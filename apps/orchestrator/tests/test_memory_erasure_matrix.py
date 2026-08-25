@@ -552,6 +552,11 @@ class TestDialogueHistory:
         conversation = resolve_active_global_conversation(bu)
         short_term.append(conversation.id, role="user", content="я веган и живу на Арбате")
         record_explicit_green_facts(bu, "я веган и живу на Арбате")
+        # Positive guard: «the window is empty» is free on a window that was
+        # never written. The absence has to be caused by the erasure.
+        assert [m["content"] for m in short_term.recall(conversation.id)] == [
+            "я веган и живу на Арбате"
+        ]
 
         _forget_all(bu)
 
@@ -581,6 +586,10 @@ class TestDialogueHistory:
             content="я веган, телефон 89990001122",
             rendered_text="я веган, телефон 89990001122",
         )
+
+        assert Message.all_tenants.filter(
+            conversation=conversation, content__contains="89990001122"
+        ).exists(), "the turn was never written — every assertion below would be free"
 
         _forget_all(bu)
 
@@ -624,6 +633,12 @@ class TestDialogueHistory:
             content="я веган, мой мастер — Анна, телефон 89990001122",
         )
 
+        # Positive guard on the READER, not just on the row: this cell claims
+        # the master's draft prompt stops carrying the person's words, and that
+        # claim is empty unless the prompt carried them a line earlier.
+        before = _recent_history(conversation)
+        assert [m.content for m in before] == ["я веган, мой мастер — Анна, телефон 89990001122"]
+
         result = delete_personal_data(bu, client=ayla)
 
         assert {s.step: s.ok for s in result.steps}["dialogue_anonymize"] is True
@@ -647,6 +662,9 @@ class TestDialogueHistory:
         _consents(bu, settings)
         conversation = resolve_active_global_conversation(bu)
         short_term.append(conversation.id, role="user", content="мой телефон 89990001122")
+        assert [m["content"] for m in short_term.recall(conversation.id)] == [
+            "мой телефон 89990001122"
+        ], "the window was never populated — the assertion below would be free"
 
         delete_personal_data(bu, client=ayla)
 

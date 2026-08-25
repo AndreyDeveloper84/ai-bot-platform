@@ -113,8 +113,15 @@ def fake_redis(monkeypatch) -> _FakeRedis:
 
 
 @pytest.fixture()
-def erased(fake_redis, settings) -> Conversation:
-    """A conversation that has been through «забудь всё», ready to probe."""
+def seeded(fake_redis, settings) -> Conversation:
+    """A conversation with the person's words still in it. NOT yet erased.
+
+    Split out from :func:`erased` on purpose. «After the erasure there is no
+    phone number» is a negative claim, and a negative claim on data that was
+    never there is not a test — it is a fixture that rotted quietly. Every cell
+    below that asserts an absence first asserts the presence on the same rows,
+    through the same reader.
+    """
 
     settings.STRICT_TENANT_SCOPE = "off"
     tenant = Tenant.objects.create(slug=f"drf1369-{uuid.uuid4().hex[:8]}", name="Guard")
@@ -147,14 +154,26 @@ def erased(fake_redis, settings) -> Conversation:
     # model's reply can be de-tokenised. Seeded by hand because the tokenizer's
     # Lua path needs a real Redis; the erasure must delete the key either way.
     fake_redis.store[f"pii_tokenmap:{conversation.id}"] = {"rev:<PHONE_deadbeef_1>": SECRET_PHONE}
+    return conversation
+
+
+def _erase(conversation: Conversation) -> Conversation:
+    """Run «забудь всё» over the thread and hand it back, reloaded."""
 
     anonymize_dialogue(
-        [bot_user.id],
+        [conversation.bot_user_id],
         through=timezone.now(),
         reason=ArchivedMessage.Reason.FORGET_ALL,
     )
     conversation.refresh_from_db()
     return conversation
+
+
+@pytest.fixture()
+def erased(seeded) -> Conversation:
+    """The same conversation, after «забудь всё»."""
+
+    return _erase(seeded)
 
 
 # ---------------------------------------------------------------------------
@@ -386,29 +405,56 @@ class TestNothingReachesThePrompt:
     """The run the ruling asks for: erase, then assemble, then look."""
 
     @pytest.mark.parametrize("key", _prompt_bound())
-    def test_probe_returns_nothing_of_the_erased_person(self, key: str, erased) -> None:
+    def test_probe_returns_nothing_of_the_erased_person(self, key: str, seeded) -> None:
+        """Before and after, through the same reader, on the same rows.
+
+        The «after» half alone would pass on a broken fixture, a probe wired to
+        the wrong object, or a reader that returns "" for reasons of its own —
+        every one of which looks exactly like a working erasure. So the «before»
+        half runs first and has to see the words, which makes this cell a
+        statement about the ERASURE rather than about the emptiness.
+        """
+        before = PROBES[key](seeded)
+        assert SECRET_PHRASE in before, (
+            f"{key} did not see the person's words BEFORE the erasure — this "
+            "probe proves nothing about the erasure until it does. Fix the "
+            "probe or the fixture; do not weaken the assertion."
+        )
+
+        erased = _erase(seeded)
+
         text = PROBES[key](erased)
         assert SECRET_PHRASE not in text, f"{key} still hands the erased person's words to a prompt"
         assert SECRET_PHONE not in text, f"{key} still hands the erased person's phone to a prompt"
         assert "веган" not in text, f"{key} still hands an erased fact to a prompt"
 
-    def test_the_redis_window_is_empty_not_merely_stale(self, erased) -> None:
+    def test_the_redis_window_is_empty_not_merely_stale(self, seeded) -> None:
         """The window that ``short_term.clear`` was written for, and never called by.
 
         Not «the TTL will get it»: сутки — это сутки, and «удалить» is heard as
         «сейчас».
         """
+        assert [m["content"] for m in short_term.recall(seeded.id)] == [
+            CUSTOMER_TEXT,
+            ASSISTANT_TEXT,
+        ], "the window was never populated — an empty-after assertion would be free"
 
-        assert short_term.recall(erased.id) == []
+        assert short_term.recall(_erase(seeded).id) == []
 
-    def test_the_token_map_goes_too(self, erased, fake_redis) -> None:
+    def test_the_token_map_goes_too(self, seeded, fake_redis) -> None:
         """The reverse map holds the raw phone, keyed by conversation.
 
         Emptying the sentence and leaving ``rev:<PHONE_…>`` → «89990001122»
         behind would be an anonymisation that keeps the number.
         """
+        key = f"pii_tokenmap:{seeded.id}"
+        assert SECRET_PHONE in str(fake_redis.store.get(key)), (
+            "the token map was never seeded — «the key is gone» would be free"
+        )
 
-        assert f"pii_tokenmap:{erased.id}" not in fake_redis.store
+        _erase(seeded)
+
+        assert key not in fake_redis.store
 
 
 class TestTheArchiveIsStillReadable:

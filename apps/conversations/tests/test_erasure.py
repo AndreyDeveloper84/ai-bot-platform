@@ -158,14 +158,19 @@ class TestTheCutoff:
         # make this cell flap on the boundary rather than on the behaviour.
         cutoff = timezone.now() - timedelta(seconds=1)
         later = _conversation(person)
-        _message(later, "здравствуйте")
+        turn = _message(later, "здравствуйте")
+        # Positive guard: a thread with nothing in it would satisfy every
+        # assertion below for free, and would say nothing about the cutoff.
+        assert turn.content == "здравствуйте"
 
         result = anonymize_dialogue([person.id], through=cutoff, reason=FORGET_ALL)
 
         later.refresh_from_db()
+        turn.refresh_from_db()
         assert result.conversations == 0
         assert later.anonymized_through is None
         assert fake_redis.deleted == []
+        assert turn.content == "здравствуйте"  # and the turn is still readable
 
     def test_the_cutoff_only_moves_forward(self, person, fake_redis):
         conversation = _conversation(person)
@@ -200,6 +205,10 @@ class TestIdempotence:
         cutoff = timezone.now()
 
         anonymize_dialogue([person.id], through=cutoff, reason=FORGET_ALL)
+        # Positive guard: if the first run cleared nothing, «the second run
+        # cleared nothing» is true and meaningless.
+        assert f"conv:{conversation.id}:msgs" in fake_redis.deleted
+
         fake_redis.deleted.clear()
         anonymize_dialogue([person.id], through=cutoff, reason=FORGET_ALL)
 
@@ -240,6 +249,11 @@ class TestReach:
 
         ids = shell_ids_for_person(bot_user=person)
         assert set(ids) == {person.id, sibling.id}
+        # Positive guard on BOTH rows: the second shell is the whole point of
+        # this cell, and «its message is empty» is free if it was never written.
+        assert Message.all_tenants.filter(conversation=here).first().content == "я веган"
+        assert Message.all_tenants.filter(conversation=there).first().content == "и живу на Арбате"
+
         anonymize_dialogue(ids, through=timezone.now(), reason=FORGET_ALL)
 
         assert Message.all_tenants.filter(conversation=here).first().content == ""
@@ -324,7 +338,11 @@ class TestTheNamedTerm:
             retention_until=timezone.now() - timedelta(seconds=1)
         )
 
-        purge_expired_archived_messages()
+        # Positive guard: the archive really did hold the words, so «the
+        # Message row survived an empty purge» cannot pass by accident.
+        assert ArchivedMessage.all_tenants.filter(conversation=conversation).count() == 1
+
+        assert purge_expired_archived_messages() == 1
 
         message.refresh_from_db()
         assert message.content == ""
