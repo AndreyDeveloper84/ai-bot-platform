@@ -38,11 +38,27 @@ no idempotency at all: a retry after a timeout books the customer twice. The
 UX contract §18 tells the surface to offer an «idempotent retry affordance» on
 an unknown outcome — that affordance only exists if the key is stable, which
 is why :meth:`create_appointment` requires one instead of defaulting it.
+
+### Two halves, and only one of them is symmetric (DRF-1346)
+
+The booking half above — ``appointments/…`` and ``customers/`` — is ours to
+read and to write. The rest of the surface (``day/``, ``masters/…``,
+``closures/…``) authenticates the same service Bearer and then hands it
+``GET``/``HEAD``/``OPTIONS`` and nothing else: ``ServiceCredentialIsReadOnly``,
+by owner decision В-1 (``docs/OD_SALON_P0_CONTRACT.md`` §ЧАСТЬ 2.1). So this
+client has six read methods there and no write methods, and that asymmetry is
+the contract rather than an unfinished job.
+
+Which routes exist, which are callable, and *why* the rest are not is declared
+as data in :mod:`apps.integrations.ayla.salon_surface` — read it before
+designing a screen against this client, because «the button is missing» and
+«the button would 403» look identical from here and are not the same problem.
 """
 
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any
 
 import httpx
@@ -167,12 +183,25 @@ class AylaSalonClient:
         different claim from which salon the actor belongs to. Ayla compares
         the two; that comparison is the second factor against
         admin-of-A-acts-on-B.
+
+        ``X-App-Type: pro`` is not decoration either, and it is the one that
+        was missing while this client only spoke to the booking half of the
+        surface. ``AppTypeMiddleware`` excludes exactly two paths —
+        ``tenants/me/appointments/`` and ``tenants/me/customers/`` — and
+        refuses every other ``/api/v1/`` request without it, **403
+        APP_TYPE_MISSING, in middleware, before authentication**. Thirteen of
+        the fifteen salon routes sit outside that exclusion, and each then
+        requires ``IsProApp`` to see ``pro`` specifically. Sent
+        unconditionally because on the two excluded prefixes the middleware
+        short-circuits and never reads it: one header, no per-route branch,
+        and no route that silently forgets it.
         """
 
         headers = {
             "Authorization": f"Bearer {self._token}",
             "X-External-User-ID": actor_external_id,
             "X-Tenant": tenant_slug,
+            "X-App-Type": "pro",
             "Accept": "application/json",
         }
         # Reads carry no idempotency key: there is nothing to de-duplicate,
@@ -237,7 +266,7 @@ class AylaSalonClient:
         if resp.status_code == 404:
             raise SalonNotFound(detail)
         if resp.status_code == 409:
-            # One status, three meanings on this surface — the code is the
+            # One status, several meanings on this surface — the code is the
             # only thing that separates them, so it is read rather than
             # collapsed. Unknown 409s stay «slot taken»: it is the common
             # case and the safe instruction (look again), whereas guessing
@@ -245,6 +274,14 @@ class AylaSalonClient:
             # not change.
             if code == "STALE_VERSION":
                 raise SalonStaleVersion(detail)
+            if code == "APPOINTMENT_TERMINAL":
+                # Ayla raises this on reschedule when the booking is already
+                # cancelled or completed. It is a 409 by status and a 422 by
+                # meaning: no other slot helps, because there is nothing left
+                # to move. Left in the «slot taken» bucket it told the
+                # receptionist to pick another time for a visit that had
+                # already happened.
+                raise SalonNotAllowed(detail)
             raise SalonSlotTaken(detail)
         if resp.status_code == 422:
             raise SalonNotAllowed(detail)
@@ -537,6 +574,321 @@ class AylaSalonClient:
             raise SalonUnavailable("upstream returned an unrecognised search payload")
         return [row for row in results if isinstance(row, dict)]
 
+    # ── reads of the salon's own data ────────────────────────────────────
+    #
+    # Everything below is a GET, and that is the whole shape of this half of
+    # the surface rather than an accident of what got written first. Ayla's
+    # ``ServiceCredentialIsReadOnly`` refuses ``POST``/``PUT``/``PATCH``/
+    # ``DELETE`` to the service Bearer on every one of these views, by owner
+    # decision (OD_SALON_P0_CONTRACT §ЧАСТЬ 2.1). A ``create_time_off`` here
+    # would be a method that always answers 403; the missing writes are
+    # declared, with their reasons, in
+    # :data:`apps.integrations.ayla.salon_surface.SALON_ROUTES` instead —
+    # where a screen author reads them at design time rather than at 15:40 on
+    # the pilot.
+
+    def get_day(
+        self,
+        *,
+        actor_external_id: str,
+        tenant_slug: str,
+        date: str | None = None,
+    ) -> dict[str, Any]:
+        """The salon's day: masters, hours, breaks, absences, bookings.
+
+        ``GET tenants/me/day/?date=YYYY-MM-DD``. Omit ``date`` and Ayla
+        answers **today in the salon's own reckoning** — taken from a
+        master's timezone, not the server's, so a call just after midnight
+        UTC from a Moscow salon does not open yesterday's journal. Passing a
+        locally-computed "today" would throw that away, which is why the
+        parameter defaults to absent rather than to ``date.today()``.
+
+        Returns the payload under ``data``: ``date``, ``generated_at``,
+        ``closures``, ``masters`` (each with ``working_intervals``,
+        ``breaks``, ``absences``, ``bookings``) and ``summary``.
+
+        Each booking carries ``version`` — the canonical value
+        :meth:`reschedule_appointment` and :meth:`complete_appointment`
+        require and that the bot's own ``RemoteBookingProxy`` mirror does not
+        reliably hold. This read is where a surface gets it.
+        """
+
+        _require_tenant(tenant_slug)
+        params: dict[str, Any] = {}
+        if date is not None:
+            params["date"] = _require_iso_date(date, field="date")
+
+        return _unwrap_object(
+            self._get(
+                "day/",
+                actor_external_id=actor_external_id,
+                tenant_slug=tenant_slug,
+                params=params,
+            ),
+            what="day",
+        )
+
+    def get_master_schedule(
+        self,
+        *,
+        actor_external_id: str,
+        tenant_slug: str,
+        specialist_id: str,
+    ) -> list[dict[str, Any]]:
+        """One master's weekly template — always seven rows, Monday first.
+
+        ``GET tenants/me/masters/{specialist_id}/schedule/``. Ayla fills in
+        the days that have no stored row, so a short list is a wire problem,
+        never «this master works four days».
+
+        Read-only here on purpose: ``PUT``/``PATCH`` on this same route are
+        the weekly recurring template, and they are closed to us twice over —
+        by ``ServiceCredentialIsReadOnly``, and by В-4 row D of the owner
+        contract, which declares the weekly-shrink guard an open backend gap
+        and Ayla's weekly writes unsupported until it closes.
+        """
+
+        _require_tenant(tenant_slug)
+        _require_id(specialist_id, field="specialist_id")
+
+        return _unwrap_list(
+            self._get(
+                f"masters/{specialist_id}/schedule/",
+                actor_external_id=actor_external_id,
+                tenant_slug=tenant_slug,
+                params={},
+            ),
+            what="master schedule",
+        )
+
+    def get_schedule_impact(
+        self,
+        *,
+        actor_external_id: str,
+        tenant_slug: str,
+        specialist_id: str,
+        start_at: str,
+        end_at: str,
+    ) -> dict[str, Any]:
+        """Which live bookings an absence over ``[start_at, end_at)`` displaces.
+
+        ``GET tenants/me/masters/{specialist_id}/schedule/impact/``. Both
+        bounds are required upstream (400 ``MISSING_PARAM`` otherwise) and
+        must be ISO-8601 with an offset; ``end_at`` must be strictly after
+        ``start_at``.
+
+        Returns ``specialist_id``, ``start_at``, ``end_at``, ``timezone``,
+        ``impact_token`` and ``bookings`` — each booking with its
+        ``version``, ``payment_status`` and
+        ``refund_percent_if_cancelled``.
+
+        **The preview is ours; the commit is not.** ``impact_token``
+        fingerprints the state this preview was computed against, and the
+        only endpoint that consumes it is ``POST …/time-off/`` with
+        ``resolutions`` — a write, refused to the service credential. So this
+        method exists to let a surface show the consequence truthfully
+        («three bookings would be cancelled»), not to let it apply one. Do
+        not present the token as an intent that can be confirmed here.
+        """
+
+        _require_tenant(tenant_slug)
+        _require_id(specialist_id, field="specialist_id")
+        if not start_at or not end_at:
+            # Upstream answers 400 MISSING_PARAM; a round-trip is a slower
+            # way to learn a caller bug.
+            raise SalonValidationError("start_at and end_at are both required")
+
+        return _unwrap_object(
+            self._get(
+                f"masters/{specialist_id}/schedule/impact/",
+                actor_external_id=actor_external_id,
+                tenant_slug=tenant_slug,
+                params={"start_at": start_at, "end_at": end_at},
+            ),
+            what="schedule impact",
+        )
+
+    def list_time_off(
+        self,
+        *,
+        actor_external_id: str,
+        tenant_slug: str,
+        specialist_id: str,
+        date_from: str | None = None,
+        date_to: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """A master's absences, optionally windowed.
+
+        ``GET tenants/me/masters/{specialist_id}/time-off/``. Each row:
+        ``id``, ``start_at``, ``end_at``, ``reason``, ``created_at``.
+
+        The two bounds are validated **here** rather than left to Ayla,
+        which is unusual on this client and deliberate: upstream passes them
+        straight into the ORM without parsing, so a malformed value is not a
+        400 but a 500. Refusing locally turns somebody's typo into a message
+        instead of a page.
+        """
+
+        return self._list_windowed(
+            f"masters/{specialist_id}/time-off/",
+            actor_external_id=actor_external_id,
+            tenant_slug=tenant_slug,
+            specialist_id=specialist_id,
+            date_from=date_from,
+            date_to=date_to,
+            what="time off",
+        )
+
+    def list_schedule_exceptions(
+        self,
+        *,
+        actor_external_id: str,
+        tenant_slug: str,
+        specialist_id: str,
+        date_from: str | None = None,
+        date_to: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """A master's specific-date overrides — «в этот день не как обычно».
+
+        ``GET tenants/me/masters/{specialist_id}/schedule-exceptions/``. Each
+        row: ``id``, ``date``, ``is_working_day``, ``start_time``,
+        ``end_time``, ``break_start``, ``break_end``, ``note``; times render
+        as ``"HH:MM"`` or ``null``.
+
+        One row per (master, date), which is why the write upstream is a
+        ``PUT`` upsert and not a ``POST`` — and why the delete is keyed by
+        date rather than by id. Both are closed to the service credential.
+        """
+
+        return self._list_windowed(
+            f"masters/{specialist_id}/schedule-exceptions/",
+            actor_external_id=actor_external_id,
+            tenant_slug=tenant_slug,
+            specialist_id=specialist_id,
+            date_from=date_from,
+            date_to=date_to,
+            what="schedule exceptions",
+        )
+
+    def list_closures(
+        self,
+        *,
+        actor_external_id: str,
+        tenant_slug: str,
+        date_from: str | None = None,
+        date_to: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Days the whole salon is closed. Each row: ``id``, ``date``,
+        ``start_time``, ``end_time``, ``reason``.
+
+        Tenant-wide rather than per-master — the scope comes from
+        ``X-Tenant`` alone, which is why this method takes no
+        ``specialist_id``.
+        """
+
+        return self._list_windowed(
+            "closures/",
+            actor_external_id=actor_external_id,
+            tenant_slug=tenant_slug,
+            specialist_id=None,
+            date_from=date_from,
+            date_to=date_to,
+            what="closures",
+        )
+
+    def _list_windowed(
+        self,
+        endpoint: str,
+        *,
+        actor_external_id: str,
+        tenant_slug: str,
+        specialist_id: str | None,
+        date_from: str | None,
+        date_to: str | None,
+        what: str,
+    ) -> list[dict[str, Any]]:
+        """The three ``date_from``/``date_to`` list reads, which differ only
+        in their path. Shared so the date validation — the part that stands
+        between a typo and an upstream 500 — cannot be present on two of them
+        and forgotten on the third."""
+
+        _require_tenant(tenant_slug)
+        if specialist_id is not None:
+            _require_id(specialist_id, field="specialist_id")
+
+        params: dict[str, Any] = {}
+        if date_from is not None:
+            params["date_from"] = _require_iso_date(date_from, field="date_from")
+        if date_to is not None:
+            params["date_to"] = _require_iso_date(date_to, field="date_to")
+
+        return _unwrap_list(
+            self._get(
+                endpoint,
+                actor_external_id=actor_external_id,
+                tenant_slug=tenant_slug,
+                params=params,
+            ),
+            what=what,
+        )
+
+
+_ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def _require_tenant(tenant_slug: str) -> None:
+    """See ``_headers``: a missing tenant becomes a 403 that reads like a
+    rights failure, or a 400 ``TENANT_REQUIRED`` from middleware that reads
+    like a broken route. Refuse locally, where the message is honest."""
+
+    if not tenant_slug:
+        raise SalonValidationError("tenant_slug is required")
+
+
+def _require_id(value: str, *, field: str) -> None:
+    if not value:
+        raise SalonValidationError(f"{field} is required")
+
+
+def _require_iso_date(value: str, *, field: str) -> str:
+    """``YYYY-MM-DD`` or a local refusal.
+
+    Ayla parses ``date`` on the day journal and answers 400 for junk, but the
+    ``date_from``/``date_to`` filters on time-off, exceptions and closures go
+    into the ORM unparsed — a malformed value there is a 500, not a 400. One
+    check covers both so a caller never has to know which endpoint is which.
+    """
+
+    value = (value or "").strip()
+    if not _ISO_DATE_RE.match(value):
+        raise SalonValidationError(f"{field} must be a date in YYYY-MM-DD form")
+    return value
+
+
+def _unwrap_object(payload: Any, *, what: str) -> dict[str, Any]:
+    """``{"data": {...}}`` -> the object, or a loud failure.
+
+    Never ``{}`` on an unrecognised shape, for the same reason
+    :meth:`AylaSalonClient.search_customers` never returns ``[]``: an empty
+    result renders as «нет записей», and a read that failed must not be shown
+    to a receptionist as proof that the day is free.
+    """
+
+    data = payload.get("data") if isinstance(payload, dict) else None
+    if not isinstance(data, dict):
+        raise SalonUnavailable(f"upstream returned an unrecognised {what} payload")
+    return data
+
+
+def _unwrap_list(payload: Any, *, what: str) -> list[dict[str, Any]]:
+    """``{"data": [...]}`` -> the rows, or a loud failure. See
+    :func:`_unwrap_object` for why this is not a quiet ``[]``."""
+
+    data = payload.get("data") if isinstance(payload, dict) else None
+    if not isinstance(data, list):
+        raise SalonUnavailable(f"upstream returned an unrecognised {what} payload")
+    return [row for row in data if isinstance(row, dict)]
+
 
 def _error_code(resp: httpx.Response) -> str:
     """Ayla's machine-readable error code, or "" when there isn't one.
@@ -585,9 +937,11 @@ __all__ = [
     "AylaSalonClient",
     "SalonAPIError",
     "SalonForbidden",
+    "SalonNotAllowed",
     "SalonNotConfigured",
     "SalonNotFound",
     "SalonSlotTaken",
+    "SalonStaleVersion",
     "SalonUnauthorized",
     "SalonUnavailable",
     "SalonValidationError",
