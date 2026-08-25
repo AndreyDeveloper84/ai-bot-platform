@@ -203,12 +203,15 @@ def _redact(text: str) -> str:
     ``apps/conversations/tests/test_erasure_redaction.py``:
 
     **1. UUIDs are masked before the patterns run and restored after.** The
-    full redactor corrupts **45.3% of canonical UUIDs** — 20 000 samples, and
-    all three digit patterns contribute (``OTP_RE`` 8 727, ``PHONE_RE`` 611,
-    ``CC_RE`` 410). ``action_data`` and ``tool_call`` are dense with UUIDs
-    (master, service and conversation ids), and an archive whose foreign keys
-    are mangled on almost every other row cannot support the incident review
-    it exists for.
+    full redactor corrupts **43.8% of canonical UUIDs** — 20 000 samples,
+    measured against ``origin/dev`` at ``a7c144d``, i.e. AFTER DRF-1382 tightened
+    the phone and card shapes. That ticket cut two of the three contributors
+    (``PHONE_RE`` 611 → 148, ``CC_RE`` 410 → 29) and left the dominant one
+    untouched: ``OTP_RE`` still hits 8 679 of 20 000 on its own.
+
+    ``action_data`` and ``tool_call`` are dense with UUIDs (master, service and
+    conversation ids), and an archive whose foreign keys are mangled on almost
+    every other row cannot support the incident review it exists for.
 
     **2. ``OTP_RE`` is not applied at all.** It matches any standalone 4- or
     6-digit run, so it turns «комфортно до 3000 рублей» into «[OTP] рублей»

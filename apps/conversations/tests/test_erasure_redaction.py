@@ -12,10 +12,16 @@ on every CI pass is what keeps a future edit from quietly walking back into
 it.
 
     apps.replay.redactor.Redactor().redact_text over 20 000 canonical UUIDs
-        corrupted 9 064 of them — 45.3%
-        OTP_RE     8 727
-        PHONE_RE     611
-        CC_RE        410
+        corrupted 8 762 of them — 43.8%      (origin/dev @ a7c144d)
+        OTP_RE     8 679
+        PHONE_RE     148
+        CC_RE         29
+
+DRF-1382 tightened the phone and card shapes shortly before this landed, which
+cut two of the three contributors by ~4x (PHONE_RE 611 -> 148, CC_RE 410 -> 29)
+and left the dominant one exactly where it was. That is the reason the cell
+below asserts the defect at a threshold rather than at a number: the shapes are
+under active repair, and the guard should survive the next repair too.
 
 The cause is a boundary choice, not a bug in the shapes: ``OTP_RE`` anchors on
 ``\w``, a UUID's separator is ``-`` which is not ``\w``, so a digit group
