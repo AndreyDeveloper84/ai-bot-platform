@@ -7,6 +7,7 @@ config-driven button-type fallback ladder.
 
 from __future__ import annotations
 
+import re
 from unittest.mock import MagicMock
 
 import pytest
@@ -804,6 +805,139 @@ class TestFoodScanButtonRemoved:
         assert "фото" in FOOD_PROMPT
         result = WelcomeSkill().handle(_ctx("cb:welcome:food"))
         assert result.reply_text == FOOD_PROMPT
+
+
+#: Предложение, в котором названы И еда, И фотография.
+#:
+#: Ищется **предложение**, а не текст целиком, и это весь смысл: «в
+#: копии где-то встречается слово „фото“» прошло бы на любом соседнем
+#: упоминании, никак не связанном с едой. Указатель существует только
+#: тогда, когда две вещи названы рядом — иначе человек не поймёт, что
+#: прислать фотографией можно именно еду.
+_FOOD_PHOTO_SENTENCE = (re.compile(r"фот", re.I), re.compile(r"\bед[ауы]\b", re.I))
+
+
+def _food_photo_pointer(text: str) -> str | None:
+    """Предложение из ``text``, называющее еду и фотографию вместе."""
+    photo, food = _FOOD_PHOTO_SENTENCE
+    for sentence in re.split(r"(?<=[.!?])\s+", text):
+        if photo.search(sentence) and food.search(sentence):
+            return sentence.strip()
+    return None
+
+
+class TestFoodPhotoPointer:
+    """Человек узнаёт из первого экрана, что еду можно прислать фотографией.
+
+    ## Зачем
+
+    После снятия «📸 Сфотографировать еду» (см.
+    :class:`TestFoodScanButtonRemoved`) отправка фото боту — **единственный
+    вход в контур еды**. Вход рабочий, но невидимый: сам DRF-1417
+    предупреждал, что снятие слага «убирает указатель, не давая замены».
+    Строчка в копии и есть замена — временная, до возвращения кнопки.
+
+    Это **указатель, а не обещание разбора**: сказано, что фото можно
+    прислать, и не сказано, что бот с ним сделает. Дневник в Mini App не
+    работает (``customer/food/*`` в ``miniapp_api`` не существует),
+    поэтому обещать экран нечем — и
+    :meth:`test_pointer_promises_no_screen_that_does_not_exist` это
+    сторожит.
+
+    ## Почему в S5, а не в S3
+
+    ``S3_POSITIONING_TEXT`` рендерится **условно** — ``show_s3=False``,
+    когда человек уже раскрывал S1 «Узнать подробнее» или S2a
+    (:meth:`WelcomeSkill._render_consent_granted`). Указатель там увидел
+    бы не каждый. ``S5_PROMPT_TEXT`` рендерится всегда, читается и без
+    клавиатуры (zero-config), стоит ровно там, где человеку только что
+    сказали «напиши своими словами», и на том самом экране, где раньше
+    была кнопка. :meth:`test_pointer_survives_when_s3_is_skipped` пинует
+    именно это — тест падал бы, положи кто-нибудь строку в S3.
+    """
+
+    #: Те же конфигурации, под которыми проверено снятие кнопки: копия
+    #: не должна зависеть от лестницы мини-аппа, и в zero-config, где
+    #: кнопок нет вовсе, указатель тем более обязан быть.
+    _CONFIGS = [
+        pytest.param("id583_bot", "", id="web-app"),
+        pytest.param("", "https://miniapp-dev.example/", id="link-fallback"),
+        pytest.param("", "", id="zero-config"),
+    ]
+
+    def test_the_detector_does_not_fire_on_neighbouring_copy(self):
+        """Негативный контроль — без него весь класс ничего не значит.
+
+        ``S3_POSITIONING_TEXT`` называет еду («еда, вода, ближайшая
+        запись»), но не фотографию. Если бы детектор срабатывал на нём,
+        все проверки ниже проходили бы, ничего не проверяя.
+        """
+        assert _food_photo_pointer(S3_POSITIONING_TEXT) is None
+
+    @pytest.mark.django_db
+    @pytest.mark.parametrize("web_app,miniapp_url", _CONFIGS)
+    def test_first_screen_says_food_can_be_sent_as_a_photo(
+        self, unwelcomed_bot_user, settings, web_app, miniapp_url
+    ):
+        settings.MAX_BOT_WEB_APP = web_app
+        settings.MAX_MINIAPP_URL = miniapp_url
+        result = WelcomeSkill().handle(
+            _ctx_with_botuser("cb:welcome:consent_yes", unwelcomed_bot_user),
+        )
+        assert _food_photo_pointer(result.reply_text), (
+            "на первом экране не сказано, что еду можно прислать фотографией. "
+            "Кнопка снята, отправка фото боту — единственный оставшийся вход "
+            f"в контур еды, и о нём человек не догадается. Копия: {result.reply_text!r}"
+        )
+
+    @pytest.mark.django_db
+    def test_pointer_survives_when_s3_is_skipped(self, unwelcomed_bot_user):
+        """Путь через S2a: ``show_s3=False``, позиционирование не
+        рендерится. Указатель обязан остаться — иначе его видит только
+        часть людей."""
+        result = WelcomeSkill().handle(
+            _ctx_with_botuser("cb:welcome:consent_yes_via_s2a", unwelcomed_bot_user),
+        )
+        assert result.meta["s3_shown"] is False, "путь через S2a перестал скрывать S3"
+        assert S3_POSITIONING_TEXT not in result.reply_text
+        assert _food_photo_pointer(result.reply_text), (
+            "указатель пропал вместе с S3 — значит он лежит в условной копии, "
+            "и человек, раскрывший S2a, о фото не узнает. Место указателя — "
+            "S5_PROMPT_TEXT, он рендерится всегда."
+        )
+
+    def test_pointer_lives_in_the_always_rendered_prompt(self):
+        """То же самое, но по источнику, а не по рендеру — чтобы
+        диагностика при поломке называла файл, а не только экран."""
+        assert _food_photo_pointer(S5_PROMPT_TEXT)
+
+    def test_pointer_promises_no_screen_that_does_not_exist(self):
+        """Границы формулировки, заданные владельцем.
+
+        Указатель говорит, что фото можно прислать, и молчит о том, что
+        будет дальше. Дневник и мини-апп упоминать нельзя: экранов нет,
+        ``customer/food/*`` в ``miniapp_api`` не существует. Проверка не
+        теоретическая — :data:`FOOD_PROMPT` рядом обещает «запишу в
+        дневник», и копипаст оттуда в копию первого экрана уронит тест.
+        """
+        pointer = _food_photo_pointer(S5_PROMPT_TEXT)
+        assert pointer is not None
+        for forbidden in ("дневник", "калори", "приложени", "мини-апп", "распозна"):
+            assert forbidden not in pointer.lower(), (
+                f"указатель обещает {forbidden!r}: {pointer!r}. Экранов еды нет, "
+                "а это снова кнопка, ведущая в поломку — только словами."
+            )
+
+    @pytest.mark.django_db
+    def test_pointer_did_not_bring_the_button_back(self, unwelcomed_bot_user, settings):
+        """Замена — текстом, не кнопкой."""
+        settings.MAX_BOT_WEB_APP = "id583_bot"
+        settings.MAX_MINIAPP_URL = ""
+        result = WelcomeSkill().handle(
+            _ctx_with_botuser("cb:welcome:consent_yes", unwelcomed_bot_user),
+        )
+        for button in result.action_data["buttons"]:
+            assert button.get("callback") != "open_food_scan"
 
 
 # ───────────────────────────────────────────────────────────────────────
