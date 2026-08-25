@@ -386,6 +386,16 @@ AI_CONFIDENCE_HANDOFF_THRESHOLD = float(os.environ.get("AI_CONFIDENCE_HANDOFF_TH
 # settings module if per-skill tuning needed.
 SKILL_CONFIDENCE_HANDOFF_THRESHOLD: dict[str, float | None] = {}
 
+# DRF-1209 — pipeline step 10.5 (confidence floor) on the LIVE per-tenant
+# path (apps/channels/max/handler.py). The thresholds above were only read
+# by the DEPRECATED ``apps.orchestrator.pipeline.turn``; this flag ports
+# the same enforcement to the live skill-dispatch handler. Default OFF =
+# byte-identical behaviour; rollback is env-only, no redeploy. The global
+# (tenant-less) path is unaffected — it dispatches no skills.
+SKILL_CONFIDENCE_FLOOR_LIVE_ENABLED = os.environ.get(
+    "SKILL_CONFIDENCE_FLOOR_LIVE_ENABLED", "false"
+).lower() in ("true", "1")
+
 # #433 umbrella — HANDLER_EXCEPTION → DLQ threshold. A handler that
 # raises gets retried by Ayla per §6.3; after this many failed
 # attempts (counted per event_id + handler), bot-platform upserts a
