@@ -437,6 +437,13 @@ def anonymize_dialogue(
             # terminal status (`master_api.services.ai_drafts`); an ACTIVE
             # draft would otherwise carry the erased person's words into the
             # master's compose box after the erasure.
+            #
+            # Deliberately NOT scoped to the cutoff, unlike the messages. A
+            # draft carries `trigger_message`, so one written after the request
+            # can still be an answer to a turn from before it — scoping by the
+            # draft's own `created_at` would leave exactly those. Over-inclusive
+            # by choice: the cost is an unsent draft for someone who just asked
+            # to be forgotten, which is the direction to err in.
             drafts_total += (
                 AiDraft.all_tenants.filter(conversation_id=conv.id)
                 .exclude(content="")
