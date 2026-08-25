@@ -67,11 +67,18 @@ def get_personal_context(user_id: uuid.UUID) -> UserPersonalContext | None:
     """Return the user's live UPC, or None if absent or forgotten.
 
     «Forgotten» covers BOTH the completed forget-all (``soft_deleted_at`` set by
-    the async sweep) AND the interim window where the user has requested
-    forget-all but the sweep has not yet run (``forget_all_requested_at`` set,
-    ``soft_deleted_at`` still NULL). Gating on both means memory stops surfacing
-    the instant the user asks to be forgotten (152-ФЗ right-to-be-forgotten),
-    not only after the async sweep completes.
+    :mod:`apps.identity.services.forget_all_sweep`) AND the interim window where
+    the user has requested forget-all but the sweep has not yet run
+    (``forget_all_requested_at`` set, ``soft_deleted_at`` still NULL). Gating on
+    both means memory stops surfacing the instant the user asks to be forgotten
+    (152-ФЗ right-to-be-forgotten), not only after the sweep completes.
+
+    This gate is a *silencer*, not the erasure. Before DRF-1370 it was the only
+    thing standing between a forgotten user's still-active rows and the prompt —
+    a single point of failure, because a future read path that forgot to call it
+    would resurrect not one stale fact but the whole memory. The sweep now
+    tombstones the rows, so this function's job is narrowed back to closing the
+    window between the request and the sweep.
     """
 
     return UserPersonalContext.objects.filter(

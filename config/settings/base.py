@@ -1133,6 +1133,17 @@ CELERY_BEAT_SCHEDULE = {
         # 04:00 replay cleanup; spike absorbed in tiers across the worker pool.
         "schedule": crontab(hour="3", minute="30"),
     },
+    # DRF-1370 — execute the pending «забудь всё» erasures. Hourly at :50,
+    # NOT daily: the read gate already silences memory the moment the person
+    # asks, so this cadence governs only how long the rows stay physically
+    # resurrectable by a read path that forgets to call the gate. The job
+    # scans one row per user who ever asked to be forgotten, so hourly is
+    # cheap; :50 keeps it clear of the :15 idempotency cleanup and the :00 /
+    # :30 booking sweeps.
+    "identity_forget_all_sweep": {
+        "task": "apps.identity.tasks.forget_all_sweep",
+        "schedule": crontab(minute="50"),
+    },
     # Sprint 8 / S4 (DRF-719) — daily shadow-delta sweep.
     # 08:00 МСК = 05:00 UTC — runs AFTER the mysite CSV publisher's
     # 04:00 МСК export window so the ground-truth file is on disk.

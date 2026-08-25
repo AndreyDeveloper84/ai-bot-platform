@@ -595,6 +595,17 @@ class UserPersonalContext(models.Model):
         "context-building path on every conversation.",
     )
 
+    # DRF-1370 — this column records the user-intent MOMENT and nothing else.
+    # The help_text below has said «async sweep then soft-deletes all entries»
+    # since the schema was written, and for just as long no such job existed:
+    # `apps/identity/tasks.py` registered only the profile recompute. The sweep
+    # is now real — `apps.identity.services.forget_all_sweep`, beat-scheduled
+    # hourly — so the sentence has become true rather than aspirational.
+    #
+    # The correction lives in a comment and not in `help_text` on purpose:
+    # `help_text` is migration-relevant, and editing it would mint a migration
+    # whose only content is a docstring, colliding with the 0020 that DRF-1371
+    # already has in flight. Prose belongs where prose costs nothing.
     forget_all_requested_at = models.DateTimeField(
         null=True,
         blank=True,
