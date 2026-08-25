@@ -211,10 +211,18 @@ def _is_card_number(matched: str) -> bool:
 
     * canonical UUIDs sliced by :data:`CC_RE`: 0.1395% -> **0.0125%**
     * 16-char hex ids: 0.060% -> **0.0035%**
-    * and, the reason that matters more than either: a 13-19 digit
-      *numeric string* — an epoch-ms timestamp, an order number, a
-      YClients ``record_id`` — went from **100% redacted** to ~10%.
-      ``ts=1756080000000`` became ``ts=[CC]`` on every single trace.
+    * and, the reason that matters more than either: a purely numeric
+      **14-19 digit** string — an order number, a YClients
+      ``record_id``, a nanosecond timestamp — went from **0% surviving**
+      a trace to **~90%** (measured per length, 5 000 samples each).
+      Before the gate every one of them came out as ``[CC]``.
+
+    Note the lower bound. A **13**-digit run — an epoch-ms timestamp —
+    is still redacted, because :data:`PHONE_RE` accepts 10-13 digits and
+    runs straight after :data:`CC_RE`. ``ts=1756080000000`` is now
+    ``ts=[PHONE]`` instead of ``ts=[CC]``, which is no better for the
+    reader. The Luhn gate does not reach that case and is not claimed
+    to; it is pinned in ``TestLuhnGate`` so the claim stays honest.
 
     ### The price, named
 
