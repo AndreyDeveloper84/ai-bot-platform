@@ -171,6 +171,22 @@ _NOT_PAIN: tuple[re.Pattern[str], ...] = (
     re.compile(r"\b(?:будет\s+больно|больно\s+будет)\b", re.IGNORECASE),
     re.compile(r"\b(?:это|а\s+это)\s+больно\s*\?", re.IGNORECASE),
     re.compile(r"\b(?:не\s+)?колет\s+ли\b", re.IGNORECASE),
+    # DRF-973 follow-up — both measured on the PATCHED classifier
+    # (2026-08-25) and both belonging to the food tier of this bot:
+    #
+    # «хрустящие хлебцы» / «хрустящая корочка» — the «хруст» stem read a
+    # meal log as «хруст в шее». The adjective «хрустящий» is never a
+    # symptom; the symptom forms «хруст» and «хрустит» are untouched.
+    re.compile(r"хрустящ\w*", re.IGNORECASE),
+    # «меня тянет на сладкое» — a craving, and about the most likely
+    # sentence in a nutrition dialogue, read as «тянет поясницу».
+    # Anchored on the animate accusative pronoun, which is exactly what
+    # separates the craving from the symptom: «спину тянет на работе»
+    # has a BODY PART in that slot and is left alone.
+    re.compile(
+        r"\b(?:меня|тебя|его|е[её]|нас|вас|их)\s+тянет\s+на\b",
+        re.IGNORECASE,
+    ),
 )
 
 
@@ -211,11 +227,57 @@ _STEM_PREFIXES: tuple[str, ...] = (
 _STEM_PREFIX_ALT = "|".join(sorted(_STEM_PREFIXES, key=len, reverse=True))
 
 
+# ─── DRF-973 follow-up — a word START is not enough for «бол» ─────────────
+#
+# The word-start rule answers «фут*бол*». It does NOT answer the other
+# half of the family: words that genuinely BEGIN with «бол» and mean
+# nothing like pain. Measured on the patched classifier (2026-08-25),
+# these still reached the screening:
+#
+#     болгарский перец · болонка · болеро · болван · болт · Болгария
+#
+# «болгарский перец» is the one that matters. This bot has a food tier
+# (``food_scanner`` / ``nutrition_anketa``) and
+# :class:`~apps.skills.health_screening.skill.HealthScreeningSkill`
+# ANSWERS on a soft signal — so a person logging lunch was asked «где
+# именно болит?».
+#
+# One :data:`_NOT_PAIN` phrase per offender does not close this: the set
+# of Russian words starting «бол» that are NOT pain is open (болид,
+# Боливия, Болонья, болтанка, Болдино…), while the set of forms that
+# ARE pain is closed and short. So «бол» — and only «бол» — is matched
+# as a stem PLUS a required ending, i.e. by its real paradigm:
+#
+#     боль/боли/болью/болям/болях · болит/болят · болел/болею/болеет/
+#     болеть · болезнь/болезненный · болячка · больно/больной/больнее
+#
+# The single carve-out inside that paradigm is «больш» («больше»,
+# «большое») — the one everyday word that shares the «боль» opening,
+# and this ticket's headline case.
+#
+# Verified both directions before shipping: every form listed above
+# still matches, and the 32-phrase ``PAIN_PHRASES`` corpus is unchanged.
+# Positive enumeration is allowed HERE because the paradigm is closed —
+# for every other stem an ending list would risk the false negative
+# this module exists to prevent, so they keep the plain stem rule.
+_STEM_TAILS: dict[str, str] = {
+    "бол": r"(?:ь(?!ш)|и\b|ит|ят|я[мхч]|е[люетмйшязн])",
+}
+
+
 def _stem_pattern(stem: str) -> re.Pattern[str]:
-    """Word-start matcher for one stem, modulo :data:`_STEM_PREFIXES`."""
+    """Word-start matcher for one stem, modulo :data:`_STEM_PREFIXES`.
+
+    A stem listed in :data:`_STEM_TAILS` additionally requires one of
+    its real inflectional endings — see the note above.
+    """
 
     return re.compile(
-        r"(?<![^\W\d_])(?:" + _STEM_PREFIX_ALT + r")?" + re.escape(stem),
+        r"(?<![^\W\d_])(?:"
+        + _STEM_PREFIX_ALT
+        + r")?"
+        + re.escape(stem)
+        + _STEM_TAILS.get(stem, ""),
         re.IGNORECASE,
     )
 
