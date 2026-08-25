@@ -16,9 +16,12 @@ from apps.skills.base import SkillContext
 from apps.skills.welcome.skill import (
     ASK_PROMPT,
     FOOD_PROMPT,
+    MINIAPP_ROUTES,
     WATER_PROMPT,
     WELCOME_TEXT,
     WelcomeSkill,
+    _s5_first_action_buttons,
+    _welcome_buttons,
 )
 from apps.tenancy.context import tenant_scope
 
@@ -622,11 +625,13 @@ class TestS3S5Flow:
         assert S3_POSITIONING_TEXT in result.reply_text
 
     @pytest.mark.django_db
-    def test_s5_grid_web_app_emits_5_open_app_buttons(self, unwelcomed_bot_user, settings):
-        """Mini App configured: 5 кнопок — 4 primary actions
-        (open_food_scan / open_water_add_250 / open_goal_select /
-        open_catalog) + open_home («Просто посмотреть»). Tau §8 routing
-        table минус анкета (DRF-1199)."""
+    def test_s5_grid_web_app_emits_4_open_app_buttons(self, unwelcomed_bot_user, settings):
+        """Mini App configured: 4 кнопки — 3 primary actions
+        (open_water_add_250 / open_goal_select / open_catalog) +
+        open_home («Просто посмотреть»). Tau §8 routing table минус
+        анкета (DRF-1199) минус «📸 Сфотографировать еду»: тот экран
+        падает в момент использования, и владелец решил снять кнопку —
+        обоснование и границы в :class:`TestFoodScanButtonRemoved`."""
         settings.MAX_BOT_WEB_APP = "id583_bot"
         settings.MAX_MINIAPP_URL = ""
         skill = WelcomeSkill()
@@ -638,7 +643,6 @@ class TestS3S5Flow:
         # is guarded once, in TestCanonQuickActionCeilingAC42 (AC-4.2).
         callbacks = [b["callback"] for b in buttons]
         assert callbacks == [
-            "open_food_scan",
             "open_water_add_250",
             "open_goal_select",
             "open_catalog",
@@ -660,7 +664,7 @@ class TestS3S5Flow:
     @pytest.mark.django_db
     def test_s5_grid_miniapp_url_fallback_emits_link_buttons(self, unwelcomed_bot_user, settings):
         """No MAX_BOT_WEB_APP but MAX_MINIAPP_URL set → link buttons
-        for the 4 primary actions + «Просто посмотреть» exit."""
+        for the 3 primary actions + «Просто посмотреть» exit."""
         settings.MAX_BOT_WEB_APP = ""
         settings.MAX_MINIAPP_URL = "https://miniapp-dev.example/"
         skill = WelcomeSkill()
@@ -668,7 +672,8 @@ class TestS3S5Flow:
             _ctx_with_botuser("cb:welcome:consent_yes", unwelcomed_bot_user),
         )
         buttons = result.action_data["buttons"]
-        # 4 primary URL + «просто посмотреть» URL (DRF-1199 убрал анкету).
+        # 3 primary URL + «просто посмотреть» URL (DRF-1199 убрал анкету,
+        # снятие «📸 Сфотографировать еду» — четвёртую).
         # Пинуется составом, не числом — потолок AC-4.2 сторожит
         # TestCanonQuickActionCeilingAC42.
         urls = [b.get("url") for b in buttons if "url" in b]
@@ -682,12 +687,123 @@ class TestS3S5Flow:
         # App.tsx by tests/test_miniapp_routes.py; this list only pins
         # which screen each button opens.
         assert urls == [
-            "https://miniapp-dev.example/customer/food-scanner/capture",
             "https://miniapp-dev.example/customer/wellness",
             "https://miniapp-dev.example/customer/goal-select",
             "https://miniapp-dev.example/customer/catalog",
             "https://miniapp-dev.example/customer/main",
         ]
+
+
+class TestFoodScanButtonRemoved:
+    """«📸 Сфотографировать еду» снята со стартовой сетки.
+
+    ## Почему снята
+
+    Кнопка открывала ``/customer/food-scanner/capture`` — экран мини-аппа,
+    который **открывается, выглядит рабочим и падает в момент
+    использования**: все четыре эндпоинта еды закрыты ``guardProd`` в
+    ``apps/miniapp/src/lib/food-scanner.ts``, вне DEV он бросает
+    ``StubNotWiredError``.
+
+    Ошибка формально поймана, но в общую ветку: человек, уже выбравший
+    приём пищи и сделавший фото, читает «Сервис недоступен · Попробуй
+    через минуту» — а через минуту не заработает, потому что не
+    подключено вовсе. «Переснять» и «Написать вручную» упираются в тот
+    же guard. Кнопка из первой сетки вела человека в тупик.
+
+    Решение владельца: экраны он готовит отдельно, подключение
+    эндпоинтов — отдельная задача, а до тех пор **указателя на поломку в
+    стартовой сетке быть не должно**.
+
+    ## Что НЕ тронуто, и почему это не дыра
+
+    * Отправка фото боту — рабочий путь и остаётся: ``FoodScannerSkill``
+      сам забирает ход с вложением, а :data:`FOOD_PROMPT` по-прежнему
+      зовёт прислать фото в чат. Дневник еды не стал недоступен, он
+      перестал быть доступен **через поломанный экран**.
+    * ``MINIAPP_ROUTES["open_food_scan"]`` оставлен в силе намеренно.
+      Таблица маршрутов ничего не показывает человеку — нажать можно
+      только кнопку. Экраны готовятся, кнопка вернётся; снос маршрута
+      означал бы его восстановление через неделю плюс синхронный правки
+      в двух зеркалах (``App.tsx``, ``max-sdk.ts``), которые мини-апп
+      всё равно держит. Целостность пары «маршрут ↔ оба зеркала»
+      продолжает сторожить ``tests/test_miniapp_routes.py``.
+
+    ## Почему проверка именно такая
+
+    Проверяется **назначение**, а не подпись: «нет кнопки с текстом про
+    еду» запретило бы и будущую рабочую кнопку. Ловится ровно то, что
+    ведёт в поломанный экран — слаг ``open_food_scan`` и путь
+    ``food-scanner`` — под каждой конфигурацией мини-аппа и под обоими
+    состояниями флага отката, потому что кнопку строят три разные ветки.
+    """
+
+    #: Все три состояния лестницы мини-аппа: open_app, link-fallback,
+    #: zero-config. Кнопку строит своя ветка в каждом.
+    _CONFIGS = [
+        pytest.param("id583_bot", "", id="web-app"),
+        pytest.param("", "https://miniapp-dev.example/", id="link-fallback"),
+        pytest.param("", "", id="zero-config"),
+    ]
+
+    #: Флаг отката строит ДРУГУЮ клавиатуру приветствия — если бы
+    #: кнопка осталась в этой ветке, снятие было бы половинчатым.
+    _UX_FLAGS = [pytest.param(True, id="pilot-ux-on"), pytest.param(False, id="pilot-ux-off")]
+
+    @pytest.mark.parametrize("pilot_ux", _UX_FLAGS)
+    @pytest.mark.parametrize("web_app,miniapp_url", _CONFIGS)
+    def test_no_welcome_button_opens_the_food_scanner(
+        self, settings, web_app, miniapp_url, pilot_ux
+    ):
+        settings.MAX_BOT_WEB_APP = web_app
+        settings.MAX_MINIAPP_URL = miniapp_url
+        settings.PILOT_CONVERSATIONAL_UX = pilot_ux
+
+        for button in _welcome_buttons() + _s5_first_action_buttons():
+            assert button.get("callback") != "open_food_scan", (
+                f"«{button['label']}» снова отправляет open_food_scan. Мини-апп "
+                "резолвит его в /customer/food-scanner/capture, где guardProd "
+                "бросает StubNotWiredError — экран открывается и падает в "
+                "момент использования."
+            )
+            assert "food-scanner" not in button.get("url", ""), (
+                f"«{button['label']}» снова ведёт на {button.get('url')!r} — это "
+                "экран, который падает в момент использования (StubNotWiredError)."
+            )
+
+    def test_s5_grid_keeps_the_three_remaining_actions(self, settings):
+        """Снята одна кнопка, а не сетка.
+
+        Состав, а не число: «стало на одну меньше» прошло бы и на
+        случайно выпавшей «Найти услугу».
+        """
+        settings.MAX_BOT_WEB_APP = "id583_bot"
+        settings.MAX_MINIAPP_URL = ""
+        assert [b["callback"] for b in _s5_first_action_buttons()] == [
+            "open_water_add_250",
+            "open_goal_select",
+            "open_catalog",
+            "open_home",
+        ]
+
+    def test_route_stays_in_the_table_for_when_the_button_returns(self):
+        """Маршрут жив — на него просто больше никто не указывает.
+
+        Пинуется по имени, чтобы «заодно почистить таблицу» стало
+        осознанным решением, а не побочным эффектом.
+        """
+        assert MINIAPP_ROUTES["open_food_scan"] == "customer/food-scanner/capture"
+
+    def test_photo_to_the_bot_is_still_the_offered_path(self):
+        """Дневник еды не стал недоступен.
+
+        Копия по-прежнему зовёт прислать фото в чат — это тот путь,
+        который работает. Сам роутинг «фото → FoodScannerSkill» пинует
+        ``apps/channels/max/tests/test_handler.py``.
+        """
+        assert "фото" in FOOD_PROMPT
+        result = WelcomeSkill().handle(_ctx("cb:welcome:food"))
+        assert result.reply_text == FOOD_PROMPT
 
 
 # ───────────────────────────────────────────────────────────────────────
