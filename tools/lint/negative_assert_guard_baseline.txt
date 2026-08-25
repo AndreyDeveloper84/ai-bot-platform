@@ -1,0 +1,416 @@
+# Absence assertions with no presence assertion ahead of them,
+# as they stood when tools/lint/negative_assert_guard.py landed
+# (DRF-1411). This file is a RATCHET, not a verdict: every line
+# is a test that may be sound and may be vacuous, and nobody has
+# checked which. Deleting a line is progress. Adding one is not
+# allowed -- the guard fails instead.
+apps/admin_api/tests/test_complete_booking.py::test_an_unreadable_version_is_503_and_not_a_guess::assert "version" not in resp.json()
+apps/admin_api/tests/test_invite.py::test_expired_invite_creates_new_row::assert "X-Idempotent" not in resp
+apps/admin_api/tests/test_invite.py::test_loopback_domain_suppresses_the_link::assert "localhost" not in text
+apps/admin_api/tests/test_master_deactivation.py::test_default_template_reassign_branch_rendered::assert "[CANCEL BRANCH]" not in cancel_text
+apps/admin_api/tests/test_master_deactivation.py::test_default_template_reassign_branch_rendered::assert "[REASSIGN BRANCH]" not in reassign_text
+apps/admin_api/tests/test_salon_day.py::test_response_carries_no_phone_anywhere::assert "+79991234567" not in body
+apps/admin_api/tests/test_salon_day.py::test_response_carries_no_phone_anywhere::assert "79991234567" not in body
+apps/admin_api/tests/test_salon_day.py::test_response_carries_no_phone_anywhere::assert "phone" not in body
+apps/admin_api/tests/test_salon_day.py::test_surname_is_reduced_to_an_initial::assert "Иванова" not in body
+apps/admin_api/tests/test_search_customers.py::test_a_channel_handle_is_not_shown_as_a_name::assert "bot:max" not in row["name"]
+apps/admin_api/tests/test_search_customers.py::test_an_upstream_401_does_not_leak_its_text::assert "token" not in resp.json()["detail"]
+apps/admin_api/tests/test_search_customers.py::test_no_phone_reaches_the_response_by_any_path::assert "79990000000" not in body
+apps/admin_api/tests/test_search_customers.py::test_no_phone_reaches_the_response_by_any_path::assert "phone" not in body
+apps/admin_api/tests/test_search_customers.py::test_upstream_failure_is_never_an_empty_list::assert "results" not in body
+apps/admin_api/tests/test_tasks_amendments.py::test_task_idempotent_skip_log_does_not_include_pii::assert "Причина:" not in rendered
+apps/admin_api/tests/test_tasks_amendments.py::test_task_idempotent_skip_log_does_not_include_pii::assert secret_reason not in rendered
+apps/admin_api/tests/test_tasks_amendments.py::test_task_retry_log_does_not_include_rendered_text::assert "Причина:" not in rendered, f"rendered DM text leaked into log: {rendered!r}"
+apps/admin_api/tests/test_tasks_amendments.py::test_task_retry_log_does_not_include_rendered_text::assert "отклонён" not in rendered, f"rendered DM text leaked into log: {rendered!r}"
+apps/admin_api/tests/test_tasks_amendments.py::test_task_retry_log_does_not_include_rendered_text::assert secret_reason not in rendered, f"PII leaked into log message: {rendered!r}"
+apps/booking/tests/test_announcement_claims.py::test_a_missing_row_cannot_be_claimed::assert not _claim_announcement(
+apps/booking/tests/test_announcement_claims.py::test_the_claim_is_scoped_by_tenant::assert not _claim_announcement(
+apps/booking/tests/test_client_notify.py::test_another_appointments_marker_does_not_suppress::assert not was_confirmed_in_chat(tenant=tenant, appointment_id=uuid.UUID(APPOINTMENT_ID))
+apps/booking/tests/test_client_notify.py::test_no_marker_no_suppression::assert not was_confirmed_in_chat(tenant=tenant, appointment_id=uuid.UUID(APPOINTMENT_ID))
+apps/booking/tests/test_client_notify.py::test_no_other_persons_data::assert "+79991234567" not in text
+apps/booking/tests/test_client_notify.py::test_no_other_persons_data::assert "+79997654321" not in text
+apps/booking/tests/test_client_notify.py::test_no_other_persons_data::assert "Мария Другая" not in text
+apps/booking/tests/test_client_notify.py::test_no_other_persons_data::assert APPOINTMENT_ID not in text
+apps/booking/tests/test_master_notify.py::test_event_without_specialist_id_is_not_a_gap::assert self._unreachable_warnings(caplog) == []
+apps/booking/tests/test_master_notify.py::test_no_client_pii::assert "+79991234567" not in text
+apps/booking/tests/test_master_notify.py::test_no_client_pii::assert "Иван Клиентов" not in text
+apps/booking/tests/test_master_notify.py::test_no_client_pii::assert AYLA_USER_ID not in text
+apps/booking/tests/test_master_notify.py::test_reachable_specialist_leaves_no_gap_signal::assert self._unreachable_warnings(caplog) == []
+apps/bookings/tests/test_booking_callbacks.py::test_does_not_match_plain_text::assert not BookingGateCallbackSkill().matches(ctx)
+apps/bookings/tests/test_booking_callbacks.py::test_does_not_match_reminder_namespace::assert not BookingGateCallbackSkill().matches(ctx)
+apps/bookings/tests/test_callbacks.py::test_does_not_match_other_cb_namespaces::assert not BookingReminderCallbackSkill().matches(ctx)
+apps/bookings/tests/test_callbacks.py::test_does_not_match_plain_text::assert not BookingReminderCallbackSkill().matches(ctx)
+apps/bookings/tests/test_reminders_factory.py::test_skipped_when_chat_id_empty::assert saved == []
+apps/catalog/tests/test_goals_mirror_drf1308.py::test_empty_goals_add_no_line::assert "Подходит" not in service_to_body(self._service(tenant, []))
+apps/catalog/tests/test_goals_mirror_drf1308.py::test_missing_field_is_an_empty_list_not_a_crash::assert "goals" not in row
+apps/channels/max/tests/test_handler_menu.py::test_book_button_routes_into_booking::assert "cb:menu" not in sent[0]["text"]
+apps/channels/max/tests/test_handler_photo.py::test_db_has_no_last_photo_bytes_column_after_happy_path::assert b"abc" not in (msg.content or "").encode()
+apps/channels/max/tests/test_handler_photo.py::test_db_has_no_last_photo_bytes_column_after_happy_path::assert b"abc" not in (msg.rendered_text or "").encode()
+apps/channels/max/tests/test_handler_photo.py::test_db_has_no_last_photo_bytes_column_after_happy_path::assert not hasattr(conv, "last_photo_bytes")
+apps/channels/max/tests/test_outbound_edit.py::test_attachments_none_leaves_the_existing_ones_alone::assert "attachments" not in body
+apps/channels/max/tests/test_outbound_edit.py::test_text_none_omits_the_field_entirely::assert "text" not in body
+apps/channels/telegram/tests/test_handler.py::test_text_message_does_not_answer_callback::assert not any("answerCallbackQuery" in u for u in called_methods)
+apps/channels/telegram/tests/test_handler_safety.py::test_gate_stays_silent_while_an_operator_is_driving::assert CRISIS_REPLY_TEXT not in _sent_texts(mock_post)
+apps/channels/telegram/tests/test_keyboards.py::test_url_button_no_callback_data_key::assert "callback_data" not in btn
+apps/channels/telegram/tests/test_outbound.py::test_no_reply_markup_when_none::assert "reply_markup" not in kwargs["json"]
+apps/channels/telegram/tests/test_outbound.py::test_send_photo_empty_caption_omitted::assert "caption" not in kwargs["json"]
+apps/channels/tests/test_bot_registry.py::test_error_message_never_contains_the_secret::assert "hunter2-topsecret" not in str(exc.value)
+apps/channels/tests/test_bot_registry.py::test_no_webhook_secret_yields_empty_not_an_error::assert with_legacy_fallback((), webhook_secret=secret, api_token=token) == ()
+apps/channels/tests/test_bot_registry.py::test_repr_redacts_credentials::assert "super-secret-token" not in rendered
+apps/channels/tests/test_bot_registry.py::test_repr_redacts_credentials::assert "super-secret-value" not in rendered
+apps/channels/tests/test_crisis_delivery_alert.py::test_alert_event_and_log_are_pii_safe::assert "SECRET_CANARY" not in json.dumps(ev.payload)
+apps/channels/tests/test_first_contact_c01.py::test_no_catalog_pitch::assert catalog_word not in GLOBAL_S5_TEXT.lower()
+apps/channels/tests/test_first_contact_c01.py::test_no_catalog_pitch::assert catalog_word not in GLOBAL_WELCOME_TEXT.lower()
+apps/channels/tests/test_first_contact_c01.py::test_no_city_on_the_first_screen::assert city_word not in GLOBAL_S5_TEXT.lower()
+apps/channels/tests/test_first_contact_c01.py::test_no_city_on_the_first_screen::assert city_word not in GLOBAL_WELCOME_TEXT.lower()
+apps/channels/tests/test_global_booking_continuation.py::test_a_typed_date_reaches_the_booking_flow_not_the_concierge::assert "мастера, которые могут подойти" not in mock_send[-1]["text"]
+apps/channels/tests/test_global_booking_lookup.py::test_backend_outage_is_not_answered_from_the_mirror::assert "Призрачная услуга" not in text
+apps/channels/tests/test_global_booking_lookup.py::test_partial_read_is_never_served_as_a_complete_list::assert "УЗ-кавитация" not in text
+apps/channels/tests/test_global_booking_lookup.py::test_the_mirror_is_not_the_source_any_more::assert "Зеркальная услуга" not in text
+apps/channels/tests/test_global_onboarding.py::test_consent_yes_returns_marketplace_s5_and_stamps_consent::assert not any(c.startswith(("cb:welcome:", "cb:food:", "cb:water:")) for c in callbacks)
+apps/channels/tests/test_handler_clarification_multiselect.py::test_a_raw_payload_never_enters_the_dialog_history::assert not any(c.startswith("cb:clarify") for c in contents)
+apps/channels/tests/test_salon_handler.py::test_existing_staff_get_the_menu_not_the_code_prompt::assert "код приглашения" not in text
+apps/channels/tests/test_staff_menu.py::test_never_leaks_a_phone_number::assert "79001234567" not in _scoped(tenant, staff_actions.salon_day, tenant)
+apps/channels/tests/test_staff_menu.py::test_no_buttons_promise_what_the_backend_cannot_do::assert forbidden not in labels
+apps/channels/tests/test_staff_menu.py::test_omitted_entirely_when_the_bot_has_no_app::assert not any("Кабинет" in x for x in labels)
+apps/channels/tests/test_staff_menu.py::test_tomorrow_is_not_today::assert "Завтрашняя" not in _scoped(tenant, staff_actions.salon_day, tenant)
+apps/consent/tests/test_services.py::test_grant_payload_does_not_leak_pii::assert "+79991234567" not in str(ev.payload)
+apps/conversations/tests/test_staff_assistant.py::test_another_persons_thread_is_not_visible::assert history == []
+apps/eventbus/tests/test_consent_signals.py::test_grant_pii_not_leaked_to_domain_bus::assert "+79991234567" not in str(ev.actor)
+apps/eventbus/tests/test_consent_signals.py::test_grant_pii_not_leaked_to_domain_bus::assert "+79991234567" not in str(ev.data)
+apps/eventbus/tests/test_ingest_pilot_allowlist.py::test_canonical_rejection_message_is_sanitized::assert "\n" not in message
+apps/eventbus/tests/test_ingest_pilot_allowlist.py::test_log_injection_via_tenant_id_is_neutralized::assert "\n" not in record.getMessage()
+apps/eventbus/tests/test_ingest_pilot_allowlist.py::test_log_injection_via_tenant_id_is_neutralized::assert "\r" not in record.getMessage()
+apps/eventbus/tests/test_ingest_pilot_allowlist.py::test_log_injection_via_tenant_id_is_neutralized::assert not any("tenant_verify_accepted" in r.getMessage() for r in caplog.records), (
+apps/eventbus/tests/test_payment_consumer.py::test_consumer_module_does_not_import_channel_outbound::assert not any(forbidden in n for n in loaded), (
+apps/eventbus/tests/test_ulid.py::test_is_valid_rejects_non_crockford_chars::assert not is_valid("0" * 25 + "U")
+apps/eventbus/tests/test_ulid.py::test_is_valid_rejects_non_crockford_chars::assert not is_valid("I" * 26)
+apps/eventbus/tests/test_ulid.py::test_is_valid_rejects_wrong_length::assert not is_valid("A" * 25)
+apps/eventbus/tests/test_ulid.py::test_is_valid_rejects_wrong_length::assert not is_valid("A" * 27)
+apps/eventbus/tests/test_validation.py::test_accepts_minor_and_patch_semver::assert validate_envelope(_envelope(event_version="1.0")) == []
+apps/eventbus/tests/test_validation.py::test_accepts_minor_and_patch_semver::assert validate_envelope(_envelope(event_version="1.2.3")) == []
+apps/eventbus/tests/test_validation.py::test_accepts_optional_actor_role_none::assert validate_envelope(_envelope(actor=Actor(type="system"))) == []
+apps/eventbus/tests/test_validation.py::test_clean_payload::assert lint_pii(data) == []
+apps/eventbus/tests/test_validation.py::test_id_strings_dont_trip_phone_heuristic::assert lint_pii({"booking_id": str(uuid.uuid4())}) == []
+apps/eventbus/tests/test_validation.py::test_well_formed_booking_created::assert validate_payload(V.BOOKING_CREATED, data) == []
+apps/eventbus/tests/test_validation.py::test_well_formed_is_clean::assert validate_envelope(_envelope()) == []
+apps/events/tests/test_schema.py::test_valid_envelope_returns_empty_list::assert validate(env) == []
+apps/handoff/tests/test_notify.py::test_no_link_line_when_admin_base_empty::assert "/admin/handoff/" not in recorder.calls[0]["text"]
+apps/handoff/tests/test_notify.py::test_normal_priority_not_marked_high::assert "HIGH" not in text
+apps/handoff/tests/test_notify.py::test_normal_priority_not_marked_high::assert "URGENT" not in text
+apps/handoff/tests/test_notify.py::test_text_has_no_phone_no_transcript::assert "+79991234567" not in text
+apps/handoff/tests/test_notify.py::test_text_has_no_phone_no_transcript::assert "мой секретный транскрипт" not in text
+apps/handoff/tests/test_services.py::test_snapshot_pii_safe::assert "+79991234567" not in snap_str
+apps/handoff/tests/test_services.py::test_snapshot_pii_safe::assert "+79991234567" not in str(ev.properties)
+apps/identity/services/tests/test_forget_all_sweep.py::test_a_row_written_after_the_request_is_reburied::assert read_green_entries(upc.user_id) == []
+apps/identity/services/tests/test_forget_all_sweep.py::test_nothing_comes_back_through_either_renderer::assert read_green_entries(upc.user_id) == []
+apps/identity/services/tests/test_forget_all_sweep.py::test_yellow_is_left_for_its_own_stream::assert read_green_entries(upc.user_id) == []
+apps/identity/services/tests/test_privacy.py::test_old_values_do_not_survive_anywhere_on_the_row::assert value not in row
+apps/identity/tests/test_drf1371_allergies_removed.py::test_api_types_have_no_allergies::assert "allergies: string" not in src
+apps/identity/tests/test_drf1371_allergies_removed.py::test_get_me_response_has_no_allergies::assert "allergies" not in json.loads(resp.content)["preferences"]
+apps/identity/tests/test_drf1371_allergies_removed.py::test_get_me_response_has_no_allergies::assert "allergies" not in resp.content.decode("utf-8")
+apps/identity/tests/test_drf1371_allergies_removed.py::test_no_help_text_still_promises_the_master::assert "allerg" not in str(field.help_text).lower()
+apps/identity/tests/test_drf1371_allergies_removed.py::test_no_help_text_still_promises_the_master::assert "аллерг" not in str(field.help_text).lower()
+apps/identity/tests/test_drf1371_allergies_removed.py::test_no_model_changes_left_unmigrated::assert "identity" not in changes, f"unmigrated identity changes: {changes}"
+apps/identity/tests/test_drf1371_allergies_removed.py::test_patch_me_rejects_allergies::assert "латекс" not in json.dumps(
+apps/identity/tests/test_drf1371_allergies_removed.py::test_profile_screen_has_no_allergies_input::assert "preferences.allergies" not in src
+apps/identity/tests/test_drf1371_allergies_removed.py::test_profile_screen_has_no_allergies_input::assert "Аллергии" not in src
+apps/identity/tests/test_drf1371_allergies_removed.py::test_profile_screen_has_no_allergies_input::assert "Передадим мастеру" not in src
+apps/identity/tests/test_encryption.py::test_raw_db_column_is_not_plaintext_json::assert "PLAINTEXT_LEAK_CANARY_AAA" not in raw_str, (
+apps/identity/tests/test_encryption.py::test_raw_db_column_is_not_plaintext_json::assert "PLAINTEXT_LEAK_CANARY_BBB" not in raw_str
+apps/identity/tests/test_export_coverage.py::test_every_exclusion_names_a_reason_that_exists::assert not missing, f"EXCLUSIONS point at reason slugs with no prose: {missing}"
+apps/identity/tests/test_export_coverage.py::test_every_stored_slot_has_an_export_decision::assert not undecided, (
+apps/identity/tests/test_export_coverage.py::test_no_decision_outlives_its_slot::assert not stale, (
+apps/identity/tests/test_export_coverage.py::test_no_reason_outlives_the_slots_that_used_it::assert not orphaned, f"REASONS nothing points at any more: {orphaned}"
+apps/identity/tests/test_export_coverage.py::test_nothing_renders_as_undeclared::assert "СОСТАВ НЕ ОБЪЯВЛЕН" not in row["reason"]
+apps/identity/tests/test_memory_deleter.py::test_deleted_entry_is_not_returned_by_a_status_active_filter::assert list(live) == [], (
+apps/identity/tests/test_red_zone_guard.py::test_comment_red_does_not_fire::assert red_zone_guard.scan_file(f, repo_root=tmp_path) == []
+apps/identity/tests/test_red_zone_guard.py::test_docstring_red_does_not_fire::assert red_zone_guard.scan_file(f, repo_root=tmp_path) == []
+apps/identity/tests/test_red_zone_guard.py::test_exclude_non_red_zones_NOT_detected::assert violations == [], (
+apps/identity/tests/test_red_zone_guard.py::test_green_filter_does_not_fire::assert red_zone_guard.scan_file(f, repo_root=tmp_path) == []
+apps/identity/tests/test_red_zone_guard.py::test_kwargs_unpacking_NOT_detected::assert violations == []
+apps/identity/tests/test_red_zone_guard.py::test_memory_writer_path_allowlisted::assert red_zone_guard.scan_file(f, repo_root=tmp_path) == []
+apps/identity/tests/test_red_zone_guard.py::test_migrations_path_allowlisted::assert red_zone_guard.scan_file(f, repo_root=tmp_path) == []
+apps/identity/tests/test_red_zone_guard.py::test_non_zone_filter_does_not_fire::assert red_zone_guard.scan_file(f, repo_root=tmp_path) == []
+apps/identity/tests/test_red_zone_guard.py::test_raw_sql_red_NOT_detected::assert violations == []
+apps/identity/tests/test_red_zone_guard.py::test_red_zone_reader_path_allowlisted::assert red_zone_guard.scan_file(f, repo_root=tmp_path) == []
+apps/identity/tests/test_red_zone_guard.py::test_runtime_variable_does_not_fire::assert red_zone_guard.scan_file(f, repo_root=tmp_path) == []
+apps/identity/tests/test_red_zone_guard.py::test_tests_path_allowlisted::assert red_zone_guard.scan_file(f, repo_root=tmp_path) == []
+apps/identity/tests/test_red_zone_guard.py::test_variable_resolved_red_NOT_detected::assert violations == []
+apps/identity/tests/test_resolver.py::test_phone_not_in_event_payload::assert "+79991234567" not in str(ev.payload)
+apps/ingress/tests/test_shadow_header.py::test_missing_header_no_shadow_flag::assert "_shadow" not in kwargs["payload"]
+apps/ingress/tests/test_shadow_header.py::test_x_shadow_other_value_ignored::assert "_shadow" not in kwargs["payload"]
+apps/integrations/ayla/tests/test_booking_client.py::test_no_legacy_service_token_header::assert "X-Service-Token" not in headers
+apps/integrations/ayla/tests/test_contract_route_table.py::test_all_clients_match_route_table::assert not unexercised, (
+apps/integrations/ayla/tests/test_profile_client.py::test_extra_fields_dropped::assert not hasattr(fields, "email")
+apps/integrations/ayla/tests/test_profile_client.py::test_extra_fields_dropped::assert not hasattr(fields, "phone")
+apps/integrations/ayla/tests/test_salon_client.py::test_an_omitted_reason_code_is_not_invented::assert "reason_code" not in seen["body"]
+apps/integrations/ayla/tests/test_salon_client.py::test_unauthorized_is_not_confused_with_forbidden::assert not issubclass(SalonForbidden, SalonUnauthorized)
+apps/integrations/ayla/tests/test_salon_client.py::test_unauthorized_is_not_confused_with_forbidden::assert not issubclass(SalonUnauthorized, SalonForbidden)
+apps/integrations/ayla/tests/test_salon_surface.py::test_a_salon_day_payload_carries_no_forbidden_key::assert find_forbidden_pii(day) == []
+apps/integrations/ayla/tests/test_salon_surface.py::test_methods_are_upper_case_verbs::assert not bad, bad
+apps/integrations/ayla/tests/test_salon_surface.py::test_no_ayla_route_is_unclassified::assert not unknown, (
+apps/integrations/ayla/tests/test_salon_surface.py::test_no_declared_route_has_disappeared::assert not gone, (
+apps/integrations/ayla/tests/test_salon_surface.py::test_no_duplicate_route_and_method::assert not duplicates, f"duplicate (route, method) rows: {duplicates}"
+apps/integrations/ayla/tests/test_salon_surface.py::test_no_two_rows_claim_the_same_method::assert not duplicates, f"one method bound to several routes: {duplicates}"
+apps/integrations/ayla/tests/test_salon_surface.py::test_paths_are_relative_to_the_salon_prefix::assert not route.path.startswith(SALON_PREFIX), (
+apps/integrations/ayla/tests/test_salon_surface.py::test_pii_notes_cover_every_route_that_returns_a_customer::assert not stale, f"PII note mentions route(s) that no longer exist: {stale}"
+apps/integrations/ayla/tests/test_salon_surface.py::test_the_guard_cannot_see_a_phone_inside_notes::assert find_forbidden_pii(walk_in_response) == [], (
+apps/integrations/ayla_payments/tests/test_client.py::test_4xx_raises_api_error::assert not isinstance(excinfo.value, AylaPaymentsUnavailableError)
+apps/integrations/yclients/tests/test_client.py::test_email_redacted::assert "anna@example.com" not in out
+apps/integrations/yclients/tests/test_client.py::test_phone_redacted::assert "+79991234567" not in out
+apps/integrations/yookassa_retired/tests/test_views.py::test_invalid_xff_does_not_inject_pii_into_audit_remote_ip::assert "4242" not in json.dumps(row.payload)
+apps/integrations/yookassa_retired/tests/test_views.py::test_log_does_not_leak_body::assert "4242" not in msg
+apps/integrations/yookassa_retired/tests/test_views.py::test_log_does_not_leak_body::assert "RUB" not in msg
+apps/integrations/yookassa_retired/tests/test_views.py::test_ua_control_chars_stripped::assert "\n" not in ua
+apps/integrations/yookassa_retired/tests/test_views.py::test_ua_control_chars_stripped::assert "\r" not in ua
+apps/integrations/yookassa_retired/tests/test_views.py::test_ua_control_chars_stripped::assert "\x00" not in ua
+apps/internal_chat/tests/test_notify.py::test_sensitive_threads_are_never_quoted::assert secret not in text
+apps/kb/tests/test_chromadb_client.py::test_query_empty_collection_returns_empty::assert client.query(tenant, query_embedding=_vec(1), k=3) == []
+apps/kb/tests/test_chromadb_client.py::test_query_k_zero_returns_empty::assert client.query(tenant, query_embedding=_vec(1), k=0) == []
+apps/kb/tests/test_projectors.py::test_zero_rating_not_projected::assert "0.00" not in body
+apps/kb/tests/test_projectors.py::test_zero_rating_not_projected::assert "Рейтинг" not in body
+apps/llm/tests/test_health.py::test_alert_text_never_carries_proxy_credentials::assert "probepass" not in str(row.payload)
+apps/llm/tests/test_health.py::test_alert_text_never_carries_proxy_credentials::assert "probepass" not in text
+apps/llm/tests/test_health.py::test_redact_secrets_strips_credentials::assert "probepass" not in out
+apps/llm/tests/test_health.py::test_redact_secrets_strips_credentials::assert "probeuser:probepass" not in out
+apps/llm/tests/test_health.py::test_redact_secrets_strips_credentials::assert "sk-test-not-a-real-key" not in out
+apps/llm/tests/test_pii_protected_provider.py::test_audit_payload_never_contains_raw_pii::assert "+7 999 123 45 67" not in payload_blob
+apps/llm/tests/test_pii_protected_provider.py::test_audit_payload_never_contains_raw_pii::assert "4111 1111 1111 1111" not in payload_blob
+apps/llm/tests/test_pii_protected_provider.py::test_audit_payload_never_contains_raw_pii::assert "9991234567" not in payload_blob
+apps/llm/tests/test_pii_protected_provider.py::test_audit_payload_never_contains_raw_pii::assert "anna@example.ru" not in payload_blob
+apps/llm/tests/test_pii_protected_provider.py::test_complete_tokenizes_all_messages_including_system::assert "+7" not in sent_msg["content"]
+apps/llm/tests/test_pii_protected_provider.py::test_complete_tokenizes_all_messages_including_system::assert "test@example.ru" not in sent_msg["content"]
+apps/llm/tests/test_pii_protected_provider.py::test_complete_tokenizes_user_message::assert "+7" not in sent
+apps/llm/tests/test_pii_tokenizer.py::test_lowercase_token_not_substituted::assert "anna@example.ru" not in out
+apps/llm/tests/test_pii_tokenizer.py::test_mutated_token_format_not_substituted::assert "+7 999 123 45 67" not in out
+apps/llm/tests/test_pii_tokenizer.py::test_user_supplied_literal_token_shape_does_not_leak::assert "+7 999 000 00 05" not in out
+apps/llm/tests/test_protocol.py::test_missing_method_fails_isinstance::assert not isinstance(HalfImplemented(), LLMProvider)
+apps/llm/tests/test_protocol.py::test_provider_quota_distinct_from_vendor_quota::assert not issubclass(LLMProviderQuotaExceeded, LLMQuotaError)
+apps/llm/tests/test_protocol.py::test_provider_quota_distinct_from_vendor_quota::assert not issubclass(LLMQuotaError, LLMProviderQuotaExceeded)
+apps/marketplace/tests/test_discovery_by_service.py::test_bare_greeting_matches_nothing::assert discover_masters(specialization=greeting) == []
+apps/marketplace/tests/test_discovery_by_service.py::test_untokenizable_query_returns_nothing::assert discover_masters(specialization=query) == []
+apps/marketplace/tests/test_discovery_goal_selection.py::test_a_goal_nothing_is_named_by_still_answers::assert not any(
+apps/marketplace/tests/test_discovery_salons_services.py::test_masters_for_service_empty_when_nobody_offers_it::assert discover_masters_for_service(service.id) == []
+apps/marketplace/tests/test_discovery_salons_services.py::test_masters_for_service_empty_when_service_is_gone::assert discover_masters_for_service(service.id) == []
+apps/marketplace/tests/test_discovery_salons_services.py::test_masters_for_service_empty_when_the_salon_went_inactive::assert discover_masters_for_service(service.id) == []
+apps/master_api/tests/test_assistant.py::test_the_result_returns_as_a_plain_message_not_a_tool_message::assert "tool" not in roles
+apps/master_api/tests/test_assistant_tools.py::test_gaps_shorter_than_asked_are_not_offered::assert {"from": "09:00", "to": "09:30"} not in result["slots"]
+apps/master_api/tests/test_assistant_tools.py::test_no_phone_number_in_the_shape::assert "phone" not in visit
+apps/master_api/tests/test_catalog.py::test_empty_master_returns_empty::assert svc.list_master_services(master=accepted_master) == []
+apps/master_api/tests/test_conversation_detail.py::test_pii_gate_no_phone_no_full_lastname_no_email_no_ltv::assert "+79161112233" not in raw
+apps/master_api/tests/test_conversation_detail.py::test_pii_gate_no_phone_no_full_lastname_no_email_no_ltv::assert "email" not in raw.lower()
+apps/master_api/tests/test_conversation_detail.py::test_pii_gate_no_phone_no_full_lastname_no_email_no_ltv::assert "ltv" not in raw.lower()
+apps/master_api/tests/test_conversation_detail.py::test_pii_gate_no_phone_no_full_lastname_no_email_no_ltv::assert "Леонова" not in raw
+apps/master_api/tests/test_conversations.py::test_response_excludes_phone_email_ltv_last_name::assert "79161234567" not in raw
+apps/master_api/tests/test_conversations.py::test_response_excludes_phone_email_ltv_last_name::assert "Леонова" not in raw  # full last name never serialised
+apps/master_api/tests/test_conversations.py::test_response_excludes_phone_email_ltv_last_name::assert not forbidden.intersection(item.keys()), item
+apps/master_api/tests/test_customers.py::test_cancelled_bookings_excluded::assert out == []
+apps/master_api/tests/test_customers.py::test_empty_master_returns_empty_list::assert out == []
+apps/master_api/tests/test_customers.py::test_walkin_without_bot_user_skipped::assert out == []
+apps/master_api/tests/test_dashboard.py::test_empty_when_no_conversations::assert ds.get_inbox_preview(accepted_master, _utc(now_local)) == []
+apps/master_api/tests/test_dashboard.py::test_skips_if_assistant_replied::assert ds.get_inbox_preview(accepted_master, now) == []
+apps/master_api/tests/test_pii_boundary.py::test_no_forbidden_pii_key_anywhere_in_response::assert found == [], (
+apps/master_api/tests/test_schedule.py::test_free_windows_sub_30min_gap_excluded::assert ("11:00", "11:15") not in starts
+apps/miniapp_api/tests/test_c7_payments.py::test_booking_item_without_mirror_has_no_payment::assert "payment" not in _booking_to_dict(booking)
+apps/miniapp_api/tests/test_dev_bypass.py::test_all_bypass_headers_present_still_enforces_hmac::assert not any("DEV-BYPASS" in rec.getMessage() for rec in caplog.records)
+apps/miniapp_api/tests/test_dev_bypass.py::test_bypass_header_value_not_exactly_one::assert not any("DEV-BYPASS" in rec.getMessage() for rec in caplog.records)
+apps/miniapp_api/tests/test_dev_bypass.py::test_no_bypass_header_runs_hmac_path::assert not any("DEV-BYPASS" in rec.getMessage() for rec in caplog.records)
+apps/miniapp_api/tests/test_pending_intent.py::test_explicit_null_field_dropped::assert "master_id" not in out
+apps/miniapp_api/tests/test_recent_activity.py::test_no_upcoming_omits_next_booking::assert "next_booking" not in data
+apps/miniapp_api/tests/test_recent_activity.py::test_non_confirmed_not_surfaced::assert "next_booking" not in data
+apps/miniapp_api/tests/test_recent_activity.py::test_other_tenant_booking_invisible::assert "next_booking" not in data
+apps/miniapp_api/tests/test_wellness_today.py::test_both_unavailable_returns_200_zeros::assert "pfc" not in data
+apps/miniapp_api/tests/test_wellness_today.py::test_summary_unavailable_keeps_water::assert "pfc" not in data
+apps/notifications/tests/test_consent_column_guard.py::test_apps_tree_has_no_violations::assert violations == [], "\n".join(v.format() for v in violations)
+apps/notifications/tests/test_consent_column_guard.py::test_attribute_assignment::assert _scan(tmp_path, "bot_user.consent_at = timezone.now()\n") == []
+apps/notifications/tests/test_consent_column_guard.py::test_consent_services_may_read::assert (
+apps/notifications/tests/test_consent_column_guard.py::test_food_scanner_consent_at_attribute::assert _scan(tmp_path, "x = bot_user.food_scanner_consent_at\n") == []
+apps/notifications/tests/test_consent_column_guard.py::test_food_scanner_consent_at_lookup::assert _scan(tmp_path, "BotUser.objects.filter(food_scanner_consent_at=None)\n") == []
+apps/notifications/tests/test_consent_column_guard.py::test_it_cannot_see_a_splatted_lookup::assert _scan(tmp_path, 'BotUser.objects.filter(**{"consent_at__isnull": False})\n') == []
+apps/notifications/tests/test_consent_column_guard.py::test_it_cannot_see_a_surface_with_no_gate_at_all::assert (
+apps/notifications/tests/test_consent_column_guard.py::test_it_cannot_see_an_indirected_field_name::assert _scan(tmp_path, 'field = "consent_at"\nx = getattr(bot_user, field)\n') == []
+apps/notifications/tests/test_consent_column_guard.py::test_it_cannot_see_raw_sql::assert (
+apps/notifications/tests/test_consent_column_guard.py::test_migrations_may_read::assert (
+apps/notifications/tests/test_consent_column_guard.py::test_model_construction::assert _scan(tmp_path, "MemoryEntry.objects.create(consent_at=now)\n") == []
+apps/notifications/tests/test_consent_column_guard.py::test_queryset_update::assert _scan(tmp_path, "BotUser.all_tenants.filter(pk=1).update(consent_at=None)\n") == []
+apps/notifications/tests/test_consent_column_guard.py::test_save_update_fields::assert _scan(tmp_path, 'bot_user.save(update_fields=["consent_at"])\n') == []
+apps/notifications/tests/test_consent_column_guard.py::test_tests_may_read::assert (
+apps/notifications/tests/test_consent_column_guard.py::test_the_fixed_nutrition_gate_is_clean::assert violations == []
+apps/notifications/tests/test_consent_column_guard.py::test_the_operator_census_may_read::assert (
+apps/notifications/tests/test_consent_column_guard.py::test_the_shared_gate_may_read::assert (
+apps/notifications/tests/test_consent_column_guard.py::test_unrelated_attribute::assert _scan(tmp_path, "x = bot_user.welcomed_at\n") == []
+apps/notifications/tests/test_consent_column_guard.py::test_welcome_skill_may_read::assert (
+apps/notifications/tests/test_consent_column_guard.py::test_write_entry_kwarg::assert _scan(tmp_path, "write_entry(consent_at=now, zone='yellow')\n") == []
+apps/nutrition_proactive/tests/test_render.py::test_it_still_reads_without_the_proportional_figure::assert "К этому часу" not in text
+apps/nutrition_proactive/tests/test_render.py::test_water_alone_still_counts_as_a_logged_day::assert "Сегодня записей не было" not in text
+apps/observability/tests/test_logging.py::test_no_embedded_newlines::assert "\n" not in result
+apps/observability/tests/test_logging.py::test_no_extra_block_when_empty::assert "extra" not in out
+apps/observability/tests/test_logging.py::test_stdlib_fields_excluded_from_extra::assert "funcName" not in out.get("extra", {})
+apps/observability/tests/test_logging.py::test_stdlib_fields_excluded_from_extra::assert "pathname" not in out.get("extra", {})
+apps/observability/tests/test_pii_filter.py::test_bare_at_username_not_redacted::assert "[EMAIL]" not in str(record.msg)
+apps/observability/tests/test_pii_filter.py::test_us_number_not_redacted::assert "[PHONE]" not in str(record.msg)
+apps/observability/tests/test_pii_filter.py::test_yclients_record_id_not_card_passes_through::assert "[CARD]" not in str(record.msg)
+apps/observability/tests/test_sentry.py::test_email_redacted_in_exception::assert "user@example.com" not in result["exception"]["values"][0]["value"]
+apps/observability/tests/test_sentry.py::test_phone_redacted_in_message::assert "+79991234567" not in result["message"]
+apps/orchestrator/memory/tests/test_short_term.py::test_append_writes_audit_without_raw_content::assert "секрет фразы" not in json.dumps(payload, ensure_ascii=False)
+apps/orchestrator/memory/tests/test_short_term.py::test_clear_deletes_key_and_audits::assert short_term.recall(conv_id) == []
+apps/orchestrator/tests/test_channel_registry.py::test_registry_module_separate_from_channels::assert not any(name.startswith("apps.channels") for name in registry_globals), (
+apps/orchestrator/tests/test_clarification_mode.py::test_mode_is_an_optional_enum_over_the_three_modes::assert "mode" not in ASK_CLARIFICATION_TOOL_SPEC["parameters"]["required"]
+apps/orchestrator/tests/test_concierge.py::test_no_memory_block_when_empty::assert "[ПАМЯТЬ О ПОЛЬЗОВАТЕЛЕ]" not in system
+apps/orchestrator/tests/test_discovery.py::test_build_discovery_prompt_without_personal_context_unchanged::assert "уже знаешь" not in msgs[0]["content"]
+apps/orchestrator/tests/test_discovery.py::test_generate_discovery_reply_empty_context_no_block::assert "уже знаешь" not in provider.messages[0]["content"]
+apps/orchestrator/tests/test_discovery_show_masters.py::test_named_service_missing_does_not_leave_bare_separator::assert " ·  " not in line
+apps/orchestrator/tests/test_discovery_show_masters.py::test_no_double_separator_in_any_combination::assert "  " not in line, line
+apps/orchestrator/tests/test_discovery_show_masters.py::test_no_double_separator_in_any_combination::assert " ·  " not in line, line
+apps/orchestrator/tests/test_discovery_show_masters.py::test_no_double_separator_in_any_combination::assert " —  " not in line, line
+apps/orchestrator/tests/test_discovery_show_masters.py::test_none_rating_still_renders_no_star::assert "★" not in self._line(rating=None)
+apps/orchestrator/tests/test_discovery_show_masters.py::test_zero_rating_renders_no_star::assert "★" not in self._line(rating=Decimal("0.00"))
+apps/orchestrator/tests/test_fast_path_claim.py::test_every_tool_has_a_claim_entry::assert missing == [], (
+apps/orchestrator/tests/test_fast_path_claim.py::test_no_claim_entry_outlives_its_tool::assert stale == [], (
+apps/orchestrator/tests/test_intent_resolution.py::test_router_client_has_no_flat_create::assert not hasattr(client, "create"), (
+apps/orchestrator/tests/test_memory_block.py::test_without_backend_data_sources_block_is_unchanged::assert INFERRED_MARK not in no_field
+apps/orchestrator/tests/test_memory_block.py::test_without_backend_data_sources_block_is_unchanged::assert MEMORY_INFERRED_HEADER not in no_field
+apps/orchestrator/tests/test_memory_bridge.py::test_domain_forget_triggers_bridge_clear::assert read_green_entries(bu.ayla_user_id) == []
+apps/orchestrator/tests/test_memory_bridge.py::test_slots_no_duplicate_when_already_declared::assert _patches(client) == []
+apps/orchestrator/tests/test_memory_erasure_matrix.py::test_a_refused_erasure_is_not_reported_as_done::assert "забыла всё, что о тебе знала" not in reply
+apps/orchestrator/tests/test_memory_erasure_matrix.py::test_skin_sensitivities_never_reach_the_max_prompt::assert "ретинол" not in block
+apps/orchestrator/tests/test_memory_erasure_matrix.py::test_skin_sensitivities_never_reach_the_max_prompt::assert "чувствительн" not in block.lower()
+apps/orchestrator/tests/test_nutrition_context.py::test_malformed_pct_does_not_raise::assert "от нормы" not in block
+apps/orchestrator/tests/test_nutrition_global.py::test_free_text_never_claimed::assert not is_structured_nutrition_turn(
+apps/orchestrator/tests/test_personal_surface.py::test_a_pull_carries_no_off_switch_footer::assert "не пиши мне" not in reply.text.lower()
+apps/orchestrator/tests/test_personal_surface.py::test_ayla_free_form_hint_never_reaches_the_person::assert "дефицит" not in reply.text.lower()
+apps/orchestrator/tests/test_personal_surface.py::test_ayla_free_form_hint_never_reaches_the_person::assert "добавк" not in reply.text.lower()
+apps/orchestrator/tests/test_personal_surface.py::test_no_forget_chip_when_there_is_nothing_to_forget::assert memory_show_chips(_bot_user("chip-empty")) == []
+apps/orchestrator/tests/test_readyz_extended.py::test_probe_stays_unscoped_across_tenants::assert "detail" not in result, "a foreign-tenant row must be seen, not ignored"
+apps/orchestrator/tests/test_service_menu_by_query.py::test_garbage_decodes_to_do_not_narrow::assert decode_query_ref(ref) == []
+apps/orchestrator/tests/test_shadow_turn.py::test_no_raw_pii_in_operational_logs::assert secret not in "\n".join(records)
+apps/orchestrator/tests/test_shadow_turn.py::test_no_retry_amplification::assert tuple(getattr(run_shadow_turn_task, "autoretry_for", ())) == ()
+apps/orchestrator/tests/test_shadow_turn.py::test_shadow_source_has_no_pipeline_turn_call::assert "await turn(" not in src
+apps/orchestrator/tests/test_shadow_turn.py::test_shadow_source_has_no_pipeline_turn_call::assert "from apps.orchestrator.pipeline import turn" not in src
+apps/orchestrator/tests/test_shadow_turn.py::test_shadow_source_has_no_pipeline_turn_call::assert "sync_to_async(turn)" not in src
+apps/orchestrator/tests/test_turn_seam.py::test_seam_source_has_no_pipeline_reference::assert "from apps.orchestrator.pipeline" not in src
+apps/orchestrator/tests/test_turn_seam.py::test_seam_source_has_no_pipeline_reference::assert "import pipeline" not in src
+apps/orchestrator/tests/test_turn_seam.py::test_seam_source_has_no_pipeline_reference::assert "pipeline.turn(" not in src
+apps/orchestrator/tests/test_visits.py::test_internal_fields_never_reach_the_customer::assert leak not in reply.text.lower()
+apps/persona/tests/test_memory_commands.py::test_domain_forget_deletes_every_row_of_the_key::assert list(remaining) == []
+apps/persona/tests/test_memory_extract.py::test_false_positives_suppressed::assert extract_green_facts(text) == []
+apps/persona/tests/test_memory_extract.py::test_session_phrases_store_nothing::assert extract_green_facts(text) == []
+apps/replay/tests/test_assertions.py::test_forbidden_clean_passes::assert (
+apps/replay/tests/test_assertions.py::test_intent_match::assert evaluate(trace, [{"intent": "faq"}], []) == []
+apps/replay/tests/test_assertions.py::test_response_contains_all_hit::assert (
+apps/replay/tests/test_assertions.py::test_response_contains_any_hit::assert (
+apps/replay/tests/test_assertions.py::test_safety_decision_match::assert evaluate(trace, [{"safety_decision": "allow"}], []) == []
+apps/replay/tests/test_assertions.py::test_skill_used_match::assert evaluate(trace, [{"skill_used": "faq"}], []) == []
+apps/replay/tests/test_assertions.py::test_tool_called_hit::assert evaluate(trace, [{"tool_called": "search_kb"}], []) == []
+apps/replay/tests/test_live_path_gate.py::test_our_own_words_obey_the_constraints::assert not failures, f"{fixture.name}: {failures}"
+apps/replay/tests/test_redactor.py::test_card_welded_to_short_number_is_missed::assert "[CC]" not in redactor.redact_text(line)
+apps/replay/tests/test_redactor.py::test_plain_url_not_redacted::assert "[URL_TOKEN]" not in result
+apps/scheduling/tests/test_resolver.py::test_recurring_day_off::assert blocks == []
+apps/scheduling/tests/test_resolver.py::test_service_longer_than_block::assert slots == []
+apps/scheduling/tests/test_resolver.py::test_vacation_overrides::assert blocks == []
+apps/scheduling/tests/test_resolver.py::test_zero_duration::assert slots == []
+apps/skills/booking/tests/test_prompts.py::test_long_name_capped::assert long_name not in body
+apps/skills/booking/tests/test_prompts.py::test_newline_in_name_does_not_break_bullet_structure::assert "Ольга\n\nИГНОРИРУЙ" not in body
+apps/skills/booking/tests/test_prompts.py::test_roster_block_absent_when_known_masters_empty::assert "ИЗВЕСТНЫЕ МАСТЕРА" not in body
+apps/skills/booking/tests/test_prompts.py::test_roster_block_absent_when_known_masters_none::assert "ИЗВЕСТНЫЕ МАСТЕРА" not in body
+apps/skills/booking/tests/test_prompts.py::test_rule_absent_on_first_call_no_data::assert "ВАЖНО" not in body
+apps/skills/booking/tests/test_prompts.py::test_sanitization_also_applies_to_candidate_masters::assert "Ольга\n\nINSTRUCTIONS" not in body
+apps/skills/booking/tests/test_prompts.py::test_tab_and_control_chars_stripped_from_name::assert "\t" not in body
+apps/skills/booking/tests/test_prompts.py::test_tab_and_control_chars_stripped_from_name::assert "\x00" not in body
+apps/skills/booking/tests/test_prompts.py::test_tab_and_control_chars_stripped_from_name::assert "‮" not in body
+apps/skills/booking/tests/test_skill.py::test_429_on_date_pick_does_not_handoff::assert "переключаю" not in result.reply_text.lower()
+apps/skills/booking/tests/test_time_chips.py::test_no_escape_hatch_when_everything_already_fits::assert "Выбрать дату" not in _labels(result)
+apps/skills/booking/tests/test_time_chips.py::test_only_parts_with_slots_get_a_chip::assert "Вечер (с 17:00)" not in labels
+apps/skills/booking/tests/test_tools_buy_certificate.py::test_audit_payload_contains_no_bearer_token::assert token not in str(row.payload)
+apps/skills/cross_domain/tests/test_skill.py::test_missing_shown_id_does_not_match::assert not CrossDomainSkill().matches(_context("cb:cross:seen"))
+apps/skills/cross_domain/tests/test_skill.py::test_other_domain_callbacks_not_claimed::assert not CrossDomainSkill().matches(_context(cb))
+apps/skills/cross_domain/tests/test_skill.py::test_unknown_action_does_not_match::assert not CrossDomainSkill().matches(_context("cb:cross:click:shown-1"))
+apps/skills/faq/tests/test_prompts.py::test_forbidden_absent_no_line::assert "Запрещено" not in system
+apps/skills/faq/tests/test_prompts.py::test_tone_absent_no_line::assert "Тон:" not in system
+apps/skills/food_clarify/tests/test_hints.py::test_non_food_messages::assert not looks_like_food_drink(text), f"unexpected hit on {text!r}"
+apps/skills/food_clarify/tests/test_skill.py::test_other_food_callback_does_not_match::assert not skill.matches(_context("cb:food:to_diary:abc123"))
+apps/skills/food_clarify/tests/test_skill.py::test_unrelated_text_does_not_match::assert not skill.matches(_context("Хочу записаться на массаж"))
+apps/skills/food_correction/tests/test_skill.py::test_food_clarify_callbacks_not_claimed::assert not FoodCorrectionSkill().matches(_context("cb:food:diary"))
+apps/skills/food_correction/tests/test_skill.py::test_food_clarify_callbacks_not_claimed::assert not FoodCorrectionSkill().matches(_context("cb:food:typo"))
+apps/skills/food_correction/tests/test_skill.py::test_food_scanner_callbacks_not_claimed::assert not FoodCorrectionSkill().matches(_context(cb))
+apps/skills/food_correction/tests/test_skill.py::test_plain_text_does_not_match::assert not FoodCorrectionSkill().matches(_context("250"))
+apps/skills/food_correction/tests/test_skill.py::test_unknown_field_does_not_match::assert not FoodCorrectionSkill().matches(_context("cb:food:correct:portion:scan-1"))
+apps/skills/food_scanner/tests/test_skill.py::test_cb_diary_no_scan_id_owned_by_p4::assert not FoodScannerSkill().matches(ctx)
+apps/skills/food_scanner/tests/test_skill.py::test_cb_typo_owned_by_p4::assert not FoodScannerSkill().matches(ctx)
+apps/skills/food_scanner/tests/test_skill.py::test_text_only_does_not_match::assert not FoodScannerSkill().matches(ctx)
+apps/skills/food_scanner/tests/test_skill.py::test_unknown_callback_does_not_match::assert not FoodScannerSkill().matches(_context("cb:other:action"))
+apps/skills/health_screening/tests/test_skill.py::test_empty_does_not_match::assert not HealthScreeningSkill().matches(_context(""))
+apps/skills/health_screening/tests/test_skill.py::test_non_pain_does_not_match::assert not HealthScreeningSkill().matches(_context("Запишите меня"))
+apps/skills/menu/tests/test_rollback_flag.py::test_off_never_ships_a_dead_menu_button::assert not any(str(b.get("callback", "")).startswith("cb:menu:") for b in buttons)
+apps/skills/menu/tests/test_routing_hardening.py::test_construction_failure_degrades_instead_of_propagating::assert tenant_service_stems(tenant) == ()
+apps/skills/menu/tests/test_routing_hardening.py::test_iteration_failure_degrades_too::assert tenant_service_stems(tenant) == ()
+apps/skills/menu/tests/test_routing_hardening.py::test_stopwords_cover_every_inflection::assert leaked not in stems, leaked
+apps/skills/menu/tests/test_routing_hardening.py::test_typed_lookalike_with_pii_is_treated_as_ordinary_text::assert "79001234567" not in logged
+apps/skills/menu/tests/test_routing_hardening.py::test_typed_lookalike_with_pii_is_treated_as_ordinary_text::assert "Иванова" not in logged
+apps/skills/menu/tests/test_routing_hardening.py::test_unknown_but_well_formed_slug_logs_only_a_length::assert "retired_button" not in logged
+apps/skills/menu/tests/test_skill.py::test_catalog_failure_degrades_to_seed_vocabulary::assert tenant_service_stems(tenant) == ()
+apps/skills/menu/tests/test_skill.py::test_out_of_tenant_scope_degrades_quietly::assert tenant_service_stems(tenant) == ()
+apps/skills/nutrition_anketa/tests/test_skill.py::test_edit_callback_jumps_back::assert "weight" not in bucket["answers"]
+apps/skills/nutrition_anketa/tests/test_skill.py::test_other_callbacks_do_not_match::assert not NutritionAnketaSkill().matches(ctx)
+apps/skills/nutrition_anketa/tests/test_skill.py::test_random_text_does_not_match_without_state::assert not NutritionAnketaSkill().matches(ctx)
+apps/skills/payment_failed/tests/test_skill.py::test_amount_line_dropped_when_missing::assert "Сумма:" not in master_dm["text"]
+apps/skills/payment_failed/tests/test_skill.py::test_cross_tenant_lookup_blocked_by_tenant_scope::assert "max-master" not in chat_ids
+apps/skills/water/tests/test_skill.py::test_empty_does_not_match::assert not WaterSkill().matches(_context(""))
+apps/skills/water/tests/test_skill.py::test_long_text_does_not_match::assert not WaterSkill().matches(_context(long_text))
+apps/skills/water/tests/test_skill.py::test_non_beverage_does_not_match::assert not WaterSkill().matches(_context("когда вы работаете?"))
+apps/skills/welcome/tests/test_miniapp_routes.py::test_catch_all_is_not_treated_as_a_route::assert not _route_exists("/no/such/screen/at/all", _miniapp_routes())
+apps/tenancy/tests/test_telegram_fields.py::test_mask_helper_short_tokens_starred::assert "abc" not in masked
+apps/tenancy/tests/test_telegram_fields.py::test_repr_does_not_contain_full_token::assert secret not in rep, f"full token leaked into repr: {rep!r}"
+apps/workers/tests/test_consumer.py::test_tenant_optional_handler_with_tenant_present_proceeds_normally::assert not any(
+apps/workers/tests/test_reaper.py::test_empty_pel_returns_zero::assert not list(fake_redis.xrange("ingress:max:dlq"))
+apps/workers/tests/test_subscriber_audit.py::test_emit_from_async_context_logs_no_error::assert not any("emit_failed" in r.getMessage() for r in caplog.records)
+tests/contracts/test_consumer_tenant_verification_mandate.py::test_lint_catches_handler_missing_verify::assert REQUIRED_VERIFY_CALL_SUBSTRING not in source
+tests/e2e/test_replay_golden.py::test_pii_in_response_redacted_before_persistence::assert "+79991234567" not in persisted_blob
+tests/fixtures/test_synthetic_visits.py::test_empty_mix_returns_empty::assert specs == []
+tests/integration/test_chromadb_isolation.py::test_delete_collection_only_drops_target::assert a_hits == []
+tests/integration/test_cross_tenant_leakage.py::test_audit_mode_returns_empty_without_context::assert result == []
+tests/integration/test_cross_tenant_leakage.py::test_event_uses_plain_manager::assert not isinstance(Event._default_manager, TenantScopedManager)
+tests/integration/test_cross_tenant_leakage.py::test_idempotency_key_uses_plain_manager::assert not isinstance(IdempotencyKey._default_manager, TenantScopedManager)
+tests/integration/test_cross_tenant_leakage.py::test_webhook_journal_uses_plain_manager::assert not isinstance(WebhookJournal._default_manager, TenantScopedManager)
+tests/test_web_security_settings.py::test_unset_env_defaults::assert not hasattr(base, "SECURE_PROXY_SSL_HEADER")
+tests/tools/test_env_guard.py::test_bypass_env_var_disables_every_check::assert env_guard.check_environment(_PROJECT_ROOT) == []
+tests/tools/test_env_guard.py::test_silent_when_pyproject_is_unreadable::assert env_guard.check_environment(tmp_path) == []
+tests/tools/test_import_boundaries.py::test_allowed_inside_marketplace::assert self._scan_cat(tmp_path) == []
+tests/tools/test_import_boundaries.py::test_apps_clean_under_real_baseline::assert v == [], "\n".join(x.format() for x in v)
+tests/tools/test_import_boundaries.py::test_baselined_crossing_passes::assert _scan(tmp_path, baseline) == []
+tests/tools/test_import_boundaries.py::test_baselined_file_passes::assert self._scan_cat(tmp_path, baseline) == []
+tests/tools/test_import_boundaries.py::test_baselined_site_passes::assert _scan_hash(tmp_path, both) == []
+tests/tools/test_import_boundaries.py::test_baselined_site_passes::assert _scan_row_lock(tmp_path, both) == []
+tests/tools/test_import_boundaries.py::test_both_call_sites_baselined_passes::assert _scan(tmp_path, baseline) == []
+tests/tools/test_import_boundaries.py::test_dunder_hash_body_is_allowed::assert _scan_hash(tmp_path) == []
+tests/tools/test_import_boundaries.py::test_dunder_hash_delegating_through_a_call_is_allowed::assert _scan_hash(tmp_path) == []
+tests/tools/test_import_boundaries.py::test_forbidden_import_from_non_source_dir_clean::assert _scan(tmp_path) == []
+tests/tools/test_import_boundaries.py::test_lambda_sort_key_is_allowed::assert _scan_hash(tmp_path) == []
+tests/tools/test_import_boundaries.py::test_migrations_are_never_scanned::assert _scan_hash(tmp_path) == []
+tests/tools/test_import_boundaries.py::test_non_catalog_all_tenants_ignored::assert self._scan_cat(tmp_path) == []
+tests/tools/test_import_boundaries.py::test_objects_manager_not_flagged::assert self._scan_cat(tmp_path) == []
+tests/tools/test_import_boundaries.py::test_partial_scan_does_not_report_unscanned_baseline_as_stale::assert v == []
+tests/tools/test_import_boundaries.py::test_queryset_split_across_statements_is_a_known_blind_spot::assert _scan_row_lock(tmp_path) == []
+tests/tools/test_import_boundaries.py::test_safe_shapes_are_silent::assert _scan_hash(tmp_path) == []
+tests/tools/test_import_boundaries.py::test_safe_shapes_are_silent::assert _scan_row_lock(tmp_path) == []
+tests/tools/test_import_boundaries.py::test_sibling_prefix_not_matched::assert _scan(tmp_path) == []
+tests/tools/test_import_boundaries.py::test_test_and_migration_files_skipped::assert _scan(tmp_path) == []
+tests/tools/test_import_boundaries.py::test_test_files_are_out_of_scope::assert _scan_row_lock(tmp_path) == []
+tests/tools/test_import_boundaries.py::test_unrelated_import_clean::assert _scan(tmp_path) == []
+tests/tools/test_miniapp_style_contract.py::test_a_bar_whose_tabs_fit_its_columns_is_not_reported::assert guard.scan_tabbar_columns(root) == []
+tests/tools/test_miniapp_style_contract.py::test_a_class_with_a_rule_is_not_reported::assert guard.scan(root) == []
+tests/tools/test_miniapp_style_contract.py::test_a_root_with_no_tab_bars_at_all_is_not_a_problem::assert guard.scan_tabbar_columns(root) == []
+tests/tools/test_miniapp_style_contract.py::test_all_stylesheets_in_the_styles_dir_count::assert guard.scan(root) == []
+tests/tools/test_miniapp_style_contract.py::test_runtime_built_class_names_are_deliberately_ignored::assert guard.scan(root) == []
+tests/tools/test_miniapp_style_contract.py::test_test_files_are_not_scanned::assert guard.scan(root) == []
+tests/tools/test_miniapp_style_contract.py::test_the_real_miniapp_matches_its_baseline_exactly::assert sorted(found - guard.BASELINE) == [], "new unstyled classes — add a rule, not an entry"
+tests/tools/test_miniapp_style_contract.py::test_the_real_miniapp_matches_its_baseline_exactly::assert sorted(guard.BASELINE - found) == [], "stale baseline entries — delete these lines"
+tests/tools/test_miniapp_style_contract.py::test_the_real_tab_bars_fit_one_row::assert guard.scan_tabbar_columns(app_root) == []
+tests/tools/test_personal_field_guard.py::test_a_manager_is_not_a_field::assert "identity.BotUser.objects" not in _keys(apps_root)
+tests/tools/test_personal_field_guard.py::test_a_new_field_on_an_event_table_says_nothing::assert guard.check(guard.scan(apps_root), self._clean_registry(), set()) == []
+tests/tools/test_personal_field_guard.py::test_a_nullable_link_to_a_person_is_not_scanned::assert not any(k.startswith("identity.CatalogMaster.") for k in _keys(apps_root))
+tests/tools/test_personal_field_guard.py::test_a_renamed_service_field_on_a_person_model_costs_one_line::assert guard.check(guard.scan(apps_root), registry, set()) == []
+tests/tools/test_personal_field_guard.py::test_an_event_table_is_not_scanned::assert not any(k.startswith("identity.BookingRequest.") for k in _keys(apps_root))
+tests/tools/test_personal_field_guard.py::test_declared_plumbing_passes::assert guard.check(guard.scan(apps_root), self._clean_registry(), set()) == []
+tests/tools/test_personal_field_guard.py::test_test_files_are_not_a_source_of_keys::assert "memory_key:made_up_by_a_fixture" not in _keys(apps_root)
