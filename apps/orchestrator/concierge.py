@@ -858,6 +858,43 @@ _BOOKING_NO_MASTER = (
 _BOOKING_WHICH_ONE = "Уточните, к кому именно — напишите фамилию или нажмите кнопку:"
 
 
+#: How far back a salon name may have been said and still count (DRF-1355).
+#: The same window ``GlobalConversationStore.load_recent_history`` gives the
+#: model, so «the person could have seen this name» means the same thing to
+#: the grounding check as «the model could have read this name» — a shorter
+#: window would refuse salons the model legitimately picked up from the
+#: transcript, a longer one would ground a name from a conversation the model
+#: can no longer see.
+_SAID_HISTORY_TURNS = 10
+
+
+def _conversation_text(conversation: Any, message_text: str) -> str:
+    """This turn plus the recent transcript, as one blob of words.
+
+    The evidence side of DRF-1355: what a salon name in a tool call is checked
+    against. BOTH roles are included — the assistant's own messages are where
+    a follow-up «а что в Люмине» gets the name from, because the bot itself
+    rendered the salon list a turn earlier.
+
+    Best-effort: a transcript read must never cost the turn, and losing it
+    degrades to «only this turn was said», which is this check's safe
+    direction (more calls treated as ungrounded, never fewer).
+    """
+    parts = [message_text or ""]
+    try:
+        from apps.conversations.models import Message
+
+        rows = (
+            Message.all_tenants.filter(conversation=conversation)
+            .order_by("-created_at")
+            .values_list("content", flat=True)[:_SAID_HISTORY_TURNS]
+        )
+        parts.extend(row for row in rows if row)
+    except Exception:  # noqa: BLE001 — evidence is best-effort, never fatal
+        logger.warning("orchestrator.concierge.said_history_failed", exc_info=True)
+    return "\n".join(parts)
+
+
 def _remember_when_before_handoff(
     conversation: Any,
     bot_user: Any,
@@ -1019,9 +1056,18 @@ def build_concierge_system_prompt(
         f"часовой пояс {timezone.get_current_timezone()}. Используй эту дату "
         "для парсинга относительных («завтра», «послезавтра») и конкретных "
         "дат записи.",
+        # DRF-1355 — this sentence used to end «конкретный салон выбирается
+        # только в момент записи», which was true until DRF-1304 shipped
+        # ``show_salons`` the day before the pilot trace. Left in place it told
+        # the model, in the second sentence of its own prompt, that a salon is
+        # not something this conversation shows — while the tool roster said
+        # the opposite. A prompt that contradicts the tool list is not a fix
+        # this ticket rests on (the platform check below is), but a false
+        # statement about our own product has no business staying in it.
         "Ты помогаешь клиенту по всей стране подобрать подходящего "
-        f"{voice['domain']}-мастера и записаться — конкретный салон выбирается "
-        "только в момент записи.",
+        f"{voice['domain']}-мастера и записаться, а также рассказываешь про "
+        "подключённые салоны, их адреса и услуги — про них отвечают "
+        "инструменты каталога.",
         "Это разговор-знакомство (discovery): отвечай тепло и кратко, "
         "задавай уточняющие вопросы про услугу, город и предпочтения. "
         # DRF-1304 — salons/prices/addresses exist now, behind the tools.
@@ -1063,13 +1109,21 @@ def build_concierge_system_prompt(
         "хочет. Не показывай список мастеров второй раз, если нужный "
         "мастер в нём уже был.",
         # DRF-1304 — the salon/service tools exist now (tool_definitions).
+        # DRF-1355 sharpens the first two lines against the live failure:
+        # «покажи мне салоны» went to show_services with an invented salon.
+        # The platform now refuses that argument outright (the answer is the
+        # salon list either way), so this is the cheap half of the fix, not
+        # the load-bearing one.
         "Инструменты каталога:\n"
-        "- Вопрос про салоны или адреса («какие салоны у вас есть», «где вы "
-        "находитесь», «куда можно прийти») — вызывай show_salons (город "
-        "необязателен).\n"
+        "- Просьба показать САЛОНЫ или спросить про адреса («покажи салоны», "
+        "«покажи мне салоны», «какие салоны у вас есть», «где вы находитесь», "
+        "«куда можно прийти») — вызывай show_salons (город необязателен). "
+        "НЕ show_services: это вопрос про места, а не про услуги.\n"
         "- Вопрос про услуги, цены, длительность («какие услуги в салоне», "
         "«что есть по лицу», «сколько стоит массаж») — вызывай show_services "
-        "с фильтром: салон, город или запрос.\n"
+        "с фильтром: салон, город или запрос. Салон в параметре salon "
+        "указывай ТОЛЬКО если клиент назвал его сам или ты показал его "
+        "раньше в этом разговоре; не подставляй салон от себя.\n"
         "- Подбор конкретного мастера — show_masters, как раньше.\n"
         "- Клиент назвал мастера по имени и хочет записаться — "
         "start_booking, а не show_masters: show_masters ищет по услуге и "
@@ -1662,7 +1716,12 @@ def _concierge_turn(
         # rephrasing catalog rows, so the turn's cost does not grow.
         args = (dto.action_data or {}).get("arguments", {})
         catalog_reply = execute_catalog_tool(
-            dto.action_type, args if isinstance(args, dict) else {}
+            dto.action_type,
+            args if isinstance(args, dict) else {},
+            # DRF-1355 — what the person could actually have named. The
+            # ``salon`` argument is checked against it before the platform
+            # answers for a salon (see ``discovery.salon_named_in``).
+            said=_conversation_text(conversation, message_text),
         )
         if catalog_reply is not None:
             # No re-clamp to _MAX_REPLY_CHARS here: the renderer already bounds

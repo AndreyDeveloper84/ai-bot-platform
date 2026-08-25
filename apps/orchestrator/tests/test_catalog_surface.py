@@ -203,7 +203,9 @@ class TestExecuteCatalogTool:
         _service(tenant, "Карбокситерапия+пилинг", price="0")  # В-4 — never «бесплатно»
         _service(tenant, "Без цены")
 
-        reply = execute_catalog_tool("show_services", {"salon": "bodyformula"})
+        reply = execute_catalog_tool(
+            "show_services", {"salon": "bodyformula"}, said="какие услуги в BodyFormula"
+        )
 
         assert reply is not None
         assert "Массаж спины — от 1700 ₽ · 45 мин" in reply.text
@@ -215,7 +217,11 @@ class TestExecuteCatalogTool:
     def test_show_services_unknown_salon_named_back(self):
         _salon("s1", "BodyFormula", city="Пенза")
 
-        reply = execute_catalog_tool("show_services", {"salon": "Афродита-несуществующая"})
+        reply = execute_catalog_tool(
+            "show_services",
+            {"salon": "Афродита-несуществующая"},
+            said="что есть в Афродита-несуществующая",
+        )
 
         assert reply is not None
         assert "Афродита-несуществующая" in reply.text
@@ -224,7 +230,9 @@ class TestExecuteCatalogTool:
     def test_show_services_known_salon_without_services(self):
         _salon("s1", "BodyFormula", city="Пенза")
 
-        reply = execute_catalog_tool("show_services", {"salon": "bodyformula"})
+        reply = execute_catalog_tool(
+            "show_services", {"salon": "bodyformula"}, said="что делают в BodyFormula"
+        )
 
         assert reply is not None
         assert "не загружены" in reply.text
@@ -234,7 +242,9 @@ class TestExecuteCatalogTool:
         _service(tenant, "Массаж спины")
 
         reply = execute_catalog_tool(
-            "show_services", {"salon": "bodyformula", "query": "такойуслугинет"}
+            "show_services",
+            {"salon": "bodyformula", "query": "такойуслугинет"},
+            said="есть ли такойуслугинет в BodyFormula",
         )
 
         assert reply is not None
@@ -383,7 +393,9 @@ class TestCatalogChips:
         _service(tenant, "Никем не оказывается")
         _offer(tenant, bookable)
 
-        reply = execute_catalog_tool("show_services", {"salon": "bodyformula"})
+        reply = execute_catalog_tool(
+            "show_services", {"salon": "bodyformula"}, said="что есть в BodyFormula"
+        )
 
         # Both services are REAL and both are shown — only the chip differs.
         assert "Массаж спины" in reply.text

@@ -31,6 +31,7 @@ import base64
 
 import asyncio
 import logging
+import re
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
@@ -199,14 +200,27 @@ SHOW_SERVICES_TOOL_SPEC: dict[str, Any] = {
         "спрашивает, что делают в конкретном салоне («какие услуги в BodyFormula»), "
         "или ищет услугу по запросу («что у вас есть по лицу», «сколько стоит "
         "массаж»). Нужен хотя бы один фильтр — салон, город или запрос; без них "
-        "уточняй через ask_clarification, каталог целиком не перечисляй."
+        "уточняй через ask_clarification, каталог целиком не перечисляй. "
+        # DRF-1355 — «покажи мне салоны» was answered by this tool with a
+        # salon nobody had named. The platform now checks the argument and
+        # answers with the salon list when it is ungrounded; saying so here
+        # keeps the tool's own description honest about what it will do.
+        "НЕ вызывай этот инструмент на вопрос про сами салоны («покажи "
+        "салоны», «какие салоны есть») — для него есть show_salons."
     ),
     "parameters": {
         "type": "object",
         "properties": {
             "salon": {
                 "type": "string",
-                "description": "Название салона (подстрока, необязательно), e.g. 'BodyFormula'.",
+                "description": (
+                    "Название салона (подстрока, необязательно), e.g. 'BodyFormula'. "
+                    # DRF-1355 — the constraint the platform now enforces.
+                    "Заполняй ТОЛЬКО названием, которое прозвучало в этом "
+                    "разговоре — от клиента или в твоём собственном ответе. "
+                    "Салон, который клиент не называл, платформа не примет и "
+                    "покажет список салонов вместо услуг."
+                ),
             },
             "city": {"type": "string", "description": "Город для фильтра (необязательно)."},
             "query": {
@@ -885,12 +899,24 @@ def _render_service_cards(
         return render_no_services(salon=salon, city=city, query=query)
     visible = services[:shown]
     salon_names = {card.salon_name for card in visible}
+    # DRF-1355 — the salon is NAMED, and the name comes from the mirror rows
+    # themselves (``ServiceCard.salon_name``), never from the tool argument.
+    #
+    # «Вот услуги этого салона:» stood here before, and on the live pilot of
+    # 24.08 two consecutive messages opened with those exact words about two
+    # DIFFERENT salons, neither of which the person had mentioned. The header
+    # was the only place the answer could have said which salon it was about,
+    # and it said «этого» — so an answer about a salon nobody had chosen was
+    # indistinguishable from an answer about one they had. Naming it costs a
+    # field we already hold and turns that class of mistake from invisible
+    # into obvious, on this path and on the chip-tap path alike.
+    only_salon = next(iter(salon_names)) if len(salon_names) == 1 else ""
     if query and query.strip():
         header = f"Вот что есть по «{query.strip()[:_MAX_ECHOED_QUERY_CHARS]}»:"
     elif city and city.strip():
         header = f"Вот услуги в городе {city.strip()[:_MAX_ECHOED_QUERY_CHARS]}:"
-    elif salon and salon.strip():
-        header = "Вот услуги этого салона:"
+    elif only_salon:
+        header = f"Вот услуги салона «{only_salon[:_MAX_ECHOED_QUERY_CHARS]}»:"
     else:
         header = "Вот услуги, которые есть:"
     lines = [header]
@@ -937,6 +963,146 @@ def has_service_criteria(salon: str | None, city: str | None, query: str | None)
 def render_no_service_criteria_clarification() -> DiscoveryReply:
     """The canon-prescribed reply to a criteria-less ``show_services`` call."""
     return _render_ask_clarification(NO_SERVICE_CRITERIA_QUESTION, [])
+
+
+# ─── DRF-1355: who decides WHICH salon ───────────────────────────────────
+#
+# ## The turn this exists to end
+#
+# Live pilot, 24.08 07:51. «покажи мне салоны» — the plainest wording of the
+# plainest intent on a marketplace — was answered with::
+#
+#     Вот услуги этого салона:
+#     • Массаж спины — от 1500 ₽ · 45 мин
+#
+# and then again, with a second salon's epilation prices. The person had named
+# no salon. The tools were not at fault: measured on this branch,
+# ``show_salons`` renders the five real salons and ``show_services`` refuses to
+# dump a criteria-less catalog, exactly as DRF-1304 built them. The pre-model
+# branch was not at fault either — ``apps.orchestrator.fast_path.decide``
+# returns ``no_service_named`` for this turn, so it reaches the model
+# untouched. What happened is that the model picked ``show_services`` and
+# filled its ``salon`` argument itself, and the platform ran that argument
+# without ever asking whether the person had said it.
+#
+# ## Why the answer is not «prompt the model harder»
+#
+# AYLA-DEC-0045 / OD-9: the model is not the ranking authority. DRF-1312
+# already applies that to service names — the model may NAME the services in a
+# sentence, and the platform checks each one against the catalog and states
+# the misses itself. WHICH SALON a person is asking about is the same kind of
+# claim, so it gets the same treatment: the model may name a salon, and the
+# platform rules on whether that name is attributable to the conversation.
+#
+# It is also not a rule in the deterministic branch. The owner's ruling of
+# 24.08 is that the turn must REACH the model, and that «отступи, если
+# спросили про салон» is the pile of exceptions DRF-1328 spent a ticket
+# escaping. Nothing here runs before the model; this is the platform reading
+# the model's chosen ARGUMENTS, in the same sync scope that already executes
+# them, one step before an answer is rendered.
+#
+# ## The rule
+#
+#     ``show_services(salon=X)`` may answer only when X carries a word that
+#     identifies exactly one salon on the platform AND that word was actually
+#     said in the conversation.
+#
+# The catalog owns the first half (:func:`~apps.marketplace.discovery.
+# identifying_salon_words` — a word belongs to exactly one salon name), the
+# transcript owns the second. Neither is the model's to assert.
+#
+# ## What an ungrounded call is answered with
+#
+# The salon list. The model has just asserted that the person wants ONE
+# salon's services and could not say which; «какого салона?» is precisely the
+# question ``show_salons`` answers, and its chips open that salon's services
+# in one tap (``cb:catalog:services:``), so the person lands where the model
+# was trying to take them. That is why this is not merely a refusal: whichever
+# of the two catalog tools the model picks for «покажи мне салоны», the answer
+# is now the salons.
+#
+# A criteria-less ``show_services({})`` is deliberately NOT routed here and
+# keeps :data:`NO_SERVICE_CRITERIA_QUESTION`. The two are different states: a
+# bare call asserts nothing about a salon and the platform genuinely cannot
+# tell whether the person wants salons or a kind of service, while an
+# ungrounded ``salon`` argument is a claim about a specific salon that the
+# platform can check and has found unsupported.
+#
+# ## Which direction this fails in
+#
+# Toward the salon list. A real salon named in a spelling the transcript does
+# not carry (the person typed «Афродите», the model answered «Afrodita») is
+# treated as ungrounded and the person is shown the salons instead of that
+# salon's services — one extra tap. The opposite mistake is the pilot trace
+# above: a confident, well-formatted answer about a salon nobody chose, which
+# reads as correct and cannot be spotted from the outside.
+
+#: Shortest word that can identify a salon in what was SAID. Mirrors
+#: ``apps.marketplace.discovery._SALON_WORD_MIN_LEN``, which draws the same
+#: line on the catalog side.
+_SAID_WORD_MIN_LEN = 4
+
+#: Width of a Russian case ending, i.e. how much of two words may differ at
+#: the end while they still name the same thing: «Люмина» ↔ «Люмине»,
+#: «Афродита» ↔ «Афродиты». The same bound (and the same reasoning) as
+#: ``apps.marketplace.discovery._CITY_MAX_SUFFIX``, which recognises «пензе» as
+#: «Пенза». Bounded rather than open-ended so «Люмина» cannot swallow
+#: «Люминесценция».
+_SALON_WORD_MAX_SUFFIX = 2
+
+_SAID_WORD_RE = re.compile(r"\w+", re.UNICODE)
+
+
+def _same_word(one: str, other: str) -> bool:
+    """True when two case-folded words differ only in their case ending."""
+    common = 0
+    for a, b in zip(one, other):
+        if a != b:
+            break
+        common += 1
+    return (
+        common >= _SAID_WORD_MIN_LEN
+        and len(one) - common <= _SALON_WORD_MAX_SUFFIX
+        and len(other) - common <= _SALON_WORD_MAX_SUFFIX
+    )
+
+
+def salon_named_in(said: str, salon: str) -> bool:
+    """True when ``salon`` is attributable to ``said`` — see the block above.
+
+    ``said`` is the conversation as the person could have seen it: this turn
+    plus the recent transcript, BOTH roles. The assistant's own messages count
+    because the salon list it just rendered is where a follow-up like «а что в
+    Люмине» gets the name from, and because a chip tap answers by id anyway
+    (:func:`execute_catalog_callback`), which never reaches this check.
+
+    Best-effort on the catalog read, like every other reader on this path: a
+    hiccup degrades to «not attributable», i.e. the salon list — this
+    function's safe direction.
+    """
+    salon = (salon or "").strip()
+    if not salon or not (said or "").strip():
+        return False
+    try:
+        from apps.marketplace.discovery import identifying_salon_words
+
+        identifying = identifying_salon_words()
+    except Exception:  # noqa: BLE001 — grounding must never break the turn
+        logger.warning("orchestrator.discovery.salon_words_failed", exc_info=True)
+        return False
+    if not identifying:
+        return False
+    said_words = [w for w in _SAID_WORD_RE.findall(said.casefold()) if len(w) >= _SAID_WORD_MIN_LEN]
+    if not said_words:
+        return False
+    for word in _SAID_WORD_RE.findall(salon.casefold()):
+        if word not in identifying:
+            # Either no salon carries this word, or several do — it cannot
+            # single one out, so it cannot ground the argument either.
+            continue
+        if any(_same_word(word, said_word) for said_word in said_words):
+            return True
+    return False
 
 
 def _reply_with_chips(text: str, buttons: list[dict[str, str]]) -> DiscoveryReply:
@@ -1030,13 +1196,24 @@ def execute_catalog_callback(callback_text: str) -> DiscoveryReply | None:
     return None
 
 
-def execute_catalog_tool(name: str, args: dict[str, Any]) -> DiscoveryReply | None:
+def execute_catalog_tool(
+    name: str, args: dict[str, Any], *, said: str = ""
+) -> DiscoveryReply | None:
     """Run the marketplace read behind a model-called salon/service tool.
 
     Deterministic, like the nutrition tools (DRF-1268): the reply is rendered
     from real mirror data right here, so the turn's cost does not grow — no
     second model pass rephrases it. Returns ``None`` for an unknown tool name
     (the caller degrades to the safe line, same as today).
+
+    ``said`` is the conversation the tool call is answering — this turn plus
+    the recent transcript. It is what the ``salon`` argument is checked
+    against (DRF-1355; see the block above :func:`salon_named_in`): the model
+    may name a salon, the platform rules on whether the person did. Empty
+    ``said`` therefore means «nothing was said that could name a salon», and a
+    ``salon`` argument is ungrounded by definition — the safe direction, and
+    the one that keeps a caller from silently opting out of the check by
+    forgetting the argument.
     """
     if not isinstance(args, dict):
         args = {}
@@ -1044,14 +1221,16 @@ def execute_catalog_tool(name: str, args: dict[str, Any]) -> DiscoveryReply | No
     def _limit(raw: Any, default: int) -> int:
         return min(int(raw), default) if isinstance(raw, int) and raw > 0 else default
 
-    if name == SHOW_SALONS_TOOL_SPEC["name"]:
-        city = args.get("city") or None
-        limit = _limit(args.get("limit"), _MAX_SALON_CARDS)
+    def _salons(city: str | None = None) -> DiscoveryReply:
+        limit = _MAX_SALON_CARDS
         # limit+1: the «это не всё» tail must KNOW there is more, not guess it
         # from a list that happens to fill the page.
         salons = discover_salons(city=city, limit=limit + 1)
         logger.info("orchestrator.discovery.show_salons count=%d", len(salons))
         return _render_salon_cards(salons, shown=limit, city=city)
+
+    if name == SHOW_SALONS_TOOL_SPEC["name"]:
+        return _salons(args.get("city") or None)
 
     if name == SHOW_SERVICES_TOOL_SPEC["name"]:
         salon = args.get("salon") or None
@@ -1059,6 +1238,28 @@ def execute_catalog_tool(name: str, args: dict[str, Any]) -> DiscoveryReply | No
         query = args.get("query") or None
         if not has_service_criteria(salon, city, query):
             return render_no_service_criteria_clarification()
+        if salon and not salon_named_in(said, salon):
+            # DRF-1355 — the model asked for ONE salon's services and named a
+            # salon the conversation does not carry. Answering it would be the
+            # pilot trace of 24.08: «Вот услуги этого салона» about a salon
+            # nobody chose. The salons themselves are the answer to «какого
+            # салона?», and their chips open exactly what this call wanted.
+            logger.info(
+                "orchestrator.discovery.ungrounded_salon salon=%r city=%r query=%r",
+                salon[:_MAX_ECHOED_QUERY_CHARS],
+                city,
+                query,
+            )
+            if not (query or "").strip():
+                # The city rides along into the salon list rather than into a
+                # service search: with the salon gone and no query, «услуги в
+                # Пензе» is every service in the city — the catalog dump
+                # BOT-003 §9 forbids — while «салоны в Пензе» is an answer.
+                return _salons(city)
+            # A QUERY did come from the person («что есть по лицу»), so it is
+            # answered — only the salon nobody named is dropped. A bare city
+            # is not enough on its own, see above.
+            salon = None
         limit = _limit(args.get("limit"), _MAX_SERVICE_CARDS)
         services = discover_services(salon=salon, city=city, query=query, limit=limit + 1)
         logger.info("orchestrator.discovery.show_services count=%d", len(services))

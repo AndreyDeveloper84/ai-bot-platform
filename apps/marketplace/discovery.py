@@ -575,6 +575,65 @@ def strip_known_cities(tokens: list[str]) -> list[str]:
     return service_tokens
 
 
+# ─── DRF-1355: which words can IDENTIFY a salon ──────────────────────────
+#
+# The live pilot of 24.08 07:51 answered «покажи мне салоны» with the service
+# list of a salon the person had never named. The model chose ``show_services``
+# and filled its ``salon`` argument out of its own head; the platform executed
+# that argument without ever asking whether the person had said it.
+#
+# AYLA-DEC-0045 / OD-9 says the model is not the authority on what the catalog
+# holds — the same rule DRF-1312 applies to service names («не решай сам, есть
+# ли услуга»). WHICH SALON a person is asking about is that same kind of
+# claim, and it gets the same answer: the model may name a salon, the platform
+# rules on whether that name is attributable to the conversation.
+#
+# This function supplies the half only the catalog can know — which words
+# identify a salon at all. A word does when EXACTLY ONE salon on the platform
+# carries it::
+#
+#   «люмина»   -> Люмина                              identifies
+#   «afrodita» -> Центр коррекции фигуры «Afrodita»    identifies
+#   «центр»    -> two salons carry it                 identifies nothing
+#   «салон»    -> in no salon name at all             identifies nothing
+#
+# Read from the live mirror rather than from a list somebody maintains, for
+# the same reason :func:`_known_cities` and :func:`_known_goals` are: a salon
+# that joins tomorrow is recognised the same day and nobody edits this file.
+# The generic half is what stops «салон» / «центр» from grounding anything —
+# without it «покажи мне САЛОНЫ» would ground a ``salon="салон красоты"``
+# argument through the very word that asked for the list.
+_SALON_WORD_MIN_LEN = 4
+
+
+def identifying_salon_words() -> dict[str, str]:
+    """``{word: salon name}`` for words carried by exactly ONE salon.
+
+    Case-folded and tokenized by this module's own ``\\w+``, so a salon name is
+    split the way a query is. Words shorter than ``_SALON_WORD_MIN_LEN`` are
+    dropped: below that a word is a fragment or a preposition, never a name —
+    the same length line :data:`_SHORT_WORD_LEN` draws for service tokens.
+
+    Two small queries (the ones :func:`_bookable_tenants` already makes) — the
+    salon set is a handful of rows by nature, six on the pilot, and the only
+    caller reaches it once per catalog turn.
+    """
+    seen: dict[str, str] = {}
+    generic: set[str] = set()
+    for tenant in _bookable_tenants().values():
+        name = tenant.name or ""
+        for word in {
+            w
+            for w in re.findall(r"\w+", name.casefold(), re.UNICODE)
+            if len(w) >= _SALON_WORD_MIN_LEN
+        }:
+            if word in seen and seen[word] != name:
+                generic.add(word)
+            else:
+                seen[word] = name
+    return {word: name for word, name in seen.items() if word not in generic}
+
+
 class ParsedQuery(NamedTuple):
     """What one discovery query asked for, in the three shapes we can match.
 
