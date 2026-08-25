@@ -10,8 +10,18 @@ generalises via a `ChannelAdapter` registry.
 POST `/api/v1/ingress/max/`
 
 Headers:
-  - `X-Max-Bot-Api-Secret` — must equal `settings.MAX_WEBHOOK_SECRET`
-    (else 401)
+  - `X-Max-Bot-Api-Secret` — must match the webhook secret of one of the
+    bots registered in `MAX_BOTS`, resolved via
+    `apps.ingress.services.resolve_bot` (→ `apps.channels.bot_registry`).
+    The gate is MANY-VALUED (DRF-1061, 15.08): the matching registry entry
+    IS the sender's identity, so the header value is at once the password
+    and the route. No matching entry → 401.
+
+    It is NOT a comparison against a single `settings.MAX_WEBHOOK_SECRET`.
+    That setting survives only as the source of the legacy fallback entry
+    the registry synthesizes when `MAX_BOTS` is unset, so single-bot
+    deployments behave exactly as before — but a second bot with its own
+    secret passes this gate, and does so on the pilot today.
 
 Body: JSON, MAX `message_created` shape (see D1 parser).
 
@@ -19,7 +29,7 @@ Response:
   - 200 always (per webhook idempotency contract — replays / dedup
     hits must not look like errors to the channel)
   - 400 only on JSON-decode failure (the channel is at fault)
-  - 401 on missing/wrong secret
+  - 401 on a missing secret, or one that matches no registered bot
 
 Side effects:
   - Records the webhook in `WebhookJournal` (C1 from Sprint 1) — idempotent
@@ -30,8 +40,12 @@ Side effects:
 ### Tenant-context exemption
 
 The webhook arrives BEFORE we know the tenant — `record_webhook`
-resolves it from the `X-Max-Bot-Api-Secret` value (matched against
-`CHANNEL_TOKEN_TO_TENANT_SLUG`). The middleware exempts `/api/v1/ingress/`
+resolves it from the `X-Max-Bot-Api-Secret` value: first the `TENANT_SLUG`
+declared by the matched registry entry, and only when that entry declares
+none does it fall back to the Sprint-1 `CHANNEL_TOKEN_TO_TENANT_SLUG` map
+(see `apps.ingress.services._resolve_tenant`). A tenant-less bot — the
+nationwide one — resolves to `None` by design, and picks a tenant only at
+booking. The middleware exempts `/api/v1/ingress/`
 from strict-mode tenant resolution; otherwise the view returns 400
 on every inbound. See `apps/tenancy/middleware.py` exemption list.
 """
