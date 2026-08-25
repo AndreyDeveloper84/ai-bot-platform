@@ -577,16 +577,43 @@ export function CustomerBookingConfirmScreen() {
           </button>
         </div>
       )}
-      {err?.kind === "server" && (
-        <div className="callout callout--danger" role="alert">
-          <p style={{ margin: 0 }}>Не получилось. Попробую ещё раз?</p>
-        </div>
-      )}
-      {err?.kind === "network" && (
+      {/* DRF-1066 — the ambiguous outcomes, and the only two that are.
+          A 5xx or a dropped connection means the answer never came
+          back; it does NOT mean the booking failed. The create may
+          well have committed and the response died on the way — which
+          is exactly what 14.08 looked like from the customer's side.
+          The old copy here («попробуй снова» / «Попробую ещё раз?»)
+          asserted a failure nobody had established and told her to do
+          the one thing that burns a second slot. Two confirmed
+          appointments with two different masters is what that costs.
+
+          Every other branch above is a definite refusal — the slot is
+          taken, the master is unbookable, the salon is suspended — and
+          keeps its retry affordance, because there the booking
+          provably did not happen.
+
+          The screen no longer guesses. It says what is actually known,
+          points at the record list, and leans on the chat
+          confirmation (apps/booking/client_notify.py), which rides the
+          booking event rather than this response and therefore arrives
+          precisely in the case this branch is for. Same rule the
+          payment-start note downstream already follows: never imply
+          the booking failed. */}
+      {(err?.kind === "server" || err?.kind === "network") && (
         <div className="callout callout--danger" role="alert">
           <p style={{ margin: 0 }}>
-            Не получилось загрузить. Проверь интернет и попробуй снова.
+            Не дождалась ответа — не знаю, прошла ли запись. Лучше не
+            записываться заново: если она создалась, я пришлю
+            подтверждение в чат.
           </p>
+          <button
+            type="button"
+            className="btn-secondary"
+            style={{ marginTop: "var(--s-3)" }}
+            onClick={() => navigate("/customer/records")}
+          >
+            Мои записи
+          </button>
         </div>
       )}
       {err?.kind === "other" && (
