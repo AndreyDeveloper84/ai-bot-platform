@@ -99,6 +99,7 @@ function renderScreen() {
           path="/customer/masters/:masterId/slots"
           element={<div>SLOTS-PROBE</div>}
         />
+        <Route path="/customer/records" element={<div>RECORDS-PROBE</div>} />
       </Routes>
     </MemoryRouter>,
   );
@@ -270,5 +271,86 @@ describe("error matrix + idempotency (Wave 0 booking GO)", () => {
     await user.click(cta);
     expect(mockedCreate).toHaveBeenCalledTimes(1);
     resolveCreate!(CREATED);
+  });
+});
+
+describe("DRF-1066 — the success screen must actually appear", () => {
+  it("lands on the success screen after a successful create", async () => {
+    const user = userEvent.setup();
+    renderScreen();
+    await user.click(screen.getByRole("button", { name: "Записаться" }));
+    expect(await screen.findByText(/Записала тебя/)).toBeInTheDocument();
+    expect(screen.queryByText("CATALOG-PROBE")).not.toBeInTheDocument();
+  });
+});
+
+
+/**
+ * DRF-1066 — what the screen says when it does not know the outcome.
+ *
+ * The 14.08 double booking was not a double tap. The customer tapped
+ * once, the answer never came back, and nothing told her the booking
+ * had happened — so she walked the funnel again and picked a different
+ * service and a different master. Two confirmed appointments, two
+ * masters, one person who did not know what she was booked for.
+ *
+ * A 5xx and a dropped connection are the only two branches where the
+ * booking may exist anyway: the create can commit and the response
+ * still die on the way back. Copy that asserts failure there is not
+ * merely inaccurate, it prescribes the second booking.
+ *
+ * The negative claim below («never tells her to retry») is worthless
+ * on its own — it would also pass if the screen rendered nothing at
+ * all, or if every retry affordance in the file were deleted. So each
+ * ambiguous case asserts the replacement copy is actually present, and
+ * `keeps the retry affordance where the refusal is definite` stands
+ * guard on the other side: a slot race provably did not book, and must
+ * still offer another time.
+ */
+describe("DRF-1066 — ambiguous outcome never invites a second booking", () => {
+  it.each([
+    ["network drop", new TypeError("Failed to fetch")],
+    ["server 5xx", new ApiError(503, "server_error", "boom")],
+  ])("%s: says the outcome is unknown, not that it failed", async (_label, thrown) => {
+    const user = userEvent.setup();
+    mockedCreate.mockRejectedValueOnce(thrown);
+    renderScreen();
+    await user.click(screen.getByRole("button", { name: "Записаться" }));
+
+    const alert = await screen.findByRole("alert");
+    // Positive: the honest copy is on screen — outcome unknown, and
+    // the chat confirmation is what will settle it.
+    expect(alert).toHaveTextContent(/не знаю, прошла ли запись/i);
+    expect(alert).toHaveTextContent(/подтверждение в чат/i);
+    // Negative: no instruction to book again.
+    expect(alert).not.toHaveTextContent(/попробу/i);
+    expect(alert).not.toHaveTextContent(/снова/i);
+  });
+
+  it("offers the record list so she can check instead of rebooking", async () => {
+    const user = userEvent.setup();
+    mockedCreate.mockRejectedValueOnce(new TypeError("Failed to fetch"));
+    renderScreen();
+    await user.click(screen.getByRole("button", { name: "Записаться" }));
+
+    await user.click(await screen.findByRole("button", { name: "Мои записи" }));
+    expect(await screen.findByText("RECORDS-PROBE")).toBeInTheDocument();
+  });
+
+  it("keeps the retry affordance where the refusal is definite", async () => {
+    // The positive guard. A slot race is a real refusal — nothing was
+    // booked — so this branch must keep sending her to pick another
+    // time. Without this, deleting every retry path in the screen
+    // would make the assertions above pass.
+    const user = userEvent.setup();
+    mockedCreate.mockRejectedValueOnce(
+      new ApiError(409, "slot_unavailable", "taken"),
+    );
+    renderScreen();
+    await user.click(screen.getByRole("button", { name: "Записаться" }));
+
+    expect(await screen.findByText(/Это время только что заняли/)).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Выбрать другое время" }));
+    expect(await screen.findByText("SLOTS-PROBE")).toBeInTheDocument();
   });
 });
