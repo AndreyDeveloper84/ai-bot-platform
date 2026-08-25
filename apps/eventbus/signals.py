@@ -17,6 +17,17 @@ Why both events share a hook:
     call-site, NOT through this signal — model `pre_save` diff
     detection here would be lossy.
 
+DRF-1140 — this hook owns the emit ONLY on the YClients path
+(``BOOKING_VIA_AYLA_REST`` off). On the Ayla-first path the Mini App
+and admin surfaces never write ``BookingRequest`` at all, so this
+receiver cannot be the emitter there — it would see a subset AND
+double-count the dialog bookings (which still write a billing
+``BookingRequest``). The single emitter on that path is the
+``booking.created`` round-trip consumer
+(:func:`apps.eventbus.consumers.booking.handle_booking_created`),
+which every Ayla booking passes through and which emits with the
+canonical appointment id.
+
 Out of scope (still need per-domain PRs):
   - booking.cancelled / booking.rescheduled — service-layer diff
     (PR-E targets these via apps/bookings/callbacks.py)
@@ -68,6 +79,14 @@ def _emit_booking_lifecycle_events(
     """
 
     if not created:
+        return
+
+    if _booking_via_ayla_rest():
+        # DRF-1140: on the Ayla-first path the booking.created round-trip
+        # consumer is the single internal emitter (see module docstring).
+        # Emitting here too would double-count every dialog booking AND
+        # key the event by the billing row's local id instead of the
+        # canonical appointment id.
         return
 
     correlation_id = services.new_correlation_id()
@@ -126,6 +145,14 @@ def _safe_emit_attribution_assigned(instance: BookingRequest, *, correlation_id:
         )
     except Exception:  # noqa: BLE001 — telemetry must never break the request
         logger.exception("eventbus.signal.attribution_assigned_failed booking=%s", instance.pk)
+
+
+def _booking_via_ayla_rest() -> bool:
+    """True when bookings are written Ayla-first (ADR-0009 flag)."""
+
+    from django.conf import settings
+
+    return bool(getattr(settings, "BOOKING_VIA_AYLA_REST", False))
 
 
 def _has(obj: Any, attr: str) -> bool:

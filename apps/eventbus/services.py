@@ -139,6 +139,8 @@ def emit_booking_created(
     actor_id: str | None = None,
     correlation_id: str | None = None,
     tenant: Any = None,
+    occurred_at: dt.datetime | None = None,
+    metadata: dict[str, Any] | None = None,
 ) -> Envelope:
     """Emit ``booking.created`` — taxonomy §3.1."""
 
@@ -157,6 +159,8 @@ def emit_booking_created(
         actor_id=actor_id,
         correlation_id=correlation_id,
         tenant=tenant,
+        occurred_at=occurred_at,
+        metadata=metadata,
     )
 
 
@@ -171,6 +175,8 @@ def emit_booking_attribution_assigned(
     actor_type: ActorType = "system",
     correlation_id: str | None = None,
     tenant: Any = None,
+    occurred_at: dt.datetime | None = None,
+    metadata: dict[str, Any] | None = None,
 ) -> Envelope:
     """Emit ``booking.attribution.assigned`` — taxonomy §3.1."""
 
@@ -187,6 +193,8 @@ def emit_booking_attribution_assigned(
         actor_type=actor_type,
         correlation_id=correlation_id,
         tenant=tenant,
+        occurred_at=occurred_at,
+        metadata=metadata,
     )
 
 
