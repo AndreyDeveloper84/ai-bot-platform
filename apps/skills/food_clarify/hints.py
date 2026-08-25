@@ -37,7 +37,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
-# ─── word stems (case-insensitive substring match) ────────────────────────
+# ─── word stems (matched at a word start — see _hint_pattern) ────────────
 
 FOOD_HINT_WORDS: frozenset[str] = frozenset(
     {
@@ -138,6 +138,82 @@ DRINK_HINT_WORDS: frozenset[str] = frozenset(
 )
 
 
+# ─── DRF-1404 — a stem is a WORD, not a substring ─────────────────────────
+#
+# The lists above were matched with a bare ``stem in lower``. Measured on
+# 2026-08-25, that offered the food card for «правильное питание» («тан»),
+# «нет повода» / «завод рядом» / «провод оборвался» («вод»), «высокий
+# рост» / «носок порвался» («сок»), «вещи в шкафу» («щи»), «муха летает»
+# («уха») and a dozen more — the stem living INSIDE a longer word.
+#
+# The module's bias is deliberate and is KEPT: a false positive costs one
+# tap on «Опечатка», a false negative costs a cold LLM fallback on a real
+# meal. So this fix only ever removes a match that no reading of the
+# message could call food, and never narrows a stem without pinning its
+# food back in ``tests/test_hints.py::FOOD_PHRASES``.
+#
+# Two tiers, because a word START is not enough on its own:
+#
+# 1. Every stem must begin a word. This closes the open class above.
+# 2. The stems below ALSO collide at a word start, so they additionally
+#    require one of their real endings — the same rule the pain
+#    classifier uses for «бол» (DRF-973). They are all short, and short
+#    is exactly when a Russian stem stops being distinctive.
+#
+# «кашель» is the one that made this tier necessary: «кашель третий
+# день» was answered with «записать в дневник питания?», so a symptom
+# was spent on the wrong skill. That is not a cheap tap.
+_STEM_TAILS: dict[str, str] = {
+    # каша / каши / кашу / кашей / кашка — NOT кашель, кашне
+    "каш": r"(?:[аиу]|ей|к[аиу])?",
+    # суп / супа / супчик — NOT суперинтересно
+    "суп": r"(?:[ауые]|ом|ов|чик\w*)?",
+    # рис / риса / рисовая — NOT риск, рискну, рисую
+    "рис": r"(?:[ауе]|ом|ов\w*)?",
+    # паста / пасты / пастой — NOT пасть, пастельный, паства
+    "паст": r"(?:[аыуе]|ой|ам|ами)?",
+    # уха — NOT ухаживаю (the genitive «ухи» is given up on purpose:
+    # «уха» is rare enough that widening it back would cost more than
+    # it buys)
+    "уха": r"",
+    # тан (the drink) — NOT танцы, танго, танк
+    "тан": r"(?:[ае]|ом)?",
+    # плов / плова — NOT пловец
+    "плов": r"(?:[ауе]|ом)?",
+    # щи — NOT щиколотка, щит
+    "щи": r"",
+    # вода / воды / водичка — NOT водитель
+    "вод": r"(?:[аыуе]|ой|ичк\w*)?",
+    # сок / сока / соки — NOT сокращаю, сокол
+    "сок": r"(?:[ауеи]|ом|ов|ами|ах)?",
+}
+
+
+def _hint_pattern(stem: str) -> re.Pattern[str]:
+    """Word-start matcher for one stem.
+
+    Stems listed in :data:`_STEM_TAILS` are matched as a WHOLE word —
+    the stem plus one of its own endings and nothing else.
+
+    Letter boundaries rather than ````: «250г борща» must still match
+    across the digit/letter seam.
+    """
+
+    head = r"(?<![^\W\d_])" + re.escape(stem)
+    tail = _STEM_TAILS.get(stem)
+    if tail is None:
+        return re.compile(head, re.IGNORECASE)
+    return re.compile(head + tail + r"(?![^\W\d_])", re.IGNORECASE)
+
+
+_FOOD_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
+    _hint_pattern(stem) for stem in sorted(FOOD_HINT_WORDS)
+)
+_DRINK_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
+    _hint_pattern(stem) for stem in sorted(DRINK_HINT_WORDS)
+)
+
+
 # Number + unit pattern. Stem matching for unit names handles "г" / "грамм" /
 # "гр" / "стакан" / "стакана" / etc.
 _NUM_UNIT_PATTERN = re.compile(
@@ -162,11 +238,11 @@ def looks_like_food_drink(text: Any) -> bool:
         return False
 
     lower = stripped.lower()
-    for stem in FOOD_HINT_WORDS:
-        if stem in lower:
+    for pattern in _FOOD_PATTERNS:
+        if pattern.search(lower):
             return True
-    for stem in DRINK_HINT_WORDS:
-        if stem in lower:
+    for pattern in _DRINK_PATTERNS:
+        if pattern.search(lower):
             return True
     if _NUM_UNIT_PATTERN.search(lower):
         return True
