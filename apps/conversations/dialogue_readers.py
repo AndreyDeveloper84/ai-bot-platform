@@ -47,8 +47,13 @@ can yield row text, any ``short_term.recall`` call, and any call of
 ``update``, ``create``, …) are not reads and are skipped; a ``values``/
 ``values_list`` projection counts only when it names a text column.
 
+Import aliasing (``from apps.conversations.models import Message as M``) is
+followed, for the same reason ``tools/lint/import_boundaries.py`` follows it:
+a guard that a rename walks past is a guard that reports what it was told
+rather than what is there.
+
 NOT detected, and named rather than left implicit: a reader that reaches the
-rows through a variable the scanner cannot resolve (a queryset passed as an
+rows through a value the scanner cannot resolve (a queryset passed in as an
 argument, ``apps.get_model("conversations", "Message")``, raw SQL). Those are
 covered by the mechanism, not by this scan — the column is empty for them too.
 The scan's job is the *authored* read, caught at authoring time.
@@ -176,9 +181,32 @@ def _projection_reads_text(methods: list[str], calls: list[ast.Call]) -> bool:
     return False
 
 
+def _model_aliases(tree: ast.AST) -> dict[str, str]:
+    """Local name -> dialogue model, following ``import ... as``.
+
+    ``from apps.conversations.models import Message as M`` is the cheapest way
+    to walk past a scanner that matches on the literal class name, and the
+    repo's other AST guard (``tools/lint/import_boundaries.py``) already treats
+    aliasing as part of the adversarial set it must catch. Same standard here:
+    a reader is a reader whatever it calls the class locally.
+    """
+
+    aliases: dict[str, str] = {name: name for name in _DIALOGUE_MODELS}
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.ImportFrom):
+            continue
+        if node.module != "apps.conversations.models":
+            continue
+        for alias in node.names:
+            if alias.name in _DIALOGUE_MODELS and alias.asname:
+                aliases[alias.asname] = alias.name
+    return aliases
+
+
 def _scan_module(path: Path, root: Path) -> list[ReadSite]:
     source = path.read_text(encoding="utf-8")
     tree = ast.parse(source, filename=str(path))
+    aliases = _model_aliases(tree)
 
     parents: dict[int, ast.AST] = {}
     scopes: dict[int, str] = {}
@@ -208,7 +236,7 @@ def _scan_module(path: Path, root: Path) -> list[ReadSite]:
             isinstance(node, ast.Attribute)
             and node.attr in _MANAGERS
             and isinstance(node.value, ast.Name)
-            and node.value.id in _DIALOGUE_MODELS
+            and node.value.id in aliases
         ):
             methods, calls = _chain_methods(node, parents)
             if any(m in _NON_READ_TERMINALS for m in methods):
@@ -217,7 +245,8 @@ def _scan_module(path: Path, root: Path) -> list[ReadSite]:
                 methods, calls
             ):
                 continue
-            storage = "archive" if node.value.id == "ArchivedMessage" else "db_message"
+            model = aliases[node.value.id]
+            storage = "archive" if model == "ArchivedMessage" else "db_message"
 
         # 2. Named read functions: short_term.recall(...), read_anonymized_dialogue(...)
         elif isinstance(node, ast.Call):

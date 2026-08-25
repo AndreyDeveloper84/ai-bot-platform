@@ -264,6 +264,94 @@ class TestRegistryCoverage:
         )
 
 
+_PLAIN = """
+from apps.conversations.models import Message
+
+
+def build_prompt(conversation):
+    return list(Message.all_tenants.filter(conversation=conversation))
+"""
+
+_ALIASED = """
+from apps.conversations.models import Message as M
+
+
+def build_prompt(conversation):
+    return list(M.all_tenants.filter(conversation=conversation))
+"""
+
+_PROJECTION = """
+from apps.conversations.models import Message
+
+
+def preview(conversation):
+    return (
+        Message.all_tenants.filter(conversation=conversation)
+        .values_list("content", flat=True)
+        .first()
+    )
+"""
+
+_COUNT_ONLY = """
+from apps.conversations.models import Message
+
+
+def how_many(conversation):
+    return Message.all_tenants.filter(conversation=conversation).count()
+"""
+
+_REDIS = """
+from apps.orchestrator.memory import short_term
+
+
+def history(conversation):
+    return short_term.recall(conversation.id)
+"""
+
+
+class TestTheScannerCannotBeWalkedPast:
+    """What the discovery half catches, proven on synthetic modules.
+
+    ``TestRegistryCoverage`` can only fail if the scanner actually sees the
+    read. A scanner with a hole passes it forever and says nothing — the same
+    false comfort as the ``short_term.clear`` docstring. So the detector gets
+    its own cells, including the cheapest evasion there is.
+    """
+
+    @staticmethod
+    def _scan(tmp_path, source: str):
+        pkg = tmp_path / "apps" / "probe"
+        pkg.mkdir(parents=True, exist_ok=True)
+        (pkg / "reader.py").write_text(source, encoding="utf-8")
+        return discover_read_sites(tmp_path / "apps")
+
+    def test_a_plain_read_is_found(self, tmp_path) -> None:
+        assert "apps.probe.reader:build_prompt" in self._scan(tmp_path, _PLAIN)
+
+    def test_an_aliased_import_does_not_walk_past(self, tmp_path) -> None:
+        """``import Message as M`` is the cheapest way around a name match."""
+        found = self._scan(tmp_path, _ALIASED)
+
+        assert "apps.probe.reader:build_prompt" in found, (
+            "an aliased model import walked past the scanner — a guard that a "
+            "rename defeats reports what it was told, not what is there"
+        )
+
+    def test_a_projection_naming_a_text_column_is_a_read(self, tmp_path) -> None:
+        assert "apps.probe.reader:preview" in self._scan(tmp_path, _PROJECTION)
+
+    def test_a_count_is_not_a_read(self, tmp_path) -> None:
+        """Aggregations cannot hand anyone a body, and pinning them would churn
+        the registry over code that carries no risk."""
+        assert self._scan(tmp_path, _COUNT_ONLY) == {}
+
+    def test_the_redis_window_read_is_found(self, tmp_path) -> None:
+        found = self._scan(tmp_path, _REDIS)
+
+        assert "apps.probe.reader:history" in found
+        assert found["apps.probe.reader:history"].storage == "redis_window"
+
+
 class TestRegistryIsCurrent:
     def test_no_registry_entry_outlives_its_reader(self) -> None:
         """Registry rot is a defect too — a stale row hides a real gap.
