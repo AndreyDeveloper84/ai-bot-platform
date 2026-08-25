@@ -146,6 +146,23 @@ NOT_PAIN_PHRASES: tuple[str, ...] = (
     "спасибо, всё отлично",
     "спасибо, до свидания",
     "всё отлично, спасибо",
+    # ── DRF-973 follow-up: words that BEGIN with «бол» and are not pain.
+    #    Measured on the patched classifier (2026-08-25) — all SOFT then.
+    #    «болгарский перец» is the load-bearing one: this bot has a food
+    #    tier, and a meal log was answered with «где именно болит?».
+    "болгарский перец",
+    "съела болгарский перец",
+    "салат с болгарским перцем",
+    "болонка",
+    "хочу болеро",
+    "болван какой-то",
+    "болт открутился",
+    "еду в Болгарию",
+    # ── same measurement, other stems, both from the food tier ──
+    "хрустящие хлебцы",  # «хруст»
+    "хрустящая корочка",
+    "меня тянет на сладкое",  # «тянет»
+    "меня тянет на солёное",
 )
 
 PAIN_PHRASES: tuple[str, ...] = (
@@ -183,6 +200,23 @@ PAIN_PHRASES: tuple[str, ...] = (
     "судорога в ноге",
     "тяжесть в ногах",
     "усталость в спине",
+    # ── DRF-973 follow-up: the price of matching «бол» by its paradigm
+    #    instead of by its first three letters. Every inflection the
+    #    enumeration claims to keep is pinned here, so a future edit to
+    #    _STEM_TAILS cannot quietly drop one.
+    "болью в пояснице",
+    "болям нет конца",
+    "болей стало меньше",
+    "болячка на губе",
+    "болею уже неделю",
+    "болеет спина после смены",
+    "болезнь суставов",
+    "мне больнее чем вчера",
+    "болеть начало утром",
+    # «тянет на» is masked ONLY after an animate pronoun — a body part
+    # in that slot is still a complaint.
+    "спину тянет на работе",
+    "шею тянет на сквозняке",
 )
 
 RED_FLAG_PHRASES: tuple[str, ...] = (
