@@ -134,14 +134,37 @@ _EMAIL_RE: Final[re.Pattern[str]] = re.compile(
 #
 # Anchored with lookarounds so it doesn't slice the middle of a 20-digit
 # uuid-fragment / opaque id.
+#
+# The boundary guards exclude ASCII letters as well as digits, for the
+# same reason as _PHONE_RE above (DRF-1380): the Luhn gate alone does
+# not save identifiers, because a 13-19 digit run carved out of a UUID
+# passes Luhn once in a while, and the id then loses its middle:
+#
+#   15835949-2147-4d47-bb62-2539e07b3fec -> [CARD]d47-bb62-2539e07b3fec
+#
+# Measured at 0.224% of random UUIDs before the guard, 0.007% after.
+#
+# 0.007% is NOT zero, and the residue has a known, single cause: the
+# dash-separated groups of a canonical UUID can themselves line up into
+# a Luhn-valid 13-19 digit run whose ends fall on dashes, where no
+# letter guard can reach:
+#
+#   320ba56a-8c75-4765-9175-452210217959 -> 320ba56a-8c75-4765-[CARD]
+#
+# It is confined to that shape: dash-free 32-char hex ids measure 0 out
+# of 200 000, canonical dashed ids 28 out of 200 000 (0.014%).
+#
+# Closing that residue needs a different mechanism than a boundary
+# guard (e.g. refusing to redact inside something already shaped like a
+# UUID); it is deliberately left open here rather than papered over.
 _CREDIT_CARD_RE: Final[re.Pattern[str]] = re.compile(
     # 13-19 digits with optional space/dash separators BETWEEN digits.
     # The trailing ``\d`` keeps the match anchored on a digit so we
     # don't eat the whitespace AFTER the card number (which would turn
     # ``card 4111 1111 1111 1111 declined`` into ``card [CARD]declined``).
-    r"(?<!\d)"
+    r"(?<![\dA-Za-z])"
     r"\d(?:[\s\-]?\d){12,18}"
-    r"(?!\d)"
+    r"(?![\dA-Za-z])"
 )
 
 # Cheap short-circuit: if neither a digit nor an "@" appears in the text,
