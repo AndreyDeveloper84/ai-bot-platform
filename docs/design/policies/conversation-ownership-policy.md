@@ -141,13 +141,32 @@ Default roles + capability mapping. Tenants создают custom roles (post-MV
 | View conversation list (all) | ✅ | ✅ | ✅ | own only |
 | View conversation transcript | ✅ | ✅ | ✅ | own only |
 | View customer name | ✅ | ✅ | ✅ | own only |
-| Click to reveal customer phone (audited) | ✅ | ✅ | ✅ (with audit log) | ❌ |
+| Click to reveal customer phone (audited) | ✅ | ✅ | ✅ (with audit log) | ❌ **никогда** — см. сноску ¹ |
 | View customer medical notes | ✅ | only if has `medical_role` flag | ❌ | ❌ |
 | View customer LTV / financial | ✅ | ✅ | ❌ | ❌ |
 | Send reply | ✅ | ✅ | ✅ | own only |
 | Promote conversation to HUMAN_LOCKED | ✅ | ✅ | ✅ (safety) | ✅ (safety) |
 | Demote conversation from HUMAN_LOCKED | ✅ | ✅ | ❌ | ❌ |
 | Approve assistant auto-resume after HUMAN_LOCKED | ✅ | ✅ | ❌ | ❌ |
+
+> ¹ **Master = ❌ здесь окончательно, DRF-1360 / owner decision OD-W2-2 (24.08):**
+> «телефон клиента исполнителю не передаётся ни в каком виде». Не «полный
+> телефон запрещён, а маска можно» — исключения на последние две/четыре цифры
+> решение не оставляет. Мастерская поверхность проверяется на это на бэкенде:
+> `apps/master_api/pii.py` + `apps/master_api/tests/test_pii_boundary.py`; любое
+> поле с телефоном клиента в мастерском ответе роняет CI. Reveal-эндпоинт для
+> мастера — **out of scope, не deferred**: строить только после нового
+> отдельного решения владельца по PII.
+>
+> ⚠️ **Открытый вопрос для владельца (не решён здесь):** в пилоте solo-мастер
+> — это owner + master в одном человеке (ADR-0008, `is_solo_provider`), и с
+> solo-поверхности есть вход «Салон» в `/admin/*`. Строка Owner = ✅ и строка
+> Master = ❌ в этом случае описывают одного и того же человека. Сегодня утечки
+> нет — салонные ручки телефон клиента тоже не отдают
+> (`apps/admin_api/views_customers.py`: «Why the phone never comes back»). Но
+> если телефон клиента когда-нибудь появится на админской поверхности, solo-мастер
+> получит его через «Салон». Решать, следует ли запрет за ролью или за человеком,
+> — владельцу.
 | Add response to FAQ / KB | ✅ | ✅ | ❌ | ❌ |
 | Add service to catalog | ✅ | ✅ | ❌ | ❌ |
 | Snooze conversation (4h) | ✅ | ✅ | ✅ | own only |

@@ -5,8 +5,13 @@
  *
  * Spec source: docs/screens/master-solo-surface.md §4.3 (Tau verdict
  * 2026-05-26 r1). Variant B navigation per §3 — this is the 3rd of the
- * 5 bottom tabs. Phase 1 Tier 2 read-only — no notes CRUD, no phone
- * reveal, no customer detail screen. Those land post-pilot.
+ * 5 bottom tabs. Phase 1 Tier 2 read-only — no notes CRUD, no customer
+ * detail screen. Those land post-pilot.
+ *
+ * **No customer phone, in any form** — not full, not masked, not the last
+ * N digits (owner decision DRF-1039 / OD-W2-2, DRF-1360). Phone reveal is
+ * out of scope, NOT deferred: it must not be built without a new separate
+ * owner decision on PII.
  *
  * Backend contract: GET /api/v1/master/customers
  * (apps/master_api/views.py::customers_list →
@@ -83,9 +88,12 @@ function CustomerCard({
       }`}
     >
       <div className="customer-card__name">{customer.first_name}</div>
-      {customer.phone_masked && (
-        <div className="customer-card__phone">{customer.phone_masked}</div>
-      )}
+      {/*
+        No phone line — not full, not masked, not the last N digits.
+        Owner decision DRF-1039 / OD-W2-2 (DRF-1360): «телефон клиента
+        исполнителю не передаётся ни в каком виде». The backend no longer
+        sends the field; do not add a client-side substitute.
+      */}
       <div className="customer-card__last-visit">
         {visitText}
         {serviceSuffix}

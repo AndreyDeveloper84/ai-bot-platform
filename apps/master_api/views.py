@@ -1475,8 +1475,14 @@ def customers_list(request: HttpRequest) -> HttpResponse:
     ``tenant_id`` filter as defence-in-depth.
 
     Phase 1 Tier 2 scope:
-      * Read-only — no notes CRUD, no phone reveal, no detail screen.
+      * Read-only — no notes CRUD, no detail screen.
       * No pagination — Phase 1 pilot rosters are bounded.
+
+    **No customer phone, in any form** — not full, not masked, not the
+    last N digits (owner decision OD-W2-2 / DRF-1360). A phone-reveal
+    endpoint is out of scope, not deferred: it must not be built without a
+    new separate owner decision on PII. Enforced across the whole master
+    surface by ``apps/master_api/tests/test_pii_boundary.py``.
 
     Response shape (always 200 on auth pass):
 

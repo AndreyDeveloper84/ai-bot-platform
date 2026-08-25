@@ -8,13 +8,20 @@ the solo provider Mini App per Tau's Variant B navigation verdict.
 
 * Roster of customers who've booked with this master (>=1 confirmed/completed
   booking each).
-* Per-customer aggregates: name, masked phone, last visit timestamp, last
-  service name, total visit count, "is returning" flag, "at risk" flag.
+* Per-customer aggregates: first name, last visit timestamp, last service
+  name, total visit count, "is returning" flag, "at risk" flag.
+  **No phone in any form** — see "Customer phone" below.
 
-### Out of scope (deferred post-pilot — see tracking issues filed by W1)
+### Not to be built (DRF-1360 — needs a new owner decision on PII first)
+
+* **Phone reveal, in any form** — endpoint, audit-gated reveal, partial
+  mask, last-N digits. This is *out of scope, not deferred*: owner
+  decision OD-W2-2 (24.08) says it must not be built without a separate
+  new owner decision on PII. Do not "finish" it. See DRF-1360.
+
+### Deferred post-pilot (see tracking issues filed by W1)
 
 * Customer notes CRUD (``MasterCustomerNote`` model).
-* Phone reveal with audit event (``RedZoneReader`` pattern from W4 #710).
 * Customer detail screen with full visit history (Alpha endpoint needed).
 * Search / sort customisation (UI ships stub-disabled selectors).
 
@@ -24,9 +31,23 @@ the solo provider Mini App per Tau's Variant B navigation verdict.
   via :func:`apps.master_api.auth.require_master_init_data` — the master
   carries the tenant scope. We pass ``tenant_id`` into every ORM filter
   as defence-in-depth (BookingRequest already has a tenant FK).
-* Phone masking is enforced **server-side**: the full :attr:`BotUser.phone`
-  is replaced before the dict leaves this module. No path returns the
-  full phone — even an XSS-style client can't recover it.
+
+### Customer phone
+
+Owner decision DRF-1039, restated verbatim in DRF-1360 (OD-W2-2):
+«телефон клиента исполнителю не передаётся ни в каком виде». There is no
+"last four digits are only an identifier" exception — until DRF-1360 this
+module shipped a ``phone_masked`` field (``+7 ••• ••• 14 67``) on every
+roster row, which is four digits of the customer's number.
+
+:attr:`BotUser.phone` is therefore not read here at all: it is absent from
+the ``.only()`` column list, so it never enters the process, let alone the
+response. The prohibition is enforced as a class, not per-field, by
+``apps/master_api/tests/test_pii_boundary.py`` — see
+:mod:`apps.master_api.pii`.
+
+Telling two same-named customers apart is a **separate** open owner
+question; do not reintroduce a phone fragment as the answer.
 
 ### Performance note
 
@@ -71,39 +92,7 @@ IS_RETURNING_MIN_VISITS = 2
 semantics — a customer is "returning" once they have a 2nd booking on the
 books (per master-mobile §M1 spec)."""
 
-PHONE_MASK_CHARS = "•••"
-"""Masking literal — three bullet characters per Tau §4.3 mock
-("+7 ••• ••• 14 67")."""
-
-
 # Helpers -----------------------------------------------------------------
-
-
-def _mask_phone(raw: str | None) -> str:
-    """Mask a phone for read-only display.
-
-    Pattern per Tau §4.3 mock: ``+7 ••• ••• 14 67`` — country prefix + 3
-    bullet groups + last 4 visible digits split into two pairs. We
-    normalise the input to digits-only first so any storage format works.
-
-    Returns an empty string when input is None / has fewer than 4 digits
-    (cold-start rows / GDPR-erased BotUsers). Empty-string return is
-    safe for the client — Tau renders it as no phone line at all.
-    """
-
-    if not raw:
-        return ""
-    # Preserve a leading + when present, but otherwise reduce to digits.
-    has_plus = raw.lstrip().startswith("+")
-    digits = "".join(ch for ch in raw if ch.isdigit())
-    if len(digits) < 4:
-        return ""
-    last4 = digits[-4:]
-    # Two-pair grouping per Tau mock ("14 67").
-    last_pair_a = last4[:2]
-    last_pair_b = last4[2:]
-    prefix = f"+{digits[0]}" if has_plus else f"{digits[0]}"
-    return f"{prefix} {PHONE_MASK_CHARS} {PHONE_MASK_CHARS} {last_pair_a} {last_pair_b}"
 
 
 def _split_name(raw: str | None) -> str:
@@ -145,7 +134,6 @@ def list_master_customers(
         {
             "bot_user_id": "<uuid>",
             "first_name": "Анна",
-            "phone_masked": "+7 ••• ••• 14 67",  # empty string when no phone
             "last_visit_at": "2026-05-20T14:30:00+00:00",  # ISO 8601
             "last_visit_service_name": "маникюр гель-лак",
             "total_visits": 5,
@@ -210,12 +198,16 @@ def list_master_customers(
 
     bot_user_ids = [row["bot_user_id"] for row in aggregates_list]
     # all_tenants + explicit tenant filter — defence-in-depth.
+    #
+    # NB: ``phone`` is deliberately ABSENT from the .only() column list
+    # (DRF-1360 / OD-W2-2). The customer's number must not even be loaded
+    # into this process, in full or in part. Do not add it back.
     bot_users = {
         bu.id: bu
         for bu in BotUser.all_tenants.filter(
             tenant_id=master.tenant_id,
             id__in=bot_user_ids,
-        ).only("id", "display_name", "phone", "client_name")
+        ).only("id", "display_name", "client_name")
     }
 
     # For the "last service name" we need the booking row that matches
@@ -263,10 +255,6 @@ def list_master_customers(
             continue
         first_name = _split_name(bu.client_name) if bu.client_name else _split_name(bu.display_name)
 
-        # Mask phone server-side. Phone reveal endpoint with audit event
-        # is deferred Tier 2 — see W1 tracking issue.
-        phone_masked = _mask_phone(bu.phone)
-
         is_returning = total_visits >= IS_RETURNING_MIN_VISITS
         at_risk = (
             last_visit_at is not None
@@ -278,7 +266,6 @@ def list_master_customers(
             {
                 "bot_user_id": str(bu_id),
                 "first_name": first_name,
-                "phone_masked": phone_masked,
                 "last_visit_at": last_visit_at.isoformat() if last_visit_at else None,
                 "last_visit_service_name": last_service_by_user.get(bu_id, ""),
                 "total_visits": total_visits,
@@ -294,6 +281,5 @@ __all__ = [
     "AT_RISK_DAYS",
     "AT_RISK_MIN_VISITS",
     "IS_RETURNING_MIN_VISITS",
-    "PHONE_MASK_CHARS",
     "list_master_customers",
 ]

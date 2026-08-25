@@ -495,15 +495,26 @@ export const getMasterConversations = (
 };
 
 /**
- * Defensive PII gate — verify a master conversations response NEVER carries
- * fields stripped by the backend. Spec §M5 lines 608-615:
+ * Fields that must NEVER appear in ANY master-facing response — not just
+ * the conversations list this gate was originally wired to. Spec §M5
+ * lines 608-615:
  *
  *     «❌ No LTV / financial signal · ❌ No reveal-phone hint · …
  *      ✅ Customer first name only»
  *
- * Returns the list of forbidden keys observed (empty when clean). The screen
- * `console.warn`s if non-empty and continues rendering — defence-in-depth,
- * not a hard failure (backend is the authority).
+ * The authoritative copy of this list now lives on the backend
+ * (`apps/master_api/pii.py`), where it is enforced across every master
+ * read endpoint by `apps/master_api/tests/test_pii_boundary.py`. Keep the
+ * two lists identical — that test asserts they have not drifted.
+ *
+ * DRF-1360: for months this list said `phone_masked` was forbidden while
+ * the customer roster on the next tab shipped it in every row, because
+ * the check was wired to one screen instead of the surface. The backend
+ * sweep is the fix; this stays as client-side defence-in-depth.
+ *
+ * {@link findForbiddenPiiKeys} returns the forbidden keys observed (empty
+ * when clean). Screens `console.warn` if non-empty and keep rendering —
+ * defence-in-depth, not a hard failure (backend is the authority).
  */
 export const FORBIDDEN_PII_KEYS = [
   "phone",
@@ -839,17 +850,26 @@ export const patchNotificationPrefs = async (
 // Both endpoints are read-only and tenant-scoped at the backend.
 
 /**
- * One row in the solo-provider customer roster. Phone is server-masked
- * (the full string never leaves the backend). Reveal endpoint with
- * audit event is deferred post-pilot — see W1 tracking issue
- * "Phone reveal с audit event (RedZoneReader pattern)".
+ * One row in the solo-provider customer roster.
+ *
+ * **No customer phone, in any form.** Not full, not masked, not the last
+ * N digits. Owner decision DRF-1039, restated verbatim in DRF-1360
+ * (OD-W2-2): «телефон клиента исполнителю не передаётся ни в каком виде»
+ * — there is no "last four digits are only an identifier" exception.
+ * This row carried `phone_masked` ("+7 ••• ••• 14 67") until DRF-1360.
+ *
+ * A phone-reveal endpoint (audit event or not) is **out of scope, not
+ * deferred**: do not build it without a new, separate owner decision on
+ * PII. `phone_masked` is in {@link FORBIDDEN_PII_KEYS}; the backend sweep
+ * `apps/master_api/tests/test_pii_boundary.py` fails CI if it returns.
+ *
+ * Telling two same-named customers apart is a separate open owner
+ * question — a phone fragment is not the answer to it.
  */
 export interface MasterCustomer {
   bot_user_id: string;
   /** First display name only (Tau §4.3 card title). */
   first_name: string;
-  /** "+7 ••• ••• 14 67" — empty string when no phone on record. */
-  phone_masked: string;
   /** ISO 8601 UTC, or null when no qualifying visit. */
   last_visit_at: string | null;
   last_visit_service_name: string;

@@ -4,7 +4,7 @@ Covers (Phase 1 Tier 2):
 
 * Empty roster — master with no bookings → 200 + empty list.
 * Roster ordering — last_visit_at DESC.
-* Phone masking — server-side enforcement, last 4 visible.
+* No customer phone in the payload, in any form (DRF-1360 / OD-W2-2).
 * Cross-tenant isolation — sibling tenant's customers must NOT leak.
 * Counting rules — CONFIRMED + RESCHEDULED counted, CANCELLED excluded.
 * Returning + at-risk flags.
@@ -79,41 +79,6 @@ def _make_client(
     )
 
 
-# --- phone masking unit ---------------------------------------------------
-
-
-class TestPhoneMask:
-    def test_full_e164_masked(self) -> None:
-        out = cs._mask_phone("+79161234567")
-        # Last 4 digits visible, three bullet groups, plus prefix.
-        assert "•••" in out
-        assert out.endswith("45 67")
-        assert out.startswith("+7")
-
-    def test_no_phone_returns_empty(self) -> None:
-        assert cs._mask_phone("") == ""
-        assert cs._mask_phone(None) == ""
-
-    def test_short_phone_returns_empty(self) -> None:
-        # Junk row with <4 digits — degrade silently rather than partial-leak.
-        assert cs._mask_phone("+71") == ""
-
-    def test_mask_contains_no_middle_digits(self) -> None:
-        # The whole point: digits 2..n-4 must NOT appear in the output.
-        raw = "+79161234567"
-        out = cs._mask_phone(raw)
-        # Middle digits 9161234 (everything except leading 7 and last 4
-        # = 45 67 / actually last 4 = 4567 → middle = 91612 3) MUST be
-        # absent. We assert every char from the middle range is missing.
-        middle = "916123"
-        for ch in middle:
-            # The leading "7" of the country code is allowed; we check
-            # specifically that no run of 2+ middle digits appears.
-            pass
-        assert "9161" not in out
-        assert "1234" not in out
-
-
 # --- endpoint auth gate ---------------------------------------------------
 
 
@@ -169,7 +134,6 @@ class TestRosterAggregation:
         assert set(row.keys()) == {
             "bot_user_id",
             "first_name",
-            "phone_masked",
             "last_visit_at",
             "last_visit_service_name",
             "total_visits",
@@ -180,8 +144,12 @@ class TestRosterAggregation:
         assert row["total_visits"] == 1
         assert row["is_returning"] is False
         assert row["at_risk"] is False
-        assert "•••" in row["phone_masked"]
-        assert "45 67" in row["phone_masked"]
+        # No phone, in any form. Owner decision DRF-1039 / OD-W2-2
+        # (DRF-1360): the roster shipped "+7 ••• ••• 45 67" — four digits
+        # of the customer's number — until that decision removed it. The
+        # class-level guard lives in test_pii_boundary.py.
+        assert "phone_masked" not in row
+        assert not any("4567" in str(v) for v in row.values())
 
     def test_roster_sorted_by_last_visit_desc(
         self, tenant: Tenant, accepted_master: CatalogMaster

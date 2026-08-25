@@ -13,6 +13,30 @@
 
 ---
 
+> ## ⛔ OVERRIDE 2026-08-24 — customer phone (owner decision OD-W2-2, DRF-1360)
+>
+> **Everything below about a customer phone — the mask, the click-to-reveal,
+> the audit event, the `reveal_phone` endpoint, Q-MSL-PII1, Q-MSL-PII2 — is
+> superseded and MUST NOT be built.** Owner decision DRF-1039, restated
+> verbatim in DRF-1360:
+>
+> > «телефон клиента исполнителю не передаётся ни в каком виде»
+>
+> There is no "last two / last four digits are only an identifier"
+> exception. This spec shipped one (`phone_masked`, `+7 ••• ••• 14 67`) into
+> `GET /api/v1/master/customers`; DRF-1360 removed it and the backend now
+> fails CI if any master response carries a phone field
+> (`apps/master_api/pii.py` + `apps/master_api/tests/test_pii_boundary.py`).
+>
+> This is **out of scope, not deferred**. Do not "finish" it. Reopening it
+> needs a new, separate owner decision on PII — not a reading of this
+> document.
+>
+> Telling two same-named customers apart is a separate open owner question.
+> A phone fragment is not the answer to it.
+
+---
+
 ## 1. Контекст
 
 ### Кто Ольга
@@ -548,9 +572,9 @@ After save → returns to «Записи» tab, new card visible.
 #### PII rules (per Q-MSL-7)
 
 - **Default visible:** имя, история визитов, заметки мастера, предпочтения по услугам
-- **Phone:** masked + click-to-reveal с **audit event** (RedZoneReader pattern from W4 #710)
+- ~~**Phone:** masked + click-to-reveal с **audit event** (RedZoneReader pattern from W4 #710)~~ — **ОТМЕНЕНО, DRF-1360 / OD-W2-2: телефон клиента исполнителю не передаётся ни в каком виде. Ни маски, ни последних цифр, ни reveal. Не строить.**
 - **NOT visible by default:** medical/wellness sensitive data, financial sensitive data, red/yellow AI memory zones
-- Audit: each phone reveal писать `customer.phone_revealed_by_provider` event с timestamp + bot_user_id
+- ~~Audit: each phone reveal писать `customer.phone_revealed_by_provider` event с timestamp + bot_user_id~~ — **ОТМЕНЕНО, DRF-1360: reveal'а нет, значит и события нет.**
 
 #### Sorting options
 
@@ -787,9 +811,9 @@ Ayla: Анна написала «опаздывает на 10 минут».
 | AI red/yellow zone memory | ❌ Hidden | Customer-only |
 
 **Audit pattern** per W4 #710 RedZoneReader:
-- Click-to-reveal phone → emit `customer.phone_revealed_by_provider` event
-- Fields: customer_id, bot_user_id (Olga), timestamp, surface (где tap'нула — booking card / customer detail / etc.)
-- Retention: 7 years per `conversation-ownership-policy §5` sensitive actions
+- ~~Click-to-reveal phone → emit `customer.phone_revealed_by_provider` event~~ — **ОТМЕНЕНО, DRF-1360 / OD-W2-2. Не строить.** Аудит раскрытия не нужен, потому что раскрытия нет.
+- ~~Fields: customer_id, bot_user_id (Olga), timestamp, surface~~
+- Retention: 7 years per `conversation-ownership-policy §5` sensitive actions — применимо к остальным событиям раздела 8.3
 
 ### 6.3 «Сообщить по записи» inbox (Q-MSL-4)
 
@@ -903,7 +927,7 @@ Per master-conversational-templates §2 — master voice = functional Ayla regis
 | `GET /api/v1/me/master/customers?sort=last_visit\|active\|alpha` | GET | Customer roster | W4 |
 | `GET /api/v1/me/master/customers/{id}` | GET | Customer detail (PII rules applied) | W4 |
 | `POST /api/v1/me/master/customers/{id}/notes` | POST | Add note (Olga-visible only) | W4 |
-| `POST /api/v1/me/master/customers/{id}/reveal_phone` | POST | Click-to-reveal + audit event | W4 + RedZoneReader pattern |
+| ~~`POST /api/v1/me/master/customers/{id}/reveal_phone`~~ | — | **НЕ СТРОИТЬ — DRF-1360 / OD-W2-2.** Out of scope, не deferred. Нужно новое отдельное решение владельца по PII | — |
 | `GET /api/v1/me/master/catalog` | GET | Own services list | W4 |
 | `POST/PATCH /api/v1/me/master/catalog/services` | POST/PATCH | Add/edit service | W4 |
 | `POST /api/v1/me/master/catalog/services/{id}/archive` | POST | Archive service | W4 |
@@ -921,7 +945,7 @@ Per ayla-mediated-messaging.md §7 + §14:
 ### 8.3 Audit events
 
 Per Q-MSL-7 RedZoneReader pattern (W4 #710):
-- `customer.phone_revealed_by_provider` — phone click-to-reveal
+- ~~`customer.phone_revealed_by_provider` — phone click-to-reveal~~ — **ОТМЕНЕНО, DRF-1360.**
 - `customer.note_added_by_provider` — Olga adds note
 - `booking.manual_added_by_provider` — manual booking creation per Q-MSL-6
 - `catalog.service_edited` — Olga edits own service
@@ -1016,8 +1040,8 @@ Reuse patterns from `customer-main-wellness-dashboard.md §8`. Master-specific i
 |---|----------|----------|------|
 | Q-MSL-NAV1 | 🟢 | «Ещё» menu — Профиль + Настройки + Выйти inside menu OR top-right ⚙ icon? | Both — quick ⚙ icon в header for settings, «Ещё» menu hosts P1 tabs + Профиль |
 | Q-MSL-NAV2 | 🟢 | Notification badge на «Ещё» tab if pending review reply OR earning update? | YES badge — discoverability for hidden tabs |
-| Q-MSL-PII1 | 🟡 | Phone reveal — show last 2 digits permanently or full mask? | Last 2 digits per «+7 ••• 14 67» format — recognition value без full exposure |
-| Q-MSL-PII2 | 🟡 | Audit event on first time per booking per session OR every tap? | First tap per booking session, не every tap (anti-noise) |
+| Q-MSL-PII1 | ✅ ЗАКРЫТ | ~~Phone reveal — show last 2 digits permanently or full mask?~~ | **Ни то, ни другое.** Owner decision OD-W2-2 (24.08, DRF-1360): «телефон клиента исполнителю не передаётся ни в каком виде». Прежний lean («last 2 digits — recognition value без full exposure») — ровно то исключение, которого решение не оставляет. Задача «различать одноимённых клиентов» решается отдельно и не телефоном |
+| Q-MSL-PII2 | ✅ ЗАКРЫТ | ~~Audit event on first time per booking per session OR every tap?~~ | Вопрос снят вместе с reveal'ом — DRF-1360 |
 | Q-MSL-CAT1 | 🟡 | Per-region pricing reference — show always или only if Olga's price >20% deviates? | Always show — Olga's choice to use, not push |
 | Q-MSL-CAT2 | 🟢 | Drag-reorder confirm modal needed? | NO — instant reorder, undo button toast 3 sec |
 | Q-MSL-INBOX1 | 🟢 | If 5+ pending messages, scroll or paginate? | Show 3 most recent, «Все сообщения (5)» link to expanded view |
@@ -1038,8 +1062,8 @@ Reuse patterns from `customer-main-wellness-dashboard.md §8`. Master-specific i
 ### For W1 / Iota (frontend implementer)
 
 1. **Bottom nav «Ещё»** — bottom sheet pattern, swipe-down dismiss, focus trap, returns focus on close
-2. **Phone mask formatting** — «+7 ••• ••• 14 67» last 2 digits visible per Q-MSL-PII1 lean
-3. **Click-to-reveal phone** — emit audit event before reveal, use RedZoneReader pattern from W4 #710 reference
+2. ~~**Phone mask formatting** — «+7 ••• ••• 14 67» last 2 digits visible per Q-MSL-PII1 lean~~ — **ОТМЕНЕНО, DRF-1360.** Телефона клиента на мастерской поверхности нет ни в каком виде; карточка клиента рендерится без строки телефона
+3. ~~**Click-to-reveal phone** — emit audit event before reveal, use RedZoneReader pattern from W4 #710 reference~~ — **НЕ СТРОИТЬ, DRF-1360.**
 4. **Manual booking entry** — реuse existing customer-cancellation-reschedule patterns где applicable
 5. **Drag-reorder catalog** — within category only, cross-category warning prompt
 6. **Customer list cold-start** — < 5 customers: skip groupings (Активные / Давно не были too small)
