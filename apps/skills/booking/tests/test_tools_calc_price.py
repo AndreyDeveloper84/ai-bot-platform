@@ -573,3 +573,178 @@ class TestCalcPriceAylaGrounding:
         assert result.price is not None
         assert result.price.final_price is None
         assert result.price.service_name == "Новая услуга"
+
+
+# ---------------------------------------------------------------------------
+# DRF-1067 — the quote uses the master+service edge price when a specific
+# master is chosen (SpecialistService.price), not the mirror's base_price.
+# ---------------------------------------------------------------------------
+
+
+class _StubEdgeClient:
+    """Minimal stand-in for the flag-ON provider's edge-price read (DRF-1067).
+
+    Records every call so the flag-OFF test can prove the client is never
+    consulted there.
+    """
+
+    def __init__(self, price: Decimal | None = None, *, exc: Exception | None = None) -> None:
+        self._price = price
+        self._exc = exc
+        self.calls: list[dict[str, Any]] = []
+
+    def get_specialist_service_price(self, *, staff_id: Any, service_id: Any) -> Decimal | None:
+        self.calls.append({"staff_id": staff_id, "service_id": service_id})
+        if self._exc is not None:
+            raise self._exc
+        return self._price
+
+
+class TestCalcPriceEdgePrice:
+    """DRF-1067: a quote for a chosen master prices the master+service edge."""
+
+    @pytest.fixture
+    def ayla_service(self, tenant: Tenant) -> tuple[CatalogService, str]:
+        svc_uuid = uuid.uuid4()
+        row = CatalogService.all_tenants.create(
+            tenant=tenant,
+            external_id=404,
+            external_updated_at=timezone.now(),
+            slug="edge-massage",
+            name="Массаж (edge)",
+            price_from=Decimal("1500.00"),
+            duration_min=60,
+            ayla_service_id=svc_uuid,
+        )
+        return row, str(svc_uuid)
+
+    def test_master_chosen_quotes_edge_price(
+        self, tenant: Tenant, ayla_service: tuple[CatalogService, str]
+    ) -> None:
+        from django.test import override_settings
+
+        row, sid = ayla_service
+        master_id = str(uuid.uuid4())
+        # The edge carries the senior master's individual price; the mirror
+        # still says 1500. The booking is created at 2500 — the quote must
+        # say 2500 too.
+        client = _StubEdgeClient(price=Decimal("2500.00"))
+        with override_settings(BOOKING_VIA_AYLA_REST=True):
+            result = calc_price(
+                tenant=tenant,
+                client=client,
+                arguments={"service_id": sid, "master_id": master_id},
+                allowed_service_ids={sid},
+                service_lookup={sid: row.name},
+            )
+        assert result.error == ""
+        assert result.price is not None
+        assert result.price.original_price == Decimal("2500.00")
+        assert result.price.final_price == Decimal("2500.00")
+        assert f"2{NBSP}500{NBSP}₽" in result.text
+        # The edge was queried for exactly the chosen pair.
+        assert client.calls == [{"staff_id": master_id, "service_id": sid}]
+
+    def test_master_chosen_promo_applies_to_edge_price(
+        self, tenant: Tenant, ayla_service: tuple[CatalogService, str]
+    ) -> None:
+        from django.test import override_settings
+
+        row, sid = ayla_service
+        Promotion.all_tenants.create(tenant=tenant, code="VIP10", discount_percent=10)
+        client = _StubEdgeClient(price=Decimal("2500.00"))
+        with override_settings(BOOKING_VIA_AYLA_REST=True):
+            result = calc_price(
+                tenant=tenant,
+                client=client,
+                arguments={
+                    "service_id": sid,
+                    "master_id": str(uuid.uuid4()),
+                    "promo_code": "VIP10",
+                },
+                allowed_service_ids={sid},
+                service_lookup={sid: row.name},
+            )
+        assert result.price is not None
+        assert result.price.promo_status == "ok"
+        assert result.price.original_price == Decimal("2500.00")
+        assert result.price.final_price == Decimal("2250.00")
+
+    def test_edge_missing_falls_back_to_mirror_base_price(
+        self, tenant: Tenant, ayla_service: tuple[CatalogService, str]
+    ) -> None:
+        from django.test import override_settings
+
+        row, sid = ayla_service
+        client = _StubEdgeClient(price=None)  # no active edge for the pair
+        with override_settings(BOOKING_VIA_AYLA_REST=True):
+            result = calc_price(
+                tenant=tenant,
+                client=client,
+                arguments={"service_id": sid, "master_id": str(uuid.uuid4())},
+                allowed_service_ids={sid},
+                service_lookup={sid: row.name},
+            )
+        assert result.price is not None
+        assert result.price.original_price == Decimal("1500.00")
+        assert result.price.final_price == Decimal("1500.00")
+
+    def test_edge_lookup_error_falls_back_to_mirror_base_price(
+        self, tenant: Tenant, ayla_service: tuple[CatalogService, str]
+    ) -> None:
+        from django.test import override_settings
+
+        from apps.integrations.yclients import YClientsAPIError
+
+        row, sid = ayla_service
+        client = _StubEdgeClient(exc=YClientsAPIError("http_400_unknown"))
+        with override_settings(BOOKING_VIA_AYLA_REST=True):
+            result = calc_price(
+                tenant=tenant,
+                client=client,
+                arguments={"service_id": sid, "master_id": str(uuid.uuid4())},
+                allowed_service_ids={sid},
+                service_lookup={sid: row.name},
+            )
+        # An edge read failure must never break the quote — the previous
+        # behaviour (mirror base price) is the honest degradation.
+        assert result.error == ""
+        assert result.price is not None
+        assert result.price.original_price == Decimal("1500.00")
+
+    def test_no_master_keeps_mirror_base_price(
+        self, tenant: Tenant, ayla_service: tuple[CatalogService, str]
+    ) -> None:
+        from django.test import override_settings
+
+        row, sid = ayla_service
+        client = _StubEdgeClient(price=Decimal("2500.00"))
+        with override_settings(BOOKING_VIA_AYLA_REST=True):
+            result = calc_price(
+                tenant=tenant,
+                client=client,
+                arguments={"service_id": sid},
+                allowed_service_ids={sid},
+                service_lookup={sid: row.name},
+            )
+        assert result.price is not None
+        assert result.price.original_price == Decimal("1500.00")
+        # Without a chosen master the edge is never queried.
+        assert client.calls == []
+
+    def test_flag_off_master_id_ignored_and_client_untouched(
+        self, tenant: Tenant, catalog_service: CatalogService
+    ) -> None:
+        # Flag OFF (YClients) has no per-master edge concept — the mirror
+        # price is quoted and the provider is never asked for one.
+        client = _StubEdgeClient(price=Decimal("2500.00"))
+        result = calc_price(
+            tenant=tenant,
+            client=client,
+            arguments={"service_id": catalog_service.external_id, "master_id": 7},
+            allowed_service_ids=_allowed_ids(catalog_service),
+            service_lookup=_service_lookup(catalog_service),
+        )
+        assert result.price is not None
+        assert result.price.original_price == Decimal("1500.00")
+        assert client.calls == []
