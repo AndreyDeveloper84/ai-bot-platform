@@ -575,6 +575,41 @@ def strip_known_cities(tokens: list[str]) -> list[str]:
     return service_tokens
 
 
+# ─── DRF-1355: the salon names a ``salon`` argument can resolve to ───────
+#
+# The live pilot of 24.08 07:51 answered «покажи мне салоны» with the service
+# list of a salon the person had never named. The model chose ``show_services``
+# and filled its ``salon`` argument out of its own head; the platform executed
+# that argument without ever asking whether the person had said it.
+#
+# AYLA-DEC-0045 / OD-9 says the model is not the authority on what the catalog
+# holds — the same rule DRF-1312 applies to service names («не решай сам, есть
+# ли услуга»). WHICH SALON a person is asking about is that same kind of
+# claim, and it gets the same answer: the model may name a salon, the platform
+# rules on whether that name is attributable to the conversation.
+#
+# This function supplies the half only the catalog can know: the names a
+# ``salon`` substring can land on. The routing decision built on top of it
+# lives in ``apps.orchestrator.discovery.salon_named_in``, because deciding
+# what to ANSWER is not this module's job.
+#
+# Read from the live mirror rather than from a list somebody maintains, for
+# the same reason :func:`_known_cities` and :func:`_known_goals` are: a salon
+# that joins tomorrow is recognised the same day and nobody edits this file.
+
+
+def bookable_salon_names() -> list[str]:
+    """The names of every salon on the marketplace surface.
+
+    «Salon» here means what it means everywhere else in this module: a tenant
+    with at least one bookable master. Two small queries (the ones
+    :func:`_bookable_tenants` already makes) over a set that is a handful of
+    rows by nature — six on the pilot — and the only caller reaches it once
+    per catalog turn.
+    """
+    return [tenant.name for tenant in _bookable_tenants().values() if tenant.name]
+
+
 class ParsedQuery(NamedTuple):
     """What one discovery query asked for, in the three shapes we can match.
 
