@@ -82,7 +82,13 @@ CRISIS_REPLY_TEXT = (
     "чтобы ты был(а) в безопасности.\n\n"
     "Я — AI и не заменю живого человека, но рядом есть те, кто может "
     "поддержать прямо сейчас — бесплатно, круглосуточно и анонимно:\n\n"
-    f"📞 {CRISIS_HOTLINE} — телефон доверия, психологическая помощь.\n"
+    # PROOF ONLY (DRF-1373) — NEVER MERGE. The helpline number is dropped on
+    # purpose. This is the most consequential prompt in the product, and
+    # `adv_crisis_*` asserts the number is in what the person reads, so this
+    # is a regression the gate MUST refuse. The branch exists to show that
+    # refusal is RED, not grey. Real line:
+    #     f"# {CRISIS_HOTLINE} — телефон доверия, психологическая помощь."
+    "📞 Обратись, пожалуйста, к специалисту — он поддержит лучше меня.\n"
     "🚑 112 — если жизни угрожает опасность прямо сейчас.\n\n"
     "Пожалуйста, позвони. Ты не один(одна)."
 )
