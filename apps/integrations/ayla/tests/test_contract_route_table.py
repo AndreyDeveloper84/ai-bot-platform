@@ -92,6 +92,14 @@ class Route:
 # nutrition contract (DRF-825) + payments (#427). Every row must be produced by
 # some client below (bijection asserted); every produced request must match a
 # row (contract asserted).
+# The salon-admin surface (``/api/v1/tenants/me/…``) is deliberately NOT mirrored
+# here. Its auth model is a fourth one — Bearer + ``X-External-User-ID`` +
+# ``X-Tenant`` + ``X-App-Type: pro`` — and, unlike the internal tree, half of it
+# is unreachable to this credential by owner decision, so a row saying only
+# "(method, path, auth)" would be a row that hides the interesting fact. It has
+# its own table with its own reachability column and its own live schema diff:
+# ``apps/integrations/ayla/salon_surface.py`` +
+# ``apps/integrations/ayla/tests/test_salon_surface.py`` (DRF-1346).
 ROUTE_TABLE: tuple[Route, ...] = (
     # booking_client (#1016) — Bearer; writes + ``me`` also carry X-External-User-ID.
     # DRF-1004: the service catalog moved off the dead legacy ``services/``
