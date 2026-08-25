@@ -58,6 +58,7 @@ from datetime import timedelta
 from typing import Any, Final, Literal
 from uuid import UUID
 
+from django.conf import settings
 from django.utils import timezone
 
 from apps.booking.client_notify import (
@@ -70,11 +71,19 @@ from apps.booking.master_notify import (
 )
 from apps.booking.models import BookingReminder, RemoteBookingProxy
 from apps.booking.reminder_lookup import reminders_for_appointment
+from apps.booking.services.attribution import compute_assist_score, compute_billable
 from apps.conversations.models import Conversation
 from apps.events.services import emit as emit_internal_event
+from apps.eventbus import vocabulary as V
 from apps.eventbus.ingest_dispatcher import register
 from apps.eventbus.ingest_envelope import IngestEnvelope
 from apps.eventbus.ingest_tenancy import assert_envelope_tenant_authorized
+from apps.eventbus.models import DomainEvent
+from apps.eventbus.services import (
+    emit_booking_attribution_assigned,
+    emit_booking_created,
+    new_correlation_id,
+)
 from apps.identity.models import BotUser
 from apps.tenancy.models import Tenant
 
@@ -626,8 +635,124 @@ def _announce_booking_created(
         )
 
 
-# ─── handlers ──────────────────────────────────────────────────────────────
+# ── DRF-1140: internal domain-bus emit from the real creation path ─────────
+#
+# Under ``BOOKING_VIA_AYLA_REST`` the Ayla-first create surfaces (Mini App,
+# admin console) never write ``BookingRequest`` — the post_save receiver in
+# :mod:`apps.eventbus.signals` therefore never fires for them, and the
+# internal dot-notation bus saw zero ``booking.created`` /
+# ``booking.attribution.assigned``: an empty audit journal and zeroed
+# attribution / ``billable``. THIS handler is the path every Ayla booking
+# actually passes through, so on that mode it owns the emit.
+#
+# Mode split (no doubles): flag OFF the post_save receiver owns the emit
+# and this function is a no-op; flag ON the receiver stays silent (see
+# ``signals._emit_booking_lifecycle_events``) and this function emits —
+# from BOTH exits of the proxy upsert, because a dialog booking lands on
+# the advanced-state no-op branch (``execute_confirm`` wrote the mirror
+# CONFIRMED before Ayla's event arrived).
+#
+# Idempotency is keyed on the canonical appointment id, not the envelope's
+# ``event_id``: Ayla's redelivery re-mints ``event_id``, which the ingest
+# dedupe ledger cannot catch. Same-transaction semantics (the dispatcher's
+# ``transaction.atomic``) cover the crash-before-commit case.
 
+_INGEST_SOURCE_TO_BOOKING_SOURCE: Final[dict[str, str]] = {
+    # Mini App — flag-OFF parity: ``create_customer_booking`` hard-codes
+    # ``ai_direct`` for the same surface.
+    "mobile_app": "ai_direct",
+    # Bot dialog — pilot fact (DRF-1110 sweep, 22.08): all six bot
+    # bookings round-tripped with ``source='automation'``.
+    "automation": "ai_direct",
+    "admin_console": "human_direct",
+    "yclients_sync": "external",
+}
+
+
+def _booking_via_ayla_rest() -> bool:
+    """True when bookings are written Ayla-first (ADR-0009 flag)."""
+
+    return bool(getattr(settings, "BOOKING_VIA_AYLA_REST", False))
+
+
+def _emit_domain_booking_created_pair(
+    *,
+    envelope: IngestEnvelope,
+    tenant: Tenant,
+    appointment_id: UUID,
+    status: str,
+    raw_source: str,
+    service_uuid: UUID | None,
+    specialist_uuid: UUID | None,
+) -> None:
+    """Re-emit ``booking.created`` + ``booking.attribution.assigned`` onto
+    the internal bus (DRF-1140) — once per appointment, flag ON only."""
+
+    if not _booking_via_ayla_rest():
+        return
+
+    booking_id = str(appointment_id)
+    if DomainEvent.objects.filter(
+        event_name=V.BOOKING_CREATED, data__booking_id=booking_id
+    ).exists():
+        logger.info(
+            "eventbus.consumer.booking.created.domain_emit_skipped_duplicate appointment_id=%s",
+            appointment_id,
+        )
+        return
+
+    # Chat origin is the durable local proof of ai_direct; the wire
+    # ``source`` cannot distinguish surfaces by itself (the bot does not
+    # pass a source through ``provider.create_record``).
+    if was_confirmed_in_chat(tenant=tenant, appointment_id=appointment_id):
+        booking_source = "ai_direct"
+    else:
+        # Ambiguity resolves towards ``external`` — undercharging is the
+        # safe direction for a finance-facing field.
+        booking_source = _INGEST_SOURCE_TO_BOOKING_SOURCE.get(raw_source, "external")
+    billable, billing_reason = compute_billable(
+        booking_source=booking_source, status=status
+    )
+    correlation_id = envelope.correlation_id or new_correlation_id()
+    # The ingest event id rides in metadata: causation_id is a
+    # 26-char ULID column and Ayla's uuid4 event ids (36 chars, #1058)
+    # would overflow it.
+    metadata = {"ingest_event_id": envelope.event_id}
+
+    try:
+        emit_booking_created(
+            booking_id=booking_id,
+            customer_id=str(envelope.user_id or ""),
+            service_id=str(service_uuid) if service_uuid else "",
+            slot_start=envelope.data["start_at"],
+            slot_end=envelope.data.get("end_at", ""),
+            booking_source=booking_source,
+            master_id=str(specialist_uuid) if specialist_uuid else "",
+            tenant=tenant,
+            correlation_id=correlation_id,
+            occurred_at=envelope.occurred_at,
+            metadata=metadata,
+        )
+        emit_booking_attribution_assigned(
+            booking_id=booking_id,
+            booking_source=booking_source,
+            ai_assist_score=float(compute_assist_score(booking_source=booking_source)),
+            billable=billable,
+            billing_reason=billing_reason,
+            attribution_metadata={"source": raw_source},
+            tenant=tenant,
+            correlation_id=correlation_id,
+            occurred_at=envelope.occurred_at,
+            metadata=metadata,
+        )
+    except Exception:  # noqa: BLE001 — telemetry must never break the consumer
+        logger.exception(
+            "eventbus.consumer.booking.created.domain_emit_failed appointment_id=%s",
+            appointment_id,
+        )
+
+
+# ─── handlers ──────────────────────────────────────────────────────────────
 
 def handle_booking_created(envelope: IngestEnvelope) -> None:
     """``booking.created`` — event-contract.md §3.1.
@@ -755,6 +880,18 @@ def handle_booking_created(envelope: IngestEnvelope) -> None:
                 specialist_uuid=specialist_uuid,
                 envelope=envelope,
             )
+            # DRF-1140: the advanced-state no-op is where a DIALOG booking
+            # lands — the internal-bus pair must fire here too, or bot
+            # bookings are exactly the ones the audit journal never sees.
+            _emit_domain_booking_created_pair(
+                envelope=envelope,
+                tenant=tenant,
+                appointment_id=appointment_id,
+                status=proxy.status,
+                raw_source=raw_source,
+                service_uuid=service_uuid,
+                specialist_uuid=specialist_uuid,
+            )
             # DRF-1069: «do not roll the state back» is not «say
             # nothing». The overwhelmingly common way to reach this
             # branch is NOT a stale event at all — it is a booking made
@@ -778,6 +915,18 @@ def handle_booking_created(envelope: IngestEnvelope) -> None:
             return
         update_fields = {k: v for k, v in create_defaults.items() if k != "tenant"}
         RemoteBookingProxy.all_tenants.filter(appointment_id=appointment_id).update(**update_fields)
+
+    # DRF-1140: the appointment is now known locally — announce it to the
+    # internal dot-notation bus (once per appointment; flag-ON only).
+    _emit_domain_booking_created_pair(
+        envelope=envelope,
+        tenant=tenant,
+        appointment_id=appointment_id,
+        status=normalized_status,
+        raw_source=raw_source,
+        service_uuid=service_uuid,
+        specialist_uuid=specialist_uuid,
+    )
 
     if bot_user is not None:
         if _is_reminder_eligible(normalized_status):
