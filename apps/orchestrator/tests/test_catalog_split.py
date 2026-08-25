@@ -100,6 +100,9 @@ def _service(tenant, name: str, *, price: str | None = None, duration: int | Non
         duration_min=duration,
     )
     master = CatalogMaster.all_tenants.filter(tenant=tenant).first()
+    # ``_salon`` always creates one; asserting it says so to mypy and turns a
+    # mis-ordered fixture into a clear failure instead of an IntegrityError.
+    assert master is not None, f"_service({name!r}) called before _salon created its master"
     MasterService.all_tenants.create(tenant=tenant, master=master, service=service)
     return service
 
