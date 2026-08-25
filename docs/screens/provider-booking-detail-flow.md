@@ -558,6 +558,24 @@ Customer should experience Ayla as the stable communication layer. Provider inte
 
 ## 11. B7 — Operational actions
 
+> [!IMPORTANT]
+> **CURRENT OVERRIDE — 25.08.2026**
+>
+> Матрица authority этого раздела superseded в части `Team-master → Mark completed`.
+>
+> CURRENT:
+>
+> - ordinary Master НЕ подтверждает обычный состоявшийся визит;
+> - на Master surface action `Состоялся` не показывается;
+> - Admin / Owner может выполнить completion на Salon/Admin surface;
+> - для multi-role пользователя authority определяется active role/surface context.
+>
+> Lifecycle chain после authoritative `completed` остаётся действующей.
+>
+> ---
+>
+> *Примечание исполнителя (не часть owner ruling): ruling говорит о подтверждении факта* состоявшегося *визита. Строка `Mark arrived` этой матрицы им не затронута и остаётся открытым вопросом — не выводить её судьбу из этого баннера ни в одну сторону. Разбор: `docs/UX_CANON_RECONCILIATION.md` §5.7.*
+
 Actions depend on role and status.
 
 ### Core actions
