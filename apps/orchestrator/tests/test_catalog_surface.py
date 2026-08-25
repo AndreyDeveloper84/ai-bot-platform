@@ -215,6 +215,10 @@ class TestExecuteCatalogTool:
         assert "None" not in reply.text
 
     def test_show_services_unknown_salon_named_back(self):
+        # DRF-1355 — this is the case the grounding check must NOT swallow.
+        # The argument lands on no salon we have, so nothing in the catalog
+        # could have suggested it and the person is its only possible source:
+        # the call goes through and gets the honest «нет такого салона».
         _salon("s1", "BodyFormula", city="Пенза")
 
         reply = execute_catalog_tool(

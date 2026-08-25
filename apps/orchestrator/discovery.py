@@ -1003,13 +1003,26 @@ def render_no_service_criteria_clarification() -> DiscoveryReply:
 #
 # ## The rule
 #
-#     ``show_services(salon=X)`` may answer only when X carries a word that
-#     identifies exactly one salon on the platform AND that word was actually
-#     said in the conversation.
+#     ``show_services(salon=X)`` may answer only when X is attributable to the
+#     conversation — and when X lands on real salons, the word that makes it
+#     attributable must be one that SINGLES OUT the salon being answered for.
 #
-# The catalog owns the first half (:func:`~apps.marketplace.discovery.
-# identifying_salon_words` — a word belongs to exactly one salon name), the
-# transcript owns the second. Neither is the model's to assert.
+# The transcript owns «was it said», the catalog owns «does that word single
+# out a salon». Neither is the model's to assert.
+#
+# The second clause is what the first alone cannot do. Consider a tenant
+# called «Салон красоты Люмина» and the turn «покажи мне САЛОНЫ» with
+# ``salon="салон"``: the word WAS said, and the argument matches that one
+# tenant, so plain attributability would answer with its price list — the
+# original defect, re-entered through the word that asked for the list. What
+# identifies that salon is «люмина», and nobody said «люмина».
+#
+# The clause is skipped when the argument lands on NO salon we have
+# («Афродита-несуществующая»). Nothing in the catalog could have suggested
+# that string, so the person is its only possible source; if they said it, the
+# honest answer is «такого салона среди подключённых нет» (DRF-1283 — name
+# back what WAS understood), and that answer only exists if the call is
+# allowed through.
 #
 # ## What an ungrounded call is answered with
 #
@@ -1036,10 +1049,28 @@ def render_no_service_criteria_clarification() -> DiscoveryReply:
 # salon's services — one extra tap. The opposite mistake is the pilot trace
 # above: a confident, well-formatted answer about a salon nobody chose, which
 # reads as correct and cannot be spotted from the outside.
+#
+# ## The one gap, stated rather than papered over
+#
+# «Singles out a salon» is a frequency test, and frequency is weak when the
+# catalog is six rows. If a tenant were named «Салон красоты Люмина» and no
+# other salon carried «салон», that word would single it out — and a model
+# passing ``salon="салон"`` on the turn «покажи мне САЛОНЫ» would be grounded
+# through the very word that asked for the list.
+#
+# Not closed here, deliberately. Closing it means declaring «салон» (and then
+# «студия», «центр», «клиника», …) a category word by hand — a maintained list
+# of exceptions, which is the shape DRF-1328 spent a ticket escaping, and it
+# would be wrong the day a salon is genuinely called that. It is also not live:
+# no tenant in the pilot mirror carries the word, and the parameter's own
+# description now tells the model to fill ``salon`` only with a name that was
+# said. Should it ever go live, the fix is a better distinctiveness signal —
+# the word's frequency across the whole tenant table rather than across the
+# bookable handful — not a word list.
 
-#: Shortest word that can identify a salon in what was SAID. Mirrors
-#: ``apps.marketplace.discovery._SALON_WORD_MIN_LEN``, which draws the same
-#: line on the catalog side.
+#: Shortest word that can name a salon. Below this a word is a fragment or a
+#: preposition — the same length line ``apps.marketplace.discovery.
+#: _SHORT_WORD_LEN`` draws for service tokens, and for the same reason.
 _SAID_WORD_MIN_LEN = 4
 
 #: Width of a Russian case ending, i.e. how much of two words may differ at
@@ -1083,26 +1114,72 @@ def salon_named_in(said: str, salon: str) -> bool:
     salon = (salon or "").strip()
     if not salon or not (said or "").strip():
         return False
-    try:
-        from apps.marketplace.discovery import identifying_salon_words
-
-        identifying = identifying_salon_words()
-    except Exception:  # noqa: BLE001 — grounding must never break the turn
-        logger.warning("orchestrator.discovery.salon_words_failed", exc_info=True)
-        return False
-    if not identifying:
-        return False
     said_words = [w for w in _SAID_WORD_RE.findall(said.casefold()) if len(w) >= _SAID_WORD_MIN_LEN]
     if not said_words:
         return False
-    for word in _SAID_WORD_RE.findall(salon.casefold()):
-        if word not in identifying:
-            # Either no salon carries this word, or several do — it cannot
-            # single one out, so it cannot ground the argument either.
-            continue
-        if any(_same_word(word, said_word) for said_word in said_words):
-            return True
-    return False
+
+    def _attributable(word: str) -> bool:
+        return any(_same_word(word, said_word) for said_word in said_words)
+
+    try:
+        from apps.marketplace.discovery import bookable_salon_names
+
+        names = bookable_salon_names()
+    except Exception:  # noqa: BLE001 — grounding must never break the turn
+        logger.warning("orchestrator.discovery.salon_names_failed", exc_info=True)
+        return False
+
+    needle = salon.casefold()
+    # The same ``icontains`` ``discover_services`` will run, so this asks
+    # exactly «which salons would that argument have answered for».
+    matched = [name for name in names if needle in name.casefold()]
+    if not matched:
+        # The argument lands on no salon we have. Nothing in the catalog could
+        # have suggested that string, so the person is its only possible
+        # source — and if they really said it, the honest answer is «такого
+        # салона среди подключённых нет», which ``render_no_services`` gives
+        # only if the call is allowed through. So plain attributability
+        # decides, with no catalog word to consult.
+        return any(
+            _attributable(word)
+            for word in _SAID_WORD_RE.findall(needle)
+            if len(word) >= _SAID_WORD_MIN_LEN
+        )
+
+    # The argument DOES land on real salons, so the catalog has a say: it is
+    # not enough that some word of the argument was said, it must be a word
+    # that singles out the salon being answered for. «покажи мне САЛОНЫ» with
+    # ``salon="салон"`` matching a tenant called «Салон красоты Люмина» is the
+    # whole reason: «салон» was said, but what identifies that salon is
+    # «люмина», and nobody said that.
+    identifying = _identifying_words(names)
+    return any(
+        identifying.get(word) == name and _attributable(word)
+        for name in matched
+        for word in _SAID_WORD_RE.findall(name.casefold())
+    )
+
+
+def _identifying_words(names: list[str]) -> dict[str, str]:
+    """``{word: salon name}`` for words carried by exactly ONE of ``names``.
+
+    A word two salons share («центр» in «Центр коррекции фигуры «Afrodita»»
+    and «Центр красоты «Эстетика»») singles out neither, so it identifies
+    nothing. Words shorter than :data:`_SAID_WORD_MIN_LEN` are dropped: below
+    that a word is a fragment, never a name — the same length line
+    ``apps.marketplace.discovery._SHORT_WORD_LEN`` draws for service tokens.
+    """
+    seen: dict[str, str] = {}
+    generic: set[str] = set()
+    for name in names:
+        for word in {
+            w for w in _SAID_WORD_RE.findall(name.casefold()) if len(w) >= _SAID_WORD_MIN_LEN
+        }:
+            if word in seen and seen[word] != name:
+                generic.add(word)
+            else:
+                seen[word] = name
+    return {word: name for word, name in seen.items() if word not in generic}
 
 
 def _reply_with_chips(text: str, buttons: list[dict[str, str]]) -> DiscoveryReply:

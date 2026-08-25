@@ -376,14 +376,35 @@ class TestSalonGrounding:
         assert not salon_named_in("покажи мне салоны", "Центр коррекции фигуры «Afrodita»")
         assert not salon_named_in("привет", "BodyFormula")
 
-    def test_the_word_that_asked_for_the_list_cannot_ground_it(self, pilot_mirror):
-        """«салон» is in no salon's name, so it identifies nothing.
+    def test_the_category_word_never_answers_with_a_salons_price_list(self, pilot_mirror):
+        """«салон» as an argument may not become one salon's services.
 
-        Without this, «покажи мне САЛОНЫ» would ground a ``salon="салон
-        красоты"`` argument through the very word that asked for the list.
+        Asserted on the ANSWER rather than on the grounding verdict, because
+        the two branches reach it differently and only the answer matters: the
+        word lands on no salon here, so the call goes through and is told «нет
+        такого салона, могу показать какие есть». What it must never be is the
+        24.08 shape — a price list for a salon the person did not choose. The
+        narrow case this does not close (a tenant whose own name contains
+        «Салон») is stated in the module block above ``salon_named_in``.
         """
-        assert not salon_named_in("покажи мне салоны", "салон")
-        assert not salon_named_in("какие салоны есть", "салон красоты")
+        reply = execute_catalog_tool("show_services", {"salon": "салон"}, said="покажи мне салоны")
+
+        assert reply is not None
+        assert "Массаж спины" not in reply.text
+        assert "1500" not in reply.text
+        assert "этого салона" not in reply.text
+
+    def test_a_salon_the_person_named_that_we_do_not_have_goes_through(self, pilot_mirror):
+        """DRF-1283's honest «нет такого салона» must survive the check.
+
+        The argument lands on no salon we have, so nothing in the catalog
+        could have suggested that string — the person is its only possible
+        source. Naming it back is a better answer than the salon list, and it
+        only exists if the call is allowed through.
+        """
+        assert salon_named_in("а есть Афродита?", "Афродита")
+        # Still refused when the person did not say it either.
+        assert not salon_named_in("покажи мне салоны", "Афродита")
 
     def test_a_word_two_salons_share_identifies_neither(self, pilot_mirror):
         """«центр» belongs to «Центр коррекции фигуры «Afrodita»» AND to
@@ -406,7 +427,7 @@ class TestSalonGrounding:
         def _boom():
             raise RuntimeError("catalog unavailable")
 
-        monkeypatch.setattr(marketplace_discovery, "identifying_salon_words", _boom)
+        monkeypatch.setattr(marketplace_discovery, "bookable_salon_names", _boom)
 
         assert not salon_named_in("какие услуги в Люмине", "Люмина")
 
