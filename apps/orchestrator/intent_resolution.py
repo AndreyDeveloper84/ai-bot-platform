@@ -761,9 +761,7 @@ def _draft_from_tool_trace(tool_trace: Any, *, user_text: str) -> dict[str, Any]
         )
         if sec is None or sec["intent_type"] not in PRODUCT_INTENT_TYPES:
             continue
-        refs = [
-            _evidence_id_for(draft, item["fragment"]) for item in sec["evidence"]
-        ]
+        refs = [_evidence_id_for(draft, item["fragment"]) for item in sec["evidence"]]
         if not refs:
             continue
         draft["secondary_intents"].append(

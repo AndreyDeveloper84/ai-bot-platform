@@ -132,7 +132,12 @@ class TestMappingTable:
     @pytest.mark.parametrize(
         ("tool", "arguments", "text", "fact"),
         [
-            ("health_screening", {"symptom_text": "болит спина"}, "у меня болит спина", "болит спина"),
+            (
+                "health_screening",
+                {"symptom_text": "болит спина"},
+                "у меня болит спина",
+                "болит спина",
+            ),
             ("log_water", {"drink_text": "стакан воды"}, "я выпила стакан воды", "стакан воды"),
             ("clarify_food_entry", {"food_text": "борщ 300г"}, "съела борщ 300г", "борщ 300г"),
         ],
@@ -159,7 +164,9 @@ class TestMappingTable:
         assert build_draft_from_tool_choice("order_pizza", {}, user_text=USER_TEXT) is None
 
     def test_malformed_arguments_have_no_honest_mapping(self):
-        assert build_draft_from_tool_choice("show_masters", "не-словарь", user_text=USER_TEXT) is None
+        assert (
+            build_draft_from_tool_choice("show_masters", "не-словарь", user_text=USER_TEXT) is None
+        )
 
     def test_ask_clarification_without_question_has_no_honest_mapping(self):
         # Внутренний degrade-диспетчера (unknown tool / malformed args) —
@@ -307,9 +314,7 @@ class TestDeterministicPath:
 
     @override_settings(INTENT_RESOLUTION_FROM_TOOL_CHOICE_ENABLED=True)
     def test_flag_on_show_my_records_falls_back_to_llm(self):
-        contract, client, _ = _resolve(
-            tool_trace=[{"tool": "show_my_records", "arguments": {}}]
-        )
+        contract, client, _ = _resolve(tool_trace=[{"tool": "show_my_records", "arguments": {}}])
         assert contract is not None
         client.chat.completions.create.assert_awaited_once()
 
@@ -369,9 +374,7 @@ class TestSecondaryIntents:
             {"tool": "show_masters", "arguments": {"specialization": "массаж"}},
             {"tool": "show_salons", "arguments": {}},
         ]
-        contract, _, _ = _resolve(
-            text="хочу массаж и список салонов", tool_trace=trace
-        )
+        contract, _, _ = _resolve(text="хочу массаж и список салонов", tool_trace=trace)
         assert contract is not None
         assert contract["intent_type"] == "FIND_SPECIALIST"
         secondary = contract["secondary_intents"]
