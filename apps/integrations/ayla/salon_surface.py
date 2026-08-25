@@ -352,6 +352,32 @@ def routes_by_access(access: SalonRouteAccess) -> tuple[SalonRoute, ...]:
     return tuple(r for r in SALON_ROUTES if r.access is access)
 
 
+def callable_client_methods() -> tuple[str, ...]:
+    """The method names bound to CALLABLE routes, narrowed to ``str``.
+
+    ``SalonRoute.client_method`` is ``str | None`` because a blocked row has no
+    method to name. On a CALLABLE row it is never ``None`` — but that is an
+    invariant of the table, not of the dataclass, so nothing holds a reader or
+    a type checker to it.
+
+    Narrowing it here, once, is the point. The tempting alternative at each
+    call site — ``route.client_method or ""`` — type-checks and then looks up a
+    method named ``""``, so a malformed row surfaces as a puzzling failure
+    somewhere downstream instead of where it is wrong. This raises at the row
+    and names it.
+    """
+
+    names: list[str] = []
+    for route in routes_by_access(SalonRouteAccess.CALLABLE):
+        if route.client_method is None:
+            raise ValueError(
+                f"CALLABLE salon route {route.method} {route.path} names no client "
+                "method — a callable row must say what calls it."
+            )
+        names.append(route.client_method)
+    return tuple(names)
+
+
 def route_for(client_method: str) -> SalonRoute | None:
     """The route a client method calls, or ``None`` when it calls none."""
 
@@ -382,6 +408,7 @@ __all__ = [
     "SALON_ROUTES",
     "SalonRoute",
     "SalonRouteAccess",
+    "callable_client_methods",
     "capability",
     "route_for",
     "routes_by_access",

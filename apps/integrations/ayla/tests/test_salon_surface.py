@@ -55,6 +55,7 @@ from apps.integrations.ayla.salon_surface import (
     SALON_ROUTES,
     SalonRoute,
     SalonRouteAccess,
+    callable_client_methods,
     capability,
     route_for,
     routes_by_access,
@@ -193,9 +194,9 @@ def _public_client_methods() -> list[str]:
 class TestClientParity:
     def test_every_callable_row_binds_a_real_method(self) -> None:
         missing = [
-            f"{r.method} {r.path} -> {r.client_method}"
-            for r in routes_by_access(SalonRouteAccess.CALLABLE)
-            if not callable(getattr(AylaSalonClient, r.client_method or "", None))
+            name
+            for name in callable_client_methods()
+            if not callable(getattr(AylaSalonClient, name, None))
         ]
         assert not missing, (
             f"registry rows naming a method AylaSalonClient does not have: {missing}"
@@ -215,6 +216,27 @@ class TestClientParity:
             "SALON_ROUTES. Add the route they call — with its access class — so the "
             "surface stays declared in one place."
         )
+
+    def test_a_callable_row_without_a_method_raises_where_it_is_wrong(self) -> None:
+        """The narrowing in ``callable_client_methods`` must be a check, not a
+        cast. Proved on a fabricated row so the raise cannot rot into dead
+        code the way ``client_method or ""`` silently would."""
+
+        import apps.integrations.ayla.salon_surface as surface
+
+        broken = SalonRoute(
+            name="tenants-fabricated",
+            method="GET",
+            path="fabricated/",
+            access=SalonRouteAccess.CALLABLE,
+        )
+        original = surface.SALON_ROUTES
+        surface.SALON_ROUTES = (*original, broken)
+        try:
+            with pytest.raises(ValueError, match="names no client method"):
+                surface.callable_client_methods()
+        finally:
+            surface.SALON_ROUTES = original
 
     def test_no_two_rows_claim_the_same_method(self) -> None:
         bound = [r.client_method for r in SALON_ROUTES if r.client_method]
@@ -317,8 +339,10 @@ CALLS: dict[str, Any] = {
 
 
 def _drive(route: SalonRoute) -> httpx.Request:
+    name = route.client_method
+    assert name is not None, f"{route.method} {route.path} is CALLABLE but names no method"
     sink: list[httpx.Request] = []
-    call = CALLS[route.client_method or ""]
+    call = CALLS[name]
     try:
         call(_client(sink))
     except Exception:  # noqa: BLE001 — the recorded request is the assertion
@@ -331,7 +355,7 @@ class TestWireShape:
     def test_every_callable_row_has_an_exerciser(self) -> None:
         """A row with no call below is a row nothing proves."""
 
-        expected = {r.client_method for r in routes_by_access(SalonRouteAccess.CALLABLE)}
+        expected = set(callable_client_methods())
         assert set(CALLS) == expected, (
             f"exercisers missing for {sorted(expected - set(CALLS))}, "
             f"stale for {sorted(set(CALLS) - expected)}"
