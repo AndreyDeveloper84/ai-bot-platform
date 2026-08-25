@@ -56,8 +56,8 @@ The 20 apps and the sprint that puts code in each:
 ## Quickstart (Sprint 0)
 
 ```powershell
-# 1. Install deps (uv expected on PATH — see "Install uv" below)
-uv sync --extra dev
+# 1. Build the environment (uv expected on PATH — see "Install uv" below)
+powershell -File scripts\dev-env.ps1     # git-bash / WSL / Linux: scripts/dev-env.sh
 
 # 2. Install pre-commit hooks (one-time per clone)
 uv run pre-commit install
@@ -69,6 +69,41 @@ uv run pytest tests/smoke/
 ```
 
 Full Postgres / Redis / chromadb / MinIO stack lives in Sprint 0 / A2 (`docker compose up`). The host-side flow above uses SQLite.
+
+### One command per worktree — and why it matters
+
+`scripts/dev-env.{sh,ps1}` is a thin wrapper over one command:
+
+```
+uv sync --extra dev --extra ai-core --frozen
+```
+
+Both extras are load-bearing. `--extra dev` alone (what this README used to
+say) leaves every `from ayla_ai_core import ...` in `apps/` unresolvable, and
+without `--frozen` uv is free to re-resolve off the locked revision.
+
+A **fresh worktree needs nothing else** — the uv cache is machine-global, so
+the sync costs ~15s:
+
+```
+git worktree add ../ai-bot-platform-drfNNNN -b fix/drfNNNN origin/dev
+cd ../ai-bot-platform-drfNNNN
+scripts/dev-env.sh
+uv run pytest apps/identity -q      # green
+```
+
+Never borrow another worktree's `.venv`: one `pip install` inside a borrowed
+venv breaks it for whoever owns it.
+
+`ayla-ai-core` is pinned by **commit SHA**, so a venv built before a re-pin
+keeps the old package and the run dies with something like
+`ImportError: cannot import name 'SOURCE_INFERRED' from 'ayla_ai_core'` —
+which reads as a broken import in `apps/` rather than as a stale environment.
+`tools/env_guard.py`, wired in as a pytest plugin (`config/pytest_env_guard.py`),
+compares the installed revision against the pin *before* Django loads and
+refuses the run with instructions instead of a traceback. Re-run
+`scripts/dev-env.sh` and carry on; bypass with `AYLA_ENV_GUARD=off` if you
+ever need to. Background: DRF-1384.
 
 ### Install uv
 

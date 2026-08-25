@@ -4,3 +4,7 @@
 # would otherwise rewrite them to CRLF on Windows and break the guard).
 tests/fixtures/contracts/*.json text eol=lf
 tests/fixtures/contracts/MANIFEST.sha256 text eol=lf
+
+# Shell scripts must stay LF — they run under git-bash / WSL / CI ubuntu
+# runners, where a CRLF shebang line fails with "bad interpreter".
+*.sh text eol=lf
