@@ -94,6 +94,7 @@ from django.db.models import Count
 from django.utils import timezone
 
 from apps.catalog.models import MasterService
+from apps.catalog.provenance import MasterServiceSource, master_service_write
 from apps.tenancy.models import Tenant
 
 # Rows per DELETE statement. Bounded so a tenant with a pathological edge count
@@ -191,7 +192,19 @@ class Command(BaseCommand):
         # spared instead of deleted on stale evidence.
         orphan_ids = [row["id"] for row in rows]
 
-        with transaction.atomic():
+        # DRF-975 — name the remover. This command writes nothing, so the
+        # provenance gate does not apply to it; the context is here so the
+        # ``master.service_edge_deleted`` audit rows the post_delete receiver
+        # emits carry ``deleted_under_source="orphan_cleanup"`` instead of the
+        # NULL that means "a CASCADE did it". That distinction is the whole
+        # point on a table whose repair history is the open question.
+        with (
+            master_service_write(
+                MasterServiceSource.ORPHAN_CLEANUP,
+                reason=f"cleanup_orphan_master_services tenant={tenant.slug}",
+            ),
+            transaction.atomic(),
+        ):
             deleted = 0
             # Chunked: this command is generic over --tenant-slug, and a single
             # IN of unbounded width is a very long transaction on Postgres and

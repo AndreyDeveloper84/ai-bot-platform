@@ -32,6 +32,7 @@ from django.db import transaction
 from django.utils import timezone
 
 from apps.catalog.models import CatalogMaster, CatalogService, MasterService
+from apps.catalog.provenance import MasterServiceSource, master_service_write
 from apps.identity.models import BotUser
 from apps.scheduling.models import Weekday, WorkingHours
 from apps.tenancy.models import Tenant
@@ -203,12 +204,20 @@ class Command(BaseCommand):
             for svc_ext in spec["service_external_ids"]:
                 service = services_by_ext[svc_ext]
                 seed_edge_id = _seed_edge_id(tenant, mst, service)
-                edge, edge_created = MasterService.all_tenants.get_or_create(
-                    tenant=tenant,
-                    master=mst,
-                    service=service,
-                    defaults={"ayla_specialist_service_id": seed_edge_id},
-                )
+                # DRF-975 — the fixture names itself. Per-edge rather than
+                # around the whole command so the context is adjacent to the
+                # only write it guards; the loop is small and the ContextVar
+                # set/reset is a few hundred nanoseconds.
+                with master_service_write(
+                    MasterServiceSource.DEV_SEED,
+                    reason="seed_dev_formula_tela",
+                ):
+                    edge, edge_created = MasterService.all_tenants.get_or_create(
+                        tenant=tenant,
+                        master=mst,
+                        service=service,
+                        defaults={"ayla_specialist_service_id": seed_edge_id},
+                    )
                 # Stamp only what we may stamp: adopt a NULL row left by an
                 # older seed run, but never overwrite a real Ayla edge id — on a
                 # --force run over a live mirror that would replace canonical

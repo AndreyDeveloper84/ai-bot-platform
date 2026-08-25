@@ -92,6 +92,7 @@ from django.views.decorators.http import require_http_methods
 
 from apps.admin_api.auth import RoleContext, require_admin_role
 from apps.audit.services import write_audit
+from apps.catalog.provenance import MasterServiceSource, master_service_write
 from apps.catalog.models import CatalogMaster, CatalogService, MasterService
 from apps.channels.max import outbound as max_outbound
 from apps.events.services import emit
@@ -338,13 +339,24 @@ def _seed_services(
     tenant_id: uuid.UUID,
     master: CatalogMaster,
     service_ids: list[uuid.UUID],
+    actor_id: uuid.UUID | None = None,
 ) -> None:
+    """Seed the invited master's service set.
+
+    DRF-975: this is a ``bulk_create``, which sends no ``pre_save`` — the gate
+    for it lives in ``MasterServiceQuerySet.bulk_create``. Same contract, same
+    exception; the context below is what satisfies it. ``actor_id`` is the
+    admin who issued the invite, so the seeded edges carry a person and not
+    just a machine label — the 2026-07-22 rows had neither.
+    """
+
     if not service_ids:
         return
     rows = [
         MasterService(tenant_id=tenant_id, master=master, service_id=sid) for sid in service_ids
     ]
-    MasterService.all_tenants.bulk_create(rows)
+    with master_service_write(MasterServiceSource.INVITE_SEED, actor_id=actor_id):
+        MasterService.all_tenants.bulk_create(rows)
 
 
 def _dispatch_max_dm(
@@ -571,6 +583,7 @@ def master_invite_create(request: HttpRequest) -> HttpResponse:
                 tenant_id=tenant.id,
                 master=master,
                 service_ids=service_ids,
+                actor_id=bot_user.id,
             )
 
             write_audit(

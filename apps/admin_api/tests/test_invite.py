@@ -276,6 +276,12 @@ class TestHappyPath:
         rows = list(MasterService.all_tenants.filter(master_id=master_id))
         assert len(rows) == 1
         assert rows[0].service_id == service.id
+        # DRF-975 — the invite seeder is a bulk_create, which sends no
+        # pre_save; its gate is MasterServiceQuerySet.bulk_create. Asserting
+        # the specific source proves the view declared itself rather than
+        # inheriting the suite-wide ambient TEST_FIXTURE context.
+        assert rows[0].source == "invite_seed"
+        assert rows[0].created_by_actor_id == owner_bot_user.id
 
     def test_two_audit_rows_emitted(
         self,

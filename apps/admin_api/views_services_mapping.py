@@ -69,6 +69,7 @@ from django.views.decorators.http import require_http_methods
 
 from apps.admin_api.auth import RoleContext, require_admin_role
 from apps.audit.services import write_audit
+from apps.catalog.provenance import MasterServiceSource, master_service_write
 from apps.catalog.models import CatalogMaster, CatalogService, MasterService
 from apps.events.vocabulary import MASTER_SERVICES_CHANGED
 from apps.identity.models import BotUser
@@ -467,7 +468,15 @@ def services_mapping_bulk(request: HttpRequest) -> HttpResponse:
     )
 
     applied = 0
-    with transaction.atomic():
+    # DRF-975 — the MM4 matrix names itself as the writer. This is the path
+    # that already audits (``master.services_changed``, one bundled row per
+    # master); the context adds the per-row stamp + per-edge audit row that
+    # survive after the bundled row ages out of AuditLog retention, and it is
+    # what the model gate requires before it will accept the INSERT.
+    with (
+        master_service_write(MasterServiceSource.MM4_MATRIX, actor_id=bot_user.id),
+        transaction.atomic(),
+    ):
         for service_uuid, master_uuid, enabled in normalised:
             pair = (service_uuid, master_uuid)
             currently = pair in current_pairs

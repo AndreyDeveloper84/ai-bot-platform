@@ -269,7 +269,14 @@ class TestServicesMappingBulkApply:
         assert body["applied"] == 1
         assert body["conflicts"] == []
         assert isinstance(body["new_snapshot_token"], str)
-        assert MasterService.all_tenants.filter(tenant=tenant, master=m, service=s).exists()
+        edge = MasterService.all_tenants.get(tenant=tenant, master=m, service=s)
+        # DRF-975 — the matrix must declare itself as the writer. The suite
+        # runs inside an ambient TEST_FIXTURE provenance context, so asserting
+        # the SPECIFIC source is what proves the view opened its own; without
+        # this the view could lose its context and every test here would still
+        # pass, with the rows stamped "test_fixture".
+        assert edge.source == "mm4_matrix"
+        assert edge.created_by_actor_id == owner_bot_user.id
 
     def test_admin_can_apply(
         self,
