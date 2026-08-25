@@ -16,13 +16,19 @@ handful of shapes that are unambiguous in Russian and expensive when wrong:
 * **promises made on the salon's behalf** — guarantees of a result, of a
   price, of a refund the assistant has no authority over;
 * **contact details** — phone numbers and emails, which no answer here has
-  a reason to contain (DRF-1039).
+  a reason to contain (DRF-1039), including a phone's four-digit tail when
+  the sentence itself calls it a number (DRF-1209: «номер 4567», «тел.
+  1234» — a partial phone is a phone, OD-W2-2).
 
 Anything subtler stays with the prompt. A greedy filter that mangles decent
 replies would get itself turned off within a week, and then there would be
 no filter at all.
 
 ### What happens on a hit
+
+The verdict model here is binary — allow or replace. A data leak is the
+replace-class (BLOCK in `post_check.py`'s three-way vocabulary), never a
+soften: there is no politely reworded way to hand out someone's number.
 
 The reply is REPLACED, not edited. Cutting the offending sentence leaves
 text that reads as though something is missing and, worse, can invert the
@@ -67,10 +73,51 @@ _CONTACTS = (
     r"(?i)[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}",
 )
 
+#: A four-digit tail, written the way a truncated phone actually comes out:
+#: "4567", "45 67", "45-67". Never matched bare — only behind a marker below.
+_TAIL = r"(?<!\d)\d{2}[\s\-]?\d{2}(?!\d)"
+
+#: What may sit between the marker and the tail: at most one possessive-ish
+#: word («номер телефона …», «телефон клиентки …») and a separator. The gap
+#: is deliberately this narrow — every extra word of freedom is a legal
+#: reply the guard can eat.
+_FILLER = r"(?:\s+(?:клиентки|клиента|мастера|салона|телефона|ваш|вашего))?"
+_SEP = r"\s*[:№\-–—]?\s*"
+
+#: A partial phone is still a phone. The live leak behind this (DRF-1039 /
+#: OD-W2-2, restated in DRF-1360) was a truncated excerpt leaving the last
+#: four digits of a customer's number readable, and the owner decision
+#: allows no "identifier" exception: «телефон клиента исполнителю не
+#: передаётся ни в каком виде». So the tail must not go out — DRF-1209.
+#:
+#: But a bare four-digit group is also a price («1500 ₽»), a year
+#: («в 2024 году»), a calorie count, and the middle group of a UUID — the
+#: exact wound DRF-1382 measured in the replay redactor. Blocking those
+#: would put false blocks on the live pilot, so the tail counts only when
+#: the sentence itself says it is a phone:
+#:
+#: * «номер 4567» / «номер телефона 45-67» — «номер» with no noun defaults
+#:   to a phone number in Russian; the nouns that make it something else
+#:   (заказа, записи, карты, счёта, брони, талона, договора, паспорта) are
+#:   excluded explicitly;
+#: * «тел. 1234» / «телефон клиентки: 1234»;
+#: * «…заканчивается на 4567» — how a partial number is usually described;
+#: * «последние 4 цифры 4567».
+#:
+#: «код 4521» is deliberately NOT a marker: a one-time code is not a phone
+#: tail, and the bot has legitimate reasons to read one back.
+_PARTIAL_PHONES = (
+    rf"(?i)\bтел(?:ефон\w*)?\.?{_FILLER}{_SEP}{_TAIL}",
+    rf"(?i)\bномер(?!\s+(?:заказа|записи|карты|сч[её]та|брони|талона|договора|паспорта))"
+    rf"{_FILLER}{_SEP}{_TAIL}",
+    rf"(?i)\b(?:заканчивается|оканчивается)\s+на{_SEP}{_TAIL}",
+    rf"(?i)\bпоследние\s+(?:\d|четыре)\s+цифр\w*{_SEP}{_TAIL}",
+)
+
 _CATEGORIES: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("medical", _MEDICAL),
     ("promise", _PROMISES),
-    ("contact", _CONTACTS),
+    ("contact", _CONTACTS + _PARTIAL_PHONES),
 )
 
 #: What the person reads instead. Says the shape of the problem without
