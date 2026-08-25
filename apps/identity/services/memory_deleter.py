@@ -13,10 +13,14 @@ Two operations, both append the 152-ФЗ audit trail:
   soft-delete tombstone; the async purge job hard-deletes after retention).
   The read-gate hides the row immediately.
 - :func:`request_forget_all` — mass erasure INTENT. Sets
-  ``UPC.forget_all_requested_at``; the async sweep then soft-deletes every
-  entry. The read-gate already treats ``forget_all_requested_at`` as «forgotten»
-  (memory_reader, #1111), so surfacing stops the instant this is set — even
-  before the sweep runs.
+  ``UPC.forget_all_requested_at``. The read-gate already treats
+  ``forget_all_requested_at`` as «forgotten» (memory_reader, #1111), so
+  surfacing stops the instant this is set — even before the sweep runs. The
+  sweep that then does the erasing is
+  :mod:`apps.identity.services.forget_all_sweep`, beat-scheduled hourly. Until
+  DRF-1370 this docstring named a job that did not exist: the intent was
+  recorded, nothing was ever tombstoned, and the read gate alone stood between
+  the person's memory and the prompt.
 """
 
 from __future__ import annotations
@@ -87,8 +91,12 @@ def soft_delete_green_entries(
 def request_forget_all(user_id: uuid.UUID) -> bool:
     """Record the user's «forget everything» intent on their UPC.
 
-    Sets ``forget_all_requested_at`` (user-intent moment; the async sweep then
-    soft-deletes all entries — ADR-0011 §8 mass erasure). Idempotent: returns
+    Sets ``forget_all_requested_at`` — the user-intent moment, and ONLY that.
+    The erasure itself is :func:`apps.identity.services.forget_all_sweep.
+    sweep_forget_all`, which the hourly beat job runs (ADR-0011 §8 mass
+    erasure). Callers must not read this returning ``True`` as «erased»: it
+    means «the request is recorded», which is what the read gate acts on
+    immediately. Idempotent: returns
     ``True`` only when it was newly set (no live UPC → creates one so the intent
     is durably recorded; a user with no memory still has their request honoured
     if the sweep later finds nothing).

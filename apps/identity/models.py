@@ -599,8 +599,9 @@ class UserPersonalContext(models.Model):
         null=True,
         blank=True,
         help_text="Set when user invokes POST /api/v1/users/me/memory/"
-        "forget-all (per ADR-0011 §3.3). Records user-intent moment; "
-        "async sweep then soft-deletes all entries.",
+        "forget-all (per ADR-0011 §3.3). Records the user-intent moment "
+        "ONLY; the erasure is apps.identity.services.forget_all_sweep, "
+        "beat-scheduled hourly (DRF-1370).",
     )
     minor_lock = models.BooleanField(
         default=False,

@@ -158,3 +158,31 @@ def _process_batch(
     )
 
     return ok, fail
+
+
+@shared_task(name="apps.identity.tasks.forget_all_sweep")
+def forget_all_sweep() -> dict:
+    """Execute the pending «забудь всё» erasures (DRF-1370).
+
+    The job three docstrings named and nobody wrote — see
+    :mod:`apps.identity.services.forget_all_sweep` for what it erases, what
+    it deliberately leaves alone, and why it re-runs rather than stamping a
+    marker.
+
+    Beat-scheduled HOURLY, not daily like the sweep above it. The read gate
+    already silences memory the instant the person asks, so the cadence does
+    not govern what they see — it governs how long the rows stay physically
+    resurrectable by a read path that forgets the gate. An hour of that
+    exposure is a different risk from a day of it, and the query costs a
+    count over a table that holds one row per user who ever asked.
+
+    Cross-tenant with no ``tenant_scope``: memory is keyed on the canonical
+    Ayla user id and ``UserPersonalContext`` has no tenant FK by design.
+
+    Returns:
+      Summary dict {"candidates", "users_swept", "entries_deleted", "errors"}.
+    """
+
+    from apps.identity.services.forget_all_sweep import sweep_pending_forget_all
+
+    return sweep_pending_forget_all()
