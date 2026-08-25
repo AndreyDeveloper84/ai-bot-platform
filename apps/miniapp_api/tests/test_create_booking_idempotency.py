@@ -264,9 +264,7 @@ def _appointment_id(resp) -> str:
 class TestRepeatOfTheSameRequest:
     """One intent, delivered more than once, must stay one booking."""
 
-    def test_first_request_really_creates(
-        self, client, bot_user, service, master, ayla
-    ) -> None:
+    def test_first_request_really_creates(self, client, bot_user, service, master, ayla) -> None:
         """The positive guard the negative assertions below stand on.
 
         Stated on its own so that a fixture which stops creating
