@@ -210,7 +210,11 @@ asyncio_mode = "strict"
 # conftest is imported: a stale `ayla-ai-core` blows up populating the app
 # registry, long before a conftest hook could say why. Rationale in full:
 # config/pytest_env_guard.py. Bypass with AYLA_ENV_GUARD=off.
-addopts = "-p config.pytest_env_guard -q -m \"not smoke\""
+# `-p config.pytest_master_service_provenance` (DRF-975) — ambient
+# MasterService write-provenance context for the ~60 existing edge
+# fixtures. Rationale in that module; the gate itself is tested with the
+# context explicitly torn down.
+addopts = "-p config.pytest_env_guard -p config.pytest_master_service_provenance -q -m \"not smoke\""
 markers = [
     "e2e: end-to-end test requiring real Redis + Postgres (CI services or docker compose locally). Skipped automatically when backing services aren't reachable.",
     "slow: opt-in performance / latency-SLO tests. Excluded from the default suite (`-m \"not slow\"`); run via `pytest -m slow` in nightly perf jobs.",

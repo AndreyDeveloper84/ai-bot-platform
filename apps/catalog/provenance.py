@@ -106,6 +106,12 @@ class MasterServiceSource(StrEnum):
     #: ``reason`` is not, and :func:`master_service_write` refuses that.
     MANUAL_SCRIPT = "manual_script"
 
+    #: ``cleanup_orphan_master_services`` — a delete-only writer. It creates
+    #: nothing; the value exists so the ``master.service_edge_deleted`` rows a
+    #: cleanup run emits say *which* run removed the edge, instead of being
+    #: indistinguishable from a CASCADE.
+    ORPHAN_CLEANUP = "orphan_cleanup"
+
     #: Test fixtures. Set by the ``config.pytest_master_service_provenance``
     #: plugin for the whole suite so that ~60 existing fixture call sites did
     #: not have to be rewritten across five teams' worktrees. Never reachable
