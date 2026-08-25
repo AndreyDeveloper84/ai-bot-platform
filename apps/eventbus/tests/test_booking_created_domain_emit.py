@@ -286,10 +286,14 @@ class TestExactlyOncePerAppointment:
         assert created.count() == 1
         assert attribution.count() == 1
         # Keyed by the canonical appointment id, not the billing row's PK.
-        assert created.first().data["booking_id"] == APPOINTMENT_ID
+        created_ev = created.first()
+        attribution_ev = attribution.first()
+        assert created_ev is not None
+        assert attribution_ev is not None
+        assert created_ev.data["booking_id"] == APPOINTMENT_ID
         # Chat origin is the durable local proof of ai_direct.
-        assert attribution.first().data["booking_source"] == "ai_direct"
-        assert attribution.first().data["billable"] is True
+        assert attribution_ev.data["booking_source"] == "ai_direct"
+        assert attribution_ev.data["billable"] is True
 
 
 class TestPerEventDedup:
@@ -324,8 +328,10 @@ class TestPerEventDedup:
         attribution = DomainEvent.objects.filter(event_name=V.BOOKING_ATTRIBUTION_ASSIGNED)
         assert created.count() == 1  # не задвоился
         assert attribution.count() == 1  # доэмитился
-        assert attribution.first().data["booking_id"] == APPOINTMENT_ID
-        assert attribution.first().data["billable"] is True
+        attribution_ev = attribution.first()
+        assert attribution_ev is not None
+        assert attribution_ev.data["booking_id"] == APPOINTMENT_ID
+        assert attribution_ev.data["billable"] is True
 
     def test_missing_created_is_backfilled_on_reprocessing(
         self, tenant: Tenant, bot_user_linked: BotUser
