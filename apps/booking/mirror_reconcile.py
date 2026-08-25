@@ -244,7 +244,10 @@ def collect_ayla_facts(
                     continue
                 appointment_id = str(raw.get("appointment_id") or "")
                 start_at = parse_datetime(str(raw.get("start_at") or ""))
-                if not appointment_id or start_at is None:
+                # Naive would TypeError against the aware window bounds
+                # below and crash the whole tenant's tick — treat as
+                # unparseable instead.
+                if not appointment_id or start_at is None or start_at.tzinfo is None:
                     # A booking we cannot identify cannot be compared;
                     # skipping it here would hide a shape drift, so say so.
                     logger.warning(
@@ -277,29 +280,32 @@ def compare(
     for appointment_id in sorted(set(mirror) | set(ayla)):
         m = mirror.get(appointment_id)
         a = ayla.get(appointment_id)
-        m_live = m is not None and _is_live(m.status)
-        a_live = a is not None and _is_live(a.status)
 
-        if a_live and not m_live:
-            if m is None:
-                ayla_only.append(appointment_id)
-            else:
-                status_mismatch.append((appointment_id, a.status, m.status))
-            continue
-        if m_live and not a_live:
-            if a is None:
+        if a is None:
+            assert m is not None  # the id came from the union
+            if _is_live(m.status):
                 mirror_only.append(appointment_id)
-            else:
-                status_mismatch.append((appointment_id, a.status, m.status))
             continue
-        if m_live and a_live:
-            assert m is not None and a is not None
-            if m.status != a.status:
-                status_mismatch.append((appointment_id, a.status, m.status))
-            elif abs((a.start_at - m.start_at).total_seconds()) > START_TOLERANCE_S:
-                start_mismatch.append(
-                    (appointment_id, a.start_at.isoformat(), m.start_at.isoformat())
-                )
+        if m is None:
+            if _is_live(a.status):
+                ayla_only.append(appointment_id)
+            continue
+
+        m_live = _is_live(m.status)
+        a_live = _is_live(a.status)
+        if m_live != a_live:
+            # Liveness disagrees — a missed cancel/confirm event whichever
+            # way it points.
+            status_mismatch.append((appointment_id, a.status, m.status))
+        elif m_live and m.status != a.status:
+            # Both live but under different slugs (confirmed vs
+            # awaiting_payment) — the day screens still show the visit,
+            # yet the mirror is stale and the detector should say so.
+            status_mismatch.append((appointment_id, a.status, m.status))
+        elif m_live and abs((a.start_at - m.start_at).total_seconds()) > START_TOLERANCE_S:
+            start_mismatch.append(
+                (appointment_id, a.start_at.isoformat(), m.start_at.isoformat())
+            )
 
     return TenantDivergence(
         tenant_slug=tenant.slug,
@@ -321,10 +327,12 @@ def reconcile_tenant(
     """Compare one tenant's live bookings on both sides. Read-only."""
 
     now = now or timezone.now()
-    window_days = window_days or getattr(
-        settings, "AYLA_MIRROR_RECONCILE_WINDOW_DAYS", 45
+    days = (
+        window_days
+        if window_days is not None
+        else int(getattr(settings, "AYLA_MIRROR_RECONCILE_WINDOW_DAYS", 45))
     )
-    start, end, dates = _window(tenant, now, window_days)
+    start, end, dates = _window(tenant, now, days)
     mirror = collect_mirror_facts(tenant, start, end)
     ayla = collect_ayla_facts(
         client,
@@ -509,6 +517,12 @@ def run_mirror_reconciliation(
                 "booking.mirror_reconcile.unchecked tenant=%s err=%s",
                 tenant.slug,
                 exc,
+            )
+            summary["unchecked"].append(tenant.slug)
+            continue
+        except Exception:  # noqa: BLE001 — one tenant's bug must not blind the rest
+            logger.exception(
+                "booking.mirror_reconcile.tenant_failed tenant=%s", tenant.slug
             )
             summary["unchecked"].append(tenant.slug)
             continue
