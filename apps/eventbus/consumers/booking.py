@@ -710,9 +710,7 @@ def _emit_domain_booking_created_pair(
         # Ambiguity resolves towards ``external`` — undercharging is the
         # safe direction for a finance-facing field.
         booking_source = _INGEST_SOURCE_TO_BOOKING_SOURCE.get(raw_source, "external")
-    billable, billing_reason = compute_billable(
-        booking_source=booking_source, status=status
-    )
+    billable, billing_reason = compute_billable(booking_source=booking_source, status=status)
     correlation_id = envelope.correlation_id or new_correlation_id()
     # The ingest event id rides in metadata: causation_id is a
     # 26-char ULID column and Ayla's uuid4 event ids (36 chars, #1058)
@@ -753,6 +751,7 @@ def _emit_domain_booking_created_pair(
 
 
 # ─── handlers ──────────────────────────────────────────────────────────────
+
 
 def handle_booking_created(envelope: IngestEnvelope) -> None:
     """``booking.created`` — event-contract.md §3.1.

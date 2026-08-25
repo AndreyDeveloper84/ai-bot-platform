@@ -209,9 +209,7 @@ class TestConsumerEmitsInternalPair:
         assert attribution.data["billable"] is True
         assert attribution.data["ai_assist_score"] == pytest.approx(1.0)
 
-    def test_automation_source_is_ai_direct(
-        self, tenant: Tenant, bot_user_linked: BotUser
-    ) -> None:
+    def test_automation_source_is_ai_direct(self, tenant: Tenant, bot_user_linked: BotUser) -> None:
         """Pilot fact (DRF-1110 sweep, 22.08): dialog bookings round-trip
         with ``source='automation'`` — the bot IS the automation."""
         handle_booking_created(_envelope(data=_created_data(source="automation")))
@@ -306,9 +304,7 @@ class TestFlagOffUnchanged:
 
 
 class TestSignalReceiverStaysSilentOnTheAylaPath:
-    def test_booking_request_post_save_emits_nothing_when_flag_on(
-        self, tenant: Tenant
-    ) -> None:
+    def test_booking_request_post_save_emits_nothing_when_flag_on(self, tenant: Tenant) -> None:
         """DRF-1140's other half: on the Ayla path the round-trip consumer
         is the single emitter. If the receiver kept firing, every dialog
         booking would be counted twice — once under the billing row's
