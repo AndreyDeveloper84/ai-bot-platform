@@ -347,3 +347,21 @@ class TestTheArchiveIsStillReadable:
     def test_a_read_without_a_purpose_is_refused(self, erased) -> None:
         with pytest.raises(ValueError):
             read_anonymized_dialogue(erased, purpose="  ")
+
+    def test_the_archive_has_no_second_door_through_the_admin(self) -> None:
+        """Registering it in the Django admin would be an unaudited read.
+
+        The archive's one sanctioned reader demands a ``purpose`` and writes a
+        row per read — the same posture as ``RedZoneReader``. An admin
+        changelist would hand the same text to a staff member with neither,
+        and it would do it by adding four lines to a file nobody would connect
+        to this ticket. So the absence is asserted rather than assumed.
+        """
+        from django.contrib import admin as django_admin
+
+        assert ArchivedMessage not in django_admin.site._registry, (
+            "ArchivedMessage is registered in the Django admin. That is a read "
+            "path around read_anonymized_dialogue: no purpose, no audit row. "
+            "If an operator surface is genuinely needed, build it on that "
+            "function so the read is recorded."
+        )
