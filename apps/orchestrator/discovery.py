@@ -49,6 +49,7 @@ from apps.marketplace.discovery import (
 from apps.marketplace.dto import MasterCard, SalonCard, ServiceCard
 from apps.orchestrator.llm.templates import get_fallback
 from apps.persona.memory_surface import render_personal_context
+from apps.persona.voice import SURFACE_MARKETPLACE, assistant_identity
 
 if TYPE_CHECKING:
     from apps.identity.services.memory_reader import PersonalContextView
@@ -379,8 +380,14 @@ def build_discovery_prompt(
     memory; appended to the system message when present, omitted otherwise.
     """
     voice = _discovery_voice_fields()
+    # The NAME comes from the surface table (apps.persona.voice), not from
+    # the raw frozen dict — the same rule the concierge follows (#1226):
+    # reading `voice['assistant_name']` here would quietly ignore a
+    # marketplace override, and the two prompts would drift apart in
+    # silence. Same word today; what changes is that it cannot diverge.
+    identity = assistant_identity(SURFACE_MARKETPLACE)
     system_parts = [
-        f"Ты — {voice['assistant_name']}, AI-помощник «{voice['business_name']}».",
+        f"Ты — {identity.name}, AI-помощник «{voice['business_name']}».",
         "Ты помогаешь клиенту по всей стране подобрать подходящего "
         f"{voice['domain']}-мастера и записаться — конкретный салон выбирается "
         "только в момент записи.",

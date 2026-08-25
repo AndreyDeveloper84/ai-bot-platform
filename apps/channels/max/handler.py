@@ -137,6 +137,7 @@ from apps.identity.services import (
 )
 from apps.persona.memory_commands import handle_memory_command
 from apps.persona.memory_surface import render_current_personal_context
+from apps.persona.voice import SALON_BUSINESS_NAME
 from apps.orchestrator.concierge import generate_direct_show_masters_reply
 from apps.orchestrator.fast_path import claims_direct_show_masters
 from apps.orchestrator.discovery import (
@@ -193,11 +194,16 @@ logger = logging.getLogger(__name__)
 
 # Welcome message — ported verbatim from
 # `legacy_maxbot/texts.py::GREETING_NEW_USER` (running in prod since
-# 2026-04). Sprint 3 AI Concierge will replace this with personalised
-# welcome flow via tenant.brand_voice persona.
+# 2026-04). The salon NAME now comes from the one place that owns it
+# (apps.persona.voice, DRF-1265) — the same «Формула тела» the FAQ and
+# booking skills introduce — instead of a string only this file knew.
+# The rest of the wording stays byte-identical to the legacy greeting:
+# «массажного салона … в Пензе» is descriptive copy, not an identity
+# field, and changing it is a product call. Sprint 3 AI Concierge will
+# replace this with personalised welcome flow via tenant.brand_voice persona.
 _WELCOME_TEXT = (
     "Здравствуйте! 👋\n\n"
-    "Это бот массажного салона «Формула тела» в Пензе.\n"
+    f"Это бот массажного салона «{SALON_BUSINESS_NAME}» в Пензе.\n"
     "Помогу записаться, расскажу об услугах и отвечу на частые вопросы.\n\n"
     "Выберите раздел:"
 )

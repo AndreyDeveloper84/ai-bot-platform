@@ -55,6 +55,7 @@ from apps.audit.services import write_audit
 from apps.events.services import emit
 from apps.events.vocabulary import SKILL_DISPATCHED
 from apps.llm.protocol import LLMError
+from apps.persona.voice import DEFAULT_SALON_PERSONA
 from apps.skills.base import SkillContext, SkillResult
 from apps.skills.booking.lookup import is_booking_request, is_personal_booking_lookup
 from apps.skills.faq.prompts import BrandVoiceConfig, build_faq_prompt
@@ -69,11 +70,13 @@ logger = logging.getLogger(__name__)
 
 
 # Sprint 7 hardcoded brand voice. Sprint 8 PromptRegistry lifts this
-# into a per-tenant config. The persona+tone are non-controversial —
-# "warm admin of the salon" — and forbidden phrases cover the
+# into a per-tenant config. The persona is the one place that owns the
+# front-desk identity (apps.persona.voice, DRF-1265) — it used to be a
+# verbatim literal here AND in the booking skill. The tone+forbidden are
+# non-controversial — "warm admin of the salon" — and cover the
 # generic-marketing-speak we want to avoid.
 _DEFAULT_BRAND_VOICE = BrandVoiceConfig(
-    persona="Алина, администратор салона «Формула тела»",
+    persona=DEFAULT_SALON_PERSONA,
     tone="дружелюбный, краткий, без канцелярита",
     forbidden=(
         "гарантирую",
