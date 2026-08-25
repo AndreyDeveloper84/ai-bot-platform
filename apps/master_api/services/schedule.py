@@ -70,7 +70,6 @@ from apps.booking.models import RemoteBookingProxy
 from apps.catalog.models import CatalogMaster, CatalogService
 from apps.identity.models import BotUser
 from apps.master_api.services.visit_source import (
-    BOOKED_STATUSES,
     UPCOMING_STATUSES,
     VisitRow,
     master_visits,
@@ -520,11 +519,12 @@ def _detect_conflicts(
 
 
 def _build_returning_customer_index(master: CatalogMaster, bot_user_ids: list[Any]) -> set[Any]:
-    """Return the subset of bot_user_ids who have >1 booking with this master.
+    """Return the subset of bot_user_ids with >1 COMPLETED visit with this master.
 
-    One DB scan per range (not per booking). Counts booked statuses —
-    upcoming plus completed — mirroring the dashboard's
-    :func:`_is_returning_customer`.
+    One DB scan per range (not per booking). DRF-1146 (owner decision
+    25.08): «returning» counts visits, not bookings — a customer who
+    booked five times and never showed is not a regular. The mirror
+    marks a visit completed via the ``completed`` status.
 
     DRF-1085 changed the shape of this rule, not just its source. The old
     version counted ``RESCHEDULED`` rows as separate visits because the
@@ -542,7 +542,7 @@ def _build_returning_customer_index(master: CatalogMaster, bot_user_ids: list[An
         tenant_id=master.tenant_id,
         specialist_id=master.id,
         bot_user_id__in=list(bot_user_ids),
-        status__in=list(BOOKED_STATUSES),
+        status="completed",
     ).values_list("bot_user_id", flat=True)
     counts = Counter(rows)
     return {bid for bid, n in counts.items() if n > 1}

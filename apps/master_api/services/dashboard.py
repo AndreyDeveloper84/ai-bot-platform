@@ -314,15 +314,19 @@ def get_active_visit(master: CatalogMaster, now: datetime) -> ActiveVisit | None
 
 
 def _is_returning_customer(master: CatalogMaster, booking: VisitRow) -> bool:
-    """True when the client has more than one live visit with this master.
+    """True when the client has more than one COMPLETED visit with this master.
 
-    Counts booked statuses — upcoming plus completed. Cancellations and
-    no-shows do not make someone a returning customer.
+    DRF-1146 (owner decision 25.08, «чип по визитам»): the chip means
+    «приходил больше одного раза», not «бронировал больше одного раза».
+    Ten cancellations and one upcoming booking do not make a regular —
+    they make a no-show risk. Until visit completion is used at scale
+    (DRF-1048) the chip stays dark for everyone: an empty flag does not
+    lie, a wrong one does.
     """
 
     if booking.bot_user_id is None:
         return False
-    return master_visit_count(master, bot_user_id=booking.bot_user_id) > 1
+    return master_visit_count(master, bot_user_id=booking.bot_user_id, statuses=("completed",)) > 1
 
 
 def _customer_intent_hint(booking: VisitRow) -> str:

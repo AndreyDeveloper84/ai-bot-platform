@@ -89,8 +89,8 @@ visits qualify. Avoids labelling one-off walk-ins as "lost"."""
 
 IS_RETURNING_MIN_VISITS = 2
 """Mirrors :func:`apps.master_api.services.dashboard._is_returning_customer`
-semantics — a customer is "returning" once they have a 2nd booking on the
-books (per master-mobile §M1 spec)."""
+semantics — a customer is "returning" once they have a 2nd COMPLETED visit
+(DRF-1146, owner decision 25.08: visits, not bookings)."""
 
 # Helpers -----------------------------------------------------------------
 
@@ -143,15 +143,14 @@ def list_master_customers(
 
     ### Counting rules
 
-    A "visit" is any :class:`BookingRequest` row for this master with
-    ``status`` IN (``CONFIRMED``, ``RESCHEDULED``) — both terminal-good
-    states. ``CANCELLED`` and the interim ``*_requested`` rows are
-    excluded so a customer who cancels every booking doesn't pad the
-    roster. ``RESCHEDULED`` IS counted because Tau §4.3 wants to credit
-    the customer for showing up the first time even if the visit row
-    was later replaced — the new replacement row is also CONFIRMED and
-    contributes a separate count, so the customer's "total_visits"
-    matches what they (and the master) remember.
+    A "visit" is a :class:`BookingRequest` row for this master with
+    ``completed_at`` stamped — the visit actually happened. DRF-1146
+    (owner decision 25.08, «чип по визитам»): bookings that were merely
+    confirmed (or rescheduled) but never completed do NOT count — a
+    customer with ten cancellations and zero visits is not «returning»,
+    they are a no-show risk. Until visit completion runs at scale
+    (DRF-1048) the flags simply stay dark: an empty flag does not lie,
+    a wrong one does.
 
     Rows without a linked ``bot_user`` (legacy walk-ins, snapshot-only
     bookings) are SKIPPED — there's no stable identity to aggregate
@@ -168,11 +167,7 @@ def list_master_customers(
     if now is None:
         now = dj_timezone.now()
 
-    # Status filter — see docstring "Counting rules".
-    counted_statuses = (
-        BookingRequest.Status.CONFIRMED,
-        BookingRequest.Status.RESCHEDULED,
-    )
+    # Completed visits only — see docstring "Counting rules" (DRF-1146).
 
     # Single grouped query: per bot_user_id, count rows + find the most-recent
     # visit. We then load BotUser display fields in a second query keyed by
@@ -181,7 +176,7 @@ def list_master_customers(
         BookingRequest.all_tenants.filter(
             tenant_id=master.tenant_id,
             master_id=master.id,
-            status__in=counted_statuses,
+            completed_at__isnull=False,
             bot_user__isnull=False,
         )
         .values("bot_user_id")
@@ -221,7 +216,7 @@ def list_master_customers(
         BookingRequest.all_tenants.filter(
             tenant_id=master.tenant_id,
             master_id=master.id,
-            status__in=counted_statuses,
+            completed_at__isnull=False,
             bot_user_id__in=bot_user_ids,
         )
         .order_by("bot_user_id", "-visit_at")

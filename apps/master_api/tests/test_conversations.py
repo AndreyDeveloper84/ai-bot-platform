@@ -1523,18 +1523,36 @@ class TestServiceHelpers:
     def test_is_returning_helper(self, tenant: Tenant, accepted_master: CatalogMaster) -> None:
         customer = _make_bot_user(tenant=tenant)
         assert conv_svc._is_returning(customer, accepted_master) is False
+        # DRF-1146: booked-but-not-completed does not count, even twice.
+        _make_booking(
+            tenant=tenant,
+            master=accepted_master,
+            bot_user=customer,
+            visit_local=datetime(2026, 5, 20, 12, 0, tzinfo=MSK),
+        )
+        _make_booking(
+            tenant=tenant,
+            master=accepted_master,
+            bot_user=customer,
+            visit_local=datetime(2026, 5, 21, 12, 0, tzinfo=MSK),
+        )
+        assert conv_svc._is_returning(customer, accepted_master) is False
+        # One completed visit + one booked — still not «returning».
         _make_booking(
             tenant=tenant,
             master=accepted_master,
             bot_user=customer,
             visit_local=datetime(2026, 5, 22, 12, 0, tzinfo=MSK),
+            completed=True,
         )
         assert conv_svc._is_returning(customer, accepted_master) is False
+        # The second COMPLETED visit is what lights the chip.
         _make_booking(
             tenant=tenant,
             master=accepted_master,
             bot_user=customer,
             visit_local=datetime(2026, 5, 23, 12, 0, tzinfo=MSK),
+            completed=True,
         )
         assert conv_svc._is_returning(customer, accepted_master) is True
 

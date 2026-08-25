@@ -235,6 +235,9 @@ def seeded_surface(
             visit_at=_utc(datetime(2026, 5, day, 14, 0)),
             duration_min=60,
             status=BookingRequest.Status.CONFIRMED,
+            # DRF-1146: the roster counts completed visits only — stamp the
+            # completion so these past rows are visits, not mere bookings.
+            completed_at=_utc(datetime(2026, 5, day, 14, 0)),
         )
 
     conv = Conversation.all_tenants.create(
