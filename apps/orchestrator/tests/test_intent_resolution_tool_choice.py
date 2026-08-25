@@ -329,7 +329,18 @@ class TestDeterministicPath:
     @override_settings(INTENT_RESOLUTION_FROM_TOOL_CHOICE_ENABLED=True)
     def test_rejected_draft_falls_back_to_llm(self):
         # _validate_and_build отверг драфт — НИЧЕГО не терять: LLM-проход.
-        with patch.object(intent_resolution, "_validate_and_build", Mock(return_value=None)):
+        # Отвергается только ПЕРВЫЙ (детерминированный) драфт; валидатор
+        # LLM-прохода работает как обычно.
+        real_validate = intent_resolution._validate_and_build
+        calls = {"n": 0}
+
+        def _reject_first(raw, **kwargs):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return None
+            return real_validate(raw, **kwargs)
+
+        with patch.object(intent_resolution, "_validate_and_build", _reject_first):
             contract, client, _ = _resolve(tool_trace=SHOW_MASTERS_TRACE)
         assert contract is not None
         client.chat.completions.create.assert_awaited_once()
