@@ -98,7 +98,11 @@ from django.db.models import Exists, OuterRef, Q
 from django.utils import timezone
 
 from apps.audit.services import write_audit
-from apps.conversations.erasure import anonymize_dialogue, shell_ids_for_person
+from apps.conversations.erasure import (
+    AnonymizeResult,
+    anonymize_dialogue,
+    shell_ids_for_person,
+)
 from apps.conversations.models import ArchivedMessage, Conversation
 from apps.identity.models import MemoryEntry, UserPersonalContext
 from apps.identity.services.memory_deleter import soft_delete_green_entries
@@ -205,10 +209,18 @@ def sweep_forget_all(user_id: uuid.UUID) -> ForgetAllSweepResult:
     # after the request are theirs again. A «now» cutoff would have this hourly
     # sweep blanking their live conversation every hour forever — and would make
     # the re-run this module is built around destructive instead of idempotent.
-    dialogue = anonymize_dialogue(
-        shell_ids_for_person(ayla_user_id=user_id),
-        through=upc.forget_all_requested_at,
-        reason=ArchivedMessage.Reason.FORGET_ALL,
+    # Non-NULL by the queryset above (``forget_all_requested_at__isnull=False``);
+    # bound to a local so the invariant is stated where it is relied on rather
+    # than asserted away with a cast.
+    requested_at = upc.forget_all_requested_at
+    dialogue = (
+        anonymize_dialogue(
+            shell_ids_for_person(ayla_user_id=user_id),
+            through=requested_at,
+            reason=ArchivedMessage.Reason.FORGET_ALL,
+        )
+        if requested_at is not None
+        else AnonymizeResult()
     )
 
     result = ForgetAllSweepResult(

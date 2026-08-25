@@ -255,7 +255,7 @@ def _redact(text: str) -> str:
     return masked
 
 
-def _redact_value(value: object) -> object:
+def _redact_value(value: Any) -> Any:
     """Recursive redaction of a JSON payload (``action_data`` / ``tool_call``).
 
     Walks the structure and applies :func:`_redact` to every string leaf, so
@@ -297,7 +297,7 @@ def _clear_redis_stores(conversation_id: uuid.UUID) -> None:
 
 def shell_ids_for_person(
     *,
-    bot_user: object | None = None,
+    bot_user: Any = None,
     ayla_user_id: uuid.UUID | None = None,
 ) -> list[uuid.UUID]:
     """Every ``BotUser`` shell of one human, for the anonymiser's subject set.
