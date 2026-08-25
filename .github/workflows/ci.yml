@@ -1,13 +1,29 @@
 name: ci
 
+# DRF-1377 — the push trigger no longer follows topic branches.
+#
+# Measured 25.08 at 01:20 UTC: 37 of the last ~50 commits ran `ci` TWICE,
+# once for `push` on the topic branch and once for `pull_request` on the
+# same SHA, byte-identical work on the same runner pool. That is where the
+# «45m21s against a 45m ceiling» came from — not a slow suite, two runs
+# elbowing each other.
+#
+# Grouping the two events together cannot fix this: whichever run lost the
+# race would report `cancelled` on the PR, which reads as «somebody skipped
+# it» (DRF-1373). The duplication has to die at the trigger instead.
+#
+# `replay.yml` has always listed only `main` and `dev` here, and its history
+# shows exactly one run per PR SHA. This makes `ci` match it.
+#
+# Trade-off, stated plainly: pushing a topic branch with no PR open now runs
+# nothing. Open the PR (or use `workflow_dispatch`) to get a verdict. Pushes
+# to `dev`/`main` still run — that is the post-merge gate and it is the half
+# that must never be skipped.
 on:
   push:
     branches:
       - main
       - dev
-      - "feat/**"
-      - "fix/**"
-      - "chore/**"
     paths-ignore:
       - "docs/**"
       - "**/*.md"
@@ -20,9 +36,30 @@ on:
       - "**/*.md"
   workflow_dispatch:
 
+# DRF-1377 — keyed on the PR number, and cancelling restricted to PRs.
+#
+# The old group was `ci-${{ github.ref }}` with an unconditional
+# `cancel-in-progress: true`. On `dev` every ref is the same string, so each
+# merge cancelled the CI run of the merge before it. Measured over the last
+# 20 pushes to `dev`: 15 cancelled, 4 green. Three quarters of everything
+# that landed did so with no verdict, and the evidence was invisible because
+# GitHub renders a cancelled run grey, not red — the same trap DRF-1373 found
+# in `replay.yml`. Commit a18ca029 (the DRF-1310 LLM-client fix) is one of
+# the fifteen.
+#
+# So:
+#   * `github.event.pull_request.number` groups a PR with itself. A new
+#     commit makes the previous run's verdict meaningless, so superseding it
+#     is honest work, and that is the only case `cancel-in-progress` covers.
+#   * `github.sha` gives every push its own group. A burst of merges to `dev`
+#     can no longer collide, and with cancelling off for `push` it could not
+#     act even if it did. Landed code always gets its own verdict.
+#
+# Not `github.workflow`: `ci-docs-skip.yml` is also named `ci`, so that
+# expression is ambiguous across the two files. The literal prefix is not.
 concurrency:
-  group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  group: ci-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   test:
