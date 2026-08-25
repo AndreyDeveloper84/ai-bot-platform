@@ -155,7 +155,7 @@ dependencies = [
 #
 # CHANGELOG: https://github.com/AndreyDeveloper84/ayla-ai-core/blob/main/CHANGELOG.md
 ai-core = [
-    "ayla-ai-core[django] @ git+https://github.com/AndreyDeveloper84/ayla-ai-core.git@af620bac8cb33ad6216350c94818b076e8b5e8e6",
+    "ayla-ai-core[django] @ git+https://github.com/AndreyDeveloper84/ayla-ai-core.git@ee6425ac90f6f4e2e0d899c22ebe981ae3b623e1",
 ]
 
 dev = [
