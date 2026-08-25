@@ -45,7 +45,7 @@ describe("CustomerWellnessDashboardScreen gating", () => {
     mockedBrowse.mockResolvedValue({
       services: [],
       masters: [],
-      pickServiceIds: [],
+      picks: [],
     });
   });
 
@@ -65,23 +65,23 @@ describe("CustomerWellnessDashboardScreen gating", () => {
     expect(screen.queryByText(/Питание:/)).not.toBeInTheDocument();
   });
 
-  it("DEV build, Block 7: renders real scorer picks (no reasoning_text)", async () => {
+  const PEDIKYUR = {
+    id: "svc-2",
+    slug: "pedikyur",
+    name: "Педикюр",
+    short_description: "",
+    description: "",
+    price_from: "2200.00",
+    duration_min: 90,
+    is_popular: false,
+    contraindications: "",
+  };
+
+  it("DEV build, Block 7: renders scorer picks WITH the WHY the source sent", async () => {
     mockedBrowse.mockResolvedValue({
-      services: [
-        {
-          id: "svc-2",
-          slug: "pedikyur",
-          name: "Педикюр",
-          short_description: "",
-          description: "",
-          price_from: "2200.00",
-          duration_min: 90,
-          is_popular: false,
-          contraindications: "",
-        },
-      ],
+      services: [PEDIKYUR],
       masters: [],
-      pickServiceIds: ["svc-2"],
+      picks: [{ serviceId: "svc-2", reasons: ["Свободно раньше всех остальных"] }],
     });
     await renderScreen(false);
     expect(
@@ -89,5 +89,22 @@ describe("CustomerWellnessDashboardScreen gating", () => {
     ).toBeInTheDocument();
     expect(screen.getByText("Педикюр")).toBeInTheDocument();
     expect(screen.getByText(/2 200 ₽/)).toBeInTheDocument();
+    expect(screen.getByText("Свободно раньше всех остальных")).toBeInTheDocument();
+  });
+
+  // Owner ruling 25.08 — same gate on the second branded surface.
+  it("DEV build, Block 7: no WHY → no branded block, dashboard unaffected", async () => {
+    mockedBrowse.mockResolvedValue({
+      services: [PEDIKYUR],
+      masters: [],
+      picks: [],
+    });
+    await renderScreen(false);
+    // Dashboard itself still renders.
+    expect(await screen.findByText(/Вода:/)).toBeInTheDocument();
+    expect(
+      screen.queryByRole("heading", { name: /Ayla подобрала тебе/ }),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByText("Педикюр")).not.toBeInTheDocument();
   });
 });

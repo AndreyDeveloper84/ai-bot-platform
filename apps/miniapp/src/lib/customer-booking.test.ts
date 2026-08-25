@@ -148,9 +148,9 @@ describe("getCatalogBrowse", () => {
     mockedFetchMasters.mockResolvedValue({ masters: [MASTER] });
     mockedFetchRecommendations.mockResolvedValue({
       recommendations: [
-        { service_id: "svc-ghost", score: 0.99 },
-        { service_id: "svc-2", score: 0.9 },
-        { service_id: "svc-1", score: 0.8 },
+        { service_id: "svc-ghost", score: 0.99, reasons: ["Свободно раньше"] },
+        { service_id: "svc-2", score: 0.9, reasons: ["Свободно раньше"] },
+        { service_id: "svc-1", score: 0.8, reasons: ["20 минут от тебя"] },
       ],
     });
     const data = await getCatalogBrowse();
@@ -161,7 +161,69 @@ describe("getCatalogBrowse", () => {
     ]);
     expect(data.masters).toEqual([MASTER]);
     // Score-desc order; ids missing from the mirror are dropped.
-    expect(data.pickServiceIds).toEqual(["svc-2", "svc-1"]);
+    expect(data.picks).toEqual([
+      { serviceId: "svc-2", reasons: ["Свободно раньше"] },
+      { serviceId: "svc-1", reasons: ["20 минут от тебя"] },
+    ]);
+  });
+
+  // ── Owner ruling 25.08: a pick without displayable WHY is not a
+  //    branded Ayla pick, so it never reaches the screens.
+  it("drops picks the scorer sent without any displayable WHY", async () => {
+    mockedFetchServices.mockResolvedValue({
+      services: [
+        service({ id: "svc-1", name: "Маникюр" }),
+        service({ id: "svc-2", name: "Педикюр" }),
+      ],
+    });
+    mockedFetchMasters.mockResolvedValue({ masters: [MASTER] });
+    // Today's runtime shape: `{service_id, score}` and nothing else.
+    mockedFetchRecommendations.mockResolvedValue({
+      recommendations: [
+        { service_id: "svc-1", score: 0.9 },
+        { service_id: "svc-2", score: 0.8 },
+      ],
+    });
+    const data = await getCatalogBrowse();
+    // Catalog itself is untouched — only the branded picks disappear.
+    expect(data.services).toHaveLength(2);
+    expect(data.picks).toEqual([]);
+  });
+
+  it("keeps the May-spec single `reasoning_text` shape too", async () => {
+    mockedFetchServices.mockResolvedValue({
+      services: [service({ id: "svc-1", name: "Маникюр" })],
+    });
+    mockedFetchMasters.mockResolvedValue({ masters: [MASTER] });
+    mockedFetchRecommendations.mockResolvedValue({
+      recommendations: [
+        { service_id: "svc-1", score: 0.9, reasoning_text: "20 минут от тебя, рейтинг 4.9" },
+      ],
+    });
+    const data = await getCatalogBrowse();
+    expect(data.picks).toEqual([
+      { serviceId: "svc-1", reasons: ["20 минут от тебя, рейтинг 4.9"] },
+    ]);
+  });
+
+  it("trims blanks and caps WHY at 3 lines", async () => {
+    mockedFetchServices.mockResolvedValue({
+      services: [
+        service({ id: "svc-1", name: "Маникюр" }),
+        service({ id: "svc-2", name: "Педикюр" }),
+      ],
+    });
+    mockedFetchMasters.mockResolvedValue({ masters: [MASTER] });
+    mockedFetchRecommendations.mockResolvedValue({
+      recommendations: [
+        { service_id: "svc-1", score: 0.9, reasons: ["  раз  ", "", "два", "три", "четыре"] },
+        { service_id: "svc-2", score: 0.8, reasons: ["   ", ""] },
+      ],
+    });
+    const data = await getCatalogBrowse();
+    expect(data.picks).toEqual([
+      { serviceId: "svc-1", reasons: ["раз", "два", "три"] },
+    ]);
   });
 
   it("returns empty picks when the Ayla scorer is unavailable", async () => {
@@ -173,7 +235,7 @@ describe("getCatalogBrowse", () => {
     const data = await getCatalogBrowse();
     expect(data.services).toHaveLength(1);
     expect(data.masters).toHaveLength(1);
-    expect(data.pickServiceIds).toEqual([]);
+    expect(data.picks).toEqual([]);
   });
 
   it("rejects when the mirror itself fails (screen shows the error state)", async () => {

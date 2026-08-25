@@ -273,15 +273,19 @@ export function CustomerWellnessDashboardScreen() {
   const todayData = today.kind === "ok" ? today.data : null;
   const activityData = activity.kind === "ok" ? activity.data : null;
   const recsData = recs.kind === "ok" ? recs.data : null;
-  // Block 7 picks — top-3 services by Ayla scorer rank (phase 3.1:
-  // scorer service_ids joined onto mirror services; no reasoning_text
-  // exists upstream, so cards render factual fields only).
-  const pickServices: Service[] = (() => {
+  // Block 7 picks — top-3 services by Ayla scorer rank, joined onto the
+  // mirror services. Owner ruling 25.08: «Нет displayable WHY → нет
+  // блока „Ayla подобрала"» — `getCatalogBrowse` already dropped every
+  // pick the source did not explain, so this list is empty until the
+  // scorer sends WHY, and the branded section below hides itself.
+  const picksWithWhy: { service: Service; reasons: string[] }[] = (() => {
     if (!recsData) return [];
     const byId = new Map(recsData.services.map((s) => [s.id, s]));
-    return recsData.pickServiceIds
-      .map((id) => byId.get(id))
-      .filter((s): s is Service => s != null)
+    return recsData.picks
+      .map((pick) => ({ service: byId.get(pick.serviceId), reasons: pick.reasons }))
+      .filter(
+        (p): p is { service: Service; reasons: string[] } => p.service != null,
+      )
       .slice(0, 3);
   })();
 
@@ -670,10 +674,13 @@ export function CustomerWellnessDashboardScreen() {
           </section>
         )}
 
-        {/* Block 7 — Recommendations embed (TL extension; phase 3.1:
-            real scorer picks onto mirror services). Hide silently on
-            error / empty (spec: no error UI). */}
-        {pickServices.length > 0 && (
+        {/* Block 7 — Recommendations embed (TL extension: real scorer
+            picks onto mirror services). Hide silently on error / empty
+            (spec: no error UI). Owner ruling 25.08 — the branded
+            signature «Ayla подобрала тебе» is gated on the WHY the
+            SOURCE sent, not on a flag: the block reappears on its own
+            once `POST /recommendations` returns reasons. */}
+        {picksWithWhy.length > 0 && (
             <section
               className="wellness-dash__recos"
               aria-labelledby="recos-header"
@@ -683,10 +690,11 @@ export function CustomerWellnessDashboardScreen() {
                 <span lang="en">Ayla</span> подобрала тебе
               </h2>
               <ul className="wellness-dash__reco-list">
-                {pickServices.map((service) => (
+                {picksWithWhy.map(({ service, reasons }) => (
                   <li key={service.id}>
                     <RecoCard
                       service={service}
+                      reasons={reasons}
                       onOpen={() =>
                         navigate(`/catalog/${service.id}`)
                       }
@@ -1004,15 +1012,23 @@ function BookingCard({
   );
 }
 
+/**
+ * One branded pick: WHAT (service + factual chips) + WHY (the lines the
+ * source sent, verbatim). `reasons` is always non-empty — the screen
+ * never builds a RecoCard for a pick it cannot explain.
+ */
 function RecoCard({
   service,
+  reasons,
   onOpen,
 }: {
   service: Service;
+  reasons: string[];
   onOpen: () => void;
 }) {
   const titleId = `wd-reco-title-${service.id}`;
   const metaId = `wd-reco-meta-${service.id}`;
+  const whyId = `wd-reco-why-${service.id}`;
   return (
     <article className="wellness-dash__reco-card">
       <button
@@ -1020,20 +1036,29 @@ function RecoCard({
         className="wellness-dash__reco-btn"
         onClick={onOpen}
         aria-labelledby={titleId}
-        aria-describedby={metaId}
+        aria-describedby={`${metaId} ${whyId}`}
       >
         <div id={titleId} className="wellness-dash__reco-title">
           {service.name}
         </div>
         <div id={metaId} className="wellness-dash__reco-meta">
-          {/* Phase 3.1: factual fields only — no reasoning_text exists
-              upstream and fabricating it is forbidden (pilot honesty
-              rule; lib/customer-booking.ts header). */}
+          {/* Factual mirror fields only — never a synthesised WHY. */}
           {formatDuration(service.duration_min)}
           {service.duration_min && service.price_from ? " · " : ""}
           {service.price_from ? `от ${formatMoney(service.price_from)}` : ""}
         </div>
       </button>
+      {/* WHY — verbatim from the source. Kept OUTSIDE the button (a
+          <ul> is not phrasing content) but wired to it via
+          aria-describedby, so screen readers announce the reason with
+          the pick. */}
+      <ul id={whyId} className="wellness-dash__reco-why">
+        {reasons.map((reason) => (
+          <li key={reason} className="wellness-dash__reco-why-item">
+            {reason}
+          </li>
+        ))}
+      </ul>
     </article>
   );
 }
