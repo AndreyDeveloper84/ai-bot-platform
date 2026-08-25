@@ -38,6 +38,8 @@ from apps.identity.models import MemoryEntry, UserPersonalContext
 def soft_delete_green_entries(
     user_id: uuid.UUID,
     entry_ids: Iterable[uuid.UUID],
+    *,
+    reason: str = MemoryEntry.DELETION_REASON_USER_DELETE,
 ) -> int:
     """Soft-delete the given user's live GREEN entries. Returns the count deleted.
 
@@ -45,6 +47,15 @@ def soft_delete_green_entries(
     not the user's, not green, or already deleted is silently skipped (defence
     against a caller passing a stray id). Idempotent: a re-delete of an
     already-tombstoned row is a no-op.
+
+    ``reason`` is the tombstone's ``deletion_reason``. It defaults to
+    ``user_delete`` — «the person named this fact and asked for it gone» —
+    because that is what the chat command does. The forget-all sweep passes
+    ``forget_all`` instead: the two are different requests with different
+    evidence behind them, and a tombstone that cannot tell them apart cannot
+    answer «why is this row deleted» for an audit. ``DELETION_REASON_FORGET_ALL``
+    had sat unused in the model since the schema was written, for the same
+    reason the sweep itself did not exist (DRF-1370).
     """
 
     ids = list(entry_ids)
@@ -62,7 +73,7 @@ def soft_delete_green_entries(
         ).update(
             delete_requested_at=now,
             soft_deleted_at=now,
-            deletion_reason=MemoryEntry.DELETION_REASON_USER_DELETE,
+            deletion_reason=reason,
             # DRF-1263 — `status` moves in the SAME UPDATE as the tombstone.
             # Without it every deletion after migration 0016 minted
             # `status='active' AND soft_deleted_at IS NOT NULL`: a state the
@@ -82,7 +93,7 @@ def soft_delete_green_entries(
             payload={
                 "user_id": str(user_id),
                 "count": deleted,
-                "reason": MemoryEntry.DELETION_REASON_USER_DELETE,
+                "reason": reason,
             },
         )
     return deleted

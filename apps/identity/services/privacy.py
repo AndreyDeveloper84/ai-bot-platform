@@ -3,9 +3,12 @@
 Implements the bot-side half of ``PILOT_CONTRACTS_2026-08-15`` §6:
 
 * **Export** — one JSON aggregating the Ayla export (verbatim upstream
-  payload, C5.1) + bot-side green ``MemoryEntry`` rows + ``ConsentRecord``
-  history for the person (cross-tenant — the person is keyed by
-  ``ayla_user_id`` and may have a ``BotUser`` per tenant).
+  payload, C5.1) + the bot-side memory profile row + green ``MemoryEntry``
+  rows + the Mini App profile preferences + ``ConsentRecord`` history for
+  the person (cross-tenant — the person is keyed by ``ayla_user_id`` and may
+  have a ``BotUser`` per tenant) + a ``coverage`` block declaring, slot by
+  slot, what is NOT in the file and why (DRF-1370, see
+  :mod:`apps.identity.export_coverage`).
 * **Delete** — the cascade: Ayla personal-data delete (C5.2 upstream),
   bot ``MemoryEntry`` erasure (immediate green soft-delete +
   ``forget_all`` UPC tombstone), consent withdraw cascade
@@ -74,13 +77,14 @@ from django.utils import timezone
 from apps.audit.services import write_audit
 from apps.consent.models import ConsentRecord
 from apps.consent.services import withdraw_personal_data_for_bot_users
-from apps.identity.models import BotUser
+from apps.identity.export_coverage import build_coverage_section
+from apps.identity.models import BotUser, UserPreferences
 from apps.identity.services.memory_deleter import (
     request_forget_all,
     soft_delete_green_entries,
 )
 from apps.identity.services.memory_key_policy import select_current_facts
-from apps.identity.services.memory_reader import read_green_entries
+from apps.identity.services.memory_reader import get_personal_context, read_green_entries
 from apps.integrations.ayla.personal_context_client import (
     PersonalContextError,
     PersonalContextHttpClient,
@@ -306,8 +310,6 @@ def _erase_bot_user_pii(bot_user: BotUser, link: _PersonLink) -> None:
     ``get_profile`` recreates a default row on the next read, so nothing
     downstream breaks.
     """
-    from apps.identity.models import UserPreferences
-
     ids = _person_shell_ids(bot_user, link)
 
     with transaction.atomic():
@@ -438,7 +440,53 @@ def export_personal_data(
             for entry in entries
         ]
 
+    # DRF-1370 — the bot-side memory profile row itself. Not entries: the
+    # columns ON the UPC, and ``summary`` among them. That is Ayla's running
+    # prose account of who this person is, stored unencrypted so the prompt
+    # builder can read it every turn (model docstring) — the single largest
+    # thing we hold about someone in free text, and it was not in the file
+    # they were handed when they asked what we hold. Read through the same
+    # gate as the prompt, so a forgotten user gets nothing; the interim-window
+    # consequence of that choice is declared in ``coverage.known_limits``
+    # rather than left for a regulator to find.
+    personal_context_section: dict[str, Any] | None = None
+    if ayla_user_id is not None:
+        upc = get_personal_context(ayla_user_id)
+        if upc is not None:
+            personal_context_section = {
+                "display_name_preferred": upc.display_name_preferred,
+                "language_preferred": upc.language_preferred,
+                "summary": upc.summary,
+                "minor_lock": upc.minor_lock,
+            }
+
     shell_ids = _person_shell_ids(bot_user, link)
+
+    # DRF-1370 — the Mini App profile screen's own values. Their absence was
+    # the plainest under-report in the file: a person exported their data and
+    # did not get back the preferences they had set themselves, on our screen,
+    # minutes earlier. One row per shell, because preferences are per-tenant.
+    #
+    # ``allergies`` is deliberately NOT here. It is free-text health data —
+    # 152-ФЗ ст. 10 special category — and what a legal export does with a
+    # special category is the owner's decision, not this function's. Its
+    # existence is declared in ``coverage.withheld`` instead of being either
+    # silently included or silently dropped. (DRF-1371 removes the column.)
+    preferences_qs = UserPreferences.all_tenants.filter(bot_user_id__in=shell_ids).order_by(
+        "created_at"
+    )
+    preferences_section = [
+        {
+            "notify_reminders": row.notify_reminders,
+            "notify_retention": row.notify_retention,
+            "notify_promo": row.notify_promo,
+            "notify_birthday": row.notify_birthday,
+            "birthday_date": row.birthday_date.isoformat() if row.birthday_date else None,
+            "updated_at": row.updated_at.isoformat(),
+        }
+        for row in preferences_qs
+    ]
+
     consents_qs = ConsentRecord.all_tenants.filter(bot_user_id__in=shell_ids).order_by(
         "captured_at"
     )
@@ -460,7 +508,14 @@ def export_personal_data(
         target_id=bot_user.id,
         payload={
             "actor": "customer",
-            "scope": ["ayla_export", "memory_green", "consents"],
+            "scope": [
+                "ayla_export",
+                "personal_context",
+                "memory_green",
+                "preferences",
+                "consents",
+                "coverage",
+            ],
         },
     )
 
@@ -470,8 +525,15 @@ def export_personal_data(
             "ayla_user_id": str(ayla_user_id) if ayla_user_id else None,
         },
         "ayla": ayla_section,
+        "personal_context": personal_context_section,
         "memory": memory_section,
+        "preferences": preferences_section,
         "consents": consents_section,
+        # Last on purpose: the reader has just seen what IS here, and this is
+        # the answer to «а это всё?». Under-reporting the composition is the
+        # failure this file's own DRF-1262 comment calls the worse one; until
+        # DRF-1370 the comment was written here and broken here.
+        "coverage": build_coverage_section(),
     }
 
 

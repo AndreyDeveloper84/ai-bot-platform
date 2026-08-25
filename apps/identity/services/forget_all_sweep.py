@@ -150,7 +150,14 @@ def sweep_forget_all(user_id: uuid.UUID) -> ForgetAllSweepResult:
             delete_requested_at__isnull=True,
         ).values_list("id", flat=True)
     )
-    entries_deleted = soft_delete_green_entries(user_id, doomed_ids)
+    entries_deleted = soft_delete_green_entries(
+        user_id,
+        doomed_ids,
+        # Not `user_delete`: nobody named these rows. The tombstone must say
+        # which request buried it, or an audit cannot tell «я забыла про
+        # веганство» from «забудь всё».
+        reason=MemoryEntry.DELETION_REASON_FORGET_ALL,
+    )
 
     now = timezone.now()
     # Count what was actually populated so the audit row and the summary say

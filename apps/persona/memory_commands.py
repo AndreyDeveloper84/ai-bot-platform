@@ -48,12 +48,32 @@ logger = logging.getLogger(__name__)
 # needed.
 _FORGET_ALL_MARKER = "напиши одним словом: удалить"
 
+# DRF-1370 — the promise was wider than the action. «Всё личное Ayla забудет»
+# covers, to the person reading it, the four notification toggles and the
+# birthday on their profile screen. Nothing in the forget-all path touched
+# either — and nothing should: those are standing instructions and a form the
+# person maintains themselves, not things Ayla remembers about them behind
+# their back. Erasing them would also flip notify_reminders / notify_retention
+# / notify_birthday back to their `True` defaults, so «забудь всё» would switch
+# ON the nudges someone had deliberately switched off.
+#
+# So the promise was narrowed to the action rather than the action widened to
+# the promise: these two sentences now name what stays and where to change it.
+# What is genuinely erased is the bot-side memory (tombstoned by
+# apps.identity.services.forget_all_sweep) and the Ayla-side declared profile.
+# What still stands is now visible: the export carries the preferences and
+# declares its own composition (apps.identity.export_coverage).
 FORGET_ALL_PROMPT = (
-    "Это серьёзный шаг: я забуду всё, что о тебе помню. Бронирования и оплаты "
-    "останутся — это по закону, но всё личное Ayla забудет, и вернуть будет "
-    f"нельзя.\nЧтобы подтвердить — {_FORGET_ALL_MARKER}"
+    "Это серьёзный шаг: я забуду всё, что запомнила о тебе из наших разговоров, "
+    "и анкету предпочтений — вернуть будет нельзя.\n"
+    "Останутся бронирования и оплаты (это по закону) и настройки уведомлений "
+    "с датой рождения — ими ты управляешь сам на экране профиля.\n"
+    f"Чтобы подтвердить — {_FORGET_ALL_MARKER}"
 )
-_FORGET_ALL_DONE = "Готово — я забыла всё, что о тебе знала. Начнём с чистого листа 🙂"
+_FORGET_ALL_DONE = (
+    "Готово — я забыла всё, что о тебе помнила. Настройки уведомлений и дата "
+    "рождения остались на экране профиля: их меняешь ты, не я 🙂"
+)
 
 # DRF-1367: said when the bot-side memory is gone but Ayla — the owner of the
 # declared profile (OD_MEMORY.md §1) — did not confirm the erasure. Claiming
