@@ -75,10 +75,15 @@ from apps.master_api.services.visit_source import (
     VisitRow,
     master_visits,
 )
+from apps.master_api.services.schedule_frame import (
+    ExceptionLike,
+    FrameBlock,
+    WorkingHoursLike,
+    load_day_frame,
+)
 from apps.scheduling.models import (
     ScheduleChangeRequest,
     ScheduleException,
-    WorkingHours,
 )
 
 logger = logging.getLogger(__name__)
@@ -339,8 +344,8 @@ def _day_bounds_utc(day: date_cls, tz: ZoneInfo) -> tuple[datetime, datetime]:
 def _working_block_for_day(
     master: CatalogMaster,
     day: date_cls,
-    exceptions_by_date: dict[date_cls, ScheduleException],
-    wh_by_weekday: dict[int, WorkingHours],
+    exceptions_by_date: dict[date_cls, ExceptionLike],
+    wh_by_weekday: dict[int, WorkingHoursLike],
 ) -> tuple[time, time] | None:
     """Return the master's effective working window for ``day``, in tenant-local time.
 
@@ -592,23 +597,15 @@ def build_schedule(
         end=range_end_utc,
     )
 
-    exceptions_qs = list(
-        ScheduleException.all_tenants.filter(
-            tenant_id=master.tenant_id,
-            master_id=master.id,
-            date__gte=from_date,
-            date__lte=to_date,
-        )
+    # DRF-1126: the frame comes from the live source. Flag OFF keeps the
+    # local scheduling tables; flag ON reads Ayla (the place the salon
+    # actually edits) — never both, never a silent fallback to stale.
+    wh_by_weekday, exceptions_by_date, extra_blocks_by_date = load_day_frame(
+        master,
+        from_date=from_date,
+        to_date=to_date,
+        tz=tz,
     )
-    exceptions_by_date: dict[date_cls, ScheduleException] = {e.date: e for e in exceptions_qs}
-
-    wh_qs = list(
-        WorkingHours.all_tenants.filter(
-            tenant_id=master.tenant_id,
-            master_id=master.id,
-        )
-    )
-    wh_by_weekday: dict[int, WorkingHours] = {wh.day_of_week: wh for wh in wh_qs}
 
     # Pre-compute returning-customer set across the range.
     bot_user_ids = [b.bot_user_id for b in bookings_qs if b.bot_user_id is not None]
@@ -640,6 +637,7 @@ def build_schedule(
             bookings_today=bookings_by_date.get(cursor, []),
             returning_set=returning_set,
             service_cache=service_cache,
+            extra_blocks=extra_blocks_by_date.get(cursor, []),
         )
         days.append(day)
         cursor += timedelta(days=1)
@@ -658,11 +656,12 @@ def _build_one_day(
     day: date_cls,
     tz: ZoneInfo,
     now: datetime,
-    wh_by_weekday: dict[int, WorkingHours],
-    exceptions_by_date: dict[date_cls, ScheduleException],
+    wh_by_weekday: dict[int, WorkingHoursLike],
+    exceptions_by_date: dict[date_cls, ExceptionLike],
     bookings_today: list[VisitRow],
     returning_set: set[Any],
     service_cache: dict[Any, int],
+    extra_blocks: list[FrameBlock] | None = None,
 ) -> ScheduleDay:
     """Build a single :class:`ScheduleDay`. See :func:`build_schedule`."""
 
@@ -735,6 +734,24 @@ def _build_one_day(
         else:
             block_intervals_local.append((time(0, 0), time(23, 59)))
             block_intervals_for_conflicts.append((str(exc.id), time(0, 0), time(23, 59)))
+
+    # Partial-day absences (Ayla time-off, flag ON): the local model has
+    # no per-hours absence, so these arrive only from the wire. They are
+    # real occupied time — free windows and the conflict pass both see them.
+    for extra in extra_blocks or []:
+        start_utc = datetime.combine(day, extra.start_local, tzinfo=tz).astimezone(dt_timezone.utc)
+        end_utc = datetime.combine(day, extra.end_local, tzinfo=tz).astimezone(dt_timezone.utc)
+        blocks.append(
+            ScheduleBlock(
+                exception_id=str(extra.id),
+                start=start_utc.isoformat(),
+                end=end_utc.isoformat(),
+                reason=extra.reason,
+                approved=True,
+            )
+        )
+        block_intervals_local.append((extra.start_local, extra.end_local))
+        block_intervals_for_conflicts.append((str(extra.id), extra.start_local, extra.end_local))
 
     free_windows = _compute_free_windows(
         working_block, booking_intervals_local, block_intervals_local
