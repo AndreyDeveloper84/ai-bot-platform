@@ -85,9 +85,16 @@ class TestTheDeclarationMatchesTheInventory:
         for limit in KNOWN_LIMITS:
             assert len(limit) >= 120
 
-    def test_the_special_category_is_withheld_not_forgotten(self):
-        """Health text must be neither silently exported nor silently dropped."""
-        assert EXCLUSIONS.get("identity.UserPreferences.allergies") == "special_category"
+    def test_no_reason_outlives_the_slots_that_used_it(self):
+        """Prose kept for a column nobody has any more rots the same way a
+        stale decision does — so the reasons ratchet in both directions too.
+
+        This fired for real: DRF-1371 removed ``UserPreferences.allergies``
+        while this branch was open. The test above named the dead decision;
+        this one named the orphaned paragraph standing behind it.
+        """
+        orphaned = sorted(set(REASONS) - set(EXCLUSIONS.values()))
+        assert not orphaned, f"REASONS nothing points at any more: {orphaned}"
 
     def test_yellow_and_red_are_named_as_withheld(self):
         """«Не добавлять молча» is satisfied by saying so, not by omitting."""
@@ -160,17 +167,22 @@ class TestTheExportSaysWhatItHolds:
             }
         ]
 
-    def test_allergies_never_reach_the_file(self, bot_user):
-        """Special category: declared as withheld, and actually withheld."""
-        prefs = UserPreferences.all_tenants.create(bot_user=bot_user, tenant=bot_user.tenant)
-        if hasattr(prefs, "allergies"):  # column removed by DRF-1371
-            UserPreferences.all_tenants.filter(pk=prefs.pk).update(allergies="ретинол")
+    def test_the_special_categories_are_named_but_not_carried(self, bot_user):
+        """Yellow and red are declared as withheld — «не молча» is satisfied by
+        saying so in the very file the person is handed.
+
+        ``UserPreferences.allergies`` used to be the third entry here. DRF-1371
+        removed the column while this branch was open, and the coverage ratchet
+        turned that into a failing test naming the dead line, rather than a
+        stale paragraph nobody would have reread.
+        """
+        UserPreferences.all_tenants.create(bot_user=bot_user, tenant=bot_user.tenant)
 
         payload = export_personal_data(bot_user, client=_NoAyla())
 
-        assert "ретинол" not in str(payload["preferences"])
         withheld = {row["field"] for row in payload["coverage"]["withheld"]}
-        assert "identity.UserPreferences.allergies" in withheld or not hasattr(prefs, "allergies")
+        assert "identity.MemoryEntry:yellow" in withheld
+        assert "identity.MemoryEntry:red" in withheld
 
     def test_the_file_carries_its_own_composition(self, bot_user):
         payload = export_personal_data(bot_user, client=_NoAyla())

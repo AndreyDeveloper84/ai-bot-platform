@@ -78,7 +78,6 @@ SECTIONS: Mapping[str, str] = {
 
 #: Slot → why its value is withheld. Every key here is deliberate.
 EXCLUSIONS: Mapping[str, str] = {
-    "identity.UserPreferences.allergies": "special_category",
     "identity.BotUser.avatar_url": "channel_shell",
     "identity.BotUser.phone": "channel_shell",
     "identity.BotUser.display_name": "channel_shell",
@@ -113,13 +112,6 @@ EXCLUSIONS: Mapping[str, str] = {
 
 #: Reason slug → the sentence the export hands the subject, and the reviewer.
 REASONS: Mapping[str, str] = {
-    "special_category": (
-        "Свободный текст о противопоказаниях и аллергиях — специальная "
-        "категория персональных данных (152-ФЗ ст. 10). Состав выгрузки для "
-        "таких данных — отдельное решение владельца, а не техническое; до "
-        "него значение не выгружается, но сам факт хранения объявлен здесь. "
-        "Поле выводится из системы отдельной задачей (DRF-1371)."
-    ),
     "channel_shell": (
         "Контактные и профильные значения на «оболочке» пользователя в "
         "мессенджере: телефон, имя, аватар, часовой пояс, отказ от "
