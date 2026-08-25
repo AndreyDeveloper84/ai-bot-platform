@@ -396,6 +396,19 @@ SKILL_CONFIDENCE_FLOOR_LIVE_ENABLED = os.environ.get(
     "SKILL_CONFIDENCE_FLOOR_LIVE_ENABLED", "false"
 ).lower() in ("true", "1")
 
+# DRF-1209 step 2 — ``AIRequestMetric`` on the non-concierge live-path turns
+# (apps/channels/max/handler.py). Until now only concierge turns wrote the
+# row (DRF-1211/1283); per-tenant skill-dispatch turns and the deterministic
+# global branches (safety / opt_out / stale_tap / handoff / visits /
+# onboarding) wrote nothing, silently biasing every per-request pilot
+# threshold. Default OFF = zero new rows, byte-identical behaviour; rollback
+# is env-only, no redeploy. Rows are best-effort — an emission failure logs
+# WARN and never breaks the user-facing turn.
+LIVE_PATH_AI_METRIC_ENABLED = os.environ.get("LIVE_PATH_AI_METRIC_ENABLED", "false").lower() in (
+    "true",
+    "1",
+)
+
 # #433 umbrella — HANDLER_EXCEPTION → DLQ threshold. A handler that
 # raises gets retried by Ayla per §6.3; after this many failed
 # attempts (counted per event_id + handler), bot-platform upserts a
