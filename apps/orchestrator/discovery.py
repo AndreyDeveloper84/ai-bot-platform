@@ -43,6 +43,7 @@ from apps.marketplace.discovery import (
     discover_salons,
     discover_services,
     get_salon,
+    parse_stems,
     query_stems,
     service_coverage,
     split_requested_services,
@@ -125,7 +126,17 @@ SHOW_MASTERS_TOOL_SPEC: dict[str, Any] = {
             "city": {"type": "string", "description": "City to filter by (optional)."},
             "specialization": {
                 "type": "string",
-                "description": "Specialization / service substring (optional), e.g. 'маникюр'.",
+                "description": (
+                    "Specialization / service substring (optional), e.g. 'маникюр'. "
+                    # DRF-968 — the constraint the platform now enforces
+                    # (``reground_specialization``), said here for the same
+                    # reason DRF-1355 says its own: a tool description should
+                    # be honest about what the call will actually do. It is a
+                    # nudge, not the fix — the fix is the guard.
+                    "Заполняй тем, что клиент назвал в ПОСЛЕДНЕЙ реплике, если "
+                    "он там назвал услугу; услугу из более раннего хода "
+                    "платформа заменит на его собственные слова."
+                ),
             },
             # DRF-1312. The user says «массаж и маникюр»; the answer used to be
             # five massage masters and silence about the nails, because the
@@ -1807,6 +1818,97 @@ def requested_services(args: dict[str, Any], specialization: str | None) -> list
             return []
     parts = split_requested_services(specialization or "")
     return parts if len(parts) >= 2 else []
+
+
+# The user's own turn, when it has to be handed to the catalog as the search
+# string. Bounded because it is model-free text off the wire: nothing upstream
+# caps how long a person's message is, and ``specialization`` ends up in an
+# ILIKE and in a log line.
+_MAX_REGROUNDED_CHARS = 120
+
+
+def reground_specialization(
+    *,
+    message_text: str,
+    city: str | None,
+    specialization: str | None,
+) -> str | None:
+    """The specialization ``show_masters`` is actually searched with (DRF-968).
+
+    The second half of DRF-968, and the one the loop hid behind. Live pilot,
+    09.08: the person typed «Кавитация» and the bot answered «Могу помочь с
+    записью на классический массаж» — the intent of an EARLIER turn, still
+    being answered three turns later. The same stickiness put the wrong
+    string into ``show_masters`` when the answer to «напишите услугу» came
+    back: «RF-лифтинг — Лицо/шея/декольте» resolves to exactly one service
+    when handed to :func:`discover_masters` directly, so the card that came
+    back without a ``service_id`` proves the tool call never carried it.
+
+    The rule: **a service the person names in THIS turn outranks whatever the
+    model carried over from the conversation.** Three gates keep that from
+    turning into «the last message always wins», which would break every
+    legitimate carry-over:
+
+    * **The turn must name something.** «а в Москве?», «давай», «подешевле»
+      leave ``parse_stems`` with no service stems, so the criteria HAVE to
+      come from the history — untouched.
+    * **A goal is left to the model.** «хочу расслабиться» names an outcome,
+      not a service; turning that into a search string is exactly the
+      language understanding the model is here for.
+    * **The catalog, not this function, decides the turn named a service.**
+      ``service_coverage`` is the same EXISTS over the same ``_bookable_qs``
+      predicate that produces the cards (AYLA-DEC-0045 / OD-9 — the model is
+      not the authority on what exists, and neither is a stem list). If the
+      person's own words find nobody bookable, the model's reading of the
+      conversation is the better of the two and is kept.
+
+    So the override fires only when the person named a service the catalog
+    can serve and the model searched for something else entirely. In that one
+    case the search string becomes the person's own words — which is the
+    string that was measured to resolve.
+
+    Returns the specialization to search with; ``None``/empty is passed
+    through untouched, because there is nothing to override and
+    ``has_discovery_criteria`` owns that turn.
+    """
+    if not specialization:
+        return specialization
+    said = (message_text or "").strip()
+    if not said:
+        return specialization
+    # ── The free half first. ``query_stems`` reads no catalog at all, and on
+    # ── the ordinary turn — the model searching for what was just said — it
+    # ── settles the question, so this whole guard costs zero queries on the
+    # ── path it will take almost every time.
+    stems = query_stems(said)
+    if not stems:
+        return specialization
+    folded = specialization.casefold()
+    if any(stem in folded for stem in stems):
+        # The model's string carries a word the person just said — it is a
+        # reading of THIS turn, however it was normalized. Nothing to fix.
+        #
+        # Judged on the RAW stems, before the catalog-aware pass narrows them:
+        # a city token or an unattested short word left in the list can only
+        # make «grounded» EASIER to satisfy, i.e. can only keep the model's
+        # answer. Erring that way is the safe direction — the override is the
+        # unusual act and should need the stronger evidence.
+        return specialization
+    # ── From here on the turn looks like it is about something the model did
+    # ── not search for, and only here does the catalog get asked.
+    parsed = parse_stems(stems)
+    # One line, both of the first two gates the docstring names: ``stems`` is
+    # empty for a turn that named only a city, AND for a goal turn — stems and
+    # goals are mutually exclusive by construction (see ``ParsedQuery``), so
+    # «хочу расслабиться» arrives here with nothing in ``stems`` and is left
+    # to the model exactly as a bare «а в Москве?» is.
+    if not parsed.stems:
+        return specialization
+    said = said[:_MAX_REGROUNDED_CHARS]
+    available, _missing = service_coverage([said], city=city)
+    if not available:
+        return specialization
+    return said
 
 
 def generate_discovery_reply(

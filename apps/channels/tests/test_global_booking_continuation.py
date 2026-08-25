@@ -90,6 +90,10 @@ _CHAT_ID = 901
 _LYMPH = uuid.UUID("aaaaaaaa-0000-0000-0000-00000000000a")
 _CLASSIC = uuid.UUID("aaaaaaaa-0000-0000-0000-00000000000b")
 _CLASSIC_BACK = uuid.UUID("aaaaaaaa-0000-0000-0000-00000000000c")
+# DRF-968's own string, from the ticket. Kept apart from the Сазонова roster
+# because it is a different SHAPE of name, and shape is what it tests.
+_RF_LIFT = uuid.UUID("aaaaaaaa-0000-0000-0000-00000000000d")
+_RF_LIFT_NAME = "RF-лифтинг — Лицо/шея/декольте"
 
 
 def _callback(payload: str) -> dict:
@@ -219,6 +223,41 @@ def salon():
         MasterService.all_tenants.create(tenant=tenant, master=master, service=service)
         rows[slug] = service
     return tenant, master, rows
+
+
+@pytest.fixture
+def rf_salon():
+    """Тихонова Ольга и её единственная услуга — фикстура из самого тикета.
+
+    Отдельно от ``salon`` не ради второго набора данных, а ради формы имени.
+    «RF-лифтинг — Лицо/шея/декольте» — латиница, длинное тире и слэши в одной
+    строке; всё остальное в этом файле — обычные русские слова с пробелами.
+    Разбор запроса режет строку на слова по границам букв и цифр, и каждый из
+    этих трёх знаков — место, где она может распасться не так, как ожидает
+    подбор услуги.
+    """
+    stamp = datetime(2026, 5, 18, tzinfo=timezone.utc)
+    tenant = Tenant.objects.create(
+        slug="pilot-kosmetologia", name="Пилот", timezone=SALON_TZ, city="Пенза"
+    )
+    master = CatalogMaster.all_tenants.create(
+        tenant=tenant,
+        external_id=7,
+        external_updated_at=stamp,
+        name="Тихонова Ольга",
+        specialization="косметология",
+        yclients_staff_id=77,
+    )
+    service = CatalogService.all_tenants.create(
+        tenant=tenant,
+        slug="rf-lift",
+        name=_RF_LIFT_NAME,
+        is_active=True,
+        ayla_service_id=_RF_LIFT,
+        external_updated_at=stamp,
+    )
+    MasterService.all_tenants.create(tenant=tenant, master=master, service=service)
+    return tenant, master, service
 
 
 def _global_conversation():
@@ -377,6 +416,31 @@ class TestTheServiceQuestionIsAnswerable:
 
         assert wired.concierge == []
         assert wired.booking == [f"cb:book:pick_master:{master.id}:{_LYMPH}"]
+        assert mock_send[-1]["text"] == "Выберите дату:"
+
+    def test_the_tickets_own_string_walks_the_whole_chain(self, wired, rf_salon, mock_send) -> None:
+        """Симптом DRF-968 целиком, одной цепочкой:
+
+        ```
+        → [тап карточки мастера]
+        ← Чтобы записаться к мастеру Тихонова Ольга, напишите желаемую услугу
+        → RF-лифтинг — Лицо/шея/декольте    ← ровно то, что попросил бот
+        ← Выберите дату:                    ← а было «Вот мастера, которые…»
+        ```
+
+        Три утверждения, и ни одно не лишнее. «Список мастеров не показан» —
+        отрицание, оно прошло бы и на пустом ответе; рядом с ним стоит, на тех
+        же данных, «запись дошла до скилла ИМЕННО с этой услугой» и «человек
+        видит выбор даты».
+        """
+        tenant, master, service = rf_salon
+        _tap_serviceless(tenant, master)
+        assert mock_send[-1]["text"].startswith("Выберите услугу мастера Тихонова Ольга")
+
+        GlobalMaxHandler()(_raw(_typed(_RF_LIFT_NAME, "mm-rf")))
+
+        assert wired.concierge == []
+        assert wired.booking == [f"cb:book:pick_master:{master.id}:{_RF_LIFT}"]
         assert mock_send[-1]["text"] == "Выберите дату:"
 
     def test_two_matches_offer_a_choice_rather_than_a_dead_end(

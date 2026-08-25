@@ -78,6 +78,7 @@ from apps.orchestrator.discovery import (
     encode_query_ref,
     execute_catalog_tool,
     has_discovery_criteria,
+    reground_specialization,
     render_no_criteria_clarification,
     requested_services,
 )
@@ -1596,6 +1597,31 @@ def _concierge_turn(
         requested = requested_services(args if isinstance(args, dict) else {}, specialization)
         if not specialization and requested:
             specialization = ", ".join(requested)
+        # DRF-968 — the second half of the ticket. The model may be answering
+        # an EARLIER turn: «Кавитация» was answered with «классический
+        # массаж» on the 09.08 pilot, and the answer to «напишите название
+        # услуги» reached this tool as something other than what was typed.
+        # A service the person named in THIS turn outranks the carry-over —
+        # the catalog, not the model and not this line, decides that a
+        # service was named (see ``reground_specialization``).
+        grounded = reground_specialization(
+            message_text=message_text, city=city, specialization=specialization
+        )
+        if grounded != specialization:
+            logger.info(
+                "orchestrator.concierge.show_masters.regrounded "
+                "model_spec=%r said=%r trace=%s pass=%d",
+                (specialization or "")[:_MAX_LOGGED_ARG_CHARS],
+                (grounded or "")[:_MAX_LOGGED_ARG_CHARS],
+                trace_id,
+                pass_index,
+            )
+            specialization = grounded
+            # The model's split came from the same stale read, so it cannot
+            # be trusted to describe this turn either. Dropping it costs the
+            # DRF-1312 «а маникюра ни у кого нет» line on this one turn and
+            # never states a service the person did not ask for.
+            requested = []
         if not has_discovery_criteria(city, specialization):
             # Criteria-less call → continue discovery, never the catalogue
             # (BOT-003 §9 / prohibition #22 — see has_discovery_criteria).
