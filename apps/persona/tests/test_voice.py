@@ -21,6 +21,9 @@ from __future__ import annotations
 import pytest
 
 from apps.persona.voice import (
+    DEFAULT_SALON_PERSONA,
+    SALON_ADMIN_NAME,
+    SALON_BUSINESS_NAME,
     SURFACE_MARKETPLACE,
     SURFACE_SALON,
     _FROZEN_MIRROR,
@@ -84,6 +87,19 @@ class TestSurfaceIdentity:
         assert assistant_identity("nonsense").name == "Ayla"  # type: ignore[arg-type]
 
 
+class TestDefaultSalonPersona:
+    def test_the_persona_is_built_from_its_parts(self):
+        assert DEFAULT_SALON_PERSONA == (
+            f"{SALON_ADMIN_NAME}, администратор салона «{SALON_BUSINESS_NAME}»"
+        )
+
+    def test_the_parts_are_the_pilot_salon(self):
+        # Pinned so a product rename is an edit here, visible in a diff,
+        # not a string someone changed inside a skill module.
+        assert SALON_ADMIN_NAME == "Алина"
+        assert SALON_BUSINESS_NAME == "Формула тела"
+
+
 class TestTheCallersUseIt:
     def test_the_concierge_prompt_carries_the_marketplace_name(self):
         from apps.orchestrator.concierge import build_concierge_system_prompt
@@ -123,6 +139,72 @@ class TestTheCallersUseIt:
         from apps.orchestrator.discovery import _discovery_voice_fields
 
         assert _discovery_voice_fields() == frozen_voice_fields()
+
+    def test_discovery_self_intro_line_is_unchanged(self):
+        """DRF-1265 swaps the SOURCE of the name, not the sentence.
+
+        Characterization pin: the line a user reads must be byte-identical
+        before and after the refactor.
+        """
+
+        from apps.orchestrator.discovery import build_discovery_prompt
+
+        system = build_discovery_prompt("хочу маникюр")[0]["content"]
+
+        assert "Ты — Ayla, AI-помощник «Ayla — AI Self-Care»." in system
+
+    def test_discovery_follows_a_marketplace_rename(self, monkeypatch):
+        """The discovery prompt must take the name from `_SURFACE_NAMES`.
+
+        Same argument as the concierge test above: reading
+        ``voice['assistant_name']`` looks correct today and silently ignores
+        the rename the day someone makes the product call. Rename the
+        surface and require the prompt to notice.
+        """
+
+        import apps.persona.voice as voice_module
+        from apps.orchestrator.discovery import build_discovery_prompt
+
+        monkeypatch.setitem(voice_module._SURFACE_NAMES, SURFACE_MARKETPLACE, "Айла")
+
+        system = build_discovery_prompt("хочу маникюр")[0]["content"]
+
+        assert assistant_identity(SURFACE_MARKETPLACE).name == "Айла"  # the setup took
+        assert "Ты — Айла" in system
+        assert "Ты — Ayla" not in system
+
+    def test_both_skills_read_the_persona_from_one_place(self):
+        """FAQ and booking held two verbatim «Алина» literals (DRF-1265).
+
+        The `is` assertions are the point: two equal strings typed in two
+        files are equal today and free to drift tomorrow. One imported
+        object cannot.
+        """
+
+        from apps.skills.booking.skill import _DEFAULT_BRAND_VOICE as booking_voice
+        from apps.skills.faq.skill import _DEFAULT_BRAND_VOICE as faq_voice
+
+        assert faq_voice.persona == booking_voice.persona == DEFAULT_SALON_PERSONA
+        assert faq_voice.persona is DEFAULT_SALON_PERSONA
+        assert booking_voice.persona is DEFAULT_SALON_PERSONA
+
+    def test_the_max_welcome_names_the_same_salon(self):
+        """The MAX welcome names the pilot salon from the shared constant.
+
+        The wording itself is the ported legacy greeting (prod since
+        2026-04) and stays byte-identical; what changes is that «Формула
+        тела» is no longer a string only this file knows.
+        """
+
+        from apps.channels.max.handler import _WELCOME_TEXT
+
+        assert SALON_BUSINESS_NAME in _WELCOME_TEXT
+        assert _WELCOME_TEXT == (
+            "Здравствуйте! 👋\n\n"
+            "Это бот массажного салона «Формула тела» в Пензе.\n"
+            "Помогу записаться, расскажу об услугах и отвечу на частые вопросы.\n\n"
+            "Выберите раздел:"
+        )
 
     @pytest.mark.django_db
     def test_the_master_draft_prompt_carries_the_salon_name(self):

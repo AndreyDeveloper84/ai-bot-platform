@@ -80,6 +80,17 @@ _SURFACE_NAMES: dict[str, str] = {
     SURFACE_SALON: "Помощник",
 }
 
+#: The default front-desk persona of the per-tenant skills (FAQ, booking).
+#: «Алина» lived as two verbatim literals — ``apps/skills/faq/skill.py``
+#: and ``apps/skills/booking/skill.py`` — the same drift the surface names
+#: had before this module: equal strings today, free to diverge tomorrow.
+#: One imported object cannot. PromptRegistry (a separate track) lifts this
+#: into per-tenant config; until then both skills import the constant, and
+#: the MAX welcome text names the same salon.
+SALON_ADMIN_NAME = "Алина"
+SALON_BUSINESS_NAME = "Формула тела"
+DEFAULT_SALON_PERSONA = f"{SALON_ADMIN_NAME}, администратор салона «{SALON_BUSINESS_NAME}»"
+
 
 def frozen_voice_fields() -> dict[str, str]:
     """The frozen marketplace voice, or the mirror when the lib is absent.
@@ -124,6 +135,9 @@ def known_surfaces() -> tuple[str, ...]:
 
 
 __all__ = [
+    "DEFAULT_SALON_PERSONA",
+    "SALON_ADMIN_NAME",
+    "SALON_BUSINESS_NAME",
     "SURFACE_MARKETPLACE",
     "SURFACE_SALON",
     "AssistantIdentity",

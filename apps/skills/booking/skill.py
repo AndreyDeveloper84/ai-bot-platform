@@ -99,6 +99,7 @@ from apps.events.services import emit
 from apps.events.vocabulary import BOOKING_FLOW_STATE_WRITE_FAILED, SKILL_DISPATCHED
 from apps.integrations.yclients import YClientsAPIError, YClientsUnavailableError
 from apps.llm.protocol import CompletionResult, LLMError, ToolCall
+from apps.persona.voice import DEFAULT_SALON_PERSONA
 from apps.skills.base import SkillContext, SkillResult
 from apps.skills.booking.lookup import (
     booking_mutation_flow,
@@ -160,7 +161,7 @@ logger = logging.getLogger(__name__)
 # Sprint 7 hardcoded brand voice — same default as FAQ. Sprint 8
 # PromptRegistry lifts this into a per-tenant config.
 _DEFAULT_BRAND_VOICE = BrandVoiceConfig(
-    persona="Алина, администратор салона «Формула тела»",
+    persona=DEFAULT_SALON_PERSONA,
     tone="дружелюбный, краткий, без канцелярита",
     forbidden=(
         "гарантирую",
