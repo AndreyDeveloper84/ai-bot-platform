@@ -228,7 +228,18 @@ def scan_tabbar_columns(app_root: Path) -> list[str]:
     for rel in TABBAR_COMPONENTS:
         path = app_root / rel
         if not path.is_file():
-            problems.append(f"{rel}: listed in TABBAR_COMPONENTS but missing")
+            # Not a defect, and deliberately not reported. `main` runs
+            # against whatever root it is handed, and the unit tests hand
+            # it throwaway trees that contain one screen and a stylesheet
+            # and no tab bar at all. Failing on absence made every one of
+            # those roots fail this check and turned an unrelated
+            # baseline test red.
+            #
+            # A *rename* that silently disables the check is the real risk
+            # here, and it is pinned where the module's docstring says
+            # real-tree facts belong: `test_every_listed_tab_bar_exists`
+            # in tests/tools/test_miniapp_style_contract.py asserts every
+            # path in TABBAR_COMPONENTS resolves inside apps/miniapp.
             continue
         source = path.read_text(encoding="utf-8")
 
@@ -307,9 +318,10 @@ def main(argv: list[str]) -> int:
         )
         return 1
 
+    checked = sum(1 for rel in TABBAR_COMPONENTS if (app_root / rel).is_file())
     print(
         f"miniapp_style_contract: clean ({len(BASELINE)} accepted, none new; "
-        f"{len(TABBAR_COMPONENTS)} tab bar(s) fit one row)."
+        f"{checked} tab bar(s) fit one row)."
     )
     return 0
 
