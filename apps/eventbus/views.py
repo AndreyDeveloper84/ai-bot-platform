@@ -37,6 +37,8 @@ from apps.eventbus.ingest_envelope import (
 from apps.eventbus.ingest_ip import get_remote_ip
 from apps.eventbus.ingest_rate_audit_sampler import should_audit_rate_limited
 from apps.eventbus.ingest_security import (
+    REASON_HMAC_MISMATCH,
+    REASON_NO_SECRET,
     signature_header_from,
     timestamp_header_from,
     verify_signature,
@@ -78,6 +80,54 @@ AUDIT_SATURATED = "eventbus.ingest.saturated"
 # this code-side limit is the defense-in-depth layer for the time
 # until that's deployed.
 _RATE_LIMIT_DEFAULT = "100/m"
+
+
+# DRF-1291 — signature-failure reasons that mean service-to-service
+# auth is BROKEN, not probed: the shared secret drifted between Ayla and
+# bot-platform (``hmac_mismatch`` — the 08.08 incident: Ayla's publisher
+# dead-lettered the event on the first 401 and nobody was paged) or was
+# never configured here (``no_secret``). Either way EVERY subsequent
+# event dies the same silent death until ops acts, so these escalate:
+# ERROR log + a sampled ``system.module.health.degraded`` alert. The
+# remaining reasons (missing/malformed/stale) are prober-shaped noise —
+# they keep the WARNING log and alert at ``warning`` severity.
+_SIGNATURE_FAILURE_ERROR_REASONS = frozenset({REASON_HMAC_MISMATCH, REASON_NO_SECRET})
+
+
+def _maybe_alert_signature_failure(reason: str) -> None:
+    """Emit a sampled ops alert for a signature rejection (DRF-1291).
+
+    Turns a silent 401 into a ``system.module.health.degraded`` domain
+    event — the same alert surface the outbox dispatcher uses for DLQ
+    quarantine (:func:`apps.eventbus.dispatcher._emit_dlq_alert`), which
+    is what ops paging is wired to. Sampled per reason
+    (:func:`should_emit_signature_failure_alert`) so an unauthenticated
+    flood cannot amplify into the DomainEvent outbox; the unsampled
+    ``AUDIT_SIGNATURE_FAILED`` row keeps per-request forensics.
+
+    Never raises and never changes the HTTP response: alerting must not
+    break the reject path itself.
+    """
+    from apps.eventbus.ingest_rate_audit_sampler import (
+        should_emit_signature_failure_alert,
+    )
+
+    if not should_emit_signature_failure_alert(reason):
+        return
+    try:
+        from apps.eventbus import services, vocabulary as V
+
+        services.emit(
+            V.SYSTEM_MODULE_HEALTH_DEGRADED,
+            {
+                "module_name": "eventbus.ingest",
+                "severity": ("error" if reason in _SIGNATURE_FAILURE_ERROR_REASONS else "warning"),
+                "metric": f"ingest_signature_failed:{reason}",
+            },
+            actor_type="system",
+        )
+    except Exception:  # noqa: BLE001 — alert never breaks the 401 path
+        logger.exception("eventbus.ingest.signature_alert_failed reason=%s", reason)
 
 
 def _rate_limit_key(group, request) -> str:
@@ -178,7 +228,19 @@ class InternalEventsIngestView(View):
         if not sig_result.ok:
             # Body deliberately NOT logged (§8.3 — partial valid data
             # could leak via the prober's error stream).
-            logger.warning(
+            #
+            # DRF-1291 — escalate when the reject means our own
+            # publisher can no longer authenticate: WARNING was exactly
+            # the severity that let the 08.08 hmac_mismatch dead-letter
+            # pass unnoticed. The sampled health-degraded alert fires on
+            # every reason (paging stack dedupes; severity encodes how
+            # broken the channel is).
+            log_at = (
+                logger.error
+                if sig_result.reason in _SIGNATURE_FAILURE_ERROR_REASONS
+                else logger.warning
+            )
+            log_at(
                 "eventbus.ingest.signature_failed reason=%s body_bytes=%d",
                 sig_result.reason,
                 len(body),
@@ -188,6 +250,7 @@ class InternalEventsIngestView(View):
                 target="eventbus.ingest",
                 payload={"reason": sig_result.reason, "body_bytes": len(body)},
             )
+            _maybe_alert_signature_failure(sig_result.reason)
             return JsonResponse(
                 {"status": "unauthorized", "reason": sig_result.reason},
                 status=401,

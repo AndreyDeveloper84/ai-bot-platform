@@ -121,6 +121,26 @@ def should_audit_saturated(remote_ip: str) -> bool:
     return _should_audit("saturated", remote_ip)
 
 
+def should_emit_signature_failure_alert(reason: str) -> bool:
+    """DRF-1291 — slug per signature-failure reason, single global key.
+
+    Sampler for the ``system.module.health.degraded`` alert emitted by
+    the ingest view on HMAC/timestamp rejection. A wrong-secret Ayla
+    publisher rejects at line speed until the secret is fixed — without
+    sampling, each rejected delivery would write a DomainEvent row,
+    turning the alert surface into the same unauthenticated DoS
+    amplifier the 429 path needed AS3 for. One alert per reason per
+    window is enough for paging; the per-request audit row
+    (``AUDIT_SIGNATURE_FAILED``, unsampled) keeps the forensic detail.
+
+    The key is deliberately global (``_global_``), not per-IP: the
+    alert answers «is service-to-service auth broken», and a broken
+    secret rejects from ONE source IP (Ayla's) just as totally as from
+    many.
+    """
+    return _should_audit(f"sigfail_{reason}", "_global_")
+
+
 def should_audit_yookassa_retired_410(remote_ip: str) -> bool:
     """#732 — slug='yookassa_retired_410'.
 
