@@ -257,3 +257,29 @@ class TestDrf1404SeedVocabularyStaysWhole:
     )
     def test_real_service_mentions_still_match(self, text: str) -> None:
         assert mentions_service(text) is True
+
+
+class TestDrf1404AvailabilitySignalsAreWords:
+    """«свободн» matched inside «неСВОБОДНая» — the same class, one list over.
+
+    The old comment claimed a substring test was safe because the
+    signals were «multi-word or long enough not to collide». Length is
+    not a defence against a Russian prefix; only a boundary is.
+    """
+
+    @pytest.mark.parametrize("text", ["несвободная касса", "несвободно"])
+    def test_prefixed_word_is_not_an_availability_signal(self, text: str) -> None:
+        assert looks_like_booking_request(text) is False
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "свободное время есть?",
+            "есть окошко на завтра",
+            "есть место на пятницу",
+            "какие слоты",
+            "когда можно прийти",
+        ],
+    )
+    def test_real_availability_phrasings_still_match(self, text: str) -> None:
+        assert looks_like_booking_request(text) is True
