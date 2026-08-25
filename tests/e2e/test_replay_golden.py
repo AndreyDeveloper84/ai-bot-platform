@@ -25,6 +25,7 @@ import pytest
 from apps.replay.fixtures.loader import load_fixture
 from apps.replay.runner import Runner
 from apps.replay.models import ReplayTrace
+from apps.replay.redactor import REDACTION_METHOD
 from apps.tenancy.context import tenant_scope
 from apps.tenancy.models import Tenant
 
@@ -169,4 +170,4 @@ def test_pii_in_response_redacted_before_persistence(g2_tenant):
     assert "+79991234567" not in persisted_blob
     # Redactor stamps the method version so re-redaction migrations
     # can be reasoned about (Phase 1).
-    assert row.redaction_method == "regex_v1"
+    assert row.redaction_method == REDACTION_METHOD

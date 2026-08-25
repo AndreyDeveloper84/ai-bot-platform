@@ -161,7 +161,7 @@ _MODEL_REQUIRED_FIELDS: dict[str, dict[str, object]] = {
     "ReplayTrace": {
         "trace_id": lambda tenant, suffix: f"scanner-trace-{suffix or 'x'}",
         "pipeline_steps": lambda tenant, suffix: [],
-        "redaction_method": "regex_v1",
+        "redaction_method": "regex_v2",
         "expires_at": lambda tenant, suffix: _future_datetime(),
     },
     # Sprint 6 / P1: ClientProfile — OneToOne(BotUser) PK + tenant FK PROTECT.

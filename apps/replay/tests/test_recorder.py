@@ -8,6 +8,7 @@ import pytest
 
 from apps.replay.models import ReplayTrace
 from apps.replay.recorder import TraceRecorder
+from apps.replay.redactor import REDACTION_METHOD
 from apps.tenancy.context import tenant_scope
 from apps.tenancy.models import Tenant
 
@@ -40,7 +41,7 @@ class TestSampling:
         assert ReplayTrace.all_tenants.count() == 1
         row = ReplayTrace.all_tenants.first()
         assert row.trace_id == "t1"
-        assert row.redaction_method == "regex_v1"
+        assert row.redaction_method == REDACTION_METHOD
 
 
 class TestRedactorWiring:
@@ -102,7 +103,7 @@ class TestEventEmission:
         ev = Event.objects.filter(tenant=tenant, event_name="replay_captured").first()
         assert ev is not None
         assert ev.properties["trace_id"] == "t-evt"
-        assert ev.properties["redaction_method"] == "regex_v1"
+        assert ev.properties["redaction_method"] == REDACTION_METHOD
         assert ev.properties["steps_count"] == 1
 
 
