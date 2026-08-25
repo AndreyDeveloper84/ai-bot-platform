@@ -95,6 +95,26 @@ _MODEL_REQUIRED_FIELDS: dict[str, dict[str, object]] = {
         "conversation": lambda tenant, suffix: _make_conversation_for_scanner(tenant, suffix),
         "role": "user",
     },
+    # DRF-1369: the anonymised dialogue archive. Two FKs that must agree —
+    # ``conversation`` is the thread and ``message`` is the row whose body
+    # moved here, so a Message built on some OTHER conversation would be a
+    # row the production code can never produce. Shared pair, same reason and
+    # same shape as AdminTask above. ``message`` is a OneToOne, so every row
+    # needs its own.
+    "ArchivedMessage": {
+        "conversation": lambda tenant, suffix: _make_archived_message_pair(tenant, suffix)[0],
+        "message": lambda tenant, suffix: _make_archived_message_pair(tenant, suffix)[1],
+        # Callables: a plain string would get `-{suffix}` appended, overflowing
+        # `role` (max_length=16) and turning `reason` into a value outside its
+        # choices.
+        "role": lambda tenant, suffix: "user",
+        "reason": lambda tenant, suffix: "forget_all",
+        # NOT NULL and deliberately without a model default: the archive copies
+        # the original turn's timestamp and stamps the retention term computed
+        # at archive time. A default would invent both.
+        "original_created_at": lambda tenant, suffix: _future_datetime(-1),
+        "retention_until": lambda tenant, suffix: _future_datetime(90),
+    },
     # Sprint 3 / A1: ConsentRecord needs bot_user FK + non-blank
     # consent_type + non-blank source.
     "ConsentRecord": {
@@ -426,6 +446,7 @@ def _make_staff_assistant_thread_for_scanner(tenant, suffix: str):
 # Scoped via the dict so the same FK target is reused inside a single
 # `_create_row` call (which invokes both lambdas with the same suffix).
 _ADMIN_TASK_PAIRS: dict[tuple[str, str], tuple[object, object]] = {}
+_ARCHIVED_MESSAGE_PAIRS: dict[tuple[str, str], tuple[object, object]] = {}
 
 
 def _make_user_for_scanner(suffix: str):
@@ -580,6 +601,36 @@ def _make_admin_task_pair(tenant, suffix: str):
     conversation = Conversation.all_tenants.create(tenant=tenant, bot_user=bot_user)
     _ADMIN_TASK_PAIRS[key] = (bot_user, conversation)
     return bot_user, conversation
+
+
+def _make_archived_message_pair(tenant, suffix: str):
+    """Return a shared (Conversation, Message) pair for an ArchivedMessage row.
+
+    Both FKs must describe the same turn: ``conversation`` is the thread and
+    ``message`` is the row whose body was moved into the archive. Building them
+    independently would produce a row the anonymiser can never produce, which
+    is exactly the kind of fixture that makes a scanner failure uninformative.
+
+    Cached per (tenant.id, suffix) like :func:`_make_admin_task_pair` — and it
+    matters more here, because ``message`` is a OneToOne and a reused Message
+    would collide on its UNIQUE.
+    """
+
+    from apps.conversations.models import Message
+
+    key = (str(tenant.id), suffix)
+    cached = _ARCHIVED_MESSAGE_PAIRS.get(key)
+    if cached is not None:
+        return cached
+    conversation = _make_conversation_for_scanner(tenant, f"arch-{suffix or 'x'}")
+    message = Message.all_tenants.create(
+        tenant=tenant,
+        conversation=conversation,
+        role="user",
+        content="",
+    )
+    _ARCHIVED_MESSAGE_PAIRS[key] = (conversation, message)
+    return conversation, message
 
 
 def _create_row(model: type[models.Model], *, tenant, suffix: str = "") -> models.Model:

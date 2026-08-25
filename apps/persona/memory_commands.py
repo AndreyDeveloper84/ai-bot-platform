@@ -66,6 +66,8 @@ _FORGET_ALL_MARKER = "напиши одним словом: удалить"
 FORGET_ALL_PROMPT = (
     "Это серьёзный шаг: я забуду всё, что запомнила о тебе из наших разговоров, "
     "и анкету предпочтений — вернуть будет нельзя.\n"
+    "Саму переписку я обезличу: текст останется без твоих контактов — только на "
+    "случай спора о записи, и удалится через 90 дней.\n"
     "Останутся бронирования и оплаты (это по закону) и настройки уведомлений "
     "с датой рождения — ими ты управляешь сам на экране профиля.\n"
     f"Чтобы подтвердить — {_FORGET_ALL_MARKER}"
@@ -388,6 +390,36 @@ def _bridge_erase(bot_user) -> bool:
         return False
 
 
+def _anonymize_dialogue(bot_user) -> None:
+    """«Забудь всё» → обезличить переписку, сейчас (DRF-1369).
+
+    The hourly ``forget_all_sweep`` does this too, idempotently, with the
+    request instant as its cutoff. This call is here because the person was
+    told «забудь всё» and a person hears that as «сейчас»: until it lands the
+    Redis window still holds the raw sentence every erased fact was extracted
+    from, and its only lifetime is a 24-hour TTL. Сутки — это сутки.
+
+    Best-effort, same posture as :func:`_bridge_clear`: a forget must never
+    break the turn, and the sweep is the retry.
+    """
+
+    if bot_user is None:
+        return
+    try:
+        from django.utils import timezone
+
+        from apps.conversations.erasure import anonymize_dialogue, shell_ids_for_person
+        from apps.conversations.models import ArchivedMessage
+
+        anonymize_dialogue(
+            shell_ids_for_person(bot_user=bot_user),
+            through=timezone.now(),
+            reason=ArchivedMessage.Reason.FORGET_ALL,
+        )
+    except Exception:  # noqa: BLE001 — forget must never break the turn
+        logger.exception("persona.memory_commands.dialogue_anonymize_failed")
+
+
 def handle_memory_command(
     *,
     user_id: uuid.UUID,
@@ -417,6 +449,9 @@ def handle_memory_command(
     if norm.rstrip(".!") == _CONFIRM_WORD:
         if last_assistant_text and _FORGET_ALL_MARKER in _normalise(last_assistant_text):
             request_forget_all(user_id)
+            # OD_MEMORY.md §4 — «удалить всё» is three obligations and the
+            # third one is the переписка. Not deleted: обезличена (DRF-1369).
+            _anonymize_dialogue(bot_user)
             # Forget must be REAL, not a mark (silent-remember ruling). Ayla
             # owns the declared profile (OD_MEMORY.md §1), so this asks the
             # owner to erase the whole row — one verb, no field list. Listing

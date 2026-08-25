@@ -144,6 +144,36 @@ class Conversation(models.Model):
         "data — never hard-deleted from this table; retention sweeps "
         "(Sprint 1 pattern) eventually cascade-prune messages.",
     )
+    # DRF-1369 — the anonymisation cutoff (OD_MEMORY.md §4).
+    #
+    # NULL means «no part of this thread has been anonymised». A value means
+    # every ``Message`` on this conversation with ``created_at <=
+    # anonymized_through`` has had its body moved to :class:`ArchivedMessage`
+    # and blanked in place.
+    #
+    # A CUTOFF and not a boolean, because «забудь всё» is not the end of the
+    # dialogue: the person keeps talking to the bot afterwards, and the turns
+    # they take after the request are theirs again. The account delete uses the
+    # same field with the cutoff at the moment of deletion.
+    #
+    # Moving the cutoff forward is the only legal transition — see
+    # ``apps.conversations.erasure.anonymize_dialogue``.
+    anonymized_through = models.DateTimeField(
+        null=True,
+        blank=True,
+        db_index=True,
+        help_text="DRF-1369 / OD_MEMORY.md §4. Messages created at or before "
+        "this instant are anonymised: body moved to ArchivedMessage, "
+        "content/rendered_text blanked in place. NULL = nothing on this "
+        "thread has been anonymised.",
+    )
+    anonymized_reason = models.CharField(
+        max_length=32,
+        blank=True,
+        default="",
+        help_text="Which erasure request moved the cutoff — forget_all / "
+        "account_delete. An audit cannot tell the two apart otherwise.",
+    )
     # Sprint 9 / D3 (DRF-835) — multi-step skill FSM state.
     #
     # ``apps.skills.fsm.SkillFSM`` serialises its in-flight state here
@@ -482,6 +512,156 @@ class Message(models.Model):
     def __str__(self) -> str:
         preview = (self.content or self.rendered_text)[:40]
         return f"Message[{self.role}]({preview!r})"
+
+
+class ArchivedMessage(models.Model):
+    """The anonymised body of a :class:`Message`, kept for incident review.
+
+    DRF-1369 / owner ruling ``OD_MEMORY.md`` §4, verbatim:
+
+        «удалить всё» = удалить память/профиль и **обезличить переписку с
+        гарантией недоступности для prompt pipeline»
+
+    Three obligations. The third is the one that decides the shape of this
+    table: a **guarantee**, not an intention.
+
+    ### Why a separate table and not a flag on ``Message``
+
+    The guarantee cannot be «every reader remembers to filter». The contour
+    had already run that experiment: ``short_term.clear`` documented itself as
+    «used by the 152-ФЗ delete-my-data workflow» and had no caller anywhere in
+    ``apps/`` — the intention was written down, the guarantee was absent.
+
+    So anonymisation does not mark the text; it **moves** it. ``Message.content``
+    and ``Message.rendered_text`` are blanked in place, and the redacted body
+    lands here. Every reader of the dialogue — the ones this ticket found, the
+    ones it did not, and the ones written next month in a package nobody
+    thought to grep — reads ``Message``. They get an empty string, by
+    construction, with no filter to forget. Same posture the cascade already
+    takes with ``StaffAssistantMessage.content`` (``privacy._erase_staff_
+    assistant``) and with terminal ``AiDraft.content``; this is that pattern
+    applied to the surface those two left uncovered.
+
+    A column on ``Message`` would have been cheaper and weaker: a
+    ``fields = "__all__"`` serialiser, a ``.values()``, ``model_to_dict``, or
+    the Django admin would carry it back out again without anyone writing a
+    read.
+
+    ### What «обезличить» means here, precisely
+
+    * The **words stay**. The owner's reason for keeping them is explicit —
+      «это единственная запись того, что бот на самом деле сказал человеку, и
+      она нужна при разборе инцидента и спора о брони». Deleting them would be
+      erasure under another name, which the ruling rejects.
+    * The **direct identifiers do not**. Bodies are passed through
+      ``apps.replay.redactor.Redactor`` (``regex_v1``: phone, e-mail, card,
+      OTP, tokened URL) before they are written here.
+    * The **person key is deliberately kept** — ``conversation`` still points
+      at the thread and the thread still points at the ``BotUser`` shell. A
+      dispute about a booking is unresolvable without knowing whose booking it
+      was, so this is pseudonymisation of the content, not severance of the
+      row. Naming it rather than implying more than is done.
+
+    ### Retention
+
+    ``retention_until`` is stamped per row from
+    ``ANONYMIZED_DIALOGUE_RETENTION_DAYS`` at archive time and enforced by
+    ``apps.conversations.tasks.purge_expired_archived_messages``. The ruling
+    demands the term be named — «бессрочно» is the absence of a decision — and
+    a term nothing enforces is one more docstring promise, which is the exact
+    failure DRF-1370 had to repair. See the module docstring of
+    ``apps.conversations.erasure`` for how the 90 days was derived and for the
+    open question standing with the owner.
+    """
+
+    class Reason(models.TextChoices):
+        FORGET_ALL = "forget_all", "«Забудь всё» (memory erasure)"
+        ACCOUNT_DELETE = "account_delete", "152-ФЗ delete-my-data"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    tenant = models.ForeignKey(
+        "tenancy.Tenant",
+        on_delete=models.PROTECT,
+        related_name="archived_messages",
+        help_text="Mirrors the archived Message.tenant so the cross-tenant "
+        "leakage scanner covers this model like every other.",
+    )
+    conversation = models.ForeignKey(
+        Conversation,
+        on_delete=models.PROTECT,
+        related_name="archived_messages",
+        help_text="PROTECT: the archive is the incident-review record; a "
+        "stray conversation delete must not take it with it.",
+    )
+    message = models.OneToOneField(
+        Message,
+        on_delete=models.PROTECT,
+        related_name="archived_body",
+        help_text="The row whose body was moved here. OneToOne makes "
+        "re-running the anonymiser a no-op at the database level rather "
+        "than by the caller's good behaviour.",
+    )
+    role = models.CharField(max_length=16, help_text="Copied from Message.role.")
+    body = models.TextField(
+        blank=True,
+        default="",
+        help_text="Redacted Message.content. NEVER read by a prompt path — "
+        "the sole sanctioned reader is "
+        "apps.conversations.erasure.read_anonymized_dialogue.",
+    )
+    rendered_body = models.TextField(
+        blank=True,
+        default="",
+        help_text="Redacted Message.rendered_text — what the person actually "
+        "saw on their screen. Same read rule as `body`.",
+    )
+    action_type = models.CharField(max_length=32, blank=True, default="")
+    action_data = models.JSONField(
+        null=True,
+        blank=True,
+        help_text="Redacted Message.action_data. It is not metadata: the "
+        "clarification block carries the question the person was asked and "
+        "the options they were offered, verbatim, and the MAX handler reads "
+        "it back to rebuild a pending multi-select. Blanking content while "
+        "leaving this behind left the words on a prompt path — the registry "
+        "guard caught exactly that.",
+    )
+    tool_call = models.JSONField(
+        null=True,
+        blank=True,
+        help_text="Redacted Message.tool_call — the model's arguments quote "
+        "the person's phrasing. Archived for the same forensic reason the "
+        "column exists at all.",
+    )
+    original_created_at = models.DateTimeField(
+        help_text="Message.created_at. The archive orders by this, not by "
+        "archived_at — a review reads the dialogue, not the sweep."
+    )
+    archived_at = models.DateTimeField(auto_now_add=True)
+    retention_until = models.DateTimeField(
+        db_index=True,
+        help_text="The named term. purge_expired_archived_messages "
+        "hard-deletes the row past this instant.",
+    )
+    reason = models.CharField(
+        max_length=32,
+        choices=Reason.choices,
+        help_text="Which erasure request produced this row.",
+    )
+
+    objects = TenantScopedManager()
+    all_tenants = models.Manager()
+
+    class Meta:
+        verbose_name = "Archived message"
+        verbose_name_plural = "Archived messages"
+        ordering = ["original_created_at"]
+        indexes = [
+            models.Index(fields=["conversation", "original_created_at"]),
+        ]
+
+    def __str__(self) -> str:
+        return f"ArchivedMessage[{self.role}]({self.original_created_at:%Y-%m-%d})"
 
 
 class AiDraft(models.Model):

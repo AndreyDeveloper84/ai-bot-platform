@@ -106,6 +106,23 @@ class TestTheDeclarationMatchesTheInventory:
         assert "conversations.Message.content" in NON_REGISTRY_STORES
         assert "conversations.Conversation.skill_state" in NON_REGISTRY_STORES
 
+    def test_the_archive_left_behind_by_erasure_is_named(self):
+        """DRF-1369 added a store, so the declaration owes a line for it.
+
+        Under-reporting the composition is the failure this whole module was
+        written to end, and this store is the one a person is least likely to
+        expect: they asked for deletion and some of their text is still held.
+        A new store that quietly does not appear here would repeat DRF-1370
+        inside the file that fixed it.
+        """
+        reason = NON_REGISTRY_STORES.get("conversations.ArchivedMessage.body", "")
+
+        assert reason, "the anonymised archive is a store the export must declare"
+        # The two things the person actually needs from the line: that the
+        # text survived the erasure, and for how long.
+        assert "обезличен" in reason.lower()
+        assert "90 дней" in reason
+
 
 class TestTheCoverageBlock:
     def test_nothing_renders_as_undeclared(self):

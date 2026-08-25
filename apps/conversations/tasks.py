@@ -1,6 +1,6 @@
 """Conversations app Celery tasks — retention sweeps.
 
-Currently hosts one task:
+Hosts two tasks:
 
 * :func:`purge_old_ai_drafts` — Blocker #5 Layer 2 of the PR #535 (M6
   AI drafts) follow-up. Hard-deletes terminal :class:`AiDraft` rows
@@ -8,6 +8,10 @@ Currently hosts one task:
   clearing at status-flip time) lives in
   :mod:`apps.master_api.services.ai_drafts`; Layer 2 sweeps the
   metadata-only stubs after the finance reconciliation window closes.
+* :func:`purge_expired_archived_messages` — DRF-1369 / ``OD_MEMORY.md``
+  §4. Hard-deletes anonymised dialogue bodies past the named retention
+  term. See :mod:`apps.conversations.erasure` for the term and its
+  derivation.
 
 ### Why two layers?
 
@@ -108,4 +112,51 @@ def purge_old_ai_drafts() -> int:
     return int(deleted_count)
 
 
-__all__ = ["AI_DRAFT_RETENTION_DAYS", "purge_old_ai_drafts"]
+@shared_task(name="apps.conversations.tasks.purge_expired_archived_messages")
+def purge_expired_archived_messages() -> int:
+    """Hard-delete anonymised dialogue bodies past their named term (DRF-1369).
+
+    ``OD_MEMORY.md`` §4 requires the retention term of the anonymised dialogue
+    to be **named explicitly** — «бессрочно» is the absence of a decision. The
+    term is :data:`apps.conversations.erasure.ANONYMIZED_DIALOGUE_RETENTION_DAYS`
+    (90 days, derived from the forensic audit tier — see that module's
+    docstring), and this task is what makes it true rather than declared. A
+    term nothing sweeps is one more docstring promise, which is the exact
+    defect DRF-1370 had to repair.
+
+    Hard delete, not soft: the row is already the tombstone. Its whole purpose
+    was to survive the erasure for the incident-review window, and once that
+    window closes there is nothing left for a softer state to mean.
+
+    ``retention_until`` is stamped per row at archive time, so a change to the
+    setting applies to future erasures and never retroactively shortens the
+    term someone was already promised.
+
+    Returns the number of rows deleted. Idempotent by construction.
+    """
+
+    from apps.conversations.models import ArchivedMessage
+
+    now = timezone.now()
+    batch_pks = list(
+        ArchivedMessage.all_tenants.filter(retention_until__lt=now).values_list("pk", flat=True)[
+            :5000
+        ]
+    )
+    if not batch_pks:
+        return 0
+
+    deleted_count, _per_model = ArchivedMessage.all_tenants.filter(pk__in=batch_pks).delete()
+    logger.info(
+        "conversations.archive.purged count=%d now=%s",
+        deleted_count,
+        now.isoformat(),
+    )
+    return int(deleted_count)
+
+
+__all__ = [
+    "AI_DRAFT_RETENTION_DAYS",
+    "purge_expired_archived_messages",
+    "purge_old_ai_drafts",
+]

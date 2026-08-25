@@ -350,6 +350,15 @@ AUDIT_LOG_RETENTION_MODE = os.environ.get("AUDIT_LOG_RETENTION_MODE", "hard")
 # dedup tokens, not forensic data (Order carries the forensic trail).
 PAYMENT_EVENT_RETENTION_DAYS = int(os.environ.get("PAYMENT_EVENT_RETENTION_DAYS", "90"))
 
+# DRF-1369 / OD_MEMORY.md §4 — how long an ANONYMISED dialogue body is kept.
+# Derived, not ruled: the canon has no retention for Conversation/Message
+# (docs/152fz/REESTR_PDN_DRAFT.md records it as «НЕ НАЙДЕН» and lists the
+# storage term for dialogue text among the open legal questions). An incident
+# review reads the AuditLog row and the dialogue body together, so the body is
+# kept for exactly as long as the audit tier it is placed alongside — 90 days.
+# Standing question with the owner: docs/OPEN_DECISIONS.md.
+ANONYMIZED_DIALOGUE_RETENTION_DAYS = int(os.environ.get("ANONYMIZED_DIALOGUE_RETENTION_DAYS", "90"))
+
 # #443 — payment.failed consumer threshold. After N consecutive failures
 # without an intervening capture, the consumer emits
 # ``payment_failed_skill_triggered`` (separate PR for the skill itself).
@@ -1250,6 +1259,15 @@ CELERY_BEAT_SCHEDULE = {
     "purge_old_ai_drafts": {
         "task": "apps.conversations.tasks.purge_old_ai_drafts",
         "schedule": crontab(hour="3", minute="15"),
+    },
+    # DRF-1369 / OD_MEMORY.md §4 — the named retention term of the
+    # anonymised dialogue, enforced. «Бессрочно» is the absence of a
+    # decision, and a term nothing sweeps is a docstring promise (the exact
+    # defect DRF-1370 repaired three docstrings at a time). 03:20 UTC,
+    # right after the draft purge — both walk the same tables.
+    "purge_expired_archived_messages": {
+        "task": "apps.conversations.tasks.purge_expired_archived_messages",
+        "schedule": crontab(hour="3", minute="20"),
     },
     # DRF-1054 (availability monitor) + DRF-1056 (connection warm-up) —
     # ONE cheap real completion down the production LLM path per tick.

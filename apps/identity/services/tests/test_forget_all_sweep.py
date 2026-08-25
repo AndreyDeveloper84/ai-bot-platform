@@ -433,6 +433,149 @@ class TestQueueBehaviour:
         assert summary["entries_deleted"] == 1
 
 
+class TestTheDialogueHalf:
+    """DRF-1369 — the sweep also обезличивает the переписка.
+
+    The memory half of «забудь всё» landed first (DRF-1370). The dialogue was
+    the surface nothing in the cascade touched, and it reached a prompt: the
+    master's AI draft is assembled straight out of ``Message`` rows.
+    """
+
+    class _FakeRedis:
+        def __init__(self):
+            self.store: dict = {}
+            self.deleted: list[str] = []
+
+        def pipeline(self):
+            outer = self
+
+            class _Pipe:
+                def __init__(self):
+                    self.ops: list = []
+
+                def rpush(self, key, value):
+                    self.ops.append((key, value))
+
+                def ltrim(self, *a):
+                    pass
+
+                def expire(self, *a):
+                    pass
+
+                def execute(self):
+                    for key, value in self.ops:
+                        outer.store.setdefault(key, []).append(value)
+                    self.ops = []
+
+            return _Pipe()
+
+        def lrange(self, key, start, end):
+            items = self.store.get(key, [])
+            return items[start:] if end == -1 else items[start:end]
+
+        def delete(self, key):
+            self.deleted.append(key)
+            self.store.pop(key, None)
+
+    @pytest.fixture()
+    def redis(self, monkeypatch):
+        from apps.llm import pii_tokenizer
+        from apps.orchestrator.memory import short_term
+
+        fake = self._FakeRedis()
+        monkeypatch.setattr(short_term, "_redis_client", lambda: fake)
+        monkeypatch.setattr(pii_tokenizer, "_redis_client", lambda: fake)
+        return fake
+
+    @staticmethod
+    def _dialogue(upc, settings):
+        from apps.conversations.models import Conversation, Message
+
+        settings.STRICT_TENANT_SCOPE = "off"
+        tenant = Tenant.objects.create(slug=f"fas-{uuid.uuid4().hex[:8]}", name="Sweep")
+        bot_user = BotUser.all_tenants.create(
+            tenant=tenant,
+            channel="max",
+            channel_user_id=f"fas-{uuid.uuid4().hex[:8]}",
+            ayla_user_id=upc.user_id,
+        )
+        conversation = Conversation.all_tenants.create(tenant=tenant, bot_user=bot_user)
+        # The thread predates the request — a thread OPENED afterwards is
+        # deliberately out of the anonymiser's reach (see
+        # apps/conversations/tests/test_erasure.py::TestTheCutoff).
+        Conversation.all_tenants.filter(pk=conversation.pk).update(
+            created_at=upc.forget_all_requested_at - timedelta(minutes=10)
+        )
+        conversation.refresh_from_db()
+        return conversation, Message
+
+    def test_the_cutoff_is_the_request_instant_not_now(self, redis, settings):
+        """The whole reason the sweep can re-run hourly without harm.
+
+        The sweep is deliberately re-entrant — the write path does not honour
+        the forget-all gate, so it keeps coming back. With a «now» cutoff that
+        re-entrancy would blank the live conversation of a forgotten person
+        every hour for as long as they kept using the bot.
+        """
+        upc = _upc()
+        request_forget_all(upc.user_id)
+        upc.refresh_from_db()
+        conversation, Message = self._dialogue(upc, settings)
+
+        before = Message.all_tenants.create(
+            tenant=conversation.tenant,
+            conversation=conversation,
+            role="user",
+            content="я веган",
+        )
+        Message.all_tenants.filter(pk=before.pk).update(
+            created_at=upc.forget_all_requested_at - timedelta(minutes=5)
+        )
+        after = Message.all_tenants.create(
+            tenant=conversation.tenant,
+            conversation=conversation,
+            role="user",
+            content="запиши меня на маникюр",
+        )
+        Message.all_tenants.filter(pk=after.pk).update(
+            created_at=upc.forget_all_requested_at + timedelta(minutes=5)
+        )
+
+        result = sweep_forget_all(upc.user_id)
+
+        before.refresh_from_db()
+        after.refresh_from_db()
+        assert result.conversations_anonymized == 1
+        assert result.messages_archived == 1
+        assert before.content == ""
+        assert after.content == "запиши меня на маникюр"
+
+    def test_an_unfinished_dialogue_keeps_the_person_in_the_queue(self, redis, settings):
+        """The failure direction: a Redis outage must not tick the person off.
+
+        The dialogue half writes to Redis before it writes to Postgres, so a
+        Redis failure leaves the cutoff unmoved. Without the third term in
+        ``pending_forget_all_user_ids`` the queue would consider the erasure
+        finished because the MEMORY half succeeded — «success reported for work
+        not done», which this cascade refuses everywhere else.
+        """
+        from apps.conversations.models import Conversation
+
+        upc = _upc()
+        _green(upc)
+        request_forget_all(upc.user_id)
+        upc.refresh_from_db()
+        conversation, _ = self._dialogue(upc, settings)
+
+        sweep_forget_all(upc.user_id)
+        assert upc.user_id not in pending_forget_all_user_ids()
+
+        # Now simulate the half that did not land.
+        Conversation.all_tenants.filter(pk=conversation.pk).update(anonymized_through=None)
+
+        assert upc.user_id in pending_forget_all_user_ids()
+
+
 class TestWiring:
     def test_the_task_is_registered_on_the_beat(self, settings):
         entry = settings.CELERY_BEAT_SCHEDULE["identity_forget_all_sweep"]
