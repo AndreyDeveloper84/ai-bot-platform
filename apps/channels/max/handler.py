@@ -502,6 +502,103 @@ def _record_live_path_metric(
         )
 
 
+def _capture_live_replay(
+    *,
+    trace_id: str | uuid.UUID | None,
+    event: CanonicalEvent,
+    surface: str,
+    branch: str,
+    pre_verdict: str,
+    post_verdict: str,
+    reply_text: str,
+    skill_name: str = "",
+    keyboard_size: int = 0,
+) -> None:
+    """DRF-1209 step 18 — one ``ReplayTrace`` row for a live-path turn.
+
+    Until now ``apps.replay.recorder`` was called only by the DEPRECATED
+    ``apps.orchestrator.pipeline.turn`` and the offline replay runner — the
+    path that actually answers people wrote no traces. This helper ports the
+    SAME recorder onto the live handler: same sampling gate
+    (``REPLAY_SAMPLE_RATE_*``, decided inside the recorder), same ``regex_v2``
+    redaction before persist, same swallow-everything contract.
+
+    The six pipeline stages do not exist on the live path, so the snapshots
+    are built from what the live path actually has — inbound, routing (which
+    branch / skill answered), pre-check verdict, the final reply, and the
+    outbound guard verdict — in the field shape of the pipeline's
+    ``_replay_capture`` steps so existing ReplayTrace readers parse them.
+    Live rows carry ``source: "live_path"`` + ``surface`` on the inbound
+    payload to stay distinguishable from pipeline-captured rows.
+
+    The global path runs at ``current_tenant()=None`` BY DESIGN (the
+    CrossTenantError invariant), and the recorder skips tenant-less captures
+    — so global rows are parked under the ``global_bot`` sentinel tenant for
+    the duration of the capture call only, exactly like the concierge
+    ``AIRequestMetric`` rows. The scope is entered around the recorder call
+    and nowhere else; the tenant-less invariant of the surrounding handler
+    is untouched.
+
+    Gated by ``REPLAY_LIVE_CAPTURE_ENABLED`` (default OFF): flag off = zero
+    new rows, zero extra DB work. Best-effort, mirroring
+    ``_record_live_path_metric``: observability must never crash the turn —
+    failures log WARN with trace_id + branch.
+    """
+    if not getattr(settings, "REPLAY_LIVE_CAPTURE_ENABLED", False):
+        return
+    try:
+        from apps.replay.recorder import capture as recorder_capture
+        from apps.tenancy.context import tenant_scope
+
+        steps = [
+            {
+                "step": "inbound",
+                "payload": {
+                    "text": event.text,
+                    "channel": event.channel,
+                    "channel_user_id": event.channel_user_id,
+                    # Live-path marker — distinguishes these rows from the
+                    # deprecated pipeline's captures without a schema change.
+                    "source": "live_path",
+                    "surface": surface,
+                },
+            },
+            {
+                "step": "routing",
+                "payload": {"branch": branch, "skill": skill_name},
+            },
+            {
+                "step": "pre_check",
+                "payload": {"verdict": pre_verdict},
+            },
+            {
+                "step": "post_check",
+                "payload": {"verdict": post_verdict},
+            },
+            {
+                "step": "composer",
+                "payload": {
+                    "final_text": reply_text,
+                    "safety_revised": post_verdict == "block",
+                    "keyboard_size": keyboard_size,
+                },
+            },
+        ]
+        trace = str(trace_id) if trace_id else ""
+        if surface == "max_global":
+            with tenant_scope(get_global_bot_tenant()):
+                recorder_capture(trace, steps)
+        else:
+            recorder_capture(trace, steps)
+    except Exception as capture_exc:  # noqa: BLE001 — observability never crashes the turn
+        logger.warning(
+            "channels.max.handler.replay_capture_failed trace=%s branch=%s err=%s",
+            trace_id,
+            branch,
+            capture_exc,
+        )
+
+
 def _deliver_crisis_reply(
     *,
     chat_id: str,
@@ -608,7 +705,7 @@ def _dispatch_skill_handoff(
     *,
     reason_override: str | None = None,
     handoff_text_override: str | None = None,
-) -> None:
+) -> str:
     """Escalate to a human when a skill returns ``should_handoff`` (#1047).
 
     The MAX handler previously ignored ``SkillResult.should_handoff``, so booking's
@@ -630,6 +727,10 @@ def _dispatch_skill_handoff(
     Requires ``current_tenant()`` — the consumer enters ``tenant_scope`` before
     dispatching to this handler (module contract), which ``create_admin_task``
     needs.
+
+    Returns the exact line that was sent (post-guard), so the caller's
+    observability (DRF-1209 replay capture) records what the person
+    actually read rather than re-deriving the pre-guard text.
     """
     from apps.handoff.models import AdminTask
     from apps.handoff.services import create_admin_task
@@ -677,6 +778,7 @@ def _dispatch_skill_handoff(
         conversation.id,
         reason,
     )
+    return handoff_text
 
 
 def _reply_kind(event: CanonicalEvent, skill_result: Any, reply_text: str) -> str:
@@ -1089,6 +1191,10 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
     #      still processed as a memory command, not hijacked into cards.
     #   3. A normal tenant-less discovery turn (which may itself surface cards).
     assistant_action_type = ""
+    # DRF-1209 step 18 — the outbound guard's verdict for the replay
+    # capture. "" until the guard runs (the crisis-reply exemption below
+    # leaves it empty: the guard deliberately does not see that reply).
+    post_verdict = ""
     # DRF-1362 — set only by the multi-select branch: this reply REPLACES the
     # message the tap came from instead of following it.
     clarify_redraw = False
@@ -1553,6 +1659,7 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
     # lines, which a test pins clean rather than a whitelist excuses.
     if assistant_action_type != "safety_pre_check":
         guarded = guard_outbound(reply.text, surface="max", bot_user=bot_user, trace_id=trace_id)
+        post_verdict = "block" if guarded.blocked else "allow"
         if guarded.blocked:
             # The keyboard goes with the text. ``outbound.py``'s rule is that
             # the reply is REPLACED, not edited, and master cards left hanging
@@ -1625,6 +1732,25 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
             text=reply.text,
             attachments=_build_attachments(reply.action_data),
         )
+
+    # DRF-1209 step 18 — replay capture for the live global path. ONE point
+    # after the reply is delivered: every branch above (safety, opt_out,
+    # stale tap, handoff, visits, onboarding, callbacks, concierge) lands
+    # here with its FINAL reply, so a single call covers them all and a
+    # capture failure can never affect what the user saw. Flag-gated +
+    # best-effort inside (REPLAY_LIVE_CAPTURE_ENABLED, default OFF). Runs
+    # after the send — zero added user-visible latency. The muted-handoff
+    # early return above answers nothing, so it captures nothing.
+    _capture_live_replay(
+        trace_id=trace_id,
+        event=event,
+        surface="max_global",
+        branch=assistant_action_type or ("concierge" if concierge_turn_ran else ""),
+        pre_verdict=safety.verdict,
+        post_verdict=post_verdict,
+        reply_text=reply.text,
+        keyboard_size=len(_build_attachments(reply.action_data) or []),
+    )
 
     # DRF-1273 — canonical intent resolution (Output Contract 0.5) for
     # free-text concierge turns. Runs AFTER the reply is delivered: zero
@@ -1901,6 +2027,17 @@ def _handle_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.UUID | N
             outcome=AIRequestMetric.OUTCOME_SUCCESS,
             skill_selected="safety_pre_check",
         )
+        # DRF-1209 step 18 — replay capture (flag-gated, best-effort inside).
+        # post_verdict="": the crisis reply is exempt from the outbound guard.
+        _capture_live_replay(
+            trace_id=trace_id,
+            event=event,
+            surface="max_per_tenant",
+            branch="safety_pre_check",
+            pre_verdict=safety.verdict,
+            post_verdict="",
+            reply_text=safety.reply_text,
+        )
         return
 
     # Photo bytes path — Веха 2 of the photo adapter port.
@@ -1982,7 +2119,9 @@ def _handle_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.UUID | N
     confidence_floor_reason = _confidence_floor_reason(skill_result)
     if skill_result is not None and (skill_result.should_handoff or confidence_floor_reason):
         if not confidence_floor_reason:
-            _dispatch_skill_handoff(conversation, skill_result, event.chat_id, trace_id)
+            handoff_sent_text = _dispatch_skill_handoff(
+                conversation, skill_result, event.chat_id, trace_id
+            )
         else:
             # Pipeline reason contract: the skill's own slug first, the floor
             # diagnostic appended ("a | b"); floor-only escalation carries just
@@ -1991,7 +2130,7 @@ def _handle_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.UUID | N
             skill_reason = skill_result.handoff_reason or (
                 "skill_requested_handoff" if skill_result.should_handoff else ""
             )
-            _dispatch_skill_handoff(
+            handoff_sent_text = _dispatch_skill_handoff(
                 conversation,
                 skill_result,
                 event.chat_id,
@@ -2015,6 +2154,19 @@ def _handle_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.UUID | N
             tenant=conversation.tenant,
             outcome=AIRequestMetric.OUTCOME_ESCALATED,
             skill_selected=_skill_selected_label(skill_result),
+        )
+        # DRF-1209 step 18 — replay capture (flag-gated, best-effort inside).
+        # post_verdict="": the outbound guard ran INSIDE _dispatch_skill_handoff;
+        # handoff_sent_text is already the post-guard line the person read.
+        _capture_live_replay(
+            trace_id=trace_id,
+            event=event,
+            surface="max_per_tenant",
+            branch=skill_result.action_type or "handoff",
+            pre_verdict=safety.verdict,
+            post_verdict="",
+            reply_text=handoff_sent_text,
+            skill_name=_skill_selected_label(skill_result),
         )
         return
 
@@ -2111,6 +2263,23 @@ def _handle_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.UUID | N
 
     # Outbound — MaxAPIError propagates up (handler does not swallow).
     send_message(chat_id=event.chat_id, text=reply_text, attachments=attachments)
+
+    # DRF-1209 step 18 — replay capture for the live per-tenant path
+    # (flag-gated + best-effort inside, REPLAY_LIVE_CAPTURE_ENABLED default
+    # OFF). After the send: zero added user-visible latency, and a capture
+    # failure can never affect what the user saw. The silent handoff-mute
+    # path above answers nothing, so it captures nothing.
+    _capture_live_replay(
+        trace_id=trace_id,
+        event=event,
+        surface="max_per_tenant",
+        branch=action_type,
+        pre_verdict=safety.verdict,
+        post_verdict="block" if _guarded.blocked else "allow",
+        reply_text=reply_text,
+        skill_name=_skill_selected_label(skill_result),
+        keyboard_size=len(attachments or []),
+    )
 
     emit(
         "channels.max.outbound.sent",
