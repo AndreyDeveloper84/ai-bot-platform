@@ -51,6 +51,16 @@ Usage::
     python tools/ci/miniapp_bundle_drift.py
     python tools/ci/miniapp_bundle_drift.py --url https://... --dist apps/miniapp/dist
 
+Runs on Python 3.8
+------------------
+`infra/deploy/miniapp-release.sh` calls this file with the pilot host's system
+`python3`, which is 3.8.10 -- while CI runs something much newer. Anything that
+only exists in 3.9+ therefore turns this guard permanently red on the host, and
+a check that always answers the same thing is not a check. Keep it 3.8-clean:
+`from __future__ import annotations` covers the PEP 585/604 annotations below,
+and nothing here may use 3.9+ runtime features (`str.removeprefix`,
+`dict |` merge, `zip(strict=)`, `match`, `tomllib`, ...).
+
 Exit codes:
     0  the served bundle matches this tree
     1  drift -- the served bundle was built from different sources
@@ -148,7 +158,11 @@ def served_modules(base_url: str) -> tuple[dict[str, str], str, str]:
         )
 
     modules: dict[str, str] = {}
-    for raw_path, content in zip(source_map.get("sources", []), contents, strict=False):
+    # No `strict=` here: that keyword landed in Python 3.10, the pilot host runs
+    # 3.8.10, and `strict=False` is zip's default behaviour anyway -- it added
+    # nothing but a TypeError on the one machine where this guard is the last
+    # thing a human reads before walking away from a release (DRF-1298).
+    for raw_path, content in zip(source_map.get("sources", []), contents):
         if content is None:
             continue
         path = str(raw_path).replace("\\", "/")

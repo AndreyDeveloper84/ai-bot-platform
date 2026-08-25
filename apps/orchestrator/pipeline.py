@@ -1,10 +1,28 @@
-"""Orchestrator pipeline — turn() (DRF-535 / Sprint 6 / O1).
+"""Orchestrator pipeline — turn() (DRF-535 / Sprint 6 / O1). DEPRECATED.
 
-The 19-step contract that takes one inbound ChannelMessage from the
-ingress consumer and produces a fully-routed outbound reply. Per
-PHASE0_DESIGN §5.1. This is the FIRST sprint that wires every component
-sprints 1-5 built — without this, every previous deliverable is
-plumbing nobody calls.
+### DEPRECATED — this is not the path that answers anyone (DRF-1216)
+
+The 19-step contract below was *designed* to take one inbound
+ChannelMessage from the ingress consumer and produce a fully-routed
+outbound reply (PHASE0_DESIGN §5.1). It never did. `turn()` has not been
+called from ingress on any day of this repository's history, and it has
+no caller outside tests today except `apps/replay/__main__.py`
+(`_default_pipeline`, imported lazily) — see `apps/replay/live_path.py`,
+which states the same fact from the replay side.
+
+A live MAX message is answered by
+`apps.channels.max.handler._handle_global_max_event_inner`, reached from
+the ingress *worker*, not from this module.
+
+Read everything below as a design record of an intended architecture, not
+as a description of the running system. The earlier wording ("takes one
+inbound ChannelMessage from the ingress consumer") read as a description
+of production and has already cost one reader a full investigation of
+1537 lines that nothing calls.
+
+Per owner decision OD-5 the pipeline is not touched as code: nothing here
+is deleted, no behaviour changes, no test changes. DRF-1216 removes only
+the false claim about the caller.
 
 ### The 19 steps
 
