@@ -204,7 +204,13 @@ norecursedirs = [
 # pytest-asyncio: explicit marker mode. Coroutine tests must be decorated
 # with @pytest.mark.asyncio (no implicit auto-collection of async funcs).
 asyncio_mode = "strict"
-addopts = "-q -m \"not smoke\""
+# `-p config.pytest_env_guard` (DRF-1384) — environment-vs-pin gate. Loaded
+# here rather than from a root conftest.py because pytest-django calls
+# `django.setup()` inside `pytest_load_initial_conftests`, i.e. BEFORE any
+# conftest is imported: a stale `ayla-ai-core` blows up populating the app
+# registry, long before a conftest hook could say why. Rationale in full:
+# config/pytest_env_guard.py. Bypass with AYLA_ENV_GUARD=off.
+addopts = "-p config.pytest_env_guard -q -m \"not smoke\""
 markers = [
     "e2e: end-to-end test requiring real Redis + Postgres (CI services or docker compose locally). Skipped automatically when backing services aren't reachable.",
     "slow: opt-in performance / latency-SLO tests. Excluded from the default suite (`-m \"not slow\"`); run via `pytest -m slow` in nightly perf jobs.",

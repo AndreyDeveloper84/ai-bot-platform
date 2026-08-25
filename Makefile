@@ -1,10 +1,12 @@
 # ai-bot-platform — Sprint 0 dev shortcuts.
-# Usage: `make <target>`. All targets assume docker compose is the runtime.
+# Usage: `make <target>`. Every target except `env` assumes docker compose
+# is the runtime; `env` is host-side and builds this worktree's venv.
 
-.PHONY: help up down restart shell test migrate makemigrations logs ps clean reset chroma-ping minio-bucket
+.PHONY: help env up down restart shell test migrate makemigrations logs ps clean reset chroma-ping minio-bucket
 
 help:
 	@echo "Targets:"
+	@echo "  env              Build/repair this worktree's venv to match the pins (host-side)"
 	@echo "  up               Bring up the dev stack (postgres, redis, chromadb, minio, web)"
 	@echo "  down             Stop the dev stack (volumes preserved)"
 	@echo "  restart          Restart all services"
@@ -18,6 +20,11 @@ help:
 	@echo "  minio-bucket     Create the replay bucket in MinIO"
 	@echo "  clean            Stop the stack (preserves volumes)"
 	@echo "  reset            Stop the stack AND delete all volumes (destructive)"
+
+# DRF-1384 — the one command for a fresh worktree. Host-side on purpose:
+# it is what builds the venv the other host-side commands run inside.
+env:
+	bash scripts/dev-env.sh
 
 up:
 	docker compose up -d --build
