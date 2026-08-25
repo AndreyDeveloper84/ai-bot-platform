@@ -3,7 +3,12 @@
  * admin / owner Mini App surface.
  *
  * Tabs (per master-management-handoff §MM0 overview):
- *   [👥 Команда] [💈 Услуги] [💬 Чаты] [⚙ Настройки]
+ *   [📅 День] [👥 Команда] [💈 Услуги] [💬 Чаты] [⚙ Настройки]
+ *
+ * Five tabs — one more than MasterTabBar. The `.master-tabbar` block is
+ * a four-column grid, so this bar adds `.master-tabbar--admin`, whose
+ * only declaration is `grid-template-columns: repeat(5, 1fr)`. Without
+ * it the fifth tab wraps onto a second row and covers screen content.
  *
  * Only «Команда» is live in this PR — the other three render
  * «Скоро» placeholder screens. Same SPA + role-routing pattern
@@ -161,7 +166,10 @@ export function AdminTabBar() {
   );
 
   return (
-    <nav className="master-tabbar" aria-label="Основная навигация">
+    <nav
+      className="master-tabbar master-tabbar--admin"
+      aria-label="Основная навигация"
+    >
       {tabs.map((tab) => {
         const isActive = location.pathname.startsWith(tab.to);
         return (

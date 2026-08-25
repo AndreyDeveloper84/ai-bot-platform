@@ -153,8 +153,97 @@ def test_a_baseline_entry_that_got_styled_must_be_deleted(
 
 
 # --------------------------------------------------------------------------
+# Tab bar columns — mechanics.
+# --------------------------------------------------------------------------
+
+NL = "\n"
+
+
+def _tabbar_app(tmp_path: Path, *, tabs: int, columns: int) -> Path:
+    """Throwaway root holding one tab bar with `tabs` tabs and `columns` columns."""
+    entries = NL.join(f'  {{ key: "t{i}", label: "T{i}", to: "/x/{i}" }},' for i in range(tabs))
+    return _app(
+        tmp_path,
+        tsx=(
+            f"const tabs: TabSpec[] = [{NL}{entries}{NL}];{NL}"
+            'export const Bar = () => <nav className="master-tabbar">{tabs}</nav>;' + NL
+        ),
+        css=(
+            ".master-tabbar { display: grid; "
+            f"grid-template-columns: repeat({columns}, 1fr); }}{NL}"
+        ),
+        rel="src/components/AdminTabBar.tsx",
+    )
+
+
+def test_a_bar_whose_tabs_fit_its_columns_is_not_reported(tmp_path: Path) -> None:
+    root = _tabbar_app(tmp_path, tabs=4, columns=4)
+
+    assert guard.scan_tabbar_columns(root) == []
+
+
+def test_a_bar_with_more_tabs_than_columns_is_reported(tmp_path: Path) -> None:
+    """The 2026-08-25 defect: five tabs in the four-column `.master-tabbar`."""
+    root = _tabbar_app(tmp_path, tabs=5, columns=4)
+
+    problems = guard.scan_tabbar_columns(root)
+
+    assert len(problems) == 1
+    assert "renders 5 tabs into a 4-column grid" in problems[0]
+
+
+def test_a_root_with_no_tab_bars_at_all_is_not_a_problem(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Absence is "not applicable", not "broken".
+
+    `main` is handed throwaway roots by the tests above, and by anything
+    else pointing it at a subtree. Reporting a missing component turned
+    every such root red and took an unrelated baseline test with it. What
+    a rename must not do — silently disable the check — is pinned by
+    `test_every_listed_tab_bar_exists` instead.
+    """
+    root = _app(
+        tmp_path,
+        tsx='export const S = () => <p className="styled">x</p>;' + NL,
+        css=".styled { display: block; }" + NL,
+    )
+    # The real BASELINE describes the real tree, not this one-file root —
+    # without this every entry reads as stale and `main` returns 1 for a
+    # reason that has nothing to do with tab bars.
+    monkeypatch.setattr(guard, "BASELINE", frozenset())
+
+    assert guard.scan_tabbar_columns(root) == []
+    assert guard.main(["miniapp_style_contract.py", str(root)]) == 0
+
+
+# --------------------------------------------------------------------------
 # The real tree.
 # --------------------------------------------------------------------------
+
+
+def test_every_listed_tab_bar_exists() -> None:
+    """A rename must not silently switch the column check off.
+
+    `scan_tabbar_columns` skips paths it cannot find, so this is the only
+    thing standing between a moved component and a check that quietly
+    stops looking at it.
+    """
+    app_root = _PROJECT_ROOT / "apps" / "miniapp"
+
+    missing = [rel for rel in guard.TABBAR_COMPONENTS if not (app_root / rel).is_file()]
+
+    assert missing == [], (
+        "TABBAR_COMPONENTS names files that no longer exist — update the tuple "
+        "in tools/lint/miniapp_style_contract.py to the new paths"
+    )
+
+
+def test_the_real_tab_bars_fit_one_row() -> None:
+    """The 2026-08-25 regression, named so a revert cannot pass quietly."""
+    app_root = _PROJECT_ROOT / "apps" / "miniapp"
+
+    assert guard.scan_tabbar_columns(app_root) == []
 
 
 def test_the_real_miniapp_matches_its_baseline_exactly() -> None:

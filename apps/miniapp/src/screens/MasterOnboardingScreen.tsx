@@ -31,6 +31,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { ApiError } from "../lib/api";
+import { salonOwnerHint } from "../lib/salonOwnerHint";
 import {
   acceptInvite,
   claimInvite,
@@ -81,8 +82,6 @@ const COPY = {
     greeting: (firstName: string) => `Здравствуйте, ${firstName}!`,
     body: (salonName: string) =>
       `${salonName} пригласила вас в помощник студии. Здесь вы будете видеть своё расписание и общаться с клиентами.`,
-    bodyKarina:
-      "Карина пригласила вас в помощник студии. Здесь вы будете видеть своё расписание и общаться с клиентами.",
     question: "Это вы?",
     cta: "Это я, продолжить",
     notMe: "Это не я",
@@ -100,8 +99,10 @@ const COPY = {
       "Финансовые данные",
       "Чужие диалоги и других мастеров",
     ],
-    footer: (salonOwnerHint: string) =>
-      `Это сделано, чтобы защитить данные клиентов. ${salonOwnerHint} может при необходимости расширить доступ — спросите ${salonOwnerHint === "Карина" ? "её" : "у студии"}.`,
+    // `ownerHint` is an arbitrary tenant string (salon name or the neutral
+    // default), so no gendered pronoun can be derived from it — ask «у студии».
+    footer: (ownerHint: string) =>
+      `Это сделано, чтобы защитить данные клиентов. ${ownerHint} может при необходимости расширить доступ — спросите у студии.`,
     cta: "Понятно",
   },
   step3: {
@@ -436,12 +437,11 @@ function Step2Permissions({
   data: ClaimResponse;
   onContinue: () => void;
 }) {
-  // Spec line 219-221 references "Карина" by name; PR uses salon.name as
-  // proxy for the owner since we don't surface owner name yet. Voice-copy
-  // verbatim per spec — we keep "Карина" until we can resolve owner
-  // first-name from BE.
-  const ownerHint = "Карина";
-  void data; // reserved for future per-salon copy.
+  // Spec line 219-221 references "Карина" by name. That is a spec example, not
+  // data: the backend surfaces no owner first name, only `salon.name`. Step 1
+  // already renders the salon name, so step 2 uses the same source rather than
+  // a literal that is wrong for every tenant. See lib/salonOwnerHint.ts.
+  const ownerHint = salonOwnerHint(data.salon.name);
   return (
     <ScreenLayout
       cta={<StickyCta onClick={onContinue}>{COPY.step2.cta}</StickyCta>}

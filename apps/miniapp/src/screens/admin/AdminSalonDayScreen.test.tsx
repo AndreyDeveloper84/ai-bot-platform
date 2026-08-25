@@ -104,6 +104,50 @@ describe("salon day", () => {
     expect(screen.getByText("Мария И.")).toBeInTheDocument();
   });
 
+  it("shows how long the visit takes, not only when it starts", async () => {
+    // `duration_min` has been in the payload since this endpoint
+    // existed and the card threw it away, so the front desk could see
+    // «10:00» but not that the master is busy until 11:15.
+    mockedDay.mockResolvedValue(
+      dayResponse({
+        summary: { total: 1, upcoming: 1, completed: 0, released: 0 },
+        masters: [
+          {
+            master_id: "m-1",
+            name: "Анна Петрова",
+            is_active: true,
+            visits: [visit({ duration_min: 75 })],
+          },
+        ],
+      }),
+    );
+    renderScreen();
+
+    expect(await screen.findByText("10:00")).toBeInTheDocument();
+    expect(screen.getByText("75 мин")).toBeInTheDocument();
+  });
+
+  it("omits the duration line when the payload says zero", async () => {
+    mockedDay.mockResolvedValue(
+      dayResponse({
+        summary: { total: 1, upcoming: 1, completed: 0, released: 0 },
+        masters: [
+          {
+            master_id: "m-1",
+            name: "Анна Петрова",
+            is_active: true,
+            visits: [visit({ duration_min: 0 })],
+          },
+        ],
+      }),
+    );
+    renderScreen();
+
+    expect(await screen.findByText("10:00")).toBeInTheDocument();
+    // «0 мин» is worse than no line at all.
+    expect(screen.queryByText(/\sмин$/)).not.toBeInTheDocument();
+  });
+
   it("says plainly when nothing is booked", async () => {
     mockedDay.mockResolvedValue(dayResponse());
     renderScreen();

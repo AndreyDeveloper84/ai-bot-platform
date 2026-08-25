@@ -42,6 +42,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { ApiError } from "../lib/api";
+import { salonOwnerHint } from "../lib/salonOwnerHint";
 import {
   getDashboard,
   type DashboardActiveVisit,
@@ -105,8 +106,11 @@ const COPY = {
         ? `Сегодня нет записей. Свободный день — отдохните. Ближайшая запись завтра в ${time} — ${firstName}.`
         : "Сегодня нет записей. Свободный день — отдохните.",
     noClientsCta: "Расписание ›",
-    noServices:
-      "Карина ещё не назначила вас на услуги. Если думаете, что это ошибка — напишите ей в MAX.",
+    // The admin is named by the salon, never by a hardcoded first name — see
+    // lib/salonOwnerHint.ts. Nominative + non-past verb («настраивает») so the
+    // sentence works for any tenant string.
+    noServices: (ownerHint: string) =>
+      `Вам ещё не назначили услуги. Их настраивает ${ownerHint} — напишите в MAX, если думаете, что это ошибка.`,
     noServicesCta: "Написать Карине",
   },
   dayDone: {
@@ -341,7 +345,7 @@ export function MasterDashboardScreen() {
         />
       ) : isEmptyToday ? (
         noServices ? (
-          <NoServicesSection />
+          <NoServicesSection salonName={data.salon.name} />
         ) : (
           <EmptyTodaySection onSchedule={onScheduleCta} />
         )
@@ -695,11 +699,13 @@ function EmptyTodaySection({ onSchedule }: { onSchedule: () => void }) {
   );
 }
 
-function NoServicesSection() {
+function NoServicesSection({ salonName }: { salonName: string | null }) {
   return (
     <section className="master-dashboard__section">
       <div className="callout" role="status">
-        <p style={{ margin: 0 }}>{COPY.empty.noServices}</p>
+        <p style={{ margin: 0 }}>
+          {COPY.empty.noServices(salonOwnerHint(salonName))}
+        </p>
       </div>
     </section>
   );

@@ -25,6 +25,9 @@
  *     disabled: warning banner «Вы отключили все уведомления. Карина
  *     может попросить включить хотя бы срочные.»»
  *
+ * The spec quote names «Карина» as an example operator. Shipped copy
+ * substitutes the salon owner hint instead — see lib/salonOwnerHint.ts.
+ *
  * Toggle semantics: every switch tap performs an optimistic UI flip
  * and PATCHes the single field. On success → subtle haptic
  * (selectionChanged) — switches are rapid + per-row. On error → revert
@@ -86,6 +89,7 @@ import { useNavigate } from "react-router-dom";
 import { MasterTabBar } from "../components/MasterTabBar";
 import { Snackbar } from "../components/Snackbar";
 import { ApiError } from "../lib/api";
+import { DEFAULT_SALON_OWNER_HINT } from "../lib/salonOwnerHint";
 import {
   getNotificationPrefs,
   patchNotificationPrefs,
@@ -146,8 +150,12 @@ const COPY = {
     },
   },
   banners: {
-    allDisabled:
-      "Вы отключили все уведомления. Карина может попросить включить хотя бы срочные.",
+    // The admin is named by the salon, never by a hardcoded first name — see
+    // lib/salonOwnerHint.ts. `MasterNotificationPrefs` carries no salon, so the
+    // caller passes the neutral default; the parameter is here so that wiring a
+    // real name later is a one-line change at the call site.
+    allDisabled: (ownerHint: string) =>
+      `Вы отключили все уведомления. ${ownerHint} может попросить включить хотя бы срочные.`,
     offline: "Нет связи. Попробуйте ещё раз позже.",
   },
   toasts: {
@@ -682,7 +690,9 @@ function AllDisabledBanner() {
       role="status"
       aria-live="polite"
     >
-      <p style={{ margin: 0 }}>{COPY.banners.allDisabled}</p>
+      <p style={{ margin: 0 }}>
+        {COPY.banners.allDisabled(DEFAULT_SALON_OWNER_HINT)}
+      </p>
     </div>
   );
 }

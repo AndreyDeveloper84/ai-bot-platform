@@ -139,9 +139,12 @@ const _ROUTE_MAP: Record<string, string> = {
  * Parse a MAX start_param payload and return the in-app path, or ``null``
  * for empty / unknown / malformed input.
  *
- * Examples:
- *   parseStartRoute("open_catalog")         → "/catalog"
- *   parseStartRoute("route=visits&ref=ig")  → "/my-visits"  (legacy form)
+ * Examples (destinations are whatever `_ROUTE_MAP` above says — keep these
+ * in sync with it, they were left naming the pre-DRF-1326 screens):
+ *   parseStartRoute("open_catalog")         → "/customer/catalog"
+ *                                             (flat slug, `open_catalog:`)
+ *   parseStartRoute("route=visits&ref=ig")  → "/customer/records"  (legacy
+ *                                             form, inner value `visits:`)
  *   parseStartRoute("open_unknown")         → null
  *   parseStartRoute("")                     → null
  *   parseStartRoute("garbage")              → null
