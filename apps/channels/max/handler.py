@@ -93,6 +93,7 @@ marker.
 from __future__ import annotations
 
 import logging
+import time
 import uuid
 from dataclasses import replace
 from typing import Any
@@ -135,6 +136,9 @@ from apps.identity.services import (
     resolve_or_create_bot_user,
     resolve_or_create_global_bot_user,
 )
+from apps.identity.services.global_tenant import get_global_bot_tenant
+from apps.observability.ai_metrics import record_ai_request
+from apps.observability.models import AIRequestMetric
 from apps.persona.memory_commands import handle_memory_command
 from apps.persona.memory_surface import render_current_personal_context
 from apps.persona.voice import SALON_BUSINESS_NAME
@@ -413,6 +417,89 @@ def _emit_safety_shortcircuit(bot_user: Any, safety: Any, *, is_global: bool) ->
             "is_global_bot": is_global,
         },
     )
+
+
+def _skill_selected_label(skill_result: Any) -> str:
+    """Skill registry name off a dispatch result; ``""`` when there is none.
+
+    Same extraction order as the pipeline / confidence-floor helpers:
+    ``meta["skill"]`` first (FAQ sets it explicitly), ``action_type`` as the
+    fallback — the dispatcher doesn't expose the skill instance.
+    """
+    if skill_result is None:
+        return ""
+    meta = getattr(skill_result, "meta", {}) or {}
+    return meta.get("skill") or getattr(skill_result, "action_type", "") or ""
+
+
+def _record_live_path_metric(
+    *,
+    bot_user: Any,
+    conversation: Any,
+    trace_id: str | uuid.UUID | None,
+    message_text: str,
+    t_start: float,
+    outcome: str,
+    tenant: Any = None,
+    skill_selected: str = "",
+    fallback_triggered: bool = False,
+) -> None:
+    """DRF-1209 step 2 — one ``AIRequestMetric`` row for a live-path turn the
+    concierge does NOT meter.
+
+    Covers the two silent families: per-tenant skill-dispatch turns
+    (:func:`_handle_max_event_inner`) and the deterministic global branches
+    (safety / opt_out / stale_tap / human handoff / visits / onboarding).
+    Concierge-covered outcomes — the concierge LLM passes and the DRF-1283
+    deterministic show-masters render — are deliberately NOT written here;
+    ``concierge._record_concierge_metric`` owns them and a second row would
+    double-count the same inbound message.
+
+    Field shape mirrors the concierge writer exactly: uuid5 fallback for a
+    non-UUID trace id (keeps log grep and ``request_id`` correlated), and the
+    non-LLM shape for these model-less outcomes — ``llm_pass_index=None``,
+    NULL tokens / cost (the schema's documented «no LLM call» encoding, NOT
+    zeros, which would drag AVG(cost) toward zero). ``tenant=None`` means the
+    tenant-less global path and resolves the ``global_bot`` sentinel lazily,
+    exactly like the concierge rows.
+
+    Gated by ``LIVE_PATH_AI_METRIC_ENABLED`` (default OFF): flag off = zero
+    new rows, zero extra DB work. Best-effort, mirroring
+    ``pipeline._safe_emit_ai_request_metric`` / the concierge writer:
+    observability must never crash the turn — failures log WARN with
+    trace_id + outcome.
+    """
+    if not getattr(settings, "LIVE_PATH_AI_METRIC_ENABLED", False):
+        return
+    try:
+        latency_total_ms = int((time.monotonic() - t_start) * 1000)
+        try:
+            request_uuid = uuid.UUID(str(trace_id))
+        except (ValueError, TypeError, AttributeError):
+            # Same deterministic fallback as pipeline / concierge (see
+            # pipeline._safe_emit_ai_request_metric for the rationale).
+            request_uuid = uuid.uuid5(
+                uuid.NAMESPACE_DNS, str(trace_id) if trace_id else "live-no-trace"
+            )
+
+        record_ai_request(
+            tenant=tenant if tenant is not None else get_global_bot_tenant(),
+            bot_user=bot_user,
+            conversation=conversation,
+            request_id=request_uuid,
+            message_text_length=len(message_text),
+            skill_selected=skill_selected,
+            fallback_triggered=fallback_triggered,
+            latency_total_ms=latency_total_ms,
+            outcome=outcome,
+        )
+    except Exception as emit_exc:  # noqa: BLE001 — observability never crashes the turn
+        logger.warning(
+            "channels.max.handler.ai_metric_emit_failed trace=%s outcome=%s err=%s",
+            trace_id,
+            outcome,
+            emit_exc,
+        )
 
 
 def _deliver_crisis_reply(
@@ -818,6 +905,10 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
     conversation = resolve_active_global_conversation(bot_user)
     assert conversation is not None  # noqa: S101 — create_if_missing=True never returns None
 
+    # DRF-1209 step 2 — turn clock for the AIRequestMetric row (the flag
+    # check itself lives inside _record_live_path_metric).
+    t_start = time.monotonic()
+
     # Prior short-term history (before this turn) feeds the discovery prompt.
     history = short_term.recall(conversation.id)
 
@@ -1010,6 +1101,17 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
         # Tag the safety turn so it is distinguishable in the Message table on the
         # global path too — parity with the per-tenant handler (#1053 de-drift).
         assistant_action_type = "safety_pre_check"
+        # DRF-1209 step 2 — pipeline parity: the safety canned reply counts
+        # as OUTCOME_SUCCESS (pipeline step 7 emitted the same).
+        _record_live_path_metric(
+            bot_user=bot_user,
+            conversation=conversation,
+            trace_id=trace_id,
+            message_text=event.text,
+            t_start=t_start,
+            outcome=AIRequestMetric.OUTCOME_SUCCESS,
+            skill_selected="safety_pre_check",
+        )
     elif (_opt_out_reply := try_handle_opt_out(text=event.text, bot_user=bot_user)) is not None:
         # DRF-1285 — «не пиши мне» must work on THIS surface too. The skill
         # registry is dispatched only on the per-tenant path below, and the
@@ -1023,6 +1125,15 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
         # whole-message, so no other branch's phrases can reach it.
         reply = DiscoveryReply(text=_opt_out_reply)
         assistant_action_type = "proactive_opt_out"
+        _record_live_path_metric(
+            bot_user=bot_user,
+            conversation=conversation,
+            trace_id=trace_id,
+            message_text=event.text,
+            t_start=t_start,
+            outcome=AIRequestMetric.OUTCOME_SUCCESS,
+            skill_selected="proactive_opt_out",
+        )
     elif stale_tap:
         # DRF-1348 — тап, который нечем подставить. Стоит здесь, а не среди
         # прочих колбэковых веток, по правилу ``_PASSTHROUGH_CALLBACK_PREFIXES``:
@@ -1030,6 +1141,18 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
         # не быть проглоченным приветствием или отданным модели сырым.
         reply = DiscoveryReply(text=STALE_TAP_TEXT, action_data=first_contact_action_data())
         assistant_action_type = "stale_tap"
+        # The tap could not be resolved to its intended action — a fallback,
+        # not a successfully answered turn.
+        _record_live_path_metric(
+            bot_user=bot_user,
+            conversation=conversation,
+            trace_id=trace_id,
+            message_text=event.text,
+            t_start=t_start,
+            outcome=AIRequestMetric.OUTCOME_FALLBACK,
+            skill_selected="stale_tap",
+            fallback_triggered=True,
+        )
     elif matches_human_handoff_request(event.text):
         reply = route_global_human_handoff(
             global_bot_user=bot_user,
@@ -1038,6 +1161,15 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
             trace_id=trace_id,
         )
         assistant_action_type = "human_handoff"
+        _record_live_path_metric(
+            bot_user=bot_user,
+            conversation=conversation,
+            trace_id=trace_id,
+            message_text=event.text,
+            t_start=t_start,
+            outcome=AIRequestMetric.OUTCOME_ESCALATED,
+            skill_selected="human_handoff",
+        )
     elif event.text.startswith(VISIT_CALLBACK_PREFIXES):
         # Cards and repeat taps carry an appointment id the bot itself
         # rendered, so they resolve before the natural-language branches.
@@ -1053,6 +1185,15 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
             if event.text.startswith(CALLBACK_VISIT_REPEAT_PREFIX)
             else "visit_card"
         )
+        _record_live_path_metric(
+            bot_user=bot_user,
+            conversation=conversation,
+            trace_id=trace_id,
+            message_text=event.text,
+            t_start=t_start,
+            outcome=AIRequestMetric.OUTCOME_SUCCESS,
+            skill_selected=assistant_action_type,
+        )
     elif is_personal_booking_lookup(event.text):
         # DRF-1032: the answer now comes from the Ayla backend, not from the
         # local mirror — a mirror row can outlive the booking it mirrors
@@ -1062,10 +1203,28 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
             trace_id=trace_id,
         )
         assistant_action_type = "booking_lookup"
+        _record_live_path_metric(
+            bot_user=bot_user,
+            conversation=conversation,
+            trace_id=trace_id,
+            message_text=event.text,
+            t_start=t_start,
+            outcome=AIRequestMetric.OUTCOME_SUCCESS,
+            skill_selected="booking_lookup",
+        )
     elif getattr(settings, "GLOBAL_BOT_ONBOARDING", False) and needs_onboarding(
         bot_user, event.text, conversation
     ):
         reply = run_onboarding_turn(conversation, bot_user, event.text, trace_id)
+        _record_live_path_metric(
+            bot_user=bot_user,
+            conversation=conversation,
+            trace_id=trace_id,
+            message_text=event.text,
+            t_start=t_start,
+            outcome=AIRequestMetric.OUTCOME_SUCCESS,
+            skill_selected="onboarding",
+        )
     elif clarify_outcome is not None:
         # DRF-1362 — a multi-select redraw or its close. Sits with the other
         # callback branches and BEFORE the concierge for the same reason they
@@ -1652,6 +1811,11 @@ def _discovery_handoff_reply(
 def _handle_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.UUID | None) -> None:
     """Inner pipeline — parse-already-done caller. Side-effects only."""
 
+    # DRF-1209 step 2 — turn clock for the AIRequestMetric row. Read
+    # unconditionally: one monotonic() call is free, and the flag check
+    # lives inside _record_live_path_metric.
+    t_start = time.monotonic()
+
     # MAX UX indicators: tell the chat we've read the message and we're
     # typing a reply BEFORE doing any heavy work (LLM call, DB writes).
     # Both are best-effort fire-and-forget — failures are logged inside
@@ -1724,6 +1888,18 @@ def _handle_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.UUID | N
             "channels.max.handler.safety_shortcircuit conversation=%s verdict=%s",
             conversation.id,
             safety.verdict,
+        )
+        # DRF-1209 step 2 — pipeline parity: the safety canned reply counts
+        # as OUTCOME_SUCCESS (pipeline step 7 emitted the same).
+        _record_live_path_metric(
+            bot_user=bot_user,
+            conversation=conversation,
+            trace_id=trace_id,
+            message_text=event.text,
+            t_start=t_start,
+            tenant=conversation.tenant,
+            outcome=AIRequestMetric.OUTCOME_SUCCESS,
+            skill_selected="safety_pre_check",
         )
         return
 
@@ -1829,6 +2005,17 @@ def _handle_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.UUID | N
                     None if skill_result.should_handoff else _HANDOFF_FALLBACK_TEXT
                 ),
             )
+        # DRF-1209 step 2 — the escalation is this turn's terminal outcome.
+        _record_live_path_metric(
+            bot_user=bot_user,
+            conversation=conversation,
+            trace_id=trace_id,
+            message_text=event.text,
+            t_start=t_start,
+            tenant=conversation.tenant,
+            outcome=AIRequestMetric.OUTCOME_ESCALATED,
+            skill_selected=_skill_selected_label(skill_result),
+        )
         return
 
     # Silent path (Sprint 3 / D3): conversation is mid-handoff. Dispatcher
@@ -1907,6 +2094,20 @@ def _handle_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.UUID | N
     # ``action_data["buttons"]``; the channel adapter converts it to the
     # native wire format. Mirrors apps/channels/telegram/handler._extract_keyboard.
     attachments = _build_attachments(action_data)
+
+    # DRF-1209 step 2 — the skill answered; this is the turn's terminal
+    # outcome. Written BEFORE the outbound send (concierge parity): a send
+    # failure is a delivery problem, not a different turn outcome.
+    _record_live_path_metric(
+        bot_user=bot_user,
+        conversation=conversation,
+        trace_id=trace_id,
+        message_text=event.text,
+        t_start=t_start,
+        tenant=conversation.tenant,
+        outcome=AIRequestMetric.OUTCOME_SUCCESS,
+        skill_selected=_skill_selected_label(skill_result),
+    )
 
     # Outbound — MaxAPIError propagates up (handler does not swallow).
     send_message(chat_id=event.chat_id, text=reply_text, attachments=attachments)
