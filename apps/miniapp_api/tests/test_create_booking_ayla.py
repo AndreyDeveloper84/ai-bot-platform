@@ -123,10 +123,12 @@ def master(tenant) -> CatalogMaster:
 
 
 @pytest.fixture
-def service(tenant) -> CatalogService:
+def service(tenant, master) -> CatalogService:
     from django.utils import timezone as tz
 
-    return CatalogService.all_tenants.create(
+    from apps.catalog.models import MasterService
+
+    svc = CatalogService.all_tenants.create(
         tenant=tenant,
         external_updated_at=tz.now(),
         name="Маникюр",
@@ -135,6 +137,13 @@ def service(tenant) -> CatalogService:
         is_active=True,
         ayla_service_id=SERVICE_AYLA_ID,
     )
+    # DRF-1164 — the create view now refuses a service nobody performs,
+    # BEFORE the local/Ayla branch. This module's baseline service is a
+    # normal, bookable one, so it carries its performer mapping; without
+    # it every passthrough test below would be measuring the new gate
+    # instead of the Ayla call it means to assert.
+    MasterService.all_tenants.create(tenant=tenant, master=master, service=svc)
+    return svc
 
 
 class _StubAylaClient:
@@ -281,6 +290,8 @@ class TestErrors:
     ) -> None:
         from django.utils import timezone as tz
 
+        from apps.catalog.models import MasterService
+
         unlinked = CatalogService.all_tenants.create(
             tenant=tenant,
             external_updated_at=tz.now(),
@@ -289,6 +300,11 @@ class TestErrors:
             is_active=True,
             ayla_service_id=None,
         )
+        # Performer present on purpose (DRF-1164): the refusal under test
+        # is the GROUNDING miss, and both refusals answer 409
+        # `service_unbookable`. Without the mapping this test would go
+        # green off the wrong gate and stop guarding #1034.
+        MasterService.all_tenants.create(tenant=tenant, master=master, service=unlinked)
         resp = _post(client, unlinked, master)
         assert resp.status_code == 409
         assert resp.json()["error"] == "service_unbookable"
@@ -401,10 +417,9 @@ class TestLocalPathUnchanged:
         the local create path is untouched and Ayla is never called."""
         import datetime as dt
 
-        from apps.catalog.models import MasterService
         from apps.scheduling.models import Weekday, WorkingHours
 
-        MasterService.all_tenants.create(tenant=bot_user.tenant, master=master, service=service)
+        # (The MasterService mapping now comes with the `service` fixture.)
         # Open the booked day for the slot check. The weekday is derived
         # from the visit rather than named, so the setup follows the date
         # instead of quietly disagreeing with it. `Weekday` is Mon=0…Sun=6,
