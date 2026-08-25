@@ -16,8 +16,15 @@ def redactor():
 
 
 class TestVersionConstant:
-    def test_redaction_method_v1(self):
-        assert REDACTION_METHOD == "regex_v1"
+    def test_redaction_method_is_pinned(self):
+        """The one place the version literal lives in a test.
+
+        Every other assertion about the stamp imports the constant
+        instead, so changing a pattern fails here — deliberately, once —
+        and not in five unrelated modules that never chose the value.
+        """
+
+        assert REDACTION_METHOD == "regex_v2"
 
 
 class TestPhoneRedaction:

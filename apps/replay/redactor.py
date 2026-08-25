@@ -6,10 +6,22 @@ Russian NER layer (natasha) deferred to Phase 1.
 ### Why pinned regex constants
 
 The patterns + placeholder tokens are part of the persistence
-contract: a row stamped `redaction_method="regex_v1"` is committing
+contract: a row stamped `redaction_method="regex_v2"` is committing
 that *exactly these patterns* ran on it. If we change a pattern, we
 must bump the version string so a future migration can re-redact
-v1 rows (with raw-text access from another source if available).
+older rows (with raw-text access from another source if available).
+
+**v1 -> v2 (DRF-1382).** ``PHONE_RE`` and ``CC_RE`` had their boundary
+guards tightened to exclude ASCII letters, and ``CC_RE`` gained a Luhn
+gate. The version string is bumped because this file says it must be:
+a v1 row ran under patterns that sliced 3.12% / 2.20% of identifiers,
+and that is a different contract from what a v2 row committed to.
+
+Re-redaction cannot repair v1 rows — the removed digits are gone and
+this file never saw the raw text twice — so the stamp's only job here
+is to let a reader tell "this trace_id is intact" from "this trace_id
+may have had its middle cut out". That distinction is exactly what a
+row-level version string is for.
 
 ### Why a class, not free functions
 
@@ -58,9 +70,9 @@ from django.conf import settings
 
 logger = logging.getLogger(__name__)
 
-# --- Pinned patterns (redaction_method = "regex_v1") ----------------------
+# --- Pinned patterns (redaction_method = "regex_v2") ----------------------
 
-REDACTION_METHOD = "regex_v1"
+REDACTION_METHOD = "regex_v2"
 
 # Phone: +7/8/+anything followed by 10 digits, optionally with spaces / dashes
 # / parens. Catches:
