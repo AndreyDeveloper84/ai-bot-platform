@@ -64,16 +64,48 @@ REDACTION_METHOD = "regex_v1"
 # Phone: +7/8/+anything followed by 10 digits, optionally with spaces / dashes
 # / parens. Catches:
 #   +7 (495) 123-45-67   8 800 123 45 67   +12345678901
+#
+# The boundary guards exclude ASCII letters as well as digits (DRF-1382).
+# ``(?<!\d)`` alone let the pattern open a match inside a hex identifier,
+# because the neighbouring character there is a letter, not a digit:
+#
+#   c4202567-6706-417c-...  ->  c[PHONE]-417c-...
+#
+# Measured at 3.12% of random canonical UUIDs and 7.98% of 32-char hex ids
+# — roughly one identifier in thirty. A trace with its ``trace_id`` middle
+# removed cannot be joined to the log or to the DB row, which is the whole
+# reason the trace was kept.
+#
+# The regex is NOT relaxed: a missed phone in a trace stays worse than a
+# mangled identifier, so the body is byte-for-byte what it was and only the
+# boundary tightened, from "not a digit" to "not a digit and not an ASCII
+# letter". A phone number is never written flush against an ASCII letter;
+# non-ASCII letters are still allowed on both sides, so a number abutting
+# Cyrillic text is caught exactly as before.
+#
+# Does NOT match:
+#   3f2a84113328793b   (digit run welded to ASCII letters — an id)
 PHONE_RE = re.compile(
-    r"(?<!\d)(?:\+?\d{1,3}[\s\-]?)?\(?\d{3}\)?[\s\-]?\d{3}[\s\-]?\d{2}[\s\-]?\d{2}(?!\d)"
+    r"(?<![\dA-Za-z])"
+    r"(?:\+?\d{1,3}[\s\-]?)?\(?\d{3}\)?[\s\-]?\d{3}[\s\-]?\d{2}[\s\-]?\d{2}"
+    r"(?![\dA-Za-z])"
 )
 
 # Email: simple RFC-5322 lite. Don't try to validate, just match the shape.
 EMAIL_RE = re.compile(r"[\w\.\-+]+@[\w\-]+\.[\w]{2,}")
 
-# Credit card: 13-19 digit groups separated by space/dash. Cheap-and-cheerful;
-# don't run Luhn check (too expensive for redactor hot path).
-CC_RE = re.compile(r"(?<!\d)(?:\d[\s\-]?){13,19}(?!\d)")
+# Credit card: 13-19 digit groups separated by space/dash.
+#
+# Same boundary tightening as PHONE_RE above, for the same reason
+# (DRF-1382): ``(?<!\d)`` alone sliced 2.20% of random canonical UUIDs and
+# 2.17% of 32-char hex ids.
+#
+#   c4202567-6706-417c-...  ->  c[CC]c-...
+CC_RE = re.compile(
+    r"(?<![\dA-Za-z])"
+    r"(?:\d[\s\-]?){13,19}"
+    r"(?![\dA-Za-z])"
+)
 
 # OTP: standalone 4- or 6-digit sequences (not embedded in longer numbers).
 # Negative lookbehind+lookahead prevent matching the inside of phone numbers
