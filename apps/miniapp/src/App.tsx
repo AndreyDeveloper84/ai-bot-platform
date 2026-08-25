@@ -256,6 +256,7 @@ function masterRouteElements(): React.ReactNode {
         element={<MasterOnboardingScreen />}
       />
       <Route path="/master/dashboard" element={<MasterDashboardScreen />} />
+      {/* D7 billing — subscription status + card binding (money path) */}
       <Route path="/master/billing" element={<MasterBillingScreen />} />
       <Route path="/master/schedule" element={<MasterScheduleScreen />} />
       <Route
@@ -274,8 +275,6 @@ function masterRouteElements(): React.ReactNode {
       />
       {/* M8 minimal — logout-only (full M8 deferred post-pilot) */}
       <Route path="/master/settings" element={<MasterSettingsScreen />} />
-      {/* D7 billing — subscription status + card binding (money path) */}
-      <Route path="/master/billing" element={<MasterBillingScreen />} />
       {/* Internal chat «Со студией» (master-admin internal-chat handoff §3) */}
       <Route
         path="/master/internal-chat"
