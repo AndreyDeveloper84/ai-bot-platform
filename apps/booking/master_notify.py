@@ -17,27 +17,32 @@ very same fan-out primitive DRF-1029 uses for handoff escalations
 (:func:`apps.handoff.notify.send_max_notification`). No new transport,
 no new queue, no dependency on the mobile app.
 
-### Addressing cascade (first hit wins)
+### Delivery fan-out
 
-1. **The master personally** — ``CatalogMaster.linked_bot_user.chat_id``
-   for the appointment's specialist. On the pilot this yields nothing:
-   ``linked_bot_user`` is NULL for all four masters and ``max_handle``
-   is empty. Linking masters to their MAX accounts is a separate task;
-   the branch is implemented here so that when the link appears, the
-   message starts going to the right person with **no code change**.
-2. **The salon manager** — ``Tenant.manager_chat_id``. The field exists
-   and is already the escalation destination for stale reminders
-   (DRF-845); on the pilot it is currently empty.
-3. **The configured fallback channel** —
-   ``HANDOFF_NOTIFY_MAX_CHAT_IDS``. Deliberately the *same* setting as
-   DRF-1029 rather than a new one: on the pilot it already holds the
-   owner's chat, so the booking notification reaches a human on day one
-   without an env change. If a salon later wants booking alerts split
-   from escalation alerts, that is a settings-level split, not a
-   rewrite of this module.
-4. **Nobody** — an explicit WARNING log line. Silence was the old
-   behaviour and it is exactly what made the gap invisible for months;
-   a booking that could not be announced must leave a trace.
+* **The specialist personally** — when the appointment's master has a
+  linked MAX account (``CatalogMaster.linked_bot_user.chat_id``), he
+  receives his own copy, addressed to him («У вас новая запись»). The
+  epic's contract is «if the master does not learn, the visit does not
+  happen», so the specialist is an *additional* recipient, not an
+  alternative to the salon (601564a delivered master-OR-salon
+  exclusively; the follow-up decision recorded here is master-AND-salon).
+  On the pilot every master is unlinked today; linking is a data
+  change, not a code change.
+* **An unreachable specialist is visible** — a mirrored master without
+  a linked account, or a specialist with no mirror row at all, leaves a
+  WARNING log line and a ``booking.specialist_unreachable`` audit row.
+  The push era hid exactly this state behind a quiet ``failed`` in the
+  database; it must never be silent again.
+* **The salon cascade (first hit wins)** — ``Tenant.manager_chat_id``,
+  then ``HANDOFF_NOTIFY_MAX_CHAT_IDS``. Deliberately the *same* setting
+  as DRF-1029 rather than a new one: on the pilot it already holds the
+  owner's chat, so the booking notification reaches a human on day one
+  without an env change. If a salon later wants booking alerts split
+  from escalation alerts, that is a settings-level split, not a
+  rewrite of this module.
+* **Nobody at all** — an explicit WARNING log line. Silence was the old
+  behaviour and it is exactly what made the gap invisible for months;
+  a booking that could not be announced must leave a trace.
 
 ### Contract (mirrors DRF-1029 §3 — do not weaken)
 
@@ -78,6 +83,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from django.db import transaction
 from django.db.models import Q
 
+from apps.audit.services import write_audit
 from apps.catalog.models import CatalogMaster, CatalogService
 from apps.channels.bot_context import bot_scope
 from apps.handoff.notify import get_notify_chat_ids, send_max_notification
@@ -128,11 +134,14 @@ CHAT_ORIGIN_SOURCE: Final[str] = "ayla_bot"
 
 @dataclass(frozen=True)
 class NotifyTarget:
-    """Resolved recipients plus the cascade step that produced them.
+    """Resolved salon recipients plus the cascade step that produced them.
 
-    ``channel`` is one of ``master`` / ``manager`` / ``fallback`` /
-    ``none`` and exists so logs (and tests) can assert *which* rung of
-    the cascade answered, not merely that something was sent.
+    ``channel`` is one of ``manager`` / ``fallback`` / ``none`` and
+    exists so logs (and tests) can assert *which* rung of the cascade
+    answered, not merely that something was sent. The specialist's
+    personal address is resolved separately — see
+    :func:`resolve_specialist_chat_id` — because it is an additional
+    recipient, not a rung of this cascade.
     """
 
     chat_ids: tuple[str, ...]
@@ -191,20 +200,29 @@ def resolve_service_name(*, tenant: Tenant, service_id: UUID | None) -> str:
     return (row.name if row else "").strip() or _UNKNOWN
 
 
-def resolve_target(*, tenant: Tenant, master: CatalogMaster | None) -> NotifyTarget:
-    """Walk the addressing cascade; the first rung with an address wins.
+def resolve_specialist_chat_id(master: CatalogMaster | None) -> str:
+    """The specialist's personal MAX chat_id, or ``""`` when unreachable.
 
-    Personal delivery to the master is intentionally *exclusive*: once
-    a master is reachable in MAX, copying every booking to the manager
-    and the owner's chat as well would train everyone to ignore the
-    channel. Escalation to a wider audience belongs to a follow-up on
-    unacknowledged bookings, not to the creation event.
+    «Reachable» means a *linked account*: ``linked_bot_user`` is set by
+    the staff-invite accept flow and by solo onboarding, and the BotUser
+    carries the chat_id of the master's own dialog with the bot. On the
+    pilot every master is unlinked today — linking them is a data
+    change, not a code change, and this resolver starts answering the
+    moment it happens.
     """
 
     linked = getattr(master, "linked_bot_user", None) if master is not None else None
-    master_chat_id = _clean_chat_id(getattr(linked, "chat_id", ""))
-    if master_chat_id:
-        return NotifyTarget(chat_ids=(master_chat_id,), channel="master")
+    return _clean_chat_id(getattr(linked, "chat_id", ""))
+
+
+def resolve_salon_target(*, tenant: Tenant) -> NotifyTarget:
+    """Walk the salon-side cascade; the first rung with an address wins.
+
+    The salon rungs stay exclusive among themselves (a manager who
+    receives every booking does not also need the fallback copy); only
+    the specialist's personal copy is additive — see the module
+    docstring.
+    """
 
     manager_chat_id = _clean_chat_id(getattr(tenant, "manager_chat_id", ""))
     if manager_chat_id:
@@ -271,6 +289,34 @@ def build_booking_created_notification(
     return "\n".join(lines)
 
 
+def build_specialist_booking_notification(
+    *,
+    tenant: Tenant,
+    appointment_id: UUID,
+    start_at: dt.datetime,
+    service_name: str,
+    raw_source: str,
+) -> str:
+    """Format the specialist's personal copy of the announcement.
+
+    Addressed to the performer himself — «У вас новая запись», and no
+    «Мастер:» line: telling Тихонова Ольга that the master is Тихонова
+    Ольга only adds noise. Same DRF-1039 rule as the salon copy: NO
+    client data of any kind.
+    """
+
+    when = start_at.astimezone(_tenant_tz(tenant)).strftime("%d.%m.%Y в %H:%M")
+    lines = [
+        "🆕 У вас новая запись",
+        f"Салон: {tenant.name}",
+        f"Услуга: {service_name or _UNKNOWN}",
+        f"Когда: {when}",
+        f"Источник: {source_label(raw_source)}",
+        f"Запись: {appointment_id}",
+    ]
+    return "\n".join(lines)
+
+
 def _salon_bot_for(tenant: Tenant):
     """The salon's staff bot, or ``None`` when it has none.
 
@@ -286,6 +332,41 @@ def _salon_bot_for(tenant: Tenant):
     except Exception:  # noqa: BLE001 — identity must never break ingest
         logger.warning("booking.notify.registry_unavailable tenant=%s", tenant.slug)
         return None
+
+
+def _audit_specialist_unreachable(
+    *,
+    tenant: Tenant,
+    appointment_id: UUID,
+    specialist_id: UUID,
+    master: CatalogMaster | None,
+    reason: str,
+) -> None:
+    """Audit-row the unreachable specialist so the gap survives log rotation.
+
+    Best-effort in the same sense as the send itself: a broken audit
+    must never cost the salon its message (write_audit already swallows
+    its own errors; the wrap here covers everything around it).
+    """
+
+    try:
+        with tenant_scope(tenant):
+            write_audit(
+                "booking.specialist_unreachable",
+                target="RemoteBookingProxy",
+                target_id=appointment_id,
+                payload={
+                    "tenant": tenant.slug,
+                    "specialist_id": str(specialist_id),
+                    "master_id": str(master.id) if master is not None else None,
+                    "reason": reason,
+                },
+            )
+    except Exception:  # noqa: BLE001 — audit is observational, never breaks the fan-out
+        logger.exception(
+            "booking.notify.specialist_unreachable_audit_failed appointment_id=%s",
+            appointment_id,
+        )
 
 
 def notify_booking_created(
@@ -305,29 +386,9 @@ def notify_booking_created(
 
     try:
         master = resolve_master(tenant=tenant, specialist_id=specialist_id)
-        target = resolve_target(tenant=tenant, master=master)
-        if not target.chat_ids:
-            # The whole point of DRF-1030: an unannounceable booking
-            # must be loud. Every rung of the cascade being empty is a
-            # configuration defect, not a normal state.
-            logger.warning(
-                "booking.notify.no_recipients tenant=%s appointment_id=%s "
-                "specialist_id=%s — no linked master chat, no manager_chat_id, "
-                "no HANDOFF_NOTIFY_MAX_CHAT_IDS: nobody was told about this booking",
-                tenant.slug,
-                appointment_id,
-                specialist_id,
-            )
-            return
-
-        text = build_booking_created_notification(
-            tenant=tenant,
-            appointment_id=appointment_id,
-            start_at=start_at,
-            service_name=resolve_service_name(tenant=tenant, service_id=service_id),
-            master_name=(getattr(master, "name", "") or "").strip() or _UNKNOWN,
-            raw_source=raw_source,
-        )
+        specialist_chat_id = resolve_specialist_chat_id(master)
+        service_name = resolve_service_name(tenant=tenant, service_id=service_id)
+        specialist_notified = False
 
         # Send as the SALON bot when the salon has one (DRF-1061).
         #
@@ -344,25 +405,100 @@ def notify_booking_created(
         # tone, whereas silence is worse in substance. That is the one case
         # where the wrong avatar beats no message.
         with bot_scope(_salon_bot_for(tenant)):
-            failures = send_max_notification(text=text, chat_ids=target.chat_ids)
-        if failures == 0:
-            logger.info(
-                "booking.notify.sent tenant=%s appointment_id=%s channel=%s recipients=%d",
-                tenant.slug,
-                appointment_id,
-                target.channel,
-                len(target.chat_ids),
-            )
-        else:
-            logger.warning(
-                "booking.notify.partial_failure tenant=%s appointment_id=%s "
-                "channel=%s recipients=%d failures=%d",
-                tenant.slug,
-                appointment_id,
-                target.channel,
-                len(target.chat_ids),
-                failures,
-            )
+            if specialist_chat_id:
+                # The specialist goes FIRST: if MAX dies mid-fan-out, the
+                # epic's priority recipient already has the message.
+                personal = build_specialist_booking_notification(
+                    tenant=tenant,
+                    appointment_id=appointment_id,
+                    start_at=start_at,
+                    service_name=service_name,
+                    raw_source=raw_source,
+                )
+                failures = send_max_notification(text=personal, chat_ids=(specialist_chat_id,))
+                specialist_notified = failures == 0
+                if specialist_notified:
+                    logger.info(
+                        "booking.notify.sent tenant=%s appointment_id=%s "
+                        "channel=master recipients=1",
+                        tenant.slug,
+                        appointment_id,
+                    )
+                else:
+                    logger.warning(
+                        "booking.notify.partial_failure tenant=%s appointment_id=%s "
+                        "channel=master recipients=1 failures=%d",
+                        tenant.slug,
+                        appointment_id,
+                        failures,
+                    )
+            elif specialist_id is not None:
+                # The whole point of this ticket: a specialist who cannot
+                # be reached must be VISIBLE. The push era recorded this
+                # exact state as a quiet ``failed`` row and the pilot ran
+                # on it for months — here it is a WARNING plus an audit
+                # row, and the salon cascade below still runs.
+                reason = "no_mirror_row" if master is None else "no_linked_chat"
+                logger.warning(
+                    "booking.notify.specialist_unreachable tenant=%s appointment_id=%s "
+                    "specialist_id=%s reason=%s — the master has no reachable MAX "
+                    "address; the salon is told instead",
+                    tenant.slug,
+                    appointment_id,
+                    specialist_id,
+                    reason,
+                )
+                _audit_specialist_unreachable(
+                    tenant=tenant,
+                    appointment_id=appointment_id,
+                    specialist_id=specialist_id,
+                    master=master,
+                    reason=reason,
+                )
+
+            target = resolve_salon_target(tenant=tenant)
+            if target.chat_ids:
+                text = build_booking_created_notification(
+                    tenant=tenant,
+                    appointment_id=appointment_id,
+                    start_at=start_at,
+                    service_name=service_name,
+                    master_name=(getattr(master, "name", "") or "").strip() or _UNKNOWN,
+                    raw_source=raw_source,
+                )
+                failures = send_max_notification(text=text, chat_ids=target.chat_ids)
+                if failures == 0:
+                    logger.info(
+                        "booking.notify.sent tenant=%s appointment_id=%s channel=%s recipients=%d",
+                        tenant.slug,
+                        appointment_id,
+                        target.channel,
+                        len(target.chat_ids),
+                    )
+                else:
+                    logger.warning(
+                        "booking.notify.partial_failure tenant=%s appointment_id=%s "
+                        "channel=%s recipients=%d failures=%d",
+                        tenant.slug,
+                        appointment_id,
+                        target.channel,
+                        len(target.chat_ids),
+                        failures,
+                    )
+            elif not specialist_notified:
+                # An unannounceable booking must be loud. Every address
+                # being empty is a configuration defect, not a normal
+                # state. (When the specialist WAS notified the booking is
+                # announced — a missing salon address is then a quieter
+                # observation, already covered by the cascade semantics.)
+                logger.warning(
+                    "booking.notify.no_recipients tenant=%s appointment_id=%s "
+                    "specialist_id=%s — no linked master chat, no manager_chat_id, "
+                    "no HANDOFF_NOTIFY_MAX_CHAT_IDS: nobody was told about this booking",
+                    tenant.slug,
+                    appointment_id,
+                    specialist_id,
+                )
     except Exception:  # noqa: BLE001 — hard containment; ingest must not break
         logger.exception(
             "booking.notify.unexpected appointment_id=%s",
