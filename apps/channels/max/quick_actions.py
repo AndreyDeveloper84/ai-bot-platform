@@ -47,7 +47,7 @@ Ayla.png``, версия 1.0, статус APPROVED, экран **C01 — First 
 не называются услугами.
 
 Инвариант пришпилен тестом, а не соглашением: см.
-``apps/channels/max/tests/test_first_contact.py::TestChipsAreNotServiceNames``.
+``apps/channels/tests/test_first_contact_c01.py::TestChipsAreNotServiceNames``.
 """
 
 from __future__ import annotations
