@@ -153,8 +153,14 @@ def test_the_gate_holder_list_is_complete():
     for path in (root / "apps").rglob("*.py"):
         if "tests" in path.parts:
             continue
-        tree = ast.parse(path.read_text(encoding="utf-8"))
-        for node in ast.walk(tree):
+        source = path.read_text(encoding="utf-8")
+        # Cheap substring gate before the expensive parse. CI runs this suite
+        # against a 45-minute ceiling it already sits ~15 seconds under, so a
+        # test that AST-parses every module in `apps/` is a cost this proof
+        # does not need: a file that cannot contain the name cannot import it.
+        if "get_personal_context" not in source:
+            continue
+        for node in ast.walk(ast.parse(source)):
             if isinstance(node, ast.ImportFrom) and any(
                 alias.name == "get_personal_context" for alias in node.names
             ):
