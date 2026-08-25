@@ -155,14 +155,38 @@ export const fetchMaster = (id: string): Promise<{ master: MasterDetail }> =>
 /**
  * POST /recommendations — proxies onto Ayla's catalog scoring
  * (`apps/miniapp_api/views.py::customer_recommendations`). Empty body →
- * Ayla's default ranking. The Ayla response is passed through verbatim;
- * the pilot consumes only `service_id` + `score` and joins them onto
- * the mirror services client-side. Failures (502/503) are the caller's
- * to isolate — picks are optional chrome, never an error screen.
+ * Ayla's default ranking. The Ayla response is passed through verbatim
+ * by the proxy (that view builds no translation layer), so ANY field
+ * Ayla starts sending arrives here untouched. Failures (502/503) are
+ * the caller's to isolate — picks are optional chrome, never an error
+ * screen.
+ *
+ * # WHY fields (owner ruling 25.08)
+ *
+ * «Нет displayable WHY → нет блока „Ayla подобрала"». The branded
+ * sections may only render a pick the SOURCE explained, so the WHY
+ * fields are declared optional here and consumed in
+ * `customer-booking.ts::getCatalogBrowse`. Today Ayla sends neither —
+ * both stay `undefined` and every branded section hides itself.
+ *
+ * Two accepted shapes, because the canon names both:
+ *
+ *   - `reasons: string[]` — owner ruling 25.08, «2–3 коротких
+ *     displayable reason»;
+ *   - `reasoning_text: string` — `docs/screens/customer-booking-flow.md`
+ *     §10.3, one backend-generated line per item.
+ *
+ * Both must arrive DISPLAY-READY. The frontend never generates,
+ * translates or decorates WHY: no internal reason codes, no confidence
+ * numbers, no chain-of-thought, no generic stand-ins.
  */
 export interface RecommendationScore {
   service_id: string;
   score: number;
+  /** Owner ruling 25.08 — display-ready WHY lines, 2–3 short ones. */
+  reasons?: string[] | null;
+  /** May spec §10.3 — a single display-ready WHY line. */
+  reasoning_text?: string | null;
 }
 export const fetchRecommendations = (): Promise<{
   recommendations: RecommendationScore[];

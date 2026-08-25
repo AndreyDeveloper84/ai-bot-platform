@@ -49,12 +49,28 @@ const MASTERS: Master[] = [
   { id: "mst-2", name: "Карина Ли", specialization: "бровист", bio: "", experience: "3 года", rating: null, photo_url: "" },
 ];
 
+/**
+ * Scorer response WITH displayable WHY — the shape the owner ruling
+ * 25.08 requires before the branded «Ayla подобрала» block may render.
+ */
 const RECS = {
+  recommendations: [
+    { service_id: "svc-2", score: 0.95, reasons: ["Свободно раньше всех остальных"] },
+    { service_id: "svc-1", score: 0.9, reasons: ["20 минут от тебя, рейтинг 4.9", "Ты уже была на этой услуге"] },
+    { service_id: "svc-4", score: 0.85, reasons: ["Подходит под твою цель — снижение стресса"] },
+    { service_id: "svc-3", score: 0.8, reasons: ["У мастера 7 лет опыта в твоей категории"] },
+  ],
+};
+
+/**
+ * TODAY'S RUNTIME shape: `POST /recommendations` returns `{service_id,
+ * score}` and nothing else — no WHY exists anywhere in the response.
+ */
+const RECS_NO_WHY = {
   recommendations: [
     { service_id: "svc-2", score: 0.95 },
     { service_id: "svc-1", score: 0.9 },
     { service_id: "svc-4", score: 0.85 },
-    { service_id: "svc-3", score: 0.8 },
   ],
 };
 
@@ -102,6 +118,12 @@ describe("CustomerCatalogScreen (real mirror data)", () => {
     expect(pickCards[0]).toHaveTextContent("Педикюр");
     expect(pickCards[1]).toHaveTextContent("Маникюр");
     expect(pickCards[2]).toHaveTextContent("Брови");
+    // WHAT + WHY: every branded pick renders the reasons the SOURCE
+    // sent, verbatim — nothing is synthesised client-side.
+    expect(pickCards[0]).toHaveTextContent("Свободно раньше всех остальных");
+    expect(pickCards[1]).toHaveTextContent("20 минут от тебя, рейтинг 4.9");
+    expect(pickCards[1]).toHaveTextContent("Ты уже была на этой услуге");
+    expect(pickCards[2]).toHaveTextContent("Подходит под твою цель — снижение стресса");
 
     const servicesSection = screen.getByRole("region", { name: "Услуги" });
     expect(within(servicesSection).getAllByRole("article")).toHaveLength(4);
@@ -129,6 +151,62 @@ describe("CustomerCatalogScreen (real mirror data)", () => {
     await screen.findByRole("region", { name: "Услуги" });
     expect(screen.queryByRole("region", { name: /Ayla подобрала/ })).not.toBeInTheDocument();
     expect(screen.getByText("Анна Соколова")).toBeInTheDocument();
+  });
+
+  // ── Owner ruling 25.08: «Нет displayable WHY → нет блока „Ayla
+  //    подобрала"». The section is gated on the reasons the source
+  //    actually sends, never on a flag and never on fabricated copy.
+  it("score-only response: no branded block, catalog and masters stay", async () => {
+    mockedFetchServices.mockResolvedValue({ services: SERVICES });
+    mockedFetchMasters.mockResolvedValue({ masters: MASTERS });
+    mockedFetchRecommendations.mockResolvedValue(RECS_NO_WHY);
+    renderScreen();
+    // The branded signature is gone…
+    expect(await screen.findByRole("region", { name: "Услуги" })).toBeInTheDocument();
+    expect(
+      screen.queryByRole("region", { name: /Ayla подобрала/ }),
+    ).not.toBeInTheDocument();
+    // …but the plain catalog underneath is untouched.
+    expect(within(screen.getByRole("region", { name: "Услуги" })).getAllByRole("article")).toHaveLength(4);
+    expect(screen.getByRole("region", { name: "Мастера" })).toBeInTheDocument();
+    // And no generic stand-in WHY was invented in its place.
+    for (const fake of [/подходит тебе/i, /выбрано по твоей цели/i, /Ayla рекомендует/i, /подобрано для вас/i]) {
+      expect(screen.queryByText(fake)).not.toBeInTheDocument();
+    }
+  });
+
+  it("drops picks whose WHY is blank; hides the block when none is left", async () => {
+    mockedFetchServices.mockResolvedValue({ services: SERVICES });
+    mockedFetchMasters.mockResolvedValue({ masters: MASTERS });
+    mockedFetchRecommendations.mockResolvedValue({
+      recommendations: [
+        { service_id: "svc-2", score: 0.95, reasons: [] },
+        { service_id: "svc-1", score: 0.9, reasons: ["   "] },
+        { service_id: "svc-4", score: 0.85, reasons: null },
+      ],
+    });
+    renderScreen();
+    await screen.findByRole("region", { name: "Услуги" });
+    expect(
+      screen.queryByRole("region", { name: /Ayla подобрала/ }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("keeps only the picks that carry WHY when the source is partial", async () => {
+    mockedFetchServices.mockResolvedValue({ services: SERVICES });
+    mockedFetchMasters.mockResolvedValue({ masters: MASTERS });
+    mockedFetchRecommendations.mockResolvedValue({
+      recommendations: [
+        { service_id: "svc-2", score: 0.95 },
+        { service_id: "svc-1", score: 0.9, reasons: ["20 минут от тебя, рейтинг 4.9"] },
+      ],
+    });
+    renderScreen();
+    const picks = await screen.findByRole("region", { name: /Ayla подобрала/ });
+    const cards = within(picks).getAllByRole("article");
+    expect(cards).toHaveLength(1);
+    expect(cards[0]).toHaveTextContent("Маникюр");
+    expect(within(picks).queryByText("Педикюр")).not.toBeInTheDocument();
   });
 
   it("shows the error state with retry when the mirror fails", async () => {

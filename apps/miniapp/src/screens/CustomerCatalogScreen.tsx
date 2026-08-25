@@ -9,7 +9,12 @@
  * provide:
  *
  *   «✨ Ayla подобрала» — top-3 services by scorer rank (founder cut
- *     #1 cap; hidden silently when the scorer is unavailable);
+ *     #1 cap), each with the WHY the source sent. Owner ruling 25.08:
+ *     «Нет displayable WHY → нет блока „Ayla подобрала"» — the section
+ *     renders only while `data.picks` is non-empty, and the lib puts a
+ *     pick there only when the SOURCE explained it. Today the scorer
+ *     sends `{service_id, score}` only, so the branded block is
+ *     silently absent; «Услуги» and «Мастера» below are untouched;
  *   «Услуги» — all active services (mirror) → service detail
  *     (`/catalog/:serviceId`, real screen continuing the booking flow);
  *   «Мастера» — bookable masters (mirror) → master detail
@@ -20,7 +25,9 @@
  * client-side (name + short description, case-insensitive).
  *
  * WCAG 2.2 AA (Tau §11): cards wrapped in `<article>`, one `<section>`
- * per block with labelled headings.
+ * per block with labelled headings. Each branded pick's WHY is a `<ul>`
+ * inside its `<article>`, next to the card — `ServiceCard` itself is
+ * shared with the plain catalog and stays WHY-free by design.
  */
 
 import { useCallback, useEffect, useMemo, useState } from "react";
@@ -30,6 +37,7 @@ import { ScreenLayout } from "../components/ScreenLayout";
 import { ServiceCard } from "../components/ServiceCard";
 import { DelayedSkeleton, ServiceCardSkeleton } from "../components/Skeleton";
 import { StateError } from "../components/StateError";
+import type { Service } from "../lib/api";
 import { getCatalogBrowse, type CatalogBrowseData } from "../lib/customer-booking";
 
 type State =
@@ -72,12 +80,20 @@ export function CustomerCatalogScreen() {
     );
   }, [state, query]);
 
-  const picks = useMemo(() => {
+  /**
+   * Branded picks, each carrying the WHY the source sent. Entries
+   * without WHY never reach here — `getCatalogBrowse` drops them (owner
+   * ruling 25.08). So an empty list means exactly one thing: Ayla has
+   * nothing it can explain right now.
+   */
+  const picksWithWhy = useMemo(() => {
     if (state.kind !== "ok") return [];
     const byId = new Map(state.data.services.map((s) => [s.id, s]));
-    return state.data.pickServiceIds
-      .map((id) => byId.get(id))
-      .filter((s): s is NonNullable<typeof s> => s != null)
+    return state.data.picks
+      .map((pick) => ({ service: byId.get(pick.serviceId), reasons: pick.reasons }))
+      .filter(
+        (p): p is { service: Service; reasons: string[] } => p.service != null,
+      )
       .slice(0, PICKS_CAP);
   }, [state]);
 
@@ -125,17 +141,30 @@ export function CustomerCatalogScreen() {
         </div>
       )}
 
-      {picks.length > 0 && (
+      {/* Owner ruling 25.08 — «Нет displayable WHY → нет блока „Ayla
+          подобрала"». The gate is the DATA, not a feature flag: the
+          section shows exactly while the source sent picks it can
+          explain, so it revives by itself when `POST /recommendations`
+          starts returning reasons. Never render a stand-in WHY here. */}
+      {picksWithWhy.length > 0 && (
         <section aria-labelledby="catalog-picks">
           <h2 id="catalog-picks" className="customer-catalog__section-title">
             <span aria-hidden="true">✨ </span>Ayla подобрала
           </h2>
-          {picks.map((service) => (
+          {picksWithWhy.map(({ service, reasons }) => (
             <article key={service.id} className="customer-catalog__card-l2">
               <ServiceCard
                 service={service}
                 onSelect={() => navigate(`/catalog/${service.id}`)}
               />
+              {/* WHY — verbatim from the source, never composed here. */}
+              <ul className="customer-catalog__why">
+                {reasons.map((reason) => (
+                  <li key={reason} className="customer-catalog__why-item">
+                    {reason}
+                  </li>
+                ))}
+              </ul>
             </article>
           ))}
         </section>

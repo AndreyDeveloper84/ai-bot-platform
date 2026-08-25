@@ -5,7 +5,8 @@
  * the no-prepayment path stays the plain confirmed success.
  */
 import { render, screen } from "@testing-library/react";
-import { MemoryRouter, Route, Routes } from "react-router-dom";
+import userEvent from "@testing-library/user-event";
+import { MemoryRouter, Route, Routes, useParams } from "react-router-dom";
 import { describe, expect, it, vi } from "vitest";
 
 vi.mock("../lib/max-sdk", async (importOriginal) => {
@@ -14,6 +15,16 @@ vi.mock("../lib/max-sdk", async (importOriginal) => {
 });
 
 import { CustomerBookingSuccessScreen } from "./CustomerBookingSuccessScreen";
+
+/** Probes that report WHICH namespace the CTA landed in, and with what id. */
+function CanonicalProbe() {
+  const { bookingId } = useParams();
+  return <div>CANONICAL-{bookingId}</div>;
+}
+function LegacyProbe() {
+  const { bookingId } = useParams();
+  return <div>LEGACY-{bookingId}</div>;
+}
 
 function renderWithState(state: Record<string, unknown> | null) {
   render(
@@ -27,6 +38,11 @@ function renderWithState(state: Record<string, unknown> | null) {
           path="/customer/booking/success/:bookingId"
           element={<CustomerBookingSuccessScreen />}
         />
+        <Route
+          path="/customer/records/:bookingId"
+          element={<CanonicalProbe />}
+        />
+        <Route path="/my-visits/:bookingId" element={<LegacyProbe />} />
       </Routes>
     </MemoryRouter>,
   );
@@ -52,5 +68,17 @@ describe("CustomerBookingSuccessScreen (payment-aware)", () => {
     });
     expect(screen.getByText(/Записала тебя/)).toBeInTheDocument();
     expect(screen.getByText("Зарезервировано")).toBeInTheDocument();
+  });
+});
+
+describe("CustomerBookingSuccessScreen — «Открыть запись» destination", () => {
+  it("opens the CANONICAL record route with the same booking id", async () => {
+    const user = userEvent.setup();
+    renderWithState({ service_name: "Маникюр" });
+    await user.click(screen.getByRole("button", { name: "Открыть запись" }));
+    // Canonical namespace (`/customer/records/:id`), same id as the
+    // booking just created — never the legacy `/my-visits` namespace.
+    expect(await screen.findByText("CANONICAL-b-1")).toBeInTheDocument();
+    expect(screen.queryByText("LEGACY-b-1")).not.toBeInTheDocument();
   });
 });

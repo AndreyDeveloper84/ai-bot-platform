@@ -9,7 +9,14 @@
  *       «Я напомню перед визитом, чтобы ты не пропустила.»
  *     NEVER promise a specific schedule («за день и за час» et al.)
  *     because user notification preferences MAY differ post-pilot.
- *   - Primary CTA «Открыть запись» → /my-visits/{id}.
+ *   - Primary CTA «Открыть запись» → `/customer/records/{id}` — the
+ *     CANONICAL record detail (`CustomerBookingDetailScreen`, mounted
+ *     in `App.tsx`). It used to point at the legacy `/my-visits/{id}`
+ *     namespace, dropping a customer who had just booked onto the old
+ *     surface; both routes read the same `GET /bookings/<id>`, so the
+ *     id carries over unchanged. Legacy `/my-visits/:id` stays mounted
+ *     for deep links that live outside this repo — see
+ *     `App.customerRecordRoute.test.tsx`, which proves both.
  *   - Secondary CTA «Сообщить по записи» — Ayla-mediated messaging
  *     per `docs/design/policies/ayla-mediated-messaging.md`.
  *
@@ -73,7 +80,7 @@ export function CustomerBookingSuccessScreen() {
         <StickyCta
           onClick={() =>
             bookingId
-              ? navigate(`/my-visits/${bookingId}`, { replace: true })
+              ? navigate(`/customer/records/${bookingId}`, { replace: true })
               : navigate("/customer/catalog", { replace: true })
           }
         >
@@ -122,9 +129,10 @@ export function CustomerBookingSuccessScreen() {
       </div>
 
       {/* Secondary CTA «Сообщить по записи» — hidden in round-1 until
-          the messaging route ships. The prior implementation routed
-          to the same `/my-visits/{id}` as the primary CTA (two CTAs,
-          same destination, no messaging surface) — a UX dead-end.
+          the messaging route ships. The prior implementation routed to
+          the record detail, i.e. the same destination as the primary
+          CTA (two CTAs, one place, no messaging surface) — a UX
+          dead-end.
           Will route to /customer/masters/{masterId}/message per
           ayla-mediated-messaging.md when messaging UI lands. */}
     </ScreenLayout>

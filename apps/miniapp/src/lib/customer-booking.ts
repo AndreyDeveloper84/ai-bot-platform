@@ -25,11 +25,30 @@
  *     the mirror services HERE (client-side, by id).
  *
  * Picks rule: the scorer is optional chrome. When it is unavailable
- * (502/503/network) the lib returns `pickServiceIds: []` and the
- * screens hide the picks section silently — never an error screen,
- * never fabricated picks. The founder cut #1 cap (≤3 picks) stays a
- * RENDER-side concern (screens slice), so this lib deliberately does
- * not truncate.
+ * (502/503/network) the lib returns `picks: []` and the screens hide
+ * the picks section silently — never an error screen, never fabricated
+ * picks. The founder cut #1 cap (≤3 picks) stays a RENDER-side concern
+ * (screens slice), so this lib deliberately does not truncate.
+ *
+ * # WHY gate (owner ruling 25.08)
+ *
+ * > «Нет displayable WHY → нет блока „Ayla подобрала".»
+ *
+ * `Recommendation = WHAT + WHY + WHAT NEXT`. A pick the source did not
+ * explain is not a branded Ayla pick, so it never leaves this lib:
+ * {@link getCatalogBrowse} keeps only the recommendations that carry
+ * display-ready WHY (`reasons[]` per the ruling, or `reasoning_text`
+ * per `docs/screens/customer-booking-flow.md` §10.3). Today
+ * `POST /recommendations` answers `{service_id, score}` and nothing
+ * else, so `picks` comes back empty and both branded sections hide
+ * themselves. Nothing is flagged off and no code is deleted: the day
+ * the scorer starts sending WHY, the same filter lets it through and
+ * the blocks come back on their own.
+ *
+ * What this lib will NOT do: invent WHY, translate reason codes into
+ * prose, or substitute a generic line («подходит тебе», «выбрано по
+ * твоей цели», «Ayla рекомендует»). Text is rendered exactly as the
+ * source sent it, or the pick is dropped.
  */
 
 import {
@@ -45,6 +64,7 @@ import type {
   MasterDetail,
   FreeSlot,
   CreatedBooking,
+  RecommendationScore,
   Service,
 } from "./api";
 
@@ -52,45 +72,86 @@ import type {
 // Catalog browse — mirror + scorer composition.
 // ---------------------------------------------------------------------------
 
+/**
+ * One branded Ayla pick: WHAT (the mirror service id) + WHY (the
+ * display-ready lines the SOURCE sent). `reasons` is guaranteed
+ * non-empty — a pick without WHY is dropped before it gets here.
+ */
+export interface ServicePick {
+  /** Mirror service id — joined onto `services` by the screens. */
+  serviceId: string;
+  /** Display-ready WHY, verbatim from the source, 1–3 lines. */
+  reasons: string[];
+}
+
 export interface CatalogBrowseData {
   /** Active services from the bot mirror (verbatim). */
   services: Service[];
   /** Bookable masters from the bot mirror (verbatim). */
   masters: Master[];
   /**
-   * Service ids ranked by the Ayla scorer (score desc), filtered to ids
-   * present in the mirror. Empty when the scorer is unavailable or
-   * returns nothing usable — picks sections hide silently then.
+   * Picks ranked by the Ayla scorer (score desc), filtered to ids
+   * present in the mirror AND to the ones the source explained. Empty
+   * when the scorer is unavailable, returns nothing usable, or sends no
+   * WHY — branded picks sections hide silently then.
    */
-  pickServiceIds: string[];
+  picks: ServicePick[];
+}
+
+/** Owner ruling 25.08: WHY is «2–3 коротких» — never a wall of text. */
+const MAX_REASONS = 3;
+
+/**
+ * Extract the display-ready WHY lines a single recommendation carries.
+ *
+ * Accepts both canon shapes (`reasons[]` / `reasoning_text`), keeps the
+ * strings verbatim apart from trimming, drops blanks, and caps the
+ * count. Returns `[]` when the source explained nothing — the caller
+ * treats that as «not a branded pick».
+ */
+function displayableReasons(rec: RecommendationScore): string[] {
+  const raw: unknown[] = Array.isArray(rec.reasons)
+    ? rec.reasons
+    : typeof rec.reasoning_text === "string"
+      ? [rec.reasoning_text]
+      : [];
+  return raw
+    .filter((r): r is string => typeof r === "string")
+    .map((r) => r.trim())
+    .filter((r) => r.length > 0)
+    .slice(0, MAX_REASONS);
 }
 
 /**
  * Load everything the catalog screen needs. Mirror failures reject
  * (the screen renders its error state); scorer failure is swallowed
- * into `pickServiceIds: []` per the picks rule above.
+ * into `picks: []` per the picks rule above.
  */
 export async function getCatalogBrowse(): Promise<CatalogBrowseData> {
   const [servicesRes, mastersRes] = await Promise.all([
     fetchServices(),
     fetchMasters(),
   ]);
-  let pickServiceIds: string[] = [];
+  let picks: ServicePick[] = [];
   try {
     const recs = await fetchRecommendations();
     const known = new Set(servicesRes.services.map((s) => s.id));
-    pickServiceIds = recs.recommendations
+    picks = recs.recommendations
       .slice()
       .sort((a, b) => b.score - a.score)
-      .map((r) => r.service_id)
-      .filter((id) => known.has(id));
+      .filter((r) => known.has(r.service_id))
+      .map((r) => ({ serviceId: r.service_id, reasons: displayableReasons(r) }))
+      // Owner ruling 25.08 — a pick the source did not explain is not a
+      // branded Ayla pick. This single line is the whole gate: it lets
+      // WHY through the moment the scorer starts sending it.
+      .filter((p) => p.reasons.length > 0);
   } catch {
     /* Ayla scorer unavailable — optional chrome, never fake it. */
   }
   return {
     services: servicesRes.services,
     masters: mastersRes.masters,
-    pickServiceIds,
+    picks,
   };
 }
 
