@@ -76,6 +76,115 @@ class TestPhoneRedaction:
 
 
 # ---------------------------------------------------------------------------
+# DRF-1380 — identifiers must survive the phone pattern
+# ---------------------------------------------------------------------------
+
+
+# Every phone form named in the pii_filter module docstring, plus the
+# spacing variants that appear in real operator chatter. Redaction of
+# these is the property the DRF-1380 boundary guard must NOT cost us.
+_PHONE_FORMS = [
+    "+7 (905) 123-45-67",
+    "+79051234567",
+    "8 905 123 45 67",
+    "8-905-123-45-67",
+    "89051234567",
+    "8 (905) 123-45-67",
+    "+7 905 123 45 67",
+    "+7-905-123-45-67",
+    "+7(905)123-45-67",
+    "8(905)123-45-67",
+    "+7 905 1234567",
+    "8 905 123-45-67",
+]
+
+# Identifiers that the pre-DRF-1380 pattern sliced. Each one is PINNED,
+# not generated: a test that rolls its own UUID is asserting on a value
+# it never chose, which is how this defect reached production in the
+# first place. Every string below contains a digit run that starts with
+# "8" and is followed by ten more digits.
+_SLICED_IDS = [
+    # The example from the ticket: draft_id -> "84113328793" cut out.
+    "3f2a84113328793b",  # pragma: allowlist secret
+    # Canonical UUIDs, sliced across a group boundary and inside a group.
+    "5a178e2b-b461-436e-8457-5213938b59ff",
+    "d8544633-7196-4392-9bf0-ae31f05b3328",
+    "18b221d3-b6cd-40bb-bcf8-3854119258e2",
+    # 32-char hex forms of the same shape.
+    "5a178e2bb461436e84575213938b59ff",  # pragma: allowlist secret
+    "18b221d3b6cd40bbbcf83854119258e2",  # pragma: allowlist secret
+    "8f9142c8b87745c0a82041578614a1e0",  # pragma: allowlist secret
+]
+
+
+class TestIdentifiersNotSlicedAsPhone:
+    """DRF-1380: the phone pattern must not cut the middle out of an id.
+
+    A redacted identifier is not a safe failure. ``draft_id`` /
+    ``trace_id`` / ``request_id`` with the middle removed cannot be
+    found by search, and the identifier an operator loses is precisely
+    the one the incident is being traced by.
+    """
+
+    @pytest.mark.parametrize("identifier", _SLICED_IDS)
+    def test_identifier_passes_through_untouched(
+        self, pii_filter: PIIRedactingFilter, identifier: str
+    ) -> None:
+        record = _make_record(f"draft_id={identifier}")
+        pii_filter.filter(record)
+        assert record.msg == f"draft_id={identifier}"
+
+    def test_suppress_log_line_shape_untouched(self, pii_filter: PIIRedactingFilter) -> None:
+        """The real log line from master_api.tasks.auto_draft.
+
+        Pinned ids, both of which the old pattern sliced.
+        """
+        line = (
+            "master_api.tasks.auto_draft.idle_active_draft_skipped "
+            "conv=5a178e2b-b461-436e-8457-5213938b59ff "
+            "draft=18b221d3-b6cd-40bb-bcf8-3854119258e2 "
+            "age_seconds=20.0 window=60s"
+        )
+        record = _make_record(line)
+        pii_filter.filter(record)
+        assert record.msg == line
+
+    @pytest.mark.parametrize("phone", _PHONE_FORMS)
+    @pytest.mark.parametrize(
+        "template",
+        [
+            "{}",
+            "phone: {}",
+            "клиент {} перезвонит",
+            "tel={} ok",
+            "({})",
+            "звонок с {}.",
+            "'{}'",
+            "номер {} записан",
+        ],
+    )
+    def test_every_phone_form_still_redacted(
+        self, pii_filter: PIIRedactingFilter, phone: str, template: str
+    ) -> None:
+        """The other direction of the same measurement.
+
+        Tightening the boundary is only acceptable while every real
+        form still gets cut.
+        """
+        record = _make_record(template.format(phone))
+        pii_filter.filter(record)
+        assert str(record.msg) == template.format("[PHONE]")
+
+    def test_phone_flush_against_cyrillic_still_redacted(
+        self, pii_filter: PIIRedactingFilter
+    ) -> None:
+        """The guard excludes ASCII letters only — Cyrillic still matches."""
+        record = _make_record("тел89051234567конец")
+        pii_filter.filter(record)
+        assert record.msg == "тел[PHONE]конец"
+
+
+# ---------------------------------------------------------------------------
 # Email redaction
 # ---------------------------------------------------------------------------
 
