@@ -89,7 +89,9 @@ from __future__ import annotations
 
 import logging
 import uuid
+from collections.abc import Iterable
 from dataclasses import dataclass
+from typing import cast
 
 from django.db import transaction
 from django.db.models import Exists, OuterRef, Q
@@ -244,7 +246,12 @@ def pending_forget_all_user_ids(limit: int = SWEEP_BATCH_SIZE) -> list[uuid.UUID
         .order_by("forget_all_requested_at")
         .values_list("user_id", flat=True)
     )
-    return list(qs[:limit])
+    # `cast` because django-stubs types `values_list` on an ANNOTATED queryset
+    # as yielding the annotated model, not the column — the annotation is what
+    # loses it the element type. `user_id` is the UUID primary key, so the
+    # runtime values are `uuid.UUID`; the cast states that rather than widening
+    # the signature to hide it.
+    return list(cast("Iterable[uuid.UUID]", qs[:limit]))
 
 
 def sweep_pending_forget_all(limit: int = SWEEP_BATCH_SIZE) -> dict:
