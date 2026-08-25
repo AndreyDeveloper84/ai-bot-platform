@@ -18,15 +18,15 @@ import hmac
 import json
 import time as time_module
 from dataclasses import dataclass, field
+from datetime import timedelta
 from typing import Any
 from unittest.mock import AsyncMock, patch
 from urllib.parse import urlencode
 
+import pytest
 from django.test import Client
 from django.urls import reverse
 from django.utils import timezone
-
-import pytest
 
 from apps.identity.models import BotUser
 from apps.integrations.ayla.nutrition_client import (
@@ -143,7 +143,7 @@ class TestAddWaterHappyPath:
 
     def test_tap_time_and_idempotency_key_are_forwarded(self, client: Client, bot_user: BotUser):
         # A queued glass flushed later must keep its own timestamp.
-        tap_ts = (timezone.now() - timezone.timedelta(hours=3)).isoformat()
+        tap_ts = (timezone.now() - timedelta(hours=3)).isoformat()
         patcher, fake = _patch_client(add=_FakeEntry())
         with patcher:
             resp = _post(
