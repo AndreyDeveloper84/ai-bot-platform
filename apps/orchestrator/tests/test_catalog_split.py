@@ -45,7 +45,7 @@ the answer goes.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal
 
@@ -155,9 +155,6 @@ class SeparationCase:
     expects: str
     tool_calls: tuple[tuple[str, dict], ...]
     why: str = ""
-    #: Turns that must NOT be treated as having named this salon. Only used by
-    #: the grounding row-check below.
-    ungrounded_for: tuple[str, ...] = field(default=())
 
 
 CATALOG_SEPARATION: tuple[SeparationCase, ...] = (

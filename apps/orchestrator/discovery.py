@@ -1221,8 +1221,7 @@ def execute_catalog_tool(
     def _limit(raw: Any, default: int) -> int:
         return min(int(raw), default) if isinstance(raw, int) and raw > 0 else default
 
-    def _salons(city: str | None = None) -> DiscoveryReply:
-        limit = _MAX_SALON_CARDS
+    def _salons(city: str | None = None, limit: int = _MAX_SALON_CARDS) -> DiscoveryReply:
         # limit+1: the «это не всё» tail must KNOW there is more, not guess it
         # from a list that happens to fill the page.
         salons = discover_salons(city=city, limit=limit + 1)
@@ -1230,7 +1229,7 @@ def execute_catalog_tool(
         return _render_salon_cards(salons, shown=limit, city=city)
 
     if name == SHOW_SALONS_TOOL_SPEC["name"]:
-        return _salons(args.get("city") or None)
+        return _salons(args.get("city") or None, _limit(args.get("limit"), _MAX_SALON_CARDS))
 
     if name == SHOW_SERVICES_TOOL_SPEC["name"]:
         salon = args.get("salon") or None
