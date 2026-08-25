@@ -48,7 +48,7 @@ from django.test import Client
 from django.urls import reverse
 
 from apps.booking.models import BookingRequest
-from apps.catalog.models import CatalogMaster, CatalogService
+from apps.catalog.models import CatalogMaster, CatalogService, MasterService
 from apps.identity.models import BotUser
 from apps.tenancy.models import Tenant
 
@@ -115,12 +115,31 @@ def bot_user(tenant: Tenant) -> BotUser:
 
 
 @pytest.fixture
-def home_service(tenant: Tenant) -> CatalogService:
+def home_master(tenant: Tenant) -> CatalogMaster:
+    """A bookable master in tenant *A*.
+
+    Exists so ``home_service`` has a performer: DRF-1164 refuses a
+    service nobody can do before the master guard is ever reached, and
+    this module is about the TENANT guard, not that one.
+    """
+
+    return CatalogMaster.all_tenants.create(
+        tenant=tenant,
+        external_id=1,
+        external_updated_at=datetime(2026, 5, 18, tzinfo=timezone.utc),
+        name="Анна",
+        is_active=True,
+        invite_status=CatalogMaster.InviteStatus.ACCEPTED,
+    )
+
+
+@pytest.fixture
+def home_service(tenant: Tenant, home_master: CatalogMaster) -> CatalogService:
     """A valid, bookable service in tenant *A* — lets the cross-tenant
     *master* test clear the service lookup before hitting the master guard.
     """
 
-    return CatalogService.all_tenants.create(
+    svc = CatalogService.all_tenants.create(
         tenant=tenant,
         external_id=42,
         external_updated_at=datetime(2026, 5, 18, tzinfo=timezone.utc),
@@ -129,6 +148,8 @@ def home_service(tenant: Tenant) -> CatalogService:
         duration_min=60,
         is_active=True,
     )
+    MasterService.all_tenants.create(tenant=tenant, master=home_master, service=svc)
+    return svc
 
 
 @pytest.fixture

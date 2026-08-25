@@ -38,10 +38,10 @@ const mockedFetchMasters = vi.mocked(fetchMasters);
 const mockedFetchRecommendations = vi.mocked(fetchRecommendations);
 
 const SERVICES: Service[] = [
-  { id: "svc-1", slug: "manikyur", name: "Маникюр", short_description: "Классический", description: "", price_from: "1800.00", duration_min: 60, is_popular: true, contraindications: "" },
-  { id: "svc-2", slug: "pedikyur", name: "Педикюр", short_description: "", description: "", price_from: "2200.00", duration_min: 90, is_popular: false, contraindications: "" },
-  { id: "svc-3", slug: "massazh", name: "Массаж", short_description: "", description: "", price_from: "3000.00", duration_min: 60, is_popular: false, contraindications: "" },
-  { id: "svc-4", slug: "brovi", name: "Брови", short_description: "", description: "", price_from: "1200.00", duration_min: 30, is_popular: false, contraindications: "" },
+  { id: "svc-1", slug: "manikyur", name: "Маникюр", short_description: "Классический", description: "", price_from: "1800.00", duration_min: 60, is_popular: true, contraindications: "", is_bookable: true },
+  { id: "svc-2", slug: "pedikyur", name: "Педикюр", short_description: "", description: "", price_from: "2200.00", duration_min: 90, is_popular: false, contraindications: "", is_bookable: true },
+  { id: "svc-3", slug: "massazh", name: "Массаж", short_description: "", description: "", price_from: "3000.00", duration_min: 60, is_popular: false, contraindications: "", is_bookable: true },
+  { id: "svc-4", slug: "brovi", name: "Брови", short_description: "", description: "", price_from: "1200.00", duration_min: 30, is_popular: false, contraindications: "", is_bookable: true },
 ];
 
 const MASTERS: Master[] = [
@@ -246,6 +246,53 @@ describe("CustomerCatalogScreen (real mirror data)", () => {
     const mastersSection = await screen.findByRole("region", { name: "Мастера" });
     await user.click(within(mastersSection).getByRole("button", { name: /Анна Соколова/ }));
     expect(await screen.findByText("MASTER-mst-1")).toBeInTheDocument();
+  });
+
+  // --- DRF-1164 ---------------------------------------------------------
+
+  it("marks a service nobody performs and keeps it in the list", async () => {
+    // The pilot defect: this row used to look exactly like the others and
+    // led to an empty master list. It stays in the catalog (owner's call)
+    // but says so on the card.
+    mockedFetchServices.mockResolvedValue({
+      services: [
+        ...SERVICES,
+        {
+          id: "svc-1164",
+          slug: "gladkaya-kozha",
+          name: "Гладкая кожа (комплекс)",
+          short_description: "",
+          description: "",
+          price_from: "9000.00",
+          duration_min: 105,
+          is_popular: false,
+          contraindications: "",
+          is_bookable: false,
+        },
+      ],
+    });
+    mockedFetchMasters.mockResolvedValue({ masters: MASTERS });
+    mockedFetchRecommendations.mockResolvedValue(RECS);
+    renderScreen();
+
+    const servicesSection = await screen.findByRole("region", { name: "Услуги" });
+    expect(within(servicesSection).getByText(/Гладкая кожа/)).toBeInTheDocument();
+    expect(
+      within(servicesSection).getByText("Сейчас нет свободных мастеров"),
+    ).toBeInTheDocument();
+    // The label rides in the accessible name too — a screen-reader user
+    // must not have to see the badge to learn it.
+    expect(
+      within(servicesSection).getByRole("button", {
+        name: /Гладкая кожа.*нет свободных мастеров/i,
+      }),
+    ).toBeInTheDocument();
+    // Bookable neighbours stay clean.
+    expect(
+      within(servicesSection)
+        .getByRole("button", { name: /Маникюр/ })
+        .textContent,
+    ).not.toMatch(/нет свободных мастеров/);
   });
 
   it("prod build: gate removed — real data renders, no coming-soon placeholder", async () => {

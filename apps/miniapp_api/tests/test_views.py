@@ -346,6 +346,102 @@ class TestServicesEndpoints:
         assert resp.status_code == 200
         assert resp.json()["service"]["name"] == "Маникюр гель-лак"
 
+    # --- DRF-1164: is_bookable on the catalog payload --------------------
+
+    def test_list_marks_service_without_masters(
+        self,
+        client: Client,
+        bot_user: BotUser,
+        tenant: Tenant,
+        master: CatalogMaster,
+        service: CatalogService,
+        master_service,
+    ) -> None:
+        """The pilot defect: a complex service sits in the catalog with zero
+        ``catalog_masterservice`` rows and the customer taps into an empty
+        master list. The payload must say so — one flag, both cases, one
+        request."""
+
+        orphan = CatalogService.all_tenants.create(
+            tenant=tenant,
+            external_id=1164,
+            external_updated_at=datetime(2026, 5, 18, tzinfo=timezone.utc),
+            slug="gladkaya-kozha",
+            name="Гладкая кожа (комплекс)",
+            duration_min=105,
+            is_active=True,
+        )
+
+        resp = client.get(
+            reverse("miniapp_api:services_list"),
+            HTTP_AUTHORIZATION=_init_data_header("12345"),
+        )
+        assert resp.status_code == 200
+        by_id = {s["id"]: s for s in resp.json()["services"]}
+
+        # Service WITHOUT a performer — present (the shop window stays)
+        # but flagged unbookable.
+        assert by_id[str(orphan.id)]["is_bookable"] is False
+        # Service WITH a bookable performer — no flag.
+        assert by_id[str(service.id)]["is_bookable"] is True
+
+    def test_list_ignores_non_bookable_master(
+        self,
+        client: Client,
+        bot_user: BotUser,
+        tenant: Tenant,
+        service: CatalogService,
+    ) -> None:
+        """A mapping row to a master that ``GET /masters?service_id=`` will
+        not return (pending invite) is not a performer — otherwise the card
+        promises someone the picker then cannot show."""
+
+        pending = CatalogMaster.all_tenants.create(
+            tenant=tenant,
+            external_id=1165,
+            external_updated_at=datetime(2026, 5, 18, tzinfo=timezone.utc),
+            name="Наталья (pending)",
+            is_active=True,
+            invite_status=CatalogMaster.InviteStatus.PENDING,
+        )
+        MasterService.all_tenants.create(tenant=tenant, master=pending, service=service)
+
+        resp = client.get(
+            reverse("miniapp_api:services_list"),
+            HTTP_AUTHORIZATION=_init_data_header("12345"),
+        )
+        assert resp.status_code == 200
+        payload = {s["id"]: s for s in resp.json()["services"]}
+        assert payload[str(service.id)]["is_bookable"] is False
+
+    def test_detail_carries_is_bookable(
+        self, client: Client, bot_user: BotUser, service: CatalogService
+    ) -> None:
+        """Deep-link by service id — the direct route past the card —
+        must carry the same flag, or the detail screen keeps its CTA."""
+
+        resp = client.get(
+            reverse("miniapp_api:service_detail", kwargs={"service_id": str(service.id)}),
+            HTTP_AUTHORIZATION=_init_data_header("12345"),
+        )
+        assert resp.status_code == 200
+        assert resp.json()["service"]["is_bookable"] is False
+
+    def test_detail_bookable_when_master_mapped(
+        self,
+        client: Client,
+        bot_user: BotUser,
+        service: CatalogService,
+        master: CatalogMaster,
+        master_service,
+    ) -> None:
+        resp = client.get(
+            reverse("miniapp_api:service_detail", kwargs={"service_id": str(service.id)}),
+            HTTP_AUTHORIZATION=_init_data_header("12345"),
+        )
+        assert resp.status_code == 200
+        assert resp.json()["service"]["is_bookable"] is True
+
 
 class TestMastersEndpoints:
     def test_list_bookable_only(
@@ -462,6 +558,101 @@ class TestCreateBooking:
         assert booking.service_id == service.id
         assert booking.master_id == master.id
 
+    def test_service_without_masters_is_refused(
+        self,
+        client: Client,
+        bot_user: BotUser,
+        tenant: Tenant,
+        master: CatalogMaster,
+        service: CatalogService,
+        working_hours,
+    ) -> None:
+        """DRF-1164 — the proof that the ban is a ban.
+
+        No ``master_service`` fixture: the service is active, the master is
+        bookable and working, the slot is free — everything a merely-hidden
+        CTA would have let through. The POST is hand-rolled exactly as a
+        client bypassing the UI would send it, and the server must refuse.
+        """
+
+        resp = client.post(
+            reverse("miniapp_api:create_booking"),
+            data=json.dumps(
+                {
+                    "service_id": str(service.id),
+                    "master_id": str(master.id),
+                    "visit_at": self._picked_slot(),
+                }
+            ),
+            content_type="application/json",
+            HTTP_AUTHORIZATION=_init_data_header("12345"),
+        )
+        assert resp.status_code == 409, resp.json()
+        assert resp.json()["error"] == "service_unbookable"
+        assert BookingRequest.all_tenants.count() == 0
+
+    def test_service_without_masters_refused_on_ayla_path(
+        self,
+        client: Client,
+        bot_user: BotUser,
+        tenant: Tenant,
+        master: CatalogMaster,
+        service: CatalogService,
+        working_hours,
+        settings,
+    ) -> None:
+        """Same refusal with ``BOOKING_VIA_AYLA_REST`` ON.
+
+        That path never consulted the MasterService mapping, so before the
+        gate it would have booked a masterless service against any bookable
+        specialist. The gate sits before the branch; if it ever moves back
+        inside one, this test goes red while its sibling stays green.
+        """
+
+        settings.BOOKING_VIA_AYLA_REST = True
+        resp = client.post(
+            reverse("miniapp_api:create_booking"),
+            data=json.dumps(
+                {
+                    "service_id": str(service.id),
+                    "master_id": str(master.id),
+                    "visit_at": self._picked_slot(),
+                }
+            ),
+            content_type="application/json",
+            HTTP_AUTHORIZATION=_init_data_header("12345"),
+        )
+        assert resp.status_code == 409, resp.json()
+        assert resp.json()["error"] == "service_unbookable"
+        assert BookingRequest.all_tenants.count() == 0
+
+    def test_unknown_service_still_reads_as_not_found(
+        self,
+        client: Client,
+        bot_user: BotUser,
+        master: CatalogMaster,
+        working_hours,
+    ) -> None:
+        """The gate must not swallow the 404 vocabulary: a service that does
+        not exist is *missing*, not *unbookable*."""
+
+        import uuid as _uuid
+
+        resp = client.post(
+            reverse("miniapp_api:create_booking"),
+            data=json.dumps(
+                {
+                    "service_id": str(_uuid.uuid4()),
+                    "master_id": str(master.id),
+                    "visit_at": self._picked_slot(),
+                }
+            ),
+            content_type="application/json",
+            HTTP_AUTHORIZATION=_init_data_header("12345"),
+        )
+        assert resp.status_code == 404, resp.json()
+        assert resp.json()["error"] == "service_not_found"
+
     def test_missing_body_fields(self, client: Client, bot_user: BotUser) -> None:
         resp = client.post(
             reverse("miniapp_api:create_booking"),
@@ -499,11 +690,29 @@ class TestCreateBooking:
         self,
         client: Client,
         bot_user: BotUser,
+        tenant: Tenant,
         master: CatalogMaster,
         service: CatalogService,
         working_hours,
     ) -> None:
-        # No master_service fixture — mapping absent.
+        # No master_service fixture for `master` — THIS master's mapping
+        # is absent, which is what the case is about.
+        #
+        # DRF-1164: a second bookable master IS mapped, so the service
+        # still has a performer. Without her the fixture would describe a
+        # different defect — a service nobody performs — and the new
+        # `service_unbookable` gate would (correctly) answer first,
+        # leaving "master does not perform this service" untested.
+        other = CatalogMaster.all_tenants.create(
+            tenant=tenant,
+            external_id=7,
+            external_updated_at=datetime(2026, 5, 18, tzinfo=timezone.utc),
+            name="Ольга",
+            is_active=True,
+            invite_status=CatalogMaster.InviteStatus.ACCEPTED,
+        )
+        MasterService.all_tenants.create(tenant=tenant, master=other, service=service)
+
         visit_at = self._picked_slot()
         resp = client.post(
             reverse("miniapp_api:create_booking"),

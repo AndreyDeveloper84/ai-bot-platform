@@ -10,6 +10,7 @@ import { StateError } from "../components/StateError";
 import { useBackButton } from "../hooks/useBackButton";
 import { useHaptics } from "../hooks/useHaptics";
 import { formatDuration, formatMoney } from "../lib/format";
+import { UNBOOKABLE_DETAIL } from "../components/UnbookableNote";
 import { setService } from "../state/booking";
 
 type State =
@@ -51,6 +52,10 @@ export function ServiceDetailScreen() {
 
   function onContinue() {
     if (state.kind !== "ok") return;
+    // Belt-and-braces: the CTA is not rendered for an unbookable service,
+    // so this can only be reached by a stale closure. Refuse anyway —
+    // the draft must never carry a service nobody can perform.
+    if (!state.service.is_bookable) return;
     haptics.selection();
     setService(state.service.id, state.service.name);
     navigate("/book/master");
@@ -99,11 +104,37 @@ export function ServiceDetailScreen() {
   }
 
   const s = state.service;
+  // DRF-1164 — this screen is the ONE door into the booking flow for a
+  // service (`/catalog/:serviceId` is where both catalog surfaces and the
+  // wellness picks land, and a bot deep-link by service id arrives here
+  // too). So the CTA is withheld here rather than only greyed out on the
+  // card: no CTA, no `setService()`, no `/book/master` — the dead end the
+  // customer used to fall into is unreachable from the service side.
+  // The page itself stays — description and contraindications are still
+  // worth reading, and the callout says why booking is off.
+  const unbookable = !s.is_bookable;
   return (
     <ScreenLayout
       title={s.name}
-      cta={<StickyCta onClick={onContinue}>Подобрать время</StickyCta>}
+      cta={
+        unbookable ? undefined : (
+          <StickyCta onClick={onContinue}>Подобрать время</StickyCta>
+        )
+      }
     >
+      {unbookable && (
+        <div className="callout" role="status">
+          <p style={{ margin: 0 }}>{UNBOOKABLE_DETAIL}</p>
+          <button
+            type="button"
+            className="btn-secondary"
+            style={{ marginTop: "var(--s-3)" }}
+            onClick={() => navigate("/catalog")}
+          >
+            Другие услуги
+          </button>
+        </div>
+      )}
       <div className="confirm-card">
         <dl>
           <dt>Длительность и цена</dt>

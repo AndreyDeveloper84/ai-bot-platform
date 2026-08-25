@@ -36,6 +36,7 @@ from functools import wraps
 from typing import Any, Callable
 from zoneinfo import ZoneInfo
 
+from django.db.models import Exists, OuterRef
 from django.http import HttpRequest, HttpResponse, JsonResponse
 from django.utils import timezone
 from django.views.decorators.csrf import csrf_exempt
@@ -645,6 +646,42 @@ def slots(request: HttpRequest) -> HttpResponse:
 # --- catalog read endpoints (4a) -------------------------------------------
 
 
+def _bookable_master_exists() -> Exists:
+    """``Exists`` subquery: does this service have ANY bookable performer?
+
+    DRF-1164. "Bookable" is spelled exactly the way
+    :meth:`apps.catalog.models._MasterManager.bookable` spells it —
+    ``is_active=True`` AND ``invite_status='accepted'`` — because that
+    is the queryset ``GET /masters?service_id=`` serves. Any other
+    definition here would let the catalog promise a performer the
+    master picker then fails to show: the very empty-screen dead end
+    this exists to prevent.
+
+    A subquery and not a per-row ``.exists()`` loop: the catalog list
+    is served whole (10–40 services on a salon, hundreds across the
+    pilot tenant) and a loop would be one query per service on the
+    hot customer-facing path. ``annotate`` folds it into the single
+    catalog SELECT.
+
+    Tenant scoping rides on ``MasterService.objects`` (TenantScopedManager)
+    plus the ``OuterRef`` join onto the already-scoped service row.
+    """
+
+    return Exists(
+        MasterService.objects.filter(
+            service=OuterRef("pk"),
+            master__is_active=True,
+            master__invite_status=CatalogMaster.InviteStatus.ACCEPTED,
+        )
+    )
+
+
+def _services_with_bookability():
+    """Catalog services annotated with ``has_bookable_master`` (bool)."""
+
+    return CatalogService.objects.annotate(has_bookable_master=_bookable_master_exists())
+
+
 def _service_to_dict(s: CatalogService) -> dict[str, Any]:
     return {
         "id": str(s.id),
@@ -656,6 +693,13 @@ def _service_to_dict(s: CatalogService) -> dict[str, Any]:
         "duration_min": s.duration_min,
         "is_popular": s.is_popular,
         "contraindications": s.contraindications,
+        # DRF-1164 — "can the customer book this?", not "how many
+        # masters" (the count is the internal reason, not the client's
+        # business). Rows MUST come from _services_with_bookability();
+        # the getattr has no default on purpose so a caller that forgot
+        # the annotation fails loudly instead of shipping a silent
+        # `false` on every card.
+        "is_bookable": bool(getattr(s, "has_bookable_master")),
     }
 
 
@@ -682,7 +726,7 @@ def services_list(request: HttpRequest) -> HttpResponse:
     services; no pagination needed at this scale).
     """
 
-    qs = CatalogService.objects.filter(is_active=True).order_by("name")
+    qs = _services_with_bookability().filter(is_active=True).order_by("name")
     return JsonResponse({"services": [_service_to_dict(s) for s in qs]})
 
 
@@ -691,7 +735,7 @@ def services_list(request: HttpRequest) -> HttpResponse:
 @with_request_tenant
 def service_detail(request: HttpRequest, service_id: str) -> HttpResponse:
     try:
-        service = CatalogService.objects.get(id=service_id, is_active=True)
+        service = _services_with_bookability().get(id=service_id, is_active=True)
     except CatalogService.DoesNotExist:
         return _error("not_found", "service not found", 404)
     return JsonResponse({"service": _service_to_dict(service)})
@@ -967,6 +1011,47 @@ def create_booking(request: HttpRequest) -> HttpResponse:
     # true → AWAITING_PAYMENT + pending Payment. The chat flow's
     # execute_confirm default (True) is intentionally NOT shared here.
     payment_required = bool(body.get("payment_required", False))
+
+    # DRF-1164 — the server-side half of "no performer, no booking".
+    # The catalog now ships `is_bookable` and the Mini App drops the CTA,
+    # but a hidden button is not a ban: a hand-rolled POST must be
+    # refused too, and BOTH create paths must refuse. The local path
+    # would have stumbled into `service_not_offered` by accident (no
+    # MasterService row for ANY master), while the Ayla path
+    # (_create_booking_via_ayla) never consults the mapping at all — it
+    # would have happily booked a masterless service against any
+    # bookable specialist. Hence the gate sits BEFORE the branch.
+    #
+    # `.first()` returns None when the service does not exist or is
+    # inactive; that case deliberately falls through so the existing
+    # `service_not_found` / 404 semantics keep their meaning. Only an
+    # explicit False — service is real, active, and has nobody to
+    # perform it — is refused here.
+    # A malformed id would make the ORM raise on the UUID cast; skip the
+    # gate there and leave the downstream lookup to report it exactly as
+    # it did before this gate existed.
+    try:
+        uuid.UUID(str(service_id))
+    except ValueError:
+        has_performer = None
+    else:
+        has_performer = (
+            _services_with_bookability()
+            .filter(id=service_id, is_active=True)
+            .values_list("has_bookable_master", flat=True)
+            .first()
+        )
+    if has_performer is False:
+        logger.info(
+            "miniapp_api.create_booking.no_bookable_master service_id=%s",
+            service_id,
+        )
+        return _error(
+            "service_unbookable",
+            "service has no bookable master",
+            409,
+        )
+
     if getattr(settings, "BOOKING_VIA_AYLA_REST", False):
         return _create_booking_via_ayla(
             bot_user=bot_user,
