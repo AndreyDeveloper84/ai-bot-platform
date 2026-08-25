@@ -688,6 +688,13 @@ NUTRITION_SERVICE_TOKEN = (
 # production flips deliberately, never ad-hoc.
 BOOKING_VIA_AYLA_REST = os.environ.get("BOOKING_VIA_AYLA_REST", "false").lower() == "true"
 
+# DRF-1111 / DRF-1161 — mirror ↔ canon reconciliation sweep. How many
+# tenant-local days ahead the ``tenants/me/day/`` fan-out reads. Rows
+# beyond the window are excluded on BOTH sides, so the comparison stays
+# fair; 45 covers the realistic booking horizon at a bounded per-tick
+# request count (one request per day per tenant).
+AYLA_MIRROR_RECONCILE_WINDOW_DAYS = int(os.environ.get("AYLA_MIRROR_RECONCILE_WINDOW_DAYS", "45"))
+
 # DRF-1005 — Controlled Pilot: per-tenant fallback for the booking
 # health-check gate. DEMOTED by DRF-1353 — read the note below before
 # adding a tenant here.
@@ -1339,6 +1346,24 @@ CELERY_BEAT_SCHEDULE = {
     "nutrition_proactive.send_water_reminders": {
         "task": "nutrition_proactive.send_water_reminders",
         "schedule": crontab(minute="20", hour="*/4"),
+    },
+    # DRF-1111 + DRF-1161 — mirror ↔ canon reconciliation detector.
+    # Compares live bookings in Ayla against RemoteBookingProxy per
+    # tenant, identifier by identifier; divergence logs every tick and
+    # pages when it persists across two consecutive ticks. Never fixes
+    # anything — расхождение это симптом, а его причины разные.
+    #
+    # Hourly at :37. The mirror feeds the salon/master day screens all
+    # working day, so hourly bounds the time a silent hole stays
+    # invisible to ~2h worst case (two-tick persistence threshold +
+    # consumer lag). Sub-hourly would multiply the day-endpoint fan-out
+    # (AYLA_MIRROR_RECONCILE_WINDOW_DAYS requests per tenant per tick)
+    # against Ayla for little gain — the threshold, not the cadence, is
+    # what bounds detection latency. :37 sits clear of the :00 / :05 /
+    # :15 / :20 / :30 beats already on the schedule.
+    "booking.reconcile_ayla_mirror": {
+        "task": "apps.booking.tasks.reconcile_ayla_mirror",
+        "schedule": crontab(minute="37"),
     },
 }
 
