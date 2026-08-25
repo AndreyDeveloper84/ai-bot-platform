@@ -73,11 +73,12 @@ class FakeSalonClient:
         self.bookings_by_date = bookings_by_date or {}
         self.calls: list[dict] = []
 
-    def get_tenant_day(self, *, actor_external_id: str, tenant_slug: str, date: dt.date) -> dict:
+    def get_day(self, *, actor_external_id: str, tenant_slug: str, date: str | None = None) -> dict:
         self.calls.append({"actor": actor_external_id, "tenant": tenant_slug, "date": date})
+        day = dt.date.fromisoformat(date) if date else None
         return {
-            "date": date.isoformat(),
-            "masters": [{"bookings": self.bookings_by_date.get(date, [])}],
+            "date": date,
+            "masters": [{"bookings": self.bookings_by_date.get(day, [])}],
         }
 
 
@@ -314,7 +315,7 @@ class TestSweep:
         «расхождение» off an unreachable canon."""
 
         class DownClient(FakeSalonClient):
-            def get_tenant_day(self, **kwargs):
+            def get_day(self, **kwargs):
                 raise SalonUnavailable("network: boom")
 
         from apps.booking import mirror_reconcile
@@ -327,6 +328,35 @@ class TestSweep:
                 now=NOW,
                 page=lambda *a, **k: pages.append((a, k)),
             )
+
+        assert summary["unchecked"] == [tenant.slug]
+        assert summary["diverged"] == []
+        assert pages == []
+
+    def test_unrecognised_day_payload_is_unchecked_not_empty(
+        self, tenant: Tenant, owner: BotUser
+    ) -> None:
+        """A 200 whose ``masters`` is missing must not read as «нет записей».
+
+        The shape check moved here from the client when the detector switched
+        to the registered ``get_day`` route (SALON_ROUTES forbids a second
+        row for the same endpoint): the client unwraps the envelope loudly,
+        and this module owns the one residual fact it relies on.
+        """
+
+        class ShapeDriftedClient(FakeSalonClient):
+            def get_day(self, **kwargs):
+                return {"date": "2026-08-25"}  # no "masters" at all
+
+        from apps.booking import mirror_reconcile
+
+        _proxy(tenant)
+        pages: list[tuple] = []
+        summary = mirror_reconcile.run_mirror_reconciliation(
+            client_factory=lambda: ShapeDriftedClient(),
+            now=NOW,
+            page=lambda *a, **k: pages.append((a, k)),
+        )
 
         assert summary["unchecked"] == [tenant.slug]
         assert summary["diverged"] == []

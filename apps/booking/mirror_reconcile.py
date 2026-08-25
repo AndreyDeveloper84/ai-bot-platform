@@ -81,6 +81,7 @@ from apps.booking.models import RemoteBookingProxy
 from apps.integrations.ayla.salon_client import (
     SalonAPIError,
     SalonNotConfigured,
+    SalonUnavailable,
     get_salon_client,
 )
 from apps.integrations.ayla.user_proxy import external_user_id_for
@@ -230,11 +231,21 @@ def collect_ayla_facts(
 
     facts: dict[str, BookingFact] = {}
     for day in dates:
-        payload = client.get_tenant_day(
+        # ``get_day`` is the registered route row (SALON_ROUTES) — the
+        # detector must not grow a second, undeclared name for the same
+        # endpoint. The envelope is unwrapped and fail-loud inside the
+        # client; the one residual shape fact the reconciliation itself
+        # depends on — ``masters`` being a list — is checked here, because
+        # a day payload without it must never read as «у салона нет
+        # записей»: that would silence the detector exactly when the
+        # contract moved under it.
+        payload = client.get_day(
             actor_external_id=actor_external_id,
             tenant_slug=tenant_slug,
-            date=day,
+            date=day.isoformat(),
         )
+        if not isinstance(payload.get("masters"), list):
+            raise SalonUnavailable("upstream returned an unrecognised day payload")
         for master in payload.get("masters") or []:
             for raw in (master or {}).get("bookings") or []:
                 if not isinstance(raw, dict):

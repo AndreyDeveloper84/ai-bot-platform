@@ -59,7 +59,6 @@ from __future__ import annotations
 
 import logging
 import re
-from datetime import date as date_cls
 from typing import Any
 
 import httpx
@@ -528,44 +527,6 @@ class AylaSalonClient:
         )
 
     MIN_QUERY = 2
-
-    def get_tenant_day(
-        self,
-        *,
-        actor_external_id: str,
-        tenant_slug: str,
-        date: date_cls,
-    ) -> dict[str, Any]:
-        """GET ``tenants/me/day/?date=…`` — the one tenant-wide booking read.
-
-        DRF-1111/DRF-1161: the mirror reconciliation sweep fans this out
-        over a bounded date window, because Ayla exposes no other way for
-        the service to enumerate a salon's bookings — the internal surface
-        is per-user, and per-user enumeration cannot see a booking whose
-        creation event never arrived (which is exactly the failure the
-        detector exists for).
-
-        Read-only: no idempotency key, nothing to de-duplicate. The
-        response is the ``success_response`` envelope; the day document
-        under ``data`` carries ``masters[].bookings[]`` with
-        ``appointment_id`` / ``status`` / ``start_at``. A 200 whose shape
-        we do not recognise raises :class:`SalonUnavailable` — a contract
-        drift must fail loudly, never read as «у салона нет записей».
-        """
-
-        if not tenant_slug:
-            raise SalonValidationError("tenant_slug is required")
-
-        payload = self._get(
-            "day/",
-            actor_external_id=actor_external_id,
-            tenant_slug=tenant_slug,
-            params={"date": date.isoformat()},
-        )
-        data = payload.get("data") if isinstance(payload, dict) else None
-        if not isinstance(data, dict) or not isinstance(data.get("masters"), list):
-            raise SalonUnavailable("upstream returned an unrecognised day payload")
-        return data
 
     def search_customers(
         self,
