@@ -655,9 +655,7 @@ class TestTenantDay:
             date=dt.date(2026, 8, 25),
         )
 
-        assert seen["url"] == (
-            "https://ayla.example/api/v1/tenants/me/day/?date=2026-08-25"
-        )
+        assert seen["url"] == ("https://ayla.example/api/v1/tenants/me/day/?date=2026-08-25")
         assert seen["headers"]["authorization"] == f"Bearer {TOKEN}"
         assert seen["headers"]["x-external-user-id"] == ACTOR
         assert seen["headers"]["x-tenant"] == "formula-tela"

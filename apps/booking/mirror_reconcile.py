@@ -149,10 +149,7 @@ class TenantDivergence:
 
     def is_clean(self) -> bool:
         return not (
-            self.ayla_only
-            or self.mirror_only
-            or self.status_mismatch
-            or self.start_mismatch
+            self.ayla_only or self.mirror_only or self.status_mismatch or self.start_mismatch
         )
 
     def fingerprint(self) -> str:
@@ -185,7 +182,9 @@ def _tenant_tz(tenant: Tenant) -> ZoneInfo:
         return ZoneInfo(DEFAULT_TZ)
 
 
-def _window(tenant: Tenant, now: datetime, window_days: int) -> tuple[datetime, datetime, list[date_cls]]:
+def _window(
+    tenant: Tenant, now: datetime, window_days: int
+) -> tuple[datetime, datetime, list[date_cls]]:
     """``[start, end)`` UTC instants + the tenant-local dates to fan out."""
 
     tz = _tenant_tz(tenant)
@@ -195,9 +194,7 @@ def _window(tenant: Tenant, now: datetime, window_days: int) -> tuple[datetime, 
     return start, end, [today + timedelta(days=i) for i in range(window_days)]
 
 
-def collect_mirror_facts(
-    tenant: Tenant, start: datetime, end: datetime
-) -> dict[str, BookingFact]:
+def collect_mirror_facts(tenant: Tenant, start: datetime, end: datetime) -> dict[str, BookingFact]:
     """Every mirror row starting inside the window, any status.
 
     Terminal rows are collected on purpose: a row cancelled in the mirror
@@ -303,9 +300,7 @@ def compare(
             # yet the mirror is stale and the detector should say so.
             status_mismatch.append((appointment_id, a.status, m.status))
         elif m_live and abs((a.start_at - m.start_at).total_seconds()) > START_TOLERANCE_S:
-            start_mismatch.append(
-                (appointment_id, a.start_at.isoformat(), m.start_at.isoformat())
-            )
+            start_mismatch.append((appointment_id, a.start_at.isoformat(), m.start_at.isoformat()))
 
     return TenantDivergence(
         tenant_slug=tenant.slug,
@@ -355,9 +350,7 @@ def find_reconcile_actor(tenant: Tenant) -> Any | None:
 
     for role in (TenantStaff.Role.OWNER, TenantStaff.Role.ADMIN):
         staff = (
-            TenantStaff.all_tenants.filter(
-                tenant=tenant, role=role, deactivated_at__isnull=True
-            )
+            TenantStaff.all_tenants.filter(tenant=tenant, role=role, deactivated_at__isnull=True)
             .select_related("bot_user")
             .first()
         )
@@ -374,9 +367,7 @@ def _record_clean(tenant: Tenant) -> None:
     key = _cache_key(tenant)
     if cache.get(key):
         cache.delete(key)
-        logger.info(
-            "booking.mirror_reconcile.recovered tenant=%s", tenant.slug
-        )
+        logger.info("booking.mirror_reconcile.recovered tenant=%s", tenant.slug)
 
 
 def _record_divergence(
@@ -478,9 +469,9 @@ def run_mirror_reconciliation(
         summary["configured"] = False
         return summary
 
-    mirror_tenant_ids = (
-        RemoteBookingProxy.all_tenants.values_list("tenant_id", flat=True).distinct()
-    )
+    mirror_tenant_ids = RemoteBookingProxy.all_tenants.values_list(
+        "tenant_id", flat=True
+    ).distinct()
     staffed_tenant_ids = (
         TenantStaff.all_tenants.filter(
             role__in=(TenantStaff.Role.OWNER, TenantStaff.Role.ADMIN),
@@ -497,9 +488,7 @@ def run_mirror_reconciliation(
     for tenant in tenants:
         actor = find_reconcile_actor(tenant)
         if actor is None:
-            logger.warning(
-                "booking.mirror_reconcile.no_actor tenant=%s", tenant.slug
-            )
+            logger.warning("booking.mirror_reconcile.no_actor tenant=%s", tenant.slug)
             summary["skipped_no_actor"].append(tenant.slug)
             continue
         try:
@@ -521,9 +510,7 @@ def run_mirror_reconciliation(
             summary["unchecked"].append(tenant.slug)
             continue
         except Exception:  # noqa: BLE001 — one tenant's bug must not blind the rest
-            logger.exception(
-                "booking.mirror_reconcile.tenant_failed tenant=%s", tenant.slug
-            )
+            logger.exception("booking.mirror_reconcile.tenant_failed tenant=%s", tenant.slug)
             summary["unchecked"].append(tenant.slug)
             continue
 

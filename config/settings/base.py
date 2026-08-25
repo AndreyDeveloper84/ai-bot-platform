@@ -671,9 +671,7 @@ BOOKING_VIA_AYLA_REST = os.environ.get("BOOKING_VIA_AYLA_REST", "false").lower()
 # beyond the window are excluded on BOTH sides, so the comparison stays
 # fair; 45 covers the realistic booking horizon at a bounded per-tick
 # request count (one request per day per tenant).
-AYLA_MIRROR_RECONCILE_WINDOW_DAYS = int(
-    os.environ.get("AYLA_MIRROR_RECONCILE_WINDOW_DAYS", "45")
-)
+AYLA_MIRROR_RECONCILE_WINDOW_DAYS = int(os.environ.get("AYLA_MIRROR_RECONCILE_WINDOW_DAYS", "45"))
 
 # DRF-1005 — Controlled Pilot: per-tenant fallback for the booking
 # health-check gate. DEMOTED by DRF-1353 — read the note below before

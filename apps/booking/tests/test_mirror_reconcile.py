@@ -73,12 +73,8 @@ class FakeSalonClient:
         self.bookings_by_date = bookings_by_date or {}
         self.calls: list[dict] = []
 
-    def get_tenant_day(
-        self, *, actor_external_id: str, tenant_slug: str, date: dt.date
-    ) -> dict:
-        self.calls.append(
-            {"actor": actor_external_id, "tenant": tenant_slug, "date": date}
-        )
+    def get_tenant_day(self, *, actor_external_id: str, tenant_slug: str, date: dt.date) -> dict:
+        self.calls.append({"actor": actor_external_id, "tenant": tenant_slug, "date": date})
         return {
             "date": date.isoformat(),
             "masters": [{"bookings": self.bookings_by_date.get(date, [])}],
@@ -87,9 +83,7 @@ class FakeSalonClient:
 
 @pytest.fixture
 def tenant() -> Tenant:
-    return Tenant.objects.create(
-        slug="reconcile-salon", name="Reconcile", timezone="Europe/Moscow"
-    )
+    return Tenant.objects.create(slug="reconcile-salon", name="Reconcile", timezone="Europe/Moscow")
 
 
 @pytest.fixture
@@ -101,9 +95,7 @@ def owner(tenant: Tenant) -> BotUser:
         chat_id="chat-owner-1",
         display_name="Вера Владелец",
     )
-    TenantStaff.all_tenants.create(
-        tenant=tenant, bot_user=user, role=TenantStaff.Role.OWNER
-    )
+    TenantStaff.all_tenants.create(tenant=tenant, bot_user=user, role=TenantStaff.Role.OWNER)
     return user
 
 
@@ -137,9 +129,7 @@ class TestComparison:
     def test_booking_live_in_ayla_missing_from_mirror(self, tenant: Tenant) -> None:
         """The DRF-1111 primary case: a creation path that emitted no event."""
         ghost = uuid4()
-        client = FakeSalonClient(
-            {NOW.date() + dt.timedelta(days=2): [_booking(ghost)]}
-        )
+        client = FakeSalonClient({NOW.date() + dt.timedelta(days=2): [_booking(ghost)]})
 
         report = _run(tenant, client)
 
@@ -158,10 +148,7 @@ class TestComparison:
     def test_cancelled_in_ayla_still_live_in_mirror(self, tenant: Tenant) -> None:
         row = _proxy(tenant, status="confirmed")
         client = FakeSalonClient(
-            {
-                NOW.date()
-                + dt.timedelta(days=2): [_booking(row.appointment_id, status="cancelled")]
-            }
+            {NOW.date() + dt.timedelta(days=2): [_booking(row.appointment_id, status="cancelled")]}
         )
 
         report = _run(tenant, client)
@@ -206,8 +193,9 @@ class TestComparison:
         )
         client = FakeSalonClient(
             {
-                NOW.date()
-                + dt.timedelta(days=2): [_booking(done.appointment_id, status="completed")],
+                NOW.date() + dt.timedelta(days=2): [
+                    _booking(done.appointment_id, status="completed")
+                ],
                 # An overnight row bleeding into today from yesterday must not
                 # fire: it started before the window on both sides.
                 NOW.date(): [
@@ -229,8 +217,7 @@ class TestComparison:
         row = _proxy(tenant, status="reschedule_pending")
         client = FakeSalonClient(
             {
-                NOW.date()
-                + dt.timedelta(days=2): [
+                NOW.date() + dt.timedelta(days=2): [
                     _booking(row.appointment_id, status="reschedule_pending")
                 ]
             }
@@ -264,18 +251,14 @@ class TestSweep:
         admin = BotUser.all_tenants.create(
             tenant=tenant, channel="max", channel_user_id="admin-1", chat_id="c-a1"
         )
-        TenantStaff.all_tenants.create(
-            tenant=tenant, bot_user=admin, role=TenantStaff.Role.ADMIN
-        )
+        TenantStaff.all_tenants.create(tenant=tenant, bot_user=admin, role=TenantStaff.Role.ADMIN)
 
         assert mirror_reconcile.find_reconcile_actor(tenant) == admin
 
     def test_deactivated_owner_is_not_the_actor(self, tenant: Tenant, owner: BotUser) -> None:
         from apps.booking import mirror_reconcile
 
-        TenantStaff.all_tenants.filter(bot_user=owner).update(
-            deactivated_at=NOW
-        )
+        TenantStaff.all_tenants.filter(bot_user=owner).update(deactivated_at=NOW)
 
         assert mirror_reconcile.find_reconcile_actor(tenant) is None
 
@@ -317,9 +300,7 @@ class TestSweep:
         from apps.booking import mirror_reconcile
 
         ghost = str(uuid4())
-        client = FakeSalonClient(
-            {NOW.date() + dt.timedelta(days=2): [_booking(ghost)]}
-        )
+        client = FakeSalonClient({NOW.date() + dt.timedelta(days=2): [_booking(ghost)]})
         summary = mirror_reconcile.run_mirror_reconciliation(
             client_factory=lambda: client, now=NOW, page=lambda *a, **k: None
         )
@@ -374,9 +355,7 @@ class TestAlerting:
                 client_factory=lambda: client, now=NOW, page=lambda *a, **k: None
             )
 
-        record = next(
-            r for r in caplog.records if "mirror_reconcile.diverged" in r.message
-        )
+        record = next(r for r in caplog.records if "mirror_reconcile.diverged" in r.message)
         assert tenant.slug in record.message
         assert ghost in caplog.text
 
@@ -403,9 +382,7 @@ class TestAlerting:
         assert len(pages) == 1
         assert pages[0][0][0] == "error"
 
-    def test_changed_fingerprint_does_not_page(
-        self, tenant: Tenant, owner: BotUser
-    ) -> None:
+    def test_changed_fingerprint_does_not_page(self, tenant: Tenant, owner: BotUser) -> None:
         from apps.booking import mirror_reconcile
 
         client, _ = self._client_with_ghost()
@@ -417,9 +394,7 @@ class TestAlerting:
         )
         # Next tick: a DIFFERENT divergence (the first one resolved, a new
         # one appeared) — the two-tick clock starts over.
-        other = FakeSalonClient(
-            {NOW.date() + dt.timedelta(days=3): [_booking(uuid4())]}
-        )
+        other = FakeSalonClient({NOW.date() + dt.timedelta(days=3): [_booking(uuid4())]})
         mirror_reconcile.run_mirror_reconciliation(
             client_factory=lambda: other, now=NOW + dt.timedelta(hours=1), page=page
         )
@@ -455,12 +430,8 @@ class TestCommand:
         self, tenant: Tenant, owner: BotUser, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         ghost = str(uuid4())
-        client = FakeSalonClient(
-            {NOW.date() + dt.timedelta(days=2): [_booking(ghost)]}
-        )
-        monkeypatch.setattr(
-            "apps.booking.mirror_reconcile.get_salon_client", lambda: client
-        )
+        client = FakeSalonClient({NOW.date() + dt.timedelta(days=2): [_booking(ghost)]})
+        monkeypatch.setattr("apps.booking.mirror_reconcile.get_salon_client", lambda: client)
         pages: list[tuple] = []
         monkeypatch.setattr(
             "apps.booking.mirror_reconcile.alert_page",
