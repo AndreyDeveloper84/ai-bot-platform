@@ -8,6 +8,12 @@ name: ci
 # «45m21s against a 45m ceiling» came from — not a slow suite, two runs
 # elbowing each other.
 #
+# (The «45m ceiling» named just above is HISTORY. DRF-1381 raised it to
+# 60 on a measurement of the job itself — see the block over
+# `timeout-minutes` below. The observation recorded here still stands:
+# the duplication was real, and moving it out of the trigger is what
+# fixed it.)
+#
 # Grouping the two events together cannot fix this: whichever run lost the
 # race would report `cancelled` on the PR, which reads as «somebody skipped
 # it» (DRF-1373). The duplication has to die at the trigger instead.
@@ -65,16 +71,109 @@ jobs:
   test:
     name: pytest + ruff + mypy
     runs-on: ubuntu-latest
-    # DRF-1121 bumped this from 15: the new "pytest apps/ (full suite)"
-    # step alone measured ~30 min against Postgres locally (7246 tests).
-    # Flagged for tech-lead confirmation in REPORT_MECHANIZATION.md —
-    # this is a real CI-feedback-latency tradeoff, not a free win.
+    # DRF-1121 bumped this from 15 to 45: the new "pytest apps/ (full
+    # suite)" step alone measured ~30 min against Postgres locally
+    # (7246 tests). Flagged for tech-lead confirmation in
+    # REPORT_MECHANIZATION.md — a real CI-feedback-latency tradeoff,
+    # not a free win.
     #
-    # DRF-1253 left this at 45. The new "pytest tests/ (cross-cutting
-    # suite)" step costs 58s on the runner (it takes ~2.5 min locally on
-    # Windows — the runner is the faster of the two), and the whole job
-    # measured 26m05s with it in. The headroom is real; do not spend it.
-    timeout-minutes: 45
+    # DRF-1253 left it at 45 and recorded: the whole job "measured
+    # 26m05s ... The headroom is real; do not spend it."
+    #
+    # DRF-1381 — THAT CONCLUSION IS DEAD, AND THAT IS THE LESSON.
+    # It was true the day it was written. Nothing re-checked it while
+    # the thing it described changed underneath: the same job now
+    # measures a 42.5 min median, +63% on the 26m05s quoted above. The
+    # sentence stayed confident, so three PRs were debugged for a
+    # failure that was really this line.
+    #
+    # MEASURED 25.08 from the GitHub jobs API. JOB duration
+    # (`started_at` -> `completed_at` of this job), NOT run duration:
+    # a run's `createdAt` -> `updatedAt` includes queue time and this
+    # repo has `success` runs with 89 min of wall-clock. Sample = the
+    # last 60 `ci` runs, all after DRF-1377 de-duplicated the triggers,
+    # so this is the suite's own cost and not two runs elbowing each
+    # other on one runner pool.
+    #
+    #   19 runs finished the job:  min 36.7   median 42.5   max 44.9
+    #   11 runs were killed by THIS ceiling, all at 45.2-45.4 min
+    #
+    #   (19 further runs were cancelled by `concurrency`, not by the
+    #   clock — they stop early by design and carry no duration
+    #   information, so they are excluded rather than averaged in.)
+    #
+    # READ THE SECOND LINE BEFORE TRUSTING THE FIRST. Of the 30 runs
+    # allowed to do the work, 11 — 37% — hit the ceiling. So "max
+    # observed = 44.9" is not the maximum of anything: the distribution
+    # is CENSORED at 45, and its entire upper tail was deleted before
+    # it could be recorded. Sizing a new ceiling off 44.9 would repeat
+    # the DRF-1253 mistake with fresher-looking numbers.
+    #
+    # Fitting a censored (Tobit) normal to all 30 observations — the 19
+    # exact durations plus the 11 "longer than 45" facts — recovers the
+    # distribution this ceiling has been hiding:
+    #
+    #   mu = 44.15 min      sigma = 2.64 min
+    #
+    # Cross-check before using it: that fit predicts 37.4% of runs
+    # exceeding 45 min, against 36.7% observed. It reproduces the
+    # failure it is being used to size away from, so its tail is worth
+    # quoting — p99 = 50.3 min, p99.9 = 52.3 min.
+    #
+    # 45 was therefore never a ceiling over this suite. It sits 0.3
+    # sigma above the median: a coin-flip the suite happens to win
+    # about six times in ten. PRs #1275, #1278 and #1282 each lost it
+    # once overnight on healthy code — 45 wasted minutes and a manual
+    # restart apiece.
+    #
+    # THE NEW NUMBER, AND WHERE IT COMES FROM:
+    #
+    #   p99.9 of the fitted distribution          52.3 min
+    #   + one infrastructure stall                 +7.2 min
+    #       measured, not guessed: the observed
+    #       peak-to-trough spread of the single
+    #       `pytest apps/` step, 1932s .. 2366s
+    #       across these same runs
+    #   = 59.5 min, rounded up to the 5-min grid   60 min
+    #
+    # Not a round number that felt roomy — 60 is where that arithmetic
+    # lands. Under the fit it is ~6 sigma out.
+    #
+    # THE TRADE-OFF, STATED PLAINLY: a job that genuinely hangs now
+    # burns 60 runner-minutes before the clock kills it instead of 45.
+    # That is the price of the ceiling no longer firing on healthy
+    # runs, and it is the right side to err on: a hang is rare, 37% of
+    # honest runs dying was not.
+    #
+    # WHAT THIS DOES NOT DO: it does not make the suite faster, and it
+    # is not meant to. 88% of the job is one step — `pytest apps/`, a
+    # 2266s median — running single-process, with `pytest-xdist` absent
+    # from the dependency tree entirely. Dependency install is NOT the
+    # cost (`uv sync --frozen` is 3s; the uv cache works). Making the
+    # suite faster is its own ticket with its own measurement, and is
+    # deliberately not attempted here.
+    #
+    # WHEN TO RE-MEASURE — do not inherit this block as fact the way
+    # DRF-1253's sentence was inherited. It is sized against a 42.5 min
+    # median and a fitted mu of 44.15 min as of 25.08.2026. If the
+    # median job passes ~50 min, the margin computed above is spent and
+    # this number is stale again. Re-measure from the jobs API. Do not
+    # assume.
+    #
+    # AND HOW THIS NUMBER GETS FALSIFIED. No soak was run to "prove" 60,
+    # deliberately: with p99.9 = 52.3 min a soak can only report the zero
+    # it was built to report — that is staging a test, not running one —
+    # while costing ~700 runner-minutes against PRs queued to merge. The
+    # evidence is collected by OBSERVATION of real traffic instead, which
+    # is also the better sample: real runs carry different diffs, load and
+    # contention. The claim is therefore refutable, and here is the line:
+    #
+    #   IF ANY RUN IS CANCELLED AT THE 60-MIN CEILING WITHIN THE NEXT 20
+    #   RUNS, THIS NUMBER IS WRONG.
+    #
+    # That would mean the fit above understated the tail. Recompute it
+    # from fresh jobs-API data — do not simply nudge the ceiling upward.
+    timeout-minutes: 60
 
     services:
       postgres:
