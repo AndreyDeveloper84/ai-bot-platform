@@ -124,6 +124,7 @@ class TestBehaviorParity:
             new_state="ACTIVE",
             should_close_conversation=False,
             meta={"reply_kind": "booking_card"},
+            confidence=0.42,
         )
         monkeypatch.setattr("apps.skills.registry.dispatch", lambda skill_ctx: direct_result)
         from apps.tenancy.context import tenant_scope
@@ -141,6 +142,7 @@ class TestBehaviorParity:
             "new_state",
             "should_close_conversation",
             "meta",
+            "confidence",
         ):
             assert getattr(via_seam, field) == getattr(direct_result, field)
 
