@@ -76,9 +76,10 @@ class FakeSalonClient:
     def get_day(self, *, actor_external_id: str, tenant_slug: str, date: str | None = None) -> dict:
         self.calls.append({"actor": actor_external_id, "tenant": tenant_slug, "date": date})
         day = dt.date.fromisoformat(date) if date else None
+        bookings = self.bookings_by_date.get(day, []) if day is not None else []
         return {
             "date": date,
-            "masters": [{"bookings": self.bookings_by_date.get(day, [])}],
+            "masters": [{"bookings": bookings}],
         }
 
 
