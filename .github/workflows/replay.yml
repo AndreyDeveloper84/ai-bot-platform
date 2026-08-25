@@ -276,7 +276,7 @@ jobs:
       # never be mistaken for "all fixtures verified".
       - name: Live-path gate (fixtures through the code that answers people)
         run: |
-          "${RUNNER_TEMP}/budget" 180 "live-path gate" \
+          "${RUNNER_TEMP}/budget" 5 "live-path gate" \
             uv run pytest apps/replay/tests/test_live_path_gate.py \
               -v --tb=short --durations=15
 
