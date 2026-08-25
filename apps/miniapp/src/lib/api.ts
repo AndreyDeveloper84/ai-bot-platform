@@ -121,6 +121,13 @@ export interface Service {
   duration_min: number | null;
   is_popular: boolean;
   contraindications: string;
+  /**
+   * DRF-1164 — can the customer book this service at all? False when no
+   * bookable master performs it. Backend-computed (`apps/miniapp_api`
+   * annotates the catalog query); NEVER derived client-side from a
+   * master list, or the answer would differ per screen.
+   */
+  is_bookable: boolean;
 }
 export const fetchServices = (): Promise<{ services: Service[] }> =>
   request("/services", { method: "GET" });

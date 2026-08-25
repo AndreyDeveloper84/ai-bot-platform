@@ -54,6 +54,7 @@ function service(partial: Partial<Service> & Pick<Service, "id" | "name">): Serv
     duration_min: 60,
     is_popular: false,
     contraindications: "",
+    is_bookable: true,
     ...partial,
   };
 }

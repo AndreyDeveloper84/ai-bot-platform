@@ -75,6 +75,7 @@ describe("CustomerWellnessDashboardScreen gating", () => {
     duration_min: 90,
     is_popular: false,
     contraindications: "",
+    is_bookable: true,
   };
 
   it("DEV build, Block 7: renders scorer picks WITH the WHY the source sent", async () => {

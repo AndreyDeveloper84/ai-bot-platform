@@ -78,6 +78,7 @@ import {
   type CatalogBrowseData,
 } from "../lib/customer-booking";
 import { STUB_SURFACES_ENABLED } from "../lib/feature-flags";
+import { UnbookableBadge } from "../components/UnbookableNote";
 import { PilotComingSoonScreen } from "./PilotComingSoonScreen";
 
 // ---------------------------------------------------------------------------
@@ -1041,6 +1042,12 @@ function RecoCard({
         <div id={titleId} className="wellness-dash__reco-title">
           {service.name}
         </div>
+        {!service.is_bookable && (
+          // DRF-1164 — the scorer ranks by fit, not by staffing, so a pick
+          // can be a service nobody performs. Same label as the catalog
+          // card; the tap lands on /catalog/:id, which withholds the CTA.
+          <UnbookableBadge />
+        )}
         <div id={metaId} className="wellness-dash__reco-meta">
           {/* Factual mirror fields only — never a synthesised WHY. */}
           {formatDuration(service.duration_min)}

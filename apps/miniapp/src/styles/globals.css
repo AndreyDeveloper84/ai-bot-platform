@@ -164,6 +164,29 @@ a {
   background: var(--c-surface-2);
 }
 
+/* DRF-1164 — a service in the catalog that nobody can currently perform.
+   The card keeps its place (owner's call: show it, mark it) and stays
+   tappable for the description; it is the booking CTA on the detail
+   screen that goes away. So this is a de-emphasis, not a disabled state:
+   text stays above the 4.5:1 contrast floor and the row keeps its normal
+   hit target. `--c-warning` has a literal fallback because the token is
+   not defined in every theme file (same fallback as .customer-card--at-risk). */
+.service-card--unbookable {
+  border-color: color-mix(in srgb, var(--c-warning, #d97706) 40%, var(--c-divider));
+}
+
+.unbookable-badge {
+  display: inline-block;
+  margin-top: var(--s-1);
+  padding: 2px var(--s-2);
+  border-radius: var(--r-sm, 6px);
+  background: color-mix(in srgb, var(--c-warning, #d97706) 14%, transparent);
+  color: var(--c-warning, #d97706);
+  font-size: var(--font-size-100);
+  font-weight: 600;
+  line-height: 1.4;
+}
+
 .service-card__name {
   font-size: var(--font-size-300);
   font-weight: 600;
