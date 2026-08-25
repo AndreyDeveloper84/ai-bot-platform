@@ -1599,15 +1599,19 @@ def _concierge_turn(
             specialization = ", ".join(requested)
         # DRF-968 — the second half of the ticket. The model may be answering
         # an EARLIER turn: «Кавитация» was answered with «классический
-        # массаж» on the 09.08 pilot, and the answer to «напишите название
-        # услуги» reached this tool as something other than what was typed.
-        # A service the person named in THIS turn outranks the carry-over —
-        # the catalog, not the model and not this line, decides that a
-        # service was named (see ``reground_specialization``).
+        # массаж» on the 09.08 pilot. When the person types a service's NAME,
+        # that name is what gets searched for — the catalog, not the model
+        # and not this line, decides that a name was typed (see
+        # ``reground_specialization``, which is deliberately narrow enough
+        # that a qualifier like «а можно на дому?» cannot trigger it).
         grounded = reground_specialization(
             message_text=message_text, city=city, specialization=specialization
         )
         if grounded != specialization:
+            # ``grounded`` is safe to log and safe to put in ``spec`` below:
+            # the guard only returns the turn when its content words ARE some
+            # service's name, so a turn carrying anything else — a phone
+            # number, an address, a sentence — cannot reach this line.
             logger.info(
                 "orchestrator.concierge.show_masters.regrounded "
                 "model_spec=%r said=%r trace=%s pass=%d",
@@ -1620,7 +1624,9 @@ def _concierge_turn(
             # The model's split came from the same stale read, so it cannot
             # be trusted to describe this turn either. Dropping it costs the
             # DRF-1312 «а маникюра ни у кого нет» line on this one turn and
-            # never states a service the person did not ask for.
+            # never states a service the person did not ask for. The turn is
+            # a single service name by construction here, so there is no
+            # composite request left to half-answer.
             requested = []
         if not has_discovery_criteria(city, specialization):
             # Criteria-less call → continue discovery, never the catalogue

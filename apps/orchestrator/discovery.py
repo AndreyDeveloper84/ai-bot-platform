@@ -128,14 +128,14 @@ SHOW_MASTERS_TOOL_SPEC: dict[str, Any] = {
                 "type": "string",
                 "description": (
                     "Specialization / service substring (optional), e.g. 'маникюр'. "
-                    # DRF-968 — the constraint the platform now enforces
-                    # (``reground_specialization``), said here for the same
-                    # reason DRF-1355 says its own: a tool description should
-                    # be honest about what the call will actually do. It is a
-                    # nudge, not the fix — the fix is the guard.
+                    # DRF-968 — a nudge, not the fix (the fix is
+                    # ``reground_specialization``). Deliberately only the
+                    # positive half: telling the model that the platform will
+                    # substitute its argument reads as permission to stop
+                    # normalizing, and a normalized argument is the better
+                    # input of the two.
                     "Заполняй тем, что клиент назвал в ПОСЛЕДНЕЙ реплике, если "
-                    "он там назвал услугу; услугу из более раннего хода "
-                    "платформа заменит на его собственные слова."
+                    "он там назвал услугу."
                 ),
             },
             # DRF-1312. The user says «массаж и маникюр»; the answer used to be
@@ -1820,11 +1820,37 @@ def requested_services(args: dict[str, Any], specialization: str | None) -> list
     return parts if len(parts) >= 2 else []
 
 
-# The user's own turn, when it has to be handed to the catalog as the search
-# string. Bounded because it is model-free text off the wire: nothing upstream
-# caps how long a person's message is, and ``specialization`` ends up in an
-# ILIKE and in a log line.
-_MAX_REGROUNDED_CHARS = 120
+# How many candidate services are read when deciding whether the turn IS a
+# service name. The answer only ever needs ONE row whose words are exactly the
+# words the person typed, so this is a safety stop on a pathological query,
+# not a page size.
+_SERVICE_NAME_SCAN_LIMIT = 20
+
+# Cap on the turn handed to the catalog as a search string. Applied to the
+# TOKENS, before anything is parsed — ``_query_tokens`` keeps the LAST tokens
+# (Russian puts the informative noun at the end), so cutting the raw string by
+# characters would decide the gates on the tail and then search with the head.
+_MAX_REGROUNDED_TOKENS = 8
+
+
+def _turn_is_this_service_name(name: str, turn_stems: list[str]) -> bool:
+    """True when the person typed THIS service's name and nothing else.
+
+    Both sides go through the SAME parse the search uses, so «Лицо/шея/декольте»
+    and «лицо шея декольте» reduce to one set, prepositions and greetings drop
+    out on both sides, and the comparison is between what the catalog calls the
+    service and what the person called it — not between two spellings.
+
+    Set EQUALITY, not containment, and that is the whole safety of this
+    function. Containment one way («some service name carries every word you
+    typed») is satisfied by «Массаж на дому» for a turn of «на дому», and by
+    «Вечерний макияж» for «на вечер» — a person asking whether the massage
+    they were already discussing can happen at home or in the evening would
+    have their request replaced by a search for house-call services. Equality
+    is not: those turns carry one word of a two-word name, so they are a
+    QUALIFIER on the running request, and a qualifier must not restate it.
+    """
+    return bool(turn_stems) and set(parse_stems(query_stems(name)).stems) == set(turn_stems)
 
 
 def reground_specialization(
@@ -1838,34 +1864,39 @@ def reground_specialization(
     The second half of DRF-968, and the one the loop hid behind. Live pilot,
     09.08: the person typed «Кавитация» and the bot answered «Могу помочь с
     записью на классический массаж» — the intent of an EARLIER turn, still
-    being answered three turns later. The same stickiness put the wrong
+    being answered several turns later. The same stickiness put the wrong
     string into ``show_masters`` when the answer to «напишите услугу» came
     back: «RF-лифтинг — Лицо/шея/декольте» resolves to exactly one service
     when handed to :func:`discover_masters` directly, so the card that came
     back without a ``service_id`` proves the tool call never carried it.
 
-    The rule: **a service the person names in THIS turn outranks whatever the
-    model carried over from the conversation.** Three gates keep that from
-    turning into «the last message always wins», which would break every
-    legitimate carry-over:
+    The rule, deliberately narrow: **when the person types a service's NAME,
+    that is what gets searched for** — whatever the model carried over from
+    earlier in the conversation. Nothing else overrides anything.
 
-    * **The turn must name something.** «а в Москве?», «давай», «подешевле»
-      leave ``parse_stems`` with no service stems, so the criteria HAVE to
-      come from the history — untouched.
-    * **A goal is left to the model.** «хочу расслабиться» names an outcome,
-      not a service; turning that into a search string is exactly the
-      language understanding the model is here for.
-    * **The catalog, not this function, decides the turn named a service.**
-      ``service_coverage`` is the same EXISTS over the same ``_bookable_qs``
-      predicate that produces the cards (AYLA-DEC-0045 / OD-9 — the model is
-      not the authority on what exists, and neither is a stem list). If the
-      person's own words find nobody bookable, the model's reading of the
-      conversation is the better of the two and is kept.
+    Narrow because the tempting wider rule is wrong. «A service the person
+    named this turn wins» sounds the same and is not: on this catalog «на
+    дому» names part of «Массаж на дому» and «вечер» names part of «Вечерний
+    макияж», so «а можно на дому?» — a QUALIFIER on the request already in
+    flight — would throw that request away and search for house calls. Every
+    gate below exists to keep a qualifier from being read as a new request:
 
-    So the override fires only when the person named a service the catalog
-    can serve and the model searched for something else entirely. In that one
-    case the search string becomes the person's own words — which is the
-    string that was measured to resolve.
+    * **The model's string must share nothing with the turn.** If it carries
+      a word the person just said, it is a reading of THIS turn however it was
+      normalized, and there is nothing to fix. Free — no catalog read.
+    * **The turn must name a service rather than a city or an outcome.**
+      ``parse_stems`` empties ``stems`` for both, so «а в Москве?» and «хочу
+      расслабиться» are left to the model.
+    * **The turn must BE a service name**, word for word — see
+      :func:`_turn_is_this_service_name`. This is the gate that separates
+      «Кавитация» from «на дому».
+    * **The catalog decides the name is bookable.** ``service_coverage`` is
+      the same EXISTS over the same ``_bookable_qs`` predicate that produces
+      the cards (AYLA-DEC-0045 / OD-9 — neither the model nor a stem list is
+      the authority on what exists).
+
+    Every gate fails in the same direction: keep what the model asked for. The
+    override is the unusual act and carries the burden of proof.
 
     Returns the specialization to search with; ``None``/empty is passed
     through untouched, because there is nothing to override and
@@ -1878,33 +1909,29 @@ def reground_specialization(
         return specialization
     # ── The free half first. ``query_stems`` reads no catalog at all, and on
     # ── the ordinary turn — the model searching for what was just said — it
-    # ── settles the question, so this whole guard costs zero queries on the
-    # ── path it will take almost every time.
+    # ── settles the question, so this guard costs zero queries on the path it
+    # ── takes almost every time.
     stems = query_stems(said)
     if not stems:
         return specialization
     folded = specialization.casefold()
     if any(stem in folded for stem in stems):
-        # The model's string carries a word the person just said — it is a
-        # reading of THIS turn, however it was normalized. Nothing to fix.
-        #
         # Judged on the RAW stems, before the catalog-aware pass narrows them:
         # a city token or an unattested short word left in the list can only
-        # make «grounded» EASIER to satisfy, i.e. can only keep the model's
-        # answer. Erring that way is the safe direction — the override is the
-        # unusual act and should need the stronger evidence.
+        # make «shares something» EASIER to satisfy, i.e. can only keep the
+        # model's answer — the safe direction.
         return specialization
-    # ── From here on the turn looks like it is about something the model did
-    # ── not search for, and only here does the catalog get asked.
-    parsed = parse_stems(stems)
-    # One line, both of the first two gates the docstring names: ``stems`` is
-    # empty for a turn that named only a city, AND for a goal turn — stems and
-    # goals are mutually exclusive by construction (see ``ParsedQuery``), so
-    # «хочу расслабиться» arrives here with nothing in ``stems`` and is left
-    # to the model exactly as a bare «а в Москве?» is.
+    # ── From here on the turn is about something the model did not search
+    # ── for, and only here does the catalog get asked.
+    parsed = parse_stems(stems[-_MAX_REGROUNDED_TOKENS:])
     if not parsed.stems:
         return specialization
-    said = said[:_MAX_REGROUNDED_CHARS]
+    named = [
+        card.name
+        for card in discover_services(query=said, city=city, limit=_SERVICE_NAME_SCAN_LIMIT)
+    ]
+    if not any(_turn_is_this_service_name(name, parsed.stems) for name in named):
+        return specialization
     available, _missing = service_coverage([said], city=city)
     if not available:
         return specialization

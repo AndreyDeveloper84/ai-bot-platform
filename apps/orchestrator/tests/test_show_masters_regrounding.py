@@ -1,4 +1,4 @@
-"""Свежая реплика перебивает залипший интент (DRF-968, вторая половина).
+"""Человек написал название услуги — ищем её, а не прошлый интент (DRF-968).
 
 Живой контур, 09.08.2026 (приёмка DRF-962, SHA ``699639c``):
 
@@ -11,15 +11,20 @@
 ``service_id``. Значит в tool-call уехала не эта строка, а интент предыдущего
 хода.
 
-Чинится не просьбой к модели, а стражем платформы: услуга, названная В ЭТОМ
-ходе, старше того, что модель принесла из истории — и решает это КАТАЛОГ
-(AYLA-DEC-0045 / OD-9), а не список стемов и не сама модель.
+Правило намеренно узкое, и половина этого файла — про то, почему широкое было
+бы хуже болезни. «Услуга, названная в этом ходе, старше переноса из истории»
+звучит правильно и ломается на живом каталоге: «на дому» — часть названия
+«Массаж на дому», «вечер» — часть «Макияж вечерний». Человек, спросивший «а
+можно на дому?» про уже обсуждаемый массаж, получил бы вместо ответа поиск по
+выездным услугам любых категорий. Поэтому страж срабатывает только когда
+реплика — это НАЗВАНИЕ услуги слово в слово, и все ворота падают в одну
+сторону: оставить то, что просила модель.
 
 Имена услуг в фикстуре несут стем в том же регистре, в каком его выделяет
-парсер («кавитац» внутри «Ультразвуковая кавитация»). Это не косметика: ILIKE
-на SQLite складывает регистр только для ASCII, и суита с «Кавитация» в имени
-проходила бы на CI и молчала бы локально — ровно тот класс проверки, который
-неотличим от проходящей.
+парсер («кавитац» внутри «Ультразвуковая кавитация», «дому» внутри «Массаж на
+дому»). Это не косметика: ILIKE на SQLite складывает регистр только для ASCII,
+и суита с «Кавитация» в имени проходила бы на CI и молчала бы локально —
+ровно тот класс проверки, который неотличим от проходящей.
 """
 
 from __future__ import annotations
@@ -41,8 +46,8 @@ pytestmark = pytest.mark.django_db
 
 TRACE_ID = str(uuid.uuid4())
 
-# Ровно те две строки из живого диалога.
-SAID = "Кавитация"
+# Название услуги, набранное человеком, и интент, залипший с прошлого хода.
+SAID = "Ультразвуковая кавитация"
 STUCK = "классический массаж"
 
 
@@ -50,8 +55,8 @@ def _ts() -> datetime:
     return datetime(2026, 8, 9, 12, 0, tzinfo=timezone.utc)
 
 
-def _master(tenant: Tenant, name: str, service_name: str, slug: str) -> CatalogMaster:
-    master = CatalogMaster.all_tenants.create(
+def _master(tenant: Tenant, name: str) -> CatalogMaster:
+    return CatalogMaster.all_tenants.create(
         tenant=tenant,
         name=name,
         specialization="",
@@ -59,51 +64,130 @@ def _master(tenant: Tenant, name: str, service_name: str, slug: str) -> CatalogM
         invite_status=CatalogMaster.InviteStatus.ACCEPTED,
         external_updated_at=_ts(),
     )
+
+
+def _service(tenant: Tenant, master: CatalogMaster, name: str, slug: str) -> CatalogService:
     service = CatalogService.all_tenants.create(
         tenant=tenant,
         slug=slug,
-        name=service_name,
+        name=name,
         is_active=True,
         ayla_service_id=uuid4(),
         external_updated_at=_ts(),
     )
     MasterService.all_tenants.create(tenant=tenant, master=master, service=service)
-    return master
+    return service
 
 
 @pytest.fixture
 def contour() -> Tenant:
-    """Пилотный контур в миниатюре: кавитация и массаж у РАЗНЫХ мастеров.
+    """Пилотный контур в миниатюре, включая обе ловушки.
 
-    Разные — в этом весь смысл. Будь обе услуги у одного человека, карточка
+    Кавитация и массаж — у РАЗНЫХ мастеров: будь обе услуги у одного, карточка
     вернулась бы та же самая при любой из двух строк, и проверка не отличала
     бы починку от её отсутствия.
+
+    «Массаж на дому» и «Макияж вечерний» — не декорация. Это те два названия,
+    из-за которых уточняющий ход («а можно на дому?», «можно на вечер?») несёт
+    слово, которое каталог действительно находит. Без них тест на ложное
+    срабатывание проходил бы вакуумно — на данных, где ошибка физически
+    невозможна.
     """
     tenant = Tenant.objects.create(slug="salon-penza-968", name="SPAtrium", city="Пенза")
-    _master(tenant, "Тихонова Ольга", "Ультразвуковая кавитация", "kav")
-    _master(tenant, "Архипкин Денис", "Классический массаж", "klass")
+    olga = _master(tenant, "Тихонова Ольга")
+    denis = _master(tenant, "Архипкин Денис")
+    _service(tenant, olga, "Ультразвуковая кавитация", "kav")
+    _service(tenant, olga, "Макияж вечерний", "makiyazh")
+    _service(tenant, denis, "Классический массаж", "klass")
+    _service(tenant, denis, "Массаж на дому", "vyezd")
     return tenant
 
 
 # ---------------------------------------------------------------------------
-# Само правило
+# Когда страж срабатывает
 # ---------------------------------------------------------------------------
 
 
-class TestTheRule:
-    def test_a_service_named_this_turn_beats_the_carry_over(self, contour: Tenant) -> None:
-        """Тот самый ход: человек сказал «Кавитация», модель искала массаж."""
+class TestTheNameWins:
+    def test_a_typed_service_name_beats_the_carry_over(self, contour: Tenant) -> None:
+        """Ход из тикета: человек написал название, модель искала прошлое."""
         assert (
             reground_specialization(message_text=SAID, city="Пенза", specialization=STUCK) == SAID
+        )
+
+    def test_the_name_is_recognised_through_inflection(self, contour: Tenant) -> None:
+        """«Ультразвуковую кавитацию» — то же название, другой падеж.
+
+        Стем режется до шести символов, и обе стороны идут через один и тот же
+        разбор, так что падеж не должен решать, попадёт человек в запись или
+        нет.
+        """
+        assert (
+            reground_specialization(
+                message_text="Ультразвуковую кавитацию", city="Пенза", specialization=STUCK
+            )
+            == "Ультразвуковую кавитацию"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Когда страж обязан промолчать
+# ---------------------------------------------------------------------------
+
+
+class TestTheCarryOverSurvives:
+    def test_a_qualifier_does_not_replace_the_request(self, contour: Tenant) -> None:
+        """«а можно на дому?» — уточнение к уже идущему запросу.
+
+        «дому» каталог находит («Массаж на дому»), и правило вида «названа
+        услуга — значит новый запрос» здесь бы сработало: человек, спросивший
+        про выезд к уже обсуждаемому классическому массажу, получил бы вместо
+        ответа поиск по выездным услугам любых категорий. Реплика несёт одно
+        слово из двухсловного названия, то есть уточняет запрос, а не называет
+        новый.
+        """
+        assert (
+            reground_specialization(
+                message_text="а можно на дому?", city="Пенза", specialization=STUCK
+            )
+            == STUCK
+        )
+
+    def test_a_qualifier_without_a_leading_particle_is_also_kept(self, contour: Tenant) -> None:
+        """«можно на вечер?» — та же ловушка через «Макияж вечерний».
+
+        Отдельным случаем, потому что здесь нет вводного «а»: правило не имеет
+        права держаться на том, что уточнение начинается с частицы.
+        """
+        assert (
+            reground_specialization(
+                message_text="можно на вечер?", city="Пенза", specialization=STUCK
+            )
+            == STUCK
+        )
+
+    def test_part_of_a_name_is_not_the_name(self, contour: Tenant) -> None:
+        """«кавитация» без «ультразвуковая» — заявленная консервативность.
+
+        Слово однозначно указывает на одну услугу контура, и всё же страж
+        молчит. Это не пробел, а цена ворот, которые держат два теста выше:
+        отличить головное слово названия от его определения этот слой не
+        может, а ошибиться в эту сторону — оставить то, что просила модель.
+        """
+        assert (
+            reground_specialization(message_text="кавитация", city="Пенза", specialization=STUCK)
+            == STUCK
         )
 
     def test_the_models_own_reading_of_this_turn_is_kept(self, contour: Tenant) -> None:
         """«кавитац» есть в строке модели — это прочтение ЭТОГО хода, не старого."""
         assert (
             reground_specialization(
-                message_text="хочу кавитацию", city="Пенза", specialization="кавитация"
+                message_text="хочу ультразвуковую кавитацию",
+                city="Пенза",
+                specialization="ультразвуковая кавитация",
             )
-            == "кавитация"
+            == "ультразвуковая кавитация"
         )
 
     def test_a_turn_that_names_no_service_leaves_the_criteria_alone(self, contour: Tenant) -> None:
@@ -114,11 +198,7 @@ class TestTheRule:
         )
 
     def test_words_the_catalog_cannot_serve_do_not_override(self, contour: Tenant) -> None:
-        """Страж от обратной ошибки: «а подешевле?» — длинное слово, но не услуга.
-
-        Без каталога в роли судьи правило превратилось бы в «последняя реплика
-        всегда права» и снесло бы каждый законный перенос критериев.
-        """
+        """«а подешевле?» — длинное слово, но ни одна услуга им не называется."""
         assert (
             reground_specialization(message_text="а подешевле?", city="Пенза", specialization=STUCK)
             == STUCK
@@ -195,27 +275,51 @@ class TestTheLivePath:
         def spy(**kwargs):
             seen.update(kwargs)
             cards = real(**kwargs)
-            seen["cards"] = [card.name for card in cards]
+            seen["cards"] = sorted({card.name for card in cards})
             return cards
 
         monkeypatch.setattr(concierge_mod, "discover_masters", spy)
 
         bot_user, conversation = _bot_user_and_conversation()
-        concierge_mod.generate_concierge_reply(
+        reply = concierge_mod.generate_concierge_reply(
             turn, bot_user=bot_user, conversation=conversation, trace_id=TRACE_ID
         )
+        seen["reply"] = reply.text
         return seen
 
     def test_the_catalog_is_searched_for_what_the_person_just_said(
         self, settings, monkeypatch, contour
     ) -> None:
         """Отрицание «массажиста не показали» прошло бы и на пустом ответе,
-        поэтому рядом стоит положительное: показан тот, кто делает кавитацию —
+        поэтому рядом стоит положительное: показана та, кто делает кавитацию —
         на тех же данных."""
         settings.BOOKING_VIA_AYLA_REST = True
         seen = self._run(monkeypatch, SAID, {"city": "Пенза", "specialization": STUCK})
 
         assert seen["specialization"] == SAID
+        assert seen["cards"] == ["Тихонова Ольга"]
+
+    def test_the_stale_service_list_is_dropped_with_the_stale_intent(
+        self, settings, monkeypatch, contour
+    ) -> None:
+        """`services` модели пришёл из того же залипшего чтения.
+
+        Оставить его — значит сказать человеку, набравшему название услуги,
+        «а маникюра у наших мастеров нет», хотя маникюра он не просил.
+        """
+        settings.BOOKING_VIA_AYLA_REST = True
+        seen = self._run(
+            monkeypatch,
+            SAID,
+            {
+                "city": "Пенза",
+                "specialization": STUCK,
+                "services": ["классический массаж", "маникюр"],
+            },
+        )
+
+        assert seen["specialization"] == SAID
+        assert "маникюр" not in seen["reply"]
         assert seen["cards"] == ["Тихонова Ольга"]
 
     def test_a_grounded_call_reaches_the_catalog_untouched(
