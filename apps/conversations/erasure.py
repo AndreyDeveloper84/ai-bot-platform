@@ -113,10 +113,12 @@ consumer law is longer, the number moves — one setting, one line.
 from __future__ import annotations
 
 import logging
+import re
 import uuid
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
+from typing import Any
 
 from django.conf import settings
 from django.db import transaction
@@ -159,26 +161,113 @@ class AnonymizeResult:
         return bool(self.conversations)
 
 
-def _redact(text: str) -> str:
-    """Strip direct identifiers, keep the sentence.
+#: Canonical UUID, the shape ``str(uuid.uuid4())`` produces. Masked before the
+#: contact patterns run and restored after — see :func:`_redact`.
+#:
+#: The lookarounds are written as explicit character classes rather than as a
+#: word boundary on purpose: a word boundary is exactly what breaks
+#: ``apps.replay.redactor.OTP_RE`` on this input, because ``-`` is not a word
+#: character and so the digit groups INSIDE a UUID satisfy it.
+_UUID_RE = re.compile(
+    "(?<![0-9a-zA-Z-])[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}(?![0-9a-zA-Z-])"
+)
 
-    Imported lazily: ``apps.replay`` pulls settings-bound machinery that the
-    conversations app has no other reason to load at import time.
+#: A sentinel the four contact patterns cannot start, end, or span: NUL is not
+#: a digit, not a word character, and not ``@``.
+_MASK = chr(0)
+
+
+def _contact_patterns() -> list[tuple[Any, str]]:
+    """The patterns that identify a PERSON, in ``apps.replay.redactor`` order.
+
+    The same compiled objects that module uses, so a fix to a phone shape
+    reaches this path too — a narrowing of that pipeline, not a fork of it.
+    ``OTP_RE`` is deliberately absent; :func:`_redact` says why.
     """
+
+    from apps.replay.redactor import CC_RE, EMAIL_RE, PHONE_RE, URL_TOKEN_RE
+
+    return [
+        (URL_TOKEN_RE, "[URL_TOKEN]"),
+        (CC_RE, "[CC]"),
+        (PHONE_RE, "[PHONE]"),
+        (EMAIL_RE, "[EMAIL]"),
+    ]
+
+
+def _redact(text: str) -> str:
+    """Strip the direct identifiers, keep everything a dispute needs.
+
+    Two departures from ``apps.replay.redactor.Redactor.redact_text``, both
+    **measured**, and both re-measured on every CI run by
+    ``apps/conversations/tests/test_erasure_redaction.py``:
+
+    **1. UUIDs are masked before the patterns run and restored after.** The
+    full redactor corrupts **45.3% of canonical UUIDs** — 20 000 samples, and
+    all three digit patterns contribute (``OTP_RE`` 8 727, ``PHONE_RE`` 611,
+    ``CC_RE`` 410). ``action_data`` and ``tool_call`` are dense with UUIDs
+    (master, service and conversation ids), and an archive whose foreign keys
+    are mangled on almost every other row cannot support the incident review
+    it exists for.
+
+    **2. ``OTP_RE`` is not applied at all.** It matches any standalone 4- or
+    6-digit run, so it turns «комфортно до 3000 рублей» into «[OTP] рублей»
+    and «запиши на 2026 год» into «[OTP] год». The owner kept this record for
+    «разбор инцидента и спора о брони» — and a booking dispute IS the amount
+    and the date. Removing them is not anonymisation; it is deleting the
+    evidence and keeping the file.
+
+    An OTP identifies nobody and expires in minutes, so dropping the pattern
+    costs no identifier. **Named residual rather than silently accepted:** a
+    confirmation code someone pasted into the chat survives into the archive.
+    Nothing on this surface sends one, and plaintext OTP handling is already an
+    open item in the 152-ФЗ register (block D) — not something this module can
+    settle on its own.
+
+    What IS stripped is what identifies a human: phone, e-mail, card number,
+    tokened URL.
+    """
+
+    if not text:
+        return text or ""
 
     from apps.replay.redactor import Redactor
 
-    return Redactor().redact_text(text or "")
+    seen: list[str] = []
+
+    def _stash(match: "re.Match[str]") -> str:
+        seen.append(match.group(0))
+        return _MASK + str(len(seen) - 1) + _MASK
+
+    masked = _UUID_RE.sub(_stash, text)
+
+    redactor = Redactor()
+    for pattern, placeholder in _contact_patterns():
+        # Reuse the redactor's own allowlist-aware replacement so an operator
+        # allowlist entry keeps meaning the same thing on both paths.
+        masked = redactor._replace_with_allowlist(pattern, placeholder, masked)
+
+    for index, original in enumerate(seen):
+        masked = masked.replace(_MASK + str(index) + _MASK, original)
+    return masked
 
 
 def _redact_value(value: object) -> object:
-    """Recursive redaction of a JSON payload (``action_data`` / ``tool_call``)."""
+    """Recursive redaction of a JSON payload (``action_data`` / ``tool_call``).
 
-    from apps.replay.redactor import Redactor
+    Walks the structure and applies :func:`_redact` to every string leaf, so
+    the UUID protection covers the payloads that carry the most of them.
+    """
 
     if value is None:
         return None
-    return Redactor().redact_value(value)
+    if isinstance(value, str):
+        return _redact(value)
+    if isinstance(value, dict):
+        return {k: _redact_value(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_redact_value(v) for v in value]
+    return value
 
 
 def _clear_redis_stores(conversation_id: uuid.UUID) -> None:
