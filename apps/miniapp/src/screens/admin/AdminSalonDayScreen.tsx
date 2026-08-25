@@ -133,8 +133,32 @@ function VisitRow({
         textDecoration: released ? "line-through" : "none",
       }}
     >
-      <span style={{ fontVariantNumeric: "tabular-nums", minWidth: "3.5em" }}>
-        {formatTime(visit.start_at, timeZone)}
+      {/* Start time, and under it the length of the visit — the mockup's
+       * time column («09:00» / «60 мин»). `duration_min` has always been
+       * in the /salon/day payload (admin-api.ts, `SalonDayVisit`); until
+       * now the screen dropped it, so the front desk could see when a
+       * visit starts but not how long the master is busy. Guarded on
+       * `> 0` so a zero-length row renders the time alone rather than
+       * «0 мин». */}
+      <span
+        style={{
+          display: "flex",
+          flexDirection: "column",
+          fontVariantNumeric: "tabular-nums",
+          minWidth: "3.5em",
+        }}
+      >
+        <span>{formatTime(visit.start_at, timeZone)}</span>
+        {visit.duration_min > 0 && (
+          <span
+            style={{
+              fontSize: "var(--font-size-100)",
+              color: "var(--c-text-secondary)",
+            }}
+          >
+            {`${visit.duration_min} мин`}
+          </span>
+        )}
       </span>
       <span style={{ flex: 1 }}>
         <span style={{ fontWeight: 600 }}>{clientLabel(visit)}</span>
