@@ -16,6 +16,7 @@ The real Ayla client is a skeleton, so flag-ON behaviour is exercised via
 
 from __future__ import annotations
 
+from decimal import Decimal
 from typing import Any
 
 import pytest
@@ -80,6 +81,7 @@ class FakeAylaBooking:
         self.create_response: AylaBookingRecord | None = None
         self.cancel_response: bool = True
         self.raise_exc: Exception | None = None
+        self.edges_rows: list[dict[str, Any]] = []
         # capture
         self.calls: list[dict[str, Any]] = []
 
@@ -191,6 +193,12 @@ class FakeAylaBooking:
     def get_user_appointments(self, *, external_user_id: str) -> list[AylaUserRecord]:
         self._maybe_raise()
         return list(self.user_records)
+
+    def get_specialist_service_edges(
+        self, *, specialist_id: str, service_id: str
+    ) -> list[dict[str, Any]]:
+        self._maybe_raise()
+        return list(self.edges_rows)
 
 
 def _adapter(fake: FakeAylaBooking, *, client_id: str = "client-uuid") -> AylaYClientsAdapter:
@@ -463,6 +471,48 @@ class TestErrorTranslation:
         fake.raise_exc = NotImplementedError("pending #1016")
         with pytest.raises(NotImplementedError):
             _adapter(fake).get_services()
+
+
+# ─── DRF-1067: edge price for the quote ──────────────────────────────────────
+
+
+class TestSpecialistServicePrice:
+    """``AylaYClientsAdapter.get_specialist_service_price`` (DRF-1067).
+
+    The quote shown to the customer must be the ``SpecialistService.price``
+    of the chosen master+service pair — the amount Ayla stamps onto the new
+    appointment — not the catalog mirror's ``base_price``.
+    """
+
+    def test_returns_edge_price_as_decimal(self) -> None:
+        fake = FakeAylaBooking()
+        fake.edges_rows = [{"specialist": "m1", "salon_service": "s1", "price": "2500.00"}]
+        price = _adapter(fake).get_specialist_service_price(staff_id="m1", service_id="s1")
+        assert price == Decimal("2500.00")
+
+    def test_numeric_wire_price_accepted(self) -> None:
+        # The records views bypass DRF serializers, so a JSON number can
+        # arrive where the schema declares a string — accept both.
+        fake = FakeAylaBooking()
+        fake.edges_rows = [{"specialist": "m1", "salon_service": "s1", "price": 2500.0}]
+        price = _adapter(fake).get_specialist_service_price(staff_id="m1", service_id="s1")
+        assert price == Decimal("2500.0")
+
+    def test_no_edge_returns_none(self) -> None:
+        fake = FakeAylaBooking()
+        assert _adapter(fake).get_specialist_service_price(staff_id="m1", service_id="s1") is None
+
+    def test_unparseable_price_returns_none(self) -> None:
+        # ``None`` (absent), never ``0`` — a silent zero would quote "free".
+        fake = FakeAylaBooking()
+        fake.edges_rows = [{"specialist": "m1", "salon_service": "s1", "price": "not-a-price"}]
+        assert _adapter(fake).get_specialist_service_price(staff_id="m1", service_id="s1") is None
+
+    def test_outage_translated(self) -> None:
+        fake = FakeAylaBooking()
+        fake.raise_exc = BookingUnavailableError("circuit_open")
+        with pytest.raises(YClientsUnavailableError):
+            _adapter(fake).get_specialist_service_price(staff_id="m1", service_id="s1")
 
 
 # ─── tool drop-in (flag ON, adapter as client) ──────────────────────────────

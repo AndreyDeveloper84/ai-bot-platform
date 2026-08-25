@@ -1159,6 +1159,9 @@ def _dispatch_tool(
             arguments=arguments,
             allowed_service_ids=allowed_service_ids,
             service_lookup=service_lookup,
+            # DRF-1067: the provider resolves the master+service edge price
+            # when the LLM passes master_id (Ayla path only).
+            client=yclients,
         )
         if result.error == "price_invalid_service_id":
             return result, "price_invalid_service_id"

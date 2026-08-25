@@ -17,8 +17,10 @@ Seven LLM-callable functions:
   reschedule).
 * :func:`show_my_bookings` — list the bot_user's upcoming bookings.
 * :func:`calc_price` (B6 / DRF-842) — quote a service price with an
-  optional promo code. Read-only; never touches YClients (price data
-  is mirrored on :class:`apps.catalog.models.CatalogService`).
+  optional promo code. Prices the catalog mirror
+  (:class:`apps.catalog.models.CatalogService`); on the Ayla path with a
+  chosen master it reads the master+service edge price instead (DRF-1067)
+  — a read-only call, never a write.
 
 Each tool spec follows the OpenAI ``{name, description, parameters}``
 shape (L1 canonical form, same as
@@ -306,7 +308,10 @@ CALC_PRICE_TOOL_SPEC: dict[str, Any] = {
         "promo_code ONLY if the client explicitly named one — never "
         "invent. service_id MUST come from the bot's known catalog "
         "(prior show_masters / show_slots, or the visible service "
-        "list); fabricated IDs trigger a handoff."
+        "list); fabricated IDs trigger a handoff. When the client has "
+        "already chosen a specific master, pass that master's id as "
+        "master_id so the quote reflects that master's individual "
+        "price — the amount the booking will actually be created at."
     ),
     "parameters": {
         "type": "object",
@@ -323,6 +328,15 @@ CALC_PRICE_TOOL_SPEC: dict[str, Any] = {
                 "description": (
                     "Promo code the client mentioned. Optional. Pass "
                     "only when the client explicitly named one."
+                ),
+            },
+            "master_id": {
+                "type": ["integer", "string"],
+                "description": (
+                    "Master id the client already chose. Optional. Pass "
+                    "only when a specific master is chosen — the quote "
+                    "then uses that master's individual price for the "
+                    "service instead of the base catalog price."
                 ),
             },
         },
@@ -2826,6 +2840,7 @@ def calc_price(
     arguments: dict[str, Any],
     allowed_service_ids: AbstractSet[int | str],
     service_lookup: dict[Any, str],
+    client: Any = None,
 ) -> BookingToolResult:
     """Quote a service price, optionally applying a promo code.
 
@@ -2833,7 +2848,7 @@ def calc_price(
       tenant: current :class:`apps.tenancy.models.Tenant`. Used to
               scope both the catalog lookup (for ``price_from``) and
               the promo lookup.
-      arguments: LLM-supplied ``{service_id, promo_code?}``.
+      arguments: LLM-supplied ``{service_id, promo_code?, master_id?}``.
       allowed_service_ids: pre-fetched set of valid YClients service
                            ids on this tenant. An LLM-emitted id not
                            in this set returns
@@ -2843,6 +2858,19 @@ def calc_price(
       service_lookup: id → display name map, used to render the reply
                       and to fall back when the catalog row is missing
                       a name.
+      client: the booking provider (flag ON: the Ayla adapter). Optional;
+              consulted only when ``master_id`` is supplied on the Ayla
+              path — see the DRF-1067 note below.
+
+    DRF-1067 — when a specific master is chosen (``master_id`` present)
+    on the Ayla path, the quote prices the master+service EDGE
+    (``SpecialistService.price`` — the amount Ayla stamps onto the new
+    appointment), not the catalog mirror's ``base_price``. The two
+    diverge the moment a salon sets per-master prices, and quoting the
+    base would show the customer one price and book them at another.
+    When the edge price cannot be resolved (no active edge, lookup
+    failure, flag OFF, no master chosen) the mirror's base price is
+    quoted — the behaviour before this change.
 
     Returns a :class:`BookingToolResult` with ``price`` populated on
     success. ``error="price_invalid_service_id"`` triggers a handoff
@@ -2855,6 +2883,7 @@ def calc_price(
     service_id = _coerce_id(arguments.get("service_id"))
     raw_promo = arguments.get("promo_code")
     promo_code = str(raw_promo).strip() if raw_promo else ""
+    master_id = _coerce_id(arguments.get("master_id"))
 
     tenant_id = str(getattr(tenant, "id", ""))
 
@@ -2926,6 +2955,15 @@ def calc_price(
 
     service_name = catalog_row.name or service_lookup.get(service_id, "")
     base_price: Decimal | None = catalog_row.price_from
+
+    # DRF-1067: with a chosen master on the Ayla path, price the
+    # master+service edge — the amount the booking is actually created
+    # at. ``service_id`` is the Ayla UUID here (``_coerce_id`` under
+    # flag ON), the same key the edge lookup is scoped by.
+    if master_id is not None and client is not None and _booking_via_ayla():
+        edge_price = _edge_price_for_quote(client, master_id=master_id, service_id=service_id)
+        if edge_price is not None:
+            base_price = edge_price
 
     # ── No promo case ──────────────────────────────────────────────
     if not promo_code:
@@ -3006,6 +3044,32 @@ def calc_price(
         },
     )
     return BookingToolResult(text=text, price=result)
+
+
+def _edge_price_for_quote(
+    client: Any,
+    *,
+    master_id: int | str,
+    service_id: int | str | None,
+) -> Decimal | None:
+    """Edge price for the quote, or ``None`` when it cannot be established.
+
+    DRF-1067. ``None`` covers every failure mode — no active edge for the
+    pair, a rejected lookup (e.g. a hallucinated master id), an outage —
+    because the honest degradation in all of them is the same: quote the
+    mirror's base price, exactly as before this change. A quote that
+    crashes on a price read would be worse than one that falls back.
+    """
+    try:
+        return client.get_specialist_service_price(staff_id=master_id, service_id=service_id)
+    except (YClientsUnavailableError, YClientsAPIError) as exc:
+        logger.warning(
+            "booking.calc_price.edge_price_failed master_id=%s service_id=%s err=%s",
+            master_id,
+            service_id,
+            exc,
+        )
+        return None
 
 
 def _format_price_text(result: CalcPriceResult) -> str:

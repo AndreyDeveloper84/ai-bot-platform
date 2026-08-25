@@ -98,6 +98,11 @@ class FakeAyla:
     def get_user_appointments(self, *, external_user_id: str) -> list[Any]:
         return []
 
+    def get_specialist_service_edges(
+        self, *, specialist_id: str, service_id: str
+    ) -> list[dict[str, Any]]:
+        return []
+
     def get_available_times(
         self, *, specialist_id: str, date: str, service_id: str | None = None
     ) -> list[AylaSlot]:
