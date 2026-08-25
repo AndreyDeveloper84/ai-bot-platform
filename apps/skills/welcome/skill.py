@@ -19,10 +19,12 @@ owner picked which five survive:
 Removed from the first screen — NOT from the bot:
 
   * 🍽 Дневник еды — a photo still reaches ``FoodScannerSkill`` (it
-                     claims attachment-only turns), food-shaped free
+                     claims attachment-only turns) and food-shaped free
                      text still reaches ``FoodClarifySkill``
-                     (``looks_like_food_drink``), and the S5 grid still
-                     opens the Mini App scanner.
+                     (``looks_like_food_drink``). The S5 grid no longer
+                     opens the Mini App scanner — see
+                     :func:`_s5_first_action_buttons`; sending a photo
+                     to the bot is the path that works.
   * 💧 Вода        — free text («стакан», «250 мл») still reaches the
                      water skill; S5 still offers «+ стакан воды».
   * ❓ Задать вопрос — the FAQ skill claims question-shaped free text on
@@ -169,6 +171,13 @@ MINIAPP_ROUTES: dict[str, str] = {
     "open_profile": "customer/profile",
     "open_catalog": "customer/catalog",
     "open_visits": "customer/records",
+    # No welcome button points here any more — the S5 grid dropped
+    # «📸 Сфотографировать еду» because the screen it opens fails at the
+    # moment of use (``guardProd`` → ``StubNotWiredError`` in
+    # ``apps/miniapp/src/lib/food-scanner.ts``). The row stays: the
+    # screens are being prepared, the button comes back, and a table
+    # entry is not something a person can tap. See
+    # :func:`_s5_first_action_buttons`.
     "open_food_scan": "customer/food-scanner/capture",
     "open_water_add_250": "customer/wellness",
     "open_goal_select": "customer/goal-select",
@@ -274,7 +283,37 @@ S3_POSITIONING_TEXT = (
 # interaction mode». Текст читается и без клавиатуры — в zero-config
 # конфигурации кнопок на этом экране не остаётся вовсе, и это допустимо:
 # AC-4.1 «Quick Actions are optional».
-S5_PROMPT_TEXT = "С чего хочешь начать? Напиши своими словами, что сейчас нужно, — я пойму."
+#
+# ── Указатель на фото еды ──────────────────────────────────────────────
+#
+# Вторая фраза дописана вместе со снятием кнопки «📸 Сфотографировать
+# еду» (DRF-1417, см. :func:`_s5_first_action_buttons`). После снятия
+# отправка фото боту — ЕДИНСТВЕННЫЙ вход в контур еды: вход рабочий, но
+# невидимый. Сам тикет предупреждал, что снять слаг «в одиночку не
+# годится: он убирает указатель, не давая замены». Эта строка и есть
+# замена — временная, до возвращения кнопки.
+#
+# Границы формулировки (решение владельца):
+#   * это УКАЗАТЕЛЬ, а не обещание разбора — сказано, что фото можно
+#     прислать, и не сказано, что бот с ним сделает; остальное покажет
+#     сам ход. Ср. :data:`FOOD_PROMPT`, который обещает «распознаю и
+#     запишу в дневник» — там это уместно, человек уже нажал;
+#   * экранов не обещаем: дневник в Mini App не работает, эндпоинтов
+#     ``customer/food/*`` в miniapp_api не существует;
+#   * это не воскрешение кнопки — кнопку владелец снял и готовит экраны.
+#
+# Почему здесь, а не в :data:`S3_POSITIONING_TEXT`: S3 рендерится
+# УСЛОВНО (``show_s3`` в :meth:`WelcomeSkill._render_consent_granted` —
+# пропускается, когда человек уже раскрывал S1-fold или S2a), и указатель
+# там увидел бы не каждый. S5 рендерится всегда, читается и без
+# клавиатуры, и стоит ровно там, где человеку сказали «напиши своими
+# словами» — и на том самом экране, где была кнопка.
+#
+# Сторожит ``tests/test_skill.py::TestFoodPhotoPointer``.
+S5_PROMPT_TEXT = (
+    "С чего хочешь начать? Напиши своими словами, что сейчас нужно, — я пойму. "
+    "А фото еды можно прислать прямо сюда."
+)
 
 # ── DRF-1202 — ровно три состояния приветствия ─────────────────────────
 #
@@ -836,9 +875,44 @@ def _s2a_details_buttons() -> list[dict[str, str]]:
 def _s5_first_action_buttons() -> list[dict[str, str]]:
     """S5 first-action grid (Tau §8 Variant A — Grid 2×2 + exit valve).
 
-    Five buttons total, all routed к Mini App start_params. DRF-1199 removed
-    the sixth («📝 Начать анкету») — BOT-001 §13.3 forbids a standalone
+    Four buttons total, all routed к Mini App start_params. DRF-1199
+    removed «📝 Начать анкету» — BOT-001 §13.3 forbids a standalone
     «Анкета» button on First Contact.
+
+    ### «📸 Сфотографировать еду» снята
+
+    Кнопка открывала ``customer/food-scanner/capture``. Экран
+    открывается, выглядит полностью рабочим и **падает в момент
+    использования**: все четыре эндпоинта еды закрыты ``guardProd`` в
+    ``apps/miniapp/src/lib/food-scanner.ts``, который вне DEV бросает
+    ``StubNotWiredError``.
+
+    Падение технически поймано (``FoodScannerProcessingScreen``), но
+    ловится в общую ветку — человек, уже выбравший приём пищи и
+    сделавший фото, получает «Сервис недоступен · Попробуй через
+    минуту». Через минуту не заработает: не подключено вообще. Обе
+    предложенные там кнопки ведут по кругу — «Переснять» повторяет
+    ``POST /food/scan``, «Написать вручную» упирается в тот же guard на
+    ``POST /food/log``. Это не «кнопка ведёт в заглушку» — это кнопка,
+    которая с первого экрана приводит человека в тупик и там ему врёт.
+
+    Решение владельца: **снять кнопку**. Экраны готовятся, подключение
+    эндпоинтов — отдельная работа; до тех пор указателя на поломку в
+    стартовой сетке быть не должно.
+
+    Дневник еды при этом никуда не делся, и это важно: **отправка фото
+    боту — рабочий путь**. ``FoodScannerSkill`` сам забирает ход с
+    вложением, ``FoodClarifySkill`` — текст про еду, а
+    :data:`FOOD_PROMPT` по-прежнему зовёт прислать фото в чат. Снят
+    сломанный вход, а не функция.
+
+    ``MINIAPP_ROUTES["open_food_scan"]`` оставлен в силе — см. коммент
+    в самой таблице. Регрессию сторожит
+    ``tests/test_skill.py::TestFoodScanButtonRemoved``.
+
+    ⚠️ ``open_water_add_250`` остаётся на месте намеренно: тот же
+    ``guardProd`` стоит и за ним, но решение по воде владельцем ещё не
+    принято, и эта правка его не предвосхищает.
 
     Mini App ladder (mirrors ``_welcome_buttons()``):
       * ``MAX_BOT_WEB_APP`` set → ``open_app`` buttons with flat-slug
@@ -870,11 +944,6 @@ def _s5_first_action_buttons() -> list[dict[str, str]]:
     if web_app:
         primary_actions = [
             {
-                "label": "📸 Сфотографировать еду",
-                "callback": "open_food_scan",
-                "web_app": web_app,
-            },
-            {
                 "label": "💧 + стакан воды",
                 "callback": "open_water_add_250",
                 "web_app": web_app,
@@ -891,10 +960,6 @@ def _s5_first_action_buttons() -> list[dict[str, str]]:
         # previously pointed at /food_scan, /goal_select etc., none of
         # which exist as Mini App routes).
         primary_actions = [
-            {
-                "label": "📸 Сфотографировать еду",
-                "url": _miniapp_url(miniapp_url, "open_food_scan"),
-            },
             {"label": "💧 + стакан воды", "url": _miniapp_url(miniapp_url, "open_water_add_250")},
             {"label": "🎯 Выбрать цель", "url": _miniapp_url(miniapp_url, "open_goal_select")},
             {"label": "📅 Найти услугу", "url": _miniapp_url(miniapp_url, "open_catalog")},
