@@ -22,8 +22,10 @@ from __future__ import annotations
 import json
 import uuid
 from datetime import date, datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 import pytest
+from freezegun import freeze_time
 
 from apps.catalog.models import CatalogMaster, CatalogService, MasterService
 from apps.channels.handlers import GlobalMaxHandler
@@ -43,6 +45,44 @@ from apps.orchestrator.time_preference import load_time_preference, parse_explic
 from apps.tenancy.models import Tenant
 
 pytestmark = pytest.mark.django_db
+
+
+# --- The clock the salon reads ---------------------------------------------
+#
+# ``TestTheTypedDateBecomesARequest`` below turns «02.09.2026» into a
+# ``day_offset``, and the offset is counted from the SALON's today — the
+# ``salon`` fixture is Moscow, and ``time_preference.local_today`` resolves
+# the day in the tenant's zone. Sampling ``date.today()`` on the runner
+# instead asserted a condition this file never created: the two calendars
+# agree only while the runner is also Moscow, so the assertion was green by
+# day and off by one between 21:00 and midnight UTC.
+#
+# The moment is therefore stated, and stated INSIDE that gap: 21:30 UTC is
+# 00:30 of the next day in Moscow. UTC still says the 24th, the salon already
+# says the 25th.
+SALON_TZ = "Europe/Moscow"
+FROZEN_NOW = "2026-08-24T21:30:00+00:00"
+# Derived, never restated: a hand-written second copy of the same fact is
+# free to drift from the first one, and then the file quietly stops testing
+# the gap it was written for. Evaluates to 2026-08-25 — the salon's date at
+# that instant, one day ahead of UTC's.
+SALON_TODAY = datetime.fromisoformat(FROZEN_NOW).astimezone(ZoneInfo(SALON_TZ)).date()
+
+
+@pytest.fixture(autouse=True)
+def _salon_clock():
+    """One answer to «какое сегодня» for the whole test, gap included.
+
+    ``ignore=["asyncio"]`` is load-bearing, not caution. Every turn here goes
+    through ``GlobalMaxHandler`` → ``resolve_and_log_turn_intent``, which runs
+    an ``asyncio.run(...)``; the event loop derives its select() deadline from
+    ``time.monotonic``, and a monotonic clock that never advances is a
+    deadline that never arrives. Without the ignore the suite hangs forever
+    inside ``windows_events._poll`` rather than failing — leave it in.
+    """
+    with freeze_time(FROZEN_NOW, ignore=["asyncio"]):
+        yield
+
 
 _USER_ID = 900
 _CHAT_ID = 901
@@ -152,7 +192,7 @@ def salon():
     """
     stamp = datetime(2026, 5, 18, tzinfo=timezone.utc)
     tenant = Tenant.objects.create(
-        slug="formula-tela", name="Формула тела", timezone="Europe/Moscow", city="Пенза"
+        slug="formula-tela", name="Формула тела", timezone=SALON_TZ, city="Пенза"
     )
     rows: dict[str, CatalogService] = {}
     master = CatalogMaster.all_tenants.create(
@@ -245,8 +285,9 @@ class TestTheMeasuredDefect:
         tenant, master, catalog = salon
         _tap_with_service(tenant, master, catalog["lymph"].id)
 
-        today = date.today()
-        wanted = today + timedelta(days=9)
+        # Nine days from the SALON's today, which is what the picker counts
+        # from — not from the runner's. See the note beside FROZEN_NOW.
+        wanted = SALON_TODAY + timedelta(days=9)
         GlobalMaxHandler()(_raw(_typed(wanted.strftime("%d.%m.%Y"), "mm-date")))
 
         stored = load_time_preference(_global_conversation())

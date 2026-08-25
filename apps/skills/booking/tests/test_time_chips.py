@@ -24,10 +24,12 @@ the schedule read actually returned.
 
 from __future__ import annotations
 
-from datetime import date, timedelta
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 
 import pytest
 from django.core.cache import cache
+from freezegun import freeze_time
 
 from apps.bookings.keyboards import (
     CALLBACK_BOOK_MORE_DATES_PREFIX,
@@ -62,6 +64,44 @@ from apps.tenancy.models import Tenant
 pytestmark = pytest.mark.django_db(transaction=True)
 
 
+# --- The clock the salon reads ---------------------------------------------
+#
+# Every «Сегодня» in this file is the SALON's, and the salon is in Moscow.
+# Left to the runner's clock these tests assert a condition they never
+# created: they asked ``date.today()`` in whatever zone the runner happened
+# to sit in, then compared the answer against a product that resolves the day
+# in the tenant's zone (``apps.orchestrator.time_preference.local_today``).
+# The two agree only while the runner is also Moscow. On a UTC runner the
+# file was therefore green by day and red between 21:00 and midnight UTC —
+# the hours when the two calendars have already parted. The product was never
+# the defect; the assertion was.
+#
+# So the moment is stated rather than sampled, and it is deliberately a
+# moment INSIDE that gap: 21:30 UTC is 00:30 of the NEXT day in Moscow. UTC
+# still says the 24th, the salon already says the 25th. A «сегодня» computed
+# server-side instead of salon-side now fails this file on every run, in
+# every zone, instead of one evening in four.
+SALON_TZ = "Europe/Moscow"
+FROZEN_NOW = "2026-08-24T21:30:00+00:00"
+# Derived, never restated: a hand-written second copy of the same fact is
+# free to drift from the first one, and then the file quietly stops testing
+# the gap it was written for. Evaluates to 2026-08-25 — the salon's date at
+# that instant, one day ahead of UTC's.
+SALON_TODAY = datetime.fromisoformat(FROZEN_NOW).astimezone(ZoneInfo(SALON_TZ)).date()
+
+
+@pytest.fixture(autouse=True)
+def _salon_clock():  # noqa: ANN201
+    """One answer to «какое сегодня» for the whole test, gap included.
+
+    Freezing also closes a second, rarer hole: an unfrozen run that crosses
+    midnight between building the fixture dates and asserting on the labels
+    disagrees with itself.
+    """
+    with freeze_time(FROZEN_NOW):
+        yield
+
+
 @pytest.fixture(autouse=True)
 def _isolated_env(tmp_path, settings):  # noqa: ANN001, ANN201
     settings.BASE_DIR = tmp_path
@@ -76,7 +116,9 @@ def _isolated_env(tmp_path, settings):  # noqa: ANN001, ANN201
 
 @pytest.fixture
 def tenant(db) -> Tenant:  # noqa: ANN001
-    return Tenant.objects.create(slug="booking-time-chips", name="Time Chips")
+    # Stated, not inherited: the model default is Moscow today, and a test
+    # that leans on a default is one migration away from testing nothing.
+    return Tenant.objects.create(slug="booking-time-chips", name="Time Chips", timezone=SALON_TZ)
 
 
 @pytest.fixture
@@ -125,13 +167,13 @@ def _tap(context: SkillContext, payload: str) -> SkillContext:
 
 
 def _iso(offset: int) -> str:
-    """A date ``offset`` days from today, in the salon's zone.
+    """A date ``offset`` days from the salon's today.
 
-    The tests run against the real clock because the code under test does:
-    «Завтра» is only meaningful relative to now, and freezing time here would
-    hide exactly the drift these assertions exist to catch.
+    Anchored on :data:`SALON_TODAY`, never on ``date.today()``: the runner's
+    calendar is not the salon's, and the booking path is right to prefer the
+    salon's. See the note beside :data:`FROZEN_NOW`.
     """
-    return (date.today() + timedelta(days=offset)).isoformat()
+    return (SALON_TODAY + timedelta(days=offset)).isoformat()
 
 
 class TestDayChips:
