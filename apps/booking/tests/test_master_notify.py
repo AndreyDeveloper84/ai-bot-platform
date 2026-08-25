@@ -8,9 +8,16 @@ replacement so the failure mode cannot come back silently.
 
 Covered:
 
-* every rung of the addressing cascade — linked master, tenant
-  ``manager_chat_id``, configured fallback chat ids;
-* precedence between the rungs (first hit wins, exclusively);
+* personal delivery to the specialist — a master with a linked MAX
+  account receives the announcement *in addition to* the salon cascade
+  (the epic's contract is «the master learns», not «the master learns
+  instead of the salon»);
+* every rung of the salon cascade — tenant ``manager_chat_id``, then
+  the configured fallback chat ids;
+* an **unreachable specialist** (no linked account, or no mirror row at
+  all) → the salon is still told, and the gap is visible: a WARNING log
+  line plus a ``booking.specialist_unreachable`` audit row — never the
+  silent ``failed`` of the push era;
 * **no address at all** → nothing sent, WARNING logged (the branch that
   used to be silent);
 * message content — service, master, tenant-local time, source — and
@@ -32,10 +39,13 @@ import pytest
 from django.db import transaction
 from django.utils import timezone
 
+from apps.audit.models import AuditLog
 from apps.booking.master_notify import (
     build_booking_created_notification,
+    build_specialist_booking_notification,
     notify_booking_created,
-    resolve_target,
+    resolve_salon_target,
+    resolve_specialist_chat_id,
 )
 from apps.booking.models import RemoteBookingProxy
 from apps.catalog.models import CatalogMaster, CatalogService
@@ -129,6 +139,7 @@ def _make_master(
     name: str = "Тихонова Ольга",
     linked_chat_id: str | None = None,
     ayla_user_id: str = SPECIALIST_ID,
+    external_id: int = 1,
 ) -> CatalogMaster:
     linked = None
     if linked_chat_id is not None:
@@ -140,7 +151,7 @@ def _make_master(
         )
     return CatalogMaster.all_tenants.create(
         tenant=tenant,
-        external_id=1,
+        external_id=external_id,
         external_updated_at=timezone.now(),
         name=name,
         ayla_user_id=ayla_user_id,
@@ -217,18 +228,21 @@ class TestAddressingCascade:
         No linked master, no ``manager_chat_id``, no fallback setting:
         exactly the pilot's current configuration. Nothing is sent, and
         the gap is recorded at WARNING so it is discoverable in logs
-        instead of vanishing.
+        instead of vanishing — twice over: the specialist was
+        unreachable AND nobody else was told either.
         """
 
         _make_master(tenant, linked_chat_id=None)
         with caplog.at_level("DEBUG", logger="apps.booking.master_notify"):
             _notify(tenant)
         assert send.calls == []
-        warnings = [
-            r for r in caplog.records if r.name == "apps.booking.master_notify" and r.levelno >= 30
+        messages = [
+            r.getMessage()
+            for r in caplog.records
+            if r.name == "apps.booking.master_notify" and r.levelno >= 30
         ]
-        assert len(warnings) == 1
-        assert "booking.notify.no_recipients" in warnings[0].getMessage()
+        assert any("booking.notify.specialist_unreachable" in m for m in messages)
+        assert any("booking.notify.no_recipients" in m for m in messages)
 
     def test_master_matched_by_specialist_profile_id(
         self, tenant: Tenant, send: SendRecorder
@@ -257,8 +271,15 @@ class TestAddressingCascade:
             linked_bot_user=linked,
         )
         _notify(tenant)
+        # The resolved master gets his personal copy (addressed to him,
+        # so his own name is not repeated in it)…
         assert [c["chat_id"] for c in send.calls] == ["master-chat-2"]
-        assert "Сазонова Инна" in send.calls[0]["text"]
+        assert send.calls[0]["text"].startswith("🆕 У вас новая запись")
+        # …and the resolved name still feeds the salon copy.
+        tenant.manager_chat_id = "manager-chat-1"
+        tenant.save(update_fields=["manager_chat_id"])
+        _notify(tenant)
+        assert "Сазонова Инна" in send.calls[-1]["text"]
 
     def test_no_master_row_at_all_still_falls_back(
         self, tenant: Tenant, send: SendRecorder
@@ -284,15 +305,25 @@ class TestAddressingCascade:
 
 
 class TestCascadePrecedence:
-    def test_master_wins_over_manager_and_fallback(
+    def test_specialist_delivery_is_additional_to_the_salon_rung(
         self, tenant: Tenant, send: SendRecorder, settings
     ) -> None:
+        """A reachable specialist is notified *on top of* the salon.
+
+        601564a made personal delivery exclusive (master OR salon); the
+        epic's contract — «if the master does not learn, the visit does
+        not happen» — needs the master to learn *and* the salon to keep
+        its visibility, so the specialist is an additional recipient,
+        not a replacement one. The salon rungs stay exclusive among
+        themselves: manager still wins over the fallback channel.
+        """
+
         settings.HANDOFF_NOTIFY_MAX_CHAT_IDS = ["owner-chat"]
         _make_master(tenant, linked_chat_id="master-chat-1")
         tenant.manager_chat_id = "manager-chat-1"
         tenant.save(update_fields=["manager_chat_id"])
         _notify(tenant)
-        assert [c["chat_id"] for c in send.calls] == ["master-chat-1"]
+        assert [c["chat_id"] for c in send.calls] == ["master-chat-1", "manager-chat-1"]
 
     def test_manager_wins_over_fallback(self, tenant: Tenant, send: SendRecorder, settings) -> None:
         settings.HANDOFF_NOTIFY_MAX_CHAT_IDS = ["owner-chat"]
@@ -301,13 +332,191 @@ class TestCascadePrecedence:
         _notify(tenant)
         assert [c["chat_id"] for c in send.calls] == ["manager-chat-1"]
 
-    def test_resolve_target_reports_the_rung(self, tenant: Tenant) -> None:
-        """The resolver names its own decision — logs and future
-        personal-addressing work depend on that label."""
+    def test_resolvers_report_their_decisions(self, tenant: Tenant, settings) -> None:
+        """The resolvers name their own decisions — logs, audit rows and
+        the send order depend on those labels."""
 
         master = _make_master(tenant, linked_chat_id="master-chat-1")
-        assert resolve_target(tenant=tenant, master=master).channel == "master"
-        assert resolve_target(tenant=tenant, master=None).channel == "none"
+        assert resolve_specialist_chat_id(master) == "master-chat-1"
+
+        unlinked = _make_master(tenant, external_id=2, linked_chat_id=None)
+        assert resolve_specialist_chat_id(unlinked) == ""
+        assert resolve_specialist_chat_id(None) == ""
+
+        tenant.manager_chat_id = "manager-chat-1"
+        assert resolve_salon_target(tenant=tenant).channel == "manager"
+
+        tenant.manager_chat_id = ""
+        settings.HANDOFF_NOTIFY_MAX_CHAT_IDS = ["owner-chat"]
+        assert resolve_salon_target(tenant=tenant).channel == "fallback"
+
+        settings.HANDOFF_NOTIFY_MAX_CHAT_IDS = []
+        assert resolve_salon_target(tenant=tenant).channel == "none"
+
+
+# ─── specialist delivery ───────────────────────────────────────────────────
+
+
+class TestSpecialistDelivery:
+    def test_linked_specialist_gets_a_personal_message(
+        self, tenant: Tenant, send: SendRecorder
+    ) -> None:
+        """The announcement reaches the master himself, not only the salon.
+
+        The personal copy is addressed to the performer — «У вас новая
+        запись», no «Мастер: <his own name>» line — and goes first: if
+        MAX dies mid-fan-out, the epic's priority recipient already has
+        the message.
+        """
+
+        _make_service(tenant)
+        _make_master(tenant, linked_chat_id="master-chat-1")
+        tenant.manager_chat_id = "manager-chat-1"
+        tenant.save(update_fields=["manager_chat_id"])
+        _notify(tenant)
+        assert [c["chat_id"] for c in send.calls] == ["master-chat-1", "manager-chat-1"]
+        personal = send.calls[0]["text"]
+        assert personal.startswith("🆕 У вас новая запись")
+        assert "Мастер:" not in personal
+        assert "УЗ-кавитация — 1 зона" in personal
+        assert "22.05.2026 в 15:00" in personal
+        assert APPOINTMENT_ID in personal
+        # The salon copy is unchanged — salon-facing, the master named.
+        assert "Мастер: Тихонова Ольга" in send.calls[1]["text"]
+
+    def test_personal_copy_carries_no_client_pii(self, tenant: Tenant, send: SendRecorder) -> None:
+        """DRF-1039 binds the personal copy exactly like the salon one."""
+
+        BotUser.all_tenants.create(
+            tenant=tenant,
+            channel="max",
+            channel_user_id="client-1",
+            chat_id="client-chat",
+            display_name="Иван Клиентов",
+            client_name="Иван Клиентов",
+            phone="+79991234567",
+            ayla_user_id=AYLA_USER_ID,
+        )
+        _make_master(tenant, linked_chat_id="master-chat-1")
+        _notify(tenant)
+        assert [c["chat_id"] for c in send.calls] == ["master-chat-1"]
+        personal = send.calls[0]["text"]
+        assert "+79991234567" not in personal
+        assert "Иван Клиентов" not in personal
+        assert AYLA_USER_ID not in personal
+
+    def test_build_specialist_is_pure(self, tenant: Tenant, django_assert_num_queries) -> None:
+        with django_assert_num_queries(0):
+            text = build_specialist_booking_notification(
+                tenant=tenant,
+                appointment_id=uuid.UUID(APPOINTMENT_ID),
+                start_at=dt.datetime.fromisoformat(START_AT),
+                service_name="Массаж",
+                raw_source="ayla_bot",
+            )
+        assert "Массаж" in text
+        assert "бот Ayla" in text
+
+
+# ─── unreachable specialist ────────────────────────────────────────────────
+
+
+class TestSpecialistUnreachable:
+    """A specialist without a reachable MAX address must be VISIBLE.
+
+    The push era hid exactly this state behind a quiet ``failed`` row in
+    the Ayla database; the whole pilot ran on it for months. The salon
+    cascade still runs — someone must know about the booking — but the
+    personal gap leaves a WARNING and an audit row every time.
+    """
+
+    def _unreachable_warnings(self, caplog: pytest.LogCaptureFixture) -> list[str]:
+        return [
+            r.getMessage()
+            for r in caplog.records
+            if r.name == "apps.booking.master_notify"
+            and r.levelno >= 30
+            and "specialist_unreachable" in r.getMessage()
+        ]
+
+    def test_unlinked_master_warns_and_audits(
+        self, tenant: Tenant, send: SendRecorder, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        master = _make_master(tenant, linked_chat_id=None)
+        tenant.manager_chat_id = "manager-chat-1"
+        tenant.save(update_fields=["manager_chat_id"])
+        with caplog.at_level("DEBUG", logger="apps.booking.master_notify"):
+            _notify(tenant)
+        # The salon is still told — the booking must not be lost.
+        assert [c["chat_id"] for c in send.calls] == ["manager-chat-1"]
+        assert self._unreachable_warnings(caplog)
+        audit = AuditLog.all_tenants.get(tenant=tenant, action="booking.specialist_unreachable")
+        assert str(audit.target_id) == APPOINTMENT_ID
+        assert audit.payload["specialist_id"] == SPECIALIST_ID
+        assert audit.payload["master_id"] == str(master.id)
+        assert audit.payload["reason"] == "no_linked_chat"
+
+    def test_unmirrored_specialist_warns_and_audits(
+        self, tenant: Tenant, send: SendRecorder, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """No catalog row at all — we cannot even name the specialist."""
+
+        tenant.manager_chat_id = "manager-chat-1"
+        tenant.save(update_fields=["manager_chat_id"])
+        with caplog.at_level("DEBUG", logger="apps.booking.master_notify"):
+            _notify(tenant)
+        assert [c["chat_id"] for c in send.calls] == ["manager-chat-1"]
+        assert self._unreachable_warnings(caplog)
+        audit = AuditLog.all_tenants.get(tenant=tenant, action="booking.specialist_unreachable")
+        assert audit.payload["reason"] == "no_mirror_row"
+        assert audit.payload["master_id"] is None
+
+    def test_reachable_specialist_leaves_no_gap_signal(
+        self, tenant: Tenant, send: SendRecorder, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        _make_master(tenant, linked_chat_id="master-chat-1")
+        with caplog.at_level("DEBUG", logger="apps.booking.master_notify"):
+            _notify(tenant)
+        assert [c["chat_id"] for c in send.calls] == ["master-chat-1"]
+        assert self._unreachable_warnings(caplog) == []
+        assert not AuditLog.all_tenants.filter(action="booking.specialist_unreachable").exists()
+
+    def test_event_without_specialist_id_is_not_a_gap(
+        self, tenant: Tenant, send: SendRecorder, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """No specialist in the event → nobody to fail to reach."""
+
+        tenant.manager_chat_id = "manager-chat-1"
+        tenant.save(update_fields=["manager_chat_id"])
+        with caplog.at_level("DEBUG", logger="apps.booking.master_notify"):
+            notify_booking_created(
+                tenant=tenant,
+                appointment_id=uuid.UUID(APPOINTMENT_ID),
+                start_at=dt.datetime.fromisoformat(START_AT),
+                specialist_id=None,
+                service_id=None,
+                raw_source="mobile_app",
+            )
+        assert [c["chat_id"] for c in send.calls] == ["manager-chat-1"]
+        assert self._unreachable_warnings(caplog) == []
+        assert not AuditLog.all_tenants.filter(action="booking.specialist_unreachable").exists()
+
+    def test_audit_failure_does_not_break_the_salon_send(
+        self, tenant: Tenant, send: SendRecorder, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The audit row is best-effort — a broken audit must not cost
+        the salon the message."""
+
+        _make_master(tenant, linked_chat_id=None)
+        tenant.manager_chat_id = "manager-chat-1"
+        tenant.save(update_fields=["manager_chat_id"])
+
+        def _boom(*_a: Any, **_k: Any) -> None:
+            raise RuntimeError("audit exploded")
+
+        monkeypatch.setattr("apps.booking.master_notify.write_audit", _boom)
+        _notify(tenant)
+        assert [c["chat_id"] for c in send.calls] == ["manager-chat-1"]
 
 
 # ─── message body ──────────────────────────────────────────────────────────
@@ -318,7 +527,9 @@ class TestNotificationText:
         self, tenant: Tenant, send: SendRecorder
     ) -> None:
         _make_service(tenant)
-        _make_master(tenant, linked_chat_id="master-chat-1")
+        _make_master(tenant, linked_chat_id=None)
+        tenant.manager_chat_id = "manager-chat-1"
+        tenant.save(update_fields=["manager_chat_id"])
         _notify(tenant)
         text = send.calls[0]["text"]
         assert "УЗ-кавитация — 1 зона" in text
