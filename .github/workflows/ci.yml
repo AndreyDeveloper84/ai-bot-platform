@@ -695,13 +695,22 @@ jobs:
           BEFORE_SHA: ${{ github.event.before }}
         run: |
           set -uo pipefail
+          # GitHub invokes this step as `bash -e`. The fail-safe default below is
+          # only reachable if a failing git command does NOT kill the script, so
+          # -e is turned off deliberately. DRF-1408: `git diff A...HEAD` exits 128
+          # with "no merge base" when the shallow base fetch has no common
+          # ancestor, and that killed the whole job before a single test ran.
+          set +e
           run_fe=true
           reason="could not determine change set — running checks (fail-safe)"
 
           if [ "$EVENT_NAME" = "pull_request" ] && [ -n "${BASE_REF:-}" ]; then
             if git fetch origin "$BASE_REF" --depth=1 >/dev/null 2>&1 \
                && BASE_SHA="$(git rev-parse "origin/$BASE_REF" 2>/dev/null)"; then
-              CHANGED="$(git diff --name-only "$BASE_SHA"...HEAD)"
+              if ! CHANGED="$(git diff --name-only "$BASE_SHA"...HEAD 2>/dev/null)"; then
+                CHANGED=""
+                reason="no merge base with $BASE_REF — running checks (fail-safe)"
+              fi
               if [ -n "$CHANGED" ]; then
                 if echo "$CHANGED" | grep -qE '^apps/miniapp/'; then
                   run_fe=true
@@ -716,7 +725,10 @@ jobs:
                && [ -n "${BEFORE_SHA:-}" ] \
                && [ "$BEFORE_SHA" != "0000000000000000000000000000000000000000" ] \
                && git cat-file -e "${BEFORE_SHA}^{commit}" 2>/dev/null; then
-            CHANGED="$(git diff --name-only "$BEFORE_SHA" HEAD)"
+            if ! CHANGED="$(git diff --name-only "$BEFORE_SHA" HEAD 2>/dev/null)"; then
+              CHANGED=""
+              reason="could not diff against $BEFORE_SHA — running checks (fail-safe)"
+            fi
             if [ -n "$CHANGED" ]; then
               if echo "$CHANGED" | grep -qE '^apps/miniapp/'; then
                 run_fe=true
