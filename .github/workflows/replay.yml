@@ -62,9 +62,10 @@
 #   INSIDE the step. An exceeded budget is a failed step, which is a
 #   failed job, which is RED, and it says in an ::error annotation which
 #   budget was blown and by which command.
-# * `timeout-minutes` on the job stays, raised well clear of the sum of
-#   the inner budgets. It is now a backstop against a wedged runner —
-#   the thing it is actually good for — and no longer the mechanism that
+# * `timeout-minutes` on the job stays at ten and did NOT have to move.
+#   The budgets sum to 360s, so one of them always expires first. It is
+#   now a backstop against a wedged runner — the thing a job-level
+#   timeout is actually good for — and no longer the mechanism that
 #   reports a slow test suite.
 # * the concurrency group is keyed on the PR number, not the ref, and
 #   `cancel-in-progress` is restricted to pull requests. Superseding a
@@ -127,11 +128,16 @@ jobs:
   fixtures:
     name: replay fixtures (golden + adversarial + voice)
     runs-on: ubuntu-latest
-    # Backstop only (DRF-1373). The budgets that report a slow suite live
-    # inside the steps and are RED; this one exists for a wedged runner and
-    # is set clear of their sum (300 + 120 + 420 = 840s) plus setup. If THIS
-    # fires, the runner stopped making progress — not the tests.
-    timeout-minutes: 20
+    # UNCHANGED, on purpose (DRF-1373). This ceiling was the symptom, never
+    # the defect: the run that hit it was making one outbound HTTP call per
+    # fixture turn, and raising the ceiling would have bought a few weeks of
+    # quiet and then failed again, larger. With that removed the job runs in
+    # 70s (run 32791956392), and the per-step budgets below sum to 360s — so
+    # a budget always expires first, and a budget expiring is RED. This one
+    # is now a backstop against a wedged runner, which is what a job-level
+    # timeout is actually good for. Raise it only together with the budgets,
+    # and only with a measurement in the PR.
+    timeout-minutes: 10
 
     # E2 — `prompt-regression-accepted` label skips the gate.
     # Pushes (not PRs) always run; the label only fires on pull_request.
@@ -244,20 +250,35 @@ jobs:
       # because the two steps below run them by name (DRF-1373). Before, both
       # files ran twice per job — the live-path gate is the most expensive
       # thing in this workflow and it was paid for twice, for nothing.
+      #
+      # Every budget below is MEASURED, on run 32791956392 (this branch,
+      # green, 70s end to end): engine 14s, fixture sanity 1s, live-path
+      # gate 23s. Each budget is that number with room for runner variance
+      # and for the corpus to keep growing — a budget is a tripwire for a
+      # regression, not a target. They sum to 360s, which is why the job
+      # ceiling did not have to move: the inner budget always fires first,
+      # and it fires RED.
       - name: apps.replay unit + integration tests (strict)
         run: |
-          "${RUNNER_TEMP}/budget" 300 "engine tests"             uv run pytest apps/replay/               --ignore=apps/replay/tests/test_fixtures.py               --ignore=apps/replay/tests/test_live_path_gate.py               -v --tb=short
+          "${RUNNER_TEMP}/budget" 120 "engine tests" \
+            uv run pytest apps/replay/ \
+              --ignore=apps/replay/tests/test_fixtures.py \
+              --ignore=apps/replay/tests/test_live_path_gate.py \
+              -v --tb=short
 
       - name: Fixture set sanity (fixtures parse + baseline-clean)
         run: |
-          "${RUNNER_TEMP}/budget" 120 "fixture sanity"             uv run pytest apps/replay/tests/test_fixtures.py -v --tb=short
+          "${RUNNER_TEMP}/budget" 60 "fixture sanity" \
+            uv run pytest apps/replay/tests/test_fixtures.py -v --tb=short
 
       # The gate proper: fixtures through the live answering path. Prints
       # the covered/needs-a-model split on every run so a green check can
       # never be mistaken for "all fixtures verified".
       - name: Live-path gate (fixtures through the code that answers people)
         run: |
-          "${RUNNER_TEMP}/budget" 420 "live-path gate"             uv run pytest apps/replay/tests/test_live_path_gate.py               -v --tb=short --durations=15
+          "${RUNNER_TEMP}/budget" 180 "live-path gate" \
+            uv run pytest apps/replay/tests/test_live_path_gate.py \
+              -v --tb=short --durations=15
 
   # E2 visibility — when the override label is present we still post a
   # status check confirming the bypass is intentional.
