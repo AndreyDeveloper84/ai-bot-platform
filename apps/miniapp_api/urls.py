@@ -98,6 +98,17 @@ urlpatterns = [
         views.customer_wellness_today,
         name="customer_wellness_today",
     ),
+    # Wellness write path (DRF-1402) — log / undo a water entry on Ayla.
+    path(
+        "wellness/water",
+        views.customer_wellness_water,
+        name="customer_wellness_water",
+    ),
+    path(
+        "wellness/water/<str:entry_id>",
+        views.customer_wellness_water_undo,
+        name="customer_wellness_water_undo",
+    ),
     # Dashboard rollup — next booking + this-week count (bookings-only).
     path(
         "recent-activity",
