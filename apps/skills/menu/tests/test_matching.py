@@ -182,3 +182,104 @@ class TestMainMenu:
         attachments = data["attachments"]
         assert attachments[0]["type"] == "inline_keyboard"
         assert attachments[0]["payload"]["buttons"] == main_menu_buttons()
+
+
+# ---------------------------------------------------------------------------
+# DRF-1404 — the length invariant belongs in the MATCHER, not only in a
+# test over the seed tuple.
+#
+# ``_MIN_PREFIX_STEM`` is the rule DRF-963 bought: a stem shorter than 5
+# characters may not be matched as a PREFIX, because «спа» then swallows
+# «спасибо». Until this patch the rule was enforced in exactly two
+# places — a unit test over ``_SERVICE_STEMS`` and the length filter in
+# ``tenant_service_stems`` — and in neither of them at match time.
+#
+# ``extra_stems`` is a public parameter that takes an arbitrary tuple or
+# callable, so any caller could hand ``_mentions_stem`` a three-letter
+# stem and reproduce DRF-963 verbatim. Measured on 2026-08-25:
+# ``mentions_service("спасибо большое", extra_stems=("спа",))`` → True.
+#
+# The seed vocabulary itself is CLEAN — «промассажировали» has never
+# matched, because the stem must begin a word. This class is closed
+# already; what was open is the vocabulary growing past the guard.
+# ---------------------------------------------------------------------------
+
+
+class TestDrf1404ShortStemsCannotPrefixMatch:
+    """A short stem must be a whole word — wherever it came from."""
+
+    @pytest.mark.parametrize(
+        "text",
+        ["спасибо большое", "спасибо", "спасите", "спальный район"],
+    )
+    def test_short_extra_stem_does_not_swallow_a_longer_word(self, text: str) -> None:
+        assert mentions_service(text, extra_stems=("спа",)) is False
+
+    def test_short_extra_stem_still_matches_its_own_word(self) -> None:
+        """Narrowing must not cost the stem its real hit."""
+        assert mentions_service("хочу спа", extra_stems=("спа",)) is True
+
+    def test_callable_extra_stems_are_guarded_too(self) -> None:
+        """The tenant catalog arrives as a deferred callable."""
+        assert looks_like_booking_request("спасибо большое", extra_stems=lambda: ("спа",)) is False
+
+    def test_long_extra_stem_still_matches_as_a_prefix(self) -> None:
+        """The invariant narrows SHORT stems only."""
+        assert mentions_service("хочу шугаринга", extra_stems=("шугаринг",)) is True
+
+
+class TestDrf1404SeedVocabularyStaysWhole:
+    """The stem-inside-a-word class, pinned so it cannot come back."""
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "промассативали",
+            "промассажировали",
+            "спасибо большое",
+            "карта не проходит",
+            "сколько минут ждать",
+        ],
+    )
+    def test_stem_inside_a_word_is_not_a_service(self, text: str) -> None:
+        assert mentions_service(text) is False
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "хочу массаж",
+            "массаж спины",
+            "запишите на маникюр",
+            "чистка лица",
+            "хочу спа",
+            "мои брови",
+        ],
+    )
+    def test_real_service_mentions_still_match(self, text: str) -> None:
+        assert mentions_service(text) is True
+
+
+class TestDrf1404AvailabilitySignalsAreWords:
+    """«свободн» matched inside «неСВОБОДНая» — the same class, one list over.
+
+    The old comment claimed a substring test was safe because the
+    signals were «multi-word or long enough not to collide». Length is
+    not a defence against a Russian prefix; only a boundary is.
+    """
+
+    @pytest.mark.parametrize("text", ["несвободная касса", "несвободно"])
+    def test_prefixed_word_is_not_an_availability_signal(self, text: str) -> None:
+        assert looks_like_booking_request(text) is False
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "свободное время есть?",
+            "есть окошко на завтра",
+            "есть место на пятницу",
+            "какие слоты",
+            "когда можно прийти",
+        ],
+    )
+    def test_real_availability_phrasings_still_match(self, text: str) -> None:
+        assert looks_like_booking_request(text) is True

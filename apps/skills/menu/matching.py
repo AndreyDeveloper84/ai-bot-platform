@@ -145,11 +145,22 @@ _SERVICE_WORDS: frozenset[str] = frozenset(
 )
 
 # Availability / walk-in phrasings that mean «I want a slot» without using
-# any booking verb. Substring match is fine — these are multi-word or long
-# enough not to collide.
-_AVAILABILITY_SIGNALS: tuple[str, ...] = (
+# any booking verb.
+#
+# DRF-1404 — the note that used to stand here said «substring match is
+# fine — these are multi-word or long enough not to collide», and that
+# was wrong for the two single-word stems: «свободн» matched inside
+# «неСВОБОДНая касса», routing it into booking. Length does not save a
+# stem from a Russian prefix; only a boundary does. The single-word
+# stems moved to :data:`_AVAILABILITY_STEMS` and are matched at a word
+# start like every other stem in this module. The multi-word phrases
+# below keep the substring test — a phrase carries its own boundaries.
+_AVAILABILITY_STEMS: tuple[str, ...] = (
     "свободн",
     "окошк",
+)
+
+_AVAILABILITY_SIGNALS: tuple[str, ...] = (
     "есть место",
     "есть места",
     "какие слоты",
@@ -167,7 +178,25 @@ def _mentions_stem(normalized: str, stem: str) -> bool:
     ``normalized`` is space-padded by :func:`normalize`, so a leading space
     anchors the word start; the word may continue with any suffix
     («массаж» → «массажа»), which is the cheap stand-in for stemming.
+
+    DRF-1404 — the :data:`_MIN_PREFIX_STEM` invariant is enforced HERE,
+    not only by ``test_prefix_stems_are_long_enough``. That test reads
+    :data:`_SERVICE_STEMS`, and :func:`tenant_service_stems` filters the
+    catalog by the same length — but ``extra_stems`` is a public
+    parameter taking an arbitrary tuple or callable, so neither guard
+    covers a caller that simply passes a short stem. Measured on
+    2026-08-25, ``mentions_service("спасибо большое", extra_stems=("спа",))``
+    was True: DRF-963 verbatim, one argument away.
+
+    A stem below the threshold is therefore matched as a WHOLE word —
+    the same treatment :data:`_SERVICE_WORDS` gets. It keeps its own hit
+    («хочу спа») and loses only the prefix reach that was never safe at
+    that length. This is the guard that has to hold as the vocabulary
+    grows, because the catalog is a tenant's free-text field and the
+    grabli is already known.
     """
+    if len(stem) < _MIN_PREFIX_STEM:
+        return f" {stem} " in normalized
     return f" {stem}" in normalized
 
 
@@ -217,6 +246,8 @@ def looks_like_booking_request(text: str, *, extra_stems: ExtraStems = ()) -> bo
     if not normalized.strip():
         return False
     if any(signal in normalized for signal in _AVAILABILITY_SIGNALS):
+        return True
+    if any(_mentions_stem(normalized, stem) for stem in _AVAILABILITY_STEMS):
         return True
     return mentions_service(text, extra_stems=extra_stems)
 

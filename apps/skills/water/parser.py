@@ -55,9 +55,44 @@ class BeverageMatch:
 # «чай» bare match.
 _BEVERAGE_PATTERNS: list[tuple[str, list[str], int]] = [
     # Tea — specific first
-    ("chai_zelenyi", ["зелёный чай", "зеленый чай", "green tea"], 250),
-    ("chai_travyanoi", ["травяной чай", "ромашка", "мята", "иван-чай"], 250),
-    ("chai_chernyi", ["чёрный чай", "черный чай", "чай", "tea"], 250),
+    (
+        "chai_zelenyi",
+        ["зелёный чай", "зеленый чай", "зелёного чая", "зеленого чая", "green tea"],
+        250,
+    ),
+    (
+        "chai_travyanoi",
+        [
+            "травяной чай",
+            "травяного чая",
+            "ромашка",
+            "ромашки",
+            "мята",
+            "мяты",
+            "мятой",
+            "иван-чай",
+            "иван-чая",
+        ],
+        250,
+    ),
+    (
+        "chai_chernyi",
+        [
+            "чёрный чай",
+            "черный чай",
+            "чёрного чая",
+            "черного чая",
+            "чай",
+            "чая",
+            "чаю",
+            "чаем",
+            "чайку",
+            "чаёк",
+            "чаек",
+            "tea",
+        ],
+        250,
+    ),
     # Coffee — specific first
     ("kofe_kapuchino", ["капучино", "cappuccino"], 250),
     ("kofe_latte", ["латте", "latte"], 350),
@@ -70,6 +105,7 @@ _BEVERAGE_PATTERNS: list[tuple[str, list[str], int]] = [
             "американо",
             "americano",
             "кофе",
+            "кофейку",
             "coffee",
         ],
         200,
@@ -77,19 +113,114 @@ _BEVERAGE_PATTERNS: list[tuple[str, list[str], int]] = [
     # Water
     (
         "voda_mineralnaya",
-        ["минералка", "минеральная вода", "боржоми", "ессентуки"],
+        [
+            "минералка",
+            "минералки",
+            "минералку",
+            "минеральная вода",
+            "минеральной воды",
+            "боржоми",
+            "ессентуки",
+        ],
         250,
     ),
-    ("voda", ["воды", "вода", "water", "h2o"], 250),
+    (
+        "voda",
+        ["воды", "вода", "воду", "водой", "воде", "водичка", "водички", "водичку", "water", "h2o"],
+        250,
+    ),
     # Juice
-    ("sok_apelsinovyi", ["апельсиновый сок", "апельсиновый"], 200),
-    ("sok_yablochnyi", ["яблочный сок", "яблочный"], 200),
+    (
+        "sok_apelsinovyi",
+        ["апельсиновый сок", "апельсинового сока", "апельсиновый", "апельсинового"],
+        200,
+    ),
+    (
+        "sok_yablochnyi",
+        ["яблочный сок", "яблочного сока", "яблочный", "яблочного"],
+        200,
+    ),
     # Other
-    ("moloko", ["молоко"], 250),
-    ("pivo", ["пиво", "beer"], 500),
-    ("vino", ["вина", "вино", "wine"], 150),
-    ("kompot", ["компот"], 250),
+    ("moloko", ["молоко", "молока", "молоком", "молоке", "молочка"], 250),
+    ("pivo", ["пиво", "пива", "пивом", "пиве", "пивка", "пивко", "beer"], 500),
+    ("vino", ["вино", "вина", "вину", "вином", "вине", "wine"], 150),
+    ("kompot", ["компот", "компота", "компотом", "компоте"], 250),
 ]
+
+
+# ─── DRF-1404 — an alias is a WORD, not a substring ───────────────────────
+#
+# The catalog was matched with a bare ``alias in normalized``. Measured
+# on 2026-08-25, that logged a drink for «случайно проспала», «чайник
+# сломался», «чайная ложка сахара», «чайхана», «случайность», «кофта
+# помятая», «измятая юбка» and «молокозавод» — the «чай» / «мята» /
+# «молоко» aliases living inside longer words.
+#
+# This is the DRF-973 defect class, but it is the expensive member of
+# the family: :meth:`~apps.skills.water.skill.WaterSkill.handle` calls
+# ``add_water`` on a match, so a false positive does not merely answer
+# oddly — it WRITES to the user's Ayla beverage diary and stays there.
+# Hence the direction of every judgement call below: when a phrase is
+# genuinely ambiguous we decline to log it. A missed drink costs one
+# re-typed line; a phantom one silently corrupts a health record.
+#
+# The fix is the rule this bot already uses for pain stems: the set of
+# words that merely CONTAIN a drink name is open, the set of drink
+# forms is closed and short. So the forms are enumerated in the catalog
+# above (that is why «чая», «чаю», «пива», «молока» appear — the
+# substring rule matched those only by accident, and «стакан чая» /
+# «выпил пива» were in fact NOT parsed at all before this patch), and
+# each is matched between letter boundaries.
+def _word_pattern(alias: str) -> re.Pattern[str]:
+    """Whole-word matcher for one alias.
+
+    Letter boundaries rather than ````: an alias may legitimately sit
+    against a digit or punctuation («0.5л воды», «чай, кофе»), but never
+    inside a longer word.
+    """
+
+    return re.compile(
+        r"(?<![^\W\d_])" + re.escape(alias) + r"(?![^\W\d_])",
+        re.IGNORECASE,
+    )
+
+
+# ─── DRF-1404 — «вина» is a homograph, and no boundary can split it ───────
+#
+# «вина» is BOTH the genitive of «вино» («бокал вина») and the
+# nominative of «вина», guilt («это моя вина»). Same for «вину»
+# («признать вину») and «вине» («по вине водителя»). A word boundary
+# does not help: both readings are whole words, spelled identically.
+#
+# «это моя вина» → 150 ml of wine in the diary was the single worst
+# observed case of this ticket, so these three forms are the one place
+# where a POSITIVE cue is required rather than a negative one: they
+# count as wine only when the message also carries drinking context —
+# a volume unit, a number, or a verb of drinking/pouring/ordering.
+# «вино» and «вином» are unambiguous and need no cue.
+#
+# Deliberately biased toward not logging: «вина было много» is missed,
+# and that is the correct trade for a write path.
+_CONTEXT_REQUIRED_ALIASES: frozenset[str] = frozenset({"вина", "вину", "вине"})
+
+_DRINK_CONTEXT = re.compile(
+    r"\d"
+    r"|(?<![^\W\d_])(?:"
+    r"бокал\w*|стакан\w*|бутыл\w*|кружк\w*|банк[аиуое]\w*|рюмк\w*|фужер\w*"
+    r"|глоток|глотк\w*|литр\w*|мл"
+    r"|пил|пила|пили|пью|пьём|пьем|выпил\w*|допил\w*|попил\w*|отпил\w*"
+    r"|нал(?:ей|ил|ила|ила)\w*|заказал\w*|дегустир\w*|пригуб\w*"
+    r")(?![^\W\d_])",
+    re.IGNORECASE,
+)
+
+
+# Compiled once at import — the catalog is static.
+_COMPILED_BEVERAGES: list[tuple[str, tuple[tuple[str, re.Pattern[str]], ...], int]] = [
+    (slug, tuple((alias, _word_pattern(alias)) for alias in aliases), serving)
+    for slug, aliases, serving in _BEVERAGE_PATTERNS
+]
+
 
 # Volume units sorted longest-first within each base to avoid partials.
 _VOLUME_UNITS: list[tuple[str, int]] = [
@@ -159,12 +290,19 @@ def parse_beverage(text: str) -> BeverageMatch | str | None:
     # 1. Beverage match — first specific alias wins.
     found_slug: str | None = None
     found_default_serving: int | None = None
-    for slug, aliases, default_serving in _BEVERAGE_PATTERNS:
-        for alias in aliases:
-            if alias in normalized:
-                found_slug = slug
-                found_default_serving = default_serving
-                break
+    has_drink_context: bool | None = None
+    for slug, aliases, default_serving in _COMPILED_BEVERAGES:
+        for alias, pattern in aliases:
+            if not pattern.search(normalized):
+                continue
+            if alias in _CONTEXT_REQUIRED_ALIASES:
+                if has_drink_context is None:
+                    has_drink_context = bool(_DRINK_CONTEXT.search(normalized))
+                if not has_drink_context:
+                    continue
+            found_slug = slug
+            found_default_serving = default_serving
+            break
         if found_slug:
             break
 
