@@ -41,6 +41,59 @@
 # Strict. Any fixture failure → red. There is no soft-fail mode.
 # If you need to ship a behavioral change, update the fixtures in the
 # same PR. The fixture diff IS the design review for AI changes.
+#
+# ### Every refusal of this gate must be RED (DRF-1373)
+#
+# For fourteen consecutive runs this gate did not run to completion, and
+# nobody noticed, because both ways it stopped are GREY in the UI:
+#
+# 1. `timeout-minutes` — GitHub records an exceeded job timeout with
+#    conclusion `cancelled`, which renders identically to «somebody
+#    skipped this deliberately».
+# 2. `cancel-in-progress` on a `github.ref` group — nine PRs merged in a
+#    day, and each merge to `dev` cancelled the gate run of the previous
+#    merge. The gate that is supposed to check what LANDED effectively
+#    ran for the last merge of each burst only.
+#
+# A guard whose refusal is invisible is worse than no guard: it
+# manufactures calm. So:
+#
+# * every test step carries its OWN budget, enforced by `timeout(1)`
+#   INSIDE the step. An exceeded budget is a failed step, which is a
+#   failed job, which is RED, and it says in an ::error annotation which
+#   budget was blown and by which command.
+# * `timeout-minutes` on the job stays at ten and did NOT have to move.
+#   The budgets sum to 360s, so one of them always expires first. It is
+#   now a backstop against a wedged runner — the thing a job-level
+#   timeout is actually good for — and no longer the mechanism that
+#   reports a slow test suite.
+# * the concurrency group is keyed on the PR number, not the ref, and
+#   `cancel-in-progress` is restricted to pull requests. Superseding a
+#   PR commit is a legitimate grey; cancelling the gate for a commit
+#   that is already on `dev` is a hole.
+#
+# ### CI has no model, and now the RUNNER says so (DRF-1373)
+#
+# The scope note above promises the gate never calls a language model.
+# That promise was held by an accident: `resolve_intent` called
+# `llm_client.create(...)`, a method the router client does not have, so
+# every resolution raised `AttributeError` into its own `except` and
+# fell back deterministically. DRF-1310 (a18ca02) fixed the typo to
+# `llm_client.chat.completions.create(...)` — correct in production, and
+# it turned every fixture turn in this gate into a real TLS round trip
+# to api.openai.com, rejected 401 because the key here is fake. Measured
+# on the runner: the gate step went 16s → 287s and hit the ceiling.
+#
+# The fixture mocks `generate_concierge_reply` but not the resolver, so
+# the promise depended on one test file remembering every LLM entry
+# point on the live path. It cannot: new entry points arrive with
+# features, and the failure mode is silent (a 401 looks like a fallback).
+# The env block below therefore gives the JOB no route to any model —
+# `OPENAI_PROXY` points at a dead local port and the request budget is a
+# quarter-second — so a forgotten mock costs a fast deterministic
+# fallback instead of an outbound request. A test may still mock; it no
+# longer has to be the only thing standing between CI and a paid,
+# non-deterministic, third-party call.
 
 name: replay
 
@@ -61,14 +114,29 @@ on:
       - "**/*.md"
   workflow_dispatch:
 
+# Keyed on the PR, not the ref (DRF-1373). A new commit on a PR makes the
+# previous run's verdict meaningless, so cancelling it is honest. A push to
+# `dev` is a DIFFERENT commit that is already merged — cancelling its gate
+# run leaves landed code ungated, which is exactly how nine PRs went in
+# without a replay verdict. `github.sha` gives every push its own group, so
+# a burst of merges queues instead of cancelling.
 concurrency:
-  group: replay-${{ github.ref }}
-  cancel-in-progress: true
+  group: replay-${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   fixtures:
     name: replay fixtures (golden + adversarial + voice)
     runs-on: ubuntu-latest
+    # UNCHANGED, on purpose (DRF-1373). This ceiling was the symptom, never
+    # the defect: the run that hit it was making one outbound HTTP call per
+    # fixture turn, and raising the ceiling would have bought a few weeks of
+    # quiet and then failed again, larger. With that removed the job runs in
+    # 70s (run 32791956392), and the per-step budgets below sum to 360s — so
+    # a budget always expires first, and a budget expiring is RED. This one
+    # is now a backstop against a wedged runner, which is what a job-level
+    # timeout is actually good for. Raise it only together with the budgets,
+    # and only with a measurement in the PR.
     timeout-minutes: 10
 
     # E2 — `prompt-regression-accepted` label skips the gate.
@@ -113,6 +181,15 @@ jobs:
       POSTGRES_PASSWORD: platform
       REDIS_URL: redis://localhost:6379/0
       OPENAI_API_KEY: ci-fake-key-not-real
+      # DRF-1373 — «CI has no model» enforced by the runner, not by a mock.
+      # See the header block. A dead local port means an LLM call that a test
+      # forgot to stub fails immediately and deterministically instead of
+      # reaching a vendor; the quarter-second budget and the single attempt
+      # mean it cannot be slow even if a route ever appears.
+      OPENAI_PROXY: http://127.0.0.1:1
+      LLM_REQUEST_TIMEOUT_S: "0.25"
+      LLM_RETRY_MAX_ATTEMPTS: "1"
+      LLM_RETRY_BASE_DELAY_S: "0"
 
     steps:
       - uses: actions/checkout@v4
@@ -144,17 +221,64 @@ jobs:
       - name: uv sync
         run: uv sync --extra dev --extra ai-core --frozen
 
+      # DRF-1373 — a per-step budget that fails RED. `timeout-minutes` on the
+      # job cannot do this: GitHub records an exceeded job timeout as
+      # `cancelled`, grey and indistinguishable from a deliberate skip, which
+      # is how this gate went fourteen runs without anyone noticing it had
+      # stopped running. `timeout(1)` exits 124 (or 137 after SIGKILL), the
+      # step fails, the job is red, and the annotation names the budget.
+      - name: Install the step-budget wrapper
+        run: |
+          cat > "${RUNNER_TEMP}/budget" <<'SH'
+          #!/usr/bin/env bash
+          # usage: budget <seconds> <label> <command...>
+          seconds="$1"; shift
+          label="$1"; shift
+          set +e
+          timeout --signal=TERM --kill-after=30s "${seconds}" "$@"
+          rc=$?
+          set -e
+          if [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ]; then
+            echo "::error title=replay: ${label} exceeded its ${seconds}s budget::The step was killed at ${seconds}s, it did not pass and it did not fail on its own. Either something on the replay path got slower (profile it — DRF-1373 was one outbound HTTP call per fixture turn) or the budget needs raising WITH a measurement in the PR."
+            exit 1
+          fi
+          exit "$rc"
+          SH
+          chmod +x "${RUNNER_TEMP}/budget"
+
+      # `test_fixtures.py` and `test_live_path_gate.py` are excluded here
+      # because the two steps below run them by name (DRF-1373). Before, both
+      # files ran twice per job — the live-path gate is the most expensive
+      # thing in this workflow and it was paid for twice, for nothing.
+      #
+      # Every budget below is MEASURED, on run 32791956392 (this branch,
+      # green, 70s end to end): engine 14s, fixture sanity 1s, live-path
+      # gate 23s. Each budget is that number with room for runner variance
+      # and for the corpus to keep growing — a budget is a tripwire for a
+      # regression, not a target. They sum to 360s, which is why the job
+      # ceiling did not have to move: the inner budget always fires first,
+      # and it fires RED.
       - name: apps.replay unit + integration tests (strict)
-        run: uv run pytest apps/replay/ -v --tb=short
+        run: |
+          "${RUNNER_TEMP}/budget" 120 "engine tests" \
+            uv run pytest apps/replay/ \
+              --ignore=apps/replay/tests/test_fixtures.py \
+              --ignore=apps/replay/tests/test_live_path_gate.py \
+              -v --tb=short
 
       - name: Fixture set sanity (fixtures parse + baseline-clean)
-        run: uv run pytest apps/replay/tests/test_fixtures.py -v --tb=short
+        run: |
+          "${RUNNER_TEMP}/budget" 60 "fixture sanity" \
+            uv run pytest apps/replay/tests/test_fixtures.py -v --tb=short
 
       # The gate proper: fixtures through the live answering path. Prints
       # the covered/needs-a-model split on every run so a green check can
       # never be mistaken for "all fixtures verified".
       - name: Live-path gate (fixtures through the code that answers people)
-        run: uv run pytest apps/replay/tests/test_live_path_gate.py -v --tb=short
+        run: |
+          "${RUNNER_TEMP}/budget" 180 "live-path gate" \
+            uv run pytest apps/replay/tests/test_live_path_gate.py \
+              -v --tb=short --durations=15
 
   # E2 visibility — when the override label is present we still post a
   # status check confirming the bypass is intentional.
