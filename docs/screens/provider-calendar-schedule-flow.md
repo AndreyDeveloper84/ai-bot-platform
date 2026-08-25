@@ -211,6 +211,23 @@ Template schedule must be labelled:
 
 ## 3. Main navigation
 
+> [!IMPORTANT]
+> **CURRENT OVERRIDE — 25.08.2026**
+>
+> Навигационный контракт этого раздела superseded явным owner ruling.
+>
+> Для Salon Controlled Pilot CURRENT IA:
+>
+> `День · Команда · Услуги · Чаты · Настройки`
+>
+> Раздел нельзя убирать из навигации, пока его capability реально не покрыта другой Pilot surface.
+>
+> Override относится только к IA / §3. Остальная спецификация сохраняется как implementation provenance и действует там, где не отменена отдельно.
+>
+> ---
+>
+> *Примечание исполнителя (не часть owner ruling): §3 содержит* два *набора — `Salon/team` и `Solo-provider`. Override выше относится к* салонному *набору. Solo-набор подтверждён тем же решением владельца 25.08 (solo — отдельная operational persona) и исполнен рантаймом почти дословно (`App.tsx:598-602`). Разбор: `docs/UX_CANON_RECONCILIATION.md` §5.2.*
+
 Provider-side bottom navigation can use different labels depending on provider type.
 
 ### Solo-provider

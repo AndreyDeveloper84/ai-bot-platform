@@ -6,6 +6,29 @@
 
 > Ports [wellness-input-modules §6 Module 4 Sleep](../policies/wellness-input-modules.md#6-module-4--sleep-tracking) to engineering-ready spec. Phase 2 sibling to Mood + Water + Body. Unique dynamics: **retroactive morning logging** (slept last night, log this morning) + **two-axis data** (duration + quality) + strong cross-correlation potential with services.
 
+> **Сноска 2026-08-25 — модуль вне Controlled Pilot (owner decision №20, `docs/OPEN_DECISIONS.md` §20).**
+>
+> Владелец 25.08 решил: **сон и шаги в пилот не берём.** Модуль не отменён — **вынесен за пилот.**
+>
+> Важно для читающего этот handoff: механика ручного ввода, описанная ниже
+> («retroactive morning logging»), владельцем **рассмотрена и отвергнута явно**, дословно:
+>
+> > данных о сне неоткуда взять, **а вводить их вручную каждое утро человек не станет**
+>
+> То есть решение принято **не по неполным данным** и не потому, что об этом handoff не знали.
+> Довод «производитель есть — это сам пользователь» уже учтён и отклонён.
+>
+> Основание решения — общее правило того же дня: «блок, который всегда пуст или всегда
+> показывает нули, **хуже отсутствующего**: он обещает то, чего нет».
+>
+> Не отменено этим решением: интеграция с устройствами (HealthKit / Google Fit / Fitbit /
+> Garmin) — вынесена за пилот, а не запрещена; возвращение к ней требует отдельного разговора
+> о производителе данных, происхождении `measured` (требует owner approval по GOALS-R1)
+> и собственного consent/policy.
+>
+> Это **сноска о scope, а не OVERRIDE**: спецификация остаётся действующей как инженерный
+> контракт на случай, когда модуль вернётся. Разбор: `docs/UX_CANON_RECONCILIATION.md`.
+
 ## ⚠ r2 Ayla-first voice-sweep note
 
 Per [`project_ayla_first_strategic_pivot`](../policies/ayla-identity-and-brand.md) memory 2026-05-19: sleep data is **Ayla's memory of user** per [`ayla-memory-and-personalization §9`](../policies/ayla-memory-and-personalization.md) — cross-tenant. NO «sleep score» anti-pattern preserved. `HUMAN_LOCKED` references — backend mechanic; customer-facing flow via emergency fallback per [`ayla-emergency-fallback-policy §3`](../policies/ayla-emergency-fallback-policy.md). AI voice uses Ayla per [`ayla-identity-and-brand §2`](../policies/ayla-identity-and-brand.md).
