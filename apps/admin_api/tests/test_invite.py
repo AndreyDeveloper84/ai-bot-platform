@@ -874,6 +874,11 @@ class TestSiteDomainFallback:
         settings.SITE_DOMAIN = ""
 
         (warning,) = check_site_domain(None)
+        # `CheckMessage.hint` is `str | None`; the check is worthless if the
+        # hint is missing, so assert its presence rather than narrowing with
+        # a cast — a `type: ignore` here would record an assumption nobody
+        # would ever verify.
+        assert warning.hint is not None
         assert PILOT_SITE_DOMAIN in warning.hint
 
         with caplog.at_level(logging.ERROR, logger="apps.admin_api.views_invite"):
