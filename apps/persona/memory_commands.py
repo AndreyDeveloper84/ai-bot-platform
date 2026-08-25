@@ -55,6 +55,17 @@ FORGET_ALL_PROMPT = (
 )
 _FORGET_ALL_DONE = "Готово — я забыла всё, что о тебе знала. Начнём с чистого листа 🙂"
 
+# DRF-1367: said when the bot-side memory is gone but Ayla — the owner of the
+# declared profile (OD_MEMORY.md §1) — did not confirm the erasure. Claiming
+# «я забыла всё» in that state is a false statement about a legal request, and
+# the person disproves it on the next turn when the prompt still names their
+# budget.
+_FORGET_ALL_PARTIAL = (
+    "Я забыла всё, что помнила сама, но до анкеты в профиле сейчас не достучалась — "
+    "там ещё остались твои предпочтения. Напиши «забудь всё» ещё раз чуть позже, "
+    "и я доведу до конца."
+)
+
 _CONFIRM_WORD = "удалить"
 
 # SHOW triggers (substring match on normalised text). Kept explicit for
@@ -315,7 +326,11 @@ def _declared_phrases_for_show(bot_user) -> dict[str, str]:
 
 
 def _bridge_clear(bot_user, memory_keys: list[str]) -> None:
-    """Clear the Ayla declared fields for forgotten keys. Best-effort."""
+    """Clear the Ayla declared fields for a DOMAIN forget. Best-effort.
+
+    «Забудь про питание» — one domain, named on purpose. The whole-profile
+    «забудь всё» does NOT come through here; see :func:`_bridge_erase`.
+    """
 
     if bot_user is None:
         return
@@ -325,6 +340,32 @@ def _bridge_clear(bot_user, memory_keys: list[str]) -> None:
         clear_declared_fields(bot_user, memory_keys)
     except Exception:  # noqa: BLE001 — forget must never break the turn
         logger.exception("persona.memory_commands.bridge_clear_failed")
+
+
+def _bridge_erase(bot_user) -> bool:
+    """«Забудь всё» → ask Ayla to erase the profile it owns. Erased?
+
+    DRF-1367: the previous implementation walked ``_KEY_KEYWORDS`` and asked
+    the bridge to clear the fields it knows how to write — three of the twelve
+    on the row. The person heard «я забыла всё, что о тебе знала» and the very
+    next prompt still carried their budget, favourite master, home and work
+    districts, days off and minimum rating.
+
+    ``False`` here means the upstream profile is still populated. The caller
+    must not then claim everything was forgotten.
+    """
+
+    if bot_user is None:
+        # Bot-local command (no channel user passed): there is no Ayla side to
+        # erase and nothing upstream was ever written under this call path.
+        return True
+    try:
+        from apps.orchestrator.memory.ayla_bridge import erase_declared_profile
+
+        return erase_declared_profile(bot_user)
+    except Exception:  # noqa: BLE001 — forget must never break the turn
+        logger.exception("persona.memory_commands.bridge_erase_failed")
+        return False
 
 
 def handle_memory_command(
@@ -356,11 +397,18 @@ def handle_memory_command(
     if norm.rstrip(".!") == _CONFIRM_WORD:
         if last_assistant_text and _FORGET_ALL_MARKER in _normalise(last_assistant_text):
             request_forget_all(user_id)
-            # Forget must be REAL, not a mark (silent-remember ruling): the
-            # Ayla-side declared fields go back to empty in the same breath.
-            # price_range has no clear encoding in the frozen contract — the
-            # bridge logs that gap explicitly.
-            _bridge_clear(bot_user, sorted(_KEY_KEYWORDS))
+            # Forget must be REAL, not a mark (silent-remember ruling). Ayla
+            # owns the declared profile (OD_MEMORY.md §1), so this asks the
+            # owner to erase the whole row — one verb, no field list. Listing
+            # fields is the DRF-1367 defect: it emptied three of twelve and
+            # could not clear the price at all.
+            erased = _bridge_erase(bot_user)
+            if not erased:
+                # The upstream profile survived. Saying «я забыла всё» here
+                # would be a false statement about a 152-ФЗ erasure — and the
+                # person would catch us out on the next turn, when the prompt
+                # still names their budget.
+                return MemoryCommandResult(text=_FORGET_ALL_PARTIAL)
             return MemoryCommandResult(text=_FORGET_ALL_DONE)
         return None  # bare «удалить» with no pending prompt → not a command
 
