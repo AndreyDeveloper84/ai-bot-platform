@@ -177,7 +177,7 @@ class TestHappyPath:
         # SITE_DOMAIN», and until this line nothing configured it: the
         # test passed against the repository default, i.e. against the
         # localhost link that reached real invited masters on the pilot.
-        settings.SITE_DOMAIN = "https://api-dev.gobeauty.site"
+        settings.SITE_DOMAIN = "https://miniapp-dev.gobeauty.site"
         before = datetime.now(tz=timezone.utc)
         resp = client.post(
             _invite_url(),
@@ -636,7 +636,7 @@ class TestDispatch:
         patched_send_message,
         settings,
     ) -> None:
-        settings.SITE_DOMAIN = "https://api-dev.gobeauty.site"  # DRF-1079
+        settings.SITE_DOMAIN = "https://miniapp-dev.gobeauty.site"  # DRF-1079
         resp = client.post(
             _invite_url(),
             data=_valid_body(),
@@ -740,7 +740,7 @@ class TestSiteDomainFallback:
         patched_send_message,
         settings,
     ) -> None:
-        settings.SITE_DOMAIN = "https://api-dev.gobeauty.site"
+        settings.SITE_DOMAIN = "https://miniapp-dev.gobeauty.site"
         resp = client.post(
             _invite_url(),
             data=_valid_body(),
@@ -749,7 +749,7 @@ class TestSiteDomainFallback:
         )
         assert resp.status_code == 201, resp.content
         link = resp.json()["fallback_link"]
-        assert link.startswith("https://api-dev.gobeauty.site/onboarding/master?token=")
+        assert link.startswith("https://miniapp-dev.gobeauty.site/onboarding/master?token=")
         assert link in patched_send_message.call_args.kwargs["text"]
 
     def test_bare_host_gets_https(
@@ -762,7 +762,7 @@ class TestSiteDomainFallback:
     ) -> None:
         """A value written without a scheme must not become a relative URL."""
 
-        settings.SITE_DOMAIN = "api-dev.gobeauty.site"
+        settings.SITE_DOMAIN = "miniapp-dev.gobeauty.site"
         resp = client.post(
             _invite_url(),
             data=_valid_body(),
@@ -771,7 +771,7 @@ class TestSiteDomainFallback:
         )
         assert resp.status_code == 201, resp.content
         assert resp.json()["fallback_link"].startswith(
-            "https://api-dev.gobeauty.site/onboarding/master?token="
+            "https://miniapp-dev.gobeauty.site/onboarding/master?token="
         )
 
     def test_loopback_domain_suppresses_the_link(
@@ -833,5 +833,49 @@ class TestSiteDomainFallback:
         warnings = check_site_domain(None)
         assert [w.id for w in warnings] == ["admin_api.W001"]
 
-        settings.SITE_DOMAIN = "https://api-dev.gobeauty.site"
+        settings.SITE_DOMAIN = "https://miniapp-dev.gobeauty.site"
         assert check_site_domain(None) == []
+
+    def test_hint_names_the_mini_app_origin_not_the_backend(self, settings, caplog) -> None:
+        """The hint is the fix's other half, and it was wrong.
+
+        Both statements of it — the system-check hint and the runtime
+        ERROR line — named ``api-dev.gobeauty.site``. That host is the
+        Django backend; it answers 404 on ``/onboarding/master``,
+        because the route is a client-side route of the Mini App SPA
+        (``apps/miniapp/src/App.tsx`` →  ``MasterOnboardingScreen``).
+        Verified by live request 2026-08-25: ``api-dev`` 404,
+        ``miniapp-dev`` 200.
+
+        Suppressing the localhost link protects the master who was
+        already invited. The hint decides what the *next* person types
+        into ``.env.staging`` — and pointing them at the backend
+        reproduces the same dead link with a domain that looks right.
+        So it is pinned, in both places it is read.
+        """
+
+        import logging
+
+        from apps.admin_api.checks import check_site_domain
+        from apps.admin_api.views_invite import (
+            PILOT_SITE_DOMAIN,
+            SITE_DOMAIN_HINT,
+            _fallback_link,
+        )
+        import uuid as _uuid
+
+        assert PILOT_SITE_DOMAIN == "https://miniapp-dev.gobeauty.site"
+        assert PILOT_SITE_DOMAIN in SITE_DOMAIN_HINT
+        # Naming the backend host is allowed only as the negative
+        # example — never as the value to set.
+        assert "NOT the backend host https://api-dev.gobeauty.site" in SITE_DOMAIN_HINT
+
+        settings.DEBUG = False
+        settings.SITE_DOMAIN = ""
+
+        (warning,) = check_site_domain(None)
+        assert PILOT_SITE_DOMAIN in warning.hint
+
+        with caplog.at_level(logging.ERROR, logger="apps.admin_api.views_invite"):
+            assert _fallback_link(_uuid.uuid4()) == ""
+        assert PILOT_SITE_DOMAIN in caplog.text

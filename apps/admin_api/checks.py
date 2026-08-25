@@ -22,6 +22,15 @@ trading a broken invite link for a dead bot. A system check is the
 right weight: ``manage.py migrate`` and ``manage.py check`` run it, so
 it is loud in CI and in the deploy log, and it blocks nothing.
 
+### The hint is imported, not retyped
+
+The wording lives in ``views_invite.SITE_DOMAIN_HINT``. Both copies of
+this hint used to be written out by hand and both named the *backend*
+host ``api-dev.gobeauty.site``, which 404s on ``/onboarding/master`` —
+the route belongs to the Mini App SPA. Whoever read either copy set the
+wrong value and got the same dead link the guard exists to prevent. One
+string, imported twice, is what keeps the correction from decaying.
+
 Registered from :class:`apps.admin_api.apps.AdminApiConfig` — the app
 that owns the endpoint embedding the value.
 """
@@ -38,7 +47,11 @@ def check_site_domain(app_configs: Any, **kwargs: Any) -> list[CheckWarning]:
 
     from django.conf import settings
 
-    from apps.admin_api.views_invite import _site_domain, _site_domain_is_loopback
+    from apps.admin_api.views_invite import (
+        SITE_DOMAIN_HINT,
+        _site_domain,
+        _site_domain_is_loopback,
+    )
 
     if settings.DEBUG:
         return []
@@ -50,10 +63,9 @@ def check_site_domain(app_configs: Any, **kwargs: Any) -> list[CheckWarning]:
             f"{_site_domain()}, which resolves on the developer machine "
             "and nowhere else.",
             hint=(
-                "Set SITE_DOMAIN to the Mini App origin (pilot: "
-                "https://api-dev.gobeauty.site). Until then the web "
-                "fallback is suppressed and an invited master has only "
-                "the in-MAX deeplink."
+                f"{SITE_DOMAIN_HINT} Until then the web fallback is "
+                "suppressed and an invited master has only the in-MAX "
+                "deeplink."
             ),
             id="admin_api.W001",
         )

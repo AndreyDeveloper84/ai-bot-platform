@@ -109,6 +109,55 @@ INVITE_TTL_DAYS = 7
 DEFAULT_SITE_DOMAIN = "http://localhost:5173"
 """Used when settings.SITE_DOMAIN is unset — Vite dev default."""
 
+PILOT_SITE_DOMAIN = "https://miniapp-dev.gobeauty.site"
+"""The pilot's Mini App origin — the value ``SITE_DOMAIN`` must carry.
+
+**Not** ``https://api-dev.gobeauty.site``. That is the *backend* host;
+it answers 404 on ``/onboarding/master`` and on its own root, because
+the route does not exist there. ``/onboarding/master`` is a client-side
+route of the Mini App SPA (``apps/miniapp/src/App.tsx``, the
+``MasterOnboardingScreen`` element) and is served only from the Mini App
+origin — the same origin CI already points the drift check at
+(``.github/workflows/miniapp-drift.yml``).
+
+Both earlier statements of this hint named the backend host. Verified by
+live request 2026-08-25:
+
+    api-dev.gobeauty.site/onboarding/master?token=...      404
+    miniapp-dev.gobeauty.site/onboarding/master?token=...  200
+
+### Three hosts, and this setting names exactly one of them
+
+The contour has three public addresses, and confusing them is how the
+wrong one came to be written down twice:
+
+* ``api-dev.gobeauty.site``     — this Django backend, and the Django
+  admin, which is why ``DJANGO_CSRF_TRUSTED_ORIGINS`` *does* name it;
+* ``miniapp-dev.gobeauty.site`` — the Mini App SPA. **This setting.**
+* ``dev.gobeauty.site/api/v1``  — what the mobile apps talk to
+  (``packages/shared/src/api/client.ts`` in the mobile repo).
+
+``SITE_DOMAIN`` is the web fallback of a MAX invite, so it is the Mini
+App origin and nothing else. Pointing it at either neighbour yields a
+link that opens nothing with no error on our side — the same silence
+this guard exists to break. Which host is canonical for the product is
+an owner question; it does not change what *this* variable means.
+"""
+
+SITE_DOMAIN_HINT = (
+    f"Set SITE_DOMAIN to the Mini App origin (pilot: {PILOT_SITE_DOMAIN}). "
+    "It is NOT the backend host https://api-dev.gobeauty.site — that one "
+    "404s on /onboarding/master, the route lives in the Mini App SPA."
+)
+"""One text, two readers: the deploy log and the runtime ERROR line.
+
+The hint was previously written out twice — here and in
+:mod:`apps.admin_api.checks` — and both copies named the wrong host. A
+variable gets set once; a hint gets read by everyone who touches this
+next. Keeping a single string is what stops the second copy from
+drifting back.
+"""
+
 LOOPBACK_HOSTS = ("localhost", "127.0.0.1", "0.0.0.0", "[::1]", "::1")
 """Hosts that mean «this developer machine» and nobody else's.
 
@@ -189,10 +238,10 @@ def _fallback_link(token: uuid.UUID) -> str:
     if not settings.DEBUG and _site_domain_is_loopback():
         logger.error(
             "admin_api.invite.site_domain_unset — web fallback suppressed: "
-            "SITE_DOMAIN resolves to %s. Set SITE_DOMAIN to the Mini App "
-            "origin (pilot: https://api-dev.gobeauty.site) or invited "
-            "masters get a link that opens nothing.",
+            "SITE_DOMAIN resolves to %s. %s Until then invited masters "
+            "have only the in-MAX deeplink.",
             _site_domain(),
+            SITE_DOMAIN_HINT,
         )
         return ""
     return f"{_site_domain()}/onboarding/master?token={token}"
