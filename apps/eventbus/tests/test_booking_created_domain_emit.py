@@ -28,7 +28,9 @@ This suite pins the fix:
 from __future__ import annotations
 
 import datetime as dt
+import logging
 from typing import Any
+from unittest.mock import patch
 from uuid import UUID
 
 import pytest
@@ -36,6 +38,7 @@ from django.test import override_settings
 from freezegun import freeze_time
 
 from apps.booking.models import BookingRequest, RemoteBookingProxy
+from apps.eventbus import services
 from apps.eventbus import vocabulary as V
 from apps.eventbus.consumers.booking import handle_booking_created
 from apps.eventbus.ingest_envelope import IngestEnvelope
@@ -287,6 +290,82 @@ class TestExactlyOncePerAppointment:
         # Chat origin is the durable local proof of ai_direct.
         assert attribution.first().data["booking_source"] == "ai_direct"
         assert attribution.first().data["billable"] is True
+
+
+class TestPerEventDedup:
+    """Ревью PR #1286 (Important): дедуп — по каждому событию отдельно.
+
+    Оба эмита сидят в одном try с проглатыванием исключения. Если
+    ``booking.created`` вставился, а ``booking.attribution.assigned``
+    упал, исключение проглочено, redelivery не будет, а повторная
+    обработка выходила по дедупу на существование BOOKING_CREATED —
+    атрибуция терялась навсегда. Дедуп и try/except теперь пер-событие.
+    """
+
+    def test_missing_attribution_is_backfilled_on_reprocessing(
+        self, tenant: Tenant, bot_user_linked: BotUser
+    ) -> None:
+        """Частичный исход прошлой обработки: строка booking.created
+        есть, attribution — нет. Повторный проход обязан доэмитить
+        ТОЛЬКО attribution, не задваивая created."""
+        services.emit_booking_created(
+            booking_id=APPOINTMENT_ID,
+            customer_id=AYLA_USER_ID,
+            service_id=SERVICE_ID,
+            slot_start="2026-05-22T15:00:00+03:00",
+            booking_source="ai_direct",
+            master_id=SPECIALIST_ID,
+            tenant=tenant,
+        )
+
+        handle_booking_created(_envelope(data=_created_data()))
+
+        created = DomainEvent.objects.filter(event_name=V.BOOKING_CREATED)
+        attribution = DomainEvent.objects.filter(event_name=V.BOOKING_ATTRIBUTION_ASSIGNED)
+        assert created.count() == 1  # не задвоился
+        assert attribution.count() == 1  # доэмитился
+        assert attribution.first().data["booking_id"] == APPOINTMENT_ID
+        assert attribution.first().data["billable"] is True
+
+    def test_missing_created_is_backfilled_on_reprocessing(
+        self, tenant: Tenant, bot_user_linked: BotUser
+    ) -> None:
+        """Зеркальный частичный исход: attribution есть, created — нет."""
+        services.emit_booking_attribution_assigned(
+            booking_id=APPOINTMENT_ID,
+            booking_source="ai_direct",
+            ai_assist_score=1.0,
+            billable=True,
+            tenant=tenant,
+        )
+
+        handle_booking_created(_envelope(data=_created_data()))
+
+        assert DomainEvent.objects.filter(event_name=V.BOOKING_CREATED).count() == 1
+        assert DomainEvent.objects.filter(event_name=V.BOOKING_ATTRIBUTION_ASSIGNED).count() == 1
+
+    def test_emit_exception_is_swallowed_and_logged(
+        self, tenant: Tenant, bot_user_linked: BotUser, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Телеметрия не ломает консюмер: упавший эмит attribution
+        логируется и проглатывается; created при этом вставляется, а
+        отсутствие attribution остаётся видимым для дедуп-бэкфилла."""
+
+        def _boom(**kwargs: Any) -> Any:
+            raise RuntimeError("simulated emit failure")
+
+        with (
+            patch("apps.eventbus.consumers.booking.emit_booking_attribution_assigned", _boom),
+            caplog.at_level(logging.ERROR, logger="apps.eventbus.consumers.booking"),
+        ):
+            handle_booking_created(_envelope(data=_created_data()))
+
+        assert DomainEvent.objects.filter(event_name=V.BOOKING_CREATED).count() == 1
+        assert DomainEvent.objects.filter(event_name=V.BOOKING_ATTRIBUTION_ASSIGNED).count() == 0
+        assert any(
+            "domain_emit_failed" in rec.message and "attribution" in rec.message
+            for rec in caplog.records
+        )
 
 
 class TestFlagOffUnchanged:

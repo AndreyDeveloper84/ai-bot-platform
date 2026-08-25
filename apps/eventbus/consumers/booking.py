@@ -692,14 +692,6 @@ def _emit_domain_booking_created_pair(
         return
 
     booking_id = str(appointment_id)
-    if DomainEvent.objects.filter(
-        event_name=V.BOOKING_CREATED, data__booking_id=booking_id
-    ).exists():
-        logger.info(
-            "eventbus.consumer.booking.created.domain_emit_skipped_duplicate appointment_id=%s",
-            appointment_id,
-        )
-        return
 
     # Chat origin is the durable local proof of ai_direct; the wire
     # ``source`` cannot distinguish surfaces by itself (the bot does not
@@ -717,37 +709,70 @@ def _emit_domain_booking_created_pair(
     # would overflow it.
     metadata = {"ingest_event_id": envelope.event_id}
 
-    try:
-        emit_booking_created(
-            booking_id=booking_id,
-            customer_id=str(envelope.user_id or ""),
-            service_id=str(service_uuid) if service_uuid else "",
-            slot_start=envelope.data["start_at"],
-            slot_end=envelope.data.get("end_at", ""),
-            booking_source=booking_source,
-            master_id=str(specialist_uuid) if specialist_uuid else "",
-            tenant=tenant,
-            correlation_id=correlation_id,
-            occurred_at=envelope.occurred_at,
-            metadata=metadata,
-        )
-        emit_booking_attribution_assigned(
-            booking_id=booking_id,
-            booking_source=booking_source,
-            ai_assist_score=float(compute_assist_score(booking_source=booking_source)),
-            billable=billable,
-            billing_reason=billing_reason,
-            attribution_metadata={"source": raw_source},
-            tenant=tenant,
-            correlation_id=correlation_id,
-            occurred_at=envelope.occurred_at,
-            metadata=metadata,
-        )
-    except Exception:  # noqa: BLE001 — telemetry must never break the consumer
-        logger.exception(
-            "eventbus.consumer.booking.created.domain_emit_failed appointment_id=%s",
+    # Dedup + try/except are PER EVENT (PR #1286 review): the two emits
+    # used to share one try, so a swallowed failure of the second left the
+    # first one's row behind — and the pair-level dedup then skipped the
+    # retry forever, silently losing attribution/billable, the very data
+    # DRF-1140 exists to deliver. A partially-emitted appointment is now
+    # completed on the next pass instead of being mistaken for a done one.
+    if DomainEvent.objects.filter(
+        event_name=V.BOOKING_CREATED, data__booking_id=booking_id
+    ).exists():
+        logger.info(
+            "eventbus.consumer.booking.created.domain_emit_skipped_duplicate "
+            "event=booking.created appointment_id=%s",
             appointment_id,
         )
+    else:
+        try:
+            emit_booking_created(
+                booking_id=booking_id,
+                customer_id=str(envelope.user_id or ""),
+                service_id=str(service_uuid) if service_uuid else "",
+                slot_start=envelope.data["start_at"],
+                slot_end=envelope.data.get("end_at", ""),
+                booking_source=booking_source,
+                master_id=str(specialist_uuid) if specialist_uuid else "",
+                tenant=tenant,
+                correlation_id=correlation_id,
+                occurred_at=envelope.occurred_at,
+                metadata=metadata,
+            )
+        except Exception:  # noqa: BLE001 — telemetry must never break the consumer
+            logger.exception(
+                "eventbus.consumer.booking.created.domain_emit_failed "
+                "event=booking.created appointment_id=%s",
+                appointment_id,
+            )
+
+    if DomainEvent.objects.filter(
+        event_name=V.BOOKING_ATTRIBUTION_ASSIGNED, data__booking_id=booking_id
+    ).exists():
+        logger.info(
+            "eventbus.consumer.booking.created.domain_emit_skipped_duplicate "
+            "event=booking.attribution.assigned appointment_id=%s",
+            appointment_id,
+        )
+    else:
+        try:
+            emit_booking_attribution_assigned(
+                booking_id=booking_id,
+                booking_source=booking_source,
+                ai_assist_score=float(compute_assist_score(booking_source=booking_source)),
+                billable=billable,
+                billing_reason=billing_reason,
+                attribution_metadata={"source": raw_source},
+                tenant=tenant,
+                correlation_id=correlation_id,
+                occurred_at=envelope.occurred_at,
+                metadata=metadata,
+            )
+        except Exception:  # noqa: BLE001 — telemetry must never break the consumer
+            logger.exception(
+                "eventbus.consumer.booking.created.domain_emit_failed "
+                "event=booking.attribution.assigned appointment_id=%s",
+                appointment_id,
+            )
 
 
 # ─── handlers ──────────────────────────────────────────────────────────────
