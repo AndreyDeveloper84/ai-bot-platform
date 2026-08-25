@@ -418,6 +418,24 @@ LIVE_PATH_AI_METRIC_ENABLED = os.environ.get("LIVE_PATH_AI_METRIC_ENABLED", "fal
     "1",
 )
 
+# DRF-1209 step 18 — ``ReplayTrace`` capture on the LIVE MAX paths
+# (apps/channels/max/handler.py). Until now ``apps.replay.recorder`` was
+# called only by the DEPRECATED ``apps.orchestrator.pipeline.turn`` (zero
+# callers outside docstrings/tests) and the offline replay runner — the
+# path that actually answers people wrote no traces, so live behaviour
+# could not be replayed/diffed. This flag ports the SAME recorder (same
+# sampling via REPLAY_SAMPLE_RATE_*, same regex_v2 redaction before
+# persist) onto the live handler: global concierge/deterministic turns
+# and per-tenant skill-dispatch turns. Default OFF = zero new rows,
+# byte-identical behaviour; rollback is env-only, no redeploy. Capture is
+# best-effort — a recorder failure logs WARN and never breaks the
+# user-facing turn. Live rows are distinguishable from pipeline rows by
+# the ``source: "live_path"`` marker on the inbound step payload.
+REPLAY_LIVE_CAPTURE_ENABLED = os.environ.get("REPLAY_LIVE_CAPTURE_ENABLED", "false").lower() in (
+    "true",
+    "1",
+)
+
 # #433 umbrella — HANDLER_EXCEPTION → DLQ threshold. A handler that
 # raises gets retried by Ayla per §6.3; after this many failed
 # attempts (counted per event_id + handler), bot-platform upserts a
