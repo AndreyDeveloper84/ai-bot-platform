@@ -44,9 +44,15 @@ def _make_booking(
     visit_local: datetime,
     duration_min: int = 60,
     status: str = BookingRequest.Status.CONFIRMED,
+    completed: bool = True,
     service_name: str = "маникюр гель-лак",
     client_name: str = "Клиент",
 ) -> BookingRequest:
+    """A roster-visible row is a COMPLETED visit (DRF-1146): the owner
+    ruled the chip counts visits, not bookings, so the helper stamps
+    ``completed_at`` by default. ``completed=False`` reproduces the old
+    world — a confirmed booking that never became a visit — for the
+    tests that pin the new rule."""
     return BookingRequest.all_tenants.create(
         tenant=tenant,
         master=master,
@@ -57,6 +63,7 @@ def _make_booking(
         visit_at=_utc(visit_local),
         duration_min=duration_min,
         status=status,
+        completed_at=_utc(visit_local) if completed else None,
     )
 
 
@@ -215,6 +222,7 @@ class TestRosterAggregation:
                 visit_at=visit_at,
                 duration_min=60,
                 status=BookingRequest.Status.CONFIRMED,
+                completed_at=visit_at,
             )
         out = cs.list_master_customers(master=accepted_master, now=now)
         assert len(out) == 1
@@ -237,6 +245,7 @@ class TestRosterAggregation:
             visit_at=now - timedelta(days=90),
             duration_min=60,
             status=BookingRequest.Status.CONFIRMED,
+            completed_at=now - timedelta(days=90),
         )
         out = cs.list_master_customers(master=accepted_master, now=now)
         assert out[0]["at_risk"] is False
@@ -251,7 +260,28 @@ class TestRosterAggregation:
             bot_user=anna,
             visit_local=datetime(2026, 5, 20, 14, 0),
             status=BookingRequest.Status.CANCELLED,
+            completed=False,
         )
+        out = cs.list_master_customers(master=accepted_master)
+        assert out == []
+
+    def test_confirmed_but_never_completed_is_not_a_visit(
+        self, tenant: Tenant, accepted_master: CatalogMaster
+    ) -> None:
+        """DRF-1146, the pilot's own row: ten bookings, zero visits.
+
+        A CONFIRMED row without ``completed_at`` was booked, not visited —
+        the owner ruled the chip counts visits (25.08), so this customer
+        does not exist for the roster until a visit actually completes."""
+        anna = _make_client(tenant=tenant, channel_user_id="x2", client_name="Анна")
+        for day in (10, 15, 20):
+            _make_booking(
+                tenant=tenant,
+                master=accepted_master,
+                bot_user=anna,
+                visit_local=datetime(2026, 5, day, 14, 0),
+                completed=False,
+            )
         out = cs.list_master_customers(master=accepted_master)
         assert out == []
 

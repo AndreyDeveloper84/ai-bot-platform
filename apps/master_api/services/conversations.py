@@ -367,11 +367,12 @@ def _sla_tier(last_message_at: datetime | None, now: datetime) -> SlaTier:
 def _build_returning_set(master: CatalogMaster, bot_user_ids: list[Any]) -> set[Any]:
     """Single-scan returning-customer index for the page.
 
-    Returning = >1 CONFIRMED + COMPLETED bookings with this master.
-    Same definition as
+    Returning = >1 COMPLETED visits with this master. Same definition as
     :func:`apps.master_api.services.dashboard._is_returning_customer`,
     optimised to one DB scan per page (avoids N+1 across items).
 
+    DRF-1146 (owner decision 25.08): visits, not bookings — a
+    confirmation that never became a visit does not make a regular.
     «Completed» is encoded as ``completed_at IS NOT NULL`` — the
     BookingRequest model has no COMPLETED status value; the post-visit
     Celery beat stamps ``completed_at`` instead.
@@ -379,15 +380,12 @@ def _build_returning_set(master: CatalogMaster, bot_user_ids: list[Any]) -> set[
 
     if not bot_user_ids:
         return set()
-    rows = (
-        BookingRequest.all_tenants.filter(
-            tenant_id=master.tenant_id,
-            master_id=master.id,
-            bot_user_id__in=list(bot_user_ids),
-        )
-        .filter(Q(status=BookingRequest.Status.CONFIRMED) | Q(completed_at__isnull=False))
-        .values_list("bot_user_id", flat=True)
-    )
+    rows = BookingRequest.all_tenants.filter(
+        tenant_id=master.tenant_id,
+        master_id=master.id,
+        bot_user_id__in=list(bot_user_ids),
+        completed_at__isnull=False,
+    ).values_list("bot_user_id", flat=True)
     counts = Counter(rows)
     return {bid for bid, n in counts.items() if n > 1}
 
@@ -401,15 +399,12 @@ def _is_returning(bot_user: Any, master: CatalogMaster) -> bool:
 
     if bot_user is None:
         return False
-    n = (
-        BookingRequest.all_tenants.filter(
-            tenant_id=master.tenant_id,
-            master_id=master.id,
-            bot_user_id=bot_user.id,
-        )
-        .filter(Q(status=BookingRequest.Status.CONFIRMED) | Q(completed_at__isnull=False))
-        .count()
-    )
+    n = BookingRequest.all_tenants.filter(
+        tenant_id=master.tenant_id,
+        master_id=master.id,
+        bot_user_id=bot_user.id,
+        completed_at__isnull=False,
+    ).count()
     return n > 1
 
 

@@ -332,7 +332,41 @@ class TestNextVisit:
         self, tenant: Tenant, accepted_master: CatalogMaster, bot_user: BotUser
     ) -> None:
         now_local = datetime(2026, 5, 21, 14, 0, tzinfo=MSK)
-        # History: one prior booking + one upcoming.
+        # History: TWO COMPLETED visits + one upcoming (DRF-1146: the chip
+        # is «приходил больше одного раза» — one past visit is not «постоянный»).
+        _make_booking(
+            tenant=tenant,
+            master=accepted_master,
+            bot_user=bot_user,
+            visit_local=datetime(2026, 5, 1, 12, 0, tzinfo=MSK),
+            completed_at=_utc(datetime(2026, 5, 1, 12, 0, tzinfo=MSK)),
+        )
+        _make_booking(
+            tenant=tenant,
+            master=accepted_master,
+            bot_user=bot_user,
+            visit_local=datetime(2026, 5, 10, 12, 0, tzinfo=MSK),
+            completed_at=_utc(datetime(2026, 5, 10, 12, 0, tzinfo=MSK)),
+        )
+        _make_booking(
+            tenant=tenant,
+            master=accepted_master,
+            bot_user=bot_user,
+            visit_local=datetime(2026, 5, 21, 16, 0, tzinfo=MSK),
+        )
+        result = ds.get_next_visit(accepted_master, _utc(now_local))
+        assert result is not None
+        assert result.is_returning_customer is True
+
+    def test_booked_but_never_completed_is_not_returning(
+        self, tenant: Tenant, accepted_master: CatalogMaster, bot_user: BotUser
+    ) -> None:
+        """DRF-1146, the pilot's own story: 10 bookings, 0 visits.
+
+        One prior CONFIRMED booking that never completed + one upcoming —
+        the old rule said «постоянный клиент»; the owner ruled (25.08)
+        the chip counts visits, so it stays dark until a visit completes."""
+        now_local = datetime(2026, 5, 21, 14, 0, tzinfo=MSK)
         _make_booking(
             tenant=tenant,
             master=accepted_master,
@@ -347,7 +381,7 @@ class TestNextVisit:
         )
         result = ds.get_next_visit(accepted_master, _utc(now_local))
         assert result is not None
-        assert result.is_returning_customer is True
+        assert result.is_returning_customer is False
 
     def test_returns_none_when_empty(self, tenant: Tenant, accepted_master: CatalogMaster) -> None:
         now_local = datetime(2026, 5, 21, 14, 0, tzinfo=MSK)
