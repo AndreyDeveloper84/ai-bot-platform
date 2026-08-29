@@ -9,6 +9,8 @@ that feed the wire numeric values and read the DTO back.
 
 from __future__ import annotations
 
+from typing import Any
+
 import httpx
 import pytest
 
@@ -128,7 +130,12 @@ class TestGetWellnessContext:
         assert outcome.progress_state == "no_observations"
 
     def test_malformed_rows_are_skipped_not_fatal(self) -> None:
-        payload = {"data": {"plan": {}, "outcomes": ["junk", _outcome()], "gated": None}}
+        # Разнородный по замыслу: смысл теста в том, что рядом с
+        # корректной строкой лежит НЕ-словарь, поэтому литерал сам по
+        # себе не сужается до одного типа значения.
+        payload: dict[str, Any] = {
+            "data": {"plan": {}, "outcomes": ["junk", _outcome()], "gated": None}
+        }
         out = _client(_ok(payload)).get_wellness_context(external_user_id=_EXT)
         assert len(out.outcomes) == 1
 
