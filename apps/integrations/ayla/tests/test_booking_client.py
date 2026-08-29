@@ -275,64 +275,6 @@ class TestReadRoundTrip:
         with pytest.raises(bc.BookingBadRequestError, match="tenant_scope_required"):
             _client_with(handler).get_services()
 
-    def test_get_services_for_specialist_uses_bookable_edges(self, db) -> None:
-        """DRF-1004: the specialist branch reads canonical
-        ``catalog/specialist-services/`` edges and joins them with the
-        salon-services catalog — the legacy nested path returned count=0."""
-        tenant = Tenant.objects.create(slug="svc-spec", name="T")
-        captured: list[httpx.Request] = []
-
-        def handler(req: httpx.Request) -> httpx.Response:
-            captured.append(req)
-            if req.url.path.endswith("catalog/specialist-services/"):
-                return httpx.Response(
-                    200,
-                    json={
-                        "count": 1,
-                        "next": None,
-                        "results": [
-                            {
-                                "id": "edge-1",
-                                "salon_service": "svc-uuid-1",
-                                "specialist": "spec-1",
-                                "tenant": str(tenant.id),
-                            }
-                        ],
-                    },
-                )
-            if req.url.path.endswith("catalog/salon-services/"):
-                return httpx.Response(
-                    200,
-                    json={
-                        "count": 2,
-                        "next": None,
-                        "results": [
-                            {
-                                "id": "svc-uuid-1",
-                                "name": "Массаж",
-                                "base_price": "100.00",
-                                "duration_minutes": 60,
-                            },
-                            {
-                                "id": "svc-uuid-2",
-                                "name": "Другое",
-                                "base_price": "50.00",
-                                "duration_minutes": 30,
-                            },
-                        ],
-                    },
-                )
-            return httpx.Response(404, json={})
-
-        with tenant_scope(tenant):
-            out = _client_with(handler).get_services(specialist_id="spec-1")
-        edge_req = next(r for r in captured if r.url.path.endswith("specialist-services/"))
-        assert edge_req.url.params["specialist"] == "spec-1"
-        assert edge_req.url.params["tenant"] == str(tenant.id)
-        assert edge_req.url.params["is_active"] == "true"
-        assert [s.id for s in out] == ["svc-uuid-1"]
-        assert out[0].title == "Массаж"
-
     def test_get_masters_paginated_results(self) -> None:
         def handler(req: httpx.Request) -> httpx.Response:
             return httpx.Response(

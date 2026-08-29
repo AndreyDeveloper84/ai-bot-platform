@@ -89,7 +89,7 @@ class FakeAylaBooking:
         if self.raise_exc is not None:
             raise self.raise_exc
 
-    def get_services(self, *, specialist_id: str | None = None) -> list[AylaService]:
+    def get_services(self) -> list[AylaService]:
         self._maybe_raise()
         return list(self.services_rows)
 

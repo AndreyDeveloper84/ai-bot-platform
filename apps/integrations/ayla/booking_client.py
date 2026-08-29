@@ -391,7 +391,7 @@ class AylaBookingClient(Protocol):
     Catalog ids are Ayla UUIDs (strings).
     """
 
-    def get_services(self, *, specialist_id: str | None = ...) -> list[AylaService]: ...
+    def get_services(self) -> list[AylaService]: ...
 
     def get_masters(self, *, specialist_id: str | None = ...) -> list[AylaMaster]: ...
 
@@ -809,32 +809,36 @@ class AylaBookingHTTPClient:
 
     # ── reads ────────────────────────────────────────────────────────────────
 
-    def get_services(self, *, specialist_id: str | None = None) -> list[AylaService]:
-        """Service catalog from Ayla's canonical catalog endpoints (DRF-1004).
+    def get_services(self) -> list[AylaService]:
+        """The tenant's whole active service catalog (DRF-1004).
 
-        The legacy ``services/`` / ``specialists/<id>/services/`` feeds are
-        dead upstream (legacy ``Service`` queryset is globally empty); the
-        live catalog is ``catalog/salon-services/``, plus the
-        ``catalog/specialist-services/`` bookable edges for the
-        per-specialist branch. Both reads are scoped by the active tenant —
-        a call without tenant scope is an error, not an empty catalog.
+        The legacy ``services/`` feed is dead upstream (legacy ``Service``
+        queryset is globally empty); the live catalog is
+        ``catalog/salon-services/``. The read is scoped by the active
+        tenant — a call without tenant scope is an error, not an empty
+        catalog.
+
+        Whole-catalog on purpose (DRF-1019). This used to take a
+        ``specialist_id`` that fetched the tenant's bookable edges as a
+        SECOND full page-walk and intersected the two lists in memory. No
+        caller ever passed it: the bot's single call site
+        (``apps/skills/booking/skill.py``) wants the whole catalog, because
+        it builds the service-id allow-set and the name lookup for the whole
+        dialog. The branch was removed rather than wired up, because both
+        readers that genuinely need "what does this master do" are already
+        cheaper than it was:
+
+        * one (specialist, service) pair → :meth:`get_specialist_service_edges`
+          — a single narrow request that also keeps the edge ``price``;
+        * a master's whole roster → the local ``catalog.MasterService``
+          mirror, joined in SQL (``apps/orchestrator/handoff.py``), no HTTP
+          at all.
         """
         tenant_id = _require_tenant_id()
         rows = self._get_all_rows(
             "catalog/salon-services/",
             params={"tenant": tenant_id, "is_active": "true"},
         )
-        if specialist_id:
-            edges = self._get_all_rows(
-                "catalog/specialist-services/",
-                params={
-                    "tenant": tenant_id,
-                    "specialist": specialist_id,
-                    "is_active": "true",
-                },
-            )
-            allowed = {str(e.get("salon_service")) for e in edges if e.get("salon_service")}
-            rows = [r for r in rows if str(r.get("id")) in allowed]
         return [_service_from_wire(r) for r in rows]
 
     def _get_all_rows(self, endpoint: str, *, params: dict[str, Any]) -> list[dict[str, Any]]:
@@ -1131,12 +1135,14 @@ class AylaBookingHTTPClient:
     ) -> list[dict[str, Any]]:
         """Active bookable edges for ONE (specialist, salon service) pair.
 
-        Narrow on purpose. ``get_services`` already reads the same endpoint,
-        but it walks the whole tenant catalog, needs an active tenant scope,
-        and keeps only the ids — the row's own ``price`` (the amount Ayla
-        stamps onto a new appointment) is dropped. The quote (DRF-1067) and
-        repeat need that price and work on the tenant-less global path, so
-        they ask for the single row instead of filtering a catalog.
+        Narrow on purpose, and — since DRF-1019 removed ``get_services``'s
+        unreachable per-specialist branch — the ONLY reader of
+        ``catalog/specialist-services/`` on this client. The removed branch
+        walked the whole tenant edge list, needed an active tenant scope, and
+        kept only the ids: the row's own ``price`` (the amount Ayla stamps
+        onto a new appointment) was dropped. The quote (DRF-1067) and repeat
+        need that price and work on the tenant-less global path, so they ask
+        for the single row instead of filtering a catalog.
 
         No tenant filter: ``(specialist, salon_service)`` is unique upstream
         (``specialistservice_specialist_salon_uniq``), so the pair already

@@ -84,7 +84,7 @@ class FakeAyla:
 
     # ── unused-by-these-tests Protocol surface (kept so the fake satisfies
     #    AylaBookingClient for the typed adapter constructor) ──────────────
-    def get_services(self, *, specialist_id: str | None = None) -> list[Any]:
+    def get_services(self) -> list[Any]:
         return []
 
     def get_masters(self, *, specialist_id: str | None = None) -> list[Any]:
