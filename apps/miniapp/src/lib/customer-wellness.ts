@@ -163,46 +163,31 @@ export interface RecentActivity {
 // module-level one that must not depend on it. Two locks, one door.
 // ---------------------------------------------------------------------------
 
-class StubNotWiredError extends Error {
-  constructor() {
-    super(
-      "Дашборд ещё не подключён. Загрузка временно недоступна. Попробуй позже.",
-    );
-    this.name = "StubNotWiredError";
-  }
-}
-
-function guardProd(endpoint: string): void {
-  if (!import.meta.env.DEV) {
-    // eslint-disable-next-line no-console
-    console.error(
-      `[customer-wellness] ${endpoint} called in production with no wire-up. ` +
-        "See docs/screens/customer-main-wellness-dashboard.md §6.",
-    );
-    throw new StubNotWiredError();
-  }
-}
-
 // ---------------------------------------------------------------------------
 // Stub variant picker — dev-only QA hook mirroring customer-booking.ts.
 // ---------------------------------------------------------------------------
 
 type StubVariant = "default" | "empty" | "partial";
 
-function pickStubVariant(): StubVariant {
-  // Production: always `default`. Reading the `?stub=` query in prod
-  // was a phishing vector in the booking flow (see customer-booking.ts
-  // PRE_MERGE blocker #2) — apply the same gate here.
-  if (!import.meta.env.DEV) return "default";
-  if (typeof window === "undefined") return "default";
+/**
+ * Which source a read should use: an explicit dev stub, or the live
+ * endpoint. Returns `null` — «go to the backend» — in production ALWAYS,
+ * and in dev unless `?stub=` names a variant.
+ *
+ * The production branch never reads the query string: doing so was a
+ * phishing vector in the booking flow (customer-booking.ts PRE_MERGE
+ * blocker #2), and that gate holds here too.
+ */
+function pickStubOrLive(): StubVariant | null {
+  if (!import.meta.env.DEV) return null;
+  if (typeof window === "undefined") return null;
   try {
-    const sp = new URLSearchParams(window.location.search);
-    const v = sp.get("stub");
-    if (v === "empty" || v === "partial") return v;
+    const v = new URLSearchParams(window.location.search).get("stub");
+    if (v === "empty" || v === "partial" || v === "default") return v;
   } catch {
-    /* SSR / parse failure — fall through */
+    /* SSR / parse failure — fall through to the live endpoint */
   }
-  return "default";
+  return null;
 }
 
 // ---------------------------------------------------------------------------
@@ -327,8 +312,8 @@ const ACTIVITY_STUB: Record<StubVariant, RecentActivity> = import.meta.env.DEV
  * follow-up. Signature does NOT change.
  */
 export async function getWellnessToday(): Promise<WellnessToday> {
-  guardProd("GET /api/v1/customer/wellness/today");
-  const variant = pickStubVariant();
+  const variant = pickStubOrLive();
+  if (variant === null) return request<WellnessToday>("/wellness/today");
   // Simulate realistic network latency for skeleton testing (~300ms).
   await new Promise<void>((resolve) => setTimeout(resolve, 300));
   return TODAY_STUB[variant];
@@ -342,8 +327,8 @@ export async function getWellnessToday(): Promise<WellnessToday> {
  * follow-up.
  */
 export async function getRecentActivity(): Promise<RecentActivity> {
-  guardProd("GET /api/v1/customer/recent-activity");
-  const variant = pickStubVariant();
+  const variant = pickStubOrLive();
+  if (variant === null) return request<RecentActivity>("/recent-activity");
   await new Promise<void>((resolve) => setTimeout(resolve, 350));
   return ACTIVITY_STUB[variant];
 }

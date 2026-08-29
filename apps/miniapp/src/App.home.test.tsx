@@ -88,6 +88,11 @@ describe("home routing (phase 3.2)", () => {
   });
 
   it("/customer/wellness keeps the (DEV) wellness dashboard reachable", async () => {
+    // The dashboard reads are wired now, so a dev build without `?stub=`
+    // goes to the network. This test is about ROUTING — that the path
+    // still resolves to the dashboard — so it asks for the stub data
+    // explicitly rather than standing up a backend.
+    window.history.replaceState({}, "", "/customer/wellness?stub=default");
     renderAppAt("/customer/wellness");
     expect(await screen.findByText(/Вода:/)).toBeInTheDocument();
   });
