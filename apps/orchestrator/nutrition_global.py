@@ -63,9 +63,12 @@ Execution details:
 from __future__ import annotations
 
 import logging
+import re
+from dataclasses import dataclass
 from typing import Any
 
 from apps.identity.services.global_tenant import get_global_bot_tenant
+from apps.orchestrator.ui.keyboards import parse_callback
 from apps.skills.base import SkillContext, SkillResult
 from apps.tenancy.context import tenant_scope
 
@@ -289,6 +292,100 @@ def execute_nutrition_tool(
 # ---------------------------------------------------------------------------
 
 _STRUCTURED_CALLBACK_PREFIXES = ("cb:anketa:", "cb:food:")
+
+
+# ---------------------------------------------------------------------------
+# DRF-990 — что тап анкеты значит В ИСТОРИИ (а не в текущем ходу)
+# ---------------------------------------------------------------------------
+#
+# Маршрутизация выше — про ТЕКУЩИЙ ход: payload доезжает до навыка нетронутым,
+# и так и должно быть (``NutritionAnketaSkill.matches`` разбирает именно
+# ``cb:anketa:choice:*`` / ``cb:anketa:edit:*``, а golden-фикстуры
+# ``apps/replay/fixtures/golden/nutrition_anketa/`` это воспроизводят).
+#
+# Историю же диалога читает консьерж на БУДУЩИХ ходах, и там строка
+# «cb:anketa:choice:gender:female» с ролью ``user`` выглядит как то, что
+# человек написал ему словами. Это и есть DRF-990, и DRF-1268 его не закрыл:
+# маршрутизация и персистенс — разные читатели одного события.
+#
+# Поэтому здесь ровно один вопрос: чем этот тап был КАК РЕПЛИКА. Ответов три,
+# и разделение между ними содержательное, а не техническое:
+#
+#   * тап по варианту (``choice``) — это ОТВЕТ человека о себе. Он остаётся в
+#     истории, но своей человеческой формулировкой: «Женский», «Похудеть».
+#     Пропустить его мимо истории было бы хуже, чем кажется: текстовые шаги
+#     той же анкеты (возраст, рост, вес) человек набирает руками, и они в
+#     истории есть всегда — пропуск оставил бы запись, где «30» есть, а пола
+#     нет;
+#   * ``start`` / ``edit`` — НАВИГАЦИЯ («открой анкету», «вернись к весу»).
+#     Человек этим ничего о себе не сказал, в историю не идёт ничего — ровно
+#     как ``cb:catalog:*`` (DRF-1304);
+#   * не тап вовсе — вызывающий пишет текст как есть.
+#
+# Разбирается ФОРМА, а не префикс: человек может НАБРАТЬ «cb:anketa: …»
+# руками, и подменять ему его собственные слова нельзя (правило C01,
+# ``apps/channels/tests/test_first_contact_c01.py``).
+
+#: Строгая форма payload'а анкеты: сегменты из ``[a-z_]``, без пробелов.
+#: Покрывает ``cb:anketa:start``, ``cb:anketa:edit:{step}`` и
+#: ``cb:anketa:choice:{step}:{value}`` — всё, что выкладывает
+#: :func:`apps.orchestrator.ui.keyboards.anketa_choice_keyboard`.
+_ANKETA_CALLBACK_RE = re.compile(r"^cb:anketa:[a-z_]+(?::[a-z_]+){0,2}$")
+
+
+@dataclass(frozen=True)
+class AnketaTap:
+    """Разбор тапа анкеты глазами ИСТОРИИ диалога.
+
+    ``history_text`` — фраза, которой этот тап является как реплика, или
+    ``None``, если репликой он не является вовсе (навигация) и в историю
+    не должно попасть ничего.
+    """
+
+    history_text: str | None
+
+
+def resolve_anketa_tap(text: str) -> AnketaTap | None:
+    """Разобрать тап анкеты; ``None`` — «это не тап анкеты».
+
+    ``None`` означает «обычное сообщение»: вызывающий не трогает ни текст
+    хода, ни персистенс. Это важнее, чем кажется, — функция стоит перед
+    записью в историю, и ошибка в сторону «это тап» либо стёрла бы человеку
+    его собственную реплику, либо подменила бы её.
+
+    Нераспознанный, но правильной формы payload (снятая кнопка, значение,
+    которого больше нет в таблице) — это навигация: в историю не идёт ничего.
+    Сырой ``cb:`` в истории — ровно тот дефект, который здесь чинится, а
+    выдумать за человека фразу нечем.
+    """
+
+    from apps.skills.nutrition_anketa.fsm import choice_keyboard_options
+
+    stripped = (text or "").strip()
+    if not _ANKETA_CALLBACK_RE.match(stripped):
+        return None
+
+    parsed = parse_callback(stripped)
+    if parsed is None:
+        return AnketaTap(history_text=None)
+
+    if parsed.get("action") != "choice":
+        # start / edit / что угодно ещё — навигация.
+        return AnketaTap(history_text=None)
+
+    ref = parsed.get("ref") or ""
+    step, _, value = ref.partition(":")
+    try:
+        # Ровно та таблица, из которой построена клавиатура
+        # (``skill._render_step`` -> ``anketa_choice_keyboard``): человек
+        # нажал одну из ЭТИХ меток, и в историю идёт она же. Не копия —
+        # иначе переименованный вариант разъехался бы с тем, что нажали.
+        # KeyError — шаг без клавиатуры (возраст/рост/вес) или шаг из
+        # будущего: подставлять нечего.
+        options = choice_keyboard_options(step)
+    except KeyError:
+        return AnketaTap(history_text=None)
+    return AnketaTap(history_text=next((lbl for lbl, slug in options if slug == value), None))
 
 
 def _anketa_fsm_active(conversation: Any) -> bool:
