@@ -24,6 +24,7 @@ from apps.orchestrator.nutrition_global import (
     NUTRITION_TOOL_SPECS,
     execute_nutrition_tool,
     is_structured_nutrition_turn,
+    resolve_anketa_tap,
     try_handle_structured_nutrition_turn,
 )
 from apps.skills.base import SkillResult
@@ -324,3 +325,83 @@ class TestAnketaOnGlobalPath:
         )
         assert result is not None
         assert result.reply_text
+
+
+class TestAnketaTapAsAHistoryTurn:
+    """DRF-990 — чем тап анкеты является КАК РЕПЛИКА.
+
+    Маршрутизация (класс выше) и персистенс — разные читатели одного
+    события: там payload обязан доехать до навыка нетронутым, здесь он не
+    должен выглядеть как то, что человек написал словами.
+    """
+
+    def test_choice_tap_becomes_the_label_the_person_pressed(self):
+        from apps.skills.nutrition_anketa.fsm import GENDER_CHOICES, GOAL_CHOICES
+
+        assert (
+            resolve_anketa_tap("cb:anketa:choice:gender:female").history_text
+            == (GENDER_CHOICES["female"])
+        )
+        assert (
+            resolve_anketa_tap("cb:anketa:choice:goal:gain").history_text == (GOAL_CHOICES["gain"])
+        )
+
+    def test_the_label_table_is_the_keyboard_own_table(self):
+        """Сторож сторожа: метки берутся из ТОЙ ЖЕ функции, что строит кнопки.
+
+        Если таблица опустеет, проверка выше стала бы «None == None».
+        """
+        from apps.skills.nutrition_anketa.fsm import CHOICE_STEPS, choice_keyboard_options
+
+        assert CHOICE_STEPS
+        for step in CHOICE_STEPS:
+            options = choice_keyboard_options(step)
+            assert options, step
+            assert not [(lbl, slug) for lbl, slug in options if not lbl or not slug], step
+
+    @pytest.mark.parametrize("step", ["age", "height", "weight"])
+    def test_text_input_steps_have_no_label_to_substitute(self, step):
+        """Шаг без клавиатуры не может прийти как ``choice`` — и не подставляется."""
+        tap = resolve_anketa_tap(f"cb:anketa:choice:{step}:whatever")
+        assert tap is not None
+        assert tap.history_text is None
+
+    @pytest.mark.parametrize(
+        "payload",
+        ["cb:anketa:start", "cb:anketa:edit:weight", "cb:anketa:edit:gender"],
+    )
+    def test_navigation_taps_are_not_a_reply_at_all(self, payload):
+        tap = resolve_anketa_tap(payload)
+        assert tap is not None
+        assert tap.history_text is None
+
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            "cb:anketa:choice:gender:retired",  # значение сняли
+            "cb:anketa:choice:pace:slow",  # шаг, которого в FSM нет
+            "cb:anketa:whatever",  # кнопка из будущего/прошлого
+        ],
+    )
+    def test_unrecognised_but_well_formed_payload_never_reaches_history(self, payload):
+        """Выдумывать за человека фразу нечем, сырой ``cb:`` — запрещён."""
+        tap = resolve_anketa_tap(payload)
+        assert tap is not None
+        assert tap.history_text is None
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "cb:anketa: это я просто так написала",
+            "смотри что нашла: cb:anketa:start",
+            "Женский",
+            "",
+        ],
+    )
+    def test_plain_text_is_left_alone(self, text):
+        """None — «это не тап»: вызывающий пишет в историю ровно то, что есть."""
+        assert resolve_anketa_tap(text) is None
+
+    def test_other_cb_families_are_not_claimed(self):
+        for payload in ("cb:food:diary", "cb:book:confirm:1", "cb:catalog:services:x"):
+            assert resolve_anketa_tap(payload) is None

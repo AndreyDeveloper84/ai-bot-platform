@@ -19,6 +19,7 @@ DRF-1268 (детерминированная маршрутизация ``cb:ank
 
 from __future__ import annotations
 
+from typing import ClassVar
 from unittest.mock import MagicMock
 
 import pytest
@@ -159,9 +160,7 @@ class TestAnketaTapsDoNotLandInHistoryRaw:
         assert history, "история пуста — отрицательная проверка ниже ничего не доказывает"
         assert not [line for line in history if line.startswith("cb:")], history
 
-    def test_the_answer_survives_as_the_phrase_the_person_gave(
-        self, sent, fake_redis, concierge
-    ):
+    def test_the_answer_survives_as_the_phrase_the_person_gave(self, sent, fake_redis, concierge):
         """Ответ анкеты — это то, что человек сказал, и он остаётся в истории.
 
         Выбранный механизм — переписывание в фразу, а не пропуск: ответы
@@ -183,7 +182,13 @@ class TestAnketaTapsDoNotLandInHistoryRaw:
         assert _user_messages(conversation)[-1] == GENDER_CHOICES["female"]
 
     def test_goal_choice_tap_lands_as_the_label_too(self, sent, fake_redis, concierge):
-        """Второй шаг с клавиатурой — той же машинкой, без второй таблицы."""
+        """Второй шаг с клавиатурой — той же машинкой, без второй таблицы.
+
+        Здесь тап приходит БЕЗ живого FSM (доводить опрос до цели значило бы
+        проверять анкету, а не персистенс). Гейт стоит выше маршрутизации, и
+        именно это тест и щупает: метка в истории появляется независимо от
+        того, кто взял ход.
+        """
         from apps.skills.nutrition_anketa.fsm import GOAL_CHOICES
 
         _, conversation = _welcomed_user(99006)
@@ -217,9 +222,7 @@ class TestAnketaTapsDoNotLandInHistoryRaw:
         history = _user_messages(conversation)
         assert not [line for line in history if line.startswith("cb:")], history
 
-    def test_short_term_memory_gets_the_phrase_not_the_payload(
-        self, sent, fake_redis, concierge
-    ):
+    def test_short_term_memory_gets_the_phrase_not_the_payload(self, sent, fake_redis, concierge):
         """Короткая память — второй читатель того же хода, и он тоже чинится."""
         _, conversation = _welcomed_user(99004)
 
@@ -235,9 +238,7 @@ class TestAnketaTapsDoNotLandInHistoryRaw:
         assert user_turns, "короткая память пуста — проверка ниже ничего не доказывает"
         assert not [m for m in user_turns if str(m.get("content", "")).startswith("cb:")], recent
 
-    def test_typed_lookalike_is_still_the_person_s_own_words(
-        self, sent, fake_redis, concierge
-    ):
+    def test_typed_lookalike_is_still_the_person_s_own_words(self, sent, fake_redis, concierge):
         """Человек может НАБРАТЬ «cb:anketa:…» руками — подменять нельзя.
 
         Разбирается форма, а не префикс: строка, не совпавшая с формой
@@ -249,3 +250,129 @@ class TestAnketaTapsDoNotLandInHistoryRaw:
         max_handler.handle_global_max_event(_msg(text=typed, user_id=99005, mid="typed-990"))
 
         assert _user_messages(conversation) == [typed]
+
+
+# --------------------------------------------------------------------------- #
+# Golden-фикстуры анкеты на пути, который правится                             #
+# --------------------------------------------------------------------------- #
+class TestAnketaGoldenFixturesStillReplay:
+    """``apps/replay/fixtures/golden/nutrition_anketa/`` через ГЛОБАЛЬНЫЙ путь.
+
+    Зачем здесь, а не в ``apps/replay/tests/test_live_path_gate.py``: тот
+    гейт гоняет только наборы ``adversarial``/``voice`` (``GATED_SETS``), а
+    ``golden/`` описан как «пер-тенантные сценарии, которые глобальный путь
+    не диспетчеризует». Для анкеты это перестало быть правдой в DRF-1268 —
+    ``try_handle_structured_nutrition_turn`` дотягивает её именно до
+    глобального пути, того самого, где правится персистенс. Поэтому
+    воспроизведение проверяется на нём.
+
+    Два шага опроса существуют только внутри живого FSM, поэтому им
+    предшествует затравка — ровно та последовательность нажатий, после
+    которой человек и оказался бы на этом шаге. Затравка НАША, а не часть
+    фикстуры, и сказано это здесь явно, чтобы её нельзя было принять за
+    поведение самой фикстуры.
+    """
+
+    #: Фикстура, чей ``must_pass`` не выполняется на живом коде — и НЕ из-за
+    #: этого PR. Валидатор отвечает «Возраст должно быть от 14 до 90», а
+    #: фикстура ищет подстроку «возраст» в нижнем регистре. Расхождение
+    #: регистра, не поведения; ни валидатор
+    #: (:func:`apps.skills.fsm.validate_int_range`), ни сама фикстура этим PR
+    #: не тронуты — см. ``git diff origin/dev -- apps/skills/fsm.py
+    #: apps/replay/`` (пусто). Причина пришпилена отдельным тестом ниже,
+    #: чтобы исключение было ГРОМКИМ, а не тихим: молча пропущенная фикстура
+    #: читается как пройденная.
+    #:
+    #: Проверка «сырого payload'а в истории нет» на неё всё равно
+    #: распространяется — исключается только ``must_pass``.
+    CASE_MISMATCH: ClassVar[frozenset[str]] = frozenset({"anketa_age_invalid_reask"})
+
+    #: имя фикстуры -> что нажать ПЕРЕД ней, чтобы шаг вообще существовал
+    PRIMING: ClassVar[dict[str, tuple[str, ...]]] = {
+        # ответ на первый вопрос — нужен запущенный опрос
+        "anketa_cb_gender_female": ("cb:anketa:start",),
+        # «150» — невалидный ВОЗРАСТ, значит FSM должен стоять на шаге age
+        "anketa_age_invalid_reask": ("cb:anketa:start", "cb:anketa:choice:gender:female"),
+    }
+
+    def _fixtures(self):
+        from pathlib import Path
+
+        from apps.replay.fixtures.loader import load_fixture_set
+
+        root = Path(__import__("apps.replay", fromlist=["x"]).__file__).parent
+        return load_fixture_set(root / "fixtures" / "golden" / "nutrition_anketa")
+
+    def test_the_fixture_set_is_the_real_one(self):
+        """Стража сторожа: параметризация ниже читает пять настоящих YAML."""
+        names = sorted(f.name for f in self._fixtures())
+        assert names == [
+            "anketa_age_invalid_reask",
+            "anketa_cb_edit_weight",
+            "anketa_cb_gender_female",
+            "anketa_cb_start",
+            "anketa_slash_command",
+        ], names
+
+    def test_every_anketa_fixture_replays_and_leaves_no_raw_payload(
+        self, sent, fake_redis, concierge
+    ):
+        from apps.replay.assertions import evaluate, evaluate_voice
+
+        failures: list[str] = []
+        for i, fixture in enumerate(self._fixtures()):
+            uid = 97000 + i
+            _, conversation = _welcomed_user(uid)
+            for j, prime in enumerate(self.PRIMING.get(fixture.name, ())):
+                max_handler.handle_global_max_event(
+                    _tap(payload=prime, user_id=uid, callback_id=f"prime-{uid}-{j}")
+                )
+            before = len(sent)
+            llm_before = concierge.call_count
+            text = str(fixture.input.get("text", ""))
+            if text.startswith("cb:"):
+                event = _tap(payload=text, user_id=uid, callback_id=f"fx-{uid}")
+            else:
+                event = _msg(text=text, user_id=uid, mid=f"fx-{uid}")
+            max_handler.handle_global_max_event(event)
+
+            response = "\n".join(m["text"] for m in sent[before:])
+            trace = {
+                "intent": "",
+                "skill_used": "",
+                "safety_decision": "allow",
+                "response_text": response,
+                "tool_calls": [],
+            }
+            if fixture.name not in self.CASE_MISMATCH:
+                for problem in evaluate(trace, fixture.must_pass, fixture.forbidden):
+                    failures.append(f"{fixture.name}: {problem}")
+            for problem in evaluate_voice(response, fixture.voice_check):
+                failures.append(f"{fixture.name}: voice: {problem}")
+            assert response, f"{fixture.name}: бот вообще не ответил"
+            if concierge.call_count != llm_before:
+                failures.append(
+                    f"{fixture.name}: ход ушёл модели — анкета перестала быть детерминированной"
+                )
+            history = _user_messages(conversation)
+            raw = [line for line in history if line.startswith("cb:")]
+            if raw:
+                failures.append(f"{fixture.name}: сырой payload в истории: {raw}")
+
+        assert not failures, failures
+
+    def test_the_known_case_mismatch_is_exactly_that_and_nothing_more(self):
+        """Почему ``anketa_age_invalid_reask`` исключён из ``must_pass``.
+
+        Не «фикстура почему-то падает», а дословная причина: валидатор
+        отвечает тем же словом, что фикстура ищет, только с заглавной. Если
+        текст ответа однажды поменяется по существу, упадёт ЭТОТ тест, и
+        исключение выше придётся пересматривать, а не молча носить дальше.
+        """
+        from apps.skills.fsm import validate_int_range
+
+        _value, err = validate_int_range(14, 90, name="возраст")("150")
+
+        assert err is not None
+        assert "возраст" not in err, err  # именно это ищет фикстура — и промахивается
+        assert "возраст" in err.lower(), err  # промахивается ТОЛЬКО регистром
