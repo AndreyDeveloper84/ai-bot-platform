@@ -22,7 +22,9 @@ this class could arrive:
 1. :class:`TestLiveResponseSweep` — every master **read** endpoint is
    fetched with a real customer seeded, and the whole JSON body is walked:
    no forbidden key at any depth, and not one digit of the customer's
-   phone number anywhere in the raw bytes.
+   phone number anywhere in the raw bytes. Each route is first asserted
+   to have answered with something — see below.
+
 2. :class:`TestRouteCoverage` — every route in ``master_api.urls`` must be
    either swept or explicitly excluded **with a reason**. A new endpoint
    fails this test until its author classifies it.
@@ -32,6 +34,27 @@ this class could arrive:
    anyone writes an endpoint test for it.
 4. :class:`TestForbiddenKeyListParity` — the backend list and the Mini App
    list must not drift apart.
+
+### The positive guard (DRF-1406)
+
+A negative assertion needs a positive guard on the same data. «There is
+no customer phone here» is worth nothing next to an empty body, and an
+empty body is a 200 like any other.
+
+This file learned that the hard way. The fixture pinned its bookings to
+literal May-2026 dates; those dates went past, ``GET /schedule`` started
+answering with seven empty days, and the sweep over that route kept
+passing for three months without looking at a single booking row. It was
+green because there was nothing to see, which is indistinguishable in a
+test report from green because there was nothing wrong.
+
+So every entry in :data:`SWEPT_READ_ROUTES` now carries a ``witness`` —
+a string that must appear in the response before any «no PII here»
+assertion is allowed to run (:func:`_assert_body_is_worth_sweeping`).
+Where the route can carry customer data the witness IS the customer's
+rendered name, so the sweep is demonstrably walking the record it claims
+is clean. And no date in this file is a literal any more: they are
+offsets from the salon's today (:func:`_visit_at`).
 
 ### The one exemption
 
@@ -48,16 +71,19 @@ import ast
 import json
 import re
 import uuid
-from datetime import datetime, timezone
+from dataclasses import dataclass
+from datetime import date as date_cls, datetime, time, timedelta, timezone
 from pathlib import Path
+from typing import Callable
 from zoneinfo import ZoneInfo
 
 import pytest
 from django.test import Client
 from django.urls import reverse
+from django.utils import timezone as dj_timezone
 
-from apps.booking.models import BookingRequest
-from apps.catalog.models import CatalogMaster
+from apps.booking.models import BookingRequest, RemoteBookingProxy
+from apps.catalog.models import CatalogMaster, MasterService
 from apps.conversations.models import Conversation, Message
 from apps.identity.models import BotUser
 from apps.master_api import urls as master_urls
@@ -67,6 +93,7 @@ from apps.master_api.pii import (
     find_forbidden_pii,
 )
 from apps.master_api.tests.conftest import init_data_header, make_master
+from apps.scheduling.models import ScheduleChangeRequest, WorkingHours
 from apps.tenancy.models import Tenant
 
 MSK = ZoneInfo("Europe/Moscow")
@@ -80,6 +107,45 @@ CUSTOMER_DIGITS = "79997775544"
 #: Pinned so the assertions below never depend on random UUID digits.
 CUSTOMER_ID = uuid.UUID("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")
 CONVERSATION_ID = uuid.UUID("bbbbbbbb-cccc-dddd-eeee-ffffffffffff")
+
+#: What the master surface renders for :data:`CUSTOMER_ID` — the first
+#: name, which is as much of the customer as OD-W2-2 permits. Every route
+#: below that *can* carry customer data must show this before the sweep
+#: is allowed to conclude anything (see :func:`_fetch_swept`).
+CUSTOMER_FIRST_NAME = "Ксения"
+
+#: The master's own name — ``make_master``'s default.
+MASTER_NAME = "Анна Петрова"
+
+#: The one service the master performs, seeded by :func:`seeded_surface`.
+SERVICE_NAME = "Маникюр гель-лак"
+
+#: Time of day for every seeded visit, in the salon's timezone.
+#:
+#: A *time*, not a date — dates below are offsets from the salon's today
+#: (DRF-1406). Pinning the clock time is not decoration: the second pass
+#: of :func:`_assert_no_customer_phone` strips separators inside each
+#: string value, so an ISO timestamp collapses to a digit run. Every
+#: phone window in :func:`_phone_windows` is drawn from ``{4,5,7,9}``,
+#: and in ``YYYY-MM-DDT14:00:00`` no four consecutive digits come from
+#: that set: the year contributes ``2026``, the month's first digit is
+#: ``0``/``1``, the day's first digit is ``0``–``3``, and the hour starts
+#: with ``1``. Each of those breaks any run before it reaches four. A
+#: wall-clock time would not — ``…T07:55:44`` collapses to ``…075544``
+#: and carries ``5544``, a window of the customer's number.
+VISIT_LOCAL_TIME = time(14, 0)
+
+#: Completed visits, as «days before the salon's today». Three of them,
+#: because the roster's ``total_visits`` and the «returning customer»
+#: chips are computed from the count.
+PAST_VISIT_DAYS_AGO = (10, 8, 2)
+
+#: The upcoming visit, as «days after the salon's today». It must land
+#: inside the schedule's default window
+#: (:data:`apps.master_api.services.schedule.DEFAULT_RANGE_DAYS` = 7 days
+#: from today) or ``GET /schedule`` goes back to returning seven empty
+#: days — the exact defect DRF-1406 was filed for.
+FUTURE_VISIT_DAYS_AHEAD = 1
 
 _UUID_RE = re.compile(
     r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
@@ -118,6 +184,31 @@ def _utc(dt_local: datetime) -> datetime:
     return dt_local.astimezone(timezone.utc)
 
 
+def _salon_today() -> date_cls:
+    """Today in the salon's timezone — the date the endpoints work from.
+
+    Not ``date.today()``: every master endpoint computes its day
+    boundaries in the tenant's IANA timezone, so a fixture anchored on
+    the runner's UTC date can seed a visit into yesterday for a salon
+    that is three hours ahead.
+    """
+
+    return dj_timezone.now().astimezone(MSK).date()
+
+
+def _visit_at(*, days_offset: int) -> datetime:
+    """A visit ``days_offset`` days from the salon's today, at 14:00 local.
+
+    Offsets, not literals. The May-2026 dates this replaced were in the
+    future when written and silently drifted into the past; from then on
+    ``GET /schedule`` answered with seven empty days and the sweep below
+    walked an empty list, which cannot fail. See :data:`VISIT_LOCAL_TIME`
+    for why the clock time stays pinned even though the date does not.
+    """
+
+    return _utc(datetime.combine(_salon_today() + timedelta(days=days_offset), VISIT_LOCAL_TIME))
+
+
 def _phone_windows() -> list[str]:
     """Every 4-consecutive-digit window of the customer's number.
 
@@ -141,6 +232,23 @@ def _iter_string_values(payload: object) -> list[str]:
     elif isinstance(payload, str):
         out.append(payload)
     return out
+
+
+def _assert_excerpt_survived(body: object, *, where: str, witness: str) -> None:
+    """The redacted text must still be in the response.
+
+    Same rule as :func:`_assert_body_is_worth_sweeping`, applied to the
+    redaction tests: «the number is gone» proves nothing about redaction
+    if the *message* is gone too. Redaction that ate the whole excerpt —
+    or a fixture that stopped producing one — would clear every
+    assertion in this class.
+    """
+
+    assert any(witness in value for value in _iter_string_values(body)), (
+        f"{where}: the redacted message is not in the response at all "
+        f"({witness!r} is absent), so «no phone digits here» is vacuous. "
+        "Redaction is supposed to remove the number, not the message."
+    )
 
 
 def _assert_no_customer_phone(raw: str, *, where: str, body: object = None) -> None:
@@ -216,29 +324,95 @@ def seeded_surface(
     tenant: Tenant,
     accepted_master: CatalogMaster,
     customer: BotUser,
+    master_service: MasterService,
 ) -> Conversation:
     """Give every master read endpoint something about ``customer`` to return.
 
-    Bookings in the past (roster + dashboard history) and in the future
-    (schedule), plus an active conversation with messages (conversations
-    list + detail).
+    Every route in :data:`SWEPT_READ_ROUTES` must come back populated —
+    an endpoint with nothing to say answers 200 with an empty list, and
+    a sweep over an empty list passes without looking at anything. What
+    each route needs:
+
+    * **roster / conversations** — completed :class:`BookingRequest` rows
+      in the past, and an active conversation with messages.
+    * **schedule / dashboard** — :class:`RemoteBookingProxy` rows. These
+      readers moved to the Ayla mirror in DRF-1085 and no longer see
+      ``BookingRequest`` at all, so the mirror is seeded alongside it:
+      the same three past visits plus one upcoming, which is what puts a
+      row in ``/schedule``'s window and a card in ``next_visit``.
+    * **catalog / me** — a :class:`MasterService` mapping (the
+      ``master_service`` fixture), so the services list is not empty.
+    * **availability_pending** — the master's own pending schedule-change
+      request.
+
+    Dates are offsets from :func:`_salon_today`, never literals — see
+    :func:`_visit_at`.
     """
 
-    for day in (18, 20, 26):
+    # Working hours for every weekday: without them the schedule renders
+    # seven off-days and the booking below lands in a day with no frame.
+    for weekday in range(7):
+        WorkingHours.all_tenants.create(
+            tenant=tenant,
+            master=accepted_master,
+            day_of_week=weekday,
+            is_working=True,
+            start_time=time(10, 0),
+            end_time=time(19, 0),
+        )
+
+    # The mirror resolves service names through ``ayla_service_id``, the
+    # catalog tab through ``MasterService``. One row, wearing both hats,
+    # so the master's screen and the master's mirror agree on the name.
+    service = master_service.service
+    service.ayla_service_id = uuid.uuid4()
+    service.save(update_fields=["ayla_service_id"])
+
+    def _seed_mirror(visit_at: datetime, status: str) -> None:
+        RemoteBookingProxy.all_tenants.create(
+            appointment_id=uuid.uuid4(),
+            tenant=tenant,
+            bot_user=customer,
+            specialist_id=accepted_master.id,
+            service_id=service.ayla_service_id,
+            start_at=visit_at,
+            end_at=visit_at + timedelta(minutes=60),
+            status=status,
+        )
+
+    for days_ago in PAST_VISIT_DAYS_AGO:
+        visit_at = _visit_at(days_offset=-days_ago)
         BookingRequest.all_tenants.create(
             tenant=tenant,
             master=accepted_master,
             bot_user=customer,
-            service_name="маникюр гель-лак",
+            service_name=SERVICE_NAME,
             client_name=customer.client_name,
             client_phone=customer.phone,
-            visit_at=_utc(datetime(2026, 5, day, 14, 0)),
+            visit_at=visit_at,
             duration_min=60,
             status=BookingRequest.Status.CONFIRMED,
             # DRF-1146: the roster counts completed visits only — stamp the
             # completion so these past rows are visits, not mere bookings.
-            completed_at=_utc(datetime(2026, 5, day, 14, 0)),
+            completed_at=visit_at,
         )
+        _seed_mirror(visit_at, RemoteBookingProxy.Status.COMPLETED)
+
+    # The upcoming visit — what ``/schedule`` and ``dashboard.next_visit``
+    # exist to render, and the row the May-2026 literals used to withhold.
+    _seed_mirror(
+        _visit_at(days_offset=FUTURE_VISIT_DAYS_AHEAD),
+        RemoteBookingProxy.Status.CONFIRMED,
+    )
+
+    ScheduleChangeRequest.all_tenants.create(
+        tenant=tenant,
+        master=accepted_master,
+        status=ScheduleChangeRequest.Status.PENDING,
+        requested_start=_visit_at(days_offset=3),
+        requested_end=_visit_at(days_offset=4),
+        reason_class="vacation",
+    )
 
     conv = Conversation.all_tenants.create(
         id=CONVERSATION_ID,
@@ -252,34 +426,153 @@ def seeded_surface(
         role=Message.Role.USER,
         content="Здравствуйте, хочу записаться",
     )
-    Conversation.all_tenants.filter(pk=conv.pk).update(
-        last_message_at=_utc(datetime(2026, 5, 21, 14, 0))
-    )
+    Conversation.all_tenants.filter(pk=conv.pk).update(last_message_at=_visit_at(days_offset=-1))
     conv.refresh_from_db()
     return conv
 
 
 # --- 1. live response sweep ----------------------------------------------
 
+
+@dataclass(frozen=True)
+class SweptRoute:
+    """One master read endpoint, plus proof that it answered with something.
+
+    ``witness`` is a string that MUST appear in the response body. It is
+    not decoration — it is the positive half of the sweep.
+
+    A negative assertion needs a positive guard on the same data. «There
+    is no customer phone here» is only worth reading next to «there is
+    something here»: an empty list satisfies every PII check ever
+    written. Two hundred is not evidence of a body — an empty response
+    is a 200 too. That is how DRF-1406 stayed green for three months
+    while ``/schedule`` returned seven empty days.
+
+    ``carries_customer_data`` records which half of the surface a route
+    is on. Where it is ``True`` the witness is the *customer's own*
+    rendered name, so the sweep is demonstrably walking the record it
+    claims is clean; where it is ``False`` the route structurally cannot
+    name a customer (the master's own profile, their prefs, their
+    services), and the witness proves only that the payload is populated.
+    """
+
+    path: Callable[[], str]
+    witness: str
+    why: str
+    carries_customer_data: bool
+
+
 #: Master read endpoints fetched in full by the sweep below. Keyed by the
-#: ``master_api`` URL name; the value builds the path.
-SWEPT_READ_ROUTES: dict[str, object] = {
-    "me": lambda: reverse("master_api:me"),
-    "dashboard": lambda: reverse("master_api:dashboard"),
-    "schedule": lambda: reverse("master_api:schedule"),
-    "availability_pending": lambda: reverse("master_api:availability_pending"),
-    "conversations_list": lambda: reverse("master_api:conversations_list"),
-    "conversation_detail": lambda: reverse(
-        "master_api:conversation_detail", args=[CONVERSATION_ID]
+#: ``master_api`` URL name.
+SWEPT_READ_ROUTES: dict[str, SweptRoute] = {
+    "me": SweptRoute(
+        lambda: reverse("master_api:me"),
+        witness=SERVICE_NAME,
+        why="the master's own service list",
+        carries_customer_data=False,
     ),
-    "customers_list": lambda: reverse("master_api:customers_list"),
-    "catalog_list": lambda: reverse("master_api:catalog_list"),
-    "notification_prefs": lambda: reverse("master_api:notification_prefs"),
+    "dashboard": SweptRoute(
+        lambda: reverse("master_api:dashboard"),
+        witness=CUSTOMER_FIRST_NAME,
+        why="next_visit / inbox_preview name the customer",
+        carries_customer_data=True,
+    ),
+    "schedule": SweptRoute(
+        lambda: reverse("master_api:schedule"),
+        witness=CUSTOMER_FIRST_NAME,
+        why="days[].bookings[].client_first_name",
+        carries_customer_data=True,
+    ),
+    "availability_pending": SweptRoute(
+        lambda: reverse("master_api:availability_pending"),
+        witness="vacation",
+        why="the master's own pending schedule-change request",
+        carries_customer_data=False,
+    ),
+    "conversations_list": SweptRoute(
+        lambda: reverse("master_api:conversations_list"),
+        witness=CUSTOMER_FIRST_NAME,
+        why="items[].client_first_name",
+        carries_customer_data=True,
+    ),
+    "conversation_detail": SweptRoute(
+        lambda: reverse("master_api:conversation_detail", args=[CONVERSATION_ID]),
+        witness=CUSTOMER_FIRST_NAME,
+        why="client_first_name on the conversation header",
+        carries_customer_data=True,
+    ),
+    "customers_list": SweptRoute(
+        lambda: reverse("master_api:customers_list"),
+        witness=CUSTOMER_FIRST_NAME,
+        why="customers[].first_name",
+        carries_customer_data=True,
+    ),
+    "catalog_list": SweptRoute(
+        lambda: reverse("master_api:catalog_list"),
+        witness=SERVICE_NAME,
+        why="services[].name",
+        carries_customer_data=False,
+    ),
+    "notification_prefs": SweptRoute(
+        lambda: reverse("master_api:notification_prefs"),
+        witness="21:00",
+        why="the master's own quiet-hours setting",
+        carries_customer_data=False,
+    ),
 }
+
+
+def _assert_body_is_worth_sweeping(route_name: str, body: object) -> None:
+    """The response must actually carry the thing the sweep is about to clear.
+
+    Checked against the decoded JSON rather than the raw bytes: Django
+    serialises with ``ensure_ascii``, so a Cyrillic witness never appears
+    literally in ``resp.content``.
+    """
+
+    route = SWEPT_READ_ROUTES[route_name]
+    values = _iter_string_values(body)
+    assert any(route.witness in value for value in values), (
+        f"{route_name}: nothing to sweep. Expected {route.witness!r} "
+        f"({route.why}) somewhere in the response, and it is not there — "
+        "so every «no PII here» assertion below would pass on an empty "
+        "body and prove nothing. Fix the fixture, not this assertion: "
+        "that is precisely how DRF-1406 kept a PII sweep green over "
+        "seven empty schedule days for three months. Body: "
+        f"{json.dumps(body, ensure_ascii=False)[:400]}"
+    )
+
+
+def _fetch_swept(client: Client, route_name: str) -> tuple[str, object]:
+    """GET a swept route, assert it is worth sweeping, return (raw, body)."""
+
+    resp = client.get(
+        SWEPT_READ_ROUTES[route_name].path(),
+        HTTP_AUTHORIZATION=init_data_header("12345"),
+    )
+    assert resp.status_code == 200, (route_name, resp.status_code, resp.content[:400])
+    body = resp.json()
+    _assert_body_is_worth_sweeping(route_name, body)
+    return resp.content.decode("utf-8"), body
 
 
 class TestLiveResponseSweep:
     """Fetch every master read endpoint and walk the whole body."""
+
+    @pytest.mark.parametrize("route_name", sorted(SWEPT_READ_ROUTES))
+    def test_response_is_populated(
+        self,
+        client: Client,
+        seeded_surface: Conversation,
+        route_name: str,
+    ) -> None:
+        """The guard on its own, so a rotted fixture names itself.
+
+        Without this the next stale fixture fails nothing — it just
+        quietly narrows what the two sweeps below are looking at.
+        """
+
+        _fetch_swept(client, route_name)
 
     @pytest.mark.parametrize("route_name", sorted(SWEPT_READ_ROUTES))
     def test_no_forbidden_pii_key_anywhere_in_response(
@@ -288,11 +581,9 @@ class TestLiveResponseSweep:
         seeded_surface: Conversation,
         route_name: str,
     ) -> None:
-        url = SWEPT_READ_ROUTES[route_name]()  # type: ignore[operator]
-        resp = client.get(url, HTTP_AUTHORIZATION=init_data_header("12345"))
-        assert resp.status_code == 200, (route_name, resp.status_code, resp.content[:400])
+        _raw, body = _fetch_swept(client, route_name)
 
-        found = find_forbidden_pii(resp.json())
+        found = find_forbidden_pii(body)
         assert found == [], (
             f"{route_name} leaked forbidden PII at {found}. Every key in "
             "apps.master_api.pii.FORBIDDEN_PII_KEYS is banned from every "
@@ -308,10 +599,38 @@ class TestLiveResponseSweep:
         seeded_surface: Conversation,
         route_name: str,
     ) -> None:
-        url = SWEPT_READ_ROUTES[route_name]()  # type: ignore[operator]
-        resp = client.get(url, HTTP_AUTHORIZATION=init_data_header("12345"))
-        assert resp.status_code == 200, (route_name, resp.content[:400])
-        _assert_no_customer_phone(resp.content.decode("utf-8"), where=route_name, body=resp.json())
+        raw, body = _fetch_swept(client, route_name)
+        _assert_no_customer_phone(raw, where=route_name, body=body)
+
+    def test_the_customer_reaches_more_than_one_route(
+        self,
+        client: Client,
+        seeded_surface: Conversation,
+    ) -> None:
+        """At least five routes must render the seeded customer.
+
+        The per-route witness catches one route going quiet. This catches
+        the fixture going quiet everywhere at once — the shape DRF-1406
+        actually had, where the sweep still «covered nine routes» but
+        only three of them had ever seen the customer.
+        """
+
+        expected = {
+            name for name, route in SWEPT_READ_ROUTES.items() if route.carries_customer_data
+        }
+        assert len(expected) >= 5, "the customer-facing half of the surface shrank — why?"
+
+        reached = set()
+        for name in sorted(SWEPT_READ_ROUTES):
+            _raw, body = _fetch_swept(client, name)
+            if any(CUSTOMER_FIRST_NAME in v for v in _iter_string_values(body)):
+                reached.add(name)
+
+        assert reached == expected, (
+            "routes classified as carrying customer data but silent about "
+            f"the seeded customer: {sorted(expected - reached)}; routes "
+            f"carrying them unexpectedly: {sorted(reached - expected)}"
+        )
 
 
 class TestRosterRegression:
@@ -416,6 +735,7 @@ class TestCustomerTypedContactsAreRedacted:
             HTTP_AUTHORIZATION=init_data_header("12345"),
         )
         assert resp.status_code == 200, resp.content[:400]
+        _assert_excerpt_survived(resp.json(), where="conversations_list", witness="перезвоните")
         _assert_no_customer_phone(
             resp.content.decode("utf-8"), where="conversations_list", body=resp.json()
         )
@@ -439,6 +759,7 @@ class TestCustomerTypedContactsAreRedacted:
             HTTP_AUTHORIZATION=init_data_header("12345"),
         )
         assert resp.status_code == 200, resp.content[:400]
+        _assert_excerpt_survived(resp.json(), where="conversation_detail", witness="перезвоните")
         _assert_no_customer_phone(
             resp.content.decode("utf-8"), where="conversation_detail", body=resp.json()
         )
@@ -471,6 +792,10 @@ class TestCustomerTypedContactsAreRedacted:
             HTTP_AUTHORIZATION=init_data_header("12345"),
         )
         assert resp.status_code == 200, resp.content[:400]
+        # The excerpt must actually be the one just written — an empty or
+        # stale excerpt would clear the assertion below without the sliced
+        # number ever having been in the response.
+        _assert_excerpt_survived(resp.json(), where="conversations_list", witness=padding[:40])
         _assert_no_customer_phone(
             resp.content.decode("utf-8"), where="conversations_list", body=resp.json()
         )
