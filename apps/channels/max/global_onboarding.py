@@ -141,14 +141,16 @@ def resolve_welcome_tap(text: str) -> WelcomeTap | None:
     это ``WelcomeTap(None)``: сырой ``cb:`` в истории — ровно тот дефект,
     который здесь чинится, а выдумать за человека фразу нечем.
     """
-    # Ленивый импорт: модуль ``WelcomeSkill`` при загрузке дёргает @register
-    # (тянет apps.skills.registry) — держим это вне пути загрузки, как и
-    # ``run_onboarding_turn`` ниже.
-    from apps.skills.welcome.skill import welcome_tap_labels
-
     stripped = (text or "").strip()
     if not _WELCOME_CALLBACK_RE.match(stripped):
         return None
+
+    # Ленивый импорт, и ПОСЛЕ проверки формы: модуль ``WelcomeSkill`` при
+    # загрузке дёргает @register (тянет apps.skills.registry) — держим это вне
+    # пути загрузки, как и ``run_onboarding_turn`` ниже, и вне пути обычного
+    # текстового хода, который сюда приходит на каждой реплике.
+    from apps.skills.welcome.skill import welcome_tap_labels
+
     return WelcomeTap(history_text=welcome_tap_labels().get(stripped))
 
 
