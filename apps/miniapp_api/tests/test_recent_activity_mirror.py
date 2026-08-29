@@ -179,9 +179,7 @@ def _week_start(tenant: Tenant) -> datetime:
 
 
 class TestMirrorIsTheSource:
-    def test_salon_made_booking_is_visible(
-        self, client: Client, tenant: Tenant, bot_user: BotUser
-    ):
+    def test_salon_made_booking_is_visible(self, client: Client, tenant: Tenant, bot_user: BotUser):
         """The whole point: a booking the customer did NOT make in the bot.
 
         ``source=admin_console`` — no BookingRequest row exists anywhere,
