@@ -409,12 +409,14 @@ BASELINE: frozenset[BaselineKey] = frozenset(
         #        slots and never reaches this helper. Flag-gated in effect, but
         #        the gate lives one frame up where this AST guard cannot see
         #        it - hence a baseline line, not a fix.
-        #      * `_get_booking_owned` - a helper called from BOTH flag-guarded
-        #        endpoints (booking_cancel_*/booking_reschedule_* return early
-        #        on flag-ON) and unguarded ones. Untriaged, follow-up ticket.
-        #      * `customer_recent_activity` - documented as a read of the local
-        #        mirror populated by the Ayla booking-event consumer (ADR-0009
-        #        cached-canonical-state read). Untriaged.
+        #      * `_get_booking_owned` - a helper reached only from flag-guarded
+        #        endpoints since DRF-1349 closed the last three unguarded
+        #        callers (reschedule request/confirm, submit_feedback). The
+        #        gate lives one frame up, where this AST guard cannot see it.
+        #      * `_recent_activity_from_local` - the flag-OFF half of the
+        #        dashboard rollup, split out by DRF-1349. Reached only when
+        #        BOOKING_VIA_AYLA_REST is OFF, where the local table really is
+        #        canonical; the flag-ON half reads RemoteBookingProxy.
         (
             "G9-booking-request-outside-owner",
             "apps/miniapp_api/views.py",
@@ -430,7 +432,7 @@ BASELINE: frozenset[BaselineKey] = frozenset(
         (
             "G9-booking-request-outside-owner",
             "apps/miniapp_api/views.py",
-            "customer_recent_activity",
+            "_recent_activity_from_local",
             "apps.booking.models.BookingRequest",
         ),
         # (b) Known LIVE defect, not legitimate - the periodic completion scan
@@ -978,17 +980,17 @@ BASELINE_NOTES: dict[BaselineKey, BaselineNote] = {
         "_get_booking_owned",
         "apps.booking.models.BookingRequest",
     ): BaselineNote(
-        "UNTRIAGED",
-        "Helper called from BOTH flag-guarded endpoints (booking_cancel_*/booking_reschedule_* return early on flag-ON) and unguarded ones. Nobody has decided which callers matter. Follow-up ticket.",
+        "BY-DESIGN",
+        "Helper reached only from flag-guarded endpoints. The untriaged half of this note is settled: DRF-1349 audited every caller and gated the three that had no check (booking_reschedule_request, booking_reschedule_confirm, submit_feedback), which on the pilot answered 404 about visits the customer could see in her own list. The gate sits one frame up, out of this AST guard's reach.",
     ),
     (
         "G9-booking-request-outside-owner",
         "apps/miniapp_api/views.py",
-        "customer_recent_activity",
+        "_recent_activity_from_local",
         "apps.booking.models.BookingRequest",
     ): BaselineNote(
-        "UNTRIAGED",
-        "Documented in-file as a read of the local mirror the Ayla booking-event consumer populates (ADR-0009 cached-canonical-state). The documentation has not been verified against the consumer.",
+        "BY-DESIGN",
+        "The documentation has now been verified against the consumer, and it was false: apps/eventbus/consumers/booking.py upserts RemoteBookingProxy and never writes BookingRequest, so the dashboard was blind to every booking not made in the bot dialog (DRF-1349). The flag-ON read moved to the mirror; this function is the flag-OFF half, reached only when BOOKING_VIA_AYLA_REST is off and the local table genuinely is canonical.",
     ),
     (
         "G9-booking-request-outside-owner",
