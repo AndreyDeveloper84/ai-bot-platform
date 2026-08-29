@@ -663,8 +663,9 @@ class TestFoodGoldenFixturesStillReplay:
     #:   food_clarify_cb_typo_ack  ищет «поняла»       -> «Поняла 🙂»
     #:
     #: Расхождение регистра, не поведения; ни тексты скиллов, ни фикстуры этим
-    #: PR не тронуты — ``git diff origin/dev -- apps/skills/ apps/replay/``
-    #: показывает только резолвер тапа еды.
+    #: PR не тронуты: ``git diff origin/dev -- apps/replay/`` пуст, а под
+    #: ``apps/skills/`` добавлена ровно одна функция —
+    #: ``welcome.skill.welcome_tap_labels``, которая никаких ответов не меняет.
     #:
     #: Исключение сделано ГРОМКИМ и самопроверяющимся: ``must_pass`` не
     #: снимается, а перепроверяется на тех же данных БЕЗ учёта регистра
