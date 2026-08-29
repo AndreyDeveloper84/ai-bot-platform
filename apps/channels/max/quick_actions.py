@@ -346,6 +346,12 @@ def resolve_tap_text(text: str, *, last_user_text: str | None = None) -> str | N
     и подставлять вместо них текст было бы ровно тем «отдельным сценарием»,
     которого макет требует избегать — только наоборот.
 
+    ``cb:anketa:`` при этом в ИСТОРИЮ сырым payload'ом всё же не уходит —
+    но чинится это не здесь (DRF-990). Анкета маршрутизируется ПО payload'у
+    (``NutritionAnketaSkill.matches``), поэтому подменить ``event.text``
+    нельзя: сломался бы сам опрос. Тап переводится в фразу на месте записи
+    в историю — :func:`apps.orchestrator.nutrition_global.resolve_anketa_tap`.
+
     ``last_user_text`` — что подставить на «Повторить». Пусто (истории нет)
     даёт None, а :func:`is_stale_tap` отличает этот случай от «не тап».
     """

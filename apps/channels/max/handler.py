@@ -165,7 +165,10 @@ from apps.orchestrator.handoff import (
     try_continue_booking,
 )
 from apps.orchestrator.intent_resolution import resolve_and_log_turn_intent
-from apps.orchestrator.nutrition_global import try_handle_structured_nutrition_turn
+from apps.orchestrator.nutrition_global import (
+    resolve_anketa_tap,
+    try_handle_structured_nutrition_turn,
+)
 from apps.nutrition_proactive.optout import try_handle_opt_out
 from apps.orchestrator.visits import (
     CALLBACK_VISIT_REPEAT_PREFIX,
@@ -1095,14 +1098,43 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
     # as the user turn it now is; a redraw tap still does not reach history.
     is_clarify_redraw_tap = event.text.startswith(CLARIFY_CALLBACK_PREFIX)
 
+    # DRF-990 — the anketa taps. Same defect class as DRF-988/DRF-1304, and
+    # NOT closed by DRF-1268: that one routes `cb:anketa:*` deterministically
+    # in the CURRENT turn, while history is what the concierge reads on the
+    # NEXT one — where «cb:anketa:choice:gender:female» under role=user reads
+    # as something the person typed at it.
+    #
+    # But the answer is not `cb:catalog:` either, so it does not get
+    # `cb:catalog:`'s treatment. Tapping «Женский» IS the person saying
+    # something about themselves, and the anketa's own text steps (age,
+    # height, weight) are typed and land in history always — dropping only
+    # the two keyboard steps would leave a record where «30» is present and
+    # the gender is missing. So a choice tap is REWRITTEN to the phrase it
+    # is («Женский», «Похудеть») and kept; `start`/`edit` are navigation and
+    # are dropped like their catalog neighbours.
+    #
+    # The rewrite happens HERE and not in ``resolve_tap_text`` above on
+    # purpose: that one replaces ``event.text`` for the whole turn, and the
+    # anketa is ROUTED by its payload (``NutritionAnketaSkill.matches``,
+    # ``_STRUCTURED_CALLBACK_PREFIXES``) — substituting the phrase there
+    # would break the flow the golden fixtures replay. Routing keeps the
+    # payload; history gets the phrase.
+    anketa_tap = resolve_anketa_tap(event.text)
+
     # Persist + remember the inbound turn (sentinel-scoped, current_tenant()=None).
-    if is_booking_callback or is_catalog_callback or is_clarify_redraw_tap:
+    inbound_history_text = event.text if anketa_tap is None else anketa_tap.history_text
+    if (
+        is_booking_callback
+        or is_catalog_callback
+        or is_clarify_redraw_tap
+        or inbound_history_text is None
+    ):
         user_msg = None
     else:
         user_msg = record_global_message(
-            conversation, role="user", content=event.text, trace_id=trace_id
+            conversation, role="user", content=inbound_history_text, trace_id=trace_id
         )
-        short_term.append(conversation.id, role="user", content=event.text)
+        short_term.append(conversation.id, role="user", content=inbound_history_text)
 
     logger.info(
         "channels.max.global.received bot_user=%s conversation=%s text_len=%d",
