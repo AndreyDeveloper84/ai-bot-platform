@@ -23,8 +23,7 @@ this class could arrive:
    fetched with a real customer seeded, and the whole JSON body is walked:
    no forbidden key at any depth, and not one digit of the customer's
    phone number anywhere in the raw bytes. Each route is first asserted
-   to have answered with something — see below.
-
+   to have answered with something — see «The positive guard» below.
 2. :class:`TestRouteCoverage` — every route in ``master_api.urls`` must be
    either swept or explicitly excluded **with a reason**. A new endpoint
    fails this test until its author classifies it.
