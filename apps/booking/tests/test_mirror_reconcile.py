@@ -26,7 +26,26 @@ from apps.tenancy.models import Tenant, TenantStaff
 
 pytestmark = pytest.mark.django_db
 
-NOW = dt.datetime(2026, 8, 25, 12, 0, tzinfo=dt.timezone.utc)
+# Anchored to the real clock, NOT a literal date.
+#
+# Most tests here drive `run_mirror_reconciliation(now=NOW)` and are immune
+# to the wall clock. `TestCommand` is not: `reconcile_ayla_mirror` calls
+# `run_mirror_reconciliation(page=None)` with no `now`, so the code under
+# test walks a window starting at the REAL today while the fixtures were
+# built around NOW. A literal NOW therefore keeps the suite green only
+# until real-today passes `NOW + 2 days`, and then fails for a reason that
+# has nothing to do with the change under review.
+#
+# That is exactly what happened: NOW was 2026-08-25, the ghost booking sat
+# on 2026-08-27, and from 2026-08-28 it fell out of the window — the
+# reconciliation reported `ayla_only=0` and the assertion blamed whatever
+# PR happened to run that day.
+#
+# Noon, not midnight: a date built at 00:00 UTC lands on the previous day
+# for tenants behind UTC, which would make the offsets below tenant-tz
+# dependent. Microseconds are dropped because they have produced false
+# reds here before.
+NOW = dt.datetime.now(dt.timezone.utc).replace(hour=12, minute=0, second=0, microsecond=0)
 
 
 def _proxy(tenant: Tenant, **overrides) -> RemoteBookingProxy:
