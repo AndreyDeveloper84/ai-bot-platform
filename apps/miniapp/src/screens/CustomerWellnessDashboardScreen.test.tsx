@@ -1,9 +1,15 @@
 /**
- * Gate tests: `CustomerWellnessDashboardScreen` is a stub surface (fake
- * wellness data in every build today). Pilot commit 4 (orchestrator):
- * hidden until S4/post-pilot — prod builds render the honest
- * `PilotComingSoonScreen` instead. DEV builds keep the stub for local
- * development.
+ * Gate tests for `CustomerWellnessDashboardScreen`.
+ *
+ * The reads are wired to the backend now, so the dashboard no longer
+ * invents anyone's day. The gate itself is unchanged and still under
+ * test: prod renders the honest `PilotComingSoonScreen` until the
+ * owner lifts it.
+ *
+ * The reads are mocked here rather than left to hit the network — this
+ * file is about the gate and the layout, and a screen test that also
+ * exercised HTTP would fail for reasons that have nothing to do with
+ * either.
  */
 import { render, screen } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
@@ -17,9 +23,37 @@ vi.mock("../lib/customer-booking", async (importOriginal) => {
   };
 });
 
+vi.mock("../lib/max-sdk", () => ({ getInitData: () => "test-init-data" }));
+
 import { getCatalogBrowse } from "../lib/customer-booking";
 
 const mockedBrowse = vi.mocked(getCatalogBrowse);
+
+
+/**
+ * The reads are wired to the backend now, so a dev build without
+ * `?stub=` goes to the network. These tests are about the GATE and the
+ * LAYOUT, not about the data source — so they ask for the stub
+ * explicitly, which is exactly what `?stub=` exists for.
+ *
+ * That the wired reads call the right endpoints is proven separately,
+ * in `customer-wellness.test.ts`.
+ */
+function useDevStubData() {
+  window.history.replaceState({}, "", "/customer/main?stub=default");
+}
+
+/** Fetch must never be reached in these tests — if it is, the stub
+ *  selection above silently stopped working and the test would go
+ *  green against real network shape instead of the layout. */
+function forbidNetwork() {
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async () => {
+      throw new Error("network reached: ?stub= selection is broken");
+    }),
+  );
+}
 
 async function renderScreen(prod: boolean) {
   vi.resetModules();
@@ -47,6 +81,8 @@ describe("CustomerWellnessDashboardScreen gating", () => {
       masters: [],
       picks: [],
     });
+    useDevStubData();
+    forbidNetwork();
   });
 
   it("DEV build: renders the wellness stub surface as before", async () => {

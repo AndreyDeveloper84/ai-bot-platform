@@ -231,19 +231,65 @@ describe("undoWaterLog", () => {
   });
 });
 
-describe("production honesty guard on the surfaces still served from stubs", () => {
-  it("getWellnessToday throws in a production build instead of inventing a day", async () => {
+/**
+ * These three replace the old `guardProd` tests. Their intent is
+ * unchanged — production must never invent a person's day — but the
+ * mechanism is: the reads now reach the backend, so «did not invent»
+ * is proven by «asked the server», not by «threw».
+ *
+ * The stub payloads below are deliberately unlike the hardcoded ones
+ * (`TODAY_STUB` says 1240 kcal): a test that asserted only «truthy»
+ * would pass on invented data too.
+ */
+describe("the reads reach the backend instead of inventing a day", () => {
+  const LIVE_TODAY = {
+    calories_eaten: 777,
+    calories_target: 1900,
+    water_glasses_eaten: 3,
+    water_glasses_target: 8,
+    active_goals: [],
+    display_name: "",
+  };
+  const LIVE_ACTIVITY = {
+    this_week_booking_count: 2,
+    weekly_progress: { water_days_logged: 1, food_days_logged: 1, active_days_count: 1 },
+  };
+
+  function okJson(body: unknown) {
+    return { ok: true, status: 200, json: async () => body } as unknown as Response;
+  }
+
+  it("getWellnessToday asks the endpoint and returns what it answered", async () => {
     vi.stubEnv("DEV", false);
-    await expect(getWellnessToday()).rejects.toThrow(/не подключ/i);
+    fetchMock.mockResolvedValue(okJson(LIVE_TODAY));
+
+    const today = await getWellnessToday();
+
+    const [url] = callAt(0);
+    expect(String(url)).toContain("/wellness/today");
+    // Positive guard: the value came from the server, not the stub.
+    expect(today.calories_eaten).toBe(777);
+    expect(today.calories_eaten).not.toBe(1240);
   });
 
-  it("getRecentActivity throws in a production build instead of inventing a booking", async () => {
+  it("getRecentActivity asks the endpoint and returns what it answered", async () => {
     vi.stubEnv("DEV", false);
-    await expect(getRecentActivity()).rejects.toThrow(/не подключ/i);
+    fetchMock.mockResolvedValue(okJson(LIVE_ACTIVITY));
+
+    const activity = await getRecentActivity();
+
+    const [url] = callAt(0);
+    expect(String(url)).toContain("/recent-activity");
+    expect(activity.this_week_booking_count).toBe(2);
+    // The stub always carries a next_booking; a live empty week must not.
+    expect(activity.next_booking).toBeUndefined();
   });
 
-  it("still serves stub data in a dev build", async () => {
-    await expect(getWellnessToday()).resolves.toBeTruthy();
-    await expect(getRecentActivity()).resolves.toBeTruthy();
+  it("a failing backend surfaces the failure — it never falls back to a stub", async () => {
+    vi.stubEnv("DEV", false);
+    fetchMock.mockRejectedValue(new TypeError("Failed to fetch"));
+
+    await expect(getWellnessToday()).rejects.toThrow();
+    await expect(getRecentActivity()).rejects.toThrow();
   });
 });
