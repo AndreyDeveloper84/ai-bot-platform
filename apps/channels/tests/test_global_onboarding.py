@@ -24,6 +24,7 @@ from apps.channels.max.global_onboarding import (
     GLOBAL_S5_TEXT,
     GLOBAL_WELCOME_TEXT,
     needs_onboarding,
+    resolve_welcome_tap,
     run_onboarding_turn,
 )
 from apps.consent.models import ConsentRecord
@@ -614,3 +615,74 @@ class TestGlobalWelcomeDoesNotWakeUpMidConversation:
             trace_id=str(uuid.uuid4()),
         )
         assert mock_send[0]["text"] == GLOBAL_WELCOME_TEXT
+
+
+class TestWelcomeTapAsAHistoryTurn:
+    """DRF-990, продолжение — чем тап приветствия является КАК РЕПЛИКА.
+
+    Маршрутизация (``needs_onboarding`` выше, ``WelcomeSkill.matches``) и
+    персистенс — разные читатели одного события: там payload обязан доехать
+    до навыка нетронутым, здесь он не должен выглядеть как то, что человек
+    написал словами.
+
+    Согласия 152-ФЗ это не касается вовсе: ``ConsentRecord`` пишет
+    ``_record_consent_journal`` по ``result.meta["reply_kind"]``, а не по
+    истории диалога — см. ``TestRunOnboardingTurn`` выше, где та запись и
+    проверяется.
+    """
+
+    def test_every_shipped_welcome_button_resolves_to_its_own_label(self):
+        """Таблица не переписана сюда — она читается из самой клавиатуры."""
+        from apps.skills.welcome.skill import welcome_tap_labels
+
+        labels = welcome_tap_labels()
+        assert labels, "клавиатура приветствия пуста — проверка ниже ни о чём"
+        for payload, label in labels.items():
+            tap = resolve_welcome_tap(payload)
+            assert tap is not None, payload
+            assert tap.history_text == label, payload
+
+    def test_the_consent_decisions_are_the_ones_that_matter(self):
+        """Оба решения — согласие и отказ — остаются в истории фразой."""
+        from apps.skills.welcome.skill import welcome_tap_labels
+
+        labels = welcome_tap_labels()
+        for payload in (
+            "cb:welcome:consent_yes",
+            "cb:welcome:consent_yes_via_s2a",
+            "cb:welcome:consent_refuse",
+        ):
+            assert resolve_welcome_tap(payload).history_text == labels[payload], payload
+
+    @pytest.mark.parametrize(
+        "payload",
+        ["cb:welcome:no_such_button", "cb:welcome:retired", "cb:welcome:s5"],
+    )
+    def test_a_retired_button_never_reaches_history(self, payload):
+        """Форма правильная, метки нет: выдумать за человека фразу нечем."""
+        tap = resolve_welcome_tap(payload)
+        assert tap is not None
+        assert tap.history_text is None
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "cb:welcome: это я просто так написала",
+            "смотри что нашла: cb:welcome:consent_yes",
+            "Да, продолжим",
+            "/start",
+            "",
+        ],
+    )
+    def test_plain_text_is_left_alone(self, text):
+        """None — «это не тап»: вызывающий пишет в историю ровно то, что есть."""
+        assert resolve_welcome_tap(text) is None
+
+    def test_other_cb_families_are_not_claimed(self):
+        for payload in (
+            "cb:anketa:start",
+            "cb:food:diary",
+            "cb:book:confirm:1",
+            "cb:catalog:services:x",
+        ):
+            assert resolve_welcome_tap(payload) is None

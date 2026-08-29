@@ -24,7 +24,9 @@ from apps.orchestrator.nutrition_global import (
     NUTRITION_TOOL_SPECS,
     execute_nutrition_tool,
     is_structured_nutrition_turn,
+    food_tap_labels,
     resolve_anketa_tap,
+    resolve_food_tap,
     try_handle_structured_nutrition_turn,
 )
 from apps.skills.base import SkillResult
@@ -405,3 +407,87 @@ class TestAnketaTapAsAHistoryTurn:
     def test_other_cb_families_are_not_claimed(self):
         for payload in ("cb:food:diary", "cb:book:confirm:1", "cb:catalog:services:x"):
             assert resolve_anketa_tap(payload) is None
+
+
+class TestFoodTapAsAHistoryTurn:
+    """DRF-990, продолжение — то же самое для ``cb:food:*``.
+
+    Буквальный близнец анкеты: тот же вход
+    (``_STRUCTURED_CALLBACK_PREFIXES``), та же маршрутизация по payload'у.
+    Разница только в источнике метки — три строителя клавиатур вместо
+    таблицы шагов.
+    """
+
+    SCAN = "scan-1"
+
+    def test_every_shipped_food_button_resolves_to_its_own_label(self):
+        """Таблица не переписана сюда — она читается из самой клавиатуры.
+
+        Кнопка, добавленная через месяц без метки, падает здесь, а не в
+        истории у человека в чате.
+        """
+        labels = food_tap_labels(self.SCAN)
+        assert labels, "клавиатуры еды пусты — проверка ниже ни о чём"
+        for payload, label in labels.items():
+            tap = resolve_food_tap(payload)
+            assert tap is not None, payload
+            assert tap.history_text == label, payload
+
+    def test_the_confirmation_and_the_rejection_are_both_kept(self):
+        """«✅ В дневник» и «❌ Не то» — подтверждение и поправка о себе."""
+        labels = food_tap_labels(self.SCAN)
+
+        assert resolve_food_tap(f"cb:food:to_diary:{self.SCAN}").history_text == (
+            labels[f"cb:food:to_diary:{self.SCAN}"]
+        )
+        assert resolve_food_tap(f"cb:food:reject:{self.SCAN}").history_text == (
+            labels[f"cb:food:reject:{self.SCAN}"]
+        )
+
+    def test_the_refless_pair_resolves_by_the_same_machinery(self):
+        """``cb:food:diary`` / ``cb:food:typo`` идут без ``scan_id``."""
+        assert resolve_food_tap("cb:food:diary").history_text == "📔 В дневник"
+        assert resolve_food_tap("cb:food:typo").history_text == "❌ Опечатка"
+
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            "cb:food:correct:nope:scan-1",  # поля нет в клавиатуре
+            "cb:food:to_diary",  # без scan_id клавиатура такого не выкладывает
+            "cb:food:whatever",  # кнопка из будущего/прошлого
+        ],
+    )
+    def test_unrecognised_but_well_formed_payload_never_reaches_history(self, payload):
+        """Выдумывать за человека фразу нечем, сырой ``cb:`` — запрещён."""
+        tap = resolve_food_tap(payload)
+        assert tap is not None
+        assert tap.history_text is None
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "cb:food: это я просто так написала",
+            "смотри что нашла: cb:food:diary",
+            "борщ 300г",
+            "",
+        ],
+    )
+    def test_plain_text_is_left_alone(self, text):
+        """None — «это не тап»: вызывающий пишет в историю ровно то, что есть."""
+        assert resolve_food_tap(text) is None
+
+    def test_other_cb_families_are_not_claimed(self):
+        for payload in (
+            "cb:anketa:start",
+            "cb:welcome:consent_yes",
+            "cb:book:confirm:1",
+            "cb:catalog:services:x",
+        ):
+            assert resolve_food_tap(payload) is None
+
+    def test_the_scan_id_itself_never_reaches_history(self):
+        """В историю идёт метка, а не id распознавания."""
+        tap = resolve_food_tap("cb:food:to_diary:abc-xyz-789")
+        assert tap is not None
+        assert tap.history_text is not None
+        assert "abc-xyz-789" not in tap.history_text
