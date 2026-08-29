@@ -100,7 +100,10 @@ MSK = ZoneInfo("Europe/Moscow")
 REPO_ROOT = Path(__file__).resolve().parents[3]
 
 #: The seeded customer's phone. Chosen so that no 4-digit window of it can
-#: collide with a timestamp fragment ("2026", "0521", ...) in a response.
+#: collide with a timestamp fragment ("2026", the month, the day) in a
+#: response. The dates are no longer literals (DRF-1406), so the argument
+#: that keeps this true is now stated once, structurally, beside
+#: :data:`VISIT_LOCAL_TIME`.
 CUSTOMER_PHONE = "+79997775544"
 CUSTOMER_DIGITS = "79997775544"
 
