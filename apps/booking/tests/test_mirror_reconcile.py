@@ -45,9 +45,7 @@ pytestmark = pytest.mark.django_db
 # for tenants behind UTC, which would make the offsets below tenant-tz
 # dependent. Microseconds are dropped because they have produced false
 # reds here before.
-NOW = dt.datetime.now(dt.timezone.utc).replace(
-    hour=12, minute=0, second=0, microsecond=0
-)
+NOW = dt.datetime.now(dt.timezone.utc).replace(hour=12, minute=0, second=0, microsecond=0)
 
 
 def _proxy(tenant: Tenant, **overrides) -> RemoteBookingProxy:
