@@ -80,6 +80,46 @@ SERVICE_ID = "3d5f7e1c-8a2d-4e6f-b9c0-1d2e3f4a5b6c"
 SPECIALIST_ID = "7c2d8e1f-0a5c-4c3a-9e1b-4d52f8eb3a17"
 
 
+# ─── clock-relative appointment times (DRF-1407) ───────────────────────────
+#
+# Every timestamp below that production compares against the clock is
+# derived from «now», never written as a literal.
+#
+# The booking.created consumer only creates a T-24h / T-2h reminder when
+# its send time is still in the future (#1146,
+# ``skip_backdated_reminder``). ``start_at`` used to read
+# ``2026-05-22T15:00:00+03:00``; the day it went by, the consumer started
+# dropping both reminders and «exactly two reminders» became «zero». The
+# test then failed for everyone who touched the repo, and for a reason
+# that had nothing to do with their change.
+#
+# Timestamps that production only stores or logs — ``cancelled_at``,
+# ``completed_at``, ``captured_at``, ``failed_at``, ``refunded_at``,
+# ``affected_dates`` — stay literal on purpose. They are opaque stamps;
+# nothing compares them to a clock, so nothing about them can rot.
+
+#: Far enough ahead that both reminder offsets (T-24h and T-2h) are still
+#: in the future no matter what hour of the day the suite runs at.
+_APPOINTMENT_DAYS_AHEAD = 7
+
+
+#: Read once, at import. Calling ``now()`` per use would let a run that
+#: straddles midnight UTC seed one row and assert against another day.
+_NOW = dt.datetime.now(tz=dt.timezone.utc)
+
+
+def _appointment_start(*, days_ahead: int = _APPOINTMENT_DAYS_AHEAD) -> dt.datetime:
+    """An appointment ``days_ahead`` days from now, on the hour, in UTC."""
+
+    return (_NOW + dt.timedelta(days=days_ahead)).replace(
+        hour=12, minute=0, second=0, microsecond=0
+    )
+
+
+def _iso(moment: dt.datetime) -> str:
+    return moment.isoformat()
+
+
 # ─── helpers ───────────────────────────────────────────────────────────────
 
 
@@ -240,8 +280,8 @@ def existing_proxy(tenant: Tenant, bot_user: BotUser) -> RemoteBookingProxy:
         appointment_id=UUID(APPOINTMENT_ID),
         tenant=tenant,
         bot_user=bot_user,
-        start_at=dt.datetime(2026, 5, 22, 15, 0, tzinfo=dt.timezone.utc),
-        end_at=dt.datetime(2026, 5, 22, 16, 0, tzinfo=dt.timezone.utc),
+        start_at=_appointment_start(),
+        end_at=_appointment_start() + dt.timedelta(hours=1),
         status="confirmed",
     )
 
@@ -287,8 +327,8 @@ class TestBookingIdempotency:
                 "appointment_id": APPOINTMENT_ID,
                 "specialist_id": SPECIALIST_ID,
                 "service_id": SERVICE_ID,
-                "start_at": "2026-05-22T15:00:00+03:00",
-                "end_at": "2026-05-22T16:00:00+03:00",
+                "start_at": _iso(_appointment_start()),
+                "end_at": _iso(_appointment_start() + dt.timedelta(hours=1)),
                 "status": "confirmed",
                 "price_total": "1800.00",
                 "source": "mobile_app",
@@ -340,8 +380,8 @@ class TestBookingIdempotency:
             event_name="booking.rescheduled",
             data={
                 "appointment_id": APPOINTMENT_ID,
-                "old_start_at": "2026-05-22T15:00:00+00:00",
-                "new_start_at": "2026-05-23T11:00:00+00:00",
+                "old_start_at": _iso(_appointment_start()),
+                "new_start_at": _iso(_appointment_start(days_ahead=8)),
                 "rescheduled_by": "admin",
             },
         )
@@ -351,9 +391,7 @@ class TestBookingIdempotency:
             def check() -> None:
                 existing_proxy.refresh_from_db()
                 # New start_at applied exactly once.
-                assert existing_proxy.start_at == dt.datetime(
-                    2026, 5, 23, 11, 0, tzinfo=dt.timezone.utc
-                )
+                assert existing_proxy.start_at == _appointment_start(days_ahead=8)
                 # Duration preserved (1h).
                 assert existing_proxy.end_at - existing_proxy.start_at == (dt.timedelta(hours=1))
                 assert mock_emit.call_count == 1

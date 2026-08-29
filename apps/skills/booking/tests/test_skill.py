@@ -6,6 +6,8 @@ skill's two-call tool-use loop runs end-to-end in-process.
 
 from __future__ import annotations
 
+import datetime as _dt
+
 import httpx
 from pathlib import Path
 from typing import Any
@@ -44,6 +46,86 @@ from apps.tenancy.models import Tenant
 
 
 pytestmark = pytest.mark.django_db(transaction=True)
+
+
+# ---------------------------------------------------------------------------
+# The date every keyboard tap in this file lands on (DRF-1407)
+# ---------------------------------------------------------------------------
+#
+# ``pick_slot`` refuses a slot that is already in the past — «Контекст
+# записи устарел. Начните выбор услуги заново.» (``skill.py``,
+# ``booking.pick_slot.past_slot``). That guard is correct: a keyboard can
+# outlive the day it was drawn for.
+#
+# So a literal date here is a fuse, not a fixture. This file held
+# ``2026-09-22`` in sixty-two places; on 21.09 two tests would have gone
+# red, on 23.09 fourteen — all at once, all with a message about stale
+# booking context, and all landing on whoever happened to be pushing that
+# week rather than on whoever wrote them.
+#
+# Computed once at import, from the clock, so it is always ahead of the
+# guard. The offset is generous on purpose: nothing in the flow caps how
+# far ahead a slot may be, and a month of runway means a slow CI queue or
+# a machine with a skewed clock still cannot reach it.
+BOOKING_DATE_DAYS_AHEAD = 30
+
+#: ``YYYY-MM-DD``, a month out. Interpolated into every ``pick_date`` /
+#: ``pick_slot`` callback, every ``AvailableTime``, and every assertion
+#: about them — one definition, so the tap and the expectation cannot
+#: drift apart.
+BOOKING_DATE = (
+    (_dt.datetime.now(tz=_dt.timezone.utc) + _dt.timedelta(days=BOOKING_DATE_DAYS_AHEAD))
+    .date()
+    .isoformat()
+)
+
+# Russian month / weekday abbreviations, spelled out here rather than
+# imported from ``apps.skills.booking.skill``. The two assertions below
+# check the sentence the part-picker puts above the keyboard; an
+# assertion that borrows the formatter it is checking cannot tell you the
+# formatter is wrong.
+_RU_MONTHS_SHORT = (
+    "янв",
+    "фев",
+    "мар",
+    "апр",
+    "мая",
+    "июн",
+    "июл",
+    "авг",
+    "сен",
+    "окт",
+    "ноя",
+    "дек",
+)
+_RU_WEEKDAYS_SHORT = ("Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс")
+
+
+def _ru_day_label(iso_date: str) -> str:
+    """«22 сен (Вт)» — the day as the part-picker prompt names it."""
+
+    d = _dt.date.fromisoformat(iso_date)
+    return f"{d.day} {_RU_MONTHS_SHORT[d.month - 1]} ({_RU_WEEKDAYS_SHORT[d.weekday()]})"
+
+
+#: What ``BOOKING_DATE`` reads as on screen. Derived, never restated — a
+#: second hand-written copy of the same day is free to drift from the
+#: first, and then the test stops checking the thing it was written for.
+BOOKING_DAY_LABEL = _ru_day_label(BOOKING_DATE)
+
+
+def _booking_date(offset_days: int) -> str:
+    """A second/third date for the date picker, relative to BOOKING_DATE.
+
+    The picker test hands the fake provider three free days and asserts a
+    button for each. Two of them used to be literal May dates sitting
+    beside one relative date — a fixture half alive and half dead, which
+    is exactly the state that hides a filter: if the picker ever started
+    dropping days in the past, those two buttons would vanish and the
+    ``len(buttons) == 3`` above would be the only thing to say so.
+    """
+
+    return (_dt.date.fromisoformat(BOOKING_DATE) + _dt.timedelta(days=offset_days)).isoformat()
 
 
 # ---------------------------------------------------------------------------
@@ -395,9 +477,9 @@ class TestMasterPickCallback:
         client = FakeYClients()
         client.services_rows = [_service(22)]
         client.staff_rows = [_staff(11)]
-        client.dates = ["2026-09-22", "2026-05-23", "2026-05-25"]
+        client.dates = [BOOKING_DATE, _booking_date(1), _booking_date(3)]
         client.times = [
-            AvailableTime(time="14:00", datetime="2026-09-22T14:00:00", seance_length_s=3600)
+            AvailableTime(time="14:00", datetime=f"{BOOKING_DATE}T14:00:00", seance_length_s=3600)
         ]
         ctx = SkillContext(
             conversation=context.conversation,
@@ -415,9 +497,9 @@ class TestMasterPickCallback:
         # One button per date, callback embeds master_id + date + service_id.
         assert len(buttons) == 3
         callbacks = [b["callback"] for b in buttons]
-        assert "cb:book:pick_date:11:2026-09-22:22" in callbacks
-        assert "cb:book:pick_date:11:2026-05-23:22" in callbacks
-        assert "cb:book:pick_date:11:2026-05-25:22" in callbacks
+        assert f"cb:book:pick_date:11:{BOOKING_DATE}:22" in callbacks
+        assert f"cb:book:pick_date:11:{_booking_date(1)}:22" in callbacks
+        assert f"cb:book:pick_date:11:{_booking_date(3)}:22" in callbacks
         # No tool_call recorded — date picker is a direct YClients call,
         # not an LLM-grounded artefact.
         assert result.tool_calls_made == []
@@ -471,7 +553,7 @@ class TestDatePickCallback:
         ctx = SkillContext(
             conversation=context.conversation,
             bot_user=context.bot_user,
-            message_text="cb:book:pick_date:11:2026-09-22:22",
+            message_text=f"cb:book:pick_date:11:{BOOKING_DATE}:22",
         )
         assert BookingSkill().matches(ctx) is True
 
@@ -484,14 +566,14 @@ class TestDatePickCallback:
         client = FakeYClients()
         client.services_rows = [_service(22)]
         client.staff_rows = [_staff(11)]
-        client.dates = ["2026-09-22"]
+        client.dates = [BOOKING_DATE]
         client.times = [
-            AvailableTime(time="14:00", datetime="2026-09-22T14:00:00", seance_length_s=3600)
+            AvailableTime(time="14:00", datetime=f"{BOOKING_DATE}T14:00:00", seance_length_s=3600)
         ]
         ctx = SkillContext(
             conversation=context.conversation,
             bot_user=context.bot_user,
-            message_text="cb:book:pick_date:11:2026-09-22:22",
+            message_text=f"cb:book:pick_date:11:{BOOKING_DATE}:22",
         )
         with _patch_yclients(client), _patch_provider_complete([]):
             with tenant_scope(tenant):
@@ -504,16 +586,18 @@ class TestDatePickCallback:
         # not a question, so the times are rendered straight away. The keyboard
         # is therefore unchanged; only the sentence above it names the day and
         # the part it belongs to.
-        assert result.reply_text == "22 сен (Вт), днём — выберите время:"
+        assert result.reply_text == f"{BOOKING_DAY_LABEL}, днём — выберите время:"
         assert result.action_data is not None
         buttons = result.action_data["attachments"][0]["payload"]["buttons"]
-        assert "cb:book:pick_slot:11:22:2026-09-22T14:00:00" in [b["callback"] for b in buttons]
+        assert f"cb:book:pick_slot:11:22:{BOOKING_DATE}T14:00:00" in [
+            b["callback"] for b in buttons
+        ]
         # No synthetic show_slots tool_call any more: the part picker reads the
         # day's times directly, the same way the date picker has always read
         # the dates list — neither is an LLM-grounded artefact. The audit row
         # is written explicitly instead (see _render_part_picker).
         assert result.tool_calls_made == []
-        assert client.times_calls == [{"staff_id": 11, "date": "2026-09-22", "service_ids": [22]}]
+        assert client.times_calls == [{"staff_id": 11, "date": BOOKING_DATE, "service_ids": [22]}]
 
     def test_malformed_payload_handoffs_softly(self, context: SkillContext, tenant: Tenant) -> None:
         ctx = SkillContext(
@@ -540,12 +624,12 @@ class TestDatePickCallback:
         # it would conclude there are no dates and never reach get_available_times.
         client.dates = []
         client.times = [
-            AvailableTime(time="14:00", datetime="2026-09-22T14:00:00", seance_length_s=3600)
+            AvailableTime(time="14:00", datetime=f"{BOOKING_DATE}T14:00:00", seance_length_s=3600)
         ]
         ctx = SkillContext(
             conversation=context.conversation,
             bot_user=context.bot_user,
-            message_text="cb:book:pick_date:11:2026-09-22:22",
+            message_text=f"cb:book:pick_date:11:{BOOKING_DATE}:22",
         )
         with _patch_yclients(client), _patch_provider_complete([]):
             with tenant_scope(tenant):
@@ -554,9 +638,9 @@ class TestDatePickCallback:
         # DRF-1325 renamed the prompt (see TestDatePickCallback above); the
         # property this test exists for — no 14-day fan-out once the user has
         # named a day — is unchanged and still asserted below.
-        assert result.reply_text == "22 сен (Вт), днём — выберите время:"
+        assert result.reply_text == f"{BOOKING_DAY_LABEL}, днём — выберите время:"
         assert client.dates_calls == []
-        assert client.times_calls == [{"staff_id": 11, "date": "2026-09-22", "service_ids": [22]}]
+        assert client.times_calls == [{"staff_id": 11, "date": BOOKING_DATE, "service_ids": [22]}]
 
 
 class TestRateLimitedScheduleUnavailable:
@@ -625,7 +709,7 @@ class TestRateLimitedScheduleUnavailable:
         ctx = SkillContext(
             conversation=context.conversation,
             bot_user=context.bot_user,
-            message_text="cb:book:pick_date:master-uuid:2026-09-22:svc-uuid-1",
+            message_text=f"cb:book:pick_date:master-uuid:{BOOKING_DATE}:svc-uuid-1",
         )
         with (
             patch("apps.skills.booking.provider.get_booking_provider", return_value=adapter),
@@ -686,7 +770,7 @@ class TestSlotPickCallback:
         ctx = SkillContext(
             conversation=context.conversation,
             bot_user=context.bot_user,
-            message_text="cb:book:pick_slot:11:22:2026-09-22T14:00:00",
+            message_text=f"cb:book:pick_slot:11:22:{BOOKING_DATE}T14:00:00",
         )
         assert BookingSkill().matches(ctx) is True
 
@@ -702,12 +786,12 @@ class TestSlotPickCallback:
         client.services_rows = [_service(22)]
         client.staff_rows = [_staff(11, "Ольга")]
         client.times = [
-            AvailableTime(time="14:00", datetime="2026-09-22T14:00:00", seance_length_s=3600)
+            AvailableTime(time="14:00", datetime=f"{BOOKING_DATE}T14:00:00", seance_length_s=3600)
         ]
         ctx = SkillContext(
             conversation=context.conversation,
             bot_user=context.bot_user,
-            message_text="cb:book:pick_slot:11:22:2026-09-22T14:00:00",
+            message_text=f"cb:book:pick_slot:11:22:{BOOKING_DATE}T14:00:00",
         )
         with _patch_yclients(client), _patch_provider_complete([]) as mock_complete:
             with tenant_scope(tenant):
@@ -727,13 +811,13 @@ class TestSlotPickCallback:
         assert row.kind == PendingBookingAction.Kind.CONFIRM
         assert row.payload["master_id"] == 11
         assert row.payload["service_id"] == 22
-        assert row.payload["slot_datetime"] == "2026-09-22T14:00:00"
+        assert row.payload["slot_datetime"] == f"{BOOKING_DATE}T14:00:00"
         assert row.consumed_at is None
         # Synthetic confirm_booking call recorded for telemetry; the LLM
         # never picked a tool.
         assert [tc.name for tc in result.tool_calls_made] == ["confirm_booking"]
         # Slot availability was re-checked against the provider.
-        assert client.times_calls == [{"staff_id": 11, "date": "2026-09-22", "service_ids": [22]}]
+        assert client.times_calls == [{"staff_id": 11, "date": BOOKING_DATE, "service_ids": [22]}]
 
     def test_unknown_service_rejected_locally(self, context: SkillContext, tenant: Tenant) -> None:
         """Service id outside the tenant catalog → safe local reply, no
@@ -746,7 +830,7 @@ class TestSlotPickCallback:
         ctx = SkillContext(
             conversation=context.conversation,
             bot_user=context.bot_user,
-            message_text="cb:book:pick_slot:11:99:2026-09-22T14:00:00",
+            message_text=f"cb:book:pick_slot:11:99:{BOOKING_DATE}T14:00:00",
         )
         with _patch_yclients(client), _patch_provider_complete([]) as mock_complete:
             with tenant_scope(tenant):
@@ -768,7 +852,7 @@ class TestSlotPickCallback:
         ctx = SkillContext(
             conversation=context.conversation,
             bot_user=context.bot_user,
-            message_text="cb:book:pick_slot:11:22:2026-09-22T14:00:00",
+            message_text=f"cb:book:pick_slot:11:22:{BOOKING_DATE}T14:00:00",
         )
         with _patch_yclients(client), _patch_provider_complete([]) as mock_complete:
             with tenant_scope(tenant):
@@ -790,12 +874,12 @@ class TestSlotPickCallback:
         client.services_rows = [_service(22)]
         client.staff_rows = [_staff(11)]
         client.times = [
-            AvailableTime(time="15:00", datetime="2026-09-22T15:00:00", seance_length_s=3600)
+            AvailableTime(time="15:00", datetime=f"{BOOKING_DATE}T15:00:00", seance_length_s=3600)
         ]
         ctx = SkillContext(
             conversation=context.conversation,
             bot_user=context.bot_user,
-            message_text="cb:book:pick_slot:11:22:2026-09-22T14:00:00",
+            message_text=f"cb:book:pick_slot:11:22:{BOOKING_DATE}T14:00:00",
         )
         with _patch_yclients(client), _patch_provider_complete([]) as mock_complete:
             with tenant_scope(tenant):
@@ -805,7 +889,9 @@ class TestSlotPickCallback:
         assert "занято" in result.reply_text.lower()
         assert result.action_data is not None
         buttons = result.action_data["attachments"][0]["payload"]["buttons"]
-        assert [b["callback"] for b in buttons] == ["cb:book:pick_slot:11:22:2026-09-22T15:00:00"]
+        assert [b["callback"] for b in buttons] == [
+            f"cb:book:pick_slot:11:22:{BOOKING_DATE}T15:00:00"
+        ]
         assert PendingBookingAction.all_tenants.count() == 0
 
     def test_slot_taken_without_alternatives(self, context: SkillContext, tenant: Tenant) -> None:
@@ -820,7 +906,7 @@ class TestSlotPickCallback:
         ctx = SkillContext(
             conversation=context.conversation,
             bot_user=context.bot_user,
-            message_text="cb:book:pick_slot:11:22:2026-09-22T14:00:00",
+            message_text=f"cb:book:pick_slot:11:22:{BOOKING_DATE}T14:00:00",
         )
         with _patch_yclients(client), _patch_provider_complete([]) as mock_complete:
             with tenant_scope(tenant):
@@ -840,12 +926,12 @@ class TestSlotPickCallback:
         client.services_rows = [_service(22)]
         client.staff_rows = [_staff(11)]
         client.times = [
-            AvailableTime(time="14:00", datetime="2026-09-22T14:00:00", seance_length_s=3600)
+            AvailableTime(time="14:00", datetime=f"{BOOKING_DATE}T14:00:00", seance_length_s=3600)
         ]
         ctx = SkillContext(
             conversation=context.conversation,
             bot_user=context.bot_user,
-            message_text="cb:book:pick_slot:11:22:2026-09-22T14:00:00",
+            message_text=f"cb:book:pick_slot:11:22:{BOOKING_DATE}T14:00:00",
         )
         with _patch_yclients(client), _patch_provider_complete([]) as mock_complete:
             with tenant_scope(tenant):
@@ -880,7 +966,7 @@ class TestSlotPickCallback:
         ctx = SkillContext(
             conversation=context.conversation,
             bot_user=context.bot_user,
-            message_text="cb:book:pick_slot:11:22:2026-09-22T14:00:00",
+            message_text=f"cb:book:pick_slot:11:22:{BOOKING_DATE}T14:00:00",
         )
         with _patch_yclients(client), _patch_provider_complete([]) as mock_complete:
             with tenant_scope(tenant):
@@ -931,7 +1017,7 @@ class TestSlotPickCallback:
         ctx = SkillContext(
             conversation=context.conversation,
             bot_user=context.bot_user,
-            message_text="cb:book:pick_slot:11:22:2026-09-22T14:00:00",
+            message_text=f"cb:book:pick_slot:11:22:{BOOKING_DATE}T14:00:00",
         )
         with _patch_yclients(client), _patch_provider_complete([]) as mock_complete:
             with tenant_scope(tenant):
@@ -953,14 +1039,14 @@ class TestSlotPickCallback:
         client.times = [
             AvailableTime(
                 time="11:00",
-                datetime="2026-09-22T11:00:00+00:00",
+                datetime=f"{BOOKING_DATE}T11:00:00+00:00",
                 seance_length_s=3600,
             )
         ]
         ctx = SkillContext(
             conversation=context.conversation,
             bot_user=context.bot_user,
-            message_text="cb:book:pick_slot:11:22:2026-09-22T14:00:00+03:00",
+            message_text=f"cb:book:pick_slot:11:22:{BOOKING_DATE}T14:00:00+03:00",
         )
         with _patch_yclients(client), _patch_provider_complete([]) as mock_complete:
             with tenant_scope(tenant):
@@ -1006,12 +1092,12 @@ class TestSlotPickCallback:
         client.services_rows = [_service(service_uuid)]
         client.staff_rows = [_staff(master_uuid, "Ольга")]
         client.times = [
-            AvailableTime(time="14:00", datetime="2026-09-22T14:00:00", seance_length_s=3600)
+            AvailableTime(time="14:00", datetime=f"{BOOKING_DATE}T14:00:00", seance_length_s=3600)
         ]
         ctx = SkillContext(
             conversation=context.conversation,
             bot_user=context.bot_user,
-            message_text=f"cb:book:pick_slot:{master_uuid}:{service_uuid}:2026-09-22T14:00:00",
+            message_text=f"cb:book:pick_slot:{master_uuid}:{service_uuid}:{BOOKING_DATE}T14:00:00",
         )
         with override_settings(BOOKING_VIA_AYLA_REST=True):
             with (
@@ -1035,9 +1121,9 @@ class TestSlotPickCallback:
         row = PendingBookingAction.all_tenants.get(pk=token)
         assert row.payload["master_id"] == master_uuid
         assert row.payload["service_id"] == service_uuid
-        assert row.payload["slot_datetime"] == "2026-09-22T14:00:00"
+        assert row.payload["slot_datetime"] == f"{BOOKING_DATE}T14:00:00"
         assert client.times_calls == [
-            {"staff_id": master_uuid, "date": "2026-09-22", "service_ids": [service_uuid]}
+            {"staff_id": master_uuid, "date": BOOKING_DATE, "service_ids": [service_uuid]}
         ]
 
     def test_pick_slot_with_canonical_catalog_service_accepted(
@@ -1098,7 +1184,7 @@ class TestSlotPickCallback:
                     200, json=[{"id": master_uuid, "display_name": "Ольга", "rating": 4.9}]
                 )
             if path.endswith(f"specialists/{master_uuid}/slots/"):
-                return httpx.Response(200, json={"slots": ["2026-09-22T14:00:00"]})
+                return httpx.Response(200, json={"slots": [f"{BOOKING_DATE}T14:00:00"]})
             return httpx.Response(404, json={})
 
         client = AylaBookingHTTPClient(
@@ -1110,7 +1196,7 @@ class TestSlotPickCallback:
         ctx = SkillContext(
             conversation=context.conversation,
             bot_user=context.bot_user,
-            message_text=f"cb:book:pick_slot:{master_uuid}:{service_uuid}:2026-09-22T14:00:00",
+            message_text=f"cb:book:pick_slot:{master_uuid}:{service_uuid}:{BOOKING_DATE}T14:00:00",
         )
         with override_settings(BOOKING_VIA_AYLA_REST=True):
             with (
@@ -1154,7 +1240,7 @@ class TestSlotPickCallback:
         ctx = SkillContext(
             conversation=context.conversation,
             bot_user=context.bot_user,
-            message_text="cb:book:pick_slot:11:22:2026-09-22T14:00:00",
+            message_text=f"cb:book:pick_slot:11:22:{BOOKING_DATE}T14:00:00",
         )
         with _patch_yclients(client), _patch_provider_complete([]) as mock_complete:
             with tenant_scope(tenant):
@@ -1176,8 +1262,8 @@ class TestSlotPickCallback:
         client.services_rows = [_service(22)]
         client.staff_rows = [_staff(11)]
         client.times = [
-            AvailableTime(time="14:00", datetime="2026-09-22T14:00:00", seance_length_s=3600),
-            AvailableTime(time="15:00", datetime="2026-09-22T15:00:00", seance_length_s=3600),
+            AvailableTime(time="14:00", datetime=f"{BOOKING_DATE}T14:00:00", seance_length_s=3600),
+            AvailableTime(time="15:00", datetime=f"{BOOKING_DATE}T15:00:00", seance_length_s=3600),
         ]
 
         def _tap(dt: str) -> SkillResult:
@@ -1191,8 +1277,8 @@ class TestSlotPickCallback:
 
         with _patch_yclients(client), _patch_provider_complete([]):
             with tenant_scope(tenant):
-                first = _tap("2026-09-22T14:00:00")
-                second = _tap("2026-09-22T15:00:00")
+                first = _tap(f"{BOOKING_DATE}T14:00:00")
+                second = _tap(f"{BOOKING_DATE}T15:00:00")
         assert first.action_data is not None
         assert second.action_data is not None
         token_a = first.action_data["pending_action"]["token"]
@@ -1238,14 +1324,14 @@ class TestSlotPickCallback:
         client.times = [
             AvailableTime(
                 time="14:00",
-                datetime="2026-09-22T14:00:00+03:00",  # aware form
+                datetime=f"{BOOKING_DATE}T14:00:00+03:00",  # aware form
                 seance_length_s=3600,
             )
         ]
         ctx = SkillContext(
             conversation=context.conversation,
             bot_user=context.bot_user,
-            message_text="cb:book:pick_slot:11:22:2026-09-22T14:00:00",  # naive form
+            message_text=f"cb:book:pick_slot:11:22:{BOOKING_DATE}T14:00:00",  # naive form
         )
         with _patch_yclients(client), _patch_provider_complete([]) as mock_complete:
             with tenant_scope(tenant):
@@ -1294,7 +1380,7 @@ class TestCreateFlowServiceContext:
         client = FakeYClients()
         client.services_rows = [_service(22)]
         client.staff_rows = [_staff(11)]
-        client.dates = ["2026-09-22"]
+        client.dates = [BOOKING_DATE]
         tc = ToolCall(
             id="c1",
             name="show_masters",
@@ -1334,14 +1420,14 @@ class TestCreateFlowServiceContext:
         client = FakeYClients()
         client.services_rows = [_service(22)]
         client.staff_rows = [_staff(11)]
-        client.dates = ["2026-09-22"]
+        client.dates = [BOOKING_DATE]
         client.times = [
-            AvailableTime(time="14:00", datetime="2026-09-22T14:00:00", seance_length_s=3600)
+            AvailableTime(time="14:00", datetime=f"{BOOKING_DATE}T14:00:00", seance_length_s=3600)
         ]
         ctx = SkillContext(
             conversation=context.conversation,
             bot_user=context.bot_user,
-            message_text="cb:book:pick_date:11:2026-09-22:22",
+            message_text=f"cb:book:pick_date:11:{BOOKING_DATE}:22",
         )
         with _patch_yclients(client), _patch_provider_complete([]):
             with tenant_scope(tenant):
@@ -1352,7 +1438,7 @@ class TestCreateFlowServiceContext:
         # flow actually makes — and off the slot buttons, which is where the
         # id has to be for the NEXT tap to work.
         assert result.tool_calls_made == []
-        assert client.times_calls == [{"staff_id": 11, "date": "2026-09-22", "service_ids": [22]}]
+        assert client.times_calls == [{"staff_id": 11, "date": BOOKING_DATE, "service_ids": [22]}]
         assert result.action_data is not None
         buttons = result.action_data["attachments"][0]["payload"]["buttons"]
         assert all(":22:" in b["callback"] for b in buttons)
@@ -1369,12 +1455,12 @@ class TestCreateFlowServiceContext:
         client.services_rows = [_service(22)]
         client.staff_rows = [_staff(11)]
         client.times = [
-            AvailableTime(time="14:00", datetime="2026-09-22T14:00:00", seance_length_s=3600)
+            AvailableTime(time="14:00", datetime=f"{BOOKING_DATE}T14:00:00", seance_length_s=3600)
         ]
         ctx = SkillContext(
             conversation=context.conversation,
             bot_user=context.bot_user,
-            message_text="cb:book:pick_slot:11:22:2026-09-22T14:00:00",
+            message_text=f"cb:book:pick_slot:11:22:{BOOKING_DATE}T14:00:00",
         )
         with _patch_yclients(client), _patch_provider_complete([]) as mock_complete:
             with tenant_scope(tenant):
@@ -1397,9 +1483,9 @@ class TestCreateFlowServiceContext:
         client = FakeYClients()
         client.services_rows = [_service(22)]
         client.staff_rows = [_staff(11, "Ольга")]
-        client.dates = ["2026-09-22"]
+        client.dates = [BOOKING_DATE]
         client.times = [
-            AvailableTime(time="14:00", datetime="2026-09-22T14:00:00", seance_length_s=3600)
+            AvailableTime(time="14:00", datetime=f"{BOOKING_DATE}T14:00:00", seance_length_s=3600)
         ]
         tc = ToolCall(
             id="c1",
@@ -1444,7 +1530,7 @@ class TestCreateFlowServiceContext:
         assert row.kind == PendingBookingAction.Kind.CONFIRM
         assert row.payload["master_id"] == 11
         assert row.payload["service_id"] == 22
-        assert row.payload["slot_datetime"] == "2026-09-22T14:00:00"
+        assert row.payload["slot_datetime"] == f"{BOOKING_DATE}T14:00:00"
 
 
 class TestConfirmBookingFlow:
@@ -1896,7 +1982,7 @@ class TestE0RegressionGuards:
         client = FakeYClients()
         client.services_rows = [_service(22)]
         client.staff_rows = [_staff(11)]
-        client.dates = ["2026-09-22"]
+        client.dates = [BOOKING_DATE]
         ctx = SkillContext(
             conversation=context.conversation,
             bot_user=context.bot_user,
@@ -2301,12 +2387,14 @@ class TestResolvedHealthCheckGate:
         client.services_rows = [_service(self._SERVICE)]
         client.staff_rows = [_staff(self._MASTER, "Ольга")]
         client.times = [
-            AvailableTime(time="14:00", datetime="2026-09-22T14:00:00", seance_length_s=3600)
+            AvailableTime(time="14:00", datetime=f"{BOOKING_DATE}T14:00:00", seance_length_s=3600)
         ]
         ctx = SkillContext(
             conversation=context.conversation,
             bot_user=context.bot_user,
-            message_text=(f"cb:book:pick_slot:{self._MASTER}:{self._SERVICE}:2026-09-22T14:00:00"),
+            message_text=(
+                f"cb:book:pick_slot:{self._MASTER}:{self._SERVICE}:{BOOKING_DATE}T14:00:00"
+            ),
         )
         with override_settings(
             BOOKING_VIA_AYLA_REST=True,
@@ -2340,7 +2428,9 @@ class TestResolvedHealthCheckGate:
         ctx = SkillContext(
             conversation=context.conversation,
             bot_user=context.bot_user,
-            message_text=(f"cb:book:pick_slot:{self._MASTER}:{self._SERVICE}:2026-09-22T14:00:00"),
+            message_text=(
+                f"cb:book:pick_slot:{self._MASTER}:{self._SERVICE}:{BOOKING_DATE}T14:00:00"
+            ),
         )
         with override_settings(
             BOOKING_VIA_AYLA_REST=True,
@@ -2375,7 +2465,7 @@ class TestResolvedHealthCheckGate:
             arguments={
                 "master_id": self._MASTER,
                 "service_id": self._SERVICE,
-                "slot_datetime": "2026-09-22T14:00:00",
+                "slot_datetime": f"{BOOKING_DATE}T14:00:00",
             },
         )
         with override_settings(
@@ -2528,12 +2618,12 @@ class TestHealthCheckGateAllowlist:
         client.services_rows = [_service(service_uuid)]
         client.staff_rows = [_staff(master_uuid, "Ольга")]
         client.times = [
-            AvailableTime(time="14:00", datetime="2026-09-22T14:00:00", seance_length_s=3600)
+            AvailableTime(time="14:00", datetime=f"{BOOKING_DATE}T14:00:00", seance_length_s=3600)
         ]
         ctx = SkillContext(
             conversation=context.conversation,
             bot_user=context.bot_user,
-            message_text=f"cb:book:pick_slot:{master_uuid}:{service_uuid}:2026-09-22T14:00:00",
+            message_text=f"cb:book:pick_slot:{master_uuid}:{service_uuid}:{BOOKING_DATE}T14:00:00",
         )
         with override_settings(
             BOOKING_VIA_AYLA_REST=True,
@@ -2584,7 +2674,7 @@ class TestHealthCheckGateAllowlist:
         ctx = SkillContext(
             conversation=context.conversation,
             bot_user=context.bot_user,
-            message_text=f"cb:book:pick_slot:{master_uuid}:{service_uuid}:2026-09-22T14:00:00",
+            message_text=f"cb:book:pick_slot:{master_uuid}:{service_uuid}:{BOOKING_DATE}T14:00:00",
         )
         with override_settings(BOOKING_VIA_AYLA_REST=True):
             with (
@@ -2629,7 +2719,7 @@ class TestHealthCheckGateAllowlist:
         ctx = SkillContext(
             conversation=context.conversation,
             bot_user=context.bot_user,
-            message_text="cb:book:pick_slot:11:22:2026-09-22T14:00:00",
+            message_text=f"cb:book:pick_slot:11:22:{BOOKING_DATE}T14:00:00",
         )
         with _patch_yclients(client), _patch_provider_complete([]):
             with tenant_scope(tenant):
