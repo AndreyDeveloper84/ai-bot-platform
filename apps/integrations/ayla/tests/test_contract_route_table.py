@@ -337,7 +337,12 @@ def _exercise_booking() -> None:
     tenant = Tenant(id=uuid.uuid4(), slug="route-table", name="Route Table")
     with tenant_scope(tenant):
         _swallow(lambda: c.get_services())
-        _swallow(lambda: c.get_services(specialist_id="SPECID"))
+    # DRF-1019: ``catalog/specialist-services/`` used to be exercised here via
+    # ``get_services(specialist_id=…)`` — a branch no production caller reached,
+    # so the row was covered by dead code while the live reader of the same
+    # route was not covered at all. ``get_specialist_service_edges`` is that
+    # live reader (quote/repeat, DRF-1067). It takes no tenant scope by design.
+    _swallow(lambda: c.get_specialist_service_edges(specialist_id="SPECID", service_id="SVCID"))
     _swallow(lambda: c.get_masters())
     _swallow(lambda: c.get_masters(specialist_id="SPECID"))
     _swallow(

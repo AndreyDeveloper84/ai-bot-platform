@@ -127,16 +127,25 @@ class AylaYClientsAdapter:
 
     # ── reads ──────────────────────────────────────────────────────────────
 
-    def get_services(
-        self,
-        *,
-        staff_id: int | str | None = None,
-        category_id: int | str | None = None,
-    ) -> list[Service]:
+    def get_services(self, *, category_id: int | str | None = None) -> list[Service]:
+        """The tenant's whole active catalog.
+
+        DRF-1019: the YClients-shaped ``staff_id`` filter is gone from this
+        side of the seam. It forwarded to an Ayla-client branch that no
+        caller ever reached, and keeping the parameter after removing the
+        branch would mean accepting a filter and silently ignoring it. A
+        caller that wants one master's services should read the local
+        ``catalog.MasterService`` mirror (SQL join, no HTTP); one
+        (master, service) pair comes from
+        ``AylaBookingClient.get_specialist_service_edges``.
+
+        ``category_id`` is accepted for parity with the YClients client the
+        tools were written against and is likewise not honoured on the Ayla
+        path — no caller passes it either. Kept, rather than removed, only
+        because the tools' call shape is duck-typed across both providers.
+        """
         with _translate_errors():
-            rows = self._client.get_services(
-                specialist_id=str(staff_id) if staff_id is not None else None
-            )
+            rows = self._client.get_services()
         return [_to_yc_service(r) for r in rows]
 
     def get_staff(self, *, staff_id: int | str | None = None) -> list[Staff]:
