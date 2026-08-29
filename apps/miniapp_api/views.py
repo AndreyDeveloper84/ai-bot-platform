@@ -33,7 +33,7 @@ import re
 import uuid
 from datetime import date as date_cls, datetime, timedelta
 from functools import wraps
-from typing import Any, Callable
+from typing import Any, Callable, NamedTuple
 from zoneinfo import ZoneInfo
 
 from django.db.models import Exists, OuterRef
@@ -1292,6 +1292,24 @@ def _get_booking_owned(bot_user: BotUser, booking_id: str):
         return None
 
 
+def _reschedule_unavailable_on_ayla_path() -> HttpResponse:
+    """409 for the reschedule pair when BOOKING_VIA_AYLA_REST is ON.
+
+    ``_get_booking_owned`` reads ``BookingRequest``, which the Ayla path
+    does not write, so without this gate both reschedule endpoints answer
+    404 «booking not found» for a visit the customer is looking at in her
+    own list — the same shape of lie the cancel pair already gates against
+    two functions up. The seam itself is genuinely absent, not merely
+    unrouted: ``_proxy_booking_to_dict`` reports ``reschedulable: False``.
+    DRF-1349.
+    """
+    return _error(
+        "invalid_state",
+        "reschedule is not available on the Ayla path",
+        409,
+    )
+
+
 # ── Ayla-path read model (RemoteBookingProxy) — W4 escalation №3 ────────────
 #
 # BOOKING_VIA_AYLA_REST ON: the Ayla-first create never writes
@@ -1308,15 +1326,23 @@ _AYLA_UPCOMING_STATUSES = ("confirmed", "awaiting_payment", "pending_payment")
 _AYLA_TERMINAL_STATUSES = ("cancelled", "completed", "no_show")
 
 
-def _proxy_booking_to_dict(proxy) -> dict[str, Any]:
-    """BookingItem shape from a RemoteBookingProxy row.
+def _proxy_catalog_refs(proxy) -> tuple[Any, Any]:
+    """``(CatalogService | None, CatalogMaster | None)`` for a proxy row.
 
-    Field-for-field identical to the local ``_booking_to_dict`` so the FE
-    never branches: names resolve through the catalog mirrors
-    (CatalogService.ayla_service_id / CatalogMaster.id), duration from
-    the schedule window, status verbatim from the proxy. Mirror lookups
-    go through the tenant-scoped manager (``with_request_tenant`` sets
-    the context; the proxy row itself was fetched under the same
+    ``RemoteBookingProxy`` stores opaque ids only — ADR-0009 rule 1 keeps
+    display copy out of the mirror — so every human-readable name on this
+    path is a catalog lookup: ``service_id`` → ``CatalogService.
+    ayla_service_id``, ``specialist_id`` → ``CatalogMaster.id``.
+
+    An id that resolves to nothing yields ``None``, and callers render
+    ``""`` rather than guessing. That gap is real and visible: an
+    unmirrored service is how a notification came out as «Поделитесь
+    впечатлением от у Тихонова Ольга», with the service name simply
+    absent. Closing it means fixing catalog sync, not inventing a name
+    here.
+
+    Lookups go through the tenant-scoped manager (``with_request_tenant``
+    sets the context; the proxy row itself was fetched under the same
     tenant) — no ``all_tenants`` carve-out here (MKT1, #1018).
     """
     from apps.catalog.models import CatalogMaster, CatalogService
@@ -1327,10 +1353,30 @@ def _proxy_booking_to_dict(proxy) -> dict[str, Any]:
     master = None
     if proxy.specialist_id:
         master = CatalogMaster.objects.filter(id=proxy.specialist_id).first()
+    return service, master
 
-    duration_min = 0
+
+def _proxy_duration_min(proxy) -> int:
+    """Visit length from the mirror's schedule window.
+
+    The mirror has no duration column — ``end_at - start_at`` is the only
+    source. Missing either endpoint yields ``0``.
+    """
     if proxy.start_at and proxy.end_at:
-        duration_min = max(int((proxy.end_at - proxy.start_at).total_seconds() // 60), 0)
+        return max(int((proxy.end_at - proxy.start_at).total_seconds() // 60), 0)
+    return 0
+
+
+def _proxy_booking_to_dict(proxy) -> dict[str, Any]:
+    """BookingItem shape from a RemoteBookingProxy row.
+
+    Field-for-field identical to the local ``_booking_to_dict`` so the FE
+    never branches: names resolve through the catalog mirrors
+    (see :func:`_proxy_catalog_refs`), duration from the schedule window,
+    status verbatim from the proxy.
+    """
+    service, master = _proxy_catalog_refs(proxy)
+    duration_min = _proxy_duration_min(proxy)
 
     out = {
         "id": str(proxy.appointment_id),
@@ -1673,6 +1719,8 @@ def booking_reschedule_request(request: HttpRequest, booking_id: str) -> HttpRes
     )
 
     bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
+    if getattr(settings, "BOOKING_VIA_AYLA_REST", False):
+        return _reschedule_unavailable_on_ayla_path()
     booking = _get_booking_owned(bot_user, booking_id)
     if booking is None:
         return _error("not_found", "booking not found", 404)
@@ -1727,6 +1775,8 @@ def booking_reschedule_confirm(request: HttpRequest, booking_id: str) -> HttpRes
     )
 
     bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
+    if getattr(settings, "BOOKING_VIA_AYLA_REST", False):
+        return _reschedule_unavailable_on_ayla_path()
     booking = _get_booking_owned(bot_user, booking_id)
     if booking is None:
         return _error("not_found", "booking not found", 404)
@@ -1953,6 +2003,18 @@ def submit_feedback(request: HttpRequest, booking_id) -> HttpResponse:  # type: 
     )
 
     bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
+
+    # On the Ayla path there is no local row to rate: `_proxy_booking_to_dict`
+    # already reports `can_rate: False` / `rating: None`, and the rating read
+    # model is out of the pilot's scope. Say so, rather than letting the
+    # BookingRequest lookup miss and answer «booking not found» about a visit
+    # the customer can see in her own list (DRF-1349).
+    if getattr(settings, "BOOKING_VIA_AYLA_REST", False):
+        return _error(
+            "invalid_state",
+            "feedback is not available on the Ayla path",
+            409,
+        )
 
     # Use the shared owner+tenant loader (explicit tenant predicate) for
     # parity with the transition endpoints, and a generic not-found message
@@ -2426,6 +2488,103 @@ def _format_visit_human(visit_at, tz: ZoneInfo, *, now=None) -> str:
     return f"{prefix} · {weekday} · {local:%H:%M}"
 
 
+class _ActivityRow(NamedTuple):
+    """The dashboard's view of one booking, source-agnostic.
+
+    Both read paths below project down to this so the response builder
+    stays identical: only *where the row came from* differs, never what
+    the customer is shown.
+    """
+
+    visit_at: datetime
+    service_name: str
+    master_name: str
+    duration_min: int
+    booking_id: str
+
+
+def _recent_activity_from_mirror(
+    bot_user: BotUser,
+    *,
+    now: datetime,
+    week_start: datetime,
+    week_end: datetime,
+) -> tuple[_ActivityRow | None, int]:
+    """Dashboard rollup from ``RemoteBookingProxy`` (BOOKING_VIA_AYLA_REST ON).
+
+    The mirror is the only table that carries bookings the customer did
+    not make in the bot dialog — salon, Mini App, admin console — which
+    is every booking the dashboard was previously blind to. Ownership is
+    the same predicate the rest of the Ayla path uses: tenant + bot_user,
+    so an orphan proxy (a booking by someone who never opened the bot)
+    belongs to nobody and is invisible here by construction.
+    """
+    from apps.booking.models import RemoteBookingProxy
+
+    owned = RemoteBookingProxy.all_tenants.filter(
+        tenant=bot_user.tenant,
+        bot_user=bot_user,
+        status__in=_AYLA_UPCOMING_STATUSES,
+    )
+
+    row: _ActivityRow | None = None
+    proxy = owned.filter(start_at__gte=now).order_by("start_at", "created_at").first()
+    if proxy is not None and proxy.start_at is not None:
+        service, master = _proxy_catalog_refs(proxy)
+        row = _ActivityRow(
+            visit_at=proxy.start_at,
+            service_name=service.name if service else "",
+            master_name=master.name if master else "",
+            duration_min=_proxy_duration_min(proxy),
+            booking_id=str(proxy.appointment_id),
+        )
+
+    this_week_count = owned.filter(
+        start_at__gte=week_start,
+        start_at__lt=week_end,
+    ).count()
+    return row, this_week_count
+
+
+def _recent_activity_from_local(
+    bot_user: BotUser,
+    *,
+    now: datetime,
+    week_start: datetime,
+    week_end: datetime,
+) -> tuple[_ActivityRow | None, int]:
+    """Dashboard rollup from ``BookingRequest`` (BOOKING_VIA_AYLA_REST OFF).
+
+    The pre-DRF-1349 behaviour, unchanged and still correct on the flag-OFF
+    path: with the flag off nothing writes the mirror, and the local table
+    is the canonical booking store.
+    """
+    from apps.booking.models import BookingRequest
+
+    owned = BookingRequest.all_tenants.filter(
+        tenant=bot_user.tenant,
+        bot_user=bot_user,
+        status=BookingRequest.Status.CONFIRMED,
+    )
+
+    row: _ActivityRow | None = None
+    booking = owned.filter(visit_at__gte=now).order_by("visit_at").first()
+    if booking is not None and booking.visit_at is not None:
+        row = _ActivityRow(
+            visit_at=booking.visit_at,
+            service_name=booking.service_name,
+            master_name=booking.master_name,
+            duration_min=booking.duration_min or 0,
+            booking_id=str(booking.id),
+        )
+
+    this_week_count = owned.filter(
+        visit_at__gte=week_start,
+        visit_at__lt=week_end,
+    ).count()
+    return row, this_week_count
+
+
 @require_http_methods(["GET"])
 @require_init_data
 @with_request_tenant
@@ -2448,20 +2607,59 @@ def customer_recent_activity(request: HttpRequest) -> HttpResponse:
 
     ## Data source
 
-    `next_booking` + `this_week_booking_count` read the local
-    `BookingRequest` mirror (populated by the Ayla booking-event
-    consumer per ADR-0009 — a read of cached canonical state, not
-    ownership). No Ayla round-trip on this path.
+    `next_booking` + `this_week_booking_count` read `RemoteBookingProxy`
+    — the Ayla booking mirror the eventbus consumers write — whenever
+    `BOOKING_VIA_AYLA_REST` is ON, and the local `BookingRequest` table
+    when it is OFF. That is the same split `/bookings/list` and
+    `/bookings/{id}` already make in this module
+    (`_bookings_list_ayla` / `_booking_detail_ayla`). No Ayla round-trip
+    on this path either way.
+
+    ### Why it changed (DRF-1349)
+
+    This endpoint used to read `BookingRequest` unconditionally, and this
+    docstring claimed the booking-event consumer populated that table.
+    It does not, and never did: `apps/eventbus/consumers/booking.py`
+    upserts `RemoteBookingProxy` on `booking.created` and mentions
+    `BookingRequest` exactly once — in a comment stating that these
+    surfaces «never write BookingRequest». With the flag ON the only
+    writers left are `execute_confirm` / `execute_reschedule` inside the
+    bot's own dialog, so a visit booked **in the salon, in the Mini App,
+    or in the admin console** was invisible here and the wellness
+    dashboard told a customer who had an appointment that she had none.
+
+    Same defect and same cure as DRF-1085 / DRF-1126 / DRF-1129 on the
+    master surfaces — see `apps/master_api/services/visit_source.py`,
+    which measured the pilot at 4 `BookingRequest` rows against 23 live
+    `RemoteBookingProxy` rows.
+
+    ### Which statuses count
+
+    The local path filters `CONFIRMED`; the mirror path filters
+    `_AYLA_UPCOMING_STATUSES` (`confirmed` / `awaiting_payment` /
+    `pending_payment`), the same set `/bookings/list` treats as upcoming
+    — `awaiting_payment` is Ayla's wire value and is deliberately not in
+    `RemoteBookingProxy.Status`. Cancelled, completed and no-show rows
+    are excluded on both paths, so a visit that already happened this
+    week drops out of the week count exactly as it did before.
 
     ## Fields without a source (documented gaps)
 
     * `next_booking.address` — bot-platform's `Tenant` has no address
       field; returned as `""`. Frontend renders empty until the address
       lands (Ayla salon profile OR a tenant config field).
+    * `next_booking.service_name` / `.master_name` on the mirror path —
+      the mirror stores opaque ids, so both are catalog lookups
+      (:func:`_proxy_catalog_refs`) and come back `""` when the catalog
+      row is missing. Empty, never invented — an unmirrored service is
+      how a notification once read «Поделитесь впечатлением от
+      у Тихонова Ольга».
+    * `next_booking.booking_id` on the mirror path is Ayla's
+      `appointment_id`, not a local `BookingRequest.id`. That is the id
+      `/bookings/list` and `/bookings/{id}` already return on this path,
+      so the dashboard's deep link resolves instead of 404-ing.
     """
     from datetime import timedelta
-
-    from apps.booking.models import BookingRequest
 
     bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
     tenant = bot_user.tenant
@@ -2472,41 +2670,40 @@ def customer_recent_activity(request: HttpRequest) -> HttpResponse:
 
     now = timezone.now()
 
-    # ── next upcoming CONFIRMED booking ─────────────────────────────────
-    next_qs = BookingRequest.all_tenants.filter(
-        tenant=tenant,
-        bot_user=bot_user,
-        status=BookingRequest.Status.CONFIRMED,
-        visit_at__gte=now,
-    ).order_by("visit_at")
-    next_row = next_qs.first()
-
-    next_booking: dict[str, Any] | None = None
-    if next_row is not None and next_row.visit_at is not None:
-        next_booking = {
-            "date_human": _format_visit_human(next_row.visit_at, tz, now=now),
-            "service_name": next_row.service_name,
-            "duration_min": next_row.duration_min or 0,
-            "master_name": next_row.master_name,
-            "salon_name": tenant.name,
-            # No address field on Tenant — graceful empty per docstring.
-            "address": "",
-            "booking_id": str(next_row.id),
-        }
-
-    # ── this-week CONFIRMED count (Mon 00:00 … next Mon, customer TZ) ────
+    # ── week window (Mon 00:00 … next Mon, customer TZ) ─────────────────
     local_now = now.astimezone(tz)
     week_start_local = (local_now - timedelta(days=local_now.weekday())).replace(
         hour=0, minute=0, second=0, microsecond=0
     )
     week_end_local = week_start_local + timedelta(days=7)
-    this_week_count = BookingRequest.all_tenants.filter(
-        tenant=tenant,
-        bot_user=bot_user,
-        status=BookingRequest.Status.CONFIRMED,
-        visit_at__gte=week_start_local,
-        visit_at__lt=week_end_local,
-    ).count()
+
+    if getattr(settings, "BOOKING_VIA_AYLA_REST", False):
+        next_row, this_week_count = _recent_activity_from_mirror(
+            bot_user,
+            now=now,
+            week_start=week_start_local,
+            week_end=week_end_local,
+        )
+    else:
+        next_row, this_week_count = _recent_activity_from_local(
+            bot_user,
+            now=now,
+            week_start=week_start_local,
+            week_end=week_end_local,
+        )
+
+    next_booking: dict[str, Any] | None = None
+    if next_row is not None:
+        next_booking = {
+            "date_human": _format_visit_human(next_row.visit_at, tz, now=now),
+            "service_name": next_row.service_name,
+            "duration_min": next_row.duration_min,
+            "master_name": next_row.master_name,
+            "salon_name": tenant.name,
+            # No address field on Tenant — graceful empty per docstring.
+            "address": "",
+            "booking_id": next_row.booking_id,
+        }
 
     payload: dict[str, Any] = {
         "this_week_booking_count": this_week_count,
