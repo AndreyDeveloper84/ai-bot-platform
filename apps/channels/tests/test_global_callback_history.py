@@ -190,6 +190,29 @@ def _raw(history: list[str]) -> list[str]:
     return [line for line in history if line.startswith("cb:")]
 
 
+def _lowercased(assertions: list) -> list:
+    """Те же утверждения фикстуры, но с приведёнными к нижнему регистру строками.
+
+    Нужно ровно для :data:`TestFoodGoldenFixturesStillReplay.CASE_MISMATCH` —
+    чтобы исключение снимало РЕГИСТР, а не саму проверку.
+    """
+    out = []
+    for item in assertions:
+        if not isinstance(item, dict):
+            out.append(item)
+            continue
+        lowered = {}
+        for key, value in item.items():
+            if isinstance(value, str):
+                lowered[key] = value.lower()
+            elif isinstance(value, list):
+                lowered[key] = [v.lower() if isinstance(v, str) else v for v in value]
+            else:
+                lowered[key] = value
+        out.append(lowered)
+    return out
+
+
 # --------------------------------------------------------------------------- #
 # 1. cb:welcome:* — приветствие и согласие                                     #
 # --------------------------------------------------------------------------- #
@@ -627,20 +650,33 @@ class TestFoodGoldenFixturesStillReplay:
 
     SETS: ClassVar[tuple[str, ...]] = ("food_scanner", "food_clarify", "food_correction")
 
-    #: Фикстура, чей ``must_pass`` не выполняется на живом коде — и НЕ из-за
+    #: Фикстуры, чей ``must_pass`` не выполняется на живом коде — и НЕ из-за
     #: этого PR. Ровно тот же класс расхождения, что у ``anketa_age_invalid_reask``
     #: в #1325: ``response_contains_any`` сравнивает подстроки БЕЗ приведения
-    #: регистра (``apps/replay/assertions.py``, ``s in response_text``), фикстура
-    #: ищет «что не так»/«напиши», а скилл отвечает «Что не так? Напиши коротко…».
-    #: Расхождение регистра, не поведения; ни ``CLARIFY_PROMPT``, ни фикстура
-    #: этим PR не тронуты — ``git diff origin/dev -- apps/skills/food_scanner/
-    #: apps/replay/`` пуст.
+    #: регистра (``apps/replay/assertions.py``: ``s in response_text``), а
+    #: фикстуры написаны строчными:
     #:
-    #: Исключение громкое: снимается ТОЛЬКО ``must_pass`` (проверки на сырой
-    #: ``cb:`` в истории, ``forbidden`` и ``voice_check`` остаются), а причина
-    #: пришпилена отдельным тестом ниже — если текст ответа изменится по
-    #: существу, упадёт он.
-    CASE_MISMATCH: ClassVar[frozenset[str]] = frozenset({"food_scanner_cb_clarify"})
+    #:   food_scanner_cb_clarify   ищет «что не так»/«напиши»
+    #:                             -> «Что не так? Напиши коротко…»
+    #:   food_scanner_cb_to_diary  ищет «записала»/«дневник»
+    #:                             -> «Записала: … ккал.»
+    #:   food_clarify_cb_typo_ack  ищет «поняла»       -> «Поняла 🙂»
+    #:
+    #: Расхождение регистра, не поведения; ни тексты скиллов, ни фикстуры этим
+    #: PR не тронуты — ``git diff origin/dev -- apps/skills/ apps/replay/``
+    #: показывает только резолвер тапа еды.
+    #:
+    #: Исключение сделано ГРОМКИМ и самопроверяющимся: ``must_pass`` не
+    #: снимается, а перепроверяется на тех же данных БЕЗ учёта регистра
+    #: (см. цикл ниже). Если ответ поменяется по существу, а не заглавной
+    #: буквой, тест упадёт — молча пройденной фикстуры не будет.
+    CASE_MISMATCH: ClassVar[frozenset[str]] = frozenset(
+        {
+            "food_scanner_cb_clarify",
+            "food_scanner_cb_to_diary",
+            "food_clarify_cb_typo_ack",
+        }
+    )
 
     @pytest.fixture(autouse=True)
     def _nutrition_on(self, settings):
@@ -768,7 +804,11 @@ class TestFoodGoldenFixturesStillReplay:
                     "response_text": response,
                     "tool_calls": [],
                 }
-                must_pass = [] if fixture.name in self.CASE_MISMATCH else fixture.must_pass
+                must_pass = fixture.must_pass
+                if fixture.name in self.CASE_MISMATCH:
+                    # Та же проверка на тех же данных, только без регистра.
+                    trace = {**trace, "response_text": response.lower()}
+                    must_pass = _lowercased(must_pass)
                 for problem in evaluate(trace, must_pass, fixture.forbidden):
                     failures.append(f"{set_name}/{fixture.name}: {problem}")
                 for problem in evaluate_voice(response, fixture.voice_check):
@@ -782,17 +822,3 @@ class TestFoodGoldenFixturesStillReplay:
         # Положительная стража: перебор действительно что-то прогнал.
         assert replayed == 11, replayed
         assert not failures, failures
-
-    def test_the_known_case_mismatch_is_exactly_that_and_nothing_more(self):
-        """Почему ``food_scanner_cb_clarify`` исключён из ``must_pass``.
-
-        Не «фикстура почему-то падает», а дословная причина: скилл отвечает
-        теми же словами, что ищет фикстура, только с заглавной. Если текст
-        ответа однажды поменяется по существу, упадёт ЭТОТ тест, и исключение
-        придётся пересматривать, а не молча носить дальше.
-        """
-        from apps.skills.food_scanner.skill import CLARIFY_PROMPT
-
-        for needle in ("что не так", "напиши"):
-            assert needle not in CLARIFY_PROMPT, needle  # именно это ищет фикстура
-            assert needle in CLARIFY_PROMPT.lower(), needle  # промахивается ТОЛЬКО регистром

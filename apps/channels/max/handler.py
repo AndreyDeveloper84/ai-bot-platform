@@ -100,7 +100,11 @@ from typing import Any
 
 from django.conf import settings
 
-from apps.channels.max.global_onboarding import needs_onboarding, run_onboarding_turn
+from apps.channels.max.global_onboarding import (
+    needs_onboarding,
+    resolve_welcome_tap,
+    run_onboarding_turn,
+)
 from apps.channels.max.outbound import (
     edit_message_or_send,
     make_inline_keyboard_attachment_rows,
@@ -167,6 +171,7 @@ from apps.orchestrator.handoff import (
 from apps.orchestrator.intent_resolution import resolve_and_log_turn_intent
 from apps.orchestrator.nutrition_global import (
     resolve_anketa_tap,
+    resolve_food_tap,
     try_handle_structured_nutrition_turn,
 )
 from apps.nutrition_proactive.optout import try_handle_opt_out
@@ -1121,12 +1126,70 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
     # payload; history gets the phrase.
     anketa_tap = resolve_anketa_tap(event.text)
 
+    # DRF-990, продолжение — те же две правки для остальных семейств.
+    #
+    # Замер по всем формам `cb:`, какие репозиторий вообще упоминает, показал,
+    # что гейт ниже — это СПИСОК ИСКЛЮЧЕНИЙ, а не правило: мимо истории идут
+    # ровно перечисленные семейства, всё остальное пишется дословно. Здесь
+    # закрываются те, что доказуемо доезжают до этого пути.
+    #
+    # ФРАЗА (тап — высказывание человека, у семейства есть НАБРАННЫЕ шаги,
+    # которые в историю попадают всегда, и молчание оставило бы половину
+    # разговора):
+    #
+    #   `cb:welcome:*` — приветствие и 152-ФЗ согласие. Шире анкеты: её
+    #       открывают не все, приветствие проходит каждый новый пользователь.
+    #       Вход НАБИРАЮТ («/start» или свободная фраза), дальше только тапы.
+    #   `cb:food:*` — буквальный близнец анкеты (тот же
+    #       `_STRUCTURED_CALLBACK_PREFIXES`). Еду называют текстом и уточняют
+    #       текстом; «✅ В дневник» / «❌ Не то» — подтверждение и поправка.
+    #
+    # Доводы целиком — в комментариях у самих резолверов
+    # (`global_onboarding.resolve_welcome_tap`, `nutrition_global.resolve_food_tap`).
+    # Как и у анкеты, перевод стоит ЗДЕСЬ, а не в `resolve_tap_text` выше: оба
+    # семейства маршрутизируются ПО payload'у (`WelcomeSkill.matches`,
+    # `needs_onboarding`, `try_handle_structured_nutrition_turn`), и подмена
+    # `event.text` сломала бы и опрос согласия, и дневник еды.
+    welcome_tap = resolve_welcome_tap(event.text)
+    food_tap = resolve_food_tap(event.text)
+
+    # МОЛЧАНИЕ — то же решение и по той же причине, что у `cb:book:*`
+    # (DRF-988) и `cb:catalog:*` (DRF-1304): текст несёт id карточки, которую
+    # бот сам нарисовал, а не слова человека.
+    #
+    #   `cb:visit:*` — карточка визита и «Записаться ещё». Ветка в лестнице
+    #       есть с самого начала, в гейте персистенса семейства не было.
+    #   `cb:discover:book:*` — главный призыв к действию на карточке мастера
+    #       и ПЕРВЫЙ шаг той самой воронки, все последующие шаги которой
+    #       (`cb:book:*`) уже молчат. Набранных шагов внутри воронки нет,
+    #       поэтому молчание однородно и асимметрии, из-за которой анкете
+    #       дали фразу, здесь не возникает. Ответы бота (карточка визита,
+    #       передача в салон) пишутся как обычно и держат контекст.
+    is_visit_callback = event.text.startswith(VISIT_CALLBACK_PREFIXES)
+    is_discover_book_callback = event.text.startswith(CALLBACK_DISCOVER_BOOK_PREFIX)
+
+    # `stale_tap` — кнопка была настоящая, но фразы за ней уже нет (снятый
+    # чип `cb:qa:{слаг}`, «Повторить» без истории). DRF-1051 закрыл для неё
+    # МАРШРУТИЗАЦИЮ — модель payload'а не видит, — но не персистенс, и сырая
+    # строка продолжала ложиться в историю. Фразы у снятой кнопки нет по
+    # определению («выдумать за человека фразу хуже» — `quick_actions`), так
+    # что единственный честный исход тот же, что и у нераспознанного тапа
+    # анкеты: в историю не идёт ничего. Экран «кнопка устарела» бот при этом
+    # отвечает и записывает, так что ход в истории виден.
+
     # Persist + remember the inbound turn (sentinel-scoped, current_tenant()=None).
-    inbound_history_text = event.text if anketa_tap is None else anketa_tap.history_text
+    inbound_history_text = event.text
+    for tap in (anketa_tap, welcome_tap, food_tap):
+        if tap is not None:
+            inbound_history_text = tap.history_text
+            break
     if (
         is_booking_callback
         or is_catalog_callback
         or is_clarify_redraw_tap
+        or is_visit_callback
+        or is_discover_book_callback
+        or stale_tap
         or inbound_history_text is None
     ):
         user_msg = None

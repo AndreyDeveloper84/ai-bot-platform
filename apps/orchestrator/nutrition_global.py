@@ -388,6 +388,77 @@ def resolve_anketa_tap(text: str) -> AnketaTap | None:
     return AnketaTap(history_text=next((lbl for lbl, slug in options if slug == value), None))
 
 
+# ---------------------------------------------------------------------------
+# DRF-990, продолжение — то же самое для ``cb:food:*``
+# ---------------------------------------------------------------------------
+#
+# Буквальный близнец анкеты: тот же вход (:data:`_STRUCTURED_CALLBACK_PREFIXES`),
+# та же маршрутизация ПО payload'у, та же дыра в персистенсе. И тот же ответ —
+# фраза, — по той же структурной причине:
+#
+#   * еду человек называет ТЕКСТОМ («борщ 300г») или присылает фото, а после
+#     «✏️ Уточнить» ДОНАБИРАЕТ поправку словами. Эти ходы в историю попадают
+#     всегда. Пропуск тапов оставил бы запись, где «борщ 300г» есть, а
+#     подтвердил его человек или отверг — неизвестно, и модель на следующем
+#     ходу достроит это сама;
+#   * «✅ В дневник» и «❌ Не то» — это высказывания человека о том, что он
+#     ел: подтверждение и поправка. Именно они делают запись дневника его
+#     записью.
+#
+# Метка берётся из тех же строителей клавиатур, что её и выложили. Совпадение
+# проверяется ДОСЛОВНО по всему payload'у: таблица строится с тем же
+# ``scan_id``, что пришёл, и payload обязан совпасть с одной из построенных
+# строк целиком. Поэтому «формы» угадывать не нужно — payload признаётся
+# тапом тогда и только тогда, когда клавиатура могла его выложить.
+# ``cb:food:to_diary`` без ``scan_id`` или ``cb:food:correct:nope:…`` под это
+# не подходят: подставлять нечего, в историю не идёт ничего.
+
+#: Строгая форма payload'а еды: сегменты без пробелов, ``scan_id`` — id Ayla.
+#: Отсекает набранное руками «cb:food: …» ДО того, как оно будет принято за
+#: тап и стёрто из истории (правило C01).
+_FOOD_CALLBACK_RE = re.compile(r"^cb:food:[a-z_]+(?::[A-Za-z0-9_-]+){0,2}$")
+
+
+def food_tap_labels(scan_id: str) -> dict[str, str]:
+    """``{payload: метка}`` для клавиатур еды, построенных с этим ``scan_id``.
+
+    Не копия таблицы, а вызов самих строителей
+    (:mod:`apps.orchestrator.ui.keyboards`) — переименованная кнопка едет в
+    историю уже новым именем, без правки здесь.
+    """
+    from apps.orchestrator.ui.keyboards import (
+        correction_choice_keyboard,
+        food_drink_clarify_keyboard,
+        food_recognition_keyboard,
+    )
+
+    return {
+        button["callback"]: button["label"]
+        for button in (
+            *food_drink_clarify_keyboard(),
+            *food_recognition_keyboard(scan_id),
+            *correction_choice_keyboard(scan_id),
+        )
+    }
+
+
+def resolve_food_tap(text: str) -> AnketaTap | None:
+    """Разобрать тап еды; ``None`` — «это не тап еды».
+
+    Возвращает тот же :class:`AnketaTap`, что и резолвер анкеты: вопрос у
+    них один — «чем этот тап был как реплика», — и заводить второй тип с тем
+    же единственным полем значило бы притвориться, что вопросы разные.
+    """
+    stripped = (text or "").strip()
+    if not _FOOD_CALLBACK_RE.match(stripped):
+        return None
+    # Последний сегмент — это ``scan_id`` у тех кнопок, что его несут, и часть
+    # имени действия у тех, что нет (``cb:food:diary``). Оба случая
+    # разрешаются одинаково: строим таблицу с ним и ищем ТОЧНОЕ совпадение.
+    scan_id = stripped.rsplit(":", 1)[-1]
+    return AnketaTap(history_text=food_tap_labels(scan_id).get(stripped))
+
+
 def _anketa_fsm_active(conversation: Any) -> bool:
     state = getattr(conversation, "skill_state", None)
     return bool(isinstance(state, dict) and state.get("nutrition_anketa"))
