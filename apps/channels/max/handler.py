@@ -1678,8 +1678,12 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
                             channel=event.channel,
                             trace_id=str(trace_id) if trace_id else "",
                             tenant=None,
-                            # Booking callbacks never reach this branch (2.5 above), so
-                            # the skipped user-turn persistence can't leak a None here.
+                            # Каждое семейство, чей ход мимо истории проходит
+                            # (booking 2.5, каталог, уточнение, визиты,
+                            # cb:discover:book, протухший тап, приветствие),
+                            # имеет СВОЮ ветку выше и до консьержа не доходит.
+                            # Сюда None приезжает только от нераспознанного
+                            # тапа анкеты/еды правильной формы, и это штатно.
                             user_message_id=user_msg.id if user_msg is not None else None,
                             memory_block=memory_block,
                             nutrition_block=nutrition_block,
