@@ -203,6 +203,11 @@ LOCAL_APPS = [
     # ``BotUser.context["nutrition_proactive"]``. Both beat tasks no-op
     # while ``NUTRITION_PROACTIVE_ENABLED`` is False (the default).
     "apps.nutrition_proactive",
+    # DRF-1344 — повод OBSERVE от Personal Plan: конвейер до гейтов, без
+    # текстов. No models, no migrations; the task evaluates the wellness
+    # context document, runs both gates and records the trace — nothing
+    # is ever sent, so there is no DRY_RUN switch and no beat entry.
+    "apps.wellness_proactive",
 ]
 
 INSTALLED_APPS = [
@@ -1412,6 +1417,19 @@ NUTRITION_PROACTIVE_ENABLED = os.environ.get("NUTRITION_PROACTIVE_ENABLED", "fal
 NUTRITION_PROACTIVE_DRY_RUN = os.environ.get("NUTRITION_PROACTIVE_DRY_RUN", "true").lower() not in (
     "false",
     "0",
+)
+
+# DRF-1344 — the single switch in front of the OBSERVE-occasion pipeline
+# (apps/wellness_proactive). False - the task returns immediately without
+# touching the database or Ayla. There is deliberately no DRY_RUN twin:
+# the module has no send path at all (the ticket ships the reason code
+# and the gate boundaries, not message texts), so every run is structurally
+# dry. No CELERY_BEAT_SCHEDULE entry either: registering a tick is a
+# decision about delivery, and delivery is out of scope — when texts land,
+# the tick reuses the DRF-1285 beat/quiet-hours infrastructure.
+WELLNESS_PROACTIVE_ENABLED = os.environ.get("WELLNESS_PROACTIVE_ENABLED", "false").lower() in (
+    "true",
+    "1",
 )
 
 # DRF-1301 — the same two switches in front of the post-visit follow-up
