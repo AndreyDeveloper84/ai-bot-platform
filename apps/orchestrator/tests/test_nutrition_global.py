@@ -437,11 +437,13 @@ class TestFoodTapAsAHistoryTurn:
         """«✅ В дневник» и «❌ Не то» — подтверждение и поправка о себе."""
         labels = food_tap_labels(self.SCAN)
 
-        assert resolve_food_tap(f"cb:food:to_diary:{self.SCAN}").history_text == (
-            labels[f"cb:food:to_diary:{self.SCAN}"]
+        assert (
+            resolve_food_tap(f"cb:food:to_diary:{self.SCAN}").history_text
+            == (labels[f"cb:food:to_diary:{self.SCAN}"])
         )
-        assert resolve_food_tap(f"cb:food:reject:{self.SCAN}").history_text == (
-            labels[f"cb:food:reject:{self.SCAN}"]
+        assert (
+            resolve_food_tap(f"cb:food:reject:{self.SCAN}").history_text
+            == (labels[f"cb:food:reject:{self.SCAN}"])
         )
 
     def test_the_refless_pair_resolves_by_the_same_machinery(self):
