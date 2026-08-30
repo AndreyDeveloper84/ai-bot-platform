@@ -7,18 +7,29 @@ Usage::
         --name "Анна Петрова" \\
         --max-handle anna_styl
 
-The command prints the master's id, invite_token, expires_at, the MAX
-bot deeplink (``max://bot/<bot>?start=master_invite_<token>``) and the
-Mini App web URL (``<host>/onboarding/master?token=<token>``).
+The command prints the master's id, invite_token, expires_at, the
+``open_app`` button payload the real invite DM carries, and the Mini App
+web URL (``<host>/onboarding/master?token=<token>``).
+
+DRF-1349 — it used to print a ``max://bot/<bot>?start=…`` deeplink
+instead of the payload. MAX does not implement that scheme; on a real
+device the address answers «Не удалось открыть ссылку». Printing it here
+taught whoever tested by hand the same dead form the invite itself was
+shipping, which is part of how the defect survived to the first live
+invitation. The payload is what the button carries and what the Mini App
+resolves (``parseStartRoute`` in ``apps/miniapp/src/lib/max-sdk.ts``).
+
+The web URL is for browser-only dev with ``--bootstrap-bot-user`` and
+the dev bypass. It is NOT a fallback for a real phone: outside MAX there
+is no ``initData``, so the Mini App cannot log the opener in.
 
 The host is read from ``settings.SITE_DOMAIN``; if absent, falls back to
-``http://localhost:5173`` (the Vite dev default). Override the bot slug
-with ``--bot``; defaults to ``settings.MASTER_BOT_USERNAME`` or
-``<tenant-slug>_bot``.
+``http://localhost:5173`` (the Vite dev default). ``--bot`` is kept for
+the printed bot name only.
 
 Idempotency: if a master with the same ``--name`` already has a PENDING
 invite in this tenant, the existing row is reused (no new token), so
-re-running the command produces the same deeplink. Pass ``--regenerate``
+re-running the command produces the same payload. Pass ``--regenerate``
 to force a fresh token + extend expiry by 7 days.
 """
 
@@ -32,6 +43,7 @@ from django.core.management.base import BaseCommand, CommandError
 from django.db import transaction
 from django.utils import timezone
 
+from apps.admin_api.views_invite import MASTER_INVITE_PAYLOAD_PREFIX
 from apps.catalog.models import CatalogMaster
 from apps.identity.models import BotUser
 from apps.master_api.auth import generate_invite_token
@@ -183,7 +195,7 @@ class Command(BaseCommand):
         # OR the regenerate branch; reuse keeps the prior non-NULL values.
         assert token is not None  # noqa: S101 — invariant guard for typing
         assert master.invite_expires_at is not None  # noqa: S101
-        deeplink = f"max://bot/{bot_slug}?start=master_invite_{token}"
+        payload = f"{MASTER_INVITE_PAYLOAD_PREFIX}{token}"
         web_url = f"{host.rstrip('/')}/onboarding/master?token={token}"
 
         verb = "Created" if created else ("Refreshed" if regenerate else "Reusing")
@@ -192,7 +204,8 @@ class Command(BaseCommand):
         self.stdout.write(f"  tenant:        {tenant.slug}")
         self.stdout.write(f"  invite_token:  {token}")
         self.stdout.write(f"  expires_at:    {master.invite_expires_at.isoformat()}")
-        self.stdout.write(f"  deeplink:      {deeplink}")
+        self.stdout.write(f"  bot:           {bot_slug}")
+        self.stdout.write(f"  open_app payload: {payload}")
         self.stdout.write(f"  web URL:       {web_url}")
 
         if options["bootstrap_bot_user"]:

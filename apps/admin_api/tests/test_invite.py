@@ -782,9 +782,25 @@ class TestSiteDomainFallback:
         patched_send_message,
         settings,
     ) -> None:
-        """The pilot's actual state: SITE_DOMAIN unset, DEBUG off."""
+        """The pilot's actual state: SITE_DOMAIN unset, DEBUG off.
+
+        DRF-1349 amended what «degraded» means here. This test used to
+        end on ``assert "max://bot/" in text`` — «the deeplink still
+        goes, the invite is degraded, not cancelled». The deeplink never
+        went anywhere: MAX does not implement the ``max://`` scheme, and
+        the owner's phone answered «Не удалось открыть ссылку» on the
+        first live invitation. So with neither a Mini App name nor a
+        usable domain there is no entry left to degrade *to*, and the
+        dispatch says so instead of reporting a message nobody can act
+        on as delivered.
+
+        The companion below is what keeps this from being «the invite
+        is just broken now»: the same unset SITE_DOMAIN with the Mini
+        App configured still sends a working button.
+        """
 
         settings.SITE_DOMAIN = ""
+        settings.MAX_BOT_WEB_APP = ""
         resp = client.post(
             _invite_url(),
             data=_valid_body(),
@@ -793,13 +809,49 @@ class TestSiteDomainFallback:
         )
         assert resp.status_code == 201, resp.content
         assert resp.json()["fallback_link"] == ""
+        assert resp.json()["max_dm_delivery"] == "failed"
+        patched_send_message.assert_not_called()
 
-        text = patched_send_message.call_args.kwargs["text"]
-        assert "localhost" not in text
-        # The deeplink still goes — the invite is degraded, not cancelled.
-        assert "max://bot/" in text
+    def test_unset_domain_is_harmless_when_the_mini_app_is_configured(
+        self,
+        client: Client,
+        owner_bot_user: BotUser,
+        tenant: Tenant,
+        patched_send_message,
+        settings,
+    ) -> None:
+        """SITE_DOMAIN is the *admin screen's* artefact, not the DM's.
+
+        The positive guard for the test above. Once the invite DM enters
+        through a button, an unset SITE_DOMAIN costs the invited master
+        nothing at all — it only leaves the owner's screen without an
+        address to copy. Without this check the previous test would read
+        as «no domain ⇒ no invite», which is exactly the wrong lesson.
+        """
+
+        settings.SITE_DOMAIN = ""
+        settings.MAX_BOT_WEB_APP = "id583_bot"
+        resp = client.post(
+            _invite_url(),
+            data=_valid_body(),
+            content_type="application/json",
+            HTTP_AUTHORIZATION=init_data_header("5001"),
+        )
+        assert resp.status_code == 201, resp.content
+        assert resp.json()["max_dm_delivery"] == "queued"
+        kwargs = patched_send_message.call_args.kwargs
+        assert "localhost" not in kwargs["text"]
+        buttons = [
+            b
+            for att in kwargs["attachments"]
+            for row in att["payload"]["buttons"]
+            for b in row
+            if b["type"] == "open_app"
+        ]
+        assert buttons, "no open_app button — the invite has no entry at all"
+        assert buttons[0]["payload"].startswith("master_invite_")
         # And no orphan heading left behind by the removed block.
-        assert "веб-версию" not in text
+        assert "веб-версию" not in kwargs["text"]
 
     def test_debug_keeps_the_localhost_link(
         self,

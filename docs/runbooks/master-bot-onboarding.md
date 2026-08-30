@@ -224,16 +224,32 @@ Steps:
    The command prints:
    - `master_id` — the `CatalogMaster.id`
    - `invite_token` — fresh UUID, 7 days TTL
-   - `deeplink` — `max://bot/<bot>?start=master_invite_<token>` (paste to
-     the tester via the bot DM)
+   - `open_app payload` — `master_invite_<token>`, the payload the real
+     invite DM carries on its «Принять приглашение» button
    - `web URL` — `http://localhost:5173/onboarding/master?token=<token>`
-     (for local Vite dev; override host with `settings.SITE_DOMAIN`)
+     (for **local Vite dev with the dev bypass only**; override host with
+     `settings.SITE_DOMAIN`)
 
    Idempotent on (tenant, name): re-running keeps the same token unless
    you pass `--regenerate`.
 
-2. **Open the deeplink in MAX** — the bot DM opens the Mini App at
-   `/onboarding/master?token=…`. Verify each step:
+   > **DRF-1349 — the address is not a way in.** This step used to print
+   > a `deeplink` line, `max://bot/<bot>?start=master_invite_<token>`,
+   > «paste to the tester via the bot DM». MAX does not implement the
+   > `max://` scheme: on a real device it answers «Не удалось открыть
+   > ссылку. Установите браузер на устройстве». The `web URL` is no
+   > substitute on a phone either — opened in a browser the Mini App gets
+   > no `initData`, shows «MAX не передал данные для входа», and the
+   > backend cannot check the token at all, because
+   > `validate_invite_token` resolves it through the tenant of the
+   > session's `BotUser`. A Mini App is entered **only** from an
+   > `open_app` button on a MAX message. Testing the invite for real
+   > means sending it for real (`POST /api/v1/admin/masters/invite`) with
+   > `MAX_BOT_WEB_APP` set.
+
+2. **Open the invitation from MAX** — tap «Принять приглашение» on the
+   bot DM; MAX passes the payload as `start_param` and the Mini App opens
+   at `/onboarding/master?token=…`. Verify each step:
 
    | Step | Expected screen | Spec line |
    |------|-----------------|-----------|

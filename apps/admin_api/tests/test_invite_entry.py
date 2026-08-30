@@ -122,24 +122,24 @@ def _ts_const(name: str) -> str:
     return found.group(1)
 
 
-def _customer_routes_body() -> str:
-    """The body of ``function CustomerRoutes()`` in ``App.tsx``.
+def _fn_body(name: str) -> str:
+    """The body of a top-level ``function <name>(…) {…}`` in ``App.tsx``.
 
-    This is the surface an *invited but not yet onboarded* master
-    actually gets: ``resolve_role`` reports ``is_master`` only for a
-    CatalogMaster that is ACCEPTED **and** already linked to a BotUser
-    (``apps/identity/services/role_resolver.py``), and an invitee is
-    neither. So the role cascade drops them into ``CustomerRoutes`` —
-    and a route mounted only under ``masterRouteElements()`` is not
-    there for the one person it exists for.
+    ``CustomerRoutes`` is the surface an *invited but not yet onboarded*
+    master actually gets: ``resolve_role`` reports ``is_master`` only
+    for a CatalogMaster that is ACCEPTED **and** already linked to a
+    BotUser (``apps/identity/services/role_resolver.py``), and an
+    invitee is neither. So the role cascade drops them into
+    ``CustomerRoutes`` — and a route mounted only under
+    ``masterRouteElements()`` is not there for the one person it exists
+    for.
     """
     src = _APP_TSX.read_text(encoding="utf-8")
-    found = re.search(r"function CustomerRoutes\(\) \{(.*?)\n\}", src, re.DOTALL)
+    found = re.search(rf"\nfunction {name}\([^)]*\)[^{{]*\{{(.*?)\n\}}", src, re.DOTALL)
     if found is None:
         raise AssertionError(
-            f"function CustomerRoutes() not found in {_APP_TSX} — the parser "
-            "and the source have drifted apart. Fix the parser; do not "
-            "delete the test."
+            f"function {name}(…) not found in {_APP_TSX} — the parser and the "
+            "source have drifted apart. Fix the parser; do not delete the test."
         )
     return found.group(1)
 
@@ -205,10 +205,16 @@ class TestParsersSeeSomething:
         assert "/customer/records" in _miniapp_routes()
 
     def test_customer_routes_body_is_read(self):
-        body = _customer_routes_body()
+        body = _fn_body("CustomerRoutes")
         assert 'path="/customer/catalog"' in body, (
             "CustomerRoutes parsed but does not contain a route it is known "
             "to declare — the regex is matching the wrong span."
+        )
+
+    def test_admin_routes_body_is_read(self):
+        assert 'path="*"' in _fn_body("AdminRoutes"), (
+            "AdminRoutes parsed but does not contain the catch-all it is "
+            "known to declare — the regex is matching the wrong span."
         )
 
 
@@ -351,11 +357,39 @@ class TestOnboardingRouteIsReachableBeforeTheMasterRole:
     needs it.
     """
 
-    def test_customer_surface_mounts_the_onboarding_route(self):
+    #: The shared element every surface mounts. Named once here so the
+    #: two checks below cannot drift into testing different things.
+    _SHARED = "inviteOnboardingRouteElements"
+
+    def test_the_shared_element_declares_the_onboarding_route(self):
+        """The indirection must actually contain the route.
+
+        Without this, the two surface checks below would be satisfied by
+        an element that mounts nothing — «the function is called» is not
+        «the route exists».
+        """
         path = _ts_const("MASTER_ONBOARDING_PATH")
-        assert f'path="{path}"' in _customer_routes_body(), (
-            f"{path} is not mounted in CustomerRoutes. An invited master is "
-            "PENDING and unlinked, so /api/v1/me returns is_master=false and "
-            "the role cascade lands them on the customer surface — where the "
-            "catch-all renders HelloScreen and the invite dies silently."
+        assert f'path="{path}"' in _fn_body(self._SHARED), (
+            f"{self._SHARED}() does not declare {path}."
+        )
+
+    @pytest.mark.parametrize("surface", ["CustomerRoutes", "AdminRoutes"])
+    def test_pre_master_surfaces_mount_the_onboarding_route(self, surface):
+        """Both surfaces an invitee can boot into must mount it.
+
+        ``CustomerRoutes`` is where a plain invited master lands;
+        ``AdminRoutes`` is where an owner who adds herself as a master
+        lands, since she is not a master until she accepts either. The
+        master and unified surfaces get it through
+        ``masterRouteElements()`` and are covered by the same element.
+        """
+        body = _fn_body(surface)
+        mounted = f"{self._SHARED}()" in body or (
+            f'path="{_ts_const("MASTER_ONBOARDING_PATH")}"' in body
+        )
+        assert mounted, (
+            f"/onboarding/master is not mounted in {surface}. An invited "
+            "master is PENDING and unlinked, so /api/v1/me returns "
+            "is_master=false and the role cascade lands them here — where the "
+            "catch-all swallows the invite and it dies silently."
         )

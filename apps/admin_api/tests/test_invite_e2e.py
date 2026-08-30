@@ -69,6 +69,15 @@ class TestAdminInviteToMasterAcceptE2E:
         )
 
         # 1. Owner POSTs the invite.
+        #
+        # DRF-1349 — the loop is run on a *configured* contour. The invite
+        # DM enters the Mini App through an `open_app` button, which needs
+        # the bot's Mini App name; with neither that nor a usable
+        # SITE_DOMAIN the dispatch now reports `failed` instead of sending
+        # a message the invited master could not act on. Leaving both
+        # unset here would have this end-to-end test assert `queued`
+        # against a contour where nothing can be opened.
+        settings.MAX_BOT_WEB_APP = "id583_bot"
         with patch("apps.admin_api.views_invite.max_outbound.send_message") as mock_dm:
             mock_dm.return_value = {"ok": True}
             resp_invite = client.post(

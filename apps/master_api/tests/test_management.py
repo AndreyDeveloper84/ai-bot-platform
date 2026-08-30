@@ -10,6 +10,7 @@ from django.core.management import call_command
 from django.core.management.base import CommandError
 from django.utils import timezone
 
+from apps.admin_api.views_invite import MASTER_INVITE_PAYLOAD_PREFIX
 from apps.catalog.models import CatalogMaster
 from apps.tenancy.models import Tenant
 
@@ -46,9 +47,17 @@ class TestCreateTestMasterInvite:
         assert master.is_active is True
         assert master.max_handle == "anna_styl"
 
-        # Output mentions the token + a web URL.
+        # Output mentions the token, the open_app payload and a web URL.
+        #
+        # DRF-1349 — this used to require a `deeplink:` line carrying a
+        # `max://bot/…` address. MAX does not implement that scheme, so
+        # the line taught whoever tested by hand the exact dead form the
+        # invite itself was shipping. What the real DM carries, and what
+        # the Mini App resolves, is the `open_app` payload.
         assert "invite_token:" in out
-        assert "deeplink:" in out
+        assert "open_app payload:" in out
+        assert f"{MASTER_INVITE_PAYLOAD_PREFIX}{master.invite_token}" in out
+        assert "max://" not in out
         assert str(master.invite_token) in out
         assert "/onboarding/master?token=" in out
 

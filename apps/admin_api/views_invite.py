@@ -54,8 +54,8 @@ token is what gets dispatched).
 3. ``MasterService`` rows seeded — one per id in ``services[]``.
 4. Audit row ``master.invited`` written.
 5. Post-commit (``transaction.on_commit``) — MAX bot DM dispatched
-   with the invite deeplink + audit row ``master.invite_dispatched``
-   written.
+   with an ``open_app`` button carrying the invite token + audit row
+   ``master.invite_dispatched`` written.
 
 The on-commit dispatch follows the same pattern as
 :mod:`apps.booking.services.transitions` — a network call inside the
@@ -211,10 +211,6 @@ def _site_domain_is_loopback() -> bool:
     return host.lower() in LOOPBACK_HOSTS
 
 
-def _bot_slug(tenant_slug: str) -> str:
-    return getattr(settings, "MASTER_BOT_USERNAME", "") or f"{tenant_slug}_bot"
-
-
 def _fallback_link(token: uuid.UUID) -> str:
     """Web fallback URL, or ``""`` when it would point at localhost.
 
@@ -238,8 +234,8 @@ def _fallback_link(token: uuid.UUID) -> str:
     if not settings.DEBUG and _site_domain_is_loopback():
         logger.error(
             "admin_api.invite.site_domain_unset — web fallback suppressed: "
-            "SITE_DOMAIN resolves to %s. %s Until then invited masters "
-            "have only the in-MAX deeplink.",
+            "SITE_DOMAIN resolves to %s. %s Until then the admin screen has "
+            "no address to show and the invite DM has only its button.",
             _site_domain(),
             SITE_DOMAIN_HINT,
         )
@@ -247,8 +243,28 @@ def _fallback_link(token: uuid.UUID) -> str:
     return f"{_site_domain()}/onboarding/master?token={token}"
 
 
-def _deeplink(tenant_slug: str, token: uuid.UUID) -> str:
-    return f"max://bot/{_bot_slug(tenant_slug)}?start=master_invite_{token}"
+MASTER_INVITE_PAYLOAD_PREFIX = "master_invite_"
+"""Prefix of the ``open_app`` button payload that carries an invitation.
+
+The Mini App declares the same constant under the same name in
+``apps/miniapp/src/lib/max-sdk.ts`` and resolves
+``master_invite_<uuid>`` to ``/onboarding/master?token=<uuid>``.
+``apps/admin_api/tests/test_invite_entry.py`` reads both sources and
+fails when they drift — the two halves are in different languages, so
+nothing but a test can hold them together.
+
+MAX restricts an ``open_app`` payload to a flat slug: no ``=``, no
+``&``, no ``?`` (Guard 3 in ``apps/channels/max/outbound.py`` — a
+querystring-shaped payload is answered with HTTP 400 and poisons the
+consumer PEL). A UUID's hyphens are fine; the querystring is assembled
+on the Mini App side, after the payload has arrived.
+"""
+
+
+def _invite_payload(token: uuid.UUID) -> str:
+    """The ``open_app`` payload for one invitation."""
+
+    return f"{MASTER_INVITE_PAYLOAD_PREFIX}{token}"
 
 
 def _validate_body(body: dict[str, Any]) -> tuple[dict[str, Any], JsonResponse | None]:
@@ -411,7 +427,6 @@ def _seed_services(
 def _dispatch_max_dm(
     *,
     master_id: uuid.UUID,
-    tenant_slug: str,
     contact_value: str,
     contact_method: str,
     token: uuid.UUID,
@@ -426,6 +441,47 @@ def _dispatch_max_dm(
     ``skipped`` covers the ``max_phone`` case — we don't have a
     phone→chat lookup pipeline in Phase 1, so we acknowledge the
     spec contract but punt the actual delivery to the follow-up PR.
+
+    ### DRF-1349 — why this is a button and not a link
+
+    Until 30.08 this DM carried two addresses and no button, and the
+    owner's first live invitation of the pilot went nowhere. Both
+    addresses were unreachable *by construction*, not by accident:
+
+    * ``max://bot/<slug>?start=…`` — MAX does not implement the scheme.
+      The device answered «Не удалось открыть ссылку. Установите
+      браузер на устройстве».
+    * ``https://<miniapp>/onboarding/master?token=…`` — opens the
+      external browser, and MAX gives a browser no ``initData``. The
+      Mini App says «MAX не передал данные для входа», and the backend
+      agrees: :func:`apps.master_api.auth.validate_invite_token`
+      resolves the token through the tenant of the session's
+      ``BotUser``, so with no session there is no tenant to look in.
+
+    A MAX Mini App is entered from a button **on the message** —
+    ``{"type": "open_app", "web_app": <bot Mini App name>, "payload":
+    <flat slug>}``. That is how the welcome grid already works
+    (:mod:`apps.skills.welcome.skill`); the invite simply never built
+    one.
+
+    ### The ladder, and why the bottom rung reports failure
+
+    1. ``MAX_BOT_WEB_APP`` set → the button. Nothing else; an https
+       address underneath it would just re-offer the path that fails,
+       and in a chat any address is one tap away from the browser.
+    2. No Mini App name, but a usable ``SITE_DOMAIN`` → the address
+       alone, captioned without any promise, plus an ERROR line naming
+       the variable to set.
+    3. Neither → **``failed``**, and nothing is sent. A message with no
+       way into the onboarding is not a delivered invitation, and
+       reporting it as ``queued`` would leave the owner reading
+       «получит сообщение в течение минуты» about a message that can do
+       nothing. Silence indistinguishable from success is the defect
+       this whole change exists to remove.
+
+    The text no longer says «Не открывается в MAX? Используйте
+    веб-версию». That sentence pointed at the one path that cannot
+    work, and on 30.08 the owner followed it.
     """
 
     if contact_method == "max_phone":
@@ -433,25 +489,65 @@ def _dispatch_max_dm(
 
     # max_username — strip leading @ for the MAX REST chat_id param.
     chat_id = contact_value.lstrip("@")
-    deeplink = _deeplink(tenant_slug, token)
+    web_app = getattr(settings, "MAX_BOT_WEB_APP", "")
     web_url = _fallback_link(token)
+
     parts = [
         f"Здравствуйте, {master_name}!\n\n",
-        f"Салон «{salon_name}» приглашает вас как мастера. ",
-        "Откройте ссылку в MAX, чтобы продолжить:\n",
-        f"{deeplink}\n\n",
+        f"Салон «{salon_name}» приглашает вас как мастера.\n\n",
     ]
-    # DRF-1079 — the web-fallback block only when there IS a fallback.
-    # `_fallback_link` returns "" when the configured domain is loopback,
-    # and «Используйте веб-версию:» followed by nothing reads as a
-    # delivery bug rather than as the misconfiguration it is.
-    if web_url:
-        parts.append(f"Не открывается в MAX? Используйте веб-версию:\n{web_url}\n\n")
-    parts.append("Ссылка действительна 7 дней.")
+    attachments: list[dict[str, Any]] | None = None
+
+    if web_app:
+        # The only entry that works. A MAX Mini App opens from a button
+        # ON the message; an address in the text cannot open it at all.
+        attachments = [
+            max_outbound.make_inline_keyboard_attachment(
+                [
+                    {
+                        "label": "Принять приглашение",
+                        "callback": _invite_payload(token),
+                        "web_app": web_app,
+                    }
+                ]
+            )
+        ]
+        parts.append("Нажмите кнопку ниже — анкета откроется прямо здесь, в MAX.\n\n")
+    elif web_url:
+        # Degraded branch — no Mini App name configured, so no button can
+        # be built. The address is all that is left, and it is offered
+        # without any promise: opened outside MAX it cannot work, because
+        # the Mini App is entered through `initData` that MAX hands only
+        # to its own webview, and `validate_invite_token` resolves the
+        # token through the tenant of the session's BotUser.
+        parts.append(f"Откройте ссылку, не выходя из MAX:\n{web_url}\n\n")
+        logger.error(
+            "admin_api.invite.web_app_unset — invite sent without an open_app "
+            "button: MAX_BOT_WEB_APP is empty, so the DM carries only a web "
+            "address, and an address opened outside MAX gets no initData. "
+            "Set MAX_BOT_WEB_APP to the bot's Mini App name."
+        )
+    else:
+        # Neither a button nor an address: whatever we send, the invited
+        # master has no way to act on it. Sending it anyway and reporting
+        # `queued` is the failure mode this whole change exists to remove
+        # — silence indistinguishable from success. Report the failure
+        # instead, so the admin screen says «не удалось» rather than
+        # «получит сообщение в течение минуты».
+        logger.error(
+            "admin_api.invite.no_entry_configured — invite NOT sent: neither "
+            "MAX_BOT_WEB_APP (open_app button) nor a usable SITE_DOMAIN (web "
+            "address) is configured, so the message would contain no way into "
+            "the onboarding at all. %s",
+            SITE_DOMAIN_HINT,
+        )
+        return {"delivery": "failed", "error": "no_entry_configured"}
+
+    parts.append("Приглашение действительно 7 дней.")
     text = "".join(parts)
 
     try:
-        max_outbound.send_message(chat_id=chat_id, text=text)
+        max_outbound.send_message(chat_id=chat_id, text=text, attachments=attachments)
     except max_outbound.MaxAPIError as exc:
         logger.warning(
             "admin_api.invite.max_dispatch_failed master_id=%s status=%s",
@@ -686,7 +782,6 @@ def master_invite_create(request: HttpRequest) -> HttpResponse:
         assert token is not None  # narrow for type-checker
         outcome = _dispatch_max_dm(
             master_id=master.id,
-            tenant_slug=tenant.slug,
             contact_value=contact_value,
             contact_method=contact_method,
             token=token,
