@@ -872,6 +872,39 @@ def _s2a_details_buttons() -> list[dict[str, str]]:
     ]
 
 
+def welcome_tap_labels() -> dict[str, str]:
+    """``{payload: метка}`` для каждой ``cb:welcome:`` кнопки этого навыка.
+
+    DRF-990, продолжение. Читателю ИСТОРИИ диалога нужно знать, чем тап был
+    как реплика; ответ — та самая метка, которую человек и нажал. Таблица
+    здесь не выписана заново, а СОБРАНА из самих строителей клавиатур: копия
+    разъехалась бы с ними при первом же переименовании кнопки, и в историю
+    поехала бы фраза, которой человек не видел.
+
+    Живёт рядом со строителями, а не у вызывающего, ровно поэтому: они
+    приватны для модуля, и единственный способ не дать таблице разойтись —
+    держать её тут.
+
+    ``_legacy_wellness_buttons`` включён намеренно: сами кнопки сняты с
+    живого экрана (DRF-1200), но их колбэки по-прежнему обрабатываются
+    (:meth:`WelcomeSkill.handle`), потому что старая клавиатура может лежать
+    у человека в чате. Раз тап доходит — метка для истории у него должна
+    быть. Кнопки Mini App (``open_*``) сюда не попадают: у них не
+    ``cb:welcome:`` payload, и в чат они ничего не присылают.
+    """
+    labels: dict[str, str] = {}
+    for button in (
+        *_start_buttons(),
+        *_s2_consent_buttons(),
+        *_s2a_details_buttons(),
+        *_legacy_wellness_buttons(),
+    ):
+        callback = button.get("callback", "")
+        if callback.startswith("cb:welcome:"):
+            labels[callback] = button["label"]
+    return labels
+
+
 def _s5_first_action_buttons() -> list[dict[str, str]]:
     """S5 first-action grid (Tau §8 Variant A — Grid 2×2 + exit valve).
 
