@@ -309,6 +309,18 @@ class TestOurOwnWordsObeyTheFixture:
         if not result.deterministic:
             pytest.skip(f"{fixture.name}: needs the outside world — {result.outside_world_notes}")
 
+        # The positive guard beside the negative claim, per fixture. «No
+        # failures» is equally true of a fixture with no rules to check and
+        # of one that passed every rule it has, and in a CI log the two are
+        # the same green dot. `test_fixtures.py` already asserts this over
+        # the whole set; asserted again here, on the one fixture this
+        # parametrisation is about, so the claim cannot be satisfied by a
+        # rule list that quietly emptied.
+        assert fixture.must_pass or fixture.forbidden, (
+            f"{fixture.name}: no must_pass and no forbidden — this fixture "
+            "asserts nothing, and passing it proves nothing"
+        )
+
         failures = evaluate(result.as_trace(), fixture.must_pass, fixture.forbidden)
         failures += evaluate_voice(result.response_text, fixture.voice_check)
         assert not failures, f"{fixture.name}: {failures}"

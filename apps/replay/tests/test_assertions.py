@@ -226,16 +226,21 @@ class TestCaseFoldingDidNotDisableTheCheck:
         assert "response_contains_any" in failures[0]
 
     def test_case_only_difference_now_passes(self):
-        """And the thing it was changed FOR, stated so the change is visible."""
+        """And the thing it was changed FOR, stated so the change is visible.
 
-        assert (
-            evaluate(
-                self._trace("Возраст должно быть от 14 до 90 — проверь?"),
-                [{"response_contains_any": ["возраст"]}],
-                [],
-            )
-            == []
+        The «no failures» line below is worth nothing on its own — a rule
+        that stopped comparing satisfies it too. The line above proves the
+        rule is live on this exact trace first: a phrase this reply does not
+        contain still comes back as a mismatch.
+        """
+
+        reply = "Возраст должно быть от 14 до 90 — проверь?"
+
+        assert evaluate(self._trace(reply), [{"response_contains_any": ["рост"]}], []), (
+            "the rule is not comparing anything on this trace, so the "
+            "assertion below would pass for the wrong reason"
         )
+        assert evaluate(self._trace(reply), [{"response_contains_any": ["возраст"]}], []) == []
 
     def test_partial_word_still_has_to_be_present(self):
         """Folding case does not fold anything else — no stemming, no fuzz."""
@@ -276,11 +281,14 @@ class TestCaseFoldingDidNotDisableTheCheck:
         """`response_contains_exact` is the strict rule, and it is strict."""
 
         strict = [{"response_contains_exact": ["Поняла"]}]
-        assert evaluate(self._trace("Поняла 🙂"), strict, []) == []
+
+        # Presence first: the strict rule is comparing, and it is strict.
         assert evaluate(self._trace("поняла 🙂"), strict, []), (
             "response_contains_exact ignored a case difference — then it is "
             "not the strict rule and nothing in the engine is"
         )
+        # …and only then: it accepts the wording it was given.
+        assert evaluate(self._trace("Поняла 🙂"), strict, []) == []
 
     def test_exact_requires_every_substring(self):
         failures = evaluate(
@@ -321,14 +329,14 @@ class TestNonStringSubstringsDoNotCrashTheEngine:
         }
 
     def test_int_substring_is_compared_not_raised(self):
-        assert (
-            evaluate(
-                self._trace("Записала 250 мл."),
-                [{"response_contains_any": [250]}],
-                [],
-            )
-            == []
-        )
+        reply = "Записала 250 мл."
+
+        # Presence first: a number the reply does NOT contain is reported as
+        # a mismatch. Without this, «no failures» below would also be
+        # satisfied by an engine that skipped non-string needles entirely —
+        # which is a plausible way to «fix» the TypeError and the wrong one.
+        assert evaluate(self._trace(reply), [{"response_contains_any": [500]}], [])
+        assert evaluate(self._trace(reply), [{"response_contains_any": [250]}], []) == []
 
     def test_int_substring_that_is_absent_reports_a_mismatch(self):
         failures = evaluate(
