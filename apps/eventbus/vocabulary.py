@@ -64,7 +64,14 @@ PAYLOAD_REQUIRED_KEYS: dict[str, frozenset[str]] = {
     BOOKING_CANCELLED: frozenset(
         {"booking_id", "cancelled_by", "cancellation_reason", "cancelled_at"}
     ),
-    BOOKING_COMPLETED: frozenset({"booking_id", "completed_at", "marked_by"}),
+    # ``completed_by`` — кто закрыл визит (решение владельца 30.08).
+    # Обязателен: подписчики гейтят по нему последствия, а конверт без
+    # актора по правилу default-deny читается как закрытие автоматом —
+    # то есть забытое поле тихо гасит начисление за подтверждённый визит.
+    # ``marked_by`` остаётся рядом: это имя из таксономии §3.1, под
+    # которым поле ездило до 30.08, и ломать его перед пилотом нечем
+    # оправдать.
+    BOOKING_COMPLETED: frozenset({"booking_id", "completed_at", "marked_by", "completed_by"}),
     BOOKING_NO_SHOW: frozenset({"booking_id", "detected_at"}),
     BOOKING_RESCHEDULED: frozenset(
         {"booking_id", "old_slot_start", "new_slot_start", "rescheduled_by"}

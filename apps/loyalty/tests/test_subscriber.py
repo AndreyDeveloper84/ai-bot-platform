@@ -1,4 +1,12 @@
-"""LoyaltySubscriber on booking.completed envelopes (Phase 1.a)."""
+"""LoyaltySubscriber on booking.completed envelopes (Phase 1.a).
+
+Every ``booking.completed`` envelope below names a human closer. That is
+not decoration: since the owner decision of 30.08 the subscriber credits
+nothing for a visit closed by the clock, so an envelope without an actor
+exercises the gate instead of the crediting path these tests are about.
+The gate itself — and its positive counterpart on the same data — lives
+in ``apps/bookings/tests/test_completed_by_gate.py``.
+"""
 
 from __future__ import annotations
 
@@ -18,6 +26,9 @@ from apps.loyalty.subscribers import LoyaltySubscriber
 from apps.tenancy.models import Tenant
 
 pytestmark = pytest.mark.django_db
+
+#: Кто закрыл визит, когда закрыл человек — см. docstring модуля.
+HUMAN_CLOSER = "master:0d4f1a92-77c1-4c88-9b0e-2a6f3c5d8e10"
 
 
 _FUTURE = dt.datetime(2027, 6, 15, 10, 0, 0, tzinfo=dt.UTC)
@@ -79,7 +90,7 @@ class TestBookingCompletedHandling:
         settings.STRICT_TENANT_SCOPE = "strict"
         envelope = _make_envelope(
             "booking.completed",
-            data={"booking_id": str(booking.pk)},
+            data={"booking_id": str(booking.pk), "completed_by": HUMAN_CLOSER},
             tenant_id=booking.tenant_id,
         )
 
@@ -99,7 +110,7 @@ class TestBookingCompletedHandling:
         service.save(update_fields=["price_from"])
         envelope = _make_envelope(
             "booking.completed",
-            data={"booking_id": str(booking.pk)},
+            data={"booking_id": str(booking.pk), "completed_by": HUMAN_CLOSER},
             tenant_id=booking.tenant_id,
         )
 
@@ -112,7 +123,7 @@ class TestBookingCompletedHandling:
         settings.STRICT_TENANT_SCOPE = "strict"
         envelope = _make_envelope(
             "booking.completed",
-            data={"booking_id": str(booking.pk)},
+            data={"booking_id": str(booking.pk), "completed_by": HUMAN_CLOSER},
             tenant_id=booking.tenant_id,
         )
 
@@ -145,13 +156,16 @@ class TestSafeSkips:
 
     def test_missing_booking_id_is_safe(self, settings):
         settings.STRICT_TENANT_SCOPE = "strict"
-        envelope = _make_envelope("booking.completed", data={})
+        envelope = _make_envelope("booking.completed", data={"completed_by": HUMAN_CLOSER})
         # Must not raise.
         LoyaltySubscriber().handle(envelope)
 
     def test_unknown_booking_id_is_safe(self, settings):
         settings.STRICT_TENANT_SCOPE = "strict"
-        envelope = _make_envelope("booking.completed", data={"booking_id": str(uuid.uuid4())})
+        envelope = _make_envelope(
+            "booking.completed",
+            data={"booking_id": str(uuid.uuid4()), "completed_by": HUMAN_CLOSER},
+        )
         LoyaltySubscriber().handle(envelope)
         # No accounts created, no exceptions.
 
@@ -161,7 +175,7 @@ class TestSafeSkips:
         BookingRequest.all_tenants.filter(pk=booking.pk).update(bot_user=None)
         envelope = _make_envelope(
             "booking.completed",
-            data={"booking_id": str(booking.pk)},
+            data={"booking_id": str(booking.pk), "completed_by": HUMAN_CLOSER},
             tenant_id=booking.tenant_id,
         )
 
@@ -183,7 +197,7 @@ class TestErrorIsolation:
 
         envelope = _make_envelope(
             "booking.completed",
-            data={"booking_id": str(booking.pk)},
+            data={"booking_id": str(booking.pk), "completed_by": HUMAN_CLOSER},
             tenant_id=booking.tenant_id,
         )
         # No raise.

@@ -323,9 +323,12 @@ class TestLoyaltyPoints:
 
         account = LoyaltyAccount.all_tenants.get(customer=customer)
         assert account.balance == 12  # 1200 ₽ → floor(1200/100)
-        assert LoyaltyEvent.all_tenants.filter(
-            account=account, event_type=LoyaltyEvent.EventType.EARN_VISIT
-        ).count() == 1
+        assert (
+            LoyaltyEvent.all_tenants.filter(
+                account=account, event_type=LoyaltyEvent.EventType.EARN_VISIT
+            ).count()
+            == 1
+        )
 
     def test_missing_actor_credits_nothing(
         self, tenant: Tenant, customer: BotUser, service: CatalogService, settings
@@ -340,9 +343,7 @@ class TestLoyaltyPoints:
             tenant, customer, service, completed_at=timezone.now(), completed_by=""
         )
 
-        LoyaltySubscriber().handle(
-            _envelope({"booking_id": str(booking.pk)}, tenant_id=tenant.id)
-        )
+        LoyaltySubscriber().handle(_envelope({"booking_id": str(booking.pk)}, tenant_id=tenant.id))
 
         assert not LoyaltyEvent.all_tenants.filter(
             event_type=LoyaltyEvent.EventType.EARN_VISIT
@@ -360,9 +361,7 @@ class TestReviewRequestLocalPath:
     часам. Ровно та инверсия, которую владелец закрыл решением 30.08.
     """
 
-    def test_system_close_sends_no_review_request(
-        self, tenant: Tenant, customer: BotUser
-    ) -> None:
+    def test_system_close_sends_no_review_request(self, tenant: Tenant, customer: BotUser) -> None:
         now = timezone.now()
         visit_at = _yesterday_msk_visit(now)
         booking = _make_booking(
@@ -411,9 +410,7 @@ class TestReviewRequestAylaPath:
     нашей стороне.
     """
 
-    def test_system_close_sends_no_review_request(
-        self, tenant: Tenant, customer: BotUser
-    ) -> None:
+    def test_system_close_sends_no_review_request(self, tenant: Tenant, customer: BotUser) -> None:
         now = timezone.now()
         visit_at = _yesterday_msk_visit(now)
         proxy = _make_proxy(
@@ -477,10 +474,16 @@ class TestVisitStillCloses:
         assert booking.completed_at is not None
 
     def test_ayla_system_close_still_flips_the_mirror(
-        self, tenant: Tenant, customer: BotUser
+        self, tenant: Tenant, customer: BotUser, settings
     ) -> None:
         from apps.eventbus.consumers.booking import handle_booking_completed
         from apps.eventbus.ingest_envelope import IngestEnvelope
+
+        # Тот же путь, которым событие идёт в проде: проверка тенанта
+        # включена, тенант и событие пущены через пилотный allowlist.
+        settings.EVENT_INGEST_TENANT_VERIFY_FAIL_OPEN = False
+        settings.EVENT_INGEST_ALLOWED_TENANTS = frozenset({str(tenant.id)})
+        settings.EVENT_INGEST_ALLOWED_EVENTS = frozenset({"booking.completed"})
 
         proxy = _make_proxy(
             tenant,

@@ -49,6 +49,7 @@ import logging
 import math
 from typing import TYPE_CHECKING
 
+from apps.booking.completion import actor_from_event, confirmed_by_human
 from apps.loyalty import services as loyalty_services
 from apps.loyalty.models import LoyaltyEvent
 from apps.tenancy.context import tenant_scope
@@ -64,6 +65,16 @@ POINTS_PER_RUB = 100  # 1 point per 100 ₽
 
 class LoyaltySubscriber:
     """Credits points on ``booking.completed`` envelopes.
+
+    ### Не за каждое завершение (решение владельца 30.08)
+
+    ``booking.completed`` приезжает и от закрытия по часам, и от человека,
+    подтвердившего визит. Баллы начисляются только за второе: см.
+    :func:`apps.booking.completion.confirmed_by_human` и комментарий в
+    :meth:`_credit_visit`. Отзыв баллов (``booking.cancelled``) такого
+    гейта НЕ имеет и иметь не должен — отмена не требует подтверждения,
+    что человек пришёл, а незачисленные баллы отзываются в ноль
+    (``revoke_visit_points`` идемпотентен на отсутствии EARN_VISIT).
 
     Mapping (Envelope → LoyaltyEvent):
       - Reads ``envelope.data.booking_id``
@@ -96,6 +107,27 @@ class LoyaltySubscriber:
             )
 
     def _credit_visit(self, envelope: "Envelope") -> None:
+        # Гейт последствий по completed_by — решение владельца 30.08.
+        #
+        # Начисление баллов утверждает, что человек пришёл. Закрытие по
+        # часам ничего такого не знает: оно знает только, что визит
+        # кончился по расписанию три часа назад. Начислять за него —
+        # выдавать неизвестность за факт, и не бесплатно: за EARN_VISIT
+        # каскадом идут бонус за долгий возврат, ПЕРЕСЧЁТ ТИРА и выплата
+        # рефереру — то есть по чужому счёту тоже, и отменять её потом
+        # некому и нечем.
+        #
+        # Гейт стоит здесь, а не в четырёх местах ниже по каскаду, ровно
+        # потому, что вход у каскада один.
+        completer = actor_from_event(envelope.data)
+        if not confirmed_by_human(completer):
+            logger.info(
+                "loyalty.subscriber.visit_unconfirmed completed_by=%r envelope=%s",
+                completer,
+                envelope.event_id,
+            )
+            return
+
         booking_id = envelope.data.get("booking_id")
         if not booking_id:
             logger.warning(

@@ -270,6 +270,7 @@ For each event below: trigger condition, `data` schema, JSON example with realis
 |------------------|-------------------|----------------------------------------------------------|
 | `appointment_id` | string (UUID)     | Canonical `Appointment.id`.                              |
 | `completed_at`   | string (ISO8601)  | When marked completed.                                   |
+| `completed_by`   | string            | **Who** closed the visit. `system` for the 3-hour auto-close; a staff identifier when a human confirmed the client came. Required — see below. |
 
 **Example:**
 
@@ -286,15 +287,34 @@ For each event below: trigger condition, `data` schema, JSON example with realis
   "causation_id": null,
   "data": {
     "appointment_id": "b8d3e4f5-1c2d-4e6f-8a9b-c3d4e5f6a7b8",
-    "completed_at": "2026-05-22T16:30:00.000Z"
+    "completed_at": "2026-05-22T16:30:00.000Z",
+    "completed_by": "system"
   }
 }
 ```
 
+**Why `completed_by` is not optional (owner decision, 2026-08-30).**
+
+`actor` at the envelope level answers «who delivered this event» and is
+`system` for every path, human closes included — the bus is the bus.
+`data.completed_by` answers a different question: «did a person confirm
+the client came?». OD-V1 (2026-08-14) settled that all three closing
+paths — salon, client, and the 3-hour auto-close — land on the same
+`completed` status, so this field is the only thing that tells them
+apart on the consumer side.
+
+The pilot on 2026-08-26 closed a visit by the clock and requested a
+review from a live customer 698 ms later. It never arrived only because
+every push was failing (DRF-1030). Consumers now gate the consequences
+that require a confirmed visit on this field, **default-deny**: a
+missing or empty `completed_by` reads as an automated close and those
+consequences do not fire. Producers must send it.
+
 **Consumer contract (`booking.*` consumer, #442):**
-1. Update `RemoteBookingProxy.status` to `completed`.
-2. Trigger the post-visit review skill (asks user about service quality in MAX chat). The skill itself is idempotent on `appointment_id`; the consumer's job is solely to fire the trigger.
-3. Update the user's RFM/sentiment counters via `apps/clients/ClientProfile` (handled cross-event in #445; this event ALSO contributes to the recency metric).
+1. Update `RemoteBookingProxy.status` to `completed` — unconditionally, on every close. A visit that does not close hangs forever and corrupts the day journal.
+2. Mirror `completed_by` onto `RemoteBookingProxy.completed_by`.
+3. Trigger the post-visit review skill (asks user about service quality in MAX chat). The skill itself is idempotent on `appointment_id`; the consumer's job is solely to fire the trigger. **Only when `completed_by` names a human.**
+4. Update the user's RFM/sentiment counters via `apps/clients/ClientProfile` (handled cross-event in #445; this event ALSO contributes to the recency metric).
 
 ---
 

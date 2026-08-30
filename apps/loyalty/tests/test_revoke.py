@@ -309,7 +309,11 @@ class TestSubscriberDispatchTable:
             event_version="1.0",
             occurred_at=dt.datetime.now(dt.UTC),
             actor=Actor(type="system"),
-            data={"booking_id": str(booking.pk)},
+            # ``actor=system`` описывает, кто ДОСТАВИЛ событие (шина), а
+            # ``completed_by`` — кто закрыл визит. Разные вопросы: событие
+            # о закрытии человеком приезжает по той же системной шине.
+            # Гейт 30.08 читает второе.
+            data={"booking_id": str(booking.pk), "completed_by": "master:3e7b"},
             tenant_id=tenant.id,
         )
 

@@ -746,9 +746,18 @@ def _make_booking_for_followup(
     tenant: Tenant,
     bot_user: BotUser,
     completed_at=None,
+    completed_by: str = "",
     status: str | None = None,
 ):
-    """Helper — create a BookingRequest row to exercise B11 blockers."""
+    """Helper — create a BookingRequest row to exercise B11 blockers.
+
+    ``completed_by`` defaults to empty on purpose (owner decision 30.08).
+    Empty means «nobody said who closed this», which the gate reads as an
+    unconfirmed visit — so a test that wants the nudge to go out has to
+    say who confirmed it, in that test, where a reader can see it. A
+    helper that defaulted to a human name would hand every future test a
+    confirmation nobody wrote.
+    """
     from apps.booking.models import BookingRequest
 
     return BookingRequest.all_tenants.create(
@@ -760,6 +769,7 @@ def _make_booking_for_followup(
         client_phone="79991234567",
         status=status or BookingRequest.Status.CONFIRMED,
         completed_at=completed_at,
+        completed_by=completed_by,
     )
 
 
@@ -923,11 +933,18 @@ class TestB11ConservativeBlockers:
     def test_happy_path_confirmed_completed_opt_in_no_failures_sends(
         self, tenant: Tenant, bot_user: BotUser
     ) -> None:
-        """All 4 gates pass → B11 fires (smoke test for full flow)."""
+        """All gates pass → B11 fires (smoke test for full flow).
+
+        ``completed_by`` names a human because that is now one of the
+        gates (owner decision 30.08): a visit closed by the clock earns
+        no review request, so a smoke test of the sending path has to
+        supply the confirmation the path requires.
+        """
         booking = _make_booking_for_followup(
             tenant=tenant,
             bot_user=bot_user,
             completed_at=NOW_UTC - timedelta(hours=1),
+            completed_by="master:9d1c",
         )
         rem = _make_reminder(
             tenant=tenant,
