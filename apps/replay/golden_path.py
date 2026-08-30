@@ -71,6 +71,7 @@ from __future__ import annotations
 
 import logging
 import socket
+import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -306,6 +307,14 @@ def build_max_payload(
     key and the fixture would exercise a shape production never produces.
     """
 
+    # Milliseconds since the epoch, taken from the clock rather than
+    # written down. The sibling helper in `live_path.py` carries a literal
+    # 1_731_320_000_000, and a fixture timestamp that is a fixed point in
+    # the past is the shape that has already turned `dev` red for four days
+    # once. Nothing here compares it today; the cost of not depending on
+    # that staying true is one function call.
+    now_ms = int(time.time() * 1000)
+
     attachments = (
         [{"type": "image", "payload": {"url": "https://cdn.invalid/replay-photo.jpg"}}]
         if has_attachments
@@ -315,9 +324,9 @@ def build_max_payload(
     if fixture_text.startswith("cb:"):
         return {
             "update_type": "message_callback",
-            "timestamp": 1_731_320_000_000,
+            "timestamp": now_ms,
             "callback": {
-                "timestamp": 1_731_320_000_000,
+                "timestamp": now_ms,
                 "callback_id": f"cb-{mid}",
                 "payload": fixture_text,
                 "user": {"user_id": user_id, "name": "Replay"},
@@ -331,7 +340,7 @@ def build_max_payload(
 
     return {
         "update_type": "message_created",
-        "timestamp": 1_731_320_000_000,
+        "timestamp": now_ms,
         "message": {
             "sender": {"user_id": user_id, "name": "Replay"},
             "recipient": {"chat_id": user_id, "chat_type": "dialog"},
