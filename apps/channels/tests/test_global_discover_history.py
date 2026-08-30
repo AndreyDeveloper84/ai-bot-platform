@@ -326,7 +326,74 @@ class TestShortTermMemoryGetsNoRawPayload:
 
 
 # --------------------------------------------------------------------------- #
-# 6. Почему здесь нет прогона golden-фикстур                                   #
+# 6. Резолвер отдельно от хендлера — граница «тап / набранный текст»           #
+# --------------------------------------------------------------------------- #
+class TestTheResolverDrawsTheLineAtTheForm:
+    """Граница проверяется на самой функции, а не только сквозь весь ход.
+
+    Сквозной прогон выше доказывает поведение; здесь заперта ПРИЧИНА, по
+    которой оно такое, — иначе следующая правка формы регулярного выражения
+    упала бы в двадцати сквозных тестах сразу и без внятного «что именно
+    сломалось».
+    """
+
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            f"cb:discover:book:{T}:{M}",
+            f"cb:discover:book:{T}:{M}:{S}",
+            f"cb:discover:book:{T}:{M}::{REF}",
+            f"cb:discover:book:{T}:{M}:{S}:{REF}",
+            "cb:discover:book:1",
+            "cb:discover:book:",
+            "cb:discover:book",
+            "cb:discover:",
+            "cb:discover",
+            f"cb:discover:masters:{T}",
+            f"cb:discover:more:{REF}",
+        ],
+    )
+    def test_a_payload_of_the_family_is_a_tap_and_says_nothing(self, payload):
+        from apps.orchestrator.discovery import resolve_discover_tap
+
+        tap = resolve_discover_tap(payload)
+        assert tap is not None, payload
+        assert tap.history_text is None, payload
+
+    @pytest.mark.parametrize(
+        "typed",
+        [
+            "cb:discover: это я просто так написала",
+            f"CB:DISCOVER:BOOK:{T}:{M}",
+            "а что такое cb:discover?",
+            "cb:discovery:book:1",
+            "cb:catalog:services:1",
+            "хочу маникюр в пензе",
+            "",
+        ],
+    )
+    def test_anything_else_is_left_to_the_caller(self, typed):
+        from apps.orchestrator.discovery import resolve_discover_tap
+
+        assert resolve_discover_tap(typed) is None, typed
+
+    def test_the_shipped_prefix_is_covered_by_the_form(self):
+        """Стража от расхождения: константа маршрута и форма истории — об одном.
+
+        Если ``CALLBACK_DISCOVER_BOOK_PREFIX`` когда-нибудь переименуют, а
+        регулярное выражение забудут, тап снова поедет в историю сырым — и
+        узнается это здесь, а не в чате у человека.
+        """
+        from apps.orchestrator.discovery import (
+            CALLBACK_DISCOVER_BOOK_PREFIX,
+            resolve_discover_tap,
+        )
+
+        assert resolve_discover_tap(f"{CALLBACK_DISCOVER_BOOK_PREFIX}{T}:{M}") is not None
+
+
+# --------------------------------------------------------------------------- #
+# 7. Почему здесь нет прогона golden-фикстур                                   #
 # --------------------------------------------------------------------------- #
 class TestNoGoldenFixtureFeedsThisGate:
     """Заявление «golden затронутого пути нет» — проверкой, а не на словах.
