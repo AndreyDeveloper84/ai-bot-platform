@@ -1178,11 +1178,27 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
     # отвечает и записывает, так что ход в истории виден.
 
     # Persist + remember the inbound turn (sentinel-scoped, current_tenant()=None).
-    inbound_history_text = event.text
+    #
+    # Аннотация здесь — не формальность перед mypy, а предмет самой правки.
+    # `str | None` говорит ровно то, что решают резолверы выше: `str` — «человек
+    # это сказал, и вот какими словами», `None` — «человек этим не сказал
+    # НИЧЕГО» (навигация, снятая кнопка), и тогда в историю не идёт ни строки.
+    # Сузить до `str` — приведением, `cast` или `type: ignore` — значило бы
+    # заявить в типе, что молчания не бывает, тогда как молчание тут половина
+    # решения; следующий читатель обязан увидеть его здесь, а не вычитывать из
+    # ветки `inbound_history_text is None` десятью строками ниже.
+    inbound_history_text: str | None = event.text
     for tap in (anketa_tap, welcome_tap, food_tap):
-        if tap is not None:
-            inbound_history_text = tap.history_text
-            break
+        if tap is None:
+            # «Это не тап моего семейства» — резолвер пропускает ход дальше и
+            # не трогает ни текст, ни персистенс.
+            continue
+        # Претендовать на payload может ровно один резолвер: семейства
+        # различаются префиксом, а форма проверяется строго. Поэтому первый же
+        # разбор — окончательный, и его `history_text` (фраза ИЛИ None) и есть
+        # ответ на вопрос «чем этот тап был как реплика».
+        inbound_history_text = tap.history_text
+        break
     if (
         is_booking_callback
         or is_catalog_callback

@@ -42,7 +42,7 @@
 
 from __future__ import annotations
 
-from typing import ClassVar
+from typing import Any, ClassVar
 from unittest.mock import MagicMock
 
 import pytest
@@ -190,18 +190,23 @@ def _raw(history: list[str]) -> list[str]:
     return [line for line in history if line.startswith("cb:")]
 
 
-def _lowercased(assertions: list) -> list:
+def _lowercased(assertions: list[Any]) -> list[Any]:
     """Те же утверждения фикстуры, но с приведёнными к нижнему регистру строками.
 
     Нужно ровно для :data:`TestFoodGoldenFixturesStillReplay.CASE_MISMATCH` —
     чтобы исключение снимало РЕГИСТР, а не саму проверку.
+
+    ``Any`` здесь честный, а не удобный: утверждение приезжает из YAML, и
+    значение у него бывает и строкой (``skill_used: echo``), и списком строк
+    (``response_contains_any: [...]``), и чем угодно ещё, что положат в
+    фикстуру. Сузить тип значило бы соврать про формат файла.
     """
-    out = []
+    out: list[Any] = []
     for item in assertions:
         if not isinstance(item, dict):
             out.append(item)
             continue
-        lowered = {}
+        lowered: dict[str, Any] = {}
         for key, value in item.items():
             if isinstance(value, str):
                 lowered[key] = value.lower()
@@ -719,9 +724,16 @@ class TestFoodGoldenFixturesStillReplay:
     def _fixtures(self, name: str):
         from pathlib import Path
 
+        import apps.replay
         from apps.replay.fixtures.loader import load_fixture_set
 
-        root = Path(__import__("apps.replay", fromlist=["x"]).__file__).parent
+        # ``__file__`` объявлен как ``str | None``, потому что у namespace-пакета
+        # его нет. ``apps.replay`` — обычный пакет с ``__init__.py``, и стража
+        # это утверждает вслух: если он когда-нибудь станет namespace-пакетом,
+        # упадёт здесь с внятной причиной, а не ниже на пустом наборе фикстур.
+        package_file = apps.replay.__file__
+        assert package_file is not None, "apps.replay — обычный пакет, у него есть __file__"
+        root = Path(package_file).parent
         return load_fixture_set(root / "fixtures" / "golden" / name)
 
     def _consented_user(self, user_id: int):
