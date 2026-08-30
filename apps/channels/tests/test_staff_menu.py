@@ -15,6 +15,7 @@ things a screenshot would not show:
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone as dt_timezone
+import re
 from unittest.mock import patch
 from uuid import uuid4
 from zoneinfo import ZoneInfo
@@ -26,6 +27,7 @@ from apps.booking.models import RemoteBookingProxy
 from apps.catalog.models import CatalogMaster, CatalogService
 from apps.channels.bot_registry import BotEntry
 from apps.channels.max import staff_actions
+from apps.channels.max.outbound import _button_to_max
 from apps.channels.max.staff_menu import (
     CB_DAY,
     CB_REQUESTS,
@@ -40,6 +42,11 @@ pytestmark = pytest.mark.django_db
 
 MSK = ZoneInfo("Europe/Moscow")
 CHANNEL_USER_ID = "700700"
+
+#: What MAX accepts in an ``open_app`` button payload — see
+#: :meth:`TestMiniAppButton.test_payload_matches_the_pattern_max_actually_enforces`
+#: for how this was measured against the live API.
+MAX_OPEN_APP_PAYLOAD_RE = re.compile(r"[A-Za-z0-9_-]{0,512}")
 
 WITH_APP = BotEntry(
     slug="salon",
@@ -208,6 +215,56 @@ class TestMiniAppButton:
         button = [b for b in menu_buttons(_Role(admin=True), entry) if "Кабинет" in b["label"]][0]
 
         assert button["url"] == "https://miniapp-dev.example/"
+
+    def test_payload_matches_the_pattern_max_actually_enforces(self):
+        """The `open_app` payload must satisfy MAX's own regex.
+
+        Established by live probe against ``https://botapi.max.ru``
+        (2026-08-30, test bot ``@id583403546770_1_bot``). MAX validates
+        ``attachments[].payload.buttons[][].payload`` for ``open_app``
+        BEFORE it resolves ``web_app`` or the chat, so the rule can be
+        read off the wire without delivering anything to anyone: a
+        rejected payload answers HTTP 400 ``proto.payload``, an accepted
+        one falls through to a later 404 about the ``web_app`` link.
+
+        Probing ``a<c>b`` for every printable ASCII ``<c>``, plus length
+        and non-ASCII sweeps, gives exactly:
+
+            ^[A-Za-z0-9_-]{0,512}$
+
+        Accepted: letters, digits, ``_``, ``-``, the empty string, up to
+        512 characters. Rejected (400 ``proto.payload``): every other
+        ASCII punctuation mark INCLUDING ``:`` and ``.``, the space,
+        Cyrillic, and 513+ characters.
+
+        The colon is the point. Until this test existed the module said
+        «colons are legal and already used elsewhere» and the payload was
+        ``cb:staff:open_app``; on 2026-08-30 setting
+        ``MAX_BOT_SALON_WEB_APP`` on the pilot made the salon bot build
+        that button and MAX answered 400 to EVERY staff reply — the
+        handler raised out of ``menu_attachments`` and no answer was sent
+        at all.
+
+        The pattern is spelled out here rather than imported from the
+        producer: a test that reads the rule out of the code it guards
+        cannot catch the code being wrong about the rule.
+        """
+
+        buttons = menu_buttons(_Role(admin=True), WITH_APP)
+        app_buttons = [b for b in buttons if b.get("web_app")]
+
+        # Positive guard first — «the payload has no forbidden character»
+        # is vacuously true when there is no button. This half fails if
+        # the Mini App entry ever silently stops being built.
+        assert len(app_buttons) == 1, buttons
+        wire = _button_to_max(app_buttons[0])
+        assert wire["type"] == "open_app", wire
+        assert wire["web_app"] == "id583_salon_bot"
+
+        payload = wire.get("payload", "")
+        assert MAX_OPEN_APP_PAYLOAD_RE.fullmatch(payload), (
+            f"MAX would answer 400 proto.payload for {payload!r}"
+        )
 
     def test_omitted_entirely_when_the_bot_has_no_app(self):
         # A dead button is worse than a missing one: it costs a tap and

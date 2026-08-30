@@ -7,6 +7,8 @@ plus error handling on 4xx/5xx and network failures.
 
 from __future__ import annotations
 
+import re
+
 import pytest
 
 from apps.channels.max.outbound import (
@@ -298,18 +300,103 @@ class TestMaxHardeningGuards:
             )
 
     def test_guard3_open_app_payload_accepts_flat_slug(self):
-        # Sanity — the canonical flat-slug shape (alphanumeric + `:` for
-        # namespacing, dot, dash, underscore) MUST still pass through.
+        # Sanity — the shape MAX actually accepts MUST still pass through:
+        # letters, digits, `_` and `-`, and nothing else. See
+        # `test_guard3_open_app_payload_rejects_colon` for how that was
+        # measured.
         att = make_inline_keyboard_attachment(
             [
                 {
                     "label": "Open",
-                    "callback": "cb:miniapp:catalog",
+                    "callback": "master_invite_10c1ae97-ca49-4eca-b662-cc53ef76f27d",
                     "web_app": "id583_bot",
                 },
             ],
         )
-        assert att["payload"]["buttons"][0][0]["payload"] == "cb:miniapp:catalog"
+        assert (
+            att["payload"]["buttons"][0][0]["payload"]
+            == "master_invite_10c1ae97-ca49-4eca-b662-cc53ef76f27d"
+        )
+
+    def test_guard3_open_app_payload_rejects_colon(self):
+        """The colon is NOT legal in an `open_app` payload.
+
+        Measured, not assumed. `https://botapi.max.ru` was asked directly
+        on 2026-08-30 with a live bot token: MAX validates this field
+        before it resolves `web_app` or the chat, so a probe never
+        delivers anything — a bad payload answers HTTP 400
+        `proto.payload`, a good one falls through to a 404 about the
+        `web_app` link. Sweeping `a<c>b` over printable ASCII, plus
+        length and non-ASCII sweeps, gives exactly:
+
+            ^[A-Za-z0-9_-]{0,512}$
+
+        Until 2026-08-30 this module claimed only `=`, `&` and `?` were
+        forbidden and `apps/channels/max/staff_menu.py` said in so many
+        words that «colons are legal». Setting `MAX_BOT_SALON_WEB_APP` on
+        the pilot turned that belief into a `cb:staff:open_app` payload on
+        the wire and MAX answered 400 to every staff reply, so the salon
+        bot stopped answering at all.
+        """
+
+        with pytest.raises(ValueError, match="flat slug"):
+            make_inline_keyboard_attachment(
+                [
+                    {
+                        "label": "Open",
+                        "callback": "cb:staff:open_app",
+                        "web_app": "id583_bot",
+                    },
+                ],
+            )
+
+    def test_guard3_open_app_payload_rejects_dot_space_and_cyrillic(self):
+        for bad in ("a.b", "a b", "привет", "a/b", "a+b", "a@b"):
+            with pytest.raises(ValueError, match="flat slug"):
+                make_inline_keyboard_attachment(
+                    [{"label": "Open", "callback": bad, "web_app": "id583_bot"}],
+                )
+
+    def test_guard3_open_app_payload_rejects_over_512_chars(self):
+        # 512 accepted, 513 rejected — measured by binary search against
+        # the live API on the same run as the character sweep.
+        att = make_inline_keyboard_attachment(
+            [{"label": "Open", "callback": "a" * 512, "web_app": "id583_bot"}],
+        )
+        assert len(att["payload"]["buttons"][0][0]["payload"]) == 512
+
+        with pytest.raises(ValueError, match="flat slug"):
+            make_inline_keyboard_attachment(
+                [{"label": "Open", "callback": "a" * 513, "web_app": "id583_bot"}],
+            )
+
+    def test_guard3_every_open_app_payload_this_repo_builds_is_legal(self):
+        """Sweep of the producers, so a new one cannot repeat this.
+
+        Three places build an `open_app` button; all three feed their
+        payload through `_button_to_max`, so it is their CONSTANTS that
+        have to be legal:
+
+        * `apps/skills/welcome/skill.py` — the Mini App route slugs;
+        * `apps/admin_api/views_invite.py` — the master invitation;
+        * `apps/channels/max/staff_menu.py` — the salon staff menu, which
+          is covered where it is built (`apps/channels/tests/
+          test_staff_menu.py::TestMiniAppButton`).
+        """
+
+        from apps.admin_api.views_invite import MASTER_INVITE_PAYLOAD_PREFIX
+        from apps.skills.welcome.skill import MINIAPP_ROUTES
+
+        pattern = re.compile(r"[A-Za-z0-9_-]{0,512}")
+
+        assert MINIAPP_ROUTES, "no routes — the sweep below would pass vacuously"
+        for slug in MINIAPP_ROUTES:
+            assert pattern.fullmatch(slug), slug
+
+        # A UUID is hex plus hyphens, so the prefix is the only part that
+        # could go wrong.
+        sample = f"{MASTER_INVITE_PAYLOAD_PREFIX}10c1ae97-ca49-4eca-b662-cc53ef76f27d"
+        assert pattern.fullmatch(sample), sample
 
     def test_guard3_callback_button_unaffected_by_slug_check(self):
         # Slug check ONLY applies to open_app payloads (the MAX-specific
