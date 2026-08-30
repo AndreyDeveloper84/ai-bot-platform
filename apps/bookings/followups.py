@@ -158,6 +158,7 @@ from django.conf import settings
 from django.utils import timezone
 
 from apps.audit.services import write_audit
+from apps.booking.completion import confirmed_by_human
 from apps.booking.models import BookingReminder
 from apps.booking.reminder_lookup import ayla_appointment_id_of
 from apps.channels.max.outbound import MaxAPIError, send_message
@@ -239,6 +240,10 @@ def vet_outbound(text: str) -> tuple[str, str | None]:
 #
 #   1. ``booking.completed_at IS NULL`` — visit never registered. Without
 #      proof of visit, не имеем right to ask «как прошёл».
+#      **Отметка часов — не proof of visit (владелец, 30.08).** Этот
+#      блокер отделяет «визит закрыт» от «не закрыт» и НЕ отделяет «часы
+#      досчитали» от «человек подтвердил», хотя спрашивали именно второе.
+#      Второй вопрос теперь задаёт блокер #5 по ``completed_by``.
 #   2. ``booking.status IN {CANCELLED, RESCHEDULED}`` — booking is in a
 #      terminal state where review prompt makes no sense. NOTE: CANCELLED
 #      bundles «customer cancelled with refund» case (Tau §4.1) because
@@ -251,6 +256,14 @@ def vet_outbound(text: str) -> tuple[str, str | None]:
 #      payment-failure cascade (per project_payment_failed_dm_threshold).
 #      Reviewing a visit while customer is in payment dispute = poor UX.
 #      Threshold от ``settings.PAYMENT_FAILED_HANDOFF_THRESHOLD`` (default 3).
+#   5. ``completed_by`` не называет человека — визит закрыли часы, никто
+#      не подтверждал, что клиент пришёл (решение владельца 30.08). Тот
+#      же вопрос на обоих путях: ``BookingRequest.completed_by`` в
+#      :func:`_should_send_b11` и ``RemoteBookingProxy.completed_by`` в
+#      :func:`_should_send_b11_ayla`. Номер по времени появления, не по
+#      порядку исполнения: блокер добавлен после четырёх пилотных, а
+#      исполняется последним — там, где о завершении визита уже
+#      известно всё, что о нём известно.
 #
 # **Phase 1 follow-up (7 additional Tau §4.1 blocker states)** требует Ayla
 # event integration: refund_pending / refund_completed / partial_refund /
@@ -294,6 +307,22 @@ def _should_send_b11_ayla(reminder: BookingReminder) -> tuple[bool, str | None]:
     and demanding it would silence the follow-up entirely. Widening this to a
     positive «visit actually happened» proof needs the completion signal to be
     reliable first.
+
+    ### Blocker #5: `completed_by` (owner decision 2026-08-30)
+
+    Since 30.08 there is a third refusal here: the mirror says ``completed``
+    and ``completed_by`` does not name a human. That is Ayla's 3-hour
+    auto-close, and the pilot on 26.08 showed what hangs off it — a review
+    request to a live customer 698 ms after a clock ran out, delivered by
+    nobody's decision. All three closing paths land on the same status
+    (OD-V1); only this field tells them apart.
+
+    Note what did NOT change. The paragraph above still holds: a mirror stuck
+    on ``confirmed`` still sends. Nobody confirmed that visit either, so the
+    asymmetry is real — but closing it means demanding ``completed``, which is
+    exactly the change the paragraph above argues against, and it is a policy
+    call for the owner rather than something to fold into this gate. Raised in
+    the DRF-1421-adjacent report, not decided here.
     """
     appointment_id = ayla_appointment_id_of(reminder)
     if appointment_id is None:
@@ -302,18 +331,38 @@ def _should_send_b11_ayla(reminder: BookingReminder) -> tuple[bool, str | None]:
 
     from apps.booking.models import RemoteBookingProxy
 
-    status = (
+    row = (
         RemoteBookingProxy.all_tenants.filter(
             appointment_id=appointment_id,
             tenant_id=reminder.tenant_id,
         )
-        .values_list("status", flat=True)
+        .values_list("status", "completed_by")
         .first()
     )
-    if status is None:
+    if row is None:
         return (False, "ayla_mirror_missing")
+    status, completed_by = row
     if status in _B11_BLOCKED_MIRROR_STATUSES:
         return (False, f"ayla_mirror_status_{status}")
+
+    # Гейт последствий по completed_by — решение владельца 30.08.
+    #
+    # Живой путь пилота. Ayla закрывает визит тремя путями (OD-V1) и все
+    # три кладут в зеркало один ``completed`` — различает их только
+    # ``completed_by``. Трёхчасовое автозакрытие подписывается
+    # ``system``: оно знает, что визит кончился по расписанию, и не
+    # знает, приходил ли человек. За такой визит запрос отзыва не
+    # уходит.
+    #
+    # Проверка навешена на состоявшееся закрытие, а НЕ превращена в
+    # требование «зеркало обязано быть ``completed``». Требование
+    # молчаливо погасило бы весь путь: пилотное зеркало сплошь и рядом
+    # остаётся ``confirmed``, потому что Ayla эмитит ``booking.completed``
+    # не всегда — это отдельная дыра, она разобрана в docstring выше и
+    # вынесена владельцу, а не закрыта заодно под видом этого гейта.
+    if status == RemoteBookingProxy.Status.COMPLETED and not confirmed_by_human(completed_by):
+        return (False, "ayla_completed_by_system")
+
     return (True, None)
 
 
@@ -354,6 +403,34 @@ def _should_send_b11(
 
     if booking_request.status in _b11_blocked_statuses_frozen_at_pr_time():
         return (False, f"booking_status_{booking_request.status}")
+
+    # Гейт последствий по completed_by — решение владельца 30.08.
+    #
+    # Стоит ПОСЛЕ проверки статуса, а не перед ней: у отменённого
+    # визита причина отказа — отмена, и подменять её на «закрыли
+    # часы» значит врать дежурному в dry-run'е про то, кого и почему
+    # не написали.
+    #
+    # Блокер #1 выше требует, чтобы визит был закрыт. Пишет
+    # ``completed_at`` на этом пути ровно один код — часы
+    # (``apps.bookings.tasks.detect_completed_bookings``). То есть до
+    # этой строки блокер #1 работал РАЗРЕШИТЕЛЕМ: «как прошёл визит?»
+    # уходил потому и только потому, что сканер закрыл визит по часам,
+    # и уходил тем вернее, чем меньше о визите знал живой человек.
+    # Комментарий над блокером говорил «без proof of visit не имеем
+    # права спрашивать» и читал отметку часов как этот proof — она его
+    # противоположность.
+    #
+    # Следствие, которое стоит назвать вслух: пока ни один человеческий
+    # путь не пишет ``BookingRequest.completed_at``, эта ветка не
+    # отправит ничего. Это не побочный эффект — это и есть решение:
+    # запрос отзыва не уходит за визит, который никто не подтверждал.
+    # Живой путь пилота — зеркало Ayla (:func:`_should_send_b11_ayla`),
+    # там закрытие человеком существует и проходит гейт:
+    # ``admin_api.views_booking_complete`` даёт администратору закрыть
+    # визит, и Ayla присылает его имя обратно в ``completed_by``.
+    if not confirmed_by_human(booking_request.completed_by):
+        return (False, "completed_by_system")
 
     return (True, None)
 

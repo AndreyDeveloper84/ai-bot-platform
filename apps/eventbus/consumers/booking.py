@@ -65,6 +65,7 @@ from apps.booking.client_notify import (
     schedule_client_booking_confirmation,
     was_confirmed_in_chat,
 )
+from apps.booking.completion import actor_from_event
 from apps.booking.master_notify import (
     CHAT_ORIGIN_SOURCE,
     schedule_booking_created_notification,
@@ -1571,6 +1572,25 @@ def handle_booking_completed(envelope: IngestEnvelope) -> None:
     Step 1: flip proxy status to completed. Step 2 (post-visit review
     skill trigger) and step 3 (RFM/sentiment update) live in
     follow-up tickets; this handler only owns the proxy state flip.
+
+    ### ``completed_by`` едет в зеркало (решение владельца 30.08)
+
+    Ayla закрывает визит тремя путями — салон, клиент, трёхчасовое
+    автозакрытие — и все три приезжают сюда одним ``status=completed``
+    (OD-V1, 14.08). Кто именно закрыл, различает только ``completed_by``:
+    поле есть в полезной нагрузке ``/tenants/me/day/`` и приезжает в этом
+    событии, но до сих пор здесь молча терялось.
+
+    Терялось не бесплатно. На пилоте 26.08 автозакрытие по часам
+    (``completed_by=system``) через 698 мс потянуло за собой запрос отзыва
+    живому клиенту, которого никто не подтверждал; не дошёл он только
+    потому, что все push падают (DRF-1030). Сохранение поля — единственный
+    способ дать читателям на нашей стороне отличить «часы досчитали» от
+    «мастер подтвердил».
+
+    Статус при этом флипается **всегда**: визит закрываться должен, иначе
+    он висит вечно и ломает расписание. Гейт стоит на последствиях
+    (``apps.booking.completion``), а не на закрытии.
     """
     assert_envelope_tenant_authorized(envelope)
 
@@ -1602,8 +1622,11 @@ def handle_booking_completed(envelope: IngestEnvelope) -> None:
         )
         return
 
+    completed_by = actor_from_event(data)
+
     RemoteBookingProxy.all_tenants.filter(appointment_id=appointment_id).update(
         status=RemoteBookingProxy.Status.COMPLETED,
+        completed_by=completed_by[:64],
         last_synced_event_id=envelope.event_id,
     )
 
@@ -1612,6 +1635,10 @@ def handle_booking_completed(envelope: IngestEnvelope) -> None:
         properties={
             "appointment_id": str(appointment_id),
             "completed_at": data.get("completed_at", ""),
+            # Не PII: роль или служебный идентификатор закрывающего.
+            # В телеметрии он нужен, чтобы «сколько визитов закрыли часы,
+            # а сколько люди» был вопросом к дашборду, а не к базе.
+            "completed_by": completed_by,
         },
     )
 

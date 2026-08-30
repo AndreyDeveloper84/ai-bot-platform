@@ -55,6 +55,10 @@ from apps.booking.models import BookingReminder
 from apps.channels.max.outbound import MaxAPIError, send_message
 from apps.bookings.keyboards import day_before_keyboard
 
+# Кто закрыл визит — один предикат и одно имя системного закрывающего
+# на весь контур (решение владельца 30.08).
+from apps.booking.completion import SYSTEM_ACTOR
+
 # Shared send-time booking-state classifier — extracted to its own module
 # to break the tasks ↔ escalation import cycle (escalation needs the
 # classifier; tasks re-exports escalation for Celery autodiscover).
@@ -419,6 +423,19 @@ def detect_completed_bookings() -> dict[str, int]:
     data-mutation event. Nothing in the booking record actually changes
     at completion time. Signal-based detection would require either a
     polling sentinel or a stored timer; the Celery beat IS the timer.
+
+    ### Закрытие по часам подписывается своим именем (владелец, 30.08)
+
+    Часы, досчитавшие до конца, ничего не знают о том, пришёл ли человек.
+    Раньше этот факт жил только в строке события (``marked_by=system``) и
+    исчезал вместе с ней: строка ``BookingRequest`` оставалась с одним
+    ``completed_at``, по которому «часы досчитали» и «мастер подтвердил»
+    неразличимы — и запрос отзыва уходил ровно потому, что часы досчитали.
+
+    Теперь тот же факт стоит и в строке (``completed_by='system'``), и в
+    событии. Последствия, которым нужно подтверждение визита, гейтятся по
+    нему; сам визит закрывается как закрывался — иначе он висит вечно и
+    ломает расписание.
     """
 
     from apps.booking.models import BookingRequest
@@ -464,7 +481,7 @@ def detect_completed_bookings() -> dict[str, int]:
             pk=booking.pk,
             completed_at__isnull=True,
             status=BookingRequest.Status.CONFIRMED,
-        ).update(completed_at=now)
+        ).update(completed_at=now, completed_by=SYSTEM_ACTOR)
         if rowcount == 0:
             counters["raced"] += 1
             continue
@@ -480,7 +497,14 @@ def detect_completed_bookings() -> dict[str, int]:
                     # When Q-ATT-IMPL7 lands, YClients webhook becomes the
                     # producer for status-driven completion with
                     # marked_by=external.
-                    "marked_by": "system",
+                    "marked_by": SYSTEM_ACTOR,
+                    # То же значение под именем, которым его зовёт Ayla.
+                    # Подписчики читают ОДИН ключ на обоих путях, вместо
+                    # того чтобы каждый помнил, какое из двух имён у него
+                    # в конверте (apps.booking.completion.ACTOR_KEYS).
+                    # Дублирование дешевле, чем переименование поля в
+                    # контракте перед пилотом.
+                    "completed_by": SYSTEM_ACTOR,
                 },
                 actor_type="system",
                 tenant=booking.tenant,
@@ -492,7 +516,12 @@ def detect_completed_bookings() -> dict[str, int]:
                 booking.pk,
             )
             # Roll back the completed_at stamp so the next tick retries.
-            BookingRequest.all_tenants.filter(pk=booking.pk).update(completed_at=None)
+            # ``completed_by`` goes back with it: a row that is not closed
+            # must not name a closer, or the next tick's CAS wins against
+            # a row that already looks system-closed to every reader.
+            BookingRequest.all_tenants.filter(pk=booking.pk).update(
+                completed_at=None, completed_by=""
+            )
             # Telemetry: track emit-failure separately. Earlier code
             # decremented `scanned` on rollback which lied about work
             # done — ops dashboards now see {scanned, emitted, raced,

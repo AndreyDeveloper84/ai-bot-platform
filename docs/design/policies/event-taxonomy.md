@@ -117,7 +117,7 @@ All events share an outer envelope. Payload (`data` field) is event-specific.
 | `booking.attribution.assigned` | 4a writes booking_source/billable | `booking_id`, `booking_source`, `ai_assist_score`, `billable`, `billing_reason`, `attribution_metadata` | analytics, loyalty, marketing, billing |
 | `booking.confirmed` | Customer confirms or auto-confirmed | `booking_id`, `confirmed_at`, `confirmation_method` (manual/auto) | conversation, master-mobile |
 | `booking.cancelled` | Customer or admin cancels | `booking_id`, `cancelled_by` (actor), `cancellation_reason`, `cancelled_at` | loyalty (refund cascade), marketing (suppression) |
-| `booking.completed` | Master marks visit done OR scheduled completion | `booking_id`, `completed_at`, `marked_by` | loyalty (points earn), wellness (Layer 4 update), marketing (post-visit campaign trigger), analytics |
+| `booking.completed` | Master marks visit done OR scheduled completion | `booking_id`, `completed_at`, `marked_by`, `completed_by` | loyalty (points earn — **only when `completed_by` names a human**, owner decision 30.08), wellness (Layer 4 update), marketing (post-visit campaign trigger), analytics |
 | `booking.no_show` | Visit time passed, no completion | `booking_id`, `detected_at` | retention, marketing (suppress), analytics |
 | `booking.rescheduled` | Slot change after creation | `booking_id`, `old_slot_start`, `new_slot_start`, `rescheduled_by` | master-mobile, conversation |
 | `booking.refunded` | Payment refund processed | `booking_id`, `refund_amount`, `refunded_at`, `refund_reason` | loyalty (revoke points), billing |

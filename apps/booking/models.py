@@ -201,6 +201,20 @@ class BookingRequest(models.Model):
         "whether we won the race. NULL on rows where the visit hasn't "
         "happened yet, was cancelled, or where the producer hasn't run yet.",
     )
+    completed_by = models.CharField(
+        max_length=64,
+        blank=True,
+        default="",
+        help_text="Кто закрыл визит. ``system`` — закрытие по часам "
+        "(apps.bookings.tasks.detect_completed_bookings); имя человека — "
+        "подтверждение, что клиент пришёл. Пустое на незакрытых строках "
+        "и на строках, закрытых до этого поля. Читается через "
+        "apps.booking.completion.confirmed_by_human: последствия, "
+        "требующие подтверждения визита (баллы, запрос отзыва), "
+        "наступают только на человеческом значении — решение владельца "
+        "30.08. ``completed_at`` отвечает «визит закрыт?», это поле — "
+        "«человек пришёл?»; до 30.08 первый ответ выдавали за второй.",
+    )
     status = models.CharField(
         max_length=24,
         choices=Status.choices,
@@ -853,6 +867,20 @@ class RemoteBookingProxy(models.Model):
         help_text="Where the booking originated. Empty when source isn't "
         "carried in the event (booking.cancelled / .rescheduled / "
         ".completed don't repeat the source).",
+    )
+    completed_by = models.CharField(
+        max_length=64,
+        blank=True,
+        default="",
+        help_text="Кто закрыл визит на стороне Ayla — зеркало поля "
+        "``completed_by`` из полезной нагрузки ``booking.completed`` и "
+        "``/tenants/me/day/``. ``system`` = трёхчасовое автозакрытие по "
+        "часам, никто не подтверждал, что клиент пришёл. Пустое, пока "
+        "визит не завершён. Единственный читатель на нашей стороне, "
+        "который может отличить «часы досчитали» от «мастер "
+        "подтвердил»: ``status=completed`` одинаков для обоих. "
+        "Последствия, требующие подтверждения визита, гейтятся по нему "
+        "(решение владельца 30.08) — см. apps.booking.completion.",
     )
 
     # ── Opaque references (catalog mirror does the name lookup) ────
