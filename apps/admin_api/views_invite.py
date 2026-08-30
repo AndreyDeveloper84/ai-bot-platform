@@ -745,7 +745,7 @@ def _dispatch_max_dm(
     return {"delivery": "queued"}
 
 
-def _response_payload(master: CatalogMaster, *, dispatch_delivery: str) -> dict[str, Any]:
+def _response_payload(master: CatalogMaster, *, tenant, dispatch_delivery: str) -> dict[str, Any]:
     """Build the 201/200 JSON envelope.
 
     For ``mode=catalog_only`` (no invite_token) ``invite_token`` and
@@ -758,6 +758,12 @@ def _response_payload(master: CatalogMaster, *, dispatch_delivery: str) -> dict[
     ``fallback_link``, not a replacement: ``fallback_link`` is the web
     address of the Mini App and works only inside MAX's own webview,
     while ``invite_link`` starts the bot from anywhere.
+
+    ``tenant`` is passed rather than read off ``master.tenant``: the
+    idempotency path hands us a row fetched without ``select_related``,
+    so the attribute would be a lazy query — and the view already holds
+    the tenant it authorised the caller against, which is the one that
+    must decide the link.
     """
 
     if master.invite_token is None:
@@ -777,7 +783,7 @@ def _response_payload(master: CatalogMaster, *, dispatch_delivery: str) -> dict[
         else None,
         "max_dm_delivery": dispatch_delivery,
         "fallback_link": _fallback_link(master.invite_token),
-        "invite_link": _bot_start_link(master.tenant, master.invite_token),
+        "invite_link": _bot_start_link(tenant, master.invite_token),
     }
 
 
@@ -857,7 +863,9 @@ def master_invite_create(request: HttpRequest) -> HttpResponse:
         existing = _idempotency_lookup(tenant_id=tenant.id, name=name, contact_value=contact_value)
         if existing is not None:
             payload = _response_payload(
-                existing, dispatch_delivery=_last_dispatch_delivery(existing)
+                existing,
+                tenant=tenant,
+                dispatch_delivery=_last_dispatch_delivery(existing),
             )
             response = JsonResponse(payload, status=200)
             response["X-Idempotent"] = "true"
@@ -1008,7 +1016,7 @@ def master_invite_create(request: HttpRequest) -> HttpResponse:
         },
     )
 
-    payload = _response_payload(master, dispatch_delivery=outcome["delivery"])
+    payload = _response_payload(master, tenant=tenant, dispatch_delivery=outcome["delivery"])
     return JsonResponse(payload, status=201)
 
 
