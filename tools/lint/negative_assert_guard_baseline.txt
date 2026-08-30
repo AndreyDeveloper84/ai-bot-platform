@@ -6,7 +6,11 @@
 # allowed -- the guard fails instead.
 apps/admin_api/tests/test_complete_booking.py::test_an_unreadable_version_is_503_and_not_a_guess::assert "version" not in resp.json()
 apps/admin_api/tests/test_invite.py::test_expired_invite_creates_new_row::assert "X-Idempotent" not in resp
-apps/admin_api/tests/test_invite.py::test_loopback_domain_suppresses_the_link::assert "localhost" not in text
+apps/admin_api/tests/test_invite.py::test_unset_domain_is_harmless_when_the_mini_app_is_configured::assert "localhost" not in kwargs["text"]
+apps/admin_api/tests/test_invite.py::test_unset_domain_is_harmless_when_the_mini_app_is_configured::assert "веб-версию" not in kwargs["text"]
+apps/admin_api/tests/test_invite_entry.py::test_hello_screen_no_longer_owns_the_redirect::assert "parseStartRoute" not in src, (
+apps/admin_api/tests/test_invite_entry.py::test_no_max_scheme_address_in_the_text::assert "max://" not in sent["kwargs"]["text"], (
+apps/admin_api/tests/test_invite_entry.py::test_no_promise_of_a_web_version::assert "веб-версию" not in sent["kwargs"]["text"], (
 apps/admin_api/tests/test_master_deactivation.py::test_default_template_reassign_branch_rendered::assert "[CANCEL BRANCH]" not in cancel_text
 apps/admin_api/tests/test_master_deactivation.py::test_default_template_reassign_branch_rendered::assert "[REASSIGN BRANCH]" not in reassign_text
 apps/admin_api/tests/test_salon_day.py::test_response_carries_no_phone_anywhere::assert "+79991234567" not in body
@@ -67,6 +71,8 @@ apps/channels/tests/test_global_booking_continuation.py::test_a_typed_date_reach
 apps/channels/tests/test_global_booking_lookup.py::test_backend_outage_is_not_answered_from_the_mirror::assert "Призрачная услуга" not in text
 apps/channels/tests/test_global_booking_lookup.py::test_partial_read_is_never_served_as_a_complete_list::assert "УЗ-кавитация" not in text
 apps/channels/tests/test_global_booking_lookup.py::test_the_mirror_is_not_the_source_any_more::assert "Зеркальная услуга" not in text
+apps/channels/tests/test_global_callback_history.py::test_consent_record_appears_on_the_tap::assert not _raw(_user_messages(conversation)), _user_messages(conversation)
+apps/channels/tests/test_global_callback_history.py::test_stale_tap_leaves_no_user_turn::assert not _raw(history), history
 apps/channels/tests/test_global_onboarding.py::test_consent_yes_returns_marketplace_s5_and_stamps_consent::assert not any(c.startswith(("cb:welcome:", "cb:food:", "cb:water:")) for c in callbacks)
 apps/channels/tests/test_handler_clarification_multiselect.py::test_a_raw_payload_never_enters_the_dialog_history::assert not any(c.startswith("cb:clarify") for c in contents)
 apps/channels/tests/test_salon_handler.py::test_existing_staff_get_the_menu_not_the_code_prompt::assert "код приглашения" not in text
@@ -75,6 +81,18 @@ apps/channels/tests/test_staff_menu.py::test_no_buttons_promise_what_the_backend
 apps/channels/tests/test_staff_menu.py::test_omitted_entirely_when_the_bot_has_no_app::assert not any("Кабинет" in x for x in labels)
 apps/channels/tests/test_staff_menu.py::test_tomorrow_is_not_today::assert "Завтрашняя" not in _scoped(tenant, staff_actions.salon_day, tenant)
 apps/consent/tests/test_services.py::test_grant_payload_does_not_leak_pii::assert "+79991234567" not in str(ev.payload)
+apps/conversations/tests/test_dialogue_reader_registry.py::test_a_count_is_not_a_read::assert self._scan(tmp_path, _COUNT_ONLY) == {}
+apps/conversations/tests/test_dialogue_reader_registry.py::test_but_the_direct_identifiers_do_not::assert SECRET_PHONE not in blob
+apps/conversations/tests/test_dialogue_reader_registry.py::test_no_probe_outlives_its_registry_row::assert orphans == [], "Probe(s) for readers no longer marked prompt-bound."
+apps/conversations/tests/test_dialogue_reader_registry.py::test_no_registry_entry_outlives_its_reader::assert stale == [], "Registry names readers that no longer exist — delete the rows."
+apps/conversations/tests/test_dialogue_reader_registry.py::test_probe_returns_nothing_of_the_erased_person::assert "веган" not in text, f"{key} still hands an erased fact to a prompt"
+apps/conversations/tests/test_dialogue_reader_registry.py::test_probe_returns_nothing_of_the_erased_person::assert SECRET_PHONE not in text, f"{key} still hands the erased person's phone to a prompt"
+apps/conversations/tests/test_dialogue_reader_registry.py::test_probe_returns_nothing_of_the_erased_person::assert SECRET_PHRASE not in text, f"{key} still hands the erased person's words to a prompt"
+apps/conversations/tests/test_dialogue_reader_registry.py::test_prompt_bound_readers_have_probes::assert missing == [], (
+apps/conversations/tests/test_erasure_redaction.py::test_phone_email_and_card_are_replaced::assert "4111" not in out
+apps/conversations/tests/test_erasure_redaction.py::test_phone_email_and_card_are_replaced::assert "999" not in out
+apps/conversations/tests/test_erasure_redaction.py::test_phone_email_and_card_are_replaced::assert "masha@example.ru" not in out
+apps/conversations/tests/test_erasure_redaction.py::test_the_mask_sentinel_never_reaches_the_archive::assert chr(0) not in _redact(text)
 apps/conversations/tests/test_staff_assistant.py::test_another_persons_thread_is_not_visible::assert history == []
 apps/eventbus/tests/test_consent_signals.py::test_grant_pii_not_leaked_to_domain_bus::assert "+79991234567" not in str(ev.actor)
 apps/eventbus/tests/test_consent_signals.py::test_grant_pii_not_leaked_to_domain_bus::assert "+79991234567" not in str(ev.data)
@@ -103,6 +121,7 @@ apps/handoff/tests/test_notify.py::test_text_has_no_phone_no_transcript::assert 
 apps/handoff/tests/test_services.py::test_snapshot_pii_safe::assert "+79991234567" not in snap_str
 apps/handoff/tests/test_services.py::test_snapshot_pii_safe::assert "+79991234567" not in str(ev.properties)
 apps/identity/services/tests/test_forget_all_sweep.py::test_a_row_written_after_the_request_is_reburied::assert read_green_entries(upc.user_id) == []
+apps/identity/services/tests/test_forget_all_sweep.py::test_an_unfinished_dialogue_keeps_the_person_in_the_queue::assert upc.user_id not in pending_forget_all_user_ids()
 apps/identity/services/tests/test_forget_all_sweep.py::test_nothing_comes_back_through_either_renderer::assert read_green_entries(upc.user_id) == []
 apps/identity/services/tests/test_forget_all_sweep.py::test_yellow_is_left_for_its_own_stream::assert read_green_entries(upc.user_id) == []
 apps/identity/services/tests/test_privacy.py::test_old_values_do_not_survive_anywhere_on_the_row::assert value not in row
@@ -156,6 +175,8 @@ apps/integrations/ayla/tests/test_salon_surface.py::test_no_two_rows_claim_the_s
 apps/integrations/ayla/tests/test_salon_surface.py::test_paths_are_relative_to_the_salon_prefix::assert not route.path.startswith(SALON_PREFIX), (
 apps/integrations/ayla/tests/test_salon_surface.py::test_pii_notes_cover_every_route_that_returns_a_customer::assert not stale, f"PII note mentions route(s) that no longer exist: {stale}"
 apps/integrations/ayla/tests/test_salon_surface.py::test_the_guard_cannot_see_a_phone_inside_notes::assert find_forbidden_pii(walk_in_response) == [], (
+apps/integrations/ayla/tests/test_wellness_context_client.py::test_unknown_keys_ride_along_but_values_do_not_enter_dtos::assert "70.35" not in serialised
+apps/integrations/ayla/tests/test_wellness_context_client.py::test_unknown_keys_ride_along_but_values_do_not_enter_dtos::assert "71.8" not in serialised
 apps/integrations/ayla_payments/tests/test_client.py::test_4xx_raises_api_error::assert not isinstance(excinfo.value, AylaPaymentsUnavailableError)
 apps/integrations/yclients/tests/test_client.py::test_email_redacted::assert "anna@example.com" not in out
 apps/integrations/yclients/tests/test_client.py::test_phone_redacted::assert "+79991234567" not in out
@@ -206,6 +227,7 @@ apps/master_api/tests/test_conversations.py::test_response_excludes_phone_email_
 apps/master_api/tests/test_conversations.py::test_response_excludes_phone_email_ltv_last_name::assert "Леонова" not in raw  # full last name never serialised
 apps/master_api/tests/test_conversations.py::test_response_excludes_phone_email_ltv_last_name::assert not forbidden.intersection(item.keys()), item
 apps/master_api/tests/test_customers.py::test_cancelled_bookings_excluded::assert out == []
+apps/master_api/tests/test_customers.py::test_confirmed_but_never_completed_is_not_a_visit::assert out == []
 apps/master_api/tests/test_customers.py::test_empty_master_returns_empty_list::assert out == []
 apps/master_api/tests/test_customers.py::test_walkin_without_bot_user_skipped::assert out == []
 apps/master_api/tests/test_dashboard.py::test_empty_when_no_conversations::assert ds.get_inbox_preview(accepted_master, _utc(now_local)) == []
@@ -220,6 +242,7 @@ apps/miniapp_api/tests/test_pending_intent.py::test_explicit_null_field_dropped:
 apps/miniapp_api/tests/test_recent_activity.py::test_no_upcoming_omits_next_booking::assert "next_booking" not in data
 apps/miniapp_api/tests/test_recent_activity.py::test_non_confirmed_not_surfaced::assert "next_booking" not in data
 apps/miniapp_api/tests/test_recent_activity.py::test_other_tenant_booking_invisible::assert "next_booking" not in data
+apps/miniapp_api/tests/test_recent_activity_mirror.py::test_past_mirror_row_omits_next_booking::assert "next_booking" not in _get(client, bot_user).json()
 apps/miniapp_api/tests/test_wellness_today.py::test_both_unavailable_returns_200_zeros::assert "pfc" not in data
 apps/miniapp_api/tests/test_wellness_today.py::test_summary_unavailable_keeps_water::assert "pfc" not in data
 apps/notifications/tests/test_consent_column_guard.py::test_apps_tree_has_no_violations::assert violations == [], "\n".join(v.format() for v in violations)
@@ -274,6 +297,7 @@ apps/orchestrator/tests/test_memory_block.py::test_without_backend_data_sources_
 apps/orchestrator/tests/test_memory_bridge.py::test_domain_forget_triggers_bridge_clear::assert read_green_entries(bu.ayla_user_id) == []
 apps/orchestrator/tests/test_memory_bridge.py::test_slots_no_duplicate_when_already_declared::assert _patches(client) == []
 apps/orchestrator/tests/test_memory_erasure_matrix.py::test_a_refused_erasure_is_not_reported_as_done::assert "забыла всё, что о тебе знала" not in reply
+apps/orchestrator/tests/test_memory_erasure_matrix.py::test_account_delete_anonymizes_customer_messages::assert _recent_history(conversation) == []
 apps/orchestrator/tests/test_memory_erasure_matrix.py::test_skin_sensitivities_never_reach_the_max_prompt::assert "ретинол" not in block
 apps/orchestrator/tests/test_memory_erasure_matrix.py::test_skin_sensitivities_never_reach_the_max_prompt::assert "чувствительн" not in block.lower()
 apps/orchestrator/tests/test_nutrition_context.py::test_malformed_pct_does_not_raise::assert "от нормы" not in block
@@ -328,6 +352,7 @@ apps/skills/cross_domain/tests/test_skill.py::test_other_domain_callbacks_not_cl
 apps/skills/cross_domain/tests/test_skill.py::test_unknown_action_does_not_match::assert not CrossDomainSkill().matches(_context("cb:cross:click:shown-1"))
 apps/skills/faq/tests/test_prompts.py::test_forbidden_absent_no_line::assert "Запрещено" not in system
 apps/skills/faq/tests/test_prompts.py::test_tone_absent_no_line::assert "Тон:" not in system
+apps/skills/food_clarify/tests/test_hints.py::test_everyday_phrases_are_not_a_food_log::assert not looks_like_food_drink(text), f"unexpected hit on {text!r}"
 apps/skills/food_clarify/tests/test_hints.py::test_non_food_messages::assert not looks_like_food_drink(text), f"unexpected hit on {text!r}"
 apps/skills/food_clarify/tests/test_skill.py::test_other_food_callback_does_not_match::assert not skill.matches(_context("cb:food:to_diary:abc123"))
 apps/skills/food_clarify/tests/test_skill.py::test_unrelated_text_does_not_match::assert not skill.matches(_context("Хочу записаться на массаж"))
@@ -360,6 +385,7 @@ apps/skills/water/tests/test_skill.py::test_empty_does_not_match::assert not Wat
 apps/skills/water/tests/test_skill.py::test_long_text_does_not_match::assert not WaterSkill().matches(_context(long_text))
 apps/skills/water/tests/test_skill.py::test_non_beverage_does_not_match::assert not WaterSkill().matches(_context("когда вы работаете?"))
 apps/skills/welcome/tests/test_miniapp_routes.py::test_catch_all_is_not_treated_as_a_route::assert not _route_exists("/no/such/screen/at/all", _miniapp_routes())
+apps/skills/welcome/tests/test_skill.py::test_no_welcome_button_opens_the_food_scanner::assert "food-scanner" not in button.get("url", ""), (
 apps/tenancy/tests/test_telegram_fields.py::test_mask_helper_short_tokens_starred::assert "abc" not in masked
 apps/tenancy/tests/test_telegram_fields.py::test_repr_does_not_contain_full_token::assert secret not in rep, f"full token leaked into repr: {rep!r}"
 apps/workers/tests/test_consumer.py::test_tenant_optional_handler_with_tenant_present_proceeds_normally::assert not any(
