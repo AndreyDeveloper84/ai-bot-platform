@@ -189,19 +189,32 @@ const _ROUTE_MAP: Record<string, string> = {
 export function parseStartRoute(payload: string): string | null {
   if (!payload) return null;
   // Try flat-slug direct lookup first (current emit format).
-  const direct = _ROUTE_MAP[payload];
+  //
+  // `Object.hasOwn` rather than a bare `_ROUTE_MAP[payload]`: the object
+  // literal inherits from Object.prototype, so `"constructor"` and
+  // `"toString"` resolve to functions. They are typed `string` here, and
+  // `navigate(aFunction)` is not something React Router has an opinion
+  // about. `start_param` is attacker-influenceable, so the lookup is
+  // restricted to keys the table actually declares.
+  const direct = Object.hasOwn(_ROUTE_MAP, payload) ? _ROUTE_MAP[payload] : undefined;
   if (direct) return direct;
   // Master invitation — the one payload that carries a parameter
-  // (DRF-1349). Checked before the `=` fallback below because a
-  // rejected invite payload must resolve to null, not fall through into
-  // querystring parsing and get read as `route=…`.
-  const invite = _MASTER_INVITE_RE.exec(payload);
-  if (invite) return `${MASTER_ONBOARDING_PATH}?token=${invite[1]}`;
+  // (DRF-1349). Claimed by prefix and resolved by the strict form: a
+  // payload that announces itself as an invitation and then isn't one is
+  // refused outright rather than left to the querystring fallback below,
+  // which would happily read `master_invite_x=1&route=catalog` as
+  // `route=catalog`. Claiming the prefix is what makes the strictness
+  // above mean something — matching order alone would not, since a
+  // failed `exec` simply falls through.
+  if (payload.startsWith(MASTER_INVITE_PAYLOAD_PREFIX)) {
+    const invite = _MASTER_INVITE_RE.exec(payload);
+    return invite ? `${MASTER_ONBOARDING_PATH}?token=${invite[1]}` : null;
+  }
   // Fall back to legacy querystring shape (``route=<value>``).
   if (payload.includes("=")) {
     const params = new URLSearchParams(payload);
     const route = params.get("route");
-    if (route && _ROUTE_MAP[route]) return _ROUTE_MAP[route];
+    if (route && Object.hasOwn(_ROUTE_MAP, route)) return _ROUTE_MAP[route] ?? null;
   }
   return null;
 }

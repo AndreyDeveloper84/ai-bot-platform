@@ -41,6 +41,7 @@ import { Link, Navigate, Route, Routes, useLocation, useNavigate } from "react-r
 
 import { ApiError } from "./lib/api";
 import { getMe, type MeResponse } from "./lib/admin-api";
+import { getStartPayload, parseStartRoute } from "./lib/max-sdk";
 import {
   SurfaceModeContext,
   type SurfaceModeContextValue,
@@ -240,6 +241,41 @@ function adminRouteElements(me: MeResponse): React.ReactNode {
       />
     </>
   );
+}
+
+/**
+ * Jump to the screen the launch payload names, once per boot (DRF-1349).
+ *
+ * MAX carries an `open_app` button's `payload` into `initData` as
+ * `start_param`, and `parseStartRoute` turns it into an in-app path.
+ * This used to live inside `HelloScreen` — which is mounted only in
+ * `CustomerRoutes`. Every other surface has its own catch-all
+ * (`/admin/team`, `/master/dashboard`, `/solo/my-day`), so for anyone
+ * holding a role the payload was read by nobody: MAX opens the Mini App
+ * at `/`, the role cascade picked a route tree, and the tree's catch-all
+ * won before anything looked at the payload.
+ *
+ * That is why it sits here, above the cascade, rather than being
+ * repeated per surface. An owner who invites herself as a master boots
+ * into `AdminRoutes`, and mounting `/onboarding/master` there without
+ * this hook would have been an unreachable route — the same defect one
+ * level up.
+ *
+ * `enabled` gates it on a finished `/me` boot, matching the previous
+ * behaviour of only redirecting after auth resolved. The ref makes it
+ * once-per-session: after the jump the user owns the navigation, and
+ * `start_param` does not change for the life of the webview, so
+ * re-running it would fight every subsequent `navigate`.
+ */
+function useStartParamRedirect(enabled: boolean): void {
+  const navigate = useNavigate();
+  const done = useRef(false);
+  useEffect(() => {
+    if (!enabled || done.current) return;
+    const target = parseStartRoute(getStartPayload());
+    done.current = true;
+    if (target) navigate(target, { replace: true });
+  }, [enabled, navigate]);
 }
 
 /**
@@ -1258,6 +1294,8 @@ export function App() {
   useEffect(() => {
     void loadMe();
   }, [loadMe]);
+
+  useStartParamRedirect(boot.status === "ready");
 
   // Round-1 FOLLOW_UP cleanup (#79): when the resolved role pattern
   // leaves nothing to choose between, drop any stale

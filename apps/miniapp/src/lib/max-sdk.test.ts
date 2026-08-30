@@ -72,5 +72,25 @@ describe("parseStartRoute", () => {
       // did not shadow it.
       expect(parseStartRoute("route=profile")).toBe("/customer/profile");
     });
+
+    it("refuses a malformed invite instead of falling through to route=", () => {
+      // The trap the prefix claim exists for: a payload that announces
+      // itself as an invitation, fails the strict form, and then gets
+      // read as an ordinary querystring. Matching order alone would not
+      // stop this — a failed regex simply falls through.
+      expect(
+        parseStartRoute(`${MASTER_INVITE_PAYLOAD_PREFIX}zz=1&route=catalog`),
+      ).toBeNull();
+    });
+  });
+
+  // `start_param` is attacker-influenceable and `_ROUTE_MAP` is an object
+  // literal, so every inherited key used to resolve: `parseStartRoute`
+  // returned `Object` — a function typed as `string` — straight into
+  // `navigate()`.
+  it("does not resolve inherited Object.prototype keys", () => {
+    expect(parseStartRoute("constructor")).toBeNull();
+    expect(parseStartRoute("toString")).toBeNull();
+    expect(parseStartRoute("route=constructor")).toBeNull();
   });
 });

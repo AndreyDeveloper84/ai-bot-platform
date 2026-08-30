@@ -49,18 +49,23 @@ token is what gets dispatched).
 ### Side effects (all inside one transaction.atomic)
 
 1. ``CatalogMaster`` row created (or reused via idempotency lookup).
-2. ``WorkingHours`` seeded — 5 Mon-Fri rows 10:00-19:00 when
-   ``schedule_preset == "default_mon_fri_10_19"``.
-3. ``MasterService`` rows seeded — one per id in ``services[]``.
-4. Audit row ``master.invited`` written.
-5. Post-commit (``transaction.on_commit``) — MAX bot DM dispatched
-   with an ``open_app`` button carrying the invite token + audit row
-   ``master.invite_dispatched`` written.
+2. ``MasterService`` rows seeded — one per id in ``services[]``.
+3. Audit row ``master.invited`` written.
 
-The on-commit dispatch follows the same pattern as
-:mod:`apps.booking.services.transitions` — a network call inside the
-atomic block would block the row lock for the duration of the request
-and might trigger rollback on a transient MAX 5xx.
+Then, **after the atomic block has committed** (not via
+``transaction.on_commit`` — see below): the MAX bot DM is dispatched
+with an ``open_app`` button carrying the invite token, and audit row
+``master.invite_dispatched`` is written.
+
+Two corrections to what this list used to say, both of which had gone
+stale under it: ``WorkingHours`` seeding was removed by DRF-1062, and
+the dispatch is a plain synchronous call after the block, not an
+``on_commit`` callback — deliberately, so the response can carry the
+authoritative dispatch outcome (the inline comment at the call site
+explains the trade). What is true either way is that the network call
+stays outside the atomic block: inside, it would hold the row lock for
+the length of the request and could roll the master row back on a
+transient MAX 5xx.
 
 ### CatalogMaster.phone — not stored
 
@@ -94,6 +99,7 @@ from apps.admin_api.auth import RoleContext, require_admin_role
 from apps.audit.services import write_audit
 from apps.catalog.provenance import MasterServiceSource, master_service_write
 from apps.catalog.models import CatalogMaster, CatalogService, MasterService
+from apps.channels.bot_context import current_bot
 from apps.channels.max import outbound as max_outbound
 from apps.events.services import emit
 from apps.events.vocabulary import MASTER_INVITE_DISPATCHED, MASTER_INVITED
@@ -265,6 +271,71 @@ def _invite_payload(token: uuid.UUID) -> str:
     """The ``open_app`` payload for one invitation."""
 
     return f"{MASTER_INVITE_PAYLOAD_PREFIX}{token}"
+
+
+def _sender_web_app() -> str:
+    """Mini App name of the bot this DM will actually be sent as.
+
+    Must be resolved the same way ``max_outbound.send_message`` resolves
+    the API token, or the button points at one bot's Mini App while the
+    message arrives from another. So this mirrors ``outbound._token()``
+    rung for rung: the surrounding ``bot_scope`` first, the legacy global
+    second.
+
+    ``admin_api`` enters no ``bot_scope`` today, so in practice this is
+    ``MAX_BOT_WEB_APP`` — the same global whose token
+    (``MAX_BOT_TOKEN``) actually sends the message. Reading the global
+    directly would give the same answer today and the wrong one the day
+    the master DM moves to the salon bot: ``.env.staging.template``
+    already instructs operators to set ``MAX_BOT_SALON_WEB_APP`` per bot
+    rather than the global, so a contour can already be configured where
+    the global is empty and the per-bot value is not.
+    """
+
+    scoped = current_bot()
+    if scoped is not None and scoped.web_app:
+        return scoped.web_app
+    return getattr(settings, "MAX_BOT_WEB_APP", "")
+
+
+def _last_dispatch_delivery(master: CatalogMaster) -> str:
+    """What the *previous* dispatch for ``master`` actually reported.
+
+    The idempotent replay used to answer a hardcoded ``"queued"``. That
+    was a white lie while every dispatch attempted a send; it stopped
+    being one when a dispatch became able to fail without sending at all
+    (``no_entry_configured``). The failure mode it would create is the
+    one this module is being fixed for: the operator sets the missing
+    variable, the owner taps «Пригласить» again, the idempotency probe
+    matches the still-PENDING row, and the reply says ``queued`` about a
+    message that was never sent and is not being sent now. The only exit
+    would be waiting out the 7-day TTL.
+
+    So the replay reports the stored outcome instead of inventing one.
+    ``master.invite_dispatched`` is written on every dispatch, successful
+    or not, and is the only durable record of what happened — the
+    response of the original call is long gone.
+
+    Falls back to ``"queued"`` when no audit row is found, which keeps
+    the historical answer for rows created before the audit existed
+    rather than inventing a failure.
+    """
+
+    from apps.audit.models import AuditLog
+
+    row = (
+        AuditLog.all_tenants.filter(
+            tenant_id=master.tenant_id,
+            target_id=master.id,
+            action=MASTER_INVITE_DISPATCHED,
+        )
+        .order_by("-created_at")
+        .values_list("payload", flat=True)
+        .first()
+    )
+    if isinstance(row, dict) and isinstance(row.get("delivery"), str):
+        return row["delivery"]
+    return "queued"
 
 
 def _validate_body(body: dict[str, Any]) -> tuple[dict[str, Any], JsonResponse | None]:
@@ -489,51 +560,24 @@ def _dispatch_max_dm(
 
     # max_username — strip leading @ for the MAX REST chat_id param.
     chat_id = contact_value.lstrip("@")
-    web_app = getattr(settings, "MAX_BOT_WEB_APP", "")
+    web_app = _sender_web_app()
     web_url = _fallback_link(token)
 
-    parts = [
-        f"Здравствуйте, {master_name}!\n\n",
-        f"Салон «{salon_name}» приглашает вас как мастера.\n\n",
-    ]
-    attachments: list[dict[str, Any]] | None = None
-
-    if web_app:
-        # The only entry that works. A MAX Mini App opens from a button
-        # ON the message; an address in the text cannot open it at all.
-        attachments = [
-            max_outbound.make_inline_keyboard_attachment(
-                [
-                    {
-                        "label": "Принять приглашение",
-                        "callback": _invite_payload(token),
-                        "web_app": web_app,
-                    }
-                ]
-            )
-        ]
-        parts.append("Нажмите кнопку ниже — анкета откроется прямо здесь, в MAX.\n\n")
-    elif web_url:
-        # Degraded branch — no Mini App name configured, so no button can
-        # be built. The address is all that is left, and it is offered
-        # without any promise: opened outside MAX it cannot work, because
-        # the Mini App is entered through `initData` that MAX hands only
-        # to its own webview, and `validate_invite_token` resolves the
-        # token through the tenant of the session's BotUser.
-        parts.append(f"Откройте ссылку, не выходя из MAX:\n{web_url}\n\n")
-        logger.error(
-            "admin_api.invite.web_app_unset — invite sent without an open_app "
-            "button: MAX_BOT_WEB_APP is empty, so the DM carries only a web "
-            "address, and an address opened outside MAX gets no initData. "
-            "Set MAX_BOT_WEB_APP to the bot's Mini App name."
-        )
-    else:
+    if not web_app and not web_url:
         # Neither a button nor an address: whatever we send, the invited
         # master has no way to act on it. Sending it anyway and reporting
         # `queued` is the failure mode this whole change exists to remove
-        # — silence indistinguishable from success. Report the failure
-        # instead, so the admin screen says «не удалось» rather than
-        # «получит сообщение в течение минуты».
+        # — silence indistinguishable from success.
+        #
+        # NOTE — the owner does NOT see this yet. The admin screen renders
+        # its failure callout only when `max_dm_delivery == "failed"` AND
+        # `fallback_link` is non-empty (AdminInviteMasterScreen.tsx), and
+        # here `fallback_link` is empty by construction: this branch runs
+        # precisely because `_fallback_link` returned "". So today the
+        # honest outcome reaches the audit row and this log line, not the
+        # screen. Un-gating that callout belongs to the screen's own PR —
+        # #1330 is editing exactly those lines — so it is filed rather
+        # than fixed here, instead of two branches rewriting one block.
         logger.error(
             "admin_api.invite.no_entry_configured — invite NOT sent: neither "
             "MAX_BOT_WEB_APP (open_app button) nor a usable SITE_DOMAIN (web "
@@ -543,10 +587,66 @@ def _dispatch_max_dm(
         )
         return {"delivery": "failed", "error": "no_entry_configured"}
 
-    parts.append("Приглашение действительно 7 дней.")
-    text = "".join(parts)
+    parts = [
+        f"Здравствуйте, {master_name}!\n\n",
+        f"Салон «{salon_name}» приглашает вас как мастера.\n\n",
+    ]
+    attachments: list[dict[str, Any]] | None = None
 
     try:
+        if web_app:
+            # The only entry that works. A MAX Mini App opens from a
+            # button ON the message; an address in the text cannot open
+            # it at all.
+            #
+            # Built inside the try on purpose.
+            # `make_inline_keyboard_attachment` raises `ValueError` for a
+            # payload MAX would reject (Guard 3 — `=`, `&`, `?`). A UUID
+            # cannot trip it today, but this runs AFTER the atomic block
+            # committed the master row, so an escape here would answer
+            # 500 with a PENDING invite already in the roster and no
+            # `master.invite_dispatched` row to say what happened — which
+            # then feeds the idempotency probe a token nobody will ever
+            # dispatch. One `?src=…` appended to the payload is all it
+            # would take.
+            attachments = [
+                max_outbound.make_inline_keyboard_attachment(
+                    [
+                        {
+                            "label": "Принять приглашение",
+                            "callback": _invite_payload(token),
+                            "web_app": web_app,
+                        }
+                    ]
+                )
+            ]
+            parts.append("Нажмите кнопку ниже — анкета откроется прямо здесь, в MAX.\n\n")
+        else:
+            # Degraded branch — no Mini App name for the sending bot, so
+            # no button can be built. The address is all that is left,
+            # and it is offered without any promise: opened outside MAX
+            # it cannot work, because the Mini App is entered through
+            # `initData` that MAX hands only to its own webview, and
+            # `validate_invite_token` resolves the token through the
+            # tenant of the session's BotUser.
+            parts.append(f"Откройте ссылку, не выходя из MAX:\n{web_url}\n\n")
+            if not settings.DEBUG:
+                # In DEBUG this branch IS the expected local setup — the
+                # Vite URL is the right answer and there is no Mini App
+                # name to have. An ERROR on every dev invite would train
+                # the reader to skip the line on the one contour where it
+                # means something.
+                logger.error(
+                    "admin_api.invite.web_app_unset — invite sent without an "
+                    "open_app button: no Mini App name for the sending bot "
+                    "(the bot registry entry's `web_app`, else the global "
+                    "MAX_BOT_WEB_APP), so the DM carries only a web address, "
+                    "and an address opened outside MAX gets no initData."
+                )
+
+        parts.append("Приглашение действительно 7 дней.")
+        text = "".join(parts)
+
         max_outbound.send_message(chat_id=chat_id, text=text, attachments=attachments)
     except max_outbound.MaxAPIError as exc:
         logger.warning(
@@ -666,7 +766,9 @@ def master_invite_create(request: HttpRequest) -> HttpResponse:
     if mode == "invite":
         existing = _idempotency_lookup(tenant_id=tenant.id, name=name, contact_value=contact_value)
         if existing is not None:
-            payload = _response_payload(existing, dispatch_delivery="queued")
+            payload = _response_payload(
+                existing, dispatch_delivery=_last_dispatch_delivery(existing)
+            )
             response = JsonResponse(payload, status=200)
             response["X-Idempotent"] = "true"
             return response

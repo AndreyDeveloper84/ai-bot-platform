@@ -92,9 +92,12 @@ def check_bot_web_app(app_configs: Any, **kwargs: Any) -> list[CheckWarning]:
     why this is a deploy-time check and not a runtime log line alone.
     """
 
-    from django.conf import settings
+    from apps.admin_api.views_invite import _sender_web_app
 
-    if getattr(settings, "MAX_BOT_WEB_APP", ""):
+    # Resolved exactly as the dispatch resolves it, so the check and the
+    # runtime cannot disagree. At check time there is no ``bot_scope``,
+    # which is also true of the invite endpoint — both land on the global.
+    if _sender_web_app():
         return []
     return [
         CheckWarning(
