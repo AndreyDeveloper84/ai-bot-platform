@@ -186,7 +186,7 @@ jobs:
         env:
           POSTGRES_DB: ai_bot_platform
           POSTGRES_USER: platform
-          POSTGRES_PASSWORD: platform
+          POSTGRES_PASSWORD: platform  # pragma: allowlist secret
         ports:
           - 5432:5432
         options: >-
@@ -204,18 +204,42 @@ jobs:
           --health-timeout 3s
           --health-retries 10
 
+    # ### Why the `# pragma: allowlist secret` markers below
+    #
+    # `detect-secrets` flags three lines in this file: the throwaway password
+    # of the Postgres service container defined twenty lines up, and two
+    # values that say what they are in their own text —
+    # `ci-test-secret-do-not-use-in-prod` and `ci-fake-key-not-real`. None is
+    # a credential; all three predate the golden gate and are unchanged by it.
+    #
+    # They used to be covered by `.secrets.baseline`, which pins findings by
+    # LINE NUMBER. That made the secret guard fail every time this file grew a
+    # comment: the golden-gate work added a header block, the three lines slid
+    # down seven rows, the baseline stopped matching, and CI went red on a
+    # diff that touched none of them. Re-pinning the numbers fixes it until
+    # the next rebase and no longer.
+    #
+    # An inline marker is pinned to the line's CONTENT, so it survives any
+    # shift. It is also the smaller change: re-pinning meant editing
+    # `.secrets.baseline`, and rebuilding that file — the obvious way to do it
+    # — takes the repo from 12 recorded findings to 23, including a
+    # self-referential block for `.secrets.baseline` itself. Measured, not
+    # assumed. The precedent is already in the tree (`apps/booking/tests/*`).
+    #
+    # A marker is a claim that a specific string is not a secret. Do not add
+    # one to a line whose value you have not read.
     env:
       DJANGO_SETTINGS_MODULE: config.settings.local
-      DJANGO_SECRET_KEY: ci-test-secret-do-not-use-in-prod
+      DJANGO_SECRET_KEY: ci-test-secret-do-not-use-in-prod  # pragma: allowlist secret
       DJANGO_DEBUG: "False"
       DJANGO_ALLOWED_HOSTS: localhost,127.0.0.1
       POSTGRES_HOST: localhost
       POSTGRES_PORT: "5432"
       POSTGRES_DB: ai_bot_platform
       POSTGRES_USER: platform
-      POSTGRES_PASSWORD: platform
+      POSTGRES_PASSWORD: platform  # pragma: allowlist secret
       REDIS_URL: redis://localhost:6379/0
-      OPENAI_API_KEY: ci-fake-key-not-real
+      OPENAI_API_KEY: ci-fake-key-not-real  # pragma: allowlist secret
       # DRF-1373 — «CI has no model» enforced by the runner, not by a mock.
       # See the header block. A dead local port means an LLM call that a test
       # forgot to stub fails immediately and deterministically instead of
