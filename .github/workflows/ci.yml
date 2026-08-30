@@ -398,6 +398,19 @@ jobs:
       - name: Personal-field owner guard (AST lint)
         run: uv run python tools/lint/personal_field_guard.py apps/
 
+      # Unguarded-absence guard (DRF-1411). DRF-1406: a PII sweep asserted
+      # `find_forbidden_pii(resp.json()) == []` over a route that had
+      # quietly started returning an empty body. The assertion went on
+      # passing and checked nothing, and never went red. This lint fails
+      # when a test asserts an absence inside content it never proved had
+      # anything in it. `assert resp.status_code == 200` does not count —
+      # an empty body is a perfectly good 200, and that mistaken guard IS
+      # the defect. Today's sites are pinned in the baseline and can only
+      # shrink. See the script docstring for what it deliberately does
+      # NOT detect: a green run is «nothing new», not «nothing wrong».
+      - name: Unguarded-absence assertion guard (AST lint)
+        run: uv run python tools/lint/negative_assert_guard.py apps/ tests/
+
       - name: Django manage.py check
         run: uv run python manage.py check
 
