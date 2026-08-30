@@ -63,6 +63,7 @@ from pathlib import Path
 import pytest
 
 from apps.channels.max import handler as max_handler
+from apps.channels.max import outbound as max_outbound
 from apps.orchestrator.memory import short_term
 from apps.replay.assertions import evaluate, evaluate_voice
 from apps.replay.fixtures.loader import load_fixture_set
@@ -191,6 +192,20 @@ def golden_run(monkeypatch, fake_redis, golden_tenant, settings):
             return {"ok": True}
 
         monkeypatch.setattr(max_handler, "send_message", fake_send)
+        # The typing indicator is delivery chrome, not the system under
+        # test, and it is a real outbound HTTPS call to botapi.max.ru made
+        # twice per turn before anything else happens. `send_message` was
+        # already faked for exactly this reason; `send_chat_action` was not,
+        # because it is imported inside the handler function and is easy to
+        # miss.
+        #
+        # It stayed invisible until the network tripwire reported it: on a
+        # runner where `MAX_BOT_TOKEN` resolves to something non-empty, every
+        # single golden turn opened a connection to the MAX API — which
+        # `replay.yml` promises in its header cannot happen — and every
+        # fixture was consequently classified «needed the outside world» and
+        # asserted by nobody. A green gate covering zero fixtures.
+        monkeypatch.setattr(max_outbound, "send_chat_action", _no_chat_action)
 
         probe = SkillNameProbe()
         registry_logger = logging.getLogger("apps.skills.registry")
@@ -250,6 +265,12 @@ def golden_run(monkeypatch, fake_redis, golden_tenant, settings):
         )
 
     return _run
+
+
+def _no_chat_action(*args, **kwargs) -> None:
+    """Swallow the MAX read/typing indicator. See where it is installed."""
+
+    return None
 
 
 def _fixture_ids(fixtures):
@@ -312,6 +333,38 @@ class TestNoFixtureAssertsOnSomethingNobodyComputes:
         assert not offenders, (
             "golden fixtures asserting on `intent`, which the per-tenant path "
             f"never computes: {offenders}. Assert on `skill_used` instead."
+        )
+
+
+class TestTheChannelIsNeverReallyCalled:
+    """The delivery transport must be faked, and this says so by name.
+
+    `test_coverage_is_reported` already catches this — it did, on the first
+    CI run of this file — but it catches it as «no golden fixture was
+    asserted in full», which reads like the classifier broke rather than
+    like «every turn made two HTTPS requests to botapi.max.ru». A guard is
+    worth more when its message names the defect.
+
+    The defect it names: `_handle_max_event_inner` opens every turn with two
+    `send_chat_action` calls (read receipt, typing indicator). They are real
+    outbound requests whenever a bot token resolves, they are imported
+    inside the handler function where a fixture is easy to forget, and
+    `replay.yml` promises in its header that this job reaches no vendor.
+    """
+
+    #: Substrings of hosts that mean the channel transport was really called.
+    CHANNEL_HOSTS = ("max.ru",)
+
+    def test_no_turn_reaches_the_max_api(self, golden_run):
+        offenders = []
+        for fixture in ALL_FIXTURES:
+            result = golden_run(fixture)
+            for attempt in result.network_attempts:
+                if any(host in attempt for host in self.CHANNEL_HOSTS):
+                    offenders.append(f"{fixture.name} -> {attempt}")
+        assert not offenders, (
+            "the golden gate called the MAX API for real; some outbound "
+            f"channel function is not faked: {offenders[:5]}"
         )
 
 

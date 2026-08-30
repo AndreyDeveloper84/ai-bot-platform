@@ -41,6 +41,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from apps.channels.max import handler as max_handler
+from apps.channels.max import outbound as max_outbound
 from apps.orchestrator.discovery import DiscoveryReply
 from apps.orchestrator.memory import short_term
 from apps.replay.assertions import evaluate, evaluate_voice
@@ -98,6 +99,15 @@ def live_run(monkeypatch, fake_redis):
             return {"ok": True}
 
         monkeypatch.setattr(max_handler, "send_message", fake_send)
+        # Same omission as the golden gate had, same fix. The handler opens
+        # the turn with two `send_chat_action` calls — read receipt and
+        # typing indicator — and they are real HTTPS requests to
+        # botapi.max.ru whenever a bot token resolves. `send_message` was
+        # faked here from the start; this one was imported inside the
+        # handler function and went unnoticed until a socket-level tripwire
+        # in the sibling gate reported it. The header of `replay.yml`
+        # promises this job reaches no vendor.
+        monkeypatch.setattr(max_outbound, "send_chat_action", lambda *a, **kw: None)
 
         canary = canary_reply_for(fixture)
         concierge = MagicMock(return_value=DiscoveryReply(text=canary, persisted=True))

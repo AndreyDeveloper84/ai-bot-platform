@@ -47,6 +47,7 @@ reach an LLM at all.
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -91,9 +92,14 @@ def build_max_payload(fixture: Fixture, *, user_id: int, mid: str) -> dict[str, 
     prompt.
     """
 
+    # Milliseconds from the clock, not a number written down. Nothing
+    # compares this field today, and the cost of not depending on that
+    # staying true is one function call — a fixture timestamp frozen at a
+    # point in the past is the shape that has already held `dev` red for
+    # four days once. Same change as the golden gate's sibling helper.
     return {
         "update_type": "message_created",
-        "timestamp": 1_731_320_000_000,
+        "timestamp": int(time.time() * 1000),
         "message": {
             "sender": {"user_id": user_id, "name": "Replay"},
             "recipient": {"chat_id": user_id, "chat_type": "dialog"},

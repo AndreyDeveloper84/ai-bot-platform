@@ -308,11 +308,11 @@ def build_max_payload(
     """
 
     # Milliseconds since the epoch, taken from the clock rather than
-    # written down. The sibling helper in `live_path.py` carries a literal
-    # 1_731_320_000_000, and a fixture timestamp that is a fixed point in
-    # the past is the shape that has already turned `dev` red for four days
-    # once. Nothing here compares it today; the cost of not depending on
-    # that staying true is one function call.
+    # written down. A fixture timestamp frozen at a point in the past is
+    # the shape that has already held `dev` red for four days once.
+    # Nothing compares this field today; the cost of not depending on that
+    # staying true is one function call. The sibling helper in
+    # `live_path.py` carried the literal and was changed with it.
     now_ms = int(time.time() * 1000)
 
     attachments = (
