@@ -95,8 +95,11 @@ export function getStartPayload(): string {
  * Two key formats accepted:
  *
  * * **Flat slug** (``open_catalog``, ``open_visits``, ``open_profile``)
- *   — current emit path. MAX requires open_app button payload to match
- *   a restricted regex (no ``=``, no ``&``); the flat-slug shape passes.
+ *   — current emit path. MAX validates an open_app button payload
+ *   against ``^[A-Za-z0-9_-]{0,512}$`` (measured against the live API
+ *   2026-08-30 — see ``OPEN_APP_PAYLOAD_RE`` in
+ *   ``apps/channels/max/outbound.py``), so the flat-slug shape passes
+ *   and anything with ``=``, ``&``, ``?``, ``.`` or ``:`` in it does not.
  * * **Legacy querystring inner-value** (``catalog``, ``visits``,
  *   ``profile``) — accepted via the ``route=<value>`` fallback below,
  *   kept for cold-start back-compat with stale message bodies in users'

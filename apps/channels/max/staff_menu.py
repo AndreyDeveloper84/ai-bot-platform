@@ -37,11 +37,16 @@ Mini App address per bot a global would send staff to the customer app.
 When neither is configured the button is omitted entirely — a dead button
 is worse than a missing one.
 
-No deeplink payload is attached on purpose: the Mini App already routes by
-resolved role (admin → /admin/team, master → /master/dashboard), and the
-frontend's ``_ROUTE_MAP`` knows only customer slugs today. Sending an
-unknown slug would land the person on the default anyway, so the payload
-would add a moving part for nothing.
+The payload carries no route: the Mini App already routes by resolved role
+(admin → /admin/team, master → /master/dashboard), and the frontend's
+``_ROUTE_MAP`` knows only customer slugs today. Sending an unknown slug
+would land the person on the default anyway.
+
+It is also written in a DIFFERENT grammar from the callback buttons above,
+and that is not a slip. MAX validates an ``open_app`` payload against
+``^[A-Za-z0-9_-]{0,512}$`` — no colons — while ``cb:{domain}:{action}``
+depends on them. See :data:`OPEN_APP_PAYLOAD` for how that was measured
+and what it cost to learn.
 """
 
 from __future__ import annotations
@@ -52,16 +57,35 @@ from typing import Any
 # apps/orchestrator/ui/keyboards.py.
 CB_DAY = "cb:staff:day"
 CB_REQUESTS = "cb:staff:requests"
-CB_OPEN_APP = "cb:staff:open_app"
 
 #: Approving one request. The request id rides in the 4th segment;
 #: `parse_callback` splits on the first three colons only, so a UUID
 #: survives intact.
 CB_APPROVE_PREFIX = "cb:staff:req_ok:"
 
-#: Flat slug for the open_app payload. MAX rejects `=`, `&` and `?` there
-#: (HTTP 400 proto.payload); colons are legal and already used elsewhere.
-OPEN_APP_PAYLOAD = "cb:staff:open_app"
+#: Payload of the Mini App button — and the one identifier in this module
+#: that CANNOT use the ``cb:staff:*`` grammar above.
+#:
+#: MAX accepts ``^[A-Za-z0-9_-]{0,512}$`` in an ``open_app`` payload and
+#: nothing else. That is measured, not assumed: ``https://botapi.max.ru``
+#: was asked directly on 2026-08-30 — see ``OPEN_APP_PAYLOAD_RE`` in
+#: ``apps/channels/max/outbound.py`` for the method and the full character
+#: sweep — and the colon came back rejected.
+#:
+#: The line this replaces said the opposite — «colons are legal and
+#: already used elsewhere» — and it was believed. On 2026-08-30
+#: ``MAX_BOT_SALON_WEB_APP`` was set on the pilot for the first time, this
+#: module started building the button, and MAX answered
+#: ``400 proto.payload`` to every staff reply. The keyboard is not sent
+#: separately from the text — it rides on the same ``send_message`` — so
+#: the 400 took the whole answer down with it, not just the button, and
+#: the salon bot went silent for its masters until the setting was pulled.
+#:
+#: The defect had been dormant since the module was written, invisible to
+#: tests and to the pilot alike, because every contour had ``web_app``
+#: empty — it woke up at the exact moment someone tried to switch the Mini
+#: App entry ON.
+OPEN_APP_PAYLOAD = "staff_open_app"
 
 
 def _miniapp_button(entry, label: str) -> dict[str, str] | None:

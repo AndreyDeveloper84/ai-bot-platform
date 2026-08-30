@@ -31,6 +31,7 @@ retains the entry for retry).
 from __future__ import annotations
 
 import logging
+import re
 from typing import TYPE_CHECKING, Any
 
 from django.conf import settings
@@ -549,6 +550,39 @@ def make_inline_keyboard_attachment_rows(
     }
 
 
+#: What MAX accepts in an ``open_app`` button ``payload``.
+#:
+#: Measured, not assumed. ``https://botapi.max.ru`` was asked directly on
+#: 2026-08-30 with a live bot token, because MAX validates this field
+#: BEFORE it resolves ``web_app`` or the chat — so a probe answers the
+#: question without delivering anything to anyone. A rejected payload
+#: gets HTTP 400 ``proto.payload``; an accepted one falls through to a
+#: later 404 about the ``web_app`` link. Sweeping ``a<c>b`` over every
+#: printable ASCII character, then binary-searching the length, gives:
+#:
+#:   * accepted — ``A-Z``, ``a-z``, ``0-9``, ``_``, ``-``, the empty
+#:     string, up to 512 characters;
+#:   * rejected — every other ASCII punctuation mark **including ``:``
+#:     and ``.``**, the space, Cyrillic, and 513 characters or more.
+#:
+#: The colon matters because until 2026-08-30 this file claimed only
+#: ``=``, ``&`` and ``?`` were forbidden and
+#: ``apps/channels/max/staff_menu.py`` stated outright that «colons are
+#: legal and already used elsewhere». Setting ``MAX_BOT_SALON_WEB_APP``
+#: on the pilot put ``cb:staff:open_app`` on the wire and MAX answered
+#: 400. The keyboard is not sent separately from the text — both ride one
+#: ``send_message`` — so :class:`MaxAPIError` propagated out of the salon
+#: handler and the bot stopped answering staff at all, rather than merely
+#: losing a button.
+#:
+#: Note the asymmetry with ``callback`` buttons, whose payload MAX does
+#: not constrain this way: the platform-wide ``cb:{domain}:{action}``
+#: grammar (:mod:`apps.orchestrator.ui.keyboards`) is therefore usable
+#: for a callback button and NOT usable for an ``open_app`` one.
+OPEN_APP_PAYLOAD_MAX_CHARS = 512
+OPEN_APP_PAYLOAD_RE = re.compile(rf"[A-Za-z0-9_-]{{0,{OPEN_APP_PAYLOAD_MAX_CHARS}}}")
+
+
 def _button_to_max(btn: dict[str, Any]) -> dict[str, Any]:
     """Convert one channel-agnostic button dict to MAX's wire format.
 
@@ -568,6 +602,10 @@ def _button_to_max(btn: dict[str, Any]) -> dict[str, Any]:
     keys: ``url`` selects link, ``web_app``/``contact_id`` selects open_app,
     ``request_contact=True`` selects request_contact. Defaults to callback
     when none are present.
+
+    For ``open_app`` the ``callback`` value becomes MAX's ``payload`` and
+    must match :data:`OPEN_APP_PAYLOAD_RE`; anything else raises
+    ``ValueError`` here rather than HTTP 400 at send time.
     """
     text = btn.get("label") or ""
     if btn.get("url"):
@@ -592,18 +630,19 @@ def _button_to_max(btn: dict[str, Any]) -> dict[str, Any]:
             # the Mini App's initData. Reuse the `callback` field so
             # producers don't have to learn two key names.
             #
-            # MAX-hardening Guard 3 (memory `max_open_app_payload_format`):
-            # MAX requires the payload к be a flat slug — NO `=`, NO
-            # `&` (querystring shape gets HTTP 400 proto.payload + poisons
-            # the consumer PEL). Validate at producer boundary so a bad
-            # caller can't poison the channel.
+            # MAX-hardening Guard 3 — validate at the producer boundary,
+            # because the alternative is what happened on 2026-08-30: the
+            # 400 surfaces inside the handler that built the keyboard, so
+            # the whole reply is lost, not just the button.
             payload_str = str(btn["callback"])
-            if "=" in payload_str or "&" in payload_str or "?" in payload_str:
+            if not OPEN_APP_PAYLOAD_RE.fullmatch(payload_str):
                 raise ValueError(
-                    "MAX open_app payload must be a flat slug — no `=`, `&`, "
-                    f"or `?`; got {payload_str!r}. Per memory "
-                    "`max_open_app_payload_format`: querystring shape gets "
-                    "HTTP 400 + poisons consumer PEL."
+                    "MAX open_app payload must be a flat slug matching "
+                    f"{OPEN_APP_PAYLOAD_RE.pattern} — letters, digits, `_` "
+                    f"and `-` only, at most {OPEN_APP_PAYLOAD_MAX_CHARS} "
+                    f"characters; got {payload_str!r}. MAX answers HTTP 400 "
+                    "`proto.payload` to anything else, which poisons the "
+                    "consumer PEL and drops the entire message."
                 )
             out["payload"] = payload_str
         return out
