@@ -166,7 +166,8 @@ Response on success (HTTP 201):
   "invite_token": "<uuid>",
   "invite_expires_at": "2026-05-27T17:00:00+00:00",
   "max_dm_delivery": "queued",
-  "fallback_link": "http://localhost:5173/onboarding/master?token=<token>"
+  "fallback_link": "http://localhost:5173/onboarding/master?token=<token>",
+  "invite_link": "https://max.ru/<salon_bot>?start=master_invite_<token>"
 }
 ```
 
@@ -180,6 +181,52 @@ Side effects (all rolled back atomically on any failure):
 - After commit: MAX bot DM dispatched to `contact_value` carrying the
   deeplink + the `fallback_link` web URL. `master.invite_dispatched`
   audit row reflects the outcome (`queued` / `failed` / `skipped`).
+
+### The three links, and which one you can actually send (DRF-1424)
+
+They are not interchangeable, and two of the three fail in ways that
+look like nothing happened:
+
+| Field | Where it works | Where it does not |
+|---|---|---|
+| `invite_link` | anywhere — chat, SMS, another messenger, read aloud | — |
+| `fallback_link` | inside MAX's own webview | a browser: no `initData`, «MAX не передал данные для входа» |
+| the DM's button | the chat it was sent to | requires a known `max_username` and an existing chat |
+
+**`invite_link` is the one to hand over.** Opening it starts the salon
+bot, which receives `bot_started` with `payload=master_invite_<token>`
+(MAX delivers `?start=` there — confirmed on the pilot 30.08 in
+`ingress:max_salon`) and replies into the chat that now exists with the
+same «Принять приглашение» button. That is what makes the delivery
+guaranteed rather than dependent on already knowing the person's handle.
+
+It names the **salon** bot on purpose: only `ingress:max_salon` reaches
+the handler that reads invitations
+(`apps/channels/max/salon_handler.py`). A link to the client bot would
+deliver the token to the conversational pipeline, which drops it.
+
+`invite_link` is `""` when the tenant has no salon bot in the registry,
+or that bot has no `web_app` (`MAX_BOT_<SLUG>_WEB_APP`) — in which case
+the bot could not build the button on arrival either, so an empty field
+is the honest answer rather than a link leading to an apology. The
+`admin_api.invite.no_start_link` WARNING names what to set.
+
+> **Pilot prerequisite, as of 30.08.** `MAX_BOT_SALON_WEB_APP` is
+> commented out in `.env.staging`. It was set that morning and rolled
+> back the same day: with a `web_app` present, the staff menu starts
+> building its own `open_app` button whose payload is
+> `cb:staff:open_app`, and MAX rejects a payload containing `:` with
+> HTTP 400 `proto.payload` — every menu reply failed. Guard 3 in
+> `apps/channels/max/outbound.py` screens `=`, `&` and `?` but not `:`,
+> and the comment at `staff_menu.py:64` asserting that colons are legal
+> is wrong. Until that is fixed, uncommenting the variable trades a dark
+> invite link for a broken staff menu; `invite_link` therefore returns
+> `""` on the pilot today and the invitation goes out by DM only.
+
+Opening the link never spends the invitation: the bot validates and
+delivers, and the token is consumed only by `/onboarding/accept` inside
+a verified Mini App session. So a forwarded link cannot burn an
+invitation the rightful master has not accepted yet.
 
 Idempotency: a second call within 7 days with the same
 `(tenant, name, contact_value)` and `invite_status=pending` returns the
@@ -249,7 +296,25 @@ Steps:
 
 2. **Open the invitation from MAX** — tap «Принять приглашение» on the
    bot DM; MAX passes the payload as `start_param` and the Mini App opens
-   at `/onboarding/master?token=…`. Verify each step:
+   at `/onboarding/master?token=…`.
+
+   Or, when there is no DM to tap (no known `max_username`, or you are
+   testing the handover route): open the `invite_link` from the create
+   response, `https://max.ru/<salon_bot>?start=master_invite_<token>`.
+   The bot starts, receives `bot_started` with the token in `payload`,
+   and answers with the same button. Then verify each step below
+   identically — from here on the two routes are the same flow.
+
+   Checking what actually arrived, when a start link seems to do
+   nothing — read the stream, not `docker compose logs`, which is lost
+   whenever the containers are recreated:
+
+   ```
+   docker compose -p ayla-bot-staging exec -T redis \
+     redis-cli XREVRANGE ingress:max_salon + - COUNT 5
+   ```
+
+   Verify each step:
 
    | Step | Expected screen | Spec line |
    |------|-----------------|-----------|

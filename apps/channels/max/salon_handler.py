@@ -16,6 +16,9 @@ cannot reach — they are talking to a different bot with a different token.
 
     someone writes to the salon bot
         ↓
+    is this the opening of a master-invitation link?
+        yes → the invitation, whatever role they hold
+        no  ↓
     do they already hold a role?
         yes → menu for that role
         no  → does the message look like an invite code?
@@ -27,6 +30,17 @@ cannot reach — they are talking to a different bot with a different token.
 No FSM, no "awaiting code" state. There is nothing to get stuck in, and a
 person who reopens the bot a week later is in exactly the same position as
 one who never left.
+
+### Why the invitation is read above the role cascade (DRF-1424)
+
+The person opening a master invitation may already be somebody here —
+most obviously the owner, inviting himself as a master. Below the
+cascade he would be handed the staff menu and the invitation would
+vanish without an error. #1332 found exactly that shape one layer up:
+`/onboarding/master` was mounted under the master surface, the role
+cascade routed the owner elsewhere first, and the invitation
+disappeared silently. Reading the payload first is the same fix applied
+to the same chain.
 
 ### What IS recorded (DRF-1061 step 0)
 
@@ -43,6 +57,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import re
 import uuid
 
 from apps.channels.bot_context import bot_scope
@@ -74,6 +89,19 @@ logger = logging.getLogger(__name__)
 #: Deep-link payload prefix: `max://bot/<bot>?start=inv_AYLA7K3M`. The
 #: parser folds that into the synthetic text «/start inv_AYLA7K3M».
 DEEPLINK_PREFIX = "inv_"
+
+#: Canonical UUID, anchored — the only tail a master invitation can have.
+#:
+#: The Mini App applies the identical rule to the same slug
+#: (``_MASTER_INVITE_RE`` in ``apps/miniapp/src/lib/max-sdk.ts``), and for
+#: the same reason: a start link is public, so whatever a stranger can
+#: type after ``?start=`` arrives here. `master_invite_<uuid>?src=x` must
+#: be refused as a token rather than echoed into an ``open_app`` button,
+#: which MAX answers with HTTP 400 `proto.payload` — an error that lands
+#: on the consumer, not on whoever crafted the link.
+_INVITE_TOKEN_RE = re.compile(
+    r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+)
 
 #: The stream this handler is registered on. Used to pick OUR registry
 #: entry: a tenant may legitimately have more than one bot (a per-tenant
@@ -109,6 +137,54 @@ MASTER_GONE = (
 OWNER_TAKEN = (
     "У салона уже есть владелец. Если владельца нужно сменить — "
     "это делается через поддержку, а не новым кодом."
+)
+
+# --- master invitation, opened by a start link (DRF-1424) -----------------
+#
+# Why these three refusals say what is wrong, while CODE_NOT_ACCEPTED above
+# deliberately does not:
+#
+# A staff code is four characters and guessable, so telling someone which
+# guess was close is a real leak — hence the hedge. An invite token is a
+# UUIDv4: 122 bits, unguessable, and anyone reading one of these sentences
+# is holding a link that was handed to them. Vagueness buys nothing there
+# and costs the invited master the only thing they need to know — whether
+# to ask for a new link or to stop trying.
+#
+# The one thing still deliberately collapsed is «not for this salon» into
+# «not found»: distinguishing them would turn the bot into an oracle for
+# whether a token is live somewhere else. That is the same collapse
+# `validate_invite_token` already makes.
+
+INVITE_WELCOME = (
+    "Салон «{salon}» приглашает вас как мастера.\n\n"
+    "Нажмите кнопку ниже — анкета откроется прямо здесь, в MAX.\n\n"
+    "Приглашение действительно 7 дней."
+)
+
+INVITE_BUTTON_LABEL = "Принять приглашение"
+
+INVITE_NOT_FOUND = (
+    "Это приглашение не найдено. Возможно, ссылка скопирована не целиком "
+    "или относится к другому салону — попросите администратора прислать её заново."
+)
+
+INVITE_EXPIRED = "Срок действия приглашения истёк. Попросите администратора салона выдать новое."
+
+INVITE_ALREADY_USED = (
+    "Это приглашение уже принято. Если мастер — вы, откройте кабинет из меню бота; "
+    "если нет — попросите администратора выдать новое."
+)
+
+#: No Mini App name for this bot, so no button can be built. Same class of
+#: failure as `no_entry_configured` in `views_invite._dispatch_max_dm`, and
+#: answered the same way: say so rather than send a message that looks like
+#: an invitation and does nothing. An https address is NOT offered as a
+#: consolation — outside MAX it gets no `initData` and cannot work, and
+#: #1332 removed exactly that promise after the owner followed it.
+INVITE_NO_ENTRY = (
+    "Приглашение получено, но бот пока не настроен на открытие анкеты. "
+    "Сообщите администратору салона."
 )
 
 ROLE_GREETING = {
@@ -202,6 +278,161 @@ def _extract_code(text: str) -> str | None:
     return cleaned if looks_like_code(cleaned) else None
 
 
+def _invite_prefix() -> str:
+    """The master-invitation slug, from the one place that declares it.
+
+    Imported lazily, and that is not a style choice: ``views_invite``
+    imports ``apps.channels.max.outbound``, so a module-scope import here
+    would close the cycle. Every other cross-app reference in this file
+    is lazy for related reasons.
+
+    Not restated as a literal either. #1332 made this constant a contract
+    between the bot and the Mini App's TypeScript, pinned by
+    ``apps/admin_api/tests/test_invite_entry.py``; a copy here would be a
+    third spelling free to drift out from under both.
+    """
+
+    from apps.admin_api.views_invite import MASTER_INVITE_PAYLOAD_PREFIX
+
+    return MASTER_INVITE_PAYLOAD_PREFIX
+
+
+def _extract_invite_token(text: str) -> str | None:
+    """The master-invite token in a start-link opening, if there is one.
+
+    MAX delivers ``?start=<payload>`` as the ``payload`` field of the
+    ``bot_started`` event (verified on the pilot 30.08, stream
+    ``ingress:max_salon``), and the parser folds it into the synthetic
+    text «/start master_invite_<uuid>» — the same shape a typed
+    «/start ...» would produce, so both are read here.
+
+    Returns ``None`` for anything that is not exactly the prefix plus a
+    canonical UUID: an ordinary «/start», an attribution deeplink
+    (``ref_user_42``, the welcome skill's business), or a crafted tail.
+    """
+
+    cleaned = (text or "").strip()
+    if not cleaned.startswith("/start"):
+        return None
+    remainder = cleaned[len("/start") :].strip()
+
+    prefix = _invite_prefix()
+    if not remainder.startswith(prefix):
+        return None
+
+    candidate = remainder[len(prefix) :]
+    return candidate if _INVITE_TOKEN_RE.match(candidate) else None
+
+
+def _handle_master_invite(event: CanonicalEvent, token: str, bot_user, tenant, entry) -> None:
+    """Answer an invitation link with the way into the invitation.
+
+    ### What this does NOT do, and why that is the design
+
+    It does not link the master, does not consume the token, and grants
+    no role. Opening a link proves possession of the link and nothing
+    else: ``bot_started`` carries ``user_id`` but no MAX username, while
+    an invitation is addressed by ``max_handle`` — so there is nothing
+    here to match the opener against the invitee, and pretending
+    otherwise would mean binding a salon's master row to whoever was
+    forwarded a message.
+
+    So the bot delivers and stops. The binding happens where it can
+    actually be checked: ``/onboarding/claim`` and ``/onboarding/accept``
+    run inside a verified Mini App session and already refuse a forwarded
+    link (``wrong_recipient``, 403, when the row is linked to somebody
+    else). Leaving the token unspent is what keeps the rightful invitee
+    able to accept after a stranger has opened the link.
+
+    ### Ownership that CAN be decided here
+
+    Which salon the token belongs to. ``validate_invite_token`` filters
+    by tenant, and the tenant is already known — the salon bot is
+    tenant-bound by construction and the consumer entered its scope. So
+    a token issued by another salon is «not found» here, in the same
+    deliberately collapsed way the Mini App reports it.
+
+    The call is a locking read inside ``atomic`` (the function does
+    ``select_for_update``), exactly as ``/onboarding/claim`` uses it. It
+    mutates nothing, so re-opening the link is idempotent.
+
+    ### Why there is no rate limit here, unlike the staff-code path
+
+    ``redeem_staff_invite`` counts attempts because a staff code is four
+    characters: guessing is a real strategy against it. A UUIDv4 is 122
+    bits, so there is no guessing to slow down, and every message to this
+    bot already costs the same DB round-trips before this branch is
+    reached (identity resolution, role resolution) — the lookup adds no
+    new amplification. What a limiter WOULD add is a way to lock out a
+    master who tapped the link twice, which is the ordinary behaviour of
+    someone who is not sure the first tap registered.
+    """
+
+    from django.db import transaction
+
+    from apps.master_api.auth import (
+        InvalidInviteToken,
+        InviteAlreadyUsed,
+        InviteExpired,
+        InviteTokenError,
+        validate_invite_token,
+    )
+
+    try:
+        with transaction.atomic():
+            validate_invite_token(token, tenant)
+    except InviteExpired:
+        _reply(event, INVITE_EXPIRED)
+        return
+    except InviteAlreadyUsed:
+        _reply(event, INVITE_ALREADY_USED)
+        return
+    except InvalidInviteToken:
+        _reply(event, INVITE_NOT_FOUND)
+        return
+    except InviteTokenError as exc:  # future slugs — never leak an exception text
+        logger.warning("channels.max.salon.invite_rejected slug=%s", getattr(exc, "slug", "?"))
+        _reply(event, INVITE_NOT_FOUND)
+        return
+
+    web_app = getattr(entry, "web_app", "")
+    if not web_app:
+        # Nothing to build a button from, and no address worth offering:
+        # a Mini App is entered through `initData`, which MAX hands only
+        # to its own webview. Saying so beats sending an invitation that
+        # cannot be opened — the failure this whole chain exists to stop.
+        logger.error(
+            "channels.max.salon.invite_no_web_app tenant=%s — invitation opened but "
+            "no Mini App name for this bot (registry entry `web_app`, i.e. "
+            "MAX_BOT_<SLUG>_WEB_APP); the invited master has no way in.",
+            tenant.slug,
+        )
+        _reply(event, INVITE_NO_ENTRY)
+        return
+
+    salon = tenant.name or tenant.slug
+    attachment = outbound.make_inline_keyboard_attachment(
+        [
+            {
+                "label": INVITE_BUTTON_LABEL,
+                "callback": f"{_invite_prefix()}{token}",
+                "web_app": web_app,
+            }
+        ]
+    )
+
+    # Same shape as `invite_redeemed` below: the internal id, never the
+    # raw MAX user id. Nothing about who was invited goes on the bus —
+    # the token is a credential and the handle is the invitee's contact
+    # detail, and neither is needed to count openings.
+    emit(
+        "channels.max.salon.invite_link_opened",
+        payload={"bot_user_id": str(bot_user.id)},
+    )
+
+    _reply(event, INVITE_WELCOME.format(salon=salon), attachments=[attachment])
+
+
 def _handle_salon_event_inner(event: CanonicalEvent, trace_id: str | uuid.UUID | None) -> None:
     """Resolve who is speaking, then either onboard them or show the menu."""
 
@@ -242,6 +473,16 @@ def _handle_salon_event_inner(event: CanonicalEvent, trace_id: str | uuid.UUID |
         return
 
     with bot_scope(entry):
+        # Read the invitation BEFORE resolving roles. Someone opening a
+        # master invitation may already hold a role here — the owner
+        # inviting himself is the ordinary case — and below the cascade
+        # he would get the staff menu while the invitation vanished
+        # without an error. See the module docstring.
+        invite_token = _extract_invite_token(event.text)
+        if invite_token is not None:
+            _handle_master_invite(event, invite_token, bot_user, tenant, entry)
+            return
+
         role_ctx = resolve_role(bot_user)
 
         if role_ctx.primary_role != "customer":

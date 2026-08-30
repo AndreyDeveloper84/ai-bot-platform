@@ -17,8 +17,13 @@ response envelope. This module implements the master-role-only subset:
 
     Response 201: {
       "master_id", "invite_token", "invite_expires_at",
-      "max_dm_delivery", "fallback_link"
+      "max_dm_delivery", "fallback_link", "invite_link"
     }
+
+``invite_link`` (DRF-1424) is the addition to that envelope: a
+``https://max.ru/<bot>?start=master_invite_<token>`` link the owner can
+hand over by any route at all. The DM above it can only reach a MAX
+username the salon already knows.
 
 ### Scope cuts (separate PRs)
 
@@ -271,6 +276,82 @@ def _invite_payload(token: uuid.UUID) -> str:
     """The ``open_app`` payload for one invitation."""
 
     return f"{MASTER_INVITE_PAYLOAD_PREFIX}{token}"
+
+
+MAX_START_LINK_TEMPLATE = "https://max.ru/{bot}?start={payload}"
+"""A link that starts the bot with a payload — the handover form (DRF-1424).
+
+Observed live on the pilot 30.08: the owner opened
+``https://max.ru/id583403546770_3_bot?start=master_invite_test`` and the
+consumer received, on ``ingress:max_salon``::
+
+    {"update_type": "bot_started", "chat_id": 315714313,
+     "user": {"user_id": 83146139, ...},
+     "payload": "master_invite_test", "user_locale": "ru"}
+
+So MAX delivers ``?start=`` as ``bot_started.payload``, and the bot side
+reads it in :func:`apps.channels.max.salon_handler._extract_invite_token`.
+
+### ``<bot>`` is the registry entry's ``web_app``
+
+Not an inference from the URL's shape. The pilot's own configuration
+names the salon bot ``MAX_BOT_SALON_WEB_APP=id583403546770_3_bot``, and
+``id583403546770_3_bot`` is character-for-character the handle in the
+link the owner opened above. The value MAX wants in an ``open_app``
+button's ``web_app`` and the value that addresses the bot in a
+``max.ru`` URL are the same string.
+
+### Why this exists next to the DM
+
+:func:`_dispatch_max_dm` can only reach a MAX username the salon already
+knows, in a chat that already exists. An owner who has the person's
+phone number, or their Telegram, or who simply wants to paste something
+into a group has nothing to hand over. This link opens anywhere, needs
+no authentication to follow, and lands the invitee in a chat with the
+bot — after which the button is delivered into a chat that now exists,
+which is what makes the delivery guaranteed rather than hopeful.
+
+**Not** ``max://bot/<slug>?start=…``. That scheme is unimplemented; the
+phone answers «Не удалось открыть ссылку» (#1332 removed it for exactly
+that reason, and it is not coming back through this door).
+"""
+
+
+def _bot_start_link(tenant, token: uuid.UUID) -> str:
+    """The shareable start link for this salon's staff bot, or ``""``.
+
+    Names the **salon** bot, not the client bot. Which bot the link opens
+    decides which stream the resulting ``bot_started`` lands on, and only
+    ``ingress:max_salon`` reaches the handler that reads invitations
+    (``apps/channels/max/salon_handler.py``). The customer-facing bot
+    would deliver the same payload to the conversational pipeline, which
+    has no opinion about invitations — the token would arrive and be
+    dropped, silently, which is the failure mode this ticket exists to
+    remove.
+
+    Empty string when the deployment has no salon bot for this tenant, or
+    it has one with no Mini App name: without ``web_app`` there is no bot
+    handle to build the URL from *and* the bot could not build the button
+    on arrival either, so the link would open a conversation that has to
+    apologise. A missing link is a visible gap; a link that leads to an
+    apology is the working-looking dead end #1332 spent a whole PR
+    removing.
+    """
+
+    from apps.channels.bot_registry import effective_registry, resolve_by_tenant_stream
+    from apps.channels.max.salon_handler import SALON_STREAM
+
+    entry = resolve_by_tenant_stream(tenant.slug, SALON_STREAM, effective_registry())
+    if entry is None or not entry.web_app:
+        logger.warning(
+            "admin_api.invite.no_start_link tenant=%s — no salon bot with a Mini App "
+            "name (MAX_BOT_<SLUG>_WEB_APP on the entry whose stream is %s), so the "
+            "invitation has no shareable link and can only be delivered by DM.",
+            tenant.slug,
+            SALON_STREAM,
+        )
+        return ""
+    return MAX_START_LINK_TEMPLATE.format(bot=entry.web_app, payload=_invite_payload(token))
 
 
 def _sender_web_app() -> str:
@@ -664,12 +745,25 @@ def _dispatch_max_dm(
     return {"delivery": "queued"}
 
 
-def _response_payload(master: CatalogMaster, *, dispatch_delivery: str) -> dict[str, Any]:
+def _response_payload(master: CatalogMaster, *, tenant, dispatch_delivery: str) -> dict[str, Any]:
     """Build the 201/200 JSON envelope.
 
     For ``mode=catalog_only`` (no invite_token) ``invite_token`` and
     ``invite_expires_at`` are null in the response, ``fallback_link``
-    is empty, and the caller passes ``dispatch_delivery="skipped"``.
+    and ``invite_link`` are empty, and the caller passes
+    ``dispatch_delivery="skipped"``.
+
+    ``invite_link`` (DRF-1424) is the one the owner can hand over by any
+    route — see :data:`MAX_START_LINK_TEMPLATE`. It is a sibling of
+    ``fallback_link``, not a replacement: ``fallback_link`` is the web
+    address of the Mini App and works only inside MAX's own webview,
+    while ``invite_link`` starts the bot from anywhere.
+
+    ``tenant`` is passed rather than read off ``master.tenant``: the
+    idempotency path hands us a row fetched without ``select_related``,
+    so the attribute would be a lazy query — and the view already holds
+    the tenant it authorised the caller against, which is the one that
+    must decide the link.
     """
 
     if master.invite_token is None:
@@ -679,6 +773,7 @@ def _response_payload(master: CatalogMaster, *, dispatch_delivery: str) -> dict[
             "invite_expires_at": None,
             "max_dm_delivery": dispatch_delivery,
             "fallback_link": "",
+            "invite_link": "",
         }
     return {
         "master_id": str(master.id),
@@ -688,6 +783,7 @@ def _response_payload(master: CatalogMaster, *, dispatch_delivery: str) -> dict[
         else None,
         "max_dm_delivery": dispatch_delivery,
         "fallback_link": _fallback_link(master.invite_token),
+        "invite_link": _bot_start_link(tenant, master.invite_token),
     }
 
 
@@ -767,7 +863,9 @@ def master_invite_create(request: HttpRequest) -> HttpResponse:
         existing = _idempotency_lookup(tenant_id=tenant.id, name=name, contact_value=contact_value)
         if existing is not None:
             payload = _response_payload(
-                existing, dispatch_delivery=_last_dispatch_delivery(existing)
+                existing,
+                tenant=tenant,
+                dispatch_delivery=_last_dispatch_delivery(existing),
             )
             response = JsonResponse(payload, status=200)
             response["X-Idempotent"] = "true"
@@ -918,7 +1016,7 @@ def master_invite_create(request: HttpRequest) -> HttpResponse:
         },
     )
 
-    payload = _response_payload(master, dispatch_delivery=outcome["delivery"])
+    payload = _response_payload(master, tenant=tenant, dispatch_delivery=outcome["delivery"])
     return JsonResponse(payload, status=201)
 
 
