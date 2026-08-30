@@ -114,9 +114,7 @@ def tenant() -> Tenant:
 
 @pytest.fixture
 def other_tenant() -> Tenant:
-    obj, _ = Tenant.all_objects.get_or_create(
-        slug="other-salon", defaults={"name": "Другой салон"}
-    )
+    obj, _ = Tenant.all_objects.get_or_create(slug="other-salon", defaults={"name": "Другой салон"})
     return obj
 
 
