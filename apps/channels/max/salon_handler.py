@@ -355,6 +355,17 @@ def _handle_master_invite(event: CanonicalEvent, token: str, bot_user, tenant, e
     The call is a locking read inside ``atomic`` (the function does
     ``select_for_update``), exactly as ``/onboarding/claim`` uses it. It
     mutates nothing, so re-opening the link is idempotent.
+
+    ### Why there is no rate limit here, unlike the staff-code path
+
+    ``redeem_staff_invite`` counts attempts because a staff code is four
+    characters: guessing is a real strategy against it. A UUIDv4 is 122
+    bits, so there is no guessing to slow down, and every message to this
+    bot already costs the same DB round-trips before this branch is
+    reached (identity resolution, role resolution) — the lookup adds no
+    new amplification. What a limiter WOULD add is a way to lock out a
+    master who tapped the link twice, which is the ordinary behaviour of
+    someone who is not sure the first tap registered.
     """
 
     from django.db import transaction

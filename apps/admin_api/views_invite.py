@@ -292,6 +292,15 @@ consumer received, on ``ingress:max_salon``::
 So MAX delivers ``?start=`` as ``bot_started.payload``, and the bot side
 reads it in :func:`apps.channels.max.salon_handler._extract_invite_token`.
 
+### ``<bot>`` is the registry entry's ``web_app``
+
+Not an inference from the URL's shape. The pilot's own configuration
+names the salon bot ``MAX_BOT_SALON_WEB_APP=id583403546770_3_bot``, and
+``id583403546770_3_bot`` is character-for-character the handle in the
+link the owner opened above. The value MAX wants in an ``open_app``
+button's ``web_app`` and the value that addresses the bot in a
+``max.ru`` URL are the same string.
+
 ### Why this exists next to the DM
 
 :func:`_dispatch_max_dm` can only reach a MAX username the salon already
