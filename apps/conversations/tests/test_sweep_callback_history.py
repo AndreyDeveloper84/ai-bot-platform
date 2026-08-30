@@ -209,6 +209,10 @@ class TestTheFirstContactThresholdIsRespected:
     def test_force_overrides_it_and_says_so(self, tmp_path):
         conversation = _conversation(98003)
         _row(conversation, f"cb:discover:book:{T}:{M}")
+        # Положительная стража: строка действительно лежала до уборки.
+        # Без неё «после уборки пусто» прошло бы и на диалоге, где ничего
+        # не было, — то есть доказывало бы не уборку, а пустоту.
+        assert _contents(conversation) == [f"cb:discover:book:{T}:{M}"]
 
         out = StringIO()
         dump = tmp_path / "sweep.jsonl"
