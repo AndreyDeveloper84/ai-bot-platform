@@ -51,8 +51,8 @@ from apps.channels.max.parser import CanonicalEvent, ParseError, parse_max_webho
 from apps.channels.max.staff_menu import (
     CB_APPROVE_PREFIX,
     CB_DAY,
-    CB_OPEN_APP,
     CB_REQUESTS,
+    OPEN_APP_PAYLOAD,
     menu_attachments,
     menu_header,
 )
@@ -246,7 +246,7 @@ def _handle_salon_event_inner(event: CanonicalEvent, trace_id: str | uuid.UUID |
 
         if role_ctx.primary_role != "customer":
             # A button tap arrives as the callback payload in `text`.
-            if event.text.startswith("cb:"):
+            if _is_button_tap(event.text):
                 _handle_button(event, role_ctx, bot_user, tenant, entry)
             else:
                 _handle_talk(event, role_ctx, bot_user, tenant, entry)
@@ -255,7 +255,7 @@ def _handle_salon_event_inner(event: CanonicalEvent, trace_id: str | uuid.UUID |
         # No role yet. A stray button tap from someone who lost their access
         # must not be read as an invite code — it would burn a rate-limit
         # attempt for a message they did not type.
-        if event.text.startswith("cb:"):
+        if _is_button_tap(event.text):
             _reply(event, ASK_FOR_CODE)
             return
 
@@ -265,6 +265,20 @@ def _handle_salon_event_inner(event: CanonicalEvent, trace_id: str | uuid.UUID |
             return
 
         _redeem_and_greet(event, bot_user, code, tenant, entry)
+
+
+def _is_button_tap(text: str) -> bool:
+    """True when this inbound text is one of our own button payloads.
+
+    Two grammars, not one, and the split is imposed by MAX rather than
+    chosen: callback buttons carry ``cb:{domain}:{action}``, while an
+    ``open_app`` payload may contain no colon at all
+    (:data:`apps.channels.max.outbound.OPEN_APP_PAYLOAD_RE`). A tap must
+    be recognised under either, or the Mini App button's payload reaches
+    the conversation path as if it were something the person typed.
+    """
+
+    return text.startswith("cb:") or text == OPEN_APP_PAYLOAD
 
 
 def _handle_button(event: CanonicalEvent, role_ctx, bot_user, tenant, entry) -> None:
@@ -306,10 +320,16 @@ def _handle_button(event: CanonicalEvent, role_ctx, bot_user, tenant, entry) -> 
             attachments=_requests_attachments(tenant, role_ctx, entry),
         )
         return
-    elif action == CB_OPEN_APP:
-        # The Mini App opens client-side; nothing to do server-side. MAX
-        # still delivers the callback, and answering nothing would look
-        # like the bot ignored the tap.
+    elif action == OPEN_APP_PAYLOAD:
+        # The Mini App opens client-side; nothing to do server-side. This
+        # branch is defensive: whether MAX echoes an `open_app` payload
+        # back as a callback at all is not something this repo has
+        # measured. If it does, the tap must land here and be silently
+        # absorbed; if it does not, this costs nothing. What it must NOT
+        # do is fall through to `_handle_talk` and hand the LLM the string
+        # `staff_open_app` as if the person had typed it — which is
+        # exactly what would happen without `_is_button_tap`, because the
+        # payload cannot start with `cb:` (MAX forbids the colon).
         return
     else:
         # Unknown or not-permitted action: show the menu rather than an

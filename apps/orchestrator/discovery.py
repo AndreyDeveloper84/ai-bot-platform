@@ -664,10 +664,12 @@ def render_missing_services(missing: list[str], city: str | None = None) -> str:
 # * stems, not the raw turn, so the segment stays short — each is ≤ 6
 #   characters and there are at most five.
 #
-# Padding is stripped and restored: ``=`` is the one character MAX rejects in
-# an ``open_app`` payload (``apps/channels/max/outbound.py``), and while this
-# is a ``callback`` payload, spending nothing to stay inside the stricter rule
-# is cheaper than discovering the difference in production.
+# Padding is stripped and restored: ``=`` is outside what MAX accepts in an
+# ``open_app`` payload, and while this is a ``callback`` payload, spending
+# nothing to stay inside the stricter rule is cheaper than discovering the
+# difference in production. The base64url alphabet turns out to BE the
+# ``open_app`` alphabet exactly — ``A-Za-z0-9-_`` — once the padding is gone
+# (measured 2026-08-30, ``apps/channels/max/outbound.py::OPEN_APP_PAYLOAD_RE``).
 _QUERY_REF_SEP = ","
 
 # A query ref longer than this is dropped and the tap degrades to the
@@ -1565,9 +1567,11 @@ def _render_ask_clarification(
 
 
 #: Multi-select callback grammar (DRF-1362). Flat slugs, digits only after the
-#: verb — no ``=``, ``&`` or ``?``, which MAX rejects outright on ``open_app``
-#: payloads (`apps/channels/max/outbound.py::_button_to_max`, Guard 3) and
-#: which there is no reason to risk here either.
+#: verb — no ``=``, ``&`` or ``?``. These are ``callback`` payloads, which MAX
+#: does not constrain; the restriction is borrowed from the ``open_app`` rule
+#: (`apps/channels/max/outbound.py::OPEN_APP_PAYLOAD_RE`) because there is no
+#: reason to risk the difference. Note the colons here ARE fine for the same
+#: reason: ``open_app`` forbids them, ``callback`` does not.
 #:
 #:     cb:clarify:tg:{mask}:{index}   toggle option {index}
 #:     cb:clarify:ok:{mask}           «Продолжить» — submit the accumulated set

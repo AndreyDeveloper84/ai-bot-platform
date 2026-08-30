@@ -182,9 +182,24 @@ class TestMenuComposition:
             assert forbidden not in labels
 
     def test_callbacks_follow_the_shared_contract(self):
+        """The `cb:` grammar binds the CALLBACK buttons — and only those.
+
+        The Mini App button is deliberately outside it: MAX validates an
+        `open_app` payload against `^[A-Za-z0-9_-]{0,512}$` and rejects
+        the colon `parse_callback` splits on, so the two grammars cannot
+        be the same one. Asserting the shared contract over every button
+        was how the incompatibility stayed invisible.
+        """
+
         from apps.orchestrator.ui.keyboards import parse_callback
 
-        for button in menu_buttons(_Role(owner=True), WITH_APP):
+        callback_buttons = [
+            b for b in menu_buttons(_Role(owner=True), WITH_APP) if not b.get("web_app")
+        ]
+
+        # Positive guard — an empty list would make the loop vacuous.
+        assert len(callback_buttons) >= 2, callback_buttons
+        for button in callback_buttons:
             callback = button.get("callback")
             if callback:
                 # parse_callback needs >=3 segments; `cb:staff` alone would
