@@ -41,6 +41,7 @@ import { Link, Navigate, Route, Routes, useLocation, useNavigate } from "react-r
 
 import { ApiError } from "./lib/api";
 import { getMe, type MeResponse } from "./lib/admin-api";
+import { getStartPayload, parseStartRoute } from "./lib/max-sdk";
 import {
   SurfaceModeContext,
   type SurfaceModeContextValue,
@@ -243,6 +244,73 @@ function adminRouteElements(me: MeResponse): React.ReactNode {
 }
 
 /**
+ * Jump to the screen the launch payload names, once per boot (DRF-1349).
+ *
+ * MAX carries an `open_app` button's `payload` into `initData` as
+ * `start_param`, and `parseStartRoute` turns it into an in-app path.
+ * This used to live inside `HelloScreen` — which is mounted only in
+ * `CustomerRoutes`. Every other surface has its own catch-all
+ * (`/admin/team`, `/master/dashboard`, `/solo/my-day`), so for anyone
+ * holding a role the payload was read by nobody: MAX opens the Mini App
+ * at `/`, the role cascade picked a route tree, and the tree's catch-all
+ * won before anything looked at the payload.
+ *
+ * That is why it sits here, above the cascade, rather than being
+ * repeated per surface. An owner who invites herself as a master boots
+ * into `AdminRoutes`, and mounting `/onboarding/master` there without
+ * this hook would have been an unreachable route — the same defect one
+ * level up.
+ *
+ * `enabled` gates it on a finished `/me` boot, matching the previous
+ * behaviour of only redirecting after auth resolved. The ref makes it
+ * once-per-session: after the jump the user owns the navigation, and
+ * `start_param` does not change for the life of the webview, so
+ * re-running it would fight every subsequent `navigate`.
+ */
+function useStartParamRedirect(enabled: boolean): void {
+  const navigate = useNavigate();
+  const done = useRef(false);
+  useEffect(() => {
+    if (!enabled || done.current) return;
+    const target = parseStartRoute(getStartPayload());
+    done.current = true;
+    if (target) navigate(target, { replace: true });
+  }, [enabled, navigate]);
+}
+
+/**
+ * The master-invitation onboarding route — mounted on EVERY surface
+ * (DRF-1349).
+ *
+ * It used to live inside `masterRouteElements()`, which made it
+ * reachable only for someone the backend already considers a master.
+ * That is precisely the person who does not need it. `resolve_role`
+ * (`apps/identity/services/role_resolver.py`) reports `is_master` only
+ * for a CatalogMaster row that is ACCEPTED **and** linked to the calling
+ * BotUser — and accepting the invitation is what this screen exists to
+ * do. An invitee is PENDING and unlinked by definition, so `/api/v1/me`
+ * returns `is_master: false`, the role cascade drops them onto the
+ * customer surface, and the catch-all there renders `HelloScreen`. The
+ * invitation died on a route that was never mounted, with no error
+ * anywhere: the deeplink effect in `HelloScreen` navigated, the
+ * catch-all rendered `HelloScreen` again, and the master saw the
+ * greeting instead of the invitation.
+ *
+ * Mounted on every surface rather than only on the customer one because
+ * the invitee's role is not knowable here: an owner adding herself as a
+ * master boots into `AdminRoutes`, a returning master into
+ * `MasterRoutes`, a solo provider into the unified surface. The screen
+ * carries its own authorisation — every step of it goes through
+ * `/onboarding/claim` and `/onboarding/accept`, which validate the
+ * token against the caller's own MAX session — so mounting it widely
+ * grants nothing: without a valid token for *that* BotUser the screen
+ * only renders its own error states.
+ */
+function inviteOnboardingRouteElements(): React.ReactNode {
+  return <Route path="/onboarding/master" element={<MasterOnboardingScreen />} />;
+}
+
+/**
  * Shared master route elements — single source of truth consumed by
  * both `MasterRoutes` (single-role master user) and
  * `UnifiedAdminMasterRoutes` (solo provider / dual-role). See
@@ -251,10 +319,7 @@ function adminRouteElements(me: MeResponse): React.ReactNode {
 function masterRouteElements(): React.ReactNode {
   return (
     <>
-      <Route
-        path="/onboarding/master"
-        element={<MasterOnboardingScreen />}
-      />
+      {inviteOnboardingRouteElements()}
       <Route path="/master/dashboard" element={<MasterDashboardScreen />} />
       {/* D7 billing — subscription status + card binding (money path) */}
       <Route path="/master/billing" element={<MasterBillingScreen />} />
@@ -325,6 +390,14 @@ function AdminRoutes({ me }: { me: MeResponse }) {
   return (
     <Routes>
       {adminRouteElements(me)}
+      {/* An owner who invites herself as a master boots here, not into
+          MasterRoutes — she is not a master until she accepts. Without
+          this the catch-all below would swallow her invitation and land
+          her on the team screen (DRF-1349). Added on the surface rather
+          than inside `adminRouteElements` so the unified surfaces, which
+          already mount it via `masterRouteElements`, don't declare it
+          twice. */}
+      {inviteOnboardingRouteElements()}
       {/* Default + unknown — land on team. */}
       <Route path="*" element={<CatchAllRedirect to="/admin/team" />} />
     </Routes>
@@ -1109,6 +1182,13 @@ function CustomerRoutes() {
       />
       <Route path="/me" element={<ProfileScreen />} />
       <Route path="/feedback/:bookingId" element={<FeedbackScreen />} />
+      {/* DRF-1349 — the surface an invited master actually boots into.
+          `/api/v1/me` returns is_master=false until the invitation is
+          ACCEPTED and linked, so this is where the invite button lands.
+          Before it was mounted here the `*` route below matched instead
+          and rendered HelloScreen, which is how the invitation vanished
+          into the greeting screen with no error anywhere. */}
+      {inviteOnboardingRouteElements()}
       <Route path="*" element={<HelloScreen />} />
     </Routes>
   );
@@ -1214,6 +1294,8 @@ export function App() {
   useEffect(() => {
     void loadMe();
   }, [loadMe]);
+
+  useStartParamRedirect(boot.status === "ready");
 
   // Round-1 FOLLOW_UP cleanup (#79): when the resolved role pattern
   // leaves nothing to choose between, drop any stale

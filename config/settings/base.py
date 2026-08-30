@@ -582,10 +582,18 @@ MASTER_SESSION_TTL_DAYS = int(os.environ.get("MASTER_SESSION_TTL_DAYS", "30"))
 
 # Master invite flow (PR 3 / MM2). The admin invite endpoint
 # (`apps/admin_api/views_invite.py`) renders a web fallback URL that
-# embeds the invite token, used by the owner's UI as a "copy invite
-# link" option when the in-bot DM fails. The token is also encoded into
-# a MAX deeplink `max://bot/<MASTER_BOT_USERNAME>?start=master_invite_<token>`.
-# Defaults:
+# embeds the invite token, shown by the owner's UI as a "copy invite
+# link" option.
+#
+# DRF-1349 — the invite DM itself no longer carries any address. A MAX
+# Mini App is entered from an `open_app` button on the message, whose
+# payload is `master_invite_<token>`; `max://` is not a scheme MAX
+# implements, and an https address opens a browser, which MAX never
+# hands `initData`. The button needs MAX_BOT_WEB_APP (above), not
+# MASTER_BOT_USERNAME.
+#
+# MASTER_BOT_USERNAME survives only for the
+# `create_test_master_invite` management command. Defaults:
 #   * SITE_DOMAIN — Vite dev default; production overrides via env.
 #   * MASTER_BOT_USERNAME — falls back to `<tenant_slug>_bot` when empty
 #     (the management command does the same fallback).

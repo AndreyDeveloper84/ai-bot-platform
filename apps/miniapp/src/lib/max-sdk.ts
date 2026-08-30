@@ -102,6 +102,42 @@ export function getStartPayload(): string {
  *   kept for cold-start back-compat with stale message bodies in users'
  *   MAX history during the F2 rollout window.
  */
+/**
+ * Payload prefix for a master invitation (DRF-1349).
+ *
+ * The bot builds `${MASTER_INVITE_PAYLOAD_PREFIX}${token}` in
+ * `apps/admin_api/views_invite.py` (constant of the same name there).
+ * `apps/admin_api/tests/test_invite_entry.py` reads both sources and
+ * fails when they drift, so this is a contract and not a coincidence.
+ *
+ * Exported because the pinning test needs to see it under a stable name
+ * — and because a reader looking at the bot's constant should be able to
+ * find this one by searching for the same identifier.
+ */
+export const MASTER_INVITE_PAYLOAD_PREFIX = "master_invite_";
+
+/** Where a valid invite payload lands. Mounted in `App.tsx`. */
+export const MASTER_ONBOARDING_PATH = "/onboarding/master";
+
+/**
+ * Strict shape of an invite payload: the prefix and a canonical UUID,
+ * anchored at both ends.
+ *
+ * This is the first prefix-plus-parameter payload in this file, and the
+ * looseness that would be natural here — `payload.startsWith(prefix)`
+ * and forward the rest — is a hole, not a shortcut: the tail is
+ * concatenated into a query string, so "anything after the prefix" means
+ * whatever text a third party can get into a `start_param` ends up in
+ * the app's own URL. A UUID is the only tail the backend can ever act
+ * on (`validate_invite_token` looks the token up by UUID), so anything
+ * else is refused here rather than forwarded and refused later.
+ */
+const _MASTER_INVITE_RE = new RegExp(
+  `^${MASTER_INVITE_PAYLOAD_PREFIX}` +
+    "([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-" +
+    "[0-9a-fA-F]{4}-[0-9a-fA-F]{12})$",
+);
+
 const _ROUTE_MAP: Record<string, string> = {
   // Flat slug — current. Every target is the canonical /customer/* screen
   // and matches MINIAPP_ROUTES in apps/skills/welcome/skill.py exactly
@@ -145,6 +181,7 @@ const _ROUTE_MAP: Record<string, string> = {
  *                                             (flat slug, `open_catalog:`)
  *   parseStartRoute("route=visits&ref=ig")  → "/customer/records"  (legacy
  *                                             form, inner value `visits:`)
+ *   parseStartRoute("master_invite_<uuid>") → "/onboarding/master?token=<uuid>"
  *   parseStartRoute("open_unknown")         → null
  *   parseStartRoute("")                     → null
  *   parseStartRoute("garbage")              → null
@@ -152,13 +189,32 @@ const _ROUTE_MAP: Record<string, string> = {
 export function parseStartRoute(payload: string): string | null {
   if (!payload) return null;
   // Try flat-slug direct lookup first (current emit format).
-  const direct = _ROUTE_MAP[payload];
+  //
+  // `Object.hasOwn` rather than a bare `_ROUTE_MAP[payload]`: the object
+  // literal inherits from Object.prototype, so `"constructor"` and
+  // `"toString"` resolve to functions. They are typed `string` here, and
+  // `navigate(aFunction)` is not something React Router has an opinion
+  // about. `start_param` is attacker-influenceable, so the lookup is
+  // restricted to keys the table actually declares.
+  const direct = Object.hasOwn(_ROUTE_MAP, payload) ? _ROUTE_MAP[payload] : undefined;
   if (direct) return direct;
+  // Master invitation — the one payload that carries a parameter
+  // (DRF-1349). Claimed by prefix and resolved by the strict form: a
+  // payload that announces itself as an invitation and then isn't one is
+  // refused outright rather than left to the querystring fallback below,
+  // which would happily read `master_invite_x=1&route=catalog` as
+  // `route=catalog`. Claiming the prefix is what makes the strictness
+  // above mean something — matching order alone would not, since a
+  // failed `exec` simply falls through.
+  if (payload.startsWith(MASTER_INVITE_PAYLOAD_PREFIX)) {
+    const invite = _MASTER_INVITE_RE.exec(payload);
+    return invite ? `${MASTER_ONBOARDING_PATH}?token=${invite[1]}` : null;
+  }
   // Fall back to legacy querystring shape (``route=<value>``).
   if (payload.includes("=")) {
     const params = new URLSearchParams(payload);
     const route = params.get("route");
-    if (route && _ROUTE_MAP[route]) return _ROUTE_MAP[route];
+    if (route && Object.hasOwn(_ROUTE_MAP, route)) return _ROUTE_MAP[route] ?? null;
   }
   return null;
 }
