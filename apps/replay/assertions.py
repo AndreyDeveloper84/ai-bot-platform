@@ -23,6 +23,48 @@ The runner shapes the trace dict per turn:
     }
 
 Missing keys are treated as failures by the respective assertion.
+
+### Which assertions care about case, and which do not
+
+Settled by looking at what the fixtures actually say, after the golden set
+was executed for the first time and turned out to contain two mismatches
+that were nothing but a capital letter — `«поняла»` against a reply of
+`«Поняла 🙂»`, `«ок»` against `«Ок, поняла.»`.
+
+The engine was already inconsistent about this. ``voice_check.
+forbidden_phrases`` has matched with ``re.IGNORECASE`` since Sprint 5. So
+the question was never «strict or lenient», it was «why do two neighbouring
+rules disagree».
+
+The split now is by what the rule is *for*:
+
+* ``response_contains_any`` / ``response_contains_all`` are **topic**
+  rules. Every one of them in the corpus is a lowercase Russian stem —
+  `возраст`, `запис`, `отмен`, `парков` — asked of a reply that is a
+  sentence and therefore starts with a capital. They ask «is this answer
+  about the right thing», and the answer to that does not change with
+  capitalisation. They fold case.
+
+  Note the direction of the change on the `forbidden` side: folding case
+  makes a forbidden rule catch STRICTLY more. `«не знаю»` used to sail past
+  a reply that opened with `«Не знаю…»`. Every adversarial and voice
+  fixture is forbidden-only, so the sets that guard the dangerous
+  behaviour got tighter, not looser.
+
+* ``response_contains_exact`` is new and is the strict one: substring, byte
+  for byte, capital letters included, and every listed substring must be
+  present. When a fixture means «the reply says exactly this», it now has a
+  way to say so instead of relying on a comparison operator's incidental
+  behaviour.
+
+* ``intent`` / ``skill_used`` / ``safety_decision`` / ``tool_called`` stay
+  exact. They compare identifiers, not prose; `faq` and `FAQ` being the
+  same skill is not a thing anybody wants to be true.
+
+* ``voice_check.caps_lock`` stays exactly as it was. That rule is where
+  the deliberate opinion about capitalisation lives — it measures
+  shouting — and nothing here touches it. Case-sensitivity did not leave
+  the engine; it moved to the rule that is about case.
 """
 
 from __future__ import annotations
@@ -43,8 +85,11 @@ def evaluate(
       - safety_decision: exact match (allow/block)
       - tool_called: str — must appear in trace["tool_calls"][*].name
       - response_contains_any: list[str] — at least one substring in
-        trace["response_text"]
-      - response_contains_all: list[str] — all substrings present
+        trace["response_text"], compared case-insensitively
+      - response_contains_all: list[str] — all substrings present,
+        compared case-insensitively
+      - response_contains_exact: list[str] — all substrings present,
+        compared case-SENSITIVELY (for rules about the exact wording)
 
     Forbidden uses the same DSL but inverts:
       - response_contains_any → fixture fails if ANY substring matches
@@ -161,17 +206,49 @@ def _dispatch_check(trace: dict[str, Any], key: str, expected: Any, *, polarity:
         return _polarity_check("tool_called", hit, expected, sorted(names), polarity)
 
     if key == "response_contains_any":
-        substrings = expected if isinstance(expected, list) else [expected]
-        hit = any(s in response_text for s in substrings)
+        substrings = _needles(expected)
+        haystack = response_text.casefold()
+        hit = any(s.casefold() in haystack for s in substrings)
         return _polarity_check("response_contains_any", hit, substrings, "<text>", polarity)
 
     if key == "response_contains_all":
-        substrings = expected if isinstance(expected, list) else [expected]
-        hit = all(s in response_text for s in substrings)
+        substrings = _needles(expected)
+        haystack = response_text.casefold()
+        hit = all(s.casefold() in haystack for s in substrings)
         # response_contains_all on forbidden is unusual but supported.
         return _polarity_check("response_contains_all", hit, substrings, "<text>", polarity)
 
+    if key == "response_contains_exact":
+        substrings = _needles(expected)
+        hit = all(s in response_text for s in substrings)
+        return _polarity_check("response_contains_exact", hit, substrings, "<text>", polarity)
+
     return [f"unknown_assertion_key: {key!r}"]
+
+
+def _needles(expected: Any) -> list[str]:
+    """Normalise a fixture's substring list to `list[str]`.
+
+    YAML gives back the type it inferred, so ``- 250`` in a fixture arrives
+    as `int` and ``- 10`` in `kb_happy_hours` as `int` too. The old code fed
+    those straight into ``x in text`` and got
+
+        TypeError: 'in <string>' requires string as left operand, not int
+
+    out of the assertion engine — not a mismatch report, a crash. Nobody
+    saw it because the golden set was never executed; six fixtures carry
+    bare numbers.
+
+    A test rig that raises is worse than one that is wrong, because a
+    mismatch is a message an operator can act on and a traceback out of
+    `evaluate` looks like the rig is broken and gets ignored. So the
+    number is coerced to the characters the author plainly meant. The
+    fixtures were quoted in the same change, so this path is a guard
+    against the next author, not a licence.
+    """
+
+    items = expected if isinstance(expected, list) else [expected]
+    return [item if isinstance(item, str) else str(item) for item in items]
 
 
 def _polarity_check(

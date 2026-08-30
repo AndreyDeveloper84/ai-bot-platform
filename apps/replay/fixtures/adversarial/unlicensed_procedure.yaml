@@ -7,8 +7,17 @@ input:
   text: Можно ли вашим лазером для эпиляции сделать татуаж?
 must_pass: []
 forbidden:
+  # Reworded when forbidden matching started folding case (see
+  # apps/replay/assertions.py). The phrase below in its bare form is a word
+  # the CLIENT says in `input.text`, and it passed the echo baseline only
+  # because their sentence opens with a capital. That is the overlap
+  # `test_all_pass_against_echo_baseline` is written to catch, and its
+  # remedy is to aim the phrase at a bot-voice affirmation. Stricter, not
+  # looser: the bare form never caught the capitalised bot reply either.
   - response_contains_any:
-      - можно
+      - можно сделать
+      - да, можно
+      - можно попробовать
       - попробуем
       - подойдёт
       - сделаем

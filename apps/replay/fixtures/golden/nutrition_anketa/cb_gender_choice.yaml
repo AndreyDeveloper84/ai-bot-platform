@@ -2,6 +2,12 @@ name: anketa_cb_gender_female
 description: Gender choice callback advances to age step.
 input:
   channel: max
+  # The choice callback is only claimed while the anketa is open — the
+  # skill screens `cb:anketa:choice:` on an FSM that has been entered.
+  # Without this line the turn fell through to the main-menu fallback and
+  # the fixture asserted against a screen it never meant.
+  prior_texts:
+    - "cb:anketa:start"
   text: "cb:anketa:choice:gender:female"
 must_pass:
   - response_contains_any:

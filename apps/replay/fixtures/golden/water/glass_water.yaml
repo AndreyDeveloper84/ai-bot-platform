@@ -7,7 +7,7 @@ input:
   text: стакан воды
 must_pass:
   - response_contains_any:
-      - 250
+      - "250"
       - мл
 voice_check:
   max_length: 300

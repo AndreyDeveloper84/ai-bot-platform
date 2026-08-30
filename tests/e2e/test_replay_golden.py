@@ -11,8 +11,31 @@ This is the Sprint 5 *exit gate* — proves the whole stack (loader →
 schema → runner → recorder → redactor → assertions) is wired end-to-end
 against the production fixture files we shipped in C3.
 
-When Sprint 6 lands ``apps.orchestrator.pipeline.turn``, this test
-upgrades to drop the synthetic ``pipeline_fn`` and call the real pipeline.
+### What «end-to-end» means here, and what it does not
+
+The ``pipeline_fn`` below is a dict literal this file wrote. So this test
+proves the PLUMBING: a fixture loads, a trace flows through the runner, the
+recorder persists it, the redactor strips PII, the assertion engine reads
+it. It proves nothing whatever about what the bot says, and the fixture
+names in it make that easy to misread.
+
+It also drifted exactly the way that arrangement invites. The privacy reply
+was hard-coded as «Все ваши данные удалены…», the skill stopped deleting
+from chat at some point, and the test stayed green because the fixture and
+the fake were stale in the same direction — the fixture asserted `удалены`,
+the fake said `удалены`, and neither was what a client would have seen. The
+synthetic reply is now IMPORTED from the skill, so the two cannot agree
+with each other while disagreeing with the product.
+
+The note that used to close this docstring said the test would drop the
+synthetic ``pipeline_fn`` for ``apps.orchestrator.pipeline.turn`` «when
+Sprint 6 lands it». Sprint 6 landed it and the upgrade did not happen —
+and ``turn()`` turned out to have no production callers, so it would have
+been a different fake rather than the real thing. The golden fixtures are
+executed against the code that answers a client in
+``apps/replay/tests/test_golden_gate.py``. That is the behavioural gate;
+this file is the plumbing one, and both are worth having as long as neither
+is mistaken for the other.
 """
 
 from __future__ import annotations
@@ -21,6 +44,8 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+
+from apps.skills.privacy_consent.skill import _DELETE_REDIRECT_TEXT
 
 from apps.replay.fixtures.loader import load_fixture
 from apps.replay.runner import Runner
@@ -78,7 +103,10 @@ def test_three_golden_fixtures_pass_end_to_end(g2_tenant):
                 "skill_used": "privacy_consent",
                 "safety_decision": "allow",
                 "tool_calls": [],
-                "response_text": "Все ваши данные удалены. Удалено диалогов: 0. Спасибо!",
+                # Imported, not transcribed. A copy of the copy is how this
+                # test went on agreeing with a fixture that had stopped
+                # agreeing with the product.
+                "response_text": _DELETE_REDIRECT_TEXT,
                 "latency_ms": 42.0,
                 "tokens": 10,
             },

@@ -4,6 +4,13 @@ description: |
   range hint in the error.
 input:
   channel: max
+  # «150» is only an out-of-range AGE when the anketa is standing on the
+  # age step. Bare, it is an unrecognised message and the bot answers with
+  # the main menu — which is what this fixture was actually asserting
+  # against before the set was ever executed.
+  prior_texts:
+    - "cb:anketa:start"
+    - "cb:anketa:choice:gender:female"
   text: "150"
 must_pass:
   - response_contains_any:

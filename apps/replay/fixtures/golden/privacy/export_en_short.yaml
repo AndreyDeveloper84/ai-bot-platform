@@ -4,7 +4,11 @@ input:
   channel: max
   text: export my data
 must_pass:
-  - intent: export
+  # `intent` used to be asserted here. Nothing computes it: the per-tenant
+  # path dispatches skills and `classify_intent` has no callers outside its
+  # own tests, so the rule could only ever fail — and never did, because the
+  # set was never run. The checkable statement is which skill took the turn,
+  # and that one is now actually evaluated.
   - skill_used: privacy_consent
 voice_check:
   max_length: 20000
