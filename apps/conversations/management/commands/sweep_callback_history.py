@@ -232,6 +232,7 @@ class Command(BaseCommand):
                 {
                     "id": str(row.id),
                     "conversation_id": str(row.conversation_id),
+                    "role": "user",
                     "created_at": row.created_at.isoformat(),
                     "content": content,
                     "action": verdict.action,
@@ -287,7 +288,12 @@ class Command(BaseCommand):
                 changed += Message.all_tenants.filter(id=item["id"]).update(
                     content=item["new_content"]
                 )
-            deleted, _ = Message.all_tenants.filter(id__in=delete_ids).delete()
+            _total, per_model = Message.all_tenants.filter(id__in=delete_ids).delete()
+            # Считается ИМЕННО Message, а не сумма каскада: у строки истории
+            # могут появиться зависимые записи, и тогда общий счётчик стал бы
+            # больше числа строк в дампе — инвариант падал бы на здоровом
+            # прогоне и уборка стала бы невыполнимой.
+            deleted = per_model.get(Message._meta.label, 0)
             # Инвариант: тронуто ровно столько, сколько в дампе. Иначе откат.
             if changed != len(rewrite_ids) or deleted != len(delete_ids):
                 raise CommandError(
