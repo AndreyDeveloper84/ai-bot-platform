@@ -69,9 +69,11 @@ Two of them, both made explicit here rather than left to luck:
 
 from __future__ import annotations
 
+import _socket
 import logging
 import socket
 import time
+from collections.abc import Buffer
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -85,6 +87,21 @@ logger = logging.getLogger(__name__)
 #: match is asking the thing under test to grade itself, and it would go on
 #: agreeing with itself after the dispatcher broke.
 _MATCH_PREFIX = "skills.dispatch.match name="
+
+#: What ``socket.socket.connect`` actually accepts, spelled the way
+#: typeshed spells it: an AF_INET/AF_INET6 tuple, an AF_UNIX path, or a
+#: raw sockaddr buffer.
+#:
+#: Written out rather than suppressed. A `type: ignore` here would record
+#: an assumption about the replacement's shape that nobody would ever
+#: re-check, and the assumption is load-bearing: this replacement is what
+#: decides whether a fixture is judged against a real reply or against an
+#: error branch. If a future Python widens `connect`, the honest signature
+#: fails to type-check and somebody looks; a suppression stays quiet.
+#:
+#: `_socket.socket`, not `socket.socket`, because the method is declared on
+#: the C base class and a parameter type may only widen, never narrow.
+type _SocketAddress = tuple[Any, ...] | str | Buffer
 
 
 class SkillNameProbe(logging.Handler):
@@ -178,15 +195,16 @@ class NetworkTripwire:
                 f"replay golden gate: name resolution is closed here (tried {host!r})"
             )
 
-        def _connect(sock: socket.socket, address: Any) -> Any:
+        def _connect(sock: _socket.socket, address: _SocketAddress) -> None:
             if tripwire._disarmed:
-                return saved_connect(sock, address)
+                saved_connect(sock, address)
+                return
             tripwire._record(address)
             raise ConnectionRefusedError(
                 f"replay golden gate: outbound network is closed here (tried {address!r})"
             )
 
-        def _connect_ex(sock: socket.socket, address: Any) -> int:
+        def _connect_ex(sock: _socket.socket, address: _SocketAddress) -> int:
             if tripwire._disarmed:
                 return saved_connect_ex(sock, address)
             tripwire._record(address)
@@ -214,19 +232,33 @@ class NetworkTripwire:
             "socketpair": saved_socketpair,
             "getaddrinfo": saved_getaddrinfo,
         }
+        # `[method-assign]` and nothing wider — the only suppression left in
+        # this file, here and at the router probe below. mypy has no way to
+        # say «this is a deliberate monkeypatch», so that code stays; it
+        # suppresses the ACT of replacing a method and nothing about the
+        # replacement's shape.
+        #
+        # The shape IS checked. The two functions above carry the signature
+        # typeshed declares, so the day a Python release widens `connect`
+        # the mismatch surfaces as `[assignment]` — a code this ignore does
+        # not cover — and somebody looks. That is the part worth not
+        # suppressing: this replacement decides whether a fixture is judged
+        # against a real reply or against an error branch, and a blanket
+        # ignore would have recorded that assumption where nobody re-reads
+        # it. The module-level replacements below need no ignore at all.
         socket.socket.connect = _connect  # type: ignore[method-assign]
         socket.socket.connect_ex = _connect_ex  # type: ignore[method-assign]
-        socket.create_connection = _create_connection  # type: ignore[assignment]
-        socket.socketpair = _socketpair  # type: ignore[assignment]
-        socket.getaddrinfo = _getaddrinfo  # type: ignore[assignment]
+        socket.create_connection = _create_connection
+        socket.socketpair = _socketpair
+        socket.getaddrinfo = _getaddrinfo
         return self
 
     def __exit__(self, *exc: Any) -> None:
         socket.socket.connect = self._saved["connect"]  # type: ignore[method-assign]
         socket.socket.connect_ex = self._saved["connect_ex"]  # type: ignore[method-assign]
-        socket.create_connection = self._saved["create_connection"]  # type: ignore[assignment]
-        socket.socketpair = self._saved["socketpair"]  # type: ignore[assignment]
-        socket.getaddrinfo = self._saved["getaddrinfo"]  # type: ignore[assignment]
+        socket.create_connection = self._saved["create_connection"]
+        socket.socketpair = self._saved["socketpair"]
+        socket.getaddrinfo = self._saved["getaddrinfo"]
 
 
 class ModelSeamProbe:
@@ -262,19 +294,32 @@ class ModelSeamProbe:
         probe = self
         self._saved = LLMRouter.get_provider
 
-        def _get_provider(self_router: Any, tenant: Any = None, **kwargs: Any) -> Any:
-            probe.requests.append(f"{kwargs.get('skill', '?')}:{kwargs.get('op', 'complete')}")
+        # Signature spelled out to match `LLMRouter.get_provider` rather
+        # than swallowed by `**kwargs` behind a `type: ignore`. Two payoffs
+        # beyond the type-check: the probe records the real `skill` and `op`
+        # instead of guessing them out of a dict, and the day somebody adds
+        # a parameter to the router the mismatch is a type error here rather
+        # than a call this probe silently stops seeing.
+        def _get_provider(
+            self: Any,  # named `self`: mypy matches parameter names too
+            tenant: Any = None,
+            *,
+            skill: str = "",
+            op: str = "complete",
+            prefer_fallback_from: str | None = None,
+        ) -> Any:
+            probe.requests.append(f"{skill or '?'}:{op}")
             raise LLMProviderUnavailable(
                 "replay golden gate: CI has no model, and this gate will not pretend it does"
             )
 
-        LLMRouter.get_provider = _get_provider  # type: ignore[assignment]
+        LLMRouter.get_provider = _get_provider  # type: ignore[method-assign]
         return self
 
     def __exit__(self, *exc: Any) -> None:
         from apps.llm.router import LLMRouter
 
-        LLMRouter.get_provider = self._saved  # type: ignore[assignment]
+        LLMRouter.get_provider = self._saved  # type: ignore[method-assign]
 
 
 def prior_texts(fixture: Fixture) -> list[str]:
