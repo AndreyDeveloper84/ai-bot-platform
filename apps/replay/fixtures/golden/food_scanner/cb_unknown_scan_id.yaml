@@ -10,5 +10,11 @@ forbidden:
       - ошибка
       - traceback
 voice_check:
-  max_length: 200
+  # 300, not 200. Every one of these fixtures is a NEGATIVE case — «the
+  # wrong skill must not claim this callback» — and the right skill not
+  # claiming it means the turn lands on the main menu, which is 233
+  # characters of deliberate product copy. The rule that carries this
+  # fixture's meaning is `forbidden`; the length cap was incidental, and at
+  # 200 it was failing the fixture for the very outcome it wanted.
+  max_length: 300
   caps_lock: 0.5

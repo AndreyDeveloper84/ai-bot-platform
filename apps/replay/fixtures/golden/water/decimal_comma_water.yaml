@@ -5,7 +5,7 @@ input:
   text: 0,5 л воды
 must_pass:
   - response_contains_any:
-      - 500
+      - "500"
 voice_check:
   max_length: 300
   caps_lock: 0.5

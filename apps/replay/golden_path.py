@@ -156,7 +156,7 @@ class NetworkTripwire:
         try:
             host, port = address[0], address[1]
             if isinstance(host, bytes):
-                host = host.decode("idna", errors="replace")
+                host = host.decode("utf-8", errors="replace")
             self.attempts.append(f"{host}:{port}")
         except Exception:  # noqa: BLE001
             self.attempts.append(repr(address))
@@ -262,12 +262,9 @@ class ModelSeamProbe:
         self._saved = LLMRouter.get_provider
 
         def _get_provider(self_router: Any, tenant: Any = None, **kwargs: Any) -> Any:
-            probe.requests.append(
-                f"{kwargs.get('skill', '?')}:{kwargs.get('op', 'complete')}"
-            )
+            probe.requests.append(f"{kwargs.get('skill', '?')}:{kwargs.get('op', 'complete')}")
             raise LLMProviderUnavailable(
-                "replay golden gate: CI has no model, and this gate will not "
-                "pretend it does"
+                "replay golden gate: CI has no model, and this gate will not pretend it does"
             )
 
         LLMRouter.get_provider = _get_provider  # type: ignore[assignment]

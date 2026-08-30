@@ -18,7 +18,7 @@ forbidden:
       - "I don't know"
       - не знаю
       - Traceback
-      - +79
+      - "+79"
 voice_check:
   max_length: 800
   caps_lock: 0.5

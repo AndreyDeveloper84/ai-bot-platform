@@ -9,8 +9,8 @@ input:
 must_pass:
   - response_contains_any:
       - работа
-      - 10
-      - 22
+      - "10"
+      - "22"
 forbidden:
   - response_contains_any:
       - "I don't know"

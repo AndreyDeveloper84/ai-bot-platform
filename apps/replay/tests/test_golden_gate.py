@@ -21,10 +21,24 @@ a capital letter. Executing all eighty shows that explanation covers exactly
 one of the four (`food_clarify_cb_typo_ack`, «Поняла» against «поняла») plus
 one nobody had found (`cross_dismiss`, «Ок» against «ок»). The other three
 named fixtures fail for three different reasons that have nothing to do with
-capitalisation, and the full set adds two more — one of which crashes the
-assertion engine with a `TypeError` rather than reporting a mismatch.
+capitalisation, and the full set adds three more:
 
-### The shape of the gate
+* six fixtures carry a bare YAML number (`- 250`, `- +79`) which loads as
+  `int` and made `evaluate` raise `TypeError` instead of reporting a
+  mismatch — and `+79`, a rule against leaking a phone number, had been
+  quietly loading as the integer `79` all along;
+* ten privacy fixtures assert `intent`, which no surface computes;
+* two anketa fixtures assert a mid-flow reply on a turn that never enters
+  the flow, and four negative fixtures cap the reply at 200 characters when
+  the outcome they are asking for IS the 233-character main menu.
+
+The tail of it reached the sets that were being gated. Folding case makes a
+`forbidden` rule catch strictly more, and three adversarial fixtures turned
+out to be forbidding a word the client says in their own first sentence —
+passing only because the sentence starts with a capital.
+
+Where it now stands: 80 executed, 47 asserted in full, 33 reported as
+needing a model or the Ayla API and counted as covered by nobody.
 
 ### The shape of the gate
 
@@ -100,6 +114,27 @@ SERVICE_ENDPOINTS = {
     "NUTRITION_SERVICE_TOKEN": "replay-golden-not-a-real-token",
 }
 
+#: What this gate hands the system before the turn under test, spelled out
+#: because a precondition granted in silence is indistinguishable from a
+#: property the code actually has. Printed by `test_coverage_is_reported`
+#: on every run, so a reader of the CI log sees the terms of the check
+#: without opening this file.
+#:
+#: Every one of these is a state a real client is in by the time any golden
+#: scenario happens. None of them is a branch a golden fixture documents:
+#: the greeting has its own skill and its own tests, and the food-scanner
+#: consent refusal has its own. If a fixture is ever written for one of
+#: those branches, it has to stop being granted here.
+GRANTED_PRECONDITIONS = (
+    "BotUser.welcomed_at is set (WelcomeSkill intercepts the first message "
+    "from an ungreeted user and would answer every fixture with the "
+    "welcome copy)",
+    "BotUser.food_scanner_consent_at is set (152-ФЗ gate; without it every "
+    "food_scanner fixture gets the «открой Mini App» refusal)",
+    "NUTRITION_ENABLED / FOOD_PHOTO_SCAN_ENABLED are on (their default is "
+    "off, and off means the «функция готовится» placeholder)",
+)
+
 
 @pytest.fixture
 def fake_redis(monkeypatch):
@@ -169,18 +204,18 @@ def golden_run(monkeypatch, fake_redis, golden_tenant, settings):
                 bot_user = resolve_or_create_bot_user(
                     channel="max", channel_user_id=str(uid), chat_id=str(uid)
                 )
-                # Declared precondition, not a convenience: golden fixtures
-                # are mid-conversation turns, and WelcomeSkill intercepts
-                # the first message from an ungreeted BotUser.
+                # Declared preconditions, not conveniences — see
+                # GRANTED_PRECONDITIONS, which the coverage report prints so
+                # nobody has to read this file to learn what the gate handed
+                # the system for free.
                 bot_user.welcomed_at = timezone.now()
-                bot_user.save(update_fields=["welcomed_at"])
+                bot_user.food_scanner_consent_at = timezone.now()
+                bot_user.save(update_fields=["welcomed_at", "food_scanner_consent_at"])
 
                 with tripwire, model_probe:
                     for i, setup_text in enumerate(prior_texts(fixture)):
                         max_handler.handle_max_event(
-                            build_max_payload(
-                                setup_text, user_id=uid, mid=f"replay-{uid}-pre{i}"
-                            )
+                            build_max_payload(setup_text, user_id=uid, mid=f"replay-{uid}-pre{i}")
                         )
                     # Setup turns are not the fixture's subject: drop their
                     # replies and their skill match so the assertions below
@@ -251,10 +286,7 @@ class TestOurOwnWordsObeyTheFixture:
         result = golden_run(fixture)
 
         if not result.deterministic:
-            pytest.skip(
-                f"{fixture.name}: needs the outside world — "
-                f"{result.outside_world_notes}"
-            )
+            pytest.skip(f"{fixture.name}: needs the outside world — {result.outside_world_notes}")
 
         failures = evaluate(result.as_trace(), fixture.must_pass, fixture.forbidden)
         failures += evaluate_voice(result.response_text, fixture.voice_check)
@@ -275,12 +307,88 @@ class TestNoFixtureAssertsOnSomethingNobodyComputes:
         offenders = [
             f.name
             for f in ALL_FIXTURES
-            if any("intent" in c for c in f.must_pass)
-            or any("intent" in c for c in f.forbidden)
+            if any("intent" in c for c in f.must_pass) or any("intent" in c for c in f.forbidden)
         ]
         assert not offenders, (
             "golden fixtures asserting on `intent`, which the per-tenant path "
             f"never computes: {offenders}. Assert on `skill_used` instead."
+        )
+
+
+class TestTheGateCanStillGoRed:
+    """Positive stress on the negative claim, on the live path, on real data.
+
+    `test_deterministic_replies_are_held_to_every_rule` passing means «no
+    mismatches». That sentence is also true of a gate that stopped comparing
+    anything, and after a change that made a comparison *more* permissive
+    that is the reading somebody should demand evidence against.
+
+    So: take a fixture that really runs, keep the real reply from the real
+    handler, and put a rule against it that is wrong by a word rather than by
+    a capital letter. If the gate reports that, it is still checking. The
+    subject is a fixture the change actually touched, so the proof is on the
+    same data as the fix and not on a convenient toy.
+    """
+
+    SUBJECT = "food_clarify_cb_typo_ack"
+
+    def _subject(self):
+        for fixture in ALL_FIXTURES:
+            if fixture.name == self.SUBJECT:
+                return fixture
+        raise AssertionError(
+            f"{self.SUBJECT} is gone from the golden set — this proof has no "
+            "subject and must be re-pointed, not deleted"
+        )
+
+    def test_the_real_reply_satisfies_the_real_rule(self):
+        """The precondition. Without it the next test proves nothing."""
+
+        fixture = self._subject()
+        assert fixture.must_pass, f"{self.SUBJECT} has no must_pass to weaken"
+
+    def test_a_wrong_word_is_reported_on_the_real_reply(self, golden_run):
+        fixture = self._subject()
+        result = golden_run(fixture)
+        assert result.deterministic, (
+            f"{self.SUBJECT} stopped being CI-checkable; this proof needs a "
+            "fixture the gate actually asserts"
+        )
+
+        # Wrong by a word, not by a capital. «записала» is a real reply this
+        # bot gives elsewhere, so this is a plausible regression, not gibberish.
+        failures = evaluate(
+            result.as_trace(),
+            [{"response_contains_any": ["записала в дневник"]}],
+            [],
+        )
+        assert failures, (
+            "the gate accepted a reply that does not contain the required "
+            "phrase — case folding turned the rule off instead of loosening it"
+        )
+
+    def test_a_wrong_skill_is_reported_on_the_real_reply(self, golden_run):
+        """Identifiers stayed exact — the other half of «did not weaken»."""
+
+        result = golden_run(self._subject())
+        assert result.deterministic
+
+        assert evaluate(result.as_trace(), [{"skill_used": "booking"}], [])
+        # …and the same name in another case is still a different skill.
+        assert evaluate(result.as_trace(), [{"skill_used": "FOOD_CLARIFY"}], [])
+
+    def test_a_forbidden_phrase_in_the_real_reply_is_reported(self, golden_run):
+        """However it is capitalised."""
+
+        result = golden_run(self._subject())
+        assert result.deterministic
+        text = result.response_text
+        assert text.strip(), "no reply to build the proof on"
+
+        first_word = text.split()[0]
+        assert evaluate(result.as_trace(), [], [{"response_contains_any": [first_word]}])
+        assert evaluate(result.as_trace(), [], [{"response_contains_any": [first_word.upper()]}]), (
+            "a forbidden phrase escaped by being written in another case"
         )
 
 

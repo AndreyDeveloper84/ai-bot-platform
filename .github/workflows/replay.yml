@@ -9,6 +9,22 @@
 #    answers people — `channels.max.handler._handle_global_max_event_inner`
 #    — and the deterministic replies are held to the fixture in full.
 #    See apps/replay/tests/test_live_path_gate.py.
+# 1b. Every GOLDEN fixture runs through the per-tenant sibling that answers
+#    a salon's clients — `channels.max.handler.handle_max_event` — with the
+#    same deterministic / needs-the-outside-world split. See
+#    apps/replay/tests/test_golden_gate.py.
+#
+#    This step is new, and the name of this job was a lie until it landed.
+#    «golden + adversarial + voice» has been the title since Sprint 5 while
+#    the golden third was only ever parsed: eighty fixtures, checked for
+#    valid YAML, for numbering eighty, and for carrying at least one rule.
+#    Nothing ran one. Executed for the first time, 39 of the 80 did not
+#    pass — a set that had looked like coverage for four sprints and was
+#    not. The live-path gate excluded golden with a correct reason (the
+#    GLOBAL handler dispatches no skills, so golden scenarios would assert
+#    against a system that is not the one under test) and an incorrect
+#    conclusion — that golden therefore could not be gated at all. It has
+#    its own handler, one door over.
 # 2. A red-flag input never reaches a language model, proved with a canary
 #    stub that emits the fixture's own forbidden phrases.
 # 3. All fixtures parse and pass the echo baseline.
@@ -63,10 +79,10 @@
 #   failed job, which is RED, and it says in an ::error annotation which
 #   budget was blown and by which command.
 # * `timeout-minutes` on the job stays at ten and did NOT have to move.
-#   The budgets sum to 360s, so one of them always expires first. It is
-#   now a backstop against a wedged runner — the thing a job-level
-#   timeout is actually good for — and no longer the mechanism that
-#   reports a slow test suite.
+#   The budgets sum to 540s (360s before the golden gate joined), so one
+#   of them always expires first. It is now a backstop against a wedged
+#   runner — the thing a job-level timeout is actually good for — and no
+#   longer the mechanism that reports a slow test suite.
 # * the concurrency group is keyed on the PR number, not the ref, and
 #   `cancel-in-progress` is restricted to pull requests. Superseding a
 #   PR commit is a legitimate grey; cancelling the gate for a commit
@@ -128,16 +144,28 @@ jobs:
   fixtures:
     name: replay fixtures (golden + adversarial + voice)
     runs-on: ubuntu-latest
-    # UNCHANGED, on purpose (DRF-1373). This ceiling was the symptom, never
-    # the defect: the run that hit it was making one outbound HTTP call per
-    # fixture turn, and raising the ceiling would have bought a few weeks of
-    # quiet and then failed again, larger. With that removed the job runs in
-    # 70s (run 32791956392), and the per-step budgets below sum to 360s — so
-    # a budget always expires first, and a budget expiring is RED. This one
-    # is now a backstop against a wedged runner, which is what a job-level
-    # timeout is actually good for. Raise it only together with the budgets,
-    # and only with a measurement in the PR.
-    timeout-minutes: 10
+    # 10 → 15, together with the budgets and with the measurement DRF-1373
+    # asked for.
+    #
+    # DRF-1373 left this at 10 for a good reason: the ceiling was the
+    # symptom, never the defect, and raising it then would have bought a few
+    # weeks of quiet before failing again, larger. That reason still holds
+    # and this is not that move. The golden gate adds a fourth 180s budget;
+    # the budgets now sum to 540s and setup (checkout + cached uv sync)
+    # costs ~90s, so a ten-minute ceiling could fire BEFORE the inner budget
+    # — which is the grey `cancelled` conclusion DRF-1373 removed,
+    # reintroduced by arithmetic. 15 restores the invariant: a budget always
+    # expires first, and a budget expiring is RED.
+    #
+    # Measurement, local, Postgres 16 in Docker, 162 golden tests through
+    # the real handler: 61s, 67s and 72s over three runs. Budget set at 180s —
+    # the same headroom the live-path gate carries over its measured 23s,
+    # because a budget is a tripwire for a regression, not a target.
+    #
+    # Still a backstop against a wedged runner, still not the mechanism that
+    # reports a slow suite. Raise it only together with the budgets, and
+    # only with a measurement in the PR.
+    timeout-minutes: 15
 
     # E2 — `prompt-regression-accepted` label skips the gate.
     # Pushes (not PRs) always run; the label only fires on pull_request.
@@ -246,24 +274,26 @@ jobs:
           SH
           chmod +x "${RUNNER_TEMP}/budget"
 
-      # `test_fixtures.py` and `test_live_path_gate.py` are excluded here
-      # because the two steps below run them by name (DRF-1373). Before, both
-      # files ran twice per job — the live-path gate is the most expensive
-      # thing in this workflow and it was paid for twice, for nothing.
+      # `test_fixtures.py`, `test_live_path_gate.py` and `test_golden_gate.py`
+      # are excluded here because the steps below run them by name
+      # (DRF-1373). Before, both files ran twice per job — the live-path gate
+      # is the most expensive thing in this workflow and it was paid for
+      # twice, for nothing.
       #
       # Every budget below is MEASURED, on run 32791956392 (this branch,
       # green, 70s end to end): engine 14s, fixture sanity 1s, live-path
       # gate 23s. Each budget is that number with room for runner variance
       # and for the corpus to keep growing — a budget is a tripwire for a
-      # regression, not a target. They sum to 360s, which is why the job
-      # ceiling did not have to move: the inner budget always fires first,
-      # and it fires RED.
+      # regression, not a target. They sum to 540s with the golden gate
+      # included, which is why the job ceiling moved from 10 to 15: the
+      # inner budget must fire first, and it fires RED.
       - name: apps.replay unit + integration tests (strict)
         run: |
           "${RUNNER_TEMP}/budget" 120 "engine tests" \
             uv run pytest apps/replay/ \
               --ignore=apps/replay/tests/test_fixtures.py \
               --ignore=apps/replay/tests/test_live_path_gate.py \
+              --ignore=apps/replay/tests/test_golden_gate.py \
               -v --tb=short
 
       - name: Fixture set sanity (fixtures parse + baseline-clean)
@@ -278,6 +308,17 @@ jobs:
         run: |
           "${RUNNER_TEMP}/budget" 180 "live-path gate" \
             uv run pytest apps/replay/tests/test_live_path_gate.py \
+              -v --tb=short --durations=15
+
+      # The golden set, through the handler that answers a salon's clients.
+      # Prints the same covered / needs-the-outside-world split, and also
+      # the preconditions it grants before the turn: a gate that quietly
+      # hands the system a consent record reads exactly like one that found
+      # the consent already there.
+      - name: Golden gate (per-tenant fixtures through the client handler)
+        run: |
+          "${RUNNER_TEMP}/budget" 180 "golden gate" \
+            uv run pytest apps/replay/tests/test_golden_gate.py \
               -v --tb=short --durations=15
 
   # E2 visibility — when the override label is present we still post a

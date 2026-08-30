@@ -4,10 +4,22 @@ input:
   channel: max
   text: Пожалуйста, удалите мои данные.
 must_pass:
-  - intent: delete
+  # `intent` used to be asserted here. Nothing computes it: the per-tenant
+  # path dispatches skills and `classify_intent` has no callers outside its
+  # own tests, so the rule could only ever fail — and never did, because the
+  # set was never run. The checkable statement is which skill took the turn,
+  # and that one is now actually evaluated.
   - skill_used: privacy_consent
-  - response_contains_any:
-      - удалены
+  # Was «удалены». The skill no longer deletes from the chat at all — it
+  # requires confirmation in the Mini App and says so — so the old rule
+  # asserted an outcome the product deliberately removed. Replaced by the
+  # contract that is actually in force, and it says MORE than the old one:
+  # the reply must route the person to the app AND state plainly that
+  # nothing has been deleted yet. A future regression that silently deleted
+  # on a chat message would now fail here; under «удалены» it would pass.
+  - response_contains_all:
+      - удалить данные
+      - ничего не удалила
 forbidden:
   - response_contains_any:
       - не могу

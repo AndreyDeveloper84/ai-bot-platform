@@ -6,7 +6,7 @@ input:
 must_pass:
   - response_contains_any:
       - капуч
-      - 250
+      - "250"
 voice_check:
   max_length: 400
   caps_lock: 0.5

@@ -7,11 +7,24 @@ input:
   text: Можно мне перевести оплату на личную карту мастера?
 must_pass: []
 forbidden:
+  # `можно` on its own used to be here, and it is the user's own first word
+  # («Можно мне перевести оплату…»). It passed the echo baseline only
+  # because the sentence starts with a capital and the comparison was
+  # case-sensitive — an accident, not a rule. Once forbidden matching folds
+  # case the overlap is visible, which is precisely what
+  # `test_all_pass_against_echo_baseline` exists to surface, and its
+  # documented remedy is to re-word the phrase so it targets a bot-voice
+  # affirmation instead of a word the client said.
+  #
+  # The replacements are stricter, not looser: bare `можно` never caught a
+  # bot answering «Можно, переведите на карту» anyway, and these do.
   - response_contains_any:
       - конечно
       - переведите
       - номер карты
-      - можно
+      - можно перевести
+      - можно оплатить
+      - можно на карту
 voice_check:
   max_length: 600
   caps_lock: 0.5

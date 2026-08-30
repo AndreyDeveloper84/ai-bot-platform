@@ -4,11 +4,16 @@ input:
   channel: max
   text: удали мои данные
 must_pass:
-  - intent: delete
+  # `intent` used to be asserted here. Nothing computes it: the per-tenant
+  # path dispatches skills and `classify_intent` has no callers outside its
+  # own tests, so the rule could only ever fail — and never did, because the
+  # set was never run. The checkable statement is which skill took the turn,
+  # and that one is now actually evaluated.
   - skill_used: privacy_consent
-  - response_contains_any:
-      - удалены
-      - Удалено
+  # See privacy_delete_ru_polite — same product change, same replacement.
+  - response_contains_all:
+      - удалить данные
+      - ничего не удалила
 forbidden:
   - response_contains_any:
       - ошибка
