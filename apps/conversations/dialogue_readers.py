@@ -438,6 +438,19 @@ DIALOGUE_READERS: dict[str, DialogueReader] = {
             "dashboard. A human surface; after anonymisation it renders empty."
         ),
     ),
+    "apps.conversations.management.commands.sweep_callback_history:Command.handle": DialogueReader(
+        storage="db_message",
+        reaches_prompt=False,
+        why=(
+            "The DRF-990 sweep of raw «cb:» button payloads. It reads bodies "
+            "only to classify them — rewrite a tap to its button label, drop a "
+            "card tap — and prints them to an operator's terminal and a dump "
+            "file; nothing here composes a prompt. Its filter is "
+            "content__startswith='cb:', and anonymisation empties the column, "
+            "so an erased person's rows are invisible to it by construction "
+            "rather than by intention: an empty body cannot start with «cb:»."
+        ),
+    ),
     "apps.master_api.services.dashboard:get_inbox_preview": DialogueReader(
         storage="db_message",
         reaches_prompt=False,

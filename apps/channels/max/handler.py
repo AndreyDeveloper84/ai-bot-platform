@@ -158,6 +158,7 @@ from apps.orchestrator.discovery import (
     DiscoveryReply,
     execute_catalog_callback,
     execute_clarify_callback,
+    resolve_discover_tap,
 )
 from apps.orchestrator.handoff import (
     BOOKING_CALLBACK_PREFIXES,
@@ -1159,14 +1160,32 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
     #
     #   `cb:visit:*` — карточка визита и «Записаться ещё». Ветка в лестнице
     #       есть с самого начала, в гейте персистенса семейства не было.
-    #   `cb:discover:book:*` — главный призыв к действию на карточке мастера
-    #       и ПЕРВЫЙ шаг той самой воронки, все последующие шаги которой
-    #       (`cb:book:*`) уже молчат. Набранных шагов внутри воронки нет,
-    #       поэтому молчание однородно и асимметрии, из-за которой анкете
-    #       дали фразу, здесь не возникает. Ответы бота (карточка визита,
-    #       передача в салон) пишутся как обычно и держат контекст.
+    #
+    # Семейство `cb:discover:*` — то же решение, но оно переехало ниже, из
+    # `startswith` в резолвер по форме; довод там же.
     is_visit_callback = event.text.startswith(VISIT_CALLBACK_PREFIXES)
-    is_discover_book_callback = event.text.startswith(CALLBACK_DISCOVER_BOOK_PREFIX)
+
+    # DRF-990, третий заход — СЕМЕЙСТВО `cb:discover:`, а не глагол `book:`.
+    #
+    # Боевой замер пилота 30.08: 55 из 68 сырых строк нажатия в истории — это
+    # `cb:discover`. Прогон пятнадцати форм через этот самый хендлер показал,
+    # что #1329 закрыл глагол `book:` ЦЕЛИКОМ (все арности, включая битый id,
+    # перебор сегментов и пустой хвост), а мимо гейта идёт ровно то, что
+    # глаголом `book:` не является: `cb:discover:`, `cb:discover` и любой
+    # глагол семейства, которого сегодня ещё нет. То есть строка `startswith
+    # (CALLBACK_DISCOVER_BOOK_PREFIX)` сторожила ГЛАГОЛ — а решение «тап по
+    # карточке репликой не является» принято про СЕМЕЙСТВО.
+    #
+    # Заменено на резолвер по ФОРМЕ — тем же механизмом, что у анкеты,
+    # приветствия и еды, и по той же причине: `startswith` съел бы реплику
+    # человека, который набрал «cb:discover: …» руками. Довод «молчание», а
+    # не «фраза», целиком в комментарии у самого резолвера
+    # (`apps.orchestrator.discovery.resolve_discover_tap`).
+    #
+    # Устройство гейта — список исключений, а не правило: форма, которую ни
+    # одно семейство не разобрало, по-прежнему пишется дословно. Это
+    # отдельный открытый вопрос, и здесь чинится частный случай.
+    discover_tap = resolve_discover_tap(event.text)
 
     # `stale_tap` — кнопка была настоящая, но фразы за ней уже нет (снятый
     # чип `cb:qa:{слаг}`, «Повторить» без истории). DRF-1051 закрыл для неё
@@ -1188,7 +1207,7 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
     # решения; следующий читатель обязан увидеть его здесь, а не вычитывать из
     # ветки `inbound_history_text is None` десятью строками ниже.
     inbound_history_text: str | None = event.text
-    for tap in (anketa_tap, welcome_tap, food_tap):
+    for tap in (anketa_tap, welcome_tap, food_tap, discover_tap):
         if tap is None:
             # «Это не тап моего семейства» — резолвер пропускает ход дальше и
             # не трогает ни текст, ни персистенс.
@@ -1204,7 +1223,6 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
         or is_catalog_callback
         or is_clarify_redraw_tap
         or is_visit_callback
-        or is_discover_book_callback
         or stale_tap
         or inbound_history_text is None
     ):
@@ -1694,12 +1712,20 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
                             channel=event.channel,
                             trace_id=str(trace_id) if trace_id else "",
                             tenant=None,
-                            # Каждое семейство, чей ход мимо истории проходит
-                            # (booking 2.5, каталог, уточнение, визиты,
-                            # cb:discover:book, протухший тап, приветствие),
-                            # имеет СВОЮ ветку выше и до консьержа не доходит.
-                            # Сюда None приезжает только от нераспознанного
-                            # тапа анкеты/еды правильной формы, и это штатно.
+                            # Почти каждое семейство, чей ход мимо истории
+                            # проходит (booking 2.5, каталог, уточнение,
+                            # визиты, cb:discover:book, протухший тап,
+                            # приветствие), имеет СВОЮ ветку выше и до
+                            # консьержа не доходит. None здесь приезжает от
+                            # тапа, у которого ветки нет: нераспознанный тап
+                            # анкеты/еды правильной формы, а с DRF-990
+                            # (третий заход) — ещё и глагол семейства
+                            # `cb:discover:`, кроме `book:`. Своего маршрута
+                            # у такого глагола сегодня нет, и он доезжает
+                            # сюда сырым `event.text` — это и есть тот самый
+                            # «гейт как список исключений», отдельный
+                            # открытый вопрос. Ход при этом не теряется:
+                            # ответ бота записывается как обычно.
                             user_message_id=user_msg.id if user_msg is not None else None,
                             memory_block=memory_block,
                             nutrition_block=nutrition_block,
