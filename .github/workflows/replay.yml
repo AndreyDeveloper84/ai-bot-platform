@@ -157,10 +157,17 @@ jobs:
     # reintroduced by arithmetic. 15 restores the invariant: a budget always
     # expires first, and a budget expiring is RED.
     #
-    # Measurement, local, Postgres 16 in Docker, 162 golden tests through
-    # the real handler: 61s, 67s and 72s over three runs. Budget set at 180s —
-    # the same headroom the live-path gate carries over its measured 23s,
-    # because a budget is a tripwire for a regression, not a target.
+    # Measurement. On THIS runner, 167 golden tests through the real
+    # handler: 13.9s (run 33318534343). Locally the same suite took 61-72s
+    # over three runs on a loaded Windows box with Postgres in Docker — the
+    # number that sized the budget before CI had ever run it, and it was
+    # five times pessimistic. Recorded because the next person to touch this
+    # budget deserves to know which of the two figures is the real one.
+    #
+    # Budget stays 180s: proportionally the same headroom the live-path gate
+    # carries over its measured 22s, and a budget is a tripwire for a
+    # regression, not a target. Tighten it only with a reason to believe the
+    # corpus has stopped growing.
     #
     # Still a backstop against a wedged runner, still not the mechanism that
     # reports a slow suite. Raise it only together with the budgets, and
