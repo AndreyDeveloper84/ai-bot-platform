@@ -391,6 +391,25 @@ class TestTheResolverDrawsTheLineAtTheForm:
 
         assert resolve_discover_tap(f"{CALLBACK_DISCOVER_BOOK_PREFIX}{T}:{M}") is not None
 
+    def test_a_real_query_ref_fits_the_form(self):
+        """Четвёртый сегмент строит НЕ тест, а сам кодировщик (DRF-1324).
+
+        Литеральный «cXVlcnktcmVm» в параметрах выше — удобная подделка. Если
+        алфавит ссылки когда-нибудь поменяют (padding, другой base64), форма
+        перестанет её покрывать, и тап снова поедет в историю сырым. Здесь
+        ссылка берётся у самого ``encode_query_ref``.
+        """
+        from apps.orchestrator.discovery import (
+            CALLBACK_DISCOVER_BOOK_PREFIX,
+            encode_query_ref,
+            resolve_discover_tap,
+        )
+
+        ref = encode_query_ref("маникюр в пензе недорого")
+        assert ref, "кодировщик вернул пустую ссылку — проверка ниже ни о чём"
+        payload = f"{CALLBACK_DISCOVER_BOOK_PREFIX}{T}:{M}:{S}:{ref}"
+        assert resolve_discover_tap(payload) is not None, payload
+
 
 # --------------------------------------------------------------------------- #
 # 7. Почему здесь нет прогона golden-фикстур                                   #
