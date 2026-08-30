@@ -1,7 +1,8 @@
 """AppConfig for the admin_api package.
 
-``ready()`` registers the ``SITE_DOMAIN`` deploy guard (DRF-1079); the
-check body lives in :mod:`apps.admin_api.checks` next to its rationale.
+``ready()`` registers the master-invite deploy guards — ``SITE_DOMAIN``
+(DRF-1079) and ``MAX_BOT_WEB_APP`` (DRF-1349); the check bodies live in
+:mod:`apps.admin_api.checks` next to their rationale.
 """
 
 from django.apps import AppConfig
@@ -14,6 +15,7 @@ class AdminApiConfig(AppConfig):
     def ready(self) -> None:
         from django.core.checks import register
 
-        from apps.admin_api.checks import check_site_domain
+        from apps.admin_api.checks import check_bot_web_app, check_site_domain
 
         register(check_site_domain)
+        register(check_bot_web_app)

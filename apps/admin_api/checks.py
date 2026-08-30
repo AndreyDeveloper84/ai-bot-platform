@@ -1,4 +1,4 @@
-"""Deploy-time guard for ``SITE_DOMAIN`` (DRF-1079).
+"""Deploy-time guards for the master-invite entry (DRF-1079, DRF-1349).
 
 ### What went wrong without it
 
@@ -64,9 +64,51 @@ def check_site_domain(app_configs: Any, **kwargs: Any) -> list[CheckWarning]:
             "and nowhere else.",
             hint=(
                 f"{SITE_DOMAIN_HINT} Until then the web fallback is "
-                "suppressed and an invited master has only the in-MAX "
-                "deeplink."
+                "suppressed: the owner's screen has no address to copy, "
+                "and the invite DM has only its open_app button."
             ),
             id="admin_api.W001",
+        )
+    ]
+
+
+def check_bot_web_app(app_configs: Any, **kwargs: Any) -> list[CheckWarning]:
+    """Warn when no ``open_app`` button can be built for a master invite.
+
+    DRF-1349 — the same shape of defect as W001 above, one layer in.
+    W001 guards the *fallback*; this one guards the only entry that
+    actually works.
+
+    A MAX Mini App is entered from an ``open_app`` button on the message,
+    and that button needs the bot's Mini App name. Without
+    ``MAX_BOT_WEB_APP`` the invite DM degrades to a bare address — which
+    on a phone opens the external browser, where MAX hands the Mini App
+    no ``initData`` and the onboarding cannot start — or, with no usable
+    ``SITE_DOMAIN`` either, is not sent at all.
+
+    Nobody on our side observes any of that. The endpoint answers 201
+    either way; the only witness is the invited master, who has no
+    channel to report «nothing opens» to anyone who could act. That is
+    why this is a deploy-time check and not a runtime log line alone.
+    """
+
+    from django.conf import settings
+
+    if getattr(settings, "MAX_BOT_WEB_APP", ""):
+        return []
+    return [
+        CheckWarning(
+            "MAX_BOT_WEB_APP is not set — master invites cannot carry an "
+            "open_app button, which is the only way to open a MAX Mini App.",
+            hint=(
+                "Set MAX_BOT_WEB_APP to the bot's Mini App name (the same "
+                "value the welcome keyboard uses). Without it the invite DM "
+                "falls back to a web address that opens the external "
+                "browser, where MAX passes no initData and the Mini App "
+                "answers «MAX не передал данные для входа»; with SITE_DOMAIN "
+                "also unset the DM is not sent at all and the dispatch "
+                "reports delivery=failed."
+            ),
+            id="admin_api.W002",
         )
     ]

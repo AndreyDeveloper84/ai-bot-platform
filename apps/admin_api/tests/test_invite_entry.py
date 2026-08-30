@@ -340,6 +340,49 @@ class TestInviteDmCarriesTheWorkingEntry:
 
 
 # ---------------------------------------------------------------------------
+# The deploy-time guard
+# ---------------------------------------------------------------------------
+
+
+class TestBotWebAppSystemCheck:
+    """``manage.py check`` is where an unset Mini App name has to surface.
+
+    The runtime ERROR line lands in a log nobody reads until someone
+    already complained; the endpoint answers 201 either way. The one
+    observer of a buttonless invite is the invited master, who has no
+    channel to report «nothing opens» to anyone who could act — which is
+    exactly how this survived to the first live invitation.
+    """
+
+    def test_flags_the_unset_mini_app_name(self, settings):
+        from apps.admin_api.checks import check_bot_web_app
+
+        settings.MAX_BOT_WEB_APP = ""
+        assert [w.id for w in check_bot_web_app(None)] == ["admin_api.W002"]
+
+    def test_silent_once_configured(self, settings):
+        """The positive half — a guard that always fires is noise.
+
+        Without this, the check above would also pass on an
+        implementation that warns unconditionally, and the first
+        operator to see W002 on a correctly configured contour would
+        learn to ignore it.
+        """
+        from apps.admin_api.checks import check_bot_web_app
+
+        settings.MAX_BOT_WEB_APP = _WEB_APP
+        assert check_bot_web_app(None) == []
+
+    def test_the_hint_names_the_variable_to_set(self, settings):
+        from apps.admin_api.checks import check_bot_web_app
+
+        settings.MAX_BOT_WEB_APP = ""
+        (warning,) = check_bot_web_app(None)
+        assert warning.hint is not None
+        assert "MAX_BOT_WEB_APP" in warning.hint
+
+
+# ---------------------------------------------------------------------------
 # The fourth break — the destination has to be mounted for the invitee
 # ---------------------------------------------------------------------------
 
