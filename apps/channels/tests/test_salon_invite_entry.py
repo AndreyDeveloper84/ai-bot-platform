@@ -315,6 +315,10 @@ class TestPlainStartIsUntouched:
     def test_no_payload_carries_no_buttons(self, tenant, sent):
         _open(tenant, None)
 
+        # Presence before absence, on the same reply: «no invite
+        # button» is green against a handler that sent nothing at all,
+        # and a handler that sends nothing is the bug next door.
+        assert _text(sent), "silence is not an answer"
         assert _invite_buttons(sent) == []
 
     def test_an_unrelated_payload_is_left_alone(self, tenant, sent):
@@ -365,14 +369,18 @@ class TestARefusalSaysWhatIsWrong:
 
         _open(tenant, f"{_invite_prefix()}{master.invite_token}")
 
-        assert _invite_buttons(sent) == []
         assert "принят" in _text(sent).lower()
+        assert _invite_buttons(sent) == []
 
     def test_a_cancelled_invite_is_not_re_offered(self, tenant, sent):
         master = _master(tenant, invite_status=CatalogMaster.InviteStatus.CANCELLED)
 
         _open(tenant, f"{_invite_prefix()}{master.invite_token}")
 
+        # Presence before absence, on the same reply: «no invite
+        # button» is green against a handler that sent nothing at all,
+        # and a handler that sends nothing is the bug next door.
+        assert _text(sent), "silence is not an answer"
         assert _invite_buttons(sent) == []
 
     def test_a_token_from_another_salon_is_not_found_here(self, tenant, other_tenant, sent):
@@ -387,6 +395,10 @@ class TestARefusalSaysWhatIsWrong:
 
         _open(tenant, f"{_invite_prefix()}{foreign.invite_token}")
 
+        # Presence before absence, on the same reply: «no invite
+        # button» is green against a handler that sent nothing at all,
+        # and a handler that sends nothing is the bug next door.
+        assert _text(sent), "silence is not an answer"
         assert _invite_buttons(sent) == []
 
     def test_that_same_token_works_in_its_own_salon(self, other_tenant, sent):
@@ -409,8 +421,11 @@ class TestARefusalSaysWhatIsWrong:
     def test_a_token_that_names_nothing_is_refused(self, tenant, sent, tail):
         _open(tenant, f"{_invite_prefix()}{tail}")
 
-        assert _invite_buttons(sent) == []
+        # Presence before absence, on the same reply: «no invite
+        # button» is green against a handler that sent nothing at all,
+        # and a handler that sends nothing is the bug next door.
         assert _text(sent), "silence is not an answer"
+        assert _invite_buttons(sent) == []
 
 
 class TestTheBotDoesNotDecideWhoseTokenItIs:
@@ -510,6 +525,9 @@ class TestTheInviteIsReadAboveTheRoleCascade:
 
         _open(tenant, None)
 
+        # The menu header names the salon — presence of the ordinary
+        # reply, ahead of both claims about what it must NOT contain.
+        assert tenant.name in _text(sent)
         assert not _invite_buttons(sent)
         assert "код приглашения" not in _text(sent)
 
@@ -540,4 +558,8 @@ class TestThePayloadIsAcceptableToMAX:
 
         _open(tenant, f"{_invite_prefix()}{uuid.uuid4()}?src=x")
 
+        # Presence before absence, on the same reply: «no invite
+        # button» is green against a handler that sent nothing at all,
+        # and a handler that sends nothing is the bug next door.
+        assert _text(sent), "silence is not an answer"
         assert _invite_buttons(sent) == []
