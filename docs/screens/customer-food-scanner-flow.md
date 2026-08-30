@@ -4,10 +4,10 @@
 |---|---|
 | **Audience** | customer (Анна, любой state — first-time and returning) |
 | **Phase** | P0 — pilot 15 July 2026 (Penza) |
-| **Status** | draft — Phase A–G done, awaiting tech lead sign-off + frontend handoff to W1/Iota |
+| **Status** | r2 — handed off to W1 (#164). Adds F0 photo consent, ED-mode branch, /дневник surface, loading-card string align |
 | **Channel** | MAX webview (Mini App inside MAX messenger) |
 | **Stream** | Tau (UX/Design) |
-| **Date** | 2026-05-25 r1 |
+| **Date** | 2026-06-02 r2 |
 | **Severity** | P0 BLOCKER — main magic moment per founder, без рабочего scanner dashboard quick action «📸 Сфотографируй еду» нечем оперировать |
 | **Selected variant** | **Variant A — Wizard** (4 screens with MAX BackButton navigation) |
 | **Tone foundation** | approximate / calm / supportive / editable / non-medical / action-oriented |
@@ -28,10 +28,20 @@
 
 ### Flow diagram
 
+> **First-scan gate:** F0 photo-consent runs ONCE before customer's first scan
+> (`food_photo_consent_at IS NULL`). Subsequent scans skip F0.
+
 ```
 Dashboard 📸 quick action
         │
-        ▼
+        ▼ (first scan only)
+┌──────────────────┐    Не сейчас          ┌──────────────────┐
+│ F0 — Photo       │ ────────────────────► │ Dashboard         │
+│   consent        │                       └──────────────────┘
+│ • accept/decline │
+└────────┬─────────┘
+         │ Хорошо, продолжим
+         ▼
 ┌──────────────────┐    Отменить / Back   ┌──────────────────┐
 │ F1 — Capture     │ ────────────────────►│ Dashboard         │
 │ • meal-type chip │                      └──────────────────┘
@@ -85,9 +95,72 @@ Dashboard 📸 quick action
 - ✅ Use: «примерно», «похоже на», «можно уточнить», «записала», «прикинула», «узнала», «заметила»
 - ❌ Avoid: «слишком много», «вредно», «так нельзя», «у вас проблема», «лечит», «устраняет», quantifiers like «много/мало» as judgment
 
+### Safety branch — ED mode (`user.eating_disorder_flag = true`)
+
+> Per memory `cross-domain-insight-safety-gap` + `wellness-mvp-scaled-pilot` SCALED scope. When flag is set, Ayla backend returns no calorie/macro numbers. UI mirrors that: hides ккал/БЖУ across F3/F4 and /дневник, replaces with calm acknowledgment copy. No daily total bar. Customer never sees numbers, никаких «прогресс к норме». See §6bis for variant screens.
+
 ---
 
-## 2. F1 — Capture
+## 2. F0 — Photo consent (first scan only)
+
+```
+┌──────────────────────────────────────────────┐
+│  ←  Фото и приватность                        │  Header 56dp
+│  ─────────────────────────────────────       │
+│                                               │
+│  ┌──────────────────────────────────────┐   │
+│  │           📷                            │   │  Calm illustration
+│  └──────────────────────────────────────┘   │
+│                                               │
+│  Прежде чем сделать первое фото —             │  Hook (Ayla voice)
+│  короткое слово.                              │
+│                                               │
+│  Чтобы узнать блюдо, я отправлю фото          │  Body §1
+│  в свой сервис распознавания. После           │
+│  распознавания фото удаляется — я не          │
+│  храню картинки.                              │
+│                                               │
+│  В дневник идёт только название блюда         │  Body §2
+│  и примерные цифры.                           │  (scope limit)
+│                                               │
+│  Поменять можно в Профиль → Приватность.      │  Exit door
+│                                               │
+│  ─────────────────────────────────────       │
+│                                               │
+│  ┌──────────────────────────────────────┐   │
+│  │  Хорошо, продолжим                     │   │  Primary
+│  └──────────────────────────────────────┘   │  → F1
+│  ┌──────────────────────────────────────┐   │
+│  │  Не сейчас                             │   │  Secondary
+│  └──────────────────────────────────────┘   │  → Dashboard
+│                                               │
+└──────────────────────────────────────────────┘
+```
+
+### Implementation notes
+
+- **Trigger:** F0 shows ONCE before customer's first scan. Detection: `BotUser.food_photo_consent_at IS NULL`. Set to `now()` on `Хорошо, продолжим` tap. Skip F0 on subsequent scans.
+- **Coordination with onboarding S2 consent:** S2 (per `customer-onboarding-flow.md` §5) covers general data scope. F0 is photo-specific scope override per `wellness-mvp-scaled-pilot` SCALED variant. Both flags coexist: `consent_at` (general) + `food_photo_consent_at` (photo-specific).
+- **«Не сейчас» path:** no error, no shame — silent return to dashboard. Customer keeps photo CTA visible; next scan re-triggers F0 (no 7d throttle MVP — re-confirm per attempt for honesty).
+- **Withdrawal:** «Поменять можно в Профиль → Приватность» — points to `customer-profile-flow.md` privacy zone. When customer revokes there, `food_photo_consent_at` returns to NULL and next scan re-triggers F0.
+- **No checkbox.** Active tap on primary button = explicit consent per 152-ФЗ + Brand Guardian "no pre-checked consent" rule.
+- **Backend touch:** Alpha owns `BotUser.food_photo_consent_at: datetime | null` field migration. ~1h.
+- **Anti-pattern:** ❌ legal wall, ❌ scary lawyer-speak, ❌ pre-checked consent, ❌ blocking dashboard return on «Не сейчас».
+
+### Voice rules applied (F0)
+
+| Element | Rule | Status |
+|---|---|---|
+| Hook «короткое слово» | Humanizes legal moment (reuse from onboarding S2) | ✅ |
+| «отправлю фото в свой сервис распознавания» | First-person Ayla owns the data flow | ✅ |
+| «После распознавания фото удаляется — я не храню картинки.» | Explicit retention scope, first-person | ✅ |
+| «Поменять можно в Профиль → Приватность.» | Exit door from start | ✅ |
+| Primary «Хорошо, продолжим» | Soft affirmative, не «Соглашаюсь» legalese | ✅ |
+| Secondary «Не сейчас» | Dignity preserved, door open (mirrors onboarding S2 refused) | ✅ |
+
+---
+
+## 3. F1 — Capture
 
 ```
 ┌──────────────────────────────────────────────┐
@@ -138,7 +211,7 @@ Dashboard 📸 quick action
 
 ---
 
-## 3. F2 — Processing
+## 4. F2 — Processing
 
 ```
 ┌──────────────────────────────────────────────┐
@@ -150,7 +223,7 @@ Dashboard 📸 quick action
 │  └──────────────────────────────────────┘   │
 │                                               │
 │                                               │
-│        Узнаю что на фото                      │  Ayla state line
+│        👀 Распознаю…                          │  Ayla state line
 │                                               │
 │              ●                                │  Pulsing dots
 │            ●   ●                              │  (sage-green,
@@ -169,6 +242,7 @@ Dashboard 📸 quick action
 
 ### Implementation notes
 
+- **Loading line canon:** «👀 Распознаю…» (r2 — replaces earlier «Узнаю что на фото»). Single emoji prefix (👀), first-person feminine, present action, ellipsis signals in-flight. Aria: emoji `aria-hidden="true"`, text «Распознаю» in `role="status" aria-live="polite"`.
 - **Initial state (0-3s):** только Ayla line + loading dots, без cancel button
 - **After 3s delay:** auto-surface «Если занимает дольше...» + Cancel button
 - **Cancel mechanics:** `AbortController.abort()` на httpx request frontend-side. If backend response returns после cancel — UI ignores (state = `cancelled`)
@@ -178,7 +252,7 @@ Dashboard 📸 quick action
 
 ---
 
-## 4. F3 — Recognition result + edit
+## 5. F3 — Recognition result + edit
 
 ### F3 — high confidence (≥0.6)
 
@@ -252,7 +326,7 @@ Same layout, but:
 
 ---
 
-## 5. F3-Clarify Modal (overlay)
+## 6. F3-Clarify Modal (overlay)
 
 Triggered by tap on `✏️ Уточнить`:
 
@@ -296,7 +370,7 @@ Triggered by tap on `✏️ Уточнить`:
 
 ---
 
-## 6. F4 — Saved confirmation
+## 7. F4 — Saved confirmation
 
 ```
 ┌──────────────────────────────────────────────┐
@@ -338,7 +412,113 @@ Triggered by tap on `✏️ Уточнить`:
 
 ---
 
-## 7. States
+## 8. ED-mode variants (`user.eating_disorder_flag = true`)
+
+> **Trigger:** Backend flag `eating_disorder_flag` set via post-pilot anketa OR explicit Профиль → Питание setting (MVP: founder Q post-pilot). When true, Ayla returns nutrition payload with `nutrition = null` AND `display_numbers = false`. UI MUST hide all calorie/macro numbers and replace metric framing with calm acknowledgment. See memory `cross-domain-insight-safety-gap` для safety lineage.
+
+### F3 — ED variant
+
+```
+┌──────────────────────────────────────────────┐
+│  ←  Распознанное                       ⋯     │
+│  ─────────────────────────────────────       │
+│                                               │
+│  ┌──────────────────────────────────────┐   │
+│  │     [photo thumbnail ~80dp]            │   │
+│  └──────────────────────────────────────┘   │
+│                                               │
+│  Узнала: гречка с курицей                     │  Dish name kept
+│                                               │  (recognition value)
+│  Питание не оцениваю — это безопасно.         │  ED-mode line
+│                                               │  (replaces metrics)
+│                                               │
+│  ── Порция ──                                 │
+│                                               │
+│  ┌──────────────────────────────────────┐   │
+│  │  Размер: обычный   ▾                  │   │  Discrete chips:
+│  │  ( поменьше · обычный · побольше )   │   │  no grams, no %
+│  └──────────────────────────────────────┘   │
+│                                               │
+│  ── Когда ──                                  │
+│                                               │
+│  ┌────────┐ ┌─────────┐ ┌──────┐ ┌─────────┐ │  Meal-type editable
+│  │ 🌅     │ │ 🥗 ●     │ │ 🍽   │ │ 🍎      │ │
+│  │Завтрак │ │ Обед    │ │ Ужин │ │Перекус  │ │
+│  └────────┘ └─────────┘ └──────┘ └─────────┘ │
+│                                               │
+│  Заметка (необязательно):                     │
+│  ┌──────────────────────────────────────┐   │
+│  │                                        │   │
+│  └──────────────────────────────────────┘   │
+│                                               │
+│  ─────────────────────────────────────       │
+│                                               │
+│  ┌──────────────────────────────────────┐   │
+│  │  Записать в дневник                    │   │  Primary (no ✓ chrome
+│  └──────────────────────────────────────┘   │   to keep neutral)
+│  ┌──────────────────────────────────────┐   │
+│  │  Уточнить                              │   │  Secondary
+│  └──────────────────────────────────────┘   │
+│  ┌──────────────────────────────────────┐   │
+│  │  Не то                                 │   │  Tertiary
+│  └──────────────────────────────────────┘   │
+└──────────────────────────────────────────────┘
+```
+
+### F4 — ED variant
+
+```
+┌──────────────────────────────────────────────┐
+│  ←  Записано                                  │
+│  ─────────────────────────────────────       │
+│                                               │
+│            Записала                           │  No ✓ chrome,
+│                                               │  no celebrative
+│                                               │  visual
+│  Гречка с курицей.                            │  Recap WITHOUT ккал
+│                                               │
+│  ─────────────────────────────────────       │
+│                                               │
+│  ┌──────────────────────────────────────┐   │
+│  │  Открыть дневник                       │   │  Primary
+│  └──────────────────────────────────────┘   │
+│  ┌──────────────────────────────────────┐   │
+│  │  Готово                                │   │  Secondary
+│  └──────────────────────────────────────┘   │
+│                                               │
+└──────────────────────────────────────────────┘
+```
+
+### Implementation notes
+
+- **Backend signal:** `ScanResponse.display_numbers = false` (Alpha owns flag on response envelope). UI MUST honor independent of `nutrition` payload presence. If `display_numbers == false`, hide ALL of: «~480 ккал» line, «Б 35 · Ж 8 · У 50 г» line, daily total bar, percent indicator.
+- **Portion control swap:** discrete chips «поменьше · обычный · побольше» (3 options) replace «−/100%/+» numeric stepper. No gram weights shown. Submit translates to `portion_multiplier` (0.75 / 1.0 / 1.25) backend-side.
+- **F3 line «Питание не оцениваю — это безопасно.»** — Ayla owns the calm framing. NOT «вы попросили скрыть» (deflecting) — Ayla owns the choice.
+- **F4 «Записала.»** — single word + period. NO «✓» chrome (celebrative tick reads as approval-of-amount). NO daily total bar. NO weekly progress integration.
+- **/дневник entries** (см. §11) also hide ккал в ED-mode.
+- **Reject toast** unchanged — REJECTED_ACK already neutral.
+- **Not Recognized / API down** states unchanged — error copy is already neutral.
+- **Manual entry fallback** — same ED treatment: no ккал shown anywhere.
+- **Reminders (B7/B9 voice templates):** when backend ships, B7 nutrition reminders for ED-flagged users MUST be entirely deactivated, NOT just stripped of numbers. Out of scope this spec — flagged for `customer-reminders-voice.md` author.
+- **Anti-patterns в ED-mode:**
+  - ❌ «Я знаю, что калории — это сложная тема» (acknowledging the issue draws attention to it)
+  - ❌ «Можно показать цифры в Настройках» (giving an easy path back undermines protection)
+  - ❌ Progress bar / streak / daily total в любой форме
+  - ❌ «Питание выглядит хорошо» (positive judgment still a judgment)
+  - ❌ Insight cards про питание
+
+### Voice rules applied (ED-mode)
+
+| Element | Rule | Status |
+|---|---|---|
+| F3 «Питание не оцениваю — это безопасно.» | Ayla owns the choice; «безопасно» frames it as protection, not deprivation | ✅ |
+| F3 portion chips «поменьше · обычный · побольше» | Relative, non-numeric, intuitive | ✅ |
+| F4 «Записала.» | Single word, no celebration, neutral recap | ✅ |
+| /дневник entry «Сегодня · 14:32 · Гречка с курицей» | Time + dish, no ккал | ✅ |
+
+---
+
+## 9. States
 
 ### State — Not Recognized (FoodNotRecognizedError)
 
@@ -448,7 +628,7 @@ Tap on `❌ Не то` from F3:
 
 ---
 
-## 8. Manual entry fallback (no-photo path)
+## 10. Manual entry fallback (no-photo path)
 
 Activated from:
 - «Не разобралась» state → `✎ Написать вручную`
@@ -489,11 +669,152 @@ Activated from:
 
 ---
 
-## 9. Backend mapping (final)
+## 11. /дневник surface (food diary landing)
+
+> **Entry points:** F4 «Открыть дневник» CTA · Dashboard pulse Питание tap · «День → Питание» bottom-nav tab. All three land on this single surface. Per memory `wellness-mvp-scaled-pilot` SCALED scope — /дневник is one of the three explicit MVP surfaces.
+
+### Populated state — standard (numbers shown)
+
+```
+┌──────────────────────────────────────────────┐
+│  ←  Дневник питания                           │  Header 56dp
+│  ─────────────────────────────────────       │
+│                                               │
+│  ── Сегодня · 2 июня ──                       │  Day group header
+│                                               │
+│  1 720 / 2 100 ккал                           │  Daily total
+│  ▓▓▓▓▓▓▓▓▓▓▓░░░  82 %                         │  (hidden in ED-mode)
+│  Б 95 · Ж 48 · У 170 г                        │
+│                                               │
+│  ┌──────────────────────────────────────┐   │
+│  │  🌅 08:14 · Завтрак                   │   │  Entry card
+│  │  Овсянка с ягодами · ~340 ккал        │   │  meal-type icon
+│  │  ────────────────────                  │   │  time · meal-type
+│  │  🥗 13:32 · Обед                       │   │  dish · ~ккал
+│  │  Гречка с курицей · ~480 ккал         │   │
+│  │  ────────────────────                  │   │  Tap entry → detail
+│  │  🍎 16:08 · Перекус                    │   │  (post-pilot)
+│  │  Яблоко · ~75 ккал                     │   │
+│  │  ────────────────────                  │   │
+│  │  🍽 19:24 · Ужин                       │   │
+│  │  Курица гриль · ~825 ккал              │   │
+│  └──────────────────────────────────────┘   │
+│                                               │
+│  ┌──────────────────────────────────────┐   │
+│  │  📸 Записать ещё                       │   │  Primary CTA
+│  └──────────────────────────────────────┘   │  → F1 (or F0 first)
+│                                               │
+│  ── Вчера ──                                  │  Previous day group
+│                                               │  collapsed by default
+│  4 записи · 2 030 ккал                        │  tap → expand
+│                                               │
+└──────────────────────────────────────────────┘
+```
+
+### Empty state (no entries yet)
+
+```
+┌──────────────────────────────────────────────┐
+│  ←  Дневник питания                           │
+│  ─────────────────────────────────────       │
+│                                               │
+│  ┌──────────────────────────────────────┐   │
+│  │                                        │   │
+│  │           📷                            │   │  Calm illustration
+│  │                                        │   │  (mirrors F0/F1)
+│  └──────────────────────────────────────┘   │
+│                                               │
+│  Дневник пока пустой.                         │  Empty hook
+│                                               │
+│  Сделай первое фото — соберём                 │  Voice continuation,
+│  вместе.                                      │  collaborative
+│                                               │
+│  ┌──────────────────────────────────────┐   │
+│  │  📸 Сделать фото                       │   │  Primary CTA
+│  └──────────────────────────────────────┘   │  → F1 (or F0 first)
+│  ┌──────────────────────────────────────┐   │
+│  │  ✎ Написать вручную                   │   │  Secondary
+│  └──────────────────────────────────────┘   │  → manual entry
+│                                               │
+└──────────────────────────────────────────────┘
+```
+
+### Populated state — ED variant
+
+```
+┌──────────────────────────────────────────────┐
+│  ←  Дневник питания                           │
+│  ─────────────────────────────────────       │
+│                                               │
+│  ── Сегодня · 2 июня ──                       │
+│                                               │
+│  4 записи                                     │  Count only,
+│                                               │  no totals, no bar
+│  ┌──────────────────────────────────────┐   │
+│  │  🌅 08:14 · Завтрак                   │   │
+│  │  Овсянка с ягодами                    │   │  No ккал shown
+│  │  ────────────────────                  │   │
+│  │  🥗 13:32 · Обед                       │   │
+│  │  Гречка с курицей                     │   │
+│  │  ────────────────────                  │   │
+│  │  🍎 16:08 · Перекус                    │   │
+│  │  Яблоко                                │   │
+│  │  ────────────────────                  │   │
+│  │  🍽 19:24 · Ужин                       │   │
+│  │  Курица гриль                          │   │
+│  └──────────────────────────────────────┘   │
+│                                               │
+│  ┌──────────────────────────────────────┐   │
+│  │  📸 Записать ещё                       │   │
+│  └──────────────────────────────────────┘   │
+│                                               │
+└──────────────────────────────────────────────┘
+```
+
+### Implementation notes
+
+- **Endpoint:** `daily_summary(external_user_id, date_from?, date_to?)` returns day-grouped entries. ED-mode hides totals + macros.
+- **Date scope:** today + last 7 days collapsed groups. Tap day group → expands. No infinite scroll MVP (per `customer-records-flow.md` precedent).
+- **«Записать ещё» CTA wiring:** routes to F0 if `food_photo_consent_at IS NULL`, else F1 directly.
+- **Empty state:** no daily total scaffold, no «Б — · Ж — · У — г» dashes (Brand Guardian rule — don't render dashes-as-data per dashboard precedent).
+- **Empty state CTA:** primary photo path + secondary manual entry — same options customer has on dashboard quick action, mirrored for symmetry.
+- **Manual entry → /дневник:** after manual log saves, /дневник shows entry с recap «Гречка с курицей — записано» (no ккал if not computed — same rule as F4).
+- **ED-mode toggle:** if customer flag changes mid-day, /дневник re-renders без ккал immediately on next open. NO retroactive scrub — historical entries lose number display but data retained backend-side (per founder Q post-pilot).
+- **Entry tap-to-detail:** post-pilot (entry card opens detail modal with edit/delete). MVP read-only list.
+
+### Voice rules applied (/дневник)
+
+| Element | Rule | Status |
+|---|---|---|
+| Header «Дневник питания» | Simple noun, не «Журнал калорий» (clinical) | ✅ |
+| Day group «Сегодня · 2 июня» | Relative + absolute, calm formatting | ✅ |
+| Empty hook «Дневник пока пустой.» | Factual, no apology, no «начни прямо сейчас!» pressure | ✅ |
+| Empty CTA hook «Сделай первое фото — соберём вместе.» | Collaborative «соберём вместе» (mirror F3 low-conf tooltip voice) | ✅ |
+| Entry recap «Гречка с курицей · ~480 ккал» | Dish first, «~» visual signal preserved | ✅ |
+| Day group collapsed summary «4 записи · 2 030 ккал» | Count + total, neutral | ✅ |
+| ED-mode entry «Гречка с курицей» | Dish only, no ккал, no «не оцениваю» banner (avoid drawing attention) | ✅ |
+| «📸 Записать ещё» | Continuation tone — «ещё» preserves agency, не «обязательно зафиксировать» | ✅ |
+
+### Anti-patterns avoided (NOT present)
+
+- ❌ «Не достигли цели» / streak warnings — guilt tone
+- ❌ «Поздравляем — 1 720 ккал!» — celebratory calorie tone (anxiety-inducing)
+- ❌ Pie charts / breakdowns — visual diet-app aesthetic
+- ❌ «Поделиться дневником» — privacy violation
+- ❌ «Сравнить с друзьями» — anti-pattern на 100%
+- ❌ Empty state с pre-filled fake entries («Пример: овсянка...») — fake data
+
+---
+
+## 12. Backend mapping (final)
 
 | Step / action | Endpoint | Notes |
 |---|---|---|
-| F1 → F2 (submit photo) | `scan_photo(external_user_id, image_bytes, filename="meal.jpg", portion_multiplier?)` | Returns `ScanResponse(scan_id, dish_name, confidence, portion_g, nutrition, provider, raw)` |
+| F0 check «consent given?» | Read `BotUser.food_photo_consent_at` (Alpha owns field) | NULL → show F0 before F1. Datetime → skip F0 |
+| F0 → F1 (accept) | `PATCH /api/v1/customer/me/food-photo-consent { granted: true }` (Alpha owns endpoint) | Sets `food_photo_consent_at = now()` |
+| F0 → Dashboard (decline) | No backend call | Silent return; next scan re-triggers F0 |
+| Profile → revoke photo consent | `PATCH /api/v1/customer/me/food-photo-consent { granted: false }` | Sets `food_photo_consent_at = NULL` |
+| F1 → F2 (submit photo) | `scan_photo(external_user_id, image_bytes, filename="meal.jpg", portion_multiplier?)` | Returns `ScanResponse(scan_id, dish_name, confidence, portion_g, nutrition, provider, raw, display_numbers)`. `display_numbers=false` ⇒ ED-mode rendering |
 | F2 cancel | Frontend `AbortController.abort()` | Backend response ignored if late |
 | F3 portion change | Local UI recalculation (or backend if supported) | TBD per founder Q1 |
 | F3 → F4 (Save «to_diary») | `log_meal(external_user_id, scan_id, meal_type, portion_multiplier, idempotency_key)` | `idempotency_key = f"diary:{external_id}:{scan_id}"` |
@@ -501,9 +822,12 @@ Activated from:
 | F3-Clarify → new photo | Local navigate to F1 | No backend call |
 | F3 → Reject («❌ Не то») | No backend call (silent ack) | Per skill.py contract |
 | Manual entry → log | `log_meal(dish_name=..., meal_type, portion_multiplier=1.0, idempotency_key)` | scan_id=None |
-| F4 daily summary delta | `daily_summary(external_user_id)` | Refresh after log |
-| F4 «Открыть дневник» CTA | Navigate to День → Питание tab | No backend call |
+| F4 daily summary delta | `daily_summary(external_user_id)` | Refresh after log. Honors `display_numbers` flag — ED-mode hides totals |
+| F4 «Открыть дневник» CTA | Navigate to /дневник (День → Питание tab) | No backend call |
 | F4 «Готово» CTA | Navigate to Dashboard | No backend call |
+| /дневник landing | `daily_summary(external_user_id, date_from=today-7d, date_to=today)` | Day-grouped entries. ED-mode hides totals + macros |
+| /дневник «Записать ещё» CTA | Re-check `food_photo_consent_at` | Routes F0 if NULL, F1 if datetime |
+| ED-mode signal | `display_numbers` on every nutrition-returning endpoint | Alpha owns flag propagation. UI MUST honor independent of `nutrition` presence |
 
 ### Error mapping
 
@@ -518,7 +842,7 @@ Activated from:
 
 ---
 
-## 10. Brand notes
+## 13. Brand notes
 
 ### Voice rules applied
 
@@ -526,7 +850,7 @@ Activated from:
 |---|---|---|
 | F1 greeting «Что ешь сейчас?» | Open question, no pressure | ✅ |
 | F1 privacy note «Фото нужно только чтобы узнать блюдо — удаляю сразу.» | First-person Ayla (corrected from sterile «Удаляется...») | ✅ Brand Guardian fix |
-| F2 «Узнаю что на фото» | First-person feminine, present action | ✅ |
+| F2 «👀 Распознаю…» | First-person feminine, single emoji prefix, present action with ellipsis | ✅ r2 |
 | F3 high-conf «Узнала: гречка с курицей» | Confident verb «Узнала» per skill.py confidence ≥0.6 | ✅ |
 | F3 low-conf «Похоже на: гречка с курицей» | Hedge per skill.py confidence <0.6 | ✅ |
 | F3 low-conf tooltip «Прикинула приблизительно — давай уточним вместе» | Collaborative «уточним вместе» (corrected from отстранённое «проверь сама») | ✅ Brand Guardian fix |
@@ -534,6 +858,13 @@ Activated from:
 | F3 «Примерно» section header | Frames whole metric block as approximate | ✅ |
 | F4 «✓ Записала» | First-person confirmation, single visual element | ✅ |
 | F4 «Открыть дневник» / «Готово» | Plain action verbs, no wellness-OS overpromise | ✅ |
+| F0 «Прежде чем сделать первое фото — короткое слово.» | Humanizing consent moment (reuse from onboarding S2 voice) | ✅ r2 |
+| F0 «отправлю фото в свой сервис распознавания» | First-person Ayla owns data flow | ✅ r2 |
+| F0 «Хорошо, продолжим» / «Не сейчас» | Soft affirmative, dignity preserved | ✅ r2 |
+| ED-mode F3 «Питание не оцениваю — это безопасно.» | Ayla owns the choice; «безопасно» frames as protection not deprivation | ✅ r2 |
+| ED-mode F4 «Записала.» | Single word, neutral confirmation, no celebration chrome | ✅ r2 |
+| ED-mode /дневник «Гречка с курицей» (no ккал) | Dish only, banner-free — avoids drawing attention to the omission | ✅ r2 |
+| /дневник empty «Сделай первое фото — соберём вместе.» | Collaborative continuation (mirror F3 voice) | ✅ r2 |
 | Reject toast «Поняла, не записываю. Если хочешь — пришли ещё фото.» | Non-judgmental recovery, door left open | ✅ Reference quality |
 | Not recognized «Фото немного сложное — не разобралась» | Ayla takes blame for recognition, not customer | ✅ Reference quality |
 | API down «Сервис распознавания временно недоступен. Попробуй через минуту.» | Calm, factual, not panic | ✅ |
@@ -560,7 +891,7 @@ Activated from:
 
 ---
 
-## 11. Accessibility (WCAG 2.2 AA)
+## 14. Accessibility (WCAG 2.2 AA)
 
 Detailed audit referenced from `customer-main-wellness-dashboard.md` §8. Food scanner specific items below.
 
@@ -570,13 +901,13 @@ Detailed audit referenced from `customer-main-wellness-dashboard.md` §8. Food s
 
 2. **1.4.3 Contrast** — Confidence indicators (low-conf border highlight), success check «✓ Записала», disabled photo button (offline) — all must meet 4.5:1 body / 3:1 non-text.
 
-3. **1.1.1 Non-text Content** — Photo preview thumbnails need `alt="Фото блюда"` (или `aria-label`). Loading dots на F2 — `aria-hidden="true"` (decorative) + `role="status" aria-live="polite"` для «Узнаю что на фото» text.
+3. **1.1.1 Non-text Content** — Photo preview thumbnails need `alt="Фото блюда"` (или `aria-label`). Loading dots на F2 — `aria-hidden="true"` (decorative) + `role="status" aria-live="polite"` для «Распознаю» text. Emoji 👀 в loading line — `aria-hidden="true"` (screen reader читает только «Распознаю»).
 
 4. **1.3.1 Info & Relationships** — F3 portion + macros composite `aria-label`: «Примерно 150 граммов, 480 килокалорий. Белки 35, жиры 8, углеводы 50 граммов.»
 
 5. **2.4.3 Focus Order** — F1: header → meal-type chips → photo CTAs → date → privacy note. F3: photo → dish name → portion controls → meal-type → note → action buttons (primary first).
 
-6. **4.1.3 Status Messages** — F2 «Узнаю что на фото» = `role="status" aria-live="polite"`. F3 portion change = `aria-live="polite"` для «Калории: ~480 ккал» update. F4 «✓ Записала» = `role="status"`.
+6. **4.1.3 Status Messages** — F2 «Распознаю» = `role="status" aria-live="polite"`. F3 portion change = `aria-live="polite"` для «Калории: ~480 ккал» update. F4 «✓ Записала» = `role="status"`.
 
 7. **3.3.1 Error Identification** — Error states (Not recognized / API down / Photo failed) headers should be `role="alert"` for screen reader announcement.
 
@@ -596,7 +927,7 @@ Detailed audit referenced from `customer-main-wellness-dashboard.md` §8. Food s
 
 ---
 
-## 12. Variants considered
+## 15. Variants considered
 
 | Variant | Status | Rationale |
 |---|---|---|
@@ -606,7 +937,7 @@ Detailed audit referenced from `customer-main-wellness-dashboard.md` §8. Food s
 
 ---
 
-## 13. Open questions / followups
+## 16. Open questions / followups
 
 ### For tech lead (backend investigation)
 
@@ -616,6 +947,8 @@ Detailed audit referenced from `customer-main-wellness-dashboard.md` §8. Food s
 | **Q-BACK-2** | `scan_photo()` returns scan_id and holds temp result до `log_meal()` reference? TTL? | ✅ RESOLVED 2026-05-25 | TTL owned by Ayla side, нет SCAN_NOT_FOUND error code currently. Expired scan routes to AYLA_DOWN_FALLBACK generic message — UX покрывает. Future: Alpha adds SCAN_NOT_FOUND error code (post-pilot). |
 | **Q-BACK-3** | MAX webview file input `<input type="file" capture="environment">` поддержка на Android/iOS production? | ⚠ Open | If unsupported on iOS → gallery-only fallback needed |
 | **Q-BACK-4** | Cross-domain insight backend `insight_text` уже проходит safety filter (anti-medical, anti-shame)? | ✅ RESOLVED 2026-05-25 | Cross-domain insight card REMOVED from MVP. bot-platform-side не рендерит, anti-medical safety filter не в production, sample rule already medical-adjacent. Post-pilot re-introduce после Alpha safety audit templates. |
+| **Q-BACK-5** (r2) | `BotUser.food_photo_consent_at: datetime \| null` field + revoke endpoint owned by Alpha? Timeline для pilot? | ⚠ Open | Blocks F0 wiring. ~1h scope. |
+| **Q-BACK-6** (r2) | `ScanResponse.display_numbers` flag + `daily_summary` honors it? Who flips `eating_disorder_flag` MVP — Profile setting? Anketa? | ⚠ Open | Blocks ED-mode wiring. MVP toggle source TBD founder. |
 
 ### For founder (UX choices, not blockers)
 
@@ -637,10 +970,16 @@ Detailed audit referenced from `customer-main-wellness-dashboard.md` §8. Food s
 8. **MAX BackButton wiring:** on F2/F3/F4 → BackButton confirms навигация (no data loss prompt MVP, может add post-pilot если customers lose unsaved edits)
 9. **Idempotency key уникальность:** `f"diary:{external_id}:{scan_id}"` per skill.py. If same combination retry — backend returns same log_id (idempotent)
 10. **Reduced motion:** detect via CSS `@media (prefers-reduced-motion: reduce)` — apply to loading dots + transitions
+11. **F0 consent gate (r2):** check `food_photo_consent_at` before EVERY entry point routing to F1 — dashboard quick action, /дневник «Записать ещё» CTA, Not Recognized «Сделать заново», Manual entry's «📸 Сделать фото» exit. If NULL → render F0 first; on accept set + navigate F1.
+12. **F0 store via lightweight client method:** suggested `consentClient.grantFoodPhotoConsent()` / `revokeFoodPhotoConsent()` thin wrappers. Persist locally optimistic; reconcile с backend.
+13. **ED-mode rendering (r2):** treat `display_numbers === false` as branch switch BEFORE rendering F3/F4/daily_summary. Render variant blocks per §8. ED-mode portion chips submit `portion_multiplier ∈ {0.75, 1.0, 1.25}` mapped from `поменьше · обычный · побольше`.
+14. **/дневник wiring (r2):** route from F4 «Открыть дневник» CTA + dashboard pulse Питание + bottom-nav День → Питание tap — all land same component. Re-fetch `daily_summary` on every mount. Day-grouped today + last 7d (no infinite scroll MVP).
+15. **/дневник CTA chain (r2):** «Записать ещё» / «📸 Сделать фото» (empty state) re-check consent gate per #11.
+16. **Loading line (r2):** «👀 Распознаю…» — emoji `aria-hidden="true"`, text wrapped в `role="status" aria-live="polite"`. Ellipsis is U+2026 (single char) not three dots.
 
 ---
 
-## 14. Skills used (subagent review trail)
+## 17. Skills used (subagent review trail)
 
 | Skill / Subagent | Phase | Findings summary |
 |---|---|---|
@@ -652,7 +991,7 @@ Detailed audit referenced from `customer-main-wellness-dashboard.md` §8. Food s
 
 ---
 
-## 15. Status next steps
+## 18. Status next steps
 
 - [x] Phase A — read wellness-input-modules + food_scanner skill code + nutrition_client
 - [x] Phase B — plan 4 screens + 7 open questions + variant direction
@@ -660,7 +999,8 @@ Detailed audit referenced from `customer-main-wellness-dashboard.md` §8. Food s
 - [x] Phase D — detail + states matrix (loading / not recognized / API down / photo failed / offline / reject toast / manual entry fallback)
 - [x] Phase E — Variant A selected per founder direction (Wizard)
 - [x] Phase F — Brand Guardian voice review (3 fixes applied)
-- [ ] **Phase G — Accessibility Auditor** (deferred — patterns reuse from dashboard precedent, food-specific items in §11)
+- [x] **r2 amendment** (2026-06-02) — F0 photo consent + ED-mode F3/F4 variants + /дневник surface + loading-card «👀 Распознаю…» voice align. Per tech-lead pickup directive feeding W1 #164.
+- [ ] **Phase G — Accessibility Auditor** (deferred — patterns reuse from dashboard precedent, food-specific items in §14)
 - [ ] **Phase H — HTML preview** (skip per dashboard precedent)
 - [x] Phase I — save to `docs/screens/customer-food-scanner-flow.md`
 - [ ] Phase J — handoff block for tech lead
@@ -668,12 +1008,21 @@ Detailed audit referenced from `customer-main-wellness-dashboard.md` §8. Food s
 **Severity результирующего flow:** P0 BLOCKER для pilot 15 July 2026.
 
 **Following streams to engage after sign-off:**
-- W1 / Iota — frontend implementation per §13 items 1-10
-- Tech lead — backend investigations Q-BACK-1..4 (macros recalc, scan_id TTL, MAX file input, insight safety filter)
-- AI Engineering — cross-domain insight safety guardrails (anti-medical / anti-shame filter validation)
+- W1 / Iota — frontend implementation per §16 items 1-16 (10 original + 6 r2: F0 consent gate, consent client, ED rendering, /дневник wiring, CTA chain, loading line)
+- Alpha — backend wiring: `food_photo_consent_at` field + revoke endpoint (Q-BACK-5); `display_numbers` flag propagation + ED toggle source (Q-BACK-6)
+- Tech lead — backend investigations Q-BACK-1..6 + ED toggle source decision (Profile setting vs anketa flag)
+- AI Engineering — cross-domain insight safety guardrails (anti-medical / anti-shame filter validation) + ED safety chain (reminders B7/B9 deactivation, not stripping)
+- `customer-reminders-voice.md` author — note: B7 nutrition reminders MUST be deactivated wholesale for ED-flagged users (NOT number-stripped)
 - Accessibility Engineer — WCAG 2.2 AA pass + screen reader testing (NVDA + VoiceOver iOS в MAX webview)
 
 ---
 
-**Last verified:** 2026-05-25 r1
+**Last verified:** 2026-06-02 r2 (F0 consent + ED-mode + /дневник + loading-card per W1 #164 pickup)
 **Tau (UX/Design stream)**
+
+**Canon provenance (r2):**
+- F0 consent voice → reuses [[customer-onboarding-flow.md]] §5 S2 «короткое слово» framing
+- ED-mode safety lineage → memory `cross-domain-insight-safety-gap` + `wellness-mvp-scaled-pilot` SCALED scope
+- /дневник surface → memory `wellness-mvp-scaled-pilot` explicit MVP surface (1 of 3)
+- Loading line «👀 Распознаю…» → tech-lead pickup directive 2026-06-02 (supersedes earlier «Узнаю что на фото»)
+- Two-axis register: customer-facing → «ты» (locked customer canon, `ayla-identity-and-brand.md` §3.0)
