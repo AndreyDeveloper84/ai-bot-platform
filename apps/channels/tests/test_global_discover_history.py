@@ -292,7 +292,11 @@ class TestRoutingStillSeesTheUntouchedPayload:
         conversation = _open_then_tap(95401, payload)
 
         assert stub_discover_route == [payload], stub_discover_route
-        assert not _raw(_user_messages(conversation)), _user_messages(conversation)
+        # Положительная стража на тех же данных: без неё «сырых строк нет»
+        # прошло бы и на пустом диалоге, то есть не значило бы ничего.
+        msgs = _user_messages(conversation)
+        assert msgs, "диалог пуст — проверять в нём нечего"
+        assert not _raw(msgs), msgs
 
 
 # --------------------------------------------------------------------------- #
