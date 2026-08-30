@@ -498,9 +498,14 @@ class TestVisitStillCloses:
             event_version=1,
             occurred_at=timezone.now(),
             tenant_id=str(tenant.id),
-            user_id=None,
+            # `IngestEnvelope` объявляет `user_id` и `correlation_id`
+            # обязательными строками — прод их всегда заполняет. Передавать
+            # сюда пустоту значило бы проверять форму, которой продюсер не
+            # производит: тест прошёл бы, а живое событие повело бы себя
+            # иначе. Тот же класс, что весь разбор 29–30.08.
+            user_id=str(customer.pk),
             actor="system",
-            correlation_id=None,
+            correlation_id=new_ulid(),
             causation_id=None,
             data={
                 "appointment_id": str(proxy.appointment_id),
