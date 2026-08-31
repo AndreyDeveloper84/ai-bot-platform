@@ -10,6 +10,23 @@ import userEvent from "@testing-library/user-event";
 import { MemoryRouter, Route, Routes, useParams } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+// Домашний экран теперь спрашивает decision-context (приглашение в
+// анкету цели). Мокаем, чтобы юнит-тест не ходил в сеть; отсутствие
+// missing = приглашение не рисуется и на эти проверки не влияет.
+vi.mock("../lib/customer-goals", async (importOriginal) => {
+  const original = await importOriginal<typeof import("../lib/customer-goals")>();
+  return {
+    ...original,
+    fetchDecisionContext: vi.fn().mockResolvedValue({
+      version: 1,
+      known: { goal: null },
+      missing: [],
+      suggestions: [],
+      intents: [],
+    }),
+  };
+});
+
 vi.mock("../lib/api", async (importOriginal) => {
   const original = await importOriginal<typeof import("../lib/api")>();
   return {

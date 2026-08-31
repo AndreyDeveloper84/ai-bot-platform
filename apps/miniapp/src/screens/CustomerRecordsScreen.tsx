@@ -27,6 +27,12 @@
  *   error    → generic copy + retry
  *   offline  → banner «Записи могут быть устаревшими»
  *
+ * # Вход в анкету цели (решение владельца 30.08)
+ *
+ * Над списком — `GoalInviteCard`. Показывается по серверному
+ * `decision-context.missing`, не по «нет записей»; секция, не модалка,
+ * так что дорога к записи не перекрыта.
+ *
  * # Voice locks
  *
  *   - «Записи» (NOT «Bookings»), «ты» canonical, no exclamation marks
@@ -42,6 +48,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { BookingCard, BookingCardSkeleton } from "../components/BookingCard";
 import { EmptyRecordsState } from "../components/EmptyRecordsState";
+import { GoalInviteCard } from "../components/GoalInviteCard";
 import { TimeGroupHeader } from "../components/TimeGroupHeader";
 import { ApiError } from "../lib/api";
 import {
@@ -309,6 +316,12 @@ export function CustomerRecordsScreen() {
           История{historyCount > 0 && ` (${historyCount})`}
         </button>
       </div>
+
+      {/* Вход в анкету цели. Показывается ровно тогда, когда сервер
+          говорит, что чего-то не хватает (decision-context.missing) —
+          не по эвристике «нет записей». Секция, не модалка: дорога к
+          записи остаётся открытой. */}
+      <GoalInviteCard />
 
       <main
         id="records-main"

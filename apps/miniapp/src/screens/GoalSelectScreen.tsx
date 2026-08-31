@@ -23,9 +23,17 @@
  *     (clarifying and guiding questions are not distinguished here).
  *   - While a POST is in flight every control is disabled; a failed
  *     POST shows an inline error and keeps the old document.
+ *
+ * Экран не корневой, поэтому кнопка «назад» платформы должна быть
+ * показана и заведена на роутер (канон `useBackButton`: показывать
+ * везде, кроме корня). Пока входом была только стартовая сетка бота,
+ * это не мешало; теперь на анкету ведёт приглашение с домашнего экрана,
+ * и без выхода назад она стала бы тупиком — то есть загородила бы
+ * дорогу к записи.
  */
 
 import { useCallback, useEffect, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import { ScreenLayout } from "../components/ScreenLayout";
 import { DelayedSkeleton, ServiceCardSkeleton } from "../components/Skeleton";
 import { StateError } from "../components/StateError";
@@ -35,6 +43,7 @@ import {
   type DecisionContext,
   type GoalSelectBody,
 } from "../lib/customer-goals";
+import { useBackButton } from "../hooks/useBackButton";
 
 type State =
   | { kind: "loading" }
@@ -44,6 +53,7 @@ type State =
 const GOAL_TEXT_MAX = 500;
 
 export function GoalSelectScreen() {
+  const navigate = useNavigate();
   const [state, setState] = useState<State>({ kind: "loading" });
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
@@ -65,6 +75,11 @@ export function GoalSelectScreen() {
   }, []);
 
   useEffect(() => load(), [load]);
+
+  // Не корень — «назад» ведёт туда, откуда пришли (домашний экран или
+  // стартовая сетка бота), а не закрывает мини-апп.
+  const goBack = useCallback(() => navigate(-1), [navigate]);
+  useBackButton({ onBack: goBack });
 
   const submit = useCallback((body: GoalSelectBody) => {
     setSubmitting(true);
