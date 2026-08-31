@@ -1405,3 +1405,78 @@ export const issueStaffInvite = (
     method: "POST",
     body: JSON.stringify(payload),
   });
+
+// --- /api/v1/admin/staff/ (roster) ---------------------------------------
+//
+// The list of people, which nothing produced before. Access could be
+// granted and revoked; who held it was unreadable outside psql.
+//
+// One entry per PERSON, never per role. Roles are additive and split over
+// two tables (ADR-0008), so the owner who is also a master is one row with
+// two roles — the backend does that merge; this client must not undo it by
+// flattening `roles` to `roles[0]`.
+//
+// Owner-only: the endpoint answers 403 to an admin. The nav entry is
+// hidden for non-owners, and the backend re-checks — the hidden button is
+// convenience, the 403 is the gate.
+
+/** How a person came by one role. */
+export type RoleSource = "access_code" | "master_invite" | "direct";
+
+/**
+ * What a grant is doing right now.
+ *
+ * Three values, not a boolean, because a boolean made two unlike things
+ * share one label. A master invited yesterday who has not opened the bot
+ * is not active — but «доступ отозван» is a lie about somebody nobody has
+ * taken anything from, and it points the owner at the wrong next move
+ * (resend the invite, not investigate a revoke).
+ *
+ * `pending` is reachable only for `master`. An unredeemed admin code
+ * writes no row at all, so that person is absent from the roster rather
+ * than pending in it.
+ */
+export type RoleState = "active" | "pending" | "revoked";
+
+export interface StaffRoleGrant {
+  role: "owner" | "admin" | "receptionist" | "master";
+  /** Per role, not per person — a revoked admin can be a live master. */
+  state: RoleState;
+  /** Derived from `state`; kept for readers that only want the boolean. */
+  active: boolean;
+  source: RoleSource;
+  /** ISO 8601, or null when the catalog sync produced the row and nobody knows. */
+  since: string | null;
+}
+
+export interface StaffRosterPerson {
+  /** `bot:<uuid>` or `master:<uuid>` — stable list key, not a lookup id. */
+  id: string;
+  bot_user_id: string | null;
+  master_id: string | null;
+  name: string;
+  /** False → this person cannot open the Mini App at all. */
+  has_account: boolean;
+  /** True while at least one role is live. */
+  is_active: boolean;
+  /**
+   * At most one entry per role name — the backend collapses a role that
+   * was revoked and granted again into its current state, so `role` is a
+   * safe React key. Never flatten this to `roles[0]`: an owner who is
+   * also a master has two entries and dropping one is exactly the
+   * blindness this endpoint was built to remove.
+   */
+  roles: StaffRoleGrant[];
+}
+
+export interface StaffRosterResponse {
+  items: StaffRosterPerson[];
+  total_count: number;
+  /** True when the 200-person cap dropped rows; `total_count` still counts them. */
+  truncated: boolean;
+}
+
+export const getStaffRoster = (
+  init: { signal?: AbortSignal } = {},
+): Promise<StaffRosterResponse> =>
+  request("/api/v1/admin/staff/", { method: "GET", signal: init.signal });

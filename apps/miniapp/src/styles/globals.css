@@ -2355,6 +2355,19 @@ a {
   color: var(--c-warning);
 }
 
+/*
+  A role somebody used to hold. Muted rather than hidden: on «Люди
+  салона» the whole point of a revoked row is that the owner can read
+  that the revoke worked. Deliberately not `--danger` — a former admin
+  is a fact, not an alarm.
+*/
+.admin-chip--revoked {
+  background: transparent;
+  color: var(--c-text-secondary);
+  border: 1px dashed var(--c-border, #e0e0e3);
+  opacity: 0.75;
+}
+
 .admin-filter-tabs {
   display: inline-flex;
   background: var(--c-surface-2);
