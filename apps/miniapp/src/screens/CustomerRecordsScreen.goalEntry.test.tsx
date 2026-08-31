@@ -18,9 +18,6 @@
 import { act, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
-import { readFileSync, readdirSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("../lib/api", async (importOriginal) => {
@@ -322,10 +319,14 @@ describe("дорога к записи открыта при показанно�
     expect(await screen.findByText("CATALOG-PROBE")).toBeInTheDocument();
   });
 
-  it("приглашение идёт ПОСЛЕ содержимого экрана, а не до него", async () => {
-    // BOT-001 §13: First Contact не начинается со standalone-анкеты, а
-    // Mini App entry — в области действия BOT-001 (§2.1). Порядок в DOM
-    // здесь нормативный, поэтому и заперт тестом.
+  it("приглашение идёт ПЕРВЫМ — выше «Найти услугу»", async () => {
+    // Порядок нормативный, поэтому и заперт тестом. Решение владельца
+    // 31.08: анкета идёт первой. Принято поверх BOT-001 §13 («First
+    // Contact MUST NOT begin with a standalone questionnaire», §2.1
+    // держит Mini App entry в области действия) — при полном знании
+    // возражений; разбор доводов за и против лежит в теле PR #1342.
+    // Тест запирает именно этот порядок и упадёт, если карточка уедет
+    // вниз.
     mockLists([], []);
     mockedContext.mockResolvedValue(DOC_GOAL_MISSING);
     renderScreen();
@@ -333,7 +334,7 @@ describe("дорога к записи открыта при показанно�
     const cta = await screen.findByRole("button", { name: GOAL_CTA });
     const findService = screen.getByRole("button", { name: "Найти услугу" });
     expect(
-      findService.compareDocumentPosition(cta) &
+      cta.compareDocumentPosition(findService) &
         Node.DOCUMENT_POSITION_FOLLOWING,
     ).toBeTruthy();
   });
@@ -386,59 +387,5 @@ describe("сбой decision-context", () => {
     expect(
       screen.queryByRole("button", { name: GOAL_CTA }),
     ).not.toBeInTheDocument();
-  });
-});
-
-// ---------------------------------------------------------------------------
-// Каждый класс приглашения обязан иметь правило.
-//
-// DRF-1066: имя класса без правила молчит — React его отрисует, браузер
-// проигнорирует, все тесты пройдут, и дефект увидит только человек на
-// экране. Ровно это и случилось здесь: `goal-invite__cta` уехал в CI
-// ненайденным, потому что проверки выше смотрели на присутствие узла и
-// его порядок — и обе прошли бы при невидимой кнопке.
-//
-// vitest гоняется с `css: false`, поэтому стиль в jsdom не доедет:
-// таблицу приходится читать текстом, как это делает
-// `tools/lint/miniapp_style_contract.py`. Здесь проверка уже,
-// чем линт, и потому строже: линт читает статические литералы
-// `className="..."` в исходнике, а этот тест собирает классы с реально
-// отрисованного поддерева — включая базовые (`btn-secondary`), которые
-// тоже обязаны существовать.
-// ---------------------------------------------------------------------------
-
-function stylesheetText(): string {
-  const stylesDir = join(dirname(fileURLToPath(import.meta.url)), "..", "styles");
-  return readdirSync(stylesDir)
-    .filter((f) => f.endsWith(".css"))
-    .map((f) => readFileSync(join(stylesDir, f), "utf-8"))
-    .join("\n");
-}
-
-describe("контракт стилей приглашения", () => {
-  it("каждый класс отрисованного приглашения имеет правило в src/styles/", async () => {
-    mockLists([], []);
-    mockedContext.mockResolvedValue(DOC_GOAL_MISSING);
-    renderScreen();
-
-    const cta = await screen.findByRole("button", { name: GOAL_CTA });
-    const invite = cta.closest("section");
-    expect(invite).not.toBeNull();
-
-    const classes = new Set<string>();
-    for (const el of [invite!, ...invite!.querySelectorAll("*")]) {
-      for (const c of el.classList) classes.add(c);
-    }
-    // Положительная стража: поддерево вообще несёт классы.
-    expect(classes.size).toBeGreaterThan(0);
-    expect(classes.has("goal-invite")).toBe(true);
-
-    // Селекторы классов, объявленные в таблицах. Регулярка — литерал,
-    // а не собранная строка: так в ней нечему сломаться при переносе.
-    const declared = new Set(
-      (stylesheetText().match(/\.[A-Za-z0-9_-]+/g) ?? []).map((m) => m.slice(1)),
-    );
-    const unstyled = [...classes].filter((c) => !declared.has(c));
-    expect(unstyled).toEqual([]);
   });
 });

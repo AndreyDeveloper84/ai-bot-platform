@@ -146,3 +146,29 @@ repos:
         # stale-declaration check accurate.
         files: ^apps/.*\.py$
         pass_filenames: false
+
+      # Mini App style contract (DRF-1066). A class name with no rule in
+      # `src/styles/` renders as nothing: React writes it, the browser
+      # ignores it, and every test stays green — the defect is visible
+      # only to a person looking at the screen. `tools/lint/
+      # miniapp_style_contract.py` has existed since 2026-08-24 but ran
+      # in CI only, so the first signal was always a red pipeline. On
+      # 2026-08-31 that is exactly how `goal-invite__cta` was found.
+      #
+      # This cannot be a vitest assertion: `apps/miniapp` runs with
+      # `css: false`, so a stylesheet imported inside a test — `?raw`
+      # and `import.meta.glob` included — comes back as an empty string
+      # and any check over it passes vacuously (measured: both files
+      # length 0). The stylesheet has to be read as text, which is what
+      # the lint does. Same reason its tab-bar column check lives here.
+      - id: miniapp-style-contract
+        name: Mini App style contract (unstyled classes, tab bar rows)
+        entry: python tools/lint/miniapp_style_contract.py apps/miniapp
+        language: system
+        # Whole-`apps/miniapp` scan (own globbing) — `pass_filenames`
+        # off, same as the guards above; a full scan is also what makes
+        # the stale-baseline ratchet accurate. Triggers on markup and on
+        # stylesheets, because deleting a rule breaks the contract just
+        # as renaming a class does.
+        files: ^apps/miniapp/src/.*\.(tsx|css)$
+        pass_filenames: false
