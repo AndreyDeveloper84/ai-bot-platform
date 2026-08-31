@@ -164,20 +164,28 @@ export function AdminPeopleScreen({ me }: Props) {
     };
   }, [navigate]);
 
-  const reload = useCallback(async (signal?: AbortSignal) => {
-    setErr(null);
-    try {
-      const res = await getStaffRoster({ signal });
-      if (signal?.aborted) return;
-      setItems(res.items);
-      setTotalCount(res.total_count);
-      setTruncated(res.truncated);
-    } catch (e) {
-      if ((e as DOMException | undefined)?.name === "AbortError") return;
-      setErr(e);
-      setItems(null);
-    }
-  }, []);
+  const reload = useCallback(
+    async (signal?: AbortSignal) => {
+      // Hooks cannot sit behind the `is_owner` early return below — they
+      // must all run on every render — so the gate lives here instead.
+      // Without it a non-owner who deep-links to this route fires a
+      // request that is guaranteed to come back 403, on every visit.
+      if (!me.is_owner) return;
+      setErr(null);
+      try {
+        const res = await getStaffRoster({ signal });
+        if (signal?.aborted) return;
+        setItems(res.items);
+        setTotalCount(res.total_count);
+        setTruncated(res.truncated);
+      } catch (e) {
+        if ((e as DOMException | undefined)?.name === "AbortError") return;
+        setErr(e);
+        setItems(null);
+      }
+    },
+    [me.is_owner],
+  );
 
   useEffect(() => {
     const controller = new AbortController();
@@ -216,7 +224,15 @@ export function AdminPeopleScreen({ me }: Props) {
 
   return (
     <div className="screen">
-      <header className="screen__header" style={{ marginBottom: "var(--s-2)" }}>
+      {/*
+        No `screen__header` class here, deliberately. Four neighbouring
+        admin screens carry it and it has no rule in src/styles/ — it is
+        inert on all of them, with the inline margin below doing the actual
+        work. Copying it here would have added a fifth dead class (the
+        style-contract guard, DRF-1066). The <header> element keeps the
+        semantics; `screen__title` on the h1 is the class that has a rule.
+      */}
+      <header style={{ marginBottom: "var(--s-2)" }}>
         <h1
           className="screen__title"
           style={{
