@@ -23,6 +23,7 @@ from apps.admin_api import (
     views_invite,
     views_staff_invite,
     views_staff_revoke,
+    views_staff_roster,
     views_master_deactivation,
     views_services_mapping,
 )
@@ -99,6 +100,16 @@ urlpatterns = [
         "staff/revoke/",
         views_staff_revoke.staff_revoke,
         name="staff_revoke",
+    ),
+    # The list nothing produced: every person of the salon with every
+    # role they hold, merged across TenantStaff and CatalogMaster
+    # (ADR-0008). Owner-only — see the view's module docstring. Declared
+    # after the two literal "staff/<verb>/" routes for the same
+    # order-sensitivity reason and before masters/<id>/.
+    path(
+        "staff/",
+        views_staff_roster.staff_roster,
+        name="staff_roster",
     ),
     path(
         "masters/<str:master_id>/",

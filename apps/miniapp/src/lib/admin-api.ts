@@ -1405,3 +1405,54 @@ export const issueStaffInvite = (
     method: "POST",
     body: JSON.stringify(payload),
   });
+
+// --- /api/v1/admin/staff/ (roster) ---------------------------------------
+//
+// The list of people, which nothing produced before. Access could be
+// granted and revoked; who held it was unreadable outside psql.
+//
+// One entry per PERSON, never per role. Roles are additive and split over
+// two tables (ADR-0008), so the owner who is also a master is one row with
+// two roles — the backend does that merge; this client must not undo it by
+// flattening `roles` to `roles[0]`.
+//
+// Owner-only: the endpoint answers 403 to an admin. The nav entry is
+// hidden for non-owners, and the backend re-checks — the hidden button is
+// convenience, the 403 is the gate.
+
+/** How a person came by one role. */
+export type RoleSource = "access_code" | "master_invite" | "direct";
+
+export interface StaffRoleGrant {
+  role: "owner" | "admin" | "receptionist" | "master";
+  /** Per role, not per person — a revoked admin can be a live master. */
+  active: boolean;
+  source: RoleSource;
+  /** ISO 8601, or null when the catalog sync produced the row and nobody knows. */
+  since: string | null;
+}
+
+export interface StaffRosterPerson {
+  /** `bot:<uuid>` or `master:<uuid>` — stable list key, not a lookup id. */
+  id: string;
+  bot_user_id: string | null;
+  master_id: string | null;
+  name: string;
+  /** False → this person cannot open the Mini App at all. */
+  has_account: boolean;
+  /** True while at least one role is live. */
+  is_active: boolean;
+  roles: StaffRoleGrant[];
+}
+
+export interface StaffRosterResponse {
+  items: StaffRosterPerson[];
+  total_count: number;
+  /** True when the 200-person cap dropped rows; `total_count` still counts them. */
+  truncated: boolean;
+}
+
+export const getStaffRoster = (
+  init: { signal?: AbortSignal } = {},
+): Promise<StaffRosterResponse> =>
+  request("/api/v1/admin/staff/", { method: "GET", signal: init.signal });

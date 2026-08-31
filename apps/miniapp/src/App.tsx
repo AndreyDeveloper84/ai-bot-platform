@@ -62,6 +62,7 @@ import { AdminInternalChatThreadScreen } from "./screens/admin/AdminInternalChat
 import { AdminInviteMasterScreen } from "./screens/admin/AdminInviteMasterScreen";
 import { AdminMasterDetailScreen } from "./screens/admin/AdminMasterDetailScreen";
 import { AdminNewBookingScreen } from "./screens/admin/AdminNewBookingScreen";
+import { AdminPeopleScreen } from "./screens/admin/AdminPeopleScreen";
 import { AdminSalonDayScreen } from "./screens/admin/AdminSalonDayScreen";
 import { AdminServicesMatrixScreen } from "./screens/admin/AdminServicesMatrixScreen";
 import { AdminSettingsPlaceholderScreen } from "./screens/admin/AdminSettingsPlaceholderScreen";
@@ -200,6 +201,21 @@ function adminRouteElements(me: MeResponse): React.ReactNode {
       <Route
         path="/admin/team/access"
         element={<AdminStaffAccessScreen me={me} />}
+      />
+      {/*
+        The roster of PEOPLE — every role, both tables (ADR-0008). Owner
+        only; the backend answers 403 to anyone else and the screen says
+        so rather than rendering an error card.
+
+        Declared before `/admin/team/:masterId`. React Router already
+        ranks a static segment above a dynamic one, so `people` could
+        never be read as a master id — the placement matches the
+        convention the URLconf uses on the backend for the same
+        collision, and costs nothing to keep explicit.
+      */}
+      <Route
+        path="/admin/team/people"
+        element={<AdminPeopleScreen me={me} />}
       />
       <Route
         path="/admin/team/:masterId/deactivate"

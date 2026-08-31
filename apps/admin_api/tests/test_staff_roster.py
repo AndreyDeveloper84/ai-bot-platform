@@ -182,9 +182,7 @@ class TestOnePersonTwoRoles:
         assert item["bot_user_id"] == str(owner_bot_user.id)
         assert item["master_id"] == str(owner_master.id)
 
-    def test_a_third_role_joins_the_same_row(
-        self, client, tenant, owner_master, owner_bot_user
-    ):
+    def test_a_third_role_joins_the_same_row(self, client, tenant, owner_master, owner_bot_user):
         TenantStaff.all_tenants.create(
             tenant=tenant, bot_user=owner_bot_user, role=TenantStaff.Role.RECEPTIONIST
         )
@@ -301,9 +299,7 @@ class TestHowTheyGotIn:
         assert owner_role["source"] == "direct"
         assert owner_role["since"] is not None
 
-    def test_a_master_invited_through_the_master_flow_says_so(
-        self, client, owner_bot_user, tenant
-    ):
+    def test_a_master_invited_through_the_master_flow_says_so(self, client, owner_bot_user, tenant):
         invited = make_master(tenant, name="Наталья Прохорова", external_id=98)
         invited.invited_at = timezone.now() - timedelta(days=3)
         invited.save(update_fields=["invited_at"])
@@ -314,9 +310,7 @@ class TestHowTheyGotIn:
         assert master_role["source"] == "master_invite"
         assert master_role["since"] is not None
 
-    def test_a_catalog_synced_master_admits_it_does_not_know(
-        self, client, owner_bot_user, tenant
-    ):
+    def test_a_catalog_synced_master_admits_it_does_not_know(self, client, owner_bot_user, tenant):
         synced = make_master(tenant, name="Ирина Смирнова", external_id=96)
         synced.invited_at = None
         synced.save(update_fields=["invited_at"])

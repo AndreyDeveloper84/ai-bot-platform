@@ -334,6 +334,28 @@ export function AdminTeamScreen({ me }: Props) {
         </button>
       )}
 
+      {/*
+        The only entry to «Люди салона». Owner-only, matching the
+        endpoint: this list is the map of who holds which administrative
+        role, and the owner reserved role decisions to herself. Hiding it
+        from an admin is convenience — the backend answers 403 either way.
+
+        It sits next to «Выдать доступ» because that is where somebody
+        realises they do not actually know who already has it.
+      */}
+      {me.is_owner && (
+        <button
+          type="button"
+          className="admin-flow-back"
+          onClick={() => {
+            hapticSelection();
+            navigate("/admin/team/people");
+          }}
+        >
+          Кто есть в салоне и с какими ролями
+        </button>
+      )}
+
       <div
         role="tablist"
         aria-label="Фильтр команды"
