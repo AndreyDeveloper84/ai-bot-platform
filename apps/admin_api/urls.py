@@ -103,9 +103,13 @@ urlpatterns = [
     ),
     # The list nothing produced: every person of the salon with every
     # role they hold, merged across TenantStaff and CatalogMaster
-    # (ADR-0008). Owner-only — see the view's module docstring. Declared
-    # after the two literal "staff/<verb>/" routes for the same
-    # order-sensitivity reason and before masters/<id>/.
+    # (ADR-0008). Owner-only — see the view's module docstring.
+    #
+    # Grouped with the other staff/ routes for reading order only. Unlike
+    # the masters/invite/ case above, there is no collision to avoid here:
+    # path() matches the whole remaining path against a literal, so
+    # "staff/" can neither swallow "staff/invite/" nor be swallowed by it
+    # at any declaration order.
     path(
         "staff/",
         views_staff_roster.staff_roster,

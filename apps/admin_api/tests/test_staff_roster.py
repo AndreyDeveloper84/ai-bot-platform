@@ -29,8 +29,10 @@ from django.urls import reverse
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 
+from apps.admin_api.services import staff_roster as staff_roster_service
 from apps.catalog.models import CatalogMaster
 from apps.identity.models import BotUser
+from apps.identity.services.role_resolver import resolve_role
 from apps.identity.services.staff_invites import issue_staff_invite, redeem_staff_invite
 from apps.tenancy.models import Tenant, TenantStaff
 
@@ -56,6 +58,10 @@ def _roles_of(item: dict) -> set[str]:
 
 def _active_roles_of(item: dict) -> set[str]:
     return {r["role"] for r in item["roles"] if r["active"]}
+
+
+def _state_of(item: dict, role: str) -> str:
+    return next(r["state"] for r in item["roles"] if r["role"] == role)
 
 
 # --- who may look -----------------------------------------------------------
@@ -227,7 +233,11 @@ class TestOtherSalonsAreInvisible:
         TenantStaff.all_tenants.create(
             tenant=other_tenant, bot_user=theirs_bu, role=TenantStaff.Role.ADMIN
         )
-        make_master(other_tenant, name="Чужой мастер")
+        # LINKED on purpose. An unlinked foreign master never touches the
+        # `linked_bot_user__display_name` join, which is the only path a
+        # foreign person's name could travel into this body — so the
+        # unlinked shape tests the boring half.
+        link_master_to_bot_user(make_master(other_tenant, name="Чужой мастер"), theirs_bu)
 
         payload = _get(client).json()
         names = set(_by_name(payload))
@@ -321,24 +331,69 @@ class TestHowTheyGotIn:
         assert master_role["source"] == "direct"
         assert master_role["since"] is None
 
-    def test_every_since_is_an_offset_from_now(self, client, owner_bot_user, tenant, master):
+    def test_a_later_direct_grant_is_not_credited_to_an_old_code(
+        self, client, owner_bot_user, tenant, customer_bot_user
+    ):
+        """«Эта роль пришла по коду» ≠ «человек когда-то вводил код».
+
+        Аня redeems an admin code, is revoked, and is later re-added by a
+        management command. Stamping the new row «по коду доступа» tells
+        the owner a live code let her back in — and sends her hunting for
+        a code nobody holds.
+        """
+
+        _invite, code = issue_staff_invite(
+            tenant=tenant,
+            role=TenantStaff.Role.ADMIN,
+            catalog_master=None,
+            created_by=owner_bot_user,
+            note="",
+        )
+        redeem_staff_invite(code=code, bot_user=customer_bot_user, tenant=tenant)
+        redeemed = TenantStaff.all_tenants.get(
+            bot_user=customer_bot_user, role=TenantStaff.Role.ADMIN
+        )
+        redeemed.deactivated_at = timezone.now()
+        redeemed.save(update_fields=["deactivated_at"])
+        # Re-added by hand, well after the code was burned.
+        fresh = TenantStaff.all_tenants.create(
+            tenant=tenant, bot_user=customer_bot_user, role=TenantStaff.Role.ADMIN
+        )
+        fresh.created_at = timezone.now() + timedelta(days=1)
+        fresh.save(update_fields=["created_at"])
+
+        item = _by_name(_get(client).json())["Клиент"]
+        admin_role = next(r for r in item["roles"] if r["role"] == "admin")
+
+        assert admin_role["state"] == "active"
+        assert admin_role["source"] == "direct"
+
+    def test_every_since_is_close_to_the_offset_the_fixture_asked_for(
+        self, client, owner_bot_user, tenant
+    ):
         """Guard for the fixtures, not the view.
 
-        Every timestamp these tests assert on is an offset from ``now``. A
-        fixture that hard-codes a date passes in the year it was written
-        and rots after.
+        A tolerance of a year would pass for any literal date written this
+        year — precisely the class of value the no-literal-dates rule
+        forbids. Rows these tests create moments ago must read as moments
+        ago, and the one deliberately backdated fixture must land on its
+        own offset.
         """
+
+        backdated = make_master(tenant, name="Наталья Прохорова", external_id=98)
+        backdated.invited_at = timezone.now() - timedelta(days=3)
+        backdated.save(update_fields=["invited_at"])
 
         payload = _get(client).json()
         now = timezone.now()
 
-        for item in payload["items"]:
-            for role in item["roles"]:
-                if role["since"] is None:
-                    continue
-                parsed = parse_datetime(role["since"])
-                assert parsed is not None
-                assert abs((now - parsed).days) < 365
+        owner_since = parse_datetime(_by_name(payload)["Карина"]["roles"][0]["since"])
+        assert owner_since is not None
+        assert abs(now - owner_since) < timedelta(minutes=5)
+
+        master_since = parse_datetime(_by_name(payload)["Наталья Прохорова"]["roles"][0]["since"])
+        assert master_since is not None
+        assert abs((now - timedelta(days=3)) - master_since) < timedelta(minutes=5)
 
 
 # --- revoked access ---------------------------------------------------------
@@ -433,6 +488,109 @@ class TestRevokedAccessIsVisibleAsRevoked:
 
         assert item["is_active"] is False
         assert _active_roles_of(item) == set()
+
+
+class TestPendingIsNotRevokedAndNotActive:
+    """A master invited yesterday is neither, and both words are lies.
+
+    ``resolve_role`` grants the master role only on ACCEPTED + not
+    archived. A PENDING catalog row has ``is_active=True,
+    archived_at=None``, so judging by those two columns alone would print
+    «Мастер · активна» for somebody the platform treats as a plain
+    customer. Calling her «доступ отозван» instead is the opposite lie —
+    nobody took anything from her, and the owner's next move is to resend
+    the invite, not to wonder who revoked it.
+    """
+
+    def test_a_pending_master_is_pending(self, client, owner_bot_user, tenant, pending_master):
+        item = _by_name(_get(client).json())["Наталья Прохорова"]
+
+        assert _state_of(item, "master") == "pending"
+        assert item["is_active"] is False
+        assert _active_roles_of(item) == set()
+
+    def test_an_accepted_master_is_active(self, client, owner_bot_user, tenant, master):
+        """The positive guard: the same field on the same shape says active."""
+
+        item = _by_name(_get(client).json())["Анна Петрова"]
+
+        assert _state_of(item, "master") == "active"
+        assert item["is_active"] is True
+
+    def test_an_archived_pending_master_is_revoked_not_pending(
+        self, client, owner_bot_user, tenant
+    ):
+        """Archived wins: she is gone, not waiting."""
+
+        make_master(
+            tenant,
+            name="Ирина Смирнова",
+            external_id=94,
+            invite_status=CatalogMaster.InviteStatus.PENDING,
+            is_active=False,
+            archived_at=timezone.now() - timedelta(days=4),
+        )
+
+        item = _by_name(_get(client).json())["Ирина Смирнова"]
+
+        assert _state_of(item, "master") == "revoked"
+
+    def test_the_roster_and_the_resolver_agree_on_who_is_a_master(
+        self, client, owner_bot_user, tenant, master_only_bot_user
+    ):
+        """The property, not the field: same answer as the auth layer.
+
+        A screen that says «Мастер · активна» about a person
+        ``resolve_role`` calls a customer has failed at the one thing it
+        exists for.
+        """
+
+        pending = make_master(
+            tenant,
+            name="Наталья Прохорова",
+            external_id=93,
+            invite_status=CatalogMaster.InviteStatus.PENDING,
+        )
+        link_master_to_bot_user(pending, master_only_bot_user)
+
+        assert resolve_role(master_only_bot_user).is_master is False
+
+        item = _by_name(_get(client).json())["Наталья Прохорова"]
+        assert _state_of(item, "master") == "pending"
+
+
+# --- the cap ----------------------------------------------------------------
+
+
+class TestTheCap:
+    def test_it_truncates_the_list_and_still_counts_the_dropped(
+        self, client, owner_bot_user, tenant, monkeypatch
+    ):
+        """``total_count`` must not shrink with the list.
+
+        A truncated answer that also under-reports its own size hides the
+        anomaly the cap exists to surface, and the screen's «показаны
+        первые N из M» banner has nothing to say.
+        """
+
+        monkeypatch.setattr(staff_roster_service, "MAX_ROSTER_PEOPLE", 2)
+        for i in range(3):
+            make_master(tenant, name=f"Мастер {i}", external_id=200 + i)
+
+        payload = _get(client).json()
+
+        # Karina (owner) + three masters = 4 people, 2 returned.
+        assert payload["total_count"] == 4
+        assert len(payload["items"]) == 2
+        assert payload["truncated"] is True
+
+    def test_a_list_under_the_cap_is_not_truncated(self, client, owner_bot_user, tenant):
+        """Positive guard — the flag is not simply always True."""
+
+        payload = _get(client).json()
+
+        assert payload["truncated"] is False
+        assert payload["total_count"] == len(payload["items"]) == 1
 
 
 # --- ordering ---------------------------------------------------------------

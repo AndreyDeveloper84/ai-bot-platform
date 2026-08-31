@@ -50,6 +50,7 @@ import {
   getStaffRoster,
   type MeResponse,
   type RoleSource,
+  type RoleState,
   type StaffRoleGrant,
   type StaffRosterPerson,
 } from "../../lib/admin-api";
@@ -72,6 +73,27 @@ const SOURCE_LABEL: Record<RoleSource, string> = {
   direct: "добавлен(а) напрямую",
 };
 
+/**
+ * Suffix on the role chip. `active` says nothing — a live role is the
+ * default and does not need a word.
+ *
+ * `pending` and `revoked` must never share copy: one is somebody who has
+ * not arrived yet and needs the invite resent, the other is somebody
+ * whose access was taken away. Telling them apart is why the backend
+ * returns three states instead of a boolean.
+ */
+const STATE_SUFFIX: Record<RoleState, string> = {
+  active: "",
+  pending: " — приглашение не принято",
+  revoked: " — доступ отозван",
+};
+
+const STATE_CHIP_CLASS: Record<RoleState, string> = {
+  active: "admin-chip",
+  pending: "admin-chip admin-chip--warn",
+  revoked: "admin-chip admin-chip--revoked",
+};
+
 const MONTHS_GEN = [
   "января",
   "февраля",
@@ -91,6 +113,13 @@ const MONTHS_GEN = [
  * «12 августа 2026». The year is kept, unlike the inbox formatter: this
  * screen answers «с каких пор», and a roster read next January must not
  * make a two-year-old grant look like last week.
+ *
+ * Rendered in the device timezone, like every other date surface in the
+ * Mini App (`masterDateFormat.ts`, `AdminAvailabilityRequestsScreen`).
+ * A grant made just after midnight salon-time therefore reads as the
+ * previous day to an owner whose phone is set elsewhere — off by a day
+ * on a field measured in months, and fixing it here alone would make
+ * this the one screen that disagrees with the others.
  */
 function formatSince(iso: string | null): string | null {
   if (!iso) return null;
@@ -269,13 +298,11 @@ export function AdminPeopleScreen({ me }: Props) {
                       <span
                         key={`${p.id}:${grant.role}`}
                         className={
-                          grant.active
-                            ? "admin-chip"
-                            : "admin-chip admin-chip--revoked"
+                          STATE_CHIP_CLASS[grant.state] ?? "admin-chip"
                         }
                       >
                         {ROLE_LABEL[grant.role] ?? grant.role}
-                        {!grant.active && " — доступ отозван"}
+                        {STATE_SUFFIX[grant.state] ?? ""}
                       </span>
                     ))}
                     {p.roles.length === 0 && (
@@ -295,14 +322,21 @@ export function AdminPeopleScreen({ me }: Props) {
                     </span>
                   ))}
 
-                  {!p.has_account && (
-                    <span
-                      className="admin-chip admin-chip--warn"
-                      style={{ marginTop: "var(--s-1)" }}
-                    >
-                      нет входа в приложение
-                    </span>
-                  )}
+                  {/*
+                    Suppressed while every role is `pending`: «приглашение
+                    не принято» already says the person has no login, and
+                    two warning chips saying one thing read as two
+                    problems.
+                  */}
+                  {!p.has_account &&
+                    !p.roles.every((r) => r.state === "pending") && (
+                      <span
+                        className="admin-chip admin-chip--warn"
+                        style={{ marginTop: "var(--s-1)" }}
+                      >
+                        нет входа в приложение
+                      </span>
+                    )}
                 </span>
               </div>
             </li>

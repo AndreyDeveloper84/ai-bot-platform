@@ -1423,9 +1423,26 @@ export const issueStaffInvite = (
 /** How a person came by one role. */
 export type RoleSource = "access_code" | "master_invite" | "direct";
 
+/**
+ * What a grant is doing right now.
+ *
+ * Three values, not a boolean, because a boolean made two unlike things
+ * share one label. A master invited yesterday who has not opened the bot
+ * is not active — but «доступ отозван» is a lie about somebody nobody has
+ * taken anything from, and it points the owner at the wrong next move
+ * (resend the invite, not investigate a revoke).
+ *
+ * `pending` is reachable only for `master`. An unredeemed admin code
+ * writes no row at all, so that person is absent from the roster rather
+ * than pending in it.
+ */
+export type RoleState = "active" | "pending" | "revoked";
+
 export interface StaffRoleGrant {
   role: "owner" | "admin" | "receptionist" | "master";
   /** Per role, not per person — a revoked admin can be a live master. */
+  state: RoleState;
+  /** Derived from `state`; kept for readers that only want the boolean. */
   active: boolean;
   source: RoleSource;
   /** ISO 8601, or null when the catalog sync produced the row and nobody knows. */

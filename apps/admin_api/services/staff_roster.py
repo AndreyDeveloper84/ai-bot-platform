@@ -34,14 +34,35 @@ one that shows a duplicate the owner can recognise and bridge.
 Keeping the rule identical to ``is_solo_provider`` also keeps two
 surfaces from disagreeing about how many people a salon has.
 
+One case the rule does NOT collapse, and cannot: ``BotUser`` is unique
+per ``(tenant, channel, channel_user_id)``, so the same human reachable
+on both MAX and a future Telegram bot is two ``BotUser`` rows and
+therefore two people here. Inherent to the identity model rather than to
+this reader, and shared with every other surface that counts people.
+
 ### What is deliberately absent
 
 **No phone number, by any path.** ``DRF-1039`` is the owner's decision
 that a client's phone never reaches an executor; it does not speak about
 staff, and no other decision does either. Rather than infer permission
-from silence, this reader never loads the column: both queries below are
-``.values()`` with explicit field lists, so a phone cannot reach the
+from silence, this reader never loads the column: all three queries below
+are ``.values()`` with explicit field lists, so a phone cannot reach the
 serialiser even by way of a future ``select_related``.
+
+``bot_user_id`` and ``master_id`` ARE returned, and they are the primary
+keys of the rows a phone hangs off. They are list identity — what a
+future revoke button would name a person with — not an invitation to
+join back to ``BotUser`` and read the rest of it. A screen that does
+that has reopened the question this module closed.
+
+**No unredeemed invites.** An outstanding admin code lives entirely in
+``StaffInvite`` and writes no ``TenantStaff`` row, so a person who was
+sent a code and never used it does not appear here at all. A master
+invited through the master flow DOES appear, because that path writes the
+catalog row up front — hence ``pending`` on the master role and no
+equivalent for the admin ones. The asymmetry belongs to the two invite
+flows, not to this reader; closing it means listing outstanding invites,
+which is a different screen.
 
 **No actions.** This module answers «who works here and what are they»
 and nothing else. Changing a role and revoking access are owner
@@ -53,12 +74,18 @@ Three queries, all indexed, regardless of salon size: staff rows, master
 rows, and the used invites that explain how each role was granted. The
 merge itself is in Python because it spans two tables that have no join
 between them.
+
+``MAX_ROSTER_PEOPLE`` bounds the RESPONSE, not the read: every row is
+still fetched and sorted before the slice. Bounding the read would cost
+the flat query count, because ``total_count`` would then need its own
+``COUNT(*)`` — and the cap exists to keep an anomaly from reaching a
+phone, not to keep it out of Postgres.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Literal
 from uuid import UUID
 
@@ -71,7 +98,8 @@ from apps.tenancy.models import StaffInvite, TenantStaff
 #: two tables that share no sort key is a real chunk of machinery, and no
 #: salon has this many employees — the pilot has five. The cap exists so
 #: that a data anomaly (a botched catalog sync inventing rows) degrades
-#: into a truncated list with a flag rather than an unbounded response.
+#: into a truncated list with a flag rather than an unbounded response —
+#: it bounds what reaches the phone, not what leaves Postgres.
 MAX_ROSTER_PEOPLE = 200
 
 #: Increasing privilege, mirroring ``role_resolver._ROLE_PRIVILEGE``.
@@ -87,25 +115,49 @@ _ROLE_RANK: dict[str, int] = {
 
 RoleSource = Literal["access_code", "master_invite", "direct"]
 
+#: What a grant is doing right now.
+#:
+#: Three values and not a boolean, because a boolean forced two unlike
+#: things to share one label. A master invited yesterday who has not
+#: opened the bot yet is not active — but calling her «доступ отозван» on
+#: the screen is a lie about a person nobody has taken anything from, and
+#: the owner's next move (resend the invite) is the opposite of the one
+#: that word suggests.
+#:
+#: ``pending`` is reachable only for the master role. An administrator's
+#: invite lives entirely in ``StaffInvite`` until it is redeemed — no
+#: ``TenantStaff`` row exists, so an unredeemed admin code does not appear
+#: in this roster at all. That gap is real and deliberately not closed
+#: here; see the module docstring.
+RoleState = Literal["active", "pending", "revoked"]
+
 
 @dataclass
 class RoleGrant:
     """One role one person holds (or held) at this salon.
 
-    ``active`` is per-role, not per-person: an admin who is still a master
+    ``state`` is per-role, not per-person: an admin who is still a master
     has one live grant and one revoked one, and flattening that to a
     single person-level flag would report her as either fully present or
     fully gone. Both are wrong.
     """
 
     role: str
-    active: bool
+    state: RoleState
     source: RoleSource
     since: datetime | None
+
+    @property
+    def active(self) -> bool:
+        return self.state == "active"
 
     def to_payload(self) -> dict[str, Any]:
         return {
             "role": self.role,
+            "state": self.state,
+            # Derived, and kept because «активна ли роль» is the question
+            # the owner actually asked. A reader that only wants the
+            # boolean never has to learn the three-value vocabulary.
             "active": self.active,
             "source": self.source,
             "since": self.since.isoformat() if self.since is not None else None,
@@ -196,6 +248,52 @@ def _supersedes(candidate: RoleGrant, incumbent: RoleGrant) -> bool:
     return candidate.since > incumbent.since
 
 
+#: How far apart a ``TenantStaff`` row and the ``StaffInvite.used_at``
+#: that produced it may be before they stop counting as the same event.
+#:
+#: ``_grant_staff_role`` runs inside the same ``transaction.atomic()``
+#: that stamps ``used_at`` (``apps.identity.services.staff_invites``), so
+#: in practice the gap is milliseconds. A minute is generous enough to
+#: survive clock skew and a slow transaction, and far too short to
+#: accidentally capture a grant made on another day.
+_CODE_MATCH_WINDOW = timedelta(minutes=1)
+
+
+def _staff_source(created_at: datetime, code_moments: list[datetime] | None) -> RoleSource:
+    """Whether THIS staff row came from a redeemed code.
+
+    Not «has this person ever redeemed a code for this role» — that
+    question has a different answer and telling the owner the wrong one
+    sends her looking for a live code that nobody holds.
+    """
+
+    if not code_moments:
+        return "direct"
+    for moment in code_moments:
+        if abs(created_at - moment) <= _CODE_MATCH_WINDOW:
+            return "access_code"
+    return "direct"
+
+
+def _master_state(
+    *, archived_at: datetime | None, is_active: bool, invite_status: str
+) -> RoleState:
+    """Where a catalog row sits between «приглашена» and «в архиве».
+
+    Archived or deactivated is ``revoked`` first — a master who was
+    archived while her invite was still outstanding is gone, not waiting.
+    Otherwise anything short of ACCEPTED is ``pending``: EXPIRED and
+    CANCELLED invites are people who never arrived, and «pending» is the
+    honest word for a row that is in the catalog with nobody behind it.
+    """
+
+    if archived_at is not None or not is_active:
+        return "revoked"
+    if invite_status != CatalogMaster.InviteStatus.ACCEPTED:
+        return "pending"
+    return "active"
+
+
 def _role_sort_key(grant: RoleGrant) -> tuple[int, int, str]:
     """Live grants first, then highest privilege. Stable for the UI."""
 
@@ -222,25 +320,51 @@ def build_staff_roster(tenant: Any) -> tuple[list[Person], int, bool]:
     reader crosses two apps and one of them (``CatalogMaster``) is a sync
     mirror, and an explicit filter is the difference between «scoped» and
     «scoped as long as nobody calls this from a Celery task».
+
+    One join is worth naming: ``CatalogMaster.linked_bot_user`` is a
+    globally unique ``OneToOneField`` with no same-tenant constraint, so a
+    foreign ``BotUser`` bound to a local master row would surface that
+    person's name through it. Not reachable through
+    ``redeem_staff_invite``, which finds the invite by the caller's own
+    tenant and links the caller's own ``BotUser`` — but the filter above
+    guards the master row, not who is on the other end of that FK.
     """
 
     # --- 1. used invite codes: how each grant was made -------------------
     #
     # Read first so both loops below can consult it. Only redeemed invites
     # matter: an outstanding code has not granted anything yet.
-    invites = StaffInvite.all_tenants.filter(
-        tenant=tenant,
-        used_at__isnull=False,
-    ).values("role", "used_by_id", "used_at", "catalog_master_id")
+    #
+    # Ordered oldest-first, overriding ``StaffInvite.Meta.ordering``
+    # (``-created_at``). The master map below is last-write-wins, so
+    # inheriting the descending default would leave it holding the OLDEST
+    # redemption — a master unlinked and re-invited would report the first
+    # attempt as «с».
+    invites = (
+        StaffInvite.all_tenants.filter(tenant=tenant, used_at__isnull=False)
+        .order_by("used_at")
+        .values("role", "used_by_id", "used_at", "catalog_master_id")
+    )
 
-    staff_code_grants: set[tuple[UUID, str]] = set()
+    # ``(bot_user_id, role) -> every moment a code granted that pair``.
+    #
+    # A list rather than a set membership test, because «this person once
+    # redeemed an admin code» is not the same claim as «THIS admin row came
+    # from a code». Аня redeems a code, is revoked, and is later re-added
+    # by a management command: stamping both rows «по коду доступа» tells
+    # the owner a live code let her back in, which is the opposite of what
+    # the field exists to say — and is the reading that would send her
+    # hunting for a code nobody holds.
+    staff_code_grants: dict[tuple[UUID, str], list[datetime]] = {}
     master_code_grants: dict[UUID, datetime] = {}
     for inv in invites:
         if inv["role"] == StaffInvite.Role.MASTER:
             if inv["catalog_master_id"] is not None:
                 master_code_grants[inv["catalog_master_id"]] = inv["used_at"]
         elif inv["used_by_id"] is not None:
-            staff_code_grants.add((inv["used_by_id"], inv["role"]))
+            staff_code_grants.setdefault((inv["used_by_id"], inv["role"]), []).append(
+                inv["used_at"]
+            )
 
     people: dict[str, Person] = {}
 
@@ -272,9 +396,10 @@ def build_staff_roster(tenant: Any) -> tuple[list[Person], int, bool]:
         person.roles.append(
             RoleGrant(
                 role=row["role"],
-                active=row["deactivated_at"] is None,
-                source=(
-                    "access_code" if (bot_user_id, row["role"]) in staff_code_grants else "direct"
+                state="active" if row["deactivated_at"] is None else "revoked",
+                source=_staff_source(
+                    row["created_at"],
+                    staff_code_grants.get((bot_user_id, row["role"])),
                 ),
                 # The moment the role began, which is the row's own
                 # birthday. The invite's ``used_at`` is the same instant
@@ -287,9 +412,16 @@ def build_staff_roster(tenant: Any) -> tuple[list[Person], int, bool]:
     # --- 3. the service-delivery side: CatalogMaster ---------------------
     #
     # Archived masters are included for the same reason revoked staff rows
-    # are. ``is_active`` on the payload mirrors what the Команда screen
-    # already calls «Активные / Архив», so the two surfaces agree about
-    # what an archived master is.
+    # are.
+    #
+    # ``invite_status`` is read because without it this roster contradicts
+    # the auth layer. ``resolve_role`` grants the master role only on
+    # ACCEPTED + not archived; a PENDING row — the state the invite-create
+    # path writes — has ``is_active=True, archived_at=None``, so judging by
+    # those two columns alone would print «Мастер · активна» for somebody
+    # the platform treats as a plain customer and who cannot open the
+    # master surface at all. Agreeing with ``resolve_role`` on who is a
+    # master is the whole point of a screen that answers «кто здесь кто».
     master_rows = CatalogMaster.all_tenants.filter(tenant=tenant).values(
         "id",
         "name",
@@ -297,6 +429,7 @@ def build_staff_roster(tenant: Any) -> tuple[list[Person], int, bool]:
         "is_active",
         "archived_at",
         "invited_at",
+        "invite_status",
         "linked_bot_user__display_name",
         "linked_bot_user__client_name",
     )
@@ -318,6 +451,13 @@ def build_staff_roster(tenant: Any) -> tuple[list[Person], int, bool]:
             person.master_id = row["id"]
         # The catalog name wins over the channel-reported display name:
         # it is what the salon calls this person on every other screen.
+        #
+        # Overwriting unconditionally looks like it could clobber a good
+        # staff-side name with «Без имени», and cannot. The key is
+        # ``bot:{linked_id}``, so an existing person here can only have
+        # come from a staff row carrying the SAME ``bot_user`` — the
+        # fallback below therefore reads the identical two columns and
+        # produces the identical answer.
         person.name = row["name"] or _name_from(
             row["linked_bot_user__display_name"], row["linked_bot_user__client_name"]
         )
@@ -340,7 +480,11 @@ def build_staff_roster(tenant: Any) -> tuple[list[Person], int, bool]:
         person.roles.append(
             RoleGrant(
                 role="master",
-                active=row["archived_at"] is None and bool(row["is_active"]),
+                state=_master_state(
+                    archived_at=row["archived_at"],
+                    is_active=bool(row["is_active"]),
+                    invite_status=row["invite_status"],
+                ),
                 source=source,
                 since=since,
             )
