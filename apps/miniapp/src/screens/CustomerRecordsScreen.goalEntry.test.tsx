@@ -319,6 +319,22 @@ describe("дорога к записи открыта при показанно�
     expect(await screen.findByText("CATALOG-PROBE")).toBeInTheDocument();
   });
 
+  it("приглашение идёт ПОСЛЕ содержимого экрана, а не до него", async () => {
+    // BOT-001 §13: First Contact не начинается со standalone-анкеты, а
+    // Mini App entry — в области действия BOT-001 (§2.1). Порядок в DOM
+    // здесь нормативный, поэтому и заперт тестом.
+    mockLists([], []);
+    mockedContext.mockResolvedValue(DOC_GOAL_MISSING);
+    renderScreen();
+
+    const cta = await screen.findByRole("button", { name: GOAL_CTA });
+    const findService = screen.getByRole("button", { name: "Найти услугу" });
+    expect(
+      findService.compareDocumentPosition(cta) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+  });
+
   it("анкета — не тупик: из неё есть выход назад к записям", async () => {
     const user = userEvent.setup();
     const back = { handler: null as (() => void) | null };
