@@ -27,6 +27,15 @@
  *   error    → generic copy + retry
  *   offline  → banner «Записи могут быть устаревшими»
  *
+ * # Вход в анкету цели (решение владельца 30.08)
+ *
+ * Первым на экране — `GoalInviteCard`, над записями и над «Найти
+ * услугу». Показывается по серверному `decision-context.missing`, не по
+ * эвристике «нет записей»; секция, а не модалка и не шаг мастера, так
+ * что дорога к записи не перекрыта. Порядок нормативный: решение
+ * владельца 31.08 поверх BOT-001 §13, принятое при полном знании
+ * возражений (разбор — в теле PR #1342).
+ *
  * # Voice locks
  *
  *   - «Записи» (NOT «Bookings»), «ты» canonical, no exclamation marks
@@ -42,6 +51,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { BookingCard, BookingCardSkeleton } from "../components/BookingCard";
 import { EmptyRecordsState } from "../components/EmptyRecordsState";
+import { GoalInviteCard } from "../components/GoalInviteCard";
 import { TimeGroupHeader } from "../components/TimeGroupHeader";
 import { ApiError } from "../lib/api";
 import {
@@ -279,6 +289,19 @@ export function CustomerRecordsScreen() {
           Записи могут быть устаревшими — нет сети.
         </div>
       )}
+
+      {/* Вход в анкету цели — ПЕРВЫМ, над записями и над «Найти
+          услугу». Порядок задан решением владельца 31.08, принятым
+          поверх BOT-001 §13 при полном знании возражений (разбор — в
+          теле PR #1342). Заголовок экрана остаётся выше: домашний
+          экран не подменяется экраном анкеты.
+
+          Карточка ничего не требует и ничего не загораживает — табы,
+          список, «Найти услугу» и нижняя навигация работают без
+          ответа на вопрос (AC-5.2, non-goal #1/#3). Показывается по
+          серверному `decision-context.missing`, не по эвристике «нет
+          записей». */}
+      <GoalInviteCard />
 
       {/* Tab strip — WCAG 1.3.1 role=tablist. */}
       <div
