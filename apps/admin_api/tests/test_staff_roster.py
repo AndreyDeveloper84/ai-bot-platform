@@ -373,12 +373,24 @@ class TestNoPhoneNumbers:
         resp = _get(client)
         raw = resp.content.decode()
 
-        assert resp.status_code == 200
+        # Positive guard FIRST, and on `raw` — the very string the absence
+        # assertions below read. The earlier version guarded with
+        # `resp.json()["total_count"]` afterwards, which is a different
+        # object read after the fact; `assert resp.status_code == 200` is
+        # not a guard at all (DRF-1406) — a 200 carrying `{"items": []}`
+        # satisfies it and every absence assertion under it.
+        # Ids, not names: ``JsonResponse`` escapes non-ASCII, so «Анна
+        # Петрова» is `Анна...` in this string and a
+        # name match would fail for a reason that has nothing to do with
+        # phones. Ids are ASCII and name the exact rows expected — a
+        # stronger guard than «non-empty» either way.
+        assert str(master.id) in raw
+        assert str(owner_bot_user.id) in raw
+        assert str(admin_bot_user.id) in raw
+
         # The fixtures give every BotUser this number.
         assert "79161234567" not in raw
         assert "phone" not in raw
-        # Positive guard on the same body: it is not empty.
-        assert resp.json()["total_count"] == 2
 
 
 # --- how they got in, and when ---------------------------------------------
