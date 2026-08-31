@@ -30,10 +30,12 @@ from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 
 from apps.admin_api.services import staff_roster as staff_roster_service
+from apps.admin_api.services.staff_roster import build_staff_roster
 from apps.catalog.models import CatalogMaster
 from apps.identity.models import BotUser
 from apps.identity.services.role_resolver import resolve_role
 from apps.identity.services.staff_invites import issue_staff_invite, redeem_staff_invite
+from apps.tenancy.context import current_tenant, tenant_scope
 from apps.tenancy.models import Tenant, TenantStaff
 
 from .conftest import init_data_header, link_master_to_bot_user, make_master
@@ -248,6 +250,107 @@ class TestOtherSalonsAreInvisible:
         # Negative: on the very same response.
         assert "Чужой админ" not in names
         assert "Чужой мастер" not in names
+
+
+class TestTheCatalogReadIsTenantScoped:
+    """MKT1 (#1018) regression, asserted on behaviour.
+
+    The first cut read the catalog through ``CatalogMaster.all_tenants``
+    — the manager that spans every salon — taken by inertia from
+    neighbouring admin code. The explicit ``tenant=`` filter below it meant
+    the answer was right anyway, which is precisely why no existing test
+    objected: with two guards, removing one changes nothing observable.
+
+    Measured, not assumed. Deleting the ``tenant=`` filter leaves all 39
+    tests green; deleting the ``tenant_scope`` this service enters turns
+    four of them red. So the scope is the load-bearing guard and the
+    filter is redundant by construction — kept as cheap defence for the
+    day somebody removes the scope again «because the decorator already
+    does it», but no behavioural test can distinguish it and none here
+    pretends to. The manager itself is the linter's job (MKT1, repo-wide),
+    not re-implemented as a unit test.
+    """
+
+    def test_a_foreign_master_is_absent_under_strict_scope(
+        self, client, owner_bot_user, tenant, admin_bot_user, other_tenant, settings
+    ):
+        """Strict mode turns a missing tenant context into an exception.
+
+        Under ``all_tenants`` this passes for the wrong reason (that manager
+        ignores scope entirely). Its job is to prove the scoped read has a
+        tenant to scope TO — that ``build_staff_roster`` really enters
+        ``tenant_scope`` and does not lean on the admin decorator's.
+        """
+
+        settings.STRICT_TENANT_SCOPE = "strict"
+        foreign_bu = BotUser.all_tenants.create(
+            tenant=other_tenant,
+            channel="max",
+            channel_user_id="9200",
+            display_name="Чужой мастер-аккаунт",
+            chat_id="9200",
+        )
+        link_master_to_bot_user(make_master(other_tenant, name="Чужой мастер"), foreign_bu)
+
+        assert current_tenant() is None
+        people, total, _ = build_staff_roster(tenant)
+        names = {p.name for p in people}
+
+        # Positive guard first: it answered, and answered fully.
+        assert total == 2
+        assert names == {"Карина", "Аня"}
+        # Negative, on the same result.
+        assert "Чужой мастер" not in names
+
+
+class TestTheManagerMustNotStartHidingPeople:
+    """Pins the manager choice itself, not just its tenant scoping.
+
+    ``CatalogMaster.objects`` is ``_MasterManager(TenantScopedManager)``:
+    tenant-bound, but hiding nothing — the «доступен для записи» filter
+    lives in the opt-in ``bookable()`` method. That is exactly why the
+    roster can use it.
+
+    The failure this guards is one step away and silent: swap ``.objects``
+    for ``.objects.bookable()`` (``is_active=True`` AND
+    ``invite_status=ACCEPTED``) and the salon loses every invited and every
+    archived master from the roster — the two groups an owner most needs to
+    see, because they are the ones something must be done about. The list
+    would still render, still be tenant-correct, and still pass every other
+    test in this file.
+
+    One test, both halves, on the same response: the people who would
+    vanish are here, AND the ordinary master who would survive is here too.
+    Without the second half this passes on a roster that returns nobody.
+    """
+
+    def test_invited_and_archived_masters_stay_in_the_roster(
+        self, client, owner_bot_user, tenant, master
+    ):
+        make_master(
+            tenant,
+            name="Наталья Прохорова",
+            external_id=91,
+            invite_status=CatalogMaster.InviteStatus.PENDING,
+        )
+        make_master(
+            tenant,
+            name="Ирина Смирнова",
+            external_id=92,
+            is_active=False,
+            archived_at=timezone.now() - timedelta(days=6),
+        )
+
+        payload = _get(client).json()
+        names = set(_by_name(payload))
+
+        # The two `bookable()` would drop.
+        assert "Наталья Прохорова" in names
+        assert "Ирина Смирнова" in names
+        # The one it would keep — the guard that makes the two above mean
+        # something rather than passing on an empty list.
+        assert "Анна Петрова" in names
+        assert payload["total_count"] == 4
 
 
 # --- privacy ----------------------------------------------------------------
@@ -591,6 +694,72 @@ class TestTheCap:
 
         assert payload["truncated"] is False
         assert payload["total_count"] == len(payload["items"]) == 1
+
+
+# --- the service's own tenant scope -----------------------------------------
+
+
+class TestItCarriesItsOwnTenantScope:
+    """Called with no ambient scope, it must answer fully — not emptily.
+
+    The reader uses the tenant-scoped default manager (MKT1: the catalog
+    mirror's ``all_tenants`` belongs to ``apps.marketplace.discovery``).
+    ``STRICT_TENANT_SCOPE`` defaults to ``audit``, where a scoped manager
+    with no tenant in context returns ``.none()`` **silently** — so a
+    caller outside a request would get «staff yes, masters no» and read it
+    as a salon with no masters.
+
+    The assertion is positive on purpose. «It did not crash» and «it
+    returned everyone» are different claims, and only the second one
+    distinguishes a working reader from a silently empty one.
+    """
+
+    def test_no_ambient_scope_still_returns_every_person(
+        self, tenant, owner_bot_user, admin_bot_user, master
+    ):
+        assert current_tenant() is None
+
+        people, total, truncated = build_staff_roster(tenant)
+
+        assert total == 3
+        assert {p.name for p in people} == {"Карина", "Аня", "Анна Петрова"}
+        assert truncated is False
+
+    def test_it_restores_whatever_scope_it_found(self, tenant, owner_bot_user, other_tenant):
+        """A push/pop, not an assignment — the caller's scope survives."""
+
+        with tenant_scope(other_tenant):
+            build_staff_roster(tenant)
+            assert current_tenant() == other_tenant
+
+        assert current_tenant() is None
+
+    def test_it_reads_the_tenant_it_was_given_not_the_one_in_context(
+        self, tenant, owner_bot_user, admin_bot_user, other_tenant
+    ):
+        """The argument wins over an ambient scope naming another salon.
+
+        Belt and braces: the explicit ``tenant=`` filter and the scope this
+        function enters must agree, and if they ever disagree the argument
+        is the one the caller meant.
+        """
+
+        theirs = BotUser.all_tenants.create(
+            tenant=other_tenant,
+            channel="max",
+            channel_user_id="9100",
+            display_name="Чужой админ",
+            chat_id="9100",
+        )
+        TenantStaff.all_tenants.create(
+            tenant=other_tenant, bot_user=theirs, role=TenantStaff.Role.ADMIN
+        )
+
+        with tenant_scope(other_tenant):
+            people, total, _ = build_staff_roster(tenant)
+
+        assert total == 2
+        assert {p.name for p in people} == {"Карина", "Аня"}
 
 
 # --- ordering ---------------------------------------------------------------

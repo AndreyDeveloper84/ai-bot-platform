@@ -75,6 +75,23 @@ rows, and the used invites that explain how each role was granted. The
 merge itself is in Python because it spans two tables that have no join
 between them.
 
+### Why not route this through ``resolve_role``
+
+It answers a different question. ``resolve_role(bot_user)`` decides what
+ONE person may do; this module inventories everyone. Handing it the job
+would drop every master with no ``BotUser`` — the pilot's dominant shape,
+three rows of four — because it takes a ``BotUser`` as input and those
+people do not have one. It also filters out exactly what a roster must
+show (revoked grants, archived and pending masters), carries neither
+``source`` nor ``since``, and would turn three queries into two per head.
+
+What must NOT be re-derived is the semantics, and it is not: the identity
+rule is ``is_solo_provider``'s, and ``test_the_roster_and_the_resolver_
+agree_on_who_is_a_master`` pins this module's answer to the resolver's on
+the case where the two could drift (a PENDING catalog row, which has
+``is_active=True, archived_at=None`` and would otherwise read as an
+active master here while the resolver calls that person a customer).
+
 ``MAX_ROSTER_PEOPLE`` bounds the RESPONSE, not the read: every row is
 still fetched and sorted before the slice. Bounding the read would cost
 the flat query count, because ``total_count`` would then need its own
@@ -90,6 +107,7 @@ from typing import Any, Literal
 from uuid import UUID
 
 from apps.catalog.models import CatalogMaster
+from apps.tenancy.context import tenant_scope
 from apps.tenancy.models import StaffInvite, TenantStaff
 
 #: Hard ceiling on people returned in one answer.
@@ -314,12 +332,34 @@ def build_staff_roster(tenant: Any) -> tuple[list[Person], int, bool]:
     dropped — a truncated list that also under-reports its own size would
     hide the anomaly the cap exists to surface.
 
-    ``all_tenants`` managers are used with an explicit ``tenant=`` filter
-    throughout. The caller is already inside ``tenant_scope`` (the admin
-    auth decorator enters it), so the default manager would do — but this
-    reader crosses two apps and one of them (``CatalogMaster``) is a sync
-    mirror, and an explicit filter is the difference between «scoped» and
-    «scoped as long as nobody calls this from a Celery task».
+    Every read goes through the tenant-scoped default manager AND names
+    ``tenant=`` explicitly, inside a ``tenant_scope`` this function enters
+    itself. Three things at once, and each earns its place:
+
+    * ``.objects`` rather than ``.all_tenants`` is what the catalog
+      boundary rule requires (MKT1 / #1018 — ``CatalogMaster.all_tenants``
+      is reserved for ``apps.marketplace.discovery``). The baselined
+      crossings elsewhere all justify themselves with «``.objects`` is
+      unavailable because this runs outside a request, where no tenant
+      ContextVar is set». That is not true here, so a baseline entry would
+      have been a false claim rather than an accepted debt.
+
+    * Entering the scope here rather than relying on the caller's is what
+      makes the first point safe. ``STRICT_TENANT_SCOPE`` defaults to
+      ``audit``, and in that mode a scoped manager with no tenant in
+      context returns ``.none()`` **silently**. Called from a job or a
+      test without a scope, this function would then answer «staff yes,
+      masters no» — a roster missing exactly the half that has no
+      ``TenantStaff`` row, which reads as a salon with no masters rather
+      than as a failure. ``tenant_scope`` is a ContextVar push/pop, so
+      re-entering it under the admin decorator's own scope costs nothing.
+
+    * The explicit ``tenant=`` filter is redundant by construction once
+      the scope above is entered, and is kept anyway as cheap defence for
+      the day somebody drops the scope «because the decorator already does
+      it» — which is how the ``all_tenants`` this replaced got here. It is
+      measured, not assumed: deleting the filter leaves the suite green,
+      deleting the scope turns four tests red. No test claims otherwise.
 
     One join is worth naming: ``CatalogMaster.linked_bot_user`` is a
     globally unique ``OneToOneField`` with no same-tenant constraint, so a
@@ -329,6 +369,13 @@ def build_staff_roster(tenant: Any) -> tuple[list[Person], int, bool]:
     tenant and links the caller's own ``BotUser`` — but the filter above
     guards the master row, not who is on the other end of that FK.
     """
+
+    with tenant_scope(tenant):
+        return _build(tenant)
+
+
+def _build(tenant: Any) -> tuple[list[Person], int, bool]:
+    """The reader proper. Always runs inside ``tenant_scope(tenant)``."""
 
     # --- 1. used invite codes: how each grant was made -------------------
     #
@@ -341,7 +388,7 @@ def build_staff_roster(tenant: Any) -> tuple[list[Person], int, bool]:
     # redemption — a master unlinked and re-invited would report the first
     # attempt as «с».
     invites = (
-        StaffInvite.all_tenants.filter(tenant=tenant, used_at__isnull=False)
+        StaffInvite.objects.filter(tenant=tenant, used_at__isnull=False)
         .order_by("used_at")
         .values("role", "used_by_id", "used_at", "catalog_master_id")
     )
@@ -373,7 +420,7 @@ def build_staff_roster(tenant: Any) -> tuple[list[Person], int, bool]:
     # Revoked rows are included on purpose — see ``Person.is_active``.
     # Explicit ``.values()`` rather than ``select_related``: it names every
     # column that crosses this boundary, and ``phone`` is not among them.
-    staff_rows = TenantStaff.all_tenants.filter(tenant=tenant).values(
+    staff_rows = TenantStaff.objects.filter(tenant=tenant).values(
         "bot_user_id",
         "role",
         "created_at",
@@ -422,7 +469,7 @@ def build_staff_roster(tenant: Any) -> tuple[list[Person], int, bool]:
     # the platform treats as a plain customer and who cannot open the
     # master surface at all. Agreeing with ``resolve_role`` on who is a
     # master is the whole point of a screen that answers «кто здесь кто».
-    master_rows = CatalogMaster.all_tenants.filter(tenant=tenant).values(
+    master_rows = CatalogMaster.objects.filter(tenant=tenant).values(
         "id",
         "name",
         "linked_bot_user_id",
