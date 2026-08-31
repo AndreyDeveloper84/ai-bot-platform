@@ -153,8 +153,47 @@ class Person:
             "name": self.name,
             "has_account": self.has_account,
             "is_active": self.is_active,
-            "roles": [r.to_payload() for r in sorted(self.roles, key=_role_sort_key)],
+            "roles": [r.to_payload() for r in self.effective_roles()],
         }
+
+    def effective_roles(self) -> list[RoleGrant]:
+        """One grant per role name, ordered for display.
+
+        A person can hold two ``TenantStaff`` rows for the SAME role —
+        revoke an admin and grant the role again and the old row stays,
+        by design, because ``deactivated_at`` is a soft delete kept for
+        audit. Only the ``owner`` role has a partial unique index; admin
+        and receptionist do not.
+
+        Emitting both would report «Аня — Администратор» next to «Аня —
+        Администратор, доступ отозван», which reads as a contradiction
+        rather than as history, and hands the frontend two list entries
+        with the same identity. The roster answers «what is this person
+        now»; the audit log is where superseded rows belong.
+
+        The live grant wins; among equals the most recent one does.
+        """
+
+        best: dict[str, RoleGrant] = {}
+        for grant in self.roles:
+            incumbent = best.get(grant.role)
+            if incumbent is None or _supersedes(grant, incumbent):
+                best[grant.role] = grant
+        return sorted(best.values(), key=_role_sort_key)
+
+
+def _supersedes(candidate: RoleGrant, incumbent: RoleGrant) -> bool:
+    """Whether ``candidate`` is the truer answer for its role name."""
+
+    if candidate.active != incumbent.active:
+        return candidate.active
+    # Same liveness — the later grant is the current one. A grant with no
+    # date loses to one that has a date rather than winning by accident.
+    if candidate.since is None:
+        return False
+    if incumbent.since is None:
+        return True
+    return candidate.since > incumbent.since
 
 
 def _role_sort_key(grant: RoleGrant) -> tuple[int, int, str]:

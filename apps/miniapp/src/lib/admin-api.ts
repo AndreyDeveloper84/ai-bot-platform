@@ -1442,6 +1442,13 @@ export interface StaffRosterPerson {
   has_account: boolean;
   /** True while at least one role is live. */
   is_active: boolean;
+  /**
+   * At most one entry per role name — the backend collapses a role that
+   * was revoked and granted again into its current state, so `role` is a
+   * safe React key. Never flatten this to `roles[0]`: an owner who is
+   * also a master has two entries and dropping one is exactly the
+   * blindness this endpoint was built to remove.
+   */
   roles: StaffRoleGrant[];
 }
 

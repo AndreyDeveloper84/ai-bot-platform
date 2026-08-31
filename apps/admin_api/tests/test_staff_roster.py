@@ -372,6 +372,54 @@ class TestRevokedAccessIsVisibleAsRevoked:
         assert _active_roles_of(item) == {"master"}
         assert _roles_of(item) == {"master", "admin"}
 
+    def test_a_re_granted_role_shows_once_and_shows_as_live(
+        self, client, owner_bot_user, tenant, admin_bot_user
+    ):
+        """Revoke and grant again and TWO admin rows exist.
+
+        ``deactivated_at`` is a soft delete kept for audit, and only
+        ``owner`` has a partial unique index — admin and receptionist can
+        stack. Reporting both would put «Администратор» next to
+        «Администратор, доступ отозван» on one person, which reads as a
+        contradiction, not as history.
+        """
+
+        old = TenantStaff.all_tenants.get(bot_user=admin_bot_user)
+        old.deactivated_at = timezone.now() - timedelta(days=2)
+        old.save(update_fields=["deactivated_at"])
+        TenantStaff.all_tenants.create(
+            tenant=tenant, bot_user=admin_bot_user, role=TenantStaff.Role.ADMIN
+        )
+
+        item = _by_name(_get(client).json())["Аня"]
+
+        assert [r["role"] for r in item["roles"]] == ["admin"]
+        assert _active_roles_of(item) == {"admin"}
+        assert item["is_active"] is True
+
+    def test_a_twice_revoked_role_shows_once_as_revoked(
+        self, client, owner_bot_user, tenant, admin_bot_user
+    ):
+        """The same collapse when neither row is live — the later wins."""
+
+        old = TenantStaff.all_tenants.get(bot_user=admin_bot_user)
+        old.deactivated_at = timezone.now() - timedelta(days=9)
+        old.save(update_fields=["deactivated_at"])
+        newer = TenantStaff.all_tenants.create(
+            tenant=tenant, bot_user=admin_bot_user, role=TenantStaff.Role.ADMIN
+        )
+        newer.deactivated_at = timezone.now() - timedelta(days=1)
+        newer.save(update_fields=["deactivated_at"])
+
+        item = _by_name(_get(client).json())["Аня"]
+
+        assert [r["role"] for r in item["roles"]] == ["admin"]
+        assert item["is_active"] is False
+        # The surviving grant is the later row, not the first one found.
+        since = parse_datetime(item["roles"][0]["since"])
+        assert since is not None
+        assert since >= newer.created_at
+
     def test_an_archived_master_is_inactive(self, client, owner_bot_user, tenant):
         make_master(
             tenant,
