@@ -269,23 +269,42 @@ class TestExhaustionIsNotRetriable:
         """The pilot symptom, measured: pre-fix each turn spent the whole
         retry budget against a known-empty balance.
         """
+        import openai
+
         calls = 0
+        raised: list[BaseException] = []
 
         async def _fail() -> None:
             nonlocal calls
             calls += 1
-            raise openai_credits_exhausted()
+            exc = openai_credits_exhausted()
+            raised.append(exc)
+            raise exc
 
-        with pytest.raises(Exception) as caught:  # noqa: PT011 — SDK class
+        # pytest.raises pins the TYPE positively — a wrapped or swallowed
+        # error fails here, by name, before any absence assertion runs.
+        with pytest.raises(openai.RateLimitError) as caught:
             await run_with_retry(
                 _fail,
                 policy=RetryPolicy(max_attempts=5, base_delay_s=0, jitter=0),
                 is_retriable=is_retriable_openai,
             )
 
-        assert calls == 1
-        # Propagated AS-IS, not wrapped — so the provider's mapper sees
-        # the SDK error and can classify it.
+        assert calls == 1, "a drained balance must not consume the retry budget"
+        assert len(raised) == 1
+
+        # Presence before absence, on the same object. `not isinstance(...)`
+        # alone is true for None and for any unrelated value, so on its own
+        # it would pass even if nothing meaningful came out at all.
+        assert is_vendor_quota_exhausted(caught.value), (
+            "the propagated error must still be recognisable as exhaustion"
+        )
+        assert caught.value is raised[0], (
+            "the SDK error must arrive as the very same object — identity is "
+            "what proves it was re-raised rather than reconstructed"
+        )
+        # Only now is this meaningful: NOT wrapped, so the provider's
+        # mapper sees the SDK error and can classify it.
         assert not isinstance(caught.value, RetriableLLMError)
 
     @pytest.mark.asyncio
@@ -579,6 +598,13 @@ class TestQuotaFallbackHop:
         stubs = _exhausted_and_healthy()
         provider = _router_with(stubs).get_provider(None, op="embedding")
 
+        # Presence before absence, on the same object. `not isinstance(...)`
+        # is true for None and for any unrelated value, so it needs proof
+        # that a real provider was resolved at all.
+        assert provider.name == "openai", "embedding must resolve to the embedding-capable vendor"
+        assert provider is stubs["openai"], (
+            "identity: the raw resolved provider, with nothing wrapped around it"
+        )
         assert not isinstance(provider, QuotaFallbackProvider)
 
     @pytest.mark.asyncio

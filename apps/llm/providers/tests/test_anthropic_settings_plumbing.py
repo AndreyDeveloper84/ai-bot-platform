@@ -52,6 +52,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
+import httpx
 import pytest
 
 from apps.llm.providers.anthropic_provider import AnthropicProvider
@@ -239,18 +240,40 @@ class TestProxySelection:
         provider = AnthropicProvider(api_key=PLACEHOLDER_ANTHROPIC_KEY)
         client = provider._get_client()
 
-        http_client = getattr(client, "_client", None)
+        # `._client` and `._mounts` are read as ATTRIBUTES, never through
+        # ``getattr(..., default)``. A default would turn "the SDK renamed
+        # this field" and "the field is empty" into the same green result —
+        # the same blindness this file is about, one layer down.
+        http_client = client._client
         assert http_client is not None, "SDK client should carry the injected httpx client"
-        mounts = getattr(http_client, "_mounts", {})
-        assert mounts, "a proxied httpx.AsyncClient mounts a proxy transport"
+        assert isinstance(http_client, httpx.AsyncClient), (
+            f"expected the injected httpx client, got {type(http_client).__name__}"
+        )
+        assert len(http_client._mounts) == 1, (
+            "a proxied httpx.AsyncClient mounts exactly one proxy transport"
+        )
 
     def test_no_proxy_means_no_injected_http_client(self, settings: Any) -> None:
         """The guard for the test above: ``_mounts`` must be able to come
-        back empty, or "assert mounts" proves nothing about the proxy.
+        back empty, or asserting it is non-empty proves nothing.
+
+        The emptiness here is the real subject of the test, so it is
+        preceded by presence assertions on the SAME object: the SDK
+        client exists, it IS an ``httpx.AsyncClient``, and ``_mounts`` is
+        read as a plain attribute so a renamed field raises
+        ``AttributeError`` instead of quietly reading as empty.
         """
         settings.ANTHROPIC_PROXY = ""
         settings.OPENAI_PROXY = ""
 
         client = AnthropicProvider(api_key=PLACEHOLDER_ANTHROPIC_KEY)._get_client()
-        http_client = getattr(client, "_client", None)
-        assert not getattr(http_client, "_mounts", {})
+
+        http_client = client._client
+        assert http_client is not None, "SDK always builds an httpx client, proxy or not"
+        assert isinstance(http_client, httpx.AsyncClient), (
+            f"expected an httpx client, got {type(http_client).__name__}"
+        )
+        # empty-assert-ok: emptiness IS the claim — no proxy configured
+        # means no mounted proxy transport. The three assertions above
+        # prove there was a real, correctly-typed object to inspect.
+        assert len(http_client._mounts) == 0
