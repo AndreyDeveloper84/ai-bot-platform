@@ -227,6 +227,30 @@ class LLMProvider(Protocol):
 
     name: str  # ``"openai"`` | ``"anthropic"`` — stable identifier
 
+    #: The model id this provider uses when the caller does not name one.
+    #:
+    #: DRF-1437 promoted this from "an attribute the concrete classes
+    #: happen to have" to part of the contract, because the router's
+    #: quota fallback now DEPENDS on it: model ids do not cross vendors,
+    #: so hopping from OpenAI to Anthropic means replacing the caller's
+    #: ``gpt-4o-mini`` with the target's own default. A provider that
+    #: does not publish one cannot be hopped TO.
+    #:
+    #: It was previously read everywhere as
+    #: ``getattr(provider, "default_completion_model", "")`` — five call
+    #: sites do this — and that default is exactly the silent
+    #: substitution this codebase keeps getting bitten by: a wrapper that
+    #: forgot to forward the attribute reads as "no default configured"
+    #: instead of failing. ``PIITokenizingProvider`` was that wrapper,
+    #: and it silently turned the fallback's model swap into a no-op.
+    #: Declaring it here makes the omission a type error.
+    #:
+    #: NOTE the deliberate asymmetry: ``default_embedding_model`` is NOT
+    #: part of this contract. Anthropic has no embeddings API at all, so
+    #: requiring it would force a meaningless value onto a provider that
+    #: cannot embed.
+    default_completion_model: str
+
     async def complete(
         self,
         messages: list[dict[str, Any]],

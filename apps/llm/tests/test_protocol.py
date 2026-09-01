@@ -95,6 +95,10 @@ class TestLLMProviderProtocol:
     def test_duck_typed_instance(self) -> None:
         class FakeProvider:
             name = "fake"
+            # DRF-1437 widened the Protocol: a provider must publish the
+            # model it defaults to, because the router's quota fallback
+            # has to name a model the TARGET vendor understands.
+            default_completion_model = "fake-model"
 
             async def complete(
                 self,

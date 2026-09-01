@@ -48,6 +48,7 @@ import pytest
 
 from apps.llm.protocol import (
     CompletionResult,
+    LLMProvider,
     LLMProviderQuotaExceeded,
     LLMQuotaError,
     LLMVendorCreditsExhausted,
@@ -399,17 +400,36 @@ class StubProvider:
         return [0.0]
 
 
-def _router_with(stubs: dict[str, StubProvider]) -> LLMRouter:
+class _StubLoadingRouter(LLMRouter):
     """A real ``LLMRouter`` with provider CONSTRUCTION stubbed.
 
     Everything under test — tier resolution, the configured-key filter,
-    the wrapper, the audit hop — is the production code path. Only the
-    two SDK-backed classes are swapped out, because there is no Anthropic
-    key to build a real one with.
+    the fallback wrapper, the audit hop — is the production code path.
+    Only the two SDK-backed classes are swapped out, because there is no
+    Anthropic key to build a real one with.
+
+    Overriding the method beats assigning over it on the instance: the
+    override is type-checked against the base signature, so a change to
+    ``_load_provider``'s contract breaks here loudly instead of being
+    silenced by a ``type: ignore``.
+
+    NOTE what this deliberately skips: the real ``_load_provider`` wraps
+    each provider in ``PIITokenizingProvider``. That wrapper is where the
+    DRF-1437 model-swap defect actually lived, and stubs like these are
+    what hid it — so the wrap chain has its own test that does NOT stub
+    this method (``TestHopThroughTheRealWrapperChain``).
     """
-    router = LLMRouter()
-    router._load_provider = stubs.__getitem__  # type: ignore[method-assign]
-    return router
+
+    def __init__(self, stubs: dict[str, StubProvider]) -> None:
+        super().__init__()
+        self._stubs = stubs
+
+    def _load_provider(self, name: str) -> LLMProvider:
+        return self._stubs[name]
+
+
+def _router_with(stubs: dict[str, StubProvider]) -> LLMRouter:
+    return _StubLoadingRouter(stubs)
 
 
 def _exhausted_and_healthy() -> dict[str, StubProvider]:
@@ -686,3 +706,97 @@ class TestKillSwitch:
             await provider.complete([], model="m")
         assert stubs["anthropic"].calls == 0
         reset_router_cache()
+
+
+@pytest.mark.django_db(transaction=True)
+class TestHopThroughTheRealWrapperChain:
+    """The hop, exercised through the REAL ``_load_provider``.
+
+    ### Why this class exists
+
+    Every other hop test in this file stubs ``LLMRouter._load_provider``
+    and gets a bare ``StubProvider`` back. Production does not: it wraps
+    each provider in ``PIITokenizingProvider`` first. That wrapper did
+    not forward ``default_completion_model``, so the fallback's model
+    swap read ``""`` off it, skipped, and forwarded the caller's OpenAI
+    model id to Anthropic — a guaranteed ``404 not_found_error`` on the
+    one call site that passes a concrete model
+    (``apps/orchestrator/intent_router.py``, ``"gpt-4o-mini"``).
+
+    The stubs hid it because ``StubProvider`` carries the attribute
+    directly. mypy found it, not the tests: ``LLMProvider`` had no
+    ``default_completion_model``, which was true — and the reason the
+    wrapper could drop it unnoticed.
+
+    So this class stubs one layer LOWER: the provider CLASSES in their
+    modules, leaving ``_load_provider``'s importlib lookup and its PII
+    wrapping to run for real.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _real_load_path(self, settings: Any, monkeypatch: pytest.MonkeyPatch) -> Any:
+        settings.OPENAI_API_KEY = PLACEHOLDER_KEY
+        settings.ANTHROPIC_API_KEY = PLACEHOLDER_KEY
+        settings.LLM_PROVIDER = "openai"
+        settings.SKILL_LLM_PROVIDER = {}
+        settings.LLM_FALLBACK_ORDER = []
+        settings.LLM_QUOTA_FALLBACK_ENABLED = True
+
+        from apps.llm.providers import anthropic_provider, openai_provider
+
+        exhausted = StubProvider(
+            "openai", raises=LLMVendorCreditsExhausted("openai.complete: no credits")
+        )
+        exhausted.default_completion_model = "gpt-4o-mini"
+        healthy = StubProvider("anthropic")
+        healthy.default_completion_model = "claude-sonnet-4-6"
+
+        monkeypatch.setattr(openai_provider, "OpenAIProvider", lambda: exhausted)
+        monkeypatch.setattr(anthropic_provider, "AnthropicProvider", lambda: healthy)
+
+        reset_router_cache()
+        yield {"openai": exhausted, "anthropic": healthy}
+        reset_router_cache()
+
+    @pytest.mark.asyncio
+    async def test_model_is_retargeted_through_the_pii_wrapper(
+        self, _real_load_path: dict[str, StubProvider]
+    ) -> None:
+        """The regression. ``intent_router`` hard-codes ``gpt-4o-mini``;
+        after the hop, Anthropic must receive its OWN model id.
+        """
+        from apps.llm.pii_protected_provider import PIITokenizingProvider
+        from apps.llm.router import QuotaFallbackProvider
+
+        provider = LLMRouter().get_provider(None, skill="intent", op="complete")
+
+        # Presence first: this is the REAL chain, PII wrapper included —
+        # if it silently degraded to a bare provider, the assertions
+        # below would prove nothing about production.
+        assert isinstance(provider, QuotaFallbackProvider)
+        assert isinstance(provider._primary, PIITokenizingProvider)
+        assert provider.default_completion_model == "gpt-4o-mini"
+
+        result = await provider.complete(
+            [{"role": "user", "content": "привет"}], model="gpt-4o-mini"
+        )
+
+        assert result.provider == "anthropic"
+        assert _real_load_path["anthropic"].last_kwargs["model"] == "claude-sonnet-4-6", (
+            "an OpenAI model id reaching api.anthropic.com is a 404 — the swap must fire "
+            "through the PII wrapper, not just through bare stubs"
+        )
+
+    def test_pii_wrapper_satisfies_the_provider_protocol(self) -> None:
+        """The contract hole itself, asserted directly.
+
+        ``LLMProvider`` now requires ``default_completion_model``. The
+        wrapper the router puts around every provider must satisfy that,
+        or the quota fallback loses the only value it can retarget to.
+        """
+        from apps.llm.protocol import LLMProvider as ProviderProtocol
+
+        loaded = LLMRouter()._load_provider("anthropic")
+
+        assert isinstance(loaded, ProviderProtocol)
+        assert loaded.default_completion_model == "claude-sonnet-4-6"

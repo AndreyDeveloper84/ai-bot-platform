@@ -43,6 +43,10 @@ class FakeProvider:
     """
 
     name = "fake"
+    # DRF-1437: the LLMProvider Protocol now requires a published
+    # default completion model — the router's quota fallback has to
+    # name a model the TARGET vendor understands when it hops.
+    default_completion_model = "fake-model"
 
     def __init__(self) -> None:
         self.embedding_calls: list[tuple[str, str | None]] = []

@@ -268,7 +268,11 @@ class QuotaFallbackProvider:
         # (``getattr(provider, "default_completion_model", None)``), so
         # the wrapper has to be transparent for them too.
         self.default_completion_model = getattr(primary, "default_completion_model", "")
-        self.default_embedding_model = getattr(primary, "default_embedding_model", "")
+        # Only when the primary really has one — see the same rule in
+        # ``PIITokenizingProvider``: an invented empty attribute would
+        # make a non-embedding vendor look like one with a blank default.
+        if hasattr(primary, "default_embedding_model"):
+            self.default_embedding_model = primary.default_embedding_model
 
     async def complete(self, messages: list[dict[str, Any]], **kwargs: Any) -> CompletionResult:
         try:
