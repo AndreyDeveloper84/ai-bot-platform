@@ -255,8 +255,16 @@ class TestWriteSurvivesAReadTimeout:
     def test_guidance_intent_is_not_reconciled(
         self, ayla: _State, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """``intent=need_guidance`` не создаёт ClientGoal, значит сверить его
-        по документу нельзя — и притворяться, что можно, тоже нельзя."""
+        """``intent=need_guidance`` не создаёт ClientGoal, значит сверять
+        его нечем — и ходить за документом не надо вовсе.
+
+        Проверяется именно ОТСУТСТВИЕ запроса, а не только исключение:
+        отказ тут поднимется в любом случае (в документе цели нет, сверка
+        всё равно не сойдётся), поэтому ``pytest.raises`` сам по себе
+        ничего не пиннит. Ценность стражи `leaves_durable_trace` в том,
+        что человек не ждёт лишний RECONCILE_READ_TIMEOUT_S ради заведомо
+        бесполезного запроса — это и утверждается.
+        """
         monkeypatch.setattr(gc, "READ_TIMEOUT_S", 0.3, raising=False)
         ayla.commit_on_post = False
         ayla.post_delay_s = 1.5
@@ -266,6 +274,11 @@ class TestWriteSurvivesAReadTimeout:
                 external_user_id=EXT_USER,
                 payload={"intent": "need_guidance", "source_channel": "miniapp"},
             )
+
+        assert not [r for r in ayla.requests if r.startswith("GET")], (
+            "сверка по документу для need_guidance бессмысленна и не должна "
+            "выполняться: ClientGoal у неё нет, а ожидание она удлиняет"
+        )
 
 
 class TestTimeoutBudgetIsSplit:
