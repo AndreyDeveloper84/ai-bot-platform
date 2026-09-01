@@ -219,9 +219,7 @@ class TestFailureLeavesATrace:
             )
             with caplog.at_level(logging.WARNING, logger="apps.orchestrator.llm.openai_provider"):
                 with pytest.raises(TimeoutError):
-                    await provider._call_openai(
-                        [{"role": "user", "content": "hi"}], "gpt-4o-mini"
-                    )
+                    await provider._call_openai([{"role": "user", "content": "hi"}], "gpt-4o-mini")
 
         assert any("openai.call_failed" in r.getMessage() for r in caplog.records)
 
@@ -237,15 +235,11 @@ class TestFailureLeavesATrace:
 
         with patch("httpx.AsyncClient"), patch("openai.AsyncOpenAI") as mock_sdk:
             mock_sdk.return_value.chat.completions.create = AsyncMock(
-                side_effect=RuntimeError(
-                    "cannot connect to http://user:s3cr3t@proxy.example:8080"
-                )
+                side_effect=RuntimeError("cannot connect to http://user:s3cr3t@proxy.example:8080")
             )
             with caplog.at_level(logging.WARNING, logger="apps.orchestrator.llm.openai_provider"):
                 with pytest.raises(RuntimeError):
-                    await provider._call_openai(
-                        [{"role": "user", "content": "hi"}], "gpt-4o-mini"
-                    )
+                    await provider._call_openai([{"role": "user", "content": "hi"}], "gpt-4o-mini")
 
         blob = " ".join(r.getMessage() for r in caplog.records)
         assert "s3cr3t" not in blob
