@@ -233,13 +233,10 @@ class TestWriteSurvivesAReadTimeout:
             "сверка обязана быть отдельным дешёвым GET, а не повтором POST"
         )
         assert sum(1 for r in ayla.requests if r.startswith("POST")) == 1, (
-            "POST не должен повторяться: он не идемпотентен по событию "
-            "воронки GOAL_SELECTED"
+            "POST не должен повторяться: он не идемпотентен по событию воронки GOAL_SELECTED"
         )
 
-    def test_lost_write_still_fails(
-        self, ayla: _State, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_lost_write_still_fails(self, ayla: _State, monkeypatch: pytest.MonkeyPatch) -> None:
         """Положительная стража: если запись НЕ прошла, отказ остаётся отказом.
 
         Без неё «сверка чинит таймаут» проходила бы и у клиента, который
