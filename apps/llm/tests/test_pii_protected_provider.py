@@ -566,6 +566,9 @@ class TestRouterIntegration:
 
         settings.LLM_PROVIDER = "openai"  # type: ignore[attr-defined]
         settings.SKILL_LLM_PROVIDER = {}  # type: ignore[attr-defined]
+        # DRF-1437: pinned off so this asserts the PII wrapper directly.
+        # The wrapped-through-the-fallback case is asserted below.
+        settings.LLM_QUOTA_FALLBACK_ENABLED = False  # type: ignore[attr-defined]
         reset_router_cache()
 
         router = LLMRouter()
@@ -574,3 +577,101 @@ class TestRouterIntegration:
         # Wrapped provider's name still reflects real vendor.
         assert provider.name == "openai"
         reset_router_cache()
+
+    def test_quota_fallback_wrapper_does_not_bypass_pii_protection(
+        self, settings: pytest.FixtureRequest, db
+    ):
+        """DRF-1437 added a second wrapper OUTSIDE this one. 152-ФЗ Tier-A
+        enforcement is single-point at the LLM-call boundary, so the new
+        outer layer must delegate to PII-wrapped providers on BOTH the
+        primary and the fallback side — otherwise a hop would be the one
+        code path that ships raw personal data to a vendor.
+        """
+        from apps.llm.pii_protected_provider import PIITokenizingProvider
+        from apps.llm.router import LLMRouter, QuotaFallbackProvider, reset_router_cache
+
+        settings.LLM_PROVIDER = "openai"  # type: ignore[attr-defined]
+        settings.SKILL_LLM_PROVIDER = {}  # type: ignore[attr-defined]
+        settings.OPENAI_API_KEY = "unit-test-placeholder"  # type: ignore[attr-defined]
+        settings.ANTHROPIC_API_KEY = "unit-test-placeholder"  # type: ignore[attr-defined]
+        settings.LLM_QUOTA_FALLBACK_ENABLED = True  # type: ignore[attr-defined]
+        settings.LLM_FALLBACK_ORDER = []  # type: ignore[attr-defined]
+        reset_router_cache()
+
+        router = LLMRouter()
+        provider = router.get_provider(tenant=None)
+        assert isinstance(provider, QuotaFallbackProvider)
+        assert isinstance(provider._primary, PIITokenizingProvider)
+        # The fallback target is loaded through the same _load_provider,
+        # so it is wrapped too.
+        assert isinstance(router._load_provider("anthropic"), PIITokenizingProvider)
+        reset_router_cache()
+
+
+class TestModelDefaultsForwarding:
+    """The wrapper must not change what the provider LOOKS LIKE (DRF-1437).
+
+    This wrapper sits between the router and every concrete provider, so
+    anything it fails to forward simply ceases to exist as far as the
+    rest of the platform is concerned. It dropped
+    ``default_completion_model``, and because all five readers used
+    ``getattr(provider, ..., "")`` the loss registered as "no default
+    configured" rather than as an error — which silently turned the
+    quota fallback's model swap into a no-op and sent an OpenAI model id
+    to api.anthropic.com.
+
+    The rule these tests pin: forward what the wrapped provider has, and
+    do NOT invent what it does not.
+    """
+
+    def test_completion_default_is_forwarded(self) -> None:
+        from apps.llm.pii_protected_provider import PIITokenizingProvider
+        from apps.llm.providers.anthropic_provider import AnthropicProvider
+
+        wrapped = AnthropicProvider(api_key="unit-test-placeholder")
+        provider = PIITokenizingProvider(wrapped)
+
+        assert provider.default_completion_model == wrapped.default_completion_model
+        assert provider.default_completion_model, "must be a real model id, not empty"
+
+    def test_embedding_default_is_forwarded_when_the_vendor_has_one(self) -> None:
+        from apps.llm.pii_protected_provider import PIITokenizingProvider
+        from apps.llm.providers.openai_provider import OpenAIProvider
+
+        wrapped = OpenAIProvider(api_key="unit-test-placeholder")
+        provider = PIITokenizingProvider(wrapped)
+
+        assert hasattr(provider, "default_embedding_model")
+        assert provider.default_embedding_model == wrapped.default_embedding_model
+
+    def test_embedding_default_is_not_invented_when_the_vendor_lacks_one(self) -> None:
+        """The negative half, on the same rule.
+
+        Anthropic has no embeddings API and no embedding default. If the
+        wrapper synthesised an empty one, ``apps/kb``'s
+        ``getattr(provider, "default_embedding_model", "text-embedding-3-small")``
+        would receive ``""`` instead of its intended fallback — a
+        wrapper turning "this vendor cannot embed" into "this vendor
+        embeds with an unnamed model".
+        """
+        from apps.llm.pii_protected_provider import PIITokenizingProvider
+        from apps.llm.providers.anthropic_provider import AnthropicProvider
+
+        wrapped = AnthropicProvider(api_key="unit-test-placeholder")
+        provider = PIITokenizingProvider(wrapped)
+
+        # Presence first, on the same objects: the wrapper really wrapped
+        # this provider, and the provider really has no embedding default —
+        # so the absence below is about forwarding, not about a broken fixture.
+        assert provider.name == "anthropic"
+        assert provider.default_completion_model == wrapped.default_completion_model
+        # …and on `wrapped` too, before asserting an absence over IT: a
+        # provider that failed to construct would satisfy "has no
+        # embedding default" for entirely the wrong reason.
+        assert wrapped.name == "anthropic"
+        assert wrapped.default_completion_model, "wrapped provider must be really configured"
+        assert not hasattr(wrapped, "default_embedding_model"), (
+            "fixture assumption: Anthropic publishes no embedding default"
+        )
+
+        assert not hasattr(provider, "default_embedding_model")

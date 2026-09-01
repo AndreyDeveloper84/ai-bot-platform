@@ -27,6 +27,9 @@ inheritance retrofit.
 * :class:`LLMProviderQuotaExceeded` — OUR daily budget cap hit
   (Sprint 7 / L7 wraps Anthropic with a Redis counter). Router catches
   and falls back to the next-tier provider.
+* :class:`LLMVendorCreditsExhausted` — subclass of the above: the
+  VENDOR's balance is drained ("you have no credits remaining").
+  Terminal, never retryable, triggers the same fallback.
 
 ### Tool spec
 
@@ -139,6 +142,36 @@ class LLMProviderQuotaExceeded(LLMError):
     """
 
 
+class LLMVendorCreditsExhausted(LLMProviderQuotaExceeded):
+    """The VENDOR refused the call because our account has no credits /
+    quota left (DRF-1437).
+
+    Distinct from its parent in one dimension only — whose budget ran
+    out. The parent is OUR Redis-counter cap; this one is the vendor
+    saying "you have no credits remaining". Both are terminal for the
+    provider that raised them and both must trigger the router's
+    quota fallback, which is exactly why this subclasses the parent
+    rather than sitting beside it: every existing ``except
+    LLMProviderQuotaExceeded`` handler picks it up unchanged.
+
+    Why it is NOT :class:`LLMQuotaError`: that class means "vendor
+    rate-limit, slow down and retry". A drained balance does not heal
+    with time, so retrying it burns the retry budget and delays the
+    turn by the full backoff before failing anyway. The pilot incident
+    of 2026-08-31 (98 consecutive refusals, zero provider hops) is the
+    reference case — see ``apps.llm.retry.is_vendor_quota_exhausted``.
+
+    Shape of the upstream error this maps from (both vendors 429 or
+    400 with a billing discriminator in the body):
+
+      * OpenAI — ``type="insufficient_quota"``,
+        ``code="insufficient_quota"`` / ``"billing_hard_limit_reached"``
+      * Anthropic — ``code="credit_balance_exhausted"``, message
+        "Your credit balance is too low…" / "You have no credits
+        remaining"
+    """
+
+
 class LLMProviderUnavailable(LLMError):
     """A provider could not be constructed (missing API key, SDK init
     failure, malformed settings).
@@ -193,6 +226,30 @@ class LLMProvider(Protocol):
     """
 
     name: str  # ``"openai"`` | ``"anthropic"`` — stable identifier
+
+    #: The model id this provider uses when the caller does not name one.
+    #:
+    #: DRF-1437 promoted this from "an attribute the concrete classes
+    #: happen to have" to part of the contract, because the router's
+    #: quota fallback now DEPENDS on it: model ids do not cross vendors,
+    #: so hopping from OpenAI to Anthropic means replacing the caller's
+    #: ``gpt-4o-mini`` with the target's own default. A provider that
+    #: does not publish one cannot be hopped TO.
+    #:
+    #: It was previously read everywhere as
+    #: ``getattr(provider, "default_completion_model", "")`` — five call
+    #: sites do this — and that default is exactly the silent
+    #: substitution this codebase keeps getting bitten by: a wrapper that
+    #: forgot to forward the attribute reads as "no default configured"
+    #: instead of failing. ``PIITokenizingProvider`` was that wrapper,
+    #: and it silently turned the fallback's model swap into a no-op.
+    #: Declaring it here makes the omission a type error.
+    #:
+    #: NOTE the deliberate asymmetry: ``default_embedding_model`` is NOT
+    #: part of this contract. Anthropic has no embeddings API at all, so
+    #: requiring it would force a meaningless value onto a provider that
+    #: cannot embed.
+    default_completion_model: str
 
     async def complete(
         self,

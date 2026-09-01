@@ -40,6 +40,10 @@ def tenant_b(db) -> Tenant:
 class FakeProvider:
     name = "fake"
     default_embedding_model = "fake-embed-3"
+    # DRF-1437: the LLMProvider Protocol now requires a published
+    # default completion model — the router's quota fallback has to
+    # name a model the TARGET vendor understands when it hops.
+    default_completion_model = "fake-model"
 
     def __init__(self, fail_on: str | None = None) -> None:
         self.fail_on = fail_on

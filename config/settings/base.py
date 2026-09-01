@@ -1465,6 +1465,78 @@ POST_VISIT_FOLLOWUP_DRY_RUN = os.environ.get("POST_VISIT_FOLLOWUP_DRY_RUN", "tru
     "0",
 )
 
+# ---------------------------------------------------------------------------
+# LLM provider selection (DRF-587 / DRF-1437)
+# ---------------------------------------------------------------------------
+# `apps.llm.router.LLMRouter` has read these three settings since Sprint 7
+# via `getattr(settings, ..., default)` — but they were never DEFINED here,
+# so every `getattr` silently took its default and the whole selection
+# surface was inert: the org default was pinned to "openai" regardless of
+# env, and `AnthropicProvider.__init__` read an ANTHROPIC_API_KEY that
+# could not exist no matter what the operator put in `.env`. The pytest
+# suite did not catch it because pytest-django's `settings` fixture happily
+# CREATES a setting that the module never defined.
+#
+# LLM_PROVIDER — org-wide default vendor, the bottom tier of the router's
+# three-tier resolution. One of the names in
+# `apps.llm.router._PROVIDER_REGISTRY`. An unknown value is logged and
+# coerced to "openai" rather than raising: a typo here must not take the
+# bot down.
+LLM_PROVIDER = os.environ.get("LLM_PROVIDER", "openai")
+
+# SKILL_LLM_PROVIDER — per-skill override, the middle tier. JSON object of
+# {skill_slug: provider_name}, e.g. {"intent": "anthropic", "faq": "openai"}.
+# Malformed JSON degrades to {} with a warning for the same reason as above.
+_SKILL_LLM_PROVIDER_RAW = os.environ.get("SKILL_LLM_PROVIDER", "").strip()
+if _SKILL_LLM_PROVIDER_RAW:
+    import json as _json
+
+    try:
+        _parsed_skill_map = _json.loads(_SKILL_LLM_PROVIDER_RAW)
+    except ValueError:
+        _parsed_skill_map = None
+    SKILL_LLM_PROVIDER = _parsed_skill_map if isinstance(_parsed_skill_map, dict) else {}
+    if not SKILL_LLM_PROVIDER:
+        import warnings as _warnings
+
+        _warnings.warn(
+            "SKILL_LLM_PROVIDER is set but is not a JSON object — ignoring it. "
+            'Expected shape: {"intent": "anthropic"}',
+            stacklevel=1,
+        )
+else:
+    SKILL_LLM_PROVIDER = {}
+
+# ANTHROPIC_API_KEY / ANTHROPIC_PROXY — read by
+# `apps.llm.providers.anthropic_provider.AnthropicProvider.__init__`.
+# The proxy falls back to OPENAI_PROXY inside the provider when unset,
+# since api.anthropic.com is blocked from RU-hosted runners exactly like
+# api.openai.com and one tunnel usually serves both.
+ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
+ANTHROPIC_PROXY = os.environ.get("ANTHROPIC_PROXY", "")
+
+# LLM_QUOTA_FALLBACK_ENABLED — master switch for the router's one-hop
+# fallback onto another vendor when the chosen one reports its quota or
+# credit balance exhausted. On by default; the off switch exists so an
+# operator can pin traffic to a single vendor during a cost incident
+# without editing code.
+LLM_QUOTA_FALLBACK_ENABLED = os.environ.get("LLM_QUOTA_FALLBACK_ENABLED", "1") not in {
+    "0",
+    "false",
+    "False",
+    "",
+}
+
+# LLM_FALLBACK_ORDER — comma-separated preference order for fallback
+# targets, e.g. "anthropic,openai". Empty → registry declaration order.
+# Unknown names are dropped with a warning by the router. Worth setting
+# when one vendor is reachable without a tunnel and the others are not:
+# the whole point of the hop is surviving a single point of failure, and
+# hopping onto a second vendor behind the SAME tunnel does not.
+LLM_FALLBACK_ORDER = [
+    _name.strip() for _name in os.environ.get("LLM_FALLBACK_ORDER", "").split(",") if _name.strip()
+]
+
 # Sprint 7 / L7 (DRF-585) — Anthropic daily-token cost cap. Counter
 # stored in Redis as `anthropic_tokens:<YYYY-MM-DD>` (TTL 24h, natural
 # UTC-midnight rollover). On overrun the provider raises
@@ -1768,6 +1840,13 @@ ALERTS_TELEGRAM_CHAT_ID = os.environ.get("ALERTS_TELEGRAM_CHAT_ID", "")
 # traffic.
 TELEGRAM_PROXY = os.environ.get("TELEGRAM_PROXY", "")
 OPENAI_PROXY = os.environ.get("OPENAI_PROXY", "")
+# NB: the Anthropic counterparts (ANTHROPIC_API_KEY / ANTHROPIC_PROXY) and
+# the provider-selection block (LLM_PROVIDER / SKILL_LLM_PROVIDER /
+# LLM_QUOTA_FALLBACK_ENABLED / LLM_FALLBACK_ORDER) live with the rest of
+# the LLM knobs, above ANTHROPIC_DAILY_TOKEN_CAP. ANTHROPIC_PROXY falls
+# back to THIS value inside AnthropicProvider — the fallback belongs to
+# the provider, not to the setting, so that an operator can point
+# Anthropic at a different egress address than everything else.
 
 # OpenAI auth — read by ``apps.orchestrator.llm.openai_provider.OpenAIProvider``
 # via ``getattr(settings, "OPENAI_API_KEY", "")``. Without this line the

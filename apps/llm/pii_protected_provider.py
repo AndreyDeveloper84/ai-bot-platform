@@ -123,6 +123,22 @@ class PIITokenizingProvider:
         # Expose wrapped's name verbatim — audit / cost tracker / router
         # telemetry look at this attribute and must see the real vendor.
         self.name = getattr(wrapped, "name", "")
+        # DRF-1437: forward the model defaults too. Omitting
+        # ``default_completion_model`` was a real production defect, not a
+        # tidiness issue: this wrapper sits between the router and every
+        # concrete provider, so the router's quota fallback read ``""``
+        # off the wrapper and skipped its model swap entirely — sending
+        # ``gpt-4o-mini`` to api.anthropic.com for a 404. Every reader
+        # used ``getattr(..., "")``, so nothing ever failed loudly.
+        # The attribute is now part of the LLMProvider Protocol.
+        self.default_completion_model = getattr(wrapped, "default_completion_model", "")
+        # Embedding default is forwarded ONLY when the wrapped provider
+        # actually has one — Anthropic has no embeddings API, and
+        # inventing an empty attribute here would hide that from
+        # ``hasattr`` checks in apps/kb, which fall back to a real model
+        # name rather than an empty string.
+        if hasattr(wrapped, "default_embedding_model"):
+            self.default_embedding_model = wrapped.default_embedding_model
 
     async def complete(
         self,
