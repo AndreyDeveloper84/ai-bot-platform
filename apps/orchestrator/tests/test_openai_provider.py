@@ -121,3 +121,150 @@ class TestLanguageOverride:
             response = await provider.complete(messages=[{"role": "user", "content": "x"}])
         assert "brief technical issue" in response.content
         assert response.is_fallback is True
+
+
+# ---------------------------------------------------------------------------
+# DRF-1436 — the Sprint-1 provider must travel the same road as production
+# ---------------------------------------------------------------------------
+
+
+def _fake_completion():
+    """Minimal stand-in for an OpenAI ChatCompletion response object."""
+
+    from types import SimpleNamespace
+
+    return SimpleNamespace(
+        choices=[SimpleNamespace(message=SimpleNamespace(content="ok"))],
+        model="gpt-4o-mini",
+        usage=SimpleNamespace(prompt_tokens=1, completion_tokens=1),
+    )
+
+
+class TestProxyAndTimeout:
+    """``api.openai.com`` is unreachable directly from the Russian hosts
+    this runs on. The production provider
+    (:mod:`apps.llm.providers.openai_provider`) threads ``OPENAI_PROXY``
+    into its ``httpx`` client and pins ``LLM_REQUEST_TIMEOUT_S``; this
+    Sprint-1 wrapper shipped with neither, so any caller that still
+    reaches it does not get an error — it gets an unbounded hang, which
+    writes nothing anywhere. Same road, same bounds.
+    """
+
+    async def test_client_built_with_proxy_and_bounded_timeout(self, settings):
+        import httpx
+
+        settings.OPENAI_PROXY = "http://proxy.example:8080"
+        settings.LLM_REQUEST_TIMEOUT_S = 30.0
+        provider = OpenAIProvider(api_key="ci-fake-key")
+
+        with (
+            patch("httpx.AsyncClient") as mock_httpx,
+            patch("openai.AsyncOpenAI") as mock_sdk,
+        ):
+            mock_sdk.return_value.chat.completions.create = AsyncMock(
+                return_value=_fake_completion()
+            )
+            await provider._call_openai([{"role": "user", "content": "hi"}], "gpt-4o-mini")
+
+        # The proxy is actually handed to httpx — not merely read.
+        mock_httpx.assert_called_once()
+        assert mock_httpx.call_args.kwargs["proxy"] == "http://proxy.example:8080"
+        assert mock_httpx.call_args.kwargs["timeout"] == 30.0
+
+        _, sdk_kwargs = mock_sdk.call_args
+        assert sdk_kwargs["http_client"] is mock_httpx.return_value
+        assert sdk_kwargs["timeout"] == 30.0
+        # Our own retry/breaker layer owns retries; the SDK must not add
+        # its own on top (DRF-989, mirrored from the production provider).
+        assert sdk_kwargs["max_retries"] == 0
+        assert httpx  # imported for symmetry with the production test
+
+    async def test_no_proxy_configured_leaves_http_client_unset(self, settings):
+        """No proxy in the environment must not fabricate one — CI and
+        local dev reach OpenAI directly (or mock it entirely).
+        """
+
+        settings.OPENAI_PROXY = ""
+        settings.LLM_REQUEST_TIMEOUT_S = 30.0
+        provider = OpenAIProvider(api_key="ci-fake-key")
+
+        with patch("openai.AsyncOpenAI") as mock_sdk:
+            mock_sdk.return_value.chat.completions.create = AsyncMock(
+                return_value=_fake_completion()
+            )
+            await provider._call_openai([{"role": "user", "content": "hi"}], "gpt-4o-mini")
+
+        _, sdk_kwargs = mock_sdk.call_args
+        assert "http_client" not in sdk_kwargs
+        assert sdk_kwargs["timeout"] == 30.0
+
+
+class TestFailureLeavesATrace:
+    """DRF-1436 side task — an LLM refusal must not be silent.
+
+    The breaker logs only on state *transitions*, so before this the
+    first failures of an outage produced no log line at all: the owner
+    learned about the outage from the alert in the chat, and the journal
+    had nothing to corroborate it.
+    """
+
+    async def test_failed_call_is_logged(self, caplog):
+        import logging
+
+        provider = OpenAIProvider(api_key="ci-fake-key")
+
+        with patch("openai.AsyncOpenAI") as mock_sdk:
+            mock_sdk.return_value.chat.completions.create = AsyncMock(
+                side_effect=TimeoutError("request timed out")
+            )
+            with caplog.at_level(logging.WARNING, logger="apps.orchestrator.llm.openai_provider"):
+                with pytest.raises(TimeoutError):
+                    await provider._call_openai([{"role": "user", "content": "hi"}], "gpt-4o-mini")
+
+        assert any("openai.call_failed" in r.getMessage() for r in caplog.records)
+
+    async def test_provider_redacts_the_proxy_before_handing_it_to_the_logger(self, settings):
+        """The proxy URL carries credentials and SDK errors quote it back
+        at us, userinfo included. The provider must redact it *itself*.
+
+        Asserted on the arguments handed to the logger, NOT on
+        ``caplog.records``. ``apps.observability.pii_filter``'s
+        ``PIIRedactingFilter`` mutates ``record.msg`` / ``record.args`` in
+        place before any handler sees them, so a
+        "no secret in caplog" assertion passes whether or not this
+        provider redacts anything — it would be testing the global filter
+        and reporting it as coverage of this code. Verified: with
+        ``redact_secrets`` removed, that formulation still passed.
+        """
+
+        # The credentials are load-bearing, not decorative — strip them and
+        # the test asserts nothing. `pragma: allowlist secret` because
+        # detect-secrets reads the shape, not the intent; the value is
+        # invented.
+        proxy_with_creds = "http://user:s3cr3t@proxy.example:8080"  # pragma: allowlist secret
+        settings.OPENAI_PROXY = proxy_with_creds
+        provider = OpenAIProvider(api_key="ci-fake-key")
+
+        with (
+            patch("httpx.AsyncClient"),
+            patch("openai.AsyncOpenAI") as mock_sdk,
+            patch("apps.orchestrator.llm.openai_provider.logger") as mock_logger,
+        ):
+            mock_sdk.return_value.chat.completions.create = AsyncMock(
+                side_effect=RuntimeError(f"cannot connect to {proxy_with_creds}")
+            )
+            with pytest.raises(RuntimeError):
+                await provider._call_openai([{"role": "user", "content": "hi"}], "gpt-4o-mini")
+
+        mock_logger.warning.assert_called_once()
+        fmt, *args = mock_logger.warning.call_args.args
+        handed_over = " ".join(str(a) for a in args)
+        assert "openai.call_failed" in fmt
+        # Presence first, and on the same string the absence is asserted
+        # against: "the secret is not in there" is trivially true of an
+        # empty or unrelated `handed_over`. These two say the proxy really
+        # did reach the log call and was redacted rather than dropped —
+        # the host survives, the credentials do not.
+        assert "proxy.example" in handed_over
+        assert "***" in handed_over
+        assert "s3cr3t" not in handed_over

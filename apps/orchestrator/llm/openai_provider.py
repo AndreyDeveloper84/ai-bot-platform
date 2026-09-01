@@ -11,6 +11,7 @@ that protocol will require.
 
 from __future__ import annotations
 
+import inspect
 import logging
 from dataclasses import dataclass
 from typing import Any
@@ -114,6 +115,51 @@ class OpenAIProvider:
                 is_fallback=True,
             )
 
+    def _build_client(self) -> Any:
+        """Build the SDK client the way the production provider does.
+
+        DRF-1436. Sprint 1 built ``AsyncOpenAI(api_key=...)`` and nothing
+        else, and the Sprint 6 router that was meant to replace it never
+        took this call site over. On the hosts this runs on that omission
+        is not cosmetic:
+
+        * ``api.openai.com`` refuses Russian addresses outright
+          (``unsupported_country_region_territory``), so without
+          ``OPENAI_PROXY`` the call cannot succeed at all;
+        * without a timeout a stalled path — a proxy that accepts the TCP
+          connection and then never completes ``CONNECT``, the 2026-08-13
+          incident — hangs for the SDK default rather than failing, and a
+          hang writes nothing to any journal.
+
+        Both settings are read exactly as
+        :meth:`apps.llm.providers.openai_provider.OpenAIProvider._get_client`
+        reads them, so the two implementations cannot drift apart on the
+        road they travel. ``max_retries=0`` for the same reason it is
+        zero there: the circuit breaker around this call owns the retry
+        and failure accounting, and a second, invisible SDK-level retry
+        loop would multiply every outage by three.
+        """
+
+        # Local import — avoid loading openai client at module import
+        # time (it pulls heavy deps; we don't always need it).
+        from openai import AsyncOpenAI
+
+        timeout = getattr(settings, "LLM_REQUEST_TIMEOUT_S", 30.0)
+        client_kwargs: dict[str, Any] = {
+            "api_key": self.api_key,
+            "timeout": timeout,
+            "max_retries": 0,
+        }
+        proxy = getattr(settings, "OPENAI_PROXY", "") or ""
+        if proxy:
+            import httpx
+
+            # The proxy client carries the same timeout, or the bound we
+            # just set on the SDK would stop at the SDK's own layer while
+            # the transport underneath it hung on indefinitely.
+            client_kwargs["http_client"] = httpx.AsyncClient(proxy=proxy, timeout=timeout)
+        return AsyncOpenAI(**client_kwargs)
+
     async def _call_openai(
         self,
         messages: list[dict[str, Any]],
@@ -122,20 +168,42 @@ class OpenAIProvider:
     ) -> LLMResponse:
         """Actual OpenAI API call.
 
-        Sprint 1 uses the async OpenAI SDK directly. Sprint 6 swaps this
-        for a router that picks the provider from per-skill config.
+        Sprint 1 used the async OpenAI SDK directly and Sprint 6 was to
+        swap this for a router. The router arrived
+        (:mod:`apps.llm.router`) and took over the pipeline and the
+        concierge, but not this wrapper, which the intent router still
+        falls back to when it is handed no tenant. So it stays, and it
+        travels the same road as the router's provider — see
+        :meth:`_build_client`.
         """
 
-        # Local import — avoid loading openai client at module import
-        # time (it pulls heavy deps; we don't always need it).
-        from openai import AsyncOpenAI
+        client = self._build_client()
+        try:
+            response = await client.chat.completions.create(
+                messages=messages,  # type: ignore[arg-type]
+                model=model,
+                **kwargs,
+            )
+        except Exception as exc:
+            # DRF-1436 — an LLM refusal must never be silent. The circuit
+            # breaker logs only on state TRANSITIONS, so before this line
+            # the opening failures of an outage produced no journal entry
+            # at all: the owner learned of the outage from the alert in
+            # the chat and there was nothing to corroborate it with.
+            # WARNING, not exception: the breaker and the caller decide
+            # severity; this line only guarantees the failure left a mark.
+            from apps.llm.health import redact_secrets
 
-        client = AsyncOpenAI(api_key=self.api_key)
-        response = await client.chat.completions.create(
-            messages=messages,  # type: ignore[arg-type]
-            model=model,
-            **kwargs,
-        )
+            logger.warning(
+                "orchestrator.llm.openai.call_failed model=%s exc=%s msg=%s",
+                model,
+                type(exc).__name__,
+                redact_secrets(str(exc))[:300],
+            )
+            raise
+        finally:
+            await self._aclose_client(client)
+
         choice = response.choices[0]
         return LLMResponse(
             content=choice.message.content or "",
@@ -144,3 +212,23 @@ class OpenAIProvider:
             tokens_in=response.usage.prompt_tokens if response.usage else 0,
             tokens_out=response.usage.completion_tokens if response.usage else 0,
         )
+
+    @staticmethod
+    async def _aclose_client(client: Any) -> None:
+        """Close the per-call SDK client and the httpx pool under it.
+
+        The client is built per call (this provider is constructed per
+        call by the intent router), so without this every classification
+        leaked a connection pool. Best-effort: teardown must never turn a
+        served answer into an error.
+        """
+
+        close = getattr(client, "close", None)
+        if close is None:
+            return
+        try:
+            result = close()
+            if inspect.isawaitable(result):
+                await result
+        except Exception:  # noqa: BLE001 — teardown must never break the caller
+            logger.warning("orchestrator.llm.openai.aclose_failed", exc_info=True)
