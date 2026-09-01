@@ -223,24 +223,45 @@ class TestFailureLeavesATrace:
 
         assert any("openai.call_failed" in r.getMessage() for r in caplog.records)
 
-    async def test_log_line_carries_no_secret(self, caplog, settings):
-        """The proxy URL carries credentials and SDK errors quote it
-        back at us. Nothing that reaches a log line may contain it.
+    async def test_provider_redacts_the_proxy_before_handing_it_to_the_logger(self, settings):
+        """The proxy URL carries credentials and SDK errors quote it back
+        at us, userinfo included. The provider must redact it *itself*.
+
+        Asserted on the arguments handed to the logger, NOT on
+        ``caplog.records``. ``apps.observability.pii_filter``'s
+        ``PIIRedactingFilter`` mutates ``record.msg`` / ``record.args`` in
+        place before any handler sees them, so a
+        "no secret in caplog" assertion passes whether or not this
+        provider redacts anything — it would be testing the global filter
+        and reporting it as coverage of this code. Verified: with
+        ``redact_secrets`` removed, that formulation still passed.
         """
 
-        import logging
-
-        settings.OPENAI_PROXY = "http://user:s3cr3t@proxy.example:8080"
+        # The credentials are load-bearing, not decorative — strip them and
+        # the test asserts nothing. `pragma: allowlist secret` because
+        # detect-secrets reads the shape, not the intent; the value is
+        # invented.
+        proxy_with_creds = "http://user:s3cr3t@proxy.example:8080"  # pragma: allowlist secret
+        settings.OPENAI_PROXY = proxy_with_creds
         provider = OpenAIProvider(api_key="ci-fake-key")
 
-        with patch("httpx.AsyncClient"), patch("openai.AsyncOpenAI") as mock_sdk:
+        with (
+            patch("httpx.AsyncClient"),
+            patch("openai.AsyncOpenAI") as mock_sdk,
+            patch("apps.orchestrator.llm.openai_provider.logger") as mock_logger,
+        ):
             mock_sdk.return_value.chat.completions.create = AsyncMock(
-                side_effect=RuntimeError("cannot connect to http://user:s3cr3t@proxy.example:8080")
+                side_effect=RuntimeError(f"cannot connect to {proxy_with_creds}")
             )
-            with caplog.at_level(logging.WARNING, logger="apps.orchestrator.llm.openai_provider"):
-                with pytest.raises(RuntimeError):
-                    await provider._call_openai([{"role": "user", "content": "hi"}], "gpt-4o-mini")
+            with pytest.raises(RuntimeError):
+                await provider._call_openai([{"role": "user", "content": "hi"}], "gpt-4o-mini")
 
-        blob = " ".join(r.getMessage() for r in caplog.records)
-        assert "s3cr3t" not in blob
-        assert "openai.call_failed" in blob
+        mock_logger.warning.assert_called_once()
+        fmt, *args = mock_logger.warning.call_args.args
+        handed_over = " ".join(str(a) for a in args)
+        assert "openai.call_failed" in fmt
+        assert "s3cr3t" not in handed_over
+        # Redacted, not merely truncated away: the host survives, the
+        # credentials do not.
+        assert "***" in handed_over
+        assert "proxy.example" in handed_over
