@@ -56,12 +56,14 @@ from apps.llm.protocol import (
     LLMError,
     LLMQuotaError,
     LLMTransportError,
+    LLMVendorCreditsExhausted,
     ToolCall,
 )
 from apps.llm.retry import (
     RetriableLLMError,
     RetryPolicy,
     is_retriable_openai,
+    is_vendor_quota_exhausted,
     policy_from_settings,
     run_with_retry,
     write_retry_attempt_audit,
@@ -405,6 +407,15 @@ class OpenAIProvider:
         )
         if exc_name in {"APIConnectionError", "APITimeoutError", "InternalServerError"}:
             raise LLMTransportError(f"openai.{op}: {exc_name}: {exc}") from exc
+        # DRF-1437 — checked BEFORE the RateLimitError branch below,
+        # because a drained account balance arrives AS a RateLimitError.
+        # Mapping it to LLMQuotaError ("slow down, retry later") is what
+        # kept the 2026-08-31 pilot silent: the error was neither
+        # retryable-usefully nor recognisable as "hop to another vendor".
+        if is_vendor_quota_exhausted(exc):
+            raise LLMVendorCreditsExhausted(
+                f"openai.{op}: vendor credits exhausted: {exc}"
+            ) from exc
         if exc_name in {"RateLimitError"}:
             raise LLMQuotaError(f"openai.{op}: rate-limited: {exc}") from exc
         # Catch-all — unknown SDK error class.

@@ -27,6 +27,9 @@ inheritance retrofit.
 * :class:`LLMProviderQuotaExceeded` — OUR daily budget cap hit
   (Sprint 7 / L7 wraps Anthropic with a Redis counter). Router catches
   and falls back to the next-tier provider.
+* :class:`LLMVendorCreditsExhausted` — subclass of the above: the
+  VENDOR's balance is drained ("you have no credits remaining").
+  Terminal, never retryable, triggers the same fallback.
 
 ### Tool spec
 
@@ -136,6 +139,36 @@ class LLMProviderQuotaExceeded(LLMError):
     Raised BEFORE making the upstream call once the counter crosses the
     configured budget. The L5 router (DRF-587) catches this and falls
     back to the next-tier provider one hop.
+    """
+
+
+class LLMVendorCreditsExhausted(LLMProviderQuotaExceeded):
+    """The VENDOR refused the call because our account has no credits /
+    quota left (DRF-1437).
+
+    Distinct from its parent in one dimension only — whose budget ran
+    out. The parent is OUR Redis-counter cap; this one is the vendor
+    saying "you have no credits remaining". Both are terminal for the
+    provider that raised them and both must trigger the router's
+    quota fallback, which is exactly why this subclasses the parent
+    rather than sitting beside it: every existing ``except
+    LLMProviderQuotaExceeded`` handler picks it up unchanged.
+
+    Why it is NOT :class:`LLMQuotaError`: that class means "vendor
+    rate-limit, slow down and retry". A drained balance does not heal
+    with time, so retrying it burns the retry budget and delays the
+    turn by the full backoff before failing anyway. The pilot incident
+    of 2026-08-31 (98 consecutive refusals, zero provider hops) is the
+    reference case — see ``apps.llm.retry.is_vendor_quota_exhausted``.
+
+    Shape of the upstream error this maps from (both vendors 429 or
+    400 with a billing discriminator in the body):
+
+      * OpenAI — ``type="insufficient_quota"``,
+        ``code="insufficient_quota"`` / ``"billing_hard_limit_reached"``
+      * Anthropic — ``code="credit_balance_exhausted"``, message
+        "Your credit balance is too low…" / "You have no credits
+        remaining"
     """
 
 

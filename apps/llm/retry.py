@@ -50,6 +50,16 @@ None) in (429, 500, 502, 503, 504)``) for cases where the SDK has
 unified errors into a single class but exposed status as an
 attribute.
 
+**Exception to both (DRF-1437):** a vendor refusing because our own
+account balance is empty also arrives as ``RateLimitError`` / 429, and
+neither the class name nor the status code distinguishes it from a
+transient rate-limit. Retrying it is pure waste — it heals when someone
+tops the account up, not in 1s. :func:`is_vendor_quota_exhausted` reads
+the error BODY for the billing discriminator and vetoes retriability;
+the provider then maps it to
+:class:`apps.llm.protocol.LLMVendorCreditsExhausted` so the router's
+quota fallback can hop to another vendor.
+
 ### Determinism in tests
 
 ``run_with_retry`` accepts ``_now`` and ``_sleep`` injection so the
@@ -187,6 +197,118 @@ _ANTHROPIC_RETRIABLE_CLASS_NAMES: frozenset[str] = frozenset(
 )
 
 
+# ---------------------------------------------------------------------------
+# Vendor credit exhaustion — retriable-looking, but terminal
+# ---------------------------------------------------------------------------
+
+# DRF-1437. Both vendors report a drained balance as an HTTP 429 raised
+# as ``RateLimitError`` — the SAME class and status as an ordinary
+# "you are going too fast" rate-limit. Class name and status code alone
+# therefore cannot tell the two apart, and the pre-fix predicates below
+# classified both as retriable.
+#
+# The consequence was the 2026-08-31 pilot incident: every turn spent
+# its whole retry budget (``LLM_RETRY_MAX_ATTEMPTS`` attempts plus the
+# backoff sleep between them) re-asking a provider whose balance was
+# known to be zero, then surfaced ``RetriableLLMError`` — a plain
+# ``Exception``, outside the ``LLMError`` hierarchy — so no caller could
+# recognise the outcome as "this provider is out of money" and hop to
+# another one. 98 consecutive refusals, zero hops.
+#
+# The discriminator is in the error BODY, not the class:
+#
+#   OpenAI    {"error": {"type": "insufficient_quota",
+#                        "code": "insufficient_quota"}}
+#   Anthropic {"error": {"type": "rate_limit_error",
+#                        "code": "credit_balance_exhausted",
+#                        "message": "... you have no credits remaining"}}
+#
+# A drained balance does not heal on the retry timescale (it heals when
+# a human tops the account up), so these are terminal for the provider
+# that raised them and belong on the fallback path instead.
+_VENDOR_EXHAUSTION_CODES: frozenset[str] = frozenset(
+    {
+        # OpenAI — billing/quota family.
+        "insufficient_quota",
+        "billing_hard_limit_reached",
+        "billing_not_active",
+        "account_deactivated",
+        # Anthropic — credit family.
+        "credit_balance_exhausted",
+        "credit_balance_too_low",
+    }
+)
+
+# Message-substring fallback for SDK versions (or proxies) that drop the
+# structured code and leave only prose. Lowercased comparison. Kept
+# deliberately narrow — each phrase names a BALANCE, never a rate.
+_VENDOR_EXHAUSTION_PHRASES: tuple[str, ...] = (
+    "no credits remaining",
+    "credit balance is too low",
+    "exceeded your current quota",
+    "billing hard limit",
+)
+
+
+def _vendor_error_codes(exc: BaseException) -> set[str]:
+    """Collect every structured code/type string an SDK error exposes.
+
+    SDK surfaces differ and drift across versions, so we read all of the
+    documented shapes rather than betting on one:
+
+      * ``exc.code`` / ``exc.type`` — flattened attributes (openai>=1.0).
+      * ``exc.body["error"]["code" | "type"]`` — the parsed JSON body,
+        which is the only place Anthropic puts ``credit_balance_exhausted``.
+      * ``exc.response.json()["error"][...]`` — deliberately NOT read;
+        re-parsing the response can raise or consume a stream, and every
+        SDK we use has already parsed it into ``.body``.
+
+    Returns lowercased strings; unknown/absent shapes contribute nothing.
+    """
+    codes: set[str] = set()
+
+    for attr in ("code", "type"):
+        value = getattr(exc, attr, None)
+        if isinstance(value, str) and value:
+            codes.add(value.lower())
+
+    body = getattr(exc, "body", None)
+    if isinstance(body, dict):
+        error = body.get("error")
+        candidates = error if isinstance(error, dict) else body
+        if isinstance(candidates, dict):
+            for key in ("code", "type"):
+                value = candidates.get(key)
+                if isinstance(value, str) and value:
+                    codes.add(value.lower())
+
+    return codes
+
+
+def is_vendor_quota_exhausted(exc: BaseException) -> bool:
+    """True when the vendor refused because OUR ACCOUNT has no credits.
+
+    False for an ordinary rate-limit — that one IS transient and must
+    stay retriable. The positive/negative split is the whole point of
+    this predicate, so both directions are covered by tests
+    (``apps/llm/tests/test_vendor_quota_exhaustion.py``).
+
+    Detection order:
+      1. structured code/type from :func:`_vendor_error_codes` against
+         :data:`_VENDOR_EXHAUSTION_CODES` — the reliable path;
+      2. a narrow message-substring match against
+         :data:`_VENDOR_EXHAUSTION_PHRASES` — the degraded path, for
+         when a proxy or an older SDK left only prose.
+
+    Non-SDK exceptions never match: they expose neither shape.
+    """
+    if _vendor_error_codes(exc) & _VENDOR_EXHAUSTION_CODES:
+        return True
+
+    message = str(exc).lower()
+    return any(phrase in message for phrase in _VENDOR_EXHAUSTION_PHRASES)
+
+
 def _is_retriable_by_class_or_status(
     exc: BaseException,
     *,
@@ -207,7 +329,16 @@ def _is_retriable_by_class_or_status(
 
     Non-SDK exceptions (``ValueError``, ``RuntimeError``, …) never
     match either layer and propagate.
+
+    Layer 0 (DRF-1437) runs FIRST and can only ever return False: a
+    drained account balance arrives as ``RateLimitError``/429, which
+    both layers below would wave through as transient. See
+    :func:`is_vendor_quota_exhausted`.
     """
+    # Layer 0: vendor credit exhaustion — looks like 429, never heals.
+    if is_vendor_quota_exhausted(exc):
+        return False
+
     # Layer 1: class-name MRO walk.
     for klass in type(exc).__mro__:
         if klass.__name__ in retriable_class_names:
@@ -245,6 +376,9 @@ def is_retriable_openai(exc: BaseException) -> bool:
       * ``PermissionDeniedError`` (403)
       * ``NotFoundError`` (404)
       * ``UnprocessableEntityError`` (422)
+      * a ``RateLimitError`` whose body carries a billing/credit
+        discriminator (DRF-1437) — see
+        :func:`is_vendor_quota_exhausted`
       * any non-SDK exception (``ValueError``, …)
 
     Status-code fallback applies for SDK versions that flatten
