@@ -397,6 +397,25 @@ a {
   color: var(--c-warning);
 }
 
+/* M0 identity block (DRF-1434) — подпись «чья это запись» и пояснение,
+   когда имя в приглашении расходится с именем в MAX. Без правил обе
+   строки слились бы с карточкой и подпись перестала бы читаться как
+   подпись. */
+.identity-caption {
+  margin: 0 0 var(--s-1);
+  color: var(--c-text-secondary);
+  font-size: var(--font-size-200);
+}
+
+.identity-mismatch {
+  margin: var(--s-2) 0 0;
+  padding-top: var(--s-2);
+  border-top: 1px solid var(--c-divider);
+  color: var(--c-text-secondary);
+  font-size: var(--font-size-200);
+  line-height: 1.4;
+}
+
 .profile-favorites {
   background: var(--c-surface-1);
   border-radius: var(--r-md);

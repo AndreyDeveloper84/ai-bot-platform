@@ -111,9 +111,20 @@ const DASHBOARD: DashboardResponse = {
   salon: { id: "t-1", name: "Формула тела" },
   now_iso: "2026-09-01T09:00:00+03:00",
   active_visit: null,
-  next_visit: null,
+  // Непустой день — иначе дашборд рисует ветку «Сегодня нет записей» без
+  // секций, и тест не отличил бы поверхность мастера от заглушки.
+  next_visit: {
+    booking_id: "b-1",
+    client_first_name: "Мария",
+    client_last_initial: "К",
+    visit_at: "2026-09-01T11:00:00+03:00",
+    service_name: "Массаж спины",
+    duration_min: 60,
+    is_returning_customer: false,
+    customer_intent_hint: "",
+  },
   inbox_preview: [],
-  today_summary: { total_clients_today: 0, completed_count: 0, next_free_window: null },
+  today_summary: { total_clients_today: 1, completed_count: 0, next_free_window: null },
   tab_badges: {
     conversations_unread: 0,
     schedule_has_pending_change: false,
@@ -169,8 +180,10 @@ describe("DRF-1434 — приземление после онбординга м
       await screen.findByRole("button", { name: "Сохранить и продолжить" }),
     );
 
-    // Поверхность мастера — секция «СЕЙЧАС» дашборда.
+    // Поверхность мастера — секции дашборда и расписание дня, ради
+    // которого весь путь и затевался.
     expect(await screen.findByText("СЕЙЧАС")).toBeInTheDocument();
+    expect(screen.getByText("СЛЕДУЮЩИЙ КЛИЕНТ")).toBeInTheDocument();
     // И ровно то, чего быть не должно: клиентское приветствие.
     expect(screen.queryByText(CLIENT_GREETING)).not.toBeInTheDocument();
   });
@@ -188,5 +201,67 @@ describe("DRF-1434 — приземление после онбординга м
       await screen.findByRole("heading", { name: /Доступ мастера ещё не подтверждён/ }),
     ).toBeInTheDocument();
     expect(screen.queryByText(CLIENT_GREETING)).not.toBeInTheDocument();
+  });
+});
+
+/**
+ * Побочный дефект того же пути: заголовок «Здравствуйте, Иван!» брал имя
+ * из профиля MAX, а карточка под вопросом «Это вы?» — «Я тест» — из
+ * записи приглашения. Человека просили подтвердить личность, показывая
+ * две. Источники оставлены оба, но каждый подписан, и расхождение
+ * названо вслух.
+ */
+describe("DRF-1434 — два имени на экране подтверждения личности", () => {
+  it("здоровается именем из MAX и подписывает карточку как запись салона", async () => {
+    mockedGetMe.mockResolvedValue(INVITEE_ME);
+    renderAppAt("/onboarding/master?token=t-1");
+
+    expect(
+      await screen.findByRole("heading", { name: "Здравствуйте, Иван!" }),
+    ).toBeInTheDocument();
+    expect(screen.getByText("Салон записал вас так:")).toBeInTheDocument();
+    expect(screen.getByText("Я тест")).toBeInTheDocument();
+  });
+
+  it("называет расхождение имён вслух", async () => {
+    mockedGetMe.mockResolvedValue(INVITEE_ME);
+    renderAppAt("/onboarding/master?token=t-1");
+    expect(
+      await screen.findByText(/В MAX вы «Иван» — имя в приглашении другое/),
+    ).toBeInTheDocument();
+  });
+
+  it("молчит, когда имена совпадают", async () => {
+    mockedGetMe.mockResolvedValue(INVITEE_ME);
+    mockedClaim.mockResolvedValue({
+      ...CLAIM,
+      master: { ...CLAIM.master, name: "Иван Петров" },
+    });
+    renderAppAt("/onboarding/master?token=t-1");
+
+    expect(
+      await screen.findByRole("heading", { name: "Здравствуйте, Иван!" }),
+    ).toBeInTheDocument();
+    expect(screen.getByText("Иван Петров")).toBeInTheDocument();
+    expect(
+      screen.queryByText(/имя в приглашении другое/),
+    ).not.toBeInTheDocument();
+  });
+
+  it("здоровается именем из приглашения, когда MAX не дал имени", async () => {
+    mockedGetMe.mockResolvedValue(INVITEE_ME);
+    mockedClaim.mockResolvedValue({
+      ...CLAIM,
+      master: { ...CLAIM.master, name: "Анна Петрова" },
+      max_user: { ...CLAIM.max_user, first_name: "" },
+    });
+    renderAppAt("/onboarding/master?token=t-1");
+
+    expect(
+      await screen.findByRole("heading", { name: "Здравствуйте, Анна!" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText(/имя в приглашении другое/),
+    ).not.toBeInTheDocument();
   });
 });
