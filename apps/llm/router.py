@@ -234,9 +234,13 @@ class QuotaFallbackProvider:
       the only embedding-capable vendor in the registry is the one that
       just failed, and the ``op="embedding"`` resolution already routes
       there. A hop would be a hop to nowhere.
-    * One hop per call, then the pool is exhausted and the original
-      exception is re-raised. Callers keep their existing
-      ``except LLMError`` degradation for the both-vendors-down case.
+    * ONE hop per call — the first configured candidate, never a walk
+      down the list. If it raises too, that exception propagates and
+      callers keep their existing ``except LLMError`` degradation. With
+      the two-vendor registry a hop and a walk are the same thing;
+      widening to a walk when a third vendor lands multiplies latency
+      and spend across N vendors on one turn, so it wants its own
+      ticket.
     * Only :class:`LLMProviderQuotaExceeded` (and therefore its subclass
       :class:`apps.llm.protocol.LLMVendorCreditsExhausted`) triggers it.
       A transport error or a 5xx does NOT — those are the retry layer's
@@ -270,27 +274,37 @@ class QuotaFallbackProvider:
         try:
             return await self._primary.complete(messages, **kwargs)
         except LLMProviderQuotaExceeded as exc:
-            for candidate in self._candidates:
-                logger.warning(
-                    "llm.router.quota_fallback from=%s to=%s reason=%s",
+            if not self._candidates:
+                # No configured alternative. Re-raise so the call site's
+                # existing LLMError handling serves its static fallback —
+                # and so the log says "nowhere to go", not "we never
+                # tried".
+                logger.error(
+                    "llm.router.quota_fallback_exhausted from=%s reason=%s "
+                    "candidates=0 (check the other vendor's API key setting)",
                     self.name,
-                    candidate,
                     type(exc).__name__,
                 )
-                await self._audit(candidate, type(exc).__name__)
-                secondary = self._load(candidate)
-                return await secondary.complete(messages, **_retarget_model(kwargs, secondary))
-            # No configured alternative. Re-raise so the call site's
-            # existing LLMError handling serves its static fallback —
-            # and so the audit trail says "nowhere to go", not "we
-            # never tried".
-            logger.error(
-                "llm.router.quota_fallback_exhausted from=%s reason=%s "
-                "candidates=0 (check the other vendor's API key setting)",
+                raise
+
+            # ONE hop, deliberately — the first candidate only, never a
+            # walk down the list. This is the Sprint 7 contract and with
+            # today's two-vendor registry the two are identical. When a
+            # third vendor lands, widening this to a walk is a real
+            # behaviour change (latency and spend multiply across N
+            # vendors on a single turn) and wants its own ticket rather
+            # than arriving as a side effect of the registry refactor.
+            candidate = self._candidates[0]
+            logger.warning(
+                "llm.router.quota_fallback from=%s to=%s reason=%s remaining_untried=%d",
                 self.name,
+                candidate,
                 type(exc).__name__,
+                len(self._candidates) - 1,
             )
-            raise
+            await self._audit(candidate, type(exc).__name__)
+            secondary = self._load(candidate)
+            return await secondary.complete(messages, **_retarget_model(kwargs, secondary))
 
     async def embedding(self, text: str, **kwargs: Any) -> list[float]:
         """Pass-through — see the class docstring on why embeddings never hop."""
