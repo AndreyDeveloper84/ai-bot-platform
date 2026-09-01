@@ -148,8 +148,16 @@ def ayla(settings) -> Any:
     server = _make_server(state)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
-    host, port = server.server_address[0], server.server_address[1]
-    settings.AYLA_BASE_URL = "http://{0}:{1}".format(host, port)
+    # ``server_address`` в typeshed допускает и AF_UNIX, где адрес — ``str``
+    # ИЛИ ``bytes``. Сервер выше связан с ("127.0.0.1", 0), то есть это всегда
+    # AF_INET-пара, но сузить тип надо явно: при подстановке ``bytes`` в URL
+    # попало бы "b'127.0.0.1'", и тест падал бы с неочевидным отказом
+    # соединения. Поэтому байты именно ДЕКОДИРУЮТСЯ, а не приводятся к строке.
+    address = server.server_address
+    assert isinstance(address, tuple), "поддельная Ayla обязана слушать AF_INET"
+    raw_host, port = address[0], address[1]
+    host = raw_host.decode() if isinstance(raw_host, bytes) else raw_host
+    settings.AYLA_BASE_URL = f"http://{host}:{port}"
     settings.AYLA_INTERNAL_API_TOKEN = "test-token"  # noqa: S105  # pragma: allowlist secret
     reset_goals_circuit()
     _close_client()
