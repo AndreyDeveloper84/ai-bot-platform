@@ -566,6 +566,9 @@ class TestRouterIntegration:
 
         settings.LLM_PROVIDER = "openai"  # type: ignore[attr-defined]
         settings.SKILL_LLM_PROVIDER = {}  # type: ignore[attr-defined]
+        # DRF-1437: pinned off so this asserts the PII wrapper directly.
+        # The wrapped-through-the-fallback case is asserted below.
+        settings.LLM_QUOTA_FALLBACK_ENABLED = False  # type: ignore[attr-defined]
         reset_router_cache()
 
         router = LLMRouter()
@@ -573,4 +576,33 @@ class TestRouterIntegration:
         assert isinstance(provider, PIITokenizingProvider)
         # Wrapped provider's name still reflects real vendor.
         assert provider.name == "openai"
+        reset_router_cache()
+
+    def test_quota_fallback_wrapper_does_not_bypass_pii_protection(
+        self, settings: pytest.FixtureRequest, db
+    ):
+        """DRF-1437 added a second wrapper OUTSIDE this one. 152-ФЗ Tier-A
+        enforcement is single-point at the LLM-call boundary, so the new
+        outer layer must delegate to PII-wrapped providers on BOTH the
+        primary and the fallback side — otherwise a hop would be the one
+        code path that ships raw personal data to a vendor.
+        """
+        from apps.llm.pii_protected_provider import PIITokenizingProvider
+        from apps.llm.router import LLMRouter, QuotaFallbackProvider, reset_router_cache
+
+        settings.LLM_PROVIDER = "openai"  # type: ignore[attr-defined]
+        settings.SKILL_LLM_PROVIDER = {}  # type: ignore[attr-defined]
+        settings.OPENAI_API_KEY = "unit-test-placeholder"  # type: ignore[attr-defined]
+        settings.ANTHROPIC_API_KEY = "unit-test-placeholder"  # type: ignore[attr-defined]
+        settings.LLM_QUOTA_FALLBACK_ENABLED = True  # type: ignore[attr-defined]
+        settings.LLM_FALLBACK_ORDER = []  # type: ignore[attr-defined]
+        reset_router_cache()
+
+        router = LLMRouter()
+        provider = router.get_provider(tenant=None)
+        assert isinstance(provider, QuotaFallbackProvider)
+        assert isinstance(provider._primary, PIITokenizingProvider)
+        # The fallback target is loaded through the same _load_provider,
+        # so it is wrapped too.
+        assert isinstance(router._load_provider("anthropic"), PIITokenizingProvider)
         reset_router_cache()

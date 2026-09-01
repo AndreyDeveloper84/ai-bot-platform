@@ -19,6 +19,14 @@ from apps.tenancy.models import Tenant
 def _isolated_router(settings: pytest.FixtureRequest):
     settings.LLM_PROVIDER = "openai"  # type: ignore[attr-defined]
     settings.SKILL_LLM_PROVIDER = {}  # type: ignore[attr-defined]
+    # DRF-1437: these tests assert the RAW resolved provider — its
+    # identity, its caching, its PII wrapper. Pin the quota-fallback
+    # wrapper off, or a developer machine with an ANTHROPIC_API_KEY in
+    # its environment would resolve a QuotaFallbackProvider here and the
+    # assertions would fail for a reason that has nothing to do with
+    # what they test. Hop behaviour has its own file
+    # (``test_vendor_quota_exhaustion.py``).
+    settings.LLM_QUOTA_FALLBACK_ENABLED = False  # type: ignore[attr-defined]
     reset_router_cache()
     yield
     reset_router_cache()

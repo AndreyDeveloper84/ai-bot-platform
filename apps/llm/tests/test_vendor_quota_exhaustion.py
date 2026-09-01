@@ -146,6 +146,43 @@ def openai_ordinary_rate_limit() -> Exception:
     )
 
 
+def openai_exhausted_code_only() -> Exception:
+    """Structured code present, prose deliberately UNRECOGNISABLE.
+
+    Isolates the ``_VENDOR_EXHAUSTION_CODES`` path. Mutation testing
+    found that every other fixture here also matches by message, so
+    disabling the code lookup entirely left the suite green — the
+    structured path, which is the reliable one, was riding on the
+    degraded one. This fixture is the only thing that fails when the
+    code lookup breaks.
+    """
+    import openai
+
+    body = {"error": {"message": "Error code: 429", "type": None, "code": "insufficient_quota"}}
+    return openai.RateLimitError(
+        "Error code: 429",
+        response=_response(429, body, "https://api.openai.com/v1/chat/completions"),
+        body=body["error"],
+    )
+
+
+def openai_exhausted_message_only() -> Exception:
+    """Prose present, structured code STRIPPED.
+
+    The degraded path: a proxy or an older SDK that hands back the
+    message and nothing else. Symmetric partner to the fixture above —
+    between them, neither detection layer can be removed unnoticed.
+    """
+    import openai
+
+    body = {"error": {"message": "You have no credits remaining"}}
+    return openai.RateLimitError(
+        "You have no credits remaining",
+        response=_response(429, body, "https://api.openai.com/v1/chat/completions"),
+        body=body["error"],
+    )
+
+
 def anthropic_credits_exhausted() -> Exception:
     """Anthropic's equivalent — same defect class, other vendor, so the
     hop works in both directions once the owner has both keys.
@@ -186,6 +223,15 @@ class TestRecognisesVendorExhaustion:
 
     def test_anthropic_credit_shape_is_recognised(self) -> None:
         assert is_vendor_quota_exhausted(anthropic_credits_exhausted()) is True
+
+    def test_structured_code_alone_is_enough(self) -> None:
+        """Neither detection layer may be load-bearing alone: this one
+        fails if the code lookup is removed…"""
+        assert is_vendor_quota_exhausted(openai_exhausted_code_only()) is True
+
+    def test_message_alone_is_enough(self) -> None:
+        """…and this one fails if the message fallback is removed."""
+        assert is_vendor_quota_exhausted(openai_exhausted_message_only()) is True
 
     # -- the guard ---------------------------------------------------------
 

@@ -108,7 +108,8 @@ class ProviderSpec:
         cost attribution. Never rename one in place.
       import_path / class_name: resolved lazily on first use so a missing
         optional SDK costs nothing until someone actually selects it.
-      api_key_setting: the Django setting that must be non-empty for this
+      key_setting_name: the NAME of the Django setting that must be
+        non-empty for this
         provider to be usable. The router refuses to FALL BACK onto a
         provider with no key — hopping onto a vendor that will 401 turns
         one dead provider into two and hides the real cause.
@@ -119,7 +120,7 @@ class ProviderSpec:
     name: str
     import_path: str
     class_name: str
-    api_key_setting: str
+    key_setting_name: str
     supports_embedding: bool
 
 
@@ -131,14 +132,14 @@ _PROVIDER_REGISTRY: tuple[ProviderSpec, ...] = (
         name="openai",
         import_path="apps.llm.providers.openai_provider",
         class_name="OpenAIProvider",
-        api_key_setting="OPENAI_API_KEY",
+        key_setting_name="OPENAI_API_KEY",
         supports_embedding=True,
     ),
     ProviderSpec(
         name="anthropic",
         import_path="apps.llm.providers.anthropic_provider",
         class_name="AnthropicProvider",
-        api_key_setting="ANTHROPIC_API_KEY",
+        key_setting_name="ANTHROPIC_API_KEY",
         supports_embedding=False,
     ),
 )
@@ -306,9 +307,7 @@ class LLMRouter:
                 candidate = embed_targets[0]
                 source = _SOURCE_EMBED_FALLBACK
             else:
-                logger.warning(
-                    "llm.router.no_embedding_capable_provider candidate=%s", candidate
-                )
+                logger.warning("llm.router.no_embedding_capable_provider candidate=%s", candidate)
 
         provider = self._load_provider(candidate)
         self._audit(
@@ -539,7 +538,7 @@ def provider_is_configured(name: str) -> bool:
     spec = _PROVIDER_SPECS.get(name)
     if spec is None:
         return False
-    return bool(getattr(settings, spec.api_key_setting, "") or "")
+    return bool(getattr(settings, spec.key_setting_name, "") or "")
 
 
 def fallback_candidates(exclude: str, *, require_embedding: bool = False) -> list[str]:
