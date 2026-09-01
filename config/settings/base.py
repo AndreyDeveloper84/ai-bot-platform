@@ -1840,6 +1840,13 @@ ALERTS_TELEGRAM_CHAT_ID = os.environ.get("ALERTS_TELEGRAM_CHAT_ID", "")
 # traffic.
 TELEGRAM_PROXY = os.environ.get("TELEGRAM_PROXY", "")
 OPENAI_PROXY = os.environ.get("OPENAI_PROXY", "")
+# NB: the Anthropic counterparts (ANTHROPIC_API_KEY / ANTHROPIC_PROXY) and
+# the provider-selection block (LLM_PROVIDER / SKILL_LLM_PROVIDER /
+# LLM_QUOTA_FALLBACK_ENABLED / LLM_FALLBACK_ORDER) live with the rest of
+# the LLM knobs, above ANTHROPIC_DAILY_TOKEN_CAP. ANTHROPIC_PROXY falls
+# back to THIS value inside AnthropicProvider — the fallback belongs to
+# the provider, not to the setting, so that an operator can point
+# Anthropic at a different egress address than everything else.
 
 # OpenAI auth — read by ``apps.orchestrator.llm.openai_provider.OpenAIProvider``
 # via ``getattr(settings, "OPENAI_API_KEY", "")``. Without this line the

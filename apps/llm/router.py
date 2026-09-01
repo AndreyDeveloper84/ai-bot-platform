@@ -76,7 +76,7 @@ the configured default in places it shouldn't be).
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -203,7 +203,7 @@ class QuotaFallbackProvider:
         primary_name: str,
         load: "Callable[[str], LLMProvider]",
         candidates: list[str],
-        audit: "Callable[[str, str], None]",
+        audit: "Callable[[str, str], Awaitable[None]]",
     ) -> None:
         self._primary = primary
         self._candidates = candidates
@@ -229,7 +229,7 @@ class QuotaFallbackProvider:
                     candidate,
                     type(exc).__name__,
                 )
-                self._audit(candidate, type(exc).__name__)
+                await self._audit(candidate, type(exc).__name__)
                 secondary = self._load(candidate)
                 return await secondary.complete(messages, **kwargs)
             # No configured alternative. Re-raise so the call site's
@@ -364,20 +364,34 @@ class LLMRouter:
         call's tenant/skill context.
         """
 
-        def _audit_hop(chosen: str, reason: str) -> None:
-            write_audit(
-                EVENT_QUOTA_FALLBACK_USED,
-                target="LLMRouter",
-                payload={
-                    "tenant_id": str(getattr(tenant, "id", "")) if tenant else "",
-                    "skill": skill,
-                    "op": op,
-                    "from_provider": primary_name,
-                    "chosen_provider": chosen,
-                    "source": _SOURCE_QUOTA_FALLBACK,
-                    "reason": reason,
-                },
-            )
+        async def _audit_hop(chosen: str, reason: str) -> None:
+            # ``write_audit`` is a sync ORM write and the hop happens
+            # inside ``await provider.complete(...)`` — calling it
+            # directly raises Django's SynchronousOnlyOperation. Same
+            # shape as ``apps.llm.retry.write_retry_attempt_audit``.
+            #
+            # Failure is swallowed: this row is telemetry, and losing it
+            # must never convert a successful fallback (the user got an
+            # answer from the other vendor) into an error.
+            from asgiref.sync import sync_to_async
+
+            payload = {
+                "tenant_id": str(getattr(tenant, "id", "")) if tenant else "",
+                "skill": skill,
+                "op": op,
+                "from_provider": primary_name,
+                "chosen_provider": chosen,
+                "source": _SOURCE_QUOTA_FALLBACK,
+                "reason": reason,
+            }
+            try:
+                await sync_to_async(_write_quota_fallback_audit, thread_sensitive=False)(payload)
+            except Exception:  # noqa: BLE001 — telemetry must not break the hop
+                logger.exception(
+                    "llm.router.quota_fallback_audit_failed from=%s to=%s",
+                    primary_name,
+                    chosen,
+                )
 
         return QuotaFallbackProvider(
             primary=provider,
@@ -500,6 +514,15 @@ class LLMRouter:
 # ---------------------------------------------------------------------------
 # Helpers + singleton
 # ---------------------------------------------------------------------------
+
+
+def _write_quota_fallback_audit(payload: dict[str, Any]) -> None:
+    """Sync helper for the async audit hook in :meth:`LLMRouter._wrap_with_fallback`."""
+    write_audit(
+        EVENT_QUOTA_FALLBACK_USED,
+        target="LLMRouter",
+        payload=payload,
+    )
 
 
 def provider_is_configured(name: str) -> bool:
