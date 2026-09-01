@@ -59,7 +59,15 @@ rejects two ``user`` rows in a row).
 
 ``api.anthropic.com`` is also blocked on RU-hosted runners. The
 provider reads ``ANTHROPIC_PROXY`` (falling back to ``OPENAI_PROXY``
-if unset) and threads it into an ``httpx.AsyncClient``.
+if unset) and threads it into ``anthropic.DefaultAsyncHttpxClient``.
+
+DRF-1437: that class, and not a bare ``httpx.AsyncClient``, because
+``anthropic >= 1.0`` moved to ``httpx2`` (the httpx 2.x line, published
+under a new distribution name so it installs next to httpx 0.x/1.x)
+while ``openai`` still depends on ``httpx < 1``. Each SDK's own
+``DefaultAsyncHttpxClient`` subclasses the ``AsyncClient`` that SDK was
+built against, so the injected client is of the type that SDK's own
+``isinstance`` check accepts — on any major, either vendor.
 """
 
 from __future__ import annotations
