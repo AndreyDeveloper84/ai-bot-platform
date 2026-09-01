@@ -18,6 +18,12 @@ never leaves bot-platform. URLs via AylaUrlBuilder (#1049).
 Resilience mirrors recommendations_client (#1048): inline circuit
 breaker (5 failures in 60s → 30s cooldown); 4xx does NOT trip it.
 
+Холодный контур пилота (DRF-1435). Соединения переиспользуются через
+пул на весь процесс (:func:`_get_client`), бюджеты на соединение и на
+чтение разделены, а POST, истёкший по чтению, закрывается сверкой
+состояния, а не повтором записи. Обоснование каждого числа и замер по
+фазам — у констант ниже и в :func:`_reconcile_goal_select`.
+
 Failure surface:
 
 * :class:`GoalsConfigError` — token / base URL not configured → 503.
@@ -41,7 +47,34 @@ from apps.integrations.ayla.url_builder import AylaUrlBuilder, AylaUrlError
 logger = logging.getLogger(__name__)
 
 # Goal calls happen on Mini App tap — the user is staring at a spinner.
-TIMEOUT_S: Final[float] = 5.0
+#
+# DRF-1435. Один общий бюджет на все фазы прятал, какая из них его съела.
+# Замер по фазам на пилоте (2026-09-01, 2 vCPU, loadavg 6–15, iowait
+# 54–86%, ~1.6 ГБ в свопе, 7–10 процессов постоянно в D-state):
+#
+#     фаза                                  холодный   тёплый
+#     TLS-рукопожатие (appconnect-connect)    3.77 s    0.025 s
+#     обработка запроса (ttfb-appconnect)     0.38 s    0.048 s
+#     итого                                   4.04 s    0.09 s
+#
+# Стоимости отличаются в ~80 раз, поэтому и бюджеты разные:
+#
+# * соединение — редкое (пул живёт весь процесс) и холодное; 6 s это
+#   измеренные 3.77 s с полуторным запасом. Больше не ставим сознательно:
+#   пересидеть насыщенный диск хоста всё равно нельзя, а каждая лишняя
+#   секунда здесь — секунда, которую человек смотрит на индикатор;
+# * чтение — частое и тёплое (0.05–0.57 s по замеру); 5 s оставлены как
+#   были, чтобы правка не удлинила ожидание ни на одном обычном запросе;
+# * сверка (:func:`_reconcile_goal_select`) идёт по соединению, которое
+#   только что доказало свою работоспособность, поэтому бюджет короче.
+CONNECT_TIMEOUT_S: Final[float] = 6.0
+READ_TIMEOUT_S: Final[float] = 5.0
+RECONCILE_READ_TIMEOUT_S: Final[float] = 3.0
+
+# Держим keep-alive заведомо короче, чем nginx перед Ayla (keepalive_timeout
+# 65 s по умолчанию): иначе мы будем переиспользовать соединение, которое
+# сервер уже закрыл, и платить за это разрывом на ровном месте.
+KEEPALIVE_EXPIRY_S: Final[float] = 50.0
 
 CIRCUIT_FAILURE_WINDOW_S: Final[float] = 60.0
 CIRCUIT_FAILURE_THRESHOLD: Final[int] = 5
@@ -123,7 +156,51 @@ class GoalsBadRequest(Exception):
 
 
 class GoalsUnavailable(Exception):
-    """Network/timeout/5xx/malformed JSON — caller maps to 502."""
+    """Network/timeout/5xx/malformed JSON — caller maps to 502.
+
+    ``cause`` — исходное исключение httpx, если отказ был сетевым. Нужно,
+    чтобы отличить «запрос до Ayla не доехал» (ConnectTimeout/ConnectError)
+    от «Ayla запрос получила и не успела ответить» (ReadTimeout): для
+    записи это разные события, и обходятся они по-разному (DRF-1435).
+    """
+
+    def __init__(self, reason: str, *, cause: BaseException | None = None) -> None:
+        self.reason = reason
+        self.cause = cause
+        super().__init__(reason)
+
+
+# Пул на весь процесс — по образцу booking_client (CR-SF1). До DRF-1435
+# ``_request`` строил httpx.Client НА КАЖДЫЙ вызов, то есть каждое нажатие
+# пользователя платило полное DNS+TCP+TLS рукопожатие. На пилоте это
+# измеренные 3.77 s накладных расходов, которые мы налагали на себя сами:
+# экран целей открывается через GET decision-context, и идущий сразу за ним
+# POST goals/select обязан ехать по уже открытому соединению.
+_http: httpx.Client | None = None
+
+
+def _get_client() -> httpx.Client:
+    """Ленивый переиспользуемый клиент с пулом соединений."""
+    global _http
+    if _http is None or _http.is_closed:
+        _http = httpx.Client(
+            timeout=httpx.Timeout(
+                connect=CONNECT_TIMEOUT_S,
+                read=READ_TIMEOUT_S,
+                write=READ_TIMEOUT_S,
+                pool=CONNECT_TIMEOUT_S,
+            ),
+            limits=httpx.Limits(keepalive_expiry=KEEPALIVE_EXPIRY_S),
+        )
+    return _http
+
+
+def close_goals_client() -> None:
+    """Закрыть пул — для тестов и корректного завершения процесса."""
+    global _http
+    if _http is not None and not _http.is_closed:
+        _http.close()
+    _http = None
 
 
 def _request(
@@ -132,6 +209,7 @@ def _request(
     *,
     external_user_id: str,
     payload: dict[str, Any] | None = None,
+    read_timeout_s: float | None = None,
 ) -> dict[str, Any]:
     """Single request seam for the goal layer — see module docstring for
     the failure contract. ``path`` is relative to ``/api/v1/``."""
@@ -156,9 +234,19 @@ def _request(
         "Content-Type": "application/json",
     }
 
+    # Бюджеты читаются на КАЖДЫЙ запрос, а не запекаются в клиент при
+    # постройке: пул живёт весь процесс, и константы должны оставаться
+    # наблюдаемыми (в том числе для тестов).
+    timeout = httpx.Timeout(
+        connect=CONNECT_TIMEOUT_S,
+        read=READ_TIMEOUT_S if read_timeout_s is None else read_timeout_s,
+        write=READ_TIMEOUT_S,
+        pool=CONNECT_TIMEOUT_S,
+    )
+
     try:
-        with httpx.Client(timeout=TIMEOUT_S) as http:
-            resp = http.request(method, url, headers=headers, json=payload)
+        http = _get_client()
+        resp = http.request(method, url, headers=headers, json=payload, timeout=timeout)
     except (httpx.TimeoutException, httpx.NetworkError) as exc:
         _circuit.record_failure(now=time.monotonic())
         logger.warning(
@@ -166,7 +254,7 @@ def _request(
             external_user_id,
             type(exc).__name__,
         )
-        raise GoalsUnavailable(f"network: {type(exc).__name__}") from exc
+        raise GoalsUnavailable(f"network: {type(exc).__name__}", cause=exc) from exc
 
     if resp.status_code >= 500:
         _circuit.record_failure(now=time.monotonic())
@@ -228,10 +316,109 @@ def post_goal_select(
     ``payload`` forwarded as-is (``goal_key`` / ``goal_text`` / ``intent``
     + ``source_channel``); shape validation lives on Ayla's side — this
     layer is a translation hop, not a schema gate.
+
+    DRF-1435: истёкшее чтение НЕ означает, что запись не прошла — ReadTimeout
+    это «Ayla запрос получила и не успела ответить». Поэтому такой отказ
+    закрывается сверкой состояния (:func:`_reconcile_goal_select`), а не
+    повтором POST: повтор не идемпотентен по событию воронки
+    (``goals/api.py:_emit_goal_selected`` создаёт новую строку на каждый
+    вызов) и по строке ``ClientGoal``.
     """
-    return _request(
-        "POST",
-        "internal/me/goals/select/",
-        external_user_id=external_user_id,
-        payload=payload,
+    try:
+        return _request(
+            "POST",
+            "internal/me/goals/select/",
+            external_user_id=external_user_id,
+            payload=payload,
+        )
+    except GoalsUnavailable as exc:
+        reconciled = _reconcile_goal_select(
+            external_user_id=external_user_id,
+            payload=payload,
+            exc=exc,
+        )
+        if reconciled is None:
+            raise
+        return reconciled
+
+
+def _selected_goal_matches(goal: Any, payload: dict[str, Any]) -> bool:
+    """Стоит ли в документе ровно та цель, которую мы пытались записать."""
+    if not isinstance(goal, dict):
+        return False
+    goal_key = payload.get("goal_key")
+    if goal_key:
+        return goal.get("goal_key") == goal_key
+    goal_text = (payload.get("goal_text") or "").strip()
+    if goal_text:
+        return (goal.get("goal_text") or "").strip() == goal_text
+    return False
+
+
+def _reconcile_goal_select(
+    *,
+    external_user_id: str,
+    payload: dict[str, Any],
+    exc: GoalsUnavailable,
+) -> dict[str, Any] | None:
+    """Один дешёвый GET: не оказалась ли цель уже записанной.
+
+    Возвращает актуальный документ, если в нём стоит ровно та цель, которую
+    мы отправляли, иначе ``None`` — и тогда вызывающая сторона поднимает
+    исходный отказ.
+
+    Сверка делается ТОЛЬКО когда:
+
+    * отказ был именно по чтению (``ReadTimeout``). При ConnectTimeout /
+      ConnectError запрос до Ayla не доехал, сверять нечего, и лишний
+      запрос лишь удлинит ожидание;
+    * в payload есть ``goal_key`` или ``goal_text``. У
+      ``intent=need_guidance`` durable-следа нет вовсе — ``ClientGoal`` не
+      создаётся (``goals/api.py``), — поэтому подтвердить его по документу
+      невозможно, и притворяться, что можно, нельзя.
+
+    Что здесь сознательно НЕ различается: наш это был запрос или та же цель
+    уже стояла раньше. Подтверждается желаемое состояние («цель — X»), а не
+    авторство конкретной записи; сравнивать ``selected_at`` с локальными
+    часами бота через расхождение часов двух машин было бы менее надёжно,
+    чем сам факт.
+    """
+    if not isinstance(exc.cause, httpx.ReadTimeout):
+        return None
+    leaves_durable_trace = bool(payload.get("goal_key")) or bool(
+        (payload.get("goal_text") or "").strip()
     )
+    if not leaves_durable_trace:
+        return None
+
+    try:
+        document = _request(
+            "GET",
+            "internal/me/decision-context/",
+            external_user_id=external_user_id,
+            read_timeout_s=RECONCILE_READ_TIMEOUT_S,
+        )
+    except (GoalsUnavailable, GoalsBadRequest, GoalsConfigError):
+        logger.warning(
+            "goals_client.reconcile_failed ext_user=%s reason=%s",
+            external_user_id,
+            exc.reason,
+        )
+        return None
+
+    known = document.get("known")
+    goal = known.get("goal") if isinstance(known, dict) else None
+    if not _selected_goal_matches(goal, payload):
+        logger.warning(
+            "goals_client.reconcile_miss ext_user=%s reason=%s",
+            external_user_id,
+            exc.reason,
+        )
+        return None
+
+    logger.info(
+        "goals_client.reconciled ext_user=%s reason=%s",
+        external_user_id,
+        exc.reason,
+    )
+    return document

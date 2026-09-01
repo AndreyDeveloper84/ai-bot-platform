@@ -243,6 +243,12 @@ class _FakeHttpxClient:
         self._response = response
         self._raise_exc = raise_exc
         self.last_call: dict = {}
+        # DRF-1435: клиент стал переиспользуемым пулом на весь процесс, а не
+        # одноразовым контекстным менеджером — двойник обязан уметь то же.
+        self.is_closed = False
+
+    def close(self):
+        self.is_closed = True
 
     def __enter__(self):
         return self
@@ -250,11 +256,26 @@ class _FakeHttpxClient:
     def __exit__(self, *_args):
         return False
 
-    def request(self, method: str, url: str, *, headers: dict, json: dict | None):
-        self.last_call = {"method": method, "url": url, "headers": headers, "json": json}
+    def request(self, method: str, url: str, *, headers: dict, json: dict | None, timeout=None):
+        self.last_call = {
+            "method": method,
+            "url": url,
+            "headers": headers,
+            "json": json,
+            "timeout": timeout,
+        }
         if self._raise_exc is not None:
             raise self._raise_exc
         return self._response
+
+
+@pytest.fixture(autouse=True)
+def _reset_goals_pool():
+    """DRF-1435: пул живёт весь процесс, поэтому между тестами его надо
+    сбрасывать — иначе первый закешированный двойник обслужит и остальные."""
+    gc.close_goals_client()
+    yield
+    gc.close_goals_client()
 
 
 class TestGoalsClient:
@@ -371,6 +392,12 @@ class TestGoalsClient:
             for _ in range(gc.CIRCUIT_FAILURE_THRESHOLD + 1):
                 with pytest.raises(GoalsBadRequest):
                     post_goal_select(external_user_id="bot:max:1", payload={})
+        # DRF-1435: пул переживает выход из `patch`, поэтому подменить
+        # двойника посреди теста без сброса пула нельзя — иначе второй
+        # `patch` не имеет никакого эффекта, а тест молча проверяет первого
+        # двойника дважды. Проверяемое утверждение («4xx не размыкает
+        # предохранитель») от этого не меняется.
+        gc.close_goals_client()
         ok = _FakeHttpxClient(response=_FakeResponse(status_code=200, payload=_DOC))
         with patch(
             "apps.integrations.ayla.goals_client.httpx.Client",
