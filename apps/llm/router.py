@@ -109,10 +109,10 @@ class ProviderSpec:
       import_path / class_name: resolved lazily on first use so a missing
         optional SDK costs nothing until someone actually selects it.
       key_setting_name: the NAME of the Django setting that must be
-        non-empty for this
-        provider to be usable. The router refuses to FALL BACK onto a
-        provider with no key — hopping onto a vendor that will 401 turns
-        one dead provider into two and hides the real cause.
+        non-empty for this provider to be usable. The router refuses to
+        FALL BACK onto a provider with no key — hopping onto a vendor
+        that will 401 turns one dead provider into two and hides the
+        real cause.
       supports_embedding: Anthropic has no embeddings API. Drives the
         embedding-fallback target choice.
     """
@@ -155,8 +155,6 @@ _SOURCE_EMBED_FALLBACK = "embedding_fallback"
 _SOURCE_QUOTA_FALLBACK = "quota_fallback"
 
 EVENT_PROVIDER_RESOLVED = "llm.provider_resolved"
-
-
 EVENT_QUOTA_FALLBACK_USED = "llm.quota_fallback_used"
 
 
