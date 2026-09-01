@@ -360,12 +360,18 @@ class StubProvider:
         self.default_completion_model = f"{name}-model"
         self._raises = raises
         self.calls = 0
+        self.last_kwargs: dict[str, Any] = {}
 
     async def complete(self, messages: list[dict[str, Any]], **kwargs: Any) -> CompletionResult:
         self.calls += 1
+        self.last_kwargs = dict(kwargs)
         if self._raises is not None:
             raise self._raises
-        return CompletionResult(text=f"answer from {self.name}", provider=self.name)
+        return CompletionResult(
+            text=f"answer from {self.name}",
+            provider=self.name,
+            model=str(kwargs.get("model", "")),
+        )
 
     async def embedding(self, text: str, **kwargs: Any) -> list[float]:
         self.calls += 1
@@ -508,6 +514,52 @@ class TestQuotaFallbackHop:
         assert row.payload["from_provider"] == "openai"
         assert row.payload["chosen_provider"] == "anthropic"
         assert row.payload["reason"] == "LLMVendorCreditsExhausted"
+
+    @pytest.mark.asyncio
+    async def test_hop_retargets_the_model_to_the_fallback_vendor(self) -> None:
+        """Without this the hop trades one failure for another: model ids
+        do not cross vendors, and ``gpt-4o-mini`` sent to Anthropic comes
+        back ``404 not_found_error``. The user would still see the static
+        fallback — now with a second vendor's bill attached.
+        """
+        stubs = _exhausted_and_healthy()
+
+        provider = _router_with(stubs).get_provider(None, op="complete")
+        result = await provider.complete([], model="gpt-4o-mini")
+
+        assert stubs["anthropic"].last_kwargs["model"] == "anthropic-model"
+        assert result.model == "anthropic-model"
+
+    # -- the guard ---------------------------------------------------------
+
+    @pytest.mark.asyncio
+    async def test_no_hop_means_the_model_is_passed_through_untouched(self) -> None:
+        """The retarget must fire ONLY on the hop. Rewriting the model on
+        the ordinary path would override every caller's deliberate choice
+        — silently and on 100%% of traffic.
+        """
+        stubs = {"openai": StubProvider("openai"), "anthropic": StubProvider("anthropic")}
+
+        provider = _router_with(stubs).get_provider(None, op="complete")
+        result = await provider.complete([], model="gpt-4o-mini")
+
+        assert stubs["openai"].last_kwargs["model"] == "gpt-4o-mini"
+        assert result.model == "gpt-4o-mini"
+
+    @pytest.mark.asyncio
+    async def test_other_kwargs_survive_the_hop(self) -> None:
+        """Only ``model`` is rewritten. Tools, temperature and tool_choice
+        carry the caller's intent and must reach the fallback intact.
+        """
+        stubs = _exhausted_and_healthy()
+        tools = [{"name": "search", "description": "", "parameters": {}}]
+
+        provider = _router_with(stubs).get_provider(None, op="complete")
+        await provider.complete([], model="gpt-4o-mini", tools=tools, temperature=0.7)
+
+        forwarded = stubs["anthropic"].last_kwargs
+        assert forwarded["tools"] == tools
+        assert forwarded["temperature"] == 0.7
 
     @pytest.mark.asyncio
     async def test_wrapper_keeps_the_primary_vendor_name(self) -> None:

@@ -160,6 +160,55 @@ EVENT_PROVIDER_RESOLVED = "llm.provider_resolved"
 EVENT_QUOTA_FALLBACK_USED = "llm.quota_fallback_used"
 
 
+def _retarget_model(kwargs: dict[str, Any], secondary: LLMProvider) -> dict[str, Any]:
+    """Swap the caller's model id for one the FALLBACK vendor knows.
+
+    Model ids are vendor-specific and there is no translation between
+    them. Forwarding the primary's id verbatim is the difference between
+    a working hop and a hop that trades one failure for another: sending
+    ``gpt-4o-mini`` to ``api.anthropic.com`` returns
+    ``404 not_found_error``, so the user would still get the static
+    "не могу ответить" — with the second vendor's bill attached.
+
+    Every call site passes a model tied to the vendor the router picked:
+    ``apps/orchestrator/intent_router.py`` hard-codes ``"gpt-4o-mini"``,
+    while the skills read ``provider.default_completion_model`` — which,
+    through this wrapper, is the PRIMARY's default. So on a hop the id is
+    always wrong for the target and must be replaced.
+
+    We use the target's own ``default_completion_model`` rather than a
+    cross-vendor equivalence table: a table would need an entry per
+    model per vendor and would silently mis-route the moment someone
+    passes an unlisted id, which is precisely the failure mode this
+    whole ticket is about. A vendor's declared default is always valid
+    for that vendor.
+
+    Note the cost consequence, deliberately accepted: Anthropic's
+    default completion model is the reply-tier one, so an intent
+    classification that hops lands on a pricier model than the
+    ``gpt-4o-mini`` it asked for. Correct-but-pricier beats
+    cheap-and-404 on a path that only runs when the primary is down.
+    """
+    if "model" not in kwargs:
+        return kwargs
+
+    target_model = getattr(secondary, "default_completion_model", "") or ""
+    if not target_model:
+        # Nothing better to offer — leave the caller's value alone
+        # rather than sending an empty model id.
+        return kwargs
+
+    if kwargs["model"] == target_model:
+        return kwargs
+
+    logger.info(
+        "llm.router.quota_fallback_model_swap from=%s to=%s",
+        kwargs["model"],
+        target_model,
+    )
+    return {**kwargs, "model": target_model}
+
+
 class QuotaFallbackProvider:
     """Wraps a primary provider and hops to the next one on exhaustion.
 
@@ -232,7 +281,7 @@ class QuotaFallbackProvider:
                 )
                 await self._audit(candidate, type(exc).__name__)
                 secondary = self._load(candidate)
-                return await secondary.complete(messages, **kwargs)
+                return await secondary.complete(messages, **_retarget_model(kwargs, secondary))
             # No configured alternative. Re-raise so the call site's
             # existing LLMError handling serves its static fallback —
             # and so the audit trail says "nowhere to go", not "we
