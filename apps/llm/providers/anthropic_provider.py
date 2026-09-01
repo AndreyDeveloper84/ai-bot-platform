@@ -339,7 +339,10 @@ class AnthropicProvider:
         if self._client is not None:
             return self._client
 
-        from anthropic import AsyncAnthropic  # type: ignore[import-not-found]
+        from anthropic import (  # type: ignore[import-not-found]
+            AsyncAnthropic,
+            DefaultAsyncHttpxClient,
+        )
 
         timeout = getattr(settings, "LLM_REQUEST_TIMEOUT_S", 30.0)
         kwargs: dict[str, Any] = {
@@ -350,9 +353,25 @@ class AnthropicProvider:
             "max_retries": 0,
         }
         if self._proxy:
-            import httpx
-
-            kwargs["http_client"] = httpx.AsyncClient(proxy=self._proxy, timeout=timeout)
+            # DRF-1437 — built from the SDK's OWN default client class, not
+            # from an `httpx` import named here. `anthropic >= 1.0` depends
+            # on `httpx2` (the httpx 2.x line, published under a new
+            # distribution name so it can be installed next to httpx 0.x/1.x)
+            # and its base client raises TypeError on any other type;
+            # `openai` still depends on `httpx<1`. A shared
+            # `httpx.AsyncClient(...)` therefore cannot serve both, and on
+            # the pilot it meant the Anthropic client never constructed —
+            # every proxied request failed before it left the process.
+            #
+            # `DefaultAsyncHttpxClient` subclasses whichever `AsyncClient`
+            # its own SDK was built against, so the type is correct by
+            # construction on every anthropic major, and stays correct when
+            # one vendor moves its HTTP stack and the other does not. It is
+            # also exactly what the SDK builds for itself when no
+            # `http_client` is passed, so the proxied path now carries the
+            # same redirect/limit defaults as the direct one instead of
+            # bare-`AsyncClient` defaults.
+            kwargs["http_client"] = DefaultAsyncHttpxClient(proxy=self._proxy, timeout=timeout)
         self._client = AsyncAnthropic(**kwargs)
         return self._client
 
