@@ -105,9 +105,7 @@ def _sdk_async_client_base(sdk: Any) -> type:
 class TestProxiedClientCarriesTheSdksOwnHttpxFlavor:
     """The provenance claim, asserted per vendor on a real constructed client."""
 
-    def test_anthropic_proxied_client_comes_from_the_anthropic_sdk(
-        self, settings: Any
-    ) -> None:
+    def test_anthropic_proxied_client_comes_from_the_anthropic_sdk(self, settings: Any) -> None:
         import anthropic
 
         settings.ANTHROPIC_PROXY = PROXY_URL
@@ -159,7 +157,13 @@ class TestProxiedClientCarriesTheSdksOwnHttpxFlavor:
             "the two SDKs' default client classes must be distinct for the "
             "provenance assertions to discriminate anything"
         )
+        # Both operands are asserted present and distinct above. These two
+        # close the remaining hole: one class might still be a SUBCLASS of
+        # the other, which would let `isinstance` accept the wrong vendor's
+        # client while the identity check above still passed.
+        # empty-assert-ok: no fetched data here — a structural claim about two classes.
         assert not issubclass(anthropic_cls, openai_cls)
+        # empty-assert-ok: the other direction of the same claim, see above.
         assert not issubclass(openai_cls, anthropic_cls)
 
 
@@ -182,8 +186,7 @@ class TestTheSdkAcceptsTheProxiedClient:
             client = provider._get_client()
         except TypeError as exc:  # pragma: no cover - the defect itself
             pytest.fail(
-                "the anthropic SDK rejected the proxied http_client this "
-                f"provider built: {exc}"
+                f"the anthropic SDK rejected the proxied http_client this provider built: {exc}"
             )
 
         expected_base = _sdk_async_client_base(anthropic)
@@ -204,8 +207,7 @@ class TestTheSdkAcceptsTheProxiedClient:
             client = provider._get_client()
         except TypeError as exc:  # pragma: no cover - the defect itself
             pytest.fail(
-                "the openai SDK rejected the proxied http_client this "
-                f"provider built: {exc}"
+                f"the openai SDK rejected the proxied http_client this provider built: {exc}"
             )
 
         expected_base = _sdk_async_client_base(openai)
@@ -256,6 +258,12 @@ class TestTheProxyIsActuallyWired:
         anthropic_http = AnthropicProvider(api_key=PLACEHOLDER_ANTHROPIC_KEY)._get_client()._client
         openai_http = OpenAIProvider(api_key=PLACEHOLDER_OPENAI_KEY)._get_client()._client
 
+        # `_mounts` is read as a plain attribute here, before the isinstance
+        # checks below: those narrow the value to `object` for mypy, which
+        # then cannot see the field. Read early, asserted in order.
+        anthropic_mounts = len(anthropic_http._mounts)
+        openai_mounts = len(openai_http._mounts)
+
         assert anthropic_http is not None, "the SDK builds a client, proxy or not"
         assert openai_http is not None, "the SDK builds a client, proxy or not"
         assert isinstance(anthropic_http, _sdk_default_client_class(anthropic))
@@ -263,5 +271,5 @@ class TestTheProxyIsActuallyWired:
         # empty-assert-ok: emptiness IS the claim — no proxy configured means
         # no mounted proxy transport. The four assertions above prove there
         # were real, correctly-typed objects to inspect.
-        assert len(anthropic_http._mounts) == 0
-        assert len(openai_http._mounts) == 0
+        assert anthropic_mounts == 0
+        assert openai_mounts == 0
