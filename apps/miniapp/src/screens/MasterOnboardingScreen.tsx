@@ -47,6 +47,7 @@ import {
   signalReady,
 } from "../lib/max-sdk";
 import { ScreenLayout } from "../components/ScreenLayout";
+import { useReloadMe } from "../state/boot";
 import { StickyCta } from "../components/StickyCta";
 import { useBackButton } from "../hooks/useBackButton";
 import { useClosingConfirmation } from "../hooks/useClosingConfirmation";
@@ -83,6 +84,11 @@ const COPY = {
     body: (salonName: string) =>
       `${salonName} пригласила вас в помощник студии. Здесь вы будете видеть своё расписание и общаться с клиентами.`,
     question: "Это вы?",
+    // DRF-1434 — карточка ниже это ЗАПИСЬ САЛОНА, а не профиль MAX.
+    // Без подписи её имя выглядело вторым именем того же человека.
+    recordCaption: "Салон записал вас так:",
+    nameMismatch: (maxName: string) =>
+      `В MAX вы «${maxName}» — имя в приглашении другое. Если оно неверное, продолжайте: студия поправит его в вашем профиле.`,
     cta: "Это я, продолжить",
     notMe: "Это не я",
   },
@@ -267,10 +273,32 @@ export function MasterOnboardingScreen() {
     setDraft((prev) => ({ ...prev, bio: next.slice(0, BIO_MAX) }));
   }, []);
 
+  /**
+   * DRF-1434 — принять приглашение мало, надо ещё сказать оболочке, что
+   * роль изменилась.
+   *
+   * `POST /onboarding/accept` ставит `linked_bot_user` и
+   * `invite_status = ACCEPTED` (apps/master_api/views.py), после чего
+   * `resolve_role` отдаёт `is_master: true`. Но `App` прочитал
+   * `/api/v1/me` один раз на старте — тогда роли ещё не было, — и
+   * держит `CustomerRoutes`. `/master/dashboard` там не объявлен, и до
+   * этой правки его доедал `<Route path="*" element={<HelloScreen />} />`:
+   * человек, прошедший весь путь мастера, получал клиентское
+   * «Помогу записаться в студию» внутри бота для мастеров.
+   *
+   * Порядок важен. `navigate` идёт первым — синхронно, пока экран ещё
+   * смонтирован. `reloadMe()` следом переводит `App` в `loading`, что
+   * размонтирует всё поддерево: если бы он шёл первым, `navigate`
+   * вызывался бы уже из размонтированного компонента, а этот экран
+   * успел бы перемонтироваться в дереве мастера и заново дёрнуть
+   * `claimInvite`.
+   */
+  const reloadMe = useReloadMe();
   const finishAndRouteToDashboard = useCallback(() => {
     hapticNotify("success");
     navigate("/master/dashboard", { replace: true });
-  }, [navigate]);
+    reloadMe();
+  }, [navigate, reloadMe]);
 
   const handleStep3Submit = useCallback(
     async (saveProfile: boolean) => {
@@ -387,16 +415,37 @@ function Step1Identity({
   onNotMe: () => void;
   disabled: boolean;
 }) {
-  const firstName = data.max_user.first_name || "коллега";
+  // DRF-1434 — на пилоте этот экран показывал два разных имени: в
+  // заголовке «Здравствуйте, Иван!» (из профиля MAX), а в карточке под
+  // вопросом «Это вы?» — «Я тест» (из записи приглашения, которую завёл
+  // салон). Человека просили подтвердить личность, показывая ему две.
+  //
+  // Оставлены оба источника, но каждый теперь подписан. Заголовок —
+  // это ЧЕЛОВЕК: MAX проверил его сессию, `first_name` оттуда, и
+  // здороваться чужим именем из чужой таблицы неправильно. Карточка —
+  // это ЗАПИСЬ САЛОНА, ровно то, что предлагается подтвердить; она и
+  // подписана как запись салона. Когда имена расходятся, экран говорит
+  // об этом вслух и подсказывает, что делать, — раньше расхождение
+  // выглядело как ошибка приложения.
+  const maxFirstName = data.max_user.first_name.trim();
+  const masterName = data.master.name.trim();
+  const greetingName =
+    maxFirstName || masterName.split(/\s+/)[0] || "коллега";
+  const nameMismatch =
+    maxFirstName !== "" &&
+    masterName !== "" &&
+    masterName.toLocaleLowerCase("ru") !==
+      maxFirstName.toLocaleLowerCase("ru") &&
+    masterName.split(/\s+/)[0]?.toLocaleLowerCase("ru") !==
+      maxFirstName.toLocaleLowerCase("ru");
   const salon = data.salon.name;
-  const masterName = data.master.name;
   const phone = data.max_user.phone_masked;
   const handle = data.max_user.max_handle
     ? `@${data.max_user.max_handle.replace(/^@/, "")}`
     : "";
   return (
     <ScreenLayout
-      title={COPY.step1.greeting(firstName)}
+      title={COPY.step1.greeting(greetingName)}
       cta={
         <StickyCta onClick={onConfirm} disabled={disabled}>
           {COPY.step1.cta}
@@ -407,12 +456,20 @@ function Step1Identity({
       <p>
         <strong>{COPY.step1.question}</strong>
       </p>
-      <div className="profile-identity" aria-label="Ваша личность">
+      <p className="identity-caption" id="m0-identity-caption">
+        {COPY.step1.recordCaption}
+      </p>
+      <div className="profile-identity" aria-labelledby="m0-identity-caption">
         <div style={{ fontWeight: 600, fontSize: "var(--font-size-300)" }}>
           {masterName}
         </div>
         {phone ? <div className="profile-phone">{phone}</div> : null}
         {handle ? <div className="profile-phone">MAX: {handle}</div> : null}
+        {nameMismatch ? (
+          <p className="identity-mismatch">
+            {COPY.step1.nameMismatch(maxFirstName)}
+          </p>
+        ) : null}
       </div>
       <div style={{ marginTop: "var(--s-3)" }}>
         <button

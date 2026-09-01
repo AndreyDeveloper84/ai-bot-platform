@@ -55,6 +55,7 @@ import {
   writeLastSurface,
   type UnifiedSurface,
 } from "./state/surface";
+import { BootReloadContext } from "./state/boot";
 import { AdminAvailabilityRequestsScreen } from "./screens/admin/AdminAvailabilityRequestsScreen";
 import { AdminDeactivationFlowScreen } from "./screens/admin/AdminDeactivationFlowScreen";
 import { AdminInternalChatListScreen } from "./screens/admin/AdminInternalChatListScreen";
@@ -92,6 +93,7 @@ import { FoodScannerProcessingScreen } from "./screens/FoodScannerProcessingScre
 import { FoodScannerResultScreen } from "./screens/FoodScannerResultScreen";
 import { FoodScannerSavedScreen } from "./screens/FoodScannerSavedScreen";
 import { HelloScreen } from "./screens/HelloScreen";
+import { RoleNotReadyScreen } from "./screens/RoleNotReadyScreen";
 import { MasterConversationDetailScreen } from "./screens/MasterConversationDetailScreen";
 import { MasterConversationsScreen } from "./screens/MasterConversationsScreen";
 import { MasterCustomersScreen } from "./screens/MasterCustomersScreen";
@@ -1205,6 +1207,21 @@ function CustomerRoutes() {
           and rendered HelloScreen, which is how the invitation vanished
           into the greeting screen with no error anywhere. */}
       {inviteOnboardingRouteElements()}
+      {/*
+        DRF-1434 — роль ещё не выдана, но человек уже на /master/* или
+        /admin/*. Раньше эти адреса доедал `*` ниже и рисовал
+        `HelloScreen`: мастер, только что принявший приглашение и
+        отправленный на `/master/dashboard`, получал клиентское
+        приветствие внутри бота для мастеров, без единого признака
+        ошибки. Объявлены ДО `*`, чтобы забрать префикс у него.
+
+        Это страховка, а не основной путь: основной — `useReloadMe()`
+        в `MasterOnboardingScreen`, после которого `/me` отдаёт
+        `is_master: true` и монтируется `MasterRoutes`. Экран ниже
+        виден, только если роль действительно не пришла.
+      */}
+      <Route path="/master/*" element={<RoleNotReadyScreen surface="master" />} />
+      <Route path="/admin/*" element={<RoleNotReadyScreen surface="admin" />} />
       <Route path="*" element={<HelloScreen />} />
     </Routes>
   );
@@ -1342,25 +1359,43 @@ export function App() {
     if (!meaningful) clearLastSurface();
   }, [boot.status, boot.me]);
 
-  if (boot.status === "loading") return <SplashScreen />;
-  if (boot.status === "no_role") {
-    return <NoRoleScreen onRetry={() => void loadMe()} />;
-  }
+  // DRF-1434 — the boot answer is cached for the life of the webview,
+  // which is right for a role that cannot change mid-session and wrong
+  // for the one that can: accepting a master invitation flips
+  // `is_master` server-side while this component still holds the old
+  // `false`. Screens that cause such a change call `useReloadMe()` (see
+  // state/boot.ts); everything else never touches it.
+  const reloadMe = useCallback(() => {
+    void loadMe();
+  }, [loadMe]);
 
-  if (boot.status === "ready" && boot.me) {
-    return (
-      <SurfaceModeContext.Provider value={surfaceMode}>
-        <RoleSurface
-          me={boot.me}
-          surfacePref={surfacePref}
-          chooserRequested={chooserRequested}
-        />
-      </SurfaceModeContext.Provider>
-    );
-  }
+  const body = (() => {
+    if (boot.status === "loading") return <SplashScreen />;
+    if (boot.status === "no_role") {
+      return <NoRoleScreen onRetry={() => void loadMe()} />;
+    }
 
-  // Network / 5xx — customer fallback with a retry banner.
-  return <CustomerFallbackWithBanner onRetry={() => void loadMe()} />;
+    if (boot.status === "ready" && boot.me) {
+      return (
+        <SurfaceModeContext.Provider value={surfaceMode}>
+          <RoleSurface
+            me={boot.me}
+            surfacePref={surfacePref}
+            chooserRequested={chooserRequested}
+          />
+        </SurfaceModeContext.Provider>
+      );
+    }
+
+    // Network / 5xx — customer fallback with a retry banner.
+    return <CustomerFallbackWithBanner onRetry={() => void loadMe()} />;
+  })();
+
+  return (
+    <BootReloadContext.Provider value={reloadMe}>
+      {body}
+    </BootReloadContext.Provider>
+  );
 }
 
 /**
