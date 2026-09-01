@@ -260,8 +260,11 @@ class TestFailureLeavesATrace:
         fmt, *args = mock_logger.warning.call_args.args
         handed_over = " ".join(str(a) for a in args)
         assert "openai.call_failed" in fmt
-        assert "s3cr3t" not in handed_over
-        # Redacted, not merely truncated away: the host survives, the
-        # credentials do not.
-        assert "***" in handed_over
+        # Presence first, and on the same string the absence is asserted
+        # against: "the secret is not in there" is trivially true of an
+        # empty or unrelated `handed_over`. These two say the proxy really
+        # did reach the log call and was redacted rather than dropped —
+        # the host survives, the credentials do not.
         assert "proxy.example" in handed_over
+        assert "***" in handed_over
+        assert "s3cr3t" not in handed_over
