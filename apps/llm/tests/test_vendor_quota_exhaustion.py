@@ -561,6 +561,26 @@ class TestQuotaFallbackHop:
         assert forwarded["tools"] == tools
         assert forwarded["temperature"] == 0.7
 
+    def test_embedding_ops_are_not_wrapped_at_all(self) -> None:
+        """Anthropic has no embeddings API, so an embedding op has nowhere
+        to hop to — ``op="embedding"`` already resolves to the only
+        embedding-capable vendor. Wrapping it would add a frame that can
+        only ever re-raise, and would mislead anyone reading a traceback
+        into thinking a fallback was attempted.
+
+        Operational consequence, stated here so it is not discovered in
+        production: while OpenAI's balance is empty the FAQ knowledge-base
+        search CANNOT fail over. It degrades to a handoff (the skill
+        catches ``LLMError``), it does not 500 — but Claude cannot cover
+        it.
+        """
+        from apps.llm.router import QuotaFallbackProvider
+
+        stubs = _exhausted_and_healthy()
+        provider = _router_with(stubs).get_provider(None, op="embedding")
+
+        assert not isinstance(provider, QuotaFallbackProvider)
+
     @pytest.mark.asyncio
     async def test_wrapper_keeps_the_primary_vendor_name(self) -> None:
         """Cost attribution, audit and telemetry all read ``.name``. A
