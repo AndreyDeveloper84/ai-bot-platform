@@ -341,7 +341,10 @@ class OpenAIProvider:
 
         # Lazy import — the openai SDK is heavy and tests that mock the
         # provider entirely shouldn't pay the import cost.
-        from openai import AsyncOpenAI  # type: ignore[import-not-found]
+        from openai import (  # type: ignore[import-not-found]
+            AsyncOpenAI,
+            DefaultAsyncHttpxClient,
+        )
 
         timeout = getattr(settings, "LLM_REQUEST_TIMEOUT_S", 30.0)
         kwargs: dict[str, Any] = {
@@ -352,12 +355,18 @@ class OpenAIProvider:
             "max_retries": 0,
         }
         if self._proxy:
-            import httpx
-
             # AsyncOpenAI accepts an http_client override so we can pin
             # the proxy without leaking it into env globally. The proxy
             # client must carry the same timeout so it can't hang either.
-            kwargs["http_client"] = httpx.AsyncClient(proxy=self._proxy, timeout=timeout)
+            #
+            # DRF-1437 — built from openai's OWN `DefaultAsyncHttpxClient`
+            # rather than a bare `httpx.AsyncClient` named here. openai
+            # currently depends on `httpx<1` and anthropic on `httpx2`, so
+            # the two providers no longer share one HTTP stack; the
+            # Anthropic side of this line raised TypeError on the pilot.
+            # Naming the SDK's own class keeps each provider bound to its
+            # own vendor's stack whichever way either one moves next.
+            kwargs["http_client"] = DefaultAsyncHttpxClient(proxy=self._proxy, timeout=timeout)
         self._client = AsyncOpenAI(**kwargs)
         return self._client
 
