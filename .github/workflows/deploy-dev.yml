@@ -88,7 +88,20 @@ jobs:
             git fetch origin
             git checkout dev
             git pull --ff-only origin dev
-            sudo docker compose --env-file /etc/ai-bot-platform-dev/.env \
+            # Откуда приезжает базовый слой (DRF-1440). Пилот достаёт
+            # Docker Hub плохо — анонимный token-endpoint отвечает через
+            # раз, и 31.08 две подряд выкладки умерли на нём до единой
+            # скомпилированной строки. Скрипт перебирает источники от
+            # зеркала в GHCR до прежнего поведения и печатает одну ссылку;
+            # хуже, чем было, стать не может.
+            BASE_IMAGE=\"\$(DOCKER_CMD='sudo docker' ENV_FILE=/etc/ai-bot-platform-dev/.env bash scripts/resolve-base-image.sh)\"
+            # \`sudo env VAR=...\`, а не \`export\` перед \`sudo\`: sudo по
+            # умолчанию сбрасывает окружение (env_reset), и compose,
+            # запущенный под root, не увидел бы переменную —
+            # интерполяция \${PYTHON_BASE_IMAGE:-...} молча вернулась бы к
+            # Docker Hub, то есть ровно к тому, что мы убираем.
+            sudo env PYTHON_BASE_IMAGE=\"\$BASE_IMAGE\" \
+              docker compose --env-file /etc/ai-bot-platform-dev/.env \
               -p ai-bot-platform-dev build web worker shadow-worker
             # Migrations MUST land between build and up: the new code may
             # query columns the old schema lacks (additive MemoryEntry

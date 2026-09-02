@@ -1,0 +1,170 @@
+# -----------------------------------------------------------------------------
+# mirror-base-image — DRF-1440 (перенос DRF-1431 из beautygo_backend)
+#
+# ## Что это убирает
+#
+# Образ бота собирается НЕ на раннере GitHub, а НА ПИЛОТЕ: и `deploy-dev.yml`
+# по ssh (`docker compose ... build web worker shadow-worker`), и рука
+# оператора для контура `ayla-bot-staging`. Значит каждая пересборка
+# заставляет эту коробку тянуть `python:3.12-slim` с Docker Hub, а коробка
+# стоит в RU.
+#
+# 31.08 на этом же хосте две подряд выкладки бэкенда умерли ровно там,
+# до единой скомпилированной строки:
+#
+#   #4 ERROR: failed to authorize: failed to fetch anonymous token:
+#        Get "https://auth.docker.io/token?scope=repository%3Alibrary..."
+#
+# Измерено с пилота 31.08 (не предположено):
+#
+#   ghcr.io/v2/                  401 за 0.26 / 0.31 / 0.26 с   (3 из 3)
+#   registry-1.docker.io/v2/     401 за 5.41 с
+#   auth.docker.io/token         200 на пробе, но в тот же день дважды
+#                                отказал внутри выкладки
+#
+# У хоста нет ни /etc/docker/daemon.json, ни drop-in для docker.service, ни
+# прокси в ~/.docker/config.json — запрос никто не портит. Вывод:
+# связность в порядке, анонимный token-endpoint Hub с этого IP ненадёжен.
+#
+# GHCR и так жёсткая зависимость выкладки (шаг `git pull` ходит туда же) и
+# отвечает в 20 раз быстрее. Базовый слой оттуда убирает точку отказа, а не
+# добавляет.
+#
+# ## Что делает этот workflow
+#
+# Крутится на раннере GitHub (у которого с Hub всё хорошо) и копирует
+# манифест апстрима в GHCR без изменений. Копия реестр-в-реестр, поэтому с
+# другой стороны выходит ТОТ ЖЕ digest; это копия, а не пересборка. Затем
+# сверяет два digest'а, чтобы недокопированное зеркало роняло job, а не
+# уезжало на пилот.
+#
+# Ссылка на апстрим ЧИТАЕТСЯ ИЗ DOCKERFILE, а не повторяется здесь: строка
+# `ARG PYTHON_BASE_IMAGE=` остаётся единственным источником правды. Бампнул
+# Dockerfile — перезапустил этот workflow, и всё; второго места, где можно
+# забыть, нет.
+#
+# ## Чем отличается от бэкендовского
+#
+# * Своё имя пакета — `ayla-bot-python`, не `beautygo-python`. Владелец у
+#   репозиториев один, и технически бот мог бы тянуть зеркало бэкенда: это
+#   байт в байт тот же образ. Не делаем: GITHUB_TOKEN этого репозитория не
+#   пишет в чужой пакет, а чтение чужого пакета делает выкладку бота
+#   заложником переименования в соседнем репозитории. Пакет дешёвый.
+# * Тег зеркала берётся из тега апстрима, как и там. Если репозитории
+#   когда-нибудь разъедутся по версии Python, ничего чинить не придётся.
+#
+# ## Эксплуатация
+#
+# Еженедельно, плюс по кнопке, плюс автоматически при изменении Dockerfile
+# на dev. Дёшево (копия манифеста), идемпотентно, пилота не касается.
+#
+# Разовое действие владельца до первой выкладки, которая на это положится:
+# сделать пакет ПУБЛИЧНЫМ (GitHub -> профиль -> Packages -> ayla-bot-python
+# -> Package settings -> Change visibility -> Public). Это побайтовая копия
+# публичного Docker Official Image, так что не раскрывает ничего, зато
+# пилоту не нужен ключ реестра на диске. Если оставить приватным,
+# scripts/docker-build.sh откатится на `docker login` с GH_DEPLOY_TOKEN из
+# .env — этому токену тогда нужна область `read:packages`.
+# -----------------------------------------------------------------------------
+name: Mirror base image to GHCR
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Понедельник, 03:41 UTC. Не в ноль минут — задачи, просящие :00,
+    # стоят в общей очереди. И не в одну минуту с зеркалом бэкенда.
+    - cron: '41 3 * * 1'
+  push:
+    branches: [dev]
+    paths:
+      # Значение имеет только строка с базовым образом, но paths-фильтры
+      # работают по файлам. Правки Dockerfile редки настолько, что
+      # перезеркалить на каждую дешевле риска протухшего зеркала.
+      - 'Dockerfile'
+      - '.github/workflows/mirror-base-image.yml'
+
+# Наименьшие права: прочитать дерево, записать один пакет. Больше ничего.
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: mirror-base-image
+  cancel-in-progress: false
+
+jobs:
+  mirror:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve upstream ref from the Dockerfile
+        id: ref
+        # Единственный источник правды. `ARG PYTHON_BASE_IMAGE=python:3.12-slim`
+        # в Dockerfile решает и что зеркалим, и какой тег несёт зеркало —
+        # разъехаться им негде.
+        run: |
+          set -euo pipefail
+          upstream=$(grep -m1 -E '^ARG PYTHON_BASE_IMAGE=' Dockerfile | cut -d= -f2-)
+          if [ -z "$upstream" ]; then
+            echo "::error::Dockerfile has no 'ARG PYTHON_BASE_IMAGE=' line to mirror."
+            exit 1
+          fi
+          case "$upstream" in
+            *:*) tag="${upstream##*:}" ;;
+            *)   echo "::error::upstream ref '$upstream' carries no tag"; exit 1 ;;
+          esac
+          # GHCR требует владельца в нижнем регистре.
+          owner=$(echo "${GITHUB_REPOSITORY_OWNER}" | tr '[:upper:]' '[:lower:]')
+          mirror="ghcr.io/${owner}/ayla-bot-python:${tag}"
+          echo "upstream=$upstream" >> "$GITHUB_OUTPUT"
+          echo "mirror=$mirror"     >> "$GITHUB_OUTPUT"
+          echo "mirroring $upstream  ->  $mirror"
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          # Токен на время job'а, истекает вместе с прогоном. Писать пакет
+          # ему разрешает `permissions.packages: write` выше.
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Copy the manifest list Hub -> GHCR
+        # `imagetools create` — копия манифеста реестр-в-реестр: слои на
+        # раннер не тянутся, а все платформы исходного манифест-листа
+        # сохраняются, так что зеркало годится и для arm64-ноутбука, и для
+        # amd64-пилота.
+        run: |
+          set -euo pipefail
+          docker buildx imagetools create \
+            --tag '${{ steps.ref.outputs.mirror }}' \
+            '${{ steps.ref.outputs.upstream }}'
+
+      - name: Assert the mirror is digest-identical to upstream
+        # Без этого job отрапортует успех поверх частичной копии. Тот же
+        # digest = те же байты = пилот собирает ровно на том образе, который
+        # получил бы ноутбук, собирающий против умолчания с Docker Hub.
+        run: |
+          set -euo pipefail
+          up=$(docker buildx imagetools inspect --format '{{.Manifest.Digest}}' '${{ steps.ref.outputs.upstream }}')
+          mi=$(docker buildx imagetools inspect --format '{{.Manifest.Digest}}' '${{ steps.ref.outputs.mirror }}')
+          echo "upstream ${{ steps.ref.outputs.upstream }}  $up"
+          echo "mirror   ${{ steps.ref.outputs.mirror }}  $mi"
+          if [ "$up" != "$mi" ]; then
+            echo "::error::mirror digest does not match upstream — refusing to call this a mirror."
+            exit 1
+          fi
+          echo "digests match — mirror is a faithful copy"
+          {
+            echo "### Base image mirrored"
+            echo
+            echo "| | ref | digest |"
+            echo "|---|---|---|"
+            echo "| upstream | \`${{ steps.ref.outputs.upstream }}\` | \`$up\` |"
+            echo "| mirror | \`${{ steps.ref.outputs.mirror }}\` | \`$mi\` |"
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -30,7 +30,30 @@
 # (DRF-1437). The other 77 were equally unverified — they had simply not
 # been unlucky yet. Nobody chose any of it; a pinless range plus a rebuild
 # chose it.
-FROM python:3.12-slim AS dev
+# Базовый образ через build-ARG (DRF-1440, перенос DRF-1431 из бэкенда).
+#
+# Почему не просто `FROM python:3.12-slim`. Образ бота собирается НА
+# ПИЛОТЕ — и `deploy-dev.yml` по ssh, и рука оператора для контура
+# `ayla-bot-staging`. Эта коробка достаёт Docker Hub плохо: 31.08 две
+# подряд выкладки бэкенда умерли на
+#     failed to authorize: failed to fetch anonymous token:
+#     Get "https://auth.docker.io/token?scope=repository%3Alibrary..."
+# ещё до того, как компилировалась хоть одна строка проекта. Измерено с
+# пилота 31.08: registry-1.docker.io/v2/ отвечает за 5.4 с, auth.docker.io
+# отвечает через раз, ghcr.io/v2/ — за 0.26-0.31 с в каждой попытке.
+# GitHub и так жёсткая зависимость выкладки (шаг «git pull» ходит туда же),
+# так что базовый слой из GHCR не добавляет точку отказа, а убирает.
+#
+# УМОЛЧАНИЕ намеренно остаётся апстримной ссылкой на Docker Hub: свежий
+# клон, ноутбук и CI работают без всякой настройки реестра. Переопределяет
+# только сборка на пилоте — через `scripts/docker-build.sh`, который
+# перебирает источники и экспортирует PYTHON_BASE_IMAGE.
+#
+# Зеркало обновляет .github/workflows/mirror-base-image.yml: он крутится на
+# раннере GitHub (у которого с Hub всё хорошо) и копирует манифест
+# апстрима байт в байт. Тот же digest, другой реестр.
+ARG PYTHON_BASE_IMAGE=python:3.12-slim
+FROM ${PYTHON_BASE_IMAGE} AS dev
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
