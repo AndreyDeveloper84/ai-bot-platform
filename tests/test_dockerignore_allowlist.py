@@ -101,6 +101,11 @@ def test_every_tracked_top_level_entry_has_a_verdict() -> None:
     """Ни один отслеживаемый элемент верхнего уровня не остаётся без решения."""
     tracked = _tracked_top_level()
     allowed = _allowed_top_level()
+    # Утверждение присутствия ПЕРЕД утверждением отсутствия: пустой
+    # `tracked` или пустой `allowed` сделали бы проверку ниже
+    # бессодержательно зелёной.
+    assert tracked, "git не вернул ни одного элемента верхнего уровня"
+    assert allowed, ".dockerignore не содержит ни одной строки `!` — образ был бы пуст"
     undecided = sorted(tracked - allowed - set(NOT_IN_IMAGE))
     assert not undecided, (
         "новые элементы верхнего уровня не попадут в образ, и никто этого "
@@ -113,10 +118,10 @@ def test_every_tracked_top_level_entry_has_a_verdict() -> None:
 def test_not_in_image_list_has_no_stale_entries() -> None:
     """NOT_IN_IMAGE не должен переживать удалённые из репозитория файлы."""
     tracked = _tracked_top_level()
+    assert tracked, "git не вернул ни одного элемента верхнего уровня"
+    assert NOT_IN_IMAGE, "список NOT_IN_IMAGE пуст — сверять нечего"
     stale = sorted(set(NOT_IN_IMAGE) - tracked)
-    assert not stale, (
-        f"NOT_IN_IMAGE называет элементы, которых больше нет в git: {stale}"
-    )
+    assert not stale, f"NOT_IN_IMAGE называет элементы, которых больше нет в git: {stale}"
 
 
 def test_allowlist_covers_what_the_build_reads() -> None:
@@ -131,6 +136,7 @@ def test_allowlist_covers_what_the_build_reads() -> None:
         "config",  # то же
         "tools",  # RUN python tools/env_guard.py --against-lock
     }
+    assert allowed, ".dockerignore не содержит ни одной строки `!` — образ был бы пуст"
     missing = sorted(required - allowed)
     assert not missing, (
         f".dockerignore перестал пропускать в образ то, что читает сборка: {missing}"
