@@ -36,6 +36,43 @@ Also runnable standalone (``uv run python tools/env_guard.py``) -- that is
 how ``scripts/dev-env.sh`` verifies a freshly built environment.
 
 Bypass: ``AYLA_ENV_GUARD=off`` (also ``0`` / ``false`` / ``no``).
+
+## The second failure: the image drifts away from the lock (DRF-1437)
+
+The checks above ask "does this environment satisfy the *pins in
+pyproject.toml*". That question has a blind spot, and on 2026-09-01 the
+blind spot took the pilot down.
+
+The pilot image was built with ``pip install -e ".[dev,ai-core]"`` --
+which re-resolves every unpinned range on every rebuild and never reads
+``uv.lock``. CI, meanwhile, builds with ``uv sync --frozen``. Both were
+green; they were not running the same software. Measured on the pilot
+that day: **78 packages at versions the lock never selected**, seven of
+them a whole major apart (anthropic 0.101.0 -> 1.2.0, django-redis 6 ->
+7, protobuf 6 -> 7, cryptography 48 -> 50, websockets 16 -> 17,
+kubernetes 35 -> 36, rpds-py 0.30 -> 2026.6.3), plus **12 packages
+installed that appear nowhere in the lock**.
+
+The anthropic major is the one that surfaced -- it moved to ``httpx2``
+and the proxied client stopped constructing, so the bot answered nobody.
+The other 77 were equally unverified; they simply had not been unlucky
+yet. Every pin check in this file passed the whole time, because every
+drifted version still satisfied its declared range.
+
+:func:`check_against_lock` asks the other question: **is what is actually
+installed exactly what uv.lock selected**. It is deliberately NOT part of
+:func:`check_environment` -- a developer venv legitimately lags between
+``uv lock`` and the next ``uv sync``, and blocking every test run on that
+would get the guard switched off. It runs where reproducibility is a
+promise rather than a convenience:
+
+  * in the image build, as the last layer -- a hand-rolled ``pip install``
+    added to the Dockerfile later fails the build instead of shipping;
+  * against a running container, to audit an environment already deployed::
+
+        docker exec <container> python /app/tools/env_guard.py --against-lock
+
+Standalone: ``python tools/env_guard.py --against-lock``.
 """
 
 from __future__ import annotations
@@ -44,7 +81,8 @@ import json
 import os
 import re
 import sys
-from importlib.metadata import PackageNotFoundError, distribution
+import tomllib
+from importlib.metadata import PackageNotFoundError, distribution, distributions
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -153,6 +191,162 @@ def _check_ayla_pin(pyproject_text: str) -> str | None:
     )
 
 
+# ---------------------------------------------------------------------------
+# Installed-vs-uv.lock (DRF-1437)
+# ---------------------------------------------------------------------------
+
+#: Bootstrap tooling that legitimately lives in an environment without
+#: appearing in ``uv.lock``. ``uv`` is here because the image build installs
+#: it in order to run ``uv sync``; pip/setuptools/wheel ship with the base
+#: interpreter; ``ai-bot-platform`` is this project itself, whose lock entry
+#: carries no resolvable version. Anything NOT on this list and NOT in the
+#: lock is drift -- that is how ``httpx2`` and ``httpcore2`` reached the
+#: pilot with nobody asking for them.
+_NOT_IN_LOCK_BY_DESIGN = frozenset({"pip", "setuptools", "wheel", "uv", "ai-bot-platform"})
+
+
+def _canonical(name: str) -> str:
+    """PEP 503 normalisation. ``Django_Stubs.Ext`` -> ``django-stubs-ext``."""
+    return re.sub(r"[-_.]+", "-", name).lower()
+
+
+def _read_lock(repo_root: Path) -> dict[str, str] | None:
+    """``uv.lock`` as ``{canonical name: version}``, or None if unreadable.
+
+    Fails open on a missing or unparseable lock: this guard must never be
+    the reason a build cannot proceed, on its own bug.
+    """
+    try:
+        raw = (repo_root / "uv.lock").read_bytes()
+    except OSError:
+        return None
+    try:
+        parsed = tomllib.loads(raw.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError):
+        return None
+    packages = parsed.get("package")
+    if not isinstance(packages, list):
+        return None
+    locked: dict[str, str] = {}
+    for entry in packages:
+        if not isinstance(entry, dict):
+            continue
+        name, version = entry.get("name"), entry.get("version")
+        if isinstance(name, str) and isinstance(version, str):
+            locked[_canonical(name)] = version
+    return locked or None
+
+
+def _installed_versions() -> dict[str, str]:
+    """``{canonical name: version}`` for the interpreter running this code.
+
+    A distribution whose metadata will not read is skipped rather than
+    reported: unreadable is not the same as drifted.
+    """
+    found: dict[str, str] = {}
+    for dist in distributions():
+        try:
+            name = dist.metadata["Name"]
+            version = dist.version
+        except (KeyError, TypeError, ValueError):
+            continue
+        if isinstance(name, str) and isinstance(version, str):
+            found[_canonical(name)] = version
+    return found
+
+
+def check_against_lock(repo_root: Path = REPO_ROOT) -> list[str]:
+    """Problems where the installed environment departs from ``uv.lock``.
+
+    Two directions, both of which the pilot exhibited on 2026-09-01:
+
+      * a package installed at a version the lock did not select;
+      * a package installed that the lock does not contain at all -- how a
+        transitive dependency of a drifted major (``httpx2``, pulled in by
+        ``anthropic 1.x``) enters an image nobody asked to change.
+
+    The reverse direction -- locked but not installed -- is deliberately NOT
+    reported: which packages are present depends on which extras were synced,
+    so it would fire on every honest ``--extra``-less environment. A missing
+    ``ayla-ai-core`` is already named, by name, in :func:`_check_ayla_pin`.
+
+    Empty list means the environment is exactly the lock. Also empty when the
+    lock cannot be read -- see :func:`_read_lock` -- so a caller that needs to
+    know the check actually ran should assert the lock is readable first.
+    """
+    if os.environ.get("AYLA_ENV_GUARD", "").strip().lower() in {"off", "0", "false", "no"}:
+        return []
+    locked = _read_lock(repo_root)
+    if locked is None:
+        return []
+
+    problems: list[str] = []
+    mismatched: list[tuple[str, str, str]] = []
+    extraneous: list[tuple[str, str]] = []
+
+    for name, installed_version in sorted(_installed_versions().items()):
+        if name in _NOT_IN_LOCK_BY_DESIGN:
+            continue
+        locked_version = locked.get(name)
+        if locked_version is None:
+            extraneous.append((name, installed_version))
+        elif locked_version != installed_version:
+            mismatched.append((name, locked_version, installed_version))
+
+    if mismatched:
+        majors = [
+            f"{n} {lv} -> {iv}"
+            for n, lv, iv in mismatched
+            if _version_tuple(lv)[:1] != _version_tuple(iv)[:1]
+        ]
+        listing = "\n".join(
+            f"      {n:<32} lock={lv:<16} installed={iv}" for n, lv, iv in mismatched
+        )
+        problem = (
+            f"  * {len(mismatched)} package(s) installed at a version uv.lock did "
+            "not select\n"
+            f"      interpreter: {sys.executable}\n"
+            f"{listing}"
+        )
+        if majors:
+            problem += "\n      whole majors apart: " + ", ".join(majors)
+        problems.append(problem)
+
+    if extraneous:
+        listing = "\n".join(f"      {n:<32} installed={iv}" for n, iv in extraneous)
+        problems.append(
+            f"  * {len(extraneous)} package(s) installed that uv.lock does not contain\n{listing}"
+        )
+    return problems
+
+
+def render_lock_report(problems: list[str]) -> str:
+    """The message read when an environment has drifted off the lock."""
+    body = "\n".join(problems)
+    return (
+        "\n"
+        "============= ENVIRONMENT DOES NOT MATCH uv.lock (DRF-1437) =============\n"
+        "The installed packages are not the ones uv.lock selected. Nothing here\n"
+        "is a code defect, and every drifted version may still satisfy its\n"
+        "declared range in pyproject.toml -- which is precisely why the pin\n"
+        "checks stay green while this is true.\n"
+        "\n"
+        f"{body}\n"
+        "\n"
+        "CAUSE, almost always: something installed dependencies WITHOUT the lock\n"
+        "-- a `pip install` of a range, rather than `uv sync --locked`. On the\n"
+        "pilot on 2026-09-01 that was the image build, and it cost the bot every\n"
+        "reply it owed a user.\n"
+        "\n"
+        "FIX -- reinstall from the lock, never hand-pick versions:\n"
+        "\n"
+        f"    {_ONE_COMMAND}\n"
+        "\n"
+        "Guard: tools/env_guard.py --against-lock -- bypass AYLA_ENV_GUARD=off\n"
+        "========================================================================="
+    )
+
+
 def check_environment(repo_root: Path = REPO_ROOT) -> list[str]:
     """Rendered problems, one string each. Empty list == environment is current."""
     if os.environ.get("AYLA_ENV_GUARD", "").strip().lower() in {"off", "0", "false", "no"}:
@@ -188,7 +382,15 @@ def render_report(problems: list[str]) -> str:
     )
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
+    args = sys.argv[1:] if argv is None else argv
+    if "--against-lock" in args:
+        lock_problems = check_against_lock()
+        if lock_problems:
+            print(render_lock_report(lock_problems), file=sys.stderr)
+            return 1
+        print("env_guard: installed packages match uv.lock exactly")
+        return 0
     problems = check_environment()
     if problems:
         print(render_report(problems), file=sys.stderr)
