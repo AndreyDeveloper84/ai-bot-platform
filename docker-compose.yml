@@ -83,6 +83,14 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      args:
+        # DRF-1440. Из какого реестра приезжает базовый слой. Умолчание —
+        # апстримная ссылка на Docker Hub, поэтому свежий клон, ноутбук и
+        # CI не меняются ничем. Сборка на пилоте экспортирует
+        # PYTHON_BASE_IMAGE=<ссылка на GHCR> перед `docker compose build`
+        # (scripts/docker-build.sh), потому что пилот достаёт Hub плохо —
+        # измерения в шапке Dockerfile.
+        PYTHON_BASE_IMAGE: ${PYTHON_BASE_IMAGE:-python:3.12-slim}
     command: python manage.py runserver 0.0.0.0:8000
     environment:
       DJANGO_SETTINGS_MODULE: config.settings.local
@@ -128,6 +136,9 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      # DRF-1440 — см. `web` в docker-compose.yml.
+      args:
+        PYTHON_BASE_IMAGE: ${PYTHON_BASE_IMAGE:-python:3.12-slim}
     command: python -m apps.workers.consumer --forever
     # A drainer that dies silently re-creates the #1010 symptom (stream
     # accepted but never processed). --forever exits cleanly on SIGINT; any
@@ -170,6 +181,9 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      # DRF-1440 — см. `web` в docker-compose.yml.
+      args:
+        PYTHON_BASE_IMAGE: ${PYTHON_BASE_IMAGE:-python:3.12-slim}
     command: celery -A config worker --loglevel=INFO -Q shadow --concurrency=2 --prefetch-multiplier=1
     restart: unless-stopped
     environment:

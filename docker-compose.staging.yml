@@ -4,6 +4,19 @@
 #   docker compose -p ayla-bot-staging \
 #     -f docker-compose.yml -f docker-compose.staging.yml up -d
 #
+# Пересборка НА ПИЛОТЕ — через резолвер базового слоя (DRF-1440), иначе
+# каждая сборка идёт в Docker Hub, чей анонимный token-endpoint с этого IP
+# отвечает через раз (измерения — в шапке Dockerfile):
+#
+#   export PYTHON_BASE_IMAGE="$(DOCKER_CMD='sudo docker' bash scripts/resolve-base-image.sh)"
+#   sudo env PYTHON_BASE_IMAGE="$PYTHON_BASE_IMAGE" docker compose -p ayla-bot-staging \
+#     -f docker-compose.yml -f docker-compose.staging.yml \
+#     build web worker shadow-worker celery-worker celery-beat
+#
+# `sudo env ...`, а не просто `export`: sudo сбрасывает окружение
+# (env_reset), и compose под root не увидел бы переменную — интерполяция
+# молча вернулась бы к Docker Hub.
+#
 # Project-prefixed (`-p ayla-bot-staging`) so volumes/networks are
 # isolated from any other stack on the host automatically.
 #
@@ -86,6 +99,9 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      # DRF-1440 — см. `web` в docker-compose.yml.
+      args:
+        PYTHON_BASE_IMAGE: ${PYTHON_BASE_IMAGE:-python:3.12-slim}
     command: celery -A config worker --loglevel=INFO --concurrency=2
     environment: *staging_app_env
     env_file:
@@ -105,6 +121,9 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      # DRF-1440 — см. `web` в docker-compose.yml.
+      args:
+        PYTHON_BASE_IMAGE: ${PYTHON_BASE_IMAGE:-python:3.12-slim}
     command: >
       celery -A config beat --loglevel=INFO
       --scheduler django_celery_beat.schedulers:DatabaseScheduler
