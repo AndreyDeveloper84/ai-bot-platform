@@ -20,7 +20,8 @@ db.sqlite3-journal
 .vscode/
 *.log
 docs/
-README.md
+# README.md is NOT excluded: pyproject.toml declares `readme = "README.md"`,
+# so setuptools reads it while building project metadata (DRF-1437).
 
 # Артефакты сборки Mini App. В образ бота они не входят: nginx раздаёт
 # apps/miniapp/dist ПРЯМО ИЗ РАБОЧЕЙ КОПИИ на хосте, а не из контейнера.
