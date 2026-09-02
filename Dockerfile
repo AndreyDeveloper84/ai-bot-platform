@@ -63,6 +63,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         curl \
     && rm -rf /var/lib/apt/lists/*
 
+# `ENV PATH` reaches the container's main process and a plain
+# `docker exec ... bash`, but a LOGIN shell (`bash -l`, and anything that
+# sources /etc/profile) rebuilds PATH from scratch and drops /opt/venv/bin.
+# Measured: `docker exec <c> bash -lc "python manage.py check"` then runs the
+# BASE interpreter and dies with `No module named 'celery'` — an operator
+# staring at a perfectly healthy image. One line closes it.
+RUN echo 'PATH=/opt/venv/bin:$PATH' > /etc/profile.d/10-ayla-venv.sh
+
 # uv is pinned like everything else. An unpinned installer is the same
 # defect one level up: a resolver whose behaviour can change under a
 # rebuild nobody asked for.
