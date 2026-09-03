@@ -94,6 +94,51 @@ services:
       - .env.staging
     restart: unless-stopped
 
+  # ------------------------------------------------------------------
+  # Shadow worker (Live Shadow Stage 1) — the `shadow` Celery queue.
+  #
+  # DRF-1447. This stanza is not decoration: without it the service is
+  # still STARTED (compose brings up every service in the merged model,
+  # and `shadow-worker` is defined in docker-compose.yml), but it is
+  # started on the BASE file's dev settings and never sees
+  # `.env.staging` at all. Measured on the pilot 2026-09-03,
+  # `docker exec ayla-bot-staging-shadow-worker-1 printenv`:
+  #
+  #     DJANGO_SETTINGS_MODULE = config.settings.local
+  #     DJANGO_DEBUG           = True
+  #
+  # while `web` next to it had `config.settings.staging` / `False`.
+  #
+  # A service is only reached by `env_file:` / `environment:` that its
+  # OWN stanza declares. `x-staging-app-env` is a YAML anchor, not a
+  # default: it is spliced where it is written, so a service nobody
+  # wrote it into gets nothing from this file. `worker` above looks
+  # like it is inheriting the staging profile; it is not — it is
+  # inheriting `build`/`command`/`volumes` from docker-compose.yml and
+  # declaring its env HERE. Copy that shape for every app service.
+  #
+  # What DEBUG=True costs on a contour with real traffic:
+  #   * an unhandled exception renders Django's technical 500 page,
+  #     which prints every local variable in every frame — tokens,
+  #     init-data payloads, client phone numbers;
+  #   * `django.db.connection.queries` accumulates every SQL statement
+  #     with its parameters, unbounded, in a process that runs for
+  #     weeks.
+  #
+  # Consequently this service is UNSAFE to run on the pilot until this
+  # stanza is applied — see `tests/test_staging_stack_completeness.py`,
+  # which fails if any Django service in the base file is missing here.
+  #
+  # `build` / `command` / `volumes` / `depends_on` come from
+  # docker-compose.yml (same service name, same image) — only the env
+  # differs per contour, exactly as for `worker`.
+  # ------------------------------------------------------------------
+  shadow-worker:
+    environment: *staging_app_env
+    env_file:
+      - .env.staging
+    restart: unless-stopped
+
   # Celery worker — general tasks (reminders dispatch, followups, sync).
   celery-worker:
     build:
