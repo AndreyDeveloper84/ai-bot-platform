@@ -93,6 +93,7 @@ import { FoodScannerProcessingScreen } from "./screens/FoodScannerProcessingScre
 import { FoodScannerResultScreen } from "./screens/FoodScannerResultScreen";
 import { FoodScannerSavedScreen } from "./screens/FoodScannerSavedScreen";
 import { HelloScreen } from "./screens/HelloScreen";
+import { CustomerEntryScreen } from "./screens/CustomerEntryScreen";
 import { RoleNotReadyScreen } from "./screens/RoleNotReadyScreen";
 import { MasterConversationDetailScreen } from "./screens/MasterConversationDetailScreen";
 import { MasterConversationsScreen } from "./screens/MasterConversationsScreen";
@@ -1096,7 +1097,21 @@ function UnifiedSoloSurface({ me }: { me: MeResponse }) {
 function CustomerRoutes() {
   return (
     <Routes>
-      <Route path="/" element={<HelloScreen />} />
+      {/*
+        DRF-1451 — первый экран клиента. Решение владельца 03.09.2026
+        (поправка A-1 к BOT-001, §24): человек, впервые открывший
+        мини-приложение, попадает на анкету цели, а не на приветствие.
+
+        Кто «новый» — решает сервер: `CustomerEntryScreen` читает
+        `missing` из decision-context и больше ничего. Сбой ручки
+        рисует прежний `HelloScreen`, так что вход в приложение от
+        необязательной анкеты не зависит.
+
+        Catch-all `*` ниже остаётся на `HelloScreen`: он ловит
+        несуществующие адреса, а не первый вход, и лишний
+        decision-context на каждой опечатке в ссылке не нужен.
+      */}
+      <Route path="/" element={<CustomerEntryScreen />} />
       <Route path="/catalog" element={<CatalogScreen />} />
       <Route path="/catalog/:serviceId" element={<ServiceDetailScreen />} />
       <Route path="/book/master" element={<MasterPickerScreen />} />
