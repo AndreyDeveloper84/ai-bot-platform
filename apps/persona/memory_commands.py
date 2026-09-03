@@ -164,6 +164,7 @@ def _domain_of(key: str) -> str:
         return "diet"
     return key
 
+
 # Human label per domain for the domain-forget acknowledgement — naming the
 # DOMAIN, not a stored row (the first live row may be a superseded value and
 # would mislabel what was forgotten).

@@ -318,9 +318,7 @@ class TestApproximateAndNegativeGrams:
     def test_a_negative_number_is_not_a_portion(self, text: str) -> None:
         from apps.orchestrator.memory import food as food_memory
 
-        assert (
-            food_memory.parse_correction_value(food_memory.FIELD_GRAMS, text) is None
-        )
+        assert food_memory.parse_correction_value(food_memory.FIELD_GRAMS, text) is None
 
 
 class TestKeepOrChange:
@@ -451,9 +449,7 @@ class TestATransientWriteFailureKeepsTheQuestionOpen:
         outcome = getattr(food_memory.Outcome, outcome_name)
         written: list = []
         with (
-            patch(
-                "apps.orchestrator.memory.food.remember_correction", return_value=outcome
-            ),
+            patch("apps.orchestrator.memory.food.remember_correction", return_value=outcome),
             patch(
                 "apps.conversations.services.write_skill_state",
                 side_effect=lambda conv, key, value: written.append((key, value)),

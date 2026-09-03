@@ -337,14 +337,11 @@ class TestSensitiveStatementsNeverPassTheDishFilter:
             "пощусь",
         ],
     )
-    def test_none_of_them_is_written_to_the_green_zone(
-        self, settings, resolver, text: str
-    ) -> None:
+    def test_none_of_them_is_written_to_the_green_zone(self, settings, resolver, text: str) -> None:
         bot_user = _consented_user(f"drf1454-sens-{abs(hash(text)) % 999}", settings)
 
         assert (
-            food_memory.note_refusal(bot_user, text=text)
-            is food_memory.Outcome.DROPPED_SENSITIVE
+            food_memory.note_refusal(bot_user, text=text) is food_memory.Outcome.DROPPED_SENSITIVE
         )
         assert MemoryEntry.objects.count() == 0
 

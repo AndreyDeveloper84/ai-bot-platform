@@ -101,7 +101,9 @@ NOT_REMEMBERED_ACK = "Поняла, учла."
 
 # The durable write failed transiently (Ayla unreachable / DB error) and the
 # question stays OPEN — the next turn retries. Said honestly, without «учла».
-RETRY_ACK = "Не получилось сохранить — связь с памятью сейчас не отвечает. Напиши ещё раз, и я запомню."
+RETRY_ACK = (
+    "Не получилось сохранить — связь с памятью сейчас не отвечает. Напиши ещё раз, и я запомню."
+)
 
 # The card the correction refers to is gone (a second photo replaced it, or it
 # was rendered before this feature shipped): there is no dish to key memory
