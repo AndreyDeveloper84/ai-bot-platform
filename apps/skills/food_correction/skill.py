@@ -84,7 +84,7 @@ _PROMPTS: dict[str, str] = {
 # gender-neutral on purpose — the bot does not know, and guessing reads worse
 # than the plain form.
 _KNOWN_PROMPTS: dict[str, str] = {
-    "grams": "В прошлый раз для «{dish}» было {value} г. Оставляем? Если изменилось — напиши число.",
+    "grams": "В прошлый раз для «{dish}» было {value} г. Оставляем? Если нет — напиши число.",
     "name": "В прошлый раз это было «{value}». Оставляем? Если нет — напиши, что было.",
     "macros": "В прошлый раз БЖУ были {value}. Оставляем? Если нет — напиши новые: 12/8/32.",
 }
@@ -121,7 +121,9 @@ _PENDING_TTL_SECONDS = 600
 # Answer shapes — the *matching* gate (stricter than the parser, which only has
 # to read a value once the turn is already ours).
 _SHAPE_GRAMS = re.compile(r"^\D{0,6}\d{1,4}\s*(?:г|гр|грамм\w*)?\.?$", re.IGNORECASE)
-_SHAPE_MACROS = re.compile(r"^\D{0,10}\d{1,4}\s*[/|]\s*\d{1,4}\s*[/|]\s*\d{1,4}\D{0,10}$")
+_SHAPE_MACROS = re.compile(
+    r"^\D{0,10}\d{1,4}\s*[/|]\s*\D{0,3}\d{1,4}\s*[/|]\s*\D{0,3}\d{1,4}\D{0,10}$"
+)
 _SHAPE_NAME = re.compile(r"^[^\d]{2,40}$")
 
 _SHAPES: dict[str, re.Pattern[str]] = {
@@ -131,19 +133,41 @@ _SHAPES: dict[str, re.Pattern[str]] = {
 }
 
 
-def _skill_state(context: SkillContext) -> dict[str, Any]:
-    raw = getattr(context.conversation, "skill_state", None)
+def _state_of(conversation: Any) -> dict[str, Any]:
+    raw = getattr(conversation, "skill_state", None)
     return raw if isinstance(raw, dict) else {}
 
 
+def _skill_state(context: SkillContext) -> dict[str, Any]:
+    return _state_of(context.conversation)
+
+
+def has_pending_correction(conversation: Any) -> bool:
+    """Is a fresh correction prompt still waiting for an answer on this conversation?
+
+    The global dispatcher (:mod:`apps.orchestrator.nutrition_global`) asks this to
+    decide whether a plain-text turn is structured — the same question it already
+    asks about an in-flight anketa FSM. It is deliberately **freshness-aware**
+    rather than a bare truthiness check on the sub-key: a prompt nobody ever
+    answered would otherwise keep every later plain-text turn away from the
+    concierge and the diary-request handler, forever.
+    """
+
+    return _pending_record(conversation) is not None
+
+
 def _pending(context: SkillContext) -> dict[str, Any] | None:
+    return _pending_record(context.conversation)
+
+
+def _pending_record(conversation: Any) -> dict[str, Any] | None:
     """The live «waiting for a correction value» record, or ``None``.
 
     Stale records are treated as absent rather than deleted here: matching must
     stay side-effect free, and the next write to the sub-key overwrites it.
     """
 
-    pending = _skill_state(context).get(_STATE_KEY)
+    pending = _state_of(conversation).get(_STATE_KEY)
     if not isinstance(pending, dict):
         return None
     if pending.get("field") not in food_memory.CORRECTION_FIELDS:
@@ -289,7 +313,9 @@ class FoodCorrectionSkill:
             action_data={"field": field, "scan_id": scan_id, "remembered": remembered},
             meta={
                 "reply_kind": (
-                    f"food_correction_{field}_remembered" if remembered else f"food_correction_{field}"
+                    f"food_correction_{field}_remembered"
+                    if remembered
+                    else f"food_correction_{field}"
                 )
             },
         )

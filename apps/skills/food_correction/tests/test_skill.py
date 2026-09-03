@@ -7,6 +7,7 @@ from unittest.mock import Mock
 import pytest
 
 from apps.skills.base import SkillContext
+from apps.skills.food_correction.skill import _PROMPTS as _PROMPTS_FOR_TEST
 from apps.skills.food_correction.skill import FoodCorrectionSkill
 
 
@@ -119,3 +120,98 @@ class TestRegistration:
         # Both P1 and P5 present; their callbacks are disjoint
         # (to_diary/clarify/reject vs correct:*).
         assert "food_scanner" in names
+
+
+# ─── DRF-1454: the answer turn ───────────────────────────────────────────
+
+
+def _pending_context(
+    text: str,
+    *,
+    field: str = "grams",
+    dish: str = "борщ",
+    age_seconds: int = 0,
+) -> SkillContext:
+    """A context whose conversation is waiting for a correction value."""
+
+    from datetime import datetime, timedelta, timezone as _tz
+
+    conversation = Mock(id="conv-1")
+    conversation.skill_state = {
+        "food_scan": {"scan_id": "scan-1", "dish": dish},
+        "food_correction": {
+            "field": field,
+            "scan_id": "scan-1",
+            "dish": dish,
+            "at": (datetime.now(_tz.utc) - timedelta(seconds=age_seconds)).isoformat(),
+        },
+    }
+    return SkillContext(conversation=conversation, bot_user=Mock(), message_text=text)
+
+
+class TestAnswerTurnIsClaimedNarrowly:
+    """The skill registers above anketa/food_clarify/faq — a loose match here
+    would shadow them, so every guard below is load-bearing."""
+
+    @pytest.mark.parametrize("text", ["500", "500 г", "около 250 грамм"])
+    def test_an_answer_shaped_reply_is_claimed(self, text: str) -> None:
+        assert FoodCorrectionSkill().matches(_pending_context(text))
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "а когда вы работаете в воскресенье?",
+            "хочу записаться на маникюр",
+            "",
+        ],
+    )
+    def test_an_unrelated_turn_falls_through(self, text: str) -> None:
+        assert not FoodCorrectionSkill().matches(_pending_context(text))
+
+    def test_a_stale_prompt_stops_claiming_text(self) -> None:
+        """An unanswered prompt must not swallow a turn tomorrow."""
+        assert not FoodCorrectionSkill().matches(_pending_context("500", age_seconds=3600))
+
+    def test_callbacks_still_win_over_the_answer_path(self) -> None:
+        result = FoodCorrectionSkill().handle(_pending_context("cb:food:correct:name:scan-1"))
+        assert result.action_type == "food_correction_prompt"
+
+    def test_macros_shape_is_required_for_a_macros_prompt(self) -> None:
+        skill = FoodCorrectionSkill()
+        assert skill.matches(_pending_context("12/8/32", field="macros"))
+        assert not skill.matches(_pending_context("12/8/32", field="name"))
+
+    def test_a_refusal_is_claimed_even_without_the_answer_shape(self) -> None:
+        assert FoodCorrectionSkill().matches(
+            _pending_context("у меня непереносимость лактозы", field="grams")
+        )
+
+    def test_has_pending_correction_is_the_dispatcher_predicate(self) -> None:
+        from apps.skills.food_correction.skill import has_pending_correction
+
+        fresh = _pending_context("500").conversation
+        stale = _pending_context("500", age_seconds=3600).conversation
+        assert has_pending_correction(fresh) is True
+        assert has_pending_correction(stale) is False
+        assert has_pending_correction(Mock(id="no-state")) is False
+
+
+class TestAnswerHandling:
+    def test_unreadable_value_re_asks_instead_of_guessing(self) -> None:
+        """A guessed correction is worse than none — it makes the NEXT card
+        wrong in the person's name."""
+        result = FoodCorrectionSkill().handle(_pending_context("99999"))
+        assert result.reply_text == _PROMPTS_FOR_TEST["grams"]
+
+    def test_refusal_is_acknowledged_without_claiming_to_remember(self) -> None:
+        result = FoodCorrectionSkill().handle(
+            _pending_context("у меня аллергия на орехи", field="name")
+        )
+        assert result.meta["reply_kind"] == "food_correction_refusal_not_stored"
+        assert "не буду" in result.reply_text.lower()
+
+    def test_a_failed_write_never_promises_memory(self) -> None:
+        """No consent / no link / DB down: a soft ack, never «запомнила»."""
+        result = FoodCorrectionSkill().handle(_pending_context("500"))
+        assert result.action_data["stored"] is False
+        assert "апомнила" not in result.reply_text

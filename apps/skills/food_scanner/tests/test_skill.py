@@ -435,3 +435,46 @@ class TestRegistration:
         # food_clarify present too — the two own DIFFERENT callbacks
         # (scan_id-bearing vs bare), so order between them is moot.
         assert "food_clarify" in names
+
+
+# ─── DRF-1454: memory on the card ────────────────────────────────────────
+
+
+class TestMemoryOnTheCard:
+    def test_card_is_byte_identical_without_memory(self) -> None:
+        """The pre-memory output must not move for a person with nothing stored."""
+        from apps.skills.food_scanner.skill import _format_scan_card
+
+        assert _format_scan_card(_scan_response()) == (
+            "Узнала: Борщ.\nПримерно 300 г.\n250 ккал · Б 12 · Ж 8 · У 32\nЗаписать в дневник?"
+        )
+
+    def test_one_line_is_added_when_something_was_clarified(self) -> None:
+        from apps.orchestrator.memory.food import FoodRecall
+        from apps.skills.food_scanner.skill import _format_scan_card
+
+        card = _format_scan_card(
+            _scan_response(), FoodRecall(portion_g=500, dish_name="плов", macros="12/8/32")
+        )
+
+        assert "Помню с прошлого раза: 500 г, «плов», БЖУ 12/8/32." in card
+        # Ayla's own numbers are printed unchanged — a remembered portion is
+        # never silently swapped into macros computed for another one.
+        assert "Примерно 300 г." in card
+        assert card.endswith("Записать в дневник?")
+        assert len(card.splitlines()) == 5
+
+    def test_reject_records_a_recogniser_signal_not_a_dietary_fact(self) -> None:
+        """«Не то» must never become «он это не ест» (DRF-1260 fabrication ban)."""
+        from apps.orchestrator.memory import food as food_memory
+
+        seen: list[str] = []
+        with patch.object(
+            food_memory,
+            "note_recognition_rejected",
+            side_effect=lambda bot_user, *, scan_id: seen.append(scan_id),
+        ):
+            result = FoodScannerSkill().handle(_context("cb:food:reject:scan-1"))
+
+        assert result.reply_text == REJECTED_ACK
+        assert seen == ["scan-1"]

@@ -192,7 +192,9 @@ def classify_refusal(text: str) -> str:
 # ─── value parsing ─────────────────────────────────────────────────────────
 
 _GRAMS_RE = re.compile(r"\d+")
-_MACROS_RE = re.compile(r"(\d{1,4})\s*[/|]\s*(\d{1,4})\s*[/|]\s*(\d{1,4})")
+# «12/8/32» and the labelled «Б12 / Ж8 / У32» people actually type. The short
+# non-digit run after each separator is the label; anything longer is prose.
+_MACROS_RE = re.compile(r"(\d{1,4})\s*[/|]\s*\D{0,3}(\d{1,4})\s*[/|]\s*\D{0,3}(\d{1,4})")
 
 
 def parse_correction_value(field: str, text: str) -> Any | None:

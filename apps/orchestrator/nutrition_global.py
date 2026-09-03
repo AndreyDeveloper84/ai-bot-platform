@@ -464,6 +464,28 @@ def _anketa_fsm_active(conversation: Any) -> bool:
     return bool(isinstance(state, dict) and state.get("nutrition_anketa"))
 
 
+def _food_correction_pending(conversation: Any) -> bool:
+    """Is a fresh «✏️ Уточнить» prompt still waiting for its answer? (DRF-1454)
+
+    Same shape as :func:`_anketa_fsm_active` and for the same reason: a question
+    the bot asked on the previous turn owns the answer that follows it. Without
+    this the correction the person types falls through to the concierge and is
+    forgotten — which was the whole reason the scanner kept re-asking.
+
+    Delegated to the skill so freshness is decided in one place: the skill
+    expires an unanswered prompt, and a stale record must not keep plain text
+    away from the concierge and the diary-request handler for good.
+    """
+
+    try:
+        from apps.skills.food_correction.skill import has_pending_correction
+
+        return has_pending_correction(conversation)
+    except Exception:  # noqa: BLE001 — a predicate must never break the turn
+        logger.exception("orchestrator.nutrition_global.correction_pending_check_failed")
+        return False
+
+
 def is_structured_nutrition_turn(
     *,
     text: str,
@@ -473,7 +495,8 @@ def is_structured_nutrition_turn(
     """Cheap predicate: is this turn owned by a nutrition skill deterministically?
 
     Free text is NEVER structured — it belongs to the concierge model
-    with the nutrition tools above.
+    with the nutrition tools above — with one exception per open question the
+    bot itself asked: an in-flight anketa step, or a pending food correction.
     """
 
     stripped = text.strip()
@@ -481,7 +504,7 @@ def is_structured_nutrition_turn(
         return True  # photo-only turn → food scanner
     if stripped == "/anketa" or stripped.startswith(_STRUCTURED_CALLBACK_PREFIXES):
         return True
-    return _anketa_fsm_active(conversation)
+    return _anketa_fsm_active(conversation) or _food_correction_pending(conversation)
 
 
 def try_handle_structured_nutrition_turn(
