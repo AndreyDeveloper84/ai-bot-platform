@@ -186,6 +186,20 @@ export function CustomerProfileScreen() {
           }`.trim()
         : "Не разрешено";
 
+  // Подпись кнопки обязана совпадать с тем, что нажатие делает. Когда
+  // состояние прочитать не удалось, кнопка повторяет чтение — обещать
+  // «Разрешить» в этот момент значило бы врать о результате нажатия.
+  const healthActionLabel = healthFailed
+    ? "Повторить"
+    : healthConsent?.granted
+      ? "Отозвать"
+      : "Разрешить";
+  const healthActionAriaLabel = healthFailed
+    ? "Повторить загрузку разрешения на данные о питании"
+    : healthConsent?.granted
+      ? "Отозвать разрешение учитывать питание"
+      : "Разрешить учитывать питание";
+
   const onHealthSettled = useCallback((next: HealthConsentState) => {
     setHealthConsent(next);
     setToast({
@@ -407,12 +421,8 @@ export function CustomerProfileScreen() {
                   variant="action"
                   title="Питание и здоровье"
                   statusText={healthStatusText}
-                  actionLabel={healthConsent?.granted ? "Отозвать" : "Разрешить"}
-                  actionAriaLabel={
-                    healthConsent?.granted
-                      ? "Отозвать разрешение учитывать питание"
-                      : "Разрешить учитывать питание"
-                  }
+                  actionLabel={healthActionLabel}
+                  actionAriaLabel={healthActionAriaLabel}
                   busy={healthConsent === null && !healthFailed}
                   triggerRef={healthTriggerRef}
                   onAction={
