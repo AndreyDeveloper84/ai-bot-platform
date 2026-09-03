@@ -213,7 +213,18 @@ def record_global_consent(
         # back BOTH, never leaving consent_at set with no proof-of-consent row.
         # Idempotent — only stamp when currently unset (never overwrite an earlier
         # consent timestamp; also reconciles a legacy row whose consent_at is None).
-        if getattr(bot_user, "consent_at", None) is None:
+        #
+        # DRF-1453 сузил условие до personal_data. BotUser.consent_at —
+        # отметка именно 152-ФЗ базы (её читает consent_blocker, то есть
+        # право писать человеку первым), а не «какое-нибудь согласие когда-нибудь».
+        # До сужения любой другой тип, записанный этой функцией первым, проставлял
+        # бы её: выдача согласия на медданные открывала бы проактивные сообщения
+        # тому, кто базового согласия не давал. Поведение онбординга не меняется —
+        # он записывает personal_data первым в своём цикле.
+        if (
+            consent_type == ConsentRecord.ConsentType.PERSONAL_DATA.value
+            and getattr(bot_user, "consent_at", None) is None
+        ):
             bot_user.consent_at = record.captured_at
             bot_user.save(update_fields=["consent_at"])
 

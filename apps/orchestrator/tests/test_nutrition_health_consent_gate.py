@@ -164,6 +164,26 @@ class TestSeparateFromPersonalData:
         assert health_consent.is_granted(miniapp_user) is False
         assert build_nutrition_context_block(miniapp_user) == ""
 
+    def test_health_grant_does_not_stamp_the_152_baseline(self, db) -> None:
+        """Выдача HEALTH не открывает право писать первым.
+
+        BotUser.consent_at — отметка 152-ФЗ базы, её читает страж
+        проактивных сообщений. Если бы её проставляла любая запись согласия,
+        разрешение на питание молча открывало бы проактив тому, кто базового
+        согласия не давал.
+        """
+        tenant = Tenant.objects.create(slug="hc-nobase", name="Без базы")
+        no_base = BotUser.all_tenants.create(
+            tenant=tenant, channel="max", channel_user_id="1453900"
+        )
+        assert no_base.consent_at is None
+
+        health_consent.grant(no_base, document_version=_grant_version())
+
+        no_base.refresh_from_db()
+        assert health_consent.is_granted(no_base) is True  # согласие записано
+        assert no_base.consent_at is None  # а база — нет
+
     def test_unknown_disclosure_version_is_refused(self, miniapp_user) -> None:
         """Согласие записывается на показанный текст, а не на абстрактное «да»."""
         with pytest.raises(health_consent.UnknownDisclosureVersionError):
