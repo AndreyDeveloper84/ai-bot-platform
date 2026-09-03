@@ -28,6 +28,13 @@
  * монтируется прямо здесь, а `GoalSelectScreen` сама прячет «назад» на
  * корне — канон `useBackButton`: показывать везде, кроме корня.
  *
+ * # Один круг к серверу, не два
+ *
+ * Документ, по которому принято решение, уезжает в `GoalSelectScreen`
+ * пропом `initialDoc`. Иначе поверхность запросила бы тот же
+ * decision-context второй раз — на первом экране, в самом дорогом
+ * месте. Решений это не добавляет: документ тот же.
+ *
  * # Сбой не запирает человека
  *
  * `decision-context` не ответил — рисуем прежний `HelloScreen` целиком,
@@ -39,14 +46,14 @@ import { useEffect, useState } from "react";
 import { Navigate } from "react-router-dom";
 import { DelayedSkeleton, ServiceCardSkeleton } from "../components/Skeleton";
 import { ScreenLayout } from "../components/ScreenLayout";
-import { fetchDecisionContext } from "../lib/customer-goals";
+import { fetchDecisionContext, type DecisionContext } from "../lib/customer-goals";
 import { signalReady } from "../lib/max-sdk";
 import { GoalSelectScreen } from "./GoalSelectScreen";
 import { HelloScreen } from "./HelloScreen";
 
 type State =
   | { kind: "loading" }
-  | { kind: "ask" }
+  | { kind: "ask"; doc: DecisionContext }
   | { kind: "home" }
   | { kind: "fallback" };
 
@@ -61,7 +68,7 @@ export function CustomerEntryScreen() {
     fetchDecisionContext()
       .then((doc) => {
         if (cancelled) return;
-        setState({ kind: doc.missing.length > 0 ? "ask" : "home" });
+        setState(doc.missing.length > 0 ? { kind: "ask", doc } : { kind: "home" });
       })
       .catch(() => {
         if (!cancelled) setState({ kind: "fallback" });
@@ -82,7 +89,9 @@ export function CustomerEntryScreen() {
     );
   }
 
-  if (state.kind === "ask") return <GoalSelectScreen />;
+  // Документ отдаём готовым: поверхность не должна ходить за ним второй
+  // раз на первом же экране.
+  if (state.kind === "ask") return <GoalSelectScreen initialDoc={state.doc} />;
   if (state.kind === "home") return <Navigate to="/customer/main" replace />;
   return <HelloScreen />;
 }

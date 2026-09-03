@@ -87,10 +87,27 @@ function currentAnketaStep(doc: DecisionContext): MissingItem | null {
   return doc.missing.find((item) => typeof item.step === "string") ?? null;
 }
 
-export function GoalSelectScreen() {
+interface Props {
+  /**
+   * Документ, уже полученный вызывающим (DRF-1451).
+   *
+   * `CustomerEntryScreen` читает decision-context, чтобы понять, есть
+   * ли что спрашивать, и монтирует эту поверхность прямо на корне.
+   * Без этого пропа она сходила бы за тем же документом второй раз —
+   * два круга к серверу на первом же экране, на самом дорогом месте.
+   *
+   * Решений это не добавляет: документ тот же, просто не запрошенный
+   * дважды. Любой POST по-прежнему заменяет состояние ответом сервера.
+   */
+  initialDoc?: DecisionContext;
+}
+
+export function GoalSelectScreen({ initialDoc }: Props = {}) {
   const navigate = useNavigate();
   const { pathname } = useLocation();
-  const [state, setState] = useState<State>({ kind: "loading" });
+  const [state, setState] = useState<State>(
+    initialDoc ? { kind: "ok", doc: initialDoc } : { kind: "loading" },
+  );
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [goalText, setGoalText] = useState("");
@@ -110,7 +127,14 @@ export function GoalSelectScreen() {
     };
   }, []);
 
-  useEffect(() => load(), [load]);
+  // Документ пришёл готовым — второй круг к серверу не нужен. Повторная
+  // загрузка остаётся доступной: `load` вызывается кнопкой «повторить»
+  // на ошибке, а любой POST и так заменяет состояние.
+  const hasInitial = initialDoc !== undefined;
+  useEffect(() => {
+    if (hasInitial) return;
+    return load();
+  }, [load, hasInitial]);
 
   // «Назад» ведёт туда, откуда пришли (домашний экран или стартовая
   // сетка бота), а не закрывает мини-апп.
