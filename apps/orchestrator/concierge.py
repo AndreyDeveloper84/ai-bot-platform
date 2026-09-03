@@ -343,13 +343,13 @@ class _RouterCompletions:
     def _model_for(self, model: str) -> str:
         """What to actually ask the provider for.
 
-        ``AIConcierge`` always passes a ``model_name``, and unless a
-        consumer configures one that is
-        ``ayla_ai_core.orchestrator.DEFAULT_MODEL_NAME`` — an OpenAI id
-        baked into a library that has no idea which vendor this platform
-        routed to. This repo never set it, so it carries no decision:
-        substituting our own tier is not overriding a caller, it is
-        supplying the choice nobody made.
+        ``AIConcierge`` always passes a ``model_name``. When the consumer
+        did not configure one — and this repo never has — that value is
+        ``ayla_ai_core.orchestrator.DEFAULT_MODEL_NAME``: an OpenAI id
+        baked into a library with no idea which vendor this platform
+        routed to. It carries no decision, so substituting our own tier
+        is not overriding a caller; it is supplying the choice nobody
+        made.
 
         That id reaching the vendor unexamined is the DRF-1443 outage:
         with ``LLM_PROVIDER=anthropic`` every concierge turn posted

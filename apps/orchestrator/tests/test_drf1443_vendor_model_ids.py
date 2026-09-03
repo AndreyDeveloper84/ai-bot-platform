@@ -44,6 +44,7 @@ the model id the vendor SDK was about to be handed.
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Iterator
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
@@ -113,7 +114,7 @@ def _openai_response() -> MagicMock:
 
 
 @pytest.fixture
-def recorder(monkeypatch, settings) -> ModelRecorder:
+def recorder(monkeypatch, settings) -> Iterator[ModelRecorder]:
     """Both vendors reachable, both stubbed one layer above the socket."""
     rec = ModelRecorder()
 
@@ -300,9 +301,7 @@ class TestIntentResolverModel:
             llm_client=RouterLLMClient(skill=CONCIERGE_SKILL),
         )
 
-    def test_default_resolves_to_the_called_vendors_cheap_model(
-        self, recorder, settings
-    ) -> None:
+    def test_default_resolves_to_the_called_vendors_cheap_model(self, recorder, settings) -> None:
         settings.LLM_PROVIDER = "anthropic"
         settings.INTENT_RESOLUTION_MODEL = "fast"
         reset_router_cache()

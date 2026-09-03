@@ -378,6 +378,8 @@ class StubProvider:
     def __init__(self, name: str, *, raises: Exception | None = None) -> None:
         self.name = name
         self.default_completion_model = f"{name}-model"
+        # DRF-1443 — the fast tier joined the Protocol beside it.
+        self.default_fast_model = f"{name}-fast-model"
         self._raises = raises
         self.calls = 0
         self.last_kwargs: dict[str, Any] = {}

@@ -59,6 +59,9 @@ class _CountingProvider:
     # default completion model — the router's quota fallback has to
     # name a model the TARGET vendor understands when it hops.
     default_completion_model = "fake-model"
+    # DRF-1443 widened the Protocol with the fast tier — see
+    # ``apps.llm.protocol.LLMProvider.default_fast_model``.
+    default_fast_model = "fake-model-fast"
 
     def __init__(self) -> None:
         self.calls = 0
