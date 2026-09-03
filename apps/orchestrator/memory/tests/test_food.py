@@ -157,7 +157,9 @@ class TestClarificationIsRemembered:
         assert _green_rows(resolver["uuid"]) == 2
         superseded = MemoryEntry.objects.filter(status=MemoryEntry.STATUS_SUPERSEDED)
         assert superseded.count() == 1
-        assert superseded.first().supersession_reason == MemoryEntry.SUPERSESSION_CORRECTED
+        superseded_row = superseded.first()
+        assert superseded_row is not None
+        assert superseded_row.supersession_reason == MemoryEntry.SUPERSESSION_CORRECTED
         assert food_memory.recall_corrections(bot_user, dish="борщ").portion_g == 250
 
 
@@ -181,6 +183,7 @@ class TestProvenance:
 
             user_id = ensure_ayla_link(bot_user, trigger="test")
             bot_user.refresh_from_db()
+        assert user_id is not None
 
         write_entry(
             user_id=user_id,
@@ -199,15 +202,18 @@ class TestProvenance:
 
     def test_the_stated_dictionary_is_the_shared_one(self) -> None:
         """The rule is «only explicit is a quote», sourced from ayla-ai-core."""
+        from typing import cast
+
         try:
             from ayla_ai_core import STATED_SOURCES
         except ImportError:
             pytest.skip("pinned ayla-ai-core predates STATED_SOURCES (see food.py)")
 
-        assert MemoryEntry.SOURCE_EXPLICIT in STATED_SOURCES
-        assert MemoryEntry.SOURCE_INFERRED not in STATED_SOURCES
-        assert MemoryEntry.SOURCE_SIGNAL not in STATED_SOURCES
-        assert CORE_SOURCE_INFERRED not in STATED_SOURCES
+        stated = cast(frozenset[str], STATED_SOURCES)
+        assert MemoryEntry.SOURCE_EXPLICIT in stated
+        assert MemoryEntry.SOURCE_INFERRED not in stated
+        assert MemoryEntry.SOURCE_SIGNAL not in stated
+        assert CORE_SOURCE_INFERRED not in stated
 
 
 # ─── зоны 🟡 / 🔴: перимeтр ───────────────────────────────────────────────

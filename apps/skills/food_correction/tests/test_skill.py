@@ -230,6 +230,7 @@ class TestAnswerHandling:
             return_value=food_memory.Outcome.NO_CONSENT,
         ):
             result = FoodCorrectionSkill().handle(_pending_context("500"))
+        assert result.action_data is not None
         assert result.action_data["stored"] is False
         assert "апомнила" not in result.reply_text
 
