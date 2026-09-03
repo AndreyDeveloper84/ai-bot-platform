@@ -116,13 +116,23 @@ export function GoalInviteCard() {
           {item.prompt}
         </p>
       ))}
+      {/* Вопросов нет — карточка не должна оставаться голой кнопкой.
+          Сервер предлагает `start_anketa` каждому, кто уже с целью, так
+          что без этой строки пустая карточка стала бы постоянной
+          мебелью на домашнем экране любого вернувшегося клиента. */}
+      {doc.missing.length === 0 && restart && (
+        <p className="goal-invite__prompt">{restart.label}</p>
+      )}
       <div className="goal-invite__actions">
         <button
           type="button"
           className="btn-secondary"
           onClick={() => navigate("/customer/goal-select")}
         >
-          {restart ? restart.label : "Выбрать цель"}
+          {/* Подпись называет место назначения, а не действие: кнопка
+              только ведёт на поверхность цели, сам проход начинается
+              там. Обещать «начнём заново» и просто перейти — солгать. */}
+          {restart ? "Открыть анкету" : "Выбрать цель"}
         </button>
       </div>
     </section>

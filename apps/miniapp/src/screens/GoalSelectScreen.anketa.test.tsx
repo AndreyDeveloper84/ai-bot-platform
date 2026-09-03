@@ -62,7 +62,9 @@ const STEP_ONE: DecisionContext = {
   ],
   suggestions: [{ key: "relax", label: "Расслабиться" }],
   intents: INTENTS,
-  next: null,
+  // Сервер шлёт `next` ВСЕГДА, в том числе на неотвеченном вопросе:
+  // выход с поверхности обязан существовать, иначе анкета — ворота.
+  next: { id: "browse_catalog", label: "Найти услугу" },
 };
 
 /** Второй шаг — ДРУГИЕ вопрос, варианты и номер. Тот же экран. */
@@ -217,10 +219,30 @@ describe("шаг анкеты рисуется тем, что прислал с�
   });
 
   it("`next` пуст — кнопки нет", async () => {
-    mockedFetch.mockResolvedValue(STEP_ONE);
+    // Контракт остаётся: рисуем то, что прислали. Сервер сегодня всегда
+    // шлёт `next`, но экран не должен подставлять кнопку сам.
+    mockedFetch.mockResolvedValue({ ...STEP_ONE, next: null });
     renderScreen();
     await screen.findByText("Что сейчас хочется привести в порядок?");
     expect(screen.queryByRole("button", { name: "Найти услугу" })).toBeNull();
+  });
+
+  it("отказ сервера перечитывает документ, а не замораживает протухший", async () => {
+    // На 409 «шаг не тот» прежний экран оставлял старый документ и
+    // предлагал нажать ту же кнопку снова — то есть воспроизвести ту же
+    // ошибку бесконечно. Теперь документ перечитывается, и следующее
+    // нажатие попадает в актуальный шаг.
+    mockedFetch.mockResolvedValueOnce(STEP_ONE).mockResolvedValueOnce(STEP_TWO);
+    mockedPost.mockRejectedValue(new Error("409"));
+    renderScreen();
+
+    await userEvent.click(await screen.findByRole("button", { name: "Лицо и кожа" }));
+
+    expect(await screen.findByText(/Не получилось отправить/)).toBeInTheDocument();
+    expect(
+      await screen.findByText("Как хочешь себя чувствовать после?"),
+    ).toBeInTheDocument();
+    expect(mockedFetch).toHaveBeenCalledTimes(2);
   });
 });
 
@@ -270,6 +292,19 @@ describe("анкета — НЕ ворота (условие C-2)", () => {
     });
 
     await userEvent.click(await screen.findByRole("button", { name: "Найти услугу" }));
+    expect(screen.getByText("ЭКРАН ПОДБОРА")).toBeInTheDocument();
+    expect(answersSent()).toEqual([]);
+  });
+
+  it("выход с поверхности есть даже на неотвеченном вопросе", async () => {
+    // Поверхность цели монтируется на корне: кнопки «назад» там нет,
+    // нижней навигации у клиента нет. Без `next` уйти было бы нельзя
+    // иначе, чем создав цель, — то есть анкета была бы воротами.
+    mockedFetch.mockResolvedValue(STEP_ONE);
+    renderScreen();
+
+    await screen.findByText("Что сейчас хочется привести в порядок?");
+    await userEvent.click(screen.getByRole("button", { name: "Найти услугу" }));
     expect(screen.getByText("ЭКРАН ПОДБОРА")).toBeInTheDocument();
     expect(answersSent()).toEqual([]);
   });

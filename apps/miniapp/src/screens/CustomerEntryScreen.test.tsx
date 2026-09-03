@@ -45,6 +45,7 @@ import { authVerify } from "../lib/api";
 import { fetchDecisionContext, type DecisionContext } from "../lib/customer-goals";
 import { setBackButton, signalReady } from "../lib/max-sdk";
 import { CustomerEntryScreen } from "./CustomerEntryScreen";
+import { CustomerRoutes } from "../App";
 
 const mockedFetch = vi.mocked(fetchDecisionContext);
 const mockedAuth = vi.mocked(authVerify);
@@ -185,5 +186,43 @@ describe("первый вход клиента", () => {
     );
     await screen.findByText("Что сейчас хочется привести в порядок?");
     expect(mockedSetBackButton).toHaveBeenCalledWith(true);
+  });
+});
+
+describe("кто получает анкету на корне, а кто нет", () => {
+  function renderRoutes(props: { goalEntry?: boolean }) {
+    render(
+      <MemoryRouter initialEntries={["/"]}>
+        <CustomerRoutes {...props} />
+      </MemoryRouter>,
+    );
+  }
+
+  it("обычный клиент — получает", async () => {
+    mockedFetch.mockResolvedValue(ASKING);
+    renderRoutes({});
+    expect(
+      await screen.findByText("Что сейчас хочется привести в порядок?"),
+    ).toBeInTheDocument();
+  });
+
+  it("админ-мастер на клиентской поверхности — НЕ получает", async () => {
+    // `goalEntry={false}` — ровно то, что App.tsx передаёт на ветке
+    // `multiRole && surfacePref === "customer"`.
+    //
+    // Он не человек, впервые встречающий Ayla, а владелец салона,
+    // зашедший посмотреть. Своего `ClientGoal` у него нет, так что
+    // анкету он получал бы первым же экраном; а `SurfaceSwitchButton`
+    // смонтирована только на профиле и настройках, до которых с корня
+    // без нижней навигации он уже не дойдёт. `useLastSurface` держит
+    // выбор в localStorage — повторялось бы при каждом запуске.
+    //
+    // Тот же класс дефекта, что DRF-1349 и DRF-1434: роль есть, экран
+    // показан не тот, и ошибки нигде не видно.
+    mockedFetch.mockResolvedValue(ASKING);
+    renderRoutes({ goalEntry: false });
+
+    expect(await screen.findByText(/Здравствуйте/)).toBeInTheDocument();
+    expect(screen.queryByText("Что сейчас хочется привести в порядок?")).toBeNull();
   });
 });
