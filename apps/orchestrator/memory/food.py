@@ -360,8 +360,10 @@ def _display(field: str, dish_slug: str, value: Any) -> str:
     Invisible is not an option here. The silent-remember ruling (2026-08-23)
     that allows the bot to store a fact without asking rests on the show/forget
     loop: a row the person cannot see is a row we had no right to write. One
-    phrase, written once, so the list and the prompt say the same sentence —
-    two renderers would be two answers about the same person.
+    phrase, written once. The concierge PROMPT is not a reader of these rows —
+    they are excluded there (:data:`apps.persona.memory_surface.
+    _PROMPT_EXCLUDED_KEY_PREFIXES`); the readers are the person's own memory
+    list and the scanner card.
     """
 
     if field == FIELD_GRAMS:

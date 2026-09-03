@@ -140,3 +140,64 @@ class TestProvenanceInTheSurfacedParagraph:
             "придумывай ничего сверх этого): любит тишину; придерживается веганского "
             "питания."
         )
+
+
+class TestFoodScannerRowsStayOutOfTheConciergePrompt:
+    """Ревью DRF-1454, оси architecture + persistence (найдено независимо
+    двумя осями): запомненные правки еды попадали в системный промпт консьержа
+    на каждом ходе любого разговора — до 20 блюд × 3 поля = 60 фраз вида
+    «порция „борщ“ — 500 г», включая разговоры, где еды нет вовсе. Их читает
+    карточка сканера через recall_corrections; в списке «покажи, что помнишь»
+    они остаются — эта поверхность модели, та — человека."""
+
+    def test_food_rows_are_not_surfaced_in_the_prompt(self):
+        view = PersonalContextView(
+            green_facts=[
+                GreenFact(
+                    kind="preference",
+                    content={
+                        "key": "food_portion:борщ",
+                        "value": 500,
+                        "display": "порция «борщ» — 500 г",
+                    },
+                    source="explicit",
+                ),
+                GreenFact(
+                    kind="lifestyle",
+                    content={"key": "diet", "value": "vegan"},
+                    source="explicit",
+                ),
+            ]
+        )
+        out = render_personal_context(view)
+        assert out is not None
+        assert "веганского питания" in out  # соседние домены не тронуты
+        assert "борщ" not in out
+
+    def test_a_view_with_only_food_rows_renders_nothing(self):
+        view = PersonalContextView(
+            green_facts=[
+                GreenFact(
+                    kind="preference",
+                    content={
+                        "key": "food_dish_name:борщ",
+                        "value": "Свекольник",
+                        "display": "блюдо «борщ» называет «Свекольник»",
+                    },
+                    source="explicit",
+                ),
+            ]
+        )
+        assert render_personal_context(view) is None
+
+    def test_food_rows_still_render_in_the_show_list(self):
+        """«Покажи, что помнишь» — поверхность человека: там строки видимы,
+        иначе это запись, которую мы не имели права писать."""
+        from apps.persona.memory_surface import describe_green_content
+
+        assert (
+            describe_green_content(
+                {"key": "food_portion:борщ", "value": 500, "display": "порция «борщ» — 500 г"}
+            )
+            == "порция «борщ» — 500 г"
+        )

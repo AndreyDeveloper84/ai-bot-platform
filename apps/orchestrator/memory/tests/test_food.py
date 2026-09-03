@@ -694,6 +694,29 @@ class TestRollbackSwitch:
         assert food_memory.recall_corrections(bot_user, dish="борщ").is_empty()
 
 
+class TestTheConciergePromptIsNotAFoodSurface:
+    """Ревью DRF-1454, две оси независимо + дыра в откате: накопленные строки
+    продолжали рендериться в системный промпт консьержа и после выключения
+    флага — «False restores the pre-DRF-1454 behaviour exactly» было неверно
+    для накопленных данных."""
+
+    def test_accumulated_rows_never_reach_the_prompt_even_with_the_flag_off(
+        self, settings, resolver
+    ) -> None:
+        from apps.persona.memory_surface import render_current_personal_context
+
+        bot_user = _consented_user("drf1454-prompt", settings)
+        food_memory.remember_correction(
+            bot_user, dish="Борщ", field=food_memory.FIELD_GRAMS, value=500
+        )
+        bot_user.refresh_from_db()
+
+        settings.FOOD_SCANNER_MEMORY_ENABLED = False
+
+        block = render_current_personal_context(resolver["uuid"])
+        assert block is None or "борщ" not in block.lower()
+
+
 class TestProvenanceDictionaryDoesNotDrift:
     def test_the_stated_dictionary_matches_the_library(self) -> None:
         """The fallback exists only until the ayla-ai-core pin carries the name.

@@ -177,6 +177,25 @@ def describe_green_content(content: dict) -> str | None:
     return None
 
 
+# Scanner-correction keys (DRF-1454) are read where they belong — the scanner
+# card, through ``apps.orchestrator.memory.food.recall_corrections``. They
+# must not ALSO ride every concierge prompt: 20 dishes × 3 fields = up to 60
+# phrases like «порция «борщ» — 500 г» in every conversation, including ones
+# with no food in them (review DRF-1454 — found independently by two axes).
+# The exclusion also closes the rollback hole: accumulated rows kept rendering
+# after FOOD_SCANNER_MEMORY_ENABLED was flipped off. They stay visible in
+# «покажи, что помнишь» — that surface is the person's; this one is the model's.
+_PROMPT_EXCLUDED_KEY_PREFIXES = ("food_portion:", "food_dish_name:", "food_macros:")
+
+
+def _prompt_visible(fact: GreenFact) -> bool:
+    """May this fact ride the concierge system prompt?"""
+
+    content = fact.content if isinstance(fact.content, dict) else {}
+    key = content.get("key")
+    return not (isinstance(key, str) and key.startswith(_PROMPT_EXCLUDED_KEY_PREFIXES))
+
+
 def _render_fact(fact: GreenFact) -> str | None:
     """Render one green fact to a phrase, or None if it can't be phrased."""
 
@@ -197,6 +216,8 @@ def render_personal_context(view: PersonalContextView) -> str | None:
         # сюда «неизвестно» без источника было бы догадкой о догадке.
         parts.append(view.summary.strip())
     for fact in view.green_facts:
+        if not _prompt_visible(fact):
+            continue
         phrase = _render_fact(fact)
         if not phrase:
             continue
