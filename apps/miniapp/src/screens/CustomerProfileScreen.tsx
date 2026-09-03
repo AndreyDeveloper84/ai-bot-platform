@@ -43,6 +43,7 @@ import { ConsentRow } from "../components/ConsentRow";
 import { DisclosureSheet } from "../components/DisclosureSheet";
 import { NotificationCard } from "../components/NotificationCard";
 import {
+  HealthConsentSheet,
   PersonalDataDeleteSheet,
   PersonalDataExportSheet,
 } from "../components/PersonalDataSheets";
@@ -63,6 +64,10 @@ import {
   type MeProfileResponse,
   type ProactivePrefsResponse,
 } from "../lib/customer-profile";
+import {
+  fetchHealthConsent,
+  type HealthConsentState,
+} from "../lib/health-consent";
 import { STUB_SURFACES_ENABLED } from "../lib/feature-flags";
 import { SurfaceSwitchButton } from "../components/SurfaceSwitch";
 
@@ -115,6 +120,16 @@ export function CustomerProfileScreen() {
   const [deleteOpen, setDeleteOpen] = useState(false);
   const exportTriggerRef = useRef<HTMLButtonElement | null>(null);
   const deleteTriggerRef = useRef<HTMLButtonElement | null>(null);
+  // Согласие на медданные (DRF-1453) — РЕАЛЬНЫЙ эндпоинт, поэтому оно вне
+  // `STUB_SURFACES_ENABLED` и вне общего `Status`: заглушечные секции в проде
+  // не грузятся вовсе, а эта строка обязана быть видна именно в проде. Пока
+  // состояние неизвестно (`null`) строка показывает «загружаю» и не кликается
+  // — «Не разрешено» до ответа сервера было бы утверждением, которого мы не
+  // проверяли.
+  const [healthConsent, setHealthConsent] = useState<HealthConsentState | null>(null);
+  const [healthFailed, setHealthFailed] = useState(false);
+  const [healthSheetOpen, setHealthSheetOpen] = useState(false);
+  const healthTriggerRef = useRef<HTMLButtonElement | null>(null);
 
   const load = useCallback(async () => {
     if (!STUB_SURFACES_ENABLED) {
@@ -140,6 +155,46 @@ export function CustomerProfileScreen() {
   useEffect(() => {
     load();
   }, [load]);
+
+  const loadHealthConsent = useCallback(async () => {
+    setHealthFailed(false);
+    try {
+      setHealthConsent(await fetchHealthConsent());
+    } catch {
+      // Читать не смогли — строка честно говорит об этом и предлагает
+      // повторить. Показать «Не разрешено» было бы удобнее и неверно.
+      setHealthConsent(null);
+      setHealthFailed(true);
+    }
+  }, []);
+
+  useEffect(() => {
+    loadHealthConsent();
+  }, [loadHealthConsent]);
+
+  // Состояние словами. Три исхода, и ни один не притворяется другим:
+  // неизвестно / не смогли прочитать / известное да-нет с датой выдачи.
+  const healthStatusText = healthFailed
+    ? "Не удалось загрузить"
+    : healthConsent === null
+      ? "Загружаю"
+      : healthConsent.granted
+        ? `Разрешено ${
+            healthConsent.granted_at
+              ? formatConsentDate(healthConsent.granted_at)
+              : ""
+          }`.trim()
+        : "Не разрешено";
+
+  const onHealthSettled = useCallback((next: HealthConsentState) => {
+    setHealthConsent(next);
+    setToast({
+      visible: true,
+      message: next.granted
+        ? "Хорошо, буду учитывать питание. Отозвать можно в профиле."
+        : "Разрешение отозвано. Питание в разговоре не участвует.",
+    });
+  }, []);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -285,9 +340,10 @@ export function CustomerProfileScreen() {
               <h2 id="profile-r2-h2" className="profile-section__heading">
                 Согласия и приватность
               </h2>
+              <dl className="profile-consent-list">
               {/* Consent rows — stub-backed, DEV builds only. */}
               {status.consents && (
-              <dl className="profile-consent-list">
+              <>
                 <ConsentRow
                   variant="info"
                   title="Данные для записи"
@@ -341,8 +397,39 @@ export function CustomerProfileScreen() {
                     </>
                   }
                 />
-              </dl>
+              </>
               )}
+                {/* Медданные — реальный эндпоинт, видно во всех сборках.
+                    Вариант "action", а не тумблер: особая категория по
+                    152-ФЗ ст. 10 не переключается одним касанием мимо
+                    текста согласия (см. HealthConsentSheet). */}
+                <ConsentRow
+                  variant="action"
+                  title="Питание и здоровье"
+                  statusText={healthStatusText}
+                  actionLabel={healthConsent?.granted ? "Отозвать" : "Разрешить"}
+                  actionAriaLabel={
+                    healthConsent?.granted
+                      ? "Отозвать разрешение учитывать питание"
+                      : "Разрешить учитывать питание"
+                  }
+                  busy={healthConsent === null && !healthFailed}
+                  triggerRef={healthTriggerRef}
+                  onAction={
+                    healthFailed
+                      ? loadHealthConsent
+                      : () => setHealthSheetOpen(true)
+                  }
+                  description={
+                    <>
+                      Отдельное разрешение: данные о питании закон относит к
+                      особой категории. Без него{" "}
+                      <span lang="en">Ayla</span> не учитывает дневник питания
+                      в разговоре. Отозвать можно в любой момент.
+                    </>
+                  }
+                />
+              </dl>
               <p className="profile-section__caption">
                 Твои данные защищены. Здесь можно посмотреть, что хранится,
                 скачать копию своих данных или удалить их — прямо в
@@ -498,6 +585,13 @@ export function CustomerProfileScreen() {
       </nav>
 
       {/* C5 export sheet (152-ФЗ) */}
+      <HealthConsentSheet
+        open={healthSheetOpen}
+        triggerRef={healthTriggerRef}
+        onClose={() => setHealthSheetOpen(false)}
+        granted={healthConsent?.granted ?? false}
+        onSettled={onHealthSettled}
+      />
       <PersonalDataExportSheet
         open={exportOpen}
         triggerRef={exportTriggerRef}

@@ -138,7 +138,7 @@ class TestGrantOpensTheSurface:
             bot_user=miniapp_user, consent_type=ConsentRecord.ConsentType.HEALTH
         )
         assert rows.count() == 1
-        assert rows.first().withdrawn_at is not None
+        assert rows.get().withdrawn_at is not None
 
     def test_grant_is_idempotent(self, miniapp_user) -> None:
         for _ in range(3):

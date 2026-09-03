@@ -111,7 +111,9 @@ def test_grant_then_read_back(client: Client, bot_user, url, auth) -> None:
     assert health_consent.is_granted(bot_user) is True
 
 
-def test_grant_records_the_version_the_person_was_shown(client: Client, bot_user, url, auth) -> None:
+def test_grant_records_the_version_the_person_was_shown(
+    client: Client, bot_user, url, auth
+) -> None:
     _post(client, url, auth, health_consent.HEALTH_CONSENT_DOCUMENT_VERSION)
 
     row = ConsentRecord.all_tenants.get(

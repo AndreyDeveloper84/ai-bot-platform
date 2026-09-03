@@ -9,6 +9,12 @@
  *   GET    /api/v1/customer/me/personal-data/export/  → JSON attachment
  *   DELETE /api/v1/customer/me/personal-data/         → {status:"deleted"}
  *
+ * DRF-1453 добавляет сюда третий лист — согласие на медданные
+ * ({@link HealthConsentSheet}). Он живёт в этом же файле, а не рядом, чтобы
+ * переиспользовать SheetChrome: у листов приватности одна механика фокуса,
+ * Escape и focus-trap, и разводить её по двум местам — прямой путь к тому,
+ * что однажды разойдётся именно в самом чувствительном.
+ *
  * # Contract obligations implemented here
  *
  * - **UI idempotency** — while a request is in flight both actions are
@@ -40,6 +46,13 @@ import {
   PersonalDataPartialDeleteError,
   triggerDownload,
 } from "../lib/personal-data";
+import {
+  grantHealthConsent,
+  HEALTH_CONSENT_DOCUMENT_VERSION,
+  StaleDisclosureError,
+  withdrawHealthConsent,
+  type HealthConsentState,
+} from "../lib/health-consent";
 import { useSheetKeyNav } from "../hooks/useSheetKeyNav";
 
 // ---------------------------------------------------------------------------
@@ -475,6 +488,208 @@ export function PersonalDataDeleteSheet({ open, triggerRef, onClose }: SheetProp
               type="button"
               className="btn-primary profile-support-sheet__primary"
               onClick={start}
+            >
+              Попробовать ещё раз
+            </button>
+            <SupportLink />
+          </div>
+        </>
+      )}
+    </SheetChrome>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Health-data consent (152-ФЗ ст. 10) — DRF-1453
+//
+// Питание — специальная категория. Ст. 10 ч. 1 п. 1 допускает обработку по
+// согласию, но согласие на специальную категорию не поглощается общим
+// согласием ст. 6 — значит ни тумблера «заодно», ни строки в списке
+// «принимаю всё». Отсюда лист: человек читает, что именно передаётся, зачем
+// и что будет при отзыве, и подтверждает отдельным действием.
+//
+// Три обязательства, которые лист держит:
+//
+// * раскрытие перед подтверждением — CTA лежит ПОД перечнем, а не над ним,
+//   и перечень не сворачивается: согласие подписывают после текста;
+// * версия — выдача уходит с HEALTH_CONSENT_DOCUMENT_VERSION, то есть в
+//   журнал попадает то, что человеку показали. Если сервер тем временем
+//   обновил раскрытие (409 stale_disclosure), лист НЕ дожимает выдачу, а
+//   честно говорит, что текст изменился и его надо перечитать;
+// * симметрия — отзыв живёт в том же листе и тем же весом: разрешение,
+//   которое легко дать и трудно снять, согласием не является.
+//
+// Chrome, фокус и Escape — общий SheetChrome выше по файлу (то же поведение,
+// что у C5-листов: initial focus на «Отмена», не на CTA).
+// ---------------------------------------------------------------------------
+
+type HealthConsentView = "confirm" | "busy" | "stale" | "error";
+
+interface HealthConsentSheetProps extends SheetProps {
+  /** Текущее состояние согласия — определяет, выдача это или отзыв. */
+  granted: boolean;
+  /** Успешная запись: экран обновляет строку согласия и показывает снекбар. */
+  onSettled: (next: HealthConsentState) => void;
+}
+
+/** Что именно уходит в обработку. Формулировки — по факту, без обещаний. */
+const HEALTH_DATA_SCOPE: readonly string[] = [
+  "Что ты записываешь в дневник питания: блюда, порции, время",
+  "Недельная картина по белку, воде и целям — в сводном виде",
+];
+
+const HEALTH_DATA_PURPOSE: readonly string[] = [
+  "Ayla учитывает питание в разговоре и в подсказках",
+  "Без этого разрешения дневник остаётся у тебя, а в разговоре не участвует",
+];
+
+export function HealthConsentSheet({
+  open,
+  triggerRef,
+  onClose,
+  granted,
+  onSettled,
+}: HealthConsentSheetProps) {
+  const [view, setView] = useState<HealthConsentView>("confirm");
+
+  useEffect(() => {
+    if (open) setView("confirm");
+  }, [open]);
+
+  const submit = useCallback(async () => {
+    setView("busy");
+    try {
+      const next = granted
+        ? await withdrawHealthConsent()
+        : await grantHealthConsent(HEALTH_CONSENT_DOCUMENT_VERSION);
+      onSettled(next);
+      onClose();
+    } catch (err) {
+      // Раскрытие успели обновить — предлагать «ещё раз» было бы враньём:
+      // повтор отправит ту же устаревшую версию и получит тот же отказ.
+      setView(err instanceof StaleDisclosureError ? "stale" : "error");
+    }
+  }, [granted, onClose, onSettled]);
+
+  if (!open) return null;
+  const busy = view === "busy";
+
+  return (
+    <SheetChrome
+      headlineId="health-consent-headline"
+      headline={granted ? "Отозвать разрешение" : "Разрешить учитывать питание"}
+      closeDisabled={busy}
+      triggerRef={triggerRef}
+      onClose={onClose}
+    >
+      {view === "confirm" && (
+        <>
+          {granted ? (
+            <>
+              <p className="profile-support-sheet__body">
+                <span lang="en">Ayla</span> перестанет учитывать питание в
+                разговоре. Дневник и записи в нём останутся — их видишь только
+                ты.
+              </p>
+              <p className="profile-support-sheet__body">
+                Разрешить снова можно в любой момент здесь же.
+              </p>
+            </>
+          ) : (
+            <>
+              <p className="profile-support-sheet__body">
+                Данные о питании закон относит к особой категории, поэтому
+                разрешение на них отдельное — и его не бывает «заодно» с
+                остальными.
+              </p>
+              <p className="profile-support-sheet__sub-heading">
+                Что передаётся:
+              </p>
+              <ul className="profile-support-sheet__list">
+                {HEALTH_DATA_SCOPE.map((item) => (
+                  <li key={item}>{item}</li>
+                ))}
+              </ul>
+              <p className="profile-support-sheet__sub-heading">Зачем:</p>
+              <ul className="profile-support-sheet__list">
+                {HEALTH_DATA_PURPOSE.map((item) => (
+                  <li key={item}>{item}</li>
+                ))}
+              </ul>
+              <p className="profile-support-sheet__body">
+                Отозвать можно в любой момент — здесь же, одним действием.
+              </p>
+            </>
+          )}
+          <div className="profile-support-sheet__actions">
+            <button
+              type="button"
+              data-initial-focus
+              className="btn-secondary profile-support-sheet__cancel"
+              onClick={onClose}
+            >
+              Отмена
+            </button>
+            <button
+              type="button"
+              className="btn-primary profile-support-sheet__primary"
+              onClick={submit}
+            >
+              {granted ? "Отозвать" : "Разрешить"}
+            </button>
+          </div>
+        </>
+      )}
+      {view === "busy" && (
+        <>
+          <p className="profile-support-sheet__body">Сохраняю…</p>
+          <div className="profile-support-sheet__actions">
+            <button type="button" disabled className="btn-secondary">
+              Отмена
+            </button>
+            <button type="button" disabled className="btn-primary">
+              {granted ? "Отозвать" : "Разрешить"}
+            </button>
+          </div>
+        </>
+      )}
+      {view === "stale" && (
+        <>
+          <p className="profile-support-sheet__body">
+            Текст про данные обновился, пока лист был открыт. Открой его заново
+            и прочитай — разрешение записывается на тот текст, который ты
+            видела.
+          </p>
+          <div className="profile-support-sheet__actions">
+            <button
+              type="button"
+              data-initial-focus
+              className="btn-primary profile-support-sheet__primary"
+              onClick={onClose}
+            >
+              Понятно
+            </button>
+          </div>
+        </>
+      )}
+      {view === "error" && (
+        <>
+          <p className="profile-support-sheet__body">
+            Не получилось сохранить. Ничего не изменилось.
+          </p>
+          <div className="profile-support-sheet__actions">
+            <button
+              type="button"
+              data-initial-focus
+              className="btn-secondary profile-support-sheet__cancel"
+              onClick={onClose}
+            >
+              Закрыть
+            </button>
+            <button
+              type="button"
+              className="btn-primary profile-support-sheet__primary"
+              onClick={submit}
             >
               Попробовать ещё раз
             </button>
