@@ -64,17 +64,32 @@ class TestHandle:
         result = FoodCorrectionSkill().handle(_context("cb:food:correct:grams:scan-1"))
         assert "грамм" in result.reply_text.lower()
         assert result.action_type == "food_correction_prompt"
-        assert result.action_data == {"field": "grams", "scan_id": "scan-1"}
+        assert result.action_data == {
+            "field": "grams",
+            "scan_id": "scan-1",
+            # DRF-1454 — the memory-aware prompt flag; False with nothing stored.
+            "remembered": False,
+        }
 
     def test_name_emits_name_prompt(self) -> None:
         result = FoodCorrectionSkill().handle(_context("cb:food:correct:name:scan-1"))
         assert "напиши" in result.reply_text.lower() or "что было" in result.reply_text.lower()
-        assert result.action_data == {"field": "name", "scan_id": "scan-1"}
+        assert result.action_data == {
+            "field": "name",
+            "scan_id": "scan-1",
+            # DRF-1454 — the memory-aware prompt flag; False with nothing stored.
+            "remembered": False,
+        }
 
     def test_macros_emits_macros_prompt(self) -> None:
         result = FoodCorrectionSkill().handle(_context("cb:food:correct:macros:scan-1"))
         assert "макрос" in result.reply_text.lower()
-        assert result.action_data == {"field": "macros", "scan_id": "scan-1"}
+        assert result.action_data == {
+            "field": "macros",
+            "scan_id": "scan-1",
+            # DRF-1454 — the memory-aware prompt flag; False with nothing stored.
+            "remembered": False,
+        }
 
     def test_scan_id_propagated_to_action_data(self) -> None:
         """The follow-up text input from the user must be tied back to

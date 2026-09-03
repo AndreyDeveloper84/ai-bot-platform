@@ -1,55 +1,65 @@
-"""Food-correction skill — prompts for the 3 correction fields.
+"""Food-correction skill — prompts for the 3 correction fields, and remembers them.
 
-Sprint 9 / P5 (DRF-822). Entered via the ``✏️ Уточнить`` button on a
-food_scanner (P1) recognition card. The button emits one of three
-callbacks (built by D2 ``correction_choice_keyboard``); this skill
-turns each callback into the corresponding follow-up prompt:
+Sprint 9 / P5 (DRF-822) shipped the **prompt** half: entered via the ``✏️
+Уточнить`` button on a food_scanner (P1) recognition card, each of the three
+callbacks (built by D2 ``correction_choice_keyboard``) turns into the matching
+follow-up prompt:
 
-* ``cb:food:correct:grams:{scan_id}`` → "Введи правильный вес в граммах"
-* ``cb:food:correct:name:{scan_id}``  → "Напиши, что было — поправлю"
-* ``cb:food:correct:macros:{scan_id}`` → "Какие БЖУ нужны? Напиши: белки/жиры/углеводы"
+* ``cb:food:correct:grams:{scan_id}``  → "Введи правильный вес в граммах"
+* ``cb:food:correct:name:{scan_id}``   → "Напиши, что было — поправлю"
+* ``cb:food:correct:macros:{scan_id}`` → "Какие БЖУ нужны?"
 
-## Scope cut — apply path stays in Phase 1
+## What DRF-1454 adds — the answer stops falling on the floor
 
-The mysite ``legacy_maxbot/handlers/food_correction.py`` (361 LOC) is a
-full FSM with 13 callbacks: portion picker → Ayla re-scan with
-``portion_multiplier``, dish rename → re-recognize, manual macros →
-update entry. Sprint 9 / P5 ships only the **prompt** half because
-the apply path needs two things we don't have yet:
+P5's own docstring named the two things missing from the apply path. One of them
+has since landed: ``apps.conversations.services.write_skill_state`` is the
+atomic skill-state write-back P5 was waiting on. So the person's answer no
+longer «falls through to the AI Concierge» — this skill now claims the reply
+turn, parses it, and hands it to
+:mod:`apps.orchestrator.memory.food` to remember.
 
-1. **An Ayla "update diary entry" endpoint.** The mysite version
-   re-runs ``scan_photo(portion_multiplier=...)`` which requires the
-   original image bytes (gone after the first scan). A cleaner
-   approach is a dedicated ``update_diary_entry(log_id, portion_g, ...)``
-   call — to be added to ``apps.integrations.ayla.nutrition_client`` in
-   Phase 1 (DRF-825 follow-up).
+The other missing piece — an Ayla «update diary entry» endpoint — is still
+missing, and this ticket deliberately does not fake it. The distinction the
+memory module draws is the same one: we remember the **calibration** (this
+person says this dish weighs 500 г), not the **diary event**. Applying the
+correction to the logged meal remains the Phase-1 follow-up (DRF-825); what
+changes today is that the correction is no longer forgotten the moment it is
+typed.
 
-2. **Skill-state plumbing for "waiting for correction value".** The D3
-   SkillFSM helper lands the state machine; what's missing is the
-   pipeline-side write-back of ``conversation.skill_state``. P3
-   nutrition_anketa is the first heavy consumer; P5 will adopt the
-   same path once that wiring exists.
+## Why the free-text turn is claimed narrowly
 
-In the meantime the user's free-text response after a P5 prompt falls
-through to the AI Concierge (or echo skill). The bot acknowledges
-that the correction was noted; manual diary cleanup is a manager task
-in the staff workflow. This is consistent with the mysite source on
-the EPIC-Q backlog ("correction stays in human hands until LLM cost
-guard").
+While a correction is pending, this skill matches plain text — and it registers
+above nutrition_anketa, food_clarify and faq, so a loose match here would
+shadow them. Three guards keep it tight:
 
-## Why this skill exists at all
+1. the pending state must exist (set on the same conversation by the callback
+   turn) and be **fresh** (:data:`_PENDING_TTL_SECONDS`);
+2. the text must match the *answer shape* of the pending field — a number for
+   grams, ``Б/Ж/У`` for macros, a short name for name;
+3. anything else falls through untouched to the skills below.
 
-Without P5 the ``cb:food:correct:*`` callback would land in the echo
-skill and produce a confusing "cb:food:correct:grams:scan-1" verbatim
-echo. P5 turns the callback into an empathic prompt and tells the
-user the next step.
+A message that is not an answer therefore reaches its normal handler, and the
+pending state simply ages out.
+
+## The sensitive perimeter
+
+«Что не подошло» arrives on exactly this turn — the ✏️ prompt asks «что не
+так?», and people answer «у меня непереносимость лактозы» as readily as «500 г».
+Such an answer is special-category (or, for a plain exclusion, a channel to one)
+and is **not** stored: :func:`apps.orchestrator.memory.food.note_refusal`
+classifies it, counts it, and drops it. The reply says so rather than pretending
+to remember — an honest «пока не храню» is the difference between a helper and a
+form that quietly files your diagnosis.
 """
 
 from __future__ import annotations
 
 import logging
-from typing import ClassVar
+import re
+from datetime import datetime, timedelta, timezone
+from typing import Any, ClassVar
 
+from apps.orchestrator.memory import food as food_memory
 from apps.orchestrator.ui.keyboards import parse_callback
 from apps.skills.base import SkillContext, SkillResult
 from apps.skills.registry import register
@@ -69,52 +79,288 @@ _PROMPTS: dict[str, str] = {
     ),
 }
 
+# The «не переспрашиваю» half: when memory already holds this person's answer
+# for this dish, the prompt states it and asks only about a change. Wording is
+# gender-neutral on purpose — the bot does not know, and guessing reads worse
+# than the plain form.
+_KNOWN_PROMPTS: dict[str, str] = {
+    "grams": "В прошлый раз для «{dish}» было {value} г. Оставляем? Если изменилось — напиши число.",
+    "name": "В прошлый раз это было «{value}». Оставляем? Если нет — напиши, что было.",
+    "macros": "В прошлый раз БЖУ были {value}. Оставляем? Если нет — напиши новые: 12/8/32.",
+}
+
+REMEMBERED_ACK: dict[str, str] = {
+    "grams": "Запомнила: «{dish}» — {value} г. Про вес этого блюда больше не спрошу.",
+    "name": "Запомнила: это «{value}». Больше не буду переспрашивать.",
+    "macros": "Запомнила БЖУ: {value}. Больше не буду переспрашивать.",
+}
+
+# Stored nothing (no consent / no link / write failed). A soft ack, never a
+# promise we did not keep.
+NOT_REMEMBERED_ACK = "Поняла, учла."
+
+# The sensitive perimeter, said out loud. Storing this needs the yellow/red
+# consent flow that is not in the pilot — so we say what we do instead of
+# implying memory we do not have.
+REFUSAL_ACK = (
+    "Поняла, сейчас учту. Запоминать такое пока не буду — это чувствительные "
+    "данные, для них нужно отдельное согласие."
+)
+
+
+# ─── pending-answer state ─────────────────────────────────────────────────
+
+# skill_state sub-key. The scanner writes «last card» under its own key; this
+# one is the «waiting for a correction value» flag.
+_STATE_KEY = "food_correction"
+# How long an unanswered prompt keeps claiming plain text. Long enough for a
+# person to type a number, short enough that a forgotten prompt never swallows
+# an unrelated turn tomorrow.
+_PENDING_TTL_SECONDS = 600
+
+# Answer shapes — the *matching* gate (stricter than the parser, which only has
+# to read a value once the turn is already ours).
+_SHAPE_GRAMS = re.compile(r"^\D{0,6}\d{1,4}\s*(?:г|гр|грамм\w*)?\.?$", re.IGNORECASE)
+_SHAPE_MACROS = re.compile(r"^\D{0,10}\d{1,4}\s*[/|]\s*\d{1,4}\s*[/|]\s*\d{1,4}\D{0,10}$")
+_SHAPE_NAME = re.compile(r"^[^\d]{2,40}$")
+
+_SHAPES: dict[str, re.Pattern[str]] = {
+    "grams": _SHAPE_GRAMS,
+    "macros": _SHAPE_MACROS,
+    "name": _SHAPE_NAME,
+}
+
+
+def _skill_state(context: SkillContext) -> dict[str, Any]:
+    raw = getattr(context.conversation, "skill_state", None)
+    return raw if isinstance(raw, dict) else {}
+
+
+def _pending(context: SkillContext) -> dict[str, Any] | None:
+    """The live «waiting for a correction value» record, or ``None``.
+
+    Stale records are treated as absent rather than deleted here: matching must
+    stay side-effect free, and the next write to the sub-key overwrites it.
+    """
+
+    pending = _skill_state(context).get(_STATE_KEY)
+    if not isinstance(pending, dict):
+        return None
+    if pending.get("field") not in food_memory.CORRECTION_FIELDS:
+        return None
+    stamped = pending.get("at")
+    if not isinstance(stamped, str):
+        return None
+    try:
+        at = datetime.fromisoformat(stamped)
+    except ValueError:
+        return None
+    if at.tzinfo is None:
+        at = at.replace(tzinfo=timezone.utc)
+    if datetime.now(timezone.utc) - at > timedelta(seconds=_PENDING_TTL_SECONDS):
+        return None
+    return pending
+
+
+def _write_state(context: SkillContext, value: dict[str, Any] | None) -> None:
+    """Best-effort skill-state write. A failure must never break the turn.
+
+    ``write_skill_state`` needs a tenant in scope and a persisted Conversation;
+    neither holds on every path this skill can be dispatched from (the
+    tenant-less discovery bot, unit tests with a stubbed conversation). Losing
+    the state costs one re-ask, which is exactly the pre-DRF-1454 behaviour —
+    raising would cost the reply.
+    """
+
+    try:
+        from apps.conversations.services import write_skill_state
+
+        write_skill_state(context.conversation, _STATE_KEY, value)
+    except Exception:  # noqa: BLE001 — degraded memory beats a lost reply
+        logger.debug(
+            "food_correction.state_write_skipped conversation=%s",
+            getattr(context.conversation, "id", None),
+        )
+
+
+def _dish_for(context: SkillContext, scan_id: str) -> str:
+    """The dish this correction is about, from the scanner's last-card stash.
+
+    Empty when the card was rendered before this feature shipped, on another
+    conversation, or when the state write did not land — in which case there is
+    nothing to key memory on and the skill degrades to its P5 behaviour.
+    """
+
+    from apps.skills.food_scanner.skill import LAST_CARD_STATE_KEY
+
+    card = _skill_state(context).get(LAST_CARD_STATE_KEY)
+    if not isinstance(card, dict):
+        return ""
+    if scan_id and card.get("scan_id") not in (None, "", scan_id):
+        return ""
+    dish = card.get("dish")
+    return dish if isinstance(dish, str) else ""
+
 
 # ─── skill ────────────────────────────────────────────────────────────────
 
 
 @register
 class FoodCorrectionSkill:
-    """Three correction prompts for the food_scanner correction flow."""
+    """Three correction prompts + the answer capture that feeds scanner memory."""
 
     name: ClassVar[str] = "food_correction"
 
     def matches(self, context: SkillContext) -> bool:
         text = context.message_text.strip()
-        if not text.startswith("cb:food:correct:"):
+        if text.startswith("cb:food:correct:"):
+            parsed = parse_callback(text)
+            if parsed is None or parsed["action"] != "correct":
+                return False
+            ref = parsed.get("ref") or ""
+            # ref shape is "{field}:{scan_id}" — split on the first colon.
+            field, _, _scan_id = ref.partition(":")
+            return field in _PROMPTS
+        # Answer path — only while a fresh prompt is pending, and only when the
+        # text has the shape of an answer to it. Anything else falls through.
+        if not text or text.startswith("cb:"):
             return False
-        parsed = parse_callback(text)
-        if parsed is None:
+        pending = _pending(context)
+        if pending is None:
             return False
-        if parsed["action"] != "correct":
-            return False
-        ref = parsed.get("ref") or ""
-        # ref shape is "{field}:{scan_id}" — split on the first colon.
-        field, _, _scan_id = ref.partition(":")
-        return field in _PROMPTS
+        field = str(pending.get("field"))
+        if food_memory.classify_refusal(text):
+            return True
+        shape = _SHAPES.get(field)
+        return bool(shape and shape.match(text))
 
     def handle(self, context: SkillContext) -> SkillResult:
         text = context.message_text.strip()
+        if text.startswith("cb:food:correct:"):
+            return self._handle_prompt(context, text)
+        return self._handle_answer(context, text)
+
+    # ─── callback → prompt ───────────────────────────────────────────────
+
+    def _handle_prompt(self, context: SkillContext, text: str) -> SkillResult:
         parsed = parse_callback(text)
         if parsed is None:
             return SkillResult(reply_text="", should_send=False)
 
         ref = parsed.get("ref") or ""
         field, _, scan_id = ref.partition(":")
-        prompt = _PROMPTS.get(field)
-        if not prompt:
+        if field not in _PROMPTS:
             # matches() guards this; defensive empty.
             return SkillResult(reply_text="", should_send=False)
 
+        dish = _dish_for(context, scan_id)
+        recall = (
+            food_memory.recall_corrections(context.bot_user, dish=dish)
+            if dish
+            else food_memory.EMPTY_RECALL
+        )
+        remembered = recall.has(field)
+        prompt = (
+            _KNOWN_PROMPTS[field].format(dish=dish, value=_recalled(recall, field))
+            if remembered
+            else _PROMPTS[field]
+        )
+
+        _write_state(
+            context,
+            {
+                "field": field,
+                "scan_id": scan_id,
+                "dish": dish,
+                "at": datetime.now(timezone.utc).isoformat(),
+            },
+        )
+
         logger.info(
-            "food_correction.prompted field=%s scan=%s conversation=%s",
+            "food_correction.prompted field=%s scan=%s remembered=%s conversation=%s",
             field,
             scan_id,
+            remembered,
             getattr(context.conversation, "id", None),
         )
         return SkillResult(
             reply_text=prompt,
             action_type="food_correction_prompt",
-            action_data={"field": field, "scan_id": scan_id},
-            meta={"reply_kind": f"food_correction_{field}"},
+            action_data={"field": field, "scan_id": scan_id, "remembered": remembered},
+            meta={
+                "reply_kind": (
+                    f"food_correction_{field}_remembered" if remembered else f"food_correction_{field}"
+                )
+            },
         )
+
+    # ─── free text → memory ──────────────────────────────────────────────
+
+    def _handle_answer(self, context: SkillContext, text: str) -> SkillResult:
+        pending = _pending(context)
+        if pending is None:  # matches() guards this; defensive.
+            return SkillResult(reply_text="", should_send=False)
+
+        field = str(pending.get("field"))
+        dish = pending.get("dish")
+        dish = dish if isinstance(dish, str) else ""
+        _write_state(context, None)  # the question is answered either way
+
+        # Perimeter first: a refusal is never a correction value, and must not
+        # reach the green write path even if it happens to parse.
+        if food_memory.classify_refusal(text):
+            outcome = food_memory.note_refusal(context.bot_user, text=text)
+            logger.info(
+                "food_correction.answer field=%s outcome=%s conversation=%s",
+                field,
+                outcome.value,
+                getattr(context.conversation, "id", None),
+            )
+            return SkillResult(
+                reply_text=REFUSAL_ACK,
+                meta={"reply_kind": "food_correction_refusal_not_stored"},
+            )
+
+        value = food_memory.parse_correction_value(field, text)
+        if value is None:
+            return SkillResult(
+                reply_text=_PROMPTS[field],
+                meta={"reply_kind": f"food_correction_{field}_reask"},
+            )
+
+        outcome = (
+            food_memory.remember_correction(context.bot_user, dish=dish, field=field, value=value)
+            if dish
+            else food_memory.Outcome.UNPARSED
+        )
+        logger.info(
+            "food_correction.answer field=%s outcome=%s conversation=%s",
+            field,
+            outcome.value,
+            getattr(context.conversation, "id", None),
+        )
+
+        stored = outcome in (food_memory.Outcome.WRITTEN, food_memory.Outcome.DUPLICATE)
+        reply = (
+            REMEMBERED_ACK[field].format(dish=dish, value=value) if stored else NOT_REMEMBERED_ACK
+        )
+        return SkillResult(
+            reply_text=reply,
+            action_type="food_correction_recorded",
+            action_data={"field": field, "value": value, "stored": stored},
+            meta={
+                "reply_kind": (
+                    f"food_correction_{field}_remembered"
+                    if stored
+                    else f"food_correction_{field}_not_stored"
+                )
+            },
+        )
+
+
+def _recalled(recall: food_memory.FoodRecall, field: str) -> Any:
+    if field == food_memory.FIELD_GRAMS:
+        return recall.portion_g
+    if field == food_memory.FIELD_NAME:
+        return recall.dish_name
+    return recall.macros
