@@ -543,7 +543,21 @@ class TestTheRowIsVisibleToThePerson:
 
         summary = render_memory_summary(bot_user, user_id=resolver["uuid"])
 
-        assert "порция «борщ» — 500 г" in summary
+        assert "порция «Борщ» — 500 г" in summary
+
+    def test_the_list_keeps_the_persons_spelling(self, settings, resolver) -> None:
+        """Мелкая находка ревью: в чате «Куриная грудка», в списке памяти
+        «куриная грудка» — написание расходилось. Ключ нормализован, а
+        написание — человека."""
+        bot_user = _consented_user("drf1454-case", settings)
+        food_memory.remember_correction(
+            bot_user, dish="Куриная грудка", field=food_memory.FIELD_GRAMS, value=200
+        )
+        bot_user.refresh_from_db()
+
+        entry = MemoryEntry.objects.get(user_id=resolver["uuid"])
+        assert "Куриная грудка" in entry.content["display"]
+        assert entry.content["key"] == "food_portion:куриная грудка"
 
     @pytest.mark.parametrize(
         "field,value,expected",

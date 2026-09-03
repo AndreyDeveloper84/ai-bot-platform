@@ -349,7 +349,7 @@ def _memory_key(field: str, dish_slug: str) -> str | None:
     return f"{prefix}:{dish_slug}"
 
 
-def _display(field: str, dish_slug: str, value: Any) -> str:
+def _display(field: str, dish_display: str, value: Any) -> str:
     """The phrase the person sees for this row in «покажи, что помнишь».
 
     Stored ON the row because that is the convention
@@ -364,13 +364,18 @@ def _display(field: str, dish_slug: str, value: Any) -> str:
     they are excluded there (:data:`apps.persona.memory_surface.
     _PROMPT_EXCLUDED_KEY_PREFIXES`); the readers are the person's own memory
     list and the scanner card.
+
+    ``dish_display`` is the dish as the person wrote it, not the normalised
+    key: the chat says «Куриная грудка», and the list must not answer with
+    «куриная грудка» (review DRF-1454). The KEY stays lowercased — matching
+    is ours, spelling is theirs.
     """
 
     if field == FIELD_GRAMS:
-        return f"порция «{dish_slug}» — {value} г"
+        return f"порция «{dish_display}» — {value} г"
     if field == FIELD_NAME:
-        return f"блюдо «{dish_slug}» называет «{value}»"
-    return f"БЖУ для «{dish_slug}» — {value}"
+        return f"блюдо «{dish_display}» называет «{value}»"
+    return f"БЖУ для «{dish_display}» — {value}"
 
 
 # ─── read side ─────────────────────────────────────────────────────────────
@@ -584,7 +589,8 @@ def remember_correction(bot_user: Any, *, dish: str, field: str, value: Any) -> 
                 "dish": dish_slug,
                 "field": field,
                 # Makes the row visible in «покажи, что помнишь» — see _display.
-                "display": _display(field, dish_slug, value),
+                # The dish keeps the person's spelling; the key stays a slug.
+                "display": _display(field, _clean_name(dish) or dish_slug, value),
             },
             request_id=uuid.uuid4(),
             purpose=_WRITE_PURPOSE,
