@@ -1966,6 +1966,101 @@ def personal_data_delete(request: HttpRequest) -> HttpResponse:
     )
 
 
+# ---------------------------------------------------------------------------
+# Health-data consent (152-ФЗ ст. 10 special category) — DRF-1453.
+#
+# Отдельная ручка, а не поле в общем consents-объекте, ровно потому, что
+# согласие обязано быть раздельным: единый PATCH «сохрани все галочки» снова
+# сделал бы медданные строкой в списке «принимаю всё». Здесь одно согласие —
+# один ресурс, и выдать его можно только явным POST с версией показанного
+# раскрытия.
+# ---------------------------------------------------------------------------
+
+
+def _health_consent_payload(bot_user: BotUser) -> dict:
+    """Состояние согласия для экрана. Дата — из действующей строки, не из часов."""
+    from apps.consent.health import (
+        HEALTH_CONSENT_DOCUMENT_VERSION,
+        current_record,
+        is_granted,
+    )
+
+    granted = is_granted(bot_user)
+    record = current_record(bot_user) if granted else None
+    return {
+        "granted": granted,
+        "granted_at": record.captured_at.isoformat() if record else None,
+        # Версия, под которой согласие СТОИТ (может отставать от текущей —
+        # тогда экран показывает актуальную и предлагает перечитать).
+        "document_version": record.document_version if record else "",
+        "current_document_version": HEALTH_CONSENT_DOCUMENT_VERSION,
+    }
+
+
+@csrf_exempt
+@require_http_methods(["GET", "POST", "DELETE"])
+@require_init_data
+@with_request_tenant
+def health_consent(request: HttpRequest) -> HttpResponse:
+    """Согласие на обработку медданных: прочитать / выдать / отозвать.
+
+    ``GET``    → состояние (см. :func:`_health_consent_payload`).
+    ``POST``   → выдать. Тело: ``{"document_version": "<версия раскрытия>"}``;
+                 версия обязательна и сверяется с серверной — согласие
+                 записывается на текст, который человеку показали, а не на
+                 абстрактное «да». Идемпотентно.
+    ``DELETE`` → отозвать. Идемпотентно; строки согласий не удаляются,
+                 проставляется ``withdrawn_at`` (audit-trail остаётся).
+
+    Ни на одном пути телефон и другие идентификаторы не читаются и не
+    передаются — ручка оперирует ровно фактом согласия.
+    """
+    import json
+
+    from apps.consent.health import (
+        UnknownDisclosureVersionError,
+        grant as grant_health,
+        withdraw as withdraw_health,
+    )
+
+    bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
+
+    if request.method == "GET":
+        return JsonResponse(_health_consent_payload(bot_user))
+
+    if request.method == "DELETE":
+        withdrawn = withdraw_health(bot_user)
+        logger.info(
+            "miniapp_api.health_consent.withdrawn bot_user=%s rows=%d",
+            bot_user.id,
+            withdrawn,
+        )
+        return JsonResponse(_health_consent_payload(bot_user))
+
+    try:
+        body = json.loads(request.body or b"{}")
+    except ValueError:
+        return _error("malformed", "body is not valid JSON", 400)
+    if not isinstance(body, dict):
+        return _error("malformed", "body must be a JSON object", 400)
+    document_version = str(body.get("document_version") or "").strip()
+    if not document_version:
+        return _error("bad_request", "document_version is required", 400)
+
+    try:
+        grant_health(bot_user, document_version=document_version)
+    except UnknownDisclosureVersionError:
+        # 409, не 400: запрос корректен по форме — расходятся версии
+        # раскрытия, и клиенту нужно перечитать актуальную, а не чинить тело.
+        return _error(
+            "stale_disclosure",
+            "document_version does not match the current disclosure",
+            409,
+        )
+    logger.info("miniapp_api.health_consent.granted bot_user=%s", bot_user.id)
+    return JsonResponse(_health_consent_payload(bot_user))
+
+
 def _profile_to_dict(snap) -> dict:
     """Serialise a :class:`ProfileSnapshot` for the JSON response."""
     return {
