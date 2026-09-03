@@ -180,8 +180,14 @@ def test_grant_after_withdraw_appends_a_fresh_row(client: Client, bot_user, url,
     assert rows.filter(withdrawn_at__isnull=True).count() == 1
 
 
-def test_unauthenticated_is_rejected(client: Client, bot_user, url) -> None:
-    """Без initData ручка не отвечает состоянием согласия ничьего человека."""
+def test_unauthenticated_is_rejected(client: Client, bot_user, url, auth) -> None:
+    """Без initData ручка не отвечает состоянием согласия ничьего человека.
+
+    Сначала — что этот же GET С аутентификацией состояние отдаёт: иначе
+    "granted" not in ... прошло бы и на пустой заглушке ручки.
+    """
+    assert "granted" in client.get(url, **auth).json()
+
     res = client.get(url)
 
     assert res.status_code != 200  # платформенный слог отказа — 400 (require_init_data)
