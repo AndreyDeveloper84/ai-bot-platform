@@ -89,7 +89,17 @@ def test_no_compose_layer_declares_allowed_hosts(compose_path: Path, service_nam
     if service is None:
         pytest.skip(f"{service_name} is not defined in {compose_path.name}")
 
-    assert GUARDED_KEY not in _environment_keys(service), (
+    keys = _environment_keys(service)
+
+    # Presence first: prove we are reading a real `environment:` block. A
+    # renamed service or a restructured file would otherwise yield an empty
+    # set, and "the key is not in an empty set" is not a check.
+    assert "DJANGO_SETTINGS_MODULE" in keys, (
+        f"{compose_path.name}: service `{service_name}` has no readable "
+        "`environment:` block — this test can no longer see what it guards."
+    )
+
+    assert GUARDED_KEY not in keys, (
         f"{compose_path.name}: service `{service_name}` declares {GUARDED_KEY} "
         "under `environment:`. Compose merges `environment:` across -f files "
         "key by key and it beats `env_file:`, so this value silently replaces "
