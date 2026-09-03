@@ -11,15 +11,28 @@ project either way. It simply started on the base file's dev profile.
 Measured on the pilot 2026-09-03 with
 `docker exec ayla-bot-staging-<svc>-1 printenv`:
 
-    web / worker / celery-worker / celery-beat   config.settings.staging, DEBUG=False
-    shadow-worker                                config.settings.local,   DEBUG=True
+    web / worker / celery-worker / celery-beat   config.settings.staging, DEBUG=False, 77 vars
+    shadow-worker                                config.settings.local,   DEBUG=True,  31 vars
 
-`DEBUG=True` makes Django render the technical 500 page on any unhandled
-exception — every local variable of every frame, which on this service
-means bot tokens, MAX init-data payloads and client phone numbers — and
-makes `django.db.connection.queries` retain every statement, unbounded,
-in a process that stays up for weeks. `shadow-worker` had been in that
-state since the staging stack was created.
+The settings module is the larger half of the damage, and `DEBUG` is only
+its most visible symptom. `config/settings/local.py` also sets
+`PII_TOKENIZER_ENABLED = False` — and this worker's whole job is
+`orchestrator.shadow_turn`, i.e. LLM calls, which
+`apps/llm/pii_protected_provider.py` then makes with the client's data
+untokenized. It swaps the Redis cache for `LocMemCache`, so any
+coordination this process does through the cache is invisible to the four
+containers beside it. Without `.env.staging` there is no
+`DJANGO_SECRET_KEY`, so `base.py` falls back to the committed
+`django-insecure-sprint0-scaffold-only-...` placeholder and this process
+signs on a different key from the rest of the stack; `STRICT_TENANT_SCOPE`
+falls back to `audit`, so a cross-tenant access is logged here instead of
+raised; and `DEBUG` puts Django's `CursorDebugWrapper` in the path, which
+keeps the last 9000 SQL statements *with their bound parameters* resident
+in a process that stays up for weeks.
+
+46 variables were missing in total, `SENTRY_DSN` among them — which is
+also the answer to "why did nobody notice": this container's errors were
+not reaching anybody.
 
 ### Why this file exists next to `test_compose_env_chain.py`
 
@@ -198,8 +211,9 @@ def test_every_base_django_service_is_described_in_the_staging_file(service_name
         "the staging stack starts it anyway — on the base file's "
         "`config.settings.local` / `DJANGO_DEBUG=True`, and with no "
         "`.env.staging`. That is DRF-1447: on the pilot `shadow-worker` ran "
-        "for weeks in DEBUG, one unhandled exception away from rendering "
-        "tokens and client phone numbers into a traceback."
+        "for weeks with PII tokenization off, a LocMemCache the rest of the "
+        "stack cannot see, the committed placeholder SECRET_KEY, and no "
+        "SENTRY_DSN to report any of it."
     )
 
     env = _environment(service)
@@ -294,8 +308,9 @@ def _assert_service_is_staged(resolved: dict, service_name: str) -> None:
     )
     assert env.get("DJANGO_DEBUG") == "False", (
         f"`{service_name}` resolves to DJANGO_DEBUG={env.get('DJANGO_DEBUG')!r}. "
-        "In DEBUG Django renders unhandled exceptions with every frame's local "
-        "variables and retains every SQL statement it ever ran."
+        "DEBUG puts Django's CursorDebugWrapper in the path, keeping the last "
+        "9000 SQL statements with their bound parameters resident in a process "
+        "that stays up for weeks."
     )
     assert env.get(ENV_FILE_MARKER) == "reached", (
         f"`{service_name}` did not receive `.env.staging`. `env_file:` binds to "

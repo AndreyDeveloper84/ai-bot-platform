@@ -107,7 +107,8 @@ services:
   #     DJANGO_SETTINGS_MODULE = config.settings.local
   #     DJANGO_DEBUG           = True
   #
-  # while `web` next to it had `config.settings.staging` / `False`.
+  # while `web` next to it had `config.settings.staging` / `False` — and
+  # 77 environment variables against this service's 31.
   #
   # A service is only reached by `env_file:` / `environment:` that its
   # OWN stanza declares. `x-staging-app-env` is a YAML anchor, not a
@@ -117,13 +118,28 @@ services:
   # inheriting `build`/`command`/`volumes` from docker-compose.yml and
   # declaring its env HERE. Copy that shape for every app service.
   #
-  # What DEBUG=True costs on a contour with real traffic:
-  #   * an unhandled exception renders Django's technical 500 page,
-  #     which prints every local variable in every frame — tokens,
-  #     init-data payloads, client phone numbers;
-  #   * `django.db.connection.queries` accumulates every SQL statement
-  #     with its parameters, unbounded, in a process that runs for
-  #     weeks.
+  # What the dev settings module cost this particular service. DEBUG is
+  # the visible symptom, not the whole bill — and the traceback-page
+  # danger does NOT apply here, because a Celery worker serves no HTTP:
+  #
+  #   * `config/settings/local.py` sets `PII_TOKENIZER_ENABLED = False`.
+  #     This worker's only job is `orchestrator.shadow_turn` — LLM calls
+  #     — so `apps/llm/pii_protected_provider.py` was sending client
+  #     data to the provider untokenized.
+  #   * the same file swaps the Redis cache for `LocMemCache`, so
+  #     anything this process coordinates through the cache is invisible
+  #     to the four containers beside it.
+  #   * with no `.env.staging` there is no `DJANGO_SECRET_KEY`, so
+  #     `base.py` falls back to the committed
+  #     `django-insecure-sprint0-scaffold-only-...` placeholder: this
+  #     process signs on a different key from the rest of the stack.
+  #   * `STRICT_TENANT_SCOPE` falls back to `audit` instead of staging's
+  #     `strict` — a cross-tenant access is logged here, not raised.
+  #   * `DEBUG=True` puts Django's `CursorDebugWrapper` in the path,
+  #     keeping the last 9000 SQL statements WITH their bound parameters
+  #     resident in a process that stays up for weeks.
+  #   * and `SENTRY_DSN` was among the 46 missing variables, which is
+  #     why none of the above ever reached anyone.
   #
   # Consequently this service is UNSAFE to run on the pilot until this
   # stanza is applied — see `tests/test_staging_stack_completeness.py`,
