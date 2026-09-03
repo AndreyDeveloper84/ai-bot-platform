@@ -38,6 +38,7 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any
 
+from apps.llm.model_tiers import TIER_FAST
 from apps.orchestrator.llm.openai_provider import OpenAIProvider
 
 logger = logging.getLogger(__name__)
@@ -100,7 +101,7 @@ async def classify(
     brand_voice: dict[str, Any] | None = None,
     provider: OpenAIProvider | None = None,
     tenant: Any = None,
-    model: str = "gpt-4o-mini",
+    model: str = TIER_FAST,
 ) -> IntentDecision:
     """Classify user text → :class:`IntentDecision`.
 
@@ -124,7 +125,14 @@ async def classify(
         (b) emits an ``llm.call_completed`` audit row (152-ФЗ §6
         transit pseudonymisation evidence per ADR-0011 §11.4).
         Closes the audit-trail gap для intent classification (#975).
-      model: LLM model override. Default gpt-4o-mini per latency budget.
+      model: model override. Defaults to the vendor-neutral ``"fast"``
+        tier (``apps.llm.model_tiers``) — the cheap, low-latency tier the
+        latency budget below asks for, named so it means the same thing
+        whichever vendor ``LLM_PROVIDER`` currently points at. It used to
+        be the literal ``"gpt-4o-mini"``, which on the Anthropic-primary
+        pilot reached ``api.anthropic.com`` and 404'd every turn
+        (DRF-1443). A concrete vendor id is still accepted and is passed
+        to that vendor unchanged.
 
     Returns:
       :class:`IntentDecision`. Safe fallback on any failure

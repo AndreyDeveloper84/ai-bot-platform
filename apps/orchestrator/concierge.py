@@ -45,6 +45,7 @@ from types import SimpleNamespace
 from typing import Any
 
 from ayla_ai_core import ActionType, AIConcierge, ToolResult
+from ayla_ai_core.orchestrator import DEFAULT_MODEL_NAME as _AI_CORE_DEFAULT_MODEL
 from asgiref.sync import sync_to_async
 from django.conf import settings
 from django.utils import timezone
@@ -54,6 +55,7 @@ from apps.conversations.services import (
     resolve_active_global_conversation,
 )
 from apps.identity.services.global_tenant import get_global_bot_tenant
+from apps.llm.model_tiers import TIER_SMART
 from apps.llm.pricing import UnknownModelError, compute_cost
 from apps.llm.router import get_router
 from apps.marketplace.discovery import (
@@ -305,6 +307,13 @@ class _RouterCompletions:
     ``apps.orchestrator.intent_router._classify_production_path``.
     """
 
+    #: DRF-1443 — the tier this client asks for when the caller did not
+    #: choose a model itself. The concierge is the customer-facing reply
+    #: path, same as every skill that reads
+    #: ``provider.default_completion_model``, so it belongs on the same
+    #: tier as those.
+    default_tier = TIER_SMART
+
     def __init__(self, *, skill: str) -> None:
         self._skill = skill
         # Telemetry of the most recent complete() call (DRF-1211). The
@@ -331,6 +340,33 @@ class _RouterCompletions:
         info, self._forced_retry = self._forced_retry, None
         return info
 
+    def _model_for(self, model: str) -> str:
+        """What to actually ask the provider for.
+
+        ``AIConcierge`` always passes a ``model_name``, and unless a
+        consumer configures one that is
+        ``ayla_ai_core.orchestrator.DEFAULT_MODEL_NAME`` — an OpenAI id
+        baked into a library that has no idea which vendor this platform
+        routed to. This repo never set it, so it carries no decision:
+        substituting our own tier is not overriding a caller, it is
+        supplying the choice nobody made.
+
+        That id reaching the vendor unexamined is the DRF-1443 outage:
+        with ``LLM_PROVIDER=anthropic`` every concierge turn posted
+        ``gpt-4o-mini`` to ``api.anthropic.com`` and came back
+        ``404 not_found_error``. The provider-level resolver in
+        ``apps.llm.model_tiers`` would also catch it — this method is
+        what makes the tier a STATED choice of this module rather than
+        an inference drawn from somebody else's constant.
+
+        A model the caller genuinely chose (``intent_resolution`` sets
+        ``INTENT_RESOLUTION_MODEL``) is forwarded untouched, so a wrong
+        one still fails at the vendor instead of being quietly repaired.
+        """
+        if not model or model == _AI_CORE_DEFAULT_MODEL:
+            return self.default_tier
+        return model
+
     async def create(
         self,
         *,
@@ -344,7 +380,7 @@ class _RouterCompletions:
 
         provider = await sync_to_async(_resolve, thread_sensitive=False)()
         started = time.monotonic()
-        result = await provider.complete(messages, model=model, tools=tools)
+        result = await provider.complete(messages, model=self._model_for(model), tools=tools)
 
         # DRF-1286 - one forced-tool pass, never a loop. The retry calls
         # `provider.complete` DIRECTLY rather than re-entering `create`,
@@ -368,7 +404,10 @@ class _RouterCompletions:
             retry_started = time.monotonic()
             try:
                 forced = await provider.complete(
-                    messages, model=model, tools=tools, tool_choice="required"
+                    messages,
+                    model=self._model_for(model),
+                    tools=tools,
+                    tool_choice="required",
                 )
             except Exception as exc:  # noqa: BLE001 — keep the first answer
                 # The retry is an optimisation, not the turn. A failure

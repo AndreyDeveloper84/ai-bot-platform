@@ -1507,6 +1507,20 @@ if _SKILL_LLM_PROVIDER_RAW:
 else:
     SKILL_LLM_PROVIDER = {}
 
+# INTENT_RESOLUTION_MODEL — model for the post-reply intent resolver
+# (`apps.orchestrator.intent_resolution.resolve_intent`). DRF-1443: the
+# resolver already read this name via `getattr(settings, ...)` but the
+# setting itself was never defined here, so the hard-coded OpenAI
+# fallback behind that getattr was unreachable from the environment —
+# an operator who saw the 404s had nothing to turn.
+#
+# The default is the vendor-neutral "fast" tier from
+# `apps.llm.model_tiers`, resolved to the CALLED vendor's own cheap
+# model at the provider boundary. Set a concrete vendor id here only to
+# pin one deployment to one model; it is then forwarded verbatim and
+# will fail at the vendor if it names another vendor's model line.
+INTENT_RESOLUTION_MODEL = os.environ.get("INTENT_RESOLUTION_MODEL", "fast")
+
 # ANTHROPIC_API_KEY / ANTHROPIC_PROXY — read by
 # `apps.llm.providers.anthropic_provider.AnthropicProvider.__init__`.
 # The proxy falls back to OPENAI_PROXY inside the provider when unset,

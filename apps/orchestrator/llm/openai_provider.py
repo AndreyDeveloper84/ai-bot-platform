@@ -20,6 +20,7 @@ from asgiref.sync import sync_to_async
 from django.conf import settings
 
 from apps.audit.services import write_audit
+from apps.llm.model_tiers import resolve_model
 from apps.orchestrator.llm.breaker import BreakerOpenError, with_circuit_breaker
 from apps.orchestrator.llm.templates import get_fallback
 
@@ -85,7 +86,19 @@ class OpenAIProvider:
         cached fallback template; ``is_fallback=True``.
         """
 
-        chosen_model = model or self.default_model
+        # DRF-1443 — this wrapper is OpenAI-only by construction, so a
+        # vendor id needs no translation here. It still runs the shared
+        # resolver for one reason: the vendor-neutral tier names are now
+        # the vocabulary of ``apps.orchestrator.intent_router``, and that
+        # module reaches BOTH the router-resolved provider and this one.
+        # Without this line a legacy-path classify would post the literal
+        # string "fast" to OpenAI and 400.
+        chosen_model = resolve_model(
+            model,
+            vendor="openai",
+            fast=self.default_model,
+            smart=self.default_model,
+        )
         try:
             return await with_circuit_breaker(
                 _BREAKER_NAME,
