@@ -287,6 +287,11 @@ def parse_correction_value(field: str, text: str) -> Any | None:
         return None
 
     if field == FIELD_GRAMS:
+        # «-300» — минус не часть числа для ``\d+``, и 300 г сохранялись как
+        # будто человек подтвердил порцию (ревью DRF-1454). Отрицательной
+        # порции не бывает: знак перед любой цифрой обесценивает весь ответ.
+        if re.search(r"[-−]\s*\d", text):
+            return None
         match = _GRAMS_RE.search(text)
         if match is None:
             return None

@@ -269,6 +269,51 @@ class TestTheNameAnswerIsNotAnyText:
         assert not skill.matches(_pending_context("Ок\n300"))
 
 
+class TestServiceWordsAreNotDishes:
+    """Ревью DRF-1454, ось correctness, MUST_FIX_PRE_PILOT: ``_NOT_A_DISH_RE``
+    не знал «найди|сотри|удали|отмена|помощь», и служебные просьбы на живом
+    промпте «что было на фото?» распознавались как название блюда. «удали мои
+    данные» и «сотри всё» — запросы по 152-ФЗ; записать их как блюдо — значит
+    украсть ход у команды стирания."""
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "найди мастера",
+            "отмена",
+            "помощь",
+            "удали мои данные",
+            "сотри всё",
+            "запись к мастеру",
+            "оставляем",  # ответ на «Оставляем?» — не блюдо (см. TestKeepOrChange)
+        ],
+    )
+    def test_a_service_request_is_not_a_dish_name(self, text: str) -> None:
+        skill = FoodCorrectionSkill()
+        # Presence first: the same pending context DOES claim a real dish name.
+        assert skill.matches(_pending_context("Борщ", field="name"))
+
+        assert not skill.matches(_pending_context(text, field="name"))
+
+
+class TestApproximateAndNegativeGrams:
+    """Ревью DRF-1454, мелкие находки: «примерно 300» не распознавалось
+    (префикс длиннее шести символов), а «-300» сохранялось как 300 г —
+    ``\\d+`` не видит знак."""
+
+    @pytest.mark.parametrize("text", ["примерно 300", "около 250 грамм", "где-то 400 г"])
+    def test_a_longer_prefix_still_reads_as_a_weight_answer(self, text: str) -> None:
+        assert FoodCorrectionSkill().matches(_pending_context(text))
+
+    @pytest.mark.parametrize("text", ["-300", "−300"])
+    def test_a_negative_number_is_not_a_portion(self, text: str) -> None:
+        from apps.orchestrator.memory import food as food_memory
+
+        assert (
+            food_memory.parse_correction_value(food_memory.FIELD_GRAMS, text) is None
+        )
+
+
 class TestAnUnreadableAnswerKeepsTheQuestionOpen:
     """The re-ask used to clear the pending record first, so the bot asked a
     question it had stopped listening to and the person's next «300» fell

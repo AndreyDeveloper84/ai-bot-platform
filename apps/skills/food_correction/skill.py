@@ -121,8 +121,10 @@ _PENDING_TTL_SECONDS = 600
 # Answer shapes — the *matching* gate (stricter than the parser, which only has
 # to read a value once the turn is already ours). ``[^\d\n]`` rather than ``\D``
 # throughout: ``\D`` matches a newline, so «Ок\n300» read as an answer about
-# weight when it was two sentences, only one of which was.
-_SHAPE_GRAMS = re.compile(r"^[^\d\n]{0,6}\d{1,4}\s*(?:г|гр|грамм\w*)?\.?$", re.IGNORECASE)
+# weight when it was two sentences, only one of which was. The prefix budget is
+# twelve chars, not six: «примерно 300» and «где-то 400 г» are answers about
+# weight too (review DRF-1454).
+_SHAPE_GRAMS = re.compile(r"^[^\d\n]{0,12}\d{1,4}\s*(?:г|гр|грамм\w*)?\.?$", re.IGNORECASE)
 _SHAPE_MACROS = re.compile(
     r"^[^\d\n]{0,10}\d{1,4}\s*[/|]\s*[^\d\n]{0,3}\d{1,4}\s*[/|]\s*[^\d\n]{0,3}\d{1,4}[^\d\n]{0,10}$"
 )
@@ -147,8 +149,14 @@ _SHAPE_NAME = re.compile(r"^(?=.*[^\W\d_]{2})[^\d\n?!]{2,30}$", re.UNICODE)
 _MAX_NAME_WORDS = 3
 _NOT_A_DISH_RE = re.compile(
     r"^\s*(?:что|чего|как|где|когда|почему|зачем|кто|какие|какой|сколько"
-    r"|хочу|хотел\w*|можно|нужно|надо|покажи|дай|скажи|расскажи|помоги|давай"
-    r"|забудь|запиши|запомни|отмени|перенеси|открой|пройти|начать|стоп"
+    r"|хочу|хотел\w*|можно|нужно|надо|покажи|дай|скажи|расскажи|помоги|помощь|давай"
+    r"|забудь|запиши|запомни|отмени|отмена|отбой|перенеси|открой|пройти|начать|стоп"
+    # Служебные просьбы (ревью DRF-1454): «удали мои данные» и «сотри всё» —
+    # запросы на стирание по 152-ФЗ, «найди мастера» / «запись к мастеру» —
+    # ходы записи. Ни одно из них — не название блюда.
+    r"|найди|ищи|поищи|сотри|удали|запис\w*|мастер\w*"
+    # Ответы на «Оставляем?» — подтверждение/отказ, а не блюдо.
+    r"|оставляем|оставь"
     r"|спасибо|привет|здравствуй\w*|пока|ок|окей|да|нет|ага|угу"
     r"|мой|моя|мои|моё|мне|меня)\b",
     re.IGNORECASE,
