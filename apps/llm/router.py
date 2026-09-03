@@ -346,6 +346,22 @@ class LLMRouter:
     # Public API
     # ------------------------------------------------------------------
 
+    def preload(self, name: str) -> LLMProvider:
+        """Construct + cache one provider WITHOUT resolving or auditing.
+
+        DRF-1445. The warm-up path (:mod:`apps.llm.warmup`) needs the
+        very instance ``get_provider`` will later hand out, so that the
+        SDK import and client construction it pays for are the ones the
+        serving path skips. It must not go through ``get_provider``
+        itself: that resolves tiers it has no tenant for and writes an
+        audit row for a resolution nobody asked for.
+
+        Raises :class:`LLMProviderUnavailable` exactly as the serving
+        path would - the caller decides whether a vendor that cannot
+        even be constructed is fatal (it is not, at boot).
+        """
+        return self._load_provider(name)
+
     def get_provider(
         self,
         tenant: "Tenant | None" = None,
@@ -601,6 +617,16 @@ def _write_quota_fallback_audit(payload: dict[str, Any]) -> None:
         target="LLMRouter",
         payload=payload,
     )
+
+
+def registered_provider_names() -> tuple[str, ...]:
+    """Every vendor name the registry knows, in declaration order.
+
+    Public read of :data:`_PROVIDER_NAMES` for callers outside this
+    module (DRF-1445 warm-up) that need to validate an operator-supplied
+    vendor name without reaching into a private.
+    """
+    return _PROVIDER_NAMES
 
 
 def provider_is_configured(name: str) -> bool:

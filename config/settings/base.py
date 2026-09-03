@@ -1578,6 +1578,38 @@ LLM_RETRY_MAX_ATTEMPTS = int(os.environ.get("LLM_RETRY_MAX_ATTEMPTS", "2"))
 LLM_RETRY_BASE_DELAY_S = float(os.environ.get("LLM_RETRY_BASE_DELAY_S", "1.0"))
 LLM_RETRY_MAX_DELAY_S = float(os.environ.get("LLM_RETRY_MAX_DELAY_S", "30.0"))
 
+# DRF-1445 — process warm-up for the vendor SDK clients.
+#
+# The pilot's first message after a worker restart took 57 s; 54 s of it
+# was ONE honest model call, and inside that call `import anthropic`
+# alone measured 31.1 s against a cold page cache (same host: %util 84,
+# r_await 174 ms, 1963 MB of 2047 MB swap in use). `apps.llm.warmup`
+# moves that import + the client construction to a daemon thread at
+# consumer start. Full measurements, and the "this is a splint, the cure
+# is a host with RAM" caveat, live in that module's docstring.
+#
+# Deliberately NOT a warm-up REQUEST: the measured cost is local, so a
+# vendor ping would buy ~1 s and spend a real call at every restart.
+#
+# LLM_WARMUP_ENABLED: master switch. On by default. Set to 0 to put the
+#   first answer back on the human's turn — which is also how the fix is
+#   proved by mutation.
+# LLM_WARMUP_PROVIDERS: comma-separated override of WHICH vendors to
+#   warm. Empty (the default) → whatever the router's own settings say
+#   this process will call: LLM_PROVIDER plus every SKILL_LLM_PROVIDER
+#   value. Pin it only to warm a vendor those settings do not name.
+LLM_WARMUP_ENABLED = os.environ.get("LLM_WARMUP_ENABLED", "1") not in {
+    "0",
+    "false",
+    "False",
+    "",
+}
+LLM_WARMUP_PROVIDERS = [
+    _name.strip()
+    for _name in os.environ.get("LLM_WARMUP_PROVIDERS", "").split(",")
+    if _name.strip()
+]
+
 # DRF-1054 (LLM availability monitor) + DRF-1056 (connection warm-up).
 # Beat entry: CELERY_BEAT_SCHEDULE["llm.probe_availability"], every 5
 # min. Logic + rationale: apps/llm/health.py.

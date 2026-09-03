@@ -358,6 +358,17 @@ class OpenAIProvider:
 
         return _hook
 
+    def warm_up(self) -> None:
+        """Pay the SDK import + client construction now, off a human's turn.
+
+        DRF-1445 - twin of ``AnthropicProvider.warm_up``; see that
+        docstring for the pilot measurements. Same shape on purpose: the
+        expensive part is the lazy ``from openai import ...`` plus the
+        SSL context inside ``DefaultAsyncHttpxClient``, and neither of
+        them needs the network. Idempotent.
+        """
+        self._get_client()
+
     def _get_client(self) -> Any:
         """Lazy SDK client with optional HTTP proxy."""
         if self._client is not None:

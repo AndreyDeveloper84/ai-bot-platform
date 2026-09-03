@@ -360,6 +360,23 @@ class AnthropicProvider:
 
         return _hook
 
+    def warm_up(self) -> None:
+        """Pay the SDK import + client construction now, off a human's turn.
+
+        DRF-1445. On the pilot this is where the first message's minute
+        went: ``import anthropic`` measured 31.1 s against a cold page
+        cache (4.8 s and 3.5 s on the two processes after it), plus
+        1.0 s to build the SSL context from the certifi bundle and 2.8 s
+        for ``DefaultAsyncHttpxClient`` - while the request that follows
+        costs ~1.7 s. All of that is local work, so warming needs no
+        vendor call: this method deliberately stops at ``_get_client()``.
+
+        Idempotent and cheap on an already-warm provider - ``_get_client``
+        returns the cached client - so calling it cannot disturb the
+        steady state it exists to protect.
+        """
+        self._get_client()
+
     def _get_client(self) -> Any:
         """Lazy SDK client with optional HTTP proxy."""
         if self._client is not None:
