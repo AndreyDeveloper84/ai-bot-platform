@@ -3,6 +3,38 @@
 # Brings up 6 services: web, worker, postgres 16, redis 7, chromadb, minio.
 # All persistent state lives in named volumes — `docker compose down`
 # preserves data; `docker compose down -v` is the explicit reset.
+#
+# ## DRF-1391 — why `DJANGO_ALLOWED_HOSTS` is NOT declared here
+#
+# It used to be, as `DJANGO_ALLOWED_HOSTS: "*"`, on `web`, `worker` and
+# `shadow-worker`. Two facts, both measured rather than reasoned:
+#
+# 1. It did nothing for THIS stack. Every service here runs
+#    `DJANGO_SETTINGS_MODULE: config.settings.local`, and
+#    `config/settings/local.py` assigns `ALLOWED_HOSTS = ["*"]`
+#    unconditionally, AFTER base.py has read the env var. The dev stack
+#    is wide-open by settings, not by this line.
+#
+# 2. It silently disarmed host checking on the pilot. Compose merges a
+#    service's `environment:` mapping across `-f` files key by key, and
+#    `environment:` beats `env_file:`. `docker-compose.staging.yml` does
+#    not list `DJANGO_ALLOWED_HOSTS` in its `x-staging-app-env` anchor,
+#    so this file's `"*"` survived the merge and overrode the operator's
+#    value in `.env.staging`. Measured with `docker compose config`:
+#
+#      web / worker / shadow-worker   DJANGO_ALLOWED_HOSTS: '*'
+#      celery-worker / celery-beat    DJANGO_ALLOWED_HOSTS: <.env.staging>
+#
+#    The two celery services differ only in that they have no
+#    counterpart in this file — so the SAME env file produced two
+#    different host lists inside one stack, and nothing said so.
+#
+# So: a variable whose correct value differs per contour does not belong
+# in the shared base file. Contours that need one set it in their own env
+# file (`.env` locally, `.env.staging` on the pilot). The drift between
+# what an env file declares and what the process actually got is reported
+# at start by `config/env_file_drift.py` (registered as check
+# `observability.W010`).
 
 services:
   postgres:
@@ -95,7 +127,6 @@ services:
     environment:
       DJANGO_SETTINGS_MODULE: config.settings.local
       DJANGO_DEBUG: "True"
-      DJANGO_ALLOWED_HOSTS: "*"
       POSTGRES_HOST: postgres
       POSTGRES_PORT: "5432"
       POSTGRES_DB: ai_bot_platform
@@ -147,7 +178,6 @@ services:
     environment:
       DJANGO_SETTINGS_MODULE: config.settings.local
       DJANGO_DEBUG: "True"
-      DJANGO_ALLOWED_HOSTS: "*"
       POSTGRES_HOST: postgres
       POSTGRES_PORT: "5432"
       POSTGRES_DB: ai_bot_platform
@@ -189,7 +219,6 @@ services:
     environment:
       DJANGO_SETTINGS_MODULE: config.settings.local
       DJANGO_DEBUG: "True"
-      DJANGO_ALLOWED_HOSTS: "*"
       POSTGRES_HOST: postgres
       POSTGRES_PORT: "5432"
       POSTGRES_DB: ai_bot_platform
