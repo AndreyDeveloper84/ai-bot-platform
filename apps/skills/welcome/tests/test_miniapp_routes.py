@@ -47,6 +47,7 @@ from apps.skills.welcome.skill import (
 _ROOT = Path(__file__).resolve().parents[4]
 _APP_TSX = _ROOT / "apps" / "miniapp" / "src" / "App.tsx"
 _MAX_SDK_TS = _ROOT / "apps" / "miniapp" / "src" / "lib" / "max-sdk.ts"
+_GOAL_SELECT_TSX = _ROOT / "apps" / "miniapp" / "src" / "screens" / "GoalSelectScreen.tsx"
 
 #: A Mini App base that is a bare domain, per the DRF-1326 contract.
 _BASE = "https://miniapp-dev.example"
@@ -101,6 +102,33 @@ def _route_map() -> dict[str, str]:
     pairs = dict(re.findall(r'^\s*(\w+):\s*"([^"]+)",', body.group(1), re.MULTILINE))
     if not pairs:
         raise AssertionError(f"_ROUTE_MAP in {_MAX_SDK_TS} parsed as empty.")
+    return pairs
+
+
+def _next_routes() -> dict[str, str]:
+    """``NEXT_ROUTES`` from ``GoalSelectScreen.tsx`` — the server's ``next.id``
+    → path table (DRF-1451).
+
+    The second slug→path table in the Mini App, and the same defect class
+    as ``_ROUTE_MAP``: the server names a destination, the client spells
+    it, and a misspelling is invisible because the address never appears
+    anywhere a person can read it. The vitest suite cannot catch it — it
+    mounts its own probe route rather than the real ``App.tsx`` table.
+    """
+    src = _GOAL_SELECT_TSX.read_text(encoding="utf-8")
+    body = re.search(
+        r"const NEXT_ROUTES: Record<string, string> = \{(.*?)\n\};",
+        src,
+        re.DOTALL,
+    )
+    if body is None:
+        raise AssertionError(
+            f"NEXT_ROUTES not found in {_GOAL_SELECT_TSX} — the parser and the "
+            "source have drifted apart. Fix the parser; do not delete the test."
+        )
+    pairs = dict(re.findall(r'^\s*(\w+):\s*"([^"]+)",', body.group(1), re.MULTILINE))
+    if not pairs:
+        raise AssertionError(f"NEXT_ROUTES in {_GOAL_SELECT_TSX} parsed as empty.")
     return pairs
 
 
@@ -331,3 +359,31 @@ class TestZeroConfigLadder:
         buttons = _built_buttons(settings, web_app="", miniapp_url="", pilot_ux=pilot_ux)
         for button in buttons:
             assert button.get("callback"), f"button with no action at all: {button}"
+
+
+# ---------------------------------------------------------------------------
+# DRF-1451 — the goal surface's own slug→path table
+# ---------------------------------------------------------------------------
+
+
+class TestNextRoutesReachRealScreens:
+    """``next.id`` sent by the server must resolve to a declared route.
+
+    DRF-1451 moved "where does this person go now" onto the server: the
+    decision-context document carries ``next: {id, label}`` and the Mini
+    App maps the id to a path. That map is the same trap ``_ROUTE_MAP``
+    is — a dead path renders the SPA catch-all, which looks like a
+    working screen and reports nothing.
+    """
+
+    def test_parser_sees_something(self):
+        assert _next_routes(), "NEXT_ROUTES parsed as empty — fix the parser"
+
+    def test_every_next_route_is_declared(self):
+        routes = _miniapp_routes()
+        for slug, path in _next_routes().items():
+            assert _route_exists(path, routes), (
+                f"next.id {slug!r} resolves to {path!r}, which is not a route in "
+                f"{_APP_TSX.name}. The catch-all would render HelloScreen and the "
+                "person would land on a greeting instead of the catalog."
+            )
