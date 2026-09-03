@@ -144,6 +144,22 @@ class PIITokenizingProvider:
         if hasattr(wrapped, "default_embedding_model"):
             self.default_embedding_model = wrapped.default_embedding_model
 
+    def warm_up(self) -> None:
+        """Forward the DRF-1445 process warm-up to the wrapped provider.
+
+        This wrapper sits between the router and every concrete
+        provider, so a warm-up that stopped here would warm nothing —
+        the same failure mode that made ``default_completion_model``
+        read as ``""`` above. Forwarded through ``getattr`` because the
+        wrapped object is duck-typed: an implementation without the hook
+        (an ai-core adapter, a test double) must stay callable, not
+        raise on boot.
+        """
+        warm = getattr(self._wrapped, "warm_up", None)
+        if warm is None:
+            return
+        warm()
+
     async def complete(
         self,
         messages: list[dict[str, Any]],

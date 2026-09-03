@@ -201,6 +201,33 @@ def consume_forever(
         group,
         _consumer_name(),
     )
+
+    # DRF-1445 — pay the LLM SDK import + client construction on a
+    # background thread instead of on the first human's turn. On the
+    # pilot that cost 54 s of a 57 s first answer.
+    #
+    # AFTER the "starting" log and BEFORE the loop, on purpose:
+    # readiness is announced first and the loop is entered immediately,
+    # so a worker still consumes while it warms. Trading a slow answer
+    # for a lost message would be a worse bug than the one being fixed.
+    #
+    # Imported inside the try rather than at module scope so the
+    # consumer keeps booting even if the warm-up module itself is
+    # broken, and so `--once` (which never reaches this function) stays
+    # import-free.
+    #
+    # The guard is not redundant with the one inside the thread: THAT
+    # one covers the vendor being unreachable, this one covers the
+    # warm-up code being wrong. A drainer that refuses to start
+    # re-creates the #1010 symptom (stream accepted, never processed),
+    # which is a far worse failure than a cold first answer.
+    try:
+        from apps.llm.warmup import start_background_warmup
+
+        start_background_warmup()
+    except Exception:  # noqa: BLE001 — boot must not depend on warm-up
+        logger.warning("workers.llm_warmup_start_failed — consuming cold", exc_info=True)
+
     try:
         while True:
             consume_once(streams=streams, group=group)
