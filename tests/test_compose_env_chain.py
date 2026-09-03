@@ -66,7 +66,14 @@ def _ignore_unknown_tag(loader: yaml.SafeLoader, tag_suffix: str, node: yaml.Nod
         return loader.construct_sequence(node, deep=True)
     if isinstance(node, yaml.MappingNode):
         return loader.construct_mapping(node, deep=True)
-    return loader.construct_scalar(node)
+    if isinstance(node, yaml.ScalarNode):
+        return loader.construct_scalar(node)
+    # A YAML node is scalar, sequence or mapping and nothing else. Raising
+    # here keeps the narrowing honest instead of returning None for a case
+    # that cannot occur.
+    raise yaml.constructor.ConstructorError(
+        None, None, f"unsupported node type {type(node).__name__}", node.start_mark
+    )
 
 
 _TagTolerantLoader.add_multi_constructor("!", _ignore_unknown_tag)
