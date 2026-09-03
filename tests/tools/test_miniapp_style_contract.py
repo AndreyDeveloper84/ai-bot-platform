@@ -217,6 +217,56 @@ def test_a_root_with_no_tab_bars_at_all_is_not_a_problem(
     assert guard.main(["miniapp_style_contract.py", str(root)]) == 0
 
 
+def _chip_row_app(tmp_path: Path, *, css: str) -> Path:
+    return _app(
+        tmp_path,
+        tsx='export const S = () => <div className="chip-row" />;' + NL,
+        css=css,
+    )
+
+
+def test_a_chip_row_that_wraps_is_not_reported(tmp_path: Path) -> None:
+    root = _chip_row_app(
+        tmp_path,
+        css=".chip-row { display: flex; flex-wrap: wrap; gap: 8px; }" + NL,
+    )
+
+    assert guard.scan_chip_rows(root) == []
+
+
+def test_a_chip_row_that_cannot_wrap_is_reported(tmp_path: Path) -> None:
+    """The DRF-1458 defect: seven suggestions, three and a half on screen."""
+    root = _chip_row_app(tmp_path, css=".chip-row { display: flex; gap: 8px; }" + NL)
+
+    problems = guard.scan_chip_rows(root)
+
+    assert len(problems) == 1
+    assert "`.chip-row` is a flex row without `flex-wrap: wrap`" in problems[0]
+
+
+def test_the_flex_flow_shorthand_counts_as_wrapping(tmp_path: Path) -> None:
+    """`flex-flow: row wrap` says the same thing in one declaration."""
+    root = _chip_row_app(tmp_path, css=".chip-row { display: flex; flex-flow: row wrap; }" + NL)
+
+    assert guard.scan_chip_rows(root) == []
+
+
+def test_a_bem_variant_of_a_chip_row_is_checked_too(tmp_path: Path) -> None:
+    root = _chip_row_app(tmp_path, css=".goal-select__chip-row { display: flex; }" + NL)
+
+    problems = guard.scan_chip_rows(root)
+
+    assert len(problems) == 1
+    assert "`.goal-select__chip-row`" in problems[0]
+
+
+def test_a_chip_row_that_is_not_a_flex_container_is_left_alone(tmp_path: Path) -> None:
+    """Only a flex row can lay an unknown-length list out on one line."""
+    root = _chip_row_app(tmp_path, css=".chip-row { display: block; margin: 8px; }" + NL)
+
+    assert guard.scan_chip_rows(root) == []
+
+
 # --------------------------------------------------------------------------
 # The real tree.
 # --------------------------------------------------------------------------
@@ -244,6 +294,18 @@ def test_the_real_tab_bars_fit_one_row() -> None:
     app_root = _PROJECT_ROOT / "apps" / "miniapp"
 
     assert guard.scan_tabbar_columns(app_root) == []
+
+
+def test_the_real_chip_rows_wrap() -> None:
+    """The 2026-09-03 regression (DRF-1458), named so a revert cannot pass quietly.
+
+    The goal surface renders one chip per server-supplied suggestion and
+    one per anketa option. Drop the wrap and the owner's screenshot comes
+    back: seven suggestions, three and a half of them reachable.
+    """
+    app_root = _PROJECT_ROOT / "apps" / "miniapp"
+
+    assert guard.scan_chip_rows(app_root) == []
 
 
 def test_the_real_miniapp_matches_its_baseline_exactly() -> None:

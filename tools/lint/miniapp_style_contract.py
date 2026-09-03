@@ -62,6 +62,32 @@ So it is read as text -- count the tab entries the component declares,
 read ``repeat(N, 1fr)`` off the class its ``<nav>`` renders, and require
 the two numbers to be equal.
 
+# Third check: chip rows must wrap
+
+A chip row holds a list whose length the client does not know: the goal
+surface renders one chip per `suggestions` entry and one per anketa
+`options` entry, both straight from the server's document. A flex row
+that does not wrap lays an unknown-length list out on one line and lets
+it run off the side of the screen.
+
+That is what the owner photographed on 2026-09-03 (DRF-1458): seven
+suggestions in the MAX panel, three and a half of them visible, a
+sideways scrollbar nobody thinks to drag, and the rest of the options
+simply gone. Measured on the real document the page was 710px wide in a
+390px viewport.
+
+It lives here for the third time for the same reason as the two checks
+above: `apps/miniapp` runs vitest with ``css: false``, so the stylesheet
+is empty inside a test, and jsdom does not lay a flex row out even when
+it is not. Only reading the declaration as text can see this.
+
+Narrow on purpose. It asks one question -- does a rule whose class name
+ends in ``chip-row`` and which turns the element into a flex container
+also say it may wrap -- and it asks it of the stylesheet, not of the
+screens. A row that overflows for some other reason is not covered, and
+pretending otherwise would make this guard's silence mean more than it
+does.
+
 # The baseline ratchets down
 
 A name in ``BASELINE`` that is no longer unstyled is itself a failure:
@@ -97,6 +123,17 @@ GRID_RULE = re.compile(
     r"repeat\(\s*(\d+)\s*,",
     re.DOTALL,
 )
+
+# A rule for a chip row -- `.chip-row` itself or any BEM variant of it --
+# together with its declaration block.
+CHIP_ROW_RULE = re.compile(r"\.([A-Za-z0-9_-]*chip-row)\s*\{([^}]*)\}", re.DOTALL)
+# The declaration that makes the element a flex container at all. Only a
+# flex row can lay an unknown-length list out on one line; a block or a
+# grid cannot, so only a flex row is asked to wrap.
+DISPLAY_FLEX = re.compile(r"display:\s*(?:inline-)?flex\b")
+# Either spelling of "you may wrap": the longhand or the `flex-flow`
+# shorthand that carries direction and wrapping together.
+WRAPS = re.compile(r"flex-(?:wrap|flow):[^;]*\bwrap\b")
 
 # Components whose `<nav>` is a tab-bar grid. The check is exactly as
 # wide as this tuple -- add a bar here when you add one.
@@ -279,6 +316,24 @@ def scan_tabbar_columns(app_root: Path) -> list[str]:
     return problems
 
 
+def scan_chip_rows(app_root: Path) -> list[str]:
+    """Return one message per chip-row rule that is a flex row and cannot wrap."""
+    css = stylesheet_text(app_root)
+    problems: list[str] = []
+
+    for match in CHIP_ROW_RULE.finditer(css):
+        name, body = match.group(1), match.group(2)
+        if DISPLAY_FLEX.search(body) and not WRAPS.search(body):
+            problems.append(
+                f"`.{name}` is a flex row without `flex-wrap: wrap` -- it holds a "
+                "server-supplied list of unknown length, so a row that cannot wrap "
+                "runs off the side of the screen and hides the chips past the edge "
+                "behind a scrollbar nobody drags (DRF-1458)"
+            )
+
+    return problems
+
+
 def main(argv: list[str]) -> int:
     if len(argv) != 2:
         print("usage: miniapp_style_contract.py <apps/miniapp>", file=sys.stderr)
@@ -294,6 +349,10 @@ def main(argv: list[str]) -> int:
         where, message = problem.split(": ", 1)
         print(f"::error file=apps/miniapp/{where}::{message}")
 
+    chip_row_problems = scan_chip_rows(app_root)
+    for message in chip_row_problems:
+        print(f"::error::{message}")
+
     found = set(scan(app_root))
     new_debt = sorted(found - BASELINE)
     stale = sorted(BASELINE - found)
@@ -307,13 +366,15 @@ def main(argv: list[str]) -> int:
             "from tools/lint/miniapp_style_contract.py"
         )
 
-    if new_debt or stale or tabbar_problems:
+    if new_debt or stale or tabbar_problems or chip_row_problems:
         print(
             f"\nminiapp_style_contract: {len(new_debt)} unstyled class(es), "
             f"{len(stale)} stale baseline entr(ies), "
-            f"{len(tabbar_problems)} tab bar(s) that do not fit one row. "
+            f"{len(tabbar_problems)} tab bar(s) that do not fit one row, "
+            f"{len(chip_row_problems)} chip row(s) that cannot wrap. "
             "A class name with no rule renders as nothing — that is DRF-1066. "
-            "A tab bar with more tabs than columns wraps over the screen.",
+            "A tab bar with more tabs than columns wraps over the screen. "
+            "A chip row that cannot wrap runs off the side of it — DRF-1458.",
             file=sys.stderr,
         )
         return 1
@@ -321,7 +382,7 @@ def main(argv: list[str]) -> int:
     checked = sum(1 for rel in TABBAR_COMPONENTS if (app_root / rel).is_file())
     print(
         f"miniapp_style_contract: clean ({len(BASELINE)} accepted, none new; "
-        f"{checked} tab bar(s) fit one row)."
+        f"{checked} tab bar(s) fit one row; every chip row wraps)."
     )
     return 0
 
