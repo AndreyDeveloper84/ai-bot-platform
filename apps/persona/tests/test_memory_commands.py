@@ -173,6 +173,10 @@ class TestFoodScannerRowsBelongToThePitanieDomain:
 
     def test_domain_forget_takes_the_food_rows_with_it(self):
         upc = _upc_with_food_rows()
+        assert (
+            MemoryEntry.objects.filter(user_id=upc.user_id, soft_deleted_at__isnull=True).count()
+            == 3
+        )
 
         res = handle_memory_command(user_id=upc.user_id, text="забудь всё про питание")
 
@@ -187,6 +191,10 @@ class TestFoodScannerRowsBelongToThePitanieDomain:
         """Строка diet и строки food_* — один домен «питание», а не два
         неоднозначных (иначе команда уходила бы в clarify)."""
         upc = _upc_with_food_rows(_upc_with_green("vegan"))
+        assert (
+            MemoryEntry.objects.filter(user_id=upc.user_id, soft_deleted_at__isnull=True).count()
+            == 4
+        )
 
         res = handle_memory_command(user_id=upc.user_id, text="забудь всё про моё питание")
 

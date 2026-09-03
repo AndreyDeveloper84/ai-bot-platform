@@ -342,7 +342,12 @@ class TestKeepOrChange:
     @pytest.mark.parametrize("text", ["да", "нет", "Оставляем"])
     def test_no_value_remembered_means_nothing_to_keep(self, text: str) -> None:
         """На чистом вопросе «да»/«нет» — не ответ: ход идёт дальше по лестнице."""
-        assert not FoodCorrectionSkill().matches(_pending_context(text))
+        skill = FoodCorrectionSkill()
+        # Положительная стража на тех же данных: с запомненным значением тот же
+        # текст скилл забирает — то есть «не забрал» ниже отвечает за pending
+        # без значения, а не за сломанный matches() вообще.
+        assert skill.matches(_pending_context(text, remembered=True, known_value=500))
+        assert not skill.matches(_pending_context(text))
 
     def test_a_confirmation_keeps_the_stored_value_and_settles(self) -> None:
         skill = FoodCorrectionSkill()
