@@ -131,6 +131,8 @@ def _pending_context(
     field: str = "grams",
     dish: str = "борщ",
     age_seconds: int = 0,
+    remembered: bool = False,
+    known_value: object = None,
 ) -> SkillContext:
     """A context whose conversation is waiting for a correction value."""
 
@@ -143,6 +145,8 @@ def _pending_context(
             "field": field,
             "scan_id": "scan-1",
             "dish": dish,
+            "remembered": remembered,
+            "value": known_value,
             "at": (datetime.now(_tz.utc) - timedelta(seconds=age_seconds)).isoformat(),
         },
     }
@@ -312,6 +316,68 @@ class TestApproximateAndNegativeGrams:
         assert (
             food_memory.parse_correction_value(food_memory.FIELD_GRAMS, text) is None
         )
+
+
+class TestKeepOrChange:
+    """Ревью DRF-1454, ось correctness, MUST_FIX_PRE_PILOT: все три промпта
+    «в прошлый раз было X» заканчиваются «Оставляем?», но matches() требовал
+    форму НОВОГО значения — «да»/«нет» уходили консьержу, а «Оставляем» на
+    промпте про имя само сохранялось как название блюда."""
+
+    @pytest.mark.parametrize("text", ["да", "Оставляем", "ок"])
+    def test_a_confirmation_is_claimed_on_a_remembered_prompt(self, text: str) -> None:
+        assert FoodCorrectionSkill().matches(
+            _pending_context(text, remembered=True, known_value=500)
+        )
+
+    def test_a_decline_is_claimed_on_a_remembered_prompt(self) -> None:
+        assert FoodCorrectionSkill().matches(
+            _pending_context("нет", remembered=True, known_value=500)
+        )
+
+    @pytest.mark.parametrize("text", ["да", "нет", "Оставляем"])
+    def test_no_value_remembered_means_nothing_to_keep(self, text: str) -> None:
+        """На чистом вопросе «да»/«нет» — не ответ: ход идёт дальше по лестнице."""
+        assert not FoodCorrectionSkill().matches(_pending_context(text))
+
+    def test_a_confirmation_keeps_the_stored_value_and_settles(self) -> None:
+        skill = FoodCorrectionSkill()
+        written: list = []
+        with patch(
+            "apps.conversations.services.write_skill_state",
+            side_effect=lambda conv, key, value: written.append((key, value)),
+        ):
+            result = skill.handle(_pending_context("да", remembered=True, known_value=500))
+
+        assert "500" in result.reply_text
+        assert "апомнила" not in result.reply_text  # ничего нового не писали
+        assert result.meta["reply_kind"] == "food_correction_grams_kept"
+        assert written and written[-1][1] is None  # вопрос закрыт
+
+    def test_a_confirmation_on_a_name_prompt_does_not_become_a_dish(self) -> None:
+        """«Оставляем» на промпте про имя — худший случай находки."""
+        result = FoodCorrectionSkill().handle(
+            _pending_context(
+                "Оставляем", field="name", remembered=True, known_value="Куриная грудка"
+            )
+        )
+        assert "Куриная грудка" in result.reply_text
+        assert result.meta["reply_kind"] == "food_correction_name_kept"
+
+    def test_a_decline_reasks_with_the_plain_prompt_and_still_listens(self) -> None:
+        skill = FoodCorrectionSkill()
+        written: list = []
+        with patch(
+            "apps.conversations.services.write_skill_state",
+            side_effect=lambda conv, key, value: written.append((key, value)),
+        ):
+            result = skill.handle(_pending_context("нет", remembered=True, known_value=500))
+
+        assert result.reply_text == _PROMPTS_FOR_TEST["grams"]
+        # Pending обновлён, а не стёрт, и remembered снят — второе «нет»
+        # не должно крутиться по кругу.
+        assert written and written[-1][1] is not None
+        assert written[-1][1]["remembered"] is False
 
 
 class TestAnUnreadableAnswerKeepsTheQuestionOpen:

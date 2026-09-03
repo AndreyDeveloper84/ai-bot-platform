@@ -99,6 +99,20 @@ REMEMBERED_ACK: dict[str, str] = {
 # promise we did not keep.
 NOT_REMEMBERED_ACK = "Поняла, учла."
 
+# «Оставляем?» answered with «да»: the value already stored simply stands.
+_KEPT_ACK: dict[str, str] = {
+    "grams": "Оставляю: «{dish}» — {value} г.",
+    "name": "Оставляю: это «{value}».",
+    "macros": "Оставляю БЖУ: {value}.",
+}
+
+# Answers to the «Оставляем?» question all three «в прошлый раз» prompts end
+# with. matches() used to require the shape of a NEW value, so «да»/«нет»
+# fell through to the concierge — and «Оставляем» on the name prompt was
+# itself stored as the dish name (review DRF-1454, MUST_FIX_PRE_PILOT).
+_CONFIRM_WORDS = frozenset({"да", "ага", "угу", "ок", "окей", "оставляем", "оставь"})
+_DECLINE_WORDS = frozenset({"нет", "не", "неа"})
+
 # The sensitive perimeter, said out loud. Storing this needs the yellow/red
 # consent flow that is not in the pilot — so we say what we do instead of
 # implying memory we do not have.
@@ -183,6 +197,28 @@ def _deterministic_chip_texts() -> frozenset[str]:
     except Exception:  # noqa: BLE001 — a matcher must never break the turn
         logger.exception("food_correction.chip_texts_unavailable")
         return frozenset()
+
+
+def _keep_or_change(text: str) -> str | None:
+    """«confirm» / «decline» when the text answers «Оставляем?», else ``None``."""
+
+    norm = re.sub(r"\s+", " ", text.strip().lower().replace("ё", "е")).strip(" .!,")
+    if norm in _CONFIRM_WORDS:
+        return "confirm"
+    if norm in _DECLINE_WORDS:
+        return "decline"
+    return None
+
+
+def _has_remembered_value(pending: dict[str, Any]) -> bool:
+    """Is this pending record waiting on an «Оставляем?» decision?
+
+    Only then do «да»/«нет» mean keep/change. A plain prompt («Сколько было
+    в граммах?») has no stored value to keep, and a pending record written
+    before this feature has no flag at all — both must not claim «да».
+    """
+
+    return bool(pending.get("remembered")) and pending.get("value") not in (None, "")
 
 
 def _looks_like_dish(text: str) -> bool:
@@ -324,6 +360,10 @@ class FoodCorrectionSkill:
         pending = _pending(context)
         if pending is None:
             return False
+        if _has_remembered_value(pending) and _keep_or_change(text):
+            # «Оставляем?» answered with «да»/«нет» — a decision about the
+            # stored value, not a new one.
+            return True
         field = str(pending.get("field"))
         if food_memory.classify_refusal(text):
             return True
@@ -370,6 +410,10 @@ class FoodCorrectionSkill:
                 "field": field,
                 "scan_id": scan_id,
                 "dish": dish,
+                # Для ответа на «Оставляем?»: «да»/«нет» имеют смысл только
+                # когда есть что оставлять (см. _has_remembered_value).
+                "remembered": remembered,
+                "value": _recalled(recall, field) if remembered else None,
                 "at": datetime.now(timezone.utc).isoformat(),
             },
         )
@@ -421,6 +465,10 @@ class FoodCorrectionSkill:
                 meta={"reply_kind": "food_correction_refusal_not_stored"},
             )
 
+        verdict = _keep_or_change(text)
+        if verdict and _has_remembered_value(pending):
+            return self._handle_keep_or_change(context, pending, verdict)
+
         value = food_memory.parse_correction_value(field, text)
         if value is None:
             # «0» and «99999» have the shape of an answer but no readable value.
@@ -432,9 +480,7 @@ class FoodCorrectionSkill:
             _write_state(
                 context,
                 {
-                    "field": field,
-                    "scan_id": pending.get("scan_id", ""),
-                    "dish": dish,
+                    **pending,
                     "at": datetime.now(timezone.utc).isoformat(),
                 },
             )
@@ -471,6 +517,50 @@ class FoodCorrectionSkill:
                     else f"food_correction_{field}_not_stored"
                 )
             },
+        )
+
+    # ─── «Оставляем?» → keep / change ────────────────────────────────────
+
+    def _handle_keep_or_change(
+        self, context: SkillContext, pending: dict[str, Any], verdict: str
+    ) -> SkillResult:
+        field = str(pending.get("field"))
+        value = pending.get("value")
+
+        if verdict == "confirm":
+            # Nothing to write: the value is already stored — that is exactly
+            # why the «в прошлый раз» prompt was shown. Settle the question.
+            _write_state(context, None)
+            logger.info(
+                "food_correction.kept field=%s conversation=%s",
+                field,
+                getattr(context.conversation, "id", None),
+            )
+            dish = pending.get("dish")
+            return SkillResult(
+                reply_text=_KEPT_ACK[field].format(
+                    dish=dish if isinstance(dish, str) else "", value=value
+                ),
+                action_type="food_correction_recorded",
+                action_data={"field": field, "value": value, "stored": True},
+                meta={"reply_kind": f"food_correction_{field}_kept"},
+            )
+
+        # «нет» — the person wants a different value, but has not given it
+        # yet: re-ask with the plain prompt and keep listening. The
+        # «remembered» flag comes off so a second «нет» does not loop.
+        _write_state(
+            context,
+            {
+                **pending,
+                "remembered": False,
+                "value": None,
+                "at": datetime.now(timezone.utc).isoformat(),
+            },
+        )
+        return SkillResult(
+            reply_text=_PROMPTS[field],
+            meta={"reply_kind": f"food_correction_{field}_reask"},
         )
 
 
