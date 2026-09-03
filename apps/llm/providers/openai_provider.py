@@ -59,6 +59,7 @@ from apps.llm.protocol import (
     LLMVendorCreditsExhausted,
     ToolCall,
 )
+from apps.llm.model_tiers import resolve_model
 from apps.llm.retry import (
     RetriableLLMError,
     RetryPolicy,
@@ -75,6 +76,14 @@ logger = logging.getLogger(__name__)
 
 _DEFAULT_COMPLETION_MODEL = "gpt-4o-mini"
 _DEFAULT_EMBEDDING_MODEL = "text-embedding-3-small"
+
+# DRF-1443 — this vendor's id for the vendor-neutral ``fast`` tier
+# (``apps.llm.model_tiers``). Identical to the completion default today:
+# on OpenAI both tiers have always resolved to ``gpt-4o-mini``, and this
+# constant records that as a deliberate equality rather than changing it.
+# Kept separate so raising the reply tier later does not silently raise
+# the price of every intent classification with it.
+_DEFAULT_FAST_MODEL = "gpt-4o-mini"
 
 
 class OpenAIProvider:
@@ -94,12 +103,14 @@ class OpenAIProvider:
         proxy: str | None = None,
         default_completion_model: str = _DEFAULT_COMPLETION_MODEL,
         default_embedding_model: str = _DEFAULT_EMBEDDING_MODEL,
+        default_fast_model: str = _DEFAULT_FAST_MODEL,
         retry_policy: RetryPolicy | None = None,
     ) -> None:
         self._api_key = api_key or getattr(settings, "OPENAI_API_KEY", "") or ""
         self._proxy = proxy if proxy is not None else getattr(settings, "OPENAI_PROXY", "") or ""
         self.default_completion_model = default_completion_model
         self.default_embedding_model = default_embedding_model
+        self.default_fast_model = default_fast_model
         # Cached SDK client — built on first call.
         self._client: Any = None
         # Phase 1 / PI7 (DRF-858) — retry policy. Lazily defaulted on
@@ -194,7 +205,20 @@ class OpenAIProvider:
         Completions API takes exactly these values, so it passes through
         verbatim. Ignored without ``tools`` (OpenAI rejects the pair).
         """
-        chosen_model = model or self.default_completion_model
+        # DRF-1443 — the caller may name a vendor-neutral tier
+        # (``"fast"`` / ``"smart"``), this vendor's own id, or — when the
+        # router or a caller written for the other vendor supplied it —
+        # a foreign id. Resolution happens HERE, at the vendor boundary,
+        # because this is the only point that knows which vendor is
+        # actually being called. An unrecognised id is passed through
+        # verbatim and 404s at the vendor: see ``apps.llm.model_tiers``
+        # on why silently repairing it would be worse than the outage.
+        chosen_model = resolve_model(
+            model,
+            vendor=self.name,
+            fast=self.default_fast_model,
+            smart=self.default_completion_model,
+        )
 
         # Phase 1 / PI9 (DRF-860) — per-tenant cost cap pre-call gate.
         # Same call shape on both providers via the shared cost_tracker

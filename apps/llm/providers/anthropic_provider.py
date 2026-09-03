@@ -90,6 +90,7 @@ from apps.llm.protocol import (
     LLMVendorCreditsExhausted,
     ToolCall,
 )
+from apps.llm.model_tiers import resolve_model
 from apps.llm.retry import (
     RetriableLLMError,
     RetryPolicy,
@@ -147,6 +148,7 @@ class AnthropicProvider:
         api_key: str | None = None,
         proxy: str | None = None,
         default_completion_model: str = _DEFAULT_REPLY_MODEL,
+        default_fast_model: str = _DEFAULT_INTENT_MODEL,
         retry_policy: RetryPolicy | None = None,
     ) -> None:
         self._api_key = api_key or getattr(settings, "ANTHROPIC_API_KEY", "") or ""
@@ -159,6 +161,13 @@ class AnthropicProvider:
                 or ""
             )
         self.default_completion_model = default_completion_model
+        # DRF-1443 — ``_DEFAULT_INTENT_MODEL`` was declared by Decision 18
+        # and then never reachable: nothing read it, so every Anthropic
+        # call landed on the reply tier. Publishing it as the vendor's
+        # ``fast`` id is what makes the tier vocabulary mean anything
+        # here — and what keeps intent classification, the highest-volume
+        # LLM call in the product, off Sonnet.
+        self.default_fast_model = default_fast_model
         self._client: Any = None
         # Phase 1 / PI7 (DRF-858) — retry policy. Lazy-defaulted on
         # first use (same pattern as OpenAIProvider) so tests that
@@ -212,7 +221,16 @@ class AnthropicProvider:
         back to OpenAI on the next ``get_provider(prefer_fallback_from=
         "anthropic")`` call.
         """
-        chosen_model = model or self.default_completion_model
+        # DRF-1443 — see the twin call in ``OpenAIProvider.complete``.
+        # This is the site of the pilot outage: with Anthropic primary,
+        # ``ayla_ai_core``'s ``gpt-4o-mini`` reached this method verbatim
+        # and every turn came back ``404 not_found_error``.
+        chosen_model = resolve_model(
+            model,
+            vendor=self.name,
+            fast=self.default_fast_model,
+            smart=self.default_completion_model,
+        )
 
         # Phase 1 / PI9 (DRF-860) — per-tenant cost cap. Runs BEFORE
         # the existing L7 per-model org-wide cap so tenants whose own

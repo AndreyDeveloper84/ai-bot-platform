@@ -56,6 +56,8 @@ from typing import Any
 
 from django.conf import settings
 
+from apps.llm.model_tiers import TIER_FAST
+
 logger = logging.getLogger(__name__)
 
 CONTRACT_VERSION = "0.5"
@@ -828,7 +830,14 @@ def resolve_intent(
 
     usage = None
     try:
-        model = getattr(settings, "INTENT_RESOLUTION_MODEL", "gpt-4o-mini")
+        # DRF-1443 — the fallback used to be the literal "gpt-4o-mini"
+        # AND ``INTENT_RESOLUTION_MODEL`` did not exist in
+        # ``config/settings/base.py``, so there was no way to override it
+        # from the environment: on the Anthropic-primary pilot this line
+        # posted an OpenAI id to ``api.anthropic.com`` on every resolver
+        # pass and there was no env var that could stop it. The setting
+        # now exists and defaults to the vendor-neutral ``"fast"`` tier.
+        model = getattr(settings, "INTENT_RESOLUTION_MODEL", TIER_FAST)
         response = asyncio.run(
             llm_client.chat.completions.create(
                 model=model,

@@ -378,6 +378,8 @@ class StubProvider:
     def __init__(self, name: str, *, raises: Exception | None = None) -> None:
         self.name = name
         self.default_completion_model = f"{name}-model"
+        # DRF-1443 — the fast tier joined the Protocol beside it.
+        self.default_fast_model = f"{name}-fast-model"
         self._raises = raises
         self.calls = 0
         self.last_kwargs: dict[str, Any] = {}
@@ -560,11 +562,35 @@ class TestQuotaFallbackHop:
         do not cross vendors, and ``gpt-4o-mini`` sent to Anthropic comes
         back ``404 not_found_error``. The user would still see the static
         fallback — now with a second vendor's bill attached.
+
+        DRF-1443 changed WHICH id the hop lands on. It used to be the
+        target's reply-tier default unconditionally; it is now the
+        target's model for the tier the caller asked for. ``gpt-4o-mini``
+        is the cheap tier, so the hop lands on the target's cheap model —
+        see the companion test below, which sends the reply tier and
+        watches it land on the reply model.
         """
         stubs = _exhausted_and_healthy()
 
         provider = _router_with(stubs).get_provider(None, op="complete")
         result = await provider.complete([], model="gpt-4o-mini")
+
+        assert stubs["anthropic"].last_kwargs["model"] == "anthropic-fast-model"
+        assert result.model == "anthropic-fast-model"
+
+    @pytest.mark.asyncio
+    async def test_the_hop_carries_the_tier_rather_than_flattening_it(self) -> None:
+        """The pair for the test above (DRF-1443).
+
+        One test alone cannot tell "the tier is preserved" from "the hop
+        always picks the cheap model" — which would silently downgrade a
+        customer-facing reply the moment the primary ran out of credit.
+        ``gpt-4o`` is OpenAI's reply tier and must arrive as Anthropic's.
+        """
+        stubs = _exhausted_and_healthy()
+
+        provider = _router_with(stubs).get_provider(None, op="complete")
+        result = await provider.complete([], model="gpt-4o")
 
         assert stubs["anthropic"].last_kwargs["model"] == "anthropic-model"
         assert result.model == "anthropic-model"
@@ -573,9 +599,18 @@ class TestQuotaFallbackHop:
 
     @pytest.mark.asyncio
     async def test_no_hop_means_the_model_is_passed_through_untouched(self) -> None:
-        """The retarget must fire ONLY on the hop. Rewriting the model on
-        the ordinary path would override every caller's deliberate choice
-        — silently and on 100%% of traffic.
+        """The ROUTER's retarget fires only on the hop; on the ordinary
+        path it leaves ``kwargs`` alone, so the audit line it emits is
+        never attributed to a routing decision that did not happen.
+
+        DRF-1443 note: the concrete providers DO resolve on every call
+        now — that is the fix for the Anthropic-primary outage, where
+        there is no hop to fire on. The two are not in conflict: the
+        provider translates only a foreign vendor's id or a logical tier
+        name, and forwards anything else untouched, so a caller's
+        deliberate choice of a model the called vendor owns still stands.
+        ``StubProvider`` is not a concrete provider and runs no
+        resolution, which is what isolates the router's behaviour here.
         """
         stubs = {"openai": StubProvider("openai"), "anthropic": StubProvider("anthropic")}
 
@@ -750,6 +785,9 @@ class TestHopThroughTheRealWrapperChain:
         exhausted.default_completion_model = "gpt-4o-mini"
         healthy = StubProvider("anthropic")
         healthy.default_completion_model = "claude-sonnet-4-6"
+        # DRF-1443 — the target's cheap tier, the one a hopped
+        # ``gpt-4o-mini`` should now land on.
+        healthy.default_fast_model = "claude-haiku-4-5"
 
         monkeypatch.setattr(openai_provider, "OpenAIProvider", lambda: exhausted)
         monkeypatch.setattr(anthropic_provider, "AnthropicProvider", lambda: healthy)
@@ -776,15 +814,19 @@ class TestHopThroughTheRealWrapperChain:
         assert isinstance(provider, QuotaFallbackProvider)
         assert isinstance(provider._primary, PIITokenizingProvider)
         assert provider.default_completion_model == "gpt-4o-mini"
+        # DRF-1443 — the fast tier has to survive the same two wrappers,
+        # or the retarget below silently falls back to the reply model.
+        assert provider.default_fast_model == "openai-fast-model"
 
         result = await provider.complete(
             [{"role": "user", "content": "привет"}], model="gpt-4o-mini"
         )
 
         assert result.provider == "anthropic"
-        assert _real_load_path["anthropic"].last_kwargs["model"] == "claude-sonnet-4-6", (
+        assert _real_load_path["anthropic"].last_kwargs["model"] == "claude-haiku-4-5", (
             "an OpenAI model id reaching api.anthropic.com is a 404 — the swap must fire "
-            "through the PII wrapper, not just through bare stubs"
+            "through the PII wrapper, not just through bare stubs. DRF-1443: it lands on "
+            "the target's CHEAP model because gpt-4o-mini is the cheap tier"
         )
 
     def test_pii_wrapper_satisfies_the_provider_protocol(self) -> None:

@@ -251,6 +251,23 @@ class LLMProvider(Protocol):
     #: cannot embed.
     default_completion_model: str
 
+    #: The model id this provider uses for the vendor-neutral ``fast``
+    #: tier — cheap, low-latency, structured-output work (intent
+    #: classification, the post-reply resolver).
+    #:
+    #: DRF-1443 added it for the same reason DRF-1437 added its sibling
+    #: above, and with the same lesson attached: the fix is only real if
+    #: a wrapper that forgets to forward it FAILS rather than reading as
+    #: ``""``. ``PIITokenizingProvider`` and ``QuotaFallbackProvider``
+    #: both sit between the router and the concrete provider; declaring
+    #: the attribute here makes an omission a type error instead of a
+    #: silent downgrade to the reply tier.
+    #:
+    #: On OpenAI it equals ``default_completion_model`` today — both
+    #: tiers are ``gpt-4o-mini``. That equality is a fact about the
+    #: current model line-up, not a licence to collapse the two fields.
+    default_fast_model: str
+
     async def complete(
         self,
         messages: list[dict[str, Any]],

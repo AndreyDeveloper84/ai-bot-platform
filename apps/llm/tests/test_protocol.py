@@ -99,6 +99,10 @@ class TestLLMProviderProtocol:
             # model it defaults to, because the router's quota fallback
             # has to name a model the TARGET vendor understands.
             default_completion_model = "fake-model"
+            # DRF-1443 widened it again, for the tier below the reply
+            # one: the same omission on the fast tier silently sends
+            # every intent classification to the reply model.
+            default_fast_model = "fake-model-fast"
 
             async def complete(
                 self,
