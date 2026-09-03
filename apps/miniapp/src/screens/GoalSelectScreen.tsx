@@ -28,6 +28,14 @@
  *      start-param slugs. Before DRF-1451 nobody decided this and the
  *      screen simply re-rendered after a goal was chosen.
  *
+ * Раскладка (DRF-1458). Три веса, а не четыре одинаковые кнопки в
+ * столбик: выход (`next`) — липкий CTA внизу, «отправить» — обычная
+ * вторичная кнопка при своём поле, побочные намерения сервера — тихий
+ * ряд ссылок. Ряды фишек переносятся по строкам: длину списка задаёт
+ * сервер, и ряд без переноса уезжает вбок при любом длинном документе.
+ * Раскладка отвечает на вопрос «что здесь главное»; ЧТО показывать
+ * по-прежнему отвечает документ.
+ *
  * Анкета — не ворота (поправка A-1 к BOT-001, §24, условие C-2).
  * Свободный ввод стоит на поверхности ВСЕГДА, рядом с вопросами: кто
  * знает, чего хочет, называет услугу здесь же и уходит к подбору, не
@@ -57,6 +65,7 @@ import { useLocation, useNavigate } from "react-router-dom";
 import { ScreenLayout } from "../components/ScreenLayout";
 import { DelayedSkeleton, ServiceCardSkeleton } from "../components/Skeleton";
 import { StateError } from "../components/StateError";
+import { StickyCta } from "../components/StickyCta";
 import {
   fetchDecisionContext,
   postGoalSelect,
@@ -217,7 +226,28 @@ export function GoalSelectScreen({ initialDoc }: Props = {}) {
       : { goal_text: text, source_channel: "miniapp" };
 
   return (
-    <ScreenLayout title="Какая у тебя цель?">
+    <ScreenLayout
+      title="Какая у тебя цель?"
+      // Выход с поверхности — главное действие экрана, и оно не должно
+      // зависеть от того, сколько вопросов и подсказок прислал сервер
+      // (DRF-1458). Условие C-2 не тронуто: кнопка по-прежнему рисуется
+      // ровно тогда, когда `next` есть в документе, и ровно с той
+      // подписью, что он назвал.
+      cta={
+        nextStep && nextRoute ? (
+          <StickyCta disabled={submitting} onClick={() => navigate(nextRoute)}>
+            {nextStep.label}
+          </StickyCta>
+        ) : undefined
+      }
+    >
+      {/* Отказ виден сразу, а не в самом низу длинного документа. */}
+      {submitError && (
+        <div className="callout callout--danger" role="alert">
+          <p style={{ margin: 0 }}>{submitError}</p>
+        </div>
+      )}
+
       {knownGoal && knownLabel && (
         <section aria-labelledby="goal-select-current">
           <h2 id="goal-select-current" className="goal-select__section-title">
@@ -307,7 +337,7 @@ export function GoalSelectScreen({ initialDoc }: Props = {}) {
             value={goalText}
             onChange={(e) => setGoalText(e.target.value)}
             maxLength={GOAL_TEXT_MAX}
-            rows={3}
+            rows={2}
             placeholder="Опиши своими словами"
             aria-label={formulateOwnLabel}
             disabled={submitting}
@@ -325,55 +355,36 @@ export function GoalSelectScreen({ initialDoc }: Props = {}) {
         </section>
       )}
 
-      {guidanceLabel && (
-        <div className="goal-select__actions">
-          <button
-            type="button"
-            className="btn-secondary"
-            disabled={submitting}
-            onClick={() =>
-              submit({ intent: "need_guidance", source_channel: "miniapp" })
-            }
-          >
-            {guidanceLabel}
-          </button>
-        </div>
-      )}
-
-      {/* DRF-1225 / C-4 — пройти анкету заново можно сколько угодно раз.
-          Показывается ровно тогда, когда намерение прислал сервер. */}
-      {startAnketaLabel && (
-        <div className="goal-select__actions">
-          <button
-            type="button"
-            className="btn-secondary"
-            disabled={submitting}
-            onClick={() =>
-              submit({ intent: "start_anketa", source_channel: "miniapp" })
-            }
-          >
-            {startAnketaLabel}
-          </button>
-        </div>
-      )}
-
-      {/* Спрашивать нечего — сервер назвал, куда вести дальше. */}
-      {nextStep && nextRoute && (
-        <div className="goal-select__actions">
-          <button
-            type="button"
-            className="btn-secondary goal-select__next"
-            disabled={submitting}
-            onClick={() => navigate(nextRoute)}
-          >
-            {nextStep.label}
-          </button>
-        </div>
-      )}
-
-      {submitError && (
-        <div className="callout callout--danger" role="alert">
-          <p style={{ margin: 0 }}>{submitError}</p>
+      {/* Побочные намерения сервера — оба ведут ВГЛУБЬ вопросов, поэтому
+          стоят в одном тихом ряду, а не двумя кнопками в столбик.
+          DRF-1225 / C-4: «пройти анкету заново» показывается ровно
+          тогда, когда намерение прислал сервер. */}
+      {(guidanceLabel || startAnketaLabel) && (
+        <div className="goal-select__minor">
+          {guidanceLabel && (
+            <button
+              type="button"
+              className="goal-select__minor-action"
+              disabled={submitting}
+              onClick={() =>
+                submit({ intent: "need_guidance", source_channel: "miniapp" })
+              }
+            >
+              {guidanceLabel}
+            </button>
+          )}
+          {startAnketaLabel && (
+            <button
+              type="button"
+              className="goal-select__minor-action"
+              disabled={submitting}
+              onClick={() =>
+                submit({ intent: "start_anketa", source_channel: "miniapp" })
+              }
+            >
+              {startAnketaLabel}
+            </button>
+          )}
         </div>
       )}
     </ScreenLayout>

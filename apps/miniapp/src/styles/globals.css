@@ -707,13 +707,24 @@ a {
 
 
 /* Filter chips (My visits §3.4). */
+/* Chip rows hold a list whose length the client does not know: options
+   and suggestions arrive from the server. A non-wrapping flex row of an
+   unknown-length list is horizontal overflow by construction — seven
+   suggestions in the MAX panel showed three and a half plus a sideways
+   scrollbar nobody thinks to drag (DRF-1458). Wrapping is not a nicety
+   here, it is the only layout that survives an arbitrary list.
+   `tools/lint/miniapp_style_contract.py` keeps this declaration. */
 .chip-row {
   display: flex;
+  flex-wrap: wrap;
   gap: var(--s-2);
   margin-bottom: var(--s-3);
 }
 
 .chip {
+  /* A single chip cannot be wider than the row: a long server label
+     wraps inside its own pill instead of pushing the page sideways. */
+  max-width: 100%;
   padding: var(--s-1) var(--s-3);
   background: var(--c-surface-2);
   border: 1px solid var(--c-divider);
@@ -732,11 +743,19 @@ a {
 }
 
 /* Goal select screen (DRF-1190) — dumb renderer over the decision doc. */
+
+/* DRF-1458 — three weights, not four equal buttons in a column:
+     1. the way out (`next`) is the sticky CTA, always on screen;
+     2. «Отправить» is a bordered secondary, welded to its textarea;
+     3. the server's side intents are quiet text buttons in one row.
+   The layout says which action is the main one; the document still says
+   which actions exist. */
+
 .goal-select__section-title {
   font-size: var(--font-size-300);
   font-weight: 600;
   color: var(--c-text-primary);
-  margin: var(--s-4) 0 var(--s-2);
+  margin: var(--s-3) 0 var(--s-2);
 }
 
 .goal-select__current {
@@ -773,7 +792,35 @@ a {
 }
 
 .goal-select__actions {
-  margin-top: var(--s-3);
+  margin-top: var(--s-2);
+}
+
+/* Side intents the server offered — «не понимаю, чего хочу», «пройти
+   анкету заново». They lead deeper into questions, not forward, so they
+   are the quietest thing on the surface and share one wrapping row
+   instead of a button each on its own line. */
+.goal-select__minor {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s-1) var(--s-3);
+  margin-top: var(--s-4);
+}
+
+.goal-select__minor-action {
+  padding: var(--s-2) 0;
+  min-height: 44px; /* a11y — handoff §16 */
+  background: none;
+  border: 0;
+  color: var(--c-text-secondary);
+  font-size: var(--font-size-200);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  cursor: pointer;
+}
+
+.goal-select__minor-action:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 
 /* Позиция вопроса в анкете (DRF-1451). Число приходит с сервера —
@@ -785,14 +832,13 @@ a {
   color: var(--c-text-secondary);
 }
 
-/* «Куда дальше», когда спрашивать нечего. Залита акцентом, в отличие
-   от соседних кнопок поверхности: это единственное действие, которое
-   ведёт человека ВПЕРЁД, а не вглубь вопросов. */
-.goal-select__next {
-  background: var(--c-accent);
-  color: var(--c-text-on-accent);
-  border-color: var(--c-accent);
-}
+/* «Куда дальше» — единственное действие, которое ведёт человека ВПЕРЁД,
+   а не вглубь вопросов. До DRF-1458 оно было последней кнопкой в общем
+   столбце и уезжало за нижний край: самое важное на экране оказалось
+   самым незаметным. Теперь это `StickyCta` — та же кнопка, что несёт
+   главное действие на остальных экранах, и она на виду независимо от
+   длины документа. Условие C-2 («анкета — не ворота») от этого только
+   крепче: выход виден не прокручивая. */
 
 /* Inline action row under each visit card. */
 .visit-row__actions {
