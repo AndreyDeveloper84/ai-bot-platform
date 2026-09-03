@@ -83,6 +83,7 @@ from typing import TYPE_CHECKING, Any
 from django.conf import settings
 
 from apps.audit.services import write_audit
+from apps.llm.model_tiers import resolve_model
 from apps.llm.protocol import (
     CompletionResult,
     LLMProvider,
@@ -174,27 +175,36 @@ def _retarget_model(kwargs: dict[str, Any], secondary: LLMProvider) -> dict[str,
     through this wrapper, is the PRIMARY's default. So on a hop the id is
     always wrong for the target and must be replaced.
 
-    We use the target's own ``default_completion_model`` rather than a
-    cross-vendor equivalence table: a table would need an entry per
-    model per vendor and would silently mis-route the moment someone
-    passes an unlisted id, which is precisely the failure mode this
-    whole ticket is about. A vendor's declared default is always valid
-    for that vendor.
+    DRF-1443 moved the actual translation into
+    :func:`apps.llm.model_tiers.resolve_model`, which the concrete
+    providers now run on EVERY call rather than only on a hop — the hop
+    was never the only place a foreign id could arrive, and with
+    Anthropic promoted to primary it stopped being a place one arrived
+    at all. This function is kept because it still earns its keep: it
+    logs the swap against the routing decision that caused it, which a
+    provider-level rewrite cannot attribute. Running the same resolver
+    on both sides is safe — it is idempotent, since an id already
+    belonging to the target vendor is returned unchanged.
 
-    Note the cost consequence, deliberately accepted: Anthropic's
-    default completion model is the reply-tier one, so an intent
-    classification that hops lands on a pricier model than the
-    ``gpt-4o-mini`` it asked for. Correct-but-pricier beats
-    cheap-and-404 on a path that only runs when the primary is down.
+    The cost consequence noted here before is also gone: the resolver
+    preserves the TIER, so an intent classification that hops now lands
+    on the target's fast model rather than its reply model.
     """
     if "model" not in kwargs:
         return kwargs
 
-    target_model = getattr(secondary, "default_completion_model", "") or ""
-    if not target_model:
+    smart = getattr(secondary, "default_completion_model", "") or ""
+    if not smart:
         # Nothing better to offer — leave the caller's value alone
         # rather than sending an empty model id.
         return kwargs
+
+    target_model = resolve_model(
+        kwargs["model"],
+        vendor=getattr(secondary, "name", "") or "",
+        fast=getattr(secondary, "default_fast_model", "") or smart,
+        smart=smart,
+    )
 
     if kwargs["model"] == target_model:
         return kwargs
@@ -268,6 +278,8 @@ class QuotaFallbackProvider:
         # (``getattr(provider, "default_completion_model", None)``), so
         # the wrapper has to be transparent for them too.
         self.default_completion_model = getattr(primary, "default_completion_model", "")
+        # DRF-1443 — same transparency rule for the fast tier.
+        self.default_fast_model = getattr(primary, "default_fast_model", "")
         # Only when the primary really has one — see the same rule in
         # ``PIITokenizingProvider``: an invented empty attribute would
         # make a non-embedding vendor look like one with a blank default.

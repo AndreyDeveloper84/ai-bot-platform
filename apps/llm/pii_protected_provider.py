@@ -132,6 +132,10 @@ class PIITokenizingProvider:
         # used ``getattr(..., "")``, so nothing ever failed loudly.
         # The attribute is now part of the LLMProvider Protocol.
         self.default_completion_model = getattr(wrapped, "default_completion_model", "")
+        # DRF-1443: the fast tier travels the same road and would break
+        # the same way — a wrapper that drops it sends every intent
+        # classification to the reply-tier model.
+        self.default_fast_model = getattr(wrapped, "default_fast_model", "")
         # Embedding default is forwarded ONLY when the wrapped provider
         # actually has one — Anthropic has no embeddings API, and
         # inventing an empty attribute here would hide that from
