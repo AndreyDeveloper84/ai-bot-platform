@@ -1592,8 +1592,13 @@ LLM_RETRY_MAX_DELAY_S = float(os.environ.get("LLM_RETRY_MAX_DELAY_S", "30.0"))
 # LLM_HEALTH_PROBE_ENABLED: master switch. On by default; with an empty
 #   HANDOFF_NOTIFY_MAX_CHAT_IDS (the CI / local default) it can still
 #   only log, never send.
-# LLM_HEALTH_PROBE_MODEL: empty → the provider's default completion
-#   model (gpt-4o-mini). Override only to probe a specific deployment.
+# LLM_HEALTH_PROBE_MODEL: empty → the CALLED provider's own default
+#   completion model — `gpt-4o-mini` on OpenAI, `claude-sonnet-4-6` on
+#   Anthropic. It is not a fixed id: DRF-1443 made the vendor decide,
+#   because a probe pinned to one vendor's model measures the other
+#   vendor's health as a permanent 404. It also accepts the logical
+#   tiers `fast` / `smart` (`apps.llm.model_tiers`). Override with a
+#   concrete id only to probe one specific deployment.
 # LLM_HEALTH_PROBE_TIMEOUT_S: OUTER ceiling on one probe, not the SDK
 #   timeout. httpx applies its scalar timeout per phase (connect/read/
 #   write/pool), so a single request can outlive any one phase budget;

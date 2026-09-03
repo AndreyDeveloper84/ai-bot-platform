@@ -170,10 +170,12 @@ def _retarget_model(kwargs: dict[str, Any], secondary: LLMProvider) -> dict[str,
     "не могу ответить" — with the second vendor's bill attached.
 
     Every call site passes a model tied to the vendor the router picked:
-    ``apps/orchestrator/intent_router.py`` hard-codes ``"gpt-4o-mini"``,
-    while the skills read ``provider.default_completion_model`` — which,
-    through this wrapper, is the PRIMARY's default. So on a hop the id is
-    always wrong for the target and must be replaced.
+    the skills read ``provider.default_completion_model`` — which, through
+    this wrapper, is the PRIMARY's default — and until DRF-1443
+    ``apps/orchestrator/intent_router.py`` hard-coded ``"gpt-4o-mini"``.
+    (It now names the ``"fast"`` tier instead; a tier is vendor-neutral,
+    so on a hop it needs resolving, not replacing.) Either way the value
+    arriving here is not yet an id the TARGET understands.
 
     DRF-1443 moved the actual translation into
     :func:`apps.llm.model_tiers.resolve_model`, which the concrete
