@@ -615,9 +615,28 @@ jobs:
       # or escalate. This list is pinned to reproduce a specific test
       # invocation for each entry, not a directory-level skip, so a
       # rename/removal of any of these tests must also touch this file.
+      # DRF-1457 — the suite runs under pytest-xdist at 4 workers.
+      #
+      # Measured 2026-09-03 (e2e-artifacts/ci-speed-20260903): this step
+      # alone was 88% of the job — median 2277s of ~2585s across 18
+      # green runs (jobs API) — running single-process, with xdist
+      # absent from the dependency tree entirely. Local A/B on an
+      # 8-core box, same deselect list: 6969s single-process vs 3033s
+      # at `-n 4 --dist load` (2.3x), and the junit test set is
+      # identical — 11145 cases, 0 absent, 0 extra, same 188 skips,
+      # same zero failures (two full runs; the only divergence ever
+      # seen was a Windows-clock created_at tie in one PII test, not
+      # reproducible on Linux timing).
+      #
+      # `-n 4`, not `-n auto`: ubuntu-latest is 4 vCPU today, and
+      # `auto` would silently change the run the day GitHub changes
+      # the runner — the measurement above is pinned to 4.
+      # `--dist load`: any idle worker takes the next test; per-worker
+      # test databases come from pytest-django's `_gwN` suffix, so no
+      # two workers ever share a schema.
       - name: pytest apps/ (full suite)
         run: |
-          uv run pytest apps/ -q \
+          uv run pytest apps/ -q -n 4 --dist load \
             --deselect apps/miniapp_api/tests/test_c7_payments.py::TestPaymentMirrorReadModel::test_booking_confirmed_with_payment_id_stamps_hold \
             --deselect apps/miniapp_api/tests/test_c7_payments.py::TestPaymentMirrorReadModel::test_booking_confirmed_without_payment_id_no_mirror \
             --deselect apps/miniapp_api/tests/test_create_booking_ayla.py::TestLocalPathUnchanged::test_flag_off_keeps_local_path \
