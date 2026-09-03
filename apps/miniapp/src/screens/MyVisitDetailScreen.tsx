@@ -243,7 +243,7 @@ export function MyVisitDetailScreen() {
               {b.master_name ? ` · ${b.master_name}` : ""}
             </p>
             <p style={{ marginTop: "var(--s-3)" }}>Что повлияло? (опционально)</p>
-            <div className="chip-row" style={{ flexWrap: "wrap" }}>
+            <div className="chip-row">
               {REASON_CHIPS.map((r) => (
                 <button
                   key={r.value}

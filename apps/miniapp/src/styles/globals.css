@@ -706,8 +706,9 @@ a {
 }
 
 
-/* Filter chips (My visits §3.4). */
-/* Chip rows hold a list whose length the client does not know: options
+/* Filter chips (My visits §3.4).
+
+   Chip rows hold a list whose length the client does not know: options
    and suggestions arrive from the server. A non-wrapping flex row of an
    unknown-length list is horizontal overflow by construction — seven
    suggestions in the MAX panel showed three and a half plus a sideways
