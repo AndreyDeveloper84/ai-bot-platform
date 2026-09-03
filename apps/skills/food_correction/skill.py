@@ -99,6 +99,19 @@ REMEMBERED_ACK: dict[str, str] = {
 # promise we did not keep.
 NOT_REMEMBERED_ACK = "Поняла, учла."
 
+# The durable write failed transiently (Ayla unreachable / DB error) and the
+# question stays OPEN — the next turn retries. Said honestly, without «учла».
+RETRY_ACK = "Не получилось сохранить — связь с памятью сейчас не отвечает. Напиши ещё раз, и я запомню."
+
+# The card the correction refers to is gone (a second photo replaced it, or it
+# was rendered before this feature shipped): there is no dish to key memory
+# on. Used to write the pending record anyway and answer «Поняла, учла» with
+# nothing stored — a silent loss. Say what happened instead.
+STALE_CARD_ACK = (
+    "Не вижу карточку, к которой относится правка — она устарела. "
+    "Пришли фото блюда ещё раз, и я всё уточню."
+)
+
 # «Оставляем?» answered with «да»: the value already stored simply stands.
 _KEPT_ACK: dict[str, str] = {
     "grams": "Оставляю: «{dish}» — {value} г.",
@@ -410,12 +423,33 @@ class FoodCorrectionSkill:
             # matches() guards this; defensive empty.
             return SkillResult(reply_text="", should_send=False)
 
+        if not food_memory.scanner_memory_enabled():
+            # Pre-DRF-1454 exactly: the plain prompt, and NO pending record —
+            # the rollback switch used to leave a dead record in skill_state
+            # that nothing would ever read (review finding).
+            return SkillResult(
+                reply_text=_PROMPTS[field],
+                action_type="food_correction_prompt",
+                action_data={"field": field, "scan_id": scan_id, "remembered": False},
+                meta={"reply_kind": f"food_correction_{field}"},
+            )
+
         dish = _dish_for(context, scan_id)
-        recall = (
-            food_memory.recall_corrections(context.bot_user, dish=dish)
-            if dish
-            else food_memory.EMPTY_RECALL
-        )
+        if not dish:
+            # A question whose answer has nothing to be keyed on is a silent
+            # loss waiting to happen — don't ask it (see STALE_CARD_ACK).
+            logger.info(
+                "food_correction.stale_card field=%s scan=%s conversation=%s",
+                field,
+                scan_id,
+                getattr(context.conversation, "id", None),
+            )
+            return SkillResult(
+                reply_text=STALE_CARD_ACK,
+                meta={"reply_kind": "food_correction_stale_card"},
+            )
+
+        recall = food_memory.recall_corrections(context.bot_user, dish=dish)
         remembered = recall.has(field)
         prompt = (
             _KNOWN_PROMPTS[field].format(dish=dish, value=_recalled(recall, field))
@@ -508,11 +542,22 @@ class FoodCorrectionSkill:
                 meta={"reply_kind": f"food_correction_{field}_reask"},
             )
 
-        _write_state(context, None)  # answered — the question is settled
-        outcome = (
-            food_memory.remember_correction(context.bot_user, dish=dish, field=field, value=value)
-            if dish
-            else food_memory.Outcome.UNPARSED
+        if not dish:
+            # A pending record written before the stale-card fix: the card is
+            # gone, there is no key to write under. Settle honestly.
+            _write_state(context, None)
+            return SkillResult(
+                reply_text=STALE_CARD_ACK,
+                meta={"reply_kind": "food_correction_stale_card"},
+            )
+
+        # The durable write goes FIRST and the pending record is cleared only
+        # after it — the two are separate, already-committed transactions
+        # (review, persistence axis: clearing first meant a NO_IDENTITY from
+        # an Ayla timeout lost the correction AND the question, and the next
+        # turn fell through to the concierge — the defect this ticket fixes).
+        outcome = food_memory.remember_correction(
+            context.bot_user, dish=dish, field=field, value=value
         )
         logger.info(
             "food_correction.answer field=%s outcome=%s conversation=%s",
@@ -521,6 +566,22 @@ class FoodCorrectionSkill:
             getattr(context.conversation, "id", None),
         )
 
+        if outcome in (food_memory.Outcome.NO_IDENTITY, food_memory.Outcome.ERROR):
+            # Transient — retrying can succeed, so the question stays open,
+            # exactly like the unparseable-answer branch above.
+            _write_state(
+                context,
+                {
+                    **pending,
+                    "at": datetime.now(timezone.utc).isoformat(),
+                },
+            )
+            return SkillResult(
+                reply_text=RETRY_ACK,
+                meta={"reply_kind": f"food_correction_{field}_retry"},
+            )
+
+        _write_state(context, None)  # settled — recorded, or terminally refused
         stored = outcome in (food_memory.Outcome.WRITTEN, food_memory.Outcome.DUPLICATE)
         reply = (
             REMEMBERED_ACK[field].format(dish=dish, value=value) if stored else NOT_REMEMBERED_ACK

@@ -12,11 +12,10 @@ from apps.skills.food_correction.skill import FoodCorrectionSkill
 
 
 def _context(text: str) -> SkillContext:
-    return SkillContext(
-        conversation=Mock(id="conv-1"),
-        bot_user=Mock(),
-        message_text=text,
-    )
+    conversation = Mock(id="conv-1")
+    # The ✏️ button lives on a scanner card — the conversation carries it.
+    conversation.skill_state = {"food_scan": {"scan_id": None, "dish": "борщ"}}
+    return SkillContext(conversation=conversation, bot_user=Mock(), message_text=text)
 
 
 # ─── matches ──────────────────────────────────────────────────────────────
@@ -224,7 +223,13 @@ class TestAnswerHandling:
 
     def test_a_failed_write_never_promises_memory(self) -> None:
         """No consent / no link / DB down: a soft ack, never «запомнила»."""
-        result = FoodCorrectionSkill().handle(_pending_context("500"))
+        from apps.orchestrator.memory import food as food_memory
+
+        with patch(
+            "apps.orchestrator.memory.food.remember_correction",
+            return_value=food_memory.Outcome.NO_CONSENT,
+        ):
+            result = FoodCorrectionSkill().handle(_pending_context("500"))
         assert result.action_data["stored"] is False
         assert "апомнила" not in result.reply_text
 
@@ -428,6 +433,93 @@ class TestAnUnreadableAnswerKeepsTheQuestionOpen:
         assert written[-1][1]["field"] == "grams"
 
 
+class TestATransientWriteFailureKeepsTheQuestionOpen:
+    """Ревью DRF-1454, ось persistence, MUST_FIX_PRE_PILOT: pending «жду ответ»
+    стирался ДО долговечной записи — отдельной, уже закоммиченной транзакцией.
+    remember_correction → NO_IDENTITY (сетевой таймаут к Ayla — в пилоте
+    штатная флуктуация) или ERROR означал: правка не записана, pending стёрт,
+    следующее сообщение ушло в консьерж — ровно тот дефект, ради которого
+    делалась задача. Соседняя ветка «не распарсилось» сделана правильно:
+    pending обновляется, а не чистится. Здесь — так же."""
+
+    @pytest.mark.parametrize("outcome_name", ["NO_IDENTITY", "ERROR"])
+    def test_a_transient_failure_refreshes_pending_instead_of_clearing(
+        self, outcome_name: str
+    ) -> None:
+        from apps.orchestrator.memory import food as food_memory
+
+        outcome = getattr(food_memory.Outcome, outcome_name)
+        written: list = []
+        with (
+            patch(
+                "apps.orchestrator.memory.food.remember_correction", return_value=outcome
+            ),
+            patch(
+                "apps.conversations.services.write_skill_state",
+                side_effect=lambda conv, key, value: written.append((key, value)),
+            ),
+        ):
+            result = FoodCorrectionSkill().handle(_pending_context("500"))
+
+        # Вопрос остаётся открытым — следующий ход повторит запись.
+        assert written and written[-1][1] is not None
+        assert "апомнила" not in result.reply_text
+        assert "Поняла, учла" not in result.reply_text  # ничего не сохранено — не врём
+
+    def test_a_terminal_outcome_settles_the_question(self) -> None:
+        """NO_CONSENT/CAP_REACHED не лечатся повтором — вопрос закрывается."""
+        from apps.orchestrator.memory import food as food_memory
+
+        written: list = []
+        with (
+            patch(
+                "apps.orchestrator.memory.food.remember_correction",
+                return_value=food_memory.Outcome.NO_CONSENT,
+            ),
+            patch(
+                "apps.conversations.services.write_skill_state",
+                side_effect=lambda conv, key, value: written.append((key, value)),
+            ),
+        ):
+            result = FoodCorrectionSkill().handle(_pending_context("500"))
+
+        assert written and written[-1][1] is None
+        assert result.reply_text == "Поняла, учла."
+
+
+class TestAStaleCardIsAnsweredHonestly:
+    """Ревью DRF-1454, мелкая находка: ответ терялся молча, если карточка
+    устарела (сканировали второе фото) или отрисована до релиза — pending
+    писался всегда, dish пустой → «Поняла, учла», ничего не сохранено."""
+
+    def test_the_prompt_is_not_asked_when_there_is_no_card(self) -> None:
+        conversation = Mock(id="conv-no-card")
+        conversation.skill_state = {}  # карточки сканера нет / она устарела
+        context = SkillContext(
+            conversation=conversation,
+            bot_user=Mock(),
+            message_text="cb:food:correct:grams:scan-9",
+        )
+        written: list = []
+        with patch(
+            "apps.conversations.services.write_skill_state",
+            side_effect=lambda conv, key, value: written.append((key, value)),
+        ):
+            result = FoodCorrectionSkill().handle(context)
+
+        assert "карточк" in result.reply_text.lower()
+        assert "Поняла, учла" not in result.reply_text
+        assert not written  # вопрос, ответ которому некуда писать, не задаётся
+
+    def test_an_answer_on_a_cardless_pending_is_not_a_silent_loss(self) -> None:
+        """Pending, записанный до исправления (dish пустой), получает честный
+        ответ вместо «Поняла, учла»."""
+        result = FoodCorrectionSkill().handle(_pending_context("500", dish=""))
+
+        assert "Поняла, учла" not in result.reply_text
+        assert "карточк" in result.reply_text.lower()
+
+
 class TestRollbackSwitchOnTheSkill:
     def test_flag_off_restores_the_pre_memory_skill(self, settings) -> None:
         skill = FoodCorrectionSkill()
@@ -438,3 +530,17 @@ class TestRollbackSwitchOnTheSkill:
         assert not skill.matches(_pending_context("500"))
         # The callback half keeps working — that is the pre-DRF-1454 behaviour.
         assert skill.matches(_context("cb:food:correct:grams:scan-1"))
+
+    def test_flag_off_writes_no_pending_record(self, settings) -> None:
+        """Мелкая находка ревью: тумблер отката не выключал запись pending —
+        в skill_state копилась мёртвая запись при выключенной фиче."""
+        settings.FOOD_SCANNER_MEMORY_ENABLED = False
+        written: list = []
+        with patch(
+            "apps.conversations.services.write_skill_state",
+            side_effect=lambda conv, key, value: written.append((key, value)),
+        ):
+            result = FoodCorrectionSkill().handle(_context("cb:food:correct:grams:scan-1"))
+
+        assert result.reply_text == _PROMPTS_FOR_TEST["grams"]  # чистый вопрос, как прежде
+        assert not written
