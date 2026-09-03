@@ -113,9 +113,18 @@ def _make_server(state: _State) -> ThreadingHTTPServer:
                 # Запись коммитится ДО задержки — ровно как на бэкенде, где
                 # transaction.atomic() отрабатывает, а медленным оказывается
                 # уже возврат ответа.
+                #
+                # Ответ на ФИНАЛЬНЫЙ шаг анкеты (DRF-1451) создаёт цель
+                # так же, как прямой выбор, — только ключи лежат на
+                # уровень глубже. Подделка обязана это повторять, иначе
+                # тест сверки проверял бы не то, что происходит живьём.
+                answer = payload.get("answer") or {}
+                is_final = answer.get("step") == "goal"
                 state.stored_goal = {
-                    "goal_key": payload.get("goal_key"),
-                    "goal_text": payload.get("goal_text"),
+                    "goal_key": payload.get("goal_key")
+                    or (answer.get("option_key") if is_final else None),
+                    "goal_text": payload.get("goal_text")
+                    or (answer.get("text") if is_final else None),
                     "selected_at": "2026-09-01T08:00:00+00:00",
                     "source_channel": payload.get("source_channel"),
                 }
@@ -286,6 +295,57 @@ class TestWriteSurvivesAReadTimeout:
         assert not [r for r in ayla.requests if r.startswith("GET")], (
             "сверка по документу для need_guidance бессмысленна и не должна "
             "выполняться: ClientGoal у неё нет, а ожидание она удлиняет"
+        )
+
+    def test_final_anketa_step_is_reconciled_too(
+        self, ayla: _State, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """DRF-1451: ответ на финальный шаг — это и есть запись цели.
+
+        Ключи у него лежат внутри ``answer``, поэтому проверка «есть ли
+        durable-след» смотрела на верхний уровень и видела пусто. Сверка
+        пропускалась, отказ уезжал 502 — на УЖЕ ЗАПИСАННОЙ цели. Человек
+        шёл отвечать на вопросы заново.
+        """
+        monkeypatch.setattr(gc, "READ_TIMEOUT_S", 0.3, raising=False)
+        ayla.commit_on_post = True
+        ayla.post_delay_s = 1.5
+
+        body = post_goal_select(
+            external_user_id=EXT_USER,
+            payload={
+                "answer": {"step": "goal", "option_key": "relax"},
+                "source_channel": "miniapp",
+            },
+        )
+
+        assert body["known"]["goal"]["goal_key"] == "relax"
+        assert sum(1 for r in ayla.requests if r.startswith("POST")) == 1
+
+    def test_narrowing_anketa_step_is_not_reconciled(
+        self, ayla: _State, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Обратная сторона: сужающий шаг ClientGoal не создаёт.
+
+        Сверять его нечем, и ходить за документом ради заведомо
+        несходящейся проверки — только удлинять ожидание человека. Та же
+        стража, что у ``need_guidance``.
+        """
+        monkeypatch.setattr(gc, "READ_TIMEOUT_S", 0.3, raising=False)
+        ayla.commit_on_post = False
+        ayla.post_delay_s = 1.5
+
+        with pytest.raises(GoalsUnavailable):
+            post_goal_select(
+                external_user_id=EXT_USER,
+                payload={
+                    "answer": {"step": "area", "option_key": "face"},
+                    "source_channel": "miniapp",
+                },
+            )
+
+        assert not [r for r in ayla.requests if r.startswith("GET")], (
+            "сужающий шаг цели не создаёт — сверять нечего"
         )
 
 

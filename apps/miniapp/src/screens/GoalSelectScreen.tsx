@@ -15,6 +15,26 @@
  *      the server answers with `missing` kind=goal_guidance and the
  *      first guiding question in `prompt`, which we render like any
  *      other missing item.
+ *   4. Anketa step (DRF-1451) — a `missing` item that arrived with
+ *      `options`. Its chips POST `{answer: {step, option_key}}`. The
+ *      screen does not know the sequence: no question list, no order,
+ *      no "is this the last one". Even the position is server-computed
+ *      and arrives in `progress`. `step` is echoed back untouched so a
+ *      stale answer is refused (409) rather than filed under the wrong
+ *      question.
+ *   5. Onward (`next`) — where to go when there is nothing left to ask.
+ *      The server names the destination; this screen maps the id to a
+ *      route, the same way `max-sdk.ts::_ROUTE_MAP` maps the bot's
+ *      start-param slugs. Before DRF-1451 nobody decided this and the
+ *      screen simply re-rendered after a goal was chosen.
+ *
+ * Анкета — не ворота (поправка A-1 к BOT-001, §24, условие C-2).
+ * Свободный ввод стоит на поверхности ВСЕГДА, рядом с вопросами: кто
+ * знает, чего хочет, называет услугу здесь же и уходит к подбору, не
+ * ответив ни на один вопрос. Куда уедет введённый текст, решает не
+ * экран, а сервер: пока текущий шаг не открыл свободный ввод
+ * (`allow_free_text`), текст идёт как `{goal_text}` — прямая цель;
+ * когда открыл — как ответ на этот шаг. Поле одно, смысл серверный.
  *
  * Sections:
  *   - `known.goal` != null → "current goal" block (goal_text, or the
@@ -33,7 +53,7 @@
  */
 
 import { useCallback, useEffect, useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { useLocation, useNavigate } from "react-router-dom";
 import { ScreenLayout } from "../components/ScreenLayout";
 import { DelayedSkeleton, ServiceCardSkeleton } from "../components/Skeleton";
 import { StateError } from "../components/StateError";
@@ -42,6 +62,7 @@ import {
   postGoalSelect,
   type DecisionContext,
   type GoalSelectBody,
+  type MissingItem,
 } from "../lib/customer-goals";
 import { useBackButton } from "../hooks/useBackButton";
 
@@ -52,9 +73,41 @@ type State =
 
 const GOAL_TEXT_MAX = 500;
 
-export function GoalSelectScreen() {
+/**
+ * `next.id` → route. A contract with the server, not a decision: the
+ * server says WHERE, this table says how that place is spelled in the
+ * router. Same shape as `max-sdk.ts::_ROUTE_MAP` for the bot's slugs.
+ */
+const NEXT_ROUTES: Record<string, string> = {
+  browse_catalog: "/customer/catalog",
+};
+
+/** The anketa step currently on the surface, if the server sent one. */
+function currentAnketaStep(doc: DecisionContext): MissingItem | null {
+  return doc.missing.find((item) => typeof item.step === "string") ?? null;
+}
+
+interface Props {
+  /**
+   * Документ, уже полученный вызывающим (DRF-1451).
+   *
+   * `CustomerEntryScreen` читает decision-context, чтобы понять, есть
+   * ли что спрашивать, и монтирует эту поверхность прямо на корне.
+   * Без этого пропа она сходила бы за тем же документом второй раз —
+   * два круга к серверу на первом же экране, на самом дорогом месте.
+   *
+   * Решений это не добавляет: документ тот же, просто не запрошенный
+   * дважды. Любой POST по-прежнему заменяет состояние ответом сервера.
+   */
+  initialDoc?: DecisionContext;
+}
+
+export function GoalSelectScreen({ initialDoc }: Props = {}) {
   const navigate = useNavigate();
-  const [state, setState] = useState<State>({ kind: "loading" });
+  const { pathname } = useLocation();
+  const [state, setState] = useState<State>(
+    initialDoc ? { kind: "ok", doc: initialDoc } : { kind: "loading" },
+  );
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [goalText, setGoalText] = useState("");
@@ -74,12 +127,27 @@ export function GoalSelectScreen() {
     };
   }, []);
 
-  useEffect(() => load(), [load]);
+  // Документ пришёл готовым — второй круг к серверу не нужен. Повторная
+  // загрузка остаётся доступной: `load` вызывается кнопкой «повторить»
+  // на ошибке, а любой POST и так заменяет состояние.
+  const hasInitial = initialDoc !== undefined;
+  useEffect(() => {
+    if (hasInitial) return;
+    return load();
+  }, [load, hasInitial]);
 
-  // Не корень — «назад» ведёт туда, откуда пришли (домашний экран или
-  // стартовая сетка бота), а не закрывает мини-апп.
+  // «Назад» ведёт туда, откуда пришли (домашний экран или стартовая
+  // сетка бота), а не закрывает мини-апп.
+  //
+  // DRF-1451: с этого дня та же поверхность бывает и КОРНЕМ — первый
+  // экран клиента без цели монтирует её на `/`. На корне кнопки быть не
+  // должно (канон `useBackButton`: показывать везде, кроме корня), и
+  // вести ей там некуда: истории за корнем нет, нажатие оставило бы
+  // человека на месте. Единственное решение экрана о навигации — и оно
+  // о корне роутера, а не о содержании документа.
   const goBack = useCallback(() => navigate(-1), [navigate]);
-  useBackButton({ onBack: goBack });
+  const isRoot = pathname === "/";
+  useBackButton({ onBack: isRoot ? undefined : goBack });
 
   const submit = useCallback((body: GoalSelectBody) => {
     setSubmitting(true);
@@ -90,11 +158,19 @@ export function GoalSelectScreen() {
         setGoalText("");
       })
       .catch(() => {
-        // Keep the old document; just surface the failure.
+        // Показать отказ И перечитать документ.
+        //
+        // Раньше документ оставался прежним, и человеку предлагалось
+        // нажать ту же кнопку ещё раз. На протухшем документе (сервер
+        // ответил 409 «шаг не тот») это воспроизводило бы ту же ошибку
+        // бесконечно: экран отправлял бы ответ на вопрос, которого
+        // сервер уже не ждёт. Перечитывание заменяет документ, и
+        // следующее нажатие попадает в актуальный шаг.
         setSubmitError("Не получилось отправить. Попробуй снова.");
+        load();
       })
       .finally(() => setSubmitting(false));
-  }, []);
+  }, [load]);
 
   if (state.kind === "loading") {
     return (
@@ -126,6 +202,19 @@ export function GoalSelectScreen() {
     doc.intents.find((i) => i.id === id)?.label ?? null;
   const formulateOwnLabel = intentLabel("formulate_own");
   const guidanceLabel = intentLabel("need_guidance");
+  const startAnketaLabel = intentLabel("start_anketa");
+  const anketaStep = currentAnketaStep(doc);
+  const nextStep = doc.next ?? null;
+  const nextRoute = nextStep ? NEXT_ROUTES[nextStep.id] : undefined;
+
+  // Куда уедет введённый текст, решает сервер, а не экран: пока текущий
+  // шаг не открыл свободный ввод, текст — прямая цель (и это выход из
+  // анкеты для того, кто знает, чего хочет); когда открыл — ответ на
+  // этот шаг.
+  const freeTextBody = (text: string): GoalSelectBody =>
+    anketaStep?.allow_free_text && anketaStep.step
+      ? { answer: { step: anketaStep.step, text }, source_channel: "miniapp" }
+      : { goal_text: text, source_channel: "miniapp" };
 
   return (
     <ScreenLayout title="Какая у тебя цель?">
@@ -141,9 +230,34 @@ export function GoalSelectScreen() {
       {doc.missing.length > 0 && (
         <section aria-label="Вопросы">
           {doc.missing.map((item, index) => (
-            <p key={`${item.kind}-${index}`} className="goal-select__prompt">
-              {item.prompt}
-            </p>
+            <div key={`${item.kind}-${index}`}>
+              {item.progress && (
+                <p className="goal-select__progress">
+                  Вопрос {item.progress.index} из {item.progress.total}
+                </p>
+              )}
+              <p className="goal-select__prompt">{item.prompt}</p>
+              {item.step && item.options && item.options.length > 0 && (
+                <div className="chip-row" role="group" aria-label={item.prompt}>
+                  {item.options.map((option) => (
+                    <button
+                      key={option.key}
+                      type="button"
+                      className="chip"
+                      disabled={submitting}
+                      onClick={() =>
+                        submit({
+                          answer: { step: item.step as string, option_key: option.key },
+                          source_channel: "miniapp",
+                        })
+                      }
+                    >
+                      {option.label}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
           ))}
         </section>
       )}
@@ -203,12 +317,7 @@ export function GoalSelectScreen() {
               type="button"
               className="btn-secondary"
               disabled={submitting || goalText.trim().length === 0}
-              onClick={() =>
-                submit({
-                  goal_text: goalText.trim(),
-                  source_channel: "miniapp",
-                })
-              }
+              onClick={() => submit(freeTextBody(goalText.trim()))}
             >
               Отправить
             </button>
@@ -227,6 +336,37 @@ export function GoalSelectScreen() {
             }
           >
             {guidanceLabel}
+          </button>
+        </div>
+      )}
+
+      {/* DRF-1225 / C-4 — пройти анкету заново можно сколько угодно раз.
+          Показывается ровно тогда, когда намерение прислал сервер. */}
+      {startAnketaLabel && (
+        <div className="goal-select__actions">
+          <button
+            type="button"
+            className="btn-secondary"
+            disabled={submitting}
+            onClick={() =>
+              submit({ intent: "start_anketa", source_channel: "miniapp" })
+            }
+          >
+            {startAnketaLabel}
+          </button>
+        </div>
+      )}
+
+      {/* Спрашивать нечего — сервер назвал, куда вести дальше. */}
+      {nextStep && nextRoute && (
+        <div className="goal-select__actions">
+          <button
+            type="button"
+            className="btn-secondary goal-select__next"
+            disabled={submitting}
+            onClick={() => navigate(nextRoute)}
+          >
+            {nextStep.label}
           </button>
         </div>
       )}

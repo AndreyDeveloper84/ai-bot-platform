@@ -71,6 +71,13 @@ CONNECT_TIMEOUT_S: Final[float] = 6.0
 READ_TIMEOUT_S: Final[float] = 5.0
 RECONCILE_READ_TIMEOUT_S: Final[float] = 3.0
 
+#: Ключ финального шага анкеты (DRF-1451) — единственный шаг, ответ на
+#: который создаёт ``ClientGoal``, а значит единственный примиримый.
+#: Совпадает с ``goals.anketa.FINAL_STEP_KEY`` на стороне Ayla; здесь
+#: он строкой, потому что через границу сервисов ходит контракт, а не
+#: импорт (ADR-0009: нет прямого доступа к чужому коду и БД).
+ANKETA_FINAL_STEP: Final[str] = "goal"
+
 # Держим keep-alive заведомо короче, чем nginx перед Ayla (keepalive_timeout
 # 65 s по умолчанию): иначе мы будем переиспользовать соединение, которое
 # сервер уже закрыл, и платить за это разрывом на ровном месте.
@@ -342,16 +349,39 @@ def post_goal_select(
         return reconciled
 
 
+def _durable_goal_intent(payload: dict[str, Any]) -> dict[str, str]:
+    """Какую цель этот payload пытался записать, если вообще пытался.
+
+    DRF-1451 добавил четвёртый вариант тела — ``answer`` (ответ на шаг
+    анкеты), — и у него ключи лежат на уровень глубже. Без разворачивания
+    сверка ниже видела бы пустой payload и отказывалась примирять именно
+    тот запрос, который цель и создаёт: последний шаг анкеты. Человек
+    получил бы 502 на записанной цели и пошёл отвечать заново.
+
+    Ответы на СУЖАЮЩИЕ шаги durable-следа в ``ClientGoal`` не оставляют
+    (цели ещё нет), поэтому примирять их нечем — как и
+    ``intent=need_guidance``. Отсюда фильтр по финальному шагу.
+    """
+    goal_key = payload.get("goal_key") or ""
+    goal_text = (payload.get("goal_text") or "").strip()
+
+    answer = payload.get("answer")
+    if isinstance(answer, dict) and answer.get("step") == ANKETA_FINAL_STEP:
+        goal_key = goal_key or (answer.get("option_key") or "")
+        goal_text = goal_text or (answer.get("text") or "").strip()
+
+    return {"goal_key": goal_key, "goal_text": goal_text}
+
+
 def _selected_goal_matches(goal: Any, payload: dict[str, Any]) -> bool:
     """Стоит ли в документе ровно та цель, которую мы пытались записать."""
     if not isinstance(goal, dict):
         return False
-    goal_key = payload.get("goal_key")
-    if goal_key:
-        return goal.get("goal_key") == goal_key
-    goal_text = (payload.get("goal_text") or "").strip()
-    if goal_text:
-        return (goal.get("goal_text") or "").strip() == goal_text
+    intent = _durable_goal_intent(payload)
+    if intent["goal_key"]:
+        return goal.get("goal_key") == intent["goal_key"]
+    if intent["goal_text"]:
+        return (goal.get("goal_text") or "").strip() == intent["goal_text"]
     return False
 
 
@@ -372,9 +402,12 @@ def _reconcile_goal_select(
     * отказ был именно по чтению (``ReadTimeout``). При ConnectTimeout /
       ConnectError запрос до Ayla не доехал, сверять нечего, и лишний
       запрос лишь удлинит ожидание;
-    * в payload есть ``goal_key`` или ``goal_text``. У
-      ``intent=need_guidance`` durable-следа нет вовсе — ``ClientGoal`` не
-      создаётся (``goals/api.py``), — поэтому подтвердить его по документу
+    * payload вообще пытался записать цель — ``goal_key`` / ``goal_text``
+      на верхнем уровне ИЛИ ответ на финальный шаг анкеты (DRF-1451),
+      см. :func:`_durable_goal_intent`. У ``intent=need_guidance``,
+      ``intent=start_anketa`` и ответов на сужающие шаги durable-следа в
+      ``ClientGoal`` нет вовсе — ``ClientGoal`` не создаётся
+      (``goals/api.py``), — поэтому подтвердить их по документу
       невозможно, и притворяться, что можно, нельзя.
 
     Что здесь сознательно НЕ различается: наш это был запрос или та же цель
@@ -385,10 +418,8 @@ def _reconcile_goal_select(
     """
     if not isinstance(exc.cause, httpx.ReadTimeout):
         return None
-    leaves_durable_trace = bool(payload.get("goal_key")) or bool(
-        (payload.get("goal_text") or "").strip()
-    )
-    if not leaves_durable_trace:
+    intent = _durable_goal_intent(payload)
+    if not (intent["goal_key"] or intent["goal_text"]):
         return None
 
     try:

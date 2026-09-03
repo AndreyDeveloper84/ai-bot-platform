@@ -93,6 +93,7 @@ import { FoodScannerProcessingScreen } from "./screens/FoodScannerProcessingScre
 import { FoodScannerResultScreen } from "./screens/FoodScannerResultScreen";
 import { FoodScannerSavedScreen } from "./screens/FoodScannerSavedScreen";
 import { HelloScreen } from "./screens/HelloScreen";
+import { CustomerEntryScreen } from "./screens/CustomerEntryScreen";
 import { RoleNotReadyScreen } from "./screens/RoleNotReadyScreen";
 import { MasterConversationDetailScreen } from "./screens/MasterConversationDetailScreen";
 import { MasterConversationsScreen } from "./screens/MasterConversationsScreen";
@@ -1092,11 +1093,41 @@ function UnifiedSoloSurface({ me }: { me: MeResponse }) {
   );
 }
 
-/** Routes for the customer role (Phase 0c / Phase 4 surface). */
-function CustomerRoutes() {
+/** Routes for the customer role (Phase 0c / Phase 4 surface).
+ *
+ * `goalEntry` — DRF-1451. Отдаётся ли корень поверхности цели.
+ *
+ * Выключается для админа-мастера, который переключился на клиентскую
+ * поверхность. У него нет `ClientGoal`, поэтому анкету он получил бы
+ * первым же экраном; а `SurfaceSwitchButton` смонтирована только на
+ * `CustomerProfileScreen`, `MasterSettingsScreen` и
+ * `AdminSettingsPlaceholderScreen` — то есть обратно к «Сменить режим»
+ * он бы уже не дошёл. `useLastSurface` держит выбор в localStorage,
+ * так что следующий запуск повторил бы то же самое.
+ *
+ * Это тот же класс дефекта, что DRF-1349 и DRF-1434 (см. комментарии
+ * ниже): роль есть, а экран показан не тот. И анкета здесь не про него:
+ * владелец салона, зашедший посмотреть клиентскую поверхность, — не
+ * человек, впервые встречающий Ayla.
+ */
+export function CustomerRoutes({ goalEntry = true }: { goalEntry?: boolean } = {}) {
   return (
     <Routes>
-      <Route path="/" element={<HelloScreen />} />
+      {/*
+        DRF-1451 — первый экран клиента. Решение владельца 03.09.2026
+        (поправка A-1 к BOT-001, §24): человек, впервые открывший
+        мини-приложение, попадает на анкету цели, а не на приветствие.
+
+        Кто «новый» — решает сервер: `CustomerEntryScreen` читает
+        `missing` из decision-context и больше ничего. Сбой ручки
+        рисует прежний `HelloScreen`, так что вход в приложение от
+        необязательной анкеты не зависит.
+
+        Catch-all `*` ниже остаётся на `HelloScreen`: он ловит
+        несуществующие адреса, а не первый вход, и лишний
+        decision-context на каждой опечатке в ссылке не нужен.
+      */}
+      <Route path="/" element={goalEntry ? <CustomerEntryScreen /> : <HelloScreen />} />
       <Route path="/catalog" element={<CatalogScreen />} />
       <Route path="/catalog/:serviceId" element={<ServiceDetailScreen />} />
       <Route path="/book/master" element={<MasterPickerScreen />} />
@@ -1466,7 +1497,9 @@ function RoleSurface({
     return <UnifiedLanding me={me} />;
   }
   if (multiRole && surfacePref === "customer") {
-    return <CustomerRoutes />;
+    // goalEntry={false}: см. шапку CustomerRoutes — иначе админ-мастер
+    // запирается на анкете без дороги обратно к «Сменить режим».
+    return <CustomerRoutes goalEntry={false} />;
   }
   if (isSolo && hasMaster) {
     return <UnifiedSoloSurface me={me} />;

@@ -776,6 +776,24 @@ a {
   margin-top: var(--s-3);
 }
 
+/* Позиция вопроса в анкете (DRF-1451). Число приходит с сервера —
+   экран его не считает, только рисует. Тише самого вопроса намеренно:
+   ориентир, а не содержание. */
+.goal-select__progress {
+  margin: var(--s-3) 0 var(--s-1);
+  font-size: var(--font-size-100);
+  color: var(--c-text-secondary);
+}
+
+/* «Куда дальше», когда спрашивать нечего. Залита акцентом, в отличие
+   от соседних кнопок поверхности: это единственное действие, которое
+   ведёт человека ВПЕРЁД, а не вглубь вопросов. */
+.goal-select__next {
+  background: var(--c-accent);
+  color: var(--c-text-on-accent);
+  border-color: var(--c-accent);
+}
+
 /* Inline action row under each visit card. */
 .visit-row__actions {
   display: flex;
