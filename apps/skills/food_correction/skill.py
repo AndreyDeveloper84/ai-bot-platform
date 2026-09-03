@@ -236,6 +236,21 @@ def _looks_like_dish(text: str) -> bool:
     )
 
 
+def _anketa_fsm_active(conversation: Any) -> bool:
+    """Is the nutrition anketa mid-flow on this conversation?
+
+    While it is, the anketa claims ANY plain text — its steps are numeric
+    (возраст 14–90, рост 100–220, вес 30–200), all inside the portion parser's
+    range, and this skill is consulted FIRST. A pending correction must
+    therefore not take a plain-text turn away from an active anketa: «170»
+    answering «какой у тебя рост» is the anketa's answer, not a portion
+    (review DRF-1454: it was stored as «порция „борщ“ — 170 г» and the
+    anketa's answer was lost).
+    """
+
+    return bool(_state_of(conversation).get("nutrition_anketa"))
+
+
 def _state_of(conversation: Any) -> dict[str, Any]:
     raw = getattr(conversation, "skill_state", None)
     return raw if isinstance(raw, dict) else {}
@@ -359,6 +374,10 @@ class FoodCorrectionSkill:
             return False
         pending = _pending(context)
         if pending is None:
+            return False
+        if _anketa_fsm_active(context.conversation):
+            # The anketa owns every plain-text turn while it runs — see
+            # _anketa_fsm_active. Callbacks above are unaffected.
             return False
         if _has_remembered_value(pending) and _keep_or_change(text):
             # «Оставляем?» answered with «да»/«нет» — a decision about the

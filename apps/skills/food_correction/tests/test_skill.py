@@ -380,6 +380,32 @@ class TestKeepOrChange:
         assert written[-1][1]["remembered"] is False
 
 
+class TestAnActiveAnketaKeepsItsAnswers:
+    """Ревью DRF-1454, ось correctness, MUST_FIX_PRE_PILOT: ожидающая правка
+    веса перехватывала числовые ответы анкеты. Шаги анкеты числовые (возраст
+    14–90, рост 100–220, вес 30–200) и все попадают в диапазон парсера порции,
+    а food_correction опрашивается раньше nutrition_anketa. Вход из находки:
+    карточка «Борщ» → ✏️ → «вес» (молчим) → «Пройти анкету» → вопрос о росте
+    → «170» → записывалось «порция „борщ“ — 170 г», ответ анкеты терялся."""
+
+    def test_an_active_anketa_fsm_blocks_the_answer_path(self) -> None:
+        skill = FoodCorrectionSkill()
+        # Presence first: without an anketa the very same turn IS ours.
+        assert skill.matches(_pending_context("170"))
+
+        context = _pending_context("170")
+        context.conversation.skill_state["nutrition_anketa"] = {"current_step": "height"}
+
+        assert not skill.matches(context)
+
+    def test_the_callback_path_is_unaffected_by_an_active_anketa(self) -> None:
+        """cb:food:correct:* должен выигрывать у анкеты и дальше (порядок
+        реестра несущий) — блокируется только свободный текст."""
+        context = _pending_context("cb:food:correct:grams:scan-1")
+        context.conversation.skill_state["nutrition_anketa"] = {"current_step": "height"}
+        assert FoodCorrectionSkill().matches(context)
+
+
 class TestAnUnreadableAnswerKeepsTheQuestionOpen:
     """The re-ask used to clear the pending record first, so the bot asked a
     question it had stopped listening to and the person's next «300» fell

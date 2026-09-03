@@ -212,6 +212,32 @@ class TestSecondVisitDoesNotReAsk:
         assert _green_rows(ayla).count() == 1
 
 
+class TestAnketaAnswersAreNotCorrections:
+    """Ревью DRF-1454, ось correctness, MUST_FIX_PRE_PILOT — вход из находки:
+    карточка «Борщ» → ✏️ → «вес» (не отвечаем) → «Пройти анкету» → вопрос о
+    росте → «170». До исправления записывалось «порция „борщ“ — 170 г», а
+    ответ анкеты терялся — анкета стояла на том же шаге."""
+
+    def test_a_numeric_anketa_answer_reaches_the_anketa(self, person, ayla) -> None:
+        _turn(person, attachments=_PHOTO)
+        _turn(person, text="cb:food:correct:grams:scan-1")  # правка веса осталась ждать
+
+        started = _turn(person, text="/anketa")
+        assert started is not None
+        assert "пол" in started.reply_text.lower()
+
+        _turn(person, text="cb:anketa:choice:gender:female")
+        asked_height = _turn(person, text="30")  # возраст — тоже число в диапазоне порции
+        assert asked_height is not None
+        assert "рост" in asked_height.reply_text.lower()
+
+        asked_weight = _turn(person, text="170")
+        assert asked_weight is not None
+        assert "вес" in asked_weight.reply_text.lower()  # анкета ПРОДВИНУЛАСЬ
+        # …а не записала «порция „борщ“ — 170 г»:
+        assert MemoryEntry.objects.count() == 0
+
+
 class TestAPendingCorrectionDoesNotSwallowTheLadder:
     """Review DRF-1454 / A2: the predicate now calls a plain-text turn
     «structured» while a correction is open, but the correction skill claims
