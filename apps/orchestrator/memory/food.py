@@ -215,9 +215,18 @@ class Outcome(str, Enum):
 
 # ─── the sensitive perimeter (DRF-1290 shape) ──────────────────────────────
 
-# Medical markers → red (152-ФЗ ст. 10 special category). The same stems the
-# green-fact extractor already refuses on, kept in sync deliberately.
-_MEDICAL_RE = re.compile(r"аллерг|непереносимост", re.IGNORECASE)
+# Medical markers → red (152-ФЗ ст. 10 special category). The allergy stems the
+# green-fact extractor already refuses on, kept in sync deliberately, plus the
+# health states a person actually types into the ✏️ prompt (review DRF-1454:
+# «у меня диабет» / «я беременна» / «кормлю грудью» all passed the «dish name»
+# filter and were written to the green zone — the least protected one).
+_MEDICAL_RE = re.compile(
+    r"аллерг|непереносимост"
+    r"|\bдиабет\w*|\bгастрит\w*|\bцелиаки\w*|\bязв\w*"
+    r"|\bпанкреатит\w*|\bподагр\w*|\bанеми\w*"
+    r"|\bбеременн\w*|\bкормлю\s+грудью\b|\bгрудн\w+\s+вскармливани\w*\b",
+    re.IGNORECASE,
+)
 
 # Plain dietary exclusion → yellow. Not a diagnosis, but a strong channel for
 # one (and for religion), so it is not green either.
@@ -228,9 +237,13 @@ _MEDICAL_RE = re.compile(r"аллерг|непереносимост", re.IGNORE
 # чувствительные данные» — the false positive costs more than the miss, because
 # it puts the refusal script in front of somebody who refused nothing.
 _EXCLUSION_RE = re.compile(
-    r"\bне\s+(?:ем|ешь|едим|пью|употребля\w*|переношу)\b"
+    r"\bне\s+(?:ем|ешь|едим|пью|употребля\w*|переношу|куша\w*)\b"
     r"|\bмне\s+нельзя\b"
-    r"|\bисключ\w+\s+из\s+рациона\b",
+    r"|\bисключ\w+\s+из\s+рациона\b"
+    # Self-declared diets and fasting: they reveal religion or a diagnosis,
+    # and data revealing a special category is treated as one.
+    r"|\bвегетариан\w*|\bвеган\w*|\bхалял\w*|\bкошерн\w*"
+    r"|\bпощусь\b|\bпостюсь\b|\b(?:держу|соблюдаю)\s+пост\b",
     re.IGNORECASE,
 )
 

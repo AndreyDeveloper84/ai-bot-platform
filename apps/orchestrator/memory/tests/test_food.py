@@ -291,6 +291,64 @@ class TestPerimeterStoresNothing:
         assert MemoryEntry.objects.count() == 0
 
 
+class TestSensitiveStatementsNeverPassTheDishFilter:
+    """Ревью DRF-1454, ось correctness, MUST_FIX_PRE_PILOT.
+
+    Периметр держался только на ``аллерг|непереносимост`` и ``не (ем|пью)`` —
+    всё остальное падало в ветку «имя блюда» и писалось в зелёную зону.
+    Воспроизводящий вход из находки: карточка «Салат» → ✏️ → «название» →
+    «у меня диабет» → зелёная строка «блюдо „салат“ называет „у меня диабет“».
+    Докстрока модуля обещает, что диагноз и исключение никогда не попадут в
+    green — эти девять строк и есть обещание, прогнанное против regex.
+    """
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "у меня диабет",
+            "у меня гастрит",
+            "у меня целиакия",
+            "я беременна",
+            "кормлю грудью",
+        ],
+    )
+    def test_a_diagnosis_or_health_state_is_red(self, text: str) -> None:
+        assert food_memory.classify_refusal(text) == MemoryEntry.SENSITIVITY_RED
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "не кушаю мясо",
+            "я вегетарианец",
+            "халяль",
+            "пощусь",
+        ],
+    )
+    def test_a_plain_exclusion_is_yellow(self, text: str) -> None:
+        assert food_memory.classify_refusal(text) == MemoryEntry.SENSITIVITY_YELLOW
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "у меня диабет",
+            "я беременна",
+            "я вегетарианец",
+            "халяль",
+            "пощусь",
+        ],
+    )
+    def test_none_of_them_is_written_to_the_green_zone(
+        self, settings, resolver, text: str
+    ) -> None:
+        bot_user = _consented_user(f"drf1454-sens-{abs(hash(text)) % 999}", settings)
+
+        assert (
+            food_memory.note_refusal(bot_user, text=text)
+            is food_memory.Outcome.DROPPED_SENSITIVE
+        )
+        assert MemoryEntry.objects.count() == 0
+
+
 # ─── согласие ─────────────────────────────────────────────────────────────
 
 
