@@ -129,7 +129,14 @@ logger = logging.getLogger(__name__)
 # pin lands with a DIFFERENT set, so the two cannot silently drift, and the
 # fallback disappears in the bump PR.
 try:  # pragma: no cover — exercised by whichever pin the environment carries
-    from ayla_ai_core import STATED_SOURCES
+    from typing import cast
+
+    from ayla_ai_core import STATED_SOURCES as _LIBRARY_STATED_SOURCES
+
+    # The pinned library resolves unknown attributes through a PEP 562
+    # ``__getattr__`` typed ``-> object``, which mypy rejects as the right
+    # operand of ``in`` — annotate the contract instead of inheriting it.
+    STATED_SOURCES: frozenset[str] = cast(frozenset[str], _LIBRARY_STATED_SOURCES)
 except ImportError:  # pin predates the dictionary
     # "stated" — the library's own name; "explicit" — the backend's name for
     # exactly the same thing (and the value `MemoryEntry.SOURCE_EXPLICIT` uses).

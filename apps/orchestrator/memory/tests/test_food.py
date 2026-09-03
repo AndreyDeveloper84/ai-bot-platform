@@ -199,7 +199,10 @@ class TestProvenance:
 
     def test_the_stated_dictionary_is_the_shared_one(self) -> None:
         """The rule is «only explicit is a quote», sourced from ayla-ai-core."""
-        from ayla_ai_core import STATED_SOURCES
+        try:
+            from ayla_ai_core import STATED_SOURCES
+        except ImportError:
+            pytest.skip("pinned ayla-ai-core predates STATED_SOURCES (see food.py)")
 
         assert MemoryEntry.SOURCE_EXPLICIT in STATED_SOURCES
         assert MemoryEntry.SOURCE_INFERRED not in STATED_SOURCES
