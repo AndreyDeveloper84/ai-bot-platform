@@ -142,6 +142,69 @@ def _add_green(upc, value):
     )
 
 
+def _upc_with_food_rows(upc=None):
+    """Green rows the food-scanner memory writes (DRF-1454): keys carry the
+    dish, so they cannot be listed in _KEY_KEYWORDS verbatim."""
+    upc = upc or UserPersonalContext.objects.create(user_id=uuid.uuid4())
+    for key, value, display in (
+        ("food_portion:борщ", 500, "порция «борщ» — 500 г"),
+        ("food_macros:борщ", "12/8/32", "БЖУ для «борщ» — 12/8/32"),
+        ("food_dish_name:борщ", "Свекольник", "блюдо «борщ» называет «Свекольник»"),
+    ):
+        MemoryEntry.objects.create(
+            user_id=upc.user_id,
+            personal_context=upc,
+            sensitivity_zone=MemoryEntry.SENSITIVITY_GREEN,
+            source=MemoryEntry.SOURCE_EXPLICIT,
+            provenance=MemoryEntry.PROVENANCE_USER_STATED,
+            kind="preference",
+            content={"key": key, "value": value, "dish": "борщ", "display": display},
+        )
+    return upc
+
+
+class TestFoodScannerRowsBelongToThePitanieDomain:
+    """Ревью DRF-1454, ось architecture, MUST_FIX_PRE_PILOT: ключи food_* не
+    были зарегистрированы в _KEY_KEYWORDS/_DOMAIN_LABELS — «забудь всё про
+    питание» удаляла только строки ключа diet, отвечала «Готово — забыла всё,
+    что знала: питание», а до 60 строк food_portion:*/food_macros:* оставались
+    живы. Кнопки «Забыть» у них тоже не было. Это право на стирание по 152-ФЗ
+    и ADR-0011 §8: стирание, рапортующее успех, обязано стирать."""
+
+    def test_domain_forget_takes_the_food_rows_with_it(self):
+        upc = _upc_with_food_rows()
+
+        res = handle_memory_command(user_id=upc.user_id, text="забудь всё про питание")
+
+        assert res is not None
+        assert "забыла" in res.text.lower()
+        alive = MemoryEntry.objects.filter(user_id=upc.user_id, soft_deleted_at__isnull=True)
+        assert list(alive) == []
+        # Tombstoned, not hard-deleted — audit rows stay.
+        assert MemoryEntry.objects.filter(user_id=upc.user_id).count() == 3
+
+    def test_domain_forget_covers_diet_and_food_rows_together(self):
+        """Строка diet и строки food_* — один домен «питание», а не два
+        неоднозначных (иначе команда уходила бы в clarify)."""
+        upc = _upc_with_food_rows(_upc_with_green("vegan"))
+
+        res = handle_memory_command(user_id=upc.user_id, text="забудь всё про моё питание")
+
+        assert res is not None
+        assert "забыла" in res.text.lower()
+        assert "Не совсем поняла" not in res.text
+        alive = MemoryEntry.objects.filter(user_id=upc.user_id, soft_deleted_at__isnull=True)
+        assert list(alive) == []
+
+    def test_the_memory_list_offers_a_forget_chip_for_food_rows(self):
+        from apps.persona.memory_commands import memory_show_chips
+
+        upc = _upc_with_food_rows()
+
+        chips = memory_show_chips(None, user_id=upc.user_id)
+        assert any("питание" in chip["label"] for chip in chips)
+
+
 class TestShowDoesNotContradictItself:
     """DRF-1262 — «покажи, что знаешь обо мне» must show the CURRENT fact set.
 
