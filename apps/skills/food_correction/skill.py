@@ -119,20 +119,77 @@ _STATE_KEY = "food_correction"
 _PENDING_TTL_SECONDS = 600
 
 # Answer shapes — the *matching* gate (stricter than the parser, which only has
-# to read a value once the turn is already ours).
-_SHAPE_GRAMS = re.compile(r"^\D{0,6}\d{1,4}\s*(?:г|гр|грамм\w*)?\.?$", re.IGNORECASE)
+# to read a value once the turn is already ours). ``[^\d\n]`` rather than ``\D``
+# throughout: ``\D`` matches a newline, so «Ок\n300» read as an answer about
+# weight when it was two sentences, only one of which was.
+_SHAPE_GRAMS = re.compile(r"^[^\d\n]{0,6}\d{1,4}\s*(?:г|гр|грамм\w*)?\.?$", re.IGNORECASE)
 _SHAPE_MACROS = re.compile(
-    r"^\D{0,10}\d{1,4}\s*[/|]\s*\D{0,3}\d{1,4}\s*[/|]\s*\D{0,3}\d{1,4}\D{0,10}$"
+    r"^[^\d\n]{0,10}\d{1,4}\s*[/|]\s*[^\d\n]{0,3}\d{1,4}\s*[/|]\s*[^\d\n]{0,3}\d{1,4}[^\d\n]{0,10}$"
 )
-# A dish name: one short line, no digits, and at least two adjacent letters —
-# «???» and a lone emoji are not answers to «что было на фото?».
-_SHAPE_NAME = re.compile(r"^(?=.*[^\W\d_]{2})[^\d\n]{2,40}$", re.UNICODE)
 
 _SHAPES: dict[str, re.Pattern[str]] = {
     "grams": _SHAPE_GRAMS,
     "macros": _SHAPE_MACROS,
-    "name": _SHAPE_NAME,
 }
+
+# ── the name answer, which has no shape of its own ────────────────────────
+#
+# «Что было на фото?» is answered with free text, so there is no pattern that
+# separates a dish from a sentence. A permissive «any 2-40 chars without
+# digits» let «что я ел сегодня» and «мой дневник» be stored as the name of a
+# dish and printed back on every future card — and, worse, took those turns
+# away from the diary handler and the concierge that own them.
+#
+# Three cheap constraints instead, all of which a dish name satisfies and a
+# request does not: it is short, it is at most three words, and it does not
+# open with the vocabulary of asking for something.
+_SHAPE_NAME = re.compile(r"^(?=.*[^\W\d_]{2})[^\d\n?!]{2,30}$", re.UNICODE)
+_MAX_NAME_WORDS = 3
+_NOT_A_DISH_RE = re.compile(
+    r"^\s*(?:что|чего|как|где|когда|почему|зачем|кто|какие|какой|сколько"
+    r"|хочу|хотел\w*|можно|нужно|надо|покажи|дай|скажи|расскажи|помоги|давай"
+    r"|забудь|запиши|запомни|отмени|перенеси|открой|пройти|начать|стоп"
+    r"|спасибо|привет|здравствуй\w*|пока|ок|окей|да|нет|ага|угу"
+    r"|мой|моя|мои|моё|мне|меня)\b",
+    re.IGNORECASE,
+)
+
+
+def _deterministic_chip_texts() -> frozenset[str]:
+    """Callback texts of the chips that MUST always execute (DRF-1302/DRF-1268).
+
+    On this path a tap IS a typed message, so «💧 Записать стакан воды» arrives
+    as the plain text «стакан воды» — which is also a perfectly good answer to
+    «что было на фото?». The chip wins: a button that silently becomes a dish
+    name is a button that stopped working, and the person has no way to tell.
+    Read from ``personal_surface`` rather than copied, so a re-worded chip
+    cannot drift out of this list.
+    """
+
+    try:
+        from apps.orchestrator.personal_surface import CHIP_ANKETA, CHIP_DIARY, CHIP_WATER
+
+        return frozenset(
+            str(chip["callback"]).strip().lower() for chip in (CHIP_ANKETA, CHIP_DIARY, CHIP_WATER)
+        )
+    except Exception:  # noqa: BLE001 — a matcher must never break the turn
+        logger.exception("food_correction.chip_texts_unavailable")
+        return frozenset()
+
+
+def _looks_like_dish(text: str) -> bool:
+    """Is this plain text plausibly a dish name rather than a request?"""
+
+    stripped = text.strip()
+    if stripped.startswith("/"):  # a command, whoever owns it
+        return False
+    if stripped.lower() in _deterministic_chip_texts():
+        return False
+    return bool(
+        _SHAPE_NAME.match(text)
+        and len(text.split()) <= _MAX_NAME_WORDS
+        and not _NOT_A_DISH_RE.match(text)
+    )
 
 
 def _state_of(conversation: Any) -> dict[str, Any]:
@@ -169,6 +226,11 @@ def _pending_record(conversation: Any) -> dict[str, Any] | None:
     stay side-effect free, and the next write to the sub-key overwrites it.
     """
 
+    if not food_memory.scanner_memory_enabled():
+        # The rollback switch, applied at the ONE place that decides whether a
+        # plain-text turn is ours: off → no claim, no routing change, no write.
+        # Exactly the pre-DRF-1454 skill.
+        return None
     pending = _state_of(conversation).get(_STATE_KEY)
     if not isinstance(pending, dict):
         return None
@@ -257,6 +319,8 @@ class FoodCorrectionSkill:
         field = str(pending.get("field"))
         if food_memory.classify_refusal(text):
             return True
+        if field == food_memory.FIELD_NAME:
+            return _looks_like_dish(text)
         shape = _SHAPES.get(field)
         return bool(shape and shape.match(text))
 
@@ -332,11 +396,11 @@ class FoodCorrectionSkill:
         field = str(pending.get("field"))
         dish = pending.get("dish")
         dish = dish if isinstance(dish, str) else ""
-        _write_state(context, None)  # the question is answered either way
 
         # Perimeter first: a refusal is never a correction value, and must not
         # reach the green write path even if it happens to parse.
         if food_memory.classify_refusal(text):
+            _write_state(context, None)  # answered — the question is settled
             outcome = food_memory.note_refusal(context.bot_user, text=text)
             logger.info(
                 "food_correction.answer field=%s outcome=%s conversation=%s",
@@ -351,11 +415,27 @@ class FoodCorrectionSkill:
 
         value = food_memory.parse_correction_value(field, text)
         if value is None:
+            # «0» and «99999» have the shape of an answer but no readable value.
+            # The pending record is REFRESHED rather than cleared: clearing it
+            # here asked a question the skill would no longer be listening to —
+            # the person's «300» on the next turn fell through to the concierge
+            # and the correction was lost, which is the exact bug this ticket
+            # exists to fix.
+            _write_state(
+                context,
+                {
+                    "field": field,
+                    "scan_id": pending.get("scan_id", ""),
+                    "dish": dish,
+                    "at": datetime.now(timezone.utc).isoformat(),
+                },
+            )
             return SkillResult(
                 reply_text=_PROMPTS[field],
                 meta={"reply_kind": f"food_correction_{field}_reask"},
             )
 
+        _write_state(context, None)  # answered — the question is settled
         outcome = (
             food_memory.remember_correction(context.bot_user, dish=dish, field=field, value=value)
             if dish

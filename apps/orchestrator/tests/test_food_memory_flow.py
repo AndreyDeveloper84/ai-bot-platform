@@ -210,3 +210,51 @@ class TestSecondVisitDoesNotReAsk:
         # История сохранена (две строки), но текущее значение одно.
         assert MemoryEntry.objects.count() == 2
         assert _green_rows(ayla).count() == 1
+
+
+class TestAPendingCorrectionDoesNotSwallowTheLadder:
+    """Review DRF-1454 / A2: the predicate now calls a plain-text turn
+    «structured» while a correction is open, but the correction skill claims
+    only text shaped like its answer. Everything else must still reach the
+    deterministic diary handler — a chip that leads to nothing is worse than no
+    chip (DRF-1302)."""
+
+    def test_the_diary_chip_still_executes_while_a_correction_is_open(
+        self, person, ayla, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from apps.skills.base import SkillResult
+
+        _turn(person, attachments=_PHOTO)
+        _turn(person, text="cb:food:correct:name:scan-1")
+
+        sentinel = SkillResult(reply_text="дневник", meta={"reply_kind": "diary"})
+        monkeypatch.setattr(
+            "apps.orchestrator.nutrition_global._try_handle_diary_request",
+            lambda **_kw: sentinel,
+            raising=True,
+        )
+
+        assert _turn(person, text="что я ел сегодня") is sentinel
+        assert MemoryEntry.objects.count() == 0  # and nothing was stored as a dish
+
+
+class TestRollbackSwitchEndToEnd:
+    def test_flag_off_leaves_the_scanner_exactly_as_it_was(self, person, ayla, settings) -> None:
+        bot_user, _conversation = person
+        # Presence first: with the switch ON the five-turn loop stores and recalls.
+        _turn(person, attachments=_PHOTO)
+        _turn(person, text="cb:food:correct:grams:scan-1")
+        _turn(person, text="500")
+        assert _green_rows(ayla).count() == 1
+
+        settings.FOOD_SCANNER_MEMORY_ENABLED = False
+
+        card = _turn(person, attachments=_PHOTO)
+        assert card is not None
+        assert "Помню с прошлого раза" not in card.reply_text
+        assert card.action_data["remembered"] is False
+
+        prompt = _turn(person, text="cb:food:correct:grams:scan-2")
+        assert prompt.reply_text == _PROMPTS["grams"]  # the plain question is back
+        assert _turn(person, text="250") is None  # the answer falls through again
+        assert _green_rows(ayla).count() == 1  # and nothing new was written

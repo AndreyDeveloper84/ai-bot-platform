@@ -97,13 +97,13 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any
 
-from ayla_ai_core import STATED_SOURCES
+from django.db.transaction import TransactionManagementError
 
 from apps.consent.memory import can_store_green_memory
 from apps.consent.services import has_memory_consent
 from apps.identity.models import MemoryEntry
 from apps.identity.services.ayla_link import ensure_ayla_link
-from apps.identity.services.memory_key_policy import read_current_view
+from apps.identity.services.memory_key_policy import read_current_view, select_current_facts
 from apps.identity.services.memory_reader import (
     get_or_create_personal_context,
     read_green_entries,
@@ -111,6 +111,29 @@ from apps.identity.services.memory_reader import (
 from apps.identity.services.memory_writer import supersede_entries, write_entry
 
 logger = logging.getLogger(__name__)
+
+
+# ─── provenance dictionary — one rule, two possible homes ──────────────────
+#
+# The rule belongs to ``ayla_ai_core`` (see the module docstring), and the
+# library grew a name for it — ``STATED_SOURCES`` — in the commit that closed
+# «цитатой считается только объявленное сказал сам». That commit is NOT in the
+# revision this repo pins (``pyproject.toml`` → ``ayla-ai-core@ee6425ac``), and
+# bumping the pin is its own change with its own checklist: the library has TWO
+# production consumers, so a bump is a coordinated release, not a line in a
+# feature PR.
+#
+# So the import is attempted and the value falls back to the same two strings
+# the library defines. The fallback is transitional and must not outlive the
+# bump: ``test_the_stated_dictionary_matches_the_library`` fails the moment the
+# pin lands with a DIFFERENT set, so the two cannot silently drift, and the
+# fallback disappears in the bump PR.
+try:  # pragma: no cover — exercised by whichever pin the environment carries
+    from ayla_ai_core import STATED_SOURCES
+except ImportError:  # pin predates the dictionary
+    # "stated" — the library's own name; "explicit" — the backend's name for
+    # exactly the same thing (and the value `MemoryEntry.SOURCE_EXPLICIT` uses).
+    STATED_SOURCES = frozenset({"stated", "explicit"})
 
 
 # ─── the three correction fields (mirror food_correction's callbacks) ──────
@@ -140,6 +163,37 @@ _MAX_DISH_LEN = 64
 # portion, and storing it would poison the next card.
 _MIN_GRAMS = 1
 _MAX_GRAMS = 5000
+# One macro of one plate. Its job is to reject a date typed into the macros
+# prompt («12/08/2026»), not to police nutrition.
+_MAX_MACRO_G = 999
+
+# How many distinct dishes one person may accumulate corrections for.
+#
+# This bound is the same argument that keeps «что ел» out of the store, applied
+# to the store itself: a green zone has no auto-TTL and supersession keeps
+# history, so an unbounded dish namespace would slowly become the very nutrition
+# profile this module refused to build — only in the weaker zone. A cap keeps
+# the set «the handful of dishes this person actually corrects» instead.
+#
+# It refuses NEW dishes rather than evicting old ones: eviction is a deletion,
+# and deletions here belong to the person (152-ФЗ), not to a cap. Corrections to
+# dishes already remembered keep working at the cap.
+_MAX_DISHES = 20
+
+
+def scanner_memory_enabled() -> bool:
+    """Deploy-free rollback switch. Default ON — see the settings comment.
+
+    Read through Django settings (not a module-level env snapshot) so tests flip
+    it with the ``settings`` fixture and an operator flips it with a restart,
+    matching :func:`apps.orchestrator.memory_block.concierge_memory_enabled`.
+    False restores the pre-DRF-1454 behaviour exactly: no write, no recall, and
+    no pending correction to claim a plain-text turn with.
+    """
+
+    from django.conf import settings
+
+    return bool(getattr(settings, "FOOD_SCANNER_MEMORY_ENABLED", True))
 
 
 class Outcome(str, Enum):
@@ -147,6 +201,9 @@ class Outcome(str, Enum):
 
     WRITTEN = "written"
     DUPLICATE = "duplicate"
+    DISABLED = "disabled"
+    #: the per-person dish cap — see _MAX_DISHES.
+    CAP_REACHED = "cap_reached"
     #: yellow/red perimeter — classified, logged, deliberately not stored.
     DROPPED_SENSITIVE = "dropped_sensitive"
     NO_CONSENT = "no_consent"
@@ -164,11 +221,16 @@ _MEDICAL_RE = re.compile(r"аллерг|непереносимост", re.IGNORE
 
 # Plain dietary exclusion → yellow. Not a diagnosis, but a strong channel for
 # one (and for religion), so it is not green either.
+#
+# Every alternative here is a statement ABOUT THE PERSON. «без сахара» is not:
+# it is how a drink is ordered, and «Кофе без сахара» is a dish name, not a
+# refusal. Treating it as one answered a name correction with «это
+# чувствительные данные» — the false positive costs more than the miss, because
+# it puts the refusal script in front of somebody who refused nothing.
 _EXCLUSION_RE = re.compile(
     r"\bне\s+(?:ем|ешь|едим|пью|употребля\w*|переношу)\b"
     r"|\bмне\s+нельзя\b"
-    r"|\bисключ\w+\s+из\s+рациона\b"
-    r"|\bбез\s+(?:глютена|лактозы|сахара)\b",
+    r"|\bисключ\w+\s+из\s+рациона\b",
     re.IGNORECASE,
 )
 
@@ -222,14 +284,33 @@ def parse_correction_value(field: str, text: str) -> Any | None:
         match = _MACROS_RE.search(text)
         if match is None:
             return None
-        return "/".join(str(int(part)) for part in match.groups())
+        parts = [int(part) for part in match.groups()]
+        # Grams have a sanity range and macros used to have none, so «12/08/2026»
+        # parsed to «12/8/2026» and was printed back on the card as this person's
+        # own figure. A macro is a portion of a plate, not a year.
+        if any(part > _MAX_MACRO_G for part in parts) or not any(parts):
+            return None
+        return "/".join(str(part) for part in parts)
 
     if field == FIELD_NAME:
         # A bare number is an answer to the *grams* question, not a dish name —
-        # ``_dish_slug`` rejects it.
-        return _dish_slug(text) or None
+        # ``_clean_name`` rejects it. Case is kept: the KEY is normalised, the
+        # value the person typed is not — «Куриная грудка» must not come back
+        # to them as «куриная грудка».
+        return _clean_name(text)
 
     return None
+
+
+def _clean_name(text: Any) -> str | None:
+    """The dish name as the person wrote it: whitespace collapsed, nothing else."""
+
+    if not isinstance(text, str):
+        return None
+    name = " ".join(text.split()).strip()
+    if not name or name.isdigit():
+        return None
+    return name[:_MAX_DISH_LEN]
 
 
 def _dish_slug(dish: Any) -> str:
@@ -248,6 +329,28 @@ def _memory_key(field: str, dish_slug: str) -> str | None:
     if prefix is None or not dish_slug:
         return None
     return f"{prefix}:{dish_slug}"
+
+
+def _display(field: str, dish_slug: str, value: Any) -> str:
+    """The phrase the person sees for this row in «покажи, что помнишь».
+
+    Stored ON the row because that is the convention
+    :func:`apps.persona.memory_surface.describe_green_content` reads — a
+    writer-stored ``display`` outranks the per-key renderer, and a row with
+    neither is silently unrenderable, i.e. invisible.
+
+    Invisible is not an option here. The silent-remember ruling (2026-08-23)
+    that allows the bot to store a fact without asking rests on the show/forget
+    loop: a row the person cannot see is a row we had no right to write. One
+    phrase, written once, so the list and the prompt say the same sentence —
+    two renderers would be two answers about the same person.
+    """
+
+    if field == FIELD_GRAMS:
+        return f"порция «{dish_slug}» — {value} г"
+    if field == FIELD_NAME:
+        return f"блюдо «{dish_slug}» называет «{value}»"
+    return f"БЖУ для «{dish_slug}» — {value}"
 
 
 # ─── read side ─────────────────────────────────────────────────────────────
@@ -293,7 +396,7 @@ def recall_corrections(bot_user: Any, *, dish: str) -> FoodRecall:
     """
 
     dish_slug = _dish_slug(dish)
-    if not dish_slug:
+    if not dish_slug or not scanner_memory_enabled():
         return EMPTY_RECALL
     try:
         user_id = _existing_ayla_user_id(bot_user)
@@ -389,6 +492,8 @@ def remember_correction(bot_user: Any, *, dish: str, field: str, value: Any) -> 
     key = _memory_key(field, dish_slug)
     if key is None or value is None or value == "":
         return Outcome.UNPARSED
+    if not scanner_memory_enabled():
+        return Outcome.DISABLED
 
     try:
         if not can_store_green_memory(bot_user):
@@ -413,11 +518,37 @@ def remember_correction(bot_user: Any, *, dish: str, field: str, value: Any) -> 
         if upc.soft_deleted_at is not None or upc.forget_all_requested_at is not None:
             return Outcome.FORGOTTEN
 
-        live_rows = read_green_entries(user_id)
-        for row in live_rows:
+        # Superseded rows are still «live» to the reader (it filters only on the
+        # delete columns), and letting them into the dedup made a return to an
+        # earlier value silently impossible: 500 → 250 → 500 matched the first,
+        # dead row, answered «Запомнила: 500 г», and left 250 as the current
+        # value. Dedup therefore compares against the CURRENT fact set only —
+        # the same set ``recall_corrections`` will read back — so a DUPLICATE
+        # verdict means «this is already what we would tell you», never «we once
+        # heard this». Excluding them also bounds the scan by number of dishes
+        # rather than by number of corrections ever made.
+        live_rows = [
+            row
+            for row in read_green_entries(user_id)
+            if row.status != MemoryEntry.STATUS_SUPERSEDED
+        ]
+        current = select_current_facts(live_rows)
+        dishes: set[str] = set()
+        for row in current:
             content = row.content if isinstance(row.content, dict) else {}
             if content.get("key") == key and content.get("value") == value:
                 return Outcome.DUPLICATE
+            remembered_dish = content.get("dish")
+            if isinstance(remembered_dish, str) and remembered_dish:
+                dishes.add(remembered_dish)
+
+        if dish_slug not in dishes and len(dishes) >= _MAX_DISHES:
+            logger.info(
+                "food_memory.dish_cap_reached bot_user=%s dishes=%d",
+                getattr(bot_user, "id", "?"),
+                len(dishes),
+            )
+            return Outcome.CAP_REACHED
 
         entry = write_entry(
             user_id=user_id,
@@ -427,7 +558,14 @@ def remember_correction(bot_user: Any, *, dish: str, field: str, value: Any) -> 
             # the sanctioned writer stamps provenance='user_stated' from it.
             source=MemoryEntry.SOURCE_EXPLICIT,
             kind=_MEMORY_KIND,
-            content={"key": key, "value": value, "dish": dish_slug, "field": field},
+            content={
+                "key": key,
+                "value": value,
+                "dish": dish_slug,
+                "field": field,
+                # Makes the row visible in «покажи, что помнишь» — see _display.
+                "display": _display(field, dish_slug, value),
+            },
             request_id=uuid.uuid4(),
             purpose=_WRITE_PURPOSE,
             consent_at=None,  # green: service-contract basis, no per-entry consent
@@ -445,8 +583,15 @@ def remember_correction(bot_user: Any, *, dish: str, field: str, value: Any) -> 
             and isinstance(row.content, dict)
             and row.content.get("key") == key
         ]
+        # INSERT and this UPDATE are two transactions, deliberately: the
+        # sanctioned writer's forensic path uses ``atomic(durable=True)`` and
+        # refuses to run inside a caller's block, so wrapping both would break
+        # it the day the yellow/red perimeter opens. A crash in between leaves
+        # two live rows of one key, which the key policy resolves on read
+        # (freshest wins) — self-healing, and the reason this is tolerable.
+        superseded = 0
         if displaced:
-            supersede_entries(
+            superseded = supersede_entries(
                 replaced_by=entry,
                 entries=displaced,
                 reason=MemoryEntry.SUPERSESSION_CORRECTED,
@@ -457,9 +602,23 @@ def remember_correction(bot_user: Any, *, dish: str, field: str, value: Any) -> 
             "food_memory.clarification_written bot_user=%s field=%s superseded=%d",
             getattr(bot_user, "id", "?"),
             field,
-            len(displaced),
+            superseded,
         )
         return Outcome.WRITTEN
+    except TransactionManagementError:
+        # The writer's durable audit refused to run inside somebody's atomic
+        # block — fail-loud by design (ADR-0011 §11.3: the rejection row is
+        # 152-ФЗ гл. 3 forensic evidence). Unreachable while the perimeter is
+        # shut; logged at ERROR rather than swallowed into the generic branch so
+        # that opening the perimeter over a caller that wraps this in atomic is
+        # visible instead of silent.
+        logger.error(
+            "food_memory.write_forensic_at_risk bot_user=%s field=%s — "
+            "remember_correction was called inside a transaction.atomic block",
+            getattr(bot_user, "id", "?"),
+            field,
+        )
+        return Outcome.ERROR
     except Exception:  # noqa: BLE001 — memory write must never break the turn
         logger.exception(
             "food_memory.write_failed bot_user=%s field=%s",

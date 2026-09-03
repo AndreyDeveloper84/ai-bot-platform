@@ -1742,6 +1742,24 @@ GLOBAL_BOT_ONBOARDING = os.environ.get("GLOBAL_BOT_ONBOARDING", "false").lower()
 # services are not even called. The concierge dialog itself keeps working.
 CONCIERGE_MEMORY_ENABLED = os.environ.get("CONCIERGE_MEMORY_ENABLED", "true").lower() == "true"
 
+# DRF-1454 — deploy-free rollback for the food-scanner's own memory: the green
+# clarification write, the «Помню с прошлого раза» line on the recognition card,
+# and the routing change that lets a pending «✏️ Уточнить» claim the plain-text
+# answer. False restores the pre-DRF-1454 behaviour exactly — the scanner still
+# scans, it just forgets again.
+#
+# Default ON, following CONCIERGE_MEMORY_ENABLED (the other memory rollback
+# switch) rather than CONCIERGE_NUTRITION_CONTEXT_ENABLED. That one ships OFF
+# because it was measured to change no reply while costing ~200 input tokens a
+# turn; this one costs no LLM tokens at all and its whole observable effect is
+# the behaviour the ticket asked for — a switch that ships off would ship the
+# feature off. The surface it rides is itself already dark by default
+# (NUTRITION_ENABLED / FOOD_PHOTO_SCAN_ENABLED both default False), so ON here
+# cannot turn anything on that an operator has not already turned on.
+FOOD_SCANNER_MEMORY_ENABLED = (
+    os.environ.get("FOOD_SCANNER_MEMORY_ENABLED", "true").lower() == "true"
+)
+
 # DRF-1266 (slice 1, multi-pass concierge) — cap on LLM passes per concierge
 # turn. Pass 1 is the primary call; each further pass feeds the executed
 # tool's result back as a plain user message (NO tool protocol — the

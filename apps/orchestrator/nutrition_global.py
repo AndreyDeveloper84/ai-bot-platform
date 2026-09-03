@@ -558,7 +558,18 @@ def try_handle_structured_nutrition_turn(
     candidates = [s for s in (_skill_by_name(n) for n in candidate_names) if s is not None]
     skill = next((s for s in candidates if s.matches(context)), None)
     if skill is None:
-        return None
+        # The predicate said «structured» and no skill claimed it after all.
+        # Before DRF-1454 that combination was impossible for plain text (an
+        # in-flight anketa claims ANY text), and returning None was right. A
+        # pending food correction is different: it claims only text shaped like
+        # its answer, so «что я ел сегодня» typed while a correction is open is
+        # structured-but-unclaimed — and used to skip the deterministic diary
+        # handler entirely for the ten minutes the prompt stayed open. A chip
+        # that leads to nothing is worse than no chip (DRF-1302), so the turn
+        # continues down the same ladder the non-structured branch uses.
+        return _try_handle_diary_request(
+            text=text, has_attachments=has_attachments, bot_user=bot_user, trace_id=trace_id
+        )
 
     if has_attachments and not text.strip() and getattr(skill, "name", None) == "food_scanner":
         # Photo turn: the scanner reads the bytes from a runtime attribute

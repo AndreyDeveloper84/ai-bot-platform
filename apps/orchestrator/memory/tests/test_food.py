@@ -240,7 +240,7 @@ class TestPerimeterStoresNothing:
         [
             "я не ем мясо",
             "мне нельзя сладкое",
-            "только без глютена",
+            "молочное я не пью",
         ],
     )
     def test_plain_exclusion_is_yellow_and_not_stored(self, settings, resolver, text: str) -> None:
@@ -262,8 +262,24 @@ class TestPerimeterStoresNothing:
             == MemoryEntry.SENSITIVITY_RED
         )
 
-    @pytest.mark.parametrize("text", ["500", "борщ", "было больше", ""])
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "500",
+            "борщ",
+            "было больше",
+            "",
+            # A drink is ordered «без сахара»; that is a description, not a
+            # refusal. Answering it with the sensitive-perimeter script put the
+            # refusal explanation in front of somebody who refused nothing.
+            "Кофе без сахара",
+            "Латте без лактозы",
+        ],
+    )
     def test_ordinary_answer_is_not_a_refusal(self, text: str) -> None:
+        # Presence first: the classifier is alive on a genuine refusal.
+        assert food_memory.classify_refusal("у меня непереносимость лактозы") != ""
+
         assert food_memory.classify_refusal(text) == ""
 
     def test_recognition_rejection_is_not_memory(self, settings, resolver) -> None:
@@ -362,6 +378,10 @@ class TestParsing:
             ("12/8/32", "12/8/32"),
             ("Б12 / Ж8 / У32", "12/8/32"),
             ("12-8-32", None),
+            # A date typed into the macros prompt is not this person's macros.
+            ("12/08/2026", None),
+            ("9999/9999/9999", None),
+            ("0/0/0", None),
         ],
     )
     def test_macros(self, text: str, expected: str | None) -> None:
@@ -370,8 +390,10 @@ class TestParsing:
     @pytest.mark.parametrize(
         "text,expected",
         [
-            ("Плов", "плов"),
-            ("   плов   узбекский ", "плов узбекский"),
+            # Case is the person's, not ours: the KEY is normalised, the value
+            # comes back to them exactly as they typed it.
+            ("Плов", "Плов"),
+            ("   Плов   Узбекский ", "Плов Узбекский"),
             ("500", None),  # a bare number answers the grams question, not name
             ("", None),
         ],
@@ -442,3 +464,198 @@ class TestNeverBreaksTheTurn:
         assert food_memory.recall_corrections(bot_user, dish="борщ").is_empty()
         bot_user.refresh_from_db()
         assert bot_user.ayla_user_id is None
+
+
+# ─── прозрачность: показать и забыть ──────────────────────────────────────
+
+
+class TestTheRowIsVisibleToThePerson:
+    """The silent-remember ruling (2026-08-23) lets the bot store without asking
+    only because the person can see and forget what was stored. A row that is
+    unrenderable is invisible — and a row we had no right to write."""
+
+    def test_a_stored_correction_renders_in_the_memory_list(self, settings, resolver) -> None:
+        from apps.persona.memory_commands import render_memory_summary
+
+        bot_user = _consented_user("drf1454-vis-1", settings)
+        food_memory.remember_correction(
+            bot_user, dish="Борщ", field=food_memory.FIELD_GRAMS, value=500
+        )
+        bot_user.refresh_from_db()
+
+        summary = render_memory_summary(bot_user, user_id=resolver["uuid"])
+
+        assert "порция «борщ» — 500 г" in summary
+
+    @pytest.mark.parametrize(
+        "field,value,expected",
+        [
+            ("grams", 500, "порция «борщ» — 500 г"),
+            ("name", "плов", "блюдо «борщ» называет «плов»"),
+            ("macros", "12/8/32", "БЖУ для «борщ» — 12/8/32"),
+        ],
+    )
+    def test_every_field_has_a_phrase_not_raw_json(
+        self, settings, resolver, field: str, value: Any, expected: str
+    ) -> None:
+        from apps.persona.memory_surface import describe_green_content
+
+        bot_user = _consented_user(f"drf1454-vis-{field}", settings)
+        food_memory.remember_correction(bot_user, dish="борщ", field=field, value=value)
+        bot_user.refresh_from_db()
+
+        entry = MemoryEntry.objects.get(user_id=resolver["uuid"])
+        assert describe_green_content(entry.content) == expected
+
+    def test_forget_all_takes_the_food_rows_with_it(self, settings, resolver) -> None:
+        """The one erase verb that DOES reach these rows today (152-ФЗ)."""
+        from apps.identity.services.forget_all_sweep import sweep_forget_all
+
+        bot_user = _consented_user("drf1454-vis-2", settings)
+        food_memory.remember_correction(
+            bot_user, dish="борщ", field=food_memory.FIELD_GRAMS, value=500
+        )
+        bot_user.refresh_from_db()
+        assert _green_rows(resolver["uuid"]) == 1
+
+        upc = get_or_create_personal_context(resolver["uuid"])
+        upc.forget_all_requested_at = timezone.now()
+        upc.save(update_fields=["forget_all_requested_at"])
+        sweep_forget_all(resolver["uuid"])
+
+        assert _green_rows(resolver["uuid"]) == 0
+        assert food_memory.recall_corrections(bot_user, dish="борщ").is_empty()
+
+
+# ─── ревью DRF-1454: регрессии ────────────────────────────────────────────
+
+
+class TestReturningToAnEarlierValue:
+    """500 → 250 → 500. The dedup used to compare against every row ever
+    written, including the dead one it had just superseded: the third turn
+    answered «Запомнила: 500 г» and left 250 as the value the next card would
+    print. A DUPLICATE verdict must mean «this is already what we would tell
+    you», never «we once heard this»."""
+
+    def test_a_person_can_go_back_to_a_value_they_had_before(self, settings, resolver) -> None:
+        bot_user = _consented_user("drf1454-back-1", settings)
+        for grams in (500, 250):
+            food_memory.remember_correction(
+                bot_user, dish="борщ", field=food_memory.FIELD_GRAMS, value=grams
+            )
+            bot_user.refresh_from_db()
+        assert food_memory.recall_corrections(bot_user, dish="борщ").portion_g == 250
+
+        outcome = food_memory.remember_correction(
+            bot_user, dish="борщ", field=food_memory.FIELD_GRAMS, value=500
+        )
+
+        assert outcome is food_memory.Outcome.WRITTEN
+        assert food_memory.recall_corrections(bot_user, dish="борщ").portion_g == 500
+
+    def test_duplicate_is_still_reported_for_the_current_value(self, settings, resolver) -> None:
+        bot_user = _consented_user("drf1454-back-2", settings)
+        food_memory.remember_correction(
+            bot_user, dish="борщ", field=food_memory.FIELD_GRAMS, value=500
+        )
+        bot_user.refresh_from_db()
+
+        assert (
+            food_memory.remember_correction(
+                bot_user, dish="борщ", field=food_memory.FIELD_GRAMS, value=500
+            )
+            is food_memory.Outcome.DUPLICATE
+        )
+
+
+class TestTheStoreStaysBounded:
+    """The same argument that keeps «что ел» out of the store, applied to the
+    store: an unbounded dish namespace in a zone with no TTL slowly becomes the
+    nutrition profile this module refused to build."""
+
+    def test_a_new_dish_past_the_cap_is_refused_and_the_old_ones_survive(
+        self, settings, resolver, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(food_memory, "_MAX_DISHES", 2, raising=True)
+        bot_user = _consented_user("drf1454-cap", settings)
+        for dish in ("борщ", "плов"):
+            food_memory.remember_correction(
+                bot_user, dish=dish, field=food_memory.FIELD_GRAMS, value=300
+            )
+            bot_user.refresh_from_db()
+
+        outcome = food_memory.remember_correction(
+            bot_user, dish="окрошка", field=food_memory.FIELD_GRAMS, value=300
+        )
+
+        assert outcome is food_memory.Outcome.CAP_REACHED
+        assert _green_rows(resolver["uuid"]) == 2
+        # Refusal, not eviction: what was remembered is still remembered.
+        assert food_memory.recall_corrections(bot_user, dish="борщ").portion_g == 300
+
+    def test_the_cap_never_blocks_a_dish_already_remembered(
+        self, settings, resolver, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(food_memory, "_MAX_DISHES", 1, raising=True)
+        bot_user = _consented_user("drf1454-cap-2", settings)
+        food_memory.remember_correction(
+            bot_user, dish="борщ", field=food_memory.FIELD_GRAMS, value=300
+        )
+        bot_user.refresh_from_db()
+
+        outcome = food_memory.remember_correction(
+            bot_user, dish="борщ", field=food_memory.FIELD_GRAMS, value=450
+        )
+
+        assert outcome is food_memory.Outcome.WRITTEN
+        assert food_memory.recall_corrections(bot_user, dish="борщ").portion_g == 450
+
+
+class TestRollbackSwitch:
+    def test_flag_off_writes_nothing_and_recalls_nothing(self, settings, resolver) -> None:
+        bot_user = _consented_user("drf1454-flag", settings)
+        # Presence first: with the switch ON this exact call stores and reads back.
+        assert (
+            food_memory.remember_correction(
+                bot_user, dish="борщ", field=food_memory.FIELD_GRAMS, value=500
+            )
+            is food_memory.Outcome.WRITTEN
+        )
+        bot_user.refresh_from_db()
+        assert food_memory.recall_corrections(bot_user, dish="борщ").portion_g == 500
+
+        settings.FOOD_SCANNER_MEMORY_ENABLED = False
+
+        assert (
+            food_memory.remember_correction(
+                bot_user, dish="плов", field=food_memory.FIELD_GRAMS, value=300
+            )
+            is food_memory.Outcome.DISABLED
+        )
+        assert _green_rows(resolver["uuid"]) == 1  # nothing new
+        assert food_memory.recall_corrections(bot_user, dish="борщ").is_empty()
+
+
+class TestProvenanceDictionaryDoesNotDrift:
+    def test_the_stated_dictionary_matches_the_library(self) -> None:
+        """The fallback exists only until the ayla-ai-core pin carries the name.
+
+        When the bump lands this test starts comparing against the library and
+        fails if the two ever disagree — which is what makes the transitional
+        fallback safe to keep until then, and obvious to delete after.
+        """
+        try:
+            from ayla_ai_core import STATED_SOURCES as LIBRARY
+        except ImportError:
+            pytest.skip("pinned ayla-ai-core predates STATED_SOURCES (see food.py)")
+
+        assert food_memory.STATED_SOURCES == LIBRARY
+
+    def test_the_medical_perimeter_agrees_with_the_green_extractor(self) -> None:
+        """Same 152-ФЗ ст. 10 stems in two apps — drift means a term that is red
+        on one path and green on the other (DRF-1290)."""
+        from apps.persona.memory_extract import _ALLERGY_RE
+
+        for text in ("у меня аллергия на орехи", "непереносимость лактозы"):
+            assert _ALLERGY_RE.search(text)
+            assert food_memory.classify_refusal(text) == MemoryEntry.SENSITIVITY_RED

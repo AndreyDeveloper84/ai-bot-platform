@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import pytest
 
@@ -223,3 +223,81 @@ class TestAnswerHandling:
         result = FoodCorrectionSkill().handle(_pending_context("500"))
         assert result.action_data["stored"] is False
         assert "апомнила" not in result.reply_text
+
+
+class TestTheNameAnswerIsNotAnyText:
+    """Review DRF-1454: «any short text without digits» let «что я ел сегодня»
+    be stored as the name of a dish AND took the turn away from the chip that
+    owns it. A dish name is short, at most three words, and does not open with
+    the vocabulary of asking for something."""
+
+    @pytest.mark.parametrize(
+        "text",
+        ["Борщ", "куриная грудка", "плов узбекский", "Кофе без сахара"],
+    )
+    def test_a_dish_name_is_still_claimed(self, text: str) -> None:
+        assert FoodCorrectionSkill().matches(_pending_context(text, field="name"))
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "что я ел сегодня",  # CHIP_DIARY callback
+            "стакан воды",  # CHIP_WATER callback
+            "/anketa",  # CHIP_ANKETA callback
+            "мой дневник",
+            "Хочу записаться на стрижку",
+            "Что вы умеете?",
+            "Как до вас доехать",
+            "Пройти анкету",
+            "покажи что ты обо мне помнишь",
+            "Спасибо большое!",
+            "ок",
+            "отмени запись",
+        ],
+    )
+    def test_a_request_is_not_a_dish_name(self, text: str) -> None:
+        skill = FoodCorrectionSkill()
+        # Presence first: the same pending context DOES claim a real dish name.
+        assert skill.matches(_pending_context("Борщ", field="name"))
+
+        assert not skill.matches(_pending_context(text, field="name"))
+
+    def test_a_two_line_message_is_not_an_answer_about_weight(self) -> None:
+        skill = FoodCorrectionSkill()
+        assert skill.matches(_pending_context("300"))
+
+        assert not skill.matches(_pending_context("Ок\n300"))
+
+
+class TestAnUnreadableAnswerKeepsTheQuestionOpen:
+    """The re-ask used to clear the pending record first, so the bot asked a
+    question it had stopped listening to and the person's next «300» fell
+    through to the concierge — the exact loss this ticket exists to fix."""
+
+    @pytest.mark.parametrize("text", ["0", "99999"])
+    def test_out_of_range_re_asks_and_still_listens(self, text: str) -> None:
+        skill = FoodCorrectionSkill()
+        context = _pending_context(text)
+        written: list = []
+        with patch(
+            "apps.conversations.services.write_skill_state",
+            side_effect=lambda conv, key, value: written.append((key, value)),
+        ):
+            result = skill.handle(context)
+
+        assert result.reply_text == _PROMPTS_FOR_TEST["grams"]
+        # The record was refreshed, not dropped — a follow-up answer is heard.
+        assert written and written[-1][1] is not None
+        assert written[-1][1]["field"] == "grams"
+
+
+class TestRollbackSwitchOnTheSkill:
+    def test_flag_off_restores_the_pre_memory_skill(self, settings) -> None:
+        skill = FoodCorrectionSkill()
+        assert skill.matches(_pending_context("500"))  # presence: ON claims it
+
+        settings.FOOD_SCANNER_MEMORY_ENABLED = False
+
+        assert not skill.matches(_pending_context("500"))
+        # The callback half keeps working — that is the pre-DRF-1454 behaviour.
+        assert skill.matches(_context("cb:food:correct:grams:scan-1"))
