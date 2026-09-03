@@ -298,6 +298,28 @@ def _person_shell_ids(bot_user: BotUser, link: _PersonLink) -> set[uuid.UUID]:
     return ids
 
 
+def person_shell_ids(bot_user: BotUser) -> set[uuid.UUID]:
+    """Public: every ``BotUser`` shell provably the same human as ``bot_user``.
+
+    Thin wrapper over the resolution this module already performs for the
+    erasure cascade (:func:`_resolve_person_link` + :func:`_person_shell_ids`),
+    exported so the consent layer can fan a **person-level** grant/withdrawal
+    over the same set instead of re-deriving it (DRF-1453).
+
+    Why the consent layer needs it: in the pilot one person holds several
+    shells — the Mini App resolves one under ``MAX_BOT_TENANT_SLUG`` while the
+    chat resolves another under the ``global_bot`` sentinel — and they are two
+    rows by ``unique_together (tenant, channel, channel_user_id)``. A consent
+    written on the shell that asked would therefore be invisible to the surface
+    that reads (the concierge), i.e. the person would tap «разрешаю» and
+    nothing would change. Same fail-closed contract as the erasure path: an
+    unusable channel key or a conflicted identity graph narrows to
+    ``{bot_user.id}`` rather than fanning out over rows that might be someone
+    else's.
+    """
+    return _person_shell_ids(bot_user, _resolve_person_link(bot_user))
+
+
 def _erase_bot_user_pii(bot_user: BotUser, link: _PersonLink) -> None:
     """Blank the person's identifiers on every shell they own + drop prefs.
 

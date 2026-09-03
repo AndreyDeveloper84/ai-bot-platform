@@ -62,6 +62,13 @@ urlpatterns = [
         views.personal_data_delete,
         name="personal_data_delete",
     ),
+    # Health-data consent (152-ФЗ ст. 10) — DRF-1453. GET/POST/DELETE on one
+    # resource: одно согласие — один ресурс, выдача только явным POST.
+    path(
+        "me/health-consent/",
+        views.health_consent,
+        name="health_consent",
+    ),
     # C7 client payments passthrough (PILOT_CONTRACTS §7.5)
     path("me/payments/", views.create_payment, name="create_payment"),
     path("me/cards/setup/", views.cards_setup, name="cards_setup"),

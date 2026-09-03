@@ -213,7 +213,18 @@ def record_global_consent(
         # back BOTH, never leaving consent_at set with no proof-of-consent row.
         # Idempotent — only stamp when currently unset (never overwrite an earlier
         # consent timestamp; also reconciles a legacy row whose consent_at is None).
-        if getattr(bot_user, "consent_at", None) is None:
+        #
+        # DRF-1453 сузил условие до personal_data. BotUser.consent_at —
+        # отметка именно 152-ФЗ базы (её читает consent_blocker, то есть
+        # право писать человеку первым), а не «какое-нибудь согласие когда-нибудь».
+        # До сужения любой другой тип, записанный этой функцией первым, проставлял
+        # бы её: выдача согласия на медданные открывала бы проактивные сообщения
+        # тому, кто базового согласия не давал. Поведение онбординга не меняется —
+        # он записывает personal_data первым в своём цикле.
+        if (
+            consent_type == ConsentRecord.ConsentType.PERSONAL_DATA.value
+            and getattr(bot_user, "consent_at", None) is None
+        ):
             bot_user.consent_at = record.captured_at
             bot_user.save(update_fields=["consent_at"])
 
@@ -444,8 +455,15 @@ MEMORY_ZONE_CONSENT = {
 
 # Отзыв personal_data каскадит на все зоны памяти (§8.4): выход из
 # персонализированного сервиса = снять все memory_* согласия.
+#
+# DRF-1453 добавляет сюда ``health``. Согласие на медданные — особая категория
+# по 152-ФЗ ст. 10, и оно надстроено над базой ст. 6: без personal_data
+# обрабатывать нечего в принципе. Оставить активный health-грант человеку,
+# который вышел из персонализированного сервиса, значило бы держать открытым
+# согласие на самую чувствительную категорию у того, кто отозвал самое общее.
 _PERSONAL_DATA_CASCADE = (
     ConsentRecord.ConsentType.PERSONAL_DATA,
+    ConsentRecord.ConsentType.HEALTH,
     ConsentRecord.ConsentType.MEMORY_GREEN,
     ConsentRecord.ConsentType.MEMORY_YELLOW,
     ConsentRecord.ConsentType.MEMORY_RED,
@@ -538,6 +556,123 @@ def withdraw_personal_data_for_bot_users(bot_users, *, source: str) -> int:
         len(subjects),
         withdrawn,
         source,
+    )
+    return withdrawn
+
+
+# ── Person-level consent (DRF-1453) ─────────────────────────────────────────
+# Одно согласие — один человек, а не один shell. В пилоте у человека несколько
+# ``BotUser``: Mini App резолвит строку под ``MAX_BOT_TENANT_SLUG``, чат — под
+# сентинелом ``global_bot``, и это разные строки по
+# ``unique_together (tenant, channel, channel_user_id)`` (см.
+# ``apps.identity.services.privacy``). Согласие, записанное только на ту строку,
+# которая спросила, невидимо для поверхности, которая читает: человек нажал
+# «разрешаю», а консьерж по-прежнему отказывает. Отзыв уже давно ходит по всем
+# shell'ам человека (``withdraw_personal_data_for_bot_users``, §8.4) — это
+# недостающая половина выдачи, симметричная ему.
+#
+# Запись остаётся построчной и построчно читается существующим
+# :func:`has_global_consent`: сторож на месте, ни один вызов чтения не меняется.
+
+
+def _person_shell_bot_users(bot_user: "BotUser") -> list["BotUser"]:
+    """Все ``BotUser`` человека. Fail-closed до самой строки при любом сбое.
+
+    Резолв делегирован ``apps.identity.services.privacy.person_shell_ids`` —
+    тому же, которым ходит каскад стирания, чтобы «кто такой этот человек»
+    имело в платформе один ответ. Ошибка резолва не должна ломать выдачу
+    согласия: сузиться до аутентифицированной строки хуже, чем упасть, но
+    заведомо безопасно — лишних субъектов такое сужение не захватывает.
+    """
+    from apps.identity.models import BotUser
+
+    try:
+        from apps.identity.services.privacy import person_shell_ids
+
+        ids = person_shell_ids(bot_user)
+    except Exception:  # noqa: BLE001 — резолв личности не должен ронять ход
+        logger.exception(
+            "consent.person_shells_failed bot_user=%s — narrowing to the row itself",
+            bot_user.id,
+        )
+        return [bot_user]
+    shells = list(BotUser.all_tenants.filter(id__in=ids))
+    return shells or [bot_user]
+
+
+def record_person_consent(
+    bot_user: "BotUser",
+    *,
+    consent_type: str,
+    source: str,
+    document_version: str = "",
+) -> int:
+    """Выдать согласие человеку — по строке на каждый его ``BotUser``.
+
+    Пишет через :func:`record_global_consent`, то есть без требования
+    ``current_tenant()`` и идемпотентно (``get_or_create`` по активному
+    гранту): повторный тап не плодит дубли. Каждая строка несёт ``tenant``
+    своей ``BotUser`` — поле денормализовано с ``bot_user.tenant`` по
+    определению модели, а не является отдельной областью действия согласия.
+
+    Returns:
+      Сколько строк реально создано (0 — согласие уже было активно везде).
+    """
+    shells = _person_shell_bot_users(bot_user)
+    created = 0
+    for shell in shells:
+        before = ConsentRecord.all_tenants.filter(
+            bot_user=shell,
+            consent_type=consent_type,
+            granted=True,
+            withdrawn_at__isnull=True,
+        ).exists()
+        record_global_consent(
+            shell,
+            consent_type=consent_type,
+            source=source,
+            document_version=document_version,
+        )
+        if not before:
+            created += 1
+    logger.info(
+        "consent.person_granted bot_user=%s type=%s shells=%d created=%d",
+        bot_user.id,
+        consent_type,
+        len(shells),
+        created,
+    )
+    return created
+
+
+def withdraw_person_consent(
+    bot_user: "BotUser",
+    *,
+    consent_type: str,
+    source: str,
+) -> int:
+    """Отозвать согласие у человека — на каждом его ``BotUser``.
+
+    Аудируемый :func:`withdraw` в ``tenant_scope`` каждой строки, как в
+    каскаде §8.4: строки не удаляются, ``withdrawn_at`` проставляется,
+    события ``CONSENT_WITHDRAWN`` уходят. Идемпотентно — уже отозванные
+    возвращают ``None`` и не считаются.
+
+    Returns:
+      Сколько активных грантов было снято.
+    """
+    from apps.tenancy.context import tenant_scope
+
+    withdrawn = 0
+    for shell in _person_shell_bot_users(bot_user):
+        with tenant_scope(shell.tenant):
+            if withdraw(shell, consent_type=consent_type, source=source) is not None:
+                withdrawn += 1
+    logger.info(
+        "consent.person_withdrawn bot_user=%s type=%s withdrawn=%d",
+        bot_user.id,
+        consent_type,
+        withdrawn,
     )
     return withdrawn
 

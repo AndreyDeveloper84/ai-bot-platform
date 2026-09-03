@@ -5252,6 +5252,23 @@ a {
   font-size: var(--font-size-100);
   color: var(--c-text-secondary);
 }
+/* Action variant (DRF-1453) — состояние словами + вход в лист раскрытия.
+   Кнопка вместо тумблера: особая категория 152-ФЗ ст. 10 не переключается
+   одним касанием мимо текста согласия. */
+.profile-consent-row__action {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+.profile-consent-row__action-btn {
+  /* 2.5.8 — цель ≥44dp даже при компактной подписи. */
+  min-height: 44px;
+  padding: 0 var(--s-3);
+  white-space: nowrap;
+}
+
 .profile-consent-row__description {
   margin: var(--s-1) 0 0;
   font-size: var(--font-size-200);
@@ -5429,6 +5446,23 @@ a {
   color: var(--c-text-secondary);
   line-height: var(--leading-normal);
 }
+/* Перечень внутри листа согласия (DRF-1453): что передаётся и зачем.
+   Тот же ритм, что у раскрытия в R2, — человек читает один текст, а не два
+   по-разному свёрстанных. */
+.profile-support-sheet__sub-heading {
+  margin: var(--s-3) 0 var(--s-1);
+  font-size: var(--font-size-200);
+  font-weight: 600;
+  color: var(--c-text-primary);
+}
+.profile-support-sheet__list {
+  margin: 0;
+  padding-left: var(--s-4);
+  font-size: var(--font-size-200);
+  color: var(--c-text-secondary);
+  line-height: var(--leading-normal);
+}
+
 /* Destructive-confirmation input (C5 erasure, DRF-956). Mirrors the
    typed-token field on the legacy profile delete card. */
 .profile-support-sheet__input {

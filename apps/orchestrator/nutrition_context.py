@@ -31,10 +31,13 @@ Both are read through :func:`apps.consent.services.has_global_consent`
 — the concierge runs tenant-less (``current_tenant() is None``), where
 the tenant-scoped ``has_consent`` would raise.
 
-**Today no pilot user holds ``HEALTH``**, so this surface is dormant by
-consent, exactly like the yellow/red memory zones: it lights up the day
-a health-consent capture flow grants it, and not one turn earlier. That
-is the intended state, not an oversight.
+``HEALTH`` has a capture flow since DRF-1453
+(:mod:`apps.consent.health`, surfaced in the Mini App profile as a
+separate, explicitly-worded consent — never bundled into «принимаю
+всё»). Until a person grants it this surface stays dormant by consent,
+exactly like the yellow/red memory zones, and a withdrawal puts it back
+to sleep on the next turn. The gate below is unchanged by that work:
+what changed is that there is now something on the other side of it.
 
 ### Injection — reuse, never re-implement
 

@@ -14,9 +14,19 @@
  * Anti-pattern avoided per spec §14: locked controls rendered as
  * disabled toggle. Pilot uses an info row with «Включено · нужно для
  * записи» status string instead — no toggle widget at all.
+ *
+ * # Третий вариант: «action» (DRF-1453)
+ *
+ * Согласие на медданные — специальная категория по 152-ФЗ ст. 10, и оно
+ * обязано быть осознанным: тумблер здесь был бы ровно тем «принимаю всё
+ * одной галочкой», которого закон в этом случае не допускает. Поэтому
+ * вариант `action` не переключает состояние сам — он ведёт в лист с
+ * раскрытием, где человек читает, что именно разрешает и зачем, и уже там
+ * подтверждает. Строка остаётся той же по вёрстке: визуальный ритм списка
+ * согласий не ломается ради одного особого случая.
  */
 
-import { useId, type ReactNode } from "react";
+import { useId, type ReactNode, type RefObject } from "react";
 import { ToggleSwitch } from "./ToggleSwitch";
 
 interface BaseProps {
@@ -30,6 +40,21 @@ interface InfoVariantProps extends BaseProps {
   statusText: string;
 }
 
+interface ActionVariantProps extends BaseProps {
+  variant: "action";
+  /** «Разрешено · с 3 сентября» / «Не разрешено» — состояние словами. */
+  statusText: string;
+  /** Подпись кнопки, ведущей в лист с раскрытием. */
+  actionLabel: string;
+  /** Полная подпись для скринридера — кнопка «Разрешить» вне контекста немая. */
+  actionAriaLabel: string;
+  onAction: () => void;
+  /** Куда вернуть фокус после закрытия листа (WCAG 2.4.3). */
+  triggerRef?: RefObject<HTMLButtonElement>;
+  /** Состояние ещё грузится или запись в полёте — нажатие заблокировано. */
+  busy?: boolean;
+}
+
 interface ToggleVariantProps extends BaseProps {
   variant: "toggle";
   checked: boolean;
@@ -39,7 +64,7 @@ interface ToggleVariantProps extends BaseProps {
   busy?: boolean;
 }
 
-type Props = InfoVariantProps | ToggleVariantProps;
+type Props = InfoVariantProps | ActionVariantProps | ToggleVariantProps;
 
 export function ConsentRow(props: Props) {
   // #953: stable id via useId — the old slug-from-title scheme could
@@ -52,11 +77,29 @@ export function ConsentRow(props: Props) {
           {props.title}
         </dt>
         <dd className="profile-consent-row__status">
-          {props.variant === "info" ? (
+          {props.variant === "info" && (
             <span className="profile-consent-row__status-text">
               {props.statusText}
             </span>
-          ) : (
+          )}
+          {props.variant === "action" && (
+            <span className="profile-consent-row__action">
+              <span className="profile-consent-row__status-text">
+                {props.statusText}
+              </span>
+              <button
+                ref={props.triggerRef}
+                type="button"
+                className="btn-secondary profile-consent-row__action-btn"
+                onClick={props.onAction}
+                disabled={props.busy}
+                aria-label={props.actionAriaLabel}
+              >
+                {props.actionLabel}
+              </button>
+            </span>
+          )}
+          {props.variant === "toggle" && (
             <ToggleSwitch
               checked={props.checked}
               onChange={props.onChange}
