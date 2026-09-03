@@ -37,9 +37,7 @@ if TYPE_CHECKING:
     # module properly for type checking and keep the skip guard at runtime.
     import yaml
 else:
-    yaml = pytest.importorskip(
-        "yaml", reason="PyYAML is needed to read the compose files"
-    )
+    yaml = pytest.importorskip("yaml", reason="PyYAML is needed to read the compose files")
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 BASE_COMPOSE = REPO_ROOT / "docker-compose.yml"
