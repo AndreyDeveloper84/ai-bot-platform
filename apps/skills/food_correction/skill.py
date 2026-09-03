@@ -124,7 +124,9 @@ _SHAPE_GRAMS = re.compile(r"^\D{0,6}\d{1,4}\s*(?:г|гр|грамм\w*)?\.?$", r
 _SHAPE_MACROS = re.compile(
     r"^\D{0,10}\d{1,4}\s*[/|]\s*\D{0,3}\d{1,4}\s*[/|]\s*\D{0,3}\d{1,4}\D{0,10}$"
 )
-_SHAPE_NAME = re.compile(r"^[^\d]{2,40}$")
+# A dish name: one short line, no digits, and at least two adjacent letters —
+# «???» and a lone emoji are not answers to «что было на фото?».
+_SHAPE_NAME = re.compile(r"^(?=.*[^\W\d_]{2})[^\d\n]{2,40}$", re.UNICODE)
 
 _SHAPES: dict[str, re.Pattern[str]] = {
     "grams": _SHAPE_GRAMS,

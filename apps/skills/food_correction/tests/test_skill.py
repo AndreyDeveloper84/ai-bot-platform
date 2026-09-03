@@ -166,11 +166,19 @@ class TestAnswerTurnIsClaimedNarrowly:
         ],
     )
     def test_an_unrelated_turn_falls_through(self, text: str) -> None:
-        assert not FoodCorrectionSkill().matches(_pending_context(text))
+        skill = FoodCorrectionSkill()
+        # Presence first: the very same pending context DOES claim a real answer,
+        # so the negative below is about the text, not about a dead fixture.
+        assert skill.matches(_pending_context("500"))
+
+        assert not skill.matches(_pending_context(text))
 
     def test_a_stale_prompt_stops_claiming_text(self) -> None:
         """An unanswered prompt must not swallow a turn tomorrow."""
-        assert not FoodCorrectionSkill().matches(_pending_context("500", age_seconds=3600))
+        skill = FoodCorrectionSkill()
+        assert skill.matches(_pending_context("500", age_seconds=60))  # fresh: claimed
+
+        assert not skill.matches(_pending_context("500", age_seconds=3600))
 
     def test_callbacks_still_win_over_the_answer_path(self) -> None:
         result = FoodCorrectionSkill().handle(_pending_context("cb:food:correct:name:scan-1"))
