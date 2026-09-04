@@ -36,7 +36,11 @@ from apps.channels.max.handler import _discovery_handoff_reply
 from apps.channels.max.parser import CanonicalEvent
 from apps.identity.services import resolve_or_create_bot_user, resolve_or_create_global_bot_user
 from apps.orchestrator.discovery import CALLBACK_DISCOVER_BOOK_PREFIX, DiscoveryReply
-from apps.orchestrator.handoff import handoff_to_booking, route_booking_callback
+from apps.orchestrator.handoff import (
+    _UNRESOLVED_BOOKING_CALLBACK_REPLY,
+    handoff_to_booking,
+    route_booking_callback,
+)
 from apps.skills.base import SkillResult
 from apps.tenancy.context import current_tenant, tenant_scope
 from apps.tenancy.exceptions import CrossTenantError
@@ -591,7 +595,12 @@ def test_route_confirm_resolves_tenant_from_pending_token(settings, monkeypatch)
 
 def test_route_unresolvable_callbacks_reply_stale_without_dispatch(settings, monkeypatch) -> None:
     """Unknown master id, unknown token, flag-off int ids and garbage payloads
-    never reach the skill pipeline — deterministic stale-context reply."""
+    never reach the skill pipeline — deterministic refusal, no dispatch.
+
+    DRF-1473: the refusal no longer claims the context «устарел». Nothing
+    here is about time — the tap's tenant is derived from the master id it
+    carries, and none of these four carry one this contour can resolve.
+    """
     settings.STRICT_TENANT_SCOPE = "strict"
     gbu = resolve_or_create_global_bot_user(channel="max", channel_user_id="602", chat_id="602")
     called: list = []
@@ -604,5 +613,6 @@ def test_route_unresolvable_callbacks_reply_stale_without_dispatch(settings, mon
         "cb:book:confirm:not-a-uuid",  # garbage
     ):
         reply = route_booking_callback(global_bot_user=gbu, callback_text=callback, chat_id="602")
-        assert "устарел" in reply.text, callback
+        assert reply.text == _UNRESOLVED_BOOKING_CALLBACK_REPLY, callback
+        assert "устарел" not in reply.text, callback
     assert called == []
