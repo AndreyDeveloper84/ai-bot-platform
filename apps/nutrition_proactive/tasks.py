@@ -223,6 +223,15 @@ def plan_daily_reports(
             decisions.append(decide("already_sent_today"))
             continue
 
+        # The weekly ceiling sits after the per-day key: «already sent
+        # today» and «the week is spent» are different operator facts and
+        # keep different slugs. Checked before the Ayla fetch -- a capped
+        # person costs no downstream call.
+        capped = prefs.weekly_cap_reason(user_prefs, surface="report", now_utc=now_utc)
+        if capped:
+            decisions.append(decide(capped))
+            continue
+
         try:
             summary, water, profile = fetch(ext)
         except (NutritionUnavailableError, NutritionAPIError) as exc:
@@ -329,6 +338,11 @@ def plan_water_reminders(
             continue
         if counters["sent"] >= prefs.MAX_WATER_REMINDERS_PER_DAY:
             decisions.append(decide("daily_quota"))
+            continue
+
+        capped = prefs.weekly_cap_reason(user_prefs, surface="water", now_utc=now_utc)
+        if capped:
+            decisions.append(decide(capped))
             continue
 
         try:
@@ -448,7 +462,7 @@ def _run_task(kind: str, planner: Callable[..., list[Decision]]) -> dict[str, in
             )
             failed += 1
             continue
-        _persist(decision)
+        _persist(decision, sent_surface=kind)
         _audit(kind, decision)
         sent += 1
 
@@ -487,13 +501,24 @@ def _deliver(decision: Decision) -> None:
     send_message(chat_id=chat_id, text=decision.text, attachments=None)
 
 
-def _persist(decision: Decision) -> None:
+def _persist(decision: Decision, *, sent_surface: str | None = None) -> None:
     from apps.identity.models import BotUser
 
     bot_user = BotUser.all_tenants.filter(pk=decision.bot_user_id).first()
     if bot_user is None:
         return
-    context = prefs.merge_prefs(bot_user, decision.pref_updates)
+    updates = dict(decision.pref_updates)
+    if sent_surface is not None:
+        # Journal the send (DRF-1468): the weekly ceiling and the ignore
+        # streak both read this list, so it is written here -- the one path
+        # every surface's successful send already takes.
+        journaled = prefs.append_outbox(
+            prefs.get_prefs(bot_user),
+            surface=sent_surface,
+            sent_at=dj_timezone.now(),
+        )
+        updates[prefs.OUTBOX_KEY] = journaled[prefs.OUTBOX_KEY]
+    context = prefs.merge_prefs(bot_user, updates)
     BotUser.all_tenants.filter(pk=decision.bot_user_id).update(context=context)
 
 

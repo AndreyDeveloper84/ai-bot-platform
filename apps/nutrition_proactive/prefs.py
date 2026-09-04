@@ -30,6 +30,9 @@ Schema (every key optional; a missing key means the conservative default)::
           "ignored_streak": 0                 # consecutive unheeded reminders
       },
       "opted_out_at": "<iso8601>",            # set by the opt-out skill
+      "outbox": [                             # shared send journal (DRF-1468)
+          {"surface": "report", "sent_at": "<iso8601 utc>"},
+      ],                                      # pruned by age, capped in length
     }
 
 ### Both defaults are OFF
@@ -45,7 +48,7 @@ from __future__ import annotations
 
 import logging
 import re
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -78,6 +81,42 @@ MAX_WATER_REMINDERS_PER_DAY = 3
 #: feature turns itself off for that person. The one idea worth keeping from
 #: the legacy ``nudges`` package, which never ran (see tasks.py).
 IGNORED_STREAK_LIMIT = 3
+
+# -- the shared anti-nag mechanism (DRF-1468) --------------------------------
+
+#: Key of the outbound journal inside the prefs sub-dict: a bounded list of
+#: ``{"surface": ..., "sent_at": <iso utc>}``, oldest first. One journal for
+#: every proactive surface, so the weekly ceiling and the ignore streak read
+#: what was actually sent rather than per-feature counters that can drift.
+OUTBOX_KEY = "outbox"
+
+#: Hard length cap. The busiest permissible week is 28 sends (1 report +
+#: 3 water per day); 64 covers it twice over. The age prune below is what
+#: keeps the list small in practice.
+OUTBOX_CAP = 64
+
+#: Entries older than this many days are dropped on append. The weekly
+#: ceiling looks 7 days back and the ignore streak only at the trailing
+#: edge, so a fortnight keeps both fully informed.
+OUTBOX_KEEP_DAYS = 14
+
+#: Sliding 7-day ceiling on ALL proactive nutrition outbound, summed across
+#: surfaces: about two unsolicited touches per day on average. This is the
+#: anti-nag budget (policy R2/R6) -- per-surface quotas may be lower, never
+#: higher in effect.
+MAX_WEEKLY_OUTBOUND_TOTAL = 14
+
+#: Per-surface weekly ceilings inside the total. The two live surfaces are
+#: pinned at what their per-day quotas already allow (report 1/day, water
+#: 3/day), so for them the ceiling documents the budget instead of changing
+#: it. Any surface not listed -- the future hint and the weekly report --
+#: gets the anti-nag default: one touch a week.
+WEEKLY_SURFACE_CAPS = {"report": 7, "water": 21}
+DEFAULT_WEEKLY_SURFACE_CAP = 1
+
+#: Consecutive sends on one surface that no user message followed before
+#: that surface pauses itself -- silently (policy R2: never «ты не ответила»).
+SURFACE_IGNORE_LIMIT = 2
 
 #: What ``BotUser.timezone`` holds when nobody ever set it -- the column
 #: default from ``apps.identity.models.BotUser``. Not "empty", which is why a
@@ -272,3 +311,76 @@ def _int(value: Any) -> int:
         return max(0, int(value))
     except (TypeError, ValueError):
         return 0
+
+
+# -- outbound journal (DRF-1468) ----------------------------------------------
+
+
+def outbox_entries(prefs: dict[str, Any]) -> list[dict[str, Any]]:
+    """The journaled sends, oldest first. A corrupt value reads as empty."""
+    raw = prefs.get(OUTBOX_KEY)
+    if not isinstance(raw, list):
+        return []
+    return [entry for entry in raw if isinstance(entry, dict)]
+
+
+def append_outbox(
+    prefs: dict[str, Any],
+    *,
+    surface: str,
+    sent_at: datetime,
+) -> dict[str, Any]:
+    """Return a copy of ``prefs`` with one send journaled.
+
+    Prunes entries older than :data:`OUTBOX_KEEP_DAYS` and caps the list at
+    :data:`OUTBOX_CAP`, so the journal stays bounded no matter how long the
+    feature runs. Timestamps compare as ISO strings -- every writer here
+    stamps aware-UTC ``datetime.isoformat()``, which sorts chronologically.
+    """
+    cutoff = (sent_at - timedelta(days=OUTBOX_KEEP_DAYS)).isoformat()
+    entries = [e for e in outbox_entries(prefs) if str(e.get("sent_at", "")) >= cutoff]
+    entries.append({"surface": surface, "sent_at": sent_at.isoformat()})
+    updated = dict(prefs)
+    updated[OUTBOX_KEY] = entries[-OUTBOX_CAP:]
+    return updated
+
+
+def weekly_sent_count(
+    prefs: dict[str, Any],
+    *,
+    now_utc: datetime,
+    surface: str | None = None,
+) -> int:
+    """Sends journaled in the sliding 7 days before ``now_utc``."""
+    cutoff = (now_utc - timedelta(days=7)).isoformat()
+    return sum(
+        1
+        for entry in outbox_entries(prefs)
+        if str(entry.get("sent_at", "")) >= cutoff
+        and (surface is None or entry.get("surface") == surface)
+    )
+
+
+def weekly_cap_for(surface: str) -> int:
+    """The per-surface weekly ceiling; unlisted surfaces get the default."""
+    return WEEKLY_SURFACE_CAPS.get(surface, DEFAULT_WEEKLY_SURFACE_CAP)
+
+
+def weekly_cap_reason(
+    prefs: dict[str, Any],
+    *,
+    surface: str,
+    now_utc: datetime,
+) -> str | None:
+    """The weekly-ceiling block reason for the next send, or None.
+
+    The surface's own ceiling is asked first (the more specific answer),
+    then the cross-surface total. Both reasons are distinct slugs so a dry
+    run can tell "this surface spent its budget" from "all surfaces together
+    did".
+    """
+    if weekly_sent_count(prefs, now_utc=now_utc, surface=surface) >= weekly_cap_for(surface):
+        return "weekly_cap_surface"
+    if weekly_sent_count(prefs, now_utc=now_utc) >= MAX_WEEKLY_OUTBOUND_TOTAL:
+        return "weekly_cap_total"
+    return None
