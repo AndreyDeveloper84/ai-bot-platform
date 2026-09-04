@@ -70,7 +70,11 @@ from django.conf import settings
 from django.utils import timezone as dj_timezone
 
 from apps.audit.services import write_audit
-from apps.channels.max.outbound import MaxAPIError, send_message
+from apps.channels.max.outbound import (
+    MaxAPIError,
+    make_inline_keyboard_attachment,
+    send_message,
+)
 from apps.integrations.ayla import (
     NutritionAPIError,
     NutritionUnavailableError,
@@ -80,7 +84,7 @@ from apps.integrations.ayla import (
     external_user_id_for,
     get_nutrition_client,
 )
-from apps.nutrition_proactive import antinag, prefs, render, selection
+from apps.nutrition_proactive import antinag, optout, prefs, render, selection
 
 logger = logging.getLogger(__name__)
 
@@ -468,7 +472,7 @@ def _run_task(kind: str, planner: Callable[..., list[Decision]]) -> dict[str, in
             logger.info("nutrition_proactive.%s.dry_run would_send=%s", kind, decision.as_log())
             continue
         try:
-            _deliver(decision)
+            _deliver(decision, surface=kind)
         except Exception as exc:  # noqa: BLE001 -- one bad row must not stop the batch
             logger.exception(
                 "nutrition_proactive.%s.send_failed bot_user=%s err=%s",
@@ -503,7 +507,7 @@ def _run_task(kind: str, planner: Callable[..., list[Decision]]) -> dict[str, in
     }
 
 
-def _deliver(decision: Decision) -> None:
+def _deliver(decision: Decision, *, surface: str) -> None:
     from apps.identity.models import BotUser
 
     chat_id = (
@@ -514,7 +518,23 @@ def _deliver(decision: Decision) -> None:
     ).strip()
     if not chat_id:
         raise MaxAPIError(0, "chat_id vanished between planning and delivery")
-    send_message(chat_id=chat_id, text=decision.text, attachments=None)
+    send_message(chat_id=chat_id, text=decision.text, attachments=_stop_keyboard(surface))
+
+
+def _stop_keyboard(surface: str) -> list[dict[str, Any]]:
+    """The one-tap unsubscribe every proactive outbound carries (DRF-1468, R6).
+
+    One button, one deterministic callback (``cb:nutri:stop:{surface}``);
+    the tap is handled by :func:`apps.nutrition_proactive.optout.
+    try_handle_surface_stop` on the global surface and by the registry
+    skill on the per-tenant one.
+    """
+    return [
+        make_inline_keyboard_attachment(
+            [{"label": optout.STOP_BUTTON_LABEL, "callback": optout.stop_callback(surface)}],
+            columns=1,
+        )
+    ]
 
 
 def _persist(decision: Decision, *, sent_surface: str | None = None) -> None:

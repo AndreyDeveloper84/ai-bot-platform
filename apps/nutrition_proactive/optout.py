@@ -108,6 +108,108 @@ CONFIRMATION = (
 )
 
 
+# -- the «Не присылать» button (DRF-1468, policy R6) --------------------------
+#
+# Every proactive outbound carries a one-tap unsubscribe. Unlike the text
+# opt-out above it silences ONE surface -- the person tapped under a
+# specific message, not «never write to me» -- so the platform-wide veto
+# stays unset and the other surface keeps its state.
+
+#: The button's label. One label for every surface; the payload says which.
+STOP_BUTTON_LABEL = "Не присылать"
+
+#: The pref each known surface's button flips, and the honest one-line
+#: confirmation the person gets back. Short, no guilt, the way back named
+#: (editorial policy R6: opt-out is one tap and never hidden).
+SURFACE_OPT_OUT_PREFS: dict[str, dict[str, Any]] = {
+    "report": {"daily_report_time": prefs.REPORT_OFF},
+    "water": {"water_reminders": False},
+}
+
+SURFACE_CONFIRMATIONS: dict[str, str] = {
+    "report": ("Хорошо, итоги дня больше не присылаю. Вернуть можно в профиле в мини-приложении."),
+    "water": (
+        "Хорошо, напоминания о воде больше не присылаю. Вернуть можно в профиле в мини-приложении."
+    ),
+}
+
+#: A tap whose surface the schema no longer knows: the button is stale.
+#: The turn is still claimed (silence would read as a broken button), but
+#: no state changes.
+STALE_SURFACE_CONFIRMATION = (
+    "Эта кнопка уже не действует, настройки не меняла. "
+    "Подсказки настраиваются в профиле в мини-приложении."
+)
+
+
+def stop_callback(surface: str) -> str:
+    """The deterministic callback payload for a surface's stop button."""
+    return f"cb:nutri:stop:{surface}"
+
+
+def parse_surface_stop(text: str) -> str | None:
+    """The surface a ``cb:nutri:stop:{surface}`` payload names, or None.
+
+    Returns the surface even when it is unknown (a stale button) -- the
+    caller decides what to change (nothing) and what to say. Returns None
+    for anything that is not exactly this button family's payload: a bare
+    ``cb:nutri:stop`` without a surface is not a button we drew.
+    """
+    stripped = (text or "").strip()
+    if not stripped.startswith("cb:"):
+        return None
+    from apps.orchestrator.ui.keyboards import parse_callback
+
+    parsed = parse_callback(stripped)
+    if parsed is None:
+        return None
+    if parsed["domain"] != "nutri" or parsed["action"] != "stop":
+        return None
+    return parsed.get("ref") or None
+
+
+def apply_surface_opt_out(bot_user: Any, surface: str) -> str:
+    """Silence ONE surface for ``bot_user`` and return the confirmation.
+
+    The platform-wide veto is deliberately NOT set: the tap answered one
+    message, not every future one. Same persistence shape as
+    :func:`apply_opt_out` -- one ``.update()``, no full-model save, no
+    tenant-context dependence -- so the two switches can never drift in
+    how reliably they land.
+    """
+    from apps.identity.models import BotUser
+
+    context_json = prefs.merge_prefs(bot_user, SURFACE_OPT_OUT_PREFS[surface])
+    BotUser.all_tenants.filter(pk=bot_user.pk).update(context=context_json)
+    bot_user.context = context_json
+
+    logger.info(
+        "nutrition_proactive.surface_opt_out bot_user=%s surface=%s",
+        bot_user.pk,
+        surface,
+    )
+    return SURFACE_CONFIRMATIONS[surface]
+
+
+def try_handle_surface_stop(*, text: str, bot_user: Any) -> str | None:
+    """Global-surface entry point for the stop button. None to fall through.
+
+    Same contract as :func:`try_handle_opt_out`: the pilot IS the global
+    bot, so the button must work there and not only in the registry skill.
+    Never raises -- a failure must not cost the person their turn.
+    """
+    try:
+        surface = parse_surface_stop(text)
+        if surface is None:
+            return None
+        if surface not in SURFACE_OPT_OUT_PREFS:
+            return STALE_SURFACE_CONFIRMATION
+        return apply_surface_opt_out(bot_user, surface)
+    except Exception:  # noqa: BLE001 -- must never break the turn
+        logger.exception("nutrition_proactive.surface_stop_failed")
+        return None
+
+
 def normalise(text: str) -> str:
     """Lowercase, fold ё, drop punctuation, collapse whitespace."""
     cleaned = _PUNCT_RE.sub(" ", text.strip().lower().replace("ё", "е"))

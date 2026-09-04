@@ -335,3 +335,55 @@ class TestSurfaceIgnoreStreak:
         decision = only(decisions, user)
         assert decision.send is True
         assert decision.reason == "behind_proportional_norm"
+
+
+# ---------------------------------------------------------------------------
+# 4 — every outbound carries the one-tap unsubscribe (policy R6)
+# ---------------------------------------------------------------------------
+
+
+def button_payloads(attachments) -> list[str]:
+    return [
+        btn["payload"]
+        for att in attachments or []
+        if att.get("type") == "inline_keyboard"
+        for row in att["payload"]["buttons"]
+        for btn in row
+    ]
+
+
+class TestStopButtonAttached:
+    def test_every_water_send_carries_the_one_tap_unsubscribe(
+        self, tenant: Tenant, settings
+    ) -> None:
+        make_user(tenant)
+        settings.NUTRITION_PROACTIVE_ENABLED = True
+        settings.NUTRITION_PROACTIVE_DRY_RUN = False
+        with (
+            patch("apps.nutrition_proactive.tasks.send_message") as send,
+            patch("apps.nutrition_proactive.tasks._fetch_water", side_effect=water_reader(0)),
+            patch("apps.nutrition_proactive.tasks.dj_timezone.now", return_value=NOON),
+        ):
+            result = tasks.send_water_reminders()
+        assert result["sent"] == 1
+
+        attachments = send.call_args.kwargs["attachments"]
+        assert button_payloads(attachments) == ["cb:nutri:stop:water"]
+
+    def test_every_report_send_carries_it_too(self, tenant: Tenant, settings) -> None:
+        make_user(tenant, report="19:00")
+        settings.NUTRITION_PROACTIVE_ENABLED = True
+        settings.NUTRITION_PROACTIVE_DRY_RUN = False
+        with (
+            patch("apps.nutrition_proactive.tasks.send_message") as send,
+            patch("apps.nutrition_proactive.tasks._fetch_daily", side_effect=summary_reader()),
+            patch(
+                "apps.nutrition_proactive.tasks.dj_timezone.now",
+                return_value=NOON.replace(hour=16),  # 19:00 MSK
+            ),
+        ):
+            result = tasks.send_daily_reports()
+        assert result["sent"] == 1
+
+        attachments = send.call_args.kwargs["attachments"]
+        assert button_payloads(attachments) == ["cb:nutri:stop:report"]

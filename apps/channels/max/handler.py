@@ -173,9 +173,10 @@ from apps.orchestrator.intent_resolution import resolve_and_log_turn_intent
 from apps.orchestrator.nutrition_global import (
     resolve_anketa_tap,
     resolve_food_tap,
+    resolve_nutri_stop_tap,
     try_handle_structured_nutrition_turn,
 )
-from apps.nutrition_proactive.optout import try_handle_opt_out
+from apps.nutrition_proactive.optout import try_handle_opt_out, try_handle_surface_stop
 from apps.orchestrator.visits import (
     CALLBACK_VISIT_REPEAT_PREFIX,
     VISIT_CALLBACK_PREFIXES,
@@ -1154,6 +1155,12 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
     welcome_tap = resolve_welcome_tap(event.text)
     food_tap = resolve_food_tap(event.text)
 
+    # DRF-1468 — тап «Не присылать» (`cb:nutri:stop:*`). МОЛЧАНИЕ по той же
+    # причине, что у `cb:catalog:*` и навигации анкеты: метка одна на все
+    # поверхности, фразы за тапом нет, а сырой payload в истории — дефект
+    # DRF-988. Ход остаётся виден по ответу-подтверждению бота.
+    nutri_stop_tap = resolve_nutri_stop_tap(event.text)
+
     # МОЛЧАНИЕ — то же решение и по той же причине, что у `cb:book:*`
     # (DRF-988) и `cb:catalog:*` (DRF-1304): текст несёт id карточки, которую
     # бот сам нарисовал, а не слова человека.
@@ -1207,7 +1214,7 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
     # решения; следующий читатель обязан увидеть его здесь, а не вычитывать из
     # ветки `inbound_history_text is None` десятью строками ниже.
     inbound_history_text: str | None = event.text
-    for tap in (anketa_tap, welcome_tap, food_tap, discover_tap):
+    for tap in (anketa_tap, welcome_tap, food_tap, discover_tap, nutri_stop_tap):
         if tap is None:
             # «Это не тап моего семейства» — резолвер пропускает ход дальше и
             # не трогает ни текст, ни персистенс.
@@ -1359,6 +1366,25 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
         # active anketa FSM included. The match set is closed and
         # whole-message, so no other branch's phrases can reach it.
         reply = DiscoveryReply(text=_opt_out_reply)
+        assistant_action_type = "proactive_opt_out"
+        _record_live_path_metric(
+            bot_user=bot_user,
+            conversation=conversation,
+            trace_id=trace_id,
+            message_text=event.text,
+            t_start=t_start,
+            outcome=AIRequestMetric.OUTCOME_SUCCESS,
+            skill_selected="proactive_opt_out",
+        )
+    elif (
+        _surface_stop_reply := try_handle_surface_stop(text=event.text, bot_user=bot_user)
+    ) is not None:
+        # DRF-1468 — тап «Не присылать» (`cb:nutri:stop:{surface}`). Стоит
+        # сразу после текстовой отписки и по той же причине выше всех
+        # прочих веток: просьба не писать важнее всего, чем ещё мог быть
+        # ход. Отличие от текстовой отписки одно и принципиальное: глушится
+        # ОДНА поверхность, платформенное вето не ставится.
+        reply = DiscoveryReply(text=_surface_stop_reply)
         assistant_action_type = "proactive_opt_out"
         _record_live_path_metric(
             bot_user=bot_user,

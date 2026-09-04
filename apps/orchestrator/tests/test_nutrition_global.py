@@ -27,6 +27,7 @@ from apps.orchestrator.nutrition_global import (
     food_tap_labels,
     resolve_anketa_tap,
     resolve_food_tap,
+    resolve_nutri_stop_tap,
     try_handle_structured_nutrition_turn,
 )
 from apps.skills.base import SkillResult
@@ -493,3 +494,40 @@ class TestFoodTapAsAHistoryTurn:
         assert tap is not None
         assert tap.history_text is not None
         assert "abc-xyz-789" not in tap.history_text
+
+
+class TestNutriStopTapAsAHistoryTurn:
+    """DRF-1468 — тап «Не присылать» (``cb:nutri:stop:*``).
+
+    Кнопка отписки — высказывание кнопкой, но фразы за ней нет: метка
+    одна на все поверхности, а смысл тапа целиком в payload'е. В историю
+    не идёт ничего — ход виден по ответу-подтверждению бота, ровно как у
+    навигационных тапов анкеты и ``cb:catalog:*``.
+    """
+
+    @pytest.mark.parametrize("surface", ["report", "water"])
+    def test_a_stop_tap_never_reaches_history(self, surface):
+        tap = resolve_nutri_stop_tap(f"cb:nutri:stop:{surface}")
+        assert tap is not None
+        assert tap.history_text is None
+
+    def test_an_unknown_but_well_formed_surface_is_still_a_tap(self):
+        """Старая кнопка (поверхность, которой больше нет) — тоже не фраза."""
+        tap = resolve_nutri_stop_tap("cb:nutri:stop:hint")
+        assert tap is not None
+        assert tap.history_text is None
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "cb:nutri:stop",  # без поверхности — не наша кнопка
+            "cb:nutri:stop:вода",  # набрано руками — не payload кнопки
+            "cb:nutri:stop:report extra",
+            "cb:nutri:delete:report",  # другой глагол
+            "cb:food:diary",
+            "не присылать",
+            "",
+        ],
+    )
+    def test_anything_else_is_not_ours(self, text):
+        assert resolve_nutri_stop_tap(text) is None
