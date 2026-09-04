@@ -243,12 +243,49 @@ class TestDayChips:
                 result = BookingSkill().handle(
                     _tap(context, f"{CALLBACK_BOOK_MORE_DATES_PREFIX}11:22")
                 )
-        assert result.reply_text == "Выберите дату:"
+        # DRF-1474 — was «Выберите дату:», the collapsed picker's own header.
+        # See test_expansion_does_not_repeat_the_collapsed_header below for
+        # the live transcript that reads as the bot saying it twice.
+        assert result.reply_text == "Все свободные даты:"
         assert len(_callbacks(result)) == 6
         # Beyond the third day a count stops being readable, so those wear a
         # date — the relative words are a convenience, not a rule.
         assert _labels(result)[:3] == ["Сегодня", "Завтра", "Послезавтра"]
         assert all(w not in _labels(result)[3:] for w in ("Сегодня", "Завтра"))
+
+    def test_expansion_does_not_repeat_the_collapsed_header(
+        self, context: SkillContext, tenant: Tenant
+    ) -> None:
+        """DRF-1474 — the «Выберите дату:» that arrived twice.
+
+        Live pilot 04.09::
+
+            12:15:13  бот  Выберите дату:   [Сегодня · Завтра · 7 сен · Выбрать дату]
+            12:15:17  бот  Выберите дату:   [Сегодня … 17 сен — 12 кнопок]
+
+        Nothing was sent twice and nothing was retried: the second message is
+        the answer to a «Выбрать дату» tap. But the transcript shows text, not
+        keyboards, so an expansion wearing the collapsed picker's words is
+        indistinguishable from a duplicate — and the owner filed it as one.
+
+        The two messages this test builds are the two the owner saw, and the
+        assertion is the whole fix: they may not read the same.
+        """
+        client = FakeYClients()
+        client.services_rows = [_service(22)]
+        client.staff_rows = [_staff(11)]
+        client.dates = [_iso(i) for i in range(6)]
+        with _patch_yclients(client), _patch_provider_complete([]):
+            with tenant_scope(tenant):
+                collapsed = BookingSkill().handle(_tap(context, "cb:book:pick_master:11:22"))
+                expanded = BookingSkill().handle(
+                    _tap(context, f"{CALLBACK_BOOK_MORE_DATES_PREFIX}11:22")
+                )
+
+        assert collapsed.reply_text != expanded.reply_text
+        # And the keyboards really did differ — otherwise the right fix would
+        # have been to suppress the second message, not to rename it.
+        assert len(_callbacks(collapsed)) < len(_callbacks(expanded))
 
 
 class TestPartChips:

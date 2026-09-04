@@ -192,6 +192,19 @@ _SLOT_PICK_PROMPT = "Выберите время:"
 
 # Date picker — shown after master pick, before slot listing.
 _DATE_PICK_PROMPT = "Выберите дату:"
+
+# DRF-1474 — the SAME picker, expanded. Live pilot 04.09:
+#
+#     12:15:13  бот  Выберите дату:          [Сегодня · Завтра · 7 сен · Выбрать дату]
+#     12:15:17  бот  Выберите дату:          [Сегодня … 17 сен — двенадцать кнопок]
+#
+# The owner read that as the bot saying the same thing twice, four seconds
+# apart, and it is hard to read any other way: nothing was sent twice — the
+# person tapped «Выбрать дату» and the expansion re-used the collapsed
+# picker's header, so the only thing that changed was a keyboard the
+# transcript does not show. A second message must not be able to arrive
+# wearing the first one's words; the header now says which of the two it is.
+_DATE_PICK_ALL_PROMPT = "Все свободные даты:"
 _DATE_PICKER_FALLBACK_NO_DATES = "У выбранного мастера нет свободных дат в ближайшее время."
 
 # ── DRF-1325: the human-time half of the flow ─────────────────────────────
@@ -1996,7 +2009,8 @@ def _render_date_picker(
 
     capped = ordered[:_MAX_DATE_BUTTONS]
     return _build_skill_result(
-        text=_DATE_PICK_PROMPT,
+        # The expansion is a different answer to a different tap and says so.
+        text=_DATE_PICK_ALL_PROMPT if expand_all else _DATE_PICK_PROMPT,
         tool_calls_made=[],
         confidence=_CONFIDENCE_OK,
         action_data=_action_data_for_date_pick(
