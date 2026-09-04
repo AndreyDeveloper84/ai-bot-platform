@@ -22,7 +22,6 @@ from uuid import UUID
 from django.core.paginator import Paginator
 from django.db.models import (
     Case,
-    Count,
     Exists,
     F,
     IntegerField,
@@ -1387,6 +1386,12 @@ def discover_masters(
 # instead», twenty read as a price list.
 _CITY_SERVICE_SAMPLES = 3
 
+# Ceiling on the (master, service) rows the sample scans. The pilot's
+# whole contour is ~500 of them; this is a suggestion, not a survey, and a
+# marketplace large enough to exceed the cap has a most-common service well
+# inside the first rows anyway.
+_SAMPLE_SCAN_ROWS = 2000
+
 
 def city_service_samples(
     city: str | None = None, *, limit: int = _CITY_SERVICE_SAMPLES
@@ -1412,20 +1417,25 @@ def city_service_samples(
     makes must be something discovery would really find.
     """
     limit = max(1, min(int(limit), _CITY_SERVICE_SAMPLES))
+    # ``order_by()`` clears the master ordering before the read: the sort
+    # columns are not in the selected set, and the ranking below is ours.
     rows = (
         _bookable_qs(city=city)
         .filter(_service_row_q())
         .order_by()
-        .values("services_offered__service__name")
-        .annotate(masters=Count("id", distinct=True))
-        .order_by("-masters", "services_offered__service__name")[:limit]
+        .values_list("services_offered__service__name", "id")[:_SAMPLE_SCAN_ROWS]
     )
-    names: list[str] = []
-    for row in rows:
-        name = str(row.get("services_offered__service__name") or "").strip()
-        if name:
-            names.append(name)
-    return names
+    # Counted in Python rather than by a GROUP BY for the same reason
+    # :func:`_matched_services` scores in Python: the row set is bounded by
+    # construction, and the rule is easier to see than to reconstruct from an
+    # annotate/values pair.
+    per_service: dict[str, set[UUID]] = {}
+    for name, master_id in rows:
+        cleaned = str(name or "").strip()
+        if cleaned:
+            per_service.setdefault(cleaned, set()).add(master_id)
+    ranked = sorted(per_service.items(), key=lambda item: (-len(item[1]), item[0]))
+    return [name for name, _masters in ranked[:limit]]
 
 
 def discover_masters_page(
