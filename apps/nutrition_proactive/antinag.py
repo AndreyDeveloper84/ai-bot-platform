@@ -11,6 +11,21 @@ going quiet -- without ever saying «ты не ответила». This module c
   send. MAX sends no read receipts, so a reply is the only observable
   acknowledgement there is.
 
+### The limitation this carries, stated plainly
+
+There are no read receipts and there never will be (the channel does not
+send them, and ``send_message`` stores no channel message id). "Ignored"
+is therefore INFERRED, not measured: a person who reads every message but
+never types a reply is indistinguishable from a person who never reads,
+and after :data:`SURFACE_IGNORE_LIMIT` sends their surface auto-pauses.
+That is the deliberate direction of the error -- the cost of a false
+"ignored" is silence (the person can re-enable), the cost of a false
+"heeded" would be pestering, and policy 2.5 prices pestering infinitely
+higher. Do not "fix" this by relaxing the streak; if a real read signal
+ever appears, plug it in here as a stronger heeded-proof alongside the
+reply. Related known gap: all pilot users sit on the default timezone,
+so quiet hours are effectively Moscow time (DRF-1477).
+
 ### Why water is not here
 
 Water keeps its own domain streak
