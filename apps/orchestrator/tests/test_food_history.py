@@ -63,7 +63,7 @@ CHANNEL_USER_ID = "1467001"
 # ─── fixtures ──────────────────────────────────────────────────────────────
 
 
-def _entry(dish: str, kcal: float = 0.0, meal_type: str = "lunch") -> dict[str, Any]:
+def _entry(dish: str, kcal: Any = 0.0, meal_type: str = "lunch") -> dict[str, Any]:
     """Строка ``FoodLogEntrySerializer`` в том виде, в каком её шлёт Ayla."""
     return {
         "id": str(uuid.uuid4()),
@@ -224,9 +224,11 @@ def _green_fact(bot_user: BotUser) -> MemoryEntry:
     """Контрольная строка — ровно того вида, каким была бы копия."""
     from apps.identity.models import UserPersonalContext
 
-    upc, _ = UserPersonalContext.objects.get_or_create(user_id=bot_user.ayla_user_id)
+    user_id = bot_user.ayla_user_id
+    assert user_id is not None  # фикстура ``person`` связывает строку с Ayla
+    upc, _ = UserPersonalContext.objects.get_or_create(user_id=user_id)
     return MemoryEntry.objects.create(
-        user_id=bot_user.ayla_user_id,
+        user_id=user_id,
         personal_context=upc,
         sensitivity_zone=MemoryEntry.SENSITIVITY_GREEN,
         source=MemoryEntry.SOURCE_EXPLICIT,

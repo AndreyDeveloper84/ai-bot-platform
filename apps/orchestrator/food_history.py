@@ -53,11 +53,18 @@ recognise, not alive enough to hand back the diary».
 
 ### Honest refusal, not silence and not invention
 
-:data:`UNAVAILABLE_TEXT` is what a person hears when the read fails on a
-surface where the history WAS the answer. The status is carried
-explicitly (:class:`Status`) rather than smuggled in an empty list,
-because «Ayla did not answer» and «you logged nothing today» are two
-different truths and a surface that confuses them lies to the person.
+The status is carried explicitly (:class:`Status`) rather than smuggled in
+an empty list, because «Ayla did not answer» and «you logged nothing today»
+are two different truths, and a surface that confuses them lies to the
+person about what they ate.
+
+The refusal itself is worded by the surface that was asked, not by this
+module — there is no copy here to keep in sync with theirs. Where the
+history WAS the question, that sentence already exists and is used:
+:data:`apps.orchestrator.personal_surface.DIARY_UNAVAILABLE_TEXT` («не могу
+сейчас поднять твой дневник — сервис питания не отвечает»). Where it was
+not — the recognition card, the concierge prompt — the honest response is
+to add nothing, and both callers do exactly that.
 
 The circuit breaker inside
 :class:`apps.integrations.ayla.nutrition_client.NutritionClient` is used,
@@ -115,14 +122,6 @@ MAX_DISH_CHARS = 64
 #: rejects a field that arrived holding something other than kcal rather
 #: than printing it back to the person as fact.
 MAX_MEAL_KCAL = 10_000
-
-#: Said when the history WAS the question and Ayla did not answer it. Names
-#: what happened and invents nothing — the failure this copy exists to
-#: prevent is a warm, plausible, fabricated answer about what someone ate.
-UNAVAILABLE_TEXT = (
-    "Не могу сейчас посмотреть, что было в дневнике — сервис питания не отвечает. "
-    "Попробуй через минуту."
-)
 
 
 class Status(str, Enum):
