@@ -152,7 +152,7 @@ Per memory `project_pilot_scope_discipline` — Sigma stays within locked scope:
 Осветлённый основной `#9da5ff` даёт с белым 2.27:1; текст на нём — тёмный.
 
 **Это решение исполнителя, а не владельца.** Оно вынесено отдельным
-вопросом — см. `docs/OPEN_DECISIONS.md`.
+вопросом — `docs/OPEN_DECISIONS.md` §21-quater, вопрос 1.
 
 ### 2.4 · Контрасты — пересчитаны
 
@@ -205,7 +205,8 @@ Per memory `project_pilot_scope_discipline` — Sigma stays within locked scope:
 хайрлайн давал 1.34:1, у sage-канона — 1.27:1. Подпись борда сохранена как
 есть, а не поднята до 3:1, потому что подъём границы до тёмно-серой изменил
 бы вид каждой карточки — это уже не цвет токена, а решение по виду, и оно
-вынесено владельцу отдельным вопросом.
+вынесено владельцу отдельным вопросом (`OPEN_DECISIONS.md` §21-quater,
+вопрос 2).
 
 **Цветной текст на подложке своего же цвета.** Шесть правил `globals.css`
 (`.callout--danger`, `.m6-bubble--failed`, `.unbookable-badge`,
@@ -1347,7 +1348,7 @@ Reasons purple wins at chat-list scale:
 
 > «Do not mix purple bot branding and sage-green app chrome в same app surface unless separately approved.»
 
-> **Поправка 04.09.2026 (DRF-1462).** Правило ниже построено на том, что интерфейс приложения — sage, а фиолетовый принадлежит только аватару бота. §21-ter это основание убрал: интерфейс теперь тоже фиолетовый, но **другой** — `--c-accent` `#4452ff` против `#7d63ef` у аватара. Запрет «не смешивать» потерял смысл, а два несогласованных фиолетовых рядом — новый вопрос, и он вынесен владельцу. До ответа ассеты аватара не трогаются.
+> **Поправка 04.09.2026 (DRF-1462).** Правило ниже построено на том, что интерфейс приложения — sage, а фиолетовый принадлежит только аватару бота. §21-ter это основание убрал: интерфейс теперь тоже фиолетовый, но **другой** — `--c-accent` `#4452ff` против `#7d63ef` у аватара. Запрет «не смешивать» потерял смысл, а два несогласованных фиолетовых рядом — новый вопрос, и он вынесен владельцу (`OPEN_DECISIONS.md` §21-quater, вопрос 3). До ответа ассеты аватара не трогаются.
 
 **Purple = channel identity. Sage-green = app UI identity.** Each lives in its own context. The only case где both appear adjacently is MAX rendering chat list (bot avatar adjacent to user's other chats) — that's not Ayla mixing colors, that's MAX UI.
 
