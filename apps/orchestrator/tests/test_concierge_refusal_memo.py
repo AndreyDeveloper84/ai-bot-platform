@@ -187,6 +187,9 @@ class TestTheLedger:
         """The catalog may have grown since. A refusal is a hint, not a law."""
         _, conversation = _bot_user_and_conversation("ledger-3")
         remember_refusal(conversation, specialization="маникюр", city="Пенза")
+        # The entry really is there before it is aged out — otherwise the
+        # assertion below would pass on a ledger that never worked at all.
+        assert len(recall_refusals(conversation)) == 1
         state = dict(conversation.skill_state)
         stale = datetime.now(timezone.utc) - timedelta(seconds=STATE_TTL_SECONDS + 60)
         state["no_match"][0]["at"] = stale.isoformat()
@@ -196,11 +199,18 @@ class TestTheLedger:
         assert recall_refusals(conversation) == []
 
     def test_a_refusal_with_no_service_is_not_recorded(self) -> None:
-        """«В Пензе никого нет» is about the city — no query to repeat."""
+        """«В Пензе никого нет» is about the city — no query to repeat.
+
+        Written as «one real refusal, then a blank one» so the assertion is
+        about the blank being dropped rather than about a ledger that might
+        simply never write anything.
+        """
         _, conversation = _bot_user_and_conversation("ledger-4")
+        remember_refusal(conversation, specialization="маникюр", city="Пенза")
         remember_refusal(conversation, specialization="", city="Пенза")
 
-        assert recall_refusals(conversation) == []
+        entries = recall_refusals(conversation)
+        assert [e.specialization for e in entries] == ["маникюр"]
 
     def test_the_block_states_the_fact_and_forbids_both_defects(self) -> None:
         _, conversation = _bot_user_and_conversation("ledger-5")
@@ -312,14 +322,17 @@ class TestTheRepeatIsAnsweredWithoutTheModel:
         # No third model call: the repeat never reaches a model, so no prompt
         # can be talked out of the answer.
         assert provider.complete.await_count == 2
-        # The sentence the owner read, and everything that made it a circle.
-        assert "Помогу найти" not in second.text
-        assert "в каком городе" not in second.text.lower()
-        assert "уточните" not in second.text.lower()
-        # What it says instead: the same answer, named as the same answer.
+        # What the second answer IS, asserted first: every «not in» below is
+        # about this text, and a check of absence over an empty reply would
+        # pass while proving nothing.
         assert "я уже ответил" in second.text
         assert "«маникюр»" in second.text
         assert second.persisted is True
+        # And what it is not — the sentence the owner read, plus the two
+        # things that turned it into a circle.
+        assert "Помогу найти" not in second.text
+        assert "в каком городе" not in second.text.lower()
+        assert "уточните" not in second.text.lower()
 
     def test_the_repeat_still_offers_the_alternative(self, monkeypatch, penza_massage_only) -> None:
         """A repeat must go somewhere, or it is just a wall said twice."""
@@ -387,6 +400,9 @@ class TestTheModelIsToldWhatWasRefused:
         )
 
         system = provider.complete.call_args_list[0].args[0][0]
+        # A real system prompt was built — otherwise «not in ""» would pass
+        # over an empty string and this test would guard nothing.
+        assert "Ответ не длиннее" in system["content"]
         assert "Уже проверено по каталогу" not in system["content"]
 
 
