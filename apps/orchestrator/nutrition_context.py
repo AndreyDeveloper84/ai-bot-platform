@@ -155,9 +155,9 @@ def build_nutrition_context_block(bot_user: Any) -> str:
     """Return the concierge system-prompt nutrition block, or ``""``.
 
     ``""`` covers every gated and every failed case — flag off, consent
-    closed, Ayla unreachable, misconfigured token, empty week — so the
-    caller injects nothing and the prompt is byte-identical to the
-    no-nutrition one. Never raises.
+    closed, Ayla unreachable, misconfigured token, a week with no signal
+    and a day with no rows — so the caller injects nothing and the prompt
+    is byte-identical to the no-nutrition one. Never raises.
     """
     if not concierge_nutrition_context_enabled():
         return ""

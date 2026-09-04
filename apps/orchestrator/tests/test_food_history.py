@@ -297,6 +297,10 @@ class TestAylaUpTheHistoryIsRead:
 
         card = _format_scan_card(scan, None, read_today(person))
 
+        # Карточка непустая и про то самое блюдо — иначе «строки нет»
+        # было бы правдой и о пустой строке.
+        assert "плов" in card
+        assert "Записать в дневник?" in card
         assert ALREADY_LOGGED_LINE not in card
 
     def test_the_model_block_carries_todays_dishes(self, person, ayla, monkeypatch) -> None:
@@ -368,9 +372,11 @@ class TestAylaDownHonestRefusalAndNoCopy:
 
         card = _format_scan_card(scan, None, read_today(person))
 
-        assert ALREADY_LOGGED_LINE not in card
-        # Карточка про тарелку — она остаётся ответом на заданный вопрос.
+        # Карточка про тарелку — она остаётся ответом на заданный вопрос,
+        # и это же доказывает, что дальше мы ищем строку в непустом тексте.
+        assert "борщ" in card
         assert "Записать в дневник?" in card
+        assert ALREADY_LOGGED_LINE not in card
 
     def test_the_model_block_invents_nothing(self, person, ayla, monkeypatch) -> None:
         monkeypatch.setattr(nutrition_context, "_fetch_deficits", lambda _u: None)
@@ -500,6 +506,13 @@ class TestParsingIsDefensive:
         assert [m.dish for m in meals] == ["Борщ"]
 
     def test_junk_shapes_do_not_raise(self) -> None:
+        # Контроль: на нормальной форме тот же вызов возвращает строки, так
+        # что пустота ниже — свойство входа, а не всегда-пустой функции.
+        assert len(food_history.meals_from_summary(_summary())) == 2
+
+        # empty-assert-ok: пустота и есть проверяемое свойство — на этих
+        # формах читать нечего, и вопрос ровно в том, что вместо исключения
+        # или выдумки возвращается пустой кортеж.
         assert food_history.meals_from_summary(_summary(entries=[])) == ()
         assert food_history.meals_from_summary(SimpleNamespace(entries=None)) == ()
         assert food_history.meals_from_summary(SimpleNamespace(entries=["строка", 7])) == ()
@@ -561,5 +574,9 @@ class TestAnEmptyDayIsSaid:
 
         text = render_daily_report(_summary(), _water(), _profile())
 
+        # Отчёт отрисовался и полон — иначе «блюд в нём нет» было бы
+        # правдой и о пустой строке.
+        assert "Итоги дня по питанию." in text
+        assert "Калории: 1210 из 1994 ккал." in text
         assert "Борщ" not in text
         assert "Омлет" not in text
