@@ -72,9 +72,7 @@ DARK_AT = "@media (prefers-color-scheme: dark)"
 # A colour literal in a value position. `#798` in `PR #798` has a space
 # before it and so does not match.
 VALUE_POSITION = re.compile(r"(?::|,)\s*#[0-9a-fA-F]{3,8}\b")
-ABOUT_COLOUR = re.compile(
-    r"var\(--|background|color|border|outline|shadow|fill|stroke"
-)
+ABOUT_COLOUR = re.compile(r"var\(--|background|color|border|outline|shadow|fill|stroke")
 BLOCK_COMMENT = re.compile(r"/\*.*?\*/")
 COMMENT_LINE = re.compile(r"^\s*(\*|//)")
 
@@ -168,10 +166,8 @@ def check_single_source(root: Path) -> list[str]:
                 continue
             if VALUE_POSITION.search(code) and ABOUT_COLOUR.search(code):
                 rel = path.relative_to(root).as_posix()
-                problems.append(
-                    f"{rel}:{number}: colour literal outside tokens.css -- "
-                    f"{line.strip()}"
-                )
+                where = f"{rel}:{number}"
+                problems.append(f"{where}: colour literal outside tokens.css -- {line.strip()}")
     return problems
 
 
@@ -197,9 +193,7 @@ def check_contrast(themes: dict[str, dict[str, str]]) -> list[str]:
         pairs = [(t, s) for t in TEXTS for s in SURFACES] + list(ON_COLOUR)
         for text, surface in pairs:
             if text not in palette or surface not in palette:
-                problems.append(
-                    f"tokens.css [{theme}]: --c-{text} / --c-{surface} missing"
-                )
+                problems.append(f"tokens.css [{theme}]: --c-{text} / --c-{surface} missing")
                 continue
             ratio = contrast(palette[text], palette[surface])
             if ratio < AA:
