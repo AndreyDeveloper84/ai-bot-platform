@@ -139,10 +139,10 @@ _KEPT_ACK: dict[str, str] = {
     "name": "Оставляю: это «{value}».",
 }
 
-# Answers to the «Оставляем?» question all three «в прошлый раз» prompts end
-# with. matches() used to require the shape of a NEW value, so «да»/«нет»
-# fell through to the concierge — and «Оставляем» on the name prompt was
-# itself stored as the dish name (review DRF-1454, MUST_FIX_PRE_PILOT).
+# Answers to the «Оставляем?» question the «в прошлый раз» prompt ends with.
+# matches() used to require the shape of a NEW value, so «да»/«нет» fell
+# through to the concierge — and «Оставляем» on the name prompt was itself
+# stored as the dish name (review DRF-1454, MUST_FIX_PRE_PILOT).
 _CONFIRM_WORDS = frozenset({"да", "ага", "угу", "ок", "окей", "оставляем", "оставь"})
 _DECLINE_WORDS = frozenset({"нет", "не", "неа"})
 
