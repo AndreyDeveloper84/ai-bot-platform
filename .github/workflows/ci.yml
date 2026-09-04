@@ -240,8 +240,8 @@ jobs:
       # CI-feedback-latency note on `timeout-minutes` above.
       #
       # Placing it above `uv sync` also means the guard still runs when
-      # the private-dep fetch (GH_DEPLOY_TOKEN) is broken, which is
-      # precisely a moment when credentials are being moved around.
+      # the ayla-ai-core fetch is broken, which is precisely a moment
+      # when credentials are being moved around.
       - name: Set up Python 3.12 (secret guard)
         uses: actions/setup-python@v5
         with:
@@ -309,23 +309,45 @@ jobs:
       - name: Set up Python 3.12
         run: uv python install 3.12
 
-      # ayla-ai-core lives in a separate private repo. CI auths via the
-      # GH_DEPLOY_TOKEN secret (read-only PAT scoped to that repo). The
-      # `insteadOf` rewrite makes `git+https://github.com/.../ayla-ai-core`
-      # in pyproject.toml resolve to `https://x-access-token:<token>@...`
-      # at fetch time without leaking the token into the lockfile.
+      # ayla-ai-core lives in a separate repo that is PUBLIC — owner's
+      # decision of 04.09.2026, recorded in OPEN_DECISIONS.md §22 (that
+      # register lives in the workspace root, outside this repo), and
+      # re-checked anonymously the same day (`"private": false`). An
+      # unauthenticated `git fetch` of the pinned SHA succeeds; measured
+      # 04.09.2026 against an empty git config, and visible independently
+      # in beautygo_backend Dependabot PRs #282-284, which installed
+      # ayla-ai-core with an EMPTY GH_DEPLOY_TOKEN and went green.
       #
-      # K12 (DRF-570) pins `ayla-ai-core==v0.6.0` exactly — `--frozen`
+      # So the token is OPTIONAL here, not required:
+      #   present  -> `insteadOf` rewrites `git+https://github.com/...` to
+      #               `https://x-access-token:<token>@...` at fetch time,
+      #               without the token ever entering the lockfile;
+      #   absent   -> a notice, and the fetch goes out anonymously.
+      #
+      # Support for the token is kept deliberately. The decision says
+      # public "for now" (пока); if the visibility is closed again this
+      # step starts authenticating with no further edit.
+      #
+      # What this step must NOT do is fail the run when the token is
+      # missing. It used to `exit 1` on a `::error::`, and that killed the
+      # Dependabot runs (#1360, #1362, #1363) at ~2 min on a prediction
+      # that was false: Dependabot has its own secret scope which does not
+      # carry GH_DEPLOY_TOKEN, and the fetch the guard predicted would
+      # fail would have succeeded anonymously. Do not restore the exit —
+      # the correct signal for an unreachable dep is `uv sync` failing on
+      # the real fetch, not a guess made before it (DRF-1466).
+      #
+      # K12 (DRF-570) pins `ayla-ai-core` to an exact SHA — `--frozen`
       # makes any drift a hard CI failure (the lockfile must match).
-      - name: Configure git auth for private deps
+      - name: Configure git auth for the ayla-ai-core dep (token optional)
         env:
           GH_DEPLOY_TOKEN: ${{ secrets.GH_DEPLOY_TOKEN }}
         run: |
           if [ -n "$GH_DEPLOY_TOKEN" ]; then
             git config --global url."https://x-access-token:${GH_DEPLOY_TOKEN}@github.com/".insteadOf "https://github.com/"
+            echo "GH_DEPLOY_TOKEN present — ayla-ai-core will be fetched with auth."
           else
-            echo "::error::GH_DEPLOY_TOKEN secret missing — ayla-ai-core fetch will fail. Set the secret in repo settings."
-            exit 1
+            echo "::notice::GH_DEPLOY_TOKEN not set — fetching ayla-ai-core anonymously (the repo is public, DRF-1466). Expected on Dependabot runs."
           fi
 
       - name: uv sync (with ai-core extra)

@@ -28,6 +28,7 @@ Three separate repositories:
 
 - **`platform/` → `config/`.** The original draft named the Django project package `platform/`. That shadows Python's stdlib `platform` module which Django itself imports for system-info detection. Renamed to `config/` (cookiecutter-django convention) in DRF-403. No other behavioural change.
 - **Private-repo deps split into extras.** Both repos are private. `ayla-ai-core` cannot be pulled by GitHub Actions without a `GH_DEPLOY_TOKEN`. Until that secret is configured, the dep moved from core `[project] dependencies` to `[project.optional-dependencies] ai-core`. Local dev opts in via `uv sync --extra dev --extra ai-core`. CI uses `--extra dev` only.
+  - **Superseded 04.09.2026 (DRF-1466).** The premise no longer holds: `ayla-ai-core`, `ai-bot-platform` and `beautygo_backend` are all **public** by the owner's decision of that date (`OPEN_DECISIONS.md` §22, in the workspace root outside this repo), verified by an anonymous API call returning `"private": false` for all three. `ayla-ai-core` fetches without any token; CI, Docker and `docker-compose` use `GH_DEPLOY_TOKEN` only when it is non-empty, and no longer fail when it is absent. The extras split survives on a different, still-valid argument — it is a heavy AI-only dependency that non-AI contributors should not have to install — not on repo visibility. The decision says public *for now*, so the token path is kept working rather than deleted.
 
 ## Alternatives considered
 
