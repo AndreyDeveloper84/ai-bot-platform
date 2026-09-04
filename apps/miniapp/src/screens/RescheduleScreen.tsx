@@ -11,6 +11,17 @@
  *   3. Confirmation modal shows old → new diff.
  *   4. On confirm we POST /reschedule + /reschedule/confirm
  *      sequentially. Spec §5.3 final screen copy: "Перенесена…".
+ *
+ * Куда ведут выходы (DRF-1480) — в каноническое `/customer/*`, а не в
+ * старое поколение. После успешного переноса это новая карточка
+ * `/customer/records/:id` (`CustomerBookingDetailScreen`). Обе карточки
+ * читают один `GET /bookings/<id>`, поэтому id переносится как есть, но
+ * старая `MyVisitDetailScreen` не рисует статус оплаты, сумму и
+ * выставленную оценку и не имеет кнопки «Оценить визит» — человек после
+ * переноса терял возможность оценить визит. «Каталог» из состояния
+ * «сирота» — тоже новый `/customer/catalog`. Образец перевода —
+ * `CustomerBookingSuccessScreen`. Старые маршруты остаются смонтированы
+ * для внешних ссылок; уборка поколений — отдельная задача (DRF-1481).
  */
 
 import { useCallback, useEffect, useMemo, useState } from "react";
@@ -130,7 +141,7 @@ export function RescheduleScreen() {
       const { new_booking } = await rescheduleBookingConfirm(bookingId);
       resetBooking();
       // Spec §5.3 confirmation: "Перенесена — было … стало …".
-      navigate(`/my-visits/${new_booking.id}`, {
+      navigate(`/customer/records/${new_booking.id}`, {
         state: { justRescheduled: true, oldVisit: b.visit_at },
         replace: true,
       });
@@ -183,7 +194,7 @@ export function RescheduleScreen() {
             type="button"
             className="btn-secondary"
             style={{ marginTop: "var(--s-3)" }}
-            onClick={() => navigate("/catalog")}
+            onClick={() => navigate("/customer/catalog")}
           >
             Каталог
           </button>

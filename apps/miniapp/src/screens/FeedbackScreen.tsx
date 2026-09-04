@@ -6,6 +6,13 @@
  * (≤3) swap copy to a calm "we'll reach out" panel — the rating still
  * persists, the backend has already fired the HUMAN_LOCKED handoff
  * (see apps/booking/services/feedback.py).
+ *
+ * Закрытие «К моим записям» ведёт в КАНОНИЧЕСКОЕ `/customer/records`
+ * (`CustomerRecordsScreen`), а не в старое `/my-visits` (DRF-1480).
+ * Прежний переход возвращал человека сразу после оценки в старое
+ * поколение экранов. Образец перевода — `CustomerBookingSuccessScreen`.
+ * Старый маршрут остаётся смонтирован для внешних ссылок; уборка
+ * поколений — отдельная задача (DRF-1481).
  */
 
 import { useCallback, useMemo, useState } from "react";
@@ -66,7 +73,7 @@ export function FeedbackScreen() {
   }
 
   if (phase.kind === "thanks") {
-    return <ThankYou result={phase.result} onClose={() => navigate("/my-visits")} />;
+    return <ThankYou result={phase.result} onClose={() => navigate("/customer/records")} />;
   }
 
   const canSubmit = phase.rating > 0 && !phase.submitting;
