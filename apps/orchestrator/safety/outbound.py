@@ -18,7 +18,12 @@ handful of shapes that are unambiguous in Russian and expensive when wrong:
 * **contact details** — phone numbers and emails, which no answer here has
   a reason to contain (DRF-1039), including a phone's four-digit tail when
   the sentence itself calls it a number (DRF-1209: «номер 4567», «тел.
-  1234» — a partial phone is a phone, OD-W2-2).
+  1234» — a partial phone is a phone, OD-W2-2);
+* **nagging / pressure** (DRF-1468, copy policy R2/R3) — «не забывайте про
+  цель», «давно не работали», «вы пропустили», virtue streaks and counters
+  («дней подряд», «серия»). Written for the proactive path, where an
+  unsolicited reproach is the worst sentence there is; the shapes are
+  banned in any reply.
 
 Anything subtler stays with the prompt. A greedy filter that mangles decent
 replies would get itself turned off within a week, and then there would be
@@ -114,10 +119,28 @@ _PARTIAL_PHONES = (
     rf"(?i)\bпоследние\s+(?:\d|четыре)\s+цифр\w*{_SEP}{_TAIL}",
 )
 
+#: Nagging / pressure shapes (DRF-1468, copy policy R2/R3). A proactive
+#: message must never scold, count absences, or score virtue: «не забывайте
+#: про цель», «давно не работали», «вы пропустили», streaks and counters.
+#: These read as reproach on a bad day, and an unsolicited reproach is the
+#: exact failure the shared anti-nag mechanism exists to prevent.
+#:
+#: «серия» is excluded only before «процедур»: a course of salon procedures
+#: is a legitimate service phrase, every other use here is a virtue counter.
+_NAG = (
+    r"(?i)\bне\s+забыва\w*\s+про\s+цель",
+    r"(?i)\bдавно\s+не\s+(работа\w*|писа\w*|записыва\w*|заходил\w*)",
+    r"(?i)\b(?:вы|ты)\s+пропустил\w*",
+    r"(?i)\bдн(?:ей|я|ень)\s+без\s+(?:срыв\w*|пропуск\w*)",
+    r"(?i)\bдн(?:ей|я|ень)\s+подряд",
+    r"(?i)\bсери[яиюе]\b(?!\s+процедур)",
+)
+
 _CATEGORIES: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("medical", _MEDICAL),
     ("promise", _PROMISES),
     ("contact", _CONTACTS + _PARTIAL_PHONES),
+    ("nag", _NAG),
 )
 
 #: What the person reads instead. Says the shape of the problem without

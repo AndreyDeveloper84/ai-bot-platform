@@ -433,6 +433,22 @@ class TestOutboundSafety:
         assert decision.send is True
         assert "много овощей" in decision.text
 
+    def test_a_nagging_comment_from_ayla_stops_the_send(self, tenant: Tenant) -> None:
+        """DRF-1468 — the pressure category bites on the proactive path too.
+
+        The report passes ``ai_comment`` through verbatim; a streak-counter
+        sentence from upstream is blocked exactly like a medical claim:
+        silence plus a log, never a replacement.
+        """
+        user = make_user(tenant, report="19:00")
+        decisions = tasks.plan_daily_reports(
+            now_utc=at_msk(19),
+            fetch=self._reader_with_comment("Ты держишь серию — 7 дней подряд!"),
+        )
+        decision = only(decisions, user)
+        assert decision.send is False
+        assert decision.reason == "outbound_safety_nag"
+
     def test_our_own_copy_passes_the_gate(self, tenant: Tenant) -> None:
         """Regression guard on the copy this module writes: if a future
         edit puts a blocked shape into the report or the nudge, this fails
