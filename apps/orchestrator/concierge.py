@@ -1405,6 +1405,13 @@ def _repeats_a_refusal(conversation: Any, message_text: str) -> Any:
     """
     if conversation is None:
         return None
+    # The ledger FIRST: `parse_query` reads the catalog for its city and goal
+    # vocabularies, and on a conversation that has been refused nothing there
+    # is nothing to compare against. Almost every turn takes this exit, so the
+    # two reads are paid only where they can change an answer.
+    entries = recall_refusals(conversation)
+    if not entries:
+        return None
     try:
         parsed = parse_query(message_text or "")
     except Exception:  # noqa: BLE001 — a hint may never cost the turn
@@ -1414,7 +1421,7 @@ def _repeats_a_refusal(conversation: Any, message_text: str) -> Any:
     if not turn_stems:
         return None
     named_city = parsed.cities[0] if parsed.cities else ""
-    for entry in reversed(recall_refusals(conversation)):
+    for entry in reversed(entries):
         try:
             refused_stems = set(parse_query(entry.specialization).stems)
         except Exception:  # noqa: BLE001
@@ -1558,7 +1565,43 @@ def _concierge_turn(
     failure degrades to the same safe fallback line as the legacy
     discovery path — the concierge must never 500.
     """
+    # DRF-1474 — the person typed the refused service again. There is nothing
+    # for a model to decide here: the catalog has already answered, and the
+    # only thing another model call can add is the chance of answering it with
+    # «помогу найти!». Said once more, plainly, with the alternative named.
+    #
+    # Ahead of the LLM client setup below because this branch never touches it.
+    repeated = _repeats_a_refusal(conversation, message_text)
+    if repeated is not None:
+        started = time.monotonic()
+        logger.info(
+            "orchestrator.concierge.refusal_repeat spec=%r city=%r trace=%s",
+            repeated.specialization[:_MAX_LOGGED_ARG_CHARS],
+            repeated.city[:_MAX_LOGGED_ARG_CHARS],
+            trace_id,
+        )
+        rendered = _render_zero_result(
+            city=repeated.city or None,
+            specialization=repeated.specialization,
+            already_refused=True,
+        )
+        # A model-less turn still belongs in the funnel it answers — same
+        # argument as :func:`_record_direct_metric`, and its LLM columns stay
+        # NULL for the same reason: there was no pass to number.
+        _record_concierge_metric(
+            bot_user=bot_user,
+            conversation=conversation,
+            trace_id=trace_id,
+            message_text=message_text,
+            pass_index=None,
+            outcome=AIRequestMetric.OUTCOME_SUCCESS,
+            latency_total_ms=int((time.monotonic() - started) * 1000),
+            skill_selected="concierge_refusal_repeat",
+        )
+        return DiscoveryReply(text=rendered.text, persisted=True)
+
     llm_client = RouterLLMClient(skill=CONCIERGE_SKILL)
+
     concierge = AIConcierge(
         openai_client=llm_client,
         store=store,
@@ -1585,25 +1628,6 @@ def _concierge_turn(
             nutrition_block=nutrition_block,
             extra_system=turn_extra_system,
         )
-
-    # DRF-1474 — the person typed the refused service again. There is nothing
-    # for a model to decide here: the catalog has already answered, and the
-    # only thing a model call can add is the chance of answering it with
-    # «помогу найти!». Said once more, plainly, with the alternative named.
-    repeated = _repeats_a_refusal(conversation, message_text)
-    if repeated is not None:
-        logger.info(
-            "orchestrator.concierge.refusal_repeat spec=%r city=%r trace=%s",
-            repeated.specialization[:_MAX_LOGGED_ARG_CHARS],
-            repeated.city[:_MAX_LOGGED_ARG_CHARS],
-            trace_id,
-        )
-        rendered = _render_zero_result(
-            city=repeated.city or None,
-            specialization=repeated.specialization,
-            already_refused=True,
-        )
-        return DiscoveryReply(text=rendered.text, persisted=True)
 
     max_passes = _max_llm_passes()
     pass_index = 0
