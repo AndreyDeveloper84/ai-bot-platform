@@ -99,6 +99,12 @@ ON_COLOUR = (
     ("text-on-accent", "success"),
     ("text-on-accent", "warning"),
     ("text-on-accent", "danger"),
+    # The snackbar is an inverted surface: `Snackbar.tsx` paints its
+    # background with `--c-text-primary`, its message with `--c-bg` and its
+    # action with `--c-accent-subtle`. Inverted or not, the text on it still
+    # has to be readable, and in both themes.
+    ("bg", "text-primary"),
+    ("accent-subtle", "text-primary"),
 )
 # Roles painted as text on a wash made of themselves. Not invented: these
 # are every rule in `globals.css` where `background: color-mix(... var
