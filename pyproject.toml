@@ -169,6 +169,7 @@ dev = [
     "django-stubs[compatible-mypy]",
     "types-requests",
     "pytest-httpx",
+    "pytest-xdist>=3.8",
     "pre-commit>=4.0",
     "detect-secrets>=1.5",
     "freezegun>=1.5",
