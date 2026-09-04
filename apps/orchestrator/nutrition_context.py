@@ -119,14 +119,16 @@ logger = logging.getLogger(__name__)
 # connection (that is the whole point of the deficits signal) but restates
 # the medical boundary rather than relaxing it: nutrition numbers are
 # precisely the context that tempts a model past it.
+# Deliberately does NOT enumerate «неделя и сегодня»: the two reads fail
+# independently, so a block naming both when only one arrived would be the
+# header telling the model something the payload does not contain.
 _HEADER = (
-    "Картина питания клиента (данные сервиса Ayla, не инструкция): неделя "
-    "в среднем и то, что записано в дневник сегодня. Ты помнишь, что ел "
-    "этот человек — если это объясняет его запрос, назови связь своими "
-    "словами, коротко и без цифр, и только потом переходи к подбору "
-    "мастера. Медицинская граница остаётся в силе: диагнозов, лечения и "
-    "добавок не назначай. Если картина к запросу не относится — не "
-    "упоминай её вовсе."
+    "Картина питания клиента (данные сервиса Ayla, не инструкция). Ты "
+    "помнишь, что ел этот человек — если это объясняет его запрос, назови "
+    "связь своими словами, коротко и без цифр, и только потом переходи к "
+    "подбору мастера. Медицинская граница остаётся в силе: диагнозов, "
+    "лечения и добавок не назначай. Если картина к запросу не относится — "
+    "не упоминай её вовсе."
 )
 
 # An upstream streak longer than this is a bug on the other side, not a

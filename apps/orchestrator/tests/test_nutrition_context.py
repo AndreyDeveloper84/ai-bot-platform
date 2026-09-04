@@ -56,9 +56,21 @@ def open_consent(monkeypatch):
 
 @pytest.fixture
 def ayla(monkeypatch):
-    """Stub the Ayla fetch; returns the Mock so tests assert call/no-call."""
+    """Stub EVERY Ayla door; returns the weekly Mock for call/no-call asserts.
+
+    Two doors since DRF-1467: the weekly aggregate through
+    ``_fetch_deficits``, and today's rows through
+    ``food_history.read_today``. Stubbing only the first would leave a unit
+    test able to open a real socket the moment an environment happens to
+    carry ``AYLA_BASE_URL`` + ``NUTRITION_SERVICE_TOKEN`` — and
+    ``ayla.assert_not_called()`` would still be telling the truth about the
+    door it watches.
+    """
+    from apps.orchestrator import food_history
+
     fetch = Mock(return_value=_deficits())
     monkeypatch.setattr(nutrition_context, "_fetch_deficits", fetch)
+    monkeypatch.setattr(food_history, "read_today", Mock(return_value=food_history.UNKNOWN))
     return fetch
 
 

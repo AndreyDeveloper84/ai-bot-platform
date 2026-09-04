@@ -209,12 +209,7 @@ class FoodScannerSkill:
 
         external_id = external_user_id_for(context.bot_user)
         try:
-            scan = asyncio.run(
-                get_nutrition_client().scan_photo(
-                    external_user_id=external_id,
-                    image_bytes=photo_bytes,
-                )
-            )
+            scan, diary = _scan_and_read_diary(context, external_id, photo_bytes)
         except FoodNotRecognizedError:
             return SkillResult(
                 reply_text=NOT_RECOGNIZED_FALLBACK,
@@ -240,11 +235,6 @@ class FoodScannerSkill:
         dish = scan.dish_name or ""
         recall = food_memory.recall_corrections(context.bot_user, dish=dish)
         food_memory.note_meal(context.bot_user, dish=dish)
-        # DRF-1467 — and what does Ayla already hold for today? Read, never
-        # copied: ``read_today`` gates on PERSONAL_DATA + HEALTH itself and
-        # returns a status rather than raising, so a closed gate or a downed
-        # Ayla costs this one line and nothing else.
-        diary = food_history.read_today(context.bot_user)
         _stash_last_card(context, scan)
 
         reply = _format_scan_card(scan, recall, diary)
@@ -357,6 +347,59 @@ def _extract_photo_bytes(context: SkillContext) -> bytes | None:
     emits ``PHOTO_NO_BYTES``.
     """
     return getattr(context.conversation, "last_photo_bytes", None)
+
+
+def _scan_and_read_diary(context: SkillContext, external_id: str, photo_bytes):
+    """Recognise the photo and read today's diary — in one round trip.
+
+    Two independent GETs to the same service, so they go together rather
+    than one after the other (DRF-1467). Sequential would have added a
+    second full ``DEFAULT_TIMEOUT_S`` to the most visible reply the bot
+    sends: recognition already costs seconds, and «Ayla alive but slow» —
+    the state the circuit breaker deliberately does NOT trip on, since it
+    counts failures rather than latency — would have doubled the wait for a
+    single optional line. Concurrently the line is free.
+
+    The diary half is skipped outright when the consent gate is shut, so an
+    unconsented person pays nothing and Ayla is not asked. That check is
+    :func:`apps.orchestrator.food_history.read_consent_open` — the same one
+    ``read_today`` runs; it is lifted out only because the fetch it guards
+    has to be scheduled next to the scan rather than after it.
+
+    Returns ``(scan, diary)``. The scan's exceptions are re-raised for the
+    caller's existing ladder to answer; the diary's are swallowed into
+    :data:`apps.orchestrator.food_history.UNKNOWN`, because a diary we could
+    not read costs one line and a scan we could not run costs the turn.
+    """
+    client = get_nutrition_client()
+    want_history = food_history.read_consent_open(context.bot_user)
+
+    async def _gather():
+        calls = [client.scan_photo(external_user_id=external_id, image_bytes=photo_bytes)]
+        if want_history:
+            calls.append(client.daily_summary(external_user_id=external_id))
+        return await asyncio.gather(*calls, return_exceptions=True)
+
+    results = asyncio.run(_gather())
+
+    scan = results[0]
+    if isinstance(scan, BaseException):
+        raise scan
+
+    diary = food_history.UNKNOWN
+    if len(results) > 1:
+        summary = results[1]
+        if isinstance(summary, BaseException):
+            logger.info(
+                "food_scanner.diary_unavailable user=%s err=%s",
+                external_id,
+                type(summary).__name__,
+            )
+        else:
+            diary = food_history.TodayDiary(
+                food_history.Status.OK, food_history.meals_from_summary(summary)
+            )
+    return scan, diary
 
 
 def _check_gates(

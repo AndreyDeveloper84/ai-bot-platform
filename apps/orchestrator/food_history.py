@@ -72,21 +72,41 @@ never bypassed: a call made while the breaker is open raises
 ``NutritionUnavailableError("circuit_open")`` and lands on
 :attr:`Status.UNAVAILABLE` like any other outage.
 
-### Consent — HEALTH is the gate, checked before anything else
+### Consent — two entry points, and only one of them owns a gate
 
-Same two keys as :mod:`apps.orchestrator.nutrition_context`, and for the
-same reason: nutrition is special-category data under 152-ФЗ ст. 10.
-``PERSONAL_DATA`` is the baseline (ADR-0011 §11); ``HEALTH`` is the
-special-category basis, with a capture flow since DRF-1453. Both are read
-through ``has_global_consent`` because the concierge runs tenant-less.
+:func:`read_today` FETCHES, so it gates: ``PERSONAL_DATA`` **and**
+``HEALTH``, both before a single byte leaves Ayla, so a closed gate costs
+no HTTP call at all. Same two keys as
+:mod:`apps.orchestrator.nutrition_context` and for the same reason —
+nutrition is special-category data under 152-ФЗ ст. 10. ``PERSONAL_DATA``
+is the baseline (ADR-0011 §11); ``HEALTH`` is the special-category basis,
+with a capture flow since DRF-1453. Both are read through
+``has_global_consent`` because the concierge runs tenant-less.
 Fail-closed: a consent read that raises reads as «no consent».
 
-:func:`apps.orchestrator.personal_surface.render_diary` deliberately gates
-on ``PERSONAL_DATA`` alone and is left alone — showing subjects their own
-record on their own request is a subject right (ADR-0011 §8), argued at
-length in that module. This module feeds surfaces that are NOT that: a
-recognition card and an LLM prompt. The stricter gate belongs to the
-stricter use, and the shipped surface is not regressed to match.
+:func:`meals_from_summary` does **not** gate, and must not pretend to: it
+fetches nothing. It is a parser over a ``SummaryResponse`` its caller
+already holds, and the basis for holding that response is the caller's to
+have established. Stating it plainly here rather than leaving the reader
+to infer a gate that is not there — an inferred gate is how an ungated
+call site gets written.
+
+Its one caller today is
+:func:`apps.orchestrator.personal_surface.render_diary`, which gates on
+``PERSONAL_DATA`` alone, deliberately and at length (ADR-0011 §8: showing
+subjects their own record on their own request is a subject right). That
+choice is not re-litigated here, and dish names do not raise the stakes it
+was made under: the totals it already prints — calories, protein, fat,
+carbs — come from the *same* ``GET /summary/`` response under the *same*
+basis. Gating the names while the numbers flow would be an inconsistency
+dressed as a protection.
+
+The two surfaces this module fetches FOR are not that: a recognition card
+and an LLM prompt are not the subject reading his own record back, so they
+take the stricter gate. **Open question for the owner** — whether the
+person's own diary answer should also require ``HEALTH``. Today it does
+not, and moving it there would put the surface to sleep for anyone who has
+not granted it.
 
 ### Never raises
 
@@ -185,8 +205,10 @@ class TodayDiary:
         return tuple(meal.dish for meal in self.meals)
 
 
-#: Returned wherever the answer is «we did not ask». Shared instance so a
-#: caller may compare cheaply; frozen, so sharing is safe.
+#: Returned wherever the answer is «Ayla did not tell us» — an outage, an
+#: open breaker, a 4xx, a payload we could not read. Shared instance because
+#: it carries no per-call state; frozen, so sharing is safe. «We did not ask»
+#: is a different answer and builds its own :attr:`Status.NO_CONSENT` value.
 UNKNOWN = TodayDiary(Status.UNAVAILABLE)
 
 
@@ -221,6 +243,11 @@ def meals_from_summary(summary: Any) -> tuple[Meal, ...]:
     Every field is coerced here rather than trusted. ``entries`` is the one
     part of the summary the client hands over raw (``list(body.get("entries")
     or [])``), so this is the first place its contents are looked at at all.
+
+    **No consent gate, by design.** Nothing is fetched here, so there is
+    nothing to gate: the basis for holding this response belongs to whoever
+    obtained it. :func:`read_today` is the gated entry point. See the module
+    docstring, «Consent — two entry points».
     """
     rows = getattr(summary, "entries", None)
     if not isinstance(rows, list):
@@ -301,17 +328,29 @@ def _fetch_summary(bot_user: Any, *, date: str | None) -> Any | None:
 
 
 def _clean_dish(raw: Any) -> str:
-    """Whitespace-collapsed, length-capped, control chars gone.
+    """Whitespace-collapsed, length-capped, control chars and angles gone.
 
-    Dish names are recogniser output, i.e. free-form text of unknown
-    provenance heading for both a chat reply and an LLM prompt. The prompt
-    side crosses ``build_safe_inputs`` as well (delimiters + brace escape);
-    this is the part that has to hold on the chat side too.
+    Dish names are recogniser output — free-form text of unknown provenance
+    heading for a chat reply AND for the concierge's system prompt. The
+    prompt side also crosses ``build_safe_inputs`` (brace escape, control
+    strip, ``<<<UNTRUSTED_CONTEXT>>>`` fencing), but that fence does not
+    neutralise a copy of *itself* arriving inside the payload, and 23
+    characters fit inside a 64-character dish name several times over. A
+    photograph of a label or a napkin is a real way for chosen text to reach
+    the recogniser, so the angles are folded to their typographic lookalikes
+    here — a cost of exactly nothing on «Борщ» and «Кофе с молоком».
+
+    A control character becomes a SPACE rather than nothing, which is where
+    this differs from :func:`apps.orchestrator.ayla_adapter.sanitize_freeform`
+    — that one guards a prompt payload, where welding two words together is
+    harmless; this one produces a name a person reads, and «борщ<NUL>суп»
+    deleted down to «борщсуп» is a dish nobody ever ate. The substitution
+    runs before the split, so the collapse below tidies up after it.
     """
     if not isinstance(raw, str):
         return ""
-    name = " ".join(ch for ch in raw.split() if ch)
-    name = "".join(ch for ch in name if ch.isprintable())
+    name = "".join(ch if (ch.isprintable() or ch.isspace()) else " " for ch in raw)
+    name = name.replace("<", "‹").replace(">", "›")
     name = " ".join(name.split()).strip()
     if not name or name.isdigit():
         return ""

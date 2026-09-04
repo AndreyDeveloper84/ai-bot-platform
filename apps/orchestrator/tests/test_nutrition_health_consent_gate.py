@@ -60,9 +60,17 @@ def _flag_on(settings):
 
 @pytest.fixture
 def ayla(monkeypatch) -> Mock:
-    """Единственный мок в файле — сеть до Ayla. Согласия настоящие."""
+    """Единственный мок в файле — сеть до Ayla. Согласия настоящие.
+
+    Дверей две (DRF-1467): недельный агрегат и сегодняшние строки дневника.
+    Закрыты обе, иначе ``assert_not_called`` говорил бы правду про одну и
+    молчал про вторую.
+    """
+    from apps.orchestrator import food_history
+
     fetch = Mock(return_value=_deficits())
     monkeypatch.setattr(nutrition_context, "_fetch_deficits", fetch)
+    monkeypatch.setattr(food_history, "read_today", Mock(return_value=food_history.UNKNOWN))
     return fetch
 
 
