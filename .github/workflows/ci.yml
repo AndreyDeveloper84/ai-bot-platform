@@ -310,7 +310,8 @@ jobs:
         run: uv python install 3.12
 
       # ayla-ai-core lives in a separate repo that is PUBLIC — owner's
-      # decision of 04.09.2026, recorded in docs/OPEN_DECISIONS.md §22 and
+      # decision of 04.09.2026, recorded in OPEN_DECISIONS.md §22 (that
+# register lives in the workspace root, outside this repo) and
       # re-checked anonymously the same day (`"private": false`). An
       # unauthenticated `git fetch` of the pinned SHA succeeds; measured
       # 04.09.2026 against an empty git config, and visible independently

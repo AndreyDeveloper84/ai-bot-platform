@@ -83,7 +83,8 @@ dependencies = [
 [project.optional-dependencies]
 
 # ayla-ai-core is a separate PUBLIC repo (owner's decision 04.09.2026,
-# docs/OPEN_DECISIONS.md §22), so pulling it needs no GitHub auth —
+# recorded in OPEN_DECISIONS.md §22 in the workspace root, outside this
+# repo), so pulling it needs no GitHub auth —
 # the pinned SHA fetches anonymously. GH_DEPLOY_TOKEN is still honoured
 # where it exists (CI/Docker rewrite the URL with it when non-empty) so
 # the machinery survives the visibility being closed again; it is not

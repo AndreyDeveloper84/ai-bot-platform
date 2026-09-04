@@ -1,7 +1,8 @@
 """Страж: ``GH_DEPLOY_TOKEN`` необязателен для получения ``ayla-ai-core``.
 
 Репозиторий ``AndreyDeveloper84/ayla-ai-core`` публичный — решение владельца
-от 04.09.2026, запись в ``docs/OPEN_DECISIONS.md`` §22, проверено анонимным
+от 04.09.2026, запись в ``OPEN_DECISIONS.md`` §22 (реестр решений владельца
+лежит в корне рабочей области, вне этого репозитория); проверено анонимным
 запросом (``"private": false``). Закреплённый SHA выкачивается вообще без
 учётных данных.
 
@@ -47,6 +48,9 @@ FAKE_VALUE = "gh" + "p_" + ("0" * 36)
 # `uv sync --frozen`, который трогает ВЕСЬ lock-файл, включая git+ deps,
 # даже когда apps/replay/ ничего оттуда не импортирует.
 WORKFLOW_FILES = ["ci.yml", "replay.yml"]
+
+# Заранее кладётся в подставной ~/.gitconfig; зачем — см. `_run_step`.
+GITCONFIG_MARKER = "[user]\n\tname = drf1466-marker\n"
 
 
 def _auth_step(workflow_name: str) -> dict:
@@ -119,7 +123,12 @@ def _run_step(script: str, token: str, tmp_path: Path) -> subprocess.CompletedPr
     bash = _usable_bash()
     assert bash is not None, "нет пригодного bash — тест должен был быть пропущен"
     gitconfig = tmp_path / "gitconfig"
-    gitconfig.write_text("", encoding="utf-8")
+    # Маркер кладётся ДО прогона намеренно. Без него «переписывания URL в
+    # конфиге нет» выглядит одинаково и когда шаг действительно ничего не
+    # записал, и когда читается не тот файл (GIT_CONFIG_GLOBAL не долетел) —
+    # а тогда `git config --global` ушёл бы в НАСТОЯЩИЙ ~/.gitconfig
+    # разработчика, и тест этого не заметил бы.
+    gitconfig.write_text(GITCONFIG_MARKER, encoding="utf-8")
     env = {
         **os.environ,
         "GH_DEPLOY_TOKEN": token,
@@ -146,6 +155,13 @@ def test_step_never_fails_the_run_on_a_missing_token(workflow_name: str) -> None
     ветку, куда не заходит локальный прогон, иначе слишком легко.
     """
     script = _auth_step(workflow_name)["run"]
+    # Присутствие — впереди отсутствия. Пустой или не тот текст дал бы
+    # «нет exit 1» даром; эта строка падает первой и по имени.
+    assert '-n "$GH_DEPLOY_TOKEN"' in script, (
+        f"{workflow_name}: переписывание URL должно происходить только при "
+        "непустом значении — иначе в конфиг уходит https://@github.com/, "
+        "собранный из значения, которое шаг ни разу не посмотрел."
+    )
     assert "exit 1" not in script, (
         f"{workflow_name}: шаг снова останавливает прогон при отсутствии токена. "
         "ayla-ai-core — публичный репозиторий, выкачка пройдёт анонимно; "
@@ -155,11 +171,6 @@ def test_step_never_fails_the_run_on_a_missing_token(workflow_name: str) -> None
     assert "::error::" not in script, (
         f"{workflow_name}: отсутствие необязательного токена помечено как ошибка. "
         "Предупреждение — да, ошибка — нет (DRF-1466)."
-    )
-    assert '-n "$GH_DEPLOY_TOKEN"' in script, (
-        f"{workflow_name}: переписывание URL должно происходить только при "
-        "непустом значении — иначе в конфиг уходит https://@github.com/, "
-        "собранный из значения, которое шаг ни разу не посмотрел."
     )
 
 
@@ -177,6 +188,11 @@ def test_step_succeeds_without_a_token_and_writes_no_rewrite(
         f"stdout: {result.stdout}\nstderr: {result.stderr}"
     )
     written = (tmp_path / "gitconfig").read_text(encoding="utf-8")
+    assert GITCONFIG_MARKER.strip() in written.strip(), (
+        f"{workflow_name}: прочитан не тот ~/.gitconfig, что видел шаг — маркер "
+        f"не вернулся. Прочитано: {written!r}. Пока это не сойдётся, "
+        "утверждение ниже ничего не проверяет."
+    )
     assert "insteadOf" not in written, (
         f"{workflow_name}: переписывание URL записано при пустом токене — "
         f"в конфиг ушло: {written!r}"
