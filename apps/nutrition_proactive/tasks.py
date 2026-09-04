@@ -70,7 +70,11 @@ from django.conf import settings
 from django.utils import timezone as dj_timezone
 
 from apps.audit.services import write_audit
-from apps.channels.max.outbound import MaxAPIError, send_message
+from apps.channels.max.outbound import (
+    MaxAPIError,
+    make_inline_keyboard_attachment,
+    send_message,
+)
 from apps.integrations.ayla import (
     NutritionAPIError,
     NutritionUnavailableError,
@@ -80,7 +84,7 @@ from apps.integrations.ayla import (
     external_user_id_for,
     get_nutrition_client,
 )
-from apps.nutrition_proactive import prefs, render, selection
+from apps.nutrition_proactive import antinag, optout, prefs, render, selection
 
 logger = logging.getLogger(__name__)
 
@@ -223,6 +227,31 @@ def plan_daily_reports(
             decisions.append(decide("already_sent_today"))
             continue
 
+        # The ignore streak is asked before the weekly ceiling: the pause
+        # is a state change (the pref flips off), the ceiling is not, and a
+        # paused person must not also burn a fetch on the way out. The
+        # pause is SILENT -- pref off, no message (policy R2/R6: never
+        # «ты не ответила»).
+        streak = antinag.surface_ignored_streak(bot_user, user_prefs, surface="report")
+        if streak >= prefs.SURFACE_IGNORE_LIMIT:
+            decisions.append(
+                decide(
+                    "surface_auto_paused",
+                    detail={"ignored_streak": streak},
+                    pref_updates={"daily_report_time": prefs.REPORT_OFF},
+                )
+            )
+            continue
+
+        # The weekly ceiling sits after the per-day key: «already sent
+        # today» and «the week is spent» are different operator facts and
+        # keep different slugs. Checked before the Ayla fetch -- a capped
+        # person costs no downstream call.
+        capped = prefs.weekly_cap_reason(user_prefs, surface="report", now_utc=now_utc)
+        if capped:
+            decisions.append(decide(capped))
+            continue
+
         try:
             summary, water, profile = fetch(ext)
         except (NutritionUnavailableError, NutritionAPIError) as exc:
@@ -329,6 +358,11 @@ def plan_water_reminders(
             continue
         if counters["sent"] >= prefs.MAX_WATER_REMINDERS_PER_DAY:
             decisions.append(decide("daily_quota"))
+            continue
+
+        capped = prefs.weekly_cap_reason(user_prefs, surface="water", now_utc=now_utc)
+        if capped:
+            decisions.append(decide(capped))
             continue
 
         try:
@@ -438,7 +472,7 @@ def _run_task(kind: str, planner: Callable[..., list[Decision]]) -> dict[str, in
             logger.info("nutrition_proactive.%s.dry_run would_send=%s", kind, decision.as_log())
             continue
         try:
-            _deliver(decision)
+            _deliver(decision, surface=kind)
         except Exception as exc:  # noqa: BLE001 -- one bad row must not stop the batch
             logger.exception(
                 "nutrition_proactive.%s.send_failed bot_user=%s err=%s",
@@ -448,7 +482,7 @@ def _run_task(kind: str, planner: Callable[..., list[Decision]]) -> dict[str, in
             )
             failed += 1
             continue
-        _persist(decision)
+        _persist(decision, sent_surface=kind)
         _audit(kind, decision)
         sent += 1
 
@@ -473,7 +507,7 @@ def _run_task(kind: str, planner: Callable[..., list[Decision]]) -> dict[str, in
     }
 
 
-def _deliver(decision: Decision) -> None:
+def _deliver(decision: Decision, *, surface: str) -> None:
     from apps.identity.models import BotUser
 
     chat_id = (
@@ -484,16 +518,43 @@ def _deliver(decision: Decision) -> None:
     ).strip()
     if not chat_id:
         raise MaxAPIError(0, "chat_id vanished between planning and delivery")
-    send_message(chat_id=chat_id, text=decision.text, attachments=None)
+    send_message(chat_id=chat_id, text=decision.text, attachments=_stop_keyboard(surface))
 
 
-def _persist(decision: Decision) -> None:
+def _stop_keyboard(surface: str) -> list[dict[str, Any]]:
+    """The one-tap unsubscribe every proactive outbound carries (DRF-1468, R6).
+
+    One button, one deterministic callback (``cb:nutri:stop:{surface}``);
+    the tap is handled by :func:`apps.nutrition_proactive.optout.
+    try_handle_surface_stop` on the global surface and by the registry
+    skill on the per-tenant one.
+    """
+    return [
+        make_inline_keyboard_attachment(
+            [{"label": optout.STOP_BUTTON_LABEL, "callback": optout.stop_callback(surface)}],
+            columns=1,
+        )
+    ]
+
+
+def _persist(decision: Decision, *, sent_surface: str | None = None) -> None:
     from apps.identity.models import BotUser
 
     bot_user = BotUser.all_tenants.filter(pk=decision.bot_user_id).first()
     if bot_user is None:
         return
-    context = prefs.merge_prefs(bot_user, decision.pref_updates)
+    updates = dict(decision.pref_updates)
+    if sent_surface is not None:
+        # Journal the send (DRF-1468): the weekly ceiling and the ignore
+        # streak both read this list, so it is written here -- the one path
+        # every surface's successful send already takes.
+        journaled = prefs.append_outbox(
+            prefs.get_prefs(bot_user),
+            surface=sent_surface,
+            sent_at=dj_timezone.now(),
+        )
+        updates[prefs.OUTBOX_KEY] = journaled[prefs.OUTBOX_KEY]
+    context = prefs.merge_prefs(bot_user, updates)
     BotUser.all_tenants.filter(pk=decision.bot_user_id).update(context=context)
 
 

@@ -183,3 +183,63 @@ class TestBehaviour:
 
         assert verdict.allowed
         assert verdict.text == "Завтра три записи."
+
+
+class TestNagging:
+    """DRF-1468 — the pressure category (policy R2/R3).
+
+    The copy policy bans these shapes outright: counting absences,
+    «не забывайте про цель», virtue streaks. A proactive message that
+    scolds is worse than silence, so these are blocked like any medical
+    claim. The passes matter as much: «серия процедур» is a salon
+    service phrase and must survive.
+    """
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "Не забывайте про цель!",
+            "Не забывай про цель, у тебя получается.",
+            "Вы давно не работали над своей целью.",
+            "Ты давно не писала про еду.",
+            "Вы пропустили вчерашнюю запись дневника.",
+            "Ты пропустила два дня.",
+            "7 дней без срыва — так держать!",
+            "Три дня подряд ты записывала ужины.",
+            "Ты держишь серию! Не останавливайся.",
+            "Твоя серия растёт.",
+        ],
+    )
+    def test_pressure_is_stopped(self, text):
+        verdict = evaluate_outbound(text)
+
+        assert verdict.blocked
+        assert verdict.text == REPLACEMENT_TEXT
+        assert "nag" in verdict.categories
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "Серия процедур даёт более стойкий результат.",
+            "Курс из серии процедур можно начать в любой день.",
+            "На этой неделе ты записывала еду четыре раза.",
+            "Если захочешь продолжить — я на месте.",
+            "Хорошо, итоги дня больше не присылаю. Вернуть можно в профиле в мини-приложении.",
+            "Хорошо, напоминания о воде больше не присылаю. Вернуть можно в профиле в мини-приложении.",
+            "Эта кнопка уже не действует, настройки не меняла.",
+        ],
+    )
+    def test_supportive_copy_passes(self, text):
+        """The anti-nag mechanism's own replies must clear its own guard."""
+
+        verdict = evaluate_outbound(text)
+
+        assert verdict.allowed
+        assert verdict.text == text
+
+    def test_the_existing_categories_are_unchanged(self):
+        """Adding the category must not move the old boundaries."""
+
+        assert "medical" in evaluate_outbound("У вас аллергия на этот состав.").categories
+        assert "promise" in evaluate_outbound("Гарантирую результат.").categories
+        assert evaluate_outbound("Завтра три записи: 10:00, 13:00 и 16:30.").allowed

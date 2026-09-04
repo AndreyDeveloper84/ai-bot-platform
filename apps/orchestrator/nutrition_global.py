@@ -459,6 +459,40 @@ def resolve_food_tap(text: str) -> AnketaTap | None:
     return AnketaTap(history_text=food_tap_labels(scan_id).get(stripped))
 
 
+# ---------------------------------------------------------------------------
+# DRF-1468 — тап «Не присылать» (``cb:nutri:stop:*``) глазами ИСТОРИИ
+# ---------------------------------------------------------------------------
+#
+# Кнопка отписки на каждом proactive-исходящем. Это высказывание кнопкой,
+# но фразы за ней нет: метка одна на все поверхности («Не присылать»), а
+# смысл тапа целиком в payload'е. Подставлять метку в историю значило бы
+# записать за человека слова, которых он не говорил (тап ≠ «написал
+# „Не присылать"»), а сырой ``cb:`` в истории — ровно дефект DRF-988.
+# Поэтому в историю не идёт НИЧЕГО: ход остаётся виден по ответу-
+# подтверждению бота, как у навигационных тапов анкеты и ``cb:catalog:*``.
+#
+# Форма строгая, по тому же правилу C01: «cb:nutri:stop:вода», набранное
+# руками, тапом не является и истории не касается.
+
+#: Строгая форма payload'а кнопки отписки: латиница/подчёркивания, без
+#: пробелов. Покрывает и поверхности из будущего — неизвестная поверхность
+#: это вопрос ОТВЕТА (stale-подтверждение), а не персистенса.
+_NUTRI_STOP_CALLBACK_RE = re.compile(r"^cb:nutri:stop:[a-z_]+$")
+
+
+def resolve_nutri_stop_tap(text: str) -> AnketaTap | None:
+    """Разобрать тап «Не присылать»; ``None`` — «это не тап отписки».
+
+    Возвращает тот же :class:`AnketaTap`: вопрос один — «чем этот тап был
+    как реплика», — и ответ здесь всегда «ничем»: ``history_text=None``.
+    """
+
+    stripped = (text or "").strip()
+    if not _NUTRI_STOP_CALLBACK_RE.match(stripped):
+        return None
+    return AnketaTap(history_text=None)
+
+
 def _anketa_fsm_active(conversation: Any) -> bool:
     state = getattr(conversation, "skill_state", None)
     return bool(isinstance(state, dict) and state.get("nutrition_anketa"))
