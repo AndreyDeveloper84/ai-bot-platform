@@ -14,6 +14,18 @@
  *   - `MasterSettingsScreen`            (/master/settings, /solo/settings)
  *   - `CustomerProfileScreen`           (/customer/profile)
  *
+ * DRF-1469 — и с КОРНЯ клиентской поверхности, через компактный
+ * `SurfaceSwitchExit` в закреплённой нижней панели. Пока выход жил
+ * только на трёх экранах настроек, до него надо было ещё дойти: у
+ * клиента нет нижней навигации, и человек, встреченный на корне
+ * анкетой, до профиля не добирался. Из-за этого многоролевым анкету
+ * просто не показывали (`goalEntry={false}` в `App.tsx`) — то есть
+ * владелец и вся команда не видели новую поверхность вовсе.
+ *
+ * Приём тот же, что вылечил DRF-1349 и DRF-1434: то, без чего человек
+ * застревает, объявляется НЕ на одном удобном экране, а там, куда он
+ * реально попадает.
+ *
  * It renders NOTHING for a single-role caller — a plain customer has no
  * other surface to switch to, and an unexplained «Сменить режим» button
  * would only raise questions. Visibility is driven by `canSwitch` from
@@ -52,6 +64,8 @@ export function useSurfaceMode(): SurfaceModeContextValue {
  * copy and the affordance stay identical whichever surface the user is
  * currently in.
  */
+export const SURFACE_SWITCH_LABEL = "Сменить режим";
+
 export function SurfaceSwitchButton() {
   const { canSwitch, requestChooser } = useSurfaceMode();
   if (!canSwitch) return null;
@@ -63,7 +77,7 @@ export function SurfaceSwitchButton() {
         style={{ width: "100%", justifyContent: "center" }}
         onClick={requestChooser}
       >
-        Сменить режим
+        {SURFACE_SWITCH_LABEL}
       </button>
       <p
         style={{
@@ -75,5 +89,27 @@ export function SurfaceSwitchButton() {
         Например, посмотреть приложение глазами клиента.
       </p>
     </div>
+  );
+}
+
+/**
+ * Тот же выход, компактный — для закреплённой нижней панели (DRF-1469).
+ *
+ * Отдельный вид, а не отдельное действие: подпись и `requestChooser` те
+ * же, что у кнопки на экранах настроек. В панели выход стоит рядом с
+ * главным действием экрана и потому нарочно тише его: уйти с
+ * поверхности — не то, зачем сюда пришли, но и не то, что должно
+ * требовать прокрутки.
+ *
+ * Как и `SurfaceSwitchButton`, ничего не рисует одноролевому: анкета
+ * обычного клиента этой правкой не меняется вовсе.
+ */
+export function SurfaceSwitchExit() {
+  const { canSwitch, requestChooser } = useSurfaceMode();
+  if (!canSwitch) return null;
+  return (
+    <button type="button" className="cta-bar__exit" onClick={requestChooser}>
+      {SURFACE_SWITCH_LABEL}
+    </button>
   );
 }

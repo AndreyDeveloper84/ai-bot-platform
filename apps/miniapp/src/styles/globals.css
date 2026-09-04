@@ -50,6 +50,15 @@ a {
     calc(var(--cta-clearance) + var(--safe-bottom));
 }
 
+/* Панель в два ряда — под ней надо освободить на ряд больше
+   (DRF-1469). Флаг ставит экран, положивший в панель второе действие;
+   у всех остальных отступ прежний. */
+.screen--tall-cta {
+  padding-bottom: calc(
+    var(--cta-clearance) + var(--cta-exit-height) + var(--safe-bottom)
+  );
+}
+
 .screen__title {
   font-size: var(--font-size-500);
   line-height: var(--leading-tight);
@@ -96,6 +105,24 @@ a {
   background: var(--c-surface-2);
   color: var(--c-text-secondary);
   cursor: not-allowed;
+}
+
+/* Выход с поверхности в той же панели (DRF-1469) — «Сменить режим».
+   Стоит рядом с главным действием, но нарочно тише его: уйти отсюда
+   не то, зачем человек пришёл, и всё же требовать ради этого прокрутки
+   нельзя — ровно так поверхность и становилась ловушкой. */
+.cta-bar__exit {
+  display: block;
+  width: 100%;
+  min-height: 44px; /* a11y — handoff §16 */
+  margin-top: var(--s-2);
+  background: none;
+  border: 0;
+  color: var(--c-text-secondary);
+  font-size: var(--font-size-200);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  cursor: pointer;
 }
 
 /* Status callouts. */

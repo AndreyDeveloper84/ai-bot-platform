@@ -10,7 +10,8 @@
  * несёт вес наравне с положительным — без него «всегда показывать
  * анкету» тоже был бы зелёным.
  */
-import { render, screen } from "@testing-library/react";
+import { render, screen, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -42,10 +43,15 @@ vi.mock("../lib/max-sdk", async (importOriginal) => {
 });
 
 import { authVerify } from "../lib/api";
-import { fetchDecisionContext, type DecisionContext } from "../lib/customer-goals";
+import {
+  fetchDecisionContext,
+  postGoalSelect,
+  type DecisionContext,
+} from "../lib/customer-goals";
 import { setBackButton, signalReady } from "../lib/max-sdk";
 import { CustomerEntryScreen } from "./CustomerEntryScreen";
 import { CustomerRoutes } from "../App";
+import { SurfaceModeContext } from "../components/SurfaceSwitch";
 
 const mockedFetch = vi.mocked(fetchDecisionContext);
 const mockedAuth = vi.mocked(authVerify);
@@ -189,40 +195,103 @@ describe("первый вход клиента", () => {
   });
 });
 
-describe("кто получает анкету на корне, а кто нет", () => {
-  function renderRoutes(props: { goalEntry?: boolean }) {
+describe("анкета на корне — одна для всех (DRF-1469)", () => {
+  /**
+   * `canSwitch` — единственное, чем многоролевой отличается от
+   * одноролевого на этой поверхности. Значение приходит из `App` тем
+   * же контекстом, что питает «Сменить режим» на экранах настроек.
+   */
+  function renderRoot(canSwitch: boolean, requestChooser = () => {}) {
     render(
-      <MemoryRouter initialEntries={["/"]}>
-        <CustomerRoutes {...props} />
-      </MemoryRouter>,
+      <SurfaceModeContext.Provider value={{ canSwitch, requestChooser }}>
+        <MemoryRouter initialEntries={["/"]}>
+          <CustomerRoutes />
+        </MemoryRouter>
+      </SurfaceModeContext.Provider>,
     );
   }
 
-  it("обычный клиент — получает", async () => {
+  it("одноролевой клиент — анкета, и ничего лишнего", async () => {
+    // Отрицательная половина: правка не меняет экран обычного клиента.
+    // Выход с поверхности ему предлагать нечего и незачем.
     mockedFetch.mockResolvedValue(ASKING);
-    renderRoutes({});
+    renderRoot(false);
+
     expect(
       await screen.findByText("Что сейчас хочется привести в порядок?"),
     ).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Сменить режим" })).toBeNull();
   });
 
-  it("админ-мастер на клиентской поверхности — НЕ получает", async () => {
-    // `goalEntry={false}` — ровно то, что App.tsx передаёт на ветке
-    // `multiRole && surfacePref === "customer"`.
-    //
-    // Он не человек, впервые встречающий Ayla, а владелец салона,
-    // зашедший посмотреть. Своего `ClientGoal` у него нет, так что
-    // анкету он получал бы первым же экраном; а `SurfaceSwitchButton`
-    // смонтирована только на профиле и настройках, до которых с корня
-    // без нижней навигации он уже не дойдёт. `useLastSurface` держит
-    // выбор в localStorage — повторялось бы при каждом запуске.
-    //
-    // Тот же класс дефекта, что DRF-1349 и DRF-1434: роль есть, экран
-    // показан не тот, и ошибки нигде не видно.
+  it("многоролевой — ту же анкету, а не приветствие", async () => {
+    // Положительная половина. Раньше здесь стоял `goalEntry={false}` и
+    // проверялось ОБРАТНОЕ: админ-мастер получал `HelloScreen`. Из-за
+    // этого владелец и вся команда не видели анкету вовсе.
     mockedFetch.mockResolvedValue(ASKING);
-    renderRoutes({ goalEntry: false });
+    renderRoot(true);
 
-    expect(await screen.findByText(/Здравствуйте/)).toBeInTheDocument();
-    expect(screen.queryByText("Что сейчас хочется привести в порядок?")).toBeNull();
+    expect(
+      await screen.findByText("Что сейчас хочется привести в порядок?"),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/Здравствуйте/)).toBeNull();
+  });
+
+  it("многоролевой может уйти с анкеты, не создавая цели", async () => {
+    // Причина прежнего запрета: с корня до «Сменить режим» было не
+    // дойти. Замер прямой — выход нажат, чужой обработчик вызван, и
+    // ни один ответ на вопрос анкеты для этого не понадобился.
+    const requestChooser = vi.fn();
+    mockedFetch.mockResolvedValue(ASKING);
+    renderRoot(true, requestChooser);
+
+    await screen.findByText("Что сейчас хочется привести в порядок?");
+    await userEvent.click(screen.getByRole("button", { name: "Сменить режим" }));
+    expect(requestChooser).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(postGoalSelect)).not.toHaveBeenCalled();
+  });
+
+  it("выход закреплён в панели, а не дописан в хвост документа", async () => {
+    // Выход, который надо доскроллить, — выход, которого на экране
+    // нет (тот же довод, что в DRF-1458 про кнопку `next`).
+    mockedFetch.mockResolvedValue(ASKING);
+    renderRoot(true);
+
+    await screen.findByText("Что сейчас хочется привести в порядок?");
+    const bar = screen.getByRole("region", { name: "Действие" });
+    expect(
+      within(bar).getByRole("button", { name: "Сменить режим" }),
+    ).toBeInTheDocument();
+  });
+
+  it("выход и дорога дальше стоят рядом, а не вместо друг друга", async () => {
+    // `ASKING` приходит без `next` — там в панели один выход. Здесь
+    // сервер прислал и `next`: условие C-2 (DRF-1451) требует, чтобы
+    // кнопка рисовалась всегда, когда она есть в документе, и правка
+    // DRF-1469 не имеет права её вытеснить.
+    mockedFetch.mockResolvedValue({
+      ...ASKING,
+      next: { id: "browse_catalog", label: "Найти услугу" },
+    });
+    renderRoot(true);
+
+    await screen.findByText("Что сейчас хочется привести в порядок?");
+    const bar = screen.getByRole("region", { name: "Действие" });
+    expect(within(bar).getByRole("button", { name: "Найти услугу" })).toBeInTheDocument();
+    expect(within(bar).getByRole("button", { name: "Сменить режим" })).toBeInTheDocument();
+    // Панель стала в два ряда — под ней надо освободить на ряд больше,
+    // иначе она накроет хвост документа.
+    expect(document.querySelector("main.screen--tall-cta")).not.toBeNull();
+  });
+
+  it("decision-context уходит С КОРНЯ, а не только с /customer/main", async () => {
+    // Признак, по которому дефект и нашли в журнале nginx: с `/`
+    // запрос не уходил ни разу, все обращения шли с `/customer/main`,
+    // то есть от карточки на экране записей. Многоролевой — тот самый
+    // случай, где этого запроса не было.
+    mockedFetch.mockResolvedValue(ASKING);
+    renderRoot(true);
+
+    await screen.findByText("Что сейчас хочется привести в порядок?");
+    expect(mockedFetch).toHaveBeenCalledTimes(1);
   });
 });
