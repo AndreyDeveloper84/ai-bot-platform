@@ -80,7 +80,7 @@ from apps.integrations.ayla import (
     external_user_id_for,
     get_nutrition_client,
 )
-from apps.nutrition_proactive import prefs, render, selection
+from apps.nutrition_proactive import antinag, prefs, render, selection
 
 logger = logging.getLogger(__name__)
 
@@ -221,6 +221,22 @@ def plan_daily_reports(
         today_iso = local.date().isoformat()
         if user_prefs.get("last_report_date") == today_iso:
             decisions.append(decide("already_sent_today"))
+            continue
+
+        # The ignore streak is asked before the weekly ceiling: the pause
+        # is a state change (the pref flips off), the ceiling is not, and a
+        # paused person must not also burn a fetch on the way out. The
+        # pause is SILENT -- pref off, no message (policy R2/R6: never
+        # «ты не ответила»).
+        streak = antinag.surface_ignored_streak(bot_user, user_prefs, surface="report")
+        if streak >= prefs.SURFACE_IGNORE_LIMIT:
+            decisions.append(
+                decide(
+                    "surface_auto_paused",
+                    detail={"ignored_streak": streak},
+                    pref_updates={"daily_report_time": prefs.REPORT_OFF},
+                )
+            )
             continue
 
         # The weekly ceiling sits after the per-day key: «already sent

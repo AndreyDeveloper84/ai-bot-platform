@@ -164,8 +164,12 @@ class TestWeeklyCeiling:
         user = make_user(
             tenant,
             report="12:00",
-            extra_prefs=outbox_prefs("report", prefs.WEEKLY_SURFACE_CAPS["report"]),
+            extra_prefs=outbox_prefs("report", prefs.WEEKLY_SURFACE_CAPS["report"], days_ago=1),
         )
+        # A reply after those sends resets the ignore streak, so the ONLY
+        # mechanism left that can bite here is the weekly ceiling.
+        user_reply(user, at=NOON - timedelta(hours=1))
+
         decisions = tasks.plan_daily_reports(now_utc=NOON, fetch=summary_reader())
         decision = only(decisions, user)
         assert decision.send is False
@@ -224,3 +228,110 @@ class TestWeeklyCeiling:
         assert prefs.weekly_sent_count(journal, now_utc=NOON) == 2
         assert prefs.weekly_sent_count(journal, now_utc=NOON, surface="water") == 1
         assert prefs.weekly_sent_count(journal, now_utc=NOON, surface="report") == 1
+
+
+# ---------------------------------------------------------------------------
+# 3 — the universal ignore streak: unanswered sends pause a surface, silently
+# ---------------------------------------------------------------------------
+
+
+def user_reply(bot_user: BotUser, *, at: datetime) -> None:
+    """A ``Message(role=user)`` stamped ``at`` -- the only "was heeded"
+    signal MAX gives us (it sends no read receipts)."""
+    from apps.conversations.models import Conversation, Message
+
+    conversation = Conversation.all_tenants.create(tenant=bot_user.tenant, bot_user=bot_user)
+    message = Message.all_tenants.create(
+        conversation=conversation,
+        tenant=bot_user.tenant,
+        role=Message.Role.USER,
+        content="привет",
+    )
+    Message.all_tenants.filter(pk=message.pk).update(created_at=at)
+
+
+class TestSurfaceIgnoreStreak:
+    def test_two_unanswered_reports_pause_the_surface_silently(self, tenant: Tenant) -> None:
+        user = make_user(
+            tenant,
+            report="12:00",
+            extra_prefs=outbox_prefs("report", prefs.SURFACE_IGNORE_LIMIT),
+        )
+        decisions = tasks.plan_daily_reports(now_utc=NOON, fetch=summary_reader())
+        decision = only(decisions, user)
+        assert decision.send is False
+        assert decision.reason == "surface_auto_paused"
+        # The pause is a pref flip, never a message to the person (R2/R6).
+        assert decision.text == ""
+        assert decision.pref_updates["daily_report_time"] == prefs.REPORT_OFF
+
+    def test_the_pause_is_persisted_without_sending_anything(
+        self, tenant: Tenant, settings
+    ) -> None:
+        user = make_user(
+            tenant,
+            report="12:00",
+            extra_prefs=outbox_prefs("report", prefs.SURFACE_IGNORE_LIMIT),
+        )
+        settings.NUTRITION_PROACTIVE_ENABLED = True
+        settings.NUTRITION_PROACTIVE_DRY_RUN = True
+        with (
+            patch("apps.nutrition_proactive.tasks.send_message") as send,
+            patch("apps.nutrition_proactive.tasks.dj_timezone.now", return_value=NOON),
+        ):
+            tasks.send_daily_reports()
+        send.assert_not_called()
+
+        stored = prefs.get_prefs(BotUser.all_tenants.get(pk=user.pk))
+        assert stored["daily_report_time"] == prefs.REPORT_OFF
+        # Nothing was sent, so nothing new was journaled either.
+        assert len(prefs.outbox_entries(stored)) == prefs.SURFACE_IGNORE_LIMIT
+
+    def test_one_unanswered_send_does_not_pause(self, tenant: Tenant) -> None:
+        user = make_user(tenant, report="12:00", extra_prefs=outbox_prefs("report", 1))
+        decisions = tasks.plan_daily_reports(now_utc=NOON, fetch=summary_reader())
+        assert only(decisions, user).send is True
+
+    def test_a_reply_after_the_sends_resets_the_streak(self, tenant: Tenant) -> None:
+        user = make_user(
+            tenant,
+            report="12:00",
+            extra_prefs=outbox_prefs("report", prefs.SURFACE_IGNORE_LIMIT, days_ago=1),
+        )
+        user_reply(user, at=NOON - timedelta(hours=1))
+
+        decisions = tasks.plan_daily_reports(now_utc=NOON, fetch=summary_reader())
+        decision = only(decisions, user)
+        assert decision.send is True
+        assert decision.reason == "due"
+
+    def test_a_reply_before_the_sends_does_not_reset(self, tenant: Tenant) -> None:
+        user = make_user(
+            tenant,
+            report="12:00",
+            extra_prefs=outbox_prefs("report", prefs.SURFACE_IGNORE_LIMIT, days_ago=1),
+        )
+        user_reply(user, at=NOON - timedelta(days=2))
+
+        decisions = tasks.plan_daily_reports(now_utc=NOON, fetch=summary_reader())
+        assert only(decisions, user).reason == "surface_auto_paused"
+
+    def test_only_the_surfaces_own_sends_count(self, tenant: Tenant) -> None:
+        """Ignored WATER sends must not pause the report, and vice versa."""
+        user = make_user(
+            tenant,
+            report="12:00",
+            extra_prefs=outbox_prefs("water", prefs.SURFACE_IGNORE_LIMIT),
+        )
+        decisions = tasks.plan_daily_reports(now_utc=NOON, fetch=summary_reader())
+        assert only(decisions, user).send is True
+
+    def test_water_keeps_its_domain_streak(self, tenant: Tenant) -> None:
+        """The universal streak does NOT pause water: a person who drinks
+        without replying is being heeded, and the intake comparison is the
+        stronger signal. Water's own streak (intake, limit 3) is untouched."""
+        user = make_user(tenant, extra_prefs=outbox_prefs("water", prefs.SURFACE_IGNORE_LIMIT))
+        decisions = tasks.plan_water_reminders(now_utc=NOON, fetch=water_reader(50))
+        decision = only(decisions, user)
+        assert decision.send is True
+        assert decision.reason == "behind_proportional_norm"
