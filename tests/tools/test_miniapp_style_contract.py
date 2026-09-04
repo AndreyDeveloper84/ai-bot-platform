@@ -217,6 +217,78 @@ def test_a_root_with_no_tab_bars_at_all_is_not_a_problem(
     assert guard.main(["miniapp_style_contract.py", str(root)]) == 0
 
 
+def _chip_row_app(tmp_path: Path, *, css: str) -> Path:
+    return _app(
+        tmp_path,
+        tsx='export const S = () => <div className="chip-row" />;' + NL,
+        css=css,
+    )
+
+
+_UNWRAPPED = ".chip-row { display: flex; gap: 8px; }" + NL
+
+
+def test_a_chip_row_that_cannot_wrap_is_reported(tmp_path: Path) -> None:
+    """The DRF-1458 defect: seven suggestions, three and a half on screen."""
+    root = _chip_row_app(tmp_path, css=_UNWRAPPED)
+
+    problems = guard.scan_chip_rows(root)
+
+    assert len(problems) == 1
+    assert "`.chip-row` is a flex row without `flex-wrap: wrap`" in problems[0]
+
+
+def test_a_chip_row_that_wraps_is_not_reported(tmp_path: Path) -> None:
+    """Presence first, then absence — on the same fixture minus one line.
+
+    An empty result is only worth reading once the same shape is known to
+    produce a non-empty one. So the unwrapped rule is measured first: it
+    IS reported. Adding `flex-wrap: wrap` and nothing else silences it.
+    """
+    unwrapped = _chip_row_app(tmp_path / "a", css=_UNWRAPPED)
+    wrapped = _chip_row_app(
+        tmp_path / "b",
+        css=".chip-row { display: flex; flex-wrap: wrap; gap: 8px; }" + NL,
+    )
+
+    assert guard.scan_chip_rows(unwrapped) != []
+    assert guard.scan_chip_rows(wrapped) == []
+
+
+def test_the_flex_flow_shorthand_counts_as_wrapping(tmp_path: Path) -> None:
+    """`flex-flow: row wrap` says the same thing in one declaration."""
+    unwrapped = _chip_row_app(tmp_path / "a", css=_UNWRAPPED)
+    shorthand = _chip_row_app(
+        tmp_path / "b",
+        css=".chip-row { display: flex; flex-flow: row wrap; }" + NL,
+    )
+
+    assert guard.scan_chip_rows(unwrapped) != []
+    assert guard.scan_chip_rows(shorthand) == []
+
+
+def test_a_bem_variant_of_a_chip_row_is_checked_too(tmp_path: Path) -> None:
+    root = _chip_row_app(tmp_path, css=".goal-select__chip-row { display: flex; }" + NL)
+
+    problems = guard.scan_chip_rows(root)
+
+    assert len(problems) == 1
+    assert "`.goal-select__chip-row`" in problems[0]
+
+
+def test_a_chip_row_that_is_not_a_flex_container_is_left_alone(tmp_path: Path) -> None:
+    """Only a flex row can lay an unknown-length list out on one line.
+
+    Same pairing as above: the flex spelling of this fixture is reported,
+    so the silence on the block spelling is a decision, not a blind spot.
+    """
+    unwrapped = _chip_row_app(tmp_path / "a", css=_UNWRAPPED)
+    block = _chip_row_app(tmp_path / "b", css=".chip-row { display: block; margin: 8px; }" + NL)
+
+    assert guard.scan_chip_rows(unwrapped) != []
+    assert guard.scan_chip_rows(block) == []
+
+
 # --------------------------------------------------------------------------
 # The real tree.
 # --------------------------------------------------------------------------
@@ -244,6 +316,26 @@ def test_the_real_tab_bars_fit_one_row() -> None:
     app_root = _PROJECT_ROOT / "apps" / "miniapp"
 
     assert guard.scan_tabbar_columns(app_root) == []
+
+
+def test_the_real_chip_rows_wrap() -> None:
+    """The 2026-09-03 regression (DRF-1458), named so a revert cannot pass quietly.
+
+    The goal surface renders one chip per server-supplied suggestion and
+    one per anketa option. Drop the wrap and the owner's screenshot comes
+    back: seven suggestions, three and a half of them reachable.
+
+    The presence assertion is the point of the first two lines: a scan
+    that found no chip-row rules at all would also return `[]`, and that
+    silence would mean the check had stopped looking — a renamed class,
+    a moved stylesheet — not that the real rows wrap.
+    """
+    app_root = _PROJECT_ROOT / "apps" / "miniapp"
+
+    assert guard.CHIP_ROW_RULE.findall(guard.stylesheet_text(app_root)) != [], (
+        "no chip-row rule left in src/styles/ — this check has gone blind"
+    )
+    assert guard.scan_chip_rows(app_root) == []
 
 
 def test_the_real_miniapp_matches_its_baseline_exactly() -> None:
