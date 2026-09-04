@@ -581,11 +581,11 @@ def remember_correction(bot_user: Any, *, dish: str, field: str, value: Any) -> 
         # earlier value silently impossible: «плов» → «плов узбекский» → «плов»
         # matched the first, dead row, answered «Запомнила», and left «плов
         # узбекский» as the current value. Dedup therefore compares against the
-        # CURRENT fact set only —
-        # the same set ``recall_corrections`` will read back — so a DUPLICATE
-        # verdict means «this is already what we would tell you», never «we once
-        # heard this». Excluding them also bounds the scan by number of dishes
-        # rather than by number of corrections ever made.
+        # CURRENT fact set only — the same set ``recall_corrections`` will read
+        # back — so a DUPLICATE verdict means «this is already what we would
+        # tell you», never «we once heard this». Excluding them also bounds the
+        # scan by number of dishes rather than by number of corrections ever
+        # made.
         live_rows = [
             row
             for row in read_green_entries(user_id)

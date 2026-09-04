@@ -143,8 +143,15 @@ def _add_green(upc, value):
 
 
 def _upc_with_food_rows(upc=None):
-    """Green rows the food-scanner memory writes (DRF-1454): keys carry the
-    dish, so they cannot be listed in _KEY_KEYWORDS verbatim."""
+    """Green rows with food-scanner keys (DRF-1454): the key carries the dish,
+    so they cannot be listed in _KEY_KEYWORDS verbatim.
+
+    Сегодня память сканера пишет только ``food_dish_name:*`` — вес и БЖУ
+    принадлежат дневнику Ayla и не хранятся до DRF-825 (решение владельца
+    04.09.2026, вариант А). Две другие строки сохранены в фикстуре намеренно:
+    стирание по домену — страж на префикс, и оно обязано забрать любую строку
+    food_*, включая ту, которую DRF-825 вернёт. Тест ловит регрессию в день
+    возврата, а не в день, когда её кто-то заметит."""
     upc = upc or UserPersonalContext.objects.create(user_id=uuid.uuid4())
     for key, value, display in (
         ("food_portion:борщ", 500, "порция «борщ» — 500 г"),
@@ -167,9 +174,9 @@ class TestFoodScannerRowsBelongToThePitanieDomain:
     """Ревью DRF-1454, ось architecture, MUST_FIX_PRE_PILOT: ключи food_* не
     были зарегистрированы в _KEY_KEYWORDS/_DOMAIN_LABELS — «забудь всё про
     питание» удаляла только строки ключа diet, отвечала «Готово — забыла всё,
-    что знала: питание», а до 60 строк food_portion:*/food_macros:* оставались
-    живы. Кнопки «Забыть» у них тоже не было. Это право на стирание по 152-ФЗ
-    и ADR-0011 §8: стирание, рапортующее успех, обязано стирать."""
+    что знала: питание», а строки food_* оставались живы. Кнопки «Забыть» у них
+    тоже не было. Это право на стирание по 152-ФЗ и ADR-0011 §8: стирание,
+    рапортующее успех, обязано стирать."""
 
     def test_domain_forget_takes_the_food_rows_with_it(self):
         upc = _upc_with_food_rows()
