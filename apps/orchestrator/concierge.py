@@ -59,8 +59,10 @@ from apps.llm.model_tiers import TIER_SMART
 from apps.llm.pricing import UnknownModelError, compute_cost
 from apps.llm.router import get_router
 from apps.marketplace.discovery import (
+    city_service_samples,
     discover_masters,
     find_masters_by_name,
+    parse_query,
     service_coverage,
 )
 from apps.observability.ai_metrics import record_ai_request
@@ -82,6 +84,7 @@ from apps.orchestrator.discovery import (
     has_discovery_criteria,
     reground_specialization,
     render_no_criteria_clarification,
+    render_no_match,
     requested_services,
 )
 from apps.orchestrator.fast_path import claims_direct_show_masters
@@ -96,6 +99,12 @@ from apps.orchestrator.personal_surface import (
     PERSONAL_TOOL_ACTIONS,
     SHOW_MY_RECORDS_TOOL_SPEC,
     execute_personal_tool,
+)
+from apps.orchestrator.refusal_memo import (
+    RefusedQuery,
+    recall_refusals,
+    remember_refusal,
+    render_refusal_block,
 )
 from apps.persona.voice import SURFACE_MARKETPLACE, assistant_identity
 
@@ -1344,6 +1353,88 @@ def _build_tool_result_message(
     return "\n".join(lines)
 
 
+def _render_zero_result(
+    *,
+    city: str | None,
+    specialization: str | None,
+    already_refused: bool = False,
+) -> DiscoveryReply:
+    """The zero-result refusal, with the alternative named (DRF-1474).
+
+    One function so every deterministic zero path — budget exhausted, a
+    follow-up pass that raised, the repeat short-circuit — says the same
+    thing. Before this ticket they all went through ``_render_master_cards``
+    with an empty list, which routes to ``render_no_match``: the same words,
+    but no way to add the «and here is what we DO have» half without adding it
+    three times.
+
+    The catalog read is best-effort by contract. A refusal that loses its
+    suggestion is the pre-DRF-1474 refusal, which shipped for weeks; a refusal
+    that raises is a lost turn.
+    """
+    alternatives: list[str] = []
+    try:
+        alternatives = city_service_samples(city)
+    except Exception:  # noqa: BLE001 — a suggestion may never cost the refusal
+        logger.exception("orchestrator.concierge.alternatives_failed")
+    return render_no_match(
+        city=city,
+        specialization=specialization,
+        alternatives=alternatives,
+        already_refused=already_refused,
+    )
+
+
+def _repeats_a_refusal(conversation: Any, message_text: str) -> RefusedQuery | None:
+    """The refusal this turn repeats, or ``None`` — decided WITHOUT the model.
+
+    The guarantee behind DRF-1474. The system-prompt block
+    (:func:`apps.orchestrator.refusal_memo.render_refusal_block`) asks the
+    model not to re-open a settled fact; this decides the one case that must
+    not depend on asking — the person typing the refused service again, which
+    is exactly what happened at 12:12:16 on 04.09 and produced «Помогу найти
+    мастера по маникюру! Уточните, в каком городе вы находитесь?».
+
+    The turn is matched by STEMS against the recorded query, so «Маникюр»,
+    «маникюр» and «маникюр?» are one question. Two conditions keep it narrow:
+
+    * every stem of the turn must be one of the refused query's — a turn that
+      adds a word is asking something else, and answering it from the ledger
+      would be this ticket's own defect with the sign flipped;
+    * the turn must name no city, or the same one — «маникюр в Самаре» is a
+      question the catalog has not been asked, and the memo may not answer it.
+    """
+    if conversation is None:
+        return None
+    # The ledger FIRST: `parse_query` reads the catalog for its city and goal
+    # vocabularies, and on a conversation that has been refused nothing there
+    # is nothing to compare against. Almost every turn takes this exit, so the
+    # two reads are paid only where they can change an answer.
+    entries = recall_refusals(conversation)
+    if not entries:
+        return None
+    try:
+        parsed = parse_query(message_text or "")
+    except Exception:  # noqa: BLE001 — a hint may never cost the turn
+        logger.exception("orchestrator.concierge.repeat_parse_failed")
+        return None
+    turn_stems = set(parsed.stems)
+    if not turn_stems:
+        return None
+    named_city = parsed.cities[0] if parsed.cities else ""
+    for entry in reversed(entries):
+        try:
+            refused_stems = set(parse_query(entry.specialization).stems)
+        except Exception:  # noqa: BLE001
+            continue
+        if not refused_stems or not turn_stems <= refused_stems:
+            continue
+        if named_city and entry.city and named_city.casefold() != entry.city.casefold():
+            continue
+        return entry
+    return None
+
+
 def generate_concierge_reply(
     message_text: str,
     *,
@@ -1475,7 +1566,43 @@ def _concierge_turn(
     failure degrades to the same safe fallback line as the legacy
     discovery path — the concierge must never 500.
     """
+    # DRF-1474 — the person typed the refused service again. There is nothing
+    # for a model to decide here: the catalog has already answered, and the
+    # only thing another model call can add is the chance of answering it with
+    # «помогу найти!». Said once more, plainly, with the alternative named.
+    #
+    # Ahead of the LLM client setup below because this branch never touches it.
+    repeated = _repeats_a_refusal(conversation, message_text)
+    if repeated is not None:
+        started = time.monotonic()
+        logger.info(
+            "orchestrator.concierge.refusal_repeat spec=%r city=%r trace=%s",
+            repeated.specialization[:_MAX_LOGGED_ARG_CHARS],
+            repeated.city[:_MAX_LOGGED_ARG_CHARS],
+            trace_id,
+        )
+        rendered = _render_zero_result(
+            city=repeated.city or None,
+            specialization=repeated.specialization,
+            already_refused=True,
+        )
+        # A model-less turn still belongs in the funnel it answers — same
+        # argument as :func:`_record_direct_metric`, and its LLM columns stay
+        # NULL for the same reason: there was no pass to number.
+        _record_concierge_metric(
+            bot_user=bot_user,
+            conversation=conversation,
+            trace_id=trace_id,
+            message_text=message_text,
+            pass_index=None,
+            outcome=AIRequestMetric.OUTCOME_SUCCESS,
+            latency_total_ms=int((time.monotonic() - started) * 1000),
+            skill_selected="concierge_refusal_repeat",
+        )
+        return DiscoveryReply(text=rendered.text, persisted=True)
+
     llm_client = RouterLLMClient(skill=CONCIERGE_SKILL)
+
     concierge = AIConcierge(
         openai_client=llm_client,
         store=store,
@@ -1489,11 +1616,18 @@ def _concierge_turn(
         tool_dispatcher=_dispatch_tool,
     )
 
+    # DRF-1474 — what this conversation has already been told does not exist,
+    # as a system-prompt fact rather than one more message in the transcript.
+    # The transcript already carried it on 04.09 and the model re-opened it
+    # anyway; an instruction is read as an instruction.
+    refusal_block = render_refusal_block(conversation)
+    turn_extra_system = "\n\n".join(part for part in (extra_system, refusal_block) if part)
+
     def _renderer(_ctx: Any) -> str:
         return build_concierge_system_prompt(
             memory_block=memory_block,
             nutrition_block=nutrition_block,
-            extra_system=extra_system,
+            extra_system=turn_extra_system,
         )
 
     max_passes = _max_llm_passes()
@@ -1562,10 +1696,20 @@ def _concierge_turn(
                 # A follow-up pass failed AFTER the tool already returned
                 # data — render the cards deterministically rather than the
                 # generic fallback: the user asked for masters, we have them.
-                rendered = _render_master_cards(
-                    pending_cards[:_MAX_MASTER_CARDS],
-                    city=pending_args.get("city"),
-                    specialization=pending_args.get("specialization"),
+                # An EMPTY `pending_cards` is not «no data», it is a searched
+                # zero, and since DRF-1474 it gets the refusal that names an
+                # alternative rather than the same one with a shorter tail.
+                rendered = (
+                    _render_master_cards(
+                        pending_cards[:_MAX_MASTER_CARDS],
+                        city=pending_args.get("city"),
+                        specialization=pending_args.get("specialization"),
+                    )
+                    if pending_cards
+                    else _render_zero_result(
+                        city=pending_args.get("city"),
+                        specialization=pending_args.get("specialization"),
+                    )
                 )
                 return _reply(
                     text=rendered.text,
@@ -1703,6 +1847,11 @@ def _concierge_turn(
             trace_id,
             pass_index,
         )
+        if not cards:
+            # DRF-1474 — the fact, written down where it is established. Every
+            # branch below that can answer an empty search reads it back, and
+            # so does the next turn's system prompt.
+            remember_refusal(conversation, specialization=specialization, city=city)
         if cards and missing:
             # Half the request has masters and half has nobody. This is the
             # DRF-1312 turn, and it is answered DETERMINISTICALLY rather than
@@ -1743,8 +1892,17 @@ def _concierge_turn(
                 trace_id,
                 pass_index,
             )
-            rendered = _render_master_cards(
-                cards[:_MAX_MASTER_CARDS], city=city, specialization=specialization
+            rendered = (
+                _render_master_cards(
+                    cards[:_MAX_MASTER_CARDS], city=city, specialization=specialization
+                )
+                if cards
+                # DRF-1474 — this is the branch the live refusal came out of
+                # (worker log 04.09 12:12:15, `multipass_budget_exhausted
+                # passes=2` with `count=0`). It used to reach `render_no_match`
+                # through an empty card list, which cannot name what we DO
+                # have; now it asks for that by name.
+                else _render_zero_result(city=city, specialization=specialization)
             )
             return _reply(
                 text=rendered.text,
