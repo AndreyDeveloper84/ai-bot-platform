@@ -226,10 +226,42 @@ _LABEL_PICK_DATE = "Выбрать дату"
 # is what the full picker already is.
 _MAX_DAY_CHIPS = 3
 
-# pick_slot deterministic short-circuit (RB1.1-D05) — safe local replies.
-# Stale/invalid callback context never reaches the backend; the user is
-# asked to restart the service selection instead.
+# ── Deterministic booking-callback refusals (DRF-1473) ────────────────────
+#
+# The guard below is right to refuse an incomplete tap; what it was wrong
+# about was WHY. Every refusal on this path used to answer «Контекст записи
+# устарел», whatever had actually happened, and three of the four things that
+# reach it have nothing to do with time. On 04.09.2026 the owner tapped a slot
+# ELEVEN SECONDS after it was drawn and was told his context had expired; the
+# real cause was a specialist roster truncated at page 1 of a paginated feed
+# (fixed in ``apps.integrations.ayla.booking_client.get_masters``). The lie
+# cost twice: the person could not tell what to do next, and the engineer
+# reading the journal was sent to look at expiry windows.
+#
+# So the refusals are split by cause, in the text AND in the log, and each
+# text says only what is true of its own branch:
+#
+# * ``_STALE_CONTEXT_TEXT`` — something genuinely ran out of time. The ONLY
+#   branch that may say «устарел»: a tapped slot that is now in the past.
+# * ``_BROKEN_CALLBACK_TEXT`` — the payload did not carry what the step
+#   needs (no service id, unparsable id, malformed datetime). Nothing
+#   expired; the button itself is unusable.
+# * ``_CONTEXT_GONE_TEXT`` — the payload parsed fine, but the master or the
+#   service it names is not in the tenant's live data. Either the salon
+#   changed under the keyboard, or — the pilot's case — the flow could not
+#   see the whole roster.
+#
+# Every one of them exits through :func:`_refuse_callback`, which is what
+# guarantees the journal line and the user's line agree.
 _STALE_CONTEXT_TEXT = "Контекст записи устарел. Начните выбор услуги заново."
+_BROKEN_CALLBACK_TEXT = (
+    "Эта кнопка пришла без части данных — не вижу, что было выбрано. "
+    "Выберите услугу ещё раз, пожалуйста."
+)
+_CONTEXT_GONE_TEXT = (
+    "Не нахожу этого мастера или эту услугу в расписании салона. "
+    "Выберите услугу заново."
+)
 _SLOT_TAKEN_PROMPT = "Это время уже занято. Выберите другое:"
 _SLOT_TAKEN_NO_ALTERNATIVES = (
     "Это время уже занято, и на эту дату свободных слотов больше нет. Выберите другую дату."
@@ -506,10 +538,11 @@ class BookingSkill:
                     confidence=None,
                 )
             if service_id is None:
-                return _build_skill_result(
-                    text=_STALE_CONTEXT_TEXT,
-                    tool_calls_made=[],
-                    confidence=_CONFIDENCE_OK,
+                return _refuse_callback(
+                    step="pick_master",
+                    reason=REFUSAL_MALFORMED_CALLBACK,
+                    text=_BROKEN_CALLBACK_TEXT,
+                    detail=f"field=service_id raw={raw_payload!r}",
                 )
             return _render_date_picker(
                 master_id=master_id,
@@ -530,11 +563,11 @@ class BookingSkill:
             master_id = _coerce_id(raw_master)
             service_id = _coerce_id(raw_service)
             if master_id is None or service_id is None:
-                logger.warning("booking.more_dates.bad_payload raw=%r", payload)
-                return _build_skill_result(
-                    text=_STALE_CONTEXT_TEXT,
-                    tool_calls_made=[],
-                    confidence=_CONFIDENCE_OK,
+                return _refuse_callback(
+                    step="more_dates",
+                    reason=REFUSAL_MALFORMED_CALLBACK,
+                    text=_BROKEN_CALLBACK_TEXT,
+                    detail=f"raw={payload!r}",
                 )
             return _render_date_picker(
                 master_id=master_id,
@@ -597,10 +630,11 @@ class BookingSkill:
                     confidence=None,
                 )
             if service_id is None:
-                return _build_skill_result(
-                    text=_STALE_CONTEXT_TEXT,
-                    tool_calls_made=[],
-                    confidence=_CONFIDENCE_OK,
+                return _refuse_callback(
+                    step="pick_date",
+                    reason=REFUSAL_MALFORMED_CALLBACK,
+                    text=_BROKEN_CALLBACK_TEXT,
+                    detail=f"field=service_id raw={payload!r}",
                 )
             return _render_part_picker(
                 master_id=master_id,
@@ -623,20 +657,20 @@ class BookingSkill:
             try:
                 raw_master, raw_date, raw_part, raw_service = payload.split(":", 3)
             except (TypeError, ValueError):
-                logger.warning("booking.pick_part.bad_payload raw=%r", payload)
-                return _build_skill_result(
-                    text=_STALE_CONTEXT_TEXT,
-                    tool_calls_made=[],
-                    confidence=_CONFIDENCE_OK,
+                return _refuse_callback(
+                    step="pick_part",
+                    reason=REFUSAL_MALFORMED_CALLBACK,
+                    text=_BROKEN_CALLBACK_TEXT,
+                    detail=f"field=shape raw={payload!r}",
                 )
             master_id = _coerce_id(raw_master)
             service_id = _coerce_id(raw_service)
             if master_id is None or service_id is None:
-                logger.warning("booking.pick_part.bad_payload raw=%r", payload)
-                return _build_skill_result(
-                    text=_STALE_CONTEXT_TEXT,
-                    tool_calls_made=[],
-                    confidence=_CONFIDENCE_OK,
+                return _refuse_callback(
+                    step="pick_part",
+                    reason=REFUSAL_MALFORMED_CALLBACK,
+                    text=_BROKEN_CALLBACK_TEXT,
+                    detail=f"field=ids raw={payload!r}",
                 )
             part_filter = raw_part if raw_part in PART_ORDER else None
             first = CompletionResult(
@@ -1583,8 +1617,11 @@ def _handle_pick_slot_callback(
        the LLM path uses. The ✅ tap then executes through
        :mod:`apps.bookings.callbacks` as usual.
 
-    Invalid/stale context is recovered locally (no handoff, no backend
-    call, no pending row) — the user is asked to restart the selection.
+    A refused tap is recovered locally (no handoff, no backend call, no
+    pending row) — the user is asked to restart the selection. Which
+    refusal it was is now said out loud, in the reply and in the journal
+    both: see :func:`_refuse_callback` and the ``REFUSAL_*`` vocabulary.
+    Only step 5's past-slot branch is allowed to call it «устарел».
     """
     raw_payload = text[len(CALLBACK_BOOK_PICK_SLOT_PREFIX) :].strip()
     parts = raw_payload.split(":", 2)
@@ -1599,19 +1636,31 @@ def _handle_pick_slot_callback(
     master_id = _coerce_id(raw_master)
     service_id = _coerce_id(raw_service)
     if master_id is None or service_id is None or not raw_dt or not _is_iso_datetime(raw_dt):
-        return _build_skill_result(
-            text=_STALE_CONTEXT_TEXT,
-            tool_calls_made=[],
-            confidence=_CONFIDENCE_OK,
+        # Nothing expired here — the button is simply unreadable. Naming
+        # which of the three fields failed is the whole point (DRF-1473).
+        bad = [
+            name
+            for name, ok in (
+                ("master_id", master_id is not None),
+                ("service_id", service_id is not None),
+                ("slot_datetime", bool(raw_dt) and _is_iso_datetime(raw_dt)),
+            )
+            if not ok
+        ]
+        return _refuse_callback(
+            step="pick_slot",
+            reason=REFUSAL_MALFORMED_CALLBACK,
+            text=_BROKEN_CALLBACK_TEXT,
+            detail=f"fields={','.join(bad)} raw={raw_payload!r}",
         )
 
     # Service must exist in the tenant catalog (prefetched in handle()).
     if service_id not in allowed_service_ids:
-        logger.info("booking.pick_slot.unknown_service service=%s", service_id)
-        return _build_skill_result(
-            text=_STALE_CONTEXT_TEXT,
-            tool_calls_made=[],
-            confidence=_CONFIDENCE_OK,
+        return _refuse_callback(
+            step="pick_slot",
+            reason=REFUSAL_UNKNOWN_SERVICE,
+            text=_CONTEXT_GONE_TEXT,
+            detail=f"service={service_id} catalog_size={len(allowed_service_ids)}",
         )
     # Specialist must be on the live tenant roster. One staff fetch feeds
     # both the membership check and the display-name lookup; a provider
@@ -1630,11 +1679,11 @@ def _handle_pick_slot_callback(
     allowed_master_ids = {_id_key(s.id) for s in staff_rows}
     master_lookup = build_master_lookup(staff_rows)
     if master_id not in allowed_master_ids:
-        logger.info("booking.pick_slot.unknown_master master=%s", master_id)
-        return _build_skill_result(
-            text=_STALE_CONTEXT_TEXT,
-            tool_calls_made=[],
-            confidence=_CONFIDENCE_OK,
+        return _refuse_callback(
+            step="pick_slot",
+            reason=REFUSAL_UNKNOWN_MASTER,
+            text=_CONTEXT_GONE_TEXT,
+            detail=f"master={master_id} roster_size={len(allowed_master_ids)}",
         )
 
     # Health-check gate — same rule as the LLM confirm path: gated
@@ -1662,11 +1711,11 @@ def _handle_pick_slot_callback(
     if tapped_dt.tzinfo is None:
         now = now.replace(tzinfo=None)
     if tapped_dt < now:
-        logger.info("booking.pick_slot.past_slot slot=%s", raw_dt)
-        return _build_skill_result(
+        return _refuse_callback(
+            step="pick_slot",
+            reason=REFUSAL_EXPIRED_SLOT,
             text=_STALE_CONTEXT_TEXT,
-            tool_calls_made=[],
-            confidence=_CONFIDENCE_OK,
+            detail=f"slot={raw_dt} now={now.isoformat()}",
         )
 
     # Duplicate tap on the same slot button: reuse the identical active
@@ -1756,11 +1805,11 @@ def _handle_pick_slot_callback(
     if result.error in {"invalid_master_id", "invalid_service_id", "missing_slot"}:
         # Pre-validated above; a roster/catalog race mid-flow lands here.
         # Recoverable locally — no handoff, no pending row.
-        logger.info("booking.pick_slot.validation_race err=%s", result.error)
-        return _build_skill_result(
-            text=_STALE_CONTEXT_TEXT,
-            tool_calls_made=[],
-            confidence=_CONFIDENCE_OK,
+        return _refuse_callback(
+            step="pick_slot",
+            reason=REFUSAL_VALIDATION_RACE,
+            text=_CONTEXT_GONE_TEXT,
+            detail=f"err={result.error}",
         )
     if result.error:
         # DRF-1005: was a silent handoff — log the confirm_booking error.
@@ -2412,6 +2461,54 @@ def _build_skill_result(
         confidence=confidence,
         meta={"skill": "booking"},
     )
+
+
+# ── The single exit for a refused booking-callback tap (DRF-1473) ─────────
+#
+# Refusal reason vocabulary. Locked, like the handoff reasons above, and for
+# the same purpose: a name that means one thing is what makes six lines in a
+# journal answer «why» without a bisect.
+#
+#: The payload could not be read — a missing service id, an id that is
+#: neither int nor UUID, a datetime that does not parse.
+REFUSAL_MALFORMED_CALLBACK = "malformed_callback"
+#: The payload named a service the tenant's live catalog does not have.
+REFUSAL_UNKNOWN_SERVICE = "unknown_service"
+#: The payload named a specialist the tenant's live roster does not have.
+#: The pilot defect (DRF-1473) landed here through a truncated roster read.
+REFUSAL_UNKNOWN_MASTER = "unknown_master"
+#: Master and service passed the pre-checks, then lost a race against a
+#: catalog / roster change inside ``confirm_booking``.
+REFUSAL_VALIDATION_RACE = "validation_race"
+#: The one refusal that is genuinely about time: the tapped slot is past.
+REFUSAL_EXPIRED_SLOT = "expired_slot"
+
+
+def _refuse_callback(
+    *,
+    step: str,
+    reason: str,
+    text: str,
+    detail: str = "",
+) -> SkillResult:
+    """Refuse a booking-callback tap, saying the SAME thing twice.
+
+    Once to the person (``text``) and once to the journal (``reason``), so
+    the two can never drift apart the way they had before DRF-1473 — where
+    five different causes shared one sentence and two of them logged nothing
+    at all. ``step`` is the callback being handled (``pick_slot``,
+    ``pick_master``…), ``detail`` any ids worth carrying.
+
+    Not a handoff and not an error: these are recoverable locally, exactly
+    as before. Only the wording and the log line changed.
+    """
+    logger.info(
+        "booking.%s.refused reason=%s%s",
+        step,
+        reason,
+        f" {detail}" if detail else "",
+    )
+    return _build_skill_result(text=text, tool_calls_made=[], confidence=_CONFIDENCE_OK)
 
 
 def _handoff(

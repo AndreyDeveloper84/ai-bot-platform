@@ -44,9 +44,9 @@ logger = logging.getLogger(__name__)
 
 # Booking skill's stable master-pick callback contract (apps/skills/booking —
 # S1 anti-touch). Format ``cb:book:pick_master:<master>:<service>`` — the
-# service part is REQUIRED: without it the skill's stale-context guard
-# (deliberately, RB1.1-D05) refuses the tap with «Контекст записи устарел»,
-# which on this path was a guaranteed dead-end (DRF-962). Under the YClients
+# service part is REQUIRED: without it the skill's incomplete-callback guard
+# (deliberately, RB1.1-D05) refuses the tap, which on this path was a
+# guaranteed dead-end (DRF-962). Under the YClients
 # path both ids are native ints; under Ayla REST both are canonical UUIDs.
 _CALLBACK_BOOK_PICK_MASTER = "cb:book:pick_master:"
 
@@ -551,10 +551,23 @@ BOOKING_CALLBACK_PREFIXES = (
     "cb:book:cancel:",
 )
 
-# Deterministic reply when the tap's tenant can no longer be resolved (stale
-# keyboard after pending-row cleanup, forged id, flag-off int ids). Mirrors
-# the booking skill's own stale-context reply — the user restarts selection.
-_STALE_BOOKING_CALLBACK_REPLY = "Контекст записи устарел. Начните выбор услуги заново."
+# Deterministic replies when a routed ``cb:book:*`` tap cannot reach tenant T
+# at all. Mirrors the booking skill's split (DRF-1473): none of the three
+# branches below is about time, so none of them says «устарел» any more. The
+# tenant of a tap is resolved from the master id it carries, so «не нахожу
+# мастера» is the literal truth in the first two, and each branch names itself
+# in the journal.
+_UNRESOLVED_BOOKING_CALLBACK_REPLY = (
+    "Не нахожу этого мастера в каталоге — записаться по этой кнопке не получится. "
+    "Выберите услугу заново."
+)
+
+# The skill ran but produced nothing to say. Never observed in the pilot; it
+# exists so an empty reply can never reach the user as a blank message, and it
+# is logged (it used to be the one silent branch on this path).
+_EMPTY_BOOKING_CALLBACK_REPLY = (
+    "Не получилось продолжить запись по этой кнопке. Выберите услугу заново."
+)
 
 
 def carry_time_preference(global_bot_user, conversation) -> None:
@@ -1127,11 +1140,11 @@ def route_booking_callback(
     tenant = _resolve_booking_callback_tenant(callback_text)
     if tenant is None:
         logger.info(
-            "marketplace.booking_callback.unresolved callback=%r trace=%s",
+            "marketplace.booking_callback.refused reason=tenant_unresolved callback=%r trace=%s",
             callback_text[:60],
             trace_id,
         )
-        return DiscoveryReply(text=_STALE_BOOKING_CALLBACK_REPLY)
+        return DiscoveryReply(text=_UNRESOLVED_BOOKING_CALLBACK_REPLY)
 
     with tenant_scope(tenant):
         per_tenant_bot_user = resolve_or_create_bot_user(
@@ -1144,11 +1157,11 @@ def route_booking_callback(
         conversation = resolve_active_conversation(per_tenant_bot_user)
         if conversation is None:
             logger.warning(
-                "marketplace.booking_callback.no_conversation tenant=%s trace=%s",
+                "marketplace.booking_callback.refused reason=no_conversation tenant=%s trace=%s",
                 tenant.id,
                 trace_id,
             )
-            return DiscoveryReply(text=_STALE_BOOKING_CALLBACK_REPLY)
+            return DiscoveryReply(text=_UNRESOLVED_BOOKING_CALLBACK_REPLY)
 
         # Re-carry on every tap: the day / part chips are separate turns and
         # each of them has to know what the user asked for out loud.
@@ -1188,7 +1201,14 @@ def route_booking_callback(
                 reason=result.handoff_reason or "booking_handoff",
             )
 
-    reply_text = (result.reply_text if result is not None else "") or _STALE_BOOKING_CALLBACK_REPLY
+    reply_text = result.reply_text if result is not None else ""
+    if not reply_text:
+        logger.warning(
+            "marketplace.booking_callback.refused reason=empty_skill_reply tenant=%s trace=%s",
+            tenant.id,
+            trace_id,
+        )
+        reply_text = _EMPTY_BOOKING_CALLBACK_REPLY
     action_data = result.action_data if result is not None else None
     return DiscoveryReply(text=reply_text, action_data=action_data)
 
