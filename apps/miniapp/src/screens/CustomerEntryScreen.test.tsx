@@ -263,6 +263,26 @@ describe("анкета на корне — одна для всех (DRF-1469)",
     ).toBeInTheDocument();
   });
 
+  it("выход и дорога дальше стоят рядом, а не вместо друг друга", async () => {
+    // `ASKING` приходит без `next` — там в панели один выход. Здесь
+    // сервер прислал и `next`: условие C-2 (DRF-1451) требует, чтобы
+    // кнопка рисовалась всегда, когда она есть в документе, и правка
+    // DRF-1469 не имеет права её вытеснить.
+    mockedFetch.mockResolvedValue({
+      ...ASKING,
+      next: { id: "browse_catalog", label: "Найти услугу" },
+    });
+    renderRoot(true);
+
+    await screen.findByText("Что сейчас хочется привести в порядок?");
+    const bar = screen.getByRole("region", { name: "Действие" });
+    expect(within(bar).getByRole("button", { name: "Найти услугу" })).toBeInTheDocument();
+    expect(within(bar).getByRole("button", { name: "Сменить режим" })).toBeInTheDocument();
+    // Панель стала в два ряда — под ней надо освободить на ряд больше,
+    // иначе она накроет хвост документа.
+    expect(document.querySelector("main.screen--tall-cta")).not.toBeNull();
+  });
+
   it("decision-context уходит С КОРНЯ, а не только с /customer/main", async () => {
     // Признак, по которому дефект и нашли в журнале nginx: с `/`
     // запрос не уходил ни разу, все обращения шли с `/customer/main`,
