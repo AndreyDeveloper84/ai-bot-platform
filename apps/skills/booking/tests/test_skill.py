@@ -1349,8 +1349,9 @@ class TestSlotPickCallback:
         }
         assert result.should_handoff is False
         assert "Подтверждаете?" in result.reply_text
-        row = PendingBookingAction.all_tenants.get(pk=result.action_data["pending_action"]["token"])
-        assert row.payload["master_id"] == master_uuid
+        assert result.action_data is not None
+        token = result.action_data["pending_action"]["token"]
+        assert PendingBookingAction.all_tenants.get(pk=token).payload["master_id"] == master_uuid
 
     def test_every_refusal_reason_gets_its_own_words(self) -> None:
         """The three refusal texts must not collapse back into one (DRF-1473).
