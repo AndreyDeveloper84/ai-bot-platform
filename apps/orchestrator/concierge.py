@@ -95,15 +95,16 @@ from apps.orchestrator.nutrition_global import (
     NUTRITION_TOOL_SPECS,
     execute_nutrition_tool,
 )
-from apps.orchestrator.refusal_memo import (
-    recall_refusals,
-    remember_refusal,
-    render_refusal_block,
-)
 from apps.orchestrator.personal_surface import (
     PERSONAL_TOOL_ACTIONS,
     SHOW_MY_RECORDS_TOOL_SPEC,
     execute_personal_tool,
+)
+from apps.orchestrator.refusal_memo import (
+    RefusedQuery,
+    recall_refusals,
+    remember_refusal,
+    render_refusal_block,
 )
 from apps.persona.voice import SURFACE_MARKETPLACE, assistant_identity
 
@@ -1384,7 +1385,7 @@ def _render_zero_result(
     )
 
 
-def _repeats_a_refusal(conversation: Any, message_text: str) -> Any:
+def _repeats_a_refusal(conversation: Any, message_text: str) -> RefusedQuery | None:
     """The refusal this turn repeats, or ``None`` — decided WITHOUT the model.
 
     The guarantee behind DRF-1474. The system-prompt block
