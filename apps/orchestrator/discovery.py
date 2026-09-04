@@ -536,8 +536,63 @@ def build_discovery_prompt(
 _MAX_ECHOED_QUERY_CHARS = 60
 
 
-def render_no_match(city: str | None = None, specialization: str | None = None) -> DiscoveryReply:
+def render_alternatives(
+    alternatives: list[str] | None, *, service: str = "", city: str = ""
+) -> str:
+    """The «here is what we DO have» sentence, or "" (DRF-1474).
+
+    One wording point, so the refusal renderer and any future caller cannot
+    phrase a substitution two ways.
+
+    The clause that earns this function its place is «это другие услуги, не
+    X». On the live turn of 04.09 the person asked for a manicure, was refused,
+    typed «массаж», and got a list of massage masters — correct, and yet the
+    transcript reads as though the bot had answered a nail request with a
+    massage list, because nothing anywhere said the two were different things.
+    A suggestion that does not name itself a suggestion is indistinguishable
+    from a silent swap, and the reader cannot tell which one they got.
+    """
+    names = [str(name).strip()[:_MAX_ECHOED_QUERY_CHARS] for name in (alternatives or [])]
+    names = [name for name in names if name]
+    if not names:
+        return ""
+    quoted = ", ".join(f"«{name}»" for name in names)
+    where = f" в городе {city.strip()[:_MAX_ECHOED_QUERY_CHARS]}" if city else ""
+    said = service.strip()[:_MAX_ECHOED_QUERY_CHARS]
+    # «Не X» only when we know what X was: without it the sentence would have
+    # to name the difference in the abstract, which says nothing.
+    unlike = f", а не «{said}»" if said else ""
+    return (
+        f"Это другие услуги{unlike}, но{where} они есть: {quoted}. "
+        "Показать мастеров по одной из них — или назовите другой город."
+    )
+
+
+def render_no_match(
+    city: str | None = None,
+    specialization: str | None = None,
+    *,
+    alternatives: list[str] | None = None,
+    already_refused: bool = False,
+) -> DiscoveryReply:
     """The honest refusal for a search that genuinely matched nobody (DRF-1283).
+
+    ### Naming the alternative (DRF-1474)
+
+    ``alternatives`` are service names the catalog really can serve here
+    (``apps.marketplace.discovery.city_service_samples``). Given them, the
+    refusal stops at a wall one sentence later than it used to: it says what
+    is not there, then what is — labelled, in words, as something else. Absent
+    them the wording is unchanged, because inventing an alternative is worse
+    than admitting there is none.
+
+    ``already_refused`` is set when this conversation has been told this exact
+    thing before (``apps.orchestrator.refusal_memo``). The fact does not
+    change on a repeat; the sentence does — repeating a refusal verbatim reads
+    as a loop, and the honest form of the second answer is to say that it IS
+    the same answer and spend the rest of the message moving forward.
+
+    ### The refusal itself (DRF-1283)
 
     The line this replaces — «По вашему запросу мастеров пока не нашлось —
     уточните город или услугу» — asked for the two things the user had most
@@ -560,19 +615,27 @@ def render_no_match(city: str | None = None, specialization: str | None = None) 
     """
     service = (specialization or "").strip()[:_MAX_ECHOED_QUERY_CHARS]
     place = (city or "").strip()[:_MAX_ECHOED_QUERY_CHARS]
+    offer = render_alternatives(alternatives, service=service, city=place)
+    if service and already_refused:
+        # The repeat. «Я уже отвечал» is not a rebuke — it is the one thing
+        # that tells the person the wall is the same wall and they have not
+        # been misheard again. The tail is the alternative, so the turn still
+        # goes somewhere; without one, the same closing question as below.
+        where = f" в городе {place}" if place else ""
+        text = f"Про «{service}»{where} я уже ответил: такого у наших мастеров нет."
+        tail = offer or "Назовите другую услугу или другой город, и я поищу ещё."
+        return DiscoveryReply(text=f"{text} {tail}"[:_MAX_REPLY_CHARS])
     if service and place:
         # «такого … нет», not «такой услуги … нет»: with both halves named we
         # know the COMBINATION matched nobody, not which half is missing —
         # the service may exist elsewhere, the city may have no masters yet.
         # Saying the narrower thing would be a confident guess.
-        text = (
-            f"«{service}» в городе {place} — такого у наших мастеров сейчас нет. "
-            "Назовите другую услугу или другой город, и я поищу ещё."
+        text = f"«{service}» в городе {place} — такого у наших мастеров сейчас нет. " + (
+            offer or "Назовите другую услугу или другой город, и я поищу ещё."
         )
     elif service:
-        text = (
-            f"«{service}» — такой услуги у наших мастеров сейчас нет. "
-            "Подскажите город или другую услугу, и я поищу ещё."
+        text = f"«{service}» — такой услуги у наших мастеров сейчас нет. " + (
+            offer or "Подскажите город или другую услугу, и я поищу ещё."
         )
     elif place:
         text = (

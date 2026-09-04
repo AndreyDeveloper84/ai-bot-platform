@@ -20,7 +20,19 @@ from typing import NamedTuple
 from uuid import UUID
 
 from django.core.paginator import Paginator
-from django.db.models import Case, Exists, F, IntegerField, Max, OuterRef, Q, QuerySet, Value, When
+from django.db.models import (
+    Case,
+    Count,
+    Exists,
+    F,
+    IntegerField,
+    Max,
+    OuterRef,
+    Q,
+    QuerySet,
+    Value,
+    When,
+)
 from django.db.models.expressions import CombinedExpression
 from django.db.models.functions import Coalesce
 
@@ -1365,6 +1377,55 @@ def discover_masters(
             for card in cards
         ]
     return cards
+
+
+# How many service names a refusal may name back as the alternative it CAN
+# serve. Three is the ceiling the salon cards already use
+# (``_SALON_SERVICE_SAMPLES``) and the reason is the same one: a refusal that
+# answers with a catalogue is a catalogue, and the system prompt forbids those
+# («никаких каталог-перечислений»). Three names read as «here is what we do
+# instead», twenty read as a price list.
+_CITY_SERVICE_SAMPLES = 3
+
+
+def city_service_samples(
+    city: str | None = None, *, limit: int = _CITY_SERVICE_SAMPLES
+) -> list[str]:
+    """Services that ARE bookable in ``city`` right now — at most ``limit`` names.
+
+    DRF-1474. The honest refusal («маникюра в Пензе нет») used to end at
+    «назовите другую услугу или другой город», which hands the person the job
+    of guessing what this marketplace actually does. On the live turn of
+    04.09 they guessed «массаж», it worked, and the transcript then reads as
+    though the bot had quietly answered a nail request with a massage list.
+
+    Naming the alternative is what makes it an alternative rather than a
+    substitution: the caller states these ARE something else, and states it in
+    the same breath as the refusal.
+
+    Ranked by how many bookable masters perform each service — «what most
+    people here can be booked for», not an editorial pick — with the name as
+    the tiebreak so the same catalog always yields the same three.
+
+    The SAME ``_bookable_qs`` predicate that produced the (empty) card list,
+    for the reason :func:`service_coverage` gives: a suggestion this function
+    makes must be something discovery would really find.
+    """
+    limit = max(1, min(int(limit), _CITY_SERVICE_SAMPLES))
+    rows = (
+        _bookable_qs(city=city)
+        .filter(_service_row_q())
+        .order_by()
+        .values("services_offered__service__name")
+        .annotate(masters=Count("id", distinct=True))
+        .order_by("-masters", "services_offered__service__name")[:limit]
+    )
+    names: list[str] = []
+    for row in rows:
+        name = str(row.get("services_offered__service__name") or "").strip()
+        if name:
+            names.append(name)
+    return names
 
 
 def discover_masters_page(
