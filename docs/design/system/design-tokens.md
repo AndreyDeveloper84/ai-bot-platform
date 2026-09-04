@@ -9,6 +9,12 @@
 | **Foundation** | [`ayla-identity-and-brand.md`](../policies/ayla-identity-and-brand.md) (§2.1 wordmark · §3 personality · §4.4 sage-green canon · §7.1 surface naming) · [`customer-main-wellness-dashboard.md`](../../screens/customer-main-wellness-dashboard.md) (§7 brand notes + §8 WCAG blockers) · [`customer-records-flow.md`](../../screens/customer-records-flow.md) (§6 status vocabulary) · [`customer-booking-flow.md`](../../screens/customer-booking-flow.md) (§11 a11y patterns) · [`customer-food-scanner-flow.md`](../../screens/customer-food-scanner-flow.md) (§1 voice foundation) · [`master-solo-surface.md`](../../screens/master-solo-surface.md) (provider-side) |
 | **Memory refs** | `project_ayla_brand_hybrid_usage` (2026-05-27 hybrid usage canon) · `project_ayla_personal_ai` (lowercase «ayla» + voice) · `project_pilot_scope_discipline` (locked scope) · `project_records_voice_principles` (status taxonomy) · `project_ayla_active_streams` (Sigma stream) |
 
+> **Поправка 04.09.2026 (DRF-1462).** §2–§4 переписаны: палитра переехала
+> на фиолетовую с борда DRF-1181 (решение владельца §21-ter), и HEX из
+> этого документа удалены — единственный источник цвета теперь
+> `apps/miniapp/src/styles/tokens.css`. Остальные секции не трогались;
+> старые имена токенов в §5 и §11 читаются по карте перехода в §2.5.
+
 > Canonical visual reference. Every customer-facing surface (Mini App customer Ayla, dashboard, booking flow, records, food scanner, push notifications, in-app headers) and provider-facing surface (Ayla Pro for solo Ольгу + team) consumes from this doc. W1 implementation references these tokens. Color, typography, spacing, radius, shadow, motion, icon strategy, component specs, wordmark, bot/channel asset distinction — single source.
 
 ---
@@ -53,137 +59,200 @@ Per memory `project_pilot_scope_discipline` — Sigma stays within locked scope:
 
 ---
 
-## § 2 · Color — Sage primary scale
+## § 2 · Цвет — один источник
 
-Primary canon per `ayla-identity-and-brand.md §4.4`. Anchor `#7ba478` (existing Tau dashboard §8) preserved as **sage-400 decorative**. WCAG-safe darker `#5a8557` preserved as **sage-500 text-safe**. Scale derived around these two anchors.
+> **Палитра больше не живёт в этом файле.** Единственный источник —
+> `apps/miniapp/src/styles/tokens.css`. Здесь только происхождение значений,
+> пересчитанные контрасты и карта перехода со старых имён.
+>
+> Так сделано намеренно. Аудит `docs/AUDIT_SOLO_MASTER_AND_COLORS.md` §2.1
+> нашёл палитру в **пяти** местах сразу — рантайм, этот документ, `DESIGN.md`
+> соседнего репозитория и два разных набора в Linear, — и с любым каноном
+> совпадали 2 переменные из 14. Держать здесь вторую копию HEX значило бы
+> договориться синхронизировать её вручную; ровно этого договора никто не
+> сдержал за три месяца. Таблица ниже — производная, а не источник, и её
+> цифры пересчитывает `tools/lint/miniapp_token_contrast.py` на каждом
+> прогоне CI.
 
-| Token | Hex | Purpose | WCAG vs white | WCAG vs sage-50 |
+### 2.1 · Откуда взяты значения
+
+Канон — борд задачи **DRF-1181** (Master App), решение владельца **§21-ter**
+от 04.09.2026 (`docs/OPEN_DECISIONS.md`). Оно отменяет §21-bis от 25.08
+(«Sage visual canon — RESTORED / CONFIRMED»): sage `#5a8557` каноном быть
+перестал. Область — **все три поверхности**: клиент, салон, мастер; своих HEX
+у клиентских и салонных бордов нет ни одного.
+
+На борде подписаны восемь значений:
+
+| Роль на борде | Подпись |
+|---|---|
+| Основной | `#5B68FF` |
+| Акцентный | `#22C55E` |
+| Предупреждение | `#F59E0B` |
+| Ошибка | `#EF4444` |
+| Текст | `#111827` |
+| Второстепенный | `#6B7280` |
+| Фон | `#F8FAFC` |
+| Граница | `#E5E7EB` |
+
+**За истину берётся подпись, не пиксель.** Борд машинно сгенерирован: в
+плоской кнопке 1128 различных цветов при однородности 0.5 %, и свотч,
+подписанный `#5B68FF`, отрисован как `#041FFA`. Пиксели с бордов не берутся
+ни при каких обстоятельствах.
+
+### 2.2 · Правило вывода — одно на всю палитру
+
+Ролей в коде четырнадцать, подписей на борде восемь. Разницу закрывает одно
+правило, применённое механически и одинаково в обеих темах:
+
+> тон (H) и насыщенность (S) подписанного значения сохраняются; светлота (L)
+> двигается на минимум, достаточный, чтобы дать **4.5:1** к худшей
+> поверхности своей темы.
+
+Подписанное значение, которое проходит как есть, стоит в `tokens.css`
+дословно. Сдвинутое помечено там же стрелкой на исходное — например
+`--c-accent: #4452ff; /* ← #5B68FF */`.
+
+Сдвиг понадобился, потому что подписи и доступность расходятся не на грани:
+`#22C55E` даёт 2.28:1 на белом, `#F59E0B` — 2.15:1, `#EF4444` — 3.76:1, а
+все три красят текст в `globals.css`. Сам основной `#5B68FF` даёт 4.31:1 —
+не проходит AA для основного текста, промахиваясь на 0.19. У sage такая
+работа была проделана и записана; у фиолетового её не было, и §21-ter п. 2
+прямо относит её к объёму задачи, а не к следующей.
+
+Шесть ролей подписи не имеют вовсе и выведены:
+
+| Роль | Как выведена |
+|---|---|
+| `--c-surface-1` | белый — карточка на подписанном фоне; так же на самом борде |
+| `--c-surface-2` | шаг ряда, из которого взяты три подписанных нейтрали (Граница = `gray-200`, Второстепенный = `gray-500`, Текст = `gray-900`) |
+| `--c-overlay` | подписанный «Текст» с альфой |
+| `--c-text-on-accent` | белый в светлой теме, подписанный «Текст» — в тёмной |
+| `--c-accent-pressed` | основной + 18 % чёрного (светлая) / белого (тёмная) |
+| `--c-accent-subtle` | основной 12 % на белом (светлая) / 18 % на фоне (тёмная) |
+
+### 2.3 · Тёмная тема — выведена, не перенесена
+
+Тёмной темы нет ни в каноне, ни на одном из 24 бордов, а в коде её
+четырнадцать переменных существуют и работают: MAX не даёт API темы, и
+`prefers-color-scheme` — единственный способ не выдать белый экран ночью.
+Сверять не с чем, поэтому значения выведены по правилу §2.2 плюс одно
+дополнительное:
+
+> два нейтральных полюса меняются местами. Фон тёмной темы — подписанный
+> «Текст» `#111827`; основной текст тёмной темы — подписанный «Фон»
+> `#F8FAFC`. Промежуточные поверхности берутся из того же ряда `gray`, из
+> которого взяты подписанные нейтрали.
+
+Побочный результат этого правила стоит назвать: на тёмном фоне подписанный
+«Акцентный» `#22C55E` проходит AA **дословно** — то есть в тёмной теме цвет
+борда стоит ровно как подписан, а сдвинут он только в светлой.
+
+Второй результат: `--c-text-on-accent` в тёмной теме перестаёт быть белым.
+Осветлённый основной `#9da5ff` даёт с белым 2.27:1; текст на нём — тёмный.
+
+**Это решение исполнителя, а не владельца.** Оно вынесено отдельным
+вопросом — см. `docs/OPEN_DECISIONS.md`.
+
+### 2.4 · Контрасты — пересчитаны
+
+Все пары взяты из `globals.css`, а не придуманы: каждая поверхность реально
+стоит в `background`, каждая роль — в `color`. Порог один — **WCAG 2.2 AA
+4.5:1** для основного текста: токен не знает, каким кеглем им покрасят.
+
+| Текст | На фоне | Светлая | Тёмная | WCAG AA 4.5:1 |
 |---|---|---|---|---|
-| `sage-50`  | `#f3f7f3` | App background tint, badge subtle fill | — (background) | — |
-| `sage-100` | `#e3ede1` | Success badge background, hover state subtle | 1.13:1 | — |
-| `sage-200` | `#c7d9c4` | Hairline border (emphasis), progress track filled, divider accent | 1.59:1 | 1.41:1 |
-| `sage-300` | `#a3bf9e` | Disabled state primary, decorative subdued | 2.36:1 | 2.09:1 |
-| `sage-400` | `#7ba478` | **Brand decorative primary** — pulse fills, sparkle accents, decorative only. **Fails 1.4.11 3:1 for UI state boundaries** — do NOT use for input borders, focus rings, or active-state indicators (use sage-500 instead) | **2.99:1** ⚠ decorative only | 2.65:1 |
-| `sage-500` | `#5a8557` | **Text-safe primary + UI boundary safe** — body links, button fill, status badge text, brand wordmark, input focus border, nav active indicator | **4.65:1** ✅ AA body | 4.11:1 |
-| `sage-600` | `#4a6e47` | Hover/pressed for sage-500, headings on white | **6.39:1** ✅ AAA body | 5.66:1 |
-| `sage-700` | `#3a5638` | High-emphasis text, success badge text on sage-100 fill | **9.21:1** ✅ AAA | 8.16:1 |
-| `sage-800` | `#2a3f29` | Dark surface text, max emphasis | **13.42:1** | 11.89:1 |
-| `sage-900` | `#1c2a1b` | (rare — primary text alternative if higher contrast required) | **17.81:1** | — |
+| `--c-text-primary` | `--c-bg` | 16.96:1 | 16.96:1 | ✅ обе |
+| `--c-text-primary` | `--c-surface-1` | 17.74:1 | 14.03:1 | ✅ обе |
+| `--c-text-primary` | `--c-surface-2` | 16.12:1 | 9.85:1 | ✅ обе |
+| `--c-text-secondary` | `--c-bg` | 4.76:1 | 7.78:1 | ✅ обе |
+| `--c-text-secondary` | `--c-surface-1` | 4.98:1 | 6.44:1 | ✅ обе |
+| `--c-text-secondary` | `--c-surface-2` | 4.52:1 | 4.52:1 | ✅ обе |
+| `--c-accent` | `--c-bg` | 5.15:1 | 7.82:1 | ✅ обе |
+| `--c-accent` | `--c-surface-1` | 5.39:1 | 6.47:1 | ✅ обе |
+| `--c-accent` | `--c-surface-2` | 4.90:1 | 4.54:1 | ✅ обе |
+| `--c-accent-pressed` | `--c-bg` | 6.94:1 | 9.19:1 | ✅ обе |
+| `--c-accent-pressed` | `--c-surface-1` | 7.26:1 | 7.60:1 | ✅ обе |
+| `--c-accent-pressed` | `--c-surface-2` | 6.60:1 | 5.34:1 | ✅ обе |
+| `--c-success` | `--c-bg` | 4.79:1 | 7.79:1 | ✅ обе |
+| `--c-success` | `--c-surface-1` | 5.01:1 | 6.44:1 | ✅ обе |
+| `--c-success` | `--c-surface-2` | 4.56:1 | 4.52:1 | ✅ обе |
+| `--c-warning` | `--c-bg` | 5.42:1 | 9.27:1 | ✅ обе |
+| `--c-warning` | `--c-surface-1` | 5.67:1 | 7.67:1 | ✅ обе |
+| `--c-warning` | `--c-surface-2` | 5.16:1 | 5.39:1 | ✅ обе |
+| `--c-danger` | `--c-bg` | 5.62:1 | 9.33:1 | ✅ обе |
+| `--c-danger` | `--c-surface-1` | 5.88:1 | 7.72:1 | ✅ обе |
+| `--c-danger` | `--c-surface-2` | 5.34:1 | 5.42:1 | ✅ обе |
+| `--c-text-primary` | `--c-accent-subtle` | 14.93:1 | 12.18:1 | ✅ обе |
+| `--c-accent` | `--c-accent-subtle` | 4.54:1 | 5.62:1 | ✅ обе |
+| `--c-accent-pressed` | `--c-accent-subtle` | 6.11:1 | 6.60:1 | ✅ обе |
+| `--c-text-on-accent` | `--c-accent` | 5.39:1 | 7.82:1 | ✅ обе |
+| `--c-text-on-accent` | `--c-accent-pressed` | 7.26:1 | 9.19:1 | ✅ обе |
+| `--c-text-on-accent` | `--c-success` | 5.01:1 | 7.79:1 | ✅ обе |
+| `--c-text-on-accent` | `--c-warning` | 5.67:1 | 9.27:1 | ✅ обе |
+| `--c-text-on-accent` | `--c-danger` | 5.88:1 | 9.33:1 | ✅ обе |
+| `--c-warning` | подложка 10 % на `--c-bg` | 4.73:1 | 7.78:1 | ✅ обе |
+| `--c-warning` | подложка 10 % на `--c-surface-1` | 4.95:1 | 6.34:1 | ✅ обе |
+| `--c-warning` | подложка 10 % на `--c-surface-2` | 4.52:1 | 4.51:1 | ✅ обе |
+| `--c-danger` | подложка 10 % на `--c-bg` | 4.74:1 | 7.79:1 | ✅ обе |
+| `--c-danger` | подложка 10 % на `--c-surface-1` | 4.94:1 | 6.28:1 | ✅ обе |
+| `--c-danger` | подложка 10 % на `--c-surface-2` | 4.50:1 | 4.52:1 | ✅ обе |
+| `--c-divider` | `--c-surface-1` | 1.24:1 | 1.94:1 | ❌ — только декоративная линия, см. ниже |
 
-### Usage anchors (per Tau docs cross-ref)
+**Граница — только декоративная линия.** `--c-divider` даёт 1.24:1 и
+использоваться единственной границей интерактивного элемента не может
+(WCAG 1.4.11 требует 3:1). Это ограничение унаследовано: у прежней палитры
+хайрлайн давал 1.34:1, у sage-канона — 1.27:1. Подпись борда сохранена как
+есть, а не поднята до 3:1, потому что подъём границы до тёмно-серой изменил
+бы вид каждой карточки — это уже не цвет токена, а решение по виду, и оно
+вынесено владельцу отдельным вопросом.
 
-| Anchor | Token | Source |
+**Цветной текст на подложке своего же цвета.** Шесть правил `globals.css`
+(`.callout--danger`, `.m6-bubble--failed`, `.unbookable-badge`,
+`.m-card__chip--warning`, `.admin-chip--warn`, `.m-notif__banner-warning`)
+кладут цветной текст на `color-mix` из него самого. Доли были 14 %, 18 % и
+20 %; все приведены к **10 %**. Иначе AA пришлось бы добирать затемнением
+самих токенов, и основной ушёл бы от подписи вдвое дальше — дешевле сделать
+подложку светлее, чем увести цвет владельца.
+
+### 2.5 · Карта перехода со старых имён
+
+Секции §2 (sage), §3 (warm) и §4 (amber / rose) удалены. Имена из них
+встречаются ниже по документу — в §5 и §11; читать их следует так:
+
+| Было | Стало | Замечание |
 |---|---|---|
-| Dashboard pulse fill (decorative) | `sage-400` | `customer-main-wellness-dashboard.md §8.2` |
-| Body text / button label on sage fill | white on `sage-500` | dashboard §8.2 — fixes 2.9:1 fail |
-| Wordmark «ayla» в Mini App header | `sage-500` | identity §4.4 + dashboard §7 |
-| Success status badge (Подтверждена / Прошла / Возврат завершён) | `sage-700` on `sage-100` fill | records §6 |
-| Brand accent decorative (sparkle ✨ placeholder) | `sage-400` | dashboard §7 |
-| Empty progress-bar track | `warm-300` (not sage) | dashboard §8 BLOCKER 6 |
-| Hover state for sage-500 button | `sage-600` | this doc |
-| Focus ring base | `sage-600` (≥3:1 non-text) — see § 8 `elev-focus` | a11y 1.4.11 / 2.4.11 |
-| Input border resting | `warm-500` (4.59:1 non-text) — see § 11 Input | a11y 1.4.11 |
-| Input focus border | `sage-500` (4.65:1) | a11y 1.4.11 |
-| Bottom-nav active indicator | `sage-500` underline (4.65:1) | a11y 1.4.11 |
+| `sage-400` / `sage-500` / `sage-600` | `--c-accent` / `--c-accent-pressed` | декоративного и текстового вариантов больше нет: одна роль, и она AA |
+| `sage-100` | `--c-accent-subtle` | |
+| `sage-700` | `--c-success` | |
+| `warm-50` | `--c-bg` | |
+| `warm-100` | `--c-surface-2` | |
+| `warm-200` / `--hairline` | `--c-divider` | по-прежнему только декоративная линия |
+| `warm-300` / `--track-empty` | `--c-divider` | |
+| `warm-400` | `--c-text-secondary` | плейсхолдер и вторичный текст слились в одну роль |
+| `warm-500` / `--ink-muted` / `--border-input` | `--c-text-secondary` | |
+| `warm-600` / `--ink-soft` | `--c-text-secondary` | |
+| `warm-700` / `warm-800` / `--ink` | `--c-text-primary` | |
+| `amber-100` / `amber-700` | `--c-warning` (подложка 10 % / текст) | |
+| `rose-100` / `rose-600` / `rose-700` | `--c-danger` (подложка 10 % / заливка / текст) | |
+| `--paper` | `--c-bg` | |
+| `--border-focus` | `--c-accent` | |
 
-### Anti-patterns
+### 2.6 · Что осталось верным из прежних §2–§4
 
-- ❌ Sage-400 для body text (2.99:1 fails AA 4.5:1)
-- ❌ Sage-400 для UI state boundaries (input borders, focus rings, active-state underlines) — fails 1.4.11 3:1 by 0.01. Use sage-500.
-- ❌ Sage-300 для anything text-bearing (disabled placeholder OK, не label)
-- ❌ Pure sage gradient on white (AI-cliché — flat sage с hairline border preferred)
-- ❌ Saturating sage further (current values calibrated против warm neutrals)
-- ❌ Mixing sage с purple bot avatar palette в same surface (§ 13 mix prohibition)
+Эти правила про смысл, а не про HEX, и переживают смену палитры:
 
----
-
-## § 3 · Color — Warm neutral scale
-
-Warm-tinted, NOT cool blue-grey (cool greys feel sterile / corporate — opposite of «подруга-эксперт»). Calibrated to harmonize с sage.
-
-| Token | Hex | Purpose | WCAG vs white |
-|---|---|---|---|
-| `warm-50`  | `#fafaf8` | App paper background (the dominant background) | — |
-| `warm-100` | `#f3f2ee` | Card background subtle, hover state ghost button | 1.07:1 |
-| `warm-200` | `#e8e6df` | Hairline border (the canonical card border), divider | 1.27:1 |
-| `warm-300` | `#d4d1c6` | Progress-bar track empty, input border resting | 1.71:1 |
-| `warm-400` | `#a8a499` | Placeholder text, muted icons, decorative chrome | 2.84:1 ⚠ non-text ok |
-| `warm-500` | `#7a766c` | Secondary text, caption text, supporting metadata | **4.59:1** ✅ AA body |
-| `warm-600` | `#54514a` | Long-form body text, dense paragraphs | **7.61:1** ✅ AAA |
-| `warm-700` | `#3a3833` | Primary body text default (the «ink» token alt for less stark feel than pure black) | **10.62:1** |
-| `warm-800` | `#25241f` | **Primary ink** — headings, dense data, max emphasis | **14.34:1** |
-| `warm-900` | `#161510` | Reserve — print, dark-mode flip if Phase 2+ | **17.69:1** |
-
-### Semantic aliases
-
-```
---paper:         warm-50  (background)
---ink:           warm-800 (primary text)
---ink-soft:      warm-600 (body text relaxed)
---ink-muted:     warm-500 (caption / secondary)
---ink-faint:     warm-400 (placeholder / decorative)
---hairline:      warm-200 (1dp decorative borders, dividers — paired with non-color affordance only)
---border-input:  warm-500 (4.59:1 — input borders, control boundaries needing 1.4.11)
---border-focus:  sage-500 (4.65:1 — focus state borders)
---track-empty:   warm-300 (progress track unfilled — fixes dashboard §8 BLOCKER 6)
-```
-
-**Important (a11y):** `--hairline` (warm-200 = 1.27:1 vs white) is permitted only as decorative reinforcement — never as the SOLE visual boundary of an interactive UI component. Use `--border-input` (warm-500) for input / control boundaries, or pair `--hairline` with shadow / fill differentiation.
-
-### Anti-patterns
-
-- ❌ Pure black `#000` (too stark for «подруга-эксперт» voice)
-- ❌ Cool grey `#666` / `#999` (sterile — breaks warm voice)
-- ❌ Pure white `#fff` for cards (use `warm-50` for paper, white only for card surfaces sitting on `warm-50`)
-
----
-
-## § 4 · Color — Semantic palette
-
-Status semantics with explicit cross-reference to Records § R4 vocabulary and Tau-shipped tints.
-
-### Named tokens (promoted from inline)
-
-| Token | Hex | WCAG vs white | Use |
-|---|---|---|---|
-| `amber-50`  | `#fbf6e9` | — (bg) | Warning subtle |
-| `amber-100` | `#f5ecd9` | 1.05:1 | Warning fill |
-| `amber-700` | `#7a5a1a` | 5.59:1 ✅ AA | Warning text |
-| `rose-50`   | `#fdf0ed` | — (bg) | Error subtle |
-| `rose-100`  | `#fbe6e3` | 1.05:1 | Error fill |
-| `rose-600`  | `#9a3320` | 6.48:1 ✅ AAA | Destructive button bg (white text passes 3.24:1 large only; pair with confirm modal — never primary tap) |
-| `rose-700`  | `#7a2516` | 9.43:1 ✅ AAA | Error text on rose-100 |
-
-### Semantic mapping
-
-| Semantic | Fill | Text | Used for |
-|---|---|---|---|
-| **Positive** | `sage-100` | `sage-700` | Подтверждена · Прошла · Возврат завершён · success toasts |
-| **Neutral lifecycle** | `warm-100` | `warm-600` | Отменена · Перенесена · Не состоялась · Возврат в обработке |
-| **Warning** | `amber-100` | `amber-700` | Отменена салоном · offline banner · stale data badge |
-| **Error (form-only)** | `rose-100` | `rose-700` | Input validation errors only — never use red for status badges per records §10.6 anti-pattern |
-| **Info** | `warm-100` | `warm-600` | Generic informational banner, partial-failure card |
-
-### Critical: NO red for status
-
-Per `customer-records-flow.md §10.6` and `§6.2`:
-> «Use «Отменена», «Не состоялась» (neutral lifecycle ends) — NOT red badges. Red = error, cancelled = neutral end. NEVER color-only.»
-
-Red is reserved for form input validation only — and even там paired с error icon + descriptive text. Cancellation / no-show / refund-pending — `warm-100/600` neutral.
-
-### Provider-cancelled badge — explicit founder refinement
-
-Per `project_records_voice_principles` (2026-05-26 founder review):
-> «provider_cancelled = neutral/warning, NOT sage-green positive — провайдер отменил это не success».
-
-Token: `#f5ecd9 → #7a5a1a` (warm-amber semantic), accompanied by `⚠` icon + text label «Отменена салоном».
-
-### Anti-patterns
-
-- ❌ Red for cancelled / no-show (anxiety, color-only error meaning)
-- ❌ Sage-green positive on provider-cancelled (wrong emotional valence — founder F2)
-- ❌ Color-only badge без icon + Russian label (WCAG 1.4.1)
-- ❌ Punitive red for any informational state
+- ❌ **Красный не используется для статуса.** «Отменена», «Не состоялась» —
+  нейтральный конец жизненного цикла, а не ошибка
+  (`customer-records-flow.md` §10.6). `--c-danger` — только валидация формы.
+- ❌ **«Отменена салоном» — предупреждение, не успех.** Решение владельца от
+  26.05 (`project_records_voice_principles`): «провайдер отменил — это не
+  success». Токен `--c-warning` плюс значок ⚠ и словесная подпись.
+- ❌ **Плашка одним только цветом, без значка и русской подписи** —
+  нарушение WCAG 1.4.1.
+- ❌ **Градиент на белом** — признак сгенерированного макета; плоская
+  заливка с хайрлайном предпочтительна.
+- ❌ **Чистый чёрный `#000`** для текста.
 
 ---
 
@@ -588,8 +657,8 @@ Pressed: warm-200 bg
 
 ```
 Same dimensions as primary
-Background: rose-600 (#9a3320)
-Hover: rose-700 (#7a2516)
+Background: rose-600 -> --c-danger
+Hover: rose-700 -> --c-danger (pressed state via opacity)
 Always paired with confirm modal — never direct destructive on single tap
 ```
 
@@ -1100,7 +1169,7 @@ Used on F3 confidence indicator (above) + future inline help. Touch-first behavi
 ```
 Container max-width: 240dp
 Padding: space-2 y / space-3 x
-Background: warm-700 (#3a3833)
+Background: warm-700 -> --c-text-primary
 Text: text-caption (13dp) weight-regular white
 Radius: radius-sm (4dp)
 Shadow: elev-2
@@ -1277,6 +1346,8 @@ Reasons purple wins at chat-list scale:
 ### Mix prohibition (founder explicit)
 
 > «Do not mix purple bot branding and sage-green app chrome в same app surface unless separately approved.»
+
+> **Поправка 04.09.2026 (DRF-1462).** Правило ниже построено на том, что интерфейс приложения — sage, а фиолетовый принадлежит только аватару бота. §21-ter это основание убрал: интерфейс теперь тоже фиолетовый, но **другой** — `--c-accent` `#4452ff` против `#7d63ef` у аватара. Запрет «не смешивать» потерял смысл, а два несогласованных фиолетовых рядом — новый вопрос, и он вынесен владельцу. До ответа ассеты аватара не трогаются.
 
 **Purple = channel identity. Sage-green = app UI identity.** Each lives in its own context. The only case где both appear adjacently is MAX rendering chat list (bot avatar adjacent to user's other chats) — that's not Ayla mixing colors, that's MAX UI.
 
