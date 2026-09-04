@@ -464,6 +464,28 @@ def _anketa_fsm_active(conversation: Any) -> bool:
     return bool(isinstance(state, dict) and state.get("nutrition_anketa"))
 
 
+def _food_correction_pending(conversation: Any) -> bool:
+    """Is a fresh «✏️ Уточнить» prompt still waiting for its answer? (DRF-1454)
+
+    Same shape as :func:`_anketa_fsm_active` and for the same reason: a question
+    the bot asked on the previous turn owns the answer that follows it. Without
+    this the correction the person types falls through to the concierge and is
+    forgotten — which was the whole reason the scanner kept re-asking.
+
+    Delegated to the skill so freshness is decided in one place: the skill
+    expires an unanswered prompt, and a stale record must not keep plain text
+    away from the concierge and the diary-request handler for good.
+    """
+
+    try:
+        from apps.skills.food_correction.skill import has_pending_correction
+
+        return has_pending_correction(conversation)
+    except Exception:  # noqa: BLE001 — a predicate must never break the turn
+        logger.exception("orchestrator.nutrition_global.correction_pending_check_failed")
+        return False
+
+
 def is_structured_nutrition_turn(
     *,
     text: str,
@@ -473,7 +495,8 @@ def is_structured_nutrition_turn(
     """Cheap predicate: is this turn owned by a nutrition skill deterministically?
 
     Free text is NEVER structured — it belongs to the concierge model
-    with the nutrition tools above.
+    with the nutrition tools above — with one exception per open question the
+    bot itself asked: an in-flight anketa step, or a pending food correction.
     """
 
     stripped = text.strip()
@@ -481,7 +504,7 @@ def is_structured_nutrition_turn(
         return True  # photo-only turn → food scanner
     if stripped == "/anketa" or stripped.startswith(_STRUCTURED_CALLBACK_PREFIXES):
         return True
-    return _anketa_fsm_active(conversation)
+    return _anketa_fsm_active(conversation) or _food_correction_pending(conversation)
 
 
 def try_handle_structured_nutrition_turn(
@@ -535,7 +558,18 @@ def try_handle_structured_nutrition_turn(
     candidates = [s for s in (_skill_by_name(n) for n in candidate_names) if s is not None]
     skill = next((s for s in candidates if s.matches(context)), None)
     if skill is None:
-        return None
+        # The predicate said «structured» and no skill claimed it after all.
+        # Before DRF-1454 that combination was impossible for plain text (an
+        # in-flight anketa claims ANY text), and returning None was right. A
+        # pending food correction is different: it claims only text shaped like
+        # its answer, so «что я ел сегодня» typed while a correction is open is
+        # structured-but-unclaimed — and used to skip the deterministic diary
+        # handler entirely for the ten minutes the prompt stayed open. A chip
+        # that leads to nothing is worse than no chip (DRF-1302), so the turn
+        # continues down the same ladder the non-structured branch uses.
+        return _try_handle_diary_request(
+            text=text, has_attachments=has_attachments, bot_user=bot_user, trace_id=trace_id
+        )
 
     if has_attachments and not text.strip() and getattr(skill, "name", None) == "food_scanner":
         # Photo turn: the scanner reads the bytes from a runtime attribute

@@ -240,6 +240,26 @@ def golden_run(monkeypatch, fake_redis, golden_tenant, settings):
                     tripwire.attempts.clear()
                     model_probe.requests.clear()
 
+                    # Declared dialogue state — the same pattern as
+                    # prior_texts, one level down. Some turns are only
+                    # meaningful with state an earlier turn wrote: the
+                    # correction callback is answered from the scanner's
+                    # last-card stash (DRF-1454), and without it the honest
+                    # answer is the stale-card refusal, not the prompt.
+                    # ``input.skill_state`` is a free-form key the fixture
+                    # schema already tolerates, like ``prior_texts``.
+                    seed = fixture.input.get("skill_state") or {}
+                    if seed:
+                        from apps.conversations.services import (
+                            resolve_active_conversation,
+                            write_skill_state,
+                        )
+
+                        conversation = resolve_active_conversation(bot_user, create_if_missing=True)
+                        assert conversation is not None
+                        for subkey, value in seed.items():
+                            write_skill_state(conversation, subkey, value)
+
                     try:
                         max_handler.handle_max_event(
                             build_max_payload(

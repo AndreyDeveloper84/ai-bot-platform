@@ -153,6 +153,8 @@ class TestGoldenFixtureSet:
           - Sprint 9 / Q2 (DRF-829): +35 (5 per skill × 7 new skills)
           - E2E-BOT-02A: +4 booking (personal lookup / booking-rules
             FAQ / reschedule / cancel routing boundary)
+          - DRF-1454: +1 food_correction (cb_stale_card — honest refusal
+            when the correction button outlives its card)
         """
         from pathlib import Path
 
@@ -160,7 +162,7 @@ class TestGoldenFixtureSet:
 
         root = Path(__file__).resolve().parents[1] / "fixtures" / "golden"
         fixtures = load_fixture_set(root)
-        assert len(fixtures) == 80, f"expected 80 golden fixtures, got {len(fixtures)}"
+        assert len(fixtures) == 81, f"expected 81 golden fixtures, got {len(fixtures)}"
 
     def test_balanced_per_category(self):
         from pathlib import Path
@@ -192,7 +194,7 @@ class TestGoldenFixtureSet:
         # Sprint 9 / Q2 (DRF-829) — 5 fixtures per Sprint 9 skill.
         assert len(food_clarify) == 5
         assert len(food_scanner) == 5
-        assert len(food_correction) == 5
+        assert len(food_correction) == 6  # 5 Sprint 9 + cb_stale_card (DRF-1454)
         assert len(water) == 5
         assert len(health_screening) == 5
         assert len(nutrition_anketa) == 5

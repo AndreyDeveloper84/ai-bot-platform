@@ -755,7 +755,7 @@ class TestFoodGoldenFixturesStillReplay:
     def test_the_fixture_sets_are_the_real_ones(self):
         """Стража сторожа: перебор ниже читает настоящие YAML."""
         counts = {name: len(list(self._fixtures(name))) for name in self.SETS}
-        assert counts == {"food_scanner": 5, "food_clarify": 5, "food_correction": 5}, counts
+        assert counts == {"food_scanner": 5, "food_clarify": 5, "food_correction": 6}, counts
 
     def test_the_replayed_subset_is_exactly_the_callback_shaped_fixtures(self):
         """Что именно перебирается ниже — и почему не все пятнадцать.
@@ -780,6 +780,7 @@ class TestFoodGoldenFixturesStillReplay:
             "food_correction_cb_grams",
             "food_correction_cb_macros",
             "food_correction_cb_name",
+            "food_correction_cb_stale_card",
             "food_correction_distinct_prompts",
             "food_correction_unknown_field",
             "food_scanner_cb_clarify",
@@ -804,6 +805,15 @@ class TestFoodGoldenFixturesStillReplay:
                 uid += 1
                 replayed += 1
                 _, conversation = self._consented_user(uid)
+                # Посев диалогового состояния, как в штатном гейте
+                # (``input.skill_state``, DRF-1454): коллбэк правки
+                # отвечается из карточки сканера, без неё честный отказ.
+                seed = fixture.input.get("skill_state") or {}
+                if seed:
+                    state = dict(conversation.skill_state or {})
+                    state.update(seed)
+                    conversation.skill_state = state
+                    conversation.save(update_fields=["skill_state"])
                 before = len(sent)
                 max_handler.handle_global_max_event(
                     _tap(payload=text, user_id=uid, callback_id=f"fx-{uid}")
@@ -833,5 +843,5 @@ class TestFoodGoldenFixturesStillReplay:
                     failures.append(f"{set_name}/{fixture.name}: сырой payload в истории: {raw}")
 
         # Положительная стража: перебор действительно что-то прогнал.
-        assert replayed == 11, replayed
+        assert replayed == 12, replayed
         assert not failures, failures

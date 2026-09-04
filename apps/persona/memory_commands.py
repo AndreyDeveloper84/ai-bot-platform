@@ -148,6 +148,27 @@ _KEY_KEYWORDS: dict[str, tuple[str, ...]] = {
     "favorite_masters": ("мастер",),
 }
 
+# Scanner-correction keys (DRF-1454) carry the dish in the key itself
+# («food_dish_name:борщ»), so they cannot be listed in _KEY_KEYWORDS verbatim —
+# and unlisted they were unforgettable: «забудь всё про питание» removed only
+# the diet rows, answered «Готово — забыла всё, что знала: питание», and left
+# the food_* rows alive (review, architecture axis: 152-ФЗ + ADR-0011 §8).
+# They ARE the «питание» domain: one person, one word, one erasure.
+#
+# Only ``food_dish_name:`` is written today (owner decision 2026-09-04, variant
+# А — see ``food_memory.REMEMBERED_FIELDS``); the other two stay listed as
+# guards, so that whatever DRF-825 revives is erasable from its first row.
+_FOOD_KEY_PREFIXES = ("food_portion:", "food_dish_name:", "food_macros:")
+
+
+def _domain_of(key: str) -> str:
+    """The forget-domain a memory key belongs to (food_* keys → «diet»)."""
+
+    if key.startswith(_FOOD_KEY_PREFIXES):
+        return "diet"
+    return key
+
+
 # Human label per domain for the domain-forget acknowledgement — naming the
 # DOMAIN, not a stored row (the first live row may be a superseded value and
 # would mislabel what was forgotten).
@@ -318,8 +339,10 @@ def memory_show_chips(bot_user, *, user_id: uuid.UUID | None = None) -> list[dic
     for fact in read_current_view(resolved).green_facts:
         content = fact.content if isinstance(fact.content, dict) else {}
         key = content.get("key")
-        if isinstance(key, str) and key in _DOMAIN_LABELS and key not in keys:
-            keys.append(key)
+        if isinstance(key, str):
+            domain = _domain_of(key)
+            if domain in _DOMAIN_LABELS and domain not in keys:
+                keys.append(domain)
     return [
         {"label": f"Забыть: {_DOMAIN_LABELS[key]}", "callback": f"забудь {_DOMAIN_LABELS[key]}"}
         for key in keys[:MAX_FORGET_CHIPS]
@@ -502,16 +525,21 @@ def handle_memory_command(
             label = describe_green_content(fact_matched[0].content) or "это"
             return MemoryCommandResult(text=f"Готово — забыла: {label}.")
 
-        domain_keys = sorted(
-            {
-                k
-                for e in entries
-                if (k := _entry_key(e)) is not None
-                and any(kw in target for kw in _KEY_KEYWORDS.get(k, ()))
-            }
-        )
+        matched_domains: set[str] = set()
+        for e in entries:
+            entry_key = _entry_key(e)
+            if entry_key is None:
+                continue
+            domain = _domain_of(entry_key)
+            if any(kw in target for kw in _KEY_KEYWORDS.get(domain, ())):
+                matched_domains.add(domain)
+        domain_keys = sorted(matched_domains)
         if len(domain_keys) == 1:
-            doomed = [e for e in entries if _entry_key(e) == domain_keys[0]]
+            doomed = [
+                e
+                for e in entries
+                if (k := _entry_key(e)) is not None and _domain_of(k) == domain_keys[0]
+            ]
             soft_delete_green_entries(user_id, [e.id for e in doomed])
             _bridge_clear(bot_user, domain_keys)
             label = _DOMAIN_LABELS.get(domain_keys[0], domain_keys[0])

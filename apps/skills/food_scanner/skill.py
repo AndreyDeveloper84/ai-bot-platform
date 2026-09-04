@@ -34,6 +34,27 @@ a scan entry-point that takes bytes via a context-meta passthrough.
      P5 food_correction skill takes over on the next turn.
    * ``reject`` → silent ack.
 
+## Memory (DRF-1454)
+
+Until this ticket the scanner had none: every photo started from a blank slate,
+so it re-asked what the person had already corrected. Three hooks now run on the
+photo/callback paths, all best-effort and all through
+:mod:`apps.orchestrator.memory.food`, which owns the zone decision:
+
+* before rendering a card — ``recall_corrections`` adds at most one line with
+  the name this person gave this dish (🟢 green, ``explicit`` only). Only the
+  name: weight and macros belong to Ayla's diary and are not kept by the bot
+  (owner decision 2026-09-04, variant А — see ``food_memory.REMEMBERED_FIELDS``);
+* on every recognised dish — ``note_meal`` declares meal history 🟡 yellow and
+  refuses to store it: the diary belongs to Ayla behind the HEALTH consent, and
+  a second copy here would be the same profile on a weaker basis;
+* on ``reject`` — ``note_recognition_rejected`` records «мы распознали не то» as
+  a quality signal, never as «он это не ест».
+
+The dish behind a card is stashed in ``Conversation.skill_state`` under
+:data:`LAST_CARD_STATE_KEY` so the correction callback — which carries only a
+``scan_id`` — can key memory on it.
+
 ## Scope cut (vs mysite source)
 
 Skipped for Sprint 9 — folded into P5 or Phase 1:
@@ -62,6 +83,7 @@ from apps.integrations.ayla import (
     external_user_id_for,
     get_nutrition_client,
 )
+from apps.orchestrator.memory import food as food_memory
 from apps.orchestrator.ui.keyboards import (
     food_recognition_keyboard,
     parse_callback,
@@ -70,6 +92,12 @@ from apps.skills.base import SkillContext, SkillResult
 from apps.skills.registry import register
 
 logger = logging.getLogger(__name__)
+
+# ``Conversation.skill_state`` sub-key holding the card we last rendered
+# (DRF-1454). Dialogue state, not memory: the callbacks that follow a card
+# carry only a ``scan_id``, and memory is keyed on the dish — this is the only
+# place the two are tied together. Read by the food_correction skill.
+LAST_CARD_STATE_KEY = "food_scan"
 
 
 # ─── reply templates ──────────────────────────────────────────────────────
@@ -186,13 +214,23 @@ class FoodScannerSkill:
                 meta={"reply_kind": "food_scanner_error"},
             )
 
-        reply = _format_scan_card(scan)
+        # DRF-1454 — memory, in the order that keeps the turn cheap and honest:
+        # read what this person already told us about this dish, declare the
+        # meal-history zone (and refuse to store it), then tie scan_id → dish so
+        # the correction callback that may follow knows what it is about.
+        dish = scan.dish_name or ""
+        recall = food_memory.recall_corrections(context.bot_user, dish=dish)
+        food_memory.note_meal(context.bot_user, dish=dish)
+        _stash_last_card(context, scan)
+
+        reply = _format_scan_card(scan, recall)
         return SkillResult(
             reply_text=reply,
             action_type="food_scan_card",
             action_data={
                 "scan_id": scan.scan_id,
                 "dish_name": scan.dish_name,
+                "remembered": not recall.is_empty(),
                 "buttons": food_recognition_keyboard(scan.scan_id),
             },
             meta={"reply_kind": "food_scanner_card"},
@@ -226,6 +264,10 @@ class FoodScannerSkill:
                 return gate
 
         if action == "reject":
+            # «Не то» is a verdict on the recogniser, not on the person's diet —
+            # see food_memory.note_recognition_rejected for why it is a quality
+            # signal and never a stored fact.
+            food_memory.note_recognition_rejected(context.bot_user, scan_id=scan_id)
             return SkillResult(
                 reply_text=REJECTED_ACK,
                 meta={"reply_kind": "food_scanner_rejected"},
@@ -365,14 +407,62 @@ def _check_gates(
     return None
 
 
-def _format_scan_card(scan) -> str:
+def _stash_last_card(context: SkillContext, scan) -> None:
+    """Tie ``scan_id`` → dish in ``Conversation.skill_state``. Best-effort.
+
+    The ``cb:food:correct:{field}:{scan_id}`` callback carries no dish name, and
+    memory is keyed on the dish — without this stash a correction has nothing to
+    attach to. ``write_skill_state`` needs a tenant in scope and a persisted
+    Conversation, neither of which holds on every dispatch path, so a failure
+    degrades to the pre-DRF-1454 behaviour (one re-ask) rather than costing the
+    reply: by this point the turn's idempotency key is already claimed.
+    """
+
+    try:
+        from apps.conversations.services import write_skill_state
+
+        write_skill_state(
+            context.conversation,
+            LAST_CARD_STATE_KEY,
+            {"scan_id": scan.scan_id, "dish": scan.dish_name or ""},
+        )
+    except Exception:  # noqa: BLE001 — degraded memory beats a lost reply
+        logger.debug(
+            "food_scanner.card_stash_skipped conversation=%s",
+            getattr(context.conversation, "id", None),
+        )
+
+
+def _memory_line(recall: food_memory.FoodRecall) -> str:
+    """One line for the name this person gave this dish, or ``""``.
+
+    One line, never more: the card's job is still «записать в дневник?», and a
+    memory that pushes the question off the screen has stopped helping.
+
+    Ayla's own numbers above it are printed unchanged, and there is nothing here
+    that could contradict them: the bot keeps no portion and no macros of its
+    own (``food_memory.REMEMBERED_FIELDS``). Two figures for one meal — one on
+    the card, another in the diary — is exactly what variant А removed.
+    """
+
+    if not recall.dish_name:
+        return ""
+    return f"Помню с прошлого раза: «{recall.dish_name}»."
+
+
+def _format_scan_card(scan, recall: food_memory.FoodRecall | None = None) -> str:
     """User-facing recognition card text.
 
     Voice mirrors D1 ``FOOD_RECOGNITION_EXAMPLES`` — terse, friendly,
     ends with the implicit question (the buttons answer it). When
     confidence is low (<0.6) we lead with a hedge so the user is
     primed to use the ✏️ Уточнить button.
+
+    ``recall`` (DRF-1454) adds at most one line: what this person already
+    corrected for this dish. Defaulting it to ``None`` keeps the pre-memory
+    output byte-identical for every caller that does not pass it.
     """
+    recall = recall or food_memory.EMPTY_RECALL
     dish = scan.dish_name or "блюдо"
     portion = scan.portion_g or 0
     nutrition = scan.nutrition or {}
@@ -395,5 +485,8 @@ def _format_scan_card(scan) -> str:
         if carbs is not None:
             macros_line += f" · У {int(carbs)}"
         parts.append(macros_line)
+    memory_line = _memory_line(recall)
+    if memory_line:
+        parts.append(memory_line)
     parts.append("Записать в дневник?")
     return "\n".join(parts)
