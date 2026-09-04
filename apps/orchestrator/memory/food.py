@@ -15,13 +15,21 @@ consent and needs no per-entry ``consent_at``; yellow/red require one and are no
 actively collected in the pilot. Food is more sensitive than an ordinary
 preference, so nothing here defaults to green.
 
-* **«что уже уточнял» → GREEN.** A correction the person typed into *our*
+* **«как это блюдо называется» → GREEN.** The name a person typed into *our*
   recognition card is a record about *our own* behaviour: «for this dish we
   already asked, and this is the answer we were given». It exists to stop the bot
   asking twice — the service-contract basis green was defined for (ADR-0011 §11).
-  The boundary is deliberate and narrow: we keep the **calibration** (dish →
-  corrected portion / name / macros), never the **event** (that it was eaten, and
-  when). A calibration is not a diary.
+  It is a naming preference, not a measurement: nothing about the meal, its size
+  or its nutrition is inferable from «этот салат я называю „греческий“».
+
+  **Weight and macros are NOT kept — owner decision of 2026-09-04, variant А.**
+  They belong to the nutrition diary, and by the ADR-0009 ownership matrix the
+  diary is Ayla's, not the bot's. Until ``nutrition_client`` grows an update
+  endpoint (DRF-825) a corrected portion has no way to reach the canonical
+  record, so keeping it here would produce two diverging numbers for one meal:
+  «помню 500 г» on the card while ``log_meal`` files Ayla's 250. One source of
+  truth is worth more than an early feature — see
+  :data:`REMEMBERED_FIELDS`.
 
 * **«что ел» → YELLOW, therefore not stored here.** A dated log of meals is not a
   preference; accumulated it *is* a nutrition profile — and that profile already
@@ -149,15 +157,31 @@ FIELD_GRAMS = "grams"
 FIELD_NAME = "name"
 FIELD_MACROS = "macros"
 
+#: Every field the ✏️ card can ask about. This is the PROMPT vocabulary: all
+#: three questions are still asked, and all three answers are still claimed by
+#: the food_correction skill instead of falling through to the concierge.
 CORRECTION_FIELDS: tuple[str, ...] = (FIELD_GRAMS, FIELD_NAME, FIELD_MACROS)
 
-# One memory key per (field, dish). Unknown keys are single-cardinality by
-# default in ``memory_key_policy``, which is exactly what a calibration wants:
-# one current portion per dish, superseded (not duplicated) when re-corrected.
+#: ...of which the bot is allowed to REMEMBER exactly one.
+#:
+#: Owner decision of 2026-09-04 (variant А, Q-NUTRITION-01): weight and macros
+#: are diary data, and by the ADR-0009 ownership matrix the nutrition diary
+#: belongs to Ayla. ``nutrition_client`` has no update endpoint yet — it arrives
+#: with DRF-825 — so a portion corrected here could never reach the canonical
+#: record, and storing it locally would leave two diverging numbers for one
+#: meal (rules 1 and 5 of ADR-0009). The dish NAME has no such owner: it is a
+#: naming preference about our own recognition, so it stays.
+#:
+#: When DRF-825 lands, the portion correction goes to Ayla — not into this
+#: tuple.
+REMEMBERED_FIELDS: tuple[str, ...] = (FIELD_NAME,)
+
+# One memory key per (field, dish) — one key, because one field is remembered.
+# Unknown keys are single-cardinality by default in ``memory_key_policy``, which
+# is exactly what a calibration wants: one current name per dish, superseded
+# (not duplicated) when re-corrected.
 _KEY_PREFIX: dict[str, str] = {
-    FIELD_GRAMS: "food_portion",
     FIELD_NAME: "food_dish_name",
-    FIELD_MACROS: "food_macros",
 }
 
 _WRITE_PURPOSE = "food_scanner:clarification"
@@ -166,8 +190,10 @@ _MEMORY_KIND = "preference"
 # Longest dish name we will key on. A name longer than this is not a dish, and a
 # memory key is not a place to put a paragraph.
 _MAX_DISH_LEN = 64
-# A plate is not a sack of potatoes: an out-of-range number is a typo, not a
-# portion, and storing it would poison the next card.
+# Sanity bounds for the two answers we read but do not keep (see
+# REMEMBERED_FIELDS): they still have to be READ, because the reply quotes the
+# number back and an unreadable answer must re-ask rather than acknowledge.
+# A plate is not a sack of potatoes — an out-of-range number is a typo.
 _MIN_GRAMS = 1
 _MAX_GRAMS = 5000
 # One macro of one plate. Its job is to reject a date typed into the macros
@@ -213,6 +239,8 @@ class Outcome(str, Enum):
     CAP_REACHED = "cap_reached"
     #: yellow/red perimeter — classified, logged, deliberately not stored.
     DROPPED_SENSITIVE = "dropped_sensitive"
+    #: the field is not ours to keep — see REMEMBERED_FIELDS (weight / macros).
+    NOT_REMEMBERED = "not_remembered"
     NO_CONSENT = "no_consent"
     NO_IDENTITY = "no_identity"
     FORGOTTEN = "forgotten"
@@ -356,7 +384,7 @@ def _memory_key(field: str, dish_slug: str) -> str | None:
     return f"{prefix}:{dish_slug}"
 
 
-def _display(field: str, dish_display: str, value: Any) -> str:
+def _display(dish_display: str, value: Any) -> str:
     """The phrase the person sees for this row in «покажи, что помнишь».
 
     Stored ON the row because that is the convention
@@ -376,13 +404,12 @@ def _display(field: str, dish_display: str, value: Any) -> str:
     key: the chat says «Куриная грудка», and the list must not answer with
     «куриная грудка» (review DRF-1454). The KEY stays lowercased — matching
     is ours, spelling is theirs.
+
+    One phrase and no ``field`` argument, because :data:`REMEMBERED_FIELDS`
+    holds one field.
     """
 
-    if field == FIELD_GRAMS:
-        return f"порция «{dish_display}» — {value} г"
-    if field == FIELD_NAME:
-        return f"блюдо «{dish_display}» называет «{value}»"
-    return f"БЖУ для «{dish_display}» — {value}"
+    return f"блюдо «{dish_display}» называет «{value}»"
 
 
 # ─── read side ─────────────────────────────────────────────────────────────
@@ -392,27 +419,24 @@ def _display(field: str, dish_display: str, value: Any) -> str:
 class FoodRecall:
     """What we already clarified with this person about this dish.
 
-    Only fields whose stored provenance is in :data:`ayla_ai_core.STATED_SOURCES`
+    One field, mirroring :data:`REMEMBERED_FIELDS`: the name. Weight and macros
+    are asked and answered but never kept, so there is nothing to recall for
+    them and :meth:`has` says ``False`` — which is what makes the card ask
+    about them again instead of quoting a number nobody stands behind.
+
+    Only values whose stored provenance is in :data:`ayla_ai_core.STATED_SOURCES`
     reach this object — everything here is safe to attribute to the person.
     """
 
-    portion_g: int | None = None
     dish_name: str | None = None
-    macros: str | None = None
 
     def is_empty(self) -> bool:
-        return self.portion_g is None and self.dish_name is None and self.macros is None
+        return self.dish_name is None
 
     def has(self, field: str) -> bool:
         """Was ``field`` already clarified for this dish? Drives «не переспрашивать»."""
 
-        if field == FIELD_GRAMS:
-            return self.portion_g is not None
-        if field == FIELD_NAME:
-            return self.dish_name is not None
-        if field == FIELD_MACROS:
-            return self.macros is not None
-        return False
+        return field == FIELD_NAME and self.dish_name is not None
 
 
 EMPTY_RECALL = FoodRecall()
@@ -443,7 +467,7 @@ def recall_corrections(bot_user: Any, *, dish: str) -> FoodRecall:
 
         wanted = {
             _memory_key(field, dish_slug): field
-            for field in CORRECTION_FIELDS
+            for field in REMEMBERED_FIELDS
             if _memory_key(field, dish_slug)
         }
         found: dict[str, Any] = {}
@@ -459,16 +483,12 @@ def recall_corrections(bot_user: Any, *, dish: str) -> FoodRecall:
                 continue
             found[field] = content.get("value")
 
-        recall = FoodRecall(
-            portion_g=_as_grams(found.get(FIELD_GRAMS)),
-            dish_name=_as_text(found.get(FIELD_NAME)),
-            macros=_as_text(found.get(FIELD_MACROS)),
-        )
+        recall = FoodRecall(dish_name=_as_text(found.get(FIELD_NAME)))
         if not recall.is_empty():
             logger.info(
                 "food_memory.recall bot_user=%s fields=%s",
                 getattr(bot_user, "id", "?"),
-                sorted(f for f in CORRECTION_FIELDS if recall.has(f)),
+                sorted(f for f in REMEMBERED_FIELDS if recall.has(f)),
             )
         return recall
     except Exception:  # noqa: BLE001 — memory recall must never break the turn
@@ -477,16 +497,6 @@ def recall_corrections(bot_user: Any, *, dish: str) -> FoodRecall:
             getattr(bot_user, "id", "?"),
         )
         return EMPTY_RECALL
-
-
-def _as_grams(raw: Any) -> int | None:
-    if isinstance(raw, bool) or not isinstance(raw, (int, str)):
-        return None
-    try:
-        grams = int(raw)
-    except (TypeError, ValueError):
-        return None
-    return grams if _MIN_GRAMS <= grams <= _MAX_GRAMS else None
 
 
 def _as_text(raw: Any) -> str | None:
@@ -514,11 +524,27 @@ def _existing_ayla_user_id(bot_user: Any) -> uuid.UUID | None:
 def remember_correction(bot_user: Any, *, dish: str, field: str, value: Any) -> Outcome:
     """Persist one correction as a green ``MemoryEntry``. Never raises.
 
-    Gate order mirrors :func:`apps.orchestrator.memory.personal_context.
-    record_explicit_green_facts` and for the same reason (owner ruling J-O3):
-    consent first, then the parsed value, and only then identity — a turn that
-    ends up storing nothing must not mint a permanent Ayla subject.
+    Ownership first: a field outside :data:`REMEMBERED_FIELDS` is somebody
+    else's data and returns :attr:`Outcome.NOT_REMEMBERED` before anything is
+    read, resolved or written. The check lives HERE rather than in the calling
+    skill so that the policy has one home — a second caller cannot acquire a
+    different opinion about who owns the nutrition diary.
+
+    Gate order after that mirrors :func:`apps.orchestrator.memory.
+    personal_context.record_explicit_green_facts` and for the same reason (owner
+    ruling J-O3): consent first, then the parsed value, and only then identity —
+    a turn that ends up storing nothing must not mint a permanent Ayla subject.
     """
+
+    if field not in REMEMBERED_FIELDS:
+        # Counted, never stored — the same shape as the yellow/red perimeter,
+        # for the same kind of reason: the data has an owner and it is not us.
+        logger.info(
+            "food_memory.not_remembered field=%s bot_user=%s stored=0 owner=ayla_diary",
+            field,
+            getattr(bot_user, "id", "?"),
+        )
+        return Outcome.NOT_REMEMBERED
 
     dish_slug = _dish_slug(dish)
     key = _memory_key(field, dish_slug)
@@ -552,9 +578,10 @@ def remember_correction(bot_user: Any, *, dish: str, field: str, value: Any) -> 
 
         # Superseded rows are still «live» to the reader (it filters only on the
         # delete columns), and letting them into the dedup made a return to an
-        # earlier value silently impossible: 500 → 250 → 500 matched the first,
-        # dead row, answered «Запомнила: 500 г», and left 250 as the current
-        # value. Dedup therefore compares against the CURRENT fact set only —
+        # earlier value silently impossible: «плов» → «плов узбекский» → «плов»
+        # matched the first, dead row, answered «Запомнила», and left «плов
+        # узбекский» as the current value. Dedup therefore compares against the
+        # CURRENT fact set only —
         # the same set ``recall_corrections`` will read back — so a DUPLICATE
         # verdict means «this is already what we would tell you», never «we once
         # heard this». Excluding them also bounds the scan by number of dishes
@@ -597,7 +624,7 @@ def remember_correction(bot_user: Any, *, dish: str, field: str, value: Any) -> 
                 "field": field,
                 # Makes the row visible in «покажи, что помнишь» — see _display.
                 # The dish keeps the person's spelling; the key stays a slug.
-                "display": _display(field, _clean_name(dish) or dish_slug, value),
+                "display": _display(_clean_name(dish) or dish_slug, value),
             },
             request_id=uuid.uuid4(),
             purpose=_WRITE_PURPOSE,
@@ -607,8 +634,8 @@ def remember_correction(bot_user: Any, *, dish: str, field: str, value: Any) -> 
             return Outcome.ERROR
 
         # A re-correction of the same dish replaces the previous one instead of
-        # coexisting with it: two portions for one dish is a contradiction the
-        # card would otherwise have to choose between (DRF-1261 «исправляю»).
+        # coexisting with it: two names for one dish is a contradiction the card
+        # would otherwise have to choose between (DRF-1261 «исправляю»).
         displaced = [
             row
             for row in live_rows

@@ -179,12 +179,18 @@ def describe_green_content(content: dict) -> str | None:
 
 # Scanner-correction keys (DRF-1454) are read where they belong — the scanner
 # card, through ``apps.orchestrator.memory.food.recall_corrections``. They
-# must not ALSO ride every concierge prompt: 20 dishes × 3 fields = up to 60
-# phrases like «порция «борщ» — 500 г» in every conversation, including ones
-# with no food in them (review DRF-1454 — found independently by two axes).
-# The exclusion also closes the rollback hole: accumulated rows kept rendering
-# after FOOD_SCANNER_MEMORY_ENABLED was flipped off. They stay visible in
-# «покажи, что помнишь» — that surface is the person's; this one is the model's.
+# must not ALSO ride every concierge prompt: up to 20 dishes' worth of phrases
+# like «блюдо «борщ» называет «борщ по-домашнему»» in every conversation,
+# including ones with no food in them (review DRF-1454 — found independently by
+# two axes). The exclusion also closes the rollback hole: accumulated rows kept
+# rendering after FOOD_SCANNER_MEMORY_ENABLED was flipped off. They stay visible
+# in «покажи, что помнишь» — that surface is the person's; this one is the
+# model's.
+#
+# Only ``food_dish_name:`` is written today (owner decision 2026-09-04, variant
+# А — see ``food_memory.REMEMBERED_FIELDS``). The portion and macros prefixes
+# stay listed as guards: whichever of them DRF-825 revives must be excluded from
+# the prompt on the day it appears, not on the day somebody notices.
 _PROMPT_EXCLUDED_KEY_PREFIXES = ("food_portion:", "food_dish_name:", "food_macros:")
 
 

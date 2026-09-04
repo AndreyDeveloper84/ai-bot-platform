@@ -149,11 +149,15 @@ _KEY_KEYWORDS: dict[str, tuple[str, ...]] = {
 }
 
 # Scanner-correction keys (DRF-1454) carry the dish in the key itself
-# («food_portion:борщ»), so they cannot be listed in _KEY_KEYWORDS verbatim —
-# and unlisted they were unforgettably: «забудь всё про питание» removed only
+# («food_dish_name:борщ»), so they cannot be listed in _KEY_KEYWORDS verbatim —
+# and unlisted they were unforgettable: «забудь всё про питание» removed only
 # the diet rows, answered «Готово — забыла всё, что знала: питание», and left
-# up to 60 food_* rows alive (review, architecture axis: 152-ФЗ + ADR-0011 §8).
+# the food_* rows alive (review, architecture axis: 152-ФЗ + ADR-0011 §8).
 # They ARE the «питание» domain: one person, one word, one erasure.
+#
+# Only ``food_dish_name:`` is written today (owner decision 2026-09-04, variant
+# А — see ``food_memory.REMEMBERED_FIELDS``); the other two stay listed as
+# guards, so that whatever DRF-825 revives is erasable from its first row.
 _FOOD_KEY_PREFIXES = ("food_portion:", "food_dish_name:", "food_macros:")
 
 

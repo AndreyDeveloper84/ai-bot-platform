@@ -19,12 +19,21 @@ turn, parses it, and hands it to
 :mod:`apps.orchestrator.memory.food` to remember.
 
 The other missing piece — an Ayla «update diary entry» endpoint — is still
-missing, and this ticket deliberately does not fake it. The distinction the
-memory module draws is the same one: we remember the **calibration** (this
-person says this dish weighs 500 г), not the **diary event**. Applying the
-correction to the logged meal remains the Phase-1 follow-up (DRF-825); what
-changes today is that the correction is no longer forgotten the moment it is
-typed.
+missing, and this ticket deliberately does not fake it.
+
+That absence decides what may be remembered at all. **Weight and macros are
+diary data, and the diary is Ayla's** (ADR-0009 ownership matrix). With no
+update endpoint a corrected portion cannot reach the canonical record, so
+keeping it locally would mean two numbers for one meal: «помню 500 г» here
+while ``log_meal`` files Ayla's 250. Owner decision of 2026-09-04 (variant А,
+Q-NUTRITION-01): those two answers are read, acknowledged and dropped, and the
+weight correction lands properly with DRF-825.
+
+What IS remembered is the dish **name** — a naming preference about our own
+recognition, which has no other owner. So the three prompts still work and the
+three answers are still claimed instead of falling through to the concierge;
+only one of them is kept, and the replies say exactly which
+(:data:`REMEMBERED_ACK` vs :data:`DEFERRED_ACK`).
 
 ## Why the free-text turn is claimed narrowly
 
@@ -83,16 +92,26 @@ _PROMPTS: dict[str, str] = {
 # for this dish, the prompt states it and asks only about a change. Wording is
 # gender-neutral on purpose — the bot does not know, and guessing reads worse
 # than the plain form.
+#
+# Name only, mirroring ``food_memory.REMEMBERED_FIELDS``: there is no stored
+# weight or macros to open a «в прошлый раз» with.
 _KNOWN_PROMPTS: dict[str, str] = {
-    "grams": "В прошлый раз для «{dish}» было {value} г. Оставляем? Если нет — напиши число.",
     "name": "В прошлый раз это было «{value}». Оставляем? Если нет — напиши, что было.",
-    "macros": "В прошлый раз БЖУ были {value}. Оставляем? Если нет — напиши новые: 12/8/32.",
 }
 
+# Said only for a field we actually keep — otherwise it is a promise, and a
+# promise the next card would break.
 REMEMBERED_ACK: dict[str, str] = {
-    "grams": "Запомнила: «{dish}» — {value} г. Про вес этого блюда больше не спрошу.",
     "name": "Запомнила: это «{value}». Больше не буду переспрашивать.",
-    "macros": "Запомнила БЖУ: {value}. Больше не буду переспрашивать.",
+}
+
+# Weight and macros: read, acknowledged, not kept (see the module docstring and
+# ``food_memory.REMEMBERED_FIELDS``). The reply repeats the number so the person
+# sees they were understood, and says plainly that it will be asked again —
+# «Про вес этого блюда больше не спрошу» was a promise nothing could keep.
+DEFERRED_ACK: dict[str, str] = {
+    "grams": "Поняла: {value} г. Вес пока не запоминаю — в следующий раз уточню снова.",
+    "macros": "Поняла: БЖУ {value}. Пока не запоминаю — в следующий раз уточню снова.",
 }
 
 # Stored nothing (no consent / no link / write failed). A soft ack, never a
@@ -115,10 +134,9 @@ STALE_CARD_ACK = (
 )
 
 # «Оставляем?» answered with «да»: the value already stored simply stands.
+# Name only — it is the only «Оставляем?» that can be asked.
 _KEPT_ACK: dict[str, str] = {
-    "grams": "Оставляю: «{dish}» — {value} г.",
     "name": "Оставляю: это «{value}».",
-    "macros": "Оставляю БЖУ: {value}.",
 }
 
 # Answers to the «Оставляем?» question all three «в прошлый раз» prompts end
@@ -438,8 +456,10 @@ class FoodCorrectionSkill:
 
         dish = _dish_for(context, scan_id)
         if not dish:
-            # A question whose answer has nothing to be keyed on is a silent
-            # loss waiting to happen — don't ask it (see STALE_CARD_ACK).
+            # No card, no question. For the name the answer would have nothing
+            # to be keyed on; for weight and macros we would not even know which
+            # recognition the person is correcting. Either way the answer is a
+            # silent loss waiting to happen — don't ask it (see STALE_CARD_ACK).
             logger.info(
                 "food_correction.stale_card field=%s scan=%s conversation=%s",
                 field,
@@ -545,8 +565,8 @@ class FoodCorrectionSkill:
             )
 
         if not dish:
-            # A pending record written before the stale-card fix: the card is
-            # gone, there is no key to write under. Settle honestly.
+            # A pending record written before the stale-card fix: the card this
+            # answer corrects is gone. Settle honestly.
             _write_state(context, None)
             return SkillResult(
                 reply_text=STALE_CARD_ACK,
@@ -585,20 +605,24 @@ class FoodCorrectionSkill:
 
         _write_state(context, None)  # settled — recorded, or terminally refused
         stored = outcome in (food_memory.Outcome.WRITTEN, food_memory.Outcome.DUPLICATE)
-        reply = (
-            REMEMBERED_ACK[field].format(dish=dish, value=value) if stored else NOT_REMEMBERED_ACK
-        )
+        if stored:
+            reply = REMEMBERED_ACK[field].format(dish=dish, value=value)
+            reply_kind = f"food_correction_{field}_remembered"
+        elif outcome is food_memory.Outcome.NOT_REMEMBERED:
+            # Weight / macros: understood and repeated back, kept by nobody here
+            # — the diary is Ayla's and the write lands with DRF-825.
+            reply = DEFERRED_ACK[field].format(value=value)
+            reply_kind = f"food_correction_{field}_not_remembered"
+        else:
+            # A gate said no (no consent, forgotten, cap, unreadable) — a soft
+            # ack that promises nothing.
+            reply = NOT_REMEMBERED_ACK
+            reply_kind = f"food_correction_{field}_not_stored"
         return SkillResult(
             reply_text=reply,
             action_type="food_correction_recorded",
             action_data={"field": field, "value": value, "stored": stored},
-            meta={
-                "reply_kind": (
-                    f"food_correction_{field}_remembered"
-                    if stored
-                    else f"food_correction_{field}_not_stored"
-                )
-            },
+            meta={"reply_kind": reply_kind},
         )
 
     # ─── «Оставляем?» → keep / change ────────────────────────────────────
@@ -647,8 +671,6 @@ class FoodCorrectionSkill:
 
 
 def _recalled(recall: food_memory.FoodRecall, field: str) -> Any:
-    if field == food_memory.FIELD_GRAMS:
-        return recall.portion_g
-    if field == food_memory.FIELD_NAME:
-        return recall.dish_name
-    return recall.macros
+    """The remembered value for ``field`` — ``None`` unless it is one we keep."""
+
+    return recall.dish_name if field == food_memory.FIELD_NAME else None

@@ -41,8 +41,10 @@ so it re-asked what the person had already corrected. Three hooks now run on the
 photo/callback paths, all best-effort and all through
 :mod:`apps.orchestrator.memory.food`, which owns the zone decision:
 
-* before rendering a card — ``recall_corrections`` adds at most one line about
-  what this person already corrected for this dish (🟢 green, ``explicit`` only);
+* before rendering a card — ``recall_corrections`` adds at most one line with
+  the name this person gave this dish (🟢 green, ``explicit`` only). Only the
+  name: weight and macros belong to Ayla's diary and are not kept by the bot
+  (owner decision 2026-09-04, variant А — see ``food_memory.REMEMBERED_FIELDS``);
 * on every recognised dish — ``note_meal`` declares meal history 🟡 yellow and
   refuses to store it: the diary belongs to Ayla behind the HEALTH consent, and
   a second copy here would be the same profile on a weaker basis;
@@ -432,26 +434,20 @@ def _stash_last_card(context: SkillContext, scan) -> None:
 
 
 def _memory_line(recall: food_memory.FoodRecall) -> str:
-    """One line for what this person already corrected about this dish, or ``""``.
+    """One line for the name this person gave this dish, or ``""``.
 
     One line, never more: the card's job is still «записать в дневник?», and a
-    memory that pushes the question off the screen has stopped helping. Ayla's
-    own numbers are printed unchanged above it — a remembered portion is not
-    silently substituted, because the macros on the card were computed for the
-    portion Ayla recognised and swapping one without the other would render a
-    figure nobody stands behind.
+    memory that pushes the question off the screen has stopped helping.
+
+    Ayla's own numbers above it are printed unchanged, and there is nothing here
+    that could contradict them: the bot keeps no portion and no macros of its
+    own (``food_memory.REMEMBERED_FIELDS``). Two figures for one meal — one on
+    the card, another in the diary — is exactly what variant А removed.
     """
 
-    parts: list[str] = []
-    if recall.portion_g is not None:
-        parts.append(f"{recall.portion_g} г")
-    if recall.dish_name:
-        parts.append(f"«{recall.dish_name}»")
-    if recall.macros:
-        parts.append(f"БЖУ {recall.macros}")
-    if not parts:
+    if not recall.dish_name:
         return ""
-    return f"Помню с прошлого раза: {', '.join(parts)}."
+    return f"Помню с прошлого раза: «{recall.dish_name}»."
 
 
 def _format_scan_card(scan, recall: food_memory.FoodRecall | None = None) -> str:
