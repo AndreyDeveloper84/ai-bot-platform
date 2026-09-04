@@ -44,6 +44,16 @@
  * (`allow_free_text`), текст идёт как `{goal_text}` — прямая цель;
  * когда открыл — как ответ на этот шаг. Поле одно, смысл серверный.
  *
+ * И это условие держит ЭКРАН, а не сервер (DRF-1483). До сих пор «поле
+ * стоит всегда» было правдой ровно настолько, насколько сервер слал
+ * намерение `formulate_own`: без него поля не было, а без `next` не
+ * было и выхода — первый экран клиента молча становился воротами.
+ * Теперь экран сам замечает документ, не оставивший ни свободного
+ * ввода, ни дороги дальше, и ставит и то, и другое: поле со своей
+ * подписью и выход в каталог. Fail-safe по построению — запасное
+ * появляется ровно в том документе, где иначе был бы тупик, и ни в
+ * каком другом. Подробности признака — у `documentIsGate` ниже.
+ *
  * Sections:
  *   - `known.goal` != null → "current goal" block (goal_text, or the
  *     suggestion label resolved by goal_key, or the raw key).
@@ -99,6 +109,17 @@ const GOAL_TEXT_MAX = 500;
 const NEXT_ROUTES: Record<string, string> = {
   browse_catalog: "/customer/catalog",
 };
+
+/**
+ * Запасной выход и запасная подпись поля — собственность ЭКРАНА, а не
+ * документа (DRF-1483). Появляются ровно тогда, когда документ не дал
+ * ни того, ни другого; во всех остальных случаях слова остаются
+ * серверными. Каталог выбран не произвольно: это то же место, куда
+ * сервер уводит своим единственным сегодняшним `next`.
+ */
+const GUARD_EXIT_ROUTE = "/customer/catalog";
+const GUARD_EXIT_LABEL = "Посмотреть услуги";
+const FREE_TEXT_FALLBACK_LABEL = "Опиши своими словами";
 
 /** The anketa step currently on the surface, if the server sent one. */
 function currentAnketaStep(doc: DecisionContext): MissingItem | null {
@@ -228,6 +249,38 @@ export function GoalSelectScreen({ initialDoc }: Props = {}) {
   const nextStep = doc.next ?? null;
   const nextRoute = nextStep ? NEXT_ROUTES[nextStep.id] : undefined;
 
+  // -------------------------------------------------------------------
+  // Условие C-2 держится ЭКРАНОМ, а не сервером (DRF-1483).
+  //
+  // Раньше держалось сервером: поле свободного ввода рисовалось только
+  // под намерение `formulate_own`, выход — только под `next`. Документ
+  // без обоих молча превращал первый экран клиента в ворота: на корне
+  // кнопки «назад» нет, нижней навигации у клиента нет, одноролевому
+  // «сменить режим» не рисуется — уйти было нельзя иначе, чем ответив
+  // на вопросы. Поймать это было нечем: единственный тест на C-2 стоял
+  // на фикстуре, которая `formulate_own` содержит, то есть провалиться
+  // не мог.
+  //
+  // Признак ворот берётся по `nextRoute`, а не по `next`: назначение,
+  // которого нет в таблице маршрутов, кнопки не даёт — та же ловушка,
+  // только с виду заполненная.
+  //
+  // Свободный ввод считается по тому, что экран РИСУЕТ, а не что
+  // документ разрешает: шаг с `allow_free_text` без намерения
+  // `formulate_own` не давал поля вовсе, и его разрешение было
+  // недостижимо. Теперь такой шаг поле получает.
+  //
+  // Экран по-прежнему не решает, ЧТО показывать: пока документ сам
+  // оставляет проход, всё рисуется ровно как раньше — ни один
+  // сегодняшний документ вида не меняет. Экран гарантирует лишь, что
+  // под человеком есть пол.
+  const stepAllowsFreeText = Boolean(anketaStep?.allow_free_text && anketaStep.step);
+  const hasFreeText = Boolean(formulateOwnLabel) || stepAllowsFreeText;
+  const hasOnward = Boolean(nextRoute);
+  const documentIsGate = !hasFreeText && !hasOnward;
+  const showFreeText = hasFreeText || documentIsGate;
+  const freeTextLabel = formulateOwnLabel ?? FREE_TEXT_FALLBACK_LABEL;
+
   // Куда уедет введённый текст, решает сервер, а не экран: пока текущий
   // шаг не открыл свободный ввод, текст — прямая цель (и это выход из
   // анкеты для того, кто знает, чего хочет); когда открыл — ответ на
@@ -256,14 +309,26 @@ export function GoalSelectScreen({ initialDoc }: Props = {}) {
   // момент — ровно та ловушка, из-за которой анкету прятали.
   const surfaceExit = canSwitch ? <SurfaceSwitchExit /> : null;
 
+  // Выход, который экран ставит САМ, когда документ не оставил ни
+  // одного. Не «ещё одна кнопка рядом с `next`»: пока `next` есть,
+  // этого выхода нет — иначе экран начал бы спорить с сервером о том,
+  // куда вести. Он появляется только на документе-воротах.
+  const guardExit = documentIsGate ? (
+    <StickyCtaButton disabled={submitting} onClick={() => navigate(GUARD_EXIT_ROUTE)}>
+      {GUARD_EXIT_LABEL}
+    </StickyCtaButton>
+  ) : null;
+  const stickyCount = [onward, guardExit, surfaceExit].filter(Boolean).length;
+
   return (
     <ScreenLayout
       title="Какая у тебя цель?"
-      tallCta={Boolean(onward && surfaceExit)}
+      tallCta={stickyCount > 1}
       cta={
-        onward || surfaceExit ? (
+        stickyCount > 0 ? (
           <StickyBar>
             {onward}
+            {guardExit}
             {surfaceExit}
           </StickyBar>
         ) : undefined
@@ -355,10 +420,10 @@ export function GoalSelectScreen({ initialDoc }: Props = {}) {
         </section>
       )}
 
-      {formulateOwnLabel && (
+      {showFreeText && (
         <section aria-labelledby="goal-select-own">
           <h2 id="goal-select-own" className="goal-select__section-title">
-            {formulateOwnLabel}
+            {freeTextLabel}
           </h2>
           <textarea
             className="goal-select__textarea"
@@ -367,7 +432,7 @@ export function GoalSelectScreen({ initialDoc }: Props = {}) {
             maxLength={GOAL_TEXT_MAX}
             rows={2}
             placeholder="Опиши своими словами"
-            aria-label={formulateOwnLabel}
+            aria-label={freeTextLabel}
             disabled={submitting}
           />
           <div className="goal-select__actions">

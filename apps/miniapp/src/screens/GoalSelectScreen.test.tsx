@@ -191,6 +191,11 @@ describe("GoalSelectScreen (dumb renderer over the decision document)", () => {
         { id: "choose_suggested", label: "Выбери из вариантов" },
         { id: "need_guidance", label: "Помоги определиться" },
       ],
+      // Документ обязан оставлять дорогу дальше, иначе это ворота, и
+      // экран подставит своё поле и свой выход (C-2 guard, DRF-1483).
+      // Здесь проверяется другое — что поле ввода следует намерению
+      // `formulate_own`, — поэтому документ берётся не-ворота.
+      next: { id: "browse_catalog", label: "Найти услугу" },
     };
     mockedFetch.mockResolvedValue(otherDoc);
     renderScreen();
@@ -202,7 +207,9 @@ describe("GoalSelectScreen (dumb renderer over the decision document)", () => {
     expect(
       screen.getByText("Какая зона требует внимания?"),
     ).toBeInTheDocument();
-    // No formulate_own intent in the document → no textarea rendered.
+    // No formulate_own intent in a document that is NOT a gate → no
+    // textarea rendered. The screen follows the document, it does not
+    // invent the field; the C-2 guard below is what covers the gate.
     expect(screen.queryByRole("textbox")).not.toBeInTheDocument();
     expect(
       screen.getByRole("button", { name: "Помоги определиться" }),

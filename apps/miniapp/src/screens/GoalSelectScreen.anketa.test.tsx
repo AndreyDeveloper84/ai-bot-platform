@@ -378,3 +378,143 @@ describe("повторный проход (DRF-1225 / C-4)", () => {
     expect(screen.queryByRole("button", { name: "Пройти анкету заново" })).toBeNull();
   });
 });
+
+// ---------------------------------------------------------------------------
+
+describe("C-2 держит экран, а не сервер (DRF-1483)", () => {
+  /**
+   * Ворота в чистом виде: вопрос есть, `formulate_own` нет, `next` нет.
+   * Ровно такого теста не было — единственная проверка C-2 стояла на
+   * фикстуре с `formulate_own`, то есть провалиться не могла. Пока
+   * условие держал сервер, этот документ молча запирал первый экран
+   * клиента: «назад» на корне не рисуется, нижней навигации у клиента
+   * нет, «сменить режим» одноролевому не показывается.
+   */
+  const GATE: DecisionContext = {
+    version: 2,
+    known: { goal: null },
+    missing: [
+      {
+        kind: "goal_anketa",
+        prompt: "Что сейчас хочется привести в порядок?",
+        step: "area",
+        options: [{ key: "face", label: "Лицо и кожа" }],
+        allow_free_text: false,
+        progress: { index: 1, total: 3 },
+      },
+    ],
+    suggestions: [],
+    intents: [{ id: "choose_suggested", label: "Выбери из вариантов" }],
+    next: null,
+  };
+
+  it("документ без formulate_own и без next — человек всё равно уходит", async () => {
+    mockedFetch.mockResolvedValue(GATE);
+    renderScreen();
+
+    // Присутствие: ворота действительно на экране — вопрос отрисован.
+    expect(
+      await screen.findByText("Что сейчас хочется привести в порядок?"),
+    ).toBeInTheDocument();
+
+    // И выход есть, хотя сервер его не дал.
+    await userEvent.click(screen.getByRole("button", { name: "Посмотреть услуги" }));
+    expect(screen.getByText("ЭКРАН ПОДБОРА")).toBeInTheDocument();
+
+    // ЗАМЕР: ушёл, не ответив ни на один вопрос и вообще ничего не послав.
+    expect(answersSent()).toEqual([]);
+    expect(sentBodies()).toEqual([]);
+  });
+
+  it("на воротах есть и свободный ввод — можно назвать услугу, а не отвечать", async () => {
+    mockedFetch.mockResolvedValue(GATE);
+    mockedPost.mockResolvedValue(DONE);
+    renderScreen();
+
+    const box = await screen.findByRole("textbox", { name: "Опиши своими словами" });
+    await userEvent.type(box, "хочу маникюр");
+    await userEvent.click(screen.getByRole("button", { name: "Отправить" }));
+
+    expect(mockedPost).toHaveBeenCalledWith({
+      goal_text: "хочу маникюр",
+      source_channel: "miniapp",
+    });
+    expect(answersSent()).toEqual([]);
+  });
+
+  it("выход экрана стоит в липкой панели, а не в хвосте документа", async () => {
+    // Та же причина, что и у серверного `next` (DRF-1458): выход,
+    // который надо доскроллить, — это выход, которого на экране нет.
+    mockedFetch.mockResolvedValue(GATE);
+    renderScreen();
+
+    await screen.findByText("Что сейчас хочется привести в порядок?");
+    const cta = screen.getByRole("region", { name: "Действие" });
+    expect(
+      within(cta).getByRole("button", { name: "Посмотреть услуги" }),
+    ).toBeInTheDocument();
+  });
+
+  it("назначение, которого нет в таблице маршрутов, — те же ворота", async () => {
+    // `next` формально есть, но кнопки он не даёт: id неизвестен. Для
+    // человека это неотличимо от документа без `next`, поэтому признак
+    // ворот берётся по маршруту, а не по наличию поля.
+    // `NextStep["id"]` — узкий литерал в типах клиента: это ДОПУЩЕНИЕ
+    // о чужом сервисе, а не гарантия. Сервер на Python вправе завести
+    // новое назначение, и тогда на экране не будет ни одной кнопки.
+    // Приведение изображает ровно этот случай — тот, ради которого
+    // признак ворот и берётся по маршруту, а не по наличию `next`.
+    const unknownNext = {
+      id: "no_such_place",
+      label: "Куда-то",
+    } as unknown as DecisionContext["next"];
+    mockedFetch.mockResolvedValue({ ...GATE, next: unknownNext });
+    renderScreen();
+
+    await screen.findByText("Что сейчас хочется привести в порядок?");
+    // Присутствие подставного выхода — и отсутствие серверного.
+    expect(screen.getByRole("button", { name: "Посмотреть услуги" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Куда-то" })).toBeNull();
+  });
+
+  it("шаг открыл свободный ввод без formulate_own — поле достижимо", async () => {
+    // Раньше `allow_free_text` на шаге не давал поля вовсе, если сервер
+    // не прислал ещё и намерение: разрешение было недостижимо.
+    const step = GATE.missing[0];
+    mockedFetch.mockResolvedValue({
+      ...GATE,
+      missing: [
+        {
+          ...step,
+          kind: "goal_anketa",
+          prompt: step?.prompt ?? "",
+          allow_free_text: true,
+        },
+      ],
+    });
+    mockedPost.mockResolvedValue(DONE);
+    renderScreen();
+
+    const box = await screen.findByRole("textbox", { name: "Опиши своими словами" });
+    await userEvent.type(box, "своя формулировка");
+    await userEvent.click(screen.getByRole("button", { name: "Отправить" }));
+
+    // Шаг открыл ввод — значит текст уходит ответом на ЭТОТ шаг.
+    expect(mockedPost).toHaveBeenCalledWith({
+      answer: { step: "area", text: "своя формулировка" },
+      source_channel: "miniapp",
+    });
+  });
+
+  it("документ, оставивший проход, экран не трогает", async () => {
+    // Контроль на ложное срабатывание: пока сервер сам дал и поле, и
+    // `next`, запасного выхода нет — иначе экран спорил бы с сервером
+    // о том, куда вести, и на каждом документе стояло бы две кнопки.
+    mockedFetch.mockResolvedValue(STEP_ONE);
+    renderScreen();
+
+    await screen.findByText("Что сейчас хочется привести в порядок?");
+    expect(screen.getByRole("button", { name: "Найти услугу" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Посмотреть услуги" })).toBeNull();
+  });
+});
