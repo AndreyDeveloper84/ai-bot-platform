@@ -52,6 +52,14 @@
  *   - While a POST is in flight every control is disabled; a failed
  *     POST shows an inline error and keeps the old document.
  *
+ * Выход с ПОВЕРХНОСТИ, а не только из документа (DRF-1469). Та же
+ * липкая панель держит «Сменить режим» для многоролевого — владельца
+ * или мастера, зашедшего посмотреть приложение глазами клиента. Своей
+ * цели у него нет, поэтому анкету он встречает первым же экраном, а
+ * нижней навигации у клиента нет и профиля с корня не видно: раньше
+ * это чинили тем, что анкету ему просто не показывали. Одноролевому
+ * `SurfaceSwitchExit` не рисует ничего — его экран не меняется.
+ *
  * Экран не корневой, поэтому кнопка «назад» платформы должна быть
  * показана и заведена на роутер (канон `useBackButton`: показывать
  * везде, кроме корня). Пока входом была только стартовая сетка бота,
@@ -65,7 +73,8 @@ import { useLocation, useNavigate } from "react-router-dom";
 import { ScreenLayout } from "../components/ScreenLayout";
 import { DelayedSkeleton, ServiceCardSkeleton } from "../components/Skeleton";
 import { StateError } from "../components/StateError";
-import { StickyCta } from "../components/StickyCta";
+import { StickyBar, StickyCtaButton } from "../components/StickyCta";
+import { SurfaceSwitchExit, useSurfaceMode } from "../components/SurfaceSwitch";
 import {
   fetchDecisionContext,
   postGoalSelect,
@@ -114,6 +123,9 @@ interface Props {
 export function GoalSelectScreen({ initialDoc }: Props = {}) {
   const navigate = useNavigate();
   const { pathname } = useLocation();
+  // Единственное, что экран отсюда берёт, — есть ли у человека вторая
+  // поверхность. Ни на один вопрос документа это не влияет.
+  const { canSwitch } = useSurfaceMode();
   const [state, setState] = useState<State>(
     initialDoc ? { kind: "ok", doc: initialDoc } : { kind: "loading" },
   );
@@ -225,19 +237,35 @@ export function GoalSelectScreen({ initialDoc }: Props = {}) {
       ? { answer: { step: anketaStep.step, text }, source_channel: "miniapp" }
       : { goal_text: text, source_channel: "miniapp" };
 
+  // Дорога дальше по документу — главное действие экрана, и оно не
+  // должно зависеть от того, сколько вопросов и подсказок прислал
+  // сервер (DRF-1458). Условие C-2 не тронуто: кнопка по-прежнему
+  // рисуется ровно тогда, когда `next` есть в документе, и ровно с той
+  // подписью, что он назвал.
+  const onward =
+    nextStep && nextRoute ? (
+      <StickyCtaButton disabled={submitting} onClick={() => navigate(nextRoute)}>
+        {nextStep.label}
+      </StickyCtaButton>
+    ) : null;
+
+  // Выход с поверхности (DRF-1469) — рядом, но НЕ вместо: `next` ведёт
+  // дальше по клиентскому пути, «Сменить режим» уводит с клиентской
+  // поверхности целиком. От документа не зависит намеренно: сервер
+  // вправе прислать документ без `next`, и остаться без выхода в этот
+  // момент — ровно та ловушка, из-за которой анкету прятали.
+  const surfaceExit = canSwitch ? <SurfaceSwitchExit /> : null;
+
   return (
     <ScreenLayout
       title="Какая у тебя цель?"
-      // Выход с поверхности — главное действие экрана, и оно не должно
-      // зависеть от того, сколько вопросов и подсказок прислал сервер
-      // (DRF-1458). Условие C-2 не тронуто: кнопка по-прежнему рисуется
-      // ровно тогда, когда `next` есть в документе, и ровно с той
-      // подписью, что он назвал.
+      tallCta={Boolean(onward && surfaceExit)}
       cta={
-        nextStep && nextRoute ? (
-          <StickyCta disabled={submitting} onClick={() => navigate(nextRoute)}>
-            {nextStep.label}
-          </StickyCta>
+        onward || surfaceExit ? (
+          <StickyBar>
+            {onward}
+            {surfaceExit}
+          </StickyBar>
         ) : undefined
       }
     >

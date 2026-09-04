@@ -65,6 +65,9 @@
   /* Layout. */
   --cta-height: 56px;
   --cta-clearance: calc(var(--cta-height) + var(--s-5));
+  /* Второй ряд закреплённой панели — тихий выход с поверхности
+     (DRF-1469). Высота ряда + его верхний отступ. */
+  --cta-exit-height: 52px;
   --safe-bottom: env(safe-area-inset-bottom, 0px);
 
   /* Motion — restrained (anti-slop §18 #11). */

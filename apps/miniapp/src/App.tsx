@@ -1095,22 +1095,25 @@ function UnifiedSoloSurface({ me }: { me: MeResponse }) {
 
 /** Routes for the customer role (Phase 0c / Phase 4 surface).
  *
- * `goalEntry` — DRF-1451. Отдаётся ли корень поверхности цели.
+ * Одна поверхность для всех, кто на неё пришёл (DRF-1469).
  *
- * Выключается для админа-мастера, который переключился на клиентскую
- * поверхность. У него нет `ClientGoal`, поэтому анкету он получил бы
- * первым же экраном; а `SurfaceSwitchButton` смонтирована только на
- * `CustomerProfileScreen`, `MasterSettingsScreen` и
- * `AdminSettingsPlaceholderScreen` — то есть обратно к «Сменить режим»
- * он бы уже не дошёл. `useLastSurface` держит выбор в localStorage,
- * так что следующий запуск повторил бы то же самое.
+ * До этой правки здесь был проп `goalEntry`, и корень отдавал анкету
+ * только одноролевому клиенту. Многоролевому — админу-мастеру,
+ * выбравшему «Клиент», — вместо неё показывали приветствие: своей цели
+ * у него нет, анкету он получил бы первым же экраном, а выход
+ * «Сменить режим» жил только на профиле и в настройках, куда с корня не
+ * дойти. Запрет был по делу, лечение — нет: под него попали владелец и
+ * вся команда, то есть анкету не видел никто из тех, кто её заказал.
  *
- * Это тот же класс дефекта, что DRF-1349 и DRF-1434 (см. комментарии
- * ниже): роль есть, а экран показан не тот. И анкета здесь не про него:
- * владелец салона, зашедший посмотреть клиентскую поверхность, — не
- * человек, впервые встречающий Ayla.
+ * Выход теперь стоит на самой поверхности цели, в её закреплённой
+ * нижней панели (`SurfaceSwitchExit`), поэтому двух поведений больше
+ * нет и держать в голове, кто какую поверхность видит, не нужно.
+ *
+ * Приём общий с DRF-1349 и DRF-1434 (см. комментарии ниже): то, без
+ * чего человек застревает, объявляется там, куда он попадает, а не
+ * там, где это было удобно объявить.
  */
-export function CustomerRoutes({ goalEntry = true }: { goalEntry?: boolean } = {}) {
+export function CustomerRoutes() {
   return (
     <Routes>
       {/*
@@ -1127,7 +1130,7 @@ export function CustomerRoutes({ goalEntry = true }: { goalEntry?: boolean } = {
         несуществующие адреса, а не первый вход, и лишний
         decision-context на каждой опечатке в ссылке не нужен.
       */}
-      <Route path="/" element={goalEntry ? <CustomerEntryScreen /> : <HelloScreen />} />
+      <Route path="/" element={<CustomerEntryScreen />} />
       <Route path="/catalog" element={<CatalogScreen />} />
       <Route path="/catalog/:serviceId" element={<ServiceDetailScreen />} />
       <Route path="/book/master" element={<MasterPickerScreen />} />
@@ -1497,9 +1500,10 @@ function RoleSurface({
     return <UnifiedLanding me={me} />;
   }
   if (multiRole && surfacePref === "customer") {
-    // goalEntry={false}: см. шапку CustomerRoutes — иначе админ-мастер
-    // запирается на анкете без дороги обратно к «Сменить режим».
-    return <CustomerRoutes goalEntry={false} />;
+    // Ровно та же поверхность, что у обычного клиента (DRF-1469).
+    // Выход обратно к «Сменить режим» есть на ней самой, поэтому
+    // отдельного поведения для многоролевого больше нет.
+    return <CustomerRoutes />;
   }
   if (isSolo && hasMaster) {
     return <UnifiedSoloSurface me={me} />;
