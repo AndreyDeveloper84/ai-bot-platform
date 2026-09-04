@@ -377,6 +377,16 @@ def _dish_slug(dish: Any) -> str:
     return slug[:_MAX_DISH_LEN]
 
 
+#: Public name for the same normalisation (DRF-1467).
+#:
+#: :mod:`apps.orchestrator.food_history` matches a dish the scanner just
+#: recognised against the rows Ayla holds in the diary. That comparison must
+#: use the key this module writes, or «Борщ» on the card and «борщ» in the
+#: memory row would slowly become two dishes. Exported rather than copied so
+#: the two cannot drift; the module owns the rule either way.
+dish_slug = _dish_slug
+
+
 def _memory_key(field: str, dish_slug: str) -> str | None:
     prefix = _KEY_PREFIX.get(field)
     if prefix is None or not dish_slug:

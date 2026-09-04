@@ -91,6 +91,7 @@ def render_daily_report(
     profile: ProfileResponse | None = None,
     *,
     include_opt_out: bool = True,
+    include_entries: bool = False,
 ) -> str:
     """Compose the daily report.
 
@@ -102,11 +103,24 @@ def render_daily_report(
     boundary and the remark rules stay byte-identical either way; a second
     renderer for the pull would have been a second boundary to keep in sync.
 
-    Structure: what was logged against what the profile expects, then at
-    most **one** remark, then Ayla's own comment if it sent one, then the
-    off-switch. Degrades cleanly -- without a profile the macro targets are
-    simply absent and no remark is made, so an Ayla outage costs detail
-    rather than correctness.
+    ``include_entries`` (DRF-1467): the dish names, likewise for the PULL
+    only. Until this ticket ``summary.entries`` was read here for its
+    truthiness alone (``_anything_logged``) and then discarded, so a person
+    who asked «что я ел сегодня» was answered with calories and macros and
+    not a single dish -- an answer to a question they had not asked. The rows
+    are read from Ayla on the turn and kept nowhere: the diary is hers behind
+    the HEALTH consent, and a second copy in the bot would be the same health
+    profile on a weaker basis (:mod:`apps.orchestrator.food_history`).
+
+    The push keeps its default of ``False``. An unprompted evening message
+    reciting what somebody ate is a different act from answering them when
+    they ask, and only the second one was requested.
+
+    Structure: what was logged against what the profile expects, then the
+    dishes when asked for, then at most **one** remark, then Ayla's own
+    comment if it sent one, then the off-switch. Degrades cleanly -- without
+    a profile the macro targets are simply absent and no remark is made, so
+    an Ayla outage costs detail rather than correctness.
     """
     lines: list[str] = ["Итоги дня по питанию."]
 
@@ -126,6 +140,12 @@ def render_daily_report(
     lines.append(_macro_line("Углеводы", summary.carbs_g, _target(profile, "carbs_g"), "г"))
     if water is not None and water.norm_ml:
         lines.append(_macro_line("Вода", water.total_ml, water.norm_ml, "мл"))
+
+    if include_entries:
+        entries_lines = _entry_lines(summary)
+        if entries_lines:
+            lines.append("")
+            lines.extend(entries_lines)
 
     remark = goal_remark(summary, water, profile)
     if remark:
@@ -208,6 +228,28 @@ def render_water_reminder(
 
 
 # -- helpers ----------------------------------------------------------------
+
+
+def _entry_lines(summary: SummaryResponse) -> list[str]:
+    """The dishes behind the totals, one per line. ``[]`` when there are none.
+
+    Every value printed comes from ``summary.entries`` as Ayla sent it, read
+    through :func:`apps.orchestrator.food_history.meals_from_summary` -- the
+    one place the raw rows are coerced, so this renderer and the recognition
+    card cannot disagree about what a row says. A meal Ayla priced at nothing
+    prints its name alone rather than «0 ккал»: a bare zero next to a dish
+    reads as a verdict on the dish.
+    """
+    from apps.orchestrator.food_history import meals_from_summary
+
+    meals = meals_from_summary(summary)
+    if not meals:
+        return []
+    lines = ["Что было записано:"]
+    for meal in meals:
+        tail = f" — {meal.calories} ккал" if meal.calories else ""
+        lines.append(f"• {meal.dish}{tail}")
+    return lines
 
 
 def _anything_logged(summary: SummaryResponse, water: WaterTodayResponse | None) -> bool:

@@ -378,7 +378,15 @@ def _render_today(bot_user: Any, profile: Any) -> DiscoveryReply:
     # same boundary and the same «every number traces» test. `include_opt_out`
     # is off because the person PULLED this: offering to stop sending it makes
     # no sense for a message nobody sent.
-    text = render_daily_report(summary, water, profile, include_opt_out=False)
+    #
+    # `include_entries` is on for the same reason it is off in the push
+    # (DRF-1467): the question here was «что я ел», and until that ticket the
+    # answer was calories and macros with the dish names dropped on the floor —
+    # ``summary.entries`` was fetched, tested for truthiness, and discarded.
+    # The rows come from Ayla on this turn and are stored nowhere: her diary
+    # sits behind the HEALTH consent and a copy here would be the same profile
+    # on a weaker basis (``apps.orchestrator.food_history``).
+    text = render_daily_report(summary, water, profile, include_opt_out=False, include_entries=True)
     if profile is None:
         text = f"{text}\n\n{NO_PROFILE_TEXT}"
     return _reply(text, _diary_chips(profile))

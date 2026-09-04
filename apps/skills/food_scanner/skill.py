@@ -51,6 +51,21 @@ photo/callback paths, all best-effort and all through
 * on ``reject`` — ``note_recognition_rejected`` records «мы распознали не то» as
   a quality signal, never as «он это не ест».
 
+## History (DRF-1467) — read at Ayla, not kept here
+
+``note_meal`` above still refuses to store the meal, and that is not the gap.
+The gap was that nothing ASKED Ayla what is already in the diary, so a second
+photograph of the same lunch was offered «Записать в дневник?» as if the day
+were empty. :func:`apps.orchestrator.food_history.read_today` is that ask: one
+GET of ``summary``, gated on PERSONAL_DATA + HEALTH, stored nowhere and cached
+nowhere — a cache would be the same copy under another name. When Ayla does
+not answer, the card simply omits the line: the person asked what is on the
+plate in front of them, not what is in the diary, so inventing «уже записано»
+would be a lie and announcing «дневник недоступен» would be an answer to a
+question nobody asked. On this path Ayla being down is already said out loud
+anyway — she is the recogniser too, so the scan fails first and
+:data:`AYLA_DOWN_FALLBACK` is what the person sees.
+
 The dish behind a card is stashed in ``Conversation.skill_state`` under
 :data:`LAST_CARD_STATE_KEY` so the correction callback — which carries only a
 ``scan_id`` — can key memory on it.
@@ -83,6 +98,7 @@ from apps.integrations.ayla import (
     external_user_id_for,
     get_nutrition_client,
 )
+from apps.orchestrator import food_history
 from apps.orchestrator.memory import food as food_memory
 from apps.orchestrator.ui.keyboards import (
     food_recognition_keyboard,
@@ -108,6 +124,9 @@ PHOTO_NO_BYTES = "Фото пришло, но скачать не получил
 REJECTED_ACK = "Поняла, не записываю. Если хочешь — пришли ещё фото."
 
 CLARIFY_PROMPT = "Что не так? Напиши коротко — поправлю граммы, название или БЖУ."
+
+# DRF-1467 — read from Ayla's diary on this turn, never from a store of ours.
+ALREADY_LOGGED_LINE = "Сегодня это блюдо уже есть в дневнике."
 
 AYLA_DOWN_FALLBACK = "Сервис распознавания временно недоступен — попробуй через минуту."
 
@@ -221,9 +240,14 @@ class FoodScannerSkill:
         dish = scan.dish_name or ""
         recall = food_memory.recall_corrections(context.bot_user, dish=dish)
         food_memory.note_meal(context.bot_user, dish=dish)
+        # DRF-1467 — and what does Ayla already hold for today? Read, never
+        # copied: ``read_today`` gates on PERSONAL_DATA + HEALTH itself and
+        # returns a status rather than raising, so a closed gate or a downed
+        # Ayla costs this one line and nothing else.
+        diary = food_history.read_today(context.bot_user)
         _stash_last_card(context, scan)
 
-        reply = _format_scan_card(scan, recall)
+        reply = _format_scan_card(scan, recall, diary)
         return SkillResult(
             reply_text=reply,
             action_type="food_scan_card",
@@ -231,6 +255,7 @@ class FoodScannerSkill:
                 "scan_id": scan.scan_id,
                 "dish_name": scan.dish_name,
                 "remembered": not recall.is_empty(),
+                "already_logged_today": diary.has_dish(dish),
                 "buttons": food_recognition_keyboard(scan.scan_id),
             },
             meta={"reply_kind": "food_scanner_card"},
@@ -450,7 +475,23 @@ def _memory_line(recall: food_memory.FoodRecall) -> str:
     return f"Помню с прошлого раза: «{recall.dish_name}»."
 
 
-def _format_scan_card(scan, recall: food_memory.FoodRecall | None = None) -> str:
+def _already_logged_line(diary, dish: str) -> str:
+    """One line when Ayla already holds this dish for today, else ``""``.
+
+    Deliberately silent on every other outcome. ``has_dish`` answers False for
+    «Ayla did not reply» and «no HEALTH consent» alike, and that is the right
+    shape here: the card is an answer about the photograph, and a person who
+    sent a plate did not ask about the state of the diary. Saying nothing
+    invents nothing — which is the whole rule (DRF-1467).
+    """
+    return ALREADY_LOGGED_LINE if diary is not None and diary.has_dish(dish) else ""
+
+
+def _format_scan_card(
+    scan,
+    recall: food_memory.FoodRecall | None = None,
+    diary=None,
+) -> str:
     """User-facing recognition card text.
 
     Voice mirrors D1 ``FOOD_RECOGNITION_EXAMPLES`` — terse, friendly,
@@ -461,6 +502,10 @@ def _format_scan_card(scan, recall: food_memory.FoodRecall | None = None) -> str
     ``recall`` (DRF-1454) adds at most one line: what this person already
     corrected for this dish. Defaulting it to ``None`` keeps the pre-memory
     output byte-identical for every caller that does not pass it.
+
+    ``diary`` (DRF-1467) adds at most one more: whether Ayla already has this
+    dish logged today, read from her on this turn and kept nowhere. Same
+    defaulting rule — ``None`` renders the card exactly as before.
     """
     recall = recall or food_memory.EMPTY_RECALL
     dish = scan.dish_name or "блюдо"
@@ -488,5 +533,11 @@ def _format_scan_card(scan, recall: food_memory.FoodRecall | None = None) -> str
     memory_line = _memory_line(recall)
     if memory_line:
         parts.append(memory_line)
+    # ``scan.dish_name``, not the ``dish`` above: that one falls back to the
+    # placeholder «блюдо», and matching a placeholder against the diary could
+    # claim a dish the recogniser never named.
+    logged_line = _already_logged_line(diary, scan.dish_name or "")
+    if logged_line:
+        parts.append(logged_line)
     parts.append("Записать в дневник?")
     return "\n".join(parts)
