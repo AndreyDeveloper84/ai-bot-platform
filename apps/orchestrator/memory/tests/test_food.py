@@ -1,15 +1,20 @@
 """Food-scanner memory — zones, provenance, perimeter (DRF-1454).
 
-Four properties are locked here, and the last two matter as much as the first:
+Five properties are locked here, and the last three matter as much as the first:
 
-1. A correction the person typed is stored 🟢 green, ``explicit``, and read back
+1. The dish NAME a person typed is stored 🟢 green, ``explicit``, and read back
    on the next turn — the whole point of the ticket.
 2. Re-correcting the same dish supersedes rather than accumulates: one dish
-   never has two current portions.
-3. «Что ел» and «что не подошло» are classified and **not** stored. The count of
+   never has two current names.
+3. Weight and macros are **not** stored at all (owner decision 2026-09-04,
+   variant А): the nutrition diary is Ayla's by the ADR-0009 ownership matrix,
+   ``nutrition_client`` has no update endpoint until DRF-825, and a local copy
+   would leave two numbers for one meal. ``remember_correction`` answers
+   ``NOT_REMEMBERED`` and writes nothing.
+4. «Что ел» and «что не подошло» are classified and **not** stored. The count of
    ``MemoryEntry`` rows after those calls is zero, and that zero is the assertion
    — a perimeter that quietly stores is worse than no perimeter.
-4. Only a source in :data:`ayla_ai_core.STATED_SOURCES` comes back to the person
+5. Only a source in :data:`ayla_ai_core.STATED_SOURCES` comes back to the person
    as their own correction. A derived row with the same key stays invisible.
 """
 
@@ -78,7 +83,7 @@ class TestClarificationIsRemembered:
         bot_user = _consented_user("drf1454-1", settings)
 
         outcome = food_memory.remember_correction(
-            bot_user, dish="Борщ", field=food_memory.FIELD_GRAMS, value=500
+            bot_user, dish="Борщ", field=food_memory.FIELD_NAME, value="борщ по-домашнему"
         )
 
         assert outcome is food_memory.Outcome.WRITTEN
@@ -92,52 +97,74 @@ class TestClarificationIsRemembered:
 
         bot_user.refresh_from_db()
         recall = food_memory.recall_corrections(bot_user, dish="борщ")
-        assert recall.portion_g == 500
-        assert recall.has(food_memory.FIELD_GRAMS)
+        assert recall.dish_name == "борщ по-домашнему"
+        assert recall.has(food_memory.FIELD_NAME)
 
     def test_dish_key_is_normalised_not_case_sensitive(self, settings, resolver) -> None:
         bot_user = _consented_user("drf1454-2", settings)
         food_memory.remember_correction(
-            bot_user, dish="  Плов   узбекский ", field=food_memory.FIELD_GRAMS, value=320
+            bot_user,
+            dish="  Плов   узбекский ",
+            field=food_memory.FIELD_NAME,
+            value="плов по-фергански",
         )
         bot_user.refresh_from_db()
 
-        assert food_memory.recall_corrections(bot_user, dish="ПЛОВ УЗБЕКСКИЙ").portion_g == 320
+        recall = food_memory.recall_corrections(bot_user, dish="ПЛОВ УЗБЕКСКИЙ")
+        assert recall.dish_name == "плов по-фергански"
 
     def test_memory_is_per_dish(self, settings, resolver) -> None:
         bot_user = _consented_user("drf1454-3", settings)
         food_memory.remember_correction(
-            bot_user, dish="борщ", field=food_memory.FIELD_GRAMS, value=500
+            bot_user, dish="борщ", field=food_memory.FIELD_NAME, value="борщ по-домашнему"
         )
         bot_user.refresh_from_db()
 
         assert food_memory.recall_corrections(bot_user, dish="плов").is_empty()
 
-    def test_all_three_fields_round_trip(self, settings, resolver) -> None:
+    def test_only_the_name_is_kept_of_the_three_answers(self, settings, resolver) -> None:
+        """Три вопроса задаются, ответ хранится один — имя блюда.
+
+        Решение владельца от 04.09.2026, вариант А: вес и БЖУ принадлежат
+        дневнику Ayla (матрица владения ADR-0009), эндпоинта обновления нет до
+        DRF-825, и локальная копия дала бы две цифры на один приём пищи. Этот
+        тест раньше требовал обратного — «все три поля кладутся в память»; он
+        изменён, а не удалён, потому что это ровно то место, которое стало
+        блокером слияния.
+        """
         bot_user = _consented_user("drf1454-4", settings)
+
+        assert (
+            food_memory.remember_correction(
+                bot_user, dish="борщ", field=food_memory.FIELD_NAME, value="плов"
+            )
+            is food_memory.Outcome.WRITTEN
+        )
         for field, value in (
             (food_memory.FIELD_GRAMS, 500),
-            (food_memory.FIELD_NAME, "плов"),
             (food_memory.FIELD_MACROS, "12/8/32"),
         ):
             assert (
                 food_memory.remember_correction(bot_user, dish="борщ", field=field, value=value)
-                is food_memory.Outcome.WRITTEN
+                is food_memory.Outcome.NOT_REMEMBERED
             )
         bot_user.refresh_from_db()
 
+        assert _green_rows(resolver["uuid"]) == 1  # the name, and nothing else
         recall = food_memory.recall_corrections(bot_user, dish="борщ")
-        assert (recall.portion_g, recall.dish_name, recall.macros) == (500, "плов", "12/8/32")
+        assert recall.dish_name == "плов"
+        assert not recall.has(food_memory.FIELD_GRAMS)
+        assert not recall.has(food_memory.FIELD_MACROS)
 
     def test_repeated_identical_correction_does_not_duplicate(self, settings, resolver) -> None:
         bot_user = _consented_user("drf1454-5", settings)
         food_memory.remember_correction(
-            bot_user, dish="борщ", field=food_memory.FIELD_GRAMS, value=500
+            bot_user, dish="борщ", field=food_memory.FIELD_NAME, value="борщ по-домашнему"
         )
         bot_user.refresh_from_db()
 
         outcome = food_memory.remember_correction(
-            bot_user, dish="борщ", field=food_memory.FIELD_GRAMS, value=500
+            bot_user, dish="борщ", field=food_memory.FIELD_NAME, value="борщ по-домашнему"
         )
 
         assert outcome is food_memory.Outcome.DUPLICATE
@@ -146,11 +173,11 @@ class TestClarificationIsRemembered:
     def test_re_correction_supersedes_instead_of_contradicting(self, settings, resolver) -> None:
         bot_user = _consented_user("drf1454-6", settings)
         food_memory.remember_correction(
-            bot_user, dish="борщ", field=food_memory.FIELD_GRAMS, value=500
+            bot_user, dish="борщ", field=food_memory.FIELD_NAME, value="борщ по-домашнему"
         )
         bot_user.refresh_from_db()
         food_memory.remember_correction(
-            bot_user, dish="борщ", field=food_memory.FIELD_GRAMS, value=250
+            bot_user, dish="борщ", field=food_memory.FIELD_NAME, value="борщ постный"
         )
 
         # History is kept (2 rows), but only the current value is surfaced.
@@ -160,7 +187,7 @@ class TestClarificationIsRemembered:
         superseded_row = superseded.first()
         assert superseded_row is not None
         assert superseded_row.supersession_reason == MemoryEntry.SUPERSESSION_CORRECTED
-        assert food_memory.recall_corrections(bot_user, dish="борщ").portion_g == 250
+        assert food_memory.recall_corrections(bot_user, dish="борщ").dish_name == "борщ постный"
 
 
 # ─── провенанс ────────────────────────────────────────────────────────────
@@ -191,7 +218,12 @@ class TestProvenance:
             sensitivity_zone=MemoryEntry.SENSITIVITY_GREEN,
             source=MemoryEntry.SOURCE_INFERRED,
             kind="preference",
-            content={"key": "food_portion:борщ", "value": 900, "dish": "борщ", "field": "grams"},
+            content={
+                "key": "food_dish_name:борщ",
+                "value": "борщ по-домашнему",
+                "dish": "борщ",
+                "field": "name",
+            },
             request_id=uuid.uuid4(),
             purpose="test:inferred",
             last_inferred_at=timezone.now(),
@@ -366,7 +398,7 @@ class TestConsentGates:
         bot_user = resolve_or_create_global_bot_user(channel="max", channel_user_id="drf1454-10")
 
         outcome = food_memory.remember_correction(
-            bot_user, dish="борщ", field=food_memory.FIELD_GRAMS, value=500
+            bot_user, dish="борщ", field=food_memory.FIELD_NAME, value="борщ по-домашнему"
         )
 
         assert outcome is food_memory.Outcome.NO_CONSENT
@@ -379,7 +411,7 @@ class TestConsentGates:
         bot_user = _consented_user("drf1454-11", settings, memory_green=False)
 
         outcome = food_memory.remember_correction(
-            bot_user, dish="борщ", field=food_memory.FIELD_GRAMS, value=500
+            bot_user, dish="борщ", field=food_memory.FIELD_NAME, value="борщ по-домашнему"
         )
 
         assert outcome is food_memory.Outcome.NO_CONSENT
@@ -388,10 +420,11 @@ class TestConsentGates:
     def test_read_is_gated_on_memory_green_too(self, settings, resolver) -> None:
         bot_user = _consented_user("drf1454-12", settings)
         food_memory.remember_correction(
-            bot_user, dish="борщ", field=food_memory.FIELD_GRAMS, value=500
+            bot_user, dish="борщ", field=food_memory.FIELD_NAME, value="борщ по-домашнему"
         )
         bot_user.refresh_from_db()
-        assert food_memory.recall_corrections(bot_user, dish="борщ").portion_g == 500
+        recall = food_memory.recall_corrections(bot_user, dish="борщ")
+        assert recall.dish_name == "борщ по-домашнему"
 
         ConsentRecord.all_tenants.filter(
             bot_user=bot_user,
@@ -403,7 +436,7 @@ class TestConsentGates:
     def test_forgotten_user_never_accretes_new_memory(self, settings, resolver) -> None:
         bot_user = _consented_user("drf1454-13", settings)
         food_memory.remember_correction(
-            bot_user, dish="борщ", field=food_memory.FIELD_GRAMS, value=500
+            bot_user, dish="борщ", field=food_memory.FIELD_NAME, value="борщ по-домашнему"
         )
         bot_user.refresh_from_db()
         upc = get_or_create_personal_context(resolver["uuid"])
@@ -411,7 +444,7 @@ class TestConsentGates:
         upc.save(update_fields=["forget_all_requested_at"])
 
         outcome = food_memory.remember_correction(
-            bot_user, dish="плов", field=food_memory.FIELD_GRAMS, value=300
+            bot_user, dish="плов", field=food_memory.FIELD_NAME, value="плов с бараниной"
         )
 
         assert outcome is food_memory.Outcome.FORGOTTEN
@@ -478,7 +511,7 @@ class TestNeverBreaksTheTurn:
     ) -> None:
         bot_user = _consented_user("drf1454-14", settings)
         food_memory.remember_correction(
-            bot_user, dish="борщ", field=food_memory.FIELD_GRAMS, value=500
+            bot_user, dish="борщ", field=food_memory.FIELD_NAME, value="борщ по-домашнему"
         )
         bot_user.refresh_from_db()
 
@@ -500,7 +533,7 @@ class TestNeverBreaksTheTurn:
         monkeypatch.setattr(food_memory, "write_entry", _boom, raising=True)
 
         outcome = food_memory.remember_correction(
-            bot_user, dish="борщ", field=food_memory.FIELD_GRAMS, value=500
+            bot_user, dish="борщ", field=food_memory.FIELD_NAME, value="борщ по-домашнему"
         )
 
         assert outcome is food_memory.Outcome.ERROR
@@ -510,13 +543,15 @@ class TestNeverBreaksTheTurn:
 
         assert (
             food_memory.remember_correction(
-                bot_user, dish="", field=food_memory.FIELD_GRAMS, value=500
+                bot_user, dish="", field=food_memory.FIELD_NAME, value="борщ по-домашнему"
             )
             is food_memory.Outcome.UNPARSED
         )
+        # An unknown field is not ours to keep either — the ownership gate is
+        # the first one, so it answers before the key is even built.
         assert (
             food_memory.remember_correction(bot_user, dish="борщ", field="calories", value=500)
-            is food_memory.Outcome.UNPARSED
+            is food_memory.Outcome.NOT_REMEMBERED
         )
         assert MemoryEntry.objects.count() == 0
 
@@ -543,13 +578,13 @@ class TestTheRowIsVisibleToThePerson:
 
         bot_user = _consented_user("drf1454-vis-1", settings)
         food_memory.remember_correction(
-            bot_user, dish="Борщ", field=food_memory.FIELD_GRAMS, value=500
+            bot_user, dish="Борщ", field=food_memory.FIELD_NAME, value="борщ по-домашнему"
         )
         bot_user.refresh_from_db()
 
         summary = render_memory_summary(bot_user, user_id=resolver["uuid"])
 
-        assert "порция «Борщ» — 500 г" in summary
+        assert "блюдо «Борщ» называет «борщ по-домашнему»" in summary
 
     def test_the_list_keeps_the_persons_spelling(self, settings, resolver) -> None:
         """Мелкая находка ревью: в чате «Куриная грудка», в списке памяти
@@ -557,33 +592,30 @@ class TestTheRowIsVisibleToThePerson:
         написание — человека."""
         bot_user = _consented_user("drf1454-case", settings)
         food_memory.remember_correction(
-            bot_user, dish="Куриная грудка", field=food_memory.FIELD_GRAMS, value=200
+            bot_user, dish="Куриная грудка", field=food_memory.FIELD_NAME, value="грудка на гриле"
         )
         bot_user.refresh_from_db()
 
         entry = MemoryEntry.objects.get(user_id=resolver["uuid"])
         assert "Куриная грудка" in entry.content["display"]
-        assert entry.content["key"] == "food_portion:куриная грудка"
+        assert entry.content["key"] == "food_dish_name:куриная грудка"
 
-    @pytest.mark.parametrize(
-        "field,value,expected",
-        [
-            ("grams", 500, "порция «борщ» — 500 г"),
-            ("name", "плов", "блюдо «борщ» называет «плов»"),
-            ("macros", "12/8/32", "БЖУ для «борщ» — 12/8/32"),
-        ],
-    )
-    def test_every_field_has_a_phrase_not_raw_json(
-        self, settings, resolver, field: str, value: Any, expected: str
-    ) -> None:
+    def test_the_stored_field_has_a_phrase_not_raw_json(self, settings, resolver) -> None:
+        """Одно поле — одна фраза (см. REMEMBERED_FIELDS).
+
+        Раньше тест перебирал три поля; вес и БЖУ больше не пишутся, так что
+        перебирать нечего — рендерится ровно то, что хранится.
+        """
         from apps.persona.memory_surface import describe_green_content
 
-        bot_user = _consented_user(f"drf1454-vis-{field}", settings)
-        food_memory.remember_correction(bot_user, dish="борщ", field=field, value=value)
+        bot_user = _consented_user("drf1454-vis-name", settings)
+        food_memory.remember_correction(
+            bot_user, dish="борщ", field=food_memory.FIELD_NAME, value="плов"
+        )
         bot_user.refresh_from_db()
 
         entry = MemoryEntry.objects.get(user_id=resolver["uuid"])
-        assert describe_green_content(entry.content) == expected
+        assert describe_green_content(entry.content) == "блюдо «борщ» называет «плов»"
 
     def test_forget_all_takes_the_food_rows_with_it(self, settings, resolver) -> None:
         """The one erase verb that DOES reach these rows today (152-ФЗ)."""
@@ -591,7 +623,7 @@ class TestTheRowIsVisibleToThePerson:
 
         bot_user = _consented_user("drf1454-vis-2", settings)
         food_memory.remember_correction(
-            bot_user, dish="борщ", field=food_memory.FIELD_GRAMS, value=500
+            bot_user, dish="борщ", field=food_memory.FIELD_NAME, value="борщ по-домашнему"
         )
         bot_user.refresh_from_db()
         assert _green_rows(resolver["uuid"]) == 1
@@ -609,38 +641,39 @@ class TestTheRowIsVisibleToThePerson:
 
 
 class TestReturningToAnEarlierValue:
-    """500 → 250 → 500. The dedup used to compare against every row ever
-    written, including the dead one it had just superseded: the third turn
-    answered «Запомнила: 500 г» and left 250 as the value the next card would
-    print. A DUPLICATE verdict must mean «this is already what we would tell
-    you», never «we once heard this»."""
+    """A → Б → A. The dedup used to compare against every row ever written,
+    including the dead one it had just superseded: the third turn answered
+    «Запомнила» and left Б as the value the next card would print. A DUPLICATE
+    verdict must mean «this is already what we would tell you», never «we once
+    heard this»."""
 
     def test_a_person_can_go_back_to_a_value_they_had_before(self, settings, resolver) -> None:
         bot_user = _consented_user("drf1454-back-1", settings)
-        for grams in (500, 250):
+        for name in ("борщ по-домашнему", "борщ постный"):
             food_memory.remember_correction(
-                bot_user, dish="борщ", field=food_memory.FIELD_GRAMS, value=grams
+                bot_user, dish="борщ", field=food_memory.FIELD_NAME, value=name
             )
             bot_user.refresh_from_db()
-        assert food_memory.recall_corrections(bot_user, dish="борщ").portion_g == 250
+        assert food_memory.recall_corrections(bot_user, dish="борщ").dish_name == "борщ постный"
 
         outcome = food_memory.remember_correction(
-            bot_user, dish="борщ", field=food_memory.FIELD_GRAMS, value=500
+            bot_user, dish="борщ", field=food_memory.FIELD_NAME, value="борщ по-домашнему"
         )
 
         assert outcome is food_memory.Outcome.WRITTEN
-        assert food_memory.recall_corrections(bot_user, dish="борщ").portion_g == 500
+        recall = food_memory.recall_corrections(bot_user, dish="борщ")
+        assert recall.dish_name == "борщ по-домашнему"
 
     def test_duplicate_is_still_reported_for_the_current_value(self, settings, resolver) -> None:
         bot_user = _consented_user("drf1454-back-2", settings)
         food_memory.remember_correction(
-            bot_user, dish="борщ", field=food_memory.FIELD_GRAMS, value=500
+            bot_user, dish="борщ", field=food_memory.FIELD_NAME, value="борщ по-домашнему"
         )
         bot_user.refresh_from_db()
 
         assert (
             food_memory.remember_correction(
-                bot_user, dish="борщ", field=food_memory.FIELD_GRAMS, value=500
+                bot_user, dish="борщ", field=food_memory.FIELD_NAME, value="борщ по-домашнему"
             )
             is food_memory.Outcome.DUPLICATE
         )
@@ -658,18 +691,19 @@ class TestTheStoreStaysBounded:
         bot_user = _consented_user("drf1454-cap", settings)
         for dish in ("борщ", "плов"):
             food_memory.remember_correction(
-                bot_user, dish=dish, field=food_memory.FIELD_GRAMS, value=300
+                bot_user, dish=dish, field=food_memory.FIELD_NAME, value=f"{dish} по-домашнему"
             )
             bot_user.refresh_from_db()
 
         outcome = food_memory.remember_correction(
-            bot_user, dish="окрошка", field=food_memory.FIELD_GRAMS, value=300
+            bot_user, dish="окрошка", field=food_memory.FIELD_NAME, value="окрошка на квасе"
         )
 
         assert outcome is food_memory.Outcome.CAP_REACHED
         assert _green_rows(resolver["uuid"]) == 2
         # Refusal, not eviction: what was remembered is still remembered.
-        assert food_memory.recall_corrections(bot_user, dish="борщ").portion_g == 300
+        recall = food_memory.recall_corrections(bot_user, dish="борщ")
+        assert recall.dish_name == "борщ по-домашнему"
 
     def test_the_cap_never_blocks_a_dish_already_remembered(
         self, settings, resolver, monkeypatch: pytest.MonkeyPatch
@@ -677,16 +711,16 @@ class TestTheStoreStaysBounded:
         monkeypatch.setattr(food_memory, "_MAX_DISHES", 1, raising=True)
         bot_user = _consented_user("drf1454-cap-2", settings)
         food_memory.remember_correction(
-            bot_user, dish="борщ", field=food_memory.FIELD_GRAMS, value=300
+            bot_user, dish="борщ", field=food_memory.FIELD_NAME, value="борщ по-домашнему"
         )
         bot_user.refresh_from_db()
 
         outcome = food_memory.remember_correction(
-            bot_user, dish="борщ", field=food_memory.FIELD_GRAMS, value=450
+            bot_user, dish="борщ", field=food_memory.FIELD_NAME, value="борщ постный"
         )
 
         assert outcome is food_memory.Outcome.WRITTEN
-        assert food_memory.recall_corrections(bot_user, dish="борщ").portion_g == 450
+        assert food_memory.recall_corrections(bot_user, dish="борщ").dish_name == "борщ постный"
 
 
 class TestRollbackSwitch:
@@ -695,18 +729,19 @@ class TestRollbackSwitch:
         # Presence first: with the switch ON this exact call stores and reads back.
         assert (
             food_memory.remember_correction(
-                bot_user, dish="борщ", field=food_memory.FIELD_GRAMS, value=500
+                bot_user, dish="борщ", field=food_memory.FIELD_NAME, value="борщ по-домашнему"
             )
             is food_memory.Outcome.WRITTEN
         )
         bot_user.refresh_from_db()
-        assert food_memory.recall_corrections(bot_user, dish="борщ").portion_g == 500
+        recall = food_memory.recall_corrections(bot_user, dish="борщ")
+        assert recall.dish_name == "борщ по-домашнему"
 
         settings.FOOD_SCANNER_MEMORY_ENABLED = False
 
         assert (
             food_memory.remember_correction(
-                bot_user, dish="плов", field=food_memory.FIELD_GRAMS, value=300
+                bot_user, dish="плов", field=food_memory.FIELD_NAME, value="плов с бараниной"
             )
             is food_memory.Outcome.DISABLED
         )
@@ -727,7 +762,7 @@ class TestTheConciergePromptIsNotAFoodSurface:
 
         bot_user = _consented_user("drf1454-prompt", settings)
         food_memory.remember_correction(
-            bot_user, dish="Борщ", field=food_memory.FIELD_GRAMS, value=500
+            bot_user, dish="Борщ", field=food_memory.FIELD_NAME, value="борщ по-домашнему"
         )
         bot_user.refresh_from_db()
 

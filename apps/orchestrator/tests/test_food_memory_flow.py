@@ -10,14 +10,20 @@ against a real ``Conversation`` and real ``MemoryEntry`` rows. Only the two
 external edges are stubbed — Ayla's photo recogniser and the identity read-back
 — because neither is what this ticket changed.
 
+What is remembered changed on 2026-09-04 (owner decision, Q-NUTRITION-01,
+variant А): only the dish NAME is kept. Weight and macros are diary data, the
+diary is Ayla's (ADR-0009 rules 1 and 5), and until DRF-825 there is no update
+endpoint a corrected portion could reach — so those two answers are
+acknowledged honestly and stored nowhere.
+
 Turns::
 
-    1. фото            → карточка «Узнала: Борщ … Примерно 300 г»   (память пуста)
-    2. ✏️ Уточнить/вес → ЧИСТЫЙ вопрос «Сколько … в граммах?»
-    3. «500 г»         → 1 зелёная запись, source=explicit
-    4. фото того же    → карточка + строка «Помню с прошлого раза: 500 г»
-    5. ✏️ Уточнить/вес → вопрос УЖЕ НЕ чистый: называет 500 и спрашивает
-                          только об изменении
+    1. фото              → карточка «Узнала: Борщ … Примерно 300 г»   (память пуста)
+    2. ✏️ Уточнить/назв. → ЧИСТЫЙ вопрос «Что было на фото?»
+    3. «плов»            → 1 зелёная запись, source=explicit
+    4. фото того же      → карточка + строка «Помню с прошлого раза: «плов».»
+    5. ✏️ Уточнить/назв. → вопрос УЖЕ НЕ чистый: называет «плов» и спрашивает
+                            только об изменении
 """
 
 from __future__ import annotations
@@ -142,16 +148,16 @@ class TestSecondVisitDoesNotReAsk:
         # Ничего не создано: история еды — жёлтая зона, её не храним.
         assert MemoryEntry.objects.count() == 0
 
-        # ── turn 2: «✏️ Уточнить» → вес. Вопрос ЧИСТЫЙ ─────────────────
-        first_prompt = _turn(person, text="cb:food:correct:grams:scan-1")
+        # ── turn 2: «✏️ Уточнить» → название. Вопрос ЧИСТЫЙ ────────────
+        first_prompt = _turn(person, text="cb:food:correct:name:scan-1")
         assert first_prompt is not None
-        assert first_prompt.reply_text == _PROMPTS["grams"]
+        assert first_prompt.reply_text == _PROMPTS["name"]
         assert first_prompt.action_data["remembered"] is False
 
         # ── turn 3: ответ человека → ровно одна зелёная запись ─────────
-        stored = _turn(person, text="500 г")
+        stored = _turn(person, text="плов")
         assert stored is not None
-        assert stored.action_data == {"field": "grams", "value": 500, "stored": True}
+        assert stored.action_data == {"field": "name", "value": "плов", "stored": True}
 
         bot_user.refresh_from_db()
         rows = _green_rows(ayla)
@@ -159,21 +165,21 @@ class TestSecondVisitDoesNotReAsk:
         entry = rows.get()
         assert entry.source == MemoryEntry.SOURCE_EXPLICIT
         assert entry.provenance == MemoryEntry.PROVENANCE_USER_STATED
-        assert entry.content["key"] == "food_portion:борщ"
-        assert entry.content["value"] == 500
+        assert entry.content["key"] == "food_dish_name:борщ"
+        assert entry.content["value"] == "плов"
 
         # ── turn 4: то же блюдо на следующем ходу — память прочитана ───
         second_card = _turn(person, attachments=_PHOTO)
         assert second_card is not None
-        assert "Помню с прошлого раза: 500 г." in second_card.reply_text
+        assert "Помню с прошлого раза: «плов»." in second_card.reply_text
         assert second_card.action_data["remembered"] is True  # ← «сколько прочитано»
         assert _green_rows(ayla).count() == 1  # чтение ничего не наплодило
 
         # ── turn 5: та же кнопка — и бот УЖЕ НЕ переспрашивает ─────────
-        second_prompt = _turn(person, text="cb:food:correct:grams:scan-2")
+        second_prompt = _turn(person, text="cb:food:correct:name:scan-2")
         assert second_prompt is not None
-        assert second_prompt.reply_text != _PROMPTS["grams"]
-        assert "500" in second_prompt.reply_text
+        assert second_prompt.reply_text != _PROMPTS["name"]
+        assert "плов" in second_prompt.reply_text
         assert "Оставляем?" in second_prompt.reply_text
         assert second_prompt.action_data["remembered"] is True
 
@@ -198,18 +204,61 @@ class TestSecondVisitDoesNotReAsk:
 
     def test_correction_of_a_correction_replaces_it(self, person, ayla) -> None:
         _turn(person, attachments=_PHOTO)
-        _turn(person, text="cb:food:correct:grams:scan-1")
-        _turn(person, text="500")
+        _turn(person, text="cb:food:correct:name:scan-1")
+        _turn(person, text="плов")
         _turn(person, attachments=_PHOTO)
-        _turn(person, text="cb:food:correct:grams:scan-2")
-        _turn(person, text="250")
+        _turn(person, text="cb:food:correct:name:scan-2")
+        _turn(person, text="свекольник")
 
         third_card = _turn(person, attachments=_PHOTO)
         assert third_card is not None
-        assert "Помню с прошлого раза: 250 г." in third_card.reply_text
+        assert "Помню с прошлого раза: «свекольник»." in third_card.reply_text
         # История сохранена (две строки), но текущее значение одно.
         assert MemoryEntry.objects.count() == 2
         assert _green_rows(ayla).count() == 1
+
+
+class TestWeightAndMacrosAreAcknowledgedNotStored:
+    """Q-NUTRITION-01 (2026-09-04, вариант А): правки веса и БЖУ принимаются с
+    честным ack — без «запомнила» и без «больше не спрошу» — и НЕ пишутся в
+    память до DRF-825: дневник принадлежит Ayla (ADR-0009, правила 1 и 5)."""
+
+    def test_a_grams_correction_is_acknowledged_and_writes_nothing(self, person, ayla) -> None:
+        _turn(person, attachments=_PHOTO)
+        prompt = _turn(person, text="cb:food:correct:grams:scan-1")
+        assert prompt is not None
+        assert prompt.reply_text == _PROMPTS["grams"]  # «в прошлый раз» для веса нет
+
+        answer = _turn(person, text="500")
+
+        assert answer is not None
+        assert "500" in answer.reply_text  # значение принято и повторено
+        assert "апомнила" not in answer.reply_text
+        assert "не спрошу" not in answer.reply_text
+        assert answer.action_data == {"field": "grams", "value": 500, "stored": False}
+        assert MemoryEntry.objects.count() == 0
+
+        # Следующая карточка ничего не «помнит» про вес — и не врёт об этом.
+        card = _turn(person, attachments=_PHOTO)
+        assert card is not None
+        assert "Узнала: Борщ" in card.reply_text  # карточка жива, проверять есть что
+        assert "Помню с прошлого раза" not in card.reply_text
+        assert card.action_data["remembered"] is False
+
+    def test_a_macros_correction_is_acknowledged_and_writes_nothing(self, person, ayla) -> None:
+        _turn(person, attachments=_PHOTO)
+        prompt = _turn(person, text="cb:food:correct:macros:scan-1")
+        assert prompt is not None
+        assert prompt.reply_text == _PROMPTS["macros"]
+
+        answer = _turn(person, text="12/8/32")
+
+        assert answer is not None
+        assert "12/8/32" in answer.reply_text
+        assert "апомнила" not in answer.reply_text
+        assert "переспрашивать" not in answer.reply_text
+        assert answer.action_data == {"field": "macros", "value": "12/8/32", "stored": False}
+        assert MemoryEntry.objects.count() == 0
 
 
 class TestAnketaAnswersAreNotCorrections:
@@ -269,8 +318,8 @@ class TestRollbackSwitchEndToEnd:
         bot_user, _conversation = person
         # Presence first: with the switch ON the five-turn loop stores and recalls.
         _turn(person, attachments=_PHOTO)
-        _turn(person, text="cb:food:correct:grams:scan-1")
-        _turn(person, text="500")
+        _turn(person, text="cb:food:correct:name:scan-1")
+        _turn(person, text="плов")
         assert _green_rows(ayla).count() == 1
 
         settings.FOOD_SCANNER_MEMORY_ENABLED = False
@@ -280,7 +329,8 @@ class TestRollbackSwitchEndToEnd:
         assert "Помню с прошлого раза" not in card.reply_text
         assert card.action_data["remembered"] is False
 
-        prompt = _turn(person, text="cb:food:correct:grams:scan-2")
-        assert prompt.reply_text == _PROMPTS["grams"]  # the plain question is back
-        assert _turn(person, text="250") is None  # the answer falls through again
+        prompt = _turn(person, text="cb:food:correct:name:scan-2")
+        assert prompt is not None
+        assert prompt.reply_text == _PROMPTS["name"]  # the plain question is back
+        assert _turn(person, text="свекольник") is None  # the answer falls through again
         assert _green_rows(ayla).count() == 1  # and nothing new was written

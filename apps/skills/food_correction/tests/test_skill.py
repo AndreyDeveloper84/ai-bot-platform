@@ -229,10 +229,79 @@ class TestAnswerHandling:
             "apps.orchestrator.memory.food.remember_correction",
             return_value=food_memory.Outcome.NO_CONSENT,
         ):
-            result = FoodCorrectionSkill().handle(_pending_context("500"))
+            result = FoodCorrectionSkill().handle(_pending_context("плов", field="name"))
         assert result.action_data is not None
         assert result.action_data["stored"] is False
         assert "апомнила" not in result.reply_text
+
+
+class TestGramsAndMacrosAreAcceptedNotStored:
+    """Решение владельца 2026-09-04 (Q-NUTRITION-01, вариант А): вес и БЖУ НЕ
+    пишутся в память до DRF-825 — дневник принадлежит Ayla, и две расходящиеся
+    записи об одном приёме пищи нарушают ADR-0009 (правила 1 и 5). Ответ на
+    такую правку — честный ack: значение принято, без «запомнила» и без
+    «больше не спрошу». Хранится только имя блюда (см. TestKeepOrChange)."""
+
+    def test_a_grams_answer_is_acknowledged_and_never_kept(self) -> None:
+        from apps.orchestrator.memory import food as food_memory
+
+        skill = FoodCorrectionSkill()
+        written: list = []
+        with (
+            patch(
+                "apps.orchestrator.memory.food.remember_correction",
+                return_value=food_memory.Outcome.NOT_REMEMBERED,
+            ) as remember,
+            patch(
+                "apps.conversations.services.write_skill_state",
+                side_effect=lambda conv, key, value: written.append((key, value)),
+            ),
+        ):
+            result = skill.handle(_pending_context("500"))
+
+        assert (
+            result.reply_text
+            == "Поняла: 500 г. Вес пока не запоминаю — в следующий раз уточню снова."
+        )
+        assert result.action_data == {"field": "grams", "value": 500, "stored": False}
+        assert "апомнила" not in result.reply_text
+        assert "не спрошу" not in result.reply_text
+        remember.assert_called_once()  # решение о владении живёт в memory, одно на всех
+        assert written and written[-1][1] is None  # вопрос закрыт
+
+    def test_a_macros_answer_is_acknowledged_and_never_kept(self) -> None:
+        from apps.orchestrator.memory import food as food_memory
+
+        with patch(
+            "apps.orchestrator.memory.food.remember_correction",
+            return_value=food_memory.Outcome.NOT_REMEMBERED,
+        ) as remember:
+            result = FoodCorrectionSkill().handle(_pending_context("12/8/32", field="macros"))
+
+        assert (
+            result.reply_text
+            == "Поняла: БЖУ 12/8/32. Пока не запоминаю — в следующий раз уточню снова."
+        )
+        assert result.action_data == {"field": "macros", "value": "12/8/32", "stored": False}
+        assert "апомнила" not in result.reply_text
+        assert "переспрашивать" not in result.reply_text
+        remember.assert_called_once()
+
+    def test_a_name_answer_still_reaches_memory(self) -> None:
+        """Положительная стража на тех же данных: имя по-прежнему пишется —
+        «не пишем вес/БЖУ» не сломало запись имени."""
+        from apps.orchestrator.memory import food as food_memory
+
+        with patch(
+            "apps.orchestrator.memory.food.remember_correction",
+            return_value=food_memory.Outcome.WRITTEN,
+        ) as remember:
+            result = FoodCorrectionSkill().handle(_pending_context("плов", field="name"))
+
+        remember.assert_called_once()
+        assert result.action_data is not None
+        assert result.action_data["stored"] is True
+        assert "апомнила" in result.reply_text
 
 
 class TestTheNameAnswerIsNotAnyText:
@@ -323,20 +392,22 @@ class TestApproximateAndNegativeGrams:
 
 
 class TestKeepOrChange:
-    """Ревью DRF-1454, ось correctness, MUST_FIX_PRE_PILOT: все три промпта
-    «в прошлый раз было X» заканчиваются «Оставляем?», но matches() требовал
-    форму НОВОГО значения — «да»/«нет» уходили консьержу, а «Оставляем» на
-    промпте про имя само сохранялось как название блюда."""
+    """Ревью DRF-1454, ось correctness, MUST_FIX_PRE_PILOT: промпт «в прошлый
+    раз было X» заканчивается «Оставляем?», но matches() требовал форму НОВОГО
+    значения — «да»/«нет» уходили консьержу, а «Оставляем» на промпте про имя
+    само сохранялось как название блюда. После Q-NUTRITION-01 (2026-09-04)
+    «в прошлый раз» существует только для имени — вес и БЖУ не хранятся до
+    DRF-825, и переспрашивать нечего."""
 
     @pytest.mark.parametrize("text", ["да", "Оставляем", "ок"])
     def test_a_confirmation_is_claimed_on_a_remembered_prompt(self, text: str) -> None:
         assert FoodCorrectionSkill().matches(
-            _pending_context(text, remembered=True, known_value=500)
+            _pending_context(text, field="name", remembered=True, known_value="плов")
         )
 
     def test_a_decline_is_claimed_on_a_remembered_prompt(self) -> None:
         assert FoodCorrectionSkill().matches(
-            _pending_context("нет", remembered=True, known_value=500)
+            _pending_context("нет", field="name", remembered=True, known_value="плов")
         )
 
     @pytest.mark.parametrize("text", ["да", "нет", "Оставляем"])
@@ -346,8 +417,10 @@ class TestKeepOrChange:
         # Положительная стража на тех же данных: с запомненным значением тот же
         # текст скилл забирает — то есть «не забрал» ниже отвечает за pending
         # без значения, а не за сломанный matches() вообще.
-        assert skill.matches(_pending_context(text, remembered=True, known_value=500))
-        assert not skill.matches(_pending_context(text))
+        assert skill.matches(
+            _pending_context(text, field="name", remembered=True, known_value="плов")
+        )
+        assert not skill.matches(_pending_context(text, field="name"))
 
     def test_a_confirmation_keeps_the_stored_value_and_settles(self) -> None:
         skill = FoodCorrectionSkill()
@@ -356,11 +429,13 @@ class TestKeepOrChange:
             "apps.conversations.services.write_skill_state",
             side_effect=lambda conv, key, value: written.append((key, value)),
         ):
-            result = skill.handle(_pending_context("да", remembered=True, known_value=500))
+            result = skill.handle(
+                _pending_context("да", field="name", remembered=True, known_value="плов")
+            )
 
-        assert "500" in result.reply_text
+        assert "плов" in result.reply_text
         assert "апомнила" not in result.reply_text  # ничего нового не писали
-        assert result.meta["reply_kind"] == "food_correction_grams_kept"
+        assert result.meta["reply_kind"] == "food_correction_name_kept"
         assert written and written[-1][1] is None  # вопрос закрыт
 
     def test_a_confirmation_on_a_name_prompt_does_not_become_a_dish(self) -> None:
@@ -380,9 +455,11 @@ class TestKeepOrChange:
             "apps.conversations.services.write_skill_state",
             side_effect=lambda conv, key, value: written.append((key, value)),
         ):
-            result = skill.handle(_pending_context("нет", remembered=True, known_value=500))
+            result = skill.handle(
+                _pending_context("нет", field="name", remembered=True, known_value="плов")
+            )
 
-        assert result.reply_text == _PROMPTS_FOR_TEST["grams"]
+        assert result.reply_text == _PROMPTS_FOR_TEST["name"]
         # Pending обновлён, а не стёрт, и remembered снят — второе «нет»
         # не должно крутиться по кругу.
         assert written and written[-1][1] is not None
@@ -444,7 +521,8 @@ class TestATransientWriteFailureKeepsTheQuestionOpen:
     штатная флуктуация) или ERROR означал: правка не записана, pending стёрт,
     следующее сообщение ушло в консьерж — ровно тот дефект, ради которого
     делалась задача. Соседняя ветка «не распарсилось» сделана правильно:
-    pending обновляется, а не чистится. Здесь — так же."""
+    pending обновляется, а не чистится. Здесь — так же. Актуально только для
+    имени: вес и БЖУ до записи не доходят вовсе (Q-NUTRITION-01)."""
 
     @pytest.mark.parametrize("outcome_name", ["NO_IDENTITY", "ERROR"])
     def test_a_transient_failure_refreshes_pending_instead_of_clearing(
@@ -461,7 +539,7 @@ class TestATransientWriteFailureKeepsTheQuestionOpen:
                 side_effect=lambda conv, key, value: written.append((key, value)),
             ),
         ):
-            result = FoodCorrectionSkill().handle(_pending_context("500"))
+            result = FoodCorrectionSkill().handle(_pending_context("плов", field="name"))
 
         # Вопрос остаётся открытым — следующий ход повторит запись.
         assert written and written[-1][1] is not None
@@ -483,7 +561,7 @@ class TestATransientWriteFailureKeepsTheQuestionOpen:
                 side_effect=lambda conv, key, value: written.append((key, value)),
             ),
         ):
-            result = FoodCorrectionSkill().handle(_pending_context("500"))
+            result = FoodCorrectionSkill().handle(_pending_context("плов", field="name"))
 
         assert written and written[-1][1] is None
         assert result.reply_text == "Поняла, учла."

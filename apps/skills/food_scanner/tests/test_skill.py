@@ -453,13 +453,11 @@ class TestMemoryOnTheCard:
         from apps.orchestrator.memory.food import FoodRecall
         from apps.skills.food_scanner.skill import _format_scan_card
 
-        card = _format_scan_card(
-            _scan_response(), FoodRecall(portion_g=500, dish_name="плов", macros="12/8/32")
-        )
+        card = _format_scan_card(_scan_response(), FoodRecall(dish_name="плов"))
 
-        assert "Помню с прошлого раза: 500 г, «плов», БЖУ 12/8/32." in card
-        # Ayla's own numbers are printed unchanged — a remembered portion is
-        # never silently swapped into macros computed for another one.
+        assert "Помню с прошлого раза: «плов»." in card
+        # Ayla's own numbers are printed unchanged — the bot keeps no portion
+        # and no macros of its own that could contradict them (REMEMBERED_FIELDS).
         assert "Примерно 300 г." in card
         assert card.endswith("Записать в дневник?")
         assert len(card.splitlines()) == 5
