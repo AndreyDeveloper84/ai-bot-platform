@@ -69,9 +69,10 @@ AA = 4.5
 DECLARATION = re.compile(r"^\s*--c-([a-z0-9-]+):\s*(#[0-9a-fA-F]{3,8})", re.M)
 DARK_AT = "@media (prefers-color-scheme: dark)"
 
-# A colour literal in a value position. `#798` in `PR #798` has a space
-# before it and so does not match.
-VALUE_POSITION = re.compile(r"(?::|,)\s*#[0-9a-fA-F]{3,8}\b")
+# A colour literal in a value position: after `:` or `,`, optionally
+# inside a quote so a JSX inline style -- `{ color: "#ff8a00" }` -- counts
+# too. `#798` in `PR #798` has a space before it and so does not match.
+VALUE_POSITION = re.compile(r"""(?::|,)\s*["']?\s*#[0-9a-fA-F]{3,8}\b""")
 ABOUT_COLOUR = re.compile(r"var\(--|background|color|border|outline|shadow|fill|stroke")
 BLOCK_COMMENT = re.compile(r"/\*.*?\*/")
 COMMENT_LINE = re.compile(r"^\s*(\*|//)")
