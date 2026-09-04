@@ -564,7 +564,7 @@ export function AdminServicesMatrixScreen({ me }: Props) {
               width: 10,
               height: 10,
               borderRadius: "50%",
-              background: "var(--c-accent, #ff8a00)",
+              background: "var(--c-accent)",
               flexShrink: 0,
             }}
           />
@@ -729,7 +729,7 @@ export function AdminServicesMatrixScreen({ me }: Props) {
               <li
                 key={m.id}
                 style={{
-                  borderBottom: "1px solid var(--c-border, rgba(0,0,0,0.08))",
+                  borderBottom: "1px solid var(--c-divider)",
                 }}
               >
                 <button
@@ -874,8 +874,8 @@ export function AdminServicesMatrixScreen({ me }: Props) {
             insetInline: 0,
             bottom: 0,
             padding: "var(--s-2) var(--s-3) calc(var(--s-3) + env(safe-area-inset-bottom, 0px))",
-            background: "var(--c-surface-0, #fff)",
-            borderTop: "1px solid var(--c-border, rgba(0,0,0,0.08))",
+            background: "var(--c-surface-1)",
+            borderTop: "1px solid var(--c-divider)",
             display: "flex",
             alignItems: "center",
             gap: "var(--s-2)",

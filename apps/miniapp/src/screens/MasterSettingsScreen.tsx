@@ -156,7 +156,7 @@ export function MasterSettingsScreen() {
       <hr
         style={{
           border: 0,
-          borderTop: "1px solid var(--c-border, rgba(0,0,0,0.08))",
+          borderTop: "1px solid var(--c-divider)",
           margin: "var(--s-4) 0",
         }}
       />
@@ -166,7 +166,7 @@ export function MasterSettingsScreen() {
         className="btn-secondary"
         onClick={openConfirm}
         style={{
-          color: "var(--c-danger, #d33)",
+          color: "var(--c-danger)",
           width: "100%",
           justifyContent: "center",
         }}
@@ -226,7 +226,7 @@ function LogoutConfirmSheet({
           <button
             type="button"
             className="cta-bar__button"
-            style={{ flex: 1, color: "var(--c-danger, #d33)" }}
+            style={{ flex: 1, color: "var(--c-danger)" }}
             onClick={onConfirm}
           >
             {COPY.confirm.confirm}

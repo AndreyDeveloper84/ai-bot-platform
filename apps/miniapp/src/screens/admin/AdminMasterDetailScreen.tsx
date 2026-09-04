@@ -1066,7 +1066,7 @@ export function AdminMasterDetailScreen({ me }: Props) {
                 key={ev.id}
                 style={{
                   padding: "var(--s-2) 0",
-                  borderBottom: "1px solid var(--c-border, rgba(0,0,0,0.08))",
+                  borderBottom: "1px solid var(--c-divider)",
                 }}
               >
                 <span style={{ color: "var(--c-text-secondary)" }}>

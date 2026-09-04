@@ -1,40 +1,61 @@
 /*
- * Design tokens — salon-warmth defaults.
+ * Design tokens — единственный источник цвета Mini App.
  *
- * These HEX values are PLACEHOLDERS chosen to be:
- *   - warm beige / dusty rose family (not purple gradient — anti-slop §18)
- *   - sufficient contrast for AA on body text
- *   - distinct light + dark variants (MAX has no theme API — we drive
- *     via `prefers-color-scheme`)
+ * Канон палитры: борд DRF-1181 (Master App), решение владельца §21-ter от
+ * 04.09.2026 (`docs/OPEN_DECISIONS.md`). Отменяет §21-bis (sage) от 25.08.
+ * Область — все три поверхности: клиент, салон, мастер.
  *
- * To swap to the brand palette: change `--c-*` HEX values only. Spacing,
- * radii and typography are also single sources of truth here.
+ * Восемь подписанных на борде значений:
+ *   Основной #5B68FF · Акцентный #22C55E · Предупреждение #F59E0B
+ *   Ошибка   #EF4444 · Текст     #111827 · Второстепенный #6B7280
+ *   Фон      #F8FAFC · Граница   #E5E7EB
  *
+ * За истину берётся ПОДПИСЬ, не пиксель: борд машинно сгенерирован (в плоской
+ * кнопке 1128 различных цветов), подпись `#5B68FF` отрисована как `#041FFA`.
+ *
+ * Правило вывода — одно на всю палитру, обе темы:
+ *   «тон (H) и насыщенность (S) подписанного значения сохраняются; светлота (L)
+ *    двигается на минимум, достаточный, чтобы получить 4.5:1 к худшей
+ *    поверхности своей темы».
+ * Худшая светлая поверхность — `--c-surface-2` #F3F4F6, худшая тёмная —
+ * `--c-surface-2` #374151. Подписанное значение, которое проходит как есть,
+ * стоит здесь дословно; сдвинутое помечено «← #XXXXXX».
+ *
+ * Проверяется тестом `src/styles/tokens.contrast.test.ts` — он читает этот
+ * файл и считает все пары «текст на фоне». Таблица: `docs/design/system/
+ * design-tokens.md` §2.
+ *
+ * Тёмной темы нет ни в каноне, ни на макетах — см. §21-ter п.3. Здесь она
+ * выведена, а не перенесена: два нейтральных полюса меняются местами
+ * (фон = подписанный «Текст», текст = подписанный «Фон»), остальное — тем же
+ * правилом. Это решение исполнителя, вынесенное владельцу отдельным вопросом.
+ *
+ * Spacing, radii и типографика — тоже единственный источник здесь.
  * Radii follow handoff §18 anti-slop check: 8 / 12 in Mini App.
  */
 
 :root {
   /* Surface — light theme. */
-  --c-bg: #fbf6f1;            /* page background */
-  --c-surface-1: #ffffff;     /* cards, sheets */
-  --c-surface-2: #f3ece4;     /* secondary fill */
-  --c-divider: #e8ddd1;
-  --c-overlay: rgb(20 12 6 / 0.4);
+  --c-bg: #f8fafc;            /* борд: Фон */
+  --c-surface-1: #ffffff;     /* выведено: карточки и шторки на фоне */
+  --c-surface-2: #f3f4f6;     /* выведено: шаг вверх по ряду от Границы */
+  --c-divider: #e5e7eb;       /* борд: Граница */
+  --c-overlay: rgb(17 24 39 / 0.4); /* выведено из борд: Текст */
 
   /* Text. */
-  --c-text-primary: #1f1812;
-  --c-text-secondary: #6b5b4a;
-  --c-text-on-accent: #ffffff;
+  --c-text-primary: #111827;   /* борд: Текст */
+  --c-text-secondary: #69707e; /* ← #6B7280, L− до 4.5:1 на surface-2 */
+  --c-text-on-accent: #ffffff; /* выведено: 5.39:1 на --c-accent */
 
-  /* Brand accent — warm dusty rose. */
-  --c-accent: #c47b6c;
-  --c-accent-pressed: #a45e50;
-  --c-accent-subtle: #f5e1dc;
+  /* Brand accent — фиолетовый с борда DRF-1181. */
+  --c-accent: #4452ff;         /* ← #5B68FF, L− до 4.5:1 */
+  --c-accent-pressed: #3843d1; /* выведено: accent + 18 % чёрного */
+  --c-accent-subtle: #e9eaff;  /* выведено: accent 12 % на белом */
 
   /* Semantic. */
-  --c-success: #4a7c5b;
-  --c-warning: #b9842a;
-  --c-danger: #b14a3a;
+  --c-success: #16803d;        /* ← #22C55E, L− до 4.5:1 */
+  --c-warning: #8f5c06;        /* ← #F59E0B, L− до 4.5:1 */
+  --c-danger: #c91111;         /* ← #EF4444, L− до 4.5:1 */
 
   /* Radii — handoff §18. */
   --r-sm: 8px;
@@ -78,22 +99,22 @@
 
 @media (prefers-color-scheme: dark) {
   :root {
-    --c-bg: #19130d;
-    --c-surface-1: #221a13;
-    --c-surface-2: #2c2218;
-    --c-divider: #3a2d20;
-    --c-overlay: rgb(0 0 0 / 0.55);
+    --c-bg: #111827;            /* борд: Текст — полюса меняются местами */
+    --c-surface-1: #1f2937;
+    --c-surface-2: #374151;
+    --c-divider: #4b5563;
+    --c-overlay: rgb(3 7 18 / 0.6);
 
-    --c-text-primary: #f3ece4;
-    --c-text-secondary: #b3a08c;
-    --c-text-on-accent: #ffffff;
+    --c-text-primary: #f8fafc;   /* борд: Фон — второй полюс */
+    --c-text-secondary: #a7acb5; /* ← #6B7280, L+ до 4.5:1 */
+    --c-text-on-accent: #111827; /* борд: Текст — белое на accent даёт 2.3:1 */
 
-    --c-accent: #d99586;
-    --c-accent-pressed: #b9695a;
-    --c-accent-subtle: #3a2620;
+    --c-accent: #9da5ff;         /* ← #5B68FF, L+ до 4.5:1 */
+    --c-accent-pressed: #afb5ff; /* выведено: accent + 18 % белого */
+    --c-accent-subtle: #2a314e;  /* выведено: accent 18 % на фоне */
 
-    --c-success: #6ea27e;
-    --c-warning: #d3a04a;
-    --c-danger: #d57565;
+    --c-success: #22c55e;        /* борд: Акцентный — проходит дословно */
+    --c-warning: #f7ad30;        /* ← #F59E0B, L+ до 4.5:1 */
+    --c-danger: #f7a7a7;         /* ← #EF4444, L+ до 4.5:1 */
   }
 }

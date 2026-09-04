@@ -107,14 +107,14 @@ export function MyVisitsScreen() {
               style={{ textAlign: "left", width: "100%" }}
             >
               <div style={{ fontWeight: 600 }}>{formatVisitFull(b.visit_at)}</div>
-              <div style={{ color: "var(--text-muted, #888)", marginTop: "var(--s-1)" }}>
+              <div style={{ color: "var(--c-text-secondary)", marginTop: "var(--s-1)" }}>
                 {b.service_name}
                 {b.master_name ? ` · ${b.master_name}` : ""}
               </div>
               {b.status === "cancel_requested" && (
                 <div
                   style={{
-                    color: "var(--warning, #c70)",
+                    color: "var(--c-warning)",
                     marginTop: "var(--s-1)",
                     fontSize: "0.9em",
                   }}
@@ -125,7 +125,7 @@ export function MyVisitsScreen() {
               {b.status === "reschedule_requested" && (
                 <div
                   style={{
-                    color: "var(--warning, #c70)",
+                    color: "var(--c-warning)",
                     marginTop: "var(--s-1)",
                     fontSize: "0.9em",
                   }}
@@ -136,7 +136,7 @@ export function MyVisitsScreen() {
               {(b.status === "cancelled" || b.status === "rescheduled") && (
                 <div
                   style={{
-                    color: "var(--text-muted, #888)",
+                    color: "var(--c-text-secondary)",
                     marginTop: "var(--s-1)",
                     fontSize: "0.9em",
                   }}

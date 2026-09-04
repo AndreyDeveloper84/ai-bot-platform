@@ -227,7 +227,7 @@ export function MyVisitDetailScreen() {
           <div
             className="modal__sheet"
             style={{
-              background: "var(--surface-1, #fff)",
+              background: "var(--c-surface-1)",
               padding: "var(--s-4)",
               borderRadius: "var(--r-lg) var(--r-lg) 0 0",
               width: "100%",
@@ -238,7 +238,7 @@ export function MyVisitDetailScreen() {
             <p style={{ marginTop: "var(--s-2)", marginBottom: "var(--s-2)" }}>
               {formatVisitFull(b.visit_at)}
             </p>
-            <p style={{ color: "var(--text-muted, #888)" }}>
+            <p style={{ color: "var(--c-text-secondary)" }}>
               {b.service_name}
               {b.master_name ? ` · ${b.master_name}` : ""}
             </p>

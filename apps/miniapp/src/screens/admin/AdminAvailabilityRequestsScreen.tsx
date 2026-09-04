@@ -766,7 +766,7 @@ export function AdminAvailabilityRequestsScreen({ me }: Props) {
                               background: "none",
                               border: "none",
                               padding: 0,
-                              color: "var(--c-accent, #3b82f6)",
+                              color: "var(--c-accent)",
                               cursor: "pointer",
                             }}
                             onClick={() => toggleExpanded(it.request_id)}
@@ -957,7 +957,7 @@ export function AdminAvailabilityRequestsScreen({ me }: Props) {
                 fontSize: "0.85rem",
                 color:
                   rejectState.reason.trim().length > MAX_REJECTION_REASON_LEN
-                    ? "var(--c-danger, #d92d20)"
+                    ? "var(--c-danger)"
                     : "var(--c-text-secondary)",
               }}
             >
