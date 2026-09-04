@@ -104,10 +104,10 @@ WORKDIR /app
 # OPTIONAL build-time credential for the ayla-ai-core dep.
 #
 # ayla-ai-core is PUBLIC (owner's decision 04.09.2026, recorded in
-# OPEN_DECISIONS.md §22 in the workspace root, outside this repo), so
-# this build needs no token: with the ARG
-# empty the `if` below is skipped and `uv sync` fetches the pinned SHA
-# anonymously. Verified 04.09.2026 by an unauthenticated fetch of the pin.
+# OPEN_DECISIONS.md §22 in the workspace root, outside this repo), so this
+# build needs no token: with the ARG empty the `if` below is skipped and
+# `uv sync` fetches the pinned SHA anonymously. Verified 04.09.2026 by an
+# unauthenticated fetch of the pin.
 #
 # The token path is kept for the day the visibility is closed again (the
 # decision says public "for now"): pass via

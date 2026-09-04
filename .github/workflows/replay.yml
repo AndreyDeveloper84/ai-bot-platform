@@ -268,8 +268,8 @@ jobs:
       #
       # That repo is PUBLIC (owner's decision 04.09.2026, recorded in
       # OPEN_DECISIONS.md §22 in the workspace root, outside this repo),
-      # so the token is optional: present ->
-      # authenticated fetch, absent -> anonymous fetch. The block mirrors
+      # so the token is optional: present -> authenticated fetch, absent
+      # -> anonymous fetch. The block mirrors
       # ci.yml, including the rule that a missing token must NOT fail the
       # run — see the long comment there for why (DRF-1466).
       - name: Configure git auth for the ayla-ai-core dep (token optional)
