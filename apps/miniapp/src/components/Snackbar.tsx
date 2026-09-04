@@ -67,8 +67,8 @@ export function Snackbar({
         left: "var(--s-3)",
         right: "var(--s-3)",
         bottom: "calc(var(--s-6) + var(--safe-bottom, 0px))",
-        background: "var(--surface-3, #1f1f1f)",
-        color: "var(--on-surface-3, #fff)",
+        background: "var(--c-text-primary)",
+        color: "var(--c-bg)",
         padding: "var(--s-3) var(--s-4)",
         borderRadius: "var(--r-md)",
         display: "flex",
@@ -89,7 +89,7 @@ export function Snackbar({
           }}
           style={{
             background: "transparent",
-            color: "var(--accent, #6ad)",
+            color: "var(--c-accent-subtle)",
             border: "none",
             font: "inherit",
             fontWeight: 600,

@@ -382,6 +382,18 @@ jobs:
       - name: Mini App style contract
         run: uv run python tools/lint/miniapp_style_contract.py apps/miniapp
 
+      # Mini App palette contract (DRF-1462). The owner moved every surface
+      # onto the purple palette signed on the DRF-1181 board (§21-ter of
+      # docs/OPEN_DECISIONS.md). Two things drift silently and this guard
+      # refuses both: a colour written anywhere but tokens.css -- there were
+      # 95 such literals, most hidden as dead `var(--c-border, #e0e0e3)`
+      # fallbacks behind variables no stylesheet declared -- and a token pair
+      # that stops meeting WCAG AA. Same reason as the style contract above
+      # for living here: vitest runs with `css: false`, so even a `?raw`
+      # import of tokens.css comes back empty inside a test.
+      - name: Mini App palette contract
+        run: uv run python tools/lint/miniapp_token_contrast.py apps/miniapp
+
       # Personal-field owner guard (DRF-1365). The memory audit of
       # 2026-08-24 returned «C — multiple competing memory systems»: six
       # stores holding facts about the same person, none of them designed
