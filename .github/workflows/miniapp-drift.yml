@@ -93,7 +93,7 @@ jobs:
       # tools/ci/miniapp_bundle_drift.py, which on a pull_request run does not
       # exist on `dev` yet. The checkout action's `ref` selects the commit
       # without ever discarding the code being run.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: >-
             ${{ (github.event_name == 'push' || github.event_name == 'pull_request')
@@ -110,7 +110,7 @@ jobs:
       # Node 24 build and the pilot's Node 20 build were verified to emit a
       # byte-identical index-foET4UYR.css.
       - name: Set up Node (from apps/miniapp/.nvmrc)
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version-file: apps/miniapp/.nvmrc
           cache: npm
