@@ -101,11 +101,18 @@ RUN pip install --upgrade pip && pip install "uv==0.11.12"
 
 WORKDIR /app
 
-# Build-time secret for cloning private GitHub repos (ayla-ai-core).
-# Pattern from beautygo_backend/Dockerfile: pass via
-# `docker build --build-arg GH_DEPLOY_TOKEN=...`. The URL-rewrite makes
+# OPTIONAL build-time credential for the ayla-ai-core dep.
+#
+# ayla-ai-core is PUBLIC (owner's decision 04.09.2026, recorded in
+# docs/OPEN_DECISIONS.md §22), so this build needs no token: with the ARG
+# empty the `if` below is skipped and `uv sync` fetches the pinned SHA
+# anonymously. Verified 04.09.2026 by an unauthenticated fetch of the pin.
+#
+# The token path is kept for the day the visibility is closed again (the
+# decision says public "for now"): pass via
+# `docker build --build-arg GH_DEPLOY_TOKEN=...` and the URL-rewrite makes
 # git clone authenticate transparently. Consumed at build time only — not
-# baked into the runtime image (empty default = public repos build fine).
+# baked into the runtime image.
 ARG GH_DEPLOY_TOKEN=""
 RUN if [ -n "$GH_DEPLOY_TOKEN" ]; then \
       git config --global url."https://${GH_DEPLOY_TOKEN}@github.com/".insteadOf "https://github.com/"; \

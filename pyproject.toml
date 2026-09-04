@@ -82,11 +82,14 @@ dependencies = [
 
 [project.optional-dependencies]
 
-# ayla-ai-core is a separate private repo. Pulling it requires GitHub
-# auth (locally via ssh, in CI via a GH_DEPLOY_TOKEN secret + `git
-# config insteadOf` rewrite — see .github/workflows/ci.yml). It lives
-# in its own extra so plain `uv sync --extra dev` works without auth
-# for non-AI contributors. AI work uses `uv sync --extra dev --extra ai-core`.
+# ayla-ai-core is a separate PUBLIC repo (owner's decision 04.09.2026,
+# docs/OPEN_DECISIONS.md §22), so pulling it needs no GitHub auth —
+# the pinned SHA fetches anonymously. GH_DEPLOY_TOKEN is still honoured
+# where it exists (CI/Docker rewrite the URL with it when non-empty) so
+# the machinery survives the visibility being closed again; it is not
+# required. It lives in its own extra because it is a heavy AI-only dep:
+# plain `uv sync --extra dev` stays light for non-AI contributors, AI
+# work uses `uv sync --extra dev --extra ai-core`.
 #
 # A2 / DRF-618: ref pinned to a 40-char commit SHA, NOT a tag. Tags are
 # force-pushable on GitHub (Security Engineer P1, 2026-05-12 six-agent

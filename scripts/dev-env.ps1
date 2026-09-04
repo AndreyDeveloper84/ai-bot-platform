@@ -33,20 +33,24 @@ it is what creates .venv. Install it, then re-run this script:
 }
 
 Write-Host "==> uv sync --extra dev --extra ai-core --frozen   (in $RepoRoot)"
-# `ai-core` pulls a private GitHub repo. Locally that needs your usual git
-# auth (ssh key or credential helper); CI rewrites the URL with
-# GH_DEPLOY_TOKEN. If this step fails on auth, the environment is NOT
-# usable for anything touching apps/orchestrator -- do not paper over it by
-# dropping the extra.
+# `ai-core` pulls ayla-ai-core from a separate PUBLIC repo (owner's
+# decision 04.09.2026), so this normally works with no git auth at all.
+# CI and Docker still rewrite the URL with GH_DEPLOY_TOKEN when that
+# variable is non-empty, for the day the visibility is closed again. If
+# this step fails, the environment is NOT usable for anything touching
+# apps/orchestrator -- do not paper over it by dropping the extra.
 uv sync --extra dev --extra ai-core --frozen
 if ($LASTEXITCODE -ne 0) {
     Write-Error @'
 `uv sync` failed.
 
-If it failed fetching ayla-ai-core (a PRIVATE repo), your git auth cannot
-reach github.com/AndreyDeveloper84/ayla-ai-core. Fix the auth -- do not
-retry without `--extra ai-core`, and do not copy another worktree's
-.venv: one `pip install` in a borrowed venv breaks it for its owner.
+If it failed fetching ayla-ai-core, you cannot reach
+github.com/AndreyDeveloper84/ayla-ai-core. That repo is public, so this is
+usually network/proxy rather than auth -- check plain
+`git ls-remote https://github.com/AndreyDeveloper84/ayla-ai-core.git`
+first. Fix it -- do not retry without `--extra ai-core`, and do not copy
+another worktree's .venv: one `pip install` in a borrowed venv breaks it
+for its owner.
 '@
     exit 1
 }

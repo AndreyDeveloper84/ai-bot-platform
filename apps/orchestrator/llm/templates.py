@@ -1,13 +1,15 @@
 """Static fallback templates for breaker-open responses (DRF-428 / D1).
 
-Sprint 1 ships static template strings. When ``GH_DEPLOY_TOKEN`` is
-configured and ``ayla-ai-core`` is importable (per review revision 5C),
-this module gets a thin import wrapper:
+Sprint 1 ships static template strings. When ``ayla-ai-core`` is
+importable (per review revision 5C), this module gets a thin import
+wrapper:
 
     from ayla_ai_core.voice import get_fallback_template
     OUTAGE_RU = get_fallback_template("outage_ru")
 
-For now, hardcoded strings keep CI green without the deploy token.
+For now, hardcoded strings keep CI green without the extra dep. (The
+original note here said this waited on ``GH_DEPLOY_TOKEN``; ayla-ai-core
+is a public repo and needs no token — DRF-1466.)
 """
 
 from __future__ import annotations
