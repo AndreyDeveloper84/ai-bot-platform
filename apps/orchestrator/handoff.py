@@ -46,8 +46,8 @@ logger = logging.getLogger(__name__)
 # S1 anti-touch). Format ``cb:book:pick_master:<master>:<service>`` — the
 # service part is REQUIRED: without it the skill's incomplete-callback guard
 # (deliberately, RB1.1-D05) refuses the tap, which on this path was a
-# guaranteed dead-end (DRF-962). Under the YClients
-# path both ids are native ints; under Ayla REST both are canonical UUIDs.
+# guaranteed dead-end (DRF-962). Under the YClients path both ids are native
+# ints; under Ayla REST both are canonical UUIDs.
 _CALLBACK_BOOK_PICK_MASTER = "cb:book:pick_master:"
 
 _UNAVAILABLE_REPLY = (
