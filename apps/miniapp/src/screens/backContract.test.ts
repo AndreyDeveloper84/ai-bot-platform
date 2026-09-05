@@ -16,6 +16,17 @@
  * объявление — либо `back={…}` у `ScreenLayout`, либо прямой вызов
  * `useScreenBack(…)`. Молчание валидным состоянием не является.
  *
+ * # Почему проверяется тело компонента, а не файл
+ *
+ * Файл нередко содержит несколько компонентов: `FoodScannerCaptureScreen`
+ * и `ConsentGate` внутри него, `FoodScannerProcessingScreen` и
+ * `ScanErrorScreen`. Проверка по всему тексту файла зеленела бы от
+ * объявления ЛЮБОГО из них — то есть ровно на той группе экранов, ради
+ * которой тест и написан (там, где есть `ScreenLayout`, гарантию даёт
+ * TypeScript). Поэтому вырезается тело именно того компонента, чьим
+ * именем экран смонтирован. Комментарии из него убираются: слова
+ * «позвать `useScreenBack`» в шапке — это не вызов.
+ *
  * # Почему только клиентское дерево
  *
  * DRF-1493 — про клиентскую поверхность: это в ней человек оказывался
@@ -51,7 +62,7 @@ const SCREEN_SOURCES = import.meta.glob("./**/*.tsx", {
   eager: true,
 }) as Record<string, string>;
 
-/** Исходник экрана по имени компонента (тестовые файлы отброшены). */
+/** Исходник файла экрана по имени компонента (тестовые файлы отброшены). */
 const SCREEN_FILES = new Map<string, string>(
   Object.entries(SCREEN_SOURCES)
     .filter(([p]) => !p.endsWith(".test.tsx"))
@@ -79,7 +90,9 @@ function customerRoutesBody(): string {
  *
  * Часть элементов — служебные обёртки, объявленные прямо в `App.tsx`.
  * Своего файла в `screens/` у них нет, экранами они не являются и в
- * проверку не попадают.
+ * проверку не попадают. `MasterOnboardingScreen` приходит не отсюда, а
+ * из хелпера `inviteOnboardingRouteElements()` — он добавлен вручную в
+ * ожидаемый список ниже, чтобы не выпасть молча.
  */
 function mountedScreens(): string[] {
   const body = customerRoutesBody();
@@ -90,29 +103,95 @@ function mountedScreens(): string[] {
   return [...names].filter((n) => SCREEN_FILES.has(n)).sort();
 }
 
+/**
+ * Точный ожидаемый состав выборки.
+ *
+ * Порог вида «больше десяти» пережил бы молчаливую потерю доброго
+ * десятка экранов: элемент, смонтированный через хелпер или через
+ * обёртку `element={<Guard><X/></Guard>}`, из регулярки выпадает и
+ * проверку больше не проходит — при этом всё зелено. Точный список
+ * делает и появление экрана, и его исчезновение видимыми в диффе.
+ */
+const EXPECTED_SCREENS = [
+  "BookingConfirmScreen",
+  "BookingSuccessScreen",
+  "BookingWhenScreen",
+  "CatalogScreen",
+  "CustomerBookingConfirmScreen",
+  "CustomerBookingDetailScreen",
+  "CustomerBookingSuccessScreen",
+  "CustomerCardsScreen",
+  "CustomerCatalogScreen",
+  "CustomerEntryScreen",
+  "CustomerMasterDetailScreen",
+  "CustomerNotificationSettingsScreen",
+  "CustomerProfileScreen",
+  "CustomerRecordsScreen",
+  "CustomerSlotsScreen",
+  "CustomerWellnessDashboardScreen",
+  "FeedbackScreen",
+  "FoodScannerCaptureScreen",
+  "FoodScannerDiaryScreen",
+  "FoodScannerManualScreen",
+  "FoodScannerProcessingScreen",
+  "FoodScannerResultScreen",
+  "FoodScannerSavedScreen",
+  "GoalSelectScreen",
+  "HelloScreen",
+  "MasterPickerScreen",
+  "MyVisitDetailScreen",
+  "MyVisitsScreen",
+  "ProfileScreen",
+  "RescheduleScreen",
+  "RoleNotReadyScreen",
+  "ServiceDetailScreen",
+] as const;
+
+/**
+ * Экраны клиентского дерева, попадающие в него не через `element={<X/>}`.
+ * Проверяются наравне с остальными.
+ */
+const MOUNTED_VIA_HELPER = ["MasterOnboardingScreen"] as const;
+
+/** Тело компонента `name` без комментариев, или `null` если его нет. */
+function componentBody(name: string): string | null {
+  const src = SCREEN_FILES.get(name);
+  if (src === undefined) return null;
+  const start = src.search(
+    new RegExp(`^(export )?function ${name}\\s*\\(`, "m"),
+  );
+  if (start < 0) return null;
+  const rest = src.slice(start);
+  // Конец компонента — закрывающая скобка в первой колонке.
+  const end = rest.search(/^\}/m);
+  const body = end < 0 ? rest : rest.slice(0, end);
+  return body
+    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .replace(/(^|[^:])\/\/[^\n]*/g, "$1");
+}
+
 const DECLARED = /<ScreenLayout[\s\S]{0,400}?back=\{|useScreenBack\s*\(/;
 
+const UNDER_TEST = [...EXPECTED_SCREENS, ...MOUNTED_VIA_HELPER].sort();
+
 describe("DRF-1493 · каждый клиентский экран объявляет свой вид", () => {
-  it("выборка непуста и содержит экраны из задачи", () => {
-    const screens = mountedScreens();
-    expect(screens.length).toBeGreaterThan(10);
-    // Пять экранов, с которых началась задача.
-    expect(screens).toContain("CustomerCatalogScreen");
-    expect(screens).toContain("CustomerRecordsScreen");
-    expect(screens).toContain("CustomerWellnessDashboardScreen");
-    expect(screens).toContain("CustomerBookingSuccessScreen");
-    expect(screens).toContain("CatalogScreen");
+  it("выборка ровно та, что ожидается", () => {
+    expect(mountedScreens()).toEqual([...EXPECTED_SCREENS]);
   });
 
-  it.each(mountedScreens())(
+  it.each(UNDER_TEST)(
     "%s объявляет: родителя (`back={…}`) или корень (`useScreenBack`)",
     (name) => {
-      const src = SCREEN_FILES.get(name)!;
+      const body = componentBody(name);
       expect(
-        DECLARED.test(src),
-        `Экран ${name} смонтирован в CustomerRoutes, но нигде не объявил, ` +
-          'куда ведёт возврат. Передайте `back={backTo("/адрес")}` в ' +
-          "`ScreenLayout` или вызовите " +
+        body,
+        `Не нашёл тело компонента ${name} — проверка по нему ослепла`,
+      ).not.toBeNull();
+      expect(
+        DECLARED.test(body!),
+        `Экран ${name} смонтирован в клиентском дереве, но в своём теле ` +
+          "нигде не объявил, куда ведёт возврат. Передайте " +
+          '`back={backTo("/адрес")}` в `ScreenLayout` или вызовите ' +
           '`useScreenBack(screenRoot("почему выше некуда"))`. ' +
           "Молчание — то, чем DRF-1493 и был.",
       ).toBe(true);

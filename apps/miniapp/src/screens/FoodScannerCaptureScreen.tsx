@@ -159,6 +159,7 @@ export function FoodScannerCaptureScreen() {
   if (consentAt === null) {
     return (
       <ConsentGate
+        onBack={onBack}
         onAccept={handleAcceptConsent}
         onDecline={handleDeclineConsent}
       />
@@ -309,14 +310,23 @@ export function FoodScannerCaptureScreen() {
 // ---------------------------------------------------------------------------
 
 function ConsentGate({
+  onBack,
   onAccept,
   onDecline,
 }: {
+  /**
+   * Возврат приходит готовым от экрана (DRF-1493).
+   *
+   * Своего `useScreenBack` здесь быть не должно: гейт живёт ВНУТРИ
+   * `FoodScannerCaptureScreen`, который объявление уже сделал. Два
+   * живых объявления давали два перехода на одно нажатие, а после
+   * «разрешаю» гейт размонтировался и его cleanup звал `hide()` —
+   * аппаратная кнопка пропадала у каждого, кто открывал скан впервые.
+   */
+  onBack: (() => void) | undefined;
   onAccept: () => void;
   onDecline: () => void;
 }) {
-  // Возврат (DRF-1493) — на дом; адрес прежний, теперь объявленный.
-  const onBack = useScreenBack(backTo("/customer/main"));
   return (
     <div className="food-scanner-screen">
       <header className="records-screen__header">

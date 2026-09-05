@@ -12,7 +12,7 @@
  *
  * Молчание было валидным состоянием. Здесь оно перестаёт им быть:
  * `ScreenLayout` требует `back`, а экран без общего каркаса обязан
- * позвать `useScreenBack` — иначе падает `screens.backContract.test.tsx`.
+ * позвать `useScreenBack` — иначе падает `screens/backContract.test.ts`.
  *
  * # Почему не `history.back()`
  *

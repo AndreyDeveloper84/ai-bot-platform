@@ -53,7 +53,7 @@ export function FoodScannerProcessingScreen() {
   // (распознавание идёт секунды и его отменяют кнопкой «Отменить»), но
   // аппаратная кнопка MAX существует независимо от разметки — и без
   // объявления увела бы из приложения. Объявление обязательно и здесь.
-  useScreenBack(backTo("/customer/main"));
+  const onBack = useScreenBack(backTo("/customer/main"));
   const location = useLocation();
   const state = (location.state ?? {}) as RouterState;
   const photo = state.photo;
@@ -143,6 +143,7 @@ export function FoodScannerProcessingScreen() {
   if (phase.kind === "error") {
     return (
       <ScanErrorScreen
+        onBack={onBack}
         err={phase.err}
         photo={photo ?? null}
         mealType={mealType}
@@ -204,19 +205,25 @@ export function FoodScannerProcessingScreen() {
 // ---------------------------------------------------------------------------
 
 function ScanErrorScreen({
+  onBack,
   err,
   photo,
   mealType,
   previewUrl,
 }: {
+  /**
+   * Возврат приходит готовым от экрана (DRF-1493): экран ошибки
+   * живёт внутри `FoodScannerProcessingScreen`, который объявление уже
+   * сделал. Свой `useScreenBack` здесь давал вторую подписку на
+   * мосту MAX — два перехода на одно нажатие.
+   */
+  onBack: (() => void) | undefined;
   err: unknown;
   photo: File | null;
   mealType: MealType;
   previewUrl: string | null;
 }) {
   const navigate = useNavigate();
-  // Возврат (DRF-1493) — на дом; адрес прежний, теперь объявленный.
-  const onBack = useScreenBack(backTo("/customer/main"));
   const isNotRecognized = err instanceof FoodNotRecognizedError;
   const isPhotoFailed = err instanceof PhotoBytesMissingError;
   const headline = isNotRecognized

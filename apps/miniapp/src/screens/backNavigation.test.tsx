@@ -20,7 +20,7 @@
  *    стрелку всем подряд.
  *
  * Дыра «новый экран молча без возврата» закрыта отдельно:
- * `backContract.test.tsx` (объявление обязательно) плюс обязательное
+ * `backContract.test.ts` (объявление обязательно) плюс обязательное
  * поле `back` у `ScreenLayout` (не собирается без него).
  */
 import { render, screen } from "@testing-library/react";
@@ -48,7 +48,12 @@ vi.mock("../lib/customer-booking", async (importOriginal) => {
   const original = await importOriginal<
     typeof import("../lib/customer-booking")
   >();
-  return { ...original, getCatalogBrowse: vi.fn() };
+  return { ...original, getCatalogBrowse: vi.fn(), getCustomerSlots: vi.fn() };
+});
+
+vi.mock("../lib/food-scanner", async (importOriginal) => {
+  const original = await importOriginal<typeof import("../lib/food-scanner")>();
+  return { ...original, fetchHealthFlags: vi.fn(), logMeal: vi.fn() };
 });
 
 vi.mock("../lib/customer-goals", async (importOriginal) => {
@@ -66,15 +71,22 @@ vi.mock("../lib/customer-goals", async (importOriginal) => {
 });
 
 import { fetchMyBookings, fetchServices } from "../lib/api";
-import { getCatalogBrowse } from "../lib/customer-booking";
+import { getCatalogBrowse, getCustomerSlots } from "../lib/customer-booking";
+import { fetchHealthFlags, type ScanResponse } from "../lib/food-scanner";
 import { onBackButton, setBackButton } from "../lib/max-sdk";
+import { resetBooking, setMaster, setService } from "../state/booking";
 import { CatalogScreen } from "./CatalogScreen";
 import { CustomerBookingSuccessScreen } from "./CustomerBookingSuccessScreen";
 import { CustomerCatalogScreen } from "./CustomerCatalogScreen";
 import { CustomerRecordsScreen } from "./CustomerRecordsScreen";
+import { CustomerSlotsScreen } from "./CustomerSlotsScreen";
 import { CustomerWellnessDashboardScreen } from "./CustomerWellnessDashboardScreen";
+import { FoodScannerCaptureScreen } from "./FoodScannerCaptureScreen";
+import { FoodScannerResultScreen } from "./FoodScannerResultScreen";
 
 const mockedBrowse = vi.mocked(getCatalogBrowse);
+const mockedSlots = vi.mocked(getCustomerSlots);
+const mockedFlags = vi.mocked(fetchHealthFlags);
 const mockedServices = vi.mocked(fetchServices);
 const mockedBookings = vi.mocked(fetchMyBookings);
 const mockedOnBack = vi.mocked(onBackButton);
@@ -101,6 +113,18 @@ function renderDeepLink(at: string, element: React.ReactNode, path: string) {
           path="/customer/records"
           element={<Probe name="/customer/records" />}
         />
+        <Route
+          path="/customer/catalog"
+          element={<Probe name="/customer/catalog" />}
+        />
+        <Route
+          path="/customer/masters/:masterId"
+          element={<Probe name="/customer/masters/:id" />}
+        />
+        <Route
+          path="/customer/food-scanner/capture"
+          element={<Probe name="/customer/food-scanner/capture" />}
+        />
       </Routes>
     </MemoryRouter>,
   );
@@ -108,6 +132,7 @@ function renderDeepLink(at: string, element: React.ReactNode, path: string) {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  resetBooking();
   mockedOnBack.mockImplementation(() => () => undefined);
   mockedBrowse.mockResolvedValue({ services: [], masters: [], picks: [] });
   mockedServices.mockResolvedValue({ services: [] });
@@ -151,6 +176,70 @@ describe("DRF-1493 · вложенный экран: возврат есть и 
     expect(await screen.findByText("ПРИЕХАЛИ:/")).toBeInTheDocument();
   });
 
+  /**
+   * Вычисляемый родитель — самое вероятное место ошибки: адрес
+   * собирается из параметра, и перепутать его нечем, кроме теста.
+   */
+  it("CustomerSlotsScreen → карточка ТОГО мастера, чьи окна показаны", async () => {
+    const user = userEvent.setup();
+    setService("svc-1", "Маникюр");
+    setMaster("mst-7", "Анна");
+    // Загрузка не завершается — экран остаётся на скелетоне, а возврат
+    // в каркасе от состояния данных не зависит.
+    mockedSlots.mockReturnValue(new Promise(() => undefined));
+    renderDeepLink(
+      "/customer/masters/mst-7/slots",
+      <CustomerSlotsScreen />,
+      "/customer/masters/:masterId/slots",
+    );
+    await user.click(await screen.findByRole("button", { name: "Назад" }));
+    expect(
+      await screen.findByText("ПРИЕХАЛИ:/customer/masters/:id"),
+    ).toBeInTheDocument();
+  });
+
+  /**
+   * `kind: "action"` — единственный вид возврата, который не является
+   * адресом. Он тоже обязан быть заданным действием, а не историей.
+   */
+  it("FoodScannerResultScreen → съёмка (возврат заданным действием)", async () => {
+    const user = userEvent.setup();
+    mockedFlags.mockResolvedValue({ health_flags: { eating_disorder: false } });
+    const result: ScanResponse = {
+      scan_id: "scan-1",
+      dish_name: "Овсянка",
+      confidence: 0.9,
+      portion_g: 200,
+      nutrition: null,
+      beauty_insights: null,
+    };
+    render(
+      <MemoryRouter
+        initialEntries={[
+          {
+            pathname: "/customer/food-scanner/result",
+            state: { result, mealType: "breakfast" },
+          },
+        ]}
+      >
+        <Routes>
+          <Route
+            path="/customer/food-scanner/result"
+            element={<FoodScannerResultScreen />}
+          />
+          <Route
+            path="/customer/food-scanner/capture"
+            element={<Probe name="/customer/food-scanner/capture" />}
+          />
+        </Routes>
+      </MemoryRouter>,
+    );
+    await user.click(await screen.findByRole("button", { name: "Назад" }));
+    expect(
+      await screen.findByText("ПРИЕХАЛИ:/customer/food-scanner/capture"),
+    ).toBeInTheDocument();
+  });
+
   it("аппаратная кнопка MAX заведена туда же, куда видимая", async () => {
     renderDeepLink(
       "/customer/catalog",
@@ -165,6 +254,40 @@ describe("DRF-1493 · вложенный экран: возврат есть и 
     handler!();
 
     expect(await screen.findByText("ПРИЕХАЛИ:/customer/main")).toBeInTheDocument();
+  });
+});
+
+/**
+ * Объявление ровно одно на смонтированное дерево.
+ *
+ * `useScreenBack` не идемпотентен: `onBackButton` копит обработчики, а
+ * `setBackButton` — это `show()`/`hide()` без счётчика ссылок. Пока
+ * `ConsentGate` внутри `FoodScannerCaptureScreen` объявлял возврат сам,
+ * их было два: одно нажатие давало два перехода, а после «разрешаю»
+ * гейт размонтировался и его cleanup звал `hide()` — аппаратная кнопка
+ * пропадала у каждого, кто открывал скан еды впервые.
+ */
+describe("DRF-1493 · внутренняя часть экрана не объявляет возврат второй раз", () => {
+  it("гейт согласия не оставляет экран без аппаратной кнопки", async () => {
+    const user = userEvent.setup();
+    window.localStorage.clear();
+    renderDeepLink(
+      "/customer/food-scanner/capture",
+      <FoodScannerCaptureScreen />,
+      "/customer/food-scanner/capture",
+    );
+
+    // Гейт согласия — первый визит.
+    const accept = await screen.findByRole("button", { name: /разреш/i });
+    expect(mockedSetBack.mock.calls).toEqual([[true]]);
+    expect(mockedOnBack).toHaveBeenCalledTimes(1);
+
+    await user.click(accept);
+
+    // Гейт ушёл, экран съёмки на месте — кнопка НЕ спрятана.
+    await screen.findByRole("heading", { name: "Что ешь сейчас?" });
+    expect(mockedSetBack).not.toHaveBeenCalledWith(false);
+    expect(mockedOnBack).toHaveBeenCalledTimes(1);
   });
 });
 
