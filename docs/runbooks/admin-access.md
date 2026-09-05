@@ -246,6 +246,11 @@ docker compose -p ayla-bot-staging exec -T web   python manage.py admin_account_
 
 Оба экрана строго на чтение.
 
+Срок хранения: `AuditLog` чистится задачей
+`apps.audit.tasks.cleanup_old_audit_logs` по `AUDIT_LOG_RETENTION_DAYS`
+(по умолчанию 90 дней). `admin.LogEntry` не чистится ничем — если разбор
+уходит глубже трёх месяцев, смотреть надо там.
+
 ### Проверка после выдачи
 
 1. Под записью-смотрящим: `/admin/handoff/admintask/` открывается (200),
