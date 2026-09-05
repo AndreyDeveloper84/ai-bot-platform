@@ -4,6 +4,11 @@
  * success the rest of the app is unblocked. Failure cases get
  * slug-specific recovery copy instead of dumping raw English messages
  * (see ERROR_COPY map below).
+ *
+ * DRF-1481 — все кнопки ведут в каноническое `/customer/*`: до уборки
+ * поколений «Записаться» вела в старый `/catalog`, а «Мои записи» — в
+ * старое `/my-visits`, то есть единственный fallback-экран раздавал
+ * прошлое поколение целиком.
  */
 
 import { useCallback, useEffect, useState } from "react";
@@ -177,11 +182,11 @@ export function HelloScreen() {
     <ScreenLayout
       back={BACK}
       title={`Здравствуйте, ${name}!`}
-      cta={<StickyCta onClick={() => navigate("/catalog")}>Записаться</StickyCta>}
+      cta={<StickyCta onClick={() => navigate("/customer/catalog")}>Записаться</StickyCta>}
     >
       <p>Помогу записаться в студию {tenant.name}.</p>
       <nav className="hello-nav" aria-label="Разделы">
-        <button type="button" className="btn-secondary" onClick={() => navigate("/my-visits")}>
+        <button type="button" className="btn-secondary" onClick={() => navigate("/customer/records")}>
           Мои записи
         </button>
         <button type="button" className="btn-secondary" onClick={() => navigate("/customer/profile")}>

@@ -1,4 +1,10 @@
-/** F1-detail — single service. CTA «Подобрать время». */
+/** F1-detail — single service. CTA «Подобрать время».
+ *
+ * DRF-1481 — канонический адрес `/customer/catalog/:serviceId`; старый
+ * `/catalog/:serviceId` остаётся смонтирован compatibility-алиасом на
+ * тот же компонент (страховка для внешних ссылок, ушедших наружу
+ * ранее). Все внутренние переходы ведут на канонический адрес.
+ */
 
 import { useCallback, useEffect, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
@@ -13,8 +19,9 @@ import { UNBOOKABLE_DETAIL } from "../components/UnbookableNote";
 import { setService } from "../state/booking";
 import { backTo } from "../lib/screen-back";
 
-/** Возврат (DRF-1493): к списку услуг, откуда открывают карточку. */
-const BACK = backTo("/catalog");
+/** Возврат (DRF-1493): к списку услуг, откуда открывают карточку.
+ * Канонический список — `/customer/catalog` (DRF-1481). */
+const BACK = backTo("/customer/catalog");
 
 type State =
   | { kind: "loading" }
@@ -88,7 +95,7 @@ export function ServiceDetailScreen() {
             type="button"
             className="btn-secondary"
             style={{ marginTop: "var(--s-3)" }}
-            onClick={() => navigate("/catalog", { replace: true })}
+            onClick={() => navigate("/customer/catalog", { replace: true })}
           >
             К услугам
           </button>
@@ -107,9 +114,10 @@ export function ServiceDetailScreen() {
 
   const s = state.service;
   // DRF-1164 — this screen is the ONE door into the booking flow for a
-  // service (`/catalog/:serviceId` is where both catalog surfaces and the
-  // wellness picks land, and a bot deep-link by service id arrives here
-  // too). So the CTA is withheld here rather than only greyed out on the
+  // service (`/customer/catalog/:serviceId` is where both catalog
+  // surfaces and the wellness picks land, and a bot deep-link by
+  // service id arrives here too). So the CTA is withheld here rather
+  // than only greyed out on the
   // card: no CTA, no `setService()`, no `/book/master` — the dead end the
   // customer used to fall into is unreachable from the service side.
   // The page itself stays — description and contraindications are still
@@ -132,7 +140,7 @@ export function ServiceDetailScreen() {
             type="button"
             className="btn-secondary"
             style={{ marginTop: "var(--s-3)" }}
-            onClick={() => navigate("/catalog")}
+            onClick={() => navigate("/customer/catalog")}
           >
             Другие услуги
           </button>

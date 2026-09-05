@@ -16,7 +16,9 @@
  *     sends `{service_id, score}` only, so the branded block is
  *     silently absent; «Услуги» and «Мастера» below are untouched;
  *   «Услуги» — all active services (mirror) → service detail
- *     (`/catalog/:serviceId`, real screen continuing the booking flow);
+ *     (`/customer/catalog/:serviceId` — canonical address of the shared
+ *     ServiceDetailScreen (DRF-1481), real screen continuing the
+ *     booking flow);
  *   «Мастера» — bookable masters (mirror) → master detail
  *     (`/customer/masters/:masterId`, real F2 screen).
  *
@@ -172,7 +174,7 @@ export function CustomerCatalogScreen() {
             <article key={service.id} className="customer-catalog__card-l2">
               <ServiceCard
                 service={service}
-                onSelect={() => navigate(`/catalog/${service.id}`)}
+                onSelect={() => navigate(`/customer/catalog/${service.id}`)}
               />
               {/* WHY — verbatim from the source, never composed here. */}
               <ul className="customer-catalog__why">
@@ -196,7 +198,7 @@ export function CustomerCatalogScreen() {
             <article key={service.id}>
               <ServiceCard
                 service={service}
-                onSelect={() => navigate(`/catalog/${service.id}`)}
+                onSelect={() => navigate(`/customer/catalog/${service.id}`)}
               />
             </article>
           ))}
