@@ -1890,9 +1890,7 @@ CATALOG_SYNC_HTTP_RETRIES = int(os.environ.get("CATALOG_SYNC_HTTP_RETRIES", "3")
 # The ceiling is the client: a stale mirror does not degrade the bot, it
 # makes it confidently deny services the salon sells. Full reasoning lives
 # in apps/catalog/staleness.py, next to the code that applies it.
-CATALOG_SYNC_STALE_AFTER_SECONDS = int(
-    os.environ.get("CATALOG_SYNC_STALE_AFTER_SECONDS", "3600")
-)
+CATALOG_SYNC_STALE_AFTER_SECONDS = int(os.environ.get("CATALOG_SYNC_STALE_AFTER_SECONDS", "3600"))
 
 # KB-RAG Sub-4b (GH #128) — Google Docs read-only client takes NO
 # credentials. It fetches source docs via the public Markdown export

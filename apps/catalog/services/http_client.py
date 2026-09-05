@@ -604,13 +604,14 @@ def _parse_specialist_service(row: dict[str, Any]) -> CatalogSpecialistServiceDT
     ``id`` / ``salon_service`` / ``specialist`` are mandatory — an edge without
     them cannot be mirrored at all.
 
-    Note this raises out of ``fetch_specialist_services`` and therefore aborts
-    the whole tenant's edge batch, NOT just the offending row: parsing happens
-    before the upserter's per-row savepoints. That is deliberate — it fails
-    *safe* (nothing written, reconciliation never runs, the other two mirrors
-    still land), and a malformed join key means the snapshot can no longer be
-    trusted to prove absence, which is exactly when deleting rows is most
-    dangerous. Loud and inert beats silent and destructive.
+    Since DRF-1494 this raise is caught by :func:`_parse_rows`, which drops
+    the row and marks the snapshot ``complete=False``. The safety property
+    the previous behaviour bought — a malformed join key must never license
+    a delete — is preserved exactly: an incomplete snapshot downgrades the
+    run to additive-only, so reconciliation still cannot act on it. What
+    changes is that the edges Ayla DID serve readably now land instead of
+    being discarded alongside the one it did not. Loud and inert was better
+    than silent and destructive; loud and partial is better than both.
 
     ``updated_at`` is optional upstream; falls back to now (same policy as
     :func:`_parse_specialist`).
