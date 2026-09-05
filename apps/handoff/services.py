@@ -49,8 +49,10 @@ from django.utils import timezone
 from apps.audit.services import write_audit
 from apps.events.services import emit
 from apps.events.vocabulary import HANDOFF_INITIATED
+from apps.handoff.assignment import resolve_addressee
 from apps.handoff.models import AdminTask
 from apps.handoff.notify import notify_admin_task_created
+from apps.handoff.silence import release_notices_for
 from apps.tenancy.context import current_tenant
 
 if TYPE_CHECKING:
@@ -189,6 +191,11 @@ def create_admin_task(
         )
 
     snapshot = package_transcript(conversation)
+    # DRF-1488 — the task is addressed before it exists, not after somebody
+    # notices it. Resolved OUTSIDE the atomic block: it is a read against the
+    # user table and the settings, and it must not lengthen the transaction
+    # that holds the conversation flip.
+    operator, queue = resolve_addressee()
 
     with transaction.atomic():
         task = AdminTask.objects.create(
@@ -199,6 +206,8 @@ def create_admin_task(
             priority=priority,
             reason=reason,
             transcript_snapshot=snapshot,
+            assigned_to=operator,
+            assigned_queue=queue,
         )
         # Flip conversation state — single UPDATE, in the same transaction
         # so an event subscriber can never see one without the other.
@@ -236,12 +245,41 @@ def create_admin_task(
     # DRF-1029 — operator notification fires only after the task row
     # actually commits; a rolled-back handoff must never notify.
     transaction.on_commit(lambda: notify_admin_task_created(task))
+    # DRF-1488 — an un-addressed task is the defect this ticket exists for,
+    # and `apps.handoff.checks` makes the configuration that produces one
+    # refuse to boot. Reaching this line anyway means the boot check was
+    # bypassed, so it is logged at ERROR and audited rather than passed over:
+    # the row would otherwise look filed while reaching nobody.
+    if not task.is_addressed:
+        logger.error(
+            "handoff.created_unaddressed task=%s conversation=%s tenant=%s",
+            task.id,
+            conversation.id,
+            tenant.id,
+        )
+        transaction.on_commit(
+            lambda: write_audit(
+                "handoff.created_unaddressed",
+                target="AdminTask",
+                target_id=task.id,
+                # tenant_id in the payload, not in the scope: the callback
+                # runs on_commit, i.e. outside the `tenant_scope` this
+                # function was called in, and `write_audit` tolerates a None
+                # tenant by writing an unattributable row. An emergency
+                # nobody can attribute is barely an emergency record.
+                payload={
+                    "conversation_id": str(conversation.id),
+                    "tenant_id": str(tenant.id),
+                },
+            )
+        )
     logger.info(
-        "handoff.created task=%s type=%s conversation=%s tenant=%s",
+        "handoff.created task=%s type=%s conversation=%s tenant=%s addressee=%s",
         task.id,
         task_type,
         conversation.id,
         tenant.id,
+        task.addressee or "NOBODY",
     )
     return task
 
@@ -296,6 +334,20 @@ def release_conversation_to_bot(task: AdminTask) -> bool:
     return bool(updated)
 
 
+def _announce_bot_is_back(task: AdminTask) -> None:
+    """Tell the muted dialogs the bot is back, after this close commits (DRF-1486).
+
+    Registered on_commit for the same reason the creation notice is
+    (DRF-1029 §3.2): a rolled-back close must not tell the client the bot
+    has returned. Called from every exit of both close paths, including
+    the idempotent ones — :func:`apps.handoff.silence.release_notices_for`
+    re-asks the mute question itself, so a task closed while ANOTHER task
+    still holds this person leaves the notice open and says nothing.
+    """
+
+    transaction.on_commit(lambda: release_notices_for(task))
+
+
 def resolve_admin_task(task: AdminTask, *, resolution_note: str = "") -> None:
     """Mark `task` RESOLVED, stamp metadata, return conversation to IDLE.
 
@@ -313,6 +365,7 @@ def resolve_admin_task(task: AdminTask, *, resolution_note: str = "") -> None:
 
     if task.status == AdminTask.Status.RESOLVED:
         release_conversation_to_bot(task)
+        _announce_bot_is_back(task)
         return
 
     tenant = current_tenant()
@@ -345,6 +398,7 @@ def resolve_admin_task(task: AdminTask, *, resolution_note: str = "") -> None:
         )
 
     transaction.on_commit(_emit_resolved)
+    _announce_bot_is_back(task)
     logger.info(
         "handoff.resolved task=%s conversation=%s tenant=%s",
         task.id,
@@ -376,6 +430,7 @@ def cancel_admin_task(task: AdminTask, *, resolution_note: str = "") -> None:
         return
     if task.status == AdminTask.Status.CANCELLED:
         release_conversation_to_bot(task)
+        _announce_bot_is_back(task)
         return
 
     tenant = current_tenant()
@@ -405,6 +460,7 @@ def cancel_admin_task(task: AdminTask, *, resolution_note: str = "") -> None:
         )
 
     transaction.on_commit(_emit_cancelled)
+    _announce_bot_is_back(task)
     logger.info(
         "handoff.cancelled task=%s conversation=%s tenant=%s",
         task.id,

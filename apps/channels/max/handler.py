@@ -120,6 +120,7 @@ from apps.channels.max.quick_actions import (
     is_stale_tap,
     resolve_tap_text,
 )
+from apps.orchestrator.llm.templates import get_fallback
 from apps.channels.max.photo import (
     PhotoDownloadError,
     PhotoTooLargeError,
@@ -136,6 +137,7 @@ from apps.conversations.services import (
 )
 from apps.events.services import emit
 from apps.consent.memory import can_store_green_memory
+from apps.handoff.silence import mark_handoff_announced, notify_silence
 from apps.identity.services import (
     resolve_or_create_bot_user,
     resolve_or_create_global_bot_user,
@@ -774,6 +776,19 @@ def _dispatch_skill_handoff(
         trace_id=trace_id,
     )
     short_term.append(conversation.id, role="assistant", content=handoff_text)
+    # DRF-1486 — этот диалог говорит человеку, что подключает сотрудника, и
+    # факт этого решает, ЧТО человек прочитает, когда молчание включится на
+    # его следующем сообщении.
+    #
+    # ДО отправки, ровно как ``record_message`` выше и по той же причине:
+    # ``send_message`` пробрасывает MaxAPIError наверх, автоматического
+    # ретрая нет (запись остаётся в PEL до ручного XCLAIM). Записать после
+    # отправки значило бы, что упавший ход оставляет диалог с меткой
+    # «здесь ничего не говорили» — и на следующем сообщении человек прочитал
+    # бы «вы просили связать вас с сотрудником в ДРУГОМ нашем чате» ровно в
+    # том чате, где он и спрашивал. Раньше такой сбой давал молчание; врать
+    # хуже, чем молчать.
+    mark_handoff_announced(conversation=conversation, chat_id=chat_id)
     send_message(
         chat_id=chat_id,
         text=handoff_text,
@@ -993,21 +1008,19 @@ def handle_global_max_event(payload: dict, trace_id: str | uuid.UUID | None = No
 def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.UUID | None) -> None:
     """Inner tenant-less discovery pipeline — parse-already-done. Side-effects only."""
 
-    # DRF-1348 — состояние C01.4 Transient («индикатор набора») из макета.
-    #
-    # Эти две строки уже пять месяцев стоят на АРЕНДАТОРСКОМ пути
-    # (``_handle_max_event_inner``), а на глобальном — том самом, по которому
-    # работает пилот, — их не было никогда: при переносе обработчика их просто
-    # не продублировали. Поэтому «прочитано / печатает…» видел кто угодно,
-    # кроме клиента маркетплейса, у которого ход самый длинный (консьерж +
-    # инструменты). Fire-and-forget: сбой логируется внутри send_chat_action и
-    # не всплывает. Стоит первой строкой, до любой тяжёлой работы, — ровно как
-    # на соседнем пути.
+    # DRF-1487 — вниз, за развилку молчания, уехало «печатает…», и только оно
+    # (см. ниже, сразу после ``global_handoff_muted``). «Прочитано» осталось
+    # здесь: у двух индикаторов разная семантика, и разъехаться они обязаны
+    # именно по ней. ``mark_seen`` — констатация: сообщение дошло и его
+    # увидели; это правда даже тогда, когда отвечать будет человек, и это
+    # единственная обратная связь, которая у клиента 04.09 вообще была.
+    # ``typing_on`` — обещание ответа, и вот его-то и нельзя давать тому,
+    # кому бот не ответит. DRF-1348 поставил на эту строку оба; DRF-1487
+    # оставляет здесь честный из них.
     if event.chat_id:
         from apps.channels.max.outbound import send_chat_action
 
         send_chat_action(chat_id=event.chat_id, action="mark_seen")
-        send_chat_action(chat_id=event.chat_id, action="typing_on")
 
     bot_user = resolve_or_create_global_bot_user(
         channel=event.channel,
@@ -1273,7 +1286,44 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
             "channels.max.global.silenced_by_handoff conversation=%s",
             conversation.id,
         )
+        # DRF-1486 — молчание объясняется ровно один раз за эпизод. Само
+        # молчание правильное и остаётся (оператор и бот не говорят
+        # одновременно); чего человеку не хватало 04.09 — фразы о том, ЧТО
+        # происходит: он писал салонному боту, а онемел витринный, и связи
+        # между этими двумя событиями для него не существовало. Функция сама
+        # помнит, что уже сказала: второе и пятое входящее не получают ничего.
+        notify_silence(
+            conversation=conversation,
+            bot_user=bot_user,
+            chat_id=event.chat_id,
+            trace_id=trace_id,
+        )
         return
+
+    # DRF-1487 — «печатает…» ПОСЛЕ решения отвечать, а не до.
+    #
+    # Замер боевого контура, диалог 6e8fdde2, 13:34:20–13:34:34 UTC: на каждое
+    # входящее уходили два ``POST /chats/518410834/actions`` → 200, а следом
+    # ``silenced_by_handoff``. Пять сообщений — пять пар индикаторов и ноль
+    # ответов. Бот, показавший «печатает», ОБЕЩАЕТ ответ, и обещание не
+    # выполнялось пять раз подряд.
+    #
+    # Выбран перенос, а не явное снятие индикатора на ветке отказа: снимать
+    # нечем. У MAX в наборе действий (``outbound._CHAT_ACTIONS``) есть
+    # ``typing_on`` и нет ``typing_off`` — «печатает…» гаснет только по
+    # таймауту или по приходу сообщения. Ветки отказа, на которой можно было бы
+    # что-то снять, физически не существует.
+    #
+    # Цена переноса измерена и мала: между прежней позицией и этой строкой
+    # стоят только резолверы личности и диалога, чтение короткой памяти,
+    # запись входящего хода и один запрос mute — ни навыков, ни LLM. Это
+    # единственный ранний ``return`` во всей функции (ветка выше), поэтому
+    # ниже индикатор уже ничем не задерживается: следующая тяжёлая работа —
+    # консьерж — начинается после него, как и раньше.
+    if event.chat_id:
+        from apps.channels.max.outbound import send_chat_action
+
+        send_chat_action(chat_id=event.chat_id, action="typing_on")
 
     # Reply, in priority order:
     #   0. Safety pre-check (#1053) — a red-flag phrase (suicide / self-harm /
@@ -1421,6 +1471,14 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
             message_text=event.text,
             trace_id=trace_id,
         )
+        # DRF-1486 — этот диалог сам сказал человеку «передаю менеджеру»,
+        # и это решает, ЧТО он прочитает, когда на следующем ходу включится
+        # молчание. Отличить «спросил здесь» от «переехало с другого бота»
+        # по одной базе нельзя: задача в обоих случаях может лежать на
+        # салонном диалоге (см. queue addressing в ``route_global_human_
+        # handoff``). Различает их только факт доставки подтверждения — он
+        # и записывается здесь, рядом с доставкой.
+        mark_handoff_announced(conversation=conversation, chat_id=event.chat_id)
         assistant_action_type = "human_handoff"
         _record_live_path_metric(
             bot_user=bot_user,
@@ -1776,8 +1834,48 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
                             bot_user.id,
                             trace_id,
                         )
+                        # DRF-1489 — слова берутся у консьержа, когда он сказал
+                        # СВОИ.
+                        #
+                        # Правка пришла из DRF-1489 и делается здесь потому,
+                        # что она целиком в этом файле: тому исполнителю
+                        # handler.py трогать было нельзя, и он остановился на
+                        # границе, оставив разрыв описанным в докстринге
+                        # ``templates.NO_ANSWER_RETRY_RU``.
+                        #
+                        # Разрыв был такой: строка собиралась заново, текст
+                        # ответа затирался целиком, и утверждённая владельцем
+                        # формулировка для случая «модель вызвали, ответа не
+                        # вышло» — «Не получилось подготовить ответ. Попробовать
+                        # ещё раз?» — до человека не доходила никогда. Он читал
+                        # слова соседней ветки, про подключение, под кнопкой
+                        # «Повторить», которая работала.
+                        #
+                        # Подменяется РОВНО общий outage-шаблон, и ничего
+                        # больше. ``AI_UNAVAILABLE_TEXT`` — дословный текст
+                        # макета C01 для состояния «AI недоступна», то есть для
+                        # ветки llm_error, которая как раз этот шаблон и
+                        # приносит; для неё всё остаётся как было. Любая другая
+                        # строка — это выбор консьержа, сделанный осознанно, и
+                        # затирать его канал не вправе.
+                        #
+                        # Сравнение с шаблоном, а не проверка «текст пустой»:
+                        # ветка llm_error приходит сюда с непустым
+                        # ``OUTAGE_RU``, и на пустоте условие просто не
+                        # сработало бы. Сравнение с getter'ом, а не с
+                        # константой, — чтобы правка формулировки в
+                        # ``templates`` не разъехалась с этой строкой молча.
+                        #
+                        # Константа не тронута, кнопка не тронута: «Повторить»
+                        # ставится по флагу outage, как и раньше.
+                        _generic_outage = {get_fallback("ru"), get_fallback("en")}
                         reply = DiscoveryReply(
-                            text=AI_UNAVAILABLE_TEXT,
+                            text=(
+                                AI_UNAVAILABLE_TEXT
+                                if (turn_reply.reply_text or "") in _generic_outage
+                                or not turn_reply.reply_text
+                                else turn_reply.reply_text
+                            ),
                             action_data=ai_unavailable_action_data(),
                             persisted=turn_reply.assistant_persisted,
                         )
@@ -2109,18 +2207,6 @@ def _handle_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.UUID | N
     # lives inside _record_live_path_metric.
     t_start = time.monotonic()
 
-    # MAX UX indicators: tell the chat we've read the message and we're
-    # typing a reply BEFORE doing any heavy work (LLM call, DB writes).
-    # Both are best-effort fire-and-forget — failures are logged inside
-    # send_chat_action and do not propagate. Done first so the user
-    # sees the «прочитано / печатает…» chrome that mysite's MAX SDK
-    # provided automatically (post-cutover regression 2026-05-20).
-    if event.chat_id:
-        from apps.channels.max.outbound import send_chat_action
-
-        send_chat_action(chat_id=event.chat_id, action="mark_seen")
-        send_chat_action(chat_id=event.chat_id, action="typing_on")
-
     bot_user = resolve_or_create_bot_user(
         channel=event.channel,
         channel_user_id=event.channel_user_id,
@@ -2130,6 +2216,39 @@ def _handle_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.UUID | N
     # `create_if_missing=True` (default) → never returns None. The
     # narrow tells mypy this; an assertion in case the contract slips.
     assert conversation is not None  # noqa: S101 — contract guard
+
+    # MAX UX indicators: tell the chat we've read the message and we're
+    # typing a reply BEFORE doing any heavy work (LLM call, DB writes).
+    # Both are best-effort fire-and-forget — failures are logged inside
+    # send_chat_action and do not propagate. The user sees the «прочитано /
+    # печатает…» chrome that mysite's MAX SDK provided automatically
+    # (post-cutover regression 2026-05-20).
+    #
+    # DRF-1487 — но «печатает…» НЕ когда бот молчит. Оба индикатора стояли
+    # первой строкой функции, а решение промолчать принимается на 230 строк
+    # ниже: замер 04.09 показал пять пар индикаторов и ноль ответов подряд.
+    #
+    # Расходятся они по семантике, а не по удобству. «Прочитано» —
+    # констатация факта доставки, правдивая и тогда, когда отвечать будет
+    # оператор; убрать её значило бы оставить человека вообще без признаков
+    # жизни, то есть усугубить ровно тот дефект, который чинит DRF-1486.
+    # «Печатает…» — обещание ответа от БОТА, и его-то и нельзя давать тому,
+    # кому бот не ответит.
+    #
+    # Условие, а не перенос вниз, — по замеру: единственный молчащий
+    # ``return`` здесь стоит ПОСЛЕ ``orchestrate_turn``, то есть после
+    # навыков и LLM. Перенести индикатор туда значило бы задержать
+    # «печатает…» на всё время работы модели для каждого обычного хода —
+    # дороже, чем сам дефект. Условие же стоит два запроса (резолверы выше)
+    # и повторяет ровно тот предикат, по которому ниже молчит диспетчер
+    # (``skills.registry.dispatch``: state == HUMAN_HANDOFF), так что
+    # разойтись они не могут.
+    if event.chat_id:
+        from apps.channels.max.outbound import send_chat_action
+
+        send_chat_action(chat_id=event.chat_id, action="mark_seen")
+        if conversation.state != Conversation.State.HUMAN_HANDOFF:
+            send_chat_action(chat_id=event.chat_id, action="typing_on")
 
     # Persist the inbound turn.
     record_message(
@@ -2342,11 +2461,29 @@ def _handle_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.UUID | N
     # nothing, log the silence + return. Operator drives until
     # resolve_admin_task flips state back.
     if skill_result is not None and not skill_result.should_send:
+        silenced_by = (skill_result.meta or {}).get("silenced_by", "skill_request")
         logger.info(
             "channels.max.handler.silenced conversation=%s reason=%s",
             conversation.id,
-            (skill_result.meta or {}).get("silenced_by", "skill_request"),
+            silenced_by,
         )
+        # DRF-1486 — объяснить молчание нужно и здесь, и в первую очередь
+        # здесь: инцидент 04.09 НАЧАЛСЯ в салонном боте. Там человеку сказали
+        # «передаю менеджеру», и дальше он писал именно сюда — без ответа и
+        # без единого признака, что его вообще слышат.
+        #
+        # Только на handoff-молчании, а не на любом ``should_send=False``:
+        # навык, попросивший тишины по своим причинам, к оператору отношения
+        # не имеет, и объяснять за него «с вами работает сотрудник» значило
+        # бы соврать. Функция сама помнит, что уже сказала, — второе и пятое
+        # входящее не получают ничего.
+        if silenced_by == "human_handoff":
+            notify_silence(
+                conversation=conversation,
+                bot_user=bot_user,
+                chat_id=event.chat_id,
+                trace_id=trace_id,
+            )
         return
 
     reply_text = skill_result.reply_text if skill_result is not None else _echo_text(event)
@@ -2427,6 +2564,32 @@ def _handle_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.UUID | N
         outcome=AIRequestMetric.OUTCOME_SUCCESS,
         skill_selected=_skill_selected_label(skill_result),
     )
+
+    # DRF-1486 — этот ход заканчивается тем, что диалог уходит в handoff, а
+    # человеку прямо сейчас уходит строка об этом. Значит, подтверждение
+    # доставлено ЗДЕСЬ, и на следующем сообщении молчание объясняется словами
+    # «ваш вопрос уже у сотрудника», а не «вы просили в другом чате».
+    #
+    # Проверяется состояние диалога, а не имя навыка: задачу заводит и
+    # ``HumanHandoffSkill``, и booking через ``should_handoff``, и порог
+    # уверенности (DRF-1209), — общее у них ровно одно, флип в HUMAN_HANDOFF
+    # внутри ``create_admin_task``. Список навыков здесь пришлось бы дополнять
+    # при каждом новом источнике эскалации, и первый же забытый вернул бы
+    # человеку неверную формулировку.
+    #
+    # До отправки — как ``record_message`` выше: ``send_message`` пробрасывает
+    # MaxAPIError, автоматического ретрая нет, и упавший ход не должен
+    # оставлять диалог с меткой «здесь ничего не говорили».
+    #
+    # Читается ИМЕННО объект в памяти, и это часть корректности, а не
+    # экономия запроса. В память состояние попадает только отсюда — из
+    # ``create_admin_task`` этого же хода. Флип, случившийся параллельно в
+    # другом процессе (глобальный путь завёл задачу на этом салонном
+    # диалоге, пока ход шёл), в памяти не виден — и не должен быть виден:
+    # ЭТОТ диалог тогда ничего человеку не объявлял, и метка была бы
+    # ложной. ``refresh_from_db()`` здесь сломает инвариант молча.
+    if conversation.state == Conversation.State.HUMAN_HANDOFF:
+        mark_handoff_announced(conversation=conversation, chat_id=event.chat_id)
 
     # Outbound — MaxAPIError propagates up (handler does not swallow).
     send_message(chat_id=event.chat_id, text=reply_text, attachments=attachments)

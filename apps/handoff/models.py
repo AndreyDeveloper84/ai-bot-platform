@@ -31,6 +31,31 @@ the user was in even if the conversation continues live.
 OPEN → IN_PROGRESS → RESOLVED|CANCELLED. The admin UI flips status;
 C3 services formalise the transitions. ``resolved_at`` is stamped on
 the OPEN/IN_PROGRESS → RESOLVED transition.
+
+### Addressing (DRF-1488)
+
+Every task on the pilot between 11.08 and 04.09.2026 carried
+``assigned_to = None`` — all ten of them. Nobody was ever named, so
+nobody was late, so nothing was ever chased: one task sat open for
+20 hours and the client's bot stayed muted for all of it (DRF-1015
+lifts the mute only when the task closes).
+
+A task is therefore **addressed at creation**, on one of two axes:
+
+* ``assigned_to`` — a named operator from the duty roster
+  (``HANDOFF_DUTY_OPERATORS``); the least-loaded one wins.
+* ``assigned_queue`` — an explicit duty queue (``HANDOFF_DUTY_QUEUE``)
+  when no roster is configured. Assignment then happens on pickup:
+  the operator sets ``assigned_to`` in the admin, which stamps
+  ``claimed_at``.
+
+Neither configured is a boot-time error (``apps.handoff.checks``), so
+an un-addressed task cannot be produced by a running deployment —
+"a task without an addressee is not a task that was filed".
+
+``claimed_at`` and ``pickup_escalated_at`` make the wait measurable:
+the sweep in :mod:`apps.handoff.escalation` escalates a task nobody
+claimed within ``HANDOFF_PICKUP_SLA_MINUTES``, exactly once.
 """
 
 from __future__ import annotations
@@ -118,8 +143,33 @@ class AdminTask(models.Model):
         null=True,
         blank=True,
         related_name="assigned_admin_tasks",
-        help_text="Operator working on this task. NULL while in OPEN. "
-        "SET_NULL on user departure keeps the task in the queue for reassign.",
+        help_text="Named operator working on this task. NULL means the task "
+        "is addressed to `assigned_queue` instead and still waits for someone "
+        "to pick it up. SET_NULL on user departure drops the task back to its "
+        "queue rather than losing it.",
+    )
+    assigned_queue = models.CharField(
+        max_length=64,
+        blank=True,
+        default="",
+        db_index=True,
+        help_text="Duty queue the task is addressed to when no named operator "
+        "was resolvable (DRF-1488). Empty together with `assigned_to` means "
+        "the task reached nobody — a configuration error, not a state.",
+    )
+    claimed_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="When an operator actually took the task (assigned_to set). "
+        "NULL = still waiting in the queue; the pickup sweep measures the wait "
+        "from `created_at` to this.",
+    )
+    pickup_escalated_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="Stamped ONCE by the pickup sweep when nobody claimed the "
+        "task within HANDOFF_PICKUP_SLA_MINUTES. Non-NULL is what makes the "
+        "escalation fire exactly once.",
     )
     status = models.CharField(
         max_length=16,
@@ -161,7 +211,124 @@ class AdminTask(models.Model):
             models.Index(fields=["tenant", "status", "-created_at"]),
             # My-queue view: tasks assigned to me, by status.
             models.Index(fields=["assigned_to", "status"]),
+            # DRF-1488 pickup sweep: cross-tenant, «open and old», so the
+            # tenant-first index above cannot serve it.
+            models.Index(fields=["status", "created_at"], name="handoff_task_status_age_idx"),
         ]
 
     def __str__(self) -> str:
         return f"AdminTask[{self.task_type}/{self.priority}/{self.status}]"
+
+    @property
+    def is_addressed(self) -> bool:
+        """True when the task reached SOMEONE — a person or a named queue.
+
+        The pilot’s failure mode was a task addressed to neither, which
+        reads as «filed» in the admin and is in fact a request dropped
+        on the floor. ``create_admin_task`` refuses to treat such a row as a
+        filed task (DRF-1488).
+        """
+
+        return bool(self.assigned_to_id or self.assigned_queue)
+
+    @property
+    def addressee(self) -> str:
+        """Human-readable addressee for logs, admin columns and the CLI."""
+
+        if self.assigned_to_id is not None:
+            return getattr(self.assigned_to, "username", "") or f"user:{self.assigned_to_id}"
+        return f"queue:{self.assigned_queue}" if self.assigned_queue else ""
+
+
+class HandoffSilenceNotice(models.Model):
+    """One muted dialog, and what the person on the other end was told (DRF-1486).
+
+    DRF-1015 mutes the bot while an operator drives ANY dialog of the same
+    channel identity — deliberately, so a human and a bot never answer the
+    same person at once. On 04.09.2026 that worked exactly as designed and
+    still produced 1h24m of silence the client could not interpret: they had
+    written to a SALON bot, and the bot that went quiet was the GLOBAL one.
+    Nothing connected the two events for them.
+
+    This row is the memory that makes the explanation possible and keeps it
+    to one message per episode:
+
+    * ``announced_here`` — the handoff confirmation («передаю
+      менеджеру») was delivered in THIS dialog, so the silence needs no
+      introduction, only a reminder. False means the mute travelled here
+      from another bot and must say so.
+    * ``silence_notified_at`` — set the moment we told the person the bot
+      is muted. Non-NULL is what stops the second, third and fifth inbound
+      message from repeating it.
+    * ``released_at`` — set when the mute lifts and we said so. A row with
+      it NULL is the *current* episode; the partial unique constraint allows
+      exactly one such row per conversation, and closed rows stay as the
+      forensic record of what the client actually saw.
+
+    No tenant FK on purpose: the row is anchored by the conversation, which
+    carries the tenant (the sentinel one, for the global dialog). A second
+    tenant column would give the leakage scanner a copy of the truth to
+    disagree with.
+    """
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    conversation = models.ForeignKey(
+        "conversations.Conversation",
+        on_delete=models.PROTECT,
+        related_name="handoff_silence_notices",
+        help_text="The dialog that went silent. PROTECT for the same reason "
+        "AdminTask.conversation is PROTECT — this is forensic evidence.",
+    )
+    bot_user = models.ForeignKey(
+        "identity.BotUser",
+        on_delete=models.PROTECT,
+        related_name="handoff_silence_notices",
+        help_text="Whose dialog it is. Carries channel + channel_user_id, "
+        "which is how the release check re-asks «is this person still being "
+        "served by a human?».",
+    )
+    chat_id = models.CharField(
+        max_length=64,
+        blank=True,
+        default="",
+        help_text="Channel chat the notices go to. Stored rather than "
+        "re-derived: the release message is sent long after the inbound turn "
+        "that carried it.",
+    )
+    announced_here = models.BooleanField(
+        default=False,
+        help_text="True when the handoff confirmation was delivered in THIS "
+        "dialog. Picks which of the two silence wordings the person reads.",
+    )
+    silence_notified_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="When the person was told the bot is muted. NULL = not yet; "
+        "non-NULL = never again for this episode.",
+    )
+    released_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="When the mute lifted and the person was told the bot is "
+        "back. NULL marks the one open episode for this conversation.",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name = "Handoff silence notice"
+        verbose_name_plural = "Handoff silence notices"
+        ordering = ["-created_at"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["conversation"],
+                condition=models.Q(released_at__isnull=True),
+                name="handoff_one_open_silence_notice_per_conversation",
+            )
+        ]
+        indexes = [
+            models.Index(fields=["bot_user", "released_at"]),
+        ]
+
+    def __str__(self) -> str:
+        state = "open" if self.released_at is None else "released"
+        return f"HandoffSilenceNotice[{self.conversation_id}/{state}]"

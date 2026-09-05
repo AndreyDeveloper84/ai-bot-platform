@@ -537,6 +537,34 @@ HANDOFF_NOTIFY_MAX_CHAT_IDS = [
 ]
 HANDOFF_ADMIN_BASE_URL = os.environ.get("HANDOFF_ADMIN_BASE_URL", "")
 
+# DRF-1488 — every handoff task gets an addressee and a deadline.
+#
+# All ten AdminTasks the pilot produced between 11.08 and 04.09.2026 carried
+# `assigned_to = None`. A task nobody owns is a task nobody is late on, and
+# the mute (DRF-1015) lifts only when the task closes — one of those ten sat
+# open for 20 hours.
+#
+# HANDOFF_DUTY_OPERATORS: comma-separated Django usernames of the operators
+# on duty. A fresh task is assigned to the least-loaded ACTIVE one, so the
+# admin's «assigned to» column answers «who is late» without a meeting.
+# Empty (the CI / local default) → queue addressing below.
+# HANDOFF_DUTY_QUEUE: the explicit duty queue a task is addressed to when no
+# roster is configured. Assignment then happens on pickup (the operator sets
+# `assigned_to` in the admin, which stamps `claimed_at`). It is deliberately
+# NON-empty by default: `apps.handoff.checks` refuses to boot when both this
+# and the roster are empty, because that combination silently reproduces the
+# defect — a task addressed to nobody at all.
+# HANDOFF_PICKUP_SLA_MINUTES: how long a task may sit unclaimed before the
+# sweep escalates it (once). Default 15 — half of the «ответят в течение 30
+# минут» the client is promised at handoff, so the nudge lands while the
+# promise can still be kept. WHAT the escalation should do beyond re-pinging
+# the operator chat is an owner decision, deliberately not taken here.
+HANDOFF_DUTY_OPERATORS = [
+    p.strip() for p in os.environ.get("HANDOFF_DUTY_OPERATORS", "").split(",") if p.strip()
+]
+HANDOFF_DUTY_QUEUE = os.environ.get("HANDOFF_DUTY_QUEUE", "duty")
+HANDOFF_PICKUP_SLA_MINUTES = int(os.environ.get("HANDOFF_PICKUP_SLA_MINUTES", "15"))
+
 # Phase 5 lazy-onboarding (apps/miniapp_api/views.py:require_init_data).
 # Single-bot mode binds the bot's HMAC token to exactly one tenant; this
 # slug picks which one. Multi-tenant ingress will replace this with the
@@ -1218,6 +1246,16 @@ CELERY_BEAT_SCHEDULE = {
         # Daily 03:30 UTC — between the 03:00 audit cleanup and the
         # 04:00 replay cleanup; spike absorbed in tiers across the worker pool.
         "schedule": crontab(hour="3", minute="30"),
+    },
+    # DRF-1488 — chase handoff tasks nobody picked up. Every 5 minutes: the
+    # SLA it guards is 15 minutes by default, so a coarser tick would spend a
+    # third of the budget waiting for the sweep itself. The job scans OPEN,
+    # unclaimed, not-yet-escalated tasks only — on the pilot that is a handful
+    # of rows a month — and the `pickup_escalated_at` stamp makes a re-run a
+    # no-op, so an overlapping tick cannot double-notify.
+    "handoff_sweep_unclaimed_tasks": {
+        "task": "handoff.sweep_unclaimed_tasks",
+        "schedule": crontab(minute="*/5"),
     },
     # DRF-1370 — execute the pending «забудь всё» erasures. Hourly at :50,
     # NOT daily: the read gate already silences memory the moment the person

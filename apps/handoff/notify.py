@@ -171,6 +171,72 @@ def notify_admin_task_created(task: AdminTask) -> None:
         logger.exception("handoff.notify.unexpected task=%s", getattr(task, "id", None))
 
 
+def build_unclaimed_notification(task: AdminTask, *, waited_minutes: int) -> str:
+    """Format the «nobody took this» nudge (DRF-1488).
+
+    Same minimum-PII contract as the creation notice, plus the two facts
+    the creation notice could not carry because they did not exist yet:
+    how long the task has been waiting, and who it is addressed to. The
+    addressee line is the whole point — the pilot's ten tasks were
+    addressed to nobody, so nobody could be reminded.
+
+    The addressee is a STAFF identifier (a Django username or a queue
+    label), and it is a class of data §Minimum PII does not list, so the
+    decision is made here rather than by default: it goes in. The recipient
+    is the operators' own chat, the value names a colleague on shift and
+    never a client, and a nudge that cannot say whose task is late asks
+    everybody and reaches nobody — which is the failure being fixed. The
+    client-facing rules are untouched: nothing about the person on the
+    other end of the dialog appears here, and DRF-1039 (never pass the
+    client's phone) holds as before.
+    """
+
+    task_type_label = AdminTask.TaskType(task.task_type).label
+    lines = [
+        "⏰ Эскалация без ответа",
+        f"Салон: {task.tenant.name}",
+        f"Тип: {task_type_label}",
+        f"Ждёт: {waited_minutes} мин",
+        f"Адресат: {task.addressee or 'НЕ НАЗНАЧЕН'}",
+        f"Задача: {task.id}",
+        f"Диалог: {task.conversation_id}",
+        "Клиенту в это время бот не отвечает.",
+    ]
+    url = admin_task_url(task.id)
+    if url:
+        lines.append(f"Открыть: {url}")
+    return "\n".join(lines)
+
+
+def notify_admin_task_unclaimed(task: AdminTask, *, waited_minutes: int) -> None:
+    """Push the overdue nudge to the operator chats. NEVER raises.
+
+    Same containment as :func:`notify_admin_task_created`: an unreachable
+    messenger must not stop the sweep from stamping the remaining tasks.
+    Disabled (silently, no network) when no recipients are configured.
+    """
+
+    try:
+        chat_ids = get_notify_chat_ids()
+        if not chat_ids:
+            return  # fully disabled (§3.1)
+        text = build_unclaimed_notification(task, waited_minutes=waited_minutes)
+
+        def _audit_failure(chat_id: str, exc: Exception) -> None:
+            _write_notify_failure_audit(task, chat_id, exc)
+
+        failures = send_max_notification(text=text, chat_ids=chat_ids, on_failure=_audit_failure)
+        if failures == 0:
+            logger.info(
+                "handoff.notify.unclaimed_sent task=%s recipients=%d waited_minutes=%d",
+                task.id,
+                len(chat_ids),
+                waited_minutes,
+            )
+    except Exception:  # noqa: BLE001 — hard containment (§3.3)
+        logger.exception("handoff.notify.unclaimed_unexpected task=%s", getattr(task, "id", None))
+
+
 def _write_notify_failure_audit(task: AdminTask, chat_id: str, exc: Exception) -> None:
     """Audit a failed notification so the gap is visible after the fact."""
 
