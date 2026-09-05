@@ -2,8 +2,9 @@
 
 До этой задачи — пустой каркас, зарезервированный под «Django admin
 chrome» (``config/settings/base.py``). Теперь здесь живёт фундамент
-доступа: роли, жизненный цикл учётных записей, журнал действий и
-политика сокрытия полей-секретов.
+доступа: роли, жизненный цикл учётных записей, журнал действий,
+политика сокрытия полей-секретов и — с DRF-1514 — область видимости
+данных клиента вместе с журналом доступа к ним.
 """
 
 from __future__ import annotations
@@ -24,11 +25,13 @@ class AdminconsoleConfig(AppConfig):
         так что к нашему ``ready()`` все ``apps/*/admin.py`` уже
         импортированы и ``admin.site`` заполнен.
 
-        Обе установки идемпотентны — повторный ``ready()`` (перезагрузка
-        реестра приложений в тестах) ничего не удваивает.
+        Все три установки идемпотентны — повторный ``ready()``
+        (перезагрузка реестра приложений в тестах) ничего не удваивает.
         """
+        from apps.adminconsole.client_scope import install_client_data_scope
         from apps.adminconsole.journal import install_admin_journal
         from apps.adminconsole.secrets_policy import install_secret_field_policy
 
         install_admin_journal()
         install_secret_field_policy()
+        install_client_data_scope()

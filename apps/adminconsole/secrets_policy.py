@@ -115,14 +115,14 @@ def _wrap_get_fieldsets(model_admin: Any, secret_fields: tuple[str, ...]) -> boo
             # Право править есть — работает форма экрана, а в ней
             # секретные поля уже под PasswordInput.
             return fieldsets
-        return _strip_fields(fieldsets, secret_fields)
+        return strip_fields(fieldsets, secret_fields)
 
     setattr(get_fieldsets, _WRAPPED_MARKER, True)
     model_admin.get_fieldsets = get_fieldsets
     return True
 
 
-def _strip_fields(fieldsets: Any, secret_fields: tuple[str, ...]) -> Any:
+def strip_fields(fieldsets: Any, secret_fields: tuple[str, ...]) -> Any:
     """Вернуть fieldsets без перечисленных полей.
 
     Django допускает вложенные кортежи внутри ``fields`` (поля в одну
