@@ -15,10 +15,13 @@ is a test:
   the sentence above it says it will. Asserting the button exists is half a
   test; a chip whose callback nothing answers is the failure the owner named
   as worse than no chip at all, so every callback here is executed.
-* **negative, with a positive guard on the same data** (DRF-1411) — the three
-  places that deliberately have NO keyboard still have none. Each of those
-  assertions sits next to a call on the same renderer that DOES produce one,
-  so «no buttons» can never come to mean «this renderer stopped drawing».
+* **negative, with a positive guard on the same data** (DRF-1411) — the places
+  that deliberately have NO keyboard still have none. There are four, and each
+  is pinned beside a positive call on the SAME renderer: ``render_no_salons()``
+  without a city (here), the outage branch of ``route_repeat`` and the
+  service-less repeat refusal (``test_visits.py``), and the reminder
+  confirm / reschedule replies (``apps/bookings/tests/test_dead_ends_drf1492.py``).
+  So «no buttons» can never come to mean «this renderer stopped drawing».
 
 The measurement the ticket asks for lives in :class:`TestDeadEndInventory`: one
 table naming every reply the audit counted, and what it must carry now.
@@ -32,11 +35,13 @@ from decimal import Decimal
 
 import pytest
 
-from apps.orchestrator import handoff as handoff_mod
+from apps.orchestrator import discovery, handoff as handoff_mod
 from apps.orchestrator.discovery import (
     CALLBACK_CATALOG_SALONS,
     CALLBACK_CATALOG_SERVICES_PREFIX,
+    CALLBACK_DISCOVER_BOOK_PREFIX,
     CATALOG_STALE_CARD_TEXT,
+    alternative_buttons,
     execute_catalog_callback,
     render_no_match,
     render_no_salons,
@@ -81,6 +86,20 @@ def _service(tenant, name: str):
     )
 
 
+def _offer(tenant, service):
+    """The MasterService edge — the statement «this master performs this»."""
+    from apps.catalog.models import CatalogMaster, MasterService
+
+    master = CatalogMaster.all_tenants.filter(tenant=tenant).first()
+    return MasterService.all_tenants.create(tenant=tenant, master=master, service=service)
+
+
+def _master_id(tenant):
+    from apps.catalog.models import CatalogMaster
+
+    return CatalogMaster.all_tenants.filter(tenant=tenant).first().id
+
+
 def _buttons(reply) -> list[dict[str, str]]:
     if reply.action_data is None:
         return []
@@ -103,11 +122,11 @@ class TestDiscoveryRefusals:
             alternatives=["Массаж спины", "Обёртывание"],
         )
 
-        # The text names them AND tells the reader they are pressable. Before
-        # this ticket it said «Показать мастеров по одной из них», which was
-        # an offer nothing on screen could accept.
+        # The text names them AND invites the choice. Before this ticket it
+        # said «Показать мастеров по одной из них», which was an offer
+        # nothing on screen could accept.
         assert "«Массаж спины»" in reply.text
-        assert "Нажмите на услугу" in reply.text
+        assert "Выберите одну из них" in reply.text
         assert _callbacks(reply) == ["Массаж спины", "Обёртывание"]
 
     def test_refusal_without_alternatives_still_offers_the_salon_list(self) -> None:
@@ -123,6 +142,41 @@ class TestDiscoveryRefusals:
 
         assert "уже ответил" in reply.text
         assert _callbacks(reply) == [CALLBACK_CATALOG_SALONS]
+
+    def test_repeat_with_alternatives_keeps_the_service_chips(self) -> None:
+        """The repeat branch and the alternatives branch overlap, and the
+        alternatives must win: ``alternative_buttons(...) or [salons]`` reads
+        the same either way round, and inverted nobody would notice.
+        """
+        reply = render_no_match(
+            specialization="маникюр", already_refused=True, alternatives=["Массаж спины"]
+        )
+
+        assert "уже ответил" in reply.text
+        assert _callbacks(reply) == ["Массаж спины"]
+
+    def test_a_branch_that_names_no_alternatives_shows_no_service_chips(self) -> None:
+        """The mirror of the ticket: a KEYBOARD the text never mentions.
+
+        ``render_no_match`` takes ``alternatives`` on every branch, but the
+        city-only and bare branches do not print them. Attaching service chips
+        there would answer a question the sentence never asked.
+        """
+        reply = render_no_match(city="Сочи", alternatives=["Массаж спины"])
+
+        assert "Массаж спины" not in reply.text
+        assert _callbacks(reply) == [CALLBACK_CATALOG_SALONS]
+
+    def test_the_sentence_names_exactly_the_services_the_keyboard_offers(self) -> None:
+        """One list, capped once. Capping only the keyboard would print six
+        names under five buttons — this ticket's defect, one size down."""
+        names = [f"Услуга {i}" for i in range(7)]
+
+        reply = render_no_match(city="Пенза", specialization="маникюр", alternatives=names)
+
+        offered = _callbacks(reply)
+        assert offered  # presence first: the cap must not empty the keyboard
+        assert [n for n in names if f"«{n}»" in reply.text] == offered
 
     def test_city_only_refusal_answers_where_we_are(self) -> None:
         _salon("s-penza", "BodyFormula", city="Пенза")
@@ -300,25 +354,82 @@ class TestHandoffDeadEnds:
 
         assert _callbacks(reply) == [f"cb:discover:book:{tenant.id}:{master_id}:{service.id}"]
 
-    def test_unresolved_booking_callback_offers_a_restart(self) -> None:
-        _salon("s1", "BodyFormula", city="Пенза")
+    # NOTE — the two ``route_booking_callback`` refusals are NOT asserted here.
+    # A reply this module builds itself out of the module's own helpers proves
+    # only that the helpers work; it stays green after the production branch
+    # stops attaching a keyboard. They are pinned on the real route instead:
+    # ``test_route_unresolvable_callbacks_reply_stale_without_dispatch`` and
+    # ``test_empty_skill_reply_offers_the_salon_it_could_not_continue`` in
+    # ``apps/orchestrator/tests/test_handoff.py``.
 
-        reply = handoff_mod._chips(
-            handoff_mod._UNRESOLVED_BOOKING_CALLBACK_REPLY,
-            [handoff_mod.show_salons_button()],
-        )
 
-        assert "выберите заново" in reply.text.lower()
-        assert _callbacks(reply) == [CALLBACK_CATALOG_SALONS]
+class TestFreeTextChipsLand:
+    """The one chip family whose callback is not an id.
+
+    ``alternative_buttons`` and ``visits._repeat_refusal`` put a SERVICE NAME
+    in the callback — the «tap == typed answer» contract
+    ``_render_ask_clarification`` has shipped since DRF-1102. It is the most
+    fragile of the three families here precisely because nothing decodes it:
+    the string has to survive as an ordinary turn and come back as masters.
+    Asserting the label and stopping there would test the half that cannot
+    break.
+    """
+
+    def test_the_service_name_a_chip_carries_finds_that_service_masters(self) -> None:
+        from apps.marketplace.discovery import discover_masters
+
+        tenant = _salon("s1", "BodyFormula", city="Пенза")
+        service = _service(tenant, "Массаж спины")
+        _offer(tenant, service)
+
+        chips = alternative_buttons(["Массаж спины"])
+        assert [c["callback"] for c in chips] == ["Массаж спины"]
+
+        # The callback IS the query. Run it as one — this is the read the
+        # ordinary turn behind the tap performs — and render the answer with
+        # the renderer that turn uses.
+        cards = discover_masters(specialization=chips[0]["callback"], resolve_service=True)
+        reply = discovery._render_master_cards(cards, specialization=chips[0]["callback"])
+
+        assert "Мастер BodyFormula" in reply.text
+        # And the card the tap produces is bookable: the button addresses that
+        # master inside that salon, so the chain does not stop at a list.
+        assert [b["callback"] for b in _buttons(reply)] == [
+            b["callback"]
+            for b in _buttons(reply)
+            if b["callback"].startswith(
+                f"{CALLBACK_DISCOVER_BOOK_PREFIX}{tenant.id}:{_master_id(tenant)}"
+            )
+        ]
+        assert _buttons(reply)  # presence: the comprehension above is not vacuous
+        assert service.name  # the seeded service is what the master was bound to
+
+    def test_a_name_nobody_performs_finds_nobody(self) -> None:
+        """Paired negative on the same read: the chip mechanism does not
+        invent masters, so the green assertion above means the seeding worked
+        rather than that the query matches anything."""
+        from apps.marketplace.discovery import discover_masters
+
+        tenant = _salon("s1", "BodyFormula", city="Пенза")
+        _offer(tenant, _service(tenant, "Массаж спины"))
+
+        assert discover_masters(specialization="Массаж спины")  # presence
+        assert discover_masters(specialization="Криотерапия") == []
 
 
 class TestDeadEndInventory:
     """The measurement, as a test rather than as a number in a PR body.
 
-    Every row is one reply the 04.09 audit counted as a dead end. ``True``
-    means «must carry a keyboard now»; ``False`` means «deliberately still
-    has none» and is the paired negative — each of those has a positive
-    sibling above, on the same renderer.
+    Every row is one reply of ``discovery`` / ``handoff`` that the 04.09 audit
+    counted as a dead end. ``True`` means «must carry a keyboard now»;
+    ``False`` means «deliberately still has none» and is the paired negative.
+
+    The ``visits`` and ``bookings`` halves of the same measurement are not
+    here — they need scripted capabilities and a database of pending rows, so
+    they live beside their own fixtures
+    (``apps/orchestrator/tests/test_visits.py::TestRepeat`` and
+    ``apps/bookings/tests/test_dead_ends_drf1492.py``). This table does not
+    claim to be the whole count; it claims to be complete for this module.
     """
 
     def _seed(self):
@@ -395,11 +506,14 @@ class TestDeadEndInventory:
             ("show_salons / populated", show_salons(), True),
         ]
 
-        # Presence first (DRF-1411): the table must actually hold both kinds,
-        # or «all buttons present» would pass over an empty inventory.
-        assert len(cases) == 20
-        assert sum(1 for _, _, expected in cases if expected) == 19
-        assert sum(1 for _, _, expected in cases if not expected) == 1
+        # Presence first (DRF-1411): the table must actually hold BOTH kinds,
+        # or «every expected keyboard is present» would pass vacuously over a
+        # table that had quietly become all-True (or empty). Stated as «there
+        # is at least one of each», not as a literal count of a list twenty
+        # lines up — a count only fails for whoever is already editing the
+        # list, and would fail for them in the same commit.
+        assert any(expected for _, _, expected in cases)
+        assert any(not expected for _, _, expected in cases)
 
         without_buttons = [
             name for name, reply, expected in cases if expected and not _buttons(reply)

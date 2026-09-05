@@ -264,6 +264,32 @@ class TestRepeat:
             assert slug not in reply.text
         assert _callbacks(reply) == [CALLBACK_CATALOG_SALONS]
 
+    @pytest.mark.parametrize(
+        ("status", "expected"),
+        [("master_unavailable", "не принимает"), ("link_unavailable", "больше не делает")],
+    )
+    def test_both_master_refusals_chip_the_service(
+        self, capability, db, status: RepeatStatus, expected: str
+    ) -> None:
+        """Both wordings of «мастер отпал» take the service chip.
+
+        The parametrised sweep above deliberately supplies no
+        ``service_name``, so it only ever exercises the fallback branch.
+        Without this pair, «больше не делает эту услугу» + чип-услуга would
+        have no oracle at all.
+        """
+        capability["repeat"] = RepeatResult(
+            status=status, master_name="Инна", service_name="Массаж спины"
+        )
+
+        reply = visits_mod.route_visit_callback(
+            global_bot_user=_BotUser(), callback_text="cb:visit:repeat:a1"
+        )
+
+        assert expected in reply.text
+        assert "Нажмите на услугу" in reply.text
+        assert _callbacks(reply) == ["Массаж спины"]
+
     def test_master_refusal_chips_the_service_that_is_still_fine(self, capability, db) -> None:
         """The master went away, the service did not — so the chip is the
         service, and its tap is the search the sentence promises.
@@ -296,11 +322,17 @@ class TestRepeat:
         )
 
         assert "позже" in reply.text.lower()
-        # DRF-1492's paired negative: an outage is not a menu. The positive
-        # half lives one test up — the same call path DOES draw a keyboard for
-        # every refusal that has an action behind it, so an empty one here is
-        # a decision and not a renderer that quietly stopped drawing.
         assert reply.action_data is None
+
+        # DRF-1492's paired positive, on the SAME capability and the same call
+        # path: a refusal that HAS an action behind it does draw a keyboard.
+        # Without this line «no buttons» above would also be satisfied by a
+        # renderer that had quietly stopped drawing any.
+        capability["repeat"] = RepeatResult(status="service_unavailable", master_name="Инна")
+        answered = visits_mod.route_visit_callback(
+            global_bot_user=_BotUser(), callback_text="cb:visit:repeat:a1"
+        )
+        assert _callbacks(answered) == [CALLBACK_CATALOG_SALONS]
 
 
 class TestFormatting:

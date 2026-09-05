@@ -31,6 +31,7 @@ from apps.booking.models import BookingReminder, BookingRequest, PendingBookingA
 from apps.bookings.callbacks import (
     REPLY_BOOK_CANCELLED_PREVIEW,
     REPLY_BOOK_EXPIRED,
+    REPLY_BOOK_EXPIRED_UNCHANGED,
     REPLY_BOOK_KEPT_PREVIEW,
     REPLY_CANCELLED,
     REPLY_CONFIRMED,
@@ -109,6 +110,15 @@ def _ctx(text: str, *, bot_user: BotUser, conversation: Conversation) -> SkillCo
 
 def _callbacks(result) -> list[str]:
     attachments = (result.action_data or {}).get("attachments") or []
+    return [
+        button["callback"]
+        for att in attachments
+        for button in (att.get("payload") or {}).get("buttons") or []
+    ]
+
+
+def _menu_callbacks(action_data) -> list[str]:
+    attachments = (action_data or {}).get("attachments") or []
     return [
         button["callback"]
         for att in attachments
@@ -265,6 +275,71 @@ class TestFunnelEndsAreNotDeadEnds:
         assert _callbacks(result) == [CALLBACK_MENU_MY_BOOKINGS]
         assert client.cancel_calls == []  # the booking is untouched
 
+    def test_abandoned_reschedule_preview_says_what_it_actually_did(
+        self, tenant: Tenant, bot_user: BotUser, conversation: Conversation
+    ) -> None:
+        """The third ``Kind``. Same branch as CANCEL, and the reason it must
+        be: the reschedule payload DOES carry master + service, so a
+        kind-blind chip would have offered «выбрать другое время» — a second
+        booking beside the live one it failed to move."""
+        token = create_pending(
+            tenant=tenant,
+            bot_user=bot_user,
+            kind=PendingBookingAction.Kind.RESCHEDULE,
+            payload={
+                "record_id": 555,
+                "new_datetime": _future_iso(),
+                "master_id": 11,
+                "service_id": 22,
+            },
+        )
+        client = _FakeYClients()
+        with _patched(client):
+            result = BookingGateCallbackSkill().handle(
+                _ctx(f"cb:book:cancel:{token}", bot_user=bot_user, conversation=conversation)
+            )
+
+        assert result.reply_text == REPLY_BOOK_KEPT_PREVIEW
+        assert _callbacks(result) == [CALLBACK_MENU_MY_BOOKINGS]
+        assert client.cancel_calls == []
+
+    def test_expired_cancel_preview_does_not_offer_to_book(
+        self, tenant: Tenant, bot_user: BotUser, conversation: Conversation
+    ) -> None:
+        """A CANCEL preview that timed out. The reply used to say «давайте
+        подберём слот заново» and — after this ticket's first pass — carried
+        📅 Записаться: one tap to CREATE a booking, offered to somebody who
+        was trying to remove one."""
+        token = create_pending(
+            tenant=tenant,
+            bot_user=bot_user,
+            kind=PendingBookingAction.Kind.CANCEL,
+            payload={"record_id": 555, "reason": "", "booking_request_id": ""},
+        )
+        PendingBookingAction.all_tenants.filter(pk=token).update(
+            expires_at=timezone.now() - timedelta(seconds=30)
+        )
+        client = _FakeYClients()
+        with _patched(client):
+            result = BookingGateCallbackSkill().handle(
+                _ctx(f"cb:book:confirm:{token}", bot_user=bot_user, conversation=conversation)
+            )
+
+        assert result.reply_text == REPLY_BOOK_EXPIRED_UNCHANGED
+        assert "подберём слот" not in result.reply_text
+        assert _callbacks(result) == [CALLBACK_MENU_MY_BOOKINGS]
+        assert client.cancel_calls == []
+
+    def test_stale_version_opens_the_records_its_text_names(
+        self, tenant: Tenant, bot_user: BotUser, conversation: Conversation
+    ) -> None:
+        """«Откройте актуальные записи» — asserted where the text is, so the
+        sentence and the button cannot drift apart."""
+        from apps.bookings import callbacks as cb
+
+        assert "актуальные записи" in cb.REPLY_BOOK_STALE_VERSION
+        assert _menu_callbacks(cb._my_bookings_keyboard()) == [CALLBACK_MENU_MY_BOOKINGS]
+
     def test_expired_preview_offers_another_time_for_the_same_pair(
         self, tenant: Tenant, bot_user: BotUser, conversation: Conversation
     ) -> None:
@@ -333,29 +408,117 @@ class TestRepliesThatStayButtonless:
         assert moved.action_data is None
 
 
-class TestChipsExecuteOnBothSurfaces:
+class TestChipsLandOnBothSurfaces:
     """The property that made ``cb:menu:*`` the right family.
 
-    Resolved through BOTH translators — the per-tenant ``MenuSkill`` map and
-    the global handler's own — so a divergence between them fails here rather
-    than in a chat.
+    Deliberately NOT «the two translation tables agree»: the global one is
+    built as ``{**MENU_CALLBACK_TEXT, …}``
+    (``apps.channels.max.quick_actions._global_menu_text``), so that equality
+    is guaranteed by the unpacking and can never fail. What has to be true is
+    that the phrase each chip resolves to LANDS somewhere — a translator that
+    yields text nobody claims is a dead button with extra steps.
     """
 
-    def test_menu_callbacks_resolve_on_the_tenant_and_the_global_path(self) -> None:
+    def test_both_chips_translate_to_a_phrase_on_the_global_path(self) -> None:
         from apps.channels.max.quick_actions import resolve_tap_text
-        from apps.skills.menu.matching import MENU_CALLBACK_TEXT
 
         for callback in (CALLBACK_MENU_MY_BOOKINGS, CALLBACK_MENU_BOOK):
-            per_tenant = MENU_CALLBACK_TEXT.get(callback)
-            assert per_tenant, callback
-            assert resolve_tap_text(callback) == per_tenant
+            assert resolve_tap_text(callback), callback
+        # Paired negative on the same resolver: it is not a rubber stamp that
+        # would make the loop above pass for any string at all.
+        assert resolve_tap_text("cb:menu:no_such_slug") == "Что ты умеешь?"
+        assert resolve_tap_text("просто текст") is None
 
-    def test_my_bookings_phrase_reaches_the_bookings_lookup(self) -> None:
-        """And the phrase behind the chip is one the booking lookup claims —
-        otherwise «Мои записи» would resolve to text nobody answers."""
+    def test_my_bookings_lands_on_the_bookings_lookup(self) -> None:
+        """«Покажи мои записи» is claimed by the SAME predicate both surfaces
+        branch on — ``apps/channels/max/handler.py`` for the global bot,
+        ``apps/skills/booking/skill.py`` for the tenant's own."""
         from apps.skills.booking.lookup import is_personal_booking_lookup
         from apps.skills.menu.matching import MENU_CALLBACK_TEXT
 
         assert is_personal_booking_lookup(MENU_CALLBACK_TEXT[CALLBACK_MENU_MY_BOOKINGS])
-        # Paired negative on the same predicate: it is not a rubber stamp.
         assert not is_personal_booking_lookup("расскажи анекдот")
+
+    def test_book_again_lands_on_the_booking_skill(
+        self, tenant: Tenant, bot_user: BotUser, conversation: Conversation
+    ) -> None:
+        """«Хочу записаться» — the phrase behind 📅 Записаться. It had no
+        landing check at all, and that chip hangs under two of this module's
+        replies.
+        """
+        from apps.skills.booking.skill import BookingSkill
+        from apps.skills.menu.matching import MENU_CALLBACK_TEXT
+
+        phrase = MENU_CALLBACK_TEXT[CALLBACK_MENU_BOOK]
+        with tenant_scope(tenant):
+            claimed = BookingSkill().matches(
+                _ctx(phrase, bot_user=bot_user, conversation=conversation)
+            )
+            # Paired negative on the same skill and the same fixtures.
+            unrelated = BookingSkill().matches(
+                _ctx("расскажи анекдот", bot_user=bot_user, conversation=conversation)
+            )
+        assert claimed, phrase
+        # empty-assert-ok: the identical call above returned True on the same fixtures
+        assert not unrelated
+
+
+class TestChipsFitTheWire:
+    def test_the_pick_master_chip_is_never_offered_over_telegrams_limit(
+        self, tenant: Tenant, bot_user: BotUser, conversation: Conversation
+    ) -> None:
+        """Telegram raises on a ``callback_data`` over 64 bytes, and nothing in
+        the send path catches it — an over-long payload costs the whole
+        message, not one button. Under the pilot flag both ids are UUIDs, so
+        ``cb:book:pick_master:<uuid>:<uuid>`` is 93 bytes and must not ship.
+        """
+        import uuid as _uuid
+
+        from apps.bookings import callbacks as cb
+
+        # Presence first: the same builder DOES produce this chip for ids that
+        # fit, so an empty result below means «too long», not «never builds».
+        short = cb._another_time_keyboard({"master_id": "11", "service_id": "22"})
+        assert [
+            b["callback"] for b in (short or {}).get("attachments", [])[0]["payload"]["buttons"]
+        ] == [f"{CALLBACK_BOOK_PICK_MASTER_PREFIX}11:22"]
+
+        long_ids = cb._another_time_keyboard(
+            {"master_id": str(_uuid.uuid4()), "service_id": str(_uuid.uuid4())}
+        )
+        callbacks = [
+            b["callback"]
+            for att in (long_ids or {}).get("attachments", [])
+            for b in att["payload"]["buttons"]
+        ]
+        assert callbacks == [CALLBACK_MENU_BOOK]
+        assert all(len(c.encode("utf-8")) <= 64 for c in callbacks)
+
+
+class TestRollbackSwitch:
+    def test_menu_chips_disappear_when_the_menu_surface_is_off(
+        self, tenant: Tenant, bot_user: BotUser, conversation: Conversation, settings
+    ) -> None:
+        """``PILOT_CONVERSATIONAL_UX`` off makes ``MenuSkill`` stand down, so a
+        ``cb:menu:*`` chip would be claimed by nobody and the raw payload
+        would reach the model — the DRF-1051 defect the rollback exists to
+        restore away FROM. The chips have to go with it.
+        """
+        reminder = _reminder(tenant, bot_user, yc_id="910")
+
+        settings.PILOT_CONVERSATIONAL_UX = True
+        on = BookingReminderCallbackSkill().handle(
+            _ctx(f"cb:rem:cancel:{reminder.pk}", bot_user=bot_user, conversation=conversation)
+        )
+        assert _callbacks(on) == [CALLBACK_MENU_BOOK]
+
+        settings.PILOT_CONVERSATIONAL_UX = False
+        off = BookingReminderCallbackSkill().handle(
+            _ctx(
+                f"cb:rem:cancel:{_reminder(tenant, bot_user, yc_id='911').pk}",
+                bot_user=bot_user,
+                conversation=conversation,
+            )
+        )
+        assert off.reply_text == REPLY_CANCELLED
+        assert off.action_data is None

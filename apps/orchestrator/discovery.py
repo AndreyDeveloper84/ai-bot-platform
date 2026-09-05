@@ -78,6 +78,12 @@ _MAX_SERVICE_CARDS = 8
 # above this.
 _MAX_CATALOG_REPLY_CHARS = 1400
 
+#: How many salons the «did this name single out exactly one salon?» check
+#: reads before it answers. Not a display limit — nothing here is rendered —
+#: so it is set well above any plausible city's roster; the alternative is a
+#: uniqueness claim about a page rather than about the catalog (DRF-1492).
+_MAX_SALON_MATCH_SCAN = 200
+
 # Callback prefix for the discovery → booking handoff button (#1020). Carries
 # the PUBLIC ids from the MasterCard DTO:
 # ``cb:discover:book:{tenant_id}:{master_id}`` — plus, when discovery resolved
@@ -606,7 +612,7 @@ def render_alternatives(
     unlike = f", а не «{said}»" if said else ""
     return (
         f"Это другие услуги{unlike}, но{where} они есть: {quoted}. "
-        "Нажмите на услугу — покажу мастеров, или назовите другой город."
+        "Выберите одну из них или назовите другой город."
     )
 
 
@@ -618,7 +624,11 @@ def alternative_names(alternatives: list[str] | None) -> list[str]:
     reply ends up naming three services and offering two.
     """
     names = [str(name).strip()[:_MAX_ECHOED_QUERY_CHARS] for name in (alternatives or [])]
-    return [name for name in names if name]
+    # Capped HERE and nowhere else. The sentence and the keyboard are built
+    # from this one list, so a cap applied to only one of them would print
+    # five service names under three buttons — «называет три, предлагает две»,
+    # a smaller copy of the defect this ticket is about.
+    return [name for name in names if name][:_MAX_CLARIFICATION_OPTIONS]
 
 
 def alternative_buttons(alternatives: list[str] | None) -> list[dict[str, str]]:
@@ -639,7 +649,7 @@ def alternative_buttons(alternatives: list[str] | None) -> list[dict[str, str]]:
     """
     return [
         {"label": name[:_MAX_OPTION_LABEL_CHARS], "callback": name}
-        for name in alternative_names(alternatives)[:_MAX_CLARIFICATION_OPTIONS]
+        for name in alternative_names(alternatives)
     ]
 
 
@@ -691,48 +701,63 @@ def render_no_match(
     service = (specialization or "").strip()[:_MAX_ECHOED_QUERY_CHARS]
     place = (city or "").strip()[:_MAX_ECHOED_QUERY_CHARS]
     offer = render_alternatives(alternatives, service=service, city=place)
-    # DRF-1492 — the refusal's own way out, as a keyboard. With alternatives
-    # the chips ARE the alternatives (the sentence above points at them);
-    # without them the only executable move left is «Показать салоны», and
-    # every branch below says «назовите…», which is a request to type. It
-    # stays a request to type — the city really is something only the person
-    # can supply — but it is no longer the ONLY thing on offer.
-    buttons = alternative_buttons(alternatives) or [show_salons_button()]
-    # The «нажмите» half of the invitation to type. Said only where the
-    # keyboard is the salon chip: with service chips the sentence
-    # ``render_alternatives`` wrote already names them.
-    tap = "" if alternative_names(alternatives) else " Или посмотрите, какие салоны есть."
+    # DRF-1492 — the refusal's own way out, as a keyboard.
+    #
+    # The chips are the alternatives ONLY on the branches that actually print
+    # ``offer``. The two branches below that ignore it (`place`, bare) would
+    # otherwise render service chips no sentence mentions — a keyboard
+    # answering a question the text never asked, which is the same
+    # text/buttons divergence this ticket is about, mirrored.
+    chips = alternative_buttons(alternatives)
+    salons = [show_salons_button()]
+    # The salon sentence rides only where the salon chip does. It is the
+    # «and here is what always works» half of an invitation that otherwise
+    # asks the person to guess which cities this marketplace is in.
+    tail_salons = " Или посмотрите, какие салоны есть."
     if service and already_refused:
         # The repeat. «Я уже отвечал» is not a rebuke — it is the one thing
         # that tells the person the wall is the same wall and they have not
         # been misheard again. The tail is the alternative, so the turn still
         # goes somewhere; without one, the same closing question as below.
+        #
+        # NOTE the missing salon sentence, and it is deliberate: this is the
+        # ONE branch whose keyboard a live caller drops
+        # (``apps.orchestrator.concierge`` returns the repeat refusal as
+        # ``DiscoveryReply(text=…, persisted=True)``, keyboard and all left
+        # behind). Until that one line is fixed under DRF-1489, a sentence
+        # here that pointed at a button would point at nothing. The chips are
+        # still attached — they are correct wherever they survive, and an
+        # unexplained chip is a smaller failure than a named one that is absent.
         where = f" в городе {place}" if place else ""
         text = f"Про «{service}»{where} я уже ответил: такого у наших мастеров нет."
-        tail = offer or f"Назовите другую услугу или другой город, и я поищу ещё.{tap}"
-        return _reply_with_chips(f"{text} {tail}"[:_MAX_REPLY_CHARS], buttons)
+        tail = offer or "Назовите другую услугу или другой город, и я поищу ещё."
+        return _reply_with_chips(f"{text} {tail}"[:_MAX_REPLY_CHARS], chips or salons)
     if service and place:
         # «такого … нет», not «такой услуги … нет»: with both halves named we
         # know the COMBINATION matched nobody, not which half is missing —
         # the service may exist elsewhere, the city may have no masters yet.
         # Saying the narrower thing would be a confident guess.
-        text = f"«{service}» в городе {place} — такого у наших мастеров сейчас нет. " + (
-            offer or f"Назовите другую услугу или другой город, и я поищу ещё.{tap}"
-        )
+        head = f"«{service}» в городе {place} — такого у наших мастеров сейчас нет. "
+        if offer:
+            return _reply_with_chips((head + offer)[:_MAX_REPLY_CHARS], chips)
+        text = head + "Назовите другую услугу или другой город, и я поищу ещё." + tail_salons
     elif service:
-        text = f"«{service}» — такой услуги у наших мастеров сейчас нет. " + (
-            offer or f"Подскажите город или другую услугу, и я поищу ещё.{tap}"
-        )
+        head = f"«{service}» — такой услуги у наших мастеров сейчас нет. "
+        if offer:
+            return _reply_with_chips((head + offer)[:_MAX_REPLY_CHARS], chips)
+        text = head + "Подскажите город или другую услугу, и я поищу ещё." + tail_salons
     elif place:
         text = (
             f"В городе {place} подключённых мастеров пока нет. "
-            f"Назовите другой город, и я поищу ещё.{tap}"
+            "Назовите другой город, и я поищу ещё." + tail_salons
         )
     else:
         # Genuinely nothing to acknowledge — the only case where asking for
         # both the city and the service is the honest question.
-        text = f"По вашему запросу мастеров пока не нашлось — уточните город или услугу.{tap}"
-    return _reply_with_chips(text[:_MAX_REPLY_CHARS], buttons)
+        text = (
+            "По вашему запросу мастеров пока не нашлось — уточните город или услугу." + tail_salons
+        )
+    return _reply_with_chips(text[:_MAX_REPLY_CHARS], salons)
 
 
 def render_missing_services(missing: list[str], city: str | None = None) -> str:
@@ -1481,19 +1506,34 @@ def _identifying_words(names: list[str]) -> dict[str, str]:
     return {word: name for word, name in seen.items() if word not in generic}
 
 
-def _reply_with_chips(text: str, buttons: list[dict[str, str]]) -> DiscoveryReply:
-    """Wrap rendered text + chips in the keyboard envelope the MAX handler
-    reads (``_build_attachments``, shape (1) — the platform-canonical one the
-    booking skill and the master card already use).
+def keyboard_envelope(buttons: list[dict[str, str]]) -> dict[str, Any] | None:
+    """The platform-canonical keyboard envelope, or ``None`` for no buttons.
 
-    Empty ``buttons`` yields a plain reply with ``action_data=None``: an empty
-    ``inline_keyboard`` attachment is a widget with nothing in it, which reads
-    as a broken message rather than as a message without buttons.
+    ``attachments`` → ``inline_keyboard`` — shape (1) of
+    ``apps.channels.max.handler._build_attachments``, and the ONLY shape the
+    Telegram adapter reads (``apps.channels.telegram.handler._extract_keyboard``).
+
+    Empty ``buttons`` yields ``None``, never an empty ``inline_keyboard``: a
+    widget with nothing in it reads as a broken message rather than as a
+    message without buttons.
+
+    Public, and shared by the three modules of this surface
+    (:mod:`apps.orchestrator.visits`, :mod:`apps.orchestrator.handoff`)
+    because DRF-1492 was about to leave four hand-copied versions of the same
+    two rules behind, each with a comment promising it would not drift. A
+    comment is not a mechanism.
     """
     if not buttons:
-        return DiscoveryReply(text=text[:_MAX_CATALOG_REPLY_CHARS])
-    action_data = {"attachments": [{"type": "inline_keyboard", "payload": {"buttons": buttons}}]}
-    return DiscoveryReply(text=text[:_MAX_CATALOG_REPLY_CHARS], action_data=action_data)
+        return None
+    return {"attachments": [{"type": "inline_keyboard", "payload": {"buttons": buttons}}]}
+
+
+def _reply_with_chips(text: str, buttons: list[dict[str, str]]) -> DiscoveryReply:
+    """Rendered text + chips, clipped to this module's catalog reply budget."""
+    return DiscoveryReply(
+        text=text[:_MAX_CATALOG_REPLY_CHARS],
+        action_data=keyboard_envelope(buttons),
+    )
 
 
 def _parse_uuid_ref(callback_text: str, prefix: str) -> UUID | None:
@@ -1606,6 +1646,20 @@ def execute_catalog_callback(callback_text: str) -> DiscoveryReply | None:
             )
         return _render_master_cards(cards)
 
+    if callback_text.startswith("cb:catalog:"):
+        # A payload of THIS family that no branch above claimed — a slug we
+        # renamed, a hand-typed «cb:catalog:salons:moscow», a chip from a
+        # keyboard older than the grammar. The ladder in the MAX handler
+        # routes by ``startswith`` over CATALOG_CALLBACK_PREFIXES, so such a
+        # payload arrives here and must not leave as ``None``: the handler's
+        # own fallback is a bare ``DiscoveryReply(text=CATALOG_STALE_CARD_TEXT)``
+        # — and since DRF-1492 that text says «Нажмите "Показать салоны"»,
+        # which under a keyboardless reply is the exact defect this ticket is
+        # about. ``None`` keeps meaning «not a catalog callback at all», which
+        # is what the caller's ladder needs.
+        logger.info("orchestrator.discovery.catalog_tap kind=unknown text=%r", callback_text[:60])
+        return render_stale_card()
+
     return None
 
 
@@ -1680,8 +1734,15 @@ def execute_catalog_tool(
             # salons matching the substring means we do not know WHICH one
             # «там» is, and a chip that guesses is worse than one less chip.
             needle = salon.strip().casefold()
+            # Explicit, generous limit: «exactly one match» must be a fact
+            # about the whole set, not about the first page. With the default
+            # page size a second matching salon could sit just past it, and
+            # «ambiguous» would silently become «certain» — opening the wrong
+            # salon's catalog behind a chip that names it.
             matched = [
-                card for card in discover_salons(city=city) if needle in card.name.casefold()
+                card
+                for card in discover_salons(city=city, limit=_MAX_SALON_MATCH_SCAN)
+                if needle in card.name.casefold()
             ]
             return render_no_services(
                 salon=salon,

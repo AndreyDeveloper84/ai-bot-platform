@@ -32,7 +32,11 @@ from apps.booking.services.records import (
 from apps.bookings.keyboards import CALLBACK_BOOK_PICK_MASTER_PREFIX
 from apps.events.services import emit
 from apps.events.vocabulary import REPEAT_CHECKED, VISIT_CARD_OPENED, VISITS_LISTED
-from apps.orchestrator.discovery import DiscoveryReply, show_salons_button
+from apps.orchestrator.discovery import (
+    DiscoveryReply,
+    keyboard_envelope,
+    show_salons_button,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -123,7 +127,9 @@ def route_visits(
         return DiscoveryReply(text=_UNAVAILABLE_TEXT)
 
     if not upcoming.visits and not visits.visits:
-        return DiscoveryReply(text=_EMPTY_TEXT, action_data=_chips([show_salons_button()]))
+        return DiscoveryReply(
+            text=_EMPTY_TEXT, action_data=keyboard_envelope([show_salons_button()])
+        )
 
     blocks: list[str] = []
     if upcoming.visits:
@@ -231,7 +237,7 @@ def route_repeat(
         )
 
     text, buttons = _repeat_refusal(result)
-    return DiscoveryReply(text=text, action_data=_chips(buttons))
+    return DiscoveryReply(text=text, action_data=keyboard_envelope(buttons))
 
 
 # ── presentation ────────────────────────────────────────────────────────────
@@ -273,19 +279,6 @@ def _visit_line(visit: Visit) -> str:
 #: truncates a long label at the tail — the same cap the discovery renderer
 #: applies to its own option labels.
 _MAX_CHIP_LABEL_CHARS = 40
-
-
-def _chips(buttons: list[dict[str, str]]) -> dict | None:
-    """The canonical keyboard envelope, or ``None`` for no buttons.
-
-    ``None``, never an empty ``inline_keyboard``: an attachment with nothing
-    in it renders as a broken message rather than as a message without
-    buttons (the rule ``apps.orchestrator.discovery._reply_with_chips``
-    states, kept identical here).
-    """
-    if not buttons:
-        return None
-    return {"attachments": [{"type": "inline_keyboard", "payload": {"buttons": buttons}}]}
 
 
 def _visit_buttons(visits: tuple[Visit, ...]) -> dict | None:

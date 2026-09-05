@@ -32,6 +32,7 @@ from apps.bookings.callbacks import (
     REPLY_BOOK_ALREADY_HANDLED,
     REPLY_BOOK_CANCELLED_PREVIEW,
     REPLY_BOOK_EXPIRED,
+    REPLY_BOOK_EXPIRED_UNCHANGED,
     REPLY_BOOK_KEPT_PREVIEW,
     REPLY_NOT_FOUND,
     BookingGateCallbackSkill,
@@ -409,7 +410,15 @@ class TestGateTextHandle:
             tenant_scope(tenant),
         ):
             result = skill.handle(_ctx(conversation, bot_user, "Подтверждаю"))
-        assert result.reply_text == REPLY_BOOK_EXPIRED
+        # DRF-1492 — the pending row here is a CANCEL preview (the test's name
+        # is about the tap, not the verb). «Давайте подберём слот заново» was
+        # said to a person whose CANCEL timed out: one sentence about the
+        # wrong verb, and a keyboard offering to book them. The reply now
+        # states the only fact that is true — nothing changed — and opens the
+        # bookings list rather than the funnel.
+        assert result.reply_text == REPLY_BOOK_EXPIRED_UNCHANGED
+        assert result.reply_text != REPLY_BOOK_EXPIRED
+        assert _callbacks(result) == [CALLBACK_MENU_MY_BOOKINGS]
         assert client.cancel_calls == []  # no mutation on stale state
 
     def test_cancel_text_discards_preview(

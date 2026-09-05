@@ -73,7 +73,11 @@ from apps.skills.booking.tools import (
     execute_confirm,
     execute_reschedule,
 )
-from apps.skills.menu.matching import CALLBACK_MENU_BOOK, CALLBACK_MENU_MY_BOOKINGS
+from apps.skills.menu.matching import (
+    CALLBACK_MENU_BOOK,
+    CALLBACK_MENU_MY_BOOKINGS,
+    pilot_ux_enabled,
+)
 from apps.skills.registry import register
 
 logger = logging.getLogger(__name__)
@@ -97,6 +101,13 @@ REPLY_FORBIDDEN = "Эта запись не для этого профиля."
 
 # B5 / DRF-841 — replies for the 2-button preview gate.
 REPLY_BOOK_EXPIRED = "Слишком много времени прошло — давайте подберём слот заново."
+# DRF-1492 — the same timeout over a CANCEL or RESCHEDULE preview. Nothing was
+# booked and nothing was changed, so «подберём слот заново» is about the wrong
+# verb: the honest fact is that the existing booking is exactly where it was.
+REPLY_BOOK_EXPIRED_UNCHANGED = (
+    "Слишком много времени прошло — ничего не изменила, запись осталась прежней. "
+    "Откройте актуальные записи и попробуйте ещё раз."
+)
 REPLY_BOOK_CANCELLED_PREVIEW = "Ок, не записываю."
 # DRF-1492 — the ❌ button aborts whatever preview it hangs under, and there
 # are three of them. «Ок, не записываю» is true of exactly one: said over an
@@ -149,6 +160,14 @@ LABEL_MY_BOOKINGS = "📋 Мои записи"
 LABEL_BOOK_AGAIN = "📅 Записаться"
 LABEL_ANOTHER_TIME = "🔄 Выбрать другое время"
 
+#: Telegram rejects a ``callback_data`` longer than this, and the platform's
+#: adapter turns that into a ``ValueError``
+#: (``apps.channels.telegram.keyboards._to_button``) which nothing in the send
+#: path catches — an over-long payload therefore costs the WHOLE reply, not
+#: one button. This module is a per-tenant surface and does reach Telegram, so
+#: every callback it emits is measured before it is offered.
+_MAX_CALLBACK_BYTES = 64
+
 
 def _keyboard(buttons: list[dict[str, str]]) -> dict | None:
     """The platform-canonical keyboard envelope, or ``None`` for no buttons.
@@ -160,18 +179,48 @@ def _keyboard(buttons: list[dict[str, str]]) -> dict | None:
 
     ``None`` rather than an empty attachment: a keyboard widget with nothing
     in it renders as a broken message, not as a message without buttons.
+
+    A button whose callback does not fit :data:`_MAX_CALLBACK_BYTES` is
+    dropped rather than offered. Dropping it costs the affordance; keeping it
+    costs the message, because the Telegram adapter raises on conversion and
+    the caller has already persisted the assistant turn — the person would
+    read nothing at all where they used to read the plain text.
     """
-    if not buttons:
+    fitting = [
+        b for b in buttons if len(str(b.get("callback", "")).encode("utf-8")) <= _MAX_CALLBACK_BYTES
+    ]
+    if len(fitting) != len(buttons):
+        logger.warning(
+            "bookings.keyboard.callback_too_long dropped=%d",
+            len(buttons) - len(fitting),
+        )
+    if not fitting:
         return None
-    return {"attachments": [{"type": "inline_keyboard", "payload": {"buttons": buttons}}]}
+    return {"attachments": [{"type": "inline_keyboard", "payload": {"buttons": fitting}}]}
+
+
+def _menu_keyboard(label: str, callback: str) -> dict | None:
+    """A ``cb:menu:*`` chip — or nothing, when that family is switched off.
+
+    ``PILOT_CONVERSATIONAL_UX`` is the documented rollback for the whole
+    DRF-963 surface, and ``MenuSkill.matches`` stands down when it is off
+    (``apps/skills/menu/skill.py``). Every pre-existing tenant-side emitter of
+    these callbacks is guarded by the same flag; this one has to be too, or
+    flipping the rollback would leave chips on screen that no skill claims and
+    a raw ``cb:menu:…`` payload reaching the model — the DRF-1051 defect the
+    rollback exists to restore away FROM.
+    """
+    if not pilot_ux_enabled():
+        return None
+    return _keyboard([{"label": label, "callback": callback}])
 
 
 def _my_bookings_keyboard() -> dict | None:
-    return _keyboard([{"label": LABEL_MY_BOOKINGS, "callback": CALLBACK_MENU_MY_BOOKINGS}])
+    return _menu_keyboard(LABEL_MY_BOOKINGS, CALLBACK_MENU_MY_BOOKINGS)
 
 
 def _book_again_keyboard() -> dict | None:
-    return _keyboard([{"label": LABEL_BOOK_AGAIN, "callback": CALLBACK_MENU_BOOK}])
+    return _menu_keyboard(LABEL_BOOK_AGAIN, CALLBACK_MENU_BOOK)
 
 
 def _another_time_keyboard(payload: dict) -> dict | None:
@@ -185,28 +234,43 @@ def _another_time_keyboard(payload: dict) -> dict | None:
     The ids ride VERBATIM from the payload, which is the same id family the
     preview was built from — canonical Ayla UUIDs under
     ``BOOKING_VIA_AYLA_REST`` (the pilot), native YClients ints with the flag
-    off. The tenant bot's booking skill takes either. The global path resolves
-    T from the master id and accepts only a UUID
-    (``apps.orchestrator.handoff._resolve_booking_callback_tenant`` —
-    «flag-off native int ids are deliberately NOT resolved»), so with the flag
-    off this chip would degrade there to that module's honest «не нахожу этого
-    мастера» line. That combination is not reachable: with the flag off the
-    global handoff never stamps a native id in the first place, so its whole
-    ``cb:book:pick_*`` family is already inert — this chip does not make it
-    more so.
+    off. The tenant bot's booking skill takes either.
+
+    The global path is narrower and the reason matters, because a wrong one
+    written down here would invite someone to remove the wrong guard. It is
+    NOT that the global handoff avoids native ids — it stamps them
+    (``apps.orchestrator.handoff`` builds ``cb:book:pick_master:{int}:{int}``
+    with the flag off). The single barrier is
+    ``_resolve_booking_callback_tenant``, which refuses any master id that is
+    not a UUID: with the flag off the whole global ``cb:book:pick_*`` family
+    dies at the first tap, long before a ``PendingBookingAction`` exists to
+    put behind this chip. So the combination «flag off + global bot» is
+    unreachable through this function, and under the pilot flag the ids are
+    UUIDs and resolve.
+
+    Under that same pilot flag the payload is 20 + 36 + 1 + 36 = 93 bytes,
+    which does NOT fit Telegram's 64-byte ``callback_data`` cap. ``_keyboard``
+    drops such a button, so this returns an empty keyboard rather than a
+    keyboard that would cost the whole message — and the caller must therefore
+    treat ``None`` as possible. See :data:`_MAX_CALLBACK_BYTES`; a compact ref
+    scheme for this callback family is a separate ticket (it is emitted from
+    ``apps/skills/booking/skill.py`` too).
     """
     master_id = str(payload.get("master_id") or "").strip()
     service_id = str(payload.get("service_id") or "").strip()
     if not master_id or not service_id:
         return _book_again_keyboard()
-    return _keyboard(
-        [
-            {
-                "label": LABEL_ANOTHER_TIME,
-                "callback": f"{CALLBACK_BOOK_PICK_MASTER_PREFIX}{master_id}:{service_id}",
-            }
-        ]
-    )
+    callback = f"{CALLBACK_BOOK_PICK_MASTER_PREFIX}{master_id}:{service_id}"
+    if len(callback.encode("utf-8")) > _MAX_CALLBACK_BYTES:
+        # Under the pilot flag this is the NORMAL case (93 bytes), so the
+        # branch is not a corner: falling through to ``_keyboard``'s drop
+        # would leave the reply with no keyboard at all, i.e. the dead end
+        # this ticket removes, restored for the very contour it ships to.
+        # «Записаться» is a weaker offer than «то же время у того же мастера»
+        # — it starts the search over — but it is an offer, it fits, and it
+        # executes on both surfaces.
+        return _book_again_keyboard()
+    return _keyboard([{"label": LABEL_ANOTHER_TIME, "callback": callback}])
 
 
 # Audit slugs. Out-of-canonical-vocab; the audit subsystem accepts
@@ -676,12 +740,22 @@ class BookingGateCallbackSkill:
                 target_id=lookup.row.pk,
                 payload={"kind": lookup.row.kind},
             )
-            # DRF-1492 — «давайте подберём слот заново» names the move; the
-            # row still names the master and the service, so the chip re-opens
-            # the date picker for that exact pair.
+            # DRF-1492 — the reply names a move, so it carries one. WHICH
+            # move depends on the verb that expired, and this branch used to
+            # answer all three with the confirm wording. «Слишком много
+            # времени прошло — давайте подберём слот заново» said to someone
+            # whose CANCEL preview timed out offers to book them, one tap,
+            # when they were trying to un-book; and a reschedule payload does
+            # carry master + service, so the confirm chip would have opened a
+            # NEW booking beside the live one it failed to move.
+            if lookup.row.kind == PendingBookingAction.Kind.CONFIRM:
+                return SkillResult(
+                    reply_text=REPLY_BOOK_EXPIRED,
+                    action_data=_another_time_keyboard(lookup.row.payload or {}),
+                )
             return SkillResult(
-                reply_text=REPLY_BOOK_EXPIRED,
-                action_data=_another_time_keyboard(lookup.row.payload or {}),
+                reply_text=REPLY_BOOK_EXPIRED_UNCHANGED,
+                action_data=_my_bookings_keyboard(),
             )
 
         if lookup.already_consumed:

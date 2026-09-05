@@ -39,6 +39,7 @@ from apps.orchestrator.discovery import (
     DiscoveryReply,
     decode_query_ref,
     encode_query_ref,
+    keyboard_envelope,
     show_salons_button,
 )
 
@@ -67,10 +68,6 @@ _UNAVAILABLE_REPLY_NO_TENANT = (
     "К сожалению, запись к этому мастеру сейчас недоступна — посмотрите наши салоны."
 )
 
-#: Cap on a chip label. Salon and service names come from the catalog mirror,
-#: which does not bound them; MAX truncates a long label at the tail.
-_MAX_CHIP_LABEL_CHARS = 40
-
 _SALON_CATALOG_LABEL = "Что есть в этом салоне"
 
 
@@ -89,19 +86,8 @@ def _salon_catalog_button(tenant_id: uuid.UUID) -> dict[str, str]:
 
 
 def _chips(text: str, buttons: list[dict[str, str]]) -> DiscoveryReply:
-    """Reply + keyboard, or a plain reply when there are no buttons.
-
-    Never an empty ``inline_keyboard``: an attachment with nothing in it
-    renders as a broken message rather than as a message without buttons —
-    the same rule ``apps.orchestrator.discovery._reply_with_chips`` states,
-    kept identical here so the two surfaces cannot drift.
-    """
-    if not buttons:
-        return DiscoveryReply(text=text)
-    return DiscoveryReply(
-        text=text,
-        action_data={"attachments": [{"type": "inline_keyboard", "payload": {"buttons": buttons}}]},
-    )
+    """Reply + keyboard, through the one envelope builder this surface has."""
+    return DiscoveryReply(text=text, action_data=keyboard_envelope(buttons))
 
 
 def _unavailable_reply(tenant_id: uuid.UUID | None = None) -> DiscoveryReply:
