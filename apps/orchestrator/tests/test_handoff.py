@@ -433,7 +433,16 @@ def test_handoff_unresolvable_service_asks_and_does_not_dispatch(
     # alternative, so they stay the neutral ask.
     expected = "нет услуги" if case == "no_edge" else "напишите"
     assert expected in reply.text, case
-    assert _buttons(reply) == [], case  # nothing deliverable → no dead buttons
+    # Nothing DELIVERABLE per service → no service buttons. That guarantee is
+    # what this line has always been about, and it is unchanged: a chip
+    # carrying one of these ungroundable ids would smuggle it into booking.
+    assert [b for b in _buttons(reply) if b["callback"].startswith("cb:discover:book:")] == [], case
+    # DRF-1492 — but the reply is no longer buttonless either: both bare
+    # wordings named a move («попробуйте выбрать другого мастера»,
+    # «напишите, какая услуга вас интересует») with nothing to press. The one
+    # chip is the salon's own catalog, addressed by the tenant id — an id
+    # this branch does hold and one that resolves by construction.
+    assert [b["callback"] for b in _buttons(reply)] == [f"cb:catalog:services:{t.id}"], case
     assert called == []
 
 

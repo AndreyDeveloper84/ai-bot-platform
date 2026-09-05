@@ -393,7 +393,8 @@ def _repeat_refusal(result: RepeatResult) -> tuple[str, list[dict[str, str]]]:
     if result.status == "prefill_unusable":
         return (
             "Не смогла разобрать эту запись, чтобы повторить её. "
-            "Скажите, что вам нужно, — или посмотрите наши салоны.",
+            "Давайте подберём заново — скажите, что вам нужно, "
+            "или посмотрите наши салоны.",
             [show_salons_button()],
         )
     # backend_unavailable and anything new: an outage is not a menu. There is

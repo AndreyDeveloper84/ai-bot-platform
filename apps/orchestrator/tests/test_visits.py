@@ -19,6 +19,17 @@ from apps.booking.services.records import (
     VisitsResult,
 )
 from apps.orchestrator import visits as visits_mod
+from apps.orchestrator.discovery import CALLBACK_CATALOG_SALONS
+
+
+def _callbacks(reply) -> list[str]:
+    """The callbacks of a reply's keyboard, in render order (DRF-1492)."""
+    attachments = (reply.action_data or {}).get("attachments") or []
+    return [
+        button["callback"]
+        for att in attachments
+        for button in (att.get("payload") or {}).get("buttons") or []
+    ]
 
 
 class _BotUser:
@@ -112,8 +123,12 @@ class TestVisitsList:
         reply = visits_mod.route_visits(global_bot_user=_BotUser())
 
         assert "пока нет завершённых визитов" in reply.text
-        assert "подобрать" in reply.text.lower()
-        assert reply.action_data is None
+        # DRF-1492 — the offer used to be «могу подобрать мастера и записать
+        # вас», with nothing to press. It is a chip now, and the chip opens
+        # the ladder (салоны → услуги → мастер → запись) that ends in a
+        # booking. Typing still works and is still invited by the text.
+        assert "салон" in reply.text.lower()
+        assert _callbacks(reply) == [CALLBACK_CATALOG_SALONS]
 
     def test_backend_outage_is_admitted_not_papered_over(self, capability, db) -> None:
         """§30 — the mirror never fills in for an unreachable source."""
@@ -231,7 +246,13 @@ class TestRepeat:
     def test_every_refusal_offers_a_way_forward(
         self, capability, db, status: RepeatStatus, expected: str
     ) -> None:
-        """OD-H4 / §18-20 — a graceful alternative, never a system error."""
+        """OD-H4 / §18-20 — a graceful alternative, never a system error.
+
+        DRF-1492 — and the alternative is now TAPPABLE. Three of these four
+        used to end in a yes/no question («поискать?», «рассказать, что
+        есть?») under a message with no buttons: a question whose only
+        possible answer is a typed «да» is homework, not an offer.
+        """
         capability["repeat"] = RepeatResult(status=status, master_name="Инна")
 
         reply = visits_mod.route_visit_callback(
@@ -239,10 +260,33 @@ class TestRepeat:
         )
 
         assert expected in reply.text
-        assert "?" in reply.text or "заново" in reply.text
         for slug in ("master_unavailable", "service_unavailable", "link_unavailable", "error"):
             assert slug not in reply.text
-        assert reply.action_data is None
+        assert _callbacks(reply) == [CALLBACK_CATALOG_SALONS]
+
+    def test_master_refusal_chips_the_service_that_is_still_fine(self, capability, db) -> None:
+        """The master went away, the service did not — so the chip is the
+        service, and its tap is the search the sentence promises.
+
+        The callback is the NAME, not an id: the id this layer holds is
+        Ayla's canonical ``service_id``, while the catalog chips address
+        ``CatalogService.pk`` — a different key space, and a chip built from
+        the wrong one would answer «услуга не найдена».
+        """
+        capability["repeat"] = RepeatResult(
+            status="master_unavailable",
+            master_name="Инна",
+            service_name="Массаж спины",
+            entry=RepeatEntry(specialist_id="spec-1", service_id="svc-1"),
+        )
+
+        reply = visits_mod.route_visit_callback(
+            global_bot_user=_BotUser(), callback_text="cb:visit:repeat:a1"
+        )
+
+        assert "Нажмите на услугу" in reply.text
+        assert _callbacks(reply) == ["Массаж спины"]
+        assert "svc-1" not in str(reply.action_data)
 
     def test_outage_during_repeat_is_temporary_not_terminal(self, capability, db) -> None:
         capability["repeat"] = RepeatResult(status="backend_unavailable")
@@ -252,6 +296,11 @@ class TestRepeat:
         )
 
         assert "позже" in reply.text.lower()
+        # DRF-1492's paired negative: an outage is not a menu. The positive
+        # half lives one test up — the same call path DOES draw a keyboard for
+        # every refusal that has an action behind it, so an empty one here is
+        # a decision and not a renderer that quietly stopped drawing.
+        assert reply.action_data is None
 
 
 class TestFormatting:

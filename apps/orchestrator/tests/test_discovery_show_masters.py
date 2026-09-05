@@ -127,7 +127,11 @@ def test_show_masters_no_results_graceful(monkeypatch) -> None:
     # asking the client to «уточнить услугу» they had just named.
     assert "маникюр" in reply.text
     assert "уточните город или услугу" not in reply.text
-    assert reply.action_data is None
+    # DRF-1492 — the refusal is not a dead end either. There are no master
+    # cards to draw (that is the point of this test), so the only keyboard it
+    # may carry is the one that opens the salon list.
+    buttons = reply.action_data["attachments"][0]["payload"]["buttons"]
+    assert [b["callback"] for b in buttons] == ["cb:catalog:salons"]
 
 
 def test_show_masters_without_criteria_asks_instead_of_listing_catalogue(monkeypatch) -> None:
