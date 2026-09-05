@@ -82,13 +82,19 @@ def test_the_queue_itself_stays_open(login_as, salon) -> None:  # noqa: ANN001
     Если бы закрылась и она, сотрудник не нашёл бы обращение, с которым
     работает, и задача превратилась бы в «работать нельзя».
     """
-    make_client_thread(salon, channel_user_id="c1", display_name="Аня", text="крашу волосы")
+    _, _, _, task = make_client_thread(
+        salon, channel_user_id="c1", display_name="Аня", text="крашу волосы"
+    )
     client = login_as("i.smotryashiy", "viewer")
 
     response = client.get(QUEUE_URL)
+    body = _body(response)
 
     assert response.status_code == 200
-    assert "крашу волосы" not in _body(response), "в списке очереди оказалась переписка"
+    # Присутствие: обращение в списке есть — иначе «переписки нет» ниже
+    # означало бы «страница пустая», а не «в очереди только метаданные».
+    assert str(task.pk)[:8] in body
+    assert "крашу волосы" not in body, "в списке очереди оказалась переписка"
 
 
 # ── причина ───────────────────────────────────────────────────────────
@@ -218,6 +224,26 @@ def test_a_refusal_is_journaled_too(login_as, salon) -> None:  # noqa: ANN001
     assert denied.count() == 1
     assert denied.get().actor_username == "i.smotryashiy"
     assert denied.get().screen == "conversations.message"
+
+
+def test_the_viewer_can_actually_use_their_own_two_screens(login_as, salon) -> None:  # noqa: ANN001
+    """Пропуск и журнал — рабочие экраны смотрящего, а не витрина владельца."""
+    _, _, _, task = make_client_thread(
+        salon, channel_user_id="c1", display_name="Аня", text="крашу волосы"
+    )
+    client = login_as("i.smotryashiy", "viewer")
+    client.post(
+        GRANT_ADD_URL,
+        {"admin_task": str(task.id), "reason": "разбираю жалобу на запись от 5 сентября"},
+    )
+    grant = ClientDataAccessGrant.objects.get()
+
+    assert client.get(GRANT_ADD_URL).status_code == 200
+    assert client.get("/admin/adminconsole/clientdataaccessgrant/").status_code == 200
+    card = client.get(f"/admin/adminconsole/clientdataaccessgrant/{grant.pk}/change/")
+    assert card.status_code == 200
+    assert "разбираю жалобу" in _body(card)
+    assert client.get("/admin/adminconsole/clientdataaccesslog/").status_code == 200
 
 
 def test_the_access_journal_is_a_different_journal_from_the_change_journal() -> None:

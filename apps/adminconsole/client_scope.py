@@ -309,7 +309,13 @@ def _install_hidden_fields(model_admin: Any, hidden: tuple[str, ...]) -> bool:
 
 
 def _announce_scope(request: Any, grants: list[Any]) -> None:
-    """Сказать в списке, чей он. Молчаливое сужение читается как «пусто»."""
+    """Сказать в списке, чей он. Молчаливое сужение читается как «пусто».
+
+    Заодно снимает двусмысленность с баннера DRF-1023 («здесь видны
+    переписки ВСЕХ салонов»), который экраны ``conversations`` рисуют
+    сами: с DRF-1514 он верен только для владельца, а чужой ``admin.py``
+    правит соседняя задача.
+    """
     from django.contrib import messages
 
     for grant in grants[:5]:
@@ -319,6 +325,12 @@ def _announce_scope(request: Any, grants: list[Any]) -> None:
             f"(салон {grant.tenant_slug or '—'}), доступ открыт до "
             f"{grant.expires_at:%H:%M %d.%m} по причине: {grant.reason}",
         )
+    messages.info(
+        request,
+        "Список сужен до клиентов, по которым у вас открыт доступ. "
+        "Предупреждение о кросс-тенантности ниже относится к владельцу — "
+        "переписок других салонов в этом списке нет.",
+    )
 
 
 def _denied_listing(request: Any) -> TemplateResponse:
