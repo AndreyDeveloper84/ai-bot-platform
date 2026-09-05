@@ -155,8 +155,12 @@ def _gate_fallback(
     """Ворота 5 — подбор замены при деактивации: можно ли передать ей запись."""
 
     leaving = _make_master(tenant, name="Уходящая")
-    MasterService.all_tenants.create(tenant=tenant, master=candidate, service=service)
-    MasterService.all_tenants.create(tenant=tenant, master=leaving, service=service)
+    # ``get_or_create``, потому что тест ниже проходит эти ворота дважды на
+    # одном и том же мастере — до снятия ``is_active`` и после. Пара
+    # (master, service) уникальна, и второй ``create`` уронил бы тест
+    # IntegrityError раньше, чем он успел бы что-нибудь проверить.
+    MasterService.all_tenants.get_or_create(tenant=tenant, master=candidate, service=service)
+    MasterService.all_tenants.get_or_create(tenant=tenant, master=leaving, service=service)
     booking = BookingRequest.all_tenants.create(
         tenant=tenant,
         service=service,
