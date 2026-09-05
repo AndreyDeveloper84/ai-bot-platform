@@ -33,6 +33,7 @@ import uuid
 from unittest.mock import MagicMock
 
 import pytest
+from django.utils import timezone
 
 from apps.channels.max import handler as max_handler
 from apps.conversations.models import Conversation, Message
@@ -204,6 +205,35 @@ class TestSilenceIsExplainedOnce:
         _run_global("вы тут?", mid="own-2")
         assert sent[-1]["text"] == SILENCE_ANNOUNCED_HERE_TEXT
         assert SILENCE_TRANSFERRED_TEXT not in [c["text"] for c in sent]
+
+    def test_asking_here_reads_the_announced_wording_even_when_the_task_went_to_a_salon(
+        self, sent, actions, fake_redis, concierge
+    ):
+        """Ровно та развилка, ради которой существует ``announced_here``.
+
+        Человек попросил человека В ЭТОМ чате, а задача по правилу адресации
+        (``route_global_human_handoff``) легла на диалог самого свежего
+        салона. По базе это неотличимо от 04.09, где клиент писал салонному
+        боту: задача в обоих случаях на салонном диалоге. Отличает их только
+        факт доставки подтверждения — и человек обязан прочитать «ваш вопрос
+        уже у сотрудника», а не «вы просили в другом чате».
+        """
+
+        salon = Tenant.objects.create(slug="salon-recent", name="Salon Recent")
+        with tenant_scope(salon):
+            salon_user = BotUser.objects.create(
+                tenant=salon, channel="max", channel_user_id=str(USER_ID)
+            )
+            salon_conv = Conversation.all_tenants.create(tenant=salon, bot_user=salon_user)
+        Conversation.all_tenants.filter(pk=salon_conv.pk).update(last_message_at=timezone.now())
+
+        _run_global("позовите оператора", mid="mix-1")
+        task = AdminTask.all_tenants.get()
+        assert task.conversation_id == salon_conv.id, "задача ушла в салонную очередь"
+
+        _run_global("вы тут?", mid="mix-2")
+
+        assert sent[-1]["text"] == SILENCE_ANNOUNCED_HERE_TEXT
 
     def test_notice_is_in_the_transcript_but_not_in_short_term_memory(
         self, sent, actions, fake_redis, concierge
