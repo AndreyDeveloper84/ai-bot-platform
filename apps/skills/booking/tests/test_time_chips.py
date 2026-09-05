@@ -539,10 +539,10 @@ class TestDeadEndDaysStillOfferDays:
         with _patch_yclients(client), _patch_provider_complete([]):
             with tenant_scope(tenant):
                 result = BookingSkill().handle(_tap(context, f"cb:book:pick_date:11:{day}:22"))
-        assert f"cb:book:pick_date:11:{day}:22" not in _callbacks(result)
-        # Positive half of the same assertion: the days that ARE free did
-        # arrive. A "not in" that passes on an empty keyboard tests nothing.
+        # Positive half first: the day that IS free arrived. A "not in"
+        # that passes on an empty keyboard tests nothing.
         assert _callbacks(result) == [f"cb:book:pick_date:11:{_iso(3)}:22"]
+        assert f"cb:book:pick_date:11:{day}:22" not in _callbacks(result)
 
     def test_a_day_with_slots_is_untouched_by_the_fix(
         self, context: SkillContext, tenant: Tenant
