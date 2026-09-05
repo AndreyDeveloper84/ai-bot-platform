@@ -166,21 +166,34 @@ def _keyboard(buttons: list[dict[str, str]]) -> dict | None:
     return {"attachments": [{"type": "inline_keyboard", "payload": {"buttons": buttons}}]}
 
 
-def _my_bookings_keyboard() -> dict:
+def _my_bookings_keyboard() -> dict | None:
     return _keyboard([{"label": LABEL_MY_BOOKINGS, "callback": CALLBACK_MENU_MY_BOOKINGS}])
 
 
-def _book_again_keyboard() -> dict:
+def _book_again_keyboard() -> dict | None:
     return _keyboard([{"label": LABEL_BOOK_AGAIN, "callback": CALLBACK_MENU_BOOK}])
 
 
-def _another_time_keyboard(payload: dict) -> dict:
+def _another_time_keyboard(payload: dict) -> dict | None:
     """«Выбрать другое время» for the pair the abandoned preview named.
 
     Falls back to the plain «Записаться» chip when the payload does not carry
     both ids: ``cb:book:pick_master:`` without a service is refused by the
     booking skill's incomplete-callback guard (RB1.1-D05), which on this path
     would be a guaranteed dead end — the very defect this ticket is about.
+
+    The ids ride VERBATIM from the payload, which is the same id family the
+    preview was built from — canonical Ayla UUIDs under
+    ``BOOKING_VIA_AYLA_REST`` (the pilot), native YClients ints with the flag
+    off. The tenant bot's booking skill takes either. The global path resolves
+    T from the master id and accepts only a UUID
+    (``apps.orchestrator.handoff._resolve_booking_callback_tenant`` —
+    «flag-off native int ids are deliberately NOT resolved»), so with the flag
+    off this chip would degrade there to that module's honest «не нахожу этого
+    мастера» line. That combination is not reachable: with the flag off the
+    global handoff never stamps a native id in the first place, so its whole
+    ``cb:book:pick_*`` family is already inert — this chip does not make it
+    more so.
     """
     master_id = str(payload.get("master_id") or "").strip()
     service_id = str(payload.get("service_id") or "").strip()
