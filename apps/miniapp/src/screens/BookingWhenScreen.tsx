@@ -131,7 +131,8 @@ export function BookingWhenScreen() {
     : "В этот день нет свободного времени.";
 
   return (
-    <ScreenLayout back={BACK}
+    <ScreenLayout
+      back={BACK}
       title="Выберите время"
       cta={
         <StickyCta onClick={onContinue} disabled={!draft.visitAt}>

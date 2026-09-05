@@ -217,7 +217,8 @@ export function CustomerSlotsScreen() {
   const dates = Array.from(slotsByDate.keys());
 
   return (
-    <ScreenLayout back={back}
+    <ScreenLayout
+      back={back}
       title="Выбери время"
       cta={
         <StickyCta onClick={onContinue} disabled={!draft.visitAt}>

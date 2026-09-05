@@ -73,7 +73,8 @@ export function BookingConfirmScreen() {
   }
 
   return (
-    <ScreenLayout back={BACK}
+    <ScreenLayout
+      back={BACK}
       title={false ? "Перенос записи" : "Подтверждение"}
       cta={
         <StickyCta onClick={onConfirm} disabled={submitting}>

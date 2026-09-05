@@ -116,7 +116,8 @@ export function ServiceDetailScreen() {
   // worth reading, and the callout says why booking is off.
   const unbookable = !s.is_bookable;
   return (
-    <ScreenLayout back={BACK}
+    <ScreenLayout
+      back={BACK}
       title={s.name}
       cta={
         unbookable ? undefined : (

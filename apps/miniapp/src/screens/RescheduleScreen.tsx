@@ -210,7 +210,8 @@ export function RescheduleScreen() {
   const b = state.booking;
 
   return (
-    <ScreenLayout back={back}
+    <ScreenLayout
+      back={back}
       title="Перенести"
       cta={
         <StickyCta onClick={onConfirm} disabled={!pickedSlot || confirming}>

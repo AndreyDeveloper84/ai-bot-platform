@@ -104,7 +104,8 @@ export function CustomerMasterDetailScreen() {
   const rating = ratingValue === null ? null : ratingValue.toFixed(1);
 
   return (
-    <ScreenLayout back={BACK}
+    <ScreenLayout
+      back={BACK}
       title={m.name}
       cta={
         <StickyCta onClick={onChooseTime}>

@@ -457,7 +457,8 @@ function Step1Identity({
     ? `@${data.max_user.max_handle.replace(/^@/, "")}`
     : "";
   return (
-    <ScreenLayout back={back}
+    <ScreenLayout
+      back={back}
       title={COPY.step1.greeting(greetingName)}
       cta={
         <StickyCta onClick={onConfirm} disabled={disabled}>
@@ -515,7 +516,8 @@ function Step2Permissions({
   // a literal that is wrong for every tenant. See lib/salonOwnerHint.ts.
   const ownerHint = salonOwnerHint(data.salon.name);
   return (
-    <ScreenLayout back={back}
+    <ScreenLayout
+      back={back}
       cta={<StickyCta onClick={onContinue}>{COPY.step2.cta}</StickyCta>}
     >
       <h1 className="screen__title">{COPY.step2.seeTitle}</h1>
@@ -576,7 +578,8 @@ function Step3Profile({
     .map((w) => w[0]?.toUpperCase() ?? "")
     .join("");
   return (
-    <ScreenLayout back={back}
+    <ScreenLayout
+      back={back}
       cta={
         <StickyCta onClick={onSubmit} disabled={submitting}>
           {COPY.step3.cta}
@@ -694,7 +697,8 @@ function InviteInvalidScreen() {
 
 function InviteUsedScreen({ onOpen }: { onOpen: () => void }) {
   return (
-    <ScreenLayout back={INVITE_ERROR_BACK}
+    <ScreenLayout
+      back={INVITE_ERROR_BACK}
       title="Уже подключены"
       cta={<StickyCta onClick={onOpen}>{COPY.errors.used}</StickyCta>}
     >
@@ -705,7 +709,8 @@ function InviteUsedScreen({ onOpen }: { onOpen: () => void }) {
 
 function WrongRecipientScreen() {
   return (
-    <ScreenLayout back={INVITE_ERROR_BACK}
+    <ScreenLayout
+      back={INVITE_ERROR_BACK}
       title="Не тот получатель"
       cta={<StickyCta onClick={closeApp}>{COPY.errors.close}</StickyCta>}
     >
@@ -726,7 +731,10 @@ function NetworkErrorScreen({
   // Surface 5xx vs offline differently per spec §M0 + customer-first-touch.
   const isServer = err instanceof ApiError && err.status >= 500;
   return (
-    <ScreenLayout back={INVITE_ERROR_BACK} title={isServer ? "Сервис временно недоступен" : "Нет связи"}>
+    <ScreenLayout
+      back={INVITE_ERROR_BACK}
+      title={isServer ? "Сервис временно недоступен" : "Нет связи"}
+    >
       <div className="callout callout--danger" role="alert">
         <p style={{ margin: 0 }}>{COPY.errors.network}</p>
         <div style={{ marginTop: "var(--s-3)" }}>

@@ -329,7 +329,8 @@ export function GoalSelectScreen({ initialDoc }: Props = {}) {
   const stickyCount = [onward, guardExit, surfaceExit].filter(Boolean).length;
 
   return (
-    <ScreenLayout back={back}
+    <ScreenLayout
+      back={back}
       title="Какая у тебя цель?"
       tallCta={stickyCount > 1}
       cta={

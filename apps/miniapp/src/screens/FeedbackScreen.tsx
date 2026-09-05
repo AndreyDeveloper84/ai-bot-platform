@@ -81,7 +81,8 @@ export function FeedbackScreen() {
   const canSubmit = phase.rating > 0 && !phase.submitting;
 
   return (
-    <ScreenLayout back={BACK}
+    <ScreenLayout
+      back={BACK}
       title="Оцените визит"
       cta={
         <StickyCta onClick={onSubmit} disabled={!canSubmit}>
@@ -190,7 +191,8 @@ function StarPicker({ value, onChange }: { value: number; onChange: (v: number) 
 function ThankYou({ result, onClose }: { result: FeedbackResult; onClose: () => void }) {
   const lowRating = result.rating <= 3;
   return (
-    <ScreenLayout back={BACK}
+    <ScreenLayout
+      back={BACK}
       title={lowRating ? "Спасибо за честность" : "Спасибо за оценку!"}
       cta={<StickyCta onClick={onClose}>К моим записям</StickyCta>}
     >

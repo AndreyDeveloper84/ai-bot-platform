@@ -174,7 +174,8 @@ export function HelloScreen() {
   const { user, tenant } = state.data;
   const name = user.client_name || user.display_name || "гость";
   return (
-    <ScreenLayout back={BACK}
+    <ScreenLayout
+      back={BACK}
       title={`Здравствуйте, ${name}!`}
       cta={<StickyCta onClick={() => navigate("/catalog")}>Записаться</StickyCta>}
     >

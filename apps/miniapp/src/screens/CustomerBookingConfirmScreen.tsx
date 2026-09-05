@@ -370,7 +370,8 @@ export function CustomerBookingConfirmScreen() {
       );
     }
     return (
-      <ScreenLayout back={back}
+      <ScreenLayout
+        back={back}
         title="Чтобы записаться"
         cta={
           <StickyCta onClick={onStartRegistration}>
@@ -389,7 +390,8 @@ export function CustomerBookingConfirmScreen() {
 
   // ── Registered branch (§6.1) — founder priority order ─────────────────
   return (
-    <ScreenLayout back={back}
+    <ScreenLayout
+      back={back}
       title="Подтверди запись"
       cta={
         <StickyCta onClick={onConfirm} disabled={submitting}>

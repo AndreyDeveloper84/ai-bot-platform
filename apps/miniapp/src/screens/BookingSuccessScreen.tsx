@@ -42,7 +42,8 @@ export function BookingSuccessScreen() {
     : "Готово.";
 
   return (
-    <ScreenLayout back={BACK}
+    <ScreenLayout
+      back={BACK}
       title=""
       cta={
         <StickyCta onClick={() => navigate("/catalog", { replace: true })}>

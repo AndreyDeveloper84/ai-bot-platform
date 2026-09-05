@@ -118,7 +118,8 @@ export function ProfileScreen() {
   const d = state.draft;
 
   return (
-    <ScreenLayout back={BACK}
+    <ScreenLayout
+      back={BACK}
       title="Профиль"
       cta={
         state.dirty ? (

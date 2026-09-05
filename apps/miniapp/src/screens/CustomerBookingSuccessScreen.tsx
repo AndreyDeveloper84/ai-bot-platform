@@ -82,7 +82,8 @@ export function CustomerBookingSuccessScreen() {
     : "Записала.";
 
   return (
-    <ScreenLayout back={BACK}
+    <ScreenLayout
+      back={BACK}
       title=""
       cta={
         <StickyCta
