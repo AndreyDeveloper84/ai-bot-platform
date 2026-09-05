@@ -11,6 +11,7 @@ Covers the four behaviours that Operations / CI rely on:
 
 from __future__ import annotations
 
+import uuid
 from io import StringIO
 
 import pytest
@@ -204,3 +205,279 @@ class TestCreateTenantSlugValidation:
                 stdout=StringIO(),
             )
         assert not Tenant.all_objects.filter(slug="a").exists()
+
+
+class TestCreateTenantAylaId:
+    """``--id`` — the pk IS the Ayla Tenant UUID (DRF-1510).
+
+    ``apps.catalog.services.sync`` fetches every mirror with
+    ``?tenant=str(tenant.id)``. A tenant minted with the model's ``uuid4``
+    default therefore mirrors zero rows while every counter reads healthy,
+    which is how five salons stayed invisible with 171 services behind them.
+    """
+
+    def test_id_becomes_the_primary_key(self):
+        wanted = uuid.UUID("6f9619ff-8b86-d011-b42d-00c04fc964ff")
+        call_command(
+            "create_tenant",
+            "--slug",
+            "olhovyy-dvor",
+            "--name",
+            "Ольховый двор",
+            "--id",
+            str(wanted),
+            stdout=StringIO(),
+        )
+        assert Tenant.all_objects.get(slug="olhovyy-dvor").id == wanted
+
+    def test_without_id_the_pk_is_a_fresh_uuid4_and_the_command_says_so(self):
+        out = StringIO()
+        call_command(
+            "create_tenant",
+            "--slug",
+            "no-upstream",
+            "--name",
+            "No Upstream",
+            stdout=out,
+        )
+        assert Tenant.all_objects.filter(slug="no-upstream").exists()
+        # Not an error — global_bot and the KB corpus legitimately have no
+        # Ayla catalog — but it must never be silent for a salon.
+        assert "no --id given" in out.getvalue()
+        assert "0 rows" in out.getvalue()
+
+    def test_malformed_id_is_rejected_before_any_write(self):
+        with pytest.raises(CommandError) as exc_info:
+            call_command(
+                "create_tenant",
+                "--slug",
+                "bad-id",
+                "--name",
+                "Bad",
+                "--id",
+                "not-a-uuid",
+                stdout=StringIO(),
+            )
+        assert "--id" in str(exc_info.value)
+        assert not Tenant.all_objects.filter(slug="bad-id").exists()
+
+    def test_id_already_worn_by_another_slug_is_refused(self):
+        shared = uuid.uuid4()
+        call_command(
+            "create_tenant",
+            "--slug",
+            "first-salon",
+            "--name",
+            "First",
+            "--id",
+            str(shared),
+            stdout=StringIO(),
+        )
+        with pytest.raises(CommandError) as exc_info:
+            call_command(
+                "create_tenant",
+                "--slug",
+                "second-salon",
+                "--name",
+                "Second",
+                "--id",
+                str(shared),
+                stdout=StringIO(),
+            )
+        assert "already used by tenant" in str(exc_info.value)
+        assert not Tenant.all_objects.filter(slug="second-salon").exists()
+
+    def test_rerun_with_the_same_id_stays_a_no_op(self):
+        wanted = uuid.uuid4()
+        for _ in range(2):
+            call_command(
+                "create_tenant",
+                "--slug",
+                "stable",
+                "--name",
+                "Stable",
+                "--id",
+                str(wanted),
+                stdout=StringIO(),
+            )
+        rows = Tenant.all_objects.filter(slug="stable")
+        assert rows.count() == 1
+        assert rows.first().id == wanted
+
+    def test_rerun_with_a_different_id_raises_instead_of_reporting_success(self):
+        """A pk cannot be re-keyed in place; pretending otherwise is worse
+        than failing, because the operator's evidence would be a lie."""
+        call_command(
+            "create_tenant",
+            "--slug",
+            "wrong-pk",
+            "--name",
+            "Wrong",
+            stdout=StringIO(),
+        )
+        with pytest.raises(CommandError) as exc_info:
+            call_command(
+                "create_tenant",
+                "--slug",
+                "wrong-pk",
+                "--name",
+                "Wrong",
+                "--id",
+                str(uuid.uuid4()),
+                stdout=StringIO(),
+            )
+        assert "cannot be changed in place" in str(exc_info.value)
+
+    def test_dry_run_with_id_writes_nothing(self):
+        out = StringIO()
+        wanted = uuid.uuid4()
+        call_command(
+            "create_tenant",
+            "--slug",
+            "ghost-id",
+            "--name",
+            "Ghost",
+            "--id",
+            str(wanted),
+            "--dry-run",
+            stdout=out,
+        )
+        assert not Tenant.all_objects.filter(slug="ghost-id").exists()
+        assert str(wanted) in out.getvalue()
+
+
+class TestCreateTenantCity:
+    """``--city`` — ``Tenant.city`` drives city-scoped marketplace discovery.
+
+    ``apps.marketplace.discovery._bookable_qs(city=...)`` filters on
+    ``tenant__city``, and ``_known_cities()`` only recognises a city token
+    that some bookable tenant actually carries. Blank city = absent from
+    every city-scoped answer. There is no backfill command in the repo, so
+    before this flag the only setter was the admin.
+    """
+
+    def test_city_is_stored(self):
+        call_command(
+            "create_tenant",
+            "--slug",
+            "mednyy-kovsh",
+            "--name",
+            "Медный ковш",
+            "--city",
+            "Пенза",
+            stdout=StringIO(),
+        )
+        assert Tenant.all_objects.get(slug="mednyy-kovsh").city == "Пенза"
+
+    def test_city_is_stripped(self):
+        call_command(
+            "create_tenant",
+            "--slug",
+            "spacey",
+            "--name",
+            "Spacey",
+            "--city",
+            "  Пенза  ",
+            stdout=StringIO(),
+        )
+        assert Tenant.all_objects.get(slug="spacey").city == "Пенза"
+
+    def test_without_city_the_field_stays_blank_not_null(self):
+        call_command(
+            "create_tenant",
+            "--slug",
+            "citiless",
+            "--name",
+            "Cityless",
+            stdout=StringIO(),
+        )
+        assert Tenant.all_objects.get(slug="citiless").city == ""
+
+    def test_rerun_backfills_a_blank_city(self):
+        """The five already-connected salons predate ``--city``; a re-run of
+        the provisioning line is how their blank city gets filled."""
+        call_command(
+            "create_tenant",
+            "--slug",
+            "legacy-salon",
+            "--name",
+            "Legacy",
+            stdout=StringIO(),
+        )
+        out = StringIO()
+        call_command(
+            "create_tenant",
+            "--slug",
+            "legacy-salon",
+            "--name",
+            "Legacy",
+            "--city",
+            "Пенза",
+            stdout=out,
+        )
+        assert Tenant.all_objects.get(slug="legacy-salon").city == "Пенза"
+        assert "backfilled blank city" in out.getvalue()
+
+    def test_rerun_never_overwrites_a_non_blank_city(self):
+        """An operator's admin edit outranks a re-run of a deploy script."""
+        call_command(
+            "create_tenant",
+            "--slug",
+            "moved",
+            "--name",
+            "Moved",
+            "--city",
+            "Москва",
+            stdout=StringIO(),
+        )
+        out = StringIO()
+        call_command(
+            "create_tenant",
+            "--slug",
+            "moved",
+            "--name",
+            "Moved",
+            "--city",
+            "Пенза",
+            stdout=out,
+        )
+        assert Tenant.all_objects.get(slug="moved").city == "Москва"
+        assert "ignored" in out.getvalue()
+
+    def test_dry_run_backfill_writes_nothing(self):
+        call_command(
+            "create_tenant",
+            "--slug",
+            "dry-backfill",
+            "--name",
+            "Dry",
+            stdout=StringIO(),
+        )
+        out = StringIO()
+        call_command(
+            "create_tenant",
+            "--slug",
+            "dry-backfill",
+            "--name",
+            "Dry",
+            "--city",
+            "Пенза",
+            "--dry-run",
+            stdout=out,
+        )
+        assert Tenant.all_objects.get(slug="dry-backfill").city == ""
+        assert "[dry-run] would backfill" in out.getvalue()
+
+    def test_overlong_city_is_rejected_before_any_write(self):
+        with pytest.raises(CommandError):
+            call_command(
+                "create_tenant",
+                "--slug",
+                "long-city",
+                "--name",
+                "Long",
+                "--city",
+                "П" * 121,
+                stdout=StringIO(),
+            )
+        assert not Tenant.all_objects.filter(slug="long-city").exists()
