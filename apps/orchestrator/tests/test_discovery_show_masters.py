@@ -130,6 +130,7 @@ def test_show_masters_no_results_graceful(monkeypatch) -> None:
     # DRF-1492 — the refusal is not a dead end either. There are no master
     # cards to draw (that is the point of this test), so the only keyboard it
     # may carry is the one that opens the salon list.
+    assert reply.action_data is not None
     buttons = reply.action_data["attachments"][0]["payload"]["buttons"]
     assert [b["callback"] for b in buttons] == ["cb:catalog:salons"]
 

@@ -38,6 +38,7 @@ import pytest
 from apps.orchestrator import discovery, handoff as handoff_mod
 from apps.orchestrator.discovery import (
     CALLBACK_CATALOG_SALONS,
+    DiscoveryReply,
     CALLBACK_CATALOG_SERVICES_PREFIX,
     CALLBACK_DISCOVER_BOOK_PREFIX,
     CATALOG_STALE_CARD_TEXT,
@@ -439,7 +440,7 @@ class TestDeadEndInventory:
 
     def test_inventory(self) -> None:
         tenant = self._seed()
-        cases: list[tuple[str, object, bool]] = [
+        cases: list[tuple[str, DiscoveryReply, bool]] = [
             (
                 "render_no_match / alternatives",
                 render_no_match(

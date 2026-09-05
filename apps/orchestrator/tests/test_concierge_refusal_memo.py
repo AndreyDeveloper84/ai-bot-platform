@@ -283,6 +283,7 @@ class TestTheRefusalNamesTheAlternative:
             "Назовите другую услугу или другой город, и я поищу ещё."
             " Или посмотрите, какие салоны есть."
         )
+        assert reply.action_data is not None
         buttons = reply.action_data["attachments"][0]["payload"]["buttons"]
         assert [b["callback"] for b in buttons] == ["cb:catalog:salons"]
 
