@@ -8,7 +8,7 @@ import { MasterCard } from "../components/MasterCard";
 import { DelayedSkeleton, MasterCardSkeleton } from "../components/Skeleton";
 import { StateError } from "../components/StateError";
 import { useHaptics } from "../hooks/useHaptics";
-import { setMaster, useBookingDraft } from "../state/booking";
+import { setEntryPoint, setMaster, useBookingDraft } from "../state/booking";
 import { backTo } from "../lib/screen-back";
 
 /** Возврат (DRF-1493): в каталог — шаг назад легаси-сценария записи. */
@@ -52,6 +52,11 @@ export function MasterPickerScreen() {
 
   function onPick(m: Master) {
     haptics.selection();
+    // DRF-1484 — provenance: /book/master is reachable only from the
+    // service detail (catalog) flow, so the draft originates at the
+    // catalog. Stamped here because ServiceDetailScreen is owned by
+    // another change window; both spots stamp the same value.
+    setEntryPoint("catalog");
     setMaster(m.id, m.name);
     navigate("/book/when");
   }

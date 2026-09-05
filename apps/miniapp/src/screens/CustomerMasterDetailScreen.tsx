@@ -27,7 +27,7 @@ import {
   type CustomerMaster,
 } from "../lib/customer-booking";
 import { publicRating } from "../lib/rating";
-import { setMaster, setService, useBookingDraft } from "../state/booking";
+import { setEntryPoint, setMaster, setService, useBookingDraft } from "../state/booking";
 import { backTo } from "../lib/screen-back";
 
 /** Возврат (DRF-1493): в каталог — единственный вход в карточку мастера. */
@@ -67,6 +67,8 @@ export function CustomerMasterDetailScreen() {
 
   function onChooseTime() {
     if (state.kind !== "ok" || !masterId) return;
+    // DRF-1484 — provenance: this flow originates at the master profile.
+    setEntryPoint("master");
     setMaster(masterId, state.master.name);
     // Pre-fill service in draft if URL param available — keeps the
     // F3 → F4 chain consistent.

@@ -10,6 +10,13 @@ export interface BookingDraft {
   visitAt: string | null;
   /** Set when flow is a reschedule of an existing booking. */
   rescheduleOf: string | null;
+  /**
+   * Provenance of the draft — where the booking flow started
+   * (DRF-1484 / §24.5). Stamped by the screen that originates the
+   * draft (`"catalog"` / `"master"`); consumed by
+   * `resolveEntryPoint` when the pending intent is snapshotted.
+   */
+  entryPoint: string | null;
 }
 
 const EMPTY: BookingDraft = {
@@ -19,6 +26,7 @@ const EMPTY: BookingDraft = {
   masterName: null,
   visitAt: null,
   rescheduleOf: null,
+  entryPoint: null,
 };
 
 let state: BookingDraft = { ...EMPTY };
@@ -36,6 +44,10 @@ export const setMaster = (id: string, name: string) => {
 };
 export const setVisitAt = (visitAt: string | null) => {
   state = { ...state, visitAt };
+  emit();
+};
+export const setEntryPoint = (entryPoint: string | null) => {
+  state = { ...state, entryPoint };
   emit();
 };
 export const setRescheduleContext = (
