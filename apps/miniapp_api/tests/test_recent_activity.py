@@ -5,7 +5,7 @@ Covers:
 - next_booking absent → key omitted
 - this_week_booking_count (CONFIRMED in current week)
 - date_human formatting (Сегодня / Завтра / dated)
-- weekly_progress zeros (nutrition rollup deferred)
+- weekly_progress absent, never fabricated zeros (rollup deferred, DRF-1476)
 - tenant boundary (other tenant's booking invisible)
 """
 
@@ -162,13 +162,23 @@ class TestRecentActivityWeekCount:
 
 
 class TestRecentActivityWeeklyProgress:
-    def test_weekly_progress_zeros(self, client: Client, bot_user: BotUser):
+    def test_weekly_progress_absent_rather_than_fabricated_zeros(
+        self, client: Client, bot_user: BotUser
+    ):
+        """No meals-list source → say nothing, do not say «0 из 7 дней».
+
+        Until DRF-1476 this returned three hardcoded zeros and relied on
+        the frontend's `active_days_count >= 3` threshold to keep them
+        off screen. Absence cannot be misread the way a zero can.
+        """
         data = _get(client, bot_user).json()
-        assert data["weekly_progress"] == {
-            "water_days_logged": 0,
-            "food_days_logged": 0,
-            "active_days_count": 0,
-        }
+        # POSITIVE (paired, same response, ahead of the absence): the
+        # endpoint still answers with the data it genuinely has, so the
+        # missing key below is a deliberate omission and not a broken
+        # response. Starve this of data and it fails here, by name.
+        assert isinstance(data["this_week_booking_count"], int)
+        # NEGATIVE: no invented rollup.
+        assert "weekly_progress" not in data
 
 
 class TestRecentActivityTenantBoundary:

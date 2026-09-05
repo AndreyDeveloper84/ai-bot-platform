@@ -333,10 +333,25 @@ export function CustomerWellnessDashboardScreen() {
     !hasAnyLogs &&
     !activityData?.next_booking;
 
-  // Block 6 cold-start gate — show iff active_days_count >= 3 (§11.4).
-  const showWeekly =
-    !!activityData &&
-    activityData.weekly_progress.active_days_count >= 3;
+  // Block 6 gate — PRESENCE first, then the cold-start threshold
+  // (§11.4). The backend omits `weekly_progress` while it has no real
+  // source for it, so «absent» must hide the block on its own and not
+  // lean on `>= 3` to do it (DRF-1476).
+  const weeklyProgress = activityData?.weekly_progress;
+  const showWeekly = !!weeklyProgress && weeklyProgress.active_days_count >= 3;
+
+  // Goal CTA is TRI-state (DRF-1476). `active_goals` absent means the
+  // backend could not reach the goal layer — that is not «no goal», and
+  // saying «Выбери цель» to someone who has one is the defect this
+  // fixes. `todayData === null` (still loading) is likewise unknown.
+  const goalsSlice = todayData?.active_goals;
+  const goalsKnown = goalsSlice !== undefined;
+  const hasGoal = !!goalsSlice && goalsSlice.length > 0;
+  const goalCtaLabel = hasGoal
+    ? "Моя цель"
+    : goalsKnown
+      ? "Выбери цель"
+      : "Цель";
 
   // Block 4 actionable targets visibility.
   const waterRemaining = todayData
@@ -525,21 +540,15 @@ export function CustomerWellnessDashboardScreen() {
             <button
               type="button"
               className="wellness-dash__qa-btn"
-              aria-label={
-                todayData && todayData.active_goals.length > 0
-                  ? "Моя цель"
-                  : "Выбери цель"
-              }
+              aria-label={goalCtaLabel}
               onClick={onGoalTap}
             >
               <span className="wellness-dash__qa-icon" aria-hidden="true">
                 🎯
               </span>
               <span className="wellness-dash__qa-label">
-                {/* §11.2 — context-aware label */}
-                {todayData && todayData.active_goals.length > 0
-                  ? "Моя цель"
-                  : "Выбери цель"}
+                {/* §11.2 — context-aware label, tri-state per DRF-1476 */}
+                {goalCtaLabel}
               </span>
             </button>
             <button
@@ -655,7 +664,7 @@ export function CustomerWellnessDashboardScreen() {
         </section>
 
         {/* Block 6 — Прогресс недели (cold-start gate §11.4). */}
-        {showWeekly && activity.kind === "ok" && (
+        {showWeekly && weeklyProgress && activity.kind === "ok" && (
           <section
             className="wellness-dash__weekly"
             aria-labelledby="weekly-header"
@@ -666,15 +675,15 @@ export function CustomerWellnessDashboardScreen() {
             <ul className="wellness-dash__weekly-list">
               <li>
                 <span aria-hidden="true">💧</span> Вода:{" "}
-                {activity.data.weekly_progress.water_days_logged} из 7 дней
+                {weeklyProgress.water_days_logged} из 7 дней
               </li>
               <li>
                 <span aria-hidden="true">🍽</span> Питание:{" "}
-                {activity.data.weekly_progress.food_days_logged} из 7 дней
+                {weeklyProgress.food_days_logged} из 7 дней
               </li>
               <li>
                 <span aria-hidden="true">📅</span> Активность:{" "}
-                {activity.data.weekly_progress.active_days_count} дней
+                {weeklyProgress.active_days_count} дней
               </li>
             </ul>
             <button
@@ -814,7 +823,15 @@ function PulseStrip({ data }: { data: WellnessToday }) {
           (data.water_glasses_eaten / data.water_glasses_target) * 100,
         )
       : 0;
-  const goal = data.active_goals[0];
+  // Tri-state, same contract as the quick-action label (DRF-1476):
+  // a goal, no goal, or «the goal layer did not answer».
+  const goalsKnown = data.active_goals !== undefined;
+  const goal = data.active_goals?.[0];
+  // Ayla stores no progress for a goal, so the bar renders ONLY when a
+  // number actually arrived. `0` is a legitimate value and must still
+  // draw — hence a null check, not a truthiness check.
+  const goalPct = goal?.progress_pct;
+  const hasGoalPct = goalPct !== undefined && goalPct !== null;
 
   return (
     <div className="wellness-dash__pulse-card">
@@ -893,37 +910,59 @@ function PulseStrip({ data }: { data: WellnessToday }) {
         className="wellness-dash__pulse-row"
         aria-label={
           goal
-            ? `Цель: ${goal.title}, ${goal.week_num}-я неделя, ${goal.progress_pct} процентов`
-            : "Цель не выбрана"
+            ? [
+                `Цель: ${goal.title}`,
+                goal.week_num ? `${goal.week_num}-я неделя` : null,
+                hasGoalPct ? `${goalPct} процентов` : null,
+              ]
+                .filter(Boolean)
+                .join(", ")
+            : goalsKnown
+              ? "Цель не выбрана"
+              : "Цель: данные недоступны"
         }
       >
         <div className="wellness-dash__pulse-head">
           <span aria-hidden="true">🎯 </span>
-          {goal ? `${goal.title} · ${goal.week_num}-я неделя` : "Цель не выбрана"}
+          {goal
+            ? goal.week_num
+              ? `${goal.title} · ${goal.week_num}-я неделя`
+              : goal.title
+            : goalsKnown
+              ? "Цель не выбрана"
+              : "Цель"}
         </div>
         {goal ? (
-          <>
-            <div
-              className="wellness-dash__progress"
-              role="progressbar"
-              aria-valuenow={goal.progress_pct}
-              aria-valuemin={0}
-              aria-valuemax={100}
-              aria-label={`${goal.title}: ${goal.progress_pct} процентов`}
-            >
+          hasGoalPct ? (
+            <>
               <div
-                className="wellness-dash__progress-fill"
-                style={{ width: `${Math.min(100, goal.progress_pct)}%` }}
-                aria-hidden="true"
-              />
-            </div>
-            <div className="wellness-dash__pulse-numbers" aria-hidden="true">
-              {goal.progress_pct} %
-            </div>
-          </>
-        ) : (
+                className="wellness-dash__progress"
+                role="progressbar"
+                aria-valuenow={goalPct}
+                aria-valuemin={0}
+                aria-valuemax={100}
+                aria-label={`${goal.title}: ${goalPct} процентов`}
+              >
+                <div
+                  className="wellness-dash__progress-fill"
+                  style={{ width: `${Math.min(100, goalPct)}%` }}
+                  aria-hidden="true"
+                />
+              </div>
+              <div className="wellness-dash__pulse-numbers" aria-hidden="true">
+                {goalPct} %
+              </div>
+            </>
+          ) : null
+        ) : goalsKnown ? (
           <div className="wellness-dash__pulse-numbers">
             Расскажи о себе — точнее советую
+          </div>
+        ) : (
+          /* Goal layer unreachable — say so plainly. No CTA here: we do
+             not know whether there is a goal to choose (DRF-1476). */
+          <div className="wellness-dash__pulse-numbers">
+            Не удалось загрузить
           </div>
         )}
       </div>

@@ -152,3 +152,216 @@ describe("CustomerWellnessDashboardScreen gating", () => {
     expect(screen.queryByText("Педикюр")).not.toBeInTheDocument();
   });
 });
+
+
+/**
+ * DRF-1476 — the dashboard must not contradict the goal screen.
+ *
+ * Owner walkthrough 2026-09-05: a goal was chosen and active, and this
+ * dashboard offered «Выбери цель». `active_goals` was hardcoded `[]`.
+ *
+ * These tests drive the REAL read path (no `?stub=`), stubbing `fetch`,
+ * so they cover the lib→screen wiring and not just the renderer. Every
+ * «the CTA is gone» assertion is paired with a «the CTA is there» case
+ * on the same code path — a fix that hid the CTA from everyone would
+ * pass the first and fail the second.
+ */
+describe("CustomerWellnessDashboardScreen — goal truthfulness (DRF-1476)", () => {
+  const BASE_TODAY = {
+    calories_eaten: 777,
+    calories_target: 1900,
+    water_glasses_eaten: 3,
+    water_glasses_target: 8,
+    display_name: "Анна",
+  };
+
+  /** Route by URL so all three reads resolve; unknown URLs fail loudly. */
+  function serve(today: unknown, activity: unknown) {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: unknown) => {
+        const u = String(url);
+        const body = u.includes("/wellness/today")
+          ? today
+          : u.includes("/recent-activity")
+            ? activity
+            : null;
+        if (body === null) throw new Error(`unexpected fetch: ${u}`);
+        return { ok: true, status: 200, json: async () => body } as unknown as Response;
+      }),
+    );
+  }
+
+  beforeEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllEnvs();
+    mockedBrowse.mockResolvedValue({ services: [], masters: [], picks: [] });
+    // No `?stub=` — go through the wired read.
+    window.history.replaceState({}, "", "/customer/main");
+  });
+
+  it("goal chosen: it is named on the dashboard and «Выбери цель» is gone", async () => {
+    serve(
+      {
+        ...BASE_TODAY,
+        active_goals: [{ title: "Позаботиться о коже лица", week_num: 2 }],
+      },
+      { this_week_booking_count: 0 },
+    );
+    await renderScreen(false);
+
+    // POSITIVE: the person's actual goal is on screen, by name.
+    expect(
+      await screen.findByText(/Позаботиться о коже лица/),
+    ).toBeInTheDocument();
+    expect(screen.getByText("Моя цель")).toBeInTheDocument();
+    // NEGATIVE (paired, same render): the bug is gone.
+    expect(screen.queryByText("Выбери цель")).not.toBeInTheDocument();
+  });
+
+  it("no goal chosen: «Выбери цель» still shows, exactly as before", async () => {
+    // The guard on the fix. Without it, «the CTA disappeared» would be
+    // indistinguishable from a change that hides it from everyone.
+    serve({ ...BASE_TODAY, active_goals: [] }, { this_week_booking_count: 0 });
+    await renderScreen(false);
+
+    expect(await screen.findByText("Выбери цель")).toBeInTheDocument();
+    expect(screen.getByText(/Цель не выбрана/)).toBeInTheDocument();
+    expect(screen.queryByText("Моя цель")).not.toBeInTheDocument();
+  });
+
+  it("goal layer unreachable: neither claim is made", async () => {
+    // `active_goals` absent — the backend could not ask. Telling this
+    // person to choose a goal is the original defect, restored by an
+    // outage; telling her she has one would be the mirror lie.
+    serve({ ...BASE_TODAY }, { this_week_booking_count: 0 });
+    await renderScreen(false);
+
+    // POSITIVE: the dashboard rendered and the goal row is honest.
+    expect(await screen.findByText(/Не удалось загрузить/)).toBeInTheDocument();
+    // Two neutral «Цель» labels — the pulse row head and the quick
+    // action — neither of which asserts anything about having a goal.
+    expect(screen.getAllByText("Цель")).toHaveLength(2);
+    // NEGATIVE (paired): neither of the two claims appears.
+    expect(screen.queryByText("Выбери цель")).not.toBeInTheDocument();
+    expect(screen.queryByText("Моя цель")).not.toBeInTheDocument();
+    expect(screen.queryByText(/Цель не выбрана/)).not.toBeInTheDocument();
+  });
+
+  it("goal without progress: the goal shows, no percentage is drawn", async () => {
+    // Ayla stores no progress. A 0 % bar under a live goal is the same
+    // class of lie, pointed the other way.
+    serve(
+      { ...BASE_TODAY, active_goals: [{ title: "Меньше стресса", week_num: 3 }] },
+      { this_week_booking_count: 0 },
+    );
+    await renderScreen(false);
+
+    // POSITIVE: goal and its real week are rendered.
+    expect(await screen.findByText(/Меньше стресса/)).toBeInTheDocument();
+    expect(screen.getByText(/3-я неделя/)).toBeInTheDocument();
+    // NEGATIVE (paired): no invented percentage next to it.
+    expect(screen.queryByText(/0 %/)).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("progressbar", { name: /Меньше стресса/ }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("goal with progress: the bar renders when a number really arrives", async () => {
+    // Paired positive for the case above — proves the bar was hidden
+    // for want of data, not deleted outright.
+    serve(
+      {
+        ...BASE_TODAY,
+        active_goals: [{ title: "Меньше стресса", week_num: 3, progress_pct: 78 }],
+      },
+      { this_week_booking_count: 0 },
+    );
+    await renderScreen(false);
+
+    expect(await screen.findByText(/Меньше стресса/)).toBeInTheDocument();
+    expect(screen.getByText(/78 %/)).toBeInTheDocument();
+    expect(
+      screen.getByRole("progressbar", { name: /Меньше стресса/ }),
+    ).toBeInTheDocument();
+  });
+});
+
+describe("CustomerWellnessDashboardScreen — weekly rollup (DRF-1476)", () => {
+  const TODAY = {
+    calories_eaten: 777,
+    calories_target: 1900,
+    water_glasses_eaten: 3,
+    water_glasses_target: 8,
+    active_goals: [],
+    display_name: "Анна",
+  };
+
+  function serve(activity: unknown) {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: unknown) => {
+        const u = String(url);
+        const body = u.includes("/wellness/today")
+          ? TODAY
+          : u.includes("/recent-activity")
+            ? activity
+            : null;
+        if (body === null) throw new Error(`unexpected fetch: ${u}`);
+        return { ok: true, status: 200, json: async () => body } as unknown as Response;
+      }),
+    );
+  }
+
+  beforeEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllEnvs();
+    mockedBrowse.mockResolvedValue({ services: [], masters: [], picks: [] });
+    window.history.replaceState({}, "", "/customer/main");
+  });
+
+  it("rollup absent: Block 6 stays hidden, and invents no «0 из 7 дней»", async () => {
+    serve({ this_week_booking_count: 0 });
+    await renderScreen(false);
+
+    // POSITIVE: the dashboard did render — so the absence below is the
+    // gate working, not a blank screen.
+    expect(await screen.findByText("Выбери цель")).toBeInTheDocument();
+    // NEGATIVE (paired): no fabricated week.
+    expect(screen.queryByText(/Прогресс недели/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/из 7 дней/)).not.toBeInTheDocument();
+  });
+
+  it("rollup present and past the cold-start gate: Block 6 renders it", async () => {
+    // The guard: proves Block 6 is hidden above for want of data, and
+    // has not simply been removed.
+    serve({
+      this_week_booking_count: 0,
+      weekly_progress: {
+        water_days_logged: 4,
+        food_days_logged: 5,
+        active_days_count: 5,
+      },
+    });
+    await renderScreen(false);
+
+    expect(await screen.findByText(/Прогресс недели/)).toBeInTheDocument();
+    expect(screen.getByText(/4 из 7 дней/)).toBeInTheDocument();
+    expect(screen.getByText(/5 из 7 дней/)).toBeInTheDocument();
+  });
+
+  it("rollup present but below the cold-start gate: still hidden (§11.4)", async () => {
+    serve({
+      this_week_booking_count: 0,
+      weekly_progress: {
+        water_days_logged: 2,
+        food_days_logged: 1,
+        active_days_count: 2,
+      },
+    });
+    await renderScreen(false);
+
+    expect(await screen.findByText("Выбери цель")).toBeInTheDocument();
+    expect(screen.queryByText(/Прогресс недели/)).not.toBeInTheDocument();
+  });
+});

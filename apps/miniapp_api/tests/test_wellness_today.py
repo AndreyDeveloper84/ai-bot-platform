@@ -5,7 +5,8 @@ Covers:
 - Water ml→glasses conversion
 - Graceful degradation: summary fails / water fails / both fail
 - pfc omitted when summary unavailable
-- active_goals always [] (no Goals endpoint yet)
+- active_goals read from Ayla's goal layer (DRF-1476), with the three
+  states kept apart: a goal, no goal, and «could not ask»
 """
 
 from __future__ import annotations
@@ -66,6 +67,55 @@ def bot_user(tenant: Tenant) -> BotUser:
         display_name="Анна",
         client_name="Анна К.",
     )
+
+
+#: A decision-context document with no goal chosen. This is the DEFAULT
+#: for every test in this file, so the pre-existing assertions that
+#: `active_goals == []` keep their original meaning — «Ayla was asked,
+#: and answered: no goal» — instead of silently becoming «the goal read
+#: blew up», which is a different state entirely since DRF-1476.
+def _no_goal_doc() -> dict[str, Any]:
+    return {
+        "version": 1,
+        "known": {"goal": None},
+        "missing": [],
+        "suggestions": [],
+        "intents": [],
+    }
+
+
+def _goal_doc(
+    *,
+    goal_key: str | None = None,
+    goal_text: str | None = None,
+    selected_at: str = "2026-09-05T09:00:00+00:00",
+    suggestions: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    return {
+        "version": 1,
+        "known": {
+            "goal": {
+                "goal_key": goal_key,
+                "goal_text": goal_text,
+                "selected_at": selected_at,
+                "source_channel": "miniapp",
+            }
+        },
+        "missing": [],
+        "suggestions": suggestions or [],
+        "intents": [],
+    }
+
+
+@pytest.fixture(autouse=True)
+def goals_stub():
+    """Patch the goal-layer read; default = «asked, no goal».
+
+    Tests that care reassign `.return_value` / `.side_effect`.
+    """
+    with patch("apps.integrations.ayla.goals_client.fetch_decision_context") as m:
+        m.return_value = _no_goal_doc()
+        yield m
 
 
 # Minimal stand-ins for the dataclass responses the NutritionClient returns.
@@ -214,3 +264,187 @@ class TestWellnessTodayGracefulDegradation:
         assert data["water_glasses_eaten"] == 0
         assert "pfc" not in data
         assert data["active_goals"] == []
+
+
+class TestWellnessTodayActiveGoals:
+    """The defect DRF-1476 closed, from both sides.
+
+    Owner walkthrough 2026-09-05: «Позаботиться о коже лица» was chosen
+    and active on the goal screen, and this dashboard offered to choose
+    a goal. `active_goals` was a hardcoded `[]`.
+
+    Every negative assertion below is paired with a positive one on the
+    SAME data — «the CTA is gone» is only worth asserting next to «the
+    goal is there», or the field could be gone for everyone.
+    """
+
+    def test_curated_goal_resolves_its_label_from_the_same_document(
+        self, client: Client, bot_user: BotUser, goals_stub
+    ):
+        # Ayla stores a curated pick as goal_key with goal_text=None
+        # (goals/api.py writes one or the other), so the human label has
+        # to come from `suggestions` — which travels in the same doc.
+        goals_stub.return_value = _goal_doc(
+            goal_key="face_skin",
+            goal_text=None,
+            suggestions=[
+                {"key": "hair", "label": "Волосы"},
+                {"key": "face_skin", "label": "Позаботиться о коже лица"},
+            ],
+        )
+        with _patch_nutrition(summary=_FakeSummary(), water=_FakeWater()):
+            resp = client.get(
+                _url(), HTTP_AUTHORIZATION=_init_data_header(bot_user.channel_user_id)
+            )
+        assert resp.status_code == 200
+        goals = resp.json()["active_goals"]
+        # POSITIVE: the goal the person chose is actually here, by name.
+        assert len(goals) == 1
+        assert goals[0]["title"] == "Позаботиться о коже лица"
+        # NEGATIVE (paired): so the frontend cannot show «Выбери цель».
+        assert goals != []
+
+    def test_free_text_goal_uses_the_persons_own_wording(
+        self, client: Client, bot_user: BotUser, goals_stub
+    ):
+        goals_stub.return_value = _goal_doc(goal_text="Спать по восемь часов")
+        with _patch_nutrition(summary=_FakeSummary(), water=_FakeWater()):
+            resp = client.get(
+                _url(), HTTP_AUTHORIZATION=_init_data_header(bot_user.channel_user_id)
+            )
+        assert resp.json()["active_goals"][0]["title"] == "Спать по восемь часов"
+
+    def test_deactivated_option_falls_back_to_the_key_never_invents(
+        self, client: Client, bot_user: BotUser, goals_stub
+    ):
+        # The GoalOption was switched off, so it is not in `suggestions`.
+        # A slug is ugly; a made-up title would be a lie.
+        goals_stub.return_value = _goal_doc(goal_key="retired_key", suggestions=[])
+        with _patch_nutrition(summary=_FakeSummary(), water=_FakeWater()):
+            resp = client.get(
+                _url(), HTTP_AUTHORIZATION=_init_data_header(bot_user.channel_user_id)
+            )
+        goals = resp.json()["active_goals"]
+        assert len(goals) == 1
+        assert goals[0]["title"] == "retired_key"
+
+    def test_no_goal_returns_empty_list_so_the_cta_still_shows(
+        self, client: Client, bot_user: BotUser, goals_stub
+    ):
+        """The positive guard for the fix — the CTA must survive.
+
+        Without this, «the goal arrives» could be satisfied by a change
+        that shows «Моя цель» to everyone, including people who have
+        never chosen anything.
+        """
+        goals_stub.return_value = _no_goal_doc()
+        with _patch_nutrition(summary=_FakeSummary(), water=_FakeWater()):
+            resp = client.get(
+                _url(), HTTP_AUTHORIZATION=_init_data_header(bot_user.channel_user_id)
+            )
+        data = resp.json()
+        # Present AND empty: the frontend distinguishes these two facts.
+        assert "active_goals" in data
+        assert data["active_goals"] == []
+
+    def test_progress_pct_is_never_invented(self, client: Client, bot_user: BotUser, goals_stub):
+        """Ayla stores no progress; 0 % under a live goal is the same lie."""
+        goals_stub.return_value = _goal_doc(goal_text="Меньше стресса")
+        with _patch_nutrition(summary=_FakeSummary(), water=_FakeWater()):
+            resp = client.get(
+                _url(), HTTP_AUTHORIZATION=_init_data_header(bot_user.channel_user_id)
+            )
+        goal = resp.json()["active_goals"][0]
+        # Paired positive FIRST: the goal itself arrived, so the absence
+        # below is about progress and not about an empty payload. Starve
+        # this test of data and it fails here, by name.
+        assert goal["title"] == "Меньше стресса"
+        assert "progress_pct" not in goal
+
+    @pytest.mark.parametrize(
+        ("days_ago", "expected_week"),
+        [(0, 1), (6, 1), (7, 2), (15, 3), (70, 11)],
+    )
+    def test_week_num_counts_real_weeks_since_selection(
+        self, client: Client, bot_user: BotUser, goals_stub, days_ago, expected_week
+    ):
+        from datetime import timedelta
+
+        from django.utils import timezone as dj_tz
+
+        selected = dj_tz.now() - timedelta(days=days_ago)
+        goals_stub.return_value = _goal_doc(goal_text="Цель", selected_at=selected.isoformat())
+        with _patch_nutrition(summary=_FakeSummary(), water=_FakeWater()):
+            resp = client.get(
+                _url(), HTTP_AUTHORIZATION=_init_data_header(bot_user.channel_user_id)
+            )
+        assert resp.json()["active_goals"][0]["week_num"] == expected_week
+
+    def test_unparsable_selected_at_omits_week_rather_than_claiming_week_one(
+        self, client: Client, bot_user: BotUser, goals_stub
+    ):
+        goals_stub.return_value = _goal_doc(goal_text="Цель", selected_at="not-a-date")
+        with _patch_nutrition(summary=_FakeSummary(), water=_FakeWater()):
+            resp = client.get(
+                _url(), HTTP_AUTHORIZATION=_init_data_header(bot_user.channel_user_id)
+            )
+        goal = resp.json()["active_goals"][0]
+        assert goal["title"] == "Цель"  # paired positive, ahead of the absence
+        assert "week_num" not in goal
+
+
+class TestWellnessTodayGoalsDegradation:
+    """A goal-layer outage must not reprint the defect."""
+
+    @pytest.mark.parametrize("exc_name", ["GoalsUnavailable", "GoalsConfigError"])
+    def test_goals_outage_omits_the_key_instead_of_claiming_no_goal(
+        self, client: Client, bot_user: BotUser, goals_stub, exc_name
+    ):
+        from apps.integrations.ayla import goals_client
+
+        exc_cls = getattr(goals_client, exc_name)
+        goals_stub.side_effect = exc_cls("down")
+        with _patch_nutrition(summary=_FakeSummary(), water=_FakeWater()):
+            resp = client.get(
+                _url(), HTTP_AUTHORIZATION=_init_data_header(bot_user.channel_user_id)
+            )
+        assert resp.status_code == 200
+        data = resp.json()
+        # POSITIVE (paired, same response, ahead of the absence): the
+        # rest of the dashboard is untouched, so the missing key below is
+        # a goal-read failure and not a blank payload.
+        assert data["calories_eaten"] == 1240
+        assert data["water_glasses_eaten"] == 4
+        # NEGATIVE: no `[]`, which the frontend would read as «no goal»
+        # and answer with «Выбери цель» — the bug, restored by outage.
+        assert "active_goals" not in data
+
+    def test_unexpected_goals_error_degrades_and_never_500s(
+        self, client: Client, bot_user: BotUser, goals_stub
+    ):
+        goals_stub.side_effect = RuntimeError("boom")
+        with _patch_nutrition(summary=_FakeSummary(), water=_FakeWater()):
+            resp = client.get(
+                _url(), HTTP_AUTHORIZATION=_init_data_header(bot_user.channel_user_id)
+            )
+        assert resp.status_code == 200
+        data = resp.json()
+        # Presence ahead of absence — a blank payload must fail here.
+        assert data["calories_eaten"] == 1240
+        assert "active_goals" not in data
+
+    def test_nutrition_outage_does_not_take_the_goal_with_it(
+        self, client: Client, bot_user: BotUser, goals_stub
+    ):
+        """The three reads degrade independently, in both directions."""
+        goals_stub.return_value = _goal_doc(goal_text="Позаботиться о коже лица")
+        with _patch_nutrition(
+            summary=NutritionUnavailableError("down"),
+            water=NutritionUnavailableError("down"),
+        ):
+            resp = client.get(
+                _url(), HTTP_AUTHORIZATION=_init_data_header(bot_user.channel_user_id)
+            )
+        data = resp.json()
+        assert data["calories_eaten"] == 0
+        assert data["active_goals"][0]["title"] == "Позаботиться о коже лица"

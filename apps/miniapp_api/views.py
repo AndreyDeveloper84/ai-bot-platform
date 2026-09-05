@@ -31,7 +31,7 @@ from __future__ import annotations
 import logging
 import re
 import uuid
-from datetime import date as date_cls, datetime, timedelta
+from datetime import UTC, date as date_cls, datetime, timedelta
 from functools import wraps
 from typing import Any, Callable, NamedTuple
 from zoneinfo import ZoneInfo
@@ -2251,6 +2251,83 @@ def _ml_to_glasses(ml: float) -> int:
     return round(ml / _WATER_GLASS_ML)
 
 
+def _goal_week_num(selected_at: Any, *, now: datetime) -> int | None:
+    """1-based week number since the goal was chosen, or ``None``.
+
+    Week 1 is the week the goal was selected in. ``None`` when
+    ``selected_at`` is missing or unparsable — the frontend then renders
+    the goal title without a week. We do NOT default to «1st week»: a
+    person who chose a goal two months ago must not be told it is her
+    first week (DRF-1476).
+    """
+    if not isinstance(selected_at, str) or not selected_at:
+        return None
+    try:
+        selected = datetime.fromisoformat(selected_at)
+    except ValueError:
+        return None
+    if selected.tzinfo is None:
+        selected = selected.replace(tzinfo=UTC)
+    days = (now - selected).days
+    if days < 0:
+        # Clock skew between services — the goal cannot be in the future.
+        return 1
+    return days // 7 + 1
+
+
+def _active_goals_from_context(doc: Any, *, now: datetime) -> list[dict[str, Any]]:
+    """Map Ayla's decision-context document onto the ``active_goals`` contract.
+
+    Source: ``known.goal`` from ``GET /internal/me/decision-context/``
+    (:func:`apps.integrations.ayla.goals_client.fetch_decision_context`),
+    the same document the goal screen renders — so the dashboard and the
+    goal screen can no longer disagree about whether a goal exists.
+
+    Title resolution, in order:
+
+    1. ``goal_text`` — the person's own wording (free-text selection).
+    2. the matching ``suggestions[].label`` — a curated goal is stored as
+       ``goal_key`` with ``goal_text=None`` (``goals/api.py`` writes one
+       or the other, never both), and the label for that key travels in
+       the SAME document, so no second round-trip is needed.
+    3. ``goal_key`` itself — only when the option has since been
+       deactivated and dropped out of ``suggestions``. A slug is ugly but
+       factual; inventing a title would not be.
+
+    ``progress_pct`` is deliberately absent: Ayla's goal layer stores no
+    progress for a goal (``ClientGoal`` has ``goal_key`` / ``goal_text`` /
+    ``selected_at`` / ``source_channel`` and nothing else). Sending 0
+    would render a 0 % bar under a goal the person is actually working
+    on — the same class of lie this ticket fixes, pointed the other way.
+    """
+    if not isinstance(doc, dict):
+        return []
+    known = doc.get("known")
+    goal = known.get("goal") if isinstance(known, dict) else None
+    if not isinstance(goal, dict):
+        return []
+
+    title = (goal.get("goal_text") or "").strip()
+    key = goal.get("goal_key")
+    if not title and key:
+        for option in doc.get("suggestions") or []:
+            if isinstance(option, dict) and option.get("key") == key:
+                title = (option.get("label") or "").strip()
+                break
+        if not title:
+            title = str(key)
+    if not title:
+        # A goal row with neither key nor text is not something we can
+        # show; treat it as «no goal» rather than render an empty chip.
+        return []
+
+    entry: dict[str, Any] = {"title": title}
+    week_num = _goal_week_num(goal.get("selected_at"), now=now)
+    if week_num is not None:
+        entry["week_num"] = week_num
+    return [entry]
+
+
 @require_http_methods(["GET"])
 @require_init_data
 def customer_wellness_today(request: HttpRequest) -> HttpResponse:
@@ -2276,11 +2353,31 @@ def customer_wellness_today(request: HttpRequest) -> HttpResponse:
     frontend contract, so a degraded response is indistinguishable from
     a genuinely empty day; that's an accepted trade for resilience.
 
+    ## active_goals — read from the goal layer (DRF-1476)
+
+    Third read, `fetch_decision_context`, against the SAME Ayla document
+    the goal screen renders (`customer_decision_context` below). Until
+    DRF-1476 this field was hardcoded `[]` with a docstring claiming the
+    goal layer «has no REST endpoint yet»; the endpoint had in fact
+    shipped with DRF-1190, and the stale `[]` meant a person who had
+    just chosen «Позаботиться о коже лица» was shown «Выбери цель» on
+    this dashboard (owner walkthrough 2026-09-05).
+
+    Three states, not two — because «we could not ask» is not «no goal»:
+
+    * goal present → one-element list, `«Моя цель»` CTA;
+    * no goal → `[]`, `«Выбери цель»` CTA, exactly as before;
+    * goals read FAILED → the key is **omitted entirely**. Falling back
+      to `[]` would reprint the very lie this ticket removes every time
+      Ayla hiccups; the frontend renders a neutral label for the absent
+      key. The nutrition halves are unaffected — this read degrades on
+      its own, like the other two.
+
     ## Fields without an Ayla source (documented gaps)
 
-    * ``active_goals`` — the Layer-2 Goals system has no REST endpoint
-      yet; returned as ``[]`` so the frontend shows the «Выбери цель»
-      CTA (Tau §11.2). Wire when the goals endpoint ships.
+    * ``active_goals[].progress_pct`` — Ayla's goal layer stores no
+      progress (see :func:`_active_goals_from_context`); omitted, and
+      the frontend hides the bar rather than drawing 0 %.
     * ``pfc.protein_target_g`` + ``day_pattern_hint`` — omitted (no
       clean source). Frontend treats both as optional.
     """
@@ -2345,18 +2442,44 @@ def customer_wellness_today(request: HttpRequest) -> HttpResponse:
         target = _ml_to_glasses(water_res.norm_ml)
         water_glasses_target = target or _WATER_GLASSES_TARGET_DEFAULT
 
+    # ── active goal (from Ayla's goal layer) ────────────────────────────
+    # Sync call, deliberately after the async pair: the goal client keeps
+    # a process-wide connection pool (DRF-1435), so on a warm worker this
+    # is ~0.09 s, and the goal screen the person just came from has
+    # already opened that connection.
+    from apps.integrations.ayla.goals_client import (
+        GoalsConfigError,
+        GoalsUnavailable,
+        fetch_decision_context,
+    )
+
+    goals_known = True
+    active_goals: list[dict[str, Any]] = []
+    try:
+        goals_doc = fetch_decision_context(external_user_id=external_id)
+    except (GoalsConfigError, GoalsUnavailable) as exc:
+        logger.warning("wellness_today.goals_unavailable ext=%s err=%s", external_id, exc)
+        goals_known = False
+    except Exception:  # noqa: BLE001 — a goal read must never 500 the dashboard
+        logger.warning("wellness_today.goals_unexpected ext=%s", external_id, exc_info=True)
+        goals_known = False
+    else:
+        active_goals = _active_goals_from_context(goals_doc, now=timezone.now())
+
     payload: dict[str, Any] = {
         "calories_eaten": calories_eaten,
         "calories_target": calories_target,
         "water_glasses_eaten": water_glasses_eaten,
         "water_glasses_target": water_glasses_target,
-        # No Goals-system endpoint yet — empty array drives the «Выбери
-        # цель» CTA. See docstring.
-        "active_goals": [],
         "display_name": bot_user.client_name or bot_user.display_name or "",
     }
     if pfc is not None:
         payload["pfc"] = pfc
+    # Omitted — not `[]` — when the goal layer could not be reached: an
+    # empty list means «no goal chosen», and saying that on an outage is
+    # the defect this ticket closes. See docstring.
+    if goals_known:
+        payload["active_goals"] = active_goals
 
     return JsonResponse(payload)
 
@@ -2693,12 +2816,26 @@ def customer_recent_activity(request: HttpRequest) -> HttpResponse:
 
     Per tech-lead verdict 2026-05-29 + memory `project_pilot_scope_discipline`:
     Ayla has no meals-list / timeline endpoint (only single-day
-    `daily_summary` + aggregate `weekly_deficits`), so the nutrition
-    rollup is deferred to a «meals layer» Phase-1 expansion that wires
-    when Alpha ships a meals-list endpoint. `weekly_progress` therefore
-    returns zeros — Block 6 (Прогресс недели) is gated on
-    `active_days_count >= 3` (Tau §11.4 cold-start) so it stays hidden
-    gracefully rather than showing misleading data.
+    `daily_summary` + aggregate `weekly_deficits`, whose payload is
+    protein averages and streaks — not per-day logging counts), so the
+    nutrition rollup is deferred to a «meals layer» Phase-1 expansion
+    that wires when Alpha ships a meals-list endpoint.
+
+    ### Why `weekly_progress` is now absent rather than zero (DRF-1476)
+
+    This endpoint used to return `water_days_logged` / `food_days_logged`
+    / `active_days_count` as three hardcoded zeros, relying on Block 6's
+    cold-start gate (`active_days_count >= 3`, Tau §11.4) to keep them
+    off screen. That worked, but it worked by accident: the zeros are
+    indistinguishable from a real week of no logging, and the only thing
+    standing between a fabricated «0 из 7 дней» and the customer's eyes
+    was a frontend threshold anyone could lower.
+
+    So the key is omitted instead. Absence is unfakeable: the frontend
+    gates Block 6 on `weekly_progress` being present at all, and there is
+    no number to misread. Populate it here when the meals-list endpoint
+    ships — a partly-real rollup (real food days, invented water days)
+    would be worse than none.
 
     ## Data source
 
@@ -2802,13 +2939,8 @@ def customer_recent_activity(request: HttpRequest) -> HttpResponse:
 
     payload: dict[str, Any] = {
         "this_week_booking_count": this_week_count,
-        # Nutrition rollup deferred — see docstring. Zeros keep Block 6
-        # hidden (gated on active_days_count >= 3).
-        "weekly_progress": {
-            "water_days_logged": 0,
-            "food_days_logged": 0,
-            "active_days_count": 0,
-        },
+        # `weekly_progress` is OMITTED — see docstring. It used to be
+        # three hardcoded zeros.
     }
     if next_booking is not None:
         payload["next_booking"] = next_booking
