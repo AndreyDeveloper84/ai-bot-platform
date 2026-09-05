@@ -481,3 +481,290 @@ class TestStatedPreferenceIsHonoured:
                 result = BookingSkill().handle(_tap(context, "cb:book:pick_master:11:22"))
         assert result.reply_text == "Выберите дату:"
         assert _labels(result)[:3] == ["Сегодня", "Завтра", "Послезавтра"]
+
+
+class TestDeadEndDaysStillOfferDays:
+    """DRF-1490 — «Вот ближайшие дни:» and then no days.
+
+    Two branches say the same sentence about a day that holds nothing. One
+    of them (a day the user NAMED that the master does not work,
+    ``_render_date_picker``) has always attached the picker the sentence
+    promises. The other (a day the user TAPPED whose slots turned out to be
+    empty, ``_render_part_picker``) ended on the colon and sent nothing
+    under it.
+
+    Nothing pinned either half, which is the only reason the two could
+    drift: the tests below assert the sentence AND the keyboard together,
+    on both branches, so neither can lose the other again.
+    """
+
+    def _remember(self, context: SkillContext, pref: TimePreference) -> None:
+        save_time_preference(context.conversation, pref)
+
+    def test_a_tapped_day_with_no_slots_delivers_the_days_it_promises(
+        self, context: SkillContext, tenant: Tenant
+    ) -> None:
+        """The defect itself: the colon now has a list under it."""
+        day = _iso(1)
+        client = FakeYClients()
+        client.services_rows = [_service(22)]
+        client.staff_rows = [_staff(11)]
+        # The day is on the master's calendar — it just has no free times
+        # left on it, which is the state that produced the empty message.
+        client.dates = [day, _iso(3), _iso(4), _iso(6)]
+        client.times = []
+        with _patch_yclients(client), _patch_provider_complete([]):
+            with tenant_scope(tenant):
+                result = BookingSkill().handle(_tap(context, f"cb:book:pick_date:11:{day}:22"))
+        assert result.reply_text == (
+            "На завтра у мастера свободного времени нет. Вот ближайшие дни:"
+        )
+        assert result.action_data is not None
+        assert result.action_data["kind"] == "date_pick"
+        assert _callbacks(result) == [
+            f"cb:book:pick_date:11:{_iso(3)}:22",
+            f"cb:book:pick_date:11:{_iso(4)}:22",
+            f"cb:book:pick_date:11:{_iso(6)}:22",
+        ]
+
+    def test_the_empty_day_is_not_offered_back(self, context: SkillContext, tenant: Tenant) -> None:
+        """Offering the dead-ended day again is a loop: the tap lands back
+        on the branch that produced this very message."""
+        day = _iso(1)
+        client = FakeYClients()
+        client.services_rows = [_service(22)]
+        client.staff_rows = [_staff(11)]
+        client.dates = [day, _iso(3)]
+        client.times = []
+        with _patch_yclients(client), _patch_provider_complete([]):
+            with tenant_scope(tenant):
+                result = BookingSkill().handle(_tap(context, f"cb:book:pick_date:11:{day}:22"))
+        assert f"cb:book:pick_date:11:{day}:22" not in _callbacks(result)
+        # Positive half of the same assertion: the days that ARE free did
+        # arrive. A "not in" that passes on an empty keyboard tests nothing.
+        assert _callbacks(result) == [f"cb:book:pick_date:11:{_iso(3)}:22"]
+
+    def test_a_day_with_slots_is_untouched_by_the_fix(
+        self, context: SkillContext, tenant: Tenant
+    ) -> None:
+        """The positive guard for the two assertions above.
+
+        Same tap, same master, same service — only the slots differ. A day
+        that HAS times must still get the part question and must NOT be
+        handed a date picker: the fix may only reach the empty case.
+        """
+        day = _iso(1)
+        client = FakeYClients()
+        client.services_rows = [_service(22)]
+        client.staff_rows = [_staff(11)]
+        client.dates = [day, _iso(3), _iso(4), _iso(6)]
+        client.times = [_at(day, "09:00"), _at(day, "14:00"), _at(day, "19:00")]
+        with _patch_yclients(client), _patch_provider_complete([]):
+            with tenant_scope(tenant):
+                result = BookingSkill().handle(_tap(context, f"cb:book:pick_date:11:{day}:22"))
+        assert result.reply_text == "Когда удобно завтра?"
+        assert result.action_data is not None
+        assert result.action_data["kind"] == "part_pick"
+        # And no schedule read for other dates was made — the branch that
+        # needs them is the empty one, and only it.
+        assert client.dates_calls == []
+
+    def test_a_master_with_no_other_day_stops_promising_one(
+        self, context: SkillContext, tenant: Tenant
+    ) -> None:
+        """A keyboard is the fix, not the goal.
+
+        When the only day the master has is the empty one there is nothing
+        to put under a colon, so the sentence must change rather than the
+        keyboard appear. Silence is a defect; an unkeepable promise is the
+        same defect wearing punctuation.
+        """
+        day = _iso(1)
+        client = FakeYClients()
+        client.services_rows = [_service(22)]
+        client.staff_rows = [_staff(11)]
+        client.dates = [day]
+        client.times = []
+        with _patch_yclients(client), _patch_provider_complete([]):
+            with tenant_scope(tenant):
+                result = BookingSkill().handle(_tap(context, f"cb:book:pick_date:11:{day}:22"))
+        assert result.reply_text == (
+            "На завтра у мастера свободного времени нет, "
+            "других свободных дней у него сейчас не вижу. Выберите другого мастера."
+        )
+        assert "Вот ближайшие дни:" not in result.reply_text
+        assert result.action_data is None
+        assert result.should_handoff is False
+
+    def test_both_dead_end_branches_answer_the_same_way(
+        self, context: SkillContext, tenant: Tenant
+    ) -> None:
+        """The two branches that share a sentence must share a keyboard.
+
+        The left-hand result comes from the day the user NAMED («завтра»,
+        which the master does not work); the right-hand one from the day
+        the user TAPPED whose slots came back empty. Before DRF-1490 the
+        first carried a picker and the second carried nothing, and the only
+        thing holding the difference in place was that no test looked at
+        both at once.
+        """
+        tomorrow = _iso(1)
+        client = FakeYClients()
+        client.services_rows = [_service(22)]
+        client.staff_rows = [_staff(11)]
+        client.times = []
+
+        self._remember(context, TimePreference(day_offset=1, said="завтра"))
+        with _patch_yclients(client), _patch_provider_complete([]):
+            with tenant_scope(tenant):
+                # Branch 1 reaches its «no such day» line only when the day
+                # is absent from the calendar entirely.
+                client.dates = [_iso(3), _iso(4)]
+                named = BookingSkill().handle(_tap(context, "cb:book:pick_master:11:22"))
+                # Branch 2: the day exists but holds no times.
+                client.dates = [tomorrow, _iso(3), _iso(4)]
+                tapped = BookingSkill().handle(_tap(context, f"cb:book:pick_date:11:{tomorrow}:22"))
+
+        assert named.reply_text == tapped.reply_text
+        assert named.action_data is not None
+        assert tapped.action_data is not None
+        assert named.action_data["kind"] == "date_pick"
+        assert tapped.action_data["kind"] == "date_pick"
+        expected = [
+            f"cb:book:pick_date:11:{_iso(3)}:22",
+            f"cb:book:pick_date:11:{_iso(4)}:22",
+        ]
+        assert _callbacks(named) == expected
+        assert _callbacks(tapped) == expected
+
+
+class TestSlotKeyboardHasACeiling:
+    """DRF-1490 — the slot picker used to have no upper bound.
+
+    ``_action_data_for_slot_pick`` drew one row per slot and stopped only
+    when the MAX transport truncated the payload at
+    :data:`~apps.channels.max.outbound.MAX_KEYBOARD_ROWS` rows, logging one
+    WARNING nobody reads. The person saw a keyboard that looked whole and
+    had no way to know that times had been withheld — the bot understating
+    a salon's availability without saying so.
+
+    The date picker has had a cap since it was written. These tests give
+    the slot picker the same one, plus the thing a cap alone does not buy:
+    a reply that admits it.
+    """
+
+    def _grid(self, day: str, count: int, start_hour: int = 9) -> list:
+        """``count`` quarter-hourly slots from ``start_hour`` — the shape
+        that overflowed on the pilot."""
+        out = []
+        minutes = start_hour * 60
+        for _ in range(count):
+            out.append(_at(day, f"{minutes // 60:02d}:{minutes % 60:02d}"))
+            minutes += 15
+        return out
+
+    def test_a_normal_day_renders_every_slot_and_says_nothing_extra(
+        self, context: SkillContext, tenant: Tenant
+    ) -> None:
+        """The positive guard: below the cap nothing changed.
+
+        Same code path, same builder, same tap as the overflow test below —
+        only the slot count differs. Twenty times still come out as twenty
+        buttons under the unchanged header.
+        """
+        day = _iso(1)
+        client = FakeYClients()
+        client.services_rows = [_service(22)]
+        client.staff_rows = [_staff(11)]
+        client.dates = [day]
+        client.times = self._grid(day, 20)
+        with _patch_yclients(client), _patch_provider_complete([]):
+            with tenant_scope(tenant):
+                result = BookingSkill().handle(
+                    _tap(context, f"{CALLBACK_BOOK_PICK_PART_PREFIX}11:{day}:any:22")
+                )
+        assert result.reply_text == "Выберите время:"
+        assert len(_callbacks(result)) == 20
+
+    def test_an_overlong_day_is_capped_and_the_reply_admits_it(
+        self, context: SkillContext, tenant: Tenant
+    ) -> None:
+        day = _iso(1)
+        client = FakeYClients()
+        client.services_rows = [_service(22)]
+        client.staff_rows = [_staff(11)]
+        client.dates = [day]
+        client.times = self._grid(day, 40)
+        with _patch_yclients(client), _patch_provider_complete([]):
+            with tenant_scope(tenant):
+                result = BookingSkill().handle(
+                    _tap(context, f"{CALLBACK_BOOK_PICK_PART_PREFIX}11:{day}:any:22")
+                )
+        callbacks = _callbacks(result)
+        assert len(callbacks) == 24
+        # Predictable, not arbitrary: the earliest 24, in order. A cap that
+        # kept a random 24 would be as opaque as the transport's truncation.
+        assert callbacks[0] == f"cb:book:pick_slot:11:22:{day}T09:00:00"
+        assert callbacks[-1] == f"cb:book:pick_slot:11:22:{day}T14:45:00"
+        # The half a silent cap does not buy: the person is told the list is
+        # partial, and told how to reach the rest.
+        assert "Показываю первые 24 из 40" in result.reply_text
+        assert "напишите, во сколько вам удобно" in result.reply_text
+        # The header the truncated list sits under is still the header.
+        assert result.reply_text.startswith("Выберите время:")
+
+    def test_the_cap_keeps_the_keyboard_inside_what_max_accepts(
+        self, context: SkillContext, tenant: Tenant
+    ) -> None:
+        """The cap exists to make the transport's clamp unreachable.
+
+        Rendering the same buttons through the MAX adapter must not trip
+        ``_clamp_keyboard_rows`` — if it does, the tail is still being
+        dropped downstream and the note above is describing the wrong
+        number.
+        """
+        from apps.channels.max.outbound import (
+            MAX_KEYBOARD_ROWS,
+            make_inline_keyboard_attachment,
+        )
+
+        day = _iso(1)
+        client = FakeYClients()
+        client.services_rows = [_service(22)]
+        client.staff_rows = [_staff(11)]
+        client.dates = [day]
+        client.times = self._grid(day, 60)
+        with _patch_yclients(client), _patch_provider_complete([]):
+            with tenant_scope(tenant):
+                result = BookingSkill().handle(
+                    _tap(context, f"{CALLBACK_BOOK_PICK_PART_PREFIX}11:{day}:any:22")
+                )
+        assert result.action_data is not None
+        buttons = result.action_data["attachments"][0]["payload"]["buttons"]
+        assert len(buttons) <= MAX_KEYBOARD_ROWS
+        rows = make_inline_keyboard_attachment(buttons)["payload"]["buttons"]
+        assert len(rows) == len(buttons)
+
+    def test_the_cap_reaches_the_narrowed_lists_too(
+        self, context: SkillContext, tenant: Tenant
+    ) -> None:
+        """A part chip is a smaller list, not an exempt one.
+
+        The «Точное время» path is the obvious overflow, but a salon with a
+        long evening can overflow a single bucket as well, and the branch
+        that renders it is a different one.
+        """
+        day = _iso(1)
+        client = FakeYClients()
+        client.services_rows = [_service(22)]
+        client.staff_rows = [_staff(11)]
+        client.dates = [day]
+        # 17:00 → 23:45, quarter-hourly: 28 evening slots, all one bucket.
+        client.times = self._grid(day, 28, start_hour=17)
+        with _patch_yclients(client), _patch_provider_complete([]):
+            with tenant_scope(tenant):
+                result = BookingSkill().handle(
+                    _tap(context, f"{CALLBACK_BOOK_PICK_PART_PREFIX}11:{day}:evening:22")
+                )
+        assert len(_callbacks(result)) == 24
+        assert "Показываю первые 24 из 28" in result.reply_text
