@@ -467,6 +467,14 @@ class TestNoPromiseWithoutTheButton:
     def test_degraded_lines_promise_nothing(self, line: str) -> None:
         """Ни одна строка без кнопки не обещает, что бот вернётся сам."""
         lowered = line.lower()
+        # Стража присутствия на тех же данных: строке есть что читать.
+        assert lowered
+        # И стража на саму проверку: на обещающей строке она СРАБАТЫВАЕТ.
+        # Без этого «обещания нет» проходило бы и на пустой фразе, и на
+        # переписанном шаблоне, в котором обещание просто сформулировано
+        # иначе.
+        assert "через минуту" in PROMISE.lower()
+        assert "in a moment" in templates.OUTAGE_EN.lower()
         assert "через минуту" not in lowered
         assert "in a moment" not in lowered
         assert "вернусь" not in lowered
