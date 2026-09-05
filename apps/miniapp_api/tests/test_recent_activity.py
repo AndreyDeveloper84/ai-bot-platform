@@ -5,7 +5,7 @@ Covers:
 - next_booking absent → key omitted
 - this_week_booking_count (CONFIRMED in current week)
 - date_human formatting (Сегодня / Завтра / dated)
-- weekly_progress zeros (nutrition rollup deferred)
+- weekly_progress absent, never fabricated zeros (rollup deferred, DRF-1476)
 - tenant boundary (other tenant's booking invisible)
 """
 
@@ -172,13 +172,13 @@ class TestRecentActivityWeeklyProgress:
         off screen. Absence cannot be misread the way a zero can.
         """
         data = _get(client, bot_user).json()
+        # POSITIVE (paired, same response, ahead of the absence): the
+        # endpoint still answers with the data it genuinely has, so the
+        # missing key below is a deliberate omission and not a broken
+        # response. Starve this of data and it fails here, by name.
+        assert isinstance(data["this_week_booking_count"], int)
         # NEGATIVE: no invented rollup.
         assert "weekly_progress" not in data
-        # POSITIVE (paired, same response): the endpoint still answers
-        # with the data it genuinely has, so the missing key above is a
-        # deliberate omission and not a broken response.
-        assert "this_week_booking_count" in data
-        assert isinstance(data["this_week_booking_count"], int)
 
 
 class TestRecentActivityTenantBoundary:

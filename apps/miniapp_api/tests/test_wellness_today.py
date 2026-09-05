@@ -355,10 +355,11 @@ class TestWellnessTodayActiveGoals:
                 _url(), HTTP_AUTHORIZATION=_init_data_header(bot_user.channel_user_id)
             )
         goal = resp.json()["active_goals"][0]
-        assert "progress_pct" not in goal
-        # Paired positive: the goal itself did arrive, so the absence
-        # above is about progress and not about an empty payload.
+        # Paired positive FIRST: the goal itself arrived, so the absence
+        # below is about progress and not about an empty payload. Starve
+        # this test of data and it fails here, by name.
         assert goal["title"] == "Меньше стресса"
+        assert "progress_pct" not in goal
 
     @pytest.mark.parametrize(
         ("days_ago", "expected_week"),
@@ -388,8 +389,8 @@ class TestWellnessTodayActiveGoals:
                 _url(), HTTP_AUTHORIZATION=_init_data_header(bot_user.channel_user_id)
             )
         goal = resp.json()["active_goals"][0]
+        assert goal["title"] == "Цель"  # paired positive, ahead of the absence
         assert "week_num" not in goal
-        assert goal["title"] == "Цель"  # paired positive
 
 
 class TestWellnessTodayGoalsDegradation:
@@ -409,14 +410,14 @@ class TestWellnessTodayGoalsDegradation:
             )
         assert resp.status_code == 200
         data = resp.json()
+        # POSITIVE (paired, same response, ahead of the absence): the
+        # rest of the dashboard is untouched, so the missing key below is
+        # a goal-read failure and not a blank payload.
+        assert data["calories_eaten"] == 1240
+        assert data["water_glasses_eaten"] == 4
         # NEGATIVE: no `[]`, which the frontend would read as «no goal»
         # and answer with «Выбери цель» — the bug, restored by outage.
         assert "active_goals" not in data
-        # POSITIVE (paired, same response): the rest of the dashboard is
-        # untouched, so the missing key is a goal-read failure and not a
-        # blank payload.
-        assert data["calories_eaten"] == 1240
-        assert data["water_glasses_eaten"] == 4
 
     def test_unexpected_goals_error_degrades_and_never_500s(
         self, client: Client, bot_user: BotUser, goals_stub
@@ -427,8 +428,10 @@ class TestWellnessTodayGoalsDegradation:
                 _url(), HTTP_AUTHORIZATION=_init_data_header(bot_user.channel_user_id)
             )
         assert resp.status_code == 200
-        assert "active_goals" not in resp.json()
-        assert resp.json()["calories_eaten"] == 1240
+        data = resp.json()
+        # Presence ahead of absence — a blank payload must fail here.
+        assert data["calories_eaten"] == 1240
+        assert "active_goals" not in data
 
     def test_nutrition_outage_does_not_take_the_goal_with_it(
         self, client: Client, bot_user: BotUser, goals_stub
