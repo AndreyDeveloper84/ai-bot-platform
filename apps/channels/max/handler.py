@@ -136,6 +136,7 @@ from apps.conversations.services import (
 )
 from apps.events.services import emit
 from apps.consent.memory import can_store_green_memory
+from apps.handoff.silence import mark_handoff_announced, notify_silence
 from apps.identity.services import (
     resolve_or_create_bot_user,
     resolve_or_create_global_bot_user,
@@ -993,21 +994,10 @@ def handle_global_max_event(payload: dict, trace_id: str | uuid.UUID | None = No
 def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.UUID | None) -> None:
     """Inner tenant-less discovery pipeline — parse-already-done. Side-effects only."""
 
-    # DRF-1348 — состояние C01.4 Transient («индикатор набора») из макета.
-    #
-    # Эти две строки уже пять месяцев стоят на АРЕНДАТОРСКОМ пути
-    # (``_handle_max_event_inner``), а на глобальном — том самом, по которому
-    # работает пилот, — их не было никогда: при переносе обработчика их просто
-    # не продублировали. Поэтому «прочитано / печатает…» видел кто угодно,
-    # кроме клиента маркетплейса, у которого ход самый длинный (консьерж +
-    # инструменты). Fire-and-forget: сбой логируется внутри send_chat_action и
-    # не всплывает. Стоит первой строкой, до любой тяжёлой работы, — ровно как
-    # на соседнем пути.
-    if event.chat_id:
-        from apps.channels.max.outbound import send_chat_action
-
-        send_chat_action(chat_id=event.chat_id, action="mark_seen")
-        send_chat_action(chat_id=event.chat_id, action="typing_on")
+    # DRF-1487 — индикаторы «прочитано / печатает…» переехали ВНИЗ, за развилку
+    # молчания (см. ниже, сразу после ``global_handoff_muted``). Здесь их больше
+    # нет намеренно; DRF-1348 поставил их на эту строку, DRF-1487 объясняет,
+    # почему им тут не место, и меряет, чем переезд оплачен.
 
     bot_user = resolve_or_create_global_bot_user(
         channel=event.channel,
@@ -1273,7 +1263,45 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
             "channels.max.global.silenced_by_handoff conversation=%s",
             conversation.id,
         )
+        # DRF-1486 — молчание объясняется ровно один раз за эпизод. Само
+        # молчание правильное и остаётся (оператор и бот не говорят
+        # одновременно); чего человеку не хватало 04.09 — фразы о том, ЧТО
+        # происходит: он писал салонному боту, а онемел витринный, и связи
+        # между этими двумя событиями для него не существовало. Функция сама
+        # помнит, что уже сказала: второе и пятое входящее не получают ничего.
+        notify_silence(
+            conversation=conversation,
+            bot_user=bot_user,
+            chat_id=event.chat_id,
+            trace_id=trace_id,
+        )
         return
+
+    # DRF-1487 — «прочитано / печатает…» ПОСЛЕ решения отвечать, а не до.
+    #
+    # Замер боевого контура, диалог 6e8fdde2, 13:34:20–13:34:34 UTC: на каждое
+    # входящее уходили два ``POST /chats/518410834/actions`` → 200, а следом
+    # ``silenced_by_handoff``. Пять сообщений — пять пар индикаторов и ноль
+    # ответов. Молчащий бот читается как «занят»; бот, показавший «печатает»,
+    # ОБЕЩАЕТ ответ, и обещание не выполнялось пять раз подряд.
+    #
+    # Выбран перенос, а не явное снятие индикатора на ветке отказа: снимать
+    # нечем. У MAX в наборе действий (``outbound._CHAT_ACTIONS``) есть
+    # ``typing_on`` и нет ``typing_off`` — «печатает…» гаснет только по
+    # таймауту или по приходу сообщения. Ветки отказа, на которой можно было бы
+    # что-то снять, физически не существует.
+    #
+    # Цена переноса измерена и мала: между прежней позицией и этой строкой
+    # стоят только резолверы личности и диалога, чтение короткой памяти,
+    # запись входящего хода и один запрос mute — ни навыков, ни LLM. Это
+    # единственный ранний ``return`` во всей функции (ветка выше), поэтому
+    # ниже индикаторы уже ничем не задерживаются: следующая тяжёлая работа —
+    # консьерж — начинается после них, как и раньше.
+    if event.chat_id:
+        from apps.channels.max.outbound import send_chat_action
+
+        send_chat_action(chat_id=event.chat_id, action="mark_seen")
+        send_chat_action(chat_id=event.chat_id, action="typing_on")
 
     # Reply, in priority order:
     #   0. Safety pre-check (#1053) — a red-flag phrase (suicide / self-harm /
@@ -1421,6 +1449,14 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
             message_text=event.text,
             trace_id=trace_id,
         )
+        # DRF-1486 — этот диалог сам сказал человеку «передаю менеджеру»,
+        # и это решает, ЧТО он прочитает, когда на следующем ходу включится
+        # молчание. Отличить «спросил здесь» от «переехало с другого бота»
+        # по одной базе нельзя: задача в обоих случаях может лежать на
+        # салонном диалоге (см. queue addressing в ``route_global_human_
+        # handoff``). Различает их только факт доставки подтверждения — он
+        # и записывается здесь, рядом с доставкой.
+        mark_handoff_announced(conversation=conversation, chat_id=event.chat_id)
         assistant_action_type = "human_handoff"
         _record_live_path_metric(
             bot_user=bot_user,
@@ -2109,18 +2145,6 @@ def _handle_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.UUID | N
     # lives inside _record_live_path_metric.
     t_start = time.monotonic()
 
-    # MAX UX indicators: tell the chat we've read the message and we're
-    # typing a reply BEFORE doing any heavy work (LLM call, DB writes).
-    # Both are best-effort fire-and-forget — failures are logged inside
-    # send_chat_action and do not propagate. Done first so the user
-    # sees the «прочитано / печатает…» chrome that mysite's MAX SDK
-    # provided automatically (post-cutover regression 2026-05-20).
-    if event.chat_id:
-        from apps.channels.max.outbound import send_chat_action
-
-        send_chat_action(chat_id=event.chat_id, action="mark_seen")
-        send_chat_action(chat_id=event.chat_id, action="typing_on")
-
     bot_user = resolve_or_create_bot_user(
         channel=event.channel,
         channel_user_id=event.channel_user_id,
@@ -2130,6 +2154,33 @@ def _handle_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.UUID | N
     # `create_if_missing=True` (default) → never returns None. The
     # narrow tells mypy this; an assertion in case the contract slips.
     assert conversation is not None  # noqa: S101 — contract guard
+
+    # MAX UX indicators: tell the chat we've read the message and we're
+    # typing a reply BEFORE doing any heavy work (LLM call, DB writes).
+    # Both are best-effort fire-and-forget — failures are logged inside
+    # send_chat_action and do not propagate. The user sees the «прочитано /
+    # печатает…» chrome that mysite's MAX SDK provided automatically
+    # (post-cutover regression 2026-05-20).
+    #
+    # DRF-1487 — но НЕ когда бот молчит. Индикаторы стояли первой строкой
+    # функции, а решение промолчать принимается на 230 строк ниже: замер
+    # 04.09 показал пять пар индикаторов и ноль ответов подряд. «Печатает…»
+    # — это обещание ответа, и обещание не выполнялось.
+    #
+    # На этом пути выбран не перенос, а условие, и по замеру: единственный
+    # молчащий ``return`` здесь стоит ПОСЛЕ ``orchestrate_turn`` — то есть
+    # после навыков и LLM. Перенести индикаторы туда значило бы задержать
+    # «печатает…» на всё время работы модели для каждого обычного хода —
+    # дороже, чем сам дефект. Условие же стоит два запроса (резолверы выше)
+    # и повторяет ровно тот предикат, по которому ниже молчит диспетчер
+    # (``skills.registry.dispatch``: state == HUMAN_HANDOFF), так что
+    # разойтись они не могут. Индикаторы всё так же уходят до любой тяжёлой
+    # работы для всех, кому бот ответит.
+    if event.chat_id and conversation.state != Conversation.State.HUMAN_HANDOFF:
+        from apps.channels.max.outbound import send_chat_action
+
+        send_chat_action(chat_id=event.chat_id, action="mark_seen")
+        send_chat_action(chat_id=event.chat_id, action="typing_on")
 
     # Persist the inbound turn.
     record_message(
