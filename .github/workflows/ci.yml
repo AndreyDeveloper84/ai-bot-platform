@@ -213,7 +213,7 @@ jobs:
       OPENAI_API_KEY: ci-fake-key-not-real
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # ------------------------------------------------------------------
       # DRF-1275 — secret guard. Before this ticket `detect-secrets` was
@@ -243,7 +243,7 @@ jobs:
       # the ayla-ai-core fetch is broken, which is precisely a moment
       # when credentials are being moved around.
       - name: Set up Python 3.12 (secret guard)
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: "3.12"
 
@@ -301,7 +301,7 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y postgresql-client
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v3
+        uses: astral-sh/setup-uv@v7
         with:
           version: "0.11.12"
           enable-cache: true
@@ -735,7 +735,7 @@ jobs:
     timeout-minutes: 15
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           # Full history: the change-detection step below diffs against
           # the PR base, which a depth-1 checkout cannot reach.
@@ -835,7 +835,7 @@ jobs:
       # with. Regenerating it under npm 11 produces a lockfile npm 10 rejects.
       - name: Set up Node (from apps/miniapp/.nvmrc)
         if: steps.detect.outputs.run_fe == 'true'
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version-file: apps/miniapp/.nvmrc
           cache: npm
@@ -890,7 +890,7 @@ jobs:
       # bundle was built from.
       - name: Upload dist artefact
         if: steps.detect.outputs.run_fe == 'true'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: miniapp-dist-${{ github.sha }}
           path: apps/miniapp/dist
