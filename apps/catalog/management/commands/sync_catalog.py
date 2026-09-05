@@ -52,6 +52,7 @@ from apps.catalog.models import CatalogService
 from apps.catalog.services.sync import CatalogSyncService
 from apps.catalog.staleness import sync_ages
 from apps.identity.constants import GLOBAL_BOT_TENANT_SLUG
+from apps.tenancy.context import tenant_scope
 from apps.tenancy.models import Tenant
 
 
@@ -102,7 +103,12 @@ class Command(BaseCommand):
         return list(Tenant.objects.exclude(slug=GLOBAL_BOT_TENANT_SLUG).order_by("slug"))
 
     def _mirror_count(self, tenant: Tenant) -> int:
-        return CatalogService.all_tenants.filter(tenant=tenant).count()
+        # Scoped read. The cross-tenant manager is reserved for marketplace
+        # discovery (import_boundaries MKT1), and this command reports on one
+        # salon at a time anyway. Counting through the scope also means the
+        # number printed is the number the bot can actually see.
+        with tenant_scope(tenant):
+            return CatalogService.objects.count()
 
     def _status(self) -> None:
         self.stdout.write(f"{'tenant':<24} {'last sync ok':<28} {'age':>8}  {'mirrored':>8}")
@@ -129,11 +135,8 @@ class Command(BaseCommand):
             except Exception as exc:  # noqa: BLE001 — operator-facing boundary
                 self.stderr.write(f"{tenant.slug}: FETCH FAILED {exc.__class__.__name__}: {exc}")
                 continue
-            known = set(
-                CatalogService.all_tenants.filter(tenant=tenant).values_list(
-                    "ayla_service_id", flat=True
-                )
-            )
+            with tenant_scope(tenant):
+                known = set(CatalogService.objects.values_list("ayla_service_id", flat=True))
             incoming = {dto.ayla_service_id for dto in dtos}
             self.stdout.write(
                 f"{tenant.slug}: upstream={len(dtos)} mirrored={before} "
