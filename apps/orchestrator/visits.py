@@ -32,7 +32,7 @@ from apps.booking.services.records import (
 from apps.bookings.keyboards import CALLBACK_BOOK_PICK_MASTER_PREFIX
 from apps.events.services import emit
 from apps.events.vocabulary import REPEAT_CHECKED, VISIT_CARD_OPENED, VISITS_LISTED
-from apps.orchestrator.discovery import DiscoveryReply
+from apps.orchestrator.discovery import DiscoveryReply, show_salons_button
 
 
 logger = logging.getLogger(__name__)
@@ -81,9 +81,14 @@ _MONTHS_GENITIVE = (
 # backend is unreachable the customer is told so, not shown yesterday's truth.
 _UNAVAILABLE_TEXT = "Не смогла получить ваши записи — попробуйте, пожалуйста, чуть позже."
 
+# DRF-1492 — «Могу подобрать мастера и записать вас» named an action and gave
+# the reader nothing to press. The offer stands; it is now a chip, and the
+# chip is the first rung of a ladder that is tappable to the end (салоны →
+# услуги → мастер → запись). Typing still works and is still invited — the
+# button is the floor, not the ceiling.
 _EMPTY_TEXT = (
     "У вас пока нет завершённых визитов. "
-    "Могу подобрать мастера и записать вас — скажите, что вам нужно."
+    "Скажите, что вам нужно, — или посмотрите наши салоны, оттуда можно записаться."
 )
 
 
@@ -118,7 +123,7 @@ def route_visits(
         return DiscoveryReply(text=_UNAVAILABLE_TEXT)
 
     if not upcoming.visits and not visits.visits:
-        return DiscoveryReply(text=_EMPTY_TEXT)
+        return DiscoveryReply(text=_EMPTY_TEXT, action_data=_chips([show_salons_button()]))
 
     blocks: list[str] = []
     if upcoming.visits:
@@ -225,7 +230,8 @@ def route_repeat(
             },
         )
 
-    return DiscoveryReply(text=_repeat_refusal_text(result))
+    text, buttons = _repeat_refusal(result)
+    return DiscoveryReply(text=text, action_data=_chips(buttons))
 
 
 # ── presentation ────────────────────────────────────────────────────────────
@@ -261,6 +267,25 @@ def _visit_line(visit: Visit) -> str:
     if visit.price is not None:
         line = f"{line} — {_format_money(visit.price)}"
     return line
+
+
+#: Chip labels here are catalog service names, not model output, but MAX
+#: truncates a long label at the tail — the same cap the discovery renderer
+#: applies to its own option labels.
+_MAX_CHIP_LABEL_CHARS = 40
+
+
+def _chips(buttons: list[dict[str, str]]) -> dict | None:
+    """The canonical keyboard envelope, or ``None`` for no buttons.
+
+    ``None``, never an empty ``inline_keyboard``: an attachment with nothing
+    in it renders as a broken message rather than as a message without
+    buttons (the rule ``apps.orchestrator.discovery._reply_with_chips``
+    states, kept identical here).
+    """
+    if not buttons:
+        return None
+    return {"attachments": [{"type": "inline_keyboard", "payload": {"buttons": buttons}}]}
 
 
 def _visit_buttons(visits: tuple[Visit, ...]) -> dict | None:
@@ -316,24 +341,64 @@ def _repeat_intro(result: RepeatResult) -> str:
     return text
 
 
-def _repeat_refusal_text(result: RepeatResult) -> str:
-    """A человеческий ответ for every refusal — never a technical slug."""
+def _repeat_refusal(result: RepeatResult) -> tuple[str, list[dict[str, str]]]:
+    """A человеческий ответ for every refusal — never a technical slug, and
+    never a question nobody can answer with a tap (DRF-1492).
+
+    Three of these four branches ended in a yes/no question — «поискать?»,
+    «рассказать, что есть?» — under a message with no buttons. A question
+    whose only answer is a typed «да» is not an offer, it is homework: the
+    person has to restate an intent the bot has just demonstrated it holds.
+
+    Two shapes of chip, and which one applies is decided by what this layer
+    can actually ground:
+
+    * **the service name**, when the refusal is about the MASTER and the
+      service itself is still fine. The callback IS the name — the «tap ==
+      typed answer» contract ``_render_ask_clarification`` has shipped on this
+      path since DRF-1102 — so the tap re-enters the ordinary turn and comes
+      back with the masters who do perform it. Not an id: the id this layer
+      holds is Ayla's canonical ``service_id``, and the catalog chips address
+      ``CatalogService.pk``, a different key space. Sending one where the
+      other is expected would render a chip that answers «услуга не найдена»
+      — the dead end with a button on it.
+    * **«Показать салоны»** when the service is the thing that went away.
+      Suggesting «похожую» would be a claim about a catalog this function has
+      not read; the salon list is the honest form of the same offer.
+    """
     master = result.master_name or "Мастер"
-    if result.status == "master_unavailable":
+    service = (result.service_name or "").strip()
+    if result.status in {"master_unavailable", "link_unavailable"}:
+        gone = (
+            f"{master} сейчас не принимает."
+            if result.status == "master_unavailable"
+            else f"{master} больше не делает эту услугу."
+        )
+        if service:
+            return (
+                f"{gone} Нажмите на услугу — покажу, кто ещё её делает.",
+                [{"label": service[:_MAX_CHIP_LABEL_CHARS], "callback": service}],
+            )
+        # No service name to press. The offer is withdrawn from the wording
+        # rather than left standing over a button that cannot be built.
         return (
-            f"{master} сейчас не принимает. Могу подобрать другого мастера "
-            "на эту же услугу — поискать?"
+            f"{gone} Посмотрите наши салоны — подберём другого мастера.",
+            [show_salons_button()],
         )
     if result.status == "service_unavailable":
-        return "Эту услугу сейчас не оказывают. Могу подобрать похожую — рассказать, что есть?"
-    if result.status == "link_unavailable":
-        return f"{master} больше не делает эту услугу. Поискать другого мастера на неё?"
+        return (
+            "Эту услугу сейчас не оказывают. Посмотрите, что есть в наших салонах.",
+            [show_salons_button()],
+        )
     if result.status == "prefill_unusable":
         return (
             "Не смогла разобрать эту запись, чтобы повторить её. "
-            "Давайте подберём заново — скажите, что вам нужно."
+            "Скажите, что вам нужно, — или посмотрите наши салоны.",
+            [show_salons_button()],
         )
-    return _UNAVAILABLE_TEXT
+    # backend_unavailable and anything new: an outage is not a menu. There is
+    # no action to offer, so none is named — waiting is the whole answer.
+    return (_UNAVAILABLE_TEXT, [])
 
 
 def _format_when(raw: str) -> str:

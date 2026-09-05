@@ -32,6 +32,7 @@ from apps.bookings.callbacks import (
     REPLY_BOOK_ALREADY_HANDLED,
     REPLY_BOOK_CANCELLED_PREVIEW,
     REPLY_BOOK_EXPIRED,
+    REPLY_BOOK_KEPT_PREVIEW,
     REPLY_NOT_FOUND,
     BookingGateCallbackSkill,
 )
@@ -46,11 +47,22 @@ from apps.conversations.models import Conversation
 from apps.identity.models import BotUser
 from apps.llm.router import reset_router_cache
 from apps.skills.base import SkillContext
+from apps.skills.menu.matching import CALLBACK_MENU_MY_BOOKINGS
 from apps.skills.registry import dispatch
 from apps.tenancy.context import tenant_scope
 from apps.tenancy.models import Tenant
 
 pytestmark = pytest.mark.django_db(transaction=True)
+
+
+def _callbacks(result) -> list[str]:
+    """The callbacks of a SkillResult's keyboard, in render order (DRF-1492)."""
+    attachments = (result.action_data or {}).get("attachments") or []
+    return [
+        button["callback"]
+        for att in attachments
+        for button in (att.get("payload") or {}).get("buttons") or []
+    ]
 
 
 @pytest.fixture(autouse=True)
@@ -412,7 +424,14 @@ class TestGateTextHandle:
             tenant_scope(tenant),
         ):
             result = skill.handle(_ctx(conversation, bot_user, "не надо"))
-        assert result.reply_text == REPLY_BOOK_CANCELLED_PREVIEW
+        # DRF-1492 — «не надо» over a CANCEL preview means «оставь запись», and
+        # the old reply («Ок, не записываю.») told the person the opposite of
+        # what happened: their booking stands, and nothing about booking was
+        # declined. The wording is per-verb now, and it carries the step that
+        # follows — a booking still standing is one you can look at.
+        assert result.reply_text == REPLY_BOOK_KEPT_PREVIEW
+        assert result.reply_text != REPLY_BOOK_CANCELLED_PREVIEW
+        assert _callbacks(result) == [CALLBACK_MENU_MY_BOOKINGS]
         assert client.cancel_calls == []
         row.refresh_from_db()
         assert row.consumed_at is not None

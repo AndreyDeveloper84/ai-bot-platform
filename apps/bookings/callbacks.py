@@ -54,6 +54,7 @@ from apps.booking.models import BookingReminder, PendingBookingAction
 from apps.bookings.keyboards import (
     CALLBACK_BOOK_CANCEL_PREFIX,
     CALLBACK_BOOK_CONFIRM_PREFIX,
+    CALLBACK_BOOK_PICK_MASTER_PREFIX,
     CALLBACK_CANCEL_PREFIX,
     CALLBACK_CONFIRM_PREFIX,
     CALLBACK_RESCHEDULE_PREFIX,
@@ -72,6 +73,7 @@ from apps.skills.booking.tools import (
     execute_confirm,
     execute_reschedule,
 )
+from apps.skills.menu.matching import CALLBACK_MENU_BOOK, CALLBACK_MENU_MY_BOOKINGS
 from apps.skills.registry import register
 
 logger = logging.getLogger(__name__)
@@ -96,6 +98,14 @@ REPLY_FORBIDDEN = "Эта запись не для этого профиля."
 # B5 / DRF-841 — replies for the 2-button preview gate.
 REPLY_BOOK_EXPIRED = "Слишком много времени прошло — давайте подберём слот заново."
 REPLY_BOOK_CANCELLED_PREVIEW = "Ок, не записываю."
+# DRF-1492 — the ❌ button aborts whatever preview it hangs under, and there
+# are three of them. «Ок, не записываю» is true of exactly one: said over an
+# aborted CANCEL preview it tells a person who just declined to cancel that
+# their booking will not be made, which is both false and alarming. Each verb
+# now says what it actually did, and each carries the step that follows from
+# it — a booking still standing is something you can look at, an abandoned
+# booking is something you can restart.
+REPLY_BOOK_KEPT_PREVIEW = "Хорошо, ничего не меняю — запись остаётся как есть."
 REPLY_BOOK_ALREADY_HANDLED = "Это действие уже выполнено."
 REPLY_BOOK_PARTIAL_FAILURE = "Не удалось завершить перенос — передал администратору, он свяжется."
 REPLY_BOOK_CANCEL_FAILED = "Не получилось отменить запись — передал администратору, скоро уточнит."
@@ -103,6 +113,87 @@ REPLY_BOOK_STALE_VERSION = (
     "Запись уже изменилась с момента выбора времени. "
     "Откройте актуальные записи и попробуйте перенести снова."
 )
+
+
+# ─── DRF-1492: an answer that names a move carries the move ────────────────
+#
+# This module answered every one of its taps with bare text — 960 lines and
+# not one ``action_data``. Three of those texts are the ends of a funnel
+# («Готово! Записала…», «Запись отменена…», «Ок, не записываю.») and two more
+# name a next step in words («давайте подберём слот заново», «откройте
+# актуальные записи»). The owner's ruling of 04.09 (OPEN_DECISIONS §25 п.3) is
+# that the end of a booking must not be a dead end; the rest follow from the
+# same principle.
+#
+# ### Why the menu callbacks and not new ones
+#
+# This skill answers on TWO surfaces — the tenant's own bot (skill registry)
+# and the global Ayla bot (``apps.orchestrator.handoff.route_booking_callback``
+# routes ``cb:book:confirm|cancel`` into the same dispatch). A chip is only
+# worth anything if it executes on both, and ``cb:menu:*`` is the one family
+# that does: the global handler translates it to a canonical phrase
+# (``apps.channels.max.quick_actions.resolve_tap_text``) and the per-tenant
+# ``MenuSkill`` translates it to the identical phrase
+# (``apps.skills.menu.matching.MENU_CALLBACK_TEXT``). Inventing a
+# ``cb:booking:done:*`` grammar would have meant a button that works in one
+# chat and lands in «я вас не понял» in the other — worse than no button,
+# because the trust was already spent.
+#
+# ``cb:book:pick_master:{master}:{service}`` is used where the pending row
+# still names both ids: it re-enters the date picker for the SAME pair, which
+# is literally «выбрать другое время». It routes on both surfaces too (the
+# booking skill's deterministic short-circuit per tenant,
+# ``BOOKING_CALLBACK_PREFIXES`` globally).
+
+LABEL_MY_BOOKINGS = "📋 Мои записи"
+LABEL_BOOK_AGAIN = "📅 Записаться"
+LABEL_ANOTHER_TIME = "🔄 Выбрать другое время"
+
+
+def _keyboard(buttons: list[dict[str, str]]) -> dict | None:
+    """The platform-canonical keyboard envelope, or ``None`` for no buttons.
+
+    ``attachments`` → ``inline_keyboard``, the ONLY shape the Telegram adapter
+    reads (``apps.channels.telegram.handler._extract_keyboard``) and one MAX
+    accepts too — the same reasoning
+    ``apps.skills.menu.matching.main_menu_action_data`` records.
+
+    ``None`` rather than an empty attachment: a keyboard widget with nothing
+    in it renders as a broken message, not as a message without buttons.
+    """
+    if not buttons:
+        return None
+    return {"attachments": [{"type": "inline_keyboard", "payload": {"buttons": buttons}}]}
+
+
+def _my_bookings_keyboard() -> dict:
+    return _keyboard([{"label": LABEL_MY_BOOKINGS, "callback": CALLBACK_MENU_MY_BOOKINGS}])
+
+
+def _book_again_keyboard() -> dict:
+    return _keyboard([{"label": LABEL_BOOK_AGAIN, "callback": CALLBACK_MENU_BOOK}])
+
+
+def _another_time_keyboard(payload: dict) -> dict:
+    """«Выбрать другое время» for the pair the abandoned preview named.
+
+    Falls back to the plain «Записаться» chip when the payload does not carry
+    both ids: ``cb:book:pick_master:`` without a service is refused by the
+    booking skill's incomplete-callback guard (RB1.1-D05), which on this path
+    would be a guaranteed dead end — the very defect this ticket is about.
+    """
+    master_id = str(payload.get("master_id") or "").strip()
+    service_id = str(payload.get("service_id") or "").strip()
+    if not master_id or not service_id:
+        return _book_again_keyboard()
+    return _keyboard(
+        [
+            {
+                "label": LABEL_ANOTHER_TIME,
+                "callback": f"{CALLBACK_BOOK_PICK_MASTER_PREFIX}{master_id}:{service_id}",
+            }
+        ]
+    )
 
 
 # Audit slugs. Out-of-canonical-vocab; the audit subsystem accepts
@@ -299,7 +390,9 @@ class BookingReminderCallbackSkill:
             },
             distinct_id=str(reminder.bot_user_id),
         )
-        return SkillResult(reply_text=REPLY_CANCELLED)
+        # DRF-1492 — «надеемся увидеть вас позже» with no way to come back is
+        # a wish, not an offer. The chip is that way back.
+        return SkillResult(reply_text=REPLY_CANCELLED, action_data=_book_again_keyboard())
 
     def _handle_reschedule(self, reminder: BookingReminder) -> SkillResult:
         """SENT_NO_REPLY → RESCHEDULE_REQUESTED. Defer operator-page TODO."""
@@ -570,7 +663,13 @@ class BookingGateCallbackSkill:
                 target_id=lookup.row.pk,
                 payload={"kind": lookup.row.kind},
             )
-            return SkillResult(reply_text=REPLY_BOOK_EXPIRED)
+            # DRF-1492 — «давайте подберём слот заново» names the move; the
+            # row still names the master and the service, so the chip re-opens
+            # the date picker for that exact pair.
+            return SkillResult(
+                reply_text=REPLY_BOOK_EXPIRED,
+                action_data=_another_time_keyboard(lookup.row.payload or {}),
+            )
 
         if lookup.already_consumed:
             write_audit(
@@ -638,7 +737,12 @@ class BookingGateCallbackSkill:
             target_id=row.pk,
             payload={"kind": "confirm"},
         )
-        return SkillResult(reply_text=result.text)
+        # OPEN_DECISIONS §25 п.3 — «Готово! Записала…» was the end of the
+        # funnel AND the end of the conversation: the person had just been
+        # told a fact about a booking and had no way to look at it. «Мои
+        # записи» is the one next step that is true right after a confirm —
+        # it reads the backend and shows the row that was just created.
+        return SkillResult(reply_text=result.text, action_data=_my_bookings_keyboard())
 
     def _dispatch_cancel(
         self,
@@ -675,7 +779,9 @@ class BookingGateCallbackSkill:
             target_id=row.pk,
             payload={"kind": "cancel"},
         )
-        return SkillResult(reply_text=result.text)
+        # Same end, same rule as the confirm above: a cancellation is where a
+        # rebooking most often starts.
+        return SkillResult(reply_text=result.text, action_data=_book_again_keyboard())
 
     def _dispatch_reschedule(
         self,
@@ -704,8 +810,11 @@ class BookingGateCallbackSkill:
                 handoff_reason="booking_cancel_yclients_failure",
             )
         if result.error == "stale_version":
+            # DRF-1492 — the text says «откройте актуальные записи», so it
+            # carries the button that opens them.
             return SkillResult(
                 reply_text=REPLY_BOOK_STALE_VERSION,
+                action_data=_my_bookings_keyboard(),
                 should_handoff=False,
                 handoff_reason="",
             )
@@ -788,7 +897,20 @@ class BookingGateCallbackSkill:
             target_id=row.pk,
             payload={"kind": row.kind},
         )
-        return SkillResult(reply_text=REPLY_BOOK_CANCELLED_PREVIEW)
+        if row.kind == PendingBookingAction.Kind.CONFIRM:
+            # A booking that was never made. The pair is still on the row, so
+            # the chip re-opens the picker for it instead of starting over.
+            return SkillResult(
+                reply_text=REPLY_BOOK_CANCELLED_PREVIEW,
+                action_data=_another_time_keyboard(row.payload or {}),
+            )
+        # An aborted cancel or reschedule: the booking is untouched, so the
+        # honest sentence is «ничего не меняю» and the honest next step is to
+        # look at it.
+        return SkillResult(
+            reply_text=REPLY_BOOK_KEPT_PREVIEW,
+            action_data=_my_bookings_keyboard(),
+        )
 
 
 def _gate_tenant_matches(

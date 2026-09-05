@@ -29,6 +29,7 @@ from apps.orchestrator import concierge, discovery
 from apps.orchestrator.concierge import _dispatch_tool, generate_concierge_reply
 from apps.orchestrator.discovery import (
     CALLBACK_CATALOG_MASTERS_PREFIX,
+    CALLBACK_CATALOG_SALONS,
     CALLBACK_CATALOG_SERVICES_PREFIX,
     CALLBACK_DISCOVER_BOOK_PREFIX,
     CATALOG_STALE_CARD_TEXT,
@@ -462,7 +463,10 @@ class TestCatalogChips:
 
         assert reply is not None
         assert "не к кому" in reply.text
-        assert _buttons(reply) == []
+        # DRF-1492 — the refusal is still honest AND no longer a dead end: it
+        # used to end at «спросите, что ещё есть в этом салоне», which named a
+        # salon this branch can no longer identify and left the person typing.
+        assert [b["callback"] for b in _buttons(reply)] == [CALLBACK_CATALOG_SALONS]
 
     def test_salon_with_an_empty_catalog_says_so_on_tap(self):
         tenant = _salon("s1", "BodyFormula", city="Пенза")
@@ -527,6 +531,59 @@ class TestCatalogChips:
     def test_no_chips_means_no_empty_keyboard(self):
         # An inline_keyboard attachment with an empty button list renders as a
         # broken message, not as a message without buttons.
-        reply = execute_catalog_tool("show_salons", {"city": "Сочи"})
+        #
+        # The positive half first (DRF-1411): the same call with a chippable
+        # salon DOES draw a keyboard, so an empty one below means «no chips»
+        # and not «this renderer stopped drawing anything».
+        chippable = _salon("s0", "BodyFormula", city="Пенза")
+        _service(chippable, "Массаж спины")
+        assert _buttons(execute_catalog_tool("show_salons", {"city": "Пенза"}))
 
+        # A salon whose mirror carries no active service: its line renders,
+        # its chip does not — the tap would open an empty list.
+        _salon("s1", "Пустой", city="Саранск")
+        reply = execute_catalog_tool("show_salons", {"city": "Саранск"})
+
+        assert "Пустой" in reply.text
         assert reply.action_data is None
+
+    def test_empty_salon_list_without_a_city_offers_no_loop(self):
+        # DRF-1492's other half. «В городе X салонов нет» gets a «Показать
+        # салоны» chip — it drops the filter and answers «а где вы есть».
+        # The city-LESS refusal must NOT: its tap would redraw this very
+        # sentence, and a button that loops is worse than a full stop.
+        with_city = execute_catalog_tool("show_salons", {"city": "Сочи"})
+        assert [b["callback"] for b in _buttons(with_city)] == [CALLBACK_CATALOG_SALONS]
+
+        without_city = execute_catalog_tool("show_salons", {})
+        assert "Подключённых салонов пока нет" in without_city.text
+        assert without_city.action_data is None
+
+    def test_show_salons_chip_answers_with_the_salon_list(self):
+        # The chip DRF-1492 added — the entry point of the catalog chain as a
+        # button. Refless: nothing to go stale, and the same renderer the
+        # model-called tool uses.
+        tenant = _salon("s1", "BodyFormula", city="Пенза")
+        _service(tenant, "Массаж спины")
+
+        reply = execute_catalog_callback(CALLBACK_CATALOG_SALONS)
+
+        assert reply is not None
+        assert "BodyFormula" in reply.text
+        # And the tap chain continues: the salon chip it renders opens that
+        # salon's services, exactly as the typed question does.
+        services = execute_catalog_callback(_buttons(reply)[0]["callback"])
+        assert services is not None
+        assert "Массаж спины" in services.text
+
+    def test_stale_card_line_carries_the_move_it_names(self):
+        # DRF-1492 — the line used to read «Спросите "какие салоны у вас
+        # есть", и я покажу заново»: the bot knew the move, named the move,
+        # and handed over the typing.
+        import uuid as _uuid
+
+        reply = execute_catalog_callback(f"{CALLBACK_CATALOG_SERVICES_PREFIX}{_uuid.uuid4()}")
+
+        assert reply is not None
+        assert reply.text == CATALOG_STALE_CARD_TEXT
+        assert [b["callback"] for b in _buttons(reply)] == [CALLBACK_CATALOG_SALONS]
