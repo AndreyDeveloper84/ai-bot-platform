@@ -23,6 +23,8 @@
 import { useNavigate } from "react-router-dom";
 
 import { ComingSoonCard } from "../components/ComingSoonCard";
+import { useScreenBack } from "../hooks/useScreenBack";
+import { screenRoot } from "../lib/screen-back";
 
 type Surface = "home" | "catalog";
 
@@ -48,6 +50,19 @@ interface Props {
 
 export function PilotComingSoonScreen({ surface }: Props) {
   const navigate = useNavigate();
+
+  // Вид экрана (DRF-1493): корень. Это то, что видно в prod-сборке на
+  // месте закрытой поверхности, и у него та же нижняя навигация из
+  // пяти вкладок — выход отсюда через неё, а не «назад». Объявление
+  // стоит здесь, а не только у вызывающего экрана: в prod до тела
+  // `CustomerWellnessDashboardScreen` дело не доходит вовсе.
+  useScreenBack(
+    screenRoot(
+      "Честная заглушка закрытой вкладки: своя нижняя навигация, " +
+        "родителя нет.",
+    ),
+  );
+
   const copy = COPY[surface];
   const activeTab = surface === "home" ? "Главная" : "Услуги";
   const tabs: Array<{ label: string; icon: string; path: string }> = [
