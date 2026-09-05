@@ -518,17 +518,35 @@ class TestFetchSpecialistServices:
         assert dto.category_slug == ""
         assert dto.user_id is None
 
-    def test_missing_join_key_raises(self, httpx_mock: HTTPXMock) -> None:
-        """An edge without its join keys is unmirrorable — fail loudly, not silently."""
-        row = _edge_row()
-        del row["specialist"]
+    def test_missing_join_key_drops_the_row_and_disarms_reconciliation(
+        self, httpx_mock: HTTPXMock
+    ) -> None:
+        """An edge without its join keys is unmirrorable — and costs only itself.
+
+        This used to assert ``pytest.raises(KeyError)``: one bad edge aborted
+        the whole tenant's batch. The safety property that bought — a
+        malformed join key must never license a delete — is what matters, and
+        DRF-1494 keeps it by another route: the row is dropped and the
+        snapshot comes back ``complete=False``, so reconciliation still
+        cannot act on it. The edges Ayla served readably now land instead of
+        being discarded alongside the one it did not.
+        """
+        good = _edge_row()
+        bad = _edge_row()
+        bad["id"] = "a4e00000-0000-4000-8000-0000000000ff"
+        del bad["specialist"]
         httpx_mock.add_response(
             url=f"{_SPEC_SVC_URL}?tenant={_TID}&page_size=100",
-            json={"count": 1, "next": None, "previous": None, "results": [row]},
+            json={"count": 2, "next": None, "previous": None, "results": [good, bad]},
         )
 
-        with pytest.raises(KeyError):
-            _client().fetch_specialist_services(tenant_id=_TID)
+        snapshot = _client().fetch_specialist_services(tenant_id=_TID)
+
+        # Presence: the readable edge arrived. Without this the assertions
+        # below would also hold for a fetch that returned nothing at all.
+        assert [e.ayla_specialist_service_id for e in snapshot.edges] == [good["id"]]
+        assert bad["id"] not in {e.ayla_specialist_service_id for e in snapshot.edges}
+        assert snapshot.complete is False
 
     def test_auth_failure_maps_to_auth_error(self, httpx_mock: HTTPXMock) -> None:
         httpx_mock.add_response(url=f"{_SPEC_SVC_URL}?tenant={_TID}&page_size=100", status_code=403)
