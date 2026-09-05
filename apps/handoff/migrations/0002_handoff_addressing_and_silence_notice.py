@@ -4,6 +4,41 @@ import django.db.models.deletion
 import uuid
 from django.conf import settings
 from django.db import migrations, models
+from django.utils import timezone
+
+
+def address_existing_tasks(apps, schema_editor):
+    """Give the tasks that already exist an addressee, and mute the backlog.
+
+    Two separate problems, one pass.
+
+    **Addressee.** Every AdminTask the pilot produced carries
+    `assigned_to = None`; with a bare `default=""` on the new column they
+    would also carry `assigned_queue = ""`, i.e. `is_addressed == False` —
+    exactly the state DRF-1488 declares must not exist. They are given the
+    configured duty queue, so the admin's new «Адресат» column tells the
+    truth about them from the first page load.
+
+    **The backlog.** The pickup sweep looks for OPEN, unclaimed,
+    not-yet-escalated tasks older than the SLA. Every still-open historical
+    task matches that on the FIRST tick after deploy, and the operator chat
+    would receive the whole month at once — a burst that reads as a bug in
+    the new feature rather than as the backlog it is. They are stamped as
+    already escalated: their lateness is not news, it is the reason this
+    ticket exists, and `manage.py handoff_queue` shows them without
+    anybody's phone buzzing.
+    """
+
+    AdminTask = apps.get_model("handoff", "AdminTask")
+    queue = (getattr(settings, "HANDOFF_DUTY_QUEUE", "") or "").strip()
+    now = timezone.now()
+    if queue:
+        AdminTask.objects.filter(assigned_to__isnull=True, assigned_queue="").update(
+            assigned_queue=queue
+        )
+    AdminTask.objects.filter(status="open", pickup_escalated_at__isnull=True).update(
+        pickup_escalated_at=now
+    )
 
 
 class Migration(migrations.Migration):
@@ -147,5 +182,9 @@ class Migration(migrations.Migration):
                 fields=("conversation",),
                 name="handoff_one_open_silence_notice_per_conversation",
             ),
+        ),
+        migrations.RunPython(
+            address_existing_tasks,
+            migrations.RunPython.noop,
         ),
     ]

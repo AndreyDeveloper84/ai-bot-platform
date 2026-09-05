@@ -179,6 +179,16 @@ def build_unclaimed_notification(task: AdminTask, *, waited_minutes: int) -> str
     how long the task has been waiting, and who it is addressed to. The
     addressee line is the whole point — the pilot's ten tasks were
     addressed to nobody, so nobody could be reminded.
+
+    The addressee is a STAFF identifier (a Django username or a queue
+    label), and it is a class of data §Minimum PII does not list, so the
+    decision is made here rather than by default: it goes in. The recipient
+    is the operators' own chat, the value names a colleague on shift and
+    never a client, and a nudge that cannot say whose task is late asks
+    everybody and reaches nobody — which is the failure being fixed. The
+    client-facing rules are untouched: nothing about the person on the
+    other end of the dialog appears here, and DRF-1039 (never pass the
+    client's phone) holds as before.
     """
 
     task_type_label = AdminTask.TaskType(task.task_type).label

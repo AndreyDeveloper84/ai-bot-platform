@@ -49,8 +49,8 @@ from django.utils import timezone
 from apps.audit.services import write_audit
 from apps.events.services import emit
 from apps.events.vocabulary import HANDOFF_INITIATED
-from apps.handoff.models import AdminTask
 from apps.handoff.assignment import resolve_addressee
+from apps.handoff.models import AdminTask
 from apps.handoff.notify import notify_admin_task_created
 from apps.handoff.silence import release_notices_for
 from apps.tenancy.context import current_tenant

@@ -18,9 +18,12 @@ DRF-1486 + DRF-1487, живой сбой 04.09.2026. Клиент написал
   на салонном диалоге), поэтому факт доставки подтверждения пишется там,
   где подтверждение доставляется.
 * **Снятие mute — тоже событие.** Бот перестал молча оживать.
-* **Индикаторы после решения отвечать.** У MAX нет ``typing_off``
-  (``outbound._CHAT_ACTIONS``), снять «печатает…» нечем — значит,
-  единственная честная правка — не отправлять его тому, кому не ответят.
+* **«Печатает…» после решения отвечать, «прочитано» — всегда.** У MAX нет
+  ``typing_off`` (``outbound._CHAT_ACTIONS``), снять «печатает…» нечем —
+  значит, единственная честная правка — не отправлять его тому, кому бот
+  не ответит. ``mark_seen`` при этом остаётся: он ничего не обещает, он
+  констатирует, и убрать его значило бы отнять у человека последний
+  признак того, что его слышат, — то есть усугубить DRF-1486.
 
 Каждая отрицательная проверка идёт в паре с положительной на тех же
 данных: «ноль индикаторов в замьюченном диалоге» бессмысленно без «в
@@ -346,14 +349,16 @@ class TestReleaseIsAnnounced:
 # DRF-1487 — индикаторы                                                        #
 # --------------------------------------------------------------------------- #
 class TestIndicatorsFollowTheDecisionToAnswer:
-    def test_muted_global_turn_fires_no_indicators(self, sent, actions, fake_redis, concierge):
+    def test_muted_global_turn_promises_nothing(self, sent, actions, fake_redis, concierge):
         _salon_handoff_elsewhere()
 
         _run_global("вы тут?", mid="ind-1")
 
-        assert actions == []  # empty-assert-ok: парная положительная проверка ниже
+        # «Прочитано» — да: сообщение дошло, и это правда.
+        # «Печатает…» — нет: отвечать бот не будет.
+        assert actions == ["mark_seen"]
         # Положительная стража на ТЕХ ЖЕ данных: молчание действительно
-        # случилось (иначе «ноль индикаторов» ничего не доказывает).
+        # случилось (иначе «нет typing_on» ничего не доказывает).
         assert sent[-1]["text"] == SILENCE_TRANSFERRED_TEXT
 
     def test_ordinary_global_turn_still_gets_both_indicators(
@@ -364,14 +369,17 @@ class TestIndicatorsFollowTheDecisionToAnswer:
         assert actions == ["mark_seen", "typing_on"]
         assert sent[-1]["text"] == "Какая услуга интересует?"
 
-    def test_five_muted_messages_five_times_nothing(self, sent, actions, fake_redis, concierge):
+    def test_five_muted_messages_promise_nothing_five_times(
+        self, sent, actions, fake_redis, concierge
+    ):
         """Замер 04.09: пять входящих — пять пар индикаторов и ноль ответов."""
 
         _salon_handoff_elsewhere()
         for i in range(5):
             _run_global(f"сообщение {i}", mid=f"ind-rep-{i}")
 
-        assert actions == []  # empty-assert-ok: присутствие доказано строкой ниже
+        assert actions == ["mark_seen"] * 5
+        assert "typing_on" not in actions
         assert len(sent) == 1 and sent[0]["text"] == SILENCE_TRANSFERRED_TEXT
 
     def test_indicators_precede_the_concierge(self, sent, actions, fake_redis, monkeypatch):
@@ -396,6 +404,19 @@ class TestIndicatorsFollowTheDecisionToAnswer:
 
         assert order == ["action:mark_seen", "action:typing_on", "concierge"]
 
+    def test_read_receipt_still_precedes_everything(self, sent, actions, fake_redis, concierge):
+        """«Прочитано» уходит первым действием хода — и в молчании тоже.
+
+        Это единственный сигнал, который человек 04.09 получал, и правка
+        DRF-1487 не имела права его отнять: «печатает…» обещает ответ,
+        «прочитано» — нет.
+        """
+
+        _salon_handoff_elsewhere()
+        _run_global("вы тут?", mid="ind-seen")
+
+        assert actions[0] == "mark_seen"
+
 
 class TestIndicatorsOnThePerTenantPath:
     """Вторая точка индикаторов (арендаторский путь) — тот же вопрос."""
@@ -409,7 +430,7 @@ class TestIndicatorsOnThePerTenantPath:
                 _msg(text, user_id=7007, chat_id=7007, mid=mid), trace_id=uuid.uuid4()
             )
 
-    def test_muted_tenant_turn_fires_no_indicators(self, sent, actions, fake_redis, concierge):
+    def test_muted_tenant_turn_promises_nothing(self, sent, actions, fake_redis, concierge):
         tenant = self._tenant()
         self._run(tenant, "привет", mid="pt-warm")
         assert actions == ["mark_seen", "typing_on"], "обычный ход обязан получить индикаторы"
@@ -422,8 +443,32 @@ class TestIndicatorsOnThePerTenantPath:
 
         self._run(tenant, "вы тут?", mid="pt-muted")
 
-        assert actions == []  # empty-assert-ok: молчание доказано строкой ниже
-        assert len(sent) == answered_before_mute, "бот действительно промолчал"
+        assert actions == ["mark_seen"]
+        assert "typing_on" not in actions
+        # …и бот действительно промолчал — кроме одного объяснения молчания.
+        assert len(sent) == answered_before_mute + 1
+        assert sent[-1]["text"] == SILENCE_TRANSFERRED_TEXT
+
+    def test_tenant_silence_is_explained_once(self, sent, actions, fake_redis, concierge):
+        """Инцидент 04.09 начался ЗДЕСЬ: человек писал салонному боту.
+
+        Молчание объясняется и на этой поверхности, и ровно один раз —
+        второе и третье входящее не получают ничего.
+        """
+
+        tenant = self._tenant()
+        self._run(tenant, "привет", mid="pts-warm")
+        conv = Conversation.all_tenants.get(bot_user__channel_user_id="7007", tenant=tenant)
+        Conversation.all_tenants.filter(pk=conv.pk).update(state=Conversation.State.HUMAN_HANDOFF)
+        before = len(sent)
+
+        self._run(tenant, "вы тут?", mid="pts-1")
+        assert len(sent) == before + 1
+
+        self._run(tenant, "алло?", mid="pts-2")
+        self._run(tenant, "ну что же вы", mid="pts-3")
+
+        assert len(sent) == before + 1
 
     def test_tenant_turn_out_of_handoff_keeps_indicators(
         self, sent, actions, fake_redis, concierge

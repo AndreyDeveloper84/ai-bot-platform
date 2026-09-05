@@ -72,7 +72,17 @@ def overdue_tasks(*, now=None):
 
 
 def sweep_unclaimed_tasks(*, now=None) -> int:
-    """Escalate every overdue task once. Returns how many were escalated."""
+    """Escalate every overdue task once. Returns how many were escalated.
+
+    At-most-once, stated plainly: the stamp lands BEFORE the notification,
+    so a process killed between the two leaves a task marked escalated
+    whose nudge never went out. That ordering is deliberate. The opposite
+    one is at-least-once, and a repeated nudge on every sweep tick for a
+    task the operator has already seen is exactly the kind of noise that
+    teaches people to mute the operator chat — after which nothing is
+    escalated at all. A lost nudge still leaves the task visible in
+    ``manage.py handoff_queue`` and in the admin's «Просрочка» column.
+    """
 
     moment = now or timezone.now()
     escalated = 0

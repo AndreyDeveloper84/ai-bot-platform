@@ -153,6 +153,23 @@ def notify_silence(
                 conversation.id,
             )
             return False
+        # Claim the right to speak BEFORE speaking. The stamp is the whole
+        # of «once per episode», and a read-modify-write cannot carry that
+        # weight: the consumer is single-threaded, but a web worker closing
+        # a task runs `release_notices_for` against these same rows. Whoever
+        # wins this conditional UPDATE owns the notice; everyone else finds
+        # zero rows and says nothing.
+        #
+        # Claiming first also picks the safer failure. Send-then-stamp
+        # repeats the message when the stamp fails; stamp-then-send loses it
+        # when the send fails. For an explanation of silence, saying it twice
+        # is worse than saying it once and missing it — the person already
+        # has an unanswered dialog in front of them.
+        claimed = HandoffSilenceNotice.objects.filter(
+            pk=notice.pk, silence_notified_at__isnull=True
+        ).update(silence_notified_at=timezone.now(), chat_id=target_chat)
+        if not claimed:
+            return False
         _send(chat_id=target_chat, text=text)
         _record(
             conversation=conversation,
@@ -160,9 +177,6 @@ def notify_silence(
             action_type=SILENCE_ACTION_TYPE,
             trace_id=trace_id,
         )
-        notice.silence_notified_at = timezone.now()
-        notice.chat_id = target_chat
-        notice.save(update_fields=["silence_notified_at", "chat_id"])
         logger.info(
             "handoff.silence.notified conversation=%s announced_here=%s",
             conversation.id,
@@ -191,6 +205,15 @@ def release_notices_for(task: "AdminTask") -> int:
     A notice that never sent a silence message is closed without sending a
     release one: there is nothing to release the person from.
 
+    The episode is closed BEFORE the message goes out, and the send is
+    contained separately. That ordering is load-bearing: a chat that is
+    unreachable (blocked bot, 4xx, network) used to leave the row open
+    forever, and an open row is what ``notify_silence`` reads as «already
+    explained». One transient send failure would have switched this whole
+    mechanism off for that dialog permanently, silently, and for every
+    future episode — a worse outcome than the missed sentence it was
+    protecting.
+
     Returns the number of release messages actually sent.
     """
 
@@ -216,22 +239,35 @@ def release_notices_for(task: "AdminTask") -> int:
                     notice.conversation_id,
                 )
                 continue
-            if notice.silence_notified_at is not None and notice.chat_id:
-                _send(chat_id=notice.chat_id, text=SILENCE_RELEASED_TEXT)
-                _record(
-                    conversation=notice.conversation,
-                    text=SILENCE_RELEASED_TEXT,
-                    action_type=RELEASE_ACTION_TYPE,
-                    trace_id=None,
-                )
-                sent += 1
-            notice.released_at = timezone.now()
-            notice.save(update_fields=["released_at"])
+            # Same conditional-UPDATE claim as `notify_silence`, for the
+            # same reason: two operators closing this person's two tasks at
+            # once would otherwise both pass the mute check and both say
+            # «сотрудник завершил разговор».
+            claimed = HandoffSilenceNotice.objects.filter(
+                pk=notice.pk, released_at__isnull=True
+            ).update(released_at=timezone.now())
+            if not claimed:
+                continue
             logger.info(
                 "handoff.silence.released conversation=%s notified=%s",
                 notice.conversation_id,
                 notice.silence_notified_at is not None,
             )
+            if notice.silence_notified_at is not None and notice.chat_id:
+                try:
+                    _send(chat_id=notice.chat_id, text=SILENCE_RELEASED_TEXT)
+                    _record(
+                        conversation=notice.conversation,
+                        text=SILENCE_RELEASED_TEXT,
+                        action_type=RELEASE_ACTION_TYPE,
+                        trace_id=None,
+                    )
+                    sent += 1
+                except Exception:  # noqa: BLE001 — the episode is closed either way
+                    logger.exception(
+                        "handoff.silence.release_send_failed conversation=%s",
+                        notice.conversation_id,
+                    )
         except Exception:  # noqa: BLE001 — one dialog must not block the rest
             logger.exception(
                 "handoff.silence.release_failed conversation=%s",
