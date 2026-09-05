@@ -85,7 +85,7 @@ _MAX_CATALOG_REPLY_CHARS = 1400
 # ``cb:discover:book:{tenant_id}:{master_id}:{service_id}``. The global handler
 # detects this, enters tenant_scope(T), and routes into the per-tenant booking
 # flow WITH the service context — without it the booking skill's pick_master
-# guard correctly refuses the serviceless tap («Контекст записи устарел»).
+# guard correctly refuses the serviceless tap as an incomplete callback.
 # No commercial data is in the callback.
 CALLBACK_DISCOVER_BOOK_PREFIX = "cb:discover:book:"
 

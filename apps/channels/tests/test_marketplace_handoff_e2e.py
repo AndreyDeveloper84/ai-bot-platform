@@ -139,7 +139,7 @@ def test_legacy_serviceless_callback_asks_for_service(
 ) -> None:
     """A pre-DRF-962 keyboard (2-id payload) must get the honest
     ask-the-service reply — this master's real services — not a dispatch that
-    the booking skill would refuse with «Контекст записи устарел».
+    the booking skill would refuse as an incomplete callback (DRF-1473).
 
     DRF-1070: those services must reach the wire as a KEYBOARD. Asserted at the
     outbound boundary, because that is where the rendering can still be lost —

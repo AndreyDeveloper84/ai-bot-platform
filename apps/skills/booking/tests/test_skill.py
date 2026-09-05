@@ -39,7 +39,12 @@ from apps.llm.router import reset_router_cache
 from apps.orchestrator.intent_router import IntentDecision
 from apps.skills.base import SkillContext, SkillResult
 from apps.skills.booking.provider import AylaYClientsAdapter, YClientsScheduleUnavailableError
-from apps.skills.booking.skill import BookingSkill
+from apps.skills.booking.skill import (
+    _BROKEN_CALLBACK_TEXT,
+    _CONTEXT_GONE_TEXT,
+    _STALE_CONTEXT_TEXT,
+    BookingSkill,
+)
 from apps.skills.booking.tools import SCHEDULE_UNAVAILABLE_TEXT
 from apps.tenancy.context import tenant_scope
 from apps.tenancy.models import Tenant
@@ -837,7 +842,9 @@ class TestSlotPickCallback:
                 result = BookingSkill().handle(ctx)
         mock_complete.assert_not_called()
         assert result.should_handoff is False
-        assert "контекст" in result.reply_text.lower()
+        # DRF-1473: a service the catalog does not have is not an expiry.
+        assert result.reply_text == _CONTEXT_GONE_TEXT
+        assert result.reply_text != _STALE_CONTEXT_TEXT
         assert client.times_calls == []
         assert PendingBookingAction.all_tenants.count() == 0
 
@@ -859,7 +866,9 @@ class TestSlotPickCallback:
                 result = BookingSkill().handle(ctx)
         mock_complete.assert_not_called()
         assert result.should_handoff is False
-        assert "контекст" in result.reply_text.lower()
+        # DRF-1473: a master the roster does not have is not an expiry.
+        assert result.reply_text == _CONTEXT_GONE_TEXT
+        assert result.reply_text != _STALE_CONTEXT_TEXT
         assert client.times_calls == []
         assert PendingBookingAction.all_tenants.count() == 0
 
@@ -1223,6 +1232,177 @@ class TestSlotPickCallback:
         assert catalog_requests
         assert catalog_requests[0].url.params["tenant"] == str(tenant.id)
 
+    def test_master_on_page_two_of_the_roster_reaches_the_preview(
+        self, context: SkillContext, tenant: Tenant
+    ) -> None:
+        """DRF-1473 reproduction, through the REAL Ayla HTTP client.
+
+        The live defect, byte for byte: ``internal/specialists/`` is a
+        paginated DRF list, the tapped master sits on page 2, and the client
+        used to read page 1 and stop. The flow drew his cards, his dates and
+        his free slots off per-specialist endpoints that never paginate — and
+        then refused the slot tap as unknown context, eleven seconds after
+        drawing it.
+
+        The assertion is the whole ticket: a master the salon has must reach
+        the confirm preview no matter which page of the roster he is on.
+        """
+        import uuid as _uuid
+
+        from django.utils import timezone as dj_timezone
+
+        from apps.booking.models import PendingBookingAction
+        from apps.catalog.models import CatalogService
+        from apps.integrations.ayla.booking_client import AylaBookingHTTPClient
+        from apps.skills.booking.provider import AylaYClientsAdapter
+
+        # Page size and roster size copied from the pilot contour 04.09.2026.
+        page_size, roster_size = 20, 31
+        master_uuid = "d66b5a6f-1479-4ff1-9d94-aceef5e6a0df"  # last row, page 2
+        service_uuid = "f5f7bb93-c661-4c99-8a32-08d11ef41ba4"
+        roster = [f"0000000{i:04d}-0000-4000-8000-000000000000" for i in range(roster_size - 1)]
+        roster.append(master_uuid)
+
+        with tenant_scope(tenant):
+            CatalogService.objects.create(
+                tenant=tenant,
+                external_id=77,
+                external_updated_at=dj_timezone.now(),
+                slug="svc-77",
+                name="Классический массаж",
+                requires_health_check=False,
+                ayla_service_id=_uuid.UUID(service_uuid),
+            )
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            path = req.url.path
+            if path.endswith("catalog/salon-services/"):
+                return httpx.Response(
+                    200,
+                    json={
+                        "count": 1,
+                        "next": None,
+                        "results": [
+                            {
+                                "id": service_uuid,
+                                "name": "Классический массаж",
+                                "duration_minutes": 60,
+                                "base_price": "3000.00",
+                            }
+                        ],
+                    },
+                )
+            if path.endswith("internal/specialists/"):
+                page = int(req.url.params.get("page", "1"))
+                start = (page - 1) * page_size
+                batch = [
+                    {"id": mid, "display_name": f"Мастер {i}", "rating": 5.0}
+                    for i, mid in enumerate(roster[start : start + page_size], start=start)
+                ]
+                return httpx.Response(
+                    200,
+                    json={
+                        "count": roster_size,
+                        "next": (
+                            f"https://ayla.test/...?page={page + 1}"
+                            if start + page_size < roster_size
+                            else None
+                        ),
+                        "results": batch,
+                    },
+                )
+            if path.endswith(f"specialists/{master_uuid}/slots/"):
+                return httpx.Response(200, json={"slots": [f"{BOOKING_DATE}T17:00:00"]})
+            return httpx.Response(404, json={})
+
+        adapter = AylaYClientsAdapter(
+            client=AylaBookingHTTPClient(
+                base_url="https://ayla.test",
+                api_token="secret-tok",  # noqa: S106  # pragma: allowlist secret
+                transport=httpx.MockTransport(handler),
+            ),
+            external_user_id="bot:max:u1",
+        )
+        ctx = SkillContext(
+            conversation=context.conversation,
+            bot_user=context.bot_user,
+            message_text=f"cb:book:pick_slot:{master_uuid}:{service_uuid}:{BOOKING_DATE}T17:00:00",
+        )
+        with override_settings(BOOKING_VIA_AYLA_REST=True):
+            with (
+                patch(
+                    "apps.skills.booking.provider.get_booking_provider",
+                    return_value=adapter,
+                ),
+                patch(
+                    "apps.skills.booking.skill._service_requires_health_check",
+                    return_value=False,
+                ),
+                _patch_provider_complete([]),
+            ):
+                with tenant_scope(tenant):
+                    result = BookingSkill().handle(ctx)
+        assert result.reply_text not in {
+            _STALE_CONTEXT_TEXT,
+            _CONTEXT_GONE_TEXT,
+            _BROKEN_CALLBACK_TEXT,
+        }
+        assert result.should_handoff is False
+        assert "Подтверждаете?" in result.reply_text
+        assert result.action_data is not None
+        token = result.action_data["pending_action"]["token"]
+        assert PendingBookingAction.all_tenants.get(pk=token).payload["master_id"] == master_uuid
+
+    def test_every_refusal_reason_gets_its_own_words(self) -> None:
+        """The three refusal texts must not collapse back into one (DRF-1473).
+
+        They existed as one sentence for five different causes, which is how
+        an eleven-second-old slot came to be reported as expired. Distinctness
+        is the property the ticket asked for, so it is asserted directly.
+        """
+        texts = [_STALE_CONTEXT_TEXT, _BROKEN_CALLBACK_TEXT, _CONTEXT_GONE_TEXT]
+        assert len(set(texts)) == 3
+        # Only the genuine-expiry text may use the word.
+        assert "устарел" in _STALE_CONTEXT_TEXT
+        assert "устарел" not in _BROKEN_CALLBACK_TEXT
+        assert "устарел" not in _CONTEXT_GONE_TEXT
+
+    def test_each_refusal_names_its_reason_in_the_journal(
+        self, context: SkillContext, tenant: Tenant, caplog
+    ) -> None:
+        """One tap per cause; each must log a reason that identifies it.
+
+        Before DRF-1473 two of these logged nothing at all and the rest
+        shared a sentence, so six production refusals could not be told
+        apart without a bisect.
+        """
+        import logging
+
+        cases = [
+            # (callback, roster, expected reason)
+            ("cb:book:pick_slot:11:22:zavtra-vecherom", [_staff(11)], "malformed_callback"),
+            (f"cb:book:pick_slot:11:99:{BOOKING_DATE}T14:00:00", [_staff(11)], "unknown_service"),
+            (f"cb:book:pick_slot:11:22:{BOOKING_DATE}T14:00:00", [], "unknown_master"),
+            ("cb:book:pick_slot:11:22:2020-01-01T14:00:00", [_staff(11)], "expired_slot"),
+        ]
+        for callback, staff_rows, expected in cases:
+            client = FakeYClients()
+            client.services_rows = [_service(22)]
+            client.staff_rows = staff_rows
+            ctx = SkillContext(
+                conversation=context.conversation,
+                bot_user=context.bot_user,
+                message_text=callback,
+            )
+            with caplog.at_level(logging.INFO, logger="apps.skills.booking.skill"):
+                caplog.clear()
+                with _patch_yclients(client), _patch_provider_complete([]):
+                    with tenant_scope(tenant):
+                        BookingSkill().handle(ctx)
+            lines = [r.getMessage() for r in caplog.records if ".refused " in r.getMessage()]
+            assert lines, f"{callback} refused silently"
+            assert f"reason={expected}" in lines[-1], (callback, lines)
+
     def test_staff_fetch_failure_handoffs_not_stale(
         self, context: SkillContext, tenant: Tenant
     ) -> None:
@@ -1309,7 +1489,8 @@ class TestSlotPickCallback:
                 result = BookingSkill().handle(ctx)
         mock_complete.assert_not_called()
         assert result.should_handoff is False
-        assert "контекст" in result.reply_text.lower()
+        # DRF-1473: THIS is the branch «устарел» belongs to — and the only one.
+        assert result.reply_text == _STALE_CONTEXT_TEXT
         assert client.times_calls == []
         assert PendingBookingAction.all_tenants.count() == 0
 
@@ -1367,7 +1548,7 @@ class TestSlotPickCallback:
             ):
                 with tenant_scope(tenant):
                     result = BookingSkill().handle(ctx)
-        assert "контекст" in result.reply_text.lower() or "услуги" in result.reply_text.lower()
+        assert result.reply_text == _BROKEN_CALLBACK_TEXT
         assert result.tool_calls_made == []
 
 
@@ -1412,7 +1593,7 @@ class TestCreateFlowServiceContext:
             with tenant_scope(tenant):
                 result = BookingSkill().handle(ctx)
         assert result.should_handoff is False
-        assert "контекст" in result.reply_text.lower() or "услуги" in result.reply_text.lower()
+        assert result.reply_text == _BROKEN_CALLBACK_TEXT
         # No backend lookup attempted without service context.
         assert client.dates_calls == []
 

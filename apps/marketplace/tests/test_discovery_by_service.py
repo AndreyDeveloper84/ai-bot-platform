@@ -203,8 +203,8 @@ class TestResolvedServiceContext:
     """DRF-962 — cards carry the matched service so the booking handoff can.
 
     Without this the discovery→booking tap dispatched a serviceless
-    ``pick_master`` and the booking skill's stale-context guard dead-ended
-    every card tap with «Контекст записи устарел».
+    ``pick_master`` and the booking skill's incomplete-callback guard
+    dead-ended every card tap (DRF-1473 renamed the refusal).
 
     A stamped service is a promise the button must keep, so resolution also
     requires deliverability: ``BOOKING_VIA_AYLA_REST`` ON and a non-NULL

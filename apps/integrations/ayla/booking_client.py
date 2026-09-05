@@ -883,12 +883,39 @@ class AylaBookingHTTPClient:
         return rows
 
     def get_masters(self, *, specialist_id: str | None = None) -> list[AylaMaster]:
+        """One specialist by id, or the ACTIVE TENANT's whole roster (DRF-1473).
+
+        The roster read is the origin of the pilot's «Контекст записи
+        устарел» dead-end. ``internal/specialists/`` is a paginated DRF list
+        (page size 20 on the pilot contour, 31 specialists on the feed) and
+        this method used to read page ONE and stop. The booking skill builds
+        its ``allowed_master_ids`` allow-set from exactly this list, so every
+        specialist past row 20 was invisible to the guard: the flow drew
+        their cards, drew their dates, drew their free slots — and then
+        refused the slot tap as unknown. Live evidence 04.09.2026: «Сазонова
+        Инна» (``d66b5a6f…``) and «SPAtrium» (``2398e6b9…``) are both on
+        page 2; the refusal logged ``allowed=[…]`` with exactly 20 ids.
+
+        Two changes, and the second is why the first is cheap:
+
+        * the walk is now :meth:`_get_all_rows`, the same reader
+          ``get_services`` uses — so a partial page-walk raises
+          ``catalog_incomplete`` (a handoff) instead of silently shrinking
+          the allow-set into a lie about the user's context;
+        * the walk is scoped to the active tenant. Unscoped, the feed mixes
+          every tenant's specialists into one list, which is both the reason
+          the page filled up and a false ownership check: the skill
+          documents this lookup as «tenant-scoped, so this is also the
+          tenant-ownership check» (``_handle_pick_slot_callback``) and it
+          was not. ``get_services`` has always scoped its read this way.
+        """
         if specialist_id:
             resp = self._request("GET", f"specialists/{specialist_id}/")
             payload = self._ok(resp)
             return [_master_from_wire(payload)] if isinstance(payload, dict) and payload else []
-        resp = self._request("GET", "specialists/")
-        return [_master_from_wire(r) for r in _as_rows(self._ok(resp))]
+        tenant_id = _require_tenant_id()
+        rows = self._get_all_rows("specialists/", params={"tenant": tenant_id})
+        return [_master_from_wire(r) for r in rows]
 
     def get_available_times(
         self,

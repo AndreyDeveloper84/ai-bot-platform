@@ -275,7 +275,9 @@ class TestReadRoundTrip:
         with pytest.raises(bc.BookingBadRequestError, match="tenant_scope_required"):
             _client_with(handler).get_services()
 
-    def test_get_masters_paginated_results(self) -> None:
+    def test_get_masters_paginated_results(self, db) -> None:
+        tenant = Tenant.objects.create(slug="m-one", name="T")
+
         def handler(req: httpx.Request) -> httpx.Response:
             return httpx.Response(
                 200,
@@ -287,8 +289,108 @@ class TestReadRoundTrip:
                 },
             )
 
-        out = _client_with(handler).get_masters()
+        with tenant_scope(tenant):
+            out = _client_with(handler).get_masters()
         assert (out[0].id, out[0].name, out[0].rating) == ("m1", "Ольга", 4.5)
+
+    # ── DRF-1473: the roster read that broke the pilot's last step ─────────
+    #
+    # ``internal/specialists/`` is a paginated DRF list. The client read page
+    # one and stopped, so the booking skill's ``allowed_master_ids`` allow-set
+    # held at most one page — and every specialist past it was answered, on
+    # the slot tap, with «Контекст записи устарел». Live 04.09.2026: the feed
+    # advertised 31 specialists over two pages, the refusal logged an allow-set
+    # of exactly 20, and both masters people were trying to book («Сазонова
+    # Инна», «SPAtrium») were on page 2.
+
+    def test_get_masters_walks_every_page(self, db) -> None:
+        """The whole roster, not the first page of it (DRF-1473).
+
+        Shaped exactly like the pilot feed: 31 specialists, page size 20, the
+        master we care about last. Reading one page loses him; the flow then
+        draws his card, his dates and his slots and refuses the tap.
+        """
+        tenant = Tenant.objects.create(slug="m-pages", name="T")
+        page_size = 20
+        total = 31
+        requested_pages: list[str] = []
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            page = int(req.url.params.get("page", "1"))
+            requested_pages.append(str(page))
+            start = (page - 1) * page_size
+            batch = [
+                {"id": f"spec-{i}", "display_name": f"Мастер {i}", "rating": 5.0}
+                for i in range(start, min(start + page_size, total))
+            ]
+            return httpx.Response(
+                200,
+                json={
+                    "count": total,
+                    "next": (
+                        f"https://ayla.test/...?page={page + 1}"
+                        if start + page_size < total
+                        else None
+                    ),
+                    "results": batch,
+                },
+            )
+
+        with tenant_scope(tenant):
+            out = _client_with(handler).get_masters()
+        assert requested_pages == ["1", "2"]
+        assert len(out) == total
+        # The last specialist on the feed is the one page-1-only lost.
+        assert f"spec-{total - 1}" in {m.id for m in out}
+
+    def test_get_masters_is_scoped_to_the_active_tenant(self, db) -> None:
+        """The allow-set this feeds is documented as the tenant-ownership
+        check (``_handle_pick_slot_callback``); unscoped it was not one, and
+        the other tenants' specialists are also what filled up page 1."""
+        tenant = Tenant.objects.create(slug="m-scope", name="T")
+        captured: list[httpx.Request] = []
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            captured.append(req)
+            return httpx.Response(200, json={"count": 0, "next": None, "results": []})
+
+        with tenant_scope(tenant):
+            _client_with(handler).get_masters()
+        assert captured[0].url.path == "/api/v1/internal/specialists/"
+        assert captured[0].url.params["tenant"] == str(tenant.id)
+
+    def test_get_masters_incomplete_roster_raises(self, db) -> None:
+        """A short roster must fail loudly, exactly as a short catalog does.
+
+        This is the whole point of routing the read through the same walker:
+        a silently truncated allow-set does not look like an outage, it looks
+        like the user's own context going stale.
+        """
+        tenant = Tenant.objects.create(slug="m-short", name="T")
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                json={
+                    "count": 31,
+                    "next": None,
+                    "results": [{"id": "spec-0", "display_name": "Один", "rating": 5.0}],
+                },
+            )
+
+        with tenant_scope(tenant):
+            with pytest.raises(bc.BookingUnavailableError, match="catalog_incomplete"):
+                _client_with(handler).get_masters()
+
+    def test_get_masters_by_id_needs_no_tenant_scope(self) -> None:
+        """The detail route is a single addressed read — unchanged."""
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            assert req.url.path == "/api/v1/internal/specialists/spec-7/"
+            return httpx.Response(200, json={"id": "spec-7", "display_name": "Инна", "rating": 5.0})
+
+        out = _client_with(handler).get_masters(specialist_id="spec-7")
+        assert [m.id for m in out] == ["spec-7"]
 
     def test_get_available_times_parses_iso_slots(self) -> None:
         captured: list[httpx.Request] = []
