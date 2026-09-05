@@ -91,14 +91,19 @@ Expected per line:
 Created tenant 'olhovyy-dvor' (id=<uuid-olhovyy-dvor>, name='Ольховый двор', city='Пенза')
 ```
 
-Failure branches — all exit 1, nothing written:
+Refusals — exit 1, nothing written:
 
 | output | meaning | action |
 | --- | --- | --- |
-| `Invalid --id …` | the UUID is malformed | fix the value; do not proceed |
+| `Invalid --id …` | the UUID is malformed, or `--id ""` reached the command | fix the value; do not proceed |
 | `--id … is already used by tenant 'X'` | that UUID belongs to another slug | you have the wrong UUID, or a duplicate row exists |
 | `exists with id=…, but --id asked for …` | the row was created earlier **without** `--id` | the pk cannot be re-keyed in place — see "Recovery" |
-| `no --id given` (a warning, exit 0) | you forgot `--id` | the row will mirror nothing — see "Recovery" |
+
+Warning — exit 0, and on a `--dry-run` it fires **before** anything is written:
+
+| output | meaning | action |
+| --- | --- | --- |
+| `no --id given: … will mirror 0 services` | you forgot `--id` | add the flag and re-run the preview. If the real run already happened, see "Recovery" |
 
 Re-runs are safe: an existing row is a no-op, and `--city` fills a blank city
 without ever overwriting a non-blank one.
@@ -215,9 +220,13 @@ preference:
    ```bash
    python manage.py shell -c "
    from apps.tenancy.models import Tenant
-   Tenant.all_objects.filter(slug='<slug>').delete()"
+   print(Tenant.all_objects.filter(slug='<slug>').delete())"
    ```
-   Then re-run the Step 1 line. Verify with `--dry-run` first.
+   `print` on purpose: `.delete()` returns `(total, {model: count})`, and
+   that tuple is the evidence the delete hit one `Tenant` row and nothing
+   else. A tenant FK cascades widely in this repo — if the tuple names any
+   model beyond `tenancy.Tenant`, stop and escalate rather than re-creating.
+   Otherwise re-run the Step 1 line, `--dry-run` first.
 2. **The row has mirror rows** — do not delete it blind. Escalate; the rows
    belong to whatever tenant id they were written under.
 
@@ -234,6 +243,11 @@ preference:
 4. **Should the already-connected five get their `city` backfilled** in the
    same pass? Re-running their `create_tenant` line with `--city "Пенза"`
    fills a blank city and never overwrites a set one.
+5. **A wrong city cannot be corrected by this command.** The
+   "never overwrite a non-blank city" policy means the first value written
+   is final as far as `create_tenant` goes; changing it afterwards is a
+   Django admin edit. So question 2 is worth settling **before** Step 1, not
+   after.
 
 ## Escalation contacts
 

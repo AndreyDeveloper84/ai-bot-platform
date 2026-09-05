@@ -59,6 +59,7 @@ import uuid
 
 from django.core.exceptions import ValidationError
 from django.core.management.base import BaseCommand, CommandError
+from django.db import IntegrityError
 
 from apps.tenancy.models import Tenant
 
@@ -128,8 +129,13 @@ class Command(BaseCommand):
     ) -> None:
         # Parse ``--id`` before anything touches the DB. A malformed UUID must
         # fail as a CommandError, not as a psycopg DataError halfway through.
+        #
+        # ``is not None`` rather than truthiness: ``--id ""`` is a supplied
+        # flag whose value did not survive whatever produced it (an unset
+        # shell variable, a blank spreadsheet cell), and minting a random pk
+        # for it would be the exact silent failure this flag exists to stop.
         pk: uuid.UUID | None = None
-        if tenant_id:
+        if tenant_id is not None:
             try:
                 pk = uuid.UUID(str(tenant_id).strip())
             except (ValueError, AttributeError, TypeError) as exc:
@@ -138,6 +144,27 @@ class Command(BaseCommand):
                 ) from exc
 
         city_value = (city or "").strip()
+
+        # Said BEFORE the dry-run branch, not after the insert (DRF-1510).
+        # The runbook tells the operator to preview all five lines with
+        # --dry-run and read the output; a warning that fires only on the
+        # real run is missing from the one step whose entire job is catching
+        # this mistake, and by the time it prints, the row exists and the
+        # fix is a delete instead of a flag.
+        #
+        # ``not system`` because a service tenant (global_bot, the KB corpus)
+        # legitimately has no Ayla catalog, and both provisioning recipes in
+        # apps/kb create one with no --id. A warning that fires on a
+        # documented-correct action teaches operators to scroll past it.
+        if pk is None and not system:
+            self.stdout.write(
+                self.style.WARNING(
+                    "no --id given: the primary key will be a fresh uuid4, and "
+                    "catalog sync fetches with ?tenant=<Tenant.id> — this salon "
+                    "will mirror 0 services unless the two happen to match "
+                    "(DRF-1510). Pass --id <ayla-tenant-uuid> for a salon."
+                )
+            )
 
         # Validate slug shape *before* hitting the DB. full_clean() runs the
         # custom ``Tenant.clean()`` which enforces the platform slug regex
@@ -195,7 +222,17 @@ class Command(BaseCommand):
         }
         if pk is not None:
             create_kwargs["id"] = pk
-        tenant = Tenant.objects.create(**create_kwargs)
+        try:
+            tenant = Tenant.objects.create(**create_kwargs)
+        except IntegrityError as exc:
+            # The clash check above is a read, and the insert is a later
+            # write. Provisioning is serialised in practice, but the module
+            # promises "exit 1, script-friendly" — a raw traceback from a
+            # concurrent run would break that promise.
+            raise CommandError(
+                f"Could not create tenant {slug!r}: {exc}. Another process may "
+                "have just created this slug or this --id."
+            ) from exc
         system_note = " [system]" if tenant.is_system else ""
         city_note = f", city={tenant.city!r}" if tenant.city else ""
         self.stdout.write(
@@ -204,18 +241,6 @@ class Command(BaseCommand):
                 f"name={tenant.name!r}{city_note}){system_note}"
             )
         )
-        if pk is None:
-            # Not an error — some tenants (global_bot, the KB corpus) have no
-            # Ayla catalog at all. But for a salon this is the difference
-            # between a mirror and an empty room, so it must be said out loud
-            # at provisioning time rather than read off a sync counter later.
-            self.stdout.write(
-                self.style.WARNING(
-                    "  no --id given: this row's primary key is a fresh uuid4, "
-                    "so catalog sync will fetch 0 rows unless it happens to "
-                    "match the Ayla Tenant UUID (DRF-1510)."
-                )
-            )
 
     # ------------------------------------------------------------------
     # Existing-row path
@@ -229,23 +254,31 @@ class Command(BaseCommand):
         city: str,
         dry_run: bool,
     ) -> None:
-        """Idempotent re-run: report, backfill a blank city, never clobber.
+        """Idempotent re-run: decide first, then say what actually happened.
 
-        Three distinct outcomes, all exit 0 except the id contradiction:
+        The outcome is computed before anything is printed, deliberately. The
+        earlier version opened with an unconditional ``No-op.`` and then
+        either raised or performed a write — and ``No-op.`` is a claim about
+        the database, so on the backfill path it was simply false. An
+        operator who typos a slug onto an unrelated production tenant must
+        not be told nothing happened while its ``city`` is being written.
 
-        * ``--id`` matching the stored pk — nothing to say beyond the no-op.
+        Four outcomes, all exit 0 except the id contradiction:
+
+        * nothing asked for beyond existence — the plain no-op line;
         * ``--id`` DIFFERING from the stored pk — the row cannot be re-keyed
-          (its mirror rows hang off that pk), so the command says so instead
+          (its mirror rows hang off that pk), so the command refuses instead
           of pretending the deploy is now correct. Loud, because this is the
-          exact state that mirrors an empty catalog.
-        * ``--city`` on a blank city — filled in. On a non-blank different
-          city, reported and left alone: an operator's admin edit outranks a
-          re-run of a provisioning script.
+          exact state that mirrors an empty catalog;
+        * ``--city`` on a blank city — filled in, and the line says so;
+        * ``--city`` on a non-blank different city — reported, left alone:
+          an operator's admin edit outranks a re-run of a deploy script.
+
+        City comparison is ``casefold``-ed and stripped because the reader
+        this field feeds is (``tenant__city__iexact`` in
+        ``apps.marketplace.discovery``). Warning about «пенза» vs «Пенза»
+        would report a conflict the consumer does not have.
         """
-        self.stdout.write(
-            f"Tenant {existing.slug!r} already exists (id={existing.id}, "
-            f"is_active={existing.is_active}). No-op."
-        )
         if pk is not None and pk != existing.id:
             raise CommandError(
                 f"Tenant {existing.slug!r} exists with id={existing.id}, but --id "
@@ -253,23 +286,68 @@ class Command(BaseCommand):
                 "catalog sync will keep fetching with the stored id and mirror "
                 "nothing. Fix the row (or delete and re-create it) explicitly."
             )
-        if not city:
+
+        stored = (existing.city or "").strip()
+        # A whitespace-only city is blank to every reader, so it is blank here.
+        wants_backfill = bool(city) and not stored
+        conflict = bool(city) and bool(stored) and stored.casefold() != city.casefold()
+
+        # A deactivated tenant is parked on purpose. The command already
+        # refuses to resurrect one; it must not quietly edit one either.
+        if wants_backfill and not existing.is_active:
+            self._say_noop(existing, note=f"inactive — --city {city!r} not applied")
             return
-        if existing.city and existing.city != city:
-            self.stdout.write(
-                self.style.WARNING(
-                    f"  city already set to {existing.city!r}; --city {city!r} "
-                    "ignored (this command never overwrites a non-blank city)."
-                )
+        if conflict:
+            self._say_noop(
+                existing,
+                note=(
+                    f"city already set to {stored!r}; --city {city!r} ignored "
+                    "(this command never overwrites a non-blank city)"
+                ),
+                warn=True,
             )
             return
-        if existing.city == city:
+        if not wants_backfill:
+            self._say_noop(existing, note=None if pk is None else "id matches")
             return
         if dry_run:
-            self.stdout.write(
-                self.style.WARNING(f"  [dry-run] would backfill blank city -> {city!r}")
-            )
+            self._say_noop(existing, note=f"[dry-run] would backfill blank city -> {city!r}")
             return
         existing.city = city
+        # ``updated_at`` is ``auto_now``; a field left out of ``update_fields``
+        # never has ``pre_save`` called, so dropping it here would silently
+        # freeze the column on every backfill.
         existing.save(update_fields=["city", "updated_at"])
-        self.stdout.write(self.style.SUCCESS(f"  backfilled blank city -> {city!r}"))
+        self._say_noop(
+            existing,
+            note=f"backfilled blank city -> {city!r}",
+            success=True,
+        )
+
+    def _say_noop(
+        self,
+        existing: Tenant,
+        *,
+        note: str | None,
+        warn: bool = False,
+        success: bool = False,
+    ) -> None:
+        """One line describing what this re-run did to ``existing``."""
+        head = f"Tenant {existing.slug!r} already exists (id={existing.id}, "
+        head += f"is_active={existing.is_active})"
+        line = f"{head}. {note}." if note else f"{head}. No changes."
+        if success:
+            self.stdout.write(self.style.SUCCESS(line))
+        elif warn:
+            self.stdout.write(self.style.WARNING(line))
+        else:
+            self.stdout.write(line)
+        if note is None and existing.city == "":
+            # The re-run path the runbook uses to backfill city on the
+            # already-connected salons. Saying the pk out loud is the only
+            # check available here — nothing else can tell whether it is the
+            # Ayla one (DRF-1510).
+            self.stdout.write(
+                "  city is blank — pass --city to fill it; pass --id to assert "
+                "the stored pk is the Ayla Tenant UUID."
+            )

@@ -57,6 +57,7 @@ import pytest
 from django.conf import settings
 from django.core.cache import cache
 from django.core.management import call_command
+from django.core.management.base import CommandError
 
 from apps.catalog.models import CatalogMaster, CatalogService, MasterService
 from apps.catalog.services.http_client import (
@@ -592,7 +593,7 @@ class TestPrimaryKeyIsTheAylaContract:
             manicures=0,
             ayla_id=first.ayla_id,
         )
-        with pytest.raises(Exception, match="already used by tenant"):
+        with pytest.raises(CommandError, match="already used by tenant"):
             _provision(clone)
         assert not Tenant.all_objects.filter(slug="typo-slug").exists()
 
@@ -605,7 +606,7 @@ class TestPrimaryKeyIsTheAylaContract:
         """
         salon = NEW_SALONS[0]
         _provision(salon, with_id=False)
-        with pytest.raises(Exception, match="cannot be changed in place"):
+        with pytest.raises(CommandError, match="cannot be changed in place"):
             _provision(salon)
 
 
@@ -624,12 +625,19 @@ class TestSalonWithoutBookableMasters:
 
     @pytest.fixture
     def contour(self) -> Salon:
-        """Four salons with masters, one (`sorok-okon`) without."""
+        """Four salons with masters, one (`sorok-okon`) without.
+
+        One master per healthy salon, not two: this fixture is rebuilt for
+        each test in the class and every master multiplies the edge rows
+        (masters × services), which dominated the class's runtime. Nothing
+        below counts masters — the plural case is covered once, in
+        :class:`TestProvisionThenSync`.
+        """
         orphan = next(s for s in NEW_SALONS if s.slug == "sorok-okon")
         for salon in NEW_SALONS:
             _provision(salon)
         feeds = {
-            str(s.ayla_id): _build_feed(s, masters=0 if s.slug == orphan.slug else None)
+            str(s.ayla_id): _build_feed(s, masters=0 if s.slug == orphan.slug else 1)
             for s in NEW_SALONS
         }
         _run_beat(feeds)
