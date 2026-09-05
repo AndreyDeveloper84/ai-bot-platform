@@ -31,7 +31,17 @@ sentence that makes the silence readable.
 * **Best-effort, hard.** A failed notice must never break inbound
   processing, roll back a handoff, or leave the release path half-done.
   Everything is caught and logged — the mute working is more important
-  than the explanation of it.
+  than the explanation of it. Delivery and transcript are contained
+  separately so a log line never blames the wrong half.
+
+### Surfaces
+
+MAX, both client paths: the global (marketplace) bot and the per-tenant
+salon bot. The salon one matters most — the 04.09 incident STARTED there.
+Telegram (``apps.channels.telegram.handler``) has the same silent branch
+and is deliberately not wired: it carries no pilot traffic, and a second
+surface would double the outbound-identity question with nothing to test
+it against.
 """
 
 from __future__ import annotations
@@ -254,18 +264,29 @@ def release_notices_for(task: "AdminTask") -> int:
                 notice.silence_notified_at is not None,
             )
             if notice.silence_notified_at is not None and notice.chat_id:
+                # Delivery and transcript are contained SEPARATELY, so the log
+                # names what actually broke. Folded together, a transcript
+                # failure was reported as `release_send_failed` — sending the
+                # next person to debug the network the message had just
+                # travelled over successfully.
                 try:
                     _send(chat_id=notice.chat_id, text=SILENCE_RELEASED_TEXT)
+                    sent += 1
+                except Exception:  # noqa: BLE001 — the episode is closed either way
+                    logger.exception(
+                        "handoff.silence.release_send_failed conversation=%s",
+                        notice.conversation_id,
+                    )
+                try:
                     _record(
                         conversation=notice.conversation,
                         text=SILENCE_RELEASED_TEXT,
                         action_type=RELEASE_ACTION_TYPE,
                         trace_id=None,
                     )
-                    sent += 1
-                except Exception:  # noqa: BLE001 — the episode is closed either way
+                except Exception:  # noqa: BLE001 — the client already read it
                     logger.exception(
-                        "handoff.silence.release_send_failed conversation=%s",
+                        "handoff.silence.release_record_failed conversation=%s",
                         notice.conversation_id,
                     )
         except Exception:  # noqa: BLE001 — one dialog must not block the rest
@@ -330,6 +351,7 @@ def _record(*, conversation: "Conversation", text: str, action_type: str, trace_
 
     from apps.conversations.services import record_global_message, record_message
     from apps.identity.services.global_tenant import get_global_bot_tenant
+    from apps.tenancy.context import tenant_scope
 
     sentinel = get_global_bot_tenant()
     if conversation.tenant_id == sentinel.id:
@@ -342,11 +364,20 @@ def _record(*, conversation: "Conversation", text: str, action_type: str, trace_
             trace_id=trace_id,  # type: ignore[arg-type]
         )
     else:
-        record_message(
-            conversation,
-            role="assistant",
-            content=text,
-            rendered_text=text,
-            action_type=action_type,
-            trace_id=trace_id,  # type: ignore[arg-type]
-        )
+        # The scope is taken from the conversation, never from the caller —
+        # the same rule ``AdminTaskAdmin.save_model`` follows, and for the
+        # same reason: the release notice runs from ``transaction.on_commit``,
+        # which fires AFTER the admin's ``with tenant_scope(...)`` has exited.
+        # ``record_message`` raises without a tenant in scope, so without this
+        # the salon dialog's release line reached the client and never reached
+        # the transcript — and the failure surfaced as
+        # ``release_send_failed``, blaming a network that had worked.
+        with tenant_scope(conversation.tenant):
+            record_message(
+                conversation,
+                role="assistant",
+                content=text,
+                rendered_text=text,
+                action_type=action_type,
+                trace_id=trace_id,  # type: ignore[arg-type]
+            )

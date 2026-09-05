@@ -775,15 +775,24 @@ def _dispatch_skill_handoff(
         trace_id=trace_id,
     )
     short_term.append(conversation.id, role="assistant", content=handoff_text)
+    # DRF-1486 — этот диалог говорит человеку, что подключает сотрудника, и
+    # факт этого решает, ЧТО человек прочитает, когда молчание включится на
+    # его следующем сообщении.
+    #
+    # ДО отправки, ровно как ``record_message`` выше и по той же причине:
+    # ``send_message`` пробрасывает MaxAPIError наверх, автоматического
+    # ретрая нет (запись остаётся в PEL до ручного XCLAIM). Записать после
+    # отправки значило бы, что упавший ход оставляет диалог с меткой
+    # «здесь ничего не говорили» — и на следующем сообщении человек прочитал
+    # бы «вы просили связать вас с сотрудником в ДРУГОМ нашем чате» ровно в
+    # том чате, где он и спрашивал. Раньше такой сбой давал молчание; врать
+    # хуже, чем молчать.
+    mark_handoff_announced(conversation=conversation, chat_id=chat_id)
     send_message(
         chat_id=chat_id,
         text=handoff_text,
         attachments=_build_attachments(skill_result.action_data),
     )
-    # DRF-1486 — этот диалог только что сам сказал человеку, что подключает
-    # сотрудника. Записывается ровно факт доставки: он решает, ЧТО человек
-    # прочитает, когда молчание включится на его следующем сообщении.
-    mark_handoff_announced(conversation=conversation, chat_id=chat_id)
     emit(
         "channels.max.handler.handoff",
         payload={"conversation_id": str(conversation.id), "reason": reason[:200]},
@@ -2514,6 +2523,24 @@ def _handle_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.UUID | N
         outcome=AIRequestMetric.OUTCOME_SUCCESS,
         skill_selected=_skill_selected_label(skill_result),
     )
+
+    # DRF-1486 — этот ход заканчивается тем, что диалог уходит в handoff, а
+    # человеку прямо сейчас уходит строка об этом. Значит, подтверждение
+    # доставлено ЗДЕСЬ, и на следующем сообщении молчание объясняется словами
+    # «ваш вопрос уже у сотрудника», а не «вы просили в другом чате».
+    #
+    # Проверяется состояние диалога, а не имя навыка: задачу заводит и
+    # ``HumanHandoffSkill``, и booking через ``should_handoff``, и порог
+    # уверенности (DRF-1209), — общее у них ровно одно, флип в HUMAN_HANDOFF
+    # внутри ``create_admin_task``. Список навыков здесь пришлось бы дополнять
+    # при каждом новом источнике эскалации, и первый же забытый вернул бы
+    # человеку неверную формулировку.
+    #
+    # До отправки — как ``record_message`` выше: ``send_message`` пробрасывает
+    # MaxAPIError, автоматического ретрая нет, и упавший ход не должен
+    # оставлять диалог с меткой «здесь ничего не говорили».
+    if conversation.state == Conversation.State.HUMAN_HANDOFF:
+        mark_handoff_announced(conversation=conversation, chat_id=event.chat_id)
 
     # Outbound — MaxAPIError propagates up (handler does not swallow).
     send_message(chat_id=event.chat_id, text=reply_text, attachments=attachments)

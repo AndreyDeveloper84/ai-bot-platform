@@ -285,8 +285,12 @@ class TestReleaseIsAnnounced:
         _run_global("вы тут?", mid="rel-1")
         assert sent[-1]["text"] == SILENCE_TRANSFERRED_TEXT
 
-        with django_capture_on_commit_callbacks(execute=True), tenant_scope(task.tenant):
-            resolve_admin_task(task, resolution_note="ответили клиенту")
+        # Колбэки исполняются ВНЕ ``tenant_scope`` — так делает админка, чей
+        # запрос не несёт заголовка тенанта, и только так тест видит, что
+        # запись в транскрипт умеет обойтись без внешнего скоупа.
+        with django_capture_on_commit_callbacks(execute=True):
+            with tenant_scope(task.tenant):
+                resolve_admin_task(task, resolution_note="ответили клиенту")
 
         assert sent[-1]["text"] == SILENCE_RELEASED_TEXT
         assert [c["text"] for c in sent].count(SILENCE_RELEASED_TEXT) == 1
@@ -301,8 +305,9 @@ class TestReleaseIsAnnounced:
 
         task = _salon_handoff_elsewhere()
         _run_global("вы тут?", mid="back-1")
-        with django_capture_on_commit_callbacks(execute=True), tenant_scope(task.tenant):
-            resolve_admin_task(task, resolution_note="done")
+        with django_capture_on_commit_callbacks(execute=True):
+            with tenant_scope(task.tenant):
+                resolve_admin_task(task, resolution_note="done")
 
         _run_global("тогда подскажите про массаж", mid="back-2")
 
@@ -319,8 +324,9 @@ class TestReleaseIsAnnounced:
         _run_global("вы тут?", mid="two-1")
         assert sent[-1]["text"] == SILENCE_TRANSFERRED_TEXT
 
-        with django_capture_on_commit_callbacks(execute=True), tenant_scope(first.tenant):
-            resolve_admin_task(first, resolution_note="одна из двух")
+        with django_capture_on_commit_callbacks(execute=True):
+            with tenant_scope(first.tenant):
+                resolve_admin_task(first, resolution_note="одна из двух")
 
         assert SILENCE_RELEASED_TEXT not in [c["text"] for c in sent]
         notice = HandoffSilenceNotice.objects.get(conversation=_global_conversation())
@@ -333,8 +339,9 @@ class TestReleaseIsAnnounced:
 
         first = _salon_handoff_elsewhere("salon-ep1")
         _run_global("вы тут?", mid="ep-1")
-        with django_capture_on_commit_callbacks(execute=True), tenant_scope(first.tenant):
-            resolve_admin_task(first, resolution_note="эпизод 1")
+        with django_capture_on_commit_callbacks(execute=True):
+            with tenant_scope(first.tenant):
+                resolve_admin_task(first, resolution_note="эпизод 1")
         said_after_first = [c["text"] for c in sent].count(SILENCE_TRANSFERRED_TEXT)
         assert said_after_first == 1
 
@@ -486,3 +493,77 @@ class TestIndicatorsOnThePerTenantPath:
         self._run(tenant, "и снова здравствуйте", mid="pt-c")
 
         assert actions == ["mark_seen", "typing_on"]
+
+
+# --------------------------------------------------------------------------- #
+# Салонный путь целиком: эскалация → молчание → закрытие                       #
+# --------------------------------------------------------------------------- #
+class TestSalonDialogEndToEnd:
+    """Полный круг на арендаторской поверхности, БЕЗ ручной расстановки состояний.
+
+    Инцидент 04.09 прошёл ровно здесь, и три вещи проверяются только так:
+
+    * салонный бот, объявивший handoff сам, читает формулировку «спросил
+      здесь» — а не ту, что про другой чат;
+    * закрытие задачи исполняет ``on_commit`` ВНЕ ``tenant_scope`` — как это
+      и делает админка, чей запрос не несёт заголовка тенанта. Внутри scope
+      этот тест был бы зелёным и при сломанном коде: ``record_message``
+      падает без тенанта в скоупе, и «клиент получил, транскрипт пуст, а лог
+      винит сеть» — это ровно то, что тест внутри scope не увидит;
+    * строка, которую человек прочитал, лежит в транскрипте того диалога,
+      где он её прочитал.
+    """
+
+    USER = 7101
+
+    def _tenant(self) -> Tenant:
+        return Tenant.objects.create(slug="salon-e2e", name="Salon E2E")
+
+    def _run(self, tenant: Tenant, text: str, *, mid: str) -> None:
+        with tenant_scope(tenant), trace_id_scope(str(uuid.uuid4())):
+            max_handler.handle_max_event(
+                _msg(text, user_id=self.USER, chat_id=self.USER, mid=mid),
+                trace_id=uuid.uuid4(),
+            )
+
+    def test_full_circle(
+        self, sent, actions, fake_redis, concierge, django_capture_on_commit_callbacks
+    ):
+        tenant = self._tenant()
+
+        # 1. Человек просит человека — салонный навык эскалирует сам.
+        self._run(tenant, "позовите оператора", mid="e2e-1")
+        task = AdminTask.all_tenants.get()
+        assert task.task_type == AdminTask.TaskType.HANDOFF
+        assert sent[-1]["text"] == "Передаю менеджеру — ответят в течение 30 минут."
+
+        # 2. Следующее сообщение — молчание, объяснённое «спросил здесь».
+        self._run(tenant, "вы тут?", mid="e2e-2")
+        assert sent[-1]["text"] == SILENCE_ANNOUNCED_HERE_TEXT
+        assert SILENCE_TRANSFERRED_TEXT not in [c["text"] for c in sent]
+
+        # 3. Закрытие — как в админке: колбэки исполняются ВНЕ tenant_scope.
+        with django_capture_on_commit_callbacks(execute=True):
+            with tenant_scope(task.tenant):
+                resolve_admin_task(task, resolution_note="ответили")
+
+        assert sent[-1]["text"] == SILENCE_RELEASED_TEXT
+
+        # 4. И то, что человек прочитал, лежит в транскрипте ЭТОГО диалога.
+        conv = Conversation.all_tenants.get(bot_user__channel_user_id=str(self.USER), tenant=tenant)
+        recorded = list(
+            Message.all_tenants.filter(
+                conversation=conv,
+                action_type__in=(SILENCE_ACTION_TYPE, RELEASE_ACTION_TYPE),
+            ).values_list("action_type", "content")
+        )
+        assert sorted(recorded) == sorted(
+            [
+                (SILENCE_ACTION_TYPE, SILENCE_ANNOUNCED_HERE_TEXT),
+                (RELEASE_ACTION_TYPE, SILENCE_RELEASED_TEXT),
+            ]
+        )
+
+        # 5. Положительная стража: бот снова отвечает.
+        self._run(tenant, "спасибо", mid="e2e-3")
+        assert sent[-1]["text"] not in (SILENCE_ANNOUNCED_HERE_TEXT, SILENCE_RELEASED_TEXT)

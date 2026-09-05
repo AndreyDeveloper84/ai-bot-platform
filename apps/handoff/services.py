@@ -262,7 +262,15 @@ def create_admin_task(
                 "handoff.created_unaddressed",
                 target="AdminTask",
                 target_id=task.id,
-                payload={"conversation_id": str(conversation.id)},
+                # tenant_id in the payload, not in the scope: the callback
+                # runs on_commit, i.e. outside the `tenant_scope` this
+                # function was called in, and `write_audit` tolerates a None
+                # tenant by writing an unattributable row. An emergency
+                # nobody can attribute is barely an emergency record.
+                payload={
+                    "conversation_id": str(conversation.id),
+                    "tenant_id": str(tenant.id),
+                },
             )
         )
     logger.info(

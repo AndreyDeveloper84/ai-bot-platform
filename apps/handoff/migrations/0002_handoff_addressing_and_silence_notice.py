@@ -2,6 +2,8 @@
 
 import django.db.models.deletion
 import uuid
+from datetime import timedelta
+
 from django.conf import settings
 from django.db import migrations, models
 from django.utils import timezone
@@ -36,9 +38,15 @@ def address_existing_tasks(apps, schema_editor):
         AdminTask.objects.filter(assigned_to__isnull=True, assigned_queue="").update(
             assigned_queue=queue
         )
-    AdminTask.objects.filter(status="open", pickup_escalated_at__isnull=True).update(
-        pickup_escalated_at=now
-    )
+    # Only the backlog that is ALREADY late. A task opened minutes before the
+    # deploy has not missed anything yet, and stamping it would quietly
+    # exempt it from the very sweep this migration ships.
+    sla = timedelta(minutes=int(getattr(settings, "HANDOFF_PICKUP_SLA_MINUTES", 0) or 0))
+    AdminTask.objects.filter(
+        status="open",
+        pickup_escalated_at__isnull=True,
+        created_at__lte=now - sla,
+    ).update(pickup_escalated_at=now)
 
 
 class Migration(migrations.Migration):
