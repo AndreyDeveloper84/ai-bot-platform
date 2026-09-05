@@ -211,17 +211,92 @@ the bot could not build the button on arrival either, so an empty field
 is the honest answer rather than a link leading to an apology. The
 `admin_api.invite.no_start_link` WARNING names what to set.
 
-> **Pilot prerequisite, as of 30.08.** `MAX_BOT_SALON_WEB_APP` is
-> commented out in `.env.staging`. It was set that morning and rolled
-> back the same day: with a `web_app` present, the staff menu starts
-> building its own `open_app` button whose payload is
-> `cb:staff:open_app`, and MAX rejects a payload containing `:` with
-> HTTP 400 `proto.payload` — every menu reply failed. Guard 3 in
-> `apps/channels/max/outbound.py` screens `=`, `&` and `?` but not `:`,
-> and the comment at `staff_menu.py:64` asserting that colons are legal
-> is wrong. Until that is fixed, uncommenting the variable trades a dark
-> invite link for a broken staff menu; `invite_link` therefore returns
-> `""` on the pilot today and the invitation goes out by DM only.
+> **Pilot prerequisite — the blocker is gone, the variable is not yet
+> set (DRF-1504).** `MAX_BOT_SALON_WEB_APP` is still commented out in
+> `.env.staging`, so `invite_link` returns `""` on the pilot today and
+> the invitation goes out by DM only. That is now a config gap, **not**
+> a code defect: turning the variable on is the fix, and nothing else
+> has to change first.
+>
+> _History, and why it no longer applies._ The variable was set on the
+> morning of 30.08 and rolled back the same day: with a `web_app`
+> present the staff menu began building its own `open_app` button whose
+> payload was then `cb:staff:open_app`, MAX answers HTTP 400
+> `proto.payload` to a payload containing `:`, and because the keyboard
+> rides on the same `send_message` as the text, the 400 took the whole
+> reply down — the salon bot went silent for its masters until the
+> setting was pulled.
+>
+> `0c3593a` (#1337, 30.08) removed both halves of that. The payload is
+> now the flat `staff_open_app` (`OPEN_APP_PAYLOAD` in
+> `apps/channels/max/staff_menu.py`), and Guard 3 in
+> `apps/channels/max/outbound.py` validates it against MAX's actual rule
+> `^[A-Za-z0-9_-]{0,512}$` — measured by live probe, not assumed —
+> raising `ValueError` at the producer instead of letting a 400 reach
+> the wire.
+>
+> Two claims in the paragraph this replaces were **already stale when it
+> was written**: `0c3593a` is an ancestor of `df356cd` (#1336), the
+> commit that added the warning. «Guard 3 screens `=`, `&` and `?` but
+> not `:`» and «the comment at `staff_menu.py:64` asserting that colons
+> are legal is wrong» both describe code that no longer existed on that
+> commit's own tree. Verify rather than trust either version:
+> `git merge-base --is-ancestor 0c3593a df356cd`, and
+> `apps/channels/tests/test_salon_web_app_enablement.py`, which drives
+> the whole path — env var → registry entry → `open_app` payload →
+> `invite_link` — from the pilot's own env block, with the paired
+> negative for the variable left unset.
+>
+> **To turn it on** (main window applies; see «Enabling the salon Mini
+> App on the pilot» below).
+
+#### Enabling the salon Mini App on the pilot (DRF-1504)
+
+One line, added to `.env.staging` on `api-dev.gobeauty.site` inside the
+existing `MAX_BOT_SALON_*` block (uncomment it if it is still there
+commented out; do not add a second copy):
+
+```
+MAX_BOT_SALON_WEB_APP=id583403546770_3_bot
+```
+
+`id583403546770_3_bot` is the salon bot's public MAX handle — the same
+string the owner's browser showed in
+`https://max.ru/id583403546770_3_bot?start=master_invite_test` on 30.08,
+and the value MAX wants in an `open_app` button's `web_app`. It is not a
+secret; the token beside it in the same block is, and stays out of
+tickets, chats, and this file.
+
+Prerequisites already in place on the pilot — verify, do not assume:
+
+- `MAX_BOTS=client,salon`. Declaring one bot silently un-declares the
+  other (`.env.staging.template`, TRAP 1).
+- `MAX_BOT_SALON_TENANT_SLUG=formula-tela` and
+  `MAX_BOT_SALON_STREAM=max_salon`. `_bot_start_link` resolves the entry
+  by `(tenant, stream)`, so a missing either one leaves `invite_link`
+  empty with the variable set.
+
+Restart is required: `MAX_BOT_REGISTRY` is parsed once at settings
+import (`config/settings/base.py`).
+
+What to check after the restart, in this order — the first one is the
+regression that caused the 30.08 rollback:
+
+1. Send anything to the salon bot as a staff member. The menu must
+   answer **with** the «🏠 Кабинет салона» button. A silent bot means the
+   `open_app` payload is being rejected again; roll the line back and
+   re-open DRF-1504 rather than debugging live.
+2. `POST /api/v1/admin/masters/invite` — `invite_link` must now be
+   `https://max.ru/id583403546770_3_bot?start=master_invite_<uuid>`
+   instead of `""`.
+3. `admin_api.invite.no_start_link` WARNING must stop appearing. While
+   it does appear, it names exactly what is still unset.
+
+Rollback is the same line commented out plus a restart: the code path
+degrades to the pre-DRF-1504 state (empty `invite_link`, no Mini App
+button, working menu) rather than failing —
+`apps/channels/tests/test_salon_web_app_enablement.py::TestWithoutItNothingBreaks`
+is that guarantee.
 
 Opening the link never spends the invitation: the bot validates and
 delivers, and the token is consumed only by `/onboarding/accept` inside
