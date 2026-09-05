@@ -197,6 +197,13 @@ def test_master_is_reachable_without_any_specialization_text(
     assert "Массажист Пилот" in reply.text
 
 
+def _buttons(reply) -> list[dict[str, str]]:
+    """The chips of a reply, or [] — the shape the MAX handler reads."""
+    if reply.action_data is None:
+        return []
+    return reply.action_data["attachments"][0]["payload"]["buttons"]
+
+
 def test_genuinely_absent_service_still_falls_back(
     monkeypatch, penza_massage_salon: CatalogMaster
 ) -> None:
@@ -213,7 +220,14 @@ def test_genuinely_absent_service_still_falls_back(
         tool_args={"city": "Пенза", "specialization": "наращивание ресниц"},
     )
 
-    assert reply.action_data is None
+    # No master cards — that is what «refuses» means here, and it is the
+    # assertion this line has always been about.
+    assert [
+        b["callback"] for b in _buttons(reply) if b["callback"].startswith("cb:discover:")
+    ] == []
+    # DRF-1492 — but the refusal is not a dead end: it ends at «или посмотрите,
+    # какие салоны есть» and carries the chip that shows them.
+    assert [b["callback"] for b in _buttons(reply)] == ["cb:catalog:salons"]
     # Refuses…
     assert "Массажист Пилот" not in reply.text
     # …while showing the request was understood, both halves of it.
