@@ -166,10 +166,13 @@ class CatalogSyncService:
             # Ayla filters salon-services by the exact ``?tenant=`` UUID. An
             # empty result on a run that succeeded (no error) is either a
             # genuinely empty catalog OR a tenant-id mismatch — the bot
-            # ``Tenant.id`` must equal the Ayla Tenant UUID (it does for
-            # Ayla-provisioned tenants; ``create_tenant`` mints a local
-            # uuid4). Warn so a mis-provisioned pilot tenant can't silently
-            # ship an empty mirror that looks identical to a healthy one.
+            # ``Tenant.id`` must equal the Ayla Tenant UUID. Since DRF-1510
+            # ``create_tenant --id <ayla-tenant-uuid>`` states it at
+            # provisioning time and warns when it is omitted; a row created
+            # before that (or without the flag) carries a local uuid4 and
+            # lands here every cycle. Warn so a mis-provisioned pilot tenant
+            # can't silently ship an empty mirror that looks identical to a
+            # healthy one.
             logger.warning(
                 "catalog.sync.empty_fetch tenant_id=%s — Ayla returned 0 "
                 "salon-services; if this salon has a catalog, verify Tenant.id "
