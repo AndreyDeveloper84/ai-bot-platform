@@ -273,8 +273,8 @@ Prerequisites already in place on the pilot — verify, do not assume:
   other (`.env.staging.template`, TRAP 1).
 - `MAX_BOT_SALON_TENANT_SLUG=formula-tela` and
   `MAX_BOT_SALON_STREAM=max_salon`. `_bot_start_link` resolves the entry
-  by `(tenant, stream)`, so a missing either one leaves `invite_link`
-  empty with the variable set.
+  by `(tenant, stream)` — if either is missing, `invite_link` stays `""`
+  even with `MAX_BOT_SALON_WEB_APP` set, and the WARNING keeps firing.
 
 Restart is required: `MAX_BOT_REGISTRY` is parsed once at settings
 import (`config/settings/base.py`).
