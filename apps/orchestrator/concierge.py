@@ -89,7 +89,13 @@ from apps.orchestrator.discovery import (
 )
 from apps.orchestrator.fast_path import claims_direct_show_masters
 from apps.orchestrator.handoff import handoff_to_booking
-from apps.orchestrator.llm.templates import get_fallback
+from apps.orchestrator.llm.templates import (
+    get_booking_needs_name,
+    get_fallback,
+    get_no_answer,
+    get_no_answer_retry,
+    get_not_parsed,
+)
 from apps.orchestrator.nutrition_global import (
     NUTRITION_TOOL_ACTIONS,
     NUTRITION_TOOL_SPECS,
@@ -1385,6 +1391,29 @@ def _render_zero_result(
     )
 
 
+def _render_pending(cards: list[Any], args: dict[str, Any]) -> DiscoveryReply:
+    """Render the last executed ``show_masters`` result deterministically.
+
+    Two branches reach for this for one reason: a pass died AFTER the tool
+    already returned data, and that data is a better answer than any degraded
+    line. An EMPTY list is not «no data», it is a searched zero, and since
+    DRF-1474 it gets the refusal that names an alternative rather than the
+    same one with a shorter tail.
+
+    DRF-1489 gave the second caller — a follow-up completion that came back
+    empty — the same treatment the raising one already had. Without it that
+    branch answered «AI недоступна» while holding the cards.
+    """
+
+    city = args.get("city")
+    specialization = args.get("specialization")
+    if cards:
+        return _render_master_cards(
+            cards[:_MAX_MASTER_CARDS], city=city, specialization=specialization
+        )
+    return _render_zero_result(city=city, specialization=specialization)
+
+
 def _repeats_a_refusal(conversation: Any, message_text: str) -> RefusedQuery | None:
     """The refusal this turn repeats, or ``None`` — decided WITHOUT the model.
 
@@ -1699,18 +1728,7 @@ def _concierge_turn(
                 # An EMPTY `pending_cards` is not «no data», it is a searched
                 # zero, and since DRF-1474 it gets the refusal that names an
                 # alternative rather than the same one with a shorter tail.
-                rendered = (
-                    _render_master_cards(
-                        pending_cards[:_MAX_MASTER_CARDS],
-                        city=pending_args.get("city"),
-                        specialization=pending_args.get("specialization"),
-                    )
-                    if pending_cards
-                    else _render_zero_result(
-                        city=pending_args.get("city"),
-                        specialization=pending_args.get("specialization"),
-                    )
-                )
+                rendered = _render_pending(pending_cards, pending_args)
                 return _reply(
                     text=rendered.text,
                     action_data=rendered.action_data,
@@ -1934,11 +1952,18 @@ def _concierge_turn(
             )
         # Parser refused the phrase the model passed (or the skill
         # declined): fall back to whatever text the model produced
-        # alongside the call, else the safe line.
+        # alongside the call, else the line that asks for other words.
+        #
+        # DRF-1489 — NOT an outage. The model was reached, it picked the right
+        # tool, and the skill's parser could not read the phrase inside. A
+        # «Повторить» button would re-send the same words, the model would
+        # pick the same tool with the same arguments, and the parser would
+        # refuse them again — a button that loops. The old «отвечу через
+        # минуту» was worse: nobody returns to this turn at all.
         text = (dto.content or "").strip()
         if text:
             return _reply(text=text[:_MAX_REPLY_CHARS], persisted=True)
-        return _reply(text=get_fallback("ru"), persisted=True)
+        return _reply(text=get_not_parsed("ru"), persisted=True)
 
     if dto.action_type in PERSONAL_TOOL_ACTIONS:
         # DRF-1302/1305 — the person's own diary + memory. Deterministic
@@ -1955,10 +1980,16 @@ def _concierge_turn(
                 persisted=True,
             )
         # Unreachable (_KNOWN_TOOLS gates dispatch); degrade like its siblings.
+        #
+        # DRF-1489 — NOT an outage. If this ever fires it is our defect, not
+        # the vendor's, and dispatch is deterministic: the same message
+        # re-sent lands here again. «Повторить» would spend the person's
+        # patience on a guaranteed repeat; «отвечу через минуту» would spend
+        # it on a wait with no end.
         text = (dto.content or "").strip()
         if text:
             return _reply(text=text[:_MAX_REPLY_CHARS], persisted=True)
-        return _reply(text=get_fallback("ru"), persisted=True)
+        return _reply(text=get_no_answer("ru"), persisted=True)
 
     if dto.action_type == START_BOOKING_ACTION:
         # DRF-1354 — the model named a master and asked to book. Resolution
@@ -1981,10 +2012,15 @@ def _concierge_turn(
         # The call named nobody (a model that emitted ``start_booking`` with an
         # empty ``master``). Keep whatever it said alongside the call rather
         # than replacing a possibly fine sentence with the generic line.
+        #
+        # DRF-1489 — NOT an outage: the model answered, it just left out the
+        # one argument the tool needs. And the missing datum is known
+        # exactly, so the degraded line asks for THAT by name instead of
+        # apologising in general or promising a return nobody makes.
         text = (dto.content or "").strip()
         if text:
             return _reply(text=text[:_MAX_REPLY_CHARS], persisted=True)
-        return _reply(text=get_fallback("ru"), persisted=True)
+        return _reply(text=get_booking_needs_name("ru"), persisted=True)
 
     if dto.action_type in CATALOG_TOOL_ACTIONS:
         # DRF-1304 — salons / services selected by the model as tools. The
@@ -2010,11 +2046,15 @@ def _concierge_turn(
                 persisted=True,
             )
         # Unknown tool name is unreachable (_KNOWN_TOOLS gates dispatch), but
-        # degrade exactly like the nutrition branch if it ever happens.
+        # degrade exactly like the personal branch if it ever happens.
+        #
+        # DRF-1489 — NOT an outage, same reasoning as that branch: a
+        # dispatcher defect repeats identically on the next send, so neither
+        # the retry button nor the promise line would be honest here.
         text = (dto.content or "").strip()
         if text:
             return _reply(text=text[:_MAX_REPLY_CHARS], persisted=True)
-        return _reply(text=get_fallback("ru"), persisted=True)
+        return _reply(text=get_no_answer("ru"), persisted=True)
 
     if dto.action_type == ActionType.ASK_CLARIFICATION:
         data = dto.action_data or {}
@@ -2023,9 +2063,14 @@ def _concierge_turn(
             # No question text: either _dispatch_tool's internal degrade path
             # (unknown tool / malformed arguments — action_data carries only
             # "reason") or a genuine ask_clarification call with a blank
-            # question. Same safe fallback as an LLM error — never send an
-            # empty clarification.
-            return _reply(text=get_fallback("ru"), persisted=True)
+            # question. Never send an empty clarification.
+            #
+            # DRF-1489 — NOT an outage, and no longer the same line as an LLM
+            # error. The model was reached and it replied; what it replied
+            # cannot be shown. Offering «Повторить» for a turn that WAS taken
+            # would be the second way of lying, and «отвечу через минуту»
+            # was the first.
+            return _reply(text=get_no_answer("ru"), persisted=True)
         rendered = _render_ask_clarification(
             question,
             list(data.get("options") or []),
@@ -2039,7 +2084,41 @@ def _concierge_turn(
 
     text = (dto.content or "").strip()
     if not text:
-        return _reply(text=get_fallback("ru"), persisted=True)
+        # DRF-1489 — the ONE of the six that IS an outage. The model was
+        # reached and produced nothing at all: no tool, no prose. There is no
+        # answer here to call good or bad — the turn did not happen — and the
+        # only remedy is the same message sent again, which is exactly what
+        # «Повторить» does. So it joins the unreachable-model case: the
+        # channel draws «AI недоступна» from макет C01, and the promise the
+        # outage line makes is one the button keeps.
+        #
+        # Unless this turn is holding real data. A ``show_masters`` pass that
+        # ran and then died on an empty follow-up completion still has the
+        # cards; rendering them beats any screen, and offering «Повторить»
+        # over an answer we already have would be the same lie pointing the
+        # other way.
+        if pending_cards is not None:
+            rendered = _render_pending(pending_cards, pending_args)
+            return _reply(
+                text=rendered.text,
+                action_data=rendered.action_data,
+                persisted=True,
+            )
+        # Its OWN line, not the llm_error one: «отвечу через минуту» promises
+        # a return, and here nothing is coming on its own — what is on offer
+        # is another attempt, which is what the button does. Text and button
+        # make the same offer (owner's ruling on DRF-1489).
+        #
+        # In MAX the person does not read this sentence today: the channel
+        # substitutes the C01 screen text for every ``outage=True`` reply
+        # (``handler.py`` → ``AI_UNAVAILABLE_TEXT``). The button is there and
+        # correct; only the wording still comes from the shared screen, and
+        # changing that needs a handler this ticket may not touch.
+        #
+        # ``persisted`` stays False on purpose: the store has nothing worth
+        # keeping (the completion was empty), so the channel records its own
+        # line — exactly as on the llm_error path above.
+        return _reply(text=get_no_answer_retry("ru"), outage=True)
     # DRF-1354 — the multi-pass prose reply carried NO keyboard. DRF-1266
     # feeds the executed ``show_masters`` result back so the model can phrase
     # it warmly, and the deterministic card render — the only thing that ever
