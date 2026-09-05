@@ -144,7 +144,7 @@ export function MyVisitDetailScreen() {
     setService(b.service_id, b.service_name);
     setMaster(b.master_id, b.master_name);
     setVisitAt(null);
-    navigate(`/my-visits/${b.id}/reschedule`);
+    navigate(`/customer/records/${b.id}/reschedule`);
   }
 
   if (state.kind === "loading") {

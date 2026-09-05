@@ -247,8 +247,9 @@ export function CustomerRecordsScreen() {
 
   const handleReschedule = useCallback(
     (b: RecordItem) => {
-      // Real reschedule flow (existing screen, /my-visits namespace).
-      navigate(`/my-visits/${b.bookingId}/reschedule`);
+      // Real reschedule flow (единственный экран переноса; канонический
+      // адрес — `/customer/records/:id/reschedule`, DRF-1481).
+      navigate(`/customer/records/${b.bookingId}/reschedule`);
     },
     [navigate],
   );

@@ -168,7 +168,7 @@ export function MyVisitsScreen() {
                     className="btn-secondary"
                     onClick={(e) => {
                       e.stopPropagation();
-                      navigate(`/my-visits/${b.id}/reschedule`);
+                      navigate(`/customer/records/${b.id}/reschedule`);
                     }}
                   >
                     Перенести

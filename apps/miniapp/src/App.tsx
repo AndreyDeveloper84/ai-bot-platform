@@ -1131,6 +1131,16 @@ export function CustomerRoutes() {
         decision-context на каждой опечатке в ссылке не нужен.
       */}
       <Route path="/" element={<CustomerEntryScreen />} />
+      {/*
+        DRF-1481 — compatibility aliases старого поколения. Ни один
+        продюсер ссылок в этом репозитории (бот, уведомления, скиllы)
+        больше не выдаёт адресов вне `/customer/*`, поэтому «deep-links
+        from bot DMs» как основание устарело: алиасы остаются страховкой
+        для СТАРЫХ внешних ссылок, ушедших наружу ранее (пересланные
+        сообщения, закладки, сторонние посты). Внутренние переходы на
+        них не ведут. Удаление самих экранов — отдельная задача
+        (DRF-1485).
+      */}
       <Route path="/catalog" element={<CatalogScreen />} />
       <Route path="/catalog/:serviceId" element={<ServiceDetailScreen />} />
       <Route path="/book/master" element={<MasterPickerScreen />} />
@@ -1140,10 +1150,7 @@ export function CustomerRoutes() {
       {/*
         Customer booking flow F1-F5 — Tier 1 Priority 3 Phase B
         (Ayla-first reskin per docs/screens/customer-booking-flow.md).
-        Runs alongside the legacy /catalog + /book/* routes; F1 reads
-        the real mirror catalog since pilot phase 3.1. The legacy routes
-        stay reachable for deep-links from bot DMs and reschedule
-        flows.
+        F1 reads the real mirror catalog since pilot phase 3.1.
       */}
       {/* Home = «Мои записи» (pilot phase 3.2, orchestrator decision):
           records on real data is the pilot home. The wellness dashboard
@@ -1166,6 +1173,17 @@ export function CustomerRoutes() {
         element={<CustomerWellnessDashboardScreen />}
       />
       <Route path="/customer/catalog" element={<CustomerCatalogScreen />} />
+      {/*
+        DRF-1481 — канонический адрес общей карточки услуги. Тот же
+        `ServiceDetailScreen`, что на алиасе `/catalog/:serviceId`
+        выше: карточка — общий узел трёх входов (оба каталога и подборы
+        wellness), а не экран старого поколения, поэтому она
+        канонизирована, а не удалена.
+      */}
+      <Route
+        path="/customer/catalog/:serviceId"
+        element={<ServiceDetailScreen />}
+      />
       <Route
         path="/customer/masters/:masterId"
         element={<CustomerMasterDetailScreen />}
@@ -1183,12 +1201,22 @@ export function CustomerRoutes() {
         element={<CustomerBookingSuccessScreen />}
       />
       {/* Tier 1 Priority 5 Phase B — customer records (Tau R1-R6).
-          New canonical routes. Legacy /my-visits stays mounted for
-          deep links from bot DMs + reschedule flows. */}
+          New canonical routes. Legacy /my-visits stays mounted as a
+          compatibility alias (см. комментарий у алиасов выше). */}
       <Route path="/customer/records" element={<CustomerRecordsScreen />} />
       <Route
         path="/customer/records/:bookingId"
         element={<CustomerBookingDetailScreen />}
+      />
+      {/*
+        DRF-1481 — канонический адрес переноса записи. `RescheduleScreen`
+        — единственный экран переноса, общий для обеих карточек; до
+        уборки он жил только по legacy-адресу. Старый маршрут ниже
+        остаётся compatibility-алиасом на тот же компонент.
+      */}
+      <Route
+        path="/customer/records/:bookingId/reschedule"
+        element={<RescheduleScreen />}
       />
       <Route path="/my-visits" element={<MyVisitsScreen />} />
       <Route path="/my-visits/:bookingId" element={<MyVisitDetailScreen />} />
@@ -1198,7 +1226,7 @@ export function CustomerRoutes() {
       />
       {/* Tier 1 Priority 6 Phase B — customer profile tab (Tau R1-R6,
           deferred Variant 3 per tech-lead 2026-06-01). New canonical
-          route. Legacy /me stays mounted for bot DM deeplinks. */}
+          route. Legacy /me stays mounted as a compatibility alias. */}
       <Route path="/customer/profile" element={<CustomerProfileScreen />} />
       <Route
         path="/customer/notification-settings"
