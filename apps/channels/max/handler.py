@@ -120,6 +120,7 @@ from apps.channels.max.quick_actions import (
     is_stale_tap,
     resolve_tap_text,
 )
+from apps.orchestrator.llm.templates import get_fallback
 from apps.channels.max.photo import (
     PhotoDownloadError,
     PhotoTooLargeError,
@@ -1833,8 +1834,48 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
                             bot_user.id,
                             trace_id,
                         )
+                        # DRF-1489 — слова берутся у консьержа, когда он сказал
+                        # СВОИ.
+                        #
+                        # Правка пришла из DRF-1489 и делается здесь потому,
+                        # что она целиком в этом файле: тому исполнителю
+                        # handler.py трогать было нельзя, и он остановился на
+                        # границе, оставив разрыв описанным в докстринге
+                        # ``templates.NO_ANSWER_RETRY_RU``.
+                        #
+                        # Разрыв был такой: строка собиралась заново, текст
+                        # ответа затирался целиком, и утверждённая владельцем
+                        # формулировка для случая «модель вызвали, ответа не
+                        # вышло» — «Не получилось подготовить ответ. Попробовать
+                        # ещё раз?» — до человека не доходила никогда. Он читал
+                        # слова соседней ветки, про подключение, под кнопкой
+                        # «Повторить», которая работала.
+                        #
+                        # Подменяется РОВНО общий outage-шаблон, и ничего
+                        # больше. ``AI_UNAVAILABLE_TEXT`` — дословный текст
+                        # макета C01 для состояния «AI недоступна», то есть для
+                        # ветки llm_error, которая как раз этот шаблон и
+                        # приносит; для неё всё остаётся как было. Любая другая
+                        # строка — это выбор консьержа, сделанный осознанно, и
+                        # затирать его канал не вправе.
+                        #
+                        # Сравнение с шаблоном, а не проверка «текст пустой»:
+                        # ветка llm_error приходит сюда с непустым
+                        # ``OUTAGE_RU``, и на пустоте условие просто не
+                        # сработало бы. Сравнение с getter'ом, а не с
+                        # константой, — чтобы правка формулировки в
+                        # ``templates`` не разъехалась с этой строкой молча.
+                        #
+                        # Константа не тронута, кнопка не тронута: «Повторить»
+                        # ставится по флагу outage, как и раньше.
+                        _generic_outage = {get_fallback("ru"), get_fallback("en")}
                         reply = DiscoveryReply(
-                            text=AI_UNAVAILABLE_TEXT,
+                            text=(
+                                AI_UNAVAILABLE_TEXT
+                                if (turn_reply.reply_text or "") in _generic_outage
+                                or not turn_reply.reply_text
+                                else turn_reply.reply_text
+                            ),
                             action_data=ai_unavailable_action_data(),
                             persisted=turn_reply.assistant_persisted,
                         )
@@ -2539,6 +2580,14 @@ def _handle_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.UUID | N
     # До отправки — как ``record_message`` выше: ``send_message`` пробрасывает
     # MaxAPIError, автоматического ретрая нет, и упавший ход не должен
     # оставлять диалог с меткой «здесь ничего не говорили».
+    #
+    # Читается ИМЕННО объект в памяти, и это часть корректности, а не
+    # экономия запроса. В память состояние попадает только отсюда — из
+    # ``create_admin_task`` этого же хода. Флип, случившийся параллельно в
+    # другом процессе (глобальный путь завёл задачу на этом салонном
+    # диалоге, пока ход шёл), в памяти не виден — и не должен быть виден:
+    # ЭТОТ диалог тогда ничего человеку не объявлял, и метка была бы
+    # ложной. ``refresh_from_db()`` здесь сломает инвариант молча.
     if conversation.state == Conversation.State.HUMAN_HANDOFF:
         mark_handoff_announced(conversation=conversation, chat_id=event.chat_id)
 

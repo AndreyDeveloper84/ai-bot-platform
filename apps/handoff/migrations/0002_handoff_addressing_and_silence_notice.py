@@ -41,12 +41,18 @@ def address_existing_tasks(apps, schema_editor):
     # Only the backlog that is ALREADY late. A task opened minutes before the
     # deploy has not missed anything yet, and stamping it would quietly
     # exempt it from the very sweep this migration ships.
+    #
+    # A zero SLA means the sweep is switched OFF, and then there is no such
+    # thing as «already late» — with `now - 0` the filter would match every
+    # open task and permanently exempt the entire backlog from the first
+    # pass of a sweep somebody turns on next week. Off means do nothing.
     sla = timedelta(minutes=int(getattr(settings, "HANDOFF_PICKUP_SLA_MINUTES", 0) or 0))
-    AdminTask.objects.filter(
-        status="open",
-        pickup_escalated_at__isnull=True,
-        created_at__lte=now - sla,
-    ).update(pickup_escalated_at=now)
+    if sla > timedelta(0):
+        AdminTask.objects.filter(
+            status="open",
+            pickup_escalated_at__isnull=True,
+            created_at__lte=now - sla,
+        ).update(pickup_escalated_at=now)
 
 
 class Migration(migrations.Migration):

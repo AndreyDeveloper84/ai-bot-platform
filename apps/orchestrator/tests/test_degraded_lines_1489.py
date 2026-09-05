@@ -340,12 +340,22 @@ class TestOutageStillGetsTheButton:
     """
 
     def test_unreachable_model_shows_the_screen_with_retry(self, monkeypatch, sent, fake_redis):
-        """Классический outage: до модели не дошли."""
+        """Классический outage: до модели не дошли.
+
+        Парная положительная стража к правке DRF-1489 в ``handler.py``:
+        второй экран остался прежним. Канал подменяет РОВНО общий
+        outage-шаблон (``get_fallback``), который приносит эта ветка, на
+        дословный текст макета C01 — и обещающая строка «отвечу через
+        минуту» до человека по-прежнему не доходит. Без этой половины
+        правка «брать текст у консьержа» могла бы незаметно вывести
+        обещание на экран, где его быть не должно.
+        """
         _model(monkeypatch, raises=RuntimeError("vendor 500"))
 
         screen = _screen(sent)
 
         assert screen["text"] == AI_UNAVAILABLE_TEXT
+        assert screen["text"] != PROMISE
         assert screen["buttons"] == [RETRY_LABEL]
 
     def test_retry_button_payload_is_the_live_one(self, monkeypatch, sent, fake_redis):
@@ -358,7 +368,7 @@ class TestOutageStillGetsTheButton:
         buttons = _buttons(sent[-1]["attachments"])
         assert buttons[0]["payload"] == RETRY_CALLBACK
 
-    def test_empty_completion_with_nothing_in_hand_is_an_outage(
+    def test_empty_completion_shows_the_owners_line_with_the_button(
         self, monkeypatch, sent, fake_redis
     ):
         """Модель ответила пустотой — ход не состоялся.
@@ -366,23 +376,28 @@ class TestOutageStillGetsTheButton:
         Оценивать тут нечего: ответа нет вовсе. Лекарство ровно одно — та же
         реплика ещё раз, и это ровно то, что делает «Повторить». Поэтому
         единственный из шести, который классифицирован как outage.
+
+        И с DRF-1489 (продолжение в handler.py) человек читает здесь именно
+        утверждённую владельцем строку, а не слова соседней ветки про
+        подключение: канал больше не затирает текст ответа. Раньше на этом
+        месте стоял ``AI_UNAVAILABLE_TEXT`` — тест поменян вместе с
+        поведением, которое он описывает.
         """
         _model(monkeypatch, _empty_text())
 
         screen = _screen(sent)
 
-        assert screen["text"] == AI_UNAVAILABLE_TEXT
+        assert screen["text"] == templates.NO_ANSWER_RETRY_RU
+        assert screen["text"] != AI_UNAVAILABLE_TEXT
         assert screen["buttons"] == [RETRY_LABEL]
 
     def test_empty_completion_says_its_own_line_not_the_promise(self, monkeypatch, fake_redis):
         """Что говорит САМ консьерж на этом ходу.
 
-        Экран выше — общий для обоих outage'ов: канал подставляет текст
-        макета C01 любому ответу с ``outage=True`` (``handler.py`` →
-        ``AI_UNAVAILABLE_TEXT``), и этот тикет ему в руки не давали. Поэтому
-        строка владельца «Не получилось подготовить ответ. Попробовать ещё
-        раз?» проверяется там, где она сегодня и живёт — в самом ответе
-        консьержа. Кнопка при этом настоящая: её ставит тот же ``outage``.
+        Дубль к экранному тесту выше — по слою: тот проверяет, что строка
+        доехала до MAX, этот — что она вообще была выбрана. Разъехаться они
+        могут (канал снова начнёт подставлять своё), и тогда красным станет
+        верхний, назвав виновного точнее.
 
         Разница с ``llm_error`` здесь и пришпилена: обещания «отвечу через
         минуту» на этом ходу нет, потому что само собой ничего не придёт.

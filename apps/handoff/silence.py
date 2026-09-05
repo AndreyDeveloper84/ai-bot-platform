@@ -342,11 +342,19 @@ def _send(*, chat_id: str, text: str) -> None:
 def _record(*, conversation: "Conversation", text: str, action_type: str, trace_id: object) -> None:
     """Persist the notice as an assistant turn — transcript, not memory.
 
-    It goes into ``Message`` so the operator opening the dialog sees what
-    the client actually saw, and it deliberately does NOT go into
+    It goes into ``Message`` so the operator opening the dialog can read
+    what the bot said to this person, and it deliberately does NOT go into
     short-term memory: the concierge grounds its next reply on what the
     person and the bot discussed, and «я сейчас молчу» is not part of that
     conversation.
+
+    What is recorded is the INTENT, not a delivery receipt — the row is
+    written even when the send that precedes it failed. That is the house
+    convention (``handler.py`` records the assistant turn before
+    ``send_message`` for exactly this reason: a failed send must not lose
+    the record of what was meant), and the alternative is worse — a dialog
+    whose transcript silently omits turns is unreadable as evidence. The
+    delivery outcome lives in the log line next to it.
     """
 
     from apps.conversations.services import record_global_message, record_message
