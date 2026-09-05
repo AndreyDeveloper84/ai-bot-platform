@@ -49,12 +49,18 @@ export async function request<T>(path: string, init: RequestInit = {}): Promise<
  *   - `price_quoted`  : int | float  (NOTE: not `price_rub`)
  *   - `note`          : str  (truncated to 500 chars server-side)
  *   - `loyalty_apply` : bool (NOTE: not `loyalty_choice`)
+ *   - `entry_point`   : str  (provenance, DRF-1484 §24.5; truncated to
+ *                             64 chars server-side)
  *
  * Field-name mismatch with the frontend sessionStorage shape
  * (`PendingBookingIntent` in `pending-booking-intent.ts`) is by
  * design — the backend cache schema is the source of truth and the
  * sessionStorage fallback was specced earlier; the booking-confirm
  * screen normalises both shapes when restoring.
+ *
+ * `tenant_id` is deliberately NOT part of this contract (§24.5 owner
+ * decision): tenant belongs to the execution/request context and is
+ * server-resolved, never a property of the durable intent snapshot.
  */
 export interface ServerPendingBookingIntent {
   master_id: string;
@@ -63,6 +69,7 @@ export interface ServerPendingBookingIntent {
   price_quoted?: number;
   note?: string;
   loyalty_apply?: boolean;
+  entry_point?: string;
 }
 
 export interface AuthVerifyResponse {

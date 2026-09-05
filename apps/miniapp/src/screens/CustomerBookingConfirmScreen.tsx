@@ -61,9 +61,10 @@ import { useClosingConfirmation } from "../hooks/useClosingConfirmation";
 import { useHaptics } from "../hooks/useHaptics";
 import { createCustomerBooking } from "../lib/customer-booking";
 import { formatMoney, formatVisitFull } from "../lib/format";
-import { getInitData, openPaymentConfirmation } from "../lib/max-sdk";
+import { getInitData, getStartPayload, openPaymentConfirmation } from "../lib/max-sdk";
 import { createPayment } from "../lib/payments";
 import {
+  resolveEntryPoint,
   restorePendingIntent,
   savePendingIntent,
 } from "../lib/pending-booking-intent";
@@ -290,6 +291,9 @@ export function CustomerBookingConfirmScreen() {
     // Spec §6.2 — P0 context preservation. Save BEFORE redirect to
     // OAuth; the callback restores from sessionStorage on mount.
     if (!draft.serviceId || !draft.masterId || !draft.visitAt) return;
+    // DRF-1484 / §24.5 — provenance rides the snapshot; tenant_id
+    // deliberately does NOT (tenant is execution-context, server-side).
+    const entryPoint = resolveEntryPoint(draft.entryPoint, getStartPayload());
     savePendingIntent({
       master_id: draft.masterId,
       service_id: draft.serviceId,
@@ -301,6 +305,7 @@ export function CustomerBookingConfirmScreen() {
       note: note || undefined,
       service_name: draft.serviceName ?? undefined,
       master_name: draft.masterName ?? undefined,
+      entry_point: entryPoint,
     });
     // W4 #844 defence-in-depth — also push the intent to the server
     // cache. Survives sessionStorage eviction + multi-device flows.
@@ -320,6 +325,7 @@ export function CustomerBookingConfirmScreen() {
         service_id: draft.serviceId,
         slot_iso: draft.visitAt,
         ...(note ? { note } : {}),
+        entry_point: entryPoint,
       },
     }).catch(() => {
       // Swallow — server-side caching is supplementary. sessionStorage
