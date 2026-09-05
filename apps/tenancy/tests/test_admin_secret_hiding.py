@@ -17,8 +17,15 @@ from django.test import Client
 from apps.tenancy.admin import TenantAdminForm
 from apps.tenancy.models import Tenant
 
-BOT_TOKEN = "1234567890:AAaaBBbbCCccDDddEEeeFFggHHiiJJkkLL"  # noqa: S105 — вымышленный
-WEBHOOK_SECRET = "s3cr3t-webhook-value-for-the-test"  # noqa: S105 — вымышленный
+# Значения фиктивные и выглядят фиктивными нарочно. Форма при этом
+# сохранена: у токена десять цифр, двоеточие и хвост, из которого
+# маскировка берёт последние четыре символа, — иначе проверка
+# маскировки была бы не про тот формат.
+BOT_TOKEN = "0000000000:ci-fake-not-a-real-bot-token-xxxx"
+# pragma ниже — потому что detect-secrets ловит присваивание по слову
+# SECRET в имени константы, каким бы ни было значение. Это не секрет:
+# строка придумана для теста и нигде, кроме него, не встречается.
+WEBHOOK_SECRET = "ci-fake-not-a-real-webhook-form-test"  # pragma: allowlist secret
 
 
 @pytest.fixture

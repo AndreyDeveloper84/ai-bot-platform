@@ -46,7 +46,11 @@ if TYPE_CHECKING:  # pragma: no cover - только для аннотаций
     from django.contrib.auth.models import AbstractUser
 
 #: Переменная окружения с паролем новой записи. Не аргумент — см. docstring.
-PASSWORD_ENV_VAR = "AYLA_ADMIN_PASSWORD"
+#:
+#: detect-secrets ловит это по слову PASSWORD в имени константы. Здесь
+#: лежит ИМЯ переменной окружения, а не значение: пароль читается из
+#: os.environ ниже и в коде не появляется никогда.
+PASSWORD_ENV_VAR = "AYLA_ADMIN_PASSWORD"  # pragma: allowlist secret
 
 #: Имена, под которыми обычно заводят «общую учётку на всех».
 #:
