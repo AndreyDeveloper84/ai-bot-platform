@@ -77,9 +77,17 @@ Never paste secrets into git, tickets, or this runbook.
 ## Step 2a — provision a multi-staff tenant (idempotent)
 
 ```bash
-python manage.py create_tenant --slug <salon-slug> --name "<Salon name>"
-# --dry-run to preview; re-runs are safe (get_or_create on slug).
+python manage.py create_tenant --slug <salon-slug> --name "<Salon name>" \
+  --id <ayla-tenant-uuid> --city "<City>"
+# --dry-run to preview; re-runs are safe (no-op on an existing slug).
 ```
+
+> **`--id` is not optional for a salon (DRF-1510).** Catalog sync fetches with
+> `?tenant=str(tenant.id)` and Ayla filters on its own Tenant UUID, so a
+> tenant minted without `--id` mirrors **zero** services while every counter
+> reads healthy. `--city` is what puts the salon into city-scoped discovery.
+> Full procedure, verification and recovery:
+> [`connect-five-salons-drf1510.md`](connect-five-salons-drf1510.md).
 
 ## Step 2b — provision a solo master
 
