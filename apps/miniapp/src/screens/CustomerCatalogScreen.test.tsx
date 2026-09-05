@@ -89,7 +89,7 @@ function renderScreen() {
     <MemoryRouter initialEntries={["/customer/catalog"]}>
       <Routes>
         <Route path="/customer/catalog" element={<CustomerCatalogScreen />} />
-        <Route path="/catalog/:serviceId" element={<ServiceProbe />} />
+        <Route path="/customer/catalog/:serviceId" element={<ServiceProbe />} />
         <Route path="/customer/masters/:masterId" element={<MasterProbe />} />
       </Routes>
     </MemoryRouter>,

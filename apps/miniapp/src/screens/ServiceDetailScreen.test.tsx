@@ -2,7 +2,9 @@
  * DRF-1164 — a service nobody can perform must be readable but not
  * bookable.
  *
- * `/catalog/:serviceId` is the single door into the booking flow from the
+ * `/customer/catalog/:serviceId` (canonical since DRF-1481; the legacy
+ * `/catalog/:serviceId` stays mounted as a compatibility alias on the
+ * same component) is the single door into the booking flow from the
  * service side: both catalog surfaces (`/catalog`, `/customer/catalog`),
  * the wellness picks, and bot deep-links by service id all land here. So
  * this screen is where the path is closed, and this file is what proves it
@@ -41,12 +43,17 @@ function service(overrides: Partial<Service> = {}): Service {
   };
 }
 
-function renderScreen() {
+function renderScreen(at = "/customer/catalog/svc-1164") {
   render(
-    <MemoryRouter initialEntries={["/catalog/svc-1164"]}>
+    <MemoryRouter initialEntries={[at]}>
       <Routes>
+        <Route
+          path="/customer/catalog/:serviceId"
+          element={<ServiceDetailScreen />}
+        />
+        {/* Compatibility alias (DRF-1481) — the same component. */}
         <Route path="/catalog/:serviceId" element={<ServiceDetailScreen />} />
-        <Route path="/catalog" element={<div>CATALOG</div>} />
+        <Route path="/customer/catalog" element={<div>CATALOG</div>} />
         <Route path="/book/master" element={<div>MASTER-PICKER</div>} />
       </Routes>
     </MemoryRouter>,
@@ -66,6 +73,17 @@ describe("ServiceDetailScreen — DRF-1164 unbookable service", () => {
       await screen.findByRole("button", { name: "Подобрать время" }),
     ).toBeInTheDocument();
     expect(screen.queryByText(/нет свободных мастеров/i)).not.toBeInTheDocument();
+  });
+
+  it("legacy alias mounts the same screen (DRF-1481)", async () => {
+    // Страховка для внешних ссылок, ушедших наружу ранее: старый адрес
+    // обязан открывать ту же карточку, а не 404 и не пустоту.
+    mockedFetchService.mockResolvedValue({ service: service() });
+    renderScreen("/catalog/svc-1164");
+    expect(
+      await screen.findByRole("heading", { name: /Гладкая кожа/ }),
+    ).toBeInTheDocument();
+    expect(mockedFetchService).toHaveBeenCalledWith("svc-1164");
   });
 
   it("shows the notice and withholds the CTA when nobody performs it", async () => {
@@ -102,8 +120,8 @@ describe("ServiceDetailScreen — DRF-1164 unbookable service", () => {
       screen.queryByRole("button", { name: "Подобрать время" }),
     ).not.toBeInTheDocument();
 
-    // The one control the screen does offer leads to the catalog, never
-    // into the flow.
+    // The one control the screen does offer leads to the (canonical)
+    // catalog, never into the flow.
     await userEvent.click(screen.getByRole("button", { name: "Другие услуги" }));
     expect(await screen.findByText("CATALOG")).toBeInTheDocument();
     expect(screen.queryByText("MASTER-PICKER")).not.toBeInTheDocument();

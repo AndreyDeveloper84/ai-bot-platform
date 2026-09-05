@@ -10,8 +10,9 @@
  * only what the backend serves (service, master, visit time, duration,
  * status, rating) plus actions wired to REAL endpoints:
  *
- *   - «Перенести» → `/my-visits/:id/reschedule` (real RescheduleScreen;
- *     gated by `reschedulable`);
+ *   - «Перенести» → `/customer/records/:id/reschedule` (real
+ *     RescheduleScreen; canonical address since DRF-1481; gated by
+ *     `reschedulable`);
  *   - «Отменить» → 2-step cancel with a 5s undo window — the proven
  *     flow mirrored from `MyVisitDetailScreen` (cancel request →
  *     snackbar undo → server confirm on timeout), gated by `cancellable`;
@@ -277,7 +278,7 @@ export function CustomerBookingDetailScreen() {
                 type="button"
                 className="btn-secondary"
                 style={{ flex: 1 }}
-                onClick={() => navigate(`/my-visits/${b.id}/reschedule`)}
+                onClick={() => navigate(`/customer/records/${b.id}/reschedule`)}
               >
                 Перенести
               </button>

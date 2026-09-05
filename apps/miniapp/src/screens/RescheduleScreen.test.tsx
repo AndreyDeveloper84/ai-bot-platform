@@ -1,5 +1,6 @@
 /**
- * Куда ведут выходы экрана переноса (DRF-1480).
+ * Куда ведут выходы экрана переноса (DRF-1480) и где он смонтирован
+ * (DRF-1481).
  *
  * Три перехода клиентского пути уводили человека в СТАРОЕ поколение
  * экранов. Самый дорогой из них — успешный перенос: он приземлял на
@@ -9,11 +10,11 @@
  * «Оценить визит». То есть человек после переноса записи терял
  * возможность оценить визит.
  *
- * Замер здесь прямой: маршрут назначения проверяется по тому, ЧТО
- * смонтировалось, а способность карточки — на настоящих экранах, а не
- * на заглушках. Старые маршруты остаются смонтированы для внешних
- * ссылок — уборка поколений отдельная задача (DRF-1481), поэтому тест
- * проверяет выбор назначения, а не отсутствие старого маршрута.
+ * DRF-1481: экран канонизирован на `/customer/records/:id/reschedule`;
+ * legacy-адрес остаётся compatibility-алиасом на тот же компонент
+ * (страховка для внешних ссылок, ушедших наружу ранее). Замер прямой:
+ * маршрут назначения проверяется по тому, ЧТО смонтировалось, а
+ * способность карточки — на настоящих экранах, а не на заглушках.
  */
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
@@ -75,10 +76,12 @@ function Probe({ label }: { label: string }) {
   return <div>{`${label}:${bookingId ?? "-"}`}</div>;
 }
 
-function renderReschedule() {
+function renderReschedule(at = `/customer/records/${OLD_ID}/reschedule`) {
   render(
-    <MemoryRouter initialEntries={[`/my-visits/${OLD_ID}/reschedule`]}>
+    <MemoryRouter initialEntries={[at]}>
       <Routes>
+        {/* Канонический адрес (DRF-1481) + compatibility alias. */}
+        <Route path="/customer/records/:bookingId/reschedule" element={<RescheduleScreen />} />
         <Route path="/my-visits/:bookingId/reschedule" element={<RescheduleScreen />} />
         <Route path="/customer/records/:bookingId" element={<Probe label="НОВАЯ КАРТОЧКА" />} />
         <Route path="/my-visits/:bookingId" element={<Probe label="СТАРАЯ КАРТОЧКА" />} />
@@ -135,6 +138,31 @@ describe("успешный перенос приземляет в новое п�
 
     expect(screen.getByText("НОВЫЙ КАТАЛОГ")).toBeInTheDocument();
     expect(screen.queryByText("СТАРЫЙ КАТАЛОГ")).toBeNull();
+  });
+});
+
+describe("канонический адрес и алиас (DRF-1481)", () => {
+  it("возврат ведёт в каноническую карточку записи, а не в старую", async () => {
+    // При входе по deep link истории нет — родитель задан адресом.
+    renderReschedule();
+    await screen.findByRole("radio", { name: "12:00" });
+
+    await userEvent.click(screen.getByRole("button", { name: "Назад" }));
+
+    // Присутствие: приехали в карточку ТОЙ записи, которую переносили…
+    expect(await screen.findByText(`НОВАЯ КАРТОЧКА:${OLD_ID}`)).toBeInTheDocument();
+    // …и только тогда осмысленно: старая не смонтирована.
+    expect(screen.queryByText(`СТАРАЯ КАРТОЧКА:${OLD_ID}`)).toBeNull();
+  });
+
+  it("legacy-алиас монтирует тот же экран с тем же id", async () => {
+    // Страховка для внешних ссылок, ушедших наружу ранее: старый адрес
+    // обязан открывать тот же перенос, а не 404 и не пустоту.
+    renderReschedule(`/my-visits/${OLD_ID}/reschedule`);
+
+    // Присутствие: экран переноса загрузился и показывает слоты.
+    expect(await screen.findByRole("radio", { name: "12:00" })).toBeInTheDocument();
+    expect(mockedBooking).toHaveBeenCalledWith(OLD_ID);
   });
 });
 

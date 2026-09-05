@@ -25,15 +25,16 @@ vi.mock("./lib/admin-api", async (importOriginal) => {
 
 vi.mock("./lib/api", async (importOriginal) => {
   const original = await importOriginal<typeof import("./lib/api")>();
-  return { ...original, fetchBooking: vi.fn() };
+  return { ...original, fetchBooking: vi.fn(), fetchSlots: vi.fn() };
 });
 
 import { getMe, type MeResponse } from "./lib/admin-api";
-import { fetchBooking, type BookingItem } from "./lib/api";
+import { fetchBooking, fetchSlots, type BookingItem } from "./lib/api";
 import { App } from "./App";
 
 const mockedGetMe = vi.mocked(getMe);
 const mockedFetchBooking = vi.mocked(fetchBooking);
+const mockedFetchSlots = vi.mocked(fetchSlots);
 
 const CUSTOMER_ME: MeResponse = {
   user: { id: "u-1", name: "Ольга", phone_masked: "+7 *** **12" },
@@ -79,6 +80,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   mockedGetMe.mockResolvedValue(CUSTOMER_ME);
   mockedFetchBooking.mockResolvedValue({ booking: BOOKING });
+  mockedFetchSlots.mockResolvedValue({ slots: [] });
 });
 
 describe("canonical record route registration", () => {
@@ -94,5 +96,27 @@ describe("canonical record route registration", () => {
   it("legacy /my-visits/:bookingId stays mounted (external deep links)", async () => {
     renderAppAt("/my-visits/bk-77");
     expect(await screen.findByText("Маникюр")).toBeInTheDocument();
+  });
+});
+
+describe("canonical reschedule route registration (DRF-1481)", () => {
+  it("/customer/records/:bookingId/reschedule resolves to the real reschedule screen", async () => {
+    renderAppAt("/customer/records/bk-77/reschedule");
+    // Real reschedule screen (not a 404 / not the booking detail).
+    expect(
+      await screen.findByRole("heading", { name: "Перенести" }),
+    ).toBeInTheDocument();
+    // The id from the URL is the id the screen actually loads.
+    expect(mockedFetchBooking).toHaveBeenCalledWith("bk-77");
+  });
+
+  it("legacy /my-visits/:bookingId/reschedule alias mounts the same screen", async () => {
+    // Compatibility alias — страховка для старых внешних ссылок,
+    // ушедших наружу ранее. Тот же компонент, тот же id.
+    renderAppAt("/my-visits/bk-77/reschedule");
+    expect(
+      await screen.findByRole("heading", { name: "Перенести" }),
+    ).toBeInTheDocument();
+    expect(mockedFetchBooking).toHaveBeenCalledWith("bk-77");
   });
 });

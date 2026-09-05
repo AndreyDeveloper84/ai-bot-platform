@@ -20,8 +20,14 @@
  * выставленную оценку и не имеет кнопки «Оценить визит» — человек после
  * переноса терял возможность оценить визит. «Каталог» из состояния
  * «сирота» — тоже новый `/customer/catalog`. Образец перевода —
- * `CustomerBookingSuccessScreen`. Старые маршруты остаются смонтированы
- * для внешних ссылок; уборка поколений — отдельная задача (DRF-1481).
+ * `CustomerBookingSuccessScreen`.
+ *
+ * Канонический адрес (DRF-1481) — `/customer/records/:id/reschedule`.
+ * До уборки экран был смонтирован только по legacy-адресу
+ * `/my-visits/:id/reschedule`, и обе карточки вели туда. Старый маршрут
+ * остаётся compatibility-алиасом на этот же компонент (страховка для
+ * внешних ссылок, ушедших наружу ранее); все внутренние переходы идут
+ * на канонический адрес.
  */
 
 import { useCallback, useEffect, useMemo, useState } from "react";
@@ -69,8 +75,9 @@ export function RescheduleScreen() {
 
   // Возврат (DRF-1493) — к самой записи, которую переносят. Адрес несёт
   // её id, поэтому родитель известен и при входе по ссылке из бота.
+  // Каноническая карточка — `/customer/records/:id` (DRF-1481).
   const back = backTo(
-    bookingId ? `/my-visits/${bookingId}` : "/my-visits",
+    bookingId ? `/customer/records/${bookingId}` : "/customer/records",
   );
 
   const load = useCallback(() => {

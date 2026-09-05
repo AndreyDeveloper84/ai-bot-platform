@@ -86,7 +86,7 @@ function renderScreen(bookingId: string) {
     <MemoryRouter initialEntries={[`/customer/records/${bookingId}`]}>
       <Routes>
         <Route path="/customer/records/:bookingId" element={<CustomerBookingDetailScreen />} />
-        <Route path="/my-visits/:bookingId/reschedule" element={<Probe />} />
+        <Route path="/customer/records/:bookingId/reschedule" element={<Probe />} />
         <Route path="/feedback/:bookingId" element={<Probe />} />
         <Route path="/customer/catalog" element={<div>CATALOG-PROBE</div>} />
       </Routes>
