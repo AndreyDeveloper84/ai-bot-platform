@@ -903,15 +903,35 @@ class TestSlotPickCallback:
         ]
         assert PendingBookingAction.all_tenants.count() == 0
 
-    def test_slot_taken_without_alternatives(self, context: SkillContext, tenant: Tenant) -> None:
-        """No slots left that day → plain safe message, no keyboard, no
-        pending row, no handoff."""
+    def test_slot_taken_without_alternatives_offers_other_dates(
+        self, context: SkillContext, tenant: Tenant
+    ) -> None:
+        """No slots left that day → «выберите другую дату» WITH the dates.
+
+        DRF-1490 / ``docs/OPEN_DECISIONS.md`` §25 п.5, owner 04.09.2026.
+        This test used to assert ``result.action_data is None`` — that the
+        reply arrived with no keyboard at all. The owner read the branch on
+        the pilot and ruled the missing picker a fossilised bug rather than
+        a decision: the sentence tells the person to choose another date
+        and the free-text branch of the flow cannot get them back to this
+        master's calendar, so the instruction was unfollowable.
+
+        Everything the old assertion actually guarded is kept and still
+        asserted below — no pending row, no handoff, no LLM call, the
+        «занято» wording — because none of that was the defect. Only the
+        expectation about the keyboard is inverted, and it is inverted on
+        the data that makes it meaningful: a master who HAS other free
+        days. The case where he genuinely has none keeps the old
+        no-keyboard expectation, in the test right after this one.
+        """
         from apps.booking.models import PendingBookingAction
 
         client = FakeYClients()
         client.services_rows = [_service(22)]
         client.staff_rows = [_staff(11)]
         client.times = []
+        other_day = (_dt.date.fromisoformat(BOOKING_DATE) + _dt.timedelta(days=1)).isoformat()
+        client.dates = [BOOKING_DATE, other_day]
         ctx = SkillContext(
             conversation=context.conversation,
             bot_user=context.bot_user,
@@ -923,6 +943,46 @@ class TestSlotPickCallback:
         mock_complete.assert_not_called()
         assert result.should_handoff is False
         assert "занято" in result.reply_text.lower()
+        assert "выберите другую дату" in result.reply_text.lower()
+        assert result.action_data is not None
+        assert result.action_data["kind"] == "date_pick"
+        # The dead-ended day is not offered back — tapping it returns here.
+        assert [
+            b["callback"] for b in result.action_data["attachments"][0]["payload"]["buttons"]
+        ] == [f"cb:book:pick_date:11:{other_day}:22"]
+        assert PendingBookingAction.all_tenants.count() == 0
+
+    def test_slot_taken_with_no_free_dates_left_sends_no_keyboard(
+        self, context: SkillContext, tenant: Tenant
+    ) -> None:
+        """The other half of the pair, and the one the old assertion was
+        really about: when there is nothing to offer, nothing is offered.
+
+        A picker built from an empty dates list would be a keyboard with no
+        buttons; a «выберите другую дату» above it would be a promise the
+        schedule cannot keep. So this branch changes the SENTENCE instead
+        and keeps ``action_data is None`` — the negative the rewritten test
+        above gave up, kept where it is true.
+        """
+        from apps.booking.models import PendingBookingAction
+
+        client = FakeYClients()
+        client.services_rows = [_service(22)]
+        client.staff_rows = [_staff(11)]
+        client.times = []
+        client.dates = []
+        ctx = SkillContext(
+            conversation=context.conversation,
+            bot_user=context.bot_user,
+            message_text=f"cb:book:pick_slot:11:22:{BOOKING_DATE}T14:00:00",
+        )
+        with _patch_yclients(client), _patch_provider_complete([]) as mock_complete:
+            with tenant_scope(tenant):
+                result = BookingSkill().handle(ctx)
+        mock_complete.assert_not_called()
+        assert result.should_handoff is False
+        assert "занято" in result.reply_text.lower()
+        assert "выберите другую дату" not in result.reply_text.lower()
         assert result.action_data is None
         assert PendingBookingAction.all_tenants.count() == 0
 

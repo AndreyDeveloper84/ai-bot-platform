@@ -232,17 +232,48 @@ class Tenant(models.Model):
         ),
     )
 
-    # Sprint 7 / C4 (DRF-575) — cursor for the catalog sync orchestrator.
-    # NULL = full-resync on the next beat (initial bootstrap or admin
-    # force-clear). Sync service writes the upstream `updated_at` of the
-    # most recent row pulled, so the next run's `?since=` filter only
-    # picks up rows mysite has touched since.
+    # Sprint 7 / C4 (DRF-575), re-labelled in DRF-1494.
+    #
+    # This is NOT a run timestamp and never was one, whatever its name
+    # suggests. `apps.catalog.services.sync` writes `max(external_updated_at)`
+    # across the rows it pulled — an UPSTREAM CONTENT WATERMARK. The `?since=`
+    # filter the original help_text described does not exist: Ayla's internal
+    # catalog exposes no such parameter (see the module docstring of
+    # apps/catalog/services/sync.py, § "No incremental cursor"), so every run
+    # is a full fetch and this value drives nothing.
+    #
+    # The distinction is the whole of DRF-1494. A salon whose catalog nobody
+    # has edited for three weeks shows a three-week-old value here on a
+    # perfectly healthy contour; a salon whose sync has been failing for
+    # three weeks shows exactly the same thing. The field cannot tell the two
+    # apart, so no alarm can be built on it — and for twelve days none was.
+    # `last_catalog_sync_ok_at` below is the field that answers "did it run".
     last_catalog_sync_at = models.DateTimeField(
         null=True,
         blank=True,
-        help_text="Cursor — `?since=` filter for the next catalog sync run. "
-        "NULL → full resync. Written by apps.catalog.services.sync after "
-        "a successful pull-upsert cycle.",
+        help_text="Upstream content watermark — max(updated_at) over the rows the "
+        "last successful pull returned. NOT a run timestamp: a static catalog "
+        "freezes this value on a healthy contour. Use last_catalog_sync_ok_at to "
+        "judge freshness of the SYNC.",
+    )
+
+    # DRF-1494 — when the catalog sync last completed successfully for this
+    # tenant. Wall-clock at completion, written by
+    # `apps.catalog.services.sync.CatalogSyncService` only on a run whose
+    # salon-services fetch succeeded.
+    #
+    # Separate column rather than a repurposed `last_catalog_sync_at`: the
+    # watermark above is read by anything that wants to know how fresh the
+    # CONTENT is, and collapsing the two would trade one blind spot for
+    # another. NULL means this tenant has never had a successful sync — which
+    # the staleness alarm reports as loudly as a stale one, because "never"
+    # and "not lately" are the same outage to the client on the other end.
+    last_catalog_sync_ok_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="Wall-clock of the last SUCCESSFUL catalog sync run for this "
+        "tenant. NULL → never synced. Age above CATALOG_SYNC_STALE_AFTER_SECONDS "
+        "pages the on-call channel (apps.catalog.tasks.alert_stale_catalog_sync).",
     )
 
     # P1 marketplace (#1018) — the salon's city, used to filter nationwide

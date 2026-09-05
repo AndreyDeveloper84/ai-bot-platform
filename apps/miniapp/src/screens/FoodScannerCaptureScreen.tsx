@@ -36,6 +36,8 @@ import {
   stripImageMetadata,
   type MealType,
 } from "../lib/food-scanner";
+import { useScreenBack } from "../hooks/useScreenBack";
+import { backTo } from "../lib/screen-back";
 
 const MEAL_TYPES: ReadonlyArray<MealType> = [
   "breakfast",
@@ -52,6 +54,10 @@ interface RouterIn {
 
 export function FoodScannerCaptureScreen() {
   const navigate = useNavigate();
+
+  // Возврат (DRF-1493) — на дом. Адрес тот же, что стоял здесь
+  // раньше; теперь он объявлен и заводит аппаратную кнопку MAX.
+  const onBack = useScreenBack(backTo("/customer/main"));
   const location = useLocation();
   const incoming = (location.state ?? {}) as RouterIn;
   const [consentAt, setConsentAt] = useState<string | null>(() =>
@@ -153,6 +159,7 @@ export function FoodScannerCaptureScreen() {
   if (consentAt === null) {
     return (
       <ConsentGate
+        onBack={onBack}
         onAccept={handleAcceptConsent}
         onDecline={handleDeclineConsent}
       />
@@ -166,7 +173,7 @@ export function FoodScannerCaptureScreen() {
           type="button"
           className="records-screen__back"
           aria-label="Назад"
-          onClick={() => navigate("/customer/main")}
+          onClick={onBack}
         >
           <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
             <path
@@ -303,13 +310,23 @@ export function FoodScannerCaptureScreen() {
 // ---------------------------------------------------------------------------
 
 function ConsentGate({
+  onBack,
   onAccept,
   onDecline,
 }: {
+  /**
+   * Возврат приходит готовым от экрана (DRF-1493).
+   *
+   * Своего `useScreenBack` здесь быть не должно: гейт живёт ВНУТРИ
+   * `FoodScannerCaptureScreen`, который объявление уже сделал. Два
+   * живых объявления давали два перехода на одно нажатие, а после
+   * «разрешаю» гейт размонтировался и его cleanup звал `hide()` —
+   * аппаратная кнопка пропадала у каждого, кто открывал скан впервые.
+   */
+  onBack: (() => void) | undefined;
   onAccept: () => void;
   onDecline: () => void;
 }) {
-  const navigate = useNavigate();
   return (
     <div className="food-scanner-screen">
       <header className="records-screen__header">
@@ -317,7 +334,7 @@ function ConsentGate({
           type="button"
           className="records-screen__back"
           aria-label="Назад"
-          onClick={() => navigate("/customer/main")}
+          onClick={onBack}
         >
           <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
             <path

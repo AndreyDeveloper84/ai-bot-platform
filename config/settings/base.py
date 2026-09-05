@@ -1214,6 +1214,22 @@ CELERY_BEAT_SCHEDULE = {
         "task": "apps.catalog.tasks.sync_catalog_for_all_tenants",
         "schedule": crontab(minute="*/15"),
     },
+    # DRF-1494 — the watchdog on the entry above. Scheduling a job is not
+    # the same as knowing it ran: this entry has been here since 2026-05-13
+    # and the pilot mirror still sat twelve days stale, because nothing read
+    # the outcome. Pages the on-call channel when any tenant's
+    # `last_catalog_sync_ok_at` is older than
+    # CATALOG_SYNC_STALE_AFTER_SECONDS.
+    #
+    # Hourly at :07 — offset past the :00/:15/:30/:45 sync ticks so it reads
+    # a clock the sync has just had its chance to advance, and hourly rather
+    # than per-cycle because `alerting.page` dedups on a 5-minute TTL and
+    # four lines an hour per stale salon is how an operator learns to mute
+    # the channel. Rationale in apps/catalog/staleness.py.
+    "catalog_sync_staleness_hourly": {
+        "task": "apps.catalog.tasks.alert_stale_catalog_sync",
+        "schedule": crontab(minute="7"),
+    },
     "cleanup_expired_replay_traces": {
         "task": "apps.replay.tasks.cleanup_expired_traces",
         # Daily 04:00 UTC — offset from the 03:00 audit cleanup so the
@@ -1900,6 +1916,19 @@ S3_ENDPOINT_URL = os.environ.get("S3_ENDPOINT_URL", "http://localhost:9000")
 CATALOG_SYNC_LOCK_TTL_SECONDS = int(os.environ.get("CATALOG_SYNC_LOCK_TTL_SECONDS", str(25 * 60)))
 CATALOG_SYNC_HTTP_TIMEOUT = int(os.environ.get("CATALOG_SYNC_HTTP_TIMEOUT", "30"))
 CATALOG_SYNC_HTTP_RETRIES = int(os.environ.get("CATALOG_SYNC_HTTP_RETRIES", "3"))
+
+# DRF-1494 — age of `Tenant.last_catalog_sync_ok_at` above which
+# `apps.catalog.tasks.alert_stale_catalog_sync` pages the on-call channel.
+#
+# One hour = four beat cycles. The floor is what a HEALTHY contour can
+# produce: 15-min cadence, a lock TTL of 25 min bounding a legal skip pair
+# at ~30 min, and a 12-min soft limit on the run behind it — worst honest
+# case ~45 min. An hour is the first round number outside that envelope, so
+# crossing it cannot be normal behaviour and a page is always actionable.
+# The ceiling is the client: a stale mirror does not degrade the bot, it
+# makes it confidently deny services the salon sells. Full reasoning lives
+# in apps/catalog/staleness.py, next to the code that applies it.
+CATALOG_SYNC_STALE_AFTER_SECONDS = int(os.environ.get("CATALOG_SYNC_STALE_AFTER_SECONDS", "3600"))
 
 # KB-RAG Sub-4b (GH #128) — Google Docs read-only client takes NO
 # credentials. It fetches source docs via the public Markdown export

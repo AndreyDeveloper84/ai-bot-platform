@@ -41,6 +41,8 @@ import {
 } from "../lib/api";
 import { displayStatusFor, getBookingDetail, renderStatus } from "../lib/customer-records";
 import { formatDuration, formatMoney, formatVisitFull } from "../lib/format";
+import { useScreenBack } from "../hooks/useScreenBack";
+import { backTo } from "../lib/screen-back";
 
 type State =
   | { kind: "loading" }
@@ -57,6 +59,12 @@ const REASON_CHIPS: { value: CancelReasonClass; label: string }[] = [
 
 export function CustomerBookingDetailScreen() {
   const navigate = useNavigate();
+
+  // Возврат (DRF-1493) — к списку записей. Не `-1`: карточку
+  // открывают и по ссылке из бота, и сразу после создания записи,
+  // где предыдущий экран — оформление, возвращаться в которое
+  // нельзя.
+  const onBack = useScreenBack(backTo("/customer/records"));
   const { bookingId } = useParams<{ bookingId: string }>();
   const [state, setState] = useState<State>({ kind: "loading" });
   const [modalOpen, setModalOpen] = useState(false);
@@ -179,7 +187,7 @@ export function CustomerBookingDetailScreen() {
             type="button"
             className="records-screen__back"
             aria-label="Назад"
-            onClick={() => navigate(-1)}
+            onClick={onBack}
           >
             <span aria-hidden="true">←</span>
           </button>
@@ -211,7 +219,7 @@ export function CustomerBookingDetailScreen() {
           type="button"
           className="records-screen__back"
           aria-label="Назад"
-          onClick={() => navigate(-1)}
+          onClick={onBack}
         >
           <span aria-hidden="true">←</span>
         </button>

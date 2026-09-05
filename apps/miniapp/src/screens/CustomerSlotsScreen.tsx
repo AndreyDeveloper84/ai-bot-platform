@@ -36,12 +36,12 @@ import {
   SlotGridSkeleton,
 } from "../components/Skeleton";
 import { StateError } from "../components/StateError";
-import { useBackButton } from "../hooks/useBackButton";
 import { useHaptics } from "../hooks/useHaptics";
 import { getCustomerSlots } from "../lib/customer-booking";
 import { formatDateLabel, formatSlotTime } from "../lib/format";
 import { getInitData } from "../lib/max-sdk";
 import { setVisitAt, useBookingDraft } from "../state/booking";
+import { backTo } from "../lib/screen-back";
 
 interface SlotRow {
   date: string;
@@ -102,7 +102,12 @@ export function CustomerSlotsScreen() {
   const draft = useBookingDraft();
   const [state, setState] = useState<State>({ kind: "loading" });
 
-  useBackButton({ onBack: () => navigate(-1) });
+  // Возврат (DRF-1493) — к карточке того мастера, чьи окна показаны.
+  // Не `-1`: по deep link в оформление истории нет, а мастер известен
+  // из адреса. Без `masterId` (адрес испорчен) — в каталог.
+  const back = backTo(
+    masterId ? `/customer/masters/${masterId}` : "/customer/catalog",
+  );
 
   const load = useCallback(() => {
     if (!masterId || !draft.serviceId) return;
@@ -174,7 +179,7 @@ export function CustomerSlotsScreen() {
 
   if (state.kind === "loading") {
     return (
-      <ScreenLayout title="Выбери время">
+      <ScreenLayout back={back} title="Выбери время">
         <DelayedSkeleton loading>
           <div className="date-strip">
             {Array.from({ length: 6 }, (_, i) => (
@@ -189,7 +194,7 @@ export function CustomerSlotsScreen() {
 
   if (state.kind === "error") {
     return (
-      <ScreenLayout title="Выбери время">
+      <ScreenLayout back={back} title="Выбери время">
         <StateError err={state.err} onRetry={load} screenId="customer-slots" />
       </ScreenLayout>
     );
@@ -198,7 +203,7 @@ export function CustomerSlotsScreen() {
   // Tau §5.3 master substitution — full 14-day fully-booked case.
   if (state.slots.length === 0) {
     return (
-      <ScreenLayout title="Выбери время">
+      <ScreenLayout back={back} title="Выбери время">
         <MasterSubstitutionCallout
           masterName={draft.masterName ?? "она"}
           onBack={() => navigate("/customer/catalog")}
@@ -213,6 +218,7 @@ export function CustomerSlotsScreen() {
 
   return (
     <ScreenLayout
+      back={back}
       title="Выбери время"
       cta={
         <StickyCta onClick={onContinue} disabled={!draft.visitAt}>

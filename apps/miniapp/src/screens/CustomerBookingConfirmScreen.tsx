@@ -57,7 +57,6 @@ import { useNavigate } from "react-router-dom";
 import { ApiError, authVerify } from "../lib/api";
 import { ScreenLayout } from "../components/ScreenLayout";
 import { StickyCta } from "../components/StickyCta";
-import { useBackButton } from "../hooks/useBackButton";
 import { useClosingConfirmation } from "../hooks/useClosingConfirmation";
 import { useHaptics } from "../hooks/useHaptics";
 import { createCustomerBooking } from "../lib/customer-booking";
@@ -75,6 +74,7 @@ import {
   setVisitAt,
   useBookingDraft,
 } from "../state/booking";
+import { backTo } from "../lib/screen-back";
 
 type ErrState =
   | { kind: "slot_unavailable"; substituteName?: string; substituteTime?: string }
@@ -131,7 +131,14 @@ export function CustomerBookingConfirmScreen() {
   const [paymentChoice, setPaymentChoice] = useState<PaymentChoice>("onsite");
   const [anonymous] = useState<boolean>(() => isAnonymous());
 
-  useBackButton({ onBack: () => navigate(-1) });
+  // Возврат (DRF-1493) — к выбору времени у того же мастера, то есть к
+  // предыдущему шагу сценария, а не к предыдущей странице истории:
+  // сюда возвращаются и после входа по OAuth, где истории уже нет.
+  const back = backTo(
+    draft.masterId
+      ? `/customer/masters/${draft.masterId}/slots`
+      : "/customer/catalog",
+  );
   useClosingConfirmation(true);
 
   // W4 #844 anonymous gate round-trip restore.
@@ -345,7 +352,7 @@ export function CustomerBookingConfirmScreen() {
     const oauthEnabled = import.meta.env.VITE_MAX_OAUTH_ENABLED === "true";
     if (!oauthEnabled) {
       return (
-        <ScreenLayout title="Чтобы записаться">
+        <ScreenLayout back={back} title="Чтобы записаться">
           <section className="customer-confirm__oauth-pending">
             <p className="customer-confirm__oauth-soon">
               Регистрация через MAX скоро будет доступна. Сейчас можно
@@ -364,6 +371,7 @@ export function CustomerBookingConfirmScreen() {
     }
     return (
       <ScreenLayout
+        back={back}
         title="Чтобы записаться"
         cta={
           <StickyCta onClick={onStartRegistration}>
@@ -383,6 +391,7 @@ export function CustomerBookingConfirmScreen() {
   // ── Registered branch (§6.1) — founder priority order ─────────────────
   return (
     <ScreenLayout
+      back={back}
       title="Подтверди запись"
       cta={
         <StickyCta onClick={onConfirm} disabled={submitting}>

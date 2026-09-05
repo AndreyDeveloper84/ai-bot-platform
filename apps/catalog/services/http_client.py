@@ -51,10 +51,11 @@ from __future__ import annotations
 
 import logging
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from decimal import Decimal
-from typing import Any
+from typing import Any, TypeVar
 
 import httpx
 from django.conf import settings
@@ -262,7 +263,10 @@ class CatalogHttpClient:
             "internal/catalog/salon-services/",
             params={"tenant": tenant_id},
         )
-        return [_parse_salon_service(row) for row in rows]
+        dtos, _failed = _parse_rows(
+            rows, _parse_salon_service, path="internal/catalog/salon-services/"
+        )
+        return dtos
 
     def fetch_specialists(self, *, tenant_id: str) -> list[CatalogSpecialistDTO]:
         """Specialists for one tenant (→ ``CatalogMaster``) — S3B masters mirror.
@@ -285,7 +289,8 @@ class CatalogHttpClient:
             "internal/specialists/",
             params={"tenant": tenant_id},
         )
-        return [_parse_specialist(row) for row in rows]
+        dtos, _failed = _parse_rows(rows, _parse_specialist, path="internal/specialists/")
+        return dtos
 
     def fetch_specialist_services(self, *, tenant_id: str) -> EdgeSnapshot:
         """Bookable master↔service edges for one tenant (→ ``MasterService``).
@@ -310,9 +315,16 @@ class CatalogHttpClient:
             # Fewer pages ⇒ fewer seams where that can happen.
             params={"tenant": tenant_id, "page_size": 100},
         )
+        edges, failed = _parse_rows(
+            rows, _parse_specialist_service, path="internal/catalog/specialist-services/"
+        )
         return EdgeSnapshot(
-            edges=[_parse_specialist_service(row) for row in rows],
-            complete=complete,
+            edges=edges,
+            # An edge this side could not read is not an edge upstream deleted.
+            # Reconciliation deletes on absence, so a dropped row must downgrade
+            # the run to additive-only exactly as a shifted page window does --
+            # otherwise skipping one malformed edge would unbook a real master.
+            complete=complete and failed == 0,
         )
 
     # ------------------------------------------------------------------
@@ -446,6 +458,68 @@ class CatalogHttpClient:
 # ---------------------------------------------------------------------------
 
 
+_RowT = TypeVar("_RowT")
+
+
+def _parse_rows(
+    rows: list[dict[str, Any]],
+    parser: Callable[[dict[str, Any]], _RowT],
+    *,
+    path: str,
+) -> tuple[list[_RowT], int]:
+    """Parse a page-walk row by row. Returns ``(parsed, failed_count)``.
+
+    ### The defect this exists for (DRF-1494)
+
+    The three fetchers used to parse their rows in a bare list
+    comprehension. One unreadable row therefore raised out of the whole
+    fetch, and :meth:`CatalogSyncService._run_locked` turned that into
+    ``SyncResult(ran=True, error=...)``: no cursor advance, no upsert, no
+    mirror. A single upstream row with a ``base_price`` of ``"от 1500"``
+    or a ``duration_minutes`` of ``"60 мин"`` was enough to freeze an
+    entire salon's catalog -- every fifteen minutes, indefinitely, while
+    the bot went on telling clients that services it had merely failed to
+    fetch do not exist.
+
+    ### Why isolation belongs on this rung specifically
+
+    This file already isolates one level below (a malformed ``goals``
+    entry is dropped rather than failing its row -- :func:`_parse_goals`),
+    and ``apps.catalog.services.upserter`` isolates one level above (a row
+    that will not upsert is counted, not raised). Only the rung between
+    them -- parsing the row -- was all-or-nothing, so the blast radius of
+    one bad field was the whole salon rather than the field.
+
+    A dropped row is a real loss and is logged at ERROR with its id --
+    the level Sentry captures -- so the operator learns *which* row Ayla
+    is serving badly. Losing that one row is strictly better than losing
+    the hundreds beside it.
+    """
+    parsed: list[_RowT] = []
+    failed = 0
+    for row in rows:
+        try:
+            parsed.append(parser(row))
+        except Exception as exc:  # noqa: BLE001 — one bad row must not cost the rest
+            failed += 1
+            logger.error(
+                "catalog.http.row_unparseable path=%s row_id=%s exc=%s: %s",
+                path,
+                row.get("id", "?"),
+                exc.__class__.__name__,
+                exc,
+            )
+    if failed:
+        logger.error(
+            "catalog.http.rows_dropped path=%s dropped=%d of=%d — these rows stay "
+            "absent from the mirror until Ayla serves them readably.",
+            path,
+            failed,
+            len(rows),
+        )
+    return parsed, failed
+
+
 def _parse_dt(raw: str) -> datetime:
     """ISO 8601 with optional trailing ``Z`` → aware datetime."""
     return datetime.fromisoformat(raw.replace("Z", "+00:00"))
@@ -530,13 +604,14 @@ def _parse_specialist_service(row: dict[str, Any]) -> CatalogSpecialistServiceDT
     ``id`` / ``salon_service`` / ``specialist`` are mandatory — an edge without
     them cannot be mirrored at all.
 
-    Note this raises out of ``fetch_specialist_services`` and therefore aborts
-    the whole tenant's edge batch, NOT just the offending row: parsing happens
-    before the upserter's per-row savepoints. That is deliberate — it fails
-    *safe* (nothing written, reconciliation never runs, the other two mirrors
-    still land), and a malformed join key means the snapshot can no longer be
-    trusted to prove absence, which is exactly when deleting rows is most
-    dangerous. Loud and inert beats silent and destructive.
+    Since DRF-1494 this raise is caught by :func:`_parse_rows`, which drops
+    the row and marks the snapshot ``complete=False``. The safety property
+    the previous behaviour bought — a malformed join key must never license
+    a delete — is preserved exactly: an incomplete snapshot downgrades the
+    run to additive-only, so reconciliation still cannot act on it. What
+    changes is that the edges Ayla DID serve readably now land instead of
+    being discarded alongside the one it did not. Loud and inert was better
+    than silent and destructive; loud and partial is better than both.
 
     ``updated_at`` is optional upstream; falls back to now (same policy as
     :func:`_parse_specialist`).

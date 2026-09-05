@@ -60,7 +60,7 @@ import {
 } from "../../lib/admin-api";
 import { formatDateLong } from "../../lib/masterDateFormat";
 import { hapticNotify, hapticSelection } from "../../lib/max-sdk";
-import { useBackButton } from "../../hooks/useBackButton";
+import { backTo, screenRoot } from "../../lib/screen-back";
 import { useClosingConfirmation } from "../../hooks/useClosingConfirmation";
 
 /**
@@ -145,12 +145,19 @@ export function AdminStaffAccessScreen({ me }: Props) {
 
   const goBackToTeam = useCallback(() => navigate("/admin/team"), [navigate]);
 
-  // On the form the hardware back goes to the roster. On the issued screen
-  // it is deliberately unwired: the only way out is «Готово», because a
-  // back-swipe here destroys a credential.
-  useBackButton(
-    stage.kind === "form" ? { onBack: goBackToTeam } : {},
-  );
+  // On the form the back goes to the roster. On the issued screen it is
+  // deliberately absent: the only way out is «Готово», because leaving by
+  // a back-swipe here destroys a credential that is shown once.
+  //
+  // DRF-1493 — объявлено видом экрана, а не пустым объектом: «здесь
+  // возврата нет» теперь говорится вслух и с причиной.
+  const back =
+    stage.kind === "form"
+      ? backTo("/admin/team")
+      : screenRoot(
+          "Код показывается один раз: уход назад со свежевыданным " +
+            "кодом уничтожает его. Единственный выход — «Готово».",
+        );
 
   const dirty = stage.kind === "form" && (masterId !== "" || note !== "");
   // While the code is on screen, closing the Mini App loses it for good —
@@ -226,6 +233,7 @@ export function AdminStaffAccessScreen({ me }: Props) {
       ROLE_OPTIONS.find((o) => o.value === issued.role)?.label ?? issued.role;
     return (
       <ScreenLayout
+        back={back}
         title="Код доступа"
         cta={<StickyCta onClick={goBackToTeam}>Готово</StickyCta>}
       >
@@ -290,6 +298,7 @@ export function AdminStaffAccessScreen({ me }: Props) {
 
   return (
     <ScreenLayout
+      back={back}
       title="Выдать доступ"
       cta={
         <StickyCta onClick={() => void onIssue()} disabled={submitting}>

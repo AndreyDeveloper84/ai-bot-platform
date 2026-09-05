@@ -6,6 +6,14 @@ import { ScreenLayout } from "../components/ScreenLayout";
 import { StickyCta } from "../components/StickyCta";
 import { formatVisitFull } from "../lib/format";
 import { hapticNotify, maxBridge } from "../lib/max-sdk";
+import { backTo } from "../lib/screen-back";
+
+/**
+ * Возврат (DRF-1493): к списку записей, а НЕ на подтверждение.
+ * Запись уже создана — шаг назад в оформление вернул бы человека в
+ * завершённый сценарий.
+ */
+const BACK = backTo("/my-visits");
 
 interface SuccessState {
   service_name?: string;
@@ -35,6 +43,7 @@ export function BookingSuccessScreen() {
 
   return (
     <ScreenLayout
+      back={BACK}
       title=""
       cta={
         <StickyCta onClick={() => navigate("/catalog", { replace: true })}>

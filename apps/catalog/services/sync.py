@@ -2,8 +2,14 @@
 
 Pulls Ayla's canonical catalog and upserts the ``CatalogService`` mirror
 under a Redis advisory lock. Called by the Celery beat every 15 minutes
-(``apps.catalog.tasks.sync_catalog_for_all_tenants``) and by the admin
-"force resync" action.
+(``apps.catalog.tasks.sync_catalog_for_all_tenants``) and, for a one-shot
+operator run, by ``manage.py sync_catalog``.
+
+(Until DRF-1494 this line promised an admin "force resync" action instead.
+There has never been one — C6/DRF-576 was never built — so for the whole
+life of the pilot the beat was the only way this code could run at all,
+and an operator who read this docstring while the catalog was twelve days
+stale would have gone looking for a button that does not exist.)
 
 Three mirrors, pulled in FK order so each one's dependencies already exist:
 
@@ -43,6 +49,7 @@ from typing import TYPE_CHECKING, Any
 
 from django.conf import settings
 from django.core.cache import cache
+from django.utils import timezone as dj_timezone
 
 from apps.audit.services import write_audit
 from apps.catalog.services.http_client import CatalogHttpClient
@@ -232,11 +239,29 @@ class CatalogSyncService:
                     {"ayla_specialist_service_id": "?", "reason": str(exc)}
                 )
 
-        # Freshness signal only — not a fetch cursor (Ayla has no ?since=).
+        # Two different questions, two different columns (DRF-1494).
+        #
+        # `last_catalog_sync_at` answers "how fresh is the CONTENT": the newest
+        # upstream `updated_at` this pull saw. It is a watermark, not a clock —
+        # a salon nobody has edited for a month legitimately freezes it, so its
+        # age can never tell a static catalog from a dead sync.
+        #
+        # `last_catalog_sync_ok_at` answers "did the sync RUN": wall-clock, set
+        # on every run that got past the salon-services fetch. It moves on a
+        # healthy contour whether or not the catalog changed, so an age above
+        # the threshold means one thing only, and the alarm can act on it.
+        #
+        # Stamped here rather than at the top of `_run_locked` on purpose: this
+        # line is downstream of the fetch, so a run that could not reach Ayla
+        # leaves the clock where it was and ages into the alarm.
+        update_fields = ["last_catalog_sync_ok_at"]
+        tenant.last_catalog_sync_ok_at = dj_timezone.now()
+
         new_cursor = _max_upstream_ts(salon_dtos)
         if new_cursor is not None:
             tenant.last_catalog_sync_at = new_cursor
-            tenant.save(update_fields=["last_catalog_sync_at"])
+            update_fields.append("last_catalog_sync_at")
+        tenant.save(update_fields=update_fields)
 
         result = SyncResult(
             ran=True,

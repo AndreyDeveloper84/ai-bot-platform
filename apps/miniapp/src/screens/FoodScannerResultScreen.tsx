@@ -24,6 +24,9 @@
 import { useCallback, useEffect, useId, useRef, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 
+import { useScreenBack } from "../hooks/useScreenBack";
+import { backByAction } from "../lib/screen-back";
+
 import { Snackbar } from "../components/Snackbar";
 import {
   MEAL_TYPE_ICON,
@@ -62,6 +65,19 @@ export function FoodScannerResultScreen() {
   const previewUrl = state.previewUrl;
 
   const [mealType, setMealType] = useState<MealType>(initialMealType);
+  // Возврат (DRF-1493) — к съёмке, с восстановлением уже сделанного
+  // снимка: без него человек, вернувшийся посмотреть на кадр,
+  // фотографировал бы заново. Поэтому не адрес, а заданное действие —
+  // но всё так же не `history.back()`.
+  const backToCapture = useCallback(
+    () =>
+      navigate("/customer/food-scanner/capture", {
+        replace: true,
+        state: { photo, mealType },
+      }),
+    [navigate, photo, mealType],
+  );
+  const onBack = useScreenBack(backByAction(backToCapture));
   const [portionMultiplier, setPortionMultiplier] = useState<number>(1.0);
   const [dishName, setDishName] = useState<string>(result?.dish_name ?? "");
   const [editingName, setEditingName] = useState(false);
@@ -241,12 +257,7 @@ export function FoodScannerResultScreen() {
           type="button"
           className="records-screen__back"
           aria-label="Назад"
-          onClick={() =>
-            navigate("/customer/food-scanner/capture", {
-              replace: true,
-              state: { photo, mealType },
-            })
-          }
+          onClick={onBack}
         >
           <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
             <path

@@ -80,6 +80,8 @@ import {
 import { STUB_SURFACES_ENABLED } from "../lib/feature-flags";
 import { UnbookableBadge } from "../components/UnbookableNote";
 import { PilotComingSoonScreen } from "./PilotComingSoonScreen";
+import { useScreenBack } from "../hooks/useScreenBack";
+import { screenRoot } from "../lib/screen-back";
 
 // ---------------------------------------------------------------------------
 // Loading + error state model — per-block isolation for «Partial» state
@@ -111,6 +113,16 @@ export function CustomerWellnessDashboardScreen() {
     return <PilotComingSoonScreen surface="home" />;
   }
   const navigate = useNavigate();
+
+  // Вид экрана (DRF-1493): корень. «День» — такая же корневая вкладка,
+  // как «Записи»: у экрана своя нижняя навигация с активной вкладкой
+  // «День», и стрелка «назад» здесь означала бы родителя, которого нет.
+  useScreenBack(
+    screenRoot(
+      "«День» — корневая вкладка клиентской поверхности со своей " +
+        "нижней навигацией; выше неё ничего нет.",
+    ),
+  );
 
   const [today, setToday] = useState<Slice<WellnessToday>>({ kind: "loading" });
   const [activity, setActivity] = useState<Slice<RecentActivity>>({

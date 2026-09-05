@@ -16,18 +16,77 @@ Key behaviour:
     admin click. ``has_delete_permission`` hides the per-row delete button,
     ``delete_model`` and ``delete_queryset`` enforce the same rule
     server-side in case a custom action bypasses the UI.
+  * Секреты Telegram (``telegram_bot_token``, ``telegram_webhook_secret``)
+    в форму не отдаются — см. :class:`TenantAdminForm` (DRF-1495).
 """
 
 from __future__ import annotations
 
+from django import forms
 from django.contrib import admin
 from django.core.exceptions import PermissionDenied
 
 from apps.tenancy.models import Tenant
 
 
+class TenantAdminForm(forms.ModelForm):
+    """Форма тенанта, которая не показывает секреты (DRF-1495).
+
+    До этой правки маскировалась только колонка списка
+    (``telegram_bot_token_masked``), а форма изменения отдавала и токен
+    бота, и вебхук-секрет обычными текстовыми полями: полные значения
+    уезжали в HTML страницы каждому, кто её открыл, и оставались в
+    кеше браузера, в скриншоте, в «сохранить страницу». Границы эпика
+    DRF-75 говорят: секреты и токены в интерфейсе не показывать никак.
+
+    Механика простая и без своего состояния: поле рендерится
+    ``PasswordInput(render_value=False)`` — значение в разметку не
+    попадает вовсе, — и пустая отправка означает «не менять». Задать
+    новое значение по-прежнему можно, стереть — нет; стирание секрета
+    это редкая осознанная операция, и для неё есть shell.
+
+    Что именно сейчас настроено, видно по read-only полям
+    ``telegram_bot_token_state`` / ``telegram_webhook_secret_state``:
+    они отвечают «задан / не задан» (для токена — плюс последние 4
+    символа, чтобы отличить два бота друг от друга, не раскрывая
+    ключа).
+    """
+
+    telegram_bot_token = forms.CharField(
+        required=False,
+        widget=forms.PasswordInput(render_value=False),
+        label="Новый токен бота",
+        help_text=(
+            "Пусто — оставить текущий. Значение не показывается: это "
+            "credential BotFather. Текущее состояние — в поле выше."
+        ),
+    )
+    telegram_webhook_secret = forms.CharField(
+        required=False,
+        widget=forms.PasswordInput(render_value=False),
+        label="Новый вебхук-секрет",
+        help_text=(
+            "Пусто — оставить текущий. Значение не показывается. "
+            "Генерируется оператором через secrets.token_urlsafe(32)."
+        ),
+    )
+
+    class Meta:
+        model = Tenant
+        fields = "__all__"
+
+    def clean_telegram_bot_token(self) -> str:
+        submitted = (self.cleaned_data.get("telegram_bot_token") or "").strip()
+        return submitted or (self.instance.telegram_bot_token or "")
+
+    def clean_telegram_webhook_secret(self) -> str:
+        submitted = (self.cleaned_data.get("telegram_webhook_secret") or "").strip()
+        return submitted or (self.instance.telegram_webhook_secret or "")
+
+
 @admin.register(Tenant)
 class TenantAdmin(admin.ModelAdmin):
+    form = TenantAdminForm
     list_display = (
         "name",
         "slug",
@@ -42,7 +101,14 @@ class TenantAdmin(admin.ModelAdmin):
     list_filter = ("is_active", "is_system", "shadow_mode")
     list_editable = ("shadow_mode",)
     search_fields = ("name", "slug")
-    readonly_fields = ("id", "is_system", "created_at", "updated_at")
+    readonly_fields = (
+        "id",
+        "is_system",
+        "created_at",
+        "updated_at",
+        "telegram_bot_token_state",
+        "telegram_webhook_secret_state",
+    )
     fieldsets = (
         (None, {"fields": ("id", "slug", "name", "is_active", "is_system")}),
         (
@@ -59,14 +125,22 @@ class TenantAdmin(admin.ModelAdmin):
         (
             "Phase 1 — Telegram channel",
             {
-                "fields": ("telegram_bot_token", "telegram_webhook_secret"),
+                "fields": (
+                    "telegram_bot_token_state",
+                    "telegram_bot_token",
+                    "telegram_webhook_secret_state",
+                    "telegram_webhook_secret",
+                ),
                 "description": (
                     "Per-tenant Telegram bot credentials. Token is from "
                     "@BotFather; webhook_secret is operator-generated via "
                     "secrets.token_urlsafe(32) and registered with "
-                    "Telegram's setWebhook. The list view shows only the "
-                    "last 4 token characters; full value is editable here. "
-                    "See docs/runbooks/telegram-bot-onboarding.md."
+                    "Telegram's setWebhook. "
+                    "DRF-1495: ни одно из двух значений в эту форму не "
+                    "отдаётся. Поля ввода пустые всегда; пустая отправка "
+                    "означает «оставить как есть». Что настроено сейчас — "
+                    "в строках состояния над каждым полем. "
+                    "См. docs/runbooks/telegram-bot-onboarding.md."
                 ),
             },
         ),
@@ -100,6 +174,24 @@ class TenantAdmin(admin.ModelAdmin):
         rule lives in one place (model + admin can't drift).
         """
         return obj._mask_telegram_token() or "—"
+
+    @admin.display(description="Токен бота сейчас")
+    def telegram_bot_token_state(self, obj: Tenant) -> str:
+        """Состояние токена без самого токена (DRF-1495).
+
+        Последние 4 символа — тот же приём, что в списке и в
+        ``__repr__``: их хватает, чтобы отличить два бота друг от друга,
+        и не хватает, чтобы воспользоваться ключом.
+        """
+        masked = obj._mask_telegram_token()
+        return f"задан ({masked})" if masked else "не задан"
+
+    @admin.display(description="Вебхук-секрет сейчас")
+    def telegram_webhook_secret_state(self, obj: Tenant) -> str:
+        """«Задан / не задан». Хвост не показываем: секрет сравнивается
+        целиком через ``hmac.compare_digest``, и любая его часть — подсказка.
+        """
+        return "задан" if (obj.telegram_webhook_secret or "") else "не задан"
 
     def get_queryset(self, request):
         # Admin must see deactivated tenants too — use all_objects manager.

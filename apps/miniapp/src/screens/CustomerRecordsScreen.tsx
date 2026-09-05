@@ -62,6 +62,8 @@ import {
   type RecordItem,
   type RecordsPage,
 } from "../lib/customer-records";
+import { useScreenBack } from "../hooks/useScreenBack";
+import { screenRoot } from "../lib/screen-back";
 
 // ---------------------------------------------------------------------------
 // State model — per-section isolation so flipping tabs doesn't blank the
@@ -86,6 +88,18 @@ const FILTER_ALL = "__all__";
 
 export function CustomerRecordsScreen() {
   const navigate = useNavigate();
+
+  // Вид экрана (DRF-1493): корень. «Записи» — дом клиентской
+  // поверхности (`/customer/main` и `/customer/records`), и у экрана
+  // есть собственная нижняя навигация: выход отсюда — соседняя
+  // вкладка, а не «назад». Объявление обязательно даже здесь — молчать
+  // о виде нельзя, иначе следующий экран промолчит по недосмотру.
+  useScreenBack(
+    screenRoot(
+      "«Записи» — дом клиентской поверхности и корневая вкладка; " +
+        "выход отсюда через нижнюю навигацию.",
+    ),
+  );
 
   const [activeTab, setActiveTab] = useState<BookingSection>("upcoming");
   const [upcoming, setUpcoming] = useState<Slice<RecordsPage>>({

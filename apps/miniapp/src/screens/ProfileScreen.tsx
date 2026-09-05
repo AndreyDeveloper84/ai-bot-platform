@@ -20,7 +20,6 @@ import { ScreenLayout } from "../components/ScreenLayout";
 import { DelayedSkeleton } from "../components/Skeleton";
 import { StateError } from "../components/StateError";
 import { StickyCta } from "../components/StickyCta";
-import { useBackButton } from "../hooks/useBackButton";
 import { useHaptics } from "../hooks/useHaptics";
 import {
   deleteAccount,
@@ -29,6 +28,10 @@ import {
   type Profile,
   updateProfile,
 } from "../lib/api";
+import { backTo } from "../lib/screen-back";
+
+/** Возврат (DRF-1493): на первый экран клиента. */
+const BACK = backTo("/");
 
 type State =
   | { kind: "loading" }
@@ -53,7 +56,6 @@ export function ProfileScreen() {
   const [state, setState] = useState<State>({ kind: "loading" });
   const [deleteOpen, setDeleteOpen] = useState(false);
 
-  useBackButton({ onBack: () => navigate(-1) });
 
   const load = useCallback(() => {
     setState({ kind: "loading" });
@@ -96,7 +98,7 @@ export function ProfileScreen() {
 
   if (state.kind === "loading") {
     return (
-      <ScreenLayout title="Профиль">
+      <ScreenLayout back={BACK} title="Профиль">
         <DelayedSkeleton loading>
           <div className="skeleton" style={{ height: 80, marginBottom: 16 }} />
           <div className="skeleton" style={{ height: 200 }} />
@@ -106,7 +108,7 @@ export function ProfileScreen() {
   }
   if (state.kind === "error") {
     return (
-      <ScreenLayout title="Профиль">
+      <ScreenLayout back={BACK} title="Профиль">
         <StateError err={state.err} onRetry={load} screenId="profile" />
       </ScreenLayout>
     );
@@ -117,6 +119,7 @@ export function ProfileScreen() {
 
   return (
     <ScreenLayout
+      back={BACK}
       title="Профиль"
       cta={
         state.dirty ? (

@@ -11,6 +11,11 @@ import { DelayedSkeleton, ServiceCardSkeleton } from "../components/Skeleton";
 import { StateError } from "../components/StateError";
 import { fetchMyBookings, type BookingItem } from "../lib/api";
 import { formatVisitFull } from "../lib/format";
+import { backTo } from "../lib/screen-back";
+
+/** Возврат (DRF-1493): на первый экран клиента. Легаси-список записей
+ * не вкладка: нижней навигации у него нет. */
+const BACK = backTo("/");
 
 type Mode = "upcoming" | "past";
 
@@ -45,7 +50,7 @@ export function MyVisitsScreen() {
   useEffect(() => load(mode), [mode, load]);
 
   return (
-    <ScreenLayout title="Мои записи">
+    <ScreenLayout back={BACK} title="Мои записи">
       {/* Filter chips per spec §3.4 list view */}
       <div className="chip-row" role="tablist" aria-label="Фильтр записей">
         <button

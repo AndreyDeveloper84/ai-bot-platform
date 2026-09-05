@@ -21,6 +21,10 @@ import {
 } from "../lib/api";
 import { formatVisitFull } from "../lib/format";
 import { setMaster, setService, setVisitAt } from "../state/booking";
+import { backTo } from "../lib/screen-back";
+
+/** Возврат (DRF-1493): к легаси-списку записей. */
+const BACK = backTo("/my-visits");
 
 type State =
   | { kind: "loading" }
@@ -145,14 +149,14 @@ export function MyVisitDetailScreen() {
 
   if (state.kind === "loading") {
     return (
-      <ScreenLayout title="Запись">
+      <ScreenLayout back={BACK} title="Запись">
         <div className="callout">Загружаю…</div>
       </ScreenLayout>
     );
   }
   if (state.kind === "error") {
     return (
-      <ScreenLayout title="Запись">
+      <ScreenLayout back={BACK} title="Запись">
         <StateError err={state.err} onRetry={load} screenId="my-visit-detail" />
       </ScreenLayout>
     );
@@ -161,7 +165,7 @@ export function MyVisitDetailScreen() {
   const b = state.booking;
 
   return (
-    <ScreenLayout title={b.service_name || "Запись"}>
+    <ScreenLayout back={BACK} title={b.service_name || "Запись"}>
       <div className="confirm-card">
         <dl>
           <dt>Время</dt>
