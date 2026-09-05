@@ -1,0 +1,40 @@
+{% extends "admin/base_site.html" %}
+{# Честный отказ вместо пустого списка (DRF-1514).
+
+   Пустая страница врёт: она читается как «переписок нет», а не как
+   «сюда нельзя». Поэтому страница объясняет запрет и показывает, что
+   делать дальше — очередь обращений, форма доступа, журнал. #}
+
+{% block breadcrumbs %}
+  <div class="breadcrumbs">
+    <a href="{% url 'admin:index' %}">Админка</a>
+    &rsaquo; {{ headline }}
+  </div>
+{% endblock %}
+
+{% block content %}
+  <div id="content-main">
+    <h1>{{ headline }}</h1>
+    {% for paragraph in paragraphs %}
+      <p style="max-width: 46em;">{{ paragraph }}</p>
+    {% endfor %}
+
+    <ul class="object-tools" style="float: none; margin: 1.5em 0 0 0;">
+      {% if grant_url %}
+        <li><a href="{{ grant_url }}">Указать причину и открыть доступ</a></li>
+      {% endif %}
+      {% if queue_url %}
+        <li><a href="{{ queue_url }}">Очередь обращений</a></li>
+      {% endif %}
+      {% if journal_url %}
+        <li><a href="{{ journal_url }}">Журнал доступа</a></li>
+      {% endif %}
+    </ul>
+
+    <p style="max-width: 46em; margin-top: 2em; color: var(--body-quiet-color, #666);">
+      Отказ записан в журнал доступа — так же, как записывается каждый
+      открытый экран. Журнал отвечает на вопрос «кто что видел» и живёт
+      отдельно от журнала изменений, который отвечает «кто что правил».
+    </p>
+  </div>
+{% endblock %}

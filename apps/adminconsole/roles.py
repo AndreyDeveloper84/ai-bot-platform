@@ -42,9 +42,9 @@ handoff и правка мастера были одним и тем же пра
 ``EDITOR_DENIED_APP_LABELS`` / ``EDITOR_DENIED_MODELS`` — то, что
 смотрится, но не правится никем, кроме суперпользователя:
 
-* журналы (``audit``, ``admin.logentry``, ``events``, ``eventbus``,
-  ``ingress``, ``replay``, ``consent``) — правка следа обессмысливает
-  след;
+* журналы (``audit``, ``admin.logentry``, ``adminconsole``, ``events``,
+  ``eventbus``, ``ingress``, ``replay``, ``consent``) — правка следа
+  обессмысливает след;
 * ``django_celery_beat`` — расписание воркеров это эксплуатация, а не
   прикладные данные;
 * ``tenancy.tenant`` — там лежат токен бота и вебхук-секрет тенанта;
@@ -87,6 +87,12 @@ ROLE_DENIED_APP_LABELS: frozenset[str] = frozenset(
 EDITOR_DENIED_APP_LABELS: frozenset[str] = frozenset(
     {
         "admin",
+        # Пропуск к данным клиента и журнал доступа (DRF-1514). Пропуск
+        # заводится через свой экран и не правится: отредактированная
+        # задним числом причина — это причина, которой не было. Право
+        # «завести пропуск» роли не нужно — его даёт
+        # ``ClientDataAccessGrantAdmin.has_add_permission``.
+        "adminconsole",
         "audit",
         "consent",
         "eventbus",
