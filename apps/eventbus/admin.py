@@ -60,7 +60,25 @@ class DomainEventAdmin(admin.ModelAdmin):
     def has_delete_permission(self, request: HttpRequest, obj=None) -> bool:
         return False
 
-    @admin.action(description="Replay selected dead-letter events")
+    # DRF-1495: без ``permissions=`` Django пропускает действие любому,
+    # у кого есть доступ к экрану — ``_filter_actions_by_permissions``
+    # не фильтрует то, у чего нет ``allowed_permissions``. С появлением
+    # ролей это значило, что «смотрящий» мог перезапустить dead-letter
+    # события шины.
+    #
+    # ``permissions=("change",)`` не подходит: ``has_change_permission``
+    # выше безусловно False, и действие стало бы недоступно вообще
+    # никому. Свой предикат спрашивает право на модель: ``eventbus`` лежит
+    # в ``EDITOR_DENIED_APP_LABELS`` (apps/adminconsole/roles.py), поэтому
+    # его нет ни у одной роли — и действие остаётся суперпользователю,
+    # как и задумано.
+    def has_replay_permission(self, request: HttpRequest) -> bool:
+        return request.user.has_perm("eventbus.change_domainevent")
+
+    @admin.action(
+        description="Replay selected dead-letter events",
+        permissions=("replay",),
+    )
     def replay_selected_dead_letters(self, request, queryset):
         ids = list(queryset.values_list("event_id", flat=True))
         reset_count = replay_dead_letter(ids)
