@@ -69,6 +69,7 @@ from apps.booking.services.transitions import (
     commit_cancel,
     request_cancel,
 )
+from apps.catalog.master_state import is_available
 from apps.catalog.models import CatalogMaster, MasterService
 from apps.channels.max.outbound import MaxAPIError, send_message
 from apps.events.services import emit
@@ -590,12 +591,15 @@ def _find_fallback_masters(
         .exclude(master_id=deactivating_master_id)
         .select_related("master")
     )
+    # DRF-1506 — «кому можно передать запись» это вопрос о продаже, не о
+    # личности: подхватить клиента может и синхронизированная мастер, у
+    # которой нет ``linked_bot_user`` (на пилоте таких все девять).
+    # Поэтому здесь ``is_available``, а не ``is_landed`` — но предикат
+    # тот же самый, из одного модуля, а не три условия, набранные заново.
     candidates: dict[UUID, CatalogMaster] = {}
     for ms in ms_rows:
         m = ms.master
-        if not m.is_active or m.archived_at is not None:
-            continue
-        if m.invite_status != CatalogMaster.InviteStatus.ACCEPTED:
+        if not is_available(m):
             continue
         candidates[m.id] = m
 

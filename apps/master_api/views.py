@@ -358,6 +358,10 @@ def onboarding_accept(request: HttpRequest) -> HttpResponse:
       * ``mode = INVITE`` (this master now has login access)
       * ``is_active = True`` unless the row is archived (DRF-1080)
       * ``linked_bot_user = current bot_user``
+      * ``accepted_at = now()`` — стамп ставит ``CatalogMaster.save()``,
+        а не этот код: приземление пишут три места, и просить каждое
+        помнить про столбец — ровно тот способ, которым определений
+        «мастер приземлился» стало пять (DRF-1506).
       * Audit row + event ``master.onboarding_accepted``
     """
 
