@@ -221,6 +221,16 @@ _PART_PICK_PROMPT = "Когда удобно {day}?"
 _PART_SLOT_PROMPT = "{day}, {part} — выберите время:"
 _HEARD_SLOT_PROMPT = "Вы просили {heard} — вот что есть:"
 _DAY_UNAVAILABLE_PROMPT = "На {day} у мастера свободного времени нет. Вот ближайшие дни:"
+# DRF-1490 — the same sentence, for the case where there is nothing to put
+# under it. «Вот ближайшие дни:» ends in a colon and promises a list; a
+# message that ends on that colon with no keyboard is the bot pointing at
+# something that is not there. When the schedule read comes back with no
+# other free day (or does not come back at all), the reply has to stop
+# promising instead of promising and not delivering.
+_DAY_UNAVAILABLE_NO_DATES = (
+    "На {day} у мастера свободного времени нет, "
+    "других свободных дней у него сейчас не вижу. Выберите другого мастера."
+)
 _PART_UNAVAILABLE_PROMPT = "{day} {part} у мастера свободного времени нет. Есть так:"
 _PART_EMPTY_PROMPT = "Свободного времени на {part} в этот день нет. Вот весь день:"
 
@@ -276,12 +286,49 @@ _CONTEXT_GONE_TEXT = (
 )
 _SLOT_TAKEN_PROMPT = "Это время уже занято. Выберите другое:"
 _SLOT_TAKEN_NO_ALTERNATIVES = (
-    "Это время уже занято, и на эту дату свободных слотов больше нет. Выберите другую дату."
+    "Это время уже занято, и на эту дату свободных слотов больше нет. Выберите другую дату:"
+)
+# DRF-1490 / OPEN_DECISIONS §25 п.5 — «выберите другую дату» without a date
+# picker is an instruction the person cannot follow: the free-text branch of
+# the flow does not know which master they were on. The line above now ships
+# with the picker; this one is what is said when the master genuinely has no
+# other free day, and it names a step that exists.
+_SLOT_TAKEN_NO_DATES = (
+    "Это время уже занято, и других свободных дат у этого мастера сейчас не вижу. "
+    "Выберите другого мастера."
 )
 
 # How many dates to render in the picker. YClients usually returns
 # a 30-day window; trimming keeps the keyboard tappable on mobile.
 _MAX_DATE_BUTTONS = 14
+
+# ── DRF-1490: the same ceiling, for slots ─────────────────────────────────
+#
+# The date picker has had a cap since it was written; the slot picker never
+# did. It renders one row per slot with no upper bound, and the only thing
+# standing between it and MAX's hard limit of 29 rows
+# (``apps.channels.max.outbound.MAX_KEYBOARD_ROWS``) is a truncation that
+# happens on the transport: the tail is dropped, one WARNING is logged, and
+# the person is shown a keyboard that looks complete. They cannot tell that
+# slots were withheld, so they read the list as «это всё, что есть» — the
+# bot lying by omission about a salon's availability.
+#
+# 24 is a full twelve-hour day at half-hour granularity (09:00–21:00), i.e.
+# every list a normal salon day produces still renders whole. It bites where
+# the transport cap used to: fifteen-minute grids, where an unfiltered day
+# is 40-48 rows. And it leaves five rows of headroom under MAX's 29, so a
+# capped keyboard can never reach the limit that drops the message wholesale.
+#
+# The cap alone would only move the silent truncation one layer up, so it
+# never travels alone: :func:`_slot_pick_reply` appends
+# :data:`_SLOT_OVERFLOW_SUFFIX` whenever it bites, and the person is told
+# both that the list is partial and how to reach the rest.
+_MAX_SLOT_BUTTONS = 24
+
+_SLOT_OVERFLOW_SUFFIX = (
+    "\n\nПоказываю первые {shown} из {total}. "
+    "Если нужного времени в списке нет — напишите, во сколько вам удобно."
+)
 
 # E0#1 Variant A (founder verdict 2026-06-02) — cap on pre-injected
 # master roster size. Pilot salons have 5-15 masters; larger tenants
@@ -925,25 +972,19 @@ class BookingSkill:
             slots = tool_result.slots
             narrowed = _slots_in_part(slots, part_filter) if part_filter else slots
             if part_filter and not narrowed:
-                return _build_skill_result(
+                return _slot_pick_reply(
                     text=_PART_EMPTY_PROMPT.format(part=PART_CHIP_LABELS[part_filter].lower()),
-                    tool_calls_made=tool_calls_made,
-                    confidence=_CONFIDENCE_OK,
-                    action_data=_action_data_for_slot_pick(
-                        slots,
-                        master_id=master_id,
-                        service_id=service_id,
-                    ),
-                )
-            return _build_skill_result(
-                text=_SLOT_PICK_PROMPT,
-                tool_calls_made=tool_calls_made,
-                confidence=_CONFIDENCE_OK,
-                action_data=_action_data_for_slot_pick(
-                    narrowed,
+                    slots=slots,
                     master_id=master_id,
                     service_id=service_id,
-                ),
+                    tool_calls_made=tool_calls_made,
+                )
+            return _slot_pick_reply(
+                text=_SLOT_PICK_PROMPT,
+                slots=narrowed,
+                master_id=master_id,
+                service_id=service_id,
+                tool_calls_made=tool_calls_made,
             )
 
         # Health-check gate — only relevant for confirm_booking.
@@ -1558,16 +1599,25 @@ def _action_data_for_slot_pick(
 ) -> dict[str, Any]:
     """Build the slot-cards keyboard from a show_slots result.
 
-    One button per slot. Callback carries master, service and slot so
-    the tap can ground confirm_booking deterministically:
+    One button per slot, at most :data:`_MAX_SLOT_BUTTONS` of them. Callback
+    carries master, service and slot so the tap can ground confirm_booking
+    deterministically:
     ``cb:book:pick_slot:<master_id>:<service_id>:<iso_datetime>``.
+
+    DRF-1490 — the cap is enforced HERE, not only in
+    :func:`_slot_pick_reply`, so that no present or future caller can hand
+    the transport a keyboard longer than it accepts. Capping in the builder
+    is what makes the promise structural; :func:`_slot_pick_reply` is what
+    makes it honest, by saying out loud when it bites. Neither is enough
+    alone: a silent cap here is the transport's silent truncation moved one
+    layer up, and a note without a cap is a note nothing enforces.
     """
     buttons = [
         {
             "label": _slot_button_label(s),
             "callback": f"{CALLBACK_BOOK_PICK_SLOT_PREFIX}{master_id}:{service_id}:{s.datetime}",
         }
-        for s in slots
+        for s in slots[:_MAX_SLOT_BUTTONS]
     ]
     return {
         "attachments": [
@@ -1578,6 +1628,108 @@ def _action_data_for_slot_pick(
         ],
         "kind": "slot_pick",
     }
+
+
+def _slot_pick_reply(
+    *,
+    text: str,
+    slots: list,
+    master_id: int | str,
+    service_id: int | str,
+    tool_calls_made: list | None = None,
+) -> SkillResult:
+    """One place where a slot list becomes a reply — text and keyboard together.
+
+    DRF-1490. Every branch that draws slots used to build the keyboard and
+    the sentence above it independently, which is exactly how the two came
+    to disagree: the keyboard was capped downstream by the MAX transport and
+    the sentence went on describing a list that no longer existed. Composing
+    both here makes the overflow note structurally impossible to forget —
+    the caller cannot render a truncated keyboard without the line that
+    admits it.
+
+    Below the cap this is the old behaviour byte for byte: same text, same
+    buttons, no note.
+    """
+    total = len(slots)
+    if total > _MAX_SLOT_BUTTONS:
+        logger.info(
+            "booking.slot_pick.capped master=%s service=%s total=%d shown=%d",
+            master_id,
+            service_id,
+            total,
+            _MAX_SLOT_BUTTONS,
+        )
+        text = text + _SLOT_OVERFLOW_SUFFIX.format(shown=_MAX_SLOT_BUTTONS, total=total)
+    return _build_skill_result(
+        text=text,
+        tool_calls_made=tool_calls_made if tool_calls_made is not None else [],
+        confidence=_CONFIDENCE_OK,
+        action_data=_action_data_for_slot_pick(
+            slots,
+            master_id=master_id,
+            service_id=service_id,
+        ),
+    )
+
+
+def _render_other_dates(
+    *,
+    master_id: int | str,
+    service_id: int | str,
+    exclude_date: str,
+    yclients: Any,
+    tenant: Any,
+    prompt: str,
+    empty_prompt: str,
+    log_slug: str,
+) -> SkillResult:
+    """Answer a dead-ended day with the master's OTHER free days.
+
+    DRF-1490. Two branches end on a day that turned out to hold nothing —
+    a day the user named that the master does not work, and a slot that was
+    taken between the draw and the tap — and both say a sentence that
+    promises a choice of days. Until now neither attached one: the person
+    read «Вот ближайшие дни:» / «Выберите другую дату» and got a message
+    that ended there.
+
+    ``exclude_date`` is the day just found empty. It is dropped from the
+    keyboard because offering it back is a loop: the tap lands on the branch
+    that produced this reply.
+
+    A failed schedule read is not an error page here — the reply about the
+    day is already true and worth sending. It degrades to ``empty_prompt``,
+    which says only what is known («не вижу») and names a step that exists.
+    """
+    try:
+        service_ids = [service_id] if service_id is not None else None
+        dates = yclients.get_available_dates(staff_id=master_id, service_ids=service_ids)
+    except (
+        YClientsScheduleUnavailableError,
+        YClientsAPIError,
+        YClientsUnavailableError,
+    ) as exc:
+        logger.warning("booking.%s.dates_failed master=%s err=%s", log_slug, master_id, exc)
+        dates = []
+    others = [d for d in sorted(dates or []) if d != exclude_date]
+    if not others:
+        return _build_skill_result(
+            text=empty_prompt,
+            tool_calls_made=[],
+            confidence=_CONFIDENCE_OK,
+        )
+    return _build_skill_result(
+        text=prompt,
+        tool_calls_made=[],
+        confidence=_CONFIDENCE_OK,
+        action_data=_action_data_for_date_pick(
+            master_id,
+            others[:_MAX_DATE_BUTTONS],
+            service_id,
+            today=local_today(tenant),
+            collapse=True,
+        ),
+    )
 
 
 # Russian weekday abbreviations for slot button labels.
@@ -1775,20 +1927,26 @@ def _handle_pick_slot_callback(
     if not any(_same_slot_instant(c.datetime, raw_dt) for c in slots):
         logger.info("booking.pick_slot.slot_gone master=%s slot=%s", master_id, raw_dt)
         if slots:
-            return _build_skill_result(
+            return _slot_pick_reply(
                 text=_SLOT_TAKEN_PROMPT,
-                tool_calls_made=[],
-                confidence=_CONFIDENCE_OK,
-                action_data=_action_data_for_slot_pick(
-                    slots,
-                    master_id=master_id,
-                    service_id=service_id,
-                ),
+                slots=slots,
+                master_id=master_id,
+                service_id=service_id,
             )
-        return _build_skill_result(
-            text=_SLOT_TAKEN_NO_ALTERNATIVES,
-            tool_calls_made=[],
-            confidence=_CONFIDENCE_OK,
+        # OPEN_DECISIONS §25 п.5 (owner, 04.09.2026) — «выберите другую
+        # дату» has to come with the dates. The old reply ended on that
+        # instruction with no keyboard and no way back to this master's
+        # calendar; the test that pinned the missing keyboard was pinning
+        # the defect, not a decision.
+        return _render_other_dates(
+            master_id=master_id,
+            service_id=service_id,
+            exclude_date=target_date,
+            yclients=yclients,
+            tenant=tenant,
+            prompt=_SLOT_TAKEN_NO_ALTERNATIVES,
+            empty_prompt=_SLOT_TAKEN_NO_DATES,
+            log_slug="pick_slot",
         )
 
     # Deterministic preview — confirm_booking validates + persists the
@@ -2115,10 +2273,22 @@ def _render_part_picker(
     slots = [c for c in (_to_slot_candidate(t, date) for t in times) if c is not None]
     today = local_today(tenant)
     if not slots:
-        return _build_skill_result(
-            text=_DAY_UNAVAILABLE_PROMPT.format(day=day_label(date, today).lower()),
-            tool_calls_made=[],
-            confidence=_CONFIDENCE_OK,
+        # DRF-1490 — the sibling branch in :func:`_render_date_picker` says
+        # this exact sentence WITH the picker under it; this one said it
+        # with nothing. The sentence is right and the keyboard was missing,
+        # not the other way round: «Вот ближайшие дни:» is the honest answer
+        # to a day that holds nothing, and the days are one schedule read
+        # away. The other branch is the one that was already correct.
+        logger.info("booking.pick_date.day_empty master=%s date=%s", master_id, date)
+        return _render_other_dates(
+            master_id=master_id,
+            service_id=service_id,
+            exclude_date=date,
+            yclients=yclients,
+            tenant=tenant,
+            prompt=_DAY_UNAVAILABLE_PROMPT.format(day=day_label(date, today).lower()),
+            empty_prompt=_DAY_UNAVAILABLE_NO_DATES.format(day=day_label(date, today).lower()),
+            log_slug="pick_date",
         )
 
     present = [p for p in PART_ORDER if _slots_in_part(slots, p)]
@@ -2130,15 +2300,11 @@ def _render_part_picker(
         # be written here — a rendered slot list must be visible in the audit
         # trail no matter which code path produced it.
         _audit_handled(tenant_id=tenant_id, tool=SHOW_SLOTS_TOOL_SPEC["name"])
-        return _build_skill_result(
+        return _slot_pick_reply(
             text=_slot_prompt(date, wanted_part, today, heard=heard),
-            tool_calls_made=[],
-            confidence=_CONFIDENCE_OK,
-            action_data=_action_data_for_slot_pick(
-                _slots_in_part(slots, wanted_part),
-                master_id=master_id,
-                service_id=service_id,
-            ),
+            slots=_slots_in_part(slots, wanted_part),
+            master_id=master_id,
+            service_id=service_id,
         )
 
     if wanted_part is not None and present:
@@ -2163,15 +2329,11 @@ def _render_part_picker(
     if len(present) == 1:
         only = present[0]
         _audit_handled(tenant_id=tenant_id, tool=SHOW_SLOTS_TOOL_SPEC["name"])
-        return _build_skill_result(
+        return _slot_pick_reply(
             text=_slot_prompt(date, only, today, heard=heard),
-            tool_calls_made=[],
-            confidence=_CONFIDENCE_OK,
-            action_data=_action_data_for_slot_pick(
-                _slots_in_part(slots, only),
-                master_id=master_id,
-                service_id=service_id,
-            ),
+            slots=_slots_in_part(slots, only),
+            master_id=master_id,
+            service_id=service_id,
         )
 
     return _build_skill_result(
