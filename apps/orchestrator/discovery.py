@@ -437,14 +437,21 @@ class DiscoveryReply:
     :mod:`apps.orchestrator.concierge`) — the handler must NOT record it
     again. Legacy producers leave it False.
 
-    ``outage`` (DRF-1348): True when this reply exists ONLY because the model
-    could not be reached — the LLM call itself raised and the turn degraded to
-    the safe line. Set in exactly one place
-    (:func:`apps.orchestrator.concierge.generate_concierge_reply`, the
-    ``llm_error`` return) and nowhere else: the other producers of the same
-    safe line — a blank clarification, an unknown tool name — are the model
-    ANSWERING badly, which is a different fact and must not offer «Повторить»
-    for a turn that was, in fact, taken.
+    ``outage`` (DRF-1348): True when this reply exists ONLY because the turn
+    produced no answer at all. Two producers, both in
+    :func:`apps.orchestrator.concierge.generate_concierge_reply`: the
+    ``llm_error`` return (the LLM call raised — we never reached the model)
+    and, since DRF-1489, an empty completion holding no tool data (we reached
+    the model and it said nothing — no tool, no prose). Neither has an answer
+    to judge, and for both the only remedy is the same message sent again,
+    which is exactly what «Повторить» does.
+
+    Everywhere else the safe line is NOT this flag: a blank clarification, an
+    unknown tool name, a parser that refused the phrase, ``start_booking``
+    naming nobody — those are the model ANSWERING badly, a different fact,
+    and offering «Повторить» for a turn that was in fact taken would be a
+    second way of lying. Those branches carry their own promise-free text
+    (see :mod:`apps.orchestrator.llm.templates`).
 
     Читается каналом, чтобы нарисовать состояние «AI недоступна» из макета C01
     вместо молчаливого «отвечу через минуту», который ничего не отвечает.
