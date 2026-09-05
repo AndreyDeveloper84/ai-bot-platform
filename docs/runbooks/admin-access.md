@@ -143,3 +143,52 @@ Used after every non-trivial run.
   fix: CSRF trusted origins + TLS-proxy flag + Secure cookies; account
   bootstrap via env-driven `createsuperuser --noinput`; cross-tenant
   warning documented and surfaced in the UI).
+
+---
+
+## Проверка состояния перед DRF-1495 (2026-09-05)
+
+Проверялся код на `origin/dev@a7fa4fa`, не тикет DRF-1023. Что найдено.
+
+**Что работает.** Механика входа, починенная DRF-1023, на месте и не
+сломана: `_parse_trusted_origins` + `DJANGO_CSRF_TRUSTED_ORIGINS` /
+`DJANGO_BEHIND_TLS_PROXY` / `DJANGO_SESSION_COOKIE_SECURE` /
+`DJANGO_CSRF_COOKIE_SECURE` читаются в `config/settings/base.py:42-102`.
+Аутентификация — сессионная (`SessionMiddleware` +
+`AuthenticationMiddleware` в `MIDDLEWARE`), JWT в контуре админки нет.
+`/admin/` смонтирован в `config/urls.py`; 19 приложений регистрируют
+`ModelAdmin`.
+
+**Чего нет — и это дыры, а не недоделки.**
+
+1. **Ролей нет вообще.** Во всём репозитории ни одной `Group`, ни одной
+   выдачи `user_permissions`. Единственный документированный способ
+   завести учётную запись — `createsuperuser` (шаг 3 этого раннбука),
+   то есть **любая заведённая запись — суперпользователь**. «Смотрящий»
+   и «правящий» не различимы: тот, кому дали посмотреть очередь
+   handoff, может править каталог, тенантов и чужие салоны.
+2. **Отзыва нет.** Ни команды, ни процедуры. Раннбук описывает только
+   выдачу и смену пароля. Ушедший человек остаётся с активной сессией
+   и правами суперпользователя.
+3. **Журнала действий админки нет.** `apps.audit.AuditLog` +
+   `write_audit()` существуют и хороши (DRF-426), но **ни один
+   `ModelAdmin` в них не пишет** — единственное исключение
+   `MasterServiceAdmin` (DRF-975), и то через provenance-контекст
+   каталога, а не как общий журнал. Django свой `admin.LogEntry` пишет,
+   но он **нигде не зарегистрирован в админке** — то есть невидим.
+   Правка через `/admin/` над живыми данными сегодня не оставляет
+   следа, который можно прочитать.
+4. **Секреты видны в интерфейсе.** `TenantAdmin.fieldsets`
+   (`apps/tenancy/admin.py`) отдаёт `telegram_bot_token` и
+   `telegram_webhook_secret` обычными текстовыми полями формы
+   изменения. Маскируется только колонка списка
+   (`telegram_bot_token_masked`); полное значение обоих секретов
+   уезжает в HTML страницы редактирования каждому, кто её открыл.
+5. `apps.adminconsole` — пустой каркас (`apps.py` + `__init__.py`),
+   зарезервированный под «Django admin chrome»
+   (`config/settings/base.py:140,178`). Дом для этой работы есть, он
+   просто не заселён.
+
+**Живых учётных записей проверить нельзя и не нужно:** на боевой контур
+эта задача не ходит (правило DRF-75). Механизм заводится здесь, записи
+заводит владелец.
