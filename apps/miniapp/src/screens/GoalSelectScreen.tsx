@@ -92,7 +92,7 @@ import {
   type GoalSelectBody,
   type MissingItem,
 } from "../lib/customer-goals";
-import { useBackButton } from "../hooks/useBackButton";
+import { backTo, screenRoot, type BackIntent } from "../lib/screen-back";
 
 type State =
   | { kind: "loading" }
@@ -187,9 +187,17 @@ export function GoalSelectScreen({ initialDoc }: Props = {}) {
   // вести ей там некуда: истории за корнем нет, нажатие оставило бы
   // человека на месте. Единственное решение экрана о навигации — и оно
   // о корне роутера, а не о содержании документа.
-  const goBack = useCallback(() => navigate(-1), [navigate]);
   const isRoot = pathname === "/";
-  useBackButton({ onBack: isRoot ? undefined : goBack });
+  // DRF-1493: место возврата задано адресом, а не историей. На корне
+  // возврата нет вовсе (см. абзац выше); в остальных случаях цель
+  // открывают с дома клиентской поверхности — «Записи», — и по
+  // deep-link `open_goal_select` из бота, где истории нет совсем.
+  const back: BackIntent = isRoot
+    ? screenRoot(
+        "Поверхность цели смонтирована на `/` первым экраном клиента — " +
+          "истории за корнем нет, вести кнопке некуда.",
+      )
+    : backTo("/customer/main");
 
   const submit = useCallback((body: GoalSelectBody) => {
     setSubmitting(true);
@@ -216,7 +224,7 @@ export function GoalSelectScreen({ initialDoc }: Props = {}) {
 
   if (state.kind === "loading") {
     return (
-      <ScreenLayout title="Какая у тебя цель?">
+      <ScreenLayout back={back} title="Какая у тебя цель?">
         <DelayedSkeleton loading>
           <ServiceCardSkeleton />
           <ServiceCardSkeleton />
@@ -227,7 +235,7 @@ export function GoalSelectScreen({ initialDoc }: Props = {}) {
 
   if (state.kind === "error") {
     return (
-      <ScreenLayout title="Какая у тебя цель?">
+      <ScreenLayout back={back} title="Какая у тебя цель?">
         <StateError err={state.err} onRetry={load} screenId="goal-select" />
       </ScreenLayout>
     );
@@ -321,7 +329,7 @@ export function GoalSelectScreen({ initialDoc }: Props = {}) {
   const stickyCount = [onward, guardExit, surfaceExit].filter(Boolean).length;
 
   return (
-    <ScreenLayout
+    <ScreenLayout back={back}
       title="Какая у тебя цель?"
       tallCta={stickyCount > 1}
       cta={

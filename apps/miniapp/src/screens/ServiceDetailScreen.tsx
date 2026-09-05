@@ -7,11 +7,14 @@ import { ScreenLayout } from "../components/ScreenLayout";
 import { StickyCta } from "../components/StickyCta";
 import { DelayedSkeleton, Skeleton } from "../components/Skeleton";
 import { StateError } from "../components/StateError";
-import { useBackButton } from "../hooks/useBackButton";
 import { useHaptics } from "../hooks/useHaptics";
 import { formatDuration, formatMoney } from "../lib/format";
 import { UNBOOKABLE_DETAIL } from "../components/UnbookableNote";
 import { setService } from "../state/booking";
+import { backTo } from "../lib/screen-back";
+
+/** Возврат (DRF-1493): к списку услуг, откуда открывают карточку. */
+const BACK = backTo("/catalog");
 
 type State =
   | { kind: "loading" }
@@ -25,7 +28,6 @@ export function ServiceDetailScreen() {
   const haptics = useHaptics();
   const [state, setState] = useState<State>({ kind: "loading" });
 
-  useBackButton({ onBack: () => navigate(-1) });
 
   const load = useCallback(() => {
     if (!serviceId) return;
@@ -63,7 +65,7 @@ export function ServiceDetailScreen() {
 
   if (state.kind === "loading") {
     return (
-      <ScreenLayout title="Услуга">
+      <ScreenLayout back={BACK} title="Услуга">
         <DelayedSkeleton loading>
           <Skeleton width="70%" height="1.6em" />
           <div style={{ marginTop: "var(--s-3)" }}>
@@ -79,7 +81,7 @@ export function ServiceDetailScreen() {
 
   if (state.kind === "notfound") {
     return (
-      <ScreenLayout title="Услуга">
+      <ScreenLayout back={BACK} title="Услуга">
         <div className="callout">
           <p style={{ margin: 0 }}>Не нашлось. Возможно, удалили.</p>
           <button
@@ -97,7 +99,7 @@ export function ServiceDetailScreen() {
 
   if (state.kind === "error") {
     return (
-      <ScreenLayout title="Услуга">
+      <ScreenLayout back={BACK} title="Услуга">
         <StateError err={state.err} onRetry={load} screenId="service-detail" />
       </ScreenLayout>
     );
@@ -114,7 +116,7 @@ export function ServiceDetailScreen() {
   // worth reading, and the callout says why booking is off.
   const unbookable = !s.is_bookable;
   return (
-    <ScreenLayout
+    <ScreenLayout back={BACK}
       title={s.name}
       cta={
         unbookable ? undefined : (

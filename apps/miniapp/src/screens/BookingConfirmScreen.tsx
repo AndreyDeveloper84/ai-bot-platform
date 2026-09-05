@@ -5,11 +5,14 @@ import { useNavigate } from "react-router-dom";
 import { ApiError, createBooking } from "../lib/api";
 import { ScreenLayout } from "../components/ScreenLayout";
 import { StickyCta } from "../components/StickyCta";
-import { useBackButton } from "../hooks/useBackButton";
 import { useClosingConfirmation } from "../hooks/useClosingConfirmation";
 import { useHaptics } from "../hooks/useHaptics";
 import { formatVisitFull } from "../lib/format";
 import { resetBooking, useBookingDraft } from "../state/booking";
+import { backTo } from "../lib/screen-back";
+
+/** Возврат (DRF-1493): к выбору времени — предыдущий шаг записи. */
+const BACK = backTo("/book/when");
 
 type ErrState =
   | { kind: "slot_unavailable" }
@@ -24,7 +27,6 @@ export function BookingConfirmScreen() {
   const [submitting, setSubmitting] = useState(false);
   const [err, setErr] = useState<ErrState | null>(null);
 
-  useBackButton({ onBack: () => navigate(-1) });
   useClosingConfirmation(true);
 
   if (!draft.serviceId || !draft.masterId || !draft.visitAt) {
@@ -71,7 +73,7 @@ export function BookingConfirmScreen() {
   }
 
   return (
-    <ScreenLayout
+    <ScreenLayout back={BACK}
       title={false ? "Перенос записи" : "Подтверждение"}
       cta={
         <StickyCta onClick={onConfirm} disabled={submitting}>

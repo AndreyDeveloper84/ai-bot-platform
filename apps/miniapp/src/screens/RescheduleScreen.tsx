@@ -31,7 +31,6 @@ import { Snackbar } from "../components/Snackbar";
 import { StickyCta } from "../components/StickyCta";
 import { DelayedSkeleton, Skeleton, SlotGridSkeleton } from "../components/Skeleton";
 import { StateError } from "../components/StateError";
-import { useBackButton } from "../hooks/useBackButton";
 import { useHaptics } from "../hooks/useHaptics";
 import {
   ApiError,
@@ -44,6 +43,7 @@ import {
 } from "../lib/api";
 import { formatDateLabel, formatDayStrip, formatSlotTime, formatVisitFull } from "../lib/format";
 import { resetBooking } from "../state/booking";
+import { backTo } from "../lib/screen-back";
 
 function isoDateNDaysAhead(offset: number): string {
   const d = new Date();
@@ -67,7 +67,11 @@ export function RescheduleScreen() {
   const [confirming, setConfirming] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  useBackButton({ onBack: () => navigate(-1) });
+  // Возврат (DRF-1493) — к самой записи, которую переносят. Адрес несёт
+  // её id, поэтому родитель известен и при входе по ссылке из бота.
+  const back = backTo(
+    bookingId ? `/my-visits/${bookingId}` : "/my-visits",
+  );
 
   const load = useCallback(() => {
     if (!bookingId) return;
@@ -161,7 +165,7 @@ export function RescheduleScreen() {
 
   if (state.kind === "loading") {
     return (
-      <ScreenLayout title="Перенести">
+      <ScreenLayout back={back} title="Перенести">
         <DelayedSkeleton loading>
           <div className="date-strip">
             {Array.from({ length: 6 }, (_, i) => (
@@ -176,7 +180,7 @@ export function RescheduleScreen() {
 
   if (state.kind === "error") {
     return (
-      <ScreenLayout title="Перенести">
+      <ScreenLayout back={back} title="Перенести">
         <StateError err={state.err} onRetry={load} screenId="reschedule" />
       </ScreenLayout>
     );
@@ -184,7 +188,7 @@ export function RescheduleScreen() {
 
   if (state.kind === "orphan") {
     return (
-      <ScreenLayout title="Перенести">
+      <ScreenLayout back={back} title="Перенести">
         <div className="callout">
           <p style={{ margin: 0 }}>
             Эту услугу нельзя перенести — она больше не предлагается в текущем
@@ -206,7 +210,7 @@ export function RescheduleScreen() {
   const b = state.booking;
 
   return (
-    <ScreenLayout
+    <ScreenLayout back={back}
       title="Перенести"
       cta={
         <StickyCta onClick={onConfirm} disabled={!pickedSlot || confirming}>

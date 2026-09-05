@@ -22,13 +22,16 @@ import { ScreenLayout } from "../components/ScreenLayout";
 import { StickyCta } from "../components/StickyCta";
 import { DelayedSkeleton, MasterCardSkeleton } from "../components/Skeleton";
 import { StateError } from "../components/StateError";
-import { useBackButton } from "../hooks/useBackButton";
 import {
   getCustomerMaster,
   type CustomerMaster,
 } from "../lib/customer-booking";
 import { publicRating } from "../lib/rating";
 import { setMaster, setService, useBookingDraft } from "../state/booking";
+import { backTo } from "../lib/screen-back";
+
+/** Возврат (DRF-1493): в каталог — единственный вход в карточку мастера. */
+const BACK = backTo("/customer/catalog");
 
 type State =
   | { kind: "loading" }
@@ -43,7 +46,6 @@ export function CustomerMasterDetailScreen() {
   const draft = useBookingDraft();
   const [state, setState] = useState<State>({ kind: "loading" });
 
-  useBackButton({ onBack: () => navigate(-1) });
 
   const load = useCallback(() => {
     if (!masterId) return;
@@ -79,7 +81,7 @@ export function CustomerMasterDetailScreen() {
 
   if (state.kind === "loading") {
     return (
-      <ScreenLayout title="Мастер">
+      <ScreenLayout back={BACK} title="Мастер">
         <DelayedSkeleton loading>
           <MasterCardSkeleton />
           <MasterCardSkeleton />
@@ -90,7 +92,7 @@ export function CustomerMasterDetailScreen() {
 
   if (state.kind === "error") {
     return (
-      <ScreenLayout title="Мастер">
+      <ScreenLayout back={BACK} title="Мастер">
         <StateError err={state.err} onRetry={load} screenId="customer-master-detail" />
       </ScreenLayout>
     );
@@ -102,7 +104,7 @@ export function CustomerMasterDetailScreen() {
   const rating = ratingValue === null ? null : ratingValue.toFixed(1);
 
   return (
-    <ScreenLayout
+    <ScreenLayout back={BACK}
       title={m.name}
       cta={
         <StickyCta onClick={onChooseTime}>

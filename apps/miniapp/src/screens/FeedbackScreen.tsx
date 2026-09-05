@@ -20,9 +20,12 @@ import { useNavigate, useParams } from "react-router-dom";
 import { ScreenLayout } from "../components/ScreenLayout";
 import { StateError } from "../components/StateError";
 import { StickyCta } from "../components/StickyCta";
-import { useBackButton } from "../hooks/useBackButton";
 import { useHaptics } from "../hooks/useHaptics";
 import { submitFeedback, type FeedbackResult } from "../lib/api";
+import { backTo } from "../lib/screen-back";
+
+/** Возврат (DRF-1493): к списку записей — отзыв открывают оттуда. */
+const BACK = backTo("/customer/records");
 
 const COMMENT_MAX = 500;
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -35,7 +38,6 @@ export function FeedbackScreen() {
   const { bookingId } = useParams<{ bookingId: string }>();
   const navigate = useNavigate();
   const haptics = useHaptics();
-  useBackButton({ onBack: () => navigate(-1) });
 
   const validId = useMemo(() => !!bookingId && UUID_RE.test(bookingId), [bookingId]);
 
@@ -64,7 +66,7 @@ export function FeedbackScreen() {
 
   if (!validId) {
     return (
-      <ScreenLayout title="Оценить визит">
+      <ScreenLayout back={BACK} title="Оценить визит">
         <div className="callout callout--danger" role="alert">
           Ссылка повреждена — не получилось определить визит.
         </div>
@@ -79,7 +81,7 @@ export function FeedbackScreen() {
   const canSubmit = phase.rating > 0 && !phase.submitting;
 
   return (
-    <ScreenLayout
+    <ScreenLayout back={BACK}
       title="Оцените визит"
       cta={
         <StickyCta onClick={onSubmit} disabled={!canSubmit}>
@@ -188,7 +190,7 @@ function StarPicker({ value, onChange }: { value: number; onChange: (v: number) 
 function ThankYou({ result, onClose }: { result: FeedbackResult; onClose: () => void }) {
   const lowRating = result.rating <= 3;
   return (
-    <ScreenLayout
+    <ScreenLayout back={BACK}
       title={lowRating ? "Спасибо за честность" : "Спасибо за оценку!"}
       cta={<StickyCta onClick={onClose}>К моим записям</StickyCta>}
     >

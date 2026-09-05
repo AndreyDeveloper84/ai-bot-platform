@@ -23,7 +23,14 @@ vi.mock("../lib/customer-booking", async (importOriginal) => {
   };
 });
 
-vi.mock("../lib/max-sdk", () => ({ getInitData: () => "test-init-data" }));
+// DRF-1493: экран объявляет свой вид через `useScreenBack`, а тот
+// заводит аппаратную кнопку MAX — мок должен отдавать и её ручки,
+// иначе тест падает на отсутствующем экспорте, а не на поведении.
+vi.mock("../lib/max-sdk", () => ({
+  getInitData: () => "test-init-data",
+  setBackButton: () => undefined,
+  onBackButton: () => () => undefined,
+}));
 
 import { getCatalogBrowse } from "../lib/customer-booking";
 

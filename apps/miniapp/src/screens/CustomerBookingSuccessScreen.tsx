@@ -37,6 +37,14 @@ import { ScreenLayout } from "../components/ScreenLayout";
 import { StickyCta } from "../components/StickyCta";
 import { formatVisitFull } from "../lib/format";
 import { hapticNotify, maxBridge } from "../lib/max-sdk";
+import { backTo } from "../lib/screen-back";
+
+/**
+ * Возврат (DRF-1493): к списку записей, а НЕ на подтверждение.
+ * Запись уже создана: шаг назад по истории вернул бы человека в
+ * оформление с оплатой, которое он только что завершил.
+ */
+const BACK = backTo("/customer/records");
 
 interface SuccessState {
   service_name?: string;
@@ -74,7 +82,7 @@ export function CustomerBookingSuccessScreen() {
     : "Записала.";
 
   return (
-    <ScreenLayout
+    <ScreenLayout back={BACK}
       title=""
       cta={
         <StickyCta
