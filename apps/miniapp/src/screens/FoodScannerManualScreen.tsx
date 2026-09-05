@@ -22,6 +22,8 @@ import {
   readConsentAt,
   type MealType,
 } from "../lib/food-scanner";
+import { useScreenBack } from "../hooks/useScreenBack";
+import { backTo } from "../lib/screen-back";
 
 interface RouterState {
   mealType?: MealType;
@@ -36,6 +38,10 @@ const MEAL_TYPES: ReadonlyArray<MealType> = [
 
 export function FoodScannerManualScreen() {
   const navigate = useNavigate();
+
+  // Возврат (DRF-1493) — к съёмке: ручной ввод открывают из неё.
+  // Был `-1`, то есть ничего при входе по ссылке.
+  const onBack = useScreenBack(backTo("/customer/food-scanner/capture"));
   const location = useLocation();
   const state = (location.state ?? {}) as RouterState;
   const [dishName, setDishName] = useState("");
@@ -107,7 +113,7 @@ export function FoodScannerManualScreen() {
           type="button"
           className="records-screen__back"
           aria-label="Назад"
-          onClick={() => navigate(-1)}
+          onClick={onBack}
         >
           <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
             <path

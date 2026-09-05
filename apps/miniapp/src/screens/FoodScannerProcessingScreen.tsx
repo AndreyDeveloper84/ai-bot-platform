@@ -30,6 +30,8 @@ import {
   scanPhoto,
   type MealType,
 } from "../lib/food-scanner";
+import { useScreenBack } from "../hooks/useScreenBack";
+import { backTo } from "../lib/screen-back";
 
 interface RouterState {
   photo?: File;
@@ -46,6 +48,12 @@ const TIMEOUT_MS = 10000;
 
 export function FoodScannerProcessingScreen() {
   const navigate = useNavigate();
+
+  // Возврат (DRF-1493) — на дом. Своей стрелки экран не рисует
+  // (распознавание идёт секунды и его отменяют кнопкой «Отменить»), но
+  // аппаратная кнопка MAX существует независимо от разметки — и без
+  // объявления увела бы из приложения. Объявление обязательно и здесь.
+  useScreenBack(backTo("/customer/main"));
   const location = useLocation();
   const state = (location.state ?? {}) as RouterState;
   const photo = state.photo;
@@ -207,6 +215,8 @@ function ScanErrorScreen({
   previewUrl: string | null;
 }) {
   const navigate = useNavigate();
+  // Возврат (DRF-1493) — на дом; адрес прежний, теперь объявленный.
+  const onBack = useScreenBack(backTo("/customer/main"));
   const isNotRecognized = err instanceof FoodNotRecognizedError;
   const isPhotoFailed = err instanceof PhotoBytesMissingError;
   const headline = isNotRecognized
@@ -226,7 +236,7 @@ function ScanErrorScreen({
           type="button"
           className="records-screen__back"
           aria-label="Назад"
-          onClick={() => navigate("/customer/main")}
+          onClick={onBack}
         >
           <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
             <path
@@ -295,7 +305,7 @@ function ScanErrorScreen({
           <button
             type="button"
             className="btn-secondary"
-            onClick={() => navigate("/customer/main")}
+            onClick={onBack}
           >
             Назад на главную
           </button>

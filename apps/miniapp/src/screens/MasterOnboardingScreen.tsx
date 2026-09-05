@@ -49,7 +49,7 @@ import {
 import { ScreenLayout } from "../components/ScreenLayout";
 import { useReloadMe } from "../state/boot";
 import { StickyCta } from "../components/StickyCta";
-import { backToStep, screenRoot, type BackIntent } from "../lib/screen-back";
+import { backByAction, screenRoot, type BackIntent } from "../lib/screen-back";
 import { useClosingConfirmation } from "../hooks/useClosingConfirmation";
 
 const BIO_MAX = 280;
@@ -197,7 +197,7 @@ export function MasterOnboardingScreen() {
   // ошибок возвращаться некуда: приглашение открывают по ссылке из
   // бота, истории за ним нет.
   const back: BackIntent = onBack
-    ? backToStep(onBack)
+    ? backByAction(onBack)
     : screenRoot(
         "Первый шаг мастера онбординга и его экраны ошибок — вход по " +
           "ссылке-приглашению из бота; предыдущего экрана не существует.",

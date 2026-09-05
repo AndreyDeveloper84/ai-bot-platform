@@ -25,14 +25,14 @@ export function useScreenBack(back: BackIntent): (() => void) | undefined {
   // объект: иначе `useBackButton` переподписывался бы каждый рендер.
   const kind = back.kind;
   const to = back.kind === "up" ? back.to : undefined;
-  const step = back.kind === "step" ? back.onBack : undefined;
+  const action = back.kind === "action" ? back.onBack : undefined;
 
   const onBack = useMemo(() => {
     if (kind === "root") return undefined;
-    if (kind === "step") return step;
+    if (kind === "action") return action;
     if (to === undefined) return undefined;
     return () => navigate(to);
-  }, [kind, to, step, navigate]);
+  }, [kind, to, action, navigate]);
 
   useBackButton({ onBack });
 

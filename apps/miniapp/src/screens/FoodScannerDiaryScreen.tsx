@@ -26,6 +26,8 @@ import {
   type DailySummaryResponse,
   type MealType,
 } from "../lib/food-scanner";
+import { useScreenBack } from "../hooks/useScreenBack";
+import { backTo } from "../lib/screen-back";
 
 type Status =
   | { kind: "loading" }
@@ -41,6 +43,9 @@ const MEAL_ORDER: ReadonlyArray<MealType> = [
 
 export function FoodScannerDiaryScreen() {
   const navigate = useNavigate();
+
+  // Возврат (DRF-1493) — на дом; адрес прежний, теперь объявленный.
+  const onBack = useScreenBack(backTo("/customer/main"));
   const [status, setStatus] = useState<Status>({ kind: "loading" });
 
   const load = useCallback(async () => {
@@ -71,7 +76,7 @@ export function FoodScannerDiaryScreen() {
           type="button"
           className="records-screen__back"
           aria-label="Назад"
-          onClick={() => navigate("/customer/main")}
+          onClick={onBack}
         >
           <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
             <path

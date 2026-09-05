@@ -17,7 +17,6 @@
  */
 
 import { useCallback, useEffect, useState } from "react";
-import { useNavigate } from "react-router-dom";
 import {
   deleteCard,
   getSavedCards,
@@ -25,6 +24,8 @@ import {
   type SavedCard,
 } from "../lib/cards";
 import { openPaymentConfirmation } from "../lib/max-sdk";
+import { useScreenBack } from "../hooks/useScreenBack";
+import { backTo } from "../lib/screen-back";
 
 type State =
   | { kind: "loading" }
@@ -42,7 +43,9 @@ function brandLabel(brand: string): string {
 }
 
 export function CustomerCardsScreen() {
-  const navigate = useNavigate();
+
+  // Возврат (DRF-1493) — в профиль: карты открывают только оттуда.
+  const onBack = useScreenBack(backTo("/customer/profile"));
   const [state, setState] = useState<State>({ kind: "loading" });
   const [consentChecked, setConsentChecked] = useState(false);
   const [setupBusy, setSetupBusy] = useState(false);
@@ -111,7 +114,7 @@ export function CustomerCardsScreen() {
           type="button"
           className="records-screen__back"
           aria-label="Назад"
-          onClick={() => navigate(-1)}
+          onClick={onBack}
         >
           <span aria-hidden="true">←</span>
         </button>
