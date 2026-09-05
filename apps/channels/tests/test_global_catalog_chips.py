@@ -174,6 +174,10 @@ class TestCatalogTaps:
         _run_global(f"{CALLBACK_CATALOG_SERVICES_PREFIX}{uuid.uuid4()}", mid="chip4")
 
         assert mock_send[-1]["text"] == CATALOG_STALE_CARD_TEXT
+        # DRF-1492 — the line says «Нажмите "Показать салоны"», so the message
+        # that carries it carries the button. Asserted on the CHANNEL, where
+        # the keyboard either reaches the wire or does not.
+        assert [b["payload"] for b in _keyboard(mock_send[-1])[0]] == ["cb:catalog:salons"]
         # The worst outcome would be the raw «cb:…» string reaching the model,
         # which would answer it as if the person had said it.
         spy_concierge.assert_not_called()
@@ -182,6 +186,34 @@ class TestCatalogTaps:
         _run_global(f"{CALLBACK_CATALOG_SERVICES_PREFIX}не-uuid", mid="chip5")
 
         assert mock_send[-1]["text"] == CATALOG_STALE_CARD_TEXT
+        assert [b["payload"] for b in _keyboard(mock_send[-1])[0]] == ["cb:catalog:salons"]
+        spy_concierge.assert_not_called()
+
+    def test_an_unknown_catalog_slug_is_answered_with_a_button_too(
+        self, mock_send, fake_redis, spy_concierge
+    ):
+        """DRF-1492 — the ladder in the handler routes ``cb:catalog:*`` by
+        PREFIX, so a slug no branch claims («cb:catalog:salons:moscow», a
+        renamed verb, a keyboard older than the grammar) reaches the executor
+        too. Its own fallback is keyboardless, and the stale line now names a
+        button — so the executor answers this class itself.
+        """
+        _run_global("cb:catalog:salons:moscow", mid="chip6b")
+
+        assert mock_send[-1]["text"] == CATALOG_STALE_CARD_TEXT
+        assert [b["payload"] for b in _keyboard(mock_send[-1])[0]] == ["cb:catalog:salons"]
+        spy_concierge.assert_not_called()
+
+    def test_the_show_salons_chip_answers_with_the_salon_list(
+        self, mock_send, fake_redis, spy_concierge, salon
+    ):
+        """The entry point of the chain, as a button, end to end on MAX."""
+        _run_global("cb:catalog:salons", mid="chip6c")
+
+        assert salon.tenant.name in mock_send[-1]["text"]
+        assert [b["payload"] for b in _keyboard(mock_send[-1])[0]] == [
+            f"{CALLBACK_CATALOG_SERVICES_PREFIX}{salon.tenant.id}"
+        ]
         spy_concierge.assert_not_called()
 
     def test_tap_never_lands_in_dialog_history(self, mock_send, fake_redis, spy_concierge, salon):

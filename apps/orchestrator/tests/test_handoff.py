@@ -433,7 +433,16 @@ def test_handoff_unresolvable_service_asks_and_does_not_dispatch(
     # alternative, so they stay the neutral ask.
     expected = "нет услуги" if case == "no_edge" else "напишите"
     assert expected in reply.text, case
-    assert _buttons(reply) == [], case  # nothing deliverable → no dead buttons
+    # Nothing DELIVERABLE per service → no service buttons. That guarantee is
+    # what this line has always been about, and it is unchanged: a chip
+    # carrying one of these ungroundable ids would smuggle it into booking.
+    assert [b for b in _buttons(reply) if b["callback"].startswith("cb:discover:book:")] == [], case
+    # DRF-1492 — but the reply is no longer buttonless either: both bare
+    # wordings named a move («попробуйте выбрать другого мастера»,
+    # «напишите, какая услуга вас интересует») with nothing to press. The one
+    # chip is the salon's own catalog, addressed by the tenant id — an id
+    # this branch does hold and one that resolves by construction.
+    assert [b["callback"] for b in _buttons(reply)] == [f"cb:catalog:services:{t.id}"], case
     assert called == []
 
 
@@ -500,6 +509,12 @@ def test_handoff_nullable_staff_id_is_graceful_no_dispatch(settings, monkeypatch
 
     reply = handoff_to_booking(global_bot_user=gbu, tenant_id=t.id, master_id=master.id)
     assert "недоступна" in reply.text
+    # DRF-1492 — T IS resolved on this branch, so the way out is that salon's
+    # own catalog, not the whole marketplace. Which argument each of the four
+    # call sites passes is the thing that decides this, and it is checkable
+    # only here: a person standing inside a salon must not be answered with
+    # «посмотрите наши салоны».
+    assert [b["callback"] for b in _buttons(reply)] == [f"cb:catalog:services:{t.id}"]
     assert called == []  # no booking dispatch when the master has no native id
 
 
@@ -512,7 +527,43 @@ def test_handoff_unknown_tenant_or_master_graceful(settings, monkeypatch) -> Non
     # Unknown tenant id → graceful, no dispatch.
     reply = handoff_to_booking(global_bot_user=gbu, tenant_id=uuid4(), master_id=uuid4())
     assert "недоступна" in reply.text
+    # DRF-1492 — the paired opposite of the test above: with T unresolved
+    # there is no «этот салон» to point at, so the chip is the salon list and
+    # the wording matches it.
+    assert "наши салоны" in reply.text
+    assert [b["callback"] for b in _buttons(reply)] == ["cb:catalog:salons"]
     assert called == []
+
+
+def test_empty_skill_reply_offers_the_salon_it_could_not_continue(settings, monkeypatch) -> None:
+    """DRF-1492 — the «skill said nothing» fallback of ``route_booking_callback``.
+
+    A new early return, and the only branch of that function that both names a
+    move («выберите заново») and knows the tenant, so its chip can be that
+    salon's catalog rather than the whole marketplace.
+    """
+    settings.STRICT_TENANT_SCOPE = "strict"
+    settings.BOOKING_VIA_AYLA_REST = True
+    t = _tenant("t-emptyreply")
+    master = _master(t)
+    gbu = resolve_or_create_global_bot_user(channel="max", channel_user_id="609", chat_id="609")
+
+    class _Empty:
+        reply_text = ""
+        action_data = None
+        should_handoff = False
+        handoff_reason = ""
+
+    monkeypatch.setattr("apps.skills.registry.dispatch", lambda ctx: _Empty())
+
+    reply = route_booking_callback(
+        global_bot_user=gbu,
+        callback_text=f"cb:book:pick_date:{master.id}:2026-08-11:{uuid4()}",
+        chat_id="609",
+    )
+
+    assert "выберите заново" in reply.text.lower()
+    assert [b["callback"] for b in _buttons(reply)] == [f"cb:catalog:services:{t.id}"]
 
 
 def test_bridge_read_invariant_raises_at_no_tenant(settings) -> None:
@@ -615,4 +666,10 @@ def test_route_unresolvable_callbacks_reply_stale_without_dispatch(settings, mon
         reply = route_booking_callback(global_bot_user=gbu, callback_text=callback, chat_id="602")
         assert reply.text == _UNRESOLVED_BOOKING_CALLBACK_REPLY, callback
         assert "устарел" not in reply.text, callback
+        # DRF-1492 — the refusal names a move («посмотрите наши салоны и
+        # выберите заново»), so every one of these four real routes carries
+        # the button that performs it. Asserted on the ROUTE, not on the
+        # helper: a reply built by the test itself would stay green after the
+        # production branch stopped attaching a keyboard.
+        assert [b["callback"] for b in _buttons(reply)] == ["cb:catalog:salons"], callback
     assert called == []

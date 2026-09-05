@@ -267,13 +267,25 @@ class TestTheRefusalNamesTheAlternative:
         assert render_alternatives(None) == ""
 
     def test_the_refusal_keeps_its_old_wording_without_alternatives(self) -> None:
-        """The pre-DRF-1474 line, unchanged where nothing can be offered."""
+        """The pre-DRF-1474 line where nothing can be offered — plus, since
+        DRF-1492, the one move that is always available.
+
+        The refusal itself is unchanged, word for word: it still names back
+        what was searched for and asks only for what was not given. What the
+        later ticket added is the tail and the chip behind it, because
+        «назовите другой город» on its own is a request to guess which cities
+        this marketplace is in.
+        """
         reply = render_no_match(city="Пенза", specialization="маникюр")
 
         assert reply.text == (
             "«маникюр» в городе Пенза — такого у наших мастеров сейчас нет. "
             "Назовите другую услугу или другой город, и я поищу ещё."
+            " Или посмотрите, какие салоны есть."
         )
+        assert reply.action_data is not None
+        buttons = reply.action_data["attachments"][0]["payload"]["buttons"]
+        assert [b["callback"] for b in buttons] == ["cb:catalog:salons"]
 
     def test_the_refusal_carries_the_alternative_when_there_is_one(self) -> None:
         reply = render_no_match(

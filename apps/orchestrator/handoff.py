@@ -34,10 +34,13 @@ from apps.marketplace.discovery import (
     service_rows_score,
 )
 from apps.orchestrator.discovery import (
+    CALLBACK_CATALOG_SERVICES_PREFIX,
     CALLBACK_DISCOVER_BOOK_PREFIX,
     DiscoveryReply,
     decode_query_ref,
     encode_query_ref,
+    keyboard_envelope,
+    show_salons_button,
 )
 
 logger = logging.getLogger(__name__)
@@ -50,9 +53,49 @@ logger = logging.getLogger(__name__)
 # ints; under Ayla REST both are canonical UUIDs.
 _CALLBACK_BOOK_PICK_MASTER = "cb:book:pick_master:"
 
+# DRF-1492 — «попробуйте выбрать другого» named the move and left the person
+# to find it. Which chip performs it depends on what the failing branch still
+# knows: inside tenant T the salon's own catalog is one tap away (and its
+# service chips lead to its other masters); with T unresolved the only true
+# thing left is the salon list. The two wordings differ because the two
+# offers differ — one sentence covering both would have to be vague enough to
+# fit the weaker one.
 _UNAVAILABLE_REPLY = (
-    "К сожалению, запись к этому мастеру сейчас недоступна — попробуйте выбрать другого."
+    "К сожалению, запись к этому мастеру сейчас недоступна — "
+    "посмотрите, что ещё есть в этом салоне."
 )
+_UNAVAILABLE_REPLY_NO_TENANT = (
+    "К сожалению, запись к этому мастеру сейчас недоступна — посмотрите наши салоны."
+)
+
+_SALON_CATALOG_LABEL = "Что есть в этом салоне"
+
+
+def _salon_catalog_button(tenant_id: uuid.UUID) -> dict[str, str]:
+    """The «open this salon's catalog» chip — ``cb:catalog:services:{tenant}``.
+
+    Reuses the DRF-1304 grammar verbatim rather than inventing a «show me
+    other masters» callback: that chain (услуги → мастера → запись) is already
+    tappable end to end and already answered by a by-id read, so the offer
+    this module makes is one somebody else keeps working.
+    """
+    return {
+        "label": _SALON_CATALOG_LABEL,
+        "callback": f"{CALLBACK_CATALOG_SERVICES_PREFIX}{tenant_id}",
+    }
+
+
+def _chips(text: str, buttons: list[dict[str, str]]) -> DiscoveryReply:
+    """Reply + keyboard, through the one envelope builder this surface has."""
+    return DiscoveryReply(text=text, action_data=keyboard_envelope(buttons))
+
+
+def _unavailable_reply(tenant_id: uuid.UUID | None = None) -> DiscoveryReply:
+    """«Запись к этому мастеру недоступна» — with the way out attached."""
+    if tenant_id is None:
+        return _chips(_UNAVAILABLE_REPLY_NO_TENANT, [show_salons_button()])
+    return _chips(_UNAVAILABLE_REPLY, [_salon_catalog_button(tenant_id)])
+
 
 # The tap carried no bookable service (pre-DRF-962 keyboard, an ambiguous
 # query like bare «массаж», or a service that went inactive between render and
@@ -82,10 +125,11 @@ _ASK_SERVICE_PICK = "Выберите услугу мастера {name}:"
 _ASK_SERVICE_NOT_OFFERED = "У мастера {name} нет услуги «{service}». Вот что можно выбрать:"
 _ASK_SERVICE_NOT_OFFERED_BARE = (
     "У мастера {name} нет услуги «{service}», а других доступных услуг у него сейчас нет — "
-    "попробуйте выбрать другого мастера."
+    "посмотрите, что ещё есть в этом салоне."
 )
 _ASK_SERVICE_REPLY_BARE = (
-    "Чтобы записаться к мастеру {name}, напишите, какая услуга вас интересует."
+    "Чтобы записаться к мастеру {name}, напишите, какая услуга вас интересует — "
+    "или посмотрите, что есть в этом салоне."
 )
 # Shown when the master offers more services than the keyboard carries. Typing
 # stays available as the escape hatch — it is a worse path (that is this
@@ -142,9 +186,17 @@ def _ask_service_reply(
     path that works today — and the bullets give the user that exact spelling
     to copy instead of reconstructing it from memory.
 
-    Empty ``rows`` means there is nothing to offer, so no keyboard is built:
-    an empty ``buttons`` list is dropped by ``_build_attachments`` anyway, and
-    a header promising a list nobody can see would repeat this ticket's bug.
+    Empty ``rows`` means there is no SERVICE list to offer, so no service
+    keyboard is built: an empty ``buttons`` list is dropped by
+    ``_build_attachments`` anyway, and a header promising a list nobody can
+    see would repeat this ticket's bug.
+
+    DRF-1492 does not reopen that decision: the branch still refuses to draw a
+    service menu it does not have. What it adds is the ONE chip that is not a
+    service menu — the salon's own catalog — because both bare wordings name a
+    move («попробуйте выбрать другого мастера», «напишите, какая услуга вас
+    интересует») and neither gave the reader anything to press. The rule being
+    kept is «no EMPTY keyboard», not «no keyboard».
     """
     if not rows:
         text = (
@@ -152,7 +204,7 @@ def _ask_service_reply(
             if not_offered_name is not None
             else _ASK_SERVICE_REPLY_BARE.format(name=master_name)
         )
-        return DiscoveryReply(text=text)
+        return _chips(text, [_salon_catalog_button(tenant_id)])
 
     header = (
         _ASK_SERVICE_NOT_OFFERED.format(name=master_name, service=not_offered_name)
@@ -227,7 +279,7 @@ def handoff_to_booking(
     tenant = Tenant.objects.filter(id=tenant_id).first()
     if tenant is None:
         logger.warning("marketplace.handoff.unknown_tenant tenant=%s trace=%s", tenant_id, trace_id)
-        return DiscoveryReply(text=_UNAVAILABLE_REPLY)
+        return _unavailable_reply()
 
     # ── Enter T's scope. Everything below is correctly scoped to T; this is the
     # ── ONLY place commercial state is read for this handoff. ───────────────
@@ -250,7 +302,7 @@ def handoff_to_booking(
                 master_id,
                 trace_id,
             )
-            return DiscoveryReply(text=_UNAVAILABLE_REPLY)
+            return _unavailable_reply(tenant_id)
 
         # Resolve the native master id the booking entrypoint expects, per the
         # BOOKING_VIA_AYLA_REST flag. yclients_staff_id is NULLABLE (master not
@@ -265,7 +317,7 @@ def handoff_to_booking(
                 master_id,
                 trace_id,
             )
-            return DiscoveryReply(text=_UNAVAILABLE_REPLY)
+            return _unavailable_reply(tenant_id)
         else:
             native_master_id = str(master.yclients_staff_id)
 
@@ -453,7 +505,7 @@ def handoff_to_booking(
                 master_id,
                 trace_id,
             )
-            return DiscoveryReply(text=_UNAVAILABLE_REPLY)
+            return _unavailable_reply(tenant_id)
 
         carry_time_preference(global_bot_user, conversation)
 
@@ -559,14 +611,15 @@ BOOKING_CALLBACK_PREFIXES = (
 # in the journal.
 _UNRESOLVED_BOOKING_CALLBACK_REPLY = (
     "Не нахожу этого мастера в каталоге — записаться по этой кнопке не получится. "
-    "Выберите услугу заново."
+    "Посмотрите наши салоны и выберите заново."
 )
 
 # The skill ran but produced nothing to say. Never observed in the pilot; it
 # exists so an empty reply can never reach the user as a blank message, and it
 # is logged (it used to be the one silent branch on this path).
 _EMPTY_BOOKING_CALLBACK_REPLY = (
-    "Не получилось продолжить запись по этой кнопке. Выберите услугу заново."
+    "Не получилось продолжить запись по этой кнопке. "
+    "Посмотрите, что есть в этом салоне, и выберите заново."
 )
 
 
@@ -1144,7 +1197,7 @@ def route_booking_callback(
             callback_text[:60],
             trace_id,
         )
-        return DiscoveryReply(text=_UNRESOLVED_BOOKING_CALLBACK_REPLY)
+        return _chips(_UNRESOLVED_BOOKING_CALLBACK_REPLY, [show_salons_button()])
 
     with tenant_scope(tenant):
         per_tenant_bot_user = resolve_or_create_bot_user(
@@ -1161,7 +1214,7 @@ def route_booking_callback(
                 tenant.id,
                 trace_id,
             )
-            return DiscoveryReply(text=_UNRESOLVED_BOOKING_CALLBACK_REPLY)
+            return _chips(_UNRESOLVED_BOOKING_CALLBACK_REPLY, [show_salons_button()])
 
         # Re-carry on every tap: the day / part chips are separate turns and
         # each of them has to know what the user asked for out loud.
@@ -1208,7 +1261,10 @@ def route_booking_callback(
             tenant.id,
             trace_id,
         )
-        reply_text = _EMPTY_BOOKING_CALLBACK_REPLY
+        # DRF-1492 — the fallback names a move («выберите заново»), so it
+        # carries one. The tenant IS resolved on this branch, so the chip can
+        # be that salon's catalog rather than the whole marketplace.
+        return _chips(_EMPTY_BOOKING_CALLBACK_REPLY, [_salon_catalog_button(tenant.id)])
     action_data = result.action_data if result is not None else None
     return DiscoveryReply(text=reply_text, action_data=action_data)
 

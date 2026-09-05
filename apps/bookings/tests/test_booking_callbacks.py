@@ -343,6 +343,13 @@ class TestExpired:
         with _patch_yclients(client):
             result = BookingGateCallbackSkill().handle(ctx)
         assert result.reply_text == REPLY_BOOK_EXPIRED
+        # DRF-1492 — a CONFIRM preview that timed out still names the pair, so
+        # the chip re-opens the picker for it. (The CANCEL / RESCHEDULE kinds
+        # take a different reply and a different chip — see
+        # ``apps/bookings/tests/test_dead_ends_drf1492.py``.)
+        assert result.action_data is not None
+        buttons = result.action_data["attachments"][0]["payload"]["buttons"]
+        assert [b["callback"] for b in buttons] == ["cb:book:pick_master:11:22"]
         # No YClients call on expired token.
         assert client.create_calls == []
 
@@ -611,6 +618,11 @@ class TestConfirmTapReschedule:
 
         assert result.should_handoff is False
         assert result.reply_text == REPLY_BOOK_STALE_VERSION
+        # DRF-1492 — the text says «Откройте актуальные записи», so the reply
+        # carries the button that opens them.
+        assert result.action_data is not None
+        buttons = result.action_data["attachments"][0]["payload"]["buttons"]
+        assert [b["callback"] for b in buttons] == ["cb:menu:my_bookings"]
         exec_mock.assert_called_once()
 
 
