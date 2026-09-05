@@ -105,6 +105,12 @@ const GOAL_TEXT_MAX = 500;
  * `next.id` → route. A contract with the server, not a decision: the
  * server says WHERE, this table says how that place is spelled in the
  * router. Same shape as `max-sdk.ts::_ROUTE_MAP` for the bot's slugs.
+ *
+ * DRF-1481 (решение владельца §24.1): эта таблица — ЕДИНСТВЕННОЕ
+ * решающее место. Тип `NextStep["id"]` больше не перечисляет известные
+ * назначения (`string`), поэтому незнакомый id доезжает сюда как есть и
+ * просто не находит строки — кнопки в никуда не появляется, а guard
+ * DRF-1483 ниже ставит запасной выход.
  */
 const NEXT_ROUTES: Record<string, string> = {
   browse_catalog: "/customer/catalog",
