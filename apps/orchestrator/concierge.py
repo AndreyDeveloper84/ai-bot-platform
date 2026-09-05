@@ -93,6 +93,7 @@ from apps.orchestrator.llm.templates import (
     get_booking_needs_name,
     get_fallback,
     get_no_answer,
+    get_no_answer_retry,
     get_not_parsed,
 )
 from apps.orchestrator.nutrition_global import (
@@ -2103,10 +2104,21 @@ def _concierge_turn(
                 action_data=rendered.action_data,
                 persisted=True,
             )
+        # Its OWN line, not the llm_error one: «отвечу через минуту» promises
+        # a return, and here nothing is coming on its own — what is on offer
+        # is another attempt, which is what the button does. Text and button
+        # make the same offer (owner's ruling on DRF-1489).
+        #
+        # In MAX the person does not read this sentence today: the channel
+        # substitutes the C01 screen text for every ``outage=True`` reply
+        # (``handler.py`` → ``AI_UNAVAILABLE_TEXT``). The button is there and
+        # correct; only the wording still comes from the shared screen, and
+        # changing that needs a handler this ticket may not touch.
+        #
         # ``persisted`` stays False on purpose: the store has nothing worth
         # keeping (the completion was empty), so the channel records its own
-        # «AI недоступна» line — exactly as on the llm_error path above.
-        return _reply(text=get_fallback("ru"), outage=True)
+        # line — exactly as on the llm_error path above.
+        return _reply(text=get_no_answer_retry("ru"), outage=True)
     # DRF-1354 — the multi-pass prose reply carried NO keyboard. DRF-1266
     # feeds the executed ``show_masters`` result back so the model can phrase
     # it warmly, and the deterministic card render — the only thing that ever

@@ -374,6 +374,47 @@ class TestOutageStillGetsTheButton:
         assert screen["text"] == AI_UNAVAILABLE_TEXT
         assert screen["buttons"] == [RETRY_LABEL]
 
+    def test_empty_completion_says_its_own_line_not_the_promise(self, monkeypatch, fake_redis):
+        """Что говорит САМ консьерж на этом ходу.
+
+        Экран выше — общий для обоих outage'ов: канал подставляет текст
+        макета C01 любому ответу с ``outage=True`` (``handler.py`` →
+        ``AI_UNAVAILABLE_TEXT``), и этот тикет ему в руки не давали. Поэтому
+        строка владельца «Не получилось подготовить ответ. Попробовать ещё
+        раз?» проверяется там, где она сегодня и живёт — в самом ответе
+        консьержа. Кнопка при этом настоящая: её ставит тот же ``outage``.
+
+        Разница с ``llm_error`` здесь и пришпилена: обещания «отвечу через
+        минуту» на этом ходу нет, потому что само собой ничего не придёт.
+        """
+        _model(monkeypatch, _empty_text())
+        bot_user, conversation = _welcomed_user(next(_UID))
+
+        reply = concierge.generate_concierge_reply(
+            "мне бы совет", bot_user=bot_user, conversation=conversation
+        )
+
+        assert reply.outage is True
+        assert reply.text == templates.NO_ANSWER_RETRY_RU
+        assert reply.text != PROMISE
+
+    def test_unreachable_model_still_says_the_promise_line(self, monkeypatch, fake_redis):
+        """Парная к предыдущему: два outage'а — две РАЗНЫЕ строки.
+
+        Без этого «своя строка у пустого ответа» доказывалась бы тестом,
+        который прошёл бы и если бы обе ветки говорили одно и то же.
+        """
+        _model(monkeypatch, raises=RuntimeError("vendor 500"))
+        bot_user, conversation = _welcomed_user(next(_UID))
+
+        reply = concierge.generate_concierge_reply(
+            "мне бы совет", bot_user=bot_user, conversation=conversation
+        )
+
+        assert reply.outage is True
+        assert reply.text == PROMISE
+        assert reply.text != templates.NO_ANSWER_RETRY_RU
+
     def test_a_normal_answer_is_untouched(self, monkeypatch, sent, fake_redis):
         """Стража на исправность обвязки: обычный ответ проходит как был."""
         _model(
@@ -405,53 +446,76 @@ def _concierge_source() -> str:
     return Path(path).read_text(encoding="utf-8")
 
 
-def _promise_returns(source: str) -> list[tuple[int, bool]]:
-    """Все ``return``'ы, чей текст берётся из обещающего шаблона.
+def _degraded_returns(source: str) -> list[tuple[int, str | None, bool]]:
+    """Все ``return``'ы консьержа, чей текст берётся из шаблона деградации.
 
-    Возвращает ``(номер строки, стоит ли outage=True)``. Разбор идёт по AST,
-    а не по регулярке: переименование обёртки ``_reply`` или перенос строки
-    не должны бесшумно вывести возврат из-под замера.
+    Возвращает ``(строка, имя геттера, стоит ли outage=True)``. Разбор идёт
+    по AST, а не по регулярке: переименование обёртки ``_reply`` или перенос
+    строки не должны бесшумно вывести возврат из-под замера.
     """
-    found: list[tuple[int, bool]] = []
+    found: list[tuple[int, str | None, bool]] = []
     for node in ast.walk(ast.parse(source)):
         if not isinstance(node, ast.Return) or not isinstance(node.value, ast.Call):
             continue
         call = node.value
-        text_kw = next((kw for kw in call.keywords if kw.arg == "text"), None)
-        if text_kw is None or not isinstance(text_kw.value, ast.Call):
-            continue
-        fn = text_kw.value.func
-        if not (isinstance(fn, ast.Name) and fn.id == "get_fallback"):
-            continue
         outage_kw = next((kw for kw in call.keywords if kw.arg == "outage"), None)
         flagged = (
             outage_kw is not None
             and isinstance(outage_kw.value, ast.Constant)
             and outage_kw.value.value is True
         )
-        found.append((node.lineno, flagged))
+        getter: str | None = None
+        text_kw = next((kw for kw in call.keywords if kw.arg == "text"), None)
+        if text_kw is not None and isinstance(text_kw.value, ast.Call):
+            fn = text_kw.value.func
+            if isinstance(fn, ast.Name) and fn.id.startswith("get_"):
+                getter = fn.id
+        if getter is None and not flagged:
+            continue
+        found.append((node.lineno, getter, flagged))
     return found
 
 
 class TestNoPromiseWithoutTheButton:
-    def test_zero_promise_returns_without_the_outage_flag(self) -> None:
-        """Замер, ради которого заведена задача.
+    """Замер, ради которого заведена задача — в обе стороны.
 
-        Число возвратов с обещающим текстом и ``outage=False`` — ноль. До
-        правки их было шесть.
-        """
-        source = _concierge_source()
-        unflagged = [line for line, flagged in _promise_returns(source) if not flagged]
+    «Текст и кнопка должны совпадать по обещанию»: строка, которая что-то
+    предлагает — вернуться или попробовать ещё раз, — обязана приезжать с
+    ``outage=True`` (по нему канал рисует «Повторить»), и наоборот, ход с
+    этим флагом обязан нести именно такую строку. Одной стороны мало:
+    проверять только первую значило бы разрешить кнопку под текстом, который
+    ничего не предлагает.
+    """
 
-        assert unflagged == [], f"промис без кнопки на строках: {unflagged}"
+    def test_zero_offering_returns_without_the_outage_flag(self) -> None:
+        """До правки таких возвратов было шесть. Должно стать ноль."""
+        offering = [
+            (line, getter)
+            for line, getter, flagged in _degraded_returns(_concierge_source())
+            if getter in templates.BUTTON_BEARING_GETTERS and not flagged
+        ]
 
-    def test_the_promise_is_still_shipped_somewhere(self) -> None:
+        assert offering == [], f"предложение без кнопки: {offering}"
+
+    def test_zero_outage_returns_without_an_offering_line(self) -> None:
+        """Обратная сторона: кнопка без предложения — тоже расхождение."""
+        silent = [
+            (line, getter)
+            for line, getter, flagged in _degraded_returns(_concierge_source())
+            if flagged and getter not in templates.BUTTON_BEARING_GETTERS
+        ]
+
+        assert silent == [], f"кнопка под текстом, который ничего не предлагает: {silent}"
+
+    def test_both_offering_lines_are_still_shipped(self) -> None:
         """Парная положительная: замер не должен проходить оттого, что
-        обещающий текст вычищен вообще. Он остаётся — там, где кнопка есть."""
-        source = _concierge_source()
-        flagged = [line for line, is_outage in _promise_returns(source) if is_outage]
+        предлагающий текст вычищен вообще. Обе строки на месте — там, где
+        кнопка есть."""
+        shipped = {
+            getter for _line, getter, flagged in _degraded_returns(_concierge_source()) if flagged
+        }
 
-        assert len(flagged) >= 1
+        assert shipped == set(templates.BUTTON_BEARING_GETTERS)
 
     @pytest.mark.parametrize(
         "line",
@@ -464,7 +528,7 @@ class TestNoPromiseWithoutTheButton:
             templates.BOOKING_NEEDS_NAME_EN,
         ],
     )
-    def test_degraded_lines_promise_nothing(self, line: str) -> None:
+    def test_button_free_lines_promise_nothing(self, line: str) -> None:
         """Ни одна строка без кнопки не обещает, что бот вернётся сам."""
         lowered = line.lower()
         # Стража присутствия на тех же данных: строке есть что читать.
@@ -478,3 +542,45 @@ class TestNoPromiseWithoutTheButton:
         assert "через минуту" not in lowered
         assert "in a moment" not in lowered
         assert "вернусь" not in lowered
+
+    @pytest.mark.parametrize(
+        "line",
+        [
+            templates.NOT_PARSED_RU,
+            templates.NO_ANSWER_RU,
+            templates.BOOKING_NEEDS_NAME_RU,
+            templates.NOT_PARSED_EN,
+            templates.NO_ANSWER_EN,
+            templates.BOOKING_NEEDS_NAME_EN,
+        ],
+    )
+    def test_button_free_lines_offer_no_second_try(self, line: str) -> None:
+        """Строка без кнопки не предлагает попробовать ещё раз.
+
+        Ровно тот принцип, ради которого тикет и делался, со второй стороны:
+        предложение, которое нечем принять, — то же расхождение текста и
+        кнопки, что и обещание без неё.
+        """
+        lowered = line.lower()
+        assert lowered
+        # Стража на проверку: на СПРАШИВАЮЩЕЙ строке она срабатывает.
+        assert "ещё раз" in templates.NO_ANSWER_RETRY_RU.lower()
+        assert templates.NO_ANSWER_RETRY_RU.endswith("?")
+        assert "ещё раз" not in lowered
+        assert "try again" not in lowered
+        # Вопросительный знак сам по себе не запрещён: строка про запись
+        # спрашивает недостающее имя, и это ответ, а не предложение повтора.
+
+    def test_the_common_line_does_not_blame_the_person(self) -> None:
+        """Решение владельца: причина внутри системы, и текст не вправе
+        создавать ощущение, что человек неправильно спросил.
+
+        Отклонённая формулировка звалa «спросить другими словами» — это
+        перекладывание нашего сбоя на того, кто сформулировал нормально.
+        """
+        for line in (templates.NO_ANSWER_RU, templates.NO_ANSWER_EN):
+            lowered = line.lower()
+            assert lowered
+            assert "другими словами" not in lowered
+            assert "another way" not in lowered
+            assert "переформулируй" not in lowered
