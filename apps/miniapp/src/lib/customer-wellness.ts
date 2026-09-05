@@ -28,9 +28,11 @@
  * Stub variants for dev QA (matching the Phase B catalog stub pattern
  * in `customer-booking.ts::pickStubVariant`):
  *   - `?stub=default`  — happy path with pfc + booking + goal (default)
- *   - `?stub=empty`    — first-time user, anketa not done, no booking
- *   - `?stub=partial`  — pfc missing, no goal, no booking (graceful
- *                        degradation across Tier 2 §11.1 / §11.2 / §11.5)
+ *   - `?stub=empty`    — first-time user, anketa not done, no goal, no
+ *                        booking, no weekly rollup
+ *   - `?stub=partial`  — pfc missing, goal layer UNREACHABLE, no booking
+ *                        (graceful degradation across Tier 2 §11.1 /
+ *                        §11.2 / §11.5)
  *
  * Variants are dev-only (gated on `import.meta.env.DEV`). Production
  * bundle ships only the `default` variant; the variant blobs for
@@ -80,14 +82,30 @@ export interface WellnessToday {
   /** Daily target. Defaults to 8 if anketa skipped. */
   water_glasses_target: number;
   /**
-   * Active goals (cap=1 for MVP — multi-goal post-pilot).
-   * Empty array when no goal chosen → quick action shows
-   * «Выбери цель» per Tau §11.2.
+   * Active goals (cap=1 for MVP — multi-goal post-pilot). Read from
+   * Ayla's goal layer — the same `known.goal` the goal screen renders
+   * (`customer-goals.ts`), so the two surfaces cannot disagree.
+   *
+   * THREE states, and the difference between the last two matters
+   * (DRF-1476):
+   *
+   *   - `[{...}]` — a goal is active → «Моя цель».
+   *   - `[]`      — no goal chosen → «Выбери цель» per Tau §11.2.
+   *   - `undefined` — the backend could NOT reach the goal layer. Not
+   *     the same as «no goal»: rendering «Выбери цель» here is what
+   *     told a customer who had just picked «Позаботиться о коже лица»
+   *     to go pick one. Render a neutral label instead.
+   *
+   * `progress_pct` is optional because Ayla stores no progress for a
+   * goal — `ClientGoal` is key / text / selected_at / source_channel.
+   * When absent the screen hides the bar rather than drawing 0 %.
+   * `week_num` is derived server-side from `selected_at`, and is absent
+   * only when that timestamp is unusable.
    */
-  active_goals: Array<{
+  active_goals?: Array<{
     title: string;
-    progress_pct: number;
-    week_num: number;
+    progress_pct?: number;
+    week_num?: number;
   }>;
   /**
    * Optional preferred display name (Layer 1 Identity). Falls back to
@@ -138,10 +156,16 @@ export interface RecentActivity {
    */
   this_week_booking_count: number;
   /**
-   * 7-day rollup. The screen's Block 6 (Прогресс недели) is gated on
-   * `weekly_progress.active_days_count >= 3` per Tau §11.4 cold-start.
+   * 7-day rollup. **Optional** — the backend omits it entirely while
+   * Ayla has no meals-list endpoint to build it from (DRF-1476). It
+   * previously arrived as three hardcoded zeros, and only Block 6's
+   * `>= 3` threshold kept that fiction off the screen.
+   *
+   * So Block 6 is gated on PRESENCE first, then on
+   * `active_days_count >= 3` per Tau §11.4 cold-start. Absence cannot
+   * be misread the way a zero can.
    */
-  weekly_progress: {
+  weekly_progress?: {
     water_days_logged: number;
     food_days_logged: number;
     active_days_count: number;
@@ -206,9 +230,9 @@ const DEFAULT_TODAY: WellnessToday = {
   },
   water_glasses_eaten: 4,
   water_glasses_target: 8,
-  active_goals: [
-    { title: "Меньше стресса", progress_pct: 78, week_num: 3 },
-  ],
+  // No progress_pct — the backend has no source for it (DRF-1476);
+  // a stub that invented one would hide the real render path.
+  active_goals: [{ title: "Меньше стресса", week_num: 3 }],
   display_name: "Анна",
   day_pattern_hint: "morning_good_progress",
 };
@@ -224,6 +248,8 @@ const DEFAULT_ACTIVITY: RecentActivity = {
     booking_id: "booking-stub-001",
   },
   this_week_booking_count: 3,
+  // Kept so Block 6 stays developable in dev; the live endpoint omits
+  // this key until the meals layer ships (DRF-1476).
   weekly_progress: {
     water_days_logged: 4,
     food_days_logged: 5,
@@ -245,11 +271,8 @@ const EMPTY_TODAY: WellnessToday = {
 const EMPTY_ACTIVITY: RecentActivity = {
   // next_booking omitted → empty-state CTA per Tau §5 State 2
   this_week_booking_count: 0,
-  weekly_progress: {
-    water_days_logged: 0,
-    food_days_logged: 0,
-    active_days_count: 0,
-  },
+  // weekly_progress omitted — mirrors the live endpoint, and exercises
+  // the presence gate on Block 6 (DRF-1476).
 };
 
 const PARTIAL_TODAY: WellnessToday = {
@@ -258,7 +281,8 @@ const PARTIAL_TODAY: WellnessToday = {
   // pfc undefined — partial state exercises the conditional render path
   water_glasses_eaten: 2,
   water_glasses_target: 8,
-  active_goals: [], // no goal — quick action shows «Выбери цель»
+  // active_goals omitted — the goal layer was unreachable. Exercises
+  // the third state: neutral label, never «Выбери цель» (DRF-1476).
   display_name: "Анна",
   // No day_pattern_hint → falls back to «fallback» template
 };
