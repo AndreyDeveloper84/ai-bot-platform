@@ -42,7 +42,9 @@ from __future__ import annotations
 import uuid
 
 from django.db import models
+from django.utils import timezone
 
+from apps.catalog.master_state import AVAILABLE
 from apps.tenancy.managers import TenantScopedManager
 
 
@@ -191,13 +193,18 @@ class _MasterManager(TenantScopedManager):
 
     Per master-management handoff §3 line 164 — only ``is_active=True``
     AND ``invite_status='accepted'`` masters are bookable.
+
+    DRF-1506 — the predicate now comes from
+    :data:`apps.catalog.master_state.AVAILABLE`, the single definition
+    the four other sites also read. That adds ``archived_at IS NULL``,
+    which this filter used to omit: a master archived while still
+    ``is_active`` stayed on sale. It deliberately does NOT add
+    ``linked_bot_user IS NOT NULL`` — see the module docstring there for
+    the nine pilot masters that requirement would take off sale.
     """
 
     def bookable(self):
-        return self.filter(
-            is_active=True,
-            invite_status=CatalogMaster.InviteStatus.ACCEPTED,
-        )
+        return self.filter(AVAILABLE)
 
 
 class CatalogMaster(_MirrorBase):
@@ -209,7 +216,10 @@ class CatalogMaster(_MirrorBase):
     Sync (``upserter._master_fields``) overwrites: name, specialization,
     bio, experience, rating, is_active, yclients_staff_id, raw.
     Platform fields NEVER touched by sync: invite_status, mode,
-    photo_url, archived_at, invited_at, max_handle.
+    photo_url, archived_at, invited_at, accepted_at, max_handle,
+    linked_bot_user. That list is why the pilot's nine active masters
+    all carry ``linked_bot_user IS NULL`` — they arrived by sync, which
+    has no platform side to fill in (DRF-1506).
     """
 
     class InviteStatus(models.TextChoices):
@@ -301,6 +311,19 @@ class CatalogMaster(_MirrorBase):
         ),
     )
     invited_at = models.DateTimeField(null=True, blank=True)
+    accepted_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text=(
+            "Момент, когда мастер впервые оказалась связанной с BotUser "
+            "и принявшей приглашение — состояние M1 из "
+            "docs/design/policies/master-onboarding-m0-m7.md §4.1. "
+            "Ставит его ``save()`` (см. ниже), поэтому забыть его на "
+            "новом пути приземления нельзя. Не стирается: это дата "
+            "события, а не флаг. NULL у синхронизированных мастеров — "
+            "они в бот не приземлялись."
+        ),
+    )
     max_handle = models.CharField(max_length=64, blank=True, default="")
 
     # M0 onboarding (master mobile handoff §M0 + master-management MM2).
@@ -349,6 +372,37 @@ class CatalogMaster(_MirrorBase):
             models.Index(fields=["tenant", "yclients_staff_id"]),
             models.Index(fields=["tenant", "is_active", "invite_status"]),
         ]
+
+    def save(self, *args, **kwargs):  # type: ignore[no-untyped-def]
+        """Штампует ``accepted_at`` в момент приземления. Один раз.
+
+        DRF-1506. Приземление пишут три места — ``onboarding_accept``
+        (принятие инвайта в Mini App), ``staff_invites._link_master``
+        (код доступа) и ``solo_onboarding`` (соло-провайдер, DRF-1507).
+        Просить каждое из них не забыть про столбец — это ровно тот
+        способ, которым определений стало пять. Здесь модель отвечает
+        за свой собственный инвариант, и четвёртый путь приземления
+        получит его даром.
+
+        Не стирается при обратном переходе: ``accepted_at`` отвечает
+        «когда она приняла», а не «принята ли сейчас» — на второй
+        вопрос отвечает ``invite_status``.
+
+        ``update_fields`` дополняется, а не игнорируется: вызывающие
+        пишут узкие списки полей (``onboarding_accept`` перечисляет
+        пять), и без этого штамп молча не доехал бы до базы.
+        """
+
+        if (
+            self.accepted_at is None
+            and self.linked_bot_user_id is not None
+            and self.invite_status == self.InviteStatus.ACCEPTED
+        ):
+            self.accepted_at = timezone.now()
+            update_fields = kwargs.get("update_fields")
+            if update_fields is not None:
+                kwargs["update_fields"] = list(update_fields) + ["accepted_at"]
+        return super().save(*args, **kwargs)
 
     def __str__(self) -> str:
         return f"CatalogMaster[{self.name}@{self.external_id}]"

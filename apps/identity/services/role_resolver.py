@@ -248,8 +248,9 @@ def resolve_role(bot_user: "BotUser") -> RoleContext:
     Reads two source tables:
 
     - :class:`apps.catalog.models.CatalogMaster` — reverse OneToOne via
-      ``linked_bot_user``. If the linked master is ACCEPTED and not
-      archived, the user is a master.
+      ``linked_bot_user``. The user is a master iff the linked row is
+      landed — :data:`apps.catalog.master_state.LANDED`, the same
+      definition ``require_master_init_data`` and the staff roster read.
     - :class:`apps.tenancy.models.TenantStaff` — active rows
       (``deactivated_at IS NULL``) within ``bot_user.tenant``.
 
@@ -268,6 +269,7 @@ def resolve_role(bot_user: "BotUser") -> RoleContext:
     # services on AppConfig.ready, so a top-level import here would
     # work today; keeping it local is defensive against future imports
     # from this service in models.)
+    from apps.catalog.master_state import LANDED
     from apps.catalog.models import CatalogMaster
     from apps.tenancy.models import TenantStaff
 
@@ -276,12 +278,16 @@ def resolve_role(bot_user: "BotUser") -> RoleContext:
     # is ``master_identity`` per the related_name on the FK. Use
     # CatalogMaster.all_tenants for tenant-safety (the BotUser already
     # carries its tenant; we re-filter explicitly as defence-in-depth).
+    # DRF-1506 — предикат приземления один на пять мест, здесь он
+    # применяется как ``Q``. Раньше этот фильтр не спрашивал про
+    # ``is_active``, а ``require_master_init_data`` спрашивал только про
+    # него: деактивированная мастер оставалась мастером для резолвера и
+    # получала 403 в мастер-приложении. См. apps/catalog/master_state.py.
     master_row = (
         CatalogMaster.all_tenants.filter(
+            LANDED,
             tenant=bot_user.tenant_id,
             linked_bot_user=bot_user,
-            invite_status=CatalogMaster.InviteStatus.ACCEPTED,
-            archived_at__isnull=True,
         )
         .only("id")
         .first()

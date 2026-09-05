@@ -178,10 +178,23 @@ def inactive_master(tenant: Tenant) -> CatalogMaster:
 
 @pytest.fixture
 def pending_master(tenant: Tenant) -> CatalogMaster:
+    """A master the owner invited yesterday, in the shape production makes.
+
+    ``is_active=False`` is not decoration — it is what the invite-create
+    path writes (``apps/admin_api/views_invite.py``, ``is_active=False``
+    beside ``invite_status=PENDING``), and it is deliberate: an invited
+    master who has not answered must not appear on the booking surface.
+
+    This fixture used to inherit ``make_master``'s ``is_active=True``,
+    a shape the invite path has never produced. Every assertion resting
+    on it was therefore guarding a case that cannot occur (DRF-1506).
+    """
+
     return make_master(
         tenant,
         name="Наталья Прохорова",
         invite_status=CatalogMaster.InviteStatus.PENDING,
+        is_active=False,
         external_id=98,
     )
 

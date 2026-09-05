@@ -44,6 +44,7 @@ from django.core.signing import BadSignature, SignatureExpired, TimestampSigner
 from django.http import HttpRequest, HttpResponse, JsonResponse
 from django.utils import timezone
 
+from apps.catalog.master_state import is_landed
 from apps.catalog.models import CatalogMaster
 from apps.identity.models import BotUser
 from apps.identity.services.bot_user_resolver import resolve_bot_user
@@ -366,10 +367,22 @@ def require_master_init_data(
                 "this account is not linked to a master",
                 401,
             )
-        if not master.is_active or master.archived_at is not None:
+        # DRF-1506 — одни ворота вместо трёх столбцов на глаз.
+        #
+        # Раньше здесь проверялись ``is_active`` и ``archived_at``, а
+        # ``invite_status`` — нет; ``resolve_role`` двумя модулями ниже
+        # проверял ``invite_status``, но не ``is_active``. Из этой пары
+        # и вырос DRF-1080: принявшая приглашение мастер была мастером
+        # для одного и «неактивной» для другого. Теперь оба спрашивают
+        # ``is_landed``.
+        #
+        # Код ответа остаётся ``master_inactive``: это единственные
+        # ворота в мастер-приложение, и дробить их на коды значило бы
+        # рассказывать вызывающему, какой именно столбец не сошёлся.
+        if not is_landed(master):
             return _error(
                 "master_inactive",
-                "master account is inactive or archived",
+                "master account is inactive, archived or has not completed onboarding",
                 403,
             )
 
