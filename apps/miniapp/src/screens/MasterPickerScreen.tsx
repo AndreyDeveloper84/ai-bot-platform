@@ -7,9 +7,12 @@ import { ScreenLayout } from "../components/ScreenLayout";
 import { MasterCard } from "../components/MasterCard";
 import { DelayedSkeleton, MasterCardSkeleton } from "../components/Skeleton";
 import { StateError } from "../components/StateError";
-import { useBackButton } from "../hooks/useBackButton";
 import { useHaptics } from "../hooks/useHaptics";
 import { setMaster, useBookingDraft } from "../state/booking";
+import { backTo } from "../lib/screen-back";
+
+/** Возврат (DRF-1493): в каталог — шаг назад легаси-сценария записи. */
+const BACK = backTo("/catalog");
 
 type State =
   | { kind: "loading" }
@@ -22,7 +25,6 @@ export function MasterPickerScreen() {
   const haptics = useHaptics();
   const [state, setState] = useState<State>({ kind: "loading" });
 
-  useBackButton({ onBack: () => navigate(-1) });
 
   const load = useCallback(() => {
     if (!draft.serviceId) return;
@@ -56,7 +58,7 @@ export function MasterPickerScreen() {
 
   if (state.kind === "loading") {
     return (
-      <ScreenLayout title="Кто сделает">
+      <ScreenLayout back={BACK} title="Кто сделает">
         <DelayedSkeleton loading>
           <MasterCardSkeleton />
           <MasterCardSkeleton />
@@ -68,7 +70,7 @@ export function MasterPickerScreen() {
 
   if (state.kind === "error") {
     return (
-      <ScreenLayout title="Кто сделает">
+      <ScreenLayout back={BACK} title="Кто сделает">
         <StateError err={state.err} onRetry={load} screenId="masters" />
       </ScreenLayout>
     );
@@ -76,7 +78,7 @@ export function MasterPickerScreen() {
 
   if (state.masters.length === 0) {
     return (
-      <ScreenLayout title="Кто сделает">
+      <ScreenLayout back={BACK} title="Кто сделает">
         <div className="callout">
           <p style={{ margin: 0 }}>У этой услуги пока нет доступных мастеров.</p>
           <button
@@ -93,7 +95,7 @@ export function MasterPickerScreen() {
   }
 
   return (
-    <ScreenLayout title="Кто сделает">
+    <ScreenLayout back={BACK} title="Кто сделает">
       {state.masters.map((m) => (
         <MasterCard
           key={m.id}

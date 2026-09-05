@@ -7,6 +7,15 @@ import { ScreenLayout } from "../components/ScreenLayout";
 import { ServiceCard } from "../components/ServiceCard";
 import { DelayedSkeleton, ServiceCardSkeleton } from "../components/Skeleton";
 import { StateError } from "../components/StateError";
+import { backTo } from "../lib/screen-back";
+
+/**
+ * Возврат (DRF-1493): наверх — на первый экран клиента. Легаси-каталог
+ * не вкладка и не корень: в него приходят с приветствия и из старых
+ * flow-экранов, а по deep link из бота — только на новый
+ * `/customer/catalog`.
+ */
+const BACK = backTo("/");
 
 type State =
   | { kind: "loading" }
@@ -36,7 +45,7 @@ export function CatalogScreen() {
 
   if (state.kind === "loading") {
     return (
-      <ScreenLayout title="Услуги студии">
+      <ScreenLayout back={BACK} title="Услуги студии">
         <DelayedSkeleton loading>
           <ServiceCardSkeleton />
           <ServiceCardSkeleton />
@@ -50,7 +59,7 @@ export function CatalogScreen() {
 
   if (state.kind === "error") {
     return (
-      <ScreenLayout title="Услуги студии">
+      <ScreenLayout back={BACK} title="Услуги студии">
         <StateError err={state.err} onRetry={load} screenId="catalog" />
       </ScreenLayout>
     );
@@ -58,7 +67,7 @@ export function CatalogScreen() {
 
   if (state.services.length === 0) {
     return (
-      <ScreenLayout title="Услуги студии">
+      <ScreenLayout back={BACK} title="Услуги студии">
         <div className="callout">
           <p style={{ margin: 0 }}>У студии пока нет услуг в каталоге. Спросите у студии напрямую.</p>
         </div>
@@ -67,7 +76,7 @@ export function CatalogScreen() {
   }
 
   return (
-    <ScreenLayout title="Услуги студии">
+    <ScreenLayout back={BACK} title="Услуги студии">
       {state.services.map((s) => (
         <ServiceCard key={s.id} service={s} onSelect={() => navigate(`/catalog/${s.id}`)} />
       ))}

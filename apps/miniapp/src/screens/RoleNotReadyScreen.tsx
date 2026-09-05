@@ -19,6 +19,11 @@
 import { useNavigate } from "react-router-dom";
 import { ScreenLayout } from "../components/ScreenLayout";
 import { useReloadMe } from "../state/boot";
+import { backTo } from "../lib/screen-back";
+
+/** Возврат (DRF-1493): в клиентскую часть — то же, что делает кнопка
+ * «Открыть клиентскую часть» в теле экрана. */
+const BACK = backTo("/");
 
 export type PendingSurface = "master" | "admin";
 
@@ -38,7 +43,7 @@ export function RoleNotReadyScreen({ surface }: { surface: PendingSurface }) {
   const navigate = useNavigate();
   const copy = COPY[surface];
   return (
-    <ScreenLayout title={copy.title}>
+    <ScreenLayout back={BACK} title={copy.title}>
       <div className="hello-error" role="alert">
         <p>{copy.body}</p>
         <div

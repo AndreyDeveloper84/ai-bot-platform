@@ -70,6 +70,8 @@ import {
 } from "../lib/health-consent";
 import { STUB_SURFACES_ENABLED } from "../lib/feature-flags";
 import { SurfaceSwitchButton } from "../components/SurfaceSwitch";
+import { useScreenBack } from "../hooks/useScreenBack";
+import { backTo } from "../lib/screen-back";
 
 // ---------------------------------------------------------------------------
 // Stub-backed sections flag (pilot phase 2a, commit 3). R1 identity
@@ -109,6 +111,16 @@ const EMPTY_TOAST: ToastState = { visible: false, message: "" };
 
 export function CustomerProfileScreen() {
   const navigate = useNavigate();
+
+  // Возврат (DRF-1493) — на дом клиентской поверхности.
+  //
+  // Профиль — вкладка со своей нижней навигацией, и стрелка у него
+  // была и раньше. DRF-1493 не снимает существующие органы
+  // управления, а доводит их до работающего состояния: стрелка
+  // остаётся, но ведёт в заданное место, а не в историю, которой у
+  // пришедшего по deep link нет. Нужна ли вкладке стрелка вообще —
+  // вопрос раскладки поверхности, он у DRF-1481.
+  const onBack = useScreenBack(backTo("/customer/main"));
   const [status, setStatus] = useState<Status>({ kind: "loading" });
   const [offline, setOffline] = useState<boolean>(
     typeof navigator !== "undefined" ? !navigator.onLine : false,
@@ -311,7 +323,7 @@ export function CustomerProfileScreen() {
           type="button"
           className="records-screen__back"
           aria-label="Назад"
-          onClick={() => navigate(-1)}
+          onClick={onBack}
         >
           <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
             <path

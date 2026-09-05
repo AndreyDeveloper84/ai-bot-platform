@@ -49,7 +49,7 @@ import {
 import { ScreenLayout } from "../components/ScreenLayout";
 import { useReloadMe } from "../state/boot";
 import { StickyCta } from "../components/StickyCta";
-import { useBackButton } from "../hooks/useBackButton";
+import { backByAction, screenRoot, type BackIntent } from "../lib/screen-back";
 import { useClosingConfirmation } from "../hooks/useClosingConfirmation";
 
 const BIO_MAX = 280;
@@ -192,7 +192,16 @@ export function MasterOnboardingScreen() {
       return () => setState({ kind: "ready", data: state.data, step: 2 });
     return undefined;
   }, [state]);
-  useBackButton({ onBack });
+  // Вид экрана (DRF-1493). Возврат здесь никуда не уводит с адреса —
+  // это шаг назад внутри мастера. На первом шаге и на всех экранах
+  // ошибок возвращаться некуда: приглашение открывают по ссылке из
+  // бота, истории за ним нет.
+  const back: BackIntent = onBack
+    ? backByAction(onBack)
+    : screenRoot(
+        "Первый шаг мастера онбординга и его экраны ошибок — вход по " +
+          "ссылке-приглашению из бота; предыдущего экрана не существует.",
+      );
   useClosingConfirmation(step3Dirty);
 
   // Cleanup the local photo-preview blob URL.
@@ -340,7 +349,7 @@ export function MasterOnboardingScreen() {
 
   if (state.kind === "loading") {
     return (
-      <ScreenLayout>
+      <ScreenLayout back={back}>
         <p>{COPY.loading}</p>
       </ScreenLayout>
     );
@@ -348,7 +357,7 @@ export function MasterOnboardingScreen() {
 
   if (state.kind === "missing_token") {
     return (
-      <ScreenLayout title="Не получилось войти">
+      <ScreenLayout back={back} title="Не получилось войти">
         <p>{COPY.errors.missing_token}</p>
       </ScreenLayout>
     );
@@ -376,6 +385,7 @@ export function MasterOnboardingScreen() {
   if (step === 1) {
     return (
       <Step1Identity
+        back={back}
         data={data}
         onConfirm={handleConfirmIdentity}
         onNotMe={handleNotMe}
@@ -385,11 +395,12 @@ export function MasterOnboardingScreen() {
   }
   if (step === 2) {
     return (
-      <Step2Permissions data={data} onContinue={handleStep2Continue} />
+      <Step2Permissions back={back} data={data} onContinue={handleStep2Continue} />
     );
   }
   return (
     <Step3Profile
+      back={back}
       data={data}
       draft={draft}
       onBioChange={onBioChange}
@@ -405,6 +416,7 @@ export function MasterOnboardingScreen() {
 // --- Step 1 ---------------------------------------------------------------
 
 function Step1Identity({
+  back,
   data,
   onConfirm,
   onNotMe,
@@ -414,6 +426,7 @@ function Step1Identity({
   onConfirm: () => void;
   onNotMe: () => void;
   disabled: boolean;
+  back: BackIntent;
 }) {
   // DRF-1434 — на пилоте этот экран показывал два разных имени: в
   // заголовке «Здравствуйте, Иван!» (из профиля MAX), а в карточке под
@@ -445,6 +458,7 @@ function Step1Identity({
     : "";
   return (
     <ScreenLayout
+      back={back}
       title={COPY.step1.greeting(greetingName)}
       cta={
         <StickyCta onClick={onConfirm} disabled={disabled}>
@@ -488,11 +502,13 @@ function Step1Identity({
 // --- Step 2 ---------------------------------------------------------------
 
 function Step2Permissions({
+  back,
   data,
   onContinue,
 }: {
   data: ClaimResponse;
   onContinue: () => void;
+  back: BackIntent;
 }) {
   // Spec line 219-221 references "Карина" by name. That is a spec example, not
   // data: the backend surfaces no owner first name, only `salon.name`. Step 1
@@ -501,6 +517,7 @@ function Step2Permissions({
   const ownerHint = salonOwnerHint(data.salon.name);
   return (
     <ScreenLayout
+      back={back}
       cta={<StickyCta onClick={onContinue}>{COPY.step2.cta}</StickyCta>}
     >
       <h1 className="screen__title">{COPY.step2.seeTitle}</h1>
@@ -530,6 +547,7 @@ function Step2Permissions({
 // --- Step 3 ---------------------------------------------------------------
 
 function Step3Profile({
+  back,
   data,
   draft,
   onBioChange,
@@ -547,6 +565,7 @@ function Step3Profile({
   onSubmit: () => void;
   onLater: () => void;
   submitting: boolean;
+  back: BackIntent;
 }) {
   const services = data.master.services
     .map((s) => s.name)
@@ -560,6 +579,7 @@ function Step3Profile({
     .join("");
   return (
     <ScreenLayout
+      back={back}
       cta={
         <StickyCta onClick={onSubmit} disabled={submitting}>
           {COPY.step3.cta}
@@ -657,9 +677,17 @@ function Step3Profile({
 
 // --- Error sub-screens ----------------------------------------------------
 
+/**
+ * Вид экранов ошибок приглашения (DRF-1493): вход по ссылке из бота,
+ * истории за ним нет — возвращаться некуда.
+ */
+const INVITE_ERROR_BACK = screenRoot(
+  "Экран ошибки приглашения открыт по ссылке из бота напрямую.",
+);
+
 function InviteInvalidScreen() {
   return (
-    <ScreenLayout title="Ссылка не работает">
+    <ScreenLayout back={INVITE_ERROR_BACK} title="Ссылка не работает">
       <div className="callout callout--danger" role="alert">
         <p style={{ margin: 0 }}>{COPY.errors.invalid}</p>
       </div>
@@ -670,6 +698,7 @@ function InviteInvalidScreen() {
 function InviteUsedScreen({ onOpen }: { onOpen: () => void }) {
   return (
     <ScreenLayout
+      back={INVITE_ERROR_BACK}
       title="Уже подключены"
       cta={<StickyCta onClick={onOpen}>{COPY.errors.used}</StickyCta>}
     >
@@ -681,6 +710,7 @@ function InviteUsedScreen({ onOpen }: { onOpen: () => void }) {
 function WrongRecipientScreen() {
   return (
     <ScreenLayout
+      back={INVITE_ERROR_BACK}
       title="Не тот получатель"
       cta={<StickyCta onClick={closeApp}>{COPY.errors.close}</StickyCta>}
     >
@@ -701,7 +731,10 @@ function NetworkErrorScreen({
   // Surface 5xx vs offline differently per spec §M0 + customer-first-touch.
   const isServer = err instanceof ApiError && err.status >= 500;
   return (
-    <ScreenLayout title={isServer ? "Сервис временно недоступен" : "Нет связи"}>
+    <ScreenLayout
+      back={INVITE_ERROR_BACK}
+      title={isServer ? "Сервис временно недоступен" : "Нет связи"}
+    >
       <div className="callout callout--danger" role="alert">
         <p style={{ margin: 0 }}>{COPY.errors.network}</p>
         <div style={{ marginTop: "var(--s-3)" }}>

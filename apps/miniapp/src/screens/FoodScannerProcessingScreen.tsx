@@ -30,6 +30,8 @@ import {
   scanPhoto,
   type MealType,
 } from "../lib/food-scanner";
+import { useScreenBack } from "../hooks/useScreenBack";
+import { backTo } from "../lib/screen-back";
 
 interface RouterState {
   photo?: File;
@@ -46,6 +48,12 @@ const TIMEOUT_MS = 10000;
 
 export function FoodScannerProcessingScreen() {
   const navigate = useNavigate();
+
+  // Возврат (DRF-1493) — на дом. Своей стрелки экран не рисует
+  // (распознавание идёт секунды и его отменяют кнопкой «Отменить»), но
+  // аппаратная кнопка MAX существует независимо от разметки — и без
+  // объявления увела бы из приложения. Объявление обязательно и здесь.
+  const onBack = useScreenBack(backTo("/customer/main"));
   const location = useLocation();
   const state = (location.state ?? {}) as RouterState;
   const photo = state.photo;
@@ -135,6 +143,7 @@ export function FoodScannerProcessingScreen() {
   if (phase.kind === "error") {
     return (
       <ScanErrorScreen
+        onBack={onBack}
         err={phase.err}
         photo={photo ?? null}
         mealType={mealType}
@@ -196,11 +205,19 @@ export function FoodScannerProcessingScreen() {
 // ---------------------------------------------------------------------------
 
 function ScanErrorScreen({
+  onBack,
   err,
   photo,
   mealType,
   previewUrl,
 }: {
+  /**
+   * Возврат приходит готовым от экрана (DRF-1493): экран ошибки
+   * живёт внутри `FoodScannerProcessingScreen`, который объявление уже
+   * сделал. Свой `useScreenBack` здесь давал вторую подписку на
+   * мосту MAX — два перехода на одно нажатие.
+   */
+  onBack: (() => void) | undefined;
   err: unknown;
   photo: File | null;
   mealType: MealType;
@@ -226,7 +243,7 @@ function ScanErrorScreen({
           type="button"
           className="records-screen__back"
           aria-label="Назад"
-          onClick={() => navigate("/customer/main")}
+          onClick={onBack}
         >
           <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
             <path
@@ -295,7 +312,7 @@ function ScanErrorScreen({
           <button
             type="button"
             className="btn-secondary"
-            onClick={() => navigate("/customer/main")}
+            onClick={onBack}
           >
             Назад на главную
           </button>

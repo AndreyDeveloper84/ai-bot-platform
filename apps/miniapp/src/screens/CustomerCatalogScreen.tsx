@@ -39,6 +39,23 @@ import { DelayedSkeleton, ServiceCardSkeleton } from "../components/Skeleton";
 import { StateError } from "../components/StateError";
 import type { Service } from "../lib/api";
 import { getCatalogBrowse, type CatalogBrowseData } from "../lib/customer-booking";
+import { backTo } from "../lib/screen-back";
+
+/**
+ * Возврат (DRF-1493) — экран со скриншота владельца («Нету кнопки
+ * назад»).
+ *
+ * Каталог НЕ корень, хотя в него и ведёт deep link из бота
+ * (`open_catalog` → `/customer/catalog`). Deep link делает
+ * `history.back()` бесполезным, но родителя не отменяет: внутри
+ * приложения сюда приходят только с дома, из профиля, со «Дня» и из
+ * тупиков сценария записи. Дом клиентской поверхности — «Записи»
+ * (`/customer/main`), туда и ведёт возврат при любом входе.
+ *
+ * Нижней навигации этот экран не рисует (её рисуют только `Записи` и
+ * `День`), поэтому без стрелки он был настоящим тупиком.
+ */
+const BACK = backTo("/customer/main");
 
 type State =
   | { kind: "loading" }
@@ -99,7 +116,7 @@ export function CustomerCatalogScreen() {
 
   if (state.kind === "loading") {
     return (
-      <ScreenLayout title="Найди мастера">
+      <ScreenLayout back={BACK} title="Найди мастера">
         <DelayedSkeleton loading>
           <ServiceCardSkeleton />
           <ServiceCardSkeleton />
@@ -111,7 +128,7 @@ export function CustomerCatalogScreen() {
 
   if (state.kind === "error") {
     return (
-      <ScreenLayout title="Найди мастера">
+      <ScreenLayout back={BACK} title="Найди мастера">
         <StateError err={state.err} onRetry={load} screenId="customer-catalog" />
       </ScreenLayout>
     );
@@ -121,7 +138,7 @@ export function CustomerCatalogScreen() {
   const allEmpty = visibleServices.length === 0 && masters.length === 0;
 
   return (
-    <ScreenLayout title="Найди мастера">
+    <ScreenLayout back={BACK} title="Найди мастера">
       <div className="customer-catalog__search">
         <input
           type="search"
