@@ -2,7 +2,8 @@
 
 До этой задачи — пустой каркас, зарезервированный под «Django admin
 chrome» (``config/settings/base.py``). Теперь здесь живёт фундамент
-доступа: роли, жизненный цикл учётных записей и журнал действий.
+доступа: роли, жизненный цикл учётных записей, журнал действий и
+политика сокрытия полей-секретов.
 """
 
 from __future__ import annotations
@@ -16,20 +17,18 @@ class AdminconsoleConfig(AppConfig):
     verbose_name = "Админка бота"
 
     def ready(self) -> None:
-        """Подписать журнал на действия админки.
+        """Поставить журнал и политику секретов на уже собранную админку.
 
-        Подписка на ``LogEntry``, а не на отдельные ``ModelAdmin``: любой
-        экран, заведённый подзадачами 2-6 эпика, попадёт в журнал сам.
-        ``dispatch_uid`` держит подписку единственной, если ``ready()``
-        позовут дважды (перезагрузка реестра приложений в тестах).
+        Порядок безопасен: ``django.contrib.admin`` стоит первым в
+        ``INSTALLED_APPS``, его ``ready()`` выполняет ``autodiscover()``,
+        так что к нашему ``ready()`` все ``apps/*/admin.py`` уже
+        импортированы и ``admin.site`` заполнен.
+
+        Обе установки идемпотентны — повторный ``ready()`` (перезагрузка
+        реестра приложений в тестах) ничего не удваивает.
         """
-        from django.contrib.admin.models import LogEntry
-        from django.db.models.signals import post_save
+        from apps.adminconsole.journal import install_admin_journal
+        from apps.adminconsole.secrets_policy import install_secret_field_policy
 
-        from apps.adminconsole.journal import record_admin_action
-
-        post_save.connect(
-            record_admin_action,
-            sender=LogEntry,
-            dispatch_uid="apps.adminconsole.journal.record_admin_action",
-        )
+        install_admin_journal()
+        install_secret_field_policy()

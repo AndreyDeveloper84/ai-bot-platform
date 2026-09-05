@@ -147,3 +147,74 @@ def test_account_grant_and_revoke_are_journalled(monkeypatch: pytest.MonkeyPatch
     revoked = AuditLog.all_tenants.get(action="admin.account.revoked")
     assert revoked.payload["username"] == "l.editor"
     assert revoked.payload["groups_removed"] == ["ayla-editor"]
+
+
+@pytest.mark.django_db
+def test_bulk_delete_lands_in_the_journal_row_per_object(
+    monkeypatch: pytest.MonkeyPatch,
+    tenant: Tenant,
+) -> None:
+    """Самая разрушительная операция — и та, на которой журнал молчал.
+
+    Django пишет ``LogEntry`` через ``LogEntryManager.log_actions``, и на
+    одном объекте это ``instance.save()``, а на нескольких —
+    ``bulk_create``, который не шлёт ``post_save``. Первая версия задачи
+    подписывалась на сигнал и теряла ровно групповое удаление: чем больше
+    строк выделили, тем тише был журнал.
+    """
+    victims = [
+        Experiment.objects.create(
+            tenant=tenant,
+            name=f"bulk-victim-{index}",
+            hypothesis="Удаляется пачкой.",
+            status=Experiment.Status.DRAFT,
+            primary_kpi="handoff_rate",
+            variants=[{"name": "control", "weight": 100}],
+        )
+        for index in range(3)
+    ]
+    client = _editor_client(monkeypatch, "b.editor")
+
+    response = client.post(
+        "/admin/experiments/experiment/",
+        data={
+            "action": "delete_selected",
+            "_selected_action": [str(item.pk) for item in victims],
+            "post": "yes",
+        },
+        follow=True,
+    )
+
+    # Присутствие: удаление действительно произошло. Без него «строк в
+    # журнале три» проверялось бы на операции, которой не было.
+    assert response.status_code == 200
+    assert Experiment.all_tenants.filter(name__startswith="bulk-victim-").count() == 0
+
+    rows = list(AuditLog.all_tenants.filter(action="admin.object.deleted"))
+    assert len(rows) == len(victims), (
+        f"групповое удаление {len(victims)} строк оставило в журнале {len(rows)}"
+    )
+    assert {row.payload["actor_username"] for row in rows} == {"b.editor"}
+    assert {row.payload["object_id"] for row in rows} == {str(item.pk) for item in victims}
+
+
+@pytest.mark.django_db
+def test_single_delete_lands_exactly_once(
+    monkeypatch: pytest.MonkeyPatch,
+    experiment: Experiment,
+) -> None:
+    """Путь на одном объекте другой (``instance.save()``) — и не двоится."""
+    client = _editor_client(monkeypatch, "d.editor")
+
+    response = client.post(
+        f"/admin/experiments/experiment/{experiment.pk}/delete/",
+        data={"post": "yes"},
+        follow=True,
+    )
+
+    assert response.status_code == 200
+    assert not Experiment.all_tenants.filter(pk=experiment.pk).exists()
+
+    rows = list(AuditLog.all_tenants.filter(action="admin.object.deleted"))
+    assert len(rows) == 1, f"одно удаление оставило {len(rows)} строк журнала"
+    assert rows[0].payload["actor_username"] == "d.editor"

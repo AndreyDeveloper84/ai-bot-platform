@@ -69,7 +69,19 @@ ROLE_GROUPS: dict[str, str] = {
 }
 
 #: Приложения, которых не видит ни одна роль (см. модуль-docstring).
-ROLE_DENIED_APP_LABELS: frozenset[str] = frozenset({"auth", "sessions"})
+ROLE_DENIED_APP_LABELS: frozenset[str] = frozenset(
+    {
+        "auth",
+        # Расписание beat — эксплуатация, а не данные. Сюда, а не в
+        # EDITOR_DENIED_*, потому что экран периодических задач приходит
+        # третьей стороной и несёт действия (`run_tasks`, `enable_tasks`)
+        # без объявленных `permissions=`. Django отдаёт такие действия
+        # всякому, кто открыл экран, — то есть «смотрящий» мог бы запускать
+        # задачи. Чужой пакет мы не правим; закрываем экран целиком.
+        "django_celery_beat",
+        "sessions",
+    }
+)
 
 #: Приложения, которые смотрящий и правящий видят, но не правят.
 EDITOR_DENIED_APP_LABELS: frozenset[str] = frozenset(
@@ -77,10 +89,13 @@ EDITOR_DENIED_APP_LABELS: frozenset[str] = frozenset(
         "admin",
         "audit",
         "consent",
-        "django_celery_beat",
         "eventbus",
         "events",
         "ingress",
+        # Системные промпты, пороги роутера и библиотека дисклеймеров —
+        # конфигурация платформы и юридические тексты, а не прикладные
+        # данные салона. Меняет их владелец, не «правящий».
+        "promptreg",
         "replay",
     }
 )
@@ -96,6 +111,10 @@ EDITOR_DENIED_MODELS: frozenset[str] = frozenset(
 _WRITE_VERBS = ("add", "change", "delete")
 
 
+class RolesSyncError(RuntimeError):
+    """Синхронизацию ролей выполнить нельзя — и группы остались как были."""
+
+
 def model_label(model: type["Model"]) -> str:
     """``<app_label>.<model_name>`` — ключ обоих списков-исключений."""
     meta = model._meta  # noqa: SLF001 — Django's own public-by-convention API
@@ -108,7 +127,17 @@ def is_visible_to_roles(model: type["Model"]) -> bool:
 
 
 def is_editable_by_editor(model: type["Model"]) -> bool:
-    """Правит ли модель правящий."""
+    """Правит ли модель правящий.
+
+    Предикат намеренно ничего не знает про ``ModelAdmin.has_*_permission``.
+    Экран может запрещать правку сам (так делают все зеркала каталога и
+    журналы), и тогда выданное здесь право просто не срабатывает — это
+    защита в два слоя, а не дубль. Но если подзадача 2-6 снимет такой
+    запрет с экрана, право окажется живым: список ниже — единственное,
+    что тогда удержит. Поэтому набор правимых моделей закреплён тестом
+    ``test_roles.py::test_editor_writable_set_is_pinned`` — новая
+    регистрация красит сборку и заставляет решить осознанно.
+    """
     if not is_visible_to_roles(model):
         return False
     if model._meta.app_label in EDITOR_DENIED_APP_LABELS:  # noqa: SLF001
@@ -162,6 +191,20 @@ def sync_admin_roles() -> dict[str, int]:
             write_perm = by_codename.get(f"{verb}_{meta.model_name}")
             if write_perm is not None:
                 editor_perms.append(write_perm)
+
+    if not viewer_perms or not editor_perms:
+        # Права выставляются set(), то есть пустой расчёт СНЯЛ бы всё уже
+        # выданное. Пустым он выходит, когда прогон случился до migrate,
+        # на урезанном INSTALLED_APPS или при пустой таблице permissions.
+        # Тихо разжаловать всех в этот момент — худший из возможных
+        # исходов, поэтому отказываемся и оставляем как было.
+        raise RolesSyncError(
+            "Расчёт прав вышел пустым (viewer={viewer}, editor={editor}). "
+            "Группы не тронуты. Обычно это значит, что команду запустили до "
+            "`migrate` или с урезанным INSTALLED_APPS.".format(
+                viewer=len(viewer_perms), editor=len(editor_perms)
+            )
+        )
 
     viewer.permissions.set(viewer_perms)
     editor.permissions.set(editor_perms)

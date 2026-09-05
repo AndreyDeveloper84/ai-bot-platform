@@ -13,15 +13,18 @@ from __future__ import annotations
 
 from typing import Any
 
-from django.core.management.base import BaseCommand
+from django.core.management.base import BaseCommand, CommandError
 
-from apps.adminconsole.roles import sync_admin_roles
+from apps.adminconsole.roles import RolesSyncError, sync_admin_roles
 
 
 class Command(BaseCommand):
     help = "Создать/обновить группы ролей админки (ayla-viewer, ayla-editor)."
 
     def handle(self, *args: Any, **options: Any) -> None:
-        granted = sync_admin_roles()
+        try:
+            granted = sync_admin_roles()
+        except RolesSyncError as exc:
+            raise CommandError(str(exc)) from exc
         for group_name, count in sorted(granted.items()):
             self.stdout.write(self.style.SUCCESS(f"{group_name}: {count} прав"))

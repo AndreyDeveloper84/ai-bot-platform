@@ -36,6 +36,7 @@ from typing import TYPE_CHECKING
 
 from django.contrib.auth import get_user_model
 from django.contrib.sessions.models import Session
+from django.db import transaction
 from django.utils import timezone
 
 from apps.adminconsole.roles import ROLE_GROUPS, sync_admin_roles
@@ -142,8 +143,22 @@ def grant_admin_account(
         known = ", ".join(sorted(ROLE_GROUPS))
         raise AccountError(f"Неизвестная роль {role!r}. Известные: {known}.")
 
+    # Одна транзакция на всю выдачу. Синхронизация ролей переписывает
+    # права обеих групп; падение на полпути оставило бы группы
+    # переписанными, а пользователя настроенным наполовину.
+    with transaction.atomic():
+        return _grant(name, role, email, actor_username)
+
+
+def _grant(
+    name: str,
+    role: str,
+    email: str,
+    actor_username: str,
+) -> tuple["AbstractUser", bool]:
     # Роли должны существовать до выдачи, и синхронизация идемпотентна —
     # дешевле выполнить её, чем требовать помнить про отдельный шаг.
+    # RolesSyncError наружу не глушим: выдать роль, которой нет, нельзя.
     sync_admin_roles()
 
     from django.contrib.auth.models import Group
@@ -215,11 +230,12 @@ def revoke_admin_account(*, username: str, actor_username: str = "") -> int:
 
     had_groups = sorted(user.groups.values_list("name", flat=True))
     was_active = user.is_active
-    user.is_active = False
-    user.is_staff = False
-    user.save(update_fields=["is_active", "is_staff"])
-    user.groups.clear()
-    flushed = _flush_sessions(user.pk)
+    with transaction.atomic():
+        user.is_active = False
+        user.is_staff = False
+        user.save(update_fields=["is_active", "is_staff"])
+        user.groups.clear()
+        flushed = _flush_sessions(user.pk)
 
     write_audit(
         "admin.account.revoked",

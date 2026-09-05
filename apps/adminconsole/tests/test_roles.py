@@ -133,3 +133,104 @@ def test_predicates_agree_with_the_denylists() -> None:
     assert not is_editable_by_editor(LogEntry)
     assert is_visible_to_roles(Tenant)
     assert not is_editable_by_editor(Tenant)
+
+
+#: Ровно то, что «правящий» может править сегодня.
+#:
+#: Список правки — денилист (``EDITOR_DENIED_*``), а значит всё, чего в
+#: денилисте нет, правится по умолчанию. Для ``view_*`` это удобно: новый
+#: экран из подзадач 2-6 сразу виден смотрящему. Для записи то же
+#: поведение означало бы, что следующее зарегистрированное приложение
+#: становится правимым, и никто не был вынужден это решить.
+#:
+#: Поэтому набор закреплён. Новая регистрация в админке красит этот тест —
+#: и тот, кто её добавил, решает осознанно: либо дописать модель сюда,
+#: либо внести приложение в ``EDITOR_DENIED_APP_LABELS``.
+EDITOR_WRITABLE_MODELS = {
+    "booking.bookingreminder",
+    "booking.bookingrequest",
+    "catalog.catalogfaq",
+    "catalog.cataloghelparticle",
+    "catalog.catalogmaster",
+    "catalog.catalogservice",
+    "catalog.masterservice",
+    "conversations.conversation",
+    "experiments.experiment",
+    "experiments.holdout",
+    "experiments.userassignment",
+    "handoff.admintask",
+    "identity.botuser",
+    "identity.clientprofile",
+    "kb.kbdocument",
+    "loyalty.loyaltyaccount",
+    "loyalty.loyaltyevent",
+    "persona.brandvoiceconfig",
+    "promotions.promotion",
+    "scheduling.schedulechangerequest",
+    "scheduling.scheduleexception",
+    "scheduling.slotconfig",
+    "scheduling.timeblock",
+    "scheduling.workinghours",
+}
+
+
+def test_editor_writable_set_is_pinned() -> None:
+    """Что правит «правящий» — решается человеком, а не умолчанием."""
+    from django.contrib import admin
+
+    from apps.adminconsole.roles import model_label
+
+    actual = {
+        model_label(model)
+        for model in admin.site._registry  # noqa: SLF001
+        if is_editable_by_editor(model)
+    }
+
+    # Присутствие: набор не пуст. Пустой прошёл бы сравнение только с
+    # пустым эталоном, а так — красит сразу.
+    assert actual, "правящий не может править ничего — денилисты съели всё"
+
+    added = sorted(actual - EDITOR_WRITABLE_MODELS)
+    removed = sorted(EDITOR_WRITABLE_MODELS - actual)
+    assert not added, (
+        "новые экраны стали правимыми по умолчанию — впишите их сюда "
+        f"или в EDITOR_DENIED_APP_LABELS: {added}"
+    )
+    assert not removed, f"экраны пропали из админки или попали в денилист: {removed}"
+
+
+@pytest.mark.django_db
+def test_platform_config_is_not_editable_by_a_role() -> None:
+    """Промпты, пороги роутера и дисклеймеры — не «прикладные данные»."""
+    sync_admin_roles()
+    editor = _codenames(EDITOR_GROUP)
+    viewer = _codenames(VIEWER_GROUP)
+
+    # Присутствие: реестр промптов вообще в админке и обеим ролям виден.
+    assert "promptreg.view_promptversion" in viewer
+    assert "promptreg.view_disclaimerlibrary" in editor
+
+    for codename in (
+        "promptreg.change_promptversion",
+        "promptreg.change_thresholdconfig",
+        "promptreg.change_disclaimerlibrary",
+    ):
+        assert codename not in editor
+
+
+@pytest.mark.django_db
+def test_empty_sync_refuses_instead_of_stripping_everyone() -> None:
+    """Пустой расчёт не должен молча разжаловать всех выданных."""
+    from unittest.mock import patch
+
+    from apps.adminconsole.roles import RolesSyncError
+
+    granted = sync_admin_roles()
+    assert granted[VIEWER_GROUP] > 0  # присутствие: права были выданы
+    before = _codenames(VIEWER_GROUP)
+    assert before
+
+    with patch("django.contrib.admin.site._registry", {}), pytest.raises(RolesSyncError):
+        sync_admin_roles()
+
+    assert _codenames(VIEWER_GROUP) == before, "отказ всё равно снял права"

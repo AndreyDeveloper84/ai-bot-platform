@@ -18,7 +18,7 @@ from typing import Any
 from django.core.management.base import BaseCommand, CommandError, CommandParser
 
 from apps.adminconsole.accounts import PASSWORD_ENV_VAR, AccountError, grant_admin_account
-from apps.adminconsole.roles import ROLE_GROUPS
+from apps.adminconsole.roles import ROLE_GROUPS, RolesSyncError
 
 
 class Command(BaseCommand):
@@ -47,7 +47,7 @@ class Command(BaseCommand):
                 email=options["email"],
                 actor_username=options["actor"],
             )
-        except AccountError as exc:
+        except (AccountError, RolesSyncError) as exc:
             raise CommandError(str(exc)) from exc
 
         verb = "заведена" if created else "обновлена"
