@@ -398,6 +398,13 @@ class TestOutageStillGetsTheButton:
 # --------------------------------------------------------------------------- #
 # Замер по коду — числом                                                      #
 # --------------------------------------------------------------------------- #
+def _concierge_source() -> str:
+    """Исходник консьержа — читается с диска, а не пересказывается здесь."""
+    path = inspect.getsourcefile(concierge)
+    assert path is not None
+    return Path(path).read_text(encoding="utf-8")
+
+
 def _promise_returns(source: str) -> list[tuple[int, bool]]:
     """Все ``return``'ы, чей текст берётся из обещающего шаблона.
 
@@ -433,7 +440,7 @@ class TestNoPromiseWithoutTheButton:
         Число возвратов с обещающим текстом и ``outage=False`` — ноль. До
         правки их было шесть.
         """
-        source = Path(inspect.getsourcefile(concierge)).read_text(encoding="utf-8")
+        source = _concierge_source()
         unflagged = [line for line, flagged in _promise_returns(source) if not flagged]
 
         assert unflagged == [], f"промис без кнопки на строках: {unflagged}"
@@ -441,7 +448,7 @@ class TestNoPromiseWithoutTheButton:
     def test_the_promise_is_still_shipped_somewhere(self) -> None:
         """Парная положительная: замер не должен проходить оттого, что
         обещающий текст вычищен вообще. Он остаётся — там, где кнопка есть."""
-        source = Path(inspect.getsourcefile(concierge)).read_text(encoding="utf-8")
+        source = _concierge_source()
         flagged = [line for line, is_outage in _promise_returns(source) if is_outage]
 
         assert len(flagged) >= 1
