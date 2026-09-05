@@ -144,8 +144,12 @@ is preferred for a supervised deploy: the blast radius is one salon per line.
 python manage.py sync_catalog --status
 ```
 
-Every one of the ten salons must show a recent successful sync. Then, per
-salon, the mirror row count must equal the table at the top:
+Prints one line per tenant: `tenant | last sync ok | age | mirrored`. All ten
+salons must show a recent `last sync ok` (no `STALE` marker), and `mirrored`
+must equal the service count in the table at the top of this runbook.
+
+`mirrored` is only half the answer, though — it says nothing about whether
+anyone can be booked. The second number is the one that decides visibility:
 
 ```bash
 python manage.py shell -c "
@@ -160,7 +164,9 @@ for t in Tenant.objects.order_by('slug'):
 "
 ```
 
-Read both numbers. The second one is the one that decides visibility.
+Columns: slug, active services, **bookable masters**, city. A salon with
+services and a zero in the middle column will sync cleanly and stay invisible
+— by design, see the section below.
 
 ### The paired positive check — do not skip it
 
