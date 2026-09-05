@@ -671,6 +671,17 @@ class TestSalonWithoutBookableMasters:
         assert discover_masters_for_service(orphan_service.id) == []
 
     def test_it_never_reaches_a_client_as_a_choice(self, contour: Salon) -> None:
+        """The chip-tap read, on a healthy salon and on this one.
+
+        The presence half runs first and on the same call shape: if the
+        fixture were starved of data, ``discover_salons(tenant_id=…)`` would
+        fail there by name instead of letting the empty result below pass for
+        the reason the test claims.
+        """
+        healthy = next(s for s in NEW_SALONS if s.slug != contour.slug)
+        healthy_id = Tenant.all_objects.get(slug=healthy.slug).id
+        assert discover_salons(tenant_id=healthy_id, limit=5), healthy.slug
+
         tenant = Tenant.all_objects.get(slug=contour.slug)
         assert discover_salons(tenant_id=tenant.id, limit=5) == []
         assert discover_masters(limit=50)
