@@ -208,7 +208,14 @@ class TestTheColonBlockerIsGone:
 
         entry = _salon_entry(PILOT_ENV_WITH_WEB_APP)
 
-        payload = _button_to_max(_app_buttons(entry)[0])["payload"]
+        wire = _button_to_max(_app_buttons(entry)[0])
+        payload = wire["payload"]
+
+        # Presence first, and not as a formality: MAX accepts the empty
+        # string, so «no colon in it» stays green for a button that
+        # carries no payload at all. That would be a different
+        # regression, not a pass.
+        assert payload, wire
 
         assert ":" not in payload, payload
         assert payload != "cb:staff:open_app"
