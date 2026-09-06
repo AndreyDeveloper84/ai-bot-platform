@@ -211,16 +211,14 @@ def test_archive_with_reason_archives_and_journals(salon: Tenant, owner_client: 
 @pytest.mark.django_db
 def test_unarchive_restores_previous_bookability(salon: Tenant, owner_client: Client) -> None:
     """Извлечение из архива возвращает принятого мастера на витрину."""
-    master = _master(
-        salon,
-        "Вернувшаяся",
-        invite_status=_ACCEPTED,
-        archived_at=timezone.now(),
-        archive_reason="временно",
-    )
-    assert not _is_bookable(
-        master
-    )  # empty-assert-ok: мастер создана уже в архиве, положительная пара — «продаётся снова» после извлечения ниже в этом же тесте
+    master = _master(salon, "Вернувшаяся", invite_status=_ACCEPTED)
+    # Присутствие на тех же данных: до архивации мастер продаётся.
+    assert _is_bookable(master)
+    master.archived_at = timezone.now()
+    master.archive_reason = "временно"
+    master.save(update_fields=["archived_at", "archive_reason"])
+    # Отрицание: та же строка в архиве с продажи снята.
+    assert not _is_bookable(master)
 
     _run_action(owner_client, "unarchive_masters", master)
 
