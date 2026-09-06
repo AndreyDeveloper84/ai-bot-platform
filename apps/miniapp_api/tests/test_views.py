@@ -442,6 +442,60 @@ class TestServicesEndpoints:
         assert resp.status_code == 200
         assert resp.json()["service"]["is_bookable"] is True
 
+    # --- DRF-1482: empty_reason on the catalog payload -----------------
+    # Contract: docs/screens/customer-catalog-empty-states-spec.md §2 —
+    # the reason lives on the server so the API can grow new reasons
+    # without breaking the client. `search_no_match` is NOT produced
+    # here: free-text search never leaves the Mini App.
+
+    def test_empty_reason_region_empty_when_no_services(
+        self, client: Client, bot_user: BotUser
+    ) -> None:
+        """City without connected salons (pilot reality): the tenant has
+        no active services at all."""
+
+        resp = client.get(
+            reverse("miniapp_api:services_list"),
+            HTTP_AUTHORIZATION=_init_data_header("12345"),
+        )
+        assert resp.status_code == 200
+        assert resp.json()["services"] == []
+        assert resp.json()["empty_reason"] == "region_empty"
+
+    def test_empty_reason_booking_unavailable_when_nothing_bookable(
+        self, client: Client, bot_user: BotUser, service: CatalogService
+    ) -> None:
+        """Services exist but not one has a bookable performer —
+        «услуги есть, но не забронировать» (CONFIRMED reading)."""
+
+        resp = client.get(
+            reverse("miniapp_api:services_list"),
+            HTTP_AUTHORIZATION=_init_data_header("12345"),
+        )
+        assert resp.status_code == 200
+        assert len(resp.json()["services"]) == 1
+        assert resp.json()["empty_reason"] == "booking_unavailable"
+
+    def test_empty_reason_null_when_catalog_bookable(
+        self,
+        client: Client,
+        bot_user: BotUser,
+        service: CatalogService,
+        master: CatalogMaster,
+        master_service,
+    ) -> None:
+        """Positive guard on the same data: as soon as one bookable
+        service exists, no empty state applies — the field is null, not
+        a stale reason."""
+
+        resp = client.get(
+            reverse("miniapp_api:services_list"),
+            HTTP_AUTHORIZATION=_init_data_header("12345"),
+        )
+        assert resp.status_code == 200
+        assert len(resp.json()["services"]) == 1
+        assert resp.json()["empty_reason"] is None
+
 
 class TestMastersEndpoints:
     def test_list_bookable_only(

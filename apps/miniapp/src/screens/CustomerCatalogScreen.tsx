@@ -34,6 +34,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
+import { CatalogEmptyState } from "../components/CatalogEmptyState";
 import { MasterCard } from "../components/MasterCard";
 import { ScreenLayout } from "../components/ScreenLayout";
 import { ServiceCard } from "../components/ServiceCard";
@@ -41,6 +42,7 @@ import { DelayedSkeleton, ServiceCardSkeleton } from "../components/Skeleton";
 import { StateError } from "../components/StateError";
 import type { Service } from "../lib/api";
 import { getCatalogBrowse, type CatalogBrowseData } from "../lib/customer-booking";
+import { resolveCatalogEmpty } from "../lib/customer-catalog-empty";
 import { backTo } from "../lib/screen-back";
 
 /**
@@ -137,7 +139,28 @@ export function CustomerCatalogScreen() {
   }
 
   const { masters } = state.data;
-  const allEmpty = visibleServices.length === 0 && masters.length === 0;
+
+  /**
+   * DRF-1482 — every empty situation resolves to a reason with its own
+   * message and recovery action (spec §1). This replaces the old
+   * `visibleServices === 0 && masters === 0` gate, under which a search
+   * that matched nothing rendered a blank screen with no explanation
+   * whenever masters were present.
+   */
+  const emptyReason = resolveCatalogEmpty({
+    query,
+    visibleServices: visibleServices.length,
+    services: state.data.services,
+    mastersCount: masters.length,
+    serverReason: state.data.emptyReason,
+  });
+
+  /** «Посмотреть/Смотреть все услуги» — drop the search, show the full
+      catalog at its canonical address (DRF-1481). */
+  const handleShowAllServices = () => {
+    setSearch("");
+    navigate("/customer/catalog");
+  };
 
   return (
     <ScreenLayout back={BACK} title="Найди мастера">
@@ -152,12 +175,12 @@ export function CustomerCatalogScreen() {
         />
       </div>
 
-      {allEmpty && (
-        <div className="callout">
-          <p style={{ margin: 0 }}>
-            Пока здесь пусто. Загляни позже — покажу варианты.
-          </p>
-        </div>
+      {emptyReason && (
+        <CatalogEmptyState
+          reason={emptyReason}
+          onShowAllServices={handleShowAllServices}
+          onRetry={load}
+        />
       )}
 
       {/* Owner ruling 25.08 — «Нет displayable WHY → нет блока „Ayla
