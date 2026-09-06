@@ -333,9 +333,7 @@ describe("CustomerWellnessDashboardScreen — goal truthfulness (DRF-1476)", () 
     expect(screen.queryByText(/Цель не выбрана/)).not.toBeInTheDocument();
   });
 
-  it("goal without progress: the goal shows, no percentage is drawn", async () => {
-    // Ayla stores no progress. A 0 % bar under a live goal is the same
-    // class of lie, pointed the other way.
+  it("goal: name and week show, no percentage and no bar", async () => {
     serve(
       { ...BASE_TODAY, active_goals: [{ title: "Меньше стресса", week_num: 3 }] },
       { this_week_booking_count: 0 },
@@ -345,30 +343,68 @@ describe("CustomerWellnessDashboardScreen — goal truthfulness (DRF-1476)", () 
     // POSITIVE: goal and its real week are rendered.
     expect(await screen.findByText(/Меньше стресса/)).toBeInTheDocument();
     expect(screen.getByText(/3-я неделя/)).toBeInTheDocument();
-    // NEGATIVE (paired): no invented percentage next to it.
-    expect(screen.queryByText(/0 %/)).not.toBeInTheDocument();
-    expect(
-      screen.queryByRole("progressbar", { name: /Меньше стресса/ }),
-    ).not.toBeInTheDocument();
+    // NEGATIVE (paired): ни процента, ни шкалы ВНУТРИ строки цели.
+    // Проценты калорий рядом — это другой ряд и другой факт.
+    const goalRow = within(screen.getByLabelText(/^Цель: Меньше стресса/));
+    expect(goalRow.queryByText(/%/)).not.toBeInTheDocument();
+    expect(goalRow.queryByRole("progressbar")).not.toBeInTheDocument();
   });
 
-  it("goal with progress: the bar renders when a number really arrives", async () => {
-    // Paired positive for the case above — proves the bar was hidden
-    // for want of data, not deleted outright.
+  it("goal progress is not drawn even if a percentage arrives (решение №13)", async () => {
+    // Решение владельца №13 (06.09): на пилоте разрешён простой показ
+    // «Моя цель» — без процентов, шкал и оценок выполнения. Раньше
+    // полоса рисовалась, как только приходил `progress_pct`; бэкенд его
+    // не слал, так что запрет держался на молчании источника. Теперь он
+    // держится на экране, и лишнее поле в ответе ничего не рисует.
     serve(
       {
         ...BASE_TODAY,
-        active_goals: [{ title: "Меньше стресса", week_num: 3, progress_pct: 78 }],
+        active_goals: [
+          { title: "Меньше стресса", week_num: 3, progress_pct: 78 },
+        ],
       },
       { this_week_booking_count: 0 },
     );
     await renderScreen(false);
 
+    // POSITIVE: цель на месте — снят прогресс, а не сама цель.
     expect(await screen.findByText(/Меньше стресса/)).toBeInTheDocument();
-    expect(screen.getByText(/78 %/)).toBeInTheDocument();
+    expect(screen.getByText("Моя цель")).toBeInTheDocument();
+    // NEGATIVE (paired): процента и шкалы нет.
+    expect(screen.queryByText(/78 %/)).not.toBeInTheDocument();
     expect(
-      screen.getByRole("progressbar", { name: /Меньше стресса/ }),
-    ).toBeInTheDocument();
+      screen.queryByRole("progressbar", { name: /Меньше стресса/ }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("nothing on the home screen is weight, measurements, sleep or steps", async () => {
+    // Решение владельца №10 (§35): вес, замеры, сон и шаги вне пилота.
+    // Замер, а не утверждение: экран рисуется целиком и обыскивается.
+    serve(
+      { ...BASE_TODAY, active_goals: [{ title: "Меньше стресса", week_num: 3 }] },
+      { this_week_booking_count: 0 },
+    );
+    await renderScreen(false);
+
+    // POSITIVE: экран отрисован — иначе «ничего не нашли» ничего не значит.
+    expect(await screen.findByText(/Меньше стресса/)).toBeInTheDocument();
+    expect(screen.getByText(/3 \/ 8 стаканов/)).toBeInTheDocument();
+    const text = document.body.textContent ?? "";
+    for (const forbidden of [
+      "Вес",
+      "вес,",
+      "Замер",
+      "замер",
+      "Сон",
+      "Шаг",
+      "шаг",
+      "Отзыв",
+      "отзыв",
+      "Рейтинг",
+      "★",
+    ]) {
+      expect(text).not.toContain(forbidden);
+    }
   });
 });
 

@@ -809,12 +809,8 @@ function PulseStrip({ data }: { data: WellnessToday }) {
   // Tri-state, same contract as the quick-action label (DRF-1476):
   // a goal, no goal, or «the goal layer did not answer».
   const goalsKnown = data.active_goals !== undefined;
+  // Одна цель, не несколько (решение владельца №13, 06.09).
   const goal = data.active_goals?.[0];
-  // Ayla stores no progress for a goal, so the bar renders ONLY when a
-  // number actually arrived. `0` is a legitimate value and must still
-  // draw — hence a null check, not a truthiness check.
-  const goalPct = goal?.progress_pct;
-  const hasGoalPct = goalPct !== undefined && goalPct !== null;
 
   return (
     <div className="wellness-dash__pulse-card">
@@ -921,7 +917,6 @@ function PulseStrip({ data }: { data: WellnessToday }) {
             ? [
                 `Цель: ${goal.title}`,
                 goal.week_num ? `${goal.week_num}-я неделя` : null,
-                hasGoalPct ? `${goalPct} процентов` : null,
               ]
                 .filter(Boolean)
                 .join(", ")
@@ -940,29 +935,14 @@ function PulseStrip({ data }: { data: WellnessToday }) {
               ? "Цель не выбрана"
               : "Цель"}
         </div>
-        {goal ? (
-          hasGoalPct ? (
-            <>
-              <div
-                className="wellness-dash__progress"
-                role="progressbar"
-                aria-valuenow={goalPct}
-                aria-valuemin={0}
-                aria-valuemax={100}
-                aria-label={`${goal.title}: ${goalPct} процентов`}
-              >
-                <div
-                  className="wellness-dash__progress-fill"
-                  style={{ width: `${Math.min(100, goalPct)}%` }}
-                  aria-hidden="true"
-                />
-              </div>
-              <div className="wellness-dash__pulse-numbers" aria-hidden="true">
-                {goalPct} %
-              </div>
-            </>
-          ) : null
-        ) : goalsKnown ? (
+        {/* Ни полосы, ни процентов под целью — решение владельца №13
+            (06.09): на пилоте разрешён простой показ «Моя цель», без
+            шкал и оценок выполнения. Канон §3 рисует «78 %», и это
+            расхождение борда/макета с решением; правится макет.
+            Раньше полоса рисовалась, когда приходил `progress_pct` —
+            бэкенд его не слал никогда, так что на экране этого не
+            видели, но код был готов нарисовать. */}
+        {goal ? null : goalsKnown ? (
           <div className="wellness-dash__pulse-numbers">
             Расскажи о себе — точнее советую
           </div>

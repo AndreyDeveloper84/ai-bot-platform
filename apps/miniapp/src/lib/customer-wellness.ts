@@ -110,15 +110,21 @@ export interface WellnessToday {
    *     told a customer who had just picked «Позаботиться о коже лица»
    *     to go pick one. Render a neutral label instead.
    *
-   * `progress_pct` is optional because Ayla stores no progress for a
-   * goal — `ClientGoal` is key / text / selected_at / source_channel.
-   * When absent the screen hides the bar rather than drawing 0 %.
-   * `week_num` is derived server-side from `selected_at`, and is absent
-   * only when that timestamp is unusable.
+   * There is NO progress field, by owner decision (решение №13,
+   * 06.09): на пилоте разрешён простой показ «Моя цель» — без
+   * процентов, шкал и оценок выполнения. Ayla и не хранит прогресс
+   * (`ClientGoal` = key / text / selected_at / source_channel), так что
+   * поле было бы нечем наполнить; теперь его нет и в контракте, и
+   * нарисовать полосу не из чего.
+   *
+   * Одна цель, не несколько — тем же решением.
+   *
+   * `week_num` — производная от `selected_at` на сервере, отсутствует
+   * только когда та отметка непригодна. Это счётчик недель, а не оценка
+   * выполнения, и под запрет №13 не попадает.
    */
   active_goals?: Array<{
     title: string;
-    progress_pct?: number;
     week_num?: number;
   }>;
   /**
@@ -239,8 +245,6 @@ const DEFAULT_TODAY: WellnessToday = {
   },
   water_glasses_eaten: 4,
   water_glasses_target: 8,
-  // No progress_pct — the backend has no source for it (DRF-1476);
-  // a stub that invented one would hide the real render path.
   active_goals: [{ title: "Меньше стресса", week_num: 3 }],
   display_name: "Анна",
   day_pattern_hint: "morning_good_progress",

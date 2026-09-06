@@ -2603,8 +2603,12 @@ def customer_wellness_today(request: HttpRequest) -> HttpResponse:
     ## Fields without an Ayla source (documented gaps)
 
     * ``active_goals[].progress_pct`` — Ayla's goal layer stores no
-      progress (see :func:`_active_goals_from_context`); omitted, and
-      the frontend hides the bar rather than drawing 0 %.
+      progress (see :func:`_active_goals_from_context`), and since the
+      owner's решение №13 (06.09) there is to be none: на пилоте
+      разрешён простой показ «Моя цель» — без процентов, шкал и оценок
+      выполнения. The key is not sent, the frontend no longer has a
+      field to render it from, and adding a source later is a product
+      decision, not a wiring one.
     * ``pfc.protein_target_g`` + ``day_pattern_hint`` — omitted (no
       clean source). Frontend treats both as optional.
     """
