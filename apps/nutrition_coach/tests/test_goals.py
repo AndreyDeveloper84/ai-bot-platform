@@ -109,7 +109,9 @@ class TestActiveGoal:
         assert result == Goal(key="", text="Больше энергии днём")
 
     def test_key_and_text_together(self) -> None:
-        document = {"known": {"goal": {"goal_key": "more_energy", "goal_text": "к вечеру не валиться"}}}
+        document = {
+            "known": {"goal": {"goal_key": "more_energy", "goal_text": "к вечеру не валиться"}}
+        }
         result = active_goal(USER, fetch=fetch_returning(document))
         assert result == Goal(key="more_energy", text="к вечеру не валиться")
 
