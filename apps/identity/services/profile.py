@@ -108,13 +108,27 @@ def get_profile(bot_user: BotUser) -> ProfileSnapshot:
 
 
 _EDITABLE_USER_FIELDS = {"client_name", "timezone"}
+#: Поля, которые ``update_profile`` присваивает ``UserPreferences`` сам.
+#: ``notify_promo`` сюда НЕ входит: он зеркало реестра согласий, см.
+#: :data:`_CONSENT_BACKED_PREF_FIELDS`.
 _EDITABLE_PREF_FIELDS = {
     "notify_reminders",
     "notify_retention",
-    "notify_promo",
     "notify_birthday",
     "birthday_date",
 }
+#: Поля профиля, за которыми стоит ``ConsentRecord``, а не колонка (DRF-1520).
+#:
+#: ``notify_promo`` — маркетинговое согласие. Оно жило в двух местах сразу:
+#: булева колонка, которую этот PATCH присваивал молча, и append-only реестр
+#: ``ConsentRecord(MARKETING)``, в который не писал никто. Два источника
+#: правды об одном согласии, ничем не связанные. Главным признан реестр —
+#: только он отвечает, кто и когда согласие дал и когда отозвал; булев флаг
+#: этого не хранит. Колонка осталась зеркалом, и пишет её теперь ровно один
+#: путь — :func:`apps.consent.customer.set_marketing`, куда этот PATCH и
+#: делегирует. Контракт ручки не меняется: тело с ``notify_promo``
+#: принимается как раньше, ответ отдаёт фактическое состояние.
+_CONSENT_BACKED_PREF_FIELDS = {"notify_promo"}
 
 
 class ProfileUpdateError(ValueError):
@@ -130,9 +144,18 @@ def update_profile(bot_user: BotUser, payload: dict[str, Any]) -> ProfileSnapsho
     :class:`ProfileUpdateError` so the API responds with 400 + slug,
     rather than silently dropping a typo.
     """
-    unknown = set(payload) - _EDITABLE_USER_FIELDS - _EDITABLE_PREF_FIELDS
+    unknown = (
+        set(payload) - _EDITABLE_USER_FIELDS - _EDITABLE_PREF_FIELDS - _CONSENT_BACKED_PREF_FIELDS
+    )
     if unknown:
         raise ProfileUpdateError(f"unknown fields: {sorted(unknown)}")
+
+    # Согласия — до колонок: если тело просит и согласие, и обычную
+    # настройку, а согласие невалидно, не должно записаться ничего.
+    for key in _CONSENT_BACKED_PREF_FIELDS & payload.keys():
+        value = payload[key]
+        if not isinstance(value, bool):
+            raise ProfileUpdateError(f"{key} must be a boolean")
 
     # Field max_lengths mirror apps/identity/models.py: BotUser.client_name(150) +
     # BotUser.timezone(64). Hardcoded to avoid runtime _meta walks on every
@@ -165,6 +188,13 @@ def update_profile(bot_user: BotUser, payload: dict[str, Any]) -> ProfileSnapsho
         prefs_dirty.append(key)
     if prefs_dirty:
         prefs.save(update_fields=[*prefs_dirty, "updated_at"])
+
+    if "notify_promo" in payload:
+        # Локальный импорт: apps.consent читает identity-модели, и импорт на
+        # уровне модуля замкнул бы кольцо при загрузке приложений.
+        from apps.consent.customer import set_marketing
+
+        set_marketing(bot_user, granted=bool(payload["notify_promo"]))
 
     return get_profile(bot_user)
 
