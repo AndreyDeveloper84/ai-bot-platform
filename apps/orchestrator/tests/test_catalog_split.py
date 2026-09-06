@@ -48,6 +48,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal
+from uuid import uuid4
 
 import pytest
 
@@ -82,6 +83,10 @@ def _salon(slug: str, name: str, *, city: str = "Пенза", address: str = "")
         is_active=True,
         invite_status=CatalogMaster.InviteStatus.ACCEPTED,
         raw={"address": address} if address else {},
+        # DRF-1540/1544 — синхронизированная строка несёт канонический ключ.
+        # Без него мастер не продаётся, и клиентские поверхности отвечали бы
+        # пустотой не потому, что сломаны.
+        ayla_user_id=uuid4(),
     )
     return tenant
 

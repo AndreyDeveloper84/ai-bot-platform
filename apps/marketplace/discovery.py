@@ -38,6 +38,7 @@ from django.db.models import (
 from django.db.models.expressions import CombinedExpression
 from django.db.models.functions import Cast, Coalesce, Length, Replace, Trim
 
+from apps.catalog.master_state import AVAILABLE
 from apps.catalog.models import CatalogMaster, CatalogService
 from apps.marketplace.dto import MasterCard, SalonCard, ServiceCard
 from apps.tenancy.models import Tenant
@@ -516,13 +517,16 @@ def _known_cities() -> list[str]:
     this marketplace can serve». One small DISTINCT; the ``all_tenants``
     carve-out (MKT1) applies here for the same reason it applies to discovery
     itself — the set spans every tenant.
+
+    «Bookable» is :data:`apps.catalog.master_state.AVAILABLE` (DRF-1544), the
+    same predicate :func:`_bookable_qs` selects on. Sharing it is what keeps
+    a city out of the recognition set once its last sellable master is gone:
+    a hand-written copy here would keep recognising «Пенза» and route the
+    query to a city that answers with nobody.
     """
     return [
         c
-        for c in CatalogMaster.all_tenants.filter(
-            is_active=True,
-            invite_status=CatalogMaster.InviteStatus.ACCEPTED,
-        )
+        for c in CatalogMaster.all_tenants.filter(AVAILABLE)
         .values_list("tenant__city", flat=True)
         .distinct()
         if c
@@ -1348,9 +1352,16 @@ def _bookable_qs(
 ) -> QuerySet[CatalogMaster]:
     """Cross-tenant queryset of bookable masters, optionally filtered.
 
-    The SOLE ``all_tenants`` carve-out (MKT1). Only ``is_active`` +
-    invite-``accepted`` masters (the same ``bookable`` predicate
-    customer-facing reads use). Optional ``city`` (exact, case-insensitive, on
+    The SOLE ``all_tenants`` carve-out (MKT1). Bookability is asked of
+    :data:`apps.catalog.master_state.AVAILABLE` and nowhere else (DRF-1544):
+    this read used to spell out ``is_active`` + invite-``accepted`` by hand,
+    which made it one more hand-rolled copy of a predicate that has since
+    grown two conditions it never learned about — ``archived_at IS NULL``
+    (DRF-1506) and a canonical ``ayla_user_id`` (DRF-1540, owner decision:
+    a master the booking notification cannot reach is not sold). Reading
+    the shared ``Q`` means
+    the next condition (DRF-1521's profile completeness) arrives here without
+    anyone editing this line. Optional ``city`` (exact, case-insensitive, on
     the owning tenant) and ``specialization`` narrow it.
 
     ### Matching a service (DRF-945)
@@ -1395,10 +1406,7 @@ def _bookable_qs(
     than join it.
     """
     qs = (
-        CatalogMaster.all_tenants.filter(
-            is_active=True,
-            invite_status=CatalogMaster.InviteStatus.ACCEPTED,
-        )
+        CatalogMaster.all_tenants.filter(AVAILABLE)
         .select_related("tenant")  # N+1-safe tenant.city / tenant_id
         .order_by("name", "id")
     )

@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from uuid import uuid4
 
 import pytest
 
@@ -49,6 +50,10 @@ def popular(penza: Tenant) -> CatalogService:
             name=f"Мастер {index:02d}",
             is_active=True,
             invite_status=CatalogMaster.InviteStatus.ACCEPTED,
+            # DRF-1540/1544 — синхронизированная строка несёт канонический ключ.
+            # Без него мастер не продаётся, и пустая выдача читалась бы как
+            # поломка подбора, а не как отсутствие связи с Ayla.
+            ayla_user_id=uuid4(),
         )
         MasterService.all_tenants.create(tenant=penza, master=master, service=service)
     return service
@@ -162,6 +167,10 @@ class TestScoreStillOutranksRotation:
                 name=f"Мастер {index:02d}",
                 is_active=True,
                 invite_status=CatalogMaster.InviteStatus.ACCEPTED,
+                # DRF-1540/1544 — синхронизированная строка несёт канонический ключ.
+                # Без него мастер не продаётся, и пустая выдача читалась бы как
+                # поломка подбора, а не как отсутствие связи с Ayla.
+                ayla_user_id=uuid4(),
             )
             # ``setattr`` and not an assignment: ``match_score`` is put on the
             # row by the queryset's ``annotate``, not by the model, so the
@@ -185,6 +194,10 @@ class TestScoreStillOutranksRotation:
                 name=f"Мастер {index:02d}",
                 is_active=True,
                 invite_status=CatalogMaster.InviteStatus.ACCEPTED,
+                # DRF-1540/1544 — синхронизированная строка несёт канонический ключ.
+                # Без него мастер не продаётся, и пустая выдача читалась бы как
+                # поломка подбора, а не как отсутствие связи с Ayla.
+                ayla_user_id=uuid4(),
             )
             # ``setattr`` and not an assignment: ``match_score`` is put on the
             # row by the queryset's ``annotate``, not by the model, so the

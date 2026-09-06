@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from decimal import Decimal
+from uuid import uuid4
 
 import pytest
 from django.conf import settings
@@ -49,6 +50,10 @@ def _master(tenant: Tenant, name: str, **kw) -> CatalogMaster:
     defaults = {
         "is_active": True,
         "invite_status": CatalogMaster.InviteStatus.ACCEPTED,
+        # DRF-1540/1544 — синхронизированная строка всегда несёт канонический
+        # ключ; без него мастер не продаётся. ``kw`` может передать ``None``,
+        # и это отдельный, названный случай, а не забытое поле.
+        "ayla_user_id": uuid4(),
     }
     defaults.update(kw)
     return CatalogMaster.all_tenants.create(
