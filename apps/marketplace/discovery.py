@@ -2004,9 +2004,10 @@ def discover_services(
     carries the id, so the follow-up must not re-run a name match);
     ``city`` — exact, case-insensitive, on the tenant; ``query`` — free text
     matched against service names through the same stem machinery as master
-    discovery (:func:`_parse_query`): tokens OR-ed, ranked by how many stems
-    one name matched, and a token naming a city we serve routes to the city
-    filter, so «массаж в пензе» works here exactly as it does for masters.
+    discovery (:func:`_parse_query`): tokens OR-ed, ranked by the same match
+    PRECISION the master search uses since DRF-1530 (:func:`_row_precision`),
+    and a token naming a city we serve routes to the city filter, so «массаж
+    в пензе» works here exactly as it does for masters.
     A query that names a GOAL and nothing else selects on the curated goal key
     instead (DRF-1324), unranked — see :func:`service_rows_score`.
     An untokenizable query fails CLOSED (empty list) rather than dropping the
