@@ -450,14 +450,33 @@ class TestNoShippedButtonReachesTheModelRaw:
         assert concierge.call_args.args[0] == "Хочу записаться"
 
     def test_retired_menu_slug_never_reaches_the_model_raw(self, sent, fake_redis, concierge):
+        """DRF-1491 — снятый слаг отвечает МЕНЮ, а не прозой модели.
+
+        Свойство, ради которого тест написан, не изменилось: сырой
+        ``cb:`` payload по-прежнему никуда не уезжает. Изменилось, КТО
+        отвечает. ``resolve_tap_text`` переводит снятый слаг в «Что ты
+        умеешь?» (``_RETIRED_MENU_TEXT``) — единственный ответ, верный
+        для любой снятой кнопки, — а эту фразу с DRF-1491 забирает
+        главное меню витрины, потому что решение владельца §25 п.2 велит
+        отвечать на неё меню, а не свободной прозой.
+
+        Прежняя стража («модель ход получила») поэтому заменена на
+        равносильную по силе: ход НЕ потерян, ответ доставлен, и в нём
+        нет ни одного сырого payload'а.
+        """
         _welcomed_user(61003)
 
         max_handler.handle_global_max_event(
             _tap(payload="cb:menu:retired_button", user_id=61003, callback_id="menu-3")
         )
 
-        assert concierge.called
-        assert not concierge.call_args.args[0].startswith("cb:")
+        # Стража: ход не потерян и клавиатура доехала.
+        assert sent, "снятый слаг остался без ответа"
+        assert sent[-1]["attachments"], sent[-1]
+        # И только теперь отрицание: сырого payload'а человек не видел…
+        assert "cb:" not in sent[-1]["text"], sent[-1]["text"]
+        # …и модель его тоже не видела.
+        assert concierge.called is False
 
     def test_typed_lookalike_is_not_treated_as_a_tap(self, sent, fake_redis, concierge):
         """Проверка формы, а не префикса: человек может НАБРАТЬ «cb:qa:…».

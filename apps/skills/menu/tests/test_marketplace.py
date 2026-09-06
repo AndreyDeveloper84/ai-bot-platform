@@ -293,7 +293,27 @@ class TestFallbackScreen:
     @pytest.mark.django_db
     def test_never_echoes_the_user(self, bot_user, consent, miniapp):
         fb_text, _ = marketplace_fallback_reply(bot_user=bot_user)
+        # Стража: текст промаха вообще есть и он про возможности.
+        assert BOT_ITEMS[0].line in fb_text
         assert "ааааа" not in fb_text
+
+    @pytest.mark.django_db
+    def test_fits_the_platform_length_ceiling(self, bot_user, consent, miniapp, settings):
+        """300 символов — потолок негативных золотых фикстур.
+
+        ``apps/replay/fixtures/golden/food_scanner/cb_unknown_scan_id.yaml``
+        и её соседка по ``food_correction`` описывают ровно этот исход:
+        «нужный навык колбэк не забрал, ход приземлился на главное меню».
+        Реплика промаха обязана в потолок влезать — иначе золотой гейт
+        краснеет на правильном поведении, а не на дефекте.
+
+        Проверяется в САМОЙ богатой конфигурации: флаг питания задан,
+        мини-приложение настроено — то есть на максимальной длине.
+        """
+        settings.NUTRITION_ENABLED = True
+        fb_text, _ = marketplace_fallback_reply(bot_user=bot_user)
+
+        assert len(fb_text) <= 300, len(fb_text)
 
 
 # --------------------------------------------------------------------------- #

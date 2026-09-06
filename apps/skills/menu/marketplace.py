@@ -250,6 +250,17 @@ _OUTRO = (
     "Нужен живой человек — напишите «оператор»."
 )
 
+#: Хвост КОРОТКОЙ рамки — той, что показывается после промаха.
+#:
+#: Отдельный от :data:`_OUTRO` не ради краткости самой по себе. Реплики
+#: платформы держат потолок длины (``voice_check.max_length`` золотых
+#: фикстур ``apps/replay/fixtures/golden``, 300 символов на негативных
+#: случаях), и экран промаха под него обязан влезать: человек, которого
+#: не поняли, читает извинение и хочет действия, а не второй абзац. Всё,
+#: что не поместилось, при этом никуда не делось — оно на кнопках, и
+#: клавиатура у промаха та же, что у меню.
+_FALLBACK_OUTRO = "Нажмите кнопку или напишите своими словами."
+
 #: Ветка «не поняла» ВИТРИНЫ. Отличается от салонной
 #: :data:`apps.skills.menu.replies.FALLBACK_TEXT` не только рамкой: там
 #: перечень услуг одного салона, здесь — возможности маркетплейса.
@@ -499,16 +510,25 @@ def _lines(items: tuple[MenuItem, ...]) -> list[str]:
     return [f"• {item.line}" for item in items]
 
 
-def marketplace_menu_text(*, intro: str = _INTRO) -> str:
+def marketplace_menu_text(*, intro: str = _INTRO, compact: bool = False) -> str:
     """Текст меню, собранный из ТЕХ ЖЕ списков, что и клавиатура.
 
     Перечень строится по фактически нарисованным пунктам, а не по
     константе: на развёртывании без мини-приложения меню не обещает
     экранов, которых человек не откроет, — и наоборот, добавленный пункт
     нельзя забыть упомянуть.
+
+    ``compact`` — рамка промаха: перечень экранов и длинный хвост
+    опускаются, чтобы реплика влезала в потолок длины (см.
+    :data:`_FALLBACK_OUTRO`). Клавиатура при этом не урезается, так что
+    ни один пункт не пропадает — он просто не пересказан словами.
     """
     web_app, miniapp_url = _config()
     parts = [intro, "\n".join(_lines(BOT_ITEMS))]
+
+    if compact:
+        parts.append(_FALLBACK_OUTRO)
+        return "\n\n".join(parts)
 
     screen_items: list[MenuItem] = []
     if web_app or miniapp_url:
@@ -538,7 +558,7 @@ def marketplace_fallback_reply(*, bot_user: Any) -> tuple[str, dict[str, Any]]:
     """
     buttons = marketplace_menu_buttons(bot_user=bot_user)
     return (
-        marketplace_menu_text(intro=FALLBACK_INTRO),
+        marketplace_menu_text(intro=FALLBACK_INTRO, compact=True),
         _menu_action_data(buttons, kind="marketplace_fallback"),
     )
 
