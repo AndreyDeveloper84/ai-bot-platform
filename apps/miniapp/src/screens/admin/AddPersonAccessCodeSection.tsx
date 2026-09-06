@@ -1,53 +1,40 @@
 /**
- * Admin — issue a staff access code. DRF-1061 block 2.4.
+ * «Добавить человека» — ветка «человек уже работает в салоне».
  *
- * Route: `/admin/team/access`
+ * Половина одного экрана (`AdminAddPersonScreen`), а не самостоятельный
+ * экран. Прежде это был `AdminStaffAccessScreen` по адресу
+ * `/admin/team/access`, и его собственный заголовок объяснял, почему он
+ * отдельный: одна половина СОЗДАЁТ карточку мастера, вторая ДАЁТ ДОСТУП
+ * тому, кто уже есть. Для бэкенда это по-прежнему два эндпоинта и два
+ * разных жизненных цикла — там разделение остаётся.
  *
- * ### Why this is a second screen and not a mode of the invite modal
+ * Владелец салона решает не это. Он решает одну задачу — подключить
+ * человека — и до этой правки должен был знать заранее, заведён тот в
+ * каталоге или нет, чтобы выбрать правильную из двух кнопок на экране
+ * команды. Решение владельца §25 п.4 от 05.09.2026: экран один, вопрос
+ * задаётся на нём.
  *
- * `AdminInviteMasterScreen` (`/admin/team/invite`) posts to
- * `masters/invite/`, which **creates a catalog master** — a person who is
- * not in the salon yet, with services, a card, a profile. This screen posts
- * to `staff/invite/`, which **grants access to a person who already
- * exists**: a `TenantStaff` row, or a link from an existing catalog master
- * to their MAX account.
+ * ### Код показывается один раз, и это форма экрана
  *
- * The backend deliberately kept those apart (`views_staff_invite.py`
- * docstring: folding them together «would have meant one endpoint whose
- * required fields depend on a role flag, and whose "create" is sometimes a
- * create and sometimes a link»). The same reasoning applies to the screen:
- * a person adding an administrator and a person adding a masseuse are not
- * doing two variants of one task.
+ * Хранится только отпечаток. Поэтому предупреждение стоит НАД кодом,
+ * подтверждение выхода MAX включено, пока код на экране, и возврата из
+ * этого состояния нет — выход только «Готово».
  *
- * Until this screen existed the only way to make an employee was a
- * management command on the pilot host — i.e. somebody with SSH.
+ * ### Ссылка (DRF-1505)
  *
- * ### The code is shown once, and that shapes the screen
- *
- * Only a hash is stored, so once this screen is left the code does not
- * exist anywhere. That is not a toast, it is a screen state:
- *
- *   - the warning is rendered **above** the code, before the reader has
- *     any reason to leave;
- *   - MAX's closing confirmation is switched ON while the code is on
- *     screen, so swiping the Mini App away asks first;
- *   - there is no «назад» out of this state — leaving is an explicit
- *     «Готово», which the reader only presses after they have the code.
- *
- * ### What this screen deliberately does NOT do
- *
- * It does not render a ready-to-forward invitation message. The wording of
- * such a message is product voice and belongs to the owner, who has not
- * ruled on it (open-decisions register). `INVITE_MESSAGE_TEMPLATE` below is
- * the seam it will arrive through; it is `null` today and the block is
- * simply absent. Inventing the copy here would put words in Ayla's mouth
- * that nobody approved, and a placeholder would be worse — it would ship.
+ * `?start=inv_<код>` — тот же код в виде, который можно вставить в
+ * переписку. Механика погашения не меняется: бот читает эту форму с
+ * DRF-1061. Меняется то, что четыре символа больше не нужно диктовать
+ * голосом. **Ссылка и есть код**: кто её откроет, тот его и потратит,
+ * поэтому она живёт под тем же предупреждением и показывается ровно
+ * один раз.
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 
 import { ScreenLayout } from "../../components/ScreenLayout";
+import { ShareableLink } from "../../components/ShareableLink";
 import { StickyCta } from "../../components/StickyCta";
 import { ApiError } from "../../lib/api";
 import {
@@ -62,17 +49,24 @@ import { formatDateLong } from "../../lib/masterDateFormat";
 import { hapticNotify, hapticSelection } from "../../lib/max-sdk";
 import { backTo, screenRoot } from "../../lib/screen-back";
 import { useClosingConfirmation } from "../../hooks/useClosingConfirmation";
+import type { ReactNode } from "react";
 
 /**
  * Ready-to-forward invitation text — NOT DECIDED.
  *
- * The owner has not ruled on whether the screen hands over a bare code or a
- * message the issuer can paste into a messenger, nor on how such a message
- * would be worded. Product voice is not a thing to guess at, so the seam is
- * left open and empty: when a decision lands, this becomes a function of
- * `{code, role, expiresAt}` and the block below starts rendering.
+ * The owner has not ruled on whether the screen hands over a bare code /
+ * link or a message the issuer can paste into a messenger, nor on how
+ * such a message would be worded. Product voice is not a thing to guess
+ * at, so the seam is left open and empty: when a decision lands, this
+ * becomes a function of `{code, role, expiresAt, invite_link}` and the
+ * block below starts rendering.
  *
- * Do not fill this with invented copy. `AdminStaffAccessScreen.test.tsx`
+ * A draft was written for DRF-1505 and sent to the owner **in the report,
+ * not into this constant.** Until it comes back approved, this stays
+ * `null` — a placeholder would ship, and shipped copy is approved copy
+ * whether or not anybody approved it.
+ *
+ * Do not fill this with invented copy. `AdminAddPersonScreen.test.tsx`
  * pins that the block is absent while this is `null`.
  */
 export const INVITE_MESSAGE_TEMPLATE: ((r: StaffInviteResponse) => string) | null =
@@ -123,10 +117,12 @@ type Stage =
   | { kind: "issued"; issued: StaffInviteResponse; masterName: string };
 
 interface Props {
-  me: MeResponse;
+  readonly me: MeResponse;
+  /** Переключатель веток — рисуется первым в теле, до формы. */
+  readonly switcher: ReactNode;
 }
 
-export function AdminStaffAccessScreen({ me }: Props) {
+export function AddPersonAccessCodeSection({ me, switcher }: Props) {
   const navigate = useNavigate();
   const [stage, setStage] = useState<Stage>({ kind: "form" });
   const [role, setRole] = useState<StaffInviteRole>("master");
@@ -150,12 +146,12 @@ export function AdminStaffAccessScreen({ me }: Props) {
   // a back-swipe here destroys a credential that is shown once.
   //
   // DRF-1493 — объявлено видом экрана, а не пустым объектом: «здесь
-  // возврата нет» теперь говорится вслух и с причиной.
+  // возврата нет» говорится вслух и с причиной.
   const back =
     stage.kind === "form"
       ? backTo("/admin/team")
       : screenRoot(
-          "Код показывается один раз: уход назад со свежевыданным " +
+          "Код и ссылка показываются один раз: уход назад со свежевыданным " +
             "кодом уничтожает его. Единственный выход — «Готово».",
         );
 
@@ -165,8 +161,7 @@ export function AdminStaffAccessScreen({ me }: Props) {
   useClosingConfirmation(dirty || stage.kind === "issued");
 
   // The master list is only needed for `role=master`, but it is fetched
-  // once for the screen rather than on every toggle: a person switching
-  // roles back and forth should not re-hit the roster endpoint.
+  // once for the screen rather than on every toggle.
   const wantsMasters = role === "master";
   const fetchedRef = useRef(false);
   useEffect(() => {
@@ -195,8 +190,7 @@ export function AdminStaffAccessScreen({ me }: Props) {
         ...(note.trim() ? { note: note.trim().slice(0, MAX_NOTE_LEN) } : {}),
       });
       hapticNotify("success");
-      const masterName =
-        masters?.find((m) => m.id === masterId)?.name ?? "";
+      const masterName = masters?.find((m) => m.id === masterId)?.name ?? "";
       setStage({ kind: "issued", issued, masterName });
     } catch (e: unknown) {
       hapticNotify("error");
@@ -216,8 +210,8 @@ export function AdminStaffAccessScreen({ me }: Props) {
 
   async function onCopy(code: string) {
     // Clipboard is a convenience, never the only way out: the code stays
-    // selectable on screen, so a refusal (older webview, denied permission)
-    // costs nothing but the button's feedback.
+    // selectable on screen, so a refusal (older webview, denied
+    // permission) costs nothing but the button's feedback.
     try {
       await navigator.clipboard.writeText(code);
       setCopied(true);
@@ -240,10 +234,12 @@ export function AdminStaffAccessScreen({ me }: Props) {
         {/* Above the code on purpose: a warning under it is read after the
             reader has already decided what to do. */}
         <div className="callout callout--danger" role="alert">
-          <p className="staff-access__once">Код показывается один раз.</p>
+          <p className="staff-access__once">
+            Код и ссылка показываются один раз.
+          </p>
           <p className="staff-access__once-detail">
-            Мы храним только его отпечаток — восстановить код нельзя ни здесь,
-            ни в поддержке. Передайте его до того, как закроете экран.
+            Мы храним только отпечаток кода — восстановить его нельзя ни здесь,
+            ни в поддержке. Передайте до того, как закроете экран.
           </p>
         </div>
 
@@ -258,6 +254,29 @@ export function AdminStaffAccessScreen({ me }: Props) {
         >
           {copied ? "Скопировано" : "Скопировать код"}
         </button>
+        {/* Слышимый итог: смена подписи кнопки скринридеру не событие. */}
+        {copied && (
+          <p className="shareable__copied" role="status">
+            Код скопирован.
+          </p>
+        )}
+
+        {issued.invite_link ? (
+          <ShareableLink
+            url={issued.invite_link}
+            label="Ссылка вместо кода"
+            hint={
+              "Открывшему её доступ откроется сразу — код вводить не нужно. " +
+              "Это тот же самый код: кто перейдёт по ссылке, тот его и " +
+              "потратит, поэтому отправляйте её только тому человеку."
+            }
+          />
+        ) : (
+          <p className="admin-hint">
+            Ссылки нет: в этом контуре не настроен салонный бот. Код по-прежнему
+            работает, если ввести его в диалоге с ботом.
+          </p>
+        )}
 
         <dl className="staff-access__meta">
           <dt>Роль</dt>
@@ -280,16 +299,10 @@ export function AdminStaffAccessScreen({ me }: Props) {
         {/* The seam described at the top of this file. Absent until the
             owner rules on the wording; never a placeholder. */}
         {INVITE_MESSAGE_TEMPLATE && (
-          <p className="staff-access__message">
-            {INVITE_MESSAGE_TEMPLATE(issued)}
-          </p>
+          <p className="staff-access__message">{INVITE_MESSAGE_TEMPLATE(issued)}</p>
         )}
 
-        <button
-          type="button"
-          className="admin-flow-back"
-          onClick={onIssueAnother}
-        >
+        <button type="button" className="admin-flow-back" onClick={onIssueAnother}>
           Выдать ещё один код
         </button>
       </ScreenLayout>
@@ -299,16 +312,18 @@ export function AdminStaffAccessScreen({ me }: Props) {
   return (
     <ScreenLayout
       back={back}
-      title="Выдать доступ"
+      title="Добавить человека"
       cta={
         <StickyCta onClick={() => void onIssue()} disabled={submitting}>
           {submitting ? "Выдаём…" : "Выдать код"}
         </StickyCta>
       }
     >
+      {switcher}
+
       <p className="staff-access__lead">
         Код открывает доступ человеку, который уже есть в салоне. Чтобы завести
-        нового мастера в каталог, вернитесь к «Добавить мастера».
+        нового мастера в каталог, переключитесь наверху.
       </p>
 
       {err && (

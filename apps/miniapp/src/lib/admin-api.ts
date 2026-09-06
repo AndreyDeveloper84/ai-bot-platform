@@ -803,7 +803,36 @@ export interface InviteMasterResponse {
   invite_token: string | null;
   invite_expires_at: string | null;
   max_dm_delivery: MaxDmDelivery;
+  /**
+   * Why the DM did not go out — `no_entry_configured`, `max_status_404`,
+   * `max_phone_lookup_deferred`, … Empty string when there is nothing to
+   * confess (DRF-1505).
+   *
+   * The cause matters because the two shapes of failure need opposite
+   * reactions from the person reading the screen: a 404 from MAX means
+   * the handle in the field above is wrong and can be retyped, while
+   * `no_entry_configured` is a deployment variable the salon owner has
+   * never heard of and cannot fix. A bare «не удалось» sends them to
+   * retype a correct handle forever.
+   */
+  max_dm_error: string;
   fallback_link: string;
+  /**
+   * `https://max.ru/<salon bot>?start=master_invite_<token>` — the one
+   * thing the owner can actually hand over (DRF-1424, surfaced by
+   * DRF-1505).
+   *
+   * The DM above it can only reach a MAX username the salon already
+   * knows, in a chat that already exists. This link opens anywhere,
+   * needs no authentication to follow, and lands the invitee in a chat
+   * with the salon bot — which is what makes the button's delivery
+   * guaranteed rather than hopeful.
+   *
+   * Empty when the deployment has no salon bot with a Mini App name.
+   * The backend returns "" rather than a half-built URL on purpose: a
+   * missing link is a visible gap, a dead one wastes the invitee's try.
+   */
+  invite_link: string;
   /**
    * True when the backend returned 200 + ``X-Idempotent: true`` because
    * a matching pending invite already existed within the 7-day window.
@@ -1396,6 +1425,22 @@ export interface StaffInviteResponse {
    * claim it was not told.
    */
   code_is_shown_once: boolean;
+  /**
+   * `https://max.ru/<salon bot>?start=inv_<code>` — the code in a form
+   * that can be pasted instead of read aloud (DRF-1505).
+   *
+   * Same credential, same single use, same expiry. Opening it starts the
+   * salon bot with the code as its `?start=` payload, which the handler
+   * has read since DRF-1061 — nothing new happens on redemption, the
+   * typing is simply gone.
+   *
+   * **The link IS the code.** It is shown once, beside the code, under
+   * the same warning, and whoever opens it redeems it.
+   *
+   * Empty when the deployment has no salon bot with a Mini App name; the
+   * code itself is unaffected and still works when typed.
+   */
+  invite_link: string;
 }
 
 export const issueStaffInvite = (

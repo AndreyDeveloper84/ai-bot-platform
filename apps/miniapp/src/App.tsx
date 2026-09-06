@@ -59,11 +59,11 @@ import {
   type UnifiedSurface,
 } from "./state/surface";
 import { BootReloadContext } from "./state/boot";
+import { AdminAddPersonScreen } from "./screens/admin/AdminAddPersonScreen";
 import { AdminAvailabilityRequestsScreen } from "./screens/admin/AdminAvailabilityRequestsScreen";
 import { AdminDeactivationFlowScreen } from "./screens/admin/AdminDeactivationFlowScreen";
 import { AdminInternalChatListScreen } from "./screens/admin/AdminInternalChatListScreen";
 import { AdminInternalChatThreadScreen } from "./screens/admin/AdminInternalChatThreadScreen";
-import { AdminInviteMasterScreen } from "./screens/admin/AdminInviteMasterScreen";
 import { AdminMasterDetailScreen } from "./screens/admin/AdminMasterDetailScreen";
 import { AdminNewBookingScreen } from "./screens/admin/AdminNewBookingScreen";
 import { AdminPeopleScreen } from "./screens/admin/AdminPeopleScreen";
@@ -71,7 +71,6 @@ import { AdminSalonDayScreen } from "./screens/admin/AdminSalonDayScreen";
 import { AdminSectionDeniedScreen } from "./screens/admin/AdminSectionDeniedScreen";
 import { AdminServicesMatrixScreen } from "./screens/admin/AdminServicesMatrixScreen";
 import { AdminSettingsPlaceholderScreen } from "./screens/admin/AdminSettingsPlaceholderScreen";
-import { AdminStaffAccessScreen } from "./screens/admin/AdminStaffAccessScreen";
 import { AdminTeamScreen } from "./screens/admin/AdminTeamScreen";
 import { BookingConfirmScreen } from "./screens/BookingConfirmScreen";
 import { BookingSuccessScreen } from "./screens/BookingSuccessScreen";
@@ -195,19 +194,50 @@ function adminRouteElements(me: MeResponse): React.ReactNode {
       <Route path="/admin/day" element={<AdminSalonDayScreen me={me} />} />
       <Route path="/admin/booking/new" element={<AdminNewBookingScreen />} />
       <Route path="/admin/team" element={<AdminTeamScreen me={me} />} />
-      <Route
-        path="/admin/team/invite"
-        element={<AdminInviteMasterScreen me={me} />}
-      />
       {/*
-        DRF-1061 block 2.4 — access codes. Sits beside `/admin/team/invite`
-        rather than inside it: that screen CREATES a catalog master, this
-        one GRANTS ACCESS to a person who already exists. The backend keeps
-        the two endpoints apart for the same reason.
+        DRF-1505 — «Добавить человека»: один экран, три адреса.
+
+        Раньше здесь стояли два экрана. Один СОЗДАВАЛ карточку мастера,
+        второй ВЫДАВАЛ доступ тому, кто уже заведён, и владелец салона
+        должен был выбрать между ними до того, как что-то сделает —
+        зная то, чего он знать не обязан. Экран теперь один, а вопрос
+        задаётся на нём (решение владельца §25 п.4 от 05.09.2026).
+
+        Прежние адреса оставлены и выбирают ветку: они лежат в
+        рунбуках, в `docs/screens/admin-surface-spec.md` и в чужих
+        экранах, и ломать их ради переезда незачем.
+
+        `key` у каждого элемента — не украшение. Три маршрута рисуют ОДИН
+        тип компонента на одном и том же месте дерева, поэтому переход
+        между ними React считает обновлением пропов, а не новым экраном:
+        инициализатор `useState` не перезапускается, и `initialTrack`
+        приезжает новый, а ветка остаётся прежняя. Сегодня по этим
+        адресам никто друг к другу не переходит, но ловушка сработала бы
+        молча — экран открылся бы «не тем».
       */}
       <Route
+        path="/admin/team/add"
+        element={<AdminAddPersonScreen key="add-person" me={me} />}
+      />
+      <Route
+        path="/admin/team/invite"
+        element={
+          <AdminAddPersonScreen
+            key="add-person-master"
+            me={me}
+            initialTrack="new-master"
+          />
+        }
+      />
+      <Route
         path="/admin/team/access"
-        element={<AdminStaffAccessScreen me={me} />}
+        element={
+          <AdminAddPersonScreen
+            key="add-person-access"
+            me={me}
+            initialTrack="access-code"
+          />
+        }
       />
       {/*
         The roster of PEOPLE — every role, both tables (ADR-0008). Owner
