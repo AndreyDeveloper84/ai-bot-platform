@@ -25,8 +25,13 @@ from __future__ import annotations
 from django import forms
 from django.contrib import admin
 from django.core.exceptions import PermissionDenied
+from django.http import HttpRequest, HttpResponse
+from django.template.response import TemplateResponse
+from django.urls import path
+from django.utils.html import format_html, format_html_join
 
 from apps.tenancy.models import Tenant
+from apps.tenancy.onboarding import REASON_LABELS, ConnectError, assess_salon, connect_salon
 
 
 class TenantAdminForm(forms.ModelForm):
@@ -84,9 +89,40 @@ class TenantAdminForm(forms.ModelForm):
         return submitted or (self.instance.telegram_webhook_secret or "")
 
 
+class SalonConnectForm(forms.Form):
+    """Поля экрана «подключить салон» (DRF-1525).
+
+    Идентификатор — обязательное поле: его нельзя ввести «на глаз»,
+    :func:`connect_salon` проверяет по Ayla, что по нему что-то есть,
+    до сохранения строки.
+    """
+
+    slug = forms.SlugField(
+        max_length=50,
+        label="Slug",
+        help_text="Строчные буквы, цифры, дефис/подчёркивание, 2–50 знаков.",
+    )
+    name = forms.CharField(max_length=200, label="Название салона")
+    tenant_id = forms.CharField(
+        label="Ayla Tenant UUID",
+        help_text=(
+            "UUID салона из бэкенда Ayla. Синхронизация ходит с "
+            "?tenant=<UUID>: без настоящего идентификатора салон "
+            "зазеркалит ноль строк при «успешном» прогоне. Перед "
+            "сохранением экран проверит, что по нему что-то есть."
+        ),
+    )
+    city = forms.CharField(
+        max_length=120,
+        label="Город",
+        help_text="Например, «Пенза». Без города салон отсутствует во всех городских ответах.",
+    )
+
+
 @admin.register(Tenant)
 class TenantAdmin(admin.ModelAdmin):
     form = TenantAdminForm
+    change_list_template = "admin/tenancy/tenant/change_list.html"
     list_display = (
         "name",
         "slug",
@@ -108,9 +144,36 @@ class TenantAdmin(admin.ModelAdmin):
         "updated_at",
         "telegram_bot_token_state",
         "telegram_webhook_secret_state",
+        "salon_visibility_state",
+        "last_catalog_sync_at",
+        "last_catalog_sync_ok_at",
     )
     fieldsets = (
-        (None, {"fields": ("id", "slug", "name", "is_active", "is_system")}),
+        (
+            None,
+            {
+                "fields": ("id", "slug", "name", "city", "is_active", "is_system"),
+                "description": (
+                    "Город участвует в городском поиске: без него салон "
+                    "отсутствует во всех городских ответах (DRF-1510)."
+                ),
+            },
+        ),
+        (
+            "Видимость для клиентов (DRF-1525)",
+            {
+                "fields": (
+                    "salon_visibility_state",
+                    "last_catalog_sync_ok_at",
+                    "last_catalog_sync_at",
+                ),
+                "description": (
+                    "Проверка исхода: салон заведён тогда, когда виден "
+                    "клиенту, а не когда появилась строка. Причины "
+                    "невидимости — закрытый перечень DRF-1511."
+                ),
+            },
+        ),
         (
             "Sprint 8 shadow-mode",
             {
@@ -192,6 +255,96 @@ class TenantAdmin(admin.ModelAdmin):
         целиком через ``hmac.compare_digest``, и любая его часть — подсказка.
         """
         return "задан" if (obj.telegram_webhook_secret or "") else "не задан"
+
+    @admin.display(description="Видимость и состояние каталога")
+    def salon_visibility_state(self, obj: Tenant) -> str:
+        """Карточка одного салона: синхронизация, витрина, причины (DRF-1525).
+
+        Не сводка по контуру (это DRF-1500), а ответ про этот салон:
+        когда последний раз синхронизировался, сколько услуг и
+        бронируемых мастеров, и — если клиент его не видит — почему,
+        названной причиной из закрытого перечня DRF-1511.
+        """
+        assessed = assess_salon(obj)
+        last_ok = (
+            assessed.last_sync_ok_at.strftime("%d.%m.%Y %H:%M UTC")
+            if assessed.last_sync_ok_at
+            else "никогда"
+        )
+        head = format_html(
+            "Последняя успешная синхронизация: {}. Активных услуг: {}. Бронируемых мастеров: {}.",
+            last_ok,
+            assessed.active_services,
+            assessed.bookable_masters,
+        )
+        if assessed.is_visible:
+            return format_html("{}<br><strong>Салон виден клиентам.</strong>", head)
+        rows = format_html_join(
+            "",
+            "<li>{}</li>",
+            ((REASON_LABELS[code],) for code in assessed.reasons),
+        )
+        return format_html(
+            "{}<br><strong>Клиентам не виден. Причины:</strong><ul>{}</ul>",
+            head,
+            rows,
+        )
+
+    # ------------------------------------------------------------------
+    # Экран подключения салона (DRF-1525)
+    # ------------------------------------------------------------------
+
+    def get_urls(self):
+        custom = [
+            path(
+                "connect/",
+                self.admin_site.admin_view(self.connect_view),
+                name="tenancy_tenant_connect",
+            ),
+        ]
+        return custom + super().get_urls()
+
+    def connect_view(self, request: HttpRequest) -> HttpResponse:
+        """Форма «подключить салон»: все шаги одним действием.
+
+        Настройки тенанта меняет только суперпользователь (OPEN_DECISIONS
+        §27 п.2, роли DRF-1495) — подключение тенанта тем более. Экран
+        не дублирует ``create_tenant``: он вызывает :func:`connect_salon`,
+        который проверяет идентификатор по Ayla ДО сохранения, запускает
+        синхронизацию и показывает исход глазами клиента.
+        """
+        if not request.user.is_superuser:
+            raise PermissionDenied(
+                "Подключение салона — действие владельца контура "
+                "(суперпользователя), а не ролей админки."
+            )
+
+        form = SalonConnectForm(request.POST or None)
+        result = None
+        error = None
+        if request.method == "POST" and form.is_valid():
+            try:
+                result = connect_salon(
+                    slug=form.cleaned_data["slug"],
+                    name=form.cleaned_data["name"],
+                    tenant_id=form.cleaned_data["tenant_id"],
+                    city=form.cleaned_data["city"],
+                )
+            except ConnectError as exc:
+                error = str(exc)
+
+        context = {
+            **self.admin_site.each_context(request),
+            "title": "Подключить салон",
+            "form": form,
+            "result": result,
+            "result_reasons": (
+                [REASON_LABELS[code] for code in result.assessment.reasons] if result else []
+            ),
+            "error": error,
+            "opts": self.model._meta,  # noqa: SLF001 — admin chrome API
+        }
+        return TemplateResponse(request, "admin/tenancy/tenant/connect.html", context)
 
     def get_queryset(self, request):
         # Admin must see deactivated tenants too — use all_objects manager.
