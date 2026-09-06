@@ -110,7 +110,7 @@ from __future__ import annotations
 import json
 import logging
 import uuid
-from datetime import timedelta
+from datetime import datetime, timedelta
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -1036,9 +1036,9 @@ def _reissue_invite(
     raw: dict[str, Any],
     mode: str,
     token: uuid.UUID | None,
-    expires,
+    expires: datetime | None,
     invite_status: str,
-    now,
+    now: datetime,
 ) -> CatalogMaster:
     """Выписать новое приглашение НА СУЩЕСТВУЮЩУЮ строку.
 
