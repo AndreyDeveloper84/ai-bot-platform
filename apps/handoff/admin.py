@@ -85,6 +85,17 @@ class AdminTaskAdmin(admin.ModelAdmin):
         "resolved_at",
     )
     ordering = ("-created_at",)
+    # DRF-1499 — changelist несёт ссылку на экран очереди («кто ждёт
+    # человека и сколько уже ждёт»), сам экран живёт в adminconsole.
+    change_list_template = "adminconsole/admintask_change_list.html"
+
+    def get_urls(self) -> list:
+        # DRF-1499 — экран очереди. Самая старая открытая задача должна
+        # находиться без похода в БД: до него факт «клиент молчит уже час»
+        # обнаруживался только случайно.
+        from apps.adminconsole.handoff_queue import queue_urlpattern
+
+        return [queue_urlpattern(self)] + super().get_urls()
 
     @admin.display(description="ID")
     def id_short(self, obj: AdminTask) -> str:

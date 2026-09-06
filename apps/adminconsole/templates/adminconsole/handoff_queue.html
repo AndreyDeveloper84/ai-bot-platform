@@ -1,0 +1,121 @@
+{% extends "admin/base_site.html" %}
+{% load i18n %}
+
+{% block extrastyle %}{{ block.super }}
+<style>
+  .queue-counter {
+    font-size: 1.15em;
+    padding: 12px 16px;
+    margin: 0 0 16px;
+    background: var(--darkened-bg, #f8f8f8);
+    border-left: 4px solid var(--accent, #417690);
+  }
+  .queue-counter strong { font-size: 1.2em; }
+  table.queue { width: 100%; border-collapse: collapse; }
+  table.queue th, table.queue td {
+    text-align: left;
+    padding: 8px 10px;
+    border-bottom: 1px solid var(--hairline-color, #ddd);
+    vertical-align: top;
+  }
+  table.queue th { background: var(--darkened-bg, #f8f8f8); }
+  .queue-age { font-weight: bold; white-space: nowrap; }
+  .queue-escalated { color: var(--error-fg, #ba2121); font-weight: bold; }
+  .queue-dialogs { margin: 0; padding-left: 18px; }
+  .queue-empty {
+    padding: 24px 16px;
+    background: var(--darkened-bg, #f8f8f8);
+    font-size: 1.1em;
+  }
+  .queue-actions form { display: inline-block; margin-right: 6px; }
+  .queue-note { width: 180px; }
+</style>
+{% endblock %}
+
+{% block breadcrumbs %}
+<div class="breadcrumbs">
+  <a href="{% url 'admin:index' %}">Начало</a> &rsaquo;
+  <a href="{% url 'admin:handoff_admintask_changelist' %}">Задачи администратора</a> &rsaquo;
+  Очередь handoff
+</div>
+{% endblock %}
+
+{% block content %}
+<h1>Очередь handoff — кто ждёт человека</h1>
+
+<div class="queue-counter">
+  Сейчас открыто: <strong>{{ open_count }}</strong>
+  {% if oldest %}
+    &nbsp;·&nbsp; самая старая ждёт уже <strong>{{ oldest.age }}</strong>
+  {% endif %}
+</div>
+
+{% if rows %}
+<table class="queue">
+  <thead>
+    <tr>
+      <th>Возраст</th>
+      <th>Салон</th>
+      <th>Тип</th>
+      <th>Клиент</th>
+      <th>Адресат</th>
+      <th>Состояние</th>
+      <th>Замьюченные диалоги</th>
+      {% if can_change %}<th>Действия</th>{% endif %}
+    </tr>
+  </thead>
+  <tbody>
+    {% for row in rows %}
+    <tr>
+      <td class="queue-age">{{ row.age }}</td>
+      <td>{{ row.salon }}</td>
+      <td>{{ row.task.get_task_type_display }}</td>
+      <td>{{ row.client }}</td>
+      <td>{{ row.addressee }}</td>
+      <td>
+        {{ row.task.get_status_display }}
+        {% if row.escalated %}<br><span class="queue-escalated">просрочена — эскалация сработала</span>{% endif %}
+        {% if not row.claimed %}<br>ещё никем не взята{% endif %}
+      </td>
+      <td>
+        <ul class="queue-dialogs">
+          {% for dialog in row.dialogs %}
+          <li>
+            {{ dialog.label }}
+            {% if dialog.is_anchor %}(здесь заведена задача){% endif %}
+            — молчит
+          </li>
+          {% endfor %}
+        </ul>
+      </td>
+      {% if can_change %}
+      <td class="queue-actions">
+        {% if not row.claimed %}
+        <form method="post" action="">
+          {% csrf_token %}
+          <input type="hidden" name="action" value="claim">
+          <input type="hidden" name="task_id" value="{{ row.task.id }}">
+          <button type="submit" class="button">Взять на себя</button>
+        </form>
+        {% endif %}
+        <form method="post" action="">
+          {% csrf_token %}
+          <input type="hidden" name="action" value="resolve">
+          <input type="hidden" name="task_id" value="{{ row.task.id }}">
+          <input type="text" name="resolution_note" class="queue-note"
+                 placeholder="чем закончилось (необязательно)">
+          <button type="submit" class="button">Закрыть</button>
+        </form>
+      </td>
+      {% endif %}
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<div class="queue-empty">
+  Открытых задач нет — очередь пуста. Клиентов, которые прямо сейчас ждут
+  человека, нет.
+</div>
+{% endif %}
+{% endblock %}
