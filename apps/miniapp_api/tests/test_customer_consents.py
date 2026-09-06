@@ -212,24 +212,27 @@ def test_read_never_grants_anything(client: Client, bot_user, url, auth) -> None
 def test_granted_follows_the_registry_not_the_denormalised_stamp(
     client: Client, bot_user, url, auth
 ) -> None:
-    """``consent_at`` остаётся после отзыва — решает реестр, и он в ``granted``.
+    """Отзыв не снимает ``BotUser.consent_at`` — и ручка на него не смотрит.
 
     На пилоте это не гипотетика: четыре из пяти строк с непустым
     ``consent_at`` уже отозвали ``personal_data``. Ручка, отвечающая по
-    колонке, сказала бы им «согласие действует».
+    колонке, сказала бы им «согласие действует», а датой отзыва не
+    располагает вовсе. Наружу идёт только реестр.
     """
     BotUser.all_tenants.filter(pk=bot_user.pk).update(consent_at=NOW_UTC)
     bot_user.refresh_from_db()
     granted_first = client.get(url, **auth).json()["data_storage"]
     assert granted_first["granted"] is True  # есть что опровергать
-    assert granted_first["consent_at"] is not None
+    assert granted_first["granted_at"] is not None
 
     ConsentRecord.all_tenants.filter(bot_user=bot_user).update(withdrawn_at=NOW_UTC)
 
     after = client.get(url, **auth).json()["data_storage"]
     assert after["granted"] is False
-    # Колонка показана как есть — расхождение видно, а не замазано.
-    assert after["consent_at"] is not None
+    assert after["granted_at"] is None
+    # Колонка осталась заполненной в базе — и именно поэтому её здесь нет.
+    assert BotUser.all_tenants.get(pk=bot_user.pk).consent_at is not None
+    assert "consent_at" not in after
 
 
 def test_consent_given_on_the_chat_shell_is_visible_in_the_app(

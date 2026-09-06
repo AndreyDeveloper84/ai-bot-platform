@@ -894,6 +894,12 @@ Avoid:
 
 Отзыв **не** закрывает вход в приложение (`deleted_at` не ставится) — согласие можно дать заново.
 
+Даты согласий берутся ИЗ РЕЕСТРА (`granted_at` — момент действующей строки). `BotUser.consent_at`
+наружу не отдаётся сознательно: приветственный поток её ставит, а отзыв никогда не снимает, поэтому
+у отозвавшего она остаётся заполненной (на пилоте 2026-08-23 — четыре строки из пяти). Две даты,
+из которых одна врёт, экрану не нужны; на эту колонку в платформе стоит отдельный сторож
+(`tools/lint/consent_column_guard.py`, DRF-1314).
+
 ### 12.3 W4 follow-up tickets (Phase J)
 
 1. **Issue P-1** — `is_solo_provider`-style API extensions (`/api/v1/me/consents`, etc.) for Profile tab rendering (consent toggles + proactive — IN scope for pilot)

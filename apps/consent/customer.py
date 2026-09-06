@@ -213,19 +213,24 @@ def read_consents(bot_user: "BotUser") -> dict[str, Any]:
     ``consents`` строится обходом ``ConsentRecord.ConsentType``: новый тип
     появляется в ответе сам, забыть его нельзя.
 
-    ``data_storage`` — тот же ``personal_data``, но с двумя добавками,
-    которые нужны экрану отзыва: денормализованная отметка
-    ``BotUser.consent_at`` и раскрытие последствий отзыва.
+    ``data_storage`` — тот же ``personal_data`` плюс раскрытие последствий
+    отзыва, которое экран обязан показать до нажатия.
 
-    ``consent_at`` отдаётся **отдельным** полем, а не вместо ``granted``,
-    и это не дублирование. Колонка ставится приветственным потоком, и
-    ``withdraw()`` её не снимает, поэтому у отозвавшего она остаётся
-    заполненной. На пилоте 2026-08-23 четыре из пяти строк с непустым
-    ``consent_at`` уже отозвали ``personal_data``. Поведение решает реестр —
-    он и стоит в ``granted``; колонка показана как есть, чтобы расхождение
-    было видно, а не замазано.
+    ### Почему здесь НЕТ ``BotUser.consent_at``
+
+    Соблазн отдать её велик — это «дата согласия», которую просит экран. Но
+    колонка ставится приветственным потоком, а ``withdraw()`` её никогда не
+    снимает: у отозвавшего она остаётся заполненной. На пилоте 2026-08-23
+    четыре из пяти строк с непустым ``consent_at`` уже отозвали
+    ``personal_data``. Отдать её рядом с ``granted`` значило бы положить на
+    экран две даты, из которых одна врёт, и предложить человеку разбираться.
+    Платформа держит на эту колонку отдельный сторож
+    (``tools/lint/consent_column_guard.py``, DRF-1314) ровно потому, что
+    каждый её читатель до сих пор ошибался.
+
+    Дату отдаёт реестр: ``granted_at`` — момент действующей строки согласия.
+    Если согласие отозвано, даты нет, и это правда, а не пробел.
     """
-    consent_at = getattr(bot_user, "consent_at", None)
     states = _active_states(_person_shells(bot_user))
     return {
         "consents": states,
@@ -234,7 +239,6 @@ def read_consents(bot_user: "BotUser") -> dict[str, Any]:
         },
         "data_storage": {
             **states[_PERSONAL_DATA],
-            "consent_at": consent_at.isoformat() if consent_at else None,
             "revocation": {
                 "disclosure_version": DATA_STORAGE_REVOCATION_DISCLOSURE_VERSION,
                 "consequences": list(DATA_STORAGE_REVOCATION_CONSEQUENCES),
