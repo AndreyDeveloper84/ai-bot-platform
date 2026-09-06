@@ -232,6 +232,7 @@ def test_granted_follows_the_registry_not_the_denormalised_stamp(
     assert after["granted_at"] is None
     # Колонка осталась заполненной в базе — и именно поэтому её здесь нет.
     assert BotUser.all_tenants.get(pk=bot_user.pk).consent_at is not None
+    assert "granted_at" in after  # тело не пустое: есть чему не оказаться рядом
     assert "consent_at" not in after
 
 
