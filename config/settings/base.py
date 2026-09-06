@@ -1979,6 +1979,17 @@ CATALOG_SYNC_HTTP_RETRIES = int(os.environ.get("CATALOG_SYNC_HTTP_RETRIES", "3")
 # in apps/catalog/staleness.py, next to the code that applies it.
 CATALOG_SYNC_STALE_AFTER_SECONDS = int(os.environ.get("CATALOG_SYNC_STALE_AFTER_SECONDS", "3600"))
 
+# DRF-1500 — экран здоровья контура (/admin/health/). Опрос Ayla за
+# полными числами услуг/мастеров: короткий таймаут (экран не ждёт дольше,
+# чем оператор) и кэш (свежесть в минутах достаточна против расхождения
+# в дни; бэкенд не бьём на каждое обновление страницы).
+CONTOUR_HEALTH_UPSTREAM_TIMEOUT_SECONDS = int(
+    os.environ.get("CONTOUR_HEALTH_UPSTREAM_TIMEOUT_SECONDS", "5")
+)
+CONTOUR_HEALTH_UPSTREAM_CACHE_SECONDS = int(
+    os.environ.get("CONTOUR_HEALTH_UPSTREAM_CACHE_SECONDS", "300")
+)
+
 # KB-RAG Sub-4b (GH #128) — Google Docs read-only client takes NO
 # credentials. It fetches source docs via the public Markdown export
 # endpoint and relies on per-doc link-sharing. See
