@@ -2521,6 +2521,19 @@ a {
   opacity: 0.75;
 }
 
+/*
+  DRF-1540 — a master the platform could not link to Ayla. Unlike
+  `--revoked` this IS an alarm: nobody chose it, it keeps a working
+  master off the storefront, and the fix is on our side, not the
+  salon's. `--danger` rather than `--warn` for exactly that reason —
+  `--warn` is «приглашение не принято», a nudge with an obvious next
+  move.
+*/
+.admin-chip--fault {
+  background: color-mix(in srgb, var(--c-danger) 10%, var(--c-surface-2));
+  color: var(--c-danger);
+}
+
 .admin-filter-tabs {
   display: inline-flex;
   background: var(--c-surface-2);

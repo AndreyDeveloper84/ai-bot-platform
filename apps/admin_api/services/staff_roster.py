@@ -152,10 +152,15 @@ RoleSource = Literal["access_code", "master_invite", "direct"]
 #: ``TenantStaff`` row exists, so an unredeemed admin code does not appear
 #: in this roster at all. That gap is real and deliberately not closed
 #: here; see the module docstring.
-#: Re-exported, not redefined: the three words and the rule that picks
-#: between them live in :mod:`apps.catalog.master_state` (DRF-1506), so
-#: the roster and the booking surface cannot drift on what «active»
+#: Re-exported, not redefined: the vocabulary and the rule that picks
+#: between its words live in :mod:`apps.catalog.master_state` (DRF-1506),
+#: so the roster and the booking surface cannot drift on what «active»
 #: means. ``Literal`` is still spelled out in the import there.
+#:
+#: DRF-1540 added a fourth word, ``ayla_unlinked``. Deliberately not
+#: folded into ``revoked``: «доступ отозван» sends the owner looking for
+#: whoever revoked it, and nobody did — the link to Ayla is ours to fix,
+#: not hers. Two refusals, two actions, two words.
 RoleState = _RoleState
 
 
@@ -460,6 +465,11 @@ def _build(tenant: Any) -> tuple[list[Person], int, bool]:
     # next move is to resend the invite. Agreeing with ``resolve_role``
     # on who is a master is the whole point of a screen that answers
     # «кто здесь кто».
+    #
+    # ``ayla_user_id`` — DRF-1540. Столбец читается не ради показа, а
+    # потому что без него ростер назвал бы «активной» мастера, которую
+    # витрина уже не продаёт: гейт один, и вопрос он задаёт по четырём
+    # колонкам, а не по трём.
     master_rows = CatalogMaster.objects.filter(tenant=tenant).values(
         "id",
         "name",
@@ -468,6 +478,7 @@ def _build(tenant: Any) -> tuple[list[Person], int, bool]:
         "archived_at",
         "invited_at",
         "invite_status",
+        "ayla_user_id",
         "linked_bot_user__display_name",
         "linked_bot_user__client_name",
     )
@@ -518,11 +529,12 @@ def _build(tenant: Any) -> tuple[list[Person], int, bool]:
         person.roles.append(
             RoleGrant(
                 role="master",
-                state=master_state(
-                    archived_at=row["archived_at"],
-                    is_active=bool(row["is_active"]),
-                    invite_status=row["invite_status"],
-                ),
+                # Строка целиком, а не перечисленные столбцы: гейт растёт
+                # (DRF-1540 добавил ``ayla_user_id``, DRF-1521 добавит
+                # своё), и список аргументов здесь пришлось бы дописывать
+                # каждый раз — а забытый аргумент выглядел бы как «условие
+                # не применилось», то есть ровно как молчаливый отказ.
+                state=master_state(row),
                 source=source,
                 since=since,
             )

@@ -21,6 +21,8 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from typing import get_args
+from uuid import uuid4
 
 import pytest
 from django.http import HttpRequest, JsonResponse
@@ -31,9 +33,12 @@ from apps.admin_api.services.staff_roster import build_staff_roster
 from apps.booking.models import BookingRequest
 from apps.catalog.master_state import (
     ACCEPTED,
+    RoleState,
+    SaleBlock,
     is_available,
     is_landed,
     master_state,
+    sale_block,
 )
 from apps.catalog.models import CatalogMaster, CatalogService, MasterService
 from apps.identity.models import BotUser
@@ -98,6 +103,13 @@ def _make_master(tenant: Tenant, **kwargs) -> CatalogMaster:
         "invite_status": CatalogMaster.InviteStatus.ACCEPTED,
         "archived_at": None,
         "linked_bot_user": None,
+        # Форма синхронизированной строки: ``upsert_specialists`` кладёт
+        # сюда ``dto.user_id``. Умолчание, а не ``None``, потому что
+        # именно эта форма стоит на боевом контуре и именно она обязана
+        # продолжать продаваться после DRF-1540. Строки без ключа
+        # заводятся явным ``ayla_user_id=None`` там, где это и есть
+        # предмет теста.
+        "ayla_user_id": uuid4(),
     }
     defaults.update(kwargs)
     return CatalogMaster.all_tenants.create(
@@ -105,6 +117,32 @@ def _make_master(tenant: Tenant, **kwargs) -> CatalogMaster:
         external_id=_NEXT_EXTERNAL_ID[0],
         external_updated_at=datetime.now(tz=timezone.utc),
         **defaults,
+    )
+
+
+def _state(
+    *,
+    archived_at: datetime | None = None,
+    is_active: bool = True,
+    invite_status: str = ACCEPTED,
+    ayla_user_id: object = None,
+) -> str:
+    """``master_state`` на голых столбцах, без похода в базу.
+
+    Гейт принимает строку целиком, а строкой годится и словарь — тот же
+    путь, которым его зовёт ростер через ``.values()``. Столбцы названы
+    по одному, чтобы тест ломался, когда гейт начнёт спрашивать пятый:
+    молчаливо подставленное умолчание — это ровно тот отказ, который
+    DRF-1540 убирает.
+    """
+
+    return master_state(
+        {
+            "archived_at": archived_at,
+            "is_active": is_active,
+            "invite_status": invite_status,
+            "ayla_user_id": ayla_user_id,
+        }
     )
 
 
@@ -312,15 +350,24 @@ class TestTheRosterStopsCallingAnInvitedMasterRevoked:
 
     def test_invited_is_pending_and_accepted_is_active(self) -> None:
         now = datetime.now(tz=timezone.utc)
+        linked = uuid4()
 
-        # Отрицание: ровно та тройка столбцов, что пишет views_invite.
-        assert master_state(archived_at=None, is_active=False, invite_status="pending") == "pending"
+        # Отрицание: ровно та четвёрка столбцов, что пишет views_invite.
+        assert _state(is_active=False, invite_status="pending", ayla_user_id=None) == "pending"
         # Положительная стража на той же функции.
-        assert master_state(archived_at=None, is_active=True, invite_status=ACCEPTED) == "active"
+        assert _state(is_active=True, invite_status=ACCEPTED, ayla_user_id=linked) == "active"
         # Архив по-прежнему сильнее всего: она ушла, а не ждёт.
-        assert master_state(archived_at=now, is_active=False, invite_status="pending") == "revoked"
+        assert (
+            _state(
+                archived_at=now,
+                is_active=False,
+                invite_status="pending",
+                ayla_user_id=None,
+            )
+            == "revoked"
+        )
         # Принята, но деактивирована — «отозван» здесь честное слово.
-        assert master_state(archived_at=None, is_active=False, invite_status=ACCEPTED) == "revoked"
+        assert _state(is_active=False, invite_status=ACCEPTED, ayla_user_id=linked) == "revoked"
 
 
 class TestTheNineSyncedMastersStayOnSale:
@@ -353,6 +400,38 @@ class TestTheNineSyncedMastersStayOnSale:
         assert len(rows) == 9
         assert all(is_available(m) for m in rows)
         assert not any(is_landed(m) for m in rows)
+
+    def test_the_tightening_takes_off_only_the_rows_with_no_ayla_link(self, tenant: Tenant) -> None:
+        """Замер DRF-1540, зашитый в тест: дельта на форме пилота — ноль.
+
+        Синхронизация заполняет ``ayla_user_id`` (``upserter`` кладёт
+        ``dto.user_id``), поэтому строки, которые продаются сегодня,
+        продаются и после ужесточения. Снимается ровно инвайт-форма —
+        та, до которой уведомления и так не доходили.
+
+        Обе половины на одних данных: счётчик, который умеет только
+        падать, зеленел бы и на пустом тенанте.
+        """
+
+        for i in range(9):
+            _make_master(tenant, name=f"Синхронизированная {i}", ayla_user_id=uuid4())
+
+        with tenant_scope(tenant):
+            before = CatalogMaster.objects.bookable().count()
+        assert before == 9
+
+        # Инвайт-форма: приглашение принято, ключа нет. Одиннадцатой
+        # строкой она бы встала на витрину — и не получила бы ни одного
+        # уведомления о записи.
+        invited = _make_master(tenant, name="Из приглашения", ayla_user_id=None)
+
+        with tenant_scope(tenant):
+            after = CatalogMaster.objects.bookable().count()
+            total = CatalogMaster.objects.filter(tenant=tenant).count()
+
+        assert after == 9
+        assert total == 10
+        assert _gate_roster(tenant, invited) == "ayla_unlinked"
 
     def test_an_archived_master_is_the_only_row_the_tightening_takes_off_sale(
         self, tenant: Tenant
@@ -432,3 +511,193 @@ class TestAcceptedAtIsTheModelsJobNotTheCallers:
 class TestTheLiteralCannotDriftFromTheEnum:
     def test_accepted_literal_matches_the_enum(self) -> None:
         assert ACCEPTED == CatalogMaster.InviteStatus.ACCEPTED
+
+
+# --- DRF-1540 — связь с Ayla как условие продажи -------------------------
+
+
+class TestAMasterWithNoAylaLinkIsNotSoldAndTheOwnerIsToldWhy:
+    """Решение владельца 06.09.2026: молчаливый отказ меняется на видимый.
+
+    Мастер из приглашения и та же мастер из синхронизации живут двумя
+    строками, склеить их сегодня не по чему. Инвайт-строка продавалась
+    клиентам, а уведомление о записи уходило по мосту ``master_user_id``
+    на другую — человек не узнавал о записи вообще. Всё выглядело
+    работающим, и это худшая форма отказа.
+
+    Владелец выбрал закрыться: непроданный мастер лучше проданного, до
+    которого не доходят уведомления. Настоящая починка — канонический
+    идентификатор в приглашении (DRF-1541, контракт Ayla).
+    """
+
+    def test_the_storefront_closes_and_the_cabinet_stays_open(
+        self,
+        tenant: Tenant,
+        bot_user: BotUser,
+        service: CatalogService,
+    ) -> None:
+        """Граница проведена ровно там, где её провёл владелец.
+
+        Обе половины в одном теле: «не продаётся» без «входит в кабинет»
+        на тех же данных прошло бы и на строке, сломанной чем угодно
+        другим.
+        """
+
+        unlinked = _make_master(
+            tenant,
+            name="Несвязанная",
+            linked_bot_user=bot_user,
+            invite_status=CatalogMaster.InviteStatus.ACCEPTED,
+            is_active=True,
+            ayla_user_id=None,
+        )
+        unlinked.refresh_from_db()
+        assert unlinked.accepted_at is not None  # приземление состоялось
+
+        # Витрина закрыта — трое ворот, которые отвечают на вопрос о продаже.
+        assert is_available(unlinked) is False
+        assert _gate_bookable(tenant, unlinked) is False
+        assert _gate_fallback(tenant, unlinked, service) is False
+
+        # Кабинет открыт — та же строка, вопрос о личности, а не о продаже.
+        # Это граница DRF-1521 («не продаётся, но в кабинет входит»), и
+        # ужесточение продажи не имело права её перейти.
+        assert is_landed(unlinked) is True
+        assert _gate_master_api(unlinked) is True
+        assert _gate_role_resolver(bot_user) is True
+
+        # Владелица салона видит причину, а не пустоту и не «активна».
+        assert _gate_roster(tenant, unlinked) == "ayla_unlinked"
+
+    def test_the_same_row_sells_again_the_moment_the_link_appears(
+        self,
+        tenant: Tenant,
+        bot_user: BotUser,
+        service: CatalogService,
+    ) -> None:
+        """Парная положительная стража (DRF-1411) на тех же данных.
+
+        Отличается ровно один столбец. Без этой половины «не продаётся»
+        зеленело бы и на фикстуре, сломанной чем угодно другим.
+        """
+
+        master = _make_master(
+            tenant,
+            name="Она же, но связанная",
+            linked_bot_user=bot_user,
+            invite_status=CatalogMaster.InviteStatus.ACCEPTED,
+            is_active=True,
+            ayla_user_id=None,
+        )
+        assert _gate_bookable(tenant, master) is False
+        assert _gate_roster(tenant, master) == "ayla_unlinked"
+
+        master.ayla_user_id = uuid4()
+        master.save(update_fields=["ayla_user_id"])
+
+        assert is_available(master) is True
+        assert _gate_bookable(tenant, master) is True
+        assert _gate_fallback(tenant, master, service) is True
+        assert _gate_roster(tenant, master) == "active"
+
+    def test_two_refusals_never_share_a_word(
+        self,
+        tenant: Tenant,
+        bot_user: BotUser,
+    ) -> None:
+        """Почему гейт возвращает причину, а не «нет».
+
+        «Приглашение не принято» — владелица идёт к мастеру. «Не удалось
+        связать с Ayla» — владелица идёт к нам. Один текст на две
+        причины отправил бы её чинить не там, и это не про формулировку,
+        а про то, кто чинит.
+        """
+
+        invited = _make_master(
+            tenant,
+            name="Приглашённая",
+            invite_status=CatalogMaster.InviteStatus.PENDING,
+            is_active=False,
+            ayla_user_id=None,
+        )
+        unlinked = _make_master(
+            tenant,
+            name="Несвязанная",
+            linked_bot_user=bot_user,
+            ayla_user_id=None,
+        )
+        revoked = _make_master(
+            tenant,
+            name="Отозванная",
+            is_active=False,
+            ayla_user_id=None,
+        )
+
+        states = {
+            "invited": _gate_roster(tenant, invited),
+            "unlinked": _gate_roster(tenant, unlinked),
+            "revoked": _gate_roster(tenant, revoked),
+        }
+
+        assert states == {
+            "invited": "pending",
+            "unlinked": "ayla_unlinked",
+            "revoked": "revoked",
+        }
+        # И то же самое как утверждение о механизме, а не о трёх строках:
+        # три разные причины дали три разных слова.
+        assert len(set(states.values())) == 3
+
+    def test_a_pending_invite_outranks_the_missing_link(self) -> None:
+        """Какую из двух одновременных причин показать.
+
+        У только что приглашённой мастера пусты оба поля. «Не удалось
+        связать профиль с Ayla» здесь было бы верно и бесполезно: она
+        ещё не пришла, связывать пока нечего, а владелице надо повторить
+        приглашение. Поэтому ``ayla_unlinked`` — последняя ветка.
+        """
+
+        assert _state(is_active=False, invite_status="pending", ayla_user_id=None) == "pending"
+        # Положительная стража на той же паре столбцов: приняла — и
+        # причина сменилась на настоящую.
+        assert _state(is_active=True, invite_status=ACCEPTED, ayla_user_id=None) == "ayla_unlinked"
+
+    def test_a_proxy_id_is_not_what_this_column_asks_for(self, tenant: Tenant) -> None:
+        """Граница, которую задача запрещает переходить.
+
+        ``resolve_identity`` умеет лениво завести в Ayla прокси-профиль,
+        и соблазн положить его сюда велик: поле заполнится, гейт
+        пропустит. Пропустит — и уведомление уйдёт на id, по которому
+        совпадения не будет никогда, то есть вернётся ровно тот
+        молчаливый отказ, который здесь закрывается.
+
+        Тест не умеет отличить прокси-UUID от канонического — их и не
+        отличить по значению. Он фиксирует то, что проверяемо: гейт
+        спрашивает СТОЛБЕЦ, а не «какой-нибудь идентификатор», и любая
+        будущая правка, решившая заполнять его чем попало, обязана
+        объясниться здесь, а не в тишине.
+        """
+
+        master = _make_master(tenant, name="С ключом", ayla_user_id=uuid4())
+        assert sale_block(master) is None
+
+        master.ayla_user_id = None
+        master.save(update_fields=["ayla_user_id"])
+        assert sale_block(master) == "ayla_unlinked"
+
+
+class TestTheReasonVocabularyCannotBeExtendedByHalves:
+    """Страховка для DRF-1521, которая придёт в этот же гейт.
+
+    Она добавит четвёртое условие готовности профиля и своё значение
+    причины. Добавить его в один словарь и забыть про второй — самая
+    дешёвая из возможных ошибок, и её ловит равенство ниже: ростер
+    владелицы не имеет права знать меньше причин, чем витрина.
+    """
+
+    def test_role_state_is_active_plus_every_sale_block(self) -> None:
+        assert set(get_args(RoleState)) == {"active"} | set(get_args(SaleBlock))
+        # Положительная стража: словари не пусты, и равенство выше не
+        # выполнилось по вырожденности.
+        assert "ayla_unlinked" in get_args(SaleBlock)
+        assert len(get_args(SaleBlock)) >= 3
