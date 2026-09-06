@@ -1503,6 +1503,33 @@ NUTRITION_PROACTIVE_DRY_RUN = os.environ.get("NUTRITION_PROACTIVE_DRY_RUN", "tru
     "0",
 )
 
+# DRF-1464 - the two switches in front of the AI dietologist
+# (apps/nutrition_coach). Same contract as the proactive pair above, and
+# the same deliberate sequencing: two conscious operator acts, in order,
+# before a single coach line reaches a real person.
+#
+# NUTRITION_COACH_ENABLED: master switch. False - every coach surface
+#   (the reactive answer and, once DRF-1468 wires it, the proactive hint)
+#   stays silent without touching the database or Ayla.
+# NUTRITION_COACH_DRY_RUN: the safety inside the switch. True - the
+#   pipeline runs its full read path (goal reader, week picture) and logs
+#   exactly what it would have said and to whom, and says nothing.
+#
+# Order is fixed: ENABLED=True + DRY_RUN=True first, read the
+# ``nutrition_coach.*.dry_run`` log lines, and only then DRY_RUN=False.
+# Dry-run is the LAST switch to open: flipping both at once skips the
+# only step that can catch a wording or selection bug before a stranger
+# gets a message about what they eat. Runtime readers:
+# apps/nutrition_coach/flags.py (getattr with these defaults).
+NUTRITION_COACH_ENABLED = os.environ.get("NUTRITION_COACH_ENABLED", "false").lower() in (
+    "true",
+    "1",
+)
+NUTRITION_COACH_DRY_RUN = os.environ.get("NUTRITION_COACH_DRY_RUN", "true").lower() not in (
+    "false",
+    "0",
+)
+
 # DRF-1344 — the single switch in front of the OBSERVE-occasion pipeline
 # (apps/wellness_proactive). False - the task returns immediately without
 # touching the database or Ayla. There is deliberately no DRY_RUN twin:
