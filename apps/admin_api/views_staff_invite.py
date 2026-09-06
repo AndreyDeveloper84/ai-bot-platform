@@ -41,6 +41,27 @@ The response carries the plaintext code because only its hash is stored and
 there is no way to recover it later. The caller shows it to the person and
 forgets it. That is stated in the response too, so a UI written against
 this cannot quietly assume it can re-read the code.
+
+### ``invite_link`` — the code without dictating it (DRF-1505)
+
+Four characters read aloud over a phone is how the pilot was expected to
+onboard its staff. ``invite_link`` is the same credential in a form that
+can be pasted: ``https://max.ru/<salon bot>?start=inv_<code>``. MAX
+delivers ``?start=`` as ``bot_started.payload``, the parser folds it into
+the synthetic text «/start inv_<code>», and
+:func:`apps.channels.max.salon_handler._extract_code` already reads
+exactly that shape — the redemption path is the one that was there
+before, reached without typing.
+
+It is the same builder the master invitation uses
+(:mod:`apps.channels.max.start_links`), and it names the salon bot for
+the same reason: only ``ingress:max_salon`` reaches the handler that
+redeems codes.
+
+**The link is the code.** Anyone who opens it redeems it, exactly as
+anyone who is told the four characters can. It is shown once, beside the
+code, under the same warning — never mailed, never logged, never put in
+an audit row.
 """
 
 from __future__ import annotations
@@ -69,6 +90,37 @@ MAX_NOTE_LEN = 200
 ALLOWED_ROLES = {r[0] for r in StaffInvite.Role.choices}
 
 
+def _code_start_link(tenant, code: str) -> str:
+    """``https://max.ru/<salon bot>?start=inv_<code>``, or ``""``.
+
+    ``DEEPLINK_PREFIX`` is imported from the handler that reads it rather
+    than restated here. The prefix is a contract between two modules in
+    the same repository, and a second spelling of it is free to drift out
+    from under the one that matters — the reader's link would keep
+    looking right and stop being redeemed. The lazy import is for the
+    cycle: ``salon_handler`` imports ``views_invite``, which lives in
+    this package.
+
+    ``code`` arrives formatted (``AYLA-7K3M``); the payload carries the
+    flat form (``AYLA7K3M``). ``normalize_code`` folds both to the same
+    four characters, so either would redeem — the flat one is used
+    because ``issue_staff_invite`` the management command has been
+    printing that shape since DRF-1061, and one credential written two
+    ways by two producers is the kind of difference that survives right
+    up until somebody compares a link to a code and concludes one of
+    them is wrong.
+
+    Empty string when there is no salon bot with a Mini App name: see
+    :mod:`apps.channels.max.start_links` for why a missing link beats one
+    that opens an apology.
+    """
+
+    from apps.channels.max.salon_handler import DEEPLINK_PREFIX
+    from apps.channels.max.start_links import salon_start_link
+
+    return salon_start_link(tenant, f"{DEEPLINK_PREFIX}{code.replace('-', '')}")
+
+
 def _error(slug: str, detail: str, status: int) -> JsonResponse:
     return JsonResponse({"error": slug, "detail": detail}, status=status)
 
@@ -84,7 +136,8 @@ def staff_invite_create(request: HttpRequest) -> HttpResponse:
       ``master_id`` — required for role=master: the EXISTING catalog row
       ``note`` — optional free-form label for the issuer's own records
 
-    Returns 201 with ``{code, role, expires_at, invite_id}``.
+    Returns 201 with ``{code, role, expires_at, invite_id,
+    code_is_shown_once, invite_link}``.
     """
 
     role_ctx = request.role_context  # type: ignore[attr-defined]
@@ -179,6 +232,7 @@ def staff_invite_create(request: HttpRequest) -> HttpResponse:
             "expires_at": invite.expires_at.isoformat(),
             # Said in the payload so a UI cannot assume it can re-read it.
             "code_is_shown_once": True,
+            "invite_link": _code_start_link(tenant, code),
         },
         status=201,
     )

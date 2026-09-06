@@ -17,13 +17,17 @@ response envelope. This module implements the master-role-only subset:
 
     Response 201: {
       "master_id", "invite_token", "invite_expires_at",
-      "max_dm_delivery", "fallback_link", "invite_link"
+      "max_dm_delivery", "max_dm_error", "fallback_link", "invite_link"
     }
 
 ``invite_link`` (DRF-1424) is the addition to that envelope: a
 ``https://max.ru/<bot>?start=master_invite_<token>`` link the owner can
 hand over by any route at all. The DM above it can only reach a MAX
 username the salon already knows.
+
+``max_dm_error`` (DRF-1505) is the second: the slug of whatever stopped
+the DM, so a refusal reaches the person who tapped «Пригласить» and not
+only the log. See :func:`_response_payload`.
 
 ### Scope cuts (separate PRs)
 
@@ -278,80 +282,23 @@ def _invite_payload(token: uuid.UUID) -> str:
     return f"{MASTER_INVITE_PAYLOAD_PREFIX}{token}"
 
 
-MAX_START_LINK_TEMPLATE = "https://max.ru/{bot}?start={payload}"
-"""A link that starts the bot with a payload — the handover form (DRF-1424).
-
-Observed live on the pilot 30.08: the owner opened
-``https://max.ru/id583403546770_3_bot?start=master_invite_test`` and the
-consumer received, on ``ingress:max_salon``::
-
-    {"update_type": "bot_started", "chat_id": 315714313,
-     "user": {"user_id": 83146139, ...},
-     "payload": "master_invite_test", "user_locale": "ru"}
-
-So MAX delivers ``?start=`` as ``bot_started.payload``, and the bot side
-reads it in :func:`apps.channels.max.salon_handler._extract_invite_token`.
-
-### ``<bot>`` is the registry entry's ``web_app``
-
-Not an inference from the URL's shape. The pilot's own configuration
-names the salon bot ``MAX_BOT_SALON_WEB_APP=id583403546770_3_bot``, and
-``id583403546770_3_bot`` is character-for-character the handle in the
-link the owner opened above. The value MAX wants in an ``open_app``
-button's ``web_app`` and the value that addresses the bot in a
-``max.ru`` URL are the same string.
-
-### Why this exists next to the DM
-
-:func:`_dispatch_max_dm` can only reach a MAX username the salon already
-knows, in a chat that already exists. An owner who has the person's
-phone number, or their Telegram, or who simply wants to paste something
-into a group has nothing to hand over. This link opens anywhere, needs
-no authentication to follow, and lands the invitee in a chat with the
-bot — after which the button is delivered into a chat that now exists,
-which is what makes the delivery guaranteed rather than hopeful.
-
-**Not** ``max://bot/<slug>?start=…``. That scheme is unimplemented; the
-phone answers «Не удалось открыть ссылку» (#1332 removed it for exactly
-that reason, and it is not coming back through this door).
-"""
-
-
 def _bot_start_link(tenant, token: uuid.UUID) -> str:
     """The shareable start link for this salon's staff bot, or ``""``.
 
-    Names the **salon** bot, not the client bot. Which bot the link opens
-    decides which stream the resulting ``bot_started`` lands on, and only
-    ``ingress:max_salon`` reaches the handler that reads invitations
-    (``apps/channels/max/salon_handler.py``). The customer-facing bot
-    would deliver the same payload to the conversational pipeline, which
-    has no opinion about invitations — the token would arrive and be
-    dropped, silently, which is the failure mode this ticket exists to
-    remove.
+    Thin wrapper over :func:`apps.channels.max.start_links.salon_start_link`
+    — the rule about *which* bot a start link may name, and what to do
+    when there is none, is shared with the staff access code
+    (``views_staff_invite``) and lives in one module so the two cannot
+    drift. What stays here is only the payload this endpoint issues.
 
-    Empty string when the deployment has no salon bot for this tenant, or
-    it has one with no Mini App name: without ``web_app`` there is no bot
-    handle to build the URL from *and* the bot could not build the button
-    on arrival either, so the link would open a conversation that has to
-    apologise. A missing link is a visible gap; a link that leads to an
-    apology is the working-looking dead end #1332 spent a whole PR
-    removing.
+    Kept as a named function rather than inlined at the call site:
+    ``apps/channels/tests/test_salon_web_app_enablement.py`` calls it
+    directly to prove the pilot's own configuration produces a link.
     """
 
-    from apps.channels.bot_registry import effective_registry, resolve_by_tenant_stream
-    from apps.channels.max.salon_handler import SALON_STREAM
+    from apps.channels.max.start_links import salon_start_link
 
-    entry = resolve_by_tenant_stream(tenant.slug, SALON_STREAM, effective_registry())
-    if entry is None or not entry.web_app:
-        logger.warning(
-            "admin_api.invite.no_start_link tenant=%s — no salon bot with a Mini App "
-            "name (MAX_BOT_<SLUG>_WEB_APP on the entry whose stream is %s), so the "
-            "invitation has no shareable link and can only be delivered by DM.",
-            tenant.slug,
-            SALON_STREAM,
-        )
-        return ""
-    return MAX_START_LINK_TEMPLATE.format(bot=entry.web_app, payload=_invite_payload(token))
+    return salon_start_link(tenant, _invite_payload(token))
 
 
 def _sender_web_app() -> str:
@@ -379,7 +326,7 @@ def _sender_web_app() -> str:
     return getattr(settings, "MAX_BOT_WEB_APP", "")
 
 
-def _last_dispatch_delivery(master: CatalogMaster) -> str:
+def _last_dispatch_outcome(master: CatalogMaster) -> tuple[str, str]:
     """What the *previous* dispatch for ``master`` actually reported.
 
     The idempotent replay used to answer a hardcoded ``"queued"``. That
@@ -400,6 +347,13 @@ def _last_dispatch_delivery(master: CatalogMaster) -> str:
     Falls back to ``"queued"`` when no audit row is found, which keeps
     the historical answer for rows created before the audit existed
     rather than inventing a failure.
+
+    Returns ``(delivery, error)``. The second half is why this is a
+    tuple: the owner is told *why* a delivery failed (DRF-1505), and on
+    the replay path the reason has to come from the same stored row as
+    the verdict — otherwise the screen shows «не доставлено» with no
+    cause on exactly the repeat tap the owner makes to check.
+    ``error`` is ``""`` when the stored row carries none.
     """
 
     from apps.audit.models import AuditLog
@@ -415,8 +369,9 @@ def _last_dispatch_delivery(master: CatalogMaster) -> str:
         .first()
     )
     if isinstance(row, dict) and isinstance(row.get("delivery"), str):
-        return row["delivery"]
-    return "queued"
+        error = row.get("error") or row.get("reason") or ""
+        return row["delivery"], error if isinstance(error, str) else ""
+    return "queued", ""
 
 
 def _validate_body(body: dict[str, Any]) -> tuple[dict[str, Any], JsonResponse | None]:
@@ -650,15 +605,15 @@ def _dispatch_max_dm(
         # `queued` is the failure mode this whole change exists to remove
         # — silence indistinguishable from success.
         #
-        # NOTE — the owner does NOT see this yet. The admin screen renders
-        # its failure callout only when `max_dm_delivery == "failed"` AND
-        # `fallback_link` is non-empty (AdminInviteMasterScreen.tsx), and
-        # here `fallback_link` is empty by construction: this branch runs
-        # precisely because `_fallback_link` returned "". So today the
-        # honest outcome reaches the audit row and this log line, not the
-        # screen. Un-gating that callout belongs to the screen's own PR —
-        # #1330 is editing exactly those lines — so it is filed rather
-        # than fixed here, instead of two branches rewriting one block.
+        # DRF-1505 — the owner DOES see this now. The slug below is
+        # returned as `max_dm_error` and the add-person screen renders
+        # it as «сообщение не ушло», with the reason, next to the start
+        # link the owner can forward instead. Until then this branch's
+        # honest outcome reached the audit row and this log line and
+        # stopped there, so the screen said «получит сообщение в течение
+        # минуты» about a message that was never sent — silence
+        # indistinguishable from success, one layer up from the one this
+        # branch itself exists to remove.
         logger.error(
             "admin_api.invite.no_entry_configured — invite NOT sent: neither "
             "MAX_BOT_WEB_APP (open_app button) nor a usable SITE_DOMAIN (web "
@@ -745,7 +700,13 @@ def _dispatch_max_dm(
     return {"delivery": "queued"}
 
 
-def _response_payload(master: CatalogMaster, *, tenant, dispatch_delivery: str) -> dict[str, Any]:
+def _response_payload(
+    master: CatalogMaster,
+    *,
+    tenant,
+    dispatch_delivery: str,
+    dispatch_error: str = "",
+) -> dict[str, Any]:
     """Build the 201/200 JSON envelope.
 
     For ``mode=catalog_only`` (no invite_token) ``invite_token`` and
@@ -754,10 +715,21 @@ def _response_payload(master: CatalogMaster, *, tenant, dispatch_delivery: str) 
     ``dispatch_delivery="skipped"``.
 
     ``invite_link`` (DRF-1424) is the one the owner can hand over by any
-    route — see :data:`MAX_START_LINK_TEMPLATE`. It is a sibling of
-    ``fallback_link``, not a replacement: ``fallback_link`` is the web
-    address of the Mini App and works only inside MAX's own webview,
-    while ``invite_link`` starts the bot from anywhere.
+    route — see
+    :data:`apps.channels.max.start_links.MAX_START_LINK_TEMPLATE`. It is
+    a sibling of ``fallback_link``, not a replacement: ``fallback_link``
+    is the web address of the Mini App and works only inside MAX's own
+    webview, while ``invite_link`` starts the bot from anywhere.
+
+    ``max_dm_error`` (DRF-1505) carries the dispatch's own slug —
+    ``no_entry_configured``, ``max_status_404``, ``max_phone_lookup_deferred``
+    — instead of leaving it in a log line nobody reads. Until this field
+    existed the honest outcome of a refused dispatch reached the audit
+    row and the ERROR line but never the person who had just tapped
+    «Пригласить»; the screen either said «получит сообщение в течение
+    минуты» about a message that was never sent, or said «не удалось»
+    with no cause. Empty string when the dispatch has nothing to
+    confess, so «is there a problem» is a truth test on one field.
 
     ``tenant`` is passed rather than read off ``master.tenant``: the
     idempotency path hands us a row fetched without ``select_related``,
@@ -772,6 +744,7 @@ def _response_payload(master: CatalogMaster, *, tenant, dispatch_delivery: str) 
             "invite_token": None,
             "invite_expires_at": None,
             "max_dm_delivery": dispatch_delivery,
+            "max_dm_error": dispatch_error,
             "fallback_link": "",
             "invite_link": "",
         }
@@ -782,6 +755,7 @@ def _response_payload(master: CatalogMaster, *, tenant, dispatch_delivery: str) 
         if master.invite_expires_at is not None
         else None,
         "max_dm_delivery": dispatch_delivery,
+        "max_dm_error": dispatch_error,
         "fallback_link": _fallback_link(master.invite_token),
         "invite_link": _bot_start_link(tenant, master.invite_token),
     }
@@ -862,10 +836,12 @@ def master_invite_create(request: HttpRequest) -> HttpResponse:
     if mode == "invite":
         existing = _idempotency_lookup(tenant_id=tenant.id, name=name, contact_value=contact_value)
         if existing is not None:
+            delivery, delivery_error = _last_dispatch_outcome(existing)
             payload = _response_payload(
                 existing,
                 tenant=tenant,
-                dispatch_delivery=_last_dispatch_delivery(existing),
+                dispatch_delivery=delivery,
+                dispatch_error=delivery_error,
             )
             response = JsonResponse(payload, status=200)
             response["X-Idempotent"] = "true"
@@ -1016,7 +992,15 @@ def master_invite_create(request: HttpRequest) -> HttpResponse:
         },
     )
 
-    payload = _response_payload(master, tenant=tenant, dispatch_delivery=outcome["delivery"])
+    payload = _response_payload(
+        master,
+        tenant=tenant,
+        dispatch_delivery=outcome["delivery"],
+        # `error` for a refusal, `reason` for a deliberate skip. The
+        # screen tells them apart by `max_dm_delivery`; what it needs
+        # from here is the cause, and both keys are one.
+        dispatch_error=str(outcome.get("error") or outcome.get("reason") or ""),
+    )
     return JsonResponse(payload, status=201)
 
 
