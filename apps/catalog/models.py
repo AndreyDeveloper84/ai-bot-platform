@@ -236,15 +236,40 @@ class CatalogMaster(_MirrorBase):
     specialization = models.CharField(max_length=255, blank=True, default="")
     bio = models.TextField(blank=True, default="")
     experience = models.CharField(max_length=255, blank=True, default="")
-    rating = models.DecimalField(max_digits=3, decimal_places=2, null=True, blank=True)
+    # DRF-1535 / DRF-1224 — the rating domain is 1..5. A stored ``0.00`` is
+    # therefore not a low rating, it is the ABSENCE of one, and the pilot's
+    # nine zero rows are exactly that: no master on the contour has a single
+    # review. Readers must treat 0.00 as "no data" — never render it (see
+    # ``apps.orchestrator.discovery._render_master_cards``) and never let it
+    # push a master down a list.
+    rating = models.DecimalField(
+        max_digits=3,
+        decimal_places=2,
+        null=True,
+        blank=True,
+        help_text=(
+            "Mirrored from the source feed. Domain is 1..5, so a stored "
+            "0.00 means «no rating yet», not «rated zero» — it is never "
+            "rendered (DRF-1224) and takes no part in discovery ordering "
+            "(DRF-1535)."
+        ),
+    )
+    # DRF-1535 — this help_text used to promise a discovery Bayesian
+    # trust-score (#1060) «so a 5.0 from 1 review can't outrank a 4.8 from
+    # 200». That score was never written, and nothing outside tests has ever
+    # read this column. A docstring describing code that does not exist is
+    # worse than no docstring: it is read as a guarantee, and the next author
+    # builds on it. The promise is gone; the field stays, because sync fills
+    # it and removing it would drop data we will want when reviews land.
     review_count = models.PositiveIntegerField(
         default=0,
         help_text=(
             "Number of reviews backing ``rating``, mirrored from Ayla's "
-            "``reviews_count``. Feeds the discovery Bayesian trust-score "
-            "(#1060) so a 5.0 from 1 review can't outrank a 4.8 from 200. "
-            "Populated by catalog sync once retargeted to Ayla (#1044); "
-            "defaults to 0 until then."
+            "``reviews_count``. Written by catalog sync "
+            "(``catalog/services/upserter._master_fields``) and read by "
+            "nobody: discovery neither ranks nor filters on it, and there is "
+            "no trust-score behind it. Collecting reviews is DRF-1527; until "
+            "that lands this is 0 on every pilot row."
         ),
     )
     is_active = models.BooleanField(default=True)
