@@ -181,6 +181,9 @@ class TestStatusFieldNotEditable:
         assert response.status_code == 200
 
         content = response.content.decode()
+        # Присутствие: форма реально отрисовала эту запись — «нет поля»
+        # ниже проверяется не на пустом экране.
+        assert booking.client_name in content
         # Отрицательная: поля статуса как элемента ввода на форме нет —
         # править его руками нельзя. Ни checkbox, ни select, ни input.
         assert 'name="status"' not in content
@@ -269,6 +272,9 @@ class TestCancelRequiresReason:
         assert response.status_code == 302  # назад в список, с сообщением об ошибке
         booking.refresh_from_db()
         assert booking.status == BookingRequest.Status.CONFIRMED
+        # Присутствие: запись на месте — «событий нет» ниже проверяется
+        # не по пустой выборке (запрос событий идёт по её pk).
+        assert BookingRequest.all_tenants.filter(pk=booking.pk).exists()
         assert _cancel_event_names(booking) == []
         assert not AuditLog.all_tenants.filter(
             action=AUDIT_ADMIN_CANCEL, target_id=booking.pk
@@ -283,9 +289,7 @@ class TestCancelRequiresReason:
 
         # Парная положительная «нетронутая запись»: соседняя запись того
         # же салона состояния не сменила.
-        untouched = _make_booking(
-            tenant=tenant, bot_user=bot_user, master=master, service=service
-        )
+        untouched = _make_booking(tenant=tenant, bot_user=bot_user, master=master, service=service)
         untouched.refresh_from_db()
         assert untouched.status == BookingRequest.Status.CONFIRMED
 
@@ -325,12 +329,8 @@ class TestCancelLinkVisibility:
     def test_link_only_where_machine_allows(
         self, monkeypatch, tenant, bot_user, master, service
     ) -> None:
-        confirmed = _make_booking(
-            tenant=tenant, bot_user=bot_user, master=master, service=service
-        )
-        cancelled = _make_booking(
-            tenant=tenant, bot_user=bot_user, master=master, service=service
-        )
+        confirmed = _make_booking(tenant=tenant, bot_user=bot_user, master=master, service=service)
+        cancelled = _make_booking(tenant=tenant, bot_user=bot_user, master=master, service=service)
         BookingRequest.all_tenants.filter(pk=cancelled.pk).update(
             status=BookingRequest.Status.CANCELLED
         )

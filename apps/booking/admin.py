@@ -126,8 +126,7 @@ class BookingRequestAdmin(admin.ModelAdmin):
             else:
                 self.message_user(
                     request,
-                    "Запись отменена. Клиент получит уведомление, как при "
-                    "отмене через приложение.",
+                    "Запись отменена. Клиент получит уведомление, как при отмене через приложение.",
                     level=messages.SUCCESS,
                 )
             return redirect("admin:booking_bookingrequest_changelist")
