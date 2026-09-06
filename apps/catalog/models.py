@@ -372,6 +372,39 @@ class CatalogMaster(_MirrorBase):
             models.Index(fields=["tenant", "yclients_staff_id"]),
             models.Index(fields=["tenant", "is_active", "invite_status"]),
         ]
+        # DRF-1507 — ключ склейки. До него единственным ограничением было
+        # ``unique_together (tenant, external_id)``, которое не покрывает ни
+        # ``ayla_user_id``, ни ``max_handle``: приглашение заводит строку с
+        # ``uuid4`` первичным ключом и синтетическим ``external_id``, а
+        # синхронизация — вторую, с канонической ``SpecialistProfile.id``.
+        # Две строки на одного человека — это ``resolve_master``
+        # (``apps/booking/master_notify.py``) ищет по ``id`` ИЛИ
+        # ``ayla_user_id`` и не находит инвайт-строку с ``ayla_user_id=NULL``:
+        # мастер не получает ни одного уведомления о записи.
+        #
+        # Частичное, а не ``unique_together``: столбец пуст у каждой
+        # инвайт-строки, и наивная уникальность столкнула бы NULL с NULL и
+        # запретила бы второго приглашённого мастера в салоне. В Postgres
+        # NULL и так не конфликтуют, но условие оставлено явным: оно
+        # читается как правило, а не как побочный эффект трёхзначной логики.
+        #
+        # ``(tenant, max_handle)`` из объёма задачи здесь НЕТ, и это не
+        # забывчивость. Единственный, кто пишет непустой ``max_handle``, —
+        # ``apps/admin_api/views_invite.py:909``, и он же на протухшем
+        # приглашении заводит вторую строку с тем же handle намеренно, с
+        # тестом на это поведение
+        # (``admin_api/tests/test_invite.py::test_expired_invite_creates_new_row``,
+        # «Now 2 rows in catalog»). Ограничение без правки этого пути
+        # превращает повторное приглашение мастера, чей семидневный токен
+        # истёк, в 500. Файл занят DRF-1505; ограничение уезжает туда же —
+        # к тому, кто может починить его писателя в одном коммите.
+        constraints = [
+            models.UniqueConstraint(
+                fields=["tenant", "ayla_user_id"],
+                condition=models.Q(ayla_user_id__isnull=False),
+                name="uq_catalog_master_tenant_ayla_user_id",
+            ),
+        ]
 
     def save(self, *args, **kwargs):  # type: ignore[no-untyped-def]
         """Штампует ``accepted_at`` в момент приземления. Один раз.

@@ -146,7 +146,10 @@ class CatalogSpecialistServiceDTO:
       mirror on the same id (``/internal/specialists/`` ``row["id"]``).
     * ``salon_service`` — ``SalonService.id`` → ``CatalogService.ayla_service_id``.
     * ``user_id`` — Ayla ``User.id``. Deliberately NOT the same as
-      ``specialist``; carried for cross-checks only, never as a join key.
+      ``specialist``; a cross-check first and a join key of last resort
+      (DRF-1507): the edge upsert reaches for it only when ``specialist``
+      resolves to no ``CatalogMaster`` at all, which is the invite-born row
+      that lives under its own ``uuid4`` primary key.
 
     ``resolved_duration`` still rides in ``raw`` only — it belongs to the
     booking gate, not to discovery.

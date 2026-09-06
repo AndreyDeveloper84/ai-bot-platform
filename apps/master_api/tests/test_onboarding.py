@@ -384,6 +384,79 @@ class TestOnboardingAccept:
         assert resp.status_code == 403
         assert resp.json()["error"] == "wrong_recipient"
 
+    def test_foreign_token_from_a_linked_user_is_refused(
+        self,
+        client: Client,
+        tenant: Tenant,
+        bot_user: BotUser,
+    ) -> None:
+        """DRF-1507 — приём смотрит на предъявленный токен, а не только на связку.
+
+        Человек уже привязан к строке А. Он предъявляет валидный токен
+        строки Б того же салона. До правки это отвечало 200 и выдавало
+        сессию А, а строка Б оставалась PENDING навсегда — фантом в ростере,
+        о котором не узнавал ни он, ни владелец салона.
+        """
+
+        mine = make_master(
+            tenant,
+            name="Анна Петрова",
+            invite_status=CatalogMaster.InviteStatus.ACCEPTED,
+            linked_bot_user=bot_user,
+        )
+        hers = make_master(tenant, name="Ирина Смирнова")
+
+        resp = _post_json(
+            client,
+            "master_api:onboarding_accept",
+            body={"token": str(hers.invite_token)},
+            header=init_data_header("12345"),
+        )
+
+        assert resp.status_code == 403, resp.content
+        assert resp.json()["error"] == "wrong_recipient"
+        hers.refresh_from_db()
+        assert hers.invite_status == CatalogMaster.InviteStatus.PENDING
+        assert hers.invite_token is not None
+        assert hers.linked_bot_user_id is None
+        mine.refresh_from_db()
+        assert mine.linked_bot_user_id == bot_user.id
+
+    def test_own_token_stays_idempotent_on_the_same_data(
+        self,
+        client: Client,
+        tenant: Tenant,
+        bot_user: BotUser,
+    ) -> None:
+        """Положительная стража к предыдущему на тех же данных.
+
+        Тот же связанный человек, тот же салон, в котором лежит чужое
+        приглашение, — но предъявлен собственный токен. Ответ прежний: 200 и
+        своя сессия. Без этой пары отрицание выше проходило бы и от кода,
+        который просто перестал принимать что бы то ни было.
+        """
+
+        mine = make_master(tenant, name="Анна Петрова")
+        make_master(tenant, name="Ирина Смирнова")
+        token = str(mine.invite_token)
+
+        first = _post_json(
+            client,
+            "master_api:onboarding_accept",
+            body={"token": token},
+            header=init_data_header("12345"),
+        )
+        retry = _post_json(
+            client,
+            "master_api:onboarding_accept",
+            body={"token": token},
+            header=init_data_header("12345"),
+        )
+
+        assert first.status_code == 200, first.content
+        assert retry.status_code == 200, retry.content
+        assert first.json()["master_id"] == retry.json()["master_id"] == str(mine.id)
+
     def test_expired_token(self, client: Client, bot_user: BotUser, tenant: Tenant) -> None:
         master = make_master(tenant, expires_in_days=-1)
         resp = _post_json(
