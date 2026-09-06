@@ -19,7 +19,7 @@
 | Admin-экран (код) | Route | Дизайн-источник | Зрелость кода |
 |---|---|---|---|
 | `AdminTeamScreen` | `/admin/team` | master-management **MM1** (roster) | боевой |
-| `AdminInviteMasterScreen` | `/admin/team/invite` | master-management **MM2** (invite modal) | боевой |
+| `AdminAddPersonScreen` | `/admin/team/add`, `…/invite`, `…/access` | master-management **MM2** (invite) + DRF-1061 §2.4 (коды доступа) | боевой |
 | `AdminMasterDetailScreen` | `/admin/team/:masterId` | master-management **MM3** (detail/edit) | боевой |
 | `AdminServicesMatrixScreen` | `/admin/services` | master-management **MM4** (services×masters) | боевой (самый полный) |
 | `AdminDeactivationFlowScreen` | `/admin/team/:masterId/deactivate` | master-management **MM5** (4-step reassign) | боевой (12-action reducer) |

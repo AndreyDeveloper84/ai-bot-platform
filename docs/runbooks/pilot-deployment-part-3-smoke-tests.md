@@ -29,7 +29,7 @@ Manual smoke tests для master + admin Mini App после deploy в Пенз�
   - `IDLE_ACTIVE_DRAFT_SUPPRESS_WINDOW_SECONDS=60` (default; per PR #700).
   - `STRICT_TENANT_REFUSE=False` (log-only mode per Alpha runbook #589; flip 2026-05-28 → перед pilot должен быть `True`).
 - [ ] **Test fixtures:**
-  - 1 test master (имя «Test M1», МАX account с принятой invite) — приготовлен через Django shell или /admin/team/invite перед launch.
+  - 1 test master (имя «Test M1», МАX account с принятой invite) — приготовлен через Django shell или /admin/team/add перед launch.
   - 1 test admin (МАX account с role=admin) в том же tenant.
   - 1 test customer (MAX account, не связан с tenant).
   - Тест-tenant создан через Django admin OR существует в Пензе с подсадными `is_test=True` (verify в DB перед launch).
@@ -352,11 +352,12 @@ Alternative: Django admin UI на `/django-admin/tenancy/tenantuserrelationship/
 
 **Действия:**
 
-1. Admin Mini App → `/admin/team` → header `[+ Пригласить]` button → лендит на `AdminInviteMasterScreen`.
-2. Заполнить: phone `+79991234567` (test phone) + name «Test M2» + role `master` + services (≥1 из existing) → `[Создать приглашение]`.
-3. POST `/api/v1/admin/masters/invite` → 201 + invite token generated + MAX DM dispatched к invited phone (если MAX account registered).
-4. Verify: test M2 master account получает MAX DM с invite link в течение 30 секунд: «Test A1 приглашает вас в команду {salon_name}. Откройте: {invite_link}».
-5. Test M2 master тапает invite link → Mini App открывается → `MasterOnboardingScreen` Step 1 → видит preview profile → принимает → linked.
+1. Admin Mini App → `/admin/team` → header `[+ Добавить человека]` → лендит на `AdminAddPersonScreen` (`/admin/team/add`), ветка «Новый мастер».
+2. Заполнить: MAX-аккаунт `@testm2` + name «Test M2» + services (≥1 из existing) → `[Пригласить]`.
+3. POST `/api/v1/admin/masters/invite` → 201 + invite token generated. Ответ несёт `invite_link`, `max_dm_delivery` и `max_dm_error`.
+4. Verify: экран показывает **ссылку-приглашение** `https://max.ru/<салонный бот>?start=master_invite_<token>` и кнопку «Скопировать ссылку». Это основной путь доставки — личное сообщение уходит клиентским ботом и достигает только уже существующий чат (DRF-1505). Если `max_dm_delivery=failed`, экран обязан назвать причину, а не сказать «получит сообщение в течение минуты».
+5. Скопировать ссылку → открыть её с телефона Test M2 → салонный бот отвечает кнопкой «Принять приглашение» → Mini App → `MasterOnboardingScreen` Step 1 → preview profile → принимает → linked.
+6. Ветка «Уже работает у нас» (`/admin/team/access`): выдать код ресепшену → экран показывает код `AYLA-XXXX` **и** ссылку `?start=inv_AYLAXXXX` (без дефиса). Открыть ссылку → доступ открывается без ввода кода.
 
 **Ожидаемый вывод:**
 

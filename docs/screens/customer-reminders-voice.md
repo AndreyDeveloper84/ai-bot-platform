@@ -70,7 +70,7 @@ Per founder § «Mini App inline copy» — quick grep `apps/miniapp/src/`:
 
 | File | Match | Customer-reminder scope? |
 |------|-------|--------------------------|
-| `AdminInviteMasterScreen.tsx` | «Напомин...» | ❌ Admin invite reminder (NOT customer scope) |
+| `AddPersonNewMasterSection.tsx` | «Напомин...» | ❌ Admin invite reminder (NOT customer scope) |
 | `MasterScheduleScreen.tsx` | «reminder...» | ❌ Master schedule reminder (NOT customer scope) |
 | `HelloScreen.tsx` | «Напомин...» | ❌ Welcome screen reminder (NOT customer scope) |
 | `ProfileScreen.tsx` | «reminder...» | ❌ Profile notification preferences (NOT customer scope) |
