@@ -234,9 +234,7 @@ def _block_form(request: HttpRequest, bot_user_id: Any, *, action: str) -> HttpR
 def _get_bot_user(bot_user_id: Any) -> Any:
     from apps.identity.models import BotUser
 
-    return (
-        BotUser.all_tenants.filter(pk=bot_user_id).select_related("tenant").first()
-    )
+    return BotUser.all_tenants.filter(pk=bot_user_id).select_related("tenant").first()
 
 
 def _salons_of(bot_user: Any) -> list[Any]:
@@ -258,9 +256,7 @@ def _consents_of(bot_user: Any) -> list[Any]:
     from apps.consent.models import ConsentRecord
 
     return list(
-        ConsentRecord.all_tenants.filter(bot_user=bot_user).order_by(
-            "consent_type", "-captured_at"
-        )
+        ConsentRecord.all_tenants.filter(bot_user=bot_user).order_by("consent_type", "-captured_at")
     )
 
 

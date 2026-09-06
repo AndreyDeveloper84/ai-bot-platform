@@ -96,9 +96,7 @@ def _recipient_blocked(chat_id: str) -> bool:
     from apps.identity.models import BotUser
 
     try:
-        return BotUser.all_tenants.filter(
-            chat_id=str(chat_id), blocked_at__isnull=False
-        ).exists()
+        return BotUser.all_tenants.filter(chat_id=str(chat_id), blocked_at__isnull=False).exists()
     except Exception:  # noqa: BLE001 — см. docstring: fail-open, но с криком в лог
         logger.exception("channels.max.outbound.blocked_check_failed chat_id=%s", chat_id)
         return False
