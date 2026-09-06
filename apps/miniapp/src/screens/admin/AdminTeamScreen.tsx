@@ -266,7 +266,7 @@ export function AdminTeamScreen({ me }: Props) {
       <div className="screen">
         <h1 className="screen__title">Команда</h1>
         <StateError err={err} onRetry={manualReload} />
-        <AdminTabBar />
+        <AdminTabBar me={me} />
       </div>
     );
   }
@@ -674,7 +674,7 @@ export function AdminTeamScreen({ me }: Props) {
         onDismiss={() => setToast("")}
       />
 
-      <AdminTabBar />
+      <AdminTabBar me={me} />
     </div>
   );
 }

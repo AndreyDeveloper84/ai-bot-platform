@@ -34,6 +34,7 @@ import {
   RELEASED_VISIT_STATUSES,
   type BookingSlot,
   type CancelReasonCode,
+  type MeResponse,
   type SalonDayResponse,
   type SalonDayVisit,
 } from "../../lib/admin-api";
@@ -433,7 +434,11 @@ function MoveDialog({
   );
 }
 
-export function AdminSalonDayScreen() {
+/**
+ * `me` нужен только нижней панели: её состав зависит от роли (DRF-1522).
+ * Сам экран роль не проверяет — «День» открыт всем трём салонным ролям.
+ */
+export function AdminSalonDayScreen({ me }: { me: MeResponse }) {
   const navigate = useNavigate();
   const today = useMemo(() => toIsoDate(new Date()), []);
   const [date, setDate] = useState<string>(today);
@@ -851,7 +856,7 @@ export function AdminSalonDayScreen() {
         />
       )}
 
-      <AdminTabBar />
+      <AdminTabBar me={me} />
     </div>
   );
 }

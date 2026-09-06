@@ -20,10 +20,12 @@
  *        persisted in DeviceStorage). Covers the solo provider case
  *        (owner+admin+master = one Olga) AND the team admin who also
  *        delivers services.
- *      - has admin role only → AdminRoutes (default landing /admin/team).
- *        Receptionist sees the list but every owner-only action button
- *        is disabled with a tooltip — backend re-checks at /deactivate
- *        + /reactivate.
+ *      - has admin role only → AdminRoutes. Владелец и администратор
+ *        садятся на /admin/team; ресепшн — на /admin/day, и «Чаты» с
+ *        «Настройками» ей не показывают вовсе (DRF-1522, см.
+ *        `lib/admin-tabs.ts`). На «Команде» ресепшн видит список, но
+ *        каждое owner-only действие выключено — бэкенд перепроверяет на
+ *        /deactivate + /reactivate.
  *      - is_master only → /master/dashboard (unchanged from M0..M6).
  *      - is_customer → existing customer routes (unchanged).
  *      - 401 / unmapped → «Доступ не настроен» error screen with
@@ -41,6 +43,7 @@ import { Link, Navigate, Route, Routes, useLocation, useNavigate } from "react-r
 
 import { ApiError } from "./lib/api";
 import { getMe, type MeResponse } from "./lib/admin-api";
+import { adminLandingPath, isReceptionOnly } from "./lib/admin-tabs";
 import { getStartPayload, parseStartRoute } from "./lib/max-sdk";
 import {
   SurfaceModeContext,
@@ -65,6 +68,7 @@ import { AdminMasterDetailScreen } from "./screens/admin/AdminMasterDetailScreen
 import { AdminNewBookingScreen } from "./screens/admin/AdminNewBookingScreen";
 import { AdminPeopleScreen } from "./screens/admin/AdminPeopleScreen";
 import { AdminSalonDayScreen } from "./screens/admin/AdminSalonDayScreen";
+import { AdminSectionDeniedScreen } from "./screens/admin/AdminSectionDeniedScreen";
 import { AdminServicesMatrixScreen } from "./screens/admin/AdminServicesMatrixScreen";
 import { AdminSettingsPlaceholderScreen } from "./screens/admin/AdminSettingsPlaceholderScreen";
 import { AdminStaffAccessScreen } from "./screens/admin/AdminStaffAccessScreen";
@@ -188,7 +192,7 @@ function adminRouteElements(me: MeResponse): React.ReactNode {
   return (
     <>
       {/* Phase 2 — the salon's day. First tab in AdminTabBar. */}
-      <Route path="/admin/day" element={<AdminSalonDayScreen />} />
+      <Route path="/admin/day" element={<AdminSalonDayScreen me={me} />} />
       <Route path="/admin/booking/new" element={<AdminNewBookingScreen />} />
       <Route path="/admin/team" element={<AdminTeamScreen me={me} />} />
       <Route
@@ -236,14 +240,34 @@ function adminRouteElements(me: MeResponse): React.ReactNode {
         path="/admin/availability-requests"
         element={<AdminAvailabilityRequestsScreen me={me} />}
       />
-      {/* Master ↔ admin internal chat — admin queue ("Чаты с мастерами"). */}
+      {/*
+        Master ↔ admin internal chat — admin queue ("Чаты с мастерами").
+
+        Ресепшн сюда не пускают (DRF-1522). Бэкенд и так отвечает 403
+        (`require_admin_role`), но экран за 403 показывал баннер поверх
+        пустого списка — человек видел ошибку, а не отказ. Страж стоит на
+        адресе, потому что вкладку мы убрали, а ссылка остаётся: в старых
+        диалогах бота, в закладках, в чужом сообщении.
+      */}
       <Route
         path="/admin/internal-chat"
-        element={<AdminInternalChatListScreen me={me} />}
+        element={
+          isReceptionOnly(me) ? (
+            <AdminSectionDeniedScreen me={me} section="Чаты" />
+          ) : (
+            <AdminInternalChatListScreen me={me} />
+          )
+        }
       />
       <Route
         path="/admin/internal-chat/threads/:threadId"
-        element={<AdminInternalChatThreadScreen me={me} />}
+        element={
+          isReceptionOnly(me) ? (
+            <AdminSectionDeniedScreen me={me} section="Чаты" />
+          ) : (
+            <AdminInternalChatThreadScreen me={me} />
+          )
+        }
       />
       {/*
         Legacy /admin/chats path (used by AdminTabBar) → redirect to the
@@ -254,9 +278,20 @@ function adminRouteElements(me: MeResponse): React.ReactNode {
         path="/admin/chats"
         element={<Navigate to="/admin/internal-chat" replace />}
       />
+      {/*
+        «Настройки» — заглушка, и для ресепшн это была заглушка, которую
+        она не может ничем заменить: настройки салона правит владелец
+        (DRF-1522). Отказ честнее, чем «Скоро здесь будут настройки».
+      */}
       <Route
         path="/admin/settings"
-        element={<AdminSettingsPlaceholderScreen />}
+        element={
+          isReceptionOnly(me) ? (
+            <AdminSectionDeniedScreen me={me} section="Настройки" />
+          ) : (
+            <AdminSettingsPlaceholderScreen me={me} />
+          )
+        }
       />
     </>
   );
@@ -417,8 +452,12 @@ function AdminRoutes({ me }: { me: MeResponse }) {
           already mount it via `masterRouteElements`, don't declare it
           twice. */}
       {inviteOnboardingRouteElements()}
-      {/* Default + unknown — land on team. */}
-      <Route path="*" element={<CatchAllRedirect to="/admin/team" />} />
+      {/*
+        Default + unknown. Владелец и администратор — на «Команду», как и
+        было. Ресепшн — на «День» (DRF-1522): ростер мастеров, где почти
+        все действия от неё скрыты, был последним, что ей нужно утром.
+      */}
+      <Route path="*" element={<CatchAllRedirect to={adminLandingPath(me)} />} />
     </Routes>
   );
 }
@@ -546,7 +585,7 @@ function UnifiedLanding({ me }: { me: MeResponse }) {
               title="Салон"
               subtitle="Команда, услуги, запросы графика"
               ariaLabel="Перейти в Салон"
-              onClick={() => pick("admin", "/admin/team")}
+              onClick={() => pick("admin", adminLandingPath(me))}
             />
             <SurfaceCard
               icon="👤"
@@ -602,7 +641,7 @@ function UnifiedLandingOrRedirect({ me }: { me: MeResponse }) {
   // the fall-through below (→ chooser) is defensive only.
   const last = readLastSurface();
   if (last === "admin") {
-    return <Navigate to="/admin/team" replace />;
+    return <Navigate to={adminLandingPath(me)} replace />;
   }
   if (last === "master") {
     return <Navigate to="/master/dashboard" replace />;
