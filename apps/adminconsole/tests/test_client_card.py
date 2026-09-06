@@ -201,10 +201,13 @@ def test_viewer_cannot_block_editor_can(login_as, client_thread) -> None:  # noq
     bot_user, *_ = client_thread
     viewer = login_as("i.tolko-smotrit", "viewer")
 
-    # Присутствие: карточку смотрящий открывает, кнопки блокировки в ней нет.
+    # Присутствие: карточку смотрящий открывает и видит клиента.
     card = viewer.get(_card_url(bot_user))
     assert card.status_code == 200
-    assert "заблокирован(а)" not in _body(card)
+    card_body = _body(card)
+    assert "Алина" in card_body
+    # Кнопки «Заблокировать» у роли без права change нет.
+    assert "Заблокировать" not in card_body
 
     assert viewer.get(f"{_card_url(bot_user)}block/").status_code == 403
     posted = viewer.post(f"{_card_url(bot_user)}block/", {"reason": "проверяю права роли"})
