@@ -191,7 +191,7 @@ MINIAPP_ITEMS: tuple[MenuItem, ...] = (
     MenuItem(
         label="🎯 Моя цель",
         callback="open_goal_select",
-        line="выбрать цель, ради которой всё это",
+        line="выбрать цель — к чему идём",
         where="miniapp",
     ),
     MenuItem(
