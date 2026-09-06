@@ -15,6 +15,7 @@ the condition that broke. The cases the ticket calls mandatory:
 from __future__ import annotations
 
 from datetime import date, timedelta
+from typing import Any
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -72,7 +73,7 @@ def coach_user(tenant: Tenant, **kwargs) -> BotUser:
 
 
 def clean_profile(**overrides) -> ProfileResponse:
-    payload = dict(
+    payload: dict[str, Any] = dict(
         gender="female",
         age=31,
         height_cm=168,
@@ -573,7 +574,7 @@ class TestBeatRegistration:
     def test_the_task_is_registered_and_on_the_schedule(self) -> None:
         """A daily tick, shipped ahead of the flags: no-op until the
         operator opens them, same contract as the sibling beats."""
-        from celery.schedules import crontab
+        from celery.schedules import crontab  # type: ignore[import-untyped]
         from django.conf import settings
 
         entry = settings.CELERY_BEAT_SCHEDULE["nutrition_proactive.send_coach_hints"]
@@ -617,10 +618,12 @@ class TestStopButtonCoversCoachHint:
         """Per-tenant surface: ProactiveOptOutSkill.matches sees the
         payload through the generic parse, no per-surface code."""
         from types import SimpleNamespace
+        from typing import cast
 
         from apps.nutrition_proactive.optout_skill import ProactiveOptOutSkill
+        from apps.skills.base import SkillContext
 
-        context = SimpleNamespace(message_text="cb:nutri:stop:coach_hint")
+        context = cast(SkillContext, SimpleNamespace(message_text="cb:nutri:stop:coach_hint"))
         assert ProactiveOptOutSkill().matches(context) is True
 
     def test_the_history_resolver_treats_the_tap_as_no_words(self) -> None:
