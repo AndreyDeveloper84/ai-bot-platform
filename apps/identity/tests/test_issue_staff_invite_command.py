@@ -120,9 +120,13 @@ class TestIssuing:
 
         output = _run(tenant="formula-tela", role="admin")
 
+        # Положительная стража первой: обе проверки ниже зелены на пустом
+        # выводе, и `negative_assert_guard.py` (DRF-1411) требует именно
+        # такого порядка — не из вежливости, а потому что «команда ничего
+        # не напечатала» это соседний дефект.
+        assert f"https://max.ru/{SALON_WEB_APP}?start=inv_" in output
         assert "max://" not in output
         assert "<salon_bot>" not in output
-        assert f"https://max.ru/{SALON_WEB_APP}?start=inv_" in output
 
     def test_no_salon_bot_means_a_plain_notice_not_a_template(self, tenant, settings):
         """The operator is told there is no link, not handed a stencil.
@@ -135,10 +139,12 @@ class TestIssuing:
 
         output = _run(tenant="formula-tela", role="admin")
 
-        assert "start=inv_" not in output
-        assert "MAX_BOT_<SLUG>_WEB_APP" in output
-        # Positive guard: the code itself still came out.
+        # Положительные стражи первыми: код всё равно выдан, и оператору
+        # сказано, какую переменную задать. Без них «ссылки нет» зеленело
+        # бы на команде, которая упала и ничего не напечатала.
         assert normalize_code(_code_from(output))
+        assert "MAX_BOT_<SLUG>_WEB_APP" in output
+        assert "start=inv_" not in output
 
     def test_ttl_is_configurable(self, tenant):
         _run(tenant="formula-tela", role="admin", ttl_days=1)
