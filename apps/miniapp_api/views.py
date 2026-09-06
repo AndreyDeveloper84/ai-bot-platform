@@ -1928,19 +1928,14 @@ def personal_data_delete(request: HttpRequest) -> HttpResponse:
     Idempotent per contract: a repeat confirmed request returns the same 200.
     A failed or skipped mandatory step yields an honest 502 + failed_steps.
     """
-    import json
-
     from apps.identity.services.privacy import delete_personal_data
     from apps.identity.services.profile import DELETE_CONFIRMATION_TOKEN
 
     bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
 
-    try:
-        body = json.loads(request.body or b"{}")
-    except ValueError:
-        return _error("malformed", "body is not valid JSON", 400)
-    if not isinstance(body, dict):
-        return _error("malformed", "body must be a JSON object", 400)
+    body = _json_object_body(request)
+    if isinstance(body, HttpResponse):
+        return body
     if body.get("confirmation", "") != DELETE_CONFIRMATION_TOKEN:
         # Nothing has been touched at this point — the cascade is below.
         return _error(
@@ -2059,6 +2054,202 @@ def health_consent(request: HttpRequest) -> HttpResponse:
         )
     logger.info("miniapp_api.health_consent.granted bot_user=%s", bot_user.id)
     return JsonResponse(_health_consent_payload(bot_user))
+
+
+# ---------------------------------------------------------------------------
+# Согласия человека — чтение всех, управление своими (DRF-1520).
+#
+# Отзыв согласия был недостижим из мини-приложения: дать можно было, забрать
+# нельзя нигде. Согласие — юридический факт, и отозвать его человек обязан
+# уметь тем же способом, каким давал. Здесь — тонкие HTTP-оболочки; вся
+# логика в :mod:`apps.consent.customer`, включая объяснение, почему главным
+# источником правды для маркетингового согласия признан реестр, а не колонка.
+#
+# Каждая пишущая ручка отвечает ПЕРЕСЧИТАННЫМ из базы состоянием, а не
+# «принято»: ответ, подтверждающий намерение вместо результата, скрывает
+# расхождение ровно там, где оно опаснее всего.
+# ---------------------------------------------------------------------------
+
+
+def _consents_document(bot_user: BotUser) -> dict:
+    """Состояние согласий, перечитанное из базы после любой записи."""
+    from apps.consent.customer import read_consents
+
+    fresh = BotUser.all_tenants.get(pk=bot_user.pk)
+    return read_consents(fresh)
+
+
+def _json_object_body(request: HttpRequest) -> dict | HttpResponse:
+    """Тело как JSON-объект — либо готовый отказ, который надо вернуть.
+
+    Возврат разнотипный намеренно: вызывающий обязан различить их
+    ``isinstance``, и ветку «тело не разобралось» нельзя пропустить,
+    случайно приняв ``None`` за пустой объект.
+    """
+    import json
+
+    try:
+        body = json.loads(request.body or b"{}")
+    except ValueError:
+        return _error("malformed", "body is not valid JSON", 400)
+    if not isinstance(body, dict):
+        return _error("malformed", "body must be a JSON object", 400)
+    return body
+
+
+@require_http_methods(["GET"])
+@require_init_data
+@with_request_tenant
+def customer_consents(request: HttpRequest) -> HttpResponse:
+    """Все согласия текущего человека — на чтение.
+
+    Только GET: читающая ручка не может ничего проставить. Субъект берётся
+    из проверенной initData, параметра «чьё согласие» нет ни в пути, ни в
+    теле — поэтому чужие согласия отсюда недостижимы по построению.
+
+    По медданным отдаётся факт наличия согласия и его дата; содержимое
+    особой категории (152-ФЗ ст. 10) не отдаётся. Телефон не отдаётся
+    (DRF-1039).
+    """
+    bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
+    return JsonResponse(_consents_document(bot_user))
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+@require_init_data
+@with_request_tenant
+def customer_proactive_hints(request: HttpRequest) -> HttpResponse:
+    """«Подсказки Ayla» — включить или выключить. Тело: ``{"enabled": bool}``.
+
+    Это не ``ConsentRecord``, а ``BotUser.proactive_messages_opt_out`` —
+    колонка, которую планировщики читают первой и безусловной проверкой.
+    До DRF-1520 она по HTTP не отдавалась ни на чтение, ни на запись: бот
+    решал, писать ли человеку первым, состоянием, которого человек не
+    видел и изменить не мог.
+    """
+    from apps.consent.customer import set_proactive_hints
+
+    bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
+    body = _json_object_body(request)
+    if isinstance(body, HttpResponse):
+        return body
+    enabled = body.get("enabled")
+    if not isinstance(enabled, bool):
+        return _error("bad_request", "enabled must be a boolean", 400)
+
+    set_proactive_hints(bot_user, enabled=enabled)
+    return JsonResponse(_consents_document(bot_user))
+
+
+@csrf_exempt
+@require_http_methods(["POST", "DELETE"])
+@require_init_data
+@with_request_tenant
+def customer_marketing_consent(request: HttpRequest) -> HttpResponse:
+    """Маркетинговое согласие: ``POST`` — выдать, ``DELETE`` — отозвать.
+
+    Форма повторяет ручку медданных намеренно: выдача — только явным
+    POST, а не полем в общем «сохрани все галочки». Оба перехода
+    идемпотентны и оба оставляют след в реестре и в аудите.
+
+    Совместимость: ``PATCH /me`` с ``notify_promo`` продолжает работать и
+    ведёт в тот же самый путь записи, так что двух источников правды об
+    этом согласии больше нет — колонка стала зеркалом реестра.
+    """
+    from apps.consent.customer import set_marketing
+
+    bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
+    granted = request.method == "POST"
+    set_marketing(bot_user, granted=granted)
+    logger.info(
+        "miniapp_api.consents.marketing bot_user=%s granted=%s",
+        bot_user.id,
+        granted,
+    )
+    return JsonResponse(_consents_document(bot_user))
+
+
+@csrf_exempt
+@require_http_methods(["DELETE"])
+@require_init_data
+@with_request_tenant
+def customer_data_storage_consent(request: HttpRequest) -> HttpResponse:
+    """Отзыв согласия на хранение данных. Только отзыв — выдача не здесь.
+
+    Тело обязано нести обе половины подтверждения::
+
+        {"confirmation": "УДАЛИТЬ", "disclosure_version": "data-storage-revocation-v1"}
+
+    ``disclosure_version`` — не формальность. Последствия отзыва должны
+    быть показаны ДО действия, и единственное, чем сервер может это
+    проверить, — версия текста последствий, под которым человек нажал.
+    Незнакомая версия отвергается с 409: клиенту нужно перечитать
+    актуальное раскрытие (его слаги отдаёт ``GET /me/consents/``), а не
+    чинить тело. ``confirmation`` — тот же примитив, что у соседнего
+    ``DELETE /me/personal-data/``: одно нажатие для необратимого действия
+    не годится, а клиентская шторка подтверждением не является.
+
+    Что происходит дальше — по шагам в
+    :func:`apps.consent.customer.revoke_data_storage`.
+
+    ### Почему 200, когда процедура отработала частично
+
+    Сосед ``DELETE /me/personal-data/`` на частичном результате отвечает
+    502, и это правильно: там весь смысл запроса — удаление. Здесь смысл
+    запроса — **отзыв согласия**, и он к этому моменту уже состоялся:
+    согласие снято, поверхности отказывают. Ответить 502 значило бы
+    сказать «ничего не вышло» про действие, которое вышло, и подтолкнуть
+    человека жать ещё раз. Поэтому статус отражает отзыв, а тело честно
+    называет, какие шаги обработки накопленного не отработали. 502 остаётся
+    ровно за одним случаем — когда не удался сам отзыв.
+    """
+    from apps.consent.customer import (
+        DATA_STORAGE_REVOCATION_DISCLOSURE_VERSION,
+        revoke_data_storage,
+    )
+    from apps.identity.services.profile import DELETE_CONFIRMATION_TOKEN
+
+    bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
+    body = _json_object_body(request)
+    if isinstance(body, HttpResponse):
+        return body
+
+    # Ничего ещё не тронуто — обе проверки стоят до вызова процедуры.
+    if body.get("confirmation", "") != DELETE_CONFIRMATION_TOKEN:
+        return _error(
+            "confirmation_mismatch",
+            f"body.confirmation must equal {DELETE_CONFIRMATION_TOKEN!r}",
+            400,
+        )
+    if body.get("disclosure_version", "") != DATA_STORAGE_REVOCATION_DISCLOSURE_VERSION:
+        return _error(
+            "stale_disclosure",
+            "disclosure_version does not match the current revocation disclosure",
+            409,
+        )
+
+    result = revoke_data_storage(bot_user)
+    document = _consents_document(bot_user)
+
+    if document["data_storage"]["granted"]:
+        # Отзыв не состоялся — единственный случай, когда ручка обязана
+        # ответить отказом: состояние осталось «согласие действует».
+        logger.error(
+            "miniapp_api.consents.data_storage_revoke_failed bot_user=%s",
+            bot_user.id,
+        )
+        return JsonResponse(
+            {**document, "revocation": {"status": "failed"}},
+            status=502,
+        )
+
+    document["revocation"] = {
+        "status": "revoked" if result.all_ok else "revoked_partial_processing",
+        "failed_steps": result.failed_steps,
+        "failed_details": {s.step: s.detail for s in result.steps if not s.ok and s.detail},
+    }
+    return JsonResponse(document, status=200)
 
 
 def _profile_to_dict(snap) -> dict:
