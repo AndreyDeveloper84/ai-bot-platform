@@ -163,7 +163,11 @@ class TestScoreStillOutranksRotation:
                 is_active=True,
                 invite_status=CatalogMaster.InviteStatus.ACCEPTED,
             )
-            master.match_score = 1.0 if index == 3 else 0.5
+            # ``setattr`` and not an assignment: ``match_score`` is put on the
+            # row by the queryset's ``annotate``, not by the model, so the
+            # attribute genuinely does not exist on the class — which is
+            # exactly the shape ``_rotate_ties`` reads it in.
+            setattr(master, "match_score", 1.0 if index == 3 else 0.5)  # noqa: B010
             masters.append(master)
 
         winners = {_rotate_ties(masters, f"conv-{i}")[0].name for i in range(50)}
@@ -182,7 +186,11 @@ class TestScoreStillOutranksRotation:
                 is_active=True,
                 invite_status=CatalogMaster.InviteStatus.ACCEPTED,
             )
-            master.match_score = 1.0 if index == 3 else 0.5
+            # ``setattr`` and not an assignment: ``match_score`` is put on the
+            # row by the queryset's ``annotate``, not by the model, so the
+            # attribute genuinely does not exist on the class — which is
+            # exactly the shape ``_rotate_ties`` reads it in.
+            setattr(master, "match_score", 1.0 if index == 3 else 0.5)  # noqa: B010
             masters.append(master)
 
         seconds = {_rotate_ties(masters, f"conv-{i}")[1].name for i in range(80)}
