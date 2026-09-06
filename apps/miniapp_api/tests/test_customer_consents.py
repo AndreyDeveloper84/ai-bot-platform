@@ -485,6 +485,32 @@ def test_revocation_is_idempotent(client: Client, bot_user, revoke_url, auth) ->
     )
 
 
+def test_consent_is_withdrawn_even_when_the_processing_step_fails(
+    client: Client, bot_user, url, revoke_url, auth
+) -> None:
+    """Отзыв стоит ПЕРЕД процедурой, а не внутри неё.
+
+    В каскаде снятие согласий — третий шаг из шести, и его исключение
+    каскад ловит по-шаговой изоляцией: он отрапортует ``consent_withdraw:
+    False`` и пойдёт дальше. Если бы отзыв жил только там, человек после
+    неудачи остался бы с действующим согласием — то есть кнопка «отозвать»
+    не отозвала бы ничего. Здесь шаг каскада ломается намеренно, и
+    согласие всё равно снято.
+    """
+    assert client.get(url, **auth).json()["data_storage"]["granted"] is True
+
+    with patch(
+        "apps.identity.services.privacy.withdraw_personal_data_for_bot_users",
+        side_effect=RuntimeError("нет связи"),
+    ):
+        res = _revoke(client, revoke_url, auth)
+
+    assert res.status_code == 200
+    assert res.json()["data_storage"]["granted"] is False
+    assert "consent_withdraw" in res.json()["revocation"]["failed_steps"]
+    assert has_global_consent(bot_user, "personal_data") is False
+
+
 def test_revocation_does_not_lock_the_person_out(
     client: Client, bot_user, url, revoke_url, auth
 ) -> None:
