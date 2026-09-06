@@ -14,7 +14,9 @@
   модель сырым payload'ом;
 * каждый нарисованный ``cb:`` payload кто-то принимает;
 * пищевые пункты подчиняются ДВУМ воротам (§25 п.6), и тап без согласия
-  ведёт на запрос согласия, а не в поверхность;
+  ведёт на запрос согласия, а не в поверхность — механизм проверяется на
+  подставленных пунктах, потому что DRF-1543 снял их из меню до появления
+  ручек ``customer/food/*``, а сам механизм остался;
 * отказ уважается: возврат назад и НИ ОДНОГО повторного запроса в том же
   диалоге.
 
@@ -33,6 +35,7 @@ from apps.channels.max import handler as max_handler
 from apps.conversations.services import resolve_active_global_conversation
 from apps.identity.services.resolver import resolve_or_create_global_bot_user
 from apps.orchestrator.memory import short_term
+from apps.skills.menu import marketplace as menu_marketplace
 from apps.skills.menu.marketplace import (
     BOT_ITEMS,
     CALLBACK_HEALTH_DECLINE,
@@ -43,13 +46,47 @@ from apps.skills.menu.marketplace import (
     HEALTH_DECLINED_TEXT,
     HEALTH_REQUEST_TEXT,
     MENU_ACTION_TYPE,
-    NUTRITION_ITEMS,
+    MenuItem,
     health_tap_text,
 )
 
 pytestmark = pytest.mark.django_db
 
 _CHAT_ID = 7711
+
+#: Два пункта, снятые DRF-1543, — теми же записями, какими вернутся.
+#:
+#: Ворота §25 п.6 остались, а рисовать им нечего: ``NUTRITION_ITEMS``
+#: пуст, пока нет ручек ``customer/food/*``. Класс ворот на живом пути без
+#: подстановки зеленел бы на пустом цикле — то есть перестал бы ловить ту
+#: поломку, ради которой написан.
+_REMOVED_BY_DRF1543: tuple[MenuItem, ...] = (
+    MenuItem(
+        label="📸 Сканер еды",
+        callback="open_food_scan",
+        line="сканер еды — снять тарелку и увидеть состав",
+        where="miniapp",
+    ),
+    MenuItem(
+        label="📔 Дневник питания",
+        callback="open_food_diary",
+        line="дневник питания",
+        where="miniapp",
+    ),
+)
+
+#: Девять пунктов, которые DRF-1543 обязан оставить нетронутыми.
+_NINE_REMAINING: tuple[tuple[str, str], ...] = (
+    ("📅 Записаться", "cb:menu:book"),
+    ("🔍 Показать салоны", "cb:catalog:salons"),
+    ("📋 Мои записи", "cb:menu:my_bookings"),
+    ("🔄 Перенести запись", "cb:menu:reschedule"),
+    ("❌ Отменить запись", "cb:menu:cancel"),
+    ("👤 Профиль", "open_profile"),
+    ("🎯 Моя цель", "open_goal_select"),
+    ("📖 Каталог услуг", "open_catalog"),
+    ("🗓 История визитов", "open_visits"),
+)
 
 
 # --------------------------------------------------------------------------- #
@@ -113,6 +150,19 @@ def concierge(monkeypatch):
 def nutrition_on(settings):
     settings.NUTRITION_ENABLED = True
     return settings
+
+
+@pytest.fixture
+def nutrition_items(monkeypatch):
+    """Вернуть пищевые пункты в кортеж на время одного теста (DRF-1543).
+
+    Подменяется глобал ``marketplace.NUTRITION_ITEMS`` — тот самый,
+    который читают и построитель клавиатуры, и ``health_need_surface`` в
+    ``handler._route_health_callback``. Механизм ворот при этом настоящий:
+    меняется только состав.
+    """
+    monkeypatch.setattr(menu_marketplace, "NUTRITION_ITEMS", _REMOVED_BY_DRF1543)
+    return _REMOVED_BY_DRF1543
 
 
 @pytest.fixture
@@ -383,8 +433,15 @@ class TestEveryDrawnButtonIsAccepted:
 # 4. Питание: двое ворот на живом пути                                         #
 # --------------------------------------------------------------------------- #
 class TestNutritionGatesOnTheLivePath:
+    """Механизм §25 п.6 на живом пути — на ВОЗВРАЩЁННЫХ пунктах.
+
+    ``NUTRITION_ITEMS`` пуст с DRF-1543, поэтому строки таблицы «флаг
+    задан» проверяются через фикстуру ``nutrition_items``. Что видит
+    человек СЕГОДНЯ — в :class:`TestNutritionItemsAreGoneFromTheLiveMenu`.
+    """
+
     def test_flag_unset_means_no_nutrition_items_at_all(
-        self, sent, fake_redis, concierge, health_consent, settings
+        self, sent, fake_redis, concierge, health_consent, settings, nutrition_items
     ):
         settings.NUTRITION_ENABLED = False
         _welcomed(70401)
@@ -395,11 +452,11 @@ class TestNutritionGatesOnTheLivePath:
         labels = [b["text"] for b in buttons]
         # Стража: меню построено, экранные пункты в нём есть.
         assert "👤 Профиль" in labels, labels
-        for item in NUTRITION_ITEMS:
+        for item in _REMOVED_BY_DRF1543:
             assert item.label not in labels, labels
 
     def test_flag_set_without_consent_leads_to_the_consent_request(
-        self, sent, fake_redis, concierge, nutrition_on, health_consent
+        self, sent, fake_redis, concierge, nutrition_on, health_consent, nutrition_items
     ):
         _welcomed(70402)
 
@@ -422,7 +479,7 @@ class TestNutritionGatesOnTheLivePath:
         assert CALLBACK_HEALTH_DECLINE in _payloads(sent[1])
 
     def test_flag_set_with_consent_opens_the_surface(
-        self, sent, fake_redis, concierge, nutrition_on, health_consent
+        self, sent, fake_redis, concierge, nutrition_on, health_consent, nutrition_items
     ):
         health_consent(True)
         _welcomed(70403)
@@ -431,10 +488,79 @@ class TestNutritionGatesOnTheLivePath:
 
         slugs = _open_app_payloads(sent[0])
         assert slugs, _keyboard(sent[0])
-        for item in NUTRITION_ITEMS:
+        for item in _REMOVED_BY_DRF1543:
             assert item.callback in slugs, slugs
         # И ни один пищевой пункт не ведёт на запрос согласия.
         assert not [p for p in _payloads(sent[0]) if p.startswith(CALLBACK_HEALTH_NEED_PREFIX)]
+
+
+# --------------------------------------------------------------------------- #
+# 4a. DRF-1543: сегодня пищевых пунктов в живом меню нет                       #
+# --------------------------------------------------------------------------- #
+class TestNutritionItemsAreGoneFromTheLiveMenu:
+    """Вариант A DRF-1543 — глазами человека на пилоте.
+
+    Замер боевого контура: ``NUTRITION_ENABLED = true``. То есть самая
+    «разрешительная» строка таблицы, и именно в ней человек с согласием
+    ``HEALTH`` доходил до падающего экрана. Пунктов быть не должно.
+    """
+
+    def test_the_menu_offers_nine_items_and_no_food(
+        self, sent, fake_redis, concierge, nutrition_on, health_consent
+    ):
+        health_consent(True)
+        _welcomed(70601)
+
+        max_handler.handle_global_max_event(
+            _msg(text="что ты умеешь?", user_id=70601, mid="m-1543")
+        )
+
+        buttons = _keyboard(sent[0])
+        labels = [b["text"] for b in buttons]
+        payloads = _payloads(sent[0]) + _open_app_payloads(sent[0])
+        text = sent[0]["text"]
+        # Положительная стража НА ТЕХ ЖЕ ДАННЫХ: девять пунктов на месте,
+        # payload каждого не изменился, перечень в тексте собран.
+        assert len(buttons) == len(_NINE_REMAINING), labels
+        for label, payload in _NINE_REMAINING:
+            assert label in labels, labels
+            assert payload in payloads, payloads
+        assert BOT_ITEMS[0].line in text, text
+        assert "открывается отдельным экраном" in text, text
+        # И только теперь отрицание.
+        for item in _REMOVED_BY_DRF1543:
+            assert item.label not in labels, labels
+            assert item.callback not in payloads, payloads
+            assert item.line not in text, text
+        assert not [p for p in payloads if p.startswith(CALLBACK_HEALTH_NEED_PREFIX)], payloads
+
+    def test_a_stale_food_payload_from_chat_history_answers_with_the_menu(
+        self, sent, fake_redis, concierge, nutrition_on, health_consent
+    ):
+        """Кнопка из истории чата не просит медданные ради снятого экрана.
+
+        Клавиатура живёт в переписке дольше выкладки. У людей с 06.09.2026
+        15:32 ``cb:health:need:food_scan`` остался в ленте, и тап по нему
+        обязан вернуть меню — а не запрос особой категории персданных ради
+        поверхности, которой нет.
+        """
+        health_consent(True)
+        _welcomed(70602)
+
+        max_handler.handle_global_max_event(
+            _tap(
+                payload=f"{CALLBACK_HEALTH_NEED_PREFIX}food_scan",
+                user_id=70602,
+                callback_id="s-1",
+            )
+        )
+
+        assert len(sent) == 1, sent
+        # Стража: ответ есть и это рабочее меню.
+        assert "cb:menu:book" in _payloads(sent[0]), _payloads(sent[0])
+        # Отрицание: экрана согласия человек не увидел.
+        assert sent[0]["text"] != HEALTH_REQUEST_TEXT, sent[0]["text"]
+        assert CALLBACK_HEALTH_DECLINE not in _payloads(sent[0]), _payloads(sent[0])
 
 
 # --------------------------------------------------------------------------- #
@@ -444,7 +570,7 @@ class TestRefusalIsRespected:
     """Канон 2.5 «без понуканий», 2.6 «автономия клиента абсолютна»."""
 
     def test_decline_returns_to_the_menu(
-        self, sent, fake_redis, concierge, nutrition_on, health_consent
+        self, sent, fake_redis, concierge, nutrition_on, health_consent, nutrition_items
     ):
         _welcomed(70501)
 
@@ -465,7 +591,7 @@ class TestRefusalIsRespected:
         assert "cb:menu:book" in _payloads(sent[1]), _payloads(sent[1])
 
     def test_no_second_consent_request_in_the_same_dialog(
-        self, sent, fake_redis, concierge, nutrition_on, health_consent
+        self, sent, fake_redis, concierge, nutrition_on, health_consent, nutrition_items
     ):
         _, conversation = _welcomed(70502)
 
@@ -499,7 +625,14 @@ class TestRefusalIsRespected:
         assert "cb:menu:book" in _payloads(sent[2]), _payloads(sent[2])
 
     def test_the_promise_survives_the_outbound_guard_eating_the_marker(
-        self, sent, fake_redis, concierge, nutrition_on, health_consent, monkeypatch
+        self,
+        sent,
+        fake_redis,
+        concierge,
+        nutrition_on,
+        health_consent,
+        monkeypatch,
+        nutrition_items,
     ):
         """Отказ помнится по ДВУМ следам, и первый переживает сторожа.
 
@@ -560,7 +693,14 @@ class TestRefusalIsRespected:
         assert sent[-1]["text"] == HEALTH_DECLINED_EARLIER_TEXT, sent[-1]["text"]
 
     def test_an_unreadable_history_never_claims_the_person_refused(
-        self, sent, fake_redis, concierge, nutrition_on, health_consent, monkeypatch
+        self,
+        sent,
+        fake_redis,
+        concierge,
+        nutrition_on,
+        health_consent,
+        monkeypatch,
+        nutrition_items,
     ):
         """Осторожность в поведении не обязана быть враньём в словах.
 
@@ -620,7 +760,7 @@ class TestHealthTapsNeverLandRawInHistory:
     """
 
     def test_taps_are_stored_as_the_phrase_the_button_carried(
-        self, sent, fake_redis, concierge, nutrition_on, health_consent
+        self, sent, fake_redis, concierge, nutrition_on, health_consent, nutrition_items
     ):
         _, conversation = _welcomed(70801)
 
@@ -647,7 +787,7 @@ class TestHealthTapsNeverLandRawInHistory:
         assert [line for line in history if line.startswith("cb:")] == [], history
 
     def test_a_typed_lookalike_is_still_the_person_s_own_words(
-        self, sent, fake_redis, concierge, nutrition_on, health_consent
+        self, sent, fake_redis, concierge, nutrition_on, health_consent, nutrition_items
     ):
         """Разбор по ФОРМЕ, а не по префиксу (правило C01)."""
         typed = "cb:health: это что такое?"
@@ -667,7 +807,7 @@ class TestHealthTapsNeverLandRawInHistory:
 # --------------------------------------------------------------------------- #
 class TestFlagIsCheckedOnTheTapToo:
     def test_stale_keyboard_does_not_ask_for_health_consent_after_the_flag_went_off(
-        self, sent, fake_redis, concierge, health_consent, settings
+        self, sent, fake_redis, concierge, health_consent, settings, nutrition_items
     ):
         """Клавиатура в истории чата живёт дольше флага в окружении.
 
