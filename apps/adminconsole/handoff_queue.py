@@ -49,7 +49,7 @@ from __future__ import annotations
 import logging
 from datetime import datetime
 from functools import partial
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from django.contrib import messages
 from django.contrib.admin.models import CHANGE, LogEntry
@@ -66,6 +66,7 @@ from apps.tenancy.context import tenant_scope
 
 if TYPE_CHECKING:  # pragma: no cover — только для аннотаций
     from django.contrib.admin import ModelAdmin
+    from django.contrib.auth.models import User
 
 logger = logging.getLogger(__name__)
 
@@ -225,7 +226,8 @@ def _claim(request: HttpRequest, task: AdminTask) -> None:
     if task.status not in OPEN_STATUSES:
         messages.info(request, "Задача уже закрыта — брать нечего.")
         return
-    if claim(task, request.user):
+    # Права проверены в queue_view: сюда аноним не доходит.
+    if claim(task, cast("User", request.user)):
         _journal(request, task, "взял(а) задачу на себя")
         messages.success(request, f"Задача {str(task.id)[:8]} — теперь на вас.")
     else:
@@ -257,8 +259,12 @@ def _journal(request: HttpRequest, task: AdminTask, verb: str) -> None:
     которую оборачивает :mod:`apps.adminconsole.journal`, — поэтому запись
     в ``AuditLog`` появляется в той же транзакции, что и само действие.
     """
+    user_pk = request.user.pk
+    if user_pk is None:
+        # Не бывает: действия пропускает только вошедший правящий.
+        return
     LogEntry.objects.log_actions(
-        request.user.pk,
+        user_pk,
         [task],
         CHANGE,
         f"очередь handoff: {verb}",
