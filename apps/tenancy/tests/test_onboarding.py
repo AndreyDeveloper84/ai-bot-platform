@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime, timezone
+from typing import Any
 
 import pytest
 from django.core.cache import cache
@@ -34,6 +35,7 @@ from apps.tenancy.onboarding import (
     REASON_NO_BOOKABLE_MASTERS,
     REASON_TENANT_INACTIVE,
     ConnectError,
+    ConnectResult,
     assess_salon,
     connect_salon,
 )
@@ -89,8 +91,8 @@ class FakeAylaHttp:
     def __enter__(self) -> FakeAylaHttp:
         return self
 
-    def __exit__(self, *_args: object) -> bool:
-        return False
+    def __exit__(self, *_args: object) -> None:
+        return None
 
     def fetch_salon_services(self, *, tenant_id: str) -> list:
         if self._raise is not None:
@@ -104,16 +106,23 @@ class FakeAylaHttp:
         return EdgeSnapshot(edges=[])
 
 
-def _connect(http: FakeAylaHttp, **overrides):
-    kwargs = {
-        "slug": "mednyy-kovsh",
-        "name": "Медный ковш",
-        "tenant_id": _AYLA_ID,
-        "city": "Пенза",
-        "http_client": http,
-    }
-    kwargs.update(overrides)
-    return connect_salon(**kwargs)
+def _connect(
+    http: FakeAylaHttp,
+    *,
+    slug: str = "mednyy-kovsh",
+    name: str = "Медный ковш",
+    tenant_id: str | None = _AYLA_ID,
+    city: str = "Пенза",
+    sync_service: Any | None = None,
+) -> ConnectResult:
+    return connect_salon(
+        slug=slug,
+        name=name,
+        tenant_id=tenant_id,
+        city=city,
+        http_client=http,
+        sync_service=sync_service,
+    )
 
 
 # ---------------------------------------------------------------------------
