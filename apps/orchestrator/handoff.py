@@ -446,6 +446,12 @@ def handoff_to_booking(
                         # service that merely shares one stem. A goal query
                         # has no score (carrying a goal is not a matter of
                         # degree) and keeps the name order.
+                        #
+                        # DRF-1530 moved that score from a stem COUNT to
+                        # match precision, in step with the master list this
+                        # menu sits one tap behind: two screens ordering the
+                        # same catalog two different ways is the failure the
+                        # ticket asked to be decided rather than left.
                         narrowed = narrowed.annotate(menu_score=score).order_by(
                             "-menu_score", "name"
                         )

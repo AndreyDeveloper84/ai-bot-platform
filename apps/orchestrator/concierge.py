@@ -84,6 +84,8 @@ from apps.orchestrator.discovery import (
     has_discovery_criteria,
     reground_specialization,
     render_no_criteria_clarification,
+    rotation_seed,
+    split_master_page,
     render_no_match,
     requested_services,
 )
@@ -1391,7 +1393,9 @@ def _render_zero_result(
     )
 
 
-def _render_pending(cards: list[Any], args: dict[str, Any]) -> DiscoveryReply:
+def _render_pending(
+    cards: list[Any], args: dict[str, Any], more_offset: int | None = None
+) -> DiscoveryReply:
     """Render the last executed ``show_masters`` result deterministically.
 
     Two branches reach for this for one reason: a pass died AFTER the tool
@@ -1409,7 +1413,10 @@ def _render_pending(cards: list[Any], args: dict[str, Any]) -> DiscoveryReply:
     specialization = args.get("specialization")
     if cards:
         return _render_master_cards(
-            cards[:_MAX_MASTER_CARDS], city=city, specialization=specialization
+            cards[:_MAX_MASTER_CARDS],
+            city=city,
+            specialization=specialization,
+            more_offset=more_offset,
         )
     return _render_zero_result(city=city, specialization=specialization)
 
@@ -1676,6 +1683,10 @@ def _concierge_turn(
     # The tool arguments behind ``pending_cards`` — so a degraded render can
     # still say WHAT was searched for (DRF-1283 / render_no_match).
     pending_args: dict[str, Any] = {}
+    # DRF-1532 — and the offset of the page AFTER ``pending_cards``, so a
+    # degraded render keeps «Показать ещё» instead of quietly capping the
+    # person at five for the sake of a pass that died.
+    pending_more_offset: int | None = None
     dto: Any = None
     # DRF-1385 — the ordered trace of tools the model picked this turn, one
     # element per pass that ended in a tool call. The concierge classified
@@ -1728,7 +1739,7 @@ def _concierge_turn(
                 # An EMPTY `pending_cards` is not «no data», it is a searched
                 # zero, and since DRF-1474 it gets the refusal that names an
                 # alternative rather than the same one with a shorter tail.
-                rendered = _render_pending(pending_cards, pending_args)
+                rendered = _render_pending(pending_cards, pending_args, pending_more_offset)
                 return _reply(
                     text=rendered.text,
                     action_data=rendered.action_data,
@@ -1839,11 +1850,31 @@ def _concierge_turn(
                 action_data=rendered.action_data,
                 persisted=True,
             )
-        cards = discover_masters(
-            city=city,
-            specialization=specialization,
-            limit=int(limit) if isinstance(limit, int) and limit > 0 else _MAX_MASTER_CARDS,
-            resolve_service=True,
+        # DRF-1532 — a PAGE, not a truncation. ``more_offset`` is the offset
+        # of the next one (``None`` when there is none), and it rides into
+        # every render below so the «Показать ещё» button can exist. Before
+        # this the sixth candidate was never fetched: on «массаж» that was
+        # three real people the person could not reach by any means, chosen
+        # by surname.
+        page_size = min(
+            int(limit) if isinstance(limit, int) and limit > 0 else _MAX_MASTER_CARDS,
+            _MAX_MASTER_CARDS,
+        )
+        # +1 row: the extra card is how this learns there IS a next page,
+        # without a second COUNT — the idiom ``show_salons`` and the
+        # ask-the-service menu already use. ``discover_masters`` stays the
+        # call, and stays THIS module's global, because that is the seam every
+        # show_masters suite patches.
+        cards, more_offset = split_master_page(
+            discover_masters(
+                city=city,
+                specialization=specialization,
+                limit=page_size + 1,
+                resolve_service=True,
+                rotation_seed=rotation_seed(conversation),
+            ),
+            offset=0,
+            limit=page_size,
         )
         # DRF-1312 — which of the requested services the CATALOG can serve.
         # Names come from the model, verdicts come from the catalog: the model
@@ -1894,6 +1925,7 @@ def _concierge_turn(
                 specialization=specialization,
                 available_services=available,
                 missing_services=missing,
+                more_offset=more_offset,
             )
             return _reply(
                 text=rendered.text,
@@ -1912,7 +1944,10 @@ def _concierge_turn(
             )
             rendered = (
                 _render_master_cards(
-                    cards[:_MAX_MASTER_CARDS], city=city, specialization=specialization
+                    cards[:_MAX_MASTER_CARDS],
+                    city=city,
+                    specialization=specialization,
+                    more_offset=more_offset,
                 )
                 if cards
                 # DRF-1474 — this is the branch the live refusal came out of
@@ -1929,6 +1964,7 @@ def _concierge_turn(
             )
         pending_cards = cards
         pending_args = args
+        pending_more_offset = more_offset
         current_text = _build_tool_result_message(message_text, cards, args, missing=missing)
 
     if dto.action_type in NUTRITION_TOOL_ACTIONS:
@@ -2098,7 +2134,7 @@ def _concierge_turn(
         # over an answer we already have would be the same lie pointing the
         # other way.
         if pending_cards is not None:
-            rendered = _render_pending(pending_cards, pending_args)
+            rendered = _render_pending(pending_cards, pending_args, pending_more_offset)
             return _reply(
                 text=rendered.text,
                 action_data=rendered.action_data,
@@ -2137,6 +2173,7 @@ def _concierge_turn(
             pending_cards[:_MAX_MASTER_CARDS],
             city=pending_args.get("city"),
             specialization=pending_args.get("specialization"),
+            more_offset=pending_more_offset,
         ).action_data
     return _reply(text=text[:_MAX_REPLY_CHARS], action_data=action_data, persisted=True)
 
@@ -2252,10 +2289,15 @@ def generate_direct_show_masters_reply(
         # path did not answer the inbound message.
         logger.info("orchestrator.concierge.direct_show_masters.not_claimed trace=%s", trace_id)
         return None
-    cards = discover_masters(
-        specialization=message_text,
+    cards, more_offset = split_master_page(
+        discover_masters(
+            specialization=message_text,
+            limit=_MAX_MASTER_CARDS + 1,
+            resolve_service=True,
+            rotation_seed=rotation_seed(conversation),
+        ),
+        offset=0,
         limit=_MAX_MASTER_CARDS,
-        resolve_service=True,
     )
     logger.info(
         "orchestrator.concierge.direct_show_masters count=%d trace=%s",
@@ -2276,7 +2318,7 @@ def generate_direct_show_masters_reply(
         started=started,
         outcome=AIRequestMetric.OUTCOME_SUCCESS,
     )
-    return _render_master_cards(cards, specialization=message_text)
+    return _render_master_cards(cards, specialization=message_text, more_offset=more_offset)
 
 
 def _record_direct_metric(
