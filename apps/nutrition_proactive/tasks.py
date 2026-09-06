@@ -448,16 +448,49 @@ def send_water_reminders() -> dict[str, int]:
     return _run_task("water", plan_water_reminders)
 
 
+# -- coach hints (DRF-1464, T5) ----------------------------------------------
+
+
+@shared_task(name="nutrition_proactive.send_coach_hints")
+def send_coach_hints() -> dict[str, int]:
+    """Daily beat. No-op unless ``NUTRITION_COACH_ENABLED``.
+
+    The coach surface has its own switch pair (``apps/nutrition_coach/
+    flags.py``), deliberately separate from ``NUTRITION_PROACTIVE_*``:
+    opening the dietologist is its own operator decision, not a side
+    effect of the report/water ramp. Everything else — selection,
+    journaling, the stop keyboard, dry-run logging — is the shared
+    machinery above, with ``surface="coach_hint"``.
+    """
+    from apps.nutrition_coach import flags as coach_flags
+    from apps.nutrition_proactive.coach import plan_coach_hints
+
+    return _run_task(
+        "coach_hint",
+        plan_coach_hints,
+        is_enabled=coach_flags.enabled,
+        is_dry_run=coach_flags.dry_run,
+    )
+
+
 # -- shared execution -------------------------------------------------------
 
 
-def _run_task(kind: str, planner: Callable[..., list[Decision]]) -> dict[str, int]:
-    if not enabled():
+def _run_task(
+    kind: str,
+    planner: Callable[..., list[Decision]],
+    *,
+    is_enabled: Callable[[], bool] | None = None,
+    is_dry_run: Callable[[], bool] | None = None,
+) -> dict[str, int]:
+    enabled_fn = enabled if is_enabled is None else is_enabled
+    dry_run_fn = dry_run if is_dry_run is None else is_dry_run
+    if not enabled_fn():
         logger.info("nutrition_proactive.%s.disabled", kind)
         return {"planned": 0, "sent": 0, "skipped": 0, "failed": 0, "dry_run": 1}
 
     decisions = planner()
-    is_dry = dry_run()
+    is_dry = dry_run_fn()
     sent = failed = 0
     to_send = [d for d in decisions if d.send]
     skipped = len(decisions) - len(to_send)

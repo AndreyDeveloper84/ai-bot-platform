@@ -25,7 +25,7 @@ from apps.integrations.ayla import ProfileResponse
 from apps.nutrition_coach import copy as coach_copy
 from apps.nutrition_coach.goals import Goal
 from apps.nutrition_coach.history import DayPicture, WeekPicture, WeekStatus
-from apps.nutrition_proactive import coach, prefs
+from apps.nutrition_proactive import coach, prefs, tasks
 from apps.nutrition_proactive.tests.test_antinag import outbox_entry, user_reply
 from apps.nutrition_proactive.tests.test_tasks import NOON, at_msk, make_user, only
 from apps.orchestrator.food_history import Meal, Status, TodayDiary
@@ -407,3 +407,227 @@ class TestReasonVocabulary:
         decisions = plan(coach_user(tenant, suffix="b"))
         for decision in decisions:
             assert decision.reason in coach.BLOCK_REASONS
+
+
+# ---------------------------------------------------------------------------
+# The beat task around the planner
+# ---------------------------------------------------------------------------
+
+
+def patch_planner_reads():
+    """Deterministic reads for task-level tests: goal, week, profile.
+
+    The task calls the planner with no fetches, so the defaults are
+    patched at their modules — this also pins that the task really does
+    go through the default read path, not a test-only seam.
+    """
+    from unittest.mock import patch
+
+    return (
+        patch(
+            "apps.nutrition_coach.goals.active_goal",
+            side_effect=goal_reader(SLEEP_GOAL),
+        ),
+        patch(
+            "apps.nutrition_coach.history.week_picture",
+            side_effect=week_reader(late_dinner_week()),
+        ),
+        patch(
+            "apps.nutrition_proactive.coach._fetch_profile",
+            side_effect=profile_reader(clean_profile()),
+        ),
+    )
+
+
+class TestCoachHintTask:
+    def test_disabled_task_touches_nothing(self, tenant: Tenant, settings) -> None:
+        from unittest.mock import patch
+
+        coach_user(tenant)
+        settings.NUTRITION_COACH_ENABLED = False
+        with patch("apps.nutrition_proactive.tasks.send_message") as send:
+            result = tasks.send_coach_hints()
+        send.assert_not_called()
+        assert result["sent"] == 0
+
+    def test_enabled_but_dry_run_sends_nothing(self, tenant: Tenant, settings) -> None:
+        from unittest.mock import patch
+
+        coach_user(tenant)
+        settings.NUTRITION_COACH_ENABLED = True
+        settings.NUTRITION_COACH_DRY_RUN = True
+        goal_patch, week_patch, profile_patch = patch_planner_reads()
+        with (
+            patch("apps.nutrition_proactive.tasks.send_message") as send,
+            patch("apps.nutrition_proactive.tasks.dj_timezone.now", return_value=NOON),
+            goal_patch,
+            week_patch,
+            profile_patch,
+        ):
+            result = tasks.send_coach_hints()
+        send.assert_not_called()
+        assert result["would_send"] == 1
+        assert result["sent"] == 0
+        assert result["dry_run"] == 1
+
+    def test_armed_task_sends_and_journals_the_surface(self, tenant: Tenant, settings) -> None:
+        from unittest.mock import patch
+
+        user = coach_user(tenant)
+        settings.NUTRITION_COACH_ENABLED = True
+        settings.NUTRITION_COACH_DRY_RUN = False
+        goal_patch, week_patch, profile_patch = patch_planner_reads()
+        with (
+            patch("apps.nutrition_proactive.tasks.send_message") as send,
+            patch("apps.nutrition_proactive.tasks.dj_timezone.now", return_value=NOON),
+            goal_patch,
+            week_patch,
+            profile_patch,
+        ):
+            result = tasks.send_coach_hints()
+        assert result["sent"] == 1
+        send.assert_called_once()
+
+        stored = prefs.get_prefs(BotUser.all_tenants.get(pk=user.pk))
+        assert prefs.outbox_entries(stored) == [
+            {"surface": "coach_hint", "sent_at": NOON.isoformat()}
+        ]
+
+    def test_every_hint_send_carries_the_one_tap_unsubscribe(
+        self, tenant: Tenant, settings
+    ) -> None:
+        from unittest.mock import patch
+
+        from apps.nutrition_proactive.tests.test_antinag import button_payloads
+
+        coach_user(tenant)
+        settings.NUTRITION_COACH_ENABLED = True
+        settings.NUTRITION_COACH_DRY_RUN = False
+        goal_patch, week_patch, profile_patch = patch_planner_reads()
+        with (
+            patch("apps.nutrition_proactive.tasks.send_message") as send,
+            patch("apps.nutrition_proactive.tasks.dj_timezone.now", return_value=NOON),
+            goal_patch,
+            week_patch,
+            profile_patch,
+        ):
+            tasks.send_coach_hints()
+        attachments = send.call_args.kwargs["attachments"]
+        assert button_payloads(attachments) == ["cb:nutri:stop:coach_hint"]
+
+    def test_a_safety_hit_is_not_journaled(self, tenant: Tenant, settings) -> None:
+        """Mandatory case: a guard hit is silence — no send, no journal,
+        no spent budget."""
+        from unittest.mock import patch
+
+        user = coach_user(tenant)
+        settings.NUTRITION_COACH_ENABLED = True
+        settings.NUTRITION_COACH_DRY_RUN = False
+        goal_patch, week_patch, profile_patch = patch_planner_reads()
+        with (
+            patch("apps.nutrition_proactive.tasks.send_message") as send,
+            patch("apps.nutrition_proactive.tasks.dj_timezone.now", return_value=NOON),
+            patch.object(
+                coach_copy, "render_hint", return_value="Ты держишь серию — 7 дней подряд!"
+            ),
+            goal_patch,
+            week_patch,
+            profile_patch,
+        ):
+            result = tasks.send_coach_hints()
+        assert result["sent"] == 0
+        send.assert_not_called()
+        stored = prefs.get_prefs(BotUser.all_tenants.get(pk=user.pk))
+        # Смысл кейса — пустой журнал после safety-hit; присутствие записи
+        # при штатной отправке прибито test_armed_task_sends_and_journals.
+        assert prefs.outbox_entries(stored) == []  # empty-assert-ok: пустота и есть проверка
+
+    def test_the_auto_pause_lands_even_in_dry_run(self, tenant: Tenant, settings) -> None:
+        """Suppression is persisted though nothing is sent — same contract
+        as the report surface (``_run_task``)."""
+        from unittest.mock import patch
+
+        user = coach_user(
+            tenant,
+            extra_prefs={
+                prefs.OUTBOX_KEY: [outbox_entry("coach_hint", days_ago=8) for _ in range(2)]
+            },
+        )
+        settings.NUTRITION_COACH_ENABLED = True
+        settings.NUTRITION_COACH_DRY_RUN = True
+        goal_patch, week_patch, profile_patch = patch_planner_reads()
+        with (
+            patch("apps.nutrition_proactive.tasks.send_message") as send,
+            patch("apps.nutrition_proactive.tasks.dj_timezone.now", return_value=NOON),
+            goal_patch,
+            week_patch,
+            profile_patch,
+        ):
+            tasks.send_coach_hints()
+        send.assert_not_called()
+        stored = prefs.get_prefs(BotUser.all_tenants.get(pk=user.pk))
+        assert stored["coach_hints"] is False
+
+
+class TestBeatRegistration:
+    def test_the_task_is_registered_and_on_the_schedule(self) -> None:
+        """A daily tick, shipped ahead of the flags: no-op until the
+        operator opens them, same contract as the sibling beats."""
+        from celery.schedules import crontab
+        from django.conf import settings
+
+        entry = settings.CELERY_BEAT_SCHEDULE["nutrition_proactive.send_coach_hints"]
+        assert entry["task"] == "nutrition_proactive.send_coach_hints"
+        assert isinstance(entry["schedule"], crontab)
+        assert tasks.send_coach_hints.name == "nutrition_proactive.send_coach_hints"
+
+
+# ---------------------------------------------------------------------------
+# The one-tap unsubscribe, generic path (DRF-1468) — no handler.py edits
+# ---------------------------------------------------------------------------
+
+
+class TestStopButtonCoversCoachHint:
+    def test_the_surface_has_an_opt_out_pref_and_a_confirmation(self) -> None:
+        from apps.nutrition_proactive import optout
+
+        assert optout.SURFACE_OPT_OUT_PREFS["coach_hint"] == {"coach_hints": False}
+        assert optout.SURFACE_CONFIRMATIONS["coach_hint"]
+        # The confirmation goes out as a chat reply: no guilt, the way
+        # back named — and clean under the outbound guard.
+        from apps.orchestrator.safety.outbound import evaluate_outbound
+
+        assert evaluate_outbound(optout.SURFACE_CONFIRMATIONS["coach_hint"]).allowed
+
+    def test_the_tap_flips_only_the_coach_pref(self, tenant: Tenant) -> None:
+        """One surface, not the platform-wide veto: the tap under a hint
+        answers the hint, not every future message."""
+        from apps.nutrition_proactive import optout
+
+        user = coach_user(tenant)
+        reply = optout.try_handle_surface_stop(text="cb:nutri:stop:coach_hint", bot_user=user)
+        assert reply == optout.SURFACE_CONFIRMATIONS["coach_hint"]
+
+        user.refresh_from_db()
+        stored = prefs.get_prefs(user)
+        assert stored["coach_hints"] is False
+        assert user.proactive_messages_opt_out is False
+
+    def test_the_registry_skill_claims_the_tap(self) -> None:
+        """Per-tenant surface: ProactiveOptOutSkill.matches sees the
+        payload through the generic parse, no per-surface code."""
+        from types import SimpleNamespace
+
+        from apps.nutrition_proactive.optout_skill import ProactiveOptOutSkill
+
+        context = SimpleNamespace(message_text="cb:nutri:stop:coach_hint")
+        assert ProactiveOptOutSkill().matches(context) is True
+
+    def test_the_history_resolver_treats_the_tap_as_no_words(self) -> None:
+        """The tap is not a phrase (DRF-990 shape): the generic resolver
+        already covers the surface, nothing to add handler-side."""
+        from apps.orchestrator.nutrition_global import resolve_nutri_stop_tap
+
+        tap = resolve_nutri_stop_tap("cb:nutri:stop:coach_hint")
+        assert tap is not None
+        assert tap.history_text is None
