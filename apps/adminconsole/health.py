@@ -331,9 +331,7 @@ def handoff_summary(*, now: datetime | None = None) -> HandoffSummary:
     return HandoffSummary(
         open_count=waiting.filter(status=AdminTask.Status.OPEN).count(),
         in_progress_count=waiting.filter(status=AdminTask.Status.IN_PROGRESS).count(),
-        oldest_open_age_seconds=(
-            None if oldest is None else (moment - oldest).total_seconds()
-        ),
+        oldest_open_age_seconds=(None if oldest is None else (moment - oldest).total_seconds()),
     )
 
 
@@ -399,16 +397,12 @@ def collect_report(
     )
 
 
-def _divergences(
-    ages: list[TenantSyncAge], counter: UpstreamCounter
-) -> list[MirrorDivergence]:
+def _divergences(ages: list[TenantSyncAge], counter: UpstreamCounter) -> list[MirrorDivergence]:
     """По каждому синхронизируемому салону — зеркало против бэкенда."""
     tenant_ids = {age.slug: age.tenant_id for age in ages}
     service_counts: dict[str, int] = {}
     master_counts: dict[str, int] = {}
-    for row in CatalogService.all_tenants.values("tenant__slug").annotate(
-        n=models.Count("id")
-    ):
+    for row in CatalogService.all_tenants.values("tenant__slug").annotate(n=models.Count("id")):
         service_counts[row["tenant__slug"]] = row["n"]
     for row in CatalogMaster.all_tenants.values("tenant__slug").annotate(n=models.Count("id")):
         master_counts[row["tenant__slug"]] = row["n"]
