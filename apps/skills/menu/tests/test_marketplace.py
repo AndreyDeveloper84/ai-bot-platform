@@ -23,11 +23,50 @@ from apps.skills.menu.marketplace import (
     CALLBACK_HEALTH_NEED_PREFIX,
     MINIAPP_ITEMS,
     NUTRITION_ITEMS,
+    MenuItem,
     health_need_surface,
     health_request_action_data,
     marketplace_fallback_reply,
     marketplace_menu_reply,
     matches_menu_request,
+)
+
+#: Два пункта, снятые DRF-1543, — дословно теми записями, какими они
+#: вернутся, когда появятся ручки ``customer/food/*``.
+#:
+#: Живут здесь по двум причинам сразу. Первая: ворота §25 п.6 не сняты и
+#: обязаны уметь краснеть, а проверять их не на чем — рисовать нечего.
+#: Вторая: возврат пункта должен приходить сюда и осознанно стирать эту
+#: запись, а не тихо разъезжаться с производственным кортежем.
+_REMOVED_BY_DRF1543: tuple[MenuItem, ...] = (
+    MenuItem(
+        label="📸 Сканер еды",
+        callback="open_food_scan",
+        line="сканер еды — снять тарелку и увидеть состав",
+        where="miniapp",
+    ),
+    MenuItem(
+        label="📔 Дневник питания",
+        callback="open_food_diary",
+        line="дневник питания",
+        where="miniapp",
+    ),
+)
+
+#: Девять пунктов, которые остались, и их payload'ы — поимённо.
+#:
+#: Парная положительная стража к отрицанию «пищевых пунктов нет»
+#: (DRF-1411). Без неё «починка», стирающая меню целиком, была бы зелёной.
+_NINE_REMAINING: tuple[tuple[str, str], ...] = (
+    ("📅 Записаться", "cb:menu:book"),
+    ("🔍 Показать салоны", "cb:catalog:salons"),
+    ("📋 Мои записи", "cb:menu:my_bookings"),
+    ("🔄 Перенести запись", "cb:menu:reschedule"),
+    ("❌ Отменить запись", "cb:menu:cancel"),
+    ("👤 Профиль", "open_profile"),
+    ("🎯 Моя цель", "open_goal_select"),
+    ("📖 Каталог услуг", "open_catalog"),
+    ("🗓 История визитов", "open_visits"),
 )
 
 
@@ -64,6 +103,24 @@ def miniapp(settings):
     settings.MAX_BOT_WEB_APP = "aylabot"
     settings.MAX_MINIAPP_URL = ""
     return settings
+
+
+@pytest.fixture
+def nutrition_items(monkeypatch):
+    """Вернуть пищевые пункты В КОРТЕЖ на время одного теста (DRF-1543).
+
+    Подменяется сам :data:`marketplace.NUTRITION_ITEMS` — тот глобал,
+    который читают и клавиатура, и текст, и :func:`health_need_surface`,
+    и :func:`health_tap_text`. Так строки таблицы §25 п.6 «флаг задан»
+    остаются проверенными на настоящем механизме, а не на заглушке
+    рядом с ним.
+    """
+
+    def _set(items: tuple[MenuItem, ...] = _REMOVED_BY_DRF1543) -> None:
+        monkeypatch.setattr(marketplace, "NUTRITION_ITEMS", tuple(items))
+
+    _set()
+    return _set
 
 
 def _payloads(buttons: list[dict]) -> list[str]:
@@ -154,49 +211,61 @@ class TestZeroConfigDegradation:
 # 3. Питание: двое ворот                                                       #
 # --------------------------------------------------------------------------- #
 class TestNutritionGates:
-    """Таблица §25 п.6 — построчно."""
+    """Таблица §25 п.6 — построчно.
+
+    Проверяется на ВОЗВРАЩЁННЫХ пунктах (фикстура ``nutrition_items``):
+    :data:`NUTRITION_ITEMS` пуст с DRF-1543, и без подстановки весь класс
+    зеленел бы вхолостую — на пустом цикле. Ворота при этом настоящие:
+    подменяется только состав кортежа, механизм не трогается.
+    """
 
     @pytest.mark.django_db
-    def test_flag_unset_hides_nutrition_entirely(self, bot_user, consent, miniapp, settings):
+    def test_flag_unset_hides_nutrition_entirely(
+        self, bot_user, consent, miniapp, settings, nutrition_items
+    ):
         settings.NUTRITION_ENABLED = False
         text, data = marketplace_menu_reply(bot_user=bot_user)
 
         labels = _labels(data["buttons"])
         # Стража: меню построено и экранные пункты в нём есть.
         assert "👤 Профиль" in labels, labels
-        for item in NUTRITION_ITEMS:
+        for item in _REMOVED_BY_DRF1543:
             assert item.label not in labels, labels
             assert item.line not in text
 
     @pytest.mark.django_db
     def test_flag_set_without_consent_shows_items_pointing_at_the_request(
-        self, bot_user, consent, miniapp, settings
+        self, bot_user, consent, miniapp, settings, nutrition_items
     ):
         settings.NUTRITION_ENABLED = True
         consent(False)
         _, data = marketplace_menu_reply(bot_user=bot_user)
 
         by_label = {b["label"]: b for b in data["buttons"]}
-        for item in NUTRITION_ITEMS:
+        for item in _REMOVED_BY_DRF1543:
             button = by_label[item.label]
             assert button["callback"].startswith(CALLBACK_HEALTH_NEED_PREFIX), button
             # Мёртвой кнопки нет и в поверхность тап не ведёт.
             assert "web_app" not in button and "url" not in button, button
 
     @pytest.mark.django_db
-    def test_flag_set_with_consent_opens_the_surface(self, bot_user, consent, miniapp, settings):
+    def test_flag_set_with_consent_opens_the_surface(
+        self, bot_user, consent, miniapp, settings, nutrition_items
+    ):
         settings.NUTRITION_ENABLED = True
         consent(True)
         _, data = marketplace_menu_reply(bot_user=bot_user)
 
         by_label = {b["label"]: b for b in data["buttons"]}
-        for item in NUTRITION_ITEMS:
+        for item in _REMOVED_BY_DRF1543:
             button = by_label[item.label]
             assert button["web_app"] == "aylabot", button
             assert button["callback"] == item.callback, button
 
     @pytest.mark.django_db
-    def test_consent_read_failure_is_fail_closed(self, bot_user, monkeypatch, miniapp, settings):
+    def test_consent_read_failure_is_fail_closed(
+        self, bot_user, monkeypatch, miniapp, settings, nutrition_items
+    ):
         """Сбой чтения согласия — это «согласия нет», а не «есть»."""
         settings.NUTRITION_ENABLED = True
 
@@ -209,6 +278,94 @@ class TestNutritionGates:
         by_label = {b["label"]: b for b in data["buttons"]}
         assert "📸 Сканер еды" in by_label, list(by_label)
         assert by_label["📸 Сканер еды"]["callback"].startswith(CALLBACK_HEALTH_NEED_PREFIX)
+
+
+# --------------------------------------------------------------------------- #
+# 3a. DRF-1543: пищевых пунктов в меню НЕТ, пока нет ручек                     #
+# --------------------------------------------------------------------------- #
+class TestNutritionItemsRemovedUntilTheHandlersExist:
+    """Вариант A DRF-1543 — решение владельца 06.09.2026.
+
+    Ручек ``customer/food/*`` нет, ``guardProd`` на прод-сборке бросает, а
+    ворота §25 п.6 пускают к падению ТОЛЬКО того, кто уже отдал медданные.
+    Пока ручек нет, пункта в меню быть не должно ни в одной строке
+    таблицы — включая самую «разрешительную».
+
+    Каждое отрицание здесь стоит рядом с положительным утверждением на
+    ТЕХ ЖЕ данных (DRF-1411): «пищевых пунктов нет» проверяется вместе с
+    «остальные девять на месте и их payload не изменился».
+    """
+
+    def test_the_tuple_is_empty(self):
+        assert NUTRITION_ITEMS == (), NUTRITION_ITEMS
+
+    @pytest.mark.django_db
+    @pytest.mark.parametrize("granted", [False, True])
+    def test_no_nutrition_item_even_with_the_flag_and_the_consent(
+        self, bot_user, consent, miniapp, settings, granted
+    ):
+        settings.NUTRITION_ENABLED = True
+        consent(granted)
+        text, data = marketplace_menu_reply(bot_user=bot_user)
+
+        labels = _labels(data["buttons"])
+        # Положительная стража НА ТЕХ ЖЕ ДАННЫХ: меню целое, девять пунктов
+        # на месте и их payload не изменился.
+        by_label = {b["label"]: b for b in data["buttons"]}
+        assert len(data["buttons"]) == len(_NINE_REMAINING), labels
+        for label, callback in _NINE_REMAINING:
+            assert label in by_label, labels
+            assert by_label[label]["callback"] == callback, by_label[label]
+        assert BOT_ITEMS[0].line in text, text
+        assert "открывается отдельным экраном" in text, text
+        # И только теперь отрицание.
+        for item in _REMOVED_BY_DRF1543:
+            assert item.label not in labels, labels
+            assert item.line not in text, text
+        payloads = [b["callback"] for b in data["buttons"]]
+        assert not [p for p in payloads if p.startswith(CALLBACK_HEALTH_NEED_PREFIX)], payloads
+        assert "open_food_scan" not in payloads, payloads
+        assert "open_food_diary" not in payloads, payloads
+
+    @pytest.mark.django_db
+    def test_the_fallback_screen_lost_nothing_either(self, bot_user, consent, miniapp, settings):
+        """Промах показывает ту же клавиатуру — значит, и в ней девять."""
+        settings.NUTRITION_ENABLED = True
+        consent(True)
+        _, data = marketplace_fallback_reply(bot_user=bot_user)
+
+        by_label = {b["label"]: b for b in data["buttons"]}
+        assert len(by_label) == len(_NINE_REMAINING), list(by_label)
+        for label, callback in _NINE_REMAINING:
+            assert by_label[label]["callback"] == callback, by_label[label]
+
+    def test_the_routes_themselves_are_not_deleted(self):
+        """Снят ПУНКТ МЕНЮ, а не маршрут.
+
+        Слаги обязаны остаться в ``MINIAPP_ROUTES`` и в ``_ROUTE_MAP``
+        мини-приложения: возврат пункта — одна строка в кортеже, а не
+        восстановление маршрута с обеих сторон. Обе стороны сверяет
+        ``apps/skills/welcome/tests/test_miniapp_routes.py``; здесь пином
+        стоит сам факт наличия, чтобы «уборка мёртвого слага» приходила
+        сюда и объяснялась.
+        """
+        import re
+        from pathlib import Path
+
+        from apps.skills.welcome.skill import MINIAPP_ROUTES
+
+        for item in _REMOVED_BY_DRF1543:
+            assert item.callback in MINIAPP_ROUTES, item.callback
+
+        root = Path(__file__).resolve().parents[4]
+        sdk = (root / "apps" / "miniapp" / "src" / "lib" / "max-sdk.ts").read_text(encoding="utf-8")
+        body = re.search(r"const _ROUTE_MAP: Record<string, string> = \{(.*?)\n\};", sdk, re.DOTALL)
+        assert body is not None, "_ROUTE_MAP не найден — почини парсер, не удаляй тест"
+        pairs = dict(re.findall(r'^\s*(\w+):\s*"([^"]+)",', body.group(1), re.MULTILINE))
+        # Стража: таблица прочитана и не пуста.
+        assert pairs.get("open_profile") == "/customer/profile", sorted(pairs)
+        for item in _REMOVED_BY_DRF1543:
+            assert pairs.get(item.callback) == "/" + MINIAPP_ROUTES[item.callback], item.callback
 
 
 # --------------------------------------------------------------------------- #
@@ -235,10 +392,22 @@ class TestHealthConsentRequestScreen:
         assert len(data["buttons"]) == 1, data["buttons"]
         assert data["buttons"][0]["callback"] == CALLBACK_HEALTH_DECLINE
 
-    def test_unknown_surface_slug_is_not_a_consent_request(self):
+    def test_unknown_surface_slug_is_not_a_consent_request(self, nutrition_items):
         assert health_need_surface(f"{CALLBACK_HEALTH_NEED_PREFIX}food_scan") == "food_scan"
         assert health_need_surface(f"{CALLBACK_HEALTH_NEED_PREFIX}снятый_пункт") is None
         assert health_need_surface("cb:menu:book") is None
+
+    def test_a_removed_item_stops_being_a_consent_request(self):
+        """DRF-1543 без подстановки: снятый пункт больше не просит согласие.
+
+        Ровно тот payload, который остался в истории чата у людей с
+        выкладки 06.09.2026 15:32. Тап по нему обязан вернуть меню, а не
+        запрос особой категории персданных ради поверхности, которой нет.
+        """
+        # Стража: разбор семейства вообще работает и форму отличает.
+        assert marketplace.is_health_callback(f"{CALLBACK_HEALTH_NEED_PREFIX}food_scan")
+        assert health_need_surface(f"{CALLBACK_HEALTH_NEED_PREFIX}food_scan") is None
+        assert health_need_surface(f"{CALLBACK_HEALTH_NEED_PREFIX}food_diary") is None
 
 
 # --------------------------------------------------------------------------- #
@@ -334,8 +503,12 @@ class TestMarketplaceCopyIsItsOwn:
         assert "Формула тела" not in menu_text
 
     def test_every_item_line_is_covered_by_a_button(self):
-        """Строка перечня и кнопка живут одной записью — вместе или никак."""
-        for item in BOT_ITEMS + MINIAPP_ITEMS + NUTRITION_ITEMS:
+        """Строка перечня и кнопка живут одной записью — вместе или никак.
+
+        Снятые DRF-1543 пункты проверяются здесь наравне с живыми: они
+        вернутся этими же записями, и требования к ним те же.
+        """
+        for item in BOT_ITEMS + MINIAPP_ITEMS + NUTRITION_ITEMS + _REMOVED_BY_DRF1543:
             assert item.label.strip(), item
             assert item.line.strip(), item
             assert item.where in {"bot", "miniapp"}, item
@@ -344,14 +517,14 @@ class TestMarketplaceCopyIsItsOwn:
         """MAX отвечает 400 на payload вне ``[A-Za-z0-9_-]``."""
         from apps.channels.max.outbound import OPEN_APP_PAYLOAD_RE
 
-        for item in MINIAPP_ITEMS + NUTRITION_ITEMS:
+        for item in MINIAPP_ITEMS + NUTRITION_ITEMS + _REMOVED_BY_DRF1543:
             assert OPEN_APP_PAYLOAD_RE.fullmatch(item.callback), item
 
     def test_screen_slugs_are_declared_routes(self):
         """Слаг без маршрута — дедлинк в SPA-заглушку, а не кнопка."""
         from apps.skills.welcome.skill import MINIAPP_ROUTES
 
-        for item in MINIAPP_ITEMS + NUTRITION_ITEMS:
+        for item in MINIAPP_ITEMS + NUTRITION_ITEMS + _REMOVED_BY_DRF1543:
             assert item.callback in MINIAPP_ROUTES, item.callback
 
 
