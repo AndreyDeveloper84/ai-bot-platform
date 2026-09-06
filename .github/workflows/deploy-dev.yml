@@ -24,6 +24,7 @@
 #   1. only on a green `ci` run (workflow_run) — never deploys red builds
 #   2. ssh to the box, git pull --ff-only dev
 #   3. docker compose up -d --build --force-recreate --no-deps web worker
+#      + сборка Mini App (DRF-1538) — статика на диске, контейнерами не едет
 #      (--no-deps keeps postgres/redis/chromadb/minio + their data untouched)
 #   4. smoke: /readyz/ on 8013 (5 retries) — fails the deploy if not green
 #   5. best-effort Telegram alert to the dev channel
@@ -112,6 +113,85 @@ jobs:
             sudo docker compose --env-file /etc/ai-bot-platform-dev/.env \
               -p ai-bot-platform-dev up -d --force-recreate --no-deps web worker shadow-worker
             sudo docker compose -p ai-bot-platform-dev ps
+          "
+
+      # DRF-1538 — Mini App собирается здесь, потому что это статика на диске,
+      # а не контейнер. Шага выше не хватало: `compose build web worker` пересобирает
+      # только Python, и 20.08 выяснилось, что `dist` на боевом собран 8 августа —
+      # двенадцать дней выкладки шли зелёными, а люди видели августовский интерфейс.
+      #
+      # Три вещи, каждая из-за конкретной поломки:
+      #
+      # 1. Node 20 через nvm. Системный на боксе 16, Vite 5 его не принимает,
+      #    и сборка падает до первой строки.
+      # 2. Сборка идёт в `dist.new`, а не поверх `dist`. `vite build` очищает
+      #    каталог назначения ПЕРЕД записью, и 21.08 монитор поймал 403 на
+      #    miniapp-dev и proapp — восемь секунд, пока nginx было нечего отдавать.
+      #    Здесь живой `dist` не трогается, пока новая сборка не готова целиком.
+      # 3. Подмена — двумя `mv` после проверки. Провал сборки не доходит до
+      #    живого каталога вовсе, а прежний остаётся в `dist.prev` для отката:
+      #      mv dist dist.broken && mv dist.prev dist
+      - name: Build Mini App (static, not a container)
+        if: steps.guard.outputs.ready == 'true'
+        env:
+          DEV_HOST: ${{ secrets.DEV_HOST }}
+          DEV_USER: ${{ secrets.DEV_USER }}
+          DEV_DEPLOY_PATH: ${{ secrets.DEV_DEPLOY_PATH }}
+        run: |
+          ssh -i ~/.ssh/dev_deploy "${DEV_USER}@${DEV_HOST}" bash -lc "
+            set -euo pipefail
+            cd '${DEV_DEPLOY_PATH}/apps/miniapp'
+
+            export NVM_DIR=\"\$HOME/.nvm\"
+            # shellcheck disable=SC1091
+            . \"\$NVM_DIR/nvm.sh\"
+            # Хост переехал 03.09; на новой машине nvm может быть без 20-й.
+            # Молча упасть на \`nvm use\` хуже, чем поставить её один раз.
+            nvm use 20 || nvm install 20
+            node --version
+
+            npm ci --no-audit --no-fund
+
+            rm -rf dist.new
+            npx tsc --noEmit
+            npx vite build --outDir dist.new --emptyOutDir
+
+            # Проверяем ДО подмены: пустой или обрезанный результат не должен
+            # доехать до живого каталога. Одного index.html мало — vite пишет
+            # его первым, а падает на ассетах.
+            test -s dist.new/index.html
+            test -d dist.new/assets
+            test \"\$(ls -1 dist.new/assets | wc -l)\" -gt 0
+
+            rm -rf dist.prev
+            if [ -d dist ]; then mv dist dist.prev; fi
+            mv dist.new dist
+
+            echo '::notice::miniapp dist rebuilt:' \"\$(ls -1 dist/assets | grep -cE '\.js\$')\" 'js bundles'
+            stat -c '%y %n' dist/index.html
+          "
+
+      # Проверка снаружи, а не на диске: свежая дата файла обновится и при сборке
+      # старого дерева. Здесь мы достаём имя бандла из отданного по https index.html
+      # и убеждаемся, что сам бандл скачивается. Это доказывает, что человек
+      # получает новый код, а не что файл лежит на месте.
+      - name: Smoke — Mini App answers over https
+        if: steps.guard.outputs.ready == 'true'
+        continue-on-error: true
+        env:
+          DEV_HOST: ${{ secrets.DEV_HOST }}
+          DEV_USER: ${{ secrets.DEV_USER }}
+        run: |
+          ssh -i ~/.ssh/dev_deploy "${DEV_USER}@${DEV_HOST}" bash -lc "
+            B=\$(curl -fsS https://miniapp-dev.gobeauty.site/ | grep -oE 'index-[A-Za-z0-9_-]+\.js' | head -1)
+            if [ -z \"\$B\" ]; then
+              echo '::warning::не нашёл имя бандла в отданном index.html'; exit 0
+            fi
+            if curl -fsS -o /dev/null \"https://miniapp-dev.gobeauty.site/assets/\$B\"; then
+              echo '::notice::miniapp отдаёт бандл' \"\$B\"
+            else
+              echo '::warning::бандл' \"\$B\" 'не скачивается — посмотреть nginx'
+            fi
           "
 
       - name: Smoke — /readyz/ on dev (port 8013)
