@@ -1,0 +1,66 @@
+{% extends "admin/base_site.html" %}
+{# Поиск клиента (DRF-1497): по идентификатору канала, имени, салону.
+   По телефону поиска нет и не будет — DRF-1039. #}
+
+{% block breadcrumbs %}
+  <div class="breadcrumbs">
+    <a href="{% url 'admin:index' %}">Админка</a>
+    &rsaquo; Клиенты
+  </div>
+{% endblock %}
+
+{% block content %}
+  <div id="content-main">
+    <h1>Клиенты</h1>
+    <p style="max-width: 46em;">
+      Поиск по идентификатору канала, имени или салону.
+      По телефону искать нельзя — телефон клиента не показывается и не передаётся.
+    </p>
+
+    <form method="get" action="">
+      <input type="text" name="q" value="{{ query }}" size="50"
+             placeholder="Имя, идентификатор в канале или салон" autofocus>
+      <button type="submit" class="button">Найти</button>
+    </form>
+
+    {% if searched %}
+      {% if results %}
+        <table id="result_list" style="margin-top: 1.5em;">
+          <thead>
+            <tr>
+              <th>Имя</th>
+              <th>Канал</th>
+              <th>Идентификатор в канале</th>
+              <th>Салон</th>
+              <th>Был(а)</th>
+              <th>Статус</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for row in results %}
+              <tr>
+                <td>
+                  <a href="{% url 'admin:adminconsole_client_card' row.pk %}">
+                    {{ row.display_name|default:row.client_name|default:"—" }}
+                  </a>
+                </td>
+                <td>{{ row.channel }}</td>
+                <td>{{ row.channel_user_id }}</td>
+                <td>{{ row.tenant.name }}</td>
+                <td>{{ row.last_seen|date:"d.m.Y H:i" }}</td>
+                <td>
+                  {% if row.blocked_at %}<strong>заблокирован(а)</strong>
+                  {% elif row.deleted_at %}удалён(а)
+                  {% else %}активен(на){% endif %}
+                </td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      {% else %}
+        <p style="margin-top: 1.5em;">Никого не нашлось. Проверьте написание —
+        поиск идёт по имени, идентификатору в канале и названию салона.</p>
+      {% endif %}
+    {% endif %}
+  </div>
+{% endblock %}

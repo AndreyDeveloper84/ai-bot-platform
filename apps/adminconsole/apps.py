@@ -29,9 +29,11 @@ class AdminconsoleConfig(AppConfig):
         (перезагрузка реестра приложений в тестах) ничего не удваивает.
         """
         from apps.adminconsole.client_scope import install_client_data_scope
+        from apps.adminconsole.clients import install_client_card
         from apps.adminconsole.journal import install_admin_journal
         from apps.adminconsole.secrets_policy import install_secret_field_policy
 
         install_admin_journal()
         install_secret_field_policy()
         install_client_data_scope()
+        install_client_card()
