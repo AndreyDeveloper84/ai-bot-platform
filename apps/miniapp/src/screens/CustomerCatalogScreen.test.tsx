@@ -11,7 +11,7 @@
  */
 import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { MemoryRouter, Route, Routes, useParams } from "react-router-dom";
+import { MemoryRouter, Route, Routes, useLocation, useParams } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("../lib/api", async (importOriginal) => {
@@ -84,11 +84,25 @@ function MasterProbe() {
   return <div>MASTER-{masterId}</div>;
 }
 
+/** Where the router currently is — CTA navigation assertions. */
+function PathProbe() {
+  const location = useLocation();
+  return <div data-testid="path">{location.pathname}</div>;
+}
+
 function renderScreen() {
   render(
     <MemoryRouter initialEntries={["/customer/catalog"]}>
       <Routes>
-        <Route path="/customer/catalog" element={<CustomerCatalogScreen />} />
+        <Route
+          path="/customer/catalog"
+          element={
+            <>
+              <CustomerCatalogScreen />
+              <PathProbe />
+            </>
+          }
+        />
         <Route path="/customer/catalog/:serviceId" element={<ServiceProbe />} />
         <Route path="/customer/masters/:masterId" element={<MasterProbe />} />
       </Routes>
@@ -302,5 +316,133 @@ describe("CustomerCatalogScreen (real mirror data)", () => {
     expect(await screen.findByRole("region", { name: "Услуги" })).toBeInTheDocument();
     expect(screen.queryByText(/выдуманных/)).not.toBeInTheDocument();
     expect(screen.queryByText("Beauty Place")).not.toBeInTheDocument();
+  });
+});
+
+// --- DRF-1482: контракт пустого каталога (empty_reason) -----------------
+// Spec: docs/screens/customer-catalog-empty-states-spec.md §1–§2.
+// Every empty situation gets its OWN message and its OWN recovery CTA —
+// the screen is never blank without an explanation.
+
+const SEARCH_NO_MATCH_TEXT = "Не нашла ничего по такому запросу";
+const REGION_EMPTY_TEXT = "Пока здесь нет подключённых салонов";
+const BOOKING_UNAVAILABLE_TEXT =
+  /Подходящие услуги есть, но сейчас нет свободных мест для записи/;
+
+describe("CustomerCatalogScreen — empty states (DRF-1482)", () => {
+  it("search_no_match: zero services with masters present explains itself (the defect)", async () => {
+    const user = userEvent.setup();
+    mockHappyPath();
+    renderScreen();
+    await screen.findByRole("region", { name: "Услуги" });
+
+    // The audit defect: free-text search filters services to zero while
+    // masters stay — the old gate rendered NOTHING here.
+    await user.type(
+      screen.getByRole("searchbox", { name: "Поиск по услугам" }),
+      "несуществующая",
+    );
+
+    // Own message + own CTA…
+    expect(await screen.findByText(SEARCH_NO_MATCH_TEXT)).toBeInTheDocument();
+    // …masters are NOT hidden — they were never the problem…
+    expect(screen.getByText("Анна Соколова")).toBeInTheDocument();
+    // …and no other state's copy leaks in (positive guard, DRF-1411).
+    expect(screen.queryByText(REGION_EMPTY_TEXT)).not.toBeInTheDocument();
+    expect(screen.queryByText(BOOKING_UNAVAILABLE_TEXT)).not.toBeInTheDocument();
+
+    // CTA «Посмотреть все услуги» — recovery: полный каталог по
+    // каноническому адресу (DRF-1481).
+    await user.click(screen.getByRole("button", { name: "Посмотреть все услуги" }));
+    expect(screen.getByTestId("path")).toHaveTextContent("/customer/catalog");
+    const servicesSection = await screen.findByRole("region", { name: "Услуги" });
+    expect(within(servicesSection).getAllByRole("article")).toHaveLength(4);
+    expect(screen.queryByText(SEARCH_NO_MATCH_TEXT)).not.toBeInTheDocument();
+  });
+
+  it("region_empty: no salons connected — own text and retry CTA", async () => {
+    const user = userEvent.setup();
+    // Backend predating the field: no empty_reason — the client derives
+    // the state from the same signals the server would use.
+    mockedFetchServices.mockResolvedValue({ services: [] });
+    mockedFetchMasters.mockResolvedValue({ masters: [] });
+    mockedFetchRecommendations.mockRejectedValue(new Error("[502] ayla_unavailable"));
+    renderScreen();
+
+    expect(await screen.findByText(REGION_EMPTY_TEXT)).toBeInTheDocument();
+    expect(screen.queryByText(SEARCH_NO_MATCH_TEXT)).not.toBeInTheDocument();
+    expect(screen.queryByText(BOOKING_UNAVAILABLE_TEXT)).not.toBeInTheDocument();
+    // Recovery exists and works: salons may have connected since.
+    mockedFetchServices.mockResolvedValue({ services: SERVICES });
+    mockedFetchMasters.mockResolvedValue({ masters: MASTERS });
+    await user.click(screen.getByRole("button", { name: "Проверить снова" }));
+    expect(await screen.findByRole("region", { name: "Услуги" })).toBeInTheDocument();
+    expect(screen.queryByText(REGION_EMPTY_TEXT)).not.toBeInTheDocument();
+  });
+
+  it("region_empty: server-provided empty_reason is honoured verbatim", async () => {
+    mockedFetchServices.mockResolvedValue({ services: [], empty_reason: "region_empty" });
+    mockedFetchMasters.mockResolvedValue({ masters: [] });
+    mockedFetchRecommendations.mockRejectedValue(new Error("[502] ayla_unavailable"));
+    renderScreen();
+    expect(await screen.findByText(REGION_EMPTY_TEXT)).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Проверить снова" }),
+    ).toBeInTheDocument();
+  });
+
+  it("booking_unavailable: services exist but none is bookable — own text and both CTAs", async () => {
+    const user = userEvent.setup();
+    const unbookable = SERVICES.map((s) => ({ ...s, is_bookable: false }));
+    mockedFetchServices.mockResolvedValue({ services: unbookable });
+    mockedFetchMasters.mockResolvedValue({ masters: [] });
+    mockedFetchRecommendations.mockRejectedValue(new Error("[502] ayla_unavailable"));
+    renderScreen();
+
+    expect(await screen.findByText(BOOKING_UNAVAILABLE_TEXT)).toBeInTheDocument();
+    expect(screen.queryByText(SEARCH_NO_MATCH_TEXT)).not.toBeInTheDocument();
+    expect(screen.queryByText(REGION_EMPTY_TEXT)).not.toBeInTheDocument();
+    // The shop window stays (DRF-1164): услуги видны, с честной пометкой.
+    expect(screen.getByRole("region", { name: "Услуги" })).toBeInTheDocument();
+
+    // «Смотреть все услуги» ведёт на канонический /customer/catalog.
+    await user.click(screen.getByRole("button", { name: "Смотреть все услуги" }));
+    expect(screen.getByTestId("path")).toHaveTextContent("/customer/catalog");
+
+    // «Подобрать ещё раз» — recovery: перезагрузить, вдруг места появились.
+    mockHappyPath();
+    await user.click(screen.getByRole("button", { name: "Подобрать ещё раз" }));
+    expect(await screen.findByRole("region", { name: "Мастера" })).toBeInTheDocument();
+    expect(screen.queryByText(BOOKING_UNAVAILABLE_TEXT)).not.toBeInTheDocument();
+  });
+
+  it("unknown server reason: spec default copy, never a blank screen", async () => {
+    // Forward-compat (spec §1 default row): a reason this build does not
+    // know renders the booking_unavailable copy — the API can grow new
+    // reasons without breaking the client.
+    mockedFetchServices.mockResolvedValue({
+      services: SERVICES,
+      empty_reason: "premium_only",
+    });
+    mockedFetchMasters.mockResolvedValue({ masters: MASTERS });
+    mockedFetchRecommendations.mockRejectedValue(new Error("[502] ayla_unavailable"));
+    renderScreen();
+
+    // Server value wins over client derivation (services ARE bookable —
+    // derivation alone would say "no empty state").
+    expect(await screen.findByText(BOOKING_UNAVAILABLE_TEXT)).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Подобрать ещё раз" }),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("premium_only")).not.toBeInTheDocument();
+  });
+
+  it("non-empty bookable catalog: no empty state at all (positive guard)", async () => {
+    mockHappyPath();
+    renderScreen();
+    await screen.findByRole("region", { name: "Услуги" });
+    expect(screen.queryByText(SEARCH_NO_MATCH_TEXT)).not.toBeInTheDocument();
+    expect(screen.queryByText(REGION_EMPTY_TEXT)).not.toBeInTheDocument();
+    expect(screen.queryByText(BOOKING_UNAVAILABLE_TEXT)).not.toBeInTheDocument();
   });
 });

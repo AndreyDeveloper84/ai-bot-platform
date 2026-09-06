@@ -3691,6 +3691,19 @@ a {
 .customer-catalog__search {
   margin: var(--s-2) 0 var(--s-3);
 }
+/* DRF-1482 — contextual empty states (spec §1). Same CTA geometry as
+   the records empty state: primary action filled, neighbours outlined. */
+.catalog-empty__ctas {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s-2);
+  margin-top: var(--s-3);
+}
+.catalog-empty__cta-primary {
+  background: var(--c-accent);
+  color: var(--c-text-on-accent);
+  border-color: var(--c-accent);
+}
 .customer-catalog__search-input {
   width: 100%;
   min-height: 44px;

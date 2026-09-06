@@ -136,7 +136,19 @@ export interface Service {
    */
   is_bookable: boolean;
 }
-export const fetchServices = (): Promise<{ services: Service[] }> =>
+export const fetchServices = (): Promise<{
+  services: Service[];
+  /**
+   * DRF-1482 — WHY the catalog has nothing to offer, server-computed
+   * (`apps/miniapp_api/views.py::services_list`), per
+   * `docs/screens/customer-catalog-empty-states-spec.md` §2:
+   * `empty_reason ∈ {search_no_match, region_empty, booking_unavailable}`.
+   * The server never sends `search_no_match` (free-text search never
+   * leaves the Mini App — the client derives that one). Optional while
+   * older backends roll out; `null`/absent means "no empty state".
+   */
+  empty_reason?: string | null;
+}> =>
   request("/services", { method: "GET" });
 export const fetchService = (id: string): Promise<{ service: Service }> =>
   request(`/services/${id}`, { method: "GET" });

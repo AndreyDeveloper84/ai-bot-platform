@@ -96,6 +96,15 @@ export interface CatalogBrowseData {
    * WHY — branded picks sections hide silently then.
    */
   picks: ServicePick[];
+  /**
+   * DRF-1482 — `empty_reason` exactly as `GET /services` sent it
+   * (null when the catalog has something to offer or the backend
+   * predates the field). Passed through UNVALIDATED: mapping values
+   * to states is `lib/customer-catalog-empty.ts`'s job, so a new
+   * server reason reaches the screen untouched (forward-compat).
+   * Optional so older composed fixtures stay valid.
+   */
+  emptyReason?: string | null;
 }
 
 /** Owner ruling 25.08: WHY is «2–3 коротких» — never a wall of text. */
@@ -152,6 +161,7 @@ export async function getCatalogBrowse(): Promise<CatalogBrowseData> {
     services: servicesRes.services,
     masters: mastersRes.masters,
     picks,
+    emptyReason: servicesRes.empty_reason ?? null,
   };
 }
 

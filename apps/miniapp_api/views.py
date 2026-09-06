@@ -727,7 +727,37 @@ def services_list(request: HttpRequest) -> HttpResponse:
     """
 
     qs = _services_with_bookability().filter(is_active=True).order_by("name")
-    return JsonResponse({"services": [_service_to_dict(s) for s in qs]})
+    rows = [_service_to_dict(s) for s in qs]
+    return JsonResponse({"services": rows, "empty_reason": _catalog_empty_reason(rows)})
+
+
+def _catalog_empty_reason(rows: list[dict[str, Any]]) -> str | None:
+    """``empty_reason`` for the catalog payload (DRF-1482, spec §2).
+
+    Contract: ``empty_reason ∈ {search_no_match, region_empty,
+    booking_unavailable}`` — the reason lives on the server so the API
+    can grow new reasons without breaking the client
+    (``docs/screens/customer-catalog-empty-states-spec.md``).
+
+    Computed from the rows this view already serialized — no extra
+    queries. Only the two reasons the catalog endpoint can see are
+    produced here; ``search_no_match`` is client-side by nature
+    (free-text search never leaves the Mini App):
+
+    - no active services at all → ``region_empty`` (the pilot reality:
+      a city with no connected salons yet);
+    - services exist but NOT ONE is bookable → ``booking_unavailable``
+      (CONFIRMED reading: «услуги есть, но не забронировать»).
+
+    ``None`` when at least one bookable service exists — the catalog
+    has something to offer and no empty state applies.
+    """
+
+    if not rows:
+        return "region_empty"
+    if not any(row["is_bookable"] for row in rows):
+        return "booking_unavailable"
+    return None
 
 
 @require_http_methods(["GET"])
