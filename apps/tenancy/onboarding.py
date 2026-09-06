@@ -39,8 +39,8 @@ from typing import Any
 
 from django.core.exceptions import ValidationError
 
-from apps.catalog.master_state import AVAILABLE
 from apps.catalog.models import CatalogMaster, CatalogService
+from apps.tenancy.context import tenant_scope
 from apps.tenancy.models import Tenant
 
 # ---------------------------------------------------------------------------
@@ -123,9 +123,16 @@ def assess_salon(tenant: Tenant) -> SalonAssessment:
     после хотя бы одной успешной синхронизации — до неё обе пустоты уже
     названы причиной ``never_synced``, и дублировать их значило бы
     отвечать на вопрос дважды.
+
+    Чтение каталога — строго скопленное, через ``tenant_scope`` и
+    тенантные менеджеры: кросс-тенантный ``all_tenants`` вне
+    ``apps/marketplace/`` запрещает контракт MKT1 (#1018), а карточке
+    нужен ровно один салон. Предикат бронируемости тот же, что читает
+    клиент: ``_MasterManager.bookable()`` → ``master_state.AVAILABLE``.
     """
-    active_services = CatalogService.all_tenants.filter(tenant=tenant, is_active=True).count()
-    bookable_masters = CatalogMaster.all_tenants.filter(AVAILABLE, tenant=tenant).count()
+    with tenant_scope(tenant):
+        active_services = CatalogService.objects.filter(is_active=True).count()
+        bookable_masters = CatalogMaster.objects.bookable().count()
 
     reasons: list[str] = []
     if not tenant.is_active:
