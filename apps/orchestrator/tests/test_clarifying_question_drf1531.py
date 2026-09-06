@@ -32,6 +32,7 @@ from django.test import override_settings
 
 from apps.catalog.models import CatalogMaster, CatalogService, MasterService
 from apps.marketplace.discovery import clarification_material, discover_masters
+from apps.orchestrator import discovery as orchestrator_discovery
 from apps.orchestrator.concierge import generate_direct_show_masters_reply
 from apps.orchestrator.discovery import (
     CLARIFY_SERVICE_QUESTION,
@@ -272,6 +273,42 @@ class TestGoalRequest:
 
         for option in _options(reply):
             assert clarifying_question(specialization=option) is None, option
+
+
+class TestAQuestionNeverCostsTheAnswer:
+    """Каталожное чтение вопроса — лучшее усилие, а не условие ответа."""
+
+    @staticmethod
+    def _explode(**_kwargs: object) -> None:
+        raise RuntimeError("Database access not allowed")
+
+    def test_a_broken_catalog_read_degrades_to_no_question(
+        self, massage: Tenant, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Отрицание. Положительная стража — прямо над ним, на тех же данных."""
+        # Positive first: with the catalog reachable, this very query asks.
+        assert clarifying_question(specialization="массаж") is not None
+
+        monkeypatch.setattr(orchestrator_discovery, "clarification_material", self._explode)
+
+        # And with it unreachable the turn is not lost — it just gets the list.
+        assert clarifying_question(specialization="массаж") is None
+
+    def test_the_turn_still_answers_with_cards(
+        self, massage: Tenant, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Форма живого читателя: каталог вопроса недоступен, ответ — есть.
+
+        Ровно то, на чём падали наборы `show_masters` до стражи выше: там
+        маркетплейс замокан и базы нет вовсе.
+        """
+        monkeypatch.setattr(orchestrator_discovery, "clarification_material", self._explode)
+
+        reply = generate_direct_show_masters_reply("хочу массаж", trace_id="t-soft")
+
+        assert reply is not None
+        # The list, not the question, and not an exception.
+        assert reply.text.startswith("Вот мастера")
 
 
 class TestTheConciergeFastPathAsksToo:

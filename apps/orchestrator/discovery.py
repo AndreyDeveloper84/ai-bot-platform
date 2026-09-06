@@ -2525,6 +2525,23 @@ def clarifying_question(
     callback, so a tap re-enters the turn as if the person had typed that
     service name — the established «tap == typed answer» contract. There is no
     second mechanism and no pending-question state to keep in sync.
+
+    ### Why the catalog read cannot take the turn down
+
+    The question is an IMPROVEMENT on the answer, not the answer. So the two
+    catalog reads below are best-effort — the same posture
+    :func:`rotation_seed` states for its own read — and anything that goes
+    wrong in them degrades to ``None``, i.e. to the master list this branch
+    would have rendered anyway. A turn that fails outright because the bot
+    could not decide how to ask a question is strictly worse than a turn
+    answered without one.
+
+    Not hypothetical: the ``show_masters`` suites render this path with the
+    marketplace mocked and NO database at all
+    (``apps/orchestrator/tests/test_discovery_show_masters.py``), and before
+    this guard those turns died on ``Database access not allowed`` — a real
+    reader in the same shape as an outage. The failure is logged, so the
+    feature cannot go quietly dead in production.
     """
     from django.conf import settings
 
@@ -2534,16 +2551,21 @@ def clarifying_question(
     said = (specialization or "").strip()
     if not said:
         return None
-    # ``parse_query`` and not a re-composition of its halves: this gate and
-    # ``clarification_material`` must agree about what the query said, and the
-    # only way to be sure is to call the same function the catalog calls.
-    parsed = parse_query(said)
-    if not parsed.goals and len(parsed.stems) != 1:
-        # Two or more service words is a request that already says which one
-        # («спортивный массаж»); zero without a goal is a city or an
-        # unparseable turn, which this question has nothing to ask about.
+    try:
+        # ``parse_query`` and not a re-composition of its halves: this gate and
+        # ``clarification_material`` must agree about what the query said, and
+        # the only way to be sure is to call the same function the catalog
+        # calls.
+        parsed = parse_query(said)
+        if not parsed.goals and len(parsed.stems) != 1:
+            # Two or more service words is a request that already says which
+            # one («спортивный массаж»); zero without a goal is a city or an
+            # unparseable turn, which this question has nothing to ask about.
+            return None
+        material = clarification_material(city=city, specialization=said)
+    except Exception as exc:  # noqa: BLE001 — a question must never cost the answer
+        logger.warning("orchestrator.discovery.clarify.unavailable err=%s", exc)
         return None
-    material = clarification_material(city=city, specialization=said)
     if material.tier < threshold or len(material.options) < 2:
         return None
     logger.info(
