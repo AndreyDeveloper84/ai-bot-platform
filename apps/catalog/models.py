@@ -201,6 +201,16 @@ class _MasterManager(TenantScopedManager):
     ``is_active`` stayed on sale. It deliberately does NOT add
     ``linked_bot_user IS NOT NULL`` — see the module docstring there for
     the nine pilot masters that requirement would take off sale.
+
+    DRF-1506 — предикат приезжает из
+    :data:`apps.catalog.master_state.AVAILABLE`, единственного
+    определения на все места. DRF-1540 добавил в него
+    ``ayla_user_id IS NOT NULL``: строка без канонического ключа
+    продавалась бы, а уведомления о записи до человека не доходили бы —
+    решение владельца 06.09.2026 меняет молчаливый отказ на видимый.
+    Условие живёт ТАМ, а не здесь: следующая задача (DRF-1521) добавляет
+    своё в то же место, и «почему не продаётся» обязано иметь один ответ
+    на витрину и на ростер владелицы.
     """
 
     def bookable(self):

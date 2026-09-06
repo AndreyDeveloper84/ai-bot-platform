@@ -77,21 +77,36 @@ const SOURCE_LABEL: Record<RoleSource, string> = {
  * Suffix on the role chip. `active` says nothing — a live role is the
  * default and does not need a word.
  *
- * `pending` and `revoked` must never share copy: one is somebody who has
- * not arrived yet and needs the invite resent, the other is somebody
- * whose access was taken away. Telling them apart is why the backend
- * returns three states instead of a boolean.
+ * `pending`, `revoked` and `ayla_unlinked` must never share copy: one is
+ * somebody who has not arrived yet and needs the invite resent, one is
+ * somebody whose access was taken away, and one is a master we failed to
+ * link to Ayla. Three different next moves for the owner. Telling them
+ * apart is why the backend returns a reason instead of a boolean.
  */
 const STATE_SUFFIX: Record<RoleState, string> = {
   active: "",
   pending: " — приглашение не принято",
   revoked: " — доступ отозван",
+  // DRF-1540, wording is the owner's decision of 06.09.2026 kept
+  // verbatim. It repeats «мастера» after the «Мастер» chip label, and
+  // that is the cheaper of the two prices: paraphrasing a decision text
+  // is how a status starts meaning something slightly else.
+  //
+  // It must never read like `pending` or `revoked`. Those two send the
+  // owner to the master (resend the invite / restore access); this one
+  // sends her to us, because the missing link is ours to fix. One text
+  // for two causes would send her to spend an evening on the wrong one.
+  ayla_unlinked: " — не удалось связать профиль мастера с Ayla",
 };
 
 const STATE_CHIP_CLASS: Record<RoleState, string> = {
   active: "admin-chip",
   pending: "admin-chip admin-chip--warn",
   revoked: "admin-chip admin-chip--revoked",
+  // Not `--warn` and not `--revoked`: a revoked role is a fact and a
+  // pending invite is a nudge, while this one is a fault that keeps a
+  // working master off the storefront until somebody acts.
+  ayla_unlinked: "admin-chip admin-chip--fault",
 };
 
 const MONTHS_GEN = [

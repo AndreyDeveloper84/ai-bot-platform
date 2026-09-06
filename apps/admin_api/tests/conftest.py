@@ -13,7 +13,7 @@ import json
 import time as time_module
 import uuid
 from datetime import datetime, timedelta, timezone
-from typing import Any
+from typing import Any, Final
 from urllib.parse import urlencode
 
 import pytest
@@ -122,6 +122,14 @@ def customer_bot_user(tenant: Tenant) -> BotUser:
     return _make_bot_user(tenant, channel_user_id="5005", display_name="Клиент")
 
 
+#: Sentinel for ``make_master(ayla_user_id=…)`` — mint a fresh canonical
+#: link. A row that sells always carries one in production (catalog sync
+#: writes ``dto.user_id``), so this is the realistic default; ``None``
+#: has to be asked for, because since DRF-1540 it means «off the
+#: storefront, and the owner is told why».
+AUTO_AYLA_LINK: Final = "auto"
+
+
 def make_master(
     tenant: Tenant,
     *,
@@ -134,10 +142,12 @@ def make_master(
     specialization: str = "Маникюр",
     bio: str = "",
     invited_at_offset_days: int = 0,
+    ayla_user_id: uuid.UUID | None | str = AUTO_AYLA_LINK,
 ) -> CatalogMaster:
     """Create a CatalogMaster with MM1/MM3-relevant defaults.
 
-    Defaults match a typical ACTIVE roster row (ACCEPTED + is_active).
+    Defaults match a typical ACTIVE roster row (ACCEPTED + is_active +
+    a canonical ``ayla_user_id``).
     """
 
     now = datetime.now(tz=timezone.utc)
@@ -161,6 +171,7 @@ def make_master(
         invited_at=invited_at,
         max_handle="@anna_styl",
         linked_bot_user=linked_bot_user,
+        ayla_user_id=(uuid.uuid4() if ayla_user_id == AUTO_AYLA_LINK else ayla_user_id),
     )
 
 

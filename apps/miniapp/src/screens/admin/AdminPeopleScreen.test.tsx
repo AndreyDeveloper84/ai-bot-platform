@@ -171,7 +171,7 @@ describe("the additive-role trap, at the UI layer", () => {
   });
 });
 
-describe("pending and revoked never share wording", () => {
+describe("pending, revoked and ayla_unlinked never share wording", () => {
   const base: StaffRosterPerson = {
     id: "master:m-9",
     bot_user_id: null,
@@ -211,6 +211,35 @@ describe("pending and revoked never share wording", () => {
       expect(screen.getByText(/доступ отозван/)).toBeInTheDocument();
     });
     expect(screen.queryByText(/приглашение не принято/)).not.toBeInTheDocument();
+  });
+
+  it("names the Ayla link failure, and blames neither the master nor the salon", async () => {
+    // DRF-1540. This master looks entirely fine on every other column —
+    // accepted, active, in the roster — and is off the storefront because
+    // we could not link her row to a canonical Ayla id. Before the fix she
+    // was sold to clients and received no booking notification at all.
+    //
+    // The owner's next move is to come to us. `доступ отозван` would send
+    // her hunting for whoever revoked it (nobody did) and
+    // `приглашение не принято` would send her back to the master (she
+    // accepted). One text for three causes is the defect, not the copy.
+    mockedRoster.mockResolvedValue(
+      rosterOf({
+        ...base,
+        roles: [grant("master", "ayla_unlinked", "master_invite", daysAgo(1))],
+      }),
+    );
+    renderScreen();
+
+    await waitFor(() => {
+      expect(
+        screen.getByText(/не удалось связать профиль мастера с Ayla/),
+      ).toBeInTheDocument();
+    });
+    expect(screen.queryByText(/доступ отозван/)).not.toBeInTheDocument();
+    expect(
+      screen.queryByText(/приглашение не принято/),
+    ).not.toBeInTheDocument();
   });
 
   it("keeps a revoked role visible rather than dropping it", async () => {

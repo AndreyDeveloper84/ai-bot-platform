@@ -1481,7 +1481,22 @@ export type RoleSource = "access_code" | "master_invite" | "direct";
  * writes no row at all, so that person is absent from the roster rather
  * than pending in it.
  */
-export type RoleState = "active" | "pending" | "revoked";
+/**
+ * `ayla_unlinked` (DRF-1540) is the one state that is OUR fault, not the
+ * salon's: the master's row carries no canonical `ayla_user_id`, so she
+ * would be sold to clients while no booking notification could ever
+ * reach her. She is taken off the storefront and the owner is told why —
+ * a silent failure traded for a visible one. It is not `revoked`,
+ * because nobody revoked anything and there is nothing for the owner to
+ * un-revoke.
+ *
+ * The backend grows this union in `apps/catalog/master_state.py`
+ * (`SaleBlock`). A new member must be added to `STATE_SUFFIX` and
+ * `STATE_CHIP_CLASS` in `AdminPeopleScreen.tsx` — both are exhaustive
+ * `Record<RoleState, …>`, so the type checker refuses a half-done
+ * addition rather than rendering an empty chip.
+ */
+export type RoleState = "active" | "pending" | "revoked" | "ayla_unlinked";
 
 export interface StaffRoleGrant {
   role: "owner" | "admin" | "receptionist" | "master";

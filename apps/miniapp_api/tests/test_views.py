@@ -8,6 +8,7 @@ import json
 import time as time_module
 from datetime import date, datetime, time, timedelta, timezone
 from urllib.parse import urlencode
+from uuid import uuid4
 
 import pytest
 from django.test import Client
@@ -70,6 +71,10 @@ def master(tenant: Tenant) -> CatalogMaster:
         external_updated_at=datetime(2026, 5, 18, tzinfo=timezone.utc),
         name="Анна",
         is_active=True,
+        # DRF-1540 — форма синхронизированной строки: канонический ключ
+        # заполнен. Без него мастер не бронируется, и клиентские ручки
+        # ниже отвечали бы 404 не потому, что сломаны.
+        ayla_user_id=uuid4(),
     )
 
 
