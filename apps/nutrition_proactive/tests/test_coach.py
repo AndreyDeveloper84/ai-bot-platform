@@ -631,3 +631,74 @@ class TestStopButtonCoversCoachHint:
         tap = resolve_nutri_stop_tap("cb:nutri:stop:coach_hint")
         assert tap is not None
         assert tap.history_text is None
+
+
+# ---------------------------------------------------------------------------
+# The operator-facing dry run
+# ---------------------------------------------------------------------------
+
+
+class TestDryRunCommand:
+    """``nutrition_coach_dryrun`` runs the planner, not a parallel
+    selection — the same contract ``TestDryRunCommandShowsTheGate`` pins
+    for the report/water surfaces."""
+
+    def _run(self, *args: str) -> str:
+        from io import StringIO
+
+        from django.core.management import call_command
+
+        out = StringIO()
+        call_command(
+            "nutrition_coach_dryrun",
+            "--at",
+            NOON.astimezone(MSK).isoformat(),
+            "--no-ayla",
+            *args,
+            stdout=out,
+        )
+        return out.getvalue()
+
+    @staticmethod
+    def _rows(report: str) -> dict[str, dict]:
+        import json
+
+        rows: dict[str, dict] = {}
+        for line in report.splitlines():
+            line = line.strip()
+            if line.startswith("{"):
+                row = json.loads(line)
+                rows[row["bot_user_id"]] = row
+        return rows
+
+    def test_the_recipient_and_the_blocked_shapes(self, tenant: Tenant) -> None:
+        recipient = coach_user(tenant, suffix="ok")
+
+        no_health = make_user(tenant, suffix="nohealth")  # personal-data only
+
+        opted_out_pref = coach_user(tenant, suffix="pref", extra_prefs={"coach_hints": False})
+
+        rows = self._rows(self._run())
+        assert rows[str(recipient.pk)]["send"] is True
+        assert rows[str(recipient.pk)]["reason"] == "due"
+        assert rows[str(no_health.pk)]["reason"] == "no_health_consent"
+        assert rows[str(opted_out_pref.pk)]["reason"] == "hints_off"
+
+    def test_no_message_text_reaches_the_report(self, tenant: Tenant) -> None:
+        coach_user(tenant, suffix="ok")
+        rows = self._rows(self._run())
+        assert rows, "dry-run показал ноль строк — проверять нечего"
+        # empty-assert-ok: свойство — отсутствие текста в выводе;
+        # присутствие строк прибито ассертом выше на тех же данных.
+        assert all("text" not in row for row in rows.values())
+
+    def test_the_flags_are_printed_and_still_closed(self, tenant: Tenant, settings) -> None:
+        """The report says out loud that nothing can actually be sent.
+
+        The autouse fixture holds the flag OPEN for the planner tests, so
+        the default-closed state is restored here explicitly."""
+        settings.NUTRITION_COACH_ENABLED = False
+        settings.NUTRITION_COACH_DRY_RUN = True
+        report = self._run()
+        assert "NUTRITION_COACH_ENABLED=False" in report
+        assert "NUTRITION_COACH_DRY_RUN=True" in report
