@@ -182,6 +182,21 @@ MINIAPP_ROUTES: dict[str, str] = {
     "open_water_add_250": "customer/wellness",
     "open_goal_select": "customer/goal-select",
     "open_home": "customer/main",
+    # DRF-1491 — главное меню витрины (``apps.skills.menu.marketplace``).
+    # Два экрана, у которых слага до сих пор не было.
+    "open_food_diary": "customer/food-scanner/diary",
+    # На ``open_wellness`` кнопки сегодня НЕТ — по той же причине и с той
+    # же судьбой, что у ``open_food_scan`` абзацем выше: экран в прод-
+    # сборке отдаёт ``PilotComingSoonScreen`` (сторож
+    # ``STUB_SURFACES_ENABLED``, «hidden until S4/post-pilot»), и меню
+    # витрины его не предлагает. Строка остаётся: экран готовится, кнопка
+    # вернётся, а запись в таблице — не то, что человек может нажать.
+    #
+    # Панель уже достижима через ``open_water_add_250``, но под тем
+    # именем, под которым её нельзя предложить в меню — «+ стакан воды»
+    # это не «самочувствие»; старое имя не переименовано, потому что
+    # старые клавиатуры в истории чата продолжают его слать.
+    "open_wellness": "customer/wellness",
 }
 
 
