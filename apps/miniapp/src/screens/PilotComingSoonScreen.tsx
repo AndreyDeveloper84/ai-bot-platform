@@ -65,9 +65,10 @@ export function PilotComingSoonScreen({ surface }: Props) {
 
   const copy = COPY[surface];
   const activeTab = surface === "home" ? "Главная" : "Услуги";
+  // Без вкладки «День» (DRF-1546): поверхности «День» не существует —
+  // её роль исполнял домашний экран, а он теперь «Главная».
   const tabs: Array<{ label: string; icon: string; path: string }> = [
     { label: "Главная", icon: "🏠", path: "/customer/main" },
-    { label: "День", icon: "☀", path: "/customer/wellness" },
     { label: "Записи", icon: "📅", path: "/customer/records" },
     { label: "Услуги", icon: "💅", path: "/customer/catalog" },
     { label: "Я", icon: "👤", path: "/customer/profile" },

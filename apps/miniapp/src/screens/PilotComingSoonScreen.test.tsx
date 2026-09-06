@@ -20,7 +20,7 @@ function renderWithRoutes(surface: "home" | "catalog") {
           element={<PilotComingSoonScreen surface={surface} />}
         />
         <Route path="/customer/profile" element={<div>PROFILE-PROBE</div>} />
-        <Route path="/customer/wellness" element={<div>WELLNESS-PROBE</div>} />
+        <Route path="/customer/main" element={<div>HOME-PROBE</div>} />
       </Routes>
     </MemoryRouter>,
   );
@@ -63,10 +63,16 @@ describe("PilotComingSoonScreen", () => {
     expect(await screen.findByText("PROFILE-PROBE")).toBeInTheDocument();
   });
 
-  it("nav «День» tab leads to the day view (/customer/wellness, #951)", async () => {
+  it("nav «Главная» tab leads to the home screen, and «День» is not offered", async () => {
+    // DRF-1546: поверхности «День» не существует — её роль исполнял
+    // домашний экран, а он теперь «Главная». Стража парная: вкладки
+    // «День» нет, но «Главная» ведёт куда обещает.
     const user = userEvent.setup();
-    renderWithRoutes("home");
-    await user.click(screen.getByRole("button", { name: "День" }));
-    expect(await screen.findByText("WELLNESS-PROBE")).toBeInTheDocument();
+    renderWithRoutes("catalog");
+    await user.click(screen.getByRole("button", { name: "Главная" }));
+    expect(await screen.findByText("HOME-PROBE")).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "День" }),
+    ).not.toBeInTheDocument();
   });
 });
