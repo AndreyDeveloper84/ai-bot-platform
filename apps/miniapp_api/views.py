@@ -2084,17 +2084,22 @@ def _consents_document(bot_user: BotUser) -> dict:
     return read_consents(fresh)
 
 
-def _json_object_body(request: HttpRequest) -> tuple[dict | None, HttpResponse | None]:
-    """Разобрать тело как JSON-объект. Возвращает ``(body, error_response)``."""
+def _json_object_body(request: HttpRequest) -> dict | HttpResponse:
+    """Тело как JSON-объект — либо готовый отказ, который надо вернуть.
+
+    Возврат разнотипный намеренно: вызывающий обязан различить их
+    ``isinstance``, и ветку «тело не разобралось» нельзя пропустить,
+    случайно приняв ``None`` за пустой объект.
+    """
     import json
 
     try:
         body = json.loads(request.body or b"{}")
     except ValueError:
-        return None, _error("malformed", "body is not valid JSON", 400)
+        return _error("malformed", "body is not valid JSON", 400)
     if not isinstance(body, dict):
-        return None, _error("malformed", "body must be a JSON object", 400)
-    return body, None
+        return _error("malformed", "body must be a JSON object", 400)
+    return body
 
 
 @require_http_methods(["GET"])
@@ -2131,10 +2136,9 @@ def customer_proactive_hints(request: HttpRequest) -> HttpResponse:
     from apps.consent.customer import set_proactive_hints
 
     bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
-    body, error = _json_object_body(request)
-    if error is not None:
-        return error
-    assert body is not None  # noqa: S101 — сужение типа, ветка выше вернула
+    body = _json_object_body(request)
+    if isinstance(body, HttpResponse):
+        return body
     enabled = body.get("enabled")
     if not isinstance(enabled, bool):
         return _error("bad_request", "enabled must be a boolean", 400)
@@ -2205,15 +2209,16 @@ def customer_data_storage_consent(request: HttpRequest) -> HttpResponse:
     называет, какие шаги обработки накопленного не отработали. 502 остаётся
     ровно за одним случаем — когда не удался сам отзыв.
     """
-    from apps.consent.customer import DATA_STORAGE_REVOCATION_DISCLOSURE_VERSION
-    from apps.consent.customer import revoke_data_storage
+    from apps.consent.customer import (
+        DATA_STORAGE_REVOCATION_DISCLOSURE_VERSION,
+        revoke_data_storage,
+    )
     from apps.identity.services.profile import DELETE_CONFIRMATION_TOKEN
 
     bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
-    body, error = _json_object_body(request)
-    if error is not None:
-        return error
-    assert body is not None  # noqa: S101 — сужение типа, ветка выше вернула
+    body = _json_object_body(request)
+    if isinstance(body, HttpResponse):
+        return body
 
     # Ничего ещё не тронуто — обе проверки стоят до вызова процедуры.
     if body.get("confirmation", "") != DELETE_CONFIRMATION_TOKEN:
