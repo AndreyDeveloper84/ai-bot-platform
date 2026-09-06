@@ -254,6 +254,12 @@ export function AddPersonAccessCodeSection({ me, switcher }: Props) {
         >
           {copied ? "Скопировано" : "Скопировать код"}
         </button>
+        {/* Слышимый итог: смена подписи кнопки скринридеру не событие. */}
+        {copied && (
+          <p className="shareable__copied" role="status">
+            Код скопирован.
+          </p>
+        )}
 
         {issued.invite_link ? (
           <ShareableLink

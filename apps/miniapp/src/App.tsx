@@ -202,15 +202,38 @@ function adminRouteElements(me: MeResponse): React.ReactNode {
         Прежние адреса оставлены и выбирают ветку: они лежат в
         рунбуках, в `docs/screens/admin-surface-spec.md` и в чужих
         экранах, и ломать их ради переезда незачем.
+
+        `key` у каждого элемента — не украшение. Три маршрута рисуют ОДИН
+        тип компонента на одном и том же месте дерева, поэтому переход
+        между ними React считает обновлением пропов, а не новым экраном:
+        инициализатор `useState` не перезапускается, и `initialTrack`
+        приезжает новый, а ветка остаётся прежняя. Сегодня по этим
+        адресам никто друг к другу не переходит, но ловушка сработала бы
+        молча — экран открылся бы «не тем».
       */}
-      <Route path="/admin/team/add" element={<AdminAddPersonScreen me={me} />} />
+      <Route
+        path="/admin/team/add"
+        element={<AdminAddPersonScreen key="add-person" me={me} />}
+      />
       <Route
         path="/admin/team/invite"
-        element={<AdminAddPersonScreen me={me} initialTrack="new-master" />}
+        element={
+          <AdminAddPersonScreen
+            key="add-person-master"
+            me={me}
+            initialTrack="new-master"
+          />
+        }
       />
       <Route
         path="/admin/team/access"
-        element={<AdminAddPersonScreen me={me} initialTrack="access-code" />}
+        element={
+          <AdminAddPersonScreen
+            key="add-person-access"
+            me={me}
+            initialTrack="access-code"
+          />
+        }
       />
       {/*
         The roster of PEOPLE — every role, both tables (ADR-0008). Owner

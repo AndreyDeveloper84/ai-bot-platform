@@ -70,10 +70,17 @@ Per founder § «Mini App inline copy» — quick grep `apps/miniapp/src/`:
 
 | File | Match | Customer-reminder scope? |
 |------|-------|--------------------------|
-| `AddPersonNewMasterSection.tsx` | «Напомин...» | ❌ Admin invite reminder (NOT customer scope) |
+| ~~`AdminInviteMasterScreen.tsx`~~ | ~~«Напомин...»~~ | **строки не было — снята 06.09.2026 (DRF-1505)** |
 | `MasterScheduleScreen.tsx` | «reminder...» | ❌ Master schedule reminder (NOT customer scope) |
 | `HelloScreen.tsx` | «Напомин...» | ❌ Welcome screen reminder (NOT customer scope) |
 | `ProfileScreen.tsx` | «reminder...» | ❌ Profile notification preferences (NOT customer scope) |
+
+> **Поправка 06.09.2026 (DRF-1505).** Первая строка таблицы была ложной с самого начала:
+> подстроки «напомин» в том экране не было ни в каком регистре (проверено `grep -i` по
+> удалённому файлу). Экран переехал в `AddPersonNewMasterSection.tsx`, и строку заманчиво
+> было переименовать — тогда ложное утверждение поехало бы дальше уже подтверждённым.
+> Вычеркнута вместо переименования. **Вердикт ниже от этого не меняется** — он и так
+> отрицательный по всем четырём строкам.
 
 **Verdict:** **NO Mini App customer-facing B5/B6/B11 copy found.** All reminders surface через MAX DM only. Per `project_max_only_pilot` confirmed — no Mini App push.
 

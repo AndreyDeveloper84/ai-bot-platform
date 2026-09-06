@@ -45,7 +45,6 @@
  */
 
 import { useState } from "react";
-import { useLocation } from "react-router-dom";
 
 import { AddPersonAccessCodeSection } from "./AddPersonAccessCodeSection";
 import { AddPersonNewMasterSection } from "./AddPersonNewMasterSection";
@@ -98,11 +97,12 @@ interface Props {
   readonly initialTrack?: AddPersonTrack;
 }
 
-export function AdminAddPersonScreen({ me, initialTrack }: Props) {
-  const location = useLocation();
-  const [track, setTrack] = useState<AddPersonTrack>(
-    () => initialTrack ?? trackFromPath(location.pathname),
-  );
+export function AdminAddPersonScreen({ me, initialTrack = "new-master" }: Props) {
+  // Начальное значение и только начальное: дальше веткой распоряжается
+  // человек, а не адрес. Каждый из трёх маршрутов монтирует этот
+  // компонент со своим `key` (`App.tsx`), поэтому переход между ними —
+  // новый экран, и `initialTrack` читается заново.
+  const [track, setTrack] = useState<AddPersonTrack>(initialTrack);
 
   const switcher = (
     <fieldset className="add-person__tracks">
@@ -147,15 +147,4 @@ export function AdminAddPersonScreen({ me, initialTrack }: Props) {
   ) : (
     <AddPersonNewMasterSection me={me} switcher={switcher} />
   );
-}
-
-/**
- * Ветка по адресу, когда её не задали пропом.
- *
- * Держится здесь, а не в таблице маршрутов, чтобы старый адрес
- * `/admin/team/access` продолжал открывать то, что открывал, даже если
- * его смонтируют ещё где-нибудь.
- */
-function trackFromPath(pathname: string): AddPersonTrack {
-  return pathname.endsWith("/access") ? "access-code" : "new-master";
 }

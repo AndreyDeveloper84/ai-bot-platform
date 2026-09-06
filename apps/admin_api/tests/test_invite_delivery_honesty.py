@@ -129,6 +129,60 @@ class TestTheOwnerIsToldWhyNothingWasSent:
         assert payload["max_dm_error"] == "max_phone_lookup_deferred"
 
 
+class TestTheCauseIsASlugAndNeverTheCredential:
+    """An unexpected failure reports ``unexpected``, not the exception.
+
+    The branch used to answer ``str(exc)[:200]``. That was tolerable
+    while the value went only into an audit row nobody parsed; DRF-1505
+    published it as ``max_dm_error``, a documented field the Mini App
+    reads by prefix.
+
+    It also published a leak. ``make_inline_keyboard_attachment`` raises
+    ``ValueError`` whose message embeds the rejected payload verbatim
+    (Guard 3 in ``apps/channels/max/outbound.py``), and that payload is
+    ``master_invite_<uuid>`` — the invitation credential. Prefix plus the
+    repr fits inside 200 characters, so the whole token survived the
+    truncation and settled into the audit row, which is a place people
+    look.
+    """
+
+    def test_an_unexpected_exception_leaks_neither_token_nor_text(
+        self, client: Client, owner_bot_user: BotUser, tenant: Tenant, settings
+    ):
+        from apps.audit.models import AuditLog
+        from apps.events.vocabulary import MASTER_INVITE_DISPATCHED
+
+        settings.DEBUG = False
+        settings.MAX_BOT_WEB_APP = "salon_bot"
+        settings.SITE_DOMAIN = "https://miniapp-dev.example"
+
+        secret = "master_invite_deadbeef-0000-4000-8000-00000000cafe"
+        with patch("apps.admin_api.views_invite.max_outbound.send_message") as send:
+            send.side_effect = RuntimeError(f"payload rejected: got {secret!r}")
+            resp = _post(client)
+
+        body = resp.content.decode()
+        payload = resp.json()
+        # Положительные стражи первыми: ответ непустой и содержит именно
+        # тот вердикт, о котором идёт речь. Без них «токена в теле нет»
+        # зеленело бы на пустом ответе — том самом классе дыры, который
+        # эта оснастка и ловит.
+        assert payload["max_dm_delivery"] == "failed"
+        assert payload["max_dm_error"] == "unexpected"
+        assert payload["master_id"] in body
+        assert secret not in body
+
+        # And the durable copy is clean too — the response is transient,
+        # the audit row is the one somebody reads a week later.
+        rows = AuditLog.all_tenants.filter(
+            tenant_id=tenant.id, action=MASTER_INVITE_DISPATCHED
+        ).values_list("payload", flat=True)
+        stored = list(rows)
+        assert stored, "no dispatch audit row — the absence checks below prove nothing"
+        assert all(secret not in str(row) for row in stored)
+        assert any(row.get("error") == "unexpected" for row in stored)
+
+
 class TestSuccessConfessesNothing:
     """Positive guard: the field is empty when there is nothing to say.
 

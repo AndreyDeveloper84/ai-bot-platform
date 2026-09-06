@@ -335,8 +335,11 @@ export function AdminTeamScreen({ me }: Props) {
         role, and the owner reserved role decisions to herself. Hiding it
         from an admin is convenience — the backend answers 403 either way.
 
-        It sits next to «Выдать доступ» because that is where somebody
-        realises they do not actually know who already has it.
+        It sits next to «Добавить человека» because that is where
+        somebody realises they do not actually know who already has
+        access. (It used to say «Выдать доступ» — that button was
+        folded into «Добавить человека» by DRF-1505, and the reason
+        survived the button.)
       */}
       {me.is_owner && (
         <button

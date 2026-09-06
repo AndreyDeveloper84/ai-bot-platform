@@ -97,9 +97,16 @@ def _code_start_link(tenant, code: str) -> str:
     than restated here. The prefix is a contract between two modules in
     the same repository, and a second spelling of it is free to drift out
     from under the one that matters — the reader's link would keep
-    looking right and stop being redeemed. The lazy import is for the
-    cycle: ``salon_handler`` imports ``views_invite``, which lives in
-    this package.
+    looking right and stop being redeemed.
+
+    The import is lazy for cost, not for a cycle. ``salon_handler`` pulls
+    in the parser, outbound, the staff menu and the identity services at
+    module scope, and nothing here needs any of that until somebody
+    actually issues a code — while every request to this module's other
+    views would pay for it. (An earlier version of this comment claimed a
+    cycle: ``salon_handler`` does import ``views_invite``, but lazily,
+    inside ``_invite_prefix``, so a module-scope import here would close
+    nothing.)
 
     ``code`` arrives formatted (``AYLA-7K3M``); the payload carries the
     flat form (``AYLA7K3M``). ``normalize_code`` folds both to the same
@@ -113,12 +120,30 @@ def _code_start_link(tenant, code: str) -> str:
     Empty string when there is no salon bot with a Mini App name: see
     :mod:`apps.channels.max.start_links` for why a missing link beats one
     that opens an apology.
+
+    Nothing raises out of here, and that is deliberate rather than
+    defensive habit. This runs AFTER ``issue_staff_invite`` has committed
+    the row, and the plaintext code exists in exactly one place: the
+    response being built. A malformed registry entry escaping as a 500
+    would destroy a live, unrecoverable credential — the issuer would see
+    a failure, the invite would exist, and the only exit would be waiting
+    out its 7-day TTL. ``views_invite`` carries the same reasoning at its
+    own post-commit dispatch. A missing link costs a paste; a lost code
+    costs the person's access.
     """
 
     from apps.channels.max.salon_handler import DEEPLINK_PREFIX
     from apps.channels.max.start_links import salon_start_link
 
-    return salon_start_link(tenant, f"{DEEPLINK_PREFIX}{code.replace('-', '')}")
+    try:
+        return salon_start_link(tenant, f"{DEEPLINK_PREFIX}{code.replace('-', '')}")
+    except Exception:  # noqa: BLE001 — see the docstring: the code must survive
+        logger.exception(
+            "admin_api.staff_invite.link_failed tenant=%s — the code was issued and "
+            "is returned without a shareable link.",
+            getattr(tenant, "slug", "?"),
+        )
+        return ""
 
 
 def _error(slug: str, detail: str, status: int) -> JsonResponse:

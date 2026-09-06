@@ -76,18 +76,27 @@ def salon_bot_handle(tenant) -> str:
     per-tenant client bot and this one — and matching on tenant would
     return whichever was declared first in ``MAX_BOTS``, quite possibly
     the client bot.
+
+    ``tenant`` is anything carrying ``.slug`` — the model in production,
+    a ``SimpleNamespace`` in
+    ``apps/channels/tests/test_salon_web_app_enablement.py``. A caller
+    without one gets ``AttributeError`` on the line below rather than a
+    ``getattr`` default: an unknown tenant must not quietly resolve to
+    «no salon bot», because that answer is indistinguishable from a
+    correctly-configured contour that simply has none.
     """
 
     from apps.channels.bot_registry import effective_registry, resolve_by_tenant_stream
     from apps.channels.max.salon_handler import SALON_STREAM
 
-    entry = resolve_by_tenant_stream(tenant.slug, SALON_STREAM, effective_registry())
+    slug = tenant.slug
+    entry = resolve_by_tenant_stream(slug, SALON_STREAM, effective_registry())
     if entry is None or not entry.web_app:
         logger.warning(
             "channels.max.start_links.no_salon_bot tenant=%s — no salon bot with a "
             "Mini App name (MAX_BOT_<SLUG>_WEB_APP on the entry whose stream is %s), "
             "so nothing shareable can be built and delivery has no link to offer.",
-            getattr(tenant, "slug", "?"),
+            slug,
             SALON_STREAM,
         )
         return ""

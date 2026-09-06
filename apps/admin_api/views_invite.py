@@ -691,12 +691,32 @@ def _dispatch_max_dm(
             exc.status_code,
         )
         return {"delivery": "failed", "error": f"max_status_{exc.status_code}"}
-    except Exception as exc:  # noqa: BLE001 — DM dispatch must not crash the request
+    except Exception:  # noqa: BLE001 — DM dispatch must not crash the request
         logger.exception(
             "admin_api.invite.max_dispatch_unexpected master_id=%s",
             master_id,
         )
-        return {"delivery": "failed", "error": str(exc)[:200]}
+        # A fixed slug, not ``str(exc)[:200]``.
+        #
+        # This used to carry the exception's own text, which was tolerable
+        # while it went only into an audit row nobody parsed. DRF-1505
+        # published the same value as ``max_dm_error`` — a documented,
+        # enumerable field the Mini App reads by prefix — and that changes
+        # what it is allowed to contain.
+        #
+        # It also changes what it is allowed to LEAK.
+        # ``make_inline_keyboard_attachment`` raises ``ValueError`` whose
+        # message embeds the rejected payload verbatim (Guard 3 in
+        # ``apps/channels/max/outbound.py``), and that payload is
+        # ``master_invite_<uuid>`` — the invitation credential itself. Its
+        # prefix plus a repr of the slug fits inside 200 characters, so
+        # the whole token survived the truncation and settled into the
+        # audit row, which is a place people look.
+        #
+        # The detail is not lost: ``logger.exception`` above carries the
+        # full traceback to the platform team, who are the only readers it
+        # was ever useful to.
+        return {"delivery": "failed", "error": "unexpected"}
     return {"delivery": "queued"}
 
 

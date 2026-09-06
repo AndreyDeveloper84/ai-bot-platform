@@ -322,6 +322,20 @@ describe("отказ доставки", () => {
     expect(notConfigured.text).not.toMatch(/проверьте написание/i);
   });
 
+  it("не объявляет поломкой подтверждённую доставку", () => {
+    // `delivered` есть в типе, бэкенд его сегодня не возвращает. Без
+    // своей ветки оно провалилось бы в «не удалось» — самый удачный
+    // исход, объявленный отказом, и никто бы этого не заметил, пока MAX
+    // не научится подтверждать доставку.
+    const notice = deliveryNotice(
+      { ...INVITED, max_dm_delivery: "delivered", max_dm_error: "" },
+      "Анна",
+    );
+
+    expect(notice.tone).toBe("ok");
+    expect(notice.text).not.toMatch(/не удалось/i);
+  });
+
   it("не называет поломкой то, что просто не построено", () => {
     const skipped = deliveryNotice(
       {
@@ -334,6 +348,48 @@ describe("отказ доставки", () => {
 
     expect(skipped.text).toMatch(/пока не умеет/i);
     expect(skipped.text).not.toMatch(/не удалось/i);
+  });
+
+  it("не советует переслать ссылку, когда ссылки нет — ни в одной ветке", () => {
+    // Первая редакция читала `invite_link` ровно в одной ветке из шести,
+    // а остальные безусловно советовали «отправьте ссылку ниже». При
+    // пустой ссылке экран рисует под этим текстом красное «Ссылки нет» —
+    // обещание и его опровержение рядом, ровно тот дефект, который эта
+    // задача чинит уровнем выше.
+    const noLink = { ...INVITED, invite_link: "" };
+    const cases = [
+      { ...noLink, max_dm_delivery: "queued" as const, max_dm_error: "" },
+      { ...noLink, max_dm_delivery: "skipped" as const, max_dm_error: "max_phone_lookup_deferred" },
+      { ...noLink, max_dm_delivery: "skipped" as const, max_dm_error: "" },
+      { ...noLink, max_dm_delivery: "failed" as const, max_dm_error: "no_entry_configured" },
+      { ...noLink, max_dm_delivery: "failed" as const, max_dm_error: "max_status_404" },
+      { ...noLink, max_dm_delivery: "failed" as const, max_dm_error: "unexpected" },
+    ];
+
+    for (const c of cases) {
+      const text = deliveryNotice(c, "Анна").text;
+      expect(text, `${c.max_dm_delivery}/${c.max_dm_error}`).not.toMatch(
+        /ссылк\w* ниже|отправьте ссылку|передайте ссылку/i,
+      );
+    }
+  });
+
+  it("советует переслать ссылку во всех тех же ветках, когда она есть", () => {
+    // Положительная стража к предыдущему тесту: без неё «нигде не
+    // сказано про ссылку» зеленело бы на функции, которая не говорит о
+    // ней никогда — то есть на молчании вместо совета.
+    const cases = [
+      { ...INVITED, max_dm_delivery: "queued" as const, max_dm_error: "" },
+      { ...INVITED, max_dm_delivery: "skipped" as const, max_dm_error: "max_phone_lookup_deferred" },
+      { ...INVITED, max_dm_delivery: "failed" as const, max_dm_error: "no_entry_configured" },
+      { ...INVITED, max_dm_delivery: "failed" as const, max_dm_error: "max_status_404" },
+      { ...INVITED, max_dm_delivery: "failed" as const, max_dm_error: "unexpected" },
+    ];
+
+    for (const c of cases) {
+      const text = deliveryNotice(c, "Анна").text;
+      expect(text, `${c.max_dm_delivery}/${c.max_dm_error}`).toMatch(/ссылк/i);
+    }
   });
 
   it("показывает причину на экране, а не только в логе", async () => {

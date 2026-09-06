@@ -6554,3 +6554,13 @@ a {
   align-items: center;
   cursor: pointer;
 }
+
+/* Слышимый итог копирования (DRF-1505). Виден и глазами: подпись кнопки
+   меняется на «Скопировано», но кнопка может уехать из поля зрения на
+   узком экране, а строка стоит там, где читатель смотрел. */
+.shareable__copied {
+  margin: var(--s-2) 0 0;
+  font-size: var(--font-size-200);
+  line-height: 1.4;
+  color: var(--c-text-secondary);
+}
