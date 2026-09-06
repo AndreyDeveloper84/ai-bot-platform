@@ -10,15 +10,18 @@
  * reality» recon.
  *
  * # Section order (per spec §11.1 selected variant)
- *   R1 — header (avatar initials fallback + name + handle + scope)
- *   R2 — consent: 3 locked rows + marketing toggle + §4.2 accordion
+ *   R1 — header (avatar initials fallback + name; handle/scope rows
+ *        render only when the real /me provides them)
+ *   R2 — consent: 2 locked rows + marketing toggle (real notify_promo)
+ *        + health-consent row + §4.2 accordion
  *        + «Запросить данные» / «Удалить аккаунт» → C5 sheets
  *        (PersonalDataSheets.tsx; support deeplink = error fallback)
  *   R3 — memory transparency: coming-soon card (no data, no clear)
- *   R4 — proactive AI toggle + transactional-always note
+ *   R4 — proactive AI toggle: HIDDEN until DRF-1520 (owner 05.09 —
+ *        no non-working toggles)
  *   R5 — notifications: MAX channel + soft timing + entry → support
  *   R6 — states: loading skeleton / API-down with retry / offline
- *        banner / proactive-off explainer snackbar
+ *        banner / toggle-change snackbar
  *
  * # WCAG 2.2 AA inline (per spec §13 — 12 patterns)
  *   2.5.8 — all interactive ≥44dp
@@ -50,41 +53,33 @@ import {
 import { Skeleton } from "../components/Skeleton";
 import { Snackbar } from "../components/Snackbar";
 import { StateError } from "../components/StateError";
-import { ToggleSwitch } from "../components/ToggleSwitch";
 import {
   additionalSalonsLabel,
   avatarInitials,
   fetchConsents,
   fetchMe,
-  fetchProactivePrefs,
   formatConsentDate,
   setMarketingConsent,
-  setProactiveOptOut,
   type ConsentsResponse,
   type MeProfileResponse,
-  type ProactivePrefsResponse,
 } from "../lib/customer-profile";
 import {
   fetchHealthConsent,
   type HealthConsentState,
 } from "../lib/health-consent";
-import { STUB_SURFACES_ENABLED } from "../lib/feature-flags";
 import { SurfaceSwitchButton } from "../components/SurfaceSwitch";
 import { useScreenBack } from "../hooks/useScreenBack";
 import { backTo } from "../lib/screen-back";
 
 // ---------------------------------------------------------------------------
-// Stub-backed sections flag (pilot phase 2a, commit 3). R1 identity
-// header, R2 consent rows + marketing toggle and R4 proactive toggle
-// read DEV-only stubs (`customer-profile.ts`) whose prod guard throws
-// BY DESIGN (`StubNotWiredError` — the 152-ФЗ truthfulness gate: no
-// fake identity / fake consent date in prod). Until the backing
-// endpoints ship (post-pilot backlog, W3), those sections render only
-// when STUB_SURFACES_ENABLED (lib/feature-flags.ts — the same gate as
-// the wellness / catalog stub surfaces): hidden UI is more honest than
-// a crashing screen.
-// Everything else — C5 export/delete (152-ФЗ), R3 memory coming-soon,
-// R5 notifications via support — shows in all builds.
+// Реальные данные (DRF-1475, часть Б, решение владельца 05.09): R1
+// identity header и R2 consent rows + marketing toggle читают/пишут
+// настоящий `/customer/me` (`customer-profile.ts` → lib/api.ts), имя и
+// маркетинговое согласие видны и работают в проде. Секции, у которых
+// пока нет backend («Подсказки от Ayla», «Хранение данных»), из
+// рендера УБРАНЫ — не disabled, не «скоро»: тумблер, который человек
+// двигает, а он ничего не делает, врёт про наличие контроля и хуже
+// отсутствующего. Возврат — после DRF-1520 (см. TODO у мест скрытия).
 // ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------
@@ -96,10 +91,8 @@ type Status =
   | { kind: "error"; err: unknown }
   | {
       kind: "ready";
-      /** Null in prod builds — stub-backed sections stay hidden. */
-      me: MeProfileResponse | null;
-      consents: ConsentsResponse | null;
-      proactive: ProactivePrefsResponse | null;
+      me: MeProfileResponse;
+      consents: ConsentsResponse;
     };
 
 interface ToastState {
@@ -127,38 +120,25 @@ export function CustomerProfileScreen() {
   );
   const [toast, setToast] = useState<ToastState>(EMPTY_TOAST);
   const [marketingBusy, setMarketingBusy] = useState(false);
-  const [proactiveBusy, setProactiveBusy] = useState(false);
   const [exportOpen, setExportOpen] = useState(false);
   const [deleteOpen, setDeleteOpen] = useState(false);
   const exportTriggerRef = useRef<HTMLButtonElement | null>(null);
   const deleteTriggerRef = useRef<HTMLButtonElement | null>(null);
-  // Согласие на медданные (DRF-1453) — РЕАЛЬНЫЙ эндпоинт, поэтому оно вне
-  // `STUB_SURFACES_ENABLED` и вне общего `Status`: заглушечные секции в проде
-  // не грузятся вовсе, а эта строка обязана быть видна именно в проде. Пока
-  // состояние неизвестно (`null`) строка показывает «загружаю» и не кликается
-  // — «Не разрешено» до ответа сервера было бы утверждением, которого мы не
-  // проверяли.
+  // Согласие на медданные (DRF-1453) — РЕАЛЬНЫЙ эндпоинт, у него свой
+  // ресурс вне общего `Status` и своя загрузка: строка обязана быть
+  // видна в проде всегда. Пока состояние неизвестно (`null`) строка
+  // показывает «загружаю» и не кликается — «Не разрешено» до ответа
+  // сервера было бы утверждением, которого мы не проверяли.
   const [healthConsent, setHealthConsent] = useState<HealthConsentState | null>(null);
   const [healthFailed, setHealthFailed] = useState(false);
   const [healthSheetOpen, setHealthSheetOpen] = useState(false);
   const healthTriggerRef = useRef<HTMLButtonElement | null>(null);
 
   const load = useCallback(async () => {
-    if (!STUB_SURFACES_ENABLED) {
-      // Prod build: stub-backed endpoints don't exist — skip the fetches
-      // entirely (the stub lib would throw by design) and render only
-      // the real sections below.
-      setStatus({ kind: "ready", me: null, consents: null, proactive: null });
-      return;
-    }
     setStatus({ kind: "loading" });
     try {
-      const [me, consents, proactive] = await Promise.all([
-        fetchMe(),
-        fetchConsents(),
-        fetchProactivePrefs(),
-      ]);
-      setStatus({ kind: "ready", me, consents, proactive });
+      const [me, consents] = await Promise.all([fetchMe(), fetchConsents()]);
+      setStatus({ kind: "ready", me, consents });
     } catch (err) {
       setStatus({ kind: "error", err });
     }
@@ -261,41 +241,6 @@ export function CustomerProfileScreen() {
     }
   }, []);
 
-  const onProactiveToggle = useCallback(async (next: boolean) => {
-    // Toggle ON = proactive enabled = opt_out false.
-    const optOut = !next;
-    setProactiveBusy(true);
-    try {
-      const updated = await setProactiveOptOut(optOut);
-      setStatus((s) =>
-        s.kind === "ready" ? { ...s, proactive: updated } : s,
-      );
-        if (optOut) {
-          // Spec §8.3 verbatim (three sentences — adversarial CR P2:
-          // dropping the «не буду писать первой» line confuses the
-          // customer about whether transactional reminders still
-          // arrive).
-          setToast({
-            visible: true,
-            message:
-              "Проактивные подсказки выключены. Я не буду писать первой с рекомендациями. Важные сообщения по записям всё равно будут приходить (подтверждения, переносы, отмены).",
-          });
-        } else {
-          setToast({
-            visible: true,
-            message: "Подсказки от Ayla включены.",
-          });
-        }
-    } catch {
-      setToast({
-        visible: true,
-        message: "Не получилось сохранить. Попробуй ещё раз.",
-      });
-    } finally {
-      setProactiveBusy(false);
-    }
-  }, []);
-
   return (
     <div className="profile-screen">
       {/* Skip-link renders only when R2 target is in the DOM (ready
@@ -353,8 +298,8 @@ export function CustomerProfileScreen() {
         )}
         {status.kind === "ready" && (
           <>
-            {/* R1 — Header (stub-backed: DEV builds only) */}
-            {status.me && <ProfileHeader me={status.me} />}
+            {/* R1 — Header (реальный /customer/me, во всех сборках) */}
+            <ProfileHeader me={status.me} />
 
             {/* R2 — Consent & Privacy */}
             <section
@@ -367,9 +312,6 @@ export function CustomerProfileScreen() {
                 Согласия и приватность
               </h2>
               <dl className="profile-consent-list">
-              {/* Consent rows — stub-backed, DEV builds only. */}
-              {status.consents && (
-              <>
                 <ConsentRow
                   variant="info"
                   title="Данные для записи"
@@ -408,23 +350,12 @@ export function CustomerProfileScreen() {
                     </>
                   }
                 />
-                <ConsentRow
-                  variant="info"
-                  title="Хранение данных"
-                  statusText={`Согласие дано ${formatConsentDate(
-                    status.consents.data_storage_consent_at,
-                  )}`}
-                  description={
-                    <>
-                      Полный отзыв согласия означает, что{" "}
-                      <span lang="en">Ayla</span> больше не сможет работать
-                      с твоим профилем. Для этого можно удалить свои данные
-                      кнопкой ниже.
-                    </>
-                  }
-                />
-              </>
-              )}
+                {/* TODO(DRF-1520): строка «Хранение данных» скрыта — у
+                    неё нет честных данных (реальный /me не отдаёт дату
+                    общего согласия), а выдуманная дата — ложь о 152-ФЗ.
+                    При возврате это будет НЕ тумблер и не строка с
+                    датой, а сценарий с подтверждением последствий
+                    отзыва согласия (потеря работы Ayla с профилем). */}
                 {/* Медданные — реальный эндпоинт, видно во всех сборках.
                     Вариант "action", а не тумблер: особая категория по
                     152-ФЗ ст. 10 не переключается одним касанием мимо
@@ -489,35 +420,13 @@ export function CustomerProfileScreen() {
               <ComingSoonCard />
             </section>
 
-            {/* R4 — Proactive AI (stub-backed: DEV builds only) */}
-            {status.proactive && (
-            <section
-              className="profile-section"
-              aria-labelledby="profile-r4-h2"
-            >
-              <h2 id="profile-r4-h2" className="profile-section__heading">
-                Подсказки от <span lang="en">Ayla</span>
-              </h2>
-              <div className="profile-proactive">
-                <div className="profile-proactive__row">
-                  <span className="profile-proactive__label">
-                    Получать подсказки от Ayla
-                  </span>
-                  <ToggleSwitch
-                    checked={!status.proactive.proactive_messages_opt_out}
-                    onChange={onProactiveToggle}
-                    ariaLabel="Получать подсказки от Ayla"
-                    disabled={proactiveBusy}
-                  />
-                </div>
-                <p className="profile-proactive__note">
-                  Я буду писать первой — наблюдения, рекомендации, идеи.
-                  Транзакционные напоминания (подтверждения записей,
-                  переносы, отмены) приходят всегда.
-                </p>
-              </div>
-            </section>
-            )}
+            {/* TODO(DRF-1520): секция R4 «Подсказки от Ayla» скрыта —
+                ручек me/proactive_opt_out пока нет, а тумблер, который
+                человек двигает, а он ничего не делает, врёт про наличие
+                контроля (решение владельца 05.09: «не показывать
+                неработающие тумблеры»). Код fetchProactivePrefs /
+                setProactiveOptOut в lib/customer-profile.ts сохранён —
+                вернуть секцию, когда DRF-1520 даст реальные эндпоинты. */}
 
             {/* Cards (C7.2 skeleton) — real screen, honest empty state
                 until the W3 passthrough ships. */}
@@ -658,7 +567,11 @@ function ProfileHeader({ me }: { me: MeProfileResponse }) {
         </div>
         <div className="profile-header__text">
           <p className="profile-header__name">{me.display_name}</p>
-          <p className="profile-header__handle">{me.max_handle}</p>
+          {/* Реальный /me не отдаёт MAX-хендл — строку не рисуем,
+              пустой параграф был бы визуальным шумом. */}
+          {me.max_handle && (
+            <p className="profile-header__handle">{me.max_handle}</p>
+          )}
           {nearest && (
             <p className="profile-header__scope">
               Клиент {nearest}
