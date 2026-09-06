@@ -33,9 +33,14 @@ export function AdminSectionDeniedScreen({
   const home = adminLandingPath(me);
   return (
     <div className="screen">
-      <header className="screen__header">
-        <h1 className="screen__title">{section}</h1>
-      </header>
+      {/*
+        Без `screen__header`: у этого класса нет правила в `src/styles/`,
+        он держится только на baseline контракта стилей
+        (`tools/lint/miniapp_style_contract.py`), а baseline умеет
+        уменьшаться, но не расти. Заголовок стоит на `screen__title` —
+        у него правило есть.
+      */}
+      <h1 className="screen__title">{section}</h1>
       <div className="callout callout--danger" role="alert">
         <p style={{ margin: 0 }}>
           Раздел «{section}» открыт владельцу и администратору салона. У вас
