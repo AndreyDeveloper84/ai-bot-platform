@@ -22,21 +22,25 @@ USER = SimpleNamespace(channel="telegram", channel_user_id="123")
 MEAL = Meal(dish="Борщ", calories=350, meal_type="lunch")
 
 
-def fetch_mapping(days: dict[str, TodayDiary], *, fallback: TodayDiary | None = None):
+class FetchStub:
     """A read_today-shaped stub keyed by ISO date. Records its calls."""
 
-    calls: list[str | None] = []
+    def __init__(self, days: dict[str, TodayDiary], *, fallback: TodayDiary | None = None) -> None:
+        self._days = days
+        self._fallback = fallback
+        self.calls: list[str | None] = []
 
-    def fetch(bot_user: Any, *, date: str | None = None) -> TodayDiary:
-        calls.append(date)
-        if date in days:
-            return days[date]
-        if fallback is not None:
-            return fallback
+    def __call__(self, bot_user: Any, *, date: str | None = None) -> TodayDiary:
+        self.calls.append(date)
+        if date in self._days:
+            return self._days[date]
+        if self._fallback is not None:
+            return self._fallback
         raise AssertionError(f"unexpected fetch for date={date}")
 
-    fetch.calls = calls
-    return fetch
+
+def fetch_mapping(days: dict[str, TodayDiary], *, fallback: TodayDiary | None = None) -> FetchStub:
+    return FetchStub(days, fallback=fallback)
 
 
 def iso(d: date) -> str:
