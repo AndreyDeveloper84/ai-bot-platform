@@ -562,14 +562,82 @@ class TestIdempotency:
         # Only one CatalogMaster row.
         assert CatalogMaster.all_tenants.filter(tenant=tenant).count() == 1
 
-    def test_expired_invite_creates_new_row(
+    def test_expired_invite_reissues_on_the_same_row(
         self,
         client: Client,
         owner_bot_user: BotUser,
         tenant: Tenant,
         patched_send_message,
     ) -> None:
-        # Fabricate an EXPIRED pending invite directly.
+        """DRF-1507 — повторное приглашение работает и НЕ заводит вторую строку.
+
+        Ожидание этого теста изменено намеренно. До DRF-1507 он назывался
+        ``test_expired_invite_creates_new_row`` и требовал «Now 2 rows in
+        catalog»: путь заводил вторую строку с тем же ``max_handle``, и это
+        считалось контрактом, пока дубли считались приемлемыми. Смысл всей
+        задачи — «один человек, одна строка», поэтому вторая строка стала
+        дефектом.
+
+        Что НЕ изменилось и проверяется здесь же: владелец по-прежнему
+        получает 201 и рабочий свежий токен с новым семидневным сроком.
+        Что этот токен доводит мастера до кабинета — проверяет
+        ``apps/master_api/tests/test_onboarding.py``.
+        """
+
+        now = datetime.now(tz=timezone.utc)
+        stale = CatalogMaster.all_tenants.create(
+            tenant=tenant,
+            external_id=11111,
+            external_updated_at=now,
+            name="Анна Петрова",
+            invite_status=CatalogMaster.InviteStatus.PENDING,
+            invite_token=uuid.uuid4(),
+            invite_expires_at=now - timedelta(hours=1),
+            invited_at=now - timedelta(days=8),
+            max_handle="@anna_styl",
+            mode=CatalogMaster.Mode.INVITE,
+            is_active=False,
+        )
+        stale_token = stale.invite_token
+
+        resp = client.post(
+            _invite_url(),
+            data=_valid_body(),
+            content_type="application/json",
+            HTTP_AUTHORIZATION=init_data_header("5001"),
+        )
+        # Свежее приглашение выписано — 201, не 200: это новое приглашение,
+        # а не повтор того же запроса.
+        assert resp.status_code == 201
+        # Присутствие прежде отсутствия (DRF-1411): тело есть и оно про
+        # ту же строку — только после этого «заголовка нет» что-то значит.
+        assert resp.json()["master_id"] == str(stale.id)
+        assert "X-Idempotent" not in resp
+        # И выписано оно НА ТУ ЖЕ строку.
+        assert CatalogMaster.all_tenants.filter(tenant=tenant).count() == 1
+
+        stale.refresh_from_db()
+        assert stale.invite_status == CatalogMaster.InviteStatus.PENDING
+        assert stale.invite_token is not None
+        assert stale.invite_token != stale_token
+        assert stale.invite_expires_at is not None
+        assert stale.invite_expires_at > now
+        assert str(stale.invite_token) == resp.json()["invite_token"]
+
+    def test_different_person_still_gets_their_own_row(
+        self,
+        client: Client,
+        owner_bot_user: BotUser,
+        tenant: Tenant,
+        patched_send_message,
+    ) -> None:
+        """Положительная стража к тесту выше (DRF-1411).
+
+        Переиспользование строки обязано срабатывать на ТОМ ЖЕ человеке и
+        не срабатывать на другом: иначе «одна строка на человека»
+        превратилась бы в «один мастер на салон».
+        """
+
         now = datetime.now(tz=timezone.utc)
         CatalogMaster.all_tenants.create(
             tenant=tenant,
@@ -587,15 +655,135 @@ class TestIdempotency:
 
         resp = client.post(
             _invite_url(),
+            data=_valid_body(name="Мария Иванова", contact_value="@maria_nails"),
+            content_type="application/json",
+            HTTP_AUTHORIZATION=init_data_header("5001"),
+        )
+        assert resp.status_code == 201
+        assert CatalogMaster.all_tenants.filter(tenant=tenant).count() == 2
+
+    def test_handle_written_without_at_is_the_same_person(
+        self,
+        client: Client,
+        owner_bot_user: BotUser,
+        tenant: Tenant,
+        patched_send_message,
+    ) -> None:
+        """«anna_styl» и «@Anna_Styl» — один аккаунт MAX, а не два мастера."""
+
+        now = datetime.now(tz=timezone.utc)
+        stale = CatalogMaster.all_tenants.create(
+            tenant=tenant,
+            external_id=11111,
+            external_updated_at=now,
+            name="Анна Петрова",
+            invite_status=CatalogMaster.InviteStatus.PENDING,
+            invite_token=uuid.uuid4(),
+            invite_expires_at=now - timedelta(hours=1),
+            invited_at=now - timedelta(days=8),
+            max_handle="@Anna_Styl",
+            mode=CatalogMaster.Mode.INVITE,
+            is_active=False,
+        )
+
+        resp = client.post(
+            _invite_url(),
+            data=_valid_body(contact_value="anna_styl"),
+            content_type="application/json",
+            HTTP_AUTHORIZATION=init_data_header("5001"),
+        )
+        assert resp.status_code == 201
+        assert resp.json()["master_id"] == str(stale.id)
+        assert CatalogMaster.all_tenants.filter(tenant=tenant).count() == 1
+
+    def test_synced_row_is_not_turned_back_into_a_pending_invite(
+        self,
+        client: Client,
+        owner_bot_user: BotUser,
+        tenant: Tenant,
+        patched_send_message,
+    ) -> None:
+        """Отбор на перевыпуск узкий — синхронизированная строка не трогается.
+
+        Положительная стража к переиспользованию: если бы отбор шёл по
+        «есть handle и нет связи», приглашение мастера, приехавшего
+        синхронизацией, перевело бы его строку в PENDING — и он выпал бы
+        из записи (``booking/services/create.py`` требует ACCEPTED) до
+        того, как откроет ссылку.
+        """
+
+        now = datetime.now(tz=timezone.utc)
+        synced = CatalogMaster.all_tenants.create(
+            tenant=tenant,
+            external_id=7,
+            external_updated_at=now,
+            name="Анна Петрова",
+            is_active=True,
+            ayla_user_id=uuid.uuid4(),
+            max_handle="@anna_styl",
+            invite_status=CatalogMaster.InviteStatus.ACCEPTED,
+            mode=CatalogMaster.Mode.CATALOG_ONLY,
+        )
+
+        resp = client.post(
+            _invite_url(),
             data=_valid_body(),
             content_type="application/json",
             HTTP_AUTHORIZATION=init_data_header("5001"),
         )
-        # Fresh PENDING row issued — 201, not 200.
-        assert resp.status_code == 201
-        assert "X-Idempotent" not in resp
-        # Now 2 rows in catalog (1 expired, 1 fresh).
+        assert resp.status_code == 201, resp.content
+        assert resp.json()["master_id"] != str(synced.id)
+
+        synced.refresh_from_db()
+        assert synced.invite_status == CatalogMaster.InviteStatus.ACCEPTED
+        assert synced.invite_token is None
         assert CatalogMaster.all_tenants.filter(tenant=tenant).count() == 2
+
+    def test_already_landed_master_is_not_invited_twice(
+        self,
+        client: Client,
+        owner_bot_user: BotUser,
+        tenant: Tenant,
+        patched_send_message,
+    ) -> None:
+        """Приглашение уже приземлившегося мастера сводится в его строку.
+
+        Второй токен на того же человека — это вторая строка, которая
+        останется PENDING навсегда: ``onboarding_accept`` вернёт ему сессию
+        первой (разрыв Р5). Поэтому 200 и существующая строка.
+        """
+
+        now = datetime.now(tz=timezone.utc)
+        landed_bot_user = BotUser.all_tenants.create(
+            tenant=tenant,
+            channel="max",
+            channel_user_id="777001",
+            chat_id="777001",
+        )
+        landed = CatalogMaster.all_tenants.create(
+            tenant=tenant,
+            external_id=11111,
+            external_updated_at=now,
+            name="Анна Петрова",
+            invite_status=CatalogMaster.InviteStatus.ACCEPTED,
+            invite_token=None,
+            max_handle="@anna_styl",
+            mode=CatalogMaster.Mode.INVITE,
+            is_active=True,
+            linked_bot_user=landed_bot_user,
+        )
+
+        resp = client.post(
+            _invite_url(),
+            data=_valid_body(),
+            content_type="application/json",
+            HTTP_AUTHORIZATION=init_data_header("5001"),
+        )
+        assert resp.status_code == 200
+        assert resp["X-Idempotent"] == "true"
+        assert resp.json()["master_id"] == str(landed.id)
+        assert resp.json()["invite_token"] is None
+        assert CatalogMaster.all_tenants.filter(tenant=tenant).count() == 1
 
     def test_different_contact_value_same_name_creates_new(
         self,
@@ -936,3 +1124,168 @@ class TestSiteDomainFallback:
         with caplog.at_level(logging.ERROR, logger="apps.admin_api.views_invite"):
             assert _fallback_link(_uuid.uuid4()) == ""
         assert PILOT_SITE_DOMAIN in caplog.text
+
+
+# =========================================================================
+# EXTERNAL_ID — гонка (DRF-1507, пункт 3 / разрыв Р7)
+# =========================================================================
+
+
+class TestExternalIdRace:
+    """``external_id`` больше не считается ``count()`` и умеет повторяться.
+
+    Было: ``external_id = count(мастеров тенанта) + 1_000_000`` и общий
+    ``except Exception`` → **500 без ретрая**. Два одновременных
+    приглашения в одном салоне считают одно и то же число; хуже,
+    ``count()`` совпадает и НЕ одновременно — достаточно, чтобы строку
+    удалили.
+    """
+
+    def test_deleted_row_does_not_make_the_next_invite_collide(
+        self,
+        client: Client,
+        owner_bot_user: BotUser,
+        tenant: Tenant,
+        patched_send_message,
+    ) -> None:
+        """Детерминированное воспроизведение той же гонки, без потоков.
+
+        Со старым ``count()+1_000_000`` третье приглашение получало номер,
+        который уже занят вторым, ловило ``unique_together (tenant,
+        external_id)`` и отвечало 500. Здесь оно обязано ответить 201.
+        """
+
+        first = client.post(
+            _invite_url(),
+            data=_valid_body(name="Анна Петрова", contact_value="@anna_styl"),
+            content_type="application/json",
+            HTTP_AUTHORIZATION=init_data_header("5001"),
+        )
+        second = client.post(
+            _invite_url(),
+            data=_valid_body(name="Мария Иванова", contact_value="@maria_nails"),
+            content_type="application/json",
+            HTTP_AUTHORIZATION=init_data_header("5001"),
+        )
+        assert first.status_code == 201, first.content
+        assert second.status_code == 201, second.content
+
+        CatalogMaster.all_tenants.filter(id=first.json()["master_id"]).delete()
+
+        third = client.post(
+            _invite_url(),
+            data=_valid_body(name="Ольга Смирнова", contact_value="@olga_brows"),
+            content_type="application/json",
+            HTTP_AUTHORIZATION=init_data_header("5001"),
+        )
+        assert third.status_code == 201, third.content
+
+        ids = set(
+            CatalogMaster.all_tenants.filter(tenant=tenant).values_list("external_id", flat=True)
+        )
+        assert len(ids) == CatalogMaster.all_tenants.filter(tenant=tenant).count()
+
+    def test_collision_is_retried_and_answers_201(
+        self,
+        client: Client,
+        owner_bot_user: BotUser,
+        tenant: Tenant,
+        patched_send_message,
+    ) -> None:
+        """Собственно гонка: номер занят между чтением и вставкой.
+
+        Уникальность держит база; проверяется здесь ответ на её
+        срабатывание — пересчитать и повторить, а не 500.
+        """
+
+        now = datetime.now(tz=timezone.utc)
+        CatalogMaster.all_tenants.create(
+            tenant=tenant,
+            external_id=1_000_000,
+            external_updated_at=now,
+            name="Уже занятый номер",
+            invite_status=CatalogMaster.InviteStatus.ACCEPTED,
+            max_handle="",
+        )
+
+        with patch(
+            "apps.admin_api.views_invite._next_external_id",
+            side_effect=[1_000_000, 1_000_001],
+        ) as spy:
+            resp = client.post(
+                _invite_url(),
+                data=_valid_body(),
+                content_type="application/json",
+                HTTP_AUTHORIZATION=init_data_header("5001"),
+            )
+
+        assert resp.status_code == 201, resp.content
+        assert spy.call_count == 2
+        created = CatalogMaster.all_tenants.get(id=resp.json()["master_id"])
+        assert created.external_id == 1_000_001
+
+    def test_collision_that_never_clears_answers_500_not_a_loop(
+        self,
+        client: Client,
+        owner_bot_user: BotUser,
+        tenant: Tenant,
+        patched_send_message,
+    ) -> None:
+        """Положительная стража к ретраю: он ограничен, а не бесконечен."""
+
+        now = datetime.now(tz=timezone.utc)
+        CatalogMaster.all_tenants.create(
+            tenant=tenant,
+            external_id=1_000_000,
+            external_updated_at=now,
+            name="Уже занятый номер",
+            invite_status=CatalogMaster.InviteStatus.ACCEPTED,
+            max_handle="",
+        )
+
+        with patch(
+            "apps.admin_api.views_invite._next_external_id",
+            return_value=1_000_000,
+        ) as spy:
+            resp = client.post(
+                _invite_url(),
+                data=_valid_body(),
+                content_type="application/json",
+                HTTP_AUTHORIZATION=init_data_header("5001"),
+            )
+
+        assert resp.status_code == 500
+        assert spy.call_count == 5
+
+    def test_invite_numbering_ignores_the_synced_range(
+        self,
+        client: Client,
+        owner_bot_user: BotUser,
+        tenant: Tenant,
+        patched_send_message,
+    ) -> None:
+        """Номера Ayla не втягиваются в нашу нумерацию.
+
+        Синхронизированная строка с ``external_id=42`` не должна ни
+        сдвигать наш счётчик, ни быть им затронутой.
+        """
+
+        now = datetime.now(tz=timezone.utc)
+        CatalogMaster.all_tenants.create(
+            tenant=tenant,
+            external_id=42,
+            external_updated_at=now,
+            name="Синхронизированная",
+            invite_status=CatalogMaster.InviteStatus.ACCEPTED,
+            max_handle="",
+        )
+
+        resp = client.post(
+            _invite_url(),
+            data=_valid_body(),
+            content_type="application/json",
+            HTTP_AUTHORIZATION=init_data_header("5001"),
+        )
+        assert resp.status_code == 201, resp.content
+        created = CatalogMaster.all_tenants.get(id=resp.json()["master_id"])
+        assert created.external_id == 1_000_000
