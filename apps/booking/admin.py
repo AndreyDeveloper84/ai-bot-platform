@@ -25,7 +25,7 @@ event-emission side effects.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 from django.contrib import admin, messages
 from django.core.exceptions import PermissionDenied
@@ -38,6 +38,7 @@ from apps.booking.services.admin_cancel import AdminCancelError, cancel_booking_
 from apps.booking.services.transitions import InvalidBookingTransition
 
 if TYPE_CHECKING:  # pragma: no cover - только для аннотаций
+    from django.contrib.auth.models import AbstractUser
     from django.http import HttpRequest, HttpResponse
 
 #: Состояния, из которых машина состояний разрешает отмену.
@@ -116,9 +117,11 @@ class BookingRequestAdmin(admin.ModelAdmin):
 
         if request.method == "POST":
             try:
+                # Право выше уже проверено — аноним сюда не доходит.
+                staff_user = cast("AbstractUser", request.user)
                 cancel_booking_from_admin(
                     booking,
-                    staff_user=request.user,
+                    staff_user=staff_user,
                     reason_text=request.POST.get("reason"),
                 )
             except (AdminCancelError, InvalidBookingTransition) as exc:

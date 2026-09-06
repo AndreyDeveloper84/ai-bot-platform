@@ -94,8 +94,13 @@ def _make_booking(
     master: CatalogMaster,
     service: CatalogService,
 ) -> BookingRequest:
+    # Слот уникален на (master, visit_at) среди активных записей — час
+    # сдвигает каждую следующую запись в тесте на свой слот.
+    offset_hours = BookingRequest.all_tenants.filter(master=master).count()
     target = dj_timezone.now().astimezone(MSK) + timedelta(days=14)
-    visit_at = target.replace(hour=12, minute=0, second=0, microsecond=0)
+    visit_at = target.replace(hour=12, minute=0, second=0, microsecond=0) + timedelta(
+        hours=offset_hours
+    )
     return BookingRequest.objects.create(
         tenant=tenant,
         bot_user=bot_user,
@@ -117,15 +122,20 @@ def _make_booking(
 
 
 def _make_pending_reminder(booking: BookingRequest) -> BookingReminder:
+    bot_user = booking.bot_user
+    visit_at = booking.visit_at
+    # Фабрика _make_booking всегда заполняет оба поля — это фиксация
+    # контракта фабрики, а не проверка продакшн-данных.
+    assert bot_user is not None and visit_at is not None
     return BookingReminder.all_tenants.create(
         tenant=booking.tenant,
-        bot_user=booking.bot_user,
+        bot_user=bot_user,
         booking_request=booking,
         yclients_record_id=f"adm-{booking.pk}",
         chat_id="adm-1",
-        visit_at=booking.visit_at,
+        visit_at=visit_at,
         kind=BookingReminder.Kind.DAY_BEFORE,
-        scheduled_at=booking.visit_at - timedelta(days=1),
+        scheduled_at=visit_at - timedelta(days=1),
         status=BookingReminder.Status.PENDING,
     )
 
