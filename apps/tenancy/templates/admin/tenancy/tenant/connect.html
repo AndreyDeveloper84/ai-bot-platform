@@ -1,0 +1,78 @@
+{% extends "admin/base_site.html" %}
+{% load i18n %}
+
+{% block content %}
+  <h1>Подключить салон</h1>
+
+  <p>
+    Подключение — не создание строки. Экран делает все шаги и проверяет
+    исход: строка, идентификатор Ayla, город, синхронизация каталога,
+    наличие бронируемых мастеров. Критерий успеха — салон виден клиенту,
+    а не «строка создана» (DRF-1525 / DRF-1511).
+  </p>
+
+  {% if error %}
+    <div class="messagelist">
+      <div class="errornote">Подключение отклонено: {{ error }}</div>
+    </div>
+  {% endif %}
+
+  {% if result %}
+    <h2>Итог</h2>
+    <p>
+      Салон <strong>{{ result.tenant.name }}</strong>
+      (slug <code>{{ result.tenant.slug }}</code>, id
+      <code>{{ result.tenant.id }}</code>) создан.
+      По идентификатору в Ayla найдено: услуг — {{ result.probe.services }},
+      мастеров — {{ result.probe.specialists }}.
+    </p>
+    {% if result.sync_error %}
+      <p class="errornote">
+        Каталог не доехал: {{ result.sync_error }}. Это не «салон не
+        подключён»: строка есть, синхронизацию можно повторить командой
+        <code>sync_catalog --tenant {{ result.tenant.slug }}</code>
+        (при HTTP 429 — после паузы ограничителя Ayla).
+      </p>
+    {% elif result.sync_skipped %}
+      <p class="errornote">
+        Синхронизация не запустилась: другой прогон держит блокировку.
+        Повторите позже командой
+        <code>sync_catalog --tenant {{ result.tenant.slug }}</code>.
+      </p>
+    {% else %}
+      <p>Синхронизация выполнена сразу после создания строки.</p>
+    {% endif %}
+
+    <p>
+      Активных услуг: {{ result.assessment.active_services }}.
+      Бронируемых мастеров: {{ result.assessment.bookable_masters }}.
+    </p>
+    {% if result.assessment.is_visible %}
+      <p><strong>Салон виден клиентам — подключение завершено.</strong></p>
+    {% else %}
+      <p><strong>Салон пока не виден клиентам. Причины:</strong></p>
+      <ul>
+        {% for reason in result_reasons %}
+          <li>{{ reason }}</li>
+        {% endfor %}
+      </ul>
+    {% endif %}
+    <p>
+      <a href="{% url 'admin:tenancy_tenant_change' result.tenant.id %}">
+        Открыть карточку салона
+      </a>
+    </p>
+  {% endif %}
+
+  {% if not result %}
+    <form method="post" novalidate>
+      {% csrf_token %}
+      <fieldset class="module aligned">
+        {{ form.as_p }}
+      </fieldset>
+      <div class="submit-row">
+        <input type="submit" value="Подключить и проверить исход" class="default">
+      </div>
+    </form>
+  {% endif %}
+{% endblock %}
