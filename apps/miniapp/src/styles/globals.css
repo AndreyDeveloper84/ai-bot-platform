@@ -6578,3 +6578,245 @@ a {
   line-height: 1.4;
   color: var(--c-text-secondary);
 }
+
+/* ===========================================================================
+   Раздел «Ayla» — диалог мастера с ассистентом (DRF-1180, OD-MASTER-IA).
+
+   Свой блок, а не переиспользование `.m6-*`: те классы принадлежат
+   экрану переписки мастера с КЛИЕНТОМ, который по решению владельца от
+   05.09 удаляется целиком (DRF-1255). Опереться на них значило бы
+   поставить новый раздел на фундамент, который сносят.
+   =========================================================================== */
+
+.ayla-screen {
+  display: flex;
+  flex-direction: column;
+  min-height: 100dvh;
+  padding-bottom: calc(var(--tabbar-height) + 96px + var(--safe-bottom));
+}
+
+.ayla-header {
+  padding: var(--s-3) 0 var(--s-2);
+}
+
+.ayla-header__title {
+  margin: 0;
+  font-size: var(--font-size-500);
+  font-weight: 600;
+  color: var(--c-text-primary);
+}
+
+.ayla-header__sub {
+  margin: 2px 0 0;
+  font-size: var(--font-size-200);
+  color: var(--c-text-secondary);
+}
+
+.ayla-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+  flex: 1;
+}
+
+.ayla-empty,
+.ayla-typing {
+  color: var(--c-text-secondary);
+  font-size: var(--font-size-200);
+  padding: var(--s-3) 0;
+  margin: 0;
+}
+
+.ayla-bubble {
+  max-width: 82%;
+  border-radius: var(--r-md);
+  padding: var(--s-2) var(--s-3);
+  font-size: var(--font-size-300);
+  line-height: var(--leading-base);
+  word-wrap: break-word;
+  overflow-wrap: anywhere;
+}
+
+.ayla-bubble--ayla {
+  align-self: flex-start;
+  background: var(--c-surface-2);
+  color: var(--c-text-primary);
+  border-bottom-left-radius: 4px;
+}
+
+.ayla-bubble--mine {
+  align-self: flex-end;
+  background: var(--c-accent);
+  color: var(--c-text-on-accent);
+  border-bottom-right-radius: 4px;
+}
+
+.ayla-bubble__content {
+  margin: 0;
+  white-space: pre-wrap;
+}
+
+/* Карточка подтверждения. Намеренно НЕ пузырь: это не реплика, а
+   развилка — человек читает, что именно будет сделано, и решает. */
+.ayla-confirm {
+  align-self: stretch;
+  border: 1px solid var(--c-accent);
+  background: var(--c-accent-subtle);
+  border-radius: var(--r-md);
+  padding: var(--s-3);
+  margin-top: var(--s-2);
+}
+
+.ayla-confirm__title {
+  margin: 0 0 var(--s-1);
+  font-size: var(--font-size-200);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--c-accent-pressed);
+}
+
+.ayla-confirm__summary {
+  margin: 0 0 var(--s-3);
+  font-size: var(--font-size-300);
+  line-height: var(--leading-base);
+  color: var(--c-text-primary);
+}
+
+.ayla-confirm__actions {
+  display: flex;
+  gap: var(--s-2);
+  flex-wrap: wrap;
+}
+
+.ayla-btn {
+  min-height: 44px;
+  padding: 0 var(--s-4);
+  border-radius: var(--r-md);
+  border: 0;
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.ayla-btn--primary {
+  background: var(--c-accent);
+  color: var(--c-text-on-accent);
+}
+
+.ayla-btn--primary:active {
+  background: var(--c-accent-pressed);
+}
+
+.ayla-btn--ghost {
+  background: transparent;
+  color: var(--c-text-secondary);
+  border: 1px solid var(--c-divider);
+}
+
+.ayla-btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.ayla-error {
+  color: var(--c-danger);
+  font-size: var(--font-size-200);
+  margin: var(--s-2) 0 0;
+}
+
+.ayla-compose {
+  position: sticky;
+  bottom: calc(var(--tabbar-height) + var(--safe-bottom));
+  background: var(--c-bg);
+  border-top: 1px solid var(--c-divider);
+  padding: var(--s-2) 0;
+  margin-top: auto;
+}
+
+.ayla-compose__row {
+  display: flex;
+  gap: var(--s-2);
+  align-items: flex-end;
+}
+
+.ayla-compose__textarea {
+  flex: 1;
+  resize: none;
+  min-height: 44px;
+  max-height: 140px;
+  padding: var(--s-2) var(--s-3);
+  border-radius: var(--r-md);
+  border: 1px solid var(--c-divider);
+  background: var(--c-surface-1);
+  color: var(--c-text-primary);
+  font: inherit;
+  line-height: var(--leading-base);
+}
+
+.ayla-compose__textarea:focus {
+  outline: 2px solid var(--c-accent-subtle);
+  outline-offset: 1px;
+  border-color: var(--c-accent);
+}
+
+.ayla-compose__send {
+  min-width: 44px;
+  min-height: 44px;
+  border-radius: var(--r-md);
+  background: var(--c-accent);
+  color: var(--c-text-on-accent);
+  border: 0;
+  cursor: pointer;
+}
+
+.ayla-compose__send:disabled {
+  background: var(--c-surface-2);
+  color: var(--c-text-secondary);
+  cursor: not-allowed;
+}
+
+.ayla-compose__counter {
+  margin: var(--s-1) 0 0;
+  font-size: var(--font-size-100);
+  color: var(--c-text-secondary);
+  text-align: end;
+}
+
+.ayla-compose__counter--over {
+  color: var(--c-danger);
+}
+
+/* Вход в раздел с «Сегодня». Временный, пока нижняя навигация
+   четырёхразделная: перевод 4 → 3 идёт вместе с DRF-1255. */
+.ayla-entry {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s-3);
+  padding: var(--s-3);
+  border-radius: var(--r-md);
+  border: 1px solid var(--c-divider);
+  background: var(--c-surface-1);
+  color: var(--c-text-primary);
+  font: inherit;
+  text-align: start;
+  cursor: pointer;
+}
+
+.ayla-entry__title {
+  display: block;
+  font-weight: 600;
+}
+
+.ayla-entry__sub {
+  display: block;
+  font-size: var(--font-size-200);
+  color: var(--c-text-secondary);
+}
+
+.ayla-entry__chevron {
+  color: var(--c-text-secondary);
+  flex: none;
+}

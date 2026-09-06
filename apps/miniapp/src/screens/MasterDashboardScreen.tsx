@@ -259,6 +259,13 @@ export function MasterDashboardScreen() {
     navigate("/master/schedule");
   }, [navigate]);
 
+  // Вход в раздел «Ayla» (DRF-1180). Временно карточкой, а не вкладкой:
+  // нижняя навигация станет трёхразделной вместе с DRF-1255.
+  const onAylaOpen = useCallback(() => {
+    hapticSelection();
+    navigate("/master/ayla");
+  }, [navigate]);
+
   // --- Resolve current data + flags --------------------------------------
 
   const data: DashboardResponse | null =
@@ -368,6 +375,8 @@ export function MasterDashboardScreen() {
         </>
       )}
 
+      <AylaEntrySection onOpen={onAylaOpen} />
+
       <PayoutPreviewCard />
 
       <MasterTabBar
@@ -376,6 +385,24 @@ export function MasterDashboardScreen() {
         profileHasOwnerPendingChange={tab_badges.profile_has_owner_pending_change}
       />
     </DashboardFrame>
+  );
+}
+
+function AylaEntrySection({ onOpen }: { onOpen: () => void }) {
+  return (
+    <section className="master-dashboard__section">
+      <button type="button" className="ayla-entry" onClick={onOpen}>
+        <span>
+          <span className="ayla-entry__title">Спросить Ayla</span>
+          <span className="ayla-entry__sub">
+            День, загрузка, свободные окна
+          </span>
+        </span>
+        <span className="ayla-entry__chevron" aria-hidden="true">
+          ›
+        </span>
+      </button>
+    </section>
   );
 }
 

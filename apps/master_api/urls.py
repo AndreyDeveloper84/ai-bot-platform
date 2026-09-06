@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from django.urls import path
 
-from apps.master_api import views
+from apps.master_api import views, views_assistant
 
 app_name = "master_api"
 
@@ -79,6 +79,12 @@ urlpatterns = [
     # Tier 2 Phase 1 read-only roster + catalog (master-solo-surface §4.3 + §4.4)
     path("customers", views.customers_list, name="customers_list"),
     path("catalog", views.catalog_list, name="catalog_list"),
+    # Раздел «Ayla» — диалог мастера с ассистентом (DRF-1180, OD-MASTER-IA).
+    # Маршрут поверх уже работающего `services.assistant`; исполнение
+    # пишущего действия отделено от ответа (см. views_assistant).
+    path("assistant/history", views_assistant.assistant_history, name="assistant_history"),
+    path("assistant/ask", views_assistant.assistant_ask, name="assistant_ask"),
+    path("assistant/confirm", views_assistant.assistant_confirm, name="assistant_confirm"),
     # Billing status (C2) + payout preview (C3) proxies (pilot 2026-08-15)
     path("billing/status", views.billing_status, name="billing_status"),
     path("billing/card-setup", views.billing_card_setup, name="billing_card_setup"),

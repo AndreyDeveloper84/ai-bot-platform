@@ -91,6 +91,11 @@ class AssistantReply:
     llm_model: str = ""
     llm_cost_usd: Decimal = field(default_factory=lambda: Decimal(0))
     blocked_categories: tuple[str, ...] = field(default_factory=tuple)
+    #: Предложенное, но НЕ выполненное действие, меняющее данные
+    #: (DRF-1180). Заполнено — значит собеседнику показывают сводку и
+    #: ждут подтверждения; выполнить его можно только отдельным
+    #: запросом с талоном изнутри. `None` — ничего не предлагалось.
+    pending_action: dict[str, Any] | None = None
 
 
 def _system_prompt(master, *, today: date, tz_label: str) -> str:
@@ -172,12 +177,27 @@ def answer_master_question(
     text: str,
     history=None,
     now: datetime | None = None,
+    allow_actions: bool = False,
 ) -> AssistantReply:
-    """Answer one question from one master. Never raises."""
+    """Answer one question from one master. Never raises.
+
+    ``allow_actions`` — умеет ли вызывающая поверхность показать
+    карточку подтверждения. По умолчанию НЕТ, и тогда модель вовсе не
+    видит пишущих действий: салонный бот, который зовёт эту функцию с
+    2026-08, остаётся ровно таким, каким работает сегодня. Mini App
+    (`POST /api/v1/master/assistant/ask`) передаёт ``True`` — и тогда
+    пишущее действие возвращается ПРЕДЛОЖЕНИЕМ, а не выполняется.
+    """
 
     from apps.master_api.services.ai_draft_limits import (
         check_and_consume_rate_limit,
         check_cost_cap,
+    )
+    from apps.master_api.services.assistant_actions import (
+        ACTION_SPECS,
+        ActionError,
+        is_action,
+        propose,
     )
     from apps.master_api.services.assistant_tools import TOOL_SPECS, ToolError, run_tool
     from apps.orchestrator.safety.gate import evaluate_inbound
@@ -216,9 +236,11 @@ def answer_master_question(
         {"role": "user", "content": text},
     ]
 
+    offered = [*TOOL_SPECS, *ACTION_SPECS] if allow_actions else list(TOOL_SPECS)
+
     reply = AssistantReply(text="")
     try:
-        first = _complete(messages, tenant=master.tenant, tools=TOOL_SPECS)
+        first = _complete(messages, tenant=master.tenant, tools=offered)
     except Exception:  # noqa: BLE001 — provider outage is not a crash
         logger.exception("master_assistant.first_call_failed master=%s", master.id)
         return AssistantReply(text=FAILED_TEXT)
@@ -235,6 +257,24 @@ def answer_master_question(
         return _finish(reply, getattr(first, "text", "") or "", evaluate_outbound)
 
     call = calls[0]
+
+    # Пишущее действие НЕ исполняется здесь — ни при каких аргументах.
+    # Оно возвращается предложением: сводка, которую человек читает, и
+    # талон, которым он подтверждает. Исполнение — отдельный запрос
+    # (`apps.master_api.services.assistant_actions.execute`).
+    if is_action(call.name):
+        try:
+            proposal = propose(call.name, call.arguments or {}, master=master)
+        except ActionError as exc:
+            return _finish(reply, f"Не смог подготовить действие: {exc.detail}", evaluate_outbound)
+        reply.tool_name = proposal.name
+        reply.pending_action = proposal.as_dict()
+        # Сводку не пропускаем через модель и не переписываем: человек
+        # подтверждает ровно тот текст, который собран из аргументов,
+        # уехавших в талон. Пересказ подтверждать нечестно.
+        reply.text = proposal.summary
+        return reply
+
     try:
         outcome = run_tool(call.name, call.arguments or {}, master=master)
     except ToolError as exc:
