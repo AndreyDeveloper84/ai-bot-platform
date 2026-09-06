@@ -5,7 +5,7 @@ from django.db import migrations, models
 
 class Migration(migrations.Migration):
     dependencies = [
-        ("identity", "0020_drop_userpreferences_allergies"),
+        ("identity", "0021_notify_promo_mirrors_consent_registry"),
     ]
 
     operations = [
