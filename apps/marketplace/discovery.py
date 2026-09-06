@@ -1102,9 +1102,10 @@ def _name_word_count_sql(field: str) -> BaseExpression:
     """:func:`name_word_count` as an ORM expression over ``field``.
 
     ``LENGTH(x) - LENGTH(REPLACE(x, ' ', '')) + 1`` — the spaces, plus one.
-    Every function used exists on BOTH backends the suite runs on (the CI
-    matrix runs the Postgres and the SQLite legs), which is why this is not
-    ``regexp_split_to_array``.
+    Every function used exists on BOTH backends the suite runs on — SQLite is
+    a real target here, not a hypothetical (the module's own tests carry a
+    Postgres-only skip precisely because the suite also runs without it) —
+    which is why this is not ``regexp_split_to_array``.
 
     NULL is deliberately NOT absorbed here. The only way ``field`` is NULL is
     the LEFT JOIN of a master with no service row at all, and that master must
