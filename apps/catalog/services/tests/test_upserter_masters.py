@@ -128,7 +128,9 @@ class TestCreate:
         upsert_specialists(tenant, [_dto(mid)])
         m = CatalogMaster.all_tenants.get(id=mid)
         # Platform-owned defaults must not be overwritten by sync.
-        assert m.invite_status == CatalogMaster.InviteStatus.ACCEPTED
+        # DRF-1496: умолчание — PENDING (мастер небронируема до ручной
+        # верификации), а не ACCEPTED из прошлого дефекта.
+        assert m.invite_status == CatalogMaster.InviteStatus.PENDING
         assert m.photo_url == ""
 
 

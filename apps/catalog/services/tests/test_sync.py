@@ -237,7 +237,9 @@ class TestMastersMirror:
 
         m = CatalogMaster.all_tenants.get(tenant=tenant, id=mid)
         assert m.name == "Анна"
-        assert m.invite_status == CatalogMaster.InviteStatus.ACCEPTED
+        # DRF-1496: синхронизация рождает мастера «ожидающим» — приглашение
+        # ей никто не слал. Бронируемой её делает ручная верификация.
+        assert m.invite_status == CatalogMaster.InviteStatus.PENDING
 
     def test_specialists_fetch_failure_isolated(self, tenant: Tenant) -> None:
         """A specialists fetch failure must not abort the services mirror."""
