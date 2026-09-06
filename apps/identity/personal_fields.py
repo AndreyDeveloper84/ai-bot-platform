@@ -630,6 +630,18 @@ NOT_PERSONAL: Mapping[str, str] = {
     ),
     "identity.BotUser.food_scanner_consent_at": "Permission record for the food scanner surface.",
     "identity.BotUser.deleted_at": "Erasure bookkeeping — when deletion was requested.",
+    "identity.BotUser.blocked_at": (
+        "Block bookkeeping (DRF-1497) — when an admin blocked the person. It "
+        "decides only whether outbound sends are delivered, never what they say."
+    ),
+    "identity.BotUser.blocked_reason": (
+        "Block bookkeeping — the reason the admin typed. Shown back to staff, "
+        "never fed into what Ayla says to the person."
+    ),
+    "identity.BotUser.blocked_by_username": (
+        "Block bookkeeping — which admin account blocked. Audit duplicate, not a "
+        "fact about the person."
+    ),
     # identity.UserPreferences
     "identity.UserPreferences.bot_user": "Row identity — the person this row is.",
     "identity.UserPreferences.tenant": "Scoping.",
