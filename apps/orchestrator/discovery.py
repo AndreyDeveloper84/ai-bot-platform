@@ -38,8 +38,8 @@ from uuid import UUID
 
 from apps.llm.router import get_router
 from apps.marketplace.discovery import (
+    discover_masters,
     discover_masters_for_service,
-    discover_masters_window,
     discover_salons,
     discover_services,
     get_salon,
@@ -1008,6 +1008,27 @@ def decode_more_ref(ref: str) -> tuple[int, str | None, str | None] | None:
     return offset, (parts[1] or None), (parts[2] or None)
 
 
+def split_master_page(
+    cards: list[MasterCard], *, offset: int, limit: int
+) -> tuple[list[MasterCard], int | None]:
+    """Split an OVER-FETCHED card list into (this page, next offset). PURE.
+
+    ``cards`` must have been read with ``limit + 1``: the extra row is how the
+    caller learns there is a next page without a second COUNT query — the same
+    idiom :func:`show_salons` and the ask-the-service menu already use, and
+    the reason is the same one. «Это не всё» must KNOW, not guess from a list
+    that happens to fill the page.
+
+    ``None`` as the second element means «that was everybody»: the caller
+    renders no «Показать ещё», because a button leading nowhere costs more
+    trust than the one it saves.
+
+    Shared by both readers rather than written twice, so the rule for when the
+    button appears cannot drift between the concierge and the LLM path.
+    """
+    return cards[:limit], (offset + limit if len(cards) > limit else None)
+
+
 def fetch_master_page(
     *,
     city: str | None,
@@ -1018,25 +1039,25 @@ def fetch_master_page(
 ) -> tuple[list[MasterCard], int | None]:
     """One page of discovered masters, plus the offset of the NEXT one.
 
-    ``None`` as the second element means «that was everybody» — the caller
-    renders no «Показать ещё», because a button that leads nowhere costs more
-    trust than the one it saves.
-
     The page size stays five (§7, прогрессивное раскрытие). What changes is
-    that position six now exists: before DRF-1532 the slice happened in SQL
+    that position six now EXISTS: before DRF-1532 the slice happened in SQL
     and the sixth candidate was never fetched, so no button could have reached
     them.
+
+    ``discover_masters`` is called through this module's own global on
+    purpose — that is the seam the show_masters suites patch, and a page
+    reader the tests cannot stand in for would make every one of them a
+    database test.
     """
-    cards, total = discover_masters_window(
+    cards = discover_masters(
         city=city,
         specialization=specialization,
-        limit=limit,
+        limit=limit + 1,
         offset=offset,
         resolve_service=True,
         rotation_seed=rotation_seed(conversation),
     )
-    next_offset = offset + len(cards)
-    return cards, (next_offset if cards and next_offset < total else None)
+    return split_master_page(cards, offset=offset, limit=limit)
 
 
 def _render_master_cards(
@@ -2550,11 +2571,15 @@ def generate_discovery_reply(
             if not has_discovery_criteria(city, specialization):
                 logger.info("orchestrator.discovery.show_masters.no_criteria trace=%s", trace_id)
                 return render_no_criteria_clarification()
+            page_size = min(
+                int(limit) if isinstance(limit, int) and limit > 0 else _MAX_MASTER_CARDS,
+                _MAX_MASTER_CARDS,
+            )
             cards, more_offset = fetch_master_page(
                 city=city,
                 specialization=specialization,
                 conversation=conversation,
-                limit=int(limit) if isinstance(limit, int) and limit > 0 else _MAX_MASTER_CARDS,
+                limit=page_size,
             )
             # DRF-1312 — a composite request is checked service by service, so
             # the half nobody offers is stated rather than dropped.

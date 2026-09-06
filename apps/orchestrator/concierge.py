@@ -60,6 +60,7 @@ from apps.llm.pricing import UnknownModelError, compute_cost
 from apps.llm.router import get_router
 from apps.marketplace.discovery import (
     city_service_samples,
+    discover_masters,
     find_masters_by_name,
     parse_query,
     service_coverage,
@@ -78,12 +79,13 @@ from apps.orchestrator.discovery import (
     _discovery_voice_fields,
     _render_ask_clarification,
     _render_master_cards,
-    fetch_master_page,
     encode_query_ref,
     execute_catalog_tool,
     has_discovery_criteria,
     reground_specialization,
     render_no_criteria_clarification,
+    rotation_seed,
+    split_master_page,
     render_no_match,
     requested_services,
 )
@@ -1854,11 +1856,25 @@ def _concierge_turn(
         # this the sixth candidate was never fetched: on «массаж» that was
         # three real people the person could not reach by any means, chosen
         # by surname.
-        cards, more_offset = fetch_master_page(
-            city=city,
-            specialization=specialization,
-            conversation=conversation,
-            limit=int(limit) if isinstance(limit, int) and limit > 0 else _MAX_MASTER_CARDS,
+        page_size = min(
+            int(limit) if isinstance(limit, int) and limit > 0 else _MAX_MASTER_CARDS,
+            _MAX_MASTER_CARDS,
+        )
+        # +1 row: the extra card is how this learns there IS a next page,
+        # without a second COUNT — the idiom ``show_salons`` and the
+        # ask-the-service menu already use. ``discover_masters`` stays the
+        # call, and stays THIS module's global, because that is the seam every
+        # show_masters suite patches.
+        cards, more_offset = split_master_page(
+            discover_masters(
+                city=city,
+                specialization=specialization,
+                limit=page_size + 1,
+                resolve_service=True,
+                rotation_seed=rotation_seed(conversation),
+            ),
+            offset=0,
+            limit=page_size,
         )
         # DRF-1312 — which of the requested services the CATALOG can serve.
         # Names come from the model, verdicts come from the catalog: the model
@@ -2273,10 +2289,14 @@ def generate_direct_show_masters_reply(
         # path did not answer the inbound message.
         logger.info("orchestrator.concierge.direct_show_masters.not_claimed trace=%s", trace_id)
         return None
-    cards, more_offset = fetch_master_page(
-        specialization=message_text,
-        city=None,
-        conversation=conversation,
+    cards, more_offset = split_master_page(
+        discover_masters(
+            specialization=message_text,
+            limit=_MAX_MASTER_CARDS + 1,
+            resolve_service=True,
+            rotation_seed=rotation_seed(conversation),
+        ),
+        offset=0,
         limit=_MAX_MASTER_CARDS,
     )
     logger.info(
