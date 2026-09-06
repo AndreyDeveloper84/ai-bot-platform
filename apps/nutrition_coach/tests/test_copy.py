@@ -48,6 +48,9 @@ class TestWhitelist:
     def test_no_string_names_a_count_or_a_clock(self, text: str) -> None:
         """Q-10 / R3: the trigger counts days and hours; the text never
         names them — not «три дня», not «после девяти», not «21:00»."""
+        # Контроль присутствия на тех же данных: строка вообще существует —
+        # иначе «в ней нет счётчиков» доказывало бы не чистоту, а пустоту.
+        assert text.strip()
         for banned in ("подряд", "21", "девят", "три дня", "дней"):
             assert banned not in text.lower(), f"{banned!r} leaked into {text!r}"
 
@@ -64,6 +67,10 @@ class TestFirstHintTail:
         """The tail is an introduction, not a refrain: repeating it every
         week turns a courtesy into noise."""
         for kind in copy.HINT_TEXTS:
+            # Контроль присутствия: на first_ever=True тот же рендер хвост
+            # несёт — иначе «нет хвоста» ниже доказывало бы не повтор, а
+            # сломанный рендер.
+            assert copy.FIRST_HINT_TAIL in copy.render_hint(kind, first_ever=True)
             assert copy.FIRST_HINT_TAIL not in copy.render_hint(kind, first_ever=False)
 
     def test_the_tail_is_the_owner_wording_verbatim(self) -> None:
