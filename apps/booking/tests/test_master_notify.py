@@ -339,7 +339,16 @@ class TestCascadePrecedence:
         master = _make_master(tenant, linked_chat_id="master-chat-1")
         assert resolve_specialist_chat_id(master) == "master-chat-1"
 
-        unlinked = _make_master(tenant, external_id=2, linked_chat_id=None)
+        # Второй мастер салона — со СВОИМ ``ayla_user_id``. Общий на двоих был
+        # невозможным состоянием, которое база терпела до DRF-1507: один
+        # человек Ayla, две строки мастера — ровно то, из-за чего
+        # ``resolve_specialist_chat_id`` мог выбрать не ту.
+        unlinked = _make_master(
+            tenant,
+            external_id=2,
+            ayla_user_id=str(uuid.uuid4()),
+            linked_chat_id=None,
+        )
         assert resolve_specialist_chat_id(unlinked) == ""
         assert resolve_specialist_chat_id(None) == ""
 

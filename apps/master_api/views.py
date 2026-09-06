@@ -352,6 +352,12 @@ def onboarding_accept(request: HttpRequest) -> HttpResponse:
     the call (network blip, user double-tapped). A DIFFERENT BotUser →
     403.
 
+    DRF-1507 — the retry branch is now gated on the presented token: a
+    token that belongs to a DIFFERENT master row of the same salon is
+    not a retry, it is somebody else's invite, and it answers 403
+    ``wrong_recipient`` instead of silently handing back the caller's
+    own session while the other row stays PENDING forever.
+
     Side effects:
       * ``invite_token = None`` (one-shot consumption)
       * ``invite_status = ACCEPTED``
@@ -392,6 +398,53 @@ def onboarding_accept(request: HttpRequest) -> HttpResponse:
         .first()
     )
     if existing is not None:
+        # DRF-1507 — проба смотрит на предъявленный токен, а не только на
+        # связанного пользователя.
+        #
+        # Было: любой токен от уже связанного человека читался как повтор.
+        # Человек, привязанный к строке А, предъявлял валидный токен строки Б
+        # и получал HTTP 200 и сессию А. Строка Б оставалась PENDING навсегда
+        # — фантом в ростере, о котором не узнавал ни он, ни владелец салона.
+        #
+        # Стало: если предъявленный токен принадлежит ДРУГОЙ строке этого
+        # салона — это не повтор, а чужое приглашение, и оно получает ту же
+        # честную ошибку, что и приглашение, адресованное другому аккаунту
+        # MAX (``wrong_recipient``, 403). Слуг переиспользован намеренно: с
+        # точки зрения предъявителя утверждение верное — приглашение выписано
+        # не на него — а Mini App уже умеет его показывать
+        # (``MasterOnboardingScreen``), и вводить второй слуг ради того же
+        # смысла значило бы просить фронт научиться ещё одному тексту.
+        #
+        # Свой токен по-прежнему идемпотентен: ``invite_token`` обнуляется на
+        # приёме (one-shot), поэтому собственный уже использованный токен ни
+        # в одной строке не находится, и проба ниже его не ловит. Ровно так
+        # же ведёт себя произвольный UUID — различить их невозможно в
+        # принципе, и молчаливый успех на повторе тут дешевле отказа на
+        # честном ретрае из-за сетевого сбоя.
+        foreign = (
+            CatalogMaster.all_tenants.filter(
+                tenant=bot_user.tenant,
+                invite_token=token_uuid,
+            )
+            .exclude(pk=existing.pk)
+            .first()
+        )
+        if foreign is not None:
+            logger.warning(
+                "master_api.onboarding.accept.foreign_token bot_user=%s "
+                "linked_master=%s token_master=%s — предъявлен токен другой "
+                "строки мастера; раньше это молча возвращало сессию своей "
+                "(DRF-1507).",
+                bot_user.id,
+                existing.id,
+                foreign.id,
+            )
+            return _error(
+                "wrong_recipient",
+                "this invite was sent to a different MAX account",
+                403,
+            )
+
         # The accepted row may have cleared invite_token already, so we
         # can't match on the wire token. We trust the linkage: the
         # SAME BotUser arriving with ANY token after accepting is a
