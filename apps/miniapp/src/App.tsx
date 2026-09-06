@@ -1227,11 +1227,25 @@ export function CustomerRoutes() {
         (Ayla-first reskin per docs/screens/customer-booking-flow.md).
         F1 reads the real mirror catalog since pilot phase 3.1.
       */}
-      {/* Home = «Мои записи» (pilot phase 3.2, orchestrator decision):
-          records on real data is the pilot home. The wellness dashboard
-          (stub surface, gated) moves to /customer/wellness until
-          S4/post-pilot. */}
-      <Route path="/customer/main" element={<CustomerRecordsScreen />} />
+      {/*
+        DRF-1546 — «Главная» это домашний экран (wellness dashboard),
+        решение владельца §24.2 + §34: старший канон клиентской
+        поверхности — `docs/screens/customer-main-wellness-dashboard.md`,
+        и там этот экран объявлен P0 BLOCKER пилота.
+
+        Оба условия снятия гейта из §24.2 выполнены до этой правки:
+        настоящие цели подключены (DRF-1476), `weekly_progress` бэкенд
+        опускает, а не шлёт нулями. Экран стоял закрытым флагом только
+        потому, что его никто не открыл, и человек на «Главной» видел
+        список записей.
+
+        Записи никуда не делись — они на `/customer/records` и на своей
+        вкладке в нижней навигации.
+      */}
+      <Route
+        path="/customer/main"
+        element={<CustomerWellnessDashboardScreen />}
+      />
       {/*
         DRF-1190 — the goal surface. Registered by the main window at the
         conversation window's request: the screen is theirs, App.tsx is
@@ -1243,6 +1257,12 @@ export function CustomerRoutes() {
         the bot, not just an internal link.
       */}
       <Route path="/customer/goal-select" element={<GoalSelectScreen />} />
+      {/*
+        Совместимый псевдоним того же экрана. Слаги бота
+        `open_wellness` и `open_water_add_250` резолвятся сюда
+        (`_ROUTE_MAP` в lib/max-sdk.ts), то есть это договор с ботом, а
+        не внутренняя ссылка — удалять его нельзя, пока живы ссылки.
+      */}
       <Route
         path="/customer/wellness"
         element={<CustomerWellnessDashboardScreen />}

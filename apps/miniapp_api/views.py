@@ -2567,12 +2567,18 @@ def customer_wellness_today(request: HttpRequest) -> HttpResponse:
     ## Graceful degradation
 
     The two Ayla calls run concurrently and degrade INDEPENDENTLY: if
-    `daily_summary` fails, calories/PFC zero out but hydration still
+    `daily_summary` fails, calories/PFC are OMITTED but hydration still
     renders, and vice-versa. The endpoint returns 200 with whatever
     succeeded — a dashboard that renders partial data beats a blank
-    error screen. Zeros are a valid «no logs today» state per the
-    frontend contract, so a degraded response is indistinguishable from
-    a genuinely empty day; that's an accepted trade for resilience.
+    error screen.
+
+    Omitted, not zeroed (DRF-1546). Zeros used to stand in for a failed
+    read, which made a degraded response indistinguishable from a
+    genuinely empty day: a person who had logged four glasses was shown
+    «0 / 8 стаканов» whenever Ayla hiccuped. That is the same class of
+    lie as the hardcoded `active_goals: []` below, and it gets the same
+    treatment — the key is absent, and the frontend says «Не удалось
+    загрузить» instead of inventing a number.
 
     ## active_goals — read from the goal layer (DRF-1476)
 
@@ -2626,11 +2632,17 @@ def customer_wellness_today(request: HttpRequest) -> HttpResponse:
     nutrition_errors = (NutritionUnavailableError, NutritionAPIError)
 
     # ── calories + PFC (from daily_summary) ─────────────────────────────
+    # `*_known` mirrors `goals_known` below: a read that FAILED omits its
+    # keys instead of sending zeros. «0 из 0 ккал» is not «nothing logged
+    # today», it is «we could not ask», and the two are indistinguishable
+    # to the person reading the screen.
+    summary_known = True
     calories_eaten = 0
     calories_target = 0
     pfc: dict[str, Any] | None = None
     if isinstance(summary_res, nutrition_errors):
         logger.warning("wellness_today.summary_unavailable ext=%s err=%s", external_id, summary_res)
+        summary_known = False
     elif isinstance(summary_res, Exception):
         # Unexpected exception type — log + degrade, never 500 the dashboard.
         logger.warning(
@@ -2638,6 +2650,7 @@ def customer_wellness_today(request: HttpRequest) -> HttpResponse:
             external_id,
             type(summary_res).__name__,
         )
+        summary_known = False
     else:
         calories_eaten = round(summary_res.calories_total)
         calories_target = int(summary_res.calories_goal)
@@ -2648,16 +2661,19 @@ def customer_wellness_today(request: HttpRequest) -> HttpResponse:
         }
 
     # ── hydration (from get_water_today) ────────────────────────────────
+    water_known = True
     water_glasses_eaten = 0
     water_glasses_target = _WATER_GLASSES_TARGET_DEFAULT
     if isinstance(water_res, nutrition_errors):
         logger.warning("wellness_today.water_unavailable ext=%s err=%s", external_id, water_res)
+        water_known = False
     elif isinstance(water_res, Exception):
         logger.warning(
             "wellness_today.water_unexpected ext=%s err=%s",
             external_id,
             type(water_res).__name__,
         )
+        water_known = False
     else:
         water_glasses_eaten = _ml_to_glasses(water_res.total_ml)
         target = _ml_to_glasses(water_res.norm_ml)
@@ -2688,14 +2704,19 @@ def customer_wellness_today(request: HttpRequest) -> HttpResponse:
         active_goals = _active_goals_from_context(goals_doc, now=timezone.now())
 
     payload: dict[str, Any] = {
-        "calories_eaten": calories_eaten,
-        "calories_target": calories_target,
-        "water_glasses_eaten": water_glasses_eaten,
-        "water_glasses_target": water_glasses_target,
         "display_name": bot_user.client_name or bot_user.display_name or "",
     }
-    if pfc is not None:
-        payload["pfc"] = pfc
+    # Omitted — not zeroed — when the nutrition read failed. See the
+    # `summary_known` comment above; the frontend renders «Не удалось
+    # загрузить» for an absent slice and numbers for a present one.
+    if summary_known:
+        payload["calories_eaten"] = calories_eaten
+        payload["calories_target"] = calories_target
+        if pfc is not None:
+            payload["pfc"] = pfc
+    if water_known:
+        payload["water_glasses_eaten"] = water_glasses_eaten
+        payload["water_glasses_target"] = water_glasses_target
     # Omitted — not `[]` — when the goal layer could not be reached: an
     # empty list means «no goal chosen», and saying that on an outage is
     # the defect this ticket closes. See docstring.

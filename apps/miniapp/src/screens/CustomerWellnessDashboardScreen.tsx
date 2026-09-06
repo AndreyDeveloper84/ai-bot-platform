@@ -17,17 +17,39 @@
  *
  *   Block 1 — Greeting + human one-liner (Tau §3 / §11.9 + §11.10)
  *   Block 2 — Pulse strip (Питание + Вода + Цель)  — Tau §3 + §11.1
- *   Block 3 — Quick actions 2×2 (📸 + 💧 + 🎯 + 📅) — Tau §3 + §11.5+§11.7+§11.8
+ *   Block 3 — Quick actions (💧 + 🎯 + 📅) — Tau §3 + §11.5 + §11.8
  *   Block 4 — Цели сегодня (text actions, no progress bars) — Tau §3
  *   Block 5 — Ближайшая запись (multi-record indicator) — Tau §3 + §11.3
  *   Block 6 — Прогресс недели (cold-start ≥3 days) — Tau §3 + §11.4
  *   Block 7 — Recommendations embed (TL extension; phase 3.1: real
  *     scorer picks onto mirror services, no reasoning_text)
- *   Bottom nav — 5 tabs (🏠 Главная / ☀ День / 📅 Записи / 💅 Услуги / 👤 Я)
+ *   Bottom nav — 🏠 Главная / 📅 Записи / 💅 Услуги / 👤 Я
  *
  * NOTE: Tau's literal Block 7 is the bottom nav. TL re-numbering treats
  * the bottom nav as separate and adds a new Block 7 (Recommendations
  * embed) above it. Implemented per TL ticket; deviation documented.
+ *
+ * # Что снято с этого экрана и почему (DRF-1546)
+ *
+ * Правило владельца (§33 / DRF-1543): блок, за которым нет ручки, на
+ * главную не выходит — не заглушкой и не «скоро», его просто нет.
+ *
+ *   - **Quick action «📸 Сфотографируй еду»** — ручек
+ *     `/api/v1/customer/food/{scan,log,daily}` не существует (404 на
+ *     боевом контуре), `food-scanner.ts::guardProd` вне DEV бросает.
+ *     Кнопка вела на падающий экран. Маршруты `/customer/food-scanner/*`
+ *     оставлены (§33: снимается вход, а не маршрут).
+ *   - **Строка «🍽 Добрать белок · ещё N г»** (Block 4) — висела на
+ *     `pfc.protein_target_g`, которого бэкенд не шлёт и источника под
+ *     него не имеет. В бою не рендерилась никогда.
+ *   - **Кнопка «Подробнее в Дне»** (Block 6) — поверхности «День» нет,
+ *     вела на `/`, экран входа.
+ *   - **Вкладка «День»** в нижней навигации — та же причина: её роль
+ *     исполнял этот экран, а он теперь Главная.
+ *
+ * AI insight cards не строятся (spec §2: deferred post-pilot), прогресс
+ * цели и мультицели — тоже (в модели Ayla их нет; борды обещают, канон
+ * нет — §34).
  *
  * # Anti-pattern enforcement
  *
@@ -77,9 +99,7 @@ import {
   getCatalogBrowse,
   type CatalogBrowseData,
 } from "../lib/customer-booking";
-import { STUB_SURFACES_ENABLED } from "../lib/feature-flags";
 import { UnbookableBadge } from "../components/UnbookableNote";
-import { PilotComingSoonScreen } from "./PilotComingSoonScreen";
 import { useScreenBack } from "../hooks/useScreenBack";
 import { screenRoot } from "../lib/screen-back";
 
@@ -104,22 +124,18 @@ function isOnline(): boolean {
 // ---------------------------------------------------------------------------
 
 export function CustomerWellnessDashboardScreen() {
-  // Pilot commit 4 (orchestrator): the wellness dashboard is a stub
-  // surface — hidden in prod builds until S4/post-pilot. The flag is a
-  // build-time constant, so the early return never violates the rules
-  // of hooks (consistent for the component's lifetime). Phase 3 target:
-  // home becomes «Мои записи» on real data — see lib/feature-flags.ts.
-  if (!STUB_SURFACES_ENABLED) {
-    return <PilotComingSoonScreen surface="home" />;
-  }
+  // Гейт снят (DRF-1546, решение владельца §24.2 + §34). Оба условия
+  // владельца выполнены: настоящие цели подключены (DRF-1476),
+  // `weekly_progress` бэкенд опускает, а не шлёт нулями. Экран стоял
+  // закрытым только потому, что его никто не открыл.
   const navigate = useNavigate();
 
-  // Вид экрана (DRF-1493): корень. «День» — такая же корневая вкладка,
-  // как «Записи»: у экрана своя нижняя навигация с активной вкладкой
-  // «День», и стрелка «назад» здесь означала бы родителя, которого нет.
+  // Вид экрана (DRF-1493): корень. «Главная» — точка входа клиентской
+  // поверхности: у экрана своя нижняя навигация, и стрелка «назад»
+  // здесь означала бы родителя, которого нет.
   useScreenBack(
     screenRoot(
-      "«День» — корневая вкладка клиентской поверхности со своей " +
+      "«Главная» — корневая вкладка клиентской поверхности со своей " +
         "нижней навигацией; выше неё ничего нет.",
     ),
   );
@@ -137,7 +153,6 @@ export function CustomerWellnessDashboardScreen() {
     () => readWaterQueue().length,
   );
   const [waterToast, setWaterToast] = useState<string | null>(null);
-  const [photoToast, setPhotoToast] = useState<string | null>(null);
   const [onboardingDismissed, setOnboardingDismissed] = useState<boolean>(
     () => isOnboardingDismissed(),
   );
@@ -223,25 +238,16 @@ export function CustomerWellnessDashboardScreen() {
     const t = setTimeout(() => setWaterToast(null), 3000);
     return () => clearTimeout(t);
   }, [waterToast]);
-  useEffect(() => {
-    if (!photoToast) return;
-    const t = setTimeout(() => setPhotoToast(null), 3000);
-    return () => clearTimeout(t);
-  }, [photoToast]);
-
   // ── quick-action handlers ────────────────────────────────────────────
-  const onPhotoTap = useCallback(() => {
-    // §11.7 — disable + toast when offline.
-    if (!online) {
-      setPhotoToast("Для распознавания нужна сеть. Попробуйте позже.");
-      return;
-    }
-    // Tier 1 Priority 7 Phase B — photo handling lives in webview now
-    // (Tau Variant A wizard). The old bot-DM deeplink path is dead
-    // code per founder pivot 2026-06-02; legacy `botDmFoodScanUrl()` +
-    // `maxBridge().openLink` retained for unrelated handlers only.
-    navigate("/customer/food-scanner/capture");
-  }, [navigate, online]);
+  //
+  // Быстрого действия «📸 Сфотографируй еду» здесь БОЛЬШЕ НЕТ
+  // (DRF-1546, тот же признак, что §33 / DRF-1543). За ним не было
+  // ручки: `/api/v1/customer/food/{scan,log,daily}` отвечают 404 на
+  // боевом контуре, а `food-scanner.ts::guardProd` вне DEV бросает
+  // `StubNotWiredError` — то есть кнопка вела на падающий экран.
+  // Маршруты `/customer/food-scanner/*` намеренно оставлены (§33:
+  // снимается вход, а не маршрут); вернуть кнопку — одна строка, когда
+  // ручки появятся. Настоящий дневник питания живёт в боте.
 
   const onWaterTap = useCallback(() => {
     // §11.8 — offline: queue to localStorage 24h TTL. Real POST is
@@ -265,12 +271,12 @@ export function CustomerWellnessDashboardScreen() {
   }, [online]);
 
   const onGoalTap = useCallback(() => {
-    // §11.2 — context-aware: «Моя цель» if any, «Выбери цель» if none.
-    // Until the goal-editor screen ships (post-pilot), bounce to bot DM
-    // for ambient onboarding. Until that screen exists in Mini App we
-    // keep the action ambient — navigate to root chooser. The handler
-    // is kept stable so a future wiring change is single-site.
-    navigate("/");
+    // §11.2 — context-aware label; the destination is the real goal
+    // surface (`GoalSelectScreen`, DRF-1190), which reads
+    // `/customer/decision-context` and writes `/customer/goals/select`.
+    // It used to `navigate("/")`, i.e. the entry screen: someone who
+    // already had a goal tapped «Моя цель» and landed on a greeting.
+    navigate("/customer/goal-select");
   }, [navigate]);
 
   const onCatalogTap = useCallback(() => {
@@ -305,14 +311,20 @@ export function CustomerWellnessDashboardScreen() {
   const now = new Date();
   const greeting = pickGreeting(now);
   const displayName = todayData?.display_name ?? "";
-  const waterRatio = todayData
-    ? todayData.water_glasses_target > 0
-      ? todayData.water_glasses_eaten / todayData.water_glasses_target
-      : 0
-    : 0;
+  // Absent ≠ zero (DRF-1546). A failed nutrition or hydration read omits
+  // its keys, and every derived number below has to treat that as
+  // «unknown» rather than folding it into «nothing logged».
+  const caloriesEaten = todayData?.calories_eaten;
+  const caloriesTarget = todayData?.calories_target;
+  const caloriesKnown =
+    caloriesEaten !== undefined && caloriesTarget !== undefined;
+  const waterEaten = todayData?.water_glasses_eaten;
+  const waterTarget = todayData?.water_glasses_target;
+  const waterKnown = waterEaten !== undefined && waterTarget !== undefined;
+  const waterRatio =
+    waterKnown && waterTarget > 0 ? waterEaten / waterTarget : 0;
   const hasAnyLogs =
-    !!todayData &&
-    (todayData.calories_eaten > 0 || todayData.water_glasses_eaten > 0);
+    !!todayData && ((caloriesEaten ?? 0) > 0 || (waterEaten ?? 0) > 0);
   const oneLiner = todayData
     ? pickOneLiner({
         hour: now.getHours(),
@@ -330,6 +342,10 @@ export function CustomerWellnessDashboardScreen() {
   const showOnboarding =
     !onboardingDismissed &&
     todayData !== null &&
+    // Only when we actually KNOW the day is empty — an outage is not a
+    // first-time user, and «Начнём с малого?» is wrong for both.
+    caloriesKnown &&
+    waterKnown &&
     !hasAnyLogs &&
     !activityData?.next_booking;
 
@@ -354,14 +370,15 @@ export function CustomerWellnessDashboardScreen() {
       : "Цель";
 
   // Block 4 actionable targets visibility.
-  const waterRemaining = todayData
-    ? Math.max(0, todayData.water_glasses_target - todayData.water_glasses_eaten)
-    : 0;
-  const proteinDeficit =
-    todayData?.pfc && todayData.pfc.protein_target_g
-      ? Math.max(0, todayData.pfc.protein_target_g - todayData.pfc.protein_g)
-      : 0;
-  const showTodayGoals = waterRemaining > 0 || proteinDeficit > 0;
+  //
+  // Строка «🍽 Добрать белок · ещё N г» СНЯТА (DRF-1546): она висела на
+  // `pfc.protein_target_g`, а бэкенд этот ключ не шлёт и источника под
+  // него не имеет (см. docstring `customer_wellness_today`). То есть в
+  // бою она не рендерилась никогда. Вернуть — когда появится цель по
+  // белку; поле оставлено в типе как метка.
+  const waterRemaining =
+    waterKnown ? Math.max(0, waterTarget - waterEaten) : 0;
+  const showTodayGoals = waterRemaining > 0;
 
   // ── render ────────────────────────────────────────────────────────────
   return (
@@ -504,29 +521,6 @@ export function CustomerWellnessDashboardScreen() {
             <button
               type="button"
               className="wellness-dash__qa-btn"
-              aria-label="Сфотографируй еду"
-              aria-disabled={!online}
-              aria-describedby={!online ? "qa-photo-hint" : undefined}
-              onClick={onPhotoTap}
-            >
-              <span className="wellness-dash__qa-icon" aria-hidden="true">
-                📸
-              </span>
-              <span className="wellness-dash__qa-label">
-                Сфотографируй еду
-              </span>
-              {!online && (
-                <span
-                  id="qa-photo-hint"
-                  className="wellness-dash__qa-hint"
-                >
-                  (нужна сеть)
-                </span>
-              )}
-            </button>
-            <button
-              type="button"
-              className="wellness-dash__qa-btn"
               aria-label="Добавить стакан воды 250 мл"
               onClick={onWaterTap}
             >
@@ -585,15 +579,6 @@ export function CustomerWellnessDashboardScreen() {
               {waterToast}
             </div>
           )}
-          {photoToast && (
-            <div
-              className="wellness-dash__toast"
-              role="status"
-              aria-live="polite"
-            >
-              {photoToast}
-            </div>
-          )}
         </section>
 
         {/* Block 4 — Цели сегодня (text actions). */}
@@ -613,12 +598,6 @@ export function CustomerWellnessDashboardScreen() {
                     Ещё {waterRemaining}{" "}
                     {ruPluralWater(waterRemaining)} до цели
                   </span>
-                </li>
-              )}
-              {proteinDeficit > 0 && (
-                <li className="wellness-dash__goal-item">
-                  <span aria-hidden="true">🍽</span>{" "}
-                  <span>Добрать белок · ещё {proteinDeficit} г</span>
                 </li>
               )}
             </ul>
@@ -686,13 +665,9 @@ export function CustomerWellnessDashboardScreen() {
                 {weeklyProgress.active_days_count} дней
               </li>
             </ul>
-            <button
-              type="button"
-              className="btn-secondary wellness-dash__weekly-more"
-              onClick={() => navigate("/")}
-            >
-              Подробнее в Дне
-            </button>
+            {/* Кнопка «Подробнее в Дне» снята (DRF-1546): поверхности
+                «День» не существует, а вела она на `/` — экран входа.
+                Вернуть вместе с самой вкладкой «День». */}
           </section>
         )}
 
@@ -728,31 +703,27 @@ export function CustomerWellnessDashboardScreen() {
           )}
       </main>
 
-      {/* Bottom nav — 5 tabs. Wellness is the «День» day view
-          (#951): active tab is «День»; «Главная» leads to the records
-          home (/customer/main). */}
+      {/* Нижняя навигация. Этот экран — «Главная» (DRF-1546), поэтому
+          активна она.
+
+          Вкладка «День» здесь НЕ рисуется: поверхности «День» не
+          существует — её роль исполнял этот самый экран, а он теперь
+          Главная. Кнопка вела бы на страницу, на которой человек уже
+          стоит. Вкладку возвращать вместе с самой поверхностью «День»
+          (канон §3 описывает пять вкладок; пятивкладочная навигация —
+          отдельная работа). Сетка навигации подстраивается под число
+          вкладок, см. `.wellness-dash__nav` в globals.css. */}
       <nav className="wellness-dash__nav" aria-label="Основная навигация">
         <button
           type="button"
-          className="wellness-dash__nav-tab"
+          className="wellness-dash__nav-tab wellness-dash__nav-tab--active"
+          aria-current="page"
           aria-label="Главная"
-          onClick={() => navigate("/customer/main")}
         >
           <span className="wellness-dash__nav-icon" aria-hidden="true">
             🏠
           </span>
           <span className="wellness-dash__nav-label">Главная</span>
-        </button>
-        <button
-          type="button"
-          className="wellness-dash__nav-tab wellness-dash__nav-tab--active"
-          aria-current="page"
-          aria-label="День"
-        >
-          <span className="wellness-dash__nav-icon" aria-hidden="true">
-            ☀
-          </span>
-          <span className="wellness-dash__nav-label">День</span>
         </button>
         <button
           type="button"
@@ -812,16 +783,28 @@ function PulseSkeleton() {
   );
 }
 
+/** Copy for a slice the backend could not read. One string, one place —
+ *  the goal row has said this since DRF-1476 and the nutrition rows say
+ *  it since DRF-1546. */
+const UNAVAILABLE = "Не удалось загрузить";
+
 function PulseStrip({ data }: { data: WellnessToday }) {
+  // Absent is not zero (DRF-1546). `0` is «nothing logged yet» and draws
+  // normally; an ABSENT key means the read failed and must say so.
+  const caloriesEaten = data.calories_eaten;
+  const caloriesTarget = data.calories_target;
+  const caloriesKnown =
+    caloriesEaten !== undefined && caloriesTarget !== undefined;
+  const waterEaten = data.water_glasses_eaten;
+  const waterTarget = data.water_glasses_target;
+  const waterKnown = waterEaten !== undefined && waterTarget !== undefined;
   const caloriesPct =
-    data.calories_target > 0
-      ? Math.round((data.calories_eaten / data.calories_target) * 100)
+    caloriesKnown && caloriesTarget > 0
+      ? Math.round((caloriesEaten / caloriesTarget) * 100)
       : 0;
   const waterPct =
-    data.water_glasses_target > 0
-      ? Math.round(
-          (data.water_glasses_eaten / data.water_glasses_target) * 100,
-        )
+    waterKnown && waterTarget > 0
+      ? Math.round((waterEaten / waterTarget) * 100)
       : 0;
   // Tri-state, same contract as the quick-action label (DRF-1476):
   // a goal, no goal, or «the goal layer did not answer».
@@ -838,40 +821,53 @@ function PulseStrip({ data }: { data: WellnessToday }) {
       {/* Питание row */}
       <div
         className="wellness-dash__pulse-row"
-        aria-label={`Питание: ${data.calories_eaten} из ${data.calories_target} килокалорий, ${caloriesPct} процентов${
-          data.pfc
-            ? `. Белки ${data.pfc.protein_g}, жиры ${data.pfc.fat_g}, углеводы ${data.pfc.carbs_g} граммов`
-            : ""
-        }`}
+        aria-label={
+          caloriesKnown
+            ? `Питание: ${caloriesEaten} из ${caloriesTarget} килокалорий, ${caloriesPct} процентов${
+                data.pfc
+                  ? `. Белки ${data.pfc.protein_g}, жиры ${data.pfc.fat_g}, углеводы ${data.pfc.carbs_g} граммов`
+                  : ""
+              }`
+            : `Питание: ${UNAVAILABLE}`
+        }
       >
         <div className="wellness-dash__pulse-head">
           <span aria-hidden="true">🍽 </span>Питание
         </div>
-        <div className="wellness-dash__pulse-numbers" aria-hidden="true">
-          {data.calories_eaten === 0 && data.water_glasses_eaten === 0
-            ? "Ещё ничего не залогировано"
-            : `${data.calories_eaten} / ${data.calories_target} ккал · ${caloriesPct} %`}
-        </div>
-        {/* §11.1 — БЖУ row hidden when pfc absent. */}
-        {data.pfc && (
-          <div className="wellness-dash__pulse-pfc" aria-hidden="true">
-            Б {data.pfc.protein_g} · Ж {data.pfc.fat_g} · У {data.pfc.carbs_g} г
-          </div>
+        {caloriesKnown ? (
+          <>
+            <div className="wellness-dash__pulse-numbers" aria-hidden="true">
+              {caloriesEaten === 0 && waterEaten === 0
+                ? "Ещё ничего не залогировано"
+                : `${caloriesEaten} / ${caloriesTarget} ккал · ${caloriesPct} %`}
+            </div>
+            {/* §11.1 — БЖУ row hidden when pfc absent. */}
+            {data.pfc && (
+              <div className="wellness-dash__pulse-pfc" aria-hidden="true">
+                Б {data.pfc.protein_g} · Ж {data.pfc.fat_g} · У{" "}
+                {data.pfc.carbs_g} г
+              </div>
+            )}
+            <div
+              className="wellness-dash__progress"
+              role="progressbar"
+              aria-valuenow={caloriesEaten}
+              aria-valuemin={0}
+              aria-valuemax={caloriesTarget}
+              aria-label={`Калории: ${caloriesEaten} из ${caloriesTarget}`}
+            >
+              <div
+                className="wellness-dash__progress-fill"
+                style={{ width: `${Math.min(100, caloriesPct)}%` }}
+                aria-hidden="true"
+              />
+            </div>
+          </>
+        ) : (
+          /* Read failed - no numbers, no bar. «0 / 0 ккал · 0 %» would
+             read as a logged-nothing day, which is a different fact. */
+          <div className="wellness-dash__pulse-numbers">{UNAVAILABLE}</div>
         )}
-        <div
-          className="wellness-dash__progress"
-          role="progressbar"
-          aria-valuenow={data.calories_eaten}
-          aria-valuemin={0}
-          aria-valuemax={data.calories_target}
-          aria-label={`Калории: ${data.calories_eaten} из ${data.calories_target}`}
-        >
-          <div
-            className="wellness-dash__progress-fill"
-            style={{ width: `${Math.min(100, caloriesPct)}%` }}
-            aria-hidden="true"
-          />
-        </div>
       </div>
 
       <hr className="wellness-dash__pulse-divider" aria-hidden="true" />
@@ -879,28 +875,40 @@ function PulseStrip({ data }: { data: WellnessToday }) {
       {/* Вода row */}
       <div
         className="wellness-dash__pulse-row"
-        aria-label={`Вода: ${data.water_glasses_eaten} из ${data.water_glasses_target} стаканов`}
+        aria-label={
+          waterKnown
+            ? `Вода: ${waterEaten} из ${waterTarget} стаканов`
+            : `Вода: ${UNAVAILABLE}`
+        }
       >
         <div className="wellness-dash__pulse-head">
           <span aria-hidden="true">💧 </span>Вода
         </div>
-        <div className="wellness-dash__pulse-numbers" aria-hidden="true">
-          {data.water_glasses_eaten} / {data.water_glasses_target} стаканов
-        </div>
-        <div
-          className="wellness-dash__water-dots"
-          role="progressbar"
-          aria-valuenow={data.water_glasses_eaten}
-          aria-valuemin={0}
-          aria-valuemax={data.water_glasses_target}
-          aria-label={`Вода: ${data.water_glasses_eaten} из ${data.water_glasses_target} стаканов (${waterPct} процентов)`}
-        >
-          <span aria-hidden="true">
-            {Array.from({ length: data.water_glasses_target }).map((_, i) => (
-              <span key={i}>{i < data.water_glasses_eaten ? "●" : "○"}</span>
-            ))}
-          </span>
-        </div>
+        {waterKnown ? (
+          <>
+            <div className="wellness-dash__pulse-numbers" aria-hidden="true">
+              {waterEaten} / {waterTarget} стаканов
+            </div>
+            <div
+              className="wellness-dash__water-dots"
+              role="progressbar"
+              aria-valuenow={waterEaten}
+              aria-valuemin={0}
+              aria-valuemax={waterTarget}
+              aria-label={`Вода: ${waterEaten} из ${waterTarget} стаканов (${waterPct} процентов)`}
+            >
+              <span aria-hidden="true">
+                {Array.from({ length: waterTarget }).map((_, i) => (
+                  <span key={i}>{i < waterEaten ? "●" : "○"}</span>
+                ))}
+              </span>
+            </div>
+          </>
+        ) : (
+          /* Read failed. The «+ стакан» quick action stays live - it is
+             a separate handle (POST /wellness/water) and still works. */
+          <div className="wellness-dash__pulse-numbers">{UNAVAILABLE}</div>
+        )}
       </div>
 
       <hr className="wellness-dash__pulse-divider" aria-hidden="true" />

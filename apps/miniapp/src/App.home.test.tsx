@@ -1,12 +1,20 @@
 /**
- * Home routing test (pilot phase 3.2, orchestrator decision):
- * `/customer/main` = «Мои записи» (real records) — records matter more
- * than wellness for the pilot. The stub wellness dashboard moved to
- * `/customer/wellness` (still gated in prod by STUB_SURFACES_ENABLED).
+ * Home routing proof (DRF-1546).
+ *
+ * `/customer/main` = домашний экран (wellness dashboard). Решение
+ * владельца §24.2 + §34: старший канон клиентской поверхности —
+ * `docs/screens/customer-main-wellness-dashboard.md`, где этот экран
+ * объявлен P0 BLOCKER пилота. До этой правки «Главная» рендерила
+ * список записей, а сам экран стоял за `STUB_SURFACES_ENABLED`.
+ *
+ * Стража парная (DRF-1411): каждому «главная больше не список записей»
+ * отвечает «а записи по-прежнему открываются» — правка, которая просто
+ * снесла бы записи, прошла бы первую проверку и упала на второй.
  *
  * App boots through `getMe()` (role resolution) — mocked to a plain
- * customer. The bookings + catalog endpoints are mocked at the HTTP
- * layer (`../lib/api`).
+ * customer. Данные домашнего экрана и записей замоканы на уровне
+ * библиотек: этот файл про МАРШРУТИЗАЦИЮ, и поднимать под неё сеть
+ * незачем.
  */
 import { render, screen } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
@@ -34,6 +42,22 @@ vi.mock("./lib/customer-goals", async (importOriginal) => {
   };
 });
 
+vi.mock("./lib/customer-wellness", async (importOriginal) => {
+  const original =
+    await importOriginal<typeof import("./lib/customer-wellness")>();
+  return {
+    ...original,
+    getWellnessToday: vi.fn(),
+    getRecentActivity: vi.fn(),
+  };
+});
+
+vi.mock("./lib/customer-booking", async (importOriginal) => {
+  const original =
+    await importOriginal<typeof import("./lib/customer-booking")>();
+  return { ...original, getCatalogBrowse: vi.fn() };
+});
+
 vi.mock("./lib/api", async (importOriginal) => {
   const original = await importOriginal<typeof import("./lib/api")>();
   return {
@@ -46,6 +70,8 @@ vi.mock("./lib/api", async (importOriginal) => {
 });
 
 import { getMe, type MeResponse } from "./lib/admin-api";
+import { getCatalogBrowse } from "./lib/customer-booking";
+import { getRecentActivity, getWellnessToday } from "./lib/customer-wellness";
 import {
   fetchMasters,
   fetchMyBookings,
@@ -59,6 +85,9 @@ const mockedList = vi.mocked(fetchMyBookings);
 const mockedServices = vi.mocked(fetchServices);
 const mockedMasters = vi.mocked(fetchMasters);
 const mockedRecs = vi.mocked(fetchRecommendations);
+const mockedToday = vi.mocked(getWellnessToday);
+const mockedActivity = vi.mocked(getRecentActivity);
+const mockedBrowse = vi.mocked(getCatalogBrowse);
 
 const CUSTOMER_ME: MeResponse = {
   user: { id: "u-1", name: "Ольга", phone_masked: "+7 *** **12" },
@@ -85,32 +114,62 @@ function renderAppAt(path: string) {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  vi.unstubAllEnvs();
   mockedGetMe.mockResolvedValue(CUSTOMER_ME);
   mockedList.mockResolvedValue({ items: [], next_cursor: null });
   mockedServices.mockResolvedValue({ services: [] });
   mockedMasters.mockResolvedValue({ masters: [] });
   mockedRecs.mockResolvedValue({ recommendations: [] });
+  mockedBrowse.mockResolvedValue({ services: [], masters: [], picks: [] });
+  mockedToday.mockResolvedValue({
+    calories_eaten: 1240,
+    calories_target: 2100,
+    water_glasses_eaten: 4,
+    water_glasses_target: 8,
+    active_goals: [],
+    display_name: "Анна",
+  });
+  mockedActivity.mockResolvedValue({ this_week_booking_count: 0 });
 });
 
-describe("home routing (phase 3.2)", () => {
-  it("/customer/main renders the real records screen, not the wellness stub", async () => {
+describe("home routing (DRF-1546)", () => {
+  it("/customer/main renders the home screen, not the records list", async () => {
     renderAppAt("/customer/main");
-    // Records empty state (both sections empty per mocks) — real screen.
-    expect(await screen.findByText(/Пока записей нет/)).toBeInTheDocument();
-    expect(
-      screen.getByRole("heading", { name: "Записи" }),
-    ).toBeInTheDocument();
-    // Wellness stub content must NOT be here.
-    expect(screen.queryByText(/Вода:/)).not.toBeInTheDocument();
+
+    // POSITIVE: домашний экран на месте, с данными из ручки.
+    expect(await screen.findByText(/4 \/ 8 стаканов/)).toBeInTheDocument();
+    expect(screen.getByText(/1240 \/ 2100 ккал/)).toBeInTheDocument();
+    // NEGATIVE (парная): списка записей на главной больше нет.
+    expect(screen.queryByText(/Пока записей нет/)).not.toBeInTheDocument();
   });
 
-  it("/customer/wellness keeps the (DEV) wellness dashboard reachable", async () => {
-    // The dashboard reads are wired now, so a dev build without `?stub=`
-    // goes to the network. This test is about ROUTING — that the path
-    // still resolves to the dashboard — so it asks for the stub data
-    // explicitly rather than standing up a backend.
-    window.history.replaceState({}, "", "/customer/wellness?stub=default");
+  it("home is NOT hidden behind the pilot placeholder in a prod build", async () => {
+    // Гейт снят именно с главной. Собранный как прод бандл обязан
+    // рисовать экран, а не «выдуманных данных не показываем».
+    vi.stubEnv("DEV", false);
+    try {
+      renderAppAt("/customer/main");
+      expect(await screen.findByText(/4 \/ 8 стаканов/)).toBeInTheDocument();
+      expect(screen.queryByText(/выдуманных данных/)).not.toBeInTheDocument();
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("/customer/records still renders the real records screen", async () => {
+    // Парная положительная стража: записи никуда не делись, их просто
+    // сняли с «Главной».
+    renderAppAt("/customer/records");
+
+    expect(await screen.findByText(/Пока записей нет/)).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Записи" })).toBeInTheDocument();
+  });
+
+  it("/customer/wellness stays mounted as the bot-slug alias", async () => {
+    // `open_wellness` / `open_water_add_250` резолвятся сюда — это
+    // договор с ботом, а не внутренняя ссылка.
     renderAppAt("/customer/wellness");
-    expect(await screen.findByText(/Вода:/)).toBeInTheDocument();
+
+    expect(await screen.findByText(/4 \/ 8 стаканов/)).toBeInTheDocument();
   });
 });
