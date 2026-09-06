@@ -37,11 +37,14 @@ from apps.skills.menu.marketplace import (
     BOT_ITEMS,
     CALLBACK_HEALTH_DECLINE,
     CALLBACK_HEALTH_NEED_PREFIX,
+    HEALTH_CHECK_FAILED_TEXT,
     HEALTH_DECLINE_ACTION_TYPE,
     HEALTH_DECLINED_EARLIER_TEXT,
     HEALTH_DECLINED_TEXT,
     HEALTH_REQUEST_TEXT,
+    MENU_ACTION_TYPE,
     NUTRITION_ITEMS,
+    health_tap_text,
 )
 
 pytestmark = pytest.mark.django_db
@@ -193,6 +196,16 @@ def _action_types(conversation) -> list[str]:
     )
 
 
+def _user_messages(conversation) -> list[str]:
+    from apps.conversations.models import Message
+
+    return list(
+        Message.all_tenants.filter(conversation_id=conversation.id, role="user")
+        .order_by("created_at")
+        .values_list("content", flat=True)
+    )
+
+
 # --------------------------------------------------------------------------- #
 # 1. «Что ты умеешь?» отвечает меню, а не прозой                               #
 # --------------------------------------------------------------------------- #
@@ -243,18 +256,30 @@ class TestCapabilitiesQuestionAnswersWithAMenu:
         assert "Расскажи чуть подробнее" in sent[0]["text"]
 
     def test_a_brand_new_person_still_gets_first_contact(self, sent, fake_redis, concierge):
-        """C01 не тронут: у новичка «что ты умеешь» забирает приветствие."""
-        resolve_or_create_global_bot_user(
+        """C01 не тронут: у новичка «что ты умеешь» забирает приветствие.
+
+        Сверяется с КОПИЕЙ первого экрана целиком, а не с подстрокой.
+        «Я Ayla» стоит в обоих экранах — и в приветствии
+        (``GLOBAL_WELCOME_TEXT``), и во вступлении меню, — так что
+        подстрочная стража была бы зелёной при любом исходе, и всю работу
+        делало бы отрицание. Это ровно то, что запрещает DRF-1411.
+        """
+        from apps.channels.max.global_onboarding import GLOBAL_WELCOME_TEXT
+
+        bot_user = resolve_or_create_global_bot_user(
             channel="max", channel_user_id="70104", chat_id=str(_CHAT_ID)
         )
+        conversation = resolve_active_global_conversation(bot_user)
 
         max_handler.handle_global_max_event(_msg(text="что ты умеешь?", user_id=70104, mid="m-new"))
 
+        # Стража на тех же данных: пришёл ровно экран первого контакта.
         assert len(sent) == 1, sent
-        # Стража: ответ вообще пришёл — и это приветствие, а не оглавление.
-        assert sent[0]["text"], sent[0]
-        assert "Я Ayla" in sent[0]["text"] or "Привет" in sent[0]["text"], sent[0]["text"]
-        assert "открывается отдельным экраном" not in sent[0]["text"]
+        assert sent[0]["text"] == GLOBAL_WELCOME_TEXT, sent[0]["text"]
+        # Ход записан — есть чему не быть меню.
+        assert _action_types(conversation), "ответ бота в переписку не попал"
+        # И только теперь отрицание: меню витрины ход не забрало.
+        assert MENU_ACTION_TYPE not in _action_types(conversation), _action_types(conversation)
 
 
 # --------------------------------------------------------------------------- #
@@ -311,7 +336,15 @@ class TestHonestFallbackOnTheGlobalPath:
 # 3. Принятое совпадает с рисуемым                                             #
 # --------------------------------------------------------------------------- #
 class TestEveryDrawnButtonIsAccepted:
-    """Каждый нарисованный ``cb:`` payload кто-то разбирает."""
+    """Каждый нарисованный ``cb:`` payload кто-то разбирает.
+
+    «Разбирает» здесь ровно то, что написано, и не больше: payload не
+    уезжает в модель сырым. Три из пяти ботовых пунктов
+    («Записаться», «Перенести», «Отменить») после подстановки фразы
+    отвечает консьерж — это принятое состояние (DRF-1051, таблица в
+    ``quick_actions._global_menu_text``), а не недосмотр. Детерминированную
+    воронку переноса и пикер дат заводит §25 п.5, отдельной задачей.
+    """
 
     def test_bot_payloads_resolve_to_a_route(self, sent, fake_redis, concierge, health_consent):
         from apps.channels.max.quick_actions import resolve_tap_text
@@ -448,7 +481,7 @@ class TestRefusalIsRespected:
         )
         max_handler.handle_global_max_event(
             _tap(
-                payload=f"{CALLBACK_HEALTH_NEED_PREFIX}wellness",
+                payload=f"{CALLBACK_HEALTH_NEED_PREFIX}food_diary",
                 user_id=70502,
                 callback_id="r-3",
             )
@@ -464,6 +497,246 @@ class TestRefusalIsRespected:
         assert CALLBACK_HEALTH_DECLINE not in _payloads(sent[2]), _payloads(sent[2])
         # И выход не мёртвый: клавиатура меню на месте.
         assert "cb:menu:book" in _payloads(sent[2]), _payloads(sent[2])
+
+    def test_the_promise_survives_the_outbound_guard_eating_the_marker(
+        self, sent, fake_redis, concierge, nutrition_on, health_consent, monkeypatch
+    ):
+        """Отказ помнится по ДВУМ следам, и первый переживает сторожа.
+
+        Сторож исходящего при блокировке заменяет реплику целиком и
+        ставит свой ``action_type`` — метка отказа пропадает. Реплика же
+        ЧЕЛОВЕКА («Не сейчас») пишется раньше сторожа, и по ней обещание
+        «больше не спрошу» продолжает держаться.
+        """
+        from apps.orchestrator.safety.gate import OUTBOUND_ACTION_TYPE, OutboundGuardOutcome
+
+        _, conversation = _welcomed(70503)
+
+        max_handler.handle_global_max_event(
+            _tap(
+                payload=f"{CALLBACK_HEALTH_NEED_PREFIX}food_scan",
+                user_id=70503,
+                callback_id="g-1",
+            )
+        )
+        # Стража: запрос показан — значит, есть чему не повториться.
+        assert sent[0]["text"] == HEALTH_REQUEST_TEXT, sent[0]["text"]
+
+        # Блокируем РОВНО один ход. ``monkeypatch.undo()`` здесь нельзя:
+        # он снял бы и заглушки фикстур — они делят один и тот же
+        # ``monkeypatch`` на тест, — и следующий ход пошёл бы в живой Redis.
+        blocking = {"on": True}
+        real_guard = max_handler.guard_outbound
+
+        def maybe_block(text, **kw):
+            if blocking["on"]:
+                return OutboundGuardOutcome(allowed=False, text="Тут нужен человек.")
+            return real_guard(text, **kw)
+
+        monkeypatch.setattr(max_handler, "guard_outbound", maybe_block)
+        max_handler.handle_global_max_event(
+            _tap(payload=CALLBACK_HEALTH_DECLINE, user_id=70503, callback_id="g-2")
+        )
+        blocking["on"] = False
+
+        # Ходы записаны, и сторож действительно сработал — есть чему быть
+        # потерянным; без этой стражи отрицание ниже зеленело бы на пустой
+        # выборке.
+        assert OUTBOUND_ACTION_TYPE in _action_types(conversation), _action_types(conversation)
+        # Метка ответа бота действительно потеряна — иначе тест ничего не ловит.
+        assert HEALTH_DECLINE_ACTION_TYPE not in _action_types(conversation), _action_types(
+            conversation
+        )
+        # А реплика человека на месте, и по ней отказ помнится.
+        assert health_tap_text()[CALLBACK_HEALTH_DECLINE] in _user_messages(conversation)
+
+        max_handler.handle_global_max_event(
+            _tap(
+                payload=f"{CALLBACK_HEALTH_NEED_PREFIX}food_diary",
+                user_id=70503,
+                callback_id="g-3",
+            )
+        )
+        assert sent[-1]["text"] == HEALTH_DECLINED_EARLIER_TEXT, sent[-1]["text"]
+
+    def test_an_unreadable_history_never_claims_the_person_refused(
+        self, sent, fake_redis, concierge, nutrition_on, health_consent, monkeypatch
+    ):
+        """Осторожность в поведении не обязана быть враньём в словах.
+
+        Сбой чтения истории толкуется в пользу «не спрашивать» — но
+        сказать при этом «я про согласие больше не напоминаю» человеку,
+        который НИКОГДА не отказывался, значит утверждать про него
+        неправду.
+        """
+        from apps.conversations.models import Message
+
+        _welcomed(70504)
+
+        real_manager = Message.all_tenants
+
+        class _UnreadableHistory:
+            """Ломается ровно на чтении; запись хода идёт как обычно."""
+
+            def __init__(self, inner):
+                self._inner = inner
+
+            def filter(self, *a, **kw):
+                raise RuntimeError("история недоступна")
+
+            def __getattr__(self, name):
+                return getattr(self._inner, name)
+
+        monkeypatch.setattr(Message, "all_tenants", _UnreadableHistory(real_manager))
+        max_handler.handle_global_max_event(
+            _tap(
+                payload=f"{CALLBACK_HEALTH_NEED_PREFIX}food_scan",
+                user_id=70504,
+                callback_id="u-1",
+            )
+        )
+
+        # Стража: ход не потерян и человек получил рабочий выход.
+        assert len(sent) == 1 and sent[0]["text"], sent
+        assert "cb:menu:book" in _payloads(sent[0]), _payloads(sent[0])
+        assert sent[0]["text"] == HEALTH_CHECK_FAILED_TEXT, sent[0]["text"]
+        # И только теперь отрицание: ни запроса согласия, ни ложного «вы отказались».
+        assert sent[0]["text"] != HEALTH_REQUEST_TEXT
+        assert sent[0]["text"] != HEALTH_DECLINED_EARLIER_TEXT
+
+
+# --------------------------------------------------------------------------- #
+# 5-bis. Что тап семейства значит в ПЕРЕПИСКЕ                                  #
+# --------------------------------------------------------------------------- #
+class TestHealthTapsNeverLandRawInHistory:
+    """Сырой ``cb:health:`` в истории — это сырой payload в промпте модели.
+
+    Гейт персистенса на глобальном пути устроен списком исключений: форма,
+    которую ни один резолвер не разобрал, пишется дословно и с ролью
+    ``user``. Консьерж читает эту историю на следующих ходах, и у него
+    есть нутриционные инструменты — то есть строку «cb:health:need:
+    food_scan» он охотно истолкует как просьбу человека про еду, сразу
+    после того как бот пообещал эту тему больше не поднимать.
+    """
+
+    def test_taps_are_stored_as_the_phrase_the_button_carried(
+        self, sent, fake_redis, concierge, nutrition_on, health_consent
+    ):
+        _, conversation = _welcomed(70801)
+
+        max_handler.handle_global_max_event(_msg(text="что ты умеешь?", user_id=70801, mid="h-0"))
+        max_handler.handle_global_max_event(
+            _tap(
+                payload=f"{CALLBACK_HEALTH_NEED_PREFIX}food_scan",
+                user_id=70801,
+                callback_id="h-1",
+            )
+        )
+        max_handler.handle_global_max_event(
+            _tap(payload=CALLBACK_HEALTH_DECLINE, user_id=70801, callback_id="h-2")
+        )
+
+        history = _user_messages(conversation)
+        # Стража: выборка не пуста, и в ней то, что человек НАБРАЛ, плюс
+        # решения, которые он принял кнопками.
+        assert "что ты умеешь?" in history, history
+        phrases = health_tap_text()
+        assert phrases[f"{CALLBACK_HEALTH_NEED_PREFIX}food_scan"] in history, history
+        assert phrases[CALLBACK_HEALTH_DECLINE] in history, history
+        # И только теперь отрицание: сырых payload'ов среди них нет.
+        assert [line for line in history if line.startswith("cb:")] == [], history
+
+    def test_a_typed_lookalike_is_still_the_person_s_own_words(
+        self, sent, fake_redis, concierge, nutrition_on, health_consent
+    ):
+        """Разбор по ФОРМЕ, а не по префиксу (правило C01)."""
+        typed = "cb:health: это что такое?"
+        _, conversation = _welcomed(70802)
+
+        max_handler.handle_global_max_event(_msg(text=typed, user_id=70802, mid="h-3"))
+
+        history = _user_messages(conversation)
+        assert history == [typed], history
+        # Ход ушёл к консьержу как обычный текст, а не в экран согласия.
+        assert concierge.call_count == 1
+        assert sent[0]["text"] != HEALTH_REQUEST_TEXT
+
+
+# --------------------------------------------------------------------------- #
+# 5-ter. Первые ворота проверяются и на тапе, не только при отрисовке          #
+# --------------------------------------------------------------------------- #
+class TestFlagIsCheckedOnTheTapToo:
+    def test_stale_keyboard_does_not_ask_for_health_consent_after_the_flag_went_off(
+        self, sent, fake_redis, concierge, health_consent, settings
+    ):
+        """Клавиатура в истории чата живёт дольше флага в окружении.
+
+        Человек увидел меню при включённом питании, но не тапнул. Флаг
+        выключили. Тап по старой кнопке не должен просить согласие на
+        особую категорию персданных ради поверхности, которой больше нет.
+        """
+        settings.NUTRITION_ENABLED = True
+        _welcomed(70803)
+        max_handler.handle_global_max_event(_msg(text="что ты умеешь?", user_id=70803, mid="f-0"))
+        # Стража: пункт действительно был нарисован, тап настоящий.
+        assert f"{CALLBACK_HEALTH_NEED_PREFIX}food_scan" in _payloads(sent[0]), _payloads(sent[0])
+
+        settings.NUTRITION_ENABLED = False
+        max_handler.handle_global_max_event(
+            _tap(
+                payload=f"{CALLBACK_HEALTH_NEED_PREFIX}food_scan",
+                user_id=70803,
+                callback_id="f-1",
+            )
+        )
+
+        assert len(sent) == 2, sent
+        assert sent[1]["text"] != HEALTH_REQUEST_TEXT
+        # Выход не мёртвый: человек получает меню — уже без пищевых пунктов.
+        assert "cb:menu:book" in _payloads(sent[1]), _payloads(sent[1])
+        assert not [p for p in _payloads(sent[1]) if p.startswith(CALLBACK_HEALTH_NEED_PREFIX)], (
+            _payloads(sent[1])
+        )
+
+
+# --------------------------------------------------------------------------- #
+# 5-quater. Незаконченное важнее оглавления                                    #
+# --------------------------------------------------------------------------- #
+class TestUnfinishedFlowsOutrankTheMenu:
+    def test_help_mid_anketa_stays_with_the_anketa(self, sent, fake_redis, concierge):
+        """«помощь» посреди анкеты — это ответ анкете, а не выход из неё.
+
+        ``is_structured_nutrition_turn`` забирает ЛЮБОЙ текст, пока FSM
+        жив. Если бы ветка меню стояла верхним ``elif`` лестницы, человек
+        получил бы оглавление, а незакрытый вопрос анкеты остался бы
+        висеть молча — и следующая же его реплика была бы съедена как
+        ответ на этот вопрос.
+        """
+        from apps.skills.base import SkillResult
+
+        _welcomed(70804)
+        claimed: list[str] = []
+
+        def fake_nutrition(*, text, attachments, bot_user, conversation, trace_id):
+            claimed.append(text)
+            return SkillResult(reply_text="Сколько вам лет?", action_type="nutrition_anketa")
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(max_handler, "try_handle_structured_nutrition_turn", fake_nutrition)
+            max_handler.handle_global_max_event(_msg(text="помощь", user_id=70804, mid="a-1"))
+
+        # Стража: анкета ход получила и ответила своим вопросом.
+        assert claimed == ["помощь"], claimed
+        assert sent[0]["text"] == "Сколько вам лет?", sent[0]["text"]
+        # И только теперь отрицание: оглавление её не перебило.
+        assert "cb:menu:book" not in _payloads_or_empty(sent[0])
+
+
+def _payloads_or_empty(call: dict) -> list[str]:
+    """``_payloads``, но без требования клавиатуры — её тут может не быть."""
+    if not call.get("attachments"):
+        return []
+    return _payloads(call)
 
 
 # --------------------------------------------------------------------------- #

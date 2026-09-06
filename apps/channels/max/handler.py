@@ -213,6 +213,7 @@ from apps.skills.menu.marketplace import (
     marketplace_fallback_reply,
     marketplace_menu_reply,
     matches_menu_request,
+    resolve_health_tap,
 )
 from apps.tools.idempotency import AlreadyClaimed, with_idempotency
 
@@ -953,35 +954,45 @@ def handle_max_event(payload: dict, trace_id: str | uuid.UUID | None = None) -> 
         return
 
 
-def _health_already_declined(conversation: Any) -> bool:
+def _health_already_declined(conversation: Any) -> bool | None:
     """Отказывался ли человек от согласия на медданные В ЭТОМ диалоге.
+
+    ``True`` — отказывался, ``False`` — нет, ``None`` — прочитать не
+    удалось. Три состояния, а не два, потому что третье звучит для
+    человека иначе: поведение в нём осторожное (экран не открываем), но
+    говорить при этом «я про согласие больше не напоминаю» тому, кто
+    никогда не отказывался, значит утверждать про него неправду.
 
     Читается таблица сообщений, а не короткая память: у короткой памяти
     TTL, а «тот же диалог» (канон 2.5 «без понуканий», 2.6 «автономия
     клиента абсолютна») живёт дольше её окна — иначе достаточно было бы
     подождать час, чтобы бот спросил ещё раз.
 
+    Два следа, и это не перестраховка. Реплика ЧЕЛОВЕКА («Не сейчас»,
+    ``marketplace.HEALTH_TAP_TEXT``) пишется ДО того, как ответ проходит
+    сторожа исходящего; метка ответа БОТА
+    (``action_type``) — после, и при блокировке сторож заменяет её на
+    ``OUTBOUND_ACTION_TYPE``, то есть теряет. Один след без другого
+    оставлял бы обещание «больше не спрошу» держащимся не всегда.
+
     ``all_tenants`` — потому что глобальный диалог лежит под sentinel-
     тенантом, а вызов идёт вне ``tenant_scope``.
-
-    Fail-safe в сторону «спрашивали»: сбой чтения не должен превратиться
-    в повторный запрос согласия. Цена ошибки несимметрична — лишний
-    отказ показать экран человек переживёт, повторное выпрашивание
-    медданных нарушает решение владельца.
     """
     from apps.conversations.models import Message
+    from apps.skills.menu.marketplace import CALLBACK_HEALTH_DECLINE, health_tap_text
 
+    decline_phrase = health_tap_text().get(CALLBACK_HEALTH_DECLINE, "")
     try:
-        return Message.all_tenants.filter(
-            conversation=conversation,
-            action_type=HEALTH_DECLINE_ACTION_TYPE,
-        ).exists()
-    except Exception:  # noqa: BLE001 — сомнение толкуется в пользу «не спрашивать»
+        rows = Message.all_tenants.filter(conversation=conversation)
+        if rows.filter(role="assistant", action_type=HEALTH_DECLINE_ACTION_TYPE).exists():
+            return True
+        return bool(decline_phrase) and rows.filter(role="user", content=decline_phrase).exists()
+    except Exception:  # noqa: BLE001 — сбой чтения не повод выпрашивать медданные
         logger.exception(
             "channels.max.global.health_decline_lookup_failed conversation=%s",
             getattr(conversation, "id", None),
         )
-        return True
+        return None
 
 
 def _route_health_callback(
@@ -1004,14 +1015,24 @@ def _route_health_callback(
     последнюю ветку и отвечает меню — тем же правилом, по которому
     ``resolve_tap_text`` переводит снятый ``cb:menu:*`` в «Что ты
     умеешь?»: чем кнопка была, восстановить нечем, но ход терять нельзя.
+
+    ПЕРВЫЕ ворота проверяются здесь тоже, а не только при отрисовке.
+    Клавиатура живёт в истории чата дольше, чем флаг в окружении: если
+    ``NUTRITION_ENABLED`` выключили после того, как человек увидел меню,
+    тап по старой кнопке не должен просить согласие на особую категорию
+    персданных ради поверхности, которую только что выключили. Такой ход
+    отвечает меню — в котором пищевого пункта уже нет (первая строка
+    таблицы §25 п.6).
     """
     from apps.skills.menu.marketplace import (
         CALLBACK_HEALTH_DECLINE,
+        HEALTH_CHECK_FAILED_TEXT,
         HEALTH_DECLINED_EARLIER_TEXT,
         HEALTH_DECLINED_TEXT,
         HEALTH_REQUEST_TEXT,
         health_need_surface,
         health_request_action_data,
+        nutrition_enabled,
     )
 
     stripped = (callback_text or "").strip()
@@ -1022,21 +1043,34 @@ def _route_health_callback(
             HEALTH_DECLINE_ACTION_TYPE,
         )
 
+    menu_text, menu_data = marketplace_menu_reply(bot_user=bot_user)
     surface = health_need_surface(stripped)
-    if surface is not None and not _health_already_declined(conversation):
-        logger.info(
-            "channels.max.global.health_consent_requested surface=%s bot_user=%s",
-            surface,
-            getattr(bot_user, "id", None),
-        )
+    if surface is None or not nutrition_enabled():
+        # Снятый пункт либо выключенный мастер-флаг: обе кнопки —
+        # пережитки клавиатуры из истории чата, и ответ на них один.
+        return DiscoveryReply(text=menu_text, action_data=menu_data), MENU_ACTION_TYPE
+
+    declined = _health_already_declined(conversation)
+    if declined is None:
         return (
-            DiscoveryReply(text=HEALTH_REQUEST_TEXT, action_data=health_request_action_data()),
-            HEALTH_REQUEST_ACTION_TYPE,
+            DiscoveryReply(text=HEALTH_CHECK_FAILED_TEXT, action_data=menu_data),
+            MENU_ACTION_TYPE,
+        )
+    if declined:
+        return (
+            DiscoveryReply(text=HEALTH_DECLINED_EARLIER_TEXT, action_data=menu_data),
+            MENU_ACTION_TYPE,
         )
 
-    menu_text, menu_data = marketplace_menu_reply(bot_user=bot_user)
-    text = HEALTH_DECLINED_EARLIER_TEXT if surface is not None else menu_text
-    return DiscoveryReply(text=text, action_data=menu_data), MENU_ACTION_TYPE
+    logger.info(
+        "channels.max.global.health_consent_requested surface=%s bot_user=%s",
+        surface,
+        getattr(bot_user, "id", None),
+    )
+    return (
+        DiscoveryReply(text=HEALTH_REQUEST_TEXT, action_data=health_request_action_data()),
+        HEALTH_REQUEST_ACTION_TYPE,
+    )
 
 
 def handle_global_max_event(payload: dict, trace_id: str | uuid.UUID | None = None) -> None:
@@ -1323,8 +1357,16 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
     # заявить в типе, что молчания не бывает, тогда как молчание тут половина
     # решения; следующий читатель обязан увидеть его здесь, а не вычитывать из
     # ветки `inbound_history_text is None` десятью строками ниже.
+    # DRF-1491 — семейство ``cb:health:`` заводится этим же PR и приходит
+    # со своим резолвером, а не с долгом. Без него сырой
+    # «cb:health:need:food_scan» лёг бы в историю с ролью ``user`` — то
+    # есть в промпт консьержа, у которого есть нутриционные инструменты,
+    # — и модель истолковала бы его как просьбу человека про еду сразу
+    # после того, как бот пообещал эту тему больше не поднимать.
+    health_tap = resolve_health_tap(event.text)
+
     inbound_history_text: str | None = event.text
-    for tap in (anketa_tap, welcome_tap, food_tap, discover_tap, nutri_stop_tap):
+    for tap in (anketa_tap, welcome_tap, food_tap, discover_tap, nutri_stop_tap, health_tap):
         if tap is None:
             # «Это не тап моего семейства» — резолвер пропускает ход дальше и
             # не трогает ни текст, ни персистенс.
@@ -1668,37 +1710,6 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
             outcome=AIRequestMetric.OUTCOME_SUCCESS,
             skill_selected="onboarding",
         )
-    elif matches_menu_request(event.text):
-        # DRF-1491 / §25 п.1-п.2 — «что ты умеешь», «помощь», «меню».
-        #
-        # До сих пор эти слова уезжали к консьержу и возвращались прозой
-        # без единой кнопки: реестр навыков, где живут ``HELP_TEXT`` и
-        # клавиатура, диспетчеризуется только на арендаторском пути, а
-        # пилот работает на глобальном боте. Владелец: «отвечаем меню, а
-        # не свободной прозой».
-        #
-        # Ниже приветствия НАМЕРЕННО: новичок с ``welcomed_at IS NULL``
-        # должен получить экран первого контакта C01, а не оглавление, —
-        # ``needs_onboarding`` забирает его ход выше. Ниже поиска записей
-        # и передачи человеку: «покажи мои записи» и «оператор» — это
-        # конкретные просьбы, оглавление их не заменяет.
-        #
-        # Матчер закрытый и по ЦЕЛОМУ сообщению
-        # (``marketplace.matches_menu_request``), поэтому ветка не может
-        # отобрать ход у консьержа: «помоги выбрать массаж» сюда не
-        # попадает.
-        menu_text, menu_data = marketplace_menu_reply(bot_user=bot_user)
-        reply = DiscoveryReply(text=menu_text, action_data=menu_data)
-        assistant_action_type = MENU_ACTION_TYPE
-        _record_live_path_metric(
-            bot_user=bot_user,
-            conversation=conversation,
-            trace_id=trace_id,
-            message_text=event.text,
-            t_start=t_start,
-            outcome=AIRequestMetric.OUTCOME_SUCCESS,
-            skill_selected=MENU_ACTION_TYPE,
-        )
     elif clarify_outcome is not None:
         # DRF-1362 — a multi-select redraw or its close. Sits with the other
         # callback branches and BEFORE the concierge for the same reason they
@@ -1911,6 +1922,43 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
                         outcome=AIRequestMetric.OUTCOME_FALLBACK,
                         skill_selected=FALLBACK_ACTION_TYPE,
                         fallback_triggered=True,
+                    )
+                elif matches_menu_request(event.text):
+                    # DRF-1491 / §25 п.1-п.2 — «что ты умеешь», «помощь», «меню».
+                    #
+                    # До сих пор эти слова уезжали к консьержу и возвращались
+                    # прозой без единой кнопки: реестр навыков, где живут
+                    # ``HELP_TEXT`` и клавиатура, диспетчеризуется только на
+                    # арендаторском пути, а пилот работает на глобальном боте.
+                    # Владелец: «отвечаем меню, а не свободной прозой».
+                    #
+                    # Стоит ЗДЕСЬ, а не верхним ``elif`` лестницы, и место
+                    # выбрано по одному правилу: НЕЗАКОНЧЕННОЕ важнее
+                    # оглавления. Выше отсюда стоят приветствие C01
+                    # (новичок получает первый экран, а не список),
+                    # незакрытый вопрос памяти, воронка записи в полёте — и
+                    # нутриционная анкета: ``is_structured_nutrition_turn``
+                    # забирает ЛЮБОЙ текст, пока FSM жив, поэтому «помощь»
+                    # посреди анкеты остаётся ответом анкете, а не выходом
+                    # из неё. Тот же довод уже принят рядом: «что я ел»
+                    # посреди анкеты — это ответ, а не запрос дневника
+                    # (``nutrition_global``).
+                    #
+                    # Матчер закрытый и по ЦЕЛОМУ сообщению
+                    # (``marketplace.matches_menu_request``), поэтому ветка
+                    # не может отобрать ход у консьержа: «помоги выбрать
+                    # массаж» сюда не попадает.
+                    menu_text, menu_data = marketplace_menu_reply(bot_user=bot_user)
+                    reply = DiscoveryReply(text=menu_text, action_data=menu_data)
+                    assistant_action_type = MENU_ACTION_TYPE
+                    _record_live_path_metric(
+                        bot_user=bot_user,
+                        conversation=conversation,
+                        trace_id=trace_id,
+                        message_text=event.text,
+                        t_start=t_start,
+                        outcome=AIRequestMetric.OUTCOME_SUCCESS,
+                        skill_selected=MENU_ACTION_TYPE,
                     )
                 else:
                     # Memory surfacing (M-C1 / #1101): inject the user's GREEN memory into
