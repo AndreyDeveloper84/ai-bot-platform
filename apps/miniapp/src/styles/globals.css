@@ -1199,16 +1199,17 @@ a {
 }
 
 /*
- * AdminTabBar renders FIVE tabs (День / Команда / Услуги / Чаты /
- * Настройки) but reuses this block for tab, icon and label styling.
+ * AdminTabBar reuses this block for tab, icon and label styling.
  * `.master-tabbar` itself is a four-column grid because MasterTabBar
  * has exactly four tabs — so the admin bar's fifth tab wrapped onto a
- * second row and ate the bottom of every admin screen. This modifier
- * carries the only declaration that differs: the column count.
+ * second row and ate the bottom of every admin screen.
  *
- * The column count must equal the number of tabs the component
- * renders. `AdminTabBar.test.tsx` asserts exactly that for both bars,
- * so adding a sixth tab without widening the grid fails the build.
+ * Пять колонок здесь — запасной вариант на случай, если стиль элемента
+ * не применился. Настоящее число колонок ставит сам компонент через
+ * `style={{ gridTemplateColumns: repeat(N, 1fr) }}`: у владельца и
+ * администратора вкладок пять, у ресепшн — три (DRF-1522), и жёсткая
+ * пятёрка сжала бы её панель в левые три пятых экрана. Число колонок
+ * теперь не может разъехаться с числом вкладок — оно из него и берётся.
  */
 .master-tabbar--admin {
   grid-template-columns: repeat(5, 1fr);

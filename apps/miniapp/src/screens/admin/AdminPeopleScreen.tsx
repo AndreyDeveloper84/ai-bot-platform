@@ -207,7 +207,7 @@ export function AdminPeopleScreen({ me }: Props) {
         <div className="callout" role="status">
           Список ролей видит только владелец салона.
         </div>
-        <AdminTabBar />
+        <AdminTabBar me={me} />
       </div>
     );
   }
@@ -217,7 +217,7 @@ export function AdminPeopleScreen({ me }: Props) {
       <div className="screen">
         <h1 className="screen__title">Люди салона</h1>
         <StateError err={err} onRetry={manualReload} />
-        <AdminTabBar />
+        <AdminTabBar me={me} />
       </div>
     );
   }
@@ -360,7 +360,7 @@ export function AdminPeopleScreen({ me }: Props) {
         </ul>
       )}
 
-      <AdminTabBar />
+      <AdminTabBar me={me} />
     </div>
   );
 }

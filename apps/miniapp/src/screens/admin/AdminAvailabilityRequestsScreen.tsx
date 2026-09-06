@@ -514,7 +514,7 @@ export function AdminAvailabilityRequestsScreen({ me }: Props) {
             Эта страница только для администраторов.
           </p>
         </div>
-        <AdminTabBar />
+        <AdminTabBar me={me} />
       </div>
     );
   }
@@ -1003,7 +1003,7 @@ export function AdminAvailabilityRequestsScreen({ me }: Props) {
         onDismiss={() => setToast("")}
       />
 
-      <AdminTabBar />
+      <AdminTabBar me={me} />
     </div>
   );
 }

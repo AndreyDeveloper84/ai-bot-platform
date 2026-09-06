@@ -31,6 +31,7 @@ import {
   getBookingVersion,
   getSalonDay,
   rescheduleSalonBooking,
+  type MeResponse,
   type SalonDayResponse,
 } from "../../lib/admin-api";
 import { AdminSalonDayScreen } from "./AdminSalonDayScreen";
@@ -69,10 +70,30 @@ function dayResponse(over: Partial<SalonDayResponse> = {}): SalonDayResponse {
   };
 }
 
+/**
+ * `me` нужен экрану только для нижней панели — её состав зависит от роли
+ * (DRF-1522). Здесь берётся владелец: эти тесты про сам день, не про
+ * панель, а состав панели владельца проверяется в
+ * `App.receptionSurface.test.tsx`.
+ */
+const OWNER_ME: MeResponse = {
+  user: { id: "u-1", name: "Ольга", phone_masked: "+7 *** **12" },
+  tenant: { id: "t-1", name: "Demo", slug: "demo" },
+  role: "owner",
+  capabilities: [],
+  is_customer: false,
+  is_master: false,
+  is_receptionist: false,
+  is_admin: false,
+  is_owner: true,
+  master_id: null,
+  landing_path: "/admin/team",
+};
+
 function renderScreen() {
   render(
     <MemoryRouter initialEntries={["/admin/day"]}>
-      <AdminSalonDayScreen />
+      <AdminSalonDayScreen me={OWNER_ME} />
     </MemoryRouter>,
   );
 }

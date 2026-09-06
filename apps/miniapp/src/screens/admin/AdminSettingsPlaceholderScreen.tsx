@@ -5,9 +5,10 @@
  */
 
 import { AdminTabBar } from "../../components/AdminTabBar";
+import type { MeResponse } from "../../lib/admin-api";
 import { SurfaceSwitchButton } from "../../components/SurfaceSwitch";
 
-export function AdminSettingsPlaceholderScreen() {
+export function AdminSettingsPlaceholderScreen({ me }: { me: MeResponse }) {
   return (
     <div className="screen">
       <header className="screen__header">
@@ -22,7 +23,7 @@ export function AdminSettingsPlaceholderScreen() {
         control that would only confuse her.
       */}
       <SurfaceSwitchButton />
-      <AdminTabBar />
+      <AdminTabBar me={me} />
     </div>
   );
 }

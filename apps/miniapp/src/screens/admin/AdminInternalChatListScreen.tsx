@@ -203,7 +203,7 @@ export function AdminInternalChatListScreen({ me }: Props) {
         <div className="callout callout--danger" role="alert">
           <p style={{ margin: 0 }}>{COPY.permissionDenied}</p>
         </div>
-        <AdminTabBar />
+        <AdminTabBar me={me} />
       </div>
     );
   }
@@ -267,7 +267,7 @@ export function AdminInternalChatListScreen({ me }: Props) {
         onDismiss={() => setToast("")}
       />
 
-      <AdminTabBar />
+      <AdminTabBar me={me} />
     </div>
   );
 }
