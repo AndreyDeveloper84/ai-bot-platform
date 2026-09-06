@@ -35,6 +35,9 @@ def every_emittable_string() -> list[str]:
     for kind in copy.HINT_TEXTS:
         strings.append(copy.render_hint(kind, first_ever=True))
         strings.append(copy.render_hint(kind, first_ever=False))
+    strings.extend(copy.OBSERVATION_TEXTS.values())
+    for kind in copy.OBSERVATION_TEXTS:
+        strings.append(copy.render_observation(kind))
     return strings
 
 
@@ -95,6 +98,30 @@ class TestTemplatesCoverExactlyTheTwoPairs:
         not as a KeyError inside a beat tick with a person waiting."""
         assert set(copy.HINT_TEXTS) == {"late_dinner", "breakfasts"}
         assert late_dinner_trigger is not None and breakfast_trigger is not None
+
+
+class TestObservationTemplates:
+    """DRF-1464 T6: the diary observation is a second template kind on the
+    same (goal × trigger) pairs — solicited wording, same editorial rules."""
+
+    def test_one_observation_template_per_trigger_kind(self) -> None:
+        assert set(copy.OBSERVATION_TEXTS) == {"late_dinner", "breakfasts"}
+
+    def test_an_unknown_kind_has_no_observation_text(self) -> None:
+        with pytest.raises(KeyError):
+            copy.render_observation("придуманный_триггер")
+
+    def test_the_observation_names_no_cadence_and_no_off_switch(self) -> None:
+        """The first-hint tail belongs to the PROACTIVE hint (R6: cadence +
+        unsubscribe of a message nobody asked for). The observation answers
+        the person's own action — repeating «присылаю не чаще раза в неделю»
+        inside an answer they requested would be noise, not autonomy."""
+        for kind in copy.OBSERVATION_TEXTS:
+            text = copy.render_observation(kind)
+            # Контроль присутствия: хвост вообще существует в модуле —
+            # иначе «нет хвоста» доказывало бы пустоту, а не выбор.
+            assert copy.FIRST_HINT_TAIL.strip()
+            assert copy.FIRST_HINT_TAIL not in text
 
 
 class TestNegativeCorpus:

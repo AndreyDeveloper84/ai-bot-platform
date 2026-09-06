@@ -6,6 +6,14 @@ sentence the coach_hint surface can emit, kept apart from the counting
 (:mod:`apps.nutrition_coach.triggers`) so the editorial boundary can be
 read and audited without scrolling past mechanics.
 
+Two template kinds live here on the same (goal × trigger) pairs:
+``HINT_TEXTS`` for the proactive push (T5) and ``OBSERVATION_TEXTS`` for
+the solicited line shown when the person opens their own diary (T6,
+Q-NUTRITION-05). One file for both on purpose: the pairs are one
+vocabulary, and a wording that is kind in a push but reads as a reproach
+in an answer — or vice versa — is the drift the whitelist test cannot
+see but a single screen can.
+
 ### The rules each line was written against
 
 (``docs/design/policies/nutrition-coach-copy-policy.md`` — the
@@ -62,6 +70,31 @@ HINT_TEXTS: Final[dict[str, str]] = {
 #: never repeated — a weekly reminder of the off-switch is itself nag.
 FIRST_HINT_TAIL: Final[str] = "Присылаю такое не чаще раза в неделю. Не нужно — кнопка ниже."
 
+#: DRF-1464 T6 (Q-NUTRITION-05): the diary observation — the SAME (goal ×
+#: trigger) pairs, worded for a solicited render. The person just opened
+#: their own diary, so the line says what the week looks like while we are
+#: already looking at it together; there is no cadence to announce and no
+#: off-switch to offer (that tail belongs to the message nobody asked for).
+#: Same rules as the hints: outcome not habit (R1), presence not absence
+#: (R3), no clocks or counts named (Q-10) — the whitelist test holds both
+#: template kinds to one bar.
+OBSERVATION_TEXTS: Final[dict[str, str]] = {
+    # Поздний ужин × цель сна. «Поздние» — качество, не час: цифр и
+    # «подряд» здесь нет по той же дисциплине Q-10, что и в HINT_TEXTS.
+    "late_dinner": (
+        "Ты говорила, что хочешь лучше спать. Раз заглянули в дневник — "
+        "на этой неделе ужины в твоих записях часто поздние. Могу "
+        "посмотреть, как они связаны со сном, если интересно."
+    ),
+    # Завтраки × цель энергии. Через присутствие: «в записях есть
+    # завтраки», никакого «пропуска» (R3).
+    "breakfasts": (
+        "Ты говорила, что хочешь больше энергии днём. Раз заглянули в "
+        "дневник — на этой неделе в твоих записях есть завтраки. Если "
+        "хочешь, посмотрим, какие из них совпадают с бодрыми днями."
+    ),
+}
+
 
 def render_hint(kind: str, *, first_ever: bool) -> str:
     """The hint text for a fired trigger kind.
@@ -77,4 +110,20 @@ def render_hint(kind: str, *, first_ever: bool) -> str:
     return text
 
 
-__all__ = ["FIRST_HINT_TAIL", "HINT_TEXTS", "render_hint"]
+def render_observation(kind: str) -> str:
+    """The observation text for a fired trigger kind (DRF-1464 T6).
+
+    Same loud-failure contract as :func:`render_hint`: a trigger without a
+    template is a line that must not be shown, and ``KeyError`` inside the
+    caller's evaluation turns into a logged skip, not an improvisation.
+    """
+    return OBSERVATION_TEXTS[kind]
+
+
+__all__ = [
+    "FIRST_HINT_TAIL",
+    "HINT_TEXTS",
+    "OBSERVATION_TEXTS",
+    "render_hint",
+    "render_observation",
+]
