@@ -24,15 +24,21 @@
  *
  * # Contracts (W4 follow-ups per spec §12.2 / §12.3 P-1)
  *
- *   GET  /api/v1/me                       → MeProfileResponse
- *   GET  /api/v1/me/consents              → ConsentsResponse
- *   POST /api/v1/me/consents/marketing    → ConsentsResponse (toggle)
- *   GET  /api/v1/me/proactive_opt_out     → ProactivePrefsResponse
- *   POST /api/v1/me/proactive_opt_out     → ProactivePrefsResponse (toggle)
+ *   GET   /api/v1/customer/me             → Profile (lib/api.ts)
+ *   PATCH /api/v1/customer/me             → Profile (notify_promo)
+ *   GET  /api/v1/me/proactive_opt_out     → ProactivePrefsResponse (STUB)
+ *   POST /api/v1/me/proactive_opt_out     → ProactivePrefsResponse (STUB)
  *
- * WIRING NOTE: this module ships STUBS only. W4 owns the proxy
- * endpoints; swap stub function bodies to `request(...)` calls when
- * W4 ships. Function signatures DO NOT change. See FOLLOW_UP P-1.
+ * WIRING NOTE (DRF-1475, часть Б, решение владельца 05.09): имя и
+ * маркетинговое согласие подключены к РЕАЛЬНОМУ `/customer/me`:
+ * `fetchMe` читает профиль, `fetchConsents`/`setMarketingConsent`
+ * маппируются на `preferences.notify_promo` (семантически это и есть
+ * маркетинговый opt-in; тем же полем пользуется экран настроек
+ * уведомлений). Отдельных ручек `me/consents` и `me/proactive_opt_out`
+ * пока нет — их делает DRF-1520; до тех пор `fetchProactivePrefs` /
+ * `setProactiveOptOut` остаются DEV-заглушками с prod-гардой, а их
+ * секции скрыты на экране (тумблер, который ничего не делает, хуже
+ * отсутствующего). Function signatures DO NOT change.
  *
  * # Stub variants for dev QA (Records / Wellness pattern reuse)
  *
@@ -40,9 +46,12 @@
  *   ?stub=new_user — first-time, single tenant, all consents at default
  *   ?stub=multi   — same as default (alias kept for explicit naming)
  *
- * Production bundle aliases all variants to default via `import.meta
- * .env.DEV` guard (Wellness PR #886 lesson — the `?stub=` query was a
- * phishing vector when read in prod).
+ * Заглушки для подключённых функций отдаются ТОЛЬКО при явном
+ * `?stub=<variant>` в DEV-сборке — без параметра и в проде всегда
+ * ходим в реальный `/customer/me`. Production bundle aliases all
+ * variants to default via `import.meta.env.DEV` guard (Wellness
+ * PR #886 lesson — the `?stub=` query was a phishing vector when
+ * read in prod).
  *
  * # Voice + factual-only rule
  *
@@ -61,6 +70,8 @@
 // Contract types — verbatim per spec §12. Marketing toggle is the ONLY
 // editable consent in R2; the other 3 rows render as locked info rows.
 // ---------------------------------------------------------------------------
+
+import { fetchProfile, updateProfile, type Profile } from "./api";
 
 export interface MeProfileResponse {
   display_name: string;
@@ -124,6 +135,51 @@ function pickStubVariant(): StubVariant {
   return "default";
 }
 
+/**
+ * Явный dev-override для ПОДКЛЮЧЁННЫХ функций (DRF-1475): заглушка
+ * отдаётся только когда разработчик сам попросил `?stub=<variant>` в
+ * DEV-сборке. Без параметра — реальный `/customer/me`, иначе dev и
+ * прод расходились бы поведением, а экран снова показывал бы выдумку.
+ */
+function explicitStubVariant(): StubVariant | null {
+  if (!import.meta.env.DEV) return null;
+  if (typeof window === "undefined") return null;
+  try {
+    const sp = new URLSearchParams(window.location.search);
+    const v = sp.get("stub");
+    if (v === "default" || v === "new_user" || v === "multi") return v;
+  } catch {
+    /* SSR / parse failure */
+  }
+  return null;
+}
+
+// ---------------------------------------------------------------------------
+// Маппинг реального `GET /customer/me` (lib/api.ts::Profile) на контракты
+// экрана. Ручка не отдаёт `max_handle`, `tenant_names` и дату общего
+// согласия на хранение — соответствующие строки экран скрывает, поэтому
+// здесь честные пустые значения, а не выдуманные. Имя — то, которое
+// человек назвал сам (`client_name`), с отступлением на канальное
+// `display_name`.
+// ---------------------------------------------------------------------------
+
+function toMeProfile(p: Profile): MeProfileResponse {
+  return {
+    display_name: p.client_name || p.display_name,
+    max_handle: "",
+    tenant_names: [],
+  };
+}
+
+function toConsents(p: Profile): ConsentsResponse {
+  return {
+    is_booking_pii_locked: true,
+    is_master_data_locked: true,
+    marketing_consent: p.preferences.notify_promo,
+    data_storage_consent_at: "",
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Stub data — voice-audited per spec §10. Anna Petrova default mirrors
 // the spec §3 illustration verbatim.
@@ -147,9 +203,9 @@ const ME_STUB: Record<StubVariant, MeProfileResponse> = import.meta.env.DEV
   ? { default: DEFAULT_ME, new_user: NEW_USER_ME, multi: MULTI_ME }
   : { default: DEFAULT_ME, new_user: DEFAULT_ME, multi: DEFAULT_ME };
 
-// In-memory mutable consent state (per-session). Production swap will
-// persist server-side; for dev QA the toggle change must be visibly
-// reflected on subsequent reads.
+// In-memory mutable consent state (per-session), только для явного
+// `?stub=` в DEV: переключение тумблера должно быть видно при повторном
+// чтении. Без `?stub=` состояние живёт на сервере (`notify_promo`).
 const CONSENTS_STATE: Record<StubVariant, ConsentsResponse> = {
   default: {
     is_booking_pii_locked: true,
@@ -178,8 +234,9 @@ const PROACTIVE_STATE: Record<StubVariant, ProactivePrefsResponse> = {
 };
 
 // ---------------------------------------------------------------------------
-// Fetch wrappers — stubs in DEV; production must swap to real endpoints
-// once W4 ships. Function signatures DO NOT change.
+// Fetch wrappers — имя и маркетинг ходят в реальный `/customer/me`
+// (DRF-1475); proactive остаётся DEV-заглушкой с prod-гардой до
+// DRF-1520. Function signatures DO NOT change.
 // ---------------------------------------------------------------------------
 
 function devWarn(msg: string): void {
@@ -190,18 +247,15 @@ function devWarn(msg: string): void {
 }
 
 /**
- * Production guard — if this module ships to prod BEFORE W4 wires the
- * real endpoints (per spec §12.2 + follow-up P-1), every customer
- * would see «Анна Петрова» as their own profile, plus a hardcoded
- * `data_storage_consent_at` they never gave, plus a marketing toggle
- * that persists fake «saved» without a server record. That's a
- * 152-ФЗ truthfulness violation against the founder-locked Variant 3
- * rule («Profile NEVER promises an in-app action it cannot complete»).
- *
- * Until W4 swaps stub bodies to real `request(...)` calls, prod-mode
- * fetch must surface an explicit error → `StateError` renders, NOT
- * fake identity. Adversarial CR caught this as «M1 stub leak in
- * production» (ship gate, addressed inline).
+ * Production guard — proactive-заглушки (`fetchProactivePrefs` /
+ * `setProactiveOptOut`) всё ещё не подключены: ручек
+ * `me/proactive_opt_out` нет до DRF-1520, и если бы их вызвали в
+ * проде, человек двигал бы тумблер, который ничего не делает. Пока
+ * DRF-1520 не дал реальные эндпоинты, prod-mode fetch этих функций
+ * обязан упасть явной ошибкой, а их секции на экране скрыты.
+ * Подключённые функции (`fetchMe` / `fetchConsents` /
+ * `setMarketingConsent`) эту гардю больше не вызывают — они ходят в
+ * реальный `/customer/me`.
  */
 class StubNotWiredError extends Error {
   constructor() {
@@ -216,7 +270,7 @@ function guardProd(endpoint: string): void {
   if (!import.meta.env.DEV) {
     // eslint-disable-next-line no-console
     console.error(
-      `[customer-profile] ${endpoint} called in production with no W4 wire-up. ` +
+      `[customer-profile] ${endpoint} called in production with no DRF-1520 wire-up. ` +
         "See docs/screens/customer-profile-flow.md §12.2 (P-1).",
     );
     throw new StubNotWiredError();
@@ -224,34 +278,38 @@ function guardProd(endpoint: string): void {
 }
 
 export async function fetchMe(): Promise<MeProfileResponse> {
-  guardProd("GET /api/v1/me");
-  devWarn(
-    "GET /api/v1/me served from stub — swap when W4 ships canonical proxy",
-  );
-  const v = pickStubVariant();
-  return ME_STUB[v];
+  const stub = explicitStubVariant();
+  if (stub) {
+    devWarn("GET /customer/me served from explicit ?stub= override");
+    return ME_STUB[stub];
+  }
+  return toMeProfile(await fetchProfile());
 }
 
 export async function fetchConsents(): Promise<ConsentsResponse> {
-  guardProd("GET /api/v1/me/consents");
-  devWarn(
-    "GET /api/v1/me/consents served from stub — W4 follow-up P-1",
-  );
-  const v = pickStubVariant();
-  // Return a copy so callers cannot mutate stub state directly.
-  return { ...CONSENTS_STATE[v] };
+  const stub = explicitStubVariant();
+  if (stub) {
+    devWarn("consents served from explicit ?stub= override");
+    // Return a copy so callers cannot mutate stub state directly.
+    return { ...CONSENTS_STATE[stub] };
+  }
+  return toConsents(await fetchProfile());
 }
 
 export async function setMarketingConsent(
   next: boolean,
 ): Promise<ConsentsResponse> {
-  guardProd("POST /api/v1/me/consents/marketing");
-  devWarn(
-    "POST /api/v1/me/consents/marketing served from stub — W4 follow-up P-1",
-  );
-  const v = pickStubVariant();
-  CONSENTS_STATE[v] = { ...CONSENTS_STATE[v], marketing_consent: next };
-  return { ...CONSENTS_STATE[v] };
+  const stub = explicitStubVariant();
+  if (stub) {
+    devWarn("marketing consent served from explicit ?stub= override");
+    CONSENTS_STATE[stub] = { ...CONSENTS_STATE[stub], marketing_consent: next };
+    return { ...CONSENTS_STATE[stub] };
+  }
+  // Маркетинговое согласие — это `notify_promo` реального PATCH /me
+  // (opt-in, по умолчанию выключено). Отзыв и выдача — один и тот же
+  // путь; сервер возвращает полный профиль, из которого перечитываем
+  // фактическое состояние, а не то, что просили.
+  return toConsents(await updateProfile({ notify_promo: next }));
 }
 
 export async function fetchProactivePrefs(): Promise<ProactivePrefsResponse> {
