@@ -61,7 +61,6 @@ def _grandfather_synced_masters(apps, schema_editor):
 
 
 class Migration(migrations.Migration):
-
     dependencies = [
         ("catalog", "0015_backfill_master_accepted_at"),
         ("audit", "0004_rename_audit_auditl_is_arch_idx_audit_audit_is_arch_4b93a0_idx"),

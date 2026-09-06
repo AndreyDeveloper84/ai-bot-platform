@@ -233,8 +233,7 @@ class CatalogMasterAdmin(_MirrorAdminBase):
             changed += 1
         self.message_user(
             request,
-            f"Верифицировано: {changed}. Уже принятых пропущено: "
-            f"{len(queryset) - changed}.",
+            f"Верифицировано: {changed}. Уже принятых пропущено: {len(queryset) - changed}.",
             level=messages.SUCCESS,
         )
 
@@ -258,8 +257,7 @@ class CatalogMasterAdmin(_MirrorAdminBase):
             changed += 1
         self.message_user(
             request,
-            f"Отозвано: {changed}. Уже отменённых пропущено: "
-            f"{len(queryset) - changed}.",
+            f"Отозвано: {changed}. Уже отменённых пропущено: {len(queryset) - changed}.",
             level=messages.SUCCESS,
         )
 
@@ -324,8 +322,7 @@ class CatalogMasterAdmin(_MirrorAdminBase):
             restored += 1
         self.message_user(
             request,
-            f"Извлечено из архива: {restored}. Не были в архиве: "
-            f"{len(queryset) - restored}.",
+            f"Извлечено из архива: {restored}. Не были в архиве: {len(queryset) - restored}.",
             level=messages.SUCCESS,
         )
 
