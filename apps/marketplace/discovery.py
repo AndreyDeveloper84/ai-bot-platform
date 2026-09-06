@@ -23,7 +23,6 @@ from uuid import UUID
 from django.core.paginator import Paginator
 from django.db.models import (
     Case,
-    CharField,
     Exists,
     ExpressionWrapper,
     F,
@@ -1107,11 +1106,14 @@ def _name_word_count_sql(field: str) -> BaseExpression:
     matrix runs the Postgres and the SQLite legs), which is why this is not
     ``regexp_split_to_array``.
 
-    ``COALESCE(field, '')`` first: a NULL name would otherwise make the whole
-    quotient NULL, and a NULL sorts FIRST under ``DESC`` in Postgres — the
-    same trap :func:`_match_precision` documents around ``MAX``.
+    NULL is deliberately NOT absorbed here. The only way ``field`` is NULL is
+    the LEFT JOIN of a master with no service row at all, and that master must
+    reach :func:`_match_precision`'s ``COALESCE`` as a NULL — swallowing it
+    down here would turn that guard into decoration and the two tests that pin
+    it into tests that cannot fail. Checked, not assumed: removing the outer
+    ``COALESCE`` reddens both of them.
     """
-    trimmed = Trim(Coalesce(field, Value(""), output_field=CharField()))
+    trimmed = Trim(field)
     return ExpressionWrapper(
         Length(trimmed) - Length(Replace(trimmed, Value(_WORD_SEP), Value(""))) + Value(1),
         output_field=IntegerField(),
