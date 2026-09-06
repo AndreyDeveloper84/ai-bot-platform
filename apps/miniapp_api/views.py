@@ -1928,19 +1928,14 @@ def personal_data_delete(request: HttpRequest) -> HttpResponse:
     Idempotent per contract: a repeat confirmed request returns the same 200.
     A failed or skipped mandatory step yields an honest 502 + failed_steps.
     """
-    import json
-
     from apps.identity.services.privacy import delete_personal_data
     from apps.identity.services.profile import DELETE_CONFIRMATION_TOKEN
 
     bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
 
-    try:
-        body = json.loads(request.body or b"{}")
-    except ValueError:
-        return _error("malformed", "body is not valid JSON", 400)
-    if not isinstance(body, dict):
-        return _error("malformed", "body must be a JSON object", 400)
+    body = _json_object_body(request)
+    if isinstance(body, HttpResponse):
+        return body
     if body.get("confirmation", "") != DELETE_CONFIRMATION_TOKEN:
         # Nothing has been touched at this point — the cascade is below.
         return _error(

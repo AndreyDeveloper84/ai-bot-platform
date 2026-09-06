@@ -74,11 +74,7 @@ from django.db import transaction
 
 from apps.audit.services import write_audit
 from apps.consent.models import ConsentRecord
-from apps.consent.services import (
-    has_global_consent,
-    record_global_consent,
-    withdraw,
-)
+from apps.consent.services import record_global_consent, withdraw
 
 if TYPE_CHECKING:
     from apps.identity.models import BotUser
@@ -110,6 +106,18 @@ DATA_STORAGE_REVOCATION_CONSEQUENCES = (
 #: обязанности оператора, а не по согласию, поэтому отзыв согласия их не
 #: удаляет — и человеку это должно быть сказано до нажатия, а не после.
 DATA_STORAGE_REVOCATION_RETAINED = ("bookings", "payments")
+
+#: Версия текста, под которым записывается маркетинговое согласие.
+#:
+#: В отличие от медданных её **не требуют от клиента**: там особая категория
+#: по 152-ФЗ ст. 10, и согласие обязано быть привязано к раскрытию, которое
+#: человеку показали, поэтому ручка сверяет присланную версию и отвергает
+#: чужую. Маркетинг — обычная категория ст. 6, и требовать эхо версии значило
+#: бы сломать существующий контракт ``PATCH /me`` ради формальности. Но
+#: записать, под какой редакцией согласие принято, сервер обязан: иначе
+#: реестр, объявленный главным источником правды, не хранит того самого, чем
+#: он лучше булевой колонки. Поднимается вместе с текстом на экране.
+MARKETING_CONSENT_DOCUMENT_VERSION = "marketing-v1"
 
 MARKETING_GRANT_SOURCE = "miniapp:profile_marketing_consent"
 MARKETING_WITHDRAW_SOURCE = "miniapp:profile_marketing_consent_withdraw"
@@ -155,29 +163,48 @@ def _person_shells(bot_user: "BotUser") -> list["BotUser"]:
     return shells or [bot_user]
 
 
-def _active_record(bot_user: "BotUser", consent_type: str) -> ConsentRecord | None:
-    """Действующая строка согласия аутентифицированной оболочки, либо None."""
-    return (
+def _active_states(shells: list["BotUser"]) -> dict[str, dict[str, Any]]:
+    """Состояние каждого типа согласия по всем оболочкам человека.
+
+    Один запрос на весь документ, а не пара на тип: ручка перечитывает
+    состояние после каждой записи, и 16 запросов на тап — цена ни за что.
+
+    **Читаем по человеку, а не по строке — и это исправление, а не
+    удобство.** Приветственный поток пишет ``personal_data`` построчно
+    (``global_onboarding._record_consent_journal`` → ``record_global_consent``)
+    на ту оболочку, которая вела разговор, — а разговор ведёт чат под
+    сентинелом ``global_bot``, тогда как мини-приложение резолвит свою
+    строку под ``MAX_BOT_TENANT_SLUG``. Построчное чтение показало бы
+    «согласия нет» ровно тем, у кого оно есть, и экран спрятал бы от них
+    кнопку отзыва — то есть недостижимость отзыва, ради которой заведён
+    DRF-1520, осталась бы на месте для основного сценария пилота.
+
+    Ложноположительного направления («экран говорит «разрешено», пока
+    поверхность отказывает») это не открывает: отзыв из этого же модуля
+    ходит по тому же множеству оболочек, так что показанное здесь
+    согласие человек отсюда же и снимает.
+    """
+    rows = (
         ConsentRecord.all_tenants.filter(
-            bot_user=bot_user,
-            consent_type=consent_type,
+            bot_user_id__in=[s.id for s in shells],
             granted=True,
             withdrawn_at__isnull=True,
         )
         .order_by("-captured_at")
-        .first()
+        .values("consent_type", "captured_at", "document_version")
     )
-
-
-def _consent_state(bot_user: "BotUser", consent_type: str) -> dict[str, Any]:
-    """Состояние одного типа согласия так, как его видит читающая сторона."""
-    granted = has_global_consent(bot_user, consent_type)
-    record = _active_record(bot_user, consent_type) if granted else None
-    return {
-        "granted": granted,
-        "granted_at": record.captured_at.isoformat() if record else None,
-        "document_version": record.document_version if record else "",
+    states: dict[str, dict[str, Any]] = {
+        choice.value: {"granted": False, "granted_at": None, "document_version": ""}
+        for choice in ConsentRecord.ConsentType
     }
+    for row in rows:
+        state = states.get(row["consent_type"])
+        if state is None or state["granted"]:
+            continue  # неизвестный тип, либо более свежая строка уже взята
+        state["granted"] = True
+        state["granted_at"] = row["captured_at"].isoformat()
+        state["document_version"] = row["document_version"]
+    return states
 
 
 def read_consents(bot_user: "BotUser") -> dict[str, Any]:
@@ -194,21 +221,19 @@ def read_consents(bot_user: "BotUser") -> dict[str, Any]:
     и это не дублирование. Колонка ставится приветственным потоком, и
     ``withdraw()`` её не снимает, поэтому у отозвавшего она остаётся
     заполненной. На пилоте 2026-08-23 четыре из пяти строк с непустым
-    ``consent_at`` уже отозвали ``personal_data``. Поведение решает реестр
-    (его читает ``consent_blocker``) — он и стоит в ``granted``; колонка
-    показана как есть, чтобы расхождение было видно, а не замазано.
+    ``consent_at`` уже отозвали ``personal_data``. Поведение решает реестр —
+    он и стоит в ``granted``; колонка показана как есть, чтобы расхождение
+    было видно, а не замазано.
     """
     consent_at = getattr(bot_user, "consent_at", None)
+    states = _active_states(_person_shells(bot_user))
     return {
-        "consents": {
-            choice.value: _consent_state(bot_user, choice.value)
-            for choice in ConsentRecord.ConsentType
-        },
+        "consents": states,
         "proactive_hints": {
             "enabled": not bool(getattr(bot_user, "proactive_messages_opt_out", False)),
         },
         "data_storage": {
-            **_consent_state(bot_user, _PERSONAL_DATA),
+            **states[_PERSONAL_DATA],
             "consent_at": consent_at.isoformat() if consent_at else None,
             "revocation": {
                 "disclosure_version": DATA_STORAGE_REVOCATION_DISCLOSURE_VERSION,
@@ -266,21 +291,37 @@ def _mirror_notify_promo(shells: list["BotUser"], *, granted: bool) -> None:
     Единственное место в платформе, которое присваивает эту колонку по
     воле человека. ``update_profile`` делегирует сюда; прямых присваиваний
     больше нет — иначе снова появилось бы два пишущих пути на один факт.
+
+    Строку настроек этот вызов **создаёт только при выдаче**. На отзыве
+    достаточно погасить существующие: заводить человеку запись настроек в
+    тот момент, когда он просит перестать хранить, — ровно наоборот тому,
+    о чём он попросил. Отсутствие строки читается как ``notify_promo``
+    по умолчанию (``False``), то есть совпадает со снятым согласием.
     """
     from apps.identity.models import UserPreferences
 
+    ids = [s.id for s in shells]
+    if not granted:
+        UserPreferences.all_tenants.filter(bot_user_id__in=ids, notify_promo=True).update(
+            notify_promo=False
+        )
+        return
     for shell in shells:
         prefs, _ = UserPreferences.all_tenants.get_or_create(
             bot_user=shell,
             defaults={"tenant": shell.tenant},
         )
-        if prefs.notify_promo != granted:
-            prefs.notify_promo = granted
+        if not prefs.notify_promo:
+            prefs.notify_promo = True
             prefs.save(update_fields=["notify_promo", "updated_at"])
 
 
-def set_marketing(bot_user: "BotUser", *, granted: bool) -> None:
-    """Выдать или отозвать маркетинговое согласие. Идемпотентно.
+def _apply_marketing(shells: list["BotUser"], *, granted: bool) -> None:
+    """Записать маркетинговое согласие по готовому множеству оболочек.
+
+    Отделено от :func:`set_marketing` потому, что отзыв согласия на
+    хранение резолвит оболочки шире (полный резолв личности) и должен
+    применять маркетинг к тому же множеству, а не к своему.
 
     Реестр — главный источник; ``notify_promo`` приводится к нему в той же
     транзакции. Порядок именно такой: сначала юридический факт, потом
@@ -289,7 +330,6 @@ def set_marketing(bot_user: "BotUser", *, granted: bool) -> None:
     """
     from apps.tenancy.context import tenant_scope
 
-    shells = _person_shells(bot_user)
     with transaction.atomic():
         for shell in shells:
             if granted:
@@ -299,6 +339,7 @@ def set_marketing(bot_user: "BotUser", *, granted: bool) -> None:
                     shell,
                     consent_type=_MARKETING,
                     source=MARKETING_GRANT_SOURCE,
+                    document_version=MARKETING_CONSENT_DOCUMENT_VERSION,
                 )
             else:
                 # ``withdraw`` требует тенанта в scope и не удаляет строку —
@@ -310,6 +351,12 @@ def set_marketing(bot_user: "BotUser", *, granted: bool) -> None:
                         source=MARKETING_WITHDRAW_SOURCE,
                     )
         _mirror_notify_promo(shells, granted=granted)
+
+
+def set_marketing(bot_user: "BotUser", *, granted: bool) -> None:
+    """Выдать или отозвать маркетинговое согласие человека. Идемпотентно."""
+    shells = _person_shells(bot_user)
+    _apply_marketing(shells, granted=granted)
     logger.info(
         "consent.customer.marketing bot_user=%s granted=%s shells=%d",
         bot_user.id,
@@ -359,17 +406,33 @@ def revoke_data_storage(bot_user: "BotUser") -> "DeleteCascadeResult":
     """
     from apps.consent.services import withdraw_personal_data_for_bot_users
     from apps.identity.models import BotUser as BotUserModel
-    from apps.identity.services.privacy import delete_personal_data
+    from apps.identity.services.privacy import delete_personal_data, person_shell_ids
 
-    shells = _person_shells(bot_user)
-    shell_ids = [s.id for s in shells]
+    # Здесь — ПОЛНЫЙ резолв личности, а не узкий ``_person_shells``. Тумблер
+    # подсказок ходит по каналу, чтобы обычный тап не лез в сеть; отзыв
+    # согласия — реализация права по 152-ФЗ, и он всё равно попадёт в
+    # ``ensure_ayla_link`` внутри ``delete_personal_data``. Сузить множество
+    # здесь означало бы оставить не отозванным согласие на оболочке,
+    # связанной с человеком только через ``ayla_user_id``.
+    try:
+        shell_ids = list(person_shell_ids(bot_user))
+    except Exception:  # noqa: BLE001 — резолв личности не должен ронять отзыв
+        logger.exception(
+            "consent.customer.revoke_shell_resolve_failed bot_user=%s — narrowing",
+            bot_user.id,
+        )
+        shell_ids = [s.id for s in _person_shells(bot_user)]
+    shells = list(BotUserModel.all_tenants.filter(id__in=shell_ids))
 
-    # 1 — остановка дальнейшего необязательного хранения.
-    withdraw_personal_data_for_bot_users(
-        BotUserModel.all_tenants.filter(id__in=shell_ids).select_related("tenant"),
-        source=DATA_STORAGE_WITHDRAW_SOURCE,
-    )
-    set_marketing(bot_user, granted=False)
+    # 1 — остановка дальнейшего необязательного хранения. Одной транзакцией:
+    # снятое наполовину согласие — худшее из состояний, потому что и человек,
+    # и оператор считают вопрос закрытым.
+    with transaction.atomic():
+        withdraw_personal_data_for_bot_users(
+            BotUserModel.all_tenants.filter(id__in=shell_ids).select_related("tenant"),
+            source=DATA_STORAGE_WITHDRAW_SOURCE,
+        )
+        _apply_marketing(shells, granted=False)
 
     write_audit(
         "consent.data_storage_revoked",

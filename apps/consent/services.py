@@ -461,9 +461,19 @@ MEMORY_ZONE_CONSENT = {
 # обрабатывать нечего в принципе. Оставить активный health-грант человеку,
 # который вышел из персонализированного сервиса, значило бы держать открытым
 # согласие на самую чувствительную категорию у того, кто отозвал самое общее.
+#
+# DRF-1520 добавляет ``marketing``. До него в этот тип не писал никто, и его
+# отсутствие в каскаде ничего не значило. Теперь маркетинговое согласие —
+# настоящая строка реестра, а ``_erase_bot_user_pii`` удаляет строку
+# ``UserPreferences`` целиком, и ``get_profile`` пересоздаёт её с
+# ``notify_promo=False``. Без этой строки человек, реализовавший право на
+# стирание, оставался бы с ДЕЙСТВУЮЩИМ маркетинговым согласием в реестре и
+# выключенным зеркалом — то самое расхождение двух источников правды, ради
+# устранения которого реестр и объявлен главным.
 _PERSONAL_DATA_CASCADE = (
     ConsentRecord.ConsentType.PERSONAL_DATA,
     ConsentRecord.ConsentType.HEALTH,
+    ConsentRecord.ConsentType.MARKETING,
     ConsentRecord.ConsentType.MEMORY_GREEN,
     ConsentRecord.ConsentType.MEMORY_YELLOW,
     ConsentRecord.ConsentType.MEMORY_RED,

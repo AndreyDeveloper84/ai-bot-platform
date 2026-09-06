@@ -32,7 +32,14 @@ from django.db import migrations
 
 
 def align_notify_promo_to_registry(apps, schema_editor):
-    """``notify_promo=False`` везде, где нет действующего MARKETING-согласия."""
+    """Свести колонку к реестру в обе стороны.
+
+    ``apps.get_model`` отдаёт историческую модель с обычным ``Manager``
+    (``use_in_migrations`` в репозитории не выставлен нигде), поэтому
+    ``objects`` здесь НЕ ограничен тенантом и миграция видит все строки.
+    Это важно настолько, что закреплено тестом: tenant-scoped менеджер
+    молча привёл бы к реестру одну площадку и отрапортовал успех.
+    """
     UserPreferences = apps.get_model("identity", "UserPreferences")
     ConsentRecord = apps.get_model("consent", "ConsentRecord")
 
@@ -43,8 +50,17 @@ def align_notify_promo_to_registry(apps, schema_editor):
             withdrawn_at__isnull=True,
         ).values_list("bot_user_id", flat=True)
     )
+    # Нет доказанного согласия → тумблер гасится (см. докстринг модуля).
     UserPreferences.objects.filter(notify_promo=True).exclude(bot_user_id__in=proven).update(
         notify_promo=False
+    )
+    # Есть доказанное согласие → тумблер включается. Симметричная половина:
+    # зеркало обязано совпасть с реестром в обе стороны, иначе «главный
+    # источник» остаётся утверждением, а не свойством данных. На момент
+    # миграции таких строк нет (в MARKETING не писал никто), но правило не
+    # должно держаться на этом факте.
+    UserPreferences.objects.filter(notify_promo=False, bot_user_id__in=proven).update(
+        notify_promo=True
     )
 
 

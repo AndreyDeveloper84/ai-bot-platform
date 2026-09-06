@@ -28,7 +28,7 @@ from apps.audit.models import AuditLog
 from apps.booking.models import BookingReminder
 from apps.bookings import followups as followups_mod
 from apps.bookings.followups import send_post_visit_followups
-from apps.consent import customer as customer_consents
+from apps.consent import customer as customer_consents, health as health_consent
 from apps.consent.models import ConsentRecord
 from apps.consent.services import has_global_consent, record_global_consent
 from apps.identity.models import BotUser, UserPreferences
@@ -65,6 +65,23 @@ def _init_data_header(user_id: str) -> str:
 @pytest.fixture(autouse=True)
 def _bot_token(settings):
     settings.MAX_BOT_TOKEN = BOT_TOKEN
+
+
+@pytest.fixture(autouse=True)
+def _no_ayla_link():
+    """Резолв личности не ходит в сеть из тестов.
+
+    ``revoke_data_storage`` → ``delete_personal_data`` → ``_resolve_person_link``
+    → ``ensure_ayla_link`` → ``resolve_identity`` — реальный HTTP. Без этой
+    заглушки исход отзыва зависел бы от того, доступна ли Ayla из окружения:
+    там, где доступна, ``ayla_delete`` прошёл бы и статус стал бы ``revoked``.
+    Тест, который краснеет от доступности внешнего сервиса, проверяет не код.
+    """
+    with patch(
+        "apps.integrations.ayla.identity_client.resolve_identity",
+        side_effect=RuntimeError("ayla недоступна в тестах"),
+    ):
+        yield
 
 
 @pytest.fixture
@@ -121,6 +138,14 @@ def marketing_url() -> str:
 @pytest.fixture
 def revoke_url() -> str:
     return reverse("miniapp_api:customer_data_storage_consent")
+
+
+class _NoOpCascade:
+    """Каскад, отрапортовавший успех, не сняв ни одного согласия."""
+
+    steps: tuple = ()
+    all_ok = True
+    failed_steps: list = []  # noqa: RUF012 — тестовая заглушка, не модель
 
 
 def _revoke_body(**overrides) -> str:
@@ -205,6 +230,78 @@ def test_granted_follows_the_registry_not_the_denormalised_stamp(
     assert after["granted"] is False
     # Колонка показана как есть — расхождение видно, а не замазано.
     assert after["consent_at"] is not None
+
+
+def test_consent_given_on_the_chat_shell_is_visible_in_the_app(
+    client: Client, bot_user, url, auth, db
+) -> None:
+    """Согласие, данное в чате, видно в мини-приложении.
+
+    Приветственный поток пишет ``personal_data`` ПОСТРОЧНО на ту оболочку,
+    которая вела разговор, — а разговор ведёт чат под сентинелом
+    ``global_bot``, тогда как мини-приложение резолвит свою строку под
+    ``MAX_BOT_TENANT_SLUG``. Построчное чтение показало бы «согласия нет»
+    ровно тем, у кого оно есть, и экран спрятал бы от них кнопку отзыва:
+    недостижимость отзыва осталась бы на месте для основного сценария.
+    """
+    # Убираем согласие с miniapp-строки и оставляем только на chat-строке —
+    # ровно та форма данных, которая есть на пилоте.
+    ConsentRecord.all_tenants.filter(bot_user=bot_user).delete()
+    sentinel = Tenant.objects.create(slug="consents-global-shell", name="Global")
+    chat_shell = BotUser.all_tenants.create(
+        tenant=sentinel,
+        channel="max",
+        channel_user_id=CHANNEL_USER_ID,
+        chat_id=f"chat-{CHANNEL_USER_ID}",
+    )
+    assert client.get(url, **auth).json()["data_storage"]["granted"] is False  # есть чему меняться
+
+    record_global_consent(chat_shell, source="test:welcome_in_chat")
+
+    body = client.get(url, **auth).json()
+    assert body["data_storage"]["granted"] is True
+    assert body["consents"]["personal_data"]["granted"] is True
+
+
+def test_read_is_read_only(client: Client, bot_user, url, auth) -> None:
+    """Ручка чтения не принимает записи ни в какой форме."""
+    assert client.get(url, **auth).status_code == 200  # читать — можно
+
+    for res in (client.post(url, **auth), client.delete(url, **auth)):
+        assert res.status_code == 405
+
+
+def test_health_consent_shows_up_in_the_same_document(client: Client, bot_user, url, auth) -> None:
+    """Одно состояние на платформу, а не отдельная правда у каждой ручки."""
+    assert client.get(url, **auth).json()["consents"]["health"]["granted"] is False
+
+    client.post(
+        reverse("miniapp_api:health_consent"),
+        data=json.dumps({"document_version": health_consent.HEALTH_CONSENT_DOCUMENT_VERSION}),
+        content_type="application/json",
+        **auth,
+    )
+
+    health = client.get(url, **auth).json()["consents"]["health"]
+    assert health["granted"] is True
+    # Версия раскрытия, под которой согласие стоит, — та же, что записала
+    # ручка медданных. Содержимое медданных при этом не отдаётся.
+    assert health["document_version"] == health_consent.HEALTH_CONSENT_DOCUMENT_VERSION
+
+
+def test_malformed_body_is_refused_without_touching_state(
+    client: Client, bot_user, hints_url, auth
+) -> None:
+    ok = client.post(
+        hints_url, data=json.dumps({"enabled": False}), content_type="application/json", **auth
+    )
+    assert ok.status_code == 200  # форма, которая принимается
+
+    for payload in ("не json", json.dumps([1, 2])):
+        res = client.post(hints_url, data=payload, content_type="application/json", **auth)
+        assert res.status_code == 400
+        assert res.json()["error"] == "malformed"
+    assert BotUser.all_tenants.get(pk=bot_user.pk).proactive_messages_opt_out is True
 
 
 # ── Подсказки Ayla ──────────────────────────────────────────────────────────
@@ -348,6 +445,68 @@ def test_patch_me_still_reports_the_actual_marketing_state(client: Client, bot_u
     assert res.status_code == 200
     assert res.json()["preferences"]["notify_promo"] is True
     assert has_global_consent(bot_user, ConsentRecord.ConsentType.MARKETING.value) is True
+
+
+def test_marketing_reaches_every_shell_of_the_person(
+    client: Client, bot_user, marketing_url, auth, db
+) -> None:
+    """Согласие пишется по всем оболочкам, иначе читающая сторона его не видит."""
+    sentinel = Tenant.objects.create(slug="consents-global-mkt", name="Global")
+    chat_shell = BotUser.all_tenants.create(
+        tenant=sentinel,
+        channel="max",
+        channel_user_id=CHANNEL_USER_ID,
+        chat_id=f"chat-{CHANNEL_USER_ID}",
+    )
+    assert has_global_consent(chat_shell, "marketing") is False  # есть чему появиться
+
+    client.post(marketing_url, **auth)
+
+    assert has_global_consent(bot_user, "marketing") is True
+    assert has_global_consent(chat_shell, "marketing") is True
+    assert UserPreferences.all_tenants.get(bot_user=chat_shell).notify_promo is True
+
+    client.delete(marketing_url, **auth)
+
+    assert has_global_consent(chat_shell, "marketing") is False
+    assert UserPreferences.all_tenants.get(bot_user=chat_shell).notify_promo is False
+
+
+def test_marketing_records_the_document_version(
+    client: Client, bot_user, marketing_url, auth
+) -> None:
+    """Реестр главнее колонки ровно тем, что хранит — в том числе редакцию текста."""
+    client.post(marketing_url, **auth)
+
+    row = ConsentRecord.all_tenants.get(
+        bot_user=bot_user, consent_type=ConsentRecord.ConsentType.MARKETING
+    )
+    assert row.document_version == customer_consents.MARKETING_CONSENT_DOCUMENT_VERSION
+
+
+def test_erasure_withdraws_marketing_too(client: Client, bot_user, marketing_url, auth) -> None:
+    """Соседняя ручка стирания не должна оставлять действующее согласие.
+
+    ``DELETE /me/personal-data/`` удаляет строку ``UserPreferences``
+    целиком, а ``get_profile`` пересоздаёт её с ``notify_promo=False``.
+    Если бы каскад §8.4 не снимал ``marketing``, человек, реализовавший
+    право на стирание, остался бы с действующим маркетинговым согласием в
+    реестре и выключенным зеркалом — расхождение двух источников правды,
+    только через другую дверь.
+    """
+    client.post(marketing_url, **auth)
+    assert has_global_consent(bot_user, "marketing") is True  # есть что снимать
+
+    res = client.delete(
+        reverse("miniapp_api:personal_data_delete"),
+        data=json.dumps({"confirmation": DELETE_CONFIRMATION_TOKEN}),
+        content_type="application/json",
+        **auth,
+    )
+
+    assert res.status_code in (200, 502)  # шаг Ayla на пилоте не адресуем
+    assert has_global_consent(bot_user, "marketing") is False
+    assert not UserPreferences.all_tenants.filter(bot_user=bot_user, notify_promo=True).exists()
 
 
 def test_marketing_grant_is_idempotent(client: Client, bot_user, marketing_url, auth) -> None:
@@ -533,6 +692,48 @@ def test_revocation_is_audited(client: Client, bot_user, revoke_url, auth) -> No
     assert AuditLog.all_tenants.filter(action="privacy.personal_data_deleted").exists()
 
 
+def test_failed_revocation_answers_with_a_refusal(
+    client: Client, bot_user, url, revoke_url, auth
+) -> None:
+    """Если согласие осталось действующим — статус обязан быть отказом.
+
+    Единственная ветка, где ручка отвечает 502: состояние после вызова
+    по-прежнему «согласие действует». Без неё частично отработавший отзыв
+    мог бы вернуть 200 и человек считал бы вопрос закрытым.
+    """
+    assert client.get(url, **auth).json()["data_storage"]["granted"] is True
+
+    # Процедура «отработала» и отрапортовала успех, не сняв ничего — ровно
+    # тот исход, ради которого сторож и стоит.
+    with patch("apps.consent.customer.revoke_data_storage", return_value=_NoOpCascade()):
+        res = _revoke(client, revoke_url, auth)
+
+    assert res.status_code == 502
+    assert res.json()["revocation"]["status"] == "failed"
+    assert has_global_consent(bot_user, "personal_data") is True
+
+
+def test_no_phone_and_no_health_content_leaves_the_endpoint(
+    client: Client, bot_user, url, auth
+) -> None:
+    """Ручка оперирует фактом согласия, а не данными за ним."""
+    BotUser.all_tenants.filter(pk=bot_user.pk).update(phone="79991234567")
+    client.post(
+        reverse("miniapp_api:health_consent"),
+        data=json.dumps({"document_version": health_consent.HEALTH_CONSENT_DOCUMENT_VERSION}),
+        content_type="application/json",
+        **auth,
+    )
+
+    raw = client.get(url, **auth).content.decode()
+
+    # Тело не пустое и действительно про согласия — есть чему не утечь рядом.
+    assert "health" in raw
+    assert json.loads(raw)["consents"]["health"]["granted"] is True
+    assert "79991234567" not in raw
+    assert "phone" not in raw
+
+
 def test_consequences_match_the_actual_cascade(bot_user) -> None:
     """Обещание на экране и код не могут разойтись.
 
@@ -566,7 +767,11 @@ def test_another_persons_consents_are_untouched(
 def test_body_cannot_name_another_subject(
     client: Client, bot_user, other_user, marketing_url, auth
 ) -> None:
-    """Подмена субъекта в теле не действует: субъект берётся из initData."""
+    """Подмена субъекта в теле не действует: субъект берётся из initData.
+
+    Проверяется отсутствие кода: ручка тело вообще не разбирает. Тест
+    поэтому не может покраснеть от содержимого — он краснеет ровно тогда,
+    когда кто-то заведёт разбор субъекта из тела, и ради этого стоит."""
     res = client.post(
         marketing_url,
         data=json.dumps({"bot_user_id": str(other_user.id), "granted": True}),
@@ -594,7 +799,8 @@ def test_unauthenticated_requests_are_rejected(
     revoke = client.delete(revoke_url, data=_revoke_body(), content_type="application/json")
 
     for res in (read, hints, marketing, revoke):
-        assert res.status_code != 200
+        # 400 — платформенный слог отказа require_init_data (не 401).
+        assert res.status_code == 400
     assert "consents" not in read.json()
     assert BotUser.all_tenants.get(pk=bot_user.pk).proactive_messages_opt_out is False
     assert has_global_consent(bot_user, "marketing") is False
