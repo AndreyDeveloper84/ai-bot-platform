@@ -81,7 +81,10 @@ def test_neither_role_sees_a_master_invite_token(
     tenant: Tenant,
     role: str,
 ) -> None:
-    """Экран каталога read-only для всех — значит его форму видят все."""
+    """Заплатка из SECRET_FIELDS снята (DRF-1515), а токен всё равно не
+    виден: маскировка теперь живёт в самом каталоге
+    (``CatalogMasterAdmin.exclude``), и этот тест доказывает именно её,
+    а не обёртку из этого модуля. Экран каталога read-only для всех."""
     token = uuid.uuid4()
     master = CatalogMaster.objects.create(
         tenant=tenant,
