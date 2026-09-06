@@ -59,6 +59,11 @@ class CatalogMasterAdmin(_MirrorAdminBase):
     )
     list_filter = ("tenant", "is_active", "invite_status", "mode", "external_updated_at")  # type: ignore[assignment]
     search_fields = ("name", "specialization", "external_id", "max_handle")
+    # DRF-1515: invite_token — действующий одноразовый ключ привязки мастера
+    # (apps/master_api/auth.py → validate_invite_token). Экран read-only для
+    # всех, значит значение печаталось бы каждому открывшему форму. Поле не
+    # попадает в форму вовсе: показывать его здесь некому и незачем.
+    exclude = ("invite_token",)
 
 
 @admin.register(MasterService)
