@@ -83,6 +83,7 @@ from apps.orchestrator.discovery import (
     execute_catalog_tool,
     has_discovery_criteria,
     reground_specialization,
+    clarifying_question,
     render_no_criteria_clarification,
     rotation_seed,
     split_master_page,
@@ -2289,6 +2290,28 @@ def generate_direct_show_masters_reply(
         # path did not answer the inbound message.
         logger.info("orchestrator.concierge.direct_show_masters.not_claimed trace=%s", trace_id)
         return None
+    # DRF-1531 — один различающий вопрос вместо сортировки неразличимого
+    # (решение владельца §29.2). Стоит ПЕРЕД чтением каталога: ход, который
+    # спрашивает, карточек не рисует вовсе.
+    #
+    # Здесь, а не только на LLM-пути, по той же причине, по которой здесь
+    # стоит ``claims_direct_show_masters``: детерминированная ветка отвечает
+    # на «покажи мастеров по услуге» сама, и если бы вопрос жил только у
+    # соседа, «массаж» получал бы вопрос или список в зависимости от того,
+    # какая из двух дверей открылась. Два экрана в один тап друг от друга не
+    # должны вести себя по-разному — ровно довод DRF-1539.
+    question = clarifying_question(specialization=message_text)
+    if question is not None:
+        logger.info("orchestrator.concierge.direct_show_masters.clarify trace=%s", trace_id)
+        _record_direct_metric(
+            bot_user=bot_user,
+            conversation=conversation,
+            trace_id=trace_id,
+            message_text=message_text,
+            started=started,
+            outcome=AIRequestMetric.OUTCOME_SUCCESS,
+        )
+        return question
     cards, more_offset = split_master_page(
         discover_masters(
             specialization=message_text,

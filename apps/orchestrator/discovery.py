@@ -38,11 +38,13 @@ from uuid import UUID
 
 from apps.llm.router import get_router
 from apps.marketplace.discovery import (
+    clarification_material,
     discover_masters,
     discover_masters_for_service,
     discover_salons,
     discover_services,
     get_salon,
+    parse_query,
     parse_stems,
     query_stems,
     service_coverage,
@@ -208,8 +210,15 @@ def resolve_discover_tap(text: str) -> DiscoverTap | None:
 # decodes, and the same rule as the booking prefix above: the ref is a PUBLIC
 # id the bot itself just rendered, never free text.
 #
-#   cb:catalog:services:{tenant_id}   salon chip  -> that salon's services
-#   cb:catalog:masters:{service_id}   service chip -> who performs it
+#   cb:catalog:services:{tenant_id}            salon chip  -> that salon's services
+#   cb:catalog:masters:{service_id}[:{offset}]  service chip -> who performs it
+#
+# The optional trailing ``{offset}`` on the second one is DRF-1539's «Показать
+# ещё»: the same tap, one page further along. It rides the EXISTING prefix
+# rather than a new verb because it is the same read with the same id, and a
+# second grammar for «show me that again from row five» would be a second
+# place for the two to disagree. A ref without the segment means offset 0, so
+# every button already in the pilot keeps meaning exactly what it meant.
 #
 # The second one lands on ``_render_master_cards``, whose buttons are the
 # booking prefix above — so the chain «какие салоны» -> услуги -> мастер ->
@@ -1068,6 +1077,7 @@ def _render_master_cards(
     available_services: list[str] | None = None,
     missing_services: list[str] | None = None,
     more_offset: int | None = None,
+    more_service_id: UUID | None = None,
 ) -> DiscoveryReply:
     """Render discovered masters as a reply + a one-button-per-card keyboard.
 
@@ -1115,6 +1125,14 @@ def _render_master_cards(
         (:func:`encode_more_ref`), so the candidates past position five stop
         being unreachable. It is deliberately the LAST button: the cards are
         the answer, and «ещё» is what to do if the answer was not enough.
+
+        ``more_service_id`` (DRF-1539) says the page came from a service CHIP
+        rather than from a text query, so the same button has to carry the
+        service id instead of the query — there is no query to re-run. One
+        parameter and not a second renderer: the two pages are the same
+        screen, and a person tapping «Показать ещё» must not be able to tell
+        which door they came through. When it is set, ``more_offset`` still
+        decides WHETHER the button appears; the id only decides what it says.
     """
     if not cards:
         return render_no_match(city=city, specialization=specialization)
@@ -1180,14 +1198,24 @@ def _render_master_cards(
             }
         )
     if more_offset is not None:
-        more_ref = encode_more_ref(offset=more_offset, city=city, specialization=specialization)
-        if more_ref:
+        if more_service_id is not None:
             buttons.append(
                 {
                     "label": SHOW_MORE_LABEL,
-                    "callback": f"{CALLBACK_DISCOVER_MORE_PREFIX}{more_ref}",
+                    "callback": (
+                        f"{CALLBACK_CATALOG_MASTERS_PREFIX}{more_service_id}:{more_offset}"
+                    ),
                 }
             )
+        else:
+            more_ref = encode_more_ref(offset=more_offset, city=city, specialization=specialization)
+            if more_ref:
+                buttons.append(
+                    {
+                        "label": SHOW_MORE_LABEL,
+                        "callback": f"{CALLBACK_DISCOVER_MORE_PREFIX}{more_ref}",
+                    }
+                )
     action_data = {"attachments": [{"type": "inline_keyboard", "payload": {"buttons": buttons}}]}
     return DiscoveryReply(text="\n".join(lines)[:_MAX_REPLY_CHARS], action_data=action_data)
 
@@ -1761,6 +1789,33 @@ def _parse_uuid_ref(callback_text: str, prefix: str) -> UUID | None:
         return None
 
 
+def _parse_service_tap(callback_text: str) -> tuple[UUID, int] | None:
+    """``cb:catalog:masters:{service_id}[:{offset}]`` → ``(id, offset)``.
+
+    ``None`` for anything that is not that — the caller answers with the
+    honest «карточка устарела» line, exactly as :func:`_parse_uuid_ref` does
+    for its siblings. Callback text arrives from the channel and is not
+    trusted to be what we rendered.
+
+    A missing offset segment is offset 0, so every button rendered before
+    DRF-1539 still means what it meant. A NEGATIVE or non-numeric offset is
+    malformed rather than clamped: it can only come from a hand-edited
+    payload, and quietly turning it into page one would answer a request
+    nobody made.
+    """
+    rest = (callback_text[len(CALLBACK_CATALOG_MASTERS_PREFIX) :] or "").strip()
+    head, sep, tail = rest.partition(":")
+    try:
+        service_id = UUID(head)
+    except (ValueError, AttributeError):
+        return None
+    if not sep:
+        return service_id, 0
+    if not tail.isdigit():
+        return None
+    return service_id, int(tail)
+
+
 #: Said when a chip's target no longer exists — the salon went inactive, the
 #: service was deactivated, or the card is simply from an old message. It names
 #: what happened and offers the one move that always works, so the tap still
@@ -1797,8 +1852,16 @@ def show_salons(city: str | None = None, limit: int = _MAX_SALON_CARDS) -> Disco
     return _render_salon_cards(salons, shown=limit, city=city)
 
 
-def execute_catalog_callback(callback_text: str) -> DiscoveryReply | None:
+def execute_catalog_callback(
+    callback_text: str, *, conversation: Any = None
+) -> DiscoveryReply | None:
     """Answer a catalog chip tap from a by-id read (DRF-1304).
+
+    ``conversation`` (DRF-1539) seeds the rotation of the master list behind a
+    service chip, the same way it does on the text path: two taps on the same
+    chip in one dialogue give the same order, two different dialogues start
+    from different people. ``None`` keeps the deterministic ranked order, so
+    no existing caller changes behaviour by not passing it.
 
     Returns ``None`` when ``callback_text`` is not a catalog callback at all,
     so the caller's ladder can keep matching. Everything else — including a
@@ -1835,14 +1898,33 @@ def execute_catalog_callback(callback_text: str) -> DiscoveryReply | None:
         return _render_service_cards(services, shown=_MAX_SERVICE_CARDS, salon=salon.name)
 
     if callback_text.startswith(CALLBACK_CATALOG_MASTERS_PREFIX):
-        service_id = _parse_uuid_ref(callback_text, CALLBACK_CATALOG_MASTERS_PREFIX)
-        if service_id is None:
+        tap = _parse_service_tap(callback_text)
+        if tap is None:
             return render_stale_card()
-        cards = discover_masters_for_service(service_id, limit=_MAX_MASTER_CARDS)
-        logger.info(
-            "orchestrator.discovery.catalog_tap kind=masters count=%d",
-            len(cards),
+        service_id, offset = tap
+        # limit+1 for the same reason every other page on this surface reads
+        # one extra row: «это не всё» must KNOW there is a next page, not
+        # guess it from a list that happens to fill the screen.
+        cards, next_offset = split_master_page(
+            discover_masters_for_service(
+                service_id,
+                limit=_MAX_MASTER_CARDS + 1,
+                offset=offset,
+                rotation_seed=rotation_seed(conversation),
+            ),
+            offset=offset,
+            limit=_MAX_MASTER_CARDS,
         )
+        logger.info(
+            "orchestrator.discovery.catalog_tap kind=masters count=%d offset=%d",
+            len(cards),
+            offset,
+        )
+        if not cards and offset:
+            # A «Показать ещё» that ran off the end — the catalog moved under
+            # an old keyboard. Say that, rather than «записаться не к кому»,
+            # which would claim the service itself is unbookable.
+            return DiscoveryReply(text=SHOW_MORE_STALE_TEXT)
         if not cards:
             # The chip was rendered only for services somebody performed, so
             # this is the race (mapping removed, master left) — not the norm.
@@ -1856,7 +1938,7 @@ def execute_catalog_callback(callback_text: str) -> DiscoveryReply | None:
                 "Посмотрите, что ещё есть в наших салонах.",
                 [show_salons_button()],
             )
-        return _render_master_cards(cards)
+        return _render_master_cards(cards, more_offset=next_offset, more_service_id=service_id)
 
     if callback_text.startswith("cb:catalog:"):
         # A payload of THIS family that no branch above claimed — a slug we
@@ -2376,6 +2458,102 @@ def render_no_criteria_clarification() -> DiscoveryReply:
     return _render_ask_clarification(NO_CRITERIA_QUESTION, [])
 
 
+# ─── DRF-1531: ask ONE question instead of sorting the indistinguishable ────
+#
+# Решение владельца §29.2: «Если разрыв недостаточен, Ayla не изображает
+# уверенность, а задаёт один различающий вопрос, используя реальные названия
+# услуг из каталога».
+#
+# Ниже — только РЕШЕНИЕ спрашивать. Материал (ярус и имена) считает каталог
+# (:func:`apps.marketplace.discovery.clarification_material`), потому что имена
+# обязаны быть строками каталога, а не формулировками модели: этим граница §20
+# укрепляется, а не сдвигается.
+
+#: The question itself. A fixed sentence, and deliberately NOT «Какой массаж?»
+#: built from the query: agreeing «какой / какая / какое» with a service name
+#: needs its grammatical gender, the catalog stores none, and a bot that says
+#: «Какой косметология?» has spent more trust than the question saves. The
+#: NAMES carry the meaning here — they are the whole content of the turn — so
+#: the frame around them can afford to be neutral.
+CLARIFY_SERVICE_QUESTION = "Уточните, пожалуйста, что именно подойдёт:"
+
+
+def clarifying_question(
+    *,
+    city: str | None = None,
+    specialization: str | None = None,
+) -> DiscoveryReply | None:
+    """ONE distinguishing question, or ``None`` to answer with the list.
+
+    ``None`` is the normal outcome and the safe one: every gate below fails
+    towards showing masters, because a list is a partial answer and a question
+    is none at all.
+
+    ### When it asks
+
+    Three conditions, all required.
+
+    **1. The request names at most ONE service word, or names a goal.** This
+    is what carries §7's «один вопрос, не два», and it carries it by
+    construction rather than by remembering: the answer to this question is a
+    catalog NAME, tapped from the keyboard, and a catalog name that is not a
+    single word cannot come back through this gate. «массаж» asks, «спортивный
+    массаж» never does — which is also the paired positive guard DRF-1411 asks
+    for, on the same data, from the other side.
+
+    A goal («хочу расслабиться») parses to no stems at all and is the case the
+    ticket is written around: it is not ranked today, so the tie IS the whole
+    result set — 120 services in alphabetical order. A goal that answers this
+    question comes back as a service name with more than one word, so it too
+    cannot ask twice.
+
+    **2. The top tier reaches** :data:`~django.conf.settings.
+    DISCOVERY_CLARIFY_MIN_TIER` (4). A crude count, on purpose and only for
+    now: §29.2 measures distinguishability properly and that is the NEXT task.
+    The threshold is a setting so that measurement can replace it without
+    touching this logic. Below 2 it disables the question entirely.
+
+    **3. At least two catalog names can be offered**, capped at five (§7,
+    прогрессивное раскрытие; the renderer caps at five too). Fewer than two is
+    not a question — it is the answer, restated as a prompt. Every offered
+    name belongs to a master who is IN that tier, so no chip can lead to an
+    empty list.
+
+    ### What tapping an option does
+
+    Nothing new. :func:`_render_ask_clarification` makes each option its own
+    callback, so a tap re-enters the turn as if the person had typed that
+    service name — the established «tap == typed answer» contract. There is no
+    second mechanism and no pending-question state to keep in sync.
+    """
+    from django.conf import settings
+
+    threshold = int(getattr(settings, "DISCOVERY_CLARIFY_MIN_TIER", 0) or 0)
+    if threshold < 2:
+        return None
+    said = (specialization or "").strip()
+    if not said:
+        return None
+    # ``parse_query`` and not a re-composition of its halves: this gate and
+    # ``clarification_material`` must agree about what the query said, and the
+    # only way to be sure is to call the same function the catalog calls.
+    parsed = parse_query(said)
+    if not parsed.goals and len(parsed.stems) != 1:
+        # Two or more service words is a request that already says which one
+        # («спортивный массаж»); zero without a goal is a city or an
+        # unparseable turn, which this question has nothing to ask about.
+        return None
+    material = clarification_material(city=city, specialization=said)
+    if material.tier < threshold or len(material.options) < 2:
+        return None
+    logger.info(
+        "orchestrator.discovery.clarify tier=%d options=%d",
+        material.tier,
+        len(material.options),
+    )
+    return _render_ask_clarification(CLARIFY_SERVICE_QUESTION, material.options)
+
+
 def requested_services(args: dict[str, Any], specialization: str | None) -> list[str]:
     """The distinct services ONE ``show_masters`` call asked for (DRF-1312).
 
@@ -2571,6 +2749,14 @@ def generate_discovery_reply(
             if not has_discovery_criteria(city, specialization):
                 logger.info("orchestrator.discovery.show_masters.no_criteria trace=%s", trace_id)
                 return render_no_criteria_clarification()
+            # DRF-1531 — BEFORE the page is fetched, because an answer that
+            # asks does not render cards at all. §29.3 forbids the reverse
+            # order too: showing a list and then asking about it would be the
+            # confident tone the owner's decision removes.
+            question = clarifying_question(city=city, specialization=specialization)
+            if question is not None:
+                logger.info("orchestrator.discovery.show_masters.clarify trace=%s", trace_id)
+                return question
             page_size = min(
                 int(limit) if isinstance(limit, int) and limit > 0 else _MAX_MASTER_CARDS,
                 _MAX_MASTER_CARDS,

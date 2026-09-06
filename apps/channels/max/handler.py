@@ -1728,7 +1728,12 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
         # execute_catalog_callback returns a reply for every catalog callback
         # — stale and malformed refs included — so this branch cannot fall
         # through once the prefix matched.
-        reply = execute_catalog_callback(event.text) or DiscoveryReply(text=CATALOG_STALE_CARD_TEXT)
+        # ``conversation`` (DRF-1539) seeds the rotation of the master list
+        # behind a service chip, exactly as it does for «Показать ещё» below:
+        # two taps on one chip in one dialogue must give the same order.
+        reply = execute_catalog_callback(event.text, conversation=conversation) or DiscoveryReply(
+            text=CATALOG_STALE_CARD_TEXT
+        )
         assistant_action_type = "catalog_card"
     elif event.text.startswith(CALLBACK_DISCOVER_MORE_PREFIX):
         # DRF-1532 — «Показать ещё». Sits with the other callback branches and

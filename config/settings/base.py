@@ -747,6 +747,28 @@ NUTRITION_SERVICE_TOKEN = (
 # production flips deliberately, never ad-hoc.
 BOOKING_VIA_AYLA_REST = os.environ.get("BOOKING_VIA_AYLA_REST", "false").lower() == "true"
 
+# DRF-1531 — the size a top TIER of indistinguishable candidates has to reach
+# before Ayla stops sorting it and asks ONE distinguishing question instead
+# (owner decision §29.2). The tier is the set of masters sharing the best
+# match precision; below this many, the ranking told them apart well enough
+# to answer and asking would be asking for its own sake.
+#
+# FOUR, and the number is deliberately crude. §29.2 measures distinguishability
+# properly — the gap between first and second, context completeness, conflicts
+# — and that is a SEPARATE task that comes after this one. Until it lands the
+# threshold is a plain count, named here so the measurement can REPLACE it
+# without rewriting the logic around it.
+#
+# Why four: the paired positive guard is «спортивный массаж», where the ticket
+# reports a top tier of three under the old counter and match precision now
+# cuts it to one. A person who said which massage they want must not be asked
+# again, so the threshold sits above that tier, not on it.
+#
+# 0 (or any value below 2) disables the question entirely — a kill switch that
+# restores the pre-DRF-1531 behaviour without a deploy. Two candidates is the
+# arithmetic floor: a question needs at least two answers.
+DISCOVERY_CLARIFY_MIN_TIER = int(os.environ.get("DISCOVERY_CLARIFY_MIN_TIER", "4"))
+
 # DRF-1111 / DRF-1161 — mirror ↔ canon reconciliation sweep. How many
 # tenant-local days ahead the ``tenants/me/day/`` fan-out reads. Rows
 # beyond the window are excluded on BOTH sides, so the comparison stays
