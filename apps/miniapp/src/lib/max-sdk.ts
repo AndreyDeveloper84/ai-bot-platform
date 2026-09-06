@@ -165,6 +165,12 @@ const _ROUTE_MAP: Record<string, string> = {
   // comment at the /customer/main route) — newer than the onboarding spec's
   // "Dashboard empty state".
   open_home: "/customer/main",
+  // DRF-1491 — главное меню витрины (apps/skills/menu/marketplace.py).
+  // Дневник питания и панель самочувствия: пункты меню есть, а слагов
+  // не было. open_wellness ведёт туда же, куда open_water_add_250, —
+  // старое имя оставлено ради клавиатур в истории чата.
+  open_food_diary: "/customer/food-scanner/diary",
+  open_wellness: "/customer/wellness",
   // Legacy querystring inner-values — kept for cold-start back-compat.
   // Same destinations as the flat slugs above: a stale `route=visits`
   // payload should land on today's records screen, not on a screen the

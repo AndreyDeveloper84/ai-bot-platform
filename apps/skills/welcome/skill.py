@@ -182,6 +182,15 @@ MINIAPP_ROUTES: dict[str, str] = {
     "open_water_add_250": "customer/wellness",
     "open_goal_select": "customer/goal-select",
     "open_home": "customer/main",
+    # DRF-1491 — главное меню витрины (``apps.skills.menu.marketplace``).
+    # Два экрана, у которых слага до сих пор не было: дневник питания и
+    # панель самочувствия. Панель уже достижима через
+    # ``open_water_add_250``, но под тем именем, под которым её нельзя
+    # предложить в меню — «+ стакан воды» это не «самочувствие»; строка
+    # не переименована, потому что старые клавиатуры в истории чата
+    # продолжают её слать.
+    "open_food_diary": "customer/food-scanner/diary",
+    "open_wellness": "customer/wellness",
 }
 
 

@@ -118,6 +118,7 @@ from apps.channels.max.quick_actions import (
     ai_unavailable_action_data,
     first_contact_action_data,
     is_stale_tap,
+    looks_like_callback_payload,
     resolve_tap_text,
 )
 from apps.orchestrator.llm.templates import get_fallback
@@ -203,6 +204,16 @@ from apps.orchestrator.turn_seam import (
     turn_reply_to_skill_result,
 )
 from apps.skills.booking.lookup import is_personal_booking_lookup
+from apps.skills.menu.marketplace import (
+    FALLBACK_ACTION_TYPE,
+    HEALTH_DECLINE_ACTION_TYPE,
+    HEALTH_REQUEST_ACTION_TYPE,
+    MENU_ACTION_TYPE,
+    is_health_callback,
+    marketplace_fallback_reply,
+    marketplace_menu_reply,
+    matches_menu_request,
+)
 from apps.tools.idempotency import AlreadyClaimed, with_idempotency
 
 logger = logging.getLogger(__name__)
@@ -942,6 +953,92 @@ def handle_max_event(payload: dict, trace_id: str | uuid.UUID | None = None) -> 
         return
 
 
+def _health_already_declined(conversation: Any) -> bool:
+    """Отказывался ли человек от согласия на медданные В ЭТОМ диалоге.
+
+    Читается таблица сообщений, а не короткая память: у короткой памяти
+    TTL, а «тот же диалог» (канон 2.5 «без понуканий», 2.6 «автономия
+    клиента абсолютна») живёт дольше её окна — иначе достаточно было бы
+    подождать час, чтобы бот спросил ещё раз.
+
+    ``all_tenants`` — потому что глобальный диалог лежит под sentinel-
+    тенантом, а вызов идёт вне ``tenant_scope``.
+
+    Fail-safe в сторону «спрашивали»: сбой чтения не должен превратиться
+    в повторный запрос согласия. Цена ошибки несимметрична — лишний
+    отказ показать экран человек переживёт, повторное выпрашивание
+    медданных нарушает решение владельца.
+    """
+    from apps.conversations.models import Message
+
+    try:
+        return Message.all_tenants.filter(
+            conversation=conversation,
+            action_type=HEALTH_DECLINE_ACTION_TYPE,
+        ).exists()
+    except Exception:  # noqa: BLE001 — сомнение толкуется в пользу «не спрашивать»
+        logger.exception(
+            "channels.max.global.health_decline_lookup_failed conversation=%s",
+            getattr(conversation, "id", None),
+        )
+        return True
+
+
+def _route_health_callback(
+    *, callback_text: str, bot_user: Any, conversation: Any
+) -> tuple[DiscoveryReply, str]:
+    """Тап семейства ``cb:health:`` — ответ и его ``action_type``.
+
+    Три исхода, и ни один из них не молчание:
+
+    * «Не сейчас» — возврат в меню плюс отметка отказа. Отметка и есть
+      механизм «повторного запроса в том же диалоге нет»: она читается
+      :func:`_health_already_declined`.
+    * пищевой пункт, отказа ещё не было — экран ЗАПРОСА согласия
+      (§25 п.6: «видит и попадает на запрос согласия»).
+    * пищевой пункт после отказа — объяснение без кнопок согласия. Не
+      запрос: спрашивать второй раз нельзя, а ответить нечем — значит
+      вернуть мёртвую кнопку, которую тот же пункт решения запрещает.
+
+    Неизвестный слаг семейства (снятый пункт из истории чата) попадает в
+    последнюю ветку и отвечает меню — тем же правилом, по которому
+    ``resolve_tap_text`` переводит снятый ``cb:menu:*`` в «Что ты
+    умеешь?»: чем кнопка была, восстановить нечем, но ход терять нельзя.
+    """
+    from apps.skills.menu.marketplace import (
+        CALLBACK_HEALTH_DECLINE,
+        HEALTH_DECLINED_EARLIER_TEXT,
+        HEALTH_DECLINED_TEXT,
+        HEALTH_REQUEST_TEXT,
+        health_need_surface,
+        health_request_action_data,
+    )
+
+    stripped = (callback_text or "").strip()
+    if stripped == CALLBACK_HEALTH_DECLINE:
+        _, menu_data = marketplace_menu_reply(bot_user=bot_user)
+        return (
+            DiscoveryReply(text=HEALTH_DECLINED_TEXT, action_data=menu_data),
+            HEALTH_DECLINE_ACTION_TYPE,
+        )
+
+    surface = health_need_surface(stripped)
+    if surface is not None and not _health_already_declined(conversation):
+        logger.info(
+            "channels.max.global.health_consent_requested surface=%s bot_user=%s",
+            surface,
+            getattr(bot_user, "id", None),
+        )
+        return (
+            DiscoveryReply(text=HEALTH_REQUEST_TEXT, action_data=health_request_action_data()),
+            HEALTH_REQUEST_ACTION_TYPE,
+        )
+
+    menu_text, menu_data = marketplace_menu_reply(bot_user=bot_user)
+    text = HEALTH_DECLINED_EARLIER_TEXT if surface is not None else menu_text
+    return DiscoveryReply(text=text, action_data=menu_data), MENU_ACTION_TYPE
+
+
 def handle_global_max_event(payload: dict, trace_id: str | uuid.UUID | None = None) -> None:
     """Process one MAX webhook for the nationwide GLOBAL (tenant-less) bot.
 
@@ -1513,6 +1610,33 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
             outcome=AIRequestMetric.OUTCOME_SUCCESS,
             skill_selected=assistant_action_type,
         )
+    elif is_health_callback(event.text):
+        # DRF-1491 / §25 п.6 — тап по пищевому пункту меню, на который нет
+        # согласия ``HEALTH``, и «Не сейчас» на экране запроса.
+        #
+        # Стоит здесь, среди колбэковых веток и ВЫШЕ приветствия, по
+        # правилу ``_PASSTHROUGH_CALLBACK_PREFIXES``: тап по кнопке,
+        # которую бот сам нарисовал, обязан дойти до ответа, а не быть
+        # проглоченным приветствием или отданным модели сырым.
+        #
+        # Своё семейство, а не ``cb:menu:``, потому что ``resolve_tap_text``
+        # переводит весь ``cb:menu:*`` в фразу ВЫШЕ лестницы: пищевой
+        # пункт превратился бы в «Что ты умеешь?» и запроса согласия
+        # человек не увидел бы никогда.
+        reply, assistant_action_type = _route_health_callback(
+            callback_text=event.text,
+            bot_user=bot_user,
+            conversation=conversation,
+        )
+        _record_live_path_metric(
+            bot_user=bot_user,
+            conversation=conversation,
+            trace_id=trace_id,
+            message_text=event.text,
+            t_start=t_start,
+            outcome=AIRequestMetric.OUTCOME_SUCCESS,
+            skill_selected=assistant_action_type,
+        )
     elif is_personal_booking_lookup(event.text):
         # DRF-1032: the answer now comes from the Ayla backend, not from the
         # local mirror — a mirror row can outlive the booking it mirrors
@@ -1543,6 +1667,37 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
             t_start=t_start,
             outcome=AIRequestMetric.OUTCOME_SUCCESS,
             skill_selected="onboarding",
+        )
+    elif matches_menu_request(event.text):
+        # DRF-1491 / §25 п.1-п.2 — «что ты умеешь», «помощь», «меню».
+        #
+        # До сих пор эти слова уезжали к консьержу и возвращались прозой
+        # без единой кнопки: реестр навыков, где живут ``HELP_TEXT`` и
+        # клавиатура, диспетчеризуется только на арендаторском пути, а
+        # пилот работает на глобальном боте. Владелец: «отвечаем меню, а
+        # не свободной прозой».
+        #
+        # Ниже приветствия НАМЕРЕННО: новичок с ``welcomed_at IS NULL``
+        # должен получить экран первого контакта C01, а не оглавление, —
+        # ``needs_onboarding`` забирает его ход выше. Ниже поиска записей
+        # и передачи человеку: «покажи мои записи» и «оператор» — это
+        # конкретные просьбы, оглавление их не заменяет.
+        #
+        # Матчер закрытый и по ЦЕЛОМУ сообщению
+        # (``marketplace.matches_menu_request``), поэтому ветка не может
+        # отобрать ход у консьержа: «помоги выбрать массаж» сюда не
+        # попадает.
+        menu_text, menu_data = marketplace_menu_reply(bot_user=bot_user)
+        reply = DiscoveryReply(text=menu_text, action_data=menu_data)
+        assistant_action_type = MENU_ACTION_TYPE
+        _record_live_path_metric(
+            bot_user=bot_user,
+            conversation=conversation,
+            trace_id=trace_id,
+            message_text=event.text,
+            t_start=t_start,
+            outcome=AIRequestMetric.OUTCOME_SUCCESS,
+            skill_selected=MENU_ACTION_TYPE,
         )
     elif clarify_outcome is not None:
         # DRF-1362 — a multi-select redraw or its close. Sits with the other
@@ -1725,6 +1880,38 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
                         action_data=nutrition_result.action_data,
                     )
                     assistant_action_type = nutrition_result.action_type or "nutrition_skill"
+                elif looks_like_callback_payload(event.text):
+                    # DRF-1491 — ветка «не поняла» глобального пути.
+                    #
+                    # Досюда доживает ровно то, что комментарий у вызова
+                    # консьержа ниже описывает как «тап, у которого ветки
+                    # нет»: нераспознанный ``cb:anketa:`` / ``cb:food:``
+                    # правильной формы и глагол ``cb:discover:``, кроме
+                    # ``book:``. До сих пор такой ход уезжал в модель СЫРЫМ
+                    # payload'ом — ровно тот дефект, который DRF-1051 чинил
+                    # для ``cb:menu:`` и ``cb:qa:``, но для остальных
+                    # семейств оставил.
+                    #
+                    # Салонный путь на нераспознанный ход отвечает честным
+                    # «я пока не понял» с клавиатурой
+                    # (``menu.replies.FALLBACK_TEXT``); у витрины такой
+                    # ветки не существовало вовсе. Здесь она и появляется —
+                    # со СВОИМ текстом: салонный назван «Формулой тела» и
+                    # перечисляет услуги одного салона.
+                    fallback_text, fallback_data = marketplace_fallback_reply(bot_user=bot_user)
+                    reply = DiscoveryReply(text=fallback_text, action_data=fallback_data)
+                    assistant_action_type = FALLBACK_ACTION_TYPE
+                    logger.info("channels.max.global.unclaimed_callback bot_user=%s", bot_user.id)
+                    _record_live_path_metric(
+                        bot_user=bot_user,
+                        conversation=conversation,
+                        trace_id=trace_id,
+                        message_text=event.text,
+                        t_start=t_start,
+                        outcome=AIRequestMetric.OUTCOME_FALLBACK,
+                        skill_selected=FALLBACK_ACTION_TYPE,
+                        fallback_triggered=True,
+                    )
                 else:
                     # Memory surfacing (M-C1 / #1101): inject the user's GREEN memory into
                     # the discovery prompt. Best-effort: these DB reads run BEFORE the reply
@@ -1884,6 +2071,35 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
                         # памяти (W5) на этом ходу не нужны: первое — ещё один
                         # вызов той же недоступной модели, второе — вопрос
                         # поверх извинения. Ход не состоялся.
+                    elif not (turn_reply.reply_text or "").strip():
+                        # DRF-1491, вторая половина ветки «не поняла».
+                        #
+                        # Модель ответила — но ничем. Флаг ``outage`` при
+                        # этом не стоит (до модели дошли), поэтому соседняя
+                        # ветка сюда не годится, а «Повторить» было бы
+                        # враньём: ход состоялся. До сих пор пустая строка
+                        # уезжала в ``send_message`` как есть, и человек
+                        # видел от бота пустоту — худший из тупиков.
+                        #
+                        # Отвечаем тем же экраном, что и нераспознанному
+                        # тапу: человеку, оставшемуся без ответа, нужен не
+                        # разбор причины, а список того, что сработает.
+                        logger.warning(
+                            "channels.max.global.empty_concierge_reply bot_user=%s trace=%s",
+                            bot_user.id,
+                            trace_id,
+                        )
+                        fallback_text, fallback_data = marketplace_fallback_reply(bot_user=bot_user)
+                        # ``persisted=False``, а не то, что сказал шов:
+                        # человек прочитал ЭТОТ текст, и в переписке должен
+                        # стоять он. Если консьерж свою пустую строку уже
+                        # записал, рядом появится вторая — что честнее, чем
+                        # переписка, в которой ответа нет вовсе.
+                        reply = DiscoveryReply(
+                            text=fallback_text,
+                            action_data=fallback_data,
+                        )
+                        assistant_action_type = FALLBACK_ACTION_TYPE
                     else:
                         reply = DiscoveryReply(
                             text=turn_reply.reply_text,
