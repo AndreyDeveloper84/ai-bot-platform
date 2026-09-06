@@ -49,11 +49,28 @@ second call returns the EXISTING row (200, not 201) with header
 twice in 5 seconds (network glitch) does NOT get two PENDING rows in
 the roster.
 
-Cancelled or accepted invites do NOT block a fresh invite — the
-contact may have been re-hired or the previous invite mis-sent.
-Expired invites also DON'T block: re-issuing intentionally creates a
-new PENDING row (the old one stays around as historical audit; the new
-token is what gets dispatched).
+DRF-1507 — «повторно приглашённый» больше не означает «вторая
+строка». Формулировка выше («re-issuing intentionally creates a new
+PENDING row») описывала поведение до этой правки и была верна ровно до
+неё:
+
+* приглашение того же человека с ПРОТУХШИМ или отменённым токеном
+  перевыпускается **на существующей строке** — свежий токен, свежие
+  семь дней, тот же ``master_id``. Владелец получает рабочую ссылку,
+  мастер по ней доходит до кабинета; растёт число приглашений, а не
+  число мастеров в ростере;
+* приглашение человека, который в салон уже приземлился, отвечает 200
+  ``X-Idempotent`` его же строкой и НЕ выписывает второго токена: этот
+  токен всё равно привёл бы к сессии первой строки (``onboarding_accept``,
+  идемпотентная проба), а выписанная строка осталась бы PENDING навсегда;
+* «тот же человек» определяется по нормализованному MAX-хэндлу
+  (:mod:`apps.catalog.handles`) или по ``raw["invite_phone"]``. До
+  нормализации ``anna_styl`` и ``@anna_styl`` были разными людьми, и
+  вторая строка появлялась просто оттого, что владелец в этот раз не
+  поставил собаку.
+
+Ограничения уникальности на ``max_handle`` при этом НЕТ — почему,
+написано в ``apps/catalog/models.py`` над ``constraints``.
 
 ### Side effects (all inside one transaction.atomic)
 
@@ -98,7 +115,8 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from django.conf import settings
-from django.db import transaction
+from django.db import IntegrityError, transaction
+from django.db.models import Max
 from django.http import HttpRequest, HttpResponse, JsonResponse
 from django.utils import timezone
 from django.views.decorators.csrf import csrf_exempt
@@ -107,6 +125,7 @@ from django.views.decorators.http import require_http_methods
 from apps.admin_api.auth import RoleContext, require_admin_role
 from apps.audit.services import write_audit
 from apps.catalog.provenance import MasterServiceSource, master_service_write
+from apps.catalog.handles import canonical_handle, normalize_handle
 from apps.catalog.models import CatalogMaster, CatalogService, MasterService
 from apps.channels.bot_context import current_bot
 from apps.channels.max import outbound as max_outbound
@@ -119,6 +138,23 @@ logger = logging.getLogger(__name__)
 
 
 INVITE_TTL_DAYS = 7
+
+INVITE_EXTERNAL_ID_FLOOR = 1_000_000
+"""Начало диапазона синтетических ``external_id`` для приглашённых мастеров.
+
+``external_id`` у синхронизированных строк принадлежит Ayla; приглашение
+своего номера от Ayla не получает и обязано его выдумать, не заняв чужой.
+Миллион — граница, ниже которой номера Ayla, выше — наши.
+"""
+
+EXTERNAL_ID_MAX_ATTEMPTS = 5
+"""Сколько раз повторить вставку, проигравшую гонку за ``external_id``.
+
+Пять, а не один: столько же одновременных приглашений в ОДНОМ салоне
+должно совпасть по секунде, чтобы исчерпать попытки. Не бесконечность —
+неснимаемый ``IntegrityError`` (например, по другому ограничению) обязан
+закончиться ответом, а не циклом внутри запроса.
+"""
 """Q-MM2 lock — invite tokens expire 7 days after issuance."""
 
 DEFAULT_SITE_DOMAIN = "http://localhost:5173"
@@ -524,9 +560,20 @@ def _seed_services(
 
     if not service_ids:
         return
-    rows = [
-        MasterService(tenant_id=tenant_id, master=master, service_id=sid) for sid in service_ids
-    ]
+    # DRF-1507 — приглашение теперь умеет перевыпускаться на существующей
+    # строке, и на ней часть услуг уже есть. ``bulk_create`` без этого
+    # фильтра положил бы вторую копию каждой связки: у ``MasterService``
+    # нет ограничения уникальности по ``(master, service)``, так что
+    # дубль был бы не отказом, а тихой парой одинаковых строк.
+    already = set(
+        MasterService.all_tenants.filter(master=master, service_id__in=service_ids).values_list(
+            "service_id", flat=True
+        )
+    )
+    missing = [sid for sid in service_ids if sid not in already]
+    if not missing:
+        return
+    rows = [MasterService(tenant_id=tenant_id, master=master, service_id=sid) for sid in missing]
     with master_service_write(MasterServiceSource.INVITE_SEED, actor_id=actor_id):
         MasterService.all_tenants.bulk_create(rows)
 
@@ -781,19 +828,153 @@ def _response_payload(
     }
 
 
+def _contact_matches(master: CatalogMaster, *, contact_method: str, contact_value: str) -> bool:
+    """Тот ли это человек, которого сейчас приглашают.
+
+    Для ``max_username`` сравнение идёт по нормализованному хэндлу
+    (:func:`apps.catalog.handles.normalize_handle`), а не по сырой строке.
+    До DRF-1507 сравнивалось сырое: владелец, набравший во второй раз
+    ``anna_styl`` вместо ``@anna_styl``, получал вторую строку на того же
+    мастера — и это выглядело как «идемпотентность не сработала», хотя
+    сработала ровно так, как написана.
+
+    Для ``max_phone`` ключ лежит в ``raw["invite_phone"]``: колонки
+    телефона у ``CatalogMaster`` нет (пробел назван в докстринге модуля).
+    Телефон сравнивается как есть — его нормализацию делает валидатор
+    тела запроса, и придумывать здесь вторую значило бы завести два
+    разных представления одного номера.
+    """
+
+    if contact_method == "max_username":
+        key = normalize_handle(contact_value)
+        return bool(key) and normalize_handle(master.max_handle) == key
+    return bool(contact_value) and (master.raw or {}).get("invite_phone") == contact_value
+
+
+def _is_superseded(master: CatalogMaster) -> bool:
+    """Строка, погашенная приземлением в другую строку того же человека.
+
+    Ставит метку ``apps/master_api/views.py::_land_on_glue_row``. Такая
+    строка — надгробие: переиспользовать её нельзя, иначе приглашение
+    поедет в отменённую половину склейки.
+    """
+
+    return bool((master.raw or {}).get("superseded_by_master_id"))
+
+
+def _person_rows(
+    *,
+    tenant_id: uuid.UUID,
+    contact_method: str,
+    contact_value: str,
+) -> list[CatalogMaster]:
+    """Все строки этого салона, относящиеся к приглашаемому человеку.
+
+    Выборка сужается в базе настолько, насколько ключ это позволяет, а
+    нормализованное сравнение доделывается в Python: индекса по
+    ``lower(ltrim(max_handle, '@'))`` нет и ради салона на десятки строк
+    он не нужен. Порядок — стабильный, чтобы выбор строки не зависел от
+    того, как база решила вернуть страницу.
+    """
+
+    qs = CatalogMaster.all_tenants.filter(tenant_id=tenant_id)
+    if contact_method == "max_username":
+        qs = qs.exclude(max_handle="")
+    else:
+        qs = qs.filter(raw__invite_phone=contact_value)
+    rows = [
+        m
+        for m in qs.order_by("invited_at", "external_id")
+        if _contact_matches(m, contact_method=contact_method, contact_value=contact_value)
+    ]
+    return [m for m in rows if not _is_superseded(m)]
+
+
+def _already_a_master(rows: list[CatalogMaster]) -> CatalogMaster | None:
+    """Строка, в которую этот человек уже приземлился.
+
+    Приглашать её повторно нечем: ``linked_bot_user`` стоит, доступ у
+    мастера есть, а второй токен на того же человека — это ровно вторая
+    строка, которую задача и запрещает.
+
+    Признак ровно один — ``linked_bot_user``. НЕ ``invite_status ==
+    ACCEPTED``: этот статус по умолчанию стоит и у синхронизированных
+    строк, и у зеркал ``mode=catalog_only`` (см. ``help_text`` поля —
+    иначе они не были бы записываемыми). За ними человека в боте нет, и
+    считать их «уже приземлившимися» значило бы отказать владельцу в
+    приглашении мастера, которого он видит в каталоге.
+    """
+
+    for master in rows:
+        if master.linked_bot_user_id is not None:
+            return master
+    return None
+
+
+def _reusable_row(rows: list[CatalogMaster]) -> CatalogMaster | None:
+    """Строка, на которой можно перевыпустить приглашение.
+
+    DRF-1507 — половина «писателя» ключа ``(tenant, max_handle)``.
+
+    Было: ``master_invite_create`` на протухшем приглашении заводил ВТОРУЮ
+    строку с тем же ``max_handle`` намеренно, и это было закреплено тестом
+    ``test_expired_invite_creates_new_row`` («Now 2 rows in catalog»).
+    Поведение для человека при этом правильное — повторное приглашение
+    должно работать; неправильным был способ: новая строка вместо нового
+    токена на старой. Через неделю неотвеченных приглашений салон получал
+    столько же фантомов в ростере, сколько раз владелец нажал «Пригласить
+    ещё раз», и ``resolve_master`` выбирал из них по случайному признаку.
+
+    Стало: перевыпуск на существующей строке. Пользовательское поведение
+    сохранено дословно — владелец получает рабочую ссылку, мастер по ней
+    доходит до кабинета; изменилось только то, что строка остаётся одна.
+
+    Отбор узкий намеренно: перевыпуск допустим только на строке, которую
+    завёл этот же путь и которая никого в бот не пустила —
+    ``mode=invite``, ``linked_bot_user`` пуст, приглашение не принято.
+
+    Что сюда НЕ попадает и почему:
+
+    * ``linked_bot_user`` стоит — человек уже в салоне, случай выше;
+    * ``mode=catalog_only`` — зеркало каталога, а не приглашение;
+      перевыпуск на нём подменил бы смысл строки;
+    * ``invite_status=ACCEPTED`` без связи — так выглядит СИНХРОНИЗИРОВАННАЯ
+      строка. Перевести её в ``PENDING`` значило бы вынуть работающего
+      мастера из записи (``booking/services/create.py`` требует ACCEPTED)
+      на всё время, пока он не откроет ссылку. Приглашение такого мастера
+      по-прежнему заводит свою строку; сводит их приземление
+      (``master_api/views.py::_land_on_glue_row``), когда становится
+      известен ``ayla_user_id``.
+    """
+
+    for master in rows:
+        if master.linked_bot_user_id is not None:
+            continue
+        if master.mode != CatalogMaster.Mode.INVITE:
+            continue
+        if master.invite_status == CatalogMaster.InviteStatus.ACCEPTED:
+            continue
+        return master
+    return None
+
+
 def _idempotency_lookup(
     *,
     tenant_id: uuid.UUID,
     name: str,
     contact_value: str,
+    contact_method: str,
 ) -> CatalogMaster | None:
     """Find an existing PENDING invite within the 7-day TTL window.
 
-    Idempotency key = ``(tenant, name, contact_value, status=PENDING,
-    invite_expires_at > now())``. We match on ``max_handle`` because
-    that's where ``max_username`` contact_values are stored. For
-    ``max_phone`` we also match via ``raw["invite_phone"]`` (set when
-    the original row was created).
+    Idempotency key = ``(tenant, name, contact, status=PENDING,
+    invite_expires_at > now())`` — «владелец нажал дважды за пять
+    секунд», и ответ обязан быть тем же самым, включая тот же токен.
+
+    Отличается от :func:`_reusable_row` тем, что здесь НИЧЕГО не пишется:
+    живое приглашение возвращается как есть, с прежним токеном и прежним
+    сроком. Перевыпуск — соседний случай, и он не должен молча сбрасывать
+    отсчёт семи дней у приглашения, которое ещё действует.
 
     Two rows with the same key but different ``contact_method`` are
     treated as separate invites — re-sending via phone after a
@@ -801,18 +982,120 @@ def _idempotency_lookup(
     """
 
     now = timezone.now()
-    qs = CatalogMaster.all_tenants.filter(
+    candidates = CatalogMaster.all_tenants.filter(
         tenant_id=tenant_id,
         name=name,
         invite_status=CatalogMaster.InviteStatus.PENDING,
         invite_expires_at__gt=now,
+    ).order_by("invited_at", "external_id")
+    for master in candidates:
+        if _is_superseded(master):
+            continue
+        if _contact_matches(master, contact_method=contact_method, contact_value=contact_value):
+            return master
+    return None
+
+
+def _next_external_id(tenant_id: uuid.UUID) -> int:
+    """Следующий синтетический ``external_id`` для этого салона.
+
+    DRF-1507, пункт 3 — разрыв Р7.
+
+    Было: ``count(мастеров тенанта) + 1_000_000``. Два одновременных
+    приглашения в одном салоне считают одно и то же число, вторая вставка
+    ловит ``unique_together (tenant, external_id)``, и вид ловил её общим
+    ``except Exception`` — **500 без ретрая**. Хуже: ``count()`` даёт
+    одинаковый результат и НЕ одновременно — достаточно удалить строку,
+    чтобы следующий номер совпал с уже занятым.
+
+    Стало: ``max`` по нашему же диапазону плюс один, и повтор вставки в
+    :func:`master_invite_create`. Уникальность по-прежнему держит база —
+    ограничение ``unique_together (tenant, external_id)`` не менялось;
+    убран источник гарантированного столкновения и добавлен ответ на
+    столкновение случайное.
+
+    ``max`` берётся только по диапазону ``>= INVITE_EXTERNAL_ID_FLOOR``:
+    номера синхронизированных строк принадлежат Ayla, и втягивать их в
+    свою нумерацию значило бы уезжать вверх на чужой рост.
+    """
+
+    highest = CatalogMaster.all_tenants.filter(
+        tenant_id=tenant_id,
+        external_id__gte=INVITE_EXTERNAL_ID_FLOOR,
+    ).aggregate(top=Max("external_id"))["top"]
+    if highest is None:
+        return INVITE_EXTERNAL_ID_FLOOR
+    return int(highest) + 1
+
+
+def _reissue_invite(
+    *,
+    master: CatalogMaster,
+    name: str,
+    max_handle: str,
+    raw: dict[str, Any],
+    mode: str,
+    token: uuid.UUID | None,
+    expires,
+    invite_status: str,
+    now,
+) -> CatalogMaster:
+    """Выписать новое приглашение НА СУЩЕСТВУЮЩУЮ строку.
+
+    DRF-1507 — писатель ключа ``(tenant, max_handle)``.
+
+    Пользовательское поведение сохраняется дословно: владелец получает
+    свежий токен и рабочую ссылку, мастер по ней доходит до кабинета.
+    Меняется только то, что строка остаётся одна — вместо второй с тем же
+    ``max_handle``, которую заводил старый путь.
+
+    ``is_active`` не трогается сознательно: строка, на которую
+    перевыпускают, доступа не имела (``linked_bot_user`` пуст — это
+    условие отбора в :func:`_reusable_row`), а значит уже неактивна;
+    решение о том, кто и когда её включает, живёт в DRF-1521 и здесь ему
+    не место.
+
+    ``external_id`` не трогается: он уже занят этой строкой, и менять
+    номер существующего мастера значит ломать ключ, по которому его
+    находит всё остальное.
+
+    ``raw`` сливается, а не заменяется: там могут лежать поля,
+    поставленные не этим путём (``invite_phone`` предыдущего
+    приглашения, диагностика). Ключи нового приглашения перекрывают
+    старые, остальное остаётся.
+    """
+
+    master.name = name
+    master.mode = CatalogMaster.Mode(mode)
+    master.invite_status = invite_status
+    master.invite_token = token
+    master.invite_expires_at = expires
+    master.invited_at = now if token is not None else master.invited_at
+    master.external_updated_at = now
+    if max_handle:
+        master.max_handle = max_handle
+    master.raw = {**(master.raw or {}), **raw}
+    master.save(
+        update_fields=[
+            "name",
+            "mode",
+            "invite_status",
+            "invite_token",
+            "invite_expires_at",
+            "invited_at",
+            "external_updated_at",
+            "max_handle",
+            "raw",
+        ]
     )
-    by_handle = qs.filter(max_handle=contact_value).first()
-    if by_handle is not None:
-        return by_handle
-    # Phone-stored case — `raw["invite_phone"]`. SQLite (test) accepts
-    # the JSON lookup the same as Postgres.
-    return qs.filter(raw__invite_phone=contact_value).first()
+    logger.info(
+        "admin_api.invite.reissued tenant=%s master_id=%s — повторное "
+        "приглашение выписано на существующую строку, вторая не заведена "
+        "(DRF-1507).",
+        master.tenant_id,
+        master.id,
+    )
+    return master
 
 
 # --- POST /api/v1/admin/masters/invite ------------------------------------
@@ -853,8 +1136,14 @@ def master_invite_create(request: HttpRequest) -> HttpResponse:
     # ``catalog_only`` row has no token + carries different semantics
     # (the spec allows multiple "catalog-only mirror" rows per same
     # name); we skip idempotency lookup for it.
+    reused: CatalogMaster | None = None
     if mode == "invite":
-        existing = _idempotency_lookup(tenant_id=tenant.id, name=name, contact_value=contact_value)
+        existing = _idempotency_lookup(
+            tenant_id=tenant.id,
+            name=name,
+            contact_value=contact_value,
+            contact_method=contact_method,
+        )
         if existing is not None:
             delivery, delivery_error = _last_dispatch_outcome(existing)
             payload = _response_payload(
@@ -867,9 +1156,49 @@ def master_invite_create(request: HttpRequest) -> HttpResponse:
             response["X-Idempotent"] = "true"
             return response
 
+        # DRF-1507 — «один человек, одна строка» держит писатель.
+        #
+        # Живого приглашения нет, но человек в салоне может уже быть: с
+        # протухшим приглашением, с отклонённым, или уже приземлившийся.
+        # До этой правки все три случая давали ВТОРУЮ строку с тем же
+        # ``max_handle``, и ростер салона распухал ровно на число нажатий
+        # «Пригласить ещё раз».
+        rows = _person_rows(
+            tenant_id=tenant.id,
+            contact_method=contact_method,
+            contact_value=contact_value,
+        )
+        landed = _already_a_master(rows)
+        if landed is not None:
+            # Мастер уже в салоне и уже с доступом. Выписывать второй
+            # токен не на что: ``onboarding_accept`` вернёт ему сессию
+            # ЭТОЙ строки (идемпотентная проба), а выписанная вторая
+            # осталась бы PENDING навсегда — фантом из разрыва Р5.
+            # ``invite_token`` у неё пуст, поэтому ответ честно несёт
+            # ``null`` вместо ссылки: посылать нечего.
+            logger.info(
+                "admin_api.invite.already_a_master tenant=%s master_id=%s "
+                "contact_method=%s — повторное приглашение сведено в "
+                "существующую строку вместо второй (DRF-1507).",
+                tenant.id,
+                landed.id,
+                contact_method,
+            )
+            delivery, delivery_error = _last_dispatch_outcome(landed)
+            payload = _response_payload(
+                landed,
+                tenant=tenant,
+                dispatch_delivery=delivery,
+                dispatch_error=delivery_error,
+            )
+            response = JsonResponse(payload, status=200)
+            response["X-Idempotent"] = "true"
+            return response
+
+        reused = _reusable_row(rows)
+
     now = timezone.now()
     expires_at = now + timedelta(days=INVITE_TTL_DAYS)
-    next_external_id = CatalogMaster.all_tenants.filter(tenant=tenant).count() + 1_000_000
 
     # Build the master row. ``max_handle`` carries the value for
     # ``max_username`` contact_method; for ``max_phone`` we stash the
@@ -879,7 +1208,10 @@ def master_invite_create(request: HttpRequest) -> HttpResponse:
     raw: dict[str, Any] = {}
     max_handle = ""
     if contact_method == "max_username":
-        max_handle = contact_value
+        # ``canonical_handle`` — форма хранения, одна на обоих писателей
+        # (DRF-1507). Раньше сюда клалось дословно набранное владельцем,
+        # и «anna_styl» со «@anna_styl» были разными людьми для проб выше.
+        max_handle = canonical_handle(contact_value)
     elif contact_method == "max_phone":
         raw["invite_phone"] = contact_value
 
@@ -890,72 +1222,118 @@ def master_invite_create(request: HttpRequest) -> HttpResponse:
         CatalogMaster.InviteStatus.PENDING if issue_token else CatalogMaster.InviteStatus.ACCEPTED
     )
 
-    try:
-        with transaction.atomic():
-            master = CatalogMaster.all_tenants.create(
-                tenant=tenant,
-                external_id=next_external_id,
-                external_updated_at=now,
-                name=name,
-                is_active=False,
-                invite_status=invite_status,
-                invite_token=token,
-                invite_expires_at=expires,
-                invited_at=now if issue_token else None,
-                max_handle=max_handle,
-                mode=CatalogMaster.Mode(mode),
-                raw=raw,
-            )
+    # DRF-1507, пункт 3 — вставка повторяется, а не падает 500.
+    #
+    # ``_next_external_id`` больше не даёт гарантированного столкновения,
+    # но два запроса, прочитавшие ``max`` до вставки друг друга, всё ещё
+    # получат одно число: гонку нельзя убрать чтением, её можно только
+    # разрешить. Уникальность держит база (``unique_together (tenant,
+    # external_id)``), а здесь — ответ на её срабатывание: пересчитать и
+    # повторить. Каждая попытка в своём ``atomic``: транзакция, поймавшая
+    # ``IntegrityError``, дальше непригодна, и повтор внутри неё был бы
+    # вторым отказом на том же месте.
+    master: CatalogMaster | None = None
+    for attempt in range(EXTERNAL_ID_MAX_ATTEMPTS):
+        try:
+            with transaction.atomic():
+                if reused is not None:
+                    master = _reissue_invite(
+                        master=reused,
+                        name=name,
+                        max_handle=max_handle,
+                        raw=raw,
+                        mode=mode,
+                        token=token,
+                        expires=expires,
+                        invite_status=invite_status,
+                        now=now,
+                    )
+                else:
+                    master = CatalogMaster.all_tenants.create(
+                        tenant=tenant,
+                        external_id=_next_external_id(tenant.id),
+                        external_updated_at=now,
+                        name=name,
+                        is_active=False,
+                        invite_status=invite_status,
+                        invite_token=token,
+                        invite_expires_at=expires,
+                        invited_at=now if issue_token else None,
+                        max_handle=max_handle,
+                        mode=CatalogMaster.Mode(mode),
+                        raw=raw,
+                    )
 
-            # DRF-1062: no working-hours seeding here any more.
-            #
-            # This branch manufactured the 10:00-19:00 stub that all four
-            # pilot masters now carry — a schedule the salon never set,
-            # indistinguishable from one it did. Worse, `apps.scheduling`
-            # is not what serves slots: with BOOKING_VIA_AYLA_REST the
-            # backend answers, so the rows shaped nothing except the
-            # summary line in the master card.
-            #
-            # `schedule_preset` stays in the invite contract on purpose —
-            # it is part of the request shape the admin screen sends. It
-            # simply no longer has a side effect. Where a new master's
-            # schedule comes from is the schedule window's call.
-            _seed_services(
-                tenant_id=tenant.id,
-                master=master,
-                service_ids=service_ids,
-                actor_id=bot_user.id,
-            )
+                # DRF-1062: no working-hours seeding here any more.
+                #
+                # This branch manufactured the 10:00-19:00 stub that all
+                # four pilot masters now carry — a schedule the salon
+                # never set, indistinguishable from one it did. Worse,
+                # `apps.scheduling` is not what serves slots: with
+                # BOOKING_VIA_AYLA_REST the backend answers, so the rows
+                # shaped nothing except the summary line in the master
+                # card.
+                #
+                # `schedule_preset` stays in the invite contract on
+                # purpose — it is part of the request shape the admin
+                # screen sends. It simply no longer has a side effect.
+                # Where a new master's schedule comes from is the
+                # schedule window's call.
+                _seed_services(
+                    tenant_id=tenant.id,
+                    master=master,
+                    service_ids=service_ids,
+                    actor_id=bot_user.id,
+                )
 
-            write_audit(
-                MASTER_INVITED,
-                target="catalog.CatalogMaster",
-                target_id=master.id,
-                payload={
-                    "master_id": str(master.id),
-                    "actor_id": str(bot_user.id),
-                    "actor_role": role_ctx.primary_role,
-                    "role": "master",
-                    "contact_method": contact_method,
-                    "mode": mode,
-                    "services_count": len(service_ids),
-                    "idempotent": False,
-                },
-                actor_id=bot_user.id,
-            )
+                write_audit(
+                    MASTER_INVITED,
+                    target="catalog.CatalogMaster",
+                    target_id=master.id,
+                    payload={
+                        "master_id": str(master.id),
+                        "actor_id": str(bot_user.id),
+                        "actor_role": role_ctx.primary_role,
+                        "role": "master",
+                        "contact_method": contact_method,
+                        "mode": mode,
+                        "services_count": len(service_ids),
+                        "idempotent": False,
+                        "reused_row": reused is not None,
+                    },
+                    actor_id=bot_user.id,
+                )
 
-            emit(
-                MASTER_INVITED,
-                properties={
-                    "master_id": str(master.id),
-                    "actor_role": role_ctx.primary_role,
-                    "contact_method": contact_method,
-                    "mode": mode,
-                    "services_count": len(service_ids),
-                },
+                emit(
+                    MASTER_INVITED,
+                    properties={
+                        "master_id": str(master.id),
+                        "actor_role": role_ctx.primary_role,
+                        "contact_method": contact_method,
+                        "mode": mode,
+                        "services_count": len(service_ids),
+                        "reused_row": reused is not None,
+                    },
+                )
+            break
+        except IntegrityError:
+            master = None
+            if attempt + 1 >= EXTERNAL_ID_MAX_ATTEMPTS:
+                logger.exception("admin_api.invite.external_id_exhausted tenant=%s", tenant.id)
+                return _error("server_error", "failed to create invite", 500)
+            logger.warning(
+                "admin_api.invite.external_id_retry tenant=%s attempt=%d — "
+                "одновременное приглашение в этом салоне заняло номер; "
+                "пересчитываю и повторяю (DRF-1507).",
+                tenant.id,
+                attempt + 1,
             )
-    except Exception:  # noqa: BLE001 — any error inside atomic → 500 + rollback
-        logger.exception("admin_api.invite.create_failed")
+        except Exception:  # noqa: BLE001 — any other error inside atomic → 500 + rollback
+            logger.exception("admin_api.invite.create_failed")
+            return _error("server_error", "failed to create invite", 500)
+
+    if master is None:  # pragma: no cover — цикл выходит либо break, либо return
+        logger.error("admin_api.invite.create_failed tenant=%s — no row after retries", tenant.id)
         return _error("server_error", "failed to create invite", 500)
 
     # Dispatch the MAX DM AFTER the atomic block has committed the

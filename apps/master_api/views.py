@@ -50,6 +50,7 @@ from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_http_methods
 
 from apps.audit.services import write_audit
+from apps.catalog.handles import canonical_handle
 from apps.catalog.models import CatalogMaster, CatalogService, MasterService
 from apps.conversations.models import AiDraft
 from apps.master_api.services.conversations import (
@@ -251,6 +252,150 @@ def _audit_payload(
     if extra:
         out.update(extra)
     return out
+
+
+def _as_uuid(value: object) -> uuid.UUID | None:
+    """``UUID`` или ``None``. SQLite отдаёт UUIDField строкой, Postgres — UUID.
+
+    Сравнивать ``str`` с ``UUID`` можно бесконечно и всегда получать False,
+    поэтому приведение здесь, а не в вызывающем.
+    """
+
+    if value is None or value == "":
+        return None
+    if isinstance(value, uuid.UUID):
+        return value
+    try:
+        return uuid.UUID(str(value))
+    except (TypeError, ValueError, AttributeError):
+        return None
+
+
+def _init_data_handle(request: HttpRequest) -> str:
+    """MAX-хэндл предъявителя из HMAC-подписанного ``initData``.
+
+    ``user.username`` входит в подписанную часть (``apps/miniapp_api/auth.py``
+    §Trust model), поэтому значению можно верить так же, как ``user.id``.
+    MAX отдаёт его без ведущей ``@`` — приводим к той форме, которую пишет
+    владелец, чтобы повторное приглашение нашло эту строку.
+    """
+
+    verified = getattr(request, "verified_init_data", None)
+    if verified is None:
+        return ""
+    raw = verified.user.get("username") if isinstance(verified.user, dict) else None
+    return canonical_handle(raw if isinstance(raw, str) else "")
+
+
+def _glue_target(
+    *,
+    tenant_id: uuid.UUID,
+    ayla_user_id: uuid.UUID | None,
+    exclude_pk: uuid.UUID,
+) -> CatalogMaster | None:
+    """Строка того же салона, на которой ``ayla_user_id`` человека УЖЕ стоит.
+
+    DRF-1507, пункт 4 — и порядок здесь важнее самого заполнения.
+
+    До этой правки ни один из путей приёма не проставлял ``ayla_user_id``:
+    его писала только синхронизация (``apps/catalog/services/upserter.py``).
+    Как только приём начинает его проставлять, он упирается в ограничение
+    ``uq_catalog_master_tenant_ayla_user_id`` (миграция
+    ``catalog/0016_master_dedup_keys``, PR #1401): DRF-1510 привела пять
+    салонов синхронизацией, и мастера этих салонов уже лежат строками с
+    заполненным ``ayla_user_id``. Наивная реализация — «записать в свою
+    инвайт-строку» — даёт этому человеку **500 вместо приземления**, и
+    только на живых данных подключённого салона: на чистой локальной базе
+    второй строки нет и всё зелено.
+
+    Поэтому сначала ищем, потом пишем. Нашли — приземляемся в найденную
+    строку; не нашли — заполняем свою.
+
+    ``ayla_user_id is None`` — это не отказ, а «моста с Ayla ещё нет»:
+    ``BotUser.ayla_user_id`` заполняет единственный писатель
+    (``apps/identity/services/ayla_link.py``) и только перед действием,
+    которому персональный субъект действительно нужен. Пока он NULL,
+    склеивать не по чему и конфликтовать тоже не с чем.
+    """
+
+    if ayla_user_id is None:
+        return None
+    return (
+        CatalogMaster.all_tenants.filter(tenant_id=tenant_id, ayla_user_id=ayla_user_id)
+        .exclude(pk=exclude_pk)
+        .select_related("tenant")
+        .first()
+    )
+
+
+def _land_on_glue_row(
+    *,
+    invite_row: CatalogMaster,
+    glue_row: CatalogMaster,
+    bot_user: BotUser,
+    handle: str,
+) -> CatalogMaster:
+    """Приземлить человека в его существующую строку, инвайт-строку погасить.
+
+    ### Что делает со второй строкой и почему именно это
+
+    Инвайт-строка **остаётся** и переводится в ``CANCELLED`` с пометкой в
+    ``raw`` о том, чем она замещена. Три рассмотренных варианта:
+
+    * *осиротить* (оставить ``PENDING``) — это ровно фантом из разрыва Р5:
+      строка навсегда висит в ростере «ждёт ответа», и ни мастер, ни
+      владелец об этом не узнают. Отвергнуто;
+    * *удалить* — на инвайт-строке уже висят ``MasterService``, засеянные
+      при создании приглашения, и ссылается ``AuditLog``. Удаление — это
+      слияние дублей, а слияние по границе задачи отдельный обоснованный
+      шаг с замером, а не побочный эффект приземления. Отвергнуто;
+    * *пометить* — то, что здесь. Ни одного FK не тронуто, строка видна
+      владельцу как отменённая, а не как вечно ожидающая, и настоящее
+      слияние (перенос услуг, архивация) остаётся возможным и обратимым.
+
+    ``invite_token`` обнуляется: приглашение потрачено, и оставлять
+    работающий токен на погашенной строке значило бы держать дверь,
+    которая ведёт в отменённое.
+
+    Услуги, выбранные владельцем в приглашении, остаются на погашенной
+    строке — их перенос это то самое слияние. Названо в отчёте DRF-1507.
+    """
+
+    glue_row.linked_bot_user = bot_user
+    glue_row.invite_status = CatalogMaster.InviteStatus.ACCEPTED
+    glue_row.mode = CatalogMaster.Mode.INVITE
+    update_fields = ["linked_bot_user", "invite_status", "mode"]
+    # ``max_handle`` синхронизация не пишет вовсе — на склеенной строке он
+    # пуст, а у владельца он есть. Blank-fill, не перезапись.
+    if not glue_row.max_handle and handle:
+        glue_row.max_handle = handle
+        update_fields.append("max_handle")
+    # Тот же ``archived_at``-guard, что и на обычном приёме: отозванный
+    # мастер не возвращается в продажу через приглашение.
+    if glue_row.archived_at is None and not glue_row.is_active:
+        glue_row.is_active = True
+        update_fields.append("is_active")
+    glue_row.save(update_fields=update_fields)
+
+    invite_row.invite_token = None
+    invite_row.invite_status = CatalogMaster.InviteStatus.CANCELLED
+    invite_row.raw = {
+        **(invite_row.raw or {}),
+        "superseded_by_master_id": str(glue_row.id),
+        "superseded_reason": "drf1507_glue_ayla_user_id",
+    }
+    invite_row.save(update_fields=["invite_token", "invite_status", "raw"])
+
+    logger.info(
+        "master_api.onboarding.accept.glued bot_user=%s invite_master=%s "
+        "glue_master=%s ayla_user_id=%s — приземление в существующую строку "
+        "салона; инвайт-строка погашена (DRF-1507).",
+        bot_user.id,
+        invite_row.id,
+        glue_row.id,
+        glue_row.ayla_user_id,
+    )
+    return glue_row
 
 
 # --- POST /onboarding/claim -----------------------------------------------
@@ -477,6 +622,7 @@ def onboarding_accept(request: HttpRequest) -> HttpResponse:
         )
 
     # Fresh accept path. Atomic + locked.
+    landed: CatalogMaster
     try:
         with transaction.atomic():
             master = validate_invite_token(token_uuid, bot_user.tenant)
@@ -491,53 +637,111 @@ def onboarding_accept(request: HttpRequest) -> HttpResponse:
                     403,
                 )
 
-            master.linked_bot_user = bot_user
-            master.invite_status = CatalogMaster.InviteStatus.ACCEPTED
-            master.mode = CatalogMaster.Mode.INVITE
-            master.invite_token = None  # one-shot consumption
-            # DRF-1080 — activate on accept.
-            #
-            # ``master_invite_create`` writes the row with
-            # ``is_active=False`` (apps/admin_api/views_invite.py:499) and
-            # deliberately so: an invited master who has not answered yet
-            # must not appear in the booking surface. Nothing flipped it
-            # back, so accepting produced a master whom ``resolve_role``
-            # reports as a master while ``require_master_init_data``
-            # answers 403 ``master_inactive`` on every master endpoint
-            # (apps/master_api/auth.py:369). A person holding a valid
-            # one-shot token is active by definition — the same reasoning
-            # and the same write as the code path in
-            # ``apps.identity.services.staff_invites._link_master``.
-            #
-            # Guarded on ``archived_at``: deactivation writes
-            # ``is_active=False`` **together with** ``archived_at``
-            # (apps/admin_api/services/master_deactivation.py:1073-1076),
-            # so the pair distinguishes "never activated" from "taken out
-            # of service". Flipping an archived master back would put them
-            # into ``_MasterManager.bookable()`` again — a revoked master
-            # silently back on sale.
-            if master.archived_at is None:
-                master.is_active = True
-            master.save(
-                update_fields=[
-                    "linked_bot_user",
-                    "invite_status",
-                    "mode",
-                    "invite_token",
-                    "is_active",
-                ]
+            # DRF-1507, пункт 4 — СНАЧАЛА ищем строку этого человека,
+            # потом пишем. Обоснование порядка — в докстринге
+            # :func:`_glue_target`; коротко: обратный порядок даёт 500 на
+            # живых данных подключённого салона и зелёные тесты локально.
+            person_ayla_user_id = _as_uuid(bot_user.ayla_user_id)
+            glue = _glue_target(
+                tenant_id=bot_user.tenant_id,
+                ayla_user_id=person_ayla_user_id,
+                exclude_pk=master.pk,
             )
+            if glue is not None and glue.linked_bot_user_id not in (None, bot_user.id):
+                # Один ``ayla_user_id`` на двух разных ``BotUser`` в одном
+                # салоне — расхождение личности, а не ретрай. Молча забрать
+                # чужую строку было бы ровно тем перенаправлением, которое
+                # эта же задача чинит в идемпотентной пробе выше.
+                logger.warning(
+                    "master_api.onboarding.accept.glue_conflict bot_user=%s "
+                    "invite_master=%s glue_master=%s linked_bot_user=%s — строка "
+                    "с тем же ayla_user_id уже связана с другим MAX-аккаунтом "
+                    "(DRF-1507).",
+                    bot_user.id,
+                    master.id,
+                    glue.id,
+                    glue.linked_bot_user_id,
+                )
+                return _error(
+                    "wrong_recipient",
+                    "this invite was sent to a different MAX account",
+                    403,
+                )
+
+            handle = canonical_handle(master.max_handle) or _init_data_handle(request)
+
+            if glue is not None:
+                landed = _land_on_glue_row(
+                    invite_row=master,
+                    glue_row=glue,
+                    bot_user=bot_user,
+                    handle=handle,
+                )
+                audit_extra = {"glued_from_master_id": str(master.id)}
+            else:
+                landed = master
+                audit_extra = None
+                # Склеивать не с чем — заполняем свою строку. Оба
+                # столбца blank-fill: их же пишут синхронизация и
+                # владелец, и перезапись чужого непустого значения
+                # превратила бы приземление в тихий редактор чужих
+                # данных.
+                extra_fields: list[str] = []
+                if master.ayla_user_id is None and person_ayla_user_id is not None:
+                    master.ayla_user_id = person_ayla_user_id
+                    extra_fields.append("ayla_user_id")
+                if not master.max_handle and handle:
+                    master.max_handle = handle
+                    extra_fields.append("max_handle")
+                master.linked_bot_user = bot_user
+                master.invite_status = CatalogMaster.InviteStatus.ACCEPTED
+                master.mode = CatalogMaster.Mode.INVITE
+                master.invite_token = None  # one-shot consumption
+                # DRF-1080 — activate on accept.
+                #
+                # ``master_invite_create`` writes the row with
+                # ``is_active=False`` (apps/admin_api/views_invite.py) and
+                # deliberately so: an invited master who has not answered
+                # yet must not appear in the booking surface. Nothing
+                # flipped it back, so accepting produced a master whom
+                # ``resolve_role`` reports as a master while
+                # ``require_master_init_data`` answers 403
+                # ``master_inactive`` on every master endpoint
+                # (apps/master_api/auth.py:369). A person holding a valid
+                # one-shot token is active by definition — the same
+                # reasoning and the same write as the code path in
+                # ``apps.identity.services.staff_invites._link_master``.
+                #
+                # Guarded on ``archived_at``: deactivation writes
+                # ``is_active=False`` **together with** ``archived_at``
+                # (apps/admin_api/services/master_deactivation.py), so the
+                # pair distinguishes "never activated" from "taken out of
+                # service". Flipping an archived master back would put
+                # them into ``_MasterManager.bookable()`` again — a
+                # revoked master silently back on sale.
+                if master.archived_at is None:
+                    master.is_active = True
+                master.save(
+                    update_fields=[
+                        "linked_bot_user",
+                        "invite_status",
+                        "mode",
+                        "invite_token",
+                        "is_active",
+                        *extra_fields,
+                    ]
+                )
 
             write_audit(
                 MASTER_ONBOARDING_ACCEPTED,
                 target="catalog.CatalogMaster",
-                target_id=master.id,
-                payload=_audit_payload(master, bot_user),
+                target_id=landed.id,
+                payload=_audit_payload(landed, bot_user, audit_extra),
                 actor_id=bot_user.id,
             )
             emit(
                 MASTER_ONBOARDING_ACCEPTED,
-                properties=_audit_payload(master, bot_user),
+                properties=_audit_payload(landed, bot_user, audit_extra),
             )
     except InviteTokenError as exc:
         return _error(
@@ -547,13 +751,13 @@ def onboarding_accept(request: HttpRequest) -> HttpResponse:
         )
 
     session_token, exp_ts = issue_master_session_token(
-        master_id=master.id,
-        tenant_id=master.tenant_id,
+        master_id=landed.id,
+        tenant_id=landed.tenant_id,
         bot_user_id=bot_user.id,
     )
     return JsonResponse(
         {
-            "master_id": str(master.id),
+            "master_id": str(landed.id),
             "session_token": session_token,
             "expires_at": datetime.fromtimestamp(exp_ts, tz=dt_timezone.utc).isoformat(),
         }

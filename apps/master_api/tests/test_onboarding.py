@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 from datetime import timezone as dt_timezone
 
 from django.test import Client
@@ -466,6 +466,273 @@ class TestOnboardingAccept:
             header=init_data_header("12345"),
         )
         assert resp.status_code == 410
+
+
+# --- /onboarding/accept — склейка со строкой синхронизации (DRF-1507) -----
+
+
+def _synced_master(
+    tenant: Tenant,
+    *,
+    ayla_user_id: uuid.UUID,
+    external_id: int,
+    name: str = "Анна Петрова",
+) -> CatalogMaster:
+    """Строка, какой её оставляет синхронизация каталога.
+
+    Ключевые отличия от инвайт-строки: ``ayla_user_id`` заполнен,
+    ``max_handle`` пуст, ``linked_bot_user`` пуст, ``invite_status``
+    по умолчанию ACCEPTED (синхронизированный мастер обязан быть
+    записываемым — см. ``CatalogMaster.invite_status.help_text``).
+    """
+
+    now = datetime.now(tz=dt_timezone.utc)
+    return CatalogMaster.all_tenants.create(
+        tenant=tenant,
+        external_id=external_id,
+        external_updated_at=now,
+        name=name,
+        specialization="Маникюр",
+        is_active=True,
+        ayla_user_id=ayla_user_id,
+        max_handle="",
+        invite_status=CatalogMaster.InviteStatus.ACCEPTED,
+        invite_token=None,
+    )
+
+
+class TestOnboardingAcceptGlue:
+    """DRF-1507, пункт 4 — приземление склеивается, а не создаёт конфликт.
+
+    Почему эти тесты существуют. DRF-1510 привела пять салонов
+    синхронизацией: их мастера уже лежат строками с заполненным
+    ``ayla_user_id``. PR #1401 поставил на этот столбец частичное
+    ограничение ``uq_catalog_master_tenant_ayla_user_id``. Приём
+    приглашения, который просто записывает ``ayla_user_id`` в СВОЮ
+    инвайт-строку, на таких данных даёт **500 вместо приземления** — и
+    только на них: на чистой локальной базе второй строки нет и всё
+    зелено. Поэтому проверка ставит обе строки явно.
+    """
+
+    def test_lands_on_the_existing_synced_row(
+        self,
+        client: Client,
+        bot_user: BotUser,
+        tenant: Tenant,
+    ) -> None:
+        ayla_user_id = uuid.uuid4()
+        bot_user.ayla_user_id = ayla_user_id
+        bot_user.save(update_fields=["ayla_user_id"])
+        synced = _synced_master(tenant, ayla_user_id=ayla_user_id, external_id=7)
+        invited = make_master(tenant, external_id=1_000_000)
+
+        before = CatalogMaster.all_tenants.filter(tenant=tenant).count()
+        resp = _post_json(
+            client,
+            "master_api:onboarding_accept",
+            body={"token": str(invited.invite_token)},
+            header=init_data_header("12345"),
+        )
+
+        # Не 500 — приземление состоялось.
+        assert resp.status_code == 200, resp.content
+        # И состоялось В СУЩЕСТВУЮЩУЮ строку, а не в инвайт-строку.
+        assert resp.json()["master_id"] == str(synced.id)
+        assert CatalogMaster.all_tenants.filter(tenant=tenant).count() == before
+
+        synced.refresh_from_db()
+        assert synced.linked_bot_user_id == bot_user.id
+        assert synced.invite_status == CatalogMaster.InviteStatus.ACCEPTED
+        assert synced.accepted_at is not None
+        # ``max_handle`` синхронизация не пишет — приземление доносит его.
+        assert synced.max_handle == invited.max_handle
+
+        # Инвайт-строка погашена, а не осиротена: PENDING навсегда — это
+        # фантом в ростере (разрыв Р5).
+        invited.refresh_from_db()
+        assert invited.invite_status == CatalogMaster.InviteStatus.CANCELLED
+        assert invited.invite_token is None
+        assert invited.raw["superseded_by_master_id"] == str(synced.id)
+        assert invited.linked_bot_user_id is None
+
+        # Сессия выписана на ту строку, в которую приземлились.
+        payload = decode_master_session_token(resp.json()["session_token"])
+        assert payload.master_id == synced.id
+
+    def test_stranger_still_lands_in_their_own_new_row(
+        self,
+        client: Client,
+        bot_user: BotUser,
+        tenant: Tenant,
+    ) -> None:
+        """Положительная стража (DRF-1411).
+
+        Мастера, которого в салоне не было, склеивать не с чем — он обязан
+        приземлиться в свою инвайт-строку. Без этой проверки «склейка»
+        могла бы означать «все приземляются в первую попавшуюся строку».
+        """
+
+        bot_user.ayla_user_id = uuid.uuid4()
+        bot_user.save(update_fields=["ayla_user_id"])
+        # Строка ДРУГОГО человека того же салона — склейка не должна её взять.
+        other = _synced_master(
+            tenant,
+            ayla_user_id=uuid.uuid4(),
+            external_id=7,
+            name="Мария Иванова",
+        )
+        invited = make_master(tenant, external_id=1_000_000)
+
+        resp = _post_json(
+            client,
+            "master_api:onboarding_accept",
+            body={"token": str(invited.invite_token)},
+            header=init_data_header("12345"),
+        )
+        assert resp.status_code == 200, resp.content
+        assert resp.json()["master_id"] == str(invited.id)
+
+        invited.refresh_from_db()
+        assert invited.invite_status == CatalogMaster.InviteStatus.ACCEPTED
+        assert invited.linked_bot_user_id == bot_user.id
+        # И столбец заполнен — ровно то, чего пункт 4 требует.
+        assert str(invited.ayla_user_id) == str(bot_user.ayla_user_id)
+
+        other.refresh_from_db()
+        assert other.linked_bot_user_id is None
+
+    def test_two_people_in_one_salon_keep_two_rows(
+        self,
+        client: Client,
+        bot_user: BotUser,
+        other_bot_user: BotUser,
+        tenant: Tenant,
+    ) -> None:
+        """Положительная стража: разные люди — разные строки."""
+
+        bot_user.ayla_user_id = uuid.uuid4()
+        bot_user.save(update_fields=["ayla_user_id"])
+        other_bot_user.ayla_user_id = uuid.uuid4()
+        other_bot_user.save(update_fields=["ayla_user_id"])
+
+        first = make_master(tenant, external_id=1_000_000)
+        second = make_master(
+            tenant,
+            name="Мария Иванова",
+            external_id=1_000_001,
+        )
+        second.max_handle = "@maria_nails"
+        second.save(update_fields=["max_handle"])
+
+        resp1 = _post_json(
+            client,
+            "master_api:onboarding_accept",
+            body={"token": str(first.invite_token)},
+            header=init_data_header("12345"),
+        )
+        resp2 = _post_json(
+            client,
+            "master_api:onboarding_accept",
+            body={"token": str(second.invite_token)},
+            header=init_data_header("99999", first_name="Мария"),
+        )
+        assert resp1.status_code == 200, resp1.content
+        assert resp2.status_code == 200, resp2.content
+        assert resp1.json()["master_id"] != resp2.json()["master_id"]
+        assert CatalogMaster.all_tenants.filter(tenant=tenant).count() == 2
+
+    def test_no_ayla_bridge_yet_lands_normally(
+        self,
+        client: Client,
+        bot_user: BotUser,
+        tenant: Tenant,
+    ) -> None:
+        """``BotUser.ayla_user_id`` пуст — склеивать не по чему, и это норма.
+
+        Мост с Ayla ставит единственный писатель
+        (``apps/identity/services/ayla_link.py``) и только перед действием,
+        которому персональный субъект нужен. Пока он пуст, приземление
+        обязано работать как раньше и НЕ писать в столбец ничего.
+        """
+
+        assert bot_user.ayla_user_id is None
+        _synced_master(tenant, ayla_user_id=uuid.uuid4(), external_id=7)
+        invited = make_master(tenant, external_id=1_000_000)
+
+        resp = _post_json(
+            client,
+            "master_api:onboarding_accept",
+            body={"token": str(invited.invite_token)},
+            header=init_data_header("12345"),
+        )
+        assert resp.status_code == 200, resp.content
+        assert resp.json()["master_id"] == str(invited.id)
+        invited.refresh_from_db()
+        assert invited.ayla_user_id is None
+
+    def test_glue_row_linked_to_someone_else_is_refused(
+        self,
+        client: Client,
+        bot_user: BotUser,
+        other_bot_user: BotUser,
+        tenant: Tenant,
+    ) -> None:
+        """Строку, уже связанную с другим MAX-аккаунтом, склейка не забирает."""
+
+        ayla_user_id = uuid.uuid4()
+        bot_user.ayla_user_id = ayla_user_id
+        bot_user.save(update_fields=["ayla_user_id"])
+        taken = _synced_master(tenant, ayla_user_id=ayla_user_id, external_id=7)
+        taken.linked_bot_user = other_bot_user
+        taken.save(update_fields=["linked_bot_user"])
+        invited = make_master(tenant, external_id=1_000_000)
+
+        resp = _post_json(
+            client,
+            "master_api:onboarding_accept",
+            body={"token": str(invited.invite_token)},
+            header=init_data_header("12345"),
+        )
+        assert resp.status_code == 403
+        assert resp.json()["error"] == "wrong_recipient"
+        invited.refresh_from_db()
+        assert invited.invite_status == CatalogMaster.InviteStatus.PENDING
+
+
+class TestReinviteAfterExpiryReachesTheCabinet:
+    """DRF-1507 — повторное приглашение после протухшего токена работает.
+
+    Сквозная проверка того самого пользовательского поведения, ради
+    сохранения которого ``test_expired_invite_creates_new_row`` был
+    переписан, а не удалён: владелец выписывает приглашение заново,
+    мастер по свежей ссылке доходит до кабинета — и второй строки при
+    этом не появляется.
+    """
+
+    def test_reissued_token_lands_the_master(
+        self,
+        client: Client,
+        bot_user: BotUser,
+        tenant: Tenant,
+    ) -> None:
+        stale = make_master(tenant, expires_in_days=-1, external_id=1_000_000)
+        # Перевыпуск, как его делает admin_api (свежий токен на той же строке).
+        stale.invite_token = uuid.uuid4()
+        stale.invite_expires_at = datetime.now(tz=dt_timezone.utc) + timedelta(days=7)
+        stale.invite_status = CatalogMaster.InviteStatus.PENDING
+        stale.save(update_fields=["invite_token", "invite_expires_at", "invite_status"])
+
+        resp = _post_json(
+            client,
+            "master_api:onboarding_accept",
+            body={"token": str(stale.invite_token)},
+            header=init_data_header("12345"),
+        )
+        assert resp.status_code == 200, resp.content
+        assert resp.json()["master_id"] == str(stale.id)
+        assert CatalogMaster.all_tenants.filter(tenant=tenant).count() == 1
+        payload = decode_master_session_token(resp.json()["session_token"])
+        assert payload.master_id == stale.id
 
 
 # --- /onboarding/reject ---------------------------------------------------
