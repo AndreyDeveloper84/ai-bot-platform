@@ -35,7 +35,7 @@ from django.db.models import (
     Value,
     When,
 )
-from django.db.models.expressions import BaseExpression, CombinedExpression
+from django.db.models.expressions import CombinedExpression
 from django.db.models.functions import Cast, Coalesce, Length, Replace, Trim
 
 from apps.catalog.models import CatalogMaster, CatalogService
@@ -1098,7 +1098,7 @@ def name_word_count(name: str) -> int:
     return (name or "").strip(_WORD_SEP).count(_WORD_SEP) + 1
 
 
-def _name_word_count_sql(field: str) -> BaseExpression:
+def _name_word_count_sql(field: str) -> ExpressionWrapper:
     """:func:`name_word_count` as an ORM expression over ``field``.
 
     ``LENGTH(x) - LENGTH(REPLACE(x, ' ', '')) + 1`` — the spaces, plus one.
@@ -1121,7 +1121,7 @@ def _name_word_count_sql(field: str) -> BaseExpression:
     )
 
 
-def _row_precision(field: str, stems: list[str], *, row: Q | None = None) -> BaseExpression:
+def _row_precision(field: str, stems: list[str], *, row: Q | None = None) -> ExpressionWrapper:
     """Match PRECISION of one service-name row against ``stems`` — DRF-1530.
 
     ``(matched / len(stems)) * (matched / words(name))`` — the share of the
@@ -1155,16 +1155,27 @@ def _row_precision(field: str, stems: list[str], *, row: Q | None = None) -> Bas
 
     ``float`` throughout: integer division on Postgres would truncate every
     quotient to 0 and flatten the ranking completely.
+
+    ``stems`` must be non-empty — it is the denominator of the first factor,
+    and every caller already routes an empty stem list elsewhere (a goal query
+    ranks by nothing at all, see :func:`service_rows_score`). Stated as a
+    raise rather than a silent ``None``, so a future caller that forgets finds
+    out here instead of in a queryset that scores everybody zero.
     """
-    matched: Case | CombinedExpression | None = None
-    for stem in stems:
+    if not stems:
+        raise ValueError("_row_precision needs at least one stem")
+
+    def _term(stem: str) -> Case:
         cond = _stem_match_q(field, stem)
-        term = Case(
+        return Case(
             When(cond if row is None else row & cond, then=Value(1)),
             default=Value(0),
             output_field=IntegerField(),
         )
-        matched = term if matched is None else matched + term
+
+    matched: Case | CombinedExpression = _term(stems[0])
+    for stem in stems[1:]:
+        matched = matched + _term(stem)
     matched_f = Cast(matched, FloatField())
     words_f = Cast(_name_word_count_sql(field), FloatField())
     return ExpressionWrapper(
@@ -1969,7 +1980,7 @@ def service_rows_match_q(parsed: "ParsedQuery") -> Q:
     return any_stem
 
 
-def service_rows_score(parsed: "ParsedQuery") -> BaseExpression | None:
+def service_rows_score(parsed: "ParsedQuery") -> ExpressionWrapper | None:
     """Rank expression for :func:`service_rows_match_q`, or ``None``.
 
     ``None`` for a goal query, deliberately: carrying a goal is a yes/no fact
