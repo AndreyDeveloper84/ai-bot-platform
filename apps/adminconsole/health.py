@@ -43,13 +43,14 @@ from typing import Protocol
 import httpx
 from django.conf import settings
 from django.core.cache import cache
-from django.db import models
 from django.utils import timezone
 
 from apps.catalog.models import CatalogMaster, CatalogService
 from apps.catalog.staleness import TenantSyncAge, stale_after_seconds, sync_ages
 from apps.handoff.models import AdminTask
 from apps.integrations.ayla.url_builder import AylaUrlBuilder, AylaUrlError
+from apps.tenancy.context import tenant_scope
+from apps.tenancy.models import Tenant
 
 logger = logging.getLogger(__name__)
 
@@ -398,25 +399,26 @@ def collect_report(
 
 
 def _divergences(ages: list[TenantSyncAge], counter: UpstreamCounter) -> list[MirrorDivergence]:
-    """По каждому синхронизируемому салону — зеркало против бэкенда."""
-    tenant_ids = {age.slug: age.tenant_id for age in ages}
-    service_counts: dict[str, int] = {}
-    master_counts: dict[str, int] = {}
-    for row in CatalogService.all_tenants.values("tenant__slug").annotate(n=models.Count("id")):
-        service_counts[row["tenant__slug"]] = row["n"]
-    for row in CatalogMaster.all_tenants.values("tenant__slug").annotate(n=models.Count("id")):
-        master_counts[row["tenant__slug"]] = row["n"]
+    """По каждому синхронизируемому салону — зеркало против бэкенда.
 
+    Чтение зеркала скоплено через ``tenant_scope`` — тот же приём, что
+    ``sync_catalog._mirror_count``: кросс-тенантный менеджер каталога
+    зарезервирован за marketplace discovery (import_boundaries MKT1,
+    #1018), а число через скоп — это ровно то, что бот реально видит.
+    """
     divergences: list[MirrorDivergence] = []
     for age in ages:
-        tenant_id = tenant_ids[age.slug]
+        tenant = Tenant.objects.get(slug=age.slug)
+        with tenant_scope(tenant):
+            mirror_services = CatalogService.objects.count()
+            mirror_masters = CatalogMaster.objects.count()
         divergences.append(
             MirrorDivergence(
                 slug=age.slug,
-                mirror_services=service_counts.get(age.slug, 0),
-                mirror_masters=master_counts.get(age.slug, 0),
-                upstream_services=counter.count(tenant_id=tenant_id, resource="services"),
-                upstream_masters=counter.count(tenant_id=tenant_id, resource="masters"),
+                mirror_services=mirror_services,
+                mirror_masters=mirror_masters,
+                upstream_services=counter.count(tenant_id=age.tenant_id, resource="services"),
+                upstream_masters=counter.count(tenant_id=age.tenant_id, resource="masters"),
             )
         )
     return divergences
