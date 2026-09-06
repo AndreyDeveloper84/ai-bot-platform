@@ -186,7 +186,8 @@ def plan_coach_hints(
             continue
 
         first_ever = not any(
-            entry.get("surface") == SURFACE for entry in prefs.outbox_entries(user_prefs)
+            entry.get("surface") == SURFACE and entry.get("solicited") is not True
+            for entry in prefs.outbox_entries(user_prefs)
         )
         text, blocked_by = vet_outbound(coach_copy.render_hint(trigger.kind, first_ever=first_ever))
         if blocked_by:

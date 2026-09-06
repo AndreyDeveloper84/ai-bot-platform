@@ -373,6 +373,25 @@ class TestDue:
         assert coach_copy.FIRST_HINT_TAIL not in decision.text
         assert decision.detail["first_ever"] is False
 
+    def test_a_solicited_observation_is_not_a_hint(self, tenant: Tenant) -> None:
+        """DRF-1464 T6 (Q-NUTRITION-05): the diary observation is journaled on
+        this surface with the solicited marker — it must not spend the hint's
+        weekly budget, must not build the ignore streak, and must not strip
+        the FIRST hint of its cadence tail. The same entry unmarked blocks
+        all three ways (the weekly-cap test above), so «due» here is the
+        marker working, not a broken gate."""
+        user = coach_user(
+            tenant,
+            extra_prefs={
+                prefs.OUTBOX_KEY: [{**outbox_entry("coach_hint", days_ago=1), "solicited": True}]
+            },
+        )
+        decision = only(plan(user), user)
+        assert decision.send is True
+        assert decision.reason == "due"
+        assert decision.detail["first_ever"] is True
+        assert coach_copy.FIRST_HINT_TAIL in decision.text
+
     def test_the_text_passes_the_outbound_guard(self, tenant: Tenant) -> None:
         from apps.orchestrator.safety.outbound import evaluate_outbound
 
