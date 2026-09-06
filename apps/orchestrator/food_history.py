@@ -166,6 +166,11 @@ class Meal:
     dish: str
     calories: int
     meal_type: str
+    #: When the entry was logged, verbatim as Ayla sent it (``""`` when she
+    #: sent nothing parseable). Carried, never interpreted here: the late-
+    #: dinner trigger (DRF-1464 T5) is the one consumer, and hour arithmetic
+    #: belongs to it, not to the reader.
+    logged_at: str = ""
 
     @property
     def slug(self) -> str:
@@ -270,6 +275,7 @@ def meals_from_summary(summary: Any) -> tuple[Meal, ...]:
                 dish=dish,
                 calories=_clamp_kcal(row.get("calories")),
                 meal_type=_clean_meal_type(row.get("meal_type")),
+                logged_at=_clean_logged_at(row.get("logged_at")),
             )
         )
     return tuple(meals)
@@ -371,3 +377,11 @@ def _clean_meal_type(raw: Any) -> str:
         return ""
     slug = raw.strip().lower()
     return slug[:32] if slug.isascii() and slug.replace("_", "").isalnum() else ""
+
+
+def _clean_logged_at(raw: Any) -> str:
+    """The timestamp string as sent, or ``""``. Kept opaque: parsing it is
+    the consumer's job, so the only coercion here is type and length."""
+    if not isinstance(raw, str):
+        return ""
+    return raw.strip()[:40]

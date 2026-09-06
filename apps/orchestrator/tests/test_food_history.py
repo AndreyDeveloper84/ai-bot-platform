@@ -657,6 +657,28 @@ class TestParsingIsDefensive:
         assert len(meals[0].dish) == food_history.MAX_DISH_CHARS
 
 
+class TestLoggedAtIsCarried:
+    """DRF-1464 T5 — триггер «поздний ужин» считает по часу записи.
+
+    ``FoodLogEntrySerializer`` всегда шлёт ``logged_at``; до этого тикета
+    читатель его выбрасывал, и «ужин после 21:00» было не из чего считать.
+    Механика подсчёта живёт в ``apps.nutrition_coach.triggers`` — здесь
+    прибито только то, что время доезжает до неё нетронутым.
+    """
+
+    def test_logged_at_survives_parsing(self) -> None:
+        meals = food_history.meals_from_summary(_summary())
+
+        assert meals[0].logged_at == "2026-09-04T10:12:00Z"
+
+    def test_a_junk_logged_at_reads_as_unknown_not_a_crash(self) -> None:
+        row = _entry("Борщ", 320.0)
+        row["logged_at"] = {"not": "a timestamp"}
+        meals = food_history.meals_from_summary(_summary(entries=[row]))
+
+        assert meals[0].logged_at == ""
+
+
 # ─── 6. пустой день — сказан, а не заполнен ────────────────────────────────
 
 
