@@ -69,6 +69,26 @@ urlpatterns = [
         views.health_consent,
         name="health_consent",
     ),
+    # Согласия человека (DRF-1520). Чтение — всех типов сразу; запись —
+    # по ресурсу на согласие, чтобы «сохрани все галочки» было невозможно.
+    path("me/consents/", views.customer_consents, name="customer_consents"),
+    path(
+        "me/consents/proactive-hints/",
+        views.customer_proactive_hints,
+        name="customer_proactive_hints",
+    ),
+    path(
+        "me/consents/marketing/",
+        views.customer_marketing_consent,
+        name="customer_marketing_consent",
+    ),
+    # Только DELETE: выдаёт согласие человек своим действием в приветственном
+    # потоке, эта ручка умеет ровно отзывать.
+    path(
+        "me/consents/data-storage/",
+        views.customer_data_storage_consent,
+        name="customer_data_storage_consent",
+    ),
     # C7 client payments passthrough (PILOT_CONTRACTS §7.5)
     path("me/payments/", views.create_payment, name="create_payment"),
     path("me/cards/setup/", views.cards_setup, name="cards_setup"),

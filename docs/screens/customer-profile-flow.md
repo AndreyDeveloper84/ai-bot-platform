@@ -864,13 +864,41 @@ Avoid:
 
 | Endpoint | Purpose | Priority |
 |----------|---------|----------|
-| `GET /api/v1/me/consents` | Return consent state (marketing on/off, given_at) | P1 PRE_PILOT |
-| `POST /api/v1/me/consents/marketing` | Update marketing consent toggle | P1 PRE_PILOT |
-| `POST /api/v1/me/proactive_opt_out` | Update proactive opt-out flag | P1 PRE_PILOT (also needed для Reminders #105) |
+| `GET /api/v1/customer/me/consents/` | Состояние **всех** типов согласий + подсказки + раскрытие последствий отзыва | ✅ BUILT (DRF-1520) |
+| `POST` / `DELETE /api/v1/customer/me/consents/marketing/` | Выдать / отозвать маркетинговое согласие | ✅ BUILT (DRF-1520) |
+| `POST /api/v1/customer/me/consents/proactive-hints/` | `{"enabled": bool}` — «Подсказки Ayla» | ✅ BUILT (DRF-1520) |
+| `DELETE /api/v1/customer/me/consents/data-storage/` | Отзыв согласия на хранение данных (подтверждение + версия раскрытия) | ✅ BUILT (DRF-1520) |
 | `GET /api/v1/me/memory/summary` | Return memory category summary для R3 bullet card | **Post-pilot (memory layer unbuilt — ADR-0015 epic)** |
 | `POST /api/v1/me/memory/clear` | Clear memory layers (per §5.2 matrix) | **Post-pilot (memory layer unbuilt)** |
 | Cross-service delete contract + hook | Wire bot-platform ↔ beautygo dual-system delete | **Post-pilot (ADR-0015 epic)** |
 | Cross-service unified export | Single export across both systems | **Post-pilot (ADR-0015 epic)** |
+
+#### Контракт отзыва «Хранения данных» (DRF-1520) — что обязан сделать экран
+
+`GET /api/v1/customer/me/consents/` возвращает в `data_storage.revocation`:
+
+* `disclosure_version` — версия текста последствий. Экран показывает текст ЭТОЙ версии
+  и присылает её обратно в теле `DELETE`. Незнакомая сервером версия → `409 stale_disclosure`;
+  это защита от «отозвал, не увидев последствий».
+* `consequences` — слаги того, что отзыв сделает с уже накопленным. Совпадают с именами шагов
+  каскада `delete_personal_data`, поэтому обещание на экране не может разойтись с кодом.
+* `retained` — что отзыв НЕ трогает (`bookings`, `payments`: хранятся по обязанности оператора,
+  а не по согласию). Это должно быть на экране ДО нажатия.
+
+Тело `DELETE`: `{"confirmation": "УДАЛИТЬ", "disclosure_version": "<из GET>"}`.
+Ответ 200 — пересчитанное состояние согласий плюс `revocation.status`:
+`revoked` (процедура прошла целиком) либо `revoked_partial_processing` с `failed_steps` —
+согласие снято, но часть обработки накопленного не подтверждена (на пилоте это обычный
+случай: `ayla_delete: not_linked`, пока `BotUser.ayla_user_id` пуст). 502 остаётся ровно за
+случаем, когда не удался сам отзыв.
+
+Отзыв **не** закрывает вход в приложение (`deleted_at` не ставится) — согласие можно дать заново.
+
+Даты согласий берутся ИЗ РЕЕСТРА (`granted_at` — момент действующей строки). `BotUser.consent_at`
+наружу не отдаётся сознательно: приветственный поток её ставит, а отзыв никогда не снимает, поэтому
+у отозвавшего она остаётся заполненной (на пилоте 2026-08-23 — четыре строки из пяти). Две даты,
+из которых одна врёт, экрану не нужны; на эту колонку в платформе стоит отдельный сторож
+(`tools/lint/consent_column_guard.py`, DRF-1314).
 
 ### 12.3 W4 follow-up tickets (Phase J)
 

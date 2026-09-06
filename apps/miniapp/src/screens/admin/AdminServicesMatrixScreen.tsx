@@ -418,7 +418,7 @@ export function AdminServicesMatrixScreen({ me }: Props) {
       <div className="screen">
         <h1 className="screen__title">Услуги мастеров</h1>
         <StateError err={loadErr} onRetry={() => void reload(false)} />
-        <AdminTabBar />
+        <AdminTabBar me={me} />
       </div>
     );
   }
@@ -430,7 +430,7 @@ export function AdminServicesMatrixScreen({ me }: Props) {
         <div className="callout" role="status">
           Загружаем матрицу…
         </div>
-        <AdminTabBar />
+        <AdminTabBar me={me} />
       </div>
     );
   }
@@ -442,7 +442,7 @@ export function AdminServicesMatrixScreen({ me }: Props) {
         <div className="callout callout--danger" role="alert">
           Не удалось загрузить данные.
         </div>
-        <AdminTabBar />
+        <AdminTabBar me={me} />
       </div>
     );
   }
@@ -486,7 +486,7 @@ export function AdminServicesMatrixScreen({ me }: Props) {
             Добавить услугу →
           </button>
         </div>
-        <AdminTabBar />
+        <AdminTabBar me={me} />
       </div>
     );
   }
@@ -523,7 +523,7 @@ export function AdminServicesMatrixScreen({ me }: Props) {
             Пригласить мастера →
           </button>
         </div>
-        <AdminTabBar />
+        <AdminTabBar me={me} />
       </div>
     );
   }
@@ -1043,7 +1043,7 @@ export function AdminServicesMatrixScreen({ me }: Props) {
         onDismiss={() => setToast("")}
       />
 
-      <AdminTabBar />
+      <AdminTabBar me={me} />
     </div>
   );
 }

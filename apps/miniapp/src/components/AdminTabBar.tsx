@@ -5,25 +5,29 @@
  * Tabs (per master-management-handoff §MM0 overview):
  *   [📅 День] [👥 Команда] [💈 Услуги] [💬 Чаты] [⚙ Настройки]
  *
- * Five tabs — one more than MasterTabBar. The `.master-tabbar` block is
- * a four-column grid, so this bar adds `.master-tabbar--admin`, whose
- * only declaration is `grid-template-columns: repeat(5, 1fr)`. Without
- * it the fifth tab wraps onto a second row and covers screen content.
+ * Пять разделов — решение владельца 05.09.2026 (DRF-1522):
+ * для владельца и администратора состав не меняется.
  *
- * Only «Команда» is live in this PR — the other three render
- * «Скоро» placeholder screens. Same SPA + role-routing pattern
- * means MasterTabBar / AdminTabBar live side-by-side and each
- * screen mounts the one matching the caller's role.
+ * Ресепшн видит три (DRF-1522). Панель больше не рисует один и тот же
+ * набор всем: она принимает `me` и спрашивает `adminTabsFor`. Раньше
+ * данных о человеке у неё не было вовсе, поэтому она показывала ресепшн
+ * «Чаты» (бэкенд отвечает 403) и «Настройки» (заглушка). Проп
+ * обязательный намеренно — так ни один экран не сможет молча смонтировать
+ * панель «для всех»: без него не соберётся тип.
+ *
+ * Ширина колонок берётся из числа вкладок, а не из класса. Раньше
+ * `.master-tabbar--admin` жёстко задавал пять колонок, и панель из трёх
+ * вкладок сжалась бы в левые три пятых экрана.
  */
 
 import { useCallback } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { hapticSelection } from "../lib/max-sdk";
-
-type TabKey = "day" | "team" | "services" | "chats" | "settings";
+import type { MeResponse } from "../lib/admin-api";
+import { adminTabsFor, type AdminTabKey } from "../lib/admin-tabs";
 
 interface TabSpec {
-  key: TabKey;
+  key: AdminTabKey;
   label: string;
   to: string;
   icon: JSX.Element;
@@ -128,11 +132,8 @@ function IconSettings() {
   );
 }
 
-export function AdminTabBar() {
-  const navigate = useNavigate();
-  const location = useLocation();
-
-  const tabs: TabSpec[] = [
+/** Все вкладки поверхности. Кто какие из них видит — решает `adminTabsFor`. */
+const ALL_TABS: readonly TabSpec[] = [
     // «День» leads because it is what the front desk opens first every
     // morning — the roster is a setup screen, the day is the work.
     { key: "day", label: "День", to: "/admin/day", icon: <IconDay /> },
@@ -157,6 +158,13 @@ export function AdminTabBar() {
     },
   ];
 
+export function AdminTabBar({ me }: { me: MeResponse }) {
+  const navigate = useNavigate();
+  const location = useLocation();
+
+  const visible = adminTabsFor(me);
+  const tabs = ALL_TABS.filter((tab) => visible.includes(tab.key));
+
   const handleTap = useCallback(
     (to: string) => {
       hapticSelection();
@@ -168,6 +176,7 @@ export function AdminTabBar() {
   return (
     <nav
       className="master-tabbar master-tabbar--admin"
+      style={{ gridTemplateColumns: `repeat(${tabs.length}, 1fr)` }}
       aria-label="Основная навигация"
     >
       {tabs.map((tab) => {

@@ -19,7 +19,7 @@
 | Admin-экран (код) | Route | Дизайн-источник | Зрелость кода |
 |---|---|---|---|
 | `AdminTeamScreen` | `/admin/team` | master-management **MM1** (roster) | боевой |
-| `AdminInviteMasterScreen` | `/admin/team/invite` | master-management **MM2** (invite modal) | боевой |
+| `AdminAddPersonScreen` | `/admin/team/add`, `…/invite`, `…/access` | master-management **MM2** (invite) + DRF-1061 §2.4 (коды доступа) | боевой |
 | `AdminMasterDetailScreen` | `/admin/team/:masterId` | master-management **MM3** (detail/edit) | боевой |
 | `AdminServicesMatrixScreen` | `/admin/services` | master-management **MM4** (services×masters) | боевой (самый полный) |
 | `AdminDeactivationFlowScreen` | `/admin/team/:masterId/deactivate` | master-management **MM5** (4-step reassign) | боевой (12-action reducer) |
@@ -86,6 +86,23 @@
 4. **MM1 read-only roster** для receptionist (из handoff) — опционально, часть post-pilot эпика; для работоспособности роли не требуется.
 
 **Приоритет: 🟡 P2-team, НЕ пилот-блокер** — solo/YClients-пилот receptionist'а не содержит (solo = один активный человек). Admin management-поверхность боевая для **Owner/Admin**; receptionist-приём — post-pilot.
+
+### ✅ Решено иначе — владелец, 05.09.2026 (DRF-1522)
+
+Вопрос «отдельная приёмная поверхность или починить существующую» был задан владельцу прямо. Ответ: **починить существующую** — «убрать две вкладки и сажать на День». Пункты 1 и 3 плана выше отменены; пункт 2 (backend `owner|admin`) остаётся как был.
+
+Что вместо пункта 1: ресепшн НЕ выбрасывают в `NoRoleScreen`-фоллбек. Она остаётся на салонной поверхности, потому что два раздела из пяти ей действительно нужны и открываются — `AdminSalonDayScreen` роль не проверяет вовсе, `AdminTeamScreen` рисует ростер и прячет только действия.
+
+Что сделано (`apps/miniapp/src/lib/admin-tabs.ts` — правило в одном месте, его читают панель, страж адресов и посадка):
+
+- Панель ресепшн — три вкладки: **День · Команда · Услуги**. «Чаты» (бэкенд отвечает 403) и «Настройки» (заглушка) не показывают.
+- Посадка ресепшн — `/admin/day`, а не `/admin/team`: ростер мастеров, где почти все действия от неё скрыты, был последним, что ей нужно утром.
+- Прямая ссылка на закрытый раздел даёт честный отказ (`AdminSectionDeniedScreen`) с выходом на «День», а не пустой экран и не карточку ошибки после 403.
+- `is_receptionist` из `hasAdmin` НЕ убран — она остаётся на салонной поверхности намеренно. Роль различает `isReceptionOnly`, и управляющая роль поверх приёмной перевешивает: владелец с `is_receptionist` видит все пять вкладок.
+
+Права на бэкенде не ослаблены: 403 на `/admin/threads/` остаётся правильным ответом. Изменилось только то, что ресепшн больше не показывают дверь, которая ей не откроется.
+
+Пункт 4 (MM1 read-only roster) закрыт по факту: «Команда» ресепшн открыта.
 
 ---
 

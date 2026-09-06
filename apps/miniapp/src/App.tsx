@@ -20,10 +20,12 @@
  *        persisted in DeviceStorage). Covers the solo provider case
  *        (owner+admin+master = one Olga) AND the team admin who also
  *        delivers services.
- *      - has admin role only → AdminRoutes (default landing /admin/team).
- *        Receptionist sees the list but every owner-only action button
- *        is disabled with a tooltip — backend re-checks at /deactivate
- *        + /reactivate.
+ *      - has admin role only → AdminRoutes. Владелец и администратор
+ *        садятся на /admin/team; ресепшн — на /admin/day, и «Чаты» с
+ *        «Настройками» ей не показывают вовсе (DRF-1522, см.
+ *        `lib/admin-tabs.ts`). На «Команде» ресепшн видит список, но
+ *        каждое owner-only действие выключено — бэкенд перепроверяет на
+ *        /deactivate + /reactivate.
  *      - is_master only → /master/dashboard (unchanged from M0..M6).
  *      - is_customer → existing customer routes (unchanged).
  *      - 401 / unmapped → «Доступ не настроен» error screen with
@@ -41,6 +43,7 @@ import { Link, Navigate, Route, Routes, useLocation, useNavigate } from "react-r
 
 import { ApiError } from "./lib/api";
 import { getMe, type MeResponse } from "./lib/admin-api";
+import { adminLandingPath, isReceptionOnly } from "./lib/admin-tabs";
 import { getStartPayload, parseStartRoute } from "./lib/max-sdk";
 import {
   SurfaceModeContext,
@@ -56,18 +59,18 @@ import {
   type UnifiedSurface,
 } from "./state/surface";
 import { BootReloadContext } from "./state/boot";
+import { AdminAddPersonScreen } from "./screens/admin/AdminAddPersonScreen";
 import { AdminAvailabilityRequestsScreen } from "./screens/admin/AdminAvailabilityRequestsScreen";
 import { AdminDeactivationFlowScreen } from "./screens/admin/AdminDeactivationFlowScreen";
 import { AdminInternalChatListScreen } from "./screens/admin/AdminInternalChatListScreen";
 import { AdminInternalChatThreadScreen } from "./screens/admin/AdminInternalChatThreadScreen";
-import { AdminInviteMasterScreen } from "./screens/admin/AdminInviteMasterScreen";
 import { AdminMasterDetailScreen } from "./screens/admin/AdminMasterDetailScreen";
 import { AdminNewBookingScreen } from "./screens/admin/AdminNewBookingScreen";
 import { AdminPeopleScreen } from "./screens/admin/AdminPeopleScreen";
 import { AdminSalonDayScreen } from "./screens/admin/AdminSalonDayScreen";
+import { AdminSectionDeniedScreen } from "./screens/admin/AdminSectionDeniedScreen";
 import { AdminServicesMatrixScreen } from "./screens/admin/AdminServicesMatrixScreen";
 import { AdminSettingsPlaceholderScreen } from "./screens/admin/AdminSettingsPlaceholderScreen";
-import { AdminStaffAccessScreen } from "./screens/admin/AdminStaffAccessScreen";
 import { AdminTeamScreen } from "./screens/admin/AdminTeamScreen";
 import { BookingConfirmScreen } from "./screens/BookingConfirmScreen";
 import { BookingSuccessScreen } from "./screens/BookingSuccessScreen";
@@ -189,22 +192,53 @@ function adminRouteElements(me: MeResponse): React.ReactNode {
   return (
     <>
       {/* Phase 2 — the salon's day. First tab in AdminTabBar. */}
-      <Route path="/admin/day" element={<AdminSalonDayScreen />} />
+      <Route path="/admin/day" element={<AdminSalonDayScreen me={me} />} />
       <Route path="/admin/booking/new" element={<AdminNewBookingScreen />} />
       <Route path="/admin/team" element={<AdminTeamScreen me={me} />} />
-      <Route
-        path="/admin/team/invite"
-        element={<AdminInviteMasterScreen me={me} />}
-      />
       {/*
-        DRF-1061 block 2.4 — access codes. Sits beside `/admin/team/invite`
-        rather than inside it: that screen CREATES a catalog master, this
-        one GRANTS ACCESS to a person who already exists. The backend keeps
-        the two endpoints apart for the same reason.
+        DRF-1505 — «Добавить человека»: один экран, три адреса.
+
+        Раньше здесь стояли два экрана. Один СОЗДАВАЛ карточку мастера,
+        второй ВЫДАВАЛ доступ тому, кто уже заведён, и владелец салона
+        должен был выбрать между ними до того, как что-то сделает —
+        зная то, чего он знать не обязан. Экран теперь один, а вопрос
+        задаётся на нём (решение владельца §25 п.4 от 05.09.2026).
+
+        Прежние адреса оставлены и выбирают ветку: они лежат в
+        рунбуках, в `docs/screens/admin-surface-spec.md` и в чужих
+        экранах, и ломать их ради переезда незачем.
+
+        `key` у каждого элемента — не украшение. Три маршрута рисуют ОДИН
+        тип компонента на одном и том же месте дерева, поэтому переход
+        между ними React считает обновлением пропов, а не новым экраном:
+        инициализатор `useState` не перезапускается, и `initialTrack`
+        приезжает новый, а ветка остаётся прежняя. Сегодня по этим
+        адресам никто друг к другу не переходит, но ловушка сработала бы
+        молча — экран открылся бы «не тем».
       */}
       <Route
+        path="/admin/team/add"
+        element={<AdminAddPersonScreen key="add-person" me={me} />}
+      />
+      <Route
+        path="/admin/team/invite"
+        element={
+          <AdminAddPersonScreen
+            key="add-person-master"
+            me={me}
+            initialTrack="new-master"
+          />
+        }
+      />
+      <Route
         path="/admin/team/access"
-        element={<AdminStaffAccessScreen me={me} />}
+        element={
+          <AdminAddPersonScreen
+            key="add-person-access"
+            me={me}
+            initialTrack="access-code"
+          />
+        }
       />
       {/*
         The roster of PEOPLE — every role, both tables (ADR-0008). Owner
@@ -237,14 +271,34 @@ function adminRouteElements(me: MeResponse): React.ReactNode {
         path="/admin/availability-requests"
         element={<AdminAvailabilityRequestsScreen me={me} />}
       />
-      {/* Master ↔ admin internal chat — admin queue ("Чаты с мастерами"). */}
+      {/*
+        Master ↔ admin internal chat — admin queue ("Чаты с мастерами").
+
+        Ресепшн сюда не пускают (DRF-1522). Бэкенд и так отвечает 403
+        (`require_admin_role`), но экран за 403 показывал баннер поверх
+        пустого списка — человек видел ошибку, а не отказ. Страж стоит на
+        адресе, потому что вкладку мы убрали, а ссылка остаётся: в старых
+        диалогах бота, в закладках, в чужом сообщении.
+      */}
       <Route
         path="/admin/internal-chat"
-        element={<AdminInternalChatListScreen me={me} />}
+        element={
+          isReceptionOnly(me) ? (
+            <AdminSectionDeniedScreen me={me} section="Чаты" />
+          ) : (
+            <AdminInternalChatListScreen me={me} />
+          )
+        }
       />
       <Route
         path="/admin/internal-chat/threads/:threadId"
-        element={<AdminInternalChatThreadScreen me={me} />}
+        element={
+          isReceptionOnly(me) ? (
+            <AdminSectionDeniedScreen me={me} section="Чаты" />
+          ) : (
+            <AdminInternalChatThreadScreen me={me} />
+          )
+        }
       />
       {/*
         Legacy /admin/chats path (used by AdminTabBar) → redirect to the
@@ -255,9 +309,20 @@ function adminRouteElements(me: MeResponse): React.ReactNode {
         path="/admin/chats"
         element={<Navigate to="/admin/internal-chat" replace />}
       />
+      {/*
+        «Настройки» — заглушка, и для ресепшн это была заглушка, которую
+        она не может ничем заменить: настройки салона правит владелец
+        (DRF-1522). Отказ честнее, чем «Скоро здесь будут настройки».
+      */}
       <Route
         path="/admin/settings"
-        element={<AdminSettingsPlaceholderScreen />}
+        element={
+          isReceptionOnly(me) ? (
+            <AdminSectionDeniedScreen me={me} section="Настройки" />
+          ) : (
+            <AdminSettingsPlaceholderScreen me={me} />
+          )
+        }
       />
     </>
   );
@@ -423,8 +488,12 @@ function AdminRoutes({ me }: { me: MeResponse }) {
           already mount it via `masterRouteElements`, don't declare it
           twice. */}
       {inviteOnboardingRouteElements()}
-      {/* Default + unknown — land on team. */}
-      <Route path="*" element={<CatchAllRedirect to="/admin/team" />} />
+      {/*
+        Default + unknown. Владелец и администратор — на «Команду», как и
+        было. Ресепшн — на «День» (DRF-1522): ростер мастеров, где почти
+        все действия от неё скрыты, был последним, что ей нужно утром.
+      */}
+      <Route path="*" element={<CatchAllRedirect to={adminLandingPath(me)} />} />
     </Routes>
   );
 }
@@ -552,7 +621,7 @@ function UnifiedLanding({ me }: { me: MeResponse }) {
               title="Салон"
               subtitle="Команда, услуги, запросы графика"
               ariaLabel="Перейти в Салон"
-              onClick={() => pick("admin", "/admin/team")}
+              onClick={() => pick("admin", adminLandingPath(me))}
             />
             <SurfaceCard
               icon="👤"
@@ -608,7 +677,7 @@ function UnifiedLandingOrRedirect({ me }: { me: MeResponse }) {
   // the fall-through below (→ chooser) is defensive only.
   const last = readLastSurface();
   if (last === "admin") {
-    return <Navigate to="/admin/team" replace />;
+    return <Navigate to={adminLandingPath(me)} replace />;
   }
   if (last === "master") {
     return <Navigate to="/master/dashboard" replace />;

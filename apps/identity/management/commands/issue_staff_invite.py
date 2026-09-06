@@ -118,11 +118,37 @@ class Command(BaseCommand):
         )
         # Said plainly because the operator only gets one chance to copy it.
         self.stdout.write(
-            "\nThe code is shown once — only its hash is stored. "
-            "Re-issue if it is lost.\n"
-            "The recipient can either type it into the salon bot or open:\n"
-            f"  max://bot/<salon_bot>?start=inv_{code.replace('-', '')}"
+            "\nThe code is shown once — only its hash is stored. Re-issue if it is lost."
         )
+        self.stdout.write(self._handover_line(tenant, code))
+
+    def _handover_line(self, tenant: Tenant, code: str) -> str:
+        """How to hand the code over — a real link when there is one.
+
+        This used to print ``max://bot/<salon_bot>?start=inv_…``, with the
+        bot's name left as an unfilled placeholder. Two things wrong with
+        one line: ``max://`` is a scheme MAX does not implement (the phone
+        answers «Не удалось открыть ссылку», which is how #1332 found it in
+        the invite DM), and even had it worked nobody could follow a URL
+        with ``<salon_bot>`` still inside it.
+
+        So the link is built from the registry, by the same function the
+        admin endpoint uses (DRF-1505), and a contour with no salon bot is
+        told so rather than handed a template to fill in.
+        """
+
+        from apps.channels.max.salon_handler import DEEPLINK_PREFIX
+        from apps.channels.max.start_links import salon_start_link
+
+        link = salon_start_link(tenant, f"{DEEPLINK_PREFIX}{code.replace('-', '')}")
+        if not link:
+            return (
+                "The recipient types the code into the salon bot.\n"
+                "  (No shareable link: this contour has no salon bot with a Mini App "
+                "name — set MAX_BOT_<SLUG>_WEB_APP on the entry whose stream is "
+                "max_salon.)"
+            )
+        return f"The recipient can either type the code into the salon bot, or open:\n  {link}"
 
     def _get_tenant(self, slug: str) -> Tenant:
         tenant = Tenant.all_objects.filter(slug=slug).first()

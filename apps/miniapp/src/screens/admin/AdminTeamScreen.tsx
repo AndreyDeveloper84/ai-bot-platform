@@ -266,7 +266,7 @@ export function AdminTeamScreen({ me }: Props) {
       <div className="screen">
         <h1 className="screen__title">Команда</h1>
         <StateError err={err} onRetry={manualReload} />
-        <AdminTabBar />
+        <AdminTabBar me={me} />
       </div>
     );
   }
@@ -307,32 +307,27 @@ export function AdminTeamScreen({ me }: Props) {
             style={{ padding: "var(--s-2) var(--s-3)" }}
             onClick={() => {
               hapticSelection();
-              navigate("/admin/team/invite");
+              navigate("/admin/team/add");
             }}
           >
-            + Добавить мастера
+            + Добавить человека
           </button>
         )}
       </header>
 
       {/*
-        DRF-1061 block 2.4. Deliberately a separate, quieter control rather
-        than a second primary button: adding a NEW master to the catalog and
-        giving an EXISTING person access are different jobs, and the roster
-        screen is where somebody realises they need the second one.
+        DRF-1505 — одна кнопка вместо двух.
+
+        Здесь стояла вторая, тише первой: «Выдать доступ тому, кто уже в
+        салоне». Разделение было верным для бэкенда (две модели, два
+        жизненных цикла) и неверным для читателя: чтобы выбрать кнопку,
+        он должен был заранее знать, заведён ли человек в каталоге.
+        Промахнувшись, попадал в форму, которая просит не то.
+
+        Теперь вопрос задаётся ПОСЛЕ нажатия, на самом экране, где на
+        него можно ответить и передумать. Решение владельца §25 п.4 от
+        05.09.2026.
       */}
-      {(me.is_owner || me.is_admin) && (
-        <button
-          type="button"
-          className="admin-flow-back"
-          onClick={() => {
-            hapticSelection();
-            navigate("/admin/team/access");
-          }}
-        >
-          Выдать доступ тому, кто уже в салоне
-        </button>
-      )}
 
       {/*
         The only entry to «Люди салона». Owner-only, matching the
@@ -340,8 +335,11 @@ export function AdminTeamScreen({ me }: Props) {
         role, and the owner reserved role decisions to herself. Hiding it
         from an admin is convenience — the backend answers 403 either way.
 
-        It sits next to «Выдать доступ» because that is where somebody
-        realises they do not actually know who already has it.
+        It sits next to «Добавить человека» because that is where
+        somebody realises they do not actually know who already has
+        access. (It used to say «Выдать доступ» — that button was
+        folded into «Добавить человека» by DRF-1505, and the reason
+        survived the button.)
       */}
       {me.is_owner && (
         <button
@@ -674,7 +672,7 @@ export function AdminTeamScreen({ me }: Props) {
         onDismiss={() => setToast("")}
       />
 
-      <AdminTabBar />
+      <AdminTabBar me={me} />
     </div>
   );
 }

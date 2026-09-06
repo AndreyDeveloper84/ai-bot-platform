@@ -149,7 +149,11 @@ def _service_fields(dto: "CatalogSalonServiceDTO") -> dict[str, Any]:
 def upsert_specialists(tenant: "Tenant", dtos: list["CatalogSpecialistDTO"]) -> UpsertResult:
     """Upsert Ayla specialists into ``CatalogMaster`` for one tenant (S3B masters).
 
-    Keyed by the canonical Ayla SpecialistProfile.id (``CatalogMaster.id``).
+    Keyed by the canonical Ayla SpecialistProfile.id (``CatalogMaster.id``),
+    then — DRF-1507 — by the glue key ``(tenant, ayla_user_id)``. The second
+    lookup is what stops one person from owning two master rows: the
+    invite-create path mints its own ``uuid4`` primary key, so the canonical
+    key never finds that row and sync used to add a second one next to it.
     Update overwrites ONLY mirror fields (name, bio, experience, rating,
     review_count, is_active, ayla_user_id, external_updated_at, raw) —
     platform-owned fields (invite_status, mode, photo_url, archived_at,
@@ -189,26 +193,71 @@ def upsert_specialists(tenant: "Tenant", dtos: list["CatalogSpecialistDTO"]) -> 
                     tenant.id,
                 )
                 continue
+            mirror = {
+                "name": dto.name,
+                "bio": dto.bio,
+                "experience": dto.experience,
+                "rating": dto.rating,
+                "review_count": dto.review_count,
+                "is_active": dto.is_active,
+                "ayla_user_id": dto.user_id,
+                "external_updated_at": dto.external_updated_at,
+                "raw": dto.raw,
+            }
             try:
                 with transaction.atomic():
-                    _obj, created = CatalogMaster.objects.update_or_create(
-                        tenant=tenant,
-                        id=dto.ayla_master_id,
-                        defaults={
-                            "name": dto.name,
-                            "bio": dto.bio,
-                            "experience": dto.experience,
-                            "rating": dto.rating,
-                            "review_count": dto.review_count,
-                            "is_active": dto.is_active,
-                            "ayla_user_id": dto.user_id,
-                            "external_updated_at": dto.external_updated_at,
-                            "raw": dto.raw,
-                        },
-                    )
-                    if created:
+                    # DRF-1507 — сначала канонический ключ, потом ключ склейки.
+                    #
+                    # Канонический ключ мирового порядка не меняет: строка,
+                    # заведённая синхронизацией, имеет ``id`` == Ayla
+                    # ``SpecialistProfile.id``, и все девять пилотных мастеров
+                    # находятся именно им. Ветка ниже для них не выполняется.
+                    #
+                    # Вторая попытка — по ``ayla_user_id``. Её адресат — строка,
+                    # заведённая приглашением: у неё ``uuid4`` в ``id``, поэтому
+                    # первый поиск её не видит, и до этой правки синхронизация
+                    # заводила на того же человека вторую. Дальше расходились
+                    # два следствия: ``resolve_master`` искал уведомления по
+                    # инвайт-строке и не находил её, а биллинг возвращал
+                    # ``None``.
+                    #
+                    # Строка НЕ перекладывается на канонический ``id``: на
+                    # ``CatalogMaster`` смотрят внешние ключи из booking,
+                    # scheduling, conversations, notifications и internal_chat,
+                    # и смена первичного ключа — это слияние дублей, отдельный
+                    # обоснованный шаг, а не побочный эффект синхронизации.
+                    # Здесь строка ровно одна, и она та, к которой привязан
+                    # живой ``BotUser``.
+                    obj = CatalogMaster.objects.filter(pk=dto.ayla_master_id).first()
+                    if obj is None and dto.user_id:
+                        obj = CatalogMaster.objects.filter(ayla_user_id=dto.user_id).first()
+                        if obj is not None:
+                            logger.info(
+                                "catalog.upsert.master_deduped model=CatalogMaster "
+                                "ayla_master_id=%s matched_row=%s ayla_user_id=%s "
+                                "tenant_id=%s — строка того же человека уже есть под "
+                                "другим первичным ключом (заведена приглашением). "
+                                "Обновляю её вместо создания второй (DRF-1507).",
+                                dto.ayla_master_id,
+                                obj.pk,
+                                dto.user_id,
+                                tenant.id,
+                            )
+                    if obj is None:
+                        CatalogMaster.objects.create(
+                            tenant=tenant,
+                            id=dto.ayla_master_id,
+                            **mirror,
+                        )
                         result.created += 1
                     else:
+                        for field_name, value in mirror.items():
+                            setattr(obj, field_name, value)
+                        # ``synced_at`` — ``auto_now``, а ``auto_now`` пишется
+                        # только если поле названо в ``update_fields``. Без
+                        # него «когда платформа последний раз трогала строку»
+                        # молча замерло бы на дате создания.
+                        obj.save(update_fields=[*mirror, "synced_at"])
                         result.updated += 1
             except IntegrityError as exc:
                 # ``CatalogMaster.id`` is the global PK, so one Ayla master can
@@ -423,6 +472,30 @@ def _upsert_one_master_service(
     # tenant is the check that does not depend on any other mirror having been
     # correct first.
     master = master_model.objects.filter(id=dto.specialist).first()
+    if master is None and dto.user_id:
+        # DRF-1507 — тот же ключ склейки, что и в ``upsert_specialists``.
+        #
+        # После дедупа человек, заведённый приглашением, живёт под своим
+        # ``uuid4``, а не под Ayla ``SpecialistProfile.id``. Рёбра приезжают
+        # с ``specialist`` == каноническим id, и поиск по первичному ключу их
+        # больше не находит — мастер остался бы без единой услуги, то есть
+        # небронируемым, ровно после того, как мы починили ему уведомления.
+        #
+        # ``user_id`` здесь — ключ последней надежды, а не основной: он
+        # трогается только когда канонический id не разрешился ни во что.
+        # Столбец уникален в пределах салона (частичное ограничение на
+        # ``CatalogMaster``), поэтому совпадение не может быть
+        # многозначным, а ``.objects`` под ``tenant_scope`` не выпустит
+        # поиск за пределы салона.
+        master = master_model.objects.filter(ayla_user_id=dto.user_id).first()
+        if master is not None:
+            logger.info(
+                "catalog.upsert.master_resolved_by_user_id model=MasterService "
+                "specialist=%s matched_row=%s tenant_id=%s (DRF-1507)",
+                dto.specialist,
+                master.pk,
+                tenant.id,
+            )
     if master is None:
         result.skipped += 1
         logger.info(

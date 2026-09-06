@@ -1199,16 +1199,17 @@ a {
 }
 
 /*
- * AdminTabBar renders FIVE tabs (День / Команда / Услуги / Чаты /
- * Настройки) but reuses this block for tab, icon and label styling.
+ * AdminTabBar reuses this block for tab, icon and label styling.
  * `.master-tabbar` itself is a four-column grid because MasterTabBar
  * has exactly four tabs — so the admin bar's fifth tab wrapped onto a
- * second row and ate the bottom of every admin screen. This modifier
- * carries the only declaration that differs: the column count.
+ * second row and ate the bottom of every admin screen.
  *
- * The column count must equal the number of tabs the component
- * renders. `AdminTabBar.test.tsx` asserts exactly that for both bars,
- * so adding a sixth tab without widening the grid fails the build.
+ * Пять колонок здесь — запасной вариант на случай, если стиль элемента
+ * не применился. Настоящее число колонок ставит сам компонент через
+ * `style={{ gridTemplateColumns: repeat(N, 1fr) }}`: у владельца и
+ * администратора вкладок пять, у ресепшн — три (DRF-1522), и жёсткая
+ * пятёрка сжала бы её панель в левые три пятых экрана. Число колонок
+ * теперь не может разъехаться с числом вкладок — оно из него и берётся.
  */
 .master-tabbar--admin {
   grid-template-columns: repeat(5, 1fr);
@@ -6367,6 +6368,200 @@ a {
 
 .staff-access__field-note {
   font-size: var(--font-size-100);
+  line-height: 1.4;
+  color: var(--c-text-secondary);
+}
+
+/* DRF-1505 — «Добавить человека»: один экран, две ветки, и ссылка,
+   которую владелец салона передаёт человеку.
+
+   Вопрос «кого добавляете?» стоит первым в теле обеих веток и выглядит
+   одинаково в обеих — иначе переключение читается как переход на другой
+   экран, а вся задача была в том, чтобы экран был один. */
+.add-person__tracks {
+  border: 0;
+  padding: 0;
+  margin: 0 0 var(--s-4);
+}
+
+.add-person__legend {
+  padding: 0;
+  margin-bottom: var(--s-1);
+  font-size: var(--font-size-200);
+  color: var(--c-text-secondary);
+}
+
+.add-person__track {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--s-2);
+  min-height: 44px;
+  padding: var(--s-1) 0;
+  cursor: pointer;
+}
+
+.add-person__track input[type="radio"] {
+  /* Подпись начинается на первой строке, поэтому кружок подтягивается к
+     ней, а не центрируется по двухстрочному блоку. */
+  margin-top: 2px;
+  width: 20px;
+  height: 20px;
+  flex: none;
+  accent-color: var(--c-accent);
+}
+
+.add-person__track-text {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-1);
+}
+
+.add-person__track-label {
+  font-size: var(--font-size-300);
+}
+
+.add-person__track-effect {
+  font-size: var(--font-size-200);
+  line-height: 1.4;
+  color: var(--c-text-secondary);
+}
+
+/* Ссылка, которую отдают другому человеку.
+
+   Адрес показан целиком и выделяем целиком: буфер обмена — удобство, и
+   он вправе отказать (старый webview, запрещённое разрешение). Кнопка
+   лежит ПОД адресом, а не вместо него, чтобы отказ стоил одного лишнего
+   движения, а не потерянных учётных данных. */
+.shareable {
+  margin: var(--s-3) 0;
+  padding: var(--s-3);
+  border-radius: var(--r-md);
+  background: var(--c-surface-2);
+}
+
+.shareable__label {
+  margin: 0;
+  font-weight: 600;
+}
+
+.shareable__hint {
+  margin: var(--s-1) 0 0;
+  font-size: var(--font-size-200);
+  line-height: 1.4;
+  color: var(--c-text-secondary);
+}
+
+.shareable__url {
+  display: block;
+  margin: var(--s-2) 0;
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-size: var(--font-size-200);
+  line-height: 1.4;
+  word-break: break-all;
+  user-select: all;
+  -webkit-user-select: all;
+}
+
+.shareable__copy {
+  width: 100%;
+}
+
+.shareable__failed {
+  margin: var(--s-2) 0 0;
+  font-size: var(--font-size-200);
+  line-height: 1.4;
+  color: var(--c-danger);
+}
+
+/* Отказ, который владелец может исправить сам, — предупреждение, а не
+   поломка: «MAX не нашёл аккаунт» правится в поле выше, и красный цвет
+   тут врал бы о серьёзности.
+
+   Без запасного литерала: `--c-warning` объявлен в `tokens.css` в обеих
+   темах (светлая #8f5c06, тёмная #f7ad30, обе подписаны как сведённые к
+   4.5:1). Литерал рядом с токеном — вторая палитра, и линт
+   `miniapp_token_contrast.py` отказывается его принимать, потому что
+   пересчитать контраст он может только у того, что объявлено. */
+.callout--warn {
+  background: color-mix(in srgb, var(--c-warning) 10%, var(--c-surface-2));
+  color: var(--c-warning);
+}
+
+/* Общие поля админских форм — прежде каждое несло свой inline-стиль. */
+.admin-fieldset {
+  border: 0;
+  padding: 0;
+  margin: 0 0 var(--s-4);
+}
+
+.admin-fieldset__legend {
+  padding: 0;
+  margin-bottom: var(--s-1);
+  font-size: var(--font-size-200);
+  color: var(--c-text-secondary);
+}
+
+.admin-choice {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--s-2);
+  min-height: 44px;
+  padding: var(--s-1) 0;
+  cursor: pointer;
+}
+
+.admin-choice input {
+  margin-top: 2px;
+  width: 20px;
+  height: 20px;
+  flex: none;
+  accent-color: var(--c-accent);
+}
+
+.admin-choice--disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.admin-field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-1);
+  margin-bottom: var(--s-3);
+}
+
+.admin-field__title {
+  font-size: var(--font-size-200);
+  color: var(--c-text-secondary);
+}
+
+.admin-hint {
+  margin: var(--s-1) 0 0;
+  font-size: var(--font-size-100);
+  line-height: 1.4;
+  color: var(--c-text-secondary);
+}
+
+.admin-details {
+  margin: var(--s-3) 0;
+  font-size: var(--font-size-200);
+  line-height: 1.4;
+  color: var(--c-text-secondary);
+}
+
+.admin-details summary {
+  min-height: 44px;
+  display: flex;
+  align-items: center;
+  cursor: pointer;
+}
+
+/* Слышимый итог копирования (DRF-1505). Виден и глазами: подпись кнопки
+   меняется на «Скопировано», но кнопка может уехать из поля зрения на
+   узком экране, а строка стоит там, где читатель смотрел. */
+.shareable__copied {
+  margin: var(--s-2) 0 0;
+  font-size: var(--font-size-200);
   line-height: 1.4;
   color: var(--c-text-secondary);
 }

@@ -19,11 +19,26 @@ from django.core.management.base import CommandError
 from django.utils import timezone
 
 from apps.catalog.models import CatalogMaster
+from apps.channels.bot_registry import BotEntry
 from apps.identity.models import BotUser
 from apps.identity.services.staff_invites import normalize_code, redeem_staff_invite
 from apps.tenancy.models import StaffInvite, Tenant
 
 pytestmark = pytest.mark.django_db
+
+#: Shaped like the pilot's own salon bot (``id583403546770_3_bot``), whose
+#: Mini App name is also its public handle and therefore the ``<bot>`` in a
+#: start link.
+SALON_WEB_APP = "id583403546770_3_bot"
+
+SALON_BOT = BotEntry(
+    slug="salon",
+    webhook_secret="wh-salon",  # pragma: allowlist secret
+    api_token="token-salon",  # pragma: allowlist secret
+    tenant_slug="formula-tela",
+    stream="max_salon",
+    web_app=SALON_WEB_APP,
+)
 
 
 @pytest.fixture
@@ -75,14 +90,61 @@ class TestIssuing:
         invite = StaffInvite.all_tenants.get()
         assert normalize_code(code) not in invite.code_hash
 
-    def test_output_carries_the_deeplink_so_nobody_has_to_type(self, tenant):
+    def test_output_carries_the_deeplink_so_nobody_has_to_type(self, tenant, settings):
+        settings.MAX_BOT_REGISTRY = (SALON_BOT,)
+
         output = _run(tenant="formula-tela", role="admin")
 
         assert "start=inv_" in output
-        # The deeplink payload must be flat — MAX rejects '=' and '&' in it,
-        # and a dash would not survive normalization anyway.
+        # The deeplink payload must be flat — MAX rejects '=' and '&' in it.
+        # A dash would in fact survive `normalize_code`, which strips every
+        # non-alphanumeric character; the flat form is used because the
+        # admin endpoint uses it too, and one credential spelled two ways
+        # by two producers is how a link and a code come to look like
+        # different things.
         deeplink = [ln for ln in output.splitlines() if "start=inv_" in ln][0]
         assert "-" not in deeplink.split("start=inv_", 1)[1]
+
+    def test_the_deeplink_is_a_scheme_the_phone_can_open(self, tenant, settings):
+        """``max://`` is unimplemented — the device answers «Не удалось
+        открыть ссылку» (#1332 found that in the invite DM).
+
+        The command printed exactly that scheme, with ``<salon_bot>``
+        never filled in, until DRF-1505. Both halves are asserted here:
+        the dead scheme is gone AND the live one is present with a real
+        bot name, because «does not contain max://» passes on an empty
+        line too.
+        """
+
+        settings.MAX_BOT_REGISTRY = (SALON_BOT,)
+
+        output = _run(tenant="formula-tela", role="admin")
+
+        # Положительная стража первой: обе проверки ниже зелены на пустом
+        # выводе, и `negative_assert_guard.py` (DRF-1411) требует именно
+        # такого порядка — не из вежливости, а потому что «команда ничего
+        # не напечатала» это соседний дефект.
+        assert f"https://max.ru/{SALON_WEB_APP}?start=inv_" in output
+        assert "max://" not in output
+        assert "<salon_bot>" not in output
+
+    def test_no_salon_bot_means_a_plain_notice_not_a_template(self, tenant, settings):
+        """The operator is told there is no link, not handed a stencil.
+
+        A URL with an unfilled placeholder is worse than no URL: it looks
+        like something that can be forwarded, and gets forwarded.
+        """
+
+        settings.MAX_BOT_REGISTRY = ()
+
+        output = _run(tenant="formula-tela", role="admin")
+
+        # Положительные стражи первыми: код всё равно выдан, и оператору
+        # сказано, какую переменную задать. Без них «ссылки нет» зеленело
+        # бы на команде, которая упала и ничего не напечатала.
+        assert normalize_code(_code_from(output))
+        assert "MAX_BOT_<SLUG>_WEB_APP" in output
+        assert "start=inv_" not in output
 
     def test_ttl_is_configurable(self, tenant):
         _run(tenant="formula-tela", role="admin", ttl_days=1)
