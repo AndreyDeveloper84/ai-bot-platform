@@ -38,8 +38,8 @@ from uuid import UUID
 
 from apps.llm.router import get_router
 from apps.marketplace.discovery import (
-    discover_masters,
     discover_masters_for_service,
+    discover_masters_window,
     discover_salons,
     discover_services,
     get_salon,
@@ -94,6 +94,31 @@ _MAX_SALON_MATCH_SCAN = 200
 # guard correctly refuses the serviceless tap as an incomplete callback.
 # No commercial data is in the callback.
 CALLBACK_DISCOVER_BOOK_PREFIX = "cb:discover:book:"
+
+# Callback prefix for «Показать ещё» (DRF-1532). Carries ONE opaque segment,
+# ``cb:discover:more:{ref}``, which :func:`encode_more_ref` builds out of the
+# next offset plus the city and service the search ran with — everything
+# needed to re-run the SAME search one page further along.
+#
+# What it deliberately does NOT carry is the rotation seed. That is read from
+# the conversation at handling time, so a stale button in an old chat cannot
+# resurrect the order of a conversation it no longer belongs to, and page two
+# is always the tail of the page one THIS conversation was shown.
+CALLBACK_DISCOVER_MORE_PREFIX = "cb:discover:more:"
+
+#: Label of that button. «Показать ещё» is the owner's wording (§29.6).
+SHOW_MORE_LABEL = "Показать ещё"
+
+#: Said when the button is tapped and the search behind it no longer has a
+#: next page — the catalog moved, or the callback is from an old render.
+#: An honest sentence beats a silent no-op keyboard.
+SHOW_MORE_STALE_TEXT = "Больше подходящих мастеров не нашлось — попробуйте назвать услугу иначе."
+
+_MORE_REF_SEP = ""
+
+#: Ceiling on the encoded «more» payload. Well inside any transport limit and
+#: far past what an offset plus two 60-character strings can produce.
+_MAX_MORE_REF_CHARS = 320
 
 
 # ---------------------------------------------------------------------------
@@ -911,6 +936,109 @@ def decode_query_ref(ref: str) -> list[str]:
     return [p for p in payload.split(_QUERY_REF_SEP) if p][:_MAX_QUERY_REF_STEMS]
 
 
+# ─── DRF-1532: ротация при равенстве и «Показать ещё» ──────────────────────
+#
+# Замер пилота 06.09.2026: по «массаж» находится 8 мастеров, показываются 5.
+# Троих человек не увидит НИКОГДА, и кто именно выпал, решала фамилия —
+# `order_by("name", "id")` при полном равенстве оценок. Обе половины решения
+# владельца (§29.6) живут здесь: сид ротации берётся из разговора, а срез в
+# пять перестаёт быть концом списка и становится первой страницей.
+
+
+def rotation_seed(conversation: Any) -> str | None:
+    """The rotation seed of a conversation — its id, as a string.
+
+    ``None`` when there is no conversation (a unit test of pure ranking, a
+    reader with no dialogue behind it). ``None`` means «do not rotate», which
+    leaves the deterministic ranked order the search produced — no caller
+    changes behaviour by not having a conversation.
+
+    Best-effort by design: this is an ordering hint, and a conversation object
+    that turns out not to have an id must not take the turn down with it.
+    """
+    identifier = getattr(conversation, "id", None) if conversation is not None else None
+    return str(identifier) if identifier else None
+
+
+def encode_more_ref(*, offset: int, city: str | None, specialization: str | None) -> str:
+    """Encode the «show me the next page» request for a callback, or ``""``. PURE.
+
+    Carries the next OFFSET and the query that produced this page. ``""`` when
+    it would not fit, and the caller then renders no button — an absent button
+    is honest, a truncated payload silently searches for something else.
+
+    No catalog read and no conversation read, for the same reason
+    :func:`encode_query_ref` has neither: rendering must stay a function of
+    what it was handed.
+    """
+    payload = _MORE_REF_SEP.join(
+        (
+            str(max(0, int(offset))),
+            (city or "")[:_MAX_ECHOED_QUERY_CHARS],
+            (specialization or "")[:_MAX_ECHOED_QUERY_CHARS],
+        )
+    )
+    ref = base64.urlsafe_b64encode(payload.encode("utf-8")).decode("ascii").rstrip("=")
+    return ref if len(ref) <= _MAX_MORE_REF_CHARS else ""
+
+
+def decode_more_ref(ref: str) -> tuple[int, str | None, str | None] | None:
+    """What :func:`encode_more_ref` wrote, or ``None`` on anything unexpected.
+
+    A forged, truncated or stale ref decodes to ``None``, which the handler
+    answers with :data:`SHOW_MORE_STALE_TEXT` rather than with a search for
+    whatever the bytes happened to say.
+    """
+    ref = (ref or "").strip()
+    if not ref or len(ref) > _MAX_MORE_REF_CHARS:
+        return None
+    try:
+        payload = base64.urlsafe_b64decode(ref + "=" * (-len(ref) % 4)).decode("utf-8")
+    except (ValueError, UnicodeDecodeError):
+        return None
+    parts = payload.split(_MORE_REF_SEP)
+    if len(parts) != 3:
+        return None
+    try:
+        offset = int(parts[0])
+    except ValueError:
+        return None
+    if offset < 0:
+        return None
+    return offset, (parts[1] or None), (parts[2] or None)
+
+
+def fetch_master_page(
+    *,
+    city: str | None,
+    specialization: str | None,
+    conversation: Any = None,
+    offset: int = 0,
+    limit: int = _MAX_MASTER_CARDS,
+) -> tuple[list[MasterCard], int | None]:
+    """One page of discovered masters, plus the offset of the NEXT one.
+
+    ``None`` as the second element means «that was everybody» — the caller
+    renders no «Показать ещё», because a button that leads nowhere costs more
+    trust than the one it saves.
+
+    The page size stays five (§7, прогрессивное раскрытие). What changes is
+    that position six now exists: before DRF-1532 the slice happened in SQL
+    and the sixth candidate was never fetched, so no button could have reached
+    them.
+    """
+    cards, total = discover_masters_window(
+        city=city,
+        specialization=specialization,
+        limit=limit,
+        offset=offset,
+        resolve_service=True,
+        rotation_seed=rotation_seed(conversation),
+    )
+    next_offset = offset + len(cards)
+    return cards, (next_offset if cards and next_offset < total else None)
+
+
 def _render_master_cards(
     cards: list[MasterCard],
     *,
@@ -918,6 +1046,7 @@ def _render_master_cards(
     specialization: str | None = None,
     available_services: list[str] | None = None,
     missing_services: list[str] | None = None,
+    more_offset: int | None = None,
 ) -> DiscoveryReply:
     """Render discovered masters as a reply + a one-button-per-card keyboard.
 
@@ -955,6 +1084,16 @@ def _render_master_cards(
         ``available_services`` when the caller knows those names. «Вот мастера,
         которые могут подойти» under a request half of which was just refused
         would be the same silent overclaim in a longer message.
+
+        ### «Показать ещё» (DRF-1532)
+
+        ``more_offset`` is the offset of the next page, or ``None`` for «this
+        is everybody» — :func:`fetch_master_page` computes it, because only a
+        reader that saw the found-count can. When it is set, one more button
+        goes UNDER the cards carrying that offset and the query
+        (:func:`encode_more_ref`), so the candidates past position five stop
+        being unreachable. It is deliberately the LAST button: the cards are
+        the answer, and «ещё» is what to do if the answer was not enough.
     """
     if not cards:
         return render_no_match(city=city, specialization=specialization)
@@ -984,7 +1123,11 @@ def _render_master_cards(
         # actually shows up, not the one the schema allows.
         has_rating = card.rating is not None and card.rating >= 1
         rating = f" · ★ {card.rating}" if has_rating else ""
-        city = f" · {card.city}" if card.city else ""
+        # NOT ``city`` — that name holds the QUERY's city, which the
+        # «Показать ещё» ref below has to carry. Rebinding it here made the
+        # button search for « · Пенза» and find nobody (caught by
+        # test_button_carries_the_query_that_produced_the_page).
+        city_suffix = f" · {card.city}" if card.city else ""
         # The em-dash belongs to the specialization, not to the line. Ayla's
         # specialists feed carries no specialization, so since DRF-945 made
         # service-relation matching the primary discovery path, the empty case
@@ -998,7 +1141,7 @@ def _render_master_cards(
         # id-only card would render a bare « ·  » — the em-dash bug again.
         # The id still rides the callback below regardless of the name.
         service = f" · {card.service_name}" if card.service_name else ""
-        lines.append(f"• {card.name}{spec}{service}{rating}{city}")
+        lines.append(f"• {card.name}{spec}{service}{rating}{city_suffix}")
         # The service segment stays positional, so a query ref without a
         # resolved service rides behind an EMPTY one — «::ref», not «:ref» —
         # or the handler would read the ref as a malformed service id and the
@@ -1015,8 +1158,49 @@ def _render_master_cards(
                 ),
             }
         )
+    if more_offset is not None:
+        more_ref = encode_more_ref(offset=more_offset, city=city, specialization=specialization)
+        if more_ref:
+            buttons.append(
+                {
+                    "label": SHOW_MORE_LABEL,
+                    "callback": f"{CALLBACK_DISCOVER_MORE_PREFIX}{more_ref}",
+                }
+            )
     action_data = {"attachments": [{"type": "inline_keyboard", "payload": {"buttons": buttons}}]}
     return DiscoveryReply(text="\n".join(lines)[:_MAX_REPLY_CHARS], action_data=action_data)
+
+
+def execute_show_more(callback_text: str, *, conversation: Any = None) -> DiscoveryReply:
+    """Answer a «Показать ещё» tap with the NEXT page of the same search.
+
+    Always returns a reply — a forged, truncated or stale ref gets
+    :data:`SHOW_MORE_STALE_TEXT`, never silence and never a fall-through to
+    the model with a raw ``cb:`` string in its mouth.
+
+    The order is reproduced, not remembered: the seed is this conversation's
+    id and the ranking is deterministic, so re-running the search one page
+    along yields exactly the tail of the list page one was the head of.
+    Nobody repeats and nobody is skipped, and no cursor is stored anywhere.
+    """
+    decoded = decode_more_ref(callback_text[len(CALLBACK_DISCOVER_MORE_PREFIX) :])
+    if decoded is None:
+        return DiscoveryReply(text=SHOW_MORE_STALE_TEXT)
+    offset, city, specialization = decoded
+    cards, next_offset = fetch_master_page(
+        city=city,
+        specialization=specialization,
+        conversation=conversation,
+        offset=offset,
+    )
+    if not cards:
+        return DiscoveryReply(text=SHOW_MORE_STALE_TEXT)
+    return _render_master_cards(
+        cards,
+        city=city,
+        specialization=specialization,
+        more_offset=next_offset,
+    )
 
 
 # ─── DRF-1304: salon / service card renderers + deterministic executor ──────
@@ -2330,6 +2514,7 @@ def generate_discovery_reply(
     history: list[dict[str, Any]] | None = None,
     personal_context: "PersonalContextView | None" = None,
     trace_id: str | None = None,
+    conversation: Any = None,
 ) -> DiscoveryReply:
     """Generate a discovery reply via the tenant-less LLM path (tool-capable).
 
@@ -2365,11 +2550,11 @@ def generate_discovery_reply(
             if not has_discovery_criteria(city, specialization):
                 logger.info("orchestrator.discovery.show_masters.no_criteria trace=%s", trace_id)
                 return render_no_criteria_clarification()
-            cards = discover_masters(
+            cards, more_offset = fetch_master_page(
                 city=city,
                 specialization=specialization,
+                conversation=conversation,
                 limit=int(limit) if isinstance(limit, int) and limit > 0 else _MAX_MASTER_CARDS,
-                resolve_service=True,
             )
             # DRF-1312 — a composite request is checked service by service, so
             # the half nobody offers is stated rather than dropped.
@@ -2388,6 +2573,7 @@ def generate_discovery_reply(
                 specialization=specialization,
                 available_services=available,
                 missing_services=missing,
+                more_offset=more_offset,
             )
 
     text = (result.text or "").strip()

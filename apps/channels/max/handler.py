@@ -153,6 +153,7 @@ from apps.orchestrator.concierge import generate_direct_show_masters_reply
 from apps.orchestrator.fast_path import claims_direct_show_masters
 from apps.orchestrator.discovery import (
     CALLBACK_DISCOVER_BOOK_PREFIX,
+    CALLBACK_DISCOVER_MORE_PREFIX,
     CATALOG_CALLBACK_PREFIXES,
     CATALOG_STALE_CARD_TEXT,
     CLARIFY_CALLBACK_PREFIX,
@@ -161,6 +162,7 @@ from apps.orchestrator.discovery import (
     DiscoveryReply,
     execute_catalog_callback,
     execute_clarify_callback,
+    execute_show_more,
     resolve_discover_tap,
 )
 from apps.orchestrator.handoff import (
@@ -1728,6 +1730,14 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
         # through once the prefix matched.
         reply = execute_catalog_callback(event.text) or DiscoveryReply(text=CATALOG_STALE_CARD_TEXT)
         assistant_action_type = "catalog_card"
+    elif event.text.startswith(CALLBACK_DISCOVER_MORE_PREFIX):
+        # DRF-1532 — «Показать ещё». Sits with the other callback branches and
+        # BEFORE the concierge for the same reason they do: the text is an id
+        # this bot rendered, not something a person said. The conversation is
+        # what seeds the rotation, so the next page is the tail of the list
+        # THIS dialogue was shown and not of some other ordering.
+        reply = execute_show_more(event.text, conversation=conversation)
+        assistant_action_type = "discovery_more"
     elif event.text.startswith(CALLBACK_DISCOVER_BOOK_PREFIX):
         reply = _discovery_handoff_reply(event, bot_user, trace_id)
     elif event.text.startswith(BOOKING_CALLBACK_PREFIXES):
