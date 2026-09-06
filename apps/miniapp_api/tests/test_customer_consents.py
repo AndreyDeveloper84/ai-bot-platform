@@ -273,7 +273,9 @@ def test_proactive_hints_change_is_audited(client: Client, bot_user, hints_url, 
 
     rows = AuditLog.all_tenants.filter(action="consent.proactive_hints_changed")
     assert rows.count() == 1
-    assert rows.first().payload["enabled"] is False
+    row = rows.first()
+    assert row is not None
+    assert row.payload["enabled"] is False
 
 
 # ── Маркетинговое согласие: один источник правды ────────────────────────────
@@ -498,7 +500,9 @@ def test_revocation_is_audited(client: Client, bot_user, revoke_url, auth) -> No
 
     revoked = AuditLog.all_tenants.filter(action="consent.data_storage_revoked")
     assert revoked.count() == 1
-    assert revoked.first().payload["actor"] == "customer"
+    row = revoked.first()
+    assert row is not None
+    assert row.payload["actor"] == "customer"
     # Процедура по накопленному пишет собственную строку со списком шагов.
     assert AuditLog.all_tenants.filter(action="privacy.personal_data_deleted").exists()
 

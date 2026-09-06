@@ -198,6 +198,7 @@ def read_consents(bot_user: "BotUser") -> dict[str, Any]:
     (его читает ``consent_blocker``) — он и стоит в ``granted``; колонка
     показана как есть, чтобы расхождение было видно, а не замазано.
     """
+    consent_at = getattr(bot_user, "consent_at", None)
     return {
         "consents": {
             choice.value: _consent_state(bot_user, choice.value)
@@ -208,9 +209,7 @@ def read_consents(bot_user: "BotUser") -> dict[str, Any]:
         },
         "data_storage": {
             **_consent_state(bot_user, _PERSONAL_DATA),
-            "consent_at": (
-                bot_user.consent_at.isoformat() if getattr(bot_user, "consent_at", None) else None
-            ),
+            "consent_at": consent_at.isoformat() if consent_at else None,
             "revocation": {
                 "disclosure_version": DATA_STORAGE_REVOCATION_DISCLOSURE_VERSION,
                 "consequences": list(DATA_STORAGE_REVOCATION_CONSEQUENCES),
