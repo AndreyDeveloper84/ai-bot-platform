@@ -106,6 +106,7 @@ import { MasterOnboardingScreen } from "./screens/MasterOnboardingScreen";
 import { MasterPickerScreen } from "./screens/MasterPickerScreen";
 import { MasterNotificationSettingsScreen } from "./screens/MasterNotificationSettingsScreen";
 import { MasterProfileScreen } from "./screens/MasterProfileScreen";
+import { MasterAylaScreen } from "./screens/MasterAylaScreen";
 import { MasterScheduleScreen } from "./screens/MasterScheduleScreen";
 import { MasterServicesScreen } from "./screens/MasterServicesScreen";
 import { MasterSettingsScreen } from "./screens/MasterSettingsScreen";
@@ -343,6 +344,11 @@ function masterRouteElements(): React.ReactNode {
       {/* D7 billing — subscription status + card binding (money path) */}
       <Route path="/master/billing" element={<MasterBillingScreen />} />
       <Route path="/master/schedule" element={<MasterScheduleScreen />} />
+      {/* Раздел «Ayla» — диалог мастера с ассистентом (DRF-1180,
+          OD-MASTER-IA от 25.08). Свой адрес, а не вкладка: перевод
+          нижней навигации 4 → 3 идёт вместе с удалением экранов
+          переписки (DRF-1255). */}
+      <Route path="/master/ayla" element={<MasterAylaScreen />} />
       <Route
         path="/master/conversations"
         element={<MasterConversationsScreen />}

@@ -888,6 +888,15 @@ NOT_SWEPT_ROUTES: dict[str, str] = {
     "billing_card_setup": "proxy to the external billing service",
     "billing_pay_debt": "proxy to the external billing service",
     "payout_preview": "proxy to the external billing service",
+    "assistant_history": (
+        "the master's own transcript with Ayla — no customer record is "
+        "rendered as fields; swept for forbidden keys and for the "
+        "customer's phone digits by test_assistant_api.TestNoCustomerPii, "
+        "which seeds a transcript first (a sweep here would run on an "
+        "empty thread and prove nothing — DRF-1406)"
+    ),
+    "assistant_ask": "POST; calls the LLM — covered by test_assistant_api",
+    "assistant_confirm": "POST mutation; body is a signed action token only",
 }
 
 

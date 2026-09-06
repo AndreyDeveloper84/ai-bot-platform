@@ -1025,3 +1025,74 @@ export const cardSetup = async (input: {
   });
   return env.data;
 };
+
+// --- Раздел «Ayla»: диалог мастера с ассистентом (DRF-1180) ---------------
+// Зеркалит apps/master_api/views_assistant.py.
+//
+// Решение владельца (OD-7 от 21.08, повторено 05.09): «Раздел «Ayla» —
+// это диалог мастера с Ayla, тот же, что в боте, но через Mini App».
+// Поэтому история читается с сервера, а не копится в браузере: она
+// общая с салонным ботом.
+
+export interface AylaMessage {
+  id: string;
+  /** "user" | "assistant" */
+  role: string;
+  content: string;
+  /** Имя сработавшего инструмента или "" — для отладки, не для показа. */
+  tool: string;
+  /** ISO datetime, "" если сервер не смог его отрендерить. */
+  created_at: string;
+}
+
+/**
+ * Предложенное, но НЕ выполненное действие, меняющее данные.
+ *
+ * Эпик DRF-1180: «сначала она должна показать, что именно собирается
+ * сделать, получить подтверждение пользователя и только после этого
+ * выполнять действие». `summary` — то, что человек читает; `token` —
+ * единственное, чем это можно выполнить, и аргументы лежат внутри
+ * него, а не в этом объекте: иначе экран мог бы показать одно, а
+ * отправить на исполнение другое.
+ */
+export interface AylaPendingAction {
+  action: string;
+  summary: string;
+  confirm_label: string;
+  token: string;
+  expires_in_sec: number;
+}
+
+export interface AylaAskResponse {
+  answer: string;
+  tool: string;
+  pending_action: AylaPendingAction | null;
+  message_id: string;
+}
+
+export interface AylaConfirmResponse {
+  answer: string;
+  action: string;
+  executed: boolean;
+  message_id: string;
+}
+
+/** Что уже сказано в диалоге, старое первым. */
+export const getAylaHistory = (limit?: number): Promise<{ messages: AylaMessage[] }> =>
+  request(`/assistant/history${limit ? `?limit=${limit}` : ""}`, {
+    method: "GET",
+  });
+
+/** Задать вопрос. Ответ может нести предложение — оно НЕ выполнено. */
+export const askAyla = (text: string): Promise<AylaAskResponse> =>
+  request("/assistant/ask", {
+    method: "POST",
+    body: JSON.stringify({ text }),
+  });
+
+/** Выполнить предложение. Только по талону — своих аргументов нет. */
+export const confirmAylaAction = (token: string): Promise<AylaConfirmResponse> =>
+  request("/assistant/confirm", {
+    method: "POST",
+    body: JSON.stringify({ token }),
+  });
