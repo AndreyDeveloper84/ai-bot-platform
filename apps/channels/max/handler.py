@@ -1664,7 +1664,9 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
         # прочих колбэковых веток, по правилу ``_PASSTHROUGH_CALLBACK_PREFIXES``:
         # тап по кнопке, которую бот сам нарисовал, обязан дойти до ответа, а
         # не быть проглоченным приветствием или отданным модели сырым.
-        reply = DiscoveryReply(text=STALE_TAP_TEXT, action_data=first_contact_action_data())
+        reply = DiscoveryReply(
+            text=STALE_TAP_TEXT, action_data=first_contact_action_data(bot_user=bot_user)
+        )
         assistant_action_type = "stale_tap"
         # The tap could not be resolved to its intended action — a fallback,
         # not a successfully answered turn.

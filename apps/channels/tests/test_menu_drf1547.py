@@ -276,8 +276,12 @@ class TestEverySevenButtonDoesWhatItPromises:
         assert _labels(sent[0]) == [
             "Подобрать услугу",
             "Найти салон",
-            "Записаться",
-            "Мои записи",
+            # Значки — решение владельца 07.09.2026 (пересмотр §37 п.7).
+            # Пара «Записаться»/«Мои записи» делит корень и стоит соседними
+            # строками одного столбика: это единственное место в семёрке,
+            # где значок различает пункты, а не украшает их.
+            "📅 Записаться",
+            "📋 Мои записи",
             "Моя цель",
             "Профиль",
             "Ещё",
@@ -559,7 +563,7 @@ class TestDiaryThroughTheBot:
             _tap(payload=CALLBACK_EXTRA_OPEN, user_id=71201, callback_id="d-1")
         )
         # Стража: пункт нарисован, и его payload это ФРАЗА, а не слаг.
-        assert "Дневник питания" in _labels(sent[0]), _labels(sent[0])
+        assert "🥗 Дневник питания" in _labels(sent[0]), _labels(sent[0])
         assert DIARY_TAP_TEXT in _payloads(sent[0]), _payloads(sent[0])
 
         max_handler.handle_global_max_event(_msg(text=DIARY_TAP_TEXT, user_id=71201, mid="d-2"))
