@@ -804,3 +804,70 @@ class TestDiaryOnFirstContact:
         data = first_contact_action_data(bot_user=person)
         assert data["button_columns"] == 1
         assert len(data["buttons"]) == MAX_FIRST_CONTACT_BUTTONS
+
+    # -- ни один payload не уедет в модель сырым --------------------------- #
+
+    def test_no_shipped_payload_reaches_the_model_raw(self, person, consent, nutrition_on):
+        """Дыра, которую этот пункт проделал в стороже соседнего класса.
+
+        ``TestNoShippedButtonReachesTheModelRaw`` собирает роспись кнопок
+        на импорте модуля, то есть БЕЗ человека, — а пищевой вход без
+        человека не рисуется вовсе. Значит именно эта кнопка проезжает
+        мимо той параметризации, и обещание файла («кнопка, добавленная
+        через месяц, не может проехать мимо проверки») перестало бы быть
+        правдой ровно с этого PR.
+
+        Проверяется то же самое и на тех же данных: у каждого payload'а
+        первого экрана есть ветка, которая его заберёт, — либо перевод в
+        фразу (``resolve_tap_text``), либо ветка семейства ``cb:health:``
+        (``handler._route_health_callback``), либо payload САМ является
+        фразой, которую забирает детерминированный разбор дневника.
+
+        Прогоняется в обоих состояниях согласия: без него кнопка несёт
+        ``cb:health:need:*``, с ним — фразу, и это два разных payload'а.
+        """
+        from apps.orchestrator.personal_surface import looks_like_diary_request
+        from apps.skills.menu.marketplace import is_health_callback
+
+        for granted in (False, True):
+            consent(granted)
+            callbacks = self._callbacks(first_contact_buttons(bot_user=person))
+            assert callbacks, "пустая клавиатура прошла бы эту проверку ни о чём"
+
+            unroutable = [
+                cb
+                for cb in callbacks
+                if not (
+                    resolve_tap_text(cb) or is_health_callback(cb) or looks_like_diary_request(cb)
+                )
+            ]
+            assert unroutable == [], f"согласие={granted}: {unroutable}"
+
+    def test_that_guard_can_actually_see_an_unroutable_payload(self):
+        """Стража стражи: проверка выше обязана уметь краснеть.
+
+        Без неё «все payload'ы маршрутизируются» осталось бы зелёным и
+        тогда, когда три предиката перестали бы что-либо отвергать —
+        то есть ровно тогда, когда проверять стало нечего.
+
+        Поэтому здесь каждый предикат показывается с ДВУХ сторон: он
+        принимает свой настоящий payload (иначе отрицания ниже пусты по
+        построению) и отвергает чужой.
+        """
+        from apps.orchestrator.personal_surface import looks_like_diary_request
+        from apps.skills.menu.marketplace import CALLBACK_HEALTH_NEED_PREFIX, is_health_callback
+
+        # Присутствие: каждый предикат умеет сказать «да» — своему.
+        assert resolve_tap_text(quick_action_callback(SECONDARY_ACTION))
+        assert is_health_callback(f"{CALLBACK_HEALTH_NEED_PREFIX}food_diary")
+        assert looks_like_diary_request(DIARY_TAP_TEXT)
+
+        # И только теперь отрицание — на payload'е, которого нет ни у кого.
+        bogus = "cb:nosuchfamily:whatever"
+        # empty-assert-ok: payload несуществующего семейства — отвергнуть его
+        # обязаны все три, и присутствие каждого показано строками выше.
+        assert not resolve_tap_text(bogus)
+        # empty-assert-ok: то же самое, см. присутствие выше.
+        assert not is_health_callback(bogus)
+        # empty-assert-ok: то же самое, см. присутствие выше.
+        assert not looks_like_diary_request(bogus)
