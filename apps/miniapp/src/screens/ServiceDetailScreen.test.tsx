@@ -54,7 +54,7 @@ function renderScreen(at = "/customer/catalog/svc-1164") {
         {/* Compatibility alias (DRF-1481) — the same component. */}
         <Route path="/catalog/:serviceId" element={<ServiceDetailScreen />} />
         <Route path="/customer/catalog" element={<div>CATALOG</div>} />
-        <Route path="/book/master" element={<div>MASTER-PICKER</div>} />
+        <Route path="/customer/book/master" element={<div>MASTER-PICKER</div>} />
       </Routes>
     </MemoryRouter>,
   );
@@ -109,7 +109,7 @@ describe("ServiceDetailScreen — DRF-1164 unbookable service", () => {
     // The direct-URL bypass: the customer never saw the marked card, so
     // the ONLY thing standing between them and the empty master list is
     // this screen. Nothing here may write `serviceId` into the draft —
-    // that is what /book/master and /book/when read.
+    // that is what /customer/book/master and /customer/book/when read.
     mockedFetchService.mockResolvedValue({
       service: service({ is_bookable: false }),
     });

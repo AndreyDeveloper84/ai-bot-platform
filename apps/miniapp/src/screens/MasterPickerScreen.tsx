@@ -52,13 +52,14 @@ export function MasterPickerScreen() {
 
   function onPick(m: Master) {
     haptics.selection();
-    // DRF-1484 — provenance: /book/master is reachable only from the
+    // DRF-1484 — provenance: подбор мастера (§31: `/customer/book/master`,
+    // алиас `/book/master`) reachable only from the
     // service detail (catalog) flow, so the draft originates at the
     // catalog. Stamped here because ServiceDetailScreen is owned by
     // another change window; both spots stamp the same value.
     setEntryPoint("catalog");
     setMaster(m.id, m.name);
-    navigate("/book/when");
+    navigate("/customer/book/when");
   }
 
   if (state.kind === "loading") {

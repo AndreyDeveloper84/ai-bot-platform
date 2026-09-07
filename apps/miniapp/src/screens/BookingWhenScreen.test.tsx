@@ -27,9 +27,9 @@ const mockedSlots = vi.mocked(fetchSlots);
 
 function renderScreen() {
   render(
-    <MemoryRouter initialEntries={["/book/when"]}>
+    <MemoryRouter initialEntries={["/customer/book/when"]}>
       <Routes>
-        <Route path="/book/when" element={<BookingWhenScreen />} />
+        <Route path="/customer/book/when" element={<BookingWhenScreen />} />
         <Route
           path="/customer/booking/confirm"
           element={<div>CONFIRM-PROBE</div>}
