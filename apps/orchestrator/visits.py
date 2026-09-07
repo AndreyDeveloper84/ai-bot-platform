@@ -590,11 +590,23 @@ def _records_buttons(upcoming: tuple[Visit, ...], past: tuple[Visit, ...]) -> di
     «Записаться ещё». Ничего не отнято: положительная стража DRF-1411
     краснеет, если этот второй набор исчезнет.
 
+    Записи ВПЕРЕДИ сверх потолка тоже не остаются без входа: у них
+    «Подробнее», а карточка за ним несёт всё те же три действия. Потолок
+    экономит место на клавиатуре, а не отнимает у человека запись — иначе
+    четвёртую он не смог бы ни открыть, ни отменить.
+
     Canonical envelope so the same reply also renders in Telegram.
     """
     buttons: list[dict[str, str]] = []
     for visit in upcoming[:_MAX_ACTIONABLE_UPCOMING]:
         buttons.extend(_card_actions(visit, suffix=visit.service_name or "запись"))
+    buttons += [
+        {
+            "label": f"Подробнее: {v.service_name or 'запись'}",
+            "callback": f"{CALLBACK_VISIT_CARD_PREFIX}{v.appointment_id}",
+        }
+        for v in upcoming[_MAX_ACTIONABLE_UPCOMING:]
+    ]
     buttons += [
         {
             "label": f"Подробнее: {v.service_name or 'визит'}",

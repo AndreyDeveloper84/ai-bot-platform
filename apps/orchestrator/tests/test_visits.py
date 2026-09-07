@@ -534,6 +534,32 @@ class TestActionsMovedOntoTheBookingCard:
         # И старая карточка визита никуда не делась.
         assert "cb:visit:card:p1" in callbacks
 
+    def test_a_booking_past_the_action_cap_still_has_a_way_in(self, capability, db) -> None:
+        """Потолок экономит место, а не отнимает запись.
+
+        Три действия на запись — три кнопки; без потолка человек с пятью
+        записями получил бы пятнадцать. Но четвёртая запись обязана
+        остаться достижимой: «Подробнее» ведёт на её карточку, а карточка
+        несёт всё те же «Перенести» и «Отменить».
+        """
+        many = tuple(
+            _visit(appointment_id=f"u{i}", service=f"Услуга {i}", start=_FUTURE) for i in range(5)
+        )
+        capability["upcoming"] = VisitsResult(status="ok", visits=many)
+
+        reply = visits_mod.route_visits(global_bot_user=_BotUser())
+        callbacks = _callbacks(reply)
+
+        # Стража: первые три получили полный набор.
+        assert "cb:visit:cancel:u0" in callbacks
+        assert "cb:visit:move:u2" in callbacks
+        # Четвёртая и пятая — без действий в списке…
+        assert "cb:visit:cancel:u3" not in callbacks
+        assert "cb:visit:cancel:u4" not in callbacks
+        # …но со входом на свою карточку, где эти действия есть.
+        assert "cb:visit:card:u3" in callbacks
+        assert "cb:visit:card:u4" in callbacks
+
     def test_an_upcoming_card_offers_move_and_cancel_not_repeat(self, capability, db) -> None:
         capability["visit"] = _visit(appointment_id=_UUID_A, start=_FUTURE)
 
