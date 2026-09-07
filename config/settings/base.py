@@ -1503,22 +1503,37 @@ NUTRITION_PROACTIVE_DRY_RUN = os.environ.get("NUTRITION_PROACTIVE_DRY_RUN", "tru
 )
 
 # DRF-1464 - the two switches in front of the AI dietologist
-# (apps/nutrition_coach). Same contract as the proactive pair above, and
-# the same deliberate sequencing: two conscious operator acts, in order,
-# before a single coach line reaches a real person.
+# (apps/nutrition_coach).
 #
 # NUTRITION_COACH_ENABLED: master switch. False - every coach surface
-#   (the reactive answer and the proactive coach_hint beat, T5) stays
-#   silent without touching the database or Ayla.
-# NUTRITION_COACH_DRY_RUN: the safety inside the switch. True - the
-#   pipeline runs its full read path (goal reader, week picture) and logs
-#   exactly what it would have said and to whom, and says nothing.
+#   stays silent without touching the database or Ayla. True opens THREE
+#   of them, and only one of the three is held by anything else:
+#     * the reactive answer (apps/channels/max/handler.py) - live at
+#       once, though it stays blind until CONCIERGE_NUTRITION_CONTEXT_
+#       ENABLED is on too, since the picture is what it answers from;
+#     * the diary observation line (apps/orchestrator/coach_observation)
+#       - live at once;
+#     * the weekly coach_hint push (T5) - held by DRY_RUN below.
+# NUTRITION_COACH_DRY_RUN: the safety inside the switch, and it covers
+#   the PUSH ONLY. True - the beat runs its full read path (goal reader,
+#   week picture) and logs exactly what it would have said and to whom,
+#   and says nothing. Its sole reader is
+#   nutrition_proactive.tasks.send_coach_hints, via flags.dry_run.
 #
-# Order is fixed: ENABLED=True + DRY_RUN=True first, read the
-# ``nutrition_coach.*.dry_run`` log lines, and only then DRY_RUN=False.
-# Dry-run is the LAST switch to open: flipping both at once skips the
-# only step that can catch a wording or selection bug before a stranger
-# gets a message about what they eat. Runtime readers:
+# So the ramp is: ENABLED=True first (the two solicited surfaces go live
+# to real people at that moment - that is the decision this flag IS),
+# read the ``nutrition_coach.*.dry_run`` lines the beat writes, and only
+# then DRY_RUN=False for the push. Dry-run is the LAST switch to open:
+# flipping both at once skips the only step that can catch a wording or
+# selection bug before a stranger gets an UNSOLICITED message about what
+# they eat.
+#
+# The earlier wording here promised «two conscious operator acts before a
+# single coach line reaches a real person». That was true of the push and
+# false of the other two, and an operator reading it would think nothing
+# was visible until the second act. Corrected 07.09.2026; the open
+# question about which order to actually open them in is
+# docs/OPEN_DECISIONS.md §59. Runtime readers:
 # apps/nutrition_coach/flags.py (getattr with these defaults).
 NUTRITION_COACH_ENABLED = os.environ.get("NUTRITION_COACH_ENABLED", "false").lower() in (
     "true",
