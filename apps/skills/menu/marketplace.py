@@ -836,7 +836,17 @@ def _nutrition_buttons(*, bot_user: Any) -> list[dict[str, str]]:
     if not nutrition_enabled():
         return []
     if health_granted(bot_user):
-        return [{"label": item.label, "callback": item.callback} for item in NUTRITION_ITEMS]
+        # ``_item_button`` — тот же построитель, что у остальных пунктов:
+        # ботовый отдаёт фразу, экранный отдаёт ``cb:open:{слаг}`` и потому
+        # получает своё предупреждение, а не открывает приложение молча.
+        # Сегодня пищевой пункт один и он ботовый; сканер вернётся
+        # экранным, и правило для него уже готово.
+        out: list[dict[str, str]] = []
+        for item in NUTRITION_ITEMS:
+            button = _item_button(item)
+            if button is not None:
+                out.append(button)
+        return out
     if not miniapp_configured():
         return []
     return [
@@ -870,19 +880,24 @@ def _lines(items: tuple[MenuItem, ...]) -> list[str]:
 def marketplace_menu_text(*, intro: str = _INTRO, compact: bool = False) -> str:
     """Текст меню, собранный из ТЕХ ЖЕ списков, что и клавиатура.
 
-    ``compact`` — рамка промаха: длинный хвост опускается, чтобы реплика
-    влезала в потолок длины (см. :data:`_FALLBACK_OUTRO`). Клавиатура при
-    этом не урезается, так что ни один пункт не пропадает — он просто не
-    пересказан словами.
+    ``compact`` — рамка промаха: перечень и длинный хвост опускаются
+    ЦЕЛИКОМ, чтобы реплика влезала в потолок длины (см.
+    :data:`_FALLBACK_OUTRO` — 300 символов на негативных случаях золотых
+    фикстур). Раньше опускалась только экранная половина перечня; после
+    §37 в главном меню семь строк, и одной этой экономии не хватает.
+
+    Клавиатура при этом НЕ урезается, так что ни один пункт не пропадает
+    — он просто не пересказан словами, и все семь подписей человек видит
+    кнопками.
 
     Экранные пункты перечисляются только там, где они нарисованы: на
     развёртывании без мини-приложения меню не обещает экранов, которых
     человек не откроет.
     """
+    if compact:
+        return f"{intro}\n\n{_FALLBACK_OUTRO}"
     drawn = tuple(item for item in MAIN_ITEMS if item.where == "bot" or miniapp_configured())
-    parts = [intro, "\n".join(_lines(drawn))]
-    parts.append(_FALLBACK_OUTRO if compact else _OUTRO)
-    return "\n\n".join(parts)
+    return "\n\n".join([intro, "\n".join(_lines(drawn)), _OUTRO])
 
 
 def marketplace_menu_reply(*, bot_user: Any) -> tuple[str, dict[str, Any]]:
