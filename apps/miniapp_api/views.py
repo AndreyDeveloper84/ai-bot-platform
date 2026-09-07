@@ -2092,7 +2092,16 @@ def health_consent(request: HttpRequest) -> HttpResponse:
     # ещё раз, думая, что не получилось.
     from apps.orchestrator.health_return import resume_after_health_consent
 
-    resume_after_health_consent(bot_user)
+    try:
+        resume_after_health_consent(bot_user)
+    except Exception:  # noqa: BLE001 — согласие уже записано, ронять нечего
+        # Пояс поверх лямок: у самого возврата свой ``try`` внутри, но
+        # доверять «оно и так не бросает» здесь нельзя — цена ошибки
+        # несимметрична. 500 на запросе, который УСПЕЛ выдать согласие,
+        # заставит человека нажать «согласиться» ещё раз, думая, что не
+        # получилось, — то есть переспросит согласие на особую категорию
+        # персданных у того, кто его только что дал.
+        logger.exception("miniapp_api.health_consent.resume_failed bot_user=%s", bot_user.id)
     return JsonResponse(_health_consent_payload(bot_user))
 
 

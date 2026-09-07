@@ -192,3 +192,73 @@ def test_unauthenticated_is_rejected(client: Client, bot_user, url, auth) -> Non
 
     assert res.status_code != 200  # платформенный слог отказа — 400 (require_init_data)
     assert "granted" not in res.json()
+
+
+# ---------------------------------------------------------------------------
+# DRF-1547 / §37 п.5 — выдача согласия ВОЗВРАЩАЕТ человека туда, куда он шёл
+# ---------------------------------------------------------------------------
+
+
+def test_granting_resumes_the_surface_the_person_came_from(
+    client: Client, bot_user, url, auth, monkeypatch
+) -> None:
+    """Ручка обязана ПОЗВАТЬ возврат, а не только записать согласие.
+
+    Возврат сам по себе покрыт своими тестами; здесь проверяется ПРОВОДКА
+    — что выдача согласия его вызывает. Без этого теста снятие одной
+    строки из вьюхи прошло бы зелёным, и человек снова оставался бы в
+    профиле (ровно тот дефект, который §37 п.5 и чинит).
+    """
+    called: list[str] = []
+    monkeypatch.setattr(
+        "apps.orchestrator.health_return.resume_after_health_consent",
+        lambda user: called.append(str(user.id)) or True,
+    )
+
+    res = _post(client, url, auth, health_consent.HEALTH_CONSENT_DOCUMENT_VERSION)
+
+    # Стража: согласие действительно выдано — есть чему вызывать возврат.
+    assert res.status_code == 200
+    assert res.json()["granted"] is True
+    # И возврат позван, ровно для этого человека.
+    assert called == [str(bot_user.id)]
+
+
+def test_a_failing_resume_never_turns_a_granted_consent_into_a_500(
+    client: Client, bot_user, url, auth, monkeypatch
+) -> None:
+    """Согласие УЖЕ записано к моменту вызова.
+
+    Исключение здесь означало бы 500 на запросе, который успел сделать
+    своё дело, — и человек нажал бы «согласиться» ещё раз, думая, что не
+    получилось.
+    """
+
+    def _boom(_user):
+        raise RuntimeError("чат недоступен")
+
+    monkeypatch.setattr("apps.orchestrator.health_return.resume_after_health_consent", _boom)
+
+    res = _post(client, url, auth, health_consent.HEALTH_CONSENT_DOCUMENT_VERSION)
+
+    assert res.status_code == 200
+    assert res.json()["granted"] is True
+    assert health_consent.is_granted(bot_user) is True
+
+
+def test_withdrawal_resumes_nothing(client: Client, bot_user, url, auth, monkeypatch) -> None:
+    """Возврат — следствие согласия, а не любого хода по ручке."""
+    _post(client, url, auth, health_consent.HEALTH_CONSENT_DOCUMENT_VERSION)
+    called: list[str] = []
+    monkeypatch.setattr(
+        "apps.orchestrator.health_return.resume_after_health_consent",
+        lambda user: called.append(str(user.id)) or True,
+    )
+
+    res = client.delete(url, **auth)
+
+    # Стража: отзыв состоялся.
+    assert res.status_code == 200
+    assert res.json()["granted"] is False
+    # И только теперь отрицание: возврат при отзыве не звался.
+    assert called == []
