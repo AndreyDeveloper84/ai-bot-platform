@@ -196,5 +196,12 @@ def test_transport_try_wraps_transport_only():
     with open(rrc.__file__, encoding="utf-8") as fh:
         source = fh.read()
     guarded = source.split("    try:\n        with httpx.Client", 1)[1].split("    except", 1)[0]
+
+    # Сначала утверждение О НАЛИЧИИ: без него две проверки ниже прошли бы
+    # вхолостую в тот день, когда срез перестанет находить блок, — и тест
+    # молча перестал бы что-либо стеречь. Ровно тот класс дефекта, который
+    # ловит AST-гард репозитория.
+    assert "http.post(" in guarded, "срез не нашёл транспортный вызов — тест смотрит не туда"
+
     assert "json()" not in guarded, "разбор ответа заехал внутрь транспортного try"
     assert "violation" not in guarded, "проверка формы заехала внутрь транспортного try"
