@@ -205,20 +205,29 @@ def _keyboard(buttons: list[dict[str, str]]) -> dict | None:
     return {"attachments": [{"type": "inline_keyboard", "payload": {"buttons": fitting}}]}
 
 
-def _menu_keyboard(label: str, callback: str) -> dict | None:
-    """A ``cb:menu:*`` chip — or nothing, when that family is switched off.
+def _menu_chips(buttons: list[dict[str, str]]) -> dict | None:
+    """``cb:menu:*`` chips — or nothing, when that family is switched off.
 
     ``PILOT_CONVERSATIONAL_UX`` is the documented rollback for the whole
     DRF-963 surface, and ``MenuSkill.matches`` stands down when it is off
     (``apps/skills/menu/skill.py``). Every pre-existing tenant-side emitter of
-    these callbacks is guarded by the same flag; this one has to be too, or
-    flipping the rollback would leave chips on screen that no skill claims and
-    a raw ``cb:menu:…`` payload reaching the model — the DRF-1051 defect the
-    rollback exists to restore away FROM.
+    these callbacks is guarded by the same flag; every new one has to be too,
+    or flipping the rollback would leave chips on screen that no skill claims
+    and a raw ``cb:menu:…`` payload reaching the model — the DRF-1051 defect
+    the rollback exists to restore away FROM.
+
+    The flag is read HERE and nowhere else in this module, so «guarded by the
+    same flag» is a property of the code rather than a promise each new
+    emitter has to remember to keep.
     """
     if not pilot_ux_enabled():
         return None
-    return _keyboard([{"label": label, "callback": callback}])
+    return _keyboard(buttons)
+
+
+def _menu_keyboard(label: str, callback: str) -> dict | None:
+    """A single ``cb:menu:*`` chip. See :func:`_menu_chips`."""
+    return _menu_chips([{"label": label, "callback": callback}])
 
 
 def _my_bookings_keyboard() -> dict | None:
@@ -238,22 +247,33 @@ def _confirmed_keyboard() -> dict | None:
     and «записаться ещё» is the one people actually take here — the second
     service of the same visit, or a booking for somebody else. Both chips are
     ``cb:menu:*`` for the reason this module's header records: that family is
-    the only one that executes on the tenant's own bot AND on the global Ayla
-    bot, and a chip that lands in «я вас не понял» in one of the two chats is
-    worse than no chip.
+    the only one CLAIMED on the tenant's own bot AND on the global Ayla bot,
+    and a chip that lands in «я вас не понял» in one of the two chats is worse
+    than no chip.
+
+    Claimed is not the same as equally strong, and the difference is worth
+    recording rather than discovering. «Мои записи» resolves to «Покажи мои
+    записи», which the deterministic ``is_personal_booking_lookup`` predicate
+    claims on both surfaces. «Записаться ещё» resolves to «Хочу записаться»,
+    which on the TENANT bot re-enters that salon's booking funnel, but on the
+    global bot reaches the concierge — and ``route_booking_callback`` clears
+    the pending-booking context on a ``cb:book:confirm:`` tap, so it arrives
+    with no salon attached and answers with a clarification instead of the
+    picker. That is a weaker offer, not a dead end; a ``cb:discover:book:``
+    variant that carries the salon through is a separate ticket.
 
     «❌ Отменить» is deliberately not here. Offering to undo a booking in the
     second after it was made is a strange thing to say to somebody who just
     got what they came for, and it is not withheld from anyone who wants it:
     «Мои записи» lists the row with its own actions, one tap away.
 
-    Two buttons, well inside the five-button ceiling (BOT-001 AC-4.2 /
-    DRF-1200), and both payloads are 12-20 bytes — nowhere near the Telegram
-    cap that :data:`_MAX_CALLBACK_BYTES` guards.
+    Two buttons — rendered stacked, one per row, by both adapters (MAX pins
+    ``columns=1`` on this envelope, Telegram puts one button per row) — well
+    inside the five-button ceiling (BOT-001 AC-4.2 / DRF-1200), and both
+    payloads are 12-20 bytes, nowhere near the Telegram cap that
+    :data:`_MAX_CALLBACK_BYTES` guards.
     """
-    if not pilot_ux_enabled():
-        return None
-    return _keyboard(
+    return _menu_chips(
         [
             {"label": LABEL_MY_BOOKINGS, "callback": CALLBACK_MENU_MY_BOOKINGS},
             {"label": LABEL_BOOK_MORE, "callback": CALLBACK_MENU_BOOK},

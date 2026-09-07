@@ -269,10 +269,19 @@ class TestFunnelEndsAreNotDeadEnds:
         client.times = [
             AvailableTime(time=new_dt.strftime("%H:%M"), datetime=new_iso, seance_length_s=None)
         ]
-        with patch("apps.skills.booking.provider.get_booking_provider", return_value=client):
+        # Not ``_patched``: with ``BOOKING_VIA_AYLA_REST`` on, the gate builds
+        # its client through ``get_booking_provider`` and the YClients
+        # singleton that helper patches is bypassed entirely.
+        # ``send_message`` is stubbed because the success branch notifies the
+        # salon manager, and the tenant fixture carries a manager_chat_id.
+        with (
+            patch("apps.skills.booking.provider.get_booking_provider", return_value=client),
+            patch("apps.channels.max.outbound.send_message", return_value=None) as notified,
+        ):
             result = BookingGateCallbackSkill().handle(
                 _ctx(f"cb:book:confirm:{token}", bot_user=bot_user, conversation=conversation)
             )
+        assert notified.called  # the manager was told, not the customer
 
         assert client.reschedule_calls  # the move really happened
         assert "Готово! Записала." in result.reply_text
@@ -503,6 +512,8 @@ class TestRepliesThatStayButtonless:
             kind=PendingBookingAction.Kind.CONFIRM,
             payload=_confirm_payload(_future_iso()),
         )
+        with tenant_scope(tenant):
+            rows_before = BookingRequest.objects.filter(bot_user=bot_user).count()
         broken = _FakeYClients(create_raises=YClientsUnavailableError("circuit open"))
         with _patched(broken):
             refused = BookingGateCallbackSkill().handle(
@@ -513,7 +524,12 @@ class TestRepliesThatStayButtonless:
                 )
             )
 
-        assert broken.create_calls == []  # nothing was booked
+        # The fake raises before recording, so «no create_calls» would be true
+        # by construction. What has to be true is that the failed attempt left
+        # no booking behind — counted against the row the positive guard above
+        # legitimately created.
+        with tenant_scope(tenant):
+            assert BookingRequest.objects.filter(bot_user=bot_user).count() == rows_before
         assert "переключаю на менеджера" in refused.reply_text
         assert refused.should_handoff
         assert refused.action_data is None
@@ -585,7 +601,7 @@ class TestChipsLandOnBothSurfaces:
         button at all.
         """
         from apps.channels.max.quick_actions import resolve_tap_text
-        from apps.skills.menu.matching import MENU_CALLBACK_TEXT
+        from apps.skills.menu.matching import MENU_CALLBACK_TEXT, is_menu_callback
         from apps.skills.menu.skill import MenuSkill
 
         token = create_pending(
@@ -604,13 +620,23 @@ class TestChipsLandOnBothSurfaces:
         for callback in emitted:
             # Global Ayla bot: the handler translates the tap into a phrase.
             assert resolve_tap_text(callback) == MENU_CALLBACK_TEXT[callback], callback
-            # Tenant's own bot: MenuSkill claims the raw payload and answers
-            # with the identical phrase.
-            with tenant_scope(tenant):
-                claimed = MenuSkill().matches(
-                    _ctx(callback, bot_user=bot_user, conversation=conversation)
-                )
-            assert claimed, callback
+            # Tenant's own bot: the two conditions ``_handle_menu_callback``
+            # itself branches on. Deliberately NOT ``MenuSkill.matches`` —
+            # that returns True for ANY non-empty text (it is the last skill
+            # before echo), so it rubber-stamps a payload nobody parses. The
+            # negative below is what proves these two assertions have teeth.
+            assert is_menu_callback(callback), callback
+            assert callback in MENU_CALLBACK_TEXT, callback
+
+        # Paired negative on the same two predicates, with an invented
+        # grammar of exactly the kind the module header rejects.
+        invented = "cb:booking:done:nobody_parses_this"
+        assert not is_menu_callback(invented)
+        assert invented not in MENU_CALLBACK_TEXT
+        # …and the demonstration that the discarded assertion would have
+        # passed for it, which is why it was discarded.
+        with tenant_scope(tenant):
+            assert MenuSkill().matches(_ctx(invented, bot_user=bot_user, conversation=conversation))
 
     def test_my_bookings_lands_on_the_bookings_lookup(self) -> None:
         """«Покажи мои записи» is claimed by the SAME predicate both surfaces
@@ -704,4 +730,38 @@ class TestRollbackSwitch:
             )
         )
         assert off.reply_text == REPLY_CANCELLED
+        assert off.action_data is None
+
+    def test_the_confirmed_reply_loses_its_chips_with_the_menu_surface(
+        self, tenant: Tenant, bot_user: BotUser, conversation: Conversation, settings
+    ) -> None:
+        """The funnel's end is under the same rollback as every other
+        ``cb:menu:*`` emitter — asserted on the reply the customer reads, not
+        on the helper, because the helper is what a refactor moves.
+        """
+        settings.PILOT_CONVERSATIONAL_UX = True
+        on_token = create_pending(
+            tenant=tenant,
+            bot_user=bot_user,
+            kind=PendingBookingAction.Kind.CONFIRM,
+            payload=_confirm_payload(_future_iso()),
+        )
+        with _patched(_FakeYClients()):
+            on = BookingGateCallbackSkill().handle(
+                _ctx(f"cb:book:confirm:{on_token}", bot_user=bot_user, conversation=conversation)
+            )
+        assert _callbacks(on) == [CALLBACK_MENU_MY_BOOKINGS, CALLBACK_MENU_BOOK]
+
+        settings.PILOT_CONVERSATIONAL_UX = False
+        off_token = create_pending(
+            tenant=tenant,
+            bot_user=bot_user,
+            kind=PendingBookingAction.Kind.CONFIRM,
+            payload=_confirm_payload(_future_iso()),
+        )
+        with _patched(_FakeYClients()):
+            off = BookingGateCallbackSkill().handle(
+                _ctx(f"cb:book:confirm:{off_token}", bot_user=bot_user, conversation=conversation)
+            )
+        assert "Готово! Записала." in off.reply_text  # the booking still happens
         assert off.action_data is None
