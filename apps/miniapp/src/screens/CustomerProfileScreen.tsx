@@ -469,17 +469,11 @@ export function CustomerProfileScreen() {
           </span>
           <span className="wellness-dash__nav-label">Главная</span>
         </button>
-        <button
-          type="button"
-          className="wellness-dash__nav-tab"
-          aria-label="День"
-          onClick={() => navigate("/customer/wellness")}
-        >
-          <span className="wellness-dash__nav-icon" aria-hidden="true">
-            ☀
-          </span>
-          <span className="wellness-dash__nav-label">День</span>
-        </button>
+        {/* Вкладки «День» здесь нет (DRF-1546): поверхности «День» не
+            существует — её роль исполнял домашний экран, а он теперь
+            «Главная». Кнопка вела бы на страницу с подсвеченной
+            «Главной», то есть врала бы о том, куда ведёт. Возвращать
+            вместе с самой поверхностью «День». */}
         <button
           type="button"
           className="wellness-dash__nav-tab"

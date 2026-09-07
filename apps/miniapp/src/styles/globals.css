@@ -4502,7 +4502,12 @@ a {
   left: 0;
   right: 0;
   display: grid;
-  grid-template-columns: repeat(5, 1fr);
+  /* Равные колонки по числу вкладок, а не жёсткие пять (DRF-1546):
+     на «Главной» вкладки «День» нет — поверхности «День» не
+     существует, — и при `repeat(5, 1fr)` там оставалась пустая
+     колонка. Экраны с пятью вкладками выглядят ровно как раньше. */
+  grid-auto-flow: column;
+  grid-auto-columns: 1fr;
   height: calc(56px + var(--safe-bottom));
   padding-bottom: var(--safe-bottom);
   background: var(--c-surface-1);

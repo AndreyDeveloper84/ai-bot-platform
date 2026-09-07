@@ -13,7 +13,7 @@
  * sheets (`PersonalDataSheets.tsx`), чей собственный suite мокирует
  * `lib/personal-data`.
  */
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -87,6 +87,20 @@ async function renderFreshProd() {
 }
 
 describe("CustomerProfileScreen (реальный /customer/me)", () => {
+  it("bottom nav: «День» is not offered, the four real tabs are", async () => {
+    // DRF-1546 — та же уборка, что на «Записях»: поверхности «День»
+    // не существует, её роль исполнял домашний экран, а он теперь
+    // «Главная». Стража парная: снята одна вкладка, а не навигация.
+    await renderFresh();
+    const nav = within(
+      await screen.findByRole("navigation", { name: "Основная навигация" }),
+    );
+    expect(nav.queryByRole("button", { name: "День" })).not.toBeInTheDocument();
+    for (const tab of ["Главная", "Записи", "Услуги", "Я"]) {
+      expect(nav.getByRole("button", { name: tab })).toBeInTheDocument();
+    }
+  });
+
   beforeEach(() => {
     vi.restoreAllMocks();
     vi.unstubAllEnvs();

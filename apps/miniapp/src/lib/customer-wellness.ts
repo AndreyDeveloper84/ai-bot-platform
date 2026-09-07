@@ -9,15 +9,14 @@
  *
  * # Contracts
  *
- *   - `GET    /api/v1/customer/wellness/today`  → `WellnessToday`   STUB
- *   - `GET    /api/v1/customer/recent-activity` → `RecentActivity`  STUB
+ *   - `GET    /api/v1/customer/wellness/today`  → `WellnessToday`   WIRED
+ *   - `GET    /api/v1/customer/recent-activity` → `RecentActivity`  WIRED
  *   - `POST   /api/v1/customer/wellness/water`  → log a glass       WIRED
  *   - `DELETE /api/v1/customer/wellness/water/{entry_id}`           WIRED
  *
- * The two READS are still served from stubs here even though their
- * backends exist (`apps/miniapp_api/views.py::customer_wellness_today`
- * / `::customer_recent_activity`). Wiring them is a follow-up, not this
- * change. Until then they are fenced by `guardProd` — see below.
+ * All four are live against `apps/miniapp_api`. The stub blobs below
+ * are a dev-only `?stub=` QA hook and are unreachable in a production
+ * build (`pickStubOrLive` returns `null` there unconditionally).
  *
  * The WRITE path is real (DRF-1402): `flushWaterQueue` posts to Ayla
  * through `apps/miniapp_api` and the offline queue drains ONLY on
@@ -62,14 +61,26 @@ import { ApiError, request } from "./api";
  * future `GET /api/v1/customer/wellness/today` per W4.
  */
 export interface WellnessToday {
-  /** Eaten today (kcal). 0 when no logs. */
-  calories_eaten: number;
+  /**
+   * Eaten today (kcal), and the target. `0` is a real value — «nothing
+   * logged yet». **Both keys are ABSENT when the nutrition read failed**
+   * (DRF-1546), which is a different thing entirely: the screen must
+   * then say «Не удалось загрузить», not «0 / 0 ккал · 0 %». Same
+   * contract as `active_goals` below — absence cannot be misread the
+   * way a zero can.
+   */
+  calories_eaten?: number;
   /** User's target (kcal). Pulled from Layer 2 Goals or anketa. */
-  calories_target: number;
+  calories_target?: number;
   /**
    * Macros breakdown. **MAY BE undefined / null** when the customer
    * has not completed the nutrition anketa (Tau §11.1). In that case
    * the БЖУ row is hidden entirely — NEVER rendered as «Б — · Ж — · У —».
+   *
+   * `protein_target_g` has no Ayla source and the backend never sends
+   * it; the «Добрать белок» line that depended on it was removed
+   * (DRF-1546). The field stays on the type as the marker for the day
+   * a source appears.
    */
   pfc?: {
     protein_g: number;
@@ -77,10 +88,13 @@ export interface WellnessToday {
     carbs_g: number;
     protein_target_g?: number;
   };
-  /** Glasses logged today. */
-  water_glasses_eaten: number;
-  /** Daily target. Defaults to 8 if anketa skipped. */
-  water_glasses_target: number;
+  /**
+   * Glasses logged today and the daily target (defaults to 8 when the
+   * anketa was skipped). **Both ABSENT when the hydration read failed**
+   * — see `calories_eaten`.
+   */
+  water_glasses_eaten?: number;
+  water_glasses_target?: number;
   /**
    * Active goals (cap=1 for MVP — multi-goal post-pilot). Read from
    * Ayla's goal layer — the same `known.goal` the goal screen renders
@@ -96,15 +110,21 @@ export interface WellnessToday {
    *     told a customer who had just picked «Позаботиться о коже лица»
    *     to go pick one. Render a neutral label instead.
    *
-   * `progress_pct` is optional because Ayla stores no progress for a
-   * goal — `ClientGoal` is key / text / selected_at / source_channel.
-   * When absent the screen hides the bar rather than drawing 0 %.
-   * `week_num` is derived server-side from `selected_at`, and is absent
-   * only when that timestamp is unusable.
+   * There is NO progress field, by owner decision (решение №13,
+   * 06.09): на пилоте разрешён простой показ «Моя цель» — без
+   * процентов, шкал и оценок выполнения. Ayla и не хранит прогресс
+   * (`ClientGoal` = key / text / selected_at / source_channel), так что
+   * поле было бы нечем наполнить; теперь его нет и в контракте, и
+   * нарисовать полосу не из чего.
+   *
+   * Одна цель, не несколько — тем же решением.
+   *
+   * `week_num` — производная от `selected_at` на сервере, отсутствует
+   * только когда та отметка непригодна. Это счётчик недель, а не оценка
+   * выполнения, и под запрет №13 не попадает.
    */
   active_goals?: Array<{
     title: string;
-    progress_pct?: number;
     week_num?: number;
   }>;
   /**
@@ -173,18 +193,13 @@ export interface RecentActivity {
 }
 
 // ---------------------------------------------------------------------------
-// Production honesty guard — same precedent as `customer-profile.ts:215`
-// and `food-scanner.ts:180`.
-//
-// The pilot rule (`lib/feature-flags.ts:9-12`): NOTHING fake in prod. A
-// stub that ships to a real customer would show them «Анна», 1240 kcal
-// they never ate and a massage they never booked. Until the reads are
-// wired, a prod-mode call must fail loudly → `StateError` renders.
-//
-// NOTE: the dashboard is ALSO hidden in prod by `STUB_SURFACES_ENABLED`
-// (`CustomerWellnessDashboardScreen.tsx:109`). That gate is a screen-
-// level decision that can be lifted at any time; this guard is a
-// module-level one that must not depend on it. Two locks, one door.
+// Production honesty rule (`lib/feature-flags.ts`): NOTHING fake in
+// prod. A stub that shipped to a real customer would show them «Анна»,
+// 1240 kcal they never ate and a massage they never booked — so the
+// stub blobs below are reachable ONLY from a dev build, and only when
+// `?stub=` names a variant. The screen-level gate that used to hide
+// this surface entirely came off with DRF-1546; this module never
+// depended on it.
 // ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------
@@ -230,8 +245,6 @@ const DEFAULT_TODAY: WellnessToday = {
   },
   water_glasses_eaten: 4,
   water_glasses_target: 8,
-  // No progress_pct — the backend has no source for it (DRF-1476);
-  // a stub that invented one would hide the real render path.
   active_goals: [{ title: "Меньше стресса", week_num: 3 }],
   display_name: "Анна",
   day_pattern_hint: "morning_good_progress",
@@ -276,8 +289,8 @@ const EMPTY_ACTIVITY: RecentActivity = {
 };
 
 const PARTIAL_TODAY: WellnessToday = {
-  calories_eaten: 800,
-  calories_target: 2000,
+  // calories_* omitted — the nutrition read failed. Exercises the
+  // «Не удалось загрузить» row instead of «0 / 0 ккал» (DRF-1546).
   // pfc undefined — partial state exercises the conditional render path
   water_glasses_eaten: 2,
   water_glasses_target: 8,

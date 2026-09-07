@@ -214,7 +214,26 @@ class TestWellnessTodayHappyPath:
 
 
 class TestWellnessTodayGracefulDegradation:
-    def test_summary_unavailable_keeps_water(self, client: Client, bot_user: BotUser):
+    """A read that FAILED omits its keys — it does not send zeros.
+
+    DRF-1546. Zeros used to stand in for a failed read, and the dashboard
+    had no way to tell «0 / 8 стаканов» (nothing logged) from «we could
+    not ask Ayla». A person who had drunk four glasses was shown an empty
+    row every time the nutrition service hiccuped.
+
+    Same treatment as ``active_goals`` (DRF-1476) and ``weekly_progress``:
+    absence cannot be misread the way a zero can.
+
+    Every «the key is gone» assertion below is paired with a «the key is
+    there, with real numbers» case in
+    :class:`TestWellnessTodayHappyPath` and with the neighbouring slice
+    here — a change that dropped the fields for everyone would pass the
+    first half and fail the second.
+    """
+
+    def test_summary_unavailable_omits_calories_and_keeps_water(
+        self, client: Client, bot_user: BotUser
+    ):
         with _patch_nutrition(
             summary=NutritionUnavailableError("circuit_open"),
             water=_FakeWater(),
@@ -225,13 +244,19 @@ class TestWellnessTodayGracefulDegradation:
             )
         assert resp.status_code == 200
         data = resp.json()
-        # calories zeroed, pfc omitted, but water survives.
-        assert data["calories_eaten"] == 0
-        assert data["calories_target"] == 0
-        assert "pfc" not in data
+        # Presence first (DRF-1411): the body really has a hydration
+        # slice, so «the nutrition keys are gone» below is a statement
+        # about this response and not about an empty one.
         assert data["water_glasses_eaten"] == 4
+        assert data["water_glasses_target"] == 8
+        # The nutrition slice is ABSENT — not zeroed.
+        assert "calories_eaten" not in data
+        assert "calories_target" not in data
+        assert "pfc" not in data
 
-    def test_water_unavailable_keeps_calories(self, client: Client, bot_user: BotUser):
+    def test_water_unavailable_omits_hydration_and_keeps_calories(
+        self, client: Client, bot_user: BotUser
+    ):
         with _patch_nutrition(
             summary=_FakeSummary(),
             water=NutritionUnavailableError("circuit_open"),
@@ -242,13 +267,17 @@ class TestWellnessTodayGracefulDegradation:
             )
         assert resp.status_code == 200
         data = resp.json()
+        # Paired positive: calories survive the hydration outage.
         assert data["calories_eaten"] == 1240
         assert data["pfc"]["protein_g"] == 65
-        # water degraded to 0 eaten + default target.
-        assert data["water_glasses_eaten"] == 0
-        assert data["water_glasses_target"] == 8
+        # Hydration is ABSENT — the default target of 8 is a product
+        # default for a real read, not a stand-in for a failed one.
+        assert "water_glasses_eaten" not in data
+        assert "water_glasses_target" not in data
 
-    def test_both_unavailable_returns_200_zeros(self, client: Client, bot_user: BotUser):
+    def test_both_unavailable_returns_200_with_neither_slice(
+        self, client: Client, bot_user: BotUser
+    ):
         with _patch_nutrition(
             summary=NutritionUnavailableError("down"),
             water=NutritionUnavailableError("down"),
@@ -257,13 +286,40 @@ class TestWellnessTodayGracefulDegradation:
                 _url(),
                 HTTP_AUTHORIZATION=_init_data_header(bot_user.channel_user_id),
             )
-        # Dashboard resilience: 200 with zeros, never 502.
+        # Dashboard resilience: 200, never 502 — but with nothing invented.
+        assert resp.status_code == 200
+        data = resp.json()
+        # Presence first (DRF-1411). A 200 is not a guard — an empty body
+        # is a perfectly good 200 — so prove the response has content the
+        # view built: the greeting name and the independent goal read.
+        assert data["display_name"] == "Анна К."
+        assert data["active_goals"] == []
+        assert "calories_eaten" not in data
+        assert "water_glasses_eaten" not in data
+        assert "pfc" not in data
+
+    def test_a_genuinely_empty_day_still_reports_its_zeros(self, client: Client, bot_user: BotUser):
+        """The guard on the fix.
+
+        Zero is a real value and must keep arriving — otherwise «omit on
+        failure» would have quietly become «never send», and the
+        dashboard would say «Не удалось загрузить» to every new customer.
+        """
+        with _patch_nutrition(
+            summary=_FakeSummary(calories_total=0, protein_g=0, fat_g=0, carbs_g=0),
+            water=_FakeWater(total_ml=0),
+        ):
+            resp = client.get(
+                _url(),
+                HTTP_AUTHORIZATION=_init_data_header(bot_user.channel_user_id),
+            )
         assert resp.status_code == 200
         data = resp.json()
         assert data["calories_eaten"] == 0
+        assert data["calories_target"] == 2100
         assert data["water_glasses_eaten"] == 0
-        assert "pfc" not in data
-        assert data["active_goals"] == []
+        assert data["water_glasses_target"] == 8
+        assert data["pfc"] == {"protein_g": 0, "fat_g": 0, "carbs_g": 0}
 
 
 class TestWellnessTodayActiveGoals:
@@ -446,5 +502,7 @@ class TestWellnessTodayGoalsDegradation:
                 _url(), HTTP_AUTHORIZATION=_init_data_header(bot_user.channel_user_id)
             )
         data = resp.json()
-        assert data["calories_eaten"] == 0
+        # Presence first (DRF-1411): the goal really arrived, so «the
+        # nutrition key is gone» is about this response.
         assert data["active_goals"][0]["title"] == "Позаботиться о коже лица"
+        assert "calories_eaten" not in data
