@@ -42,7 +42,7 @@ Master DM **actively fires** via local mirror lookup chain:
     → .specialist_id (Ayla Master UUID)
     → CatalogMaster.ayla_user_id == specialist_id
     → .linked_bot_user (OneToOne к BotUser)
-    → BotUser.chat_id → send_message
+    → BotUser.channel_user_id → send_message(user_id=…)  ← DRF-1558
 
 All hops are bot-platform mirror tables — no cross-repo DB / REST call
 per ADR-0009 §Hard rule #2. Mirror staleness gap (Ayla canonical may be
@@ -259,7 +259,10 @@ def _try_send_master_dm(data: dict[str, Any], payment_id: str) -> None:
         → .specialist_id (Ayla Master UUID)
         → CatalogMaster.ayla_user_id == specialist_id
         → .linked_bot_user (OneToOne к BotUser, lazy-onboarded)
-        → BotUser.chat_id → send_message(chat_id, text)
+        → BotUser.channel_user_id → send_message(user_id=…, text)
+
+    Адрес — ЧЕЛОВЕК, а не диалог (DRF-1558): этот DM пишется первым,
+    а сохранённый ``chat_id`` принадлежит паре «другой бот + человек».
 
     Enrichment fields from local mirror (Phase 1 envelope is Option C
     minimum — only payment/appointment/client ids + counter):
