@@ -24,6 +24,7 @@ from apps.catalog.models import (
     MasterService,
 )
 from apps.catalog.provenance import MasterServiceSource, master_service_write
+from apps.catalog.services import verification
 
 
 class _MirrorAdminBase(admin.ModelAdmin):
@@ -240,22 +241,23 @@ class CatalogMasterAdmin(_MirrorAdminBase):
         description="Верифицировать: приглашение принято (вручную)",
     )
     def verify_masters(self, request, queryset) -> None:  # type: ignore[no-untyped-def]
-        changed = 0
-        for master in queryset:
-            if master.invite_status == CatalogMaster.InviteStatus.ACCEPTED:
-                continue
-            old = master.get_invite_status_display()
-            master.invite_status = CatalogMaster.InviteStatus.ACCEPTED
-            master.save(update_fields=["invite_status"])
-            self.log_change(
-                request,
-                master,
-                f"Верификация вручную: приглашение «{old}» → «принято».",
-            )
-            changed += 1
+        """Тонкая обёртка над сервисом верификации (DRF-1553).
+
+        Тело действия переехало в
+        ``apps.catalog.services.verification.verify_masters``: то же
+        действие понадобилось экрану подключения салона (DRF-1553,
+        OPEN_DECISIONS §51.1), а позвать метод админки с ``request`` и
+        ``queryset`` оттуда нельзя. Копия была бы второй реализацией
+        верификации — и вторым текстом в журнале.
+
+        Здесь осталось ровно то, что принадлежит админке: какие строки
+        выбраны и что сказать оператору. Журнал пишет сервис — см. его
+        докстринг, почему не вызывающий.
+        """
+        outcome = verification.verify_masters(queryset, user=request.user)
         self.message_user(
             request,
-            f"Верифицировано: {changed}. Уже принятых пропущено: {len(queryset) - changed}.",
+            f"Верифицировано: {outcome.verified}. Уже принятых пропущено: {outcome.skipped}.",
             level=messages.SUCCESS,
         )
 

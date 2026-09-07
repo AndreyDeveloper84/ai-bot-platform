@@ -33,6 +33,7 @@ from apps.tenancy.onboarding import (
     REASON_CITY_MISSING,
     REASON_NEVER_SYNCED,
     REASON_NO_ACTIVE_SERVICES,
+    REASON_MASTERS_AWAIT_VERIFICATION,
     REASON_NO_BOOKABLE_MASTERS,
     REASON_TENANT_INACTIVE,
     ConnectError,
@@ -248,8 +249,13 @@ class TestOutcomeIsClientVisibility:
         # DRF-1496: синхронизация приводит мастера в ``pending``, и до
         # ручной верификации салон клиенту не виден. Это поведение
         # задачи: приглашения этому мастеру никто не слал.
+        #
+        # DRF-1553 назвал этот подслучай отдельно: причина «ждут
+        # верификации», а не общее «нет бронируемых мастеров». Разница
+        # несущая — на первой экран даёт кнопку, на второй предлагать
+        # нечего.
         assert result.assessment.bookable_masters == 0
-        assert REASON_NO_BOOKABLE_MASTERS in result.assessment.reasons
+        assert REASON_MASTERS_AWAIT_VERIFICATION in result.assessment.reasons
 
         # Верификация оператором — и тот же салон на тех же данных
         # становится видимым. Парная положительная стража к отрицанию
@@ -346,7 +352,8 @@ class TestAssessSalon:
         http = FakeAylaHttp(services=[_service()], specialists=[_specialist()])
         connected = _connect(http, sync_service=CatalogSyncService(http_client=http))
         # DRF-1496: до верификации причина названа, а не молчит.
-        assert REASON_NO_BOOKABLE_MASTERS in connected.assessment.reasons
+        # DRF-1553: и названа подслучаем — «ждут верификации».
+        assert REASON_MASTERS_AWAIT_VERIFICATION in connected.assessment.reasons
 
         assert _verify_synced_masters(connected.tenant) == 1
         result = assess_salon(connected.tenant)
