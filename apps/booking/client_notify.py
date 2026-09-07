@@ -278,7 +278,8 @@ def notify_client_booking_confirmed(
             # mobile app / Mini App and has never opened the bot, so
             # there is no conversation to answer in. INFO, because a
             # WARNING here would fire on ordinary traffic and drown the
-            # salon-side no_recipients warning that does mean something.
+            # booking.notify.specialist_unreachable warning that does
+            # mean something.
             logger.info(
                 "booking.client_notify.no_chat tenant=%s appointment_id=%s",
                 tenant.slug,

@@ -23,11 +23,16 @@ customer-facing avatar.
 
 Direction decides the recipient:
 
-* **master → admin**: the salon side. The salon's manager address first,
-  then the configured fallback channel — the same cascade the booking
-  notice uses, deliberately, so a salon configures one destination rather
-  than one per feature. Which KEY each rung uses is decided once, in
-  :mod:`apps.channels.max.addressing` (DRF-1559).
+* **master → admin**: the salon side, and only the salon's own manager
+  address. Which KEY that address uses is decided once, in
+  :mod:`apps.channels.max.addressing` (DRF-1559). This rung used to fall
+  back to the configured operator channel — removed by the owner's
+  decision of 2026-09-07, for the same reason the booking notice lost it:
+  that list is global, it carries no tenant, so on the pilot every salon's
+  staff correspondence resolved to one shared, hand-typed dialog. That is
+  exactly the leak the admin→master direction already refuses below. A
+  salon with no manager address configured simply has no MAX address, and
+  that is a normal state.
 * **admin → master**: that thread's master personally, via
   ``CatalogMaster.linked_bot_user.channel_user_id``. There is no fallback here on
   purpose: a message addressed to one master must not be broadcast to the
@@ -140,19 +145,18 @@ def _recipients_for(message) -> tuple[tuple[MaxAddress, ...], str]:
     отвечает только на вопрос «кому».
     """
 
-    from apps.handoff.notify import get_notify_addresses
-
     thread = message.thread
     tenant = thread.tenant
 
     if message.sender_role == "master":
-        # To the salon side. Same cascade as the booking notice so a salon
-        # configures one destination, not one per feature.
+        # To the salon side, and only to this salon's own address. The
+        # global operator channel was removed on 2026-09-07 (see the
+        # module docstring): it names no tenant, so it would have shown
+        # ten salons each other's staff correspondence.
         manager = manager_address(tenant)
         if manager:
             return (manager,), "manager"
-        fallback = get_notify_addresses()
-        return (fallback, "fallback") if fallback else ((), "none")
+        return (), "none"
 
     # To the master personally. No fallback on purpose: broadcasting a
     # message meant for one master to the salon's shared channel would
@@ -179,6 +183,21 @@ def notify_internal_message(*, message) -> None:
         recipient_count = len(recipients)
 
         if not recipient_count:
+            if message.sender_role == "master":
+                # Observable, but quiet. Since 2026-09-07 a salon with no
+                # manager address has no MAX address at all, and that is
+                # a normal state rather than a configuration defect — one
+                # INFO line per pass, no warning. (The admin→master
+                # direction below keeps its WARNING: an unlinked master
+                # IS a defect.)
+                logger.info(
+                    "internal_chat.notify.no_salon_target tenant=%s thread=%s message=%s "
+                    "— no manager address is configured, the salon copy is skipped",
+                    tenant.slug,
+                    thread.id,
+                    message.id,
+                )
+                return
             # Loud, not silent: an undeliverable staff message is a
             # configuration defect, and silence is what made the whole
             # internal-chat feature invisible in the first place.

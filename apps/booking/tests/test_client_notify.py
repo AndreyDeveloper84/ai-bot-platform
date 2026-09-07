@@ -242,8 +242,8 @@ class TestAddressing:
         """Booking in the Ayla app without ever opening the bot is normal.
 
         No message is possible and none is warned about — a WARNING on
-        ordinary traffic would bury the salon-side ``no_recipients``
-        warning, which does mean something is misconfigured.
+        ordinary traffic would bury ``booking.notify.specialist_unreachable``,
+        which does mean something is misconfigured.
         """
 
         _notify(tenant, None)
