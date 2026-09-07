@@ -75,9 +75,14 @@ def _conversation(*, asked_ago_seconds: int | None = None) -> SimpleNamespace:
 
 
 def _context(text: str, conversation: SimpleNamespace) -> SkillContext:
+    # Подделки вместо моделей — намеренно: памятка читает у разговора
+    # только `skill_state`, а навык у человека не читает ничего, и
+    # заводить строки в базе ради этого значило бы проверять ORM вместо
+    # порядка проверок. Тот же приём и та же аннотация, что у соседнего
+    # `apps/skills/nutrition_anketa/tests/test_skill.py`.
     return SkillContext(
-        conversation=conversation,
-        bot_user=SimpleNamespace(id="bu-1542"),
+        conversation=conversation,  # type: ignore[arg-type]
+        bot_user=SimpleNamespace(id="bu-1542"),  # type: ignore[arg-type]
         message_text=text,
     )
 
