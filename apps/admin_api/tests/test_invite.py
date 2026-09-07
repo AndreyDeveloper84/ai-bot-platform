@@ -6,16 +6,20 @@ Covers:
   Customer 403.
 * Validation — missing name, bad contact_method, oversized fields,
   cross-tenant service UUID, role!=master.
-* Side effects — CatalogMaster created with token + TTL, WorkingHours
-  seeded, MasterService rows seeded, audit rows for
-  ``master.invited`` + ``master.invite_dispatched``.
+* Side effects — CatalogMaster created with token + TTL, MasterService
+  rows seeded, ONE audit row (``master.invited``).
 * Idempotency — same (name, contact_value) returns existing row +
   ``X-Idempotent`` header; expired invite creates fresh; different
   contact_value creates fresh.
-* MAX DM dispatch — success path = queued; raise = failed + audit
-  reflects failure.
-* Atomic — WorkingHours seed failure rolls back master row.
-* Modes — ``catalog_only`` skips token + dispatch.
+* Atomic — service seed failure rolls back master row.
+* Modes — ``catalog_only`` skips the token.
+
+Личного сообщения этот эндпоинт больше не шлёт (решение владельца §44.4
+от 07.09.2026), поэтому здесь нет ни `patched_send_message`, ни класса
+про доставку. Стража, что попытка не вернулась, стоит рядом — в
+``test_invite_no_dm.py``: она бьёт по ``max_outbound``, а не по
+отсутствию строки в ответе, потому что вернуть отправку можно и не
+трогая ответ вовсе.
 """
 
 from __future__ import annotations
@@ -32,7 +36,6 @@ from django.urls import reverse
 from apps.admin_api.tests.conftest import init_data_header
 from apps.audit.models import AuditLog
 from apps.catalog.models import CatalogMaster, CatalogService, MasterService
-from apps.channels.max.outbound import MaxAPIError
 from apps.identity.models import BotUser
 from apps.scheduling.models import WorkingHours
 from apps.tenancy.models import Tenant
@@ -69,24 +72,6 @@ def _valid_body(
     if role is not None:
         out["role"] = role
     return out
-
-
-@pytest.fixture
-def patched_send_message():
-    """Default — MAX send_message returns OK (response ignored)."""
-
-    with patch("apps.admin_api.views_invite.max_outbound.send_message") as mock:
-        mock.return_value = {"ok": True}
-        yield mock
-
-
-@pytest.fixture
-def patched_send_message_fails():
-    """MAX send_message raises a MaxAPIError → delivery=failed."""
-
-    with patch("apps.admin_api.views_invite.max_outbound.send_message") as mock:
-        mock.side_effect = MaxAPIError(503, "service unavailable")
-        yield mock
 
 
 # =========================================================================
@@ -133,7 +118,6 @@ class TestAuth:
         client: Client,
         admin_bot_user: BotUser,
         tenant: Tenant,
-        patched_send_message,
     ) -> None:
         resp = client.post(
             _invite_url(),
@@ -148,7 +132,6 @@ class TestAuth:
         client: Client,
         owner_bot_user: BotUser,
         tenant: Tenant,
-        patched_send_message,
     ) -> None:
         resp = client.post(
             _invite_url(),
@@ -170,7 +153,6 @@ class TestHappyPath:
         client: Client,
         owner_bot_user: BotUser,
         tenant: Tenant,
-        patched_send_message,
         settings,
     ) -> None:
         # DRF-1079 — the assertion below says «uses configured
@@ -213,7 +195,6 @@ class TestHappyPath:
         client: Client,
         owner_bot_user: BotUser,
         tenant: Tenant,
-        patched_send_message,
     ) -> None:
         """DRF-1062: the invite must not manufacture a schedule.
 
@@ -245,7 +226,6 @@ class TestHappyPath:
         client: Client,
         owner_bot_user: BotUser,
         tenant: Tenant,
-        patched_send_message,
     ) -> None:
         resp = client.post(
             _invite_url(),
@@ -263,7 +243,6 @@ class TestHappyPath:
         owner_bot_user: BotUser,
         tenant: Tenant,
         service: CatalogService,
-        patched_send_message,
     ) -> None:
         resp = client.post(
             _invite_url(),
@@ -283,13 +262,19 @@ class TestHappyPath:
         assert rows[0].source == "invite_seed"
         assert rows[0].created_by_actor_id == owner_bot_user.id
 
-    def test_two_audit_rows_emitted(
+    def test_one_audit_row_emitted(
         self,
         client: Client,
         owner_bot_user: BotUser,
         tenant: Tenant,
-        patched_send_message,
     ) -> None:
+        """Одна строка, а не две.
+
+        Вторая была ``master.invite_dispatched`` — исход отправки
+        личного сообщения. Отправки нет (§44.4), и записи о ней тоже:
+        аудит-строка «skipped» описывала бы событие, которого не бывает.
+        """
+
         resp = client.post(
             _invite_url(),
             data=_valid_body(),
@@ -301,7 +286,7 @@ class TestHappyPath:
         actions = sorted(
             AuditLog.all_tenants.filter(target_id=master_id).values_list("action", flat=True)
         )
-        assert actions == ["master.invite_dispatched", "master.invited"]
+        assert actions == ["master.invited"]
 
     def test_audit_payload_shape_invited(
         self,
@@ -309,7 +294,6 @@ class TestHappyPath:
         owner_bot_user: BotUser,
         tenant: Tenant,
         service: CatalogService,
-        patched_send_message,
     ) -> None:
         resp = client.post(
             _invite_url(),
@@ -387,7 +371,6 @@ class TestValidation:
         client: Client,
         owner_bot_user: BotUser,
         tenant: Tenant,
-        patched_send_message,
     ) -> None:
         """CatalogMaster has no phone column; we stash phone in raw["invite_phone"]."""
 
@@ -401,26 +384,6 @@ class TestValidation:
         master = CatalogMaster.all_tenants.get(id=resp.json()["master_id"])
         assert master.raw.get("invite_phone") == "+79161234567"
         assert master.max_handle == ""  # max_phone does NOT populate max_handle
-
-    def test_max_phone_dm_delivery_skipped(
-        self,
-        client: Client,
-        owner_bot_user: BotUser,
-        tenant: Tenant,
-        patched_send_message,
-    ) -> None:
-        """max_phone has no phone→chat lookup yet — dispatch is skipped."""
-
-        resp = client.post(
-            _invite_url(),
-            data=_valid_body(contact_method="max_phone", contact_value="+79161234567"),
-            content_type="application/json",
-            HTTP_AUTHORIZATION=init_data_header("5001"),
-        )
-        assert resp.status_code == 201
-        assert resp.json()["max_dm_delivery"] == "skipped"
-        # send_message must not have been called.
-        patched_send_message.assert_not_called()
 
     def test_cross_tenant_service_400(
         self,
@@ -493,12 +456,11 @@ class TestValidation:
         )
         assert resp.status_code == 400
 
-    def test_catalog_only_mode_no_token_no_dispatch(
+    def test_catalog_only_mode_issues_no_token(
         self,
         client: Client,
         owner_bot_user: BotUser,
         tenant: Tenant,
-        patched_send_message,
     ) -> None:
         resp = client.post(
             _invite_url(),
@@ -510,7 +472,6 @@ class TestValidation:
         body = resp.json()
         assert body["invite_token"] is None
         assert body["invite_expires_at"] is None
-        assert body["max_dm_delivery"] == "skipped"
         assert body["fallback_link"] == ""
 
         master = CatalogMaster.all_tenants.get(id=body["master_id"])
@@ -518,8 +479,6 @@ class TestValidation:
         assert master.invite_token is None
         assert master.invite_status == CatalogMaster.InviteStatus.ACCEPTED
         assert master.is_active is False
-        # send_message NOT called for catalog_only.
-        patched_send_message.assert_not_called()
 
 
 # =========================================================================
@@ -533,7 +492,6 @@ class TestIdempotency:
         client: Client,
         owner_bot_user: BotUser,
         tenant: Tenant,
-        patched_send_message,
     ) -> None:
         # First call — 201
         first = client.post(
@@ -567,7 +525,6 @@ class TestIdempotency:
         client: Client,
         owner_bot_user: BotUser,
         tenant: Tenant,
-        patched_send_message,
     ) -> None:
         """DRF-1507 — повторное приглашение работает и НЕ заводит вторую строку.
 
@@ -629,7 +586,6 @@ class TestIdempotency:
         client: Client,
         owner_bot_user: BotUser,
         tenant: Tenant,
-        patched_send_message,
     ) -> None:
         """Положительная стража к тесту выше (DRF-1411).
 
@@ -667,7 +623,6 @@ class TestIdempotency:
         client: Client,
         owner_bot_user: BotUser,
         tenant: Tenant,
-        patched_send_message,
     ) -> None:
         """«anna_styl» и «@Anna_Styl» — один аккаунт MAX, а не два мастера."""
 
@@ -701,7 +656,6 @@ class TestIdempotency:
         client: Client,
         owner_bot_user: BotUser,
         tenant: Tenant,
-        patched_send_message,
     ) -> None:
         """Отбор на перевыпуск узкий — синхронизированная строка не трогается.
 
@@ -744,7 +698,6 @@ class TestIdempotency:
         client: Client,
         owner_bot_user: BotUser,
         tenant: Tenant,
-        patched_send_message,
     ) -> None:
         """Приглашение уже приземлившегося мастера сводится в его строку.
 
@@ -790,7 +743,6 @@ class TestIdempotency:
         client: Client,
         owner_bot_user: BotUser,
         tenant: Tenant,
-        patched_send_message,
     ) -> None:
         resp1 = client.post(
             _invite_url(),
@@ -811,62 +763,6 @@ class TestIdempotency:
 
 
 # =========================================================================
-# MAX DM DISPATCH
-# =========================================================================
-
-
-class TestDispatch:
-    def test_dispatch_success_queued(
-        self,
-        client: Client,
-        owner_bot_user: BotUser,
-        tenant: Tenant,
-        patched_send_message,
-        settings,
-    ) -> None:
-        settings.SITE_DOMAIN = "https://miniapp-dev.gobeauty.site"  # DRF-1079
-        resp = client.post(
-            _invite_url(),
-            data=_valid_body(),
-            content_type="application/json",
-            HTTP_AUTHORIZATION=init_data_header("5001"),
-        )
-        assert resp.status_code == 201
-        assert resp.json()["max_dm_delivery"] == "queued"
-        patched_send_message.assert_called_once()
-        # The dispatch text should mention the master name + carry the
-        # web URL fallback (defence-in-depth message-shape check).
-        kwargs = patched_send_message.call_args.kwargs
-        assert "Анна" in kwargs["text"]
-        assert "/onboarding/master?token=" in kwargs["text"]
-        assert kwargs["chat_id"] == "anna_styl"  # leading @ stripped
-
-    def test_dispatch_failure_marks_failed(
-        self,
-        client: Client,
-        owner_bot_user: BotUser,
-        tenant: Tenant,
-        patched_send_message_fails,
-    ) -> None:
-        resp = client.post(
-            _invite_url(),
-            data=_valid_body(),
-            content_type="application/json",
-            HTTP_AUTHORIZATION=init_data_header("5001"),
-        )
-        assert resp.status_code == 201
-        assert resp.json()["max_dm_delivery"] == "failed"
-        # Master row still created (dispatch is observable, not blocking).
-        master = CatalogMaster.all_tenants.get(id=resp.json()["master_id"])
-        assert master.invite_status == CatalogMaster.InviteStatus.PENDING
-
-        # Audit row reflects the failure.
-        audit = AuditLog.all_tenants.get(target_id=master.id, action="master.invite_dispatched")
-        assert audit.payload["delivery"] == "failed"
-        assert "error" in audit.payload
-
-
-# =========================================================================
 # ATOMICITY
 # =========================================================================
 
@@ -878,7 +774,6 @@ class TestAtomicity:
         owner_bot_user: BotUser,
         tenant: Tenant,
         service: CatalogService,
-        patched_send_message,
     ) -> None:
         """A failure inside the transaction must not leave a half-made master.
 
@@ -925,7 +820,6 @@ class TestSiteDomainFallback:
         client: Client,
         owner_bot_user: BotUser,
         tenant: Tenant,
-        patched_send_message,
         settings,
     ) -> None:
         settings.SITE_DOMAIN = "https://miniapp-dev.gobeauty.site"
@@ -938,14 +832,12 @@ class TestSiteDomainFallback:
         assert resp.status_code == 201, resp.content
         link = resp.json()["fallback_link"]
         assert link.startswith("https://miniapp-dev.gobeauty.site/onboarding/master?token=")
-        assert link in patched_send_message.call_args.kwargs["text"]
 
     def test_bare_host_gets_https(
         self,
         client: Client,
         owner_bot_user: BotUser,
         tenant: Tenant,
-        patched_send_message,
         settings,
     ) -> None:
         """A value written without a scheme must not become a relative URL."""
@@ -967,24 +859,20 @@ class TestSiteDomainFallback:
         client: Client,
         owner_bot_user: BotUser,
         tenant: Tenant,
-        patched_send_message,
         settings,
     ) -> None:
         """The pilot's actual state: SITE_DOMAIN unset, DEBUG off.
 
-        DRF-1349 amended what «degraded» means here. This test used to
-        end on ``assert "max://bot/" in text`` — «the deeplink still
-        goes, the invite is degraded, not cancelled». The deeplink never
-        went anywhere: MAX does not implement the ``max://`` scheme, and
-        the owner's phone answered «Не удалось открыть ссылку» on the
-        first live invitation. So with neither a Mini App name nor a
-        usable domain there is no entry left to degrade *to*, and the
-        dispatch says so instead of reporting a message nobody can act
-        on as delivered.
+        Отдаётся пустая строка, а не ссылка на ``localhost:5173``:
+        правдоподобный мёртвый адрес хуже отсутствия — владелец
+        отправит его мастеру и узнает об этом от мастера.
 
-        The companion below is what keeps this from being «the invite
-        is just broken now»: the same unset SITE_DOMAIN with the Mini
-        App configured still sends a working button.
+        Раньше этот тест кончался на ``max_dm_delivery == "failed"``:
+        без Mini App и без домена личному сообщению нечего было нести,
+        и оно не уходило. Личного сообщения больше нет вовсе (§44.4),
+        так что проверять здесь осталось ровно одно — какой адрес
+        видит владелец. Спутник ниже держит вторую половину: пустой
+        ``SITE_DOMAIN`` сам по себе приглашение не ломает.
         """
 
         settings.SITE_DOMAIN = ""
@@ -996,29 +884,42 @@ class TestSiteDomainFallback:
             HTTP_AUTHORIZATION=init_data_header("5001"),
         )
         assert resp.status_code == 201, resp.content
-        assert resp.json()["fallback_link"] == ""
-        assert resp.json()["max_dm_delivery"] == "failed"
-        patched_send_message.assert_not_called()
+        body = resp.json()
+        # Присутствие на тех же данных: строка мастера выписана и токен
+        # у неё есть — иначе «ссылки нет» доказывало бы только то, что
+        # приглашение вообще не создалось.
+        assert body["invite_token"]
+        assert body["fallback_link"] == ""
 
     def test_unset_domain_is_harmless_when_the_mini_app_is_configured(
         self,
         client: Client,
         owner_bot_user: BotUser,
         tenant: Tenant,
-        patched_send_message,
         settings,
     ) -> None:
-        """SITE_DOMAIN is the *admin screen's* artefact, not the DM's.
+        """SITE_DOMAIN is the *web fallback's* artefact, not the invite's.
 
-        The positive guard for the test above. Once the invite DM enters
-        through a button, an unset SITE_DOMAIN costs the invited master
-        nothing at all — it only leaves the owner's screen without an
-        address to copy. Without this check the previous test would read
-        as «no domain ⇒ no invite», which is exactly the wrong lesson.
+        The positive guard for the test above. Приглашение живёт в
+        ``invite_link`` — ссылке на салонного бота, которая от
+        ``SITE_DOMAIN`` не зависит вовсе. Без этой проверки предыдущий
+        тест читался бы как «нет домена ⇒ нет приглашения», а это ровно
+        обратный вывод.
         """
 
+        from apps.channels.bot_registry import BotEntry
+
         settings.SITE_DOMAIN = ""
-        settings.MAX_BOT_WEB_APP = "id583_bot"
+        settings.MAX_BOT_REGISTRY = (
+            BotEntry(
+                slug="salon",
+                webhook_secret="wh-salon",  # pragma: allowlist secret
+                api_token="token-salon",  # pragma: allowlist secret
+                tenant_slug="admin-api-test",
+                stream="max_salon",
+                web_app="id583403546770_3_bot",
+            ),
+        )
         resp = client.post(
             _invite_url(),
             data=_valid_body(),
@@ -1026,27 +927,20 @@ class TestSiteDomainFallback:
             HTTP_AUTHORIZATION=init_data_header("5001"),
         )
         assert resp.status_code == 201, resp.content
-        assert resp.json()["max_dm_delivery"] == "queued"
-        kwargs = patched_send_message.call_args.kwargs
-        assert "localhost" not in kwargs["text"]
-        buttons = [
-            b
-            for att in kwargs["attachments"]
-            for row in att["payload"]["buttons"]
-            for b in row
-            if b["type"] == "open_app"
-        ]
-        assert buttons, "no open_app button — the invite has no entry at all"
-        assert buttons[0]["payload"].startswith("master_invite_")
-        # And no orphan heading left behind by the removed block.
-        assert "веб-версию" not in kwargs["text"]
+        body = resp.json()
+        assert body["invite_link"].startswith("https://max.ru/")
+        assert "master_invite_" in body["invite_link"]
+        # Ни одного адреса, который открывается только на машине
+        # разработчика: пустой SITE_DOMAIN гасит веб-запасной путь, а не
+        # подменяет его localhost-ом.
+        assert "localhost" not in body["invite_link"]
+        assert body["fallback_link"] == ""
 
     def test_debug_keeps_the_localhost_link(
         self,
         client: Client,
         owner_bot_user: BotUser,
         tenant: Tenant,
-        patched_send_message,
         settings,
     ) -> None:
         """Local dev is the one place the Vite URL is the right answer."""
@@ -1146,7 +1040,6 @@ class TestExternalIdRace:
         client: Client,
         owner_bot_user: BotUser,
         tenant: Tenant,
-        patched_send_message,
     ) -> None:
         """Детерминированное воспроизведение той же гонки, без потоков.
 
@@ -1190,7 +1083,6 @@ class TestExternalIdRace:
         client: Client,
         owner_bot_user: BotUser,
         tenant: Tenant,
-        patched_send_message,
     ) -> None:
         """Собственно гонка: номер занят между чтением и вставкой.
 
@@ -1229,7 +1121,6 @@ class TestExternalIdRace:
         client: Client,
         owner_bot_user: BotUser,
         tenant: Tenant,
-        patched_send_message,
     ) -> None:
         """Положительная стража к ретраю: он ограничен, а не бесконечен."""
 
@@ -1262,7 +1153,6 @@ class TestExternalIdRace:
         client: Client,
         owner_bot_user: BotUser,
         tenant: Tenant,
-        patched_send_message,
     ) -> None:
         """Номера Ayla не втягиваются в нашу нумерацию.
 

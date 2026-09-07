@@ -184,6 +184,9 @@ function actionToHuman(ev: AuditEvent): string {
       return "обновил(а) фото";
     case "master.invited":
       return "пригласил(а) мастера";
+    // Новых таких строк не появляется с §44.4 — приглашение больше не
+    // шлёт личных сообщений. Ветка остаётся ради тех, что уже лежат в
+    // аудите: без неё лента нарисовала бы им сырой слаг.
     case "master.invite_dispatched":
       return "выслал(а) приглашение";
     case "master.onboarding_accepted":

@@ -354,21 +354,21 @@ Alternative: Django admin UI на `/django-admin/tenancy/tenantuserrelationship/
 
 1. Admin Mini App → `/admin/team` → header `[+ Добавить человека]` → лендит на `AdminAddPersonScreen` (`/admin/team/add`), ветка «Новый мастер».
 2. Заполнить: MAX-аккаунт `@testm2` + name «Test M2» + services (≥1 из existing) → `[Пригласить]`.
-3. POST `/api/v1/admin/masters/invite` → 201 + invite token generated. Ответ несёт `invite_link`, `max_dm_delivery` и `max_dm_error`.
-4. Verify: экран показывает **ссылку-приглашение** `https://max.ru/<салонный бот>?start=master_invite_<token>` и кнопку «Скопировать ссылку». Это основной путь доставки — личное сообщение уходит клиентским ботом и достигает только уже существующий чат (DRF-1505). Если `max_dm_delivery=failed`, экран обязан назвать причину, а не сказать «получит сообщение в течение минуты».
+3. POST `/api/v1/admin/masters/invite` → 201 + invite token generated. Ответ несёт `invite_link`. Полей `max_dm_delivery` / `max_dm_error` в нём НЕТ: эндпоинт с §44.4 не шлёт мастеру личного сообщения и не отчитывается о нём.
+4. Verify: экран показывает **ссылку-приглашение** `https://max.ru/<салонный бот>?start=master_invite_<token>`, кнопку «Скопировать ссылку» и под ними **готовый текст приглашения** с кнопкой «Скопировать текст» (§44.2). Это единственный путь доставки: отправляет владелец салона сам. Ни одной строки о доставке личного сообщения на экране быть не должно.
 5. Скопировать ссылку → открыть её с телефона Test M2 → салонный бот отвечает кнопкой «Принять приглашение» → Mini App → `MasterOnboardingScreen` Step 1 → preview profile → принимает → linked.
 6. Ветка «Уже работает у нас» (`/admin/team/access`): выдать код ресепшену → экран показывает код `AYLA-XXXX` **и** ссылку `?start=inv_AYLAXXXX` (без дефиса). Открыть ссылку → доступ открывается без ввода кода.
 
 **Ожидаемый вывод:**
 
 - Invite сreated successfully.
-- MAX DM с invite link arrives.
+- Ссылка и готовый текст на экране; оба копируются.
 - Master claim flow works end-to-end.
 - После accept: M2 master visible в admin roster (`/admin/team`) с status=ACTIVE.
 
 **Если не сработало:**
 
-- MAX DM не приходит: invited phone не registered в MAX OR send_message endpoint failed (см. PART 5.1 «MAX DM dispatch»).
+- `invite_link` пустой: в контуре нет салонного бота с Mini App-именем (`MAX_BOT_<SLUG>_WEB_APP`). Передать приглашение при этом нечем — личного сообщения больше нет, ссылка была вторым способом и осталась единственным.
 - Invite token expired: tokens по default expire через 7 дней (verify в `CatalogMaster.invite_expires_at`). Re-generate invite.
 - Role enum mismatch: «master» / «admin» / «receptionist» — verify в `apps/catalog/models.py::CatalogMaster.Role`.
 

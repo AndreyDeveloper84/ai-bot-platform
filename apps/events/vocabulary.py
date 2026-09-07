@@ -105,9 +105,15 @@ MASTER_PHOTO_UPDATED_BY_ADMIN = "master.photo_updated_by_admin"
 #   master.invite_dispatched:
 #     {master_id, channel: "max", delivery: "queued"|"failed"|"skipped",
 #      error?: str}
-# The two events are paired: ``invited`` records the admin's intent +
-# the DB row creation, ``invite_dispatched`` records the side-channel
-# delivery attempt (queued post-commit via ``transaction.on_commit``).
+#
+# ``invite_dispatched`` НЕ ПИШЕТСЯ БОЛЬШЕ НИКЕМ (решение владельца §44.4
+# от 07.09.2026): оно описывало исход личного сообщения, которое
+# приглашение больше не отправляет. Имя оставлено в словаре ради строк,
+# уже лежащих в базе, — их читает лента в карточке мастера
+# (``apps/miniapp/src/screens/admin/AdminMasterDetailScreen.tsx``), и
+# без имени они рисовались бы сырым слагом. Новых таких строк не
+# появляется; если через год их не останется, имя можно снять вместе с
+# веткой ленты.
 MASTER_INVITED = "master.invited"
 MASTER_INVITE_DISPATCHED = "master.invite_dispatched"
 

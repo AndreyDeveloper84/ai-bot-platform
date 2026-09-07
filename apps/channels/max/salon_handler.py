@@ -176,10 +176,11 @@ INVITE_ALREADY_USED = (
     "если нет — попросите администратора выдать новое."
 )
 
-#: No Mini App name for this bot, so no button can be built. Same class of
-#: failure as `no_entry_configured` in `views_invite._dispatch_max_dm`, and
-#: answered the same way: say so rather than send a message that looks like
-#: an invitation and does nothing. An https address is NOT offered as a
+#: No Mini App name for this bot, so no button can be built. The invite
+#: endpoint used to refuse the same way (`no_entry_configured`) before
+#: §44.4 removed its message entirely; this rung is the one that
+#: remains, and it answers the same way: say so rather than send a
+#: message that looks like an invitation and does nothing. An https address is NOT offered as a
 #: consolation — outside MAX it gets no `initData` and cannot work, and
 #: #1332 removed exactly that promise after the owner followed it.
 INVITE_NO_ENTRY = (

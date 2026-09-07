@@ -52,19 +52,21 @@ import { useClosingConfirmation } from "../../hooks/useClosingConfirmation";
 import type { ReactNode } from "react";
 
 /**
- * Ready-to-forward invitation text — NOT DECIDED.
+ * Ready-to-forward invitation text — STILL NOT DECIDED FOR THIS BRANCH.
  *
- * The owner has not ruled on whether the screen hands over a bare code /
- * link or a message the issuer can paste into a messenger, nor on how
- * such a message would be worded. Product voice is not a thing to guess
- * at, so the seam is left open and empty: when a decision lands, this
- * becomes a function of `{code, role, expiresAt, invite_link}` and the
- * block below starts rendering.
+ * §30 задавал вопрос про ДВА текста: приглашение новому мастеру и код
+ * доступа человеку, который уже работает в салоне. 07.09.2026 владелец
+ * ответил §44.2 — и ответил про первый:
  *
- * A draft was written for DRF-1505 and sent to the owner **in the report,
- * not into this constant.** Until it comes back approved, this stays
- * `null` — a placeholder would ship, and shipped copy is approved copy
- * whether or not anybody approved it.
+ *     «...чтобы получить доступ к рабочему профилю мастера»
+ *
+ * Эта ветка выдаёт код на четыре роли — мастер, ресепшен,
+ * администратор, владелец, — и «рабочий профиль мастера» верен ровно
+ * для одной из них. Подставить утверждённый текст сюда значило бы
+ * сказать ресепшену, что он мастер; переписать его под роль значило бы
+ * сочинить формулировку, которой владелец не утверждал. Поэтому шов
+ * остаётся пустым и вопрос — открытым; текст для новой карточки
+ * мастера живёт в `components/InviteMessage.tsx`.
  *
  * Do not fill this with invented copy. `AdminAddPersonScreen.test.tsx`
  * pins that the block is absent while this is `null`.
