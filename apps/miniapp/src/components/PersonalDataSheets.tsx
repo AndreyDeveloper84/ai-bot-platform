@@ -36,9 +36,17 @@
  * backdrop click closes (same guard); focus restores to the opener.
  */
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useRef, useState } from "react";
 
-import { SUPPORT_DEEPLINK } from "../lib/customer-profile";
+import {
+  DATA_STORAGE_PARTIAL_PROCESSING_NOTE,
+  DATA_STORAGE_REVOCATION_DISCLOSURE_TEXT,
+  DataStorageRevocationFailedError,
+  revokeDataStorage,
+  StaleDisclosureError as DataStorageStaleDisclosureError,
+  SUPPORT_DEEPLINK,
+  type ConsentsResponse,
+} from "../lib/customer-profile";
 import {
   DELETE_CONFIRMATION_TOKEN,
   deletePersonalData,
@@ -676,6 +684,283 @@ export function HealthConsentSheet({
         <>
           <p className="profile-support-sheet__body">
             Не получилось сохранить. Ничего не изменилось.
+          </p>
+          <div className="profile-support-sheet__actions">
+            <button
+              type="button"
+              data-initial-focus
+              className="btn-secondary profile-support-sheet__cancel"
+              onClick={onClose}
+            >
+              Закрыть
+            </button>
+            <button
+              type="button"
+              className="btn-primary profile-support-sheet__primary"
+              onClick={submit}
+            >
+              Попробовать ещё раз
+            </button>
+            <SupportLink />
+          </div>
+        </>
+      )}
+    </SheetChrome>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Отзыв согласия на хранение данных (§35 п.6-п.9, п.16) — DRF-1475
+//
+// Не тумблер. Отзыв согласия необратим по последствиям, и переключатель,
+// который снимает его одним касанием, показал бы последствия ПОСЛЕ
+// действия — то есть никогда. Поэтому тот же жанр, что у соседей по
+// файлу: строка `ConsentRow variant="action"` ведёт в лист, человек
+// читает утверждённый текст последствий и подтверждает отдельным
+// нажатием.
+//
+// Три вещи, которые лист держит и которые легко потерять:
+//
+// * текст последствий — УТВЕРЖДЁН ВЛАДЕЛЬЦЕМ ДОСЛОВНО (§35 п.7) и живёт
+//   одной константой в `lib/customer-profile.ts`. Здесь он только
+//   рисуется; слова не меняются. Разметка не текст: `Ayla` оборачивается
+//   в lang="en" (WCAG 3.1.1), состав и порядок слов остаются те же;
+// * версия раскрытия — ИЗ ОТВЕТА СЕРВЕРА, не из константы на клиенте.
+//   Смысл проверки в том, что человек нажал под тем текстом, который
+//   сервер считает актуальным. На 409 лист не «дожимает» отзыв тем же
+//   телом, а просит перечитать раскрытие (и экран его перечитывает);
+// * §35 п.16 — при `revoked_partial_processing` лист говорит ТОЛЬКО
+//   «Согласие отозвано» и не делает ни одного утверждения о полноте
+//   удаления. Ни «всё удалено», ни «часть данных осталась»: второе тоже
+//   формулировка, которой у нас нет. Место для будущей —
+//   `DATA_STORAGE_PARTIAL_PROCESSING_NOTE` с TODO(Q-CLIENT-03).
+//
+// §35 п.6: отзыв НЕ закрывает аккаунт. Об этом сказано и в строке
+// профиля, и здесь — рядом с «Удалить аккаунт» два действия не должны
+// сливаться ни визуально, ни словами.
+// ---------------------------------------------------------------------------
+
+type DataStorageRevokeView =
+  | "confirm"
+  | "busy"
+  // Отзыв состоялся полностью.
+  | "revoked"
+  // Отзыв состоялся, часть обработки накопленного не отработала.
+  | "partial"
+  // 409: сервер обновил текст последствий — повтор тем же телом не пройдёт.
+  | "stale"
+  // 502: не состоялся сам отзыв, согласие осталось действующим.
+  | "failed"
+  // Ответа не было или он не про отзыв — исход неизвестен, и так и сказано.
+  | "unknown";
+
+interface DataStorageRevokeSheetProps extends SheetProps {
+  /** Версия раскрытия из последнего ответа сервера. Не константа клиента. */
+  disclosureVersion: string;
+  /** Токен подтверждения — общий с C5-удалением, второй копии нет. */
+  confirmationToken: string;
+  /** Отзыв состоялся: экран перечитывает состояние из ЭТОГО ответа. */
+  onRevoked: (next: ConsentsResponse) => void;
+  /** 409: экран обязан перечитать `me/consents/` и показать раскрытие заново. */
+  onStaleDisclosure: () => void;
+}
+
+/**
+ * Утверждённый текст последствий. Слова берутся из константы как есть;
+ * единственное, что добавляет эта функция, — разметка языка для `Ayla`.
+ */
+function ApprovedRevocationDisclosure() {
+  const parts = DATA_STORAGE_REVOCATION_DISCLOSURE_TEXT.split("Ayla");
+  return (
+    <p className="profile-support-sheet__body">
+      {parts.map((part, i) => (
+        <Fragment key={i}>
+          {i > 0 && <span lang="en">Ayla</span>}
+          {part}
+        </Fragment>
+      ))}
+    </p>
+  );
+}
+
+export function DataStorageRevokeSheet({
+  open,
+  triggerRef,
+  onClose,
+  disclosureVersion,
+  confirmationToken,
+  onRevoked,
+  onStaleDisclosure,
+}: DataStorageRevokeSheetProps) {
+  const [view, setView] = useState<DataStorageRevokeView>("confirm");
+
+  useEffect(() => {
+    if (open) setView("confirm");
+  }, [open]);
+
+  const submit = useCallback(async () => {
+    setView("busy");
+    try {
+      const result = await revokeDataStorage(
+        confirmationToken,
+        disclosureVersion,
+      );
+      // §35 п.9: состояние берётся из ответа сервера, а не достраивается
+      // из решения. Что сервер сказал, то экран и покажет.
+      onRevoked(result.consents);
+      setView(result.status === "revoked" ? "revoked" : "partial");
+    } catch (err) {
+      if (err instanceof DataStorageStaleDisclosureError) {
+        onStaleDisclosure();
+        setView("stale");
+        return;
+      }
+      setView(
+        err instanceof DataStorageRevocationFailedError ? "failed" : "unknown",
+      );
+    }
+  }, [confirmationToken, disclosureVersion, onRevoked, onStaleDisclosure]);
+
+  if (!open) return null;
+  const busy = view === "busy";
+
+  return (
+    <SheetChrome
+      headlineId="data-storage-revoke-headline"
+      headline="Отозвать согласие на хранение данных?"
+      closeDisabled={busy}
+      triggerRef={triggerRef}
+      onClose={onClose}
+    >
+      {view === "confirm" && (
+        <>
+          <ApprovedRevocationDisclosure />
+          <p className="profile-support-sheet__body">
+            Это не удаление аккаунта. Аккаунт останется, записаться снова
+            можно будет как обычно. Удалить аккаунт — отдельное действие в
+            профиле.
+          </p>
+          <div className="profile-support-sheet__actions">
+            <button
+              type="button"
+              data-initial-focus
+              className="btn-secondary profile-support-sheet__cancel"
+              onClick={onClose}
+            >
+              Не отзывать
+            </button>
+            <button
+              type="button"
+              className="btn-primary profile-support-sheet__primary"
+              onClick={submit}
+            >
+              Отозвать согласие
+            </button>
+          </div>
+        </>
+      )}
+      {view === "busy" && (
+        <>
+          <p className="profile-support-sheet__body">Отзываю…</p>
+          <div className="profile-support-sheet__actions">
+            <button type="button" disabled className="btn-secondary">
+              Не отзывать
+            </button>
+            <button type="button" disabled className="btn-primary">
+              Отзываю…
+            </button>
+          </div>
+        </>
+      )}
+      {view === "revoked" && (
+        <>
+          <p className="profile-support-sheet__body">
+            Согласие отозвано. Данные, которые можно удалить, удалены.
+          </p>
+          <div className="profile-support-sheet__actions">
+            <button
+              type="button"
+              className="btn-primary profile-support-sheet__primary"
+              onClick={onClose}
+            >
+              Закрыть
+            </button>
+          </div>
+        </>
+      )}
+      {view === "partial" && (
+        <>
+          {/* §35 п.16: одно проверенное утверждение и ни одного лишнего.
+              Про возможное сохранение части сведений человек прочитал в
+              утверждённом тексте до нажатия. */}
+          <p className="profile-support-sheet__body">Согласие отозвано.</p>
+          {DATA_STORAGE_PARTIAL_PROCESSING_NOTE && (
+            <p className="profile-support-sheet__body">
+              {DATA_STORAGE_PARTIAL_PROCESSING_NOTE}
+            </p>
+          )}
+          <div className="profile-support-sheet__actions">
+            <button
+              type="button"
+              className="btn-primary profile-support-sheet__primary"
+              onClick={onClose}
+            >
+              Закрыть
+            </button>
+          </div>
+        </>
+      )}
+      {view === "stale" && (
+        <>
+          <p className="profile-support-sheet__body">
+            Текст про последствия обновился, пока лист был открыт. Открой
+            его заново и прочитай — отзыв записывается на тот текст,
+            который ты видела.
+          </p>
+          <div className="profile-support-sheet__actions">
+            <button
+              type="button"
+              data-initial-focus
+              className="btn-primary profile-support-sheet__primary"
+              onClick={onClose}
+            >
+              Понятно
+            </button>
+          </div>
+        </>
+      )}
+      {view === "failed" && (
+        <>
+          <p className="profile-support-sheet__body">
+            Не получилось отозвать согласие. Оно осталось действующим.
+          </p>
+          <div className="profile-support-sheet__actions">
+            <button
+              type="button"
+              data-initial-focus
+              className="btn-secondary profile-support-sheet__cancel"
+              onClick={onClose}
+            >
+              Закрыть
+            </button>
+            <button
+              type="button"
+              className="btn-primary profile-support-sheet__primary"
+              onClick={submit}
+            >
+              Попробовать ещё раз
+            </button>
+            <SupportLink />
+          </div>
+        </>
+      )}
+      {view === "unknown" && (
+        <>
+          <p className="profile-support-sheet__body">
+            Не получилось дозвониться до сервера, и я не знаю, дошёл ли
+            отзыв. Открой профиль заново и посмотри строку «Хранение
+            данных» — там будет текущее состояние. Повторный отзыв
+            безопасен.
           </p>
           <div className="profile-support-sheet__actions">
             <button
