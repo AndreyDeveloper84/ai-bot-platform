@@ -14,6 +14,10 @@
 > port 8014, env `.env.staging`, files `docker-compose.yml` +
 > `docker-compose.staging.yml` + `docker-compose.staging.local.yml`.
 
+> Оба vhost'а пилота — `proapp.gobeauty.site` и `miniapp-dev.gobeauty.site` — отдают один и тот
+> же `apps/miniapp/dist`, поэтому любой роут SPA отвечает на обоих. Домен
+> `ai-bot-platform.gobeauty.site`, который здесь стоял раньше, не существует вовсе.
+
 ## Purpose
 
 Manual smoke tests для master + admin Mini App после deploy в Пензе 2026-07-15. Запускаются operator'ом в окне T+0 → T+1h после launch (per [`project-pilot-deployment-runbook-scope`](../../../.claude/memory/project_pilot_deployment_runbook.md) PART 3). Цель: подтвердить что критичные user flow работают live before объявления pilot открытым для real masters.
@@ -57,7 +61,7 @@ Manual smoke tests для master + admin Mini App после deploy в Пенз�
 **Действия:**
 
 1. На устройстве test master: открыть мессенджер MAX → меню → найти бота `@ai_bot` (или ссылку из invite DM, если master ещё не linked).
-2. Если first launch: тап на invite link от admin (формат `https://miniapp-dev.gobeauty.site/?invite=<token>`) → Mini App открывается на `MasterOnboardingScreen` → проходит Step 1 (claim) → Step 2 (accept) → Step 3 (bio + photo, optional).
+2. Если first launch: тап на invite link от admin (формат `https://proapp.gobeauty.site/?invite=<token>`) → Mini App открывается на `MasterOnboardingScreen` → проходит Step 1 (claim) → Step 2 (accept) → Step 3 (bio + photo, optional).
 3. Если master уже linked (existing pilot session): открыть Mini App из меню MAX → SessionToken в `DeviceStorage('master_token')` валидируется → landing on M1 dashboard.
 
 **Ожидаемый вывод:**
@@ -222,7 +226,7 @@ Manual smoke tests для master + admin Mini App после deploy в Пенз�
 
 **Действия:**
 
-1. Test admin account открывает admin Mini App (`https://api-dev.gobeauty.site/admin/`).
+1. Test admin account открывает admin Mini App (`https://proapp.gobeauty.site/admin/today`) — это роут SPA, а не Django admin на `api-dev`.
 2. Auth gate runs: init-data validation → role lookup → admin OR owner OR receptionist.
 3. Лендит на `AdminTeamScreen` (`/admin/team`).
 
