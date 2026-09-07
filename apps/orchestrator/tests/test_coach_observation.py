@@ -493,8 +493,13 @@ class TestWelcomeOutsideLimits:
         welcome = personal_surface.render_diary(person, cadence=Cadence.UNTRACKED)
         assert welcome.text.endswith(line)
 
-        # Потолок не поставлен: участок лимитов не тронут ни на запись...
+        # Присутствие на ТЕХ ЖЕ данных и выше отсутствия: журнал
+        # приветствие записал — §39 снял лимит, а не журнал. Значит
+        # «отметки потолка нет» ниже говорит о непустых данных, а не о
+        # пустом словаре, который молчал бы при любой реализации.
         stored = prefs.get_prefs(BotUser.all_tenants.get(pk=person.pk))
+        assert prefs.OUTBOX_KEY in stored
+        # Потолок не поставлен: участок лимитов не тронут ни на запись...
         assert OBSERVATION_STATE_KEY not in stored
 
         # ...ни, следовательно, на чтение — человек приходит сам в те же
