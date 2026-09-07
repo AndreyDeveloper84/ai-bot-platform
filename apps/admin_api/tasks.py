@@ -201,7 +201,7 @@ def dispatch_master_decision_dm(
     if not user_id_norm:
         # Structured-only log: master / request ids, no text.
         logger.info(
-            "admin_api.tasks.dispatch_master_decision_dm.no_chat_id master=%s request=%s",
+            "admin_api.tasks.dispatch_master_decision_dm.no_user_id master=%s request=%s",
             master_id,
             request_id,
         )

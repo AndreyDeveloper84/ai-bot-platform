@@ -460,7 +460,7 @@ def _enqueue_master_dm_post_commit(
     linked = master.linked_bot_user
     if linked is None or not (linked.channel_user_id or "").strip():
         logger.info(
-            "admin_api.availability.no_master_chat_id master=%s request=%s",
+            "admin_api.availability.no_master_user_id master=%s request=%s",
             master.id,
             request_id,
         )

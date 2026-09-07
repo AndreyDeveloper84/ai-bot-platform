@@ -20,7 +20,7 @@ no new queue, no dependency on the mobile app.
 ### Delivery fan-out
 
 * **The specialist personally** — when the appointment's master has a
-  linked MAX account (``CatalogMaster.linked_bot_user.chat_id``), he
+  linked MAX account (``CatalogMaster.linked_bot_user.channel_user_id``), he
   receives his own copy, addressed to him («У вас новая запись»). The
   epic's contract is «if the master does not learn, the visit does not
   happen», so the specialist is an *additional* recipient, not an

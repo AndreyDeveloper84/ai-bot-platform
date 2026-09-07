@@ -28,7 +28,7 @@ Direction decides the recipient:
   notice uses, deliberately, so a salon configures one destination rather
   than one per feature.
 * **admin → master**: that thread's master personally, via
-  ``CatalogMaster.linked_bot_user.chat_id``. There is no fallback here on
+  ``CatalogMaster.linked_bot_user.channel_user_id``. There is no fallback here on
   purpose: a message addressed to one master must not be broadcast to the
   salon's shared channel just because the link is missing. Silence plus a
   warning is the correct failure — the alternative leaks a private
