@@ -1,0 +1,102 @@
+{% extends "admin/base_site.html" %}
+{% comment %}
+Экран здоровья контура (DRF-1500). Не дашборд с метриками — экран того,
+что сломалось молча. Красная плашка сверху — единственный обязательный
+элемент: если список проблем пуст, экран спокоен; если нет — кричит.
+Персональных данных здесь нет и быть не должно: только агрегаты.
+{% endcomment %}
+
+{% block content %}
+<style>
+  .health-banner { padding: 12px 16px; border-radius: 4px; margin-bottom: 20px; }
+  .health-banner.critical { background: #ba2121; color: #fff; }
+  .health-banner.ok { background: #2d6a2d; color: #fff; }
+  .health-banner ul { margin: 8px 0 0 18px; }
+  table.health th, table.health td { padding: 4px 12px 4px 0; text-align: left; }
+  .stale { color: #ba2121; font-weight: bold; }
+  .fresh { color: #2d6a2d; }
+  .gap { color: #ba2121; font-weight: bold; }
+  .muted { color: #777; }
+  h2 { margin-top: 28px; }
+</style>
+
+{% if report.has_problems %}
+<div class="health-banner critical">
+  <strong>Есть молчаливые сбои — {{ report.problems|length }}:</strong>
+  <ul>
+    {% for problem in report.problems %}<li>{{ problem }}</li>{% endfor %}
+  </ul>
+</div>
+{% else %}
+<div class="health-banner ok">
+  <strong>Молчаливых сбоев не видно.</strong>
+  Каталог свеж, зеркало сходится с бэкендом.
+</div>
+{% endif %}
+
+<h2>Свежесть каталога</h2>
+<p class="muted">
+  Возраст последней успешной синхронизации по каждому салону.
+  Порог отставания: {{ report.threshold_seconds }} с
+  (конфиг CATALOG_SYNC_STALE_AFTER_SECONDS). Сигнал DRF-1494.
+</p>
+<table class="health">
+  <tr><th>Салон</th><th>Последняя успешная</th><th>Возраст</th><th>Состояние</th></tr>
+  {% for age in report.catalog_ages %}
+  <tr>
+    <td>{{ age.slug }}</td>
+    <td>{% if age.last_ok_at %}{{ age.last_ok_at|date:"d.m.Y H:i" }}{% else %}никогда{% endif %}</td>
+    <td>{{ age.age_human }}</td>
+    <td>{% if age.is_stale %}<span class="stale">ОТСТАЁТ</span>{% else %}<span class="fresh">свежий</span>{% endif %}</td>
+  </tr>
+  {% endfor %}
+</table>
+
+<h2>Зеркало против бэкенда</h2>
+<p class="muted">
+  Источник чисел бэкенда: опрос Ayla REST (count первой страницы), кэш до
+  пяти минут. {% if not report.upstream_queried %}<strong>Бэкенд не опрошен
+  (нет токена/URL или сеть) — видны только числа зеркала, расхождение не проверено.</strong>{% endif %}
+</p>
+<table class="health">
+  <tr>
+    <th>Салон</th><th>Услуги в зеркале</th><th>Услуги в бэкенде</th><th>Зазор</th>
+    <th>Мастера в зеркале</th><th>Мастера в бэкенде</th><th>Зазор</th>
+  </tr>
+  {% for div in report.divergences %}
+  <tr>
+    <td>{{ div.slug }}</td>
+    <td>{{ div.mirror_services }}</td>
+    <td>{% if div.upstream_services is None %}<span class="muted">?</span>{% else %}{{ div.upstream_services }}{% endif %}</td>
+    <td>{% if div.services_gap is None %}<span class="muted">—</span>{% elif div.services_gap %}<span class="gap">{{ div.services_gap }}</span>{% else %}0{% endif %}</td>
+    <td>{{ div.mirror_masters }}</td>
+    <td>{% if div.upstream_masters is None %}<span class="muted">?</span>{% else %}{{ div.upstream_masters }}{% endif %}</td>
+    <td>{% if div.masters_gap is None %}<span class="muted">—</span>{% elif div.masters_gap %}<span class="gap">{{ div.masters_gap }}</span>{% else %}0{% endif %}</td>
+  </tr>
+  {% endfor %}
+</table>
+
+<h2>Очередь handoff</h2>
+<p>
+  Открыто: <strong>{{ report.handoff.open_count }}</strong>,
+  в работе: <strong>{{ report.handoff.in_progress_count }}</strong>,
+  самое старое ждёт: <strong>{{ report.handoff.oldest_age_human }}</strong>.
+  <span class="muted">Детали — экран очереди handoff.</span>
+</p>
+
+<h2>Спящие поверхности</h2>
+<p class="muted">
+  Флаги показаны, но отсюда не переключаются (правило заморозки).
+  Значения переменных не выводятся — только состояние.
+</p>
+<table class="health">
+  <tr><th>Флаг</th><th>Состояние</th><th>Что недоступно</th></tr>
+  {% for flag in report.flags %}
+  <tr>
+    <td><code>{{ flag.name }}</code></td>
+    <td>{% if flag.enabled %}<span class="fresh">{{ flag.state_label }}</span>{% else %}<span class="stale">{{ flag.state_label }}</span>{% endif %}</td>
+    <td>{% if not flag.enabled %}{{ flag.consequence }}{% else %}<span class="muted">—</span>{% endif %}</td>
+  </tr>
+  {% endfor %}
+</table>
+{% endblock %}
