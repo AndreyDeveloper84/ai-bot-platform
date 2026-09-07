@@ -25,7 +25,6 @@ from apps.booking.services.records import (
     DEFAULT_VISIT_LIMIT,
     RepeatResult,
     Visit,
-    VisitsResult,
     list_upcoming,
     list_visits,
     prepare_repeat,
@@ -86,6 +85,21 @@ VISIT_CALLBACK_PREFIXES = (
 #: вернул бэкенд, так что ни одна не пропадает из виду.
 _MAX_ACTIONABLE_UPCOMING = 3
 
+#: Сколько ПРОШЕДШИХ визитов перечисляется в самом чате.
+#:
+#: Здесь и проходит граница «бот против приложения» для истории
+#: (``docs/OPEN_DECISIONS.md`` §62, решение владельца 07.09.2026: «надо
+#: максимально стараться отображать информацию с помощью кнопок и именно
+#: в боте, миниапп служит „резервом“ частично»). Пять последних визитов
+#: читаются в чате целиком; всё, что дальше пятого, — это уже листание,
+#: фильтр по мастеру и карточка, то есть ровно то, ради чего приложение и
+#: остаётся резервом.
+#:
+#: Совпадает с :data:`~apps.booking.services.records.DEFAULT_VISIT_LIMIT`
+#: не случайно и не навсегда: это ОДИН и тот же вопрос «сколько влезает в
+#: одну реплику», и разъехаться им можно только осознанно.
+_HISTORY_CHAT_LIMIT = DEFAULT_VISIT_LIMIT
+
 # The pilot's timezone. ``TIME_ZONE`` is UTC in this service, so
 # ``timezone.localtime`` would keep the bug DRF-1071 reported, and the
 # ``me/bookings`` response names the tenant without its zone. Same default
@@ -132,6 +146,32 @@ _EMPTY_TEXT = (
     "Скажите, что вам нужно, — или посмотрите наши салоны, оттуда можно записаться."
 )
 
+# §62 / OD-UI-1 — половина ответа, которая раньше молчала.
+#
+# Пока «История визитов» была отдельным пунктом, ведущим в приложение,
+# ответ «Мои записи» про прошлое не говорил ВООБЩЕ: у человека с двумя
+# предстоящими записями и без единого состоявшегося визита обе половины
+# схлопывались в одну, и он не узнавал, что вторая существует. После
+# слияния кнопок это уже не «нечего показать», а пропажа способности —
+# ровно тот дефект, ради которого заведена ``TestRemovedActionsStayReachable``.
+#
+# Поэтому пустая история говорит о себе ВСЛУХ и одной строкой. Ноль
+# завершённых визитов — сегодняшняя норма пилота (07.09.2026: 30 зеркал,
+# из них 17 отменены, 10 подтверждены, 3 ждут оплаты, завершённых нет),
+# и выглядеть это обязано как ответ, а не как обрыв.
+_HISTORY_EMPTY_LINE = "Завершённых визитов пока нет — история появится после первого."
+
+# §62 — единственное оправданное место ухода в приложение на этом экране.
+#
+# Две формы, и вторая не косметика: обещать приложение там, где его нет
+# (``MAX_BOT_WEB_APP`` и ``MAX_MINIAPP_URL`` оба пусты), значит написать
+# человеку строку, под которой не будет кнопки. Это тот же запрет, по
+# которому меню не рисует экранных пунктов без настроенного приложения.
+_HISTORY_CAPPED_TEXT = f"Показала последние {_HISTORY_CHAT_LIMIT} визитов."
+_HISTORY_CAPPED_APP_TEXT = (
+    f"Показала последние {_HISTORY_CHAT_LIMIT} визитов — весь список открою в приложении."
+)
+
 # DRF-1547 — тексты действий на карточке.
 #
 # Каждый называет СВОЙ исход. Довод тот же, которым DRF-1492 разводил
@@ -174,6 +214,13 @@ _CANCEL_UNAVAILABLE_TEXT = (
 #: устроен так же: семейство по префиксу, параметр по строгой форме.
 RESCHEDULE_PAYLOAD_PREFIX = "reschedule_"
 
+#: Слаг экрана визитов в :data:`apps.skills.welcome.skill.MINIAPP_ROUTES`.
+#:
+#: Имя историческое («визиты»), экран за ним общий — ``customer/records``
+#: с двумя вкладками. Переименовывать его этой задачей нельзя: тем же
+#: слагом ходят клавиатуры, лежащие в истории чатов.
+_HISTORY_SLUG = "open_visits"
+
 #: Строгая форма идентификатора записи. Проверяется ЗДЕСЬ, а не только в
 #: SPA: payload уходит в ``open_app``, MAX отвечает 400 на всё, что не
 #: подходит под ``OPEN_APP_PAYLOAD_RE``, и этот отказ уносит с собой
@@ -193,9 +240,22 @@ def route_visits(
     One question, one answer: upcoming bookings and past visits come from the
     same source, so the reply cannot contradict itself depending on which word
     the customer used (H-1).
+
+    §62 / OD-UI-1 (решение владельца 07.09.2026, дословно: «кнопки
+    сливаем») — это ЕДИНСТВЕННЫЙ ответ на прошлые визиты. Отдельного
+    пункта «История визитов», уводившего в приложение, больше нет, и всё,
+    что он обещал, обязано быть здесь: прошлое перечислено словами,
+    пустое прошлое названо вслух, а приложение предлагается ровно тогда,
+    когда список длиннее одной реплики.
     """
     upcoming = list_upcoming(bot_user=global_bot_user, limit=DEFAULT_VISIT_LIMIT)
-    visits = list_visits(bot_user=global_bot_user, limit=DEFAULT_VISIT_LIMIT)
+    # На один больше, чем показываем. Шестой визит нужен не человеку, а
+    # ответу: он и есть признак «история длиннее чата», и узнать его
+    # иначе неоткуда — ``VisitsResult`` не несёт общего счётчика, а
+    # спрашивать вторую страницу ради одного булева значения дороже.
+    visits = list_visits(bot_user=global_bot_user, limit=_HISTORY_CHAT_LIMIT + 1)
+    past_shown = visits.visits[:_HISTORY_CHAT_LIMIT]
+    past_truncated = len(visits.visits) > _HISTORY_CHAT_LIMIT
 
     emit(
         VISITS_LISTED,
@@ -204,7 +264,10 @@ def route_visits(
             "upcoming_status": upcoming.status,
             "visits_status": visits.status,
             "upcoming_count": len(upcoming.visits),
-            "visits_count": len(visits.visits),
+            # Сколько человек РЕАЛЬНО увидел, а не сколько вернул бэкенд:
+            # шестой запрошен ради признака и на экран не попадает.
+            "visits_count": len(past_shown),
+            "visits_truncated": past_truncated,
         },
     )
 
@@ -213,20 +276,32 @@ def route_visits(
     if "backend_unavailable" in (upcoming.status, visits.status):
         return DiscoveryReply(text=_UNAVAILABLE_TEXT)
 
-    if not upcoming.visits and not visits.visits:
+    if not upcoming.visits and not past_shown:
         return DiscoveryReply(
             text=_EMPTY_TEXT, action_data=keyboard_envelope([show_salons_button()])
         )
 
     blocks: list[str] = []
     if upcoming.visits:
-        blocks.append(_render_upcoming(upcoming))
-    if visits.visits:
-        blocks.append(_render_visits(visits))
+        blocks.append(_render_upcoming(upcoming.visits))
+    if past_shown:
+        blocks.append(_render_visits(past_shown))
+    else:
+        # Молчания здесь быть не может — см. :data:`_HISTORY_EMPTY_LINE`.
+        blocks.append(_HISTORY_EMPTY_LINE)
+
+    tail_buttons: list[dict[str, str]] = []
+    if past_truncated:
+        button = history_app_button()
+        if button is None:
+            blocks.append(_HISTORY_CAPPED_TEXT)
+        else:
+            blocks.append(_HISTORY_CAPPED_APP_TEXT)
+            tail_buttons.append(button)
 
     return DiscoveryReply(
         text="\n\n".join(blocks),
-        action_data=_records_buttons(upcoming.visits, visits.visits),
+        action_data=_records_buttons(upcoming.visits, past_shown, tail=tail_buttons),
     )
 
 
@@ -452,6 +527,36 @@ def reschedule_button(appointment_id: str, *, label: str) -> dict[str, str] | No
     return None
 
 
+def history_app_button() -> dict[str, str] | None:
+    """Кнопка «Открыть» на экран визитов — или ``None``, открывать нечем.
+
+    Та же лестница вырождения, что у :func:`reschedule_button` и у
+    приветствия (``welcome.skill._welcome_buttons``): ``open_app``,
+    внешняя ссылка, ничего. Третий случай не ошибка и не пустой экран —
+    ответ уже перечислил визиты словами, и приложение здесь было
+    добавкой, а не содержанием.
+
+    Слаг ``open_visits`` НЕ выдуман рядом: путь берётся из
+    :data:`apps.skills.welcome.skill.MINIAPP_ROUTES` — единственной
+    таблицы, которую сверяет с SPA
+    ``apps/skills/welcome/tests/test_miniapp_routes.py``. Кнопка и ссылка
+    на один и тот же экран не могут разъехаться, потому что обе берут
+    путь оттуда.
+    """
+    from django.conf import settings
+
+    from apps.skills.menu.marketplace import OPEN_BUTTON_LABEL
+    from apps.skills.welcome.skill import _miniapp_url
+
+    web_app = getattr(settings, "MAX_BOT_WEB_APP", "") or ""
+    miniapp_url = getattr(settings, "MAX_MINIAPP_URL", "") or ""
+    if web_app:
+        return {"label": OPEN_BUTTON_LABEL, "callback": _HISTORY_SLUG, "web_app": web_app}
+    if miniapp_url:
+        return {"label": OPEN_BUTTON_LABEL, "url": _miniapp_url(miniapp_url, _HISTORY_SLUG)}
+    return None
+
+
 def route_repeat(
     *,
     global_bot_user,
@@ -494,15 +599,22 @@ def route_repeat(
 # ── presentation ────────────────────────────────────────────────────────────
 
 
-def _render_upcoming(result: VisitsResult) -> str:
+def _render_upcoming(visits: tuple[Visit, ...]) -> str:
     lines = ["Ваши предстоящие записи:"]
-    lines += [f"• {_visit_line(v)}" for v in result.visits]
+    lines += [f"• {_visit_line(v)}" for v in visits]
     return "\n".join(lines)
 
 
-def _render_visits(result: VisitsResult) -> str:
+def _render_visits(visits: tuple[Visit, ...]) -> str:
+    """Прошедшие визиты — ТЕ, ЧТО ПОКАЗЫВАЮТСЯ, а не те, что вернул бэкенд.
+
+    Принимает кортеж, а не ``VisitsResult``, ровно поэтому: с §62 в чат
+    попадает срез (:data:`_HISTORY_CHAT_LIMIT`), и отдать сюда целый
+    результат значило бы перечислить словами больше, чем есть кнопок под
+    текстом.
+    """
     lines = ["Ваши последние визиты:"]
-    lines += [f"• {_visit_line(v)}" for v in result.visits]
+    lines += [f"• {_visit_line(v)}" for v in visits]
     return "\n".join(lines)
 
 
@@ -581,7 +693,12 @@ def _card_actions(visit: Visit, *, suffix: str = "") -> list[dict[str, str]]:
     ]
 
 
-def _records_buttons(upcoming: tuple[Visit, ...], past: tuple[Visit, ...]) -> dict | None:
+def _records_buttons(
+    upcoming: tuple[Visit, ...],
+    past: tuple[Visit, ...],
+    *,
+    tail: list[dict[str, str]] | None = None,
+) -> dict | None:
     """Клавиатура ответа «Мои записи» — действия впереди, карточки позади.
 
     Записи ВПЕРЕДИ получают все три действия владельца (§37 п.1), и
@@ -614,6 +731,11 @@ def _records_buttons(upcoming: tuple[Visit, ...], past: tuple[Visit, ...]) -> di
         }
         for v in past
     ]
+    # Последней — и только когда история не влезла целиком (§62). Кнопка
+    # в приложение стоит ПОСЛЕ всех карточек намеренно: чат отвечает
+    # первым, приложение остаётся резервом и читается как продолжение, а
+    # не как альтернатива ответу.
+    buttons += list(tail or [])
     return keyboard_envelope(buttons)
 
 
