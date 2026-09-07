@@ -147,6 +147,20 @@ interface Props {
   initialDoc?: DecisionContext;
 }
 
+/** Что объявить после успешной отправки — или `null`, если объявлять нечего.
+
+Разные тела — разные события, и называть их одним словом значит соврать:
+ответ на шаг анкеты не «цель сохранена», а `need_guidance` вообще не
+сохранение, а смена документа. Функция модульная, а не внутри компонента:
+она не зависит от состояния, и в замыкании `useCallback` ей делать нечего. */
+function noticeFor(body: GoalSelectBody): string | null {
+  // `in`, а не доступ к полю: `GoalSelectBody` — размеченное объединение,
+  // и у ветки с `goal_key` поля `goal_text` не существует вовсе.
+  if ("goal_key" in body || "goal_text" in body) return "Цель сохранена.";
+  if ("answer" in body) return "Ответ сохранён.";
+  return null;
+}
+
 export function GoalSelectScreen({ initialDoc }: Props = {}) {
   const navigate = useNavigate();
   const { pathname } = useLocation();
@@ -158,6 +172,11 @@ export function GoalSelectScreen({ initialDoc }: Props = {}) {
   );
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
+  // Объявление УСПЕХА. До этого его не было вовсе: отказ говорил
+  // (`role="alert"`), успех молчал, и человек у поля ввода внизу не видел
+  // ни подсветки чипа, ни секции «Текущая цель» — обе выше сгиба. Жалоба
+  // «не понимаю, получилось ли» была ровно про это.
+  const [savedNotice, setSavedNotice] = useState<string | null>(null);
   const [goalText, setGoalText] = useState("");
 
   const load = useCallback(() => {
@@ -208,10 +227,12 @@ export function GoalSelectScreen({ initialDoc }: Props = {}) {
   const submit = useCallback((body: GoalSelectBody) => {
     setSubmitting(true);
     setSubmitError(null);
+    setSavedNotice(null);
     postGoalSelect(body)
       .then((doc) => {
         setState({ kind: "ok", doc });
         setGoalText("");
+        setSavedNotice(noticeFor(body));
       })
       .catch(() => {
         // Показать отказ И перечитать документ.
@@ -332,7 +353,29 @@ export function GoalSelectScreen({ initialDoc }: Props = {}) {
       {GUARD_EXIT_LABEL}
     </StickyCtaButton>
   ) : null;
-  const stickyCount = [onward, guardExit, surfaceExit].filter(Boolean).length;
+  // Сохранение свободного текста — липкой кнопкой, пока в поле есть текст.
+  //
+  // Раньше единственная кнопка, сохраняющая формулировку человека, стояла
+  // ПОСЛЕДНЕЙ содержательной на прокручиваемой странице, ниже чипов и поля
+  // ввода, и была вторичной по виду. Замер: 29 целей на боевом — и НИ ОДНОЙ
+  // с непустым `goal_text`. Отказа сервера там нет, есть место кнопки.
+  //
+  // Появляется и исчезает вместе с текстом: пустое поле — сохранять нечего,
+  // и постоянная кнопка спорила бы с `next` за единственное липкое место.
+  // Внутристраничная кнопка при этом не дублируется, а уступает: две кнопки
+  // с одним действием на одном экране — это вопрос «в чём разница», а
+  // разницы нет.
+  const freeTextPending = showFreeText && goalText.trim().length > 0;
+  const saveFreeText = freeTextPending ? (
+    <StickyCtaButton
+      disabled={submitting}
+      onClick={() => submit(freeTextBody(goalText.trim()))}
+    >
+      Отправить
+    </StickyCtaButton>
+  ) : null;
+
+  const stickyCount = [saveFreeText, onward, guardExit, surfaceExit].filter(Boolean).length;
 
   return (
     <ScreenLayout
@@ -342,6 +385,7 @@ export function GoalSelectScreen({ initialDoc }: Props = {}) {
       cta={
         stickyCount > 0 ? (
           <StickyBar>
+            {saveFreeText}
             {onward}
             {guardExit}
             {surfaceExit}
@@ -353,6 +397,19 @@ export function GoalSelectScreen({ initialDoc }: Props = {}) {
       {submitError && (
         <div className="callout callout--danger" role="alert">
           <p style={{ margin: 0 }}>{submitError}</p>
+        </div>
+      )}
+
+      {/* Успех рядом с отказом и той же формой — но `role="status"`, а не
+          `alert`: сохранение не прерывает человека, оно его подтверждает.
+          Для читающего экран это и есть починка: до сих пор отказ
+          объявлялся, а успех не объявлялся никак. Для видящего экран
+          вторая половина починки — липкая «Отправить» выше: она исчезает
+          вместе с очищенным полем, то есть изменение происходит ТАМ, где
+          человек стоит, а не одной строкой выше сгиба. */}
+      {savedNotice && (
+        <div className="callout callout--success" role="status">
+          <p style={{ margin: 0 }}>{savedNotice}</p>
         </div>
       )}
 
@@ -450,16 +507,18 @@ export function GoalSelectScreen({ initialDoc }: Props = {}) {
             aria-label={freeTextLabel}
             disabled={submitting}
           />
-          <div className="goal-select__actions">
-            <button
-              type="button"
-              className="btn-secondary"
-              disabled={submitting || goalText.trim().length === 0}
-              onClick={() => submit(freeTextBody(goalText.trim()))}
-            >
-              Отправить
-            </button>
-          </div>
+          {/* Пока текста нет — кнопка стоит здесь, отключённая, и показывает,
+              что с полем вообще можно сделать. Как только текст появился,
+              сохранение уезжает в липкую панель (см. `saveFreeText`), и
+              здесь не остаётся ничего: два «Отправить» на одном экране — это
+              вопрос «в чём разница». */}
+          {!freeTextPending && (
+            <div className="goal-select__actions">
+              <button type="button" className="btn-secondary" disabled>
+                Отправить
+              </button>
+            </div>
+          )}
         </section>
       )}
 

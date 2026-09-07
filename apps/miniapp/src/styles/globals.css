@@ -170,6 +170,15 @@ a {
   color: var(--c-danger);
 }
 
+/* Успех сохранения. Пара к `--danger`: до DRF-1435 отказ имел голос, а
+   успех не имел никакого — ни цвета, ни `aria-live`. Токен `--c-success`
+   объявлен в `tokens.css` в обеих темах и сведён к 4.5:1; литерал рядом с
+   токеном линт `miniapp_token_contrast.py` не примет, и правильно. */
+.callout--success {
+  background: color-mix(in srgb, var(--c-success) 10%, var(--c-surface-2));
+  color: var(--c-success);
+}
+
 /* Secondary button used in error / empty / not-found states. */
 .btn-secondary {
   display: inline-block;
