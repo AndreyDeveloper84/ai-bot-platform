@@ -197,7 +197,16 @@ class TestMiniAppSources:
     """
 
     def test_profile_screen_has_no_allergies_input(self) -> None:
-        src = _read("apps", "miniapp", "src", "screens", "ProfileScreen.tsx")
+        # Читается ЖИВОЙ профиль клиента. Легаси-`ProfileScreen.tsx`
+        # (адрес `/me`), на который эта проверка была наведена, снят
+        # вместе с двумя другими мёртвыми экранами (DRF-1485) — и
+        # вопрос «не вернулась ли подпись» относится теперь к тому
+        # единственному экрану, где человек правит свой профиль.
+        src = _read("apps", "miniapp", "src", "screens", "CustomerProfileScreen.tsx")
+        # Положительная стража на тех же данных (negative_assert_guard,
+        # DRF-1411): без неё переименованный или снятый файл читался бы
+        # как «подписи нет», и три утверждения ниже стали бы пустыми.
+        assert "Профиль клиента" in src
         assert "Аллергии" not in src
         assert "Передадим мастеру" not in src
         assert "preferences.allergies" not in src
@@ -205,9 +214,9 @@ class TestMiniAppSources:
     def test_no_screen_references_preferences_allergies(self) -> None:
         # Property access / object key / type member — not the word inside a
         # comment or a filename, which is how this very test is referenced.
-        # `*.test.tsx` is out of scope on purpose: ProfileScreen.test.tsx
-        # asserts the key is never sent, and a fixture that re-added it
-        # would fail `tsc --noEmit` against the `Preferences` type anyway.
+        # `*.test.tsx` is out of scope on purpose: a fixture that re-added
+        # the key would fail `tsc --noEmit` against the `Preferences`
+        # type anyway.
         needles = (
             ".allergies",
             "allergies:",
