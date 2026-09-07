@@ -24,14 +24,20 @@ from __future__ import annotations
 
 from django import forms
 from django.contrib import admin
-from django.core.exceptions import PermissionDenied
+from django.core.exceptions import PermissionDenied, ValidationError
 from django.http import HttpRequest, HttpResponse
 from django.template.response import TemplateResponse
 from django.urls import path
 from django.utils.html import format_html, format_html_join
 
 from apps.tenancy.models import Tenant
-from apps.tenancy.onboarding import REASON_LABELS, ConnectError, assess_salon, connect_salon
+from apps.tenancy.onboarding import (
+    REASON_LABELS,
+    ConnectError,
+    assess_salon,
+    connect_salon,
+    verify_salon_masters,
+)
 
 
 class TenantAdminForm(forms.ModelForm):
@@ -304,14 +310,36 @@ class TenantAdmin(admin.ModelAdmin):
         ]
         return custom + super().get_urls()
 
+    #: Имя поля кнопки верификации: в нём же приезжает id салона.
+    #:
+    #: DRF-1553. Отдельного URL у действия нет намеренно: оно живёт на
+    #: экране подключения и нигде больше, а отдельный адрес пришлось бы
+    #: защищать вторым разрешением — то самое «смешение двух прав»,
+    #: которое владелец снял, оставив ОДИН уровень доступа (§51.1).
+    VERIFY_FIELD = "verify_masters_of"
+
     def connect_view(self, request: HttpRequest) -> HttpResponse:
-        """Форма «подключить салон»: все шаги одним действием.
+        """Форма «подключить салон» и действие верификации на ней же.
 
         Настройки тенанта меняет только суперпользователь (OPEN_DECISIONS
         §27 п.2, роли DRF-1495) — подключение тенанта тем более. Экран
         не дублирует ``create_tenant``: он вызывает :func:`connect_salon`,
         который проверяет идентификатор по Ayla ДО сохранения, запускает
         синхронизацию и показывает исход глазами клиента.
+
+        DRF-1553 добавил сюда второе действие — верификацию мастеров.
+        После DRF-1496 мастер, приехавший синхронизацией, рождается
+        ``pending``, поэтому сразу после подключения бронируемых ноль и
+        критерий успеха этого экрана («салон виден клиенту») без ручного
+        шага не достигался НИКОГДА. Владелец выбрал дать шаг кнопкой, а
+        не назвать его словами (§51.1), и уровень доступа оставил один —
+        тот же суперпользователь; проверка прав здесь одна на оба
+        действия, и кнопка ничьих прав не расширяет.
+
+        Верификация идёт тем же сервисом, что действие ``verify_masters``
+        в админке каталога (:func:`verify_salon_masters` →
+        ``apps.catalog.services.verification``), поэтому и состояние, и
+        строка журнала у двух экранов одинаковые.
         """
         if not request.user.is_superuser:
             raise PermissionDenied(
@@ -319,10 +347,33 @@ class TenantAdmin(admin.ModelAdmin):
                 "(суперпользователя), а не ролей админки."
             )
 
-        form = SalonConnectForm(request.POST or None)
+        verify_of = request.POST.get(self.VERIFY_FIELD) if request.method == "POST" else None
+
+        form = SalonConnectForm(request.POST if verify_of is None else None)
         result = None
         error = None
-        if request.method == "POST" and form.is_valid():
+        salon = None
+        verified = None
+
+        if verify_of is not None:
+            try:
+                salon = Tenant.all_objects.filter(pk=verify_of).first()
+            except (ValidationError, ValueError):
+                # Не UUID вовсе. ``UUIDField`` отвечает на это исключением,
+                # а не пустой выборкой, и без перехвата экран отдал бы 500
+                # на подделанной форме.
+                salon = None
+            if salon is None:
+                # Не «верифицировано: 0», а отказ: салон, которого нет,
+                # обязан выглядеть ошибкой, а не пустым успехом — тот же
+                # класс тихого «успеха», ради которого заведён DRF-1525.
+                error = (
+                    f"Салон {verify_of!r} не найден — верификация не выполнена. "
+                    "Откройте карточку салона и повторите оттуда."
+                )
+            else:
+                verified = verify_salon_masters(salon, user=request.user)
+        elif request.method == "POST" and form.is_valid():
             try:
                 result = connect_salon(
                     slug=form.cleaned_data["slug"],
@@ -330,17 +381,36 @@ class TenantAdmin(admin.ModelAdmin):
                     tenant_id=form.cleaned_data["tenant_id"],
                     city=form.cleaned_data["city"],
                 )
+                salon = result.tenant
             except ConnectError as exc:
                 error = str(exc)
+
+        # Оценка после действия, а не до: кнопка обещает «салон появится
+        # в поиске», и экран обязан показать, случилось ли это на самом
+        # деле, а не повторить обещание.
+        if result is not None:
+            # ``connect_salon`` уже посчитал исход — второй проход по тем
+            # же таблицам дал бы то же самое за лишние запросы.
+            assessment = result.assessment
+        elif salon is not None:
+            assessment = assess_salon(salon)
+        else:
+            assessment = None
 
         context = {
             **self.admin_site.each_context(request),
             "title": "Подключить салон",
             "form": form,
             "result": result,
-            "result_reasons": (
-                [REASON_LABELS[code] for code in result.assessment.reasons] if result else []
+            "salon": salon,
+            "assessment": assessment,
+            "assessment_reasons": (
+                [REASON_LABELS[code] for code in assessment.reasons]
+                if assessment is not None
+                else []
             ),
+            "verified": verified,
+            "verify_field": self.VERIFY_FIELD,
             "error": error,
             "opts": self.model._meta,  # noqa: SLF001 — admin chrome API
         }
