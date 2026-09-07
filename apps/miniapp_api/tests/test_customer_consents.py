@@ -15,6 +15,7 @@ import hashlib
 import hmac
 import json
 import time as time_module
+import uuid
 from datetime import datetime, timedelta, timezone as dt_timezone
 from unittest.mock import patch
 from urllib.parse import urlencode
@@ -649,7 +650,7 @@ def test_revocation_is_idempotent(client: Client, bot_user, revoke_url, auth) ->
 
 
 def test_revocation_switches_the_hints_off_on_every_shell(
-    client: Client, bot_user, url, revoke_url, auth, db
+    client: Client, bot_user, url, revoke_url, auth
 ) -> None:
     """§35 п.9: после отзыва «Подсказки Ayla» показывают выключено.
 
@@ -672,7 +673,7 @@ def test_revocation_switches_the_hints_off_on_every_shell(
     # Есть чему меняться: до отзыва тумблер включён на обеих оболочках.
     assert client.get(url, **auth).json()["proactive_hints"]["enabled"] is True
     assert BotUser.all_tenants.get(pk=bot_user.pk).proactive_messages_opt_out is False
-    assert chat_shell.proactive_messages_opt_out is False
+    assert BotUser.all_tenants.get(pk=chat_shell.pk).proactive_messages_opt_out is False
 
     res = _revoke(client, revoke_url, auth)
 
@@ -697,6 +698,42 @@ def test_repeated_revocation_leaves_the_hints_off(
     assert second.status_code == 200
     assert second.json()["proactive_hints"]["enabled"] is False
     assert BotUser.all_tenants.get(pk=bot_user.pk).proactive_messages_opt_out is True
+
+
+def test_revocation_reaches_a_shell_linked_only_by_ayla_user_id(tenant, bot_user) -> None:
+    """Гашение идёт по ПОЛНОМУ резолву личности, а не по соседям по каналу.
+
+    Ровно тот случай, ради которого ``revoke_data_storage`` берёт
+    ``person_shell_ids`` вместо узкого ``_person_shells``: оболочка,
+    связанная с человеком только через ``ayla_user_id``, с другим
+    ``channel_user_id``. Соседский резолв её не увидит — и тест покраснеет,
+    если множество когда-нибудь сузят.
+
+    Каскад по накопленному здесь заглушён намеренно: связанная личность
+    заставила бы его пойти в Ayla по-настоящему, а проверяется шаг 1.
+    """
+    person_key = uuid.uuid4()
+    BotUser.all_tenants.filter(pk=bot_user.pk).update(ayla_user_id=person_key)
+    bot_user.refresh_from_db()
+    upstream = Tenant.objects.create(slug="consents-upstream", name="Upstream")
+    ayla_only_shell = BotUser.all_tenants.create(
+        tenant=upstream,
+        channel="max",
+        channel_user_id="1520999",  # другой канальный ключ — не сосед
+        chat_id="chat-1520999",
+        ayla_user_id=person_key,
+    )
+    # Есть чему меняться, и меняться именно по дальней оболочке.
+    assert BotUser.all_tenants.get(pk=ayla_only_shell.pk).proactive_messages_opt_out is False
+
+    with patch(
+        "apps.identity.services.privacy.delete_personal_data",
+        return_value=_NoOpCascade(),
+    ):
+        customer_consents.revoke_data_storage(bot_user)
+
+    assert BotUser.all_tenants.get(pk=bot_user.pk).proactive_messages_opt_out is True
+    assert BotUser.all_tenants.get(pk=ayla_only_shell.pk).proactive_messages_opt_out is True
 
 
 def test_consent_is_withdrawn_even_when_the_processing_step_fails(
