@@ -65,6 +65,7 @@ import logging
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
+from enum import Enum
 from typing import TYPE_CHECKING, Any
 
 from apps.orchestrator.safety.outbound import evaluate_outbound
@@ -86,6 +87,41 @@ SURFACE = "coach_hint"
 #: The own-limit state inside the ``nutrition_proactive`` prefs sub-dict:
 #: ``{"date": <recipient-local ISO day>, "key": "<trigger kind>:<days>"}``.
 OBSERVATION_STATE_KEY = "coach_observation"
+
+
+class Cadence(Enum):
+    """Считается ли эта строка событием для системы лимитов (OPEN_DECISIONS §39).
+
+    Владелец 07.09 решил про приветственное слово после выдачи согласия:
+    «не считать это слотом диетолога, то есть приветственное слово не
+    тратит лимиты на сообщения». Формулировка важна дословно: не «в этот
+    раз пропускаем потолок», а ВНЕ СИСТЕМЫ ЛИМИТОВ — ни суточного потолка
+    наблюдения, ни любого другого, который появится позже.
+
+    Поэтому здесь категория, а не булев ``skip_limit`` у одного вызова.
+    Разница видна не сегодня, когда лимит один, а в тот день, когда
+    появится второй: он ляжет в тот же участок (:func:`_cadence_blocks`
+    и :func:`_cadence_record`), и ``UNTRACKED`` окажется вне него БЕЗ
+    ЕДИНОЙ ПРАВКИ здесь. Булев флаг такого не обещает — его пришлось бы
+    протаскивать в каждый новый лимит руками, и первый же забытый вернул
+    бы §39 обратно в поломанное состояние, причём молча.
+
+    ``TRACKED``
+        Обычный заход в дневник: человек пришёл сам. Лимиты читаются
+        (:func:`_cadence_blocks`) и ставятся (:func:`_cadence_record`).
+
+    ``UNTRACKED``
+        Приветственное слово: строка едет прицепом к действию, которое
+        человек не планировал как заход в дневник. Показывается, но
+        участка лимитов не касается НИ НА ЧТЕНИЕ, НИ НА ЗАПИСЬ — суточный
+        слот остаётся целым для захода, который человек сделает сам.
+        Журнал при этом ведётся как обычно: §39 говорит про лимиты, а не
+        про журнал, и «журналируется всё» остаётся в силе — иначе мы
+        потеряли бы способ узнать, что приветствие вообще уходило.
+    """
+
+    TRACKED = "tracked"
+    UNTRACKED = "untracked"
 
 
 @dataclass(frozen=True)
@@ -110,12 +146,22 @@ def decide_observation(
     now_utc: datetime | None = None,
     fetch_goal: Callable[[Any], Goal | None] | None = None,
     fetch_history: Callable[[Any], WeekPicture] | None = None,
+    cadence: Cadence = Cadence.TRACKED,
 ) -> Observation | None:
     """The observation line due for this diary open, or ``None``. Writes nothing.
 
     Same seam contract as the proactive planner: ``fetch_goal`` /
     ``fetch_history`` replace the Ayla reads in tests; defaults are the
     real readers, breaker and all.
+
+    ``cadence`` — считается ли эта строка событием для лимитов
+    (:class:`Cadence`, §39). Умолчание ``TRACKED`` — обычный заход, то есть
+    поведение до §39: сторона, которая ничего не знает про приветствие, не
+    может случайно оказаться вне лимитов. ``UNTRACKED`` пропускает участок
+    лимитов целиком, а ВСЕ ОСТАЛЬНЫЕ ворота лестницы (флаги, HEALTH,
+    чувствительный периметр, цель, триггер, страж исходящего) проходятся
+    одинаково: приветствие не даёт права сказать то, чего нельзя было бы
+    сказать обычным заходом.
     """
     from apps.nutrition_coach import flags as coach_flags
 
@@ -147,7 +193,7 @@ def decide_observation(
     if trigger is None:
         return None
     content_key = f"{trigger.kind}:{trigger.days}"
-    if _own_limit_reached(
+    if cadence is Cadence.TRACKED and _cadence_blocks(
         prefs.get_prefs(bot_user), content_key=content_key, local_date=local_date
     ):
         return None
@@ -163,6 +209,7 @@ def persist_observation(
     observation: Observation,
     *,
     now_utc: datetime | None = None,
+    cadence: Cadence = Cadence.TRACKED,
 ) -> None:
     """Journal a SHOWN observation and stamp the own-limit state.
 
@@ -170,6 +217,12 @@ def persist_observation(
     entry carries ``solicited=True`` (Q-NUTRITION-05): everything outgoing
     is journaled, but this send spends no weekly budget and builds no
     ignore streak.
+
+    ``cadence`` (§39): ЖУРНАЛ ВЕДЁТСЯ ВСЕГДА — «журналируется всё» касается
+    и приветствия, иначе исходящее перестало бы быть видимым. Не ставится
+    только отметка потолка (:func:`_cadence_record`): ``UNTRACKED`` не
+    тратит суточный слот, и следующий, осознанный заход в те же сутки
+    получит настоящее наблюдение.
     """
     from django.utils import timezone as dj_timezone
 
@@ -188,10 +241,8 @@ def persist_observation(
         sent_at=now_utc,
         solicited=True,
     )
-    updated[OBSERVATION_STATE_KEY] = {
-        "date": observation.local_date,
-        "key": observation.content_key,
-    }
+    if cadence is Cadence.TRACKED:
+        _cadence_record(updated, observation)
     context = prefs.merge_prefs(stored, updated)
     BotUser.all_tenants.filter(pk=bot_user.pk).update(context=context)
     # Keep the caller's instance in sync: decide → persist → decide inside
@@ -217,17 +268,24 @@ def _health_open(bot_user: Any) -> bool:
         return False
 
 
-def _own_limit_reached(
+def _cadence_blocks(
     user_prefs: dict[str, Any],
     *,
     content_key: str,
     local_date: str,
 ) -> bool:
-    """The window's own ceiling: once a local day, and no unchanged repeat.
+    """УЧАСТОК ЛИМИТОВ, сторона чтения. Единственная на весь модуль.
 
-    Stored state is deliberately tiny (a date and a content key) rather
-    than a counter: «когда» and «что» are the whole rule, and a counter
-    would be a second cadence mechanism next to DRF-1468's.
+    Сегодня здесь один лимит — свой потолок окна: раз в местные сутки и не
+    повторять неизменившееся. Хранимое состояние нарочно крошечное (дата и
+    ключ содержания), а не счётчик: «когда» и «что» — это всё правило, а
+    счётчик стал бы вторым механизмом каданса рядом с DRF-1468.
+
+    ЛЮБОЙ НОВЫЙ ЛИМИТ КЛАДЁТСЯ СЮДА, а не отдельной проверкой выше по
+    лестнице. Это не стилистика: вызывающий решает вопрос «считается ли
+    эта строка событием» один раз, категорией :class:`Cadence`, и лимит,
+    положенный мимо этого участка, молча отменит §39 для приветственного
+    слова. Страж на это стоит в тестах модуля.
     """
     state = user_prefs.get(OBSERVATION_STATE_KEY)
     if not isinstance(state, dict):
@@ -237,9 +295,25 @@ def _own_limit_reached(
     return state.get("key") == content_key
 
 
+def _cadence_record(updated: dict[str, Any], observation: Observation) -> None:
+    """УЧАСТОК ЛИМИТОВ, сторона записи. Обратная сторона :func:`_cadence_blocks`.
+
+    Вызывается только для :attr:`Cadence.TRACKED` и только после того, как
+    строка действительно ушла в ответ: отметка потолка говорит о
+    показанном, а не о задуманном. Новый лимит, которому нужно что-то
+    запоминать, запоминает это здесь — по той же причине, что и в паре
+    сверху.
+    """
+    updated[OBSERVATION_STATE_KEY] = {
+        "date": observation.local_date,
+        "key": observation.content_key,
+    }
+
+
 __all__ = [
     "OBSERVATION_STATE_KEY",
     "SURFACE",
+    "Cadence",
     "Observation",
     "decide_observation",
     "persist_observation",

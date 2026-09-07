@@ -18,6 +18,11 @@ outbound-гард. «Нет триггера — нет строки».
 
 ``TestJournal`` — маркер прошенного в outbox: запись есть, а
 ``weekly_cap_reason`` и ``surface_ignored_streak`` её не видят.
+
+``TestWelcomeOutsideLimits`` — OPEN_DECISIONS §39: приветственное слово
+после выдачи согласия показывается, но находится ВНЕ системы лимитов.
+Обязательный сценарий приёмки — ВТОРОЙ заход в те же сутки, а не первый:
+первый зелёный при любой реализации и сам по себе не доказывает ничего.
 """
 
 from __future__ import annotations
@@ -41,6 +46,7 @@ from apps.orchestrator import personal_surface
 from apps.orchestrator.coach_observation import (
     OBSERVATION_STATE_KEY,
     SURFACE,
+    Cadence,
     Observation,
     decide_observation,
     persist_observation,
@@ -438,3 +444,174 @@ class TestDiaryIntegration:
         # Дневник отвечает как ни в чём не бывало — строка никогда не стоит
         # потерянного ответа на заданный вопрос.
         assert "1210" in reply.text
+
+
+# ─── §39: приветственное слово вне системы лимитов ─────────────────────────
+
+
+class TestWelcomeOutsideLimits:
+    """Решение владельца §39 (07.09): «не считать это слотом диетолога».
+
+    Возврат к дневнику после выдачи согласия (§37 п.5) отрисовывает дневник
+    и может показать строку наблюдения. Владелец решил, что эта строка —
+    отклик на действие человека, а не наблюдение, и потому лимитов не
+    тратит: суточный слот остаётся целым для захода, который человек
+    сделает сам.
+    """
+
+    def test_the_welcome_line_is_shown_and_the_slot_survives(self, monkeypatch) -> None:
+        """Сценарий приёмки §39 целиком, и решает его ВТОРОЙ заход.
+
+        непустая неделя → приветственное слово показано → второй заход в те
+        же сутки → настоящее наблюдение пришло, слот не был потрачен.
+        """
+        person = _person("w39-1")
+        _install_ayla(
+            monkeypatch,
+            _FakeAyla(summary=_diary_summary(), water=_diary_water(), profile=_profile()),
+        )
+        _install_coach_reads(monkeypatch)
+        line = coach_copy.OBSERVATION_TEXTS["late_dinner"]
+
+        welcome = personal_surface.render_diary(person, cadence=Cadence.UNTRACKED)
+        assert welcome.text.endswith(line)
+
+        # Потолок не поставлен: участок лимитов не тронут ни на запись...
+        stored = prefs.get_prefs(BotUser.all_tenants.get(pk=person.pk))
+        assert OBSERVATION_STATE_KEY not in stored
+
+        # ...ни, следовательно, на чтение — человек приходит сам в те же
+        # сутки и получает СВОЁ наблюдение, а не тишину.
+        own = personal_surface.render_diary(BotUser.all_tenants.get(pk=person.pk))
+        assert own.text.endswith(line)
+
+        # И вот теперь слот потрачен — обычный заход ведёт себя как прежде.
+        # Дату не прибиваем: render_diary идёт по реальному «сейчас», в него
+        # now_utc не передаётся. Прибит ключ содержания и сам факт отметки.
+        stored = prefs.get_prefs(BotUser.all_tenants.get(pk=person.pk))
+        assert stored[OBSERVATION_STATE_KEY]["key"] == "late_dinner:3"
+        assert stored[OBSERVATION_STATE_KEY]["date"]
+
+        # И третий заход в те же сутки уже молчит — потолок работает как
+        # работал, §39 снял слот только с приветствия.
+        third = personal_surface.render_diary(BotUser.all_tenants.get(pk=person.pk))
+        assert line not in third.text
+
+    def test_the_first_open_alone_proves_nothing(self, monkeypatch) -> None:
+        """Страж НЕДОСТАТОЧНОСТИ, а не поведения.
+
+        Проверка, ограниченная первым заходом, проходит одинаково и при
+        верной реализации §39, и при той, что тратит слот: обе показывают
+        строку. Тест прибивает именно эту неразличимость, чтобы следующий
+        исполнитель не «проверил §39» первым заходом и не успокоился.
+        """
+        line = coach_copy.OBSERVATION_TEXTS["late_dinner"]
+        seen = []
+        for uid, cadence in (("w39-2a", Cadence.UNTRACKED), ("w39-2b", Cadence.TRACKED)):
+            person = _person(uid)
+            _install_ayla(
+                monkeypatch,
+                _FakeAyla(summary=_diary_summary(), water=_diary_water(), profile=_profile()),
+            )
+            _install_coach_reads(monkeypatch)
+            first = personal_surface.render_diary(person, cadence=cadence)
+            seen.append(first.text)
+
+        # Первые заходы совпадают буква в букву — по ним §39 неотличим от
+        # его нарушения. Отличает только второй заход, см. тест выше.
+        assert seen[0].endswith(line)
+        assert seen[0] == seen[1]
+
+    def test_the_welcome_is_still_journaled(self, monkeypatch) -> None:
+        """§39 про лимиты, а не про журнал: «журналируется всё» в силе.
+
+        Иначе мы потеряли бы способ узнать, что приветствие вообще уходило.
+        """
+        person = _person("w39-3")
+        _install_ayla(
+            monkeypatch,
+            _FakeAyla(summary=_diary_summary(), water=_diary_water(), profile=_profile()),
+        )
+        _install_coach_reads(monkeypatch)
+
+        personal_surface.render_diary(person, cadence=Cadence.UNTRACKED)
+
+        stored = prefs.get_prefs(BotUser.all_tenants.get(pk=person.pk))
+        entries = prefs.outbox_entries(stored)
+        assert len(entries) == 1
+        assert entries[0].get("surface") == SURFACE
+        assert entries[0].get("solicited") is True
+
+    def test_being_outside_limits_grants_no_permission(self) -> None:
+        """Вне лимитов — не значит вне ворот.
+
+        Приветствие не даёт права сказать то, чего нельзя было бы сказать
+        обычным заходом: остальная лестница проходится одинаково.
+        """
+        # Контроль присутствия: на тех же данных с HEALTH строка есть.
+        assert _decide(_person("w39-4"), cadence=Cadence.UNTRACKED) is not None
+        assert _decide(_person("w39-5", health=False), cadence=Cadence.UNTRACKED) is None
+        assert (
+            _decide(
+                _person("w39-6"),
+                cadence=Cadence.UNTRACKED,
+                fetch_goal=_goal_reader(None),
+            )
+            is None
+        )
+        assert (
+            _decide(
+                _person("w39-7"),
+                cadence=Cadence.UNTRACKED,
+                profile=_profile(health_flags={"eating_disorder": True}),
+            )
+            is None
+        )
+
+    def test_the_default_is_tracked(self, monkeypatch) -> None:
+        """Умолчание — обычный заход.
+
+        Сторона, которая ничего не знает про §39, не может случайно
+        оказаться вне лимитов: это и есть причина, по которой ``T6``
+        безопасен в любом порядке слияния с DRF-1547.
+        """
+        person = _person("w39-8")
+        _install_ayla(
+            monkeypatch,
+            _FakeAyla(summary=_diary_summary(), water=_diary_water(), profile=_profile()),
+        )
+        _install_coach_reads(monkeypatch)
+
+        personal_surface.render_diary(person)
+
+        stored = prefs.get_prefs(BotUser.all_tenants.get(pk=person.pk))
+        assert OBSERVATION_STATE_KEY in stored
+
+    def test_the_limit_state_lives_only_in_the_cadence_section(self) -> None:
+        """Страж на будущее: второй лимит обязан лечь в тот же участок.
+
+        Категория :class:`Cadence` держит §39 ровно до тех пор, пока
+        решение «считается ли это событием» принимается в ОДНОМ месте.
+        Лимит, положенный мимо участка, отменит §39 молча — поэтому
+        участок прибит здесь, а не оставлен на дисциплину.
+        """
+        import ast
+        import inspect
+
+        from apps.orchestrator import coach_observation
+
+        tree = ast.parse(inspect.getsource(coach_observation))
+        touching = set()
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.FunctionDef):
+                continue
+            for inner in ast.walk(node):
+                if isinstance(inner, ast.Name) and inner.id == "OBSERVATION_STATE_KEY":
+                    touching.add(node.name)
+
+        assert touching == {"_cadence_blocks", "_cadence_record"}, (
+            "Состояние лимита читается или пишется вне участка каданса: "
+            f"{sorted(touching)}. Новый лимит кладётся в _cadence_blocks / "
+            "_cadence_record, иначе приветственное слово §39 снова начнёт "
+            "тратить слот."
+        )
