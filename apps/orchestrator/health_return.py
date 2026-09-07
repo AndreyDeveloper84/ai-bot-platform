@@ -152,14 +152,16 @@ def _resume(bot_user: Any) -> bool:
     if not text:
         return False
 
-    chat_id = str(getattr(chat_user, "chat_id", "") or "").strip()
-    if not chat_id:
+    # DRF-1558 — приветствие пишет человеку первым, значит адрес — сам
+    # человек (``channel_user_id``), а не диалог с каким-то из ботов.
+    user_id = str(getattr(chat_user, "channel_user_id", "") or "").strip()
+    if not user_id:
         return False
 
     from apps.channels.max.handler import _build_attachments
     from apps.channels.max.outbound import send_message
 
-    send_message(chat_id=chat_id, text=text, attachments=_build_attachments(reply.action_data))
+    send_message(user_id=user_id, text=text, attachments=_build_attachments(reply.action_data))
     record_global_message(
         conversation,
         role="assistant",

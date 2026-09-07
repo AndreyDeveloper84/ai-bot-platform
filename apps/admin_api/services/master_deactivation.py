@@ -255,7 +255,10 @@ class _PendingNotification:
     operator finds out who that is and why.
     """
 
-    chat_id: str | None
+    #: MAX ``user_id`` — ``BotUser.channel_user_id``. The person, not the
+    #: dialog: these DMs are written first, and a stored ``chat_id`` names
+    #: a dialog with whichever bot opened one (DRF-1558).
+    user_id: str | None
     text: str
     hash_: str
     booking_id: str
@@ -265,7 +268,8 @@ class _PendingNotification:
 
 @dataclass
 class _PendingMasterNotification:
-    chat_id: str
+    #: MAX ``user_id`` — see :class:`_PendingNotification` (DRF-1558).
+    user_id: str
     text: str
     master_id: str
     blocked_reason: str | None = None
@@ -990,7 +994,7 @@ def execute_deactivation(
 
                 pending_customer_notifications.append(
                     _PendingNotification(
-                        chat_id=bu.chat_id if bu else None,
+                        user_id=bu.channel_user_id if bu else None,
                         text=rendered,
                         hash_=msg_hash,
                         booking_id=str(booking.id),
@@ -1062,7 +1066,7 @@ def execute_deactivation(
 
                 pending_customer_notifications.append(
                     _PendingNotification(
-                        chat_id=bu.chat_id if bu else None,
+                        user_id=bu.channel_user_id if bu else None,
                         text=rendered,
                         hash_=msg_hash,
                         booking_id=str(booking.id),
@@ -1109,7 +1113,7 @@ def execute_deactivation(
                 if target.linked_bot_user_id is None:
                     continue
                 bu = BotUser.all_tenants.filter(pk=target.linked_bot_user_id).first()
-                if bu is None or not bu.chat_id:
+                if bu is None or not bu.channel_user_id:
                     continue
                 n_inherited = counts.get(target_id, 0)
                 text = (
@@ -1120,7 +1124,7 @@ def execute_deactivation(
                 )
                 pending_master_notifications.append(
                     _PendingMasterNotification(
-                        chat_id=bu.chat_id,
+                        user_id=bu.channel_user_id,
                         text=text,
                         master_id=target_id,
                         blocked_reason=_master_notification_blocker(bu),
@@ -1145,11 +1149,12 @@ def execute_deactivation(
                     pn.blocked_reason,
                 )
                 continue
-            if not pn.chat_id:
+            if not pn.user_id:
+                # Slug ``no_chat_id`` — эмитируемый ключ, оставлен как был.
                 logger.info("mm5.notify.skip booking=%s reason=no_chat_id", pn.booking_id)
                 continue
             try:
-                send_message(chat_id=pn.chat_id, text=pn.text)
+                send_message(user_id=pn.user_id, text=pn.text)
                 customer_dispatched += 1
             except MaxAPIError as exc:
                 logger.warning(
@@ -1169,7 +1174,7 @@ def execute_deactivation(
                 )
                 continue
             try:
-                send_message(chat_id=pn.chat_id, text=pn.text)
+                send_message(user_id=pn.user_id, text=pn.text)
                 master_dispatched += 1
             except MaxAPIError as exc:
                 logger.warning(
@@ -1241,10 +1246,10 @@ def reactivate_master(
         }
         if notify_master and master.linked_bot_user_id is not None:
             bu = BotUser.all_tenants.filter(pk=master.linked_bot_user_id).first()
-            if bu is not None and bu.chat_id:
+            if bu is not None and bu.channel_user_id:
                 blocked = _master_notification_blocker(bu)
                 pending_master_dm = _PendingMasterNotification(
-                    chat_id=bu.chat_id,
+                    user_id=bu.channel_user_id,
                     text=REACTIVATION_NOTIFICATION_TEXT,
                     master_id=str(master.id),
                     blocked_reason=blocked,
@@ -1275,7 +1280,7 @@ def reactivate_master(
             )
             return
         try:
-            send_message(chat_id=pending_master_dm.chat_id, text=pending_master_dm.text)
+            send_message(user_id=pending_master_dm.user_id, text=pending_master_dm.text)
             notified = True
         except MaxAPIError as exc:
             logger.warning(

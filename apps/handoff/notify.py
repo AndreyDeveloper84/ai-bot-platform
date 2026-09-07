@@ -65,7 +65,17 @@ _HIGH_PRIORITIES = frozenset({AdminTask.Priority.HIGH.value, AdminTask.Priority.
 
 
 def get_notify_chat_ids() -> list[str]:
-    """Configured MAX recipient chat_ids; empty list = mechanism off."""
+    """Configured MAX recipient chat_ids; empty list = mechanism off.
+
+    These are **dialog** ids typed in by an operator, and we hold no
+    person id for them — so they cannot move to ``user_id`` addressing
+    the way a ``BotUser``-derived recipient can (DRF-1558). They keep
+    the limitation that goes with a dialog id: they only resolve for the
+    bot whose dialog they were copied out of. On 2026-09-07 that is why
+    the salon fallback answered 404 alongside the master notification
+    (`docs/OPEN_DECISIONS.md` §55) — a setting holding user ids is a
+    separate, config-shaped change.
+    """
 
     return [c for c in getattr(settings, "HANDOFF_NOTIFY_MAX_CHAT_IDS", []) if c]
 
@@ -113,18 +123,50 @@ def build_admin_task_notification(task: AdminTask) -> str:
 def send_max_notification(
     *,
     text: str,
-    chat_ids: Sequence[str],
+    chat_ids: Sequence[str] = (),
+    user_ids: Sequence[str] = (),
     timeout: float = _SEND_TIMEOUT,
     on_failure: Callable[[str, Exception], None] | None = None,
 ) -> int:
-    """Fan out ``text`` to each MAX chat, best-effort. Returns failures.
+    """Fan out ``text`` to each MAX recipient, best-effort. Returns failures.
 
-    Every recipient is isolated: an exception on one chat is logged
+    Two recipient lists, because there are two kinds of address and only
+    one of them survives a change of sending bot (DRF-1558):
+
+    * ``user_ids`` — ``BotUser.channel_user_id``. The person. **This is
+      what a recipient resolved from our own database must use**: the
+      ``chat_id`` stored next to it names a dialog with whichever bot
+      wrote first, and a different bot sending there gets 404
+      ``dialog.not.found``.
+    * ``chat_ids`` — a dialog id an operator configured by hand
+      (``HANDOFF_NOTIFY_MAX_CHAT_IDS``, ``Tenant.manager_chat_id``).
+      We have no person id for those, so they stay as they are and
+      inherit the same limitation: they only work for the bot whose
+      dialog they were copied out of.
+
+    Both may be given; each recipient is addressed by its own key.
+
+    Every recipient is isolated: an exception on one address is logged
     (and reported via ``on_failure``) but never cancels the remaining
     sends. No retries — the sync path stays short by design.
     """
 
     failures = 0
+    for user_id in user_ids:
+        try:
+            send_message(user_id=user_id, text=text, timeout=timeout)
+        except Exception as exc:  # noqa: BLE001 — best-effort by contract
+            failures += 1
+            logger.warning(
+                "handoff.notify.send_failed user_id=%s exc=%s",
+                user_id,
+                exc,
+            )
+            if on_failure is not None:
+                try:
+                    on_failure(user_id, exc)
+                except Exception:  # noqa: BLE001 — the hook is best-effort too
+                    logger.exception("handoff.notify.on_failure_hook_failed user_id=%s", user_id)
     for chat_id in chat_ids:
         try:
             send_message(chat_id=chat_id, text=text, timeout=timeout)

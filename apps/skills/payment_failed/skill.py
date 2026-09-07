@@ -333,8 +333,10 @@ def _try_send_master_dm(data: dict[str, Any], payment_id: str) -> None:
         return
 
     master_bot_user = master.linked_bot_user
-    chat_id = (master_bot_user.chat_id or "").strip()
-    if not chat_id:
+    # DRF-1558 — DM мастеру пишется первым, адрес = человек, не диалог.
+    # Slug причины (``master_no_chat_id``) оставлен: это ключ аудита.
+    user_id = (master_bot_user.channel_user_id or "").strip()
+    if not user_id:
         _audit_master_dm_skip(data, payment_id, "master_no_chat_id")
         return
 
@@ -367,7 +369,7 @@ def _try_send_master_dm(data: dict[str, Any], payment_id: str) -> None:
     )
 
     _send_dm(
-        chat_id=chat_id,
+        user_id=user_id,
         text=text,
         attachments=None,  # info-only, no buttons per Variant C scope
         log_context={
@@ -604,7 +606,7 @@ def _try_send_client_dm(data: dict[str, Any], payment_id: str) -> None:
     )
     action_data = _build_retry_button_envelope(payment_id)
     _send_dm(
-        bot_user.chat_id,
+        bot_user.channel_user_id,
         text,
         attachments=action_data,
         log_context={
@@ -737,7 +739,7 @@ def _build_retry_button_envelope(payment_id: str) -> list[dict[str, Any]]:
 
 
 def _send_dm(
-    chat_id: str,
+    user_id: str,
     text: str,
     *,
     attachments: list[dict[str, Any]] | None,
@@ -748,7 +750,9 @@ def _send_dm(
     Не raise — лог-и-уходи: payment_failed flow никогда не должен сломать
     consumer-цикл Gamma's #443.
     """
-    if not chat_id:
+    if not user_id:
+        # Slug ``empty_chat_id`` сохранён — это ключ, по которому логи
+        # уже грепают; адрес под ним теперь ``user_id`` (DRF-1558).
         logger.warning(
             "payment_failed.send_dm.empty_chat_id ctx=%s",
             log_context,
@@ -758,7 +762,7 @@ def _send_dm(
     try:
         from apps.channels.max.outbound import send_message
 
-        send_message(chat_id=chat_id, text=text, attachments=attachments)
+        send_message(user_id=user_id, text=text, attachments=attachments)
         logger.info(
             "payment_failed.dm_sent ctx=%s text_len=%d",
             log_context,
