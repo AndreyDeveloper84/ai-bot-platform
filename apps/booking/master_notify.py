@@ -140,7 +140,7 @@ class NotifyTarget:
     exists so logs (and tests) can assert *which* rung of the cascade
     answered, not merely that something was sent. The specialist's
     personal address is resolved separately — see
-    :func:`resolve_specialist_chat_id` — because it is an additional
+    :func:`resolve_specialist_user_id` — because it is an additional
     recipient, not a rung of this cascade.
     """
 
