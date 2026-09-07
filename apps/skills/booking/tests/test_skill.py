@@ -2741,12 +2741,21 @@ class TestHealthGateNoTenantOverride:
         it would read as "supported, currently empty" to the next operator."""
         from django.conf import settings as dj_settings
 
+        # Presence before absence (DRF-1406 guard): the sibling per-tenant
+        # allowlist proves this settings object is loaded and still declares
+        # allowlists of this shape, so the miss below is a fact about THIS
+        # name rather than about an object that answers nothing.
+        assert hasattr(dj_settings, "BOOKING_NO_PREPAYMENT_TENANTS")
         assert not hasattr(dj_settings, "BOOKING_HEALTH_CHECK_GATE_DISABLED_TENANTS")
 
     def test_no_helper_reads_a_tenant_override(self) -> None:
         """The removed reader stays removed."""
         from apps.skills.booking import skill as booking_skill
 
+        # Presence before absence: the gate itself is still there, so the
+        # miss below means the reader was removed — not that the module
+        # failed to import or was renamed wholesale.
+        assert hasattr(booking_skill, "_service_requires_health_check")
         assert not hasattr(booking_skill, "_health_check_gate_disabled_for_tenant")
 
     def test_disabled_audit_slug_survives_the_removal(self) -> None:
