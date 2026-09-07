@@ -28,7 +28,7 @@ Direction decides the recipient:
   notice uses, deliberately, so a salon configures one destination rather
   than one per feature.
 * **admin → master**: that thread's master personally, via
-  ``CatalogMaster.linked_bot_user.chat_id``. There is no fallback here on
+  ``CatalogMaster.linked_bot_user.channel_user_id``. There is no fallback here on
   purpose: a message addressed to one master must not be broadcast to the
   salon's shared channel just because the link is missing. Silence plus a
   warning is the correct failure — the alternative leaks a private
@@ -128,8 +128,14 @@ def _salon_bot_for(tenant):
         return None
 
 
-def _recipients_for(message) -> tuple[list[str], str]:
-    """``(chat_ids, channel_label)`` for this message's direction."""
+def _recipients_for(message) -> tuple[list[str], list[str], str]:
+    """``(chat_ids, user_ids, channel_label)`` for this message's direction.
+
+    Two lists because there are two kinds of address (DRF-1558). The
+    salon-side rungs are dialog ids an operator configured by hand and we
+    hold no person id for them; the master rung is resolved from our own
+    ``BotUser`` row and therefore names the person.
+    """
 
     from apps.handoff.notify import get_notify_chat_ids
 
@@ -141,17 +147,20 @@ def _recipients_for(message) -> tuple[list[str], str]:
         # configures one destination, not one per feature.
         manager_chat_id = (getattr(tenant, "manager_chat_id", "") or "").strip()
         if manager_chat_id:
-            return [manager_chat_id], "manager"
+            return [manager_chat_id], [], "manager"
         fallback = get_notify_chat_ids()
-        return (list(fallback), "fallback") if fallback else ([], "none")
+        return (list(fallback), [], "fallback") if fallback else ([], [], "none")
 
     # To the master personally. No fallback on purpose: broadcasting a
     # message meant for one master to the salon's shared channel would
     # leak a private conversation to whoever reads that chat.
     master = getattr(thread, "master", None)
     linked = getattr(master, "linked_bot_user", None)
-    chat_id = (getattr(linked, "chat_id", "") or "").strip() if linked else ""
-    return ([chat_id], "master") if chat_id else ([], "none")
+    # DRF-1558 — the person, not the dialog: this fan-out runs under the
+    # salon bot's ``bot_scope`` and the master's stored ``chat_id`` names
+    # their dialog with the CLIENT bot.
+    user_id = (getattr(linked, "channel_user_id", "") or "").strip() if linked else ""
+    return ([], [user_id], "master") if user_id else ([], [], "none")
 
 
 def notify_internal_message(*, message) -> None:
@@ -163,9 +172,10 @@ def notify_internal_message(*, message) -> None:
     try:
         thread = message.thread
         tenant = thread.tenant
-        chat_ids, channel = _recipients_for(message)
+        chat_ids, user_ids, channel = _recipients_for(message)
+        recipient_count = len(chat_ids) + len(user_ids)
 
-        if not chat_ids:
+        if not recipient_count:
             # Loud, not silent: an undeliverable staff message is a
             # configuration defect, and silence is what made the whole
             # internal-chat feature invisible in the first place.
@@ -181,7 +191,7 @@ def notify_internal_message(*, message) -> None:
 
         text = build_notification_text(message=message)
         with bot_scope(_salon_bot_for(tenant)):
-            failures = send_max_notification(text=text, chat_ids=chat_ids)
+            failures = send_max_notification(text=text, chat_ids=chat_ids, user_ids=user_ids)
 
         if failures:
             logger.warning(
@@ -190,7 +200,7 @@ def notify_internal_message(*, message) -> None:
                 tenant.slug,
                 thread.id,
                 channel,
-                len(chat_ids),
+                recipient_count,
                 failures,
             )
         else:
@@ -199,7 +209,7 @@ def notify_internal_message(*, message) -> None:
                 tenant.slug,
                 thread.id,
                 channel,
-                len(chat_ids),
+                recipient_count,
             )
     except Exception:  # noqa: BLE001 — a failed notice must not cost the message
         logger.exception(

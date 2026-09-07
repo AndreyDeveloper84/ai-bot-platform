@@ -458,9 +458,9 @@ def _enqueue_master_dm_post_commit(
     """
 
     linked = master.linked_bot_user
-    if linked is None or not (linked.chat_id or "").strip():
+    if linked is None or not (linked.channel_user_id or "").strip():
         logger.info(
-            "admin_api.availability.no_master_chat_id master=%s request=%s",
+            "admin_api.availability.no_master_user_id master=%s request=%s",
             master.id,
             request_id,
         )
@@ -478,7 +478,7 @@ def _enqueue_master_dm_post_commit(
     # broker outage is an ops-visible event, not an API-caller error.
     try:
         dispatch_master_decision_dm.delay(
-            chat_id=linked.chat_id.strip(),
+            user_id=linked.channel_user_id.strip(),
             decision=decision,
             date_range_human=date_range_human,
             request_id=str(request_id),

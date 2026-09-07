@@ -104,6 +104,7 @@ class TestDirectionMasterToAdmin:
         notify.notify_internal_message(message=msg)
 
         assert sent.call_args.kwargs["chat_ids"] == ["555"]
+        assert sent.call_args.kwargs["user_ids"] == []
 
     def test_falls_back_to_the_configured_channel(self, tenant, settings, sent):
         # Same cascade as the booking notice, deliberately: a salon
@@ -136,7 +137,10 @@ class TestDirectionAdminToMaster:
 
         notify.notify_internal_message(message=msg)
 
-        assert sent.call_args.kwargs["chat_ids"] == ["4242"]
+        # DRF-1558 — мастеру пишем как ЧЕЛОВЕКУ: эта отправка идёт под
+        # салонным ботом, а «4242» — диалог мастера с клиентским.
+        assert sent.call_args.kwargs["user_ids"] == ["42"]
+        assert sent.call_args.kwargs["chat_ids"] == []
 
     def test_an_unlinked_master_is_NOT_broadcast_to_the_salon(self, tenant, settings, sent):
         """The privacy property. No fallback on this direction, on purpose."""

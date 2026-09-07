@@ -24,9 +24,21 @@ phone-as-secondary-key cross-channel consolidation (Sprint 3+).
   this table at query time.
 
 * **`chat_id` separate from `channel_user_id`** — in some channels
-  (Telegram private DM) they're identical, but in MAX the chat_id is
-  the conversation key that outbound `send_message` writes to, and may
-  differ from the user identity once group chats land Phase 1+.
+  (Telegram private DM) they're identical. **In MAX they are not, even
+  in a private dialog** (DRF-1558): measured on the pilot 2026-09-07,
+  `chat_id=518410834` while `channel_user_id=260237491` for the same
+  person in a one-to-one dialog. MAX's `chat_id` is the id of a
+  **dialog**, so it is meaningful only together with the bot that opened
+  it — and this row has no bot column, so all of one person's rows carry
+  the SAME `chat_id`, valid for at most one of our bots. That false
+  equality is what made storing one address per person look safe; a
+  salon bot sending there answers 404 `dialog.not.found`
+  (`docs/OPEN_DECISIONS.md` §55).
+
+  Therefore: a **reply** uses the inbound event's own `chat_id`, and
+  anything the bot **writes first** uses `channel_user_id` via
+  `outbound.send_message(user_id=...)`. `chat_id` on this row is not an
+  address for a bot-initiated send.
 
 * **Default manager = `TenantScopedManager`** — `(channel, channel_user_id)`
   is unique *within a tenant*, not globally. Same Telegram user can sign
@@ -125,6 +137,11 @@ class BotUser(models.Model):
         help_text="E.164-normalised phone. PII — never write raw to "
         "AuditLog payload; reference by bot_user_id UUID instead.",
     )
+    # DRF-1558 — the help_text below predates the pilot measurement and its
+    # «Equal to channel_user_id in private DMs» is FALSE for MAX; see the
+    # module docstring. Left as-is on purpose: editing help_text generates
+    # an AlterField migration, and a schema migration is not what a
+    # correction to prose should cost.
     chat_id = models.CharField(
         max_length=128,
         blank=True,

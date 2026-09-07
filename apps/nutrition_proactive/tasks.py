@@ -543,15 +543,18 @@ def _run_task(
 def _deliver(decision: Decision, *, surface: str) -> None:
     from apps.identity.models import BotUser
 
-    chat_id = (
+    # DRF-1558 — адресуемся по человеку, а не по диалогу: проактив пишет
+    # первым, и сохранённый ``chat_id`` принадлежит паре «другой бот +
+    # человек».
+    user_id = (
         BotUser.all_tenants.filter(pk=decision.bot_user_id)
-        .values_list("chat_id", flat=True)
+        .values_list("channel_user_id", flat=True)
         .first()
         or ""
     ).strip()
-    if not chat_id:
-        raise MaxAPIError(0, "chat_id vanished between planning and delivery")
-    send_message(chat_id=chat_id, text=decision.text, attachments=_stop_keyboard(surface))
+    if not user_id:
+        raise MaxAPIError(0, "channel_user_id vanished between planning and delivery")
+    send_message(user_id=user_id, text=decision.text, attachments=_stop_keyboard(surface))
 
 
 def _stop_keyboard(surface: str) -> list[dict[str, Any]]:

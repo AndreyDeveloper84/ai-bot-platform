@@ -511,6 +511,16 @@ class BookingReminder(models.Model):
     reminder's send target must stay stable to the booking-time value.
     Same rationale as mysite.
 
+    **The dispatcher no longer sends to this snapshot (DRF-1558).** A
+    reminder writes to the person first, so it addresses
+    ``bot_user.channel_user_id`` — the person — rather than a dialog id
+    that is only valid for whichever bot opened that dialog. The column
+    stays: it is the booking-time forensic record of where we would have
+    written, and dropping it would cost a migration to erase evidence.
+    The stability argument above survives the change intact — it argued
+    for pinning the *address*, and the person id is the more stable of
+    the two identifiers, not the less.
+
     ### Delete semantics
 
     ``record.delete`` events transition existing reminders to

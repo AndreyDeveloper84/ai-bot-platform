@@ -34,8 +34,11 @@ call sites and the overwhelming majority are *replies* — a person wrote
 to the bot and is waiting. Two things break if the consent gate moves
 there:
 
-1. ``send_message(chat_id=...)`` has no ``BotUser`` in hand, and
-   ``chat_id`` does not resolve back to one uniquely:
+1. ``send_message`` has no ``BotUser`` in hand, and neither address it
+   takes resolves back to one uniquely. (Since DRF-1558 a bot-initiated
+   send addresses ``user_id`` = ``BotUser.channel_user_id``; the gate
+   below is still the seam, for the same reason.) ``chat_id`` in
+   particular does not resolve back:
    ``soft_delete_user()`` leaves ``chat_id`` populated on erased rows,
    and the same human can hold rows in several tenants.
 2. The welcome flow — :mod:`apps.skills.welcome` — is what *asks* for

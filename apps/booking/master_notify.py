@@ -20,7 +20,7 @@ no new queue, no dependency on the mobile app.
 ### Delivery fan-out
 
 * **The specialist personally** — when the appointment's master has a
-  linked MAX account (``CatalogMaster.linked_bot_user.chat_id``), he
+  linked MAX account (``CatalogMaster.linked_bot_user.channel_user_id``), he
   receives his own copy, addressed to him («У вас новая запись»). The
   epic's contract is «if the master does not learn, the visit does not
   happen», so the specialist is an *additional* recipient, not an
@@ -140,7 +140,7 @@ class NotifyTarget:
     exists so logs (and tests) can assert *which* rung of the cascade
     answered, not merely that something was sent. The specialist's
     personal address is resolved separately — see
-    :func:`resolve_specialist_chat_id` — because it is an additional
+    :func:`resolve_specialist_user_id` — because it is an additional
     recipient, not a rung of this cascade.
     """
 
@@ -200,19 +200,26 @@ def resolve_service_name(*, tenant: Tenant, service_id: UUID | None) -> str:
     return (row.name if row else "").strip() or _UNKNOWN
 
 
-def resolve_specialist_chat_id(master: CatalogMaster | None) -> str:
-    """The specialist's personal MAX chat_id, or ``""`` when unreachable.
+def resolve_specialist_user_id(master: CatalogMaster | None) -> str:
+    """The specialist's MAX ``user_id``, or ``""`` when unreachable.
 
     «Reachable» means a *linked account*: ``linked_bot_user`` is set by
-    the staff-invite accept flow and by solo onboarding, and the BotUser
-    carries the chat_id of the master's own dialog with the bot. On the
+    the staff-invite accept flow and by solo onboarding. On the
     pilot every master is unlinked today — linking them is a data
     change, not a code change, and this resolver starts answering the
     moment it happens.
+
+    Reads ``channel_user_id``, not ``chat_id`` (DRF-1558). This message
+    goes out under the SALON bot's token, and the stored ``chat_id`` is
+    the master's dialog with whichever bot opened one first — the client
+    bot, on the pilot. Sending there answered 404 ``dialog.not.found``
+    on 2026-09-07 (`docs/OPEN_DECISIONS.md` §55) for exactly one reason:
+    a dialog id means nothing to a bot that is not in that dialog. The
+    person id does.
     """
 
     linked = getattr(master, "linked_bot_user", None) if master is not None else None
-    return _clean_chat_id(getattr(linked, "chat_id", ""))
+    return _clean_chat_id(getattr(linked, "channel_user_id", ""))
 
 
 def resolve_salon_target(*, tenant: Tenant) -> NotifyTarget:
@@ -386,7 +393,7 @@ def notify_booking_created(
 
     try:
         master = resolve_master(tenant=tenant, specialist_id=specialist_id)
-        specialist_chat_id = resolve_specialist_chat_id(master)
+        specialist_user_id = resolve_specialist_user_id(master)
         service_name = resolve_service_name(tenant=tenant, service_id=service_id)
         specialist_notified = False
 
@@ -405,7 +412,7 @@ def notify_booking_created(
         # tone, whereas silence is worse in substance. That is the one case
         # where the wrong avatar beats no message.
         with bot_scope(_salon_bot_for(tenant)):
-            if specialist_chat_id:
+            if specialist_user_id:
                 # The specialist goes FIRST: if MAX dies mid-fan-out, the
                 # epic's priority recipient already has the message.
                 personal = build_specialist_booking_notification(
@@ -415,7 +422,7 @@ def notify_booking_created(
                     service_name=service_name,
                     raw_source=raw_source,
                 )
-                failures = send_max_notification(text=personal, chat_ids=(specialist_chat_id,))
+                failures = send_max_notification(text=personal, user_ids=(specialist_user_id,))
                 specialist_notified = failures == 0
                 if specialist_notified:
                     logger.info(
