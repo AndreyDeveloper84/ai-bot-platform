@@ -257,6 +257,8 @@ _LOW = ("consent", "0002_alter_consentrecord_consent_type")
 _HIGH = ("consent", "0003_backfill_memory_green_consent")
 
 _SYNTHETIC_PREAMBLE = f"""
+from apps.consent.models import ConsentRecord
+
 _A = {_LOW!r}
 _B = {_HIGH!r}
 
@@ -440,7 +442,15 @@ class TestNoRuntimeModelUseWhileRolledBack:
     @pytest.mark.parametrize("relpath", _MIGRATION_TEST_FILES)
     def test_nothing_touches_a_runtime_model_below_the_head(self, relpath: str) -> None:
         source = (_REPO_ROOT / relpath).read_text(encoding="utf-8")
-        findings, _ = runtime_access_below_head(source)
+        findings, below = runtime_access_below_head(source)
+        # Presence before absence, on THIS file (DRF-1406/1411). An aggregate
+        # over all five would let one file lose its rollback — to a
+        # conftest.py this analysis cannot see, say — and go vacuously green
+        # while the other four kept the total positive.
+        assert below >= 1, (
+            f"{relpath}: no statement was analysed below the graph head. A "
+            "clean result here would be blindness, not health."
+        )
         assert findings == [], (
             f"{relpath}: a statement uses a runtime model while the graph is "
             "rolled back. The runtime model carries the columns of the CURRENT "
@@ -530,5 +540,159 @@ def test_seeds_at_head_then_reruns(rerun):
     rerun()
     assert bu is not None
 """
-        findings, _ = runtime_access_below_head(source)
+        findings, below = runtime_access_below_head(source)
+        # Presence before absence: the fixture's own down-and-up pair does put
+        # the analysis below head for a statement, so «nothing reported» here
+        # is a verdict, not a state the analysis never entered. What the test
+        # pins is that the SEEDING — identical to the sibling test above,
+        # which IS reported — happens at head and so is not.
+        assert below >= 1, "the analysis never went below head; it proves nothing"
         assert findings == [], findings
+
+
+class TestTheGuardedPopulationIsComplete:
+    """A new rollback test must join the list, not hide from it.
+
+    Every guard in this module runs over `_MIGRATION_TEST_FILES`, a list
+    written by hand. The whole DRF-1551 → DRF-1554 arc is about the *next*
+    change: a test that drives the executor and never joins that list is
+    invisible to all of them, and the way that gets noticed is six red tests
+    in somebody else's PR.
+    """
+
+    #: Files that drive `.migrate([...])` and are deliberately not guarded.
+    _EXEMPT = {
+        # This module itself: its synthetic sources are strings containing
+        # exactly the shapes the guards look for.
+        "tests/test_migration_graph_restore.py",
+    }
+
+    @staticmethod
+    def _files_driving_the_executor() -> set[str]:
+        roots = [
+            *_REPO_ROOT.glob("apps/**/tests/**/test_*.py"),
+            *_REPO_ROOT.glob("tests/**/test_*.py"),
+        ]
+        found: set[str] = set()
+        for path in roots:
+            try:
+                text = path.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError):  # pragma: no cover
+                continue
+            if ".migrate([" in text:
+                found.add(path.relative_to(_REPO_ROOT).as_posix())
+        return found
+
+    def test_the_scan_finds_the_files_we_already_know_about(self) -> None:
+        """Presence before absence: a scan that finds nothing proves nothing."""
+
+        found = self._files_driving_the_executor()
+        assert set(_MIGRATION_TEST_FILES) <= found, (
+            "the scan missed a file that is already on the guarded list — it "
+            f"is looking in the wrong place. Missing: "
+            f"{sorted(set(_MIGRATION_TEST_FILES) - found)}"
+        )
+
+    def test_no_unguarded_file_drives_the_migration_executor(self) -> None:
+        found = self._files_driving_the_executor()
+        assert found, "the scan found no file at all — blindness, not health"
+        unguarded = sorted(found - set(_MIGRATION_TEST_FILES) - self._EXEMPT)
+        assert unguarded == [], (
+            f"{unguarded} drive `executor.migrate([...])` but are not in "
+            "_MIGRATION_TEST_FILES, so none of the guards in this module look "
+            "at them. Add them to the list — or to _EXEMPT with the reason "
+            "written down (DRF-1554)."
+        )
+
+
+class TestTheGuardsSurviveReview:
+    """Shapes an independent review broke the first cut of these guards on.
+
+    Kept as tests rather than as fixed code, because both holes came from the
+    same seductive shortcut — treating «the statement did something» as «the
+    database left that node», and «this app is back on its own leaf» as «the
+    graph is whole». The second one is the exact fallacy DRF-1551 exists to
+    correct, reappearing inside its own guard.
+    """
+
+    def test_two_migrates_to_the_same_node_do_not_excuse_each_other(self) -> None:
+        """`resting` asked «does the next statement migrate», which is not
+        the same question as «does the database leave this node»."""
+
+        source = (
+            _SYNTHETIC_PREAMBLE
+            + """
+
+def test_x(at_a):
+    _executor().migrate([_B])
+    _executor().migrate([_B])
+    assert ConsentRecord.all_tenants.count() == 1
+"""
+        )
+        moves, classified = forward_moves_to_pinned_nodes(source)
+        assert classified >= 1
+        assert _violating(moves) != [], "a forward move hid behind its own repeat"
+
+    def test_an_app_back_on_its_own_leaf_is_still_not_a_whole_graph(self) -> None:
+        """The DRF-1551 fallacy, refused inside the guard itself.
+
+        `migrate([consent/0003])` puts consent on its leaf and leaves
+        `identity/0021` unapplied all the same. Only a restore means whole.
+        """
+
+        source = (
+            _SYNTHETIC_PREAMBLE
+            + """
+
+def test_x(at_a):
+    _executor().migrate([_B])
+    _executor().migrate([_B])
+    assert ConsentRecord.all_tenants.count() == 1
+"""
+        )
+        findings, below = runtime_access_below_head(source)
+        assert below >= 1
+        assert [f.via for f in findings] == ["ConsentRecord.all_tenants"]
+
+    def test_the_fix_the_guard_recommends_is_not_itself_reported(self) -> None:
+        """Paired positive guard (DRF-1411), in both spellings.
+
+        The failure message says «use restore_migration_head()». A developer
+        who does exactly that must go green, or the guard is a trap.
+        """
+
+        plain = (
+            _SYNTHETIC_PREAMBLE
+            + """
+
+def test_fixed(at_a):
+    _executor().migrate([_B])
+    restore_migration_head()
+    assert ConsentRecord.all_tenants.count() == 1
+"""
+        )
+        guarded = (
+            _SYNTHETIC_PREAMBLE
+            + """
+
+def test_fixed_try(at_a):
+    try:
+        _executor().migrate([_B])
+    finally:
+        restore_migration_head()
+    assert ConsentRecord.all_tenants.count() == 1
+"""
+        )
+        for label, source in (("plain", plain), ("try/finally", guarded)):
+            moves, classified = forward_moves_to_pinned_nodes(source)
+            assert classified >= 1, label
+            # Presence before absence, over the same `moves` (DRF-1406/1411):
+            # the forward move must have been SEEN and called forward, or
+            # «no violation» would just mean the analysis missed it.
+            assert [m.direction for m in moves if m.function.startswith("test_fixed")] == [
+                "forward"
+            ], label
+            assert _violating(moves) == [], label
+            findings, below = runtime_access_below_head(source)
+            assert below >= 1, label
+            assert findings == [], (label, findings)
