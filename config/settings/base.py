@@ -203,6 +203,11 @@ LOCAL_APPS = [
     # ``BotUser.context["nutrition_proactive"]``. Both beat tasks no-op
     # while ``NUTRITION_PROACTIVE_ENABLED`` is False (the default).
     "apps.nutrition_proactive",
+    # DRF-1464 — ИИ-диетолог: флаги, ридер цели, картина недели,
+    # триггеры и тексты подсказок. No models, so no migrations; every
+    # surface stays silent while NUTRITION_COACH_ENABLED is False
+    # (the default).
+    "apps.nutrition_coach",
     # DRF-1344 — повод OBSERVE от Personal Plan: конвейер до гейтов, без
     # текстов. No models, no migrations; the task evaluates the wellness
     # context document, runs both gates and records the trace — nothing
@@ -1454,6 +1459,24 @@ CELERY_BEAT_SCHEDULE = {
         "task": "nutrition_proactive.send_water_reminders",
         "schedule": crontab(minute="20", hour="*/4"),
     },
+    # DRF-1464 (T5) — проактивная подсказка диетолога. Listed in advance
+    # for the same reason as the pair above: enabling is then an env
+    # change, not a deploy. No-ops while NUTRITION_COACH_ENABLED is
+    # False (the default) and only logs while NUTRITION_COACH_DRY_RUN
+    # is True (also the default).
+    #
+    # Once a day at 07:40 UTC = 10:40 MSK: waking hours for every pilot
+    # recipient (all on the default timezone, DRF-1477), late enough
+    # that the week's breakfasts and yesterday's dinner are already
+    # logged. The quiet-hours gate makes the tick a no-op for anyone it
+    # would wake, and the first non-quiet tick with a fired trigger
+    # spends the weekly budget (one hint a week, the DRF-1468 default
+    # for unlisted surfaces). :40 sits clear of the :00 / :05 / :20 /
+    # :37 beats.
+    "nutrition_proactive.send_coach_hints": {
+        "task": "nutrition_proactive.send_coach_hints",
+        "schedule": crontab(minute="40", hour="7"),
+    },
     # DRF-1111 + DRF-1161 — mirror ↔ canon reconciliation detector.
     # Compares live bookings in Ayla against RemoteBookingProxy per
     # tenant, identifier by identifier; divergence logs every tick and
@@ -1509,8 +1532,8 @@ NUTRITION_PROACTIVE_DRY_RUN = os.environ.get("NUTRITION_PROACTIVE_DRY_RUN", "tru
 # before a single coach line reaches a real person.
 #
 # NUTRITION_COACH_ENABLED: master switch. False - every coach surface
-#   (the reactive answer and, once DRF-1468 wires it, the proactive hint)
-#   stays silent without touching the database or Ayla.
+#   (the reactive answer and the proactive coach_hint beat, T5) stays
+#   silent without touching the database or Ayla.
 # NUTRITION_COACH_DRY_RUN: the safety inside the switch. True - the
 #   pipeline runs its full read path (goal reader, week picture) and logs
 #   exactly what it would have said and to whom, and says nothing.

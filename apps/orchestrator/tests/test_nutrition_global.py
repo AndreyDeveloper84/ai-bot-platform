@@ -505,7 +505,7 @@ class TestNutriStopTapAsAHistoryTurn:
     навигационных тапов анкеты и ``cb:catalog:*``.
     """
 
-    @pytest.mark.parametrize("surface", ["report", "water"])
+    @pytest.mark.parametrize("surface", ["report", "water", "coach_hint"])
     def test_a_stop_tap_never_reaches_history(self, surface):
         tap = resolve_nutri_stop_tap(f"cb:nutri:stop:{surface}")
         assert tap is not None

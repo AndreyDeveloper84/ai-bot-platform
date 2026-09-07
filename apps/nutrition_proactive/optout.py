@@ -124,12 +124,18 @@ STOP_BUTTON_LABEL = "Не присылать"
 SURFACE_OPT_OUT_PREFS: dict[str, dict[str, Any]] = {
     "report": {"daily_report_time": prefs.REPORT_OFF},
     "water": {"water_reminders": False},
+    # DRF-1464 T5: the coach hint's subscription pref (default True — the
+    # basis is the goal itself, owner decision Q-09).
+    "coach_hint": {"coach_hints": False},
 }
 
 SURFACE_CONFIRMATIONS: dict[str, str] = {
     "report": ("Хорошо, итоги дня больше не присылаю. Вернуть можно в профиле в мини-приложении."),
     "water": (
         "Хорошо, напоминания о воде больше не присылаю. Вернуть можно в профиле в мини-приложении."
+    ),
+    "coach_hint": (
+        "Хорошо, подсказки диетолога больше не присылаю. Вернуть можно в профиле в мини-приложении."
     ),
 }
 
