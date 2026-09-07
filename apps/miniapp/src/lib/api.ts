@@ -218,6 +218,103 @@ export const fetchRecommendations = (): Promise<{
   recommendations: RecommendationScore[];
 }> => request("/recommendations", { method: "POST" });
 
+/**
+ * DRF-1556 — the runtime half of the declaration above.
+ *
+ * `fetchRecommendations` returns a TYPED promise and checks nothing:
+ * TS types are erased at runtime, so the interface proves only what we
+ * intended to receive, never what arrived. That gap is what let a
+ * contract divergence look exactly like a dead scorer: the source
+ * answered with a different shape, `recommendations` was `undefined`,
+ * `.slice()` threw a `TypeError`, and the consumer's catch — written
+ * for «scorer unavailable» — swallowed it (`docs/OPEN_DECISIONS.md`
+ * §52).
+ *
+ * This function does NOT adapt, rename or reshape anything: reconciling
+ * the two contracts belongs to the resolver boundary (§53), not here.
+ * It only answers one question about an ALREADY-DELIVERED payload —
+ * «is this the shape we declared?» — and returns a short description of
+ * the first violation, or `null` when the payload conforms.
+ *
+ * It is deliberately never applied to a transport failure: network,
+ * non-2xx and unparseable bodies reject before any payload exists, so
+ * an unavailable scorer can never reach this check and can never make
+ * noise. See `customer-booking.ts::loadRecommendations`.
+ */
+export function recommendationsContractViolation(payload: unknown): string | null {
+  if (!isPlainObject(payload)) {
+    return `expected an object with \`recommendations\`, received ${describeShape(payload)}`;
+  }
+  const list = payload.recommendations;
+  if (!Array.isArray(list)) {
+    return (
+      "expected `recommendations` to be an array, received " +
+      `${describeShape(list)} (payload: ${describeShape(payload)})`
+    );
+  }
+  for (let i = 0; i < list.length; i += 1) {
+    const item: unknown = list[i];
+    if (!isPlainObject(item)) {
+      return `recommendations[${i}]: expected an object, received ${describeShape(item)}`;
+    }
+    if (typeof item.service_id !== "string") {
+      return (
+        `recommendations[${i}].service_id: expected string, received ` +
+        `${describeShape(item.service_id)} (item: ${describeShape(item)})`
+      );
+    }
+    if (typeof item.score !== "number" || Number.isNaN(item.score)) {
+      return (
+        `recommendations[${i}].score: expected number, received ` +
+        `${describeShape(item.score)} (item: ${describeShape(item)})`
+      );
+    }
+    // WHY fields are optional — absent is contract-conforming and stays
+    // silent. Present-but-wrong-typed is not: that is the same class of
+    // divergence, and it hides the branded block just as quietly.
+    const { reasons, reasoning_text: reasoningText } = item;
+    if (
+      reasons !== undefined &&
+      reasons !== null &&
+      !(Array.isArray(reasons) && reasons.every((r) => typeof r === "string"))
+    ) {
+      return (
+        `recommendations[${i}].reasons: expected string[] | null, received ` +
+        describeShape(reasons)
+      );
+    }
+    if (
+      reasoningText !== undefined &&
+      reasoningText !== null &&
+      typeof reasoningText !== "string"
+    ) {
+      return (
+        `recommendations[${i}].reasoning_text: expected string | null, received ` +
+        describeShape(reasoningText)
+      );
+    }
+  }
+  return null;
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/**
+ * Describe a value by its SHAPE, never by its content — key names and
+ * types are what identifies a diverged contract, and they cannot carry
+ * customer data into a log line.
+ */
+function describeShape(value: unknown): string {
+  if (value === null) return "null";
+  if (Array.isArray(value)) return `array(${value.length})`;
+  if (typeof value === "object") {
+    return `object{${Object.keys(value as object).join(",")}}`;
+  }
+  return typeof value;
+}
+
 // --- slots ---
 export interface FreeSlot {
   date: string;

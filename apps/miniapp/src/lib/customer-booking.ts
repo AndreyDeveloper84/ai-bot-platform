@@ -30,6 +30,12 @@
  * picks. The founder cut #1 cap (≤3 picks) stays a RENDER-side concern
  * (screens slice), so this lib deliberately does not truncate.
  *
+ * DRF-1556: «silently» applies to THAT state only. A scorer that
+ * answers in a shape the declared contract does not describe is a
+ * different state — a contract divergence — and it is logged loudly
+ * while still yielding `picks: []`. See {@link loadRecommendations};
+ * the two must never share a branch again (`docs/OPEN_DECISIONS.md` §52).
+ *
  * # WHY gate (owner ruling 25.08)
  *
  * > «Нет displayable WHY → нет блока „Ayla подобрала".»
@@ -58,6 +64,7 @@ import {
   fetchServices,
   fetchSlots,
   createBooking,
+  recommendationsContractViolation,
 } from "./api";
 import type {
   Master,
@@ -132,9 +139,62 @@ function displayableReasons(rec: RecommendationScore): string[] {
 }
 
 /**
+ * DRF-1556 — the two states the old single `catch` merged.
+ *
+ * They have OPPOSITE costs of silence, so they may not share a branch:
+ *
+ *   - `unavailable` — the scorer did not answer (network, non-2xx,
+ *     timeout, unparseable body). Optional chrome; silence is correct
+ *     and noise here is actively harmful — a detector that shouts on
+ *     every dead scorer gets muted within a week and is then silent
+ *     exactly when it matters.
+ *   - `diverged`    — the scorer DID answer, in a shape that is not the
+ *     one `api.ts::RecommendationScore` declares. That is «we and they
+ *     stopped agreeing about what we agreed on», and it must be loud:
+ *     today it hides the branded block quietly and forever
+ *     (`docs/OPEN_DECISIONS.md` §52).
+ *
+ * `picks` stays `[]` in BOTH — never fake a recommendation.
+ */
+type RecommendationsOutcome =
+  | { state: "unavailable" }
+  | { state: "diverged"; violation: string }
+  | { state: "ok"; recommendations: RecommendationScore[] };
+
+/**
+ * Fetch the picks payload and classify the result.
+ *
+ * The distinction is structural, not heuristic: the `try` wraps the
+ * TRANSPORT and nothing else, so anything that rejects is — by
+ * construction — «the source did not answer», and the shape check only
+ * ever sees payloads that were actually delivered. That is why a normal
+ * outage cannot produce a false `diverged`: it never reaches the check.
+ * Nothing but the transport lives inside the catch either, so the
+ * mapping below can no longer hide a defect of ours in the same branch.
+ */
+async function loadRecommendations(): Promise<RecommendationsOutcome> {
+  let payload: unknown;
+  try {
+    payload = await fetchRecommendations();
+  } catch {
+    /* Ayla scorer unavailable — optional chrome, never fake it, and
+       never noisy: this is the state whose silence is legitimate. */
+    return { state: "unavailable" };
+  }
+  const violation = recommendationsContractViolation(payload);
+  if (violation !== null) return { state: "diverged", violation };
+  return {
+    state: "ok",
+    recommendations: (payload as { recommendations: RecommendationScore[] })
+      .recommendations,
+  };
+}
+
+/**
  * Load everything the catalog screen needs. Mirror failures reject
- * (the screen renders its error state); scorer failure is swallowed
- * into `picks: []` per the picks rule above.
+ * (the screen renders its error state); an unavailable scorer is
+ * swallowed into `picks: []` per the picks rule above, while a
+ * contract divergence leaves `picks: []` too — but says so out loud.
  */
 export async function getCatalogBrowse(): Promise<CatalogBrowseData> {
   const [servicesRes, mastersRes] = await Promise.all([
@@ -142,8 +202,19 @@ export async function getCatalogBrowse(): Promise<CatalogBrowseData> {
     fetchMasters(),
   ]);
   let picks: ServicePick[] = [];
-  try {
-    const recs = await fetchRecommendations();
+  const recs = await loadRecommendations();
+  if (recs.state === "diverged") {
+    // The only channel `apps/miniapp/src` has (no Sentry, no tracker —
+    // DRF-1556 forbids inventing one for this task). One line, one
+    // state: what we declared, and what actually arrived.
+    // eslint-disable-next-line no-console
+    console.error(
+      "[recommendations] contract mismatch — the scorer answered, but not " +
+        "in the shape `apps/miniapp/src/lib/api.ts::RecommendationScore` " +
+        `declares: ${recs.violation}. Picks stay empty (never faked); ` +
+        "see docs/OPEN_DECISIONS.md §52–§53 (DRF-1556).",
+    );
+  } else if (recs.state === "ok") {
     const known = new Set(servicesRes.services.map((s) => s.id));
     picks = recs.recommendations
       .slice()
@@ -154,8 +225,6 @@ export async function getCatalogBrowse(): Promise<CatalogBrowseData> {
       // branded Ayla pick. This single line is the whole gate: it lets
       // WHY through the moment the scorer starts sending it.
       .filter((p) => p.reasons.length > 0);
-  } catch {
-    /* Ayla scorer unavailable — optional chrome, never fake it. */
   }
   return {
     services: servicesRes.services,
