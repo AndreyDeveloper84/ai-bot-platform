@@ -45,6 +45,10 @@ from typing import ClassVar
 
 from apps.skills.base import SkillContext, SkillResult
 from apps.skills.health_screening.classifier import PainSignal, classify
+from apps.skills.health_screening.memo import (
+    remember_screening_asked,
+    screening_asked_recently,
+)
 from apps.skills.registry import register
 
 logger = logging.getLogger(__name__)
@@ -76,8 +80,29 @@ class HealthScreeningSkill:
     name: ClassVar[str] = "health_screening"
 
     def matches(self, context: SkillContext) -> bool:
+        """DRF-1542 — порядок здесь несущий, а не стилистический.
+
+        Сначала классификация, и только потом памятка. ``RED_FLAG``
+        возвращает ``True`` ДО того, как памятка вообще прочитана:
+        решение владельца ``docs/OPEN_DECISIONS.md`` §35 п.5 — тревожный
+        признак сразу включает безопасную ветку, и разрыв петли не
+        является основанием промолчать про «сначала к врачу». Петля
+        раздражает; молчание на тревожном признаке может стоить человеку
+        здоровья.
+
+        Памятка гасит ровно один случай — повтор ``SOFT``: те же два
+        вопроса, на которые человек уже ответил. Отказ здесь не «бот
+        замолчал»: на глобальном пути ``execute_nutrition_tool``
+        возвращает ``None``, и консьерж отдаёт собственный текст модели
+        (``dto.content``) — ход возвращается модели, как и просил тикет.
+        """
+
         signal = classify(context.message_text)
-        return signal != PainSignal.NONE
+        if signal == PainSignal.NONE:
+            return False
+        if signal == PainSignal.RED_FLAG:
+            return True
+        return not screening_asked_recently(context.conversation)
 
     def handle(self, context: SkillContext) -> SkillResult:
         signal = classify(context.message_text)
@@ -93,6 +118,10 @@ class HealthScreeningSkill:
             )
 
         if signal == PainSignal.SOFT:
+            # Записывается ровно то, что было сказано: вопросы заданы.
+            # Красный флаг сюда не пишется — его памятка не гасит, и
+            # запоминать нечего.
+            remember_screening_asked(context.conversation)
             return SkillResult(
                 reply_text=SOFT_PAIN_REPLY,
                 meta={"reply_kind": "health_soft_pain"},

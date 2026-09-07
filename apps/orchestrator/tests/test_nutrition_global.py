@@ -171,12 +171,17 @@ class TestExecuteNutritionTool:
     def test_health_screening_executes_real_skill(self):
         # Network-free skill: the deterministic diagnostic reply must come
         # from the same class the per-tenant registry would have run.
+        #
+        # DRF-1542 — ``message_text`` (реплика человека) теперь обязателен
+        # для скрининга: вето считается по ней, а не по ``symptom_text``
+        # модели. Здесь человек сказал ровно то же, что модель пересказала.
         result = execute_nutrition_tool(
             "health_screening",
             {"symptom_text": "болит спина"},
             bot_user=Mock(),
-            conversation=Mock(),
+            conversation=_conversation(),
             trace_id="t",
+            message_text="болит спина",
         )
         assert result is not None
         assert result.reply_text
