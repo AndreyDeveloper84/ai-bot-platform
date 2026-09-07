@@ -1980,6 +1980,10 @@ def _concierge_turn(
             bot_user=bot_user,
             conversation=conversation,
             trace_id=trace_id or "",
+            # DRF-1542 — реплика человека, а не пересказ модели. Вето
+            # health_screening считается по ней: иначе модель проверяет
+            # себя собой и всегда соглашается.
+            message_text=message_text,
         )
         if result is not None and result.reply_text:
             return _reply(

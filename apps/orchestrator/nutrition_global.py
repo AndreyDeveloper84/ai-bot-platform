@@ -55,9 +55,14 @@ Execution details:
 - The tools only SELECT the skill; side effects run in the concierge
   wrapper's sync scope after ``asyncio.run`` returns — the same shape
   as ``show_masters`` (ai-core dispatchers stay I/O-free).
-- Free-text tools pass the user's own phrase through as
-  ``message_text`` — the skills' parsers stay the single source of
-  truth instead of teaching the model the beverage/food grammars.
+- Free-text tools run the skills' own parsers rather than teaching the
+  model the beverage/food grammars. ``log_water`` and
+  ``clarify_food_entry`` are executed on the phrase the MODEL passed —
+  its normalisation («и водички дёрнул стакан» → «стакан воды») is what
+  those grammars can read. ``health_screening`` is executed on the
+  phrase the PERSON typed (DRF-1542): it has no grammar to normalise,
+  only a symptom classifier, and a paraphrased red flag would decay to
+  soft pain. See :func:`execute_nutrition_tool`.
 """
 
 from __future__ import annotations
@@ -225,13 +230,30 @@ def execute_nutrition_tool(
     bot_user: Any,
     conversation: Any,
     trace_id: str,
+    message_text: str,
 ) -> SkillResult | None:
     """Run the skill behind a model-called nutrition tool.
 
     Returns ``None`` for an unknown tool name (the caller falls back to
-    the safe generic line, same as an unknown tool today). The user's
-    own phrase is passed through as ``message_text`` — the skills'
-    parsers remain the single source of truth.
+    the safe generic line, same as an unknown tool today).
+
+    ``message_text`` — реплика ЧЕЛОВЕКА на этом ходу (DRF-1542).
+    **Обязателен намеренно, без умолчания.** Пустая строка — законное
+    значение (ход без текста, например одно фото), и по ней скрининг
+    честно воздерживается. Но умолчание сделало бы ровно это же
+    воздержание молчаливой ценой забытого аргумента: новый вызывающий
+    выключил бы скрининг симптомов, ничего не заметив, и гарантия
+    DRF-358 T04 отвалилась бы без единого падения. Забыть обязательный
+    аргумент нельзя — это ``TypeError`` на месте вызова. До
+    этого тикета её здесь не было, и докстринг обещал ровно то, чего код
+    не делал: «*The user's own phrase is passed through as
+    ``message_text``*». Передавался пересказ МОДЕЛИ, а вето
+    (``skill.matches``) считалось по нему же — то есть модель проверяла
+    себя собой и всегда соглашалась. На живом диалоге владельца 06.09
+    классификатор на трёх ходах из пяти честно вернул ``NONE``, а
+    скрининг ответил всё равно: вето не может наложить вето на того, кто
+    его породил. Здесь код возвращается к своему собственному описанию —
+    это не новое поведение.
     """
 
     skill_name_by_tool = {
@@ -266,6 +288,47 @@ def execute_nutrition_tool(
 
     if not text:
         return None
+
+    if name == "health_screening":
+        # DRF-1542 — половина Б. Скрининг судится по словам ЧЕЛОВЕКА, а
+        # не по пересказу модели, и по ним же исполняется.
+        #
+        # Сужено ровно до этого инструмента, намеренно. `log_water` и
+        # `clarify_food_entry` разбирают ГРАММАТИКУ («стакан воды»,
+        # «борщ 300г»), и там пересказ модели — нормализация, которая
+        # парсеру помогает: человек говорит «и водички дёрнул стакан»,
+        # модель отдаёт «стакан воды», парсер матчит второе и не матчит
+        # первое. Подставить им реплику человека значило бы сузить их
+        # там, где они работают. У скрининга грамматики нет — есть
+        # классификатор симптомов, и он обязан читать симптом из уст
+        # человека: перефразированный моделью красный флаг («онемела
+        # рука» → «болит рука») деградировал бы до SOFT.
+        human_text = str(message_text or "").strip()
+        if not human_text:
+            logger.info(
+                "orchestrator.nutrition_global.screening_veto_no_user_text trace=%s",
+                trace_id,
+            )
+            return None
+        context = _build_context(
+            message_text=human_text,
+            bot_user=bot_user,
+            conversation=conversation,
+            trace_id=trace_id,
+        )
+        if not skill.matches(context):
+            # Либо человек симптома на этом ходу не называл («Что ты
+            # понимаешь?»), либо те же вопросы уже заданы (памятка,
+            # apps.skills.health_screening.memo). И то и другое — повод
+            # вернуть ход модели, а не выдать константу в шестой раз.
+            logger.info(
+                "orchestrator.nutrition_global.screening_veto tool=%s trace=%s",
+                name,
+                trace_id,
+            )
+            return None
+        return _run_skill(skill, context)
+
     context = _build_context(
         message_text=text,
         bot_user=bot_user,
