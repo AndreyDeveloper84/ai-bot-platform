@@ -33,11 +33,30 @@
  * (`send_message` без `bot=`, `apps/admin_api/views_invite.py`), и это
  * тупик по конструкции, а не дефект настройки: правильный путь —
  * ссылка. Заведено отдельно.
+ *
+ * # Готовый текст приглашения (решение владельца §44.2, 07.09.2026)
+ *
+ * Под ссылкой встал `InviteMessage` — утверждённая владельцем
+ * формулировка со ссылкой внутри, которую владелец копирует и при
+ * желании правит. Формулировка и три решения внутри неё описаны в самом
+ * компоненте.
+ *
+ * Вместе с ним из подсказки к ссылке ушла фраза «Приглашение при
+ * открытии не тратится: принять его сможет только тот, кому оно
+ * выдано». Она была неверна: `onboarding_accept`
+ * (`apps/master_api/views.py`) привязывает строку мастера к ТОЙ сессии,
+ * которая пришла с токеном первой, и никакой сверки с приглашённым
+ * хэндлом на этом пути нет. Утверждённый текст говорит ровно обратное —
+ * «доступ получит тот, кто откроет ссылку первым», — и держать оба
+ * утверждения на одном экране значило бы повторить дефект, ради
+ * которого эта ветка и переписывалась: обещание и его опровержение
+ * рядом.
  */
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 
+import { InviteMessage } from "../../components/InviteMessage";
 import { ScreenLayout } from "../../components/ScreenLayout";
 import { ShareableLink } from "../../components/ShareableLink";
 import { StickyCta } from "../../components/StickyCta";
@@ -507,17 +526,20 @@ export function AddPersonNewMasterSection({ me, switcher }: Props) {
             )}
 
             {result.invite_link ? (
-              <ShareableLink
-                url={result.invite_link}
-                label="Ссылка-приглашение"
-                hint={
-                  `Отправьте её ${inviteFirstName} любым способом — в MAX, ` +
-                  "в другом мессенджере, по SMS. Кто её откроет, попадёт в " +
-                  "диалог с ботом салона и получит кнопку входа. Приглашение " +
-                  "при открытии не тратится: принять его сможет только тот, " +
-                  "кому оно выдано."
-                }
-              />
+              <>
+                <ShareableLink
+                  url={result.invite_link}
+                  label="Ссылка-приглашение"
+                  hint={
+                    `Отправьте её ${inviteFirstName} любым способом — в MAX, ` +
+                    "в другом мессенджере, по SMS. Кто её откроет, попадёт в " +
+                    "диалог с ботом салона и получит кнопку входа."
+                  }
+                />
+                {/* Готовый текст со ссылкой внутри — решение владельца
+                    §44.2. Формулировка утверждена; см. `InviteMessage`. */}
+                <InviteMessage salonName={me.tenant.name} link={result.invite_link} />
+              </>
             ) : (
               <div className="callout callout--danger" role="alert">
                 Ссылки нет: в этом контуре не настроен салонный бот, а без него

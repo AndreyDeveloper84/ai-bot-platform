@@ -67,6 +67,7 @@ import {
   INVITE_MESSAGE_TEMPLATE,
   ROLE_OPTIONS,
 } from "./AddPersonAccessCodeSection";
+import { buildInviteMessage } from "../../components/InviteMessage";
 import { deliveryNotice } from "./AddPersonNewMasterSection";
 
 const mockedIssue = vi.mocked(issueStaffInvite);
@@ -284,6 +285,106 @@ describe("ссылка-приглашение", () => {
     await waitFor(() =>
       expect(mockedClosingConfirmation).toHaveBeenCalledWith(true),
     );
+  });
+});
+
+// --------------------------------------------------------------------------
+// Готовый текст приглашения — решение владельца §44.2 от 07.09.2026.
+// --------------------------------------------------------------------------
+
+describe("текст приглашения", () => {
+  /**
+   * Утверждённая формулировка, дословно.
+   *
+   * Пишется здесь второй раз намеренно. Тест, собирающий ожидание тем
+   * же `buildInviteMessage`, доказывал бы только то, что функция равна
+   * себе: любую правку формулировки он пропустил бы молча. Владелец
+   * утвердил ЭТИ предложения, поэтому в тесте лежит их копия, а не
+   * ссылка на источник.
+   */
+  const APPROVED =
+    "Приглашаем вас присоединиться к салону «Формула тела» в Ayla.\n" +
+    "Откройте ссылку, чтобы получить доступ к рабочему профилю мастера.\n" +
+    "\n" +
+    `${INVITED.invite_link}\n` +
+    "\n" +
+    "Ссылка одноразовая. Пожалуйста, не пересылайте её: доступ получит " +
+    "тот, кто откроет ссылку первым.";
+
+  it("собирается дословно по утверждённой формулировке", () => {
+    expect(
+      buildInviteMessage({
+        salonName: "Формула тела",
+        link: INVITED.invite_link,
+      }),
+    ).toBe(APPROVED);
+  });
+
+  it("держит три решения владельца: от лица салона, без «кабинета», с предупреждением", () => {
+    const text = buildInviteMessage({
+      salonName: "Формула тела",
+      link: INVITED.invite_link,
+    });
+
+    // Присутствие — сначала, на тех же данных: иначе «нет слова
+    // кабинет» доказывалось бы и пустой строкой.
+    expect(text).toMatch(/Приглашаем вас присоединиться к салону/);
+    expect(text).toMatch(/рабочему профилю мастера/);
+    expect(text).toMatch(/кто откроет ссылку первым/);
+    // «Приглашаю» — от лица человека; «кабинет» — запрещённое слово.
+    expect(text).not.toMatch(/Приглашаю/);
+    expect(text).not.toMatch(/кабинет/i);
+  });
+
+  it("показывается рядом со ссылкой и копируется целиком", async () => {
+    const user = userEvent.setup();
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    stubClipboard(writeText);
+    mockedInvite.mockResolvedValue(INVITED);
+    renderNewMaster();
+
+    await submitInvite(user);
+
+    await user.click(
+      await screen.findByRole("button", { name: "Скопировать текст" }),
+    );
+
+    expect(writeText).toHaveBeenCalledWith(APPROVED);
+    expect(await screen.findByText("Текст скопирован.")).toBeInTheDocument();
+  });
+
+  it("копирует правку владельца, а не исходную заготовку", async () => {
+    const user = userEvent.setup();
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    stubClipboard(writeText);
+    mockedInvite.mockResolvedValue(INVITED);
+    renderNewMaster();
+
+    await submitInvite(user);
+
+    const field = await screen.findByLabelText("Текст приглашения");
+    await user.clear(field);
+    await user.type(field, "Аня, вот та ссылка");
+    await user.click(screen.getByRole("button", { name: "Скопировать текст" }));
+
+    // Правка — половина решения владельца: «скопировать и при желании
+    // изменить». Кнопка, копирующая заготовку, отменяет вторую половину.
+    expect(writeText).toHaveBeenCalledWith("Аня, вот та ссылка");
+  });
+
+  it("без ссылки не показывается вовсе", async () => {
+    const user = userEvent.setup();
+    mockedInvite.mockResolvedValue({ ...INVITED, invite_link: "" });
+    renderNewMaster();
+
+    await submitInvite(user);
+
+    // Присутствие на тех же данных: экран отрисовался и сказал про
+    // отсутствие ссылки — значит отсутствие текста ниже не артефакт
+    // упавшего рендера.
+    const noLinkScreen = await screen.findByText(/Ссылки нет/);
+    expect(noLinkScreen).toBeInTheDocument();
+    expect(screen.queryByLabelText("Текст приглашения")).not.toBeInTheDocument();
   });
 });
 
