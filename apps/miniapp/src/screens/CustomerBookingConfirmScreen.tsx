@@ -110,6 +110,11 @@ const NOT_BOOKABLE_SLUGS = new Set([
   "service_not_offered",
   "service_unbookable",
   "master_archived",
+  // DRF-1548 — мастер без канонической связи с Ayla. Для клиента исход
+  // тот же, что у `master_not_bookable`: записаться к этому мастеру
+  // нельзя. Без этой строки слаг падал бы в ветку `other`, а она рисует
+  // `detail` бэкенда как есть — то есть английскую служебную фразу.
+  "master_ayla_unlinked",
 ]);
 
 /** Payment choice per C7.4 / AMD-002 — online is optional (D6). */

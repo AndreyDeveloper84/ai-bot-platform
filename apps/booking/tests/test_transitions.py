@@ -7,6 +7,7 @@ Covers spec §2 transitions in
 from __future__ import annotations
 
 from datetime import datetime, time, timedelta, timezone
+from uuid import uuid4
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -71,6 +72,11 @@ def master(tenant: Tenant) -> CatalogMaster:
         name="Анна",
         is_active=True,
         invite_status=CatalogMaster.InviteStatus.ACCEPTED,
+        # DRF-1540/1548 — синхронизированная строка всегда несёт
+        # канонический ключ; без него мастер не продаётся и брони не
+        # получает. ``None`` здесь был бы формой, которой у боевой
+        # строки не бывает.
+        ayla_user_id=uuid4(),
     )
 
 
@@ -83,6 +89,11 @@ def alt_master(tenant: Tenant) -> CatalogMaster:
         name="Мария",
         is_active=True,
         invite_status=CatalogMaster.InviteStatus.ACCEPTED,
+        # DRF-1540/1548 — синхронизированная строка всегда несёт
+        # канонический ключ; без него мастер не продаётся и брони не
+        # получает. ``None`` здесь был бы формой, которой у боевой
+        # строки не бывает.
+        ayla_user_id=uuid4(),
     )
 
 
