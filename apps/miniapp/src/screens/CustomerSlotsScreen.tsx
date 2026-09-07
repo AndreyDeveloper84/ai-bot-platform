@@ -8,8 +8,14 @@
  *
  * Voice rules (founder cut #4 — state-dependent suggestions header):
  *   - Anonymous / new customer: «Ближайшие свободные»
- *   - Registered with behavior: «Похоже подойдёт»
+ *   - Registered WITH BEHAVIOR: «Похоже подойдёт»
  *   - Loyal (5+ visits): «Твоё обычное время»
+ *
+ * «WITH BEHAVIOR» — не оборот речи, а условие. Персонализирующие
+ * заголовки разрешены только когда бэкенд действительно пометил слоты
+ * (`is_suggested`). Без пометки в блоке лежат ПЕРВЫЕ ДВА СЛОТА ПО
+ * ВРЕМЕНИ, и честное имя им — «Ближайшие свободные»; так и записано в
+ * рационале спеки §5.1: «не имитировать персонализацию там где её нет».
  *
  * Master substitution (Q-BF-3) — verbatim founder copy:
  *   «Анна занята на 2 недели вперёд. Если хочешь раньше, есть Карина —
@@ -61,7 +67,12 @@ type State =
 /** Tau §8 F3 state-dependent header per founder cut #4. */
 type CustomerMode = "anonymous" | "registered" | "loyal";
 
-function suggestionsHeader(mode: CustomerMode): string {
+function suggestionsHeader(mode: CustomerMode, personalised: boolean): string {
+  // Нет сигнала персонализации — нет и персонализирующего обещания.
+  // «Похоже подойдёт» над первыми двумя слотами по времени — это
+  // утверждение «мы посмотрели на тебя», которого никто не делал:
+  // сохранённого предпочтения по времени бэкенд не отдаёт вовсе.
+  if (!personalised) return "Ближайшие свободные";
   switch (mode) {
     case "anonymous":
       return "Ближайшие свободные";
@@ -122,10 +133,14 @@ export function CustomerSlotsScreen() {
         if (cancelled) return;
         // Re-shape to our local row type; `is_suggested` is a future
         // backend field — absent today, defaults to false.
+        // `is_suggested` — серверная пометка (Tau §5.2). Ручка её
+        // сегодня не шлёт; читаем то, что пришло, и НЕ подставляем
+        // ничего от себя: отсутствие пометки = персонализации нет.
         const rows = slots.map((s) => ({
           date: s.date,
           start: s.start,
-          isSuggested: false as boolean,
+          isSuggested:
+            (s as { is_suggested?: boolean }).is_suggested === true,
         }));
         setState({ kind: "ok", slots: rows });
       })
@@ -213,7 +228,9 @@ export function CustomerSlotsScreen() {
   }
 
   const mode = detectCustomerMode();
-  const sugHeader = suggestionsHeader(mode);
+  // Персонализация есть ровно тогда, когда её прислал бэкенд.
+  const personalised = state.slots.some((s) => s.isSuggested === true);
+  const sugHeader = suggestionsHeader(mode, personalised);
   const dates = Array.from(slotsByDate.keys());
 
   return (
