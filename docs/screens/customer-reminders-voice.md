@@ -73,7 +73,7 @@ Per founder § «Mini App inline copy» — quick grep `apps/miniapp/src/`:
 | ~~`AdminInviteMasterScreen.tsx`~~ | ~~«Напомин...»~~ | **строки не было — снята 06.09.2026 (DRF-1505)** |
 | `MasterScheduleScreen.tsx` | «reminder...» | ❌ Master schedule reminder (NOT customer scope) |
 | `HelloScreen.tsx` | «Напомин...» | ❌ Welcome screen reminder (NOT customer scope) |
-| `ProfileScreen.tsx` | «reminder...» | ❌ Profile notification preferences (NOT customer scope) |
+| ~~`ProfileScreen.tsx`~~ | ~~«reminder...»~~ | **экран снят 07.09.2026 (DRF-1485) — мёртвый легаси `/me`** |
 
 > **Поправка 06.09.2026 (DRF-1505).** Первая строка таблицы была ложной с самого начала:
 > подстроки «напомин» в том экране не было ни в каком регистре (проверено `grep -i` по

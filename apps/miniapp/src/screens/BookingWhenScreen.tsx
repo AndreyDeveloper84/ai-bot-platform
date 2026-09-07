@@ -59,7 +59,7 @@ export function BookingWhenScreen() {
 
   useEffect(() => {
     if (!draft.serviceId || !draft.masterId) {
-      navigate("/catalog", { replace: true });
+      navigate("/customer/catalog", { replace: true });
       return;
     }
     return load();
@@ -86,10 +86,10 @@ export function BookingWhenScreen() {
 
   function onContinue() {
     if (!draft.visitAt) return;
-    // Wave 0 flow unification: the service-first chain also lands on
-    // the payment-capable confirmation screen (payment choice C7.4
-    // lives there; the legacy /book/confirm has none and stays
-    // reachable only for deep links).
+    // Wave 0 flow unification: the service-first chain lands on the
+    // payment-capable confirmation screen — the only one there is.
+    // Payment choice C7.4 lives here; the legacy /book/confirm had none
+    // and was removed with its screen (DRF-1485).
     navigate("/customer/booking/confirm");
   }
 

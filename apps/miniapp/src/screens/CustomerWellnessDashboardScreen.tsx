@@ -642,7 +642,7 @@ export function CustomerWellnessDashboardScreen() {
               onReschedule={() =>
                 activity.data.next_booking &&
                 navigate(
-                  `/my-visits/${activity.data.next_booking.booking_id}/reschedule`,
+                  `/customer/records/${activity.data.next_booking.booking_id}/reschedule`,
                 )
               }
               onAll={() => navigate("/customer/records")}
@@ -701,7 +701,7 @@ export function CustomerWellnessDashboardScreen() {
                       service={service}
                       reasons={reasons}
                       onOpen={() =>
-                        navigate(`/catalog/${service.id}`)
+                        navigate(`/customer/catalog/${service.id}`)
                       }
                     />
                   </li>
@@ -1104,7 +1104,8 @@ function RecoCard({
         {!service.is_bookable && (
           // DRF-1164 — the scorer ranks by fit, not by staffing, so a pick
           // can be a service nobody performs. Same label as the catalog
-          // card; the tap lands on /catalog/:id, which withholds the CTA.
+          // card; the tap lands on /customer/catalog/:id, which withholds
+          // the CTA.
           <UnbookableBadge />
         )}
         <div id={metaId} className="wellness-dash__reco-meta">

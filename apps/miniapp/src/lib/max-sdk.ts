@@ -182,8 +182,9 @@ const _ROUTE_MAP: Record<string, string> = {
   // Before DRF-1326 these three pointed at the legacy pre-reskin screens
   // (/catalog, /my-visits, /me) while the link fallback pointed at the
   // /customer/* ones — same button, two destinations depending on config.
-  // The legacy routes stay mounted in App.tsx for reschedule flows and
-  // old bot DMs; they are simply no longer what the welcome menu opens.
+  // /catalog and /my-visits stay mounted in App.tsx as compatibility
+  // aliases; /me and its screen were removed with DRF-1485. None of the
+  // three is what the welcome menu opens any more.
   open_catalog: "/customer/catalog",
   open_visits: "/customer/records",
   open_profile: "/customer/profile",

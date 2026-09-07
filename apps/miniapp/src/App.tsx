@@ -72,8 +72,6 @@ import { AdminSectionDeniedScreen } from "./screens/admin/AdminSectionDeniedScre
 import { AdminServicesMatrixScreen } from "./screens/admin/AdminServicesMatrixScreen";
 import { AdminSettingsPlaceholderScreen } from "./screens/admin/AdminSettingsPlaceholderScreen";
 import { AdminTeamScreen } from "./screens/admin/AdminTeamScreen";
-import { BookingConfirmScreen } from "./screens/BookingConfirmScreen";
-import { BookingSuccessScreen } from "./screens/BookingSuccessScreen";
 import { BookingWhenScreen } from "./screens/BookingWhenScreen";
 import { CatalogScreen } from "./screens/CatalogScreen";
 import { CustomerBookingConfirmScreen } from "./screens/CustomerBookingConfirmScreen";
@@ -115,7 +113,6 @@ import { MasterServicesScreen } from "./screens/MasterServicesScreen";
 import { MasterSettingsScreen } from "./screens/MasterSettingsScreen";
 import { MyVisitDetailScreen } from "./screens/MyVisitDetailScreen";
 import { MyVisitsScreen } from "./screens/MyVisitsScreen";
-import { ProfileScreen } from "./screens/ProfileScreen";
 import { RescheduleScreen } from "./screens/RescheduleScreen";
 import { ServiceDetailScreen } from "./screens/ServiceDetailScreen";
 
@@ -1227,13 +1224,19 @@ export function CustomerRoutes() {
         from bot DMs» как основание устарело: алиасы остаются страховкой
         для СТАРЫХ внешних ссылок, ушедших наружу ранее (пересланные
         сообщения, закладки, сторонние посты). Внутренние переходы на
-        них не ведут. Удаление самих экранов — отдельная задача
-        (DRF-1485).
+        них не ведут — это замерено, а не заявлено (DRF-1485).
+
+        Остались ровно те алиасы, за которыми стоит живой экран:
+        `/catalog` (`CatalogScreen`) и `/catalog/:serviceId` (тот же
+        `ServiceDetailScreen`, что на каноническом адресе). Три экрана
+        прежнего поколения, на которые не вело уже ничего, сняты вместе
+        со своими адресами (DRF-1485): `/book/confirm`,
+        `/book/success/:bookingId` и `/me`. Алиасами они быть не могли —
+        каждый показывал СВОЙ экран, а не канонический по старому
+        адресу, так что оставить адрес значило бы оставить и экран.
       */}
       <Route path="/catalog" element={<CatalogScreen />} />
       <Route path="/catalog/:serviceId" element={<ServiceDetailScreen />} />
-      <Route path="/book/confirm" element={<BookingConfirmScreen />} />
-      <Route path="/book/success/:bookingId" element={<BookingSuccessScreen />} />
       {/*
         §31 (решение владельца 06.09.2026) — `MasterPickerScreen` и
         `BookingWhenScreen` исключены из удаления DRF-1485 и
@@ -1348,8 +1351,10 @@ export function CustomerRoutes() {
         element={<RescheduleScreen />}
       />
       {/* Tier 1 Priority 6 Phase B — customer profile tab (Tau R1-R6,
-          deferred Variant 3 per tech-lead 2026-06-01). New canonical
-          route. Legacy /me stays mounted as a compatibility alias. */}
+          deferred Variant 3 per tech-lead 2026-06-01). Единственный
+          профиль клиента: легаси-`/me` (`ProfileScreen`) снят вместе с
+          экраном (DRF-1485) — алиасом он быть не мог, потому что
+          показывал ДРУГОЙ экран, а не тот же по другому адресу. */}
       <Route path="/customer/profile" element={<CustomerProfileScreen />} />
       <Route
         path="/customer/notification-settings"
@@ -1383,7 +1388,6 @@ export function CustomerRoutes() {
         path="/customer/food-scanner/manual"
         element={<FoodScannerManualScreen />}
       />
-      <Route path="/me" element={<ProfileScreen />} />
       <Route path="/feedback/:bookingId" element={<FeedbackScreen />} />
       {/* DRF-1349 — the surface an invited master actually boots into.
           `/api/v1/me` returns is_master=false until the invitation is
