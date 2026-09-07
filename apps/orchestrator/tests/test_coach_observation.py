@@ -159,7 +159,7 @@ class TestLadder:
         obs = _decide(_person("due-1"))
         assert obs is not None
         assert obs.text == coach_copy.OBSERVATION_TEXTS["late_dinner"]
-        assert obs.content_key == "late_dinner:3"
+        assert obs.content_key == "late_dinner"
         assert obs.local_date == "2026-08-23"
 
     def test_flag_off_means_no_line(self, settings) -> None:
@@ -237,9 +237,14 @@ class TestOwnLimit:
         persist_observation(person, obs, now_utc=NOON)
         assert _decide(person) is None
 
-    def test_the_next_day_with_changed_content_may_speak(self) -> None:
-        """Вторая сутки + неделя сдвинулась (дней с паттерном стало больше)
-        → содержимое другое, строка снова допустима."""
+    def test_more_days_of_the_same_pattern_is_not_new_content(self) -> None:
+        """Неделя «сдвинулась» на день — но человек прочитал бы то же самое.
+
+        Раньше ключ был ``kind:days``, и порог, перевалив с трёх дней на
+        четыре, давал новый ключ при ПОБУКВЕННО том же тексте: правило «не
+        повторять неизменившееся» повторяло. Теперь ключ — вид триггера, и
+        считается то, что человек читает, а не то, что посчитала система.
+        """
         person = _person("limit-2")
         obs = _decide(person)
         assert obs is not None
@@ -249,9 +254,21 @@ class TestOwnLimit:
             now_utc=NEXT_DAY,
             fetch_history=_week_reader(_late_dinner_week(days=4)),
         )
-        assert again is not None
-        assert again.content_key == "late_dinner:4"
-        assert again.local_date == "2026-08-24"
+        assert again is None
+
+    def test_the_key_ignores_how_many_days_the_pattern_held(self) -> None:
+        """Страж на ключ: тот же вид с разным числом дней — один ключ.
+
+        Прибито отдельно от поведения, чтобы следующий не вернул ``days`` в
+        ключ, приняв нынешнее молчание за недосмотр.
+        """
+        three = _decide(_person("key-1"), fetch_history=_week_reader(_late_dinner_week(days=3)))
+        four = _decide(_person("key-2"), fetch_history=_week_reader(_late_dinner_week(days=4)))
+        assert three is not None
+        assert four is not None
+        assert three.content_key == four.content_key == "late_dinner"
+        # И то, ради чего ключ вообще существует: текст этих двух совпадает.
+        assert three.text == four.text
 
     def test_an_unchanged_observation_is_not_repeated(self) -> None:
         """Тот же ключ содержимого — пропуск, даже на другие сутки:
@@ -283,7 +300,7 @@ class TestOwnLimit:
             fetch_history=_week_reader(week),
         )
         assert again is not None
-        assert again.content_key == "breakfasts:3"
+        assert again.content_key == "breakfasts"
 
 
 # ─── the journal ────────────────────────────────────────────────────────────
@@ -306,7 +323,7 @@ class TestJournal:
         ]
         assert stored[OBSERVATION_STATE_KEY] == {
             "date": "2026-08-23",
-            "key": "late_dinner:3",
+            "key": "late_dinner",
         }
 
     def test_the_budget_and_the_streak_do_not_see_it(self) -> None:
@@ -489,7 +506,7 @@ class TestWelcomeOutsideLimits:
         # Дату не прибиваем: render_diary идёт по реальному «сейчас», в него
         # now_utc не передаётся. Прибит ключ содержания и сам факт отметки.
         stored = prefs.get_prefs(BotUser.all_tenants.get(pk=person.pk))
-        assert stored[OBSERVATION_STATE_KEY]["key"] == "late_dinner:3"
+        assert stored[OBSERVATION_STATE_KEY]["key"] == "late_dinner"
         assert stored[OBSERVATION_STATE_KEY]["date"]
 
         # И третий заход в те же сутки уже молчит — потолок работает как

@@ -128,10 +128,19 @@ class Cadence(Enum):
 class Observation:
     """A line that passed the whole ladder, not yet journaled.
 
-    ``content_key`` is what «the same observation» means: the fired pair
-    and how many days it fired across. Same key, another open → the week
-    did not change in any way the line talks about, so there is nothing
-    new to say — silence (the window's ruling).
+    ``content_key`` is what «the same observation» means: the fired pair,
+    and NOTHING ELSE. Same key, another open → the week did not change in
+    any way the line talks about, so there is nothing new to say — silence
+    (the window's ruling).
+
+    Почему не «пара и сколько дней она держалась»: текст выбирается только
+    по виду триггера (:func:`apps.nutrition_coach.copy.render_observation`),
+    числа дней в нём нет и быть не может (Q-10 — считает триггер, называет
+    текст никогда). Ключ с ``days`` делал ``late_dinner:3`` и
+    ``late_dinner:4`` разными ключами при ПОБУКВЕННО одинаковом тексте:
+    порог перевалил на следующий день — и правило «не повторять
+    неизменившееся» повторяло, потому что менялась величина, невидимая
+    человеку. См. запись §39-соседнюю в NUTRITION-current-checkpoint.
     """
 
     text: str
@@ -192,7 +201,17 @@ def decide_observation(
     trigger = triggers.any_trigger(goal.key, fetch_history(bot_user), tz=tz)
     if trigger is None:
         return None
-    content_key = f"{trigger.kind}:{trigger.days}"
+    # days СОЗНАТЕЛЬНО не входит в ключ: текст зависит только от вида
+    # триггера, и ключ обязан совпадать с тем, что человек читает, а не с
+    # тем, что посчитала система. Цена решения — молчание там, где можно
+    # было бы сказать: одно наблюдение данного вида говорится один раз,
+    # пока вид не сменился.
+    #
+    # ПЕРЕСМАТРИВАТЬ, когда появятся пилотные данные о том, как часто люди
+    # отвечают на предложение продолжить. Тогда возможен вариант «тот же
+    # вид не раньше чем через N суток» — но N без данных был бы выдуман, а
+    # выдуманное число потом никто не пересматривает.
+    content_key = trigger.kind
     if cadence is Cadence.TRACKED and _cadence_blocks(
         prefs.get_prefs(bot_user), content_key=content_key, local_date=local_date
     ):
