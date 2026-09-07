@@ -1,9 +1,10 @@
 # miniapp-drift — go red when the Mini App people receive is not the Mini App in `dev`.
 #
 # DRF-1257. The Mini App is static files on the pilot host, not a container.
-# The bot deploy rebuilds four Python services and never touches
-# `apps/miniapp/`, so merging a front-end change publishes nothing. On
-# 2026-08-20 the built `dist` on the pilot turned out to be dated 8 August:
+# It used to be published by hand: the bot deploy rebuilt four Python services
+# and never touched `apps/miniapp/`, so merging a front-end change published
+# nothing. On 2026-08-20 the built `dist` on the pilot turned out to be dated
+# 8 August:
 # twelve days in which the owner reviewed screenshots of an August interface
 # sitting on top of a backend rebuilt that morning, and nobody could tell,
 # because nothing anywhere was comparing the two.
@@ -27,10 +28,13 @@
 # experience.
 #
 # ### Expected behaviour after a Mini App change merges
-# This goes RED and stays red until someone publishes
-# (`infra/deploy/miniapp-release.sh`). That is the intended design, not noise:
-# a merged front-end change that has not been published IS a defect, and this
-# is the only place it is visible.
+# Publication is no longer manual: `deploy-dev.yml` builds the Mini App on the
+# runner and ships it to the box on every green `ci` on `dev` (DRF-1538), so
+# the normal case is a red for the minutes between the two runs, going green
+# on its own. A red that PERSISTS is the real signal — the deploy did not run,
+# its ship step failed, or the box is serving something nobody built from
+# `dev`. That is the defect this workflow exists to make visible, and it is
+# still the only place it is visible.
 
 name: miniapp-drift
 

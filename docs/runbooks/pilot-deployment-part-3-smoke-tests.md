@@ -5,6 +5,15 @@
 > Target completion sprint: 2026-07-15 pilot launch (Penza, salon «Формула тела»)
 > Owner: W1 (Delta — master/admin Mini App)
 
+> **Dead host — do not work on `194.87.99.126`.** SSH to it still succeeds and
+> every command will report success, but the box serves nobody: `miniapp-dev`,
+> `proapp`, `dev` and `api-dev` `.gobeauty.site` all resolve to
+> `176.119.159.141`, and the `.126` vhost only proxies there. A change made on
+> `.126` never reaches a person. The pilot is `176.119.159.141`,
+> `/home/taximeter/ai-bot-platform-dev`, Compose project `ayla-bot-staging`,
+> port 8014, env `.env.staging`, files `docker-compose.yml` +
+> `docker-compose.staging.yml` + `docker-compose.staging.local.yml`.
+
 ## Purpose
 
 Manual smoke tests для master + admin Mini App после deploy в Пензе 2026-07-15. Запускаются operator'ом в окне T+0 → T+1h после launch (per [`project-pilot-deployment-runbook-scope`](../../../.claude/memory/project_pilot_deployment_runbook.md) PART 3). Цель: подтвердить что критичные user flow работают live before объявления pilot открытым для real masters.
@@ -48,7 +57,7 @@ Manual smoke tests для master + admin Mini App после deploy в Пенз�
 **Действия:**
 
 1. На устройстве test master: открыть мессенджер MAX → меню → найти бота `@ai_bot` (или ссылку из invite DM, если master ещё не linked).
-2. Если first launch: тап на invite link от admin (формат `https://ai-bot-platform.gobeauty.site/?invite=<token>`) → Mini App открывается на `MasterOnboardingScreen` → проходит Step 1 (claim) → Step 2 (accept) → Step 3 (bio + photo, optional).
+2. Если first launch: тап на invite link от admin (формат `https://miniapp-dev.gobeauty.site/?invite=<token>`) → Mini App открывается на `MasterOnboardingScreen` → проходит Step 1 (claim) → Step 2 (accept) → Step 3 (bio + photo, optional).
 3. Если master уже linked (existing pilot session): открыть Mini App из меню MAX → SessionToken в `DeviceStorage('master_token')` валидируется → landing on M1 dashboard.
 
 **Ожидаемый вывод:**
@@ -213,7 +222,7 @@ Manual smoke tests для master + admin Mini App после deploy в Пенз�
 
 **Действия:**
 
-1. Test admin account открывает admin Mini App (`https://ai-bot-platform.gobeauty.site/admin/`).
+1. Test admin account открывает admin Mini App (`https://api-dev.gobeauty.site/admin/`).
 2. Auth gate runs: init-data validation → role lookup → admin OR owner OR receptionist.
 3. Лендит на `AdminTeamScreen` (`/admin/team`).
 
