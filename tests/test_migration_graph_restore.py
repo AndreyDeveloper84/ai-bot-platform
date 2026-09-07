@@ -206,7 +206,14 @@ class TestNoHardCodedRestoreTargets:
         restoring = [r for r in regions if "restore_migration_head" in self._calls(r)]
         assert restoring, f"{relpath}: no restore region calls restore_migration_head()"
         for region in restoring:
-            assert "migrate" not in self._calls(region), (
+            calls = self._calls(region)
+            # Presence before absence, on the same `calls`: "no .migrate()
+            # here" means nothing unless this region provably has calls in it
+            # at all (DRF-1406's rule).
+            assert "restore_migration_head" in calls, (
+                f"{relpath}: restore region does not call restore_migration_head()"
+            )
+            assert "migrate" not in calls, (
                 f"{relpath}: a restore region still calls .migrate() with a "
                 "hand-typed target. Restoring one app's head leaves every "
                 "other app that depends on it unapplied (DRF-1551)."
