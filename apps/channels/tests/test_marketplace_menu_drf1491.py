@@ -479,7 +479,9 @@ class TestNutritionGatesOnTheLivePath:
         buttons = _keyboard(sent[0])
         labels = [b["text"] for b in buttons]
         # Стража: подменю построено, соседние пункты в нём есть.
-        assert "История визитов" in labels, labels
+        # «История визитов» на эту роль больше не годится — она слита с
+        # «Моими записями» (OD-UI-1), — и её место занимает «Помощь».
+        assert "Помощь" in labels, labels
         assert "Назад" in labels, labels
         for item in _GATED_ITEMS:
             assert item.label not in labels, labels

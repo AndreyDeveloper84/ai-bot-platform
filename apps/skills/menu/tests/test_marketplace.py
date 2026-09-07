@@ -59,7 +59,6 @@ _SEVEN_MAIN: tuple[tuple[str, str], ...] = (
 #: ведёт на ЗАПРОС согласия (вторая строка таблицы §25 п.6).
 _EXTRA_WITHOUT_CONSENT: tuple[tuple[str, str], ...] = (
     ("Дневник питания", f"{CALLBACK_HEALTH_NEED_PREFIX}food_diary"),
-    ("История визитов", "cb:open:visits"),
     ("Помощь", CALLBACK_EXTRA_HELP),
     ("Назад", CALLBACK_EXTRA_BACK),
 )
@@ -278,10 +277,10 @@ class TestWarningBeforeOpeningTheApp:
     def test_link_degradation_builds_the_declared_route(self, bot_user, consent, settings):
         settings.MAX_BOT_WEB_APP = ""
         settings.MAX_MINIAPP_URL = "https://app.example"
-        warning = open_warning_reply("open_visits")
+        warning = open_warning_reply("open_profile")
         assert warning is not None
         _text, data = warning
-        assert data["buttons"][0]["url"] == "https://app.example/customer/records"
+        assert data["buttons"][0]["url"] == "https://app.example/customer/profile"
 
 
 # --------------------------------------------------------------------------- #
@@ -293,6 +292,13 @@ class TestRemovedActionsStayReachable:
     Из главного меню ушли три пункта — «Перенести запись», «Отменить
     запись», «История визитов». Каждое отрицание здесь стоит рядом с
     местом, где действие ЕСТЬ.
+
+    «История визитов» с OD-UI-1 («кнопки сливаем») снята и из подменю
+    «Ещё» тоже — то есть отдельной кнопки у неё не осталось нигде. Это
+    самый опасный вид переезда для такой стражи: способность легко
+    объявить перенесённой и не перенести. Поэтому пара для неё теперь
+    доказывает не «пункт есть в другом меню», а всю цепь от кнопки «Мои
+    записи» до напечатанного списка прошлых визитов.
     """
 
     def test_reschedule_and_cancel_left_the_main_menu(self, bot_user, consent, miniapp):
@@ -319,16 +325,75 @@ class TestRemovedActionsStayReachable:
         labels = [b["label"] for b in _card_actions(visit)]
         assert labels == ["Подробнее", "Перенести", "Отменить"]
 
-    def test_visit_history_left_the_main_menu(self, bot_user, consent, miniapp):
-        payloads = _payloads(marketplace_menu_reply(bot_user=bot_user)[1]["buttons"])
-        # Стража: экранные пункты в меню ЕСТЬ — значит отсутствие истории
-        # это состав, а не пустая клавиатура.
-        assert "cb:open:profile" in payloads, payloads
-        assert "cb:open:visits" not in payloads, payloads
+    def test_visit_history_left_both_menus(self, bot_user, consent, miniapp, nutrition_on):
+        """OD-UI-1 — «кнопки сливаем»: пункта нет уже НИГДЕ.
 
-    def test_but_it_lives_in_the_extra_menu(self, bot_user, consent, miniapp, nutrition_on):
-        payloads = _payloads(marketplace_extra_reply(bot_user=bot_user)[1]["buttons"])
-        assert "cb:open:visits" in payloads
+        До этого решения он жил в подменю «Ещё» и вёл в приложение. Оба
+        отрицания стоят рядом с положительной стражей на тех же данных:
+        экранные пункты в главном меню есть, подменю построено и его
+        служебные кнопки на месте, — то есть проверяется состав, а не
+        пустая клавиатура.
+        """
+        main = _payloads(marketplace_menu_reply(bot_user=bot_user)[1]["buttons"])
+        extra = _payloads(marketplace_extra_reply(bot_user=bot_user)[1]["buttons"])
+        assert "cb:open:profile" in main, main
+        assert CALLBACK_EXTRA_HELP in extra, extra
+        # И только теперь отрицания.
+        assert "cb:open:visits" not in main, main
+        assert "cb:open:visits" not in extra, extra
+
+    def test_but_past_visits_are_answered_by_my_bookings_in_the_chat(self, bot_user, consent):
+        """…и живут за «Моими записями» — В ЧАТЕ (§62 / OD-UI-1).
+
+        Проверяется ЦЕПЬ, а не намерение, и каждое звено — настоящее:
+
+        1. кнопка меню шлёт ``cb:menu:my_bookings``;
+        2. ``resolve_tap_text`` переводит этот payload в каноническую
+           фразу — тот самый перевод, которым тап и становится репликой
+           (DRF-1051);
+        3. фразу забирает детерминированный детектор
+           ``is_personal_booking_lookup`` — то есть до модели она не
+           доходит;
+        4. ветка за детектором (``route_visits``) печатает прошлые
+           визиты словами.
+
+        Порвись любое звено — «История визитов» пропала бы молча, а
+        именно этого ``TestRemovedActionsStayReachable`` и не допускает.
+        """
+        from apps.channels.max.quick_actions import resolve_tap_text
+        from apps.skills.booking.lookup import is_personal_booking_lookup
+
+        payloads = _payloads(marketplace_menu_reply(bot_user=bot_user)[1]["buttons"])
+        assert "cb:menu:my_bookings" in payloads, payloads
+
+        phrase = resolve_tap_text("cb:menu:my_bookings")
+        assert phrase is not None
+        assert is_personal_booking_lookup(phrase) is True
+
+    def test_and_the_answer_behind_that_phrase_lists_the_past(self, monkeypatch, db):
+        """Четвёртое звено той же цепи, на настоящем построителе ответа."""
+        from apps.booking.services.records import Visit, VisitsResult
+        from apps.orchestrator import visits as visits_mod
+
+        visit = Visit(
+            appointment_id="11111111-1111-4111-8111-111111111111",
+            service_name="Массаж спины",
+            master_name="Инна",
+            start_at="2026-08-12T09:30:00+00:00",
+            price=None,
+        )
+        monkeypatch.setattr(visits_mod, "list_upcoming", lambda **_: VisitsResult(status="empty"))
+        monkeypatch.setattr(
+            visits_mod, "list_visits", lambda **_: VisitsResult(status="ok", visits=(visit,))
+        )
+
+        class _User:
+            id = "11111111-2222-3333-4444-555555555555"
+
+        reply = visits_mod.route_visits(global_bot_user=_User())
+
+        assert "Ваши последние визиты:" in reply.text
+        assert "Массаж спины" in reply.text
 
     def test_the_catalog_became_a_pick_not_a_removal(self, bot_user, consent, miniapp):
         """«Каталог услуг» не пропал — он стал «Подобрать услугу» (§37 п.3)."""
@@ -349,7 +414,9 @@ class TestNutritionGates:
         _text, data = marketplace_extra_reply(bot_user=bot_user)
         payloads = _payloads(data["buttons"])
         # Положительная стража ВПЕРЕДИ отрицания: подменю живо и полно.
-        assert "cb:open:visits" in payloads, payloads
+        # «История визитов» сюда больше не годится — она слита с «Моими
+        # записями» (OD-UI-1), — а служебные кнопки подменю на месте.
+        assert CALLBACK_EXTRA_HELP in payloads, payloads
         assert CALLBACK_EXTRA_BACK in payloads, payloads
         # И только теперь отрицание.
         assert DIARY_TAP_TEXT not in payloads, payloads
