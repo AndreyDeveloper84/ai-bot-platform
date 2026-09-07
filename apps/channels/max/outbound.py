@@ -85,6 +85,23 @@ def _token(bot: "BotEntry | None" = None) -> str:
     return getattr(settings, "MAX_BOT_TOKEN", "")
 
 
+def _recipient_blocked(chat_id: str) -> bool:
+    """Заблокирован ли получатель этого чата (DRF-1497).
+
+    Проверка по ``BotUser.chat_id`` — единственной привязке исходящего
+    сообщения к человеку. Сбой самой проверки (база легла) fail-open:
+    блокировка — рабочее действие поддержки, а не контур безопасности,
+    и остановить из-за неё ВСЮ отправку платформы было бы худшим исходом.
+    """
+    from apps.identity.models import BotUser
+
+    try:
+        return BotUser.all_tenants.filter(chat_id=str(chat_id), blocked_at__isnull=False).exists()
+    except Exception:  # noqa: BLE001 — см. docstring: fail-open, но с криком в лог
+        logger.exception("channels.max.outbound.blocked_check_failed chat_id=%s", chat_id)
+        return False
+
+
 def send_message(
     *,
     chat_id: str,
@@ -124,6 +141,17 @@ def send_message(
         # surface this via an exception so the handler emits a clear
         # `channels.max.outbound.no_token` audit.
         raise MaxAPIError(0, "MAX_BOT_TOKEN is not configured")
+
+    if _recipient_blocked(chat_id):
+        # DRF-1497 — заблокированный из админки клиент не получает ничего:
+        # ни ответы, ни напоминания, ни проактив. Это не сбой доставки,
+        # поэтому не raise (иначе PEL уйдёт в вечный retry), а подавленная
+        # отправка с отметкой в логе. Снятие блокировки возвращает всё как было.
+        logger.info(
+            "channels.max.outbound.recipient_blocked chat_id=%s — отправка подавлена",
+            chat_id,
+        )
+        return {"blocked": True}
 
     body: dict[str, Any] = {"text": text}
     if attachments:

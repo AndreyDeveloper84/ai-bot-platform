@@ -217,6 +217,34 @@ class BotUser(models.Model):
         help_text="Customer-level opt-out of proactive bot-initiated "
         "messages (B11 post-visit follow-up etc.). False = receive.",
     )
+
+    # DRF-1497 — блокировка клиента из админки. ``blocked_at`` NULL =
+    # не заблокирован. Эффект — один: ``apps.channels.max.outbound``
+    # не отправляет заблокированному человеку ничего (ни ответы бота,
+    # ни проактив), пока блокировка не снята. Ставится и снимается
+    # только через ``apps.identity.services.blocking`` — с причиной и
+    # записью в журнал; правкой полей руками состояние не меняется.
+    blocked_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        db_index=True,
+        help_text="Когда клиента заблокировали из админки (DRF-1497). "
+        "NULL = не заблокирован. Non-null = исходящие ему не отправляются.",
+    )
+    blocked_reason = models.CharField(
+        max_length=500,
+        blank=True,
+        default="",
+        help_text="Причина блокировки — обязательна, см. "
+        "apps.identity.services.blocking. Показывается в карточке клиента.",
+    )
+    blocked_by_username = models.CharField(
+        max_length=150,
+        blank=True,
+        default="",
+        help_text="Кто заблокировал (username учётной записи админки). "
+        "Дублирует журнал, чтобы карточка читалась без второго запроса.",
+    )
     context = models.JSONField(
         default=dict,
         blank=True,
