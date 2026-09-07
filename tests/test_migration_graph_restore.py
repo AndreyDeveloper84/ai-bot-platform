@@ -37,6 +37,10 @@ from tests.support.migration_graph import (
     restore_migration_head,
     unapplied_leaf_nodes,
 )
+from tests.support.migration_moves import (
+    forward_moves_to_pinned_nodes,
+    runtime_access_below_head,
+)
 
 # The node the five modules roll below, and the node whose removal drags
 # other apps down with it.
@@ -242,3 +246,289 @@ class TestNoHardCodedRestoreTargets:
             f"{relpath} stopped calling executor.migrate() — the migration "
             "test has been hollowed out, not fixed"
         )
+
+
+# --- DRF-1554: the moves FORWARD, which the restore guard above cannot see ---
+
+#: Real nodes, so direction resolves against the real graph. `_LOW` is below
+#: `_HIGH` in `consent`; if that ever stops being true these fixtures fail
+#: loudly rather than passing vacuously.
+_LOW = ("consent", "0002_alter_consentrecord_consent_type")
+_HIGH = ("consent", "0003_backfill_memory_green_consent")
+
+_SYNTHETIC_PREAMBLE = f"""
+_A = {_LOW!r}
+_B = {_HIGH!r}
+
+
+@pytest.fixture
+def at_a():
+    _executor().migrate([_A])
+    yield
+    restore_migration_head()
+"""
+
+
+def _violating(moves) -> list[str]:
+    return [f"{m.function}:{m.lineno} -> {m.target}" for m in moves if m.is_violation]
+
+
+def _violations(source: str) -> list[str]:
+    moves, _ = forward_moves_to_pinned_nodes(source)
+    return _violating(moves)
+
+
+class TestForwardMoveClassifier:
+    """The classifier itself, on sources written to be unambiguous.
+
+    The repo's own tests are the subject of the next class; these pin the
+    RULE, so a future refactor of the classifier cannot quietly stop
+    distinguishing the two directions.
+    """
+
+    def test_a_forward_move_to_a_pinned_node_is_reported(self) -> None:
+        """The falsifier. This is the shape DRF-1554 was filed about."""
+
+        source = (
+            _SYNTHETIC_PREAMBLE
+            + """
+
+def test_walks_forward(at_a):
+    _executor().migrate([_B])
+    assert ConsentRecord.all_tenants.count() == 1
+"""
+        )
+        reported = _violations(source)
+        assert len(reported) == 1, reported
+        assert reported[0].startswith("test_walks_forward:")
+        assert str(_HIGH) in reported[0]
+
+    def test_a_backward_move_is_not_reported(self) -> None:
+        """Paired positive guard (DRF-1411).
+
+        Rolling back to a hand-typed node is how every reversibility test in
+        this repo is written. A guard that flagged it would leave them
+        unwritable, and the cheapest way to satisfy such a guard is to delete
+        the rollback — i.e. to delete the test's whole point.
+        """
+
+        source = (
+            _SYNTHETIC_PREAMBLE
+            + """
+
+def test_rolls_back():
+    _executor().migrate([_A])
+    assert ConsentRecord.all_tenants.count() == 0
+"""
+        )
+        moves, classified = forward_moves_to_pinned_nodes(source)
+        assert classified >= 1, "the classifier saw nothing — it proves nothing"
+        # Presence before absence, over the same `moves` (DRF-1406/1411):
+        # «no violations» is worth nothing unless the move was actually seen.
+        assert [m.direction for m in moves if m.function == "test_rolls_back"] == ["backward"]
+        assert _violating(moves) == []
+
+    def test_a_forward_move_that_declares_historical_intent_is_allowed(self) -> None:
+        """Measured exception, not a loophole — see `migration_moves` docstring.
+
+        `apps/identity/tests/test_memory_entry_step3_backfill.py` writes rows
+        through the 0016-era registry; at the graph head migration 0019's
+        `memory_entry_explicit_requires_provenance` CHECK rejects them.
+        Sitting below head IS the test.
+        """
+
+        source = (
+            _SYNTHETIC_PREAMBLE
+            + """
+
+def test_forward_but_historical(at_a):
+    _executor().migrate([_B])
+    apps = _apps_at(_B)
+    assert apps is not None
+"""
+        )
+        moves, _ = forward_moves_to_pinned_nodes(source)
+        assert [m.direction for m in moves if m.function == "test_forward_but_historical"] == [
+            "forward"
+        ]
+        assert _violating(moves) == []
+
+    def test_the_same_constant_is_judged_by_direction_not_by_name(self) -> None:
+        """`_B` is a bug in one test and correct in the other, same file."""
+
+        source = (
+            _SYNTHETIC_PREAMBLE
+            + """
+
+def test_forward_to_b(at_a):
+    _executor().migrate([_B])
+
+
+def test_back_to_b_from_head():
+    _executor().migrate([_B])
+    _executor().migrate([_A])
+"""
+        )
+        reported = _violations(source)
+        assert len(reported) == 1
+        assert reported[0].startswith("test_forward_to_b:")
+
+
+class TestNoForwardMovesToPinnedNodes:
+    """DRF-1554. The five modules must not walk forward and stop short.
+
+    Walking one app forward leaves every app that depends on it unapplied for
+    the REST OF THIS TEST — the fixture's restore repairs the next test, not
+    this one. Where the test then reads through the runtime ORM, it reads a
+    live model against a truncated schema.
+    """
+
+    @pytest.mark.parametrize("relpath", _MIGRATION_TEST_FILES)
+    def test_the_classifier_can_see_this_file(self, relpath: str) -> None:
+        """Presence before absence (DRF-1406/1411).
+
+        «No forward violations» means nothing if the classifier resolved no
+        moves at all — a renamed helper or a computed target would make every
+        file silently clean.
+        """
+
+        source = (_REPO_ROOT / relpath).read_text(encoding="utf-8")
+        _, classified = forward_moves_to_pinned_nodes(source)
+        assert classified >= 1, (
+            f"{relpath}: the direction classifier resolved no migrate() "
+            "target. A clean result here would be blindness, not health."
+        )
+
+    @pytest.mark.parametrize("relpath", _MIGRATION_TEST_FILES)
+    def test_no_forward_move_stops_short_of_the_graph_head(self, relpath: str) -> None:
+        source = (_REPO_ROOT / relpath).read_text(encoding="utf-8")
+        moves, classified = forward_moves_to_pinned_nodes(source)
+        assert classified >= 1
+        # Paired positive guard, and the presence half of DRF-1406's rule:
+        # «no forward violations» proves nothing over a file whose moves this
+        # analysis never resolved.
+        assert any(m.direction == "backward" for m in moves), (
+            f"{relpath}: no backward move left — the reversibility this file "
+            "exists to prove has been removed, not fixed (DRF-1411)."
+        )
+        assert _violating(moves) == [], (
+            f"{relpath}: a test walks the graph FORWARD to a hand-typed node "
+            "and then keeps working through the runtime ORM. Walking one app "
+            "forward does not re-apply the apps that depend on it — they stay "
+            "off until this test ends. Use restore_migration_head(), or name "
+            "the node to project_state()/_apps_at() if you deliberately mean "
+            "to read through that node's historical registry (DRF-1554)."
+        )
+
+
+class TestNoRuntimeModelUseWhileRolledBack:
+    """DRF-1554, second finding — and the one that actually bit.
+
+    The six consent tests never reached their forward move. They seeded rows
+    through `BotUser.all_tenants.create(...)` while the fixture held the graph
+    at `consent/0002`, and PR #1399's `identity/0022` put a column on
+    `BotUser` itself.
+
+    No ordering of restores can fix that: `identity/0021` declares
+    `consent/0003` a dependency, so «consent at 0002 AND identity at 0022» is
+    not a reachable state of the graph. The cure is what you touch while you
+    are down — seed at head and roll back with the data already there, or go
+    through the historical registry, whose model has exactly the columns that
+    exist at that node.
+    """
+
+    @pytest.mark.parametrize("relpath", _MIGRATION_TEST_FILES)
+    def test_nothing_touches_a_runtime_model_below_the_head(self, relpath: str) -> None:
+        source = (_REPO_ROOT / relpath).read_text(encoding="utf-8")
+        findings, _ = runtime_access_below_head(source)
+        assert findings == [], (
+            f"{relpath}: a statement uses a runtime model while the graph is "
+            "rolled back. The runtime model carries the columns of the CURRENT "
+            "code; below the head those columns may not exist yet, and no "
+            "restore order can help — the state is unreachable by "
+            "construction. Seed at head before rolling back, or read through "
+            "project_state(node).apps (DRF-1554)."
+        )
+
+    def test_the_analysis_reaches_the_dangerous_state_at_all(self) -> None:
+        """Presence before absence (DRF-1406/1411).
+
+        Across the five files at least one statement must actually execute
+        below the head — otherwise «no findings» would mean the analysis never
+        entered the state it exists to police.
+        """
+
+        seen = 0
+        for relpath in _MIGRATION_TEST_FILES:
+            source = (_REPO_ROOT / relpath).read_text(encoding="utf-8")
+            _, below = runtime_access_below_head(source)
+            seen += below
+        assert seen > 0, (
+            "no statement in any of the five files was analysed below the "
+            "graph head — a clean result here would be blindness"
+        )
+
+    def test_a_runtime_write_below_the_head_is_reported(self) -> None:
+        """The falsifier: the exact shape that broke the six consent tests."""
+
+        source = """
+from apps.identity.models import BotUser
+
+_A = ("consent", "0002_alter_consentrecord_consent_type")
+
+
+@pytest.fixture
+def at_a():
+    _executor().migrate([_A])
+    yield
+    restore_migration_head()
+
+
+def _seed():
+    return BotUser.all_tenants.create(channel="max")
+
+
+def test_seeds_while_rolled_back(at_a):
+    bu = _seed()
+    assert bu is not None
+"""
+        findings, below = runtime_access_below_head(source)
+        assert below > 0
+        assert [f.function for f in findings] == ["test_seeds_while_rolled_back"]
+        assert findings[0].via == "_seed()"
+
+    def test_the_same_write_at_the_head_is_not_reported(self) -> None:
+        """Paired positive guard (DRF-1411).
+
+        Seeding through the runtime models is the deliberate choice this file
+        documents — a historical manager is not tenant-scoped, and seeding
+        through one would hide exactly the difference the tests exercise. The
+        guard must object to *where*, never to *what*.
+        """
+
+        source = """
+from apps.identity.models import BotUser
+
+_A = ("consent", "0002_alter_consentrecord_consent_type")
+
+
+@pytest.fixture
+def rerun():
+    def _rerun():
+        _executor().migrate([_A])
+        restore_migration_head()
+
+    return _rerun
+
+
+def _seed():
+    return BotUser.all_tenants.create(channel="max")
+
+
+def test_seeds_at_head_then_reruns(rerun):
+    bu = _seed()
+    rerun()
+    assert bu is not None
+"""
+        findings, _ = runtime_access_below_head(source)
+        assert findings == [], findings
