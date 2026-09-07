@@ -1,109 +1,83 @@
 # Runbook — publishing the Mini App
 
-**Ticket:** DRF-1257. **Applies to:** `apps/miniapp/` on the pilot host
-(`taximeter@194.87.99.126`, `/home/taximeter/ai-bot-platform-dev`).
+**Tickets:** DRF-1257 (drift guard), DRF-1538 (publication moved into the
+pipeline). **Applies to:** `apps/miniapp/` on the pilot host
+(`taximeter@176.119.159.141`, `/home/taximeter/ai-bot-platform-dev`).
+
+> **Dead host — do not work on `194.87.99.126`.** SSH to it still succeeds and
+> every command will report success, but the box serves nobody: `miniapp-dev`,
+> `proapp`, `dev` and `api-dev` `.gobeauty.site` all resolve to
+> `176.119.159.141`, and the `.126` vhost only proxies there. A change made on
+> `.126` never reaches a person. The pilot is `176.119.159.141`,
+> `/home/taximeter/ai-bot-platform-dev`, Compose project `ayla-bot-staging`,
+> port 8014, env `.env.staging`, files `docker-compose.yml` +
+> `docker-compose.staging.yml` + `docker-compose.staging.local.yml`.
 
 ---
 
-## 1. Why this runbook exists
+## 1. The short version — do nothing
 
-The Mini App is **static files on disk, not a container**. The bot deploy
-rebuilds four Python services and never touches `apps/miniapp/`, so merging a
-front-end change to `dev` publishes *nothing*. The change reaches people only
-when a human remembers to run a build on the host.
+**Publishing the Mini App is not a manual step any more.** Merge to `dev` and
+the pipeline publishes. There is no command for you to run on the host, and
+running one is a way to make things worse rather than better.
 
-On 2026-08-20 that memory failed for twelve days: the built `dist` on the pilot
-was dated **8 August**. Every deploy in between rebuilt Python and left the
-interface untouched, and the owner was reviewing screenshots of an August UI
-against a backend rebuilt that morning. Everyone believed they were looking at
-the current state.
+Concretely, do **not**:
 
-Two things were missing, and both are now in the repository:
+- **do not** `ssh` to the pilot to build the Mini App — there is no Node on
+  the box (checked 2026-09-06: no nvm under the deploy user), so a build there
+  either fails or silently uses a Node that does not match CI;
+- **do not** run `infra/deploy/miniapp-release.sh`. It is the old host-side
+  path from DRF-1257 and it builds *on the host*, which is exactly the
+  prerequisite that no longer holds. It is not what publishes today;
+- **do not** hand-copy a `dist/` you built on your laptop. Your Node is not the
+  runner's Node, and nothing downstream will tell you that it differed;
+- **do not** publish "just this once, it is urgent". The whole point of the
+  twelve-day incident in §6 was that nobody could tell which of those things
+  had last happened.
 
-| Gap | Closed by |
+---
+
+## 2. What actually publishes, and when
+
+`.github/workflows/deploy-dev.yml` does it, automatically:
+
+| Step in `deploy-dev` | What it does |
 | --- | --- |
-| Nothing ever ran `vite build` — not in CI, not in the deploy | `vite build` step in the `miniapp` job of `.github/workflows/ci.yml` |
-| Nothing compared what is *served* against what is in `dev` | `.github/workflows/miniapp-drift.yml` + `tools/ci/miniapp_bundle_drift.py` |
-| Building in place took both Mini App domains down | `infra/deploy/miniapp-release.sh` (build aside, flip a symlink) |
+| trigger | `workflow_run` — fires when the `ci` workflow **completes successfully on `dev`**. No human presses anything. |
+| `Checkout dev (для сборки Mini App)` | Takes the sources from `dev`, not from the host's checkout. |
+| `Node 20` + `Build Mini App on the runner` | `npm ci --no-audit --no-fund` then `npm run build`, on the runner. Asserts `dist/index.html` is non-empty and `dist/assets/` is non-empty before going further — vite writes `index.html` first and can still fail on the assets. |
+| `Ship Mini App to the box and swap` | `tar` over ssh into `apps/miniapp/dist.new`, verifies it there, then two `mv`: the live `dist` becomes `dist.prev` and `dist.new` becomes `dist`. |
+| `Smoke — Mini App answers over https` | Reads the bundle name out of the served `index.html` and downloads it. Informational (`continue-on-error`) on purpose: nginx failures and build failures are different failures, and conflating them helps nobody. |
+
+Two properties worth knowing, because they used to be false:
+
+- **No outage window.** `vite build` empties its output directory *before*
+  writing, and on 2026-08-21 the monitor caught the consequence: 403 on both
+  `miniapp-dev.gobeauty.site` and `proapp.gobeauty.site`, which share this one
+  directory, for the eight seconds of an in-place build. The pipeline never
+  touches the live `dist` until the new build is on disk in full; the swap is
+  two renames.
+- **Built where CI built it.** The runner's environment is fixed and is the one
+  the PR was checked in. Building on the host meant a second toolchain that
+  could quietly drift — on 2026-08-23 the host had `react-router-dom` 6.30.4
+  installed while `package-lock.json` pinned 6.30.3, so the bundle people were
+  served linked a version this repository never pinned.
 
 ---
 
-## 2. One-time host preparation
+## 3. Where to look at the result
 
-These steps are **not** performed by CI and have not been performed by this
-ticket. They need a human on the host.
+1. **The deploy run.** `gh run list -R AndreyDeveloper84/ai-bot-platform
+   --workflow=deploy-dev.yml`. The publish is inside the same run as the Python
+   deploy; there is no separate Mini App workflow to look for.
+2. **The swap step's own output.** `Ship Mini App to the box and swap` ends with
+   `stat -c '%y %n' dist/index.html`, so the run log states the timestamp that
+   is now live.
+3. **From outside, over HTTPS** — see §4. This is the only one of the three that
+   proves a *person* is receiving the change.
 
-### 2.1 Install the Node version the repository declares
-
-`apps/miniapp/.nvmrc` says **22**. The host's nvm currently has only
-`v20.20.0`, and the system Node is `v16.20.2`, which Vite 5 refuses.
-
-```bash
-export NVM_DIR="$HOME/.nvm"; . "$NVM_DIR/nvm.sh"
-nvm install 22
-```
-
-Until this is done, `nvm use` (with no argument) inside `apps/miniapp` fails
-with `N/A: version "v22" is not yet installed`, which is why the ad-hoc
-instructions everyone was passing around said `nvm use 20` — they were working
-around a mismatch nobody had written down. CI builds on 22; the host could only
-build on 20; nothing enforced that they agree.
-
-`infra/deploy/miniapp-release.sh` now stops with that exact instruction rather
-than silently falling through to Node 16.
-
-### 2.2 Convert `dist` from a directory into a release symlink
-
-`vite build` **empties its output directory before writing**. nginx serves
-`apps/miniapp/dist` as `root`, so an in-place build means there is nothing to
-serve for the duration. On 2026-08-21 the monitor caught it: **403 on both
-`miniapp-dev.gobeauty.site` and `proapp.gobeauty.site`**, which share this one
-directory. Eight seconds of build, eight seconds of outage on two domains.
-
-The first run of the release script performs the conversion itself: it preserves
-the existing `dist/` as a release (this is the mandatory pre-build backup) and
-replaces it with a symlink. Afterwards every publish is an atomic `rename(2)`
-over the symlink, and there is no window at all.
-
-```bash
-cd /home/taximeter/ai-bot-platform-dev
-./infra/deploy/miniapp-release.sh --dry-run    # build + verify, live site untouched
-./infra/deploy/miniapp-release.sh              # publish
-```
-
-Nothing in nginx needs to change: `root` is resolved per request, symlinks are
-followed by default (`disable_symlinks` is not set on this host), so both
-vhosts flip at the same instant and no reload is required.
-
-### 2.3 Clean up the manual backups
-
-`dist.bak-20260820/`, `dist.bak-prev/`, `dist.bak-rating-20260821/` are
-leftovers from hand-run builds. Once releases exist they are redundant — the
-last five releases are kept automatically and `--rollback` repoints at the
-previous one. Remove them when convenient.
-
----
-
-## 3. Publishing a change
-
-```bash
-ssh taximeter@194.87.99.126
-cd /home/taximeter/ai-bot-platform-dev
-git checkout dev && git pull --ff-only origin dev
-./infra/deploy/miniapp-release.sh
-```
-
-The script runs `npm ci` (not `npm install`) on purpose. On 2026-08-23 the host
-had `react-router-dom` **6.30.4** installed while `package-lock.json` pins
-**6.30.3** — the bundle people were served linked a dependency version this
-repository never pinned. `ci` wipes `node_modules` and reproduces the lockfile
-exactly.
-
-Rollback is a symlink flip, no rebuild:
-
-```bash
-./infra/deploy/miniapp-release.sh --rollback
-```
+If the run is green and the site is stale, the failure is between nginx and the
+directory, not in the build. Do not respond by building something by hand.
 
 ---
 
@@ -120,10 +94,6 @@ B=$(curl -s https://miniapp-dev.gobeauty.site/ | grep -oE 'index-[A-Za-z0-9_-]+\
 curl -s "https://miniapp-dev.gobeauty.site/assets/$B" | grep -c "<a string from the change>"
 ```
 
-The release script already does the asset-name half of this automatically and
-refuses to report success if the served page does not name the bundle it just
-built.
-
 For the complete answer — *every* module, not one string:
 
 ```bash
@@ -132,65 +102,82 @@ python3 tools/ci/miniapp_bundle_drift.py --url https://miniapp-dev.gobeauty.site
 
 `apps/miniapp/vite.config.ts` sets `build.sourcemap = true`, so each deploy
 publishes `assets/index-<hash>.js.map`, and that map carries `sourcesContent` —
-the verbatim text of all 106 application modules as of build time. The guard
+the verbatim text of the application modules as of build time. The guard
 downloads it and diffs it against the checkout. It compares *the code a
 browser executes*, and trusts nothing on the host.
 
 Two traps it handles, both of which have already burned someone here:
 
 - **Line endings.** Sources checked out on Windows carry CRLF; a Linux build
-  embeds LF. Raw byte comparison reports all 106 modules as different and means
+  embeds LF. Raw byte comparison reports every module as different and means
   nothing. Every comparison is LF-normalized.
 - **Bundle hashes.** `index-<hash>.js` changes with the minifier and Node
   version even when the sources are identical, so the hash is never compared.
   Sources are the invariant; bytes are not.
 
+`.github/workflows/miniapp-drift.yml` runs the same guard on every push to
+`dev` that touches `apps/miniapp/**`, plus on a daily schedule.
+
 ---
 
-## 5. Known gap — this is still a human remembering
+## 5. Rollback
 
-`miniapp-drift` makes forgetting **loud**, and CI now guarantees the code
-*builds*. Neither makes publication automatic: a merge to `dev` still does not
-reach the pilot until someone runs the release script.
-
-Closing that last gap needs a working deploy pipeline to hang the step on, and
-**there is not one**:
-
-- `.github/workflows/deploy-dev.yml` has produced **no automatic run since
-  2026-06-10**. Commit `ab2d164` ("activate auto-deploy of the dev bot")
-  switched its trigger from `push: [dev]` to `workflow_run`. GitHub honours
-  `workflow_run` triggers **only from the default branch**, and the default
-  branch is `main` — 885 commits behind, still carrying the old skeleton. The
-  commit that activated auto-deploy is what disabled it.
-- The single run since then (`workflow_dispatch`, 2026-08-08, run
-  `31279529908`) **failed** at "Pull + rebuild + restart dev services". It
-  targets Compose project `ai-bot-platform-dev`; the pilot actually runs
-  `ayla-bot-staging` (plus a systemd `ai-bot-platform-dev-consumer`).
-
-Adding a Mini App build step to that workflow would attach it to something that
-neither fires nor works. Both are Python-deploy repairs and out of scope for
-DRF-1257 — they need their own ticket and an owner's decision.
-
-### 5.1 The same default-branch rule limits `miniapp-drift`
-
-`miniapp-drift` runs on **push to `dev`**, which works: `push` triggers are read
-from the branch being pushed. Its `schedule` and `workflow_dispatch` triggers
-are read **only from the default branch**, so while `main` is 885 commits
-behind, the daily run does not fire and the workflow does not appear in the
-Actions dispatch list.
-
-The push trigger is the one that carries the guarantee, and it covers the case
-that caused this ticket. What is missing until `main` catches up is the
-commit-less drift: a host rebuilt from a stale checkout, a release rolled back
-and never rolled forward. Until then, check that case by hand:
+The previous build is left on the box as `apps/miniapp/dist.prev` by the swap
+step. On the **pilot** (`176.119.159.141`), not on `.126`:
 
 ```bash
-python3 tools/ci/miniapp_bundle_drift.py --url https://miniapp-dev.gobeauty.site
+cd /home/taximeter/ai-bot-platform-dev/apps/miniapp
+mv dist dist.broken && mv dist.prev dist
 ```
 
-Do **not** read a silent `miniapp-drift` as a clean pilot. Confirm the schedule
-is alive before relying on it:
+This is an emergency lever, not a workflow. It survives exactly one deploy —
+the next `Ship Mini App` overwrites `dist.prev`. The durable fix is to revert
+on `dev` and let the pipeline publish the revert.
 
-```bash
-gh run list --workflow=miniapp-drift.yml
-```
+---
+
+## 6. Why this runbook exists
+
+The Mini App is **static files on disk, not a container**. For a long time the
+bot deploy rebuilt only the Python services, so merging a front-end change to
+`dev` published *nothing*, and the change reached people only when a human
+remembered to run a build on the host.
+
+On 2026-08-20 that memory failed for twelve days: the built `dist` on the pilot
+was dated **8 August**. Every deploy in between rebuilt Python and left the
+interface untouched, and the owner was reviewing screenshots of an August UI
+against a backend rebuilt that morning. Everyone believed they were looking at
+the current state.
+
+Three gaps caused it; all three are closed:
+
+| Gap | Closed by |
+| --- | --- |
+| Nothing ever ran `vite build` in CI | `vite build` step in the `miniapp` job of `.github/workflows/ci.yml` |
+| Nothing compared what is *served* against what is in `dev` | `.github/workflows/miniapp-drift.yml` + `tools/ci/miniapp_bundle_drift.py` |
+| Publication depended on a human remembering | `Build Mini App on the runner` + `Ship Mini App to the box and swap` in `.github/workflows/deploy-dev.yml` (DRF-1538) |
+
+The last row is what turned this runbook from a procedure into a prohibition.
+Everything the old §2 ("one-time host preparation" — install Node 22 on the box,
+convert `dist` into a release symlink, clean up `dist.bak-*`) and the old §3
+("Publishing a change" — ssh, pull, run `miniapp-release.sh`) described is
+superseded: the host no longer needs a toolchain, and nobody publishes by hand.
+
+### 6.1 Two claims this runbook used to make that are no longer true
+
+- *"`deploy-dev.yml` has produced no automatic run since 2026-06-10, because
+  `workflow_run` triggers are honoured only from the default branch and the
+  default branch is `main`."* The default branch is now **`dev`**, so
+  `workflow_run` fires, and `deploy-dev` runs on every green `ci` on `dev`.
+- *"Adding a Mini App build step to that workflow would attach it to something
+  that neither fires nor works."* It was added (DRF-1538) and it does both.
+
+---
+
+## 7. Known gap
+
+`infra/deploy/miniapp-release.sh` is still in the tree and still documents a
+host-side build. It is superseded by the pipeline and cannot run on the pilot
+(no Node). Removing it, and the host-Node instructions it carries, needs its
+own ticket — it is code, and this runbook is not the place to delete it.
+Until then, treat its presence as history, not as an instruction.
