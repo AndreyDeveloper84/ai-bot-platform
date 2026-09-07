@@ -19,15 +19,22 @@
  * проверка присутствия на тех же данных: сначала «вот поверхность», и
  * только потом «вот чего в ней нет».
  *
+ * Здесь же — вход в пилот с моста и выход обратно (решение владельца
+ * 07.09.2026): посадка осталась мостовой, а в пилот с «Настроек» ведёт
+ * явная кнопка. Вход без выхода — ловушка, поэтому оба конца проверены
+ * в паре.
+ *
  * Тесты умеют падать: снимите `canOpenSalonPilot` с маршрута
  * `/admin/today` — покраснеют права ресепшн; поменяйте состав
  * `SALON_PILOT_TAB_SPECS` — покраснеет панель; верните пилоту
  * `AdminTabBar` — покраснеет разделение поверхностей; верните «Услуги»
- * в `ADMIN_TABS_RECEPTION` — покраснеет пин моста.
+ * в `ADMIN_TABS_RECEPTION` — покраснеет пин моста; снимите
+ * `setBackButton`/`onBackButton` с `SalonPilotFrame` — покраснеет выход.
  */
 import { render, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("./lib/admin-api", async (importOriginal) => {
   const original = await importOriginal<typeof import("./lib/admin-api")>();
@@ -50,6 +57,7 @@ import {
 import { SALON_PILOT_PATHS, SALON_PILOT_TABS } from "./lib/salon-pilot";
 import { SALON_PILOT_TAB_SPECS } from "./components/SalonPilotTabBar";
 import { App } from "./App";
+import { AdminSettingsPlaceholderScreen } from "./screens/admin/AdminSettingsPlaceholderScreen";
 
 const mockedGetMe = vi.mocked(getMe);
 const mockedDay = vi.mocked(getSalonDay);
@@ -355,5 +363,178 @@ describe("мост из пяти вкладок не сдвинулся (DRF-123
     expect(
       screen.queryByRole("button", { name: "Расписание" }),
     ).not.toBeInTheDocument();
+  });
+});
+
+/**
+ * Заглушка системной кнопки MAX.
+ *
+ * В jsdom `window.WebApp` нет вовсе, поэтому `setBackButton` и
+ * `onBackButton` — пустышки, и без этой заглушки проверка выхода
+ * зеленела бы, ничего не проверив.
+ */
+function stubMaxBackButton() {
+  const handlers: Array<() => void> = [];
+  const backButton = {
+    show: vi.fn(),
+    hide: vi.fn(),
+    onClick: vi.fn((h: () => void) => {
+      handlers.push(h);
+    }),
+    offClick: vi.fn((h: () => void) => {
+      const i = handlers.indexOf(h);
+      if (i >= 0) handlers.splice(i, 1);
+    }),
+  };
+  (window as unknown as { WebApp?: unknown }).WebApp = { BackButton: backButton };
+  return {
+    backButton,
+    /** Нажатие системной «назад» — зовём то, на что экран подписался. */
+    press: () => handlers.forEach((h) => h()),
+  };
+}
+
+describe("вход в пилот с моста (решение владельца 07.09.2026)", () => {
+  it("владелец видит вход на «Настройках» и попадает по нему в «Сегодня»", async () => {
+    mockedGetMe.mockResolvedValue(OWNER_ME);
+    renderAppAt("/admin/settings");
+    const enter = await screen.findByRole("button", {
+      name: "Открыть пилотную админку",
+    });
+    await userEvent.click(enter);
+    expect(
+      await screen.findByRole("heading", { name: "Сегодня" }),
+    ).toBeInTheDocument();
+    // И это именно пилот, а не «День» моста.
+    expect(tabLabels()).toEqual(["Сегодня", "Расписание", "Ayla"]);
+  });
+
+  it("администратор видит тот же вход", async () => {
+    mockedGetMe.mockResolvedValue(ADMIN_ME);
+    renderAppAt("/admin/settings");
+    expect(
+      await screen.findByRole("button", { name: "Открыть пилотную админку" }),
+    ).toBeInTheDocument();
+  });
+
+  it("надпись не обещает содержимого пустых разделов", async () => {
+    mockedGetMe.mockResolvedValue(OWNER_ME);
+    renderAppAt("/admin/settings");
+    // Присутствие: вход на месте и назвал оба пустых раздела пустыми.
+    expect(
+      await screen.findByText(
+        /«Расписание» и «Ayla» пока пустые/,
+      ),
+    ).toBeInTheDocument();
+  });
+
+  it("ресепшн до «Настроек» не доходит — на адресе стоит отказ", async () => {
+    mockedGetMe.mockResolvedValue(RECEPTION_ME);
+    renderAppAt("/admin/settings");
+    // Присутствие: отказ отрисован, экран не пустой.
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      /Раздел «Настройки» открыт владельцу и администратору/,
+    );
+    // И только теперь отрицание: входа в пилот на нём нет.
+    expect(
+      screen.queryByRole("button", { name: "Открыть пилотную админку" }),
+    ).not.toBeInTheDocument();
+  });
+
+  /**
+   * Проверка выше пинует СТРАЖ МАРШРУТА, а не проверку роли на экране:
+   * ресепшн до placeholder-а не доходит вовсе, поэтому убери
+   * `canOpenSalonPilot` из экрана — и она осталась бы зелёной. Проверено
+   * саботажем: заменил условие на `true`, все 29 остались зелёными.
+   *
+   * Поэтому экран рендерится напрямую, в обход маршрута. Правила
+   * независимы: сюда пускает `isAdminTabAllowed(me, "settings")`, в пилот
+   * — `canOpenSalonPilot`. Сегодня оба закрыты для ресепшн; если
+   * «Настройки» ей когда-нибудь откроют, вход в пилот уехать следом не
+   * должен — он привёл бы её на экран отказа.
+   */
+  it("на самом экране вход скрыт от ресепшн, а не только на маршруте", () => {
+    render(
+      <MemoryRouter>
+        <AdminSettingsPlaceholderScreen me={RECEPTION_ME} />
+      </MemoryRouter>,
+    );
+    // Присутствие: экран отрисовался целиком, а не упал в пустоту.
+    expect(screen.getByText(/Скоро здесь будут настройки/)).toBeInTheDocument();
+    // Отсутствие: и входа в пилот на нём нет.
+    expect(
+      screen.queryByRole("button", { name: "Открыть пилотную админку" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("тому же экрану с владельцем вход показывается", () => {
+    render(
+      <MemoryRouter>
+        <AdminSettingsPlaceholderScreen me={OWNER_ME} />
+      </MemoryRouter>,
+    );
+    expect(
+      screen.getByRole("button", { name: "Открыть пилотную админку" }),
+    ).toBeInTheDocument();
+  });
+
+  it("«Настройки» не потеряли своего прежнего содержимого", async () => {
+    mockedGetMe.mockResolvedValue(OWNER_ME);
+    renderAppAt("/admin/settings");
+    expect(
+      await screen.findByText(/Скоро здесь будут настройки/),
+    ).toBeInTheDocument();
+    // Панель моста под ними прежняя — вход в пилот её не тронул.
+    expect(tabLabels()).toEqual([
+      "День",
+      "Команда",
+      "Услуги",
+      "Чаты",
+      "Настройки",
+    ]);
+  });
+});
+
+describe("выход с пилота обратно на мост (не ловушка)", () => {
+  afterEach(() => {
+    delete (window as unknown as { WebApp?: unknown }).WebApp;
+  });
+
+  it("на пилоте показана системная «назад», и она возвращает в «Настройки»", async () => {
+    const max = stubMaxBackButton();
+    mockedGetMe.mockResolvedValue(OWNER_ME);
+    renderAppAt("/admin/today");
+    await screen.findByRole("heading", { name: "Сегодня" });
+    // Присутствие: кнопка показана и экран на неё подписался.
+    expect(max.backButton.show).toHaveBeenCalled();
+    expect(max.backButton.onClick).toHaveBeenCalled();
+
+    max.press();
+
+    expect(
+      await screen.findByText(/Скоро здесь будут настройки/),
+    ).toBeInTheDocument();
+    // Ушли именно на мост: под «Настройками» его пятивкладочная панель.
+    expect(tabLabels()).toEqual([
+      "День",
+      "Команда",
+      "Услуги",
+      "Чаты",
+      "Настройки",
+    ]);
+  });
+
+  it("выход есть на каждом из трёх разделов, а не только на «Сегодня»", async () => {
+    const max = stubMaxBackButton();
+    mockedGetMe.mockResolvedValue(OWNER_ME);
+    renderAppAt("/admin/ayla");
+    await screen.findByRole("heading", { name: "Ayla" });
+    expect(max.backButton.show).toHaveBeenCalled();
+
+    max.press();
+
+    expect(
+      await screen.findByText(/Скоро здесь будут настройки/),
+    ).toBeInTheDocument();
   });
 });
