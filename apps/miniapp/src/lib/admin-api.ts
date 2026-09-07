@@ -1525,3 +1525,54 @@ export const getStaffRoster = (
   init: { signal?: AbortSignal } = {},
 ): Promise<StaffRosterResponse> =>
   request("/api/v1/admin/staff/", { method: "GET", signal: init.signal });
+
+// --- /api/v1/admin/staff/revoke/ -----------------------------------------
+//
+// The other half of `issueStaffInvite`. The endpoint has existed since
+// DRF-1227 with no caller at all: access was grantable from the Mini App
+// and removable only from a psql session. DRF-1557 is the caller.
+//
+// Owner AND admin, unlike the roster above — `require_admin_role` admits
+// both and this view does not narrow. The caller must gate on the ROLE,
+// never on anything about the person being revoked; a screen that decides
+// by lifecycle offers buttons the server refuses.
+
+export interface StaffRevokePayload {
+  /**
+   * EXACTLY ONE of these two. The server rejects both-or-neither with
+   * 400 `bad_request`, so this is a union in the wire contract even
+   * though TypeScript cannot express it on an object literal here.
+   *
+   * `bot_user_id` names the person; `master_id` names a catalog row and
+   * the server resolves it to whoever is linked to it. Naming the person
+   * is the direct form — the master path exists for surfaces that hold a
+   * catalog id and nothing else, which the roster is not: it returns
+   * both, and `bot_user_id` is null exactly when there is no account and
+   * therefore nothing to take away.
+   */
+  bot_user_id?: string;
+  master_id?: string;
+  /** Free-form note, recorded in the audit row. Server caps at 200. */
+  reason?: string;
+}
+
+export interface StaffRevokeResponse {
+  /**
+   * False when the person already held nothing. Revoking twice answers
+   * 200, not an error — somebody unsure the first attempt landed will
+   * try again, and a failure would tell them it did not.
+   */
+  changed: boolean;
+  /** Role slugs actually taken away — empty when `changed` is false. */
+  roles_revoked: string[];
+  /** True when `CatalogMaster.linked_bot_user` was cleared. */
+  master_unlinked: boolean;
+}
+
+export const revokeStaffAccess = (
+  payload: StaffRevokePayload,
+): Promise<StaffRevokeResponse> =>
+  request("/api/v1/admin/staff/revoke/", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
