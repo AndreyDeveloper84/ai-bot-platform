@@ -88,9 +88,12 @@ class TestMaxAddress:
 class TestManagerAddress:
     """Адрес салона: заполненный ``manager_user_id`` вытесняет ``manager_chat_id``."""
 
-    @staticmethod
-    def _tenant(**kwargs) -> Tenant:
-        return Tenant.objects.create(slug="drf1559", name="Салон DRF-1559", **kwargs)
+    _seq = 0
+
+    @classmethod
+    def _tenant(cls, **kwargs) -> Tenant:
+        cls._seq += 1
+        return Tenant.objects.create(slug=f"drf1559-{cls._seq}", name="Салон DRF-1559", **kwargs)
 
     def test_user_id_wins_when_both_are_set(self):
         tenant = self._tenant(
@@ -109,10 +112,33 @@ class TestManagerAddress:
         assert manager_address(tenant).send_kwargs() == {"chat_id": MEASURED_CHAT_ID}
 
     def test_neither_configured_is_no_address(self):
+        """Отрицание — вторым, после доказательства, что резолвер отвечает.
+
+        DRF-1411: «адреса нет» проходит одинаково и когда салон не настроен,
+        и когда резолвер сломан и не возвращает ничего никогда. Сначала
+        положительная стража на настроенном салоне — она падает по имени,
+        если сломано именно это, — и только потом отрицание.
+        """
+        assert manager_address(self._tenant(manager_user_id=MEASURED_USER_ID)).value == (
+            MEASURED_USER_ID
+        )
+
         assert not manager_address(self._tenant())
 
     def test_object_without_the_fields_reads_as_not_configured(self):
-        """Лёгкий двойник тенанта не должен ронять отправителя."""
+        """Лёгкий двойник тенанта не должен ронять отправителя.
+
+        Парная стража та же: двойник С полями читается как настроенный,
+        и только двойник БЕЗ полей — как ненастроенный. Без первой половины
+        тест прошёл бы и на резолвере, который всегда отвечает «пусто».
+        """
+
+        class _Double:
+            manager_user_id = MEASURED_USER_ID
+            manager_chat_id = ""
+
+        assert manager_address(_Double()).send_kwargs() == {"user_id": MEASURED_USER_ID}
+
         assert not manager_address(object())
 
 
@@ -136,6 +162,11 @@ class TestOperatorAddresses:
         assert [a.send_kwargs() for a in operator_addresses()] == [{"chat_id": MEASURED_CHAT_ID}]
 
     def test_nothing_configured_means_the_mechanism_is_off(self, settings):
+        """Та же пара: сначала «механизм вообще отвечает», потом «выключен»."""
+        settings.HANDOFF_NOTIFY_MAX_USER_IDS = [MEASURED_USER_ID]
+        assert len(get_notify_addresses()) == 1
+
+        settings.HANDOFF_NOTIFY_MAX_USER_IDS = []
         assert operator_addresses() == ()
         assert get_notify_addresses() == ()
 
