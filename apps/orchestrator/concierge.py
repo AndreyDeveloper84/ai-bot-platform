@@ -1679,7 +1679,16 @@ def _concierge_turn(
             latency_total_ms=int((time.monotonic() - started) * 1000),
             skill_selected="concierge_refusal_repeat",
         )
-        return DiscoveryReply(text=rendered.text, persisted=True)
+        # DRF-1576 — the keyboard travels with the words, like it does on the
+        # seven other returns in this module. Dropping ``action_data`` here
+        # sent the repeat refusal out as bare text: the alternatives it names
+        # («Классический массаж») were rendered as chips and then discarded,
+        # so the one turn that most needs a way out arrived with none.
+        return DiscoveryReply(
+            text=rendered.text,
+            action_data=rendered.action_data,
+            persisted=True,
+        )
 
     llm_client = RouterLLMClient(skill=CONCIERGE_SKILL)
 
