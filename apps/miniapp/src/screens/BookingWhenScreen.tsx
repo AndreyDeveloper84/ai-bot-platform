@@ -59,7 +59,7 @@ export function BookingWhenScreen() {
 
   useEffect(() => {
     if (!draft.serviceId || !draft.masterId) {
-      navigate("/catalog", { replace: true });
+      navigate("/customer/catalog", { replace: true });
       return;
     }
     return load();

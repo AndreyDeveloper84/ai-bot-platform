@@ -35,6 +35,8 @@ function renderScreen() {
           element={<div>CONFIRM-PROBE</div>}
         />
         <Route path="/book/confirm" element={<div>LEGACY-CONFIRM</div>} />
+        <Route path="/customer/catalog" element={<div>CATALOG-LIVE</div>} />
+        <Route path="/catalog" element={<div>CATALOG-LEGACY</div>} />
       </Routes>
     </MemoryRouter>,
   );
@@ -47,6 +49,21 @@ beforeEach(() => {
   setMaster("mst-1", "Анна Соколова");
   mockedSlots.mockResolvedValue({
     slots: [{ date: "2026-08-01", start: "2026-08-01T16:00:00+03:00" }],
+  });
+});
+
+describe("BookingWhenScreen — запасной выход (DRF-1485 §3)", () => {
+  it("потерянный черновик уводит в /customer/catalog, не в /catalog", async () => {
+    // §31 оставил этот экран жить навсегда, значит и его аварийный
+    // выход обязан вести в живое поколение. До правки он вёл в
+    // `/catalog` — экран прежнего, оставленный лишь алиасом.
+    resetBooking();
+    renderScreen();
+
+    expect(await screen.findByText("CATALOG-LIVE")).toBeInTheDocument();
+    expect(screen.queryByText("CATALOG-LEGACY")).not.toBeInTheDocument();
+    // Редирект случился до загрузки слотов — экрана не было вовсе.
+    expect(mockedSlots).not.toHaveBeenCalled();
   });
 });
 
