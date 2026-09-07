@@ -32,6 +32,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from decimal import Decimal
+from uuid import uuid4
 
 import pytest
 
@@ -59,6 +60,29 @@ def penza() -> Tenant:
 
 
 def _master(tenant: Tenant, ext: int, name: str, rating: Decimal | None) -> CatalogMaster:
+    """A master who is genuinely ON SALE, differing only in ``rating``.
+
+    ``ayla_user_id`` is set for the same reason ``is_active`` and the accepted
+    invite are: it is part of what «bookable» MEANS
+    (:data:`apps.catalog.master_state.AVAILABLE`), not decoration. DRF-1540
+    added ``ayla_user_id IS NOT NULL`` to that predicate — a row without the
+    canonical key is one whose booking notification cannot reach the human, so
+    the owner chose a visible refusal over a silent one — and DRF-1544 pointed
+    ``_bookable_qs`` at the shared predicate instead of its own hand-rolled
+    copy of ``is_active`` + accepted-invite.
+
+    This module was written against that hand-rolled copy, one merge before it
+    was replaced, so it built rows that the old spelling sold and the current
+    gate correctly refuses: every assertion below saw an empty result and had
+    nothing to say about rating at all. The rating question is only asked of
+    masters the marketplace would actually show, so the fixture has to build
+    one. What is asserted about ordering and rendering is unchanged.
+
+    ``sale_block`` on these rows is ``None``; that is the invariant the whole
+    file rests on, and ``test_master_surfaces_drf1544.py`` is where the gate
+    itself — including the unlinked row this helper deliberately never
+    builds — is under test.
+    """
     return CatalogMaster.all_tenants.create(
         tenant=tenant,
         external_id=ext,
@@ -68,6 +92,7 @@ def _master(tenant: Tenant, ext: int, name: str, rating: Decimal | None) -> Cata
         rating=rating,
         is_active=True,
         invite_status=CatalogMaster.InviteStatus.ACCEPTED,
+        ayla_user_id=uuid4(),
     )
 
 
