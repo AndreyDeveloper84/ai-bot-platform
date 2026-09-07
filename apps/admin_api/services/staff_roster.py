@@ -161,6 +161,13 @@ RoleSource = Literal["access_code", "master_invite", "direct"]
 #: folded into ``revoked``: «доступ отозван» sends the owner looking for
 #: whoever revoked it, and nobody did — the link to Ayla is ours to fix,
 #: not hers. Two refusals, two actions, two words.
+#:
+#: DRF-1521 added a fifth, ``profile_incomplete``, splitting the other
+#: half of ``revoked``: the owner switching a master off the storefront
+#: and a master who accepted the invite and stopped halfway write the
+#: same columns, and the second one is not a revoke either. Unreachable
+#: on live data until DRF-1521 пп. 4-6 land — see
+#: :func:`apps.catalog.master_state.sale_block`.
 RoleState = _RoleState
 
 
@@ -470,6 +477,14 @@ def _build(tenant: Any) -> tuple[list[Person], int, bool]:
     # потому что без него ростер назвал бы «активной» мастера, которую
     # витрина уже не продаёт: гейт один, и вопрос он задаёт по четырём
     # колонкам, а не по трём.
+    #
+    # ``accepted_at`` — DRF-1521, и по той же причине. Гейт спрашивает
+    # его, чтобы отличить «я сама сняла её с витрины» от «она приняла
+    # приглашение и не дозаполнила профиль»: у второй есть личность, у
+    # первой её может не быть вовсе. Забытый здесь столбец не дал бы
+    # тихого умолчания — ``sale_block`` читает строку строго и упал бы
+    # ``KeyError``, что и есть замысел: молчаливое умолчание читалось бы
+    # как «условие не применилось».
     master_rows = CatalogMaster.objects.filter(tenant=tenant).values(
         "id",
         "name",
@@ -479,6 +494,7 @@ def _build(tenant: Any) -> tuple[list[Person], int, bool]:
         "invited_at",
         "invite_status",
         "ayla_user_id",
+        "accepted_at",
         "linked_bot_user__display_name",
         "linked_bot_user__client_name",
     )

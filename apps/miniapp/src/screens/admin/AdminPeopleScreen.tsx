@@ -116,6 +116,13 @@ const STATE_SUFFIX: Record<RoleState, string> = {
   // sends her to us, because the missing link is ours to fix. One text
   // for two causes would send her to spend an evening on the wrong one.
   ayla_unlinked: " — не удалось связать профиль мастера с Ayla",
+  // DRF-1521. ПРЕДЛОЖЕННЫЙ текст — решение владельца по формулировке
+  // ещё не получено, и это единственная строка здесь, стоящая без него.
+  // Требование к любой замене: не читаться ни как `revoked` («доступ
+  // отозван» — здесь никто ничего не отзывал), ни как `ayla_unlinked`
+  // («не удалось» — это наша вина, а эта причина не наша), и называть
+  // следующий шаг владелицы, а он один — написать мастеру.
+  profile_incomplete: " — профиль не заполнен",
 };
 
 const STATE_CHIP_CLASS: Record<RoleState, string> = {
@@ -126,6 +133,11 @@ const STATE_CHIP_CLASS: Record<RoleState, string> = {
   // pending invite is a nudge, while this one is a fault that keeps a
   // working master off the storefront until somebody acts.
   ayla_unlinked: "admin-chip admin-chip--fault",
+  // `--warn`, как у `pending`, и это не лень: обе причины — про
+  // человека, который ещё не дошёл, и обе чинятся одним и тем же
+  // движением владелицы. `--fault` здесь был бы неправдой: сломанного
+  // ничего нет.
+  profile_incomplete: "admin-chip admin-chip--warn",
 };
 
 /**
@@ -155,6 +167,11 @@ const STATE_REVOCABLE: Record<RoleState, boolean> = {
   // tells the owner this one is ours to fix; it does not follow that she
   // may not remove a master who is leaving anyway.
   ayla_unlinked: true,
+  // DRF-1521 — по тому же доводу, что и строкой выше: причина не в
+  // доступе. Она приняла приглашение, она связана, она входит в кабинет
+  // (и входит ИМЕННО затем, чтобы дозаполнить профиль). Доступ реален,
+  // значит его есть что отозвать, если владелица решит.
+  profile_incomplete: true,
 };
 
 const MONTHS_GEN = [

@@ -44,7 +44,7 @@ from django.core.signing import BadSignature, SignatureExpired, TimestampSigner
 from django.http import HttpRequest, HttpResponse, JsonResponse
 from django.utils import timezone
 
-from apps.catalog.master_state import is_landed
+from apps.catalog.master_state import is_enrolled
 from apps.catalog.models import CatalogMaster
 from apps.identity.models import BotUser
 from apps.identity.services.bot_user_resolver import resolve_bot_user
@@ -376,10 +376,20 @@ def require_master_init_data(
         # для одного и «неактивной» для другого. Теперь оба спрашивают
         # ``is_landed``.
         #
+        # DRF-1521 — те же одни ворота, но предикат третий:
+        # ``is_enrolled``. Он отличается от ``is_landed`` ровно тем, что
+        # не спрашивает ``is_active``, и в этом вся задача: мастер,
+        # снятая с витрины, — это человек, которому НУЖНО войти и
+        # починить то, из-за чего её сняли. Закрытая здесь дверь
+        # оставляла её без способа что-либо изменить — это и был
+        # DRF-1080, только приходивший теперь с другой стороны.
+        # По-настоящему закрывает дверь архив: он означает «ушла».
+        # Витрину этот предикат НЕ трогает — там ``is_available``.
+        #
         # Код ответа остаётся ``master_inactive``: это единственные
         # ворота в мастер-приложение, и дробить их на коды значило бы
         # рассказывать вызывающему, какой именно столбец не сошёлся.
-        if not is_landed(master):
+        if not is_enrolled(master):
             return _error(
                 "master_inactive",
                 "master account is inactive, archived or has not completed onboarding",

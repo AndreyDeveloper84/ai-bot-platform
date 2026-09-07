@@ -385,6 +385,26 @@ describe("error matrix + idempotency (Wave 0 booking GO)", () => {
     expect(screen.queryByText(/ayla_user_id/)).not.toBeInTheDocument();
   });
 
+  it("DRF-1521 — an unfinished master profile reads as not-bookable, not as a raw detail", async () => {
+    const user = userEvent.setup();
+    mockedCreate.mockRejectedValue(
+      new ApiError(
+        404,
+        "master_profile_incomplete",
+        "master accepted the invite but her profile is not ready for sale",
+      ),
+    );
+    renderScreen();
+    await user.click(screen.getByRole("button", { name: "Записаться" }));
+    expect(
+      await screen.findByText(/Эта услуга или специалист сейчас недоступны/),
+    ).toBeInTheDocument();
+    // Без записи слага в NOT_BOOKABLE_SLUGS ветка `other` нарисовала бы
+    // `detail` бэкенда как есть — служебную английскую фразу. Клиенту
+    // причина не показывается вовсе: она для владелицы салона.
+    expect(screen.queryByText(/profile is not ready/)).not.toBeInTheDocument();
+  });
+
   it("double-tap on «Записаться» creates the booking exactly once", async () => {
     const user = userEvent.setup();
     let resolveCreate: ((v: typeof CREATED) => void) | undefined;

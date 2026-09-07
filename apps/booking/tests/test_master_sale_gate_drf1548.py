@@ -27,7 +27,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date, datetime, time, timedelta, timezone
+from datetime import UTC, date, datetime, time, timedelta, timezone
 from uuid import UUID, uuid4
 from zoneinfo import ZoneInfo
 
@@ -61,6 +61,9 @@ MSK = ZoneInfo("Europe/Moscow")
 #: тест на контракт и тесты поведения не могли разъехаться по опечатке.
 AYLA_UNLINKED_SLUG = "master_ayla_unlinked"
 
+#: То же для отказа DRF-1521 — «профиль не готов к продаже».
+PROFILE_INCOMPLETE_SLUG = "master_profile_incomplete"
+
 
 @dataclass
 class _Row:
@@ -75,6 +78,12 @@ class _Row:
     is_active: bool = True
     archived_at: datetime | None = None
     invite_status: str = "accepted"
+    # DRF-1521 — гейт спрашивает их на ветке снятой активности. Умолчания
+    # описывают живую строку: имя заполнено, личности нет (форма
+    # синхронизированного мастера, которых на контуре девять из девяти).
+    name: str = "Анна Петрова"
+    linked_bot_user_id: UUID | None = None
+    accepted_at: datetime | None = None
 
 
 @pytest.fixture
@@ -307,11 +316,17 @@ class TestTheSlugIsInBothStatusTables:
     """
 
     def test_every_sale_block_has_a_slug(self) -> None:
-        """Полнота таблицы перевода. DRF-1521 добавит свою причину."""
+        """Полнота таблицы перевода. DRF-1521 добавила свою причину."""
 
         assert set(SALE_BLOCK_SLUG) == set(ALL_SALE_BLOCKS)
         assert len(set(SALE_BLOCK_SLUG.values())) == len(SALE_BLOCK_SLUG)
         assert SALE_BLOCK_SLUG["ayla_unlinked"] == AYLA_UNLINKED_SLUG
+        # DRF-1521 — слаг обязан ОТЛИЧАТЬСЯ от соседа, хотя клиенту оба
+        # означают «к этому мастеру не записаться». Он едет и в аудит, и
+        # на экран владелицы, а там это два разных следующих шага:
+        # «профиль не заполнен» — к мастеру, «не удалось связать» — к нам.
+        assert SALE_BLOCK_SLUG["profile_incomplete"] == PROFILE_INCOMPLETE_SLUG
+        assert PROFILE_INCOMPLETE_SLUG != AYLA_UNLINKED_SLUG
 
     def test_every_sale_block_slug_is_mapped_on_create(self) -> None:
         from apps.miniapp_api.views import _ERROR_SLUG_TO_STATUS
@@ -319,6 +334,8 @@ class TestTheSlugIsInBothStatusTables:
         for slug in SALE_BLOCK_SLUG.values():
             assert slug in _ERROR_SLUG_TO_STATUS, slug
         assert _ERROR_SLUG_TO_STATUS[AYLA_UNLINKED_SLUG] == 404
+        # Создание: 404 — «такого предложения нет».
+        assert _ERROR_SLUG_TO_STATUS[PROFILE_INCOMPLETE_SLUG] == 404
 
     def test_every_sale_block_slug_is_mapped_on_transition(self) -> None:
         from apps.miniapp_api.views import _TRANSITION_SLUG_TO_STATUS
@@ -326,6 +343,42 @@ class TestTheSlugIsInBothStatusTables:
         for slug in SALE_BLOCK_SLUG.values():
             assert slug in _TRANSITION_SLUG_TO_STATUS, slug
         assert _TRANSITION_SLUG_TO_STATUS[AYLA_UNLINKED_SLUG] == 409
+        # Переход: 409 — бронь существует, вопрос про допустимость.
+        assert _TRANSITION_SLUG_TO_STATUS[PROFILE_INCOMPLETE_SLUG] == 409
+
+    def test_the_refusal_of_an_unfinished_profile_is_its_own(self) -> None:
+        """Причина и слаг у нового отказа — не общие с соседями.
+
+        Присутствие и отсутствие на одном корне и на одних данных: две
+        строки отличаются ровно теми столбцами, что различают причины.
+        """
+
+        landed_at = datetime(2026, 9, 7, tzinfo=UTC)
+        unfinished = _Row(
+            ayla_user_id=uuid4(),
+            is_active=False,
+            name="",
+            linked_bot_user_id=uuid4(),
+            accepted_at=landed_at,
+        )
+        deactivated = _Row(
+            ayla_user_id=uuid4(),
+            is_active=False,
+            name="Анна Петрова",
+            linked_bot_user_id=uuid4(),
+            accepted_at=landed_at,
+        )
+
+        refusals = {
+            "unfinished": master_sale_refusal(unfinished),
+            "deactivated": master_sale_refusal(deactivated),
+        }
+        assert refusals["unfinished"] is not None
+        assert refusals["deactivated"] is not None
+        slugs = {key: value[0] for key, value in refusals.items() if value is not None}
+        assert slugs["unfinished"] == PROFILE_INCOMPLETE_SLUG
+        assert slugs["deactivated"] == "master_archived"
+        assert PROFILE_INCOMPLETE_SLUG not in {slugs["deactivated"]}
 
     def test_the_helper_answers_with_a_reason_not_a_boolean(self) -> None:
         """``master_sale_refusal``: пара «слаг + detail», либо ``None``.

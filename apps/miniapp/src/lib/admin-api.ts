@@ -1475,13 +1475,25 @@ export type RoleSource = "access_code" | "master_invite" | "direct";
  * because nobody revoked anything and there is nothing for the owner to
  * un-revoke.
  *
+ * `profile_incomplete` (DRF-1521) is the salon's half of what used to be
+ * `revoked`: a master who accepted the invite and stopped halfway. Nobody
+ * revoked anything here either — the owner's next move is to nudge the
+ * master, not to look for who took the access away. It is unreachable on
+ * live data until DRF-1521 пп. 4-6 land; the word exists first so the
+ * screen is not the last place to learn about it.
+ *
  * The backend grows this union in `apps/catalog/master_state.py`
  * (`SaleBlock`). A new member must be added to `STATE_SUFFIX` and
  * `STATE_CHIP_CLASS` in `AdminPeopleScreen.tsx` — both are exhaustive
  * `Record<RoleState, …>`, so the type checker refuses a half-done
  * addition rather than rendering an empty chip.
  */
-export type RoleState = "active" | "pending" | "revoked" | "ayla_unlinked";
+export type RoleState =
+  | "active"
+  | "pending"
+  | "revoked"
+  | "ayla_unlinked"
+  | "profile_incomplete";
 
 export interface StaffRoleGrant {
   role: "owner" | "admin" | "receptionist" | "master";
