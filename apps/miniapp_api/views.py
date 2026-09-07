@@ -834,6 +834,12 @@ def _parse_iso_datetime(s: str | None) -> datetime | None:
         return None
 
 
+# Слаг отказа -> HTTP-статус создания брони.
+#
+# ``.get(slug, 400)`` ниже НЕ падает на неизвестном слаге и не логирует
+# его: новый отказ, забытый здесь, тихо уехал бы клиенту с правдоподобным
+# и, возможно, неверным статусом. Полноту таблицы по слагам гейта продажи
+# держит ``test_every_sale_block_slug_is_mapped_on_create`` (DRF-1548).
 _ERROR_SLUG_TO_STATUS = {
     "service_not_found": 404,
     "master_not_bookable": 404,
@@ -842,6 +848,14 @@ _ERROR_SLUG_TO_STATUS = {
     "visit_in_past": 400,
     "slot_unavailable": 409,
     "master_archived": 409,
+    # DRF-1548 — 404, как у ``master_not_bookable``: с точки зрения
+    # клиента исход тождествен («этот мастер недоступен для записи»), а
+    # различать «профиль неполон» и «мы не сможем гарантировать
+    # уведомление» значит рассказывать ему о нашем устройстве, ничего не
+    # меняя в том, что он может сделать. Причина живёт в слаге и в
+    # аудите; владелица салона видит её отдельно (§32 п.2). 503 сюда не
+    # годится: он обещает «повторите позже», а ретрай связи не создаст.
+    "master_ayla_unlinked": 404,
     "tenant_mismatch": 403,
 }
 
@@ -1596,6 +1610,10 @@ def booking_detail(request: HttpRequest, booking_id: str) -> HttpResponse:
     return JsonResponse({"booking": _booking_to_dict(booking)})
 
 
+# Слаг отказа перехода -> HTTP-статус. Умолчание ниже (409) так же
+# молчаливо, как и на создании: см. комментарий у
+# ``_ERROR_SLUG_TO_STATUS``. Полноту держит
+# ``test_every_sale_block_slug_is_mapped_on_transition`` (DRF-1548).
 _TRANSITION_SLUG_TO_STATUS = {
     "invalid_state": 409,
     "forbidden": 403,
@@ -1603,6 +1621,12 @@ _TRANSITION_SLUG_TO_STATUS = {
     "master_not_found": 404,
     "master_archived": 409,
     "master_not_bookable": 409,
+    # DRF-1548 — 409, а не 404: бронь здесь СУЩЕСТВУЕТ, и вопрос не «есть
+    # ли такой мастер», а «допустим ли переход в это состояние». Конфликт
+    # с текущим состоянием — ровно 409. Разница create/transition («такого
+    # нет» против «в это нельзя») сохраняется и для нового слага: она про
+    # вопрос, а не про слаг.
+    "master_ayla_unlinked": 409,
     "service_not_found": 404,
     "service_unbookable": 409,
     "service_not_offered": 404,
