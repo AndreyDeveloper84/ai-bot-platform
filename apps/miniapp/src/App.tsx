@@ -44,6 +44,7 @@ import { Link, Navigate, Route, Routes, useLocation, useNavigate } from "react-r
 import { ApiError } from "./lib/api";
 import { getMe, type MeResponse } from "./lib/admin-api";
 import { adminLandingPath, isAdminTabAllowed } from "./lib/admin-tabs";
+import { canOpenSalonPilot } from "./lib/salon-pilot";
 import { getStartPayload, parseStartRoute } from "./lib/max-sdk";
 import {
   SurfaceModeContext,
@@ -72,6 +73,9 @@ import { AdminSectionDeniedScreen } from "./screens/admin/AdminSectionDeniedScre
 import { AdminServicesMatrixScreen } from "./screens/admin/AdminServicesMatrixScreen";
 import { AdminSettingsPlaceholderScreen } from "./screens/admin/AdminSettingsPlaceholderScreen";
 import { AdminTeamScreen } from "./screens/admin/AdminTeamScreen";
+import { SalonPilotAylaScreen } from "./screens/admin/SalonPilotAylaScreen";
+import { SalonPilotScheduleScreen } from "./screens/admin/SalonPilotScheduleScreen";
+import { SalonPilotTodayScreen } from "./screens/admin/SalonPilotTodayScreen";
 import { BookingWhenScreen } from "./screens/BookingWhenScreen";
 import { CatalogScreen } from "./screens/CatalogScreen";
 import { CustomerBookingConfirmScreen } from "./screens/CustomerBookingConfirmScreen";
@@ -188,6 +192,69 @@ function NoRoleScreen({ onRetry }: { onRetry: () => void }) {
 function adminRouteElements(me: MeResponse): React.ReactNode {
   return (
     <>
+      {/*
+        Пилотная салонная админка — «Сегодня · Расписание · Ayla»
+        (DRF-1235, решение владельца 07.09.2026).
+
+        Три адреса стоят РЯДОМ с пятивкладочным мостом, а не вместо
+        него: мост — двадцать живых экранов, на которых салон работает
+        сегодня, и выключать его владелец не просил. Обе поверхности
+        живут параллельно, у каждой своя нижняя панель и своё правило
+        доступа.
+
+        Страж — не украшение, и он НЕ повторяет собой гейт ручки.
+        `GET /api/v1/admin/day/`, за которым ходит «Сегодня», с DRF-1552
+        пускает и ресепшн (`require_admin_or_reception_read`), так что
+        403 сам собой её отсюда не выставит. Закрывает её решение о
+        поверхности: пилотную админку владелец открыл владельцу и
+        администратору, а вопрос, какие салонные сценарии отдать
+        ресепшн, отдельный и незакрытый (`docs/OPEN_DECISIONS.md` §35).
+        До ответа она не должна попадать сюда даже по прямой ссылке из
+        закладок или старого сообщения бота.
+
+        Проверка спрашивает наличие управляющей роли
+        (`canOpenSalonPilot`), а не отсутствие приёмной: владелец,
+        которому заодно проставили ресепшн, остаётся владельцем.
+
+        Отказ рисует общий `AdminSectionDeniedScreen` — тот же, что на
+        «Чатах», «Настройках» и «Услугах». Своего экрана у пилота для
+        этого нет намеренно: два отказа с разными словами про одно и то
+        же разъезжаются на первой же правке текста.
+
+        Посадка приложения не тронута: `adminLandingPath` по-прежнему
+        ведёт на мост. Какая из двух поверхностей встречает человека при
+        входе — решение владельца, и принимать его здесь нечем.
+      */}
+      <Route
+        path="/admin/today"
+        element={
+          canOpenSalonPilot(me) ? (
+            <SalonPilotTodayScreen me={me} />
+          ) : (
+            <AdminSectionDeniedScreen me={me} section="Сегодня" />
+          )
+        }
+      />
+      <Route
+        path="/admin/schedule"
+        element={
+          canOpenSalonPilot(me) ? (
+            <SalonPilotScheduleScreen me={me} />
+          ) : (
+            <AdminSectionDeniedScreen me={me} section="Расписание" />
+          )
+        }
+      />
+      <Route
+        path="/admin/ayla"
+        element={
+          canOpenSalonPilot(me) ? (
+            <SalonPilotAylaScreen me={me} />
+          ) : (
+            <AdminSectionDeniedScreen me={me} section="Ayla" />
+          )
+        }
+      />
       {/* Phase 2 — the salon's day. First tab in AdminTabBar. */}
       <Route path="/admin/day" element={<AdminSalonDayScreen me={me} />} />
       <Route path="/admin/booking/new" element={<AdminNewBookingScreen />} />

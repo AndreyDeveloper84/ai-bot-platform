@@ -1272,6 +1272,49 @@ a {
   border: 1.5px solid var(--c-surface-1);
 }
 
+/* ---- Пилотная салонная админка: три вкладки (DRF-1235) ---- */
+
+/*
+ * Панель пилота переиспользует `.master-tabbar` целиком — позицию,
+ * фон, границу, отступы — и переопределяет только число колонок.
+ * Правило стоит ПОСЛЕ `.master-tabbar` и `.master-tabbar--admin`
+ * намеренно: селекторы односоставные, специфичность у них одинаковая,
+ * и решает порядок в файле.
+ *
+ * Настоящее число колонок ставит сам компонент (`style=
+ * {{ gridTemplateColumns }}`); тройка здесь — запасной вариант и то,
+ * что читает `tools/lint/miniapp_style_contract.py`, сверяя колонки с
+ * числом вкладок в `SalonPilotTabBar.tsx`.
+ */
+.salon-pilot-tabbar {
+  grid-template-columns: repeat(3, 1fr);
+}
+
+/*
+ * Название салона над заголовком раздела — подпись, а не кнопка:
+ * выбор салона из макета убран, пока multi-salon не входит в P0
+ * (DRF-1235).
+ */
+.salon-pilot__brand {
+  margin: 0;
+  font-size: var(--font-size-200);
+  font-weight: 600;
+  color: var(--c-text-primary);
+}
+
+/* Дата под заголовком «Сегодня» — приходит с сервера, в поясе салона. */
+.salon-pilot__subtitle {
+  margin: calc(var(--s-3) * -1) 0 var(--s-3);
+  font-size: var(--font-size-300);
+  color: var(--c-text-secondary);
+}
+
+/* Строка ожидания: экран уже пошёл за данными, ответа ещё нет. */
+.salon-pilot__note {
+  margin: 0;
+  color: var(--c-text-secondary);
+}
+
 /* ---- Solo provider 8-tab bottom nav (Tau §5.1) ---- */
 
 /*
