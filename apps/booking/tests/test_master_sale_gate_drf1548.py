@@ -26,8 +26,9 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta, timezone
-from uuid import uuid4
+from uuid import UUID, uuid4
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -61,12 +62,19 @@ MSK = ZoneInfo("Europe/Moscow")
 AYLA_UNLINKED_SLUG = "master_ayla_unlinked"
 
 
+@dataclass
 class _Row:
-    """Минимальная строка каталога — предикат читает атрибуты."""
+    """Минимальная строка каталога: ровно те столбцы, которые читает гейт.
 
-    def __init__(self, values: dict) -> None:
-        for key, value in values.items():
-            setattr(self, key, value)
+    Именованные поля, а не словарь через ``setattr``: гейт спрашивает
+    строку по атрибутам, и опечатка в имени столбца должна ловиться
+    типами, а не молча превращаться в другой ответ предиката.
+    """
+
+    ayla_user_id: UUID | None = None
+    is_active: bool = True
+    archived_at: datetime | None = None
+    invite_status: str = "accepted"
 
 
 @pytest.fixture
@@ -326,16 +334,11 @@ class TestTheSlugIsInBothStatusTables:
         данных — строка отличается ровно одним столбцом.
         """
 
-        linked = {
-            "is_active": True,
-            "archived_at": None,
-            "invite_status": "accepted",
-            "ayla_user_id": uuid4(),
-        }
-        unlinked = {**linked, "ayla_user_id": None}
+        linked = _Row(ayla_user_id=uuid4())
+        unlinked = _Row(ayla_user_id=None)
 
-        refusal_unlinked = master_sale_refusal(_Row(unlinked))
-        refusal_linked = master_sale_refusal(_Row(linked))
+        refusal_unlinked = master_sale_refusal(unlinked)
+        refusal_linked = master_sale_refusal(linked)
 
         assert refusal_unlinked is not None
         slug, detail = refusal_unlinked
@@ -362,17 +365,7 @@ class TestTheMeasurementOnPilotShapedData:
     PILOT_BOOKABLE_MASTERS = 31
 
     def _pilot_rows(self) -> list[_Row]:
-        return [
-            _Row(
-                {
-                    "is_active": True,
-                    "archived_at": None,
-                    "invite_status": "accepted",
-                    "ayla_user_id": uuid4(),
-                }
-            )
-            for _ in range(self.PILOT_BOOKABLE_MASTERS)
-        ]
+        return [_Row(ayla_user_id=uuid4()) for _ in range(self.PILOT_BOOKABLE_MASTERS)]
 
     def test_the_gate_refuses_nobody_on_the_pilot_shape(self) -> None:
         rows = self._pilot_rows()
