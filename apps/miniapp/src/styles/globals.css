@@ -1315,6 +1315,201 @@ a {
   color: var(--c-text-secondary);
 }
 
+/* ---- «Сегодня»: содержимое главного экрана (DRF-1236) ---- */
+
+/*
+ * Главное действие экрана. Своего `.btn-primary` в приложении нет —
+ * заливка акцентом живёт только в `.cta-bar__button`, а он приколочен к
+ * низу экрана, где уже стоит панель вкладок. Кнопка на макете стоит в
+ * потоке, сразу под датой, поэтому правило своё, а токены — те же.
+ */
+.salon-today__cta {
+  display: block;
+  width: 100%;
+  min-height: 48px; /* a11y — handoff §16 */
+  margin: 0 0 var(--s-4);
+  padding: 0 var(--s-4);
+  background: var(--c-accent);
+  color: var(--c-text-on-accent);
+  font-size: var(--font-size-300);
+  font-weight: 600;
+  border-radius: var(--r-md);
+  transition: background-color var(--dur-fast) var(--ease-out);
+}
+
+.salon-today__cta:active {
+  background: var(--c-accent-pressed);
+}
+
+.salon-today__section {
+  margin: 0 0 var(--s-5);
+}
+
+.salon-today__heading {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+  margin: 0 0 var(--s-2);
+  font-size: var(--font-size-300);
+  font-weight: 700;
+  color: var(--c-text-primary);
+}
+
+/* Счётчик у «Сейчас» — сколько записей идёт в этот момент. */
+.salon-today__count {
+  min-width: 24px;
+  padding: 0 var(--s-2);
+  border-radius: var(--r-md);
+  background: var(--c-accent-subtle);
+  color: var(--c-accent-pressed);
+  font-size: var(--font-size-100);
+  font-weight: 600;
+  text-align: center;
+}
+
+/* Подпись под заголовком блока — то, что известно про блок наверняка. */
+.salon-today__section-note {
+  margin: calc(var(--s-1) * -1) 0 var(--s-3);
+  font-size: var(--font-size-100);
+  color: var(--c-text-secondary);
+}
+
+.salon-today__list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  background: var(--c-surface-1);
+  border: 1px solid var(--c-divider);
+  border-radius: var(--r-md);
+  overflow: hidden;
+}
+
+.salon-today__visit {
+  display: flex;
+  gap: var(--s-3);
+  padding: var(--s-3);
+  border-bottom: 1px solid var(--c-divider);
+}
+
+.salon-today__list .salon-today__visit:last-child {
+  border-bottom: 0;
+}
+
+/*
+ * Зелёная полоса идущей записи. Цвет ВСПОМОГАТЕЛЬНЫЙ: смысл несёт
+ * заголовок блока «Сейчас», и человек, не различающий зелёное, ничего
+ * не теряет (DRF-1236: «цвет не является единственным носителем
+ * смысла»).
+ */
+.salon-today__visit--now {
+  border-left: 3px solid var(--c-success);
+}
+
+.salon-today__visit-time {
+  display: flex;
+  flex-direction: column;
+  min-width: 6.5em;
+  font-variant-numeric: tabular-nums;
+}
+
+.salon-today__visit-clock {
+  font-weight: 600;
+  color: var(--c-text-primary);
+}
+
+.salon-today__visit-duration {
+  font-size: var(--font-size-100);
+  color: var(--c-text-secondary);
+}
+
+.salon-today__visit-body {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: var(--s-1);
+}
+
+.salon-today__visit-client {
+  font-weight: 600;
+  color: var(--c-text-primary);
+}
+
+.salon-today__visit-service {
+  font-size: var(--font-size-100);
+  color: var(--c-text-secondary);
+}
+
+.salon-today__visit-master {
+  font-size: var(--font-size-100);
+  color: var(--c-text-secondary);
+}
+
+/* Запись, чей специалист не сошёлся ни с одним мастером каталога. */
+.salon-today__visit-orphan {
+  font-size: var(--font-size-100);
+  color: var(--c-warning);
+}
+
+/* Раскрыть остаток дня на месте — см. комментарий экрана про «Расписание». */
+.salon-today__more {
+  display: block;
+  width: 100%;
+  min-height: 44px; /* a11y — handoff §16 */
+  margin-top: var(--s-2);
+  color: var(--c-accent);
+  font-size: var(--font-size-200);
+  font-weight: 600;
+  text-align: center;
+}
+
+.salon-today__masters {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-3);
+}
+
+.salon-today__master {
+  display: flex;
+  align-items: center;
+  gap: var(--s-3);
+}
+
+/*
+ * Кружок с буквой имени. Фотографий мастеров в ответе дня нет — буква
+ * выведена из имени, которое есть, а не подставлена вместо неизвестного
+ * фото.
+ */
+.salon-today__avatar {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 40px;
+  flex: 0 0 40px;
+  border-radius: 50%;
+  background: var(--c-accent-subtle);
+  color: var(--c-accent-pressed);
+  font-weight: 700;
+}
+
+.salon-today__master-body {
+  display: flex;
+  flex-direction: column;
+}
+
+.salon-today__master-name {
+  font-weight: 600;
+  color: var(--c-text-primary);
+}
+
+.salon-today__master-count {
+  font-size: var(--font-size-100);
+  color: var(--c-text-secondary);
+}
+
 /* ---- Solo provider 8-tab bottom nav (Tau §5.1) ---- */
 
 /*

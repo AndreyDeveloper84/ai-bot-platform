@@ -101,11 +101,36 @@ function tabLabels(): string[] {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  // День с одной идущей записью. До DRF-1236 здесь стояло
+  // `total: 5` при пустом списке мастеров: экран показывал только
+  // число из `summary`, и расхождение ничему не мешало. Теперь экран
+  // рисует сами записи, и несуществующие пять записей были бы фикстурой,
+  // описывающей невозможный ответ сервера.
   mockedDay.mockResolvedValue({
     date: "2026-08-22",
     timezone: "Europe/Moscow",
-    summary: { total: 5, upcoming: 3, completed: 2, released: 0 },
-    masters: [],
+    summary: { total: 1, upcoming: 0, completed: 0, released: 0 },
+    masters: [
+      {
+        master_id: "m-1",
+        name: "Денис",
+        is_active: true,
+        visits: [
+          {
+            id: "v-1",
+            service_id: "svc-1",
+            start_at: "2026-08-22T06:00:00Z",
+            end_at: "2026-08-22T07:00:00Z",
+            duration_min: 60,
+            status: "confirmed",
+            service_name: "Классический массаж",
+            client_first_name: "Анна",
+            client_last_initial: "П.",
+            is_in_progress: true,
+          },
+        ],
+      },
+    ],
     orphan_visits: [],
   });
   mockedMasters.mockResolvedValue({
@@ -264,14 +289,16 @@ describe("права на пилот повторяют бэкенд (DRF-1235)"
 });
 
 describe("«Сегодня» показывает то, что вернул сервер (DRF-1235)", () => {
-  it("дата и число записей приходят из ответа ручки дня", async () => {
+  it("дата и записи дня приходят из ответа ручки", async () => {
     mockedGetMe.mockResolvedValue(OWNER_ME);
     renderAppAt("/admin/today");
     await waitFor(() => expect(mockedDay).toHaveBeenCalled());
     expect(await screen.findByText("Суббота, 22 августа")).toBeInTheDocument();
-    expect(
-      await screen.findByText(/Записей на сегодня: 5/),
-    ).toBeInTheDocument();
+    // Содержимое дня — DRF-1236; здесь проверяется только то, что ответ
+    // ручки доезжает до экрана внутри каркаса. Разбор блоков «Сейчас»,
+    // «Дальше» и «Мастера сегодня» живёт в
+    // `screens/admin/SalonPilotTodayScreen.test.tsx`.
+    expect(await screen.findByText("Анна П.")).toBeInTheDocument();
   });
 
   it("пустой день назван пустым, а не спрятан", async () => {
