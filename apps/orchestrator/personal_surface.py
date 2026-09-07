@@ -354,14 +354,62 @@ def render_diary(bot_user: Any, *, period: str = PERIOD_TODAY) -> DiscoveryReply
     Never raises. Ayla unreachable → :data:`DIARY_UNAVAILABLE_TEXT`; no
     consent → :data:`CONSENT_CLOSED_TEXT`; nothing logged → the honest
     «записей не было» line ``render_daily_report`` already owns.
+
+    The reply may carry one solicited observation line (DRF-1464 T6) —
+    see :func:`_with_coach_observation`. When no line is due the reply is
+    byte-identical to what it was before that surface existed.
     """
     if not personal_records_consent_open(bot_user):
         return _reply(CONSENT_CLOSED_TEXT, [])
 
     profile = _fetch_profile(bot_user)
     if period == PERIOD_WEEK:
-        return _render_week(bot_user, profile)
-    return _render_today(bot_user, profile)
+        reply = _render_week(bot_user, profile)
+    else:
+        reply = _render_today(bot_user, profile)
+    return _with_coach_observation(bot_user, reply, profile=profile)
+
+
+def _with_coach_observation(
+    bot_user: Any, reply: DiscoveryReply, *, profile: Any
+) -> DiscoveryReply:
+    """Append the solicited observation line when one is due (DRF-1464 T6).
+
+    The person opened their own diary, so one dietologist observation may
+    ride along — journaled with the solicited marker, outside the weekly
+    budget, with its own once-a-day / no-unchanged-repeat ceiling
+    (:mod:`apps.orchestrator.coach_observation`).
+
+    Two ways this returns ``reply`` untouched:
+
+    * no line due (flag, HEALTH, perimeter, goal, trigger, own limit,
+      guard) — the diary is byte-identical to its pre-T6 self;
+    * the composed text would overflow the reply budget — the line is
+      dropped rather than clipped mid-sentence, and NOT journaled: the
+      journal records what was shown, and nothing was.
+
+    And the third: any failure inside the observation path degrades to the
+    plain diary. A line nobody asked a question to receive is never worth
+    losing the answer they did ask for.
+    """
+    try:
+        from apps.orchestrator.coach_observation import (
+            decide_observation,
+            persist_observation,
+        )
+
+        observation = decide_observation(bot_user, profile=profile)
+        if observation is None:
+            return reply
+        combined = f"{reply.text}\n\n{observation.text}"
+        if len(combined) > _MAX_PERSONAL_REPLY_CHARS:
+            return reply
+        persist_observation(bot_user, observation)
+    except Exception:  # noqa: BLE001 — the diary must survive its garnish
+        logger.exception("orchestrator.personal_surface.observation_failed")
+        return reply
+    buttons = list((reply.action_data or {}).get("buttons") or [])
+    return _reply(combined, buttons)
 
 
 def _render_today(bot_user: Any, profile: Any) -> DiscoveryReply:
