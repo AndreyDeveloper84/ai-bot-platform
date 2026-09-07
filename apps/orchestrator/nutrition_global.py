@@ -230,14 +230,21 @@ def execute_nutrition_tool(
     bot_user: Any,
     conversation: Any,
     trace_id: str,
-    message_text: str = "",
+    message_text: str,
 ) -> SkillResult | None:
     """Run the skill behind a model-called nutrition tool.
 
     Returns ``None`` for an unknown tool name (the caller falls back to
     the safe generic line, same as an unknown tool today).
 
-    ``message_text`` — реплика ЧЕЛОВЕКА на этом ходу (DRF-1542). До
+    ``message_text`` — реплика ЧЕЛОВЕКА на этом ходу (DRF-1542).
+    **Обязателен намеренно, без умолчания.** Пустая строка — законное
+    значение (ход без текста, например одно фото), и по ней скрининг
+    честно воздерживается. Но умолчание сделало бы ровно это же
+    воздержание молчаливой ценой забытого аргумента: новый вызывающий
+    выключил бы скрининг симптомов, ничего не заметив, и гарантия
+    DRF-358 T04 отвалилась бы без единого падения. Забыть обязательный
+    аргумент нельзя — это ``TypeError`` на месте вызова. До
     этого тикета её здесь не было, и докстринг обещал ровно то, чего код
     не делал: «*The user's own phrase is passed through as
     ``message_text``*». Передавался пересказ МОДЕЛИ, а вето

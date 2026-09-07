@@ -139,7 +139,15 @@ class TestExecuteNutritionTool:
     def test_unknown_tool_returns_none(self):
         assert (
             execute_nutrition_tool(
-                "order_pizza", {}, bot_user=Mock(), conversation=Mock(), trace_id="t"
+                "order_pizza",
+                {},
+                bot_user=Mock(),
+                conversation=Mock(),
+                trace_id="t",
+                # Реплика человека этому инструменту не нужна — но
+                # аргумент обязателен (DRF-1542), и пустая строка здесь
+                # сказана вслух, а не подставлена умолчанием.
+                message_text="",
             )
             is None
         )
@@ -152,6 +160,7 @@ class TestExecuteNutritionTool:
                 bot_user=Mock(),
                 conversation=Mock(),
                 trace_id="t",
+                message_text="выпил",
             )
             is None
         )
@@ -165,6 +174,7 @@ class TestExecuteNutritionTool:
             bot_user=Mock(),
             conversation=Mock(),
             trace_id="t",
+            message_text="привет, как дела у тебя сегодня",
         )
         assert result is None
 
