@@ -65,6 +65,8 @@ def bot_user(tenant: Tenant) -> BotUser:
 
 @pytest.fixture
 def master(tenant: Tenant) -> CatalogMaster:
+    # DRF-1496: умолчание invite_status теперь PENDING — бронируемость
+    # декларируем явно, а не побочным эффектом умолчания.
     return CatalogMaster.all_tenants.create(
         tenant=tenant,
         external_id=1,
@@ -75,6 +77,7 @@ def master(tenant: Tenant) -> CatalogMaster:
         # заполнен. Без него мастер не бронируется, и клиентские ручки
         # ниже отвечали бы 404 не потому, что сломаны.
         ayla_user_id=uuid4(),
+        invite_status=CatalogMaster.InviteStatus.ACCEPTED,
     )
 
 

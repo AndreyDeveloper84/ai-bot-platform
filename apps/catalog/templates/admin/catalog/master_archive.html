@@ -1,0 +1,55 @@
+{% extends "admin/base_site.html" %}
+{# Промежуточная страница архива мастеров (DRF-1496).
+
+   Причина обязательна: «архивировал молча» не допускается. Пустое поле
+   не архивирует с пустой строкой, а возвращает оператора сюда же с
+   ошибкой — архив без причины не случается вовсе. #}
+
+{% block breadcrumbs %}
+  <div class="breadcrumbs">
+    <a href="{% url 'admin:index' %}">Админка</a>
+    &rsaquo; <a href="{% url 'admin:catalog_catalogmaster_changelist' %}">Мастера</a>
+    &rsaquo; Архив
+  </div>
+{% endblock %}
+
+{% block content %}
+  <div id="content-main">
+    <h1>{{ title }}</h1>
+    <p style="max-width: 46em;">
+      Выбрано мастеров: {{ masters|length }}. Архив снимает мастера с
+      продажи (предикат <code>bookable()</code> требует
+      <code>archived_at IS NULL</code>), но не удаляет строку. Причина
+      сохранится в поле <code>archive_reason</code> и попадёт в журнал
+      действий вместе с вашим именем.
+    </p>
+
+    <form method="post">
+      {% csrf_token %}
+      <fieldset class="module aligned">
+        <div class="form-row">
+          <label for="id_archive_reason"><strong>Причина архивации (обязательно)</strong></label>
+          <textarea id="id_archive_reason" name="archive_reason" rows="3" cols="60"
+                    required style="display: block; margin-top: .5em;"></textarea>
+        </div>
+      </fieldset>
+
+      <ul style="margin: 1em 0;">
+        {% for master in masters %}
+          <li>{{ master }} — {{ master.tenant }}</li>
+        {% endfor %}
+      </ul>
+
+      {% for master in masters %}
+        <input type="hidden" name="{{ action_checkbox_name }}" value="{{ master.pk }}">
+      {% endfor %}
+      <input type="hidden" name="action" value="archive_masters">
+      <div class="submit-row">
+        <input type="submit" name="apply" value="Отправить в архив" class="default">
+        <a href="{% url 'admin:catalog_catalogmaster_changelist' %}" class="button cancel-link">
+          Отмена
+        </a>
+      </div>
+    </form>
+  </div>
+{% endblock %}

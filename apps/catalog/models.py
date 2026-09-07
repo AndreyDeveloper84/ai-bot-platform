@@ -298,10 +298,17 @@ class CatalogMaster(_MirrorBase):
     invite_status = models.CharField(
         max_length=16,
         choices=InviteStatus.choices,
-        default=InviteStatus.ACCEPTED,
+        default=InviteStatus.PENDING,
         db_index=True,
-        help_text="Default ACCEPTED so backfilled/sync masters are "
-        "bookable. Invite create-path writes PENDING.",
+        help_text=(
+            "Default PENDING (DRF-1496): a master born by sync was never "
+            "invited, so she is not bookable until an operator verifies "
+            "her by hand (journaled admin action). The pre-DRF-1496 "
+            "default was ACCEPTED; rows that existed on 04.09.2026 were "
+            "grandfathered as ACCEPTED by migration 0017 so the pilot's "
+            "booking pick-list did not silently collapse. Invite "
+            "create-path writes PENDING explicitly, as before."
+        ),
     )
     mode = models.CharField(
         max_length=16,

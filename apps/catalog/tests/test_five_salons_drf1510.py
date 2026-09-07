@@ -287,10 +287,19 @@ def _provision(salon: Salon, *, with_id: bool = True, with_city: bool = True) ->
 
 
 def _run_beat(feeds: dict[str, _Feed]) -> tuple[dict[str, int], FakeAyla]:
-    """Run the real beat fan-out against a stubbed Ayla."""
+    """Run the real beat fan-out against a stubbed Ayla.
+
+    Затем — ручная верификация свежих мастеров (DRF-1496): с этой
+    задачи синхронизация рождает мастеров ``pending``, и салон невидим,
+    пока оператор не верифицирует их вручную через админку. Репетиция
+    проверяет видимость салонов, поэтому её контур включает и этот шаг.
+    Класс про салон БЕЗ мастеров строит фид с ``masters=0`` — верифицировать
+    там нечего, и исключения ему не нужно.
+    """
     fake = FakeAyla(feeds)
     with patch("apps.catalog.services.sync.CatalogHttpClient", return_value=fake):
         counters = sync_catalog_for_all_tenants()
+    CatalogMaster.all_tenants.update(invite_status=CatalogMaster.InviteStatus.ACCEPTED)
     return counters, fake
 
 

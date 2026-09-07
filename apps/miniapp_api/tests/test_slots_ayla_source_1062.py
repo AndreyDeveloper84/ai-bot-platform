@@ -91,6 +91,9 @@ def master(tenant: Tenant) -> CatalogMaster:
         external_updated_at=datetime(2026, 8, 1, tzinfo=timezone.utc),
         name="Ольга",
         is_active=True,
+        # DRF-1496: умолчание invite_status теперь PENDING — бронируемость
+        # декларируем явно, а не побочным эффектом умолчания.
+        invite_status=CatalogMaster.InviteStatus.ACCEPTED,
         # The Ayla User id — deliberately different from the row id, which
         # is what the slots endpoint actually takes. Mixing these up gives
         # a silently empty picker.
