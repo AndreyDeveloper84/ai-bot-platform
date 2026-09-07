@@ -37,8 +37,8 @@ DRF-1548, решение владельца ``docs/OPEN_DECISIONS.md`` §32 пу
 * пропуск в :data:`SALE_BLOCK_SLUG` — это ``KeyError``, то есть громко,
   а не тихо;
 * полноту таблицы держит тест ``test_every_sale_block_has_a_slug``:
-  DRF-1521 добавит ``profile_incomplete`` в ``SaleBlock``, и забыть про
-  него здесь будет нельзя.
+  DRF-1521 добавила ``profile_incomplete`` в ``SaleBlock``, и забыть про
+  него здесь было нельзя.
 
 Статус (404 на создании, 409 на переходах) живёт не тут, а в таблицах
 вида: слаг отвечает «почему», статус — «что человек может сделать», и
@@ -56,13 +56,21 @@ from apps.catalog.master_state import SaleBlock, sale_block
 #: Причина «не продаётся» → стабильный слаг отказа брони.
 #:
 #: ``revoked`` и ``pending`` названы теми же слагами, которыми обе точки
-#: отвечали до DRF-1548, — контракт наружу не менялся. Новый здесь один:
-#: ``master_ayla_unlinked``. Три отказа остаются тремя.
+#: отвечали до DRF-1548, — контракт наружу не менялся. Новых здесь два:
+#: ``master_ayla_unlinked`` (DRF-1548) и ``master_profile_incomplete``
+#: (DRF-1521). Четыре причины — четыре слага, ни одного общего.
+#:
+#: ``master_profile_incomplete`` обязан отличаться от
+#: ``master_ayla_unlinked``, хотя клиенту оба означают «к этому мастеру
+#: не записаться»: слаг едет и в аудит, и на экран владелицы салона, а
+#: там это два разных следующих шага — «профиль не заполнен» отправляет
+#: её к мастеру, «не удалось связать с Ayla» отправляет к нам.
 SALE_BLOCK_SLUG: Final[Mapping[SaleBlock, str]] = MappingProxyType(
     {
         "revoked": "master_archived",
         "pending": "master_not_bookable",
         "ayla_unlinked": "master_ayla_unlinked",
+        "profile_incomplete": "master_profile_incomplete",
     }
 )
 
@@ -90,6 +98,8 @@ def master_sale_refusal(master: Any) -> tuple[str, str] | None:
         return slug, f"master invite_status={master.invite_status}"
     if block == "ayla_unlinked":
         return slug, "master has no canonical ayla_user_id; booking notification would not arrive"
+    if block == "profile_incomplete":
+        return slug, "master accepted the invite but her profile is not ready for sale"
     return slug, "master deactivated before booking confirmed"
 
 

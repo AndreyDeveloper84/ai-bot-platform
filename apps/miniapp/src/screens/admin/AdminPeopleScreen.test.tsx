@@ -250,6 +250,37 @@ describe("pending, revoked and ayla_unlinked never share wording", () => {
     ).not.toBeInTheDocument();
   });
 
+  it("says the profile is unfinished, and does not call it a revoke", async () => {
+    // DRF-1521. `is_active=false` on an accepted master answers two
+    // different questions and they need two different next moves: the
+    // owner took her off the storefront herself (nothing to fix), or the
+    // master accepted the invite and stopped halfway (write to her).
+    // `доступ отозван` on the second one sends the owner hunting for
+    // whoever revoked the access — the same lie DRF-1506 removed for
+    // `pending`, one status later.
+    //
+    // Unreachable on live data until DRF-1521 пп. 4-6 land; the wording
+    // exists first so this screen is not the last place to learn about it.
+    mockedRoster.mockResolvedValue(
+      rosterOf({
+        ...base,
+        roles: [grant("master", "profile_incomplete", "master_invite", daysAgo(3))],
+      }),
+    );
+    renderScreen();
+
+    await waitFor(() => {
+      expect(screen.getByText(/профиль не заполнен/)).toBeInTheDocument();
+    });
+    expect(screen.queryByText(/доступ отозван/)).not.toBeInTheDocument();
+    expect(
+      screen.queryByText(/приглашение не принято/),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByText(/не удалось связать профиль мастера с Ayla/),
+    ).not.toBeInTheDocument();
+  });
+
   it("keeps a revoked role visible rather than dropping it", async () => {
     // Disappearance proves nothing: the owner has to READ that the revoke
     // landed. A row that simply vanished would look identical to a person

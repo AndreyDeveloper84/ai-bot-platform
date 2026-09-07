@@ -200,15 +200,22 @@ class TestDashboardAuth:
         assert resp.status_code == 403
         assert resp.json()["error"] == "master_inactive"
 
-    def test_inactive_master_returns_403(
+    def test_inactive_master_still_reaches_the_dashboard(
         self,
         client: Client,
         bot_user: BotUser,
         tenant: Tenant,
     ) -> None:
+        """DRF-1521 — снятие с витрины больше не закрывает кабинет.
+
+        Обе половины на одних данных: та же строка, заархивированная,
+        по-прежнему получает 403. Одного «пустили» здесь мало — ворота,
+        которые пускают всех, дали бы ту же зелень.
+        """
+
         from apps.master_api.tests.conftest import make_master
 
-        make_master(
+        master = make_master(
             tenant,
             invite_status=CatalogMaster.InviteStatus.ACCEPTED,
             invite_token=None,
@@ -220,7 +227,15 @@ class TestDashboardAuth:
             reverse("master_api:dashboard"),
             HTTP_AUTHORIZATION=init_data_header("12345"),
         )
-        assert resp.status_code == 403
+        assert resp.status_code == 200
+
+        master.archived_at = dj_timezone.now()
+        master.save(update_fields=["archived_at"])
+        archived_resp = client.get(
+            reverse("master_api:dashboard"),
+            HTTP_AUTHORIZATION=init_data_header("12345"),
+        )
+        assert archived_resp.status_code == 403
 
 
 # --- active visit ---------------------------------------------------------
