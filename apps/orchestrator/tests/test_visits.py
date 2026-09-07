@@ -450,3 +450,299 @@ class TestCapabilityAndAdapterTogether:
 
         assert "Массаж спины" in reply.text
         assert "12 августа" in reply.text
+
+
+# --------------------------------------------------------------------------- #
+# DRF-1547 / §37 п.1 — действия на карточке КОНКРЕТНОЙ записи                   #
+# --------------------------------------------------------------------------- #
+
+#: Заведомо будущая дата. Отдельная константа, а не литерал в каждом
+#: тесте: «предстоящая запись» решается сравнением с часами, и один
+#: забытый год превратил бы половину этих тестов в тесты про прошлое.
+_FUTURE = "2099-01-15T09:30:00+00:00"
+
+_UUID_A = "11111111-1111-4111-8111-111111111111"
+_UUID_B = "22222222-2222-4222-8222-222222222222"
+
+
+@pytest.fixture
+def miniapp(settings):
+    settings.MAX_BOT_WEB_APP = "aylabot"
+    settings.MAX_MINIAPP_URL = ""
+    return settings
+
+
+class TestActionsMovedOntoTheBookingCard:
+    """Владелец: «так меньше риск отменить не тот визит» (§37 п.1)."""
+
+    def test_each_upcoming_booking_gets_all_three_actions_named_by_service(
+        self, capability, db
+    ) -> None:
+        capability["upcoming"] = VisitsResult(
+            status="ok",
+            visits=(
+                _visit(appointment_id=_UUID_A, service="Маникюр", start=_FUTURE),
+                _visit(appointment_id=_UUID_B, service="Массаж спины", start=_FUTURE),
+            ),
+        )
+
+        reply = visits_mod.route_visits(global_bot_user=_BotUser())
+
+        assert reply.action_data is not None
+        buttons = reply.action_data["attachments"][0]["payload"]["buttons"]
+        assert [(b["label"], b["callback"]) for b in buttons] == [
+            ("Подробнее: Маникюр", f"cb:visit:card:{_UUID_A}"),
+            ("Перенести: Маникюр", f"cb:visit:move:{_UUID_A}"),
+            ("Отменить: Маникюр", f"cb:visit:cancel:{_UUID_A}"),
+            ("Подробнее: Массаж спины", f"cb:visit:card:{_UUID_B}"),
+            ("Перенести: Массаж спины", f"cb:visit:move:{_UUID_B}"),
+            ("Отменить: Массаж спины", f"cb:visit:cancel:{_UUID_B}"),
+        ]
+
+    def test_the_label_names_the_booking_so_two_cannot_be_confused(self, capability, db) -> None:
+        """Довод владельца целиком: без имени услуги выбор был бы вслепую."""
+        capability["upcoming"] = VisitsResult(
+            status="ok",
+            visits=(
+                _visit(appointment_id=_UUID_A, service="Маникюр", start=_FUTURE),
+                _visit(appointment_id=_UUID_B, service="Массаж спины", start=_FUTURE),
+            ),
+        )
+
+        reply = visits_mod.route_visits(global_bot_user=_BotUser())
+        assert reply.action_data is not None
+        cancels = [
+            b
+            for b in reply.action_data["attachments"][0]["payload"]["buttons"]
+            if b["callback"].startswith("cb:visit:cancel:")
+        ]
+        # Стража: кнопок отмены ровно две и подписи у них разные.
+        assert len(cancels) == 2
+        assert cancels[0]["label"] != cancels[1]["label"]
+        assert cancels[0]["callback"] != cancels[1]["callback"]
+
+    def test_past_visits_keep_the_card_button_they_always_had(self, capability, db) -> None:
+        """Парная положительная стража DRF-1411: ничего не отнято."""
+        capability["upcoming"] = VisitsResult(
+            status="ok", visits=(_visit(appointment_id=_UUID_A, start=_FUTURE),)
+        )
+        capability["visits"] = VisitsResult(status="ok", visits=(_visit(appointment_id="p1"),))
+
+        reply = visits_mod.route_visits(global_bot_user=_BotUser())
+
+        callbacks = _callbacks(reply)
+        # Стража: новые действия на месте.
+        assert f"cb:visit:cancel:{_UUID_A}" in callbacks
+        # И старая карточка визита никуда не делась.
+        assert "cb:visit:card:p1" in callbacks
+
+    def test_a_booking_past_the_action_cap_still_has_a_way_in(self, capability, db) -> None:
+        """Потолок экономит место, а не отнимает запись.
+
+        Три действия на запись — три кнопки; без потолка человек с пятью
+        записями получил бы пятнадцать. Но четвёртая запись обязана
+        остаться достижимой: «Подробнее» ведёт на её карточку, а карточка
+        несёт всё те же «Перенести» и «Отменить».
+        """
+        many = tuple(
+            _visit(appointment_id=f"u{i}", service=f"Услуга {i}", start=_FUTURE) for i in range(5)
+        )
+        capability["upcoming"] = VisitsResult(status="ok", visits=many)
+
+        reply = visits_mod.route_visits(global_bot_user=_BotUser())
+        callbacks = _callbacks(reply)
+
+        # Стража: первые три получили полный набор.
+        assert "cb:visit:cancel:u0" in callbacks
+        assert "cb:visit:move:u2" in callbacks
+        # Четвёртая и пятая — без действий в списке…
+        assert "cb:visit:cancel:u3" not in callbacks
+        assert "cb:visit:cancel:u4" not in callbacks
+        # …но со входом на свою карточку, где эти действия есть.
+        assert "cb:visit:card:u3" in callbacks
+        assert "cb:visit:card:u4" in callbacks
+
+    def test_an_upcoming_card_offers_move_and_cancel_not_repeat(self, capability, db) -> None:
+        capability["visit"] = _visit(appointment_id=_UUID_A, start=_FUTURE)
+
+        reply = visits_mod.route_visit_callback(
+            global_bot_user=_BotUser(), callback_text=f"cb:visit:card:{_UUID_A}"
+        )
+
+        callbacks = _callbacks(reply)
+        # Стража: карточка построена и действия на ней есть.
+        assert f"cb:visit:move:{_UUID_A}" in callbacks
+        assert f"cb:visit:cancel:{_UUID_A}" in callbacks
+        # И только теперь отрицание: «Записаться ещё» над несостоявшимся
+        # визитом было бы верной фразой про неверный глагол.
+        assert f"cb:visit:repeat:{_UUID_A}" not in callbacks
+
+    def test_a_past_card_still_offers_repeat(self, capability, db) -> None:
+        """Парная положительная стража к предыдущему тесту."""
+        capability["visit"] = _visit(appointment_id="p1")
+
+        reply = visits_mod.route_visit_callback(
+            global_bot_user=_BotUser(), callback_text="cb:visit:card:p1"
+        )
+
+        assert _callbacks(reply) == ["cb:visit:repeat:p1"]
+
+
+class TestCancelNamesWhatDisappears:
+    """Подтверждение, не называющее запись, риска не снимает."""
+
+    def test_the_question_names_the_service_and_the_time(self, capability, db) -> None:
+        capability["visit"] = _visit(appointment_id=_UUID_A, service="Маникюр", start=_FUTURE)
+
+        reply = visits_mod.route_visit_callback(
+            global_bot_user=_BotUser(), callback_text=f"cb:visit:cancel:{_UUID_A}"
+        )
+
+        assert "Маникюр" in reply.text
+        assert "15 января" in reply.text
+        assert _callbacks(reply) == [
+            f"cb:visit:drop:{_UUID_A}",
+            f"cb:visit:card:{_UUID_A}",
+        ]
+
+    def test_asking_cancels_nothing(self, capability, db, monkeypatch) -> None:
+        """Между вопросом и действием не должно быть ни одного вызова."""
+        calls: list[str] = []
+
+        def _cancel(*, bot_user, appointment_id):
+            calls.append(appointment_id)
+            return "ok"
+
+        monkeypatch.setattr("apps.booking.services.records.cancel_booking", _cancel)
+        capability["visit"] = _visit(appointment_id=_UUID_A, start=_FUTURE)
+
+        visits_mod.route_visit_callback(
+            global_bot_user=_BotUser(), callback_text=f"cb:visit:cancel:{_UUID_A}"
+        )
+
+        assert calls == []
+
+    def test_confirming_cancels_exactly_the_chosen_booking(
+        self, capability, db, monkeypatch
+    ) -> None:
+        """Главная проверка §37 п.1: отменяется ИМЕННО выбранная."""
+        cancelled: list[str] = []
+
+        def _cancel(*, bot_user, appointment_id):
+            cancelled.append(appointment_id)
+            return "ok"
+
+        monkeypatch.setattr("apps.booking.services.records.cancel_booking", _cancel)
+        capability["visit"] = _visit(appointment_id=_UUID_B, service="Массаж спины", start=_FUTURE)
+
+        reply = visits_mod.route_visit_callback(
+            global_bot_user=_BotUser(), callback_text=f"cb:visit:drop:{_UUID_B}"
+        )
+
+        assert cancelled == [_UUID_B]
+        assert "Отменила: Массаж спины" in reply.text
+
+    @pytest.mark.parametrize(
+        ("status", "fragment"),
+        [
+            ("already_gone", "уже нет"),
+            ("not_found", "уже нет"),
+            ("refused", "оператор"),
+            ("backend_unavailable", "не отвечает"),
+        ],
+    )
+    def test_every_refusal_says_what_actually_happened(
+        self, capability, db, monkeypatch, status, fragment
+    ) -> None:
+        """Ни один исход не обещает того, чего не произошло (DRF-1492)."""
+        monkeypatch.setattr("apps.booking.services.records.cancel_booking", lambda **_: status)
+        capability["visit"] = _visit(appointment_id=_UUID_A, start=_FUTURE)
+
+        reply = visits_mod.route_visit_callback(
+            global_bot_user=_BotUser(), callback_text=f"cb:visit:drop:{_UUID_A}"
+        )
+
+        # Стража: ответ есть и он про эту запись.
+        assert reply.text
+        assert fragment in reply.text.lower()
+        # И только теперь отрицание: «отменила» не сказано.
+        assert "Отменила" not in reply.text
+
+
+class TestMoveWarnsBeforeOpeningTheSchedule:
+    """§37 п.6, формулировка владельца дословно."""
+
+    def test_the_warning_is_the_owner_s_sentence(self, capability, db, miniapp) -> None:
+        reply = visits_mod.route_visit_callback(
+            global_bot_user=_BotUser(), callback_text=f"cb:visit:move:{_UUID_A}"
+        )
+
+        assert reply.text == "Для выбора времени открою расписание."
+
+    def test_the_button_opens_the_schedule_of_this_very_booking(
+        self, capability, db, miniapp
+    ) -> None:
+        """Человек уже выбрал запись — выбирать её второй раз он не должен."""
+        reply = visits_mod.route_visit_callback(
+            global_bot_user=_BotUser(), callback_text=f"cb:visit:move:{_UUID_A}"
+        )
+
+        assert reply.action_data is not None
+        buttons = reply.action_data["buttons"]
+        assert len(buttons) == 1
+        assert buttons[0]["web_app"] == "aylabot"
+        assert buttons[0]["callback"] == f"reschedule_{_UUID_A}"
+
+    def test_the_payload_is_one_max_will_accept(self, capability, db, miniapp) -> None:
+        """MAX отвечает 400 на всё, что не подходит под форму, и уносит ВЕСЬ ответ."""
+        from apps.channels.max.outbound import OPEN_APP_PAYLOAD_RE
+
+        reply = visits_mod.route_visit_callback(
+            global_bot_user=_BotUser(), callback_text=f"cb:visit:move:{_UUID_A}"
+        )
+        assert reply.action_data is not None
+        payload = reply.action_data["buttons"][0]["callback"]
+        assert OPEN_APP_PAYLOAD_RE.fullmatch(payload), payload
+
+    def test_the_link_fallback_builds_the_declared_route(self, capability, db, settings) -> None:
+        settings.MAX_BOT_WEB_APP = ""
+        settings.MAX_MINIAPP_URL = "https://app.example"
+
+        reply = visits_mod.route_visit_callback(
+            global_bot_user=_BotUser(), callback_text=f"cb:visit:move:{_UUID_A}"
+        )
+
+        assert reply.action_data is not None
+        assert (
+            reply.action_data["buttons"][0]["url"]
+            == f"https://app.example/customer/records/{_UUID_A}/reschedule"
+        )
+
+    def test_a_forged_id_never_becomes_an_open_app_payload(self, capability, db, miniapp) -> None:
+        """Строгая форма проверяется ЗДЕСЬ, а не только в SPA."""
+        capability["visit"] = _visit(appointment_id="not-a-uuid", start=_FUTURE)
+
+        reply = visits_mod.route_visit_callback(
+            global_bot_user=_BotUser(), callback_text="cb:visit:move:not-a-uuid"
+        )
+
+        # Стража: ход не потерян, человек получил ответ и действия карточки.
+        assert reply.text
+        assert "cb:visit:cancel:not-a-uuid" in _callbacks(reply)
+        # И только теперь отрицание: payload'а с битым id никто не строил.
+        assert "reschedule_" not in str(reply.action_data)
+
+    def test_without_a_miniapp_move_says_so_and_cancel_still_works(
+        self, capability, db, settings
+    ) -> None:
+        settings.MAX_BOT_WEB_APP = ""
+        settings.MAX_MINIAPP_URL = ""
+        capability["visit"] = _visit(appointment_id=_UUID_A, start=_FUTURE)
+
+        reply = visits_mod.route_visit_callback(
+            global_bot_user=_BotUser(), callback_text=f"cb:visit:move:{_UUID_A}"
+        )
+
+        # Стража: отмена — ботовая и осталась доступной.
+        assert f"cb:visit:cancel:{_UUID_A}" in _callbacks(reply)
+        assert "Отменить запись я могу прямо здесь" in reply.text

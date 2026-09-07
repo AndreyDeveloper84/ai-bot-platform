@@ -207,11 +207,14 @@ from apps.orchestrator.turn_seam import (
 )
 from apps.skills.booking.lookup import is_personal_booking_lookup
 from apps.skills.menu.marketplace import (
+    EXTRA_ACTION_TYPE,
     FALLBACK_ACTION_TYPE,
     HEALTH_DECLINE_ACTION_TYPE,
-    HEALTH_REQUEST_ACTION_TYPE,
     MENU_ACTION_TYPE,
+    OPEN_WARNING_ACTION_TYPE,
+    is_extra_callback,
     is_health_callback,
+    is_open_callback,
     marketplace_fallback_reply,
     marketplace_menu_reply,
     matches_menu_request,
@@ -1034,6 +1037,7 @@ def _route_health_callback(
         HEALTH_REQUEST_TEXT,
         health_need_surface,
         health_request_action_data,
+        health_request_action_type,
         nutrition_enabled,
     )
 
@@ -1071,8 +1075,60 @@ def _route_health_callback(
     )
     return (
         DiscoveryReply(text=HEALTH_REQUEST_TEXT, action_data=health_request_action_data()),
-        HEALTH_REQUEST_ACTION_TYPE,
+        # DRF-1547 / §37 п.5 — метка несёт ПОВЕРХНОСТЬ, а не просто «здесь
+        # был запрос». Выдача согласия происходит в мини-приложении,
+        # отдельным HTTP-запросом, и без этой метки вернуть человека туда,
+        # куда он шёл, не по чему: в профиле он оказался бы с пустыми
+        # руками и обязанностью вспомнить, зачем пришёл.
+        health_request_action_type(surface),
     )
+
+
+def _route_menu_nav_callback(*, callback_text: str, bot_user: Any) -> tuple[DiscoveryReply, str]:
+    """Тап навигации по меню — ответ и его ``action_type`` (DRF-1547).
+
+    Три исхода, и ни один из них не молчание:
+
+    * ``cb:extra:open`` — подменю «Дополнительные возможности» (§37);
+    * ``cb:extra:back`` / ``cb:extra:help`` — главное меню. Одинаковый
+      экран у обоих намеренно: главное меню И ЕСТЬ ответ на «что ты
+      умеешь» (§25 п.2, решение владельца «отвечаем меню, а не свободной
+      прозой»), а «Назад» ведёт ровно туда же. Payload'ы при этом разные,
+      чтобы в журнале «нажал помощь» и «вернулся» не слились в одно.
+    * ``cb:open:{слаг}`` — ПРЕДУПРЕЖДЕНИЕ перед открытием приложения
+      (§37 п.6) и уже под ним кнопка, которая его открывает.
+
+    Незнакомый слаг любой из двух форм — снятая кнопка из истории чата.
+    Отвечается меню, тем же правилом, по которому ``resolve_tap_text``
+    переводит снятый ``cb:menu:*`` в «Что ты умеешь?»: чем кнопка была,
+    восстановить нечем, но ход терять нельзя.
+    """
+    from apps.skills.menu.marketplace import (
+        CALLBACK_EXTRA_OPEN,
+        marketplace_extra_reply,
+        open_callback_slug,
+        open_warning_reply,
+    )
+
+    stripped = (callback_text or "").strip()
+
+    if stripped == CALLBACK_EXTRA_OPEN:
+        extra_text, extra_data = marketplace_extra_reply(bot_user=bot_user)
+        return DiscoveryReply(text=extra_text, action_data=extra_data), EXTRA_ACTION_TYPE
+
+    if is_open_callback(stripped):
+        slug = open_callback_slug(stripped)
+        warning = open_warning_reply(slug) if slug else None
+        if warning is not None:
+            warn_text, warn_data = warning
+            logger.info("channels.max.global.open_warned slug=%s", slug)
+            return (
+                DiscoveryReply(text=warn_text, action_data=warn_data),
+                OPEN_WARNING_ACTION_TYPE,
+            )
+
+    menu_text, menu_data = marketplace_menu_reply(bot_user=bot_user)
+    return DiscoveryReply(text=menu_text, action_data=menu_data), MENU_ACTION_TYPE
 
 
 def handle_global_max_event(payload: dict, trace_id: str | uuid.UUID | None = None) -> None:
@@ -1318,6 +1374,21 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
     # `startswith` в резолвер по форме; довод там же.
     is_visit_callback = event.text.startswith(VISIT_CALLBACK_PREFIXES)
 
+    # DRF-1547 — МОЛЧАНИЕ, и по тому же правилу, что у соседей выше.
+    #
+    #   `cb:extra:*` — «Ещё», «Помощь», «Назад». Навигация по меню, как
+    #       `cb:anketa:start` / `cb:anketa:edit`: человек ничего не сказал,
+    #       он открыл другой экран. Фразы за этими тапами нет — «Ещё» это
+    #       не высказывание, — а сырой payload в истории с ролью `user`
+    #       есть ровно дефект DRF-988.
+    #   `cb:open:*` — «открой экран приложения». То же самое, и добавочно:
+    #       ход отвечается ПРЕДУПРЕЖДЕНИЕМ, после которого человек ещё
+    #       может передумать. Записать это как его реплику значило бы
+    #       записать намерение, которое он не подтвердил.
+    #
+    # Ход при этом в переписке виден — ответ бота записывается всегда.
+    is_menu_nav_callback = is_extra_callback(event.text) or is_open_callback(event.text)
+
     # DRF-990, третий заход — СЕМЕЙСТВО `cb:discover:`, а не глагол `book:`.
     #
     # Боевой замер пилота 30.08: 55 из 68 сырых строк нажатия в истории — это
@@ -1384,6 +1455,7 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
         or is_catalog_callback
         or is_clarify_redraw_tap
         or is_visit_callback
+        or is_menu_nav_callback
         or stale_tap
         or inbound_history_text is None
     ):
@@ -1644,6 +1716,32 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
             "booking_repeat"
             if event.text.startswith(CALLBACK_VISIT_REPEAT_PREFIX)
             else "visit_card"
+        )
+        _record_live_path_metric(
+            bot_user=bot_user,
+            conversation=conversation,
+            trace_id=trace_id,
+            message_text=event.text,
+            t_start=t_start,
+            outcome=AIRequestMetric.OUTCOME_SUCCESS,
+            skill_selected=assistant_action_type,
+        )
+    elif is_extra_callback(event.text) or is_open_callback(event.text):
+        # DRF-1547 / §37 — подменю «Ещё» и предупреждение перед открытием
+        # приложения.
+        #
+        # Стоит здесь, среди колбэковых веток и ВЫШЕ приветствия, по тому
+        # же правилу, что и ``cb:health:``: тап по кнопке, которую бот сам
+        # нарисовал, обязан дойти до ответа, а не быть проглоченным
+        # приветствием или отданным модели сырым.
+        #
+        # Своё семейство, а не ``cb:menu:``, потому что ``resolve_tap_text``
+        # переводит весь ``cb:menu:*`` в фразу ВЫШЕ лестницы: «Ещё»
+        # превратилось бы в «Что ты умеешь?» и подменю не открылось бы
+        # никогда.
+        reply, assistant_action_type = _route_menu_nav_callback(
+            callback_text=event.text,
+            bot_user=bot_user,
         )
         _record_live_path_metric(
             bot_user=bot_user,

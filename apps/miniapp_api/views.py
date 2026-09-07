@@ -2083,6 +2083,25 @@ def health_consent(request: HttpRequest) -> HttpResponse:
             409,
         )
     logger.info("miniapp_api.health_consent.granted bot_user=%s", bot_user.id)
+    # DRF-1547 / §37 п.5 — «после согласия возвращает человека к дневнику».
+    #
+    # Здесь, а не в SPA: дневник живёт В БОТЕ (ручек ``customer/food/*`` не
+    # существует), поэтому вернуть человека можно только сообщением в чат.
+    # Best-effort по контракту — согласие УЖЕ записано, и провал доставки не
+    # смеет превратить успешный POST в 500: человек нажал бы «согласиться»
+    # ещё раз, думая, что не получилось.
+    from apps.orchestrator.health_return import resume_after_health_consent
+
+    try:
+        resume_after_health_consent(bot_user)
+    except Exception:  # noqa: BLE001 — согласие уже записано, ронять нечего
+        # Пояс поверх лямок: у самого возврата свой ``try`` внутри, но
+        # доверять «оно и так не бросает» здесь нельзя — цена ошибки
+        # несимметрична. 500 на запросе, который УСПЕЛ выдать согласие,
+        # заставит человека нажать «согласиться» ещё раз, думая, что не
+        # получилось, — то есть переспросит согласие на особую категорию
+        # персданных у того, кто его только что дал.
+        logger.exception("miniapp_api.health_consent.resume_failed bot_user=%s", bot_user.id)
     return JsonResponse(_health_consent_payload(bot_user))
 
 
