@@ -946,7 +946,7 @@ def notify_manager_of_availability_request(*, tenant, master, request_id) -> Non
     """DM «Анна просит выходной» администратору салона.
 
     Спека master-mobile §M3 строка 458: «server marks slot blocked →
-    owner notified (audit + bot DM)». Пустой ``manager_chat_id`` — не
+    owner notified (audit + bot DM)». Ненастроенный адрес менеджера — не
     ошибка, а деградация: тот же режим, что у эскалации напоминаний.
 
     Живёт здесь, а не в вызывающем модуле, потому что заявку теперь
@@ -963,8 +963,15 @@ def notify_manager_of_availability_request(*, tenant, master, request_id) -> Non
 
     from django.conf import settings
 
-    chat_id = (getattr(tenant, "manager_chat_id", "") or "").strip()
-    if not chat_id:
+    # DRF-1559 — адрес менеджера: человек, если у салона заполнен
+    # ``manager_user_id``, иначе прежний диалоговый идентификатор. Slug
+    # ``no_manager_chat_id`` сохранён — это эмитируемый ключ. Импорт
+    # локальный, как и у ``send_message`` ниже: apps.channels не нужен
+    # тем эндпоинтам master_api, которые сюда не заходят.
+    from apps.channels.max.addressing import manager_address
+
+    manager = manager_address(tenant)
+    if not manager:
         logger.info(
             "master_api.availability.no_manager_chat_id tenant=%s master=%s",
             tenant.id,
@@ -984,7 +991,7 @@ def notify_manager_of_availability_request(*, tenant, master, request_id) -> Non
         f"[Открыть запрос]({admin_url}?request_id={request_id})"
     )
     try:
-        send_message(chat_id=chat_id, text=text)
+        send_message(**manager.send_kwargs(), text=text)
     except MaxAPIError:
         # Best-effort: источник правды — строка в базе и аудит.
         logger.warning(

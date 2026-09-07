@@ -92,6 +92,7 @@ from datetime import timedelta
 
 from apps.audit.services import write_audit
 from apps.booking.models import BookingReminder
+from apps.channels.max.addressing import manager_address
 from apps.channels.max.outbound import MaxAPIError, send_message
 
 # E0 #6 — send-time booking-state recheck. The same helper governs
@@ -281,8 +282,12 @@ def escalate_stale_reminders() -> dict[str, int]:
 
         # We own the row.
         tenant = row.tenant
-        manager_chat_id = (tenant.manager_chat_id or "").strip()
-        if not manager_chat_id:
+        # DRF-1559 — человек, если у салона заполнен ``manager_user_id``,
+        # иначе прежний диалоговый идентификатор. Slug причины и ключ
+        # аудита (``no_manager_chat_id``) сохранены: это эмитируемые ключи,
+        # по ним считают пропущенные эскалации.
+        manager = manager_address(tenant)
+        if not manager:
             logger.warning(
                 "bookings.escalate.no_manager_chat tenant=%s pk=%s",
                 tenant.slug,
@@ -305,7 +310,7 @@ def escalate_stale_reminders() -> dict[str, int]:
         text = _format_escalation_text(row)
         try:
             send_message(
-                chat_id=manager_chat_id,
+                **manager.send_kwargs(),
                 text=text,
                 attachments=None,
             )

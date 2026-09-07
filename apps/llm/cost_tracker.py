@@ -54,10 +54,10 @@ brief said "don't add Lua/locking", so we don't.
 ### Alerting
 
 After every ``record_usage`` we compute the previous-vs-new percent of
-each cap. Crossing 80% → one warning to ``tenant.manager_chat_id``;
+each cap. Crossing 80% → one warning to the salon manager's MAX address;
 crossing 100% → one "exhausted" alert. Both deduplicated via
 ``warned_80`` / ``warned_100`` Redis flags so subsequent calls don't
-re-spam the manager. Empty manager_chat_id → log + skip the outbound
+re-spam the manager. No configured address → log + skip the outbound
 (cap is still enforced, telemetry still written).
 
 ### Exception contract
@@ -77,6 +77,8 @@ from decimal import ROUND_HALF_UP, Decimal
 from typing import Any, Literal
 
 from django.core.cache import cache
+
+from apps.channels.max.addressing import MaxAddress
 
 logger = logging.getLogger(__name__)
 
@@ -113,7 +115,7 @@ AUDIT_QUOTA_FALLBACK = "llm.quota_exhausted_fallback"
 
 
 # Russian-language alert templates. Sent via the existing MAX outbound
-# channel to ``tenant.manager_chat_id`` when a daily threshold is
+# channel to the salon manager's MAX address when a daily threshold is
 # crossed. Both lines fit a single MAX message body (no media).
 _ALERT_80_TEMPLATE = (
     "⚠️ LLM-расходы за сегодня дошли до 80% дневного лимита "
@@ -424,7 +426,7 @@ async def record_usage(
     Behaviour:
       - Increments ``tokens`` and ``cost_microcents`` keys; sets TTL on
         first write of the day per tenant.
-      - Reads ``Tenant.manager_chat_id`` + caps via sync ORM.
+      - Reads the manager's MAX address + caps via sync ORM.
       - If the new usage crossed 80% or 100% on EITHER cap, sends one
         outbound MAX message (deduplicated via the warned_* flags).
       - Telegram alert failure (no token, network error) logs WARN
@@ -490,9 +492,9 @@ async def record_usage(
 
     new_tokens = new_tokens_post
 
-    # Read caps + manager_chat_id for the alert path.
+    # Read caps + manager address for the alert path.
     try:
-        token_cap, cost_cap_usd, manager_chat_id = await sync_to_async(
+        token_cap, cost_cap_usd, manager = await sync_to_async(
             _read_tenant_alert_context, thread_sensitive=False
         )(tenant_id)
     except Exception:  # noqa: BLE001 — alerting must not break accounting
@@ -522,7 +524,7 @@ async def record_usage(
     if crossed_80 and not _flag_set(_warned_80_key(tenant_id)):
         await sync_to_async(_send_threshold_alert, thread_sensitive=False)(
             tenant_id=tenant_id,
-            manager_chat_id=manager_chat_id,
+            manager=manager,
             level=80,
             tokens_used=new_tokens,
             token_cap=token_cap,
@@ -534,7 +536,7 @@ async def record_usage(
     if crossed_100 and not _flag_set(_warned_100_key(tenant_id)):
         await sync_to_async(_send_threshold_alert, thread_sensitive=False)(
             tenant_id=tenant_id,
-            manager_chat_id=manager_chat_id,
+            manager=manager,
             level=100,
             tokens_used=new_tokens,
             token_cap=token_cap,
@@ -728,11 +730,11 @@ def _read_tenant_caps(tenant_id: str) -> tuple[int, Decimal]:
     return (token_cap, cost_cap)
 
 
-def _read_tenant_alert_context(tenant_id: str) -> tuple[int, Decimal, str]:
-    """Read caps + manager_chat_id in a single ORM hop.
+def _read_tenant_alert_context(tenant_id: str) -> tuple[int, Decimal, MaxAddress]:
+    """Read caps + the manager's MAX address in a single ORM hop.
 
     Separate from :func:`_read_tenant_caps` so the hot enforce-caps
-    path doesn't pay for ``manager_chat_id`` it never uses.
+    path doesn't pay for an address it never uses.
 
     Same Y3 contract as :func:`_read_tenant_caps`: raises
     :class:`UnknownTenantError` on missing tenant, propagating to the
@@ -743,7 +745,7 @@ def _read_tenant_alert_context(tenant_id: str) -> tuple[int, Decimal, str]:
 
     try:
         row = Tenant.all_objects.values(
-            "daily_token_cap", "daily_cost_cap_usd", "manager_chat_id"
+            "daily_token_cap", "daily_cost_cap_usd", "manager_chat_id", "manager_user_id"
         ).get(id=tenant_id)
     except Tenant.DoesNotExist as exc:
         logger.error(
@@ -759,7 +761,17 @@ def _read_tenant_alert_context(tenant_id: str) -> tuple[int, Decimal, str]:
     cost_cap = row.get("daily_cost_cap_usd") or Decimal("0")
     if not isinstance(cost_cap, Decimal):
         cost_cap = Decimal(str(cost_cap))
-    return (token_cap, cost_cap, str(row.get("manager_chat_id") or ""))
+    # DRF-1559 — адрес и ключ выбираются здесь один раз и дальше едут
+    # готовыми: слоёв между чтением и отправкой три, и ветвление в каждом
+    # было бы тремя местами, где следующая правка забудет одно.
+    return (
+        token_cap,
+        cost_cap,
+        MaxAddress.resolve(
+            user_id=row.get("manager_user_id"),
+            chat_id=row.get("manager_chat_id"),
+        ),
+    )
 
 
 def _write_quota_telemetry(
@@ -801,7 +813,7 @@ def _write_quota_telemetry(
 def _send_threshold_alert(
     *,
     tenant_id: str,
-    manager_chat_id: str,
+    manager: MaxAddress,
     level: int,
     tokens_used: int,
     token_cap: int,
@@ -810,11 +822,17 @@ def _send_threshold_alert(
 ) -> None:
     """Send a 80% or 100% alert to the salon manager via MAX outbound.
 
-    Empty ``manager_chat_id`` → log WARN, skip the send. The cap is
+    Ненастроенный адрес менеджера → log WARN, skip the send. The cap is
     still enforced and telemetry still written — alerting is a courtesy
     layer, not a precondition.
+
+    Адрес приходит готовым (DRF-1559): ``manager_user_id``, если он
+    заполнен, иначе прежний ``manager_chat_id`` — с прежним же
+    ограничением, что диалоговый идентификатор верен только для того бота,
+    из чьей переписки его скопировали. Slug ``alert_skipped_no_manager_chat_id``
+    сохранён: это эмитируемый ключ.
     """
-    if not manager_chat_id:
+    if not manager:
         logger.warning(
             "cost_tracker.alert_skipped_no_manager_chat_id "
             "tenant=%s level=%d tokens=%d/%d cost=$%s/$%s",
@@ -842,7 +860,7 @@ def _send_threshold_alert(
     try:
         from apps.channels.max.outbound import send_message
 
-        send_message(chat_id=manager_chat_id, text=text)
+        send_message(**manager.send_kwargs(), text=text)
     except Exception:  # noqa: BLE001 — alerting must never break accounting
         logger.warning(
             "cost_tracker.alert_send_failed tenant=%s level=%d",

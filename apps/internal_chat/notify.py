@@ -23,10 +23,11 @@ customer-facing avatar.
 
 Direction decides the recipient:
 
-* **master → admin**: the salon side. ``Tenant.manager_chat_id`` first,
+* **master → admin**: the salon side. The salon's manager address first,
   then the configured fallback channel — the same cascade the booking
   notice uses, deliberately, so a salon configures one destination rather
-  than one per feature.
+  than one per feature. Which KEY each rung uses is decided once, in
+  :mod:`apps.channels.max.addressing` (DRF-1559).
 * **admin → master**: that thread's master personally, via
   ``CatalogMaster.linked_bot_user.channel_user_id``. There is no fallback here on
   purpose: a message addressed to one master must not be broadcast to the
@@ -60,6 +61,8 @@ from __future__ import annotations
 import logging
 
 from django.db import transaction
+
+from apps.channels.max.addressing import MaxAddress, manager_address
 
 logger = logging.getLogger(__name__)
 
@@ -128,16 +131,16 @@ def _salon_bot_for(tenant):
         return None
 
 
-def _recipients_for(message) -> tuple[list[str], list[str], str]:
-    """``(chat_ids, user_ids, channel_label)`` for this message's direction.
+def _recipients_for(message) -> tuple[tuple[MaxAddress, ...], str]:
+    """``(addresses, channel_label)`` for this message's direction.
 
-    Two lists because there are two kinds of address (DRF-1558). The
-    salon-side rungs are dialog ids an operator configured by hand and we
-    hold no person id for them; the master rung is resolved from our own
-    ``BotUser`` row and therefore names the person.
+    Каждый получатель несёт СВОЙ ключ адресации, и ветвление по ключу
+    здесь не повторяется: с DRF-1559 выбор «человек, если задан, иначе
+    диалог» живёт в :mod:`apps.channels.max.addressing`, а этот резолвер
+    отвечает только на вопрос «кому».
     """
 
-    from apps.handoff.notify import get_notify_chat_ids
+    from apps.handoff.notify import get_notify_addresses
 
     thread = message.thread
     tenant = thread.tenant
@@ -145,11 +148,11 @@ def _recipients_for(message) -> tuple[list[str], list[str], str]:
     if message.sender_role == "master":
         # To the salon side. Same cascade as the booking notice so a salon
         # configures one destination, not one per feature.
-        manager_chat_id = (getattr(tenant, "manager_chat_id", "") or "").strip()
-        if manager_chat_id:
-            return [manager_chat_id], [], "manager"
-        fallback = get_notify_chat_ids()
-        return (list(fallback), [], "fallback") if fallback else ([], [], "none")
+        manager = manager_address(tenant)
+        if manager:
+            return (manager,), "manager"
+        fallback = get_notify_addresses()
+        return (fallback, "fallback") if fallback else ((), "none")
 
     # To the master personally. No fallback on purpose: broadcasting a
     # message meant for one master to the salon's shared channel would
@@ -160,7 +163,7 @@ def _recipients_for(message) -> tuple[list[str], list[str], str]:
     # salon bot's ``bot_scope`` and the master's stored ``chat_id`` names
     # their dialog with the CLIENT bot.
     user_id = (getattr(linked, "channel_user_id", "") or "").strip() if linked else ""
-    return ([], [user_id], "master") if user_id else ([], [], "none")
+    return ((MaxAddress(user_id=user_id),), "master") if user_id else ((), "none")
 
 
 def notify_internal_message(*, message) -> None:
@@ -172,8 +175,8 @@ def notify_internal_message(*, message) -> None:
     try:
         thread = message.thread
         tenant = thread.tenant
-        chat_ids, user_ids, channel = _recipients_for(message)
-        recipient_count = len(chat_ids) + len(user_ids)
+        recipients, channel = _recipients_for(message)
+        recipient_count = len(recipients)
 
         if not recipient_count:
             # Loud, not silent: an undeliverable staff message is a
@@ -191,7 +194,7 @@ def notify_internal_message(*, message) -> None:
 
         text = build_notification_text(message=message)
         with bot_scope(_salon_bot_for(tenant)):
-            failures = send_max_notification(text=text, chat_ids=chat_ids, user_ids=user_ids)
+            failures = send_max_notification(text=text, addresses=recipients)
 
         if failures:
             logger.warning(

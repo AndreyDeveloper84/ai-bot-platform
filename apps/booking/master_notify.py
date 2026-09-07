@@ -33,13 +33,20 @@ no new queue, no dependency on the mobile app.
   WARNING log line and a ``booking.specialist_unreachable`` audit row.
   The push era hid exactly this state behind a quiet ``failed`` in the
   database; it must never be silent again.
-* **The salon cascade (first hit wins)** — ``Tenant.manager_chat_id``,
-  then ``HANDOFF_NOTIFY_MAX_CHAT_IDS``. Deliberately the *same* setting
+* **The salon cascade (first hit wins)** — the salon's manager address,
+  then the configured operator channel. Deliberately the *same* setting
   as DRF-1029 rather than a new one: on the pilot it already holds the
-  owner's chat, so the booking notification reaches a human on day one
+  owner's address, so the booking notification reaches a human on day one
   without an env change. If a salon later wants booking alerts split
   from escalation alerts, that is a settings-level split, not a
   rewrite of this module.
+
+  Each rung carries its own addressing key (DRF-1559): a manager with
+  ``manager_user_id`` filled in is written to as a PERSON, and only a
+  salon that has not been migrated yet falls back to the dialog id. That
+  matters precisely here — this message goes out under the SALON bot, and
+  a dialog id copied out of the client bot's chat answers 404
+  ``dialog.not.found`` (`docs/OPEN_DECISIONS.md` §55).
 * **Nobody at all** — an explicit WARNING log line. Silence was the old
   behaviour and it is exactly what made the gap invisible for months;
   a booking that could not be announced must leave a trace.
@@ -86,7 +93,8 @@ from django.db.models import Q
 from apps.audit.services import write_audit
 from apps.catalog.models import CatalogMaster, CatalogService
 from apps.channels.bot_context import bot_scope
-from apps.handoff.notify import get_notify_chat_ids, send_max_notification
+from apps.channels.max.addressing import MaxAddress, manager_address
+from apps.handoff.notify import get_notify_addresses, send_max_notification
 from apps.tenancy.context import tenant_scope
 from apps.tenancy.models import Tenant
 
@@ -144,11 +152,19 @@ class NotifyTarget:
     recipient, not a rung of this cascade.
     """
 
-    chat_ids: tuple[str, ...]
+    #: Получатели этой ступени, каждый со СВОИМ ключом адресации
+    #: (DRF-1559). Не ``chat_ids``: у менеджера теперь может быть
+    #: идентификатор человека, и тогда сообщение уходит по нему — иначе
+    #: салонный бот пишет в чужой диалог и получает 404.
+    addresses: tuple[MaxAddress, ...]
     channel: str
 
 
-def _clean_chat_id(value: object) -> str:
+def _clean_id(value: object) -> str:
+    """Прежнее имя — ``_clean_chat_id``. Чистить осталось только
+    ``channel_user_id`` (DRF-1558): адрес менеджера теперь приходит готовым
+    из :func:`~apps.channels.max.addressing.manager_address` (DRF-1559)."""
+
     return str(value or "").strip()
 
 
@@ -219,7 +235,7 @@ def resolve_specialist_user_id(master: CatalogMaster | None) -> str:
     """
 
     linked = getattr(master, "linked_bot_user", None) if master is not None else None
-    return _clean_chat_id(getattr(linked, "channel_user_id", ""))
+    return _clean_id(getattr(linked, "channel_user_id", ""))
 
 
 def resolve_salon_target(*, tenant: Tenant) -> NotifyTarget:
@@ -231,15 +247,15 @@ def resolve_salon_target(*, tenant: Tenant) -> NotifyTarget:
     docstring.
     """
 
-    manager_chat_id = _clean_chat_id(getattr(tenant, "manager_chat_id", ""))
-    if manager_chat_id:
-        return NotifyTarget(chat_ids=(manager_chat_id,), channel="manager")
+    manager = manager_address(tenant)
+    if manager:
+        return NotifyTarget(addresses=(manager,), channel="manager")
 
-    fallback = tuple(c for c in (_clean_chat_id(c) for c in get_notify_chat_ids()) if c)
+    fallback = get_notify_addresses()
     if fallback:
-        return NotifyTarget(chat_ids=fallback, channel="fallback")
+        return NotifyTarget(addresses=fallback, channel="fallback")
 
-    return NotifyTarget(chat_ids=(), channel="none")
+    return NotifyTarget(addresses=(), channel="none")
 
 
 def _tenant_tz(tenant: Tenant) -> ZoneInfo:
@@ -464,7 +480,7 @@ def notify_booking_created(
                 )
 
             target = resolve_salon_target(tenant=tenant)
-            if target.chat_ids:
+            if target.addresses:
                 text = build_booking_created_notification(
                     tenant=tenant,
                     appointment_id=appointment_id,
@@ -473,14 +489,14 @@ def notify_booking_created(
                     master_name=(getattr(master, "name", "") or "").strip() or _UNKNOWN,
                     raw_source=raw_source,
                 )
-                failures = send_max_notification(text=text, chat_ids=target.chat_ids)
+                failures = send_max_notification(text=text, addresses=target.addresses)
                 if failures == 0:
                     logger.info(
                         "booking.notify.sent tenant=%s appointment_id=%s channel=%s recipients=%d",
                         tenant.slug,
                         appointment_id,
                         target.channel,
-                        len(target.chat_ids),
+                        len(target.addresses),
                     )
                 else:
                     logger.warning(
@@ -489,7 +505,7 @@ def notify_booking_created(
                         tenant.slug,
                         appointment_id,
                         target.channel,
-                        len(target.chat_ids),
+                        len(target.addresses),
                         failures,
                     )
             elif not specialist_notified:

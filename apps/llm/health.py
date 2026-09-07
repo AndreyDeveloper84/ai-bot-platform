@@ -493,17 +493,20 @@ def _notify(text: str) -> int:
     """
 
     try:
-        from apps.handoff.notify import get_notify_chat_ids, send_max_notification
+        from apps.handoff.notify import get_notify_addresses, send_max_notification
 
-        chat_ids = get_notify_chat_ids()
-        if not chat_ids:
+        recipients = get_notify_addresses()
+        if not recipients:
             logger.info("llm.health.notify_skipped reason=no_recipients")
             return 0
-        failures = send_max_notification(text=text, chat_ids=chat_ids)
+        # DRF-1559 — тот же список операторов, но выбор ключа адресации
+        # сделан за нас: людей предпочитаем диалогам.
+        failures = send_max_notification(text=text, addresses=recipients)
         logger.info(
-            "llm.health.notify_sent recipients=%d failures=%d",
-            len(chat_ids),
+            "llm.health.notify_sent recipients=%d failures=%d addressed_by=%s",
+            len(recipients),
             failures,
+            recipients[0].key,
         )
         return failures
     except Exception:  # noqa: BLE001 — alerting must never break the probe

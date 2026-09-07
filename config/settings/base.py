@@ -540,6 +540,24 @@ MAX_WEBHOOK_SECRET = os.environ.get("MAX_WEBHOOK_SECRET", "")
 HANDOFF_NOTIFY_MAX_CHAT_IDS = [
     p.strip() for p in os.environ.get("HANDOFF_NOTIFY_MAX_CHAT_IDS", "").split(",") if p.strip()
 ]
+
+# DRF-1559 — тот же список получателей, но как ЛЮДИ, а не как диалоги.
+#
+# chat_id в MAX — идентификатор ДИАЛОГА: он верен только для того бота, из
+# переписки с которым его скопировали. Пока бот был один, разницы не было;
+# с салонным ботом отправка по чужому диалогу отвечает 404 dialog.not.found
+# (замер 07.09.2026, docs/OPEN_DECISIONS.md §55, §56 — там упал и
+# channel=fallback, который адресуется ровно отсюда).
+#
+# Непустой HANDOFF_NOTIFY_MAX_USER_IDS ВЫТЕСНЯЕТ HANDOFF_NOTIFY_MAX_CHAT_IDS
+# целиком, а не дополняет: на время переноса это один и тот же человек,
+# записанный дважды, и объединение слало бы ему всё по два раза. Пусто —
+# читается старая настройка, то есть вчерашнее поведение со вчерашним же
+# ограничением. Выбор живёт в apps/channels/max/addressing.py, здесь только
+# значения.
+HANDOFF_NOTIFY_MAX_USER_IDS = [
+    p.strip() for p in os.environ.get("HANDOFF_NOTIFY_MAX_USER_IDS", "").split(",") if p.strip()
+]
 HANDOFF_ADMIN_BASE_URL = os.environ.get("HANDOFF_ADMIN_BASE_URL", "")
 
 # DRF-1488 — every handoff task gets an addressee and a deadline.
