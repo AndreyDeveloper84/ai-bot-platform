@@ -488,6 +488,7 @@ class TestActionsMovedOntoTheBookingCard:
 
         reply = visits_mod.route_visits(global_bot_user=_BotUser())
 
+        assert reply.action_data is not None
         buttons = reply.action_data["attachments"][0]["payload"]["buttons"]
         assert [(b["label"], b["callback"]) for b in buttons] == [
             ("Подробнее: Маникюр", f"cb:visit:card:{_UUID_A}"),
@@ -509,6 +510,7 @@ class TestActionsMovedOntoTheBookingCard:
         )
 
         reply = visits_mod.route_visits(global_bot_user=_BotUser())
+        assert reply.action_data is not None
         cancels = [
             b
             for b in reply.action_data["attachments"][0]["payload"]["buttons"]
@@ -685,6 +687,7 @@ class TestMoveWarnsBeforeOpeningTheSchedule:
             global_bot_user=_BotUser(), callback_text=f"cb:visit:move:{_UUID_A}"
         )
 
+        assert reply.action_data is not None
         buttons = reply.action_data["buttons"]
         assert len(buttons) == 1
         assert buttons[0]["web_app"] == "aylabot"
@@ -697,6 +700,7 @@ class TestMoveWarnsBeforeOpeningTheSchedule:
         reply = visits_mod.route_visit_callback(
             global_bot_user=_BotUser(), callback_text=f"cb:visit:move:{_UUID_A}"
         )
+        assert reply.action_data is not None
         payload = reply.action_data["buttons"][0]["callback"]
         assert OPEN_APP_PAYLOAD_RE.fullmatch(payload), payload
 
@@ -708,6 +712,7 @@ class TestMoveWarnsBeforeOpeningTheSchedule:
             global_bot_user=_BotUser(), callback_text=f"cb:visit:move:{_UUID_A}"
         )
 
+        assert reply.action_data is not None
         assert (
             reply.action_data["buttons"][0]["url"]
             == f"https://app.example/customer/records/{_UUID_A}/reschedule"

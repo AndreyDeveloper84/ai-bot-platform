@@ -210,10 +210,12 @@ def test_granting_resumes_the_surface_the_person_came_from(
     профиле (ровно тот дефект, который §37 п.5 и чинит).
     """
     called: list[str] = []
-    monkeypatch.setattr(
-        "apps.orchestrator.health_return.resume_after_health_consent",
-        lambda user: called.append(str(user.id)) or True,
-    )
+
+    def _resume(user) -> bool:
+        called.append(str(user.id))
+        return True
+
+    monkeypatch.setattr("apps.orchestrator.health_return.resume_after_health_consent", _resume)
 
     res = _post(client, url, auth, health_consent.HEALTH_CONSENT_DOCUMENT_VERSION)
 
@@ -250,10 +252,12 @@ def test_withdrawal_resumes_nothing(client: Client, bot_user, url, auth, monkeyp
     """Возврат — следствие согласия, а не любого хода по ручке."""
     _post(client, url, auth, health_consent.HEALTH_CONSENT_DOCUMENT_VERSION)
     called: list[str] = []
-    monkeypatch.setattr(
-        "apps.orchestrator.health_return.resume_after_health_consent",
-        lambda user: called.append(str(user.id)) or True,
-    )
+
+    def _resume(user) -> bool:
+        called.append(str(user.id))
+        return True
+
+    monkeypatch.setattr("apps.orchestrator.health_return.resume_after_health_consent", _resume)
 
     res = client.delete(url, **auth)
 
