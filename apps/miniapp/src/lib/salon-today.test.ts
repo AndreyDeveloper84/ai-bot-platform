@@ -108,6 +108,34 @@ describe("visitsNow", () => {
     expect(ids).not.toContain("cancelled");
   });
 
+  it("не показывает закрытую, хотя сервер оставил ей признак", () => {
+    // Сервер снимает `is_in_progress` только с отменённых и неявок
+    // (`RELEASED_STATUSES`), а `completed` туда не входит. Визит,
+    // закрытый до конца интервала — а закрывают его именно так, — придёт
+    // с признаком «идёт».
+    const alive = visit({ id: "alive", is_in_progress: true });
+    const closed = visit({
+      id: "closed",
+      is_in_progress: true,
+      status: "completed",
+    });
+    const rows = visitsNow(
+      day({
+        masters: [
+          {
+            master_id: "m-1",
+            name: "Денис",
+            is_active: true,
+            visits: [alive, closed],
+          },
+        ],
+      }),
+    );
+    const ids = rows.map((r) => r.visit.id);
+    expect(ids).toContain("alive");
+    expect(ids).not.toContain("closed");
+  });
+
   it("показывает запись без мастера, а не прячет её", () => {
     const rows = visitsNow(
       day({ orphan_visits: [visit({ id: "orphan", is_in_progress: true })] }),
@@ -185,6 +213,52 @@ describe("visitsNext", () => {
 });
 
 describe("mastersToday", () => {
+  it("не считает освобождённые слоты: число сходится с тем, что видно", () => {
+    const rows = mastersToday(
+      day({
+        masters: [
+          {
+            master_id: "m-1",
+            name: "Денис",
+            is_active: true,
+            visits: [
+              visit({ id: "a" }),
+              visit({ id: "b", status: "completed" }),
+              visit({ id: "c", status: "cancelled" }),
+              visit({ id: "d", status: "no_show" }),
+            ],
+          },
+        ],
+      }),
+    );
+    expect(rows).toHaveLength(1);
+    // Состоявшаяся считается — она часть дня мастера; освобождённые нет.
+    expect(rows[0]!.visitCount).toBe(2);
+  });
+
+  it("прячет выключенную карточку без записей и оставляет с записями", () => {
+    const rows = mastersToday(
+      day({
+        masters: [
+          { master_id: "m-1", name: "Денис", is_active: true, visits: [] },
+          { master_id: "m-2", name: "Инна", is_active: false, visits: [] },
+          {
+            master_id: "m-3",
+            name: "Ольга",
+            is_active: false,
+            visits: [visit({ id: "x" })],
+          },
+        ],
+      }),
+    );
+    const names = rows.map((r) => r.name);
+    // Присутствие сначала: активный и выключенный-с-записями на месте...
+    expect(names).toContain("Денис");
+    expect(names).toContain("Ольга");
+    // ...и только потом — что выключенной пустой карточки нет.
+    expect(names).not.toContain("Инна");
+  });
+
   it("отдаёт имя и число записей и ничего не выдумывает сверх ответа", () => {
     const rows = mastersToday(
       day({
@@ -195,7 +269,7 @@ describe("mastersToday", () => {
             is_active: true,
             visits: [visit({ id: "a" }), visit({ id: "b" })],
           },
-          { master_id: "m-2", name: "Инна", is_active: false, visits: [] },
+          { master_id: "m-2", name: "Инна", is_active: true, visits: [] },
         ],
       }),
     );

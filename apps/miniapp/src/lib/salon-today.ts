@@ -60,7 +60,17 @@ export interface DayRow {
 export interface MasterRow {
   masterId: string;
   name: string;
-  /** Сколько записей стоит у него на этот день, включая отменённые. */
+  /**
+   * Сколько записей у него на этот день, БЕЗ освобождённых.
+   *
+   * Отменённая запись и неявка — это освободившийся слот: мастер на них
+   * не занят. Считать их значило бы поставить над списком число, которое
+   * ни с чем на экране не сходится и которое администратору нечем
+   * проверить: экран освобождённых слотов не показывает, а пилотный
+   * «Расписание» до DRF-1237 пуст.
+   *
+   * Закрытые записи считаются: они СОСТОЯЛИСЬ, это часть дня мастера.
+   */
   visitCount: number;
 }
 
@@ -69,6 +79,14 @@ export const NEXT_PREVIEW_LIMIT = 3;
 
 /** Завершённая запись: состоялась. Не «Дальше» и не «Сейчас». */
 const COMPLETED_STATUS = "completed";
+
+/**
+ * Пояс на случай, когда браузер не знает присланного сервером.
+ *
+ * Тот же, что у сервера (`DEFAULT_TZ`, `apps/admin_api/services/salon_day.py`)
+ * — не пояс устройства.
+ */
+const FALLBACK_TZ = "Europe/Moscow";
 
 function allRows(day: SalonDayResponse): DayRow[] {
   const rows: DayRow[] = [];
@@ -102,15 +120,31 @@ function byStart(a: DayRow, b: DayRow): number {
 /**
  * Что показывать в «Сейчас» — записи, идущие в этот момент.
  *
+ * # Почему статуса мало и признака тоже мало
+ *
  * Отменённые сюда попасть не могут: сервер снимает `is_in_progress` с
  * освобождённых слотов. Проверка всё равно стоит — признак и статус
  * приходят двумя полями, и разъехаться они могут только здесь.
+ *
+ * А вот ЗАКРЫТЫЕ записи сервер не снимает, и это не мелочь.
+ * `is_in_progress` считается как «статус не в `RELEASED_STATUSES` и
+ * время накрывает сейчас» (`apps/admin_api/services/salon_day.py`,
+ * `_build_visit`), а `RELEASED_STATUSES` — это ровно `("cancelled",
+ * "no_show")` (`apps/master_api/services/visit_source.py`). `completed`
+ * туда не входит. Значит, визит, закрытый администратором до конца
+ * интервала — а закрывают его именно так, «когда клиент уходит», —
+ * продолжает приходить с `is_in_progress: true`.
+ *
+ * Показать его в «Сейчас» с зелёной полосой значило бы сказать «идёт»
+ * про то, что уже состоялось. Поэтому закрытые отсекаются здесь — так
+ * же, как в `visitsNext`.
  */
 export function visitsNow(day: SalonDayResponse): DayRow[] {
   return allRows(day)
     .filter(
       (row) =>
         row.visit.is_in_progress &&
+        row.visit.status !== COMPLETED_STATUS &&
         !RELEASED_VISIT_STATUSES.has(row.visit.status),
     )
     .sort(byStart);
@@ -153,11 +187,23 @@ export function visitsNext(day: SalonDayResponse, nowMs: number): DayRow[] {
  * выдать догадку за факт.
  */
 export function mastersToday(day: SalonDayResponse): MasterRow[] {
-  return day.masters.map((master) => ({
-    masterId: master.master_id,
-    name: master.name,
-    visitCount: master.visits.length,
-  }));
+  return day.masters
+    .filter(
+      // Отключённая карточка без единой записи на сегодня к сегодняшнему
+      // дню отношения не имеет: `build_salon_day` отдаёт всех
+      // неархивированных мастеров, а `is_active: false` — это выключенная
+      // карточка в каталоге. Но если у неё ЕСТЬ записи, мастер остаётся в
+      // списке: скрыть строку, за которой стоят живые записи, значило бы
+      // спрятать день, а не убрать шум.
+      (master) => master.is_active || master.visits.length > 0,
+    )
+    .map((master) => ({
+      masterId: master.master_id,
+      name: master.name,
+      visitCount: master.visits.filter(
+        (visit) => !RELEASED_VISIT_STATUSES.has(visit.status),
+      ).length,
+    }));
 }
 
 /**
@@ -179,11 +225,16 @@ export function formatTime(iso: string | null, timeZone: string): string {
       timeZone,
     }).format(dt);
   } catch {
-    // Неизвестный сервером пояс не должен ронять экран целиком.
+    // Пояс, которого не знает браузер, не должен ронять экран целиком —
+    // но и печатать время в поясе УСТРОЙСТВА нельзя: получилось бы
+    // правдоподобное и неверное время без единого признака подмены.
+    // Поэтому запасной вариант тот же, что у сервера (`DEFAULT_TZ` в
+    // `apps/admin_api/services/salon_day.py`), а не пояс телефона.
     return new Intl.DateTimeFormat("ru-RU", {
       hour: "2-digit",
       minute: "2-digit",
       hour12: false,
+      timeZone: FALLBACK_TZ,
     }).format(dt);
   }
 }

@@ -13,7 +13,25 @@
  *   мастера. Признак считает сервер (`is_in_progress`).
  * * `Дальше` — ближайшие записи, превью на три строки, остальные
  *   раскрываются на месте.
- * * `Мастера сегодня` — кто есть в команде и сколько у кого записей.
+ * * `Мастера сегодня` — кто из команды сегодня в деле и сколько у кого
+ *   записей. Выключенные карточки без единой записи не показываются;
+ *   выключенная карточка С записями показывается — спрятать строку, за
+ *   которой стоят живые записи, значило бы спрятать день.
+ *
+ * # Экран не молчит, когда показывать нечего
+ *
+ * Пусто бывает по двум разным причинам. День без записей — одно; день,
+ * где всё уже прошло, — другое, и к вечеру салон живёт именно в нём.
+ * Сказать про второе «записей нет» было бы неправдой, а не сказать
+ * ничего — оставить экран, неотличимый от несостоявшейся отрисовки.
+ *
+ * # День перечитывается при возврате на экран
+ *
+ * «Сейчас» сервер считает на момент ЗАПРОСА, а отсечка «Дальше»
+ * заморожена на момент ответа. Без обновления оставленная вкладка через
+ * два часа рисует «идёт» на том, что давно кончилось. Поэтому возврат на
+ * экран (`visibilitychange`) перезапрашивает день; опроса по таймеру нет
+ * — экран не стучится в ручку, пока на него никто не смотрит.
  *
  * # Чего на экране нет и почему
  *
@@ -42,6 +60,13 @@
  * так не выглядит.
  *
  * **Телефон клиента.** Его нет в полезной нагрузке вовсе (DRF-1039).
+ *
+ * **Освобождённые слоты.** Отменённые и неявки на «Сегодня» не
+ * показываются и не считаются: слот свободен, ждать на него некого.
+ * Служба дня отдаёт их намеренно — «отсутствующая строка и отменённая
+ * выглядят одинаково», — и для журнала дня это верно; для экрана
+ * ближайших часов верно обратное. Решение экрана, а не побочный эффект
+ * фильтров.
  *
  * Всё перечисленное вынесено в отчёт по задаче отдельным списком — это
  * работа по данным, а не решение этого экрана.
@@ -178,8 +203,10 @@ export function SalonPilotTodayScreen({ me }: { me: MeResponse }) {
    *
    * Берётся один раз на ответ, а не на каждый рендер: иначе раскрытие
    * списка пересчитывало бы отсечку, и запись, начавшаяся между двумя
-   * нажатиями, исчезала бы под пальцем. Обновляется вместе с данными —
-   * то есть по «Попробовать снова».
+   * нажатиями, исчезала бы под пальцем.
+   *
+   * Обновляется вместе с данными — то есть при каждой загрузке, включая
+   * ту, что делает возврат на экран (см. `visibilitychange` ниже).
    */
   const [loadedAtMs, setLoadedAtMs] = useState(() => Date.now());
 
@@ -209,6 +236,28 @@ export function SalonPilotTodayScreen({ me }: { me: MeResponse }) {
 
   const retry = useCallback(() => setAttempt((n) => n + 1), []);
 
+  /**
+   * Возврат на экран перезапрашивает день.
+   *
+   * Без этого экран показывает момент, в который его открыли, и ничего
+   * больше: «Сейчас» считает сервер на время ЗАПРОСА, а отсечка «Дальше»
+   * заморожена в `loadedAtMs`. Оставленная на обед вкладка через два часа
+   * рисует зелёные полосы «идёт» на визитах, которые давно кончились, — и
+   * ни одной кнопки обновить на успешном пути нет: «Попробовать снова»
+   * живёт внутри `StateError`, то есть только в отказе.
+   *
+   * Самый дешёвый честный ответ — перечитать день, когда человек к нему
+   * вернулся. Опросов по таймеру здесь нет намеренно: экран не обязан
+   * стучаться в ручку, пока на него никто не смотрит.
+   */
+  useEffect(() => {
+    const onVisible = () => {
+      if (document.visibilityState === "visible") retry();
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => document.removeEventListener("visibilitychange", onVisible);
+  }, [retry]);
+
   const nowRows = useMemo(() => (day ? visitsNow(day) : []), [day]);
   const nextRows = useMemo(
     () => (day ? visitsNext(day, loadedAtMs) : []),
@@ -222,7 +271,21 @@ export function SalonPilotTodayScreen({ me }: { me: MeResponse }) {
   const hiddenNextCount = nextRows.length - visibleNext.length;
 
   const subtitle = day ? formatDayLine(day.date) : null;
-  const tz = day?.timezone ?? "Europe/Moscow";
+
+  /**
+   * Строка состояния — одна и та же на всё время жизни экрана.
+   *
+   * Живой участок, вставленный в DOM уже с текстом, части читалок не
+   * объявляет вовсе, и переход «загружаем → загрузилось» не объявляет
+   * никто. Поэтому область постоянная, а меняется её ТЕКСТ.
+   */
+  let statusLine = "";
+  if (loading) statusLine = "Загружаем день салона…";
+  else if (!err && day) {
+    if (nowRows.length > 0) statusLine = `Сейчас идёт записей: ${nowRows.length}.`;
+    else if (nextRows.length > 0)
+      statusLine = `Ближайших записей: ${nextRows.length}.`;
+  }
 
   return (
     <SalonPilotFrame me={me} title="Сегодня" subtitle={subtitle}>
@@ -230,25 +293,38 @@ export function SalonPilotTodayScreen({ me }: { me: MeResponse }) {
         <button
           type="button"
           className="salon-today__cta"
-          onClick={() => navigate("/admin/booking/new")}
+          /* `?return=today` — чтобы экран создания вернул сюда, а не на
+             мост. Без параметра его возврат ведёт на `/admin/day`, и
+             главное действие пилота стало бы дверью в один конец: с
+             пятивкладочной поверхности назад в пилот не ведёт ничего.
+             Ровно та ловушка, от которой предостерегает
+             `SalonPilotFrame`. */
+          onClick={() => navigate("/admin/booking/new?return=today")}
         >
           + Новая запись
         </button>
       ) : null}
 
-      {loading ? (
-        <p className="salon-pilot__note" role="status">
-          Загружаем день салона…
-        </p>
-      ) : null}
+      <p className="salon-pilot__note" role="status">
+        {statusLine}
+      </p>
 
       {!loading && err ? <StateError err={err} onRetry={retry} /> : null}
 
       {!loading && !err && day ? (
         <>
-          {day.summary.total === 0 ? (
-            <div className="callout" role="status">
-              <p style={{ margin: 0 }}>Записей на сегодня нет.</p>
+          {/* Пусто на экране бывает по двум разным причинам, и молчать
+              нельзя ни в одной. День без записей — это одно; день, где
+              всё уже прошло, — совсем другое, и к вечеру салон живёт
+              именно в нём. Отличать их по `summary.total` можно честно:
+              он считает записи дня целиком, включая закрытые. */}
+          {nowRows.length === 0 && nextRows.length === 0 ? (
+            <div className="callout">
+              <p style={{ margin: 0 }}>
+                {day.summary.total === 0
+                  ? "Записей на сегодня нет."
+                  : "Записи на сегодня закончились — впереди ничего не осталось."}
+              </p>
             </div>
           ) : null}
 
@@ -266,7 +342,7 @@ export function SalonPilotTodayScreen({ me }: { me: MeResponse }) {
                   <VisitRow
                     key={row.visit.id}
                     row={row}
-                    timeZone={tz}
+                    timeZone={day.timezone}
                     variant="now"
                   />
                 ))}
@@ -287,18 +363,26 @@ export function SalonPilotTodayScreen({ me }: { me: MeResponse }) {
                   <VisitRow
                     key={row.visit.id}
                     row={row}
-                    timeZone={tz}
+                    timeZone={day.timezone}
                     variant="next"
                   />
                 ))}
               </ul>
-              {hiddenNextCount > 0 ? (
+              {/* Переключатель, а не одноразовая кнопка. Кнопка, которая
+                  исчезает под пальцем, роняет фокус в `<body>`: тот, кто
+                  ходит с клавиатуры или читалкой, теряет место, и никто
+                  не объявляет, что строк стало больше. И развернуть было
+                  можно, а свернуть — уже нет. */}
+              {nextRows.length > NEXT_PREVIEW_LIMIT ? (
                 <button
                   type="button"
                   className="salon-today__more"
-                  onClick={() => setShowAllNext(true)}
+                  aria-expanded={showAllNext}
+                  onClick={() => setShowAllNext((on) => !on)}
                 >
-                  {`Показать ещё ${visitCountLabel(hiddenNextCount).toLowerCase()}`}
+                  {showAllNext
+                    ? "Свернуть"
+                    : `Показать ещё ${visitCountLabel(hiddenNextCount).toLowerCase()}`}
                 </button>
               ) : null}
             </section>

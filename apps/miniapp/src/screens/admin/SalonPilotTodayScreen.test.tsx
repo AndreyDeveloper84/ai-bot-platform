@@ -20,7 +20,12 @@
  */
 import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { MemoryRouter, Route, Routes } from "react-router-dom";
+import {
+  MemoryRouter,
+  Route,
+  Routes,
+  useSearchParams,
+} from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("../../lib/admin-api", async (importOriginal) => {
@@ -36,6 +41,12 @@ import {
   type SalonDayVisit,
 } from "../../lib/admin-api";
 import { SalonPilotTodayScreen } from "./SalonPilotTodayScreen";
+
+/** Заглушка экрана создания записи — печатает, куда ей велено вернуть. */
+function BookingProbe() {
+  const [params] = useSearchParams();
+  return <p>{`Экран новой записи · возврат: ${params.get("return")}`}</p>;
+}
 
 const mockedDay = vi.mocked(getSalonDay);
 
@@ -122,7 +133,10 @@ function renderToday(me: MeResponse = OWNER) {
     <MemoryRouter initialEntries={["/admin/today"]}>
       <Routes>
         <Route path="/admin/today" element={<SalonPilotTodayScreen me={me} />} />
-        <Route path="/admin/booking/new" element={<p>Экран новой записи</p>} />
+        <Route
+          path="/admin/booking/new"
+          element={<BookingProbe />}
+        />
       </Routes>
     </MemoryRouter>,
   );
@@ -185,6 +199,79 @@ describe("что построено с макета", () => {
     expect(screen.queryByText("Дальше")).toBeNull();
   });
 
+  it("день, где всё уже прошло, назван своими словами, а не «записей нет»", async () => {
+    // Вечер: записи были, впереди ничего. `summary.total` считает день
+    // целиком, поэтому «записей нет» здесь было бы неправдой, а молчание
+    // — экраном, неотличимым от несостоявшейся отрисовки.
+    mockedDay.mockResolvedValue({
+      date: "2026-08-22",
+      timezone: "Europe/Moscow",
+      summary: { total: 2, upcoming: 0, completed: 2, released: 0 },
+      masters: [
+        {
+          master_id: "m-1",
+          name: "Денис",
+          is_active: true,
+          visits: [
+            visit({
+              id: "past-1",
+              start_at: "2026-08-22T06:00:00Z",
+              end_at: "2026-08-22T07:00:00Z",
+              status: "completed",
+              is_in_progress: false,
+            }),
+          ],
+        },
+      ],
+      orphan_visits: [],
+    });
+    renderToday();
+
+    expect(
+      await screen.findByText(
+        "Записи на сегодня закончились — впереди ничего не осталось.",
+      ),
+    ).toBeInTheDocument();
+    const emptyCopy = screen.queryByText("Записей на сегодня нет.");
+    expect(emptyCopy).toBeNull();
+  });
+
+  it("закрытая до конца интервала запись не висит в «Сейчас»", async () => {
+    // Сервер оставляет ей `is_in_progress: true` — `completed` не входит
+    // в `RELEASED_STATUSES`.
+    mockedDay.mockResolvedValue({
+      date: "2026-08-22",
+      timezone: "Europe/Moscow",
+      summary: { total: 2, upcoming: 0, completed: 1, released: 0 },
+      masters: [
+        {
+          master_id: "m-1",
+          name: "Денис",
+          is_active: true,
+          visits: [
+            visit({ id: "running", client_first_name: "Анна" }),
+            visit({
+              id: "closed",
+              client_first_name: "Пётр",
+              client_last_initial: "В.",
+              status: "completed",
+              is_in_progress: true,
+            }),
+          ],
+        },
+      ],
+      orphan_visits: [],
+    });
+    renderToday();
+
+    // Идущая на месте...
+    const now = await screen.findByRole("region", { name: /Сейчас/ });
+    expect(within(now).getByText("Анна П.")).toBeInTheDocument();
+    // ...а закрытая — нет.
+    const closed = within(now).queryByText("Пётр В.");
+    expect(closed).toBeNull();
+  });
+
   it("не отвечающая ручка даёт общий StateError с повтором", async () => {
     mockedDay.mockRejectedValue(new Error("boom"));
     renderToday();
@@ -206,7 +293,12 @@ describe("кнопка «Новая запись» решается по рол�
 
     const cta = await screen.findByRole("button", { name: "+ Новая запись" });
     await userEvent.click(cta);
-    expect(await screen.findByText("Экран новой записи")).toBeInTheDocument();
+    // Не просто «дошёл до экрана», а «дошёл с адресом возврата»: без него
+    // экран создания вернул бы на мост, и главное действие пилота стало
+    // бы дверью в один конец.
+    expect(
+      await screen.findByText("Экран новой записи · возврат: today"),
+    ).toBeInTheDocument();
   });
 
   it("ресепшн её не видит: сервер откажет в создании (require_admin_role)", async () => {
@@ -295,10 +387,21 @@ describe("остаток дня раскрывается на месте", () =>
     const hidden = screen.queryByText("Клиент4");
     expect(hidden).toBeNull();
 
-    await userEvent.click(
-      screen.getByRole("button", { name: "Показать ещё 2 записи" }),
-    );
+    const toggle = screen.getByRole("button", {
+      name: "Показать ещё 2 записи",
+    });
+    expect(toggle).toHaveAttribute("aria-expanded", "false");
+    await userEvent.click(toggle);
     expect(await screen.findByText("Клиент4")).toBeInTheDocument();
     expect(screen.getByText("Клиент5")).toBeInTheDocument();
+
+    // Кнопка не исчезает под пальцем: фокус остаётся на ней, и раскрытие
+    // обратимо.
+    const collapse = screen.getByRole("button", { name: "Свернуть" });
+    expect(collapse).toHaveAttribute("aria-expanded", "true");
+    await userEvent.click(collapse);
+    const gone = screen.queryByText("Клиент4");
+    expect(gone).toBeNull();
+    expect(screen.getByText("Клиент3")).toBeInTheDocument();
   });
 });

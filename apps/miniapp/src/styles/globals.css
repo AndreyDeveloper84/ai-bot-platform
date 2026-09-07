@@ -1326,7 +1326,7 @@ a {
 .salon-today__cta {
   display: block;
   width: 100%;
-  min-height: 48px; /* a11y — handoff §16 */
+  min-height: 48px; /* главное действие — как `.cta-bar__button` */
   margin: 0 0 var(--s-4);
   padding: 0 var(--s-4);
   background: var(--c-accent);
@@ -1454,7 +1454,7 @@ a {
 .salon-today__more {
   display: block;
   width: 100%;
-  min-height: 44px; /* a11y — handoff §16 */
+  min-height: 44px; /* второстепенное действие — как `.btn-secondary` */
   margin-top: var(--s-2);
   color: var(--c-accent);
   font-size: var(--font-size-200);
