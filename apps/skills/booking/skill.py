@@ -35,6 +35,38 @@ the Ayla REST path reads the RESOLVED per-edge
 from Ayla's escalate-only OR of template floor → salon service →
 specialist. Unknown → gate closed.
 
+**DRF-1545 (owner, 06.09.2026 — ``docs/OPEN_DECISIONS.md`` §36).** Two
+things are settled here and are not tuning knobs:
+
+* **No salon can switch the gate off.** The per-tenant allowlist
+  ``BOOKING_HEALTH_CHECK_GATE_DISABLED_TENANTS`` is gone as a mechanism.
+  The duty to ask belongs to the procedure, not to the venue.
+* **A gate that fires hands the person to a human — it does not ask.**
+  The gate is one boolean; it never reads the contraindication text, and
+  on 06.09.2026 not one of 265 mirrored services had any. Asking "any
+  contraindications?" with nothing behind it buys a tick-box, not a
+  safety check — «видимость защиты, а не защита».
+
+  This is not a special case invented for the health gate. It is the
+  conversation canon's general admission rule (v1.1 §8, read in
+  ``docs/OPEN_DECISIONS.md`` §40.2 п.1): **a question is permitted only
+  when the answer can change admissibility, ranking, or a required
+  execution parameter.** With no text to ask about and no branch the
+  answer could move, the question is not merely useless — it is not
+  admissible. Handing over is what the rule leaves.
+
+  The handover is the escalation that already exists (DRF-1015):
+  ``should_handoff=True`` → ``_dispatch_skill_handoff`` →
+  ``apps.handoff.services.create_admin_task`` → the operator queue, the
+  ``HUMAN_HANDOFF`` flip and its silence notices. Canon §40.3 (а)
+  forbids building a second one, and ``task_type`` must stay
+  ``HANDOFF``: ``orchestrator.handoff.global_handoff_muted`` filters on
+  it, so any other type would silently drop the cross-dialog mute the
+  person depends on (DRF-1486).
+
+  The handoff log line records whether contraindication text existed, so
+  the day Ayla starts sending it shows up instead of being guessed at.
+
 Scope, stated plainly: this is the conversational channel's routing
 policy, not a platform-wide interlock. No other booking entry point
 reads the flag.
@@ -360,8 +392,17 @@ _FLOW_ABORT_REPLIES = {
 # Audit / event slugs.
 EVENT_BOOKING_HANDLED = "booking.handled"
 EVENT_BOOKING_HANDOFF = "booking.handoff"
-# DRF-1005: owner-required trace for every evaluation where the pilot
-# allowlist disabled the health-check gate for a tenant.
+# DRF-1005: owner-required trace for every evaluation where something
+# disabled the health-check gate for a tenant — "отключение медицинской
+# проверки должно быть прослеживаемым, а не невидимым".
+#
+# DRF-1545 removed the only thing that could disable it, so nothing writes
+# this action today and no booking path may start writing one without a
+# switch to name. The slug is kept deliberately: the requirement that a
+# disabling be auditable outlives the switch that was audited, and a future
+# override that appears without this row would be exactly the invisible
+# disabling the owner ruled out. ``TestHealthGateNoTenantOverride`` guards
+# both halves — the name survives, no writer does.
 EVENT_BOOKING_HEALTH_GATE_DISABLED = "booking.health_check_gate_disabled"
 
 
@@ -999,10 +1040,17 @@ class BookingSkill:
                 # DRF-1005: this branch used to hand off without a single
                 # log line — log the policy decision, and use the policy
                 # text (consultation), not the failure fallback.
+                #
+                # DRF-1545: hand the person over, never ask a hollow
+                # question. ``contraindications`` is logged, not consulted
+                # — the escalation is unconditional either way, and the
+                # field is what will show the day Ayla starts sending it.
                 logger.info(
-                    "booking.confirm.health_check_required tenant=%s service=%s",
+                    "booking.confirm.health_check_required tenant=%s service=%s "
+                    "contraindications=%s",
                     tenant_id,
                     service_id,
+                    "present" if _has_contraindication_text(tenant, service_id) else "absent",
                 )
                 return _handoff(
                     tool_calls_made=tool_calls_made,
@@ -1302,40 +1350,36 @@ def _fetch_master_lookup(yclients: Any) -> dict[int | str, str]:
 # ---------------------------------------------------------------------------
 
 
-def _health_check_gate_disabled_for_tenant() -> bool:
-    """DRF-1005: True when the ACTIVE tenant is in the pilot allowlist.
+def _has_contraindication_text(tenant: Any, service_id: int | str) -> bool:
+    """Whether the mirrored service carries any contraindication TEXT.
 
-    The tenant identity comes from the active ``tenant_scope`` (same
-    lazy-import pattern as ``apps/integrations/ayla/booking_client.py``,
-    DRF-997/1004) — never from caller-supplied data.
+    DRF-1545 / ``docs/OPEN_DECISIONS.md`` §36. Observability only — this
+    never decides anything. The gate is one boolean and reads no text;
+    on 06.09.2026 all 265 mirrored services had an empty
+    ``contraindications`` column, which is precisely why a gated booking
+    is handed to a human instead of being covered with a generic "any
+    contraindications?" question the bot could not follow up on.
 
-    Fail-closed on every doubt: no tenant in scope, or a malformed
-    setting value injected past settings load (``override_settings`` /
-    live reload), keeps the gate CLOSED. A malformed value can never
-    silently widen access, and a settings-load-time malformed value never
-    boots at all (``config/settings/base.py`` raises
-    ``ImproperlyConfigured``).
+    The value is logged at the handoff so the day Ayla starts sending the
+    text is visible in the logs rather than guessed at. Any doubt reads
+    as "absent": no row, an id that names nothing, a catalog that is not
+    importable. Absent is the status quo and the safe answer, since both
+    answers lead to the same handoff.
     """
-    from django.conf import settings
-
-    from apps.eventbus.ingest_allowlist import (
-        AllowlistConfigurationError,
-        parse_tenant_allowlist,
-    )
-    from apps.tenancy.context import current_tenant
-
-    tenant = current_tenant()
-    if tenant is None:
-        return False
-    raw: Any = getattr(settings, "BOOKING_HEALTH_CHECK_GATE_DISABLED_TENANTS", frozenset())
     try:
-        allowed = parse_tenant_allowlist(
-            raw, setting_name="BOOKING_HEALTH_CHECK_GATE_DISABLED_TENANTS"
-        )
-    except AllowlistConfigurationError as exc:
-        logger.warning("booking.health_gate.allowlist_malformed err=%s", exc)
+        from apps.catalog.models import CatalogService
+    except ImportError:  # pragma: no cover — catalog always available
         return False
-    return str(tenant.id).lower() in allowed
+    rows = CatalogService.all_tenants.filter(tenant=tenant)
+    try:
+        rows = rows.filter(ayla_service_id=uuid.UUID(str(service_id)))
+    except (ValueError, AttributeError, TypeError):
+        try:
+            rows = rows.filter(external_id=int(service_id))
+        except (ValueError, TypeError):
+            return False
+    text = rows.values_list("contraindications", flat=True).first()
+    return bool(text and text.strip())
 
 
 def _resolved_health_check_for_edge(
@@ -1405,16 +1449,22 @@ def _service_requires_health_check(
     source that #1034/#1121 called missing now exists and is mirrored:
     ``MasterService.resolved_requires_health_check``. Precedence:
 
-    1. **The resolved verdict wins, in both directions.** ``True`` gates,
-       ``False`` opens. It wins over the DRF-1005 allowlist too — an
-       allowlisted tenant must not be able to book a service Ayla says
-       needs screening. That ordering is a tightening, not a loosening:
-       before DRF-1353 the single allowlisted pilot tenant was the one
-       tenant for which the gate could never fire at all.
-    2. **Unknown (``None``) falls back to the DRF-1005 allowlist**, which
-       keeps its original job: unblock a pilot tenant whose edges are not
-       mirrored (operator-owned MM4 rows, sync not yet run).
-    3. **Otherwise fail closed** — unchanged from #1034.
+    1. **The resolved verdict decides, in both directions.** ``True``
+       gates, ``False`` opens.
+    2. **Unknown (``None``) fails closed** — unchanged from #1034.
+       Absence of evidence is not evidence of safety for a medical check.
+
+    **DRF-1545: there is no per-tenant override, by design.** DRF-1005 had
+    one (``BOOKING_HEALTH_CHECK_GATE_DISABLED_TENANTS``, an allowlist of
+    tenants whose unknown edges opened instead of closing) and the owner
+    removed the mechanism outright on 06.09.2026, not merely the one salon
+    on it: "требование расспросить человека принадлежит процедуре, а не
+    площадке" — a salon cannot cancel a contraindication. The measurement
+    that made the removal free is in ``docs/OPEN_DECISIONS.md`` §36: all
+    387 pilot edges carried a synced verdict, so the allowlist (which only
+    ever spoke for UNKNOWN edges) decided nothing on the day it was
+    deleted, and the one salon holding it had no screened service — it
+    would have opened silently the day it got one.
 
     Note what this gate is and is not. No other booking entry point in this
     codebase consults it — ``apps/booking/services/create.py``,
@@ -1435,26 +1485,14 @@ def _service_requires_health_check(
                 resolved,
             )
             return bool(resolved)
-        if _health_check_gate_disabled_for_tenant():
-            # DRF-1005: owner-mandated audit trail — disabling a medical
-            # screening check must be traceable, never invisible.
-            logger.info(
-                "booking.health_check_gate.disabled tenant=%s service=%s",
-                getattr(tenant, "id", "?"),
-                service_id,
-            )
-            write_audit(
-                EVENT_BOOKING_HEALTH_GATE_DISABLED,
-                target="BookingSkill",
-                payload={
-                    "tenant_id": str(getattr(tenant, "id", "")),
-                    "service_id": str(service_id),
-                    "master_id": str(master_id or ""),
-                    "reason": "resolved_flag_unknown",
-                },
-            )
-            return False
-        # Edge not mirrored and tenant not allowlisted → fail closed. See #1034.
+        # Edge not mirrored → fail closed. See #1034. Nothing may open it:
+        # DRF-1545 removed the last override that could (see docstring).
+        logger.info(
+            "booking.health_gate.unknown_edge_closed tenant=%s master=%s service=%s",
+            getattr(tenant, "id", "?"),
+            master_id,
+            service_id,
+        )
         return True
 
     try:
@@ -1855,11 +1893,15 @@ def _handle_pick_slot_callback(
     if _service_requires_health_check(tenant, service_id, master_id):
         # DRF-1005: log the policy decision (this branch used to hand off
         # silently) and use the policy text, not the failure fallback.
+        # DRF-1545: same handover, same reason to log the text — see the
+        # confirm path above.
         logger.info(
-            "booking.pick_slot.health_check_required tenant=%s master=%s service=%s",
+            "booking.pick_slot.health_check_required tenant=%s master=%s service=%s "
+            "contraindications=%s",
             tenant_id,
             master_id,
             service_id,
+            "present" if _has_contraindication_text(tenant, service_id) else "absent",
         )
         return _handoff(
             tool_calls_made=[],
