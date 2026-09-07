@@ -329,6 +329,15 @@ VISITS_LISTED = "marketplace.visits.listed"
 VISIT_CARD_OPENED = "marketplace.visit_card.opened"
 REPEAT_CHECKED = "marketplace.repeat.checked"
 
+# DRF-1547 / §37 п.1 — отмена записи С КАРТОЧКИ, в чате.
+#
+# Своё имя, а не ``BOOKING_CANCELLED``: то событие пишет БЭКЕНД по
+# круговому ходу, а это — ход ЧЕЛОВЕКА на клиентской поверхности. Слить
+# их в одно значило бы потерять ровно тот вопрос, ради которого действие
+# переехало на карточку: пользуются ли отменой из чата и чем она
+# заканчивается.
+VISIT_CANCELLED = "marketplace.visit.cancelled"
+
 
 CANONICAL_EVENTS: frozenset[str] = frozenset(
     {
@@ -394,6 +403,7 @@ CANONICAL_EVENTS: frozenset[str] = frozenset(
         VISITS_LISTED,
         VISIT_CARD_OPENED,
         REPEAT_CHECKED,
+        VISIT_CANCELLED,
     }
 )
 

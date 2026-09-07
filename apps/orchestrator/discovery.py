@@ -243,7 +243,17 @@ CALLBACK_CATALOG_SALONS = "cb:catalog:salons"
 #: The one label for that chip. Single wording point, same reason
 #: :func:`render_alternatives` is one: two spellings of the same button read
 #: as two different buttons.
-SHOW_SALONS_LABEL = "Показать салоны"
+#:
+#: DRF-1547 / §37 п.4, решение владельца дословно: «„Показать салоны“ →
+#: „Найти салон“. Это ДЕЙСТВИЕ, а не техническая команда интерфейсу.»
+#:
+#: Переименована КОНСТАНТА, а не только пункт меню, и это часть решения, а
+#: не расширение объёма: та же кнопка висит под тупиками этого модуля,
+#: под пустой историей визитов и под отказами повтора. Оставить её
+#: «Показать салоны» в одном месте и «Найти салон» в другом значило бы
+#: воспроизвести ровно ту несогласованность, ради устранения которой §37
+#: и написан.
+SHOW_SALONS_LABEL = "Найти салон"
 
 CATALOG_CALLBACK_PREFIXES = (
     CALLBACK_CATALOG_SERVICES_PREFIX,
@@ -1822,7 +1832,7 @@ def _parse_service_tap(callback_text: str) -> tuple[UUID, int] | None:
 #: ends somewhere the user can act.
 CATALOG_STALE_CARD_TEXT = (
     "Эта карточка уже неактуальна — каталог с тех пор обновился. "
-    "Нажмите «Показать салоны», и я покажу заново."
+    "Нажмите «Найти салон», и я покажу заново."
 )
 
 

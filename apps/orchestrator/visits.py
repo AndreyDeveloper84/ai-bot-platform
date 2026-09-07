@@ -15,6 +15,7 @@ surface and is not touched here.
 from __future__ import annotations
 
 import logging
+import re
 import uuid
 from datetime import datetime
 from decimal import Decimal
@@ -31,7 +32,12 @@ from apps.booking.services.records import (
 )
 from apps.bookings.keyboards import CALLBACK_BOOK_PICK_MASTER_PREFIX
 from apps.events.services import emit
-from apps.events.vocabulary import REPEAT_CHECKED, VISIT_CARD_OPENED, VISITS_LISTED
+from apps.events.vocabulary import (
+    REPEAT_CHECKED,
+    VISIT_CANCELLED,
+    VISIT_CARD_OPENED,
+    VISITS_LISTED,
+)
 from apps.orchestrator.discovery import (
     DiscoveryReply,
     keyboard_envelope,
@@ -46,8 +52,39 @@ logger = logging.getLogger(__name__)
 CALLBACK_VISIT_CARD_PREFIX = "cb:visit:card:"
 CALLBACK_VISIT_REPEAT_PREFIX = "cb:visit:repeat:"
 
+# DRF-1547 / §37 п.1 — действия НА КАРТОЧКЕ КОНКРЕТНОЙ ЗАПИСИ.
+#
+# Владелец дословно: «Сначала человек выбирает конкретную запись, затем
+# действие. Так меньше риск отменить не тот визит.» До этой правки
+# «Перенести» и «Отменить» были пунктами ГЛАВНОГО МЕНЮ: тап превращался в
+# фразу «Отменить запись» (``MENU_CALLBACK_TEXT``) и уезжал консьержу, у
+# которого в реестре инструментов глагола отмены нет вовсе. То есть кнопка
+# была, а пути за ней не было — ровно тот дефект, по признаку которого из
+# меню снимались пищевые пункты.
+#
+# Три шага, а не два, и третий не бюрократия: ``cancel`` СПРАШИВАЕТ, назвав
+# услугу и время, ``drop`` выполняет. Между списком и необратимым действием
+# стоит экран, на котором написано, ЧТО именно исчезнет.
+CALLBACK_VISIT_MOVE_PREFIX = "cb:visit:move:"
+CALLBACK_VISIT_CANCEL_PREFIX = "cb:visit:cancel:"
+CALLBACK_VISIT_DROP_PREFIX = "cb:visit:drop:"
+
 # What the global handler matches to route a tap here.
-VISIT_CALLBACK_PREFIXES = (CALLBACK_VISIT_CARD_PREFIX, CALLBACK_VISIT_REPEAT_PREFIX)
+VISIT_CALLBACK_PREFIXES = (
+    CALLBACK_VISIT_CARD_PREFIX,
+    CALLBACK_VISIT_REPEAT_PREFIX,
+    CALLBACK_VISIT_MOVE_PREFIX,
+    CALLBACK_VISIT_CANCEL_PREFIX,
+    CALLBACK_VISIT_DROP_PREFIX,
+)
+
+#: Сколько ближайших записей получают ПОЛНЫЙ набор действий в списке.
+#:
+#: Не косметика: три действия на запись означают три кнопки, и без
+#: потолка человек с пятью записями получил бы пятнадцать. Потолок стоит
+#: на ДЕЙСТВИЯХ, а не на списке — в тексте перечислены все записи, какие
+#: вернул бэкенд, так что ни одна не пропадает из виду.
+_MAX_ACTIONABLE_UPCOMING = 3
 
 # The pilot's timezone. ``TIME_ZONE`` is UTC in this service, so
 # ``timezone.localtime`` would keep the bug DRF-1071 reported, and the
@@ -95,6 +132,56 @@ _EMPTY_TEXT = (
     "Скажите, что вам нужно, — или посмотрите наши салоны, оттуда можно записаться."
 )
 
+# DRF-1547 — тексты действий на карточке.
+#
+# Каждый называет СВОЙ исход. Довод тот же, которым DRF-1492 разводил
+# «Ок, не записываю» и «ничего не меняю»: фраза, верная для одного глагола,
+# сказанная над другим, звучит как ошибка системы, а не как ответ.
+
+#: Перенос невозможен технически — мини-приложения нет в этом развёртывании.
+#: Не «попробуйте позже»: позже ничего не изменится, пока не появится
+#: настройка. Отмена при этом работает — она ботовая, и об этом сказано.
+_MOVE_UNAVAILABLE_TEXT = (
+    "Перенести отсюда сейчас не получится — расписание открывается в приложении, "
+    "а оно не подключено. Отменить запись я могу прямо здесь."
+)
+
+#: Записи уже нет — до того, как человек нажал «Да, отменить», либо
+#: вовсе. Один текст на оба случая намеренно: для человека они
+#: неразличимы, и различать их вслух значило бы рассказывать ему про
+#: устройство наших очередей.
+_CANCEL_GONE_TEXT = "Этой записи уже нет — отменять нечего."
+
+#: Бэкенд отказал по состоянию записи (слишком поздно, визит идёт,
+#: запись уже закрыта). Что именно — знает салон, и звать его честнее,
+#: чем пересказывать чужое правило своими словами.
+_CANCEL_REFUSED_TEXT = (
+    "Эту запись отменить не получилось — салон её уже не отдаёт. "
+    "Напишите «оператор», и с ней разберётся человек."
+)
+
+#: Сервис недоступен. Отдельно от отказа: здесь ПОВТОРИТЬ имеет смысл, а
+#: там нет, и сказать «попробуйте позже» про окончательный отказ значило
+#: бы отправить человека ждать напрасно.
+_CANCEL_UNAVAILABLE_TEXT = (
+    "Не смогла отменить запись — сервис не отвечает. Попробуйте, пожалуйста, чуть позже."
+)
+
+#: Префикс полезной нагрузки, открывающей экран переноса КОНКРЕТНОЙ
+#: записи. Живёт здесь, а не в ``MINIAPP_ROUTES``: та таблица плоская
+#: («слаг — путь»), а этот payload несёт параметр. Единственный
+#: существующий прецедент такой формы — ``master_invite_{uuid}``, и он
+#: устроен так же: семейство по префиксу, параметр по строгой форме.
+RESCHEDULE_PAYLOAD_PREFIX = "reschedule_"
+
+#: Строгая форма идентификатора записи. Проверяется ЗДЕСЬ, а не только в
+#: SPA: payload уходит в ``open_app``, MAX отвечает 400 на всё, что не
+#: подходит под ``OPEN_APP_PAYLOAD_RE``, и этот отказ уносит с собой
+#: ВЕСЬ ответ, а не одну кнопку (MAX-hardening Guard 3).
+_UUID_RE = re.compile(
+    r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+)
+
 
 def route_visits(
     *,
@@ -139,7 +226,7 @@ def route_visits(
 
     return DiscoveryReply(
         text="\n\n".join(blocks),
-        action_data=_visit_buttons(visits.visits),
+        action_data=_records_buttons(upcoming.visits, visits.visits),
     )
 
 
@@ -149,18 +236,34 @@ def route_visit_callback(
     callback_text: str,
     trace_id: str | uuid.UUID | None = None,
 ) -> DiscoveryReply:
-    """Dispatch a ``cb:visit:*`` tap to the card or the repeat check.
+    """Dispatch a ``cb:visit:*`` tap to the card, repeat, move or cancel.
 
     The id is whatever the bot itself put in the button. A forged one buys
-    nothing: the backend scopes every read to the resolved subject and
-    answers 404 for anyone else's booking, so a bad id ends as "not found",
-    never as someone else's visit.
+    nothing: the backend scopes every read AND every write to the resolved
+    subject and answers 404 for anyone else's booking, so a bad id ends as
+    "not found", never as someone else's visit — and never as someone
+    else's cancellation.
     """
     if callback_text.startswith(CALLBACK_VISIT_REPEAT_PREFIX):
         return route_repeat(
             global_bot_user=global_bot_user,
             appointment_id=callback_text[len(CALLBACK_VISIT_REPEAT_PREFIX) :].strip(),
             trace_id=trace_id,
+        )
+    if callback_text.startswith(CALLBACK_VISIT_MOVE_PREFIX):
+        return route_visit_move(
+            global_bot_user=global_bot_user,
+            appointment_id=callback_text[len(CALLBACK_VISIT_MOVE_PREFIX) :].strip(),
+        )
+    if callback_text.startswith(CALLBACK_VISIT_CANCEL_PREFIX):
+        return route_visit_cancel_ask(
+            global_bot_user=global_bot_user,
+            appointment_id=callback_text[len(CALLBACK_VISIT_CANCEL_PREFIX) :].strip(),
+        )
+    if callback_text.startswith(CALLBACK_VISIT_DROP_PREFIX):
+        return route_visit_cancel_do(
+            global_bot_user=global_bot_user,
+            appointment_id=callback_text[len(CALLBACK_VISIT_DROP_PREFIX) :].strip(),
         )
     return route_visit_card(
         global_bot_user=global_bot_user,
@@ -175,7 +278,15 @@ def route_visit_card(
     appointment_id: str,
     trace_id: str | uuid.UUID | None = None,
 ) -> DiscoveryReply:
-    """Open one visit — service, master, date, what it cost then."""
+    """Open one booking — service, master, date, and what can be done to it.
+
+    One card for both halves of the list, and the buttons are what differs:
+    a visit that has happened can be repeated, a booking still ahead can be
+    moved or cancelled. Offering «Записаться ещё» over a booking that has
+    not happened yet would be the same class of wrongness the reschedule
+    refusal texts were fixed for in DRF-1492 — a true sentence about the
+    wrong verb.
+    """
     from apps.booking.services.records import get_visit
 
     visit = get_visit(bot_user=global_bot_user, appointment_id=appointment_id)
@@ -192,13 +303,153 @@ def route_visit_card(
     ]
     if visit.master_name:
         lines.append(f"Мастер: {visit.master_name}")
-    if visit.price is not None:
-        lines.append(f"Стоил: {_format_money(visit.price)}")
 
+    past = _is_past(visit)
+    if visit.price is not None:
+        # «Стоил» — прошедшее время, и оно верно только для прошедшего
+        # визита. У записи впереди это «Стоит», и разница не стилистическая:
+        # цена будущей записи может ещё измениться, а цена состоявшегося
+        # визита это факт.
+        lines.append(f"{'Стоил' if past else 'Стоит'}: {_format_money(visit.price)}")
+
+    text = "\n".join(lines)
+    if past:
+        return DiscoveryReply(text=text, action_data=_repeat_button(visit))
+    return DiscoveryReply(text=text, action_data=keyboard_envelope(_card_actions(visit)))
+
+
+def route_visit_move(*, global_bot_user, appointment_id: str) -> DiscoveryReply:
+    """«Перенести» — предупредить и открыть расписание (§37 п.6).
+
+    Приложение здесь открывается по правилу границы: выбор времени это
+    визуальный выбор, в чате его не сделать удобно. А раз оно откроется,
+    человека предупреждают НЕПОСРЕДСТВЕННО перед этим — формулировкой
+    владельца, дословно (:data:`apps.skills.menu.marketplace.WARN_TIME`).
+
+    Кнопка одна и открывает ЭКРАН ПЕРЕНОСА КОНКРЕТНОЙ ЗАПИСИ
+    (``/customer/records/{id}/reschedule``), а не общий список: человек уже
+    выбрал запись, и заставлять его выбирать её второй раз в приложении
+    значило бы вернуть ровно тот риск, ради снятия которого действие
+    переехало на карточку.
+
+    Без настроенного мини-приложения открывать нечем. Тогда ход не
+    теряется: карточка возвращается со своими действиями, и отмена по-
+    прежнему работает — она ботовая.
+    """
+    from apps.booking.services.records import get_visit
+    from apps.skills.menu.marketplace import OPEN_BUTTON_LABEL, WARN_TIME
+
+    button = reschedule_button(appointment_id, label=OPEN_BUTTON_LABEL)
+    if button is None:
+        visit = get_visit(bot_user=global_bot_user, appointment_id=appointment_id)
+        if visit is None:
+            return DiscoveryReply(text=_UNAVAILABLE_TEXT)
+        return DiscoveryReply(
+            text=_MOVE_UNAVAILABLE_TEXT,
+            action_data=keyboard_envelope(_card_actions(visit)),
+        )
+    return DiscoveryReply(text=WARN_TIME, action_data={"buttons": [button], "button_columns": 1})
+
+
+def route_visit_cancel_ask(*, global_bot_user, appointment_id: str) -> DiscoveryReply:
+    """«Отменить» — спросить, НАЗВАВ запись, и только потом отменять.
+
+    Экран существует ради довода владельца: «так меньше риск отменить не
+    тот визит». Подтверждение, которое не называет услугу и время, этот
+    риск не снимает — оно просто добавляет тап.
+
+    Карточка читается заново, а не берётся из подписи кнопки: клавиатура
+    живёт в истории чата, и запись за ней могла измениться или исчезнуть.
+    """
+    from apps.booking.services.records import get_visit
+
+    visit = get_visit(bot_user=global_bot_user, appointment_id=appointment_id)
+    if visit is None:
+        return DiscoveryReply(text=_CANCEL_GONE_TEXT)
+    what = f"{visit.service_name or 'запись'} — {_format_when(visit.start_at)}"
     return DiscoveryReply(
-        text="\n".join(lines),
-        action_data=_repeat_button(visit),
+        text=f"Отменяю запись: {what}.\nПодтвердите — отменить её?",
+        action_data=keyboard_envelope(
+            [
+                {
+                    "label": "Да, отменить",
+                    "callback": f"{CALLBACK_VISIT_DROP_PREFIX}{visit.appointment_id}",
+                },
+                {
+                    "label": "Нет, оставить",
+                    "callback": f"{CALLBACK_VISIT_CARD_PREFIX}{visit.appointment_id}",
+                },
+            ]
+        ),
     )
+
+
+def route_visit_cancel_do(*, global_bot_user, appointment_id: str) -> DiscoveryReply:
+    """Отмена подтверждена — выполнить и сказать, что именно исчезло.
+
+    Каждый исход говорит правду о СВОЁМ действии (DRF-1492): «отменила» —
+    только там, где отменила именно этот ход; «её и так уже не было» —
+    там, где записи не стало раньше. Ни один из них не обещает того, чего
+    не произошло.
+    """
+    from apps.booking.services.records import cancel_booking, get_visit
+
+    visit = get_visit(bot_user=global_bot_user, appointment_id=appointment_id)
+    what = ""
+    if visit is not None:
+        what = f"{visit.service_name or 'запись'} — {_format_when(visit.start_at)}"
+
+    status = cancel_booking(bot_user=global_bot_user, appointment_id=appointment_id)
+    emit(
+        VISIT_CANCELLED,
+        distinct_id=str(global_bot_user.id),
+        properties={"status": status},
+    )
+    if status == "ok":
+        text = f"Отменила: {what}." if what else "Отменила эту запись."
+        return DiscoveryReply(text=text, action_data=keyboard_envelope([show_salons_button()]))
+    if status in {"already_gone", "not_found"}:
+        return DiscoveryReply(
+            text=_CANCEL_GONE_TEXT, action_data=keyboard_envelope([show_salons_button()])
+        )
+    if status == "refused":
+        return DiscoveryReply(text=_CANCEL_REFUSED_TEXT)
+    return DiscoveryReply(text=_CANCEL_UNAVAILABLE_TEXT)
+
+
+def reschedule_button(appointment_id: str, *, label: str) -> dict[str, str] | None:
+    """Кнопка, открывающая экран переноса КОНКРЕТНОЙ записи.
+
+    ``None`` — мини-приложение не настроено, открывать нечем.
+
+    Полезная нагрузка ``reschedule_{uuid}`` разбирается на стороне SPA
+    (``apps/miniapp/src/lib/max-sdk.ts``) тем же приёмом и с той же
+    строгостью, что и приглашение мастера ``master_invite_{uuid}``: по
+    ПРЕФИКСУ семейство, по строгой форме UUID — параметр. «Всё, что после
+    префикса» было бы дырой, а не сокращением: хвост попадает в адрес
+    самого приложения.
+    """
+    from django.conf import settings
+
+    from apps.skills.welcome.skill import reschedule_route
+
+    booking_id = (appointment_id or "").strip()
+    if not _UUID_RE.match(booking_id):
+        return None
+    web_app = getattr(settings, "MAX_BOT_WEB_APP", "") or ""
+    miniapp_url = getattr(settings, "MAX_MINIAPP_URL", "") or ""
+    if web_app:
+        return {
+            "label": label,
+            "callback": f"{RESCHEDULE_PAYLOAD_PREFIX}{booking_id}",
+            "web_app": web_app,
+        }
+    if miniapp_url:
+        return {
+            "label": label,
+            "url": f"{miniapp_url.rstrip('/')}/{reschedule_route(booking_id)}",
+        }
+    return None
 
 
 def route_repeat(
@@ -281,21 +532,77 @@ def _visit_line(visit: Visit) -> str:
 _MAX_CHIP_LABEL_CHARS = 40
 
 
-def _visit_buttons(visits: tuple[Visit, ...]) -> dict | None:
-    """One «Подробнее» per visit, capped by the list itself.
+def _is_past(visit: Visit) -> bool:
+    """Состоялся ли визит — по времени начала, а не по статусу.
+
+    Статуса на этой карточке нет: ``Visit`` строится из ответа Ayla, где
+    ``closed_by`` зарезервирован и всегда ``None`` (OD-V1). Время начала —
+    то, что есть, и для выбора действий его достаточно: у записи впереди
+    предлагается перенос и отмена, у прошедшей — повтор.
+
+    Нечитаемая дата толкуется как ПРОШЛОЕ. Ошибиться в эту сторону значит
+    предложить повтор — безобидное лишнее предложение; в другую — показать
+    «Отменить» над визитом, который уже состоялся.
+    """
+    if not visit.start_at:
+        return True
+    try:
+        moment = datetime.fromisoformat(visit.start_at)
+    except ValueError:
+        return True
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=_DISPLAY_TZ)
+    return moment <= datetime.now(tz=_DISPLAY_TZ)
+
+
+def _card_actions(visit: Visit, *, suffix: str = "") -> list[dict[str, str]]:
+    """Три действия ОДНОЙ записи — «Подробнее», «Перенести», «Отменить».
+
+    Порядок владельца (§37). ``suffix`` дописывает к подписи название
+    услуги: в СПИСКЕ записей это единственное, что отличает кнопки одной
+    записи от кнопок другой, и без него человек выбирал бы вслепую — то
+    есть ровно тот риск, ради снятия которого действия сюда переехали. На
+    самой карточке запись уже названа текстом, и суффикс не нужен.
+    """
+    tail = f": {suffix}" if suffix else ""
+    return [
+        {
+            "label": f"Подробнее{tail}",
+            "callback": f"{CALLBACK_VISIT_CARD_PREFIX}{visit.appointment_id}",
+        },
+        {
+            "label": f"Перенести{tail}",
+            "callback": f"{CALLBACK_VISIT_MOVE_PREFIX}{visit.appointment_id}",
+        },
+        {
+            "label": f"Отменить{tail}",
+            "callback": f"{CALLBACK_VISIT_CANCEL_PREFIX}{visit.appointment_id}",
+        },
+    ]
+
+
+def _records_buttons(upcoming: tuple[Visit, ...], past: tuple[Visit, ...]) -> dict | None:
+    """Клавиатура ответа «Мои записи» — действия впереди, карточки позади.
+
+    Записи ВПЕРЕДИ получают все три действия владельца (§37 п.1), и
+    каждая подписана своей услугой. Визиты ПОЗАДИ сохраняют ровно то, что
+    у них было до этой задачи, — «Подробнее», ведущее на карточку с
+    «Записаться ещё». Ничего не отнято: положительная стража DRF-1411
+    краснеет, если этот второй набор исчезнет.
 
     Canonical envelope so the same reply also renders in Telegram.
     """
-    if not visits:
-        return None
-    buttons = [
+    buttons: list[dict[str, str]] = []
+    for visit in upcoming[:_MAX_ACTIONABLE_UPCOMING]:
+        buttons.extend(_card_actions(visit, suffix=visit.service_name or "запись"))
+    buttons += [
         {
             "label": f"Подробнее: {v.service_name or 'визит'}",
             "callback": f"{CALLBACK_VISIT_CARD_PREFIX}{v.appointment_id}",
         }
-        for v in visits
+        for v in past
     ]
-    return {"attachments": [{"type": "inline_keyboard", "payload": {"buttons": buttons}}]}
+    return keyboard_envelope(buttons)
 
 
 def _repeat_button(visit: Visit) -> dict:
