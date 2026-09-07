@@ -218,9 +218,18 @@ def verify_salon_masters(tenant: Tenant, *, user) -> VerificationOutcome:  # typ
     посчитала бы его в своей подписи и молча изменила бы строку, ничего
     не решив. Обещание кнопки и её работа обязаны совпадать.
 
-    Чтение и запись — под ``tenant_scope``: карточке нужен ровно один
-    салон, кросс-тенантный ``all_tenants`` вне ``apps/marketplace/``
-    запрещает контракт MKT1 (#1018).
+    Выборка — под ``tenant_scope``: карточке нужен ровно один салон, а
+    кросс-тенантный ``all_tenants`` вне ``apps/marketplace/`` запрещает
+    контракт MKT1 (#1018). **Сама верификация идёт ВНЕ скоупа**, и это
+    не небрежность, а условие паритета: ``adminconsole.journal``
+    разворачивает ``LogEntry`` в ``AuditLog`` через ``write_audit``, а
+    тот берёт тенанта из ``current_tenant()``. Под скоупом строка
+    журнала получила бы ``tenant`` салона, а та же строка от действия в
+    админке каталога — ``NULL``, потому что там выборка кросс-тенантная
+    и одного салона у неё нет. Два экрана писали бы в журнал РАЗНОЕ —
+    ровно то расхождение, которого задача избегает. Измерено, а не
+    предположено: ``test_same_masters_same_journal_as_catalog_admin_action``
+    сравнивает и ``LogEntry``, и ``AuditLog``.
 
     **Автоверификации здесь нет и быть не может.** Функция вызывается
     только из обработчика нажатия оператором; ни ``connect_salon``, ни
@@ -230,7 +239,7 @@ def verify_salon_masters(tenant: Tenant, *, user) -> VerificationOutcome:  # typ
 
     with tenant_scope(tenant):
         awaiting = list(CatalogMaster.objects.filter(AWAITING_VERIFICATION))
-        return _verify_masters(awaiting, user=user)
+    return _verify_masters(awaiting, user=user)
 
 
 # ---------------------------------------------------------------------------

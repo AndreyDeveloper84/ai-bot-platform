@@ -32,6 +32,7 @@ from django.test import Client
 from django.urls import reverse
 from django.utils import timezone
 
+from apps.audit.models import AuditLog
 from apps.catalog.models import CatalogMaster, CatalogService
 from apps.tenancy.onboarding import (
     REASON_MASTERS_AWAIT_VERIFICATION,
@@ -259,6 +260,17 @@ class TestButtonDoesWhatTheCatalogActionDoes:
         # и след ей не писался.
         assert not journal["в архиве"]
 
+        # 4. Развёрнутый журнал — то, что реально читает оператор.
+        # ``LogEntry`` разворачивается в ``AuditLog``
+        # (``apps.adminconsole.journal``), и разойтись строки могут уже
+        # ЗДЕСЬ: ``write_audit`` берёт тенанта из ``current_tenant()``, и
+        # верификация под ``tenant_scope`` подписала бы строку салоном
+        # там, где действие админки оставляет NULL. Измеряется, а не
+        # предполагается.
+        audit = {label: _audit_of(row) for label, row in button_masters.items()}
+        assert audit["ждёт"], "кнопка не оставила развёрнутой строки журнала"
+        assert audit["ждёт"] == _audit_of(action_masters["ждёт"])
+
     def test_after_the_button_salon_is_visible_with_exactly_that_many(
         self, owner_client: Client
     ) -> None:
@@ -340,6 +352,20 @@ def _journal_of(master: CatalogMaster) -> list[tuple[int, int, str]]:
     return [
         (entry.user_id, entry.action_flag, entry.get_change_message())
         for entry in LogEntry.objects.filter(object_id=str(master.pk)).order_by("action_time")
+    ]
+
+
+def _audit_of(master: CatalogMaster) -> list[tuple[object, str, str, str]]:
+    """Развёрнутый след: тенант, действие, цель, текст.
+
+    Тенант в сравнении участвует намеренно — именно он расходился, пока
+    верификация шла под ``tenant_scope``.
+    """
+    return [
+        (row.tenant_id, row.action, row.target, row.payload.get("change_message", ""))
+        for row in AuditLog.all_tenants.filter(payload__object_id=str(master.pk)).order_by(
+            "created_at"
+        )
     ]
 
 
