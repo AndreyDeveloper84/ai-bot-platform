@@ -367,9 +367,19 @@ class BookingRequest(models.Model):
 
     # Phase 4 / F5 — post-visit feedback. Filled when the customer
     # submits the rating form; before that all four fields are NULL.
-    # ``rating <= 3`` triggers a HUMAN_LOCKED handoff (apps.handoff
-    # AdminTask + Conversation.state=HUMAN_HANDOFF), see
-    # apps/booking/services/feedback.py.
+    #
+    # ``rating <= 3`` заводит AdminTask через
+    # ``apps.handoff.services.create_admin_task``; он же одной
+    # транзакцией с задачей переводит разговор в
+    # ``Conversation.state = HUMAN_HANDOFF``. Точка входа —
+    # ``apps/booking/services/feedback.py``.
+    #
+    # Ярус ``Conversation.tier`` этот путь НЕ трогает. ``HUMAN_LOCKED`` —
+    # значение ЯРУСА, которым мастер вручную выключает бота и compose; у
+    # него своя атрибуция (``tier_locked_at`` / ``tier_locked_by``) и своё
+    # событие. Прежняя редакция комментария называла эскалацию по оценке
+    # «HUMAN_LOCKED handoff» и склеивала два разных механизма в один —
+    # читавший models.py, чтобы понять эскалацию, уходил не туда.
     rating = models.PositiveSmallIntegerField(
         null=True,
         blank=True,
