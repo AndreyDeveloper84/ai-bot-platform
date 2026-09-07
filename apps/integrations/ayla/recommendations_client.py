@@ -154,18 +154,35 @@ def fetch_recommendations(
 ) -> dict[str, Any]:
     """POST ``/internal/me/catalog/recommendations/`` and return Ayla's body.
 
+    ЛЕГАСИ-ПУТЬ. Роль «translation hop, not a schema gate» ОТМЕНЕНА
+    ------------------------------------------------------------------
+    Здесь стояло: «Caller is responsible for shape validation — this layer
+    is a translation hop, not a schema gate» и «Pass-through; no shape
+    enforcement here». Контракт резолвера (§2.1 C3, §9.4) эти формулировки
+    отменяет: у формы ответа появился владелец, и транзит обязан
+    валидировать.
+
+    Отказ обеих сторон владеть формой — не архитектурный стиль, а причина
+    DEFECT-C-02: источник говорил «потребитель отрисует», потребитель —
+    «источник объяснит», и расхождение форм прожило незамеченным, потому
+    что его нечем было заметить.
+
+    Пропуск как есть здесь СОХРАНЁН только до миграции потребителя этой
+    ручки (T6 — DRF-1567, T7 — DRF-1568): валидировать по новой схеме
+    ответ старой формы значило бы сломать домашний экран раньше, чем он
+    к ней переедет. Валидирующий клиент границы — соседний модуль
+    :mod:`apps.integrations.ayla.recommendation_resolver_client`; новый код
+    ходит через него. После T7 этот модуль удаляется целиком.
+
     Args:
       external_user_id: ``bot:{channel}:{channel_user_id}`` — produced
                         by :func:`apps.integrations.ayla.external_user_id_for`.
       payload: Request body forwarded as-is (``lat``/``lon``/``goal``/
-               ``tenant_history``). Caller is responsible for shape
-               validation — this layer is a translation hop, not a
-               schema gate.
+               ``tenant_history``).
 
     Returns:
-      The parsed JSON object Ayla returned. Pass-through; no shape
-      enforcement here so the contract can evolve on Alpha's side
-      without lockstep bot-platform releases.
+      The parsed JSON object Ayla returned, unvalidated — см. выше о том,
+      почему это ЛЕГАСИ, а не правило.
 
     Raises:
       :class:`RecommendationsConfigError`
