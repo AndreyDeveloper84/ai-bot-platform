@@ -5,7 +5,7 @@
  * rows. Home = records: the screen is a tab root (no back button) and
  * renders identically in DEV and prod builds.
  */
-import { render, screen } from "@testing-library/react";
+import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter, Route, Routes, useParams } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -127,6 +127,22 @@ beforeEach(() => {
 });
 
 describe("CustomerRecordsScreen (real data)", () => {
+  it("bottom nav: «День» is not offered, the four real tabs are", async () => {
+    // DRF-1546 — поверхности «День» не существует: её роль исполнял
+    // домашний экран, а он теперь «Главная». Вкладка вела бы на
+    // страницу с подсвеченной «Главной», то есть врала бы о том, куда
+    // ведёт. Стража парная: снята одна вкладка, а не навигация.
+    mockLists();
+    renderScreen();
+    const nav = within(
+      await screen.findByRole("navigation", { name: "Основная навигация" }),
+    );
+    expect(nav.queryByRole("button", { name: "День" })).not.toBeInTheDocument();
+    for (const tab of ["Главная", "Записи", "Услуги", "Я"]) {
+      expect(nav.getByRole("button", { name: tab })).toBeInTheDocument();
+    }
+  });
+
   it("renders real upcoming bookings with tab counts and status badges", async () => {
     mockLists();
     renderScreen();

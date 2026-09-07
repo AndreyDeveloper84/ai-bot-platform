@@ -307,14 +307,16 @@ describe("DRF-1493 · корневой экран: лишней кнопки н�
     expect(mockedSetBack).not.toHaveBeenCalledWith(true);
   });
 
-  it("CustomerWellnessDashboardScreen — вкладка «День»", async () => {
-    window.history.replaceState({}, "", "/customer/wellness?stub=default");
+  it("CustomerWellnessDashboardScreen — «Главная» клиентской поверхности", async () => {
+    // DRF-1546: экран переехал на «Главную», и вкладки «День» у него
+    // больше нет — ждём саму активную вкладку.
+    window.history.replaceState({}, "", "/customer/main?stub=default");
     renderDeepLink(
-      "/customer/wellness",
+      "/customer/main",
       <CustomerWellnessDashboardScreen />,
-      "/customer/wellness",
+      "/customer/main",
     );
-    await screen.findByRole("button", { name: "День" });
+    await screen.findByRole("button", { name: "Главная", current: "page" });
     expect(
       screen.queryByRole("button", { name: "Назад" }),
     ).not.toBeInTheDocument();
