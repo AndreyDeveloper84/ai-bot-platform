@@ -185,6 +185,53 @@ class TestBehaviour:
         assert verdict.text == "Завтра три записи."
 
 
+class TestNegatedDiagnosis:
+    """Отрицание диагноза — не диагноз.
+
+    Шаблон ловил слово «диагноз» при любом вхождении: разделитель был
+    необязателен, и хватало одного слова следом. Значит блокировалось
+    ровно то, что канон велит боту ГОВОРИТЬ — «это наблюдение, а не
+    диагноз» (wellness-symptom-handoff).
+
+    Утвердительная форма в русском несёт связку, отрицающая — нет. На этом
+    и разведено, без списка исключений.
+    """
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "Диагноз — дерматит, лечите мазью.",
+            "Диагноз: экзема, вот схема лечения.",
+            "Ваш диагноз - псориаз, начинайте курс.",
+        ],
+    )
+    def test_an_asserted_diagnosis_is_still_stopped(self, text):
+        verdict = evaluate_outbound(text)
+
+        assert verdict.blocked, text
+        assert "medical" in verdict.categories
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "Это не диагноз и не лечение, просто наблюдение.",
+            "Это наблюдение, а не диагноз для вас.",
+            "Я не врач, и это не диагноз. Просто что видно в записях.",
+            "Диагноз может поставить только врач — я расскажу про уход, если хотите.",
+        ],
+    )
+    def test_a_denied_or_deflected_diagnosis_passes(self, text):
+        verdict = evaluate_outbound(text)
+
+        assert verdict.allowed, f"съедено: {text} → {verdict.categories}"
+        assert verdict.text == text
+
+    def test_the_neighbouring_shapes_are_untouched(self):
+        """Контроль присутствия: остальная медицина ловится как ловилась."""
+        assert "medical" in evaluate_outbound("У вас аллергия на этот материал.").categories
+        assert "medical" in evaluate_outbound("Примите ибупрофен и приходите завтра.").categories
+
+
 class TestNagging:
     """DRF-1468 — the pressure category (policy R2/R3).
 
