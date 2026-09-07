@@ -121,9 +121,18 @@ function renderScreen() {
   );
 }
 
+/** Переключить `navigator.onLine`, вернув прежнее значение обратно. */
+function setOnLine(value: boolean) {
+  Object.defineProperty(window.navigator, "onLine", {
+    value,
+    configurable: true,
+  });
+}
+
 beforeEach(() => {
   vi.clearAllMocks();
   vi.unstubAllEnvs();
+  setOnLine(true);
 });
 
 describe("CustomerRecordsScreen (real data)", () => {
@@ -238,5 +247,82 @@ describe("CustomerRecordsScreen (real data)", () => {
       "aria-current",
       "page",
     );
+  });
+});
+
+/**
+ * Офлайн: полоса и кнопки говорят одно и то же.
+ *
+ * До правки экран рисовал честную полосу «Записи могут быть
+ * устаревшими — нет сети», а кнопки под ней оставались живыми:
+ * «Перенести» и «Отменить» уводили на экраны, которые без сети ничего
+ * не загрузят и ничего не отправят, «Записаться ещё» — в каталог,
+ * который не придёт. Предупреждение, которое приложение само же
+ * опровергает следующим касанием, хуже отсутствия предупреждения.
+ *
+ * Стража парная (`negative_assert_guard`, DRF-1411): к «действия
+ * выключены» приложены положительные проверки на тех же данных — сами
+ * записи, их время и мастер на месте, «Открыть запись» работает
+ * (чтение уже показанного, у экрана детали своё состояние ошибки), и
+ * при живой сети ВСЕ кнопки снова активны. Правка, которая выключила бы
+ * карточку целиком или выключила бы её навсегда, упала бы на них.
+ *
+ * Тест умеет падать: снимите `disabled={offline}` с кнопок
+ * `BookingCard` — покраснеет первый случай; перестаньте передавать
+ * `offline: !online` в `renderTimeBuckets` — покраснеет он же.
+ */
+describe("офлайн: действия выключены вместе с предупреждением", () => {
+  it("перенос, отмена и повтор недоступны, пока нет сети", async () => {
+    setOnLine(false);
+    mockLists();
+    renderScreen();
+    await screen.findByText("Маникюр");
+    expect(screen.getByRole("button", { name: "Перенести" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Отменить" })).toBeDisabled();
+    // Полоса объясняет, почему.
+    expect(
+      screen.getByText(/Перенос, отмена и\s+новая запись сейчас недоступны/),
+    ).toBeInTheDocument();
+  });
+
+  it("история: «Записаться ещё» и «Оставить отзыв» тоже выключены", async () => {
+    setOnLine(false);
+    mockLists();
+    renderScreen();
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("tab", { name: /История/ }));
+    const repeats = await screen.findAllByRole("button", {
+      name: "Записаться ещё",
+    });
+    for (const b of repeats) expect(b).toBeDisabled();
+    expect(
+      screen.getByRole("button", { name: "Оставить отзыв" }),
+    ).toBeDisabled();
+  });
+
+  it("положительная стража: записи видны и «Открыть запись» работает", async () => {
+    setOnLine(false);
+    mockLists();
+    renderScreen();
+    const user = userEvent.setup();
+    // Сами записи никуда не делись — офлайн выключает действия, не показ.
+    expect(await screen.findByText("Маникюр")).toBeInTheDocument();
+    expect(screen.getByText("Массаж")).toBeInTheDocument();
+    expect(screen.getAllByText(/у Анна Соколова/).length).toBeGreaterThan(0);
+    // Чтение уже показанной записи остаётся доступным.
+    const open = screen.getAllByRole("button", { name: "Открыть запись" })[0];
+    expect(open).toBeEnabled();
+    await user.click(open!);
+    expect(await screen.findByText("BOOKING-b-1")).toBeInTheDocument();
+  });
+
+  it("положительная стража: с сетью все действия снова активны", async () => {
+    setOnLine(true);
+    mockLists();
+    renderScreen();
+    await screen.findByText("Маникюр");
+    expect(screen.getByRole("button", { name: "Перенести" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Отменить" })).toBeEnabled();
+    expect(screen.queryByText(/нет сети/i)).not.toBeInTheDocument();
   });
 });

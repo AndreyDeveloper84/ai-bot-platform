@@ -114,6 +114,70 @@ beforeEach(() => {
   });
   mockedCreate.mockResolvedValue(CREATED);
   seedDraft();
+  setOnLine(true);
+});
+
+/** Переключить `navigator.onLine` — jsdom позволяет переопределить свойство. */
+function setOnLine(value: boolean) {
+  Object.defineProperty(window.navigator, "onLine", {
+    value,
+    configurable: true,
+  });
+}
+
+/**
+ * Офлайн на экране воронки: сказать до нажатия, а не после.
+ *
+ * Баннера «нет сети» на экранах воронки записи не было вовсе: человек
+ * доходил до «Записаться», жал и получал ошибку сети вместо записи.
+ *
+ * Стража парная (`negative_assert_guard`, DRF-1411): к «CTA выключен и
+ * запись не создаётся» приложены положительные проверки на тех же
+ * данных — карточка визита на месте, выбор оплаты на месте, а при живой
+ * сети кнопка снова активна и создаёт запись.
+ *
+ * Тест умеет падать: уберите `|| !online` из `disabled` у `StickyCta` —
+ * покраснеет первый случай; снимите `<OfflineBanner />` — второй.
+ */
+describe("офлайн на экране подтверждения", () => {
+  it("не даёт нажать «Записаться» и не зовёт ручку", async () => {
+    setOnLine(false);
+    renderScreen();
+    const cta = screen.getByRole("button", { name: "Записаться" });
+    expect(cta).toBeDisabled();
+    await userEvent.click(cta);
+    expect(mockedCreate).not.toHaveBeenCalled();
+  });
+
+  it("объясняет, почему", () => {
+    setOnLine(false);
+    renderScreen();
+    expect(
+      screen.getByText("Нет сети — записаться сейчас не получится."),
+    ).toBeInTheDocument();
+  });
+
+  it("положительная стража: сам экран цел и с сетью запись создаётся", async () => {
+    setOnLine(false);
+    renderScreen();
+    // Карточка визита и выбор оплаты никуда не делись.
+    expect(screen.getByText("Анна Соколова")).toBeInTheDocument();
+    expect(
+      screen.getByRole("radio", { name: /Оплатить на месте/ }),
+    ).toBeInTheDocument();
+  });
+
+  it("положительная стража: с сетью кнопка активна и создаёт запись", async () => {
+    setOnLine(true);
+    renderScreen();
+    const cta = screen.getByRole("button", { name: "Записаться" });
+    expect(cta).toBeEnabled();
+    await userEvent.click(cta);
+    expect(mockedCreate).toHaveBeenCalledTimes(1);
+    expect(
+      screen.queryByText("Нет сети — записаться сейчас не получится."),
+    ).not.toBeInTheDocument();
+  });
 });
 
 /**

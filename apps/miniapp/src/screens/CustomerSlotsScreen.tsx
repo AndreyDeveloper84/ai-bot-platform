@@ -41,7 +41,9 @@ import {
   Skeleton,
   SlotGridSkeleton,
 } from "../components/Skeleton";
+import { OfflineBanner } from "../components/OfflineBanner";
 import { StateError } from "../components/StateError";
+import { useOnline } from "../hooks/useOnline";
 import { useHaptics } from "../hooks/useHaptics";
 import { getCustomerSlots } from "../lib/customer-booking";
 import { formatDateLabel, formatSlotTime } from "../lib/format";
@@ -107,6 +109,7 @@ function detectCustomerMode(): CustomerMode {
 }
 
 export function CustomerSlotsScreen() {
+  const online = useOnline();
   const navigate = useNavigate();
   const { masterId } = useParams<{ masterId: string }>();
   const haptics = useHaptics();
@@ -238,11 +241,12 @@ export function CustomerSlotsScreen() {
       back={back}
       title="Выбери время"
       cta={
-        <StickyCta onClick={onContinue} disabled={!draft.visitAt}>
+        <StickyCta onClick={onContinue} disabled={!draft.visitAt || !online}>
           {draft.visitAt ? "Дальше" : "Выбери слот"}
         </StickyCta>
       }
     >
+      <OfflineBanner online={online} />
       {suggestions.length > 0 && (
         <section aria-labelledby="slots-suggestions-title">
           <h2 id="slots-suggestions-title" className="customer-slots__section-title">
