@@ -544,8 +544,10 @@ def slots(request: HttpRequest) -> HttpResponse:
             400,
         )
 
-    # Per master-management handoff: only is_active=True AND
-    # invite_status='accepted' masters are bookable from customer surfaces.
+    # Customer surfaces serve only bookable masters. What that means is
+    # ``apps.catalog.master_state.AVAILABLE``, read here through
+    # ``bookable()`` — DRF-1549: naming the columns in a comment is how
+    # the catalog shelf drifted away from this queryset for a release.
     try:
         master = CatalogMaster.objects.bookable().get(id=master_id)
     except CatalogMaster.DoesNotExist:
@@ -649,13 +651,24 @@ def slots(request: HttpRequest) -> HttpResponse:
 def _bookable_master_exists() -> Exists:
     """``Exists`` subquery: does this service have ANY bookable performer?
 
-    DRF-1164. "Bookable" is spelled exactly the way
-    :meth:`apps.catalog.models._MasterManager.bookable` spells it —
-    ``is_active=True`` AND ``invite_status='accepted'`` — because that
-    is the queryset ``GET /masters?service_id=`` serves. Any other
-    definition here would let the catalog promise a performer the
-    master picker then fails to show: the very empty-screen dead end
-    this exists to prevent.
+    DRF-1164 / DRF-1549. The subquery IS the master picker's queryset:
+    ``CatalogMaster.objects.bookable()`` — the same call
+    :func:`masters_list` makes to serve ``GET /masters?service_id=`` —
+    narrowed by the join to the masters who perform this service. Not a
+    reimplementation of it and, deliberately, not a restatement of the
+    columns it happens to check: the catalog must promise exactly the
+    performers the picker will show, or it walks the customer into the
+    empty screen this annotation exists to prevent.
+
+    Restating them is how the invariant broke once already. The old
+    docstring here claimed parity with ``bookable()`` and then spelled
+    two columns out; ``bookable()`` grew a third (DRF-1540 —
+    ``ayla_user_id``, the notification bridge), and the catalog went on
+    marking services bookable whose only performer the picker had
+    stopped returning. A restatement rots in silence; a call cannot.
+    The definition itself lives in
+    :data:`apps.catalog.master_state.AVAILABLE` and is read from there
+    by ``bookable()`` — this module does not get a copy of it.
 
     A subquery and not a per-row ``.exists()`` loop: the catalog list
     is served whole (10–40 services on a salon, hundreds across the
@@ -663,17 +676,12 @@ def _bookable_master_exists() -> Exists:
     hot customer-facing path. ``annotate`` folds it into the single
     catalog SELECT.
 
-    Tenant scoping rides on ``MasterService.objects`` (TenantScopedManager)
-    plus the ``OuterRef`` join onto the already-scoped service row.
+    Tenant scoping rides on ``CatalogMaster.objects`` (TenantScopedManager)
+    — the picker's own manager, so both surfaces are scoped by the same
+    code — plus the ``OuterRef`` join onto the already-scoped service row.
     """
 
-    return Exists(
-        MasterService.objects.filter(
-            service=OuterRef("pk"),
-            master__is_active=True,
-            master__invite_status=CatalogMaster.InviteStatus.ACCEPTED,
-        )
-    )
+    return Exists(CatalogMaster.objects.bookable().filter(services_offered__service=OuterRef("pk")))
 
 
 def _services_with_bookability():
