@@ -18,7 +18,7 @@ from django.db import migrations, models
 
 class Migration(migrations.Migration):
     dependencies = [
-        ("catalog", "0015_backfill_master_accepted_at"),
+        ("catalog", "0017_master_invite_default_pending"),
     ]
 
     operations = [
