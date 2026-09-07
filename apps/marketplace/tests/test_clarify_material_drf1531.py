@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import hashlib
 from datetime import datetime, timezone
+from uuid import uuid4
 
 import pytest
 from django.conf import settings
@@ -70,6 +71,10 @@ def _offers(tenant: Tenant, master_name: str, *services) -> CatalogMaster:
         specialization="",
         is_active=True,
         invite_status=CatalogMaster.InviteStatus.ACCEPTED,
+        # DRF-1540/1544 — синхронизированная строка несёт канонический ключ.
+        # Без него мастер не продаётся, и пустая выдача читалась бы как
+        # поломка подбора, а не как отсутствие связи с Ayla.
+        ayla_user_id=uuid4(),
     )
     for item in services:
         row = _service(tenant, item) if isinstance(item, str) else item
@@ -227,6 +232,10 @@ class TestWhenThereIsNothingToAsk:
                 specialization="массаж на дому",
                 is_active=True,
                 invite_status=CatalogMaster.InviteStatus.ACCEPTED,
+                # DRF-1540/1544 — синхронизированная строка несёт канонический ключ.
+                # Без него мастер не продаётся, и пустая выдача читалась бы как
+                # поломка подбора, а не как отсутствие связи с Ayla.
+                ayla_user_id=uuid4(),
             )
 
         material = clarification_material(specialization="массаж")

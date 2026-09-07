@@ -55,6 +55,7 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
+from uuid import uuid4
 
 import pytest
 
@@ -98,6 +99,10 @@ def penza() -> None:
         is_active=True,
         invite_status=CatalogMaster.InviteStatus.ACCEPTED,
         external_updated_at=datetime(2026, 8, 24, 12, 0, tzinfo=timezone.utc),
+        # DRF-1540/1544 — синхронизированная строка несёт канонический ключ.
+        # Без него мастер не продаётся, и клиентские поверхности отвечали бы
+        # пустотой не потому, что сломаны.
+        ayla_user_id=uuid4(),
     )
 
 

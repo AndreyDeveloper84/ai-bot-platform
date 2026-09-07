@@ -63,6 +63,10 @@ def _master(tenant: Tenant, *, staff_id=None, name: str = "Анна") -> Catalog
         name=name,
         specialization="маникюр",
         yclients_staff_id=staff_id,
+        # DRF-1540/1544 — синхронизированная строка несёт канонический ключ.
+        # Без него мастер не продаётся, и клиентские поверхности отвечали бы
+        # пустотой не потому, что сломаны.
+        ayla_user_id=uuid4(),
     )
 
 

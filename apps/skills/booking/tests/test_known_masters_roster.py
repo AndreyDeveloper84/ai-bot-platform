@@ -9,11 +9,14 @@ graceful failure. The pure rendering half is tested in
 
 from __future__ import annotations
 
+import uuid
 from datetime import datetime, timezone
+from typing import Final
 from unittest.mock import patch
 
 import pytest
 
+from apps.catalog.master_state import AVAILABLE
 from apps.catalog.models import CatalogMaster
 from apps.skills.booking.skill import (
     _KNOWN_MASTERS_ROSTER_CAP,
@@ -38,6 +41,15 @@ def tenant_other() -> Tenant:
 _next_external_id = [1]
 
 
+#: Sentinel for ``_master(ayla_user_id=…)`` — mint a fresh canonical link.
+#:
+#: DRF-1544. A row the customer can be told about always carries one in
+#: production (catalog sync writes ``dto.user_id``), so this is the realistic
+#: default; ``None`` has to be asked for, because it means «off the roster,
+#: because the booking notification would never reach her» (DRF-1540).
+AUTO_AYLA_LINK: Final = "auto"
+
+
 def _master(
     tenant: Tenant,
     *,
@@ -45,6 +57,8 @@ def _master(
     specialization: str = "",
     is_active: bool = True,
     invite_status: str = CatalogMaster.InviteStatus.ACCEPTED,
+    archived_at: datetime | None = None,
+    ayla_user_id: uuid.UUID | None | str = AUTO_AYLA_LINK,
 ) -> CatalogMaster:
     # external_id is part of CatalogMaster's unique constraint
     # (tenant, external_id) — auto-increment for test convenience.
@@ -57,6 +71,8 @@ def _master(
         specialization=specialization,
         is_active=is_active,
         invite_status=invite_status,
+        archived_at=archived_at,
+        ayla_user_id=(uuid.uuid4() if ayla_user_id == AUTO_AYLA_LINK else ayla_user_id),
     )
 
 
@@ -193,3 +209,102 @@ class TestLoadRoster:
         roster, _ = _load_tenant_master_roster(tenant)
         assert len(roster) == 1
         assert roster[0]["specialization"] == ""
+
+
+class TestTheRosterAsksTheSaleGate:
+    """DRF-1544 — ростер в промпте спрашивает ``AVAILABLE``, а не свою копию.
+
+    Здесь ставка выше, чем на витрине: имя в этом списке — это имя,
+    которое ассистент подтвердит как записываемое («такого мастера нет»
+    он говорит ровно про тех, кого в списке не увидел). Мастер, которого
+    гейт продажи не пропускает, не имеет права доехать до промпта —
+    иначе модель предложит человека, к которому запись не дойдёт.
+
+    Решение владельца 06.09.2026 — реестр открытых решений, §32, пункт 1
+    (документ живёт вне этого репозитория).
+    """
+
+    def test_an_ordinary_bookable_master_is_still_in_the_prompt(self, tenant: Tenant) -> None:
+        """Положительная стража. Стоит первой: два отрицания ниже верны
+        и на пустом ростере, а пустой ростер — это отключённый блок."""
+        _master(tenant, name="Сазонова Инна", specialization="массаж")
+
+        roster, is_truncated = _load_tenant_master_roster(tenant)
+
+        assert [row["name"] for row in roster] == ["Сазонова Инна"]
+        assert is_truncated is False
+
+    def test_a_master_without_an_ayla_link_never_reaches_the_prompt(self, tenant: Tenant) -> None:
+        _master(tenant, name="Сазонова Инна")
+        _master(tenant, name="Без связи с Ayla", ayla_user_id=None)
+
+        roster, _ = _load_tenant_master_roster(tenant)
+        names = {row["name"] for row in roster}
+
+        assert "Сазонова Инна" in names  # присутствие: ростер не пуст
+        assert "Без связи с Ayla" not in names
+
+    def test_an_archived_master_never_reaches_the_prompt(self, tenant: Tenant) -> None:
+        """Латентный пропуск ручного набора: ``archived_at`` он не спрашивал."""
+        _master(tenant, name="Сазонова Инна")
+        _master(
+            tenant,
+            name="В архиве",
+            archived_at=datetime(2026, 9, 6, tzinfo=timezone.utc),
+        )
+
+        roster, _ = _load_tenant_master_roster(tenant)
+        names = {row["name"] for row in roster}
+
+        assert "Сазонова Инна" in names  # присутствие: ростер не пуст
+        assert "В архиве" not in names
+
+    def test_the_pilot_shape_loses_nobody(self, tenant: Tenant) -> None:
+        """Замер: 31 бронируемый, все со связью — ростер обязан не сузиться.
+
+        Форма боевого контура 06.09.2026. Считаются мастера, а не строки
+        промпта: сузься список — ассистент начал бы отрицать людей,
+        которые на самом деле принимают.
+
+        Отсечка ``_KNOWN_MASTERS_ROSTER_CAP`` (20) ниже пилотных 31, и это
+        не мешает замеру, а задаёт его форму: сравнивать надо ТО, ЧТО
+        ПОВЕРХНОСТЬ ОТДАЁТ, до и после — иначе замер померил бы отсечку по
+        размеру промпта, а не гейт. Прежний набор на этих данных отдал бы
+        те же двадцать имён и тот же сигнал усечения; их и сверяем.
+        """
+        pilot_bookable = 31
+        for index in range(pilot_bookable):
+            _master(tenant, name=f"Мастер {index:02d}")
+
+        # Что отдала бы поверхность ДО перевода — ручной набор, порядок и
+        # отсечка те же, что в самой функции.
+        hand_rolled = list(
+            CatalogMaster.all_tenants.filter(
+                tenant=tenant,
+                is_active=True,
+                invite_status=CatalogMaster.InviteStatus.ACCEPTED,
+            )
+            .order_by("name")
+            .values_list("name", flat=True)[: _KNOWN_MASTERS_ROSTER_CAP + 1]
+        )
+        before = list(hand_rolled[:_KNOWN_MASTERS_ROSTER_CAP])
+        before_truncated = len(hand_rolled) > _KNOWN_MASTERS_ROSTER_CAP
+
+        roster, is_truncated = _load_tenant_master_roster(tenant)
+        after = [row["name"] for row in roster]
+
+        # Присутствие раньше отрицания: данные действительно заведены и
+        # отсечка действительно сработала, иначе равенство ниже сравнивало
+        # бы два пустых списка.
+        assert len(before) == _KNOWN_MASTERS_ROSTER_CAP
+        assert before_truncated is True
+
+        assert after == before
+        assert is_truncated == before_truncated
+
+        # И ни один из 31 не потерян по причине гейта: усечение — это
+        # отсечка промпта, а не отказ в продаже.
+        assert (
+            CatalogMaster.all_tenants.filter(tenant=tenant).filter(AVAILABLE).count()
+            == pilot_bookable
+        )

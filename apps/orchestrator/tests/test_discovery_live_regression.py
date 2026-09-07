@@ -94,6 +94,10 @@ def penza_massage_salon() -> CatalogMaster:
         is_active=True,
         invite_status=CatalogMaster.InviteStatus.ACCEPTED,
         external_updated_at=_ts(),
+        # DRF-1540/1544 — синхронизированная строка несёт канонический ключ.
+        # Без него мастер не продаётся, и клиентские поверхности отвечали бы
+        # пустотой не потому, что сломаны.
+        ayla_user_id=uuid4(),
     )
     for name, slug in (("Спортивный массаж", "sport-massage"), ("Классический массаж", "classic")):
         service = CatalogService.all_tenants.create(

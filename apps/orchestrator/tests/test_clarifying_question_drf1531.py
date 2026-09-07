@@ -25,6 +25,7 @@ from __future__ import annotations
 import hashlib
 from datetime import datetime, timezone
 from typing import Any
+from uuid import uuid4
 
 import pytest
 from django.conf import settings
@@ -79,6 +80,10 @@ def _offers(tenant: Tenant, master_name: str, *services) -> CatalogMaster:
         name=master_name,
         is_active=True,
         invite_status=CatalogMaster.InviteStatus.ACCEPTED,
+        # DRF-1540/1544 — синхронизированная строка несёт канонический ключ.
+        # Без него мастер не продаётся, и клиентские поверхности отвечали бы
+        # пустотой не потому, что сломаны.
+        ayla_user_id=uuid4(),
     )
     for item in services:
         row = _service(tenant, item) if isinstance(item, str) else item

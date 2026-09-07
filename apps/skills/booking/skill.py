@@ -2729,12 +2729,18 @@ def _load_tenant_master_roster(tenant: Any) -> tuple[list[dict[str, str]], bool]
 
     **Adversarial CR #955 changes:**
 
-    * **F2** — filter `is_active=True AND invite_status=ACCEPTED`
-      matching the model's canonical ``bookable()`` predicate. The
-      previous `is_active`-only gate surfaced PENDING / EXPIRED /
+    * **F2** — bookability is asked of the canonical predicate instead
+      of an `is_active`-only gate, which surfaced PENDING / EXPIRED /
       CANCELLED invite masters (M0 invite-flow rows with `is_active=
-      True` by default until accepted), creating a false-positive
+      True` by default until accepted) and created a false-positive
       roster vs the YClients-grounded ``show_masters`` tool result.
+      Since DRF-1544 the predicate is read from
+      :data:`apps.catalog.master_state.AVAILABLE` rather than spelled
+      out here, so the roster the model is told about and the shelf the
+      customer can actually book from cannot drift apart. That matters
+      more here than anywhere else: a name in this roster is a name the
+      assistant will confirm as bookable, so a master the predicate
+      excludes must never reach the prompt.
     * **F3** — return a `(roster, is_truncated)` tuple так prompt
       renderer can weaken the «такого мастера нет» rule when the cap
       fired. Without this, alphabetically-late masters get false
@@ -2752,14 +2758,11 @@ def _load_tenant_master_roster(tenant: Any) -> tuple[list[dict[str, str]], bool]
     MUST NOT raise (would 500 the customer turn).
     """
     try:
+        from apps.catalog.master_state import AVAILABLE
         from apps.catalog.models import CatalogMaster
 
         rows = list(
-            CatalogMaster.all_tenants.filter(
-                tenant=tenant,
-                is_active=True,
-                invite_status=CatalogMaster.InviteStatus.ACCEPTED,
-            )
+            CatalogMaster.all_tenants.filter(AVAILABLE, tenant=tenant)
             .order_by("name")
             .values("name", "specialization")[: _KNOWN_MASTERS_ROSTER_CAP + 1]
         )
