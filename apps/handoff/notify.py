@@ -78,9 +78,23 @@ def get_notify_addresses() -> tuple[MaxAddress, ...]:
     it: during the migration both would name the same human, and the union
     would message them twice per event.
 
-    That fallback rung is not hypothetical breakage — it is the
-    ``channel=fallback`` that answered 404 alongside the master
-    notification on 2026-09-07 (`docs/OPEN_DECISIONS.md` §55).
+    **Operator-facing only.** This is ONE GLOBAL list with no tenant
+    binding, so it is never a stand-in for a salon's own address: on the
+    pilot all ten salons resolved to a single hand-typed dialog, which
+    would have shown each salon the others' bookings. The two salon-side
+    readers (booking notice, internal chat) were removed by the owner's
+    decision of 2026-09-07 and must not come back — that
+    ``channel=fallback`` is what answered 404 alongside the master
+    notification (`docs/OPEN_DECISIONS.md` §55, §60).
+
+    What is left addresses the OPERATOR — the person on the other end of
+    an escalation and of an LLM-health alert — for whom «one shared
+    recipient, no tenant» is the intent rather than a defect. Mind the
+    mine underneath: those three paths run outside any ``bot_scope``, and
+    that is the only reason a dialog-shaped entry still works for them.
+    The first legitimate move of an escalation under a salon bot repeats
+    the 404 — migrate that recipient to ``HANDOFF_NOTIFY_MAX_USER_IDS``
+    before making it.
     """
 
     return operator_addresses()

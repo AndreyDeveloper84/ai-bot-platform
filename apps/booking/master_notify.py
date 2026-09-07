@@ -33,23 +33,28 @@ no new queue, no dependency on the mobile app.
   WARNING log line and a ``booking.specialist_unreachable`` audit row.
   The push era hid exactly this state behind a quiet ``failed`` in the
   database; it must never be silent again.
-* **The salon cascade (first hit wins)** — the salon's manager address,
-  then the configured operator channel. Deliberately the *same* setting
-  as DRF-1029 rather than a new one: on the pilot it already holds the
-  owner's address, so the booking notification reaches a human on day one
-  without an env change. If a salon later wants booking alerts split
-  from escalation alerts, that is a settings-level split, not a
-  rewrite of this module.
+* **The salon — its own manager address, and nothing else.** It carries
+  its own addressing key (DRF-1559): a manager with ``manager_user_id``
+  filled in is written to as a PERSON, and only a salon not yet migrated
+  uses its dialog id. That matters precisely here — this message goes out
+  under the SALON bot, and a dialog id copied out of the client bot's
+  chat answers 404 ``dialog.not.found`` (`docs/OPEN_DECISIONS.md` §55).
 
-  Each rung carries its own addressing key (DRF-1559): a manager with
-  ``manager_user_id`` filled in is written to as a PERSON, and only a
-  salon that has not been migrated yet falls back to the dialog id. That
-  matters precisely here — this message goes out under the SALON bot, and
-  a dialog id copied out of the client bot's chat answers 404
-  ``dialog.not.found`` (`docs/OPEN_DECISIONS.md` §55).
-* **Nobody at all** — an explicit WARNING log line. Silence was the old
-  behaviour and it is exactly what made the gap invisible for months;
-  a booking that could not be announced must leave a trace.
+  Until the owner's decision of 2026-09-07 this rung fell back to the
+  configured operator channel. That channel is a single GLOBAL list with
+  no tenant binding of any kind: on the pilot all ten salons resolved to
+  the very same hand-typed address, so each salon would have been shown
+  the others' bookings — and being a dialog id sent under the salon bot,
+  it answered ``404 chat.not.found`` in the same pass in which the
+  master's own copy answered ``200`` (`docs/OPEN_DECISIONS.md` §60). It
+  is not a salon address and cannot be made into one. The rung is gone;
+  a salon that wants booking alerts configures itself.
+* **No salon address is a NORMAL state** — one INFO line per pass, no
+  warning. An empty manager address means this salon has not asked for
+  MAX alerts, not that a delivery failed; the noisy log on a routine
+  state is meant to be switched off after a week of watching. The
+  specialist's personal copy is unaffected and keeps its own loud
+  ``booking.specialist_unreachable`` trace.
 
 ### Contract (mirrors DRF-1029 §3 — do not weaken)
 
@@ -94,7 +99,7 @@ from apps.audit.services import write_audit
 from apps.catalog.models import CatalogMaster, CatalogService
 from apps.channels.bot_context import bot_scope
 from apps.channels.max.addressing import MaxAddress, manager_address
-from apps.handoff.notify import get_notify_addresses, send_max_notification
+from apps.handoff.notify import send_max_notification
 from apps.tenancy.context import tenant_scope
 from apps.tenancy.models import Tenant
 
@@ -144,7 +149,7 @@ CHAT_ORIGIN_SOURCE: Final[str] = "ayla_bot"
 class NotifyTarget:
     """Resolved salon recipients plus the cascade step that produced them.
 
-    ``channel`` is one of ``manager`` / ``fallback`` / ``none`` and
+    ``channel`` is ``manager`` or ``none`` and
     exists so logs (and tests) can assert *which* rung of the cascade
     answered, not merely that something was sent. The specialist's
     personal address is resolved separately — see
@@ -239,21 +244,19 @@ def resolve_specialist_user_id(master: CatalogMaster | None) -> str:
 
 
 def resolve_salon_target(*, tenant: Tenant) -> NotifyTarget:
-    """Walk the salon-side cascade; the first rung with an address wins.
+    """This salon's own address, or none at all.
 
-    The salon rungs stay exclusive among themselves (a manager who
-    receives every booking does not also need the fallback copy); only
-    the specialist's personal copy is additive — see the module
-    docstring.
+    One rung, by the owner's decision of 2026-09-07: the salon is
+    whoever :func:`~apps.channels.max.addressing.manager_address` names.
+    There is no fallback to the operator channel — see the module
+    docstring for why that global list was never a salon address. An
+    empty result is a normal state, not a failure: the caller records it
+    at INFO and sends nothing.
     """
 
     manager = manager_address(tenant)
     if manager:
         return NotifyTarget(addresses=(manager,), channel="manager")
-
-    fallback = get_notify_addresses()
-    if fallback:
-        return NotifyTarget(addresses=fallback, channel="fallback")
 
     return NotifyTarget(addresses=(), channel="none")
 
@@ -508,19 +511,23 @@ def notify_booking_created(
                         len(target.addresses),
                         failures,
                     )
-            elif not specialist_notified:
-                # An unannounceable booking must be loud. Every address
-                # being empty is a configuration defect, not a normal
-                # state. (When the specialist WAS notified the booking is
-                # announced — a missing salon address is then a quieter
-                # observation, already covered by the cascade semantics.)
-                logger.warning(
-                    "booking.notify.no_recipients tenant=%s appointment_id=%s "
-                    "specialist_id=%s — no linked master chat, no manager_chat_id, "
-                    "no HANDOFF_NOTIFY_MAX_CHAT_IDS: nobody was told about this booking",
+            else:
+                # Observable, but quiet: since the owner's decision of
+                # 2026-09-07 a salon with no manager address simply has
+                # no MAX address, which is a normal state and not a
+                # refusal. One INFO line per pass so the silence can be
+                # counted while the pilot fills the field in; a WARNING
+                # here would cry defect on every booking of every salon
+                # that has not asked for alerts. An unreachable
+                # *specialist* stays loud — that trace is above and is
+                # untouched.
+                logger.info(
+                    "booking.notify.no_salon_target tenant=%s appointment_id=%s "
+                    "specialist_notified=%s — no manager address is configured, "
+                    "the salon copy is skipped",
                     tenant.slug,
                     appointment_id,
-                    specialist_id,
+                    specialist_notified,
                 )
     except Exception:  # noqa: BLE001 — hard containment; ingest must not break
         logger.exception(
