@@ -159,6 +159,12 @@ REPLY_BOOK_STALE_VERSION = (
 LABEL_MY_BOOKINGS = "📋 Мои записи"
 LABEL_BOOK_AGAIN = "📅 Записаться"
 LABEL_ANOTHER_TIME = "🔄 Выбрать другое время"
+#: Same callback as :data:`LABEL_BOOK_AGAIN`, one word longer, used only under
+#: «Готово! Записала.». There the short form is ambiguous in the worst
+#: direction: a person who has just been told the booking exists reads
+#: «📅 Записаться» as «that did not work — try again». «ещё» says the offer is
+#: for a SECOND booking, which is what the button actually does.
+LABEL_BOOK_MORE = "📅 Записаться ещё"
 
 #: Telegram rejects a ``callback_data`` longer than this, and the platform's
 #: adapter turns that into a ``ValueError``
@@ -221,6 +227,38 @@ def _my_bookings_keyboard() -> dict | None:
 
 def _book_again_keyboard() -> dict | None:
     return _menu_keyboard(LABEL_BOOK_AGAIN, CALLBACK_MENU_BOOK)
+
+
+def _confirmed_keyboard() -> dict | None:
+    """The end of the funnel, with the two moves that are true right after it.
+
+    DRF-1492 gave this reply «📋 Мои записи» — the answer to «did it really
+    happen, and when»: the chip reads the backend and shows the row that was
+    just created. The owner's ruling of 04.09 asks for the next STEP as well,
+    and «записаться ещё» is the one people actually take here — the second
+    service of the same visit, or a booking for somebody else. Both chips are
+    ``cb:menu:*`` for the reason this module's header records: that family is
+    the only one that executes on the tenant's own bot AND on the global Ayla
+    bot, and a chip that lands in «я вас не понял» in one of the two chats is
+    worse than no chip.
+
+    «❌ Отменить» is deliberately not here. Offering to undo a booking in the
+    second after it was made is a strange thing to say to somebody who just
+    got what they came for, and it is not withheld from anyone who wants it:
+    «Мои записи» lists the row with its own actions, one tap away.
+
+    Two buttons, well inside the five-button ceiling (BOT-001 AC-4.2 /
+    DRF-1200), and both payloads are 12-20 bytes — nowhere near the Telegram
+    cap that :data:`_MAX_CALLBACK_BYTES` guards.
+    """
+    if not pilot_ux_enabled():
+        return None
+    return _keyboard(
+        [
+            {"label": LABEL_MY_BOOKINGS, "callback": CALLBACK_MENU_MY_BOOKINGS},
+            {"label": LABEL_BOOK_MORE, "callback": CALLBACK_MENU_BOOK},
+        ]
+    )
 
 
 def _another_time_keyboard(payload: dict) -> dict | None:
@@ -826,10 +864,9 @@ class BookingGateCallbackSkill:
         )
         # OPEN_DECISIONS §25 п.3 — «Готово! Записала…» was the end of the
         # funnel AND the end of the conversation: the person had just been
-        # told a fact about a booking and had no way to look at it. «Мои
-        # записи» is the one next step that is true right after a confirm —
-        # it reads the backend and shows the row that was just created.
-        return SkillResult(reply_text=result.text, action_data=_my_bookings_keyboard())
+        # told a fact about a booking and had no way to look at it. See
+        # :func:`_confirmed_keyboard` for why these two chips and not others.
+        return SkillResult(reply_text=result.text, action_data=_confirmed_keyboard())
 
     def _dispatch_cancel(
         self,
@@ -927,7 +964,20 @@ class BookingGateCallbackSkill:
             target_id=row.pk,
             payload={"kind": "reschedule"},
         )
-        return SkillResult(reply_text=result.text)
+        # The twelfth dead end, missed by DRF-1492's inventory because it was
+        # read as «перенос», not as an end of the funnel. Under
+        # ``BOOKING_VIA_AYLA_REST`` — the pilot contour — this branch answers
+        # with the SAME sentence as a fresh confirm: ``execute_reschedule``
+        # routes into the native Ayla move, which renders through
+        # ``apps.skills.booking.tools._format_confirmation_text``, i.e.
+        # «Готово! Записала. Мастер… Услуга… Время…». Bare text under it was
+        # the very wall §25 п.3 rules out.
+        #
+        # «Мои записи» only, and not the confirm's pair: the move is done and
+        # the honest next step is to look at where the booking landed.
+        # «Записаться ещё» would offer a SECOND appointment to somebody who
+        # was rearranging the one they have.
+        return SkillResult(reply_text=result.text, action_data=_my_bookings_keyboard())
 
     # ─── cancel-tap (discard preview, no destructive call) ───────────────
 

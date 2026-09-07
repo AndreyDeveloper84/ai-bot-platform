@@ -43,7 +43,11 @@ from apps.bookings.keyboards import CALLBACK_BOOK_PICK_MASTER_PREFIX
 from apps.bookings.pending_actions import create_pending
 from apps.conversations.models import Conversation
 from apps.identity.models import BotUser
-from apps.integrations.yclients import AvailableTime, BookingRecord
+from apps.integrations.yclients import (
+    AvailableTime,
+    BookingRecord,
+    YClientsUnavailableError,
+)
 from apps.skills.base import SkillContext
 from apps.skills.menu.matching import CALLBACK_MENU_BOOK, CALLBACK_MENU_MY_BOOKINGS
 from apps.tenancy.context import tenant_scope
@@ -78,18 +82,31 @@ def conversation(tenant: Tenant, bot_user: BotUser) -> Conversation:
 
 
 class _FakeYClients:
-    def __init__(self) -> None:
+    def __init__(self, *, create_raises: Exception | None = None) -> None:
         self.create_calls: list[dict] = []
         self.cancel_calls: list[int] = []
+        self.reschedule_calls: list[dict] = []
         self.times: list[AvailableTime] = []
+        self._create_raises = create_raises
 
     def create_record(self, **kwargs):
+        if self._create_raises is not None:
+            raise self._create_raises
         self.create_calls.append(kwargs)
         return BookingRecord(record_id=777, record_hash="h", raw={})
 
     def cancel_record(self, *, record_id: int) -> bool:
         self.cancel_calls.append(record_id)
         return True
+
+    def reschedule_record(self, **kwargs):
+        """Native move — the shape ``_execute_reschedule_ayla`` calls.
+
+        Only reachable with ``BOOKING_VIA_AYLA_REST`` on; the flag-OFF path
+        cancels and re-creates through the two methods above.
+        """
+        self.reschedule_calls.append(kwargs)
+        return BookingRecord(record_id=kwargs.get("record_id"), record_hash="h", raw={})
 
     def get_available_times(self, **_: Any) -> list[AvailableTime]:
         return list(self.times)
@@ -164,8 +181,12 @@ class TestFunnelEndsAreNotDeadEnds:
     ) -> None:
         """§25 п.3 — «Готово! Записала…» was the end of the conversation too.
 
-        «Мои записи» is the one next step that is true right after a confirm:
-        it reads the backend and shows the row that was just created.
+        «Мои записи» answers «did it really happen, and when» — it reads the
+        backend and shows the row that was just created. «Записаться ещё» is
+        the other move people make from here: the second service of the same
+        visit, or a booking for somebody else. Order is asserted, not just
+        membership: the verification chip comes first because that is the
+        question the person has in the second after a confirm.
         """
         token = create_pending(
             tenant=tenant,
@@ -181,7 +202,84 @@ class TestFunnelEndsAreNotDeadEnds:
 
         assert client.create_calls  # the booking really happened
         assert "Готово! Записала." in result.reply_text
+        assert _callbacks(result) == [CALLBACK_MENU_MY_BOOKINGS, CALLBACK_MENU_BOOK]
+
+    def test_the_book_more_chip_says_more_and_not_again(self) -> None:
+        """The label carries the whole difference between «you have a booking,
+        want another?» and «that failed, try again» — under «Готово!
+        Записала.» the short «📅 Записаться» reads as the second one.
+        """
+        from apps.bookings import callbacks as cb
+
+        labels = [
+            b["label"]
+            for att in (cb._confirmed_keyboard() or {}).get("attachments", [])
+            for b in att["payload"]["buttons"]
+        ]
+        assert labels == [cb.LABEL_MY_BOOKINGS, cb.LABEL_BOOK_MORE]
+        assert cb.LABEL_BOOK_MORE != cb.LABEL_BOOK_AGAIN
+        # …while pointing at the identical landing, so the two wordings cannot
+        # drift into two different behaviours.
+        assert _menu_callbacks(cb._confirmed_keyboard())[1] == CALLBACK_MENU_BOOK
+        assert _menu_callbacks(cb._book_again_keyboard()) == [CALLBACK_MENU_BOOK]
+
+    def test_reschedule_done_offers_the_booking_it_just_moved(
+        self, tenant: Tenant, bot_user: BotUser, conversation: Conversation, settings
+    ) -> None:
+        """The twelfth dead end — the one DRF-1492's inventory missed.
+
+        A successful reschedule answered with bare text. On the pilot contour
+        (``BOOKING_VIA_AYLA_REST``) that text is the SAME sentence a fresh
+        confirm produces — ``execute_reschedule`` takes the native Ayla move,
+        which renders through ``_format_confirmation_text``. So the exact
+        string §25 п.3 names was still a wall on this branch after the ticket
+        that removed it everywhere else.
+        """
+        settings.BOOKING_VIA_AYLA_REST = True
+        appointment_id = "3f1c2e9a-4b7d-4c2a-9e1f-8a2b6c0d1e34"
+        new_dt = (timezone.now() + timedelta(days=3)).replace(microsecond=0, second=0)
+        new_iso = new_dt.isoformat()
+        with tenant_scope(tenant):
+            BookingRequest.objects.create(
+                tenant=tenant,
+                bot_user=bot_user,
+                service_name="Массаж",
+                master_name="Ольга",
+                client_name="Anna",
+                client_phone="79991234567",
+                comment=f"Bot booking | yclients_record_id={appointment_id}",
+                source="bot",
+                status=BookingRequest.Status.CONFIRMED,
+                visit_at=timezone.now() + timedelta(days=1),
+            )
+        token = create_pending(
+            tenant=tenant,
+            bot_user=bot_user,
+            kind=PendingBookingAction.Kind.RESCHEDULE,
+            payload={
+                "record_id": appointment_id,
+                "new_datetime": new_iso,
+                "master_id": "7c9e0000-0000-0000-0000-000000000011",
+                "service_id": "1a2b3c4d-0000-0000-0000-000000000010",
+                "master_name": "Ольга",
+                "service_name": "Массаж",
+            },
+        )
+        client = _FakeYClients()
+        client.times = [
+            AvailableTime(time=new_dt.strftime("%H:%M"), datetime=new_iso, seance_length_s=None)
+        ]
+        with patch("apps.skills.booking.provider.get_booking_provider", return_value=client):
+            result = BookingGateCallbackSkill().handle(
+                _ctx(f"cb:book:confirm:{token}", bot_user=bot_user, conversation=conversation)
+            )
+
+        assert client.reschedule_calls  # the move really happened
+        assert "Готово! Записала." in result.reply_text
         assert _callbacks(result) == [CALLBACK_MENU_MY_BOOKINGS]
+        # Not the confirm's pair: a person rearranging the booking they have
+        # is not being offered a second one.
+        assert CALLBACK_MENU_BOOK not in _callbacks(result)
 
     def test_booking_cancelled_offers_the_way_back(
         self, tenant: Tenant, bot_user: BotUser, conversation: Conversation
@@ -373,6 +471,53 @@ class TestRepliesThatStayButtonless:
     and hanging a chip under them would invent a step nobody asked for.
     """
 
+    def test_the_confirm_that_failed_hands_over_and_offers_nothing(
+        self, tenant: Tenant, bot_user: BotUser, conversation: Conversation
+    ) -> None:
+        """«Не удалось создать запись — переключаю на менеджера» keeps its
+        bare text, and the reason is the sentence itself: it says a HUMAN
+        will act next. A chip there would be the second lie in one message —
+        «Мои записи» would open a list without the booking the person just
+        tried to make, and «Записаться ещё» would invite them back into the
+        funnel that had just refused them.
+
+        The positive guard (DRF-1411) runs first, on the same skill and the
+        same fixtures, so an empty keyboard below means «this branch», not
+        «this test never draws one».
+        """
+        ok_token = create_pending(
+            tenant=tenant,
+            bot_user=bot_user,
+            kind=PendingBookingAction.Kind.CONFIRM,
+            payload=_confirm_payload(_future_iso()),
+        )
+        with _patched(_FakeYClients()):
+            made = BookingGateCallbackSkill().handle(
+                _ctx(f"cb:book:confirm:{ok_token}", bot_user=bot_user, conversation=conversation)
+            )
+        assert _callbacks(made) == [CALLBACK_MENU_MY_BOOKINGS, CALLBACK_MENU_BOOK]
+
+        failing_token = create_pending(
+            tenant=tenant,
+            bot_user=bot_user,
+            kind=PendingBookingAction.Kind.CONFIRM,
+            payload=_confirm_payload(_future_iso()),
+        )
+        broken = _FakeYClients(create_raises=YClientsUnavailableError("circuit open"))
+        with _patched(broken):
+            refused = BookingGateCallbackSkill().handle(
+                _ctx(
+                    f"cb:book:confirm:{failing_token}",
+                    bot_user=bot_user,
+                    conversation=conversation,
+                )
+            )
+
+        assert broken.create_calls == []  # nothing was booked
+        assert "переключаю на менеджера" in refused.reply_text
+        assert refused.should_handoff
+        assert refused.action_data is None
+
     def test_reminder_confirm_and_reschedule_stay_plain(
         self, tenant: Tenant, bot_user: BotUser, conversation: Conversation
     ) -> None:
@@ -428,6 +573,44 @@ class TestChipsLandOnBothSurfaces:
         # would make the loop above pass for any string at all.
         assert resolve_tap_text("cb:menu:no_such_slug") == "Что ты умеешь?"
         assert resolve_tap_text("просто текст") is None
+
+    def test_every_chip_of_the_confirmed_reply_resolves_on_both_surfaces(
+        self, tenant: Tenant, bot_user: BotUser, conversation: Conversation
+    ) -> None:
+        """Read the callbacks OFF the reply rather than naming them.
+
+        The named checks below fix each family in place; this one is what
+        catches a third chip added to the funnel's end tomorrow whose payload
+        nobody parses — the failure mode the owner called worse than no
+        button at all.
+        """
+        from apps.channels.max.quick_actions import resolve_tap_text
+        from apps.skills.menu.matching import MENU_CALLBACK_TEXT
+        from apps.skills.menu.skill import MenuSkill
+
+        token = create_pending(
+            tenant=tenant,
+            bot_user=bot_user,
+            kind=PendingBookingAction.Kind.CONFIRM,
+            payload=_confirm_payload(_future_iso()),
+        )
+        with _patched(_FakeYClients()):
+            result = BookingGateCallbackSkill().handle(
+                _ctx(f"cb:book:confirm:{token}", bot_user=bot_user, conversation=conversation)
+            )
+
+        emitted = _callbacks(result)
+        assert emitted, "nothing to check — the reply lost its keyboard"
+        for callback in emitted:
+            # Global Ayla bot: the handler translates the tap into a phrase.
+            assert resolve_tap_text(callback) == MENU_CALLBACK_TEXT[callback], callback
+            # Tenant's own bot: MenuSkill claims the raw payload and answers
+            # with the identical phrase.
+            with tenant_scope(tenant):
+                claimed = MenuSkill().matches(
+                    _ctx(callback, bot_user=bot_user, conversation=conversation)
+                )
+            assert claimed, callback
 
     def test_my_bookings_lands_on_the_bookings_lookup(self) -> None:
         """«Покажи мои записи» is claimed by the SAME predicate both surfaces
