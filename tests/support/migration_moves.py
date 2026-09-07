@@ -305,10 +305,24 @@ def _walk_moves(
                 leaves = [n for n in graph.leaf_nodes() if n[0] == app]
                 current = leaves[0] if len(leaves) == 1 else None
             more_here = j + 1 < len(calls)
-            next_stmt_moves = (
-                bool(_migrate_calls(statements[i + 1])) if i + 1 < len(statements) else False
-            )
-            resting = not (more_here or next_stmt_moves)
+            following = statements[i + 1] if i + 1 < len(statements) else None
+            # «Leaves the node», not «does something». A restore leaves it —
+            # and it is the fix this guard's own message recommends, so
+            # flagging it would be absurd. A second `migrate()` leaves it only
+            # if it names a DIFFERENT node; migrating twice to the same one is
+            # a no-op the database sits through just the same.
+            next_stmt_leaves = False
+            if following is not None:
+                if _restores(following):
+                    next_stmt_leaves = True
+                else:
+                    for nxt in _migrate_calls(following):
+                        nxt_arg = _migrate_target(nxt)
+                        nxt_target = _as_node(nxt_arg, scopes) if nxt_arg is not None else None
+                        if nxt_target is not None and nxt_target != target:
+                            next_stmt_leaves = True
+                            break
+            resting = not (more_here or next_stmt_leaves)
             moves.append((call.lineno, target, _direction(current, target), resting))
             position[app] = target
         if _restores(stmt):
@@ -399,6 +413,26 @@ def forward_moves_to_pinned_nodes(source: str) -> tuple[list[Move], int]:
 # is *what* you touch while you are down: either seed at head and roll back
 # with the data already there, or read and write through the historical
 # registry, whose model has exactly the columns that exist at that node.
+
+# What this second analysis does NOT do — said plainly, because a scanner
+# that cannot see is indistinguishable from a clean tree, and this one sees
+# less than the first:
+#
+# * It matches `Name.manager` where `Name` is a module-level import from
+#   `apps.<app>.models`. It does NOT see instance methods (`row.save()`,
+#   `row.refresh_from_db()`, `row.delete()`), related managers
+#   (`bot_user.consentrecord_set.create(...)`), or a service imported inside
+#   the function body. Those are the same defect and would go unreported.
+# * `declares_historical` in the first analysis is computed over the whole
+#   function, not from the position of the move, so a node named to
+#   `project_state` anywhere excuses every forward move to it.
+# * The population it runs over is the hand-written list in the guard test.
+#   A new rollback test that never joins that list is invisible to both
+#   analyses; `test_the_guarded_population_is_complete` is what stops that.
+#
+# Consequence worth stating: the first analysis leans on this one as its
+# backstop for «what happens after a forward move», and this one has the
+# holes above. Neither is a proof; both are ratchets.
 
 #: Manager attributes that mean «the live table, as the running app sees it».
 _RUNTIME_MANAGERS = frozenset({"objects", "all_tenants", "_default_manager", "_base_manager"})
@@ -518,9 +552,6 @@ def runtime_access_below_head(source: str) -> tuple[list[RuntimeAccess], int]:
         if exit_position:
             fixture_exit[name] = exit_position
 
-    graph = _graph()
-    leaves = {app: node for app, node in ((n[0], n) for n in graph.leaf_nodes())}
-
     findings: list[RuntimeAccess] = []
     below_head_statements = 0
     for name, (func, class_consts) in functions.items():
@@ -530,7 +561,15 @@ def runtime_access_below_head(source: str) -> tuple[list[RuntimeAccess], int]:
             position.update(fixture_exit.get(arg.arg) or {})
         live = models - _rebound_names(func)
         for stmt in _flatten(func):
-            below = any(node != leaves.get(app) for app, node in position.items())
+            # Anything moved and not yet restored counts as down. NOT «is
+            # this app back on its own leaf» — that is precisely the DRF-1551
+            # fallacy, and repeating it inside the guard would be a joke:
+            # `migrate([consent/0003])` puts consent on its own leaf and
+            # leaves `identity/0021` unapplied all the same. Only
+            # `restore_migration_head()` — which clears `position` — means the
+            # whole graph is back. This also sidesteps the app that is
+            # mid-merge and has two leaves.
+            below = bool(position)
             if below:
                 below_head_statements += 1
                 via = _touches_runtime(stmt, live, helpers)
