@@ -3,6 +3,8 @@ import { describe, expect, it } from "vitest";
 import {
   MASTER_INVITE_PAYLOAD_PREFIX,
   MASTER_ONBOARDING_PATH,
+  RESCHEDULE_PATH_PREFIX,
+  RESCHEDULE_PAYLOAD_PREFIX,
   parseStartRoute,
 } from "./max-sdk";
 
@@ -81,6 +83,41 @@ describe("parseStartRoute", () => {
       expect(
         parseStartRoute(`${MASTER_INVITE_PAYLOAD_PREFIX}zz=1&route=catalog`),
       ).toBeNull();
+    });
+  });
+
+  // DRF-1547 / §37 — «Перенести» открывает расписание КОНКРЕТНОЙ записи.
+  // Второй и последний payload с параметром; правила те же, что у
+  // приглашения, и по той же причине: хвост попадает в адрес самого
+  // приложения, так что "всё после префикса" было бы дырой.
+  describe("reschedule payload", () => {
+    const uuid = "11111111-1111-4111-8111-111111111111";
+
+    it("routes a well-formed payload to that booking's reschedule screen", () => {
+      expect(parseStartRoute(`${RESCHEDULE_PAYLOAD_PREFIX}${uuid}`)).toBe(
+        `${RESCHEDULE_PATH_PREFIX}/${uuid}/reschedule`,
+      );
+    });
+
+    it("refuses anything that is not a canonical UUID", () => {
+      expect(parseStartRoute(`${RESCHEDULE_PAYLOAD_PREFIX}`)).toBeNull();
+      expect(parseStartRoute(`${RESCHEDULE_PAYLOAD_PREFIX}nope`)).toBeNull();
+      expect(parseStartRoute(`${RESCHEDULE_PAYLOAD_PREFIX}${uuid}x`)).toBeNull();
+      expect(
+        parseStartRoute(`${RESCHEDULE_PAYLOAD_PREFIX}../../admin/team`),
+      ).toBeNull();
+    });
+
+    it("refuses a malformed payload instead of falling through to route=", () => {
+      expect(
+        parseStartRoute(`${RESCHEDULE_PAYLOAD_PREFIX}zz=1&route=catalog`),
+      ).toBeNull();
+    });
+
+    it("does not shadow the flat slugs", () => {
+      // Положительная пара: соседние формы продолжают работать.
+      expect(parseStartRoute("open_visits")).toBe("/customer/records");
+      expect(parseStartRoute("route=profile")).toBe("/customer/profile");
     });
   });
 
