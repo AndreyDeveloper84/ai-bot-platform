@@ -77,6 +77,35 @@ def _no_intent_llm(monkeypatch):
     monkeypatch.setattr(max_handler, "resolve_and_log_turn_intent", MagicMock(return_value=None))
 
 
+def _recording_send(sink: list):
+    """Заглушка исходящего, принимающая ОБА ключа адресации (DRF-1558).
+
+    Возврат после согласия пишет человеку первым и потому уходит по
+    ``user_id``; ответ внутри хода по-прежнему уходит по ``chat_id``.
+    Заглушка, знающая только один ключ, роняет вызов внутрь ``except``
+    вызывающего и превращает «адрес поменялся» в «доставки не было» —
+    ровно то, на чём этот файл покраснел.
+
+    ``key`` записывается рядом с адресом: без него возврат на диалог
+    прошёл бы мимо теста, потому что оба значения лежат на одной строке.
+    """
+
+    def _send(*, chat_id=None, user_id=None, text, attachments=None, timeout=10.0):
+        sink.append(
+            {
+                "chat_id": chat_id,
+                "user_id": user_id,
+                "addr": user_id if user_id is not None else chat_id,
+                "key": "user_id" if user_id is not None else "chat_id",
+                "text": text,
+                "attachments": attachments,
+            }
+        )
+        return {"ok": True}
+
+    return _send
+
+
 @pytest.fixture
 def sent(monkeypatch):
     calls: list[dict] = []
@@ -525,10 +554,7 @@ class TestDiaryThroughTheBot:
         )
         monkeypatch.setattr(
             "apps.channels.max.outbound.send_message",
-            lambda *, chat_id, text, attachments=None, timeout=10.0: (
-                sent.append({"chat_id": chat_id, "text": text, "attachments": attachments})
-                or {"ok": True}
-            ),
+            _recording_send(sent),
         )
 
         max_handler.handle_global_max_event(
@@ -549,6 +575,13 @@ class TestDiaryThroughTheBot:
 
         # И получает В ЧАТ то, ради чего согласие давал.
         assert "Питание за сегодня" in sent[-1]["text"], sent[-1]["text"]
+        # DRF-1558 — и получает как ЧЕЛОВЕК, а не как диалог: возврат уходит
+        # вне хода и пишет первым, а сохранённый ``chat_id`` принадлежит паре
+        # «другой бот + человек». Ключ проверяется рядом с адресом: оба
+        # значения лежат на одной строке, и без ключа возврат на диалог
+        # прошёл бы мимо.
+        assert sent[-1]["key"] == "user_id"
+        assert sent[-1]["addr"] == str(bot_user.channel_user_id)
 
     def test_the_return_asks_for_the_welcome_cadence_not_the_ordinary_one(
         self, sent, fake_redis, concierge, settings, health_consent, monkeypatch
@@ -582,10 +615,7 @@ class TestDiaryThroughTheBot:
         monkeypatch.setattr("apps.orchestrator.personal_surface.render_diary", _render)
         monkeypatch.setattr(
             "apps.channels.max.outbound.send_message",
-            lambda *, chat_id, text, attachments=None, timeout=10.0: (
-                sent.append({"chat_id": chat_id, "text": text, "attachments": attachments})
-                or {"ok": True}
-            ),
+            _recording_send(sent),
         )
 
         max_handler.handle_global_max_event(
@@ -622,10 +652,7 @@ class TestDiaryThroughTheBot:
         )
         monkeypatch.setattr(
             "apps.channels.max.outbound.send_message",
-            lambda *, chat_id, text, attachments=None, timeout=10.0: (
-                sent.append({"chat_id": chat_id, "text": text, "attachments": attachments})
-                or {"ok": True}
-            ),
+            _recording_send(sent),
         )
 
         max_handler.handle_global_max_event(
