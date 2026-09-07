@@ -39,11 +39,19 @@
 
 import type React from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Link, Navigate, Route, Routes, useLocation, useNavigate } from "react-router-dom";
+import {
+  Link,
+  Navigate,
+  Route,
+  Routes,
+  useLocation,
+  useNavigate,
+} from "react-router-dom";
 
 import { ApiError } from "./lib/api";
 import { getMe, type MeResponse } from "./lib/admin-api";
 import { adminLandingPath, isAdminTabAllowed } from "./lib/admin-tabs";
+import { canOpenSalonPilot } from "./lib/salon-pilot";
 import { getStartPayload, parseStartRoute } from "./lib/max-sdk";
 import {
   SurfaceModeContext,
@@ -72,6 +80,10 @@ import { AdminSectionDeniedScreen } from "./screens/admin/AdminSectionDeniedScre
 import { AdminServicesMatrixScreen } from "./screens/admin/AdminServicesMatrixScreen";
 import { AdminSettingsPlaceholderScreen } from "./screens/admin/AdminSettingsPlaceholderScreen";
 import { AdminTeamScreen } from "./screens/admin/AdminTeamScreen";
+import { SalonPilotAylaScreen } from "./screens/admin/SalonPilotAylaScreen";
+import { SalonPilotDeniedScreen } from "./screens/admin/SalonPilotDeniedScreen";
+import { SalonPilotScheduleScreen } from "./screens/admin/SalonPilotScheduleScreen";
+import { SalonPilotTodayScreen } from "./screens/admin/SalonPilotTodayScreen";
 import { BookingWhenScreen } from "./screens/BookingWhenScreen";
 import { CatalogScreen } from "./screens/CatalogScreen";
 import { CustomerBookingConfirmScreen } from "./screens/CustomerBookingConfirmScreen";
@@ -139,7 +151,10 @@ function SplashScreen() {
           gap: "var(--s-3)",
         }}
       >
-        <div className="skeleton" style={{ width: 80, height: 80, borderRadius: "50%" }} />
+        <div
+          className="skeleton"
+          style={{ width: 80, height: 80, borderRadius: "50%" }}
+        />
         <p style={{ color: "var(--c-text-secondary)" }}>
           Загружаем рабочее место…
         </p>
@@ -153,8 +168,8 @@ function NoRoleScreen({ onRetry }: { onRetry: () => void }) {
     <div className="screen">
       <h1 className="screen__title">Доступ не настроен</h1>
       <p>
-        Кажется, эта учётная запись пока не привязана к салону. Откройте
-        чат с ботом, чтобы зарегистрироваться, и попробуйте снова.
+        Кажется, эта учётная запись пока не привязана к салону. Откройте чат с
+        ботом, чтобы зарегистрироваться, и попробуйте снова.
       </p>
       <div
         style={{ display: "flex", gap: "var(--s-2)", marginTop: "var(--s-4)" }}
@@ -188,6 +203,58 @@ function NoRoleScreen({ onRetry }: { onRetry: () => void }) {
 function adminRouteElements(me: MeResponse): React.ReactNode {
   return (
     <>
+      {/*
+        Пилотная салонная админка — «Сегодня · Расписание · Ayla»
+        (DRF-1235, решение владельца 07.09.2026).
+
+        Три адреса стоят РЯДОМ с пятивкладочным мостом, а не вместо
+        него: мост — двадцать живых экранов, на которых салон работает
+        сегодня, и выключать его владелец не просил. Обе поверхности
+        живут параллельно, у каждой своя нижняя панель и своё правило
+        доступа.
+
+        Страж — не украшение. Бэкенд и так ответит 403 ресепшн
+        (`require_admin_role`), но вопрос «какие салонные ручки открывать
+        ресепшн» у владельца не закрыт, и до ответа она не должна
+        попадать сюда даже по прямой ссылке из закладок или старого
+        сообщения бота. Проверка спрашивает наличие управляющей роли
+        (`canOpenSalonPilot`), а не отсутствие приёмной: владелец,
+        которому заодно проставили ресепшн, остаётся владельцем.
+
+        Посадка приложения не тронута: `adminLandingPath` по-прежнему
+        ведёт на мост. Какая из двух поверхностей встречает человека при
+        входе — решение владельца, и принимать его здесь нечем.
+      */}
+      <Route
+        path="/admin/today"
+        element={
+          canOpenSalonPilot(me) ? (
+            <SalonPilotTodayScreen me={me} />
+          ) : (
+            <SalonPilotDeniedScreen me={me} />
+          )
+        }
+      />
+      <Route
+        path="/admin/schedule"
+        element={
+          canOpenSalonPilot(me) ? (
+            <SalonPilotScheduleScreen me={me} />
+          ) : (
+            <SalonPilotDeniedScreen me={me} />
+          )
+        }
+      />
+      <Route
+        path="/admin/ayla"
+        element={
+          canOpenSalonPilot(me) ? (
+            <SalonPilotAylaScreen me={me} />
+          ) : (
+            <SalonPilotDeniedScreen me={me} />
+          )
+        }
+      />
       {/* Phase 2 — the salon's day. First tab in AdminTabBar. */}
       <Route path="/admin/day" element={<AdminSalonDayScreen me={me} />} />
       <Route path="/admin/booking/new" element={<AdminNewBookingScreen />} />
@@ -403,7 +470,9 @@ function useStartParamRedirect(enabled: boolean): void {
  * only renders its own error states.
  */
 function inviteOnboardingRouteElements(): React.ReactNode {
-  return <Route path="/onboarding/master" element={<MasterOnboardingScreen />} />;
+  return (
+    <Route path="/onboarding/master" element={<MasterOnboardingScreen />} />
+  );
 }
 
 /**
@@ -504,7 +573,10 @@ function AdminRoutes({ me }: { me: MeResponse }) {
         было. Ресепшн — на «День» (DRF-1522): ростер мастеров, где почти
         все действия от неё скрыты, был последним, что ей нужно утром.
       */}
-      <Route path="*" element={<CatchAllRedirect to={adminLandingPath(me)} />} />
+      <Route
+        path="*"
+        element={<CatchAllRedirect to={adminLandingPath(me)} />}
+      />
     </Routes>
   );
 }
@@ -774,9 +846,25 @@ const SOLO_NAV_TABS: ReadonlyArray<{
 }> = [
   { path: "/solo/my-day", label: "День", icon: "📋", ariaLabel: "Мой день" },
   { path: "/solo/bookings", label: "Записи", icon: "📅", ariaLabel: "Записи" },
-  { path: "/solo/customers", label: "Клиенты", icon: "👥", ariaLabel: "Клиенты" },
-  { path: "/solo/services", label: "Услуги", icon: "💼", ariaLabel: "Услуги и цены" },
-  { path: "/solo/more", label: "Ещё", icon: "⋯", ariaLabel: "Меню «Ещё»", opensSheet: true },
+  {
+    path: "/solo/customers",
+    label: "Клиенты",
+    icon: "👥",
+    ariaLabel: "Клиенты",
+  },
+  {
+    path: "/solo/services",
+    label: "Услуги",
+    icon: "💼",
+    ariaLabel: "Услуги и цены",
+  },
+  {
+    path: "/solo/more",
+    label: "Ещё",
+    icon: "⋯",
+    ariaLabel: "Меню «Ещё»",
+    opensSheet: true,
+  },
 ];
 
 interface SoloMoreSheetItem {
@@ -789,7 +877,12 @@ interface SoloMoreSheetItem {
 }
 
 const SOLO_MORE_SHEET_ITEMS: ReadonlyArray<SoloMoreSheetItem> = [
-  { path: "/solo/schedule", label: "Расписание", icon: "⏰", ariaLabel: "Расписание" },
+  {
+    path: "/solo/schedule",
+    label: "Расписание",
+    icon: "⏰",
+    ariaLabel: "Расписание",
+  },
   { path: "/solo/earnings", label: "Доходы", icon: "💰", ariaLabel: "Доходы" },
   { path: "/solo/reviews", label: "Отзывы", icon: "⭐", ariaLabel: "Отзывы" },
   {
@@ -800,7 +893,12 @@ const SOLO_MORE_SHEET_ITEMS: ReadonlyArray<SoloMoreSheetItem> = [
     trailingDivider: true,
   },
   { path: "/solo/profile", label: "Профиль", icon: "👤", ariaLabel: "Профиль" },
-  { path: "/solo/settings", label: "Настройки", icon: "⚙", ariaLabel: "Настройки" },
+  {
+    path: "/solo/settings",
+    label: "Настройки",
+    icon: "⚙",
+    ariaLabel: "Настройки",
+  },
 ];
 
 /**
@@ -872,9 +970,7 @@ function SoloBottomNav({
         const matchesSheetItem =
           isMore &&
           moreItems.some((it) => location.pathname.startsWith(it.path));
-        const isActive = isMore
-          ? sheetOpen || matchesSheetItem
-          : matchesPath;
+        const isActive = isMore ? sheetOpen || matchesSheetItem : matchesPath;
         if (isMore) {
           return (
             <button
@@ -961,8 +1057,7 @@ function SoloMoreSheet({
     // restore to it on close (typically the «Ещё» bottom-tab button).
     if (typeof document !== "undefined") {
       const active = document.activeElement;
-      restoreFocusRef.current =
-        active instanceof HTMLElement ? active : null;
+      restoreFocusRef.current = active instanceof HTMLElement ? active : null;
     }
     const panel = panelRef.current;
     if (!panel) return;
@@ -999,7 +1094,11 @@ function SoloMoreSheet({
       // Restore focus on close — guard against the trigger being
       // unmounted (deep-link → /solo/more redirect case).
       const target = restoreFocusRef.current;
-      if (target && typeof document !== "undefined" && document.contains(target)) {
+      if (
+        target &&
+        typeof document !== "undefined" &&
+        document.contains(target)
+      ) {
         target.focus();
       }
       restoreFocusRef.current = null;
@@ -1071,8 +1170,8 @@ function SoonScreen({ tab, slug }: { tab: string; slug: string }) {
       </span>
       <h1 className="soon-screen__title">«{tab}» — скоро</h1>
       <p className="soon-screen__body">
-        Этот раздел появится в следующих обновлениях. Пока работаю над тем,
-        что уже есть — день, записи, расписание.
+        Этот раздел появится в следующих обновлениях. Пока работаю над тем, что
+        уже есть — день, записи, расписание.
       </p>
       <p
         className="soon-screen__body"
@@ -1409,7 +1508,10 @@ export function CustomerRoutes() {
         `is_master: true` и монтируется `MasterRoutes`. Экран ниже
         виден, только если роль действительно не пришла.
       */}
-      <Route path="/master/*" element={<RoleNotReadyScreen surface="master" />} />
+      <Route
+        path="/master/*"
+        element={<RoleNotReadyScreen surface="master" />}
+      />
       <Route path="/admin/*" element={<RoleNotReadyScreen surface="admin" />} />
       <Route path="*" element={<HelloScreen />} />
     </Routes>
@@ -1422,11 +1524,7 @@ export function CustomerRoutes() {
  * out of catalog browsing. The error banner sits on top of the
  * customer routes via a wrapper.
  */
-function CustomerFallbackWithBanner({
-  onRetry,
-}: {
-  onRetry: () => void;
-}) {
+function CustomerFallbackWithBanner({ onRetry }: { onRetry: () => void }) {
   const location = useLocation();
   // Banner shows only on the root page so customers browsing don't
   // see a perpetual error toast.
@@ -1439,9 +1537,7 @@ function CustomerFallbackWithBanner({
           role="alert"
           style={{ margin: "var(--s-2) var(--s-3)" }}
         >
-          <p style={{ margin: 0 }}>
-            Не получилось загрузить ваш профиль.{" "}
-          </p>
+          <p style={{ margin: 0 }}>Не получилось загрузить ваш профиль. </p>
           <button
             type="button"
             className="btn-secondary"
@@ -1486,7 +1582,9 @@ export function App() {
         boot.status === "ready" &&
         boot.me != null &&
         [
-          Boolean(boot.me.is_owner || boot.me.is_admin || boot.me.is_receptionist),
+          Boolean(
+            boot.me.is_owner || boot.me.is_admin || boot.me.is_receptionist,
+          ),
           Boolean(boot.me.is_master),
         ].filter(Boolean).length > 1,
       requestChooser,
@@ -1543,8 +1641,7 @@ export function App() {
     const multiRole = hasAdmin && hasMaster;
     const stored = readLastSurface();
     if (stored === null) return;
-    const meaningful =
-      multiRole && (stored === "customer" || !isSolo);
+    const meaningful = multiRole && (stored === "customer" || !isSolo);
     if (!meaningful) clearLastSurface();
   }, [boot.status, boot.me]);
 

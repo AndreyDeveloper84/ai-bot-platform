@@ -140,6 +140,7 @@ WRAPS = re.compile(r"flex-(?:wrap|flow):[^;]*\bwrap\b")
 TABBAR_COMPONENTS = (
     "src/components/AdminTabBar.tsx",
     "src/components/MasterTabBar.tsx",
+    "src/components/SalonPilotTabBar.tsx",
 )
 
 STYLES_DIR = Path("src/styles")
