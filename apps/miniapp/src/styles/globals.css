@@ -3976,11 +3976,6 @@ a {
   color: var(--c-text-secondary);
 }
 
-.customer-confirm__policy {
-  margin: var(--s-2) 0;
-  font-size: var(--font-size-200);
-  color: var(--c-text-secondary);
-}
 .customer-confirm__notes {
   margin-top: var(--s-3);
 }

@@ -116,6 +116,52 @@ beforeEach(() => {
   seedDraft();
 });
 
+/**
+ * Условия отмены — блока нет, пока нет источника.
+ *
+ * До правки экран рисовал «Можно отменить за 4 часа до визита.» как
+ * утверждение. Политику отмены не отдаёт ни `GET /bookings/<id>`, ни
+ * ответ создания записи — число было константой в разметке.
+ *
+ * Стража парная (`negative_assert_guard`, DRF-1411): рядом с
+ * отрицательной проверкой стоят положительные на ТЕХ ЖЕ данных — выбор
+ * оплаты, заметка мастеру и кнопка «Записаться» никуда не делись.
+ * Правка, которая вычистила бы блок вместе с соседями, прошла бы
+ * отрицательную проверку и упала на положительных.
+ *
+ * Тест умеет падать: верните
+ * `<p className="customer-confirm__policy">Можно отменить за 4 часа до
+ * визита.</p>` в `CustomerBookingConfirmScreen` — покраснеет первый
+ * случай.
+ */
+describe("условия отмены (DRF — правдивость экрана подтверждения)", () => {
+  it("не обещает срок отмены, которого не отдаёт ни одна ручка", () => {
+    seedDraft();
+    renderScreen();
+    expect(screen.queryByText(/Можно отменить за/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/отменить за 4 часа/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/без штрафа/i)).not.toBeInTheDocument();
+  });
+
+  it("положительная стража: соседние блоки экрана на месте", () => {
+    seedDraft();
+    renderScreen();
+    // Выбор оплаты (C7.4) — соседний блок сверху.
+    expect(
+      screen.getByRole("radio", { name: /Оплатить на месте/ }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("radio", { name: /Оплатить онлайн/ }),
+    ).toBeInTheDocument();
+    // Заметка мастеру (§6.1 п.5) — соседний блок снизу.
+    expect(
+      screen.getByRole("button", { name: /Добавить заметку мастеру/ }),
+    ).toBeInTheDocument();
+    // И сама запись — то, ради чего экран существует.
+    expect(screen.getByRole("button", { name: "Записаться" })).toBeInTheDocument();
+  });
+});
+
 describe("payment choice (C7.4 / AMD-002)", () => {
   it("offers both options with «Оплатить на месте» preselected", () => {
     renderScreen();
