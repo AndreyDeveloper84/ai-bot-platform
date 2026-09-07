@@ -5,12 +5,14 @@
  * Что закреплено — выбрано по тому, что реально стоит дорого:
  *
  *   - **ссылка-приглашение видна и её можно взять.** Без неё владелец
- *     салона физически не может пригласить мастера: личное сообщение
- *     уходит клиентским ботом и достигает только уже существующий чат.
- *     На 06.09 из 34 мастеров в кабинет могут войти 4;
- *   - **отказ доставки назван причиной, а не молчанием.** «Не удалось»
- *     без причины отправляет владельца перепроверять правильный
- *     аккаунт до бесконечности;
+ *     салона физически не может пригласить мастера — с §44.4 это
+ *     вообще единственный путь. На 06.09 из 34 мастеров в кабинет
+ *     могут войти 4;
+ *   - **личного сообщения нет и строки о нём нет** (решение владельца
+ *     §44.4). Попытка уходила клиентским ботом и до незнакомого мастера
+ *     не доходила никогда, а владелец читал «не дошло» почти на каждом
+ *     приглашении. Стража перечисляет прежние формулировки поимённо:
+ *     вернуть их назад проще всего случайно;
  *   - код показывается один раз, поэтому экран обязан это СКАЗАТЬ и не
  *     давать уйти назад свайпом, уничтожив учётные данные;
  *   - `role=owner` — это повышение привилегий, и 403 сервера не должен
@@ -22,7 +24,7 @@
  *     последний тест падает, если кто-то заполнил шов выдуманной
  *     формулировкой вместо того, чтобы дождаться ответа.
  */
-import { render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -67,7 +69,7 @@ import {
   INVITE_MESSAGE_TEMPLATE,
   ROLE_OPTIONS,
 } from "./AddPersonAccessCodeSection";
-import { deliveryNotice } from "./AddPersonNewMasterSection";
+import { buildInviteMessage } from "../../components/InviteMessage";
 
 const mockedIssue = vi.mocked(issueStaffInvite);
 const mockedListMasters = vi.mocked(listMasters);
@@ -109,8 +111,6 @@ const INVITED: InviteMasterResponse = {
   master_id: "m-9",
   invite_token: "3f6c1e7a-0000-4000-8000-0000000000aa",
   invite_expires_at: "2026-09-13T09:00:00+00:00",
-  max_dm_delivery: "queued",
-  max_dm_error: "",
   fallback_link: "https://miniapp-dev.gobeauty.site/onboarding/master?token=3f6c1e7a",
   invite_link:
     "https://max.ru/id583403546770_3_bot?start=master_invite_3f6c1e7a-0000-4000-8000-0000000000aa",
@@ -255,12 +255,7 @@ describe("ссылка-приглашение", () => {
 
   it("не обещает ссылку, которой нет", async () => {
     const user = userEvent.setup();
-    mockedInvite.mockResolvedValue({
-      ...INVITED,
-      invite_link: "",
-      max_dm_delivery: "failed",
-      max_dm_error: "no_entry_configured",
-    });
+    mockedInvite.mockResolvedValue({ ...INVITED, invite_link: "" });
     renderNewMaster();
 
     await submitInvite(user);
@@ -288,127 +283,167 @@ describe("ссылка-приглашение", () => {
 });
 
 // --------------------------------------------------------------------------
-// Честность про доставку.
+// Готовый текст приглашения — решение владельца §44.2 от 07.09.2026.
 // --------------------------------------------------------------------------
 
-describe("отказ доставки", () => {
-  it("не выдаёт принятую отправку за доставленную", () => {
-    const notice = deliveryNotice(INVITED, "Анна");
+describe("текст приглашения", () => {
+  /**
+   * Утверждённая формулировка, дословно.
+   *
+   * Пишется здесь второй раз намеренно. Тест, собирающий ожидание тем
+   * же `buildInviteMessage`, доказывал бы только то, что функция равна
+   * себе: любую правку формулировки он пропустил бы молча. Владелец
+   * утвердил ЭТИ предложения, поэтому в тесте лежит их копия, а не
+   * ссылка на источник.
+   */
+  const APPROVED =
+    "Приглашаем вас присоединиться к салону «Формула тела» в Ayla.\n" +
+    "Откройте ссылку, чтобы получить доступ к рабочему профилю мастера.\n" +
+    "\n" +
+    `${INVITED.invite_link}\n` +
+    "\n" +
+    "Ссылка одноразовая. Пожалуйста, не пересылайте её: доступ получит " +
+    "тот, кто откроет ссылку первым.";
 
-    expect(notice.tone).toBe("ok");
-    expect(notice.text).toMatch(/Подтверждения доставки/);
-    expect(notice.text).not.toMatch(/в течение минуты/);
+  it("собирается дословно по утверждённой формулировке", () => {
+    expect(
+      buildInviteMessage({
+        salonName: "Формула тела",
+        link: INVITED.invite_link,
+      }),
+    ).toBe(APPROVED);
   });
 
-  it("различает опечатку в аккаунте и ненастроенный контур", () => {
-    const typo = deliveryNotice(
-      { ...INVITED, max_dm_delivery: "failed", max_dm_error: "max_status_404" },
-      "Анна",
-    );
-    const notConfigured = deliveryNotice(
-      {
-        ...INVITED,
-        max_dm_delivery: "failed",
-        max_dm_error: "no_entry_configured",
-      },
-      "Анна",
-    );
-
-    // Опечатку правит владелец — прямо в поле выше.
-    expect(typo.text).toMatch(/проверьте написание/i);
-    // А это он не исправит ничем, и посылать его перепроверять
-    // правильный аккаунт — злее, чем молчать.
-    expect(notConfigured.text).toMatch(/настройка на стороне платформы/i);
-    expect(notConfigured.text).not.toMatch(/проверьте написание/i);
-  });
-
-  it("не объявляет поломкой подтверждённую доставку", () => {
-    // `delivered` есть в типе, бэкенд его сегодня не возвращает. Без
-    // своей ветки оно провалилось бы в «не удалось» — самый удачный
-    // исход, объявленный отказом, и никто бы этого не заметил, пока MAX
-    // не научится подтверждать доставку.
-    const notice = deliveryNotice(
-      { ...INVITED, max_dm_delivery: "delivered", max_dm_error: "" },
-      "Анна",
-    );
-
-    expect(notice.tone).toBe("ok");
-    expect(notice.text).not.toMatch(/не удалось/i);
-  });
-
-  it("не называет поломкой то, что просто не построено", () => {
-    const skipped = deliveryNotice(
-      {
-        ...INVITED,
-        max_dm_delivery: "skipped",
-        max_dm_error: "max_phone_lookup_deferred",
-      },
-      "Анна",
-    );
-
-    expect(skipped.text).toMatch(/пока не умеет/i);
-    expect(skipped.text).not.toMatch(/не удалось/i);
-  });
-
-  it("не советует переслать ссылку, когда ссылки нет — ни в одной ветке", () => {
-    // Первая редакция читала `invite_link` ровно в одной ветке из шести,
-    // а остальные безусловно советовали «отправьте ссылку ниже». При
-    // пустой ссылке экран рисует под этим текстом красное «Ссылки нет» —
-    // обещание и его опровержение рядом, ровно тот дефект, который эта
-    // задача чинит уровнем выше.
-    const noLink = { ...INVITED, invite_link: "" };
-    const cases = [
-      { ...noLink, max_dm_delivery: "queued" as const, max_dm_error: "" },
-      { ...noLink, max_dm_delivery: "skipped" as const, max_dm_error: "max_phone_lookup_deferred" },
-      { ...noLink, max_dm_delivery: "skipped" as const, max_dm_error: "" },
-      { ...noLink, max_dm_delivery: "failed" as const, max_dm_error: "no_entry_configured" },
-      { ...noLink, max_dm_delivery: "failed" as const, max_dm_error: "max_status_404" },
-      { ...noLink, max_dm_delivery: "failed" as const, max_dm_error: "unexpected" },
-    ];
-
-    for (const c of cases) {
-      const text = deliveryNotice(c, "Анна").text;
-      expect(text, `${c.max_dm_delivery}/${c.max_dm_error}`).not.toMatch(
-        /ссылк\w* ниже|отправьте ссылку|передайте ссылку/i,
-      );
-    }
-  });
-
-  it("советует переслать ссылку во всех тех же ветках, когда она есть", () => {
-    // Положительная стража к предыдущему тесту: без неё «нигде не
-    // сказано про ссылку» зеленело бы на функции, которая не говорит о
-    // ней никогда — то есть на молчании вместо совета.
-    const cases = [
-      { ...INVITED, max_dm_delivery: "queued" as const, max_dm_error: "" },
-      { ...INVITED, max_dm_delivery: "skipped" as const, max_dm_error: "max_phone_lookup_deferred" },
-      { ...INVITED, max_dm_delivery: "failed" as const, max_dm_error: "no_entry_configured" },
-      { ...INVITED, max_dm_delivery: "failed" as const, max_dm_error: "max_status_404" },
-      { ...INVITED, max_dm_delivery: "failed" as const, max_dm_error: "unexpected" },
-    ];
-
-    for (const c of cases) {
-      const text = deliveryNotice(c, "Анна").text;
-      expect(text, `${c.max_dm_delivery}/${c.max_dm_error}`).toMatch(/ссылк/i);
-    }
-  });
-
-  it("показывает причину на экране, а не только в логе", async () => {
-    const user = userEvent.setup();
-    mockedInvite.mockResolvedValue({
-      ...INVITED,
-      max_dm_delivery: "failed",
-      max_dm_error: "no_entry_configured",
+  it("держит три решения владельца: от лица салона, без «кабинета», с предупреждением", () => {
+    const text = buildInviteMessage({
+      salonName: "Формула тела",
+      link: INVITED.invite_link,
     });
+
+    // Присутствие — сначала, на тех же данных: иначе «нет слова
+    // кабинет» доказывалось бы и пустой строкой.
+    expect(text).toMatch(/Приглашаем вас присоединиться к салону/);
+    expect(text).toMatch(/рабочему профилю мастера/);
+    expect(text).toMatch(/кто откроет ссылку первым/);
+    // «Приглашаю» — от лица человека; «кабинет» — запрещённое слово.
+    expect(text).not.toMatch(/Приглашаю/);
+    expect(text).not.toMatch(/кабинет/i);
+  });
+
+  it("показывается рядом со ссылкой и копируется целиком", async () => {
+    const user = userEvent.setup();
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    stubClipboard(writeText);
+    mockedInvite.mockResolvedValue(INVITED);
     renderNewMaster();
 
     await submitInvite(user);
 
-    expect(
-      await screen.findByText(/настройка на стороне платформы/i),
-    ).toBeInTheDocument();
-    // Положительная стража: ссылка при этом на месте, и владельцу есть
-    // что передать — иначе экран сообщал бы об отказе и обрывался.
-    expect(screen.getByText(INVITED.invite_link)).toBeInTheDocument();
+    await user.click(
+      await screen.findByRole("button", { name: "Скопировать текст" }),
+    );
+
+    expect(writeText).toHaveBeenCalledWith(APPROVED);
+    expect(await screen.findByText("Текст скопирован.")).toBeInTheDocument();
+  });
+
+  it("копирует правку владельца, а не исходную заготовку", async () => {
+    const user = userEvent.setup();
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    stubClipboard(writeText);
+    mockedInvite.mockResolvedValue(INVITED);
+    renderNewMaster();
+
+    await submitInvite(user);
+
+    // `fireEvent.change`, а не `user.clear` + `user.type`: заготовка
+    // длиной в четыре строки, и посимвольный ввод поверх неё съедает
+    // пять секунд таймаута на ровном месте. Проверяется здесь не ввод,
+    // а то, ЧТО уходит в буфер.
+    const field = await screen.findByLabelText("Текст приглашения");
+    fireEvent.change(field, { target: { value: "Аня, вот та ссылка" } });
+    await user.click(screen.getByRole("button", { name: "Скопировать текст" }));
+
+    // Правка — половина решения владельца: «скопировать и при желании
+    // изменить». Кнопка, копирующая заготовку, отменяет вторую половину.
+    expect(writeText).toHaveBeenCalledWith("Аня, вот та ссылка");
+  });
+
+  it("без ссылки не показывается вовсе", async () => {
+    const user = userEvent.setup();
+    mockedInvite.mockResolvedValue({ ...INVITED, invite_link: "" });
+    renderNewMaster();
+
+    await submitInvite(user);
+
+    // Присутствие на тех же данных: экран отрисовался и сказал про
+    // отсутствие ссылки — значит отсутствие текста ниже не артефакт
+    // упавшего рендера.
+    const noLinkScreen = await screen.findByText(/Ссылки нет/);
+    expect(noLinkScreen).toBeInTheDocument();
+    expect(screen.queryByLabelText("Текст приглашения")).not.toBeInTheDocument();
+  });
+});
+
+// --------------------------------------------------------------------------
+// Личного сообщения нет — и строки о нём тоже (решение владельца §44.4).
+// --------------------------------------------------------------------------
+
+describe("личное сообщение убрано", () => {
+  /**
+   * Все шесть формулировок, которые `deliveryNotice` выдавала на экран.
+   *
+   * Перечислены дословно, а не одним словом «сообщение»: слово
+   * «сообщение» живёт и в подсказке к готовому тексту, и стража на нём
+   * краснела бы от собственного соседа. Красить должен возврат
+   * УДАЛЁННОГО, а не любое упоминание.
+   */
+  const DELIVERY_LINES = [
+    /Подтверждения доставки/i,
+    /передано в MAX/i,
+    /MAX подтвердил доставку/i,
+    /Сообщение не отправлялось/i,
+    /Сообщение НЕ отправлено/i,
+    /отправить не удалось/i,
+    /MAX отказался принять сообщение/i,
+    /По номеру телефона бот написать пока не умеет/i,
+    /настройка на стороне платформы/i,
+  ];
+
+  it("не рисует ни одной строки о доставке рядом со ссылкой", async () => {
+    const user = userEvent.setup();
+    mockedInvite.mockResolvedValue(INVITED);
+    renderNewMaster();
+
+    await submitInvite(user);
+
+    // Присутствие сначала и на тех же данных: экран успеха отрисован и
+    // несёт то, ради чего он есть. Без этой пары «строк о доставке нет»
+    // зеленело бы и на экране, который не отрисовался вовсе.
+    const success = await screen.findByText(INVITED.invite_link);
+    expect(success).toBeInTheDocument();
+    expect(screen.getByLabelText("Текст приглашения")).toBeInTheDocument();
+
+    for (const line of DELIVERY_LINES) {
+      expect(screen.queryByText(line), String(line)).not.toBeInTheDocument();
+    }
+  });
+
+  it("не рисует их и там, где раньше было громче всего — при пустой ссылке", async () => {
+    const user = userEvent.setup();
+    mockedInvite.mockResolvedValue({ ...INVITED, invite_link: "" });
+    renderNewMaster();
+
+    await submitInvite(user);
+
+    // Тот же порядок: сначала доказать, что экран есть и говорит про
+    // отсутствие ссылки, потом — что о доставке он молчит.
+    const noLink = await screen.findByText(/Ссылки нет/);
+    expect(noLink).toBeInTheDocument();
+
+    for (const line of DELIVERY_LINES) {
+      expect(screen.queryByText(line), String(line)).not.toBeInTheDocument();
+    }
   });
 });
 

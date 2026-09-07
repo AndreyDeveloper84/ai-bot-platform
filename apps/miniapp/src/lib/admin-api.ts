@@ -787,7 +787,6 @@ export const reactivateMaster = (
 export type InviteContactMethod = "max_username" | "max_phone";
 export type InviteSchedulePreset = "default_mon_fri_10_19" | "none";
 export type InviteMode = "invite" | "catalog_only";
-export type MaxDmDelivery = "queued" | "delivered" | "failed" | "skipped";
 
 export interface InviteMasterPayload {
   name: string;
@@ -802,31 +801,17 @@ export interface InviteMasterResponse {
   master_id: string;
   invite_token: string | null;
   invite_expires_at: string | null;
-  max_dm_delivery: MaxDmDelivery;
-  /**
-   * Why the DM did not go out — `no_entry_configured`, `max_status_404`,
-   * `max_phone_lookup_deferred`, … Empty string when there is nothing to
-   * confess (DRF-1505).
-   *
-   * The cause matters because the two shapes of failure need opposite
-   * reactions from the person reading the screen: a 404 from MAX means
-   * the handle in the field above is wrong and can be retyped, while
-   * `no_entry_configured` is a deployment variable the salon owner has
-   * never heard of and cannot fix. A bare «не удалось» sends them to
-   * retype a correct handle forever.
-   */
-  max_dm_error: string;
   fallback_link: string;
   /**
    * `https://max.ru/<salon bot>?start=master_invite_<token>` — the one
    * thing the owner can actually hand over (DRF-1424, surfaced by
    * DRF-1505).
    *
-   * The DM above it can only reach a MAX username the salon already
-   * knows, in a chat that already exists. This link opens anywhere,
-   * needs no authentication to follow, and lands the invitee in a chat
-   * with the salon bot — which is what makes the button's delivery
-   * guaranteed rather than hopeful.
+   * Since §44.4 it is also the ONLY thing: the endpoint no longer
+   * attempts a personal message of its own, so nothing reaches the
+   * invited master except what the owner sends. This link opens
+   * anywhere, needs no authentication to follow, and lands the invitee
+   * in a chat with the salon bot.
    *
    * Empty when the deployment has no salon bot with a Mini App name.
    * The backend returns "" rather than a half-built URL on purpose: a
