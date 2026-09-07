@@ -2460,9 +2460,18 @@ def customer_recommendations(request: HttpRequest) -> HttpResponse:
 # the Mini App dashboard (Tau §6 Block 5) renders glasses. Conversion
 # lives here so the frontend stays unit-agnostic.
 _WATER_GLASS_ML = 250
-# Cold-start default when the customer skipped the nutrition anketa and
-# Ayla reports norm_ml=0. Matches the frontend stub default (Tau §11.1).
-_WATER_GLASSES_TARGET_DEFAULT = 8
+# Норму воды НЕ ПРИДУМЫВАЕМ. Здесь стояла константа
+# `_WATER_GLASSES_TARGET_DEFAULT = 8`, которая подставлялась, когда Ayla
+# отвечает `norm_ml=0` — то есть когда нормы у человека нет: анкету
+# питания он не проходил, и вычислять её не из чего. Восемь стаканов —
+# число ниоткуда: ни принятого плана, ни расчёта, ни ответа ручки за ним
+# не стоит, а человеку оно показывалось как ЕГО дневная цель, с
+# процентом выполнения и шкалой.
+#
+# Теперь при `norm_ml=0` ключ `water_glasses_target` просто не уходит.
+# Выпитое (`water_glasses_eaten`) — настоящее число и уходит всегда:
+# скрывать его вместе с целью значило бы потерять правду заодно с
+# выдумкой. Клиент рисует «N стаканов сегодня» без цели и без шкалы.
 
 
 def _ml_to_glasses(ml: float) -> int:
@@ -2667,7 +2676,8 @@ def customer_wellness_today(request: HttpRequest) -> HttpResponse:
     # ── hydration (from get_water_today) ────────────────────────────────
     water_known = True
     water_glasses_eaten = 0
-    water_glasses_target = _WATER_GLASSES_TARGET_DEFAULT
+    # None — «нормы нет», не «норма ноль». Ключ в ответ не попадёт.
+    water_glasses_target: int | None = None
     if isinstance(water_res, nutrition_errors):
         logger.warning("wellness_today.water_unavailable ext=%s err=%s", external_id, water_res)
         water_known = False
@@ -2680,8 +2690,9 @@ def customer_wellness_today(request: HttpRequest) -> HttpResponse:
         water_known = False
     else:
         water_glasses_eaten = _ml_to_glasses(water_res.total_ml)
-        target = _ml_to_glasses(water_res.norm_ml)
-        water_glasses_target = target or _WATER_GLASSES_TARGET_DEFAULT
+        # `norm_ml=0` = нормы нет. Ноль стаканов целью тоже не бывает,
+        # поэтому обе ситуации сходятся в один ответ: цели не будет.
+        water_glasses_target = _ml_to_glasses(water_res.norm_ml) or None
 
     # ── active goal (from Ayla's goal layer) ────────────────────────────
     # Sync call, deliberately after the async pair: the goal client keeps
@@ -2720,7 +2731,9 @@ def customer_wellness_today(request: HttpRequest) -> HttpResponse:
             payload["pfc"] = pfc
     if water_known:
         payload["water_glasses_eaten"] = water_glasses_eaten
-        payload["water_glasses_target"] = water_glasses_target
+        # Цель уходит, только когда она есть. Ключа нет = нормы нет.
+        if water_glasses_target is not None:
+            payload["water_glasses_target"] = water_glasses_target
     # Omitted — not `[]` — when the goal layer could not be reached: an
     # empty list means «no goal chosen», and saying that on an outage is
     # the defect this ticket closes. See docstring.
@@ -2845,17 +2858,18 @@ def customer_wellness_water(request: HttpRequest) -> HttpResponse:
             status=400,
         )
 
-    payload = {
+    payload: dict[str, Any] = {
         "entry_id": entry.entry_id,
         "ml": entry.ml,
         "water_ml": entry.water_ml,
         "today_total_ml": entry.today_total_ml,
         "today_norm_ml": entry.today_norm_ml,
         "water_glasses_eaten": _ml_to_glasses(entry.today_total_ml),
-        "water_glasses_target": (
-            _ml_to_glasses(entry.today_norm_ml) or _WATER_GLASSES_TARGET_DEFAULT
-        ),
     }
+    # Та же правда, что и в read-ручке: нормы нет — ключа нет.
+    water_target = _ml_to_glasses(entry.today_norm_ml) or None
+    if water_target is not None:
+        payload["water_glasses_target"] = water_target
     return JsonResponse(payload, status=201)
 
 

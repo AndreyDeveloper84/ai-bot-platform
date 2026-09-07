@@ -137,7 +137,9 @@ class TestAddWaterHappyPath:
         data = resp.json()
         assert data["entry_id"] == "entry-abc"
         assert data["today_total_ml"] == 1250
-        # Same 250 ml glass + same default target as GET /wellness/today.
+        # Тот же стакан 250 мл и та же норма, что у GET /wellness/today —
+        # два разных определения стакана показали бы человеку число,
+        # которое прыгает при обновлении.
         assert data["water_glasses_eaten"] == 5
         assert data["water_glasses_target"] == 8
 
@@ -157,13 +159,29 @@ class TestAddWaterHappyPath:
         assert kwargs["ts"] == tap_ts
         assert kwargs["idempotency_key"] == "water-1-abc"
 
-    def test_zero_norm_falls_back_to_the_default_target(self, client: Client, bot_user: BotUser):
-        # Anketa skipped → Ayla reports norm 0; the read endpoint shows 8
-        # glasses, so the write endpoint must not answer 0.
+    def test_zero_norm_omits_the_target(self, client: Client, bot_user: BotUser):
+        """Анкету не проходили → Ayla шлёт norm 0 → цели нет.
+
+        Здесь проверялось обратное: что запись воды ответит константой 8,
+        «раз read-ручка показывает 8». Обе ручки показывали одно и то же
+        выдуманное число — согласованно, но неправдиво.
+
+        Стража парная (``negative_assert_guard``, DRF-1411): ключа цели
+        нет, но выпитое на месте, и 201 остаётся 201 —
+        ``test_...glass_reaches_ayla`` выше держит вторую половину пары:
+        с настоящей нормой ключ приходит.
+        """
         patcher, _ = _patch_client(add=_FakeEntry(today_norm_ml=0))
         with patcher:
             resp = _post(client, bot_user, {"ml": 250})
-        assert resp.json()["water_glasses_target"] == 8
+        assert resp.status_code == 201
+        data = resp.json()
+        # POSITIVE ВПЕРЕДИ: ответ настоящий и содержит выпитое, поэтому
+        # «ключа цели нет» ниже — про этот ответ, а не про пустой.
+        assert data["water_glasses_eaten"] == 5
+        assert data["entry_id"] == "entry-abc"
+        # NEGATIVE: нормы нет — цели нет.
+        assert "water_glasses_target" not in data
 
 
 class TestAddWaterValidation:
