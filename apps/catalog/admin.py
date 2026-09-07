@@ -15,8 +15,7 @@ from django.http import HttpRequest
 from django.shortcuts import render
 from django.utils import timezone
 
-from apps.catalog.master_state import ACCEPTED as _INVITE_ACCEPTED
-from apps.catalog.master_state import is_available
+from apps.catalog.master_state import is_available, sale_block
 from apps.catalog.models import (
     CatalogFaq,
     CatalogHelpArticle,
@@ -202,16 +201,39 @@ class CatalogMasterAdmin(_MirrorAdminBase):
         """Тот же предикат, что ``CatalogMaster.objects.bookable()``."""
         return is_available(obj)
 
+    #: Причина отказа словами оператора — по коду из ``sale_block``.
+    #:
+    #: Ключи ровно из :data:`apps.catalog.master_state.SaleBlock`, и
+    #: полнота держится тестом: гейт продажи расширяется (DRF-1521
+    #: добавляет ``profile_incomplete``), и забытый ключ печатал бы
+    #: оператору «нет данных» вместо причины.
+    _BOOKABLE_NOTES = {
+        "revoked": "в архиве или снята синхронизацией",
+        "pending": "приглашение не принято",
+        "ayla_unlinked": "не удалось связать профиль с Ayla",
+    }
+
     @admin.display(description="Почему не бронируется")
     def bookable_note(self, obj: CatalogMaster) -> str:
-        """Причина, а не только факт — требование задачи к списку."""
-        if is_available(obj):
+        """Причина, а не только факт — требование задачи к списку.
+
+        Спрашивает ``sale_block``, а не пересобирает лестницу условий
+        заново. Своя копия здесь была бы четвёртой (докстринг
+        ``apps/catalog/master_state.py`` заводить новые запрещает) и уже
+        врала бы: после DRF-1540 гейт спрашивает про ``ayla_user_id``, и
+        несвязанный мастер по прежней лестнице подписывался как
+        «неактивна по данным синхронизации» — оператор шёл бы чинить
+        активность, которая в порядке.
+        """
+        block = sale_block(obj)
+        if block is None:
             return "—"
-        if obj.archived_at is not None:
+        if block == "revoked" and obj.archived_at is not None:
+            # Архив и снятая активность — одно значение гейта, но разные
+            # действия оператора: из архива достают отсюда, активность
+            # чинят в источнике синхронизации.
             return "в архиве"
-        if obj.invite_status != _INVITE_ACCEPTED:
-            return f"приглашение: {obj.get_invite_status_display()}"
-        return "неактивна по данным синхронизации"
+        return self._BOOKABLE_NOTES.get(block, block)
 
     @admin.action(
         permissions=["change"],

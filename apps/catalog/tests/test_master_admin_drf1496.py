@@ -14,6 +14,8 @@
 
 from __future__ import annotations
 
+import uuid
+
 import pytest
 from django.contrib.admin.models import LogEntry
 from django.contrib.auth import get_user_model
@@ -56,6 +58,14 @@ def _master(salon: Tenant, name: str, **kwargs) -> CatalogMaster:
         "external_updated_at": timezone.now(),
         "name": name,
         "is_active": True,
+        # DRF-1540 — форма синхронизированной строки: канонический ключ
+        # заполнен. Гейт продажи (``apps/catalog/master_state.py``)
+        # спрашивает про ``ayla_user_id``, и без него мастер не
+        # бронировалась бы по чужой причине, а тесты этой задачи
+        # проверяют ровно влияние ``invite_status`` и архива. Ключ у
+        # каждой строки свой: ``0016_master_dedup_keys`` держит
+        # частичную уникальность ``(tenant, ayla_user_id)``.
+        "ayla_user_id": uuid.uuid4(),
     }
     defaults.update(kwargs)
     return CatalogMaster.all_tenants.create(**defaults)
@@ -259,16 +269,36 @@ def test_changelist_explains_why_master_is_not_bookable(
     """В списке видно, почему мастер не бронируется, а не только факт."""
     _master(salon, "Ждущая", invite_status=_PENDING)
     _master(salon, "Архивная", invite_status=_ACCEPTED, archived_at=timezone.now())
+    # DRF-1540: строка без канонического ключа не продаётся, и причина у
+    # неё своя — оператор идёт к нам, а не чинит активность.
+    _master(salon, "Несвязанная", invite_status=_ACCEPTED, ayla_user_id=None)
     _master(salon, "Бронируемая", invite_status=_ACCEPTED)
 
     response = owner_client.get(reverse(CHANGELIST_URL))
 
     assert response.status_code == 200
     content = response.content.decode()
-    # Присутствие: все трое в списке.
+    # Присутствие: все четверо в списке.
     assert "Ждущая" in content
     assert "Архивная" in content
+    assert "Несвязанная" in content
     assert "Бронируемая" in content
     # Причины рядом с фактом.
-    assert "приглашение: Pending invite" in content
+    assert "приглашение не принято" in content
     assert "в архиве" in content
+    assert "не удалось связать профиль с Ayla" in content
+
+
+def test_every_sale_block_has_a_word_for_the_operator() -> None:
+    """У каждой причины гейта есть текст — молчащих кодов не бывает.
+
+    Гейт продажи расширяется (DRF-1521 добавит ``profile_incomplete``).
+    Без этой сверки новая причина доехала бы до списка сырым кодом, и
+    экран, заведённый ради ответа «почему», ответил бы «почему-то».
+    """
+    from typing import get_args
+
+    from apps.catalog.admin import CatalogMasterAdmin
+    from apps.catalog.master_state import SaleBlock
+
+    assert set(CatalogMasterAdmin._BOOKABLE_NOTES) == set(get_args(SaleBlock))  # noqa: SLF001
