@@ -1042,7 +1042,7 @@ def _maybe_send_manager_dm(*, tenant: Any, master: CatalogMaster, request_id: uu
     """Dispatch the «Анна просит выходной» DM to the salon manager.
 
     Per master-mobile §M3 line 458: «server marks slot blocked → owner
-    notified (audit + bot DM)». No-op when ``manager_chat_id`` is
+    notified (audit + bot DM)». No-op when the manager's MAX address is
     empty — degraded mode aligned with the reminder-escalation pattern
     (apps/bookings/tasks::escalate_stale_reminders).
 
@@ -1051,8 +1051,15 @@ def _maybe_send_manager_dm(*, tenant: Any, master: CatalogMaster, request_id: uu
     every master endpoint.
     """
 
-    chat_id = (tenant.manager_chat_id or "").strip()
-    if not chat_id:
+    # DRF-1559 — адрес менеджера: человек, если у салона заполнен
+    # ``manager_user_id``, иначе прежний диалоговый идентификатор. Slug
+    # ``no_manager_chat_id`` сохранён — это эмитируемый ключ. Импорт
+    # локальный, как и у ``send_message`` ниже: apps.channels не нужен
+    # тем эндпоинтам master_api, которые сюда не заходят.
+    from apps.channels.max.addressing import manager_address
+
+    manager = manager_address(tenant)
+    if not manager:
         logger.info(
             "master_api.availability.no_manager_chat_id tenant=%s master=%s",
             tenant.id,
@@ -1075,7 +1082,7 @@ def _maybe_send_manager_dm(*, tenant: Any, master: CatalogMaster, request_id: uu
         f"[Открыть запрос]({admin_url}?request_id={request_id})"
     )
     try:
-        send_message(chat_id=chat_id, text=text)
+        send_message(**manager.send_kwargs(), text=text)
     except MaxAPIError:
         # Best-effort: the audit + DB row are the source of truth. DM
         # failures are logged for ops but don't propagate.
@@ -1187,7 +1194,7 @@ def availability_request(request: HttpRequest) -> HttpResponse:
     Side effects:
       * Audit row: ``master.availability_change_requested``.
       * Event emit (same slug) for analytics fanout.
-      * MAX DM to ``tenant.manager_chat_id`` post-commit. No-op when
+      * MAX DM to the salon manager's address post-commit. No-op when
         empty (degraded mode, matches reminder-escalation pattern).
     """
 

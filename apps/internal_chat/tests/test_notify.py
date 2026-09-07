@@ -96,6 +96,16 @@ def _message(thread, *, role: str, body: str = "Можно поменяться 
 
 
 class TestDirectionMasterToAdmin:
+    @staticmethod
+    def _addressed(sent) -> list[dict[str, str]]:
+        """Адрес И ключ, которым он ушёл (DRF-1559).
+
+        Проверять только значение мало: и человек, и диалог лежат в одной
+        настройке салона, и возврат к диалоговому ключу прошёл бы мимо.
+        """
+
+        return [a.send_kwargs() for a in sent.call_args.kwargs["addresses"]]
+
     def test_goes_to_the_salon_manager(self, tenant, sent):
         tenant.manager_chat_id = "555"
         tenant.save(update_fields=["manager_chat_id"])
@@ -103,8 +113,22 @@ class TestDirectionMasterToAdmin:
 
         notify.notify_internal_message(message=msg)
 
-        assert sent.call_args.kwargs["chat_ids"] == ["555"]
-        assert sent.call_args.kwargs["user_ids"] == []
+        assert self._addressed(sent) == [{"chat_id": "555"}]
+
+    def test_manager_with_a_user_id_is_addressed_as_a_person(self, tenant, sent):
+        """DRF-1559 — заполненный ``manager_user_id`` вытесняет диалог.
+
+        Значения намеренно разные: возврат к ``chat_id`` даёт другое, а не
+        то же самое, и пройти зелёным не может.
+        """
+        tenant.manager_user_id = "260237491"
+        tenant.manager_chat_id = "555"
+        tenant.save(update_fields=["manager_user_id", "manager_chat_id"])
+        msg = _message(_thread(tenant, _master(tenant)), role=SenderRoleChoices.MASTER)
+
+        notify.notify_internal_message(message=msg)
+
+        assert self._addressed(sent) == [{"user_id": "260237491"}]
 
     def test_falls_back_to_the_configured_channel(self, tenant, settings, sent):
         # Same cascade as the booking notice, deliberately: a salon
@@ -114,7 +138,7 @@ class TestDirectionMasterToAdmin:
 
         notify.notify_internal_message(message=msg)
 
-        assert sent.call_args.kwargs["chat_ids"] == ["777"]
+        assert self._addressed(sent) == [{"chat_id": "777"}]
 
     def test_nowhere_to_send_is_loud_not_silent(self, tenant, sent, caplog):
         msg = _message(_thread(tenant, _master(tenant)), role=SenderRoleChoices.MASTER)
@@ -139,8 +163,7 @@ class TestDirectionAdminToMaster:
 
         # DRF-1558 — мастеру пишем как ЧЕЛОВЕКУ: эта отправка идёт под
         # салонным ботом, а «4242» — диалог мастера с клиентским.
-        assert sent.call_args.kwargs["user_ids"] == ["42"]
-        assert sent.call_args.kwargs["chat_ids"] == []
+        assert [a.send_kwargs() for a in sent.call_args.kwargs["addresses"]] == [{"user_id": "42"}]
 
     def test_an_unlinked_master_is_NOT_broadcast_to_the_salon(self, tenant, settings, sent):
         """The privacy property. No fallback on this direction, on purpose."""

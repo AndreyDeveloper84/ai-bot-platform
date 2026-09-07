@@ -8,9 +8,11 @@ told "someone will answer within 30 minutes", and nobody knew.
 
 ### Contract (brief §3, do not weaken)
 
-* **Off by default.** ``HANDOFF_NOTIFY_MAX_CHAT_IDS`` empty → the
-  mechanism is fully disabled: no network calls, no warning-level log
-  lines. That is the CI / local-dev default.
+* **Off by default.** Both ``HANDOFF_NOTIFY_MAX_USER_IDS`` and
+  ``HANDOFF_NOTIFY_MAX_CHAT_IDS`` empty → the mechanism is fully
+  disabled: no network calls, no warning-level log lines. That is the
+  CI / local-dev default. A non-empty USER_IDS list REPLACES the
+  CHAT_IDS one — see :func:`get_notify_addresses` (DRF-1559).
 * **After commit, never inside the transaction.** Callers register
   :func:`notify_admin_task_created` via ``transaction.on_commit`` — a
   rolled-back task must never notify (false alarm: the operator hunts
@@ -48,6 +50,7 @@ from django.conf import settings
 from django.utils import timezone
 
 from apps.audit.services import write_audit
+from apps.channels.max.addressing import MaxAddress, operator_addresses, split_addresses
 from apps.channels.max.outbound import send_message
 from apps.handoff.models import AdminTask
 
@@ -64,17 +67,33 @@ _MAX_REASON_LEN = 200
 _HIGH_PRIORITIES = frozenset({AdminTask.Priority.HIGH.value, AdminTask.Priority.URGENT.value})
 
 
-def get_notify_chat_ids() -> list[str]:
-    """Configured MAX recipient chat_ids; empty list = mechanism off.
+def get_notify_addresses() -> tuple[MaxAddress, ...]:
+    """Configured operator recipients; empty = mechanism off.
 
-    These are **dialog** ids typed in by an operator, and we hold no
-    person id for them — so they cannot move to ``user_id`` addressing
-    the way a ``BotUser``-derived recipient can (DRF-1558). They keep
-    the limitation that goes with a dialog id: they only resolve for the
-    bot whose dialog they were copied out of. On 2026-09-07 that is why
-    the salon fallback answered 404 alongside the master notification
-    (`docs/OPEN_DECISIONS.md` §55) — a setting holding user ids is a
-    separate, config-shaped change.
+    Since DRF-1559 the setting comes in two shapes and the choice between
+    them lives in one place — :func:`apps.channels.max.addressing.operator_addresses`.
+    A non-empty ``HANDOFF_NOTIFY_MAX_USER_IDS`` (people, valid for any of
+    our bots) REPLACES ``HANDOFF_NOTIFY_MAX_CHAT_IDS`` (dialogs, valid only
+    for the bot whose dialog they were copied out of) rather than adding to
+    it: during the migration both would name the same human, and the union
+    would message them twice per event.
+
+    That fallback rung is not hypothetical breakage — it is the
+    ``channel=fallback`` that answered 404 alongside the master
+    notification on 2026-09-07 (`docs/OPEN_DECISIONS.md` §55).
+    """
+
+    return operator_addresses()
+
+
+def get_notify_chat_ids() -> list[str]:
+    """Только диалоговые получатели — совместимость для читателей настройки.
+
+    Оставлено, потому что ``apps/llm/health.py`` и пара сообщений в логах
+    спрашивают именно «настроен ли запасной канал», а не «каким ключом он
+    адресуется». Для ОТПРАВКИ использовать :func:`get_notify_addresses`:
+    этот список пуст, когда настроены люди, и вызывающий, спутавший одно
+    с другим, замолчит вместо того, чтобы отправить.
     """
 
     return [c for c in getattr(settings, "HANDOFF_NOTIFY_MAX_CHAT_IDS", []) if c]
@@ -125,6 +144,7 @@ def send_max_notification(
     text: str,
     chat_ids: Sequence[str] = (),
     user_ids: Sequence[str] = (),
+    addresses: Sequence[MaxAddress] = (),
     timeout: float = _SEND_TIMEOUT,
     on_failure: Callable[[str, Exception], None] | None = None,
 ) -> int:
@@ -144,12 +164,21 @@ def send_max_notification(
       inherit the same limitation: they only work for the bot whose
       dialog they were copied out of.
 
-    Both may be given; each recipient is addressed by its own key.
+    ``addresses`` (DRF-1559) is the third and preferred form: a
+    :class:`~apps.channels.max.addressing.MaxAddress` already carries which
+    of the two keys it is, so a caller that got its recipient from config
+    never has to branch. It is merged into the two lists below.
+
+    All three may be given; each recipient is addressed by its own key.
 
     Every recipient is isolated: an exception on one address is logged
     (and reported via ``on_failure``) but never cancels the remaining
     sends. No retries — the sync path stays short by design.
     """
+
+    extra_chat_ids, extra_user_ids = split_addresses(addresses)
+    chat_ids = [*chat_ids, *extra_chat_ids]
+    user_ids = [*user_ids, *extra_user_ids]
 
     failures = 0
     for user_id in user_ids:
@@ -194,20 +223,21 @@ def notify_admin_task_created(task: AdminTask) -> None:
     """
 
     try:
-        chat_ids = get_notify_chat_ids()
-        if not chat_ids:
+        recipients = get_notify_addresses()
+        if not recipients:
             return  # fully disabled (§3.1)
         text = build_admin_task_notification(task)
 
-        def _audit_failure(chat_id: str, exc: Exception) -> None:
-            _write_notify_failure_audit(task, chat_id, exc)
+        def _audit_failure(address: str, exc: Exception) -> None:
+            _write_notify_failure_audit(task, address, exc)
 
-        failures = send_max_notification(text=text, chat_ids=chat_ids, on_failure=_audit_failure)
+        failures = send_max_notification(text=text, addresses=recipients, on_failure=_audit_failure)
         if failures == 0:
             logger.info(
-                "handoff.notify.sent task=%s recipients=%d",
+                "handoff.notify.sent task=%s recipients=%d addressed_by=%s",
                 task.id,
-                len(chat_ids),
+                len(recipients),
+                recipients[0].key,
             )
     except Exception:  # noqa: BLE001 — hard containment (§3.3)
         logger.exception("handoff.notify.unexpected task=%s", getattr(task, "id", None))
@@ -259,28 +289,38 @@ def notify_admin_task_unclaimed(task: AdminTask, *, waited_minutes: int) -> None
     """
 
     try:
-        chat_ids = get_notify_chat_ids()
-        if not chat_ids:
+        recipients = get_notify_addresses()
+        if not recipients:
             return  # fully disabled (§3.1)
         text = build_unclaimed_notification(task, waited_minutes=waited_minutes)
 
-        def _audit_failure(chat_id: str, exc: Exception) -> None:
-            _write_notify_failure_audit(task, chat_id, exc)
+        def _audit_failure(address: str, exc: Exception) -> None:
+            _write_notify_failure_audit(task, address, exc)
 
-        failures = send_max_notification(text=text, chat_ids=chat_ids, on_failure=_audit_failure)
+        failures = send_max_notification(text=text, addresses=recipients, on_failure=_audit_failure)
         if failures == 0:
             logger.info(
-                "handoff.notify.unclaimed_sent task=%s recipients=%d waited_minutes=%d",
+                "handoff.notify.unclaimed_sent task=%s recipients=%d waited_minutes=%d "
+                "addressed_by=%s",
                 task.id,
-                len(chat_ids),
+                len(recipients),
                 waited_minutes,
+                recipients[0].key,
             )
     except Exception:  # noqa: BLE001 — hard containment (§3.3)
         logger.exception("handoff.notify.unclaimed_unexpected task=%s", getattr(task, "id", None))
 
 
-def _write_notify_failure_audit(task: AdminTask, chat_id: str, exc: Exception) -> None:
-    """Audit a failed notification so the gap is visible after the fact."""
+def _write_notify_failure_audit(task: AdminTask, address: str, exc: Exception) -> None:
+    """Audit a failed notification so the gap is visible after the fact.
+
+    Ключ payload переименован ``chat_id`` → ``address`` (DRF-1559): под ним
+    теперь может лежать и идентификатор человека, и идентификатор диалога.
+    Оставить прежнее имя значило бы, что запись о сбое доставки называет
+    получателя не тем, чем он был, — а читают её именно тогда, когда
+    выясняют, кому не дошло. По репозиторию этот ключ никто не читает:
+    единственный тест на эту запись проверяет её наличие, не содержимое.
+    """
 
     try:
         write_audit(
@@ -289,7 +329,7 @@ def _write_notify_failure_audit(task: AdminTask, chat_id: str, exc: Exception) -
             target_id=task.id,
             payload={
                 "conversation_id": str(task.conversation_id),
-                "chat_id": str(chat_id),
+                "address": str(address),
                 "error": f"{type(exc).__name__}: {exc}"[:200],
             },
         )

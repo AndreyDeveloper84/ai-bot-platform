@@ -181,6 +181,26 @@ class TenantAdmin(admin.ModelAdmin):
             },
         ),
         (
+            "Адрес менеджера в MAX (DRF-1559)",
+            {
+                "fields": ("manager_user_id", "manager_chat_id"),
+                "description": (
+                    "Сюда уходят эскалации напоминаний, оповещения о записях, "
+                    "просьбы изменить расписание и предупреждения о лимитах. "
+                    "<b>Заполняйте manager_user_id.</b> chat_id — это "
+                    "идентификатор ДИАЛОГА: он верен только для того бота, из "
+                    "переписки с которым его скопировали, и салонный бот, "
+                    "отправляя туда, получает 404 dialog.not.found (замер "
+                    "07.09.2026, OPEN_DECISIONS §55). user_id — это человек, и "
+                    "он верен для любого нашего бота. "
+                    "Пересчитать одно в другое нельзя: MAX отдаёт "
+                    "recipient.user_id в ответе на успешную отправку — оттуда "
+                    "и берут. Пока user_id пуст, читается chat_id, то есть "
+                    "поведение остаётся вчерашним."
+                ),
+            },
+        ),
+        (
             "Sprint 8 shadow-mode",
             {
                 "fields": ("shadow_mode",),
@@ -222,7 +242,8 @@ class TenantAdmin(admin.ModelAdmin):
                     "Either cap can trip independently and the bot serves a "
                     "static 'лимит исчерпан' fallback once exhausted; reset "
                     "at 00:00 UTC. The 80% threshold also pings the salon "
-                    "manager's MAX chat (manager_chat_id) once per day."
+                    "manager's MAX address once per day — см. раздел «Адрес "
+                    "менеджера в MAX»."
                 ),
             },
         ),

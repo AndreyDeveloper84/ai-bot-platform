@@ -353,6 +353,35 @@ class TestCascadePrecedence:
         _notify(tenant)
         assert [c["addr"] for c in send.calls] == ["manager-chat-1"]
 
+    def test_manager_with_a_user_id_is_addressed_as_a_person(
+        self, tenant: Tenant, send: SendRecorder
+    ) -> None:
+        """DRF-1559 — это и есть путь, упавший в замере §55.
+
+        Уведомление о записи уходит под САЛОННЫМ ботом, а
+        ``manager_chat_id`` — диалог менеджера с клиентским. Заполненный
+        ``manager_user_id`` вытесняет его: значения разные намеренно, и
+        возврат к диалогу даёт другое, а не то же самое.
+        """
+
+        tenant.manager_user_id = "260237491"
+        tenant.manager_chat_id = "manager-chat-1"
+        tenant.save(update_fields=["manager_user_id", "manager_chat_id"])
+        _notify(tenant)
+        assert [c["addr"] for c in send.calls] == ["260237491"]
+        assert [c["key"] for c in send.calls] == ["user_id"]
+
+    def test_operator_fallback_follows_the_same_rule(
+        self, tenant: Tenant, send: SendRecorder, settings
+    ) -> None:
+        """Запасная ступень — тот самый ``channel=fallback``, что упал в §55."""
+
+        settings.HANDOFF_NOTIFY_MAX_CHAT_IDS = ["owner-chat"]
+        settings.HANDOFF_NOTIFY_MAX_USER_IDS = ["owner-person"]
+        _notify(tenant)
+        assert [c["addr"] for c in send.calls] == ["owner-person"]
+        assert [c["key"] for c in send.calls] == ["user_id"]
+
     def test_resolvers_report_their_decisions(self, tenant: Tenant, settings) -> None:
         """The resolvers name their own decisions — logs, audit rows and
         the send order depend on those labels."""
@@ -382,6 +411,12 @@ class TestCascadePrecedence:
 
         settings.HANDOFF_NOTIFY_MAX_CHAT_IDS = []
         assert resolve_salon_target(tenant=tenant).channel == "none"
+
+        # DRF-1559 — та же ступень, но адресуемая человеком.
+        tenant.manager_user_id = "260237491"
+        target = resolve_salon_target(tenant=tenant)
+        assert target.channel == "manager"
+        assert [a.send_kwargs() for a in target.addresses] == [{"user_id": "260237491"}]
 
 
 # ─── specialist delivery ───────────────────────────────────────────────────
@@ -838,7 +873,7 @@ class TestSenderIdentity:
 
         seen: list[str] = []
 
-        def _fake_send(*, text, chat_ids, **kwargs):
+        def _fake_send(*, text, **kwargs):
             from apps.channels.max.outbound import _token
 
             seen.append(_token())

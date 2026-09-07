@@ -350,7 +350,7 @@ _FALLBACK_QUOTA_EXHAUSTED = (
 # error class).
 _FALLBACK_RETRY_EXHAUSTED = "Извините, сейчас не могу ответить. Я уже сообщил менеджеру."
 
-# Manager alert template. Sent to ``tenant.manager_chat_id`` (when set)
+# Manager alert template. Sent to the salon manager's MAX address (when set)
 # whenever the retry layer exhausts for that tenant. Dedup window =
 # one alert per tenant per hour to avoid spamming the manager during
 # an OpenAI / Anthropic outage that affects every turn.
@@ -1248,7 +1248,7 @@ def _send_retry_exhausted_alert(*, tenant: Any, retry_exc: Any) -> None:
 
     Phase 1 / PI7 (DRF-858). Deduplicated via a per-tenant Redis flag
     with a 1-hour TTL so a sustained vendor outage that touches every
-    turn doesn't spam the manager. Empty ``manager_chat_id`` → log +
+    turn doesn't spam the manager. No configured address → log +
     skip (matches the cost-tracker alert path).
 
     The dedup flag is checked AND set via ``cache.add`` so the
@@ -1258,10 +1258,17 @@ def _send_retry_exhausted_alert(*, tenant: Any, retry_exc: Any) -> None:
     """
     from django.core.cache import cache
 
-    manager_chat_id = str(getattr(tenant, "manager_chat_id", "") or "")
+    from apps.channels.max.addressing import manager_address
+
+    # DRF-1559 — человек, если у салона заполнен ``manager_user_id``, иначе
+    # прежний диалоговый идентификатор. Локальный импорт, как и у
+    # ``send_message`` ниже: оркестратор не тянет apps.channels на уровне
+    # модуля (цикл feature↔feature, Sprint 8 review P1-cycle2).
+    # Slug ``...no_manager_chat_id`` сохранён — эмитируемый ключ.
+    manager = manager_address(tenant)
     tenant_id = str(getattr(tenant, "id", ""))
 
-    if not manager_chat_id:
+    if not manager:
         logger.warning(
             "pipeline.retry_alert_skipped_no_manager_chat_id tenant=%s",
             tenant_id,
@@ -1301,7 +1308,7 @@ def _send_retry_exhausted_alert(*, tenant: Any, retry_exc: Any) -> None:
     try:
         from apps.channels.max.outbound import send_message
 
-        send_message(chat_id=manager_chat_id, text=text)
+        send_message(**manager.send_kwargs(), text=text)
     except Exception:  # noqa: BLE001 — alerting must never break the request
         logger.warning(
             "pipeline.retry_alert_send_failed tenant=%s",
