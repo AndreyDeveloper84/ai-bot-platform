@@ -528,3 +528,69 @@ class TestWellnessTodayGoalsDegradation:
         # nutrition key is gone» is about this response.
         assert data["active_goals"][0]["title"] == "Позаботиться о коже лица"
         assert "calories_eaten" not in data
+
+
+class TestWellnessTodayInventedCalorieGoal:
+    """Цель калорий, которой у человека нет, не подставляется — как у воды.
+
+    Водную половину этого вылечили раньше (``test_zero_water_norm_omits_
+    the_target`` выше): подставленная константа «8 стаканов» показывалась
+    человеку как ЕГО норма. Калории носили ту же болезнь дальше и в более
+    заметном месте: ``calories_goal`` приезжает из
+    ``NUTRITION_DEFAULT_CALORIES_GOAL`` — плоской константы на всех, — и
+    человеку без анкеты питания рисовались «1240 / 2000 ккал · 62 %», где
+    знаменатель не имеет к нему отношения, а процент выполнения считается
+    от чужого числа.
+
+    Ноль с той стороны означает «цели нет». Тогда не уходит ни цель, ни
+    строка БЖУ — по клиентскому контракту §11.1 она ЦЕЛЕВАЯ («pfc
+    undefined — анкета не пройдена, строка скрыта»), и гаснуть они обязаны
+    вместе: строка БЖУ рядом с отсутствующей целью читается как «анкета
+    есть, цели нет», то есть как третье состояние, которого не бывает.
+
+    Съеденное при этом не теряется ни в одном случае — потерять правду
+    заодно с выдумкой было бы вторым дефектом, а не починкой.
+    """
+
+    def test_zero_calorie_goal_omits_the_target_and_the_pfc_row(
+        self, client: Client, bot_user: BotUser
+    ):
+        with _patch_nutrition(
+            summary=_FakeSummary(calories_goal=0),
+            water=_FakeWater(),
+        ):
+            resp = client.get(
+                _url(),
+                HTTP_AUTHORIZATION=_init_data_header(bot_user.channel_user_id),
+            )
+
+        assert resp.status_code == 200
+        data = resp.json()
+        # POSITIVE ВПЕРЕДИ (DRF-1411): срез питания в ответе ЕСТЬ, и вода
+        # со своей настоящей нормой тоже — значит отрицания ниже про этот
+        # ответ, а не про пустой и не про упавшее чтение.
+        assert data["calories_eaten"] == 1240
+        assert data["water_glasses_target"] == 8
+        # NEGATIVE: цели нет — нет ни ключа цели, ни целевой строки БЖУ.
+        # Ни 2000, ни 0.
+        assert "calories_target" not in data
+        assert "pfc" not in data
+
+    def test_a_real_goal_keeps_the_target_and_the_pfc_row(self, client: Client, bot_user: BotUser):
+        """Вторая половина пары: с настоящей целью оба ключа на месте.
+
+        Без неё «ключей нет» выше прошло бы и в мире, где ручка перестала
+        отдавать питание вовсе.
+        """
+        with _patch_nutrition(
+            summary=_FakeSummary(calories_goal=1900),
+            water=_FakeWater(),
+        ):
+            resp = client.get(
+                _url(),
+                HTTP_AUTHORIZATION=_init_data_header(bot_user.channel_user_id),
+            )
+
+        data = resp.json()
+        assert data["calories_target"] == 1900
+        assert data["pfc"] == {"protein_g": 65, "fat_g": 40, "carbs_g": 121}

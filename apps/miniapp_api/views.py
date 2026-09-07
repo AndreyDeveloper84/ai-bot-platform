@@ -2715,7 +2715,10 @@ def customer_wellness_today(request: HttpRequest) -> HttpResponse:
     # to the person reading the screen.
     summary_known = True
     calories_eaten = 0
-    calories_target = 0
+    # None — «цели нет», не «цель ноль». Ключа в ответе не будет, как у
+    # воды ниже: Ayla отдаёт ``calories_goal = 0``, когда считать цель
+    # не из чего — анкету питания человек не проходил.
+    calories_target: int | None = None
     pfc: dict[str, Any] | None = None
     if isinstance(summary_res, nutrition_errors):
         logger.warning("wellness_today.summary_unavailable ext=%s err=%s", external_id, summary_res)
@@ -2730,12 +2733,24 @@ def customer_wellness_today(request: HttpRequest) -> HttpResponse:
         summary_known = False
     else:
         calories_eaten = round(summary_res.calories_total)
-        calories_target = int(summary_res.calories_goal)
-        pfc = {
-            "protein_g": round(summary_res.protein_g),
-            "fat_g": round(summary_res.fat_g),
-            "carbs_g": round(summary_res.carbs_g),
-        }
+        # Ту же болезнь, что вылечили у воды, калории носили дальше:
+        # ``NUTRITION_DEFAULT_CALORIES_GOAL`` — плоская константа на всех,
+        # и человеку без анкеты она показывалась как ЕГО дневная цель, со
+        # шкалой и процентом. Ноль с той стороны означает «цели нет».
+        calories_target = int(summary_res.calories_goal) or None
+        # БЖУ — строка ЦЕЛЕВАЯ (§11.1 клиентского контракта: «pfc
+        # undefined — анкета не пройдена, строка БЖУ скрыта»), поэтому
+        # она живёт и гаснет вместе с целью, а не отдельно. Съеденное при
+        # этом не теряется: ``calories_eaten`` уходит всегда.
+        pfc = (
+            {
+                "protein_g": round(summary_res.protein_g),
+                "fat_g": round(summary_res.fat_g),
+                "carbs_g": round(summary_res.carbs_g),
+            }
+            if calories_target is not None
+            else None
+        )
 
     # ── hydration (from get_water_today) ────────────────────────────────
     water_known = True
@@ -2790,7 +2805,9 @@ def customer_wellness_today(request: HttpRequest) -> HttpResponse:
     # загрузить» for an absent slice and numbers for a present one.
     if summary_known:
         payload["calories_eaten"] = calories_eaten
-        payload["calories_target"] = calories_target
+        # Цель уходит, только когда она есть. Ключа нет = цели нет.
+        if calories_target is not None:
+            payload["calories_target"] = calories_target
         if pfc is not None:
             payload["pfc"] = pfc
     if water_known:
