@@ -2456,9 +2456,17 @@ def customer_recommendations(request: HttpRequest) -> HttpResponse:
     * ``X-External-User-ID: bot:{channel}:{channel_user_id}`` — Ayla
       resolves this to its ProxyUser via the user_proxy mapping.
 
-    The Ayla response body is passed through verbatim. The Mini App
-    side owns the rendering contract, so adding a translation layer
-    here only creates a release-lockstep tax.
+    The Ayla response body is passed through verbatim.
+
+    ЛЕГАСИ. Формулировка «The Mini App side owns the rendering contract»
+    ОТМЕНЕНА контрактом резолвера (§2.1 C3, OD §53): у формы ответа есть
+    владелец — Recommendation Resolver, и валидация на границе обязательна.
+    Пока эта ручка держит домашний экран на старой форме, пропуск как есть
+    сохранён намеренно (см. `recommendations_client.fetch_recommendations`);
+    после миграции потребителя (T6 — DRF-1567, T7 — DRF-1568) представление
+    уходит вместе с ней. Новый код ходит через
+    `apps.integrations.ayla.recommendation_resolver_client`, который
+    валидирует и разводит три исхода.
 
     Failure mapping:
 
