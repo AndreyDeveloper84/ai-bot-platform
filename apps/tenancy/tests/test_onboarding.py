@@ -65,9 +65,20 @@ def _service(name: str = "Стрижка") -> CatalogSalonServiceDTO:
 
 
 def _specialist(*, active: bool = True) -> CatalogSpecialistDTO:
+    # ``user_id`` заполнен, потому что так выглядит боевая строка. DRF-1540
+    # (#1413) сделал связь с каноническим пользователем Ayla условием
+    # продаваемости: мастер без неё не показывается клиенту, потому что
+    # уведомление о записи до него не дойдёт. Замер контура 06.09.2026 —
+    # 31 бронируемый мастер, ни одного без ``ayla_user_id``.
+    #
+    # ``None`` здесь стоял с DRF-1525 и был законной формой провода
+    # (``CatalogSpecialistDTO.user_id`` объявлен ``str | None``), но не той
+    # формой, которую отдаёт Ayla. После #1413 фикстура начала рисовать
+    # салон, который не может быть виден клиенту, и три теста видимости
+    # стали падать на ``dev``.
     return CatalogSpecialistDTO(
         ayla_master_id=str(uuid.uuid4()),
-        user_id=None,
+        user_id=str(uuid.uuid4()),
         name="Анна",
         external_updated_at=_ts(),
         is_active=active,
