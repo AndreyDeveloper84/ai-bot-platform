@@ -2072,6 +2072,10 @@ def _concierge_turn(
             # ``salon`` argument is checked against it before the platform
             # answers for a salon (see ``discovery.salon_named_in``).
             said=_conversation_text(conversation, message_text),
+            # C-01 — сид ротации услуг. Тот же разговор, что уже сеет
+            # ротацию мастеров, чтобы два экрана в одном диалоге не
+            # расходились в порядке.
+            conversation=conversation,
         )
         if catalog_reply is not None:
             # No re-clamp to _MAX_REPLY_CHARS here: the renderer already bounds

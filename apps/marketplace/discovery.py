@@ -17,7 +17,7 @@ from __future__ import annotations
 import hashlib
 import re
 from dataclasses import replace
-from typing import NamedTuple
+from typing import Any, NamedTuple, Protocol, TypeVar
 from uuid import UUID
 
 from django.core.paginator import Paginator
@@ -1558,8 +1558,27 @@ def _rotation_key(seed: str, master_id: UUID) -> bytes:
     return hashlib.blake2b(payload, digest_size=16).digest()
 
 
-def _rotate_ties(masters: list[CatalogMaster], seed: str) -> list[CatalogMaster]:
-    """Order ``masters`` by score, breaking EXACT ties by :func:`_rotation_key`.
+class _Rotatable(Protocol):
+    """Что нужно ротации от строки: идентификатор, и всё.
+
+    Протокол, а не ``CatalogMaster``, потому что тот же самый порядок нужен
+    услугам (C-01): ``discover_services`` резала алфавитом с отсечением
+    top-N — ровно то, что §9 запрещает. Заводить вторую ротацию для второго
+    типа значило бы завести и второй ключ, а ключ — это и есть контракт
+    «стабильно внутри человека, равномерно между людьми».
+
+    ``match_score`` не в протоколе намеренно: он есть не на всех выдачах, и
+    его отсутствие читается как «все равны» (см. ниже).
+    """
+
+    id: Any
+
+
+_R = TypeVar("_R", bound=_Rotatable)
+
+
+def rotate_ties(rows: list[_R], seed: str) -> list[_R]:
+    """Order ``rows`` by score, breaking EXACT ties by :func:`_rotation_key`.
 
     Score first, always. Rotation is the answer to «these candidates are
     indistinguishable», not a re-ranking: where :func:`_match_precision` tells
@@ -1572,10 +1591,10 @@ def _rotate_ties(masters: list[CatalogMaster], seed: str) -> list[CatalogMaster]
     equal, and today they are ordered by surname.
     """
     return sorted(
-        masters,
-        key=lambda master: (
-            -float(getattr(master, "match_score", 0.0) or 0.0),
-            _rotation_key(seed, master.id),
+        rows,
+        key=lambda row: (
+            -float(getattr(row, "match_score", 0.0) or 0.0),
+            _rotation_key(seed, row.id),
         ),
     )
 
@@ -1616,7 +1635,7 @@ def discover_masters_window(
     qs = _bookable_qs(city=city, specialization=specialization)
     candidates = list(qs[:_CANDIDATE_SCAN_CAP])
     if rotation_seed:
-        candidates = _rotate_ties(candidates, rotation_seed)
+        candidates = rotate_ties(candidates, rotation_seed)
     total = len(candidates)
     masters = candidates[offset : offset + limit]
     cards = [_to_card(master) for master in masters]
@@ -2175,6 +2194,7 @@ def discover_services(
     city: str | None = None,
     query: str | None = None,
     limit: int = _DEFAULT_LIMIT,
+    rotation_seed: str | None = None,
 ) -> list[ServiceCard]:
     """Return active services of salons on the platform, as public DTOs.
 
@@ -2194,6 +2214,29 @@ def discover_services(
 
     Only services of tenants with at least one bookable master are shown:
     a salon no client can book at is not on the surface.
+
+    ``rotation_seed`` — C-01. До этой правки ничьи разводились алфавитом, а
+    срез в ``limit`` делал SQL: значит услуги, чьё имя стоит дальше по
+    алфавиту, не показывались НИКОГДА, и кто именно выпал, решала первая
+    буква. Канон §9 запрещает алфавитный fallback именно при отсечении
+    top-N — отсечение превращает порядок в систематическое смещение показов.
+    DRF-1529 вылечила эту болезнь на списке мастеров и назвала три точки;
+    вылечена была одна.
+
+    Кандидаты поэтому набираются до :data:`_CANDIDATE_SCAN_CAP` и режутся
+    ЗДЕСЬ, в питоне, ровно как в :func:`discover_masters_window`. Срез в SQL
+    оставлял бы ротации нечего переставлять — та же причина, по которой
+    DRF-1530 ничего не переупорядочила.
+
+    ``None`` (сида нет) сохраняет прежний детерминированный порядок, так что
+    ни один существующий вызывающий не меняет поведения молча.
+
+    **Следствие, которое стоит назвать:** на выдаче БЕЗ запроса прежний
+    порядок группировал услуги по салону (``tenant__name``). С сидом
+    группировка уступает ротации — все кандидаты там равны, и «равны» на
+    этой поверхности означает именно то же, что и на соседней: сегодня их
+    порядок решает алфавит. Это тот же выбор, который уже сделан для
+    мастеров, а не новый.
     """
     limit = max(1, min(limit, _MAX_LIMIT))
     bookable_tenant_ids = _bookable_qs().order_by().values_list("tenant_id", flat=True).distinct()
@@ -2246,7 +2289,14 @@ def discover_services(
     performs_it = _bookable_qs().order_by().filter(services_offered__service_id=OuterRef("pk"))
     qs = qs.annotate(has_bookable_master=Exists(performs_it))
 
-    rows = qs.order_by(*order)[:limit]
+    # Набираем до потолка и режем в питоне — иначе ротации нечего
+    # переставлять. Потолок (200) не меньше любого возможного ``limit``
+    # (он клампится тем же числом выше), так что кандидатов для среза
+    # всегда достаточно.
+    candidates = list(qs.order_by(*order)[:_CANDIDATE_SCAN_CAP])
+    if rotation_seed:
+        candidates = rotate_ties(candidates, rotation_seed)
+    rows = candidates[:limit]
     return [
         ServiceCard(
             tenant_id=service.tenant_id,
@@ -2301,7 +2351,7 @@ def discover_masters_for_service(
     them — there is no gap for match precision to find. That is not a gap in
     the fix: it is what «полное равенство кандидатов» (§29.6) means, and the
     honest answer to it is the rotation below, not an invented tiebreak.
-    ``_rotate_ties`` is therefore given the whole list, and it orders by score
+    ``rotate_ties`` is therefore given the whole list, and it orders by score
     first regardless — if a future filter ever does separate these candidates,
     its verdict stands and rotation cannot move them (DRF-1411).
 
@@ -2326,7 +2376,7 @@ def discover_masters_for_service(
         ]
     )
     if rotation_seed:
-        candidates = _rotate_ties(candidates, rotation_seed)
+        candidates = rotate_ties(candidates, rotation_seed)
     masters = candidates[offset : offset + limit]
     return [
         replace(_to_card(master), service_id=service.id, service_name=service.name)
