@@ -30,6 +30,12 @@
  * picks. The founder cut #1 cap (≤3 picks) stays a RENDER-side concern
  * (screens slice), so this lib deliberately does not truncate.
  *
+ * DRF-1556: «silently» applies to THAT state only. A scorer that
+ * answers in a shape the declared contract does not describe is a
+ * different state — a contract divergence — and it is logged loudly
+ * while still yielding `picks: []`. See {@link loadRecommendations};
+ * the two must never share a branch again (`docs/OPEN_DECISIONS.md` §52).
+ *
  * # WHY gate (owner ruling 25.08)
  *
  * > «Нет displayable WHY → нет блока „Ayla подобрала".»
