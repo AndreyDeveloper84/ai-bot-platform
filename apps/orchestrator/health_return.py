@@ -45,6 +45,21 @@
 **Ничего не решает про согласие.** Дневник рендерится своим обычным
 путём (:func:`apps.orchestrator.personal_surface.render_diary`) со своими
 собственными воротами; этот модуль только доставляет ответ в чат.
+
+**Одно исключение из «обычного пути» — и оно про лимиты, не про ворота.**
+Дневник просится с :attr:`apps.orchestrator.coach_observation.Cadence.
+UNTRACKED` (решение владельца §39): строка наблюдения диетолога, если она
+здесь положена, показывается, но суточный слот не тратит.
+
+Причина: человек не планировал этот заход как открытие дневника — он
+нажал «согласиться». Потратить на приветствие слот значило бы отнять
+наблюдение у захода, который человек спланирует сам, и он через час
+получил бы тишину не потому, что сказать нечего.
+
+Проверять это надо ВТОРЫМ заходом в те же сутки: первый зелёный и при
+верной реализации, и при нарушении. См.
+``apps/orchestrator/tests/test_coach_observation.py``,
+``TestWelcomeOutsideLimits``.
 """
 
 from __future__ import annotations
@@ -124,9 +139,15 @@ def _resume(bot_user: Any) -> bool:
     if _SURFACE_RENDERERS.get(surface) != "diary":
         return False
 
+    from apps.orchestrator.coach_observation import Cadence
     from apps.orchestrator.personal_surface import render_diary
 
-    reply = render_diary(chat_user)
+    # §39: приветственное слово показывается, но лимитов НЕ тратит —
+    # суточный слот остаётся целым для захода, который человек сделает
+    # сам. Категория, а не флаг: второй лимит, когда появится, ляжет в
+    # тот же участок каданса, и приветствие окажется вне него без правок
+    # здесь.
+    reply = render_diary(chat_user, cadence=Cadence.UNTRACKED)
     text = (reply.text or "").strip()
     if not text:
         return False

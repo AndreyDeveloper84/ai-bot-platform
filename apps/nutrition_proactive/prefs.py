@@ -32,8 +32,25 @@ Schema (every key optional; a missing key means the conservative default)::
       "opted_out_at": "<iso8601>",            # set by the opt-out skill
       "outbox": [                             # shared send journal (DRF-1468)
           {"surface": "report", "sent_at": "<iso8601 utc>"},
+          # + "solicited": true on sends the person asked for (DRF-1464 T6)
       ],                                      # pruned by age, capped in length
     }
+
+### The solicited marker — учёт и лимит разделяем (DRF-1464 T6, Q-NUTRITION-05)
+
+Everything outgoing is journaled, but only the UNASKED is limited. A send
+the person provoked themselves — the dietologist observation shown when
+they open their own diary — is journaled with ``"solicited": True`` and:
+
+* still counts as a fact in the journal (the audit trail stays complete);
+* does NOT spend the weekly budget (``weekly_sent_count`` skips it) — a
+  reply to a person's own action is not an interruption;
+* does NOT build the ignore streak (``antinag.surface_ignored_streak``
+  skips it) — there was nothing to «ignore», the answer was read on the
+  screen it was rendered into.
+
+An entry WITHOUT the key is an unsolicited send: today's behaviour for
+every existing writer and every existing journal is unchanged.
 
 ### Both defaults are OFF
 
@@ -329,6 +346,7 @@ def append_outbox(
     *,
     surface: str,
     sent_at: datetime,
+    solicited: bool = False,
 ) -> dict[str, Any]:
     """Return a copy of ``prefs`` with one send journaled.
 
@@ -336,10 +354,18 @@ def append_outbox(
     :data:`OUTBOX_CAP`, so the journal stays bounded no matter how long the
     feature runs. Timestamps compare as ISO strings -- every writer here
     stamps aware-UTC ``datetime.isoformat()``, which sorts chronologically.
+
+    ``solicited`` (DRF-1464 T6): the send answered the person's own action.
+    Journaled like everything else, but the weekly budget and the ignore
+    streak skip it. The marker key is written only when True, so entries
+    without it keep their previous shape -- and their previous meaning.
     """
     cutoff = (sent_at - timedelta(days=OUTBOX_KEEP_DAYS)).isoformat()
     entries = [e for e in outbox_entries(prefs) if str(e.get("sent_at", "")) >= cutoff]
-    entries.append({"surface": surface, "sent_at": sent_at.isoformat()})
+    entry: dict[str, Any] = {"surface": surface, "sent_at": sent_at.isoformat()}
+    if solicited:
+        entry["solicited"] = True
+    entries.append(entry)
     updated = dict(prefs)
     updated[OUTBOX_KEY] = entries[-OUTBOX_CAP:]
     return updated
@@ -351,12 +377,17 @@ def weekly_sent_count(
     now_utc: datetime,
     surface: str | None = None,
 ) -> int:
-    """Sends journaled in the sliding 7 days before ``now_utc``."""
+    """Sends journaled in the sliding 7 days before ``now_utc``.
+
+    Unsolicited sends only: a ``"solicited": True`` entry is journaled for
+    the audit trail but spends no budget (DRF-1464 T6, Q-NUTRITION-05).
+    """
     cutoff = (now_utc - timedelta(days=7)).isoformat()
     return sum(
         1
         for entry in outbox_entries(prefs)
         if str(entry.get("sent_at", "")) >= cutoff
+        and entry.get("solicited") is not True
         and (surface is None or entry.get("surface") == surface)
     )
 

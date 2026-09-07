@@ -550,6 +550,62 @@ class TestDiaryThroughTheBot:
         # И получает В ЧАТ то, ради чего согласие давал.
         assert "Питание за сегодня" in sent[-1]["text"], sent[-1]["text"]
 
+    def test_the_return_asks_for_the_welcome_cadence_not_the_ordinary_one(
+        self, sent, fake_redis, concierge, settings, health_consent, monkeypatch
+    ):
+        """§39 — приветственное слово вне системы лимитов.
+
+        Возврат после согласия отрисовывает дневник, и у человека с
+        непустой неделей дневник может нести строку наблюдения диетолога.
+        Она показывается, но суточный слот не тратит: слот остаётся целым
+        для захода, который человек сделает сам.
+
+        Здесь прибит СТЫК — что возврат просит именно эту категорию. Что
+        категория действительно не трогает участок лимитов, прибито
+        отдельно, в ``apps/orchestrator/tests/test_coach_observation.py``
+        (``TestWelcomeOutsideLimits``), и решается там ВТОРЫМ заходом:
+        первый заход §39 не различает.
+        """
+        from apps.orchestrator.coach_observation import Cadence
+        from apps.orchestrator.discovery import DiscoveryReply
+
+        settings.NUTRITION_ENABLED = True
+        health_consent(False)
+        bot_user, _conversation = _welcomed(71207)
+
+        asked: list[dict] = []
+
+        def _render(_bot_user, **kwargs):
+            asked.append(kwargs)
+            return DiscoveryReply(text="Питание за сегодня. Белка 40 г.")
+
+        monkeypatch.setattr("apps.orchestrator.personal_surface.render_diary", _render)
+        monkeypatch.setattr(
+            "apps.channels.max.outbound.send_message",
+            lambda *, chat_id, text, attachments=None, timeout=10.0: (
+                sent.append({"chat_id": chat_id, "text": text, "attachments": attachments})
+                or {"ok": True}
+            ),
+        )
+
+        max_handler.handle_global_max_event(
+            _tap(
+                payload=f"{CALLBACK_HEALTH_NEED_PREFIX}food_diary",
+                user_id=71207,
+                callback_id="r-39",
+            )
+        )
+
+        from apps.orchestrator.health_return import resume_after_health_consent
+
+        health_consent(True)
+        assert resume_after_health_consent(bot_user) is True
+
+        # Присутствие выше отсутствия: дневник действительно отрисован...
+        assert asked
+        # ...и попрошен он как приветствие, а не как обычный заход.
+        assert asked[-1].get("cadence") is Cadence.UNTRACKED
+
     def test_the_return_is_delivered_once_not_on_every_repeated_grant(
         self, sent, fake_redis, concierge, settings, health_consent, monkeypatch
     ):

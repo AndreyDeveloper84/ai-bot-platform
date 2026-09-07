@@ -78,9 +78,14 @@ def surface_ignored_streak(
     Computed from the journal rather than a stored counter, so it can never
     disagree with what was actually sent: any send newer than the newest
     user message is unanswered by definition.
+
+    Solicited entries (DRF-1464 T6) are skipped: a send the person asked
+    for was answered by being shown, so there is nothing to «ignore».
     """
     entries = [
-        entry for entry in prefs.outbox_entries(user_prefs) if entry.get("surface") == surface
+        entry
+        for entry in prefs.outbox_entries(user_prefs)
+        if entry.get("surface") == surface and entry.get("solicited") is not True
     ]
     if not entries:
         return 0

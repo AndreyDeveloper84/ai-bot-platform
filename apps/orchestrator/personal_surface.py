@@ -112,9 +112,12 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from apps.orchestrator.discovery import DiscoveryReply
+
+if TYPE_CHECKING:
+    from apps.orchestrator.coach_observation import Cadence
 
 logger = logging.getLogger(__name__)
 
@@ -348,20 +351,88 @@ def personal_records_consent_open(bot_user: Any) -> bool:
 # ---------------------------------------------------------------------------
 
 
-def render_diary(bot_user: Any, *, period: str = PERIOD_TODAY) -> DiscoveryReply:
+def render_diary(
+    bot_user: Any,
+    *,
+    period: str = PERIOD_TODAY,
+    cadence: Cadence | None = None,
+) -> DiscoveryReply:
     """The person's own food/water record, with chips that execute.
 
     Never raises. Ayla unreachable → :data:`DIARY_UNAVAILABLE_TEXT`; no
     consent → :data:`CONSENT_CLOSED_TEXT`; nothing logged → the honest
     «записей не было» line ``render_daily_report`` already owns.
+
+    The reply may carry one solicited observation line (DRF-1464 T6) —
+    see :func:`_with_coach_observation`. When no line is due the reply is
+    byte-identical to what it was before that surface existed.
+
+    ``cadence`` — считается ли эта отрисовка событием для лимитов
+    диетолога (:class:`apps.orchestrator.coach_observation.Cadence`,
+    OPEN_DECISIONS §39). ``None`` означает обычный заход, то есть
+    ``TRACKED``: сторона, которая ничего не знает про §39, не может
+    случайно оказаться вне лимитов. ``UNTRACKED`` передаёт возврат к
+    дневнику после выдачи согласия
+    (:func:`apps.orchestrator.health_return.resume_after_health_consent`):
+    приветственное слово показывается, но суточный слот не тратит.
     """
     if not personal_records_consent_open(bot_user):
         return _reply(CONSENT_CLOSED_TEXT, [])
 
     profile = _fetch_profile(bot_user)
     if period == PERIOD_WEEK:
-        return _render_week(bot_user, profile)
-    return _render_today(bot_user, profile)
+        reply = _render_week(bot_user, profile)
+    else:
+        reply = _render_today(bot_user, profile)
+    return _with_coach_observation(bot_user, reply, profile=profile, cadence=cadence)
+
+
+def _with_coach_observation(
+    bot_user: Any,
+    reply: DiscoveryReply,
+    *,
+    profile: Any,
+    cadence: Cadence | None = None,
+) -> DiscoveryReply:
+    """Append the solicited observation line when one is due (DRF-1464 T6).
+
+    The person opened their own diary, so one dietologist observation may
+    ride along — journaled with the solicited marker, outside the weekly
+    budget, with its own once-a-day / no-unchanged-repeat ceiling
+    (:mod:`apps.orchestrator.coach_observation`).
+
+    Two ways this returns ``reply`` untouched:
+
+    * no line due (flag, HEALTH, perimeter, goal, trigger, own limit,
+      guard) — the diary is byte-identical to its pre-T6 self;
+    * the composed text would overflow the reply budget — the line is
+      dropped rather than clipped mid-sentence, and NOT journaled: the
+      journal records what was shown, and nothing was.
+
+    And the third: any failure inside the observation path degrades to the
+    plain diary. A line nobody asked a question to receive is never worth
+    losing the answer they did ask for.
+    """
+    try:
+        from apps.orchestrator.coach_observation import (
+            Cadence,
+            decide_observation,
+            persist_observation,
+        )
+
+        resolved = cadence or Cadence.TRACKED
+        observation = decide_observation(bot_user, profile=profile, cadence=resolved)
+        if observation is None:
+            return reply
+        combined = f"{reply.text}\n\n{observation.text}"
+        if len(combined) > _MAX_PERSONAL_REPLY_CHARS:
+            return reply
+        persist_observation(bot_user, observation, cadence=resolved)
+    except Exception:  # noqa: BLE001 — the diary must survive its garnish
+        logger.exception("orchestrator.personal_surface.observation_failed")
+        return reply
+    buttons = list((reply.action_data or {}).get("buttons") or [])
+    return _reply(combined, buttons)
 
 
 def _render_today(bot_user: Any, profile: Any) -> DiscoveryReply:
