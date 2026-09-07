@@ -168,11 +168,9 @@ export class PhotoBytesMissingError extends Error {
  * is not wired, prod-mode calls throw → `StateError` renders. NEVER
  * ship fake recognition results / fake daily totals to a real customer.
  */
-class StubNotWiredError extends Error {
+export class StubNotWiredError extends Error {
   constructor() {
-    super(
-      "Скан еды ещё не подключён. Загрузка временно недоступна. Попробуй позже.",
-    );
+    super("Распознавание еды по фото ещё не подключено.");
     this.name = "StubNotWiredError";
   }
 }

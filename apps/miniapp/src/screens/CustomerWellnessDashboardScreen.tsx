@@ -320,9 +320,16 @@ export function CustomerWellnessDashboardScreen() {
     caloriesEaten !== undefined && caloriesTarget !== undefined;
   const waterEaten = todayData?.water_glasses_eaten;
   const waterTarget = todayData?.water_glasses_target;
-  const waterKnown = waterEaten !== undefined && waterTarget !== undefined;
+  // Выпитое и цель — РАЗНЫЕ факты, и знать их можно порознь. Норму воды
+  // Ayla отдаёт только тем, кто прошёл анкету питания; раньше на её
+  // месте стояла константа «8 стаканов», и человек видел чужое число
+  // как свою дневную цель. Теперь цели просто нет — а выпитое остаётся.
+  const waterKnown = waterEaten !== undefined;
+  const waterTargetKnown = waterTarget !== undefined;
   const waterRatio =
-    waterKnown && waterTarget > 0 ? waterEaten / waterTarget : 0;
+    waterTargetKnown && waterTarget > 0 && waterEaten !== undefined
+      ? waterEaten / waterTarget
+      : undefined;
   const hasAnyLogs =
     !!todayData && ((caloriesEaten ?? 0) > 0 || (waterEaten ?? 0) > 0);
   const oneLiner = todayData
@@ -376,8 +383,9 @@ export function CustomerWellnessDashboardScreen() {
   // него не имеет (см. docstring `customer_wellness_today`). То есть в
   // бою она не рендерилась никогда. Вернуть — когда появится цель по
   // белку; поле оставлено в типе как метка.
+  // «Ещё N стаканов до цели» бывает только когда цель есть.
   const waterRemaining =
-    waterKnown ? Math.max(0, waterTarget - waterEaten) : 0;
+    waterKnown && waterTargetKnown ? Math.max(0, waterTarget - waterEaten) : 0;
   const showTodayGoals = waterRemaining > 0;
 
   // ── render ────────────────────────────────────────────────────────────
@@ -797,13 +805,15 @@ function PulseStrip({ data }: { data: WellnessToday }) {
     caloriesEaten !== undefined && caloriesTarget !== undefined;
   const waterEaten = data.water_glasses_eaten;
   const waterTarget = data.water_glasses_target;
-  const waterKnown = waterEaten !== undefined && waterTarget !== undefined;
+  // Знать выпитое и не знать нормы — обычное состояние, а не сбой.
+  const waterKnown = waterEaten !== undefined;
+  const waterTargetKnown = waterTarget !== undefined;
   const caloriesPct =
     caloriesKnown && caloriesTarget > 0
       ? Math.round((caloriesEaten / caloriesTarget) * 100)
       : 0;
   const waterPct =
-    waterKnown && waterTarget > 0
+    waterKnown && waterTargetKnown && waterTarget > 0
       ? Math.round((waterEaten / waterTarget) * 100)
       : 0;
   // Tri-state, same contract as the quick-action label (DRF-1476):
@@ -872,15 +882,17 @@ function PulseStrip({ data }: { data: WellnessToday }) {
       <div
         className="wellness-dash__pulse-row"
         aria-label={
-          waterKnown
-            ? `Вода: ${waterEaten} из ${waterTarget} стаканов`
-            : `Вода: ${UNAVAILABLE}`
+          !waterKnown
+            ? `Вода: ${UNAVAILABLE}`
+            : waterTargetKnown
+              ? `Вода: ${waterEaten} из ${waterTarget} стаканов`
+              : `Вода: ${waterEaten} ${ruPluralWater(waterEaten)} сегодня`
         }
       >
         <div className="wellness-dash__pulse-head">
           <span aria-hidden="true">💧 </span>Вода
         </div>
-        {waterKnown ? (
+        {waterKnown && waterTargetKnown ? (
           <>
             <div className="wellness-dash__pulse-numbers" aria-hidden="true">
               {waterEaten} / {waterTarget} стаканов
@@ -900,6 +912,14 @@ function PulseStrip({ data }: { data: WellnessToday }) {
               </span>
             </div>
           </>
+        ) : waterKnown ? (
+          /* Норма не известна — показываем ровно то, что знаем: сколько
+             выпито. Ни шкалы, ни процентов, ни точек «до цели»: всё это
+             считается ОТ цели, а цели нет. Формулировка — из макета
+             §Cold-start: «0 стаканов сегодня». */
+          <div className="wellness-dash__pulse-numbers">
+            {waterEaten} {ruPluralWater(waterEaten)} сегодня
+          </div>
         ) : (
           /* Read failed. The «+ стакан» quick action stays live - it is
              a separate handle (POST /wellness/water) and still works. */

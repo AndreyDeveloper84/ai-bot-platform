@@ -89,9 +89,14 @@ export interface WellnessToday {
     protein_target_g?: number;
   };
   /**
-   * Glasses logged today and the daily target (defaults to 8 when the
-   * anketa was skipped). **Both ABSENT when the hydration read failed**
-   * — see `calories_eaten`.
+   * Стаканы за сегодня и дневная норма.
+   *
+   * `water_glasses_eaten` отсутствует, когда чтение воды упало (см.
+   * `calories_eaten`). `water_glasses_target` отсутствует ЕЩЁ И тогда,
+   * когда нормы у человека просто нет: анкету питания он не проходил, и
+   * Ayla отвечает `norm_ml=0`. Раньше на это место бэкенд подставлял
+   * константу «8», и человек видел чужое число как свою цель — теперь
+   * ключа нет, и экран рисует выпитое без цели и без шкалы.
    */
   water_glasses_eaten?: number;
   water_glasses_target?: number;
@@ -275,7 +280,10 @@ const EMPTY_TODAY: WellnessToday = {
   calories_target: 2000,
   // pfc undefined — anketa not done, БЖУ row hidden per §11.1
   water_glasses_eaten: 0,
-  water_glasses_target: 8,
+  // water_glasses_target omitted — анкету не проходили, нормы нет.
+  // Это и есть боевое состояние холодного старта: раньше здесь стояла
+  // та же выдуманная восьмёрка, что и на бэкенде, и стаб «подтверждал»
+  // константу вместо того, чтобы её ловить.
   active_goals: [],
   display_name: "Анна",
   day_pattern_hint: "morning_no_logs",
@@ -293,7 +301,7 @@ const PARTIAL_TODAY: WellnessToday = {
   // «Не удалось загрузить» row instead of «0 / 0 ккал» (DRF-1546).
   // pfc undefined — partial state exercises the conditional render path
   water_glasses_eaten: 2,
-  water_glasses_target: 8,
+  // water_glasses_target omitted — тот же холодный старт.
   // active_goals omitted — the goal layer was unreachable. Exercises
   // the third state: neutral label, never «Выбери цель» (DRF-1476).
   display_name: "Анна",
@@ -481,7 +489,8 @@ export interface WaterLogResult {
   today_total_ml: number;
   today_norm_ml: number;
   water_glasses_eaten: number;
-  water_glasses_target: number;
+  /** Отсутствует, когда нормы у человека нет (Ayla шлёт norm_ml=0). */
+  water_glasses_target?: number;
 }
 
 /**
@@ -664,7 +673,14 @@ export function pickGreeting(now: Date = new Date()): string {
 export function pickOneLiner(args: {
   hour: number;
   hint?: string;
-  waterRatio: number; // 0..1
+  /**
+   * Доля выпитого от нормы, 0..1 — или `undefined`, когда НОРМЫ НЕТ.
+   *
+   * Раньше её место занимал ноль, и ноль означал сразу две разные вещи:
+   * «сегодня ещё не пил» и «нормы у человека нет». Из второго нельзя
+   * делать вывод «мало воды» — сравнивать не с чем.
+   */
+  waterRatio?: number;
   hasAnyLogs: boolean;
   hasNextBooking: boolean;
 }): string {
@@ -686,7 +702,8 @@ export function pickOneLiner(args: {
   // Heuristic fallback when no hint provided.
   if (hour >= 4 && hour < 12) {
     if (!hasAnyLogs) return "Доброе утро. Начнём день?";
-    if (waterRatio < 0.5) return "Хороший старт дня. Давай мягко доберём воду.";
+    if (waterRatio !== undefined && waterRatio < 0.5)
+      return "Хороший старт дня. Давай мягко доберём воду.";
     return "Хороший старт дня.";
   }
   if (hour >= 12 && hour < 18) {
@@ -695,7 +712,8 @@ export function pickOneLiner(args: {
       : "Хорошо идёшь. Продолжаем.";
   }
   if (hour >= 18 && hour < 22) {
-    if (waterRatio >= 0.75) return "Почти всё что хотели. Допей воду перед сном.";
+    if (waterRatio !== undefined && waterRatio >= 0.75)
+      return "Почти всё что хотели. Допей воду перед сном.";
     if (!hasAnyLogs) return "Тихий день. Если что-то нужно — расскажи.";
     return "Что нужно сегодня?";
   }

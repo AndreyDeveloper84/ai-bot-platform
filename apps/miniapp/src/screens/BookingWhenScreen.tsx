@@ -13,7 +13,7 @@ import { setVisitAt, useBookingDraft } from "../state/booking";
 import { backTo } from "../lib/screen-back";
 
 /** Возврат (DRF-1493): к выбору мастера — предыдущий шаг записи. */
-const BACK = backTo("/book/master");
+const BACK = backTo("/customer/book/master");
 
 function isoDateNDaysAhead(offset: number): string {
   const d = new Date();

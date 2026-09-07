@@ -1218,10 +1218,24 @@ export function CustomerRoutes() {
       */}
       <Route path="/catalog" element={<CatalogScreen />} />
       <Route path="/catalog/:serviceId" element={<ServiceDetailScreen />} />
-      <Route path="/book/master" element={<MasterPickerScreen />} />
-      <Route path="/book/when" element={<BookingWhenScreen />} />
       <Route path="/book/confirm" element={<BookingConfirmScreen />} />
       <Route path="/book/success/:bookingId" element={<BookingSuccessScreen />} />
+      {/*
+        §31 (решение владельца 06.09.2026) — `MasterPickerScreen` и
+        `BookingWhenScreen` исключены из удаления DRF-1485 и
+        КАНОНИЗИРОВАНЫ по адресам `/customer/book/master` и
+        `/customer/book/when`. Старые `/book/*` остаются алиасами —
+        ровно как сказано в решении, ни один адрес наружу не ломается.
+
+        Каноническая пара идёт ПЕРВОЙ: внутренние переходы ведут только
+        на неё (`ServiceDetailScreen`, `MasterPickerScreen`,
+        `BookingWhenScreen`), а `/book/master` и `/book/when` ниже
+        держат ранее ушедшие наружу ссылки.
+      */}
+      <Route path="/customer/book/master" element={<MasterPickerScreen />} />
+      <Route path="/customer/book/when" element={<BookingWhenScreen />} />
+      <Route path="/book/master" element={<MasterPickerScreen />} />
+      <Route path="/book/when" element={<BookingWhenScreen />} />
       {/*
         Customer booking flow F1-F5 — Tier 1 Priority 3 Phase B
         (Ayla-first reskin per docs/screens/customer-booking-flow.md).

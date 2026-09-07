@@ -12,8 +12,9 @@
  * Voice rules (founder F2 + §6 + §8 F4):
  *   - Title: «Подтверди запись» (registered) / «Чтобы записаться»
  *     (anonymous gate, founder-locked).
- *   - Cancellation policy: «Можно отменить за 4 часа до визита.»
- *     (compact, no scary preamble.)
+ *   - Cancellation policy: НЕ РИСУЕТСЯ — источника нет (см. блок 3
+ *     ниже по коду). Прежняя строка «Можно отменить за 4 часа до
+ *     визита.» была константой без ручки.
  *   - Notes label: «+ Добавить заметку мастеру» — collapsed by
  *     default per founder cut #3.
  *   - Primary CTA: «Записаться» (registered) / «Зарегистрироваться»
@@ -22,7 +23,7 @@
  * Founder priority order (§6.1, locked):
  *   1. Что / где / когда / цена  (the visit summary)
  *   2. Button «Записаться»
- *   3. Cancellation policy (compact)
+ *   3. Cancellation policy (compact) — снята до появления источника
  *   4. Loyalty block (graceful — hide on 404 / no balance per TL Q3)
  *   5. «+ Добавить заметку мастеру» (collapsed default)
  *
@@ -55,10 +56,12 @@
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { ApiError, authVerify } from "../lib/api";
+import { OfflineBanner } from "../components/OfflineBanner";
 import { ScreenLayout } from "../components/ScreenLayout";
 import { StickyCta } from "../components/StickyCta";
 import { useClosingConfirmation } from "../hooks/useClosingConfirmation";
 import { useHaptics } from "../hooks/useHaptics";
+import { useOnline } from "../hooks/useOnline";
 import { createCustomerBooking } from "../lib/customer-booking";
 import { formatMoney, formatVisitFull } from "../lib/format";
 import { getInitData, getStartPayload, openPaymentConfirmation } from "../lib/max-sdk";
@@ -122,6 +125,7 @@ function isAnonymous(): boolean {
 }
 
 export function CustomerBookingConfirmScreen() {
+  const online = useOnline();
   const navigate = useNavigate();
   const draft = useBookingDraft();
   const haptics = useHaptics();
@@ -400,11 +404,16 @@ export function CustomerBookingConfirmScreen() {
       back={back}
       title="Подтверди запись"
       cta={
-        <StickyCta onClick={onConfirm} disabled={submitting}>
+        <StickyCta onClick={onConfirm} disabled={submitting || !online}>
           {submitting ? "Записываю…" : "Записаться"}
         </StickyCta>
       }
     >
+      {/* Сети нет — сказать до нажатия. Кнопка «Записаться» здесь ЕДИНСТВЕННОЕ
+          действие, которое меняет мир, и без сети оно не произойдёт: раньше
+          человек жал её и получал ошибку сети вместо записи. */}
+      <OfflineBanner online={online} />
+
       {/* 1. Visit summary — что / где / когда / цена */}
       <div className="confirm-card">
         <dl>
@@ -463,10 +472,26 @@ export function CustomerBookingConfirmScreen() {
         </label>
       </fieldset>
 
-      {/* 3. Cancellation policy — compact */}
-      <p className="customer-confirm__policy">
-        Можно отменить за 4 часа до визита.
-      </p>
+      {/* 3. Условия отмены — БЛОКА НЕТ.
+
+          Здесь стояла строка «Можно отменить за 4 часа до визита.»,
+          нарисованная как authoritative. Источника у неё не было ни
+          одного: политику отмены не отдаёт ни `GET /bookings/<id>`, ни
+          ответ создания записи, ни каталог. Число «4 часа» не совпадало
+          даже с макетом §6.1 самого репозитория («12+ часов — без
+          штрафа»), то есть было выдумано на месте.
+
+          Обещание про деньги и сроки человеку — не косметика: по нему
+          планируют. Показывать то, чего мы не знаем и что не подтвердит
+          ни одна ручка, нельзя (тот же признак, что §35 п.3 «выдуманные
+          адреса» и п.11 «выдуманные отзывы»).
+
+          Заглушки взамен нет намеренно: ни «скоро», ни «уточните в
+          салоне» — второе тоже утверждение, которого мы не проверяли.
+
+          Вернуть блок — когда бэкенд начнёт отдавать политику отмены в
+          ответе бронирования; тогда он рисуется по данным ручки, а не
+          по константе, и закрывает §6.1 Q-BF-7 по-настоящему. */}
 
       {/* 4. Loyalty block — graceful degradation (TL Q3).
           Hidden when no balance / 404. No render means no error UI.

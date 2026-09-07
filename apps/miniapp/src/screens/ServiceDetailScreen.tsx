@@ -67,7 +67,7 @@ export function ServiceDetailScreen() {
     if (!state.service.is_bookable) return;
     haptics.selection();
     setService(state.service.id, state.service.name);
-    navigate("/book/master");
+    navigate("/customer/book/master");
   }
 
   if (state.kind === "loading") {

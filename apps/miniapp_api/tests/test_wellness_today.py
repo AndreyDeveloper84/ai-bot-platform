@@ -199,18 +199,39 @@ class TestWellnessTodayHappyPath:
         assert data["water_glasses_eaten"] == 5
         assert data["water_glasses_target"] == 8
 
-    def test_zero_water_target_falls_back_to_default(self, client: Client, bot_user: BotUser):
+    def test_zero_water_norm_omits_the_target(self, client: Client, bot_user: BotUser):
+        """`norm_ml=0` — нормы нет, и выдумывать её нечем.
+
+        Здесь стояла проверка ровно обратного: что вместо нуля уйдёт
+        константа 8 («default, not 0»). Восемь стаканов — число ниоткуда:
+        ни принятого плана, ни расчёта, ни ответа Ayla за ним не стоит, а
+        человеку оно показывалось как ЕГО дневная цель, с процентом
+        выполнения и шкалой.
+
+        Стража парная (``negative_assert_guard``, DRF-1411): рядом с
+        отрицательной проверкой — положительная на тех же данных.
+        Выпитое (``water_glasses_eaten``) настоящее и уходит всегда;
+        потерять правду заодно с выдумкой было бы вторым дефектом, а не
+        починкой. А ``test_full_composition`` выше держит вторую половину
+        пары: с НАСТОЯЩЕЙ нормой ключ на месте.
+        """
         with _patch_nutrition(
             summary=_FakeSummary(),
-            water=_FakeWater(total_ml=0, norm_ml=0),
+            water=_FakeWater(total_ml=750, norm_ml=0),
         ):
             resp = client.get(
                 _url(),
                 HTTP_AUTHORIZATION=_init_data_header(bot_user.channel_user_id),
             )
         data = resp.json()
-        assert data["water_glasses_eaten"] == 0
-        assert data["water_glasses_target"] == 8  # default, not 0
+        # POSITIVE ВПЕРЕДИ: тело действительно содержит срез воды и срез
+        # питания, поэтому «ключа цели нет» ниже — утверждение про ЭТОТ
+        # ответ, а не про пустой.
+        assert data["water_glasses_eaten"] == 3  # 750 / 250
+        assert data["calories_eaten"] == 1240
+        assert data["calories_target"] == 2100
+        # NEGATIVE: цели нет — ключа нет. Ни 8, ни 0.
+        assert "water_glasses_target" not in data
 
 
 class TestWellnessTodayGracefulDegradation:
@@ -270,8 +291,9 @@ class TestWellnessTodayGracefulDegradation:
         # Paired positive: calories survive the hydration outage.
         assert data["calories_eaten"] == 1240
         assert data["pfc"]["protein_g"] == 65
-        # Hydration is ABSENT — the default target of 8 is a product
-        # default for a real read, not a stand-in for a failed one.
+        # Гидратация ОТСУТСТВУЕТ целиком: ноль стаканов — это «сегодня
+        # ещё не пил», а не «чтение упало», и подменять одно другим
+        # нельзя ни в какую сторону.
         assert "water_glasses_eaten" not in data
         assert "water_glasses_target" not in data
 

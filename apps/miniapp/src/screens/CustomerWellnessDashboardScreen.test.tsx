@@ -643,3 +643,86 @@ describe("CustomerWellnessDashboardScreen — degraded reads (DRF-1546)", () => 
     expect(screen.queryByText(/Добрать белок/)).not.toBeInTheDocument();
   });
 });
+
+/**
+ * Норма воды: показываем только настоящую.
+ *
+ * До правки бэкенд подставлял `_WATER_GLASSES_TARGET_DEFAULT = 8`, когда
+ * Ayla отвечает `norm_ml=0` — то есть когда нормы у человека нет вовсе
+ * (анкету питания он не проходил). Экран рисовал «4 / 8 стаканов»,
+ * восемь точек и «Ещё 4 стакана до цели»: чужое число как ЕГО дневную
+ * цель, с процентом выполнения.
+ *
+ * Стража парная (`negative_assert_guard`, DRF-1411): к «цели и шкалы
+ * нет» приложены положительные на тех же данных — выпитое видно
+ * (`water_glasses_eaten` — настоящее число, скрывать его вместе с
+ * выдумкой нельзя), соседняя строка питания цела, и второй случай
+ * показывает, что С НАСТОЯЩЕЙ нормой цель, шкала и «до цели»
+ * возвращаются.
+ *
+ * Тест умеет падать: верните `water_glasses_target: 8` в ответ ручки —
+ * покраснеет первый случай; сделайте `waterKnown` снова зависимым от
+ * цели — покраснеет положительная проверка про «2 стакана сегодня».
+ */
+describe("CustomerWellnessDashboardScreen — норма воды не выдумывается", () => {
+  function serve(today: unknown) {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: unknown) => {
+        const u = String(url);
+        const body = u.includes("/wellness/today")
+          ? today
+          : u.includes("/recent-activity")
+            ? { this_week_booking_count: 0 }
+            : null;
+        if (body === null) throw new Error(`unexpected fetch: ${u}`);
+        return { ok: true, status: 200, json: async () => body } as unknown as Response;
+      }),
+    );
+  }
+
+  beforeEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllEnvs();
+    mockedBrowse.mockResolvedValue({ services: [], masters: [], picks: [] });
+    window.history.replaceState({}, "", "/customer/main");
+  });
+
+  it("нормы нет: ни цели, ни шкалы, ни «до цели» — но выпитое видно", async () => {
+    serve({
+      calories_eaten: 800,
+      calories_target: 2100,
+      water_glasses_eaten: 2,
+      // water_glasses_target отсутствует — Ayla ответила norm_ml=0.
+      active_goals: [],
+      display_name: "Анна",
+    });
+    await renderScreen(false);
+
+    // POSITIVE: настоящее число на месте, и соседний срез цел.
+    expect(await screen.findByText("2 стакана сегодня")).toBeInTheDocument();
+    expect(screen.getByText(/800 \/ 2100 ккал/)).toBeInTheDocument();
+    // NEGATIVE: выдуманной восьмёрки нет ни в числах, ни в шкале, ни в целях.
+    expect(screen.queryByText(/\/ 8 стаканов/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/до цели/)).not.toBeInTheDocument();
+    expect(
+      screen.queryByLabelText(/из 8 стаканов/),
+    ).not.toBeInTheDocument();
+  });
+
+  it("норма есть: цель, шкала и «до цели» возвращаются", async () => {
+    serve({
+      calories_eaten: 800,
+      calories_target: 2100,
+      water_glasses_eaten: 4,
+      water_glasses_target: 8,
+      active_goals: [],
+      display_name: "Анна",
+    });
+    await renderScreen(false);
+
+    expect(await screen.findByText(/4 \/ 8 стаканов/)).toBeInTheDocument();
+    expect(screen.getByText(/Ещё 4 стакана до цели/)).toBeInTheDocument();
+    expect(screen.queryByText(/стакана сегодня/)).not.toBeInTheDocument();
+  });
+});

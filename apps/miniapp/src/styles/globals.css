@@ -3976,11 +3976,6 @@ a {
   color: var(--c-text-secondary);
 }
 
-.customer-confirm__policy {
-  margin: var(--s-2) 0;
-  font-size: var(--font-size-200);
-  color: var(--c-text-secondary);
-}
 .customer-confirm__notes {
   margin-top: var(--s-3);
 }
@@ -4667,6 +4662,21 @@ a {
   padding: var(--s-2) var(--s-3);
   font-size: var(--font-size-200);
   text-align: center;
+}
+/* Та же полоса на экранах воронки записи (см. OfflineBanner.tsx). */
+.offline-banner {
+  background: var(--c-warning);
+  color: var(--c-text-on-accent);
+  padding: var(--s-2) var(--s-3);
+  margin-bottom: var(--s-3);
+  border-radius: var(--r-md);
+  font-size: var(--font-size-200);
+  text-align: center;
+}
+/* Действие, которого без сети не будет, читается выключенным. */
+.records-card__action:disabled {
+  opacity: 0.5;
+  cursor: default;
 }
 .records-screen__tabs {
   display: flex;
