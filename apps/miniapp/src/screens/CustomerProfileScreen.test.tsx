@@ -387,23 +387,28 @@ describe("CustomerProfileScreen (настоящие ручки согласий)
   }, 15000);
 
   it("§35 п.9: подсказки после отзыва — то, что сказал сервер", async () => {
-    // Решение владельца требует, чтобы подсказки погасли. Сервер их не
-    // гасит (`revoke_data_storage` не трогает колонку), и экран
-    // показывает ответ сервера, а не решение: расхождение — находка для
-    // отчёта, а не маскировка на клиенте.
+    // Решение владельца требует, чтобы подсказки погасли, и теперь их
+    // гасит сервер: `revoke_data_storage` ставит
+    // `proactive_messages_opt_out` по всем оболочкам человека. Экран
+    // по-прежнему показывает ответ сервера, а не собственное решение, —
+    // просто ответ наконец совпал с решением владельца.
     const user = userEvent.setup();
     routeRequests(
       {
         [DATA_STORAGE]: () =>
           consentsDoc({
             storageGranted: false,
-            hintsEnabled: true,
+            hintsEnabled: false,
             revocation: { status: "revoked", failed_steps: [] },
           }),
       },
       { hintsEnabled: true },
     );
     await renderFresh();
+    // Есть чему гаснуть: до отзыва тумблер включён.
+    expect(
+      await screen.findByRole("switch", { name: HINTS_SWITCH }),
+    ).toHaveAttribute("aria-checked", "true");
     await user.click(await screen.findByRole("button", { name: REVOKE_ROW_BTN }));
     await user.click(
       await screen.findByRole("button", { name: "Отозвать согласие" }),
@@ -412,7 +417,7 @@ describe("CustomerProfileScreen (настоящие ручки согласий)
     await user.click(screen.getByRole("button", { name: "Закрыть" }));
     expect(
       await screen.findByRole("switch", { name: HINTS_SWITCH }),
-    ).toHaveAttribute("aria-checked", "true");
+    ).toHaveAttribute("aria-checked", "false");
   }, 15000);
 
   it("409 stale_disclosure: не дожимаем тело, а перечитываем раскрытие", async () => {
