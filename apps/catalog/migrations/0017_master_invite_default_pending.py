@@ -55,14 +55,14 @@ def _grandfather_synced_masters(apps, schema_editor):
                 "оставлены accepted, чтобы не обрушить подбор на пилоте. "
                 "Верификация новых мастеров — вручную через админку."
             ),
-            "source": "migration_0016",
+            "source": "migration_0017",
         },
     )
 
 
 class Migration(migrations.Migration):
     dependencies = [
-        ("catalog", "0015_backfill_master_accepted_at"),
+        ("catalog", "0016_master_dedup_keys"),
         ("audit", "0004_rename_audit_auditl_is_arch_idx_audit_audit_is_arch_4b93a0_idx"),
     ]
 
@@ -79,7 +79,7 @@ class Migration(migrations.Migration):
                 ],
                 db_index=True,
                 default="pending",
-                help_text="Default PENDING (DRF-1496): a master born by sync was never invited, so she is not bookable until an operator verifies her by hand (journaled admin action). The pre-DRF-1496 default was ACCEPTED; rows that existed on 04.09.2026 were grandfathered as ACCEPTED by migration 0016 so the pilot's booking pick-list did not silently collapse. Invite create-path writes PENDING explicitly, as before.",
+                help_text="Default PENDING (DRF-1496): a master born by sync was never invited, so she is not bookable until an operator verifies her by hand (journaled admin action). The pre-DRF-1496 default was ACCEPTED; rows that existed on 04.09.2026 were grandfathered as ACCEPTED by migration 0017 so the pilot's booking pick-list did not silently collapse. Invite create-path writes PENDING explicitly, as before.",
                 max_length=16,
             ),
         ),

@@ -305,7 +305,7 @@ class CatalogMaster(_MirrorBase):
             "invited, so she is not bookable until an operator verifies "
             "her by hand (journaled admin action). The pre-DRF-1496 "
             "default was ACCEPTED; rows that existed on 04.09.2026 were "
-            "grandfathered as ACCEPTED by migration 0016 so the pilot's "
+            "grandfathered as ACCEPTED by migration 0017 so the pilot's "
             "booking pick-list did not silently collapse. Invite "
             "create-path writes PENDING explicitly, as before."
         ),
