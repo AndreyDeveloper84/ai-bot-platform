@@ -64,12 +64,15 @@ def _body(*candidates, version: str = "1.0.0") -> dict:
 
 def _respond(status: int = 200, json_body: dict | None = None):
     request = httpx.Request("POST", "https://ayla.test/api/v1/internal/recommendation/resolve/")
-    return httpx.Response(status, json=json_body if json_body is not None else _body(), request=request)
+    return httpx.Response(
+        status, json=json_body if json_body is not None else _body(), request=request
+    )
 
 
 # ---------------------------------------------------------------------------
 # Три исхода
 # ---------------------------------------------------------------------------
+
 
 def test_conformant_answer_is_ok():
     with patch.object(httpx.Client, "post", return_value=_respond()):
@@ -92,7 +95,9 @@ def test_network_failure_is_unavailable_not_a_contract_violation():
 
 def test_source_not_bound_is_unavailable():
     """503 «источник не привязан» — недоступность, а не пустая выдача."""
-    with patch.object(httpx.Client, "post", return_value=_respond(503, {"error": {"code": "SERVICE_UNAVAILABLE"}})):
+    with patch.object(
+        httpx.Client, "post", return_value=_respond(503, {"error": {"code": "SERVICE_UNAVAILABLE"}})
+    ):
         outcome = resolve_recommendation(external_user_id="bot:1", payload={})
     assert outcome.state == "unavailable"
 
@@ -108,6 +113,7 @@ def test_wrong_shape_is_loud_and_named():
 # ---------------------------------------------------------------------------
 # §53.1 — конформность целиком
 # ---------------------------------------------------------------------------
+
 
 def test_one_broken_element_invalidates_the_whole_answer():
     """Девятнадцать годных из двадцати не показываются. Цена названа и принята.
@@ -141,6 +147,7 @@ def test_candidate_without_reason_codes_is_a_violation():
 # Версия контракта
 # ---------------------------------------------------------------------------
 
+
 def test_unknown_major_version_is_refused_not_parsed():
     """§9.4: разбирать неизвестное запрещено — именно так расхождение доезжает молча."""
     violation = decision_contract_violation(_body(version="2.0.0"))
@@ -155,6 +162,7 @@ def test_minor_version_bump_is_accepted():
 # ---------------------------------------------------------------------------
 # Строка для показа
 # ---------------------------------------------------------------------------
+
 
 def test_display_string_in_the_answer_is_a_violation():
     """Источник, снова собравший фразу за потребителя, нарушает §7.
@@ -175,6 +183,7 @@ def test_display_string_is_caught_at_any_depth():
 # ---------------------------------------------------------------------------
 # Структурность различия
 # ---------------------------------------------------------------------------
+
 
 def test_transport_try_wraps_transport_only():
     """Ложного `contract_violation` не может быть — не потому, что стараются.

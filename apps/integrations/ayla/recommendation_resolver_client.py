@@ -74,7 +74,7 @@ _PATH: Final[str] = "internal/recommendation/resolve/"
 class ResolveOutcome:
     """Исход вызова. Ровно один из трёх, и они не сливаются."""
 
-    state: str                      # "ok" | "unavailable" | "contract_violation"
+    state: str  # "ok" | "unavailable" | "contract_violation"
     decision: dict | None = None
     detail: str | None = None
 
@@ -117,7 +117,9 @@ def resolve_recommendation(*, external_user_id: str, payload: dict[str, Any]) ->
     if response.status_code != 200:
         # 4xx: мы отправили не то. Предохранитель не трогаем — источник жив.
         logger.warning("resolver_client.client_error status=%d", response.status_code)
-        return ResolveOutcome("contract_violation", detail=f"HTTP {response.status_code} на запрос границы")
+        return ResolveOutcome(
+            "contract_violation", detail=f"HTTP {response.status_code} на запрос границы"
+        )
 
     try:
         body = response.json()
@@ -203,7 +205,9 @@ def _candidate_violation(item: Any, index: int) -> str | None:
         # дальше, но здесь она уже нарушение формы, а не «нечего показать».
         return f"ordered[{index}].reason_codes: ожидался непустой список строк, получено {_shape(codes)}"
     if not isinstance(item.get("evidence", []), list):
-        return f"ordered[{index}].evidence: ожидался список, получено {_shape(item.get('evidence'))}"
+        return (
+            f"ordered[{index}].evidence: ожидался список, получено {_shape(item.get('evidence'))}"
+        )
     return None
 
 

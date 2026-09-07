@@ -30,7 +30,16 @@ _QUALITY_SIGNAL = re.compile(
 
 _ARGS_WINDOW = 160
 
-_SKIPPED_PARTS = ("migrations", "tests", ".venv", "venv", "__pycache__", "node_modules", ".git", "scripts")
+_SKIPPED_PARTS = (
+    "migrations",
+    "tests",
+    ".venv",
+    "venv",
+    "__pycache__",
+    "node_modules",
+    ".git",
+    "scripts",
+)
 
 #: Известные места. У каждого либо задача, которая его снимет, либо
 #: объяснение, почему это не кандидаты рекомендации.
@@ -63,10 +72,12 @@ def _python_files():
 def _ranking_sites(text: str) -> list[tuple[int, str]]:
     found = []
     for call in _ORDERING_CALLS.finditer(text):
-        window = text[call.start(): call.start() + _ARGS_WINDOW]
+        window = text[call.start() : call.start() + _ARGS_WINDOW]
         signal = _QUALITY_SIGNAL.search(window)
         if signal:
-            found.append((text[: call.start()].count("\n") + 1, f"{call.group(1)}… {signal.group(0)}"))
+            found.append(
+                (text[: call.start()].count("\n") + 1, f"{call.group(1)}… {signal.group(0)}")
+            )
     return found
 
 
@@ -118,8 +129,14 @@ def test_transit_no_longer_claims_it_does_not_validate():
     цитата с пометкой «ОТМЕНЕНА», и этот тест ловит попытку восстановить
     её как утверждение.
     """
-    text = (REPO_ROOT / "apps/integrations/ayla/recommendations_client.py").read_text(encoding="utf-8")
-    assert "ОТМЕНЕНА" in text, "клиент обязан помнить, что роль транзита без схемы отменена (§2.1 C3)"
+    text = (REPO_ROOT / "apps/integrations/ayla/recommendations_client.py").read_text(
+        encoding="utf-8"
+    )
+    assert "ОТМЕНЕНА" in text, (
+        "клиент обязан помнить, что роль транзита без схемы отменена (§2.1 C3)"
+    )
 
     views = (REPO_ROOT / "apps/miniapp_api/views.py").read_text(encoding="utf-8")
-    assert "ОТМЕНЕНА" in views, "прокси обязан помнить, что «Mini App owns the rendering contract» отменено"
+    assert "ОТМЕНЕНА" in views, (
+        "прокси обязан помнить, что «Mini App owns the rendering contract» отменено"
+    )
