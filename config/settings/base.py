@@ -776,46 +776,22 @@ DISCOVERY_CLARIFY_MIN_TIER = int(os.environ.get("DISCOVERY_CLARIFY_MIN_TIER", "4
 # request count (one request per day per tenant).
 AYLA_MIRROR_RECONCILE_WINDOW_DAYS = int(os.environ.get("AYLA_MIRROR_RECONCILE_WINDOW_DAYS", "45"))
 
-# DRF-1005 — Controlled Pilot: per-tenant fallback for the booking
-# health-check gate. DEMOTED by DRF-1353 — read the note below before
-# adding a tenant here.
+# DRF-1545 — the booking health-check gate has NO per-tenant override.
 #
-# Originally this was the ONLY way through the gate: under
-# ``BOOKING_VIA_AYLA_REST`` it failed CLOSED unconditionally
-# (#1034 / #1121) because the resolved (master×service)
-# requires-health-check source was believed not to exist, which made
-# automatic booking impossible for every tenant. Owner decision
-# 2026-08-12 (variant 3): an explicit, empty-by-default allowlist of
-# tenant UUIDs, with an audit record on every gate-disabled evaluation.
+# ``BOOKING_HEALTH_CHECK_GATE_DISABLED_TENANTS`` (DRF-1005) used to name
+# tenants whose UNKNOWN master×service edges opened instead of failing
+# closed. Owner decision 06.09.2026 (``docs/OPEN_DECISIONS.md`` §36)
+# removed the mechanism, not just the salon on it: the duty to ask about
+# contraindications belongs to the procedure, not to the venue — a salon
+# cannot cancel a contraindication.
 #
-# DRF-1353 found that source: it exists on Ayla
-# (``SpecialistService.resolved_requires_health_check``, escalate-only OR
-# across template floor → salon service → specialist) and is served by
-# ``/internal/catalog/specialist-services/``. It is now mirrored onto
-# ``MasterService.resolved_requires_health_check`` and the gate reads it
-# FIRST. This allowlist only decides edges whose resolved flag is
-# UNKNOWN — operator-owned MM4 rows, or a tenant catalog sync has not
-# reached. It can never override an explicit "screening required".
-#
-# Adding a tenant here is therefore no longer the way to unblock a salon:
-# run catalog sync for it. Reach for the allowlist only when the edges
-# genuinely cannot be mirrored.
-#
-# Empty/unset = gate closed for every unknown edge (behaviour unchanged).
-# Parsing reuses the strict T-02 allowlist parser: malformed input raises
-# ImproperlyConfigured at settings load — a process must not boot with a
-# half-parsed allowlist whose operator believes a tenant is listed when
-# it is not.
-try:
-    BOOKING_HEALTH_CHECK_GATE_DISABLED_TENANTS = _parse_ingest_tenant_allowlist(
-        os.environ.get("BOOKING_HEALTH_CHECK_GATE_DISABLED_TENANTS", ""),
-        setting_name="BOOKING_HEALTH_CHECK_GATE_DISABLED_TENANTS",
-    )
-except _IngestAllowlistConfigurationError as exc:
-    # Same fail-safe as the ingest allowlists below: refuse to boot.
-    raise ImproperlyConfigured(
-        f"Invalid booking health-check gate allowlist configuration: {exc}"
-    ) from exc
+# It cost nothing to remove: all 387 pilot edges carried a synced verdict,
+# which the gate reads first, so the allowlist decided nothing on the day
+# it went. That is also why it was dangerous — it did nothing visible and
+# would have opened silently the first time its salon got a screened
+# service. The setting is deliberately NOT re-declared here: an operator
+# setting the old env var must get no behaviour at all, not a half-wired
+# switch. See ``apps/skills/booking/skill.py``.
 
 # DRF-1007 — Controlled Pilot runs WITHOUT prepayment: per-tenant switch
 # for the ``payment_required`` flag on bot-created bookings.
