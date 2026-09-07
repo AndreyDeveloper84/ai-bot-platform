@@ -43,7 +43,7 @@ import { Link, Navigate, Route, Routes, useLocation, useNavigate } from "react-r
 
 import { ApiError } from "./lib/api";
 import { getMe, type MeResponse } from "./lib/admin-api";
-import { adminLandingPath, isReceptionOnly } from "./lib/admin-tabs";
+import { adminLandingPath, isAdminTabAllowed } from "./lib/admin-tabs";
 import { getStartPayload, parseStartRoute } from "./lib/max-sdk";
 import {
   SurfaceModeContext,
@@ -263,9 +263,23 @@ function adminRouteElements(me: MeResponse): React.ReactNode {
         path="/admin/team/:masterId"
         element={<AdminMasterDetailScreen me={me} />}
       />
+      {/*
+        «Услуги» — матрица «мастер × услуга» с правкой и массовым
+        применением. У ресепшн вкладку убрали (DRF-1552, решение
+        владельца §35 п.1: разрешённого сценария для неё нет), поэтому
+        страж стоит и на адресе: ссылка переживает вкладку — в закладке,
+        в старом сообщении бота, в `AdminMasterDetailScreen`, который
+        уводит сюда с `?master_id=`.
+      */}
       <Route
         path="/admin/services"
-        element={<AdminServicesMatrixScreen me={me} />}
+        element={
+          isAdminTabAllowed(me, "services") ? (
+            <AdminServicesMatrixScreen me={me} />
+          ) : (
+            <AdminSectionDeniedScreen me={me} section="Услуги" />
+          )
+        }
       />
       <Route
         path="/admin/availability-requests"
@@ -283,20 +297,20 @@ function adminRouteElements(me: MeResponse): React.ReactNode {
       <Route
         path="/admin/internal-chat"
         element={
-          isReceptionOnly(me) ? (
-            <AdminSectionDeniedScreen me={me} section="Чаты" />
-          ) : (
+          isAdminTabAllowed(me, "chats") ? (
             <AdminInternalChatListScreen me={me} />
+          ) : (
+            <AdminSectionDeniedScreen me={me} section="Чаты" />
           )
         }
       />
       <Route
         path="/admin/internal-chat/threads/:threadId"
         element={
-          isReceptionOnly(me) ? (
-            <AdminSectionDeniedScreen me={me} section="Чаты" />
-          ) : (
+          isAdminTabAllowed(me, "chats") ? (
             <AdminInternalChatThreadScreen me={me} />
+          ) : (
+            <AdminSectionDeniedScreen me={me} section="Чаты" />
           )
         }
       />
@@ -317,10 +331,10 @@ function adminRouteElements(me: MeResponse): React.ReactNode {
       <Route
         path="/admin/settings"
         element={
-          isReceptionOnly(me) ? (
-            <AdminSectionDeniedScreen me={me} section="Настройки" />
-          ) : (
+          isAdminTabAllowed(me, "settings") ? (
             <AdminSettingsPlaceholderScreen me={me} />
+          ) : (
+            <AdminSectionDeniedScreen me={me} section="Настройки" />
           )
         }
       />
