@@ -74,7 +74,6 @@ import { AdminServicesMatrixScreen } from "./screens/admin/AdminServicesMatrixSc
 import { AdminSettingsPlaceholderScreen } from "./screens/admin/AdminSettingsPlaceholderScreen";
 import { AdminTeamScreen } from "./screens/admin/AdminTeamScreen";
 import { SalonPilotAylaScreen } from "./screens/admin/SalonPilotAylaScreen";
-import { SalonPilotDeniedScreen } from "./screens/admin/SalonPilotDeniedScreen";
 import { SalonPilotScheduleScreen } from "./screens/admin/SalonPilotScheduleScreen";
 import { SalonPilotTodayScreen } from "./screens/admin/SalonPilotTodayScreen";
 import { BookingWhenScreen } from "./screens/BookingWhenScreen";
@@ -203,13 +202,24 @@ function adminRouteElements(me: MeResponse): React.ReactNode {
         живут параллельно, у каждой своя нижняя панель и своё правило
         доступа.
 
-        Страж — не украшение. Бэкенд и так ответит 403 ресепшн
-        (`require_admin_role`), но вопрос «какие салонные ручки открывать
-        ресепшн» у владельца не закрыт, и до ответа она не должна
-        попадать сюда даже по прямой ссылке из закладок или старого
-        сообщения бота. Проверка спрашивает наличие управляющей роли
+        Страж — не украшение, и он НЕ повторяет собой гейт ручки.
+        `GET /api/v1/admin/day/`, за которым ходит «Сегодня», с DRF-1552
+        пускает и ресепшн (`require_admin_or_reception_read`), так что
+        403 сам собой её отсюда не выставит. Закрывает её решение о
+        поверхности: пилотную админку владелец открыл владельцу и
+        администратору, а вопрос, какие салонные сценарии отдать
+        ресепшн, отдельный и незакрытый (`docs/OPEN_DECISIONS.md` §35).
+        До ответа она не должна попадать сюда даже по прямой ссылке из
+        закладок или старого сообщения бота.
+
+        Проверка спрашивает наличие управляющей роли
         (`canOpenSalonPilot`), а не отсутствие приёмной: владелец,
         которому заодно проставили ресепшн, остаётся владельцем.
+
+        Отказ рисует общий `AdminSectionDeniedScreen` — тот же, что на
+        «Чатах», «Настройках» и «Услугах». Своего экрана у пилота для
+        этого нет намеренно: два отказа с разными словами про одно и то
+        же разъезжаются на первой же правке текста.
 
         Посадка приложения не тронута: `adminLandingPath` по-прежнему
         ведёт на мост. Какая из двух поверхностей встречает человека при
@@ -221,7 +231,7 @@ function adminRouteElements(me: MeResponse): React.ReactNode {
           canOpenSalonPilot(me) ? (
             <SalonPilotTodayScreen me={me} />
           ) : (
-            <SalonPilotDeniedScreen me={me} />
+            <AdminSectionDeniedScreen me={me} section="Сегодня" />
           )
         }
       />
@@ -231,7 +241,7 @@ function adminRouteElements(me: MeResponse): React.ReactNode {
           canOpenSalonPilot(me) ? (
             <SalonPilotScheduleScreen me={me} />
           ) : (
-            <SalonPilotDeniedScreen me={me} />
+            <AdminSectionDeniedScreen me={me} section="Расписание" />
           )
         }
       />
@@ -241,7 +251,7 @@ function adminRouteElements(me: MeResponse): React.ReactNode {
           canOpenSalonPilot(me) ? (
             <SalonPilotAylaScreen me={me} />
           ) : (
-            <SalonPilotDeniedScreen me={me} />
+            <AdminSectionDeniedScreen me={me} section="Ayla" />
           )
         }
       />

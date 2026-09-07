@@ -2,8 +2,14 @@
  * DRF-1235 — каркас пилотной салонной админки.
  *
  * Проверяется ровно то, что построено: три адреса существуют, панель
- * под ними одна и та же и состоит из трёх вкладок, права повторяют
- * бэкенд, а мост из пяти вкладок не сдвинулся.
+ * под ними одна и та же и состоит из трёх вкладок, поверхность закрыта
+ * всем, кроме владельца и администратора, а мост не сдвинулся —
+ * «День · Команда · Услуги · Чаты · Настройки» у владельца и
+ * «День · Команда» у ресепшн (DRF-1552).
+ *
+ * Права здесь НЕ «повторяют бэкенд»: `GET /api/v1/admin/day/` с
+ * DRF-1552 ресепшн открыт (`require_admin_or_reception_read`). Пилот
+ * закрыт решением о поверхности, и тест проверяет именно его.
  *
  * # Почему каждое отрицание идёт в паре с утверждением
  *
@@ -16,7 +22,8 @@
  * Тесты умеют падать: снимите `canOpenSalonPilot` с маршрута
  * `/admin/today` — покраснеют права ресепшн; поменяйте состав
  * `SALON_PILOT_TAB_SPECS` — покраснеет панель; верните пилоту
- * `AdminTabBar` — покраснеет разделение поверхностей.
+ * `AdminTabBar` — покраснеет разделение поверхностей; верните «Услуги»
+ * в `ADMIN_TABS_RECEPTION` — покраснеет пин моста.
  */
 import { render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
@@ -193,24 +200,49 @@ describe("права на пилот повторяют бэкенд (DRF-1235)"
   it("ресепшн получает честный отказ, а не пустой экран", async () => {
     mockedGetMe.mockResolvedValue(RECEPTION_ME);
     renderAppAt("/admin/today");
+    // Отказ рисует общий `AdminSectionDeniedScreen`, тот же, что на
+    // «Чатах», «Настройках» и «Услугах», и называет раздел по имени.
     expect(await screen.findByRole("alert")).toHaveTextContent(
-      /Салонная админка открыта владельцу и администратору/,
+      /Раздел «Сегодня» открыт владельцу и администратору/,
     );
     // Выход есть, и он ведёт на мост.
     expect(
       screen.getByRole("button", { name: "Вернуться в «День»" }),
     ).toBeInTheDocument();
-    // И только теперь отрицание: до ручки дня дело не дошло.
+    // И только теперь отрицание — и оно НЕ про 403.
+    //
+    // С DRF-1552 `GET /api/v1/admin/day/` ресепшн пускает
+    // (`require_admin_or_reception_read`), то есть ручка ответила бы ей
+    // данными. Закрывает её решение о поверхности, и проверяется именно
+    // оно: запроса не случилось вовсе.
     expect(mockedDay).not.toHaveBeenCalled();
   });
 
   it("ресепшн закрыты все три адреса, а не только первый", async () => {
     mockedGetMe.mockResolvedValue(RECEPTION_ME);
     renderAppAt("/admin/schedule");
-    expect(await screen.findByRole("alert")).toBeInTheDocument();
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      /Раздел «Расписание» открыт владельцу и администратору/,
+    );
+    // Заголовком экраны не различить: общий отказ ставит в `h1` имя
+    // раздела, то есть тоже «Расписание». Различает содержимое и
+    // панель — их у отказа нет, а у экрана пилота есть.
     expect(
-      screen.queryByRole("heading", { name: "Расписание" }),
+      screen.queryByText(/Расписание салона сюда пока не приходит/),
     ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Ayla" }),
+    ).not.toBeInTheDocument();
+    // Под отказом — панель моста, уже урезанная до двух вкладок.
+    expect(tabLabels()).toEqual(["День", "Команда"]);
+  });
+
+  it("и «Ayla» тоже — отказ называет её своим именем", async () => {
+    mockedGetMe.mockResolvedValue(RECEPTION_ME);
+    renderAppAt("/admin/ayla");
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      /Раздел «Ayla» открыт владельцу и администратору/,
+    );
   });
 
   it("владелец с приёмной ролью сверху остаётся владельцем", async () => {
@@ -302,6 +334,16 @@ describe("мост из пяти вкладок не сдвинулся (DRF-123
       "Чаты",
       "Настройки",
     ]);
+  });
+
+  it("у ресепшн на мосту прежние две вкладки: «День» и «Команда»", async () => {
+    // Пин по именам, а не по числу. DRF-1552 убрал у ресепшн «Услуги»,
+    // и счётчик «три» здесь уже однажды устарел за сутки; список имён
+    // покраснеет и на возврате «Услуг», и на подмешивании пилота.
+    mockedGetMe.mockResolvedValue(RECEPTION_ME);
+    renderAppAt("/admin/day");
+    await waitFor(() => expect(mockedDay).toHaveBeenCalled());
+    expect(tabLabels()).toEqual(["День", "Команда"]);
   });
 
   it("вход без адреса по-прежнему ведёт владельца на «Команду»", async () => {
