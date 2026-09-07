@@ -626,6 +626,25 @@ def _eligible_reminders(window_start: datetime, window_end: datetime) -> list[Bo
     into the output. Opt-out and erasure need no such visibility — both
     are plain columns anyone can ``count()`` at any time, and neither is
     a number that changes what the operator does next.
+
+    **Caveat since §35 п.9 (``apps.consent.customer.revoke_data_storage``):
+    that separation is no longer clean for one route.** Revoking the
+    storage consent from the Mini App now also sets
+    ``proactive_messages_opt_out`` — the toggle must not read "on" while
+    the effect is off — so a *self-serve* revoker is filtered out here
+    and never reaches :func:`_consent_blocker`'s ``consent_withdrawn``.
+    Two consequences an operator has to know before reading the numbers
+    above as an answer:
+
+    * the opt-out count now mixes "chose not to be messaged" with
+      "withdrew their 152-ФЗ consent through the app";
+    * withdrawal by any other route (:func:`apps.consent.services.withdraw`
+      from the admin side) leaves the column ``False``, so those people
+      still surface with ``consent_withdrawn``. The same legal fact is
+      visible differently depending on which door it came through.
+
+    Nothing is delivered in either arrangement — both vetoes block — so
+    this is an observability caveat, not a delivery risk.
     """
     return list(
         BookingReminder.all_tenants.filter(
