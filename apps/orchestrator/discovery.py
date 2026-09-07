@@ -1896,7 +1896,14 @@ def execute_catalog_callback(
         salon = get_salon(tenant_id)
         if salon is None:
             return render_stale_card()
-        services = discover_services(tenant_id=tenant_id, limit=_MAX_SERVICE_CARDS + 1)
+        # C-01 — тот же сид, что уже отдаётся списку мастеров ниже.
+        # Восемь карточек на экране, услуг у салона больше: без ротации
+        # хвост алфавита не увидит никто и никогда.
+        services = discover_services(
+            tenant_id=tenant_id,
+            limit=_MAX_SERVICE_CARDS + 1,
+            rotation_seed=rotation_seed(conversation),
+        )
         logger.info(
             "orchestrator.discovery.catalog_tap kind=services count=%d",
             len(services),
@@ -1968,7 +1975,7 @@ def execute_catalog_callback(
 
 
 def execute_catalog_tool(
-    name: str, args: dict[str, Any], *, said: str = ""
+    name: str, args: dict[str, Any], *, said: str = "", conversation: Any = None
 ) -> DiscoveryReply | None:
     """Run the marketplace read behind a model-called salon/service tool.
 
@@ -2024,7 +2031,15 @@ def execute_catalog_tool(
             # is not enough on its own, see above.
             salon = None
         limit = _limit(args.get("limit"), _MAX_SERVICE_CARDS)
-        services = discover_services(salon=salon, city=city, query=query, limit=limit + 1)
+        services = discover_services(
+            salon=salon,
+            city=city,
+            query=query,
+            limit=limit + 1,
+            # C-01: тот же сид, что у чипа выше. ``None`` — прежний
+            # детерминированный порядок, поведение не меняется.
+            rotation_seed=rotation_seed(conversation),
+        )
         logger.info("orchestrator.discovery.show_services count=%d", len(services))
         if not services and salon:
             # «No such salon» and «the salon is here but its list is empty»
@@ -2727,6 +2742,12 @@ def reground_specialization(
     parsed = parse_stems(stems[-_MAX_REGROUNDED_TOKENS:])
     if not parsed.stems:
         return specialization
+    # C-01 сознательно НЕ трогает этот вызов, и разница принципиальная:
+    # здесь выдача не показывается человеку, а служит РЕШЕНИЮ — назвал ли
+    # он существующую услугу. Ротация меняла бы, какая услуга «выиграет»
+    # регрузку, то есть переставляла бы не показы, а вывод. §9 запрещает
+    # алфавитный fallback там, где отсечение делает его смещением ПОКАЗОВ;
+    # здесь показов нет.
     named = [
         card.name
         for card in discover_services(query=said, city=city, limit=_SERVICE_NAME_SCAN_LIMIT)

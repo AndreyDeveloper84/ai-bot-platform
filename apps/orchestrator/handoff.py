@@ -40,6 +40,7 @@ from apps.orchestrator.discovery import (
     decode_query_ref,
     encode_query_ref,
     keyboard_envelope,
+    rotation_seed,
     show_salons_button,
 )
 
@@ -157,6 +158,38 @@ _ASK_SERVICE_FILTERED_NOTE = (
 # keeps the keyboard scannable. Ordered by name — a stable, explainable order
 # (there is no popularity signal in the catalog mirror to rank by).
 _ASK_SERVICE_BUTTON_LIMIT = 10
+
+#: Сколько строк меню набирается ДО среза. Ротации нужен весь ничейный
+#: пласт: срез в SQL оставлял бы ей нечего переставлять — та же причина, по
+#: которой DRF-1530 ничего не переупорядочила. Потолок с запасом больше
+#: кнопочного бюджета и ограничен, чтобы у мастера с длинным прайсом чтение
+#: не разрослось.
+_ASK_SERVICE_SCAN_CAP = 200
+
+
+def _menu_rows(qs, *, seed: str | None) -> list[tuple[uuid.UUID, str]]:
+    """Строки меню услуг: набрать до потолка, развести ничьи, срезать.
+
+    C-01. До этой правки ничьи разводились алфавитом, а срез в кнопочный
+    бюджет делал SQL — значит услуги, чьё имя стоит дальше по алфавиту, не
+    показывались НИКОГДА, и кто именно выпал, решала первая буква. Канон §9
+    запрещает алфавитный fallback именно при отсечении top-N: отсечение
+    превращает порядок в систематическое смещение показов.
+
+    Ротация — та же, что у списка мастеров
+    (:func:`apps.marketplace.discovery.rotate_ties`), а не вторая своя.
+    Второй ключ означал бы второй контракт «стабильно внутри человека,
+    равномерно между людьми», и разойтись им — вопрос времени.
+
+    ``seed`` ``None`` — прежний детерминированный порядок: вызывающий без
+    разговора поведения не меняет.
+    """
+    from apps.marketplace.discovery import rotate_ties
+
+    rows = list(qs[:_ASK_SERVICE_SCAN_CAP])
+    if seed:
+        rows = rotate_ties(rows, seed)
+    return [(row.id, row.name) for row in rows[: _ASK_SERVICE_BUTTON_LIMIT + 1]]
 
 
 def _ask_service_reply(
@@ -437,6 +470,11 @@ def handoff_to_booking(
                 # rendering must not. Same functions, same order, so a request
                 # read off a button means what it meant when it produced the
                 # card.
+                # C-01 — сид ротации меню. Разговор, а не случайность:
+                # два тапа по одной кнопке в одном диалоге обязаны дать один
+                # порядок, разные люди — разный. ``None`` (разговора ещё нет)
+                # оставляет прежний алфавитный порядок и ничего не ломает.
+                menu_seed = rotation_seed(_global_conversation(global_bot_user))
                 parsed = parse_stems(decode_query_ref(query_ref))
                 if not parsed.is_empty:
                     narrowed = menu_qs.filter(service_rows_match_q(parsed))
@@ -452,25 +490,24 @@ def handoff_to_booking(
                         # menu sits one tap behind: two screens ordering the
                         # same catalog two different ways is the failure the
                         # ticket asked to be decided rather than left.
-                        narrowed = narrowed.annotate(menu_score=score).order_by(
-                            "-menu_score", "name"
+                        # Аннотация зовётся ``match_score``, как на
+                        # соседних поверхностях: это одно и то же выражение
+                        # (DRF-1530), и ротация читает именно его. Своё имя
+                        # здесь означало бы, что ничьи разводит не тот же
+                        # механизм, что у мастеров.
+                        narrowed = narrowed.annotate(match_score=score).order_by(
+                            "-match_score", "name"
                         )
                     else:
                         narrowed = narrowed.order_by("name")
-                    narrowed_rows = list(
-                        narrowed.values_list("id", "name")[: _ASK_SERVICE_BUTTON_LIMIT + 1]
-                    )
+                    narrowed_rows = _menu_rows(narrowed, seed=menu_seed)
                     if narrowed_rows:
                         rows, filtered = narrowed_rows, True
                 if not filtered:
                     # +1 row to detect truncation without a second COUNT query
                     # (the narrowed read above takes the same +1 for the same
                     # reason).
-                    rows = list(
-                        menu_qs.order_by("name").values_list("id", "name")[
-                            : _ASK_SERVICE_BUTTON_LIMIT + 1
-                        ]
-                    )
+                    rows = _menu_rows(menu_qs.order_by("name"), seed=menu_seed)
                 truncated = len(rows) > _ASK_SERVICE_BUTTON_LIMIT
                 rows = rows[:_ASK_SERVICE_BUTTON_LIMIT]
             logger.info(
