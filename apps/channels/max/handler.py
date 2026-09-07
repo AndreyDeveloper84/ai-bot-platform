@@ -193,6 +193,7 @@ from apps.orchestrator.memory.personal_context import record_explicit_green_fact
 from apps.orchestrator.memory_ask import maybe_weave_question, try_handle_answer
 from apps.orchestrator.memory_block import build_concierge_memory_block
 from apps.orchestrator.nutrition_context import build_nutrition_context_block
+from apps.orchestrator.nutrition_wellness import interpretation_eligible
 from apps.orchestrator.safety.gate import (
     OUTBOUND_ACTION_TYPE,
     evaluate_inbound,
@@ -2109,9 +2110,29 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
                     # Best-effort exactly like its neighbours: this runs AFTER the
                     # idempotency key is claimed, so a raise would lose the reply
                     # on retry rather than retry it.
+                    # §48 — ПЕРВАЯ ступень гейта Nutrition Wellness
+                    # Interpretation, по ХОДУ. Дешёвый предикат до всякого
+                    # I/O: ход про еду и не про медицину. Вторая ступень (по
+                    # цели человека) стоит внутри билдера — там она видна.
+                    #
+                    # Две службы одного предиката. Без него включённый флаг
+                    # платит ДВА похода в Ayla и ~200 токенов за КАЖДЫЙ ход,
+                    # включая «во сколько вы работаете». А по §48 он же
+                    # ограничитель области действия способности: нет
+                    # приложенной картины — нет и разрешения модели о ней
+                    # говорить.
+                    #
+                    # Плюс флаг диетолога. Флагов два намеренно и они про
+                    # разное: CONCIERGE_NUTRITION_CONTEXT_ENABLED — труба
+                    # (DRF-1284), NUTRITION_COACH_ENABLED — поверхность
+                    # диетолога (DRF-1464). Труба без диетолога это ровно
+                    # то, что DRF-1284 измерил: токены растут, ответ нет.
                     nutrition_block = ""
                     try:
-                        nutrition_block = build_nutrition_context_block(bot_user)
+                        from apps.nutrition_coach import flags as _coach_flags
+
+                        if _coach_flags.enabled() and interpretation_eligible(event.text):
+                            nutrition_block = build_nutrition_context_block(bot_user)
                     except Exception:  # noqa: BLE001 — belt-and-braces; module is fail-closed
                         logger.exception(
                             "channels.max.global.nutrition_context_failed bot_user=%s",

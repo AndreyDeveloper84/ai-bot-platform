@@ -111,6 +111,7 @@ import logging
 from typing import Any
 
 from apps.orchestrator.ayla_adapter import build_safe_inputs
+from apps.orchestrator.nutrition_wellness import goal_is_medical
 
 logger = logging.getLogger(__name__)
 
@@ -166,11 +167,24 @@ def build_nutrition_context_block(bot_user: Any) -> str:
     if not _consent_open(bot_user):
         return ""
 
+    # Вторая ступень гейта §48 — по ДАННЫМ, а не по ходу. Первая (текст
+    # хода: про еду и не про медицину) стоит у вызывающего, в handler:
+    # там живёт ход. Здесь проверяется то, что видно только отсюда, —
+    # цель человека, которую этот блок всё равно читает, чтобы её назвать.
+    #
+    # Разведены намеренно: ослабить одну половину, не тронув другую,
+    # должно быть невозможно случайно. См. apps/orchestrator/
+    # nutrition_wellness.py.
+    goal = _fetch_goal(bot_user)
+    if goal_is_medical(goal):
+        return ""
+
     # Two reads, two independent failures. Neither is required: a week with
     # no signal and a day with no rows are both ordinary, and so is one of
     # the two calls failing. The block is whatever came back — and "" when
     # nothing did.
-    lines = _render_lines(_fetch_deficits(bot_user))
+    lines = _render_goal_lines(goal)
+    lines.extend(_render_lines(_fetch_deficits(bot_user)))
     lines.extend(_render_today_lines(bot_user))
     if not lines:
         return ""
@@ -208,6 +222,42 @@ def _consent_open(bot_user: Any) -> bool:
     from apps.orchestrator.food_history import read_consent_open
 
     return read_consent_open(bot_user)
+
+
+def _fetch_goal(bot_user: Any) -> Any | None:
+    """Активная цель человека, или ``None``. Никогда не бросает.
+
+    Тот же ридер, что у проактивной поверхности
+    (:func:`apps.nutrition_coach.goals.active_goal`, DRF-1464 T2), а не
+    вторая копия: цель — одна на диетолога, и два места её читать это два
+    места разойтись. Ридер fail-closed сам: недоступность Ayla читается
+    как «цели нет», а не как «цель может быть».
+    """
+    try:
+        from apps.nutrition_coach.goals import active_goal
+
+        return active_goal(bot_user)
+    except Exception:  # noqa: BLE001 — ход дороже картины
+        logger.exception("orchestrator.nutrition_context.goal_failed")
+        return None
+
+
+def _render_goal_lines(goal: Any) -> list[str]:
+    """Цель человека → строка промпта. ``[]``, когда цели нет.
+
+    Цель стоит ПЕРВОЙ в блоке: она рамка, в которой читается всё
+    остальное. «Белок 62% от нормы» без цели — число ни о чём; с целью
+    «больше энергии днём» — то, с чем модели разрешено связать вопрос.
+
+    Формулировка берётся у человека дословно (``text``), а при её
+    отсутствии не выдумывается: голый курируемый ключ (``more_energy``)
+    в промпт не идёт — это наш идентификатор, а не слова человека, и
+    модель, увидев слоган, начнёт его цитировать.
+    """
+    text = (getattr(goal, "text", None) or "").strip() if goal is not None else ""
+    if not text:
+        return []
+    return [f"Цель клиента своими словами: {text}"]
 
 
 def _fetch_deficits(bot_user: Any) -> Any | None:
