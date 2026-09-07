@@ -22,6 +22,7 @@ from django.db.migrations.executor import MigrationExecutor
 from apps.consent.models import ConsentRecord
 from apps.identity.models import BotUser
 from apps.tenancy.models import Tenant
+from tests.support.migration_graph import restore_migration_head
 
 pytestmark = pytest.mark.django_db(transaction=True)
 
@@ -42,10 +43,16 @@ def _executor() -> MigrationExecutor:
 
 @pytest.fixture
 def at_0002():
-    """Roll the consent app back to 0002 and ALWAYS return to the head."""
+    """Roll the consent app back to 0002 and ALWAYS restore the whole graph.
+
+    Not `migrate([_MIG_0003])`: identity/0021 declares consent/0003 as a
+    dependency, so this rollback unapplies identity/0021 too and re-applying
+    consent's own head never brings it back. Whatever stays off stays off for
+    every later test on this xdist worker (DRF-1551).
+    """
     _executor().migrate([_MIG_0002])
     yield
-    _executor().migrate([_MIG_0003])
+    restore_migration_head()
 
 
 def _bot_user(slug: str, cuid: str) -> BotUser:

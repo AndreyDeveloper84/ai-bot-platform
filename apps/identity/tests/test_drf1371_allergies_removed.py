@@ -46,6 +46,7 @@ from apps.identity.services.profile import (
     update_profile,
 )
 from apps.tenancy.models import Tenant
+from tests.support.migration_graph import restore_migration_head
 
 
 pytestmark = pytest.mark.django_db
@@ -263,8 +264,10 @@ class TestMigration:
     def test_rollback_and_reapply(self) -> None:
         # Fresh executor per migrate(): the loader caches applied state at
         # init, so a reused one mis-plans the second leg. The finally always
-        # returns the test DB to head — later tests write through the
-        # runtime model, which has no `allergies`.
+        # restores the WHOLE graph, not `_HEAD`: handoff/0002 and
+        # catalog/0016 depend on identity/0020, so the rollback to 0019 takes
+        # them down too and re-applying 0020 alone leaves them off for every
+        # later test on this xdist worker (DRF-1551).
         try:
             executor = MigrationExecutor(connection)
             executor.migrate([self._PREV])
@@ -283,7 +286,7 @@ class TestMigration:
             )
             assert "allergies" not in {f.name for f in new._meta.fields}
         finally:
-            MigrationExecutor(connection).migrate([self._HEAD])
+            restore_migration_head()
 
     def test_no_model_changes_left_unmigrated(self) -> None:
         """`makemigrations --check` for identity, in-process."""

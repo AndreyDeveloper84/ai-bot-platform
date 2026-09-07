@@ -16,10 +16,10 @@ from django.db import connection
 from django.db.migrations.executor import MigrationExecutor
 
 from apps.identity.models import MemoryEntry
+from tests.support.migration_graph import restore_migration_head
 
 _MIG_0017 = ("identity", "0017_memoryentry_provenance")
 _MIG_0018 = ("identity", "0018_memoryentry_provenance_backfill")
-_MIG_HEAD = ("identity", "0019_memoryentry_lifecycle_constraints")
 
 _TS = datetime(2026, 1, 10, 12, 0, 0, tzinfo=tz.utc)
 
@@ -35,16 +35,18 @@ def _apps_at(target):
 
 @pytest.fixture
 def at_0017():
-    """Migrate down to 0017; ALWAYS return to the chain HEAD afterwards.
+    """Migrate down to 0017; ALWAYS restore the whole graph afterwards.
 
-    Head, not 0018: migrating «to 0018» unapplies everything after it, and
-    since pytest-django reuses one database for the whole session that would
-    silently strip migration 0019's CHECK constraints from every test that
-    runs later (DRF-1263).
+    The graph's leaves, not identity's head: migrating «to 0018» unapplies
+    everything after it, and since pytest-django reuses one database per
+    xdist worker for the whole session that silently strips 0019's CHECK
+    constraints from every later test (DRF-1263) — and, because handoff/0002
+    and catalog/0016 depend on identity/0020, their tables and columns too
+    (DRF-1551). Only `graph.leaf_nodes()` puts all of that back.
     """
     _executor().migrate([_MIG_0017])
     yield _apps_at(_MIG_0017)
-    _executor().migrate([_MIG_HEAD])
+    restore_migration_head()
 
 
 def _row(apps, upc, *, source="explicit", **fields) -> uuid.UUID:
