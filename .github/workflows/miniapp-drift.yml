@@ -76,6 +76,22 @@ name: miniapp-drift
 # `workflow_run` is NOT a repeat of how `deploy-dev` died in commit ab2d164.
 # It died because the default branch was `main` back then. It is `dev` now, and
 # `deploy-dev` itself is the standing proof that `workflow_run` fires.
+#
+# ### The chain length, checked before relying on it
+# `workflow_run` chains are capped: "You can't use `workflow_run` to chain
+# together more than three levels of workflows" (GitHub Actions docs, "Events
+# that trigger workflows"). The chain here is exactly three and therefore
+# inside the cap:
+#
+#   1. `ci`             — push to `dev`
+#   2. `deploy-dev`     — workflow_run on `ci`
+#   3. `miniapp-drift`  — workflow_run on `deploy-dev`   <- this file
+#
+# There is no room left. A fourth workflow hung off this one would not run, and
+# it would not announce that it did not run — it would simply be silent, which
+# is the failure mode this whole workflow exists to prevent. Anything that needs
+# to happen after a drift check belongs INSIDE this workflow as another job, not
+# behind another `workflow_run`.
 on:
   workflow_run:
     workflows: ["deploy-dev"]
