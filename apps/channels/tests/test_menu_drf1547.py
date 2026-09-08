@@ -325,6 +325,62 @@ class TestEverySevenButtonDoesWhatItPromises:
             "Отменить: Маникюр",
         ]
 
+    def test_my_bookings_also_lists_the_past_in_the_chat(
+        self, sent, fake_redis, concierge, bookings
+    ):
+        """§62 / OD-UI-1 — одна кнопка, оба ответа, и оба В ЧАТЕ.
+
+        Это то, ради чего «История визитов» перестала быть отдельным
+        пунктом. Раньше прошлые визиты в боте не показывались вообще:
+        пункт был экранным и уводил на ``/customer/records``, который
+        открывается на вкладке «Ближайшие».
+
+        Проверяется ровно живой путь: настоящий вход, настоящая
+        лестница. И детерминированность здесь не мелочь — ``concierge``
+        не звался ни разу, то есть тап по кнопке не ушёл в модель
+        (регрессия DRF-1051).
+        """
+        bookings["visits"] = VisitsResult(
+            status="ok",
+            visits=(
+                _visit(
+                    appointment_id=_UUID_B,
+                    service="Массаж спины",
+                    start="2026-08-12T09:30:00+00:00",
+                ),
+            ),
+        )
+        _welcomed(71014)
+
+        max_handler.handle_global_max_event(
+            _tap(payload="cb:menu:my_bookings", user_id=71014, callback_id="s-14")
+        )
+
+        assert "Ваши последние визиты:" in sent[0]["text"], sent[0]["text"]
+        assert "Массаж спины" in sent[0]["text"], sent[0]["text"]
+        assert concierge.call_count == 0
+        # Приложение не открывалось: пять визитов и меньше читаются целиком.
+        assert not [b for b in (sent[0]["attachments"] or []) if b.get("type") == "open_app"], sent[
+            0
+        ]["attachments"]
+
+    def test_my_bookings_says_out_loud_that_the_history_is_empty(
+        self, sent, fake_redis, concierge, bookings
+    ):
+        """Ноль завершённых визитов — сегодняшняя норма пилота, не сбой."""
+        bookings["upcoming"] = VisitsResult(status="ok", visits=(_visit(),))
+        bookings["visits"] = VisitsResult(status="empty")
+        _welcomed(71015)
+
+        max_handler.handle_global_max_event(
+            _tap(payload="cb:menu:my_bookings", user_id=71015, callback_id="s-15")
+        )
+
+        # Стража: ответ построен и предстоящая половина в нём есть.
+        assert "Ваши предстоящие записи" in sent[0]["text"], sent[0]["text"]
+        # И только теперь — вторая половина, которая раньше молчала.
+        assert "Завершённых визитов пока нет" in sent[0]["text"], sent[0]["text"]
+
     @pytest.mark.parametrize(
         ("payload", "warning", "slug"),
         [
@@ -364,7 +420,11 @@ class TestEverySevenButtonDoesWhatItPromises:
         )
 
         assert sent[0]["text"] == "Дополнительные возможности"
-        assert _labels(sent[0]) == ["История визитов", "Помощь", "Назад"]
+        # «История визитов» слита с «Моими записями» (OD-UI-1, «кнопки
+        # сливаем»); прошлое отвечается в чате, и отдельного пункта у него
+        # больше нет. Достижимость доказана выше —
+        # ``test_my_bookings_also_lists_the_past_in_the_chat``.
+        assert _labels(sent[0]) == ["Помощь", "Назад"]
 
     def test_back_returns_to_the_main_menu(self, sent, fake_redis, concierge):
         _welcomed(71007)

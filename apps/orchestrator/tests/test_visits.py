@@ -119,6 +119,107 @@ class TestVisitsList:
             "cb:visit:card:a2",
         ]
 
+    def test_empty_history_is_named_out_loud_beside_upcoming(self, capability, db) -> None:
+        """§62 / OD-UI-1 — половина ответа, которая раньше молчала.
+
+        Пилот на 07.09.2026 — ровно этот случай: 30 зеркал, ни одного
+        завершённого визита. До слияния кнопок человек с предстоящей
+        записью не узнавал, что история вообще существует: блок про
+        прошлое просто не печатался, а отдельный пункт «История визитов»
+        уводил в приложение показывать ту же вкладку «Ближайшие».
+        """
+        capability["upcoming"] = VisitsResult(status="ok", visits=(_visit(appointment_id="u1"),))
+        capability["visits"] = VisitsResult(status="empty")
+
+        reply = visits_mod.route_visits(global_bot_user=_BotUser())
+
+        # Стража НА ТЕХ ЖЕ данных: ответ построен и предстоящая половина в
+        # нём есть — то есть выборка непуста (DRF-1411).
+        assert "Ваши предстоящие записи:" in reply.text
+        # И только теперь утверждение о второй половине.
+        assert "Завершённых визитов пока нет" in reply.text
+
+    def test_a_long_history_is_capped_and_the_app_carries_the_rest(
+        self, capability, db, miniapp
+    ) -> None:
+        """§62 — единственное оправданное место ухода в приложение.
+
+        Шестой визит запрашивается ради ПРИЗНАКА «список длиннее чата» и
+        на экран не попадает: он бы удлинил ответ ровно на ту строку,
+        из-за которой потолок и введён.
+        """
+        capability["visits"] = VisitsResult(
+            status="ok",
+            visits=tuple(
+                _visit(appointment_id=f"h{i}", service=f"Услуга {i}") for i in range(1, 7)
+            ),
+        )
+
+        reply = visits_mod.route_visits(global_bot_user=_BotUser())
+
+        assert "Ваши последние визиты:" in reply.text
+        assert "Услуга 5" in reply.text
+        assert "Услуга 6" not in reply.text
+        assert "весь список открою в приложении" in reply.text
+        buttons = (reply.action_data or {})["attachments"][0]["payload"]["buttons"]
+        assert [b["callback"] for b in buttons] == [
+            "cb:visit:card:h1",
+            "cb:visit:card:h2",
+            "cb:visit:card:h3",
+            "cb:visit:card:h4",
+            "cb:visit:card:h5",
+            "open_visits",
+        ]
+        assert buttons[-1]["web_app"] == "aylabot"
+
+    def test_a_short_history_never_offers_the_app(self, capability, db, miniapp) -> None:
+        """Резерв открывается по нужде, а не по привычке (§62)."""
+        capability["visits"] = VisitsResult(
+            status="ok",
+            visits=tuple(
+                _visit(appointment_id=f"h{i}", service=f"Услуга {i}") for i in range(1, 6)
+            ),
+        )
+
+        reply = visits_mod.route_visits(global_bot_user=_BotUser())
+
+        assert "Услуга 5" in reply.text
+        assert "приложении" not in reply.text
+        assert "open_visits" not in _callbacks(reply)
+
+    def test_without_a_miniapp_the_cap_promises_nothing(self, capability, db, settings) -> None:
+        """Строка, под которой не будет кнопки, — та же мёртвая кнопка."""
+        settings.MAX_BOT_WEB_APP = ""
+        settings.MAX_MINIAPP_URL = ""
+        capability["visits"] = VisitsResult(
+            status="ok",
+            visits=tuple(
+                _visit(appointment_id=f"h{i}", service=f"Услуга {i}") for i in range(1, 7)
+            ),
+        )
+
+        reply = visits_mod.route_visits(global_bot_user=_BotUser())
+
+        # Стража: ответ цел и пять визитов в нём перечислены.
+        assert "Услуга 5" in reply.text
+        assert "Показала последние 5 визитов." in reply.text
+        # И только теперь отрицание.
+        assert "приложении" not in reply.text
+        assert "open_visits" not in _callbacks(reply)
+
+    def test_the_link_fallback_opens_the_declared_screen(self, capability, db, settings) -> None:
+        settings.MAX_BOT_WEB_APP = ""
+        settings.MAX_MINIAPP_URL = "https://app.example"
+        capability["visits"] = VisitsResult(
+            status="ok",
+            visits=tuple(_visit(appointment_id=f"h{i}") for i in range(1, 7)),
+        )
+
+        reply = visits_mod.route_visits(global_bot_user=_BotUser())
+
+        buttons = (reply.action_data or {})["attachments"][0]["payload"]["buttons"]
+        assert buttons[-1]["url"] == "https://app.example/customer/records"
+
     def test_empty_state_offers_a_next_step(self, capability, db) -> None:
         reply = visits_mod.route_visits(global_bot_user=_BotUser())
 
