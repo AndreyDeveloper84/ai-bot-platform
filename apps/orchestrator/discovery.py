@@ -771,18 +771,19 @@ def render_no_match(
         # been misheard again. The tail is the alternative, so the turn still
         # goes somewhere; without one, the same closing question as below.
         #
-        # NOTE the missing salon sentence, and it is deliberate: this is the
-        # ONE branch whose keyboard a live caller drops
-        # (``apps.orchestrator.concierge`` returns the repeat refusal as
-        # ``DiscoveryReply(text=…, persisted=True)``, keyboard and all left
-        # behind). Until that one line is fixed under DRF-1489, a sentence
-        # here that pointed at a button would point at nothing. The chips are
-        # still attached — they are correct wherever they survive, and an
-        # unexplained chip is a smaller failure than a named one that is absent.
+        # The salon sentence was withheld on this branch until DRF-1576, and
+        # the reason was the keyboard: ``apps.orchestrator.concierge`` returned
+        # the repeat refusal as ``DiscoveryReply(text=…, persisted=True)`` and
+        # left the buttons behind, so a sentence here naming a button would
+        # have pointed at nothing. That line now passes ``action_data`` like
+        # its seven neighbours, the keyboard survives, and the sentence rides
+        # by the same rule as every branch below — with the salon chip, only
+        # where the salon chip is the one actually drawn.
         where = f" в городе {place}" if place else ""
         text = f"Про «{service}»{where} я уже ответил: такого у наших мастеров нет."
         tail = offer or "Назовите другую услугу или другой город, и я поищу ещё."
-        return _reply_with_chips(f"{text} {tail}"[:_MAX_REPLY_CHARS], chips or salons)
+        salon_tail = "" if chips else tail_salons
+        return _reply_with_chips(f"{text} {tail}{salon_tail}"[:_MAX_REPLY_CHARS], chips or salons)
     if service and place:
         # «такого … нет», not «такой услуги … нет»: with both halves named we
         # know the COMBINATION matched nobody, not which half is missing —
