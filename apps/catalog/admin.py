@@ -15,13 +15,15 @@ dupe. DRF-1581 is the number that actually shipped it.)
 
 from __future__ import annotations
 
+from typing import ClassVar
+
 from django.contrib import admin, messages
 from django.contrib.admin.helpers import ACTION_CHECKBOX_NAME
 from django.http import HttpRequest
 from django.shortcuts import render
 from django.utils import timezone
 
-from apps.adminconsole.theme import AylaAdminMedia, absent, badge
+from apps.adminconsole.theme import AylaAdminMedia, BadgeMap, absent, badge
 from apps.catalog.master_state import is_available, sale_block
 from apps.catalog.models import (
     CatalogFaq,
@@ -402,7 +404,7 @@ class CatalogMasterAdmin(_MirrorAdminBase):
     #: Ключи ровно из :class:`CatalogMaster.InviteStatus`; полноту
     #: держит тест: добавится состояние — забытый ключ напечатает код
     #: без подписи, и тест это поймает.
-    _INVITE_BADGES = {
+    _INVITE_BADGES: ClassVar[BadgeMap] = {
         CatalogMaster.InviteStatus.PENDING: ("wait", "Приглашение не принято"),
         CatalogMaster.InviteStatus.ACCEPTED: ("ok", "Приглашение принято"),
         CatalogMaster.InviteStatus.EXPIRED: ("stop", "Приглашение просрочено"),
@@ -414,7 +416,7 @@ class CatalogMasterAdmin(_MirrorAdminBase):
         tone, label = self._INVITE_BADGES.get(obj.invite_status, ("off", "Неизвестное состояние"))
         return badge(tone, label, obj.invite_status)
 
-    _MODE_BADGES = {
+    _MODE_BADGES: ClassVar[BadgeMap] = {
         CatalogMaster.Mode.INVITE: ("ok", "Заходит в приложение"),
         CatalogMaster.Mode.CATALOG_ONLY: ("off", "Только в каталоге, без входа"),
     }
@@ -668,7 +670,7 @@ class MasterServiceAdmin(AylaAdminMedia, admin.ModelAdmin):
     #: / хорошо», а «насколько строка объяснима»: приехавшая
     #: синхронизацией объяснима сама собой, рукотворная требует того,
     #: кто её сделал.
-    _SOURCE_BADGES = {
+    _SOURCE_BADGES: ClassVar[BadgeMap] = {
         MasterServiceSource.CATALOG_SYNC: ("ok", "Синхронизация каталога"),
         MasterServiceSource.MM4_MATRIX: ("ok", "Матрица услуг в приложении"),
         MasterServiceSource.INVITE_SEED: ("off", "Заведена при приглашении"),
@@ -681,7 +683,14 @@ class MasterServiceAdmin(AylaAdminMedia, admin.ModelAdmin):
 
     @admin.display(description="Откуда взялась", ordering="source")
     def origin(self, obj: MasterService):  # type: ignore[no-untyped-def]
-        tone, label = self._SOURCE_BADGES.get(obj.source, ("off", "Неизвестное происхождение"))
+        if not obj.source:
+            # NULL здесь — настоящее отсутствие, а не «прочее»: строка
+            # заведена до DRF-975, автор невосстановим (см. help_text
+            # поля). Подставить сюда бейдж «неизвестное происхождение»
+            # значило бы выдать отсутствие за значение — ровно то, что
+            # запрещает OPEN_DECISIONS §65.
+            return absent("происхождение не записано")
+        tone, label = self._SOURCE_BADGES.get(obj.source, ("off", "Незнакомое происхождение"))
         return badge(tone, label, obj.source)
 
     # Provenance is written by the platform, never typed by a human -- an

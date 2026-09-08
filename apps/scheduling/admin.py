@@ -11,9 +11,11 @@
 
 from __future__ import annotations
 
+from typing import ClassVar
+
 from django.contrib import admin
 
-from apps.adminconsole.theme import AylaAdminMedia, badge
+from apps.adminconsole.theme import AylaAdminMedia, BadgeMap, badge
 from apps.scheduling.models import (
     ScheduleChangeRequest,
     ScheduleException,
@@ -137,7 +139,7 @@ class ScheduleExceptionAdmin(_ScheduleAdminBase):
     #: Человеческие подписи у этой модели уже были (``Type`` объявлен
     #: по-русски), но на экране пропадал КОД, а именно им исключение
     #: называется в задачах и логах. Бейдж печатает оба.
-    _KIND_BADGES = {
+    _KIND_BADGES: ClassVar[BadgeMap] = {
         ScheduleException.Type.VACATION: ("off", "Отпуск"),
         ScheduleException.Type.SICK_LEAVE: ("wait", "Больничный"),
         ScheduleException.Type.DAY_OFF: ("off", "Выходной"),
@@ -222,7 +224,7 @@ class ScheduleChangeRequestAdmin(_ScheduleAdminBase):
     readonly_fields = ("requested_change", "created_at")
 
     #: Состояние заявки словами — и код рядом.
-    _STATE_BADGES = {
+    _STATE_BADGES: ClassVar[BadgeMap] = {
         ScheduleChangeRequest.Status.PENDING: ("wait", "Ждёт решения"),
         ScheduleChangeRequest.Status.APPROVED: ("ok", "Согласовано"),
         ScheduleChangeRequest.Status.REJECTED: ("stop", "Отклонено"),

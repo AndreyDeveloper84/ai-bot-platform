@@ -37,6 +37,13 @@ from django.utils.safestring import SafeString
 #: работает, «off» — нейтральное/выключенное.
 BadgeTone = Literal["ok", "wait", "stop", "off"]
 
+#: Карта «машинное значение состояния → (тон, человеческая подпись)».
+#: Ключ именно ``str``, а не член перечисления: в базе лежит строка, и
+#: карта обязана уметь ответить на значение, которого в перечислении
+#: ещё (или уже) нет — иначе экран падал бы на незнакомом состоянии
+#: вместо того, чтобы честно напечатать его код.
+BadgeMap = dict[str, tuple[BadgeTone, str]]
+
 #: Как выглядит отсутствие значения.
 #:
 #: Формулировка «нет данных», а не прочерк и не ноль: OPEN_DECISIONS §65
@@ -151,4 +158,6 @@ def install_admin_branding() -> None:
         return _ordered_app_list(original(request, app_label))
 
     site.get_app_list = get_app_list  # type: ignore[method-assign]
-    site._ayla_app_order_installed = True  # noqa: SLF001 — свой флаг на своём объекте
+    # Свой флаг на чужом объекте: в AdminSite такого атрибута нет и не
+    # будет, поэтому через setattr, а не точкой.
+    setattr(site, "_ayla_app_order_installed", True)  # noqa: B010

@@ -210,8 +210,12 @@ def test_absence_is_named_not_substituted(model) -> None:  # noqa: ANN001
     ноль. Экран обязан сказать словами, что данных нет.
     """
     model_admin = admin.site._registry[model]  # noqa: SLF001 — реестр админки
-    assert model_admin.empty_value_display == "нет данных"
-    assert model_admin.empty_value_display not in {"-", "—", "0", ""}
+    # ``getattr``, а не точка: заглушки django-stubs не знают про
+    # ``empty_value_display`` у ``ModelAdmin``, хотя Django его читает
+    # (``ModelAdmin.get_empty_value_display``).
+    shown = getattr(model_admin, "empty_value_display", None)
+    assert shown == "нет данных"
+    assert shown not in {"-", "—", "0", ""}
 
 
 def test_badges_show_both_human_label_and_machine_code(
@@ -230,6 +234,29 @@ def test_badges_show_both_human_label_and_machine_code(
     assert "Приглашение не принято" in body, "пропала человеческая подпись"
     assert "ayla-badge__code" in body, "пропал слой машинного имени"
     assert ">pending<" in body, "пропало машинное имя состояния"
+
+
+def test_null_provenance_reads_as_absence_not_as_a_label(
+    owner: Client, salon: Tenant, master: CatalogMaster, service: CatalogService
+) -> None:
+    """У связи без записанного происхождения на экране ОТСУТСТВИЕ.
+
+    ``MasterService.source`` допускает NULL: так выглядят строки,
+    заведённые до DRF-975, у которых автор невосстановим. Подставить им
+    бейдж «неизвестное происхождение» значило бы выдать отсутствие за
+    значение — ровно то, что запрещает OPEN_DECISIONS §65.
+    """
+    with master_service_write(MasterServiceSource.DEV_SEED, reason="test"):
+        edge = MasterService.all_tenants.create(tenant=salon, master=master, service=service)
+    MasterService.all_tenants.filter(pk=edge.pk).update(source=None)
+
+    body = owner.get(reverse("admin:catalog_masterservice_changelist")).content.decode()
+
+    # Положительная пара: строка на экране есть, и это ЭТА связь.
+    assert master.name in body
+    assert "происхождение не записано" in body
+    # Отрицательная: отсутствие не подменено ни ярлыком, ни словом «None».
+    assert "Незнакомое происхождение" not in body
 
 
 def test_badge_stylesheet_is_wired_into_the_page(owner: Client, master: CatalogMaster) -> None:

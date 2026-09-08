@@ -25,7 +25,7 @@ event-emission side effects.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, ClassVar, cast
 
 from django.contrib import admin, messages
 from django.core.exceptions import PermissionDenied
@@ -33,7 +33,7 @@ from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import path, reverse
 from django.utils.html import format_html
 
-from apps.adminconsole.theme import AylaAdminMedia, badge
+from apps.adminconsole.theme import AylaAdminMedia, BadgeMap, badge
 from apps.booking.models import BookingReminder, BookingRequest
 from apps.booking.services.admin_cancel import AdminCancelError, cancel_booking_from_admin
 from apps.booking.services.transitions import InvalidBookingTransition
@@ -185,7 +185,7 @@ class BookingRequestAdmin(AylaAdminMedia, admin.ModelAdmin):
     #: Оба имени обязательны: подпись читает человек, кодом
     #: (``confirmed``, ``cancel_requested``) визит называется в задачах,
     #: логах и в разговоре с нами.
-    _STATE_BADGES = {
+    _STATE_BADGES: ClassVar[BadgeMap] = {
         BookingRequest.Status.CONFIRMED: ("ok", "Подтверждена"),
         BookingRequest.Status.CANCEL_REQUESTED: ("wait", "Клиент попросил отменить"),
         BookingRequest.Status.RESCHEDULE_REQUESTED: ("wait", "Клиент попросил перенести"),
@@ -193,7 +193,7 @@ class BookingRequestAdmin(AylaAdminMedia, admin.ModelAdmin):
         BookingRequest.Status.RESCHEDULED: ("off", "Перенесена, заменена новой"),
     }
 
-    _ORIGIN_BADGES = {
+    _ORIGIN_BADGES: ClassVar[BadgeMap] = {
         "wizard": ("off", "Форма на сайте"),
         "bot": ("ok", "Диалог с ботом"),
         "yclients_admin": ("off", "Салон завёл в YClients"),
@@ -327,13 +327,13 @@ class BookingReminderAdmin(AylaAdminMedia, admin.ModelAdmin):
         ),
     )
 
-    _KIND_BADGES = {
+    _KIND_BADGES: ClassVar[BadgeMap] = {
         BookingReminder.Kind.DAY_BEFORE: ("off", "За сутки"),
         BookingReminder.Kind.TWO_HOURS: ("off", "За два часа"),
     }
 
     #: Состояние напоминания словами — и код рядом.
-    _STATE_BADGES = {
+    _STATE_BADGES: ClassVar[BadgeMap] = {
         BookingReminder.Status.PENDING: ("wait", "Ждёт отправки"),
         BookingReminder.Status.SENT_NO_REPLY: ("wait", "Отправлено, ответа нет"),
         BookingReminder.Status.SENT: ("ok", "Отправлено"),
