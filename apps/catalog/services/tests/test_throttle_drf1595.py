@@ -39,6 +39,7 @@ from pytest_httpx import HTTPXMock
 
 from apps.catalog.services.http_client import (
     CatalogClientError,
+    CatalogError,
     CatalogHttpClient,
     CatalogThrottledError,
 )
@@ -75,6 +76,36 @@ def _empty_page() -> dict[str, Any]:
     return {"count": 0, "next": None, "previous": None, "results": []}
 
 
+_SERVICE_ID = "6f1c2e9a-0000-4000-8000-000000000001"
+
+
+def _one_service_page() -> dict[str, Any]:
+    """A page carrying one real row.
+
+    Used where the point is that the retry RECOVERED. An empty page would
+    have made the test pass on "no exception was raised", which is the same
+    evidence a silently broken client produces.
+    """
+    return {
+        "count": 1,
+        "next": None,
+        "previous": None,
+        "results": [
+            {
+                "id": _SERVICE_ID,
+                "tenant": _TID,
+                "name": "Массаж",
+                "duration_minutes": 45,
+                "base_price": "1500.00",
+                "requires_health_check": False,
+                "is_active": True,
+                "created_at": "2026-09-05T09:24:00Z",
+                "updated_at": "2026-09-05T09:24:00Z",
+            }
+        ],
+    }
+
+
 @pytest.fixture
 def slept(monkeypatch: pytest.MonkeyPatch) -> list[float]:
     """Record sleep durations instead of taking them.
@@ -97,12 +128,15 @@ class TestThrottleIsRetried:
         self, httpx_mock: HTTPXMock, slept: list[float]
     ) -> None:
         httpx_mock.add_response(url=_SALON_WIRE, status_code=429, json=_THROTTLE_BODY)
-        httpx_mock.add_response(url=_SALON_WIRE, json=_empty_page())
+        httpx_mock.add_response(url=_SALON_WIRE, json=_one_service_page())
 
         with _client(wait_budget=ThrottleWaitBudget(240)) as c:
             rows = c.fetch_salon_services(tenant_id=_TID)
 
-        assert rows == []
+        # The catalog actually arrived. "No exception" would not have been
+        # evidence of that — this is the salon whose services the bot spent
+        # three days denying the existence of.
+        assert [row.ayla_service_id for row in rows] == [_SERVICE_ID]
         # 54, not 0.5 — the backoff ladder would have been the wrong answer
         # even if it had been applied, because the limiter's window is
         # upstream's to know.
@@ -203,10 +237,13 @@ class TestOtherFourXxStillFailImmediately:
         assert slept == []
 
     def test_throttled_error_is_not_a_client_error(self) -> None:
-        # Sub-classing would have been the tidy-looking choice (429 IS a 4xx)
-        # and would have silently re-merged the two facts this ticket exists
-        # to separate: every `except CatalogClientError` upstream would catch
-        # a throttle again.
+        # It IS a catalog error — callers that mean "anything went wrong
+        # talking to Ayla" still catch it.
+        assert issubclass(CatalogThrottledError, CatalogError)
+        # It is NOT a client error. Sub-classing would have been the
+        # tidy-looking choice (429 IS a 4xx) and would have silently
+        # re-merged the two facts this ticket exists to separate: every
+        # `except CatalogClientError` upstream would catch a throttle again.
         assert not issubclass(CatalogThrottledError, CatalogClientError)
 
 
