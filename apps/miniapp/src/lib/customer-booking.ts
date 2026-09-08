@@ -76,6 +76,7 @@ import {
   fetchSlots,
   createBooking,
   decisionContractViolation,
+  NOT_RECOMMENDABLE_CODE,
 } from "./api";
 import type {
   Master,
@@ -212,6 +213,26 @@ export interface CatalogBrowseData {
    */
   picks: ServicePick[];
   /**
+   * Почему `picks` именно такой — ЧЕТЫРЕ различимых исхода, и свести
+   * любые два значило бы вернуть то самое смешение отсутствия с нулём.
+   *
+   * * `OK` — источник ответил, полка построена (может быть пустой по
+   *   гейту WHY);
+   * * `UNAVAILABLE` — источник не ответил. Временно, повтор осмыслен,
+   *   молчание законно;
+   * * `CONTRACT_VIOLATION` — источник ответил не в той форме. Наш с
+   *   ним дефект, громко, повтор бессмыслен;
+   * * `NO_VERIFIED_CANDIDATES` — **штатный результат, а не ошибка**
+   *   (решение владельца §76): видимых услуг больше нуля, пригодных к
+   *   рекомендации — ноль, потому что `VERIFIED` выдаётся только после
+   *   подтверждения. Повторять бессмысленно; человеку показывается
+   *   предусмотренное НЕперсонализированное состояние — каталог и
+   *   запись по прямому выбору, без слова «подходит» (§10.2, §10.3).
+   *
+   * Экран вправе развести их по-разному; сводить обратно — нельзя.
+   */
+  picksOutcome: PicksOutcome;
+  /**
    * DRF-1482 — `empty_reason` ровно как прислал `GET /services`
    * (`null`, когда каталогу есть что предложить или бэкенд старее
    * поля). Проходит НЕПРОВЕРЕННЫМ: сопоставление значений состояниям —
@@ -241,11 +262,43 @@ function displayableReasons(candidate: RankedCandidate): string[] {
   return phrases;
 }
 
-/** Три исхода границы §9.4 — именами контракта, а не своими. */
+/**
+ * Исходы границы §9.4 — именами контракта, а не своими.
+ *
+ * Три первых объявлены §9.4; четвёртый пришёл решением владельца §76 и
+ * лежит НЕ рядом с ними, а внутри `OK`: на проводе это конформный
+ * ответ, а не отказ. Именно поэтому он появляется после проверки формы,
+ * а не вместо неё.
+ */
 type RecommendationsOutcome =
   | { state: "UNAVAILABLE" }
   | { state: "CONTRACT_VIOLATION"; violation: string }
   | { state: "OK"; decision: RecommendationDecision };
+
+export type PicksOutcome =
+  | "OK"
+  | "UNAVAILABLE"
+  | "CONTRACT_VIOLATION"
+  | "NO_VERIFIED_CANDIDATES";
+
+/**
+ * Узнать штатную пустоту §10.3 по её собственному признаку.
+ *
+ * Форма на проводе описана контрактом: пустой `ordered[]` **и** код
+ * решения в целом `ELIG_EXCLUDED_NOT_RECOMMENDABLE`. Имя состоянию дал
+ * владелец (§76) — `NO_VERIFIED_CANDIDATES`.
+ *
+ * Пустой `ordered[]` БЕЗ этого кода сюда не попадает намеренно: он
+ * означает другое («никто не подошёл»), и назвать одно другим значило
+ * бы снова сложить два состояния в одну ветку. Контракт различает их
+ * кодом — различаем и мы.
+ */
+function isNoVerifiedCandidates(decision: RecommendationDecision): boolean {
+  return (
+    decision.ordered.length === 0 &&
+    (decision.reason_codes ?? []).includes(NOT_RECOMMENDABLE_CODE)
+  );
+}
 
 /**
  * Сходить за решением и классифицировать результат.
@@ -288,6 +341,7 @@ export async function getCatalogBrowse(): Promise<CatalogBrowseData> {
   ]);
   let picks: ServicePick[] = [];
   const recs = await loadRecommendations();
+  let picksOutcome: PicksOutcome = recs.state;
   if (recs.state === "CONTRACT_VIOLATION") {
     // Единственный канал, который есть у `apps/miniapp/src` (ни Sentry,
     // ни трекера — заводить их под эту задачу запрещено DRF-1556).
@@ -301,6 +355,11 @@ export async function getCatalogBrowse(): Promise<CatalogBrowseData> {
         ". Подбор остаётся пустым (никогда не подделывается); см. docs/specs/" +
         "RECOMMENDATION_RESOLVER_CONTRACT_v1.0.md §9.4 (DRF-1568).",
     );
+  } else if (recs.state === "OK" && isNoVerifiedCandidates(recs.decision)) {
+    // Штатное состояние с именем, а не дефект и не пустота по ошибке.
+    // Ни строчки в журнал: шум здесь обесценил бы детектор расхождения,
+    // стоящий рядом.
+    picksOutcome = "NO_VERIFIED_CANDIDATES";
   } else if (recs.state === "OK") {
     const known = new Set(servicesRes.services.map((s) => s.id));
     picks = recs.decision.ordered
@@ -322,6 +381,7 @@ export async function getCatalogBrowse(): Promise<CatalogBrowseData> {
     services: servicesRes.services,
     masters: mastersRes.masters,
     picks,
+    picksOutcome,
     emptyReason: servicesRes.empty_reason ?? null,
   };
 }

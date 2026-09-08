@@ -224,6 +224,19 @@ export const fetchMaster = (id: string): Promise<{ master: MasterDetail }> =>
 export const SUPPORTED_RESOLVER_SPEC_MAJOR = 1;
 
 /**
+ * §10.3 — код решения В ЦЕЛОМ (не про кандидата), которым источник
+ * говорит: видимых услуг больше нуля, пригодных к рекомендации — ноль.
+ *
+ * Решение владельца §76 дало этому состоянию имя —
+ * `NO_VERIFIED_CANDIDATES` — и статус ШТАТНОГО результата, а не ошибки:
+ * `VERIFIED` выдаётся только после подтверждения, 206 существующих
+ * связей становятся `REVIEW_REQUIRED`, и ноль `VERIFIED` не разрешает
+ * fallback. Пустая полка перестаёт быть дефектом и становится
+ * состоянием с именем.
+ */
+export const NOT_RECOMMENDABLE_CODE = "ELIG_EXCLUDED_NOT_RECOMMENDABLE";
+
+/**
  * §4.3 — что именно рекомендовано. `kind` нормативен: без него
  * поверхность не знает, услуга это или мастер, и «молча подставить
  * другое» становится делом одной строки.
@@ -449,6 +462,29 @@ function candidateViolation(item: unknown, index: number): string | null {
       `получено ${describeShape(codes)}`
     );
   }
+  // Код исключения внутри `ordered[]` — нарушение, а не странность.
+  // Исключения фиксируются только на S0/S1 и живут в `excluded[]`
+  // (§4.4); в упорядоченном множестве им места нет, а `REVIEW_REQUIRED`
+  // и `UNMAPPED` там запрещены прямо (§10.2 и решение владельца §76:
+  // «клиенту нельзя сообщать, что такая услуга или мастер подходит»).
+  const excluding = (codes as string[]).find((c) => EXCLUSION_CODE_RE.test(c));
+  if (excluding !== undefined) {
+    return (
+      `ordered[${index}].reason_codes: код исключения ${excluding} в ` +
+      "упорядоченном множестве; его место в excluded[] (§4.4, §10.2)"
+    );
+  }
+  // `mapping_status` контракт у кандидата не объявляет, но решение
+  // владельца §76 однозначно: рекомендуется только `VERIFIED`. Если
+  // источник это поле всё же прислал — оно обязано быть `VERIFIED`.
+  // Молча отрисовать непроверенную связь нельзя.
+  const mapping = item.mapping_status;
+  if (mapping !== undefined && mapping !== "VERIFIED") {
+    return (
+      `ordered[${index}].mapping_status: рекомендуется только VERIFIED, ` +
+      `получено ${describeShape(mapping)} (§10.1, решение владельца §76)`
+    );
+  }
   if (item.evidence !== undefined && !Array.isArray(item.evidence)) {
     return (
       `ordered[${index}].evidence: ожидался список, получено ` +
@@ -457,6 +493,15 @@ function candidateViolation(item: unknown, index: number): string | null {
   }
   return null;
 }
+
+/**
+ * Семейства кодов исключения §7.2 — `ELIG_EXCLUDED_*`, `SCOPE_EXCLUDED_*`
+ * и `SCOPE_GEO_UNKNOWN_EXCLUDED`. Проверяется формой имени, а не
+ * перечислением: реестр версионируется, и новый код исключения обязан
+ * ловиться сторожем в день своего появления, а не в день, когда мы про
+ * него узнаем.
+ */
+const EXCLUSION_CODE_RE = /^(ELIG_EXCLUDED_|SCOPE_EXCLUDED_)|_EXCLUDED$/;
 
 /**
  * Поля, наличие которых означает, что источник снова собрал фразу за

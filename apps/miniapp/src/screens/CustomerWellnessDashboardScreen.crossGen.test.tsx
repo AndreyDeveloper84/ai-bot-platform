@@ -133,7 +133,12 @@ beforeEach(() => {
   vi.unstubAllEnvs();
   // Без `?stub=` — идём через проводной чтение, как в DRF-1476 кейсах.
   window.history.replaceState({}, "", "/customer/main");
-  mockedBrowse.mockResolvedValue({ services: [], masters: [], picks: [] });
+  mockedBrowse.mockResolvedValue({
+    services: [],
+    masters: [],
+    picks: [],
+    picksOutcome: "OK",
+  });
 });
 
 describe("Главная → перенос записи ведёт в живое поколение", () => {
@@ -168,6 +173,7 @@ describe("Главная → карточка подбора ведёт в жи�
           reasons: ["Подходит под твою цель"],
         },
       ],
+      picksOutcome: "OK",
     });
     serve({ this_week_booking_count: 0 });
     renderScreen();

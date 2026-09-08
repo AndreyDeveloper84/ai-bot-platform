@@ -124,6 +124,7 @@ describe("CustomerWellnessDashboardScreen — the home surface", () => {
       services: [],
       masters: [],
       picks: [],
+      picksOutcome: "OK",
     });
     useDevStubData();
     forbidNetwork();
@@ -219,6 +220,7 @@ describe("CustomerWellnessDashboardScreen — the home surface", () => {
           reasons: ["Есть свободное время в нужном окне"],
         },
       ],
+      picksOutcome: "OK",
     });
     await renderScreen(false);
     expect(
@@ -235,6 +237,7 @@ describe("CustomerWellnessDashboardScreen — the home surface", () => {
       services: [PEDIKYUR],
       masters: [],
       picks: [],
+      picksOutcome: "OK",
     });
     await renderScreen(false);
     // Dashboard itself still renders.
@@ -288,7 +291,12 @@ describe("CustomerWellnessDashboardScreen — goal truthfulness (DRF-1476)", () 
   beforeEach(() => {
     vi.restoreAllMocks();
     vi.unstubAllEnvs();
-    mockedBrowse.mockResolvedValue({ services: [], masters: [], picks: [] });
+    mockedBrowse.mockResolvedValue({
+    services: [],
+    masters: [],
+    picks: [],
+    picksOutcome: "OK",
+  });
     // No `?stub=` — go through the wired read.
     window.history.replaceState({}, "", "/customer/main");
   });
@@ -445,7 +453,12 @@ describe("CustomerWellnessDashboardScreen — weekly rollup (DRF-1476)", () => {
   beforeEach(() => {
     vi.restoreAllMocks();
     vi.unstubAllEnvs();
-    mockedBrowse.mockResolvedValue({ services: [], masters: [], picks: [] });
+    mockedBrowse.mockResolvedValue({
+    services: [],
+    masters: [],
+    picks: [],
+    picksOutcome: "OK",
+  });
     window.history.replaceState({}, "", "/customer/main");
   });
 
@@ -529,7 +542,12 @@ describe("CustomerWellnessDashboardScreen — degraded reads (DRF-1546)", () => 
   beforeEach(() => {
     vi.restoreAllMocks();
     vi.unstubAllEnvs();
-    mockedBrowse.mockResolvedValue({ services: [], masters: [], picks: [] });
+    mockedBrowse.mockResolvedValue({
+    services: [],
+    masters: [],
+    picks: [],
+    picksOutcome: "OK",
+  });
     window.history.replaceState({}, "", "/customer/main");
   });
 
@@ -692,7 +710,12 @@ describe("CustomerWellnessDashboardScreen — норма воды не выду�
   beforeEach(() => {
     vi.restoreAllMocks();
     vi.unstubAllEnvs();
-    mockedBrowse.mockResolvedValue({ services: [], masters: [], picks: [] });
+    mockedBrowse.mockResolvedValue({
+    services: [],
+    masters: [],
+    picks: [],
+    picksOutcome: "OK",
+  });
     window.history.replaceState({}, "", "/customer/main");
   });
 
@@ -755,7 +778,12 @@ describe("CustomerWellnessDashboardScreen — цель калорий не вы�
   beforeEach(() => {
     vi.restoreAllMocks();
     vi.unstubAllEnvs();
-    mockedBrowse.mockResolvedValue({ services: [], masters: [], picks: [] });
+    mockedBrowse.mockResolvedValue({
+    services: [],
+    masters: [],
+    picks: [],
+    picksOutcome: "OK",
+  });
     window.history.replaceState({}, "", "/customer/main");
   });
 

@@ -128,7 +128,12 @@ beforeEach(() => {
       ordered: [],
     },
   });
-  mockedBrowse.mockResolvedValue({ services: [], masters: [], picks: [] });
+  mockedBrowse.mockResolvedValue({
+    services: [],
+    masters: [],
+    picks: [],
+    picksOutcome: "OK",
+  });
   mockedToday.mockResolvedValue({
     calories_eaten: 1240,
     calories_target: 2100,

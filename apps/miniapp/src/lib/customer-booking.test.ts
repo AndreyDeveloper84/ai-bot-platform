@@ -603,3 +603,116 @@ describe("decisionContractViolation", () => {
     expect(consoleErrorSpy).toHaveBeenCalledTimes(1);
   });
 });
+
+// --- §76: четыре исхода, и свести любые два нельзя ------------------------
+//
+// Решение владельца 08.09.2026: `VERIFIED` выдаётся только после
+// подтверждения, 206 существующих связей становятся `REVIEW_REQUIRED`,
+// и ноль `VERIFIED` НЕ разрешает fallback. Когда пригодных к
+// рекомендации кандидатов нет, источник отвечает ШТАТНЫМ результатом,
+// а не ошибкой, и человеку показывается неперсонализированное
+// состояние — каталог и запись по прямому выбору, без слова «подходит».
+//
+// Форма этого состояния на проводе описана контрактом §10.3: пустой
+// `ordered[]` ПЛЮС код решения `ELIG_EXCLUDED_NOT_RECOMMENDABLE`.
+
+describe("§76 · NO_VERIFIED_CANDIDATES — штатное состояние с именем", () => {
+  function mirrorReady(): void {
+    mockedFetchServices.mockResolvedValue({
+      services: [service({ id: "svc-1", name: "Маникюр" })],
+    });
+    mockedFetchMasters.mockResolvedValue({ masters: [MASTER] });
+  }
+
+  it("узнаётся по коду решения и НЕ выдаётся за ошибку", async () => {
+    mirrorReady();
+    mockedFetchRecommendations.mockResolvedValue(
+      decision([], { reason_codes: ["ELIG_EXCLUDED_NOT_RECOMMENDABLE"] }),
+    );
+    const data = await getCatalogBrowse();
+
+    expect(data.picksOutcome).toBe("NO_VERIFIED_CANDIDATES");
+    expect(data.picks).toEqual([]);
+    // Каталог и мастера на месте — это и есть предусмотренное
+    // неперсонализированное состояние, а не пустой экран.
+    expect(data.services).toHaveLength(1);
+    expect(data.masters).toHaveLength(1);
+    // Штатное состояние молчит: шум здесь обесценил бы детектор
+    // расхождения, стоящий в соседней ветке.
+    expect(consoleErrorSpy).not.toHaveBeenCalled();
+  });
+
+  it("пустой ordered БЕЗ кода — это другое состояние, и оно не подменяется", async () => {
+    mirrorReady();
+    mockedFetchRecommendations.mockResolvedValue(decision([]));
+    const data = await getCatalogBrowse();
+    // «Никто не подошёл» ≠ «нечего рекомендовать, потому что не
+    // проверено». Контракт различает их кодом — различаем и мы.
+    expect(data.picksOutcome).toBe("OK");
+    expect(data.picks).toEqual([]);
+  });
+
+  it("четыре исхода различимы попарно — ни один не схлопнут в другой", async () => {
+    const seen: string[] = [];
+
+    mirrorReady();
+    mockedFetchRecommendations.mockResolvedValue(
+      decision([candidate("svc-1", { reason_codes: ["MATCH_SERVICE_EXACT"] })]),
+    );
+    seen.push((await getCatalogBrowse()).picksOutcome);
+
+    mockedFetchRecommendations.mockRejectedValue(new Error("[502] ayla_unavailable"));
+    seen.push((await getCatalogBrowse()).picksOutcome);
+
+    mockedFetchRecommendations.mockResolvedValue({ recommendations: [] });
+    seen.push((await getCatalogBrowse()).picksOutcome);
+
+    mockedFetchRecommendations.mockResolvedValue(
+      decision([], { reason_codes: ["ELIG_EXCLUDED_NOT_RECOMMENDABLE"] }),
+    );
+    seen.push((await getCatalogBrowse()).picksOutcome);
+
+    expect(seen).toEqual([
+      "OK",
+      "UNAVAILABLE",
+      "CONTRACT_VIOLATION",
+      "NO_VERIFIED_CANDIDATES",
+    ]);
+    expect(new Set(seen).size).toBe(4);
+  });
+
+  it("REVIEW_REQUIRED, доехавший до клиента, — нарушение, а не повод отрисовать", () => {
+    // «Клиенту нельзя сообщать, что такая услуга или мастер подходит».
+    for (const status of ["REVIEW_REQUIRED", "UNMAPPED", "UNKNOWN", null]) {
+      const violation = decisionContractViolation(
+        decision([candidate("svc-1", { mapping_status: status })]),
+      );
+      expect(violation, `mapping_status=${String(status)}`).toContain("mapping_status");
+    }
+    // А `VERIFIED` проходит — иначе сторож запрещал бы всё подряд.
+    expect(
+      decisionContractViolation(decision([candidate("svc-1", { mapping_status: "VERIFIED" })])),
+    ).toBeNull();
+  });
+
+  it("код исключения внутри ordered[] — нарушение (§4.4, §10.2)", () => {
+    const cases = [
+      "ELIG_EXCLUDED_NOT_RECOMMENDABLE",
+      "ELIG_EXCLUDED_SAFETY",
+      "SCOPE_EXCLUDED_OUT_OF_CITY",
+      "SCOPE_GEO_UNKNOWN_EXCLUDED",
+    ];
+    for (const code of cases) {
+      const violation = decisionContractViolation(
+        decision([candidate("svc-1", { reason_codes: ["MATCH_SERVICE_EXACT", code] })]),
+      );
+      expect(violation, code).toContain("код исключения");
+    }
+    // Тот же код НА УРОВНЕ РЕШЕНИЯ законен — это и есть §10.3.
+    expect(
+      decisionContractViolation(
+        decision([], { reason_codes: ["ELIG_EXCLUDED_NOT_RECOMMENDABLE"] }),
+      ),
+    ).toBeNull();
+  });
+});
