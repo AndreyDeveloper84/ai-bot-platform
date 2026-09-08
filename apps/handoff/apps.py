@@ -4,6 +4,7 @@ from django.apps import AppConfig
 class HandoffConfig(AppConfig):
     default_auto_field = "django.db.models.BigAutoField"
     name = "apps.handoff"
+    verbose_name = "Передача оператору"
 
     def ready(self) -> None:
         # DRF-1488 — registers handoff.E001 (no addressee configured).

@@ -78,6 +78,8 @@ from apps.consent.models import ConsentRecord
 from apps.consent.services import record_global_consent, withdraw
 
 if TYPE_CHECKING:
+    from datetime import datetime
+
     from apps.identity.models import BotUser
     from apps.identity.services.privacy import DeleteCascadeResult
 
@@ -288,6 +290,79 @@ def set_proactive_hints(bot_user: "BotUser", *, enabled: bool) -> None:
         enabled,
         len(shells),
     )
+
+
+def set_food_scanner_consent(bot_user: "BotUser", *, granted: bool) -> "datetime | None":
+    """Записать или снять согласие на сканирование еды. Идемпотентно.
+
+    ### Зачем эта функция появилась (DRF-1564)
+
+    Колонка ``BotUser.food_scanner_consent_at`` существует с миграции
+    ``0013_botuser_food_scanner_consent_at``, и её читает гейт навыка
+    (``apps/skills/food_scanner/skill.py:463`` — требует настоящий
+    ``datetime``). **Писателей у неё не было ни одного.**
+
+    Согласие при этом человек давал: мини-приложение складывало отметку
+    в ``localStorage`` браузера. Получалась петля, из которой человек не
+    выходит своими силами: экран согласие принимает и пропускает дальше,
+    а бот на то же самое согласие отвечает «открой Mini App и дай
+    согласие» — и так каждый раз, на любом устройстве.
+
+    Класс дефекта: миграция есть, гейт есть, комментарии говорят, что
+    согласие работает, — и всё это правда по отдельности, а пути между
+    ними нет.
+
+    ### По всем оболочкам, а не по одной строке
+
+    Тот же довод, что у :func:`set_proactive_hints`: чат и
+    мини-приложение — разные строки ``BotUser``, и согласие, записанное
+    на одной, не открыло бы гейт, читающий другую. Человек дал согласие
+    один раз и вправе не давать его снова, сменив поверхность.
+
+    ### Отзыв
+
+    ``granted=False`` ставит ``NULL`` — то самое состояние, которое гейт
+    читает как «согласия нет». Отзыв обязан быть доступен тем же
+    способом, что и выдача: право на отзыв, недостижимое из приложения,
+    — предмет DRF-1520, и заводить его заново одной строкой ниже было бы
+    странно.
+
+    Returns:
+      Момент выдачи (``datetime``) либо ``None`` после отзыва — ровно то,
+      что теперь лежит в колонке.
+    """
+    from django.utils import timezone as dj_timezone
+
+    from apps.identity.models import BotUser as BotUserModel
+
+    shells = _person_shells(bot_user)
+    consent_at = dj_timezone.now() if granted else None
+    with transaction.atomic():
+        BotUserModel.all_tenants.filter(id__in=[s.id for s in shells]).update(
+            food_scanner_consent_at=consent_at
+        )
+    # Экземпляр вызывающего должен совпасть со строкой — ответ не имеет
+    # права показать значение, которого в базе уже нет.
+    bot_user.food_scanner_consent_at = consent_at
+
+    write_audit(
+        "consent.food_scanner_changed",
+        target="BotUser",
+        target_id=bot_user.id,
+        actor_id=bot_user.id,
+        payload={
+            "actor": "customer",
+            "granted": granted,
+            "shells": len(shells),
+        },
+    )
+    logger.info(
+        "consent.customer.food_scanner bot_user=%s granted=%s shells=%d",
+        bot_user.id,
+        granted,
+        len(shells),
+    )
+    return consent_at
 
 
 def _mirror_notify_promo(shells: list["BotUser"], *, granted: bool) -> None:

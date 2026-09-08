@@ -2047,6 +2047,73 @@ def personal_data_delete(request: HttpRequest) -> HttpResponse:
 # ---------------------------------------------------------------------------
 
 
+def _food_scanner_consent_payload(bot_user: BotUser) -> dict:
+    """Состояние согласия на сканирование еды для экрана.
+
+    Отдаётся МОМЕНТ выдачи, а не булев: гейт навыка
+    (``apps/skills/food_scanner/skill.py:463``) читает ту же колонку и
+    требует настоящий ``datetime``, поэтому экран и гейт смотрят на одно
+    и то же значение, а не на два производных от него.
+    """
+    consent_at = bot_user.food_scanner_consent_at
+    return {
+        "granted": consent_at is not None,
+        "granted_at": consent_at.isoformat() if consent_at else None,
+    }
+
+
+@csrf_exempt
+@require_http_methods(["GET", "POST", "DELETE"])
+@require_init_data
+@with_request_tenant
+def food_scanner_consent(request: HttpRequest) -> HttpResponse:
+    """Согласие на сканирование еды — чтение, выдача, отзыв (DRF-1564).
+
+    ``GET``    → состояние (см. :func:`_food_scanner_consent_payload`).
+    ``POST``   → выдать. Тело не требуется. Идемпотентно.
+    ``DELETE`` → отозвать: колонка становится ``NULL``, и гейт навыка
+                 читает это как «согласия нет». Идемпотентно.
+
+    ### Почему ручка появилась только сейчас
+
+    Колонка ``BotUser.food_scanner_consent_at`` живёт с миграции
+    ``0013``; гейт навыка её читает. **Писателей у неё не было.**
+    Согласие человека оседало в ``localStorage`` мини-приложения —
+    то есть экран его принимал и пропускал дальше, а бот на то же самое
+    согласие отвечал «открой Mini App и дай согласие». Петля, из которой
+    человек не выходит своими силами, и на новом устройстве всё
+    начиналось заново.
+
+    ### Почему DELETE здесь, а не «потом»
+
+    Согласие — юридический факт, и отозвать его человек должен уметь тем
+    же способом, каким давал. Ручка выдачи без ручки отзыва завела бы
+    ровно ту строку, которую закрывала DRF-1520 («право на отзыв
+    недостижимо из приложения»), и завела бы её в тот же день.
+
+    Тела у ``POST`` нет намеренно: в отличие от health-consent, у
+    сканера нет версионированного текста раскрытия, который сверяется с
+    серверным. Появится — появится и ``document_version``; выдумывать
+    версию, которой нет, чтобы «было как у соседа», значит поставить
+    согласие на несуществующий документ.
+    """
+    from apps.consent.customer import set_food_scanner_consent
+
+    bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
+
+    if request.method == "GET":
+        return JsonResponse(_food_scanner_consent_payload(bot_user))
+
+    granted = request.method == "POST"
+    set_food_scanner_consent(bot_user, granted=granted)
+    logger.info(
+        "miniapp_api.food_scanner_consent.%s bot_user=%s",
+        "granted" if granted else "withdrawn",
+        bot_user.id,
+    )
+    return JsonResponse(_food_scanner_consent_payload(bot_user))
+
+
 def _health_consent_payload(bot_user: BotUser) -> dict:
     """Состояние согласия для экрана. Дата — из действующей строки, не из часов."""
     from apps.consent.health import (
@@ -2356,6 +2423,17 @@ def _profile_to_dict(snap) -> dict:
         "timezone": snap.timezone,
         "joined_at": snap.joined_at,
         "preferences": snap.preferences,
+        # DRF-1564 — согласие на сканирование еды приезжает вместе с
+        # профилем, а не отдельным вызовом ради одного значения. Это
+        # ЕДИНСТВЕННЫЙ источник правды для экранов сканера: `localStorage`
+        # авторитетом быть перестал — браузер на новом устройстве сказал
+        # бы «согласия нет» там, где база говорит «есть», и разошлись бы
+        # они молча.
+        #
+        # `null` означает «согласия нет» и читается экраном как отказ
+        # (fail-closed): отсутствие доезжает отсутствием, а не
+        # подставленным значением.
+        "food_scanner_consent_at": snap.food_scanner_consent_at,
         "favorites": {
             "master_name": snap.favorite_master_name,
             "service_name": snap.favorite_service_name,
