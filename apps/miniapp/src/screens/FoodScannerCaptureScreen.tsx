@@ -31,11 +31,13 @@ import {
   MEAL_TYPE_ICON,
   MEAL_TYPE_LABEL,
   defaultMealTypeForHour,
-  readConsentAt,
-  saveConsentAccepted,
+  fetchConsentAt,
+  grantConsent,
   stripImageMetadata,
   type MealType,
 } from "../lib/food-scanner";
+import { Skeleton } from "../components/Skeleton";
+import { StateError } from "../components/StateError";
 import { useScreenBack } from "../hooks/useScreenBack";
 import { backTo } from "../lib/screen-back";
 
@@ -60,9 +62,33 @@ export function FoodScannerCaptureScreen() {
   const onBack = useScreenBack(backTo("/customer/main"));
   const location = useLocation();
   const incoming = (location.state ?? {}) as RouterIn;
-  const [consentAt, setConsentAt] = useState<string | null>(() =>
-    readConsentAt(),
+  // Согласие спрашивается у СЕРВЕРА, а не у браузера (DRF-1564).
+  //
+  // `null` — «согласия нет», и экран показывает гейт. Пока ответ не
+  // пришёл, состояние `undefined`: экран НЕ показывает ни гейт, ни
+  // камеру. Показать гейт заранее значило бы переспросить согласие у
+  // того, кто его уже дал, — а согласие переспрашивают только тогда,
+  // когда его действительно нет.
+  const [consentAt, setConsentAt] = useState<string | null | undefined>(
+    undefined,
   );
+  const [consentErr, setConsentErr] = useState<unknown>(null);
+
+  const loadConsent = useCallback(async () => {
+    setConsentErr(null);
+    try {
+      setConsentAt(await fetchConsentAt());
+    } catch (e) {
+      // Не подставляем `null`: «не смогли спросить» — не «согласия
+      // нет». Первое лечится повтором, второе — гейтом, и путать их
+      // здесь значит спрашивать согласие на пустом месте.
+      setConsentErr(e);
+    }
+  }, []);
+
+  useEffect(() => {
+    loadConsent();
+  }, [loadConsent]);
   const [mealType, setMealType] = useState<MealType>(() =>
     defaultMealTypeForHour(new Date().getHours()),
   );
@@ -89,8 +115,17 @@ export function FoodScannerCaptureScreen() {
     };
   }, []);
 
-  const handleAcceptConsent = useCallback(() => {
-    const now = saveConsentAccepted();
+  const handleAcceptConsent = useCallback(async () => {
+    // Момент выдачи берём из ответа сервера, а не из часов браузера:
+    // гейт навыка читает ту же колонку, и два разных времени у одного
+    // согласия — это два разных согласия.
+    let now: string | null;
+    try {
+      now = await grantConsent();
+    } catch (e) {
+      setConsentErr(e);
+      return;
+    }
     setConsentAt(now);
     // If the customer arrived via deep-link to a downstream surface
     // (e.g. /manual) and was bounced here for consent, return them
@@ -156,6 +191,25 @@ export function FoodScannerCaptureScreen() {
   );
 
   // ── render branches ────────────────────────────────────────────────
+  // Три состояния согласия, и свести любые два нельзя:
+  //   `undefined` — ещё не спросили: ждём, гейт не показываем;
+  //   ошибка чтения — «не смогли спросить»: говорим об этом и даём
+  //                   повтор, но согласие НЕ переспрашиваем;
+  //   `null`      — согласия нет: гейт.
+  if (consentErr !== null) {
+    return (
+      <div className="food-scanner-screen">
+        <StateError err={consentErr} onRetry={loadConsent} />
+      </div>
+    );
+  }
+  if (consentAt === undefined) {
+    return (
+      <div className="food-scanner-screen">
+        <Skeleton width="70%" height="1.1em" />
+      </div>
+    );
+  }
   if (consentAt === null) {
     return (
       <ConsentGate
