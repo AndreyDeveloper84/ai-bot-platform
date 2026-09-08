@@ -14,6 +14,8 @@
 
 from __future__ import annotations
 
+from unittest import mock
+
 import pytest
 
 from apps.skills.menu import marketplace
@@ -627,6 +629,43 @@ class TestNutritionGates:
         payloads = _payloads(marketplace_menu_reply(bot_user=bot_user)[1]["buttons"])
         assert DIARY_TAP_TEXT in payloads
         assert not [p for p in payloads if p.startswith(CALLBACK_HEALTH_NEED_PREFIX)]
+
+    def test_two_nutrition_items_are_drawn_once_each(
+        self, bot_user, consent, miniapp, nutrition_on
+    ):
+        """Подстановка пищевых кнопок — ОДИН раз, а не на каждом пункте.
+
+        Сегодня пищевой пункт один, и цикл верен при любой позиции
+        подстановки. Модуль, однако, обещает возвращение «Сканера еды»
+        прямым текстом («сканер вернётся экранным, и правило для него уже
+        готово»), а ``_nutrition_buttons`` отдаёт кнопки на ВЕСЬ
+        ``NUTRITION_ITEMS`` разом. Подставь их на каждом совпадении — и в
+        день возвращения сканера каждая пищевая кнопка нарисуется дважды;
+        поймал бы это не тест, а человек в MAX.
+
+        Проверяется на ДВУХ пунктах, потому что на одном закладка
+        невидима, — и на настоящем построителе, а не на копии цикла.
+        """
+        consent(True)
+        scanner = MenuItem(
+            label="Сканер еды",
+            callback="open_food_scan",
+            line="",
+            where="miniapp",
+            warning="Для снимка тарелки открою сканер.",
+            surface="food_scan",
+        )
+        two = (*NUTRITION_ITEMS, scanner)
+        with mock.patch.object(marketplace, "NUTRITION_ITEMS", two):
+            payloads = _payloads(marketplace_menu_reply(bot_user=bot_user)[1]["buttons"])
+
+        # Стража: оба пункта нарисованы — иначе «по одному разу» зеленело
+        # бы на пустом наборе.
+        assert DIARY_TAP_TEXT in payloads, payloads
+        assert "cb:open:food_scan" in payloads, payloads
+        # И только теперь — ровно по одному каждого.
+        assert payloads.count(DIARY_TAP_TEXT) == 1, payloads
+        assert payloads.count("cb:open:food_scan") == 1, payloads
 
     def test_the_diary_phrase_is_one_the_diary_itself_claims(self):
         """Кнопка не может вести туда, куда фраза не доезжает."""
