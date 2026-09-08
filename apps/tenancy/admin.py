@@ -30,6 +30,7 @@ from django.template.response import TemplateResponse
 from django.urls import path
 from django.utils.html import format_html, format_html_join
 
+from apps.adminconsole.theme import AylaAdminMedia
 from apps.tenancy.models import Tenant
 from apps.tenancy.onboarding import (
     REASON_LABELS,
@@ -126,12 +127,13 @@ class SalonConnectForm(forms.Form):
 
 
 @admin.register(Tenant)
-class TenantAdmin(admin.ModelAdmin):
+class TenantAdmin(AylaAdminMedia, admin.ModelAdmin):
     form = TenantAdminForm
     change_list_template = "admin/tenancy/tenant/change_list.html"
     list_display = (
         "name",
         "slug",
+        "city",
         "is_active",
         "is_system",
         "shadow_mode",
@@ -141,8 +143,14 @@ class TenantAdmin(admin.ModelAdmin):
         "created_at",
     )
     list_filter = ("is_active", "is_system", "shadow_mode")
+    # Оставлено как было. Единственное правимое прямо из списка поле —
+    # переключатель «бот не пишет клиенту». Подпись у него теперь
+    # называет последствие, а не термин: «Shadow mode» не говорил
+    # оператору ничего, «Теневой режим: бот не пишет клиенту» говорит.
     list_editable = ("shadow_mode",)
     search_fields = ("name", "slug")
+    search_help_text = "Ищет по названию салона и его коду."
+    empty_value_display = "нет данных"
     readonly_fields = (
         "id",
         "is_system",
@@ -156,7 +164,7 @@ class TenantAdmin(admin.ModelAdmin):
     )
     fieldsets = (
         (
-            None,
+            "Салон",
             {
                 "fields": ("id", "slug", "name", "city", "address", "is_active", "is_system"),
                 "description": (
@@ -169,7 +177,7 @@ class TenantAdmin(admin.ModelAdmin):
             },
         ),
         (
-            "Видимость для клиентов (DRF-1525)",
+            "Виден ли салон клиентам",
             {
                 "fields": (
                     "salon_visibility_state",
@@ -184,7 +192,7 @@ class TenantAdmin(admin.ModelAdmin):
             },
         ),
         (
-            "Адрес менеджера в MAX (DRF-1559)",
+            "Куда бот пишет менеджеру салона",
             {
                 "fields": ("manager_user_id", "manager_chat_id"),
                 "description": (
@@ -204,18 +212,20 @@ class TenantAdmin(admin.ModelAdmin):
             },
         ),
         (
-            "Sprint 8 shadow-mode",
+            "Теневой режим",
             {
                 "fields": ("shadow_mode",),
                 "description": (
-                    "When checked, the orchestrator writes shadow rows but "
-                    "does NOT send outbound messages to the user. See "
-                    "docs/runbooks/shadow-mode-launch.md before flipping in prod."
+                    "Включено — оркестратор пишет теневые строки, но НЕ "
+                    "отправляет клиенту ни одного сообщения. Это "
+                    "переключатель поведения бота, а не оформления: перед "
+                    "включением на бою читайте "
+                    "docs/runbooks/shadow-mode-launch.md."
                 ),
             },
         ),
         (
-            "Phase 1 — Telegram channel",
+            "Канал Telegram",
             {
                 "fields": (
                     "telegram_bot_token_state",
@@ -224,10 +234,10 @@ class TenantAdmin(admin.ModelAdmin):
                     "telegram_webhook_secret",
                 ),
                 "description": (
-                    "Per-tenant Telegram bot credentials. Token is from "
-                    "@BotFather; webhook_secret is operator-generated via "
-                    "secrets.token_urlsafe(32) and registered with "
-                    "Telegram's setWebhook. "
+                    "Ключи телеграм-бота этого салона. Токен выдаёт "
+                    "@BotFather; вебхук-секрет оператор генерирует сам "
+                    "(<code>secrets.token_urlsafe(32)</code>) и "
+                    "регистрирует в setWebhook. "
                     "DRF-1495: ни одно из двух значений в эту форму не "
                     "отдаётся. Поля ввода пустые всегда; пустая отправка "
                     "означает «оставить как есть». Что настроено сейчас — "
@@ -237,29 +247,30 @@ class TenantAdmin(admin.ModelAdmin):
             },
         ),
         (
-            "Cost Controls",
+            "Дневные лимиты расходов на модель",
             {
                 "fields": ("daily_token_cap", "daily_cost_cap_usd"),
                 "description": (
-                    "Per-tenant daily LLM budget (Phase 1 / PI9 / DRF-860). "
-                    "Either cap can trip independently and the bot serves a "
-                    "static 'лимит исчерпан' fallback once exhausted; reset "
-                    "at 00:00 UTC. The 80% threshold also pings the salon "
-                    "manager's MAX address once per day — см. раздел «Адрес "
-                    "менеджера в MAX»."
+                    "Дневной потолок расходов салона на модель. Любой из "
+                    "двух лимитов срабатывает сам по себе: как только он "
+                    "исчерпан, бот отвечает клиенту заглушкой «лимит "
+                    "исчерпан». Счётчики обнуляются в 00:00 UTC. На 80 % "
+                    "бот один раз в сутки пишет менеджеру салона — адрес "
+                    "берётся из раздела «Куда бот пишет менеджеру салона»."
                 ),
             },
         ),
         (
-            "Системное",
+            "Служебное",
             {
                 "fields": ("created_at", "updated_at"),
                 "classes": ("collapse",),
+                "description": "Отметки времени. Проставляются сами, править нечего.",
             },
         ),
     )
 
-    @admin.display(description="Telegram token (last 4)")
+    @admin.display(description="Токен Telegram (последние 4)")
     def telegram_bot_token_masked(self, obj: Tenant) -> str:
         """Admin column: never expose the full Telegram bot token.
 
