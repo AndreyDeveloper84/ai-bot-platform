@@ -40,6 +40,30 @@ beat cadence so an overrun fires :class:`SoftTimeLimitExceeded`
 in time for the next tick to start fresh. The service's Redis lock
 TTL still guards against the worker silently hanging beyond that
 window.
+
+### Fan-out order (DRF-1595)
+
+The order is ``last_catalog_sync_ok_at`` ascending, nulls first, then
+``id``. Until DRF-1595 there was no ``order_by`` at all: the fan-out walked
+``Tenant.objects.all()`` and took whatever order Postgres felt like
+returning. That order is *stable*, which is exactly what made it dangerous —
+when Ayla's rate limiter starts refusing partway through the walk, the same
+salons are at the tail every single cycle. On the pilot that was
+``formula-tela`` (the head salon) and ``fevralskiy-svet``: eight salons
+synced minutes ago, those two had not synced in three days, and the bot
+spent those three days telling clients that services the salon sells do not
+exist. Ordering by staleness makes the loser of one cycle the first served
+in the next; the ``id`` tie-break keeps that deterministic instead of
+handing the decision back to the database whenever two clocks match.
+
+### Wait budget (DRF-1595)
+
+One :class:`~apps.catalog.services.throttle.ThrottleWaitBudget` per run,
+shared by every tenant, capping the wall-clock this task may spend asleep
+waiting out Ayla's ``429``s. Spent only on 429s — a healthy cycle never
+touches it. When it runs out the fan-out stops issuing work and books the
+remaining salons as *skipped*, which is deliberately not the same counter,
+and not the same log event, as *failed*.
 """
 
 from __future__ import annotations
@@ -47,8 +71,10 @@ from __future__ import annotations
 import logging
 
 from celery import shared_task  # type: ignore[import-untyped]
+from django.db.models import F
 
 from apps.catalog.services.sync import CatalogSyncService, SyncResult
+from apps.catalog.services.throttle import ThrottleWaitBudget
 from apps.catalog.staleness import sync_ages
 from apps.identity.constants import GLOBAL_BOT_TENANT_SLUG
 from apps.observability.alerting import page
@@ -66,8 +92,9 @@ def sync_catalog_for_all_tenants() -> dict[str, int]:
     """Beat target — sync every active tenant's catalog mirror.
 
     Returns:
-      Counter dict ``{tenants_run, tenants_skipped, tenants_failed,
-      total_created, total_updated, total_skipped, total_removed}``
+      Counter dict ``{tenants_run, tenants_skipped,
+      tenants_skipped_throttled, tenants_failed, total_created,
+      total_updated, total_skipped, total_removed}``
       aggregated across the fan-out. The return value goes to the Celery
       result backend and nowhere else.
 
@@ -84,6 +111,11 @@ def sync_catalog_for_all_tenants() -> dict[str, int]:
     counters = {
         "tenants_run": 0,
         "tenants_skipped": 0,
+        # Subset of tenants_skipped: skipped because Ayla was rate-limiting us
+        # and this run had no wait budget left (DRF-1595). Broken out because
+        # "we stood down" and "it broke" are different facts and were, for
+        # three pilot days, the same number in the same log line.
+        "tenants_skipped_throttled": 0,
         "tenants_failed": 0,
         "total_created": 0,
         "total_updated": 0,
@@ -91,8 +123,10 @@ def sync_catalog_for_all_tenants() -> dict[str, int]:
         "total_removed": 0,
     }
 
-    service = CatalogSyncService()
-    for tenant in Tenant.objects.all().iterator():
+    budget = ThrottleWaitBudget.from_settings()
+    service = CatalogSyncService(wait_budget=budget)
+    stood_down: list[Tenant] = []
+    for tenant in tenants_in_sync_order().iterator():
         # Skip the global_bot sentinel (#1019): it owns tenant-less global
         # BotUsers + discovery, NOT a salon catalog — the Ayla fetch with
         # its UUID returns 400 every cycle (perpetual tenants_failed=1 +
@@ -100,7 +134,21 @@ def sync_catalog_for_all_tenants() -> dict[str, int]:
         # apps.identity.constants — the same single source of truth the
         # identity resolver uses, so the sentinel can't drift past the
         # exclusion. The row itself is NOT touched (it must stay alive).
+        #
+        # Checked BEFORE the budget gate below so the sentinel never lands in
+        # the stood-down list: it is not a salon and must not be reported as
+        # a salon we failed to serve.
         if tenant.slug == GLOBAL_BOT_TENANT_SLUG:
+            continue
+        if budget.exhausted:
+            # Stop issuing work rather than walking the rest and letting each
+            # remaining salon burn one more fast-failing 429 (DRF-1595).
+            # Continuing would deepen the hole we are climbing out of: every
+            # request into an exhausted quota pushes back the moment the
+            # limiter reopens, so the next tick would start in worse shape
+            # than this one. Rotation is what makes standing down safe — these
+            # salons are now the stalest, so the next cycle serves them first.
+            stood_down.append(tenant)
             continue
         try:
             result = service.run(tenant)
@@ -113,11 +161,28 @@ def sync_catalog_for_all_tenants() -> dict[str, int]:
             continue
         _accumulate(counters, result)
 
+    if stood_down:
+        counters["tenants_skipped"] += len(stood_down)
+        counters["tenants_skipped_throttled"] += len(stood_down)
+        logger.warning(
+            "catalog.sync.beat_throttle_budget_exhausted budget=%ss spent=%ss "
+            "stood_down=%d tenants=%s — Ayla rate-limited this run; these salons "
+            "were NOT attempted and are NOT failures. They sort first next tick.",
+            budget.total_seconds,
+            budget.spent_seconds,
+            len(stood_down),
+            ",".join(t.slug for t in stood_down),
+        )
+
     logger.info(
-        "catalog.sync.beat_completed run=%s skipped=%s failed=%s "
+        "catalog.sync.beat_completed run=%s skipped=%s skipped_throttled=%s failed=%s "
         "created=%s updated=%s skipped_rows=%s removed=%s",
         counters["tenants_run"],
         counters["tenants_skipped"],
+        # Separate field, not folded into `skipped`: an operator reading this
+        # line has to be able to tell "Ayla is limiting us" from "a beat
+        # raced itself on the lock" without opening the worker log.
+        counters["tenants_skipped_throttled"],
         counters["tenants_failed"],
         counters["total_created"],
         counters["total_updated"],
@@ -129,10 +194,35 @@ def sync_catalog_for_all_tenants() -> dict[str, int]:
     return counters
 
 
+def tenants_in_sync_order():
+    """Tenants ordered stalest-first — the fan-out's serving order.
+
+    ``last_catalog_sync_ok_at`` ascending with NULLs first: a tenant that has
+    never had a successful sync is the most behind there is, not the least,
+    so it must not sort to the end (which is what an unqualified ASC does on
+    Postgres, where NULLs are LAST by default).
+
+    ``id`` is the tie-break and it is load-bearing, not decoration. Ties are
+    ordinary — a fresh contour where several salons have never synced puts
+    every one of them at NULL — and without a second key the database picks
+    the order among them, which is precisely the failure DRF-1595 is about:
+    an order nobody chose, stable enough to punish the same salons forever.
+    ``id`` is the UUID primary key, so it is unique and the sort is total.
+
+    Public (no leading underscore) so the ordering can be asserted directly
+    in tests: the behaviour that matters here is the ORDER, and a test that
+    only checks the resulting sync calls cannot tell a deliberate tie-break
+    from a lucky one.
+    """
+    return Tenant.objects.order_by(F("last_catalog_sync_ok_at").asc(nulls_first=True), "id")
+
+
 def _accumulate(counters: dict[str, int], result: SyncResult) -> None:
     """Roll a per-tenant :class:`SyncResult` into the fan-out totals."""
     if result.skipped:
         counters["tenants_skipped"] += 1
+        if result.skip_reason == "throttled":
+            counters["tenants_skipped_throttled"] += 1
         return
     if not result.ran or result.error:
         counters["tenants_failed"] += 1
