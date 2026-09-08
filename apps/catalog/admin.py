@@ -3,8 +3,14 @@
 Catalog mirrors are derived state — the source of truth lives in mysite,
 the platform writes only through the catalog sync (C-track). Manual
 edits would silently rot on the next sync overwrite. Admin is view-only
-for forensics; controlled mutation (force resync) lands in C6 (DRF-576)
-as an admin action.
+for forensics; the single controlled mutation is the force-resync admin
+action (DRF-1581) on ``CatalogServiceAdmin``, which enqueues
+``apps.catalog.tasks.sync_catalog_for_tenant`` per selected tenant.
+
+(The paragraph above used to promise the button "lands in C6 (DRF-576)".
+DRF-576 was the read-only admin; the button itself had been specced in
+DRF-667, closed as its duplicate — and half the subject left with the
+dupe. DRF-1581 is the number that actually shipped it.)
 """
 
 from __future__ import annotations
@@ -25,6 +31,7 @@ from apps.catalog.models import (
 )
 from apps.catalog.provenance import MasterServiceSource, master_service_write
 from apps.catalog.services import verification
+from apps.catalog.tasks import sync_catalog_for_tenant
 
 
 class _MirrorAdminBase(admin.ModelAdmin):
@@ -49,6 +56,70 @@ class _MirrorAdminBase(admin.ModelAdmin):
 class CatalogServiceAdmin(_MirrorAdminBase):
     list_display = ("slug", "name", "tenant", "is_active", "is_popular", "synced_at")
     search_fields = ("slug", "name", "external_id")
+    actions = ("force_resync_selected_tenants",)
+
+    # DRF-1581, образец — DRF-1495 у зеркала KB: без ``permissions=``
+    # Django отдаёт действие всякому, кто открыл экран, включая роль
+    # «смотрящий». ``permissions=("change",)`` не годится:
+    # ``has_change_permission`` в базовом классе безусловно False, и
+    # действие умерло бы вместе с ролями. Отдельный предикат спрашивает
+    # право на модель: владелец и «правящий» кнопку получают,
+    # «смотрящий» — нет.
+    def has_resync_permission(self, request: HttpRequest) -> bool:
+        return request.user.has_perm("catalog.change_catalogservice")
+
+    @admin.action(
+        permissions=("resync",),
+        description="Пересинхронизировать каталог выбранных салонов",
+    )
+    def force_resync_selected_tenants(self, request: HttpRequest, queryset) -> None:  # type: ignore[no-untyped-def]
+        """Enqueue :func:`sync_catalog_for_tenant` per distinct tenant (DRF-1581).
+
+        Дедуп по тенанту, не по строкам: сколько бы услуг салона ни было
+        выбрано, задание одно — прогон пересинхронизирует все три зеркала
+        (услуги, мастера, связи) этого салона целиком.
+
+        Веера по всем салонам здесь нет нарочно: ставится ровно то, что
+        выбрал оператор. Анонимный лимит Ayla (~30/мин, замер окна
+        DRF-1595) веер по каждому тенанту разом не пережил бы.
+
+        Защита от двойного запуска — не в этом методе, а в сервисе:
+        Redis-замок ``CatalogSyncService`` отвечает повторному прогону
+        ``skipped``, поэтому двойное нажатие не запускает двух
+        синхронизаций одного салона.
+
+        Синхронно из админ-запроса не гоняем (причина расписана у K9,
+        ``apps/kb/admin.py``): фетч из Ayla по сети заблокировал бы
+        воркер админки на минуты. Оператор видит принятие в message,
+        завершение — по обновившейся колонке ``synced_at``.
+        """
+        tenants = sorted(
+            {
+                row.tenant.slug: str(row.tenant_id) for row in queryset.select_related("tenant")
+            }.items()
+        )
+        if not tenants:
+            self.message_user(
+                request,
+                "В выборке нет салонов — пересинхронизация не поставлена.",
+                level=messages.WARNING,
+            )
+            return
+
+        for _slug, tenant_id in tenants:
+            # ``.delay`` ставит задание и возвращается сразу; результат
+            # (AsyncResult) здесь не ждём — завершение видно по synced_at.
+            sync_catalog_for_tenant.delay(tenant_id)
+
+        slugs = ", ".join(slug for slug, _ in tenants)
+        self.message_user(
+            request,
+            f"Пересинхронизация поставлена для {len(tenants)} салон(а/ов): {slugs}. "
+            "Прогон стартует в течение минуты; завершение смотрите по колонке "
+            "synced_at — она обновится, когда синхронизация закончится. "
+            "Повторное нажатие, пока идёт прогон, пропускается замком.",
+            level=messages.SUCCESS,
+        )
 
 
 class MasterArchivedFilter(admin.SimpleListFilter):

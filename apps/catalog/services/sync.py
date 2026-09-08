@@ -2,14 +2,18 @@
 
 Pulls Ayla's canonical catalog and upserts the ``CatalogService`` mirror
 under a Redis advisory lock. Called by the Celery beat every 15 minutes
-(``apps.catalog.tasks.sync_catalog_for_all_tenants``) and, for a one-shot
-operator run, by ``manage.py sync_catalog``.
+(``apps.catalog.tasks.sync_catalog_for_all_tenants``), for a one-shot
+operator run by ``manage.py sync_catalog``, and from the admin
+force-resync action (DRF-1581) by
+``apps.catalog.tasks.sync_catalog_for_tenant``.
 
 (Until DRF-1494 this line promised an admin "force resync" action instead.
-There has never been one — C6/DRF-576 was never built — so for the whole
-life of the pilot the beat was the only way this code could run at all,
-and an operator who read this docstring while the catalog was twelve days
-stale would have gone looking for a button that does not exist.)
+There was none then — C6/DRF-576 was never built — so for the whole life
+of the pilot the beat was the only way this code could run at all, and an
+operator who read this docstring while the catalog was twelve days stale
+would have gone looking for a button that did not exist. The button has
+since landed: DRF-1581 added the force-resync action on
+``CatalogServiceAdmin``.)
 
 Three mirrors, pulled in FK order so each one's dependencies already exist:
 

@@ -2,9 +2,11 @@
 
 Before this command the only way the catalog sync could run was the Celery
 beat. ``apps/catalog/services/sync.py`` claimed an admin "force resync"
-action existed; it did not (C6/DRF-576 was never built). So when the pilot
-mirror went stale there was no supported way to push a fix through without
-waiting for a beat that was, by then, the thing that was broken.
+action existed; it did not (C6/DRF-576 was never built — the admin button
+arrived later, as the DRF-1581 action on ``CatalogServiceAdmin``). So when
+the pilot mirror went stale there was no supported way to push a fix
+through without waiting for a beat that was, by then, the thing that was
+broken.
 
 Two modes, both explicit:
 
