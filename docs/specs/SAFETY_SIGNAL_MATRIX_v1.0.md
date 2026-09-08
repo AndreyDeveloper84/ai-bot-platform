@@ -54,7 +54,7 @@
 Первое требование задания — не документ, а сверка. Ниже семь расхождений,
 каждое проверено по первоисточнику, а не по имени функции или комментарию.
 
-### 1.1 Словарей состояний не один, а шесть
+### 1.1 Словарей состояний шесть, объявлены в семи местах
 
 | источник | словарь | мощность |
 |---|---|---|
@@ -66,9 +66,10 @@
 | код: `safety/post_check.py:PostCheckVerdict` | `allow / revise / block` | 3 |
 | код: `safety/outbound.py:OutboundVerdict` | `allowed: bool` + `categories[]` | 2 |
 
-Канон запрещает ровно это: «No duplicated enums across repositories»
-(канон, раздел «Additional rules»). Сегодня их семь редакций в одном
-репозитории.
+Семь строк дают **шесть различных словарей**: `PLAN_ENGINE` и
+`DECISION_READINESS` совпадают между собой, остальные пять различны
+попарно. Канон запрещает ровно это: «No duplicated enums across
+repositories» (канон, раздел «Additional rules»).
 
 **`UNKNOWN` в каноне не состояние, а правило:** «Unknown safety-critical
 semantics fail closed». Три контракта повысили правило до значения перечисления
