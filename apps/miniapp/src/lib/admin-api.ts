@@ -649,6 +649,77 @@ export const listMasters = (
   });
 };
 
+// --- DRF-1597 awaiting verification --------------------------------------
+
+/**
+ * Мастер, которого клиент не видит, пока владелица его не подтвердит.
+ *
+ * Заведённый через админку Ayla мастер приезжает синхронизацией со
+ * статусом приглашения `pending` — синхронизация это поле не пишет
+ * никогда, а гейт продажи требует `accepted`. До DRF-1597 перевести его
+ * могла только Django-админка, то есть человек с доступом к серверу.
+ */
+export interface AwaitingVerificationMaster {
+  id: string;
+  name: string;
+  specialization: string;
+  photo_url: string;
+  invite_status: string;
+}
+
+export interface AwaitingVerificationResponse {
+  items: AwaitingVerificationMaster[];
+  count: number;
+}
+
+export interface VerifyMastersResult {
+  verified: number;
+  skipped: number;
+  /**
+   * Строки, за которые решать нельзя: приглашение выписано лично, и
+   * принять его может только сама мастер. Отдельное число, а не часть
+   * `skipped`, — «уже принято» и «за неё нельзя» ведут владелицу к
+   * разным следующим шагам.
+   */
+  blocked: number;
+  /**
+   * Названные владелицей, но не отданные очереди: в архиве, снятые с
+   * активности, чужого салона, несуществующие. Молчать о них нельзя —
+   * у каждого пропуска должно быть имя (OPEN_DECISIONS §78).
+   */
+  not_eligible: number;
+  /**
+   * Подтверждены, но гейт продажи их всё равно не пускает. Обещание
+   * кнопки проверено замером, а не выведено из предиката: сегодня список
+   * пуст всегда, и если он перестанет быть пустым — это будет видно, а
+   * не молча.
+   */
+  still_hidden: string[];
+  remaining: number;
+}
+
+export const getMastersAwaitingVerification = (
+  init: { signal?: AbortSignal } = {},
+): Promise<AwaitingVerificationResponse> =>
+  request("/api/v1/admin/masters/awaiting-verification/", {
+    method: "GET",
+    signal: init.signal,
+  });
+
+/**
+ * Подтвердить мастеров. Без `masterIds` — всю очередь салона.
+ *
+ * Только владелец: сервер отвечает 403 админу и ресепшену. Экран это
+ * повторяет кнопкой, но решает сервер.
+ */
+export const verifyMasters = (
+  masterIds?: string[],
+): Promise<VerifyMastersResult> =>
+  request("/api/v1/admin/masters/awaiting-verification/", {
+    method: "POST",
+    body: JSON.stringify(masterIds ? { master_ids: masterIds } : {}),
+  });
+
 // --- MM5 deactivation preview --------------------------------------------
 
 export interface DeactivationFallbackMaster {

@@ -2968,6 +2968,29 @@ a {
   color: var(--c-text-secondary);
 }
 
+/*
+  DRF-1597 — блок «клиент не видит N мастеров» на «Команде».
+
+  Не `--danger`: сломанного ничего нет, мастер заведён верно и ждёт
+  осознанного шага владелицы. И не нейтральная сводка: пока шага нет,
+  салон недосчитывается людей на витрине, и блок обязан читаться как
+  требующий действия. Отсюда та же семантика предупреждения, что у
+  `admin-chip--warn`, — один язык цвета на экран.
+*/
+.admin-notice {
+  margin-top: var(--s-3);
+  padding: var(--s-3);
+  border-radius: var(--r-md);
+  font-size: var(--font-size-200);
+  background: var(--c-surface-2);
+  color: var(--c-text-primary);
+}
+
+.admin-notice--warn {
+  background: color-mix(in srgb, var(--c-warning) 10%, var(--c-surface-2));
+  border: 1px solid color-mix(in srgb, var(--c-warning) 35%, transparent);
+}
+
 .admin-template-preview {
   margin-top: var(--s-2);
 }

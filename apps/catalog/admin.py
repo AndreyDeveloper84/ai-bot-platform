@@ -260,11 +260,19 @@ class CatalogMasterAdmin(_MirrorAdminBase):
         докстринг, почему не вызывающий.
         """
         outcome = verification.verify_masters(queryset, user=request.user)
-        self.message_user(
-            request,
-            f"Верифицировано: {outcome.verified}. Уже принятых пропущено: {outcome.skipped}.",
-            level=messages.SUCCESS,
-        )
+        text = f"Верифицировано: {outcome.verified}. Уже принятых пропущено: {outcome.skipped}."
+        if outcome.blocked:
+            # DRF-1597. Молчать об этих строках нельзя: оператор выбрал их
+            # руками и вправе узнать, что действие их НЕ коснулось —
+            # иначе «верифицировано: 0» читается как сбой, а не как
+            # граница согласия. Причина названа словами, а не кодом:
+            # экран читает человек.
+            text += (
+                f" Не подтверждено — ждут нажатия самого мастера: {outcome.blocked}. "
+                "Этим мастерам приглашение реально выписано; принять его "
+                "может только сама мастер."
+            )
+        self.message_user(request, text, level=messages.SUCCESS)
 
     @admin.action(
         permissions=["change"],

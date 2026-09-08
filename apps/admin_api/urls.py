@@ -21,6 +21,7 @@ from apps.admin_api import (
     views_customers,
     views_day,
     views_invite,
+    views_master_verify,
     views_staff_invite,
     views_staff_revoke,
     views_staff_roster,
@@ -78,6 +79,14 @@ urlpatterns = [
         name="booking_slots",
     ),
     path("masters/", views.masters_list, name="masters_list"),
+    # DRF-1597 — очередь «ждут подтверждения» и само подтверждение.
+    # Перед masters/<id>/ по той же причине, что masters/invite/ ниже:
+    # ``str``-конвертер Django съел бы литерал как master_id.
+    path(
+        "masters/awaiting-verification/",
+        views_master_verify.masters_awaiting_verification,
+        name="masters_awaiting_verification",
+    ),
     # PR 3 / MM2 — must precede masters/<id>/ so the literal "invite"
     # segment is not consumed as a master_id. Django's path resolver is
     # order-sensitive for ``str`` converters (greedy match).
