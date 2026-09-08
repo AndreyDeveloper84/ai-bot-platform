@@ -235,8 +235,8 @@ export interface CatalogBrowseData {
    * с ключами зеркала (`apps/miniapp_api/views.py:695`). Без имени это
    * состояние выглядело бы как `OK` с пустой полкой — и всплыло бы не
    * сейчас, а через недели, когда кто-то разметит связи и будет ждать,
-   * что полка загорится. Разбор — `bus/CLIENT-note-resolver-candidate-
-   * kind-mismatch.md`.
+   * что полка загорится. Разбор — `bus/CLIENT-SURFACE-note-resolver-
+   * candidate-kind-mismatch.md`.
    *
    * Последние три — пустая полка, и снаружи они **неразличимы**: 200 и
    * пустой `ordered[]` у всех трёх. Различает их только код исключения,
@@ -423,7 +423,8 @@ export async function getCatalogBrowse(): Promise<CatalogBrowseData> {
           `${recs.decision.ordered.length} кандидат(ов), и ни один не ` +
           "отрисуем этой полкой: она умеет kind=SERVICE и ключи зеркала " +
           `(kinds: ${[...new Set(recs.decision.ordered.map((c) => c.candidate.kind))].join(",")}). ` +
-          "Подбор остаётся пустым; см. bus/CLIENT-note-resolver-candidate-kind-mismatch.md.",
+          "Подбор остаётся пустым; см. bus/CLIENT-SURFACE-note-resolver-" +
+          "candidate-kind-mismatch.md.",
       );
       picksOutcome = "UNRENDERABLE_CANDIDATES";
     }
