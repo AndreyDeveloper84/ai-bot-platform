@@ -214,7 +214,9 @@ def _verify(request: HttpRequest) -> HttpResponse:
     # чужого салона или несуществующие. Их НЕЛЬЗЯ проглотить молча
     # (§78): владелица назвала имя и обязана узнать, что оно не было
     # обработано, а не увидеть «подтверждено: 0» без объяснения.
-    not_eligible = 0 if raw_ids is None else len(raw_ids) - len(selected)
+    not_eligible = (
+        0 if raw_ids is None else len({str(i) for i in raw_ids}) - len(selected)
+    )
 
     outcome = verification.verify_masters_by_salon(selected, actor=actor)
 
@@ -226,9 +228,18 @@ def _verify(request: HttpRequest) -> HttpResponse:
     # докстринге ``master_state`` прямо сказано, что будут ещё), и в тот
     # день эндпойнт стал бы отвечать «подтверждено: N» о мастерах,
     # которых по-прежнему не видно. Здесь это не молчит.
+    #
+    # Считается ТОЛЬКО по строкам, которые действительно перешли в
+    # ``accepted``. Заблокированная строка тоже лежит в ``selected`` и
+    # тоже не продаётся — но она не продаётся ПО ЗАМЫСЛУ, и попади она
+    # сюда, эндпойнт кричал бы о расхождении гейта на штатной границе
+    # согласия. Именно так эта проверка и была написана сначала.
     still_hidden = [
         m.name
-        for m in CatalogMaster.objects.filter(pk__in=[m.pk for m in selected])
+        for m in CatalogMaster.objects.filter(
+            pk__in=[m.pk for m in selected],
+            invite_status=CatalogMaster.InviteStatus.ACCEPTED,
+        )
         if not is_available(m)
     ]
     remaining = _awaiting_qs().count()

@@ -249,6 +249,12 @@ class TestTwoPathsNotOneLoophole:
         assert body["blocked"] == 1
         assert body["verified"] == 0
 
+        # Заблокированная строка НЕ продаётся — и это замысел, а не
+        # расхождение гейта. `still_hidden` о ней молчит, иначе он кричал
+        # бы на каждой штатной границе согласия и перестал бы значить
+        # что-либо в тот единственный раз, когда важен.
+        assert body["still_hidden"] == []
+
         invited.refresh_from_db()
         assert invited.invite_status == CatalogMaster.InviteStatus.PENDING
         assert is_available(invited) is False
@@ -313,6 +319,25 @@ class TestNoSilentSkips:
 
         assert resp.status_code == 200, resp.content
         assert resp.json()["not_eligible"] == 1
+
+    def test_the_same_id_twice_is_one_master_not_one_skip(
+        self, client, owner_bot_user, tenant
+    ):
+        """Дубль в списке — не пропуск.
+
+        Считай ``not_eligible`` длиной списка, и повторно названный
+        мастер выдал бы «подтверждён 1, не подошёл 1» про одного и того
+        же человека.
+        """
+
+        master = _synced_master(tenant)
+
+        resp = _post(client, {"master_ids": [str(master.id), str(master.id)]})
+
+        assert resp.status_code == 200, resp.content
+        body = resp.json()
+        assert body["verified"] == 1
+        assert body["not_eligible"] == 0
 
     def test_another_salon_master_named_by_id_is_counted_not_verified(
         self, client, owner_bot_user, tenant, other_tenant
