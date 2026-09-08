@@ -40,6 +40,34 @@
 # Switching the decision costs one line: `exit 1` -> `exit 0` in the
 # `not-configured` job. The name of the skip survives either way.
 #
+# ### Its sibling in `deploy.yml` is deliberately NOT the same shape yet
+# `deploy.yml` (prod) carries the OLD single-job form of this guard: one
+# `id: guard` step, `if: steps.guard.outputs.ready == 'true'` on five deploy
+# steps, and a `::notice::` reading "No-op: nothing was deployed, nothing was
+# backed up". DRF-1578 / PR #1484 ported it there from this file, describing it
+# as "a visible no-op, not a green check that hides doing nothing".
+#
+# Half of that is delivered and half is not, and the difference is the whole
+# subject of DRF-1605, so it is written down rather than smoothed over. The
+# notice IS the name §78 asks for and it does appear in the run's annotations.
+# But the run still concludes `success`, so in `gh run list` — and in every
+# dashboard, badge and "was the deploy green?" glance that reads a conclusion
+# rather than a log — a prod deploy that touched nothing is still shaped
+# exactly like a prod deploy that shipped. Measured, not assumed: run
+# 34225611782 is that exact shape with an unset host, and it concluded
+# `success` with a single job called `deploy-dev` reported green.
+#
+# So the divergence between these two files is real and is a thing to CLOSE,
+# not to keep — one decision in two shapes across two neighbouring files is a
+# future defect. It closes by porting these three jobs into `deploy.yml`, not
+# by folding this file back into one job. `deploy.yml` belongs to DRF-1578, so
+# that is its own ticket and its own review, and prod additionally deserves the
+# question this file did not have to ask: whether a prod deploy with no host
+# configured should be red at all, or should never be reachable.
+#
+# The one thing kept identical on purpose is the anchor: the step that reads
+# the secret is still `id: guard`, so a single grep still finds both files.
+#
 # ### Operator prerequisites (one-time, DRF-891)
 # Repo → Settings → Secrets and variables → Actions:
 #   DEV_HOST         dev box hostname/IP (decision A: same VPS as Ayla)
@@ -115,7 +143,7 @@ jobs:
     steps:
       - name: Say what did not happen
         run: |
-          echo "::error title=deploy-dev deployed nothing::DEV_HOST is not set, so no host was contacted, no image was rebuilt and no Mini App bundle was shipped. The pilot is still running whatever it was running before this run. Set DEV_HOST / DEV_USER / DEV_SSH_KEY / DEV_DEPLOY_PATH (DRF-891) — or, if this repository is deliberately not wired to a host, change this job's exit code (DRF-1605)."
+          echo "::error title=deploy-dev deployed nothing::DEV_HOST is not set. Nothing was deployed: no host was contacted, no image was rebuilt, no migration was run and no Mini App bundle was shipped. The pilot is still serving whatever it was serving before this run. Set DEV_HOST / DEV_USER / DEV_SSH_KEY / DEV_DEPLOY_PATH (DRF-891) — or, if this repository is deliberately not wired to a host, change this job's exit code (DRF-1605)."
           exit 1
 
   deploy:
