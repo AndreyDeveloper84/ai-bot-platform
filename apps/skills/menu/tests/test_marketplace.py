@@ -48,8 +48,8 @@ from apps.skills.menu.marketplace import (
 _SEVEN_MAIN: tuple[tuple[str, str], ...] = (
     ("Подобрать услугу", DISCOVER_TAP_TEXT),
     ("Найти салон", "cb:catalog:salons"),
-    ("Записаться", "cb:menu:book"),
-    ("Мои записи", "cb:menu:my_bookings"),
+    ("📅 Записаться", "cb:menu:book"),
+    ("📋 Мои записи", "cb:menu:my_bookings"),
     ("Моя цель", "cb:open:goal_select"),
     ("Профиль", "cb:open:profile"),
     ("Ещё", CALLBACK_EXTRA_OPEN),
@@ -58,7 +58,7 @@ _SEVEN_MAIN: tuple[tuple[str, str], ...] = (
 #: Подменю «Ещё» с включённым питанием и БЕЗ согласия: пункт есть, и он
 #: ведёт на ЗАПРОС согласия (вторая строка таблицы §25 п.6).
 _EXTRA_WITHOUT_CONSENT: tuple[tuple[str, str], ...] = (
-    ("Дневник питания", f"{CALLBACK_HEALTH_NEED_PREFIX}food_diary"),
+    ("🥗 Дневник питания", f"{CALLBACK_HEALTH_NEED_PREFIX}food_diary"),
     ("Помощь", CALLBACK_EXTRA_HELP),
     ("Назад", CALLBACK_EXTRA_BACK),
 )
@@ -150,36 +150,160 @@ class TestSevenButtons:
 # --------------------------------------------------------------------------- #
 # 2. Эмодзи                                                                    #
 # --------------------------------------------------------------------------- #
-class TestLabelsCarryNoEmoji:
-    """§37 п.7: «Эмодзи в кнопках убрать» — во всём этом меню."""
+class TestEmojiStayWithinReason:
+    """Решение владельца 07.09.2026 — ПЕРЕСМОТР §37 п.7, не починка дефекта.
+
+    §37 п.7 запрещал значки во всём этом меню, и прежняя редакция этого
+    класса (``TestLabelsCarryNoEmoji``) это и сторожила. Владелец решение
+    пересмотрел («кнопки без эмодзи, выглядит суховато») и выдал новое
+    правило, у которого три части:
+
+    * не больше ОДНОГО значка на подпись;
+    * только там, где значок РАЗЛИЧАЕТ пункты, а не украшает каждый;
+    * подпись читаема без значка — сам по себе он смысла не несёт.
+
+    Класс поэтому переформулирован, а не удалён. Удалить стражу — самый
+    дешёвый способ получить зелёный тест, который ничего не проверяет:
+    без неё «в разумных пределах» через месяц значило бы значок на каждой
+    подписи, и никто бы не заметил.
+
+    Три части правила дают три разные проверки, и ни одна не заменяет
+    остальные: «не больше одного» пройдёт на значке у каждого пункта,
+    «не у каждого» пройдёт на нуле значков (то есть на прежнем §37 п.7),
+    а «читаема без значка» — единственная, которая ловит значок, уехавший
+    в реплику человека.
+    """
 
     #: Проверяется КОДОВАЯ ТОЧКА, а не список конкретных значков: список
     #: пропустил бы следующий добавленный.
     @staticmethod
-    def _has_emoji(text: str) -> bool:
-        return any(
-            0x1F300 <= ord(ch) <= 0x1FAFF
+    def _emoji_in(text: str) -> list[str]:
+        return [
+            ch
+            for ch in text
+            if 0x1F300 <= ord(ch) <= 0x1FAFF
             or 0x2600 <= ord(ch) <= 0x27BF
             or 0xFE00 <= ord(ch) <= 0xFE0F
-            for ch in text
-        )
+        ]
 
-    def test_main_menu(self, bot_user, consent, miniapp):
-        _text, data = marketplace_menu_reply(bot_user=bot_user)
-        assert not [label for label in _labels(data["buttons"]) if self._has_emoji(label)]
-
-    def test_extra_menu(self, bot_user, consent, miniapp, nutrition_on):
-        _text, data = marketplace_extra_reply(bot_user=bot_user)
-        assert not [label for label in _labels(data["buttons"]) if self._has_emoji(label)]
-
-    def test_consent_request_screen(self, miniapp):
-        data = health_request_action_data()
-        assert not [label for label in _labels(data["buttons"]) if self._has_emoji(label)]
+    def _has_emoji(self, text: str) -> bool:
+        return bool(self._emoji_in(text))
 
     def test_the_detector_itself_can_see_an_emoji(self):
         """Стража, которая ничего не ловит, зеленела бы всегда."""
-        assert self._has_emoji("📅 Записаться")
-        assert not self._has_emoji("Записаться")
+        assert self._emoji_in("📅 Записаться") == ["📅"]
+        assert self._emoji_in("Записаться") == []
+        assert len(self._emoji_in("📅📋 Записаться")) == 2
+
+    # -- часть 1: не больше одного значка на подпись ----------------------- #
+
+    def test_main_menu_labels_carry_at_most_one_emoji_each(self, bot_user, consent, miniapp):
+        _text, data = marketplace_menu_reply(bot_user=bot_user)
+        labels = _labels(data["buttons"])
+        assert labels, "пустое меню сделало бы проверку значков бессмысленной"
+        assert [label for label in labels if len(self._emoji_in(label)) > 1] == []
+
+    def test_extra_menu_labels_carry_at_most_one_emoji_each(
+        self, bot_user, consent, miniapp, nutrition_on
+    ):
+        _text, data = marketplace_extra_reply(bot_user=bot_user)
+        labels = _labels(data["buttons"])
+        assert labels, "пустое подменю сделало бы проверку значков бессмысленной"
+        assert [label for label in labels if len(self._emoji_in(label)) > 1] == []
+
+    # -- часть 2: различает, а не украшает каждый -------------------------- #
+
+    def test_main_menu_does_not_decorate_every_label(self, bot_user, consent, miniapp):
+        """«Не украшает каждый» — половина правила, и она про БОЛЬШИНСТВО.
+
+        Значок оправдан там, где две подписи иначе не различить. Таких
+        мест в семёрке одно (пара «Записаться»/«Мои записи»), поэтому
+        подписей БЕЗ значка должно остаться больше, чем со значком.
+        """
+        _text, data = marketplace_menu_reply(bot_user=bot_user)
+        labels = _labels(data["buttons"])
+        assert labels, "пустое меню сделало бы проверку значков бессмысленной"
+        with_emoji = [label for label in labels if self._has_emoji(label)]
+        without = [label for label in labels if not self._has_emoji(label)]
+        assert with_emoji, "вторая половина правила: значки владелец ВЕРНУЛ"
+        assert len(without) > len(with_emoji)
+
+    def test_the_confusable_pair_is_exactly_where_the_emoji_went(self, bot_user, consent, miniapp):
+        """Положительная стража к предыдущей: значки стоят НЕ где попало.
+
+        «Записаться» и «Мои записи» делят корень и стоят соседними
+        строками одного столбика — это единственная пара во всём меню,
+        которую глаз путает. Если значки однажды переедут на «Профиль» и
+        «Моя цель», предыдущий тест этого не заметит, а этот заметит.
+        """
+        _text, data = marketplace_menu_reply(bot_user=bot_user)
+        marked = [label for label in _labels(data["buttons"]) if self._has_emoji(label)]
+        assert marked, "значков нет вовсе — это прежний §37 п.7, а не новое решение"
+        assert [label.split(" ", 1)[1] for label in marked] == ["Записаться", "Мои записи"]
+
+    def test_extra_menu_marks_only_the_diary(self, bot_user, consent, miniapp, nutrition_on):
+        _text, data = marketplace_extra_reply(bot_user=bot_user)
+        marked = [label for label in _labels(data["buttons"]) if self._has_emoji(label)]
+        assert marked, "дневник свой значок носит — он же уходит на первый экран"
+        assert [label.split(" ", 1)[1] for label in marked] == ["Дневник питания"]
+
+    def test_consent_request_screen_carries_no_emoji(self, miniapp):
+        """Экрану согласия различать нечего: там согласие и «Не сейчас».
+
+        Пара противоположных по смыслу подписей — ровно тот случай, где
+        значок ничего не добавляет, а «украшает». Проверка отрицательная,
+        поэтому рядом стоит присутствие на ТЕХ ЖЕ данных.
+        """
+        labels = _labels(health_request_action_data()["buttons"])
+        assert labels, "экран без кнопок сделал бы проверку значков пустой"
+        assert [label for label in labels if self._has_emoji(label)] == []
+
+    # -- часть 3: подпись читаема без значка ------------------------------- #
+
+    def test_no_emoji_reaches_the_dialogue_history_as_a_persons_words(self):
+        """Самая дорогая часть правила и единственная не про внешний вид.
+
+        ``cb:health:need:*`` ложится в историю ФРАЗОЙ (``health_tap_text``),
+        то есть как реплика человека — и дальше в промпт консьержа. Значок
+        там означал бы значок в том, что человек якобы сказал. Устройство
+        (``MenuItem.emoji`` отдельным полем) это и обеспечивает; проверка
+        здесь на случай, если однажды его сольют обратно в ``label``.
+        """
+        phrases = list(marketplace.health_tap_text().values())
+        assert phrases, "пустая таблица фраз прошла бы любую проверку об их содержимом"
+        assert [phrase for phrase in phrases if self._has_emoji(phrase)] == []
+
+    def test_every_marked_label_reads_without_its_emoji(self):
+        """«Сам по себе значок смысла не несёт» — проверяемо на полях.
+
+        У пункта со значком ``label`` существует ОТДЕЛЬНО и уже читается:
+        не один значок, не значок с пробелом и не пустая строка.
+        """
+        marked = [item for item in (*MAIN_ITEMS, *NUTRITION_ITEMS) if item.emoji]
+        assert marked, "ни одного помеченного пункта — правило нечего проверять"
+
+        plain = [item.label for item in marked]
+        assert plain, "подписи помеченных пунктов пусты — отрицание ниже соврало бы"
+        assert [label for label in plain if self._has_emoji(label)] == []
+        assert [label for label in plain if len(label.strip()) <= 2] == []
+
+        assert [item.button_label for item in marked] == [
+            f"{item.emoji} {item.label}" for item in marked
+        ]
+
+    def test_the_menu_listing_in_text_carries_no_emoji(self, miniapp):
+        """Перечень в тексте строится из ``line``, а не из подписи.
+
+        Значок на кнопке объясняет соседство кнопок; в перечне строк
+        соседства нет, и повтор значка был бы тем самым украшением.
+        """
+        listing = [
+            line
+            for line in marketplace.marketplace_menu_text().splitlines()
+            if line.startswith("•")
+        ]
+        assert listing, "перечень пуст — проверять в нём нечего"
+        assert [line for line in listing if self._has_emoji(line)] == []
 
 
 # --------------------------------------------------------------------------- #

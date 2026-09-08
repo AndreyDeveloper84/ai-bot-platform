@@ -65,6 +65,7 @@ _CHAT_ID = 7711
 _GATED_ITEMS: tuple[MenuItem, ...] = (
     MenuItem(
         label="Дневник питания",
+        emoji="🥗",
         callback="дневник питания",
         line="дневник питания — что вы ели и пили",
         where="bot",
@@ -86,8 +87,8 @@ _GATED_ITEMS: tuple[MenuItem, ...] = (
 _SEVEN_MAIN: tuple[tuple[str, str], ...] = (
     ("Подобрать услугу", "Помоги подобрать услугу"),
     ("Найти салон", "cb:catalog:salons"),
-    ("Записаться", "cb:menu:book"),
-    ("Мои записи", "cb:menu:my_bookings"),
+    ("📅 Записаться", "cb:menu:book"),
+    ("📋 Мои записи", "cb:menu:my_bookings"),
     ("Моя цель", "cb:open:goal_select"),
     ("Профиль", "cb:open:profile"),
     ("Ещё", CALLBACK_EXTRA_OPEN),
@@ -565,7 +566,7 @@ class TestNutritionItemsAreGoneFromTheLiveMenu:
             assert payload in payloads, payloads
         assert MAIN_ITEMS[0].line in text, text
         # И только теперь отрицание.
-        assert "Дневник питания" not in labels, labels
+        assert "🥗 Дневник питания" not in labels, labels
         assert "Сканер еды" not in labels, labels
         assert not [p for p in payloads if p.startswith(CALLBACK_HEALTH_NEED_PREFIX)], payloads
 
@@ -588,7 +589,7 @@ class TestNutritionItemsAreGoneFromTheLiveMenu:
         labels = [b["text"] for b in _keyboard(sent[0])]
         payloads = _payloads(sent[0]) + _open_app_payloads(sent[0])
         # Стража: дневник вернулся, и он ботовый — payload это фраза.
-        assert "Дневник питания" in labels, labels
+        assert "🥗 Дневник питания" in labels, labels
         assert "дневник питания" in payloads, payloads
         # Отрицание: сканер не вернулся вместе с ним.
         assert "Сканер еды" not in labels, labels

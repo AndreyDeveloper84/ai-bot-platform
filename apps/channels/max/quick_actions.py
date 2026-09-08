@@ -218,20 +218,74 @@ QUICK_ACTIONS_HINT = "Можно написать своими словами и
 #: Смысл ограничения не изменился и остаётся пришпиленным тестом: кнопка
 #: не должна появиться на первом экране незаметно. Изменилось только число,
 #: и изменилось решением, а не по ходу правки.
-MAX_FIRST_CONTACT_BUTTONS = 7
+#:
+#: **Поднято до восьми решением владельца 07.09.2026** — дневник питания
+#: выведен на первое появление (см. :func:`_diary_buttons`). Семь мест
+#: были заняты целиком: шесть чипов плюс вторичный вход. Уступить место
+#: было чему — но каждое такое место занято ДЕЙСТВУЮЩИМ решением того же
+#: владельца (шесть чипов — §38 от 07.09.2026, вторичный вход — решение
+#: от 24.08), а сегодняшние два решения пересматривают §37 п.7 и §37 п.5
+#: и ни одного из них не касаются. Снять чип значило бы отменить решение,
+#: которое никто не отменял, — молча и по ходу чужой правки.
+#:
+#: Цена восьмого места честная и в другую сторону: экран рисуется в один
+#: столбик, так что восьмая кнопка — это восьмая строка, и первая реплика
+#: уезжает вверх ещё на строку. Поэтому дневник встал в ХВОСТ, к выходам,
+#: а не в середину примеров, и один он там не растёт: следующее место
+#: снова потребует решения, а не довода «там уже было восемь».
+MAX_FIRST_CONTACT_BUTTONS = 8
+
+
+def _diary_buttons(bot_user: Any) -> list[dict[str, str]]:
+    """Вход в дневник питания на первом экране — или ничего.
+
+    **Решение владельца 07.09.2026 дополняет §37 п.5.** Дневник жил
+    только в подменю «Ещё», то есть за двумя тапами от первого экрана;
+    теперь он есть и на первом появлении. В «Ещё» он при этом ОСТАЁТСЯ:
+    новое место не заменяет прежнее (положительная стража на оба места —
+    ``test_marketplace.py::TestExtraMenu`` и
+    ``test_first_contact_c01.py::TestDiaryOnFirstContact``).
+
+    Ворота не переписаны здесь, а позваны у меню
+    (:func:`apps.skills.menu.marketplace.nutrition_entry_buttons`): и
+    ``NUTRITION_ENABLED``, и согласие ``HEALTH`` считаются одним кодом на
+    оба места. Со снятым флагом список пуст — пункта на экране нет вовсе,
+    а не есть-и-не-работает.
+
+    ``bot_user is None`` — тоже пусто, и это не заглушка ради тестов:
+    вход персональный (ворота читают согласие ЭТОГО человека), и без
+    человека его нельзя нарисовать, не соврав про то, куда он ведёт.
+    Импорт ленивый — тем же приёмом, что и остальные заимствования из
+    меню в этом модуле, и по той же причине (меню импортирует канал).
+    """
+    if bot_user is None:
+        return []
+    from apps.skills.menu.marketplace import nutrition_entry_buttons
+
+    return nutrition_entry_buttons(bot_user=bot_user)
 
 
 def first_contact_buttons(
     actions: tuple[QuickAction, ...] = FIRST_CONTACT_QUICK_ACTIONS,
     *,
     with_secondary: bool = True,
+    bot_user: Any = None,
 ) -> list[dict[str, str]]:
-    """Клавиатура первого экрана: чипы, затем вторичный вход.
+    """Клавиатура первого экрана: чипы, дневник, затем вторичный вход.
 
     Порядок несущий. Вторичный вход идёт **последним** и один в строке —
-    решение владельца «малый вес, не конкурирует со свободным текстом».
+    решение владельца «малый вес, не конкурирует со свободным текстом»,
+    и дневник этого не отнимает: он встаёт ПЕРЕД ним, но ПОСЛЕ чипов.
+
+    Почему не среди чипов: шесть чипов — примеры свободного ввода, у
+    которых ``label`` и ``text`` совпадают, и человек видит на кнопке
+    ровно ту реплику, что уйдёт от его имени. Дневник — не пример
+    реплики, а вход в поверхность, и подпись у него со значком. Встань
+    он между чипами, строка-подсказка «выбрать пример» указывала бы и на
+    него тоже.
     """
     buttons = [{"label": a.label, "callback": quick_action_callback(a)} for a in actions]
+    buttons.extend(_diary_buttons(bot_user))
     if with_secondary:
         buttons.append(
             {"label": SECONDARY_ACTION.label, "callback": quick_action_callback(SECONDARY_ACTION)}
@@ -243,6 +297,7 @@ def first_contact_action_data(
     actions: tuple[QuickAction, ...] = FIRST_CONTACT_QUICK_ACTIONS,
     *,
     with_secondary: bool = True,
+    bot_user: Any = None,
 ) -> dict[str, Any]:
     """``action_data`` первого экрана в плоской форме.
 
@@ -251,7 +306,7 @@ def first_contact_action_data(
     у остального, что приходит из ``WelcomeSkill`` на этом пути.
     """
     return {
-        "buttons": first_contact_buttons(actions, with_secondary=with_secondary),
+        "buttons": first_contact_buttons(actions, with_secondary=with_secondary, bot_user=bot_user),
         "button_columns": 1,
     }
 
@@ -261,6 +316,7 @@ def render_first_contact(
     actions: tuple[QuickAction, ...] = FIRST_CONTACT_QUICK_ACTIONS,
     *,
     with_secondary: bool = True,
+    bot_user: Any = None,
 ) -> tuple[str, dict[str, Any] | None]:
     """Текст и клавиатура экрана C01 — включая состояние **No Quick Actions**.
 
@@ -271,16 +327,21 @@ def render_first_contact(
     только чтобы объяснить чипы, и без них она врёт.
 
     Вторичный вход переживает пустой набор — он выход из экрана, а не
-    пример запроса, и когда примеров нет, выход нужнее.
+    пример запроса, и когда примеров нет, выход нужнее. Дневник — тоже:
+    он не пример запроса, а вход, и «нет релевантных примеров» ничего
+    про него не говорит.
+
+    ``None`` вместо клавиатуры отдаётся ровно тогда, когда рисовать
+    нечего — то есть когда пуст ИТОГОВЫЙ список кнопок, а не когда пуст
+    ``actions``. Иначе состояние «нет примеров, дневник есть» съело бы
+    единственную кнопку на экране.
     """
+    data = first_contact_action_data(actions, with_secondary=with_secondary, bot_user=bot_user)
+    if not data["buttons"]:
+        return body, None
     if not actions:
-        return body, (
-            first_contact_action_data((), with_secondary=with_secondary) if with_secondary else None
-        )
-    return (
-        f"{body}\n\n{QUICK_ACTIONS_HINT}",
-        first_contact_action_data(actions, with_secondary=with_secondary),
-    )
+        return body, data
+    return f"{body}\n\n{QUICK_ACTIONS_HINT}", data
 
 
 # ---------------------------------------------------------------------------
