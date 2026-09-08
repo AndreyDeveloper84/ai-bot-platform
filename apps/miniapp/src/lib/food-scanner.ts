@@ -56,6 +56,8 @@
 // — frontend must null-safe; UI never crashes.
 // ---------------------------------------------------------------------------
 
+import { request } from "./api";
+
 export interface NutritionFacts {
   calories: number;
   protein_g: number;
@@ -437,31 +439,60 @@ export async function fetchHealthFlags(): Promise<MeHealthFlagsResponse> {
 }
 
 // ---------------------------------------------------------------------------
-// 152-ФЗ consent gate persistence — DeviceStorage MVP, server-side
-// persist (`food_scanner_consent_at` field) deferred to W4 follow-up.
+// Согласие на сканирование еды (152-ФЗ) — источник правды СЕРВЕР.
 // ---------------------------------------------------------------------------
+//
+// Здесь стоял `localStorage`, и это был не «MVP-компромисс», а петля.
+//
+// Колонка `BotUser.food_scanner_consent_at` существует с миграции `0013`,
+// и её читает гейт навыка (`apps/skills/food_scanner/skill.py:463`).
+// Писателей у неё не было ни одного. Человек давал согласие в
+// мини-приложении, экран его принимал и пропускал дальше — а бот на то же
+// самое согласие отвечал «открой Mini App и дай согласие». Каждый раз. На
+// новом устройстве всё начиналось заново, потому что согласие лежало в
+// браузере предыдущего.
+//
+// Теперь согласие пишется ручкой `me/food-scanner-consent/` и читается
+// вместе с профилем. `localStorage` авторитетом быть перестал и здесь не
+// живёт вовсе: браузер на новом устройстве сказал бы «согласия нет» там,
+// где база говорит «есть», и разошлись бы они молча.
 
-const CONSENT_STORAGE_KEY = "ayla.food_scanner_consent_at";
-
-export function readConsentAt(): string | null {
-  if (typeof window === "undefined") return null;
-  try {
-    return window.localStorage.getItem(CONSENT_STORAGE_KEY);
-  } catch {
-    return null;
-  }
+/**
+ * Прочитать согласие у СЕРВЕРА (приезжает вместе с профилем).
+ *
+ * `null` — согласия нет, и экран обязан спросить. Отсутствие ключа
+ * читается так же: fail-closed, отсутствие доезжает отсутствием.
+ */
+export async function fetchConsentAt(): Promise<string | null> {
+  const me = await request<{ food_scanner_consent_at?: string | null }>("/me", {
+    method: "GET",
+  });
+  return me.food_scanner_consent_at ?? null;
 }
 
-export function saveConsentAccepted(): string {
-  const now = new Date().toISOString();
-  if (typeof window !== "undefined") {
-    try {
-      window.localStorage.setItem(CONSENT_STORAGE_KEY, now);
-    } catch {
-      /* private mode / quota — UI still proceeds for this session */
-    }
-  }
-  return now;
+/**
+ * Дать согласие. Возвращает момент выдачи, записанный СЕРВЕРОМ.
+ *
+ * Момент берётся из ответа, а не из часов браузера: у гейта и у экрана
+ * должно быть одно значение, а часы на устройстве человека могут
+ * показывать что угодно.
+ */
+export async function grantConsent(): Promise<string | null> {
+  const res = await request<{ granted_at?: string | null }>(
+    "/me/food-scanner-consent/",
+    { method: "POST" },
+  );
+  return res.granted_at ?? null;
+}
+
+/**
+ * Отозвать согласие. Отзыв доступен тем же способом, что и выдача, —
+ * иначе это была бы новая строка «право на отзыв недостижимо из
+ * приложения» (DRF-1520) в день закрытия старой.
+ */
+export async function withdrawConsent(): Promise<null> {
+  await request("/me/food-scanner-consent/", { method: "DELETE" });
+  return null;
 }
 
 // ---------------------------------------------------------------------------

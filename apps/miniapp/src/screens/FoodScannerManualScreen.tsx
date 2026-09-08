@@ -19,7 +19,7 @@ import {
   MEAL_TYPE_LABEL,
   defaultMealTypeForHour,
   logMeal,
-  readConsentAt,
+  fetchConsentAt,
   type MealType,
 } from "../lib/food-scanner";
 import { useScreenBack } from "../hooks/useScreenBack";
@@ -68,12 +68,25 @@ export function FoodScannerManualScreen() {
   // linked /manual user lands at /capture after accept and loses the
   // path they intended).
   useEffect(() => {
-    if (readConsentAt() === null) {
-      navigate("/customer/food-scanner/capture", {
-        replace: true,
-        state: { returnTo: "/customer/food-scanner/manual", mealType },
+    let cancelled = false;
+    // Согласие спрашивается у сервера. Отказ ЧТЕНИЯ сюда не приводит:
+    // отправить человека на гейт из-за сетевого сбоя значило бы
+    // переспросить согласие у того, кто его дал, — а «не смогли
+    // спросить» и «согласия нет» это разные вещи.
+    fetchConsentAt()
+      .then((at) => {
+        if (cancelled || at !== null) return;
+        navigate("/customer/food-scanner/capture", {
+          replace: true,
+          state: { returnTo: "/customer/food-scanner/manual", mealType },
+        });
+      })
+      .catch(() => {
+        /* читать не удалось — экран остаётся на месте, гейт не зовём */
       });
-    }
+    return () => {
+      cancelled = true;
+    };
   }, [navigate, mealType]);
 
   const onSave = useCallback(async () => {
