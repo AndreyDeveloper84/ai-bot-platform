@@ -3,8 +3,8 @@
 04.09.2026 каталог не синхронизировался двенадцать дней: в бэкенде было
 265 услуг и 14 маникюров, в зеркале бота — 94 и ноль, а бот честно
 отвечал клиентам «такого у наших мастеров нет». Нашлось это не сигналом,
-а потому что владелец вспомнил про маникюр. Этот модуль собирает четыре
-молчаливых сбоя на один экран:
+а потому что владелец вспомнил про маникюр. Этот модуль собирает пять
+молчаливых сбоёв на один экран:
 
 1. **Свежесть каталога** — возраст последней успешной синхронизации по
    каждому салону. Сам сигнал заведён в DRF-1494
@@ -24,9 +24,14 @@
    недоступно. На 04.09 ``NUTRITION_ENABLED`` был не задан вовсе, и это
    было неочевидно ниоткуда, кроме ``printenv`` в контейнере. Отсюда
    флаги не переключаются (правило заморозки) — показываются.
+5. **Салон, невидимый клиенту целиком** — мастера приняты и активны, а
+   продаётся ноль. Сигнал заведён в ``apps.catalog.visibility`` поверх
+   построчного ``sale_block``; здесь он только показывается. Пункт 2
+   этого состояния не ловит и не мог бы: зеркало сходится с бэкендом
+   строка в строку, гейт продажи стоит после зеркала.
 
 Персональных данных здесь нет: только агрегаты — возрасты, числа,
-состояния флагов. Значения флагов не показываются, только
+состояния флагов, счётчики строк каталога. Значения флагов не показываются, только
 «задан/не задан» и «включено/выключено»; имена на секрет-паттерн
 проверяются, чтобы сюда случайно не притащили токен.
 """
@@ -47,6 +52,7 @@ from django.utils import timezone
 
 from apps.catalog.models import CatalogMaster, CatalogService
 from apps.catalog.staleness import TenantSyncAge, stale_after_seconds, sync_ages
+from apps.catalog.visibility import TenantVisibility, tenant_visibilities
 from apps.handoff.models import AdminTask
 from apps.integrations.ayla.url_builder import AylaUrlBuilder, AylaUrlError
 from apps.tenancy.context import tenant_scope
@@ -345,6 +351,7 @@ def handoff_summary(*, now: datetime | None = None) -> HandoffSummary:
 class ContourHealthReport:
     catalog_ages: list[TenantSyncAge]
     divergences: list[MirrorDivergence]
+    visibility: list[TenantVisibility]
     handoff: HandoffSummary
     flags: list[SurfaceFlag]
     threshold_seconds: int
@@ -361,7 +368,7 @@ def collect_report(
     now: datetime | None = None,
     counter: UpstreamCounter | None = None,
 ) -> ContourHealthReport:
-    """Собрать все четыре молчаливых сбоя в один отчёт.
+    """Собрать все пять молчаливых сбоёв в один отчёт.
 
     ``problems`` — готовый список криков для красной плашки экрана.
     Экран «кричит», если список не пуст; проверка задачи — что на
@@ -372,6 +379,7 @@ def collect_report(
 
     ages = sync_ages(now=moment)
     divergences = _divergences(ages, counter)
+    visibility = tenant_visibilities()
     handoff = handoff_summary(now=moment)
     flags = surface_flags()
 
@@ -386,10 +394,20 @@ def collect_report(
                 f"{div.mirror_services} против {div.upstream_services}, "
                 f"мастера {div.mirror_masters} против {div.upstream_masters}"
             )
+    for vis in visibility:
+        if vis.invisible_whole:
+            # Причина в тексте крика, а не только в таблице: без неё
+            # оператор идёт искать «почему пусто» с нуля, а слово уже
+            # посчитано построчным гейтом.
+            problems.append(
+                f"{vis.slug}: клиент не увидит никого — принято "
+                f"{vis.admitted}, продаётся 0 ({vis.blocks_human})"
+            )
 
     return ContourHealthReport(
         catalog_ages=ages,
         divergences=divergences,
+        visibility=visibility,
         handoff=handoff,
         flags=flags,
         threshold_seconds=stale_after_seconds(),
