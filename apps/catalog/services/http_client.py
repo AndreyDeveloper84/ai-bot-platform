@@ -546,13 +546,13 @@ class CatalogHttpClient:
         """Sleep off one ``429``, or raise :class:`CatalogThrottledError`.
 
         Returns normally only when the caller should retry immediately after
-        the sleep. Three ways it refuses instead, each a different fact:
+        the sleep. Two ways it refuses instead, each a different fact:
 
         * this was the last attempt — Ayla is still closed and we are out of
-          tries;
+          tries (``budget_exhausted=False``);
         * the run's wait budget will not cover what Ayla asked for — we are
           out of *permission* to wait (``budget_exhausted=True``, which the
-          beat reads to stand down for the rest of the cycle);
+          beat reads to stand down for the rest of the cycle).
 
         Both surface as the same exception type because both mean "this salon
         did not sync and it is not the salon's fault". Neither is a
