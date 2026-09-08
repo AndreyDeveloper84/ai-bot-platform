@@ -100,16 +100,30 @@ class TestFoodScannerConsentEndpoint:
         """
         settings.NUTRITION_ENABLED = True
 
+        from unittest.mock import Mock
+
+        from apps.skills.base import SkillContext
         from apps.skills.food_scanner.skill import _check_gates
 
-        class _Ctx:
-            def __init__(self, bu):
-                self.bot_user = bu
-                self.conversation = None
+        def _ctx(bu: BotUser) -> SkillContext:
+            """Настоящий `SkillContext`, а не самодельная заглушка.
+
+            Способ подсмотрен у соседей (`apps/skills/food_scanner/tests/
+            test_skill.py`), а не выдуман: гейту нужен объявленный тип, и
+            подсовывать ему свой лёгкий класс значит проверять не то, что
+            зовёт живой код. Разговор здесь `Mock` — гейт трогает у него
+            только `id`, и заводить строку в базе ради `logger.info`
+            было бы платой ни за что.
+            """
+            return SkillContext(
+                conversation=Mock(id="conv-consent"),
+                bot_user=bu,
+                message_text="",
+            )
 
         bot_user.refresh_from_db()
         # ДО: гейт отказывает и просит открыть мини-приложение.
-        before = _check_gates(_Ctx(bot_user), require_photo_scan=False, kind="callback")
+        before = _check_gates(_ctx(bot_user), require_photo_scan=False, kind="callback")
         assert before is not None
         assert before.meta["reply_kind"] == "food_scanner_consent_required"
 
@@ -117,7 +131,7 @@ class TestFoodScannerConsentEndpoint:
         bot_user.refresh_from_db()
 
         # ПОСЛЕ: отказа нет. Это и есть предмет DRF-1564.
-        assert _check_gates(_Ctx(bot_user), require_photo_scan=False, kind="callback") is None
+        assert _check_gates(_ctx(bot_user), require_photo_scan=False, kind="callback") is None
 
     def test_withdraw_clears_it_and_the_gate_closes_again(self, client: Client, bot_user: BotUser):
         hdr = _init_data_header(bot_user.channel_user_id)
@@ -225,4 +239,10 @@ class TestFoodScannerConsentAudit:
         client.post(_url(), HTTP_AUTHORIZATION=_init_data_header(bot_user.channel_user_id))
         rows = AuditLog.all_tenants.filter(action="consent.food_scanner_changed")
         assert rows.count() == before + 1
-        assert rows.last().payload["granted"] is True
+        row = rows.last()
+        # Сужение явное, а не `# type: ignore`: строку выше доказывает
+        # СРАВНЕНИЕ количеств, но проверяющему типов об этом неизвестно,
+        # и `ignore` похоронил бы доказательство под отметкой вместо
+        # того, чтобы его использовать.
+        assert row is not None
+        assert row.payload["granted"] is True
