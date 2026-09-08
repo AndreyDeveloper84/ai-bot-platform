@@ -40,30 +40,53 @@ name: miniapp-drift
 
 # ### Which of these triggers actually fires — read before trusting one
 #
-# `push` is evaluated against the workflow file **on the branch being pushed**,
-# so this one works the moment it lands on `dev`. It is the trigger that
-# carries the guarantee, and it covers the case that caused this ticket: a Mini
-# App change merged to `dev` and never published.
+# DRF-1605. This used to be `push: branches: [dev]`, and that was the whole
+# defect: the guard fired at the moment the pilot is GUARANTEED to be behind.
+# Publication happens after a green `ci`, which on this repository takes 25-40
+# minutes, so a push-triggered run asks "is the pilot serving this commit?"
+# while the commit is still being tested. Measured on 2026-09-08, commit
+# fa37302c: the merge landed 11:16:57, this workflow answered red 11:17:46
+# (run 34219861014), and `deploy-dev` (run 34222210402) did not start until
+# 11:43:41 — the guard was red twenty-eight minutes before the deploy it was
+# judging even began, and nothing re-ran it afterwards. Eleven of the last
+# twelve runs were red that way. It had stopped reporting drift and started
+# reporting merges, and a signal that is red on every merge is a signal nobody
+# reads on the day it matters.
 #
-# `schedule` and `workflow_dispatch` are read **only from the default branch**.
-# The default branch here is `main`, 885 commits behind, so until this file
-# reaches it BOTH are inert — the cron will not fire and the workflow will not
-# appear in the Actions dispatch list. This is stated rather than quietly
-# accepted because it is exactly how `deploy-dev.yml` died: commit ab2d164
-# moved it to a `workflow_run` trigger that only the default branch is read
-# for, and it has not auto-run since 2026-06-10. They are kept here so they
-# start working by themselves when `main` catches up; do not read a silent
-# `miniapp-drift` as a clean pilot until `gh run list --workflow=miniapp-drift.yml`
-# shows scheduled runs.
+# So it now runs AFTER the deploy, not after the push. `workflow_run` fires
+# when `deploy-dev` completes; the job's `if` then throws away everything that
+# is not a successful deploy, so a deploy that was skipped (red `ci`) or that
+# refused to run (deploy target not configured) does not produce a red guard
+# for a publication that never happened.
+#
+# ### On `workflow_run`, `schedule` and `workflow_dispatch` being read only
+# ### from the default branch
+#
+# True, and harmless here: **the default branch of this repository is `dev`**
+# (`GET /repos/AndreyDeveloper84/ai-bot-platform` -> `defaultBranchRef: dev`;
+# there is no `main` branch at all). The previous version of this comment said
+# the default branch was `main`, 885 commits behind, and that `schedule` and
+# `workflow_dispatch` were therefore inert. That was already false when it was
+# written: runs 34122285699 and 34219941064 are `event: schedule` on
+# `headBranch: dev`, and `deploy-dev` has been auto-running on `workflow_run`
+# all along. `docs/runbooks/miniapp-deploy.md` §6.1 records the same
+# correction from the deploy side.
+#
+# That also disposes of the obvious worry about this change: moving to
+# `workflow_run` is NOT a repeat of how `deploy-dev` died in commit ab2d164.
+# It died because the default branch was `main` back then. It is `dev` now, and
+# `deploy-dev` itself is the standing proof that `workflow_run` fires.
 on:
-  push:
+  workflow_run:
+    workflows: ["deploy-dev"]
+    types: [completed]
     branches: [dev]
-    paths:
-      - "apps/miniapp/**"
   # Catches the drift no commit causes: a host rebuilt from a stale checkout,
   # a release rolled back and never rolled forward, a directory restored from
-  # a backup. Nothing in the repository moves in those cases, so only a
-  # wall-clock trigger can notice. Inert until this file is on `main` — see above.
+  # a backup. Nothing in the repository moves in those cases and no deploy
+  # runs, so only a wall-clock trigger can notice. This is the trigger that
+  # carries the guarantee stated in the header above, and it is why that header
+  # is still true once the `push` trigger is gone.
   schedule:
     - cron: "17 6 * * *"
   workflow_dispatch:
@@ -85,23 +108,40 @@ jobs:
     name: served bundle matches sources
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    # A deploy that did not happen must not produce a red guard. `deploy-dev`
+    # ends in exactly three ways and only one of them published anything:
+    #   success  — it deployed. Check the pilot.
+    #   skipped  — `ci` was red, so every job was gated off. Nothing shipped.
+    #   failure  — it tried and could not, including the named
+    #              "deploy target not configured" job (DRF-1605). Nothing shipped.
+    # Comparing the pilot against `dev` after the last two would report drift
+    # the deploy pipeline has already reported itself, in a workflow whose whole
+    # job is to be believed when it goes red.
+    if: >-
+      github.event_name != 'workflow_run'
+      || github.event.workflow_run.conclusion == 'success'
 
     steps:
       # `dev` is the branch the pilot deploys from, so that is what the live
-      # site must be compared against. A scheduled run would otherwise check
-      # out the default branch — `main`, 885 commits behind — and diff the
-      # pilot against ancient sources.
+      # site must be compared against. `workflow_run` and `schedule` runs are
+      # attributed to the default branch and a `workflow_dispatch` can come from
+      # anywhere, so the ref is pinned explicitly rather than inherited.
+      #
+      # `workflow_dispatch` is the deliberate exception: it checks out the ref it
+      # was dispatched on, which is what makes it possible to exercise a change
+      # to this workflow from a branch before merging it (that is how DRF-1605
+      # was proved). Dispatching from a feature branch therefore compares the
+      # pilot against THAT branch — intended, and worth knowing before reading
+      # the result.
       #
       # Resolving this with a `git checkout dev` step instead was tried and is
       # wrong: it replaces the whole working tree, including
-      # tools/ci/miniapp_bundle_drift.py, which on a pull_request run does not
-      # exist on `dev` yet. The checkout action's `ref` selects the commit
-      # without ever discarding the code being run.
+      # tools/ci/miniapp_bundle_drift.py. The checkout action's `ref` selects the
+      # commit without ever discarding the code being run.
       - uses: actions/checkout@v4
         with:
           ref: >-
-            ${{ (github.event_name == 'push' || github.event_name == 'pull_request')
-                && github.ref || 'dev' }}
+            ${{ github.event_name == 'workflow_dispatch' && github.ref || 'dev' }}
 
       - name: Show what is being compared
         run: echo "::notice::comparing the pilot against $(git rev-parse --short HEAD)"

@@ -3,10 +3,42 @@
 # Activated 2026-06 (was the DRF-891 skeleton). Runs ONLY after the `ci`
 # workflow succeeds on `dev`, so a red build never deploys.
 #
-# ### Inert until configured
-# The first step is a guard: if `DEV_HOST` is unset the whole job is a clean
-# no-op (a green check, NOT a red pipeline). Nothing deploys until the
-# operator lands the repo secrets + bootstraps the box.
+# ### Three outcomes, three different symbols (DRF-1605)
+# `deploy-dev: success` used to mean one of two things — "the pilot was
+# updated" or "there was nowhere to update", because an unset `DEV_HOST`
+# produced a clean green no-op. Those are not the same event and a green check
+# is not allowed to stand for both. `OPEN_DECISIONS` §78: every skip must have
+# a name.
+#
+#   success  — it deployed. The pilot is running this commit.
+#   skipped  — `ci` was red (or this was not a green `ci` run), so no job ran
+#              at all. Nothing was attempted, nothing shipped.
+#   failure  — it tried and could not. That now INCLUDES an unset `DEV_HOST`:
+#              the job `deploy target NOT configured` names the outcome and
+#              exits non-zero.
+#
+# All three are readable in `gh run list` from the conclusion alone, without
+# opening a single log.
+#
+# ### Why "not configured" is red and not green (§79, приём 2)
+# §79 says to ask first whether the skip can be avoided altogether. It can:
+# the June guard ("a green check, NOT a red pipeline") was written for the
+# weeks when the secrets deliberately did not exist yet (DRF-891). They exist,
+# and this workflow has been deploying since 2026-06. A deploy pipeline with
+# nowhere to deploy is a defect, not a resting state, so it reports as one.
+#
+# A literally `skipped` run is not reachable here and the reason is worth
+# writing down so nobody tries again: the `secrets` context is NOT available
+# in `jobs.<id>.if` (only `github`, `needs`, `vars`, `inputs`), so the presence
+# of `DEV_HOST` can only be discovered from inside a job that already ran — and
+# a run holding one successful job plus one skipped job concludes `success`,
+# which is the exact symbol being taken away. `cancelled` was rejected too: it
+# already carries two meanings in this repository (§77 — the `*-docs-skip`
+# self-cancel, and a run superseded by a newer push), and a third meaning on
+# the same symbol would recreate this very defect somewhere else.
+#
+# Switching the decision costs one line: `exit 1` -> `exit 0` in the
+# `not-configured` job. The name of the skip survives either way.
 #
 # ### Operator prerequisites (one-time, DRF-891)
 # Repo → Settings → Secrets and variables → Actions:
@@ -42,30 +74,59 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  deploy:
-    name: deploy-dev
+  # Its own job for one reason: the answer has to be visible before anything
+  # else runs, and `secrets` cannot be read from a job-level `if`. It reads the
+  # deploy target and says nothing else.
+  preflight:
+    name: is there anywhere to deploy?
     runs-on: ubuntu-latest
-    timeout-minutes: 15
-    # Deploy only a green CI run (or a manual dispatch).
+    timeout-minutes: 5
+    # Deploy only a green CI run (or a manual dispatch). When this is false
+    # every job below is gated off with it and the whole run concludes
+    # `skipped` — "nothing was attempted", which is true and is its own symbol.
     if: >-
       github.event_name == 'workflow_dispatch' ||
       github.event.workflow_run.conclusion == 'success'
-
+    outputs:
+      ready: ${{ steps.guard.outputs.ready }}
     steps:
-      - name: Guard — no-op if deploy secrets are unset
+      - name: Read the deploy target
         id: guard
         env:
           DEV_HOST: ${{ secrets.DEV_HOST }}
         run: |
           if [ -z "${DEV_HOST}" ]; then
-            echo "::notice::DEV_HOST not set — deploy-dev is inert (secrets + bootstrap pending DRF-891). No-op."
             echo "ready=false" >> "$GITHUB_OUTPUT"
+            echo "::warning title=deploy target not configured::DEV_HOST is empty — nothing will be deployed. The run will end red, by design (DRF-1605)."
           else
             echo "ready=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::deploy target configured — deploying"
           fi
 
+  # The outcome that used to hide inside a green check. It exists so that
+  # "nothing was deployed" has a name of its own in the job list and a
+  # conclusion of its own in `gh run list`. See the header for why it is red.
+  not-configured:
+    name: deploy target NOT configured — nothing was deployed
+    needs: preflight
+    if: needs.preflight.outputs.ready != 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Say what did not happen
+        run: |
+          echo "::error title=deploy-dev deployed nothing::DEV_HOST is not set, so no host was contacted, no image was rebuilt and no Mini App bundle was shipped. The pilot is still running whatever it was running before this run. Set DEV_HOST / DEV_USER / DEV_SSH_KEY / DEV_DEPLOY_PATH (DRF-891) — or, if this repository is deliberately not wired to a host, change this job's exit code (DRF-1605)."
+          exit 1
+
+  deploy:
+    name: deploy-dev
+    needs: preflight
+    if: needs.preflight.outputs.ready == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
       - name: Configure SSH
-        if: steps.guard.outputs.ready == 'true'
         env:
           DEV_SSH_KEY: ${{ secrets.DEV_SSH_KEY }}
           DEV_HOST: ${{ secrets.DEV_HOST }}
@@ -76,7 +137,6 @@ jobs:
           ssh-keyscan -H "${DEV_HOST}" >> ~/.ssh/known_hosts 2>/dev/null
 
       - name: Pull + rebuild + restart dev services
-        if: steps.guard.outputs.ready == 'true'
         env:
           DEV_HOST: ${{ secrets.DEV_HOST }}
           DEV_USER: ${{ secrets.DEV_USER }}
@@ -132,13 +192,11 @@ jobs:
       # одну вещь, которая молча разъедется с версией из CI. На раннере
       # окружение фиксировано и совпадает с тем, в котором PR проходил проверки.
       - name: Checkout dev (для сборки Mini App)
-        if: steps.guard.outputs.ready == 'true'
         uses: actions/checkout@v4
         with:
           ref: dev
 
       - name: Node 20
-        if: steps.guard.outputs.ready == 'true'
         uses: actions/setup-node@v4
         with:
           node-version: '20'
@@ -146,7 +204,6 @@ jobs:
           cache-dependency-path: apps/miniapp/package-lock.json
 
       - name: Build Mini App on the runner
-        if: steps.guard.outputs.ready == 'true'
         working-directory: apps/miniapp
         run: |
           npm ci --no-audit --no-fund
@@ -166,7 +223,6 @@ jobs:
       # не лежит на диске целиком. Прежний остаётся в dist.prev для отката:
       #   mv dist dist.broken && mv dist.prev dist
       - name: Ship Mini App to the box and swap
-        if: steps.guard.outputs.ready == 'true'
         env:
           DEV_HOST: ${{ secrets.DEV_HOST }}
           DEV_USER: ${{ secrets.DEV_USER }}
@@ -186,7 +242,6 @@ jobs:
       # новый код. Информационный: nginx и сборка — разные отказы, путать их не
       # надо, поэтому выкладку не валит.
       - name: Smoke — Mini App answers over https
-        if: steps.guard.outputs.ready == 'true'
         continue-on-error: true
         run: |
           B=$(curl -fsS https://miniapp-dev.gobeauty.site/ | grep -oE 'index-[A-Za-z0-9_-]+[.]js' | head -1)
@@ -200,7 +255,6 @@ jobs:
           fi
 
       - name: Smoke — /readyz/ on dev (port 8014)
-        if: steps.guard.outputs.ready == 'true'
         env:
           DEV_HOST: ${{ secrets.DEV_HOST }}
           DEV_USER: ${{ secrets.DEV_USER }}
@@ -216,7 +270,6 @@ jobs:
           "
 
       - name: Telegram smoke alert (informational)
-        if: steps.guard.outputs.ready == 'true'
         continue-on-error: true
         env:
           DEV_HOST: ${{ secrets.DEV_HOST }}
