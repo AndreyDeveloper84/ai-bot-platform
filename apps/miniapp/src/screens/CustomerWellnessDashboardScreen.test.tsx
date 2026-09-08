@@ -210,7 +210,15 @@ describe("CustomerWellnessDashboardScreen — the home surface", () => {
     mockedBrowse.mockResolvedValue({
       services: [PEDIKYUR],
       masters: [],
-      picks: [{ serviceId: "svc-2", reasons: ["Свободно раньше всех остальных"] }],
+      picks: [
+        {
+          serviceId: "svc-2",
+          tier: 1,
+          rank: 1,
+          reasonCodes: ["EXEC_SLOT_CONFIRMED_IN_WINDOW"],
+          reasons: ["Есть свободное время в нужном окне"],
+        },
+      ],
     });
     await renderScreen(false);
     expect(
@@ -218,7 +226,7 @@ describe("CustomerWellnessDashboardScreen — the home surface", () => {
     ).toBeInTheDocument();
     expect(screen.getByText("Педикюр")).toBeInTheDocument();
     expect(screen.getByText(/2 200 ₽/)).toBeInTheDocument();
-    expect(screen.getByText("Свободно раньше всех остальных")).toBeInTheDocument();
+    expect(screen.getByText("Есть свободное время в нужном окне")).toBeInTheDocument();
   });
 
   // Owner ruling 25.08 — same gate on the second branded surface.
