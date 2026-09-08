@@ -853,3 +853,97 @@ describe("три пустоты различаются кодом, а не пу�
     ).toBeNull();
   });
 });
+
+// --- Кандидаты, которых полка не умеет, перестают называться OK ------------
+//
+// Замер 08.09.2026: источник отдаёт `kind=PROVIDER` с ключами Ayla
+// (`users/recommendation_source.py:209`), полка умеет `kind=SERVICE` с
+// ключами зеркала (`apps/miniapp_api/views.py:695`). Без имени это
+// состояние выглядит как `OK` с пустой полкой — и всплывает не тогда,
+// когда возникло, а через недели, когда кто-то разметит связи и будет
+// ждать, что полка загорится.
+//
+// Единственный из исходов, где виноват ПОТРЕБИТЕЛЬ, а не источник.
+
+describe("UNRENDERABLE_CANDIDATES — «нам прислали то, чего мы не умеем»", () => {
+  beforeEach(() => {
+    mockedFetchServices.mockResolvedValue({
+      services: [service({ id: "svc-1", name: "Маникюр" })],
+    });
+    mockedFetchMasters.mockResolvedValue({ masters: [MASTER] });
+  });
+
+  function provider(id: string, rank: number): unknown {
+    return {
+      candidate: { kind: "PROVIDER", id },
+      rank,
+      tier: 1,
+      reason_codes: ["MATCH_SERVICE_EXACT"],
+    };
+  }
+
+  it("решение из одних мастеров не выдаётся за OK и не молчит", async () => {
+    mockedFetchRecommendations.mockResolvedValue(
+      decision([provider("ayla-mst-1", 1), provider("ayla-mst-2", 2)]),
+    );
+    const data = await getCatalogBrowse();
+
+    expect(data.picksOutcome).toBe("UNRENDERABLE_CANDIDATES");
+    expect(data.picks).toEqual([]);
+
+    expect(consoleErrorSpy).toHaveBeenCalledTimes(1);
+    const message = String(consoleErrorSpy.mock.calls[0]![0]);
+    // Названо И сколько пришло, И какого вида — чинить будут по этому.
+    expect(message).toContain("2 кандидат");
+    expect(message).toContain("PROVIDER");
+    // Ключей и имён в журнале нет: он в консоли самого человека.
+    expect(message).not.toContain("ayla-mst-1");
+  });
+
+  it("услуга не из зеркала — тот же случай: показать её нечем", async () => {
+    mockedFetchRecommendations.mockResolvedValue(
+      decision([candidate("ayla-svc-42", { reason_codes: ["MATCH_SERVICE_EXACT"] })]),
+    );
+    const data = await getCatalogBrowse();
+    expect(data.picksOutcome).toBe("UNRENDERABLE_CANDIDATES");
+    expect(data.picks).toEqual([]);
+  });
+
+  it("частичная отрисуемость тревогой НЕ является", async () => {
+    // Два кандидата, один наш. Полка показывает своего и молчит: тревога
+    // здесь — про ПОЛНУЮ неспособность, а не про смешанный ответ.
+    mockedFetchRecommendations.mockResolvedValue(
+      decision([
+        provider("ayla-mst-1", 1),
+        candidate("svc-1", { rank: 2, reason_codes: ["MATCH_SERVICE_EXACT"] }),
+      ]),
+    );
+    const data = await getCatalogBrowse();
+    expect(data.picksOutcome).toBe("OK");
+    expect(data.picks.map((p) => p.serviceId)).toEqual(["svc-1"]);
+    expect(consoleErrorSpy).not.toHaveBeenCalled();
+  });
+
+  it("гейт WHY владельца остаётся ТИХИМ и остаётся OK", async () => {
+    // Кандидат наш и отрисуем, но объяснить его нечем. Это решение
+    // владельца 25.08, а не наша неспособность: имени у него нет и шума
+    // тоже. Пара к предыдущему тесту: без неё «громко» расползлось бы
+    // на соседнее состояние.
+    mockedFetchRecommendations.mockResolvedValue(
+      decision([candidate("svc-1", { reason_codes: ["MATCH_UNDETERMINED"] })]),
+    );
+    const data = await getCatalogBrowse();
+    expect(data.picksOutcome).toBe("OK");
+    expect(data.picks).toEqual([]);
+    expect(consoleErrorSpy).not.toHaveBeenCalled();
+  });
+
+  it("пустой ordered тревогу не поднимает — там свои имена", async () => {
+    mockedFetchRecommendations.mockResolvedValue(
+      decision([], { reason_codes: ["ELIG_EXCLUDED_NOT_RECOMMENDABLE"] }),
+    );
+    const data = await getCatalogBrowse();
+    expect(data.picksOutcome).toBe("NO_VERIFIED_CANDIDATES");
+    expect(consoleErrorSpy).not.toHaveBeenCalled();
+  });
+});
