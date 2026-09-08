@@ -104,9 +104,7 @@ def _awaiting_qs():  # type: ignore[no-untyped-def]
     ``objects``, а не ``all_tenants``.
     """
 
-    return CatalogMaster.objects.filter(AWAITING_VERIFICATION).exclude(
-        verification.live_invite_q()
-    )
+    return CatalogMaster.objects.filter(AWAITING_VERIFICATION).exclude(verification.live_invite_q())
 
 
 def _named_qs():  # type: ignore[no-untyped-def]
@@ -214,9 +212,7 @@ def _verify(request: HttpRequest) -> HttpResponse:
     # чужого салона или несуществующие. Их НЕЛЬЗЯ проглотить молча
     # (§78): владелица назвала имя и обязана узнать, что оно не было
     # обработано, а не увидеть «подтверждено: 0» без объяснения.
-    not_eligible = (
-        0 if raw_ids is None else len({str(i) for i in raw_ids}) - len(selected)
-    )
+    not_eligible = 0 if raw_ids is None else len({str(i) for i in raw_ids}) - len(selected)
 
     outcome = verification.verify_masters_by_salon(selected, actor=actor)
 

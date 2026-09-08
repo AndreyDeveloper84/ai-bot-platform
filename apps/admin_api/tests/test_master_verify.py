@@ -154,9 +154,7 @@ class TestGateOpens:
             m.refresh_from_db()
             assert is_available(m) is True
 
-    def test_second_press_is_skip_not_second_journal_row(
-        self, client, owner_bot_user, tenant
-    ):
+    def test_second_press_is_skip_not_second_journal_row(self, client, owner_bot_user, tenant):
         master = _synced_master(tenant)
         _post(client, {"master_ids": [str(master.id)]})
 
@@ -181,9 +179,7 @@ class TestQueue:
         assert [i["id"] for i in body["items"]] == [str(master.id)]
         assert body["items"][0]["name"] == master.name
 
-    def test_queue_does_not_promise_archived_or_inactive(
-        self, client, owner_bot_user, tenant
-    ):
+    def test_queue_does_not_promise_archived_or_inactive(self, client, owner_bot_user, tenant):
         now = datetime.now(tz=dt_timezone.utc)
         _synced_master(tenant, name="В архиве", external_id=521, archived_at=now)
         _synced_master(tenant, name="Снята", external_id=522, is_active=False)
@@ -234,9 +230,7 @@ class TestTwoPathsNotOneLoophole:
     закреплено.
     """
 
-    def test_live_invite_is_refused_by_name_not_by_silence(
-        self, client, owner_bot_user, tenant
-    ):
+    def test_live_invite_is_refused_by_name_not_by_silence(self, client, owner_bot_user, tenant):
         invited = _invited_master(tenant)
 
         resp = _post(client, {"master_ids": [str(invited.id)]})
@@ -320,9 +314,7 @@ class TestNoSilentSkips:
         assert resp.status_code == 200, resp.content
         assert resp.json()["not_eligible"] == 1
 
-    def test_the_same_id_twice_is_one_master_not_one_skip(
-        self, client, owner_bot_user, tenant
-    ):
+    def test_the_same_id_twice_is_one_master_not_one_skip(self, client, owner_bot_user, tenant):
         """Дубль в списке — не пропуск.
 
         Считай ``not_eligible`` длиной списка, и повторно названный
@@ -385,9 +377,7 @@ class TestWhoMayPress:
         master.refresh_from_db()
         assert master.invite_status == CatalogMaster.InviteStatus.PENDING
 
-    def test_receptionist_is_refused_at_the_door(
-        self, client, receptionist_bot_user, tenant
-    ):
+    def test_receptionist_is_refused_at_the_door(self, client, receptionist_bot_user, tenant):
         _synced_master(tenant)
 
         assert _get(client, user_id="5003").status_code == 403
@@ -411,9 +401,7 @@ class TestRequestShape:
         resp = _post(client, {"master_ids": "not-a-list"})
         assert resp.status_code == 400, resp.content
 
-    def test_empty_master_ids_is_refused_not_read_as_all(
-        self, client, owner_bot_user, tenant
-    ):
+    def test_empty_master_ids_is_refused_not_read_as_all(self, client, owner_bot_user, tenant):
         """``[]`` и «поле не передано» — разные намерения.
 
         Пустой список, прочитанный как «все», подтвердил бы весь салон
