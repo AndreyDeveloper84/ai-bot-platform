@@ -29,10 +29,21 @@
 #
 # ### Expected behaviour after a Mini App change merges
 # Publication is no longer manual: `deploy-dev.yml` builds the Mini App on the
-# runner and ships it to the box on every green `ci` on `dev` (DRF-1538), so
-# the normal case is a red for the minutes between the two runs, going green
-# on its own. A red that PERSISTS is the real signal — the deploy did not run,
-# its ship step failed, or the box is serving something nobody built from
+# runner and ships it to the box on every green `ci` on `dev` (DRF-1538).
+#
+# This paragraph used to end differently, and the difference is DRF-1605. It
+# said the normal case was "a red for the minutes between the two runs, going
+# green on its own", and that only a PERSISTING red was the real signal. That
+# concession is what killed the workflow's usefulness: the window was not
+# minutes but 25-40, every merge opened one, and nothing re-ran the guard when
+# it closed — so the transient red never went green on its own and eleven of
+# twelve runs were red. A guard whose normal state is red is not read.
+#
+# There is no such window any more, because the guard no longer runs during it.
+# It runs when the deploy is finished and only when the deploy succeeded, so
+# **every** red here now means what a red was always supposed to mean: the
+# deploy claims it published, and the pilot says otherwise — the deploy's ship
+# step failed silently, or the box is serving something nobody built from
 # `dev`. That is the defect this workflow exists to make visible, and it is
 # still the only place it is visible.
 
