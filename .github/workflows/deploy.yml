@@ -16,14 +16,25 @@
 #    code only. Any change to skill dispatch / pipeline / scope enforcement
 #    requires `canary-pause` label + Lead approval.
 #
-# ### Setup status
-# This is the **bootstrap version** of the workflow. Real machinery
-# activates when DRF-891 closes:
-# - DRF-891 task 2: branch protection enforced
-# - DRF-891 task 4: GitHub secrets PROD_HOST / PROD_USER / PROD_SSH_KEY
-# - DRF-891 task 5+ done
+# ### Machinery — activated under DRF-1578
+# This workflow spent its first months as a bootstrap skeleton: it printed
+# what WOULD deploy and went green. DRF-891 (closed) had landed the
+# prerequisites — branch protection + PROD_* secrets — and the activation
+# comment kept pointing at that closed number, so the defect had no open
+# line of its own (OPEN_DECISIONS §68). DRF-1578 activates the machinery:
+# SSH, Postgres backup with a dump-size check BEFORE anything changes on
+# the box, pull + recreate, /readyz/ smoke, Telegram alert.
 #
-# Until then, workflow exercises trigger graph + prints what WOULD deploy.
+# ### Inert until configured (same contract as deploy-dev.yml)
+# The first step is a guard: if `PROD_HOST` is unset every deploy step is
+# skipped and the run says so in a ::notice:: — a visible no-op, not a
+# green check that hides doing nothing.
+#
+# Secrets (repo → Settings → Secrets and variables → Actions):
+#   PROD_HOST         prod box hostname/IP
+#   PROD_USER         ssh user with docker rights
+#   PROD_SSH_KEY      private key contents for that user
+#   PROD_DEPLOY_PATH  repo checkout on the box (e.g. /home/ops/ai-bot-platform)
 
 name: deploy
 
@@ -46,6 +57,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Guard — no-op if deploy secrets are unset
+        id: guard
+        env:
+          PROD_HOST: ${{ secrets.PROD_HOST }}
+        run: |
+          if [ -z "${PROD_HOST}" ]; then
+            echo "::notice::PROD_HOST not set — deploy-prod is inert (secrets pending). No-op: nothing was deployed, nothing was backed up."
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Pre-flight check — was this on dev?
         run: |
           echo "::notice::deploy-prod triggered for ${{ github.ref }} @ ${{ github.sha }}"
@@ -54,73 +77,90 @@ jobs:
           # in PR description). Sprint 11+ can automate this via a check
           # that queries dev's audit log for first-seen-on-dev timestamp.
 
-      # ─── ACTIVATE AFTER DRF-891 SECRETS LAND ───
-      # - name: Configure SSH
-      #   env:
-      #     PROD_SSH_KEY: ${{ secrets.PROD_SSH_KEY }}
-      #   run: |
-      #     mkdir -p ~/.ssh
-      #     echo "$PROD_SSH_KEY" > ~/.ssh/prod_deploy
-      #     chmod 600 ~/.ssh/prod_deploy
-      #     ssh-keyscan -H ${{ secrets.PROD_HOST }} >> ~/.ssh/known_hosts
-      #
-      # - name: Postgres backup before deploy
-      #   env:
-      #     PROD_HOST: ${{ secrets.PROD_HOST }}
-      #     PROD_USER: ${{ secrets.PROD_USER }}
-      #   run: |
-      #     ssh -i ~/.ssh/prod_deploy "$PROD_USER@$PROD_HOST" bash -lc "
-      #       set -e
-      #       BACKUP_PATH=/var/backups/ai-bot-platform/pre-deploy-\$(date +%Y%m%d-%H%M%S).sql.gz
-      #       sudo docker compose -p ai-bot-platform exec -T postgres \
-      #         pg_dump -U platform ai_bot_platform | gzip > \$BACKUP_PATH
-      #       # Size sanity check — empty backups are deploy-blockers.
-      #       test \$(stat -c%s \$BACKUP_PATH) -ge 1024 || { echo 'backup too small'; exit 1; }
-      #       echo \"Backup: \$BACKUP_PATH\"
-      #     "
-      #
-      # - name: Pull + restart prod services
-      #   env:
-      #     PROD_HOST: ${{ secrets.PROD_HOST }}
-      #     PROD_USER: ${{ secrets.PROD_USER }}
-      #     PROD_DEPLOY_PATH: ${{ secrets.PROD_DEPLOY_PATH }}
-      #   run: |
-      #     ssh -i ~/.ssh/prod_deploy "$PROD_USER@$PROD_HOST" bash -lc "
-      #       set -e
-      #       cd $PROD_DEPLOY_PATH
-      #       git fetch origin
-      #       git checkout main
-      #       git pull origin main
-      #       sudo docker compose --env-file /etc/ai-bot-platform/.env \
-      #         -p ai-bot-platform up -d --force-recreate --no-deps web worker
-      #     "
-      #
-      # - name: Smoke /readyz/ on prod
-      #   env:
-      #     PROD_HOST: ${{ secrets.PROD_HOST }}
-      #     PROD_USER: ${{ secrets.PROD_USER }}
-      #   run: |
-      #     for i in 1 2 3 4 5; do
-      #       if ssh -i ~/.ssh/prod_deploy "$PROD_USER@$PROD_HOST" \
-      #            'curl -fsS http://127.0.0.1:8003/readyz/'; then
-      #         echo "::notice::readyz green attempt $i"
-      #         exit 0
-      #       fi
-      #       sleep 10
-      #     done
-      #     echo "::error::readyz red after 5 attempts — investigate"
-      #     exit 1
-      #
-      # - name: Telegram alert — prod deploy complete
-      #   env:
-      #     PROD_HOST: ${{ secrets.PROD_HOST }}
-      #     PROD_USER: ${{ secrets.PROD_USER }}
-      #     PROD_DEPLOY_PATH: ${{ secrets.PROD_DEPLOY_PATH }}
-      #   run: |
-      #     ssh -i ~/.ssh/prod_deploy "$PROD_USER@$PROD_HOST" bash -lc "
-      #       cd $PROD_DEPLOY_PATH
-      #       sudo docker compose --env-file /etc/ai-bot-platform/.env \
-      #         -p ai-bot-platform exec -T web \
-      #         python manage.py smoke_alert --severity=warning \
-      #         --title='prod deploy' --body='${{ github.sha }} live'
-      #     "
+      - name: Configure SSH
+        if: steps.guard.outputs.ready == 'true'
+        env:
+          PROD_SSH_KEY: ${{ secrets.PROD_SSH_KEY }}
+          PROD_HOST: ${{ secrets.PROD_HOST }}
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "${PROD_SSH_KEY}" > ~/.ssh/prod_deploy
+          chmod 600 ~/.ssh/prod_deploy
+          ssh-keyscan -H "${PROD_HOST}" >> ~/.ssh/known_hosts 2>/dev/null
+
+      # The backup is the FIRST thing that touches the box: nothing below
+      # runs if the dump didn't land or came out suspiciously small. A prod
+      # deploy without a verified backup is the original defect (DRF-1578).
+      - name: Postgres backup before deploy
+        if: steps.guard.outputs.ready == 'true'
+        env:
+          PROD_HOST: ${{ secrets.PROD_HOST }}
+          PROD_USER: ${{ secrets.PROD_USER }}
+        run: |
+          ssh -i ~/.ssh/prod_deploy "${PROD_USER}@${PROD_HOST}" bash -lc "
+            set -euo pipefail
+            BACKUP_DIR=/var/backups/ai-bot-platform
+            BACKUP_PATH=\"\$BACKUP_DIR/pre-deploy-\$(date +%Y%m%d-%H%M%S).sql.gz\"
+            # /var/backups is root-owned on a stock box; tee under sudo so the
+            # first ever run can't die on the directory or the permissions.
+            sudo mkdir -p \"\$BACKUP_DIR\"
+            sudo docker compose -p ai-bot-platform exec -T postgres \
+              pg_dump -U platform ai_bot_platform | gzip | sudo tee \"\$BACKUP_PATH\" > /dev/null
+            # Size sanity check — empty backups are deploy-blockers.
+            SIZE=\$(sudo stat -c%s \"\$BACKUP_PATH\")
+            test \"\$SIZE\" -ge 1024 || { echo \"::error::backup too small (\$SIZE bytes) — aborting before any change on the box\"; exit 1; }
+            echo \"Backup: \$BACKUP_PATH (\$SIZE bytes)\"
+          "
+
+      - name: Pull + restart prod services
+        if: steps.guard.outputs.ready == 'true'
+        env:
+          PROD_HOST: ${{ secrets.PROD_HOST }}
+          PROD_USER: ${{ secrets.PROD_USER }}
+          PROD_DEPLOY_PATH: ${{ secrets.PROD_DEPLOY_PATH }}
+        run: |
+          ssh -i ~/.ssh/prod_deploy "${PROD_USER}@${PROD_HOST}" bash -lc "
+            set -euo pipefail
+            cd '${PROD_DEPLOY_PATH}'
+            git fetch origin
+            git checkout main
+            git pull origin main
+            sudo docker compose --env-file /etc/ai-bot-platform/.env \
+              -p ai-bot-platform up -d --force-recreate --no-deps web worker
+          "
+
+      - name: Smoke /readyz/ on prod
+        if: steps.guard.outputs.ready == 'true'
+        env:
+          PROD_HOST: ${{ secrets.PROD_HOST }}
+          PROD_USER: ${{ secrets.PROD_USER }}
+        run: |
+          for i in 1 2 3 4 5; do
+            if ssh -i ~/.ssh/prod_deploy "${PROD_USER}@${PROD_HOST}" \
+                 'curl -fsS http://127.0.0.1:8003/readyz/'; then
+              echo "::notice::readyz green attempt $i"
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "::error::readyz red after 5 attempts — investigate"
+          exit 1
+
+      # Informational: an alert that failed to send must not turn a
+      # successful deploy red (same call as deploy-dev.yml's smoke alert).
+      - name: Telegram alert — prod deploy complete
+        if: steps.guard.outputs.ready == 'true'
+        continue-on-error: true
+        env:
+          PROD_HOST: ${{ secrets.PROD_HOST }}
+          PROD_USER: ${{ secrets.PROD_USER }}
+          PROD_DEPLOY_PATH: ${{ secrets.PROD_DEPLOY_PATH }}
+          SHA: ${{ github.sha }}
+        run: |
+          ssh -i ~/.ssh/prod_deploy "${PROD_USER}@${PROD_HOST}" bash -lc "
+            cd '${PROD_DEPLOY_PATH}'
+            sudo docker compose --env-file /etc/ai-bot-platform/.env \
+              -p ai-bot-platform exec -T web \
+              python manage.py smoke_alert --severity=warning \
+              --title='prod deploy' --body='${SHA} live' || true
+          "
