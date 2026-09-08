@@ -83,6 +83,9 @@ class TestPackagedArtifact:
         unknown = {rule.kind for rule in registry.rules if rule.status == "UNKNOWN"}
         assert unsupported == {"REPETITION", "COMPATIBILITY", "INCOMPATIBILITY"}
         assert len(unknown) == 10
+        # presence перед отсутствием (negative_assert_guard): «нет KNOWN»
+        # осмысленно только когда записи вообще есть.
+        assert len(registry.rules) == 13
         assert not any(rule.status == "KNOWN" for rule in registry.rules)
 
     def test_unknown_carries_reason_shape_not_value(self):
