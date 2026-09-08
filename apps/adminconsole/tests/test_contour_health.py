@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+import uuid
 from datetime import timedelta
 
 import pytest
@@ -77,6 +78,28 @@ def _mirror_masters(tenant: Tenant, count: int) -> None:
     moment = timezone.now()
     CatalogMaster.all_tenants.bulk_create(
         CatalogMaster(tenant=tenant, name=f"Мастер {i}", external_updated_at=moment)
+        for i in range(count)
+    )
+
+
+def _admitted_masters(tenant: Tenant, count: int, *, linked: bool) -> None:
+    """Мастера, принятые салоном; ``linked`` — есть ли канонический ключ Ayla.
+
+    Без ключа строка административно в полном порядке и всё равно не
+    продаётся (``ayla_unlinked``, DRF-1540) — это форма, в которой
+    ``solo_onboarding`` создаёт соло-мастера.
+    """
+    moment = timezone.now()
+    CatalogMaster.all_tenants.bulk_create(
+        CatalogMaster(
+            tenant=tenant,
+            name=f"Мастер {i}",
+            external_updated_at=moment,
+            invite_status=CatalogMaster.InviteStatus.ACCEPTED,
+            is_active=True,
+            ayla_user_id=uuid.uuid4() if linked else None,
+            accepted_at=moment if linked else None,
+        )
         for i in range(count)
     )
 
@@ -189,6 +212,70 @@ class TestMirrorDivergence:
         assert ">3</td>" in page
         assert "Бэкенд не опрошен" in page
         assert "расходится с бэкендом" not in page
+
+
+class TestTenantVisibility:
+    """Салон, принявший мастеров и не показывающий клиенту никого, кричит.
+
+    Пятый молчаливый сбой (DRF-1540). Он не ловится ни одним из четырёх
+    предыдущих: синхронизация свежая, зеркало сходится с бэкендом строка
+    в строку — гейт продажи стоит ПОСЛЕ зеркала, и до чисел источника
+    ему дела нет. Поэтому оба теста ниже держат остальные сигналы
+    зелёными: если бы кричал сосед, крик читался бы как чужой.
+    """
+
+    def test_admitted_but_unlinked_tenant_screams(
+        self, salon: Tenant, login_as, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _sync_age(salon, minutes=5)
+        _admitted_masters(salon, 2, linked=False)
+        client = login_as("smotryashchiy", "viewer")
+
+        response = _view_with_counter(monkeypatch, client, FakeCounter(services=0, masters=2))
+        page = response.content.decode()
+
+        assert "НЕВИДИМ ЦЕЛИКОМ" in page
+        assert "клиент не увидит никого" in page
+        # Причина, а не только число: оператору незачем искать её заново.
+        assert "ayla_unlinked" in page
+        # Соседние сигналы молчат — крик именно про видимость.
+        assert "ОТСТАЁТ" not in page
+        assert "расходится с бэкендом" not in page
+
+    def test_one_linked_master_keeps_the_tenant_visible(
+        self, salon: Tenant, login_as, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _sync_age(salon, minutes=5)
+        _admitted_masters(salon, 1, linked=False)
+        _admitted_masters(salon, 1, linked=True)
+        client = login_as("smotryashchiy", "viewer")
+
+        response = _view_with_counter(monkeypatch, client, FakeCounter(services=0, masters=2))
+        page = response.content.decode()
+
+        # Парная положительная стража: салон на экране есть, обе строки
+        # посчитаны, и одна непроданная сама по себе не крик.
+        assert "formula-tela" in page
+        assert "ayla_unlinked" in page
+        assert "виден" in page
+        assert "НЕВИДИМ ЦЕЛИКОМ" not in page
+        assert "клиент не увидит никого" not in page
+
+    def test_empty_tenant_does_not_scream(
+        self, salon: Tenant, login_as, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Незаполненный салон — не поломка; вечная краснота обесценила бы экран."""
+        _sync_age(salon, minutes=5)
+        client = login_as("smotryashchiy", "viewer")
+
+        response = _view_with_counter(monkeypatch, client, FakeCounter(services=0, masters=0))
+        page = response.content.decode()
+
+        # Стража присутствия: салон на экране есть и помечен пустым.
+        assert "formula-tela" in page
+        assert "пуст" in page
+        assert "НЕВИДИМ ЦЕЛИКОМ" not in page
+        assert "Молчаливых сбоев не видно" in page
 
 
 class TestHistoricalCase0409:

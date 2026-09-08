@@ -21,7 +21,7 @@ from apps.adminconsole.health import collect_report
 
 
 def contour_health(request: HttpRequest) -> HttpResponse:
-    """Сводный экран: свежесть каталога, расхождение зеркала, handoff, флаги."""
+    """Сводный экран: свежесть каталога, расхождение зеркала, видимость салонов, handoff, флаги."""
     if not (request.user.is_authenticated and request.user.is_staff):
         return HttpResponse("forbidden", status=403)
     report = collect_report()

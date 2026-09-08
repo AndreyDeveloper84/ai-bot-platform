@@ -30,7 +30,8 @@
 {% else %}
 <div class="health-banner ok">
   <strong>Молчаливых сбоев не видно.</strong>
-  Каталог свеж, зеркало сходится с бэкендом.
+  Каталог свеж, зеркало сходится с бэкендом, в каждом принятом салоне
+  есть кого показать клиенту.
 </div>
 {% endif %}
 
@@ -72,6 +73,31 @@
     <td>{{ div.mirror_masters }}</td>
     <td>{% if div.upstream_masters is None %}<span class="muted">?</span>{% else %}{{ div.upstream_masters }}{% endif %}</td>
     <td>{% if div.masters_gap is None %}<span class="muted">—</span>{% elif div.masters_gap %}<span class="gap">{{ div.masters_gap }}</span>{% else %}0{% endif %}</td>
+  </tr>
+  {% endfor %}
+</table>
+
+<h2>Кого видит клиент</h2>
+<p class="muted">
+  Мастера, принятые салоном, против мастеров, которых витрина продаёт.
+  Расхождение здесь — это НЕ отставание зеркала: строки на месте, их не
+  пускает гейт продажи (<code>apps.catalog.master_state.sale_block</code>).
+  Салон, где принято не ноль, а продаётся ноль, клиенту не показывает
+  никого — и клиенту причину не называет никто.
+</p>
+<table class="health">
+  <tr>
+    <th>Салон</th><th>Строк в зеркале</th><th>Принято</th><th>Продаётся</th>
+    <th>Почему не продаются</th><th>Состояние</th>
+  </tr>
+  {% for vis in report.visibility %}
+  <tr>
+    <td>{{ vis.slug }}</td>
+    <td>{{ vis.mirrored }}</td>
+    <td>{{ vis.admitted }}</td>
+    <td>{% if vis.invisible_whole %}<span class="gap">{{ vis.available }}</span>{% else %}{{ vis.available }}{% endif %}</td>
+    <td>{% if vis.blocks_human %}{{ vis.blocks_human }}{% else %}<span class="muted">—</span>{% endif %}</td>
+    <td>{% if vis.invisible_whole %}<span class="stale">НЕВИДИМ ЦЕЛИКОМ</span>{% elif vis.available %}<span class="fresh">виден</span>{% else %}<span class="muted">пуст</span>{% endif %}</td>
   </tr>
   {% endfor %}
 </table>
