@@ -71,7 +71,7 @@ from __future__ import annotations
 import logging
 
 from celery import shared_task  # type: ignore[import-untyped]
-from django.db.models import F
+from django.db.models import F, QuerySet
 
 from apps.catalog.services.sync import CatalogSyncService, SyncResult
 from apps.catalog.services.throttle import ThrottleWaitBudget
@@ -194,7 +194,7 @@ def sync_catalog_for_all_tenants() -> dict[str, int]:
     return counters
 
 
-def tenants_in_sync_order():
+def tenants_in_sync_order() -> "QuerySet[Tenant]":
     """Tenants ordered stalest-first — the fan-out's serving order.
 
     ``last_catalog_sync_ok_at`` ascending with NULLs first: a tenant that has
@@ -209,10 +209,15 @@ def tenants_in_sync_order():
     an order nobody chose, stable enough to punish the same salons forever.
     ``id`` is the UUID primary key, so it is unique and the sort is total.
 
-    Public (no leading underscore) so the ordering can be asserted directly
-    in tests: the behaviour that matters here is the ORDER, and a test that
-    only checks the resulting sync calls cannot tell a deliberate tie-break
-    from a lucky one.
+    A named function rather than an inline ``order_by`` on the loop: the
+    order is the fix, and burying it in the ``for`` line is how it went
+    missing in the first place.
+
+    The tests that defend this
+    (``apps/catalog/tests/test_beat_order_budget_drf1595.py``) assert the
+    order salons are actually SERVED in, not this queryset's shape — nothing
+    about the old code was malformed, it simply had no opinion, so only
+    behaviour can tell a deliberate tie-break from a lucky one.
     """
     return Tenant.objects.order_by(F("last_catalog_sync_ok_at").asc(nulls_first=True), "id")
 
