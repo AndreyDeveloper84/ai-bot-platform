@@ -676,12 +676,14 @@ class TestWellnessTodayDiaryEntries:
             )
         assert resp.status_code == 200
         data = resp.json()
-        # Отсутствие: пустого списка тут быть НЕ должно — он означал бы
-        # «мы спросили, и за день пусто».
+        # Положительная стража ВПЕРЕДИ отрицательной, на тех же данных:
+        # ответ пришёл и он не пустой — вода в нём есть. Без неё
+        # «ключа нет» доказывало бы что угодно, вплоть до пустого тела.
+        assert data["water_glasses_eaten"] == 4
+        # И только теперь отсутствие: пустого списка тут быть НЕ должно —
+        # он означал бы «мы спросили, и за день пусто».
         assert "entries" not in data
         assert "calories_eaten" not in data
-        # Положительная стража к тому же ответу: вода не пострадала.
-        assert data["water_glasses_eaten"] == 4
 
     def test_the_three_states_are_pairwise_distinguishable(self, client: Client, bot_user: BotUser):
         """Сведение любых двух состояний обязано краснить этот тест."""
@@ -776,14 +778,14 @@ class TestWellnessTodayNumbersHidden:
             )
         assert resp.status_code == 200
         data = resp.json()
-        # Отсутствие: `False` тут быть НЕ должно — это превратило бы
-        # «не смогли спросить» в разрешение показать калории тому, кому
-        # спека их показывать запрещает.
-        assert "nutrition_numbers_hidden" not in data
-        # Положительная стража к тому же ответу: остальные половины живы,
-        # то есть чтение профиля деградирует само по себе.
+        # Положительная стража ВПЕРЕДИ: остальные половины живы, то есть
+        # чтение профиля деградирует само по себе, а ответ не пуст.
         assert data["calories_eaten"] == 1240
         assert data["water_glasses_eaten"] == 4
+        # И только теперь отсутствие: `False` тут быть НЕ должно — это
+        # превратило бы «не смогли спросить» в разрешение показать
+        # калории тому, кому спека их показывать запрещает.
+        assert "nutrition_numbers_hidden" not in data
 
     def test_an_unexpected_profile_error_degrades_and_never_500s(
         self, client: Client, bot_user: BotUser
@@ -795,7 +797,11 @@ class TestWellnessTodayNumbersHidden:
                 _url(), HTTP_AUTHORIZATION=_init_data_header(bot_user.channel_user_id)
             )
         assert resp.status_code == 200
-        assert "nutrition_numbers_hidden" not in resp.json()
+        data = resp.json()
+        # Положительная стража ВПЕРЕДИ: неожиданная ошибка профиля не
+        # уронила соседние половины — дашборд остался дашбордом.
+        assert data["calories_eaten"] == 1240
+        assert "nutrition_numbers_hidden" not in data
 
     def test_the_raw_diagnosis_never_crosses_the_boundary(self, client: Client, bot_user: BotUser):
         """152-ФЗ: наружу идёт следствие, а не специальная категория."""
