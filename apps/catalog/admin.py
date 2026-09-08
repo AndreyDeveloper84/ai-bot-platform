@@ -21,6 +21,7 @@ from django.http import HttpRequest
 from django.shortcuts import render
 from django.utils import timezone
 
+from apps.adminconsole.theme import AylaAdminMedia, absent, badge
 from apps.catalog.master_state import is_available, sale_block
 from apps.catalog.models import (
     CatalogFaq,
@@ -34,10 +35,19 @@ from apps.catalog.services import verification
 from apps.catalog.tasks import sync_catalog_for_tenant
 
 
-class _MirrorAdminBase(admin.ModelAdmin):
+#: Как выглядит отсутствие значения на экранах каталога.
+#:
+#: Не «—» и не «0»: прочерк в колонке чисел читается как ноль, а ноль —
+#: как измеренный ноль. Ни то, ни другое не правда, когда значения просто
+#: нет (OPEN_DECISIONS §65 — «не подставлять значение вместо отсутствия»).
+_ABSENT = "нет данных"
+
+
+class _MirrorAdminBase(AylaAdminMedia, admin.ModelAdmin):
     list_filter = ("tenant", "external_updated_at")
     date_hierarchy = "external_updated_at"
     ordering = ("-external_updated_at",)
+    empty_value_display = _ABSENT
 
     def get_queryset(self, request):
         return self.model.all_tenants.all()
@@ -54,9 +64,70 @@ class _MirrorAdminBase(admin.ModelAdmin):
 
 @admin.register(CatalogService)
 class CatalogServiceAdmin(_MirrorAdminBase):
-    list_display = ("slug", "name", "tenant", "is_active", "is_popular", "synced_at")
+    list_display = ("name", "slug", "tenant", "is_active", "is_popular", "synced_at")
     search_fields = ("slug", "name", "external_id")
+    search_help_text = "Ищет по названию услуги, её коду и идентификатору в источнике."
+    # Экран и так только для чтения (``_MirrorAdminBase`` отказывает в
+    # change). Перечисление здесь ничего не открывает и ничего не
+    # закрывает — оно позволяет Django нарисовать в карточке поля,
+    # которые не редактируемы в принципе (``id``, ``synced_at``,
+    # ``external_updated_at``): без явного readonly Django отказывается
+    # включать их в fieldsets.
+    readonly_fields = tuple(f.name for f in CatalogService._meta.fields)
     actions = ("force_resync_selected_tenants",)
+    fieldsets = (
+        (
+            "Услуга",
+            {
+                "fields": ("name", "slug", "tenant", "short_description", "description"),
+                "description": (
+                    "Так услуга называется у клиента. Экран только для "
+                    "чтения: каталог — зеркало, правку затрёт следующий "
+                    "прогон синхронизации."
+                ),
+            },
+        ),
+        (
+            "Продажа",
+            {
+                "fields": (
+                    "price_from",
+                    "duration_min",
+                    "is_active",
+                    "is_popular",
+                    "goals",
+                ),
+                "description": (
+                    "«Продаётся» — то же поле, по которому услуга попадает клиенту в выдачу."
+                ),
+            },
+        ),
+        (
+            "Здоровье и противопоказания",
+            {"fields": ("requires_health_check", "contraindications")},
+        ),
+        (
+            "Служебное: синхронизация и SEO",
+            {
+                "classes": ("collapse",),
+                "fields": (
+                    "id",
+                    "external_id",
+                    "ayla_service_id",
+                    "external_updated_at",
+                    "synced_at",
+                    "cache_version",
+                    "seo_title",
+                    "seo_description",
+                    "raw",
+                ),
+                "description": (
+                    "Технические поля зеркала. Нужны, когда разбираешься, "
+                    "почему услуга приехала не такой, какой ждали."
+                ),
+            },
+        ),
+    )
 
     # DRF-1581, образец — DRF-1495 у зеркала KB: без ``permissions=``
     # Django отдаёт действие всякому, кто открыл экран, включая роль
@@ -125,7 +196,7 @@ class CatalogServiceAdmin(_MirrorAdminBase):
 class MasterArchivedFilter(admin.SimpleListFilter):
     """«В архиве / не в архиве» — по NULL в ``archived_at`` (DRF-1496)."""
 
-    title = "архив"
+    title = "архив мастера"
     parameter_name = "archived"
 
     def lookups(self, request, model_admin):  # type: ignore[no-untyped-def]
@@ -206,8 +277,8 @@ class CatalogMasterAdmin(_MirrorAdminBase):
     list_display = (
         "name",
         "tenant",
-        "invite_status",
-        "mode",
+        "invite_state",
+        "work_mode",
         "bookable",
         "bookable_note",
         "synced_at",
@@ -221,6 +292,9 @@ class CatalogMasterAdmin(_MirrorAdminBase):
         "external_updated_at",
     )
     search_fields = ("name", "specialization", "external_id", "max_handle")
+    search_help_text = (
+        "Ищет по имени мастера, специализации, нику в MAX и идентификатору в источнике."
+    )
     # DRF-1515: invite_token — действующий одноразовый ключ привязки мастера
     # (apps/master_api/auth.py → validate_invite_token). Экран read-only для
     # всех, значит значение печаталось бы каждому открывшему форму. Поле не
@@ -234,25 +308,75 @@ class CatalogMasterAdmin(_MirrorAdminBase):
     )
     fieldsets = (
         (
-            "Данные синхронизации",
+            "Мастер",
             {
                 "description": (
-                    "Эти поля перезаписывает каждый прогон синхронизации "
-                    "каталога — правка здесь была бы временной, поэтому "
-                    "они только для чтения."
+                    "Как мастера видит клиент. Эти поля перезаписывает "
+                    "каждый прогон синхронизации каталога — правка здесь "
+                    "была бы временной, поэтому они только для чтения."
                 ),
-                "fields": _SYNC_MANAGED_FIELDS,
+                "fields": ("name", "specialization", "bio", "experience"),
             },
         ),
         (
-            "Платформенное состояние",
+            "Репутация и активность",
             {
                 "description": (
-                    "Меняется действиями со страницы списка — верификацией "
-                    "и архивом. Каждое действие пишется в журнал с автором "
-                    "и причиной."
+                    "Тоже приезжает синхронизацией. «Активна по данным "
+                    "синхронизации» — это ответ источника, а не решение "
+                    "оператора: снятую активность чинят в источнике, не здесь."
                 ),
-                "fields": _PLATFORM_FIELDS,
+                "fields": ("rating", "review_count", "is_active"),
+            },
+        ),
+        (
+            "Приглашение и доступ",
+            {
+                "description": (
+                    "Платформенная часть: её синхронизация не трогает "
+                    "никогда. Меняется действиями со страницы списка — "
+                    "верификацией и отзывом приглашения. Каждое действие "
+                    "пишется в журнал с автором."
+                ),
+                "fields": (
+                    "invite_status",
+                    "mode",
+                    "max_handle",
+                    "linked_bot_user",
+                    "invited_at",
+                    "invite_expires_at",
+                    "accepted_at",
+                ),
+            },
+        ),
+        (
+            "Архив",
+            {
+                "description": (
+                    "Архив обязан иметь причину — «архивировал молча» не "
+                    "допускается, поэтому поля заполняет действие, а не форма."
+                ),
+                "fields": ("archived_at", "archive_reason"),
+            },
+        ),
+        (
+            "Служебное: связь с источниками",
+            {
+                "classes": ("collapse",),
+                "description": (
+                    "Технические идентификаторы и отметки синхронизации. "
+                    "Нужны, когда разбираешься, откуда приехало значение."
+                ),
+                "fields": (
+                    "tenant",
+                    "photo_url",
+                    "yclients_staff_id",
+                    "ayla_user_id",
+                    "external_id",
+                    "external_updated_at",
+                    "synced_at",
+                    "cache_version",
+                ),
             },
         ),
     )
@@ -267,6 +391,38 @@ class CatalogMasterAdmin(_MirrorAdminBase):
         # пустая — все поля readonly, изменить строку можно только
         # журналируемым действием.
         return request.user.has_perm("catalog.change_catalogmaster")
+
+    #: Состояние приглашения словами — и код рядом.
+    #:
+    #: Оба имени обязательны. Одного человеческого мало: оператор
+    #: прочитает «Ждёт мастера», а спросить о нём не сможет — в задачах,
+    #: логах и в разговоре с нами живёт строка ``pending``. Одного
+    #: машинного тоже мало — это и есть сегодняшняя болезнь экрана.
+    #:
+    #: Ключи ровно из :class:`CatalogMaster.InviteStatus`; полноту
+    #: держит тест: добавится состояние — забытый ключ напечатает код
+    #: без подписи, и тест это поймает.
+    _INVITE_BADGES = {
+        CatalogMaster.InviteStatus.PENDING: ("wait", "Приглашение не принято"),
+        CatalogMaster.InviteStatus.ACCEPTED: ("ok", "Приглашение принято"),
+        CatalogMaster.InviteStatus.EXPIRED: ("stop", "Приглашение просрочено"),
+        CatalogMaster.InviteStatus.CANCELLED: ("stop", "Приглашение отозвано"),
+    }
+
+    @admin.display(description="Приглашение", ordering="invite_status")
+    def invite_state(self, obj: CatalogMaster):  # type: ignore[no-untyped-def]
+        tone, label = self._INVITE_BADGES.get(obj.invite_status, ("off", "Неизвестное состояние"))
+        return badge(tone, label, obj.invite_status)
+
+    _MODE_BADGES = {
+        CatalogMaster.Mode.INVITE: ("ok", "Заходит в приложение"),
+        CatalogMaster.Mode.CATALOG_ONLY: ("off", "Только в каталоге, без входа"),
+    }
+
+    @admin.display(description="Режим", ordering="mode")
+    def work_mode(self, obj: CatalogMaster):  # type: ignore[no-untyped-def]
+        tone, label = self._MODE_BADGES.get(obj.mode, ("off", "Неизвестный режим"))
+        return badge(tone, label, obj.mode)
 
     @admin.display(description="Бронируется", boolean=True)
     def bookable(self, obj: CatalogMaster) -> bool:
@@ -304,7 +460,9 @@ class CatalogMasterAdmin(_MirrorAdminBase):
         """
         block = sale_block(obj)
         if block is None:
-            return "—"
+            # Причины нет — и это факт, а не отсутствие данных. Называем
+            # словами, чтобы прочерк не читался как «не посчитали».
+            return absent("причин нет, продаётся")
         if block == "revoked" and obj.archived_at is not None:
             # Архив и снятая активность — одно значение гейта, но разные
             # действия оператора: из архива достают отсюда, активность
@@ -436,7 +594,7 @@ class CatalogMasterAdmin(_MirrorAdminBase):
 
 
 @admin.register(MasterService)
-class MasterServiceAdmin(admin.ModelAdmin):
+class MasterServiceAdmin(AylaAdminMedia, admin.ModelAdmin):
     """The one catalog admin that is NOT read-only -- and, until DRF-975, the
     second unaudited write path into ``catalog_masterservice``.
 
@@ -462,14 +620,78 @@ class MasterServiceAdmin(admin.ModelAdmin):
     instead, which is honest about what we actually know.
     """
 
-    list_display = ("master", "service", "tenant", "source", "created_at")
+    list_display = ("master", "service", "tenant", "origin", "created_at")
     list_filter = ("tenant", "source")
     search_fields = ("master__name", "service__name")
+    search_help_text = "Ищет по имени мастера и названию услуги."
+    empty_value_display = _ABSENT
     raw_id_fields = ("master", "service", "created_by")
+    fieldsets = (
+        (
+            "Связь",
+            {
+                "fields": ("master", "service", "tenant"),
+                "description": (
+                    "Одна строка = «эта мастер делает эту услугу». Именно "
+                    "из этих строк собирается выбор мастера у клиента."
+                ),
+            },
+        ),
+        (
+            "Откуда взялась",
+            {
+                "fields": ("source", "created_by", "created_by_actor_id", "created_at"),
+                "description": (
+                    "Происхождение пишет платформа, руками его не набирают: "
+                    "иначе рукотворную строку можно было бы переклеить в "
+                    "«приехала синхронизацией» и потерять след."
+                ),
+            },
+        ),
+        (
+            "Служебное",
+            {
+                "classes": ("collapse",),
+                "fields": (
+                    "id",
+                    "ayla_specialist_service_id",
+                    "resolved_requires_health_check",
+                    "updated_at",
+                ),
+            },
+        ),
+    )
+
+    #: Происхождение связи словами — и код рядом.
+    #:
+    #: Ключи ровно из :class:`MasterServiceSource`. Тон здесь не «плохо
+    #: / хорошо», а «насколько строка объяснима»: приехавшая
+    #: синхронизацией объяснима сама собой, рукотворная требует того,
+    #: кто её сделал.
+    _SOURCE_BADGES = {
+        MasterServiceSource.CATALOG_SYNC: ("ok", "Синхронизация каталога"),
+        MasterServiceSource.MM4_MATRIX: ("ok", "Матрица услуг в приложении"),
+        MasterServiceSource.INVITE_SEED: ("off", "Заведена при приглашении"),
+        MasterServiceSource.DEV_SEED: ("off", "Тестовые данные"),
+        MasterServiceSource.MANUAL_SCRIPT: ("wait", "Скрипт вручную"),
+        MasterServiceSource.DJANGO_ADMIN: ("wait", "Заведена в этой админке"),
+        MasterServiceSource.ORPHAN_CLEANUP: ("off", "Уборка осиротевших строк"),
+        MasterServiceSource.TEST_FIXTURE: ("off", "Фикстура теста"),
+    }
+
+    @admin.display(description="Откуда взялась", ordering="source")
+    def origin(self, obj: MasterService):  # type: ignore[no-untyped-def]
+        tone, label = self._SOURCE_BADGES.get(obj.source, ("off", "Неизвестное происхождение"))
+        return badge(tone, label, obj.source)
+
     # Provenance is written by the platform, never typed by a human -- an
     # editable ``source`` would let an admin relabel a hand-made row as
     # ``catalog_sync`` and undo the whole point.
-    readonly_fields = ("source", "created_by_actor_id", "created_at", "updated_at")
+    # ``id`` добавлен к прежней четвёрке не ради прав, а ради показа:
+    # он ``editable=False``, и без явного readonly Django отказывается
+    # рисовать его в fieldsets. Ничьих прав это не меняет — поле не было
+    # правимым и раньше.
+    readonly_fields = ("id", "source", "created_by_actor_id", "created_at", "updated_at")
 
     def get_queryset(self, request):
         return self.model.all_tenants.all().select_related("master", "service", "tenant")
@@ -497,9 +719,11 @@ class MasterServiceAdmin(admin.ModelAdmin):
 class CatalogFaqAdmin(_MirrorAdminBase):
     list_display = ("question", "category_slug", "tenant", "synced_at")
     search_fields = ("question", "answer", "external_id")
+    search_help_text = "Ищет по тексту вопроса и ответа."
 
 
 @admin.register(CatalogHelpArticle)
 class CatalogHelpArticleAdmin(_MirrorAdminBase):
     list_display = ("question", "tenant", "is_active", "order", "synced_at")
     search_fields = ("question", "answer", "external_id")
+    search_help_text = "Ищет по заголовку и тексту статьи."
