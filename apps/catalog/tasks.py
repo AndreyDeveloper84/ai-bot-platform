@@ -45,6 +45,8 @@ window.
 from __future__ import annotations
 
 import logging
+from typing import Any
+from uuid import UUID
 
 from celery import shared_task  # type: ignore[import-untyped]
 
@@ -209,7 +211,9 @@ def alert_stale_catalog_sync() -> dict[str, int]:
                 "продаёт.\n"
                 "Причину искать в логах воркера по catalog.sync.fetch_failed / "
                 "catalog.http.row_unparseable для этого tenant_id.\n"
-                "Разовый прогон: manage.py sync_catalog --tenant " + age.slug
+                "Разовый прогон: админка → каталог → действие "
+                "«Пересинхронизировать каталог выбранных салонов» (DRF-1581), "
+                "либо manage.py sync_catalog --tenant " + age.slug
             ),
             dedup_key=f"catalog_sync_stale:{age.slug}",
         )
@@ -223,3 +227,61 @@ def alert_stale_catalog_sync() -> dict[str, int]:
         paged,
     )
     return {"checked": len(ages), "stale": len(stale), "paged": paged}
+
+
+@shared_task(
+    name="apps.catalog.tasks.sync_catalog_for_tenant",
+    soft_time_limit=720,
+    time_limit=780,
+)
+def sync_catalog_for_tenant(tenant_id: str) -> dict[str, Any]:
+    """Manual force-resync for ONE tenant — the DRF-1581 admin button's payload.
+
+    ### Why a separate task instead of reusing the beat fan-out
+
+    The admin action (``CatalogServiceAdmin.force_resync_selected_tenants``)
+    enqueues this per selected tenant. Calling
+    :func:`sync_catalog_for_all_tenants` from the button would sync every
+    salon on one click: Ayla's internal catalog is anonymously rate-limited
+    (~30 req/min, measured by the DRF-1595 window), and a full fan-out
+    would throttle itself exactly while the operator is firefighting one
+    stale salon.
+
+    ### Idempotency — the service lock is the guard
+
+    :meth:`CatalogSyncService.run` runs under a per-tenant Redis advisory
+    lock and skips (does NOT queue) when a run is already in flight. A
+    second click while the first run holds the lock comes back here as
+    ``skipped=True`` — double-clicking the button cannot start two syncs
+    of the same salon.
+
+    Returns:
+      ``{"tenant", "ran", "skipped", "error", "services_created",
+      "services_updated", ...}`` — goes to the Celery result backend.
+      The operator-facing confirmation is the admin action's message;
+      completion is visible by the ``synced_at`` column moving.
+    """
+    tenant = Tenant.objects.get(id=UUID(str(tenant_id)))
+    result = CatalogSyncService().run(tenant)
+    outcome: dict[str, Any] = {
+        "tenant": tenant.slug,
+        "ran": result.ran,
+        "skipped": result.skipped,
+        "error": result.error,
+    }
+    for name, mirror in (
+        ("services", result.services),
+        ("masters", result.masters),
+        ("edges", result.master_services),
+    ):
+        outcome[f"{name}_created"] = mirror.created
+        outcome[f"{name}_updated"] = mirror.updated
+        outcome[f"{name}_removed"] = mirror.removed
+    logger.info(
+        "catalog.sync.manual_run tenant=%s ran=%s skipped=%s error=%s",
+        tenant.slug,
+        result.ran,
+        result.skipped,
+        result.error or "-",
+    )
+    return outcome
