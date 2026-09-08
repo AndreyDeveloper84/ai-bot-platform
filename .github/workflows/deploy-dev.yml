@@ -18,7 +18,17 @@
 #              exits non-zero.
 #
 # All three are readable in `gh run list` from the conclusion alone, without
-# opening a single log.
+# opening a single log. All three already occur in this workflow's own history
+# — of its last 100 runs, 53 `success`, 35 `failure`, 8 `skipped`, 4
+# `cancelled` — so none of them is a symbol invented for this change.
+#
+# The residual, stated rather than glossed: `failure` now covers two different
+# things — "the deploy broke" and "there was no deploy target". They are told
+# apart by which job is red, one click into the run, not by the conclusion. That
+# is a deliberate trade: the alternative was a third meaning on `cancelled`,
+# which already carries two in this repository (§77), and re-using a symbol is
+# exactly the defect being removed here. Both meanings do agree on the thing the
+# reader needs from the list — the pilot was NOT updated by this run.
 #
 # ### Why "not configured" is red and not green (§79, приём 2)
 # §79 says to ask first whether the skip can be avoided altogether. It can:
