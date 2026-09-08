@@ -158,7 +158,23 @@ class Command(BaseCommand):
 
             after = self._mirror_count(tenant)
             if result.skipped:
-                self.stdout.write(f"{tenant.slug}: skipped (another run holds the lock)")
+                # The reason has to be printed, not assumed (DRF-1595). Until
+                # then a skip could only mean the lock, so the message named
+                # it; now it can also mean Ayla's rate limiter, and this
+                # command is exactly what an operator reaches for to catch a
+                # lagging salon up. Being told "another run holds the lock"
+                # while the real answer is "Ayla is throttling us" sends them
+                # hunting for a beat that is not running.
+                reasons = {
+                    "lock_held": "another run holds the lock",
+                    "throttled": (
+                        "Ayla rate-limited us (HTTP 429) and this run had no wait budget "
+                        "left — retry in a minute, or raise "
+                        "CATALOG_SYNC_THROTTLE_WAIT_BUDGET_SECONDS for a one-shot catch-up"
+                    ),
+                }
+                why = reasons.get(result.skip_reason, result.skip_reason or "reason not recorded")
+                self.stdout.write(f"{tenant.slug}: skipped ({why})")
                 continue
             if result.error:
                 failures += 1
