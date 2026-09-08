@@ -1998,6 +1998,25 @@ CATALOG_SYNC_LOCK_TTL_SECONDS = int(os.environ.get("CATALOG_SYNC_LOCK_TTL_SECOND
 CATALOG_SYNC_HTTP_TIMEOUT = int(os.environ.get("CATALOG_SYNC_HTTP_TIMEOUT", "30"))
 CATALOG_SYNC_HTTP_RETRIES = int(os.environ.get("CATALOG_SYNC_HTTP_RETRIES", "3"))
 
+# DRF-1595 — ceiling, in seconds, on the wall-clock ONE catalog sync run may
+# spend asleep waiting out Ayla's `429 THROTTLED` (its body carries the
+# `wait_seconds` to honour). Spent only on 429s: a healthy run never touches
+# it.
+#
+# 240 is one third of `sync_catalog_for_all_tenants`'s soft_time_limit=720,
+# which is itself under the 900s beat cadence. The budget has to exist at all
+# because the honest response to a 429 — sleep the time upstream asked for —
+# multiplied by tenants × three catalog surfaces would overrun that limit and
+# get the whole fan-out killed mid-cycle: every salon unsynced instead of the
+# two at the tail. 240 leaves ~480s for the actual fetch/upsert work while
+# still admitting roughly four waits at the wait_seconds=54 the pilot
+# observed. There is deliberately NO separate per-wait cap — the remaining
+# budget is itself the cap, so an upstream asking for ten minutes is refused
+# without a second knob to keep in sync.
+CATALOG_SYNC_THROTTLE_WAIT_BUDGET_SECONDS = int(
+    os.environ.get("CATALOG_SYNC_THROTTLE_WAIT_BUDGET_SECONDS", "240")
+)
+
 # DRF-1494 — age of `Tenant.last_catalog_sync_ok_at` above which
 # `apps.catalog.tasks.alert_stale_catalog_sync` pages the on-call channel.
 #
