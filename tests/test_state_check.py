@@ -119,13 +119,20 @@ def test_a_fact_whose_expectation_no_longer_matches_is_stale(tmp_path: Path) -> 
     Файл `pyproject.toml` в корне репозитория содержит ровно одну строку
     `[project]`. Факт с `ожидание: =1` держится; тот же факт с `ожидание: =7`
     обязан стать протухшим — это и есть красная лампа инструмента.
+
+    Ревизия здесь `HEAD`, а не `origin/dev`, которую требует формат живых
+    файлов состояния: в чекауте CI (`actions/checkout` тянет только голову PR)
+    ссылки `origin/dev` может не быть вовсе, и тест краснел бы на упавшей
+    команде вместо несошедшегося числа — то есть по правильной причине, но не
+    по той, которую он проверяет. Что упавшая команда тоже считается
+    протухшей, держит отдельный тест ниже.
     """
     holds = state_check.parse_facts(
         "## Работает\n\n"
         "### Проект объявлен один раз\n"
         "статус:   РАБОТАЕТ\n"
         "где:      pyproject.toml\n"
-        'проверка: git grep -c "^\\[project\\]$" origin/dev -- pyproject.toml\n'
+        'проверка: git grep -c "^\\[project\\]$" HEAD -- pyproject.toml\n'
         "ожидание: =1\n"
         "снято:    2026-09-08 @ 8c276fa (ai-bot-platform)\n",
         tmp_path / "STATE-TEST.md",
@@ -148,7 +155,7 @@ def test_stale_fact_makes_the_run_return_nonzero(tmp_path: Path) -> None:
         "### Заведомо неверное число\n"
         "статус:   РАБОТАЕТ\n"
         "где:      pyproject.toml\n"
-        'проверка: git grep -c "^\\[project\\]$" origin/dev -- pyproject.toml\n'
+        'проверка: git grep -c "^\\[project\\]$" HEAD -- pyproject.toml\n'
         "ожидание: =999\n"
         "снято:    2026-09-08 @ 8c276fa (ai-bot-platform)\n",
         encoding="utf-8",
