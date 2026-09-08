@@ -155,7 +155,8 @@ def upsert_specialists(tenant: "Tenant", dtos: list["CatalogSpecialistDTO"]) -> 
     invite-create path mints its own ``uuid4`` primary key, so the canonical
     key never finds that row and sync used to add a second one next to it.
     Update overwrites ONLY mirror fields (name, bio, experience, rating,
-    review_count, is_active, ayla_user_id, external_updated_at, raw) —
+    review_count, is_active, ayla_user_id, external_updated_at, raw, and
+    the DRF-1588 geo trio address / location_lat / location_lng) —
     platform-owned fields (invite_status, mode, photo_url, archived_at,
     invited_at, max_handle, linked_bot_user) are NEVER touched by sync.
 
@@ -201,6 +202,15 @@ def upsert_specialists(tenant: "Tenant", dtos: list["CatalogSpecialistDTO"]) -> 
                 "review_count": dto.review_count,
                 "is_active": dto.is_active,
                 "ayla_user_id": dto.user_id,
+                # DRF-1588 — гео едет в колонки. Раньше оно доезжало только
+                # внутрь ``raw`` (ниже), то есть было, но было недоступно:
+                # по JSON-ключу нельзя ни искать, ни фильтровать, ни
+                # сортировать. Значения переносятся КАК ЕСТЬ — ``None``
+                # остаётся ``None``, пустая строка остаётся пустой строкой,
+                # и ни одно из двух не подменяется другим.
+                "address": dto.address,
+                "location_lat": dto.location_lat,
+                "location_lng": dto.location_lng,
                 "external_updated_at": dto.external_updated_at,
                 "raw": dto.raw,
             }
@@ -308,7 +318,61 @@ def upsert_specialists(tenant: "Tenant", dtos: list["CatalogSpecialistDTO"]) -> 
                     "catalog.upsert.row_failed model=CatalogMaster ayla_master_id=%s",
                     ayla_id,
                 )
+        _write_tenant_address(tenant, dtos)
     return result
+
+
+def _write_tenant_address(tenant: "Tenant", dtos: list["CatalogSpecialistDTO"]) -> None:
+    """Довезти адрес САЛОНА из фида специалистов в ``Tenant.address`` (DRF-1588).
+
+    Салонный адрес приезжает денормализованным ключом ``tenant_address`` на
+    каждой строке специалиста — отдельным от мастерского ``address``, так что
+    в одном слепке лежат оба. Складывать их здесь нечем: правило старшинства
+    «салон против мастера» — DRF-1589. Здесь только перенос.
+
+    ### Почему это не «первый непустой среди мастеров»
+
+    Потому что ровно это уже однажды сделали, и OPEN_DECISIONS §45 назвал
+    результат лотереей: ``discover_salons`` брала первый непустой адрес среди
+    мастеров салона, и стоило смениться составу мастеров — менялся адрес
+    салона. Здесь ключ салонный, то есть все строки одного салона обязаны
+    нести ОДНО значение. Поэтому:
+
+    * ни одна строка ключа не несёт → ``Tenant.address`` не трогаем вовсе.
+      Источник промолчал, и молчание не повод что-то записать. Это сегодняшнее
+      состояние пилота: ключа ещё нет, его заводит DRF-1587;
+    * все несущие строки согласны → пишем это значение (в т.ч. ``""``:
+      «адреса нет» — ответ источника, а не наше умолчание);
+    * строки РАСХОДЯТСЯ → не пишем ничего и кричим в лог. Выбрать одно из
+      двух означало бы завести лотерею заново, только на этаж ниже, а
+      выбранное значение было бы неотличимо от подтверждённого.
+
+    Идемпотентно: совпадающее значение не перезаписывается, чтобы каждый
+    пятнадцатиминутный удар не двигал ``updated_at`` на пустом месте.
+    """
+    stated = {dto.tenant_address for dto in dtos if dto.tenant_address is not None}
+    if not stated:
+        return
+    if len(stated) > 1:
+        logger.error(
+            "catalog.upsert.tenant_address_disagreement tenant_id=%s values=%r — "
+            "строки одного салона несут разный tenant_address. Адрес салона не "
+            "записан: выбор одного из нескольких — это лотерея (OPEN_DECISIONS "
+            "§45), а записанное значение было бы неотличимо от подтверждённого.",
+            tenant.id,
+            sorted(stated),
+        )
+        return
+    value = stated.pop()
+    if tenant.address == value:
+        return
+    tenant.address = value
+    tenant.save(update_fields=["address", "updated_at"])
+    logger.info(
+        "catalog.upsert.tenant_address_written tenant_id=%s — адрес салона "
+        "приехал ключом tenant_address (DRF-1588).",
+        tenant.id,
+    )
 
 
 def upsert_master_services(
