@@ -5,6 +5,7 @@ from django.core.signals import setting_changed
 class EventsConfig(AppConfig):
     default_auto_field = "django.db.models.BigAutoField"
     name = "apps.events"
+    verbose_name = "Служебное: события"
 
     def ready(self) -> None:
         from apps.events.fanout import reset_registry_cache

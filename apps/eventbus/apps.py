@@ -5,7 +5,7 @@ from django.core.signals import setting_changed
 class EventBusConfig(AppConfig):
     default_auto_field = "django.db.models.BigAutoField"
     name = "apps.eventbus"
-    verbose_name = "Domain event bus"
+    verbose_name = "Служебное: шина событий"
 
     def ready(self) -> None:
         from apps.eventbus import signals  # noqa: F401  — register post_save handlers

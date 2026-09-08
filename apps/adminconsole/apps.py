@@ -25,15 +25,19 @@ class AdminconsoleConfig(AppConfig):
         так что к нашему ``ready()`` все ``apps/*/admin.py`` уже
         импортированы и ``admin.site`` заполнен.
 
-        Все три установки идемпотентны — повторный ``ready()``
+        Все установки идемпотентны — повторный ``ready()``
         (перезагрузка реестра приложений в тестах) ничего не удваивает.
         """
         from apps.adminconsole.client_scope import install_client_data_scope
         from apps.adminconsole.clients import install_client_card
         from apps.adminconsole.journal import install_admin_journal
         from apps.adminconsole.secrets_policy import install_secret_field_policy
+        from apps.adminconsole.theme import install_admin_branding
 
         install_admin_journal()
         install_secret_field_policy()
         install_client_data_scope()
         install_client_card()
+        # Только оформление: шапка сайта и порядок разделов индекса.
+        # Ни прав, ни действий, ни регистраций не трогает.
+        install_admin_branding()
