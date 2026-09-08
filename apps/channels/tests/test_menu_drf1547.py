@@ -454,14 +454,17 @@ class TestEverySevenButtonDoesWhatItPromises:
         max_handler.handle_global_max_event(_msg(text="меню", user_id=71007, mid="s-6"))
 
         labels = _labels(sent[0])
-        # Стража: меню построено и полно.
+        payloads = _payloads(sent[0])
+        # Стража НА ТЕХ ЖЕ данных: меню построено и полно — и по подписям,
+        # и по payload'ам.
         assert "Профиль" in labels, labels
         assert "Помощь" in labels, labels
+        assert CALLBACK_EXTRA_HELP in payloads, payloads
         # И только теперь отрицания.
         assert "Ещё" not in labels, labels
         assert "Назад" not in labels, labels
-        assert CALLBACK_EXTRA_OPEN not in _payloads(sent[0]), _payloads(sent[0])
-        assert CALLBACK_EXTRA_BACK not in _payloads(sent[0]), _payloads(sent[0])
+        assert CALLBACK_EXTRA_OPEN not in payloads, payloads
+        assert CALLBACK_EXTRA_BACK not in payloads, payloads
 
     def test_help_from_the_main_menu_answers_with_the_menu(self, sent, fake_redis, concierge):
         """§25 п.2 — «отвечаем меню, а не свободной прозой».
@@ -635,9 +638,12 @@ class TestDiaryThroughTheBot:
 
         labels = _labels(sent[0])
         payloads = _payloads(sent[0])
-        # Стража: меню построено и полно.
+        # Стража НА ТЕХ ЖЕ данных: меню построено и полно — и по подписям,
+        # и по payload'ам, среди которых ЕСТЬ ботовые фразы (то есть
+        # отсутствие фразы дневника ниже — состав, а не пустой список).
         assert "Помощь" in labels, labels
         assert "📋 Мои записи" in labels, labels
+        assert DISCOVER_TAP_TEXT in payloads, payloads
         # И только теперь отрицания — ни кнопки, ни запроса согласия.
         assert "🥗 Дневник питания" not in labels, labels
         assert DIARY_TAP_TEXT not in payloads, payloads

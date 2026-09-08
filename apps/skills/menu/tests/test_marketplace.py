@@ -339,6 +339,13 @@ class TestExtraMenuIsGone:
         Оставленный «на всякий случай» построитель это мёртвый код,
         который следующий читатель примет за живую поверхность.
         """
+        # Стража НА ТЕХ ЖЕ данных: модуль импортирован и построители в нём
+        # есть — иначе «ничего не нашлось» зеленело бы на опечатке в имени
+        # модуля, а не доказывало снос подменю.
+        assert hasattr(marketplace, "marketplace_menu_reply")
+        assert hasattr(marketplace, "marketplace_menu_buttons")
+        assert hasattr(marketplace, "main_items")
+        # И только теперь отрицания.
         assert not hasattr(marketplace, "marketplace_extra_reply")
         assert not hasattr(marketplace, "marketplace_extra_buttons")
         assert not hasattr(marketplace, "extra_items")
