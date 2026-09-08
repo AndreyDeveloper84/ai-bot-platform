@@ -208,7 +208,6 @@ from apps.orchestrator.turn_seam import (
 )
 from apps.skills.booking.lookup import is_personal_booking_lookup
 from apps.skills.menu.marketplace import (
-    EXTRA_ACTION_TYPE,
     FALLBACK_ACTION_TYPE,
     HEALTH_DECLINE_ACTION_TYPE,
     MENU_ACTION_TYPE,
@@ -1088,16 +1087,31 @@ def _route_health_callback(
 def _route_menu_nav_callback(*, callback_text: str, bot_user: Any) -> tuple[DiscoveryReply, str]:
     """Тап навигации по меню — ответ и его ``action_type`` (DRF-1547).
 
-    Три исхода, и ни один из них не молчание:
+    Два исхода, и ни один из них не молчание:
 
-    * ``cb:extra:open`` — подменю «Дополнительные возможности» (§37);
-    * ``cb:extra:back`` / ``cb:extra:help`` — главное меню. Одинаковый
-      экран у обоих намеренно: главное меню И ЕСТЬ ответ на «что ты
-      умеешь» (§25 п.2, решение владельца «отвечаем меню, а не свободной
-      прозой»), а «Назад» ведёт ровно туда же. Payload'ы при этом разные,
-      чтобы в журнале «нажал помощь» и «вернулся» не слились в одно.
     * ``cb:open:{слаг}`` — ПРЕДУПРЕЖДЕНИЕ перед открытием приложения
-      (§37 п.6) и уже под ним кнопка, которая его открывает.
+      (§37 п.6) и уже под ним кнопка, которая его открывает;
+    * ВСЁ семейство ``cb:extra:*`` — главное меню.
+
+    Второй пункт с OD-UI-2 («Ещё убираем, помощь в главное меню») стал
+    правилом без исключений. Раньше ``cb:extra:open`` открывал подменю, а
+    ``back`` и ``help`` возвращали в главное меню; подменю снесено, и
+    открывать больше нечего.
+
+    Ветка при этом НЕ снята вместе с подменю, и это главное здесь:
+
+    * ``cb:extra:help`` — живая кнопка ГЛАВНОГО меню. Её payload
+      намеренно не переведён в ``cb:menu:help``: ``resolve_tap_text``
+      перехватывает весь ``cb:menu:*`` ВЫШЕ этой лестницы и подставляет
+      каноническую фразу, а для ``help`` эта фраза — «Что ты умеешь?»,
+      уезжающая к консьержу. Человек получил бы свободную прозу модели
+      вместо меню, что §25 п.2 и запрещает («отвечаем меню, а не
+      свободной прозой»), — а главное меню И ЕСТЬ ответ на этот вопрос;
+    * ``cb:extra:open`` и ``cb:extra:back`` кнопками больше не рисуются,
+      но лежат в истории чатов на вчерашних клавиатурах. Тап по кнопке,
+      которую бот сам нарисовал, обязан дойти до ответа: снять ветку —
+      значит отдать сырой ``cb:extra:…`` модели (ровно дефект DRF-1051)
+      или промолчать.
 
     Незнакомый слаг любой из двух форм — снятая кнопка из истории чата.
     Отвечается меню, тем же правилом, по которому ``resolve_tap_text``
@@ -1105,17 +1119,11 @@ def _route_menu_nav_callback(*, callback_text: str, bot_user: Any) -> tuple[Disc
     восстановить нечем, но ход терять нельзя.
     """
     from apps.skills.menu.marketplace import (
-        CALLBACK_EXTRA_OPEN,
-        marketplace_extra_reply,
         open_callback_slug,
         open_warning_reply,
     )
 
     stripped = (callback_text or "").strip()
-
-    if stripped == CALLBACK_EXTRA_OPEN:
-        extra_text, extra_data = marketplace_extra_reply(bot_user=bot_user)
-        return DiscoveryReply(text=extra_text, action_data=extra_data), EXTRA_ACTION_TYPE
 
     if is_open_callback(stripped):
         slug = open_callback_slug(stripped)
@@ -1730,8 +1738,9 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
             skill_selected=assistant_action_type,
         )
     elif is_extra_callback(event.text) or is_open_callback(event.text):
-        # DRF-1547 / §37 — подменю «Ещё» и предупреждение перед открытием
-        # приложения.
+        # DRF-1547 / §37 + OD-UI-2 — «Помощь» главного меню, тапы по
+        # снесённому подменю из истории чата и предупреждение перед
+        # открытием приложения.
         #
         # Стоит здесь, среди колбэковых веток и ВЫШЕ приветствия, по тому
         # же правилу, что и ``cb:health:``: тап по кнопке, которую бот сам
@@ -1739,9 +1748,11 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
         # приветствием или отданным модели сырым.
         #
         # Своё семейство, а не ``cb:menu:``, потому что ``resolve_tap_text``
-        # переводит весь ``cb:menu:*`` в фразу ВЫШЕ лестницы: «Ещё»
-        # превратилось бы в «Что ты умеешь?» и подменю не открылось бы
-        # никогда.
+        # переводит весь ``cb:menu:*`` в фразу ВЫШЕ лестницы. Пока было
+        # подменю, «Ещё» превратилось бы в «Что ты умеешь?» и не открылось
+        # бы никогда; после OD-UI-2 тот же перехват держит «Помощь»: её
+        # фраза на глобальном пути уезжает к консьержу, и человек получил
+        # бы прозу модели вместо меню.
         reply, assistant_action_type = _route_menu_nav_callback(
             callback_text=event.text,
             bot_user=bot_user,

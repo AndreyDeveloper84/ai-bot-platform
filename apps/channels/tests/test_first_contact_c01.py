@@ -52,7 +52,7 @@ from apps.conversations.services import resolve_active_global_conversation
 from apps.skills.menu.marketplace import (
     CALLBACK_HEALTH_NEED_PREFIX,
     DIARY_TAP_TEXT,
-    marketplace_extra_buttons,
+    marketplace_menu_buttons,
 )
 from apps.identity.services.resolver import resolve_or_create_global_bot_user
 from apps.orchestrator.memory import short_term
@@ -761,12 +761,18 @@ class TestDiaryOnFirstContact:
     # -- прежнее место сохранено ------------------------------------------- #
 
     def test_the_new_place_does_not_replace_the_old(self, person, consent, nutrition_on):
-        """«Дневник остаётся и в „Ещё“» — прямое условие решения."""
+        """«Дневник остаётся и в меню» — прямое условие решения.
+
+        Условие было сформулировано про «Ещё»; подменю снесено (OD-UI-2),
+        и пункт вместе с воротами поднялся в ГЛАВНОЕ меню. Условие от
+        этого не изменилось: первый экран не ЗАМЕНЯЕТ меню, а добавляется
+        к нему, и проверять это надо там, где пункт теперь живёт.
+        """
         on_first_contact = self._labels(first_contact_buttons(bot_user=person))
-        in_extra = self._labels(marketplace_extra_buttons(bot_user=person))
+        in_menu = self._labels(marketplace_menu_buttons(bot_user=person))
 
         assert [label for label in on_first_contact if label.endswith("Дневник питания")]
-        assert [label for label in in_extra if label.endswith("Дневник питания")]
+        assert [label for label in in_menu if label.endswith("Дневник питания")]
 
     # -- предел кнопок ----------------------------------------------------- #
 

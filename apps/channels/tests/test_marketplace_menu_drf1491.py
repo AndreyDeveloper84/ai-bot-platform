@@ -37,6 +37,7 @@ from apps.identity.services.resolver import resolve_or_create_global_bot_user
 from apps.orchestrator.memory import short_term
 from apps.skills.menu import marketplace as menu_marketplace
 from apps.skills.menu.marketplace import (
+    CALLBACK_EXTRA_HELP,
     CALLBACK_EXTRA_OPEN,
     CALLBACK_HEALTH_DECLINE,
     CALLBACK_HEALTH_NEED_PREFIX,
@@ -91,7 +92,10 @@ _SEVEN_MAIN: tuple[tuple[str, str], ...] = (
     ("📋 Мои записи", "cb:menu:my_bookings"),
     ("Моя цель", "cb:open:goal_select"),
     ("Профиль", "cb:open:profile"),
-    ("Ещё", CALLBACK_EXTRA_OPEN),
+    # OD-UI-2 («Ещё убираем, помощь в главное меню») поставил «Помощь» на
+    # место «Ещё». Payload остался ``cb:extra:help``: под ``cb:menu:`` его
+    # перехватила бы ``resolve_tap_text`` и увела фразой к консьержу.
+    ("Помощь", CALLBACK_EXTRA_HELP),
 )
 
 
@@ -479,11 +483,12 @@ class TestNutritionGatesOnTheLivePath:
 
         buttons = _keyboard(sent[0])
         labels = [b["text"] for b in buttons]
-        # Стража: подменю построено, соседние пункты в нём есть.
-        # «История визитов» на эту роль больше не годится — она слита с
-        # «Моими записями» (OD-UI-1), — и её место занимает «Помощь».
+        # Стража: меню построено, соседние пункты в нём есть. Подменю
+        # снесено (OD-UI-2), и вчерашний ``cb:extra:open`` из истории чата
+        # отвечается ГЛАВНЫМ меню — там же, где теперь живёт пищевой пункт.
+        # «Назад» на роль стражи больше не годится: возвращаться неоткуда.
         assert "Помощь" in labels, labels
-        assert "Назад" in labels, labels
+        assert "Профиль" in labels, labels
         for item in _GATED_ITEMS:
             assert item.label not in labels, labels
 
@@ -544,9 +549,17 @@ class TestNutritionItemsAreGoneFromTheLiveMenu:
     """
 
     def test_the_main_menu_offers_seven_items_and_no_food(
-        self, sent, fake_redis, concierge, nutrition_on, health_consent
+        self, sent, fake_redis, concierge, health_consent, settings
     ):
-        """Питание живёт в «Ещё», а не в главном меню (§37)."""
+        """При ЗАКРЫТЫХ воротах питания меню — ровно семёрка владельца.
+
+        §37 отправлял питание в «Ещё»; OD-UI-2 подменю снёс и поднял
+        дневник сюда. Значит «пищевого пункта в главном меню нет» стало
+        утверждением НЕ про меню, а про ПЕРВЫЕ ворота, и проверяется оно
+        теперь при выключенном флаге. Что видит человек с открытыми
+        воротами — в тесте ниже.
+        """
+        settings.NUTRITION_ENABLED = False
         health_consent(True)
         _welcomed(70601)
 
@@ -568,6 +581,31 @@ class TestNutritionItemsAreGoneFromTheLiveMenu:
         # И только теперь отрицание.
         assert "🥗 Дневник питания" not in labels, labels
         assert "Сканер еды" not in labels, labels
+        assert not [p for p in payloads if p.startswith(CALLBACK_HEALTH_NEED_PREFIX)], payloads
+
+    def test_but_an_open_gate_puts_the_diary_into_the_main_menu(
+        self, sent, fake_redis, concierge, nutrition_on, health_consent
+    ):
+        """Парная положительная стража к предыдущей (OD-UI-2, DRF-1411).
+
+        На боевом пилоте ``NUTRITION_ENABLED=True``, то есть человек видит
+        именно этот случай. Восемь кнопок вместо семи, дневник седьмой и
+        ботовый — payload это ФРАЗА, а не слаг приложения.
+        """
+        health_consent(True)
+        _welcomed(70602)
+
+        max_handler.handle_global_max_event(
+            _msg(text="что ты умеешь?", user_id=70602, mid="m-odui2")
+        )
+
+        buttons = _keyboard(sent[0])
+        labels = [b["text"] for b in buttons]
+        payloads = _payloads(sent[0]) + _open_app_payloads(sent[0])
+        assert len(buttons) == len(_SEVEN_MAIN) + 1, labels
+        assert labels[-2:] == ["🥗 Дневник питания", "Помощь"], labels
+        assert "дневник питания" in payloads, payloads
+        # Согласие есть — на запрос согласия тап не ведёт.
         assert not [p for p in payloads if p.startswith(CALLBACK_HEALTH_NEED_PREFIX)], payloads
 
     def test_the_food_scanner_is_still_gone_but_the_diary_came_back(

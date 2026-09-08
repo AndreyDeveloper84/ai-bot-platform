@@ -14,6 +14,8 @@
 
 from __future__ import annotations
 
+from unittest import mock
+
 import pytest
 
 from apps.skills.menu import marketplace
@@ -34,7 +36,6 @@ from apps.skills.menu.marketplace import (
     health_request_action_type,
     is_extra_callback,
     is_open_callback,
-    marketplace_extra_reply,
     marketplace_fallback_reply,
     marketplace_menu_reply,
     matches_menu_request,
@@ -42,9 +43,13 @@ from apps.skills.menu.marketplace import (
     open_warning_reply,
 )
 
-#: Семь пунктов главного меню В ПОРЯДКЕ ВЛАДЕЛЬЦА (§37) и payload'ы,
-#: которые они шлют. Порядок load-bearing: раскладка 2×3+1 получается из
-#: него и ``button_columns=2``, и перестановка переставляет пары.
+#: Главное меню при ЗАКРЫТЫХ воротах питания — семь пунктов в порядке
+#: владельца (§37 + OD-UI-2) и payload'ы, которые они шлют. Порядок
+#: load-bearing: раскладка получается из него и ``button_columns=2``, и
+#: перестановка переставляет пары.
+#:
+#: Последней стоит «Помощь»: OD-UI-2 («Ещё убираем, помощь в главное
+#: меню») снёс подменю и поставил её на место «Ещё».
 _SEVEN_MAIN: tuple[tuple[str, str], ...] = (
     ("Подобрать услугу", DISCOVER_TAP_TEXT),
     ("Найти салон", "cb:catalog:salons"),
@@ -52,15 +57,16 @@ _SEVEN_MAIN: tuple[tuple[str, str], ...] = (
     ("📋 Мои записи", "cb:menu:my_bookings"),
     ("Моя цель", "cb:open:goal_select"),
     ("Профиль", "cb:open:profile"),
-    ("Ещё", CALLBACK_EXTRA_OPEN),
+    ("Помощь", CALLBACK_EXTRA_HELP),
 )
 
-#: Подменю «Ещё» с включённым питанием и БЕЗ согласия: пункт есть, и он
-#: ведёт на ЗАПРОС согласия (вторая строка таблицы §25 п.6).
-_EXTRA_WITHOUT_CONSENT: tuple[tuple[str, str], ...] = (
+#: Главное меню при ОТКРЫТЫХ воротах питания и БЕЗ согласия: пищевой пункт
+#: есть, стоит седьмым и ведёт на ЗАПРОС согласия (вторая строка таблицы
+#: §25 п.6). Восемь кнопок вместо семи — единственная разница.
+_EIGHT_WITHOUT_CONSENT: tuple[tuple[str, str], ...] = (
+    *_SEVEN_MAIN[:6],
     ("🥗 Дневник питания", f"{CALLBACK_HEALTH_NEED_PREFIX}food_diary"),
     ("Помощь", CALLBACK_EXTRA_HELP),
-    ("Назад", CALLBACK_EXTRA_BACK),
 )
 
 
@@ -203,12 +209,13 @@ class TestEmojiStayWithinReason:
         assert labels, "пустое меню сделало бы проверку значков бессмысленной"
         assert [label for label in labels if len(self._emoji_in(label)) > 1] == []
 
-    def test_extra_menu_labels_carry_at_most_one_emoji_each(
+    def test_the_diary_label_carries_at_most_one_emoji_too(
         self, bot_user, consent, miniapp, nutrition_on
     ):
-        _text, data = marketplace_extra_reply(bot_user=bot_user)
+        """Та же проверка на восьмёрке: пищевой пункт поднялся сюда же."""
+        _text, data = marketplace_menu_reply(bot_user=bot_user)
         labels = _labels(data["buttons"])
-        assert labels, "пустое подменю сделало бы проверку значков бессмысленной"
+        assert "🥗 Дневник питания" in labels, labels
         assert [label for label in labels if len(self._emoji_in(label)) > 1] == []
 
     # -- часть 2: различает, а не украшает каждый -------------------------- #
@@ -241,11 +248,22 @@ class TestEmojiStayWithinReason:
         assert marked, "значков нет вовсе — это прежний §37 п.7, а не новое решение"
         assert [label.split(" ", 1)[1] for label in marked] == ["Записаться", "Мои записи"]
 
-    def test_extra_menu_marks_only_the_diary(self, bot_user, consent, miniapp, nutrition_on):
-        _text, data = marketplace_extra_reply(bot_user=bot_user)
+    def test_the_diary_keeps_its_emoji_after_the_move(
+        self, bot_user, consent, miniapp, nutrition_on
+    ):
+        """Значок переезжает ВМЕСТЕ с пунктом (OD-UI-2).
+
+        Довод значка привязан к первому экрану, а не к подменю, — там
+        дневник стоит среди goal-like чипов и рвёт категорию. Подменю
+        снесено, довод не тронут, значок на месте.
+        """
+        _text, data = marketplace_menu_reply(bot_user=bot_user)
         marked = [label for label in _labels(data["buttons"]) if self._has_emoji(label)]
-        assert marked, "дневник свой значок носит — он же уходит на первый экран"
-        assert [label.split(" ", 1)[1] for label in marked] == ["Дневник питания"]
+        assert [label.split(" ", 1)[1] for label in marked] == [
+            "Записаться",
+            "Мои записи",
+            "Дневник питания",
+        ]
 
     def test_consent_request_screen_carries_no_emoji(self, miniapp):
         """Экрану согласия различать нечего: там согласие и «Не сейчас».
@@ -307,47 +325,92 @@ class TestEmojiStayWithinReason:
 
 
 # --------------------------------------------------------------------------- #
-# 3. Подменю «Ещё»                                                             #
+# 3. Снос подменю «Ещё» — OD-UI-2                                              #
 # --------------------------------------------------------------------------- #
-class TestExtraMenu:
-    """§37: «Ещё» открывает дополнительные возможности."""
+class TestExtraMenuIsGone:
+    """Владелец дословно: «Ещё убираем, помощь в главное меню».
 
-    def test_composition_without_consent(self, bot_user, consent, miniapp, nutrition_on):
-        _text, data = marketplace_extra_reply(bot_user=bot_user)
-        assert _pairs(data["buttons"]) == list(_EXTRA_WITHOUT_CONSENT)
+    Правило DRF-1411 соблюдено буквально: рядом с каждым «этого нет»
+    стоит «а вот это есть» на ТЕХ ЖЕ данных. Подменю снесено, но ни одна
+    способность из него не пропала — обе поднялись в главное меню.
+    """
 
-    def test_heading_is_the_owner_s(self, bot_user, consent, miniapp, nutrition_on):
-        text, _data = marketplace_extra_reply(bot_user=bot_user)
-        assert text == "Дополнительные возможности"
+    def test_the_submenu_builder_is_gone_for_good(self):
+        """Экрана нет — значит нет и построителя.
 
-    def test_one_column(self, bot_user, consent, miniapp, nutrition_on):
-        _text, data = marketplace_extra_reply(bot_user=bot_user)
-        assert data["button_columns"] == 1
+        Оставленный «на всякий случай» построитель это мёртвый код,
+        который следующий читатель примет за живую поверхность.
+        """
+        # Стража НА ТЕХ ЖЕ данных: модуль импортирован и построители в нём
+        # есть — иначе «ничего не нашлось» зеленело бы на опечатке в имени
+        # модуля, а не доказывало снос подменю.
+        assert hasattr(marketplace, "marketplace_menu_reply")
+        assert hasattr(marketplace, "marketplace_menu_buttons")
+        assert hasattr(marketplace, "main_items")
+        # И только теперь отрицания.
+        assert not hasattr(marketplace, "marketplace_extra_reply")
+        assert not hasattr(marketplace, "marketplace_extra_buttons")
+        assert not hasattr(marketplace, "extra_items")
 
-    def test_help_and_back_are_distinguishable_in_the_journal(
+    def test_the_main_menu_has_no_way_in_and_no_way_back(
         self, bot_user, consent, miniapp, nutrition_on
     ):
-        """Один экран на два хода — но не один payload.
+        payloads = _payloads(marketplace_menu_reply(bot_user=bot_user)[1]["buttons"])
+        # Стража ВПЕРЕДИ отрицания: меню построено и полно.
+        assert DISCOVER_TAP_TEXT in payloads, payloads
+        assert CALLBACK_EXTRA_HELP in payloads, payloads
+        # И только теперь отрицания: входить некуда, возвращаться неоткуда.
+        assert CALLBACK_EXTRA_OPEN not in payloads, payloads
+        assert CALLBACK_EXTRA_BACK not in payloads, payloads
 
-        Обе кнопки отвечают главным меню (§25 п.2), и это правильно. Общий
-        payload при этом сделал бы «сколько людей просят помощи»
-        неизмеримым в тот же день.
+    def test_the_composition_is_the_owner_s_eight(self, bot_user, consent, miniapp, nutrition_on):
+        """Восемь при открытых воротах питания, в порядке владельца."""
+        _text, data = marketplace_menu_reply(bot_user=bot_user)
+        assert _pairs(data["buttons"]) == list(_EIGHT_WITHOUT_CONSENT)
+
+    def test_two_columns_survive_the_merge(self, bot_user, consent, miniapp, nutrition_on):
+        """Подменю рисовалось столбиком; главное меню — парами, и осталось."""
+        _text, data = marketplace_menu_reply(bot_user=bot_user)
+        assert data["button_columns"] == 2
+
+    def test_help_keeps_its_own_payload(self, bot_user, consent, miniapp, nutrition_on):
+        """Payload «Помощи» не слился ни с чьим при переезде.
+
+        Он был отдельным от «Назад» ради измеримости «сколько людей просят
+        помощи»; «Назад» больше нет, но повод остался: слить «Помощь» с
+        любым соседом значит потерять тот же счётчик.
         """
-        _text, data = marketplace_extra_reply(bot_user=bot_user)
-        payloads = _payloads(data["buttons"])
-        assert CALLBACK_EXTRA_HELP in payloads
-        assert CALLBACK_EXTRA_BACK in payloads
-        assert CALLBACK_EXTRA_HELP != CALLBACK_EXTRA_BACK
+        payloads = _payloads(marketplace_menu_reply(bot_user=bot_user)[1]["buttons"])
+        assert payloads.count(CALLBACK_EXTRA_HELP) == 1, payloads
 
-    def test_the_family_is_not_cb_menu(self):
-        """``cb:menu:*`` перехватывается ``resolve_tap_text`` выше лестницы.
+    def test_help_did_not_move_into_the_cb_menu_family(self):
+        """Наивный переезд в ``cb:menu:help`` дал бы прозу вместо меню.
 
-        Попади «Ещё» в это семейство — оно превратилось бы в «Что ты
-        умеешь?», то есть в главное меню, и подменю не открылось бы
-        никогда.
+        ``resolve_tap_text`` перехватывает ВЕСЬ ``cb:menu:*`` выше
+        лестницы обработчика, а ``_global_menu_text`` знает для ``help``
+        фразу «Что ты умеешь?» — она уехала бы консьержу. Проверяется не
+        строка в константе, а сам перехват: тот же вызов, что стоит на
+        живом пути.
         """
-        assert not CALLBACK_EXTRA_OPEN.startswith("cb:menu:")
+        from apps.channels.max.quick_actions import resolve_tap_text
+        from apps.skills.menu.matching import CALLBACK_MENU_HELP
+
+        # Стража: перехват РАБОТАЕТ и «cb:menu:help» действительно съеден.
+        assert resolve_tap_text(CALLBACK_MENU_HELP) == "Что ты умеешь?"
+        # И только теперь — payload «Помощи» мимо него не проходит.
+        assert not CALLBACK_EXTRA_HELP.startswith("cb:menu:")
+        assert resolve_tap_text(CALLBACK_EXTRA_HELP) is None
+        assert is_extra_callback(CALLBACK_EXTRA_HELP)
+
+    def test_the_retired_payloads_are_still_recognised(self):
+        """Клавиатуры живут в истории чата дольше кода.
+
+        Кнопок «Ещё» и «Назад» больше не рисуют, но вчерашние остались у
+        людей в переписке. Перестань разбирать их форму — и тап уедет
+        модели сырым payload'ом (DRF-1051) или утонет в молчании.
+        """
         assert is_extra_callback(CALLBACK_EXTRA_OPEN)
+        assert is_extra_callback(CALLBACK_EXTRA_BACK)
         assert not is_extra_callback("cb:menu:book")
 
     def test_a_typed_lookalike_is_not_a_tap(self):
@@ -459,7 +522,7 @@ class TestRemovedActionsStayReachable:
         пустая клавиатура.
         """
         main = _payloads(marketplace_menu_reply(bot_user=bot_user)[1]["buttons"])
-        extra = _payloads(marketplace_extra_reply(bot_user=bot_user)[1]["buttons"])
+        extra = _payloads(marketplace_menu_reply(bot_user=bot_user)[1]["buttons"])
         assert "cb:open:profile" in main, main
         assert CALLBACK_EXTRA_HELP in extra, extra
         # И только теперь отрицания.
@@ -535,13 +598,13 @@ class TestNutritionGates:
     def test_flag_unset_hides_the_diary_entirely(self, bot_user, consent, miniapp, settings):
         settings.NUTRITION_ENABLED = False
         consent(True)
-        _text, data = marketplace_extra_reply(bot_user=bot_user)
+        _text, data = marketplace_menu_reply(bot_user=bot_user)
         payloads = _payloads(data["buttons"])
-        # Положительная стража ВПЕРЕДИ отрицания: подменю живо и полно.
-        # «История визитов» сюда больше не годится — она слита с «Моими
-        # записями» (OD-UI-1), — а служебные кнопки подменю на месте.
+        # Положительная стража ВПЕРЕДИ отрицания: меню живо и полно.
+        # «Назад» сюда больше не годится — подменю снесено (OD-UI-2), —
+        # а соседи пищевого пункта на месте.
+        assert DISCOVER_TAP_TEXT in payloads, payloads
         assert CALLBACK_EXTRA_HELP in payloads, payloads
-        assert CALLBACK_EXTRA_BACK in payloads, payloads
         # И только теперь отрицание.
         assert DIARY_TAP_TEXT not in payloads, payloads
         assert not [p for p in payloads if p.startswith(CALLBACK_HEALTH_NEED_PREFIX)], payloads
@@ -550,7 +613,7 @@ class TestNutritionGates:
         self, bot_user, consent, miniapp, nutrition_on
     ):
         consent(False)
-        payloads = _payloads(marketplace_extra_reply(bot_user=bot_user)[1]["buttons"])
+        payloads = _payloads(marketplace_menu_reply(bot_user=bot_user)[1]["buttons"])
         assert f"{CALLBACK_HEALTH_NEED_PREFIX}food_diary" in payloads
         assert DIARY_TAP_TEXT not in payloads
 
@@ -563,9 +626,46 @@ class TestNutritionGates:
         тап обязан быть неотличим от набранного текста (DRF-1348).
         """
         consent(True)
-        payloads = _payloads(marketplace_extra_reply(bot_user=bot_user)[1]["buttons"])
+        payloads = _payloads(marketplace_menu_reply(bot_user=bot_user)[1]["buttons"])
         assert DIARY_TAP_TEXT in payloads
         assert not [p for p in payloads if p.startswith(CALLBACK_HEALTH_NEED_PREFIX)]
+
+    def test_two_nutrition_items_are_drawn_once_each(
+        self, bot_user, consent, miniapp, nutrition_on
+    ):
+        """Подстановка пищевых кнопок — ОДИН раз, а не на каждом пункте.
+
+        Сегодня пищевой пункт один, и цикл верен при любой позиции
+        подстановки. Модуль, однако, обещает возвращение «Сканера еды»
+        прямым текстом («сканер вернётся экранным, и правило для него уже
+        готово»), а ``_nutrition_buttons`` отдаёт кнопки на ВЕСЬ
+        ``NUTRITION_ITEMS`` разом. Подставь их на каждом совпадении — и в
+        день возвращения сканера каждая пищевая кнопка нарисуется дважды;
+        поймал бы это не тест, а человек в MAX.
+
+        Проверяется на ДВУХ пунктах, потому что на одном закладка
+        невидима, — и на настоящем построителе, а не на копии цикла.
+        """
+        consent(True)
+        scanner = MenuItem(
+            label="Сканер еды",
+            callback="open_food_scan",
+            line="",
+            where="miniapp",
+            warning="Для снимка тарелки открою сканер.",
+            surface="food_scan",
+        )
+        two = (*NUTRITION_ITEMS, scanner)
+        with mock.patch.object(marketplace, "NUTRITION_ITEMS", two):
+            payloads = _payloads(marketplace_menu_reply(bot_user=bot_user)[1]["buttons"])
+
+        # Стража: оба пункта нарисованы — иначе «по одному разу» зеленело
+        # бы на пустом наборе.
+        assert DIARY_TAP_TEXT in payloads, payloads
+        assert "cb:open:food_scan" in payloads, payloads
+        # И только теперь — ровно по одному каждого.
+        assert payloads.count(DIARY_TAP_TEXT) == 1, payloads
+        assert payloads.count("cb:open:food_scan") == 1, payloads
 
     def test_the_diary_phrase_is_one_the_diary_itself_claims(self):
         """Кнопка не может вести туда, куда фраза не доезжает."""
@@ -580,7 +680,7 @@ class TestNutritionGates:
             raise RuntimeError("db is down")
 
         monkeypatch.setattr("apps.consent.health.is_granted", _boom)
-        payloads = _payloads(marketplace_extra_reply(bot_user=bot_user)[1]["buttons"])
+        payloads = _payloads(marketplace_menu_reply(bot_user=bot_user)[1]["buttons"])
         assert f"{CALLBACK_HEALTH_NEED_PREFIX}food_diary" in payloads
 
     def test_without_a_miniapp_an_unconsented_diary_is_not_offered(
@@ -590,7 +690,7 @@ class TestNutritionGates:
         settings.MAX_BOT_WEB_APP = ""
         settings.MAX_MINIAPP_URL = ""
         consent(False)
-        payloads = _payloads(marketplace_extra_reply(bot_user=bot_user)[1]["buttons"])
+        payloads = _payloads(marketplace_menu_reply(bot_user=bot_user)[1]["buttons"])
         assert not [p for p in payloads if p.startswith(CALLBACK_HEALTH_NEED_PREFIX)]
 
     def test_but_a_consented_diary_works_without_a_miniapp(
@@ -600,7 +700,7 @@ class TestNutritionGates:
         settings.MAX_BOT_WEB_APP = ""
         settings.MAX_MINIAPP_URL = ""
         consent(True)
-        payloads = _payloads(marketplace_extra_reply(bot_user=bot_user)[1]["buttons"])
+        payloads = _payloads(marketplace_menu_reply(bot_user=bot_user)[1]["buttons"])
         assert DIARY_TAP_TEXT in payloads
 
 
@@ -722,9 +822,12 @@ class TestCompositionInvariants:
 
     def test_module_exposes_the_action_types_the_handler_records(self):
         assert marketplace.MENU_ACTION_TYPE
-        assert marketplace.EXTRA_ACTION_TYPE
         assert marketplace.OPEN_WARNING_ACTION_TYPE
         assert marketplace.FALLBACK_ACTION_TYPE
+        # Метка экрана подменю снята вместе с экраном (OD-UI-2): тапы
+        # ``cb:extra:*`` из истории чата метятся как главное меню, потому
+        # что им и отвечаются.
+        assert not hasattr(marketplace, "EXTRA_ACTION_TYPE")
 
     def test_a_bot_item_never_carries_a_route_slug(self):
         """Перепутать payload и слаг — значит нарисовать кнопку в никуда."""
