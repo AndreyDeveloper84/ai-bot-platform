@@ -237,6 +237,36 @@ export const SUPPORTED_RESOLVER_SPEC_MAJOR = 1;
 export const NOT_RECOMMENDABLE_CODE = "ELIG_EXCLUDED_NOT_RECOMMENDABLE";
 
 /**
+ * §7.2 / §4.4 — пустота по безопасности.
+ *
+ * Снаружи она выглядит ТОЧНО ТАК ЖЕ, как §10.3: те же 200, тот же
+ * пустой `ordered[]`. Различает их только код, и путать эти два
+ * состояния особенно дорого: первое означает «почини разметку
+ * каталога», второе — «не чини ничего, гейт сработал верно».
+ *
+ * Заявление поверхности `NOT_APPLICABLE` отвергается СОДЕРЖАНИЕМ
+ * решения, а не мнением о вызывающем (§4.1, решение владельца §72):
+ * кандидат, требующий проверки здоровья, делает выдачу fail-closed
+ * так же, как `UNKNOWN`.
+ */
+export const SAFETY_EXCLUDED_CODE = "ELIG_EXCLUDED_SAFETY";
+
+/**
+ * §4.4 — нужда названа явно, но никто ей не отвечает
+ * (`need.is_stated ∧ MATCH_UNDETERMINED` → исключение на S1).
+ *
+ * Третья пустота, и она отличается от двух других тем, что чинить в
+ * системе нечего: показать кого-то другого значило бы молча подставить
+ * не ту услугу, что канон §14.4 запрещает прямо.
+ *
+ * На уровень решения этот код НЕ поднимается — он живёт только в
+ * `excluded[]`. Потому потребитель обязан читать оба места: чтение
+ * одних только кодов решения превратило бы это состояние в `OK`
+ * с пустой полкой, то есть снова в безымянную пустоту.
+ */
+export const NOT_CAPABLE_CODE = "ELIG_EXCLUDED_NOT_CAPABLE";
+
+/**
  * §4.3 — что именно рекомендовано. `kind` нормативен: без него
  * поверхность не знает, услуга это или мастер, и «молча подставить
  * другое» становится делом одной строки.
@@ -408,6 +438,20 @@ export function decisionContractViolation(payload: unknown): string | null {
       return `ответ невалиден целиком; первое нарушение — ${problem}`;
     }
   }
+  // `excluded[]` проверяется потому, что потребитель его ЧИТАЕТ: по нему
+  // различаются три причины пустой полки (§4.4). Разбирать непроверенное
+  // — тот же дефект, что разбирать неизвестную версию.
+  if (data.excluded !== undefined) {
+    if (!Array.isArray(data.excluded)) {
+      return `excluded: ожидался список, получено ${describeShape(data.excluded)}`;
+    }
+    for (let i = 0; i < data.excluded.length; i += 1) {
+      const problem = excludedViolation(data.excluded[i], i);
+      if (problem !== null) {
+        return `ответ невалиден целиком; первое нарушение — ${problem}`;
+      }
+    }
+  }
   for (const field of ["decision_id", "request_id", "policy_versions"] as const) {
     if (!(field in data)) return `обязательное поле ${field} отсутствует`;
   }
@@ -490,6 +534,35 @@ function candidateViolation(item: unknown, index: number): string | null {
       `ordered[${index}].evidence: ожидался список, получено ` +
       `${describeShape(item.evidence)}`
     );
+  }
+  return null;
+}
+
+function excludedViolation(item: unknown, index: number): string | null {
+  if (!isPlainObject(item)) {
+    return `excluded[${index}]: ожидался объект, получено ${describeShape(item)}`;
+  }
+  const candidate = item.candidate;
+  if (!isPlainObject(candidate) || typeof candidate.id !== "string") {
+    return `excluded[${index}].candidate: нет идентификатора кандидата`;
+  }
+  if (typeof item.reason_code !== "string") {
+    return (
+      `excluded[${index}].reason_code: ожидалась строка, получено ` +
+      `${describeShape(item.reason_code)}`
+    );
+  }
+  // §4.4: исключения фиксируются ТОЛЬКО на стадиях допустимости. Код не
+  // из семейства исключения здесь означал бы, что упорядочивание тайком
+  // стало фильтром, — а §4.4 существует ровно затем, чтобы этого не было.
+  if (!EXCLUSION_CODE_RE.test(item.reason_code)) {
+    return (
+      `excluded[${index}].reason_code: ожидался код исключения, получено ` +
+      `${describeShape(item.reason_code)} (§4.4)`
+    );
+  }
+  if (typeof item.stage !== "string") {
+    return `excluded[${index}].stage: ожидалась строка, получено ${describeShape(item.stage)}`;
   }
   return null;
 }

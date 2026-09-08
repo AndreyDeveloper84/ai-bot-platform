@@ -76,7 +76,9 @@ import {
   fetchSlots,
   createBooking,
   decisionContractViolation,
+  NOT_CAPABLE_CODE,
   NOT_RECOMMENDABLE_CODE,
+  SAFETY_EXCLUDED_CODE,
 } from "./api";
 import type {
   Master,
@@ -213,23 +215,29 @@ export interface CatalogBrowseData {
    */
   picks: ServicePick[];
   /**
-   * Почему `picks` именно такой — ЧЕТЫРЕ различимых исхода, и свести
+   * Почему `picks` именно такой — ШЕСТЬ различимых исходов, и свести
    * любые два значило бы вернуть то самое смешение отсутствия с нулём.
    *
-   * * `OK` — источник ответил, полка построена (может быть пустой по
-   *   гейту WHY);
-   * * `UNAVAILABLE` — источник не ответил. Временно, повтор осмыслен,
-   *   молчание законно;
-   * * `CONTRACT_VIOLATION` — источник ответил не в той форме. Наш с
-   *   ним дефект, громко, повтор бессмыслен;
-   * * `NO_VERIFIED_CANDIDATES` — **штатный результат, а не ошибка**
-   *   (решение владельца §76): видимых услуг больше нуля, пригодных к
-   *   рекомендации — ноль, потому что `VERIFIED` выдаётся только после
-   *   подтверждения. Повторять бессмысленно; человеку показывается
-   *   предусмотренное НЕперсонализированное состояние — каталог и
-   *   запись по прямому выбору, без слова «подходит» (§10.2, §10.3).
+   * | исход | что произошло | повтор | что чинить |
+   * |---|---|---|---|
+   * | `OK` | источник ответил, полка построена | — | — |
+   * | `UNAVAILABLE` | источник не ответил | осмыслен | ждать |
+   * | `CONTRACT_VIOLATION` | ответил не в той форме | бессмыслен | источник |
+   * | `NO_VERIFIED_CANDIDATES` | связи не подтверждены (§76) | бессмыслен | разметку каталога |
+   * | `SAFETY_BLOCKED` | гейт безопасности закрыл выдачу | бессмыслен | **ничего** |
+   * | `NO_CAPABLE_CANDIDATES` | нужда названа, никто не совпал | бессмыслен | запрос |
    *
-   * Экран вправе развести их по-разному; сводить обратно — нельзя.
+   * Последние три — пустая полка, и снаружи они **неразличимы**: 200 и
+   * пустой `ordered[]` у всех трёх. Различает их только код исключения,
+   * а цена путаницы разная: `SAFETY_BLOCKED`, названный «нет
+   * подтверждённых связей», отправил бы человека чинить разметку там,
+   * где гейт сработал верно.
+   *
+   * Все четыре пустоты — **штатные результаты, а не ошибки** (решение
+   * владельца §76). Человеку во всех показывается предусмотренное
+   * НЕперсонализированное состояние: каталог и запись по прямому
+   * выбору, без слова «подходит» (§10.2). Экран вправе развести их
+   * по-разному; сводить обратно — нельзя.
    */
   picksOutcome: PicksOutcome;
   /**
@@ -279,25 +287,51 @@ export type PicksOutcome =
   | "OK"
   | "UNAVAILABLE"
   | "CONTRACT_VIOLATION"
-  | "NO_VERIFIED_CANDIDATES";
+  | "NO_VERIFIED_CANDIDATES"
+  | "SAFETY_BLOCKED"
+  | "NO_CAPABLE_CANDIDATES";
 
 /**
- * Узнать штатную пустоту §10.3 по её собственному признаку.
+ * Три пустоты, неразличимые снаружи, и почему их всё же три.
  *
- * Форма на проводе описана контрактом: пустой `ordered[]` **и** код
- * решения в целом `ELIG_EXCLUDED_NOT_RECOMMENDABLE`. Имя состоянию дал
- * владелец (§76) — `NO_VERIFIED_CANDIDATES`.
+ * `200` и пустой `ordered[]` выглядят одинаково во всех трёх случаях.
+ * Различает их только код — и цена путаницы разная у каждой пары:
  *
- * Пустой `ordered[]` БЕЗ этого кода сюда не попадает намеренно: он
- * означает другое («никто не подошёл»), и назвать одно другим значило
- * бы снова сложить два состояния в одну ветку. Контракт различает их
- * кодом — различаем и мы.
+ * | код | причина | что чинить |
+ * |---|---|---|
+ * | `ELIG_EXCLUDED_NOT_RECOMMENDABLE` | связь не подтверждена (§76) | разметку каталога |
+ * | `ELIG_EXCLUDED_SAFETY` | заявление `NOT_APPLICABLE` отвергнуто содержанием | **ничего: гейт сработал** |
+ * | `ELIG_EXCLUDED_NOT_CAPABLE` | нужда названа, никто не совпал | запрос, не систему |
+ *
+ * Назвать безопасность «нет подтверждённых связей» значило бы послать
+ * человека чинить разметку там, где сработал медицинский гейт, — одно
+ * имя на два состояния, то самое, против чего эти исходы и заведены.
+ *
+ * **Читаются ДВА места, и это не перестраховка.** Реализация резолвера
+ * (`recommendation/_pipeline.py::_decision_codes`) поднимает на уровень
+ * решения только первые два кода; `ELIG_EXCLUDED_NOT_CAPABLE` живёт
+ * исключительно в `excluded[]`. Потребитель, читающий одни лишь коды
+ * решения, превратил бы третью пустоту обратно в `OK` с пустой полкой.
+ *
+ * **Старшинство при нескольких кодах сразу** (решение отвергло часть
+ * кандидатов по безопасности, а часть — по неподтверждённой связи):
+ * безопасность старше. Она — единственная из трёх, про которую верно
+ * «чинить нечего», и потерять её за более громким соседом опаснее, чем
+ * наоборот. Это выбор потребителя, а не буква контракта: контракт
+ * допускает оба кода одновременно и старшинства не назначает.
  */
-function isNoVerifiedCandidates(decision: RecommendationDecision): boolean {
-  return (
-    decision.ordered.length === 0 &&
-    (decision.reason_codes ?? []).includes(NOT_RECOMMENDABLE_CODE)
-  );
+function classifyEmptiness(decision: RecommendationDecision): PicksOutcome {
+  if (decision.ordered.length > 0) return "OK";
+  const decisionCodes = decision.reason_codes ?? [];
+  const excludedCodes = (decision.excluded ?? []).map((e) => e.reason_code);
+  if (decisionCodes.includes(SAFETY_EXCLUDED_CODE)) return "SAFETY_BLOCKED";
+  if (decisionCodes.includes(NOT_RECOMMENDABLE_CODE)) return "NO_VERIFIED_CANDIDATES";
+  if (excludedCodes.includes(SAFETY_EXCLUDED_CODE)) return "SAFETY_BLOCKED";
+  if (excludedCodes.includes(NOT_RECOMMENDABLE_CODE)) return "NO_VERIFIED_CANDIDATES";
+  if (excludedCodes.includes(NOT_CAPABLE_CODE)) return "NO_CAPABLE_CANDIDATES";
+  // Пустота без единого кода — «никто не подошёл» без объяснения.
+  // Приписать ей чужое имя значило бы выдумать причину.
+  return "OK";
 }
 
 /**
@@ -355,11 +389,11 @@ export async function getCatalogBrowse(): Promise<CatalogBrowseData> {
         ". Подбор остаётся пустым (никогда не подделывается); см. docs/specs/" +
         "RECOMMENDATION_RESOLVER_CONTRACT_v1.0.md §9.4 (DRF-1568).",
     );
-  } else if (recs.state === "OK" && isNoVerifiedCandidates(recs.decision)) {
-    // Штатное состояние с именем, а не дефект и не пустота по ошибке.
+  } else if (recs.state === "OK" && recs.decision.ordered.length === 0) {
+    // Штатные состояния с именами, а не дефект и не пустота по ошибке.
     // Ни строчки в журнал: шум здесь обесценил бы детектор расхождения,
     // стоящий рядом.
-    picksOutcome = "NO_VERIFIED_CANDIDATES";
+    picksOutcome = classifyEmptiness(recs.decision);
   } else if (recs.state === "OK") {
     const known = new Set(servicesRes.services.map((s) => s.id));
     picks = recs.decision.ordered
