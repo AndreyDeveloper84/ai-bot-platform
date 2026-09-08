@@ -284,7 +284,11 @@ class TestEverySevenButtonDoesWhatItPromises:
             "📋 Мои записи",
             "Моя цель",
             "Профиль",
-            "Ещё",
+            # OD-UI-2 («Ещё убираем, помощь в главное меню»): подменю
+            # снесено, и «Помощь» заняла его место последней кнопкой.
+            # Пищевого пункта здесь нет, потому что ворота закрыты —
+            # ``NUTRITION_ENABLED`` в этом файле не поднимался.
+            "Помощь",
         ]
 
     def test_pick_a_service_asks_what_the_person_wants(self, sent, fake_redis, concierge):
@@ -416,44 +420,85 @@ class TestEverySevenButtonDoesWhatItPromises:
         assert buttons[0]["text"] == "Открыть"
         assert buttons[0]["payload"] == slug, buttons
 
-    def test_more_opens_the_submenu(self, sent, fake_redis, concierge):
+    def test_yesterdays_more_and_back_still_answer_with_the_menu(self, sent, fake_redis, concierge):
+        """OD-UI-2 — подменю снесено, но вчерашние кнопки живы в переписке.
+
+        Раньше ``cb:extra:open`` открывал «Дополнительные возможности», а
+        ``cb:extra:back`` возвращал. Экрана больше нет; ветка осталась,
+        потому что клавиатуры живут в истории чата дольше кода. Тап по
+        кнопке, которую бот сам нарисовал, обязан дойти до ОТВЕТА — иначе
+        сырой ``cb:extra:…`` уедет модели (DRF-1051) или человек получит
+        молчание.
+        """
         _welcomed(71006)
 
         max_handler.handle_global_max_event(
             _tap(payload=CALLBACK_EXTRA_OPEN, user_id=71006, callback_id="s-5")
         )
-
-        assert sent[0]["text"] == "Дополнительные возможности"
-        # «История визитов» слита с «Моими записями» (OD-UI-1, «кнопки
-        # сливаем»); прошлое отвечается в чате, и отдельного пункта у него
-        # больше нет. Достижимость доказана выше —
-        # ``test_my_bookings_also_lists_the_past_in_the_chat``.
-        assert _labels(sent[0]) == ["Помощь", "Назад"]
-
-    def test_back_returns_to_the_main_menu(self, sent, fake_redis, concierge):
-        _welcomed(71007)
-
         max_handler.handle_global_max_event(
-            _tap(payload=CALLBACK_EXTRA_OPEN, user_id=71007, callback_id="s-6")
-        )
-        max_handler.handle_global_max_event(
-            _tap(payload=CALLBACK_EXTRA_BACK, user_id=71007, callback_id="s-7")
+            _tap(payload=CALLBACK_EXTRA_BACK, user_id=71006, callback_id="s-5b")
         )
 
         assert len(sent) == 2, sent
-        assert sent[1]["text"].startswith("Что хотите сделать?")
-        assert "Ещё" in _labels(sent[1])
+        for reply in sent:
+            assert reply["text"].startswith("Что хотите сделать?"), reply["text"]
+            assert "Помощь" in _labels(reply), _labels(reply)
+        # Экрана подменю больше нет ни у одного из двух ходов.
+        assert not [r for r in sent if r["text"] == "Дополнительные возможности"], sent
+        assert concierge.call_count == 0
 
-    def test_help_answers_with_the_menu_too(self, sent, fake_redis, concierge):
-        """§25 п.2 — «отвечаем меню, а не свободной прозой»."""
+    def test_the_menu_no_longer_offers_a_way_into_the_submenu(self, sent, fake_redis, concierge):
+        """…и нарисовать «Ещё» заново меню уже не может."""
+        _welcomed(71007)
+
+        max_handler.handle_global_max_event(_msg(text="меню", user_id=71007, mid="s-6"))
+
+        labels = _labels(sent[0])
+        # Стража: меню построено и полно.
+        assert "Профиль" in labels, labels
+        assert "Помощь" in labels, labels
+        # И только теперь отрицания.
+        assert "Ещё" not in labels, labels
+        assert "Назад" not in labels, labels
+        assert CALLBACK_EXTRA_OPEN not in _payloads(sent[0]), _payloads(sent[0])
+        assert CALLBACK_EXTRA_BACK not in _payloads(sent[0]), _payloads(sent[0])
+
+    def test_help_from_the_main_menu_answers_with_the_menu(self, sent, fake_redis, concierge):
+        """§25 п.2 — «отвечаем меню, а не свободной прозой».
+
+        Главная проверка переезда «Помощи» (OD-UI-2). Payload остался
+        ``cb:extra:help``, и это несущее решение: ``resolve_tap_text``
+        забирает весь ``cb:menu:*`` ВЫШЕ этой лестницы и подставляет
+        каноническую фразу, а для ``cb:menu:help`` на глобальном пути эта
+        фраза — «Что ты умеешь?», уезжающая КОНСЬЕРЖУ. То есть наивный
+        переезд дал бы прозу модели вместо меню.
+
+        Здесь проверяется живой путь целиком: тап приходит настоящим
+        webhook'ом, отвечает меню, и консьерж не звался НИ РАЗУ.
+        """
         _welcomed(71008)
 
         max_handler.handle_global_max_event(
             _tap(payload=CALLBACK_EXTRA_HELP, user_id=71008, callback_id="s-8")
         )
 
+        assert len(sent) == 1, sent
         assert sent[0]["text"].startswith("Что хотите сделать?")
+        assert "Помощь" in _labels(sent[0]), _labels(sent[0])
         assert concierge.call_count == 0
+
+    def test_the_naive_help_payload_would_have_gone_to_the_concierge(self):
+        """Стража к предыдущему: ловушка настоящая, а не выдуманная.
+
+        Если однажды ``cb:menu:help`` перестанет перехватываться выше
+        лестницы, предыдущий тест этого не заметит — а этот заметит и
+        скажет, что довод устарел.
+        """
+        from apps.channels.max.quick_actions import resolve_tap_text
+        from apps.skills.menu.matching import CALLBACK_MENU_HELP
+
+        assert resolve_tap_text(CALLBACK_MENU_HELP) == "Что ты умеешь?"
+        assert resolve_tap_text(CALLBACK_EXTRA_HELP) is None
 
     def test_navigation_taps_never_land_in_history(self, sent, fake_redis, concierge):
         """«Ещё» — не высказывание, а сырой ``cb:`` в истории это DRF-988."""
@@ -559,9 +604,8 @@ class TestDiaryThroughTheBot:
         monkeypatch.setattr("apps.orchestrator.personal_surface.render_diary", _render)
         _welcomed(71201)
 
-        max_handler.handle_global_max_event(
-            _tap(payload=CALLBACK_EXTRA_OPEN, user_id=71201, callback_id="d-1")
-        )
+        # Вход — ГЛАВНОЕ меню: с OD-UI-2 дневник живёт здесь, подменю нет.
+        max_handler.handle_global_max_event(_msg(text="меню", user_id=71201, mid="d-1"))
         # Стража: пункт нарисован, и его payload это ФРАЗА, а не слаг.
         assert "🥗 Дневник питания" in _labels(sent[0]), _labels(sent[0])
         assert DIARY_TAP_TEXT in _payloads(sent[0]), _payloads(sent[0])
@@ -573,6 +617,32 @@ class TestDiaryThroughTheBot:
         assert "Питание за сегодня" in sent[1]["text"], sent[1]["text"]
         assert concierge.call_count == 0
 
+    def test_a_closed_gate_keeps_the_diary_out_of_the_main_menu(
+        self, sent, fake_redis, concierge, settings, health_consent
+    ):
+        """Первая строка таблицы §25 п.6 пережила переезд (OD-UI-2).
+
+        Согласие ЕСТЬ — и всё равно пункта нет: первые ворота считаются
+        раньше вторых, и никакое согласие их не открывает. Дописать
+        пищевой пункт в статический кортеж главного меню значило бы
+        покраснеть именно здесь.
+        """
+        settings.NUTRITION_ENABLED = False
+        health_consent(True)
+        _welcomed(71206)
+
+        max_handler.handle_global_max_event(_msg(text="меню", user_id=71206, mid="c-1"))
+
+        labels = _labels(sent[0])
+        payloads = _payloads(sent[0])
+        # Стража: меню построено и полно.
+        assert "Помощь" in labels, labels
+        assert "📋 Мои записи" in labels, labels
+        # И только теперь отрицания — ни кнопки, ни запроса согласия.
+        assert "🥗 Дневник питания" not in labels, labels
+        assert DIARY_TAP_TEXT not in payloads, payloads
+        assert not [p for p in payloads if p.startswith(CALLBACK_HEALTH_NEED_PREFIX)], payloads
+
     def test_without_consent_the_button_explains_and_leads_to_the_profile(
         self, sent, fake_redis, concierge, settings, health_consent
     ):
@@ -580,10 +650,12 @@ class TestDiaryThroughTheBot:
         health_consent(False)
         _welcomed(71202)
 
-        max_handler.handle_global_max_event(
-            _tap(payload=CALLBACK_EXTRA_OPEN, user_id=71202, callback_id="g-1")
-        )
+        max_handler.handle_global_max_event(_msg(text="меню", user_id=71202, mid="g-1"))
+        # Пункт стоит в ГЛАВНОМ меню (OD-UI-2) и ведёт на ЗАПРОС согласия,
+        # а не в поверхность: вторая строка таблицы §25 п.6 пережила переезд.
+        assert "🥗 Дневник питания" in _labels(sent[0]), _labels(sent[0])
         assert f"{CALLBACK_HEALTH_NEED_PREFIX}food_diary" in _payloads(sent[0]), _payloads(sent[0])
+        assert DIARY_TAP_TEXT not in _payloads(sent[0]), _payloads(sent[0])
 
         max_handler.handle_global_max_event(
             _tap(
