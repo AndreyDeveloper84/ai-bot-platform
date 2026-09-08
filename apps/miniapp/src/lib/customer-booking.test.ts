@@ -604,7 +604,7 @@ describe("decisionContractViolation", () => {
   });
 });
 
-// --- §76: четыре исхода, и свести любые два нельзя ------------------------
+// --- §76: пустота с именем, а не безымянная пустота ------------------------
 //
 // Решение владельца 08.09.2026: `VERIFIED` выдаётся только после
 // подтверждения, 206 существующих связей становятся `REVIEW_REQUIRED`,
@@ -614,7 +614,8 @@ describe("decisionContractViolation", () => {
 // состояние — каталог и запись по прямому выбору, без слова «подходит».
 //
 // Форма этого состояния на проводе описана контрактом §10.3: пустой
-// `ordered[]` ПЛЮС код решения `ELIG_EXCLUDED_NOT_RECOMMENDABLE`.
+// `ordered[]` ПЛЮС код `ELIG_EXCLUDED_NOT_RECOMMENDABLE`. Соседние
+// пустоты — блоком ниже: их у полки три, и снаружи они одинаковы.
 
 describe("§76 · NO_VERIFIED_CANDIDATES — штатное состояние с именем", () => {
   function mirrorReady(): void {
@@ -652,35 +653,6 @@ describe("§76 · NO_VERIFIED_CANDIDATES — штатное состояние �
     expect(data.picks).toEqual([]);
   });
 
-  it("четыре исхода различимы попарно — ни один не схлопнут в другой", async () => {
-    const seen: string[] = [];
-
-    mirrorReady();
-    mockedFetchRecommendations.mockResolvedValue(
-      decision([candidate("svc-1", { reason_codes: ["MATCH_SERVICE_EXACT"] })]),
-    );
-    seen.push((await getCatalogBrowse()).picksOutcome);
-
-    mockedFetchRecommendations.mockRejectedValue(new Error("[502] ayla_unavailable"));
-    seen.push((await getCatalogBrowse()).picksOutcome);
-
-    mockedFetchRecommendations.mockResolvedValue({ recommendations: [] });
-    seen.push((await getCatalogBrowse()).picksOutcome);
-
-    mockedFetchRecommendations.mockResolvedValue(
-      decision([], { reason_codes: ["ELIG_EXCLUDED_NOT_RECOMMENDABLE"] }),
-    );
-    seen.push((await getCatalogBrowse()).picksOutcome);
-
-    expect(seen).toEqual([
-      "OK",
-      "UNAVAILABLE",
-      "CONTRACT_VIOLATION",
-      "NO_VERIFIED_CANDIDATES",
-    ]);
-    expect(new Set(seen).size).toBe(4);
-  });
-
   it("REVIEW_REQUIRED, доехавший до клиента, — нарушение, а не повод отрисовать", () => {
     // «Клиенту нельзя сообщать, что такая услуга или мастер подходит».
     for (const status of ["REVIEW_REQUIRED", "UNMAPPED", "UNKNOWN", null]) {
@@ -712,6 +684,171 @@ describe("§76 · NO_VERIFIED_CANDIDATES — штатное состояние �
     expect(
       decisionContractViolation(
         decision([], { reason_codes: ["ELIG_EXCLUDED_NOT_RECOMMENDABLE"] }),
+      ),
+    ).toBeNull();
+  });
+});
+
+// --- Три пустоты, неразличимые снаружи -------------------------------------
+//
+// `200` и пустой `ordered[]` у всех трёх. Различает их только код, и
+// цена путаницы разная у каждой пары: «нет подтверждённых связей»
+// говорит «почини разметку», отказ по безопасности — «не чини ничего,
+// гейт сработал», «никто не совпал» — «дело в запросе, не в системе».
+//
+// Читаются ДВА места: реализация резолвера
+// (`recommendation/_pipeline.py::_decision_codes`) поднимает на уровень
+// решения только первые два кода, третий живёт лишь в `excluded[]`.
+
+describe("три пустоты различаются кодом, а не пустотой ordered", () => {
+  function mirrorReady(): void {
+    mockedFetchServices.mockResolvedValue({
+      services: [service({ id: "svc-1", name: "Маникюр" })],
+    });
+    mockedFetchMasters.mockResolvedValue({ masters: [MASTER] });
+  }
+
+  function excluded(id: string, code: string): unknown {
+    return { candidate: { kind: "SERVICE", id }, stage: "S1", reason_code: code };
+  }
+
+  beforeEach(mirrorReady);
+
+  it("код решения: безопасность и неподтверждённая связь названы по-разному", async () => {
+    mockedFetchRecommendations.mockResolvedValue(
+      decision([], {
+        reason_codes: ["ELIG_EXCLUDED_SAFETY"],
+        excluded: [excluded("svc-1", "ELIG_EXCLUDED_SAFETY")],
+      }),
+    );
+    expect((await getCatalogBrowse()).picksOutcome).toBe("SAFETY_BLOCKED");
+
+    mockedFetchRecommendations.mockResolvedValue(
+      decision([], {
+        reason_codes: ["ELIG_EXCLUDED_NOT_RECOMMENDABLE"],
+        excluded: [excluded("svc-1", "ELIG_EXCLUDED_NOT_RECOMMENDABLE")],
+      }),
+    );
+    expect((await getCatalogBrowse()).picksOutcome).toBe("NO_VERIFIED_CANDIDATES");
+  });
+
+  it("NOT_CAPABLE читается из excluded[] — на уровень решения он не поднимается", async () => {
+    // Резолвер этот код наверх не выносит. Потребитель, читающий одни
+    // лишь коды решения, назвал бы это состояние `OK` с пустой полкой —
+    // то есть снова безымянной пустотой.
+    mockedFetchRecommendations.mockResolvedValue(
+      decision([], { excluded: [excluded("svc-1", "ELIG_EXCLUDED_NOT_CAPABLE")] }),
+    );
+    expect((await getCatalogBrowse()).picksOutcome).toBe("NO_CAPABLE_CANDIDATES");
+  });
+
+  it("безопасность старше неподтверждённой связи, когда оба кода сразу", async () => {
+    // Часть кандидатов отсеяна гейтом, часть — разметкой. Потерять
+    // безопасность за более громким соседом опаснее, чем наоборот:
+    // это единственный из трёх случаев, где чинить нечего.
+    mockedFetchRecommendations.mockResolvedValue(
+      decision([], {
+        reason_codes: ["ELIG_EXCLUDED_NOT_RECOMMENDABLE", "ELIG_EXCLUDED_SAFETY"],
+        excluded: [
+          excluded("svc-1", "ELIG_EXCLUDED_SAFETY"),
+          excluded("svc-2", "ELIG_EXCLUDED_NOT_RECOMMENDABLE"),
+        ],
+      }),
+    );
+    expect((await getCatalogBrowse()).picksOutcome).toBe("SAFETY_BLOCKED");
+  });
+
+  it("исключения при НЕпустой полке ничего не переименовывают", async () => {
+    // Исключения — штатная часть любого решения. Пока `ordered` не пуст,
+    // причина пустоты не обсуждается: пустоты нет.
+    mockedFetchRecommendations.mockResolvedValue(
+      decision([candidate("svc-1", { reason_codes: ["MATCH_SERVICE_EXACT"] })], {
+        excluded: [excluded("svc-2", "ELIG_EXCLUDED_SAFETY")],
+      }),
+    );
+    const data = await getCatalogBrowse();
+    expect(data.picksOutcome).toBe("OK");
+    expect(data.picks).toHaveLength(1);
+  });
+
+  it("ШЕСТЬ исходов различимы попарно — ни один не схлопнут в другой", async () => {
+    const seen: string[] = [];
+
+    mockedFetchRecommendations.mockResolvedValue(
+      decision([candidate("svc-1", { reason_codes: ["MATCH_SERVICE_EXACT"] })]),
+    );
+    seen.push((await getCatalogBrowse()).picksOutcome);
+
+    mockedFetchRecommendations.mockRejectedValue(new Error("[502] ayla_unavailable"));
+    seen.push((await getCatalogBrowse()).picksOutcome);
+
+    mockedFetchRecommendations.mockResolvedValue({ recommendations: [] });
+    seen.push((await getCatalogBrowse()).picksOutcome);
+
+    mockedFetchRecommendations.mockResolvedValue(
+      decision([], { reason_codes: ["ELIG_EXCLUDED_NOT_RECOMMENDABLE"] }),
+    );
+    seen.push((await getCatalogBrowse()).picksOutcome);
+
+    mockedFetchRecommendations.mockResolvedValue(
+      decision([], { reason_codes: ["ELIG_EXCLUDED_SAFETY"] }),
+    );
+    seen.push((await getCatalogBrowse()).picksOutcome);
+
+    mockedFetchRecommendations.mockResolvedValue(
+      decision([], { excluded: [excluded("svc-1", "ELIG_EXCLUDED_NOT_CAPABLE")] }),
+    );
+    seen.push((await getCatalogBrowse()).picksOutcome);
+
+    expect(seen).toEqual([
+      "OK",
+      "UNAVAILABLE",
+      "CONTRACT_VIOLATION",
+      "NO_VERIFIED_CANDIDATES",
+      "SAFETY_BLOCKED",
+      "NO_CAPABLE_CANDIDATES",
+    ]);
+    expect(new Set(seen).size).toBe(6);
+  });
+
+  it("excluded[] проверяется, раз уж он читается", () => {
+    const cases: ReadonlyArray<[unknown, string]> = [
+      [decision([], { excluded: {} }), "excluded: ожидался список"],
+      [decision([], { excluded: [null] }), "excluded[0]: ожидался объект"],
+      [
+        decision([], { excluded: [{ stage: "S1", reason_code: "ELIG_EXCLUDED_SAFETY" }] }),
+        "excluded[0].candidate",
+      ],
+      [
+        decision([], { excluded: [{ candidate: { kind: "SERVICE", id: "s" }, stage: "S1" }] }),
+        "excluded[0].reason_code",
+      ],
+      // Код НЕ из семейства исключения: упорядочивание тайком стало бы
+      // фильтром, а §4.4 существует ровно затем, чтобы этого не было.
+      [
+        decision([], {
+          excluded: [
+            { candidate: { kind: "SERVICE", id: "s" }, stage: "S1", reason_code: "MATCH_SERVICE_EXACT" },
+          ],
+        }),
+        "ожидался код исключения",
+      ],
+      [
+        decision([], {
+          excluded: [{ candidate: { kind: "SERVICE", id: "s" }, reason_code: "ELIG_EXCLUDED_SAFETY" }],
+        }),
+        "excluded[0].stage",
+      ],
+    ];
+    for (const [payload, expected] of cases) {
+      const violation = decisionContractViolation(payload);
+      expect(violation, JSON.stringify(payload)).not.toBeNull();
+      expect(violation).toContain(expected);
+    }
+    // А правильная запись проходит.
+    expect(
+      decisionContractViolation(
+        decision([], { excluded: [excluded("svc-1", "ELIG_EXCLUDED_SAFETY")] }),
       ),
     ).toBeNull();
   });
