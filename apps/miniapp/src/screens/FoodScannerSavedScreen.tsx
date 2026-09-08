@@ -24,10 +24,8 @@ import { useLocation, useNavigate } from "react-router-dom";
 
 import { StateError } from "../components/StateError";
 import {
-  fetchDailySummary,
-  fetchHealthFlags,
-  type DailySummaryResponse,
 } from "../lib/food-scanner";
+import { getWellnessToday, type WellnessToday } from "../lib/customer-wellness";
 import { useScreenBack } from "../hooks/useScreenBack";
 import { backTo } from "../lib/screen-back";
 
@@ -54,18 +52,19 @@ export function FoodScannerSavedScreen() {
     state.edMode === undefined ? true : Boolean(state.edMode),
   );
 
-  const [summary, setSummary] = useState<DailySummaryResponse | null>(null);
+  const [summary, setSummary] = useState<WellnessToday | null>(null);
   const [err, setErr] = useState<unknown>(null);
 
   const load = useCallback(async () => {
     setErr(null);
     try {
-      const [s, flags] = await Promise.all([
-        fetchDailySummary(),
-        fetchHealthFlags(),
-      ]);
+      const s = await getWellnessToday();
       setSummary(s);
-      setEdMode(Boolean(flags.health_flags.eating_disorder));
+      // Признак приходит от источника; отсутствие ключа ПРЯЧЕТ числа —
+      // «не смогли спросить» не становится разрешением их показать
+      // (§10 Appendix ED Mode). Раньше здесь стояла заглушка, которая
+      // на этот вопрос отвечала выдумкой.
+      setEdMode(s.nutrition_numbers_hidden !== false);
     } catch (e) {
       setErr(e);
     }
@@ -75,13 +74,15 @@ export function FoodScannerSavedScreen() {
     load();
   }, [load]);
 
+  // Процент считается, ТОЛЬКО когда известны оба числа. Цели нет —
+  // нет и шкалы: доля от несуществующей цели это не ноль процентов,
+  // это отсутствие ответа (§65).
+  const eaten = summary?.calories_eaten;
+  const target = summary?.calories_target;
   const progressPct =
-    summary && summary.calories_goal > 0
-      ? Math.min(
-          100,
-          Math.round((summary.calories_total * 100) / summary.calories_goal),
-        )
-      : 0;
+    eaten !== undefined && target !== undefined && target > 0
+      ? Math.min(100, Math.round((eaten * 100) / target))
+      : null;
 
   return (
     <div className="food-scanner-screen">
@@ -149,27 +150,35 @@ export function FoodScannerSavedScreen() {
             {err !== null && <StateError err={err} onRetry={load} />}
             {err === null && summary && (
               <>
-                <p className="food-scanner-saved__total">
-                  {summary.calories_total} / {summary.calories_goal} ккал
-                </p>
-                <div
-                  className="food-scanner-saved__bar"
-                  role="progressbar"
-                  aria-valuenow={progressPct}
-                  aria-valuemin={0}
-                  aria-valuemax={100}
-                  aria-label={`Прогресс по калориям: ${progressPct} процентов`}
-                >
-                  <div
-                    className="food-scanner-saved__bar-fill"
-                    style={{ width: `${progressPct}%` }}
-                  />
-                </div>
-                <p className="food-scanner-saved__pct">{progressPct} %</p>
-                <p className="food-scanner-saved__macros">
-                  Б {summary.protein_g} · Ж {summary.fat_g} · У{" "}
-                  {summary.carbs_g} г
-                </p>
+                {eaten !== undefined && (
+                  <p className="food-scanner-saved__total">
+                    {target !== undefined ? `${eaten} / ${target} ккал` : `${eaten} ккал`}
+                  </p>
+                )}
+                {progressPct !== null && (
+                  <>
+                    <div
+                      className="food-scanner-saved__bar"
+                      role="progressbar"
+                      aria-valuenow={progressPct}
+                      aria-valuemin={0}
+                      aria-valuemax={100}
+                      aria-label={`Прогресс по калориям: ${progressPct} процентов`}
+                    >
+                      <div
+                        className="food-scanner-saved__bar-fill"
+                        style={{ width: `${progressPct}%` }}
+                      />
+                    </div>
+                    <p className="food-scanner-saved__pct">{progressPct} %</p>
+                  </>
+                )}
+                {summary.pfc && (
+                  <p className="food-scanner-saved__macros">
+                    Б {summary.pfc.protein_g} · Ж {summary.pfc.fat_g} · У{" "}
+                    {summary.pfc.carbs_g} г
+                  </p>
+                )}
               </>
             )}
           </section>

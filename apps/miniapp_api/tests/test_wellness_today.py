@@ -148,11 +148,23 @@ def _url() -> str:
     return reverse("miniapp_api:customer_wellness_today")
 
 
-def _patch_nutrition(*, summary, water):
+@dataclass
+class _FakeProfile:
+    """Только то, что читает ручка. Остальные поля профиля ей не нужны."""
+
+    health_flags: dict = None  # type: ignore[assignment]
+
+
+_NO_PROFILE = object()
+
+
+def _patch_nutrition(*, summary, water, profile=_NO_PROFILE):
     """Patch get_nutrition_client to return an async-method stub.
 
-    `summary` / `water` are either a value (returned) or an Exception
-    instance (raised) to exercise the degrade paths.
+    `summary` / `water` / `profile` — либо значение (вернётся), либо
+    экземпляр исключения (бросится), чтобы гонять ветки деградации.
+    По умолчанию профиль — «анкеты нет» (`None`): так ведёт себя
+    большинство людей на пилоте, и числа при этом показываются.
     """
     from unittest.mock import AsyncMock
 
@@ -165,6 +177,11 @@ def _patch_nutrition(*, summary, water):
         client.get_water_today = AsyncMock(side_effect=water)
     else:
         client.get_water_today = AsyncMock(return_value=water)
+    resolved = None if profile is _NO_PROFILE else profile
+    if isinstance(resolved, Exception):
+        client.get_profile = AsyncMock(side_effect=resolved)
+    else:
+        client.get_profile = AsyncMock(return_value=resolved)
     return patch("apps.integrations.ayla.get_nutrition_client", return_value=client)
 
 
@@ -594,3 +611,212 @@ class TestWellnessTodayInventedCalorieGoal:
         data = resp.json()
         assert data["calories_target"] == 1900
         assert data["pfc"] == {"protein_g": 65, "fat_g": 40, "carbs_g": 121}
+
+
+class TestWellnessTodayDiaryEntries:
+    """Записи дня — четвёртый ключ той же ручки (DRF-1329, план дневника).
+
+    Три различимых состояния вместо двух, и различие несёт КЛЮЧ:
+
+    * ключа нет            → «прочитать не удалось»;
+    * ключ есть, список пуст → «за день ничего не записано»;
+    * ключ есть, список полон → записи.
+
+    Свести первые два — то же самое, что показать «0 из 0 ккал» при
+    отказе чтения: человек видит «сегодня ты ничего не ел» там, где
+    правда — «мы не смогли спросить».
+    """
+
+    ENTRY = {
+        "id": "fl-1",
+        "dish_name": "Овсянка с ягодами",
+        "calories": 320,
+        "protein_g": 11.2,
+        "fat_g": 6.4,
+        "carbs_g": 54.0,
+        "meal_type": "breakfast",
+        "logged_at": "2026-09-08T05:31:00Z",
+    }
+
+    def test_entries_travel_verbatim(self, client: Client, bot_user: BotUser):
+        with _patch_nutrition(summary=_FakeSummary(entries=[self.ENTRY]), water=_FakeWater()):
+            resp = client.get(
+                _url(), HTTP_AUTHORIZATION=_init_data_header(bot_user.channel_user_id)
+            )
+        assert resp.status_code == 200
+        data = resp.json()
+        # Дословно: ни переименования, ни пересчёта. БЖУ записи —
+        # настоящее и приезжает вместе с ней, поэтому считать его
+        # заново не из чего и незачем.
+        assert data["entries"] == [self.ENTRY]
+
+    def test_an_empty_day_sends_an_empty_list_not_a_missing_key(
+        self, client: Client, bot_user: BotUser
+    ):
+        with _patch_nutrition(summary=_FakeSummary(entries=[]), water=_FakeWater()):
+            resp = client.get(
+                _url(), HTTP_AUTHORIZATION=_init_data_header(bot_user.channel_user_id)
+            )
+        data = resp.json()
+        # Положительная стража: ключ ЕСТЬ…
+        assert "entries" in data
+        # …и он пуст. Это ответ «за день ничего не записано».
+        assert data["entries"] == []
+        # Соседние ключи живы — половина не деградировала.
+        assert data["calories_eaten"] == 1240
+
+    def test_a_failed_read_omits_the_key_instead_of_claiming_an_empty_day(
+        self, client: Client, bot_user: BotUser
+    ):
+        from apps.integrations.ayla.nutrition_client import NutritionUnavailableError
+
+        with _patch_nutrition(summary=NutritionUnavailableError("boom"), water=_FakeWater()):
+            resp = client.get(
+                _url(), HTTP_AUTHORIZATION=_init_data_header(bot_user.channel_user_id)
+            )
+        assert resp.status_code == 200
+        data = resp.json()
+        # Положительная стража ВПЕРЕДИ отрицательной, на тех же данных:
+        # ответ пришёл и он не пустой — вода в нём есть. Без неё
+        # «ключа нет» доказывало бы что угодно, вплоть до пустого тела.
+        assert data["water_glasses_eaten"] == 4
+        # И только теперь отсутствие: пустого списка тут быть НЕ должно —
+        # он означал бы «мы спросили, и за день пусто».
+        assert "entries" not in data
+        assert "calories_eaten" not in data
+
+    def test_the_three_states_are_pairwise_distinguishable(self, client: Client, bot_user: BotUser):
+        """Сведение любых двух состояний обязано краснить этот тест."""
+        from apps.integrations.ayla.nutrition_client import NutritionUnavailableError
+
+        seen = []
+        for summary in (
+            _FakeSummary(entries=[self.ENTRY]),
+            _FakeSummary(entries=[]),
+            NutritionUnavailableError("boom"),
+        ):
+            with _patch_nutrition(summary=summary, water=_FakeWater()):
+                resp = client.get(
+                    _url(), HTTP_AUTHORIZATION=_init_data_header(bot_user.channel_user_id)
+                )
+            data = resp.json()
+            seen.append("absent" if "entries" not in data else f"list:{len(data['entries'])}")
+
+        assert seen == ["list:1", "list:0", "absent"]
+        assert len(set(seen)) == 3
+
+    def test_no_entries_field_from_the_source_is_not_a_crash(
+        self, client: Client, bot_user: BotUser
+    ):
+        # `_FakeSummary.entries` по умолчанию None — так же ведёт себя
+        # клиент, если источник поля не прислал вовсе. Ключ уходит
+        # пустым списком: чтение УДАЛОСЬ, просто записей нет.
+        with _patch_nutrition(summary=_FakeSummary(), water=_FakeWater()):
+            resp = client.get(
+                _url(), HTTP_AUTHORIZATION=_init_data_header(bot_user.channel_user_id)
+            )
+        data = resp.json()
+        assert data["entries"] == []
+
+
+class TestWellnessTodayNumbersHidden:
+    """Прятать ли числа — производный признак, а не диагноз (§10 ED Mode).
+
+    Наружу уходит ОДИН булев. Сырых `health_flags` в ответе нет и быть
+    не должно: клиенту нужно знать «прятать ли цифру», а не «что с
+    человеком». Раз поля нет, его нельзя ни залогировать, ни отправить
+    дальше, ни прочитать в консоли браузера.
+    """
+
+    def test_ed_flag_hides_the_numbers(self, client: Client, bot_user: BotUser):
+        with _patch_nutrition(
+            summary=_FakeSummary(),
+            water=_FakeWater(),
+            profile=_FakeProfile(health_flags={"eating_disorder": True}),
+        ):
+            resp = client.get(
+                _url(), HTTP_AUTHORIZATION=_init_data_header(bot_user.channel_user_id)
+            )
+        data = resp.json()
+        assert data["nutrition_numbers_hidden"] is True
+
+    def test_a_person_without_the_flag_sees_numbers(self, client: Client, bot_user: BotUser):
+        with _patch_nutrition(
+            summary=_FakeSummary(),
+            water=_FakeWater(),
+            profile=_FakeProfile(health_flags={"pregnancy": True}),
+        ):
+            resp = client.get(
+                _url(), HTTP_AUTHORIZATION=_init_data_header(bot_user.channel_user_id)
+            )
+        data = resp.json()
+        # Другой флаг — не этот. Спрятать числа беременной спека не просит.
+        assert data["nutrition_numbers_hidden"] is False
+
+    def test_no_profile_at_all_is_an_answer_not_a_failure(self, client: Client, bot_user: BotUser):
+        # `get_profile` отдаёт None, когда анкеты нет вовсе: спросили и
+        # узнали, что профиля нет. Это НЕ отказ чтения.
+        with _patch_nutrition(summary=_FakeSummary(), water=_FakeWater(), profile=None):
+            resp = client.get(
+                _url(), HTTP_AUTHORIZATION=_init_data_header(bot_user.channel_user_id)
+            )
+        data = resp.json()
+        assert data["nutrition_numbers_hidden"] is False
+
+    def test_a_failed_profile_read_omits_the_key_so_the_screen_fails_closed(
+        self, client: Client, bot_user: BotUser
+    ):
+        from apps.integrations.ayla.nutrition_client import NutritionUnavailableError
+
+        with _patch_nutrition(
+            summary=_FakeSummary(),
+            water=_FakeWater(),
+            profile=NutritionUnavailableError("boom"),
+        ):
+            resp = client.get(
+                _url(), HTTP_AUTHORIZATION=_init_data_header(bot_user.channel_user_id)
+            )
+        assert resp.status_code == 200
+        data = resp.json()
+        # Положительная стража ВПЕРЕДИ: остальные половины живы, то есть
+        # чтение профиля деградирует само по себе, а ответ не пуст.
+        assert data["calories_eaten"] == 1240
+        assert data["water_glasses_eaten"] == 4
+        # И только теперь отсутствие: `False` тут быть НЕ должно — это
+        # превратило бы «не смогли спросить» в разрешение показать
+        # калории тому, кому спека их показывать запрещает.
+        assert "nutrition_numbers_hidden" not in data
+
+    def test_an_unexpected_profile_error_degrades_and_never_500s(
+        self, client: Client, bot_user: BotUser
+    ):
+        with _patch_nutrition(
+            summary=_FakeSummary(), water=_FakeWater(), profile=RuntimeError("kaboom")
+        ):
+            resp = client.get(
+                _url(), HTTP_AUTHORIZATION=_init_data_header(bot_user.channel_user_id)
+            )
+        assert resp.status_code == 200
+        data = resp.json()
+        # Положительная стража ВПЕРЕДИ: неожиданная ошибка профиля не
+        # уронила соседние половины — дашборд остался дашбордом.
+        assert data["calories_eaten"] == 1240
+        assert "nutrition_numbers_hidden" not in data
+
+    def test_the_raw_diagnosis_never_crosses_the_boundary(self, client: Client, bot_user: BotUser):
+        """152-ФЗ: наружу идёт следствие, а не специальная категория."""
+        with _patch_nutrition(
+            summary=_FakeSummary(),
+            water=_FakeWater(),
+            profile=_FakeProfile(health_flags={"eating_disorder": True, "pregnancy": True}),
+        ):
+            resp = client.get(
+                _url(), HTTP_AUTHORIZATION=_init_data_header(bot_user.channel_user_id)
+            )
+        body = resp.content.decode()
+        # Присутствие: производный признак есть…
+        assert '"nutrition_numbers_hidden": true' in body.replace("'", '"')
+        # …отсутствие: ни имени флага, ни контейнера, ни соседних диагнозов.
+        assert "eating_disorder" not in body
+        assert "health_flags" not in body
+        assert "pregnancy" not in body

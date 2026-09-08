@@ -6470,6 +6470,28 @@ a {
   font-size: var(--font-size-200);
   color: var(--c-text-secondary);
 }
+/* «Ответ пришёл, но записей в нём нет» — своё состояние, не ошибка и
+   не пустой день. Выглядит как карточка соседних групп, чтобы человек
+   читал это как часть дневника, а не как сломанный экран. */
+.food-scanner-diary__unreadable {
+  background: var(--c-surface-1);
+  border: 1px solid var(--c-divider);
+  border-radius: var(--r-md);
+  padding: var(--s-4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+  align-items: flex-start;
+}
+.food-scanner-diary__unreadable p {
+  margin: 0;
+  font-size: var(--font-size-200);
+  color: var(--c-text-primary);
+}
+.food-scanner-diary__unreadable-hint {
+  color: var(--c-text-secondary);
+}
+
 .food-scanner-diary__group {
   background: var(--c-surface-1);
   border: 1px solid var(--c-divider);

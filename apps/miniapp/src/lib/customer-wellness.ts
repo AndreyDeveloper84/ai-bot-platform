@@ -60,6 +60,30 @@ import { ApiError, request } from "./api";
  * Pulse data + today's targets + greeting context. Shape matches the
  * future `GET /api/v1/customer/wellness/today` per W4.
  */
+/**
+ * Одна запись дневника питания, дословно как её отдаёт источник
+ * (`nutrition/serializers.py::FoodLogEntrySerializer`).
+ *
+ * БЖУ приходит НА ЗАПИСЬ и настоящее. Клиент до 08.09.2026 считал его
+ * сам — умножал калории на постоянные коэффициенты (0.075 / 0.018 /
+ * 0.105) — и показывал человеку как факт о том, что тот съел. Это было
+ * выдуманное число о человеке, а не выдуманная цель, и снято вместе с
+ * подключением настоящих записей.
+ *
+ * `logged_at` — UTC. Расхождение суток разбирает DRF-1582; здесь оно не
+ * решается и не воспроизводится.
+ */
+export interface FoodDiaryEntry {
+  id: string;
+  dish_name: string;
+  calories: number;
+  protein_g: number;
+  fat_g: number;
+  carbs_g: number;
+  meal_type: string;
+  logged_at: string;
+}
+
 export interface WellnessToday {
   /**
    * Eaten today (kcal), and the target. `0` is a real value — «nothing
@@ -100,6 +124,38 @@ export interface WellnessToday {
    */
   water_glasses_eaten?: number;
   water_glasses_target?: number;
+  /**
+   * Записи дневника за сегодня — ТРИ различимых состояния, и различие
+   * несёт КЛЮЧ, а не длина списка:
+   *
+   * * ключа нет            → «прочитать не удалось». Экран говорит это
+   *   словами, а не показывает пустой день;
+   * * `[]`                 → «спросили, за день ничего не записано»;
+   * * непустой список      → записи.
+   *
+   * Свести первые два — та же ложь, что «0 из 0 ккал» при отказе
+   * чтения: человеку сообщают «ты сегодня ничего не ел» там, где
+   * правда — «мы не смогли спросить».
+   *
+   * Поля приходят ДОСЛОВНО от источника
+   * (`nutrition/serializers.py::FoodLogEntrySerializer`) и здесь не
+   * переименовываются: одно поле — одно имя на всём проводе.
+   */
+  entries?: FoodDiaryEntry[];
+  /**
+   * Прятать ли числа (калории, БЖУ) — производный признак, а не
+   * диагноз.
+   *
+   * Наружу приходит следствие, потому что клиенту нужно знать
+   * «прятать ли цифру», а не «что с человеком»: здоровье — специальная
+   * категория 152-ФЗ, и границу она пересекать не обязана.
+   *
+   * **Отсутствие ключа = fail-closed, числа ПРЯЧУТСЯ.** «Не смогли
+   * спросить» не превращается в разрешение показать калории тому, кому
+   * спека их показывать запрещает (§10 Appendix ED Mode). Цена названа
+   * и принята: пока чтение профиля не работает, числа спрятаны у всех.
+   */
+  nutrition_numbers_hidden?: boolean;
   /**
    * Active goals (cap=1 for MVP — multi-goal post-pilot). Read from
    * Ayla's goal layer — the same `known.goal` the goal screen renders
@@ -356,6 +412,47 @@ const ACTIVITY_STUB: Record<StubVariant, RecentActivity> = import.meta.env.DEV
  * Ayla; swapping this body for `request("/wellness/today")` is the
  * follow-up. Signature does NOT change.
  */
+/**
+ * Дневник за сегодня — три различимых состояния.
+ *
+ * Живёт здесь, а не в `food-scanner.ts`, потому что источник у него
+ * тот же, что у дашборда: одна композитная ручка на обе поверхности.
+ * Второе хранилище не заводится — его надо не «не заводить
+ * специально», а просто не завести.
+ *
+ * * `unreachable` — ручка не ответила: наружу уходит исключение, экран
+ *   рисует состояние ошибки с повтором;
+ * * `unreadable` — ручка ответила, но БЕЗ ключа `entries`: питательная
+ *   половина у сервера не прочиталась. Повтор осмыслен, сообщение
+ *   другое, и «пустой день» показывать нельзя;
+ * * `empty` / `entries` — ключ есть; пустой список означает ровно
+ *   «за сегодня ничего не записано».
+ *
+ * `hideNumbers` читается ОДИНАКОВО в обеих непустых ветках, и
+ * отсутствие ключа прячет числа (fail-closed).
+ */
+export type DiaryToday =
+  | { state: "unreadable" }
+  | { state: "empty"; hideNumbers: boolean; today: WellnessToday }
+  | {
+      state: "entries";
+      entries: FoodDiaryEntry[];
+      hideNumbers: boolean;
+      today: WellnessToday;
+    };
+
+export async function loadDiaryToday(): Promise<DiaryToday> {
+  const today = await getWellnessToday();
+  if (!Array.isArray(today.entries)) return { state: "unreadable" };
+  const hideNumbers = today.nutrition_numbers_hidden !== false;
+  // `today` едет целиком, а не разобранным на итоги: у его ключей уже
+  // объявлены правила отсутствия (цели нет → ключа нет), и пересобрать
+  // их здесь значило бы завести второй набор тех же правил.
+  return today.entries.length === 0
+    ? { state: "empty", hideNumbers, today }
+    : { state: "entries", entries: today.entries, hideNumbers, today };
+}
+
 export async function getWellnessToday(): Promise<WellnessToday> {
   const variant = pickStubOrLive();
   if (variant === null) return request<WellnessToday>("/wellness/today");
