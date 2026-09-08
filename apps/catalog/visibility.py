@@ -81,6 +81,7 @@ from dataclasses import dataclass
 from typing import Iterable, Mapping
 
 from apps.catalog.master_state import SaleBlock, is_admitted, sale_block
+from apps.catalog.models import CatalogMaster
 from apps.identity.constants import GLOBAL_BOT_TENANT_SLUG
 from apps.tenancy.context import tenant_scope
 from apps.tenancy.models import Tenant
@@ -179,11 +180,6 @@ def tenant_visibilities(*, tenants: Iterable[Tenant] | None = None) -> list[Tena
         if tenants is not None
         else Tenant.objects.exclude(slug=GLOBAL_BOT_TENANT_SLUG).order_by("slug")
     )
-
-    # Импорт внутри функции: ``apps.catalog.models`` импортирует
-    # ``master_state``, чтобы собрать ``bookable()``, и модуль сигнала,
-    # затянутый в модели через шапку, замкнул бы загрузку приложения.
-    from apps.catalog.models import CatalogMaster
 
     result: list[TenantVisibility] = []
     for tenant in rows:
