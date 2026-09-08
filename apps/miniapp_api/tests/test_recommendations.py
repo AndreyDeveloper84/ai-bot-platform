@@ -242,12 +242,15 @@ class TestRecommendationsView:
         """
         from django.db import DatabaseError
 
-        with patch(
-            "apps.integrations.ayla.recommendations_client.fetch_recommendations",
-            return_value=_decision_body(str(uuid.uuid4())),
-        ), patch(
-            "apps.catalog.resolver_keys.translate_provider_keys",
-            side_effect=DatabaseError("mirror is down"),
+        with (
+            patch(
+                "apps.integrations.ayla.recommendations_client.fetch_recommendations",
+                return_value=_decision_body(str(uuid.uuid4())),
+            ),
+            patch(
+                "apps.catalog.resolver_keys.translate_provider_keys",
+                side_effect=DatabaseError("mirror is down"),
+            ),
         ):
             resp = client.post(
                 self._url(),

@@ -2650,7 +2650,8 @@ def customer_recommendations(request: HttpRequest) -> HttpResponse:
         # мы продать не можем. Чинить это здесь нельзя (условие
         # принадлежит Ayla, DRF-1571), видеть — обязательно.
         logger.warning(
-            "customer_recommendations.keys_untranslated %s", keys.as_log_fields(),
+            "customer_recommendations.keys_untranslated %s",
+            keys.as_log_fields(),
         )
     else:
         logger.info("customer_recommendations.keys %s", keys.as_log_fields())
