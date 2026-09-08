@@ -308,6 +308,83 @@ def test_schedule_change_request_form_was_not_made_more_inviting() -> None:
     assert model_admin.readonly_fields == ("requested_change", "created_at")
 
 
+#: Поля, которых в карточке нет НАМЕРЕННО, с причиной у каждого.
+#:
+#: Перечень существовал и до этой правки — просто нигде не был записан.
+#: Ни одно из этих полей не входит в ``readonly_fields`` своего экрана,
+#: поэтому «показать их заодно» означало бы отдать оператору правку
+#: того, чего он править не мог. Это расширение прав, а не оформление.
+#:
+#: Смысл перечня — не разрешение, а замок: НОВОЕ выпавшее поле в него не
+#: попадёт и уронит тест.
+_INTENTIONALLY_OFF_THE_CARD = {
+    "catalog.catalogmaster": {
+        # Сырой зеркальный JSON: в нём могут лежать контакты мастера.
+        # Не показывался и раньше (см. докстринг CatalogMasterAdmin).
+        "raw",
+        # Приехали с DRF-1588 и в карточку не заводились; редактируемые,
+        # значит показать их — открыть правку.
+        "address",
+        "location_lat",
+        "location_lng",
+        # Первичный ключ зеркала. В списке и в адресе он и так виден.
+        "id",
+    },
+}
+
+
+@pytest.mark.parametrize(
+    "model",
+    [
+        CatalogService,
+        CatalogMaster,
+        MasterService,
+        BookingRequest,
+        BookingReminder,
+        WorkingHours,
+        ScheduleException,
+        TimeBlock,
+        SlotConfig,
+    ],
+)
+def test_no_field_silently_dropped_from_cards(model) -> None:  # noqa: ANN001
+    """Группировка полей не имеет права ПРЯТАТЬ поля.
+
+    До правки у большинства этих экранов ``fieldsets`` не было вовсе, а
+    значит Django рисовал в карточке ВСЕ поля. Явная группировка легко
+    теряет поле молча: оно просто перестаёт показываться, и никто не
+    замечает — ни импорт, ни рендер, ни глаз.
+
+    Поэтому проверка считает, а не рассуждает: множество полей модели
+    минус множество полей во всех разделах обязано быть пустым. Счётчик
+    вместо построчного «вроде все на месте» — сумма отдельных «это поле
+    я видел» не доказывает, что не потерялось ни одного.
+    """
+    from django.contrib.admin.utils import flatten_fieldsets
+
+    model_admin = admin.site._registry[model]  # noqa: SLF001 — реестр админки
+    fieldsets = model_admin.fieldsets
+    assert fieldsets, f"{model.__name__}: разделов нет — проверять нечего"
+
+    shown = set(flatten_fieldsets(fieldsets))
+    declared = {f.name for f in model._meta.fields}
+
+    # Положительная пара: разделы вообще что-то показывают, и это поля
+    # ЭТОЙ модели, а не выдуманные имена.
+    assert shown, f"{model.__name__}: разделы пусты"
+    assert shown <= declared | set(model_admin.readonly_fields), (
+        f"{model.__name__}: в разделах есть имена, которых у модели нет: {shown - declared}"
+    )
+
+    # Отрицательная: ни одно поле модели не выпало из разделов молча.
+    allowed = _INTENTIONALLY_OFF_THE_CARD.get(model._meta.label_lower, set())
+    missing = declared - shown - set(getattr(model_admin, "exclude", None) or ()) - allowed
+    assert not missing, (
+        f"{model.__name__}: поля пропали из карточки молча: {sorted(missing)}. "
+        "Либо добавьте их в раздел, либо впишите в _INTENTIONALLY_OFF_THE_CARD с причиной."
+    )
+
+
 # ──────────────────────────────────────────────────────────────────────
 # Экраны действительно открываются
 # ──────────────────────────────────────────────────────────────────────
