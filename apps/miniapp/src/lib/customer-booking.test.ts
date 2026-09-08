@@ -1,12 +1,12 @@
 /**
- * Tests for `customer-booking.ts` — the customer booking-flow client.
+ * Тесты `customer-booking.ts` — клиентской библиотеки воронки записи.
  *
- * After pilot phase 3(1) the catalog reads are REAL: the 3-layer Tau
- * stub (layer_1/2/3 with reasoning_text) is gone — no backend ever
- * produced it. The lib now composes the bot-mirror endpoints
- * (`GET /services`, `GET /masters`) with the Ayla scorer proxy
- * (`POST /recommendations` → service_id+score). HTTP layer mocked here;
- * fixtures use the verbatim contract shapes from
+ * После T7 (DRF-1568) полка подбора читает решение резолвера:
+ * `{data: {resolver_spec_version, ordered[], …}}` — контракт
+ * `docs/specs/RECOMMENDATION_RESOLVER_CONTRACT_v1.0.md` §4.2/§9.4.
+ * Прежняя форма `{recommendations: [{service_id, score}]}` и трёхслойная
+ * форма источника здесь остались — но как фикстуры того, что обязано
+ * краснеть. HTTP замокан; фикстуры зеркала — дословные формы
  * `apps/miniapp_api/views.py::_service_to_dict/_master_to_dict`.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -30,10 +30,9 @@ import {
   fetchRecommendations,
   fetchServices,
   fetchSlots,
-  recommendationsContractViolation,
+  decisionContractViolation,
   ApiError,
   type Master,
-  type RecommendationScore,
   type Service,
 } from "./api";
 import {
@@ -154,10 +153,45 @@ describe("createCustomerBooking", () => {
   });
 });
 
-// --- catalog browse (real mirror + Ayla scorer) ----------------------------
+// --- catalog browse: решение резолвера доезжает до экрана -----------------
 
-describe("getCatalogBrowse", () => {
-  it("composes mirror services/masters with Ayla-ranked pick ids", async () => {
+/**
+ * Конформное решение §4.2. Собрано из ДОКУМЕНТА
+ * (`docs/specs/RECOMMENDATION_RESOLVER_CONTRACT_v1.0.md`), а не из
+ * чужой реализации: фикстура, списанная с кода источника, доказывает
+ * лишь то, что мы повторили источник, включая его ошибки.
+ */
+function decision(
+  ordered: unknown[],
+  extra: Record<string, unknown> = {},
+): unknown {
+  return {
+    data: {
+      decision_id: "dec-1",
+      request_id: "req-1",
+      resolver_spec_version: "1.0",
+      policy_versions: { resolver_spec_version: "1.0" },
+      ordered,
+      ...extra,
+    },
+  };
+}
+
+function candidate(
+  id: string,
+  partial: Record<string, unknown> = {},
+): Record<string, unknown> {
+  return {
+    candidate: { kind: "SERVICE", id },
+    rank: 1,
+    tier: 1,
+    reason_codes: ["MATCH_SERVICE_EXACT"],
+    ...partial,
+  };
+}
+
+describe("getCatalogBrowse — решение резолвера", () => {
+  function mirrorReady(): void {
     mockedFetchServices.mockResolvedValue({
       services: [
         service({ id: "svc-1", name: "Маникюр" }),
@@ -166,194 +200,237 @@ describe("getCatalogBrowse", () => {
       ],
     });
     mockedFetchMasters.mockResolvedValue({ masters: [MASTER] });
-    mockedFetchRecommendations.mockResolvedValue({
-      recommendations: [
-        { service_id: "svc-ghost", score: 0.99, reasons: ["Свободно раньше"] },
-        { service_id: "svc-2", score: 0.9, reasons: ["Свободно раньше"] },
-        { service_id: "svc-1", score: 0.8, reasons: ["20 минут от тебя"] },
-      ],
-    });
+  }
+
+  it("отдаёт порядок источника нетронутым и не пересобирает его", async () => {
+    mirrorReady();
+    mockedFetchRecommendations.mockResolvedValue(
+      decision([
+        candidate("svc-3", { rank: 1, tier: 1, reason_codes: ["MATCH_GOAL_CATEGORY"] }),
+        candidate("svc-1", { rank: 2, tier: 2, reason_codes: ["MATCH_SERVICE_EXACT"] }),
+        candidate("svc-2", { rank: 3, tier: 2, reason_codes: ["EXEC_BOOKABLE"] }),
+      ]),
+    );
     const data = await getCatalogBrowse();
-    expect(data.services.map((s) => s.name)).toEqual([
-      "Маникюр",
-      "Педикюр",
-      "Массаж",
-    ]);
-    expect(data.masters).toEqual([MASTER]);
-    // Score-desc order; ids missing from the mirror are dropped.
+    expect(data.picks.map((p) => p.serviceId)).toEqual(["svc-3", "svc-1", "svc-2"]);
+    expect(data.picks.map((p) => p.rank)).toEqual([1, 2, 3]);
+    expect(consoleErrorSpy).not.toHaveBeenCalled();
+  });
+
+  it("собирает WHY из утверждённых кодов, а не из присланной фразы", async () => {
+    mirrorReady();
+    mockedFetchRecommendations.mockResolvedValue(
+      decision([
+        candidate("svc-1", {
+          reason_codes: ["EXEC_BOOKABLE", "MATCH_SERVICE_EXACT", "SCOPE_WITHIN_CITY"],
+        }),
+      ]),
+    );
+    const data = await getCatalogBrowse();
     expect(data.picks).toEqual([
-      { serviceId: "svc-2", reasons: ["Свободно раньше"] },
-      { serviceId: "svc-1", reasons: ["20 минут от тебя"] },
+      {
+        serviceId: "svc-1",
+        tier: 1,
+        rank: 1,
+        reasonCodes: ["EXEC_BOOKABLE", "MATCH_SERVICE_EXACT", "SCOPE_WITHIN_CITY"],
+        reasons: ["Можно записаться", "Это та услуга, которую ты искала", "В твоём городе"],
+      },
     ]);
   });
 
-  // ── Owner ruling 25.08: a pick without displayable WHY is not a
-  //    branded Ayla pick, so it never reaches the screens.
-  it("drops picks the scorer sent without any displayable WHY", async () => {
-    mockedFetchServices.mockResolvedValue({
-      services: [
-        service({ id: "svc-1", name: "Маникюр" }),
-        service({ id: "svc-2", name: "Педикюр" }),
-      ],
-    });
-    mockedFetchMasters.mockResolvedValue({ masters: [MASTER] });
-    // Today's runtime shape: `{service_id, score}` and nothing else.
-    mockedFetchRecommendations.mockResolvedValue({
-      recommendations: [
-        { service_id: "svc-1", score: 0.9 },
-        { service_id: "svc-2", score: 0.8 },
-      ],
-    });
+  it("режет WHY до трёх строк — решение владельца 25.08", async () => {
+    mirrorReady();
+    mockedFetchRecommendations.mockResolvedValue(
+      decision([
+        candidate("svc-1", {
+          reason_codes: [
+            "CONTEXT_PRIOR_COMPLETED_VISIT",
+            "ELIG_ACTIVE_OFFER",
+            "EXEC_BOOKABLE",
+            "MATCH_SERVICE_EXACT",
+            "SCOPE_WITHIN_CITY",
+          ],
+        }),
+      ]),
+    );
     const data = await getCatalogBrowse();
-    // Catalog itself is untouched — only the branded picks disappear.
-    expect(data.services).toHaveLength(2);
+    expect(data.picks[0]!.reasons).toHaveLength(3);
+    // Коды при этом доезжают ВСЕ: режется показ, а не свидетельство.
+    expect(data.picks[0]!.reasonCodes).toHaveLength(5);
+  });
+
+  it("равный ярус остаётся равным: ни один pick не помечен лучшим", async () => {
+    mirrorReady();
+    mockedFetchRecommendations.mockResolvedValue(
+      decision([
+        candidate("svc-1", { rank: 1, tier: 1 }),
+        candidate("svc-2", { rank: 2, tier: 1 }),
+      ]),
+    );
+    const data = await getCatalogBrowse();
+    expect(data.picks.map((p) => p.tier)).toEqual([1, 1]);
+    // Присутствие: ярус доехал… (§4.3 / решение владельца §29.3)
+    expect(data.picks[0]!.tier).toBe(data.picks[1]!.tier);
+    // …отсутствие: и ни одного поля, которым можно назвать первого лучшим.
+    for (const pick of data.picks) {
+      expect(Object.keys(pick).sort()).toEqual([
+        "rank",
+        "reasonCodes",
+        "reasons",
+        "serviceId",
+        "tier",
+      ]);
+    }
+  });
+
+  it("кандидат, которому нечем объяснить, не проходит гейт WHY", async () => {
+    mirrorReady();
+    mockedFetchRecommendations.mockResolvedValue(
+      decision([
+        // Оба кода в реестре есть, но человеку они не причина.
+        candidate("svc-1", { reason_codes: ["TIE_TIER_SHARED", "MATCH_UNDETERMINED"] }),
+        candidate("svc-2", { rank: 2, reason_codes: ["MATCH_SERVICE_EXACT"] }),
+      ]),
+    );
+    const data = await getCatalogBrowse();
+    expect(data.picks.map((p) => p.serviceId)).toEqual(["svc-2"]);
+    // Это гейт владельца, а не расхождение: шуметь тут нечем.
+    expect(consoleErrorSpy).not.toHaveBeenCalled();
+  });
+
+  it("код вне реестра фразы не даёт и нарушением не является", async () => {
+    mirrorReady();
+    mockedFetchRecommendations.mockResolvedValue(
+      decision([
+        candidate("svc-1", { reason_codes: ["MATCH_SERVICE_EXACT", "REASON_FROM_THE_FUTURE"] }),
+      ]),
+    );
+    const data = await getCatalogBrowse();
+    expect(data.picks[0]!.reasons).toEqual(["Это та услуга, которую ты искала"]);
+    expect(data.picks[0]!.reasonCodes).toContain("REASON_FROM_THE_FUTURE");
+    expect(consoleErrorSpy).not.toHaveBeenCalled();
+  });
+
+  it("кандидат не-услуга на полку услуг не попадает", async () => {
+    mirrorReady();
+    mockedFetchRecommendations.mockResolvedValue(
+      decision([
+        { ...candidate("mst-1"), candidate: { kind: "PROVIDER", id: "mst-1" } },
+        candidate("svc-1", { rank: 2 }),
+      ]),
+    );
+    const data = await getCatalogBrowse();
+    expect(data.picks.map((p) => p.serviceId)).toEqual(["svc-1"]);
+  });
+
+  it("услуга, которой нет в зеркале, до экрана не доходит", async () => {
+    mirrorReady();
+    mockedFetchRecommendations.mockResolvedValue(
+      decision([candidate("svc-ghost"), candidate("svc-1", { rank: 2 })]),
+    );
+    const data = await getCatalogBrowse();
+    expect(data.picks.map((p) => p.serviceId)).toEqual(["svc-1"]);
+  });
+
+  it("пустой ordered — законный ответ, а не расхождение", async () => {
+    mirrorReady();
+    mockedFetchRecommendations.mockResolvedValue(decision([]));
+    const data = await getCatalogBrowse();
     expect(data.picks).toEqual([]);
+    expect(consoleErrorSpy).not.toHaveBeenCalled();
   });
 
-  it("keeps the May-spec single `reasoning_text` shape too", async () => {
-    mockedFetchServices.mockResolvedValue({
-      services: [service({ id: "svc-1", name: "Маникюр" })],
-    });
-    mockedFetchMasters.mockResolvedValue({ masters: [MASTER] });
-    mockedFetchRecommendations.mockResolvedValue({
-      recommendations: [
-        { service_id: "svc-1", score: 0.9, reasoning_text: "20 минут от тебя, рейтинг 4.9" },
-      ],
-    });
-    const data = await getCatalogBrowse();
-    expect(data.picks).toEqual([
-      { serviceId: "svc-1", reasons: ["20 минут от тебя, рейтинг 4.9"] },
-    ]);
-  });
-
-  it("trims blanks and caps WHY at 3 lines", async () => {
-    mockedFetchServices.mockResolvedValue({
-      services: [
-        service({ id: "svc-1", name: "Маникюр" }),
-        service({ id: "svc-2", name: "Педикюр" }),
-      ],
-    });
-    mockedFetchMasters.mockResolvedValue({ masters: [MASTER] });
-    mockedFetchRecommendations.mockResolvedValue({
-      recommendations: [
-        { service_id: "svc-1", score: 0.9, reasons: ["  раз  ", "", "два", "три", "четыре"] },
-        { service_id: "svc-2", score: 0.8, reasons: ["   ", ""] },
-      ],
-    });
-    const data = await getCatalogBrowse();
-    expect(data.picks).toEqual([
-      { serviceId: "svc-1", reasons: ["раз", "два", "три"] },
-    ]);
-  });
-
-  it("returns empty picks when the Ayla scorer is unavailable", async () => {
-    mockedFetchServices.mockResolvedValue({
-      services: [service({ id: "svc-1", name: "Маникюр" })],
-    });
-    mockedFetchMasters.mockResolvedValue({ masters: [MASTER] });
-    mockedFetchRecommendations.mockRejectedValue(new Error("[502] ayla_unavailable"));
-    const data = await getCatalogBrowse();
-    expect(data.services).toHaveLength(1);
-    expect(data.masters).toHaveLength(1);
-    expect(data.picks).toEqual([]);
-  });
-
-  it("rejects when the mirror itself fails (screen shows the error state)", async () => {
+  it("отказ зеркала отвергается — экран рисует ошибку", async () => {
     mockedFetchServices.mockRejectedValue(new Error("[500] http_error"));
     mockedFetchMasters.mockResolvedValue({ masters: [] });
     await expect(getCatalogBrowse()).rejects.toThrow("[500]");
   });
 });
 
-// --- DRF-1556: contract divergence ≠ unavailable scorer --------------------
+// --- ПРИЁМКА T7, шаг 1: ДО — сегодняшний ответ краснеет --------------------
 //
-// The two states used to share one `catch`, so a divergence was
-// indistinguishable from a dead scorer and undetectable by design
-// (`docs/OPEN_DECISIONS.md` §52). These tests hold them apart from both
-// sides: the loud one must be loud, and — the pairing that matters more
-// (DRF-1411) — the quiet one must stay quiet, or the detector gets muted
-// within a week and is silent exactly when it is needed.
+// Три шага целиком: «до» краснеет, «после» зеленеет, и проверка
+// ОСТАЁТСЯ строгой. Без третьего шага зелёное доказывало бы только то,
+// что проверку ослабили.
 
-describe("getCatalogBrowse — contract divergence is loud", () => {
-  /** The shape the source actually sends today: layers of MASTERS. */
+describe("приёмка T7 · шаг 1 — трёхслойный ответ источника даёт CONTRACT_VIOLATION", () => {
+  /** Форма, которую источник отдаёт на 07.09.2026: слои с МАСТЕРАМИ. */
   const LAYERED_PAYLOAD = {
     data: {
       layer_1_your_places: [],
-      layer_2_ayla_picks: [
-        { master_id: "mst-1", reasoning_text: "20 минут от тебя" },
-      ],
+      layer_2_ayla_picks: [{ master_id: "mst-1", reasoning_text: "20 минут от тебя" }],
       layer_3_explore: [],
     },
   };
 
-  function mirrorReady(): void {
+  /** Форма, которую этот файл объявлял ДО T7. */
+  const LEGACY_PAYLOAD = {
+    recommendations: [{ service_id: "svc-1", score: 0.9, reasons: ["20 минут от тебя"] }],
+  };
+
+  beforeEach(() => {
     mockedFetchServices.mockResolvedValue({
       services: [service({ id: "svc-1", name: "Маникюр" })],
     });
     mockedFetchMasters.mockResolvedValue({ masters: [MASTER] });
-  }
+  });
 
-  /** The mock is typed to the DECLARED contract — divergence is, by
-   *  definition, a payload that type does not describe. */
-  function respondWith(payload: unknown): void {
-    mockedFetchRecommendations.mockResolvedValue(
-      payload as { recommendations: RecommendationScore[] },
-    );
-  }
-
-  it("says so out loud when the source answers in the layered shape", async () => {
-    mirrorReady();
-    respondWith(LAYERED_PAYLOAD);
+  it("говорит об этом вслух и не подделывает подбор", async () => {
+    mockedFetchRecommendations.mockResolvedValue(LAYERED_PAYLOAD);
     const data = await getCatalogBrowse();
 
     expect(consoleErrorSpy).toHaveBeenCalledTimes(1);
     const message = String(consoleErrorSpy.mock.calls[0]![0]);
-    // What we expected, and what actually arrived — both named.
-    expect(message).toContain("contract mismatch");
-    expect(message).toContain("`recommendations` to be an array");
-    expect(message).toContain("object{data}");
+    expect(message).toContain("расхождение контракта");
+    expect(message).toContain("resolver_spec_version");
 
-    // Never fake a pick: the block stays hidden either way, and the
-    // catalog around it is untouched.
     expect(data.picks).toEqual([]);
     expect(data.services).toHaveLength(1);
     expect(data.masters).toHaveLength(1);
   });
 
-  it("says so out loud on a PARTIAL divergence (items lose `score`)", async () => {
-    mirrorReady();
-    respondWith({
-      recommendations: [
-        { service_id: "svc-1", reasoning_text: "20 минут от тебя" },
-      ],
-    });
+  it("прежняя форма {service_id, score} тоже краснеет — шаг 3", async () => {
+    mockedFetchRecommendations.mockResolvedValue(LEGACY_PAYLOAD);
     const data = await getCatalogBrowse();
-
     expect(consoleErrorSpy).toHaveBeenCalledTimes(1);
-    const message = String(consoleErrorSpy.mock.calls[0]![0]);
-    expect(message).toContain("recommendations[0].score");
+    expect(String(consoleErrorSpy.mock.calls[0]![0])).toContain("конверт");
     expect(data.picks).toEqual([]);
   });
 
-  it("never leaks payload VALUES into the log — only keys and types", async () => {
-    mirrorReady();
-    respondWith({
-      recommendations: [{ service_id: "svc-1", score: "0.9", secret: "+79990000000" }],
+  it("не уносит значения в журнал — только ключи и типы", async () => {
+    mockedFetchRecommendations.mockResolvedValue({
+      data: {
+        decision_id: "dec-1",
+        request_id: "req-1",
+        resolver_spec_version: "1.0",
+        policy_versions: {},
+        ordered: [
+          {
+            candidate: { kind: "SERVICE", id: "svc-1" },
+            rank: 1,
+            tier: "первый",
+            reason_codes: ["MATCH_SERVICE_EXACT"],
+            secret: "+79990000000",
+          },
+        ],
+      },
     });
     await getCatalogBrowse();
 
     expect(consoleErrorSpy).toHaveBeenCalledTimes(1);
     const message = String(consoleErrorSpy.mock.calls[0]![0]);
-    // Presence: the log names the offending field and its key set…
-    expect(message).toContain("recommendations[0].score");
-    expect(message).toContain("object{service_id,score,secret}");
-    // …absence: and carries none of the values behind those keys.
+    // Присутствие: поле названо…
+    expect(message).toContain("ordered[0].tier");
+    // …отсутствие: и ни одного значения за ключами.
     expect(message).not.toContain("+79990000000");
+    expect(message).not.toContain("первый");
     expect(message).not.toContain("svc-1");
   });
 });
 
-describe("getCatalogBrowse — an unavailable scorer stays SILENT (DRF-1411 pairing)", () => {
+// --- ПРИЁМКА T7, шаг 2 и молчание недоступности ---------------------------
+
+describe("недоступный источник МОЛЧИТ (парность DRF-1411)", () => {
   beforeEach(() => {
     mockedFetchServices.mockResolvedValue({
       services: [service({ id: "svc-1", name: "Маникюр" })],
@@ -362,114 +439,280 @@ describe("getCatalogBrowse — an unavailable scorer stays SILENT (DRF-1411 pair
   });
 
   const outages: ReadonlyArray<[string, unknown]> = [
-    // `fetch` itself failing — no response at all.
-    ["network down", new TypeError("Failed to fetch")],
-    // Non-2xx, exactly as `api.ts::request` raises it.
-    ["502 from the proxy", new ApiError(502, "ayla_unavailable", "upstream down")],
-    ["500 from the proxy", new ApiError(500, "http_error", "Internal Server Error")],
-    // Request aborted on timeout.
-    ["timeout", Object.assign(new Error("The operation was aborted."), { name: "AbortError" })],
-    // 2xx with a body that is not JSON — `res.json()` rejects.
-    ["unparseable body", new SyntaxError("Unexpected token < in JSON at position 0")],
+    ["сеть упала", new TypeError("Failed to fetch")],
+    ["502 от прокси", new ApiError(502, "ayla_unavailable", "upstream down")],
+    ["500 от прокси", new ApiError(500, "http_error", "Internal Server Error")],
+    ["таймаут", Object.assign(new Error("The operation was aborted."), { name: "AbortError" })],
+    ["тело не разбирается", new SyntaxError("Unexpected token < in JSON at position 0")],
   ];
 
   for (const [label, failure] of outages) {
-    it(`stays quiet and empty when the scorer is unavailable: ${label}`, async () => {
+    it(`молчит и пусто, когда источник недоступен: ${label}`, async () => {
       mockedFetchRecommendations.mockRejectedValue(failure);
       const data = await getCatalogBrowse();
-      // Presence — the screen still gets its catalog…
+      // Присутствие — каталог экран всё равно получает…
       expect(data.services).toHaveLength(1);
       expect(data.masters).toHaveLength(1);
-      // …absence — no picks invented, and NOT ONE WORD logged.
+      // …отсутствие — подбор не выдуман и НИ ОДНОГО слова в журнал.
       expect(data.picks).toEqual([]);
       expect(consoleErrorSpy).not.toHaveBeenCalled();
     });
   }
 
-  it("a conforming answer is silent too — behaviour unchanged", async () => {
-    mockedFetchRecommendations.mockResolvedValue({
-      recommendations: [
-        { service_id: "svc-1", score: 0.9, reasons: ["20 минут от тебя"] },
-      ],
-    });
+  it("приёмка T7 · шаг 2 — конформное решение даёт OK и молчит", async () => {
+    mockedFetchRecommendations.mockResolvedValue(
+      decision([candidate("svc-1", { reason_codes: ["MATCH_SERVICE_EXACT"] })]),
+    );
     const data = await getCatalogBrowse();
     expect(data.picks).toEqual([
-      { serviceId: "svc-1", reasons: ["20 минут от тебя"] },
+      {
+        serviceId: "svc-1",
+        tier: 1,
+        rank: 1,
+        reasonCodes: ["MATCH_SERVICE_EXACT"],
+        reasons: ["Это та услуга, которую ты искала"],
+      },
     ]);
-    expect(consoleErrorSpy).not.toHaveBeenCalled();
-  });
-
-  it("a conforming answer WITHOUT the optional WHY fields is silent too", async () => {
-    // Today's real 2xx payload from the proxy. Empty picks here is the
-    // owner's WHY gate, not a divergence — it must not make noise.
-    mockedFetchRecommendations.mockResolvedValue({
-      recommendations: [{ service_id: "svc-1", score: 0.9 }],
-    });
-    const data = await getCatalogBrowse();
-    expect(data.picks).toEqual([]);
-    expect(consoleErrorSpy).not.toHaveBeenCalled();
-  });
-
-  it("an empty list is a valid answer, not a divergence", async () => {
-    mockedFetchRecommendations.mockResolvedValue({ recommendations: [] });
-    const data = await getCatalogBrowse();
-    expect(data.picks).toEqual([]);
     expect(consoleErrorSpy).not.toHaveBeenCalled();
   });
 });
 
-// --- DRF-1556: the runtime shape check itself ------------------------------
+// --- ПРИЁМКА T7, шаг 3: проверка формы осталась строгой --------------------
 
-describe("recommendationsContractViolation", () => {
-  it("passes every shape the declared contract allows", () => {
+describe("decisionContractViolation", () => {
+  it("пропускает всё, что контракт разрешает", () => {
     const conforming: unknown[] = [
-      { recommendations: [] },
-      { recommendations: [{ service_id: "svc-1", score: 0 }] },
-      { recommendations: [{ service_id: "svc-1", score: -1.5, reasons: null }] },
-      { recommendations: [{ service_id: "svc-1", score: 1, reasons: ["раз", "два"] }] },
-      { recommendations: [{ service_id: "svc-1", score: 1, reasoning_text: "почему" }] },
-      { recommendations: [{ service_id: "svc-1", score: 1, reasoning_text: null }] },
-      // Forward-compat: unknown EXTRA fields are not a divergence —
-      // `api.ts` says any field Ayla starts sending arrives untouched.
-      { recommendations: [{ service_id: "svc-1", score: 1, tier: "gold" }] },
-      { recommendations: [{ service_id: "svc-1", score: 1 }], meta: { v: 2 } },
+      decision([]),
+      decision([candidate("svc-1")]),
+      decision([candidate("svc-1", { tier: 0, rank: 0 })]),
+      decision([candidate("svc-1", { evidence: [] })]),
+      decision([
+        candidate("svc-1", {
+          evidence: [
+            {
+              kind: "RATING",
+              value: 4.9,
+              strength: "UNSUBSTANTIATED",
+              origin: "DOMAIN_FACT",
+            },
+          ],
+        }),
+      ]),
+      decision([{ ...candidate("mst-1"), candidate: { kind: "PROVIDER", id: "mst-1" } }]),
+      // Вперёд-совместимость: незнакомые ЛИШНИЕ поля — не расхождение.
+      decision([candidate("svc-1", { stage_verdicts: { S2: "DISTINGUISHED" } })], {
+        excluded: [],
+        computed_at: "2026-09-08T10:00:00+03:00",
+        something_new: 1,
+      }),
+      // Минорная версия старше нашей — разбираем: мажорная та же.
+      { ...(decision([]) as { data: Record<string, unknown> }) },
     ];
     for (const payload of conforming) {
-      expect(recommendationsContractViolation(payload)).toBeNull();
+      expect(decisionContractViolation(payload)).toBeNull();
     }
+    const minorAhead = decision([]) as { data: Record<string, unknown> };
+    minorAhead.data.resolver_spec_version = "1.7";
+    expect(decisionContractViolation(minorAhead)).toBeNull();
   });
 
-  it("names the first violation for every way the contract can break", () => {
+  it("называет первое нарушение на каждый способ сломать контракт", () => {
+    const broken = (
+      ordered: unknown[],
+      extra: Record<string, unknown> = {},
+    ): unknown => decision(ordered, extra);
+    const stripped = (field: string): unknown => {
+      const payload = decision([]) as { data: Record<string, unknown> };
+      delete payload.data[field];
+      return payload;
+    };
     const cases: ReadonlyArray<[unknown, string]> = [
-      [null, "expected an object"],
-      [[], "expected an object"],
-      ["", "expected an object"],
-      [{}, "`recommendations` to be an array"],
-      [{ data: {} }, "object{data}"],
-      [{ recommendations: {} }, "`recommendations` to be an array"],
-      [{ recommendations: [null] }, "recommendations[0]: expected an object"],
-      [{ recommendations: [{ score: 1 }] }, "recommendations[0].service_id"],
-      [{ recommendations: [{ service_id: 7, score: 1 }] }, "recommendations[0].service_id"],
-      [{ recommendations: [{ service_id: "s", score: "1" }] }, "recommendations[0].score"],
-      [{ recommendations: [{ service_id: "s", score: Number.NaN }] }, "recommendations[0].score"],
-      [{ recommendations: [{ service_id: "s", score: 1, reasons: "одна" }] }, "reasons"],
-      [{ recommendations: [{ service_id: "s", score: 1, reasons: [1] }] }, "reasons"],
-      [{ recommendations: [{ service_id: "s", score: 1, reasoning_text: 5 }] }, "reasoning_text"],
-      // Second item diverges — the check must not stop at the first.
+      [null, "ожидался объект"],
+      [[], "ожидался объект"],
+      ["", "ожидался объект"],
+      [{}, "ожидался конверт"],
+      // Полдефекта C-02: ответ без конверта.
+      [{ decision_id: "d", request_id: "r", ordered: [] }, "ожидался конверт"],
+      [{ data: {} }, "resolver_spec_version"],
+      [{ data: { resolver_spec_version: 1 } }, "resolver_spec_version"],
+      // Неизвестная мажорная версия — не разбираем вовсе (§9.4).
+      [{ data: { resolver_spec_version: "2.0" } }, "неизвестная мажорная версия"],
+      [{ data: { resolver_spec_version: "х.0" } }, "неизвестная мажорная версия"],
+      [{ data: { resolver_spec_version: "1.0" } }, "ordered отсутствует"],
+      [broken([null]), "ordered[0]: ожидался объект"],
+      [broken([{ rank: 1, tier: 1, reason_codes: ["X"] }]), "ordered[0].candidate"],
       [
-        {
-          recommendations: [
-            { service_id: "s", score: 1 },
-            { service_id: "s2" },
-          ],
-        },
-        "recommendations[1].score",
+        broken([{ ...candidate("s"), candidate: { kind: "SERVICE", id: 7 } }]),
+        "ordered[0].candidate",
       ],
+      // `kind` вне четырёх — «услуга» и «мастер» перестали различаться.
+      [
+        broken([{ ...candidate("s"), candidate: { kind: "МАСТЕР", id: "s" } }]),
+        "ordered[0].candidate.kind",
+      ],
+      [broken([{ ...candidate("s"), candidate: { id: "s" } }]), "ordered[0].candidate.kind"],
+      [broken([candidate("s", { rank: "1" })]), "ordered[0].rank"],
+      [broken([candidate("s", { tier: 1.5 })]), "ordered[0].tier"],
+      [broken([candidate("s", { tier: undefined })]), "ordered[0].tier"],
+      [broken([candidate("s", { reason_codes: [] })]), "ordered[0].reason_codes"],
+      [broken([candidate("s", { reason_codes: "MATCH_SERVICE_EXACT" })]), "reason_codes"],
+      [broken([candidate("s", { reason_codes: [1] })]), "reason_codes"],
+      [broken([candidate("s", { evidence: {} })]), "ordered[0].evidence"],
+      [stripped("decision_id"), "decision_id"],
+      [stripped("request_id"), "request_id"],
+      [stripped("policy_versions"), "policy_versions"],
+      // §8.4 E1 — строка для показа человеку в ответе запрещена…
+      [broken([candidate("s", { reasoning_text: "Рейтинг 4.9" })]), "строку для показа"],
+      // …в том числе вложенная.
+      [
+        broken([candidate("s", { evidence: [{ kind: "RATING", why_text: "Рейтинг 4.9" }] })]),
+        "строку для показа",
+      ],
+      [broken([], { reason_text: "потому что" }), "строку для показа"],
+      // Второй элемент сломан — проверка не останавливается на первом…
+      [broken([candidate("s"), candidate("s2", { rank: 2, tier: "два" })]), "ordered[1].tier"],
     ];
     for (const [payload, expected] of cases) {
-      const violation = recommendationsContractViolation(payload);
+      const violation = decisionContractViolation(payload);
       expect(violation, `payload: ${JSON.stringify(payload)}`).not.toBeNull();
       expect(violation).toContain(expected);
     }
+  });
+
+  it("частично конформный ответ невалиден ЦЕЛИКОМ (§9.4.1, OD §53.1)", async () => {
+    // Девятнадцать годных и один битый. «Пропускать годные» запрещено:
+    // это вернуло бы четвёртого авторитета, живущего в фильтре.
+    const ordered: unknown[] = [];
+    for (let i = 1; i <= 19; i += 1) {
+      ordered.push(candidate(`svc-${i}`, { rank: i, tier: 1 }));
+    }
+    ordered.push(candidate("svc-20", { rank: 20, tier: 1, reason_codes: [] }));
+
+    const violation = decisionContractViolation(decision(ordered));
+    expect(violation).toContain("ответ невалиден целиком");
+    expect(violation).toContain("ordered[19].reason_codes");
+
+    // И то же самое на живом пути: ни одна из девятнадцати не доезжает.
+    mockedFetchServices.mockResolvedValue({
+      services: [service({ id: "svc-1", name: "Маникюр" })],
+    });
+    mockedFetchMasters.mockResolvedValue({ masters: [MASTER] });
+    mockedFetchRecommendations.mockResolvedValue(decision(ordered));
+    const data = await getCatalogBrowse();
+    expect(data.picks).toEqual([]);
+    expect(consoleErrorSpy).toHaveBeenCalledTimes(1);
+  });
+});
+
+// --- §76: четыре исхода, и свести любые два нельзя ------------------------
+//
+// Решение владельца 08.09.2026: `VERIFIED` выдаётся только после
+// подтверждения, 206 существующих связей становятся `REVIEW_REQUIRED`,
+// и ноль `VERIFIED` НЕ разрешает fallback. Когда пригодных к
+// рекомендации кандидатов нет, источник отвечает ШТАТНЫМ результатом,
+// а не ошибкой, и человеку показывается неперсонализированное
+// состояние — каталог и запись по прямому выбору, без слова «подходит».
+//
+// Форма этого состояния на проводе описана контрактом §10.3: пустой
+// `ordered[]` ПЛЮС код решения `ELIG_EXCLUDED_NOT_RECOMMENDABLE`.
+
+describe("§76 · NO_VERIFIED_CANDIDATES — штатное состояние с именем", () => {
+  function mirrorReady(): void {
+    mockedFetchServices.mockResolvedValue({
+      services: [service({ id: "svc-1", name: "Маникюр" })],
+    });
+    mockedFetchMasters.mockResolvedValue({ masters: [MASTER] });
+  }
+
+  it("узнаётся по коду решения и НЕ выдаётся за ошибку", async () => {
+    mirrorReady();
+    mockedFetchRecommendations.mockResolvedValue(
+      decision([], { reason_codes: ["ELIG_EXCLUDED_NOT_RECOMMENDABLE"] }),
+    );
+    const data = await getCatalogBrowse();
+
+    expect(data.picksOutcome).toBe("NO_VERIFIED_CANDIDATES");
+    expect(data.picks).toEqual([]);
+    // Каталог и мастера на месте — это и есть предусмотренное
+    // неперсонализированное состояние, а не пустой экран.
+    expect(data.services).toHaveLength(1);
+    expect(data.masters).toHaveLength(1);
+    // Штатное состояние молчит: шум здесь обесценил бы детектор
+    // расхождения, стоящий в соседней ветке.
+    expect(consoleErrorSpy).not.toHaveBeenCalled();
+  });
+
+  it("пустой ordered БЕЗ кода — это другое состояние, и оно не подменяется", async () => {
+    mirrorReady();
+    mockedFetchRecommendations.mockResolvedValue(decision([]));
+    const data = await getCatalogBrowse();
+    // «Никто не подошёл» ≠ «нечего рекомендовать, потому что не
+    // проверено». Контракт различает их кодом — различаем и мы.
+    expect(data.picksOutcome).toBe("OK");
+    expect(data.picks).toEqual([]);
+  });
+
+  it("четыре исхода различимы попарно — ни один не схлопнут в другой", async () => {
+    const seen: string[] = [];
+
+    mirrorReady();
+    mockedFetchRecommendations.mockResolvedValue(
+      decision([candidate("svc-1", { reason_codes: ["MATCH_SERVICE_EXACT"] })]),
+    );
+    seen.push((await getCatalogBrowse()).picksOutcome);
+
+    mockedFetchRecommendations.mockRejectedValue(new Error("[502] ayla_unavailable"));
+    seen.push((await getCatalogBrowse()).picksOutcome);
+
+    mockedFetchRecommendations.mockResolvedValue({ recommendations: [] });
+    seen.push((await getCatalogBrowse()).picksOutcome);
+
+    mockedFetchRecommendations.mockResolvedValue(
+      decision([], { reason_codes: ["ELIG_EXCLUDED_NOT_RECOMMENDABLE"] }),
+    );
+    seen.push((await getCatalogBrowse()).picksOutcome);
+
+    expect(seen).toEqual([
+      "OK",
+      "UNAVAILABLE",
+      "CONTRACT_VIOLATION",
+      "NO_VERIFIED_CANDIDATES",
+    ]);
+    expect(new Set(seen).size).toBe(4);
+  });
+
+  it("REVIEW_REQUIRED, доехавший до клиента, — нарушение, а не повод отрисовать", () => {
+    // «Клиенту нельзя сообщать, что такая услуга или мастер подходит».
+    for (const status of ["REVIEW_REQUIRED", "UNMAPPED", "UNKNOWN", null]) {
+      const violation = decisionContractViolation(
+        decision([candidate("svc-1", { mapping_status: status })]),
+      );
+      expect(violation, `mapping_status=${String(status)}`).toContain("mapping_status");
+    }
+    // А `VERIFIED` проходит — иначе сторож запрещал бы всё подряд.
+    expect(
+      decisionContractViolation(decision([candidate("svc-1", { mapping_status: "VERIFIED" })])),
+    ).toBeNull();
+  });
+
+  it("код исключения внутри ordered[] — нарушение (§4.4, §10.2)", () => {
+    const cases = [
+      "ELIG_EXCLUDED_NOT_RECOMMENDABLE",
+      "ELIG_EXCLUDED_SAFETY",
+      "SCOPE_EXCLUDED_OUT_OF_CITY",
+      "SCOPE_GEO_UNKNOWN_EXCLUDED",
+    ];
+    for (const code of cases) {
+      const violation = decisionContractViolation(
+        decision([candidate("svc-1", { reason_codes: ["MATCH_SERVICE_EXACT", code] })]),
+      );
+      expect(violation, code).toContain("код исключения");
+    }
+    // Тот же код НА УРОВНЕ РЕШЕНИЯ законен — это и есть §10.3.
+    expect(
+      decisionContractViolation(
+        decision([], { reason_codes: ["ELIG_EXCLUDED_NOT_RECOMMENDABLE"] }),
+      ),
+    ).toBeNull();
   });
 });

@@ -133,7 +133,12 @@ beforeEach(() => {
   vi.unstubAllEnvs();
   // Без `?stub=` — идём через проводной чтение, как в DRF-1476 кейсах.
   window.history.replaceState({}, "", "/customer/main");
-  mockedBrowse.mockResolvedValue({ services: [], masters: [], picks: [] });
+  mockedBrowse.mockResolvedValue({
+    services: [],
+    masters: [],
+    picks: [],
+    picksOutcome: "OK",
+  });
 });
 
 describe("Главная → перенос записи ведёт в живое поколение", () => {
@@ -159,7 +164,16 @@ describe("Главная → карточка подбора ведёт в жи�
     mockedBrowse.mockResolvedValue({
       services: [SERVICE],
       masters: [],
-      picks: [{ serviceId: SERVICE.id, reasons: ["Подходит твоей цели"] }],
+      picks: [
+        {
+          serviceId: SERVICE.id,
+          tier: 1,
+          rank: 1,
+          reasonCodes: ["MATCH_GOAL_CATEGORY"],
+          reasons: ["Подходит под твою цель"],
+        },
+      ],
+      picksOutcome: "OK",
     });
     serve({ this_week_booking_count: 0 });
     renderScreen();
@@ -170,7 +184,7 @@ describe("Главная → карточка подбора ведёт в жи�
     const card = await screen.findByRole("button", {
       name: /Массаж лимфодренаж/,
     });
-    expect(screen.getByText("Подходит твоей цели")).toBeInTheDocument();
+    expect(screen.getByText("Подходит под твою цель")).toBeInTheDocument();
     await user.click(card);
 
     expect(await screen.findByText("SERVICE-LIVE")).toBeInTheDocument();

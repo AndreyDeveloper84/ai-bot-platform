@@ -50,29 +50,44 @@ const MASTERS: Master[] = [
 ];
 
 /**
- * Scorer response WITH displayable WHY — the shape the owner ruling
- * 25.08 requires before the branded «Ayla подобрала» block may render.
+ * Решение резолвера (§4.2) — форма, которую полка читает после T7
+ * (DRF-1568). Порядок задан источником: пересобрать его нечем, баллов
+ * в ответе нет вовсе.
  */
-const RECS = {
-  recommendations: [
-    { service_id: "svc-2", score: 0.95, reasons: ["Свободно раньше всех остальных"] },
-    { service_id: "svc-1", score: 0.9, reasons: ["20 минут от тебя, рейтинг 4.9", "Ты уже была на этой услуге"] },
-    { service_id: "svc-4", score: 0.85, reasons: ["Подходит под твою цель — снижение стресса"] },
-    { service_id: "svc-3", score: 0.8, reasons: ["У мастера 7 лет опыта в твоей категории"] },
-  ],
-};
+function decision(ordered: unknown[]): unknown {
+  return {
+    data: {
+      decision_id: "dec-1",
+      request_id: "req-1",
+      resolver_spec_version: "1.0",
+      policy_versions: { resolver_spec_version: "1.0" },
+      ordered,
+    },
+  };
+}
+
+function ranked(id: string, rank: number, tier: number, codes: string[]): unknown {
+  return { candidate: { kind: "SERVICE", id }, rank, tier, reason_codes: codes };
+}
+
+/** Решение с кодами, которым словарь отрисовки даёт фразу. */
+const RECS = decision([
+  ranked("svc-2", 1, 1, ["EXEC_SLOT_CONFIRMED_IN_WINDOW"]),
+  ranked("svc-1", 2, 2, ["CONTEXT_PRIOR_COMPLETED_VISIT", "SCOPE_WITHIN_CITY"]),
+  ranked("svc-4", 3, 3, ["MATCH_GOAL_CATEGORY"]),
+  ranked("svc-3", 4, 4, ["ELIG_CAPABILITY_VERIFIED"]),
+]);
 
 /**
- * TODAY'S RUNTIME shape: `POST /recommendations` returns `{service_id,
- * score}` and nothing else — no WHY exists anywhere in the response.
+ * Коды есть — фразы нет: ярусная механика и «соответствие не
+ * определилось» человеку причиной не являются (§7.2, словарь
+ * отрисовки). Это гейт владельца, а не расхождение контракта.
  */
-const RECS_NO_WHY = {
-  recommendations: [
-    { service_id: "svc-2", score: 0.95 },
-    { service_id: "svc-1", score: 0.9 },
-    { service_id: "svc-4", score: 0.85 },
-  ],
-};
+const RECS_NO_WHY = decision([
+  ranked("svc-2", 1, 1, ["TIE_TIER_SHARED"]),
+  ranked("svc-1", 2, 1, ["MATCH_UNDETERMINED"]),
+  ranked("svc-4", 3, 1, ["QUALITY_RATING_UNSUBSTANTIATED_IGNORED"]),
+]);
 
 function ServiceProbe() {
   const { serviceId } = useParams();
@@ -122,22 +137,21 @@ beforeEach(() => {
 });
 
 describe("CustomerCatalogScreen (real mirror data)", () => {
-  it("renders real services and masters; picks capped at 3 in score order", async () => {
+  it("renders real services and masters; picks capped at 3 in resolver order", async () => {
     mockHappyPath();
     renderScreen();
     const picks = await screen.findByRole("region", { name: /Ayla подобрала/ });
     const pickCards = within(picks).getAllByRole("article");
     expect(pickCards).toHaveLength(3);
-    // Score order: Педикюр (0.95), Маникюр (0.9), Брови (0.85) — Массаж out.
+    // Порядок резолвера: Педикюр, Маникюр, Брови — Массаж за срезом k.
     expect(pickCards[0]).toHaveTextContent("Педикюр");
     expect(pickCards[1]).toHaveTextContent("Маникюр");
     expect(pickCards[2]).toHaveTextContent("Брови");
-    // WHAT + WHY: every branded pick renders the reasons the SOURCE
-    // sent, verbatim — nothing is synthesised client-side.
-    expect(pickCards[0]).toHaveTextContent("Свободно раньше всех остальных");
-    expect(pickCards[1]).toHaveTextContent("20 минут от тебя, рейтинг 4.9");
-    expect(pickCards[1]).toHaveTextContent("Ты уже была на этой услуге");
-    expect(pickCards[2]).toHaveTextContent("Подходит под твою цель — снижение стресса");
+    // WHAT + WHY: фраза собрана из УТВЕРЖДЁННОГО кода и ниоткуда больше.
+    expect(pickCards[0]).toHaveTextContent("Есть свободное время в нужном окне");
+    expect(pickCards[1]).toHaveTextContent("Ты уже здесь была");
+    expect(pickCards[1]).toHaveTextContent("В твоём городе");
+    expect(pickCards[2]).toHaveTextContent("Подходит под твою цель");
 
     const servicesSection = screen.getByRole("region", { name: "Услуги" });
     expect(within(servicesSection).getAllByRole("article")).toHaveLength(4);
@@ -170,7 +184,7 @@ describe("CustomerCatalogScreen (real mirror data)", () => {
   // ── Owner ruling 25.08: «Нет displayable WHY → нет блока „Ayla
   //    подобрала"». The section is gated on the reasons the source
   //    actually sends, never on a flag and never on fabricated copy.
-  it("score-only response: no branded block, catalog and masters stay", async () => {
+  it("коды без фразы: блока нет, каталог и мастера на месте", async () => {
     mockedFetchServices.mockResolvedValue({ services: SERVICES });
     mockedFetchMasters.mockResolvedValue({ masters: MASTERS });
     mockedFetchRecommendations.mockResolvedValue(RECS_NO_WHY);
@@ -189,16 +203,17 @@ describe("CustomerCatalogScreen (real mirror data)", () => {
     }
   });
 
-  it("drops picks whose WHY is blank; hides the block when none is left", async () => {
+  it("незнакомый код фразы не даёт — блок прячется, а не выдумывает копию", async () => {
     mockedFetchServices.mockResolvedValue({ services: SERVICES });
     mockedFetchMasters.mockResolvedValue({ masters: MASTERS });
-    mockedFetchRecommendations.mockResolvedValue({
-      recommendations: [
-        { service_id: "svc-2", score: 0.95, reasons: [] },
-        { service_id: "svc-1", score: 0.9, reasons: ["   "] },
-        { service_id: "svc-4", score: 0.85, reasons: null },
-      ],
-    });
+    // Реестр версионируется: источник вправе уехать вперёд. «Мы отстали»
+    // не повод подставить человеку выдуманную причину.
+    mockedFetchRecommendations.mockResolvedValue(
+      decision([
+        ranked("svc-2", 1, 1, ["REASON_FROM_THE_FUTURE"]),
+        ranked("svc-1", 2, 1, ["ANOTHER_UNKNOWN_CODE"]),
+      ]),
+    );
     renderScreen();
     await screen.findByRole("region", { name: "Услуги" });
     expect(
@@ -206,15 +221,15 @@ describe("CustomerCatalogScreen (real mirror data)", () => {
     ).not.toBeInTheDocument();
   });
 
-  it("keeps only the picks that carry WHY when the source is partial", async () => {
+  it("показывает только тех, кого есть чем объяснить", async () => {
     mockedFetchServices.mockResolvedValue({ services: SERVICES });
     mockedFetchMasters.mockResolvedValue({ masters: MASTERS });
-    mockedFetchRecommendations.mockResolvedValue({
-      recommendations: [
-        { service_id: "svc-2", score: 0.95 },
-        { service_id: "svc-1", score: 0.9, reasons: ["20 минут от тебя, рейтинг 4.9"] },
-      ],
-    });
+    mockedFetchRecommendations.mockResolvedValue(
+      decision([
+        ranked("svc-2", 1, 1, ["MATCH_UNDETERMINED"]),
+        ranked("svc-1", 2, 1, ["MATCH_SERVICE_EXACT"]),
+      ]),
+    );
     renderScreen();
     const picks = await screen.findByRole("region", { name: /Ayla подобрала/ });
     const cards = within(picks).getAllByRole("article");

@@ -134,7 +134,12 @@ beforeEach(() => {
   vi.clearAllMocks();
   resetBooking();
   mockedOnBack.mockImplementation(() => () => undefined);
-  mockedBrowse.mockResolvedValue({ services: [], masters: [], picks: [] });
+  mockedBrowse.mockResolvedValue({
+    services: [],
+    masters: [],
+    picks: [],
+    picksOutcome: "OK",
+  });
   mockedServices.mockResolvedValue({ services: [] });
   mockedBookings.mockResolvedValue({
     items: [],
