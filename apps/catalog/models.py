@@ -223,8 +223,9 @@ class CatalogMaster(_MirrorBase):
 
     See ``docs/design/handoffs/2026-05-18-master-management-handoff.md``.
 
-    Sync (``upserter._master_fields``) overwrites: name, specialization,
-    bio, experience, rating, is_active, yclients_staff_id, raw.
+    Sync (``upserter.upsert_specialists``) overwrites: name, specialization,
+    bio, experience, rating, is_active, yclients_staff_id, raw, and — since
+    DRF-1588 — address, location_lat, location_lng.
     Platform fields NEVER touched by sync: invite_status, mode,
     photo_url, archived_at, invited_at, accepted_at, max_handle,
     linked_bot_user. That list is why the pilot's nine active masters
@@ -301,6 +302,69 @@ class CatalogMaster(_MirrorBase):
         ),
     )
     raw = models.JSONField(default=dict, blank=True)
+
+    # DRF-1588 — адрес и координаты мастера. Данные приезжали и раньше, но
+    # только внутрь ``raw``: замер на пилоте 08.09.2026 нашёл гео-ключи в
+    # слепке у 31 строки из 34, а колонок под них не было ни одной. Пока
+    # значение живёт в JSON, по нему нельзя ни искать, ни фильтровать, ни
+    # сортировать — данные есть, доступа к ним нет. Эти три колонки и есть
+    # доступ; читателя они себе не назначают.
+    #
+    # Источник — ``users_specialistprofile.address / location_lat /
+    # location_lng`` в самой Ayla (OPEN_DECISIONS §45): адрес физически
+    # хранится у СПЕЦИАЛИСТА, а не у салона. Правило старшинства «салон
+    # против мастера» — DRF-1589, и здесь его нет.
+    #
+    # ``NULL`` против ``""`` — разница смысловая, и она единственное, что
+    # стоит между нами и повтором дефекта §65:
+    #
+    # * ``address is None`` — ключа ``address`` в слепке НЕ БЫЛО. Мы не
+    #   знаем. Три пилотные строки из 34 именно такие.
+    # * ``address == ""``   — ключ был и нёс пустую строку. Источник
+    #   ответил «адреса нет». Это ответ, а не молчание.
+    #
+    # Координаты по той же причине ``null=True`` и НИКОГДА не ``0.0``:
+    # на пилоте они ``None`` у всех 31 строки, а нулевая пара — это точка
+    # в Гвинейском заливе, которая выглядит как настоящее значение и
+    # уедет на карту как настоящее. Отсутствие координаты обязано остаться
+    # отсутствием.
+    address = models.CharField(
+        max_length=500,
+        null=True,
+        blank=True,
+        default=None,
+        help_text=(
+            "Адрес мастера, зеркалится из ключа ``address`` фида "
+            "специалистов. NULL — ключа в слепке не было (не знаем); "
+            '"" — ключ был и нёс пустое (источник ответил «нет»). '
+            "Разница обязательна: подставленное значение неотличимо от "
+            "настоящего."
+        ),
+    )
+    location_lat = models.DecimalField(
+        max_digits=9,
+        decimal_places=6,
+        null=True,
+        blank=True,
+        default=None,
+        help_text=(
+            "Широта из ключа ``location_lat``. NULL — координаты нет "
+            "(ключ отсутствовал либо нёс null). НИКОГДА не 0.0: пара "
+            "нулей — точка в Гвинейском заливе, неотличимая от настоящей."
+        ),
+    )
+    location_lng = models.DecimalField(
+        max_digits=9,
+        decimal_places=6,
+        null=True,
+        blank=True,
+        default=None,
+        help_text=(
+            "Долгота из ключа ``location_lng``. NULL — координаты нет "
+            "(ключ отсутствовал либо нёс null). НИКОГДА не 0.0 — см. "
+            "``location_lat``."
+        ),
+    )
 
     # #445 — slot cache staleness counter. Bumped on every
     # master.schedule.updated event. Forward-compatible signal for

@@ -128,6 +128,21 @@ class CatalogSpecialistDTO:
     rating: Decimal | None = None
     review_count: int = 0
     is_active: bool = True
+    # DRF-1588 — гео. ``address`` трёхзначен и обязан таким остаться:
+    # ``None`` — ключа в строке НЕ БЫЛО (не знаем), ``""`` — ключ был и нёс
+    # пустое (источник ответил «адреса нет»), строка — адрес. Ровно тот же
+    # приём, что у ``resolved_requires_health_check`` ниже, и по той же
+    # причине: отсутствие, свёрнутое в значение, читается как факт.
+    # Координаты — ``None`` при любом отсутствии и НИКОГДА не ``0``.
+    address: str | None = None
+    location_lat: Decimal | None = None
+    location_lng: Decimal | None = None
+    # DRF-1588 — адрес САЛОНА, отдельным ключом ``tenant_address``, а не тем
+    # же ``address``, что у мастера: в одной строке приезжают оба. Складывать
+    # их здесь нечем и незачем — правило старшинства это DRF-1589. Ключа
+    # сегодня ещё нет (его заводит DRF-1587), поэтому ``None`` — штатное
+    # состояние, а не дефект.
+    tenant_address: str | None = None
     raw: dict[str, Any] = field(default_factory=dict)
 
 
@@ -528,6 +543,33 @@ def _parse_dt(raw: str) -> datetime:
     return datetime.fromisoformat(raw.replace("Z", "+00:00"))
 
 
+def _optional_str(row: dict[str, Any], key: str) -> str | None:
+    """Строка из ``row[key]`` так, чтобы ОТСУТСТВИЕ не стало ПУСТЫМ (DRF-1588).
+
+    Три исхода, и все три различимы у вызывающего:
+
+    * ключа в строке нет      → ``None``  («источник не сказал ничего»);
+    * ключ есть и это ``null``→ ``None``  (то же самое молчание, явным словом);
+    * ключ есть и это строка  → она сама, ДОСЛОВНО, включая ``""``.
+
+    Дословно — то есть без ``.strip()`` и без нормализации: ``raw`` это
+    сырой слепок чужой системы, и выводить из него что-либо, кроме того,
+    что там лежит буквально, — способ получить значение, неотличимое от
+    настоящего. Обрезкой и разбором занимается читатель, у которого есть
+    на это основание; у зеркала основания нет.
+
+    Привычное ``row.get(key) or ""`` делает ровно обратное: сворачивает
+    все три исхода в один и печатает «адреса нет» там, где верный ответ —
+    «не знаем».
+    """
+    if key not in row:
+        return None
+    value = row[key]
+    if value is None:
+        return None
+    return str(value)
+
+
 def _parse_decimal(raw: Any) -> Decimal | None:
     if raw in (None, ""):
         return None
@@ -655,5 +697,14 @@ def _parse_specialist(row: dict[str, Any]) -> CatalogSpecialistDTO:
         is_active=bool(
             str(row.get("status", "")).lower() == "active" and row.get("is_available", True)
         ),
+        # DRF-1588 — ``_optional_str``/``_parse_decimal``, а не ``or ""`` /
+        # ``or 0``: последние стирают ровно ту разницу, ради которой поле
+        # заводилось. ``row.get("address") or ""`` превратил бы отсутствие
+        # ключа в пустой адрес, а ``or 0`` — отсутствие координаты в точку
+        # в Гвинейском заливе.
+        address=_optional_str(row, "address"),
+        location_lat=_parse_decimal(row.get("location_lat")),
+        location_lng=_parse_decimal(row.get("location_lng")),
+        tenant_address=_optional_str(row, "tenant_address"),
         raw=row,
     )
