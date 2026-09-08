@@ -72,16 +72,7 @@ class Migration(migrations.Migration):
             field=models.CharField(
                 blank=True,
                 default="",
-                help_text=(
-                    "IANA-пояс человека для отрисовки времени в сообщениях. "
-                    "ПУСТО означает «не задано» — и это единственное, что здесь "
-                    "означает отсутствие ответа. Умолчанием стоял `Europe/Moscow` "
-                    "(DRF-1606): настоящий пояс в роли «никто не выбирал», из-за "
-                    "чего молчание 26 из 26 человек на пилоте было неотличимо от "
-                    "осознанного выбора москвича. Кто читает пояс — "
-                    "`apps.nutrition_proactive.prefs.resolve_timezone`; кто пишет — "
-                    "только `apps.identity.services.profile.update_profile`."
-                ),
+                help_text="Часовой пояс человека. Пусто означает «не задано».",
                 max_length=64,
             ),
         ),

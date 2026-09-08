@@ -268,20 +268,27 @@ class BotUser(models.Model):
         help_text="Per-user scratch JSON for personalisation flags, "
         "consent timestamps, etc. Avoid raw PII — store IDs.",
     )
+    # DRF-1606. Умолчанием здесь стоял `Europe/Moscow` — НАСТОЯЩИЙ пояс в
+    # роли «никто не выбирал». Поэтому молчание 26 из 26 человек на пилоте
+    # было неотличимо от осознанного выбора москвича, и читатель пояса
+    # относил явный московский ответ к «не задано».
+    #
+    # Кто читает: `apps.nutrition_proactive.prefs.resolve_timezone`.
+    # Кто пишет: только `apps.identity.services.profile.update_profile`
+    # (через `PATCH /me`), с проверкой IANA — DRF-1477.
+    #
+    # Разбор решения живёт ЗДЕСЬ, а не в `help_text`: `help_text`
+    # рендерится на карточке клиента в админконсоли, рядом с телефоном и
+    # дневником питания, и её сторож (`adminconsole/tests/
+    # test_client_scope.py`) справедливо запрещает там всё, что пахнет
+    # медданными, — включая имя модуля `nutrition_proactive`. Оператору
+    # салона путь питоновского модуля не говорит ничего; ему нужно ровно
+    # одно — что означает пустота.
     timezone = models.CharField(
         max_length=64,
         default="",
         blank=True,
-        help_text=(
-            "IANA-пояс человека для отрисовки времени в сообщениях. "
-            "ПУСТО означает «не задано» — и это единственное, что здесь "
-            "означает отсутствие ответа. Умолчанием стоял `Europe/Moscow` "
-            "(DRF-1606): настоящий пояс в роли «никто не выбирал», из-за "
-            "чего молчание 26 из 26 человек на пилоте было неотличимо от "
-            "осознанного выбора москвича. Кто читает пояс — "
-            "`apps.nutrition_proactive.prefs.resolve_timezone`; кто пишет — "
-            "только `apps.identity.services.profile.update_profile`."
-        ),
+        help_text="Часовой пояс человека. Пусто означает «не задано».",
     )
 
     # GDPR-style soft delete (Phase 3 / F4). ``deleted_at`` set when the
