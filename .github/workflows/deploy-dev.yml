@@ -55,7 +55,10 @@
 # `id: guard` step, `if: steps.guard.outputs.ready == 'true'` on five deploy
 # steps, and a `::notice::` reading "No-op: nothing was deployed, nothing was
 # backed up". DRF-1578 / PR #1484 ported it there from this file, describing it
-# as "a visible no-op, not a green check that hides doing nothing".
+# as "a visible no-op, not a green check that hides doing nothing". It is in
+# `dev` as of 8c276fa (merged 2026-09-08 13:05 UTC), and re-checked there after
+# the merge rather than only on its branch: still one job, still `id: guard`,
+# still five step-level `if`s.
 #
 # Half of that is delivered and half is not, and the difference is the whole
 # subject of DRF-1605, so it is written down rather than smoothed over. The
