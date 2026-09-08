@@ -7,7 +7,6 @@ from django.db import migrations, models
 
 
 class Migration(migrations.Migration):
-
     dependencies = [
         ("catalog", "0019_master_address_and_location"),
         ("identity", "0022_botuser_blocked_at_botuser_blocked_by_username_and_more"),
@@ -105,9 +104,7 @@ class Migration(migrations.Migration):
         migrations.AlterField(
             model_name="catalogfaq",
             name="raw",
-            field=models.JSONField(
-                blank=True, default=dict, verbose_name="Сырой ответ источника"
-            ),
+            field=models.JSONField(blank=True, default=dict, verbose_name="Сырой ответ источника"),
         ),
         migrations.AlterField(
             model_name="catalogfaq",
@@ -180,9 +177,7 @@ class Migration(migrations.Migration):
         migrations.AlterField(
             model_name="cataloghelparticle",
             name="raw",
-            field=models.JSONField(
-                blank=True, default=dict, verbose_name="Сырой ответ источника"
-            ),
+            field=models.JSONField(blank=True, default=dict, verbose_name="Сырой ответ источника"),
         ),
         migrations.AlterField(
             model_name="cataloghelparticle",
@@ -238,9 +233,7 @@ class Migration(migrations.Migration):
         migrations.AlterField(
             model_name="catalogmaster",
             name="archived_at",
-            field=models.DateTimeField(
-                blank=True, null=True, verbose_name="В архиве с"
-            ),
+            field=models.DateTimeField(blank=True, null=True, verbose_name="В архиве с"),
         ),
         migrations.AlterField(
             model_name="catalogmaster",
@@ -270,9 +263,7 @@ class Migration(migrations.Migration):
         migrations.AlterField(
             model_name="catalogmaster",
             name="experience",
-            field=models.CharField(
-                blank=True, default="", max_length=255, verbose_name="Опыт"
-            ),
+            field=models.CharField(blank=True, default="", max_length=255, verbose_name="Опыт"),
         ),
         migrations.AlterField(
             model_name="catalogmaster",
@@ -345,16 +336,12 @@ class Migration(migrations.Migration):
         migrations.AlterField(
             model_name="catalogmaster",
             name="invited_at",
-            field=models.DateTimeField(
-                blank=True, null=True, verbose_name="Приглашение выписано"
-            ),
+            field=models.DateTimeField(blank=True, null=True, verbose_name="Приглашение выписано"),
         ),
         migrations.AlterField(
             model_name="catalogmaster",
             name="is_active",
-            field=models.BooleanField(
-                default=True, verbose_name="Активна по данным синхронизации"
-            ),
+            field=models.BooleanField(default=True, verbose_name="Активна по данным синхронизации"),
         ),
         migrations.AlterField(
             model_name="catalogmaster",
@@ -398,9 +385,7 @@ class Migration(migrations.Migration):
         migrations.AlterField(
             model_name="catalogmaster",
             name="max_handle",
-            field=models.CharField(
-                blank=True, default="", max_length=64, verbose_name="Ник в MAX"
-            ),
+            field=models.CharField(blank=True, default="", max_length=64, verbose_name="Ник в MAX"),
         ),
         migrations.AlterField(
             model_name="catalogmaster",
@@ -442,9 +427,7 @@ class Migration(migrations.Migration):
         migrations.AlterField(
             model_name="catalogmaster",
             name="raw",
-            field=models.JSONField(
-                blank=True, default=dict, verbose_name="Сырой ответ источника"
-            ),
+            field=models.JSONField(blank=True, default=dict, verbose_name="Сырой ответ источника"),
         ),
         migrations.AlterField(
             model_name="catalogmaster",
@@ -514,9 +497,7 @@ class Migration(migrations.Migration):
         migrations.AlterField(
             model_name="catalogservice",
             name="contraindications",
-            field=models.TextField(
-                blank=True, default="", verbose_name="Противопоказания"
-            ),
+            field=models.TextField(blank=True, default="", verbose_name="Противопоказания"),
         ),
         migrations.AlterField(
             model_name="catalogservice",
@@ -526,9 +507,7 @@ class Migration(migrations.Migration):
         migrations.AlterField(
             model_name="catalogservice",
             name="duration_min",
-            field=models.IntegerField(
-                blank=True, null=True, verbose_name="Длительность, мин"
-            ),
+            field=models.IntegerField(blank=True, null=True, verbose_name="Длительность, мин"),
         ),
         migrations.AlterField(
             model_name="catalogservice",
@@ -551,9 +530,7 @@ class Migration(migrations.Migration):
         migrations.AlterField(
             model_name="catalogservice",
             name="goals",
-            field=models.JSONField(
-                blank=True, default=list, verbose_name="Цели клиента (теги)"
-            ),
+            field=models.JSONField(blank=True, default=list, verbose_name="Цели клиента (теги)"),
         ),
         migrations.AlterField(
             model_name="catalogservice",
@@ -595,16 +572,12 @@ class Migration(migrations.Migration):
         migrations.AlterField(
             model_name="catalogservice",
             name="raw",
-            field=models.JSONField(
-                blank=True, default=dict, verbose_name="Сырой ответ источника"
-            ),
+            field=models.JSONField(blank=True, default=dict, verbose_name="Сырой ответ источника"),
         ),
         migrations.AlterField(
             model_name="catalogservice",
             name="requires_health_check",
-            field=models.BooleanField(
-                default=False, verbose_name="Требует проверки здоровья"
-            ),
+            field=models.BooleanField(default=False, verbose_name="Требует проверки здоровья"),
         ),
         migrations.AlterField(
             model_name="catalogservice",
@@ -621,9 +594,7 @@ class Migration(migrations.Migration):
         migrations.AlterField(
             model_name="catalogservice",
             name="short_description",
-            field=models.TextField(
-                blank=True, default="", verbose_name="Краткое описание"
-            ),
+            field=models.TextField(blank=True, default="", verbose_name="Краткое описание"),
         ),
         migrations.AlterField(
             model_name="catalogservice",

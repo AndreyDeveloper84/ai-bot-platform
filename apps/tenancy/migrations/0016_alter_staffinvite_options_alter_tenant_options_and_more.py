@@ -7,7 +7,6 @@ from django.db import migrations, models
 
 
 class Migration(migrations.Migration):
-
     dependencies = [
         ("catalog", "0020_alter_catalogfaq_options_and_more"),
         ("identity", "0022_botuser_blocked_at_botuser_blocked_by_username_and_more"),
@@ -135,9 +134,7 @@ class Migration(migrations.Migration):
         migrations.AlterField(
             model_name="staffinvite",
             name="used_at",
-            field=models.DateTimeField(
-                blank=True, null=True, verbose_name="Использовано"
-            ),
+            field=models.DateTimeField(blank=True, null=True, verbose_name="Использовано"),
         ),
         migrations.AlterField(
             model_name="staffinvite",

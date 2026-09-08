@@ -6,7 +6,6 @@ from django.db import migrations, models
 
 
 class Migration(migrations.Migration):
-
     dependencies = [
         ("booking", "0020_completed_by_actor"),
         ("catalog", "0019_master_address_and_location"),
@@ -131,16 +130,12 @@ class Migration(migrations.Migration):
         migrations.AlterField(
             model_name="bookingreminder",
             name="master_name",
-            field=models.CharField(
-                blank=True, default="", max_length=120, verbose_name="Мастер"
-            ),
+            field=models.CharField(blank=True, default="", max_length=120, verbose_name="Мастер"),
         ),
         migrations.AlterField(
             model_name="bookingreminder",
             name="replied_at",
-            field=models.DateTimeField(
-                blank=True, null=True, verbose_name="Клиент ответил"
-            ),
+            field=models.DateTimeField(blank=True, null=True, verbose_name="Клиент ответил"),
         ),
         migrations.AlterField(
             model_name="bookingreminder",
@@ -153,16 +148,12 @@ class Migration(migrations.Migration):
         migrations.AlterField(
             model_name="bookingreminder",
             name="sent_at",
-            field=models.DateTimeField(
-                blank=True, null=True, verbose_name="Отправлено"
-            ),
+            field=models.DateTimeField(blank=True, null=True, verbose_name="Отправлено"),
         ),
         migrations.AlterField(
             model_name="bookingreminder",
             name="service_name",
-            field=models.CharField(
-                blank=True, default="", max_length=200, verbose_name="Услуга"
-            ),
+            field=models.CharField(blank=True, default="", max_length=200, verbose_name="Услуга"),
         ),
         migrations.AlterField(
             model_name="bookingreminder",
@@ -518,9 +509,7 @@ class Migration(migrations.Migration):
         migrations.AlterField(
             model_name="bookingrequest",
             name="service_name",
-            field=models.CharField(
-                max_length=200, verbose_name="Услуга (как было при записи)"
-            ),
+            field=models.CharField(max_length=200, verbose_name="Услуга (как было при записи)"),
         ),
         migrations.AlterField(
             model_name="bookingrequest",
