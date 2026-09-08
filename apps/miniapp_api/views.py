@@ -2635,10 +2635,17 @@ def _active_goals_from_context(doc: Any, *, now: datetime) -> list[dict[str, Any
 def customer_wellness_today(request: HttpRequest) -> HttpResponse:
     """Compose the customer's today-snapshot for the Wellness dashboard.
 
-    Wraps two Ayla nutrition reads — ``daily_summary`` (calories + PFC)
-    and ``get_water_today`` (hydration) — into the ``WellnessToday``
-    shape the Mini App expects (see
+    Wraps four Ayla reads — ``daily_summary`` (calories + PFC + записи
+    дня), ``get_water_today`` (hydration), ``get_profile`` (единственный
+    производный признак, см. ниже) и ``fetch_decision_context`` (цель) —
+    в форму ``WellnessToday``, которую ждёт Mini App (см.
     ``apps/miniapp/src/lib/customer-wellness.ts``).
+
+    Здесь стояло «two Ayla nutrition reads», и это перестало быть правдой
+    ещё в DRF-1476: тот же докстринг двумя абзацами ниже сам называет
+    ``fetch_decision_context`` «Third read». Строку поправили при
+    добавлении четвёртого чтения — счёт в шапке обязан сходиться с телом,
+    иначе следующий замер сделают по шапке.
 
     Identity bridging: the NutritionClient sends
     ``X-External-User-ID: bot:{channel}:{channel_user_id}`` +
@@ -2704,15 +2711,19 @@ def customer_wellness_today(request: HttpRequest) -> HttpResponse:
     bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
     external_id = external_user_id_for(bot_user)
 
-    async def _fetch() -> tuple[Any, Any]:
+    async def _fetch() -> tuple[Any, Any, Any]:
         client = get_nutrition_client()
         return await asyncio.gather(
             client.daily_summary(external_user_id=external_id),
             client.get_water_today(external_user_id=external_id),
+            # Третьим в ТОЙ ЖЕ конкурентной пачке, а не отдельным шагом:
+            # чтение нужно только ради одного булева, и платить за него
+            # ещё одним последовательным round-trip незачем.
+            client.get_profile(external_user_id=external_id),
             return_exceptions=True,
         )
 
-    summary_res, water_res = asyncio.run(_fetch())
+    summary_res, water_res, profile_res = asyncio.run(_fetch())
 
     nutrition_errors = (NutritionUnavailableError, NutritionAPIError)
 
@@ -2728,6 +2739,12 @@ def customer_wellness_today(request: HttpRequest) -> HttpResponse:
     # не из чего — анкету питания человек не проходил.
     calories_target: int | None = None
     pfc: dict[str, Any] | None = None
+    # Записи дня. `None` — «не спросили», `[]` — «спросили, за день пусто».
+    # Различие несёт КЛЮЧ в ответе: список уходит только при удавшемся
+    # чтении, поэтому экран отличает «дневник не доехал» от «сегодня
+    # ничего не записано». Ровно то же правило, что у калорий и воды
+    # выше (DRF-1546), и оно же §78: у отсутствия должно быть имя.
+    entries: list[dict[str, Any]] | None = None
     if isinstance(summary_res, nutrition_errors):
         logger.warning("wellness_today.summary_unavailable ext=%s err=%s", external_id, summary_res)
         summary_known = False
@@ -2759,6 +2776,57 @@ def customer_wellness_today(request: HttpRequest) -> HttpResponse:
             if calories_target is not None
             else None
         )
+        # Записи уходят ДОСЛОВНО, как их отдал источник
+        # (`nutrition/serializers.py::FoodLogEntrySerializer`):
+        # `id · dish_name · calories · protein_g · fat_g · carbs_g ·
+        # meal_type · logged_at`.
+        #
+        # Не переименовываются и не пересчитываются. Переименование
+        # завело бы второе имя одному полю, а пересчёт — второй источник
+        # числа: БЖУ у каждой записи НАСТОЯЩЕЕ и приходит вместе с ней.
+        # Клиент до сих пор считал его сам, множа калории на постоянный
+        # коэффициент, и показывал человеку как факт о том, что он съел.
+        #
+        # `logged_at` в UTC — расхождение суток, DRF-1582. Здесь оно не
+        # решается и не воспроизводится: значение проходит как есть.
+        entries = list(summary_res.entries or [])
+
+    # ── прятать ли числа (from get_profile) ─────────────────────────────
+    # Наружу уходит ОДИН производный булев, а не `health_flags`.
+    #
+    # Клиенту нужно знать «прятать ли цифру», а не «что с человеком».
+    # Диагноз — специальная категория 152-ФЗ, и границу он пересекать не
+    # обязан: раз сырого флага в ответе нет, его нельзя ни залогировать,
+    # ни отправить дальше, ни прочитать в консоли браузера. Тот же приём,
+    # которым убрано `subject_ref` из тела запроса границы резолвера
+    # (§9.4): не давать пути, а не запрещать по нему ходить.
+    #
+    # Имя называет СЛЕДСТВИЕ, а не причину. `ed_mode` было бы тем же
+    # диагнозом, только короче.
+    #
+    # Ключ отсутствует, если чтение не удалось, — и экран на отсутствие
+    # реагирует fail-closed, то есть числа прячет. Цена названа прямо:
+    # пока `get_profile` не отвечает, дневник у ВСЕХ без цифр. Это
+    # задумано. Обратное умолчание («не знаем → показать») превратило бы
+    # отсутствие данных в разрешение показать калории тому, кому спека
+    # их показывать запрещает (§10 Appendix ED Mode) — и цена ошибки
+    # здесь несимметрична.
+    numbers_hidden: bool | None = None
+    if isinstance(profile_res, nutrition_errors):
+        logger.warning("wellness_today.profile_unavailable ext=%s err=%s", external_id, profile_res)
+    elif isinstance(profile_res, Exception):
+        logger.warning(
+            "wellness_today.profile_unexpected ext=%s err=%s",
+            external_id,
+            type(profile_res).__name__,
+        )
+    elif profile_res is not None:
+        # `get_profile` отдаёт `None`, когда анкеты нет вовсе. Это не
+        # отказ чтения: спросили и узнали, что профиля нет, а значит и
+        # флага нет — числа показываются.
+        numbers_hidden = bool((profile_res.health_flags or {}).get("eating_disorder"))
+    else:
+        numbers_hidden = False
 
     # ── hydration (from get_water_today) ────────────────────────────────
     water_known = True
@@ -2818,6 +2886,14 @@ def customer_wellness_today(request: HttpRequest) -> HttpResponse:
             payload["calories_target"] = calories_target
         if pfc is not None:
             payload["pfc"] = pfc
+        # Пустой список — законный ответ («за день ничего не записано»),
+        # и он уходит. Отсутствие ключа означает другое — «прочитать не
+        # удалось», — и попасть сюда может только вместе с провалом
+        # всей питательной половины.
+        if entries is not None:
+            payload["entries"] = entries
+    if numbers_hidden is not None:
+        payload["nutrition_numbers_hidden"] = numbers_hidden
     if water_known:
         payload["water_glasses_eaten"] = water_glasses_eaten
         # Цель уходит, только когда она есть. Ключа нет = нормы нет.

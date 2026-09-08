@@ -393,34 +393,34 @@ export async function logMeal(
   return { log_id: logId, dish_name: dishName, meal_type: req.meal_type, calories };
 }
 
-export async function fetchDailySummary(
-  date?: string,
-): Promise<DailySummaryResponse> {
-  guardProd("GET /api/v1/customer/food/daily");
-  devWarn("fetchDailySummary served from stub — W4 follow-up");
-  const d = date ?? todayKey();
-  const day = ensureDiaryDay(d);
-  let calTotal = 0;
-  let pTotal = 0;
-  let fTotal = 0;
-  let cTotal = 0;
-  for (const e of day.entries) {
-    calTotal += e.calories;
-    // Approximate macros split when not available per-entry.
-    pTotal += Math.round(e.calories * 0.075);
-    fTotal += Math.round(e.calories * 0.018);
-    cTotal += Math.round(e.calories * 0.105);
-  }
-  return {
-    date: d,
-    calories_total: calTotal,
-    calories_goal: day.calories_goal,
-    protein_g: pTotal,
-    fat_g: fTotal,
-    carbs_g: cTotal,
-    entries: day.entries.slice(),
-  };
-}
+/*
+ * `fetchDailySummary` УДАЛЕНА 08.09.2026 вместе с выдуманным числом.
+ *
+ * Она читала `localStorage` и вычисляла БЖУ из калорий постоянными
+ * коэффициентами:
+ *
+ *     pTotal += Math.round(e.calories * 0.075);
+ *     fTotal += Math.round(e.calories * 0.018);
+ *     cTotal += Math.round(e.calories * 0.105);
+ *
+ * — и показывала это человеку как его белки, жиры и углеводы за день.
+ *
+ * До сих пор в этом контуре вычищали выдуманные НОРМЫ (§65): плоские
+ * 2000 ккал, восемь стаканов. Норма — выдуманная мишень, она врёт про
+ * то, к чему идти, и её можно оспорить. Здесь был выдуманный ФАКТ О
+ * ЧЕЛОВЕКЕ — про то, что он уже съел; свой факт о себе человек
+ * оспаривать не станет.
+ *
+ * Приближение было ещё и не нужно: настоящие `protein_g / fat_g /
+ * carbs_g` приходят НА КАЖДУЮ ЗАПИСЬ от источника
+ * (`nutrition/serializers.py::FoodLogEntrySerializer`).
+ *
+ * Снято тем же коммитом, которым подключены настоящие записи: до него
+ * выдумку закрывал `guardProd`, и одно лишь подключение данных само
+ * открыло бы ей дорогу к человеку.
+ *
+ * Настоящее чтение — `customer-wellness.ts::loadDiaryToday`.
+ */
 
 /**
  * Read the customer's health_flags. Production swap: read from
