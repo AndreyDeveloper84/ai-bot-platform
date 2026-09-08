@@ -226,6 +226,17 @@ export interface CatalogBrowseData {
    * | `NO_VERIFIED_CANDIDATES` | связи не подтверждены (§76) | бессмыслен | разметку каталога |
    * | `SAFETY_BLOCKED` | гейт безопасности закрыл выдачу | бессмыслен | **ничего** |
    * | `NO_CAPABLE_CANDIDATES` | нужда названа, никто не совпал | бессмыслен | запрос |
+   * | `UNRENDERABLE_CANDIDATES` | кандидаты есть, полка их не умеет | бессмыслен | **нас** |
+   *
+   * Последний — единственный, где виноват потребитель, а не источник и
+   * не данные. Он существует потому, что замер 08.09 показал: источник
+   * отдаёт `kind=PROVIDER` с ключами Ayla
+   * (`users/recommendation_source.py:209`), а полка умеет `kind=SERVICE`
+   * с ключами зеркала (`apps/miniapp_api/views.py:695`). Без имени это
+   * состояние выглядело бы как `OK` с пустой полкой — и всплыло бы не
+   * сейчас, а через недели, когда кто-то разметит связи и будет ждать,
+   * что полка загорится. Разбор — `bus/CLIENT-note-resolver-candidate-
+   * kind-mismatch.md`.
    *
    * Последние три — пустая полка, и снаружи они **неразличимы**: 200 и
    * пустой `ordered[]` у всех трёх. Различает их только код исключения,
@@ -289,7 +300,8 @@ export type PicksOutcome =
   | "CONTRACT_VIOLATION"
   | "NO_VERIFIED_CANDIDATES"
   | "SAFETY_BLOCKED"
-  | "NO_CAPABLE_CANDIDATES";
+  | "NO_CAPABLE_CANDIDATES"
+  | "UNRENDERABLE_CANDIDATES";
 
 /**
  * Три пустоты, неразличимые снаружи, и почему их всё же три.
@@ -396,10 +408,28 @@ export async function getCatalogBrowse(): Promise<CatalogBrowseData> {
     picksOutcome = classifyEmptiness(recs.decision);
   } else if (recs.state === "OK") {
     const known = new Set(servicesRes.services.map((s) => s.id));
-    picks = recs.decision.ordered
+    // Кандидаты, которые эта поверхность вообще способна показать:
+    // услуга (не мастер, не слот) и притом известная зеркалу.
+    const renderable = recs.decision.ordered.filter(
+      (c) => c.candidate.kind === "SERVICE" && known.has(c.candidate.id),
+    );
+    if (renderable.length === 0) {
+      // Источник ответил, кандидаты есть — и ни одного из них полка
+      // отрисовать не может. Это НЕ «нечего показать»: это «нам
+      // прислали то, чего мы не умеем», и молчать об этом нельзя.
+      // eslint-disable-next-line no-console
+      console.error(
+        "[recommendations] решение содержит " +
+          `${recs.decision.ordered.length} кандидат(ов), и ни один не ` +
+          "отрисуем этой полкой: она умеет kind=SERVICE и ключи зеркала " +
+          `(kinds: ${[...new Set(recs.decision.ordered.map((c) => c.candidate.kind))].join(",")}). ` +
+          "Подбор остаётся пустым; см. bus/CLIENT-note-resolver-candidate-kind-mismatch.md.",
+      );
+      picksOutcome = "UNRENDERABLE_CANDIDATES";
+    }
+    picks = renderable
       // Порядок НЕ трогается: он пришёл готовым, и пересобрать его не
       // из чего — баллов в ответе нет (§4.3).
-      .filter((c) => c.candidate.kind === "SERVICE" && known.has(c.candidate.id))
       .map((c) => ({
         serviceId: c.candidate.id,
         tier: c.tier,
