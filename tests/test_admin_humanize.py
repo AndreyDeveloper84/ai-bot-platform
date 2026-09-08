@@ -254,6 +254,15 @@ def test_booking_change_form_still_refuses_editable_status(
     """
     url = reverse("admin:booking_bookingrequest_change", args=[booking.pk])
     body = owner.get(url).content.decode()
+
+    # Положительная пара к трём отрицаниям ниже (DRF-1411): карточка
+    # действительно нарисована и действительно про ЭТУ запись. Без этой
+    # строки «поля нет» означало бы всего лишь «страницы нет».
+    assert booking.client_name in body
+    assert "Состояние записи" in body, "поле статуса обязано быть ВИДНО — просто не правимо"
+
+    # Отрицательные: ни одного элемента ввода, которым состояние визита
+    # можно было бы переставить руками.
     assert 'name="status"' not in body
     assert 'name="completed_at"' not in body
     assert 'name="completed_by"' not in body
