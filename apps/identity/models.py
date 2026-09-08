@@ -270,8 +270,18 @@ class BotUser(models.Model):
     )
     timezone = models.CharField(
         max_length=64,
-        default="Europe/Moscow",
-        help_text="IANA timezone for time-of-day rendering in messages.",
+        default="",
+        blank=True,
+        help_text=(
+            "IANA-пояс человека для отрисовки времени в сообщениях. "
+            "ПУСТО означает «не задано» — и это единственное, что здесь "
+            "означает отсутствие ответа. Умолчанием стоял `Europe/Moscow` "
+            "(DRF-1606): настоящий пояс в роли «никто не выбирал», из-за "
+            "чего молчание 26 из 26 человек на пилоте было неотличимо от "
+            "осознанного выбора москвича. Кто читает пояс — "
+            "`apps.nutrition_proactive.prefs.resolve_timezone`; кто пишет — "
+            "только `apps.identity.services.profile.update_profile`."
+        ),
     )
 
     # GDPR-style soft delete (Phase 3 / F4). ``deleted_at`` set when the
