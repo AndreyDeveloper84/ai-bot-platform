@@ -56,12 +56,15 @@ class _MirrorBase(models.Model):
     mirror wants live here.
     """
 
-    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    id = models.UUIDField(
+        primary_key=True, default=uuid.uuid4, editable=False, verbose_name="Идентификатор"
+    )
     tenant = models.ForeignKey(
         "tenancy.Tenant",
         on_delete=models.CASCADE,
         help_text="Owning tenant. CASCADE — mirrors are derived from "
         "mysite via catalog sync; tenant delete also drops them.",
+        verbose_name="Салон",
     )
     external_id = models.IntegerField(
         null=True,
@@ -70,16 +73,19 @@ class _MirrorBase(models.Model):
         "the mirror onto the Ayla stable-id (UUID): Ayla-fed rows leave this "
         "NULL and key on (tenant, ayla_service_id / ayla_user_id). Kept for "
         "legacy rows — unique_together (tenant, external_id) stays NULL-safe.",
+        verbose_name="Идентификатор в источнике",
     )
     external_updated_at = models.DateTimeField(
         help_text="Upstream `updated_at` at last sync. Drives the "
         "`?since=` cursor (C2) and last-writer-wins on concurrent beats "
         "(C4 Risk #5).",
+        verbose_name="Изменено в источнике",
     )
     synced_at = models.DateTimeField(
         auto_now=True,
         help_text="When the platform last touched this row. Differs "
         "from `external_updated_at` (upstream's timestamp).",
+        verbose_name="Синхронизировано",
     )
 
     objects = TenantScopedManager()
@@ -108,20 +114,26 @@ class CatalogService(_MirrorBase):
     read-replica, never the source of truth.
     """
 
-    slug = models.SlugField(max_length=100)
-    name = models.CharField(max_length=200)
-    short_description = models.TextField(blank=True, default="")
-    description = models.TextField(blank=True, default="")
-    price_from = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
-    duration_min = models.IntegerField(null=True, blank=True)
-    is_active = models.BooleanField(default=True)
-    is_popular = models.BooleanField(default=False)
-    seo_title = models.CharField(max_length=255, blank=True, default="")
-    seo_description = models.TextField(blank=True, default="")
-    goals = models.JSONField(default=list, blank=True)
-    requires_health_check = models.BooleanField(default=False)
-    contraindications = models.TextField(blank=True, default="")
-    raw = models.JSONField(default=dict, blank=True)
+    slug = models.SlugField(max_length=100, verbose_name="Код услуги")
+    name = models.CharField(max_length=200, verbose_name="Название услуги")
+    short_description = models.TextField(blank=True, default="", verbose_name="Краткое описание")
+    description = models.TextField(blank=True, default="", verbose_name="Описание")
+    price_from = models.DecimalField(
+        max_digits=10, decimal_places=2, null=True, blank=True, verbose_name="Цена от, ₽"
+    )
+    duration_min = models.IntegerField(null=True, blank=True, verbose_name="Длительность, мин")
+    is_active = models.BooleanField(default=True, verbose_name="Продаётся")
+    is_popular = models.BooleanField(default=False, verbose_name="Популярная")
+    seo_title = models.CharField(
+        max_length=255, blank=True, default="", verbose_name="SEO-заголовок"
+    )
+    seo_description = models.TextField(blank=True, default="", verbose_name="SEO-описание")
+    goals = models.JSONField(default=list, blank=True, verbose_name="Цели клиента (теги)")
+    requires_health_check = models.BooleanField(
+        default=False, verbose_name="Требует проверки здоровья"
+    )
+    contraindications = models.TextField(blank=True, default="", verbose_name="Противопоказания")
+    raw = models.JSONField(default=dict, blank=True, verbose_name="Сырой ответ источника")
 
     # #444 — link to Ayla's canonical Service.id (UUID). Coexists with
     # the legacy mysite integer ``external_id``: mysite-synced rows set
@@ -139,6 +151,7 @@ class CatalogService(_MirrorBase):
             "a separate cleanup PR removes external_id once mysite is "
             "fully retired."
         ),
+        verbose_name="Идентификатор услуги в Ayla",
     )
 
     # #444 — mirror-staleness signal. Bumped on every service.updated
@@ -155,11 +168,12 @@ class CatalogService(_MirrorBase):
             "it in their cache key so increments transparently "
             "invalidate stale entries. No active cache reads it today."
         ),
+        verbose_name="Версия кеша",
     )
 
     class Meta:
-        verbose_name = "Catalog: service"
-        verbose_name_plural = "Catalog: services"
+        verbose_name = "Услуга каталога"
+        verbose_name_plural = "Услуги каталога"
         ordering = ["name"]
         unique_together = (("tenant", "external_id"),)
         constraints = [
@@ -243,10 +257,12 @@ class CatalogMaster(_MirrorBase):
         INVITE = "invite", "Invite-based access"
         CATALOG_ONLY = "catalog_only", "Catalog only (no login)"
 
-    name = models.CharField(max_length=200)
-    specialization = models.CharField(max_length=255, blank=True, default="")
-    bio = models.TextField(blank=True, default="")
-    experience = models.CharField(max_length=255, blank=True, default="")
+    name = models.CharField(max_length=200, verbose_name="Имя мастера")
+    specialization = models.CharField(
+        max_length=255, blank=True, default="", verbose_name="Специализация"
+    )
+    bio = models.TextField(blank=True, default="", verbose_name="О себе")
+    experience = models.CharField(max_length=255, blank=True, default="", verbose_name="Опыт")
     # DRF-1535 / DRF-1224 — the rating domain is 1..5. A stored ``0.00`` is
     # therefore not a low rating, it is the ABSENCE of one, and the pilot's
     # nine zero rows are exactly that: no master on the contour has a single
@@ -264,6 +280,7 @@ class CatalogMaster(_MirrorBase):
             "rendered (DRF-1224) and takes no part in discovery ordering "
             "(DRF-1535)."
         ),
+        verbose_name="Рейтинг",
     )
     # DRF-1535 — this help_text used to promise a discovery Bayesian
     # trust-score (#1060) «so a 5.0 from 1 review can't outrank a 4.8 from
@@ -282,13 +299,15 @@ class CatalogMaster(_MirrorBase):
             "no trust-score behind it. Collecting reviews is DRF-1527; until "
             "that lands this is 0 on every pilot row."
         ),
+        verbose_name="Отзывов",
     )
-    is_active = models.BooleanField(default=True)
+    is_active = models.BooleanField(default=True, verbose_name="Активна по данным синхронизации")
     yclients_staff_id = models.IntegerField(
         null=True,
         blank=True,
         help_text="YClients staff id — pre-populated from mysite so the "
         "Phase 1 booking flow can dispatch without a second lookup.",
+        verbose_name="Идентификатор в YClients",
     )
     ayla_user_id = models.UUIDField(
         null=True,
@@ -300,8 +319,9 @@ class CatalogMaster(_MirrorBase):
             "Nullable because legacy mysite-synced rows lack this — "
             "back-filled by catalog-sync service or master event consumer."
         ),
+        verbose_name="Идентификатор пользователя в Ayla",
     )
-    raw = models.JSONField(default=dict, blank=True)
+    raw = models.JSONField(default=dict, blank=True, verbose_name="Сырой ответ источника")
 
     # DRF-1588 — адрес и координаты мастера. Данные приезжали и раньше, но
     # только внутрь ``raw``: замер на пилоте 08.09.2026 нашёл гео-ключи в
@@ -340,6 +360,7 @@ class CatalogMaster(_MirrorBase):
             "Разница обязательна: подставленное значение неотличимо от "
             "настоящего."
         ),
+        verbose_name="Адрес приёма",
     )
     location_lat = models.DecimalField(
         max_digits=9,
@@ -352,6 +373,7 @@ class CatalogMaster(_MirrorBase):
             "(ключ отсутствовал либо нёс null). НИКОГДА не 0.0: пара "
             "нулей — точка в Гвинейском заливе, неотличимая от настоящей."
         ),
+        verbose_name="Широта",
     )
     location_lng = models.DecimalField(
         max_digits=9,
@@ -364,6 +386,7 @@ class CatalogMaster(_MirrorBase):
             "(ключ отсутствовал либо нёс null). НИКОГДА не 0.0 — см. "
             "``location_lat``."
         ),
+        verbose_name="Долгота",
     )
 
     # #445 — slot cache staleness counter. Bumped on every
@@ -382,6 +405,7 @@ class CatalogMaster(_MirrorBase):
             "No active cache layer reads this today — it's a "
             "forward-compatible signal."
         ),
+        verbose_name="Версия кеша",
     )
 
     invite_status = models.CharField(
@@ -398,14 +422,18 @@ class CatalogMaster(_MirrorBase):
             "booking pick-list did not silently collapse. Invite "
             "create-path writes PENDING explicitly, as before."
         ),
+        verbose_name="Состояние приглашения",
     )
     mode = models.CharField(
         max_length=16,
         choices=Mode.choices,
         default=Mode.CATALOG_ONLY,
+        verbose_name="Режим работы с ботом",
     )
-    photo_url = models.URLField(max_length=500, blank=True, default="")
-    archived_at = models.DateTimeField(null=True, blank=True)
+    photo_url = models.URLField(
+        max_length=500, blank=True, default="", verbose_name="Ссылка на фото"
+    )
+    archived_at = models.DateTimeField(null=True, blank=True, verbose_name="В архиве с")
     archive_reason = models.TextField(
         blank=True,
         default="",
@@ -415,8 +443,9 @@ class CatalogMaster(_MirrorBase):
             "to the AuditLog row; cleared on reactivate so the next "
             "deactivation starts fresh."
         ),
+        verbose_name="Причина архива",
     )
-    invited_at = models.DateTimeField(null=True, blank=True)
+    invited_at = models.DateTimeField(null=True, blank=True, verbose_name="Приглашение выписано")
     accepted_at = models.DateTimeField(
         null=True,
         blank=True,
@@ -429,8 +458,9 @@ class CatalogMaster(_MirrorBase):
             "события, а не флаг. NULL у синхронизированных мастеров — "
             "они в бот не приземлялись."
         ),
+        verbose_name="Приглашение принято",
     )
-    max_handle = models.CharField(max_length=64, blank=True, default="")
+    max_handle = models.CharField(max_length=64, blank=True, default="", verbose_name="Ник в MAX")
 
     # M0 onboarding (master mobile handoff §M0 + master-management MM2).
     # invite_token: opaque UUID emitted by MM2 POST /api/v1/masters/invite,
@@ -449,11 +479,13 @@ class CatalogMaster(_MirrorBase):
         db_index=True,
         help_text="One-shot opaque token from MM2 invite-create. Cleared "
         "on accept; uniqueness enforced so a stale token can't collide.",
+        verbose_name="Одноразовый ключ приглашения",
     )
     invite_expires_at = models.DateTimeField(
         null=True,
         blank=True,
         help_text="invited_at + 7d (Q-MM2). Past-expiry tokens 410.",
+        verbose_name="Приглашение действует до",
     )
     linked_bot_user = models.OneToOneField(
         "identity.BotUser",
@@ -463,14 +495,15 @@ class CatalogMaster(_MirrorBase):
         related_name="master_identity",
         help_text="MAX/Telegram BotUser this master signs in with. "
         "SET_NULL on BotUser delete preserves the master audit trail.",
+        verbose_name="Связанный аккаунт в мессенджере",
     )
 
     objects = _MasterManager()  # type: ignore[misc]
     all_tenants = models.Manager()  # type: ignore[misc]
 
     class Meta:
-        verbose_name = "Catalog: master"
-        verbose_name_plural = "Catalog: masters"
+        verbose_name = "Мастер"
+        verbose_name_plural = "Мастера"
         ordering = ["name"]
         unique_together = (("tenant", "external_id"),)
         indexes = [
@@ -650,21 +683,26 @@ class MasterService(models.Model):
     operator unchecks a cell.
     """
 
-    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    id = models.UUIDField(
+        primary_key=True, default=uuid.uuid4, editable=False, verbose_name="Идентификатор"
+    )
     tenant = models.ForeignKey(
         "tenancy.Tenant",
         on_delete=models.CASCADE,
         related_name="master_services",
+        verbose_name="Салон",
     )
     master = models.ForeignKey(
         "catalog.CatalogMaster",
         on_delete=models.CASCADE,
         related_name="services_offered",
+        verbose_name="Мастер",
     )
     service = models.ForeignKey(
         "catalog.CatalogService",
         on_delete=models.CASCADE,
         related_name="masters_offering",
+        verbose_name="Услуга",
     )
     # DEAD SINCE 0002 (DRF-975 finding). No writer has ever populated this —
     # not the MM4 matrix, not the invite seeder, not sync, not the dev seed.
@@ -681,6 +719,7 @@ class MasterService(models.Model):
         null=True,
         blank=True,
         related_name="+",
+        verbose_name="Кем заведена связь",
     )
 
     # DRF-975 — mandatory write provenance. Both columns are stamped by the
@@ -709,6 +748,7 @@ class MasterService(models.Model):
             "MasterServiceSource). NULL = created before DRF-975 shipped; "
             "author unrecoverable."
         ),
+        verbose_name="Откуда взялась связь",
     )
     created_by_actor_id = models.UUIDField(
         null=True,
@@ -719,10 +759,11 @@ class MasterService(models.Model):
             "predating DRF-975. Not an FK on purpose: this is a forensic "
             "stamp that must survive the BotUser row being deleted."
         ),
+        verbose_name="Автор (идентификатор в Ayla)",
     )
 
-    created_at = models.DateTimeField(auto_now_add=True)
-    updated_at = models.DateTimeField(auto_now=True)
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name="Заведена")
+    updated_at = models.DateTimeField(auto_now=True, verbose_name="Изменена")
 
     # DRF-945 — provenance + Ayla's canonical bookable-edge id
     # (``SpecialistService.id``). NULL ⇒ operator-owned (MM4 matrix / invite
@@ -738,6 +779,7 @@ class MasterService(models.Model):
             "operator (MM4 matrix / invite seeding) and catalog sync must "
             "never reconcile it away."
         ),
+        verbose_name="Идентификатор связи в Ayla",
     )
 
     # DRF-1353 — the RESOLVED (master×service) health-check flag, mirrored
@@ -764,6 +806,7 @@ class MasterService(models.Model):
             "NULL = unknown (never synced); the booking health-check gate "
             "treats NULL as 'screening required'."
         ),
+        verbose_name="Требует проверки здоровья (итог)",
     )
 
     # DRF-975 — both managers carry the provenance-checking ``bulk_create``.
@@ -771,8 +814,8 @@ class MasterService(models.Model):
     all_tenants = models.Manager.from_queryset(MasterServiceQuerySet)()  # type: ignore[misc]
 
     class Meta:
-        verbose_name = "Catalog: master-service mapping"
-        verbose_name_plural = "Catalog: master-service mappings"
+        verbose_name = "Связь мастера с услугой"
+        verbose_name_plural = "Связи мастеров с услугами"
         ordering = ["master_id", "service_id"]
         unique_together = (("master", "service"),)
         constraints = [
@@ -798,14 +841,16 @@ class MasterService(models.Model):
 class CatalogFaq(_MirrorBase):
     """Mirror of `mysite/services_app.FAQ`."""
 
-    question = models.CharField(max_length=500)
-    answer = models.TextField()
-    category_slug = models.SlugField(max_length=100, blank=True, default="")
-    raw = models.JSONField(default=dict, blank=True)
+    question = models.CharField(max_length=500, verbose_name="Вопрос")
+    answer = models.TextField(verbose_name="Ответ")
+    category_slug = models.SlugField(
+        max_length=100, blank=True, default="", verbose_name="Код раздела"
+    )
+    raw = models.JSONField(default=dict, blank=True, verbose_name="Сырой ответ источника")
 
     class Meta:
-        verbose_name = "Catalog: FAQ"
-        verbose_name_plural = "Catalog: FAQs"
+        verbose_name = "Вопрос и ответ"
+        verbose_name_plural = "Вопросы и ответы"
         ordering = ["question"]
         unique_together = (("tenant", "external_id"),)
         indexes = [
@@ -825,15 +870,15 @@ class CatalogHelpArticle(_MirrorBase):
     FAQ on the public site.
     """
 
-    question = models.CharField(max_length=500)
-    answer = models.TextField()
-    order = models.IntegerField(default=0)
-    is_active = models.BooleanField(default=True)
-    raw = models.JSONField(default=dict, blank=True)
+    question = models.CharField(max_length=500, verbose_name="Заголовок")
+    answer = models.TextField(verbose_name="Текст")
+    order = models.IntegerField(default=0, verbose_name="Порядок")
+    is_active = models.BooleanField(default=True, verbose_name="Показывается")
+    raw = models.JSONField(default=dict, blank=True, verbose_name="Сырой ответ источника")
 
     class Meta:
-        verbose_name = "Catalog: help article"
-        verbose_name_plural = "Catalog: help articles"
+        verbose_name = "Статья справки"
+        verbose_name_plural = "Статьи справки"
         ordering = ["order", "question"]
         unique_together = (("tenant", "external_id"),)
         indexes = [
