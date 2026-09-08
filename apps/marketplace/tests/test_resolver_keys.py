@@ -19,7 +19,7 @@ import pytest
 from django.utils import timezone
 
 from apps.catalog.models import CatalogMaster
-from apps.catalog.resolver_keys import translate_provider_keys
+from apps.marketplace.resolver_keys import translate_provider_keys
 from apps.tenancy.models import Tenant
 
 

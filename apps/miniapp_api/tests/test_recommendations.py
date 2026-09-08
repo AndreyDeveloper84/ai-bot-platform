@@ -248,7 +248,7 @@ class TestRecommendationsView:
                 return_value=_decision_body(str(uuid.uuid4())),
             ),
             patch(
-                "apps.catalog.resolver_keys.translate_provider_keys",
+                "apps.marketplace.resolver_keys.translate_provider_keys",
                 side_effect=DatabaseError("mirror is down"),
             ),
         ):

@@ -2543,9 +2543,15 @@ def customer_recommendations(request: HttpRequest) -> HttpResponse:
     живёт в ключах зеркала и ключа Ayla не знает: поля у неё нет.
 
     Перевести может только тот, у кого есть оба, — то есть этот слой.
-    Сам перевод живёт в `apps.catalog.resolver_keys`, а не здесь:
+    Сам перевод живёт в `apps.marketplace.resolver_keys`, а не здесь:
     «кто такой этот ключ» — доменное знание, и рядом с разбором тела
     и кодами ответов оно читалось бы как часть транспорта.
+
+    В `apps/marketplace/`, а не в `apps/catalog/`, где лежит модель:
+    межсалонное чтение каталога разрешено контуром **в одном месте**
+    (`MKT1`, #1018), и это место — маркетплейс. Модуль по роду
+    занятия и есть discovery: «дай продаваемых мастеров по множеству
+    ключей». В `catalog` он оказался по месту данных, а не по делу.
 
     ### Никто не отбрасывается
 
@@ -2586,7 +2592,7 @@ def customer_recommendations(request: HttpRequest) -> HttpResponse:
 
     from django.db import DatabaseError
 
-    from apps.catalog.resolver_keys import translate_provider_keys
+    from apps.marketplace.resolver_keys import translate_provider_keys
     from apps.integrations.ayla import external_user_id_for
     from apps.integrations.ayla.recommendations_client import (
         RecommendationsBadRequest,
