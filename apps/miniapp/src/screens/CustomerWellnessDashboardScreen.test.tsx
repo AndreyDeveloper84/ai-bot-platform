@@ -726,3 +726,90 @@ describe("CustomerWellnessDashboardScreen — норма воды не выду�
     expect(screen.queryByText(/стакана сегодня/)).not.toBeInTheDocument();
   });
 });
+
+describe("CustomerWellnessDashboardScreen — цель калорий не выдумывается", () => {
+  function serve(today: unknown) {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: unknown) => {
+        const u = String(url);
+        const body = u.includes("/wellness/today")
+          ? today
+          : u.includes("/recent-activity")
+            ? { this_week_booking_count: 0 }
+            : null;
+        if (body === null) throw new Error(`unexpected fetch: ${u}`);
+        return { ok: true, status: 200, json: async () => body } as unknown as Response;
+      }),
+    );
+  }
+
+  beforeEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllEnvs();
+    mockedBrowse.mockResolvedValue({ services: [], masters: [], picks: [] });
+    window.history.replaceState({}, "", "/customer/main");
+  });
+
+  it("цели нет: съеденное видно, а НЕДОСТУПНО не показывается", async () => {
+    serve({
+      calories_eaten: 800,
+      // calories_target отсутствует — анкеты питания нет, Ayla ответила 0.
+      // pfc тоже нет: строка БЖУ целевая (§11.1).
+      water_glasses_eaten: 4,
+      water_glasses_target: 8,
+      active_goals: [],
+      display_name: "Анна",
+    });
+    await renderScreen(false);
+
+    // POSITIVE: съеденное на месте, соседний срез цел.
+    expect(await screen.findByText("800 ккал сегодня")).toBeInTheDocument();
+    expect(screen.getByText(/4 \/ 8 стаканов/)).toBeInTheDocument();
+    // NEGATIVE: ни выдуманного знаменателя, ни процента, ни отказа.
+    // «Не удалось загрузить» здесь было бы ЛОЖНЫМ отказом: чтение прошло,
+    // это цели нет — и до правки экран показывал именно его, потому что
+    // `caloriesKnown` требовал оба значения сразу.
+    expect(screen.queryByText(/2000 ккал/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/ккал · /)).not.toBeInTheDocument();
+    expect(screen.queryByLabelText(/Питание: .*недоступ/i)).not.toBeInTheDocument();
+    expect(screen.queryByLabelText(/^Калории: /)).not.toBeInTheDocument();
+  });
+
+  it("цель есть: знаменатель, процент и шкала возвращаются", async () => {
+    serve({
+      calories_eaten: 800,
+      calories_target: 2100,
+      pfc: { protein_g: 65, fat_g: 40, carbs_g: 120 },
+      water_glasses_eaten: 4,
+      water_glasses_target: 8,
+      active_goals: [],
+      display_name: "Анна",
+    });
+    await renderScreen(false);
+
+    expect(await screen.findByText(/800 \/ 2100 ккал/)).toBeInTheDocument();
+    expect(screen.getByLabelText("Калории: 800 из 2100")).toBeInTheDocument();
+    expect(screen.getByText(/Б 65 · Ж 40 · У 120 г/)).toBeInTheDocument();
+    expect(screen.queryByText(/ккал сегодня/)).not.toBeInTheDocument();
+  });
+
+  it("пустой день: шкалы нет и для скринридера, а не только для глаза", async () => {
+    serve({
+      calories_eaten: 0,
+      calories_target: 2100,
+      water_glasses_eaten: 0,
+      water_glasses_target: 8,
+      active_goals: [],
+      display_name: "Анна",
+    });
+    await renderScreen(false);
+
+    // POSITIVE: экран действительно нарисован и говорит про пустой день.
+    expect(await screen.findByText("Ещё ничего не залогировано")).toBeInTheDocument();
+    // NEGATIVE: полоса при нуле не видна глазом, но `role="progressbar"`
+    // озвучивал «Калории: 0 из 2100» — дефект доставался ровно тому, кто
+    // не может проверить глазами.
+    expect(screen.queryByLabelText("Калории: 0 из 2100")).not.toBeInTheDocument();
+  });
+});
