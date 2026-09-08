@@ -195,6 +195,20 @@ def _candidate_violation(item: Any, index: int) -> str | None:
     candidate = item.get("candidate")
     if not isinstance(candidate, dict) or not isinstance(candidate.get("id"), str):
         return f"ordered[{index}].candidate: нет идентификатора кандидата"
+    kind = candidate.get("kind")
+    if kind not in _CANDIDATE_KINDS:
+        # `kind` проверяется НАРАВНЕ с `id`, и это не педантизм.
+        # Без него «услуга» и «мастер» неразличимы, а полка услуг, молча
+        # принявшая PROVIDER, — подстановка другого предмета (§14.4).
+        #
+        # Множество закрыто (§5, K1), поэтому неизвестное значение —
+        # нарушение, а не терпимое расширение: источник говорит на
+        # диалекте, которого мы не знаем, и это ровно тот случай, ради
+        # которого заведён третий исход.
+        return (
+            f"ordered[{index}].candidate.kind: ожидалось одно из "
+            f"{sorted(_CANDIDATE_KINDS)}, получено {_shape(kind)}"
+        )
     for field in ("rank", "tier"):
         if not isinstance(item.get(field), int) or isinstance(item.get(field), bool):
             return f"ordered[{index}].{field}: ожидалось целое, получено {_shape(item.get(field))}"
@@ -215,6 +229,12 @@ def _candidate_violation(item: Any, index: int) -> str | None:
 #: потребителя. Проверяется рекурсивно: «Рейтинг 4.9» пришёл человеку
 #: именно такой строкой.
 _DISPLAY_FIELDS = frozenset({"reasoning_text", "reason_text", "why_text"})
+
+#: Что именно рекомендуется — контракт §5, K1. Зеркало закрытого множества
+#: `CandidateKind` с той стороны границы; разделять кодом нельзя, репозитории
+#: разные, и это цена, а не небрежность. Расходится множество — расходится
+#: контракт, и заметит это тест ниже, а не человек на проде.
+_CANDIDATE_KINDS = frozenset({"SERVICE", "OFFER", "PROVIDER", "SLOT"})
 
 
 def _has_display_string(node: Any) -> bool:
