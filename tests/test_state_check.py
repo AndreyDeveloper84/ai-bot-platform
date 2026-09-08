@@ -213,11 +213,12 @@ def test_commands_outside_the_whitelist_are_rejected_not_run(command: str) -> No
 def test_rejected_command_never_reaches_subprocess(monkeypatch: pytest.MonkeyPatch) -> None:
     """Отклонение обязано случиться ДО запуска, а не после."""
     called: list[list[str]] = []
-    monkeypatch.setattr(
-        state_check,
-        "run_command",
-        lambda argv, cwd, timeout: called.append(argv) or (0, "", ""),
-    )
+
+    def _spy(argv: list[str], cwd: Path, timeout: float) -> tuple[int, str, str]:
+        called.append(argv)
+        return 0, "", ""
+
+    monkeypatch.setattr(state_check, "run_command", _spy)
 
     fact = state_check.parse_facts(
         "## Работает\n\n"

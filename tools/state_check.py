@@ -55,6 +55,7 @@ import re
 import shlex
 import subprocess
 import sys
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -348,7 +349,10 @@ def run_command(argv: list[str], cwd: Path, timeout: float) -> tuple[int, str, s
     return proc.returncode, proc.stdout, proc.stderr
 
 
-def check_fact(fact: Fact, repos: dict[str, Path | None], timeout: float) -> Result:
+# `Mapping`, а не `dict`: `dict` инвариантен по значению, и вызывающий с
+# `dict[str, Path]` (все репозитории нашлись) не подошёл бы под
+# `dict[str, Path | None]`. Читать отсюда всё равно только читают.
+def check_fact(fact: Fact, repos: Mapping[str, Path | None], timeout: float) -> Result:
     if fact.check.strip().lower() == NOTHING_TO_CHECK:
         return Result(fact, UNCHECKED, reason=fact.why or "проверка: нечем")
 
