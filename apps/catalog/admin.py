@@ -470,6 +470,9 @@ class CatalogMasterAdmin(_MirrorAdminBase):
         # заполняет она. Текст для владелицы салона живёт отдельно, в
         # ``AdminPeopleScreen.tsx``.
         "profile_incomplete": "профиль не заполнен",
+        # §83. Чинится не здесь и не в источнике синхронизации: часы
+        # подтверждает владелец салона в салонной поверхности.
+        "schedule_unconfirmed": "расписание не подтверждено",
     }
 
     @admin.display(description="Почему не бронируется")

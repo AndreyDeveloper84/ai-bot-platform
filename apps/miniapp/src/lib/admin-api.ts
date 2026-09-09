@@ -1633,6 +1633,14 @@ export type RoleSource = "access_code" | "master_invite" | "direct";
  * live data until DRF-1521 пп. 4-6 land; the word exists first so the
  * screen is not the last place to learn about it.
  *
+ * `schedule_unconfirmed` (§83) is the third condition of readiness: the
+ * salon owner has not vouched for this master's current working hours, or
+ * they changed after she did. Not `revoked` and not our fault either —
+ * the owner's next move is to open the master's card and press
+ * «Расписание верно». It appears only while the backend flag
+ * `MASTER_SCHEDULE_CONFIRMATION_REQUIRED` is on; the word exists first so
+ * the screen is not the last place to learn about it.
+ *
  * The backend grows this union in `apps/catalog/master_state.py`
  * (`SaleBlock`). A new member must be added to `STATE_SUFFIX` and
  * `STATE_CHIP_CLASS` in `AdminPeopleScreen.tsx` — both are exhaustive
@@ -1644,7 +1652,8 @@ export type RoleState =
   | "pending"
   | "revoked"
   | "ayla_unlinked"
-  | "profile_incomplete";
+  | "profile_incomplete"
+  | "schedule_unconfirmed";
 
 export interface StaffRoleGrant {
   role: "owner" | "admin" | "receptionist" | "master";

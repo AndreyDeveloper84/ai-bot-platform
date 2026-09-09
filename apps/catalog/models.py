@@ -44,7 +44,7 @@ import uuid
 from django.db import models
 from django.utils import timezone
 
-from apps.catalog.master_state import AVAILABLE
+from apps.catalog.master_state import available_q
 from apps.tenancy.managers import TenantScopedManager
 
 
@@ -228,7 +228,7 @@ class _MasterManager(TenantScopedManager):
     """
 
     def bookable(self):
-        return self.filter(AVAILABLE)
+        return self.filter(available_q())
 
 
 class CatalogMaster(_MirrorBase):

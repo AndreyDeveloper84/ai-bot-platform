@@ -26,17 +26,20 @@ from uuid import uuid4
 
 import pytest
 from django.http import HttpRequest, JsonResponse
-from django.test import RequestFactory
+from django.test import RequestFactory, override_settings
+from django.utils.timezone import now as timezone_now
 
 from apps.admin_api.services.master_deactivation import _find_fallback_masters
 from apps.admin_api.services.staff_roster import build_staff_roster
 from apps.booking.models import BookingRequest
 from apps.catalog.master_state import (
     ACCEPTED,
+    AVAILABLE,
     ENROLLED,
     LANDED,
     RoleState,
     SaleBlock,
+    available_q,
     is_available,
     is_enrolled,
     is_landed,
@@ -994,7 +997,11 @@ class TestTheReasonVocabularyCannotBeExtendedByHalves:
         # выполнилось по вырожденности.
         assert "ayla_unlinked" in get_args(SaleBlock)
         assert "profile_incomplete" in get_args(SaleBlock)
-        assert len(get_args(SaleBlock)) >= 4
+        # §83 — пятая причина. Строка добавлена сюда, а не заменена: цель
+        # положительной стражи в том, чтобы равенство выше не выполнилось
+        # по вырожденности, и старые члены проверяются наравне с новым.
+        assert "schedule_unconfirmed" in get_args(SaleBlock)
+        assert len(get_args(SaleBlock)) >= 5
 
 
 class TestTheMeasurementDRF1521OwesTheOwner:
@@ -1057,3 +1064,142 @@ class TestTheMeasurementDRF1521OwesTheOwner:
         assert synced.filter(invite_status=ACCEPTED).count() == 9
         assert all(is_available(m) for m in synced.filter(invite_status=ACCEPTED))
         assert not any(is_enrolled(m) for m in synced)
+
+
+class TestTheScheduleGateIsOffUntilTheOwnerTurnsItOn:
+    """§83 — условие есть, но никого не снимает, пока флаг выключен.
+
+    Порядок работ DRF-1521 п. 7: сперва признак и способ его поставить,
+    потом кампания подтверждения по уже подключённым мастерам, и только
+    потом гейт. Между «признак есть» и «гейт включён» живут все тридцать
+    один продаваемый мастер пилота, и уронить их раньше времени — это не
+    строгость, а поломка витрины.
+    """
+
+    def test_an_unconfirmed_master_still_sells_while_the_flag_is_off(
+        self, tenant: Tenant
+    ) -> None:
+        master = _make_master(tenant)
+
+        assert master.schedule_confirmed_at is None
+        assert sale_block(master) is None
+        assert is_available(master) is True
+        assert CatalogMaster.all_tenants.filter(available_q()).filter(pk=master.pk).exists()
+
+    @override_settings(MASTER_SCHEDULE_CONFIRMATION_REQUIRED=True)
+    def test_with_the_flag_on_the_same_master_stops_selling_and_says_why(
+        self, tenant: Tenant
+    ) -> None:
+        master = _make_master(tenant)
+
+        assert sale_block(master) == "schedule_unconfirmed"
+        assert is_available(master) is False
+        assert not CatalogMaster.all_tenants.filter(available_q()).filter(pk=master.pk).exists()
+
+    @override_settings(MASTER_SCHEDULE_CONFIRMATION_REQUIRED=True)
+    def test_a_confirmed_master_passes_the_gate(self, tenant: Tenant) -> None:
+        """Положительная стража: гейт не «снимает всех», он снимает
+        неподтверждённых. Без этой половины предыдущий тест зеленел бы и
+        на предикате, который не пускает никого."""
+
+        master = _make_master(tenant, schedule_confirmed_at=timezone_now())
+
+        assert sale_block(master) is None
+        assert is_available(master) is True
+        assert CatalogMaster.all_tenants.filter(available_q()).filter(pk=master.pk).exists()
+
+    @override_settings(MASTER_SCHEDULE_CONFIRMATION_REQUIRED=True)
+    def test_the_schedule_reason_never_outranks_a_reason_the_owner_cannot_fix_by_pressing(
+        self, tenant: Tenant
+    ) -> None:
+        """Отказ — это обещание «почини вот это, и мастер станет продаваться».
+
+        Мастеру без связи с Ayla подтверждение расписания продажи не
+        вернёт. Покажи мы «подтвердите расписание» — владелица нажала бы
+        кнопку и ничего не изменилось бы, а экран соврал.
+        """
+
+        unlinked = _make_master(tenant, ayla_user_id=None)
+        pending = _make_master(tenant, invite_status=CatalogMaster.InviteStatus.PENDING)
+
+        assert sale_block(unlinked) == "ayla_unlinked"
+        assert sale_block(pending) == "pending"
+
+    @override_settings(MASTER_SCHEDULE_CONFIRMATION_REQUIRED=True)
+    def test_the_whole_salon_going_dark_is_visible_as_a_count(self, tenant: Tenant) -> None:
+        """Счётчик, а не построчность.
+
+        Сумма построчных «не продаётся» — это «клиент не увидит никого», и
+        заметить это обязан тот же гейт, а не владелец на пилоте. Тест
+        считает витрину салона до и после включения условия.
+        """
+
+        for _ in range(5):
+            _make_master(tenant)
+        confirmed = _make_master(tenant, schedule_confirmed_at=timezone_now())
+
+        with override_settings(MASTER_SCHEDULE_CONFIRMATION_REQUIRED=False):
+            before = CatalogMaster.all_tenants.filter(available_q(), tenant=tenant).count()
+        after = CatalogMaster.all_tenants.filter(available_q(), tenant=tenant).count()
+
+        assert before == 6, "до включения продаются все шестеро"
+        assert after == 1, "после включения остаётся ровно подтверждённая"
+        assert after > 0, "витрина салона не обнулилась целиком"
+        assert (
+            CatalogMaster.all_tenants.filter(available_q(), tenant=tenant).first().pk
+            == confirmed.pk
+        )
+
+
+    @override_settings(MASTER_SCHEDULE_CONFIRMATION_REQUIRED=True)
+    def test_the_roster_survives_the_flag_and_says_the_word(
+        self, tenant: Tenant, bot_user: BotUser
+    ) -> None:
+        """Ростер владелицы читает строки через ``.values()`` со СПИСКОМ полей.
+
+        Гейт спрашивает ``schedule_confirmed_at``, когда флаг включён, а
+        ``sale_block`` читает строку строго — забытый в списке столбец даёт
+        не тихое умолчание, а ``KeyError`` на живом экране «Команда». То
+        есть в момент включения флага ростер салона упал бы целиком.
+
+        Тест проходит ростер по-настоящему, а не проверяет наличие строки
+        в исходнике: список полей — это то, что легко «поправить» обратно.
+        """
+
+        master = _make_master(tenant, linked_bot_user=bot_user, accepted_at=timezone_now())
+
+        assert _gate_roster(tenant, master) == "schedule_unconfirmed"
+
+        master.schedule_confirmed_at = timezone_now()
+        master.save(update_fields=["schedule_confirmed_at"])
+
+        assert _gate_roster(tenant, master) == "active"
+
+
+class TestTheTwoTwinsOfTheSalePredicateCannotDrift:
+    """``AVAILABLE`` (SQL) и :func:`sale_block` (построчно) — один вопрос.
+
+    ``AVAILABLE`` читает флаг ПРИ ИМПОРТЕ: ``Q`` это значение, а не вызов.
+    :func:`available_q` читает его в момент вызова. Разъехаться в СОСТАВЕ
+    они не имеют права — расходиться может только момент чтения флага, и
+    этот тест держит границу между двумя разницами.
+    """
+
+    def test_available_constant_equals_the_runtime_predicate(self) -> None:
+        assert AVAILABLE == available_q()
+
+    @override_settings(MASTER_SCHEDULE_CONFIRMATION_REQUIRED=True)
+    def test_the_runtime_predicate_answers_the_flag_the_constant_cannot(self) -> None:
+        """Именно поэтому ``bookable()`` зовёт функцию, а не константу."""
+
+        assert available_q() != AVAILABLE
+        assert "schedule_confirmed_at" in str(available_q())
+        assert "schedule_confirmed_at" not in str(AVAILABLE)
+
+    @override_settings(MASTER_SCHEDULE_CONFIRMATION_REQUIRED=True)
+    def test_the_manager_funnel_uses_the_runtime_predicate(self, tenant: Tenant) -> None:
+        """``bookable()`` — воронка витрины, и она обязана слушать флаг."""
+
+        _make_master(tenant)
+
+        assert CatalogMaster.objects.bookable().filter(tenant=tenant).count() == 0
