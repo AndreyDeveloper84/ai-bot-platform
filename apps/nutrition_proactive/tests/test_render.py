@@ -56,7 +56,13 @@ def summary(**overrides: Any) -> SummaryResponse:
     return replace(_BASE_SUMMARY, **overrides)
 
 
-def water(total_ml: int = 1600, norm_ml: int = 2000) -> WaterTodayResponse:
+def water(total_ml: int = 1600, norm_ml: int | None = 2000) -> WaterTodayResponse:
+    """Умолчание 2000 — фикстура состояния «ориентир ЕСТЬ».
+
+    `norm_ml=None` — штатное состояние с 09.09.2026 (§82, §85): формула
+    воды снята, и Ayla ключ не присылает. Тип расширен, чтобы это
+    состояние можно было изобразить, а не только описать словами.
+    """
     return WaterTodayResponse(total_ml=total_ml, norm_ml=norm_ml, entries=[])
 
 

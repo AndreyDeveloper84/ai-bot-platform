@@ -362,3 +362,62 @@ def test_imports_clean() -> None:
 
     importlib.reload(mod)
     assert mod.NutritionAnketaSkill.name == "nutrition_anketa"
+
+
+# ─── карточка норм: ноль не печатается как ориентир ───────────────────────
+
+
+class TestSummaryCardShowsOnlyRealTargets:
+    """Ноль в поле ориентира — отсутствие, а не «ориентир ноль» (§82, §85).
+
+    Карточка печатала пять строк безусловно, и после снятия формулы воды
+    выдавала «💧 Вода: 0 мл», а человеку без веса — ещё и «🔥 Калории:
+    0 ккал/день». Ни одна из пяти величин не бывает нулём у живого
+    человека, поэтому такая карточка не пустая, а лживая — и лжёт сразу
+    после слов «Готово, рассчитала твои нормы».
+    """
+
+    def test_a_full_calculation_still_shows_every_row(self) -> None:
+        """POSITIVE ВПЕРЕДИ: карточка не онемела, строки на месте."""
+        from apps.skills.nutrition_anketa.skill import _format_summary
+
+        text = _format_summary(_profile())
+        assert "Готово, рассчитала твои нормы:" in text
+        assert "🔥 Калории: 1900 ккал/день" in text
+        assert "💧 Вода: 2100 мл" in text
+
+    def test_a_zero_row_is_dropped_not_printed(self) -> None:
+        from dataclasses import replace
+
+        from apps.skills.nutrition_anketa.skill import _format_summary
+
+        text = _format_summary(replace(_profile(), water_ml=0))
+        # PRESENCE ВПЕРЕДИ: карточка отрисована и остальные строки на
+        # месте — снимается строка без значения, а не карточка целиком.
+        assert "🔥 Калории: 1900 ккал/день" in text
+        # ABSENCE: воды нет вовсе — ни подписи, ни нуля.
+        assert "Вода" not in text
+        assert "0 мл" not in text
+
+    def test_nothing_computed_does_not_pretend_to_be_a_calculation(self) -> None:
+        """Человек без веса: расчёта нет, и карточка это признаёт."""
+        from dataclasses import replace
+
+        from apps.skills.nutrition_anketa.skill import _format_summary
+
+        empty = replace(
+            _profile(),
+            daily_kcal=0,
+            protein_g=0,
+            fat_g=0,
+            carbs_g=0,
+            water_ml=0,
+        )
+        text = _format_summary(empty)
+        # PRESENCE ВПЕРЕДИ: ответ не пуст — человеку сказано, что
+        # дневник работает. Без этого отрицания ниже прошли бы и на
+        # пустой строке.
+        assert "Дневник готов" in text
+        # ABSENCE: расчётом карточка не притворяется и нолей не печатает.
+        assert "рассчитала твои нормы" not in text
+        assert "0" not in text
