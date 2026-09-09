@@ -7,6 +7,7 @@
 экземпляр бэкапа). Забрать файл с хоста:
     ssh taximeter@194.87.99.126 "docker cp dev-web-1:/tmp/drf974_backup_edges.json /tmp/ && cat /tmp/drf974_backup_edges.json" > drf974_backup_edges.json
 """
+
 import json
 
 from services.models import SalonService, SpecialistService
@@ -29,7 +30,9 @@ edges = [
         "created_at": r.created_at.isoformat(),
         "updated_at": r.updated_at.isoformat(),
     }
-    for r in SpecialistService.objects.filter(tenant=t).select_related("specialist", "salon_service")
+    for r in SpecialistService.objects.filter(tenant=t).select_related(
+        "specialist", "salon_service"
+    )
 ]
 
 services = [
