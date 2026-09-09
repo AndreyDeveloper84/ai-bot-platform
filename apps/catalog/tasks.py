@@ -380,3 +380,124 @@ def sync_catalog_for_tenant(tenant_id: str) -> dict[str, Any]:
         result.error or "-",
     )
     return outcome
+
+
+@shared_task(
+    name="apps.catalog.tasks.sweep_schedule_confirmations",
+    soft_time_limit=300,
+    time_limit=360,
+)
+def sweep_schedule_confirmations() -> dict[str, int]:
+    """Снять подтверждения, под которыми часы уже изменились. §83, правило 4.
+
+    **Это единственный работающий механизм сброса, а не запасной путь.**
+
+    Правило 4 решения владельца звучит как «любое изменение рабочих часов
+    автоматически отменяет подтверждение», и правильным местом для него
+    было бы событие ``master.schedule.updated``: контракт §3.11 его
+    описывает, консьюмер (``apps.eventbus.consumers.schedule``) его
+    принимает и сброс делает. Замер пилота 09.09.2026 показал, что **этот
+    топик не приходил ни разу за всю историю** — ``IngestDedupe`` знает
+    только ``booking.*`` и два ``appointment.rescheduled``. Регистрация
+    консьюмера доказывает готовность принять, а не факт приёма.
+
+    **И причин две, независимых.** Даже будь событие отправлено, оно было
+    бы отвергнуто: живое значение аллоулиста на пилоте (прочитано в
+    контейнере бота 09.09.2026) — ``EVENT_INGEST_ALLOWED_EVENTS`` несёт
+    ровно четыре имени, все ``booking.*`` плюс ``appointment.rescheduled``.
+    ``master.schedule.updated`` среди них нет, и событие ушло бы в мёртвую
+    очередь с ``event_not_allowed``. Состав аллоулиста — решение владельца
+    (OD-T02-5), а не наша забывчивость, и меняется правкой окружения, а не
+    этим кодом.
+
+    Поэтому обход — не дубль событийного пути и не подстраховка к нему:
+    **другого работающего пути инвалидации сегодня нет вовсе.**
+
+    Поэтому обход, и поэтому цену надо назвать честно:
+
+        правило 4 исполняется как «отменяет НЕ ПОЗДНЕЕ ЧЕМ через цикл»,
+        а не «отменяет в момент изменения».
+
+    Между изменением часов в Ayla и сбросом проходит до одного интервала
+    бита. В это окно мастер продаётся по часам, которые владелица
+    подтверждала не глядя на нынешние. Выдавать обход за мгновенный сброс
+    нельзя — свойства у него такого нет.
+
+    ### Обход сторожит СУЩЕСТВУЮЩИЕ подтверждения
+
+    Проверяются только строки с ``schedule_confirmed_at IS NOT NULL``: у
+    неподтверждённого мастера сбрасывать нечего. Цена — один HTTP-вызов на
+    ПОДТВЕРЖДЁННОГО мастера за проход, а не на весь пул подбора: сегодня
+    это максимум девять строк из тридцати одной (замер 09.09.2026).
+
+    **Обратного направления у обхода нет, и это названо, а не забыто.**
+    Он замечает, что у подтверждённого часы изменились, и НЕ замечает, что
+    у неподтверждённого они появились. Мастер, которому салон завёл часы в
+    Ayla, подтверждаемым сам собой не станет и никого об этом не уведомит.
+    Сегодня таких потенциально двадцать два. Это дыра продуктового
+    сценария, а не дефект механизма; если понадобится уведомление, оно
+    сядет сюда же.
+
+    ### Недоступность источника — НЕ изменение часов
+
+    Ayla не ответила — подтверждение остаётся, строка считается в
+    ``unreadable`` и называется в логе. Обратное решение (нет ответа →
+    сбросить) сняло бы с витрины всех подтверждённых разом на первой же
+    сетевой ошибке, и владелица прочла бы это как «у всех изменилось
+    расписание». Отсутствие ответа доезжает отсутствием.
+
+    Возвращает счётчики прохода: ``checked`` / ``cleared`` / ``unreadable``.
+    """
+
+    from apps.catalog.models import CatalogMaster
+    from apps.catalog.services.schedule_confirmation import (
+        ScheduleConfirmationError,
+        clear_confirmation,
+        read_weekly_template,
+    )
+    from apps.integrations.ayla.salon_client import SalonNotConfigured, SalonUnavailable
+    from apps.tenancy.context import tenant_scope
+
+    counters = {"checked": 0, "cleared": 0, "unreadable": 0}
+
+    for tenant in tenants_in_sync_order():
+        with tenant_scope(tenant):
+            # ``objects`` внутри скоупа, а не ``all_tenants``: межсалонное
+            # чтение каталога живёт только в ``apps/marketplace`` (MKT1), и
+            # обход — не повод его завести.
+            confirmed = list(
+                CatalogMaster.objects.filter(schedule_confirmed_at__isnull=False).select_related(
+                    "tenant"
+                )
+            )
+            for master in confirmed:
+                counters["checked"] += 1
+                try:
+                    template = read_weekly_template(master)
+                except (ScheduleConfirmationError, SalonNotConfigured, SalonUnavailable) as exc:
+                    counters["unreadable"] += 1
+                    logger.warning(
+                        "catalog.schedule_sweep.unreadable master=%s tenant=%s err=%s — "
+                        "подтверждение оставлено: нет ответа источника, а не изменение часов",
+                        master.pk,
+                        tenant.id,
+                        type(exc).__name__,
+                    )
+                    continue
+
+                if template.fingerprint == master.schedule_fingerprint:
+                    continue
+
+                counters["cleared"] += clear_confirmation(
+                    tenant_id=tenant.id,
+                    ayla_user_id=master.ayla_user_id,
+                    reason="sweep: hours changed since confirmation",
+                )
+
+    logger.info(
+        "catalog.schedule_sweep.done checked=%d cleared=%d unreadable=%d",
+        counters["checked"],
+        counters["cleared"],
+        counters["unreadable"],
+    )
+    return counters

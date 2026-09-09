@@ -652,3 +652,99 @@ class TestTheLocalSourceIsShapedLikeTheWire:
 
         assert len(template.rows) == 7
         assert template.has_working_day is False
+
+
+class TestTheSweepIsTheOnlyResetThatActuallyRuns:
+    """§83, правило 4 — обход снимает подтверждения, под которыми часы ушли.
+
+    Событие ``master.schedule.updated`` за всю историю не приходило ни разу
+    (замер пилота 09.09.2026), поэтому обход — не запасной путь, а
+    единственный работающий. И он даёт сброс с задержкой до одного цикла,
+    а не мгновенно: это названо и здесь, и в докстринге задачи.
+    """
+
+    def _confirm(self, master, owner, ayla, rows=None):
+        ayla(rows or wire_week())
+        return sc.confirm_schedule(master, by=owner)
+
+    def test_a_changed_week_clears_the_confirmation(
+        self, master: CatalogMaster, owner: BotUser, ayla
+    ) -> None:
+        from apps.catalog.tasks import sweep_schedule_confirmations
+
+        self._confirm(master, owner, ayla)
+        ayla(wire_week(day1={"end_time": "21:00"}))
+
+        counters = sweep_schedule_confirmations()
+
+        assert counters == {"checked": 1, "cleared": 1, "unreadable": 0}
+        master.refresh_from_db()
+        assert master.schedule_confirmed_at is None
+        assert master.schedule_fingerprint == ""
+
+    def test_an_unchanged_week_is_left_alone(
+        self, master: CatalogMaster, owner: BotUser, ayla
+    ) -> None:
+        """Положительная стража: обход снимает НЕ ВСЁ подряд.
+
+        Без этой половины предыдущий тест зеленел бы и на задаче, которая
+        сбрасывает каждое подтверждение, до которого дотянется.
+        """
+
+        from apps.catalog.tasks import sweep_schedule_confirmations
+
+        self._confirm(master, owner, ayla)
+
+        counters = sweep_schedule_confirmations()
+
+        assert counters == {"checked": 1, "cleared": 0, "unreadable": 0}
+        master.refresh_from_db()
+        assert master.schedule_confirmed_at is not None
+
+    def test_an_unreadable_source_does_not_count_as_changed_hours(
+        self, master: CatalogMaster, owner: BotUser, ayla
+    ) -> None:
+        """Ayla не ответила — подтверждение остаётся.
+
+        Обратное решение сняло бы с витрины всех подтверждённых разом на
+        первой же сетевой ошибке, и владелица прочла бы это как «у всех
+        изменилось расписание». Отсутствие ответа доезжает отсутствием.
+        """
+
+        from apps.catalog.tasks import sweep_schedule_confirmations
+
+        self._confirm(master, owner, ayla)
+        ayla([], exc=SalonUnavailable("upstream down"))
+
+        counters = sweep_schedule_confirmations()
+
+        assert counters == {"checked": 1, "cleared": 0, "unreadable": 1}
+        master.refresh_from_db()
+        assert master.schedule_confirmed_at is not None
+
+    def test_unconfirmed_masters_are_not_even_read(
+        self, tenant: Tenant, master: CatalogMaster, ayla
+    ) -> None:
+        """Цена обхода — по подтверждённым, а не по всему пулу.
+
+        У неподтверждённого сбрасывать нечего, и HTTP-вызов на него был бы
+        платой ни за что. Сегодня это разница между девятью строками и
+        тридцатью одной.
+        """
+
+        from apps.catalog.tasks import sweep_schedule_confirmations
+
+        for i in range(4):
+            CatalogMaster.all_tenants.create(
+                tenant=tenant,
+                external_id=300 + i,
+                external_updated_at=dt.datetime.now(tz=dt.timezone.utc),
+                name=f"Неподтверждённая {i}",
+                ayla_user_id=uuid.uuid4(),
+            )
+        client = ayla(wire_week())
+
+        counters = sweep_schedule_confirmations()
+
+        assert counters == {"checked": 0, "cleared": 0, "unreadable": 0}
+        assert client.calls == 0, "неподтверждённых обход не читает вовсе"
