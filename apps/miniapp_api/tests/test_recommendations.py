@@ -12,6 +12,7 @@ import hashlib
 import hmac
 import json
 import time as time_module
+import uuid
 from unittest.mock import patch
 from urllib.parse import urlencode
 
@@ -86,6 +87,27 @@ def bot_user(tenant: Tenant) -> BotUser:
     )
 
 
+def _decision_body(*ayla_ids: str) -> dict:
+    """Решение резолвера в форме, которую отдаёт Ayla."""
+    return {
+        "data": {
+            "decision_id": "d-1",
+            "request_id": "r-1",
+            "resolver_spec_version": "1.0.0",
+            "ordered": [
+                {
+                    "candidate": {"kind": "PROVIDER", "id": ayla_id},
+                    "rank": i + 1,
+                    "tier": 1,
+                    "reason_codes": ["MATCH_SERVICE_EXACT"],
+                    "evidence": [],
+                }
+                for i, ayla_id in enumerate(ayla_ids)
+            ],
+        }
+    }
+
+
 # ─── TestViewIntegration ────────────────────────────────────────────────
 
 
@@ -131,6 +153,114 @@ class TestRecommendationsView:
             "goal": "relax",
             "tenant_history": [],
         }
+
+    def test_provider_keys_are_translated_to_mirror_ids(
+        self, client: Client, bot_user: BotUser, tenant: Tenant
+    ):
+        """Ключ Ayla заменяется ключом зеркала — иначе полка не узнает никого.
+
+        Полка живёт в ключах зеркала и ключа Ayla не знает: поля у неё
+        нет. Перевести может только этот слой (DRF-1598, OD §81).
+        """
+        from django.utils import timezone
+
+        from apps.catalog.models import CatalogMaster
+
+        ayla_id = uuid.uuid4()
+        master = CatalogMaster.all_tenants.create(
+            tenant=tenant,
+            external_updated_at=timezone.now(),
+            external_id=970001,
+            name="Мастер зеркала",
+            specialization="Парикмахер",
+            is_active=True,
+            invite_status=CatalogMaster.InviteStatus.ACCEPTED,
+            ayla_user_id=ayla_id,
+        )
+        ayla_response = _decision_body(str(ayla_id))
+
+        with patch(
+            "apps.integrations.ayla.recommendations_client.fetch_recommendations",
+            return_value=ayla_response,
+        ):
+            resp = client.post(
+                self._url(),
+                content_type="application/json",
+                data="{}",
+                HTTP_AUTHORIZATION=_init_data_header(bot_user.channel_user_id),
+            )
+
+        assert resp.status_code == 200
+        ordered = resp.json()["data"]["ordered"]
+        assert ordered[0]["candidate"]["id"] == str(master.id)
+        assert ordered[0]["candidate"]["kind"] == "PROVIDER"
+
+    def test_an_untranslatable_candidate_is_not_dropped(
+        self, client: Client, bot_user: BotUser, tenant: Tenant
+    ):
+        """Требование брифа: непустой `ordered` не превращается в пустой молча.
+
+        Отбрось мы непереводимого здесь — полка получила бы пустой подбор
+        при **непустом** решении и назвала бы это состояние `OK`:
+        её классификатор смотрит на `ordered`, а он бы уже опустел.
+        Молча пустая полка под именем «всё хорошо».
+
+        Сегодня это не проявилось бы: подтверждённых связей ноль (§76),
+        полка пуста и так. Вылезло бы через недели после разметки,
+        с готовым ложным объяснением «наверное, опять разметка».
+
+        Поэтому кандидат доезжает **как есть**, с ключом Ayla, и полка
+        сама поднимает `UNRENDERABLE_CANDIDATES` — имя у этого состояния
+        уже есть, второго классификатора мы не заводим.
+        """
+        stranger = str(uuid.uuid4())
+
+        with patch(
+            "apps.integrations.ayla.recommendations_client.fetch_recommendations",
+            return_value=_decision_body(stranger),
+        ):
+            resp = client.post(
+                self._url(),
+                content_type="application/json",
+                data="{}",
+                HTTP_AUTHORIZATION=_init_data_header(bot_user.channel_user_id),
+            )
+
+        assert resp.status_code == 200
+        ordered = resp.json()["data"]["ordered"]
+        assert len(ordered) == 1, "кандидат обязан доехать, а не исчезнуть"
+        assert ordered[0]["candidate"]["id"] == stranger
+
+    def test_mirror_failure_is_unavailability_not_a_silent_pass_through(
+        self, client: Client, bot_user: BotUser
+    ):
+        """Своя авария называется своим именем.
+
+        Пропусти мы кандидатов непереведёнными при упавшем чтении зеркала,
+        полка сказала бы «нам прислали то, чего мы не умеем» — то есть
+        обвинила бы Ayla в НАШЕЙ аварии, и чинить пошли бы не там.
+        """
+        from django.db import DatabaseError
+
+        with (
+            patch(
+                "apps.integrations.ayla.recommendations_client.fetch_recommendations",
+                return_value=_decision_body(str(uuid.uuid4())),
+            ),
+            patch(
+                "apps.marketplace.resolver_keys.translate_provider_keys",
+                side_effect=DatabaseError("mirror is down"),
+            ),
+        ):
+            resp = client.post(
+                self._url(),
+                content_type="application/json",
+                data="{}",
+                HTTP_AUTHORIZATION=_init_data_header(bot_user.channel_user_id),
+            )
+
+        assert resp.status_code == 503
+        assert resp.json()["error"] == "mirror_unavailable"
 
     def test_ayla_5xx_graceful(self, client: Client, bot_user: BotUser):
         """Ayla outage → 502 ayla_unavailable (frontend retries)."""

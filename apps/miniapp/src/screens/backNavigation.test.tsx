@@ -53,7 +53,14 @@ vi.mock("../lib/customer-booking", async (importOriginal) => {
 
 vi.mock("../lib/food-scanner", async (importOriginal) => {
   const original = await importOriginal<typeof import("../lib/food-scanner")>();
-  return { ...original, fetchHealthFlags: vi.fn(), logMeal: vi.fn() };
+  return {
+    ...original,
+    fetchHealthFlags: vi.fn(),
+    logMeal: vi.fn(),
+    // DRF-1564 — согласие спрашивается у сервера, а не у браузера.
+    fetchConsentAt: vi.fn(),
+    grantConsent: vi.fn(),
+  };
 });
 
 vi.mock("../lib/customer-goals", async (importOriginal) => {
@@ -72,7 +79,12 @@ vi.mock("../lib/customer-goals", async (importOriginal) => {
 
 import { fetchMyBookings, fetchServices } from "../lib/api";
 import { getCatalogBrowse, getCustomerSlots } from "../lib/customer-booking";
-import { fetchHealthFlags, type ScanResponse } from "../lib/food-scanner";
+import {
+  fetchConsentAt,
+  fetchHealthFlags,
+  grantConsent,
+  type ScanResponse,
+} from "../lib/food-scanner";
 import { onBackButton, setBackButton } from "../lib/max-sdk";
 import { resetBooking, setMaster, setService } from "../state/booking";
 import { CatalogScreen } from "./CatalogScreen";
@@ -87,6 +99,8 @@ import { FoodScannerResultScreen } from "./FoodScannerResultScreen";
 const mockedBrowse = vi.mocked(getCatalogBrowse);
 const mockedSlots = vi.mocked(getCustomerSlots);
 const mockedFlags = vi.mocked(fetchHealthFlags);
+const mockedConsent = vi.mocked(fetchConsentAt);
+const mockedGrant = vi.mocked(grantConsent);
 const mockedServices = vi.mocked(fetchServices);
 const mockedBookings = vi.mocked(fetchMyBookings);
 const mockedOnBack = vi.mocked(onBackButton);
@@ -275,7 +289,10 @@ describe("DRF-1493 · вложенный экран: возврат есть и 
 describe("DRF-1493 · внутренняя часть экрана не объявляет возврат второй раз", () => {
   it("гейт согласия не оставляет экран без аппаратной кнопки", async () => {
     const user = userEvent.setup();
-    window.localStorage.clear();
+    // Согласия нет — и это ОТВЕТ сервера, а не пустой localStorage:
+    // источником правды с DRF-1564 является колонка, а не браузер.
+    mockedConsent.mockResolvedValue(null);
+    mockedGrant.mockResolvedValue("2026-09-08T12:00:00+00:00");
     renderDeepLink(
       "/customer/food-scanner/capture",
       <FoodScannerCaptureScreen />,

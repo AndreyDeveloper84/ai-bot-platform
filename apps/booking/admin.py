@@ -25,7 +25,7 @@ event-emission side effects.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, ClassVar, cast
 
 from django.contrib import admin, messages
 from django.core.exceptions import PermissionDenied
@@ -33,6 +33,7 @@ from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import path, reverse
 from django.utils.html import format_html
 
+from apps.adminconsole.theme import AylaAdminMedia, BadgeMap, badge
 from apps.booking.models import BookingReminder, BookingRequest
 from apps.booking.services.admin_cancel import AdminCancelError, cancel_booking_from_admin
 from apps.booking.services.transitions import InvalidBookingTransition
@@ -51,14 +52,14 @@ _CANCELLABLE_STATUSES = frozenset(
 
 
 @admin.register(BookingRequest)
-class BookingRequestAdmin(admin.ModelAdmin):
+class BookingRequestAdmin(AylaAdminMedia, admin.ModelAdmin):
     list_display = (
         "client_name",
         "service_name",
         "master_name",
         "visit_at",
-        "status",
-        "source",
+        "visit_state",
+        "origin",
         "tenant",
         "cancel_link",
     )
@@ -70,9 +71,144 @@ class BookingRequestAdmin(admin.ModelAdmin):
         ("visit_at", admin.DateFieldListFilter),
     )
     search_fields = ("client_name", "service_name", "comment")
+    search_help_text = (
+        "Ищет по имени клиента, названию услуги и комментарию. "
+        "По телефону не ищет и не будет: телефон клиента — не поисковый ключ."
+    )
+    empty_value_display = "нет данных"
     readonly_fields = tuple(f.name for f in BookingRequest._meta.fields)
     date_hierarchy = "visit_at"
     ordering = ("-created_at",)
+    fieldsets = (
+        (
+            "Визит",
+            {
+                "fields": (
+                    "visit_at",
+                    "duration_min",
+                    "service_name",
+                    "master_name",
+                    "category_name",
+                    "status",
+                ),
+                "description": (
+                    "Состояние визита показано, но не правится — и не будет: "
+                    "закрытие визитов и смена статусов идут только через "
+                    "машину состояний. Единственное разрешённое отсюда "
+                    "действие — «Отменить…» в списке, и оно зовёт тот же "
+                    "сервис, что и приложение."
+                ),
+            },
+        ),
+        (
+            "Клиент",
+            {"fields": ("client_name", "bot_user", "comment")},
+        ),
+        (
+            "Персональные данные клиента",
+            {
+                "classes": ("collapse",),
+                "fields": ("client_phone",),
+                "description": (
+                    "Раздел свёрнут нарочно: телефон нужен редко, а "
+                    "открытый на экране он попадает в скриншот и в кеш "
+                    "браузера. Поиск по телефону здесь не работает."
+                ),
+            },
+        ),
+        (
+            "Откуда пришла запись",
+            {"fields": ("source", "booking_source", "is_processed")},
+        ),
+        (
+            "Отмена и перенос",
+            {
+                "fields": ("cancel_requested_at", "reschedule_candidate", "rescheduled_from"),
+                "description": (
+                    "Пустые поля означают, что отмены и переноса не было, а не что их «ноль»."
+                ),
+            },
+        ),
+        (
+            "Завершение визита",
+            {
+                "fields": ("completed_at", "completed_by"),
+                "description": (
+                    "Проставляет периодическая задача, когда визит "
+                    "закончился. Руками отсюда визит не закрывают."
+                ),
+            },
+        ),
+        (
+            "Отзыв клиента",
+            {
+                "fields": (
+                    "rating",
+                    "feedback_comment",
+                    "feedback_at",
+                    "feedback_prompt_sent_at",
+                ),
+            },
+        ),
+        (
+            "Служебное: тарификация и атрибуция",
+            {
+                "classes": ("collapse",),
+                "fields": (
+                    "billable",
+                    "billing_reason",
+                    "ai_assist_score",
+                    "commercial_identity_snapshot",
+                    "attribution_metadata",
+                ),
+            },
+        ),
+        (
+            "Служебное: связи и отметки",
+            {
+                "classes": ("collapse",),
+                "fields": (
+                    "id",
+                    "tenant",
+                    "service",
+                    "master",
+                    "conversation",
+                    "original_booking_event",
+                    "created_at",
+                ),
+            },
+        ),
+    )
+
+    #: Состояние визита словами — и код рядом.
+    #:
+    #: Оба имени обязательны: подпись читает человек, кодом
+    #: (``confirmed``, ``cancel_requested``) визит называется в задачах,
+    #: логах и в разговоре с нами.
+    _STATE_BADGES: ClassVar[BadgeMap] = {
+        BookingRequest.Status.CONFIRMED: ("ok", "Подтверждена"),
+        BookingRequest.Status.CANCEL_REQUESTED: ("wait", "Клиент попросил отменить"),
+        BookingRequest.Status.RESCHEDULE_REQUESTED: ("wait", "Клиент попросил перенести"),
+        BookingRequest.Status.CANCELLED: ("stop", "Отменена"),
+        BookingRequest.Status.RESCHEDULED: ("off", "Перенесена, заменена новой"),
+    }
+
+    _ORIGIN_BADGES: ClassVar[BadgeMap] = {
+        "wizard": ("off", "Форма на сайте"),
+        "bot": ("ok", "Диалог с ботом"),
+        "yclients_admin": ("off", "Салон завёл в YClients"),
+        "import": ("off", "Массовый импорт"),
+    }
+
+    @admin.display(description="Состояние визита", ordering="status")
+    def visit_state(self, obj: BookingRequest):  # type: ignore[no-untyped-def]
+        tone, label = self._STATE_BADGES.get(obj.status, ("off", "Неизвестное состояние"))
+        return badge(tone, label, obj.status)
+
+    @admin.display(description="Откуда запись", ordering="source")
+    def origin(self, obj: BookingRequest):  # type: ignore[no-untyped-def]
+        tone, label = self._ORIGIN_BADGES.get(obj.source, ("off", "Неизвестный источник"))
+        return badge(tone, label, obj.source)
 
     def has_add_permission(self, request) -> bool:  # type: ignore[no-untyped-def]
         return False
@@ -145,11 +281,11 @@ class BookingRequestAdmin(admin.ModelAdmin):
 
 
 @admin.register(BookingReminder)
-class BookingReminderAdmin(admin.ModelAdmin):
+class BookingReminderAdmin(AylaAdminMedia, admin.ModelAdmin):
     list_display = (
         "yclients_record_id",
-        "kind",
-        "status",
+        "reminder_kind",
+        "reminder_state",
         "visit_at",
         "scheduled_at",
         "sent_at",
@@ -159,8 +295,65 @@ class BookingReminderAdmin(admin.ModelAdmin):
     )
     list_filter = ("status", "kind", "tenant")
     search_fields = ("yclients_record_id", "master_name", "service_name")
+    search_help_text = "Ищет по номеру записи в YClients, имени мастера и названию услуги."
+    empty_value_display = "нет данных"
     readonly_fields = tuple(f.name for f in BookingReminder._meta.fields)
     ordering = ("scheduled_at",)
+    fieldsets = (
+        (
+            "Напоминание",
+            {"fields": ("kind", "status", "scheduled_at", "sent_at", "replied_at")},
+        ),
+        (
+            "О каком визите",
+            {"fields": ("visit_at", "master_name", "service_name", "booking_request")},
+        ),
+        (
+            "Кому",
+            {"fields": ("bot_user", "chat_id")},
+        ),
+        (
+            "Служебное",
+            {
+                "classes": ("collapse",),
+                "fields": (
+                    "id",
+                    "tenant",
+                    "yclients_record_id",
+                    "ayla_appointment_id",
+                    "created_at",
+                ),
+            },
+        ),
+    )
+
+    _KIND_BADGES: ClassVar[BadgeMap] = {
+        BookingReminder.Kind.DAY_BEFORE: ("off", "За сутки"),
+        BookingReminder.Kind.TWO_HOURS: ("off", "За два часа"),
+    }
+
+    #: Состояние напоминания словами — и код рядом.
+    _STATE_BADGES: ClassVar[BadgeMap] = {
+        BookingReminder.Status.PENDING: ("wait", "Ждёт отправки"),
+        BookingReminder.Status.SENT_NO_REPLY: ("wait", "Отправлено, ответа нет"),
+        BookingReminder.Status.SENT: ("ok", "Отправлено"),
+        BookingReminder.Status.CONFIRMED: ("ok", "Клиент подтвердил"),
+        BookingReminder.Status.RESCHEDULE_REQUESTED: ("wait", "Клиент просит перенести"),
+        BookingReminder.Status.CANCELLED: ("stop", "Отменено"),
+        BookingReminder.Status.ESCALATED: ("stop", "Ушло к оператору"),
+        BookingReminder.Status.FAILED: ("stop", "Ошибка отправки"),
+        BookingReminder.Status.STALE_DROPPED: ("off", "Снято: запись изменилась"),
+    }
+
+    @admin.display(description="Вид напоминания", ordering="kind")
+    def reminder_kind(self, obj: BookingReminder):  # type: ignore[no-untyped-def]
+        tone, label = self._KIND_BADGES.get(obj.kind, ("off", "Неизвестный вид"))
+        return badge(tone, label, obj.kind)
+
+    @admin.display(description="Состояние", ordering="status")
+    def reminder_state(self, obj: BookingReminder):  # type: ignore[no-untyped-def]
+        tone, label = self._STATE_BADGES.get(obj.status, ("off", "Неизвестное состояние"))
+        return badge(tone, label, obj.status)
 
     def has_add_permission(self, request) -> bool:  # type: ignore[no-untyped-def]
         return False

@@ -43,6 +43,7 @@ repos:
             uv\.lock|
             .*\.lock|
             tests/fixtures/.*|
+            apps/planning_rules/data/.*|
             legacy_maxbot/.*|
             legacy_formulatela_mcp/.*|
             legacy_notifications/.*

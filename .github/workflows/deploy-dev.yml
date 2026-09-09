@@ -214,6 +214,59 @@ jobs:
               -f docker-compose.yml -f docker-compose.staging.yml \
               -f docker-compose.staging.local.yml \
               -p ayla-bot-staging run --rm web python manage.py migrate --noinput
+            # DRF-1610 — collectstatic. Шага не было НИКОГДА: \`git grep
+            # collectstatic origin/dev -- .github\` не находил ничего, и
+            # админка бота на пилоте с первого дня отдавалась без единого
+            # стиля. Замер 09.09.2026: \`GET https://api-dev.gobeauty.site/
+            # static/admin/css/base.css\` → 404 nginx/1.18.0, а внутри
+            # \`ayla-bot-staging-web-1\` \`ls /app/staticfiles\` → No such file
+            # or directory.
+            #
+            # Виноват был не nginx: vhost настроен верно (\`location /static/\`
+            # → alias \`{DEPLOY_PATH}/staticfiles/\`), а
+            # \`docker-compose.staging.yml\` монтирует \`./:/app\`, то есть
+            # \`/app/staticfiles\` контейнера И ЕСТЬ \`{DEPLOY_PATH}/staticfiles\`
+            # хоста. Каталога просто не существовало, потому что команду,
+            # которая его создаёт, не запускал никто. Отдать статику
+            # приложением тоже нечем: \`whitenoise\` в проекте отсутствует.
+            #
+            # Той же формой, что и \`migrate\` выше, и по той же причине:
+            # \`run --rm web\` берёт СВЕЖЕСОБРАННЫЙ образ, поэтому статика на
+            # диске и код в контейнерах не разъезжаются. Порядок — после
+            # миграций и до \`up -d\`: файлы кладутся на смонтированный хостовый
+            # каталог, работающие контейнеры для этого не нужны.
+            sudo docker compose --env-file .env.staging \
+              -f docker-compose.yml -f docker-compose.staging.yml \
+              -f docker-compose.staging.local.yml \
+              -p ayla-bot-staging run --rm web python manage.py collectstatic --noinput
+            # Проверка ИСХОДА, а не кода возврата — DRF-1605 ровно про этот
+            # класс дефекта. \`collectstatic --noinput\` завершается нулём и при
+            # «0 static files copied»: неверный STATIC_ROOT, приложение без
+            # \`static/\`, пустой поиск — всё это молча зелёный шаг и
+            # по-прежнему голая админка. Молчаливо успешный шаг, ничего не
+            # собравший, неотличим от работающего.
+            #
+            # Смотрим по ХОСТУ, а не внутри контейнера: nginx читает
+            # \`{DEPLOY_PATH}/staticfiles/\` и никакого \`/app\` не знает.
+            # Каталог смонтирован, так что сегодня это один и тот же диск —
+            # но доказательство должно смотреть на тот путь, который отдают
+            # людям, а не на его зеркало.
+            if [ ! -d staticfiles ]; then
+              echo '::error::collectstatic отработал, но каталога staticfiles/ на хосте нет — nginx отдаст 404 на весь /static/'
+              exit 1
+            fi
+            if [ -z \"\$(find staticfiles -type f -print -quit)\" ]; then
+              echo '::error::staticfiles/ существует, но пуст — шаг зелёный, админка голая. Смотреть STATIC_ROOT (config/settings/base.py) и состав INSTALLED_APPS'
+              exit 1
+            fi
+            # Именной файл, а не только «непусто»: \`admin/css/base.css\` —
+            # ровно тот, на котором 09.09 приехал 404. Непустым каталог могли
+            # бы сделать и чужие остатки от ручной починки.
+            if [ ! -s staticfiles/admin/css/base.css ]; then
+              echo '::error::staticfiles/ непуст, но admin/css/base.css нет — django.contrib.admin не собрался, админка останется без стилей'
+              exit 1
+            fi
+            echo \"::notice::collectstatic: \$(find staticfiles -type f | wc -l) файлов в staticfiles/\"
             sudo docker compose --env-file .env.staging \
               -f docker-compose.yml -f docker-compose.staging.yml \
               -f docker-compose.staging.local.yml \

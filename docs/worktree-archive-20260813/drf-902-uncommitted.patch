@@ -1,0 +1,141 @@
+diff --git a/apps/skills/booking/skill.py b/apps/skills/booking/skill.py
+index 7078400..4c3d916 100644
+--- a/apps/skills/booking/skill.py
++++ b/apps/skills/booking/skill.py
+@@ -105,7 +105,6 @@ from apps.skills.booking.tools import (
+     SHOW_SLOTS_TOOL_SPEC,
+     BookingToolResult,
+     PendingPreview,
+-    _as_uuid,
+     _booking_via_ayla,
+     _coerce_id,
+     _format_confirm_preview,
+@@ -922,40 +921,25 @@ def _service_requires_health_check(tenant: Any, service_id: int | str) -> bool:
+     synced yet) we DEFAULT to ``False`` — better UX to attempt the booking
+     than to dead-end every flow.
+ 
+-    **flag-ON (Ayla REST path):** service ids are canonical Ayla UUIDs, so
+-    we ground the flag against the mirror's ``ayla_service_id`` column. We
+-    FAIL CLOSED — return ``True`` so the confirm gate routes to a human
+-    (``booking_health_check_required``) — when EITHER the id isn't a UUID
+-    OR no mirror row carries that ``ayla_service_id`` yet (the UUID column
+-    isn't guaranteed back-filled for every live service). Only an explicit
+-    ``requires_health_check=False`` on a matched row lets the booking
+-    through. We never fail OPEN on a potentially gated service.
++    **flag-ON (Ayla REST path): FAIL CLOSED unconditionally (#1034 / #1121).**
++    The correct source is the RESOLVED (master×service) requires-health-check
++    that S3B PR-2 populates on the catalog mirror (``CatalogMaster`` /
++    ``MasterService``). Until that source exists we must NOT trust the
++    service-level ``CatalogService.requires_health_check``: a service flagged
++    ``False`` can still need screening for a specific master, so trusting it is a
++    fail-OPEN risk (#1121). So every Ayla-path booking routes to a human health
++    check. Swap this stub for the ``resolved_requires_health_check`` read the
++    moment S3B PR-2 lands the resolved column.
+     """
++    if _booking_via_ayla():
++        # No resolved (master×service) source yet → fail closed. See #1034.
++        return True
++
+     try:
+         from apps.catalog.models import CatalogService
+     except ImportError:  # pragma: no cover — catalog always available
+-        # No catalog to ground against. flag-ON fails closed; flag-OFF
+-        # keeps the legacy lenient default.
+-        return _booking_via_ayla()
+-
+-    if _booking_via_ayla():
+-        ayla_uuid = _as_uuid(service_id)
+-        if ayla_uuid is None:
+-            # Non-UUID service id under flag-ON — nothing to ground. Fail closed.
+-            return True
+-        row = (
+-            CatalogService.all_tenants.filter(
+-                tenant=tenant,
+-                ayla_service_id=ayla_uuid,
+-            )
+-            .only("requires_health_check")
+-            .first()
+-        )
+-        # Mirror miss → fail-closed backstop: ayla_service_id may not be
+-        # back-filled for this service yet (see coverage management command).
+-        if row is None:
+-            return True
+-        return bool(row.requires_health_check)
++        # No catalog to ground the legacy YClients path against → lenient default.
++        return False
+ 
+     row = (
+         CatalogService.all_tenants.filter(
+diff --git a/apps/skills/booking/tests/test_skill.py b/apps/skills/booking/tests/test_skill.py
+index 0c14a69..7a44daa 100644
+--- a/apps/skills/booking/tests/test_skill.py
++++ b/apps/skills/booking/tests/test_skill.py
+@@ -1746,11 +1746,12 @@ class TestE0RegressionGuards:
+ class TestServiceRequiresHealthCheck:
+     """Direct coverage for ``_service_requires_health_check``.
+ 
+-    PR-B grounding: under ``BOOKING_VIA_AYLA_REST`` the helper grounds the
+-    flag against the mirror's ``ayla_service_id`` (UUID) column. A matched
+-    ``requires_health_check=False`` row lets the booking through; a UUID
+-    miss OR a non-UUID id FAILS CLOSED (``True`` → human handoff) rather
+-    than fail OPEN. The flag-OFF (int ``external_id``) path is unchanged.
++    #1034 / #1121: under ``BOOKING_VIA_AYLA_REST`` the helper FAILS CLOSED
++    unconditionally (``True`` → human handoff). The resolved (master×service)
++    health-check source lands with S3B PR-2; until then the service-level
++    ``CatalogService.requires_health_check`` is NOT trusted (a service-level
++    ``False`` is a fail-OPEN risk for a specific master). The flag-OFF (int
++    ``external_id``) path is unchanged (lenient default).
+     """
+ 
+     _AYLA_UUID = "11111111-1111-1111-1111-111111111111"
+@@ -1771,7 +1772,7 @@ class TestServiceRequiresHealthCheck:
+                 ayla_service_id=ayla_service_id,
+             )
+ 
+-    def test_flag_on_grounded_gated_returns_true(self, tenant: Tenant) -> None:
++    def test_flag_on_gated_row_fails_closed(self, tenant: Tenant) -> None:
+         from apps.skills.booking.skill import _service_requires_health_check
+ 
+         self._make_row(tenant, ayla_service_id=self._AYLA_UUID, gated=True, external_id=22)
+@@ -1779,17 +1780,18 @@ class TestServiceRequiresHealthCheck:
+             with tenant_scope(tenant):
+                 assert _service_requires_health_check(tenant, self._AYLA_UUID) is True
+ 
+-    def test_flag_on_grounded_not_gated_passes(self, tenant: Tenant) -> None:
+-        # The crux of PR-B: a matched, NOT-gated row must let the booking through.
++    def test_flag_on_not_gated_row_still_fails_closed(self, tenant: Tenant) -> None:
++        # #1034 fail-closed: even a service-level NOT-gated row must NOT let the
++        # booking through under flag-ON — the resolved (master×service) source
++        # (S3B PR-2) is the only trusted one. Guards against a fail-OPEN regress.
+         from apps.skills.booking.skill import _service_requires_health_check
+ 
+         self._make_row(tenant, ayla_service_id=self._AYLA_UUID, gated=False, external_id=22)
+         with override_settings(BOOKING_VIA_AYLA_REST=True):
+             with tenant_scope(tenant):
+-                assert _service_requires_health_check(tenant, self._AYLA_UUID) is False
++                assert _service_requires_health_check(tenant, self._AYLA_UUID) is True
+ 
+-    def test_flag_on_uuid_miss_fails_closed(self, tenant: Tenant) -> None:
+-        # Valid UUID but no mirror row carries that ayla_service_id yet.
++    def test_flag_on_no_row_fails_closed(self, tenant: Tenant) -> None:
+         from apps.skills.booking.skill import _service_requires_health_check
+ 
+         with override_settings(BOOKING_VIA_AYLA_REST=True):
+@@ -1799,6 +1801,17 @@ class TestServiceRequiresHealthCheck:
+                     is True
+                 )
+ 
++    def test_flag_off_grounds_against_external_id(self, tenant: Tenant) -> None:
++        # Legacy YClients path unchanged: reads service-level requires_health_check
++        # by int external_id; missing row → lenient default False.
++        from apps.skills.booking.skill import _service_requires_health_check
++
++        self._make_row(tenant, ayla_service_id=self._AYLA_UUID, gated=True, external_id=22)
++        with override_settings(BOOKING_VIA_AYLA_REST=False):
++            with tenant_scope(tenant):
++                assert _service_requires_health_check(tenant, 22) is True
++                assert _service_requires_health_check(tenant, 999) is False  # miss → lenient
++
+     def test_flag_on_non_uuid_fails_closed(self, tenant: Tenant) -> None:
+         # A non-UUID id (e.g. a stray legacy int) can't be grounded → fail closed.
+         from apps.skills.booking.skill import _service_requires_health_check
