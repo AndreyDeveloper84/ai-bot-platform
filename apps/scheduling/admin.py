@@ -1,12 +1,9 @@
 """Админка расписания — экраны, которые салон правит сам.
 
 Полный CRUD у рабочих часов, исключений, блокировок и настроек сетки.
-У заявок на изменение расписания (``ScheduleChangeRequest``) — см.
-предупреждение в докстринге :class:`ScheduleChangeRequestAdmin`.
-
-Эта правка касается ТОЛЬКО того, как экран выглядит и как на нём
-названы вещи: подписи, группировка полей, подсказка поиска, бейджи
-состояний. Ни права, ни действия, ни набор правимых полей не тронуты.
+Заявки на изменение расписания (``ScheduleChangeRequest``) — строго на
+чтение: решение принимает владелица салона в переписке с ботом (Q-M6),
+а не через форму админки. См. :class:`ScheduleChangeRequestAdmin`.
 """
 
 from __future__ import annotations
@@ -192,20 +189,35 @@ class TimeBlockAdmin(_ScheduleAdminBase):
 
 @admin.register(ScheduleChangeRequest)
 class ScheduleChangeRequestAdmin(_ScheduleAdminBase):
-    """Заявки мастера на изменение расписания.
+    """Заявки мастера на изменение расписания — только на чтение (DRF-1607).
 
-    ВНИМАНИЕ, находка этой задачи, а не её работа. Докстринг модуля до
-    сегодня утверждал, что экран «read-only for ScheduleChangeRequest
-    (resolution is owner-driven via bot DM per Q-M6, not via admin
-    form)». Код говорит другое: ``readonly_fields`` содержит ровно
-    ``requested_change`` и ``created_at``, а ``status``,
-    ``resolution_note`` и ``resolved_at`` в карточке правятся руками.
+    Разрешение заявки — решение владелицы салона, и приходит оно из
+    переписки с ботом (Q-M6): её нажатие меняет строку и применяет диф
+    к :class:`~apps.scheduling.models.WorkingHours` /
+    :class:`~apps.scheduling.models.ScheduleException` одной
+    транзакцией. Правка ``status`` руками в форме проходит мимо этого
+    пути молча и не оставляет следа, который оставил бы диалог.
 
-    Здесь это НЕ чинится и НЕ делается заметнее: группировки полей у
-    этого экрана нет нарочно — понятный раздел «Решение» с выпадающим
-    списком состояний приглашал бы нажать там, где решение обязано
-    приходить из переписки с владельцем. Бейдж состояния добавлен
-    только в СПИСОК: список читают, в нём ничего не правится.
+    Тот же класс запрета, что у визитов (DRF-1498,
+    :mod:`apps.booking.admin`), и исполнен он так же **механически**:
+    ``readonly_fields`` собирается из ``_meta.fields``, а не
+    перечисляется руками — новая колонка попадает под запрет сама, а не
+    ждёт, пока кто-то вспомнит дописать её в список. Добавление и
+    удаление закрыты правами модели.
+
+    Обещание read-only стояло в докстринге модуля с самого начала, но
+    держал его только текст: ``readonly_fields`` содержал ровно
+    ``requested_change`` и ``created_at``, то есть ``status``,
+    ``resolution_note`` и ``resolved_at`` правились руками. Сторож
+    теперь не в комментарии, а в
+    ``apps/scheduling/tests/test_admin_change_request_readonly.py``.
+
+    Группировки полей (``fieldsets``) у экрана нет нарочно, и она не
+    появляется вместе с запретом: понятный раздел «Решение» с
+    выпадающим списком состояний приглашает нажать там, где нажимать
+    нельзя. Сначала запрет, удобство — отдельным решением. Бейдж
+    состояния — только в СПИСКЕ: список читают, в нём ничего не
+    правится.
     """
 
     list_display = (
@@ -221,7 +233,16 @@ class ScheduleChangeRequestAdmin(_ScheduleAdminBase):
     search_help_text = "Ищет по имени мастера и тексту причины."
     ordering = ("-created_at",)
     raw_id_fields = ("master", "resolved_by")
-    readonly_fields = ("requested_change", "created_at")
+    #: Механически, из ``_meta``: перечень руками отстаёт от модели.
+    readonly_fields = tuple(f.name for f in ScheduleChangeRequest._meta.fields)
+
+    def has_add_permission(self, request) -> bool:  # type: ignore[no-untyped-def]
+        """Заявку заводит мастер из своего приложения, не оператор."""
+        return False
+
+    def has_delete_permission(self, request, obj=None) -> bool:  # type: ignore[no-untyped-def]
+        """Удаление стирает след решения — а он и есть предмет заявки."""
+        return False
 
     #: Состояние заявки словами — и код рядом.
     _STATE_BADGES: ClassVar[BadgeMap] = {
