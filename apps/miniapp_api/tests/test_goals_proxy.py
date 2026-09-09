@@ -36,8 +36,11 @@ from apps.tenancy.models import Tenant
 
 BOT_TOKEN = "test-bot-token-goals"  # noqa: S105 — test fixture  # pragma: allowlist secret
 
+#: Документ состояния — та форма, которую Ayla кладёт ВНУТРЬ конверта.
+#: ``version: 2`` и ключ ``next`` выписаны из `goals/decision_context.py:270-278`
+#: каталога, а не из памяти: раньше здесь стояла ``version: 1`` без ``next``.
 _DOC = {
-    "version": 1,
+    "version": 2,
     "known": {"goal": None},
     "missing": [{"kind": "goal", "prompt": "Что хочешь изменить?"}],
     "suggestions": [{"key": "relax", "label": "Расслабиться и восстановиться"}],
@@ -46,7 +49,14 @@ _DOC = {
         {"id": "formulate_own", "label": "Сформулирую своими словами"},
         {"id": "need_guidance", "label": "Не понимаю, чего хочу"},
     ],
+    "next": None,
 }
+
+#: То, что реально приходит ПО ПРОВОДУ от Ayla: документ в конверте
+#: (`users/response.py::success_response`). Подделки HTTP обязаны отдавать
+#: именно это — подделка, говорящая на другом языке, чем сервер, и есть
+#: причина, по которой дефект конверта дожил до пилота.
+_WIRE = {"data": _DOC}
 
 
 def _sign(params: dict[str, str], *, token: str = BOT_TOKEN) -> str:
@@ -123,7 +133,10 @@ class TestDecisionContextView:
             )
 
         assert resp.status_code == 200
-        assert resp.json() == _DOC
+        # SPA разворачивает конверт сама (`customer-goals.ts:146-151`),
+        # поэтому ручка обязана его вернуть — даже теперь, когда клиент
+        # целей отдаёт документ уже без конверта.
+        assert resp.json() == {"data": _DOC}
         assert captured["external_user_id"] == f"bot:max:{bot_user.channel_user_id}"
 
     def test_ayla_unavailable_returns_502(self, client: Client, bot_user: BotUser):
@@ -149,6 +162,56 @@ class TestDecisionContextView:
             )
         assert resp.status_code == 503
         assert resp.json()["error"] == "not_configured"
+
+    def test_the_spa_envelope_is_a_contract_not_a_leftover(self, client: Client, bot_user: BotUser):
+        """Сторож обратной обёртки в ручке.
+
+        Обёртка ``{"data": doc}`` выглядит бессмысленной ровно настолько,
+        насколько она нужна: клиент целей снял конверт Ayla, а Mini App
+        разворачивает свой сама (`customer-goals.ts:122, 146-151`). Без
+        этого теста следующий читатель снимет её как «лишнюю» и погасит
+        живой экран целей, ничего не уронив в проверках.
+
+        Комментарий рядом с кодом обязателен, но комментарий не сторож.
+        """
+        with patch(
+            "apps.integrations.ayla.goals_client.fetch_decision_context",
+            side_effect=lambda *, external_user_id: _DOC,
+        ):
+            resp = client.get(
+                self._url(),
+                HTTP_AUTHORIZATION=_init_data_header(bot_user.channel_user_id),
+            )
+
+        body = resp.json()
+        # Положительная стража прежде отрицания: конверт есть И внутри
+        # лежит настоящий документ. Один лишь ключ `data` зеленел бы и на
+        # `{"data": {}}`, то есть на пустом экране целей.
+        assert body["data"]["version"] == 2
+        assert body["data"]["intents"], "внутри конверта обязан лежать документ, а не пустышка"
+        assert "known" not in body, "документ не должен доезжать до SPA голым: она читает env.data"
+
+    def test_a_missing_envelope_reaches_the_screen_as_a_refusal(
+        self, client: Client, bot_user: BotUser
+    ):
+        """Отсутствие конверта обязано доезжать отказом, а не пустотой.
+
+        Дефект, который мы чиним, и жил ровно потому, что негодная форма
+        проезжала дальше молча и читалась как «цели нет». Здесь проверено,
+        что имя отказа (`malformed: no data envelope`) доходит до
+        потребителя ОТКАЗОМ — 502, — а не документом без целей.
+        """
+        with patch(
+            "apps.integrations.ayla.goals_client.fetch_decision_context",
+            side_effect=GoalsUnavailable("malformed: no data envelope"),
+        ):
+            resp = client.get(
+                self._url(),
+                HTTP_AUTHORIZATION=_init_data_header(bot_user.channel_user_id),
+            )
+
+        assert resp.status_code == 502
+        assert resp.json()["error"] == "ayla_unavailable"
 
 
 class TestGoalSelectView:
@@ -176,7 +239,9 @@ class TestGoalSelectView:
             )
 
         assert resp.status_code == 200
-        assert resp.json() == updated
+        # Тот же контракт SPA, что и у чтения: `postGoalSelect` тоже
+        # берёт `env.data` (`customer-goals.ts:158-166`).
+        assert resp.json() == {"data": updated}
         assert captured["external_user_id"] == f"bot:max:{bot_user.channel_user_id}"
         assert captured["payload"] == {"goal_key": "relax", "source_channel": "miniapp"}
 
@@ -282,7 +347,7 @@ class TestGoalsClient:
     def test_decision_context_url_and_headers(self, settings):
         settings.AYLA_BASE_URL = "https://ayla.test"
         settings.AYLA_INTERNAL_API_TOKEN = "tok"  # noqa: S105  # pragma: allowlist secret
-        fake = _FakeHttpxClient(response=_FakeResponse(status_code=200, payload=_DOC))
+        fake = _FakeHttpxClient(response=_FakeResponse(status_code=200, payload=_WIRE))
         with patch(
             "apps.integrations.ayla.goals_client.httpx.Client",
             return_value=fake,
@@ -297,7 +362,7 @@ class TestGoalsClient:
     def test_goal_select_posts_payload(self, settings):
         settings.AYLA_BASE_URL = "https://ayla.test"
         settings.AYLA_INTERNAL_API_TOKEN = "tok"  # noqa: S105  # pragma: allowlist secret
-        fake = _FakeHttpxClient(response=_FakeResponse(status_code=200, payload=_DOC))
+        fake = _FakeHttpxClient(response=_FakeResponse(status_code=200, payload=_WIRE))
         with patch(
             "apps.integrations.ayla.goals_client.httpx.Client",
             return_value=fake,
@@ -398,7 +463,7 @@ class TestGoalsClient:
         # двойника дважды. Проверяемое утверждение («4xx не размыкает
         # предохранитель») от этого не меняется.
         gc.close_goals_client()
-        ok = _FakeHttpxClient(response=_FakeResponse(status_code=200, payload=_DOC))
+        ok = _FakeHttpxClient(response=_FakeResponse(status_code=200, payload=_WIRE))
         with patch(
             "apps.integrations.ayla.goals_client.httpx.Client",
             return_value=ok,

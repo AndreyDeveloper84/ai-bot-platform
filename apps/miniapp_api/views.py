@@ -3837,7 +3837,23 @@ def customer_decision_context(request: HttpRequest) -> HttpResponse:
         logger.warning("customer_decision_context.unavailable: %s", exc)
         return _error("ayla_unavailable", "ayla decision-context unavailable", 502)
 
-    return JsonResponse(ayla_body)
+    # Конверт восстанавливается ЗДЕСЬ, потому что он контракт ЭТОЙ ручки,
+    # а не свойство документа. Клиент целей снял конверт Ayla на границе
+    # (`goals_client._request`) — там он мешал четырём читателям, которые
+    # брали `known` с корня и молча получали пустоту. А Mini App
+    # разворачивает его сама (`apps/miniapp/src/lib/customer-goals.ts:122,
+    # 146-151`) и сегодня читает ВЕРНО, поэтому отдать ей голый документ
+    # значило бы починить бота и сломать живой экран целей.
+    #
+    # ЦЕНА этой строки, чтобы следующий читатель видел не только
+    # конструкцию: конверт здесь СОБИРАЕТСЯ заново, а не пересылается.
+    # `success_response` умеет второй ключ — `meta`, — и у целей его
+    # сегодня не передаёт ни один из семи успешных выходов `goals/api.py`
+    # (проверено грепом, не предположено). Но если Ayla начнёт его слать,
+    # эта ручка потеряет его МОЛЧА: клиент целей его не вернёт, а здесь
+    # его неоткуда взять. Появится `meta` — конверт придётся не собирать,
+    # а проносить, и тогда разворот с обёрткой должны меняться вместе.
+    return JsonResponse({"data": ayla_body})
 
 
 @csrf_exempt
@@ -3896,4 +3912,9 @@ def customer_goal_select(request: HttpRequest) -> HttpResponse:
         logger.warning("customer_goal_select.unavailable: %s", exc)
         return _error("ayla_unavailable", "ayla goals unavailable", 502)
 
-    return JsonResponse(ayla_body)
+    # Тот же конверт, что и у чтения выше, и по той же причине: SPA
+    # разворачивает `env.data` на обеих ручках
+    # (`customer-goals.ts:158-166`). Обе стороны обязаны меняться вместе —
+    # ручка, отдающая документ голым, пока другая отдаёт в конверте, была
+    # бы хуже нынешнего состояния.
+    return JsonResponse({"data": ayla_body})
