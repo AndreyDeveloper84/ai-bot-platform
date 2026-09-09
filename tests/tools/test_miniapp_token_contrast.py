@@ -189,9 +189,7 @@ def test_the_self_wash_is_mixed_from_the_bright_role() -> None:
     """
     problems = guard.check_contrast(_themes({"success-text": "#16803d"}))
 
-    assert any(
-        "--c-success-text on a 10 % wash of --c-success" in p for p in problems
-    ), problems
+    assert any("--c-success-text on a 10 % wash of --c-success" in p for p in problems), problems
     assert any("4.20:1" in p for p in problems), problems
 
 
@@ -414,4 +412,7 @@ def test_the_retired_purple_is_no_longer_a_declared_value() -> None:
     # И ни одного литерала в потребителях — там его ловит check_single_source,
     # но только как «цвет вне tokens.css»; здесь важно именно это значение.
     globals_css = (APP_ROOT / "src" / "styles" / "globals.css").read_text(encoding="utf-8")
+    # Присутствие прежде отсутствия: пустая строка прошла бы проверку ниже,
+    # ничего не доказав.
+    assert "--c-accent" in globals_css, "globals.css не прочитан — проверка слепа"
     assert "7d63ef" not in globals_css.lower()
