@@ -66,6 +66,16 @@ def active_goal(
 ) -> Goal | None:
     """The active goal for ``bot_user``, or ``None``. Never raises.
 
+    ``None`` here means TWO different states, and they are deliberately
+    not distinguished to the caller: «человек цели не выбрал» и «спросить
+    не удалось». Для коуча исход один — молчать, — поэтому наружу идёт
+    одно имя. Различаются они ВНУТРЬ, счётчиками в логе:
+    ``nutrition_coach.goals.unavailable reason=…`` и
+    ``nutrition_coach.goals.disabled`` пишутся только на втором, и по ним
+    одним видно, молчит ли коуч потому, что цели нет, или потому, что до
+    слоя целей не достучались. Отлаживая тишину коуча, смотреть надо
+    туда: по возвращаемому значению эти два случая неразличимы.
+
     ``fetch`` is the test seam (same shape as ``fetch=`` on
     :func:`apps.nutrition_proactive.tasks.plan_daily_reports`): injected
     it replaces the Ayla call; default is

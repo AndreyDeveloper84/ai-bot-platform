@@ -300,12 +300,46 @@ def _request(
         _circuit.record_failure(now=time.monotonic())
         raise GoalsUnavailable("malformed: top-level is not an object")
 
+    # Конверт снимается ЗДЕСЬ — в единственном месте, где рождается тело
+    # успешного ответа, — и больше нигде.
+    #
+    # Ayla заворачивает каждый успешный ответ в ``{"data": ...}``
+    # (`users/response.py::success_response`), и все семь успешных выходов
+    # `goals/api.py` идут через него; `meta` у целей не передаётся нигде.
+    # Бот же читал документ с КОРНЯ конверта, и четыре читателя молча
+    # получали пустоту у людей, у которых цель есть: карточка клиента
+    # (`adminconsole/clients.py`), дашборд целей (`miniapp_api/views.py`),
+    # коуч питания (`nutrition_coach/goals.py`) и сверка после таймаута
+    # ниже в этом же файле. Все четверо берут ``known`` с верхнего уровня —
+    # то есть с этого разворота они читают верно, и править их не нужно.
+    #
+    # Тесты этого не ловили, потому что подделка сервера отдавала документ
+    # БЕЗ конверта и объявляла ``version: 1``: обе стороны данных построил
+    # один автор, и они сходились друг с другом, а не с Ayla.
+    #
+    # Отсутствие конверта получает ИМЯ, а не молчаливый пропуск: пропустить
+    # тело дальше и есть тот механизм, которым дефект дожил до пилота —
+    # читатель получал словарь, читал ``known`` → ``None`` и не жаловался.
+    if "data" not in body:
+        _circuit.record_failure(now=time.monotonic())
+        raise GoalsUnavailable("malformed: no data envelope")
+
+    document = body["data"]
+    if not isinstance(document, dict):
+        _circuit.record_failure(now=time.monotonic())
+        raise GoalsUnavailable("malformed: data is not an object")
+
     _circuit.record_success()
-    return body
+    return document
 
 
 def fetch_decision_context(*, external_user_id: str) -> dict[str, Any]:
-    """GET ``/internal/me/decision-context/`` — документ состояния as-is."""
+    """GET ``/internal/me/decision-context/`` — документ состояния.
+
+    Возвращает САМ документ (``version`` / ``known`` / ``missing`` /
+    ``suggestions`` / ``intents`` / ``next``), а не конверт ``{"data": …}``,
+    в котором его присылает Ayla: конверт снимается в :func:`_request`.
+    """
     return _request(
         "GET",
         "internal/me/decision-context/",
@@ -319,6 +353,11 @@ def post_goal_select(
     payload: dict[str, Any],
 ) -> dict[str, Any]:
     """POST ``/internal/me/goals/select/`` — возвращает обновлённый документ.
+
+    Документ, а не конверт ``{"data": …}`` — см. :func:`_request`. Это
+    касается ОБОИХ выходов: и прямого ответа, и документа, полученного
+    сверкой после таймаута (:func:`_reconcile_goal_select` ходит тем же
+    ``_request``, поэтому разворот у них общий).
 
     ``payload`` forwarded as-is (``goal_key`` / ``goal_text`` / ``intent``
     + ``source_channel``); shape validation lives on Ayla's side — this
