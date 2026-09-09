@@ -729,7 +729,7 @@ export function AdminServicesMatrixScreen({ me }: Props) {
               <li
                 key={m.id}
                 style={{
-                  borderBottom: "1px solid var(--c-divider)",
+                  borderBottom: "1px solid var(--c-border-decorative)",
                 }}
               >
                 <button
@@ -875,7 +875,7 @@ export function AdminServicesMatrixScreen({ me }: Props) {
             bottom: 0,
             padding: "var(--s-2) var(--s-3) calc(var(--s-3) + env(safe-area-inset-bottom, 0px))",
             background: "var(--c-surface-1)",
-            borderTop: "1px solid var(--c-divider)",
+            borderTop: "1px solid var(--c-border-decorative)",
             display: "flex",
             alignItems: "center",
             gap: "var(--s-2)",

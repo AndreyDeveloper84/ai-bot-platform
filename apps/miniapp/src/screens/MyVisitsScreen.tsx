@@ -119,7 +119,7 @@ export function MyVisitsScreen() {
               {b.status === "cancel_requested" && (
                 <div
                   style={{
-                    color: "var(--c-warning)",
+                    color: "var(--c-warning-text)",
                     marginTop: "var(--s-1)",
                     fontSize: "0.9em",
                   }}
@@ -130,7 +130,7 @@ export function MyVisitsScreen() {
               {b.status === "reschedule_requested" && (
                 <div
                   style={{
-                    color: "var(--c-warning)",
+                    color: "var(--c-warning-text)",
                     marginTop: "var(--s-1)",
                     fontSize: "0.9em",
                   }}

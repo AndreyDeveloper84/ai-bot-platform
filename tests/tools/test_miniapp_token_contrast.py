@@ -13,6 +13,19 @@ are the regressions that matter. The defect DRF-1462 describes is not
 fourteen variables still agreed with any canon". A guard that passes its
 own fixtures while the real tree drifts would be exactly the failure it
 exists to prevent.
+
+The owner's decision of 2026-09-09 (``OPEN_DECISIONS`` §21-quinquies)
+added three things this file has to keep honest, and each has a test that
+fails if the guard stops looking:
+
+* the bright status colours are no longer text, so the pair measured at
+  4.5:1 is ``--c-<role>-text`` and the wash under it is mixed from the
+  bright role;
+* ``--c-border-interactive`` is a component boundary at 3:1 measured
+  against *every* surface, while ``--c-border-decorative`` is asked for
+  nothing at all — a split that is only real if both halves are tested;
+* the dark theme is canon, so a value that only works on the light one
+  is a defect rather than a gap.
 """
 
 from __future__ import annotations
@@ -34,16 +47,21 @@ _TOKENS_HEAD = """:root {
   --c-bg: #f8fafc;
   --c-surface-1: #ffffff;
   --c-surface-2: #f3f4f6;
-  --c-divider: #e5e7eb;
+  --c-border-decorative: #e5e7eb;
+  --c-border-interactive: #838c9f;
   --c-text-primary: #111827;
   --c-text-secondary: #69707e;
   --c-text-on-accent: #ffffff;
+  --c-text-on-status: #111827;
   --c-accent: #4452ff;
   --c-accent-pressed: #3843d1;
   --c-accent-subtle: #e9eaff;
-  --c-success: #16803d;
-  --c-warning: #8f5c06;
-  --c-danger: #c91111;
+  --c-success: #22c55e;
+  --c-success-text: #157a3a;
+  --c-warning: #f59e0b;
+  --c-warning-text: #8f5c06;
+  --c-danger: #ef4444;
+  --c-danger-text: #c91111;
 }
 """
 _TOKENS_DARK = """@media (prefers-color-scheme: dark) {
@@ -51,25 +69,34 @@ _TOKENS_DARK = """@media (prefers-color-scheme: dark) {
     --c-bg: #111827;
     --c-surface-1: #1f2937;
     --c-surface-2: #374151;
-    --c-divider: #4b5563;
+    --c-border-decorative: #4b5563;
+    --c-border-interactive: #838c9f;
     --c-text-primary: #f8fafc;
     --c-text-secondary: #a7acb5;
     --c-text-on-accent: #111827;
+    --c-text-on-status: #111827;
     --c-accent: #9da5ff;
     --c-accent-pressed: #afb5ff;
     --c-accent-subtle: #2a314e;
     --c-success: #22c55e;
-    --c-warning: #f7ad30;
-    --c-danger: #f7a7a7;
+    --c-success-text: #25d465;
+    --c-warning: #f59e0b;
+    --c-warning-text: #f7ad30;
+    --c-danger: #ef4444;
+    --c-danger-text: #f7a7a7;
   }
 }
 """
 
 
-def _themes(light_overrides: dict[str, str] | None = None) -> dict[str, dict[str, str]]:
+def _themes(
+    light_overrides: dict[str, str] | None = None,
+    dark_overrides: dict[str, str] | None = None,
+) -> dict[str, dict[str, str]]:
     """Разобранная эталонная палитра, при желании с подменой одной роли."""
     parsed = guard.palettes(_TOKENS_HEAD + _TOKENS_DARK)
     parsed["light"].update(light_overrides or {})
+    parsed["dark"].update(dark_overrides or {})
     return parsed
 
 
@@ -110,10 +137,14 @@ def test_the_reference_palette_is_clean() -> None:
 
 
 def test_a_signed_value_that_fails_aa_is_caught() -> None:
-    """Подпись `#22C55E` даёт 2.28:1 — ровно то, ради чего страж есть."""
-    problems = guard.check_contrast(_themes({"success": "#22c55e"}))
+    """Подпись `#22C55E` даёт 2.28:1 — ровно то, ради чего страж есть.
 
-    assert any("--c-success on --c-bg" in p for p in problems)
+    После §21-quinquies подпись стоит в `--c-success` законно: там она
+    красит фон и иконки. Провал — это когда её же ставят текстом.
+    """
+    problems = guard.check_contrast(_themes({"success-text": "#22c55e"}))
+
+    assert any("--c-success-text on --c-bg" in p for p in problems)
     assert any("2.18:1" in p for p in problems)
 
 
@@ -143,7 +174,106 @@ def test_raising_a_self_wash_above_ten_percent_is_caught() -> None:
     finally:
         guard.SELF_WASH_SHARE = original
 
-    assert any("on its own 18 % wash" in p for p in problems)
+    assert any("on a 18 % wash" in p for p in problems)
+
+
+# ── §21-quinquies: раздельные текстовые токены статусов ────────────────────
+
+
+def test_the_self_wash_is_mixed_from_the_bright_role() -> None:
+    """Подложка мешается из ЯРКОГО статуса, а не из текстового.
+
+    Прежний `--c-success` `#16803d` проходил, пока подложку мешали из него
+    же. Из подписанного `#22C55E` та же пара даёт 4.20:1 — и это не
+    придирка стража, а то, что увидит глаз на `.callout--success`.
+    """
+    problems = guard.check_contrast(_themes({"success-text": "#16803d"}))
+
+    assert any(
+        "--c-success-text on a 10 % wash of --c-success" in p for p in problems
+    ), problems
+    assert any("4.20:1" in p for p in problems), problems
+
+
+def test_a_bright_status_moved_off_its_signed_label_is_caught() -> None:
+    """Яркая половина пары обязана стоять дословно по борду."""
+    problems = guard.check_contrast(_themes({"warning": "#8f5c06"}))
+
+    assert any("--c-warning is #8f5c06" in p and "#f59e0b" in p for p in problems)
+
+
+def test_white_on_a_bright_status_is_caught() -> None:
+    """Текст на ярком статусе — тёмный. Белое на `#F59E0B` даёт 2.15:1."""
+    problems = guard.check_contrast(_themes({"text-on-status": "#ffffff"}))
+
+    assert any("--c-text-on-status on --c-warning" in p for p in problems)
+    assert any("2.15:1" in p for p in problems)
+
+
+# ── §21-quinquies: две границы вместо одной ────────────────────────────────
+
+
+def test_an_interactive_border_below_three_to_one_is_caught() -> None:
+    """Порог интерактивной границы — 3:1, а не «примерно как было».
+
+    Прежняя `#E5E7EB` даёт 1.13:1 на `--c-surface-2`: единственной
+    границей нажимаемой карточки она быть не может.
+    """
+    problems = guard.check_contrast(_themes({"border-interactive": "#e5e7eb"}))
+
+    assert any("--c-border-interactive on --c-surface-2" in p for p in problems)
+    assert any("user-interface component boundary" in p for p in problems)
+
+
+def test_an_interactive_border_measured_only_against_white_is_caught() -> None:
+    """`#949494` — 3.03:1 на белом и 2.76:1 на `--c-surface-2`.
+
+    Ровно та ошибка, которую делает проверка против одного `#ffffff`:
+    значение проходит порог и всё равно не работает на двух поверхностях
+    из трёх.
+    """
+    assert round(guard.contrast("#949494", "#ffffff"), 2) == 3.03
+    assert round(guard.contrast("#949494", "#f3f4f6"), 2) == 2.76
+
+    problems = guard.check_contrast(_themes({"border-interactive": "#949494"}))
+
+    assert any("--c-border-interactive on --c-surface-2" in p for p in problems)
+    assert not any("--c-border-interactive on --c-surface-1" in p for p in problems)
+
+
+def test_the_decorative_border_is_not_asked_for_contrast() -> None:
+    """Разделительная граница ничего не сообщает — и порога у неё нет.
+
+    Без этой проверки «разделение» могло бы свестись к переименованию:
+    оба токена под одним требованием — это по-прежнему один токен.
+    """
+    themes = _themes()
+    assert themes["light"]["border-decorative"] == "#e5e7eb"
+    assert round(guard.contrast("#e5e7eb", "#f3f4f6"), 2) == 1.13
+
+    assert guard.check_contrast(themes) == []
+
+
+# ── §21-quinquies: тёмная тема — канон, а не приложение ────────────────────
+
+
+def test_the_canonical_purple_dropped_into_the_dark_theme_is_caught() -> None:
+    """`#4452FF` — канон, но в тёмной теме его светлотная форма `#9DA5FF`.
+
+    Прочитав только «канон — `#4452FF`», легко подставить его в обе темы.
+    На `--c-surface-2` #374151 он даёт 1.99:1.
+    """
+    problems = guard.check_contrast(_themes(dark_overrides={"accent": "#4452ff"}))
+
+    assert any("[dark]: --c-accent on --c-surface-2" in p for p in problems)
+    assert any("1.91:1" in p for p in problems)
+
+
+def test_the_dark_theme_is_checked_at_all() -> None:
+    """Тёмная тема — канон с 09.09.2026, а не вывод исполнителя."""
+    problems = guard.check_contrast(_themes(dark_overrides={"text-secondary": "#4b5563"}))
+
+    assert any(p.startswith("tokens.css [dark]") for p in problems)
 
 
 # ── проверка единственного источника ───────────────────────────────────────
@@ -228,12 +358,60 @@ def test_the_real_palette_meets_aa() -> None:
     assert guard.check_contrast(themes) == []
 
 
-def test_the_real_palette_still_declares_fourteen_roles_in_both_themes() -> None:
+def test_the_real_palette_still_declares_eighteen_roles_in_both_themes() -> None:
     """Если ролей стало меньше, проверка контраста тихо перестаёт покрывать
     то, что перестало объявляться."""
     themes = guard.palettes((APP_ROOT / guard.TOKENS).read_text(encoding="utf-8"))
 
-    # Тринадцать HEX плюс `--c-overlay`, который задан через `rgb()` и в
-    # разбор HEX не попадает по устройству.
-    assert len(themes["light"]) == 13
-    assert len(themes["dark"]) == 13
+    # Восемнадцать HEX плюс `--c-overlay`, который задан через `rgb()` и в
+    # разбор HEX не попадает по устройству. Было тринадцать: §21-quinquies
+    # добавил `border-decorative`/`border-interactive` вместо `divider`,
+    # `text-on-status` и три токена `--c-*-text`.
+    assert len(themes["light"]) == 18
+    assert len(themes["dark"]) == 18
+
+
+def test_the_real_palette_keeps_one_purple() -> None:
+    """Решение владельца п.3: `#4452FF` — единственный фиолетовый канона,
+    а `#9DA5FF` — его вторая светлотная форма, не второй цвет.
+
+    Связь проверяется числом, а не комментарием: у обеих форм совпадают
+    тон и насыщенность, различается только светлота.
+    """
+    themes = guard.palettes((APP_ROOT / guard.TOKENS).read_text(encoding="utf-8"))
+    light, dark = themes["light"]["accent"], themes["dark"]["accent"]
+
+    assert light == "#4452ff"
+    assert dark == "#9da5ff"
+
+    import colorsys
+
+    def hsl(value: str) -> tuple[float, float, float]:
+        r, g, b = (c / 255 for c in guard._rgb(value))
+        h, ell, s = colorsys.rgb_to_hls(r, g, b)
+        return h * 360, s * 100, ell * 100
+
+    h_light, s_light, l_light = hsl(light)
+    h_dark, s_dark, l_dark = hsl(dark)
+
+    assert abs(h_light - h_dark) < 1.0, "тон разошёлся — это уже два цвета"
+    assert abs(s_light - s_dark) < 1.0, "насыщенность разошлась"
+    assert l_dark > l_light, "тёмной теме нужна ОСВЕТЛЁННАЯ форма"
+
+
+def test_the_retired_purple_is_no_longer_a_declared_value() -> None:
+    """`#7D63EF` убран как второй фиолетовый (п.3).
+
+    Проверяется ЗНАЧЕНИЕ, а не текст файла: объяснение, почему цвет убран,
+    обязано называть его вслух, и запрет на упоминание превратил бы этот
+    тест в запрет на объяснение. Ассеты аватара — отдельная работа, здесь
+    не проверяются.
+    """
+    themes = guard.palettes((APP_ROOT / guard.TOKENS).read_text(encoding="utf-8"))
+    for theme, palette in themes.items():
+        assert "#7d63ef" not in {v.lower() for v in palette.values()}, theme
+
+    # И ни одного литерала в потребителях — там его ловит check_single_source,
+    # но только как «цвет вне tokens.css»; здесь важно именно это значение.
+    globals_css = (APP_ROOT / "src" / "styles" / "globals.css").read_text(encoding="utf-8")
+    assert "7d63ef" not in globals_css.lower()

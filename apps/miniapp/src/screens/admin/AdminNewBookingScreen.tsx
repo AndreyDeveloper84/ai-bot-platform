@@ -124,7 +124,7 @@ function DraftRow({
         alignItems: "center",
         gap: "var(--s-3)",
         padding: "var(--s-3) 0",
-        borderBottom: "1px solid var(--c-divider)",
+        borderBottom: "1px solid var(--c-border-decorative)",
         background: "none",
         border: "none",
         textAlign: "start",
