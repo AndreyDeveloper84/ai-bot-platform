@@ -305,3 +305,38 @@ class TestEmptyDay:
         )
         assert "Сегодня записей не было" not in text
         assert "Вода: 500 из 2000 мл." in text
+
+
+class TestNoTargetNoJudgement:
+    """Ориентира нет — отчёт называет факт и молчит про цель (§82, §85).
+
+    Владелец 09.09.2026: при отсутствии активного ориентира не
+    показываем цель, шкалу выполнения, проценты, дефицит или превышение.
+    Отчёт по питанию — такой же экран, как дневник, только приезжает
+    сам, и «Калорий вышло на 300 ккал больше нормы» без нормы было бы
+    приговором от чужого числа.
+    """
+
+    def test_the_calorie_line_drops_its_second_number(self) -> None:
+        text = render.render_daily_report(
+            summary(calories_goal=None), water(norm_ml=None), profile()
+        )
+        # POSITIVE: съеденное и выпитое на месте — снимается ориентир,
+        # не факт. Без этой половины отрицания ниже прошли бы и на
+        # пустом отчёте.
+        assert "Калории: 1500 ккал." in text
+        assert "1500 из" not in text
+        # Строка воды исчезает целиком: она вся была «X из N мл».
+        assert "Вода:" not in text
+
+    def test_no_word_about_overshoot_or_shortfall(self) -> None:
+        remark = render.goal_remark(
+            summary(calories_total=3000.0, calories_goal=None),
+            water(total_ml=100, norm_ml=None),
+            profile(goal="lose", protein_g=0),
+        )
+        # 3000 ккал при цели «снизить вес» раньше давали «Калорий вышло
+        # на N ккал больше нормы из профиля».
+        assert "больше нормы" not in remark
+        assert "осталось" not in remark
+        assert "уложился" not in remark
