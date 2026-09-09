@@ -276,7 +276,16 @@ class TestAnketaAnswersAreNotCorrections:
         assert "пол" in started.reply_text.lower()
 
         _turn(person, text="cb:anketa:choice:gender:female")
-        asked_height = _turn(person, text="30")  # возраст — тоже число в диапазоне порции
+        asked_screening = _turn(person, text="30")  # возраст — тоже число в диапазоне порции
+        assert asked_screening is not None
+        # После возраста анкета спрашивает скрининг §7.1: он стоит ДО роста и
+        # веса намеренно (``apps/skills/nutrition_anketa/fsm.py``), чтобы никто
+        # в стоп-сценарии не дошёл до вопроса о весе. Предмет этого теста —
+        # что ЧИСЛО доехало до анкеты, а не легло весом порции, — от порядка
+        # шагов не зависит: числовых ответов здесь по-прежнему два.
+        assert "перед расчётом" in asked_screening.reply_text.lower()
+
+        asked_height = _turn(person, text="cb:anketa:choice:screening:none")
         assert asked_height is not None
         assert "рост" in asked_height.reply_text.lower()
 
