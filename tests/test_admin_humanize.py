@@ -296,16 +296,28 @@ def test_booking_change_form_still_refuses_editable_status(
 
 
 def test_schedule_change_request_form_was_not_made_more_inviting() -> None:
-    """Находка, а не работа: у заявок статус правится руками и сегодня.
+    """Экран заявок не получает ``fieldsets`` — ни тогда, ни при DRF-1607.
 
-    Докстринг модуля обещал read-only, код обещания не держит. Правка
-    оформления НЕ добавляет этому экрану ``fieldsets``: понятный раздел
-    «Решение» звал бы нажать там, где решение обязано приходить из
-    переписки с владельцем. Тест держит это решение.
+    Правка оформления НЕ добавляла этому экрану группировку полей:
+    понятный раздел «Решение» звал бы нажать там, где решение обязано
+    приходить из переписки с владельцем. Тест держит это решение.
+
+    Вторая строка была слепком тогдашнего состояния: ``readonly_fields``
+    равнялся ровно ``("requested_change", "created_at")``, то есть
+    ``status``, ``resolution_note`` и ``resolved_at`` правились руками —
+    это и была находка той задачи. DRF-1607 её закрыла, и сравнение на
+    равенство теперь означало бы «правка обязана вернуться». Сторож не
+    ослаблен, а ужесточён: правимых полей должно не остаться вовсе.
+    Подробный запрет — в
+    ``apps/scheduling/tests/test_admin_change_request_readonly.py``.
     """
     model_admin = admin.site._registry[ScheduleChangeRequest]  # noqa: SLF001
     assert getattr(model_admin, "fieldsets", None) is None
-    assert model_admin.readonly_fields == ("requested_change", "created_at")
+
+    editable = {f.name for f in ScheduleChangeRequest._meta.fields} - set(
+        model_admin.readonly_fields
+    )
+    assert not editable, f"заявка снова правится руками: {sorted(editable)}"
 
 
 #: Поля, которых в карточке нет НАМЕРЕННО, с причиной у каждого.
