@@ -53,17 +53,26 @@ class SalonCard:
     done there. ``tenant_id`` rides along so a caller can deep-link, same as
     ``MasterCard``.
 
-    ``address`` is the only field whose source is per-master (the Ayla
-    specialists feed carries it in the specialist payload, mirrored into
-    ``CatalogMaster.raw``; ``Tenant`` has no address column). It is the first
-    non-empty address among the salon's bookable masters, and may legitimately
-    be "" — the pilot salon's masters carry no address at all.
+    ``address`` is ``Tenant.address`` verbatim (DRF-1609). It used to be the
+    first non-empty address among the salon's bookable masters — OPEN_DECISIONS
+    §45 called that a lottery, and it was one: confirm a new master, deactivate
+    an old one, and the same salon shows a different address without moving.
+    DRF-1587 gave the tenant its own column; this DTO carries it.
+
+    **``None`` and "" are DIFFERENT values here and must stay different.**
+    ``None`` — the source said nothing about the address (today that is every
+    salon: the specialists feed has no ``tenant_address`` key yet). ``""`` —
+    the source said there is no address. Collapsing the two would undo exactly
+    what DRF-1587 separated, and would do it on the way OUT, where no reader
+    can tell them apart any more. Renderers print both as nothing (see
+    ``apps.orchestrator.discovery._salon_place``), so nothing is gained by
+    merging them and a fact is lost.
     """
 
     tenant_id: UUID
     name: str
     city: str
-    address: str
+    address: str | None
     master_count: int
     service_count: int
     sample_services: tuple[str, ...] = ()
