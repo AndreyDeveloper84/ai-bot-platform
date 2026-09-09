@@ -167,13 +167,39 @@ class FoodLogResponse:
     raw: dict[str, Any]
 
 
+def _optional_int(raw: Any) -> int | None:
+    """Число — или ``None``, когда ключа нет.
+
+    Не ``int(raw or 0)``. Тот вариант отвечал одинаково на три разных
+    вопроса: «ключа нет», «ключ null» и «ориентир ноль». Отличать их
+    обязан именно этот слой — он единственный видит сырое тело ответа;
+    ниже по конвейеру исходный ключ уже недоступен, и восстановить
+    различие будет неоткуда.
+
+    Ноль, пришедший ЯВНО, сохраняется как ноль: врать в обратную
+    сторону тоже нельзя. Ориентиром он при этом не станет — потребители
+    проверяют значение на положительность.
+    """
+    if raw is None:
+        return None
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return None
+
+
 @dataclass(frozen=True)
 class SummaryResponse:
     """Subset of ``NutritionSummaryResponseSerializer`` data we care about."""
 
     date: str
     calories_total: float
-    calories_goal: int
+    #: ``None`` — ОРИЕНТИРА НЕТ. Ayla перестала присылать ключ вовсе
+    #: (§82: «Текущая плоская норма калорий для всех удаляется»), и
+    #: нормализовать это в ноль на нашей стороне нельзя: ноль здесь
+    #: неотличим от «ориентир ноль», а дальше по конвейеру он рисуется
+    #: как «0 из 0 ккал · 0 %». Отсутствие едет отсутствием до экрана.
+    calories_goal: int | None
     protein_g: float
     fat_g: float
     carbs_g: float
@@ -228,7 +254,9 @@ class WaterEntryResponse:
     kcal: int
     milestone_text: str | None
     today_total_ml: int
-    today_norm_ml: int
+    #: ``None`` — ориентира по жидкости нет. Формула ``30 мл × вес``
+    #: снята до утверждения методики (§82, §85 раздел 4).
+    today_norm_ml: int | None
     alcohol_recovery_hint: bool
     raw: dict[str, Any] = field(default_factory=dict)
 
@@ -244,7 +272,7 @@ class WaterTodayResponse:
     """
 
     total_ml: int
-    norm_ml: int
+    norm_ml: int | None
     entries: list[dict[str, Any]]
     kcal_from_beverages: float = 0.0
     caffeine_mg: float = 0.0
@@ -535,7 +563,7 @@ class NutritionClient:
             return SummaryResponse(
                 date=str(body.get("date") or ""),
                 calories_total=float(body.get("calories_total") or 0.0),
-                calories_goal=int(body.get("calories_goal") or 0),
+                calories_goal=_optional_int(body.get("calories_goal")),
                 protein_g=float(body.get("protein_g") or 0.0),
                 fat_g=float(body.get("fat_g") or 0.0),
                 carbs_g=float(body.get("carbs_g") or 0.0),
@@ -767,7 +795,7 @@ class NutritionClient:
                 kcal=int(body.get("kcal") or 0),
                 milestone_text=body.get("milestone_text"),
                 today_total_ml=int(body.get("today_total_water_ml") or 0),
-                today_norm_ml=int(body.get("today_norm_water_ml") or 0),
+                today_norm_ml=_optional_int(body.get("today_norm_water_ml")),
                 alcohol_recovery_hint=bool(body.get("alcohol_recovery_hint") or False),
                 raw=body,
             )
@@ -848,7 +876,7 @@ class NutritionClient:
             body = resp.json().get("data", {})
             return WaterTodayResponse(
                 total_ml=int(body.get("today_total_water_ml") or 0),
-                norm_ml=int(body.get("today_norm_water_ml") or 0),
+                norm_ml=_optional_int(body.get("today_norm_water_ml")),
                 entries=list(body.get("entries") or []),
                 kcal_from_beverages=float(body.get("today_kcal_from_beverages") or 0.0),
                 caffeine_mg=float(body.get("today_caffeine_mg") or 0.0),

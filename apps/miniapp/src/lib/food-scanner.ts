@@ -113,7 +113,17 @@ export interface DailySummaryEntry {
 export interface DailySummaryResponse {
   date: string; // YYYY-MM-DD
   calories_total: number;
-  calories_goal: number;
+  /**
+   * `calories_goal` СНЯТО. Ayla ключ больше не присылает: плоскую норму
+   * 2000 ккал для всех владелец удалил 09.09.2026 (§82), а
+   * версионированный расчёт (§85) — отдельный срез. Обязательное поле
+   * здесь заставляло бы выдумать значение при любой попытке собрать
+   * этот объект — что стаб ниже и делал, подставляя 2100.
+   *
+   * Когда ориентир появится, он придёт НЕОБЯЗАТЕЛЬНЫМ (`?:`), как
+   * `calories_target` в `customer-wellness.ts`: экран обязан уметь
+   * его отсутствие, а не полагаться на то, что число всегда есть.
+   */
   protein_g: number;
   fat_g: number;
   carbs_g: number;
@@ -290,7 +300,6 @@ const SCAN_STUB: Record<StubVariant, ScanResponse> = {
 
 interface DiaryState {
   entries: DailySummaryEntry[];
-  calories_goal: number;
 }
 
 const DIARY_STATE: { byDate: Map<string, DiaryState> } = {
@@ -308,7 +317,11 @@ function todayKey(): string {
 function ensureDiaryDay(date: string): DiaryState {
   let state = DIARY_STATE.byDate.get(date);
   if (!state) {
-    state = { entries: [], calories_goal: 2100 };
+    // Ориентира у стаба нет — ровно как у источника. Стояло
+    // `calories_goal: 2100`: выдуманное число, «подтверждавшее»
+    // константу вместо того, чтобы её ловить. Ровно так же здесь уже
+    // стояла выдуманная восьмёрка стаканов.
+    state = { entries: [] };
     DIARY_STATE.byDate.set(date, state);
   }
   return state;
