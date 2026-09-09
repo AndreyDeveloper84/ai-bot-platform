@@ -993,7 +993,11 @@ export interface MasterDetail {
   archived_at: string | null;
   linked_bot_user: LinkedBotUser | null;
   services: MasterDetailService[];
-  working_hours_summary: string;
+  // §83 — здесь БЫЛО `working_hours_summary`. Строка приходила из
+  // локального зеркала `scheduling.WorkingHours`, а часы клиенту продаёт
+  // Ayla, поэтому она описывала не то расписание, по которому продают.
+  // Часы теперь берутся отдельным вызовом `getMasterSchedule` — тем же
+  // источником, с которого снимается отпечаток подтверждения.
 }
 
 interface MasterDetailEnvelope {
@@ -1008,6 +1012,82 @@ export const getMasterDetail = (
     method: "GET",
     signal: init.signal,
   }).then((env) => env.master);
+
+/**
+ * Рабочие часы мастера и состояние их подтверждения (§83).
+ *
+ * Один день недели в том виде, в каком его отдаёт источник, по которому
+ * мастера продают. `break_start` / `break_end` здесь не украшение: перерыв
+ * входит в отпечаток, и показать часы без него значило бы просить владелицу
+ * заверить то, чего она не видела.
+ *
+ * `null` во времени означает «не задано», а не «ноль» — рисовать вместо него
+ * прочерк или «00:00» нельзя.
+ */
+export interface MasterScheduleDay {
+  day_of_week: number;
+  is_working_day: boolean;
+  start_time: string | null;
+  end_time: string | null;
+  break_start: string | null;
+  break_end: string | null;
+}
+
+/**
+ * Состояние подтверждения относительно ИМЕННО ЭТИХ часов.
+ *
+ * `is_current` — не «подтверждали когда-нибудь», а «подтверждено для этой
+ * версии часов». Экран обязан различать: `confirmed_at` без `is_current`
+ * означает, что часы изменились после подтверждения и мастера надо
+ * подтвердить заново.
+ *
+ * `fingerprint` возвращается на сервер при нажатии «Расписание верно» —
+ * так подтверждается увиденное, а не то, что успело измениться.
+ *
+ * `block` — причина, по которой нажимать нельзя, словом. `null` значит
+ * «можно». Сегодня единственное значение — `no_working_day`.
+ */
+export interface MasterScheduleConfirmation {
+  confirmed_at: string | null;
+  confirmed_by: { id: string; name: string } | null;
+  is_current: boolean;
+  fingerprint: string;
+  block: "no_working_day" | null;
+}
+
+export interface MasterSchedule {
+  source: string;
+  days: MasterScheduleDay[];
+  has_working_day: boolean;
+  confirmation: MasterScheduleConfirmation;
+}
+
+interface MasterScheduleEnvelope {
+  schedule: MasterSchedule;
+}
+
+export const getMasterSchedule = (
+  masterId: string,
+  init: { signal?: AbortSignal } = {},
+): Promise<MasterSchedule> =>
+  request<MasterScheduleEnvelope>(`/api/v1/admin/masters/${masterId}/schedule/`, {
+    method: "GET",
+    signal: init.signal,
+  }).then((env) => env.schedule);
+
+/**
+ * «Расписание верно». Отправляет отпечаток показанных часов: если они
+ * изменились, сервер ответит `stale_view`, а не подтвердит молча то, чего
+ * владелица не видела.
+ */
+export const confirmMasterSchedule = (
+  masterId: string,
+  fingerprint: string,
+): Promise<MasterSchedule> =>
+  request<MasterScheduleEnvelope>(`/api/v1/admin/masters/${masterId}/schedule/confirm/`, {
+    method: "POST",
+    body: JSON.stringify({ fingerprint }),
+  }).then((env) => env.schedule);
 
 /**
  * PATCH body for ``/api/v1/admin/masters/<id>/``. Only fields the

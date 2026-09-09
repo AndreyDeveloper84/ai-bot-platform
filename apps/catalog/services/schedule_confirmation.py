@@ -371,6 +371,9 @@ def confirm_schedule(master: Any, *, by: Any) -> WeeklyTemplate:
             "the weekly template has no working day at all; there is nothing to confirm",
         )
 
+    from apps.audit.services import write_audit
+    from apps.events.vocabulary import MASTER_SCHEDULE_CONFIRMED
+
     with transaction.atomic():
         master.schedule_confirmed_at = timezone.now()
         master.schedule_confirmed_by = by
@@ -381,6 +384,17 @@ def confirm_schedule(master: Any, *, by: Any) -> WeeklyTemplate:
                 "schedule_confirmed_by",
                 "schedule_fingerprint",
             ]
+        )
+        write_audit(
+            MASTER_SCHEDULE_CONFIRMED,
+            target="catalog.CatalogMaster",
+            target_id=master.pk,
+            payload={
+                "master_id": str(master.pk),
+                "source": template.source,
+                "fingerprint": template.fingerprint,
+            },
+            actor_id=getattr(by, "pk", None),
         )
 
     logger.info(
@@ -442,15 +456,36 @@ def clear_confirmation(*, tenant_id: Any, ayla_user_id: Any, reason: str) -> int
         )
         return 0
 
+    from apps.audit.services import write_audit
+    from apps.events.vocabulary import MASTER_SCHEDULE_CONFIRMATION_CLEARED
+
     with tenant_scope(tenant):
-        cleared = CatalogMaster.objects.filter(
+        affected = CatalogMaster.objects.filter(
             ayla_user_id=ayla_user_id,
             schedule_confirmed_at__isnull=False,
-        ).update(
+        )
+        # Отпечаток читается ДО снятия: без него запись аудита скажет
+        # «подтверждение снято» и не скажет, какое именно расписание было
+        # заверено. Лишний запрос платится один раз на изменение часов у
+        # одного мастера — не горячий путь.
+        previous = list(affected.values_list("id", "schedule_fingerprint"))
+        cleared = affected.update(
             schedule_confirmed_at=None,
             schedule_confirmed_by=None,
             schedule_fingerprint="",
         )
+
+        for master_pk, previous_fingerprint in previous:
+            write_audit(
+                MASTER_SCHEDULE_CONFIRMATION_CLEARED,
+                target="catalog.CatalogMaster",
+                target_id=master_pk,
+                payload={
+                    "master_id": str(master_pk),
+                    "reason": reason,
+                    "previous_fingerprint": previous_fingerprint,
+                },
+            )
 
     if cleared:
         logger.info(
