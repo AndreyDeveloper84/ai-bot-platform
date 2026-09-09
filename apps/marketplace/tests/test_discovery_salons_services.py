@@ -200,7 +200,7 @@ class TestDiscoverSalons:
         assert card.address is None
 
     def test_source_said_no_address_is_empty_string_not_none(self) -> None:
-        """"" — источник СКАЗАЛ, что адреса нет. Это ответ, а не молчание,
+        """ "" — источник СКАЗАЛ, что адреса нет. Это ответ, а не молчание,
         и от ``None`` он обязан отличаться на выходе DTO тоже."""
         tenant = Tenant.objects.create(slug="noaddr", name="Безадресный", city="Пенза", address="")
         _master(tenant, "Анна")
