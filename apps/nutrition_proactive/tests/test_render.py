@@ -330,13 +330,22 @@ class TestNoTargetNoJudgement:
         assert "Вода:" not in text
 
     def test_no_word_about_overshoot_or_shortfall(self) -> None:
-        remark = render.goal_remark(
+        # PRESENCE ВПЕРЕДИ: те же 3000 ккал при цели «снизить вес» и
+        # ЖИВОМ ориентире дают приговор — значит фраза производима, и
+        # отрицание ниже про её отсутствие, а не про сломанный рендер.
+        with_target = render.goal_remark(
+            summary(calories_total=3000.0),
+            water(),
+            profile(goal="lose", protein_g=0),
+        )
+        assert "больше нормы" in with_target
+
+        # ABSENCE: без ориентира ответа нет вовсе — это сильнее трёх
+        # «not in», потому что закрывает и формулировки, которых мы не
+        # предусмотрели.
+        without_target = render.goal_remark(
             summary(calories_total=3000.0, calories_goal=None),
             water(total_ml=100, norm_ml=None),
             profile(goal="lose", protein_g=0),
         )
-        # 3000 ккал при цели «снизить вес» раньше давали «Калорий вышло
-        # на N ккал больше нормы из профиля».
-        assert "больше нормы" not in remark
-        assert "осталось" not in remark
-        assert "уложился" not in remark
+        assert without_target == ""
