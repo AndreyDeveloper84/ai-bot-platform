@@ -38,12 +38,29 @@ def _ts() -> datetime:
 
 @pytest.fixture
 def penza() -> Tenant:
-    return Tenant.objects.create(slug="salon-penza", name="BodyFormula", city="Пенза")
+    """Салон с СОБСТВЕННЫМ адресом в ``Tenant.address`` (DRF-1587/1609).
+
+    Не в ``raw`` мастера: адрес салона больше не выводится из мастерских
+    строк, и фикстура обязана описывать тот мир, который есть. Так его пишет
+    синхронизация — ``_write_tenant_address`` в
+    ``apps.catalog.services.upserter``.
+    """
+    return Tenant.objects.create(
+        slug="salon-penza",
+        name="BodyFormula",
+        city="Пенза",
+        address="Пенза, ул. Леонова, 15а",
+    )
 
 
 @pytest.fixture
 def moscow() -> Tenant:
-    return Tenant.objects.create(slug="salon-msk", name="Медиклиник", city="Москва")
+    return Tenant.objects.create(
+        slug="salon-msk",
+        name="Медиклиник",
+        city="Москва",
+        address="Москва, Тверская 1",
+    )
 
 
 def _master(tenant: Tenant, name: str, **kw) -> CatalogMaster:
@@ -87,8 +104,8 @@ def _offer(tenant: Tenant, master: CatalogMaster, service: CatalogService) -> Ma
 
 class TestDiscoverSalons:
     def test_returns_salons_across_tenants(self, penza, moscow) -> None:
-        _master(penza, "Анна", raw={"address": "Пенза, ул. Леонова, 15а"})
-        _master(moscow, "Борис", raw={"address": "Москва, Тверская 1"})
+        _master(penza, "Анна")
+        _master(moscow, "Борис")
         _service(penza, "Массаж спины", price="1700", duration=45)
         _service(penza, "Массаж лица", price="1500", duration=30)
         _service(penza, "Прессотерапия")
@@ -127,23 +144,80 @@ class TestDiscoverSalons:
         assert {c.name for c in discover_salons(city="Пенза")} == {"BodyFormula"}
         assert discover_salons(city="Сочи") == []
 
-    def test_missing_address_is_empty_string_not_a_crash(self, penza) -> None:
-        # The pilot salon's masters carry no address at all (live mirror,
-        # 23.08) — and raw may even be a non-dict on a hand-written row.
-        _master(penza, "Безадресная")
-        _master(penza, "Странная", raw=["not", "a", "dict"])
+    def test_address_never_comes_from_the_masters(self, penza) -> None:
+        """СТОРОЖ DRF-1609. Краснеет, если адрес салона снова начнут выводить
+        из адресов мастеров.
+
+        Адреса у двух мастеров РАЗНЫЕ и оба отличаются от салонного — иначе
+        тест зеленел бы на совпадении и не доказывал бы ничего. Прежний код
+        (``next((a for a in (_master_address(m) …) if a), "")``) вернул бы
+        адрес того мастера, который лёг первым, то есть значение, зависящее
+        от состава ростера. OPEN_DECISIONS §45 назвал это лотереей.
+
+        ``help_text`` колонки уже говорит «Не выводится из адресов мастеров»
+        — и не удержал: проверяемый инвариант не живёт в комментарии.
+        """
+        _master(penza, "Первая", raw={"address": "Пенза, Московская 74"})
+        _master(penza, "Вторая", raw={"address": "Пенза, Кирова 1"})
+
+        (card,) = discover_salons()
+
+        assert card.address == "Пенза, ул. Леонова, 15а"  # Tenant.address
+        assert card.address != "Пенза, Московская 74"
+        assert card.address != "Пенза, Кирова 1"
+
+    def test_roster_churn_does_not_move_the_salon(self, penza) -> None:
+        """То же свойство, но так, как его видит человек: состав мастеров
+        сменился целиком — адрес салона не шелохнулся.
+
+        Именно этот сценарий был живым дефектом: подтвердили нового мастера,
+        деактивировали старого — и клиент увидел другой адрес того же салона.
+        """
+        first = _master(penza, "Первая", raw={"address": "Пенза, Московская 74"})
+        (before,) = discover_salons()
+
+        first.is_active = False
+        first.save(update_fields=["is_active"])
+        _master(penza, "Вторая", raw={"address": "Пенза, Кирова 1"})
+        (after,) = discover_salons()
+
+        assert before.address == after.address == "Пенза, ул. Леонова, 15а"
+
+    def test_source_silent_is_none_not_empty_string(self) -> None:
+        """``None`` — источник об адресе НЕ СКАЗАЛ НИЧЕГО. Сегодняшнее
+        состояние всех салонов: ключа ``tenant_address`` в фиде ещё нет.
+
+        Схлопывать это в "" запрещено: "" — отдельный ответ источника (см.
+        соседний тест). И мастера здесь с адресами — чтобы «ничего не
+        сказал» не могло приехать подстановкой из них.
+        """
+        tenant = Tenant.objects.create(slug="silent", name="Молчун", city="Пенза")
+        assert tenant.address is None  # default колонки, не наша выдумка
+        _master(tenant, "Садресом", raw={"address": "Пенза, Суворова 3"})
+
+        (card,) = discover_salons()
+
+        assert card.address is None
+
+    def test_source_said_no_address_is_empty_string_not_none(self) -> None:
+        """"" — источник СКАЗАЛ, что адреса нет. Это ответ, а не молчание,
+        и от ``None`` он обязан отличаться на выходе DTO тоже."""
+        tenant = Tenant.objects.create(slug="noaddr", name="Безадресный", city="Пенза", address="")
+        _master(tenant, "Анна")
 
         (card,) = discover_salons()
 
         assert card.address == ""
+        assert card.address is not None
 
-    def test_first_non_empty_address_wins(self, penza) -> None:
-        _master(penza, "Безадресная", raw={})
-        _master(penza, "Садресом", raw={"address": "  Пенза, Московская 74  "})
+    def test_non_dict_master_raw_is_not_a_crash(self, penza) -> None:
+        """Кривой ``raw`` на рукописной строке больше не может уронить
+        карточку салона — адрес его вообще не читает."""
+        _master(penza, "Странная", raw=["not", "a", "dict"])
 
         (card,) = discover_salons()
 
-        assert card.address == "Пенза, Московская 74"
+        assert card.address == "Пенза, ул. Леонова, 15а"
 
     def test_salon_without_services_says_so_via_empty_sample(self, penza) -> None:
         _master(penza, "Анна")
@@ -290,7 +364,7 @@ class TestByIdReads:
     land the same tap on a different salon as the catalog grows."""
 
     def test_get_salon_returns_that_salon(self, penza, moscow) -> None:
-        _master(penza, "Анна", raw={"address": "Пенза, ул. Леонова, 15а"})
+        _master(penza, "Анна")
         _master(moscow, "Борис")
         _service(penza, "Массаж спины")
 
