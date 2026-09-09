@@ -53,8 +53,12 @@
 в `djangoproject-catalog`: там же запрещено чтение столбца
 `NutritionProfile.daily_water_ml`, в котором лежит выход снятой формулы.
 
-Замер 09.09.2026: подставить `calories_target = 2000` в
-`apps/miniapp_api/views.py` → `1 violation`; снять → `0`.
+Замер 09.09.2026, снят `uv run python tools/lint/nutrition_target_guard.py
+apps/`: подставить `calories_target = 2000` вместо
+`summary_res.calories_goal or None` в `apps/miniapp_api/views.py` →
+`1 violation(s)` с указанием строки 2915; вернуть как было → `0`.
+Подмена проверена на применение (ровно одно совпадение в файле), иначе
+доказывалось бы свойство несуществующего кода.
 """
 
 from __future__ import annotations
