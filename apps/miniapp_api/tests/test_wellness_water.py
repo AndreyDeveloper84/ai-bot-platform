@@ -84,7 +84,8 @@ class _FakeEntry:
     kcal: int = 0
     milestone_text: Any = None
     today_total_ml: int = 1250
-    today_norm_ml: int = 2000
+    # Ориентира нет ни у кого до утверждения методики (§82, §85).
+    today_norm_ml: int | None = None
     alcohol_recovery_hint: bool = False
     raw: dict = field(default_factory=dict)
 

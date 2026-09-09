@@ -2897,11 +2897,14 @@ def customer_wellness_today(request: HttpRequest) -> HttpResponse:
         summary_known = False
     else:
         calories_eaten = round(summary_res.calories_total)
-        # Ту же болезнь, что вылечили у воды, калории носили дальше:
-        # ``NUTRITION_DEFAULT_CALORIES_GOAL`` — плоская константа на всех,
-        # и человеку без анкеты она показывалась как ЕГО дневная цель, со
-        # шкалой и процентом. Ноль с той стороны означает «цели нет».
-        calories_target = int(summary_res.calories_goal) or None
+        # Ориентир приходит от Ayla уже КАК ОТСУТСТВИЕ: ключа
+        # ``calories_goal`` в ответе нет, клиент отдаёт ``None``
+        # (§82 — «Текущая плоская норма калорий для всех удаляется»).
+        # Раньше здесь стояло ``int(...) or None`` — перевод нуля в
+        # отсутствие на нашей стороне; теперь переводить нечего, и
+        # ``or None`` снят: он молча превратил бы явный ноль ориентира
+        # в отсутствие, а это уже другая ложь.
+        calories_target = summary_res.calories_goal
         # БЖУ — строка ЦЕЛЕВАЯ (§11.1 клиентского контракта: «pfc
         # undefined — анкета не пройдена, строка БЖУ скрыта»), поэтому
         # она живёт и гаснет вместе с целью, а не отдельно. Съеденное при
@@ -2984,9 +2987,14 @@ def customer_wellness_today(request: HttpRequest) -> HttpResponse:
         water_known = False
     else:
         water_glasses_eaten = _ml_to_glasses(water_res.total_ml)
-        # `norm_ml=0` = нормы нет. Ноль стаканов целью тоже не бывает,
-        # поэтому обе ситуации сходятся в один ответ: цели не будет.
-        water_glasses_target = _ml_to_glasses(water_res.norm_ml) or None
+        # Ориентира по жидкости нет ни у кого: формула 30 мл × вес снята
+        # до утверждения методики (§82, §85 раздел 4), и Ayla ключ не
+        # присылает. `None` доезжает до экрана как отсутствие ключа.
+        water_glasses_target = (
+            _ml_to_glasses(water_res.norm_ml) or None
+            if water_res.norm_ml is not None
+            else None
+        )
 
     # ── active goal (from Ayla's goal layer) ────────────────────────────
     # Sync call, deliberately after the async pair: the goal client keeps
@@ -3167,11 +3175,20 @@ def customer_wellness_water(request: HttpRequest) -> HttpResponse:
         "ml": entry.ml,
         "water_ml": entry.water_ml,
         "today_total_ml": entry.today_total_ml,
-        "today_norm_ml": entry.today_norm_ml,
         "water_glasses_eaten": _ml_to_glasses(entry.today_total_ml),
     }
-    # Та же правда, что и в read-ручке: нормы нет — ключа нет.
-    water_target = _ml_to_glasses(entry.today_norm_ml) or None
+    # `today_norm_ml` уходит только когда ориентир ЕСТЬ. Ключ со
+    # значением `null` — это не «ориентира нет», это «ориентир есть, мы
+    # его не знаем», и клиент вправе нарисовать прочерк. Пока методика
+    # не утверждена (§82, §85) ключа не бывает вовсе.
+    if entry.today_norm_ml is not None:
+        payload["today_norm_ml"] = entry.today_norm_ml
+    # Та же правда, что и в read-ручке: ориентира нет — ключа нет.
+    water_target = (
+        _ml_to_glasses(entry.today_norm_ml) or None
+        if entry.today_norm_ml is not None
+        else None
+    )
     if water_target is not None:
         payload["water_glasses_target"] = water_target
     return JsonResponse(payload, status=201)

@@ -262,8 +262,16 @@ def _target(profile: ProfileResponse | None, field: str) -> float:
     return float(getattr(profile, field, 0) or 0) if profile is not None else 0.0
 
 
-def _macro_line(label: str, actual: float, target: float, unit: str) -> str:
-    """``Белки: 80 из 95 г`` -- or without the target when none is known."""
+def _macro_line(
+    label: str, actual: float, target: float | None, unit: str,
+) -> str:
+    """``Белки: 80 из 95 г`` — или без ориентира, когда его нет.
+
+    ``None`` в ``target`` теперь штатное состояние, а не сбой: ориентир
+    по калориям снят до утверждения методики (§82, §85). Строка без
+    второго числа — это и есть режим «без ориентира»: факт показан,
+    цель не выдумана.
+    """
     if target:
         return f"{label}: {round(actual)} из {round(target)} {unit}."
     return f"{label}: {round(actual)} {unit}."

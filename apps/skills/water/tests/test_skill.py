@@ -35,7 +35,8 @@ def _ayla_response(ml: int = 250, water_ml: int = 250) -> WaterEntryResponse:
         kcal=0,
         milestone_text=None,
         today_total_ml=1500,
-        today_norm_ml=2000,
+        # Ориентира нет ни у кого до утверждения методики (§82, §85).
+        today_norm_ml=None,
         alcohol_recovery_hint=False,
         raw={},
     )
@@ -107,7 +108,8 @@ class TestHandleHappyPath:
                 kcal=120,
                 milestone_text=None,
                 today_total_ml=1500,
-                today_norm_ml=2000,
+                # Ориентира нет ни у кого до утверждения методики (§82, §85).
+        today_norm_ml=None,
                 alcohol_recovery_hint=True,
                 raw={},
             )
