@@ -123,9 +123,7 @@ def _master_filter_option_ids(body: str) -> set[str]:
 
 
 @pytest.mark.parametrize("mode", ["strict", "audit"])
-def test_master_filter_lists_every_master(
-    superuser_client: Client, settings, mode: str
-) -> None:
+def test_master_filter_lists_every_master(superuser_client: Client, settings, mode: str) -> None:
     """Фильтр «Мастер» показывает всех мастеров базы в обоих режимах."""
 
     settings.STRICT_TENANT_SCOPE = "strict"
@@ -140,8 +138,7 @@ def test_master_filter_lists_every_master(
     response = superuser_client.get(CHANGELIST_URL)
 
     assert response.status_code == 200, (
-        f"режим {mode}: страница записей должна открываться, "
-        f"получено {response.status_code}"
+        f"режим {mode}: страница записей должна открываться, получено {response.status_code}"
     )
     body = response.content.decode()
 

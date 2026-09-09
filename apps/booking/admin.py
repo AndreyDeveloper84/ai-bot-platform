@@ -43,6 +43,7 @@ if TYPE_CHECKING:  # pragma: no cover - только для аннотаций
     from django.contrib.auth.models import AbstractUser
     from django.http import HttpRequest, HttpResponse
 
+
 class AllTenantsRelatedListFilter(admin.RelatedFieldListFilter):
     """Варианты бокового фильтра по FK берутся из ``all_tenants`` (DRF-1608).
 
@@ -89,9 +90,7 @@ class AllTenantsRelatedListFilter(admin.RelatedFieldListFilter):
 
         remote = field.remote_field
         choice_func = operator.attrgetter(
-            remote.get_related_field().attname
-            if hasattr(remote, "get_related_field")
-            else "pk"
+            remote.get_related_field().attname if hasattr(remote, "get_related_field") else "pk"
         )
         queryset = manager.complex_filter(field.get_limit_choices_to())
         ordering = self.field_admin_ordering(field, request, model_admin)
