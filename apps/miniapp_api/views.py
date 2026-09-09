@@ -2534,17 +2534,52 @@ def customer_recommendations(request: HttpRequest) -> HttpResponse:
     * ``X-External-User-ID: bot:{channel}:{channel_user_id}`` — Ayla
       resolves this to its ProxyUser via the user_proxy mapping.
 
-    The Ayla response body is passed through verbatim.
+    Тело Ayla проходит насквозь — **кроме ключей кандидатов** (DRF-1598).
+
+    ### Что здесь переводится и почему только здесь
+
+    Резолвер рекомендует **мастеров** (решение владельца OD §81) и
+    называет их ключом Ayla — `specialist.id`. Полка мини-приложения
+    живёт в ключах зеркала и ключа Ayla не знает: поля у неё нет.
+
+    Перевести может только тот, у кого есть оба, — то есть этот слой.
+    Сам перевод живёт в `apps.marketplace.resolver_keys`, а не здесь:
+    «кто такой этот ключ» — доменное знание, и рядом с разбором тела
+    и кодами ответов оно читалось бы как часть транспорта.
+
+    В `apps/marketplace/`, а не в `apps/catalog/`, где лежит модель:
+    межсалонное чтение каталога разрешено контуром **в одном месте**
+    (`MKT1`, #1018), и это место — маркетплейс. Модуль по роду
+    занятия и есть discovery: «дай продаваемых мастеров по множеству
+    ключей». В `catalog` он оказался по месту данных, а не по делу.
+
+    ### Никто не отбрасывается
+
+    Кандидат, которому зеркальной строки не нашлось, едет дальше **как
+    есть**, с ключом Ayla. Полка уже умеет назвать это состояние
+    (`UNRENDERABLE_CANDIDATES`) и делает это правильно — проверяя, что
+    умеет отрисовать. Отфильтруй мы здесь, список пришёл бы к ней уже
+    усечённым, и она **не узнала бы о потере**: два места считали бы
+    одно и то же и разошлись.
+
+    Наружу — имя состояния от полки, в журнал — числа отсюда.
+
+    ### Отказ чтения зеркала — это недоступность
+
+    Раньше эта ручка своей базы не трогала, и класса отказа «зеркало не
+    ответило» у неё не было. Теперь есть. Пропусти мы кандидатов
+    непереведёнными при упавшем чтении — полка сказала бы «нам прислали
+    то, чего мы не умеем», то есть обвинила бы Ayla в нашей собственной
+    аварии. Имя, обвиняющее не ту сторону, хуже отсутствия имени: по нему
+    идут чинить не там.
 
     ЛЕГАСИ. Формулировка «The Mini App side owns the rendering contract»
     ОТМЕНЕНА контрактом резолвера (§2.1 C3, OD §53): у формы ответа есть
     владелец — Recommendation Resolver, и валидация на границе обязательна.
-    Пока эта ручка держит домашний экран на старой форме, пропуск как есть
-    сохранён намеренно (см. `recommendations_client.fetch_recommendations`);
-    после миграции потребителя (T6 — DRF-1567, T7 — DRF-1568) представление
-    уходит вместе с ней. Новый код ходит через
+    Пропуск формы как есть сохранён намеренно (см.
+    `recommendations_client.fetch_recommendations`); валидацию несёт
     `apps.integrations.ayla.recommendation_resolver_client`, который
-    валидирует и разводит три исхода.
+    разводит три исхода.
 
     Failure mapping:
 
@@ -2555,6 +2590,9 @@ def customer_recommendations(request: HttpRequest) -> HttpResponse:
     """
     import json
 
+    from django.db import DatabaseError
+
+    from apps.marketplace.resolver_keys import translate_provider_keys
     from apps.integrations.ayla import external_user_id_for
     from apps.integrations.ayla.recommendations_client import (
         RecommendationsBadRequest,
@@ -2601,7 +2639,30 @@ def customer_recommendations(request: HttpRequest) -> HttpResponse:
         logger.warning("customer_recommendations.unavailable: %s", exc)
         return _error("ayla_unavailable", "ayla recommendations unavailable", 502)
 
-    return JsonResponse(ayla_body)
+    try:
+        translated, keys = translate_provider_keys(ayla_body)
+    except DatabaseError as exc:
+        # Наша база, не их ответ. Пропустив кандидатов непереведёнными,
+        # мы получили бы у полки `UNRENDERABLE_CANDIDATES` — имя, которое
+        # обвиняет Ayla в нашей собственной аварии, и по которому пойдут
+        # чинить не там. Недоступность обязана называться недоступностью.
+        logger.warning("customer_recommendations.mirror_unavailable: %s", exc)
+        return _error("mirror_unavailable", "catalog mirror unavailable", 503)
+
+    if keys.untranslated:
+        # Две причины раздельно, не одной суммой: «зеркало отстало»
+        # и «разошлись в том, кто продаётся» — разные болезни с разным
+        # лечением, и второе означает, что Ayla рекомендует того, кого
+        # мы продать не можем. Чинить это здесь нельзя (условие
+        # принадлежит Ayla, DRF-1571), видеть — обязательно.
+        logger.warning(
+            "customer_recommendations.keys_untranslated %s",
+            keys.as_log_fields(),
+        )
+    else:
+        logger.info("customer_recommendations.keys %s", keys.as_log_fields())
+
+    return JsonResponse(translated)
 
 
 # --- /customer/wellness/today — nutrition composition ----------------------
