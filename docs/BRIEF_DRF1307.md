@@ -87,7 +87,7 @@ DRF-1301 установила, что такие рассылки **действ
 
 **Коммитить промежуточное** — сессия может кончиться внезапно, сегодня это случилось пять раз.
 
-**`.venv` в главном дереве бота пуст.** Настоящий — `ai-bot-platform-tests/.venv`. pip нет, uv. Для detect-secrets: `uvx --from detect-secrets==1.5.0`.
+**`.venv` в главном дереве бота пуст.** Настоящий — `ai-bot-platform-tests/.venv`. pip нет, uv. Запуск detect-secrets — `uvx --from detect-secrets==1.5.0`.
 
 **Три файла оркестратора падают локально без Redis** (`test_shadow_turn`, `test_shadow_short_circuit`, `test_pipeline_latency`) — не ваш регресс, в CI зелёные.
 
