@@ -50,21 +50,31 @@ def _ts() -> datetime:
     return datetime(2026, 8, 23, 12, 0, tzinfo=timezone.utc)
 
 
-def _salon(slug: str, name: str, *, city: str = "", address: str = ""):
+def _salon(slug: str, name: str, *, city: str = "", address: str | None = None):
     """One salon: tenant + one bookable master (the platform's definition of
-    «салон на витрине»). ``address`` rides in the master's mirrored raw —
-    exactly where the Ayla specialists feed puts it."""
+    «салон на витрине»).
+
+    ``address`` goes into ``Tenant.address`` — the salon's OWN column (DRF-1587),
+    where the sync writes it (``_write_tenant_address``) and where
+    ``discover_salons`` reads it since DRF-1609. It used to ride in the master's
+    mirrored ``raw``, which made a salon's address a function of its roster —
+    OPEN_DECISIONS §45 called that a lottery.
+
+    The default is ``None``, not "" — «источник ничего не сказал», today's state
+    of every real salon. Pass ``address=""`` for the other empty: «источник
+    сказал, что адреса нет».
+    """
     from apps.catalog.models import CatalogMaster
     from apps.tenancy.models import Tenant
 
-    tenant = Tenant.objects.create(slug=slug, name=name, city=city)
+    tenant = Tenant.objects.create(slug=slug, name=name, city=city, address=address)
     CatalogMaster.all_tenants.create(
         tenant=tenant,
         external_updated_at=_ts(),
         name=f"Мастер {name}",
         is_active=True,
         invite_status=CatalogMaster.InviteStatus.ACCEPTED,
-        raw={"address": address} if address else {},
+        raw={},
         # DRF-1540/1544 — синхронизированная строка несёт канонический ключ.
         # Без него мастер не продаётся, и клиентские поверхности отвечали бы
         # пустотой не потому, что сломаны.
@@ -179,8 +189,17 @@ class TestExecuteCatalogTool:
 
     def test_show_salons_renders_real_mirror_rows(self):
         _salon("s1", "BodyFormula", city="Пенза", address="Пенза, ул. Леонова, 15а")
-        t2 = _salon("s2", "Безадресный", city="Пенза")  # address empty — pilot shape
+        t2 = _salon("s2", "Безадресный", city="Пенза")  # address is None — pilot shape
         _service(t2, "Массаж спины")
+        # DRF-1609 — пустот ДВЕ, и обе обязаны дойти до человека одинаково
+        # пустыми. Раньше отличить их было нечем: мастерский raw умел только
+        # "". Теперь ``None`` («источник промолчал») и ``""`` («источник
+        # сказал: адреса нет») — разные значения на DTO, и проверять надо оба,
+        # иначе сторож ловит половину случаев.
+        # Без услуг — намеренно: этот салон здесь ради адреса, и добавлять
+        # ему чип значило бы попутно переписать соседнее утверждение про
+        # состав кнопок, которое к DRF-1609 отношения не имеет.
+        _salon("s3", "Сказали-что-нет", city="Пенза", address="")
 
         reply = execute_catalog_tool("show_salons", {"city": "Пенза"})
 
@@ -188,8 +207,12 @@ class TestExecuteCatalogTool:
         assert "BodyFormula" in reply.text
         assert "ул. Леонова, 15а" in reply.text
         assert "Безадресный" in reply.text
-        # An empty address must not leak as «None».
+        assert "Сказали-что-нет" in reply.text
+        # Neither empty may leak as «None» — nor as any other placeholder.
         assert "None" not in reply.text
+        # И обе строки выглядят ОДИНАКОВО: город без адреса и без хвоста.
+        assert "• Безадресный — Пенза\n" in reply.text
+        assert "• Сказали-что-нет — Пенза\n" in reply.text
         # Owner's call 23.08: a chip per salon that has something to show.
         # BodyFormula has no services here, so it gets a line and no chip —
         # the tap would open «услуги пока не загружены».
