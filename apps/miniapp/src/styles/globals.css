@@ -5901,6 +5901,36 @@ a {
   line-height: var(--leading-normal);
 }
 
+/* Выбор часового пояса (DRF-1477). Список кнопок, а не `select`:
+   родной селект в MAX-вебвью открывает системное колесо, где не видно
+   ни текущего значения, ни того, сколько всего вариантов — а их здесь
+   намеренно немного. */
+.timezone-sheet__list {
+  margin: var(--s-3) 0 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-1);
+  max-height: 46vh;
+  overflow-y: auto;
+}
+.timezone-sheet__option {
+  width: 100%;
+  text-align: left;
+  padding: var(--s-3) var(--s-4);
+  background: var(--c-surface-1);
+  border: 1px solid var(--c-divider);
+  border-radius: var(--r-md);
+  font-size: var(--font-size-300);
+  color: var(--c-text-primary);
+  cursor: pointer;
+}
+.timezone-sheet__option[aria-current="true"] {
+  border-color: var(--c-accent);
+  font-weight: 600;
+}
+
 /* Destructive-confirmation input (C5 erasure, DRF-956). Mirrors the
    typed-token field on the legacy profile delete card. */
 .profile-support-sheet__input {
