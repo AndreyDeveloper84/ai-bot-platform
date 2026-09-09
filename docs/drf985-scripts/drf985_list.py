@@ -11,14 +11,20 @@ TID = "b32a057a-56c7-4bf0-ae50-e11e76ab44be"
 flds = {f.name for f in Appointment._meta.fields}
 print("FIELDS:", sorted(flds))
 
-qs = Appointment.objects.filter(tenant_id=TID) if "tenant" in flds else Appointment.objects.filter(salon_service__tenant_id=TID)
+qs = (
+    Appointment.objects.filter(tenant_id=TID)
+    if "tenant" in flds
+    else Appointment.objects.filter(salon_service__tenant_id=TID)
+)
 qs = qs.select_related("salon_service").order_by("pk")
 print("TOTAL:", qs.count())
 
 active = set(
-    SpecialistService.objects.filter(tenant_id=TID, is_active=True)
-    .values_list("specialist_id", "salon_service_id")
+    SpecialistService.objects.filter(tenant_id=TID, is_active=True).values_list(
+        "specialist_id", "salon_service_id"
+    )
 )
+
 
 def g(obj, *names):
     for n in names:
@@ -27,6 +33,7 @@ def g(obj, *names):
             if v is not None:
                 return v
     return None
+
 
 for a in qs:
     svc = g(a, "salon_service")
