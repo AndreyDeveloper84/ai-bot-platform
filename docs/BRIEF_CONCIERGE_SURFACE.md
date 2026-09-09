@@ -129,7 +129,7 @@ daily_summary    -> SummaryResponse(calories_goal=2000, ...)
 
 **Коммитить промежуточное.** Сессия может кончиться внезапно — сегодня это случилось трижды. Незакоммиченное пропадает.
 
-**`.venv` в главном дереве бота пуст.** Настоящий — `ai-bot-platform-tests/.venv`. Пакетного менеджера pip нет, используется uv. Для detect-secrets: `uvx --from detect-secrets==1.5.0`.
+**`.venv` в главном дереве бота пуст.** Настоящий — `ai-bot-platform-tests/.venv`. Пакетного менеджера pip нет, используется uv. Запуск detect-secrets — `uvx --from detect-secrets==1.5.0`.
 
 **Три файла оркестратора падают локально без Redis** (`test_shadow_turn`, `test_shadow_short_circuit`, `test_pipeline_latency`) — это не ваш регресс, в CI они зелёные.
 
