@@ -77,7 +77,16 @@ interface SheetChromeProps {
   children: React.ReactNode;
 }
 
-function SheetChrome({
+/**
+ * Общая обёртка листа: заголовок, ловушка фокуса, возврат фокуса на
+ * триггер, закрытие по Esc.
+ *
+ * Экспортируется (DRF-1477), потому что лист часового пояса —
+ * `TimezoneSheet.tsx` — обязан вести себя так же. Скопировать эту
+ * обёртку значило бы завести вторую реализацию ловушки фокуса и второе
+ * поведение Esc: они разойдутся не сразу и молча, а починят их порознь.
+ */
+export function SheetChrome({
   headlineId,
   headline,
   closeDisabled,

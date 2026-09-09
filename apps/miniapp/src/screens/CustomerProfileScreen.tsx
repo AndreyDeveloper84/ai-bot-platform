@@ -45,6 +45,7 @@ import { useNavigate } from "react-router-dom";
 import { ComingSoonCard } from "../components/ComingSoonCard";
 import { ConsentRow } from "../components/ConsentRow";
 import { DisclosureSheet } from "../components/DisclosureSheet";
+import { TimezoneSheet, zoneLabel } from "../components/TimezoneSheet";
 import { NotificationCard } from "../components/NotificationCard";
 import {
   DataStorageRevokeSheet,
@@ -62,6 +63,7 @@ import {
   fetchMe,
   formatConsentDate,
   setMarketingConsent,
+  saveTimezone,
   setProactiveOptOut,
   type ConsentsResponse,
   type MeProfileResponse,
@@ -165,6 +167,8 @@ export function CustomerProfileScreen() {
   const [healthConsent, setHealthConsent] = useState<HealthConsentState | null>(null);
   const [healthFailed, setHealthFailed] = useState(false);
   const [healthSheetOpen, setHealthSheetOpen] = useState(false);
+  const [tzSheetOpen, setTzSheetOpen] = useState(false);
+  const tzTriggerRef = useRef<HTMLButtonElement | null>(null);
   const healthTriggerRef = useRef<HTMLButtonElement | null>(null);
 
   const load = useCallback(async () => {
@@ -224,6 +228,27 @@ export function CustomerProfileScreen() {
     : healthConsent?.granted
       ? "Отозвать разрешение учитывать питание"
       : "Разрешить учитывать питание";
+
+  /**
+   * Записать пояс и обновить экран ТЕМ, ЧТО ОТВЕТИЛ СЕРВЕР.
+   *
+   * Не тем, что человек нажал: сервер проверяет значение (DRF-1477) и
+   * он же — источник правды. Показать нажатое, не дождавшись ответа,
+   * значило бы завести на экране второе состояние того же поля.
+   *
+   * Ошибку НЕ глотаем — её показывает сам лист, и человек видит, что
+   * пояс остался прежним, а не уходит уверенным в обратном.
+   */
+  const onTimezoneSaved = useCallback(async (zone: string) => {
+    const saved = await saveTimezone(zone);
+    setStatus((prev) =>
+      prev.kind === "ready" ? { ...prev, me: { ...prev.me, timezone: saved } } : prev,
+    );
+    setToast({
+      visible: true,
+      message: `Запомнила: ${zoneLabel(saved)}. Изменить можно здесь же.`,
+    });
+  }, []);
 
   const onHealthSettled = useCallback((next: HealthConsentState) => {
     setHealthConsent(next);
@@ -527,6 +552,49 @@ export function CustomerProfileScreen() {
             </section>
 
             {/* R3 — Memory transparency (deferred) */}
+            {/* Часовой пояс (DRF-1477). Своя секция, а не строка среди
+                согласий: пояс — не согласие, и складывать их вместе
+                значило бы предложить человеку «разрешить» своё
+                местоположение во времени.
+
+                Рядом на этом экране — имя, согласия и отзыв хранения.
+                Ничего про здоровье и питание здесь нет: пояс к особой
+                категории не относится, и подмешивать соседей нельзя. */}
+            <section
+              className="profile-section"
+              aria-labelledby="profile-tz-h2"
+            >
+              <h2 id="profile-tz-h2" className="profile-section__heading">
+                Часовой пояс
+              </h2>
+              <dl className="profile-consent-list">
+                <ConsentRow
+                  variant="action"
+                  title="Мой пояс"
+                  statusText={
+                    status.me.timezone
+                      ? zoneLabel(status.me.timezone)
+                      : "Не задан"
+                  }
+                  actionLabel={status.me.timezone ? "Изменить" : "Указать"}
+                  actionAriaLabel={
+                    status.me.timezone
+                      ? `Изменить часовой пояс, сейчас ${zoneLabel(status.me.timezone)}`
+                      : "Указать часовой пояс"
+                  }
+                  description={
+                    <>
+                      По нему <span lang="en">Ayla</span> считает время в
+                      напоминаниях. Пока пояс не задан, время считается по
+                      салону, в который ты записываешься.
+                    </>
+                  }
+                  onAction={() => setTzSheetOpen(true)}
+                  triggerRef={tzTriggerRef}
+                />
+              </dl>
+            </section>
+
             <section
               className="profile-section"
               aria-labelledby="profile-r3-h2"
@@ -657,6 +725,13 @@ export function CustomerProfileScreen() {
         onClose={() => setHealthSheetOpen(false)}
         granted={healthConsent?.granted ?? false}
         onSettled={onHealthSettled}
+      />
+      <TimezoneSheet
+        open={tzSheetOpen}
+        triggerRef={tzTriggerRef}
+        onClose={() => setTzSheetOpen(false)}
+        current={status.kind === "ready" ? status.me.timezone : ""}
+        onSave={onTimezoneSaved}
       />
       <PersonalDataExportSheet
         open={exportOpen}

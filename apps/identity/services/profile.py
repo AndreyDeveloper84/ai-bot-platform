@@ -39,6 +39,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import date
 from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from django.db import transaction
 from django.utils import timezone
@@ -108,6 +109,41 @@ def get_profile(bot_user: BotUser) -> ProfileSnapshot:
 
 
 _EDITABLE_USER_FIELDS = {"client_name", "timezone"}
+
+
+def _validated_timezone(value: str) -> str:
+    """Пропустить только настоящий IANA-пояс либо пустоту (DRF-1477).
+
+    До этой проверки колонку принимала ЛЮБАЯ строка: она обрезалась до
+    64 символов и уходила в базу. Значит `«не знаю»` доезжало до
+    `nutrition_proactive.prefs.resolve_timezone`, где
+    `_safe_zoneinfo` возвращал `None`, и человек **молча** уезжал на
+    пояс салона. Ошибка не сообщалась никому и никогда: ни тому, кто
+    прислал, ни тому, кто читает.
+
+    Пустая строка разрешена намеренно — это «не задано» (DRF-1606),
+    единственный способ сказать «ответа нет». Отклонять её значило бы
+    запретить снимать ответ, однажды данный по ошибке.
+
+    Проверка идёт через `ZoneInfo`, а не по списку: список пришлось бы
+    поддерживать, а база tz обновляется без нас. Неизвестный пояс
+    отвергается ЯВНО — 400 с именем причины вместо тихого сползания на
+    салон.
+    """
+    if not value:
+        return ""
+    try:
+        ZoneInfo(value)
+    except (ZoneInfoNotFoundError, ValueError) as exc:
+        # Сообщаем, что именно не так, но НЕ подставляем «правильное»
+        # значение: догадка о поясе человека — это ровно то, что
+        # DRF-1606 только что вычистил из умолчания колонки.
+        raise ProfileUpdateError(
+            f"timezone must be a valid IANA zone (e.g. Europe/Moscow); got {value!r}"
+        ) from exc
+    return value
+
+
 #: Поля, которые ``update_profile`` присваивает ``UserPreferences`` сам.
 #: ``notify_promo`` сюда НЕ входит: он зеркало реестра согласий, см.
 #: :data:`_CONSENT_BACKED_PREF_FIELDS`.
@@ -161,13 +197,27 @@ def update_profile(bot_user: BotUser, payload: dict[str, Any]) -> ProfileSnapsho
     # BotUser.timezone(64). Hardcoded to avoid runtime _meta walks on every
     # PATCH (and to keep mypy happy with the Field | ForeignObjectRel union).
     _USER_MAX_LEN = {"client_name": 150, "timezone": 64}
-    user_dirty = False
+    # СНАЧАЛА проверяем всё, потом пишем хоть что-то.
+    #
+    # Проверка внутри цикла записи оставляла бы наполовину применённую
+    # правку: `{"client_name": ..., "timezone": "мусор"}` успевал бы
+    # присвоить имя экземпляру и только затем упасть. Сегодня это не
+    # доезжало до базы лишь потому, что `save()` стоит НИЖЕ цикла —
+    # то есть гарантия держалась на порядке строк, а не на устройстве,
+    # и первая же перестановка `save()` внутрь сломала бы её молча.
+    cleaned_user: dict[str, str] = {}
     for key in _EDITABLE_USER_FIELDS & payload.keys():
         value = payload[key]
         if not isinstance(value, str):
             raise ProfileUpdateError(f"{key} must be a string")
-        setattr(bot_user, key, value.strip()[: _USER_MAX_LEN[key]])
-        user_dirty = True
+        cleaned = value.strip()[: _USER_MAX_LEN[key]]
+        if key == "timezone":
+            cleaned = _validated_timezone(cleaned)
+        cleaned_user[key] = cleaned
+
+    user_dirty = bool(cleaned_user)
+    for key, cleaned in cleaned_user.items():
+        setattr(bot_user, key, cleaned)
     if user_dirty:
         bot_user.save(update_fields=[*(_EDITABLE_USER_FIELDS & payload.keys()), "last_seen"])
 

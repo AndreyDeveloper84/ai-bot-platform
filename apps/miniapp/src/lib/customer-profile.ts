@@ -84,11 +84,27 @@
 // действие с подтверждением); остальные строки — locked info rows.
 // ---------------------------------------------------------------------------
 
-import { ApiError, fetchProfile, request, type Profile } from "./api";
+import {
+  ApiError,
+  fetchProfile,
+  request,
+  updateProfile,
+  type Profile,
+} from "./api";
 
 export interface MeProfileResponse {
   display_name: string;
   max_handle: string;
+  /**
+   * Часовой пояс человека. **Пусто означает «не задано»** (DRF-1606):
+   * умолчанием колонки стоял настоящий пояс, и молчание было неотличимо
+   * от осознанного выбора москвича.
+   *
+   * Пустота доезжает до экрана пустотой и НЕ превращается по дороге в
+   * подставленное значение — иначе мы вылечили бы колонку и завели ту же
+   * болезнь на экране.
+   */
+  timezone: string;
   /**
    * Variant C multi-tenant scope hint (per spec §3.1 + memory
    * `project_cross_tenant_invisible_relationship`). Nearest tenant is
@@ -300,6 +316,10 @@ function toMeProfile(p: Profile): MeProfileResponse {
   return {
     display_name: p.client_name || p.display_name,
     max_handle: "",
+    // Как пришло: пусто остаётся пустым. Ни `?? "Europe/Moscow"`, ни
+    // определения браузером здесь — определяет и предлагает лист, а
+    // записывает человек (DRF-1477).
+    timezone: p.timezone ?? "",
     tenant_names: [],
   };
 }
@@ -335,12 +355,18 @@ function toProactivePrefs(doc: ConsentsDocument): ProactivePrefsResponse {
 const DEFAULT_ME: MeProfileResponse = {
   display_name: "Анна Петрова",
   max_handle: "@anna_petrova",
+  // Пояс задан — заглушка «человек уже ответил».
+  timezone: "Europe/Moscow",
   tenant_names: ["Beauty Place", "Casa Bella", "Студия Натали"],
 };
 
 const NEW_USER_ME: MeProfileResponse = {
   display_name: "Мария",
   max_handle: "@maria_k",
+  // Новый человек: пояс НЕ задан. Пусто, а не «Europe/Moscow» —
+  // заглушка обязана уметь показывать то состояние, ради которого
+  // DRF-1606 и делался.
+  timezone: "",
   tenant_names: ["Beauty Place"],
 };
 
@@ -424,6 +450,18 @@ export async function fetchMe(): Promise<MeProfileResponse> {
  * по кусочкам: сервер отдаёт один документ, и три запроса за одним и
  * тем же документом отличались бы только моментом съёмки.
  */
+/**
+ * Записать часовой пояс, названный человеком (DRF-1477).
+ *
+ * Значение проверяется НА СЕРВЕРЕ (`update_profile` требует настоящий
+ * IANA-пояс): до этого колонку принимала любая строка, `«не знаю»`
+ * доезжало до планировщика и молча сваливалось на пояс салона.
+ */
+export async function saveTimezone(zone: string): Promise<string> {
+  const updated = await updateProfile({ timezone: zone });
+  return updated.timezone ?? "";
+}
+
 export async function fetchConsents(): Promise<ConsentsResponse> {
   const stub = explicitStubVariant();
   if (stub) {
