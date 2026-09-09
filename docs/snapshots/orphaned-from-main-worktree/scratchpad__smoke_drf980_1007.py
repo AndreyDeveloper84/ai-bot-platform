@@ -33,9 +33,7 @@ def run():
     print("SMOKE1007 setting =", getattr(settings, "BOOKING_NO_PREPAYMENT_TENANTS", None))
     pilot = Tenant.objects.get(id="b32a057a-56c7-4bf0-ae50-e11e76ab44be")
     other = Tenant.objects.exclude(id=pilot.id).first()
-    print(
-        "SMOKE1007 pilot =", _resolve_payment_required(pilot, {}), "(expect False)"
-    )
+    print("SMOKE1007 pilot =", _resolve_payment_required(pilot, {}), "(expect False)")
     print(
         "SMOKE1007 other =",
         _resolve_payment_required(other, {}),
@@ -55,9 +53,7 @@ def run():
     try:
         with transaction.atomic():
             t = Tenant.objects.create(slug=f"smoke-{uuid.uuid4().hex[:8]}", name="smoke")
-            bu = BotUser.all_tenants.create(
-                tenant=t, channel="max", channel_user_id="smoke-bu"
-            )
+            bu = BotUser.all_tenants.create(tenant=t, channel="max", channel_user_id="smoke-bu")
             conv = Conversation.all_tenants.create(tenant=t, bot_user=bu)
             with tenant_scope(t):
                 task = create_admin_task(conv, task_type=AdminTask.TaskType.HANDOFF)
@@ -88,9 +84,7 @@ def run():
                 t3 = create_admin_task(conv, task_type=AdminTask.TaskType.COMPLAINT)
             admin_close(t2.pk, "resolved")
             conv.refresh_from_db()
-            print(
-                "SMOKE980 first_of_two state =", conv.state, "(expect human_handoff)"
-            )
+            print("SMOKE980 first_of_two state =", conv.state, "(expect human_handoff)")
             admin_close(t3.pk, "cancelled")
             conv.refresh_from_db()
             print("SMOKE980 last_of_two state =", conv.state, "(expect idle)")
