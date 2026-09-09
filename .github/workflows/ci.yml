@@ -445,6 +445,18 @@ jobs:
       - name: Unguarded-absence assertion guard (AST lint)
         run: uv run python tools/lint/negative_assert_guard.py apps/ tests/
 
+      # Ориентира питания нет ни у кого до утверждения методики (§82,
+      # §85): плоские 2000 ккал и формула воды 30 мл × вес сняты
+      # владельцем 09.09.2026. Место без ориентира читается как
+      # недоделка, и «разумное умолчание» туда уже возвращали ДВАЖДЫ —
+      # восьмёрку стаканов сначала выкинули из клиента, а она приехала
+      # по проводу с бэкенда. Сторож ловит форму возврата (число в
+      # поле-ориентире), а не конкретное значение. Чего он не ловит —
+      # переименование поля и TypeScript-стабы — сказано в его
+      # докстринге; там же названы файлы, которым подстановка разрешена.
+      - name: Nutrition-target substitution guard (AST lint)
+        run: uv run python tools/lint/nutrition_target_guard.py apps/
+
       - name: Django manage.py check
         run: uv run python manage.py check
 
