@@ -1,0 +1,109 @@
+diff --git a/apps/identity/tests/test_recompute.py b/apps/identity/tests/test_recompute.py
+index 204b770..3b9821d 100644
+--- a/apps/identity/tests/test_recompute.py
++++ b/apps/identity/tests/test_recompute.py
+@@ -8,6 +8,7 @@ from decimal import Decimal
+ from unittest.mock import patch
+ 
+ import pytest
++from freezegun import freeze_time
+ 
+ from apps.identity.models import BotUser, ClientProfile
+ from apps.identity.services.recompute import recompute_profile
+@@ -45,11 +46,16 @@ def _visits_at(days_back: list[int], amount=Decimal("2000")) -> list[_Visit]:
+     return [_Visit(visited_at=_AS_OF - timedelta(days=d), amount=amount) for d in days_back]
+ 
+ 
++def _recompute_at_as_of(bot_user: BotUser, visits: list[_Visit]) -> ClientProfile:
++    with freeze_time(_AS_OF):
++        return recompute_profile(bot_user, visits)
++
++
+ class TestRecomputeHappyPath:
+     def test_writes_profile_fields(self, bot_user, tenant):
+         # 5 visits, recent (loyal-band) — frequency=5, monetary=10000
+         with tenant_scope(tenant):
+-            profile = recompute_profile(bot_user, _visits_at([5, 30, 60, 90, 120]))
++            profile = _recompute_at_as_of(bot_user, _visits_at([5, 30, 60, 90, 120]))
+ 
+         assert profile.bot_user_id == bot_user.id
+         assert profile.tenant_id == tenant.id
+@@ -63,7 +69,7 @@ class TestRecomputeHappyPath:
+ 
+     def test_empty_visits_produces_new_segment(self, bot_user, tenant):
+         with tenant_scope(tenant):
+-            profile = recompute_profile(bot_user, [])
++            profile = _recompute_at_as_of(bot_user, [])
+ 
+         assert profile.frequency_visits == 0
+         assert profile.monetary_total == Decimal("0")
+@@ -77,8 +83,8 @@ class TestRecomputeHappyPath:
+ class TestIdempotency:
+     def test_second_call_updates_same_row(self, bot_user, tenant):
+         with tenant_scope(tenant):
+-            recompute_profile(bot_user, _visits_at([5]))
+-            recompute_profile(bot_user, _visits_at([5, 30, 60, 90, 120, 150, 180, 210]))
++            _recompute_at_as_of(bot_user, _visits_at([5]))
++            _recompute_at_as_of(bot_user, _visits_at([5, 30, 60, 90, 120, 150, 180, 210]))
+ 
+         # Still one row; second call overwrote first.
+         assert ClientProfile.all_tenants.filter(bot_user=bot_user).count() == 1
+@@ -88,15 +94,13 @@ class TestIdempotency:
+ 
+     def test_last_recomputed_at_updates_per_call(self, bot_user, tenant):
+         with tenant_scope(tenant):
+-            recompute_profile(bot_user, _visits_at([5]))
++            _recompute_at_as_of(bot_user, _visits_at([5]))
+             first_ts = ClientProfile.all_tenants.get(bot_user=bot_user).last_recomputed_at
+ 
+-        # Force a small delay then recompute again.
+-        import time
+-
+-        time.sleep(0.01)
++        second_as_of = _AS_OF + timedelta(seconds=1)
+         with tenant_scope(tenant):
+-            recompute_profile(bot_user, _visits_at([5, 30]))
++            with freeze_time(second_as_of):
++                recompute_profile(bot_user, _visits_at([5, 30]))
+             second_ts = ClientProfile.all_tenants.get(bot_user=bot_user).last_recomputed_at
+ 
+         assert second_ts > first_ts
+@@ -118,7 +122,7 @@ class TestEventEmission:
+     def test_emits_client_profile_recomputed(self, bot_user, tenant):
+         with patch("apps.identity.services.recompute.emit") as mock_emit:
+             with tenant_scope(tenant):
+-                recompute_profile(bot_user, _visits_at([5, 30, 60]))
++                _recompute_at_as_of(bot_user, _visits_at([5, 30, 60]))
+ 
+         mock_emit.assert_called_once()
+         args, kwargs = mock_emit.call_args
+@@ -133,25 +137,25 @@ class TestEventEmission:
+ class TestAvgIntervalDerivation:
+     def test_two_visits_30_days_apart(self, bot_user, tenant):
+         with tenant_scope(tenant):
+-            profile = recompute_profile(bot_user, _visits_at([0, 30]))
++            profile = _recompute_at_as_of(bot_user, _visits_at([0, 30]))
+         assert profile.avg_visit_interval_days == 30
+ 
+     def test_three_visits_15_days_apart(self, bot_user, tenant):
+         # span 30, N-1=2, → 15
+         with tenant_scope(tenant):
+-            profile = recompute_profile(bot_user, _visits_at([0, 15, 30]))
++            profile = _recompute_at_as_of(bot_user, _visits_at([0, 15, 30]))
+         assert profile.avg_visit_interval_days == 15
+ 
+     def test_single_visit_returns_none(self, bot_user, tenant):
+         with tenant_scope(tenant):
+-            profile = recompute_profile(bot_user, _visits_at([10]))
++            profile = _recompute_at_as_of(bot_user, _visits_at([10]))
+         assert profile.avg_visit_interval_days is None
+ 
+ 
+ class TestPersistence:
+     def test_returned_profile_is_saved(self, bot_user, tenant):
+         with tenant_scope(tenant):
+-            profile = recompute_profile(bot_user, _visits_at([5]))
++            profile = _recompute_at_as_of(bot_user, _visits_at([5]))
+         # Re-read from DB and confirm values match.
+         from_db = ClientProfile.all_tenants.get(bot_user=bot_user)
+         assert from_db.pk == profile.pk

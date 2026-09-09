@@ -62,6 +62,11 @@ class ProfileSnapshot:
     # Favourites — top-N derived; computed elsewhere, populated here for F4
     favorite_master_name: str | None
     favorite_service_name: str | None
+    # DRF-1564 — момент согласия на сканирование еды, ISO 8601 либо None.
+    # Отдаётся моментом, а не булевым: ту же колонку читает гейт навыка
+    # (`apps/skills/food_scanner/skill.py:463`), и два производных от
+    # одного значения разошлись бы рано или поздно.
+    food_scanner_consent_at: str | None
 
 
 def _mask_phone(phone: str) -> str:
@@ -105,6 +110,11 @@ def get_profile(bot_user: BotUser) -> ProfileSnapshot:
         },
         favorite_master_name=None,
         favorite_service_name=None,
+        food_scanner_consent_at=(
+            bot_user.food_scanner_consent_at.isoformat()
+            if bot_user.food_scanner_consent_at
+            else None
+        ),
     )
 
 
