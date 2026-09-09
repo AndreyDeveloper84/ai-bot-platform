@@ -20,7 +20,7 @@
   и в ней нет ни одного элемента ввода решения;
 * :func:`test_the_form_offers_no_field_to_type_a_decision_into` —
   самый сильный: ``ModelAdmin.get_form`` не принимает от оператора ни
-  одного поля. До правки принимала четырнадцать, включая ``status``.
+  одного поля. До правки принимала тринадцать — замерено, не оценено.
 """
 
 from __future__ import annotations
@@ -158,8 +158,11 @@ def test_the_form_offers_no_field_to_type_a_decision_into(
 
     Проверяется не разметка, а ``ModelAdmin.get_form``: именно её
     ``base_fields`` решают, чьё значение из POST будет записано. До
-    правки там лежали ``status``, ``resolution_note``, ``resolved_at`` и
-    ещё одиннадцать полей.
+    правки там лежало ТРИНАДЦАТЬ полей (замерено на ``origin/dev``, а не
+    прикинуто): ``master``, ``reason``, ``reason_class``, ``reason_text``,
+    ``requested_by``, ``requested_end``, ``requested_start``,
+    ``resolution_note``, ``resolved_at``, ``resolved_by``,
+    ``resolved_by_bot_user_id``, ``status``, ``tenant``.
 
     POST-ом это доказать не вышло, и причина названа, а не обойдена: у
     админского запроса нет тенанта в контексте, поэтому ``master``
