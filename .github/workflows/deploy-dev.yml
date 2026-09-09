@@ -22,11 +22,19 @@
 #
 # ### What each deploy does
 #   1. only on a green `ci` run (workflow_run) — never deploys red builds
-#   2. ssh to the box, git pull --ff-only dev
-#   3. docker compose up -d --build --force-recreate --no-deps web worker
+#   2. pg_dump of the pilot database BEFORE anything else touches the box;
+#      an empty or missing dump aborts the deploy (rotation keeps the last
+#      KEEP snapshots — see the step for why the depth is a default)
+#   3. ssh to the box, git pull --ff-only dev
+#   4. docker compose up -d --build --force-recreate --no-deps web worker
 #      (--no-deps keeps postgres/redis/chromadb/minio + their data untouched)
-#   4. smoke: /readyz/ on 8014 (5 retries) — fails the deploy if not green
-#   5. best-effort Telegram alert to the dev channel
+#   5. smoke: /readyz/ on 8014 (5 retries) — fails the deploy if not green
+#   6. best-effort Telegram alert to the dev channel
+#
+# The list names the load-bearing steps, NOT all of them: `migrate`,
+# `collectstatic` and the Mini App build live inside the steps above and
+# are not numbered here. Read the steps, not this list, before concluding
+# that something does not happen.
 
 name: deploy-dev
 
@@ -96,6 +104,12 @@ jobs:
             set -euo pipefail
             cd '${DEV_DEPLOY_PATH}'
             BACKUP_DIR=/var/backups/ayla-bot-staging
+            # Глубина — ЧЕСТНОЕ УМОЛЧАНИЕ, а не расчёт: размер дампа
+            # пилота на момент написания не измерен, и десять взято как
+            # число, которое заведомо лучше бесконечности. Занятое место
+            # печатается ниже каждым прогоном — по первому же выводу
+            # глубину надо назначить числом. Пока этого не сделано, тот,
+            # кто читает `KEEP=10`, не должен принимать его за решение.
             KEEP=10
             BACKUP_PATH=\"\$BACKUP_DIR/pre-deploy-\$(date +%Y%m%d-%H%M%S).sql.gz\"
             # /var/backups принадлежит root на стоковой машине; tee под sudo,
