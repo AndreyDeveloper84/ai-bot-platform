@@ -25,7 +25,8 @@ event-emission side effects.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, ClassVar, cast
+import operator
+from typing import TYPE_CHECKING, Any, ClassVar, cast
 
 from django.contrib import admin, messages
 from django.core.exceptions import PermissionDenied
@@ -41,6 +42,63 @@ from apps.booking.services.transitions import InvalidBookingTransition
 if TYPE_CHECKING:  # pragma: no cover - только для аннотаций
     from django.contrib.auth.models import AbstractUser
     from django.http import HttpRequest, HttpResponse
+
+class AllTenantsRelatedListFilter(admin.RelatedFieldListFilter):
+    """Варианты бокового фильтра по FK берутся из ``all_tenants`` (DRF-1608).
+
+    ПОЧЕМУ ЯВНЫЙ ОБХОД ТЕНАНТНОГО МЕНЕДЖЕРА, А НЕ НЕДОСМОТР.
+
+    Django строит список вариантов бокового фильтра через
+    ``field.get_choices()``, а тот ходит в ``rel_model._default_manager``
+    — то есть в ``CatalogMaster.objects``, у которого стоит
+    :class:`~apps.tenancy.managers.TenantScopedManager`. У запроса в
+    ``/admin/`` тенантного контекста нет и быть не должно: админка
+    сознательно кросс-тенантная (``get_queryset`` ниже уже берёт
+    ``all_tenants``, экраны несут предупреждение про кросс-тенант,
+    DRF-1023). Поэтому ``objects`` вне контекста ведёт себя ровно так,
+    как задумано **для прикладного кода**, и ровно неверно для админки:
+
+      * ``STRICT_TENANT_SCOPE=strict``  → ``CrossTenantError`` из
+        ``filters.py`` ещё до отрисовки: страница отдаёт **500**,
+        оператор списка записей не видит вовсе;
+      * ``STRICT_TENANT_SCOPE=audit``   → ``.none()``: страница **200**,
+        а фильтр «Мастер» молча пуст при непустой таблице мастеров —
+        оператор читает это как «мастеров нет».
+
+    Замер 09.09.2026 на ``origin/dev`` @ 92ebc6c, оба режима, зонд
+    ``/admin/booking/bookingrequest/`` с двумя мастерами в базе:
+    strict → 500 / 0 вариантов, audit → 200 / 0 вариантов.
+
+    Обход именно здесь, а не в менеджере: чинить ``TenantScopedManager``
+    под админку значило бы ослаблять сторож ради одного потребителя.
+    Сторож прав — неправ был потребитель, который звал ``objects``.
+
+    Ограничение по назначению: фильтр применять только на экранах, где
+    кросс-тенантный обзор — заявленное свойство экрана. Для модели без
+    ``all_tenants`` поведение падает обратно на штатное Django —
+    молчаливой смены семантики не происходит.
+    """
+
+    def field_choices(self, field: Any, request: Any, model_admin: Any) -> list:
+        rel_model = field.remote_field.model
+        manager = getattr(rel_model, "all_tenants", None)
+        if manager is None:
+            # Модель не тенантная (или escape-hatch не объявлен) —
+            # ведём себя как штатный Django-фильтр.
+            return super().field_choices(field, request, model_admin)
+
+        remote = field.remote_field
+        choice_func = operator.attrgetter(
+            remote.get_related_field().attname
+            if hasattr(remote, "get_related_field")
+            else "pk"
+        )
+        queryset = manager.complex_filter(field.get_limit_choices_to())
+        ordering = self.field_admin_ordering(field, request, model_admin)
+        if ordering:
+            queryset = queryset.order_by(*ordering)
+        return [(choice_func(obj), str(obj)) for obj in queryset]
+
 
 #: Состояния, из которых машина состояний разрешает отмену.
 _CANCELLABLE_STATUSES = frozenset(
@@ -65,7 +123,10 @@ class BookingRequestAdmin(AylaAdminMedia, admin.ModelAdmin):
     )
     list_filter = (
         "tenant",
-        "master",
+        # DRF-1608: варианты «Мастер» — из ``all_tenants``; см. докстринг
+        # :class:`AllTenantsRelatedListFilter`. Голый ``"master"`` роняет
+        # эту страницу в 500 при ``STRICT_TENANT_SCOPE=strict``.
+        ("master", AllTenantsRelatedListFilter),
         "status",
         "source",
         ("visit_at", admin.DateFieldListFilter),
