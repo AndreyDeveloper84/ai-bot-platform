@@ -653,6 +653,38 @@ class TestTheLocalSourceIsShapedLikeTheWire:
         assert len(template.rows) == 7
         assert template.has_working_day is False
 
+    def test_a_stored_day_off_row_is_not_a_working_day(
+        self, master: CatalogMaster, tenant: Tenant
+    ) -> None:
+        """Строка ЕСТЬ, а рабочего дня нет — и это не одно и то же.
+
+        ``WorkingHours`` с ``is_working=False`` означает выходной: времена
+        обязаны быть null, и это держит CHECK-constraint модели. Значит
+        «у мастера есть строки расписания» и «у мастера есть рабочий день»
+        — разные утверждения, и правило 7 спрашивает второе.
+
+        Тест заведён потому, что соседние два проверяют ОТСУТСТВИЕ строк, а
+        не наличие нерабочих. Считай мы строки вместо рабочих дней —
+        подтверждать было бы «можно» у любого, кому завели семь выходных,
+        и оба прежних теста остались бы зелёными.
+        """
+
+        from apps.scheduling.models import WorkingHours
+
+        for day in range(7):
+            WorkingHours.all_tenants.create(
+                tenant=tenant,
+                master=master,
+                day_of_week=day,
+                is_working=False,
+            )
+
+        with override_settings(BOOKING_VIA_AYLA_REST=False):
+            template = sc.read_weekly_template(master)
+
+        assert len(template.rows) == 7, "семь строк на месте"
+        assert template.has_working_day is False, "и ни одного рабочего дня"
+
 
 class TestTheSweepIsTheOnlyResetThatActuallyRuns:
     """§83, правило 4 — обход снимает подтверждения, под которыми часы ушли.
