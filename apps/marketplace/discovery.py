@@ -2051,20 +2051,6 @@ def _bookable_tenants(
     return {t.id: t for t in Tenant.objects.filter(id__in=tenant_ids)}
 
 
-def _master_address(master: CatalogMaster) -> str:
-    """The salon address as mirrored on a master row, or "".
-
-    The address is per-master, not per-tenant: ``Tenant`` has no address
-    column — the Ayla specialists feed carries it in the specialist payload,
-    mirrored into ``CatalogMaster.raw``. Four of the pilot's masters carry
-    none, so "" is a normal value, not an error.
-    """
-    raw = master.raw
-    if not isinstance(raw, dict):
-        return ""
-    return str(raw.get("address") or "").strip()
-
-
 def discover_salons(
     *,
     city: str | None = None,
@@ -2076,8 +2062,9 @@ def discover_salons(
     Optional ``city`` (exact, case-insensitive, on the tenant) narrows the
     result — same semantics as :func:`discover_masters`; ``tenant_id`` narrows
     it to one salon (the chip-tap read — see :func:`get_salon`). Each card carries
-    the salon's address (first non-empty one among its bookable masters —
-    "" when none of them has one), its bookable-master count, and a count +
+    the salon's address (``Tenant.address`` verbatim — ``None`` when the source
+    said nothing, "" when it said there is none; DRF-1609 stopped deriving it
+    from the masters' addresses), its bookable-master count, and a count +
     short sample of its active services («что там делают»). Three bounded
     queries total: masters, tenants, service names.
     """
@@ -2103,7 +2090,28 @@ def discover_salons(
         salon_masters = masters_by_tenant.get(tenant_id, [])
         if not salon_masters:
             continue  # inactive tenant — its masters are not a public salon
-        address = next((a for a in (_master_address(m) for m in salon_masters) if a), "")
+        # DRF-1609 — адрес САЛОНА берётся из колонки салона.
+        #
+        # Здесь стояло ``next((a for a in (_master_address(m) …) if a), "")``:
+        # первый непустой адрес среди мастеров. OPEN_DECISIONS §45 назвал это
+        # лотереей, и буквально: подтвердили нового мастера, деактивировали
+        # старого — и клиент видит ДРУГОЙ адрес того же салона, хотя салон не
+        # переезжал. DRF-1587 завела ``Tenant.address`` (миграция
+        # tenancy/0015, 08.09) ровно затем, чтобы читать колонку, а не
+        # угадывать; синхронизация уже пишет её (``_write_tenant_address``,
+        # apps/catalog/services/upserter.py).
+        #
+        # ``None`` НЕ схлопывается в "". Это два разных ответа источника, и
+        # различает их та же DRF-1587: ``None`` — источник об адресе ничего
+        # не сказал (сегодня это все салоны: ключа ``tenant_address`` в фиде
+        # ещё нет), "" — источник сказал, что адреса нет. Подстановка "" на
+        # месте молчания сделала бы «мы не знаем» неотличимым от «адреса
+        # нет», а рендер и так печатает пустоту одинаково — значит платить
+        # за слияние нечем, а терять есть что.
+        #
+        # Старшинство «салон против мастера» (DRF-1589) здесь не решается:
+        # мастерский адрес в карточку САЛОНА не попадает вовсе.
+        address = tenant.address
         service_names = services_by_tenant.get(tenant_id, [])
         cards.append(
             SalonCard(
