@@ -56,6 +56,7 @@
 Замер 09.09.2026: подставить `calories_target = 2000` в
 `apps/miniapp_api/views.py` → `1 violation`; снять → `0`.
 """
+
 from __future__ import annotations
 
 import ast
@@ -66,17 +67,19 @@ from pathlib import Path
 
 #: Имена, несущие ОРИЕНТИР. Имён факта (`calories_eaten`,
 #: `calories_total`, `water_ml`, `today_total_ml`) здесь нет намеренно.
-TARGET_NAMES = frozenset({
-    "calories_goal",
-    "calories_target",
-    "water_goal_ml",
-    "water_pct",
-    "today_norm_ml",
-    "today_norm_water_ml",
-    "today_progress_pct",
-    "water_glasses_target",
-    "norm_ml",
-})
+TARGET_NAMES = frozenset(
+    {
+        "calories_goal",
+        "calories_target",
+        "water_goal_ml",
+        "water_pct",
+        "today_norm_ml",
+        "today_norm_water_ml",
+        "today_progress_pct",
+        "water_glasses_target",
+        "norm_ml",
+    }
+)
 
 #: Файлы, которым подстановка разрешена: это стабы и фикстуры, чья
 #: работа — изображать состояние «ориентир ЕСТЬ». §85 вернул шкалу и
@@ -86,15 +89,17 @@ TARGET_NAMES = frozenset({
 #: Список нарочно короткий и путями, а не шаблоном: `**/tests/**` пустило
 #: бы сюда любой будущий тест, а тест — самое частое место, где выдумка
 #: заводится «на время».
-ALLOWED = frozenset({
-    "apps/nutrition_proactive/tests/test_render.py",
-    "apps/nutrition_proactive/tests/test_tasks.py",
-    "apps/orchestrator/tests/test_coach_observation.py",
-    "apps/orchestrator/tests/test_food_history.py",
-    "apps/orchestrator/tests/test_personal_surface.py",
-    "apps/miniapp_api/tests/test_wellness_today.py",
-    "apps/integrations/ayla/tests/test_nutrition_client.py",
-})
+ALLOWED = frozenset(
+    {
+        "apps/nutrition_proactive/tests/test_render.py",
+        "apps/nutrition_proactive/tests/test_tasks.py",
+        "apps/orchestrator/tests/test_coach_observation.py",
+        "apps/orchestrator/tests/test_food_history.py",
+        "apps/orchestrator/tests/test_personal_surface.py",
+        "apps/miniapp_api/tests/test_wellness_today.py",
+        "apps/integrations/ayla/tests/test_nutrition_client.py",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -141,39 +146,42 @@ def scan_source(source: str, *, path: str) -> list[Violation]:
         for t in targets:
             hit = _names_of(t) & TARGET_NAMES
             if hit and value is not None and _is_number(value):
-                out.append(Violation(
-                    path, node.lineno,
-                    f"{sorted(hit)[0]} = {ast.unparse(value)}",
-                ))
+                out.append(
+                    Violation(
+                        path,
+                        node.lineno,
+                        f"{sorted(hit)[0]} = {ast.unparse(value)}",
+                    )
+                )
 
         if isinstance(node, ast.Call):
             for kw in node.keywords:
                 if kw.arg in TARGET_NAMES and _is_number(kw.value):
-                    out.append(Violation(
-                        path, node.lineno,
-                        f"{kw.arg}={ast.unparse(kw.value)}",
-                    ))
+                    out.append(
+                        Violation(
+                            path,
+                            node.lineno,
+                            f"{kw.arg}={ast.unparse(kw.value)}",
+                        )
+                    )
 
         # {"calories_goal": 2000} — та же подстановка, только в теле
         # ответа или в payload. Форма отдельная: ключ здесь СТРОКА, и
         # разбор имён её не видит.
         if isinstance(node, ast.Dict):
             for k, v in zip(node.keys, node.values):
-                if (
-                    isinstance(k, ast.Constant)
-                    and k.value in TARGET_NAMES
-                    and _is_number(v)
-                ):
-                    out.append(Violation(
-                        path, node.lineno,
-                        f'"{k.value}": {ast.unparse(v)}',
-                    ))
+                if isinstance(k, ast.Constant) and k.value in TARGET_NAMES and _is_number(v):
+                    out.append(
+                        Violation(
+                            path,
+                            node.lineno,
+                            f'"{k.value}": {ast.unparse(v)}',
+                        )
+                    )
 
         if isinstance(node, ast.BoolOp) and isinstance(node.op, ast.Or):
             text = ast.unparse(node)
-            if any(n in text for n in TARGET_NAMES) and any(
-                _is_number(v) for v in node.values
-            ):
+            if any(n in text for n in TARGET_NAMES) and any(_is_number(v) for v in node.values):
                 out.append(Violation(path, node.lineno, f"or-умолчание: {text}"))
 
     return out

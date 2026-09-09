@@ -2904,7 +2904,15 @@ def customer_wellness_today(request: HttpRequest) -> HttpResponse:
         # отсутствие на нашей стороне; теперь переводить нечего, и
         # ``or None`` снят: он молча превратил бы явный ноль ориентира
         # в отсутствие, а это уже другая ложь.
-        calories_target = summary_res.calories_goal
+        # `or None` оставлен НАМЕРЕННО, и это не подстраховка «на
+        # всякий случай». Два репозитория выкладываются порознь, и
+        # между двумя выкладками живёт версия Ayla, которая ключ ещё
+        # шлёт со значением 0 — так «цели нет» выражалось до этой
+        # правки. Ноль ккал в сутки физически невозможен, поэтому
+        # читать его как отсутствие — не ложь, а единственное верное
+        # чтение. Без этой строки человек в окне выкладки увидел бы
+        # «1240 / 0 ккал · 0 %».
+        calories_target = summary_res.calories_goal or None
         # БЖУ — строка ЦЕЛЕВАЯ (§11.1 клиентского контракта: «pfc
         # undefined — анкета не пройдена, строка БЖУ скрыта»), поэтому
         # она живёт и гаснет вместе с целью, а не отдельно. Съеденное при
@@ -2990,11 +2998,10 @@ def customer_wellness_today(request: HttpRequest) -> HttpResponse:
         # Ориентира по жидкости нет ни у кого: формула 30 мл × вес снята
         # до утверждения методики (§82, §85 раздел 4), и Ayla ключ не
         # присылает. `None` доезжает до экрана как отсутствие ключа.
-        water_glasses_target = (
-            _ml_to_glasses(water_res.norm_ml) or None
-            if water_res.norm_ml is not None
-            else None
-        )
+        # `or None` — та же правда, что у калорий выше: ноль мл в
+        # сутки невозможен, а старая версия Ayla шлёт ноль вместо
+        # отсутствия ключа.
+        water_glasses_target = _ml_to_glasses(water_res.norm_ml or 0) or None
 
     # ── active goal (from Ayla's goal layer) ────────────────────────────
     # Sync call, deliberately after the async pair: the goal client keeps
@@ -3181,14 +3188,10 @@ def customer_wellness_water(request: HttpRequest) -> HttpResponse:
     # значением `null` — это не «ориентира нет», это «ориентир есть, мы
     # его не знаем», и клиент вправе нарисовать прочерк. Пока методика
     # не утверждена (§82, §85) ключа не бывает вовсе.
-    if entry.today_norm_ml is not None:
+    if entry.today_norm_ml:
         payload["today_norm_ml"] = entry.today_norm_ml
     # Та же правда, что и в read-ручке: ориентира нет — ключа нет.
-    water_target = (
-        _ml_to_glasses(entry.today_norm_ml) or None
-        if entry.today_norm_ml is not None
-        else None
-    )
+    water_target = _ml_to_glasses(entry.today_norm_ml or 0) or None
     if water_target is not None:
         payload["water_glasses_target"] = water_target
     return JsonResponse(payload, status=201)

@@ -218,6 +218,14 @@ def render_water_reminder(
     "here is the arithmetic" -- and it is the same figure the gate used, so
     the message cannot disagree with the decision that produced it.
     """
+    # Без ориентира этого сообщения НЕ БЫВАЕТ: оно целиком построено на
+    # норме — «выпито X из N», «до нормы ещё M». Отправитель это уже
+    # знает и до сюда не доходит (`tasks.py`: `if not water.norm_ml:
+    # continue`), поэтому здесь не подстановка умолчания, а объявление
+    # предусловия: ориентира нет — напоминания нет, а не напоминание с
+    # выдуманным числом (§82, §85).
+    if not water.norm_ml:
+        return ""
     deficit = max(0, water.norm_ml - water.total_ml)
     lines = [f"Сегодня выпито {water.total_ml} из {water.norm_ml} мл."]
     if proportional_ml:
@@ -263,7 +271,10 @@ def _target(profile: ProfileResponse | None, field: str) -> float:
 
 
 def _macro_line(
-    label: str, actual: float, target: float | None, unit: str,
+    label: str,
+    actual: float,
+    target: float | None,
+    unit: str,
 ) -> str:
     """``Белки: 80 из 95 г`` — или без ориентира, когда его нет.
 

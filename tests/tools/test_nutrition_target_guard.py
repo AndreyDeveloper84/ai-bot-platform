@@ -108,14 +108,14 @@ class TestTheScannerStillSees:
     все формы разом.
     """
 
-    _GUILTY = '''
+    _GUILTY = """
 def render(body, profile):
     calories_target = 2000
     payload = {"calories_goal": 2000}
     norm = body.get("water_goal_ml") or 2000
     profile.today_norm_ml = 2400
     return WellnessToday(calories_target=2100), payload, norm
-'''
+"""
 
     def test_all_four_forms_are_found(self) -> None:
         hits = _scan(self._GUILTY)

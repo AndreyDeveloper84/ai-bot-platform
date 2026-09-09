@@ -167,7 +167,7 @@ class FoodLogResponse:
     raw: dict[str, Any]
 
 
-def _optional_int(raw: object) -> int | None:
+def _optional_int(raw: Any) -> int | None:
     """Число — или ``None``, когда ключа нет.
 
     Не ``int(raw or 0)``. Тот вариант отвечал одинаково на три разных

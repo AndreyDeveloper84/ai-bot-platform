@@ -76,7 +76,14 @@ class TestHandleHappyPath:
             result = WaterSkill().handle(_context("стакан воды"))
 
         assert "Записала 250 мл" in result.reply_text
-        assert "Сегодня: 1500 из 2000" in result.reply_text
+        # Строки «Сегодня: 1500 из 2000 мл» больше нет: ориентира по
+        # жидкости нет ни у кого до утверждения методики (§82, §85).
+        # Второе число было выходом формулы 30 мл × вес — оно называло
+        # человеку его вес, а знаменатель, делящийся на 30 нацело, —
+        # ещё и состояние (§35 п.10).
+        #
+        # Записанное при этом на месте: снимается ориентир, не факт.
+        assert "из" not in result.reply_text
         assert result.action_type == "water_logged"
         assert result.action_data is not None
         assert result.action_data["slug"] == "voda"
@@ -109,7 +116,7 @@ class TestHandleHappyPath:
                 milestone_text=None,
                 today_total_ml=1500,
                 # Ориентира нет ни у кого до утверждения методики (§82, §85).
-        today_norm_ml=None,
+                today_norm_ml=None,
                 alcohol_recovery_hint=True,
                 raw={},
             )
