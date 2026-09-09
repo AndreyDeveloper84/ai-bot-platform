@@ -13,6 +13,7 @@ DRY-RUN ПО УМОЛЧАНИЮ. Ничего не пишет, пока не в�
   * итоговое число активных рёбер совпадает с ожидаемым (84);
   * матрица + UNKNOWN покрывают ровно 58 услуг каталога.
 """
+
 import os
 
 from django.db import transaction
@@ -21,13 +22,13 @@ from services.models import SalonService, SpecialistService
 from tenants.models import Tenant
 
 APPLY = os.environ.get("DRF974_APPLY") == "yes"
-EXPECTED_KEEP = 95   # 84 (REPLY №3) + 11 услуг лица за Ольгой (REPLY №4 п.2)
+EXPECTED_KEEP = 95  # 84 (REPLY №3) + 11 услуг лица за Ольгой (REPLY №4 п.2)
 EXPECTED_TOTAL = 232
 
 D = "522574ff-c325-4a43-8312-bdf0ec0d085f"  # Архипкин Денис
-I = "d66b5a6f-1479-4ff1-9d94-aceef5e6a0df"  # Сазонова Инна
+I = "d66b5a6f-1479-4ff1-9d94-aceef5e6a0df"  # noqa: E741 — Сазонова Инна
 T = "fb3efd6b-3302-4614-a5f6-6bb62b36be2d"  # Татьяна Паламарчук
-O = "a8f3608c-34d6-4085-a078-abbf613c9941"  # Тихонова Ольга
+O = "a8f3608c-34d6-4085-a078-abbf613c9941"  # noqa: E741 — Тихонова Ольга
 NAMES = {D: "Архипкин Денис", I: "Сазонова Инна", T: "Татьяна Паламарчук", O: "Тихонова Ольга"}
 M = (D, I, T)  # массажисты
 
@@ -105,16 +106,21 @@ covered = {n for n, _, _ in MATRIX}
 
 problems = []
 if covered | set(UNKNOWN) != catalog:
-    problems.append(f"матрица+UNKNOWN != каталог: лишние={sorted((covered | set(UNKNOWN)) - catalog)} "
-                    f"непокрытые={sorted(catalog - (covered | set(UNKNOWN)))}")
+    problems.append(
+        f"матрица+UNKNOWN != каталог: лишние={sorted((covered | set(UNKNOWN)) - catalog)} "
+        f"непокрытые={sorted(catalog - (covered | set(UNKNOWN)))}"
+    )
 if covered & set(UNKNOWN):
     problems.append(f"услуга и в матрице, и в UNKNOWN: {sorted(covered & set(UNKNOWN))}")
 
 keep_ids = set()
 for name, masters, _conf in MATRIX:
     for spec_id in masters:
-        rows = list(SpecialistService.objects.filter(
-            tenant=t, specialist_id=spec_id, salon_service__name=name))
+        rows = list(
+            SpecialistService.objects.filter(
+                tenant=t, specialist_id=spec_id, salon_service__name=name
+            )
+        )
         if len(rows) != 1:
             problems.append(f"пара ({NAMES[spec_id]}, {name!r}) → {len(rows)} рёбер, ожидалось 1")
             continue
@@ -122,7 +128,9 @@ for name, masters, _conf in MATRIX:
 
 total = SpecialistService.objects.filter(tenant=t).count()
 if total != EXPECTED_TOTAL:
-    problems.append(f"всего рёбер {total}, ожидалось {EXPECTED_TOTAL} — данные изменились, перепроверь матрицу")
+    problems.append(
+        f"всего рёбер {total}, ожидалось {EXPECTED_TOTAL} — данные изменились, перепроверь матрицу"
+    )
 if len(keep_ids) != EXPECTED_KEEP:
     problems.append(f"KEEP={len(keep_ids)}, ожидалось {EXPECTED_KEEP}")
 
@@ -148,5 +156,7 @@ with transaction.atomic():
     changed = drop_qs.update(is_active=False)
     active_after = SpecialistService.objects.filter(tenant=t, is_active=True).count()
     if active_after != EXPECTED_KEEP:
-        raise RuntimeError(f"после гашения активных {active_after}, ожидалось {EXPECTED_KEEP} — откат")
+        raise RuntimeError(
+            f"после гашения активных {active_after}, ожидалось {EXPECTED_KEEP} — откат"
+        )
 print(f"\nПРИМЕНЕНО: погашено {changed}, активных осталось {EXPECTED_KEEP}.")
