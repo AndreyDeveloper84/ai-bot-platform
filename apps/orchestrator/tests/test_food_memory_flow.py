@@ -108,6 +108,20 @@ def person(ayla):
         ConsentRecord.ConsentType.MEMORY_GREEN.value,
     ):
         record_global_consent(bot_user, consent_type=consent_type, source="welcome")
+    # Согласие на персональный расчёт — §92 п.1, решение владельца 10.09.
+    # Выдаётся ОТДЕЛЬНОЙ строкой, а не добавлением в кортеж выше: тот про
+    # две базы памяти, которые выдаёт приветствие, а это согласие
+    # приветствие не выдаёт и не будет — у него свой экран.
+    #
+    # Настоящим `record_global_consent`, а не подменой предиката: тест
+    # гоняет живой обработчик, и предусловие обязано быть таким же живым.
+    # Без него анкета ниже отвечает отказом, и тест проверял бы поток,
+    # которого у человека без согласия нет.
+    record_global_consent(
+        bot_user,
+        consent_type=ConsentRecord.ConsentType.PERSONAL_CALCULATION.value,
+        source="test:precondition",
+    )
     conversation = resolve_active_global_conversation(bot_user)
     return bot_user, conversation
 
