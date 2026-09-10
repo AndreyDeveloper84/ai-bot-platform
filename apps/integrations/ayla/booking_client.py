@@ -1133,6 +1133,7 @@ class AylaBookingHTTPClient:
         start_at: str,
         end_at: str,
         reason: str = "",
+        external_user_id: str | None = None,
     ) -> dict[str, Any]:
         """Block a specialist's time in Ayla (DRF-1062).
 
@@ -1157,6 +1158,11 @@ class AylaBookingHTTPClient:
                 "end_at": end_at,
                 "reason": reason,
             },
+            # §117, attribution. Закрытие графика — операция с последствиями,
+            # и она обязана быть приписана человеку: три остальные записи
+            # этого клиента (создание, отмена, перенос) человека несут, эта
+            # была единственной без него.
+            external_user_id=external_user_id,
         )
         if resp.status_code == 409:
             # Distinct from a generic 4xx: the request was well-formed and

@@ -197,3 +197,65 @@ class TestFlagOffUnchanged:
         assert calls == []
         pending.refresh_from_db()
         assert pending.status == ScheduleChangeRequest.Status.APPROVED
+
+
+class TestTheBlockIsAttributedToAHuman:
+    """§117, третья проверка: кто закрыл график, видно НА ТОЙ стороне.
+
+    Замер 10.09.2026: из четырёх записывающих вызовов ``booking_client``
+    три несут ``X-External-User-ID`` — создание записи, отмена, перенос, —
+    а закрытие графика было единственным без него. Ayla видела «сервис»
+    там, где закрыли чужой рабочий день.
+
+    Следствие сильнее неудобства в логе: раз человек не передаётся, никакая
+    проверка ЕГО прав наверху невозможна в принципе. Пока единственная дверь
+    — одобрение заявки самого мастера, объект выбирает заявка. Открой салону
+    закрывать график по своему выбору (DRF-1240), и между админом и любым
+    мастером тенанта остался бы только наш декоратор.
+    """
+
+    def test_the_wire_carries_the_person_who_approved(
+        self, tenant: Tenant, master: CatalogMaster, pending: ScheduleChangeRequest
+    ) -> None:
+        from apps.identity.models import BotUser
+
+        actor = BotUser.objects.create(
+            tenant=tenant,
+            channel="max",
+            channel_user_id="7788",
+            display_name="Карина",
+        )
+        client, calls = _fake_client()
+
+        with patch(CLIENT_PATH, return_value=client):
+            approve_availability_request(
+                request_id=pending.id,
+                tenant_id=tenant.id,
+                actor=None,
+                actor_bot_user_id=actor.id,
+                actor_bot_user=actor,
+                actor_role="admin",
+            )
+
+        assert len(calls) == 1
+        # Именно тот формат, что понимает Ayla: bot:{channel}:{channel_user_id}.
+        assert calls[0]["external_user_id"] == "bot:max:7788"
+
+    def test_without_a_named_person_the_write_is_not_silently_attributed(
+        self, tenant: Tenant, master: CatalogMaster, pending: ScheduleChangeRequest
+    ) -> None:
+        # Случай «человека нет» существовал и до правки — канал MAX
+        # допускает actor=None, — и семантику отказа я не меняю: это
+        # продуктовое решение. Но приписать запись кому-то по умолчанию
+        # нельзя, поэтому наружу уходит ``None``, а не подставленное имя.
+        client, calls = _fake_client()
+
+        with patch(CLIENT_PATH, return_value=client):
+            approve_availability_request(
+                request_id=pending.id,
+                tenant_id=tenant.id,
+                actor=None,
+                actor_role="admin",
+            )
+
+        assert calls[0]["external_user_id"] is None

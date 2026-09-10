@@ -109,6 +109,7 @@ def _block_time_in_ayla(
     start_at,
     end_at,
     reason: str,
+    actor_bot_user=None,
 ) -> None:
     """Write the approved absence into Ayla, the system of record (DRF-1062).
 
@@ -136,14 +137,39 @@ def _block_time_in_ayla(
         ScheduleBlockConflictError,
         get_ayla_booking_client,
     )
+    from apps.integrations.ayla.user_proxy import external_user_id_for
 
     try:
+        # §117, attribution. Закрытие графика — операция с последствиями, и
+        # на той стороне она обязана быть приписана ЧЕЛОВЕКУ, а не боту.
+        # Три из четырёх записей этого клиента уже несут X-External-User-ID
+        # (создание записи, отмена, перенос); эта была единственной без него,
+        # и Ayla видела «сервис» там, где закрыли чужой рабочий день.
+        #
+        # Раз человека не передавали, никакая проверка ЕГО прав наверху была
+        # невозможна в принципе — не потому, что там её не написали, а
+        # потому, что проверять было нечего.
+        external_actor = (
+            external_user_id_for(actor_bot_user) if actor_bot_user is not None else None
+        )
+        if external_actor is None:
+            # Случай «человек не назван» существовал и до правки: канал MAX
+            # допускает actor=None. Семантику отказа не меняю — это
+            # продуктовое решение, — но и молчать нельзя: запись уйдёт
+            # неприписанной, и знать об этом нужно из лога, а не из спора
+            # через месяц.
+            logger.warning(
+                "availability.ayla_block_unattributed master=%s tenant=%s",
+                master.id,
+                tenant_id,
+            )
         get_ayla_booking_client().create_specialist_time_off(
             specialist_id=str(master.id),
             tenant_id=str(tenant_id),
             start_at=start_at.isoformat(),
             end_at=end_at.isoformat(),
             reason=reason,
+            external_user_id=external_actor,
         )
     except ScheduleBlockConflictError as exc:
         # Not a failure of the approval — the time is booked. Say so, so
@@ -512,6 +538,7 @@ def approve_availability_request(
     tenant_id: UUID,
     actor: Any,
     actor_bot_user_id: UUID | None = None,
+    actor_bot_user: Any = None,
     actor_role: str = "",
     now: datetime | None = None,
 ) -> DecisionResult:
@@ -647,6 +674,7 @@ def approve_availability_request(
             start_at=req.requested_start,
             end_at=req.requested_end,
             reason=req.reason_text or "",
+            actor_bot_user=actor_bot_user,
         )
 
         # Materialise — one ScheduleException per covered date.
