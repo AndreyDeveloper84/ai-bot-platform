@@ -89,7 +89,10 @@ def refuse_with(monkeypatch):
     return _install
 
 
-def _post(client: Client, master, service) -> object:
+# Возвращаемый тип НЕ аннотируется вручную: у тестового клиента Django
+# это подменённый ответ, у которого есть `.json()`, и своя аннотация
+# `-> object` его отбирала. Вывод типа знает больше, чем я.
+def _post(client: Client, master, service):
     return client.post(
         _url(),
         data=json.dumps(
