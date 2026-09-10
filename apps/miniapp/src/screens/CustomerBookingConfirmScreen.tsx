@@ -55,7 +55,7 @@
 
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { ApiError, authVerify } from "../lib/api";
+import { ApiError, authVerify, isHealthCheckSlug } from "../lib/api";
 import { OfflineBanner } from "../components/OfflineBanner";
 import { ScreenLayout } from "../components/ScreenLayout";
 import { StickyCta } from "../components/StickyCta";
@@ -88,6 +88,22 @@ type ErrState =
   | { kind: "server" }
   | { kind: "network" }
   | { kind: "other"; detail: string };
+
+/**
+ * DRF-1614 — the health-check handoff. Its own type, not a member of
+ * {@link ErrState}: nothing was broken and nothing needs retrying.
+ *
+ * `text` is the server's sentence, rendered verbatim. It is NOT composed
+ * here: the wording is the owner's, one copy lives in
+ * `apps/integrations/ayla/health_check.py`, and a second copy in the SPA
+ * would be a second contract to keep in sync.
+ *
+ * There is deliberately no second field for «does this promise a
+ * specialist». That distinction is real, but it lives entirely in the
+ * sentence the server sends, and a copy of it here would be a second
+ * place to keep in sync — and the first place the two could disagree.
+ */
+type HandoffState = { text: string };
 
 /**
  * C1 (billing eligibility) → client-facing slug. Frozen contract
@@ -141,6 +157,11 @@ export function CustomerBookingConfirmScreen() {
   const haptics = useHaptics();
   const [submitting, setSubmitting] = useState(false);
   const [err, setErr] = useState<ErrState | null>(null);
+  // DRF-1614 — kept apart from `err` on purpose. A handoff is an outcome,
+  // not a failure; sharing the error state would put it in the branch the
+  // contract test forbids, and the next person adding an error kind would
+  // have no way to see that one member of the union is not an error.
+  const [handoff, setHandoff] = useState<HandoffState | null>(null);
   const [notesOpen, setNotesOpen] = useState(false);
   const [note, setNote] = useState("");
   const [paymentChoice, setPaymentChoice] = useState<PaymentChoice>("onsite");
@@ -235,6 +256,7 @@ export function CustomerBookingConfirmScreen() {
     if (!draft.serviceId || !draft.masterId || !draft.visitAt) return;
     setSubmitting(true);
     setErr(null);
+    setHandoff(null);
     try {
       const { booking } = await createCustomerBooking({
         service_id: draft.serviceId,
@@ -274,6 +296,24 @@ export function CustomerBookingConfirmScreen() {
         replace: true,
       });
     } catch (e: unknown) {
+      if (e instanceof ApiError && isHealthCheckSlug(e.slug)) {
+        // DRF-1614 — NOT an error state, and deliberately not `setErr`.
+        // Ayla refused the booking because the service needs a screening
+        // question first; that is a decision somebody took about this
+        // person on purpose. Rendering it in the failure branch told them
+        // «что-то пошло не так» about a system working exactly as
+        // designed — and an error haptic would say the same thing again
+        // without words, which is why the buzz below moved into the
+        // branch that really is a failure.
+        //
+        // The text comes from the server verbatim: the wording is the
+        // owner's and lives in one place (`health_check.py`), so the two
+        // surfaces cannot drift apart. We branch on the slug only —
+        // never on the prose, never on the status.
+        setHandoff({ text: e.detail });
+        setSubmitting(false);
+        return;
+      }
       haptics.notify("error");
       if (e instanceof ApiError && e.slug === "slot_unavailable") {
         // Backend MAY return substitute candidate in the 409 body
@@ -537,6 +577,29 @@ export function CustomerBookingConfirmScreen() {
           </button>
         )}
       </div>
+
+      {/* DRF-1614 — an outcome, above the error states and outside them.
+          `callout` without `--danger`: the neutral face the surface
+          already uses for «this cannot be booked, here is what now», and
+          `role="status"` rather than `role="alert"` because a screen
+          reader should hear this politely — an alert interrupts, and
+          nothing here is urgent. */}
+      {handoff && (
+        <div className="callout" role="status">
+          <p style={{ margin: 0 }}>{handoff.text}</p>
+          <button
+            type="button"
+            className="btn-secondary"
+            style={{ marginTop: "var(--s-3)" }}
+            onClick={() => navigate("/customer/catalog")}
+          >
+            {/* No «попробовать ещё раз» on either path: repeating the
+                request cannot change a screening decision, and offering
+                it would invite the person to hammer a closed door. */}
+            Посмотреть другие услуги
+          </button>
+        </div>
+      )}
 
       {/* Error states — §6.3 */}
       {err?.kind === "slot_unavailable" && (

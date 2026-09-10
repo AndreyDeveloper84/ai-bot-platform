@@ -129,6 +129,7 @@ from apps.bookings.pending_actions import (
 )
 from apps.events.services import emit
 from apps.events.vocabulary import BOOKING_FLOW_STATE_WRITE_FAILED, SKILL_DISPATCHED
+from apps.integrations.ayla.health_check import HANDOFF_TEXT
 from apps.integrations.yclients import YClientsAPIError, YClientsUnavailableError
 from apps.llm.protocol import CompletionResult, LLMError, ToolCall
 from apps.persona.voice import DEFAULT_SALON_PERSONA
@@ -209,9 +210,15 @@ _FALLBACK_HANDOFF_TEXT = "Не получилось оформить запис�
 # DRF-1005 §3.3: the health-check handoff is a POLICY (the service needs a
 # consultation before booking), not a failure — the generic failure text
 # above would mislead the user into thinking something broke.
-_HEALTH_CHECK_HANDOFF_TEXT = (
-    "Для этой услуги нужна консультация — передаю менеджеру, он поможет с записью."
-)
+#
+# DRF-1614 / §98: the sentence itself now comes from the shared module.
+# It used to read «Для этой услуги нужна консультация — передаю менеджеру,
+# он поможет с записью.» — same meaning, different words from the other
+# two surfaces. §98 requires all three (Mini App, admin console, internal
+# REST) to say ONE calm sentence, and one sentence cannot live in three
+# files. The local name is kept so the two call sites below read the same
+# as before.
+_HEALTH_CHECK_HANDOFF_TEXT = HANDOFF_TEXT
 
 # Deterministic prompt shown when the master-cards keyboard is sent.
 # Buttons carry the data — text only frames the choice. Kept short

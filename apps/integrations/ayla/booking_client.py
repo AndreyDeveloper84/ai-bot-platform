@@ -188,6 +188,13 @@ class BookingBadRequestError(BookingAPIError):
     e.g. C1's ``SUBSCRIPTION_PAST_DUE``) so callers can branch on the
     reason without parsing the message string. Both default to None for
     legacy raise sites.
+
+    ``handoff`` is Ayla's own ``error.details.handoff`` boolean
+    (DRF-1614): «somebody will get back to this person». It rides along
+    instead of being derived, because deriving it means taking the code
+    string apart, and string surgery on a contract breaks silently the
+    first time a code is renamed. ``None`` means the field was absent —
+    which is not the same as ``False``.
     """
 
     def __init__(
@@ -196,10 +203,12 @@ class BookingBadRequestError(BookingAPIError):
         *,
         status_code: int | None = None,
         code: str | None = None,
+        handoff: bool | None = None,
     ) -> None:
         super().__init__(message)
         self.status_code = status_code
         self.code = code
+        self.handoff = handoff
 
 
 class ScheduleBlockConflictError(BookingBadRequestError):
@@ -790,6 +799,7 @@ class AylaBookingHTTPClient:
             f"http_{resp.status_code}_{_err_code(resp)}",
             status_code=resp.status_code,
             code=_err_code(resp),
+            handoff=_err_handoff(resp),
         )
 
     def _ok(self, resp: httpx.Response, *, success: tuple[int, ...] = (200, 201)) -> Any:
@@ -1432,6 +1442,22 @@ def _err_code(resp: httpx.Response) -> str:
         return (resp.json().get("error") or {}).get("code", "") or "unknown"
     except (ValueError, AttributeError):
         return "unknown"
+
+
+def _err_handoff(resp: httpx.Response) -> bool | None:
+    """Pull ``error.details.handoff`` from a 4xx body, or None if absent.
+
+    Three-valued on purpose (DRF-1614). ``True``/``False`` are Ayla's
+    answer to «will somebody get back to this person»; ``None`` means the
+    field was not there at all, and a caller that collapsed it to
+    ``False`` would turn our silence into Ayla's «no».
+    """
+    try:
+        details = ((resp.json().get("error") or {}).get("details")) or {}
+        value = details.get("handoff")
+    except (ValueError, AttributeError):
+        return None
+    return value if isinstance(value, bool) else None
 
 
 def _parse_retry_after(value: str | None) -> float:
