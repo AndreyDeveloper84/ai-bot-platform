@@ -140,9 +140,11 @@ def create_booking(request: HttpRequest) -> HttpResponse:
     if not idempotency_key:
         idempotency_key = str(uuid.uuid4())
 
+    from apps.integrations.ayla.health_check import outward_code, text_for
     from apps.integrations.ayla.salon_client import (
         SalonAPIError,
         SalonForbidden,
+        SalonHealthCheckHandoff,
         SalonNotConfigured,
         SalonNotFound,
         SalonSlotTaken,
@@ -212,6 +214,34 @@ def create_booking(request: HttpRequest) -> HttpResponse:
             "the schedule did not answer — refresh the day before trying again",
             504,
             idempotency_key=idempotency_key,
+        )
+    except SalonHealthCheckHandoff as exc:
+        # DRF-1614. Caught BEFORE the SalonAPIError catch-all below, which
+        # used to render this as outcome="failed" with HTTP 502 — a
+        # deliberate medical refusal shown to the administrator as a
+        # server outage, i.e. the one reading that makes somebody call
+        # support about a system that is working exactly as decided.
+        #
+        # `blocked` and not a new fifth outcome: §18 fixes four, and
+        # "explain, do not retry" is what this is. The outward code is
+        # what lets the screen tell it from a rights block without
+        # branching on prose.
+        #
+        # The log keeps the EXACT code while the screen gets the merged
+        # name: the annotation queue is prioritised by how many
+        # HEALTH_CHECK_UNKNOWN a service produced, and that counter dies
+        # if REQUIRED and UNKNOWN arrive here as one word.
+        logger.info(
+            "admin_api.create_booking.health_check_handoff actor=%s tenant=%s code=%s",
+            actor,
+            tenant.id,
+            exc.code or "MISSING",
+        )
+        return _outcome(
+            "blocked",
+            text_for(exc.code),
+            422,
+            code=outward_code(exc.code),
         )
     except SalonAPIError as exc:
         logger.warning("admin_api.create_booking.error actor=%s err=%s", actor, exc)

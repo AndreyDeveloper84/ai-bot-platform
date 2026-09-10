@@ -64,6 +64,7 @@ from typing import Any
 import httpx
 from django.conf import settings
 
+from apps.integrations.ayla.health_check import HEALTH_CHECK_CODES
 from apps.integrations.ayla.url_builder import AylaUrlBuilder
 
 logger = logging.getLogger(__name__)
@@ -72,7 +73,20 @@ DEFAULT_TIMEOUT_S = 10.0
 
 
 class SalonAPIError(Exception):
-    """Base for every salon-surface failure."""
+    """Base for every salon-surface failure.
+
+    Carries Ayla's machine-readable ``code`` alongside the human detail.
+    Before DRF-1614 the code was computed in :meth:`_raise_for_status` and
+    then dropped on the floor for every branch that did not immediately
+    read it — so a caller that needed to tell two same-status refusals
+    apart had nothing but prose to go on, two levels before the log line
+    that was supposed to distinguish them. Empty string means Ayla sent
+    no code, which is not the same as a code we do not recognise.
+    """
+
+    def __init__(self, detail: str = "", *, code: str = "") -> None:
+        super().__init__(detail)
+        self.code = code
 
 
 class SalonNotConfigured(SalonAPIError):
@@ -131,6 +145,30 @@ class SalonNotAllowed(SalonAPIError):
     A finished visit cannot be cancelled and a cancelled one cannot be
     moved. Not a rights problem (403) and not a race (409): no retry and
     no other actor changes the answer.
+    """
+
+
+class SalonHealthCheckHandoff(SalonAPIError):
+    """422 ``HEALTH_CHECK_*`` — a medical decision, not a broken server.
+
+    Shares a status code with :class:`SalonNotAllowed` and means something
+    entirely different, exactly as :class:`SalonStaleVersion` does with
+    :class:`SalonSlotTaken` on 409. «This booking's state forbids it»
+    sends the receptionist to look at the visit; «this service needs
+    screening first» sends the request to a human who can ask the
+    questions. Only ``code`` separates them, so it is read rather than
+    collapsed.
+
+    Left inside :class:`SalonAPIError`'s catch-all it surfaced as
+    ``outcome="failed"`` with HTTP 502 — a deliberate refusal rendered to
+    the salon administrator as a server outage, which is the one reading
+    that makes somebody call support about a working system.
+
+    ``code`` keeps the exact one of the three (DRF-1614). The person sees
+    one sentence; the log has to know which code produced the handoff,
+    because the service-annotation queue is prioritised by the count of
+    ``HEALTH_CHECK_UNKNOWN`` and a merged counter leaves it without a
+    criterion.
     """
 
 
@@ -284,7 +322,14 @@ class AylaSalonClient:
                 raise SalonNotAllowed(detail)
             raise SalonSlotTaken(detail)
         if resp.status_code == 422:
-            raise SalonNotAllowed(detail)
+            # Same split as 409 above: one status, two meanings, and the
+            # code is the only thing that separates them. Unknown 422s
+            # stay «the booking's state forbids this» — the pre-DRF-1614
+            # meaning — because guessing «needs screening» would promise
+            # a consultation nobody is going to give.
+            if code in HEALTH_CHECK_CODES:
+                raise SalonHealthCheckHandoff(detail, code=code)
+            raise SalonNotAllowed(detail, code=code)
         if resp.status_code >= 500:
             raise SalonUnavailable(f"upstream {resp.status_code}: {detail}")
         raise SalonAPIError(f"unexpected {resp.status_code}: {detail}")
