@@ -171,13 +171,26 @@ def check_outbox_backlog(app_configs: Any = None, **kwargs: Any) -> list[CheckWa
     другой рупор, в том процессе, где отказ является новостью.
     """
 
-    from django.db import DatabaseError
-
     from apps.observability.outbox_backlog import STALE_AFTER, measure_outbox_backlog
 
     try:
         backlog = measure_outbox_backlog()
-    except DatabaseError:
+    except Exception:  # noqa: BLE001 — сторож не вправе ломать `check`
+        # Ловится ВСЁ, а не только ``DatabaseError``, и это не
+        # перестраховка, а исправление собственного промаха.
+        #
+        # Сперва здесь стоял узкий ``except DatabaseError`` — «таблицы нет
+        # под migrate». CI нашёл второй способ не суметь посчитать, о
+        # котором я не подумал: `tests/smoke/test_django_boots.py` гоняет
+        # `manage.py check` БЕЗ метки ``django_db``, и pytest-django
+        # запрещает доступ к базе ``RuntimeError``-ом, а не ошибкой БД.
+        # Узкий перехват его пропускал, и сторож исходящего ящика ронял
+        # проверку загрузки — ровно то, от чего он должен защищать.
+        #
+        # Урок общий: список способов НЕ СУМЕТЬ посчитать не перечисляется
+        # заранее. Обещание «эта проверка не сломает `check`» либо
+        # безусловное, либо его нет. Имя отказу даёт другой рупор —
+        # :func:`log_outbox_backlog` в работающем процессе.
         return []
 
     if not backlog.is_stale:

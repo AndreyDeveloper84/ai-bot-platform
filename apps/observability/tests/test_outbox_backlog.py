@@ -237,6 +237,32 @@ class TestAFailedCountIsNotSilence:
 
         assert check_outbox_backlog() == []
 
+    def test_the_system_check_survives_a_forbidden_database_too(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Не только ошибка БД, но и ЗАПРЕТ обращаться к ней.
+
+        Написан по живому падению: сперва здесь стоял узкий
+        ``except DatabaseError``, и CI нашёл второй способ не суметь
+        посчитать — `tests/smoke/test_django_boots.py` гоняет
+        ``manage.py check`` без метки ``django_db``, а pytest-django
+        запрещает доступ ``RuntimeError``-ом, не ошибкой БД. Сторож
+        исходящего ящика ронял проверку загрузки — ровно то, от чего он
+        должен защищать.
+
+        Урок, ради которого тест и стоит: **список способов не суметь не
+        перечисляется заранее.** Обещание «эта проверка не сломает
+        `check`» либо безусловное, либо его нет.
+        """
+        monkeypatch.setattr(
+            "apps.observability.outbox_backlog.measure_outbox_backlog",
+            lambda **kw: (_ for _ in ()).throw(
+                RuntimeError("Database access not allowed, use the django_db mark")
+            ),
+        )
+
+        assert check_outbox_backlog() == []
+
     def test_a_reporter_failure_never_breaks_boot(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Сторож, способный уронить загрузку, — авария, которую он же
         и должен был предотвращать."""
