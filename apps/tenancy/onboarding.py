@@ -28,10 +28,17 @@ DRF-1511).
 низация падает» читается из ``last_catalog_sync_ok_at``: NULL («ни разу
 не проходила») — названная причина; устаревание и аларм — это часы
 здоровья DRF-1494 и сводка DRF-1500, не эта карточка.
+
+У NULL есть подслучай, который локальными полями от него неотличим:
+идентификатор салона не существует в Ayla, и тогда синхронизация вернёт
+ноль не «пока», а всегда. Различает их :func:`_never_synced_reason` —
+тем же запросом к Ayla, которым :func:`connect_salon` проверяет
+идентификатор ДО сохранения строки.
 """
 
 from __future__ import annotations
 
+import logging
 import uuid
 from dataclasses import dataclass
 from datetime import datetime
@@ -46,6 +53,8 @@ from apps.catalog.services.verification import verify_masters as _verify_masters
 from apps.tenancy.context import tenant_scope
 from apps.tenancy.models import Tenant
 
+logger = logging.getLogger(__name__)
+
 # ---------------------------------------------------------------------------
 # Закрытый перечень причин невидимости (DRF-1511)
 # ---------------------------------------------------------------------------
@@ -53,6 +62,7 @@ from apps.tenancy.models import Tenant
 REASON_TENANT_INACTIVE = "tenant_inactive"
 REASON_CITY_MISSING = "city_missing"
 REASON_NEVER_SYNCED = "never_synced"
+REASON_ID_NOT_IN_AYLA = "id_not_in_ayla"
 REASON_NO_ACTIVE_SERVICES = "no_active_services"
 REASON_NO_BOOKABLE_MASTERS = "no_bookable_masters"
 REASON_MASTERS_AWAIT_VERIFICATION = "masters_await_verification"
@@ -63,6 +73,19 @@ REASON_LABELS: dict[str, str] = {
     REASON_TENANT_INACTIVE: "салон выключен (is_active=False) — скрыт из всех выдач",
     REASON_CITY_MISSING: "не задан город — городской поиск салона не найдёт",
     REASON_NEVER_SYNCED: "синхронизация каталога ни разу не проходила — витрины нет",
+    # Подслучай «ни разу не проходила», а не второй код на всякий
+    # случай. Замер 09.09.2026: салон `testovuy-salin`, заведённый
+    # штатной формой Django, получил СЛУЧАЙНЫЙ первичный ключ — такого
+    # UUID в Ayla нет. Прежняя подпись говорила ему «синхронизация ни
+    # разу не проходила», и это читалось как «запустите синхронизацию».
+    # Правда другая: она вернёт ноль и завтра, и через год. Первичный
+    # ключ строки не меняется, поэтому названо и то, что с этим делать —
+    # иначе причина сообщала бы о безвыходности и молчала о выходе.
+    REASON_ID_NOT_IN_AYLA: (
+        "идентификатора салона нет в Ayla — по нему синхронизация вернёт ноль строк "
+        "и сегодня, и всегда; первичный ключ строки не меняется, поэтому салон "
+        "нужно удалить и подключить заново настоящим Ayla Tenant UUID"
+    ),
     REASON_NO_ACTIVE_SERVICES: "нет активных услуг — записываться не на что",
     REASON_NO_BOOKABLE_MASTERS: (
         "нет бронируемых мастеров (is_active, не в архиве, приглашение принято) — "
@@ -154,7 +177,43 @@ class ConnectResult:
 # ---------------------------------------------------------------------------
 
 
-def assess_salon(tenant: Tenant) -> SalonAssessment:
+def _never_synced_reason(tenant: Tenant, *, http_client: Any | None) -> str:
+    """Который из двух: «ещё не синхронизировалась» или «UUID мёртвый».
+
+    Различить их локальными полями нельзя: у обоих
+    ``last_catalog_sync_ok_at IS NULL``, и оба молчат одинаково. Разница
+    живёт в Ayla, поэтому спрашивают Ayla — той же проверкой, что
+    :func:`connect_salon` делает ДО сохранения строки
+    (:func:`probe_backend`). Мёртвый салон 09.09.2026 отличается от
+    здорового только этим ответом.
+
+    Цена запроса — та же, что у проверки при подключении: две выборки
+    по одному салону. Он уходит только при ``last_catalog_sync_ok_at IS
+    NULL``, то есть у салона без витрины; у мёртвого идентификатора обе
+    выборки пусты и обрываются на первой странице.
+
+    Без клиента и на упавшем запросе возвращается прежняя причина.
+    Сказать «идентификатора нет в Ayla», не спросив Ayla, значило бы
+    назвать состояние источника по молчанию потребителя — то есть
+    обвинить его замером, которого никто не делал. Молчание об
+    отказе тоже не годится: он уходит в лог, где его видно.
+    """
+    if http_client is None:
+        return REASON_NEVER_SYNCED
+    try:
+        probe = probe_backend(str(tenant.id), http_client=http_client)
+    except Exception as exc:
+        logger.warning(
+            "tenancy.assess.probe_failed tenant=%s error=%s: причина остаётся "
+            "«ни разу не проходила» — замера нет",
+            tenant.slug,
+            exc.__class__.__name__,
+        )
+        return REASON_NEVER_SYNCED
+    return REASON_NEVER_SYNCED if probe.found_anything else REASON_ID_NOT_IN_AYLA
+
+
+def assess_salon(tenant: Tenant, *, http_client: Any | None = None) -> SalonAssessment:
     """Ответить на «почему салона не видно» названными причинами.
 
     Перечень закрыт: возвращаются только коды из :data:`REASON_LABELS`.
@@ -168,6 +227,12 @@ def assess_salon(tenant: Tenant) -> SalonAssessment:
     ``apps/marketplace/`` запрещает контракт MKT1 (#1018), а карточке
     нужен ровно один салон. Предикат бронируемости тот же, что читает
     клиент: ``_MasterManager.bookable()`` → ``master_state.AVAILABLE``.
+
+    ``http_client`` — необязательный: с ним «синхронизация ни разу не
+    проходила» уточняется до «идентификатора нет в Ayla» (см.
+    :func:`_never_synced_reason`), без него остаётся прежней. Сетевой
+    запрос делается ТОЛЬКО когда успешной синхронизации не было ни разу:
+    у салона с витриной спрашивать нечего.
     """
     with tenant_scope(tenant):
         active_services = CatalogService.objects.filter(is_active=True).count()
@@ -181,7 +246,7 @@ def assess_salon(tenant: Tenant) -> SalonAssessment:
     if not (tenant.city or "").strip():
         reasons.append(REASON_CITY_MISSING)
     if tenant.last_catalog_sync_ok_at is None:
-        reasons.append(REASON_NEVER_SYNCED)
+        reasons.append(_never_synced_reason(tenant, http_client=http_client))
     else:
         if active_services == 0:
             reasons.append(REASON_NO_ACTIVE_SERVICES)

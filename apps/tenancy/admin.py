@@ -18,6 +18,12 @@ Key behaviour:
     server-side in case a custom action bypasses the UI.
   * Секреты Telegram (``telegram_bot_token``, ``telegram_webhook_secret``)
     в форму не отдаются — см. :class:`TenantAdminForm` (DRF-1495).
+  * Штатной формы «Add Tenant» у салона НЕТ (``has_add_permission``):
+    она физически не может принять Ayla-UUID и рождает нерабочий салон
+    молча. Единственный путь — экран «Подключить салон» (``connect/``).
+  * Карточка подключённого салона несёт то же действие верификации
+    мастеров, что экран подключения, — ``change_view`` перехватывает
+    POST по :data:`TenantAdmin.VERIFY_FIELD`.
 """
 
 from __future__ import annotations
@@ -25,7 +31,7 @@ from __future__ import annotations
 from django import forms
 from django.contrib import admin
 from django.core.exceptions import PermissionDenied, ValidationError
-from django.http import HttpRequest, HttpResponse
+from django.http import Http404, HttpRequest, HttpResponse, HttpResponseRedirect
 from django.template.response import TemplateResponse
 from django.urls import path
 from django.utils.html import format_html, format_html_join
@@ -134,6 +140,13 @@ class TenantAdmin(AylaAdminMedia, admin.ModelAdmin):
         "name",
         "slug",
         "city",
+        # Признака связи с Ayla в списке не было вовсе, и мёртвый салон
+        # 09.09.2026 стоял среди живых неотличимо: те же имя, slug и
+        # город, та же дата создания. Колонка читает ТОЛЬКО локальные
+        # поля — по строке на салон, никаких запросов в Ayla: список
+        # рисуется целиком, и один сетевой вызов на строку превратил бы
+        # его в минуту ожидания.
+        "ayla_link_state",
         "is_active",
         "is_system",
         "shadow_mode",
@@ -297,6 +310,40 @@ class TenantAdmin(AylaAdminMedia, admin.ModelAdmin):
         """
         return "задан" if (obj.telegram_webhook_secret or "") else "не задан"
 
+    @admin.display(description="Связь с Ayla")
+    def ayla_link_state(self, obj: Tenant) -> str:
+        """Связан ли салон с Ayla — колонка списка.
+
+        Три ответа, а не два. «Синхронизация шла и не удалась» и
+        «синхронизация не подходила ни разу» — разные состояния, и
+        слить их в одно «не связан» значило бы спрятать ровно тот
+        случай, ради которого колонка заведена: у мёртвого салона
+        ``last_catalog_sync_at`` тоже NULL, то есть к нему не приходили
+        вовсе, а не приходили и не смогли.
+
+        Здесь НЕ спрашивается Ayla: список рисует все строки разом.
+        Настоящую причину («идентификатора нет в Ayla») называет
+        карточка одного салона — там один запрос уместен, здесь их было
+        бы столько же, сколько салонов.
+        """
+        if obj.last_catalog_sync_ok_at is not None:
+            return "связан"
+        if obj.last_catalog_sync_at is not None:
+            return "нет связи — синхронизация шла, но ни разу не удалась"
+        return "нет связи — синхронизация ни разу не подходила"
+
+    def _ayla_probe_client(self):  # type: ignore[no-untyped-def]
+        """Клиент, которым карточка спрашивает Ayla про идентификатор.
+
+        Отдельный метод, а не строка внутри :meth:`salon_visibility_state`:
+        тесты подменяют его, чтобы проверять разметку экрана, а не работу
+        HTTP-клиента (у него свои тесты). Ввоз локальный — ``admin.py``
+        грузится при старте, а клиент тянет за собой настройки синхронизации.
+        """
+        from apps.catalog.services.http_client import CatalogHttpClient
+
+        return CatalogHttpClient()
+
     @admin.display(description="Видимость и состояние каталога")
     def salon_visibility_state(self, obj: Tenant) -> str:
         """Карточка одного салона: синхронизация, витрина, причины (DRF-1525).
@@ -305,8 +352,15 @@ class TenantAdmin(AylaAdminMedia, admin.ModelAdmin):
         когда последний раз синхронизировался, сколько услуг и
         бронируемых мастеров, и — если клиент его не видит — почему,
         названной причиной из закрытого перечня DRF-1511.
+
+        Клиент Ayla передаётся намеренно: без него карточка мёртвого
+        салона говорила «синхронизация ни разу не проходила», что
+        читается как «запустите синхронизацию», хотя по этому UUID она
+        вернёт ноль всегда. Запрос уходит ТОЛЬКО когда успешной
+        синхронизации не было ни разу, и его отказ причину не меняет
+        (:func:`~apps.tenancy.onboarding._never_synced_reason`).
         """
-        assessed = assess_salon(obj)
+        assessed = assess_salon(obj, http_client=self._ayla_probe_client())
         last_ok = (
             assessed.last_sync_ok_at.strftime("%d.%m.%Y %H:%M UTC")
             if assessed.last_sync_ok_at
@@ -452,9 +506,125 @@ class TenantAdmin(AylaAdminMedia, admin.ModelAdmin):
         }
         return TemplateResponse(request, "admin/tenancy/tenant/connect.html", context)
 
+    # ------------------------------------------------------------------
+    # Карточка подключённого салона: шаг верификации
+    # ------------------------------------------------------------------
+
+    def change_view(self, request, object_id, form_url="", extra_context=None):
+        """Карточка салона плюс то же действие верификации, что на подключении.
+
+        До этой правки кнопка жила ТОЛЬКО на экране подключения и
+        рисовалась только при ``salon is not None`` — то есть ровно один
+        раз, на странице итога сразу после нажатия «Подключить». На GET
+        того же экрана ``salon`` пуст, а у салона, подключённого вчера,
+        экрана итога нет вовсе: единственным путём к шагу оставалось
+        знание про действие ``verify_masters`` в админке каталога. Шаг,
+        без которого критерий успеха («салон виден клиенту») не
+        достигается никогда (DRF-1496 → DRF-1553), не может быть виден
+        один раз.
+
+        Перехват идёт ДО ``super()``: POST карточки — это обычное
+        сохранение формы тенанта, и без перехвата нажатие кнопки
+        отправило бы форму, а не действие. Признак тот же, что на
+        экране подключения — присутствие :data:`VERIFY_FIELD`.
+
+        Уровень доступа не меняется: суперпользователь, как и на экране
+        подключения (OPEN_DECISIONS §27 п.2, §51.1). Карточку тенанта
+        открывает и роль с ``tenancy.change_tenant``; кнопки она не
+        видит и нажать её не может — иначе один экран расширял бы
+        права, которых другой не даёт.
+        """
+        if request.method == "POST" and self.VERIFY_FIELD in request.POST:
+            return self._verify_from_card(request, object_id)
+
+        salon = self.get_object(request, object_id)
+        assessment = assess_salon(salon) if salon is not None else None
+        extra_context = {
+            **(extra_context or {}),
+            "verify_field": self.VERIFY_FIELD,
+            "salon_assessment": assessment,
+            # Одно решение, а не два в шаблоне: «есть что предложить» и
+            # «этому человеку можно» проверяются здесь, вместе, потому
+            # что разъехаться им нельзя — кнопка, которую видно, но
+            # нажать нельзя, обещает исход, которого не будет.
+            "can_verify_masters": bool(
+                assessment is not None
+                and assessment.can_verify_masters
+                and request.user.is_superuser
+            ),
+        }
+        return super().change_view(request, object_id, form_url, extra_context)
+
+    def _verify_from_card(self, request: HttpRequest, object_id: str) -> HttpResponse:
+        """Нажатие кнопки на карточке — тем же сервисом, что везде.
+
+        Ответ — редирект на ту же карточку, а не отрисовка на месте:
+        обновление страницы после POST повторило бы верификацию, и
+        оператор увидел бы «верифицировано: 0» там, где ничего не
+        сломалось. Числа исхода уходят в штатное сообщение админки.
+        """
+        if not request.user.is_superuser:
+            raise PermissionDenied(
+                "Верификация мастеров — действие владельца контура "
+                "(суперпользователя), а не ролей админки: тот же уровень "
+                "доступа, что у экрана подключения салона."
+            )
+        salon = self.get_object(request, object_id)
+        if salon is None:
+            # Не «верифицировано: 0», а отказ: салон, которого нет,
+            # обязан выглядеть ошибкой, а не пустым успехом.
+            raise Http404("Салон не найден — верификация не выполнена.")
+
+        outcome = verify_salon_masters(salon, user=request.user)
+        message = (
+            f"Верифицировано мастеров: {outcome.verified}. "
+            f"Уже принятых пропущено: {outcome.skipped}."
+        )
+        if outcome.blocked:
+            # DRF-1597: число печатается всегда, когда оно ненулевое —
+            # «верифицировано: 0» без него читается как сбой.
+            message += f" Не подтверждено — ждут нажатия самого мастера: {outcome.blocked}."
+        self.message_user(request, message)
+        return HttpResponseRedirect(request.path)
+
     def get_queryset(self, request):
         # Admin must see deactivated tenants too — use all_objects manager.
         return Tenant.all_objects.all()
+
+    def has_add_permission(self, request: HttpRequest) -> bool:
+        """Штатной формы «Add Tenant» у салона нет — и не должно быть.
+
+        Замер 09.09.2026, 05:57: владелец завёл ею салон
+        ``testovuy-salin``. У строки ``last_catalog_sync_at = None``,
+        такого UUID в Ayla нет, синхронизация не пыталась ни разу и не
+        попытается. Это не ошибка оператора и не невезение: форма
+        физически не может принять Ayla-UUID, потому что ``Tenant.id``
+        объявлен ``editable=False`` — поле в форму не попадает, ключ
+        подставляется случайный, а первичный ключ потом не меняется.
+        Любой салон, рождённый здесь, нерабочий навсегда. Форма при
+        этом молчит и рапортует успех.
+
+        **Почему запрет, а не редирект на ``connect/``.** Дверей не
+        две, а четырнадцать: кнопка в списке салонов плюс тринадцать
+        зелёных плюсов «добавить» — по одному на каждую чужую форму
+        админки с правимым выбором салона (``persona``,
+        ``experiments``, ``catalog``, ``promptreg``, ``promotions``,
+        ``scheduling``; посчитано по реестру ``admin.site``, сторож —
+        ``test_no_green_plus_beside_tenant_selects``). Этот метод —
+        единственный переключатель, который Django спрашивает про все
+        четырнадцать сразу; редирект в ``add_view`` закрыл бы один
+        адрес и оставил бы тринадцать плюсов, каждый из которых
+        открывает всплывающее окно. Экран подключения всплывающих окон
+        не знает: он не закроется, не подставит салон в поле-источник и
+        не вернёт оператора туда, откуда тот пришёл. Мы бы поменяли
+        одну тихую поломку на тринадцать новых.
+
+        Здоровый путь никуда не делся и стоит на том же месте:
+        «Подключить салон» в списке салонов (``connect/``) —
+        единственный экран, который умеет спросить идентификатор,
+        проверить его по Ayla ДО сохранения строки и показать исход.
+        """
+        return False
 
     def has_delete_permission(self, request, obj=None):
         # When obj is None Django asks "may this user delete *anything* here?"
