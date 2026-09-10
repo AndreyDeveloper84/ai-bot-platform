@@ -414,6 +414,18 @@ jobs:
       - name: Mini App palette contract
         run: uv run python tools/lint/miniapp_token_contrast.py apps/miniapp
 
+      # Словарь состояний подтверждения расписания (DRF-1237 B1, §29.5).
+      # Состояния жили в двух экранах и разошлись молча: одно и то же
+      # называлось «Расписание не подтверждено» и «Расписание не
+      # подтверждено — салон его не заверял». Сведение чинит сегодняшний
+      # день, сторож — следующий: он роняет и вторую формулировку, и второй
+      # вывод состояния (чтение `is_current` мимо словаря), потому что
+      # одинаковые слова при разном выводе — то же расхождение, только
+      # незаметнее. Здесь, а не в vitest: обход исходников требует
+      # `node:fs`, а `@types/node` в mini-app нет.
+      - name: Mini App schedule-confirmation vocabulary
+        run: uv run python tools/lint/schedule_vocabulary_guard.py apps/miniapp
+
       # Personal-field owner guard (DRF-1365). The memory audit of
       # 2026-08-24 returned «C — multiple competing memory systems»: six
       # stores holding facts about the same person, none of them designed

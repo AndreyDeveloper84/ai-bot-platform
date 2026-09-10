@@ -1,6 +1,11 @@
 /**
  * §83 — «График» на карточке мастера: три состояния, которые нельзя слить.
  *
+ * Формулировки состояний берутся из `lib/schedule-confirmation-state` —
+ * одного словаря на обе поверхности (пилотную и эту). Менять текст здесь
+ * в одиночку нельзя: сторож `tools/lint/schedule_vocabulary_guard.py`
+ * уронит второе имя того же состояния.
+ *
  * Экран обязан различать «не подтверждено», «подтверждено для этих часов» и
  * «подтверждено, но часы с тех пор изменились». Третье выглядит как второе
  * ровно до тех пор, пока мастер не уходит с витрины — и тогда владелица не
@@ -134,7 +139,7 @@ describe("График на карточке мастера", () => {
 
     renderScreen();
 
-    expect(await screen.findByText("Расписание не подтверждено")).toBeTruthy();
+    expect(await screen.findByText(/Расписание не подтверждено/)).toBeTruthy();
     expect(screen.getByText("Проверьте рабочие часы мастера")).toBeTruthy();
     expect(screen.getByRole("button", { name: "Расписание верно" })).toBeTruthy();
   });
@@ -150,7 +155,7 @@ describe("График на карточке мастера", () => {
 
     renderScreen();
 
-    expect(await screen.findByText(/Подтверждено 9 сентября/)).toBeTruthy();
+    expect(await screen.findByText(/Расписание подтверждено 9 сентября/)).toBeTruthy();
     expect(screen.queryByRole("button", { name: "Расписание верно" })).toBeNull();
   });
 
@@ -167,8 +172,8 @@ describe("График на карточке мастера", () => {
 
     renderScreen();
 
-    expect(await screen.findByText("Часы изменились после подтверждения")).toBeTruthy();
-    expect(screen.queryByText(/Подтверждено 9 сентября/)).toBeNull();
+    expect(await screen.findByText(/Часы изменились после подтверждения/)).toBeTruthy();
+    expect(screen.queryByText(/Расписание подтверждено 9 сентября/)).toBeNull();
     expect(screen.getByRole("button", { name: "Расписание верно" })).toBeTruthy();
   });
 
