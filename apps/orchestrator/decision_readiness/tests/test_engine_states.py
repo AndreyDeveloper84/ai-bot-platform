@@ -127,6 +127,58 @@ def test_every_missing_input_blocks_with_its_own_reason(
     assert rc.BLOCK_READINESS_INPUT_UNAVAILABLE in output.reason_codes
 
 
+def test_an_uncalibrated_threshold_blocks_at_the_availability_check() -> None:
+    """OD-DR-1: until calibration the threshold has no value, so the engine cannot
+    tell READY from NEEDS_DISCRIMINATION and must not claim either.
+
+    The attribution is asserted in full rather than by substring. There are two
+    guards for this property — the availability check here and a total-function
+    fallback in step 6 — and a loose assertion stays green when either one is
+    removed, which would leave one of the two proved by nothing. Each is pinned
+    by the words only it produces. Found by substitution: removing the
+    availability check left the whole suite green.
+    """
+
+    output = eng.evaluate(make_input(policy=_uncalibrated_policy()))
+
+    assert output.readiness_state is eng.ReadinessState.BLOCKED
+    assert output.blockers[0].attribution == "tau_separation is uncalibrated (OD-DR-1, DRF-1519)"
+
+
+def test_an_uncomputed_separation_blocks_at_the_step_six_fallback() -> None:
+    """The other half of the same property, reached by the other route.
+
+    The availability check catches an uncalibrated *threshold*. A `separation`
+    the resolver never computed passes that check and arrives at step 6, where
+    it must still block: absent is not zero, and a comparison against a missing
+    number is not a comparison that came out false.
+    """
+
+    reference = make_input()
+
+    state, blockers, _verdicts, _codes = eng.f(
+        state=reference.state,
+        evidence=reference.evidence,
+        candidates=candidates(separation=None),
+        safety=SafetyResult(state=SafetyState.NORMAL, evaluated_at_revision=REVISION),
+        spec=reference.required_context_spec,
+        availability=eng.InputAvailability(
+            ledger_readable=True, probe_available=True, candidates_fresh=True
+        ),
+        state_revision=REVISION,
+        mode=reference.mode,
+        measures=eng.Measures(completeness=1.0, conflicts=0),
+        probe_usable=True,
+        policy=make_input().policy,
+        execution_required_params=frozenset(),
+        current_need=None,
+        probe=reference.probe,
+    )
+
+    assert state is eng.ReadinessState.BLOCKED
+    assert blockers[0].attribution == "separation threshold uncalibrated"
+
+
 def test_stale_safety_blocks() -> None:
     """P3 — a verdict computed before the person's last message answers a different
     question."""
