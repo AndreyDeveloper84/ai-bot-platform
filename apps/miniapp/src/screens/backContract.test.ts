@@ -114,7 +114,6 @@ function mountedScreens(): string[] {
  */
 const EXPECTED_SCREENS = [
   "BookingWhenScreen",
-  "CatalogScreen",
   "CustomerBookingConfirmScreen",
   "CustomerBookingDetailScreen",
   "CustomerBookingSuccessScreen",

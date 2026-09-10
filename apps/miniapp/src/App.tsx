@@ -77,7 +77,6 @@ import { SalonPilotAylaScreen } from "./screens/admin/SalonPilotAylaScreen";
 import { SalonPilotScheduleScreen } from "./screens/admin/SalonPilotScheduleScreen";
 import { SalonPilotTodayScreen } from "./screens/admin/SalonPilotTodayScreen";
 import { BookingWhenScreen } from "./screens/BookingWhenScreen";
-import { CatalogScreen } from "./screens/CatalogScreen";
 import { CustomerBookingConfirmScreen } from "./screens/CustomerBookingConfirmScreen";
 import { CustomerBookingDetailScreen } from "./screens/CustomerBookingDetailScreen";
 import { CustomerBookingSuccessScreen } from "./screens/CustomerBookingSuccessScreen";
@@ -1291,16 +1290,29 @@ export function CustomerRoutes() {
         сообщения, закладки, сторонние посты). Внутренние переходы на
         них не ведут — это замерено, а не заявлено (DRF-1485).
 
-        Остались ровно те алиасы, за которыми стоит живой экран:
-        `/catalog` (`CatalogScreen`) и `/catalog/:serviceId` (тот же
-        `ServiceDetailScreen`, что на каноническом адресе). Три экрана
-        прежнего поколения, на которые не вело уже ничего, сняты вместе
-        со своими адресами (DRF-1485): `/book/confirm`,
-        `/book/success/:bookingId` и `/me`. Алиасами они быть не могли —
-        каждый показывал СВОЙ экран, а не канонический по старому
-        адресу, так что оставить адрес значило бы оставить и экран.
+        Остались ровно те алиасы, за которыми стоит КАНОНИЧЕСКИЙ экран:
+        `/catalog/:serviceId` — тот же `ServiceDetailScreen`, что на
+        каноническом адресе. Три экрана прежнего поколения, на которые
+        не вело уже ничего, сняты вместе со своими адресами (DRF-1485):
+        `/book/confirm`, `/book/success/:bookingId` и `/me`. Алиасами
+        они быть не могли — каждый показывал СВОЙ экран, а не
+        канонический по старому адресу, так что оставить адрес значило
+        бы оставить и экран.
+
+        DRF-1625 — `/catalog` (`CatalogScreen`) снят по тому же
+        критерию, под который он подпадал всё это время: канонический
+        каталог это `CustomerCatalogScreen` на `/customer/catalog`, а
+        `CatalogScreen` был СВОИМ экраном, а не тем же по старому
+        адресу. Внутренний вход в него был ровно один — из
+        `MyVisitsScreen`, снятого тем же пакетом; продюсеров пути
+        `/catalog` в репозитории нет: единственный маршрутный литерал у
+        продюсеров — `"open_catalog": "customer/catalog"`
+        (`apps/skills/welcome/skill.py:172`), а протухший payload
+        `catalog` из старых клавиатур `_ROUTE_MAP` резолвит в
+        `/customer/catalog`.
+
+        `/catalog/:serviceId` остаётся: это настоящий псевдоним.
       */}
-      <Route path="/catalog" element={<CatalogScreen />} />
       <Route path="/catalog/:serviceId" element={<ServiceDetailScreen />} />
       {/*
         §31 (решение владельца 06.09.2026) — `MasterPickerScreen` и

@@ -87,7 +87,6 @@ import {
 } from "../lib/food-scanner";
 import { onBackButton, setBackButton } from "../lib/max-sdk";
 import { resetBooking, setMaster, setService } from "../state/booking";
-import { CatalogScreen } from "./CatalogScreen";
 import { CustomerBookingSuccessScreen } from "./CustomerBookingSuccessScreen";
 import { CustomerCatalogScreen } from "./CustomerCatalogScreen";
 import { CustomerRecordsScreen } from "./CustomerRecordsScreen";
@@ -185,14 +184,6 @@ describe("DRF-1493 · вложенный экран: возврат есть и 
     expect(
       await screen.findByText("ПРИЕХАЛИ:/customer/records"),
     ).toBeInTheDocument();
-  });
-
-  it("CatalogScreen (легаси) → /", async () => {
-    const user = userEvent.setup();
-    renderDeepLink("/catalog", <CatalogScreen />, "/catalog");
-    await screen.findByRole("heading", { name: "Услуги студии" });
-    await user.click(screen.getByRole("button", { name: "Назад" }));
-    expect(await screen.findByText("ПРИЕХАЛИ:/")).toBeInTheDocument();
   });
 
   /**
