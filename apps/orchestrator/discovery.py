@@ -1324,6 +1324,18 @@ def _salon_place(card: SalonCard) -> str:
     The ``or ""`` below is what makes both empties print as nothing INSTEAD OF
     the word «None»; it is load-bearing, not defensive noise. The distinction
     itself survives on the DTO, where a reader that needs it can still see it.
+
+    УСЛОВИЕ, при котором молчание здесь верно (DRF-1611): сегодня ``None``
+    у ВСЕХ салонов — ключа ``tenant_address`` в фиде ещё нет. Подсказка,
+    повторённая десять раз в одном списке, читается как поломка, и человек
+    перестаёт видеть все десять, включая свой. Когда ключ появится и
+    ``None`` станет редким, подсказка станет действием, а не шумом, и
+    молчание придётся пересмотреть.
+
+    Это условие, а не свойство списка, и у него есть срок годности. На
+    карточке ОДНОГО визита (мини-апп, ``CustomerWellnessDashboardScreen``)
+    оба пустых состояния уже дают разный текст: там подсказка повторяется
+    один раз и читается как действие.
     """
     city = (card.city or "").strip()
     address = (card.address or "").strip()

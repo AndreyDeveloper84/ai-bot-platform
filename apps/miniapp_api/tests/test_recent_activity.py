@@ -114,7 +114,11 @@ class TestRecentActivityNextBooking:
         assert nb["master_name"] == "Ирина"
         assert nb["duration_min"] == 60
         assert nb["salon_name"] == "Формула тела"
-        assert nb["address"] == ""  # no Tenant.address field — graceful
+        # У этого тенанта адрес не задан: колонка `Tenant.address`
+        # трёхзначна (DRF-1587), и молчание источника доезжает как
+        # `null`. Здесь стояло `== ""` с причиной «no Tenant.address
+        # field» — поле есть, и утверждение закрепляло дефект.
+        assert nb["address"] is None
         assert "booking_id" in nb
         assert "·" in nb["date_human"]  # «… · пт · 16:00» shape
 
@@ -198,3 +202,109 @@ class TestRecentActivityTenantBoundary:
         data = _get(client, bot_user).json()
         assert "next_booking" not in data
         assert data["this_week_booking_count"] == 0
+
+
+class TestVisitAddressThreeStates:
+    """Адрес визита: три состояния, и они не схлопываются (DRF-1611).
+
+    Ручка отдавала жёсткий `""` мимо колонки, а рядом стоял комментарий
+    «No address field on Tenant — graceful empty per docstring». Поле
+    завела DRF-1587, причём сразу трёхзначным, — то есть комментарий
+    объяснял устройство, которого больше нет, и стоял вплотную к
+    строке, читаясь как обоснование.
+
+    Различие человеку видно: при `""` спрашивать некого — салон
+    ответил; при `null` адрес скорее всего есть, и его стоит уточнить.
+    """
+
+    def test_a_known_address_travels_verbatim(self, client: Client, bot_user: BotUser, tenant):
+        tenant.address = "Москва, Тверская 12"
+        tenant.save(update_fields=["address"])
+        _make_booking(bot_user, visit_at=datetime.now(dt_timezone.utc) + timedelta(days=1))
+
+        nb = _get(client, bot_user).json()["next_booking"]
+
+        assert nb["address"] == "Москва, Тверская 12"
+
+    def test_the_salon_saying_there_is_none_arrives_as_empty_string(
+        self, client: Client, bot_user: BotUser, tenant
+    ):
+        tenant.address = ""
+        tenant.save(update_fields=["address"])
+        _make_booking(bot_user, visit_at=datetime.now(dt_timezone.utc) + timedelta(days=1))
+
+        nb = _get(client, bot_user).json()["next_booking"]
+
+        # Положительная стража впереди: ответ пришёл и он про эту запись.
+        assert nb["salon_name"] == "Формула тела"
+        # `""` — ОТВЕТ салона, а не молчание источника.
+        assert nb["address"] == ""
+
+    def test_silence_arrives_as_null_not_as_empty_string(
+        self, client: Client, bot_user: BotUser, tenant
+    ):
+        """Главное различие: молчание не превращается в ответ.
+
+        `or ""` в ручке выдал бы наш пробел за «салон сказал, адреса
+        нет» — и человек перестал бы спрашивать там, где спросить надо.
+        """
+        # Умолчание колонки и есть `None` — ничего не задаём.
+        assert tenant.address is None
+        _make_booking(bot_user, visit_at=datetime.now(dt_timezone.utc) + timedelta(days=1))
+
+        nb = _get(client, bot_user).json()["next_booking"]
+
+        assert nb["salon_name"] == "Формула тела"
+        assert nb["address"] is None
+
+    def test_the_three_states_are_pairwise_distinguishable(
+        self, client: Client, bot_user: BotUser, tenant
+    ):
+        """Сведение любых двух обязано краснить этот тест."""
+        _make_booking(bot_user, visit_at=datetime.now(dt_timezone.utc) + timedelta(days=1))
+
+        seen = []
+        for value in ("Москва, Тверская 12", "", None):
+            tenant.address = value
+            tenant.save(update_fields=["address"])
+            nb = _get(client, bot_user).json()["next_booking"]
+            seen.append("null" if nb["address"] is None else f"str:{len(nb['address'])}")
+
+        assert seen == ["str:19", "str:0", "null"]
+        assert len(set(seen)) == 3
+
+    def test_our_own_gap_is_counted(self, client: Client, bot_user: BotUser, tenant, caplog):
+        """`null` считается: без счётчика нечем сказать, растёт пробел или нет."""
+        import logging
+
+        assert tenant.address is None
+        _make_booking(bot_user, visit_at=datetime.now(dt_timezone.utc) + timedelta(days=1))
+
+        with caplog.at_level(logging.INFO, logger="apps.miniapp_api.views"):
+            _get(client, bot_user)
+
+        hits = [r for r in caplog.records if "recent_activity.address_unknown" in r.getMessage()]
+        assert len(hits) == 1
+
+    def test_a_known_address_is_not_counted_as_a_gap(
+        self, client: Client, bot_user: BotUser, tenant, caplog
+    ):
+        """Парная проверка: счётчик считает пробел, а не каждый визит.
+
+        Без неё «счётчик работает» доказывалось бы строкой, которая
+        пишется всегда, — и число потеряло бы смысл.
+        """
+        import logging
+
+        tenant.address = "Москва, Тверская 12"
+        tenant.save(update_fields=["address"])
+        _make_booking(bot_user, visit_at=datetime.now(dt_timezone.utc) + timedelta(days=1))
+
+        with caplog.at_level(logging.INFO, logger="apps.miniapp_api.views"):
+            resp = _get(client, bot_user)
+
+        # Присутствие впереди: запрос отработал и адрес доехал…
+        assert resp.json()["next_booking"]["address"] == "Москва, Тверская 12"
+        # …и только теперь отсутствие: пробела не было, считать нечего.
+        hits = [r for r in caplog.records if "recent_activity.address_unknown" in r.getMessage()]
+        assert hits == []

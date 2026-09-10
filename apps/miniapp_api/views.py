@@ -3461,9 +3461,20 @@ def customer_recent_activity(request: HttpRequest) -> HttpResponse:
 
     ## Fields without a source (documented gaps)
 
-    * `next_booking.address` — bot-platform's `Tenant` has no address
-      field; returned as `""`. Frontend renders empty until the address
-      lands (Ayla salon profile OR a tenant config field).
+    * `next_booking.address` — ТРИ состояния, и они не схлопываются
+      (DRF-1611, поле заведено DRF-1587):
+
+      - строка   — адрес известен;
+      - `""`     — САЛОН сказал, что адреса нет. Ответ, а не молчание;
+      - `null`   — источник об адресе не сказал ничего. Это НАШ пробел,
+        и он считается: `miniapp_api.recent_activity.address_unknown`.
+
+      Здесь стояло «bot-platform's `Tenant` has no address field;
+      returned as `""`». Утверждение удалено, а не переписано: поле
+      существует (`apps/tenancy/models.py:360`), и никакая формулировка
+      про его отсутствие верной не станет. Комментарий, объясняющий
+      несуществующее устройство, опаснее отсутствия комментария — он
+      стоит вплотную к строке и читается как обоснование.
     * `next_booking.service_name` / `.master_name` on the mirror path —
       the mirror stores opaque ids, so both are catalog lookups
       (:func:`_proxy_catalog_refs`) and come back `""` when the catalog
@@ -3516,10 +3527,22 @@ def customer_recent_activity(request: HttpRequest) -> HttpResponse:
             "duration_min": next_row.duration_min,
             "master_name": next_row.master_name,
             "salon_name": tenant.name,
-            # No address field on Tenant — graceful empty per docstring.
-            "address": "",
+            # Дословно как в колонке: `None` уезжает как `null`, `""` —
+            # как `""`. Ни `or ""`, ни `?? ""` здесь быть не может: они
+            # схлопнули бы «источник промолчал» в «адреса нет», то есть
+            # выдали бы наш пробел за ответ салона.
+            "address": tenant.address,
             "booking_id": next_row.booking_id,
         }
+        if tenant.address is None:
+            # Счётчик НАШЕГО пробела. Без него нечем сказать, растёт он
+            # или сокращается, — а сегодня мы весь день натыкаемся на
+            # состояния, у которых счётчика нет.
+            logger.info(
+                "miniapp_api.recent_activity.address_unknown tenant=%s bot_user=%s",
+                tenant.id,
+                bot_user.id,
+            )
 
     payload: dict[str, Any] = {
         "this_week_booking_count": this_week_count,
