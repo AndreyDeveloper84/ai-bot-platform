@@ -204,7 +204,15 @@ class TestMirrorIsTheSource:
         assert nb["master_name"] == "Ирина"
         assert nb["duration_min"] == 90
         assert nb["salon_name"] == "Формула тела"
-        assert nb["address"] == ""  # documented gap — no Tenant.address
+        # Адрес у этого тенанта не задан, и молчание источника доезжает
+        # как `null` (DRF-1611). Здесь стояло `== ""` с причиной
+        # «documented gap — no Tenant.address»: поле завела DRF-1587,
+        # и утверждение закрепляло дефект вместо того, чтобы его ловить.
+        #
+        # Проверка стоит и на зеркальном пути тоже: обе ветки ручки
+        # собирают ОДИН словарь `next_booking`, и это подтверждено
+        # прогоном — при правке одной ветки покраснела вторая.
+        assert nb["address"] is None
         assert nb["booking_id"] == str(proxy.appointment_id)
         assert "·" in nb["date_human"]
 
