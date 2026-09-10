@@ -118,3 +118,60 @@ def test_the_backup_addresses_the_same_stack_the_deploy_restarts(
     project = re.search(r"-p (\S+)", restart["run"])
     assert project, "у шага перезапуска не найден проект compose"
     assert f"-p {project.group(1)}" in backup["run"]
+
+
+def test_the_backup_path_needs_no_root(backup: dict) -> None:
+    """Файловые операции шага идут БЕЗ sudo — иначе шаг ставит на sudoers.
+
+    Замер на пилоте 10.09.2026: ``/var/backups`` — root:root, каталога
+    ``ayla-bot-staging`` там нет, ``touch`` от пользователя выкладки
+    отвечает ``Permission denied``. Первая редакция обходила это через
+    ``sudo mkdir`` и ``sudo tee``, и это была ставка на незаглянутое: все
+    восемь вызовов sudo в этом воркфлоу — про docker, то есть правило
+    sudoers вполне может быть выдано ровно на docker.
+
+    Тогда блокирующий шаг упал бы на ``mkdir`` и остановил выкладку —
+    механизм, заведённый ради защиты, сломал бы то, что защищает.
+
+    Домашний каталог снимает вопрос: прав достаточно по построению.
+    ``sudo docker`` остаётся — он единственный, чья работа на хосте
+    доказана тем, что выкладка идёт.
+    """
+    run = backup["run"]
+    commands = [
+        line.strip()
+        for line in run.splitlines()
+        # Комментарии внутри ssh-строки начинаются с экранированной решётки;
+        # они законно упоминают sudo, объясняя, почему его тут нет.
+        if "sudo" in line and not line.strip().lstrip("\\").startswith("#")
+    ]
+    non_docker = [c for c in commands if "sudo docker" not in c]
+    assert non_docker == [], f"sudo вне docker: {non_docker}"
+    assert "$HOME/" in run, "каталог бэкапов не в домашнем каталоге пользователя"
+
+
+def test_the_write_is_probed_before_the_dump(backup: dict) -> None:
+    """Проверка записи стоит ДО ``pg_dump`` и делается тем же пользователем.
+
+    Без неё первым о потерянных правах сказал бы ``pg_dump`` — то есть
+    отказ пришёл бы из шага, к правам отношения не имеющего, и читался бы
+    как сбой базы.
+    """
+    # Порядок ищется по КОМАНДАМ, а не по тексту. Первая версия этой
+    # проверки сравнивала позиции подстрок и упала на моём же комментарии
+    # «...и ДО pg_dump»: сторож читал рассказ о коде вместо кода. Дефект
+    # был в стороже, и починен сторож, а не порядок в шаге.
+    lines = [
+        ln.strip()
+        for ln in backup["run"].splitlines()
+        if not ln.strip().lstrip("\\").startswith("#")
+    ]
+    probe = next((i for i, ln in enumerate(lines) if "write-probe" in ln), -1)
+    dump = next((i for i, ln in enumerate(lines) if "pg_dump" in ln), -1)
+
+    assert probe != -1, "проверки записи нет вовсе"
+    assert dump != -1, "шаг перестал делать дамп — проверять нечего"
+    assert probe < dump, f"проверка записи ({probe}) стоит ПОСЛЕ дампа ({dump})"
+    assert "не записываем пользователем выкладки" in backup["run"], (
+        "отказ по правам не назван словами"
+    )

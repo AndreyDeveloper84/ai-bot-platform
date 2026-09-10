@@ -103,18 +103,48 @@ jobs:
           ssh -i ~/.ssh/dev_deploy "${DEV_USER}@${DEV_HOST}" bash -lc "
             set -euo pipefail
             cd '${DEV_DEPLOY_PATH}'
-            BACKUP_DIR=/var/backups/ayla-bot-staging
-            # Глубина — ЧЕСТНОЕ УМОЛЧАНИЕ, а не расчёт: размер дампа
-            # пилота на момент написания не измерен, и десять взято как
-            # число, которое заведомо лучше бесконечности. Занятое место
-            # печатается ниже каждым прогоном — по первому же выводу
-            # глубину надо назначить числом. Пока этого не сделано, тот,
-            # кто читает `KEEP=10`, не должен принимать его за решение.
+            # Каталог, ПРИНАДЛЕЖАЩИЙ пользователю выкладки, а не root.
+            #
+            # Замер на пилоте 10.09.2026: /var/backups — root:root
+            # drwxr-xr-x, каталога ayla-bot-staging там нет, а touch от
+            # пользователя выкладки отвечает Permission denied. Первая
+            # редакция обходила это через sudo mkdir и sudo tee — ставка на
+            # незаглянутое: все восемь вызовов sudo в этом воркфлоу про
+            # docker, то есть правило sudoers вполне может быть выдано ровно
+            # на docker. Тогда блокирующий шаг упал бы на mkdir и остановил
+            # выкладку — механизм, заведённый ради защиты, сломал бы то, что
+            # защищает.
+            #
+            # Домашний каталог снимает вопрос целиком: sudo не нужен, прав
+            # достаточно по построению, каталог переживает перезагрузку и не
+            # соседствует с системной ротацией — в /var/backups уже пишет apt
+            # (alternatives.tar.*, apt.extended_states.* с суффиксами .0 и
+            # .1.gz), и наши снимки оказались бы в её окружении.
+            BACKUP_DIR=\"\$HOME/ayla-bot-staging-backups\"
+            # Глубина — теперь РЕШЕНИЕ, а не умолчание. Первая редакция
+            # честно говорила «размер дампа не измерен, десять взято как
+            # число, заведомо лучшее бесконечности» и требовала назначить
+            # глубину по первому же замеру. Замер сделан на пилоте
+            # 10.09.2026: база бота 65 MB, свободно 57 GB из 79.
+            #
+            # 65 MB × 10 ≈ 650 MB при 57 GB свободных — порядок величины
+            # несущественный, и десять остаётся, но уже как посчитанное
+            # число. Печать занятого места ниже сохранена: она отвечает не
+            # на вопрос «сколько взять», а на вопрос «не разошлось ли».
             KEEP=10
             BACKUP_PATH=\"\$BACKUP_DIR/pre-deploy-\$(date +%Y%m%d-%H%M%S).sql.gz\"
-            # /var/backups принадлежит root на стоковой машине; tee под sudo,
-            # чтобы самый первый прогон не умер на каталоге или на правах.
-            sudo mkdir -p \"\$BACKUP_DIR\"
+            mkdir -p \"\$BACKUP_DIR\"
+            # Проверка записи ТЕМ ЖЕ пользователем и ДО pg_dump. Без неё
+            # первым о потерянных правах сказал бы pg_dump — то есть отказ
+            # пришёл бы из шага, который к правам отношения не имеет, и
+            # читался бы как сбой базы. Проверять под sudo значило бы
+            # ответить на чужой вопрос: пишет сюда не root.
+            PROBE=\"\$BACKUP_DIR/.write-probe.\$\$\"
+            if ! (: > \"\$PROBE\") 2>/dev/null; then
+              echo \"::error::каталог бэкапов не записываем пользователем выкладки: \$BACKUP_DIR\"
+              exit 1
+            fi
+            rm -f \"\$PROBE\"
             # Пользователь и имя базы берутся ИЗ САМОГО КОНТЕЙНЕРА, а не
             # вписаны сюда. На боевой тропе они захардкожены, и это верно
             # ровно до первого стенда с другим окружением: пилот поднимается
@@ -122,13 +152,13 @@ jobs:
             # Контейнер знает их по построению, и спросить его дешевле, чем
             # угадать. Кавычки вокруг переменных внутри одинарных — чтобы их
             # раскрыл удалённый sh, а не наш ssh.
-            sudo docker compose --env-file .env.staging -f docker-compose.yml -f docker-compose.staging.yml -f docker-compose.staging.local.yml -p ayla-bot-staging exec -T postgres sh -c 'pg_dump -U \"\$POSTGRES_USER\" \"\$POSTGRES_DB\"' | gzip | sudo tee \"\$BACKUP_PATH\" > /dev/null
+            sudo docker compose --env-file .env.staging -f docker-compose.yml -f docker-compose.staging.yml -f docker-compose.staging.local.yml -p ayla-bot-staging exec -T postgres sh -c 'pg_dump -U \"\$POSTGRES_USER\" \"\$POSTGRES_DB\"' | gzip > \"\$BACKUP_PATH\"
             # Проверка размера: пустой бэкап блокирует выкладку. Порог тот
             # же, что на боевой тропе. Ноль здесь обязан иметь положительную
             # стражу: pg_dump, упавший внутри пайпа, оставляет валидный
             # gzip-заголовок в два десятка байт, и без порога это прошло бы
             # за успех — файл есть, размер ненулевой, данных нет.
-            SIZE=\$(sudo stat -c%s \"\$BACKUP_PATH\")
+            SIZE=\$(stat -c%s \"\$BACKUP_PATH\")
             test \"\$SIZE\" -ge 1024 || { echo \"::error::backup too small (\$SIZE bytes) — aborting before any change on the box\"; exit 1; }
             echo \"Backup: \$BACKUP_PATH (\$SIZE bytes)\"
             # Ротация. Её нет и на боевой тропе — перенести шаг как есть
@@ -140,9 +170,9 @@ jobs:
             # Сортировка по ИМЕНИ в обратном порядке, а не по времени
             # файловой системы: имя несёт метку времени снимка и не сдвинется
             # от постороннего касания файла.
-            ls -1 \"\$BACKUP_DIR\"/pre-deploy-*.sql.gz 2>/dev/null | sort -r | tail -n +\$((KEEP + 1)) | while read -r OLD; do sudo rm -f \"\$OLD\"; done
+            ls -1 \"\$BACKUP_DIR\"/pre-deploy-*.sql.gz 2>/dev/null | sort -r | tail -n +\$((KEEP + 1)) | while read -r OLD; do rm -f \"\$OLD\"; done
             KEPT=\$(ls -1 \"\$BACKUP_DIR\"/pre-deploy-*.sql.gz 2>/dev/null | wc -l)
-            TOTAL=\$(sudo du -sh \"\$BACKUP_DIR\" | cut -f1)
+            TOTAL=\$(du -sh \"\$BACKUP_DIR\" | cut -f1)
             echo \"::notice::снимков в \$BACKUP_DIR: \$KEPT (глубина \$KEEP), занято \$TOTAL\"
           "
 
