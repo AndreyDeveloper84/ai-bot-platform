@@ -71,6 +71,7 @@ class CandidateSetSignature:
     digest: str
     visible_count: int
     recommendation_eligible_count: int | None
+    eligible_ids: tuple[str, ...] = ()
     ordered_ids: tuple[str, ...] = ()
     separation: float | None = None
     spanning_fields: frozenset[str] = field(default_factory=frozenset)
@@ -109,10 +110,26 @@ class CandidateSetSignature:
             self.digest,
             str(self.visible_count),
             str(self.recommendation_eligible_count),
+            ",".join(sorted(self.eligible_ids)),
             ",".join(self.ordered_ids),
             "none" if self.separation is None else f"{self.separation:.6f}",
             ",".join(sorted(self.spanning_fields)),
         )
+
+
+@dataclass(frozen=True, slots=True)
+class HypotheticalAnswer:
+    """ "If the person answered `value` for `slot`" — for probing, and only that.
+
+    Spec §12.2 calls the probe's argument an `evidence_delta`. It is deliberately
+    **not** a `ConfirmedEvidence` here. Minting real evidence for a hypothesis
+    would create exactly the object that must never exist: a settled fact nobody
+    stated, one list-append away from closing a slot. A hypothesis gets a type
+    that cannot satisfy anything, and `verdict()` (§8.3) does not accept it.
+    """
+
+    slot: str
+    value: str
 
 
 @runtime_checkable
@@ -125,8 +142,8 @@ class CandidateProbe(Protocol):
     it is evaluating happen.
     """
 
-    def probe(self, evidence_delta: ConfirmedEvidence) -> CandidateSetSignature:
-        """The signature the set *would* have under this hypothetical evidence."""
+    def probe(self, answer: HypotheticalAnswer) -> CandidateSetSignature:
+        """The signature the set *would* have if this answer arrived."""
         ...
 
     def narrowed_by(self, evidence: ConfirmedEvidence) -> bool:
