@@ -362,3 +362,69 @@ describe("Расписание салона — режим «Все»", () => {
     expect(screen.queryByText("Хронология")).toBeNull();
   });
 });
+
+describe("Отметка «сейчас по плану» — утверждённая семантика DRF-1237", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockedDay.mockResolvedValue(salonDay());
+    mockedSchedule.mockResolvedValue({
+      tenant_tz: "Europe/Moscow",
+      from: "2026-09-10",
+      to: "2026-09-10",
+      days: [masterDay()],
+    });
+    mockedFrame.mockResolvedValue(frame());
+  });
+
+  it("стоит у записи, чей интервал накрывает сейчас, и только у неё", async () => {
+    // Заморозка: `scheduled_start <= now < scheduled_end`. Считает это
+    // сервер (`is_in_progress`), клиент не заводит своё «сейчас».
+    //
+    // Отрицательный контроль в этом же тесте обязателен: проверка «отметка
+    // есть» без «у соседа её нет» зеленела бы и на отметке у всех подряд.
+    const base = salonDay();
+    mockedDay.mockResolvedValue({
+      ...base,
+      masters: [
+        { ...base.masters[0]!, visits: [visit({ id: "v-now", is_in_progress: true })] },
+        {
+          ...base.masters[1]!,
+          visits: [
+            visit({
+              id: "v-later",
+              client_first_name: "Пётр",
+              service_name: "Бритьё",
+              is_in_progress: false,
+            }),
+          ],
+        },
+      ],
+    });
+
+    renderScreen();
+    await switchToAll();
+
+    expect(await screen.findByText(/Ольга · Стрижка · Мария К\. · сейчас по плану/)).toBeTruthy();
+    expect(screen.getByText(/Денис · Бритьё · Пётр К\.$/)).toBeTruthy();
+  });
+
+  it("не обещает, что клиент пришёл", async () => {
+    // Заморозка прямо запрещает читать индикатор как приход клиента, оплату
+    // или статус in_progress. Слово «идёт» обещало бы ровно это, поэтому
+    // формулировка говорит про план, а не про факт.
+    const base = salonDay();
+    mockedDay.mockResolvedValue({
+      ...base,
+      masters: [
+        { ...base.masters[0]!, visits: [visit({ id: "v-now", is_in_progress: true })] },
+        { ...base.masters[1]!, visits: [] },
+      ],
+    });
+
+    renderScreen();
+    await switchToAll();
+
+    await screen.findByText(/сейчас по плану/);
+    expect(screen.queryByText(/· идёт$/)).toBeNull();
+  });
+});
