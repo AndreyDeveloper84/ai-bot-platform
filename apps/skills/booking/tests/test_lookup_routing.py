@@ -44,6 +44,7 @@ from apps.skills.booking.lookup import (
     is_personal_booking_lookup,
 )
 from apps.skills.booking.skill import BookingSkill
+from apps.skills.booking.tests.conftest import VendorClientForbidden
 from apps.skills.faq.skill import FAQSkill
 from apps.skills.registry import dispatch, registered
 from apps.tenancy.context import tenant_scope
@@ -1244,9 +1245,41 @@ class TestAmbiguousDispatchNegatives:
     ) -> None:
         """Review round 3 P1 — through the REAL SkillRegistry.dispatch:
         compound/re-scoped "запись" phrasings must never enter the
-        booking skill (its fast path would force show_my_bookings)."""
+        booking skill (its fast path would force show_my_bookings).
+
+        DRF-1636 — ``OpenAIProvider.complete`` подменён здесь СВОИМ
+        детерминированным ответом. Патча не было, и дальше по диспетчеру
+        честно отрабатывал FAQ: он шёл в роутер, строил настоящий
+        ``AsyncOpenAI`` и уходил в сеть. Тест при этом оставался зелёным,
+        потому что ``show_my_bookings`` не появляется в ответе FAQ ни при
+        каком исходе вызова — включая провалившийся. То есть предмет
+        (маршрутизация) доказывался дорогой, к предмету не относящейся.
+
+        Красным его делало соседство: чужой мок ``AsyncOpenAI`` с
+        исчерпанным ``side_effect`` ронял конструктор ``StopIteration``-ом,
+        и эти двадцать параметров падали в файле, который сам ничего не
+        патчил.
+
+        ``return_value``, а НЕ ``side_effect=[...]``: список исчерпаем, и
+        мок, кончающийся на следующем обращении, — ровно тот класс
+        дефекта, который здесь чинится.
+
+        Проверки «подмена сработала» здесь НЕТ намеренно: до FAQ доходит
+        только часть фраз (остальные разбираются детерминированно, вовсе
+        без LLM), и счётчик вызовов был бы верен для одних параметров и
+        ложен для других. Нагрузку доказательства несут двое, у каждого
+        своё утверждение: сторож каталога (``conftest.py``) — что клиент
+        вендора не строится ни разу, и
+        :class:`TestBookingTestsNeverBuildAVendorClient` — что подмена
+        здесь не декоративна.
+        """
         with (
             patch.object(BookingSkill, "handle") as booking_handle,
+            patch.object(
+                OpenAIProvider,
+                "complete",
+                return_value=_completion(text="ответ FAQ, подменённый тестом"),
+            ),
             tenant_scope(tenant),
         ):
             result = dispatch(_with_text(context, phrase))
@@ -1254,6 +1287,54 @@ class TestAmbiguousDispatchNegatives:
         assert result is not None
         booking_handle.assert_not_called()
         assert "show_my_bookings" not in [tc.name for tc in result.tool_calls_made]
+
+
+class TestBookingTestsNeverBuildAVendorClient:
+    """DRF-1636 — сторож каталога, доказанный в обе стороны.
+
+    Утверждение сформулировано положительно и **не зависит от порядка**:
+    ни один тест `apps/skills/booking/tests/` не доходит до конструктора
+    клиента вендора. Двадцать узлов до правки, ноль после.
+
+    Обычное «падает до, проходит после» здесь неприменимо, и это стоит
+    сказать прямо: запущенный в одиночку исходный тест проходил и ДО
+    правки — красным его делало соседство. Воспроизвести соседство можно
+    было бы только подделкой исчерпанного чужого мока, и тогда сторож
+    стерёг бы подделку, а не предмет. Предмет — не поведение, а
+    зависимость; мерить её исходом прогона нельзя, потому что исход и
+    есть то, что от неё пляшет.
+    """
+
+    def test_the_guard_is_armed(self) -> None:
+        """Положительная стража ко всему остальному в этом каталоге.
+
+        Без неё «клиент вендора не строится» было бы зелёным и у
+        фикстуры, которая не делает ничего, — то есть у снятого сторожа,
+        неотличимого от исправного.
+        """
+        # Провайдер строится без аргументов: ключ ему не понадобится —
+        # сторож перехватывает раньше, чем тот кому-то нужен.
+        with pytest.raises(VendorClientForbidden):
+            OpenAIProvider()._get_client()
+
+    def test_the_routing_turn_would_reach_the_vendor_unstubbed(
+        self,
+        context: SkillContext,
+        tenant: Tenant,
+    ) -> None:
+        """Скрепа: подмена в соседнем тесте не декоративна.
+
+        Диспетчер на составной фразе действительно уходит в FAQ, а FAQ —
+        к вендору. Если однажды это перестанет быть правдой (FAQ уйдёт с
+        живого провайдера), тест покраснеет и скажет, что подмену рядом
+        можно снимать. Иначе она осталась бы там навсегда как обряд, чьё
+        основание никто уже не помнит.
+        """
+        phrase = COMPOUND_NON_BOOKING_PHRASES[0]
+
+        with patch.object(BookingSkill, "handle"), tenant_scope(tenant):
+            with pytest.raises(VendorClientForbidden):
+                dispatch(_with_text(context, phrase))
 
 
 class TestWhitespaceNormalization:
