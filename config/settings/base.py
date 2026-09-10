@@ -434,7 +434,7 @@ LIVE_PATH_AI_METRIC_ENABLED = os.environ.get("LIVE_PATH_AI_METRIC_ENABLED", "fal
 # callers outside docstrings/tests) and the offline replay runner — the
 # path that actually answers people wrote no traces, so live behaviour
 # could not be replayed/diffed. This flag ports the SAME recorder (same
-# sampling via REPLAY_SAMPLE_RATE_*, same regex_v2 redaction before
+# sampling via REPLAY_SAMPLE_RATE_*, same regex_v3 redaction before
 # persist) onto the live handler: global concierge/deterministic turns
 # and per-tenant skill-dispatch turns. Default OFF = zero new rows,
 # byte-identical behaviour; rollback is env-only, no redeploy. Capture is
