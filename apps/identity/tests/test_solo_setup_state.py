@@ -126,13 +126,23 @@ class TestALinkedProviderIsReady:
         bootstrap_tenant,
         identity,
     ):
-        import uuid
+        """ТОЛЬКО положительное утверждение, без отрицательного рядом.
 
-        result = create_solo_provider(**identity)
-        assert result.is_ready is False
+        Первая редакция начиналась с `assert result.is_ready is False` —
+        и от этого переставала быть стражей: подмена «всегда READY»
+        роняла её на первой же строке, то есть тест падал вместе со
+        всеми, ничего не доказывая. Страже полагается ПЕРЕЖИВАТЬ ту
+        подмену, которую ловят её соседи, иначе она не отличает
+        «сторож сломан» от «сторож снят».
+
+        Отрицательное утверждение живёт отдельно, в
+        ``test_the_state_follows_the_row_not_the_result_object``.
+        """
+        import uuid
 
         # Ровно то, что сделает встречное заведение в Ayla, когда оно
         # появится: проставит канонический ключ. Больше ничего.
+        result = create_solo_provider(**identity)
         CatalogMaster.all_tenants.filter(pk=result.master.pk).update(
             ayla_user_id=uuid.uuid4(),
         )
