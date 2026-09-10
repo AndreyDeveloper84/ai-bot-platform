@@ -258,6 +258,14 @@ REPLACEMENT_TEXT = (
     "Не могу это ответить — тут нужен человек, а не помощник. Спросите администратора салона."
 )
 
+#: Category recorded when the check itself could not run. Deliberately not one
+#: of the content labels: an operator has to be able to separate "the draft
+#: matched a banned shape" from "we never got to look at the draft". The first
+#: says the model wrote something it should not; the second says our own check
+#: is broken. Same replacement line outward, different counters inward, and
+#: opposite fixes.
+CHECK_FAILED_CATEGORY = "check_failed"
+
 
 @dataclass(frozen=True)
 class OutboundVerdict:
@@ -275,13 +283,16 @@ class OutboundVerdict:
 def evaluate_outbound(text: str) -> OutboundVerdict:
     """Check a drafted reply before it reaches a person.
 
-    Returns the original text when clean, and :data:`REPLACEMENT_TEXT`
-    with the matched categories when not. Never raises: a crash in a
-    safety check must not be the thing that costs someone their answer.
+    Returns the original text when clean, and :data:`REPLACEMENT_TEXT` when
+    not — whether "not" means a category matched or the check could not run
+    at all. Never raises: a crash here must not propagate into the turn.
     """
 
     body = text or ""
     if not body.strip():
+        # Nothing drafted, so nothing to check and nothing to send. Replacing
+        # an empty draft would turn a no-op into a message the person never
+        # had coming.
         return OutboundVerdict(allowed=True, text=body)
 
     hits: list[str] = []
@@ -289,9 +300,34 @@ def evaluate_outbound(text: str) -> OutboundVerdict:
         for label, patterns in _CATEGORIES:
             if any(re.search(p, body) for p in patterns):
                 hits.append(label)
-    except Exception:  # noqa: BLE001 — a broken regex must not eat the turn
+    except Exception:  # noqa: BLE001 — a crash must not raise into the turn
+        # The check did not run, so nothing is known about this draft.
+        # Sending it anyway was the old behaviour, and its reasoning was sound
+        # as far as it went: a crash in a safety check must not cost someone
+        # their answer.
+        #
+        # What that reasoning missed is that those were never the only two
+        # options. :data:`REPLACEMENT_TEXT` already exists, so the choice is
+        # not "send the unchecked text" versus "say nothing" — it is "send the
+        # unchecked text" versus "send the safe line". The person still gets
+        # an answer; it is simply not the one we were unable to check.
+        #
+        # Owner §111: Safety uncertain → fail closed for the AFFECTED
+        # capability, not for the product. This is exactly that, scoped to one
+        # capability: this draft.
+        #
+        # The category is :data:`CHECK_FAILED_CATEGORY` rather than one of the
+        # content labels on purpose. "Replaced because it matched" and
+        # "replaced because we could not look" are different states with
+        # opposite fixes, and an operator reading the audit a month from now
+        # has to tell them apart. Outward both are the same line; inward they
+        # are separate counters.
         logger.exception("safety.outbound.check_failed")
-        return OutboundVerdict(allowed=True, text=body)
+        return OutboundVerdict(
+            allowed=False,
+            text=REPLACEMENT_TEXT,
+            categories=(CHECK_FAILED_CATEGORY,),
+        )
 
     if not hits:
         return OutboundVerdict(allowed=True, text=body)
@@ -302,4 +338,9 @@ def evaluate_outbound(text: str) -> OutboundVerdict:
     return OutboundVerdict(allowed=False, text=REPLACEMENT_TEXT, categories=tuple(hits))
 
 
-__all__ = ["REPLACEMENT_TEXT", "OutboundVerdict", "evaluate_outbound"]
+__all__ = [
+    "CHECK_FAILED_CATEGORY",
+    "REPLACEMENT_TEXT",
+    "OutboundVerdict",
+    "evaluate_outbound",
+]

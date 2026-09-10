@@ -174,8 +174,23 @@ class TestBehaviour:
         assert evaluate_outbound("").allowed
         assert evaluate_outbound("   ").allowed
 
-    def test_a_broken_check_never_eats_the_answer(self, monkeypatch):
-        """A crashing safety check must not be what costs someone a reply."""
+    def test_a_broken_check_still_does_not_cost_the_person_a_reply(self, monkeypatch):
+        """A crashing check must not cost someone a reply — and it does not.
+
+        This test previously asserted the opposite half of the same sentence:
+        that the ORIGINAL text went out. That was not a wrong test, it was the
+        old specification, and it rested on a real fear — a crash in a safety
+        check must not leave a person staring at silence.
+
+        Owner §111 replaced the specification: «Safety uncertain → fail closed
+        затронутой capability», not the product. The fear was answered by a
+        third option that was already sitting in this module —
+        ``REPLACEMENT_TEXT``. The person still gets an answer. It is simply
+        not the one nobody managed to check.
+
+        So the assertion flips deliberately, and it is recorded here rather
+        than quietly edited: the behaviour changed because the rule changed.
+        """
 
         import apps.orchestrator.safety.outbound as mod
 
@@ -185,8 +200,8 @@ class TestBehaviour:
         monkeypatch.setattr(mod.re, "search", boom)
         verdict = evaluate_outbound("Завтра три записи.")
 
-        assert verdict.allowed
-        assert verdict.text == "Завтра три записи."
+        assert verdict.text == REPLACEMENT_TEXT
+        assert verdict.blocked
 
 
 class TestNegatedDiagnosis:
