@@ -212,14 +212,19 @@ PERSONAL_FIELDS: tuple[PersonalField, ...] = (
     ),
     PersonalField(
         site="identity.BotUser.timezone",
-        origin="SYSTEM",
+        origin="USER_STATED",
         owner="BOT",
         crosses_salons=False,
         why=(
-            "IANA zone for rendering times in messages. No runtime path "
-            "writes it today (it is only read, at "
-            "apps/identity/services/profile.py:96) — a personal slot standing "
-            "at its default."
+            "IANA-пояс человека для отрисовки времени в сообщениях. "
+            "Происхождение сменилось с SYSTEM на USER_STATED (DRF-1477): "
+            "здесь стояло «no runtime path writes it today — a personal slot "
+            "standing at its default», и это перестало быть правдой. Экран "
+            "профиля определяет пояс браузером, ПОКАЗЫВАЕТ его человеку "
+            "видимым значением и записывает только по подтверждению, через "
+            "`PATCH /me`. Значение с этого момента — ответ человека, а не "
+            "умолчание колонки: пусто означает «не задано» (DRF-1606), и "
+            "непустое означает, что его назвали."
         ),
     ),
     # -----------------------------------------------------------------
