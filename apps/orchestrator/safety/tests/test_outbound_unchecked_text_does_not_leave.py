@@ -82,6 +82,16 @@ class TestUncheckedTextDoesNotLeave:
         verdict = evaluate_outbound(draft)
 
         blob = " ".join(str(v) for v in vars(verdict).values())
+
+        # Positive control on the absence below, and it is not ceremony: if
+        # ``vars()`` ever stopped seeing this dataclass's fields, ``blob``
+        # would be empty and every "not in blob" below would pass while
+        # proving nothing. These two lines say the haystack is real and was
+        # built from THIS verdict, so a miss underneath means the draft is
+        # genuinely gone rather than never looked for.
+        assert blob.strip(), "the verdict rendered to nothing — nothing was searched"
+        assert REPLACEMENT_TEXT in blob, "blob does not carry this verdict's own text"
+
         assert draft not in blob
         # A distinctive fragment too, in case something truncates rather than
         # copies whole.
