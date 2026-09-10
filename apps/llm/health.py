@@ -145,6 +145,7 @@ import re
 import time
 from dataclasses import dataclass
 from datetime import datetime
+from typing import Any
 
 from django.conf import settings
 from django.core.cache import cache
@@ -312,7 +313,7 @@ def probe_target() -> tuple[str, str]:
     return resolve_provider_tier()
 
 
-def build_probe_provider(name: str) -> object:
+def build_probe_provider(name: str) -> Any:
     """A FRESH, unwrapped instance of vendor ``name`` for one probe.
 
     Construction goes through :func:`apps.llm.router.build_provider`,
@@ -334,6 +335,11 @@ def build_probe_provider(name: str) -> object:
 
     ``retry_policy`` is pinned to one attempt: see the module docstring,
     "Why the probe does NOT retry".
+
+    Typed ``Any`` rather than :class:`~apps.llm.protocol.LLMProvider`
+    because the probe uses ``aclose``, which is deliberately NOT part of
+    that protocol — it is the short-lived-caller hook and this module is
+    the only short-lived caller.
     """
 
     from apps.llm.retry import RetryPolicy
