@@ -84,7 +84,8 @@ class _FakeEntry:
     kcal: int = 0
     milestone_text: Any = None
     today_total_ml: int = 1250
-    today_norm_ml: int = 2000
+    # Ориентира нет ни у кого до утверждения методики (§82, §85).
+    today_norm_ml: int | None = None
     alcohol_recovery_hint: bool = False
     raw: dict = field(default_factory=dict)
 
@@ -137,11 +138,17 @@ class TestAddWaterHappyPath:
         data = resp.json()
         assert data["entry_id"] == "entry-abc"
         assert data["today_total_ml"] == 1250
-        # Тот же стакан 250 мл и та же норма, что у GET /wellness/today —
-        # два разных определения стакана показали бы человеку число,
-        # которое прыгает при обновлении.
+        # Тот же стакан 250 мл, что у GET /wellness/today — два разных
+        # определения стакана показали бы человеку число, которое
+        # прыгает при обновлении.
         assert data["water_glasses_eaten"] == 5
-        assert data["water_glasses_target"] == 8
+        # NEGATIVE: ориентира нет — нет ни ключа цели, ни нормы в мл.
+        # Ни 2000, ни 8, ни ноль: ключа в ответе не бывает вовсе, пока
+        # методика не утверждена (§82, §85 раздел 4). Выпитое выше — то
+        # самое POSITIVE, без которого отрицание проходило бы и по
+        # пустому ответу (DRF-1411).
+        assert "water_glasses_target" not in data
+        assert "today_norm_ml" not in data
 
     def test_tap_time_and_idempotency_key_are_forwarded(self, client: Client, bot_user: BotUser):
         # A queued glass flushed later must keep its own timestamp.

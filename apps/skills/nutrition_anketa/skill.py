@@ -41,18 +41,56 @@ On COMPLETE, the skill:
 3. Renders a "норму посчитала" summary.
 4. Wipes the FSM state from ``conversation.skill_state``.
 
+## Stop scenarios (owner decision 2026-09-09, §7.1)
+
+Ayla does not compute targets automatically for a minor, during
+pregnancy or nursing, for a declared eating disorder, or for a condition
+affecting nutrition or fluid balance. **The diary stays available** —
+that is the point of the branch, not a consolation.
+
+Two gates, both firing on the turn the answer arrives:
+
+* after ``age`` — under :data:`~apps.skills.nutrition_anketa.fsm.ADULT_AGE`;
+* after ``screening`` — any answer other than ``none``.
+
+Three properties this branch must keep, each of which cost something to
+learn elsewhere in this codebase:
+
+1. **Nothing is sent to Ayla.** Not "sent and ignored" — not sent.
+   ``profile_upsert_service._recompute_and_persist`` recomputes on every
+   upsert unconditionally, and the current override ladder *adds* kcal
+   and water for pregnancy and nursing (+200/+400 kcal, +300/+700 ml).
+   Forwarding those answers today would make the outcome worse than not
+   asking at all. The ladder is being replaced by the calculation
+   service; until it is, the stop ends before the network call.
+2. **The screening answer is not stored.** It decides, then it is
+   dropped — not written to ``skill_state``, not put in ``health_flags``,
+   not remembered. It is special-category data under 152-ФЗ and the
+   consent that would allow keeping it is still an open question with
+   the owner. Same treatment as «что не подошло» in
+   :mod:`apps.skills.food_correction`.
+3. **The log records the bucket, not the condition.** ``stop=screening``
+   and never *which* — a log line is storage too.
+
 ## Scope cuts vs mysite
 
 Deferred to Phase 1 / a follow-up Sprint 9 ticket:
 
-* Pace step (slow / balanced).
+* Pace step (slow / balanced) — and with it the "faster than ~0.9 kg per
+  week" stop, which needs a methodology that computes a rate.
 * Gain-clarify branch.
 * BMI-ladder override response handling ("Учла важное" override card).
 * Allergies / meds (these belong with the Tier-B health screening
   port — see DRF-824 scope note).
 * Activity step — defaulted to ``1.4`` (sedentary). Phase 1 makes it a
-  step with 5 levels.
-* Consent screen — assumed handled at tenant onboarding; not per-skill.
+  step with 5 levels. Note ``1.4`` is not one of the four coefficients
+  the owner approved (1.2 / 1.375 / 1.55 / 1.725); the calculation
+  service change carries that.
+* Consent screen before the weight question. The owner requires a
+  separate consent for weight; whether the same consent covers the
+  screening answers is open (question 1 in
+  ``docs/PLAN_NUTRITION_TARGETS.md``). Wiring one checkbox that silently
+  covers both is the thing not to do, so it lands separately.
 """
 
 from __future__ import annotations
@@ -71,7 +109,9 @@ from apps.orchestrator.ui.keyboards import anketa_choice_keyboard, parse_callbac
 from apps.skills.base import SkillContext, SkillResult
 from apps.skills.fsm import Completed, NextStep
 from apps.skills.nutrition_anketa.fsm import (
+    ADULT_AGE,
     CHOICE_STEPS,
+    SCREENING_CLEAR,
     AnketaFSM,
     choice_keyboard_options,
 )
@@ -85,6 +125,35 @@ _STATE_KEY = "nutrition_anketa"
 _AYLA_DOWN_FALLBACK = (
     "Не получилось сохранить — сервис временно недоступен. Попробуй ещё раз через минуту."
 )
+
+# ─── stop-scenario copy (§7.1) ───────────────────────────────────────────
+#
+# Two texts, not one. The reason differs, and a single «не считаю»
+# covering both would be a refusal without a name — the person could not
+# tell whether we mean their age or their answer, and neither could we.
+
+#: Shared tail. The diary staying open IS the decision, so it is stated
+#: plainly rather than tacked on as an apology.
+_STOP_DIARY_TAIL = (
+    "Дневник остаётся: записывай еду и воду, я посчитаю и покажу, сколько "
+    "вышло за день. Без дневной цели и без процентов.\n\n"
+    "Если ориентир тебе назначил специалист, вписать его пока некуда — "
+    "такой ручки у меня ещё нет."
+)
+
+_STOP_MINOR = (
+    "Персональный ориентир по калориям и воде я считаю только совершеннолетним. "
+    "Это не про тебя лично — просто такие числа несовершеннолетнему должен "
+    "называть врач, а не бот.\n\n" + _STOP_DIARY_TAIL
+)
+
+#: Deliberately does not repeat back what the person just declared.
+_STOP_SCREENING = (
+    "Тогда персональный ориентир считать не буду — в таких случаях числа должен "
+    "называть специалист, который тебя ведёт.\n\n" + _STOP_DIARY_TAIL
+)
+
+_STOP_TEXTS = {"minor": _STOP_MINOR, "screening": _STOP_SCREENING}
 
 
 @register
@@ -167,7 +236,25 @@ class NutritionAnketaSkill:
         # Extract user input — from choice callback if present, else raw text.
         value = self._extract_value(text)
 
+        # Which step this answer belongs to — `transition` advances
+        # `current_step`, so it has to be read before the call.
+        answered_step = fsm.current_step
         result = fsm.transition(value)
+
+        # §7.1 stop-gates. Checked here, on the turn the answer arrives:
+        # before the next question is asked (so nobody in a stop scenario
+        # is asked their weight) and before any call to Ayla.
+        stop = self._stop_reason(answered_step, fsm.answers, result)
+        if stop is not None:
+            self._clear_state(context)
+            return self._render_stop(stop, context)
+
+        if answered_step == "screening":
+            # Decided above; not kept. Popping before `_save_state` is what
+            # keeps it out of `Conversation.skill_state` — and out of the
+            # `answers` copy that `Completed` hands to `_on_complete`, so
+            # it cannot reach the payload either.
+            fsm.answers.pop("screening", None)
 
         if isinstance(result, NextStep):
             self._save_state(context, fsm)
@@ -176,6 +263,57 @@ class NutritionAnketaSkill:
         # Completed → POST to Ayla.
         assert isinstance(result, Completed)
         return self._on_complete(context, result.answers)
+
+    # ─── stop scenarios (§7.1) ───────────────────────────────────────────
+
+    def _stop_reason(
+        self,
+        answered_step: str,
+        answers: dict,
+        result: NextStep | Completed,
+    ) -> str | None:
+        """Name of the stop scenario this answer triggers, or ``None``.
+
+        Returns a bucket name (``"minor"`` / ``"screening"``), never the
+        declared condition: the bucket is all the caller needs, and the
+        condition is special-category data we have decided not to carry.
+        """
+        if isinstance(result, NextStep) and result.is_validation_error:
+            # Nothing was stored — the FSM re-asks the same step. Reading
+            # `answers` here would test the PREVIOUS answer to this step
+            # and stop on an input the person has not actually given.
+            return None
+
+        if answered_step == "age":
+            age = answers.get("age")
+            if isinstance(age, int) and age < ADULT_AGE:
+                return "minor"
+
+        if answered_step == "screening" and answers.get("screening") != SCREENING_CLEAR:
+            return "screening"
+
+        return None
+
+    def _render_stop(self, reason: str, context: SkillContext) -> SkillResult:
+        """State 4 of the owner's twelve: no automatic result, diary intact."""
+        # Bucket only. `stop=screening` says everything the operator needs;
+        # `stop=pregnancy_nursing` would put a health fact in the log file.
+        logger.info(
+            "anketa.stop_scenario reason=%s conv=%s",
+            reason,
+            getattr(context.conversation, "id", None),
+        )
+        return SkillResult(
+            reply_text=_STOP_TEXTS[reason],
+            action_type="anketa_stop",
+            action_data={
+                "reason": reason,
+                # The same two next moves the completed anketa offers. The
+                # branch says the diary stays open, so it has to open it.
+                "buttons": _post_anketa_chips(),
+            },
+            meta={"reply_kind": f"anketa_stop_{reason}"},
+        )
 
     def _on_complete(self, context: SkillContext, answers: dict) -> SkillResult:
         external_id = external_user_id_for(context.bot_user)
@@ -367,16 +505,53 @@ def _post_anketa_chips() -> list[dict[str, str]]:
     return chips
 
 
+#: Строки карточки: подпись, поле профиля, единица. Порядок значим —
+#: он же порядок на экране.
+_SUMMARY_ROWS: tuple[tuple[str, str, str], ...] = (
+    ("🔥 Калории", "daily_kcal", "ккал/день"),
+    ("🍗 Белок", "protein_g", "г"),
+    ("🥑 Жиры", "fat_g", "г"),
+    ("🍚 Углеводы", "carbs_g", "г"),
+    ("💧 Вода", "water_ml", "мл"),
+)
+
+
 def _format_summary(profile) -> str:
-    """Compose the post-anketa norms card."""
+    """Карточка после анкеты — только те ориентиры, которые ЕСТЬ.
+
+    Здесь стояли пять строк подряд, безусловно. Каждая печатала
+    `{profile.<поле>}`, и ноль печатался как значение: «💧 Вода: 0 мл»,
+    а у человека, не назвавшего вес, — ещё и «🔥 Калории: 0 ккал/день».
+    Ноль ккал в сутки не бывает; такая карточка не «пустая», она ЛЖЁТ, и
+    лжёт в самом громком месте — сразу после «Готово, рассчитала твои
+    нормы».
+
+    С 09.09.2026 нолей в этих полях штатно много: владелец снял формулу
+    воды `30 мл × вес` (§82) и подстановку медианы за пропущенные
+    рост/вес/возраст/пол (§85, раздел 3.2 — входы обязательны). Строка
+    без значения теперь не печатается вовсе, а если не посчиталось
+    НИЧЕГО — карточка не притворяется расчётом.
+
+    Ноль читается как отсутствие, а не как «ориентир ноль»: ни одна из
+    пяти величин не может быть нулём у живого человека.
+    """
+    rows = [
+        f"{label}: {value} {unit}"
+        for label, field, unit in _SUMMARY_ROWS
+        if (value := int(getattr(profile, field, 0) or 0)) > 0
+    ]
+
+    if not rows:
+        # Ни одного ориентира — говорим об этом прямо и не называем
+        # причину чужими словами: у отсутствия должно быть имя, но имя
+        # это «мы не считали», а не «ты чего-то не заполнил».
+        return (
+            "Дневник готов — записывай еду и воду, я всё сохраню.\n"
+            "Дневных ориентиров пока не считаю."
+        )
+
     parts: list[str] = ["Готово, рассчитала твои нормы:"]
-    parts.append(
-        f"🔥 Калории: {profile.daily_kcal} ккал/день\n"
-        f"🍗 Белок: {profile.protein_g} г\n"
-        f"🥑 Жиры: {profile.fat_g} г\n"
-        f"🍚 Углеводы: {profile.carbs_g} г\n"
-        f"💧 Вода: {profile.water_ml} мл"
-    )
+    parts.append("\n".join(rows))
     if profile.goal_overridden_by:
         # Ayla applied a safety override (pregnancy / eating-disorder /
         # BMI floor). Mention it gently — the override is the right call,

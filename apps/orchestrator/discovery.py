@@ -1312,12 +1312,30 @@ def render_no_salons(city: str | None = None) -> DiscoveryReply:
 def _salon_place(card: SalonCard) -> str:
     """« — Пенза, ул. Леонова, 15а» / « — Пенза» / «» for a salon card.
 
-    The mirrored address usually ALREADY starts with the city (live pilot:
-    «Пенза, ул. Карпинского, 33А»), and gluing city + address unconditionally
-    printed it twice — «SPAtrium — Пенза, Пенза, ул. Карпинского, 33А». The
-    city is dropped from the prefix exactly when the address opens with it;
-    an address from another city (mirror drift) still shows both, because
-    then the two really are different facts.
+    The address usually ALREADY starts with the city (live pilot: «Пенза, ул.
+    Карпинского, 33А»), and gluing city + address unconditionally printed it
+    twice — «SPAtrium — Пенза, Пенза, ул. Карпинского, 33А». The city is
+    dropped from the prefix exactly when the address opens with it; an address
+    from another city (mirror drift) still shows both, because then the two
+    really are different facts.
+
+    ``card.address`` is three-valued since DRF-1609 — ``None`` (the source
+    said nothing about the address), "" (it said there is none), or a string.
+    The ``or ""`` below is what makes both empties print as nothing INSTEAD OF
+    the word «None»; it is load-bearing, not defensive noise. The distinction
+    itself survives on the DTO, where a reader that needs it can still see it.
+
+    УСЛОВИЕ, при котором молчание здесь верно (DRF-1611): сегодня ``None``
+    у ВСЕХ салонов — ключа ``tenant_address`` в фиде ещё нет. Подсказка,
+    повторённая десять раз в одном списке, читается как поломка, и человек
+    перестаёт видеть все десять, включая свой. Когда ключ появится и
+    ``None`` станет редким, подсказка станет действием, а не шумом, и
+    молчание придётся пересмотреть.
+
+    Это условие, а не свойство списка, и у него есть срок годности. На
+    карточке ОДНОГО визита (мини-апп, ``CustomerWellnessDashboardScreen``)
+    оба пустых состояния уже дают разный текст: там подсказка повторяется
+    один раз и читается как действие.
     """
     city = (card.city or "").strip()
     address = (card.address or "").strip()
@@ -1334,8 +1352,11 @@ def _render_salon_cards(
     """Render salons: name — city, address + a short «что там делают» sample,
     plus one chip per salon whose tap opens that salon's services.
 
-    ``address`` may legitimately be "" (the pilot salon's masters carry none)
-    — the line simply goes without it. A salon whose mirror holds no active
+    ``address`` may legitimately be absent — ``None`` today for every salon
+    (``Tenant.address`` is fed by the specialists feed's ``tenant_address``
+    key, which DRF-1587 is still landing), "" when the source says there is no
+    address. The line simply goes without it, and never prints «None»
+    (``test_catalog_surface`` guards both empties). A salon whose mirror holds no active
     services says «Услуги пока не загружены» instead of inventing a list —
     and gets no chip either: its tap would open an empty list.
     """
