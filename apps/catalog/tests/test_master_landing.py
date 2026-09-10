@@ -1076,9 +1076,7 @@ class TestTheScheduleGateIsOffUntilTheOwnerTurnsItOn:
     строгость, а поломка витрины.
     """
 
-    def test_an_unconfirmed_master_still_sells_while_the_flag_is_off(
-        self, tenant: Tenant
-    ) -> None:
+    def test_an_unconfirmed_master_still_sells_while_the_flag_is_off(self, tenant: Tenant) -> None:
         master = _make_master(tenant)
 
         assert master.schedule_confirmed_at is None
@@ -1149,7 +1147,6 @@ class TestTheScheduleGateIsOffUntilTheOwnerTurnsItOn:
             CatalogMaster.all_tenants.filter(available_q(), tenant=tenant).first().pk
             == confirmed.pk
         )
-
 
     @override_settings(MASTER_SCHEDULE_CONFIRMATION_REQUIRED=True)
     def test_the_roster_survives_the_flag_and_says_the_word(

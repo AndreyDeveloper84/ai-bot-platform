@@ -360,6 +360,7 @@ def available_q() -> Q:
     base = ADMITTED & LINKED_TO_AYLA
     return base & SCHEDULE_CONFIRMED if _schedule_gate_enabled() else base
 
+
 #: Мастер продавался бы, если бы оператор верифицировал приглашение.
 #:
 #: DRF-1553. Это :data:`AVAILABLE` с единственным перевёрнутым условием —
