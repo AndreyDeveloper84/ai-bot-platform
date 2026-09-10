@@ -1059,7 +1059,22 @@ function BookingCard({
       <div className="wellness-dash__booking-who">
         у {b.master_name} · {b.salon_name}
       </div>
-      <div className="wellness-dash__booking-where">{b.address}</div>
+      {/* Адрес — три состояния, и на экране их два разных текста
+          (DRF-1611). Строка есть ВСЕГДА: человек идёт на визит, и
+          нужда у него одна и та же независимо от того, чей это
+          пробел — салона или наш.
+
+          Асимметрия иначе выходила бы обратная задуманной: при `""`
+          состояние окончательное (салон ответил, спрашивать некого),
+          при `null` — исправимое (адрес скорее всего есть). Спрятать
+          строку у `null` значило бы дать меньше тому, кому нужнее. */}
+      <div className="wellness-dash__booking-where">
+        {b.address === null
+          ? "Уточните адрес в салоне"
+          : b.address === ""
+            ? "Адрес не указан"
+            : b.address}
+      </div>
 
       {/* §11.3 — multi-record indicator. */}
       {moreThisWeek && (
