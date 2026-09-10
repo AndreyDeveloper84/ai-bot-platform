@@ -98,6 +98,7 @@ from apps.booking.services.attribution import (
     get_reschedulable_statuses,
 )
 from apps.eventbus import services as eventbus_services
+from apps.integrations.ayla.health_check import text_for as health_check_text_for
 from apps.bookings.keyboards import confirm_2_button
 from apps.bookings.pending_actions import create_pending
 from apps.bookings.reminders_factory import create_reminders_for_booking
@@ -110,6 +111,7 @@ from apps.integrations.yclients import (
     YClientsUnavailableError,
 )
 from apps.skills.booking.provider import (
+    YClientsHealthCheckHandoffError,
     YClientsScheduleUnavailableError,
     YClientsSpecialistUnavailableError,
     YClientsStaleVersionError,
@@ -423,6 +425,12 @@ def get_active_booking_tool_specs() -> list[dict[str, Any]]:
 EVENT_BOOKING_TOOL_INVOKED = "booking.tool_invoked"
 EVENT_BOOKING_CONFIRMED = "booking.confirmed"
 EVENT_BOOKING_CONFIRM_FAILED = "booking.confirm_failed"
+# DRF-1614 / §98 — its own event, deliberately not a `*_failed` one.
+# The booking did not happen, but nothing failed: the service needs a
+# screening question first and the request goes to a human. Counted
+# separately because «why do people end up with an operator» is a
+# question we will actually be asked.
+EVENT_BOOKING_HEALTH_CHECK_HANDOFF = "booking.health_check_handoff"
 EVENT_BOOKING_PREVIEW = "booking.preview"
 EVENT_BOOKING_CANCELLED = "booking.cancelled"
 EVENT_BOOKING_CANCEL_FAILED = "booking.cancel_failed"
@@ -1191,6 +1199,43 @@ def execute_confirm(
         return BookingToolResult(
             confirmation=ConfirmationResult(ok=False, error="unavailable"),
             error="unavailable",
+        )
+    except YClientsHealthCheckHandoffError as exc:
+        # DRF-1614 / §98. Caught BEFORE the generic branch below, which is
+        # where this refusal used to land: the person was handed to a
+        # human — correctly — but the handoff was named
+        # ``yclients_api_error`` and worded with the breakdown copy.
+        #
+        # The outcome carries the EXACT code, so the annotation queue can
+        # count HEALTH_CHECK_UNKNOWN on its own. §98 names that the
+        # substantive reason for keeping the two apart inside: merged
+        # into REQUIRED, the counter loses the criterion the queue is
+        # prioritised by. Outwards it is one calm sentence.
+        #
+        # The audit event is its own name and NOT
+        # ``EVENT_BOOKING_CONFIRM_FAILED``: nothing failed. Filing a
+        # medical decision under a failure event is the same defect one
+        # level up — it would lie to us later, when somebody counts why
+        # people end up with an operator.
+        code = exc.code or "MISSING"
+        logger.info("booking.confirm.exec.health_check_handoff code=%s err=%s", code, exc)
+        _audit_tool(
+            tenant_id=tenant_id,
+            tool="execute_confirm",
+            outcome=f"health_check_{code.lower()}",
+        )
+        write_audit(
+            EVENT_BOOKING_HEALTH_CHECK_HANDOFF,
+            target="BookingSkill",
+            payload={"tenant_id": tenant_id, "code": code},
+        )
+        # `text` and not a bare error slug: this result carries the
+        # sentence the person reads, exactly as the schedule-outage
+        # branch above does. The slug stays distinct so the caller routes
+        # to a handoff instead of the failure copy.
+        return BookingToolResult(
+            text=health_check_text_for(exc.code),
+            error="health_check_handoff",
         )
     except YClientsAPIError as exc:
         logger.info("booking.confirm.exec.api_error err=%s", exc)

@@ -54,6 +54,7 @@ from apps.integrations.ayla.booking_client import (
     BookingRateLimitedError,
     BookingUnavailableError,
 )
+from apps.integrations.ayla.health_check import is_health_check_code
 from apps.integrations.yclients.client import (
     AvailableTime,
     BookingRecord,
@@ -375,6 +376,33 @@ class YClientsScheduleUnavailableError(YClientsUnavailableError):
     """
 
 
+class YClientsHealthCheckHandoffError(YClientsAPIError):
+    """Ayla refused ``create`` with 422 ``HEALTH_CHECK_*`` (§98, DRF-1614).
+
+    A medical routing decision, not an outage and not a rejected payload.
+    Before this class the refusal fell through to plain
+    ``YClientsAPIError`` and the skill answered
+    ``_handoff(reason="booking_yclients_failure")`` with the generic
+    failure copy — so the person WAS passed to a human, but under the
+    name of a bus failure and in the words of a breakdown.
+
+    That mattered twice. To the person, because the calm sentence §98
+    fixes was replaced by «не получилось оформить запись». And to us,
+    because a journal that files a medical decision as an integration
+    failure will lie later, when somebody counts why people end up with
+    an operator.
+
+    ``code`` carries the exact one of the three. §98 requires ``True``
+    and ``UNKNOWN`` to stay apart inside the system — the annotation
+    queue is prioritised by the ``UNKNOWN`` count — while the person
+    hears one sentence.
+    """
+
+    def __init__(self, detail: str = "", *, code: str = "") -> None:
+        super().__init__(detail)
+        self.code = code
+
+
 class YClientsStaleVersionError(YClientsAPIError):
     """Optimistic concurrency conflict on Ayla reschedule.
 
@@ -383,6 +411,21 @@ class YClientsStaleVersionError(YClientsAPIError):
     and does NOT retry automatically, so a concurrent change to the same
     appointment is never silently overwritten.
     """
+
+
+def _health_check_code(exc: BaseException) -> str:
+    """The ``HEALTH_CHECK_*`` code of this 422, or "" when it is not one.
+
+    Reads status AND code, never the message: the reason must not be
+    reconstructed from prose (§98). A 422 whose code we do not recognise
+    is deliberately NOT treated as a health-check refusal — guessing one
+    would promise a consultation nobody is going to give.
+    """
+    code = getattr(exc, "code", None)
+    status = getattr(exc, "status_code", None)
+    if status != 422 or not isinstance(code, str):
+        return ""
+    return code if is_health_check_code(code) else ""
 
 
 def _is_c1_debt_block(exc: BaseException) -> bool:
@@ -415,6 +458,15 @@ class _translate_errors:
         # translated YClients error, or lets the original propagate.
         if exc_type is None:
             return
+        # DRF-1614 — checked FIRST among the 4xx specialisations. Not for
+        # precedence over C1 or stale-version (the statuses differ, so
+        # they cannot collide), but because this is the branch a reader
+        # must see before the generic fall-through below, which is where
+        # the refusal used to end up.
+        if issubclass(exc_type, BookingBadRequestError):
+            health_code = _health_check_code(exc)
+            if health_code:
+                raise YClientsHealthCheckHandoffError(str(exc), code=health_code) from exc
         if issubclass(exc_type, BookingBadRequestError) and _is_c1_debt_block(exc):
             raise YClientsSpecialistUnavailableError(str(exc)) from exc
         if issubclass(exc_type, BookingBadRequestError) and _is_stale_version(exc):
