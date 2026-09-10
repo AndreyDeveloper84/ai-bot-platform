@@ -193,9 +193,28 @@ class CatalogSpecialistServiceDTO:
     ``resolved_requires_health_check`` (DRF-1353) is now a first-class field
     because the gate finally has a reader for it
     (``apps.skills.booking.skill._service_requires_health_check``). It is
-    ``bool | None``: ``None`` means the upstream row did not carry the key at
-    all — an older Ayla — and MUST NOT be read as "no screening needed". Only
-    an explicit ``False`` opens the gate; ``None`` keeps it closed.
+    ``bool | None``: ``None`` means "no readable value" and MUST NOT be read
+    as "no screening needed". Only an explicit ``False`` opens the gate.
+
+    ``health_check_key_present`` splits that ``None`` in two, and the split
+    is load-bearing:
+
+    * **key absent** (``False``) — this payload does not speak about the
+      field at all: an older Ayla, a partial serializer, a transport hiccup.
+      The mirror must KEEP what it already knows. Overwriting a known
+      verdict with "unknown" on that basis would make a medical gate
+      flicker on every upstream wobble.
+    * **key present, value ``null``** (``True``, value ``None``) — the
+      catalog is speaking, and what it says is *"I do not know"*. That is an
+      answer, and the mirror must record it as ``NULL``, which the booking
+      gate reads as "screening required".
+
+    Before this split both arrived as the same Python ``None``, so the
+    upserter could only pick one behaviour for both — and it picked "keep",
+    correctly, to protect against the hiccup. The price was that an explicit
+    "unknown" could never reach the mirror at all. The catalog only started
+    sending one once ``SpecialistService.resolved_requires_health_check``
+    stopped turning a missing template into ``False``.
     """
 
     ayla_specialist_service_id: str
@@ -208,6 +227,11 @@ class CatalogSpecialistServiceDTO:
     category_slug: str = ""
     is_active: bool = True
     resolved_requires_health_check: bool | None = None
+    #: Нёс ли ключ сам ответ. См. докстринг выше: отличает «поле не
+    #: прислали» от «прислали null». Умолчание `False` — консервативное:
+    #: вызывающий, собравший DTO руками и про поле не сказавший, получает
+    #: прежнее поведение «сохранить, что было».
+    health_check_key_present: bool = False
     raw: dict[str, Any] = field(default_factory=dict)
 
 
@@ -867,6 +891,10 @@ def _parse_specialist_service(row: dict[str, Any]) -> CatalogSpecialistServiceDT
         resolved_requires_health_check=_parse_optional_bool(
             row.get("resolved_requires_health_check")
         ),
+        # `in`, а не `.get() is not None`: присланный `null` — это ОТВЕТ
+        # «не знаю», и он обязан отличаться от «ключа не было». Оба дают
+        # питоновский `None`, и до этой строки различить их было нечем.
+        health_check_key_present="resolved_requires_health_check" in row,
         raw=row,
     )
 
