@@ -79,11 +79,13 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { StateError } from "../../components/StateError";
 import {
   getMasterDaySchedule,
+  getMasterExceptions,
   getMasterSchedule,
   getSalonDay,
   getSalonDayFrame,
   RELEASED_VISIT_STATUSES,
   type MasterDay,
+  type MasterExceptions,
   type MasterSchedule,
   type MeResponse,
   type SalonDayFrame,
@@ -135,6 +137,47 @@ const BLOCK_REASON: Record<string, string> = {
 const NOW_MARKER = " · сейчас по плану";
 
 const WEEKDAYS_SHORT = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"];
+
+const MONTHS_GENITIVE = [
+  "января", "февраля", "марта", "апреля", "мая", "июня",
+  "июля", "августа", "сентября", "октября", "ноября", "декабря",
+];
+
+/**
+ * «2026-09-12» → «12 сентября», без обращения к Date.
+ *
+ * `new Date("2026-09-12")` разбирается как полночь UTC, и у администратора
+ * западнее Гринвича дата уехала бы на день назад. Дата с провода — уже
+ * дата салона; превращать её в момент времени незачем.
+ */
+function humanDate(iso: string): string {
+  const [y, m, d] = iso.split("-");
+  const month = MONTHS_GENITIVE[Number(m) - 1];
+  if (!y || !d || !month) return iso;
+  return `${Number(d)} ${month}`;
+}
+
+/**
+ * Часы из ISO со смещением — как их прислал салон.
+ *
+ * Намеренно строкой, а не через Date: провод несёт смещение САЛОНА, и
+ * пересчёт в часовой пояс браузера показал бы администратору в Калининграде
+ * московские времена сдвинутыми. Показываем время салона, потому что
+ * недоступность назначена в нём.
+ */
+function wireTime(iso: string): string {
+  return iso.length >= 16 ? iso.slice(11, 16) : iso;
+}
+
+function wireDate(iso: string): string {
+  return humanDate(iso.slice(0, 10));
+}
+
+const ASSIGNED_TITLE: Record<string, string> = {
+  exceptions: "исключения",
+  time_off: "недоступность",
+  closures: "закрытия салона",
+};
 
 const LIST_TITLE: Record<string, string> = {
   working_intervals: "смены",
@@ -191,6 +234,8 @@ export function SalonPilotScheduleScreen({ me }: { me: MeResponse }) {
   const [frameErr, setFrameErr] = useState<unknown>(null);
   const [week, setWeek] = useState<MasterSchedule | null>(null);
   const [weekErr, setWeekErr] = useState<unknown>(null);
+  const [assigned, setAssigned] = useState<MasterExceptions | null>(null);
+  const [assignedErr, setAssignedErr] = useState<unknown>(null);
 
   const masters = salon?.masters ?? null;
 
@@ -267,13 +312,30 @@ export function SalonPilotScheduleScreen({ me }: { me: MeResponse }) {
     }
   }, []);
 
+  const loadAssigned = useCallback(async (masterId: string, signal?: AbortSignal) => {
+    if (!masterId) return;
+    setAssignedErr(null);
+    try {
+      const res = await getMasterExceptions(masterId, {}, { signal });
+      if (signal?.aborted) return;
+      setAssigned(res);
+    } catch (e) {
+      if ((e as DOMException | undefined)?.name === "AbortError") return;
+      setAssignedErr(e);
+      // Чужое назначенное не переживает переключение мастера — то же
+      // правило, что для дня, кадра и графика.
+      setAssigned(null);
+    }
+  }, []);
+
   useEffect(() => {
     if (mode !== "one") return;
     const ctrl = new AbortController();
     void load(selected, ctrl.signal);
     void loadWeek(selected, ctrl.signal);
+    void loadAssigned(selected, ctrl.signal);
     return () => ctrl.abort();
-  }, [mode, selected, load, loadWeek]);
+  }, [mode, selected, load, loadWeek, loadAssigned]);
 
   useEffect(() => {
     if (mode !== "all") return;
@@ -491,6 +553,80 @@ export function SalonPilotScheduleScreen({ me }: { me: MeResponse }) {
                 </li>
               ))}
             </ul>
+          )}
+        </section>
+      )}
+
+      {/*
+        Что уже назначено мастеру — исключения, недоступность и закрытия
+        салона (DRF-1240, чтение). Сегодня этого не видно нигде: день
+        показывает сегодняшнюю рамку, а «что назначено на неделю вперёд» не
+        показывает никто.
+
+        Действий здесь нет, и это говорит СЕРВЕР полем `writable`, а не
+        решает экран: все записывающие маршруты салонной поверхности
+        закрыты, §117 разрешает credential path только после трёх проверок.
+      */}
+      {mode === "one" && (assigned != null || assignedErr != null) && (
+        <section style={{ marginTop: "var(--s-3)" }}>
+          <h3 style={{ fontSize: "var(--text-body-size, 15px)", margin: "0 0 var(--s-1)" }}>
+            Назначено
+          </h3>
+
+          {assignedErr != null ? (
+            <StateError err={assignedErr} onRetry={() => void loadAssigned(selected)} />
+          ) : (
+            <>
+              {assigned!.unreadable_lists.length > 0 && (
+                // Названный пробел вместо тишины: без этой строки
+                // неразобранный отгул выглядел бы как его отсутствие, и
+                // салон спланировал бы день поверх него.
+                <p style={{ margin: "0 0 var(--s-2)", color: "var(--c-text-secondary)" }}>
+                  {`Показано не всё: не удалось разобрать ${assigned!.unreadable_lists
+                    .map((k) => ASSIGNED_TITLE[k] ?? k)
+                    .join(", ")}.`}
+                </p>
+              )}
+
+              {assigned!.exceptions.rows.length === 0 &&
+              assigned!.time_off.rows.length === 0 &&
+              assigned!.closures.rows.length === 0 ? (
+                assigned!.unreadable_lists.length === 0 ? (
+                  // «Ничего не назначено» — утверждение, а не пустота, и
+                  // говорить его можно ТОЛЬКО когда разобрано всё. Иначе это
+                  // обещание за тот список, который мы не прочитали.
+                  <p style={{ margin: 0, color: "var(--c-text-secondary)" }}>
+                    На ближайшие дни ничего не назначено.
+                  </p>
+                ) : null
+              ) : (
+                <ul style={{ listStyle: "none", padding: 0, margin: 0 }}>
+                  {assigned!.exceptions.rows.map((r) => (
+                    <li key={`exc-${r.id}`} style={{ padding: "2px 0" }}>
+                      {`${humanDate(r.date)} · ${
+                        r.is_working_day && r.start && r.end
+                          ? `${r.start}–${r.end}`
+                          : "не работает"
+                      }`}
+                    </li>
+                  ))}
+                  {assigned!.time_off.rows.map((r) => (
+                    <li key={`off-${r.id}`} style={{ padding: "2px 0" }}>
+                      {`${wireDate(r.start_at)} · ${wireTime(r.start_at)}–${wireTime(
+                        r.end_at,
+                      )} · недоступна${r.reason ? ` · ${r.reason}` : ""}`}
+                    </li>
+                  ))}
+                  {assigned!.closures.rows.map((r) => (
+                    <li key={`cl-${r.id}`} style={{ padding: "2px 0" }}>
+                      {`${humanDate(r.date)} · салон закрыт${
+                        r.start && r.end ? ` ${r.start}–${r.end}` : ""
+                      }${r.reason ? ` · ${r.reason}` : ""}`}
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </>
           )}
         </section>
       )}

@@ -1178,12 +1178,21 @@ export interface FrameInterval {
   end: string;
 }
 
-export interface FrameList {
+/**
+ * Список с провода вместе с состоянием — общая форма для всех салонных видов.
+ *
+ * Одно имя состояния на все списки намеренно: второй набор тех же четырёх
+ * слов рядом разошёлся бы с первым молча. Сервер отдаёт ту же форму из
+ * `apps/admin_api/services/wire_lists.py`.
+ */
+export interface WireList<Row> {
   state: FrameListState;
-  rows: FrameInterval[];
+  rows: Row[];
   /** Имена полей, встреченных в неопознанной строке. Не значения. */
   seen_fields: string[];
 }
+
+export type FrameList = WireList<FrameInterval>;
 
 export interface SalonFrameMaster {
   specialist_id: string;
@@ -1211,6 +1220,66 @@ export interface SalonDayFrame {
  * читает зеркало. Два источника записей на одном экране — то самое
  * расхождение, ради недопущения которого зеркало и читается.
  */
+// --- GET /api/v1/admin/masters/<id>/exceptions/ (DRF-1240, чтение) --------
+
+export interface MasterExceptionRow {
+  id: string;
+  date: string;
+  is_working_day: boolean;
+  /** Часы только у рабочего дня: «не работаю» с часами — противоречие. */
+  start: string | null;
+  end: string | null;
+}
+
+export interface MasterTimeOffRow {
+  id: string;
+  /** ISO со смещением САЛОНА, не браузера. */
+  start_at: string;
+  end_at: string;
+  reason: string;
+}
+
+export interface SalonClosureRow {
+  id: string;
+  date: string;
+  start: string | null;
+  end: string | null;
+  reason: string;
+}
+
+export interface MasterExceptions {
+  from: string;
+  to: string;
+  exceptions: WireList<MasterExceptionRow>;
+  time_off: WireList<MasterTimeOffRow>;
+  closures: WireList<SalonClosureRow>;
+  unreadable_lists: string[];
+  /**
+   * Можно ли отсюда менять график. Сегодня всегда `false`, и это говорит
+   * СЕРВЕР, а не догадывается экран: все записывающие маршруты салонной
+   * поверхности закрыты, а §117 разрешает credential path только после трёх
+   * проверок. Кнопка, которой сервер не примет, — то же пустое обещание,
+   * что «Найти время» без контракта доступности.
+   */
+  writable: boolean;
+}
+
+/** Что уже назначено мастеру: исключения, недоступность, закрытия салона. */
+export const getMasterExceptions = (
+  masterId: string,
+  params: { from?: string; to?: string } = {},
+  init: { signal?: AbortSignal } = {},
+): Promise<MasterExceptions> => {
+  const qs = new URLSearchParams();
+  if (params.from) qs.set("from", params.from);
+  if (params.to) qs.set("to", params.to);
+  const suffix = qs.toString() ? `?${qs.toString()}` : "";
+  return request<MasterExceptions>(
+    `/api/v1/admin/masters/${masterId}/exceptions/${suffix}`,
+    { method: "GET", signal: init.signal },
+  );
+};
+
 export const getSalonDayFrame = (
   date?: string,
   init: { signal?: AbortSignal } = {},

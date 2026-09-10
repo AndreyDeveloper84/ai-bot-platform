@@ -26,15 +26,18 @@ vi.mock("../../lib/admin-api", async (importOriginal) => {
     getMasterDaySchedule: vi.fn(),
     getSalonDayFrame: vi.fn(),
     getMasterSchedule: vi.fn(),
+    getMasterExceptions: vi.fn(),
   };
 });
 
 import {
   getMasterDaySchedule,
+  getMasterExceptions,
   getMasterSchedule,
   getSalonDay,
   getSalonDayFrame,
   type MasterDay,
+  type MasterExceptions,
   type MasterSchedule,
   type MeResponse,
   type SalonDayFrame,
@@ -47,6 +50,7 @@ const mockedDay = vi.mocked(getSalonDay);
 const mockedSchedule = vi.mocked(getMasterDaySchedule);
 const mockedFrame = vi.mocked(getSalonDayFrame);
 const mockedWeek = vi.mocked(getMasterSchedule);
+const mockedAssigned = vi.mocked(getMasterExceptions);
 
 const ME: MeResponse = {
   user: { id: "u-1", name: "Карина", phone_masked: "+7 *** **12" },
@@ -120,6 +124,26 @@ function weekSchedule(patch: Partial<MasterSchedule> = {}): MasterSchedule {
   };
 }
 
+/**
+ * Назначенное в форме ответа `GET masters/<id>/exceptions/`.
+ *
+ * По умолчанию — всё разобрано и пусто: положительный контроль для проверок
+ * «показано не всё», которые иначе зеленели бы на экране, где раздела нет.
+ */
+function assignedNothing(patch: Partial<MasterExceptions> = {}): MasterExceptions {
+  const empty = { state: "none" as const, rows: [], seen_fields: [] };
+  return {
+    from: "2026-09-10",
+    to: "2026-09-16",
+    exceptions: empty,
+    time_off: empty,
+    closures: empty,
+    unreadable_lists: [],
+    writable: false,
+    ...patch,
+  };
+}
+
 function renderScreen() {
   return render(
     <MemoryRouter>
@@ -139,6 +163,7 @@ describe("Расписание салона — режим одного маст
       days: [masterDay()],
     });
     mockedWeek.mockResolvedValue(weekSchedule());
+    mockedAssigned.mockResolvedValue(assignedNothing());
   });
 
   it("в выборе есть и тот мастер, у которого нет записей", async () => {
@@ -305,6 +330,7 @@ describe("Расписание салона — режим «Все»", () => {
     });
     mockedFrame.mockResolvedValue(frame());
     mockedWeek.mockResolvedValue(weekSchedule());
+    mockedAssigned.mockResolvedValue(assignedNothing());
   });
 
   it("параллельные записи стоят под одним временем, а не в четырёх колонках", async () => {
@@ -411,6 +437,7 @@ describe("Отметка «сейчас по плану» — утверждён
     });
     mockedFrame.mockResolvedValue(frame());
     mockedWeek.mockResolvedValue(weekSchedule());
+    mockedAssigned.mockResolvedValue(assignedNothing());
   });
 
   it("стоит у записи, чей интервал накрывает сейчас, и только у неё", async () => {
@@ -490,6 +517,7 @@ describe("Расписание салона — график мастера и �
     });
     mockedFrame.mockResolvedValue(frame());
     mockedWeek.mockResolvedValue(weekSchedule());
+    mockedAssigned.mockResolvedValue(assignedNothing());
   });
 
   it("показывает неделю целиком, включая выходной", async () => {
@@ -559,5 +587,148 @@ describe("Расписание салона — график мастера и �
 
     expect(await screen.findByText(/Состояние подтверждения не прочитано/)).toBeTruthy();
     expect(screen.queryByText(/Расписание не подтверждено/)).toBeNull();
+  });
+});
+
+/**
+ * Показ назначенного — DRF-1240, читаемая половина.
+ *
+ * Держит три вещи:
+ *
+ * * назначенное видно вообще — сегодня его не показывает ни один экран;
+ * * «ничего не назначено» — утверждение, и произносить его можно ТОЛЬКО
+ *   когда разобрано всё. Сказать его поверх неразобранного списка значит
+ *   поручиться за то, чего не читал;
+ * * действий нет, и это говорит сервер полем `writable`, а не экран.
+ */
+describe("Расписание салона — что уже назначено мастеру", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockedDay.mockResolvedValue(salonDay());
+    mockedSchedule.mockResolvedValue({
+      tenant_tz: "Europe/Moscow",
+      from: "2026-09-10",
+      to: "2026-09-10",
+      days: [masterDay()],
+    });
+    mockedFrame.mockResolvedValue(frame());
+    mockedWeek.mockResolvedValue(weekSchedule());
+    mockedAssigned.mockResolvedValue(assignedNothing());
+  });
+
+  it("показывает исключение, недоступность и закрытие салона", async () => {
+    mockedAssigned.mockResolvedValue(
+      assignedNothing({
+        exceptions: {
+          state: "parsed",
+          rows: [
+            { id: "e1", date: "2026-09-12", is_working_day: true, start: "12:00", end: "16:00" },
+          ],
+          seen_fields: [],
+        },
+        time_off: {
+          state: "parsed",
+          rows: [
+            {
+              id: "o1",
+              start_at: "2026-09-13T10:00:00+03:00",
+              end_at: "2026-09-13T14:00:00+03:00",
+              reason: "учёба",
+            },
+          ],
+          seen_fields: [],
+        },
+        closures: {
+          state: "parsed",
+          rows: [
+            { id: "c1", date: "2026-09-14", start: null, end: null, reason: "санитарный день" },
+          ],
+          seen_fields: [],
+        },
+      }),
+    );
+
+    renderScreen();
+
+    expect(await screen.findByText("12 сентября · 12:00–16:00")).toBeTruthy();
+    expect(screen.getByText(/13 сентября · 10:00–14:00 · недоступна · учёба/)).toBeTruthy();
+    expect(screen.getByText(/14 сентября · салон закрыт · санитарный день/)).toBeTruthy();
+  });
+
+  it("время недоступности показано как прислал салон, а не в поясе браузера", async () => {
+    // Провод несёт смещение САЛОНА. Пересчёт через Date показал бы
+    // администратору в другом поясе сдвинутое время назначения.
+    mockedAssigned.mockResolvedValue(
+      assignedNothing({
+        time_off: {
+          state: "parsed",
+          rows: [
+            {
+              id: "o1",
+              start_at: "2026-09-13T09:30:00+03:00",
+              end_at: "2026-09-13T11:00:00+03:00",
+              reason: "",
+            },
+          ],
+          seen_fields: [],
+        },
+      }),
+    );
+
+    renderScreen();
+
+    expect(await screen.findByText(/13 сентября · 09:30–11:00 · недоступна/)).toBeTruthy();
+  });
+
+  it("нерабочий день не показывает часы, даже если они пришли", async () => {
+    // Первая версия этого теста была украшением, и поймала её подмена:
+    // фикстура приходила с `start: null`, поэтому снятие фронтового условия
+    // ничего не меняло — предмет держал сервер, который часы уже обнулил.
+    //
+    // Инвариант держат ДВОЕ: `_exception_row` на сервере и это условие на
+    // экране. Чтобы проверялось именно второе, данные здесь ВРАЖДЕБНЫЕ —
+    // нерабочий день с часами. Так выглядел бы ответ, если серверную
+    // половину однажды снимут, и экран обязан не поверить часам, которые
+    // тот же ответ объявил нерабочими.
+    mockedAssigned.mockResolvedValue(
+      assignedNothing({
+        exceptions: {
+          state: "parsed",
+          rows: [
+            { id: "e1", date: "2026-09-12", is_working_day: false, start: "12:00", end: "16:00" },
+          ],
+          seen_fields: [],
+        },
+      }),
+    );
+
+    renderScreen();
+
+    expect(await screen.findByText("12 сентября · не работает")).toBeTruthy();
+    expect(screen.queryByText(/12:00–16:00/)).toBeNull();
+  });
+
+  it("«ничего не назначено» говорится только когда разобрано всё", async () => {
+    // Положительный контроль стоит рядом: сперва убеждаемся, что фраза
+    // вообще появляется на пустом разобранном ответе.
+    renderScreen();
+    expect(await screen.findByText("На ближайшие дни ничего не назначено.")).toBeTruthy();
+  });
+
+  it("поверх неразобранного списка «ничего не назначено» не произносится", async () => {
+    // Это и есть предмет: пустой список и непрочитанный список выглядят
+    // одинаково, и утверждение о пустоте поверх второго — обещание за то,
+    // чего мы не читали.
+    mockedAssigned.mockResolvedValue(
+      assignedNothing({
+        time_off: { state: "unreadable", rows: [], seen_fields: ["from", "to"] },
+        unreadable_lists: ["time_off"],
+      }),
+    );
+
+    renderScreen();
+
+    expect(await screen.findByText(/не удалось разобрать недоступность/)).toBeTruthy();
+    expect(screen.queryByText("На ближайшие дни ничего не назначено.")).toBeNull();
   });
 });
