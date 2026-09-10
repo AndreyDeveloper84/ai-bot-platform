@@ -50,7 +50,35 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 2
     steps:
+      # Автоматический автор — названное исключение, а не молчаливое.
+      #
+      # Замер перед включением сторожа обязательным: из шестнадцати открытых PR
+      # упали бы семь, и ПЯТЬ из них — Dependabot. У него задачи не будет
+      # никогда, и `NO-TICKET:` в тело ему дописать некому. Обязательная
+      # проверка заблокировала бы обновления зависимостей навсегда — включая
+      # обновления безопасности.
+      #
+      # Исключение стоит здесь, а не в условии job'а, чтобы проверка всё равно
+      # ЗАПУСКАЛАСЬ и доложила успех: пропущенная проверка и пройденная
+      # выглядят в списке одинаково, а означают разное (§77).
+      - name: Skip for automated authors
+        id: author
+        env:
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+        run: |
+          set -euo pipefail
+          case "$PR_AUTHOR" in
+            dependabot\[bot\]|renovate\[bot\]|github-actions\[bot\])
+              echo "::notice::Автоматический автор ${PR_AUTHOR} — ссылка на задачу не требуется."
+              echo "skip=true" >> "$GITHUB_OUTPUT"
+              ;;
+            *)
+              echo "skip=false" >> "$GITHUB_OUTPUT"
+              ;;
+          esac
+
       - name: Check for a ticket reference
+        if: steps.author.outputs.skip == 'false'
         env:
           # Через env, а не через подстановку в скрипт: заголовок и тело PR
           # пишет человек, и обратные кавычки, кавычки и `$(...)` в них
