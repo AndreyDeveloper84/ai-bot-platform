@@ -64,7 +64,12 @@ import { useHaptics } from "../hooks/useHaptics";
 import { useOnline } from "../hooks/useOnline";
 import { createCustomerBooking } from "../lib/customer-booking";
 import { formatMoney, formatVisitFull } from "../lib/format";
-import { getInitData, getStartPayload, openPaymentConfirmation } from "../lib/max-sdk";
+import {
+  getInitData,
+  getStartPayload,
+  openExternalLink,
+  openPaymentConfirmation,
+} from "../lib/max-sdk";
 import { createPayment } from "../lib/payments";
 import {
   resolveEntryPoint,
@@ -341,6 +346,10 @@ export function CustomerBookingConfirmScreen() {
     }
   }
 
+  // MAX OAuth (W4) на момент DRF-1319 не выкачен, поэтому переменная
+  // пуста во всех окружениях и человек видит объяснение, а не тупик.
+  const oauthUrl = (import.meta.env.VITE_MAX_OAUTH_URL ?? "").trim();
+
   function onStartRegistration() {
     // Spec §6.2 — P0 context preservation. Save BEFORE redirect to
     // OAuth; the callback restores from sessionStorage on mount.
@@ -395,22 +404,33 @@ export function CustomerBookingConfirmScreen() {
         "[customer-booking-confirm] saved intent + entering OAuth flow",
       );
     }
-    // Best-effort: open bot DM to drive registration. Will be
-    // replaced with the canonical MAX OAuth endpoint when W4 ships.
-    navigate("/", { replace: true });
+    // DRF-1319. Здесь стоял `navigate("/")` — кнопка «Зарегистрироваться»
+    // возвращала человека на главный экран. Теперь она ведёт туда, куда
+    // обещает, и существует ровно тогда, когда этому адресу есть куда
+    // вести: см. `oauthUrl` ниже.
+    openExternalLink(oauthUrl);
   }
 
   // ── Anonymous gate branch (§6.2) ─────────────────────────────────────
   if (anonymous) {
-    // VITE_MAX_OAUTH_ENABLED gates the *functional* registration CTA.
-    // Until W4 ships /auth/verify + the canonical MAX OAuth URL, the
-    // «Зарегистрироваться» button strands a sessionStorage intent + a
-    // navigate("/") — a UX dead-end (round-1 PRE_MERGE blocker #1).
-    // Acceptable degradation: render an «OAuth pending» placeholder
+    // Пока адреса MAX OAuth нет, кнопка «Зарегистрироваться» уводила бы
+    // в никуда: сохранённое намерение и `navigate("/")` — тупик
+    // (round-1 PRE_MERGE blocker #1). Допустимая деградация: показать
     // that lets the user keep exploring the catalog. Flip the env
     // flag when W4 lands.
-    const oauthEnabled = import.meta.env.VITE_MAX_OAUTH_ENABLED === "true";
-    if (!oauthEnabled) {
+    // DRF-1319. Выключателем служит САМ АДРЕС, а не булев флаг.
+    //
+    // Раньше здесь стоял `VITE_MAX_OAUTH_ENABLED`, упомянутый в одном
+    // месте и не заданный НИГДЕ, включая `.env.local.example`. Флаг без
+    // установщика всегда ложь — ветка не исполнялась ни в одном
+    // окружении и при этом читалась как существующая. А включи его
+    // кто-нибудь, он получил бы кнопку «Зарегистрироваться», которая
+    // возвращает на главный экран: хуже заглушки.
+    //
+    // Условие на непустой адрес снимает обе беды разом. Включить
+    // регистрацию нельзя, не дав ей куда вести, и не бывает состояния
+    // «включено, но некуда».
+    if (!oauthUrl) {
       return (
         <ScreenLayout back={back} title="Чтобы записаться">
           <section className="customer-confirm__oauth-pending">
