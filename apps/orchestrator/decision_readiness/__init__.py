@@ -27,6 +27,21 @@ test rather than merely left uncalled.
 
 from __future__ import annotations
 
+from apps.orchestrator.decision_readiness.evidence import (
+    CONFIRMABLE_ORIGINS,
+    ConfirmedEvidence,
+    DecisionRef,
+    DomainRef,
+    EvidenceOrigin,
+    MemoryRef,
+    MessageRef,
+    ModelSignal,
+    confirm,
+    from_domain_authority,
+    from_promoted_memory,
+    from_user_action,
+    from_user_text,
+)
 from apps.orchestrator.decision_readiness.events import (
     SemanticUserEvent,
     Surface,
@@ -44,8 +59,16 @@ from apps.orchestrator.decision_readiness.state import (
 )
 
 __all__ = [
+    "CONFIRMABLE_ORIGINS",
+    "ConfirmedEvidence",
     "ConversationState",
+    "DecisionRef",
+    "DomainRef",
+    "EvidenceOrigin",
     "LoadResult",
+    "MemoryRef",
+    "MessageRef",
+    "ModelSignal",
     "SemanticUserEvent",
     "SlotState",
     "SlotValue",
@@ -53,6 +76,11 @@ __all__ = [
     "StateLifecycle",
     "Surface",
     "UserEventKind",
+    "confirm",
+    "from_domain_authority",
+    "from_promoted_memory",
+    "from_user_action",
+    "from_user_text",
     "user_action_event",
     "user_text_event",
 ]
