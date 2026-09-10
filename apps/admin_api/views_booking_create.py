@@ -239,9 +239,9 @@ def create_booking(request: HttpRequest) -> HttpResponse:
         )
         return _outcome(
             "blocked",
-            text_for(exc.code),
+            text_for(exc.code, handoff=exc.handoff),
             422,
-            code=outward_code(exc.code),
+            code=outward_code(exc.code, handoff=exc.handoff),
         )
     except SalonAPIError as exc:
         logger.warning("admin_api.create_booking.error actor=%s err=%s", actor, exc)

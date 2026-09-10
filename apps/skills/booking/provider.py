@@ -398,9 +398,10 @@ class YClientsHealthCheckHandoffError(YClientsAPIError):
     hears one sentence.
     """
 
-    def __init__(self, detail: str = "", *, code: str = "") -> None:
+    def __init__(self, detail: str = "", *, code: str = "", handoff: bool | None = None) -> None:
         super().__init__(detail)
         self.code = code
+        self.handoff = handoff
 
 
 class YClientsStaleVersionError(YClientsAPIError):
@@ -466,7 +467,9 @@ class _translate_errors:
         if issubclass(exc_type, BookingBadRequestError):
             health_code = _health_check_code(exc)
             if health_code:
-                raise YClientsHealthCheckHandoffError(str(exc), code=health_code) from exc
+                raise YClientsHealthCheckHandoffError(
+                    str(exc), code=health_code, handoff=getattr(exc, "handoff", None)
+                ) from exc
         if issubclass(exc_type, BookingBadRequestError) and _is_c1_debt_block(exc):
             raise YClientsSpecialistUnavailableError(str(exc)) from exc
         if issubclass(exc_type, BookingBadRequestError) and _is_stale_version(exc):

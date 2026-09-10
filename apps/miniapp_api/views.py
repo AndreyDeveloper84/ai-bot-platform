@@ -1019,7 +1019,11 @@ def _create_booking_via_ayla(
                 master_id,
                 exc.code or "MISSING",
             )
-            return _error(outward_code(exc.code), text_for(exc.code), 422)
+            return _error(
+                outward_code(exc.code, handoff=exc.handoff),
+                text_for(exc.code, handoff=exc.handoff),
+                422,
+            )
         if (exc.code or "").lower() == "subscription_past_due":
             # C1: neutral surface — no debt semantics to the client
             # (frozen W4 slug).

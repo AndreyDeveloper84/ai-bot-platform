@@ -1234,7 +1234,7 @@ def execute_confirm(
         # branch above does. The slug stays distinct so the caller routes
         # to a handoff instead of the failure copy.
         return BookingToolResult(
-            text=health_check_text_for(exc.code),
+            text=health_check_text_for(exc.code, handoff=exc.handoff),
             error="health_check_handoff",
         )
     except YClientsAPIError as exc:

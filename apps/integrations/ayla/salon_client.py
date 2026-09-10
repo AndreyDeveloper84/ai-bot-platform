@@ -84,9 +84,10 @@ class SalonAPIError(Exception):
     no code, which is not the same as a code we do not recognise.
     """
 
-    def __init__(self, detail: str = "", *, code: str = "") -> None:
+    def __init__(self, detail: str = "", *, code: str = "", handoff: bool | None = None) -> None:
         super().__init__(detail)
         self.code = code
+        self.handoff = handoff
 
 
 class SalonNotConfigured(SalonAPIError):
@@ -328,7 +329,7 @@ class AylaSalonClient:
             # meaning — because guessing «needs screening» would promise
             # a consultation nobody is going to give.
             if code in HEALTH_CHECK_CODES:
-                raise SalonHealthCheckHandoff(detail, code=code)
+                raise SalonHealthCheckHandoff(detail, code=code, handoff=_error_handoff(resp))
             raise SalonNotAllowed(detail, code=code)
         if resp.status_code >= 500:
             raise SalonUnavailable(f"upstream {resp.status_code}: {detail}")
@@ -952,6 +953,23 @@ def _error_code(resp: httpx.Response) -> str:
         if isinstance(err, dict):
             return str(err.get("code") or "")
     return ""
+
+
+def _error_handoff(resp: httpx.Response) -> bool | None:
+    """Ayla's ``error.details.handoff``, or None when the field is absent.
+
+    Read, never derived. The catalog declares this boolean precisely so a
+    surface does not decide «will somebody call this person» by taking
+    the code string apart. ``None`` is a third state: the field was not
+    sent, which is not Ayla saying «no».
+    """
+
+    try:
+        details = ((resp.json().get("error") or {}).get("details")) or {}
+        value = details.get("handoff")
+    except (ValueError, AttributeError):
+        return None
+    return value if isinstance(value, bool) else None
 
 
 def _detail(resp: httpx.Response) -> str:

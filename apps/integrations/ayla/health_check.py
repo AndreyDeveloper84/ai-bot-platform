@@ -16,6 +16,19 @@ The codes live here, in one module, rather than next to each surface,
 because the defect this ticket fixes IS divergence: three readings of one
 refusal. A constant copied three times is three constants.
 
+# 422 is NOT a synonym for «health check»
+
+The catalog answers 422 for five other reasons already —
+``SERVICE_NOT_ACTIVE``, ``RESCHEDULE_NOT_ALLOWED``,
+``CANCELLATION_NOT_ALLOWED``, ``SPECIALIST_NOT_ACTIVE``,
+``INVALID_STATE_TRANSITION``. So «this status means screening» is wrong
+today, not one day in the future.
+
+That is why every reader here branches on the CODE and never on the
+status, and why a 422 whose code we do not recognise keeps its previous
+meaning. Read the status alone and an administrator refused for an
+inactive service is told a specialist will call them about their health.
+
 # The codes
 
 ``HEALTH_CHECK_REQUIRED``
@@ -123,28 +136,37 @@ def is_health_check_code(code: str | None) -> bool:
     return (code or "") in HEALTH_CHECK_CODES
 
 
-def promises_a_specialist(code: str | None) -> bool:
-    """True when the person may be told somebody will get back to them."""
+def promises_a_specialist(code: str | None, *, handoff: bool | None = None) -> bool:
+    """True when the person may be told somebody will get back to them.
 
+    ``handoff`` is Ayla's own boolean (``error.details.handoff``) and wins
+    whenever it is present. The catalog side declares it as a field for a
+    reason: a surface must not decide this by taking the code apart —
+    ``code.endswith("NOT_APPLICABLE")`` is string surgery on a contract,
+    and it breaks silently the first time a code is renamed.
+
+    ``None`` means the field was absent, not that it was false. Then, and
+    only then, we fall back to the code set: an unrecognised code
+    promises nothing. That direction is deliberate — a refusal heard as
+    final costs a person one attempt, a promise nobody keeps costs them
+    a wait.
+    """
+
+    if handoff is not None:
+        return handoff
     return (code or "") in PROMISES_A_SPECIALIST
 
 
-def text_for(code: str | None) -> str:
-    """The sentence shown to the person for this refusal code.
+def text_for(code: str | None, *, handoff: bool | None = None) -> str:
+    """The sentence shown to the person for this refusal."""
 
-    Anything that is not a known promising code gets the sentence that
-    promises nothing. Failing that way round is deliberate: a refusal
-    heard as final costs a person one attempt, a promise nobody keeps
-    costs them a wait.
-    """
-
-    return HANDOFF_TEXT if promises_a_specialist(code) else NOT_APPLICABLE_TEXT
+    return HANDOFF_TEXT if promises_a_specialist(code, handoff=handoff) else NOT_APPLICABLE_TEXT
 
 
-def outward_code(code: str | None) -> str:
+def outward_code(code: str | None, *, handoff: bool | None = None) -> str:
     """The name this refusal travels under on an API surface."""
 
-    return OUTWARD_HANDOFF if promises_a_specialist(code) else OUTWARD_UNAVAILABLE
+    return OUTWARD_HANDOFF if promises_a_specialist(code, handoff=handoff) else OUTWARD_UNAVAILABLE
 
 
 __all__ = [
