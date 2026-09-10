@@ -184,3 +184,69 @@ class TestTheGuardStillHasItsSubject:
         for _label, patterns in mod._CATEGORIES:
             for pattern in patterns:
                 re.compile(pattern)
+
+
+class TestTheApprovedTextKeepsItsPromises:
+    """Owner §128 came with two prohibitions, and they outlive the wording.
+
+    Pinning the exact sentence would break on every copy edit and teach the
+    next person to update the expectation without reading it. These pin the
+    RULES instead: whatever the line says, it must not read as an empty
+    shelf and must not read as the end of the conversation.
+    """
+
+    def test_it_does_not_read_as_an_empty_world(self):
+        """«ничего не найдено» when the catalogue is not empty.
+
+        Our own failure must not be dressed up as absence of the world — the
+        person would go away believing there is nothing for them.
+        """
+        lowered = REPLACEMENT_TEXT.lower()
+
+        assert lowered, "the replacement line is empty"
+        assert "ничего не найдено" not in lowered
+        assert "ничего нет" not in lowered
+
+    def test_it_does_not_read_as_the_end_of_the_conversation(self):
+        """«не могу помочь» when a controlled continuation exists.
+
+        The previous line broke exactly this: it closed the conversation and
+        handed the person an errand («спросите администратора салона»).
+        """
+        lowered = REPLACEMENT_TEXT.lower()
+
+        # Presence first, on the same data: an empty constant would satisfy
+        # every "not in" below while offering the person nothing at all.
+        # «могу показать» is the half of the sentence that keeps the
+        # conversation open, so its presence is what makes the absences mean
+        # something.
+        assert "могу показать" in lowered, "the line offers no continuation"
+
+        assert "не могу помочь" not in lowered
+        assert "спросите администратора" not in lowered
+
+    def test_it_offers_a_way_forward_in_the_words_themselves(self):
+        """Until the verdict can carry actions, the sentence has to.
+
+        Positive control on the two absences above: this asserts the text
+        contains something, so a blank constant could not pass them all.
+        """
+        assert "могу показать" in REPLACEMENT_TEXT.lower()
+        assert "уточнить" in REPLACEMENT_TEXT.lower()
+
+    def test_the_continuations_are_named_but_not_yet_carried(self):
+        """The gap is declared, not hidden.
+
+        ``OFFERED_CONTINUATIONS`` exists; ``OutboundVerdict`` has no field for
+        it. This test says so out loud, so that "the person was offered a way
+        out" cannot look delivered while no surface renders one. When the
+        verdict grows the field, this test is what tells whoever does it that
+        the promise was waiting here.
+        """
+        from apps.orchestrator.safety.outbound import OFFERED_CONTINUATIONS, OutboundVerdict
+
+        assert OFFERED_CONTINUATIONS == ("Посмотреть услуги", "Уточнить запрос")
+        assert "actions" not in OutboundVerdict.__dataclass_fields__, (
+            "OutboundVerdict grew an actions field — wire OFFERED_CONTINUATIONS "
+            "into it and rewrite this test to assert they are carried"
+        )

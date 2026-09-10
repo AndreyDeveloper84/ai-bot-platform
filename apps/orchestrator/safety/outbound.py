@@ -254,9 +254,36 @@ _CATEGORIES: tuple[tuple[str, tuple[str, ...]], ...] = (
 
 #: What the person reads instead. Says the shape of the problem without
 #: pretending the assistant knows the answer.
+#: Owner §128 — the approved line, verbatim. It replaces a draft the check
+#: refused AND a draft the check could not look at, because the person must
+#: not be able to tell our judgement from our outage.
+#:
+#: Two prohibitions come with it, and both say the same thing — **a failed
+#: check is not an empty world**:
+#:
+#: * never «ничего не найдено» when the catalogue is not empty — our fault
+#:   must not read as a bare shelf;
+#: * never «не могу помочь» when a controlled continuation exists — our fault
+#:   must not read as the end of the conversation.
+#:
+#: The previous line («тут нужен человек… спросите администратора») broke the
+#: second one: it closed the conversation and handed the person an errand.
 REPLACEMENT_TEXT = (
-    "Не могу это ответить — тут нужен человек, а не помощник. Спросите администратора салона."
+    "Пока у меня недостаточно подтверждённых данных, чтобы уверенно "
+    "посоветовать конкретный вариант. Могу показать доступные услуги "
+    "или помочь уточнить, что тебе сейчас нужно."
 )
+
+#: The two continuations §128 names alongside the text. They are declared here
+#: and NOT yet carried by :class:`OutboundVerdict`, which has room for
+#: ``allowed``, ``text`` and ``categories`` and nothing else.
+#:
+#: Wiring them is a separate slice, and saying so is the point: adding a field
+#: quietly would make «the person was offered a way out» look delivered while
+#: no surface renders one. Until then the text names both continuations in
+#: prose, which the person can act on by saying so — the sentence is written
+#: to survive exactly this gap.
+OFFERED_CONTINUATIONS: tuple[str, ...] = ("Посмотреть услуги", "Уточнить запрос")
 
 #: Category recorded when the check itself could not run. Deliberately not one
 #: of the content labels: an operator has to be able to separate "the draft
@@ -340,6 +367,7 @@ def evaluate_outbound(text: str) -> OutboundVerdict:
 
 __all__ = [
     "CHECK_FAILED_CATEGORY",
+    "OFFERED_CONTINUATIONS",
     "REPLACEMENT_TEXT",
     "OutboundVerdict",
     "evaluate_outbound",
