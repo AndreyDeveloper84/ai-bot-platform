@@ -23,6 +23,7 @@ from apps.admin_api import (
     views_invite,
     views_master_schedule,
     views_master_verify,
+    views_salon_frame,
     views_staff_invite,
     views_staff_revoke,
     views_staff_roster,
@@ -37,6 +38,11 @@ urlpatterns = [
     # the front desk opens most often; ordering is cosmetic here (no
     # wildcard can swallow a literal "day" segment at this level).
     path("day/", views_day.salon_day, name="salon_day"),
+    # DRF-1237 A2 — кадр того же дня: смены, перерывы и отсутствия ВСЕХ
+    # мастеров одним вызовом Ayla. Соседствует с ``day/`` намеренно: это
+    # вторая половина одного экрана, визиты берутся из ``day/`` и только
+    # оттуда (см. докстринг ``views_salon_frame``).
+    path("day/frame/", views_salon_frame.salon_day_frame, name="salon_day_frame"),
     # Phase 2 — bookable starts for the manual-booking flow. Wraps Ayla's
     # canonical slots read; see the module docstring for why it refuses
     # rather than returning an empty list on upstream failure.
