@@ -753,13 +753,6 @@ a {
   margin: 0;
 }
 
-/* Rating badge on visit cards. */
-.visit-rating {
-  color: var(--c-accent);
-  letter-spacing: 2px;
-  font-size: var(--font-size-300);
-}
-
 /* HelloScreen error panel — warmer than the generic .callout--danger. */
 .hello-error {
   background: var(--c-surface-1);
@@ -772,14 +765,6 @@ a {
   margin: 0;
   color: var(--c-text-primary);
   line-height: 1.5;
-}
-
-/* My-visits row wrapper — card + inline "Оценить" CTA. */
-.visit-row {
-  display: flex;
-  flex-direction: column;
-  gap: var(--s-2);
-  margin-bottom: var(--s-3);
 }
 
 
@@ -917,17 +902,6 @@ a {
    главное действие на остальных экранах, и она на виду независимо от
    длины документа. Условие C-2 («анкета — не ворота») от этого только
    крепче: выход виден не прокручивая. */
-
-/* Inline action row under each visit card. */
-.visit-row__actions {
-  display: flex;
-  gap: var(--s-2);
-  flex-wrap: wrap;
-}
-
-.visit-row__actions .btn-secondary {
-  flex: 0 1 auto;
-}
 
 /* ===========================================================================
    Master M1 dashboard (master-mobile §M1).

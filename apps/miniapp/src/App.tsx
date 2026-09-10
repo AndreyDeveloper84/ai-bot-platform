@@ -115,8 +115,6 @@ import { MasterAylaScreen } from "./screens/MasterAylaScreen";
 import { MasterScheduleScreen } from "./screens/MasterScheduleScreen";
 import { MasterServicesScreen } from "./screens/MasterServicesScreen";
 import { MasterSettingsScreen } from "./screens/MasterSettingsScreen";
-import { MyVisitDetailScreen } from "./screens/MyVisitDetailScreen";
-import { MyVisitsScreen } from "./screens/MyVisitsScreen";
 import { RescheduleScreen } from "./screens/RescheduleScreen";
 import { ServiceDetailScreen } from "./screens/ServiceDetailScreen";
 
@@ -1394,8 +1392,8 @@ export function CustomerRoutes() {
         element={<CustomerBookingSuccessScreen />}
       />
       {/* Tier 1 Priority 5 Phase B — customer records (Tau R1-R6).
-          New canonical routes. Legacy /my-visits stays mounted as a
-          compatibility alias (см. комментарий у алиасов выше). */}
+          Канонические адреса. От легаси-`/my-visits` остался только
+          псевдоним экрана переноса — см. комментарий ниже (DRF-1625). */}
       <Route path="/customer/records" element={<CustomerRecordsScreen />} />
       <Route
         path="/customer/records/:bookingId"
@@ -1411,8 +1409,33 @@ export function CustomerRoutes() {
         path="/customer/records/:bookingId/reschedule"
         element={<RescheduleScreen />}
       />
-      <Route path="/my-visits" element={<MyVisitsScreen />} />
-      <Route path="/my-visits/:bookingId" element={<MyVisitDetailScreen />} />
+      {/*
+        DRF-1625 — от старого пространства имён `/my-visits` остался
+        ровно один адрес, и он настоящий псевдоним: тот же
+        `RescheduleScreen`, что на каноническом
+        `/customer/records/:bookingId/reschedule` выше.
+
+        `/my-visits` (`MyVisitsScreen`) и `/my-visits/:bookingId`
+        (`MyVisitDetailScreen`) сняты вместе со своими экранами. Они
+        подпадали под критерий DRF-1485, записанный у алиасов выше:
+        каждый показывал СВОЙ экран, а не канонический по старому
+        адресу, — то есть оставить адрес значило бы оставить и
+        поверхность прежнего поколения, беднее канонической
+        (`MyVisitDetailScreen` не рисовал ни оплату, ни оценку).
+
+        Внешних ссылок на них нет, и это замерено, а не предположено:
+        ни один продюсер ссылок в репозитории никогда не выдавал пути
+        `/my-visits` — `git log -S` по `apps/skills`, `apps/orchestrator`,
+        `apps/channels`, `apps/notifications`, `apps/booking`,
+        `apps/miniapp_api`, `config` находит ровно один коммит, и тот
+        добавляет строку докстринга. Клавиатуры, ушедшие в историю чата
+        раньше, несут не URL, а payload (`open_visits`, `route=visits`),
+        и `_ROUTE_MAP` в `lib/max-sdk.ts` резолвит его сегодня в
+        `/customer/records`.
+
+        Сторож: `App.legacyRoutes.test.ts` — легаси-адрес имеет право
+        существовать только как псевдоним канонического экрана.
+      */}
       <Route
         path="/my-visits/:bookingId/reschedule"
         element={<RescheduleScreen />}
