@@ -143,6 +143,14 @@ urlpatterns = [
         views_master_schedule.master_schedule,
         name="master_schedule",
     ),
+    # DRF-1237, срез A1 — рабочий день мастера глазами салона. Тонкий вид
+    # поверх ``master_api.services.schedule.build_schedule``: четвёртого
+    # вычислителя «свободного времени» в продукте заводить нельзя.
+    path(
+        "masters/<str:master_id>/day-schedule/",
+        views_master_schedule.master_day_schedule,
+        name="master_day_schedule",
+    ),
     path(
         "masters/<str:master_id>/schedule/confirm/",
         views_master_schedule.master_schedule_confirm,
