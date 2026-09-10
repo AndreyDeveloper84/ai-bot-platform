@@ -88,6 +88,7 @@ import hashlib
 import logging
 import struct
 from dataclasses import dataclass
+from enum import Enum
 from typing import Optional
 from uuid import UUID
 
@@ -153,6 +154,29 @@ class BootstrapTenantMissing(SoloOnboardingError):
 # ─── Result dataclass ───────────────────────────────────────────────────
 
 
+class SoloSetupState(str, Enum):
+    """Готов ли соло-мастер принимать записи — или ещё нет.
+
+    §122 (10.09.2026): «соло-мастер не должен оставаться в состоянии, где
+    он зарегистрирован, но невидим клиентам навсегда», и —
+    «регистрация не должна ложно завершаться как „готово"».
+
+    Второе требование — про ЭТОТ тип. До него у `create_solo_provider`
+    было ровно два исхода: `created=True` (посеял) и `created=False`
+    (уже было). Ни один из них не отвечал на вопрос, который человека
+    единственно и волнует: **увидят ли меня клиенты**. Успех и полууспех
+    в контракте были неотличимы, и «неотличимы» здесь значит, что
+    вызывающий, честно проверивший `created`, отчитается «готово» о
+    человеке, которого не видно.
+    """
+
+    #: Все условия продаваемости выполнены — человек в выдаче.
+    READY = "ready"
+    #: Записи заведены, но чего-то не хватает. Не отказ и не ошибка:
+    #: состояние, у которого есть имя, причина и выход.
+    SETUP_PENDING = "setup_pending"
+
+
 @dataclass(frozen=True)
 class SoloOnboardingResult:
     """Outcome of `create_solo_provider`.
@@ -166,7 +190,8 @@ class SoloOnboardingResult:
         admin_staff: `TenantStaff(role=admin)` row.
         master: `CatalogMaster` row with `linked_bot_user=bot_user`.
         created: True if this call SEEDED the records; False if all 4
-            already existed (idempotent return).
+            already existed (idempotent return). **Про готовность НЕ
+            говорит ничего** — см. :attr:`setup_state`.
     """
 
     tenant: Tenant
@@ -175,6 +200,49 @@ class SoloOnboardingResult:
     admin_staff: TenantStaff
     master: CatalogMaster
     created: bool
+
+    @property
+    def setup_state(self) -> SoloSetupState:
+        """Готовность, ВЫЧИСЛЕННАЯ по строке, а не переданная в неё.
+
+        Поля здесь нет намеренно. Поле можно не заполнить, а незаполненное
+        поле снаружи неотличимо от отсутствующего — и тогда сторож ловил
+        бы наличие атрибута вместо невозможности соврать. Свойство без
+        сеттера отнимает у вызывающего саму возможность объявить
+        готовность: чтобы ответить `READY`, ему пришлось бы изменить
+        строку каталога, то есть сделать человека продаваемым на самом
+        деле.
+
+        Считает не своим правилом, а ЕДИНСТВЕННЫМ: `sale_block` —
+        то же место, которым витрина решает, показывать ли мастера, и
+        которым ростер салона называет его состояние (DRF-1506, одно
+        определение на пять поверхностей). Своя копия условий разъехалась
+        бы с витриной, и разъехалась бы молча: человек читался бы готовым
+        здесь и непродаваемым там.
+        """
+        return SoloSetupState.READY if self.blocked_by is None else SoloSetupState.SETUP_PENDING
+
+    @property
+    def blocked_by(self) -> Optional[str]:
+        """Почему не готов — машинным именем, или `None`, если готов.
+
+        Имя причины нужно человеку, а не логу: «не готов» без причины
+        отправляет его искать дверь, а `ayla_unlinked` говорит, что
+        ждать надо связывания, и что оно наша работа, а не его.
+        """
+        from apps.catalog.master_state import sale_block
+
+        return sale_block(self.master)
+
+    @property
+    def is_ready(self) -> bool:
+        """Короткая форма для вызывающего, который спрашивает одно.
+
+        Существует, чтобы `if result.created:` не оставалось самой
+        удобной проверкой в файле: удобная неверная проверка вытесняет
+        верную неудобную.
+        """
+        return self.setup_state is SoloSetupState.READY
 
 
 # ─── Helpers ────────────────────────────────────────────────────────────
@@ -436,14 +504,7 @@ def create_solo_provider(
         },
         distinct_id=str(new_bot_user.id),
     )
-    logger.info(
-        "identity.solo_provider.created tenant=%s bot_user=%s channel=%s",
-        new_tenant.slug,
-        new_bot_user.id,
-        channel,
-    )
-
-    return SoloOnboardingResult(
+    result = SoloOnboardingResult(
         tenant=new_tenant,
         bot_user=new_bot_user,
         owner_staff=owner,
@@ -451,6 +512,20 @@ def create_solo_provider(
         master=master,
         created=True,
     )
+    # Готовность пишется в лог РЯДОМ с фактом создания, одной строкой.
+    # Порознь они читаются как «завели» — и через месяц по логам не
+    # восстановить, скольким из заведённых людей это что-нибудь дало.
+    logger.info(
+        "identity.solo_provider.created tenant=%s bot_user=%s channel=%s "
+        "setup_state=%s blocked_by=%s",
+        new_tenant.slug,
+        new_bot_user.id,
+        channel,
+        result.setup_state.value,
+        result.blocked_by,
+    )
+
+    return result
 
 
 # ─── is_solo_provider — Веха 3 (/api/v1/me extension) ──────────────────
