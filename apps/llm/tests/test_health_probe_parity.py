@@ -153,34 +153,48 @@ def test_probe_builds_the_class_the_router_serves(settings, vendor):
 def test_probe_call_lands_on_the_resolved_vendor(settings, monkeypatch, vendor):
     """Behavioural reading: the request really reaches that vendor.
 
-    Matching classes is not the same as calling one. This patches
-    ``complete`` on whichever class the REGISTRY names for ``vendor`` —
-    not on a hand-imported module — and asserts the probe's single call
-    arrived there and is attributed to that vendor in the result.
+    Matching classes is not the same as calling one.
+
+    ``complete`` is patched on EVERY registered vendor class, not only
+    the expected one, for two reasons. It turns the assertion into a
+    counter — "one call, and it landed here, and nowhere else" — which a
+    single-class patch cannot express: with only the expected class
+    stubbed, a probe that called the wrong vendor would reach the real
+    SDK, and the test would go red for the right reason by accident,
+    over the network, after a 401. (Verified: under a deliberate
+    divergence this test issued a live ``POST api.openai.com`` before
+    the patch was widened.) A monitor's test must not need egress to
+    tell the truth.
     """
 
     settings.LLM_PROVIDER = vendor
 
-    cls = provider_class(vendor)
-    calls: list[dict] = []
+    calls: list[tuple[str, str]] = []
 
-    async def _complete(self, messages, **kwargs):
-        calls.append({"messages": messages, **kwargs})
-        return object()
+    def _stub(name: str):
+        async def _complete(self, messages, **kwargs):
+            calls.append((name, "complete"))
+            return object()
 
-    async def _aclose(self):
-        calls.append({"closed": True})
+        async def _aclose(self):
+            calls.append((name, "aclose"))
 
-    monkeypatch.setattr(cls, "complete", _complete, raising=False)
-    monkeypatch.setattr(cls, "aclose", _aclose, raising=False)
+        return _complete, _aclose
+
+    for known in VENDORS:
+        cls = provider_class(known)
+        complete, aclose = _stub(known)
+        monkeypatch.setattr(cls, "complete", complete, raising=False)
+        monkeypatch.setattr(cls, "aclose", aclose, raising=False)
 
     result = health.run_probe_sync()
 
     assert result.ok is True
     assert result.provider == vendor
-    # One completion + one close, in that order: a fresh client per tick
-    # that is never closed leaks an httpx pool into the worker.
-    assert [("closed" in c) for c in calls] == [False, True]
+    # Exactly one completion, on the resolved vendor, then its close: a
+    # fresh client per tick that is never closed leaks an httpx pool into
+    # the worker every five minutes.
+    assert calls == [(vendor, "complete"), (vendor, "aclose")]
 
 
 @pytest.mark.parametrize("vendor", VENDORS)
