@@ -749,6 +749,30 @@ def provider_is_configured(name: str) -> bool:
     key, by contrast, must be skipped silently-but-audibly: hopping
     onto a vendor that is guaranteed to 401 converts one dead provider
     into two and buries the original cause under an auth error.
+
+    ### Named, not fixed: this function arms an unapproved policy
+
+    DRF-1631 / owner decision В-14 (10.09.2026). Read what this gate
+    actually decides on the serving path: a key being *present* is the
+    whole of the evidence that lets :class:`QuotaFallbackProvider` move
+    live traffic off the configured vendor and onto another one, in
+    silence. Under ``LLM_PROVIDER=anthropic`` that is a silent runtime
+    fall-back to OpenAI, and В-14 forbids it — a fall-back is permitted
+    only under a policy designed, approved and tested, and none exists.
+
+        **Holding a secret is not permission to fall back.**
+
+    ``OPENAI_API_KEY`` is on the pilot for a different and legitimate
+    reason (embeddings — Anthropic has no embeddings API, so
+    ``op="embedding"`` routes to OpenAI by design; see the module
+    docstring). One key is therefore serving two purposes, only one of
+    which anyone chose, and this function cannot tell them apart.
+
+    Left AS IS deliberately: the fix is a policy decision about
+    completions, not a line of code a monitor ticket may take on its own
+    — changing it here would swap one silent behaviour for another. The
+    operator switch that exists today is
+    ``LLM_QUOTA_FALLBACK_ENABLED=0``.
     """
     spec = _PROVIDER_SPECS.get(name)
     if spec is None:

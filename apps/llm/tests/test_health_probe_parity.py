@@ -291,3 +291,95 @@ def test_key_gate_asks_about_the_resolved_vendor(settings, monkeypatch, vendor):
     # Now empty exactly that vendor's key and nothing else.
     setattr(settings, _PROVIDER_SPECS[vendor].key_setting_name, "")
     assert health.check_llm_availability()["skipped"] == health.SKIP_NO_API_KEY
+
+
+def test_openai_health_does_not_colour_the_anthropic_verdict(settings, monkeypatch):
+    """Owner decision В-14: OpenAI's health does not determine Ayla's.
+
+    The serving path wraps the resolved provider in
+    ``QuotaFallbackProvider``, which hops to another vendor when the
+    first reports its credits exhausted. A probe that inherited that
+    wrapper would answer "the LLM is fine" on the strength of the vendor
+    the product was *not* configured to use — the same confusion
+    DRF-1631 is undoing, arriving through a different door.
+
+    So this pins the probe half of В-14: with Anthropic out of credits
+    and OpenAI answering happily, the verdict is DOWN and it is named
+    against ``anthropic``.
+    """
+
+    from apps.llm.protocol import LLMVendorCreditsExhausted
+
+    settings.LLM_PROVIDER = "anthropic"
+    settings.LLM_QUOTA_FALLBACK_ENABLED = True
+
+    async def _exhausted(self, messages, **kwargs):
+        raise LLMVendorCreditsExhausted("anthropic.complete: vendor credits exhausted")
+
+    async def _happy(self, messages, **kwargs):
+        return object()
+
+    async def _aclose(self):
+        return None
+
+    monkeypatch.setattr(provider_class("anthropic"), "complete", _exhausted, raising=False)
+    monkeypatch.setattr(provider_class("anthropic"), "aclose", _aclose, raising=False)
+    monkeypatch.setattr(provider_class("openai"), "complete", _happy, raising=False)
+    monkeypatch.setattr(provider_class("openai"), "aclose", _aclose, raising=False)
+
+    result = health.run_probe_sync()
+
+    # Presence: the probe really ran against the configured vendor.
+    assert result.provider == "anthropic"
+    assert result.ok is False
+    assert result.error_class == "LLMVendorCreditsExhausted"
+
+
+def test_serving_path_still_hops_vendors_silently(settings, monkeypatch):
+    """Records a FORBIDDEN behaviour so its removal has to be deliberate.
+
+    This assertion does NOT endorse what it asserts. Under
+    ``LLM_PROVIDER=anthropic`` the serving path today answers a user
+    from OpenAI when Anthropic reports its credits exhausted, without
+    telling anyone — which owner decision В-14 forbids outright: a
+    fall-back is permitted only under a policy designed, approved and
+    tested, and none exists.
+
+    It is pinned here rather than fixed because the fix is a policy
+    decision about completions and belongs to its own ticket, and
+    because an unwatched defect is how this one lasted three weeks. When
+    the policy lands, this test changes with it — visibly, in a diff,
+    instead of a behaviour quietly ceasing.
+
+    Holding a secret is not permission to fall back: note that nothing
+    below configures a fall-back. It is armed by ``OPENAI_API_KEY``
+    merely being set (:func:`apps.llm.router.provider_is_configured`).
+    """
+
+    import asyncio
+
+    from apps.llm.protocol import LLMVendorCreditsExhausted
+
+    settings.LLM_PROVIDER = "anthropic"
+    settings.LLM_QUOTA_FALLBACK_ENABLED = True
+
+    served_by: list[str] = []
+
+    async def _exhausted(self, messages, **kwargs):
+        served_by.append("anthropic")
+        raise LLMVendorCreditsExhausted("anthropic.complete: vendor credits exhausted")
+
+    async def _happy(self, messages, **kwargs):
+        served_by.append("openai")
+        return object()
+
+    monkeypatch.setattr(provider_class("anthropic"), "complete", _exhausted, raising=False)
+    monkeypatch.setattr(provider_class("openai"), "complete", _happy, raising=False)
+
+    provider = get_router().get_provider()
+    assert provider.name == "anthropic"  # presence: this is the configured vendor
+
+    asyncio.run(provider.complete([{"role": "user", "content": "ping"}]))
+
+    # DEFECT, pinned: the user was answered by a vendor nobody chose.
+    assert served_by == ["anthropic", "openai"]

@@ -58,6 +58,37 @@ cost us:
 * **blindness, which is worse** — had Anthropic failed, the probe would
   have gone on reporting green, because it was asking OpenAI.
 
+### The rule this module now obeys (owner decision В-14, 10.09.2026)
+
+``LLM_PROVIDER`` is **authoritative** for the configured runtime
+vendor. Under ``LLM_PROVIDER=anthropic``:
+
+* production health checks MUST check Anthropic;
+* **OpenAI's health does not determine Ayla's LLM health**;
+* a silent runtime fall-back to OpenAI is **forbidden** — permitted only
+  under a fallback policy that has been designed, approved and tested,
+  and no such policy exists.
+
+Which gives the two readings an operator has to hold at once, both
+demonstrated this week:
+
+* **a red panel is not a broken Ayla** — 10.09, 2018 ticks of a wallet
+  nobody spends from;
+* **a green panel is not a live Ayla** — what the same code would have
+  shown had Anthropic died.
+
+And the sentence that names the mechanism behind both:
+
+    **Holding a secret is not permission to fall back.**
+
+Nobody decided the probe should ask OpenAI. The key was present and the
+class was imported, and the presence of a secret quietly became
+behaviour. That is why this module now resolves its vendor and refuses
+to inherit the router's quota-fallback wrapper: see
+:func:`build_probe_provider`, and the DRF-1631 note on
+:func:`apps.llm.router.provider_is_configured`, which arms the serving
+path's hop from exactly the same evidence — a key being set.
+
 The probe's context has no tenant and no skill, so the tier that
 answers it is tier 3, ``LLM_PROVIDER``. That is the honest scope of one
 cheap call, and it is stated rather than assumed: when
