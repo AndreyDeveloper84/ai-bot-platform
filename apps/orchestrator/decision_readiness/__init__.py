@@ -75,6 +75,7 @@ from apps.orchestrator.decision_readiness.engine import (
     readiness_key,
 )
 from apps.orchestrator.decision_readiness.ledger import (
+    ExpiryMechanism,
     LedgerEntry,
     LedgerUnavailable,
     QuestionLedger,
@@ -95,6 +96,13 @@ from apps.orchestrator.decision_readiness.questions import (
     QuestionKind,
     SemanticOption,
     question_id,
+)
+from apps.orchestrator.decision_readiness.resume import (
+    RESUME_TTL_SECONDS,
+    ResumeSummary,
+    SettledQuestion,
+    resume_conditions,
+    summarise,
 )
 from apps.orchestrator.decision_readiness.required_context import (
     EMPTY_SPEC,
@@ -136,6 +144,7 @@ __all__ = [
     "CONFIRMABLE_ORIGINS",
     "EMPTY_CATALOG",
     "EMPTY_SPEC",
+    "RESUME_TTL_SECONDS",
     "KNOWN_SAFETY_STATES",
     "SHADOW_SETTING",
     "SPEC_VERSION",
@@ -154,6 +163,7 @@ __all__ = [
     "DomainRef",
     "EvidenceOrigin",
     "EvidenceSink",
+    "ExpiryMechanism",
     "HypotheticalAnswer",
     "InputAvailability",
     "LedgerEntry",
@@ -179,6 +189,7 @@ __all__ = [
     "ReadinessOutput",
     "ReadinessState",
     "ReaskConditions",
+    "ResumeSummary",
     "RequiredContextSpec",
     "RequiredSlot",
     "SafetyResult",
@@ -190,6 +201,7 @@ __all__ = [
     "SlotOwner",
     "SlotState",
     "SlotValue",
+    "SettledQuestion",
     "SlotVerdict",
     "StateExpiry",
     "StateLifecycle",
@@ -209,6 +221,8 @@ __all__ = [
     "question_id",
     "readiness_key",
     "shadow_flag",
+    "resume_conditions",
+    "summarise",
     "unsatisfied_slots",
     "user_action_event",
     "user_text_event",
