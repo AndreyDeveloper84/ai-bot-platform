@@ -234,3 +234,53 @@ def test_unknown_is_countable_apart_from_required(
     assert not any(HEALTH_CHECK_UNKNOWN in m for m in required), (
         "REQUIRED пишется в журнал как UNKNOWN — счётчик разметки будет завышен"
     )
+
+
+@pytest.mark.parametrize("code", ALL_THREE)
+def test_the_screen_can_tell_all_three_apart(
+    client: Client, tenant: Tenant, owner_bot_user, refuse_with, code: str
+) -> None:
+    """§106: наружу одно `blocked`, различает `reason_code`.
+
+    На салонной поверхности различаются ВСЕ ТРИ, а не две. Клиенту
+    `REQUIRED` и `UNKNOWN` — одно имя, потому что разница наша;
+    администратору она адресована: `unknown` значит «нужна консультация
+    И разметка», и разметка — его работа.
+    """
+    body = _refuse(client, tenant, refuse_with, code).json()
+
+    assert "reason_code" in body, "экрану нечем различать причины отказа"
+    assert body["reason_code"] == code.lower()
+
+
+def test_a_rights_refusal_is_told_apart_from_a_medical_one(
+    client: Client, tenant: Tenant, owner_bot_user, refuse_with, monkeypatch
+) -> None:
+    """«Нельзя по правам» и «нужен скрининг» — разные `reason_code` (§106).
+
+    Оба исхода — `blocked`, и это правильно. Без кода причины экран
+    получил бы одно слово на два несовместимых действия: в одном случае
+    просить прав, в другом — ждать консультации.
+    """
+    from apps.integrations.ayla.salon_client import SalonForbidden
+
+    class _Forbidding:
+        def create_appointment(self, **kwargs):
+            raise SalonForbidden("not an administrator of this salon")
+
+    monkeypatch.setattr(
+        "apps.integrations.ayla.salon_client.get_salon_client", lambda: _Forbidding()
+    )
+    n = next(_SEQ)
+    denied = _post(
+        client, make_master(tenant, name="Анна", external_id=n), _service(tenant, n)
+    ).json()
+
+    assert denied["outcome"] == "blocked"
+    assert denied["reason_code"] == "permission_denied"
+
+    medical = _refuse(client, tenant, refuse_with, HEALTH_CHECK_REQUIRED).json()
+    assert medical["outcome"] == "blocked"
+    assert medical["reason_code"] != denied["reason_code"], (
+        "два несовместимых отказа приезжают на экран одним словом"
+    )

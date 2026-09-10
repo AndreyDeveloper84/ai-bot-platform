@@ -140,7 +140,7 @@ def create_booking(request: HttpRequest) -> HttpResponse:
     if not idempotency_key:
         idempotency_key = str(uuid.uuid4())
 
-    from apps.integrations.ayla.health_check import outward_code, text_for
+    from apps.integrations.ayla.health_check import text_for
     from apps.integrations.ayla.salon_client import (
         SalonAPIError,
         SalonForbidden,
@@ -198,7 +198,11 @@ def create_booking(request: HttpRequest) -> HttpResponse:
             tenant.id,
             exc,
         )
-        return _outcome("blocked", str(exc), 403)
+        # §106 — `blocked` наружу одно, различает `reason_code`. Без него
+        # «нельзя по правам» и «нужен скрининг» приезжают на экран одним
+        # словом, и различать нечем ровно так же, как до этой задачи, —
+        # только в другую сторону.
+        return _outcome("blocked", str(exc), 403, reason_code="permission_denied")
     except SalonNotFound as exc:
         # Ayla knows the specialist or the customer is not this salon's. For
         # a customer that is an invitation to book them as a new guest, which
@@ -241,7 +245,13 @@ def create_booking(request: HttpRequest) -> HttpResponse:
             "blocked",
             text_for(exc.code, handoff=exc.handoff),
             422,
-            code=outward_code(exc.code, handoff=exc.handoff),
+            # §106: на ЭТОЙ поверхности причины различаются все три, а не
+            # две. Клиенту `REQUIRED` и `UNKNOWN` — одно имя, потому что
+            # разница наша; администратору она адресована: `unknown`
+            # означает «нужна консультация И разметка», и разметка — его
+            # работа. Слитый здесь код отнял бы у экрана именно то
+            # различие, ради которого владелец завёл `reason_code`.
+            reason_code=(exc.code or "").lower() or "health_check_unspecified",
         )
     except SalonAPIError as exc:
         logger.warning("admin_api.create_booking.error actor=%s err=%s", actor, exc)
