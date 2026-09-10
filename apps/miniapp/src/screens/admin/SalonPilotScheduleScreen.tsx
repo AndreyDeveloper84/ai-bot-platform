@@ -6,6 +6,13 @@
  * * **один мастер** (срез A1) — выбрали человека, видите его рабочий день;
  * * **все** (срез A2) — хронология салона: кто когда занят и кто когда в смене.
  *
+ * В режиме одного мастера рядом с днём читается его недельный график и
+ * состояние подтверждения (срез B1). Это не украшение: §29.5 запрещает
+ * считать неизвестное расписание свободным или занятым, а показанные часы и
+ * поручительство салона за них — разные утверждения. Подтверждать отсюда
+ * нельзя, только смотреть: подтверждение — решение владелицы (§83) и
+ * отдельная поверхность.
+ *
  * # Что здесь появилось и почему только сейчас
  *
  * До этого экран честно писал «показывать нечего», и это было верно: ручки,
@@ -72,15 +79,21 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { StateError } from "../../components/StateError";
 import {
   getMasterDaySchedule,
+  getMasterSchedule,
   getSalonDay,
   getSalonDayFrame,
   RELEASED_VISIT_STATUSES,
   type MasterDay,
+  type MasterSchedule,
   type MeResponse,
   type SalonDayFrame,
   type SalonDayResponse,
   type SalonDayVisit,
 } from "../../lib/admin-api";
+import {
+  confirmationLabel,
+  confirmationState,
+} from "../../lib/schedule-confirmation-state";
 import { SalonPilotFrame } from "./SalonPilotFrame";
 
 /** Сегодня в местном исчислении браузера — та же дата, что подставит сервер. */
@@ -120,6 +133,8 @@ const BLOCK_REASON: Record<string, string> = {
  * текущее время. Клиент мог не прийти, и экран этого не знает.
  */
 const NOW_MARKER = " · сейчас по плану";
+
+const WEEKDAYS_SHORT = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"];
 
 const LIST_TITLE: Record<string, string> = {
   working_intervals: "смены",
@@ -174,6 +189,8 @@ export function SalonPilotScheduleScreen({ me }: { me: MeResponse }) {
   const [err, setErr] = useState<unknown>(null);
   const [frame, setFrame] = useState<SalonDayFrame | null>(null);
   const [frameErr, setFrameErr] = useState<unknown>(null);
+  const [week, setWeek] = useState<MasterSchedule | null>(null);
+  const [weekErr, setWeekErr] = useState<unknown>(null);
 
   const masters = salon?.masters ?? null;
 
@@ -234,12 +251,29 @@ export function SalonPilotScheduleScreen({ me }: { me: MeResponse }) {
     }
   }, []);
 
+  const loadWeek = useCallback(async (masterId: string, signal?: AbortSignal) => {
+    if (!masterId) return;
+    setWeekErr(null);
+    try {
+      const res = await getMasterSchedule(masterId, { signal });
+      if (signal?.aborted) return;
+      setWeek(res);
+    } catch (e) {
+      if ((e as DOMException | undefined)?.name === "AbortError") return;
+      setWeekErr(e);
+      // Чужой график не переживает переключение мастера — то же правило, что
+      // для дня и для кадра.
+      setWeek(null);
+    }
+  }, []);
+
   useEffect(() => {
     if (mode !== "one") return;
     const ctrl = new AbortController();
     void load(selected, ctrl.signal);
+    void loadWeek(selected, ctrl.signal);
     return () => ctrl.abort();
-  }, [mode, selected, load]);
+  }, [mode, selected, load, loadWeek]);
 
   useEffect(() => {
     if (mode !== "all") return;
@@ -320,6 +354,33 @@ export function SalonPilotScheduleScreen({ me }: { me: MeResponse }) {
               : `Смена ${day.working_hours.start}–${day.working_hours.end}`}
           </h2>
 
+          {/*
+            Часы выше и поручительство за них — РАЗНЫЕ утверждения (§29.5).
+            Показать смену молча значило бы выдать её за заверенную, а
+            «заглушка 10:00–19:00 подтверждением не является».
+
+            Состояний четыре, и ни одно не сворачивается в остальные:
+            подтверждено для этих часов, подтверждено для других (часы
+            изменились), не подтверждено никогда — и НЕ ПРОЧИТАНО, когда
+            запрос не дошёл. Последнее не то же самое, что «не подтверждено»:
+            неизвестное нельзя подставлять значением по умолчанию ни в одну
+            сторону.
+          */}
+          {weekErr != null ? (
+            <p style={{ margin: "0 0 var(--s-2)", color: "var(--c-text-secondary)" }}>
+              Состояние подтверждения не прочитано — это не значит «не подтверждено».
+            </p>
+          ) : (
+            week != null && (
+              <p
+                style={{ margin: "0 0 var(--s-2)", color: "var(--c-text-secondary)" }}
+                data-state={confirmationState(week.confirmation)}
+              >
+                {confirmationLabel(week.confirmation)}
+              </p>
+            )
+          )}
+
           <section style={{ marginBottom: "var(--s-3)" }}>
             <h3 style={{ fontSize: "var(--text-body-size, 15px)", margin: "0 0 var(--s-1)" }}>
               Записи
@@ -397,6 +458,41 @@ export function SalonPilotScheduleScreen({ me }: { me: MeResponse }) {
             )}
           </section>
         </>
+      )}
+
+      {/*
+        График на неделю — чтение (срез B1). Именно та поверхность, на
+        которой видно, что расписание мастера никто не заверял: сегодня это
+        число живёт в комментарии к задаче (4 из 31 на 07.09.2026), и салон
+        его не видит вовсе. Подтверждать отсюда нельзя — это решение
+        владелицы и отдельный срез; здесь только показ.
+      */}
+      {mode === "one" && (week != null || weekErr != null) && (
+        <section style={{ marginTop: "var(--s-3)" }}>
+          <h3 style={{ fontSize: "var(--text-body-size, 15px)", margin: "0 0 var(--s-1)" }}>
+            График на неделю
+          </h3>
+          {weekErr != null ? (
+            <StateError err={weekErr} onRetry={() => void loadWeek(selected)} />
+          ) : (
+            <ul style={{ listStyle: "none", padding: 0, margin: 0 }}>
+              {week!.days.map((d) => (
+                <li key={d.day_of_week} style={{ padding: "2px 0" }}>
+                  <span style={{ display: "inline-block", minWidth: "2.5em" }}>
+                    {WEEKDAYS_SHORT[d.day_of_week] ?? d.day_of_week}
+                  </span>
+                  {d.is_working_day && d.start_time && d.end_time
+                    ? `${d.start_time}–${d.end_time}${
+                        d.break_start && d.break_end
+                          ? ` · перерыв ${d.break_start}–${d.break_end}`
+                          : ""
+                      }`
+                    : "выходной"}
+                </li>
+              ))}
+            </ul>
+          )}
+        </section>
       )}
 
       {mode === "all" && frameErr != null && (

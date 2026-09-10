@@ -25,14 +25,17 @@ vi.mock("../../lib/admin-api", async (importOriginal) => {
     getSalonDay: vi.fn(),
     getMasterDaySchedule: vi.fn(),
     getSalonDayFrame: vi.fn(),
+    getMasterSchedule: vi.fn(),
   };
 });
 
 import {
   getMasterDaySchedule,
+  getMasterSchedule,
   getSalonDay,
   getSalonDayFrame,
   type MasterDay,
+  type MasterSchedule,
   type MeResponse,
   type SalonDayFrame,
   type SalonDayResponse,
@@ -43,6 +46,7 @@ import { SalonPilotScheduleScreen } from "./SalonPilotScheduleScreen";
 const mockedDay = vi.mocked(getSalonDay);
 const mockedSchedule = vi.mocked(getMasterDaySchedule);
 const mockedFrame = vi.mocked(getSalonDayFrame);
+const mockedWeek = vi.mocked(getMasterSchedule);
 
 const ME: MeResponse = {
   user: { id: "u-1", name: "Карина", phone_masked: "+7 *** **12" },
@@ -86,6 +90,36 @@ function masterDay(patch: Partial<MasterDay> = {}): MasterDay {
   };
 }
 
+/**
+ * Недельный график в форме ответа `GET masters/<id>/schedule/`.
+ *
+ * По умолчанию — подтверждённый для ЭТИХ часов: положительный контроль, без
+ * которого проверки «не подтверждено» зеленели бы на экране, где подтверждения
+ * не показывают вовсе.
+ */
+function weekSchedule(patch: Partial<MasterSchedule> = {}): MasterSchedule {
+  return {
+    source: "ayla",
+    has_working_day: true,
+    days: [0, 1, 2, 3, 4, 5, 6].map((i) => ({
+      day_of_week: i,
+      is_working_day: i !== 6,
+      start_time: i !== 6 ? "10:00" : null,
+      end_time: i !== 6 ? "19:00" : null,
+      break_start: null,
+      break_end: null,
+    })),
+    confirmation: {
+      confirmed_at: "2026-09-09T12:00:00+03:00",
+      confirmed_by: { id: "u-1", name: "Карина" },
+      is_current: true,
+      fingerprint: "abc",
+      block: null,
+    },
+    ...patch,
+  };
+}
+
 function renderScreen() {
   return render(
     <MemoryRouter>
@@ -104,6 +138,7 @@ describe("Расписание салона — режим одного маст
       to: "2026-09-10",
       days: [masterDay()],
     });
+    mockedWeek.mockResolvedValue(weekSchedule());
   });
 
   it("в выборе есть и тот мастер, у которого нет записей", async () => {
@@ -269,6 +304,7 @@ describe("Расписание салона — режим «Все»", () => {
       days: [masterDay()],
     });
     mockedFrame.mockResolvedValue(frame());
+    mockedWeek.mockResolvedValue(weekSchedule());
   });
 
   it("параллельные записи стоят под одним временем, а не в четырёх колонках", async () => {
@@ -374,6 +410,7 @@ describe("Отметка «сейчас по плану» — утверждён
       days: [masterDay()],
     });
     mockedFrame.mockResolvedValue(frame());
+    mockedWeek.mockResolvedValue(weekSchedule());
   });
 
   it("стоит у записи, чей интервал накрывает сейчас, и только у неё", async () => {
@@ -426,5 +463,101 @@ describe("Отметка «сейчас по плану» — утверждён
 
     await screen.findByText(/сейчас по плану/);
     expect(screen.queryByText(/· идёт$/)).toBeNull();
+  });
+});
+
+/**
+ * График и поручительство за него — срез B1.
+ *
+ * §29.5: «Неизвестное расписание нельзя считать ни свободным, ни занятым.
+ * Третье состояние, а не подстановка значения по умолчанию», и там же —
+ * «заглушка 10:00–19:00 подтверждением не является».
+ *
+ * Отсюда четыре состояния, и ни одно не сворачивается в остальные. Тесты
+ * держат именно неразличимость соседей: «устарело» рядом с «никогда» и
+ * «не прочитано» рядом с «не подтверждено» — те две пары, которые проще
+ * всего склеить в булево и потерять действие, которым они отличаются.
+ */
+describe("Расписание салона — график мастера и его подтверждение", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockedDay.mockResolvedValue(salonDay());
+    mockedSchedule.mockResolvedValue({
+      tenant_tz: "Europe/Moscow",
+      from: "2026-09-10",
+      to: "2026-09-10",
+      days: [masterDay()],
+    });
+    mockedFrame.mockResolvedValue(frame());
+    mockedWeek.mockResolvedValue(weekSchedule());
+  });
+
+  it("показывает неделю целиком, включая выходной", async () => {
+    renderScreen();
+
+    expect(await screen.findByText("График на неделю")).toBeTruthy();
+    expect(screen.getByText("Вс")).toBeTruthy();
+    expect(screen.getByText("выходной")).toBeTruthy();
+  });
+
+  it("подтверждённое расписание названо подтверждённым", async () => {
+    // Положительный контроль: без него три следующие проверки зеленели бы и
+    // на экране, где подтверждение не показывают вовсе.
+    renderScreen();
+
+    expect(await screen.findByText(/Расписание подтверждено 9 сентября · Карина/)).toBeTruthy();
+  });
+
+  it("неподтверждённое названо словами, а не показано пустотой", async () => {
+    mockedWeek.mockResolvedValue(
+      weekSchedule({
+        confirmation: {
+          confirmed_at: null,
+          confirmed_by: null,
+          is_current: false,
+          fingerprint: "abc",
+          block: null,
+        },
+      }),
+    );
+
+    renderScreen();
+
+    expect(await screen.findByText(/Расписание не подтверждено/)).toBeTruthy();
+  });
+
+  it("устаревшее подтверждение — не то же, что неподтверждённое", async () => {
+    // Разница не косметическая: «никогда не заверяли» лечится первым
+    // подтверждением, «часы изменились после» — повторным, и склеенные в
+    // булево они потеряли бы ровно то действие, которым отличаются.
+    mockedWeek.mockResolvedValue(
+      weekSchedule({
+        confirmation: {
+          confirmed_at: "2026-09-08T12:00:00+03:00",
+          confirmed_by: { id: "u-1", name: "Карина" },
+          is_current: false,
+          fingerprint: "def",
+          block: null,
+        },
+      }),
+    );
+
+    renderScreen();
+
+    expect(await screen.findByText(/Часы изменились после подтверждения/)).toBeTruthy();
+    expect(screen.queryByText(/Расписание не подтверждено/)).toBeNull();
+  });
+
+  it("непрочитанное состояние не выдаётся за неподтверждённое", async () => {
+    // Самая соблазнительная склейка: запрос не дошёл — значит «не
+    // подтверждено». Нет: неизвестное нельзя подставлять значением по
+    // умолчанию НИ В ОДНУ сторону, иначе салон пойдёт заверять расписание,
+    // которое, возможно, уже заверено.
+    mockedWeek.mockRejectedValue(new Error("boom"));
+
+    renderScreen();
+
+    expect(await screen.findByText(/Состояние подтверждения не прочитано/)).toBeTruthy();
+    expect(screen.queryByText(/Расписание не подтверждено/)).toBeNull();
   });
 });
