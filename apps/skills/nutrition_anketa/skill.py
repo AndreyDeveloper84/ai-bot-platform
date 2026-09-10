@@ -155,6 +155,25 @@ _STOP_SCREENING = (
 
 _STOP_TEXTS = {"minor": _STOP_MINOR, "screening": _STOP_SCREENING}
 
+# ─── нет согласия на расчёт (§92 п.1) ────────────────────────────────────
+#
+# Говорит ровно то, что есть, и не обещает того, чего нет. Экрана согласий
+# пока не существует — сказать «дай согласие вон там» значило бы отправить
+# человека в место, которого нет, а это хуже отказа: отказ он поймёт, а
+# несуществующую дверь будет искать.
+#
+# Про уже посчитанные ориентиры здесь молчим намеренно. Гейт останавливает
+# СПРАШИВАНИЕ, а не гасит посчитанное: человек параметры сообщил, просто
+# без отдельного экрана — это наш процессный пробел, а не его. Правило 4
+# (удалить либо обезличить) срабатывает при ОТЗЫВЕ, а отзывать пока нечего.
+_CONSENT_REQUIRED = (
+    "Персональный расчёт пока не запускаю: на обработку веса, роста, возраста "
+    "и остального нужно отдельное согласие, а взять его сейчас негде — экран "
+    "с ним ещё не готов.\n\n"
+    "Дневник от этого не закрывается: записывай еду и воду, я посчитаю и покажу, "
+    "сколько вышло за день. Как появится экран — предложу посчитать ориентир."
+)
+
 
 @register
 class NutritionAnketaSkill:
@@ -188,6 +207,12 @@ class NutritionAnketaSkill:
     def handle(self, context: SkillContext) -> SkillResult:
         text = context.message_text.strip()
 
+        # §92 п.1 — до согласия на расчёт анкета не идёт. Проверка стоит
+        # ПЕРЕД всеми тремя путями, включая возобновление и правку: иначе
+        # человек, отозвавший согласие посреди анкеты, дошёл бы до конца.
+        if not self._calculation_consent_granted(context):
+            return self._render_consent_required(context)
+
         # Entry: start fresh FSM.
         if text in ("/anketa", "cb:anketa:start"):
             return self._on_enter(context)
@@ -198,6 +223,45 @@ class NutritionAnketaSkill:
 
         # Resume — load FSM + transition.
         return self._on_transition(context, text)
+
+    # ─── согласие на расчёт (§92 п.1) ────────────────────────────────────
+
+    def _calculation_consent_granted(self, context: SkillContext) -> bool:
+        """Есть ли действующее согласие на персональный расчёт.
+
+        Отказ БД или несконфигурированное согласие читаются как «нет»:
+        анкета — сбор параметров тела, и открывать её на неизвестном
+        основании нельзя. Fail-closed здесь дешевле ошибки в другую
+        сторону, и это единственное место, где молчание допустимо, —
+        потому что молчание тут ЗАКРЫВАЕТ, а не открывает.
+        """
+        from apps.consent.nutrition import calculation_is_granted
+
+        try:
+            return bool(calculation_is_granted(context.bot_user))
+        except Exception:  # noqa: BLE001 — неизвестное основание = нет основания
+            logger.warning(
+                "anketa.consent_check_failed conv=%s — анкета закрыта, основание неизвестно",
+                getattr(context.conversation, "id", None),
+                exc_info=True,
+            )
+            return False
+
+    def _render_consent_required(self, context: SkillContext) -> SkillResult:
+        """§92 п.1: вопросов о теле нет, дневник остаётся."""
+        # Незавершённая анкета не должна пережить отказ: иначе следующий
+        # ход человека попадёт в FSM, стоящую на шаге веса.
+        self._clear_state(context)
+        logger.info(
+            "anketa.consent_required conv=%s",
+            getattr(context.conversation, "id", None),
+        )
+        return SkillResult(
+            reply_text=_CONSENT_REQUIRED,
+            action_type="anketa_consent_required",
+            action_data={"buttons": _post_anketa_chips()},
+            meta={"reply_kind": "anketa_consent_required"},
+        )
 
     # ─── entry ──────────────────────────────────────────────────────────
 

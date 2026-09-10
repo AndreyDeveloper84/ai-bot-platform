@@ -9,6 +9,8 @@ from __future__ import annotations
 
 from unittest.mock import Mock, patch
 
+import pytest
+
 from apps.integrations.ayla import (
     NutritionUnavailableError,
     ProfileResponse,
@@ -17,6 +19,25 @@ from apps.skills.base import SkillContext
 from apps.skills.nutrition_anketa.skill import (
     NutritionAnketaSkill,
 )
+
+
+@pytest.fixture(autouse=True)
+def _calculation_consent_granted():
+    """Предусловие всего файла: согласие на расчёт есть (§92 п.1).
+
+    Объявлено фикстурой, а не подразумевается. С 10.09 анкета без этого
+    согласия не задаёт ни одного вопроса о теле, поэтому КАЖДЫЙ проход
+    ниже описывает мир, в котором человек согласие дал. Одиннадцать
+    тестов этого файла покраснели ровно на этом, когда гейт появился, —
+    и это было верно: они проверяли поток, которого без согласия нет.
+
+    Сам гейт проверяется отдельно, в ``test_consent_gate.py``, включая
+    замер на стыке с настоящим ``ConsentRecord``. Здесь он выключен
+    сознательно: предмет этого файла — FSM, стоп-сценарии и пути отказа
+    Ayla, а не основание для сбора.
+    """
+    with patch("apps.consent.nutrition.calculation_is_granted", return_value=True):
+        yield
 
 
 class _StatefulConversation:
