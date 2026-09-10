@@ -502,6 +502,11 @@ class TestHealthCheckHandoff:
         self._refuse(stub_client, code)
         body = _post(client, service, master).json()
 
+        # Стража присутствия на тех же данных: в теле есть ключ отказа,
+        # значит «брони нет» сказано про разобранный непустой ответ, а не
+        # про пустой словарь.
+        assert "error" in body, "ответ не тот — проверка ниже была бы про пустоту"
+        assert body["error"] in HEALTH_SLUGS
         assert "booking" not in body, f"{code}: поверхность вернула запись"
         assert "Вы записаны" not in json.dumps(body, ensure_ascii=False)
 
@@ -517,6 +522,7 @@ class TestHealthCheckHandoff:
         self._refuse(stub_client, code)
         detail = _post(client, service, master).json()["detail"]
 
+        assert detail, "поверхность не дала человеку ни слова — проверять нечего"
         assert "HEALTH_CHECK" not in detail
         assert "http_422" not in detail
         assert "booking rejected" != detail
@@ -534,6 +540,7 @@ class TestHealthCheckHandoff:
         self._refuse(stub_client, HEALTH_CHECK_NOT_APPLICABLE)
         refused = _post(client, service, master).json()["detail"]
 
+        assert refused, "второй отказ пуст — сравнение ниже без предмета"
         assert "специалист" not in refused.lower()
         assert refused != promised
 

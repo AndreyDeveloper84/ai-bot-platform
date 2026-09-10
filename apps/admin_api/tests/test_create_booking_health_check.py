@@ -154,6 +154,9 @@ def test_nothing_claims_a_booking_was_created(
 
     body = _refuse(client, tenant, refuse_with, code).json()
 
+    # Стража присутствия на ТЕХ ЖЕ данных: тело разобрано и несёт исход.
+    # Без неё «идентификатора нет» было бы верно и для пустого словаря.
+    assert body["outcome"], "тело ответа пусто — утверждение ниже проверяло бы пустоту"
     assert "appointment_id" not in body, f"{code}: поверхность вернула идентификатор записи"
     assert body["outcome"] != "committed"
 
@@ -192,6 +195,9 @@ def test_not_applicable_promises_no_specialist() -> None:
     """
     assert "специалист" in HANDOFF_TEXT.lower(), (
         "фраза передачи перестала обещать специалиста — проверка ниже потеряла предмет"
+    )
+    assert "недоступна" in NOT_APPLICABLE_TEXT.lower(), (
+        "фраза отказа изменилась до неузнаваемости — проверка ниже потеряла предмет"
     )
     assert "специалист" not in NOT_APPLICABLE_TEXT.lower()
     assert NOT_APPLICABLE_TEXT != HANDOFF_TEXT
