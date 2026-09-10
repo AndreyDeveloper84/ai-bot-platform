@@ -957,7 +957,7 @@ export function AdminAvailabilityRequestsScreen({ me }: Props) {
                 fontSize: "0.85rem",
                 color:
                   rejectState.reason.trim().length > MAX_REJECTION_REASON_LEN
-                    ? "var(--c-danger)"
+                    ? "var(--c-danger-text)"
                     : "var(--c-text-secondary)",
               }}
             >

@@ -636,7 +636,7 @@ function SurfaceCard({
         padding: "var(--s-4)",
         minHeight: 88,
         background: "var(--c-surface-1)",
-        border: "1px solid var(--c-divider)",
+        border: "1px solid var(--c-border-interactive)",
         borderRadius: "var(--r-md)",
         textAlign: "left",
       }}

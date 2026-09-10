@@ -1069,7 +1069,7 @@ export function AdminMasterDetailScreen({ me }: Props) {
                 key={ev.id}
                 style={{
                   padding: "var(--s-2) 0",
-                  borderBottom: "1px solid var(--c-divider)",
+                  borderBottom: "1px solid var(--c-border-decorative)",
                 }}
               >
                 <span style={{ color: "var(--c-text-secondary)" }}>

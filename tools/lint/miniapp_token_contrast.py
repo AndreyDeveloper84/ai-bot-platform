@@ -36,6 +36,28 @@ value where it passes and a lightness-shifted one where it does not --
 and this lint recomputes every pair rather than trusting the comment
 written beside it.
 
+The owner's decision of 2026-09-09 (``OPEN_DECISIONS`` §21-quinquies)
+splits two of these roles in two, and the split is what this lint now
+enforces.
+
+*Status colours.* A bright status keeps its signed value for
+backgrounds, icons and decoration; the text painted in that colour
+moves to a separate ``--c-<role>-text`` token. So the pair checked at
+4.5:1 is ``--c-success-text``, never ``--c-success`` -- and the
+self-wash a status text sits on is mixed from the **bright** role,
+which is a harder background than the shifted one it replaced. That is
+why ``success`` joined ``SELF_WASH``: ``.callout--success`` has always
+had the shape, and the split is what made it bite.
+
+*Borders.* ``--c-divider`` became ``--c-border-decorative`` (optional
+separators, no contrast asked of it) and ``--c-border-interactive``
+(the border that shows where a control may be pressed). The second one
+is a user-interface component boundary, so its floor is WCAG 1.4.11's
+3:1 rather than 4.5:1, and it is measured against **every** surface of
+its theme -- not against ``#ffffff`` alone. Against white a value can
+clear 3:1 and still fail on ``--c-surface-2``: ``#949494`` is 3.03:1 on
+white and 2.76:1 on ``#f3f4f6``.
+
 # Why this is a lint and not a front-end test
 
 Same reason as ``tools/lint/miniapp_style_contract.py``: ``apps/miniapp``
@@ -79,16 +101,26 @@ COMMENT_LINE = re.compile(r"^\s*(\*|//)")
 
 # Surfaces that actually appear in `background:` in `globals.css`.
 SURFACES = ("bg", "surface-1", "surface-2")
-# Roles that actually appear in `color:` there.
+# Roles that actually appear in `color:` there. The bright `success` /
+# `warning` / `danger` are deliberately absent: after §21-quinquies they
+# paint backgrounds, icons and decoration, and the text drawn in that
+# colour is the `-text` token beside them.
 TEXTS = (
     "text-primary",
     "text-secondary",
     "accent",
     "accent-pressed",
-    "success",
-    "warning",
-    "danger",
+    "success-text",
+    "warning-text",
+    "danger-text",
 )
+
+# Borders that delineate a pressable or typable area. WCAG 2.2 sets 3:1
+# for user-interface component boundaries (1.4.11), not 4.5:1 -- but it
+# sets it against every surface the control can sit on, which is the part
+# a check against `#ffffff` alone silently skips.
+AA_NON_TEXT = 3.0
+BORDERS = ("border-interactive",)
 # Pairs where the background is a coloured token, not a surface.
 ON_COLOUR = (
     ("text-primary", "accent-subtle"),
@@ -96,9 +128,12 @@ ON_COLOUR = (
     ("accent-pressed", "accent-subtle"),
     ("text-on-accent", "accent"),
     ("text-on-accent", "accent-pressed"),
-    ("text-on-accent", "success"),
-    ("text-on-accent", "warning"),
-    ("text-on-accent", "danger"),
+    # A bright status is a light colour in both themes, so the foreground
+    # on it is the dark pole, not `--c-text-on-accent`. White on `#f59e0b`
+    # is 2.15:1; this pair is why `--c-text-on-status` exists.
+    ("text-on-status", "success"),
+    ("text-on-status", "warning"),
+    ("text-on-status", "danger"),
     # The snackbar is an inverted surface: `Snackbar.tsx` paints its
     # background with `--c-text-primary`, its message with `--c-bg` and its
     # action with `--c-accent-subtle`. Inverted or not, the text on it still
@@ -108,18 +143,40 @@ ON_COLOUR = (
 )
 # Roles painted as text on a wash made of themselves. Not invented: these
 # are every rule in `globals.css` where `background: color-mix(... var
-# (--c-X) N%, ...)` sits beside `color: var(--c-X)` -- `.callout--danger`,
-# `.m6-bubble--failed`, `.unbookable-badge`, `.m-card__chip--warning`,
-# `.admin-chip--warn`, `.m-notif__banner-warning`. The share is 10 %
-# everywhere; raising it is what this check refuses.
-SELF_WASH = ("warning", "danger")
+# (--c-X) N%, ...)` sits beside `color: var(--c-X-text)` -- `.callout--
+# danger`, `.callout--success`, `.m6-bubble--failed`, `.unbookable-badge`,
+# `.m-card__chip--warning`, `.admin-chip--warn`, `.m-notif__banner-
+# warning`. The share is 10 % everywhere; raising it is what this check
+# refuses.
+#
+# `success` was missing from this list while `.callout--success` had the
+# shape all along. It could stay missing only because the wash was mixed
+# from the already-darkened `--c-success`; mixed from the bright signed
+# `#22C55E` it drops to 4.20:1, and the token had to move again.
+SELF_WASH = ("success", "warning", "danger")
 SELF_WASH_SHARE = 0.10
 
 # Values signed on the DRF-1181 board that survive AA untouched and so
 # must stand verbatim. The dark theme swaps the two neutral poles.
 SIGNED = {
-    "light": {"bg": "#f8fafc", "divider": "#e5e7eb", "text-primary": "#111827"},
-    "dark": {"bg": "#111827", "text-primary": "#f8fafc"},
+    "light": {
+        "bg": "#f8fafc",
+        "border-decorative": "#e5e7eb",
+        "text-primary": "#111827",
+        # The bright statuses stand at their signed values now that the
+        # text drawn in them has its own token. If one of these drifts,
+        # the board has quietly stopped being the source.
+        "success": "#22c55e",
+        "warning": "#f59e0b",
+        "danger": "#ef4444",
+    },
+    "dark": {
+        "bg": "#111827",
+        "text-primary": "#f8fafc",
+        "success": "#22c55e",
+        "warning": "#f59e0b",
+        "danger": "#ef4444",
+    },
 }
 
 
@@ -210,13 +267,28 @@ def check_contrast(themes: dict[str, dict[str, str]]) -> list[str]:
                 )
         for role in SELF_WASH:
             for surface in SURFACES:
+                # The wash is mixed from the *bright* role; the text on it
+                # is the `-text` token. Mixing both from the same value
+                # would measure a pair the app never paints.
                 wash = mix(palette[role], palette[surface], SELF_WASH_SHARE)
-                ratio = contrast(palette[role], wash)
+                ratio = contrast(palette[f"{role}-text"], wash)
                 if ratio < AA:
                     problems.append(
-                        f"tokens.css [{theme}]: --c-{role} on its own "
-                        f"{int(SELF_WASH_SHARE * 100)} % wash over "
-                        f"--c-{surface} is {ratio:.2f}:1, below AA {AA}:1"
+                        f"tokens.css [{theme}]: --c-{role}-text on a "
+                        f"{int(SELF_WASH_SHARE * 100)} % wash of --c-{role} "
+                        f"over --c-{surface} is {ratio:.2f}:1, below AA {AA}:1"
+                    )
+        for border in BORDERS:
+            for surface in SURFACES:
+                if border not in palette:
+                    problems.append(f"tokens.css [{theme}]: --c-{border} missing")
+                    break
+                ratio = contrast(palette[border], palette[surface])
+                if ratio < AA_NON_TEXT:
+                    problems.append(
+                        f"tokens.css [{theme}]: --c-{border} on --c-{surface} "
+                        f"is {ratio:.2f}:1, below {AA_NON_TEXT}:1 for a "
+                        "user-interface component boundary"
                     )
     return problems
 

@@ -110,7 +110,7 @@ a {
   padding: var(--s-3) var(--s-4)
     calc(var(--s-3) + var(--safe-bottom));
   background: var(--c-surface-1);
-  border-top: 1px solid var(--c-divider);
+  border-top: 1px solid var(--c-border-decorative);
   z-index: 10;
 }
 
@@ -167,7 +167,7 @@ a {
 
 .callout--danger {
   background: color-mix(in srgb, var(--c-danger) 10%, var(--c-surface-2));
-  color: var(--c-danger);
+  color: var(--c-danger-text);
 }
 
 /* Успех сохранения. Пара к `--danger`: до DRF-1435 отказ имел голос, а
@@ -176,7 +176,7 @@ a {
    токеном линт `miniapp_token_contrast.py` не примет, и правильно. */
 .callout--success {
   background: color-mix(in srgb, var(--c-success) 10%, var(--c-surface-2));
-  color: var(--c-success);
+  color: var(--c-success-text);
 }
 
 /* Secondary button used in error / empty / not-found states. */
@@ -217,7 +217,7 @@ a {
   width: 100%;
   text-align: start;
   background: var(--c-surface-1);
-  border: 1px solid var(--c-divider);
+  border: 1px solid var(--c-border-interactive);
   border-radius: var(--r-md);
   padding: var(--s-3) var(--s-4);
   margin-bottom: var(--s-2);
@@ -239,7 +239,7 @@ a {
    hit target. `--c-warning` has a literal fallback because the token is
    not defined in every theme file (same fallback as .customer-card--at-risk). */
 .service-card--unbookable {
-  border-color: color-mix(in srgb, var(--c-warning) 40%, var(--c-divider));
+  border-color: color-mix(in srgb, var(--c-warning) 40%, var(--c-border-interactive));
 }
 
 .unbookable-badge {
@@ -248,7 +248,7 @@ a {
   padding: 2px var(--s-2);
   border-radius: var(--r-sm, 6px);
   background: color-mix(in srgb, var(--c-warning) 10%, transparent);
-  color: var(--c-warning);
+  color: var(--c-warning-text);
   font-size: var(--font-size-100);
   font-weight: 600;
   line-height: 1.4;
@@ -330,7 +330,7 @@ a {
   padding: var(--s-2) var(--s-3);
   border-radius: var(--r-md);
   background: var(--c-surface-1);
-  border: 1px solid var(--c-divider);
+  border: 1px solid var(--c-border-interactive);
   text-align: center;
   scroll-snap-align: start;
   cursor: pointer;
@@ -363,7 +363,7 @@ a {
   padding: var(--s-3);
   border-radius: var(--r-sm);
   background: var(--c-surface-1);
-  border: 1px solid var(--c-divider);
+  border: 1px solid var(--c-border-interactive);
   font-size: var(--font-size-200);
   font-weight: 500;
   min-height: 48px;
@@ -386,7 +386,7 @@ a {
 /* Confirmation card / Success screen. */
 .confirm-card {
   background: var(--c-surface-1);
-  border: 1px solid var(--c-divider);
+  border: 1px solid var(--c-border-decorative);
   border-radius: var(--r-md);
   padding: var(--s-4);
   margin: var(--s-3) 0;
@@ -426,7 +426,7 @@ a {
   display: flex;
   gap: var(--s-2);
   margin-bottom: var(--s-3);
-  border-bottom: 1px solid var(--c-divider);
+  border-bottom: 1px solid var(--c-border-decorative);
 }
 
 .tab {
@@ -461,7 +461,7 @@ a {
 }
 
 .profile-phone--missing {
-  color: var(--c-warning);
+  color: var(--c-warning-text);
 }
 
 /* M0 identity block (DRF-1434) — подпись «чья это запись» и пояснение,
@@ -477,7 +477,7 @@ a {
 .identity-mismatch {
   margin: var(--s-2) 0 0;
   padding-top: var(--s-2);
-  border-top: 1px solid var(--c-divider);
+  border-top: 1px solid var(--c-border-decorative);
   color: var(--c-text-secondary);
   font-size: var(--font-size-200);
   line-height: 1.4;
@@ -512,7 +512,7 @@ a {
 }
 
 .profile-section--privacy .profile-section__title {
-  color: var(--c-warning);
+  color: var(--c-warning-text);
 }
 
 .profile-toggle {
@@ -520,7 +520,7 @@ a {
   justify-content: space-between;
   align-items: center;
   padding: var(--s-2) 0;
-  border-bottom: 1px solid var(--c-divider);
+  border-bottom: 1px solid var(--c-border-decorative);
   min-height: 44px;
   cursor: pointer;
 }
@@ -538,7 +538,7 @@ a {
   width: 48px;
   height: 28px;
   appearance: none;
-  background: var(--c-divider);
+  background: var(--c-border-decorative);
   border-radius: 14px;
   position: relative;
   transition: background 0.18s ease;
@@ -549,7 +549,7 @@ a {
    в светлой теме это ровно тот же белый, пиксель в пиксель.
 
    Названная слабость тёмной темы (DRF-1462, вопрос владельцу №1): дорожка
-   в положении «выкл» это `--c-divider` #4b5563, бегунок — `--c-surface-1`
+   в положении «выкл» это `--c-border-decorative` #4b5563, бегунок — `--c-surface-1`
    #1f2937, между ними 1.94:1, а WCAG 1.4.11 просит 3:1. Токена, который
    светлый в обеих темах, в наборе нет, а заводить его — это уже решение о
    виде, а не о цвете. Состояние читается по положению бегунка и по цвету
@@ -603,7 +603,7 @@ a {
   width: 100%;
   padding: var(--s-2) var(--s-3);
   font-size: var(--font-size-300);
-  border: 1px solid var(--c-divider);
+  border: 1px solid var(--c-border-interactive);
   border-radius: var(--r-sm);
   background: var(--c-surface-1);
   color: var(--c-text-primary);
@@ -624,13 +624,13 @@ a {
 }
 
 .btn-secondary--danger {
-  color: var(--c-warning);
+  color: var(--c-warning-text);
   border-color: var(--c-warning);
 }
 
 .btn-danger {
   background: var(--c-warning);
-  color: var(--c-text-on-accent);
+  color: var(--c-text-on-status);
   border: 0;
   padding: var(--s-2) var(--s-4);
   border-radius: var(--r-sm);
@@ -712,7 +712,7 @@ a {
   border: 0;
   font-size: 44px;
   line-height: 1;
-  color: var(--c-divider);
+  color: var(--c-border-decorative);
   cursor: pointer;
   padding: var(--s-1);
   min-width: 56px;
@@ -765,7 +765,7 @@ a {
   background: var(--c-surface-1);
   border-radius: var(--r-md);
   padding: var(--s-4);
-  border: 1px solid var(--c-divider);
+  border: 1px solid var(--c-border-decorative);
 }
 
 .hello-error p {
@@ -805,7 +805,7 @@ a {
   max-width: 100%;
   padding: var(--s-1) var(--s-3);
   background: var(--c-surface-2);
-  border: 1px solid var(--c-divider);
+  border: 1px solid var(--c-border-interactive);
   border-radius: 999px;
   font-size: var(--font-size-200);
   color: var(--c-text-primary);
@@ -857,7 +857,7 @@ a {
   box-sizing: border-box;
   padding: var(--s-3);
   background: var(--c-surface-1);
-  border: 1px solid var(--c-divider);
+  border: 1px solid var(--c-border-interactive);
   border-radius: var(--r-md);
   font-size: var(--font-size-200);
   color: var(--c-text-primary);
@@ -946,7 +946,7 @@ a {
   align-items: flex-start;
   gap: var(--s-3);
   padding: var(--s-2) 0 var(--s-3);
-  border-bottom: 1px solid var(--c-divider);
+  border-bottom: 1px solid var(--c-border-decorative);
   margin-bottom: var(--s-3);
 }
 
@@ -1076,7 +1076,7 @@ a {
   width: 100%;
   text-align: start;
   background: var(--c-surface-1);
-  border: 1px solid var(--c-divider);
+  border: 1px solid var(--c-border-interactive);
   border-radius: var(--r-md);
   padding: var(--s-3) var(--s-4);
   margin-bottom: var(--s-2);
@@ -1156,7 +1156,7 @@ a {
 
 .m-card__chip--warning {
   background: color-mix(in srgb, var(--c-warning) 10%, var(--c-surface-1));
-  color: var(--c-warning);
+  color: var(--c-warning-text);
 }
 
 .m-card__cta {
@@ -1190,7 +1190,7 @@ a {
 
 .m-card__dot--white {
   background: var(--c-surface-2);
-  border: 1px solid var(--c-divider);
+  border: 1px solid var(--c-border-decorative);
 }
 
 /* ---- Tab bar ---- */
@@ -1202,7 +1202,7 @@ a {
   display: grid;
   grid-template-columns: repeat(4, 1fr);
   background: var(--c-surface-1);
-  border-top: 1px solid var(--c-divider);
+  border-top: 1px solid var(--c-border-decorative);
   padding: var(--s-2) 0 calc(var(--s-2) + var(--safe-bottom));
   z-index: 100;
 }
@@ -1260,7 +1260,7 @@ a {
   height: 18px;
   border-radius: 9px;
   background: var(--c-danger);
-  color: var(--c-text-on-accent);
+  color: var(--c-text-on-status);
   font-size: 11px;
   font-weight: 600;
   padding: 0 4px;
@@ -1388,7 +1388,7 @@ a {
   margin: 0;
   padding: 0;
   background: var(--c-surface-1);
-  border: 1px solid var(--c-divider);
+  border: 1px solid var(--c-border-decorative);
   border-radius: var(--r-md);
   overflow: hidden;
 }
@@ -1397,7 +1397,7 @@ a {
   display: flex;
   gap: var(--s-3);
   padding: var(--s-3);
-  border-bottom: 1px solid var(--c-divider);
+  border-bottom: 1px solid var(--c-border-decorative);
 }
 
 .salon-today__list .salon-today__visit:last-child {
@@ -1456,7 +1456,7 @@ a {
 /* Запись, чей специалист не сошёлся ни с одним мастером каталога. */
 .salon-today__visit-orphan {
   font-size: var(--font-size-100);
-  color: var(--c-warning);
+  color: var(--c-warning-text);
 }
 
 /* Раскрыть остаток дня на месте — см. комментарий экрана про «Расписание». */
@@ -1535,7 +1535,7 @@ a {
   display: grid;
   grid-template-columns: repeat(5, 1fr);
   background: var(--c-surface-1);
-  border-top: 1px solid var(--c-divider);
+  border-top: 1px solid var(--c-border-decorative);
   padding: var(--s-2) 0 calc(var(--s-2) + var(--safe-bottom));
   z-index: 100;
 }
@@ -1632,7 +1632,7 @@ a {
   width: 36px;
   height: 4px;
   border-radius: 2px;
-  background: var(--c-divider);
+  background: var(--c-border-decorative);
   margin: 0 auto var(--s-2);
 }
 
@@ -1685,7 +1685,7 @@ a {
 
 .solo-more-sheet__divider {
   border: 0;
-  border-top: 1px solid var(--c-divider);
+  border-top: 1px solid var(--c-border-decorative);
   margin: var(--s-2) 0;
 }
 
@@ -1724,7 +1724,7 @@ a {
   min-height: 44px;
   padding: 0 var(--s-3);
   border-radius: var(--r-md);
-  border: 1px solid var(--c-divider);
+  border: 1px solid var(--c-border-interactive);
   background: var(--c-surface-1);
   font: inherit;
   color: var(--c-text-secondary);
@@ -1766,7 +1766,7 @@ a {
   gap: var(--s-1);
   padding: var(--s-3);
   background: var(--c-surface-1);
-  border: 1px solid var(--c-divider);
+  border: 1px solid var(--c-border-interactive);
   border-radius: var(--r-md);
 }
 
@@ -1805,7 +1805,7 @@ a {
 }
 
 .customer-card__lost-hint {
-  color: var(--c-warning);
+  color: var(--c-warning-text);
   font-size: var(--font-size-100);
 }
 
@@ -1863,7 +1863,7 @@ a {
   flex-direction: column;
   gap: var(--s-2);
   padding: var(--s-2) 0 var(--s-3);
-  border-bottom: 1px solid var(--c-divider);
+  border-bottom: 1px solid var(--c-border-decorative);
   margin-bottom: var(--s-3);
 }
 
@@ -1920,7 +1920,7 @@ a {
 
 .schedule-stepper__btn {
   background: none;
-  border: 1px solid var(--c-divider);
+  border: 1px solid var(--c-border-interactive);
   border-radius: var(--r-md);
   min-width: 36px;
   min-height: 36px;
@@ -1963,7 +1963,7 @@ a {
   gap: 2px;
   padding: var(--s-2) 2px;
   background: var(--c-surface-1);
-  border: 1px solid var(--c-divider);
+  border: 1px solid var(--c-border-interactive);
   border-radius: var(--r-md);
   font: inherit;
   color: var(--c-text-primary);
@@ -2009,7 +2009,7 @@ a {
 
 .schedule-week-section {
   padding: var(--s-3) 0;
-  border-bottom: 1px solid var(--c-divider);
+  border-bottom: 1px solid var(--c-border-decorative);
 }
 
 .schedule-week-section__title {
@@ -2168,7 +2168,7 @@ a {
 .schedule-sheet__textarea {
   width: 100%;
   resize: vertical;
-  border: 1px solid var(--c-divider);
+  border: 1px solid var(--c-border-interactive);
   border-radius: var(--r-md);
   padding: var(--s-2);
   font: inherit;
@@ -2248,7 +2248,7 @@ a {
 
 .m6-header {
   padding: var(--s-3) 0;
-  border-bottom: 1px solid var(--c-divider);
+  border-bottom: 1px solid var(--c-border-decorative);
   margin-bottom: var(--s-3);
 }
 
@@ -2265,7 +2265,7 @@ a {
 }
 
 .m6-header__sub--locked {
-  color: var(--c-warning);
+  color: var(--c-warning-text);
   font-weight: 500;
 }
 
@@ -2283,7 +2283,7 @@ a {
   position: sticky;
   bottom: 0;
   background: var(--c-bg);
-  border-top: 1px solid var(--c-divider);
+  border-top: 1px solid var(--c-border-decorative);
   padding: var(--s-3) 0 calc(var(--s-3) + var(--safe-bottom));
   margin-top: auto;
   text-align: center;
@@ -2357,7 +2357,7 @@ a {
 
 .m6-bubble--failed {
   background: color-mix(in srgb, var(--c-danger) 10%, var(--c-surface-2));
-  color: var(--c-danger);
+  color: var(--c-danger-text);
 }
 
 .m6-bubble__chip {
@@ -2503,7 +2503,7 @@ a {
   position: sticky;
   bottom: 0;
   background: var(--c-bg);
-  border-top: 1px solid var(--c-divider);
+  border-top: 1px solid var(--c-border-decorative);
   padding: var(--s-2) 0 calc(var(--s-2) + var(--safe-bottom));
   margin-top: auto;
 }
@@ -2521,7 +2521,7 @@ a {
   max-height: 140px;
   padding: var(--s-2) var(--s-3);
   border-radius: var(--r-md);
-  border: 1px solid var(--c-divider);
+  border: 1px solid var(--c-border-interactive);
   background: var(--c-surface-1);
   color: var(--c-text-primary);
   font: inherit;
@@ -2566,7 +2566,7 @@ a {
 }
 
 .m6-compose__counter--over {
-  color: var(--c-danger);
+  color: var(--c-danger-text);
   font-weight: 600;
 }
 
@@ -2575,7 +2575,7 @@ a {
   margin: var(--s-2) auto 0;
   background: none;
   border: 0;
-  color: var(--c-warning);
+  color: var(--c-warning-text);
   font-weight: 500;
   font-size: var(--font-size-200);
   padding: var(--s-2) var(--s-3);
@@ -2584,7 +2584,7 @@ a {
 }
 
 .m6-compose__promote:active {
-  color: var(--c-danger);
+  color: var(--c-danger-text);
 }
 
 /* Promote sheet -------------------------------------------------------- */
@@ -2752,7 +2752,7 @@ a {
 
 .admin-chip--warn {
   background: color-mix(in srgb, var(--c-warning) 10%, var(--c-surface-2));
-  color: var(--c-warning);
+  color: var(--c-warning-text);
 }
 
 /*
@@ -2764,7 +2764,7 @@ a {
 .admin-chip--revoked {
   background: transparent;
   color: var(--c-text-secondary);
-  border: 1px dashed var(--c-divider);
+  border: 1px dashed var(--c-border-decorative);
   opacity: 0.75;
 }
 
@@ -2778,7 +2778,7 @@ a {
 */
 .admin-chip--fault {
   background: color-mix(in srgb, var(--c-danger) 10%, var(--c-surface-2));
-  color: var(--c-danger);
+  color: var(--c-danger-text);
 }
 
 .admin-filter-tabs {
@@ -2810,7 +2810,7 @@ a {
   width: 100%;
   padding: var(--s-2) var(--s-3);
   min-height: 44px;
-  border: 1px solid var(--c-divider);
+  border: 1px solid var(--c-border-interactive);
   border-radius: var(--r-md);
   background: var(--c-surface-1);
   color: var(--c-text-primary);
@@ -2879,7 +2879,7 @@ a {
 }
 
 .admin-sheet__action--danger {
-  color: var(--c-danger);
+  color: var(--c-danger-text);
 }
 
 .admin-sheet__action--cancel {
@@ -2909,7 +2909,7 @@ a {
 }
 
 .admin-booking-card {
-  border: 1px solid var(--c-divider);
+  border: 1px solid var(--c-border-decorative);
   border-radius: var(--r-md);
   padding: var(--s-3);
   background: var(--c-surface-1);
@@ -2933,7 +2933,7 @@ a {
   margin-top: var(--s-1);
   min-height: 40px;
   background: var(--c-surface-1);
-  border: 1px solid var(--c-divider);
+  border: 1px solid var(--c-border-interactive);
   border-radius: var(--r-md);
   font: inherit;
 }
@@ -2945,7 +2945,7 @@ a {
 .admin-textarea {
   width: 100%;
   padding: var(--s-2) var(--s-3);
-  border: 1px solid var(--c-divider);
+  border: 1px solid var(--c-border-interactive);
   border-radius: var(--r-md);
   background: var(--c-surface-1);
   color: var(--c-text-primary);
@@ -3078,7 +3078,7 @@ a {
 .master-profile__bio-quote {
   margin: var(--s-1) 0 0;
   padding: 0 0 0 var(--s-2);
-  border-left: 2px solid var(--c-divider);
+  border-left: 2px solid var(--c-border-decorative);
   color: var(--c-text-primary);
   font-style: italic;
   line-height: var(--leading-base);
@@ -3109,7 +3109,7 @@ a {
 
 .master-profile__error {
   margin: var(--s-2) 0 0;
-  color: var(--c-danger);
+  color: var(--c-danger-text);
   font-size: var(--font-size-200);
 }
 
@@ -3124,7 +3124,7 @@ a {
 
 .master-profile__service-item {
   padding: var(--s-2) 0;
-  border-bottom: 1px solid var(--c-divider);
+  border-bottom: 1px solid var(--c-border-decorative);
   color: var(--c-text-primary);
 }
 
@@ -3183,7 +3183,7 @@ a {
   width: 100%;
   min-height: 120px;
   padding: var(--s-2) var(--s-3);
-  border: 1px solid var(--c-divider);
+  border: 1px solid var(--c-border-interactive);
   border-radius: var(--r-md);
   background: var(--c-surface-1);
   color: var(--c-text-primary);
@@ -3203,7 +3203,7 @@ a {
 }
 
 .master-profile__counter--bad {
-  color: var(--c-danger);
+  color: var(--c-danger-text);
   font-weight: 600;
 }
 
@@ -3255,7 +3255,7 @@ a {
 
 .m-notif__section {
   padding: var(--s-2) var(--s-3) var(--s-3);
-  border-top: 1px solid var(--c-divider);
+  border-top: 1px solid var(--c-border-decorative);
 }
 
 .m-notif__section:first-of-type {
@@ -3281,7 +3281,7 @@ a {
 }
 
 .m-notif__switch-row + .m-notif__switch-row {
-  border-top: 1px solid var(--c-divider);
+  border-top: 1px solid var(--c-border-decorative);
 }
 
 .m-notif__row-text {
@@ -3326,7 +3326,7 @@ a {
 .m-notif__switch-track {
   position: absolute;
   inset: 0;
-  background: var(--c-divider);
+  background: var(--c-border-decorative);
   border-radius: 999px;
   transition: background-color 160ms ease;
 }
@@ -3335,7 +3335,7 @@ a {
    в светлой теме это ровно тот же белый, пиксель в пиксель.
 
    Названная слабость тёмной темы (DRF-1462, вопрос владельцу №1): дорожка
-   в положении «выкл» это `--c-divider` #4b5563, бегунок — `--c-surface-1`
+   в положении «выкл» это `--c-border-decorative` #4b5563, бегунок — `--c-surface-1`
    #1f2937, между ними 1.94:1, а WCAG 1.4.11 просит 3:1. Токена, который
    светлый в обеих темах, в наборе нет, а заводить его — это уже решение о
    виде, а не о цвете. Состояние читается по положению бегунка и по цвету
@@ -3398,8 +3398,8 @@ a {
 .m-notif__banner-warning {
   margin: var(--s-2) var(--s-3);
   background: color-mix(in srgb, var(--c-warning) 10%, var(--c-surface-1));
-  border: 1px solid color-mix(in srgb, var(--c-warning) 40%, var(--c-divider));
-  color: var(--c-warning);
+  border: 1px solid color-mix(in srgb, var(--c-warning) 40%, var(--c-border-decorative));
+  color: var(--c-warning-text);
   border-radius: var(--r-md, 8px);
   padding: var(--s-2) var(--s-3);
 }
@@ -3463,7 +3463,7 @@ a {
   font: inherit;
   font-size: 1.1rem;
   padding: var(--s-2);
-  border: 1px solid var(--c-divider);
+  border: 1px solid var(--c-border-interactive);
   border-radius: var(--r-md, 8px);
   min-height: 44px;
   background: var(--c-bg);
@@ -3478,7 +3478,7 @@ a {
 
 .m-notif__error {
   margin: var(--s-2) 0 0;
-  color: var(--c-danger);
+  color: var(--c-danger-text);
   font-size: 0.9rem;
 }
 
@@ -3543,7 +3543,7 @@ a {
 }
 
 .internal-chat-list__filter {
-  border: 1px solid var(--c-divider);
+  border: 1px solid var(--c-border-interactive);
   background: transparent;
   color: var(--c-text-primary);
   padding: var(--s-1) var(--s-3);
@@ -3592,7 +3592,7 @@ a {
   gap: var(--s-1);
   padding: var(--s-3);
   border-radius: var(--r-md, 12px);
-  border: 1px solid var(--c-divider);
+  border: 1px solid var(--c-border-interactive);
   background: var(--c-surface-1);
 }
 
@@ -3642,7 +3642,7 @@ a {
   align-items: stretch;
   gap: var(--s-2);
   margin-top: var(--s-4);
-  border-top: 1px solid var(--c-divider);
+  border-top: 1px solid var(--c-border-decorative);
 }
 
 .internal-chat-list__new-thread-helper {
@@ -3716,7 +3716,7 @@ a {
   align-items: center;
   gap: var(--s-2);
   background: transparent;
-  border: 1px solid var(--c-divider);
+  border: 1px solid var(--c-border-interactive);
   border-radius: var(--r-md, 12px);
   padding: var(--s-2) var(--s-3);
   width: 100%;
@@ -3755,7 +3755,7 @@ a {
   width: 100%;
   padding: var(--s-2);
   border-radius: var(--r-md, 12px);
-  border: 1px solid var(--c-divider);
+  border: 1px solid var(--c-border-interactive);
   font: inherit;
   background: var(--c-surface-1);
   color: var(--c-text-primary);
@@ -3773,11 +3773,11 @@ a {
 }
 
 .internal-chat-sheet__counter--bad {
-  color: var(--c-danger);
+  color: var(--c-danger-text);
 }
 
 .internal-chat-sheet__error {
-  color: var(--c-danger);
+  color: var(--c-danger-text);
   margin: 0;
 }
 
@@ -3801,7 +3801,7 @@ a {
 
 .internal-chat-thread__header {
   padding: var(--s-3);
-  border-bottom: 1px solid var(--c-divider);
+  border-bottom: 1px solid var(--c-border-decorative);
   display: flex;
   flex-direction: column;
   gap: var(--s-1);
@@ -3905,7 +3905,7 @@ a {
 }
 
 .internal-chat-thread__footer {
-  border-top: 1px solid var(--c-divider);
+  border-top: 1px solid var(--c-border-decorative);
   padding: var(--s-3);
   display: flex;
   flex-direction: column;
@@ -3925,7 +3925,7 @@ a {
 .internal-chat-thread__textarea {
   width: 100%;
   border-radius: var(--r-md, 12px);
-  border: 1px solid var(--c-divider);
+  border: 1px solid var(--c-border-interactive);
   padding: var(--s-2);
   font: inherit;
   background: var(--c-surface-1);
@@ -3947,7 +3947,7 @@ a {
 }
 
 .internal-chat-thread__counter--bad {
-  color: var(--c-danger);
+  color: var(--c-danger-text);
 }
 
 .internal-chat-thread__locked-helper {
@@ -3992,7 +3992,7 @@ a {
   width: 100%;
   min-height: 44px;
   padding: var(--s-2) var(--s-3);
-  border: 1px solid var(--c-divider);
+  border: 1px solid var(--c-border-interactive);
   border-radius: var(--r-md);
   background: var(--c-surface-1);
   color: inherit;
@@ -4006,7 +4006,7 @@ a {
 .customer-catalog__card-l1,
 .customer-catalog__card-l2 {
   background: var(--c-surface-1);
-  border: 1px solid var(--c-divider);
+  border: 1px solid var(--c-border-decorative);
   border-radius: var(--r-md);
   margin-bottom: var(--s-2);
   overflow: hidden;
@@ -4071,7 +4071,7 @@ a {
   width: 100%;
   padding: var(--s-2) var(--s-3);
   background: var(--c-surface-1);
-  border: 1px solid var(--c-divider);
+  border: 1px solid var(--c-border-decorative);
   border-radius: var(--r-md);
   color: inherit;
   font-size: var(--font-size-200);
@@ -4140,7 +4140,7 @@ a {
   min-width: 96px;
   padding: var(--s-2) var(--s-3);
   background: var(--c-surface-1);
-  border: 1px solid var(--c-divider);
+  border: 1px solid var(--c-border-interactive);
   border-radius: var(--r-md);
   color: inherit;
   cursor: pointer;
@@ -4179,7 +4179,7 @@ a {
   min-height: 44px;
   padding: var(--s-2);
   background: var(--c-surface-1);
-  border: 1px solid var(--c-divider);
+  border: 1px solid var(--c-border-interactive);
   border-radius: var(--r-sm, 8px);
   color: inherit;
   font-size: var(--font-size-200);
@@ -4270,7 +4270,7 @@ a {
 .customer-confirm__notes-input {
   width: 100%;
   padding: var(--s-2);
-  border: 1px solid var(--c-divider);
+  border: 1px solid var(--c-border-interactive);
   border-radius: var(--r-md);
   background: var(--c-surface-1);
   color: inherit;
@@ -4333,7 +4333,7 @@ a {
  * WCAG 2.2 AA notes (Tau §8 BLOCKERS addressed):
  *   - All tap targets ≥44×44dp (icon buttons use padding to reach the
  *     hit area without enlarging the visible glyph).
- *   - Progress bar track + borders use the `--c-divider` token. It is
+ *   - Progress bar track + borders use the `--c-border-decorative` token. It is
  *     a hairline (1.24:1 on `--c-surface-1`), so it is decorative
  *     reinforcement only — never the sole boundary of a control.
  *   - Body text uses `--c-text-primary` — 16.96:1 against `--c-bg`
@@ -4368,7 +4368,7 @@ a {
   gap: var(--s-3);
   height: 56px;
   padding: 0 var(--s-3);
-  border-bottom: 1px solid var(--c-divider);
+  border-bottom: 1px solid var(--c-border-decorative);
   background: var(--c-surface-1);
 }
 .wellness-dash__brand {
@@ -4423,7 +4423,7 @@ a {
 }
 .wellness-dash__offline-banner {
   background: var(--c-warning);
-  color: var(--c-text-on-accent);
+  color: var(--c-text-on-status);
   padding: var(--s-2) var(--s-3);
   font-size: var(--font-size-200);
   text-align: center;
@@ -4452,7 +4452,7 @@ a {
 .wellness-dash__onboarding {
   background: var(--c-accent-subtle);
   border-radius: var(--r-md);
-  border: 1px solid var(--c-divider);
+  border: 1px solid var(--c-border-decorative);
 }
 .wellness-dash__onboarding-body {
   padding: var(--s-3);
@@ -4488,7 +4488,7 @@ a {
 }
 .wellness-dash__pulse-card {
   background: var(--c-surface-1);
-  border: 1px solid var(--c-divider);
+  border: 1px solid var(--c-border-decorative);
   border-radius: var(--r-md);
   padding: var(--s-3);
   display: flex;
@@ -4514,7 +4514,7 @@ a {
 }
 .wellness-dash__pulse-divider {
   border: 0;
-  border-top: 1px solid var(--c-divider);
+  border-top: 1px solid var(--c-border-decorative);
   margin: 0;
 }
 .wellness-dash__progress {
@@ -4522,7 +4522,7 @@ a {
   background: var(--c-surface-2);
   border-radius: var(--r-pill);
   overflow: hidden;
-  border: 1px solid var(--c-divider);
+  border: 1px solid var(--c-border-decorative);
 }
 .wellness-dash__progress-fill {
   height: 100%;
@@ -4569,7 +4569,7 @@ a {
   min-height: 88px;
   padding: var(--s-3);
   background: var(--c-surface-1);
-  border: 1px solid var(--c-divider);
+  border: 1px solid var(--c-border-interactive);
   border-radius: var(--r-md);
   text-align: left;
   cursor: pointer;
@@ -4632,7 +4632,7 @@ a {
 }
 .wellness-dash__booking-card {
   background: var(--c-surface-1);
-  border: 1px solid var(--c-divider);
+  border: 1px solid var(--c-border-decorative);
   border-radius: var(--r-md);
   padding: var(--s-3);
   display: flex;
@@ -4697,7 +4697,7 @@ a {
 }
 .wellness-dash__reco-card {
   background: var(--c-surface-1);
-  border: 1px solid var(--c-divider);
+  border: 1px solid var(--c-border-decorative);
   border-radius: var(--r-md);
 }
 .wellness-dash__reco-btn {
@@ -4746,7 +4746,7 @@ a {
 }
 .wellness-dash__block-error {
   background: var(--c-surface-1);
-  border: 1px solid var(--c-divider);
+  border: 1px solid var(--c-border-decorative);
   border-radius: var(--r-md);
   padding: var(--s-3);
   display: flex;
@@ -4776,7 +4776,7 @@ a {
   height: calc(56px + var(--safe-bottom));
   padding-bottom: var(--safe-bottom);
   background: var(--c-surface-1);
-  border-top: 1px solid var(--c-divider);
+  border-top: 1px solid var(--c-border-decorative);
   z-index: 10;
 }
 .wellness-dash__nav-tab {
@@ -4836,13 +4836,13 @@ a {
   line-height: 1;
 }
 .records-status-badge--sage {
-  color: var(--c-success);
+  color: var(--c-success-text);
 }
 .records-status-badge--muted {
   color: var(--c-text-secondary);
 }
 .records-status-badge--warning {
-  color: var(--c-warning);
+  color: var(--c-warning-text);
 }
 .records-status-badge__label {
   line-height: var(--leading-tight);
@@ -4859,7 +4859,7 @@ a {
   color: var(--c-text-primary);
 }
 .records-tenant-header__dash {
-  color: var(--c-divider);
+  color: var(--c-border-decorative);
   letter-spacing: 0.1em;
   flex: 0 0 auto;
 }
@@ -4901,7 +4901,7 @@ a {
   gap: var(--s-2);
   height: 56px;
   padding: 0 var(--s-3);
-  border-bottom: 1px solid var(--c-divider);
+  border-bottom: 1px solid var(--c-border-decorative);
   background: var(--c-surface-1);
 }
 .records-screen__back {
@@ -4928,7 +4928,7 @@ a {
 }
 .records-screen__offline-banner {
   background: var(--c-warning);
-  color: var(--c-text-on-accent);
+  color: var(--c-text-on-status);
   padding: var(--s-2) var(--s-3);
   font-size: var(--font-size-200);
   text-align: center;
@@ -4936,7 +4936,7 @@ a {
 /* Та же полоса на экранах воронки записи (см. OfflineBanner.tsx). */
 .offline-banner {
   background: var(--c-warning);
-  color: var(--c-text-on-accent);
+  color: var(--c-text-on-status);
   padding: var(--s-2) var(--s-3);
   margin-bottom: var(--s-3);
   border-radius: var(--r-md);
@@ -4952,7 +4952,7 @@ a {
   display: flex;
   gap: var(--s-2);
   padding: var(--s-3) var(--s-3) 0;
-  border-bottom: 1px solid var(--c-divider);
+  border-bottom: 1px solid var(--c-border-decorative);
 }
 .records-screen__tab {
   flex: 1;
@@ -4990,7 +4990,7 @@ a {
 }
 .records-screen__chip {
   background: var(--c-surface-1);
-  border: 1px solid var(--c-divider);
+  border: 1px solid var(--c-border-interactive);
   border-radius: var(--r-pill);
   padding: var(--s-1) var(--s-3);
   min-height: 36px;
@@ -5034,7 +5034,7 @@ a {
 .records-screen__error,
 .records-screen__filter-empty {
   background: var(--c-surface-1);
-  border: 1px solid var(--c-divider);
+  border: 1px solid var(--c-border-decorative);
   border-radius: var(--r-md);
   padding: var(--s-3);
   display: flex;
@@ -5067,7 +5067,7 @@ a {
 /* ── goal invite (вход в анкету цели с домашнего экрана) ───────── */
 .goal-invite {
   background: var(--c-surface-1);
-  border: 1px solid var(--c-divider);
+  border: 1px solid var(--c-border-decorative);
   border-radius: var(--r-md);
   padding: var(--s-4);
   margin: var(--s-3) var(--s-3) 0;
@@ -5089,7 +5089,7 @@ a {
 
 .records-empty {
   background: var(--c-surface-1);
-  border: 1px solid var(--c-divider);
+  border: 1px solid var(--c-border-decorative);
   border-radius: var(--r-md);
   padding: var(--s-4);
   display: flex;
@@ -5116,7 +5116,7 @@ a {
 /* ── booking card (3 variants) ─────────────────────────────────── */
 .records-card {
   background: var(--c-surface-1);
-  border: 1px solid var(--c-divider);
+  border: 1px solid var(--c-border-decorative);
   border-left-width: 3px;
   border-radius: var(--r-md);
   padding: var(--s-3);
@@ -5157,7 +5157,7 @@ a {
 .records-card__review-hint {
   margin: var(--s-1) 0 0;
   font-size: var(--font-size-100);
-  color: var(--c-success);
+  color: var(--c-success-text);
 }
 .records-card__actions {
   display: flex;
@@ -5176,7 +5176,7 @@ a {
   border-color: var(--c-accent);
 }
 .records-card__action--danger {
-  color: var(--c-danger);
+  color: var(--c-danger-text);
 }
 @media (max-width: 320px) {
   /* WCAG 1.4.4 — at small viewport / 200% zoom, actions stack. */
@@ -5202,7 +5202,7 @@ a {
   gap: var(--s-2);
   height: 56px;
   padding: 0 var(--s-3);
-  border-bottom: 1px solid var(--c-divider);
+  border-bottom: 1px solid var(--c-border-decorative);
   background: var(--c-surface-1);
 }
 .records-detail__back {
@@ -5317,14 +5317,14 @@ a {
   color: var(--c-text-secondary);
 }
 .records-detail__refund {
-  color: var(--c-success);
+  color: var(--c-success-text);
 }
 .records-detail__penalty {
   color: var(--c-text-secondary);
 }
 .records-detail__past-context {
   background: var(--c-surface-1);
-  border: 1px solid var(--c-divider);
+  border: 1px solid var(--c-border-decorative);
   border-radius: var(--r-md);
   padding: var(--s-3);
 }
@@ -5342,7 +5342,7 @@ a {
 .records-detail__deleted,
 .records-detail__error {
   background: var(--c-surface-1);
-  border: 1px solid var(--c-divider);
+  border: 1px solid var(--c-border-decorative);
   border-radius: var(--r-md);
   padding: var(--s-3);
   display: flex;
@@ -5361,7 +5361,7 @@ a {
   left: 0;
   right: 0;
   background: var(--c-surface-1);
-  border-top: 1px solid var(--c-divider);
+  border-top: 1px solid var(--c-border-decorative);
   padding: var(--s-3);
   padding-bottom: calc(var(--s-3) + var(--safe-bottom));
   display: flex;
@@ -5419,7 +5419,7 @@ a {
   width: 36px;
   height: 4px;
   border-radius: var(--r-pill);
-  background: var(--c-divider);
+  background: var(--c-border-decorative);
 }
 .records-msg-modal__title {
   margin: 0;
@@ -5450,7 +5450,7 @@ a {
   gap: var(--s-2);
   width: 100%;
   background: var(--c-surface-2);
-  border: 1px solid var(--c-divider);
+  border: 1px solid var(--c-border-decorative);
   border-radius: var(--r-md);
   min-height: 56px;
   padding: var(--s-2) var(--s-3);
@@ -5482,7 +5482,7 @@ a {
 .records-msg-modal__textarea {
   width: 100%;
   background: var(--c-surface-2);
-  border: 1px solid var(--c-divider);
+  border: 1px solid var(--c-border-decorative);
   border-radius: var(--r-md);
   padding: var(--s-2) var(--s-3);
   font-size: var(--font-size-200);
@@ -5570,7 +5570,7 @@ a {
   background: var(--c-surface-1);
   border-radius: var(--r-md);
   padding: var(--s-4);
-  border: 1px solid var(--c-divider);
+  border: 1px solid var(--c-border-decorative);
 }
 .profile-header__row {
   display: flex;
@@ -5582,7 +5582,7 @@ a {
   height: 56px;
   border-radius: 50%;
   background: var(--c-success);
-  color: var(--c-text-on-accent);
+  color: var(--c-text-on-status);
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -5619,7 +5619,7 @@ a {
   background: var(--c-surface-1);
   border-radius: var(--r-md);
   padding: var(--s-4);
-  border: 1px solid var(--c-divider);
+  border: 1px solid var(--c-border-decorative);
 }
 .profile-section__heading {
   margin: 0 0 var(--s-3);
@@ -5642,7 +5642,7 @@ a {
   margin-top: var(--s-3);
 }
 .profile-section__cta--cautious {
-  color: var(--c-warning);
+  color: var(--c-warning-text);
   border-color: var(--c-warning);
 }
 .profile-section--skeleton {
@@ -5661,7 +5661,7 @@ a {
 }
 .profile-consent-row {
   padding: var(--s-3) 0;
-  border-bottom: 1px solid var(--c-divider);
+  border-bottom: 1px solid var(--c-border-decorative);
 }
 .profile-consent-row:first-child {
   padding-top: 0;
@@ -5733,7 +5733,7 @@ a {
   left: 8px;
   width: 48px;
   height: 28px;
-  background: var(--c-divider);
+  background: var(--c-border-decorative);
   border-radius: 14px;
   transition: background-color 160ms ease;
 }
@@ -5775,8 +5775,8 @@ a {
 /* R2 §4.2 disclosure accordion */
 .profile-disclosure {
   margin-top: var(--s-3);
-  border-top: 1px solid var(--c-divider);
-  border-bottom: 1px solid var(--c-divider);
+  border-top: 1px solid var(--c-border-decorative);
+  border-bottom: 1px solid var(--c-border-decorative);
 }
 .profile-disclosure__trigger {
   width: 100%;
@@ -5941,7 +5941,7 @@ a {
   font-size: var(--font-size-200);
   color: var(--c-text-primary);
   background: var(--c-surface-1);
-  border: 1px solid var(--c-divider);
+  border: 1px solid var(--c-border-interactive);
   border-radius: var(--r-md);
 }
 .profile-support-sheet__actions {
@@ -5963,7 +5963,7 @@ a {
 
 /* R3 coming-soon card */
 .profile-coming-soon {
-  background: color-mix(in srgb, var(--c-divider) 30%, var(--c-surface-1));
+  background: color-mix(in srgb, var(--c-border-decorative) 30%, var(--c-surface-1));
   border-radius: var(--r-md);
   padding: var(--s-4);
 }
@@ -6006,7 +6006,7 @@ a {
   background: var(--c-surface-1);
   border-radius: var(--r-md);
   padding: var(--s-4);
-  border: 1px solid var(--c-divider);
+  border: 1px solid var(--c-border-decorative);
 }
 .profile-notifications__facts {
   margin: 0 0 var(--s-3);
@@ -6075,7 +6075,7 @@ a {
 }
 .food-scanner-screen__section {
   background: var(--c-surface-1);
-  border: 1px solid var(--c-divider);
+  border: 1px solid var(--c-border-decorative);
   border-radius: var(--r-md);
   padding: var(--s-3) var(--s-4);
   display: flex;
@@ -6125,7 +6125,7 @@ a {
   padding: var(--s-2);
   min-height: 64px;
   background: var(--c-surface-2);
-  border: 1px solid var(--c-divider);
+  border: 1px solid var(--c-border-interactive);
   border-radius: var(--r-md);
   color: var(--c-text-primary);
   font-size: var(--font-size-100);
@@ -6168,7 +6168,7 @@ a {
 /* F0 consent gate */
 .food-scanner-consent {
   background: var(--c-surface-1);
-  border: 1px solid var(--c-divider);
+  border: 1px solid var(--c-border-decorative);
   border-radius: var(--r-md);
   padding: var(--s-4);
   display: flex;
@@ -6208,7 +6208,7 @@ a {
   border-radius: var(--r-md);
   overflow: hidden;
   background: var(--c-surface-2);
-  border: 1px solid var(--c-divider);
+  border: 1px solid var(--c-border-decorative);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -6280,7 +6280,7 @@ a {
   height: 80px;
   border-radius: var(--r-md);
   object-fit: cover;
-  border: 1px solid var(--c-divider);
+  border: 1px solid var(--c-border-decorative);
 }
 .food-scanner-result__lead {
   margin: 0;
@@ -6298,14 +6298,14 @@ a {
   width: 100%;
   font: inherit;
   padding: var(--s-2) var(--s-3);
-  border: 1px solid var(--c-divider);
+  border: 1px solid var(--c-border-interactive);
   border-radius: var(--r-sm);
   background: var(--c-surface-1);
   color: var(--c-text-primary);
 }
 .food-scanner-result__metrics {
   background: var(--c-surface-1);
-  border: 1px solid var(--c-divider);
+  border: 1px solid var(--c-border-decorative);
   border-radius: var(--r-md);
   padding: var(--s-3) var(--s-4);
   display: flex;
@@ -6332,7 +6332,7 @@ a {
   height: 44px;
   border-radius: var(--r-md);
   background: var(--c-surface-2);
-  border: 1px solid var(--c-divider);
+  border: 1px solid var(--c-border-interactive);
   font-size: var(--font-size-300);
   font-weight: 600;
   color: var(--c-text-primary);
@@ -6359,7 +6359,7 @@ a {
   display: flex;
   flex-direction: column;
   gap: var(--s-1);
-  border-top: 1px solid var(--c-divider);
+  border-top: 1px solid var(--c-border-decorative);
   padding-top: var(--s-2);
 }
 .food-scanner-result__calories {
@@ -6384,7 +6384,7 @@ a {
   resize: vertical;
   min-height: 56px;
   padding: var(--s-2) var(--s-3);
-  border: 1px solid var(--c-divider);
+  border: 1px solid var(--c-border-interactive);
   border-radius: var(--r-sm);
   background: var(--c-surface-1);
   color: var(--c-text-primary);
@@ -6429,7 +6429,7 @@ a {
   align-items: center;
   gap: var(--s-2);
   align-self: center;
-  color: var(--c-success);
+  color: var(--c-success-text);
   font-size: var(--font-size-300);
   font-weight: 600;
 }
@@ -6445,7 +6445,7 @@ a {
 }
 .food-scanner-saved__daily {
   background: var(--c-surface-1);
-  border: 1px solid var(--c-divider);
+  border: 1px solid var(--c-border-decorative);
   border-radius: var(--r-md);
   padding: var(--s-3) var(--s-4);
   display: flex;
@@ -6462,7 +6462,7 @@ a {
   position: relative;
   width: 100%;
   height: 8px;
-  background: var(--c-divider);
+  background: var(--c-border-decorative);
   border-radius: 4px;
   overflow: hidden;
 }
@@ -6491,7 +6491,7 @@ a {
 /* /дневник */
 .food-scanner-diary__skeleton {
   background: var(--c-surface-1);
-  border: 1px solid var(--c-divider);
+  border: 1px solid var(--c-border-decorative);
   border-radius: var(--r-md);
   padding: var(--s-3) var(--s-4);
 }
@@ -6505,7 +6505,7 @@ a {
    читал это как часть дневника, а не как сломанный экран. */
 .food-scanner-diary__unreadable {
   background: var(--c-surface-1);
-  border: 1px solid var(--c-divider);
+  border: 1px solid var(--c-border-decorative);
   border-radius: var(--r-md);
   padding: var(--s-4);
   display: flex;
@@ -6524,7 +6524,7 @@ a {
 
 .food-scanner-diary__group {
   background: var(--c-surface-1);
-  border: 1px solid var(--c-divider);
+  border: 1px solid var(--c-border-decorative);
   border-radius: var(--r-md);
   padding: var(--s-3) var(--s-4);
   display: flex;
@@ -6551,7 +6551,7 @@ a {
   justify-content: space-between;
   gap: var(--s-2);
   padding: var(--s-2) 0;
-  border-bottom: 1px solid var(--c-divider);
+  border-bottom: 1px solid var(--c-border-decorative);
 }
 .food-scanner-diary__entry:last-child {
   border-bottom: none;
@@ -6582,7 +6582,7 @@ a {
 }
 .food-scanner-diary__totals {
   background: var(--c-surface-1);
-  border: 1px solid var(--c-divider);
+  border: 1px solid var(--c-border-decorative);
   border-radius: var(--r-md);
   padding: var(--s-3) var(--s-4);
   display: flex;
@@ -6845,7 +6845,7 @@ a {
   margin: var(--s-2) 0 0;
   font-size: var(--font-size-200);
   line-height: 1.4;
-  color: var(--c-danger);
+  color: var(--c-danger-text);
 }
 
 /* Отказ, который владелец может исправить сам, — предупреждение, а не
@@ -6859,7 +6859,7 @@ a {
    пересчитать контраст он может только у того, что объявлено. */
 .callout--warn {
   background: color-mix(in srgb, var(--c-warning) 10%, var(--c-surface-2));
-  color: var(--c-warning);
+  color: var(--c-warning-text);
 }
 
 /* Общие поля админских форм — прежде каждое несло свой inline-стиль. */
@@ -7073,7 +7073,7 @@ a {
 .ayla-btn--ghost {
   background: transparent;
   color: var(--c-text-secondary);
-  border: 1px solid var(--c-divider);
+  border: 1px solid var(--c-border-interactive);
 }
 
 .ayla-btn:disabled {
@@ -7082,7 +7082,7 @@ a {
 }
 
 .ayla-error {
-  color: var(--c-danger);
+  color: var(--c-danger-text);
   font-size: var(--font-size-200);
   margin: var(--s-2) 0 0;
 }
@@ -7091,7 +7091,7 @@ a {
   position: sticky;
   bottom: calc(var(--tabbar-height) + var(--safe-bottom));
   background: var(--c-bg);
-  border-top: 1px solid var(--c-divider);
+  border-top: 1px solid var(--c-border-decorative);
   padding: var(--s-2) 0;
   margin-top: auto;
 }
@@ -7109,7 +7109,7 @@ a {
   max-height: 140px;
   padding: var(--s-2) var(--s-3);
   border-radius: var(--r-md);
-  border: 1px solid var(--c-divider);
+  border: 1px solid var(--c-border-interactive);
   background: var(--c-surface-1);
   color: var(--c-text-primary);
   font: inherit;
@@ -7146,7 +7146,7 @@ a {
 }
 
 .ayla-compose__counter--over {
-  color: var(--c-danger);
+  color: var(--c-danger-text);
 }
 
 /* Вход в раздел с «Сегодня». Временный, пока нижняя навигация
@@ -7159,7 +7159,7 @@ a {
   gap: var(--s-3);
   padding: var(--s-3);
   border-radius: var(--r-md);
-  border: 1px solid var(--c-divider);
+  border: 1px solid var(--c-border-interactive);
   background: var(--c-surface-1);
   color: var(--c-text-primary);
   font: inherit;
