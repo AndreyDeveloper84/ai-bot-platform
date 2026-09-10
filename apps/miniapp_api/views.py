@@ -903,6 +903,11 @@ def _create_booking_via_ayla(
         BookingUnavailableError,
         get_ayla_booking_client,
     )
+    from apps.integrations.ayla.health_check import (
+        is_health_check_code,
+        outward_code,
+        text_for,
+    )
     from apps.integrations.ayla.user_proxy import external_user_id_for
 
     # DRF-1057: this path used to read ``bot_user.ayla_user_id`` and refuse
@@ -985,6 +990,36 @@ def _create_booking_via_ayla(
             payment_required=payment_required,
         )
     except BookingBadRequestError as exc:
+        if exc.status_code == 422 and is_health_check_code(exc.code):
+            # DRF-1614. A medical decision taken upstream, not a rejected
+            # payload — and emphatically not a broken server. Caught
+            # BEFORE the generic branch below, which turned all three
+            # codes into `bad_request` / "booking rejected": the person
+            # read «что-то пошло не так» about a system that had just
+            # decided something about them on purpose.
+            #
+            # The status mirrors Ayla's 422 rather than being re-derived,
+            # and the slug carries the machine code, so nothing downstream
+            # has to reconstruct the reason from prose or from the status.
+            # The SPA branches on the slug to render a handoff instead of
+            # the failure card (see `customer-booking.ts`).
+            #
+            # The log keeps the EXACT code; the person gets the merged
+            # name. REQUIRED and UNKNOWN are one sentence outwards on
+            # purpose — the difference between «we know you must be
+            # asked» and «nobody has annotated this service» is our
+            # bookkeeping. Inwards they must stay apart: the annotation
+            # queue is prioritised by the UNKNOWN count, and a merged
+            # counter leaves it without a criterion.
+            logger.info(
+                "miniapp_api.create_booking.health_check_handoff "
+                "tenant=%s service=%s master=%s code=%s",
+                tenant.id,
+                service_id,
+                master_id,
+                exc.code or "MISSING",
+            )
+            return _error(outward_code(exc.code), text_for(exc.code), 422)
         if (exc.code or "").lower() == "subscription_past_due":
             # C1: neutral surface — no debt semantics to the client
             # (frozen W4 slug).
