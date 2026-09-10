@@ -98,6 +98,11 @@ def test_parser_marks_the_key_as_present_when_null_was_sent(service, master):
 
 def test_parser_marks_the_key_as_absent_when_it_was_not_sent(service, master):
     row = _row(service, master)
+    # Положительная стража перед отрицательной: строка НЕ пуста и несёт
+    # свои обычные ключи — она просто не говорит про здоровье. Без этой
+    # проверки тест зеленел бы и на пустом словаре, то есть доказывал бы
+    # отсутствие ключа отсутствием строки.
+    assert row["id"] and row["salon_service"] and row["specialist"]
     assert "resolved_requires_health_check" not in row
     dto = _parse_specialist_service(row)
     assert dto.resolved_requires_health_check is None
