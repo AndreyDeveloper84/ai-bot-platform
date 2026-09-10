@@ -1155,6 +1155,73 @@ export const getMasterDaySchedule = (
   );
 };
 
+// --- GET /api/v1/admin/day/frame/ (DRF-1237, срез A2) ---------------------
+
+/**
+ * Состояние одного списка интервалов — четыре исхода, а не «есть/нет».
+ *
+ * `absent` — ключа на проводе нет: контракт разошёлся.
+ * `none` — ключ есть, строк нет: сегодня пусто.
+ * `parsed` — строки разобраны, они в `rows`.
+ * `unreadable` — строки **есть**, но ни одна не опознана.
+ *
+ * Последнее состояние — причина, по которой их четыре. Форма непустой
+ * строки `breaks` не проверена ничем: перерывов на пилоте не завёл никто.
+ * Если неопознанная строка приедет сюда пустотой, экран покажет обед
+ * рабочим временем — поэтому «пусто» и «не разобрал» обязаны различаться,
+ * и экран обязан сказать второе словами.
+ */
+export type FrameListState = "absent" | "none" | "parsed" | "unreadable";
+
+export interface FrameInterval {
+  start: string;
+  end: string;
+}
+
+export interface FrameList {
+  state: FrameListState;
+  rows: FrameInterval[];
+  /** Имена полей, встреченных в неопознанной строке. Не значения. */
+  seen_fields: string[];
+}
+
+export interface SalonFrameMaster {
+  specialist_id: string;
+  display_name: string;
+  is_working_day: boolean;
+  schedule_note: string | null;
+  schedule_source: string | null;
+  working_intervals: FrameList;
+  breaks: FrameList;
+  absences: FrameList;
+}
+
+export interface SalonDayFrame {
+  date: string | null;
+  source: string;
+  masters: SalonFrameMaster[];
+  /** Какие списки экран не вправе показать полными. */
+  unreadable_lists: string[];
+}
+
+/**
+ * Смены, перерывы и отсутствия всех мастеров салона за один день.
+ *
+ * Записей здесь НЕТ намеренно: визиты берутся из `getSalonDay()`, который
+ * читает зеркало. Два источника записей на одном экране — то самое
+ * расхождение, ради недопущения которого зеркало и читается.
+ */
+export const getSalonDayFrame = (
+  date?: string,
+  init: { signal?: AbortSignal } = {},
+): Promise<SalonDayFrame> => {
+  const qs = date ? `?date=${encodeURIComponent(date)}` : "";
+  return request<SalonDayFrame>(`/api/v1/admin/day/frame/${qs}`, {
+    method: "GET",
+    signal: init.signal,
+  });
+};
+
 export const confirmMasterSchedule = (
   masterId: string,
   fingerprint: string,
