@@ -75,6 +75,7 @@ the configured default in places it shouldn't be).
 
 from __future__ import annotations
 
+import importlib
 import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -505,29 +506,16 @@ class LLMRouter:
         *,
         skill: str,
     ) -> tuple[str, str]:
-        """Walk the three tiers; return (provider_name, source)."""
-        # Tier 1 — per-tenant override.
-        if tenant is not None:
-            features = getattr(tenant, "features", {}) or {}
-            tenant_choice = features.get("llm_provider")
-            if isinstance(tenant_choice, str) and tenant_choice in _PROVIDER_NAMES:
-                return (tenant_choice, _SOURCE_TENANT)
+        """Walk the three tiers; return (provider_name, source).
 
-        # Tier 2 — per-skill default.
-        if skill:
-            skill_map = getattr(settings, "SKILL_LLM_PROVIDER", {}) or {}
-            skill_choice = skill_map.get(skill)
-            if isinstance(skill_choice, str) and skill_choice in _PROVIDER_NAMES:
-                return (skill_choice, _SOURCE_SKILL)
-
-        # Tier 3 — org-wide default.
-        org_choice = getattr(settings, "LLM_PROVIDER", "openai") or "openai"
-        if org_choice not in _PROVIDER_NAMES:
-            # Misconfigured org default — log + force OpenAI so we keep
-            # serving.
-            logger.warning("llm.router.bad_org_default value=%r forced=openai", org_choice)
-            org_choice = "openai"
-        return (org_choice, _SOURCE_ORG)
+        Instance-level alias for :func:`resolve_provider_tier`. The walk
+        reads only settings and its arguments — never ``self`` — so
+        DRF-1631 moved the body to module level, where a NON-serving
+        caller (the health probe) can run *the same* walk rather than
+        re-implement it. Kept under this name because the serving path
+        and its tests have called it so since Sprint 7.
+        """
+        return resolve_provider_tier(tenant, skill=skill)
 
     # ------------------------------------------------------------------
     # Provider construction (lazy + cached)
@@ -549,15 +537,8 @@ class LLMRouter:
         #     traceback,
         #   - the audit row (written by ``get_provider``) carry an
         #     explicit ``init_failed`` discriminator.
-        spec = _PROVIDER_SPECS.get(name)
-        if spec is None:  # pragma: no cover — guarded by the resolution tiers
-            raise LLMProviderUnavailable(f"unknown provider name: {name!r}")
-
         try:
-            import importlib
-
-            module = importlib.import_module(spec.import_path)
-            raw_provider: Any = getattr(module, spec.class_name)()
+            raw_provider: Any = build_provider(name)
         except LLMProviderUnavailable:
             raise
         except Exception as exc:  # noqa: BLE001 — typed re-raise below
@@ -617,6 +598,135 @@ def _write_quota_fallback_audit(payload: dict[str, Any]) -> None:
         target="LLMRouter",
         payload=payload,
     )
+
+
+def resolve_provider_tier(
+    tenant: "Tenant | None" = None,
+    *,
+    skill: str = "",
+) -> tuple[str, str]:
+    """Walk the three tiers; return ``(provider_name, source)``.
+
+    THE single implementation of "which vendor answers here". Both the
+    serving path (:meth:`LLMRouter.get_provider`, via
+    :meth:`LLMRouter._resolve_candidate`) and the DRF-1631 health probe
+    call this function — not a copy of it, not a rule that happens to
+    agree with it.
+
+    Tiers, highest first:
+
+    1. ``Tenant.features["llm_provider"]`` — the canary surface;
+    2. ``settings.SKILL_LLM_PROVIDER[skill]`` — per-skill override;
+    3. ``settings.LLM_PROVIDER`` — org-wide default.
+
+    A tier holding a name the registry does not know falls through to
+    the next rather than raising: a typo in an env var must not take the
+    bot down.
+
+    Note what a caller passing neither ``tenant`` nor ``skill`` gets:
+    tier 3, and only tier 3. That is the honest answer for a context
+    that has no tenant and no skill — the health probe's context — and
+    it is why :func:`configured_vendor_names` exists to name the vendors
+    such a caller is therefore NOT speaking for.
+    """
+    # Tier 1 — per-tenant override.
+    if tenant is not None:
+        features = getattr(tenant, "features", {}) or {}
+        tenant_choice = features.get("llm_provider")
+        if isinstance(tenant_choice, str) and tenant_choice in _PROVIDER_NAMES:
+            return (tenant_choice, _SOURCE_TENANT)
+
+    # Tier 2 — per-skill default.
+    if skill:
+        skill_map = getattr(settings, "SKILL_LLM_PROVIDER", {}) or {}
+        skill_choice = skill_map.get(skill)
+        if isinstance(skill_choice, str) and skill_choice in _PROVIDER_NAMES:
+            return (skill_choice, _SOURCE_SKILL)
+
+    # Tier 3 — org-wide default.
+    org_choice = getattr(settings, "LLM_PROVIDER", "openai") or "openai"
+    if org_choice not in _PROVIDER_NAMES:
+        # Misconfigured org default — log + force OpenAI so we keep
+        # serving.
+        logger.warning("llm.router.bad_org_default value=%r forced=openai", org_choice)
+        org_choice = "openai"
+    return (org_choice, _SOURCE_ORG)
+
+
+def build_provider(name: str, **provider_kwargs: Any) -> Any:
+    """Construct a FRESH, unwrapped instance of vendor ``name``.
+
+    THE single implementation of "name → concrete provider object".
+    :meth:`LLMRouter._load_provider` calls it and then caches and wraps
+    the result; the DRF-1631 health probe calls it and does neither, on
+    purpose (see :mod:`apps.llm.health` — a pooled client would sail
+    past the very failure the probe exists to catch).
+
+    Sharing this function is what makes "the probe measures the vendor
+    the router serves" a property of the code rather than of somebody
+    remembering to update two places. Before DRF-1631 the probe named
+    ``OpenAIProvider`` in an import; the pilot ran ``LLM_PROVIDER=
+    anthropic``; the panel reported OpenAI's empty wallet as an outage
+    for 2018 consecutive ticks while a genuine Anthropic failure would
+    have gone unnoticed.
+
+    Raises :class:`LLMProviderUnavailable` for a name outside the
+    registry. Constructor failures (missing key, missing SDK) propagate
+    as-is — ``_load_provider`` is what converts those into the typed
+    error for the serving path, and the probe wants the raw exception so
+    it can name the SDK class in the alert.
+    """
+    return provider_class(name)(**provider_kwargs)
+
+
+def provider_class(name: str) -> Any:
+    """Import and return the concrete provider CLASS registered as ``name``.
+
+    The name→class step on its own, split out of :func:`build_provider`
+    so a caller that must not *instantiate* — a test patching
+    ``complete`` on whichever class the registry names, for instance —
+    still goes through the registry instead of importing a vendor
+    module by hand. Importing by hand is the whole of DRF-1631.
+
+    Raises :class:`LLMProviderUnavailable` for an unregistered name.
+    """
+    spec = _PROVIDER_SPECS.get(name)
+    if spec is None:
+        raise LLMProviderUnavailable(f"unknown provider name: {name!r}")
+    module = importlib.import_module(spec.import_path)
+    return getattr(module, spec.class_name)
+
+
+def configured_vendor_names() -> list[str]:
+    """Every vendor this deployment's SETTINGS can route a live turn to.
+
+    ``LLM_PROVIDER`` plus every value of ``SKILL_LLM_PROVIDER``, in that
+    order, de-duplicated, restricted to names the registry knows.
+
+    The per-TENANT tier is deliberately absent: reading it is a database
+    query, and a tenant override is by definition the canary case.
+
+    Used by the health probe to state, out loud, which vendors its one
+    call does NOT speak for. A probe covers tier 3; a deployment that
+    also sets ``SKILL_LLM_PROVIDER`` is serving some skills from a
+    vendor nobody is watching, and that is a fact an operator has to be
+    told rather than left to infer from a green lamp.
+
+    (:func:`apps.llm.warmup.warmup_provider_names` computes a near-twin
+    for a different question — what to *warm* — and honours the
+    ``LLM_WARMUP_PROVIDERS`` pin plus an is-the-key-set filter, neither
+    of which belongs in "what could be called". Kept separate on
+    purpose.)
+    """
+    wanted: list[str] = [str(getattr(settings, "LLM_PROVIDER", "") or "")]
+    skill_map = getattr(settings, "SKILL_LLM_PROVIDER", {}) or {}
+    wanted += [value for value in skill_map.values() if isinstance(value, str)]
+
+    out: list[str] = []
+    for name in wanted:
+        if name and name in _PROVIDER_SPECS and name not in out:
+            out.append(name)
+    return out
 
 
 def registered_provider_names() -> tuple[str, ...]:
