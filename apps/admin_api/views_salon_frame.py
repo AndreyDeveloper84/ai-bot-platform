@@ -85,6 +85,7 @@ from django.http import HttpRequest, HttpResponse, JsonResponse
 from django.views.decorators.http import require_http_methods
 
 from apps.admin_api.auth import require_admin_or_reception_read
+from apps.admin_api.services.wire_lists import UNREADABLE, read_list
 from apps.integrations.ayla.salon_client import (
     SalonNotConfigured,
     SalonUnavailable,
@@ -135,39 +136,20 @@ def _hhmm(value: Any) -> str | None:
     return f"{parsed.hour:02d}:{parsed.minute:02d}"
 
 
-def _read_list(row: dict[str, Any], key: str) -> dict[str, Any]:
-    """Один список интервалов мастера — с состоянием, а не только строками."""
+def _interval_row(item: dict[str, Any]) -> dict[str, str] | None:
+    """Строка-интервал в нормальной форме, либо ``None`` — «не опознана».
 
-    if key not in row:
-        return {"state": "absent", "rows": [], "seen_fields": []}
+    Опознание — это И имена полей, И разбор значений: строка с верными
+    именами и мусором в значении так же непригодна, как строка с чужими
+    именами, и обе обязаны дать ``unreadable``, а не исчезнуть.
+    """
 
-    raw = row.get(key)
-    if not isinstance(raw, list) or not raw:
-        # Пустой список и не-список отвечают одинаково: строк нет. Разница
-        # между ними интересна только логу — на экране обе значат «нечего
-        # показать», и придумывать для них разные слова значило бы просить
-        # администратора различать то, чего он не видит.
-        return {"state": "none", "rows": [], "seen_fields": []}
-
-    parsed: list[dict[str, str]] = []
-    seen: set[str] = set()
-    for item in raw:
-        if not isinstance(item, dict):
-            continue
-        seen |= set(item)
-        for start_field, end_field in _INTERVAL_FIELDS:
-            start = _hhmm(item.get(start_field))
-            end = _hhmm(item.get(end_field))
-            if start is not None and end is not None:
-                parsed.append({"start": start, "end": end})
-                break
-
-    if not parsed:
-        # Строки БЫЛИ. Молчаливый ноль здесь и есть тот дефект, ради которого
-        # состояний четыре: пустой ответ прочитался бы как «перерывов нет».
-        return {"state": "unreadable", "rows": [], "seen_fields": sorted(seen)}
-
-    return {"state": "parsed", "rows": parsed, "seen_fields": sorted(seen)}
+    for start_field, end_field in _INTERVAL_FIELDS:
+        start = _hhmm(item.get(start_field))
+        end = _hhmm(item.get(end_field))
+        if start is not None and end is not None:
+            return {"start": start, "end": end}
+    return None
 
 
 def _master_frame(row: dict[str, Any]) -> dict[str, Any]:
@@ -177,7 +159,7 @@ def _master_frame(row: dict[str, Any]) -> dict[str, Any]:
         "is_working_day": bool(row.get("is_working_day")),
         "schedule_note": row.get("schedule_note") or None,
         "schedule_source": row.get("schedule_source") or None,
-        **{key: _read_list(row, key) for key in LIST_KEYS},
+        **{key: read_list(row, key, _interval_row) for key in LIST_KEYS},
     }
 
 
@@ -237,9 +219,7 @@ def salon_day_frame(request: HttpRequest) -> HttpResponse:
         )
 
     frames = [_master_frame(m) for m in masters if isinstance(m, dict)]
-    unreadable = sorted(
-        {key for f in frames for key in LIST_KEYS if f[key]["state"] == "unreadable"}
-    )
+    unreadable = sorted({key for f in frames for key in LIST_KEYS if f[key]["state"] == UNREADABLE})
     if unreadable:
         logger.warning(
             "admin_api.salon_day_frame.unreadable tenant=%s date=%s keys=%s",

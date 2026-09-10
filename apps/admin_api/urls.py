@@ -21,6 +21,7 @@ from apps.admin_api import (
     views_customers,
     views_day,
     views_invite,
+    views_master_exceptions,
     views_master_schedule,
     views_master_verify,
     views_salon_frame,
@@ -156,6 +157,15 @@ urlpatterns = [
         "masters/<str:master_id>/day-schedule/",
         views_master_schedule.master_day_schedule,
         name="master_day_schedule",
+    ),
+    # DRF-1240 (чтение) — что уже назначено мастеру: исключения по датам,
+    # недоступность и закрытия салона. Записи нет: все записывающие маршруты
+    # салонной поверхности SERVICE_READ_ONLY, а §117 разрешает креденшел
+    # условно — сначала три проверки, потом использование.
+    path(
+        "masters/<str:master_id>/exceptions/",
+        views_master_exceptions.master_exceptions,
+        name="master_exceptions",
     ),
     path(
         "masters/<str:master_id>/schedule/confirm/",
