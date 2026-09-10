@@ -1,43 +1,255 @@
 /**
- * «Расписание» — второй раздел пилотной салонной админки (DRF-1235).
+ * «Расписание» — второй раздел пилотной салонной админки (DRF-1235, DRF-1237).
  *
- * Адрес: `/admin/schedule`. Каркас, не содержимое.
+ * Адрес: `/admin/schedule`. Срез A1 — **режим одного мастера**: выбрали
+ * человека, видите его рабочий день.
  *
- * # Почему здесь нет данных
+ * # Что здесь появилось и почему только сейчас
  *
- * Ручки, которая отдаёт расписание салона — мастера, рабочие интервалы,
- * записи и блоки за период, — в `apps/admin_api/urls.py` нет.
- * Существует `day/` (ровно одни сутки) и `availability-requests/`
- * (заявки мастеров на изменение графика); ни то, ни другое расписанием
- * салона не является. Проектирование этого экрана — DRF-1237, вместе с
- * ним придёт и его контракт.
+ * До этого экран честно писал «показывать нечего», и это было верно: ручки,
+ * отдающей рамку доступности, в `apps/admin_api/` не было. День салона
+ * (`GET /api/v1/admin/day/`) отдаёт визиты и только визиты — ни смены, ни
+ * исключений по датам, ни отгулов в нём нет, и «рабочий день мастера» из
+ * него не строится.
  *
- * Поэтому экран рисует свою рамку и одну честную строку: показывать
- * нечего. Не «скоро здесь будет расписание» — обещания того, чего
- * бэкенд не отдаёт, здесь не место. И не пустой список: пустой список
- * означал бы «в расписании ничего не назначено», а это неправда —
- * расписание просто не запрашивалось.
+ * Теперь есть `GET /api/v1/admin/masters/<id>/day-schedule/` — тонкий вид
+ * поверх `master_api.services.schedule.build_schedule`.
  *
- * # Почему экран не собирает расписание из `day/`
+ * # Экран НЕ считает доступность
  *
- * Технически можно позвать `day/` за несколько дат подряд. Но какие
- * даты, сколько их и как показать многомастерность на телефоне — это
- * ровно те решения, которые DRF-1235 оставил задаче расписания
- * («Точная модель будет определена в задаче расписания»). Придумать их
- * здесь значило бы решить за неё и потом переделывать.
+ * Ни рабочие окна, ни занятость. Всё приходит посчитанным с сервера, из
+ * авторитетного источника. Взять смену, вычесть визиты и нарисовать окна
+ * было бы быстро и выглядело бы верно — и было бы «клиент выдумывает
+ * доступность» (§17). В продукте уже три вычислителя «свободного времени», и
+ * они между собой расходятся (DRF-1637); четвёртый здесь был бы худшим из
+ * возможных решений.
+ *
+ * # Известная слепота, о которой экран не молчит
+ *
+ * Обеденный перерыв в свободные окна протекает: провод Ayla его несёт, разбор
+ * кадра роняет (DRF-1638). Экран **не чинит это своими руками** — он
+ * подписывает свободные окна так, чтобы администратор не принял их за
+ * гарантию. Формулировка соответствует канону: «свободный интервал — это
+ * диапазон доступности, а не готовый слот», и окончательную проверку делает
+ * создание записи (409 при конфликте).
+ *
+ * # Режим «Все» — это A2, и его здесь нет
+ *
+ * Единая хронология салона с группировкой параллельных записей — отдельный
+ * срез. Рисовать её половиной здесь значило бы решить за неё.
  */
 
-import type { MeResponse } from "../../lib/admin-api";
+import { useCallback, useEffect, useState } from "react";
+
+import { StateError } from "../../components/StateError";
+import {
+  getMasterDaySchedule,
+  getSalonDay,
+  type MasterDay,
+  type MeResponse,
+  type SalonDayMaster,
+} from "../../lib/admin-api";
 import { SalonPilotFrame } from "./SalonPilotFrame";
 
+/** Сегодня в местном исчислении браузера — та же дата, что подставит сервер. */
+function today(): string {
+  const d = new Date();
+  const m = `${d.getMonth() + 1}`.padStart(2, "0");
+  const day = `${d.getDate()}`.padStart(2, "0");
+  return `${d.getFullYear()}-${m}-${day}`;
+}
+
+/** «10:00» из ISO-времени визита. */
+function hhmm(iso: string): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso;
+  return `${`${d.getHours()}`.padStart(2, "0")}:${`${d.getMinutes()}`.padStart(2, "0")}`;
+}
+
+const BLOCK_REASON: Record<string, string> = {
+  lunch: "перерыв",
+  vacation: "отпуск",
+  sick: "больничный",
+  personal: "личное",
+  other: "недоступна",
+};
+
 export function SalonPilotScheduleScreen({ me }: { me: MeResponse }) {
+  const [masters, setMasters] = useState<SalonDayMaster[] | null>(null);
+  const [selected, setSelected] = useState<string>("");
+  const [day, setDay] = useState<MasterDay | null>(null);
+  const [loading, setLoading] = useState<boolean>(false);
+  const [err, setErr] = useState<unknown>(null);
+
+  // Список мастеров берётся из дня салона: там ВСЕ неархивные мастера, а не
+  // только занятые (`salon_day.py` фильтрует по `archived_at IS NULL`).
+  // Свободный мастер обязан быть в выборе — иначе именно его расписание и
+  // нельзя открыть.
+  useEffect(() => {
+    const ctrl = new AbortController();
+    getSalonDay(undefined, { signal: ctrl.signal })
+      .then((res) => {
+        if (ctrl.signal.aborted) return;
+        setMasters(res.masters);
+        const first = res.masters[0];
+        if (first) setSelected(first.master_id);
+      })
+      .catch((e) => {
+        if ((e as DOMException | undefined)?.name === "AbortError") return;
+        setErr(e);
+      });
+    return () => ctrl.abort();
+  }, []);
+
+  const load = useCallback(
+    async (masterId: string, signal?: AbortSignal) => {
+      if (!masterId) return;
+      setLoading(true);
+      setErr(null);
+      try {
+        const date = today();
+        const res = await getMasterDaySchedule(masterId, { from: date, to: date }, { signal });
+        if (signal?.aborted) return;
+        setDay(res.days[0] ?? null);
+      } catch (e) {
+        if ((e as DOMException | undefined)?.name === "AbortError") return;
+        setErr(e);
+        setDay(null);
+      } finally {
+        if (!signal?.aborted) setLoading(false);
+      }
+    },
+    [],
+  );
+
+  useEffect(() => {
+    const ctrl = new AbortController();
+    void load(selected, ctrl.signal);
+    return () => ctrl.abort();
+  }, [selected, load]);
+
   return (
     <SalonPilotFrame me={me} title="Расписание">
-      <div className="callout" role="status">
-        <p style={{ margin: 0 }}>
-          Расписание салона сюда пока не приходит — показывать нечего.
-        </p>
-      </div>
+      {masters !== null && masters.length === 0 && (
+        <div className="callout" role="status">
+          <p style={{ margin: 0 }}>В салоне нет мастеров — расписание показывать некому.</p>
+        </div>
+      )}
+
+      {masters !== null && masters.length > 0 && (
+        <div style={{ marginBottom: "var(--s-3)" }}>
+          <label htmlFor="salon-schedule-master" style={{ display: "block", marginBottom: "var(--s-1)" }}>
+            Мастер
+          </label>
+          <select
+            id="salon-schedule-master"
+            value={selected}
+            onChange={(e) => setSelected(e.target.value)}
+          >
+            {masters.map((m) => (
+              <option key={m.master_id} value={m.master_id}>
+                {m.name}
+              </option>
+            ))}
+          </select>
+        </div>
+      )}
+
+      {loading && !day && <p>Загружаю день…</p>}
+
+      {err != null && (
+        // Названная причина, а не пустой день: пустой день читался бы как
+        // «мастер свободен весь день», и администратор предложил бы клиенту
+        // время, которого нет.
+        <StateError err={err} onRetry={() => void load(selected)} />
+      )}
+
+      {day && err == null && (
+        <>
+          <h2 style={{ fontSize: "var(--text-h3-size, 18px)", margin: "0 0 var(--s-2)" }}>
+            {day.is_off_day || !day.working_hours
+              ? "Сегодня не работает"
+              : `Смена ${day.working_hours.start}–${day.working_hours.end}`}
+          </h2>
+
+          <section style={{ marginBottom: "var(--s-3)" }}>
+            <h3 style={{ fontSize: "var(--text-body-size, 15px)", margin: "0 0 var(--s-1)" }}>
+              Записи
+            </h3>
+            {day.bookings.length === 0 ? (
+              <p style={{ margin: 0, color: "var(--c-text-secondary)" }}>Записей нет.</p>
+            ) : (
+              <ul style={{ listStyle: "none", padding: 0, margin: 0 }}>
+                {day.bookings.map((b) => (
+                  <li key={b.booking_id} style={{ padding: "2px 0" }}>
+                    {`${hhmm(b.visit_at)} · ${b.service_name} · ${b.client_first_name} ${b.client_last_initial}`}
+                    {b.is_in_progress && " · идёт"}
+                  </li>
+                ))}
+              </ul>
+            )}
+          </section>
+
+          {day.blocks.length > 0 && (
+            <section style={{ marginBottom: "var(--s-3)" }}>
+              <h3 style={{ fontSize: "var(--text-body-size, 15px)", margin: "0 0 var(--s-1)" }}>
+                Недоступность
+              </h3>
+              <ul style={{ listStyle: "none", padding: 0, margin: 0 }}>
+                {day.blocks.map((bl) => (
+                  <li key={bl.exception_id} style={{ padding: "2px 0" }}>
+                    {`${hhmm(bl.start)}–${hhmm(bl.end)} · ${BLOCK_REASON[bl.reason] ?? bl.reason}`}
+                  </li>
+                ))}
+              </ul>
+            </section>
+          )}
+
+          {day.conflicts.length > 0 && (
+            // Конфликт показывается, а не прячется: запись вне часов или
+            // поверх недоступности существует законно (салонная и уличная
+            // запись создаются вне рамки намеренно), и администратор должен
+            // видеть её, а не гадать, почему день выглядит странно.
+            <section style={{ marginBottom: "var(--s-3)" }}>
+              <h3 style={{ fontSize: "var(--text-body-size, 15px)", margin: "0 0 var(--s-1)" }}>
+                Требует внимания
+              </h3>
+              <ul style={{ listStyle: "none", padding: 0, margin: 0 }}>
+                {day.conflicts.map((c) => (
+                  <li key={`${c.type}-${c.booking_id}`} style={{ padding: "2px 0" }}>
+                    {c.description}
+                  </li>
+                ))}
+              </ul>
+            </section>
+          )}
+
+          <section>
+            <h3 style={{ fontSize: "var(--text-body-size, 15px)", margin: "0 0 var(--s-1)" }}>
+              Свободное время
+            </h3>
+            {day.free_windows.length === 0 ? (
+              <p style={{ margin: 0, color: "var(--c-text-secondary)" }}>
+                Свободных промежутков нет.
+              </p>
+            ) : (
+              <>
+                <ul style={{ listStyle: "none", padding: 0, margin: 0 }}>
+                  {day.free_windows.map((w) => (
+                    <li key={`${w.start}-${w.end}`} style={{ padding: "2px 0" }}>
+                      {`${w.start}–${w.end} · ${w.duration_min} мин`}
+                    </li>
+                  ))}
+                </ul>
+                <p style={{ margin: "var(--s-1) 0 0", color: "var(--c-text-secondary)" }}>
+                  Это диапазон доступности, а не готовый слот: свободное время
+                  проверяется ещё раз при создании записи.
+                </p>
+              </>
+            )}
+          </section>
+        </>
+      )}
     </SalonPilotFrame>
   );
 }

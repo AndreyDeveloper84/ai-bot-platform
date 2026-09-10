@@ -1080,6 +1080,81 @@ export const getMasterSchedule = (
  * изменились, сервер ответит `stale_view`, а не подтвердит молча то, чего
  * владелица не видела.
  */
+/**
+ * Рабочий день мастера глазами салона (DRF-1237, срез A1).
+ *
+ * Форма — ровно та, что отдаёт `master_api.services.schedule.build_schedule`:
+ * салонная ручка это тонкий вид поверх него, а не свой расчёт. Считает сервер;
+ * клиент окна НЕ вычисляет — это «клиент выдумывает доступность» (§17).
+ *
+ * `working_hours` = null означает «в этот день не работает», а не «часы
+ * неизвестны»: неизвестность приезжает отказом ручки, а не пустым полем.
+ */
+export interface MasterDayBooking {
+  booking_id: string;
+  visit_at: string;
+  duration_min: number;
+  service_name: string;
+  client_first_name: string;
+  client_last_initial: string;
+  is_in_progress: boolean;
+  is_returning_customer: boolean;
+}
+
+export interface MasterDayBlock {
+  exception_id: string;
+  start: string;
+  end: string;
+  /** lunch | vacation | sick | personal | other */
+  reason: string;
+  approved: boolean;
+}
+
+export interface MasterDayFreeWindow {
+  start: string;
+  end: string;
+  duration_min: number;
+}
+
+export interface MasterDayConflict {
+  /** double_booking | outside_hours | overlapping_exception */
+  type: string;
+  booking_id: string;
+  description: string;
+}
+
+export interface MasterDay {
+  date: string;
+  is_off_day: boolean;
+  working_hours: { start: string; end: string } | null;
+  bookings: MasterDayBooking[];
+  blocks: MasterDayBlock[];
+  free_windows: MasterDayFreeWindow[];
+  conflicts: MasterDayConflict[];
+}
+
+export interface MasterDaySchedule {
+  tenant_tz: string;
+  from: string;
+  to: string;
+  days: MasterDay[];
+}
+
+export const getMasterDaySchedule = (
+  masterId: string,
+  params: { from?: string; to?: string } = {},
+  init: { signal?: AbortSignal } = {},
+): Promise<MasterDaySchedule> => {
+  const qs = new URLSearchParams();
+  if (params.from) qs.set("from", params.from);
+  if (params.to) qs.set("to", params.to);
+  const suffix = qs.toString() ? `?${qs.toString()}` : "";
+  return request<MasterDaySchedule>(
+    `/api/v1/admin/masters/${masterId}/day-schedule/${suffix}`,
+    { method: "GET", signal: init.signal },
+  );
+};
+
 export const confirmMasterSchedule = (
   masterId: string,
   fingerprint: string,
