@@ -50,7 +50,7 @@ from apps.orchestrator.decision_readiness.engine import Delegation
 from apps.orchestrator.decision_readiness.evidence import EvidenceOrigin
 from apps.orchestrator.decision_readiness.questions import AskReason, ImpactClaim, QuestionKind
 from apps.orchestrator.decision_readiness.required_context import SlotOwner
-from apps.orchestrator.decision_readiness.safety_input import SafetyState
+from apps.orchestrator.decision_readiness.safety_input import Handoff, SafetyState
 
 
 @dataclass(frozen=True, slots=True)
@@ -127,6 +127,32 @@ DECLARED_WITHOUT_PRODUCER: tuple[Undeclared, ...] = (
         ),
     ),
     Undeclared(
+        member=Handoff.NONE,
+        blocked_on=(
+            "a producer of SafetyResult (slice E8, lane A). The whole triple is "
+            "unreachable for the same reason: nothing computes a safety verdict yet, "
+            "so nothing promises a next step either. §127 froze the three values; this "
+            "records that none of them has an author today."
+        ),
+    ),
+    Undeclared(
+        member=Handoff.RECOMMENDED,
+        blocked_on=(
+            "a producer of SafetyResult (slice E8, lane A). See Handoff.NONE — the "
+            "three are listed separately because the register is a partition over "
+            "members, not over enums, and a member that gains a producer must be "
+            "retired on its own."
+        ),
+    ),
+    Undeclared(
+        member=Handoff.REQUIRED,
+        blocked_on=(
+            "a producer of SafetyResult (slice E8, lane A). This is the one §127 cares "
+            "about most — a crisis handoff — and it is the one with no author, which is "
+            "worth saying out loud rather than leaving to be inferred."
+        ),
+    ),
+    Undeclared(
         member=EvidenceOrigin.PROMOTED_MEMORY,
         blocked_on=(
             "a live caller of `from_promoted_memory`. The intake function exists and is "
@@ -141,6 +167,7 @@ DECLARED_WITHOUT_PRODUCER: tuple[Undeclared, ...] = (
 #: check the register against them rather than against itself.
 COVERED_ENUMS: tuple[type[Enum], ...] = (
     SafetyState,
+    Handoff,
     QuestionKind,
     SlotOwner,
     AskReason,
