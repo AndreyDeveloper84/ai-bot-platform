@@ -222,6 +222,23 @@ def _targets_source(body: dict[str, Any]) -> str:
     return str(provenance.get("source") or "")
 
 
+def _provenance_dict(body: dict[str, Any], key: str) -> dict[str, Any]:
+    """``targets_provenance.<key>`` как словарь — или ``{}``.
+
+    Для ``method_versions`` и ``input_snapshot``. Каталог шлёт снимок
+    входов владельцу данных с §5.1 (11.09.2026): «методика и
+    использованные данные показываются человеку». Пустой словарь —
+    и «расчёта не было», и «ключа нет»: различать их здесь незачем,
+    показывающая сторона по пустому снимку просто не печатает строку
+    «от твоих данных», а не изготавливает её.
+    """
+    provenance = body.get("targets_provenance")
+    if not isinstance(provenance, dict):
+        return {}
+    value = provenance.get(key)
+    return dict(value) if isinstance(value, dict) else {}
+
+
 def _target_or_none(norms: dict[str, Any], key: str) -> int | None:
     """Ориентир из блока ``norms`` — или ``None``, если его там нет.
 
@@ -286,6 +303,13 @@ class ProfileResponse:
     #: сторона по ``"none"`` объясняет человеку, почему ориентиров нет, а
     #: по ``""`` молчит и пишет warning: нарушен контракт, а не расчёт.
     targets_source: str = ""
+    #: Методика (``{"calories": "mifflin_st_jeor_v1"}``) и входы расчёта
+    #: (``SNAPSHOT_INPUTS`` каталога: пол, возраст, рост, вес, активность,
+    #: цель, темп) — §5.1 11.09.2026: показываются человеку. Это данные
+    #: самого человека, приехавшие ему же; дальше личного диалога не
+    #: уходят. Пусто, когда расчёта нет.
+    targets_method_versions: dict[str, str] = field(default_factory=dict)
+    targets_input_snapshot: dict[str, Any] = field(default_factory=dict)
     raw: dict[str, Any] = field(default_factory=dict)
 
 
@@ -791,6 +815,8 @@ class NutritionClient:
                 disclaimer_acked=body.get("disclaimer_acked"),
                 goal_overridden_by=body.get("goal_overridden_by"),
                 targets_source=_targets_source(body),
+                targets_method_versions=_provenance_dict(body, "method_versions"),
+                targets_input_snapshot=_provenance_dict(body, "input_snapshot"),
                 raw=body,
             )
 

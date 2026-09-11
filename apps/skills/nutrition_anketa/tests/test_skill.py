@@ -648,3 +648,94 @@ class TestSummaryCardShowsOnlyRealTargets:
         # ABSENCE: расчётом карточка не притворяется и нолей не печатает.
         assert "рассчитала твои нормы" not in text
         assert "0" not in text
+
+
+# ─── карточка норм: методика и входы показываются человеку (§5.1) ───────────
+
+
+from dataclasses import replace  # noqa: E402
+
+
+class TestSummaryCardShowsMethodAndInputs:
+    """Решение владельца 11.09.2026 §5.1: «методика и использованные данные
+    показываются человеку». Карточка после анкеты печатает, по какой
+    методике и от каких ответов человека посчитаны нормы — из снимка,
+    который каталог прислал вместе с происхождением (PR #362), а не из
+    текущих полей профиля.
+
+    Оговорка о предмете: после #1523 анкета на пилоте закрыта fail-closed
+    до экрана согласия, то есть сегодня карточку не увидит никто. Здесь
+    стережётся МЕХАНИЗМ, а не наблюдение.
+    """
+
+    _SNAPSHOT = {
+        "gender": "female",
+        "age": 30,
+        "height_cm": 168,
+        "weight_kg": 62.0,
+        "activity_coefficient": 1.375,
+        "goal": "maintain",
+        "pace": "moderate",
+    }
+
+    def test_method_and_inputs_line_is_printed_from_the_snapshot(self) -> None:
+        from apps.skills.nutrition_anketa.skill import _format_summary
+
+        profile = replace(
+            _profile(),
+            targets_method_versions={"calories": "mifflin_st_jeor_v1"},
+            targets_input_snapshot=self._SNAPSHOT,
+        )
+        text = _format_summary(profile)
+        assert "Считала по методике Миффлин — Сан Жеор, версия 1 от твоих данных:" in text
+        for fact in (
+            "пол — женский",
+            "возраст — 30",
+            "рост — 168 см",
+            "вес — 62 кг",
+            "активность — 1.375",
+            "цель — поддерживать",
+            "темп — средний",
+        ):
+            assert fact in text, fact
+        # POSITIVE: строки норм на месте — методика добавлена, не заменила их.
+        assert "🔥 Калории: 1900 ккал/день" in text
+
+    def test_snapshot_values_win_over_profile_fields(self) -> None:
+        """Печатаются входы РАСЧЁТА, а не текущие поля профиля.
+
+        Если человек между расчётом и показом поменял вес, карточка обязана
+        объяснять число тем весом, из которого оно посчитано.
+        """
+        from apps.skills.nutrition_anketa.skill import _format_summary
+
+        profile = replace(
+            _profile(),
+            weight_kg=70,
+            targets_method_versions={"calories": "mifflin_st_jeor_v1"},
+            targets_input_snapshot=self._SNAPSHOT,
+        )
+        text = _format_summary(profile)
+        assert "вес — 62 кг" in text
+        assert "вес — 70 кг" not in text
+
+    def test_empty_snapshot_prints_no_method_line(self) -> None:
+        """Нет снимка — нет строки. «От твоих данных» без данных — выдумка."""
+        from apps.skills.nutrition_anketa.skill import _format_summary
+
+        text = _format_summary(_profile())
+        assert "от твоих данных" not in text
+        assert "Считала" not in text
+        assert "🔥 Калории: 1900 ккал/день" in text
+
+    def test_unknown_method_version_is_printed_as_is(self) -> None:
+        """Подписи, которой каталог не давал, не изготавливаем."""
+        from apps.skills.nutrition_anketa.skill import _format_summary
+
+        profile = replace(
+            _profile(),
+            targets_method_versions={"calories": "mifflin_st_jeor_v2"},
+            targets_input_snapshot=self._SNAPSHOT,
+        )
+        text = _format_summary(profile)
+        assert "Считала по методике mifflin_st_jeor_v2 от твоих данных:" in text
