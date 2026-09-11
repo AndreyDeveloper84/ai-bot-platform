@@ -633,6 +633,39 @@ export const fetchSlots = (params: {
 };
 
 // --- bookings ---
+
+/**
+ * Health-check handoff slugs (DRF-1614) — mirrored from
+ * `apps/integrations/ayla/health_check.py`.
+ *
+ * Ayla answers 422 when a service may not be booked without a screening
+ * question first. That is a medical decision taken on purpose upstream,
+ * not a rejected payload and not a broken server, so the surface must
+ * NOT render it as a failure.
+ *
+ * Two slugs, not three. `HEALTH_CHECK_REQUIRED` and
+ * `HEALTH_CHECK_UNKNOWN` arrive here merged into
+ * `health_check_handoff`, because the difference between «we know you
+ * must be asked» and «nobody has annotated this service yet» is our
+ * bookkeeping and explaining it to a person who came to book would tell
+ * them about our filing system. The exact code stays in the backend log,
+ * where the annotation queue counts it.
+ *
+ * `health_check_unavailable` is separate because its sentence differs:
+ * it promises NOTHING. Nobody is assigned on that path, and a promise of
+ * a consultation that no one will hold is the same family of defect as a
+ * link to a screen that does not exist — a refusal is understood, a
+ * non-existent door is searched for.
+ *
+ * The slug is read, never the prose: the reason must not be
+ * reconstructed from text or from an HTTP status.
+ */
+export const HEALTH_CHECK_HANDOFF_SLUG = "health_check_handoff";
+export const HEALTH_CHECK_UNAVAILABLE_SLUG = "health_check_unavailable";
+
+export const isHealthCheckSlug = (slug: string): boolean =>
+  slug === HEALTH_CHECK_HANDOFF_SLUG || slug === HEALTH_CHECK_UNAVAILABLE_SLUG;
+
 export interface CreatedBooking {
   id: string;
   service_name: string;
@@ -673,6 +706,13 @@ export interface BookingItem {
   undo_window_seconds: number;
   cancellable: boolean;
   reschedulable: boolean;
+  /**
+   * Адрес салона, дословно как в колонке (DRF-1652). Три состояния:
+   * строка — известен; `""` — салон сказал, что адреса нет; `null` —
+   * источник промолчал. Разбор один на все экраны —
+   * `lib/visit-address.ts`; собирать фразу на месте нельзя.
+   */
+  address: string | null;
   // Phase 4 — post-visit feedback. NULL until customer rates.
   rating: number | null;
   can_rate: boolean;

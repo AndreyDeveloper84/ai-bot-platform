@@ -657,13 +657,28 @@ def _upsert_one_master_service(
     if str(existing.ayla_specialist_service_id) != dto.ayla_specialist_service_id:
         existing.ayla_specialist_service_id = dto.ayla_specialist_service_id
         changed.append("ayla_specialist_service_id")
-    # DRF-1353 — only an EXPLICIT upstream value is written. ``None`` means
-    # the payload did not carry the key, and downgrading a known True/False
-    # to "unknown" on that basis would flip the gate on an upstream hiccup.
-    # A real upstream False does overwrite a stale True: the flag is
-    # escalate-only on Ayla's side, so a False there is a deliberate answer.
+    # DRF-1353 — only an EXPLICIT upstream ANSWER is written, and the test
+    # for "explicit" is now the presence of the KEY, not the non-nullness of
+    # the value.
+    #
+    # Прежнее условие (`is not None`) защищало от настоящей опасности:
+    # понизить известный True/False до «неизвестно» из-за того, что выгрузка
+    # не донесла поле, значит заставить медицинский гейт мигать на каждой
+    # икоте канала. Защита остаётся — но она больше не съедает вместе
+    # с икотой и осмысленный ответ.
+    #
+    # Каталог теперь умеет сказать «я не знаю» (услуга без канонической
+    # связи, `SpecialistService.resolved_requires_health_check` → `None`),
+    # и по проводу это едет ключом со значением `null`. Ключ есть — ответ
+    # прислали, и его надо записать: `NULL` в колонке, который гейт брони
+    # читает как «нужен скрининг». Ключа нет — прежнее поведение, сохранить
+    # что было.
+    #
+    # Настоящий upstream `False` по-прежнему перекрывает устаревший `True`:
+    # флаг на стороне Ayla escalate-only, значит `False` там — намеренный
+    # ответ, а не умолчание.
     if (
-        dto.resolved_requires_health_check is not None
+        dto.health_check_key_present
         and existing.resolved_requires_health_check is not dto.resolved_requires_health_check
     ):
         existing.resolved_requires_health_check = dto.resolved_requires_health_check

@@ -5,13 +5,18 @@ Per event-contract.md §3.11. One handler:
 * ``master.schedule.updated`` — when a master's working hours,
   exceptions, or vacation change, bump
   ``CatalogMaster.cache_version`` so downstream slot-resolution
-  cache layers transparently invalidate stale entries.
+  cache layers transparently invalidate stale entries, **and drop the
+  salon owner's schedule confirmation** (§83, правило 4) — the hours she
+  vouched for are no longer the hours on sale.
 
 ### Hard rules
 
 * **ADR-0009 Rule #5** — bot-platform never writes canonical
-  schedule state. This handler mutates ONLY the local mirror's
-  ``cache_version`` signal field. Canonical schedule lives in Ayla.
+  schedule state. This handler mutates two LOCAL fields only: the
+  mirror's ``cache_version`` signal, and the schedule-confirmation trio
+  (§83), which is admission state — «this master may be shown to
+  customers» — and not schedule data. Canonical schedule lives in Ayla,
+  and nothing here writes it.
 * **Contract §3.11 step 2** — handler MUST NOT cancel existing
   bookings. Ayla emits ``booking.cancelled`` separately if the
   schedule change invalidated any bookings.
@@ -62,7 +67,14 @@ def handle_master_schedule_updated(envelope: IngestEnvelope) -> None:
          for observability (NOT used for per-date invalidation today).
       3. Atomic ``F("cache_version") + 1`` on the CatalogMaster
          mirror row scoped by ``(tenant_id, ayla_user_id=master_id)``.
-      4. Log change_type + per-date count for forensic trace.
+      4. Drop the schedule confirmation on that same row (§83 rule 4):
+         the owner vouched for hours that just changed.
+      5. Log change_type + per-date count for forensic trace.
+
+    Step 4 is idempotent in the way that matters: a replay clears an
+    already-cleared confirmation and reports zero rows. What it must
+    never do is re-confirm — only :func:`confirm_schedule` writes a
+    confirmation, and only with a live read and an author.
 
     Idempotency: cache_version bumps are additive — 3 replays = +3
     versions, still a valid invalidation signal. IngestDedupe at the
@@ -108,6 +120,39 @@ def handle_master_schedule_updated(envelope: IngestEnvelope) -> None:
         tenant_id=tenant_id_str,
         ayla_user_id=master_id,
     ).update(cache_version=F("cache_version") + 1)
+
+    # §83, правило 4: любое изменение часов отменяет старое подтверждение.
+    #
+    # Здесь, а не на записи в ``scheduling.WorkingHours``: под
+    # ``BOOKING_VIA_AYLA_REST`` (замер пилота 09.09.2026 — включён) часы
+    # клиенту продаёт Ayla, а локальная таблица — зеркало, которого не
+    # читает никто. Сигнал на ней сработал бы на изменение, которого
+    # клиент не увидит, и не сработал бы на то, которое увидит.
+    #
+    # **Замер 09.09.2026: этот топик не приходил НИ РАЗУ.** За всю историю
+    # ``IngestDedupe`` знает только ``booking.created`` (34),
+    # ``booking.confirmed`` (29), ``booking.cancelled`` (19) и
+    # ``appointment.rescheduled`` (2, последнее 8 августа); в ``IngestDLQ``
+    # записей про расписание тоже нет. Так что сброс отсюда СЕГОДНЯ не
+    # происходит — обработчик правильный и ни разу не сработавший.
+    #
+    # Он остаётся, потому что верен по контракту (§3.11) и сработает в тот
+    # день, когда Ayla начнёт публиковать топик. Но выдавать его за
+    # исполнение правила 4 нельзя: работающий механизм — подметание
+    # (``apps.catalog.tasks.sweep_schedule_confirmations``), и оно даёт
+    # сброс с задержкой до одного цикла, а не мгновенно.
+    #
+    # Сброс идёт ДО проверки ``updated == 0`` намеренно: нулевой бамп
+    # означает «строки зеркала нет», а не «сбрасывать нечего», и связывать
+    # два разных вопроса одной веткой — как раз тот способ, которым
+    # условие однажды перестаёт применяться молча.
+    from apps.catalog.services.schedule_confirmation import clear_confirmation
+
+    clear_confirmation(
+        tenant_id=tenant_id_str,
+        ayla_user_id=master_id,
+        reason=f"master.schedule.updated change_type={change_type or 'unknown'}",
+    )
 
     if updated == 0:
         # Mirror row not yet provisioned for this Ayla master. Log

@@ -55,7 +55,7 @@ jobs:
     timeout-minutes: 15
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Guard — no-op if deploy secrets are unset
         id: guard

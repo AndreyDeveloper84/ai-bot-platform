@@ -770,6 +770,22 @@ NUTRITION_SERVICE_TOKEN = (
 # production flips deliberately, never ad-hoc.
 BOOKING_VIA_AYLA_REST = os.environ.get("BOOKING_VIA_AYLA_REST", "false").lower() == "true"
 
+# §83 — требовать ли АКТУАЛЬНОЕ подтверждение расписания для продажи мастера.
+#
+# DEFAULT OFF, и умолчание здесь несёт цену, а не осторожность. В момент
+# включения с витрины уходят ВСЕ мастера без актуального подтверждения — по
+# правилу 1 решения владельца («по умолчанию расписание не подтверждено») это
+# верно, но это видимое изменение продукта. Порядок работ записан в DRF-1521
+# п. 7: сперва признак и способ его поставить, потом кампания подтверждения по
+# уже подключённым мастерам, и только потом гейт.
+#
+# Поэтому флаг переключает не «фичу», а МОМЕНТ, когда условие начинает снимать
+# людей с продажи, и нажать это должен владелец, увидев число, а не обнаружить
+# постфактум.
+MASTER_SCHEDULE_CONFIRMATION_REQUIRED = (
+    os.environ.get("MASTER_SCHEDULE_CONFIRMATION_REQUIRED", "false").lower() == "true"
+)
+
 # DRF-1531 — the size a top TIER of indistinguishable candidates has to reach
 # before Ayla stops sorting it and asks ONE distinguishing question instead
 # (owner decision §29.2). The tier is the set of masters sharing the best
@@ -1234,6 +1250,25 @@ CELERY_BEAT_SCHEDULE = {
         # fires before the next beat fires a parallel run.
         "task": "apps.catalog.tasks.sync_catalog_for_all_tenants",
         "schedule": crontab(minute="*/15"),
+    },
+    "schedule_confirmation_sweep_every_15min": {
+        # §83 — сторожит СУЩЕСТВУЮЩИЕ подтверждения расписания: снимает те,
+        # под которыми часы в Ayla уже изменились.
+        #
+        # Обход, а не событие, потому что события нет: замер 09.09.2026 —
+        # топик ``master.schedule.updated`` не приходил ни разу за всю
+        # историю. Консьюмер для него написан и верен, но сегодня молчит.
+        #
+        # Цена, которую этот интервал назначает: до 15 минут между
+        # изменением часов и снятием подтверждения. В это окно мастер
+        # продаётся по часам, которые владелица подтверждала не глядя на
+        # нынешние. Правило 4 исполняется как «не позднее чем через цикл»,
+        # и короче цикл — короче окно.
+        #
+        # Смещение на :08 — чтобы не бить в одну минуту с фан-аутом
+        # синхронизации на :00/:15/:30/:45: обе задачи ходят в Ayla.
+        "task": "apps.catalog.tasks.sweep_schedule_confirmations",
+        "schedule": crontab(minute="8,23,38,53"),
     },
     # DRF-1494 — the watchdog on the entry above. Scheduling a job is not
     # the same as knowing it ran: this entry has been here since 2026-05-13

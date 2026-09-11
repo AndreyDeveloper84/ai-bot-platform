@@ -185,6 +185,15 @@ def require_init_data(view_func: Callable[..., HttpResponse]) -> Callable[..., H
         # Look up scoped to that tenant — including soft-deleted rows so
         # we can return a distinct error for those users (they need to
         # contact support, not silently re-onboard).
+        # DRF-1653 — этот `order_by` разбирали как третий случай ничьей и
+        # оставили как есть: ничьей здесь быть не может. Фильтр совпадает с
+        # `unique_together = (("tenant", "channel", "channel_user_id"))`
+        # (apps/identity/models.py:323), то есть строк не больше одной, и
+        # сортировка ни на что не влияет. Тай-брейк сюда добавили бы «за
+        # компанию» — а это ровно тот способ, которым появляются меры без
+        # предмета. Строка оставлена, потому что она безвредна и выражает
+        # намерение; менять её без причины значило бы трогать чужой код ради
+        # единообразия.
         existing = (
             BotUser.all_tenants.filter(
                 tenant=bot_tenant,
@@ -872,6 +881,14 @@ _ERROR_SLUG_TO_STATUS = {
     # владелицы. 503 сюда не годится: он обещает «повторите позже», а
     # повтор профиля не заполнит.
     "master_profile_incomplete": 404,
+    # §83 — 404 по тому же доводу, что у двух соседей выше: клиенту исход
+    # тождествен («к этому мастеру не записаться»), а различать «владелец
+    # салона не подтвердил часы» и «профиль неполон» значит рассказывать
+    # ему о нашем устройстве, ничего не меняя в том, что он может сделать.
+    # Причина живёт в слаге, в аудите и в ростере владелицы. 503 сюда не
+    # годится: он обещает «повторите позже», а повтор подтверждения не
+    # выдаст — его выдаёт человек.
+    "master_schedule_unconfirmed": 404,
     "tenant_mismatch": 403,
 }
 
@@ -902,6 +919,11 @@ def _create_booking_via_ayla(
         BookingBadRequestError,
         BookingUnavailableError,
         get_ayla_booking_client,
+    )
+    from apps.integrations.ayla.health_check import (
+        is_health_check_code,
+        outward_code,
+        text_for,
     )
     from apps.integrations.ayla.user_proxy import external_user_id_for
 
@@ -985,6 +1007,40 @@ def _create_booking_via_ayla(
             payment_required=payment_required,
         )
     except BookingBadRequestError as exc:
+        if exc.status_code == 422 and is_health_check_code(exc.code):
+            # DRF-1614. A medical decision taken upstream, not a rejected
+            # payload — and emphatically not a broken server. Caught
+            # BEFORE the generic branch below, which turned all three
+            # codes into `bad_request` / "booking rejected": the person
+            # read «что-то пошло не так» about a system that had just
+            # decided something about them on purpose.
+            #
+            # The status mirrors Ayla's 422 rather than being re-derived,
+            # and the slug carries the machine code, so nothing downstream
+            # has to reconstruct the reason from prose or from the status.
+            # The SPA branches on the slug to render a handoff instead of
+            # the failure card (see `customer-booking.ts`).
+            #
+            # The log keeps the EXACT code; the person gets the merged
+            # name. REQUIRED and UNKNOWN are one sentence outwards on
+            # purpose — the difference between «we know you must be
+            # asked» and «nobody has annotated this service» is our
+            # bookkeeping. Inwards they must stay apart: the annotation
+            # queue is prioritised by the UNKNOWN count, and a merged
+            # counter leaves it without a criterion.
+            logger.info(
+                "miniapp_api.create_booking.health_check_handoff "
+                "tenant=%s service=%s master=%s code=%s",
+                tenant.id,
+                service_id,
+                master_id,
+                exc.code or "MISSING",
+            )
+            return _error(
+                outward_code(exc.code, handoff=exc.handoff),
+                text_for(exc.code, handoff=exc.handoff),
+                422,
+            )
         if (exc.code or "").lower() == "subscription_past_due":
             # C1: neutral surface — no debt semantics to the client
             # (frozen W4 slug).
@@ -1195,7 +1251,14 @@ def _ayla_appointment_id_of(booking) -> str | None:
     return match.group(1) if match else None
 
 
-def _booking_to_dict(b, *, now=None) -> dict[str, Any]:
+def _booking_to_dict(b, *, tenant, now=None) -> dict[str, Any]:
+    """Запись для клиентской поверхности.
+
+    ``tenant`` обязателен и приходит извне, а не читается с ``b``:
+    сериализатор зовут и в списке, и в карточке, и чтение связи на
+    каждую строку дало бы запрос на элемент. У вызывающего тенант
+    уже есть — он один на запрос.
+    """
     from apps.booking.services.transitions import UNDO_WINDOW_SECONDS
 
     visit_at_iso = b.visit_at.isoformat() if b.visit_at else ""
@@ -1232,6 +1295,19 @@ def _booking_to_dict(b, *, now=None) -> dict[str, Any]:
         # Phase 4 — F5 rating exposure
         "rating": b.rating,
         "can_rate": can_rate,
+        # DRF-1652 — «клиент записался и не видит, куда ехать».
+        #
+        # Заглушка адрес рисовала, настоящая ручка его не несла, и экран
+        # ЧЕСТНО перестал показывать вместо того, чтобы выдумывать. Эту
+        # честность правка обязана сохранить: адрес появляется, когда его
+        # прислали, и отсутствие остаётся отличимым.
+        #
+        # Три состояния, дословно как в колонке (DRF-1587/1611):
+        #   строка — адрес известен;
+        #   ""     — САЛОН сказал, что адреса нет. Ответ, а не молчание;
+        #   null   — источник об адресе не сказал ничего. Наш пробел.
+        # Ни `or ""`, ни `?? ""`: они схлопнули бы пробел в ответ салона.
+        "address": tenant.address,
     }
     # C7.3: optional payment read-model — present only when the event
     # stream produced a mirror row (hold signal or a payment.* event).
@@ -1331,7 +1407,12 @@ def bookings_list(request: HttpRequest) -> HttpResponse:
         last = rows[-1]
         next_cursor = last.visit_at.isoformat() if last.visit_at else None
 
-    return JsonResponse({"items": [_booking_to_dict(b) for b in rows], "next_cursor": next_cursor})
+    return JsonResponse(
+        {
+            "items": [_booking_to_dict(b, tenant=bot_user.tenant) for b in rows],
+            "next_cursor": next_cursor,
+        }
+    )
 
 
 def _get_booking_owned(bot_user: BotUser, booking_id: str):
@@ -1427,7 +1508,7 @@ def _proxy_duration_min(proxy) -> int:
     return 0
 
 
-def _proxy_booking_to_dict(proxy) -> dict[str, Any]:
+def _proxy_booking_to_dict(proxy, *, tenant) -> dict[str, Any]:
     """BookingItem shape from a RemoteBookingProxy row.
 
     Field-for-field identical to the local ``_booking_to_dict`` so the FE
@@ -1456,6 +1537,10 @@ def _proxy_booking_to_dict(proxy) -> dict[str, Any]:
         # No rating read model on the Ayla path in pilot.
         "rating": None,
         "can_rate": False,
+        # DRF-1652 — то же поле и те же три состояния, что у локального
+        # пути. Поле, которое есть на одной ветке и отсутствует на другой,
+        # и есть та развилка, из-за которой экран начинает гадать.
+        "address": tenant.address,
     }
     # C7.3 parity with the local BookingItem: optional payment read-model,
     # present only when the event stream produced a mirror row (hold
@@ -1524,7 +1609,10 @@ def _bookings_list_ayla(request: HttpRequest, bot_user) -> HttpResponse:
         next_cursor = last.start_at.isoformat() if last.start_at else None
 
     return JsonResponse(
-        {"items": [_proxy_booking_to_dict(p) for p in rows], "next_cursor": next_cursor}
+        {
+            "items": [_proxy_booking_to_dict(p, tenant=bot_user.tenant) for p in rows],
+            "next_cursor": next_cursor,
+        }
     )
 
 
@@ -1540,7 +1628,7 @@ def _booking_detail_ayla(bot_user, booking_id: str) -> HttpResponse:
     ).first()
     if proxy is None:
         return _error("not_found", "booking not found", 404)
-    return JsonResponse({"booking": _proxy_booking_to_dict(proxy)})
+    return JsonResponse({"booking": _proxy_booking_to_dict(proxy, tenant=bot_user.tenant)})
 
 
 def _cancel_via_ayla(bot_user, booking_id: str) -> HttpResponse:
@@ -1610,7 +1698,7 @@ def _cancel_via_ayla(bot_user, booking_id: str) -> HttpResponse:
 
     # The proxy stays untouched: the booking.cancelled round-trip event
     # flips the status. The response mirrors the current row verbatim.
-    return JsonResponse({"booking": _proxy_booking_to_dict(proxy)})
+    return JsonResponse({"booking": _proxy_booking_to_dict(proxy, tenant=bot_user.tenant)})
 
 
 @require_http_methods(["GET"])
@@ -1623,7 +1711,7 @@ def booking_detail(request: HttpRequest, booking_id: str) -> HttpResponse:
     booking = _get_booking_owned(bot_user, booking_id)
     if booking is None:
         return _error("not_found", "booking not found", 404)
-    return JsonResponse({"booking": _booking_to_dict(booking)})
+    return JsonResponse({"booking": _booking_to_dict(booking, tenant=bot_user.tenant)})
 
 
 # Слаг отказа перехода -> HTTP-статус. Умолчание ниже (409) так же
@@ -1648,6 +1736,10 @@ _TRANSITION_SLUG_TO_STATUS = {
     # create/transition сохраняется и здесь: она про вопрос, а не про
     # слаг.
     "master_profile_incomplete": 409,
+    # §83 — 409, а не 404, по той же границе: бронь СУЩЕСТВУЕТ, и вопрос
+    # не «есть ли такой мастер», а «допустим ли переход». Разница
+    # create/transition сохраняется и здесь: она про вопрос, а не про слаг.
+    "master_schedule_unconfirmed": 409,
     "service_not_found": 404,
     "service_unbookable": 409,
     "service_not_offered": 404,
@@ -1699,7 +1791,7 @@ def booking_cancel_request(request: HttpRequest, booking_id: str) -> HttpRespons
     except InvalidBookingTransition as exc:
         return _error(exc.slug, exc.detail, _TRANSITION_SLUG_TO_STATUS.get(exc.slug, 409))
 
-    return JsonResponse({"booking": _booking_to_dict(row)})
+    return JsonResponse({"booking": _booking_to_dict(row, tenant=bot_user.tenant)})
 
 
 @csrf_exempt
@@ -1740,7 +1832,7 @@ def booking_cancel_confirm(request: HttpRequest, booking_id: str) -> HttpRespons
                 booking.id,
             )
 
-    return JsonResponse({"booking": _booking_to_dict(row)})
+    return JsonResponse({"booking": _booking_to_dict(row, tenant=bot_user.tenant)})
 
 
 @csrf_exempt
@@ -1768,7 +1860,7 @@ def booking_cancel_undo(request: HttpRequest, booking_id: str) -> HttpResponse:
         row = undo_cancel(booking, actor=bot_user)
     except InvalidBookingTransition as exc:
         return _error(exc.slug, exc.detail, _TRANSITION_SLUG_TO_STATUS.get(exc.slug, 409))
-    return JsonResponse({"booking": _booking_to_dict(row)})
+    return JsonResponse({"booking": _booking_to_dict(row, tenant=bot_user.tenant)})
 
 
 @csrf_exempt
@@ -1829,7 +1921,7 @@ def booking_reschedule_request(request: HttpRequest, booking_id: str) -> HttpRes
         )
     except InvalidBookingTransition as exc:
         return _error(exc.slug, exc.detail, _TRANSITION_SLUG_TO_STATUS.get(exc.slug, 409))
-    return JsonResponse({"booking": _booking_to_dict(row)})
+    return JsonResponse({"booking": _booking_to_dict(row, tenant=bot_user.tenant)})
 
 
 @csrf_exempt
@@ -1869,8 +1961,8 @@ def booking_reschedule_confirm(request: HttpRequest, booking_id: str) -> HttpRes
 
     return JsonResponse(
         {
-            "old_booking": _booking_to_dict(old_row),
-            "new_booking": _booking_to_dict(new_row),
+            "old_booking": _booking_to_dict(old_row, tenant=bot_user.tenant),
+            "new_booking": _booking_to_dict(new_row, tenant=bot_user.tenant),
         }
     )
 

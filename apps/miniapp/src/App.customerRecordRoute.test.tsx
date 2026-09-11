@@ -10,9 +10,12 @@
  * booking-detail screen, and (c) it hands that screen the SAME id from
  * the URL (the id `GET /bookings/<id>` is then called with).
  *
- * The legacy `/my-visits/:bookingId` route stays mounted on purpose
- * (bot-DM deep links live outside this repo) — a second case asserts it
- * still resolves, so nobody reads this change as a legacy removal.
+ * DRF-1625: легаси-`/my-visits/:bookingId` снят вместе со своим
+ * экраном — продюсеров этого адреса не нашлось ни в коде, ни в истории
+ * (замер в комментарии у маршрутов в `App.tsx`). Псевдоним экрана
+ * переноса `/my-visits/:bookingId/reschedule` остался: за ним стоит тот
+ * же `RescheduleScreen`, что и на каноническом адресе, — второй кейс
+ * ниже это и проверяет.
  */
 import { render, screen } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
@@ -66,6 +69,8 @@ const BOOKING: BookingItem = {
   reschedulable: true,
   rating: null,
   can_rate: false,
+  // DRF-1652 — «источник промолчал», см. другие фикстуры.
+  address: null,
 };
 
 function renderAppAt(path: string) {
@@ -91,11 +96,6 @@ describe("canonical record route registration", () => {
     expect(screen.getByText(/Анна Соколова/)).toBeInTheDocument();
     // The id from the URL is the id the detail screen actually loads.
     expect(mockedFetchBooking).toHaveBeenCalledWith("bk-77");
-  });
-
-  it("legacy /my-visits/:bookingId stays mounted (external deep links)", async () => {
-    renderAppAt("/my-visits/bk-77");
-    expect(await screen.findByText("Маникюр")).toBeInTheDocument();
   });
 });
 

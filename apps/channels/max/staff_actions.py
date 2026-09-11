@@ -177,6 +177,7 @@ def approve_request(*, tenant, request_id: str, actor) -> str:
             # same as the Mini App path does.
             actor=None,
             actor_bot_user_id=getattr(actor, "id", None),
+            actor_bot_user=actor,
             actor_role="admin",
         )
     except AvailabilityDecisionError as exc:

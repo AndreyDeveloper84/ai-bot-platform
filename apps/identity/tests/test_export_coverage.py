@@ -233,10 +233,12 @@ class TestTheExportSaysWhatItHolds:
 class _NoAyla:
     """Upstream stub — an empty Ayla export, so the bot half is what is asserted."""
 
-    def get_personal_data_export(self, *, ayla_user_id: str) -> dict:
+    def get_personal_data_export(self, *, ayla_user_id: str, external_user_id: str) -> dict:
         return {}
 
-    def delete_personal_data(self, *, ayla_user_id: str) -> None:  # pragma: no cover
+    def delete_personal_data(
+        self, *, ayla_user_id: str, external_user_id: str
+    ) -> None:  # pragma: no cover
         return None
 
     def close(self) -> None:
