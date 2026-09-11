@@ -77,7 +77,6 @@ import { SalonPilotAylaScreen } from "./screens/admin/SalonPilotAylaScreen";
 import { SalonPilotScheduleScreen } from "./screens/admin/SalonPilotScheduleScreen";
 import { SalonPilotTodayScreen } from "./screens/admin/SalonPilotTodayScreen";
 import { BookingWhenScreen } from "./screens/BookingWhenScreen";
-import { CatalogScreen } from "./screens/CatalogScreen";
 import { CustomerBookingConfirmScreen } from "./screens/CustomerBookingConfirmScreen";
 import { CustomerBookingDetailScreen } from "./screens/CustomerBookingDetailScreen";
 import { CustomerBookingSuccessScreen } from "./screens/CustomerBookingSuccessScreen";
@@ -115,8 +114,6 @@ import { MasterAylaScreen } from "./screens/MasterAylaScreen";
 import { MasterScheduleScreen } from "./screens/MasterScheduleScreen";
 import { MasterServicesScreen } from "./screens/MasterServicesScreen";
 import { MasterSettingsScreen } from "./screens/MasterSettingsScreen";
-import { MyVisitDetailScreen } from "./screens/MyVisitDetailScreen";
-import { MyVisitsScreen } from "./screens/MyVisitsScreen";
 import { RescheduleScreen } from "./screens/RescheduleScreen";
 import { ServiceDetailScreen } from "./screens/ServiceDetailScreen";
 
@@ -1293,16 +1290,29 @@ export function CustomerRoutes() {
         сообщения, закладки, сторонние посты). Внутренние переходы на
         них не ведут — это замерено, а не заявлено (DRF-1485).
 
-        Остались ровно те алиасы, за которыми стоит живой экран:
-        `/catalog` (`CatalogScreen`) и `/catalog/:serviceId` (тот же
-        `ServiceDetailScreen`, что на каноническом адресе). Три экрана
-        прежнего поколения, на которые не вело уже ничего, сняты вместе
-        со своими адресами (DRF-1485): `/book/confirm`,
-        `/book/success/:bookingId` и `/me`. Алиасами они быть не могли —
-        каждый показывал СВОЙ экран, а не канонический по старому
-        адресу, так что оставить адрес значило бы оставить и экран.
+        Остались ровно те алиасы, за которыми стоит КАНОНИЧЕСКИЙ экран:
+        `/catalog/:serviceId` — тот же `ServiceDetailScreen`, что на
+        каноническом адресе. Три экрана прежнего поколения, на которые
+        не вело уже ничего, сняты вместе со своими адресами (DRF-1485):
+        `/book/confirm`, `/book/success/:bookingId` и `/me`. Алиасами
+        они быть не могли — каждый показывал СВОЙ экран, а не
+        канонический по старому адресу, так что оставить адрес значило
+        бы оставить и экран.
+
+        DRF-1625 — `/catalog` (`CatalogScreen`) снят по тому же
+        критерию, под который он подпадал всё это время: канонический
+        каталог это `CustomerCatalogScreen` на `/customer/catalog`, а
+        `CatalogScreen` был СВОИМ экраном, а не тем же по старому
+        адресу. Внутренний вход в него был ровно один — из
+        `MyVisitsScreen`, снятого тем же пакетом; продюсеров пути
+        `/catalog` в репозитории нет: единственный маршрутный литерал у
+        продюсеров — `"open_catalog": "customer/catalog"`
+        (`apps/skills/welcome/skill.py:172`), а протухший payload
+        `catalog` из старых клавиатур `_ROUTE_MAP` резолвит в
+        `/customer/catalog`.
+
+        `/catalog/:serviceId` остаётся: это настоящий псевдоним.
       */}
-      <Route path="/catalog" element={<CatalogScreen />} />
       <Route path="/catalog/:serviceId" element={<ServiceDetailScreen />} />
       {/*
         §31 (решение владельца 06.09.2026) — `MasterPickerScreen` и
@@ -1394,8 +1404,8 @@ export function CustomerRoutes() {
         element={<CustomerBookingSuccessScreen />}
       />
       {/* Tier 1 Priority 5 Phase B — customer records (Tau R1-R6).
-          New canonical routes. Legacy /my-visits stays mounted as a
-          compatibility alias (см. комментарий у алиасов выше). */}
+          Канонические адреса. От легаси-`/my-visits` остался только
+          псевдоним экрана переноса — см. комментарий ниже (DRF-1625). */}
       <Route path="/customer/records" element={<CustomerRecordsScreen />} />
       <Route
         path="/customer/records/:bookingId"
@@ -1411,8 +1421,33 @@ export function CustomerRoutes() {
         path="/customer/records/:bookingId/reschedule"
         element={<RescheduleScreen />}
       />
-      <Route path="/my-visits" element={<MyVisitsScreen />} />
-      <Route path="/my-visits/:bookingId" element={<MyVisitDetailScreen />} />
+      {/*
+        DRF-1625 — от старого пространства имён `/my-visits` остался
+        ровно один адрес, и он настоящий псевдоним: тот же
+        `RescheduleScreen`, что на каноническом
+        `/customer/records/:bookingId/reschedule` выше.
+
+        `/my-visits` (`MyVisitsScreen`) и `/my-visits/:bookingId`
+        (`MyVisitDetailScreen`) сняты вместе со своими экранами. Они
+        подпадали под критерий DRF-1485, записанный у алиасов выше:
+        каждый показывал СВОЙ экран, а не канонический по старому
+        адресу, — то есть оставить адрес значило бы оставить и
+        поверхность прежнего поколения, беднее канонической
+        (`MyVisitDetailScreen` не рисовал ни оплату, ни оценку).
+
+        Внешних ссылок на них нет, и это замерено, а не предположено:
+        ни один продюсер ссылок в репозитории никогда не выдавал пути
+        `/my-visits` — `git log -S` по `apps/skills`, `apps/orchestrator`,
+        `apps/channels`, `apps/notifications`, `apps/booking`,
+        `apps/miniapp_api`, `config` находит ровно один коммит, и тот
+        добавляет строку докстринга. Клавиатуры, ушедшие в историю чата
+        раньше, несут не URL, а payload (`open_visits`, `route=visits`),
+        и `_ROUTE_MAP` в `lib/max-sdk.ts` резолвит его сегодня в
+        `/customer/records`.
+
+        Сторож: `App.legacyRoutes.test.ts` — легаси-адрес имеет право
+        существовать только как псевдоним канонического экрана.
+      */}
       <Route
         path="/my-visits/:bookingId/reschedule"
         element={<RescheduleScreen />}
