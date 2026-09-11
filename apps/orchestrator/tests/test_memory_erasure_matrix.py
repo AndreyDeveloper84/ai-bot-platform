@@ -67,11 +67,13 @@ class _FakeAyla:
         self.calls: list[tuple] = []
 
     # -- wire surface -------------------------------------------------
-    def get_context(self, *, ayla_user_id: str) -> DeclaredContext:
+    def get_context(self, *, ayla_user_id: str, external_user_id: str) -> DeclaredContext:
         self.calls.append(("get", ayla_user_id))
         return DeclaredContext(ayla_user_id=ayla_user_id, context=dict(self.context))
 
-    def patch_context(self, *, ayla_user_id: str, updates: list) -> DeclaredContext:
+    def patch_context(
+        self, *, ayla_user_id: str, external_user_id: str, updates: list
+    ) -> DeclaredContext:
         self.calls.append(("patch", ayla_user_id, updates))
         for item in updates:
             # Backend: setattr(ctx, item["field"], item["value"]) — no
@@ -79,7 +81,7 @@ class _FakeAyla:
             self.context[item["field"]] = item["value"]
         return DeclaredContext(ayla_user_id=ayla_user_id, context=dict(self.context))
 
-    def delete_personal_data(self, *, ayla_user_id: str) -> None:
+    def delete_personal_data(self, *, ayla_user_id: str, external_user_id: str) -> None:
         self.calls.append(("delete", ayla_user_id))
         self.context.clear()
         self.deleted = True

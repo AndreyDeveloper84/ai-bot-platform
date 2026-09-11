@@ -29,6 +29,7 @@ from enum import Enum
 from typing import Any
 
 from apps.consent.services import has_memory_consent
+from apps.integrations.ayla.user_proxy import external_user_id_for
 from apps.integrations.ayla.personal_context_client import (
     AskEligibility,
     DeclaredContext,
@@ -102,7 +103,10 @@ def get_declared_prefs(
     try:
         return GatedResult(
             status=GateStatus.OK,
-            context=client.get_context(ayla_user_id=str(ayla_user_id)),
+            context=client.get_context(
+                ayla_user_id=str(ayla_user_id),
+                external_user_id=external_user_id_for(bot_user),
+            ),
         )
     except PersonalContextError:
         logger.exception("identity.personal_context.get_failed")
@@ -127,7 +131,11 @@ def patch_declared_prefs(
     try:
         return GatedResult(
             status=GateStatus.OK,
-            context=client.patch_context(ayla_user_id=str(ayla_user_id), updates=updates),
+            context=client.patch_context(
+                ayla_user_id=str(ayla_user_id),
+                external_user_id=external_user_id_for(bot_user),
+                updates=updates,
+            ),
         )
     except PersonalContextError:
         logger.exception("identity.personal_context.patch_failed")
@@ -151,7 +159,10 @@ def get_ask_eligibility(
     try:
         return GatedResult(
             status=GateStatus.OK,
-            eligibility=client.get_ask_eligibility(ayla_user_id=str(ayla_user_id)),
+            eligibility=client.get_ask_eligibility(
+                ayla_user_id=str(ayla_user_id),
+                external_user_id=external_user_id_for(bot_user),
+            ),
         )
     except PersonalContextError:
         logger.exception("identity.personal_context.ask_eligibility_failed")
@@ -174,7 +185,11 @@ def mark_asked(
     owns = client is None
     client = client or PersonalContextHttpClient()
     try:
-        client.mark_asked(ayla_user_id=str(ayla_user_id), field=field)
+        client.mark_asked(
+            ayla_user_id=str(ayla_user_id),
+            external_user_id=external_user_id_for(bot_user),
+            field=field,
+        )
         return GatedResult(status=GateStatus.OK)
     except PersonalContextError:
         logger.exception("identity.personal_context.mark_asked_failed")
@@ -199,7 +214,11 @@ def skip(
     try:
         return GatedResult(
             status=GateStatus.OK,
-            skip_count=client.skip(ayla_user_id=str(ayla_user_id), field=field),
+            skip_count=client.skip(
+                ayla_user_id=str(ayla_user_id),
+                external_user_id=external_user_id_for(bot_user),
+                field=field,
+            ),
         )
     except PersonalContextError:
         logger.exception("identity.personal_context.skip_failed")
@@ -252,7 +271,10 @@ def erase_declared_prefs(
     owns = client is None
     client = client or PersonalContextHttpClient()
     try:
-        client.delete_personal_data(ayla_user_id=str(ayla_user_id))
+        client.delete_personal_data(
+            ayla_user_id=str(ayla_user_id),
+            external_user_id=external_user_id_for(bot_user),
+        )
         return GatedResult(status=GateStatus.OK)
     except PersonalContextNotFoundError:
         # Already gone upstream (or never existed) — the erasure contract is

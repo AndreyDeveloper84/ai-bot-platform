@@ -66,6 +66,8 @@ const BOOKING: BookingItem = {
   reschedulable: true,
   rating: null,
   can_rate: false,
+  // DRF-1652 — «источник промолчал», см. другие фикстуры.
+  address: null,
 };
 
 function renderAppAt(path: string) {
