@@ -25,15 +25,14 @@ activity_coefficient / goal`` обязан нести **утверждение**
 :data:`NOT_GRANTED`. Слить их значило бы чинить «дай согласие» там, где
 чинить надо «под какой текст».
 
-### Почему строка, а не член перечисления
+### Одно значение на два конца
 
-Тип ``personal_calculation`` вводит в ``ConsentRecord.ConsentType`` PR
-ai-bot-platform#1523 (срез N-a), ещё не слитый. Здесь он назван строкой
-намеренно, чтобы не стековать PR: значение — контракт границы (константа
-``PERSONAL_CALCULATION`` в ``nutrition/services/personal_calculation_consent.py``
-каталога), а не имя из модели. **Когда #1523 сольётся — заменить строку на
-``ConsentRecord.ConsentType.PERSONAL_CALCULATION.value``, не заводить
-вторую константу.**
+Тип ``personal_calculation`` ввёл в ``ConsentRecord.ConsentType`` #1602
+(сужение #1523, срез N-a). :data:`PERSONAL_CALCULATION` читается из
+перечисления, а не дублируется строкой: значение — одновременно имя типа
+в реестре и контракт границы (константа ``PERSONAL_CALCULATION`` в
+``nutrition/services/personal_calculation_consent.py`` каталога), и два
+написания одного факта разошлись бы молча.
 
 ### Предел
 
@@ -62,10 +61,8 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-#: Вид согласия — контракт границы каталога (#324), не имя из модели.
-#: TODO(#1523): после слияния заменить на
-#: ``ConsentRecord.ConsentType.PERSONAL_CALCULATION.value``.
-PERSONAL_CALCULATION = "personal_calculation"
+#: Вид согласия — и имя типа в реестре, и контракт границы каталога (#324).
+PERSONAL_CALCULATION = ConsentRecord.ConsentType.PERSONAL_CALCULATION.value
 
 #: Ключ утверждения в теле POST профиля — как его читает
 #: ``NutritionProfileUpsertSerializer.consent`` в каталоге.
