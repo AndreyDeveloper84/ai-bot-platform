@@ -41,29 +41,22 @@ there.
 | Q6 | §H.3 BORDERLINE | Mandatory adversarial review pre-merge |
 | Q7 | D + B-signature | Dedicated solo bot + kwargs signature with channel/channel_user_id/display_name/phone/chat_id/tenant_name |
 
-# Ops setup required BEFORE this service runs
+# Вход: САЛОННЫЙ бот, а не выделенный (§26 п.2, 05.09.2026)
 
-The bootstrap tenant + dedicated MAX bot are **ops/pre-pilot setup**,
-NOT created by this code. Setup steps:
+Докстринг выше описывает выделенного бота «Ayla Solo» и bootstrap-тенант
+`ayla_solo_bootstrap`. **Владелец этот вариант отменил**: «в клиентском
+боте не надо делать кнопку „Я соло мастер"… это всё будет жить конечно в
+салонном боте». Третьего бота не заводим.
 
-1. Create new MAX bot for solo registration (e.g. `@ayla_solo_bot`).
-2. Add the bot's secret token to `CHANNEL_TOKEN_TO_TENANT_SLUG`:
-   ```bash
-   CHANNEL_TOKEN_TO_TENANT_SLUG=<solo_bot_token>=ayla_solo_bootstrap
-   ```
-3. Seed the bootstrap tenant via management shell:
-   ```python
-   from apps.tenancy.models import Tenant
-   Tenant.objects.create(
-       slug="ayla_solo_bootstrap",
-       name="Ayla Solo — Registration",
-       is_active=True,
-   )
-   ```
+Оставлять прежнее описание рядом с новым поведением нельзя: правило
+приоритета — принятое решение > реализация > устаревший комментарий, — и
+комментарий здесь был устаревшим. Ops-настройки под отменённого бота
+больше не требуется, предполётная проверка снята (см. комментарий в теле
+функции).
 
-If the bootstrap tenant is missing when the service runs,
-`BootstrapTenantMissing` is raised — fail-loud so ops knows to complete
-setup.
+`BOOTSTRAP_TENANT_SLUG` оставлен константой: на него ссылаются тесты и
+ранбук, а удаление имени ничего не чинит. Ни одного чтения тенанта по
+этому слагу в коде не осталось.
 
 # Caller contract
 
@@ -140,14 +133,6 @@ class SoloOnboardingPartialStateError(SoloOnboardingError):
     2026-05-26: masking an underlying invariant violation is worse than
     graceful recovery (memory `feedback_severity_discipline_rubric` —
     data-integrity issues fail loud).
-    """
-
-
-class BootstrapTenantMissing(SoloOnboardingError):
-    """The `ayla_solo_bootstrap` tenant doesn't exist yet.
-
-    Fail-loud signal that ops pre-pilot setup is incomplete. See module
-    docstring for the 3-step setup procedure.
     """
 
 
@@ -356,7 +341,6 @@ def create_solo_provider(
         SoloOnboardingResult with all 5 records + `created` flag.
 
     Raises:
-        BootstrapTenantMissing: ops setup incomplete (see module docstring).
         SoloOnboardingPartialStateError: existing solo tenant has missing
             related rows (owner / admin / master). Manual ops inspection.
     """
@@ -378,14 +362,24 @@ def create_solo_provider(
             "identity-hijack risk via idempotency path."
         )
 
-    # Pre-flight: bootstrap tenant must exist (ops setup gate).
-    if not Tenant.objects.filter(slug=BOOTSTRAP_TENANT_SLUG).exists():
-        raise BootstrapTenantMissing(
-            f"Bootstrap tenant {BOOTSTRAP_TENANT_SLUG!r} not found. "
-            "Ops pre-pilot setup incomplete — see "
-            "apps/identity/services/solo_onboarding.py docstring for the "
-            "3-step procedure (create solo MAX bot + map token + seed tenant)."
-        )
+    # ПРЕДПОЛЁТНОЙ ПРОВЕРКИ BOOTSTRAP-ТЕНАНТА БОЛЬШЕ НЕТ, и это исполнение
+    # решения, а не послабление.
+    #
+    # Она сторожила, что операторы выполнили настройку ВЫДЕЛЕННОГО бота
+    # «Ayla Solo»: завести бота, отобразить его токен на тенант
+    # `ayla_solo_bootstrap`, засеять тенант. Владелец отменил выделенного
+    # бота §26 п.2 — вход соло-мастера идёт через САЛОННОГО, который уже
+    # настроен и без которого это сообщение сюда бы не доехало.
+    #
+    # Сам тенант в засеве не участвовал никогда: `create_solo_provider`
+    # создаёт СВОЙ тенант на человека, а `ayla_solo_bootstrap` был лишь
+    # посадочной площадкой отменённой схемы. Проверено переписью: во всём
+    # `apps/` слаг встречался только в этой проверке и в тексте её
+    # ошибки.
+    #
+    # Замер пилота 11.09.2026: тенанта `ayla_solo_bootstrap` там нет, а
+    # двенадцать других есть. То есть проверка не «ещё не настроено» —
+    # она требовала настройки под дверь, которую закрыли.
 
     target_slug = _solo_tenant_slug(channel, channel_user_id)
 
