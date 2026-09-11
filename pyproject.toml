@@ -234,11 +234,20 @@ markers = [
 [tool.ruff]
 line-length = 100
 target-version = "py312"
+# ruff 0.16 (Dependabot #1363, вынесен отдельно): по умолчанию он (а) включает в
+# обход `*.md` и форматирует Python-блоки в документах — 84 файла docs/ стали бы
+# «не отформатированы» без единой правки кода; (б) расширил набор правил по
+# умолчанию с 59 до 413 — на dev 11.09 это 3391 находка в 999 файлах. Обе строки
+# ниже возвращают поведение 0.15 явно: обновление инструмента нейтрально,
+# принятие новых правил и форматирования документов — отдельное решение.
+include = ["*.py", "*.pyi", "*.pyw", "*.ipynb", "**/pyproject.toml", "**/ruff.toml", "**/.ruff.toml"]
 # legacy_*/ are AS-IS migration sources — they follow the source repo's
 # style, not the platform's. Drained sprint-by-sprint into apps/.
 extend-exclude = ["legacy_maxbot", "legacy_formulatela_mcp", "legacy_notifications"]
 
 [tool.ruff.lint]
+# Набор по умолчанию ruff ≤ 0.15 (E4, E7, E9, F) — закреплён явно, см. [tool.ruff].
+select = ["E4", "E7", "E9", "F"]
 # TID251 = banned-api / banned-module-level-imports. Stops apps/ from
 # accidentally pulling legacy_* code while migration is in flight.
 # Override per-line with `# noqa: TID251` only for transitional glue
