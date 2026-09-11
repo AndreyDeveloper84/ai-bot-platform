@@ -24,10 +24,7 @@ interface ErrorBody {
   detail: string;
 }
 
-async function request<T>(
-  path: string,
-  init: RequestInit = {},
-): Promise<T> {
+async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   const result = await requestWithResponse<T>(path, init);
   return result.data;
 }
@@ -87,11 +84,7 @@ export interface MeTenant {
 }
 
 export type RoleSlug =
-  | "customer"
-  | "master"
-  | "receptionist"
-  | "admin"
-  | "owner";
+  "customer" | "master" | "receptionist" | "admin" | "owner";
 
 export interface MeResponse {
   user: MeUser;
@@ -595,10 +588,13 @@ export const getBookingSlots = (
     service_id: params.serviceId,
     date: params.date,
   });
-  return request<BookingSlotsResponse>(`/api/v1/admin/booking-slots/?${q.toString()}`, {
-    method: "GET",
-    signal: init.signal,
-  });
+  return request<BookingSlotsResponse>(
+    `/api/v1/admin/booking-slots/?${q.toString()}`,
+    {
+      method: "GET",
+      signal: init.signal,
+    },
+  );
 };
 
 // --- /api/v1/admin/masters/ ----------------------------------------------
@@ -1070,10 +1066,13 @@ export const getMasterSchedule = (
   masterId: string,
   init: { signal?: AbortSignal } = {},
 ): Promise<MasterSchedule> =>
-  request<MasterScheduleEnvelope>(`/api/v1/admin/masters/${masterId}/schedule/`, {
-    method: "GET",
-    signal: init.signal,
-  }).then((env) => env.schedule);
+  request<MasterScheduleEnvelope>(
+    `/api/v1/admin/masters/${masterId}/schedule/`,
+    {
+      method: "GET",
+      signal: init.signal,
+    },
+  ).then((env) => env.schedule);
 
 /**
  * «Расписание верно». Отправляет отпечаток показанных часов: если они
@@ -1280,6 +1279,60 @@ export const getMasterExceptions = (
   );
 };
 
+// --- GET /api/v1/admin/masters/<id>/schedule/impact/ (§142, срез В) --------
+
+export interface ScheduleImpactRow {
+  appointment_id: string;
+  /** ISO со смещением САЛОНА — печатать срезом, не через Date. */
+  start_local: string;
+  end_local: string;
+  service_name: string | null;
+  status: string | null;
+  payment_status: string | null;
+  refund_percent_if_cancelled: number | null;
+}
+
+export interface ScheduleImpact {
+  start_at: string;
+  end_at: string;
+  timezone: string | null;
+  bookings: WireList<ScheduleImpactRow> & {
+    /**
+     * Сколько строк Ayla прислала, а мы не разобрали. Здесь предмет — сколько
+     * людей затронет закрытие, и молча выброшенная строка занижает вред:
+     * «затронет одну», когда затронет две.
+     */
+    unreadable_rows: number;
+  };
+  /**
+   * Всегда `false`, и это говорит сервер: закрытие времени и решение по
+   * каждой записи — в Pro App, где администратор вошёл под своим именем
+   * (реестр §150, срез В). Кнопки «закрыть» здесь нет не потому, что не
+   * успели, а потому, что сервер её не примет.
+   */
+  writable: boolean;
+  next_step: "pro_app";
+}
+
+/**
+ * Какие записи вытеснит закрытие времени мастера — показ, не действие.
+ *
+ * Окно — датой и часами САЛОНА; смещение прикладывает сервер по поясу
+ * салона. Экран не вычисляет смещение сам: это та ошибка, из-за которой
+ * хронология показывала «11:00» вместо «14:00».
+ */
+export const getScheduleImpact = (
+  masterId: string,
+  params: { date: string; from: string; to: string },
+  init: { signal?: AbortSignal } = {},
+): Promise<ScheduleImpact> => {
+  const qs = new URLSearchParams(params);
+  return request<ScheduleImpact>(
+    `/api/v1/admin/masters/${masterId}/schedule/impact/?${qs.toString()}`,
+    { method: "GET", signal: init.signal },
+  );
+};
+
 export const getSalonDayFrame = (
   date?: string,
   init: { signal?: AbortSignal } = {},
@@ -1295,10 +1348,13 @@ export const confirmMasterSchedule = (
   masterId: string,
   fingerprint: string,
 ): Promise<MasterSchedule> =>
-  request<MasterScheduleEnvelope>(`/api/v1/admin/masters/${masterId}/schedule/confirm/`, {
-    method: "POST",
-    body: JSON.stringify({ fingerprint }),
-  }).then((env) => env.schedule);
+  request<MasterScheduleEnvelope>(
+    `/api/v1/admin/masters/${masterId}/schedule/confirm/`,
+    {
+      method: "POST",
+      body: JSON.stringify({ fingerprint }),
+    },
+  ).then((env) => env.schedule);
 
 /**
  * PATCH body for ``/api/v1/admin/masters/<id>/``. Only fields the
@@ -1537,8 +1593,7 @@ export const getServicesMapping = (
  * into ApiError's ``detail`` string. Conflict resolution needs the
  * full conflict[] array — preserve it via direct ``fetch``.
  */
-export interface ServicesMappingConflictEnvelope
-  extends ServicesMappingConflictResponse {
+export interface ServicesMappingConflictEnvelope extends ServicesMappingConflictResponse {
   __conflict: true;
 }
 
@@ -1697,7 +1752,8 @@ async function decisionFetch(
       __conflict: true,
       conflict: slug,
       detail,
-      dates: slug === "overlap_conflict" ? parseDatesFromDetail(detail) : undefined,
+      dates:
+        slug === "overlap_conflict" ? parseDatesFromDetail(detail) : undefined,
     };
   }
 
@@ -1726,10 +1782,9 @@ export const rejectAvailabilityRequest = (
   requestId: string,
   rejection_reason: string,
 ): Promise<AvailabilityRequestItem | AvailabilityConflict> =>
-  decisionFetch(
-    `/api/v1/admin/availability-requests/${requestId}/reject/`,
-    { rejection_reason },
-  );
+  decisionFetch(`/api/v1/admin/availability-requests/${requestId}/reject/`, {
+    rejection_reason,
+  });
 
 // --- Staff access codes (DRF-1061 block 2.4) -----------------------------
 //

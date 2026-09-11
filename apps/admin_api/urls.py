@@ -22,6 +22,7 @@ from apps.admin_api import (
     views_day,
     views_invite,
     views_master_exceptions,
+    views_schedule_impact,
     views_master_schedule,
     views_master_verify,
     views_salon_frame,
@@ -166,6 +167,11 @@ urlpatterns = [
         "masters/<str:master_id>/exceptions/",
         views_master_exceptions.master_exceptions,
         name="master_exceptions",
+    ),
+    path(
+        "masters/<str:master_id>/schedule/impact/",
+        views_schedule_impact.master_schedule_impact,
+        name="master_schedule_impact",
     ),
     path(
         "masters/<str:master_id>/schedule/confirm/",
