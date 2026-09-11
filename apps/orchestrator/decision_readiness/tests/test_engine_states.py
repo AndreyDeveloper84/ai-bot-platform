@@ -14,7 +14,7 @@ from apps.orchestrator.decision_readiness import engine as eng
 from apps.orchestrator.decision_readiness import reason_codes as rc
 from apps.orchestrator.decision_readiness.policy import ControlledPolicy
 from apps.orchestrator.decision_readiness.required_context import RequiredContextSpec
-from apps.orchestrator.decision_readiness.safety_input import SafetyResult, SafetyState
+from apps.orchestrator.decision_readiness.safety_input import Handoff, SafetyResult, SafetyState
 from apps.orchestrator.decision_readiness.tests.conftest import (
     REVISION,
     SplittingProbe,
@@ -34,7 +34,10 @@ def test_stop_blocks_before_anything_else() -> None:
     output = eng.evaluate(
         make_input(
             safety=SafetyResult(
-                state=SafetyState.STOP, evaluated_at_revision=REVISION, rule_id="R-7"
+                state=SafetyState.STOP,
+                evaluated_at_revision=REVISION,
+                handoff=Handoff.NONE,
+                rule_id="R-7",
             )
         )
     )
@@ -60,7 +63,9 @@ def test_clarify_asks_rather_than_blocking() -> None:
 
     output = eng.evaluate(
         make_input(
-            safety=SafetyResult(state=SafetyState.CLARIFY, evaluated_at_revision=REVISION),
+            safety=SafetyResult(
+                state=SafetyState.CLARIFY, evaluated_at_revision=REVISION, handoff=Handoff.NONE
+            ),
             catalog=make_input().catalog,
         )
     )
@@ -72,7 +77,11 @@ def test_clarify_asks_rather_than_blocking() -> None:
 
 def test_caution_is_recorded_without_stopping_the_turn() -> None:
     output = eng.evaluate(
-        make_input(safety=SafetyResult(state=SafetyState.CAUTION, evaluated_at_revision=REVISION))
+        make_input(
+            safety=SafetyResult(
+                state=SafetyState.CAUTION, evaluated_at_revision=REVISION, handoff=Handoff.NONE
+            )
+        )
     )
 
     assert rc.SAFETY_CAUTION_CONSTRAINED in output.reason_codes
@@ -160,7 +169,9 @@ def test_an_uncomputed_separation_blocks_at_the_step_six_fallback() -> None:
         state=reference.state,
         evidence=reference.evidence,
         candidates=candidates(separation=None),
-        safety=SafetyResult(state=SafetyState.NORMAL, evaluated_at_revision=REVISION),
+        safety=SafetyResult(
+            state=SafetyState.NORMAL, evaluated_at_revision=REVISION, handoff=Handoff.NONE
+        ),
         spec=reference.required_context_spec,
         availability=eng.InputAvailability(
             ledger_readable=True, probe_available=True, candidates_fresh=True
@@ -185,7 +196,9 @@ def test_stale_safety_blocks() -> None:
 
     output = eng.evaluate(
         make_input(
-            safety=SafetyResult(state=SafetyState.NORMAL, evaluated_at_revision=REVISION - 1)
+            safety=SafetyResult(
+                state=SafetyState.NORMAL, evaluated_at_revision=REVISION - 1, handoff=Handoff.NONE
+            )
         )
     )
 
@@ -351,3 +364,75 @@ def test_reason_codes_are_sorted_and_unique() -> None:
     output = eng.evaluate(make_input(evidence=()))
 
     assert list(output.reason_codes) == sorted(set(output.reason_codes))
+
+
+# --- §127: BLOCK and HANDOFF are not collapsed -------------------------------
+
+
+def test_a_crisis_handoff_is_not_the_same_decision_as_a_policy_refusal() -> None:
+    """§127 — and the pair here shares a `rule_id`, deliberately.
+
+    What is **not** claimed: that the two would collide today without this
+    field. They would not. `rule_id` is in `digest_fields()` as well, and in
+    production the two promises arrive from different rule buckets, so their
+    digests already differ.
+
+    What is claimed: that separation is a **coincidence of today's catalogue**.
+    Both verdicts below carry the same `rule_id` — one bucket — and differ only
+    in what they promise the person: "someone will come" against "I cannot say
+    that". Before this field, the projection had no notion of a promise, so
+    nothing in the contract forbade one bucket from issuing both and digesting
+    them the same.
+
+    The pair is simulated on purpose: what matters is what the type **permits**,
+    not what today's rules happen to emit.
+    """
+
+    one_bucket = "pre_check.regex:same"
+
+    refusal = make_input(
+        safety=SafetyResult(
+            state=SafetyState.STOP,
+            evaluated_at_revision=REVISION,
+            handoff=Handoff.NONE,
+            rule_id=one_bucket,
+        )
+    )
+    crisis = make_input(
+        safety=SafetyResult(
+            state=SafetyState.STOP,
+            evaluated_at_revision=REVISION,
+            handoff=Handoff.REQUIRED,
+            rule_id=one_bucket,
+        )
+    )
+
+    assert eng.readiness_key(refusal)  # presence: a key was really produced
+    assert eng.readiness_key(refusal) != eng.readiness_key(crisis)
+
+
+def test_a_verdict_must_say_which_promise_it_makes() -> None:
+    """`NONE` is a decision, not a default (§127). A producer that says nothing
+    leaves the surface to guess, so it is refused instead."""
+
+    with pytest.raises(ValueError, match="without a handoff"):
+        SafetyResult(state=SafetyState.STOP, evaluated_at_revision=REVISION)
+
+
+def test_a_verdict_that_never_ran_promises_nothing() -> None:
+    """The other direction. Absence lives in `SafetyState.UNKNOWN`, which already
+    means the engine did not run — §127 froze three values and a fourth would
+    reopen it."""
+
+    assert SafetyResult.not_evaluated().handoff is None
+
+    with pytest.raises(ValueError, match="cannot promise a next step"):
+        SafetyResult(
+            state=SafetyState.UNKNOWN, evaluated_at_revision=None, handoff=Handoff.REQUIRED
+        )
+
+
+def test_there_are_exactly_three_handoff_values() -> None:
+    """Frozen by §127. A fourth would be reopening a closed decision."""
+
+    assert {h.value for h in Handoff} == {"none", "recommended", "required"}

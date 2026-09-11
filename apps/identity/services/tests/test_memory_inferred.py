@@ -107,28 +107,28 @@ class _StubPCClient:
         self.calls: list[tuple] = []
         self.closed = False
 
-    def get_context(self, *, ayla_user_id: str):
+    def get_context(self, *, ayla_user_id: str, external_user_id: str):
         self.calls.append(("get", ayla_user_id))
         from apps.integrations.ayla.personal_context_client import DeclaredContext
 
         return DeclaredContext(ayla_user_id=ayla_user_id, context={"diet_type": "vegan"})
 
-    def patch_context(self, *, ayla_user_id: str, updates: list):
+    def patch_context(self, *, ayla_user_id: str, external_user_id: str, updates: list):
         self.calls.append(("patch", ayla_user_id, updates))
         from apps.integrations.ayla.personal_context_client import DeclaredContext
 
         return DeclaredContext(ayla_user_id=ayla_user_id, context={})
 
-    def get_ask_eligibility(self, *, ayla_user_id: str):
+    def get_ask_eligibility(self, *, ayla_user_id: str, external_user_id: str):
         self.calls.append(("ask", ayla_user_id))
         from apps.integrations.ayla.personal_context_client import AskEligibility
 
         return AskEligibility(should_ask=True, field="diet_type", prompt_hint="?")
 
-    def mark_asked(self, *, ayla_user_id: str, field: str):
+    def mark_asked(self, *, ayla_user_id: str, external_user_id: str, field: str):
         self.calls.append(("mark", ayla_user_id, field))
 
-    def skip(self, *, ayla_user_id: str, field: str):
+    def skip(self, *, ayla_user_id: str, external_user_id: str, field: str):
         self.calls.append(("skip", ayla_user_id, field))
         return 2
 
@@ -225,7 +225,7 @@ class TestPersonalContextGate:
         _grant(bu, CT.MEMORY_GREEN)
 
         class _Failing(_StubPCClient):
-            def get_context(self, *, ayla_user_id: str):
+            def get_context(self, *, ayla_user_id: str, external_user_id: str):
                 raise PersonalContextTransportError("http_500")
 
         result = get_declared_prefs(bu, client=_Failing())  # type: ignore[arg-type]

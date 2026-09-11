@@ -19,7 +19,7 @@ import inspect
 
 from apps.orchestrator.decision_readiness import engine as eng
 from apps.orchestrator.decision_readiness import reason_codes as rc
-from apps.orchestrator.decision_readiness.safety_input import SafetyResult, SafetyState
+from apps.orchestrator.decision_readiness.safety_input import Handoff, SafetyResult, SafetyState
 from apps.orchestrator.decision_readiness.tests.conftest import (
     REVISION,
     SplittingProbe,
@@ -39,7 +39,9 @@ def test_d1_high_delegation_does_not_close_required_context() -> None:
 def test_d2_high_delegation_does_not_get_past_clarify() -> None:
     output = eng.evaluate(
         make_input(
-            safety=SafetyResult(state=SafetyState.CLARIFY, evaluated_at_revision=REVISION),
+            safety=SafetyResult(
+                state=SafetyState.CLARIFY, evaluated_at_revision=REVISION, handoff=Handoff.NONE
+            ),
             candidates=candidates(separation=0.1),
             delegation=eng.Delegation.HIGH,
         )
@@ -52,7 +54,9 @@ def test_d2_high_delegation_does_not_get_past_clarify() -> None:
 def test_d3_stop_blocks_regardless_of_delegation() -> None:
     output = eng.evaluate(
         make_input(
-            safety=SafetyResult(state=SafetyState.STOP, evaluated_at_revision=REVISION),
+            safety=SafetyResult(
+                state=SafetyState.STOP, evaluated_at_revision=REVISION, handoff=Handoff.NONE
+            ),
             delegation=eng.Delegation.HIGH,
         )
     )

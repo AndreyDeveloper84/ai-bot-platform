@@ -682,7 +682,9 @@ jobs:
       # two workers ever share a schema.
       - name: pytest apps/ (full suite)
         run: |
+          rm -f junit-apps.xml
           uv run pytest apps/ -q -n 4 --dist load \
+            --junitxml=junit-apps.xml \
             --deselect apps/miniapp_api/tests/test_c7_payments.py::TestPaymentMirrorReadModel::test_booking_confirmed_with_payment_id_stamps_hold \
             --deselect apps/miniapp_api/tests/test_c7_payments.py::TestPaymentMirrorReadModel::test_booking_confirmed_without_payment_id_no_mirror \
             --deselect apps/miniapp_api/tests/test_create_booking_ayla.py::TestLocalPathUnchanged::test_flag_off_keeps_local_path \
@@ -709,6 +711,85 @@ jobs:
             --deselect apps/skills/booking/tests/test_flow_continuation.py::TestSequenceB::test_combined_selection_slot_turn \
             --deselect apps/skills/booking/tests/test_flow_continuation.py::TestSequenceC::test_callback_confirm_executes \
             --deselect apps/skills/booking/tests/test_flow_continuation.py::TestNegatives::test_duplicate_text_confirm_no_double_mutation
+
+      # DRF-1349 — the test counts, read from junit rather than from the
+      # exit code. Before this step a red full-suite run printed no test
+      # numbers at all: the log ended at "Process completed with exit code
+      # 1" and the failing test had to be found by re-running things by
+      # hand (three attempts, on #1502). pytest's exit code is no
+      # substitute — it reports zero for a run that collected nothing, and
+      # non-zero for a healthy suite killed for memory. The numbers below
+      # are what a red-PR triage should read.
+      #
+      # Three deliberate properties:
+      #
+      #  - `tests` is printed BEFORE `failures`. failures=0 with tests=0
+      #    means "nothing ran", not "everything passed", so the collected
+      #    count is the first number in the log — and tests=0 fails this
+      #    step instead of riding along as a green run.
+      #  - a missing junit file is its own outcome ("JUNIT MISSING"), NOT
+      #    zero failures: it means pytest died before it finished
+      #    collection — import error, OOM kill, the container going away.
+      #  - the file is deleted before pytest runs (see the step above), so
+      #    an XML left over from an earlier run in the same workspace can
+      #    never be read as this run's result.
+      #
+      # `if: always()` because the run worth reading is exactly the one
+      # where the step above failed.
+      - name: pytest apps/ test counts (junit)
+        if: always()
+        run: |
+          python3 - <<'PY'
+          import os
+          import sys
+          import xml.etree.ElementTree as ET
+
+          path = "junit-apps.xml"
+
+          if not os.path.exists(path):
+              print(
+                  f"JUNIT MISSING - {path} was never written: pytest did not reach "
+                  "test collection. This is NOT zero failures."
+              )
+              sys.exit(1)
+
+          root = ET.parse(path).getroot()
+          suite = root if root.tag == "testsuite" else root.find("testsuite")
+          if suite is None:
+              print(f"JUNIT UNREADABLE - no <testsuite> element in {path}.")
+              sys.exit(1)
+
+          def count(key: str) -> int:
+              return int(suite.get(key) or 0)
+
+          tests = count("tests")
+          failures = count("failures")
+          errors = count("errors")
+          skipped = count("skipped")
+
+          # tests first, on purpose - see the comment on this step.
+          print(f"JUNIT tests={tests}")
+          print(f"JUNIT failures={failures} errors={errors} skipped={skipped}")
+          print(f"JUNIT passed={tests - failures - errors - skipped}")
+
+          if tests == 0:
+              print("JUNIT EMPTY - 0 tests collected. An empty run is not a green run.")
+              sys.exit(1)
+          PY
+
+      # The junit XML itself, so a red run is triaged by downloading one
+      # file instead of scrolling ~30 minutes of log. `if-no-files-found:
+      # warn` and not `error`: the missing-file case is already reported,
+      # with its cause, by the step above — a second red X here would only
+      # bury it.
+      - name: Upload pytest junit (apps/)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: junit-apps-${{ github.sha }}
+          path: junit-apps.xml
+          retention-days: 14
+          if-no-files-found: warn
 
       # mypy is blocking. `strict=False` keeps the bar reasonable while
       # apps/ are mostly empty AppConfigs; tighten to strict per-package
