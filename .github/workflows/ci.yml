@@ -486,6 +486,17 @@ jobs:
       - name: Nutrition-target substitution guard (AST lint)
         run: uv run python tools/lint/nutrition_target_guard.py apps/
 
+      # Owner decision 11.09 §3: «payload.get("safety") or NOT_APPLICABLE»
+      # is forbidden and AST-guarded. The guard catches the CLASS — an
+      # `or` / `.get(default)` / `getattr(default)` / `x if x else` that
+      # supplies a SafetyState where a verdict was absent — not one
+      # spelling. UNKNOWN / not_evaluated() are the honest defaults and
+      # pass. What it cannot see (two-line defaults, renamed keys) is
+      # named in its docstring; the consumer's __post_init__ is the
+      # second line.
+      - name: Safety-default substitution guard (AST lint)
+        run: uv run python tools/lint/safety_default_guard.py apps/ tests/
+
       - name: Django manage.py check
         run: uv run python manage.py check
 
