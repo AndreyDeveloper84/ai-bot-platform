@@ -154,6 +154,11 @@ def request_account_deletion(bot_user: BotUser, *, client: Any = None) -> Deleti
     # ``created`` берётся из тела: клиент отдаёт JSON без HTTP-статуса, а
     # «принято» и «уже принято» человеку — разное (второе нажатие).
     view = _from_wire(data, created=bool(data.get("created", False)))
+    # D2 (§7): персонализация прекращается СРАЗУ — флаг ставится здесь, до
+    # возврата (то есть до показа успеха), на уровне человека.
+    from apps.identity.services.deletion_gate import mark_deletion_requested
+
+    mark_deletion_requested(link.ayla_user_id, request_id=view.request_id)
     logger.info(
         "identity.deletion_request.accepted bot_user=%s request_id=%s deadline=%s status=%s",
         bot_user.id,
@@ -196,9 +201,23 @@ def current_account_deletion(
             exc.__class__.__name__,
         )
         return None
+    from apps.identity.services.deletion_gate import (
+        clear_deletion_flag,
+        mark_deletion_requested,
+    )
+
     if data is None:
+        # Каталог говорит «заявок не было» — и у нас флага быть не должно.
+        clear_deletion_flag(link.ayla_user_id)
         return None
     try:
-        return _from_wire(data, created=False)
+        view = _from_wire(data, created=False)
     except DeletionNotStarted:
         return None
+    # Догоняем каталог в обе стороны: заявка из приложения ставит флаг,
+    # завершённая — снимает.
+    if view.is_open:
+        mark_deletion_requested(link.ayla_user_id, request_id=view.request_id)
+    else:
+        clear_deletion_flag(link.ayla_user_id)
+    return view
