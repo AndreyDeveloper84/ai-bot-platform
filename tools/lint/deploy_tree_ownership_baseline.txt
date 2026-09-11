@@ -1,0 +1,45 @@
+# Objects in the dev deploy tree NOT owned by the deploy user, as they stood
+# when tools/lint/deploy_tree_ownership.py landed (DRF-1646).
+#
+# This file is a RATCHET, not a verdict. Every number here is damage already
+# done: 3315 objects the deploy user cannot overwrite, in a tree two accounts
+# write to on every run. Lowering a number is progress and is done by hand
+# after the repair. Raising one is not allowed — the guard fails instead.
+#
+# Per category on purpose. A total would let a repair in staticfiles/ and a
+# regression in .git/ cancel out into a green run.
+#
+# MEASURED 2026-09-11 on /home/taximeter/ai-bot-platform-dev by the session
+# holding DRF-1646, which has shell access to the box. Not re-measured here:
+# this window has no host access, and a number copied from a report is a
+# number, not a measurement. If it disagrees with the tree, the tree wins —
+# re-measure and correct this file rather than arguing with it.
+#
+# Owner split at the time of measurement: taximeter 940, root 735, other 2.
+# (Those count top-level-ish objects; the per-category numbers below count
+# every object in the walk, which is why they are larger.)
+#
+# WHAT THE NUMBERS SAY ABOUT WHO DID IT
+#
+#   .git/ 2130 + other 1011  git ran as root in this tree, repeatedly. No
+#                            workflow does that: deploy-dev.yml:88-90 and
+#                            deploy.yml:125-127 both run fetch/pull as
+#                            ${DEV_USER}. A person, by hand. `other` includes
+#                            ordinary source files — tests/test_admin_humanize.py,
+#                            tests/support/migration_graph.py,
+#                            tests/contracts/test_master_address_has_no_readers.py
+#                            — i.e. working copies, not artefacts.
+#
+#   staticfiles/ 174         the container producer, and the only one this
+#                            repository explains: docker-compose.staging.yml
+#                            mounts ./:/app, the image has no USER, and
+#                            deploy-dev.yml runs `collectstatic` under
+#                            `sudo docker compose run`. Fixable in the repo.
+#
+#   __pycache__ 0            measured, not assumed. The prediction that this
+#                            would be the bulk was wrong; it is empty.
+
+.git/ = 2130
+staticfiles/ = 174
+__pycache__/ = 0
+other = 1011
