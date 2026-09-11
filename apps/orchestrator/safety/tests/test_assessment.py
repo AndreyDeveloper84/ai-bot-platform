@@ -21,15 +21,19 @@ is an observation about behaviour. Only the second one survives a refactor.
 
 from __future__ import annotations
 
+import ast
 from datetime import datetime, timezone
 
 import pytest
 
-from apps.orchestrator.decision_readiness.safety_input import SafetyResult, SafetyState
+from apps.orchestrator.decision_readiness.safety_input import (
+    Handoff,
+    SafetyResult,
+    SafetyState,
+)
 from apps.orchestrator.safety import pre_check as pre_check_mod
 from apps.orchestrator.safety.assessment import (
     UNREACHABLE_TODAY,
-    HandoffRequirement,
     SafetyAssessment,
     assess,
     policy_version,
@@ -63,13 +67,13 @@ class TestTheTwoStopsAreDifferentPromises:
         a = assess(_result(SafetyVerdict.HANDOFF), state_revision=1, now=_NOW)
 
         assert a.state is SafetyState.STOP
-        assert a.handoff is HandoffRequirement.REQUIRED
+        assert a.handoff is Handoff.REQUIRED
 
     def test_an_ordinary_refusal_does_not(self):
         a = assess(_result(SafetyVerdict.BLOCK), state_revision=1, now=_NOW)
 
         assert a.state is SafetyState.STOP
-        assert a.handoff is HandoffRequirement.NONE
+        assert a.handoff is Handoff.NONE
 
     def test_the_state_alone_cannot_tell_them_apart(self):
         """The reason ``handoff`` has to exist as its own field.
@@ -85,44 +89,29 @@ class TestTheTwoStopsAreDifferentPromises:
         assert crisis.handoff != refusal.handoff
 
 
-class TestTheHandoffPromiseIsLostAtTheBoundary:
-    """A named gap, not a silent one.
+class TestTheHandoffPromiseSurvivesTheBoundary:
+    """Was: ``TestTheHandoffPromiseIsLostAtTheBoundary``. Flipped 11.09.2026.
 
-    ``SafetyResult`` has no field for ``handoff``, so the distinction proven
-    above does not survive the projection. This is pinned rather than worked
-    around: a silent loss looks like working code, and the difference between
-    the two promises is exactly what §127 says must never be lost.
+    The old class asserted the opposite and was right to: ``SafetyResult`` had
+    no field for the promise, so a crisis `STOP` and a policy-refusal `STOP`
+    arrived downstream carrying the same thing. That was a named gap with a
+    test on it rather than a silent loss, and the test was built to go red the
+    day the field landed.
 
-    **When DecisionReadiness grows the field, this class flips** — visibly,
-    with its reason — and the gap paragraph in ``assessment`` goes with it.
+    It landed. The assertions are inverted **deliberately**, and the reason is
+    recorded here rather than in the commit message: a reader in six months
+    must see that the contract changed, not that somebody removed a test that
+    was in the way. A deletion and an inversion produce the same diff and
+    opposite meanings.
+
+    What is guarded now is the other direction — that the promise keeps
+    arriving, and that nothing quietly manufactures it.
     """
 
-    def test_the_consumer_type_has_nowhere_to_put_it(self):
-        assert "handoff" not in SafetyResult.__dataclass_fields__, (
-            "SafetyResult grew a handoff field — carry assessment.handoff into "
-            "to_readiness_input, make sure it enters digest_fields (two different "
-            "promises must not share an idempotency key), and rewrite this class "
-            "to assert the promise survives"
-        )
+    def test_the_consumer_type_carries_the_promise(self):
+        assert "handoff" in SafetyResult.__dataclass_fields__
 
-    def test_the_promise_is_gone_even_though_the_cause_survives(self):
-        """The precise shape of the loss, which is narrower than it first looks.
-
-        A first reading says «two different promises collide into one record».
-        That is NOT what happens, and the difference matters enough to pin:
-        ``rule_id`` carries the bucket, so a crisis and a refusal DO arrive
-        distinguishable and DO digest differently.
-
-        What is lost is the promise itself. ``rule_id`` is evidence about the
-        CAUSE and is read by someone who knows the rule catalogue;
-        ``handoff`` is a statement about the NEXT STEP and has to be readable
-        without it. A consumer deciding "do I call a human" would have to
-        parse rule identifiers to find out — which is exactly the coupling
-        §127's separate field exists to remove.
-
-        So the cost is not collision. It is that the answer is only reachable
-        by knowing things the consumer should not need to know.
-        """
+    def test_the_two_stops_are_distinguishable_downstream(self):
         crisis = to_readiness_input(
             assess(_result(SafetyVerdict.HANDOFF), state_revision=1, now=_NOW)
         )
@@ -131,35 +120,29 @@ class TestTheHandoffPromiseIsLostAtTheBoundary:
         )
 
         assert crisis.state is refusal.state is SafetyState.STOP
-        # They are separable — through the cause, not the promise.
-        assert crisis.rule_id != refusal.rule_id
-        assert crisis.digest_fields() != refusal.digest_fields()
-        # And there is no field that answers "call a human?" directly.
-        assert not hasattr(crisis, "handoff")
+        assert crisis.handoff is Handoff.REQUIRED
+        assert refusal.handoff is Handoff.NONE
 
-    def test_the_separation_holds_by_accident_and_would_stop_holding(self):
-        """Named limit on the line above.
+    def test_the_promise_reaches_the_idempotency_key(self):
+        """The half that made the gap expensive rather than merely untidy.
 
-        The digests differ only because the two promises happen to come from
-        different buckets today. Two verdicts sharing a bucket but carrying
-        different promises would digest alike — and nothing in the contract
-        forbids that, because the contract has no notion of a promise here.
-
-        Simulated rather than asserted about the real mapping: the point is
-        what the TYPE permits, not what today's rules happen to do.
+        Two decisions carrying different promises must not share a key. Before
+        the field, they were separated only by ``rule_id`` — that is, by
+        accident of coming from different buckets. Now the promise itself is
+        in the digest, so the separation holds even when the cause is shared.
         """
-        same_bucket_crisis = SafetyAssessment(
+        same_cause_crisis = SafetyAssessment(
             state=SafetyState.STOP,
-            handoff=HandoffRequirement.REQUIRED,
+            handoff=Handoff.REQUIRED,
             evaluated_at_revision=1,
             evaluated_at=_NOW,
             source="pre_check",
             triggered=True,
             rule_id="pre_check.regex:block",
         )
-        same_bucket_refusal = SafetyAssessment(
+        same_cause_refusal = SafetyAssessment(
             state=SafetyState.STOP,
-            handoff=HandoffRequirement.NONE,
+            handoff=Handoff.NONE,
             evaluated_at_revision=1,
             evaluated_at=_NOW,
             source="pre_check",
@@ -167,11 +150,103 @@ class TestTheHandoffPromiseIsLostAtTheBoundary:
             rule_id="pre_check.regex:block",
         )
 
-        assert same_bucket_crisis.handoff != same_bucket_refusal.handoff
         assert (
-            to_readiness_input(same_bucket_crisis).digest_fields()
-            == to_readiness_input(same_bucket_refusal).digest_fields()
-        ), "if this ever stops being true, the boundary gained a promise field"
+            to_readiness_input(same_cause_crisis).digest_fields()
+            != to_readiness_input(same_cause_refusal).digest_fields()
+        ), "two different promises share an idempotency key"
+
+
+class TestTheAdapterNeverSubstitutesAPromise:
+    """The narrow failure the consumer's own guard cannot see.
+
+    ``SafetyResult`` refuses a known state with no handoff, so **forgetting**
+    the argument fails loudly. What it cannot refuse is a handoff that was
+    *supplied* — so ``or Handoff.NONE`` in the adapter would satisfy every
+    check while turning "the producer did not say" back into "not required",
+    one floor below where anyone looks.
+
+    Same for a swallowed exception: ``UNKNOWN`` with no revision is the
+    consumer's **legal** pair, so ``except: return not_evaluated()`` would
+    make a mapping failure arrive wearing the shape of an honest absence.
+    Neither is visible from behaviour on valid input, so both are asserted on
+    the source.
+    """
+
+    def test_the_adapter_passes_the_promise_it_was_given(self):
+        for verdict, expected in (
+            (SafetyVerdict.HANDOFF, Handoff.REQUIRED),
+            (SafetyVerdict.BLOCK, Handoff.NONE),
+        ):
+            projected = to_readiness_input(assess(_result(verdict), state_revision=1, now=_NOW))
+            assert projected.handoff is expected
+
+    @staticmethod
+    def _body(func) -> ast.AST:
+        """The function's CODE, with its prose removed.
+
+        Read on the tree rather than on the text, and the first version of
+        this test is why: it matched the word ``except`` inside the docstring
+        that explains why there is no ``except``. A guard that reads
+        documentation instead of the program is the thing this whole file
+        argues against, and it caught itself.
+        """
+        import inspect
+        import textwrap
+
+        tree = ast.parse(textwrap.dedent(inspect.getsource(func)))
+        node = tree.body[0]
+        stripped = list(node.body)
+        if (
+            stripped
+            and isinstance(stripped[0], ast.Expr)
+            and isinstance(stripped[0].value, ast.Constant)
+            and isinstance(stripped[0].value.value, str)
+        ):
+            stripped.pop(0)
+        node.body = stripped
+        return node
+
+    def test_the_adapter_does_not_default_the_promise(self):
+        body = self._body(to_readiness_input)
+
+        passed = [
+            kw
+            for call in ast.walk(body)
+            if isinstance(call, ast.Call)
+            for kw in call.keywords
+            if kw.arg == "handoff"
+        ]
+        assert passed, "the adapter stopped passing the promise at all"
+        for kw in passed:
+            assert isinstance(kw.value, ast.Attribute), (
+                "handoff is no longer passed straight through — anything but a "
+                "plain attribute read is a place a fallback can hide"
+            )
+            assert not isinstance(kw.value, ast.BoolOp)
+
+        assert not [n for n in ast.walk(body) if isinstance(n, ast.BoolOp)], (
+            "a boolean fallback appeared — «the producer did not say» would "
+            "become «not required», and the consumer cannot tell"
+        )
+
+    def test_the_adapter_swallows_nothing(self):
+        body = self._body(to_readiness_input)
+
+        assert not [n for n in ast.walk(body) if isinstance(n, ast.Try)], (
+            "a try/except appeared in the adapter — a mapping failure would "
+            "arrive as UNKNOWN, which the consumer accepts as a legal absence"
+        )
+        manufactured = [
+            n
+            for n in ast.walk(body)
+            if isinstance(n, ast.Call)
+            and isinstance(n.func, ast.Attribute)
+            and n.func.attr == "not_evaluated"
+        ]
+        assert not manufactured, (
+            "the adapter learned to manufacture an absence; «did not run» is "
+            "not something a completed assessment can become"
+        )
 
 
 class TestNothingFiredIsNotNothingRan:
@@ -217,7 +292,7 @@ class TestTheVerdictCarriesEnoughToBeCheckedLater:
         with pytest.raises(ValueError, match="timezone-aware"):
             SafetyAssessment(
                 state=SafetyState.NORMAL,
-                handoff=HandoffRequirement.NONE,
+                handoff=Handoff.NONE,
                 evaluated_at_revision=1,
                 evaluated_at=datetime(2026, 9, 11, 12, 0),
                 source="pre_check",
@@ -231,7 +306,7 @@ class TestTheVerdictCarriesEnoughToBeCheckedLater:
         with pytest.raises(ValueError, match="did not run"):
             SafetyAssessment(
                 state=SafetyState.UNKNOWN,
-                handoff=HandoffRequirement.NONE,
+                handoff=Handoff.NONE,
                 evaluated_at_revision=1,
                 evaluated_at=_NOW,
                 source="pre_check",
@@ -271,7 +346,7 @@ class TestWhatIsUnreachableStaysNamed:
         from apps.orchestrator.safety.assessment import _MAPPING
 
         produced = {handoff for _, handoff in _MAPPING.values()}
-        assert HandoffRequirement.RECOMMENDED not in produced, (
+        assert Handoff.RECOMMENDED not in produced, (
             "a rule now produces RECOMMENDED — update UNREACHABLE_TODAY"
         )
 
