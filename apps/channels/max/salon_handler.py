@@ -72,6 +72,7 @@ from apps.channels.max.staff_menu import (
     menu_header,
 )
 from apps.events.services import emit
+from apps.identity.services.identity_card import WHOAMI_COMMAND, build_card, render_for_person
 from apps.identity.services.role_resolver import resolve_role
 from apps.identity.services.staff_invites import (
     InviteError,
@@ -549,6 +550,20 @@ def _handle_salon_event_inner(event: CanonicalEvent, trace_id: str | uuid.UUID |
         invite_token = _extract_invite_token(event.text)
         if invite_token is not None:
             _handle_master_invite(event, invite_token, bot_user, tenant, entry)
+            return
+
+        if event.text.strip() == WHOAMI_COMMAND:
+            # Owner 11.09 §12.3 — the person's own card in THIS salon: role
+            # here, master card here, dates; other salons as a number. Before
+            # the role cascade so a person with no role yet (the ones §12 is
+            # about) gets an answer instead of «введите код».
+            _reply(
+                event,
+                render_for_person(
+                    build_card(bot_user.channel, bot_user.channel_user_id),
+                    tenant_slug=tenant.slug,
+                ),
+            )
             return
 
         role_ctx = resolve_role(bot_user)

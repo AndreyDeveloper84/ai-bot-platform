@@ -41,6 +41,7 @@ from apps.tenancy.models import Tenant
 from apps.tenancy.onboarding import (
     REASON_LABELS,
     ConnectError,
+    ConnectPending,
     assess_salon,
     connect_salon,
     verify_salon_masters,
@@ -105,25 +106,26 @@ class TenantAdminForm(forms.ModelForm):
 class SalonConnectForm(forms.Form):
     """Поля экрана «подключить салон» (DRF-1525).
 
-    Идентификатор — обязательное поле: его нельзя ввести «на глаз»,
-    :func:`connect_salon` проверяет по Ayla, что по нему что-то есть,
-    до сохранения строки.
+    Три поля и кнопка. Поля «Ayla Tenant UUID» здесь больше нет (владелец,
+    11.09.2026): идентификатор салона приходит из каталога по slug —
+    :func:`connect_salon` находит салон в Ayla или заводит его и берёт
+    UUID оттуда. Человек его не вводит и не видит; вводимый «на глаз»
+    ключ и был источником класса DRF-1510.
     """
 
     slug = forms.SlugField(
         max_length=50,
         label="Slug",
-        help_text="Строчные буквы, цифры, дефис/подчёркивание, 2–50 знаков.",
-    )
-    name = forms.CharField(max_length=200, label="Название салона")
-    tenant_id = forms.CharField(
-        label="Ayla Tenant UUID",
         help_text=(
-            "UUID салона из бэкенда Ayla. Синхронизация ходит с "
-            "?tenant=<UUID>: без настоящего идентификатора салон "
-            "зазеркалит ноль строк при «успешном» прогоне. Перед "
-            "сохранением экран проверит, что по нему что-то есть."
+            "Строчные буквы, цифры, дефис/подчёркивание, 2–50 знаков. Тот же "
+            "slug будет у салона в Ayla: если он там уже есть — салон "
+            "найдётся, если нет — будет заведён."
         ),
+    )
+    name = forms.CharField(
+        max_length=200,
+        label="Название салона",
+        help_text="Как в Ayla, если салон там уже заведён: другое название по тому же slug — отказ.",
     )
     city = forms.CharField(
         max_length=120,
@@ -441,6 +443,7 @@ class TenantAdmin(AylaAdminMedia, admin.ModelAdmin):
         form = SalonConnectForm(request.POST if verify_of is None else None)
         result = None
         error = None
+        pending = None
         salon = None
         verified = None
 
@@ -468,12 +471,16 @@ class TenantAdmin(AylaAdminMedia, admin.ModelAdmin):
                 result = connect_salon(
                     slug=form.cleaned_data["slug"],
                     name=form.cleaned_data["name"],
-                    tenant_id=form.cleaned_data["tenant_id"],
                     city=form.cleaned_data["city"],
                 )
                 salon = result.tenant
             except ConnectError as exc:
                 error = str(exc)
+            except ConnectPending as exc:
+                # SETUP_PENDING, не отказ: данные верны, контур не
+                # донастроен. Форма остаётся заполненной, чтобы после
+                # настройки токена хватило одного нажатия.
+                pending = exc
 
         # Оценка после действия, а не до: кнопка обещает «салон появится
         # в поиске», и экран обязан показать, случилось ли это на самом
@@ -502,6 +509,7 @@ class TenantAdmin(AylaAdminMedia, admin.ModelAdmin):
             "verified": verified,
             "verify_field": self.VERIFY_FIELD,
             "error": error,
+            "pending": pending,
             "opts": self.model._meta,  # noqa: SLF001 — admin chrome API
         }
         return TemplateResponse(request, "admin/tenancy/tenant/connect.html", context)
