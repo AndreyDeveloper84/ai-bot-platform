@@ -24,6 +24,7 @@
 from __future__ import annotations
 
 import inspect
+from typing import Any
 from unittest.mock import Mock, patch
 
 from apps.consent.personal_calculation import (
@@ -34,7 +35,7 @@ from apps.consent.personal_calculation import (
     ConsentAttestationUnavailable,
 )
 from apps.integrations.ayla import ProfileResponse
-from apps.skills.base import SkillContext
+from apps.skills.base import SkillContext, SkillResult
 from apps.skills.nutrition_anketa.skill import NutritionAnketaSkill
 
 _ATTESTATION = "apps.consent.personal_calculation.current_attestation"
@@ -118,7 +119,7 @@ def _client_that_must_not_be_called() -> Mock:
     return client
 
 
-def _complete(ctx: SkillContext, client: Mock, attestation_side_effect):
+def _complete(ctx: SkillContext, client: Mock, attestation_side_effect: object) -> SkillResult:
     with (
         patch(_CLIENT, return_value=client),
         patch(_ATTESTATION, side_effect=attestation_side_effect),
@@ -170,36 +171,37 @@ class TestWithAttestationTheBodyCarriesIt:
 
 
 class TestWithoutAttestationNothingIsSent:
-    def _refused(self, reason: str):
+    def _refused(self, reason: str) -> tuple[SkillResult, dict[str, Any], _Conversation]:
         ctx, conversation = _context("cb:anketa:choice:goal:maintain", state=_READY_FOR_GOAL)
         result = _complete(
             ctx,
             _client_that_must_not_be_called(),
             ConsentAttestationUnavailable(reason),
         )
-        return result, conversation
+        assert result.action_data is not None
+        return result, result.action_data, conversation
 
     def test_not_granted_refuses_by_name_and_keeps_the_diary(self) -> None:
-        result, conversation = self._refused(NOT_GRANTED)
+        result, action_data, conversation = self._refused(NOT_GRANTED)
 
         assert result.action_type == "anketa_consent_required"
-        assert result.action_data["reason"] == NOT_GRANTED
+        assert action_data["reason"] == NOT_GRANTED
         assert "дневник" in result.reply_text.lower(), "§92: отказ не закрывает дневник"
         # Собранные параметры тела не остаются лежать без основания.
         assert "nutrition_anketa" not in conversation.skill_state
 
     def test_missing_version_is_its_own_reason(self) -> None:
         """Версии нет — это не ``not_granted``: чинится текстом, а не согласием."""
-        result, _ = self._refused(NO_DOCUMENT_VERSION)
+        result, action_data, _ = self._refused(NO_DOCUMENT_VERSION)
 
         assert result.action_type == "anketa_consent_required"
-        assert result.action_data["reason"] == NO_DOCUMENT_VERSION
+        assert action_data["reason"] == NO_DOCUMENT_VERSION
 
     def test_registry_failure_refuses_rather_than_sends(self) -> None:
-        result, _ = self._refused(LOOKUP_FAILED)
+        result, action_data, _ = self._refused(LOOKUP_FAILED)
 
         assert result.action_type == "anketa_consent_required"
-        assert result.action_data["reason"] == LOOKUP_FAILED
+        assert action_data["reason"] == LOOKUP_FAILED
 
     def test_unpatched_lookup_on_a_non_orm_user_closes_not_opens(self) -> None:
         """Без подмены: Mock вместо BotUser упирается в реестр — и это отказ.
@@ -213,6 +215,7 @@ class TestWithoutAttestationNothingIsSent:
             result = NutritionAnketaSkill().handle(ctx)
 
         assert result.action_type == "anketa_consent_required"
+        assert result.action_data is not None
         assert result.action_data["reason"] == LOOKUP_FAILED
 
 
