@@ -77,6 +77,49 @@ jobs:
               ;;
           esac
 
+      # Сторож называет, КАКОЙ ВЕРСИЕЙ он судит.
+      #
+      # На `pull_request` workflow берётся из ГОЛОВЫ PR, а не из `dev`. PR,
+      # открытый до починки сторожа и не перебазированный, несёт старую копию —
+      # и краснеет при верном теле. Перезапуск не помогает: он перечитывает то
+      # же тело тем же старым сторожем. 11.09.2026 так упал #1550: тело
+      # `**Задача: DRF-1349**` проходило под регуляркой на `dev` и не проходило
+      # под регуляркой в голове PR. Читатель лога принял правило головы за
+      # правило репозитория — потому что лог ничем их не различал.
+      #
+      # Поэтому сторож печатает блоб своей копии против блоба на `dev`. Не
+      # совет «проверь, не старая ли копия», а строка, по которой это видно.
+      # Через contents API, без checkout: сравниваются блобы, то есть
+      # СОДЕРЖИМОЕ файла, и `contents: read` для этого достаточно.
+      #
+      # Шаг информационный и НЕ падает сам: его предмет — назвать версию, а не
+      # судить. Не смог сравнить — говорит об этом отдельной строкой, иначе
+      # молчание читалось бы как «совпадает».
+      - name: Name the guard's own version
+        if: steps.author.outputs.skip == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+          WF_PATH: .github/workflows/ticket-reference-guard.yml
+        run: |
+          set -uo pipefail
+          blob_at() {
+            gh api "repos/${REPO}/contents/${WF_PATH}?ref=$1" --jq .sha 2>/dev/null || true
+          }
+          head_blob="$(blob_at "$HEAD_SHA")"
+          base_blob="$(blob_at "$BASE_REF")"
+          if [ -z "$head_blob" ] || [ -z "$base_blob" ]; then
+            echo "::warning::Не удалось сравнить версию сторожа с ${BASE_REF} (head=${head_blob:-?} base=${base_blob:-?}). Судит копия из головы PR; какая — неизвестно."
+            exit 0
+          fi
+          if [ "$head_blob" = "$base_blob" ]; then
+            echo "::notice::Сторож судит копией, совпадающей с ${BASE_REF} (blob ${head_blob:0:12})."
+          else
+            echo "::warning::Сторож судит копией из ГОЛОВЫ PR (blob ${head_blob:0:12}), а на ${BASE_REF} другая (blob ${base_blob:0:12}). Красный при верном теле — сначала перебазируйте: перезапуск перечитает то же тело тем же сторожем."
+          fi
+
       - name: Check for a ticket reference
         if: steps.author.outputs.skip == 'false'
         env:

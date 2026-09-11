@@ -131,6 +131,7 @@ def build(
                     else None
                 ),
                 "ask_reason": output.next_question.ask_reason.value,
+                "ask_reason_mechanism": output.next_question.ask_reason_mechanism,
             }
             if output.next_question
             else None

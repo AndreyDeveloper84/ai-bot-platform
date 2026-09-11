@@ -4264,7 +4264,8 @@ a {
 }
 
 /* F4 anonymous-gate OAuth pending placeholder (round-1) — shown
-   when VITE_MAX_OAUTH_ENABLED !== "true". Replaces the prior
+   when VITE_MAX_OAUTH_URL is empty (DRF-1319: выключателем служит сам
+   адрес, а не булев флаг без установщика). Replaces the prior
    dead-end «Зарегистрироваться» CTA with a soft «coming soon»
    message + a fallback nav back to catalog. */
 .customer-confirm__oauth-pending {

@@ -257,6 +257,25 @@ class AskPermission:
         return self.outcome in {AskOutcome.FIRST_ASK, AskOutcome.REASK_ALLOWED}
 
 
+class ExpiryMechanism(str, Enum):
+    """Which of two different things expired, behind one outward reason code.
+
+    §13.5 gives one code, `REASK_ANSWER_EXPIRED`, and defines it by a `VOLATILE`
+    slot whose `ttl_seconds` elapsed. Slice E9 applies it to a second mechanism:
+    the session itself ending, which §13.4 says is when a `STABLE` slot's answer
+    reaches the end of its life (canon §4.1, the 2h inactivity TTL).
+
+    The five reasons are frozen, so a sixth code is not available and is not
+    wanted. What is wanted is the rule this project keeps relearning: **one
+    coarse name outward, separate counters inward.** A month from now the
+    question "why are we re-asking" has to be answerable, and a single
+    undifferentiated `REASK_ANSWER_EXPIRED` cannot answer it.
+    """
+
+    VOLATILE_TTL = "volatile_ttl"
+    SESSION_ENDED = "session_ended"
+
+
 @dataclass(frozen=True, slots=True)
 class ReaskConditions:
     """The five conditions of §13.5, as they arrive from outside the engine.
@@ -271,6 +290,17 @@ class ReaskConditions:
     semantics_changed: bool = False
     candidate_set_changed: bool = False
     safety_reevaluation: bool = False
+    expiry_mechanism: ExpiryMechanism | None = None
+
+    def __post_init__(self) -> None:
+        if self.answer_expired and self.expiry_mechanism is None:
+            raise ValueError(
+                "answer_expired without an expiry_mechanism: two different things expire "
+                "behind this one reason code, and an unnamed one cannot be counted apart "
+                "from the other (see ExpiryMechanism)"
+            )
+        if self.expiry_mechanism is not None and not self.answer_expired:
+            raise ValueError("expiry_mechanism named without answer_expired set")
 
     def first_matching(self) -> AskReason | None:
         """The §13.5 table order, so that two simultaneous conditions still give

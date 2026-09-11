@@ -114,29 +114,36 @@ def test_the_actor_is_resolved_on_the_host_not_on_the_runner(
     )
 
 
-def test_both_container_runs_write_as_the_deploy_user(steps: list[dict]) -> None:
-    """``--user`` у ОБОИХ вызовов ``run --rm``, а не только у пишущего.
+def test_every_container_process_carries_user(steps: list[dict]) -> None:
+    """``--user`` у КАЖДОГО ``run --rm`` и ``exec`` compose, не только у пишущих.
 
-    ``migrate`` сегодня в дерево не пишет, и строка у него выглядит лишней.
-    Она не лишняя: канал, оставленный открытым, — это тот самый случай,
-    когда чинят запись и оставляют чтение.
+    ``sudo -u`` на хосте решает, кто позвал клиента docker; кто работает
+    ВНУТРИ контейнера и чьим uid ложатся файлы в примонтированное дерево,
+    решает только ``--user``. Два механизма на разные предметы (#1586).
+
+    Прежняя редакция пинила ``run --rm`` и не видела ``exec``. Дыру нашёл
+    #1592 (11.09.2026): шаг с ``exec -T web python manage.py … --write`` под
+    безупречным ``sudo -u … -H`` — и записал бы root-овый файл в дерево
+    владельца. Сторож на ``run --rm`` был зелёным, потому что ``exec`` не
+    ``run``. Стережётся класс — процесс в контейнере, — а не одна подкоманда.
+
+    ``migrate`` и ``smoke_alert`` в дерево не пишут, и строка у них выглядит
+    лишней. Она не лишняя: правило без исключений проверяемо, а правило с
+    исключением требует, чтобы сторож знал, какие команды пишут, — знание,
+    которое устаревает молча.
     """
-    # Комментарии отбрасываются. Первая версия этого сторожа считала
-    # командами строки «run --rm web uses the freshly built image» и
-    # «\`run --rm web\` берёт СВЕЖЕСОБРАННЫЙ образ» — то есть читала рассказ
-    # о коде вместо кода. Дефект был в стороже, и починен сторож.
-    runs = []
-    for step in steps:
-        for line in (step.get("run") or "").splitlines():
-            bare = line.strip().lstrip("\\")
-            if bare.startswith("#"):
-                continue
-            if "run --rm" in bare:
-                runs.append(bare)
+    # Строки склеиваются по продолжению: ``exec -T`` стоит в одной строке,
+    # ``--user`` может стоять в следующей — команда одна.
+    procs = [
+        ln
+        for step in steps
+        for ln in logical_lines(step)
+        if "docker compose" in ln and (" run --rm" in ln or " exec " in ln)
+    ]
 
-    assert len(runs) >= 2, f"вызовов run --rm найдено {len(runs)} — ищу не там"
-    without = [r for r in runs if "--user" not in r]
-    assert without == [], f"контейнер запишет файлы от root: {without}"
+    assert len(procs) >= 3, f"процессов в контейнере найдено {len(procs)} — ищу не там"
+    without = [p for p in procs if "--user" not in p]
+    assert without == [], f"процесс в контейнере пойдёт от uid образа, не владельца: {without}"
 
 
 def test_the_long_lived_services_are_not_switched_to_another_user() -> None:
@@ -407,3 +414,46 @@ def test_a_continued_command_is_read_as_one() -> None:
 
     assert _unwrapped(wrapped) == []
     assert _unwrapped(bare) != []
+
+
+def test_the_only_write_root_does_itself_is_handing_the_tree_back(
+    steps: list[dict],
+) -> None:
+    """Исключение из правила «пишет владелец» — ровно одно, и оно названо.
+
+    Правило «все пишущие команды идут от владельца» имеет один осмысленный
+    предел: вернуть дерево владельцу может только тот, у кого права, то есть
+    root. Эта запись меняет не содержимое, а принадлежность, и она —
+    единственное, что root делает сам.
+
+    Исключение без стража превращается в дыру: следующий ``chown`` в этом
+    файле проехал бы молча. Поэтому граница пинится с обеих сторон —
+    ``chown`` ровно один во всём воркфлоу, он возвращает дерево ИМЕННО
+    владельцу и стоит ПЕРЕД проверкой прав.
+
+    Почему вообще нужен: уборка руками не держится. Каталоги, переданные
+    владельцу 11.09.2026 в 06:12, снова стали root-овыми после выкладки
+    06:37–06:52, шедшей ещё от root, и набор таких каталогов не фиксирован —
+    каждый слитый PR с новым каталогом добавлял свой.
+    """
+
+    ship = next((s for s in steps if "dist.new" in (s.get("run") or "")), None)
+    assert ship is not None, "шаг выкладки мини-аппа не найден — сторож смотрит не туда"
+
+    everywhere = [ln for s in steps for ln in logical_lines(s) if "chown" in ln]
+    assert len(everywhere) == 1, f"chown должен быть ровно один — граница исключения: {everywhere}"
+
+    lines = logical_lines(ship)
+    hand_back = next((i for i, ln in enumerate(lines) if "chown" in ln), -1)
+    probe = next((i for i, ln in enumerate(lines) if "test -w" in ln), -1)
+
+    assert hand_back != -1, "нечего вернуть владельцу — самолечения нет"
+    assert probe != -1, "проверка прав пропала — стеречь порядок не у чего"
+    assert hand_back < probe, (
+        f"возврат дерева ({hand_back}) стоит ПОСЛЕ проверки ({probe}) — "
+        "первая же выкладка упадёт на том, что умеет починить сама"
+    )
+    assert "$OWNER" in lines[hand_back], (
+        "chown отдаёт дерево не владельцу, а кому-то названному вслепую"
+    )
+    assert "::notice::" in lines[hand_back], "молчаливый chown меняет права и не оставляет следа"

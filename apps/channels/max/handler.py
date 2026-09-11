@@ -549,7 +549,7 @@ def _capture_live_replay(
     ``apps.orchestrator.pipeline.turn`` and the offline replay runner — the
     path that actually answers people wrote no traces. This helper ports the
     SAME recorder onto the live handler: same sampling gate
-    (``REPLAY_SAMPLE_RATE_*``, decided inside the recorder), same ``regex_v2``
+    (``REPLAY_SAMPLE_RATE_*``, decided inside the recorder), same ``regex_v3``
     redaction before persist, same swallow-everything contract.
 
     The six pipeline stages do not exist on the live path, so the snapshots

@@ -118,11 +118,25 @@ def test_a_repeat_without_one_of_the_five_reasons_is_suppressed() -> None:
     assert permission.detail == led.ASK_SUPPRESSED_ALREADY_ASKED
 
 
+def _only(condition: str) -> led.ReaskConditions:
+    """One condition set, plus the mechanism `answer_expired` is required to name.
+
+    `expiry_mechanism` is not a sixth reason: it is the inward half of one of the
+    five, because `REASK_ANSWER_EXPIRED` covers both a volatile slot's own
+    `ttl_seconds` and a session that ended.
+    """
+
+    kwargs: dict[str, object] = {condition: True}
+    if condition == "answer_expired":
+        kwargs["expiry_mechanism"] = led.ExpiryMechanism.VOLATILE_TTL
+    return led.ReaskConditions(**kwargs)  # type: ignore[arg-type]
+
+
 @pytest.mark.parametrize(
     ("condition", "expected"),
     [
         ("answer_retracted", AskReason.REASK_ANSWER_RETRACTED),
-        ("answer_expired", AskReason.REASK_ANSWER_EXPIRED),
+        ("answer_expired", AskReason.REASK_ANSWER_EXPIRED),  # mechanism supplied below
         ("semantics_changed", AskReason.REASK_SEMANTICS_CHANGED),
         ("candidate_set_changed", AskReason.REASK_CANDIDATE_SET_CHANGED),
         ("safety_reevaluation", AskReason.REASK_SAFETY_REEVALUATION),
@@ -137,7 +151,7 @@ def test_each_of_the_five_reasons_permits_exactly_one_repeat(
         "q1",
         ledger=ledger,
         policy=POLICY,
-        conditions=led.ReaskConditions(**{condition: True}),
+        conditions=_only(condition),
     )
 
     assert permission.allowed is True
@@ -147,13 +161,19 @@ def test_each_of_the_five_reasons_permits_exactly_one_repeat(
 def test_there_are_exactly_five_reask_reasons() -> None:
     """A sixth is a `spec_version` change, not a quiet edit (§13.5)."""
 
-    assert set(led.ReaskConditions.__dataclass_fields__) == {
+    reasons = set(led.ReaskConditions.__dataclass_fields__) - {"expiry_mechanism"}
+
+    assert reasons == {
         "answer_retracted",
         "answer_expired",
         "semantics_changed",
         "candidate_set_changed",
         "safety_reevaluation",
     }
+    # `expiry_mechanism` is not a sixth reason. It is the inward half of one of
+    # the five: `REASK_ANSWER_EXPIRED` covers both a volatile slot's ttl_seconds
+    # and a session that ended, and the audit has to tell them apart.
+    assert {m.value for m in led.ExpiryMechanism} == {"volatile_ttl", "session_ended"}
     assert set(REASK_REASONS) == {
         AskReason.REASK_ANSWER_RETRACTED,
         AskReason.REASK_ANSWER_EXPIRED,
@@ -166,7 +186,11 @@ def test_there_are_exactly_five_reask_reasons() -> None:
 def test_two_simultaneous_reasons_give_one_deterministic_answer() -> None:
     """§17.1 — the same input must always name the same reason."""
 
-    both = led.ReaskConditions(answer_expired=True, safety_reevaluation=True)
+    both = led.ReaskConditions(
+        answer_expired=True,
+        expiry_mechanism=led.ExpiryMechanism.VOLATILE_TTL,
+        safety_reevaluation=True,
+    )
 
     assert both.first_matching() is AskReason.REASK_ANSWER_EXPIRED
     assert both.first_matching() is AskReason.REASK_ANSWER_EXPIRED
@@ -187,7 +211,9 @@ def test_the_second_ask_is_the_last_one() -> None:
         "q1",
         ledger=ledger,
         policy=POLICY,
-        conditions=led.ReaskConditions(answer_expired=True),
+        conditions=led.ReaskConditions(
+            answer_expired=True, expiry_mechanism=led.ExpiryMechanism.VOLATILE_TTL
+        ),
     )
 
     assert permission.allowed is False
