@@ -170,6 +170,50 @@ _STOP_TEXTS = {"minor": _STOP_MINOR, "screening": _STOP_SCREENING}
 # вон там» отправило бы человека в место, которого нет. Собранные ответы
 # стираются вместе с FSM — держать параметры тела в skill_state без
 # основания нельзя.
+# ЧЕРНОВИК ТЕКСТОВ. Владельцем не утверждён: это его слова к людям.
+# Состав согласия взят из §92 дословно — вес, рост, возраст,
+# физиологический пол, активность и цель; шесть параметров, и ни одним
+# больше.
+#
+# Чего в тексте намеренно НЕТ:
+#   * обещания, что отказ можно передумать «в настройках» — экрана
+#     отзыва в боте сегодня нет, и обещать дверь, которой нет, нельзя;
+#   * слова «анонимно» и «обезличенно» — параметры тела хранятся под
+#     учётной записью человека, и называть это обезличиванием было бы
+#     неправдой;
+#   * юридических формул сверх необходимого: человек читает это в
+#     мессенджере между делом.
+CONSENT_ASK = (
+    "Чтобы посчитать персональные нормы, мне нужны шесть ваших "
+    "параметров: вес, рост, возраст, пол, уровень активности и цель.\n\n"
+    "Я сохраню их в вашем профиле и буду пересчитывать нормы, когда вы "
+    "их измените. Без этого дневник работает как обычно — записывайте "
+    "еду и воду, я посчитаю, сколько вышло за день, но личных норм не "
+    "покажу.\n\n"
+    "Согласие можно отозвать: напишите об этом, и я удалю параметры и "
+    "перестану считать."
+)
+
+#: Свои слаги, а не свободный текст: угаданное «да» — это запись
+#: согласия за человека, который его не давал.
+CONSENT_GRANT_CALLBACK = "cb:pc_consent:grant"
+CONSENT_DECLINE_CALLBACK = "cb:pc_consent:decline"
+
+CONSENT_BUTTON_GRANT = "Согласен"
+CONSENT_BUTTON_DECLINE = "Не сейчас"
+
+CONSENT_DECLINED = (
+    "Хорошо, не считаем. Дневник остаётся при вас: записывайте еду и "
+    "воду, я покажу, сколько вышло за день.\n\n"
+    "Передумаете — отправьте /anketa, и я спрошу ещё раз."
+)
+
+CONSENT_RECORDED_BUT_UNREADABLE = (
+    "Записал согласие, но перечитать его не смог — не начинаю расчёт, "
+    "пока не буду уверен. Попробуйте ещё раз через пару минут."
+)
+
+
 _CONSENT_ATTESTATION_MISSING = (
     "Персональный расчёт пока не запускаю: на обработку веса, роста, возраста "
     "и остального нужно отдельное согласие с версией текста, а у меня его нет — "
@@ -194,6 +238,11 @@ class NutritionAnketaSkill:
         if text == "/anketa" or text == "cb:anketa:start":
             return True
 
+        # Ответ на экран согласия. Забираем оба, включая отказ: молчание
+        # на «не сейчас» человек прочтёт как поломку.
+        if text in (CONSENT_GRANT_CALLBACK, CONSENT_DECLINE_CALLBACK):
+            return True
+
         # Resume path — claim turns while an FSM is in flight.
         if self._has_active_fsm(context):
             # Anketa choice callback or plain user input.
@@ -211,6 +260,12 @@ class NutritionAnketaSkill:
     def handle(self, context: SkillContext) -> SkillResult:
         text = context.message_text.strip()
 
+        # Ответ на экран согласия — до всего остального.
+        if text == CONSENT_GRANT_CALLBACK:
+            return self._on_consent_granted(context)
+        if text == CONSENT_DECLINE_CALLBACK:
+            return self._on_consent_declined(context)
+
         # Entry: start fresh FSM.
         if text in ("/anketa", "cb:anketa:start"):
             return self._on_enter(context)
@@ -225,6 +280,26 @@ class NutritionAnketaSkill:
     # ─── entry ──────────────────────────────────────────────────────────
 
     def _on_enter(self, context: SkillContext) -> SkillResult:
+        # ГЕЙТ НА ВХОДЕ, А НЕ НА ШАГЕ ВЕСА И НЕ НА ЗАВЕРШЕНИИ.
+        #
+        # Проверка утверждения стояла в `_on_complete` — то есть ПОСЛЕ
+        # того, как человек назвал пол, возраст, рост, вес и цель, а FSM
+        # сохранила их в `Conversation.skill_state`. Пять параметров из
+        # шести, перечисленных §92, оказывались собраны и записаны до
+        # того, как появлялось основание их собирать.
+        #
+        # §92 требует гейт на входе в анкету прямым текстом, и довод там
+        # тот же: гейт на шаге веса «исполнил бы букву правила и оставил
+        # четыре параметра из шести собранными без основания».
+        #
+        # Прежняя проверка в `_on_complete` НЕ снимается: она вторая
+        # линия. Согласие может быть отозвано между входом и завершением,
+        # и тогда параметры не должны уехать в каталог.
+        from apps.consent.personal_calculation import is_granted
+
+        if not is_granted(context.bot_user):
+            return self._render_consent_ask()
+
         fsm = AnketaFSM()
         step_result = fsm.enter()
         self._save_state(context, fsm)
@@ -472,6 +547,79 @@ class NutritionAnketaSkill:
         # ref shape is "{step}:{value}" — return just the value half.
         _step, _, value = ref.partition(":")
         return value or text
+
+    def _render_consent_ask(self) -> SkillResult:
+        """Экран согласия: текст с версией и два действия.
+
+        Версия не показывается человеку — она записывается вместе с
+        согласием. Показывать её значило бы требовать от человека помнить
+        номер; доказывать, на что он согласился, — наша работа, а не его.
+        """
+        from apps.consent.personal_calculation import (
+            PERSONAL_CALCULATION_DOCUMENT_VERSION,
+        )
+
+        return SkillResult(
+            reply_text=CONSENT_ASK,
+            action_type="anketa_consent_ask",
+            action_data={
+                "document_version": PERSONAL_CALCULATION_DOCUMENT_VERSION,
+                "buttons": [
+                    {"label": CONSENT_BUTTON_GRANT, "callback": CONSENT_GRANT_CALLBACK},
+                    {
+                        "label": CONSENT_BUTTON_DECLINE,
+                        "callback": CONSENT_DECLINE_CALLBACK,
+                    },
+                ],
+            },
+            meta={"reply_kind": "anketa_consent_ask"},
+        )
+
+    def _on_consent_granted(self, context: SkillContext) -> SkillResult:
+        """Записать согласие и начать анкету — но только если записалось.
+
+        `grant` возвращает результат ЧТЕНИЯ, а не факт вызова. Если
+        реестр не отдал запись обратно, анкета не начинается: собрать
+        параметры и потом обнаружить, что основания нет, хуже, чем
+        попросить человека повторить.
+        """
+        from apps.consent.personal_calculation import (
+            PERSONAL_CALCULATION_DOCUMENT_VERSION,
+            grant,
+        )
+
+        recorded = grant(
+            context.bot_user,
+            document_version=PERSONAL_CALCULATION_DOCUMENT_VERSION,
+        )
+        logger.info(
+            "anketa.consent_granted conv=%s recorded=%s version=%s",
+            getattr(context, "conversation_id", None),
+            recorded,
+            PERSONAL_CALCULATION_DOCUMENT_VERSION,
+        )
+        if not recorded:
+            return SkillResult(
+                reply_text=CONSENT_RECORDED_BUT_UNREADABLE,
+                meta={"reply_kind": "anketa_consent_unreadable"},
+            )
+        return self._on_enter(context)
+
+    def _on_consent_declined(self, context: SkillContext) -> SkillResult:
+        """Отказ — не ошибка и не тупик.
+
+        §92: «отказ не закрывает дневник» — он продолжает работать в
+        своём объёме, и текст говорит об этом первым делом, а не
+        последним.
+        """
+        logger.info(
+            "anketa.consent_declined conv=%s",
+            getattr(context, "conversation_id", None),
+        )
+        return SkillResult(
+            reply_text=CONSENT_DECLINED,
+            meta={"reply_kind": "anketa_consent_declined"},
+        )
 
     def _render_step(self, step: str, prompt: str) -> SkillResult:
         action_data: dict = {"step": step}

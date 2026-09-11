@@ -71,6 +71,20 @@ PERSONAL_CALCULATION = "personal_calculation"
 #: ``NutritionProfileUpsertSerializer.consent`` в каталоге.
 PAYLOAD_KEY = "consent"
 
+#: Версия текста, который человеку показывают перед анкетой. Меняется
+#: ВМЕСТЕ с текстом: версия — снимок того, на что согласились, а не
+#: украшение. При следующей редакции константа поднимается, старые
+#: согласия перестают её предъявлять, и человека спрашивают заново.
+#:
+#: Та же дисциплина, что у ``HEALTH_CONSENT_DOCUMENT_VERSION``
+#: (``apps/consent/health.py``) — форма взята оттуда намеренно, чтобы два
+#: согласия не расходились в устройстве.
+PERSONAL_CALCULATION_DOCUMENT_VERSION = "personal-calculation-v1"
+
+#: Откуда пришла выдача и отзыв. Свободная форма по контракту модели.
+GRANT_SOURCE = "max:nutrition_anketa_consent"
+WITHDRAW_SOURCE = "max:nutrition_anketa_consent_withdraw"
+
 # ── причины отказа ────────────────────────────────────────────────────────
 # Три разных «нет», и у каждого свой адрес починки: первое чинится
 # согласием человека, второе — текстом, под которым его взяли, третье —
@@ -161,3 +175,69 @@ def current_attestation(bot_user: BotUser) -> ConsentAttestation:
 def attach(payload: dict[str, Any], attestation: ConsentAttestation) -> dict[str, Any]:
     """Тело POST с утверждением. Исходный словарь не меняется."""
     return {**payload, PAYLOAD_KEY: attestation.as_payload()}
+
+
+class UnknownDisclosureVersionError(ValueError):
+    """Показали одну версию текста, записать просят другую.
+
+    Не педантизм: ``document_version`` — единственное доказательство
+    того, ЧТО именно человеку показали в момент согласия. Принять чужую
+    строку значит записать в юридический журнал непроверяемое
+    утверждение, а граница каталога (#324) требует версию именно затем,
+    чтобы через полгода согласие можно было отличить от согласия на
+    другой текст.
+    """
+
+
+def grant(bot_user: BotUser, *, document_version: str) -> bool:
+    """Записать согласие на персональный расчёт. Идемпотентно.
+
+    Возвращает ``True``, если после вызова действующее согласие есть, —
+    проверкой ЧТЕНИЕМ, а не оптимистичным «мы же только что записали».
+    Читающая сторона (`current_attestation`) и пишущая обязаны сойтись,
+    иначе экран скажет «разрешено», а анкета продолжит отказывать.
+
+    Raises:
+      UnknownDisclosureVersionError: версия не та, что показывали.
+    """
+    from apps.consent.services import record_person_consent
+
+    if document_version != PERSONAL_CALCULATION_DOCUMENT_VERSION:
+        raise UnknownDisclosureVersionError(document_version)
+
+    record_person_consent(
+        bot_user,
+        consent_type=PERSONAL_CALCULATION,
+        source=GRANT_SOURCE,
+        document_version=PERSONAL_CALCULATION_DOCUMENT_VERSION,
+    )
+    return is_granted(bot_user)
+
+
+def withdraw(bot_user: BotUser) -> int:
+    """Отозвать согласие. Идемпотентно; строки не удаляются.
+
+    §92 требует хранить отзыв, а не забывать его: ``withdrawn_at``
+    проставляется, append-only журнал остаётся целиком.
+    """
+    from apps.consent.services import withdraw_person_consent
+
+    return withdraw_person_consent(
+        bot_user,
+        consent_type=PERSONAL_CALCULATION,
+        source=WITHDRAW_SOURCE,
+    )
+
+
+def is_granted(bot_user: BotUser) -> bool:
+    """Есть ли действующее согласие СЕЙЧАС — тем же чтением, что у границы.
+
+    Намеренно выражено через :func:`current_attestation`, а не своим
+    запросом: экран не должен уметь сказать «разрешено» в случае, когда
+    утверждение собрать нельзя. Один предикат — одна правда.
+    """
+    try:
+        current_attestation(bot_user)
+    except ConsentAttestationUnavailable:
+        return False
+    return True
