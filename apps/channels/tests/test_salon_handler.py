@@ -21,6 +21,7 @@ from unittest.mock import patch
 import pytest
 from django.utils import timezone
 
+from apps.catalog.models import CatalogMaster
 from apps.channels.bot_registry import BotEntry
 from apps.channels.max.salon_handler import _extract_code, handle_salon_max_event
 from apps.identity.models import BotUser
@@ -156,6 +157,94 @@ class TestOnboarding:
         text = sent.call_args.kwargs["text"]
         assert "код приглашения" not in text
         assert "Формула тела" in text
+
+
+def _master_card(tenant: Tenant, name: str, **kwargs) -> CatalogMaster:
+    defaults = dict(
+        name=name,
+        external_id=None,
+        external_updated_at=timezone.now(),
+        invite_status=CatalogMaster.InviteStatus.ACCEPTED,
+        mode=CatalogMaster.Mode.CATALOG_ONLY,
+        is_active=True,
+    )
+    defaults.update(kwargs)
+    return CatalogMaster.all_tenants.create(tenant=tenant, **defaults)
+
+
+class TestMasterCodeCannotTakeSomeoneElsesCard:
+    """DRF-1647 seen from the chat, not from the service.
+
+    The service-level proof lives in
+    ``apps/identity/tests/test_staff_invites.py``. What is asserted here is
+    the part the master would have noticed: her card stays hers, and the
+    person who typed the code is told something rather than welcomed in.
+    """
+
+    def test_the_card_stays_with_its_master_and_the_bearer_is_answered(self, tenant, sent):
+        real_master = BotUser.all_tenants.create(
+            tenant=tenant, channel="max", channel_user_id="700111", display_name="Ольга"
+        )
+        card = _master_card(tenant, "Тихонова Ольга")
+        card.linked_bot_user = real_master
+        card.save(update_fields=["linked_bot_user"])
+        invite, code = issue_staff_invite(
+            tenant=tenant, role=StaffInvite.Role.MASTER, catalog_master=card
+        )
+
+        _handle(code, tenant)
+
+        card.refresh_from_db()
+        invite.refresh_from_db()
+        assert card.linked_bot_user_id == real_master.id, "her card was taken"
+        # Answered, not welcomed: no greeting, and the code survives for the
+        # person it was issued to.
+        assert sent.call_count == 1
+        assert "вы мастер" not in sent.call_args.kwargs["text"].lower()
+        assert invite.used_at is None
+
+
+class TestAPersonWhoAlreadyHoldsACardIsNotIgnored:
+    """DRF-1650 seen from the chat: the reply that was not sent.
+
+    Before the fix this exact sequence produced zero outbound messages and
+    an ``IntegrityError`` out of ``handle_salon_max_event`` — the person sat
+    looking at a bot that had stopped talking to them.
+
+    The card has to be archived for the bot to reach the code branch at all:
+    ``resolve_role`` calls a linked-but-archived person a customer (ENROLLED
+    asks ``archived_at IS NULL``), while ``CatalogMaster.linked_bot_user``
+    is a OneToOneField and still remembers her. The disagreement between
+    those two is the whole defect.
+    """
+
+    def test_the_bot_answers_instead_of_going_silent(self, tenant, sent):
+        person = BotUser.all_tenants.create(
+            tenant=tenant,
+            channel="max",
+            channel_user_id=CHANNEL_USER_ID,
+            display_name="Мастер",
+        )
+        old_card = _master_card(
+            tenant, "Прежняя карточка", is_active=False, archived_at=timezone.now()
+        )
+        old_card.linked_bot_user = person
+        old_card.save(update_fields=["linked_bot_user"])
+        fresh_card = _master_card(tenant, "Новая карточка")
+        invite, code = issue_staff_invite(
+            tenant=tenant, role=StaffInvite.Role.MASTER, catalog_master=fresh_card
+        )
+
+        # No exception may escape the handler, and no silence may either.
+        _handle(code, tenant)
+
+        assert sent.call_count == 1, "the person got no reply at all"
+        assert sent.call_args.kwargs["text"].strip() != ""
+
+        fresh_card.refresh_from_db()
+        invite.refresh_from_db()
+        assert fresh_card.linked_bot_user_id is None
+        assert invite.used_at is None, "the code was burned by someone else's mistake"
 
 
 class TestSenderIdentity:
