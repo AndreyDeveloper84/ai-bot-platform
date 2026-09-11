@@ -18,10 +18,15 @@ Sprint 3 ships JSON only. PDF / archive URL → Phase 1.
 
    **Not reachable from the chat since DRF-956 / T-05.** This helper
    hard-deletes the ``BotUser`` row, which is referenced
-   ``on_delete=PROTECT`` by ``observability.AIRequestMetric``,
-   ``handoff.AdminTask`` and ``tenancy.StaffAssignment`` — so it raises
-   ``ProtectedError`` for any user who has ever triggered an AI turn or a
-   human handoff. It survives only as the admin-facing "wipe a user with
+   ``on_delete=PROTECT`` by ``handoff.AdminTask``,
+   ``handoff.HandoffSilenceNotice`` and ``tenancy.TenantStaff`` — so it
+   raises ``ProtectedError`` for any user who has ever reached a human
+   handoff or holds a staff role. (``observability.AIRequestMetric`` was
+   PROTECT here until owner decision 11.09 §16.1 made it SET_NULL: an AI
+   turn no longer blocks the delete; the metric stays, its subject goes.
+   The list is read from the ORM by ``account_reset.incoming_relations``,
+   not from this paragraph — the measurement of 11.09 found this text
+   naming a model that does not exist.) It survives only as the admin-facing "wipe a user with
    no protected references" helper. The customer-facing erasure path is
    :func:`apps.identity.services.privacy.delete_personal_data`, which
    erases in place and keeps the shell. Do not re-wire this into a
