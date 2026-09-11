@@ -44,7 +44,7 @@ import uuid
 from django.db import models
 from django.utils import timezone
 
-from apps.catalog.master_state import AVAILABLE
+from apps.catalog.master_state import available_q
 from apps.tenancy.managers import TenantScopedManager
 
 
@@ -228,7 +228,7 @@ class _MasterManager(TenantScopedManager):
     """
 
     def bookable(self):
-        return self.filter(AVAILABLE)
+        return self.filter(available_q())
 
 
 class CatalogMaster(_MirrorBase):
@@ -242,7 +242,9 @@ class CatalogMaster(_MirrorBase):
     DRF-1588 — address, location_lat, location_lng.
     Platform fields NEVER touched by sync: invite_status, mode,
     photo_url, archived_at, invited_at, accepted_at, max_handle,
-    linked_bot_user. That list is why the pilot's nine active masters
+    linked_bot_user and — since §83 — the schedule-confirmation trio
+    (schedule_confirmed_at, schedule_confirmed_by, schedule_fingerprint).
+    That list is why the pilot's nine active masters
     all carry ``linked_bot_user IS NULL`` — they arrived by sync, which
     has no platform side to fill in (DRF-1506).
     """
@@ -496,6 +498,51 @@ class CatalogMaster(_MirrorBase):
         help_text="MAX/Telegram BotUser this master signs in with. "
         "SET_NULL on BotUser delete preserves the master audit trail.",
         verbose_name="Связанный аккаунт в мессенджере",
+    )
+
+    # ── подтверждение расписания (§83, DRF-1521 п. 6) ─────────────────────
+    #
+    # Три столбца, а не булево, и живут они ЗДЕСЬ, а не на
+    # ``scheduling.WorkingHours``, — решение владельца от 09.09.2026:
+    # подтверждение это «состояние допуска мастера к продаже», а не
+    # свойство часов. Часы говорят, когда мастер работает; подтверждение
+    # говорит, что этого мастера можно показывать клиентам.
+    #
+    # Столбцы платформенные: синхронизация их не трогает — она пишет
+    # только перечисленный список зеркальных полей через ``update_fields``
+    # (``apps/catalog/services/upserter.py``). Тот же класс, что
+    # ``invite_status`` и ``accepted_at``.
+    #
+    # Умолчание — НЕ подтверждено, и заполнять их миграцией запрещено
+    # (правило 6 решения): массовая простановка выглядит как «включили
+    # функцию», а означает «объявили проверенным непроверенное».
+    schedule_confirmed_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="Когда владелец салона подтвердил рабочие часы этого "
+        "мастера. NULL — не подтверждены; по умолчанию так у всех.",
+        verbose_name="Расписание подтверждено",
+    )
+    schedule_confirmed_by = models.ForeignKey(
+        "identity.BotUser",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="+",
+        help_text="Кто подтвердил. SET_NULL сохраняет след подтверждения, "
+        "даже если аккаунт удалён: «подтверждено» и «известно кем» — "
+        "разные утверждения, и первое не должно исчезать со вторым.",
+        verbose_name="Кем подтверждено",
+    )
+    schedule_fingerprint = models.CharField(
+        max_length=128,
+        blank=True,
+        default="",
+        help_text="Отпечаток ИМЕННО ТЕХ часов, которые подтвердили. Без "
+        "него «подтверждено» означает «кто-то когда-то нажал»: нечем "
+        "отличить подтверждённую версию часов от нынешней. Формат и "
+        "состав — apps/catalog/services/schedule_confirmation.py.",
+        verbose_name="Отпечаток подтверждённых часов",
     )
 
     objects = _MasterManager()  # type: ignore[misc]

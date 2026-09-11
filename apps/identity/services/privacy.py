@@ -87,6 +87,7 @@ from apps.identity.services.memory_deleter import (
 )
 from apps.identity.services.memory_key_policy import select_current_facts
 from apps.identity.services.memory_reader import get_personal_context, read_green_entries
+from apps.integrations.ayla.user_proxy import external_user_id_for
 from apps.integrations.ayla.personal_context_client import (
     PersonalContextError,
     PersonalContextHttpClient,
@@ -417,7 +418,18 @@ def export_personal_data(
         owns = client is None
         client = client or PersonalContextHttpClient()
         try:
-            ayla_section = client.get_personal_data_export(ayla_user_id=str(ayla_user_id))
+            ayla_section = client.get_personal_data_export(
+                ayla_user_id=str(ayla_user_id),
+                # The subject is named from the SAME shell whose link we
+                # resolved. `_channel_sibling_ids` only gathers shells
+                # sharing `(channel, channel_user_id)`, and the external id
+                # is built from exactly that pair — so every candidate that
+                # could have supplied `ayla_user_id` produces this identical
+                # header. A conflict across shells has already fail-closed
+                # above, so there is no branch here where the header and the
+                # path could name different people.
+                external_user_id=external_user_id_for(bot_user),
+            )
         except PersonalContextError as exc:
             raise PrivacyUpstreamError(f"ayla export failed: {exc}") from exc
         finally:
@@ -602,7 +614,10 @@ def delete_personal_data(
         owns = client is None
         client = client or PersonalContextHttpClient()
         try:
-            client.delete_personal_data(ayla_user_id=str(ayla_user_id))
+            client.delete_personal_data(
+                ayla_user_id=str(ayla_user_id),
+                external_user_id=external_user_id_for(bot_user),
+            )
             steps.append(DeleteStep("ayla_delete", True))
         except PersonalContextNotFoundError:
             # Already gone upstream — idempotent success.

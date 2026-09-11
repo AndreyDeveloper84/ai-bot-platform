@@ -308,7 +308,12 @@ class TestMasterDetail:
         assert "linked_bot_user" in m  # may be None but key present
         assert isinstance(m["services"], list)
         assert m["services"][0]["name"] == "Маникюр гель-лак"
-        assert "working_hours_summary" in m
+        # §83 — карточка больше НЕ несёт ``working_hours_summary``: та
+        # строка описывала локальное зеркало, а не то расписание, по
+        # которому продают. Часы отдаёт ``masters/<id>/schedule/``.
+        # Проверка на отсутствие стоит здесь нарочно: вернуть поле обратно
+        # значило бы вернуть на экран второе, неверное расписание.
+        assert "working_hours_summary" not in m
 
     def test_404_on_bad_uuid(self, client: Client, owner_bot_user: BotUser) -> None:
         resp = client.get(

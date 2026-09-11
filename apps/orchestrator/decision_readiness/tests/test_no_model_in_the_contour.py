@@ -29,9 +29,20 @@ from apps.orchestrator.decision_readiness.tests.conftest import make_input
 
 PACKAGE_ROOT = pathlib.Path(eng.__file__).parent
 
-# The decision contour: everything `evaluate()` can reach. `ledger_store` is
-# deliberately outside it — it touches the database and the engine never calls
-# it, which is why the register arrives in the input instead.
+# The decision contour: everything `evaluate()` can reach.
+#
+# Three modules are deliberately outside it, and all three for one reason — they
+# are **input adapters**. They reach into the rest of the application to read
+# what the engine will be given, and the engine never calls them: `evaluate()`
+# receives a register, a verdict and a measure, it does not fetch them.
+#
+#   ledger_store       touches the database
+#   profile_questions  reads `memory_ask`, which reaches the LLM contour
+#   migration          reads `refusal_memo` and the screening memo
+#
+# Putting an adapter inside the contour would make the purity claim weaker than
+# it reads: this check is per-file, so a module that merely *imports* something
+# that imports a provider would pass while dragging one in.
 DECISION_MODULES = (
     "engine.py",
     "decision.py",
@@ -46,6 +57,13 @@ DECISION_MODULES = (
     "reason_codes.py",
     "state.py",
     "audit.py",
+    "declared_states.py",
+    "shadow.py",
+    "resume.py",
+)
+
+ADAPTERS_OUTSIDE_THE_CONTOUR = frozenset(
+    {"ledger_store.py", "profile_questions.py", "migration.py"}
 )
 
 FORBIDDEN_IMPORT_MARKERS = (
@@ -81,12 +99,13 @@ def test_every_decision_module_is_present_in_the_check() -> None:
     on_disk = {
         path.name
         for path in PACKAGE_ROOT.glob("*.py")
-        if path.name not in {"__init__.py", "ledger_store.py"}
+        if path.name not in ADAPTERS_OUTSIDE_THE_CONTOUR | {"__init__.py"}
     }
 
     assert on_disk == set(DECISION_MODULES), (
         "a module was added to or removed from the decision contour; add it to "
-        "DECISION_MODULES or say in ledger_store.py's docstring why it is outside"
+        "DECISION_MODULES, or to ADAPTERS_OUTSIDE_THE_CONTOUR with the reason "
+        "written in its own docstring"
     )
 
 

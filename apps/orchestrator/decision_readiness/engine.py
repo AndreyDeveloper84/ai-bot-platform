@@ -39,6 +39,7 @@ closed. Nothing consumes this engine yet, so nothing changes for anyone.
 from __future__ import annotations
 
 import hashlib
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import Enum
 
@@ -184,7 +185,18 @@ class ReadinessInput:
     current_need: CurrentNeed | None = None
     probe: CandidateProbe | None = None
     execution_required_params: frozenset[str] = field(default_factory=frozenset)
-    reask_conditions: ReaskConditions = field(default_factory=ReaskConditions)
+    reask_conditions: Mapping[str, ReaskConditions] = field(default_factory=dict)
+    """Re-ask conditions **per question id**, defaulting to none.
+
+    Per-question and not per-turn, because all five of §13.5's reasons are facts
+    about one question: *this* answer was retracted, *this* slot's answer
+    expired, *this* question's semantics changed. A single set of conditions
+    applied to every question would hand a re-ask to questions nobody ever
+    answered — the imprecision out of which the DRF-1542 class comes back.
+
+    An absent entry means "no reason to ask again", which is the fail-closed
+    default: `ask_permission` then suppresses the repeat.
+    """
     surface: Surface = Surface.UNKNOWN
     spec_version: str = SPEC_VERSION
 
@@ -659,7 +671,7 @@ def _next_question(
             entry.question_id,
             ledger=request.question_ledger,
             policy=request.policy,
-            conditions=request.reask_conditions,
+            conditions=request.reask_conditions.get(entry.question_id) or ReaskConditions(),
         )
         if permission.outcome is AskOutcome.BUDGET_EXHAUSTED:
             suppressed_by_budget = True
@@ -671,6 +683,10 @@ def _next_question(
         if decision.claim is not None:
             codes.append(_CLAIM_CODES[decision.claim])
         if permission.reason is not None and permission.reason is not AskReason.FIRST_ASK:
+            # One coarse code outward (§13.5's five are frozen), the mechanism
+            # inward: `REASK_ANSWER_EXPIRED` covers both a volatile slot's own
+            # ttl_seconds and a session that ended, and a month from now "why are
+            # we re-asking" has to be answerable.
             codes.append(_REASK_CODES[permission.reason])
 
         candidates.append(
@@ -678,6 +694,12 @@ def _next_question(
                 entry=entry,
                 decision=decision,
                 ask_reason=permission.reason or AskReason.FIRST_ASK,
+                ask_reason_mechanism=(
+                    conditions.expiry_mechanism.value
+                    if (conditions := request.reask_conditions.get(entry.question_id))
+                    and conditions.expiry_mechanism
+                    else None
+                ),
                 expected_separation_gain=expected_separation_gain(
                     entry, candidates=request.candidates, probe=request.probe
                 ),

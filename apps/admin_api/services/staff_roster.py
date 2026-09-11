@@ -495,6 +495,10 @@ def _build(tenant: Any) -> tuple[list[Person], int, bool]:
         "invite_status",
         "ayla_user_id",
         "accepted_at",
+        # §83 — гейт спрашивает его, когда включён флаг. Забытый здесь
+        # столбец не дал бы тихого умолчания: ``sale_block`` читает строку
+        # строго и упал бы ``KeyError``, и это замысел.
+        "schedule_confirmed_at",
         "linked_bot_user__display_name",
         "linked_bot_user__client_name",
     )
