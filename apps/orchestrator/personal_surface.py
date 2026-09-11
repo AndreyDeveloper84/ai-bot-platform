@@ -594,6 +594,12 @@ def render_memory(bot_user: Any) -> DiscoveryReply:
     """
     if not personal_records_consent_open(bot_user):
         return _reply(CONSENT_CLOSED_TEXT, [])
+    from apps.identity.services.person_context_gate import person_context_access
+
+    if person_context_access(bot_user) is not None:
+        # §2.4 (S2-2): the same closed door as no consent, from the person's
+        # side — not a placeholder, not a fact. The reason is in the gate's log.
+        return _reply(CONSENT_CLOSED_TEXT, [])
     try:
         from apps.persona.memory_commands import memory_show_chips, render_memory_summary
 

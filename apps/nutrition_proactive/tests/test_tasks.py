@@ -82,6 +82,10 @@ def make_user(
     user = BotUser.all_tenants.create(
         tenant=tenant,
         channel="max",
+        # S2-2 (owner §2.4): these tests model a person the client contour
+        # knows — a LINKED shell. A SHADOW gets nothing, and that is proven
+        # in ``TestShadowIsClosed`` against a shell built without this line.
+        customer_status=BotUser.CustomerStatus.LINKED,
         # DRF-1558 — адрес проактивной отправки это ``channel_user_id``.
         # ``chat_id`` намеренно другой: совпадение прятало бы регрессию.
         channel_user_id=f"np-{suffix}" if chat_id is None else chat_id,
@@ -278,6 +282,7 @@ class TestDefaultsAreOff:
         user = BotUser.all_tenants.create(
             tenant=tenant,
             channel="max",
+            customer_status=BotUser.CustomerStatus.LINKED,
             channel_user_id="np-virgin",
             chat_id="chat-virgin",
             consent_at=datetime(2026, 5, 1, tzinfo=dt_timezone.utc),
@@ -586,6 +591,37 @@ class TestSwitches:
 # ────────────────────────────────────────────────────────────────────
 # DRF-1314 — who may be written to first
 # ────────────────────────────────────────────────────────────────────
+
+
+class TestShadowIsClosed:
+    """Owner 11.09 §2.4 (S2-2): nutrition is closed to a SHADOW salon shell.
+
+    Same shape as ``TestConsentGate``: one person differs from
+    :func:`make_user` in exactly one respect — the standing of the shell —
+    and both planners name that respect. ``unresolved`` has its own name:
+    «the rule was not applied» and «the rule said shadow» need different
+    people to act.
+    """
+
+    def _both(self, user: BotUser):
+        water = tasks.plan_water_reminders(now_utc=NOON, fetch=water_reader(0))
+        report = tasks.plan_daily_reports(now_utc=NOON, fetch=summary_reader())
+        return [d for d in [*water, *report] if d.bot_user_id == user.pk]
+
+    @pytest.mark.parametrize("status", ["shadow", "unresolved"])
+    def test_a_shadow_gets_nothing_and_the_reason_says_so(
+        self, tenant: Tenant, status: str
+    ) -> None:
+        # Presence first: the LINKED twin, built the same way, is written to.
+        linked = make_user(tenant, water=True, report="12:00", suffix="twin")
+        assert {d.reason for d in self._both(linked)} == {"behind_proportional_norm", "due"}
+
+        user = make_user(tenant, water=True, report="12:00", suffix=status)
+        BotUser.all_tenants.filter(pk=user.pk).update(customer_status=status)
+        decisions = self._both(user)
+        assert len(decisions) == 2
+        assert [d.reason for d in decisions] == [status] * 2
+        assert all(d.send is False for d in decisions)
 
 
 class TestConsentGate:

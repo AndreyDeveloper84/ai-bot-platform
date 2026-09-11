@@ -154,7 +154,15 @@ _HHMM_RE = re.compile(r"^([01]\d|2[0-3]):([0-5]\d)$")
 
 
 def get_prefs(bot_user: Any) -> dict[str, Any]:
-    """Return the ``nutrition_proactive`` sub-dict (a copy, never None)."""
+    """Return the ``nutrition_proactive`` sub-dict (a copy, never None).
+
+    §2.4 (S2-2): a shell the person-context gate refuses has no nutrition
+    preferences — an empty dict, the same answer as «never set».
+    """
+    from apps.identity.services.person_context_gate import person_context_access
+
+    if person_context_access(bot_user) is not None:
+        return {}
     context = bot_user.context if isinstance(bot_user.context, dict) else {}
     raw = context.get(CONTEXT_KEY)
     return dict(raw) if isinstance(raw, dict) else {}
@@ -167,6 +175,12 @@ def merge_prefs(bot_user: Any, updates: dict[str, Any]) -> dict[str, Any]:
     ``.update()`` so a cross-tenant beat is not refused by the tenant-scoped
     default manager.
     """
+    from apps.identity.services.person_context_gate import person_context_access
+
+    if person_context_access(bot_user) is not None:
+        # §2.4: nothing is written for a shell the gate refuses; the context
+        # comes back untouched so a caller's `.update()` changes nothing.
+        return dict(bot_user.context) if isinstance(bot_user.context, dict) else {}
     context = dict(bot_user.context) if isinstance(bot_user.context, dict) else {}
     prefs = dict(context.get(CONTEXT_KEY) or {})
     prefs.update(updates)
