@@ -129,6 +129,10 @@ def _profile(**over: Any) -> ProfileResponse:
         health_flags={},
         disclaimer_acked=None,
         raw={},
+        # DRF-1686 (§6): без названного происхождения DTO обнуляет ориентиры.
+        # Умолчание — посчитанный профиль; тесты о ненастроенном передают
+        # ``targets_source`` явно.
+        targets_source="ayla_calculated",
     )
     payload.update(over)
     return ProfileResponse(**payload)
@@ -382,9 +386,15 @@ class TestAClearedProfileSaysWhy:
         assert NO_TARGETS_TEXT not in reply.text
         assert " из 128 " in reply.text
 
-    def test_unknown_legacy_is_left_alone(self, monkeypatch):
-        """Состояние ДО очистки: числа ещё печатаются, хвоста нет — их показ
-        меняет другой срез, не этот."""
+    def test_unknown_legacy_is_not_configured_too(self, monkeypatch):
+        """Тот «другой срез», на который ссылался прежний тест, — это он
+        (DRF-1686, §6 свода 11.09): число без происхождения не показывается.
+
+        До очистки строк каталог ещё присылает ``unknown_legacy`` с числами —
+        на пилоте это все шесть профилей. Они читаются как ``NOT_CONFIGURED``
+        здесь и сейчас, а не после чужой команды: иначе исполнение решения
+        зависело бы от очерёдности запусков, а это не сторож.
+        """
         _install_ayla(
             monkeypatch,
             _FakeAyla(
@@ -394,10 +404,15 @@ class TestAClearedProfileSaysWhy:
             ),
         )
 
+        import re
+
         reply = render_diary(_bot_user("legacy-1"))
 
-        assert NO_TARGETS_TEXT not in reply.text
-        assert " из 128 " in reply.text
+        assert NO_TARGETS_TEXT in reply.text
+        assert " из 128 " not in reply.text
+        assert not (set(map(int, re.findall(r"\d+", reply.text))) & set(self._PRIOR_TARGETS))
+        # Факт остаётся: съеденное печатается — снимается ориентир, не запись.
+        assert "Белки: 61 г" in reply.text
 
     def test_a_missing_key_is_a_contract_breach_not_an_absent_target(self, monkeypatch, caplog):
         """Ключ не пришёл → ``""`` → хвоста нет, а в лог — warning: изготовить
@@ -513,17 +528,38 @@ class TestChipsExecute:
 
         assert memory_show_chips(_bot_user("chip-empty")) == []
 
-    def test_the_diary_offers_the_anketa_only_when_there_is_no_profile(self, monkeypatch):
-        _install_ayla(monkeypatch, _FakeAyla(summary=_summary(), water=_water(), profile=None))
-        without = render_diary(_bot_user("chip-noprof"))
+    def test_water_is_offered_always_and_the_anketa_beside_it_until_targets_exist(
+        self, monkeypatch
+    ):
+        """§6 свода 11.09 (OD-NUT-1, DRF-1686): анкета не блокирует дневник.
 
-        _install_ayla(
-            monkeypatch, _FakeAyla(summary=_summary(), water=_water(), profile=_profile())
-        )
-        with_profile = render_diary(_bot_user("chip-prof"))
+        Раньше без профиля чип был один — анкета: поверхность ставила её
+        на место действия. Теперь вода предлагается всегда (запись
+        профиля не требует), а анкета — вторым чипом, пока ориентиры не
+        настроены: нет профиля, ``none``, ``unknown_legacy``. У
+        настроенного профиля предлагать настройку нечего.
+        """
+        cases = {
+            "chip-noprof": None,
+            "chip-none": _profile(targets_source="none"),
+            "chip-legacy": _profile(targets_source="unknown_legacy"),
+        }
+        for uid, profile in cases.items():
+            _install_ayla(
+                monkeypatch, _FakeAyla(summary=_summary(), water=_water(), profile=profile)
+            )
+            reply = render_diary(_bot_user(uid))
+            assert _callbacks(reply) == [CHIP_WATER["callback"], CHIP_ANKETA["callback"]], uid
 
-        assert _callbacks(without) == [CHIP_ANKETA["callback"]]
-        assert _callbacks(with_profile) == [CHIP_WATER["callback"]]
+        for uid, source in {"chip-calc": "ayla_calculated", "chip-user": "user_entered"}.items():
+            _install_ayla(
+                monkeypatch,
+                _FakeAyla(
+                    summary=_summary(), water=_water(), profile=_profile(targets_source=source)
+                ),
+            )
+            reply = render_diary(_bot_user(uid))
+            assert _callbacks(reply) == [CHIP_WATER["callback"]], uid
 
     def test_the_anketa_finale_offers_the_two_steps_that_exist(self, monkeypatch):
         """Post-anketa the bot used to hand over five numbers and go quiet.

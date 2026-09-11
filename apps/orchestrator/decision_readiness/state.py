@@ -394,6 +394,9 @@ _SAFETY_CODEC_FIELDS: tuple[str, ...] = (
     # едут в дайджест (см. `SafetyResult.digest_fields`).
     "not_applicable_for",
     "activated_at",
+    # §3, evidence_ref — ссылка на свидетельство; пришло тем же путём: сторож
+    # полноты покраснел и назвал поле. Едет и в payload, и в дайджест.
+    "evidence_ref",
 )
 
 
@@ -441,6 +444,7 @@ def _encode_safety(verdict: SafetyResult) -> dict[str, Any] | None:
         "forbidden_capabilities": list(verdict.forbidden_capabilities),
         "not_applicable_for": verdict.not_applicable_for,
         "activated_at": verdict.activated_at.isoformat() if verdict.activated_at else None,
+        "evidence_ref": verdict.evidence_ref,
     }
 
 
@@ -543,6 +547,7 @@ def _build_verdict(
         required_slots=tuple(entry.get("required_slots") or ()),
         forbidden_capabilities=tuple(entry.get("forbidden_capabilities") or ()),
         not_applicable_for=entry.get("not_applicable_for") or None,
+        evidence_ref=entry.get("evidence_ref") or None,
         activated_at=(
             datetime.fromisoformat(entry["activated_at"]) if entry.get("activated_at") else None
         ),
