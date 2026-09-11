@@ -2861,12 +2861,48 @@ def customer_recommendations(request: HttpRequest) -> HttpResponse:
     # `subject_ref` в теле нет намеренно — кого спрашивают, определяет
     # аутентификация). Приняв часть запроса от клиента, мы позволили бы
     # ему получить решение за другого человека.
+    # D2 (§7, DRF-1699): живая заявка на удаление — подбора нет и в каталог
+    # не ходим: лишний запрос по человеку, который просил его не
+    # обрабатывать, сам есть обработка. Отказ с именем и номером — 423, как
+    # отвечает и каталог, чтобы полка видела одно и то же с любой стороны.
+    from apps.identity.services.deletion_gate import (
+        deletion_gate,
+        mark_deletion_requested,
+    )
+    from apps.identity.services.privacy import resolve_person_link
+
+    link = resolve_person_link(bot_user)
+    gate = deletion_gate(None if link.conflict else link.ayla_user_id)
+    if gate.blocked:
+        return JsonResponse(
+            {
+                "error": gate.reason,
+                "detail": "personalisation stopped: deletion requested",
+                "request_id": gate.request_id,
+            },
+            status=423,
+        )
+
     payload = build_shelf_request(goal_key=None)
 
     outcome = resolve_recommendation(
         external_user_id=external_user_id_for(bot_user),
         payload=payload,
     )
+
+    if outcome.state == "refused":
+        # Каталог узнал о заявке раньше нас (заведена из приложения):
+        # отражаем флаг, чтобы память и проактив закрылись тем же ходом.
+        if link.ayla_user_id is not None and not link.conflict and outcome.request_id:
+            mark_deletion_requested(link.ayla_user_id, request_id=outcome.request_id)
+        return JsonResponse(
+            {
+                "error": "deletion_requested",
+                "detail": "personalisation stopped: deletion requested",
+                "request_id": outcome.request_id,
+            },
+            status=423,
+        )
 
     if outcome.state == "contract_violation":
         # ГРОМКО и отдельно от недоступности. Это и есть вторая половина

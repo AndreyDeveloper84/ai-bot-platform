@@ -73,11 +73,17 @@ _PATH: Final[str] = "internal/recommendation/resolve/"
 
 @dataclass(frozen=True)
 class ResolveOutcome:
-    """Исход вызова. Ровно один из трёх, и они не сливаются."""
+    """Исход вызова. Ровно один из четырёх, и они не сливаются.
 
-    state: str  # "ok" | "unavailable" | "contract_violation"
+    ``refused`` (DRF-1699 D2) — подбора нет ПО ВОЛЕ ЧЕЛОВЕКА: живая заявка
+    на удаление, ``detail`` = ``deletion_requested``. Не ``unavailable``:
+    там источник не ответил и повтор осмыслен, здесь ответ и есть отказ.
+    """
+
+    state: str  # "ok" | "unavailable" | "contract_violation" | "refused"
     decision: dict | None = None
     detail: str | None = None
+    request_id: str | None = None
 
     @property
     def is_ok(self) -> bool:
@@ -115,6 +121,14 @@ def resolve_recommendation(*, external_user_id: str, payload: dict[str, Any]) ->
     if response.status_code >= 500 or response.status_code == 503:
         _circuit.record_failure(now=time.monotonic())
         return ResolveOutcome("unavailable", detail=f"server: HTTP {response.status_code}")
+    if response.status_code == 423:
+        # D2 (§7): каталог отказал по воле человека — живая заявка на
+        # удаление. Не «unavailable» (повтор осмыслен) и не «мы прислали не
+        # то»: ответ и есть отказ, с номером. Отражение флага — у вызывающего,
+        # который держит bot_user; транспорт базы не трогает.
+        return ResolveOutcome(
+            "refused", detail="deletion_requested", request_id=_request_id_from_423(response)
+        )
     if response.status_code != 200:
         # 4xx: мы отправили не то. Предохранитель не трогаем — источник жив.
         logger.warning("resolver_client.client_error status=%d", response.status_code)
@@ -324,3 +338,17 @@ def _shape(value: Any) -> str:
     if isinstance(value, dict):
         return f"object{sorted(value)[:5]}"
     return type(value).__name__
+
+
+# ---------------------------------------------------------------------------
+# DRF-1699 D2 — разбор отказа 423
+# ---------------------------------------------------------------------------
+
+
+def _request_id_from_423(response: httpx.Response) -> str | None:
+    try:
+        details = response.json().get("error", {}).get("details", {}) or {}
+    except ValueError:
+        return None
+    rid = details.get("request_id")
+    return str(rid) if rid else None
