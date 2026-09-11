@@ -32,6 +32,7 @@ import socket
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
+from typing import cast
 
 from django.apps import apps
 from django.db import DatabaseError
@@ -150,7 +151,7 @@ def newest(pulses: list[Pulse]) -> Pulse | None:
     alive = [p for p in pulses if p.at is not None]
     if not alive:
         return None
-    return max(alive, key=lambda p: p.at)
+    return max(alive, key=lambda p: cast(datetime, p.at))
 
 
 def fresh(pulses: list[Pulse], within: timedelta, now: datetime | None = None):
@@ -264,7 +265,7 @@ def subject_lines(
     pulses = gather_pulse(anchors) if pulses is None else pulses
     freshest = newest(pulses)
 
-    started = identity["started_at"]
+    started = cast("datetime | None", identity["started_at"])
     lines = [
         "== ПРЕДМЕТ: кто отвечает на этот замер ==",
         f"хост (hostname процесса)   : {socket.gethostname()}",
