@@ -75,6 +75,8 @@ from apps.events.services import emit
 from apps.identity.services.role_resolver import resolve_role
 from apps.identity.services.staff_invites import (
     InviteError,
+    MasterAlreadyLinked,
+    PersonAlreadyMaster,
     InviteMasterMissing,
     InviteNotFound,
     InviteRateLimited,
@@ -132,6 +134,35 @@ TOO_MANY_ATTEMPTS = (
 
 MASTER_GONE = (
     "Приглашение указывает на карточку мастера, которой больше нет. Сообщите администратору салона."
+)
+
+# DRF-1647 / DRF-1650. Оба исхода до этого попадали в общую ветку
+# `except InviteError` и получали `CODE_NOT_ACCEPTED` — то есть ложились в
+# ту же кучу, что «неверный код», «истёк» и «чужой салон». Молчание там
+# уже вылечено, но куча осталась, а лекарства у этих двоих разные: одному
+# нужен СВОЙ код, другому никакой код не поможет.
+#
+# Довод про догадки сюда не переносится. `CODE_NOT_ACCEPTED` туманен
+# намеренно: код из четырёх знаков угадываем, и подсказка «почти» была бы
+# утечкой. Эти два отказа наступают ПОСЛЕ того, как код признан верным, —
+# гадать уже нечего, и туман отнимает у человека единственное, что ему
+# нужно знать: просить новый код или перестать пробовать.
+#
+# Чего в текстах намеренно НЕТ: обещания, что администратору что-то
+# придёт. При обоих отказах ему не приходит ничего, только строка в лог.
+# «Напишите администратору» — указание человеку, а не обещание
+# уведомления; обещанное и не случившееся хуже неназванного.
+#
+# Тексты предложены исполнителем и владельцем не утверждены.
+WRONG_RECIPIENT = (
+    "Этот код не для вас: карточка мастера уже привязана к другому "
+    "аккаунту. Попросите администратора салона выдать код именно на вас."
+)
+
+PERSON_ALREADY_MASTER = (
+    "Ваш аккаунт уже привязан к другой карточке мастера. Новый код здесь "
+    "не поможет — сначала нужно снять прежнюю привязку. Напишите об этом "
+    "администратору салона."
 )
 
 OWNER_TAKEN = (
@@ -781,6 +812,16 @@ def _redeem_and_greet(event: CanonicalEvent, bot_user, code: str, tenant, entry)
         return
     except OwnerAlreadyExists:
         _reply(event, OWNER_TAKEN)
+        return
+    # Обе ветки стоят ВЫШЕ общей намеренно: `MasterAlreadyLinked` и
+    # `PersonAlreadyMaster` — подклассы `InviteError`, и снизу их уже
+    # некому поймать. Порядок здесь не стиль, а условие того, что правка
+    # вообще что-то меняет.
+    except MasterAlreadyLinked:
+        _reply(event, WRONG_RECIPIENT)
+        return
+    except PersonAlreadyMaster:
+        _reply(event, PERSON_ALREADY_MASTER)
         return
     except InviteError as exc:  # future slugs — never leak an exception text
         logger.warning("channels.max.salon.redeem_failed slug=%s", getattr(exc, "slug", "?"))
