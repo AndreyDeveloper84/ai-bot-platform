@@ -412,8 +412,8 @@ describe("CustomerWellnessDashboardScreen — goal truthfulness (DRF-1476)", () 
       "Замер",
       "замер",
       "Сон",
-      "Шаг",
-      "шаг",
+      "Шагомер",
+      "шагомер",
       "Отзыв",
       "отзыв",
       "Рейтинг",
@@ -421,6 +421,14 @@ describe("CustomerWellnessDashboardScreen — goal truthfulness (DRF-1476)", () 
     ]) {
       expect(text).not.toContain(forbidden);
     }
+    // «Шаги» §35 п.10 — это шагомер, счётчик пройденного. Прежняя стража
+    // ловила подстроку «Шаг»/«шаг» и с 11.09.2026 сталкивалась с §5.2:
+    // блок «Шаги на сегодня» — шаги ПЛАНА (PlanStep), не шаги ног. Два
+    // решения об одном слове и разных предметах; стража сужена до
+    // класса, который она стережёт: число + «шаг» (5000 шагов) и
+    // «шагомер». Заголовок §5.2 через неё проходит, счётчик — нет.
+    expect(text).not.toMatch(/\d+\s*шаг/i);
+    expect(text).not.toMatch(/шагов/i);
   });
 });
 
@@ -649,7 +657,7 @@ describe("CustomerWellnessDashboardScreen — degraded reads (DRF-1546)", () => 
 
   it("«Добрать белок» is gone even when a protein target arrives", async () => {
     // Строка снята: бэкенд `protein_target_g` не шлёт и источника не
-    // имеет. Парная положительная стража — водяная строка «Цели
+    // имеет. Парная положительная стража — водяная строка «Шаги на
     // сегодня» на месте, то есть снят пункт, а не весь блок.
     serve(
       {
@@ -665,7 +673,7 @@ describe("CustomerWellnessDashboardScreen — degraded reads (DRF-1546)", () => 
     );
     await renderScreen(false);
 
-    expect(await screen.findByText(/Ещё 4 стакана до цели/)).toBeInTheDocument();
+    expect(await screen.findByText(/Ещё 4 стакана до нормы/)).toBeInTheDocument();
     expect(screen.queryByText(/Добрать белок/)).not.toBeInTheDocument();
   });
 });
@@ -676,14 +684,14 @@ describe("CustomerWellnessDashboardScreen — degraded reads (DRF-1546)", () => 
  * До правки бэкенд подставлял `_WATER_GLASSES_TARGET_DEFAULT = 8`, когда
  * Ayla отвечает `norm_ml=0` — то есть когда нормы у человека нет вовсе
  * (анкету питания он не проходил). Экран рисовал «4 / 8 стаканов»,
- * восемь точек и «Ещё 4 стакана до цели»: чужое число как ЕГО дневную
+ * восемь точек и «Ещё 4 стакана до нормы»: чужое число как ЕГО дневную
  * цель, с процентом выполнения.
  *
  * Стража парная (`negative_assert_guard`, DRF-1411): к «цели и шкалы
  * нет» приложены положительные на тех же данных — выпитое видно
  * (`water_glasses_eaten` — настоящее число, скрывать его вместе с
  * выдумкой нельзя), соседняя строка питания цела, и второй случай
- * показывает, что С НАСТОЯЩЕЙ нормой цель, шкала и «до цели»
+ * показывает, что С НАСТОЯЩЕЙ нормой цель, шкала и «до нормы»
  * возвращаются.
  *
  * Тест умеет падать: верните `water_glasses_target: 8` в ответ ручки —
@@ -719,7 +727,7 @@ describe("CustomerWellnessDashboardScreen — норма воды не выду�
     window.history.replaceState({}, "", "/customer/main");
   });
 
-  it("нормы нет: ни цели, ни шкалы, ни «до цели» — но выпитое видно", async () => {
+  it("нормы нет: ни цели, ни шкалы, ни «до нормы» — но выпитое видно", async () => {
     serve({
       calories_eaten: 800,
       calories_target: 2100,
@@ -735,13 +743,14 @@ describe("CustomerWellnessDashboardScreen — норма воды не выду�
     expect(screen.getByText(/800 \/ 2100 ккал/)).toBeInTheDocument();
     // NEGATIVE: выдуманной восьмёрки нет ни в числах, ни в шкале, ни в целях.
     expect(screen.queryByText(/\/ 8 стаканов/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/до нормы/)).not.toBeInTheDocument();
     expect(screen.queryByText(/до цели/)).not.toBeInTheDocument();
     expect(
       screen.queryByLabelText(/из 8 стаканов/),
     ).not.toBeInTheDocument();
   });
 
-  it("норма есть: цель, шкала и «до цели» возвращаются", async () => {
+  it("норма есть: цель, шкала и «до нормы» возвращаются", async () => {
     serve({
       calories_eaten: 800,
       calories_target: 2100,
@@ -753,8 +762,72 @@ describe("CustomerWellnessDashboardScreen — норма воды не выду�
     await renderScreen(false);
 
     expect(await screen.findByText(/4 \/ 8 стаканов/)).toBeInTheDocument();
-    expect(screen.getByText(/Ещё 4 стакана до цели/)).toBeInTheDocument();
+    expect(screen.getByText(/Ещё 4 стакана до нормы/)).toBeInTheDocument();
     expect(screen.queryByText(/стакана сегодня/)).not.toBeInTheDocument();
+  });
+});
+
+/**
+ * Block 4 называется «Шаги на сегодня», не «Цели сегодня» (решение владельца
+ * 11.09.2026 §5.2: Goal — желаемый результат, Habit — повторяющееся действие
+ * внутри плана, PlanStep — конкретное действие; привычка или действие не
+ * создают отдельную Goal). Стакан воды — шаг; заголовок «Цели» заводил
+ * человеку вторую цель, которой он не ставил, и строка «до цели» — тоже.
+ *
+ * Оговорка о предмете: на пилоте блок не рендерится никому — норма воды
+ * сегодня отсутствует у всех (#304/#1527, `water_service.water_goal_ml =
+ * None`), а блок показывается только при известной норме. Здесь стережётся
+ * МЕХАНИЗМ, а не наблюдение: первый человек с нормой должен увидеть «Шаги»,
+ * а не «Цели». Тест умеет падать: верните заголовок «Цели сегодня» или
+ * «до цели» в строку — покраснеет.
+ */
+describe("Block 4 — «Шаги на сегодня» (§5.2)", () => {
+  function serve(today: unknown) {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: unknown) => {
+        const u = String(url);
+        const body = u.includes("/wellness/today")
+          ? today
+          : u.includes("/recent-activity")
+            ? { this_week_booking_count: 0 }
+            : null;
+        if (body === null) throw new Error(`unexpected fetch: ${u}`);
+        return { ok: true, status: 200, json: async () => body } as unknown as Response;
+      }),
+    );
+  }
+
+  beforeEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllEnvs();
+    mockedBrowse.mockResolvedValue({
+      services: [],
+      masters: [],
+      picks: [],
+      picksOutcome: "OK",
+    });
+    window.history.replaceState({}, "", "/customer/main");
+  });
+
+  it("заголовок — «Шаги на сегодня», слова «цел» в блоке нет", async () => {
+    serve({
+      calories_eaten: 800,
+      water_glasses_eaten: 4,
+      water_glasses_target: 8,
+      active_goals: [],
+      display_name: "Анна",
+    });
+    await renderScreen(false);
+
+    const header = await screen.findByRole("heading", { name: "Шаги на сегодня" });
+    expect(header).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: /Цели сегодня/ })).not.toBeInTheDocument();
+    // Внутри блока — ни «цели», ни «цель»: шаг измеряется нормой.
+    const block = header.closest("section");
+    expect(block).not.toBeNull();
+    expect(block!.textContent).toMatch(/до нормы/);
+    expect(block!.textContent).not.toMatch(/цел[ьи]/i);
   });
 });
 
