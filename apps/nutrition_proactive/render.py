@@ -134,7 +134,9 @@ def render_daily_report(
         return "\n".join(lines)
 
     lines.append("")
-    lines.append(_macro_line("Калории", summary.calories_total, summary.calories_goal, "ккал"))
+    lines.append(
+        _macro_line("Калории", summary.calories_total, _summary_goal(summary, profile), "ккал")
+    )
     lines.append(_macro_line("Белки", summary.protein_g, _target(profile, "protein_g"), "г"))
     lines.append(_macro_line("Жиры", summary.fat_g, _target(profile, "fat_g"), "г"))
     lines.append(_macro_line("Углеводы", summary.carbs_g, _target(profile, "carbs_g"), "г"))
@@ -181,7 +183,16 @@ def goal_remark(
         return ""
     assert profile is not None  # narrowed by remarks_suppressed
 
+    # §6 свода 11.09: до настройки ориентиров скрыты оценки «мало», «много»,
+    # «перебор» и «осталось». Все четыре реплики ниже — такие оценки, и
+    # все они сравнивают с нормой. Нормы не настроены — реплики нет,
+    # какое бы число ни лежало в сводке или в ответе по воде: у них нет
+    # происхождения, у профиля есть.
+    if not profile.targets_are_configured:
+        return ""
+
     goal_label = GOAL_LABELS.get(profile.goal, "")
+    calories_goal = _summary_goal(summary, profile)
 
     if profile.protein_g and summary.protein_g < profile.protein_g * SHORTFALL_RATIO:
         short = round(profile.protein_g - summary.protein_g)
@@ -193,14 +204,14 @@ def goal_remark(
 
     if (
         profile.goal in {"lose", "tone"}
-        and summary.calories_goal
-        and summary.calories_total > summary.calories_goal * OVERSHOOT_RATIO
+        and calories_goal
+        and summary.calories_total > calories_goal * OVERSHOOT_RATIO
     ):
-        over = round(summary.calories_total - summary.calories_goal)
+        over = round(summary.calories_total - calories_goal)
         tail = f" — цель в профиле «{goal_label}»" if goal_label else ""
         return f"Калорий вышло на {over} ккал больше нормы из профиля{tail}."
 
-    if summary.calories_goal and summary.calories_total >= summary.calories_goal * SHORTFALL_RATIO:
+    if calories_goal and summary.calories_total >= calories_goal * SHORTFALL_RATIO:
         return "День уложился в нормы из твоего профиля."
 
     return ""
@@ -266,8 +277,34 @@ def _anything_logged(summary: SummaryResponse, water: WaterTodayResponse | None)
     return logged_food or logged_water
 
 
-def _target(profile: ProfileResponse | None, field: str) -> float:
-    return float(getattr(profile, field, 0) or 0) if profile is not None else 0.0
+def _target(profile: ProfileResponse | None, field: str) -> float | None:
+    """Ориентир из профиля — или ``None``, когда его нет.
+
+    Раньше здесь стояло ``or 0``, и ноль служил именем отсутствия: ``None``
+    → ``0.0`` → «нет». Пользователю это не было видно — ``_macro_line`` ноль
+    не печатал, — но это ровно вариант B из §103, который владелец отверг:
+    одно число несёт два смысла, и первый же рефакторинг ``if target:`` в
+    ``if target is not None:`` напечатал бы «из 0 г». §6: неизвестная норма
+    — ``NOT_CONFIGURED``, а не ноль. Здесь отсутствие остаётся отсутствием.
+    """
+    if profile is None:
+        return None
+    value = getattr(profile, field, None)
+    return None if value is None else float(value)
+
+
+def _summary_goal(summary: SummaryResponse, profile: ProfileResponse | None) -> float | None:
+    """``calories_goal`` сводки — только если ориентиры профиля настроены.
+
+    Сводка приезжает отдельным ответом и происхождения не несёт: у
+    ``unknown_legacy`` каталог до команды очистки (#332) присылает в ней
+    число. Профиль своё происхождение знает, и он же решает, можно ли
+    показывать число из соседнего ответа. Без профиля — нельзя: §103.
+    """
+    if profile is None or not profile.targets_are_configured:
+        return None
+    goal = summary.calories_goal
+    return None if goal is None else float(goal)
 
 
 def _macro_line(
@@ -283,6 +320,6 @@ def _macro_line(
     второго числа — это и есть режим «без ориентира»: факт показан,
     цель не выдумана.
     """
-    if target:
+    if target is not None:
         return f"{label}: {round(actual)} из {round(target)} {unit}."
     return f"{label}: {round(actual)} {unit}."

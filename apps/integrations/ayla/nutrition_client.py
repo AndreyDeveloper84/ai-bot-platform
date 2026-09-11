@@ -222,6 +222,35 @@ def _targets_source(body: dict[str, Any]) -> str:
     return str(provenance.get("source") or "")
 
 
+#: §6 свода владельца 11.09 (OD-NUT-1): «неизвестные нормы имеют
+#: NOT_CONFIGURED, а не ноль». Настроенным ориентир считается ТОЛЬКО при
+#: названном происхождении. Всё остальное — не настроено:
+#:
+#:   none            расчёта не было или он снят (§103)
+#:   unknown_legacy  происхождение не сохранялось — число есть, объяснить
+#:                   его нечем; §103: «уже рассчитанный ориентир нельзя
+#:                   показывать как актуальный без происхождения»
+#:   ""              ключ не пришёл — контракт нарушен, число не подтверждено
+#:   ayla_proposed   посчитано, но человеком НЕ подтверждено (§5.1 свода,
+#:                   вводится ayla-a3) — не настроено до подтверждения
+#:
+#: Правило применяется ОДИН РАЗ, на границе: ниже, при разборе ответа,
+#: ориентиры не настроенного профиля читаются как ``None``, и ни одна
+#: поверхность не получает числа, которое ей нельзя показывать. Иначе
+#: правило пришлось бы повторять в каждом рендере, и первая же новая
+#: поверхность, прочитавшая ``profile.protein_g`` напрямую, напечатала бы
+#: число без происхождения — как это и было до этой правки у шести
+#: профилей пилота (все ``unknown_legacy``).
+TARGETS_CONFIGURED_SOURCES: frozenset[str] = frozenset({"ayla_calculated", "user_entered"})
+TARGETS_CONFIGURED = "configured"
+TARGETS_NOT_CONFIGURED = "not_configured"
+
+
+def targets_configured(source: str | None) -> bool:
+    """Есть ли у ориентира названное происхождение (§6, §103)."""
+    return (source or "") in TARGETS_CONFIGURED_SOURCES
+
+
 def _target_or_none(norms: dict[str, Any], key: str) -> int | None:
     """Ориентир из блока ``norms`` — или ``None``, если его там нет.
 
@@ -287,6 +316,29 @@ class ProfileResponse:
     #: по ``""`` молчит и пишет warning: нарушен контракт, а не расчёт.
     targets_source: str = ""
     raw: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def targets_state(self) -> str:
+        """``configured`` | ``not_configured`` — имя отсутствия по §6.
+
+        Производное от ``targets_source``, а не отдельное поле: два поля
+        об одном факте разошлись бы при первом же новом источнике.
+        """
+        return (
+            TARGETS_CONFIGURED
+            if targets_configured(self.targets_source)
+            else TARGETS_NOT_CONFIGURED
+        )
+
+    @property
+    def targets_are_configured(self) -> bool:
+        """То же одним булевым — для поверхностей, которым нужен ответ, а не имя.
+
+        Единственный вопрос, который поверхность вправе задать: «можно ли
+        показывать ориентир». Ответ производится здесь, а не собирается на
+        каждом экране заново из ``targets_source``.
+        """
+        return targets_configured(self.targets_source)
 
 
 @dataclass(frozen=True)
@@ -754,6 +806,14 @@ class NutritionClient:
             # prefix per Ayla spec §1.1. Flat top-level fallback was removed
             # in DRF-270.
             norms = body.get("norms") or {}
+            source = _targets_source(body)
+            # §6 / §103: число без названного происхождения не выдаётся
+            # наружу вовсе. Для ``unknown_legacy`` каталог до команды
+            # очистки (#332) ещё присылает числа — здесь они и остаются:
+            # в ``raw`` для диагностики, но не в полях, которые читают
+            # экраны. Одно место, все поверхности.
+            if not targets_configured(source):
+                norms = {}
             return ProfileResponse(
                 gender=str(body.get("gender") or ""),
                 age=int(body.get("age") or 0),
@@ -790,7 +850,7 @@ class NutritionClient:
                 health_flags=dict(body.get("health_flags") or {}),
                 disclaimer_acked=body.get("disclaimer_acked"),
                 goal_overridden_by=body.get("goal_overridden_by"),
-                targets_source=_targets_source(body),
+                targets_source=source,
                 raw=body,
             )
 
