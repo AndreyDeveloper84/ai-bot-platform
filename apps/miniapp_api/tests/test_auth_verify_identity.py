@@ -159,6 +159,9 @@ class TestIdentityBlock:
     ) -> None:
         """Слов «anonymous» / «guest» в ответе нет — их нет в модели §124."""
         raw = json.dumps(_verify(client)).lower()
+        # Присутствие впереди: словарь §124 в ответе есть — и только он.
+        assert '"channel": "identified"' in raw
+        assert '"subject": "linked"' in raw
         assert "anonymous" not in raw
         assert "guest" not in raw
 
