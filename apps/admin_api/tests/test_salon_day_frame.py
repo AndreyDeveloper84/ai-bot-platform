@@ -163,6 +163,13 @@ class TestTheWholeSalonArrivesInOneCall:
 
         body = _get(client).json()
 
+        # Присутствие впереди отсутствия. Пустой ответ — сломанный вид,
+        # отказ прав, пустой список — даёт «записей нет» ровно так же, как
+        # правильный, и тест зеленел бы на нерабочем. Утверждать надо на ТОМ
+        # ЖЕ выражении, из которого потом читается отсутствие.
+        assert body["masters"], "в ответе нет ни одного мастера — проверять нечего"
+        assert body["masters"][0]["display_name"] == "Ольга"
+
         assert "bookings" not in body["masters"][0]
         assert "b-1" not in resp_text(body)
 
