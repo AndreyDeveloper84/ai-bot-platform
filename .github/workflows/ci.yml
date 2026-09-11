@@ -42,6 +42,13 @@ on:
       - "**/*.md"
   workflow_dispatch:
 
+  # Событие очереди слияний. `merge_group` фильтров по путям НЕ ПОДДЕРЖИВАЕТ,
+  # поэтому здесь нет `paths-ignore`: полный набор идёт и на группе из одних
+  # документов. Это дороже, но верно. Двойник `ci-docs-skip` на `merge_group`
+  # не подписан НАМЕРЕННО: оба репортят одни и те же имена проверок, и очередь
+  # получила бы два ответа на один вопрос — ровно то, на чём мы уже обожглись.
+  merge_group:
+
 # DRF-1377 — keyed on the PR number, and cancelling restricted to PRs.
 #
 # The old group was `ci-${{ github.ref }}` with an unconditional

@@ -130,6 +130,10 @@ on:
       - "**/*.md"
   workflow_dispatch:
 
+  # См. пояснение в ci.yml: `merge_group` не фильтруется по путям, и двойник
+  # `replay-docs-skip` на него не подписан по той же причине.
+  merge_group:
+
 # Keyed on the PR, not the ref (DRF-1373). A new commit on a PR makes the
 # previous run's verdict meaningless, so cancelling it is honest. A push to
 # `dev` is a DIFFERENT commit that is already merged — cancelling its gate
