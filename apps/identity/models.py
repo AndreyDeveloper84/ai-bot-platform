@@ -99,6 +99,46 @@ class BotUser(models.Model):
         "envelope.user_id → BotUser for BookingReminder + Conversation update.",
     )
 
+    # DRF-1649. Which SORT of Ayla account the key above points at.
+    #
+    # Ayla's `IsBotServiceWithVerifiedClient` lazily creates an `is_proxy=True`
+    # User the first time it sees a bot-issued external identity, and resolves a
+    # REAL account only once one has been bound (`bind_external_identity`). Both
+    # are legitimate canonical ids for THIS person, and booking needs either —
+    # which is why `ensure_ayla_link` writes both and must keep writing both.
+    #
+    # The distinction matters one layer out. `CatalogMaster.ayla_user_id` is the
+    # bridge `master_user_id` → ORM join for booking notifications, and
+    # `apps/catalog/master_state.py:464-471` forbids a proxy id there in as many
+    # words: "он занял бы ключ значением, по которому совпадения не будет
+    # никогда". Before this column the sort was resolved, emitted to telemetry
+    # and dropped — so the consumer that needed it could not ask.
+    #
+    # Three-valued, and NULL is not "probably fine":
+    #   False  a real bound account — the only sort safe to copy onward
+    #   True   the isolated proxy — never into CatalogMaster
+    #   NULL   the sort is unknown, and it is genuinely unknowable for rows
+    #          written by `apps/identity/services/resolver.py:192`, which
+    #          receives an id from its caller, and for every row linked before
+    #          this column existed.
+    #
+    # Consumers fail closed on True AND on NULL. "We do not know" is not "yes";
+    # reading it as permission would turn an honest gap into a silent one.
+    ayla_user_id_is_proxy = models.BooleanField(
+        null=True,
+        blank=True,
+        default=None,
+        help_text=(
+            "Sort of the Ayla account `ayla_user_id` points at: False = a real "
+            "bound account, True = Ayla's isolated proxy, NULL = unknown (written "
+            "by a path that does not learn it, or predates this column). Written "
+            "in the same save() as the key by apps/identity/services/ayla_link.py "
+            "— a sort that could be filled in separately would create a fourth "
+            "state, 'key present, sort pending', worse than any of the three."
+        ),
+        verbose_name="Ключ Ayla — прокси",
+    )
+
     # Synced from Ayla's `user.profile.updated` domain event (Gamma #446,
     # event-contract.md §3.12). Mirror-only — Ayla owns the canonical
     # value per ADR-0009 §Hard rule #1. Refresh via REST GET
