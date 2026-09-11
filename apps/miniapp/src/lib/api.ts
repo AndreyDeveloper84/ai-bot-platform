@@ -706,6 +706,13 @@ export interface BookingItem {
   undo_window_seconds: number;
   cancellable: boolean;
   reschedulable: boolean;
+  /**
+   * Адрес салона, дословно как в колонке (DRF-1652). Три состояния:
+   * строка — известен; `""` — салон сказал, что адреса нет; `null` —
+   * источник промолчал. Разбор один на все экраны —
+   * `lib/visit-address.ts`; собирать фразу на месте нельзя.
+   */
+  address: string | null;
   // Phase 4 — post-visit feedback. NULL until customer rates.
   rating: number | null;
   can_rate: boolean;
