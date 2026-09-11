@@ -410,6 +410,14 @@ class NextBestQuestion:
     impact_claim: ImpactClaim | None = None
     impact_evidence: ImpactEvidence | None = None
     ask_reason: AskReason = AskReason.FIRST_ASK
+    ask_reason_mechanism: str | None = None
+    """The inward half of `ask_reason`.
+
+    `REASK_ANSWER_EXPIRED` is one code covering two different things — a
+    volatile slot's own `ttl_seconds`, and a session that ended (slice E9). The
+    code is what analytics keys on; this is what tells the two apart in the
+    audit. Left `None` for reasons that mean exactly one thing.
+    """
 
 
 @dataclass(frozen=True, slots=True)
@@ -419,6 +427,7 @@ class Candidate:
     entry: QuestionCatalogEntry
     decision: AskDecision
     ask_reason: AskReason = AskReason.FIRST_ASK
+    ask_reason_mechanism: str | None = None
     expected_separation_gain: float | None = None
 
 
@@ -460,6 +469,7 @@ def select_next_question(candidates: Sequence[Candidate]) -> NextBestQuestion | 
         impact_claim=best.decision.claim,
         impact_evidence=best.decision.evidence,
         ask_reason=best.ask_reason,
+        ask_reason_mechanism=best.ask_reason_mechanism,
     )
 
 
