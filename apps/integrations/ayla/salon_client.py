@@ -66,6 +66,7 @@ from django.conf import settings
 
 from apps.integrations.ayla.health_check import HEALTH_CHECK_CODES
 from apps.integrations.ayla.url_builder import AylaUrlBuilder
+from apps.integrations.ayla.request_id import with_request_id
 
 logger = logging.getLogger(__name__)
 
@@ -236,13 +237,15 @@ class AylaSalonClient:
         and no route that silently forgets it.
         """
 
-        headers = {
-            "Authorization": f"Bearer {self._token}",
-            "X-External-User-ID": actor_external_id,
-            "X-Tenant": tenant_slug,
-            "X-App-Type": "pro",
-            "Accept": "application/json",
-        }
+        headers = with_request_id(
+            {
+                "Authorization": f"Bearer {self._token}",
+                "X-External-User-ID": actor_external_id,
+                "X-Tenant": tenant_slug,
+                "X-App-Type": "pro",
+                "Accept": "application/json",
+            }
+        )
         # Reads carry no idempotency key: there is nothing to de-duplicate,
         # and sending one would suggest to the reader that there is.
         if idempotency_key:
