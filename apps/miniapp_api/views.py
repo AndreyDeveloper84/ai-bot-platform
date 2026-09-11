@@ -2608,6 +2608,68 @@ def submit_feedback(request: HttpRequest, booking_id) -> HttpResponse:  # type: 
 # --- /customer/recommendations — Ayla catalog proxy ------------------------
 
 
+def _audit_no_verified_candidates(bot_user, payload: dict, decision: dict) -> None:
+    """Пустая полка с именем и числом (§10.5.1).
+
+    «Пустая полка перестаёт быть дефектом и становится состоянием с
+    именем и числом» — но только если число посчитано. Здесь считаются
+    коды исключения из `excluded[]`: по ним видно, чего именно не
+    хватает — подтверждений или самих связей.
+
+    Отдельным действием, а не полем внутри общего: три вещи, которые
+    сегодня выглядят одинаково пустой полкой — нарушенный контракт,
+    штатный ноль подтверждённых и отсутствие кандидатов вовсе, — обязаны
+    считаться порознь.
+    """
+    from collections import Counter
+
+    from apps.audit.services import write_audit
+
+    excluded = decision.get("excluded")
+    tally = Counter(
+        str(item.get("reason_code") or "MISSING")
+        for item in (excluded if isinstance(excluded, list) else [])
+        if isinstance(item, dict)
+    )
+    write_audit(
+        "recommendation.boundary.no_verified_candidates",
+        target="RecommendationBoundary",
+        payload={
+            "tenant_id": str(getattr(getattr(bot_user, "tenant", None), "id", "") or ""),
+            "request_id": payload.get("request_id", ""),
+            "excluded_by_reason": dict(tally),
+            "excluded_total": sum(tally.values()),
+        },
+    )
+
+
+def _audit_resolver_outcome(bot_user, state: str, payload: dict, detail: str | None) -> None:
+    """Считаемый след исхода границы — в аудит, а не только в лог.
+
+    `CONTRACT_VIOLATION` и `UNAVAILABLE` пишутся РАЗНЫМИ действиями, а не
+    одним с полем-различителем: §9.4 требует, чтобы третий исход попадал
+    в метрику отдельно от второго, и агрегат «сколько раз за неделю»
+    должен строиться запросом, а не глазами по логу.
+
+    `request_id` кладётся рядом: он же ключ воспроизводимости (§9.4), и
+    по нему дежурный найдёт в журнале границы тот же самый вызов.
+    """
+    from apps.audit.services import write_audit
+
+    write_audit(
+        f"recommendation.boundary.{state}",
+        target="RecommendationBoundary",
+        payload={
+            "tenant_id": str(getattr(getattr(bot_user, "tenant", None), "id", "") or ""),
+            "request_id": payload.get("request_id", ""),
+            # Причина словами источника. Значения полей уносить сюда
+            # можно и нужно: адресат этой записи — дежурный, а не консоль
+            # браузера человека (§9.4 про разную диагностику двух половин).
+            "detail": detail or "",
+        },
+    )
+
+
 @csrf_exempt
 @require_http_methods(["POST"])
 @require_init_data
@@ -2665,74 +2727,118 @@ def customer_recommendations(request: HttpRequest) -> HttpResponse:
     аварии. Имя, обвиняющее не ту сторону, хуже отсутствия имени: по нему
     идут чинить не там.
 
-    ЛЕГАСИ. Формулировка «The Mini App side owns the rendering contract»
-    ОТМЕНЕНА контрактом резолвера (§2.1 C3, OD §53): у формы ответа есть
-    владелец — Recommendation Resolver, и валидация на границе обязательна.
-    Пропуск формы как есть сохранён намеренно (см.
-    `recommendations_client.fetch_recommendations`); валидацию несёт
-    `apps.integrations.ayla.recommendation_resolver_client`, который
-    разводит три исхода.
+    ### Форма на проводе одна, и она объявлена в контракте (DRF-1626)
+
+    Здесь стояло: «Пропуск формы как есть сохранён намеренно». Это
+    описывало решение, которое канон уже отменил — §9.4 требует
+    обратного дословно: «Транзитный слой валидирует. `ai-bot-platform`
+    обязан проверить схему, прежде чем передавать дальше. Роль
+    „translation hop, not a schema gate" отменена (§2.1 C3)». Оставь мы
+    абзац, следующий прочёл бы его как действующий и вернул пропуск.
+
+    Та же судьба у формулировки «The Mini App side owns the rendering
+    contract»: она ОТМЕНЕНА контрактом резолвера (§2.1 C3, OD §53). У
+    формы ответа есть владелец — Recommendation Resolver, — и здесь это
+    не пометка в прозе, а исполнение: транзит проверяет форму ДО того,
+    как отдать её полке (`tests/contracts/test_recommendation_boundary_guard.py`
+    держит обе стороны за слово).
+
+    Дефект был не в форме, а в проводе. Существуют ДВЕ ручки Ayla:
+
+    * `internal/me/catalog/recommendations/` — легаси-полка, три слоя
+      `layer_1/2/3`, никакого идентификатора выдачи;
+    * `internal/recommendation/resolve/` — граница §9.4, `ordered[]`,
+      `decision_id`, `resolver_spec_version`.
+
+    Транзит ходил на первую, а полка мини-приложения написана против
+    второй, поэтому валидатор отвергал ответ целиком и `picks` оставался
+    пустым — при том, что 55 вызовов из 56 отвечали `200`. Ломалось не
+    то, что отвечало: легаси-ручка исправно работала.
+
+    «Научить полку принимать обе формы» запрещено владельцем и было бы
+    хуже общего довода про удвоение предмета: это навсегда закрепило бы
+    в потребителе знание о ручке, которую §9.4 уже заменил.
+
+    ### Три исхода, и они не сливаются
+
+    * `OK` — форма проверена, ключи кандидатов переведены, тело уходит
+      полке в конверте `{"data": …}`, как объявляет §9.4;
+    * `UNAVAILABLE` — сеть, таймаут, 5xx, открытый предохранитель.
+      Подбор необязателен, молчание законно;
+    * `CONTRACT_VIOLATION` — источник ОТВЕТИЛ, но не в объявленной
+      форме. Обязано быть громким и считаться отдельно: без этого
+      несовместимость даёт пустую полку, неотличимую от «ничего не
+      нашлось».
 
     Failure mapping:
 
-    * 400 — body not valid JSON object, OR Ayla returned 4xx
-      (Ayla's response body forwarded under ``ayla_error``).
-    * 502 — Ayla timeout / 5xx / malformed JSON.
-    * 503 — bot-platform misconfigured (missing service token / base URL).
+    * 502 `contract_violation` — граница ответила не в своей форме.
+    * 502 `ayla_unavailable` — граница не ответила.
+    * 503 `mirror_unavailable` — не ответило НАШЕ зеркало ключей.
     """
-    import json
-
     from django.db import DatabaseError
 
-    from apps.marketplace.resolver_keys import translate_provider_keys
     from apps.integrations.ayla import external_user_id_for
-    from apps.integrations.ayla.recommendations_client import (
-        RecommendationsBadRequest,
-        RecommendationsConfigError,
-        RecommendationsUnavailable,
-        fetch_recommendations,
-    )
+    from apps.integrations.ayla.recommendation_resolver_client import resolve_recommendation
+    from apps.marketplace.resolver_keys import translate_provider_keys
+    from apps.marketplace.resolver_request import build_shelf_request
 
     bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
 
-    # Match the /auth/verify pattern: only parse JSON when the caller
-    # explicitly declares `Content-Type: application/json`. Empty/
-    # multipart bodies are treated as «no scoring hints» — Ayla receives
-    # `{}` and returns its default ranking.
-    body: dict = {}
-    content_type = (request.content_type or "").split(";")[0].strip().lower()
-    if content_type == "application/json" and request.body:
-        try:
-            parsed = json.loads(request.body)
-        except ValueError:
-            return _error("malformed", "body is not valid JSON", 400)
-        if not isinstance(parsed, dict):
-            return _error("malformed", "body must be a JSON object", 400)
-        body = parsed
+    # Тело не читается. Полка шлёт `POST /recommendations` без него, а
+    # запрос границы собирается из того, что знает сервер (§4.1:
+    # `subject_ref` в теле нет намеренно — кого спрашивают, определяет
+    # аутентификация). Приняв часть запроса от клиента, мы позволили бы
+    # ему получить решение за другого человека.
+    payload = build_shelf_request(goal_key=None)
+
+    outcome = resolve_recommendation(
+        external_user_id=external_user_id_for(bot_user),
+        payload=payload,
+    )
+
+    if outcome.state == "contract_violation":
+        # ГРОМКО и отдельно от недоступности. Это и есть вторая половина
+        # критерия DRF-1626: сегодня несовместимость давала пустую полку,
+        # неотличимую от «ничего не нашлось», и человек с дежурным видели
+        # одно и то же в двух совершенно разных случаях.
+        #
+        # Счётчик в аудите, а не только в логе: по строке лога нельзя
+        # ответить «сколько раз за неделю», не написав парсер, которого
+        # никто не напишет.
+        logger.error(
+            "customer_recommendations.contract_violation request_id=%s detail=%s",
+            payload["request_id"],
+            outcome.detail,
+        )
+        _audit_resolver_outcome(bot_user, "contract_violation", payload, outcome.detail)
+        return _error("contract_violation", "recommendation boundary answered off-contract", 502)
+
+    if not outcome.is_ok:
+        # Подбор — необязательное украшение: молчание здесь законно, и
+        # детектор, кричащий на каждый мёртвый источник, глушат за неделю.
+        logger.warning(
+            "customer_recommendations.unavailable request_id=%s detail=%s",
+            payload["request_id"],
+            outcome.detail,
+        )
+        _audit_resolver_outcome(bot_user, "unavailable", payload, outcome.detail)
+        return _error("ayla_unavailable", "recommendation boundary unavailable", 502)
+
+    decision = outcome.decision or {}
+    if not decision.get("ordered"):
+        # §10.5.1: ноль подтверждённых связей — ШТАТНЫЙ результат, а не
+        # ошибка. Считается ОТДЕЛЬНО от двух плохих исходов: попади оно в
+        # счётчик поломок, мы стали бы чинить работающее.
+        #
+        # Контракт требует писать это событие «с количеством
+        # REVIEW_REQUIRED и UNMAPPED». Числа берутся из того, что решение
+        # реально несёт — из кодов в `excluded[]`; выводить их из чего-то
+        # ещё значило бы придумать замер.
+        _audit_no_verified_candidates(bot_user, payload, decision)
 
     try:
-        ayla_body = fetch_recommendations(
-            external_user_id=external_user_id_for(bot_user),
-            payload=body,
-        )
-    except RecommendationsConfigError as exc:
-        logger.error("customer_recommendations.config_error: %s", exc)
-        return _error("not_configured", "ayla recommendations not configured", 503)
-    except RecommendationsBadRequest as exc:
-        return JsonResponse(
-            {
-                "error": "ayla_bad_request",
-                "detail": f"ayla returned HTTP {exc.status_code}",
-                "ayla_error": exc.body,
-            },
-            status=400,
-        )
-    except RecommendationsUnavailable as exc:
-        logger.warning("customer_recommendations.unavailable: %s", exc)
-        return _error("ayla_unavailable", "ayla recommendations unavailable", 502)
-
-    try:
-        translated, keys = translate_provider_keys(ayla_body)
+        translated, keys = translate_provider_keys({"data": decision})
     except DatabaseError as exc:
         # Наша база, не их ответ. Пропустив кандидатов непереведёнными,
         # мы получили бы у полки `UNRENDERABLE_CANDIDATES` — имя, которое

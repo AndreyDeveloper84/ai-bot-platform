@@ -96,9 +96,9 @@ Customer Анна открывает MAX-мессенджер, переходи�
 │                                               │
 │  ─ ─ ─ ─ ─ ─ ─ scroll ~450dp ─ ─ ─ ─ ─       │
 │                                               │
-│  Цели сегодня                                 │  Block 4 — text actions
+│  Шаги на сегодня                              │  Block 4 — text actions
 │                                               │  без progress bars
-│  💧 Ещё 4 стакана до цели                     │
+│  💧 Ещё 4 стакана до нормы                    │  (§5.2 11.09.2026: шаг ≠ цель)
 │  🍽 Добрать белок · ещё 35 г                  │
 │                                               │
 │  ───────────────────────────────────────     │
@@ -401,8 +401,8 @@ Per tech lead caveat (мной упущено в первичной версии
 
 | Endpoint / method | Откуда | Куда (UI element) | Сценарий |
 |---|---|---|---|
-| `NutritionClient.daily_summary()` | `apps/integrations/ayla/nutrition_client.py` | Pulse Питание + Цели сегодня | Calories + БЖУ (pfc может быть null → conditional hide) |
-| `NutritionClient.get_water_today()` | same | Pulse Вода + Цели сегодня + Weekly progress | Стаканы выпитые сегодня |
+| `NutritionClient.daily_summary()` | `apps/integrations/ayla/nutrition_client.py` | Pulse Питание + Шаги на сегодня | Calories + БЖУ (pfc может быть null → conditional hide) |
+| `NutritionClient.get_water_today()` | same | Pulse Вода + Шаги на сегодня + Weekly progress | Стаканы выпитые сегодня |
 | `NutritionClient.add_water(volume_ml)` | same | Quick action `+ стакан 250 мл` | POST log entry, localStorage fallback offline |
 | `NutritionClient.scan_photo(photo)` | same | Quick action `📸 Сфотографируй еду` | Photo recognition + meal log |
 | `NutritionClient.log_meal(meal)` | same | Post photo confirm | Save recognized food |

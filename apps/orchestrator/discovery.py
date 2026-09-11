@@ -2522,7 +2522,14 @@ def render_no_criteria_clarification() -> DiscoveryReply:
 #: «Какой косметология?» has spent more trust than the question saves. The
 #: NAMES carry the meaning here — they are the whole content of the turn — so
 #: the frame around them can afford to be neutral.
-CLARIFY_SERVICE_QUESTION = "Уточните, пожалуйста, что именно подойдёт:"
+#: Вопрос перед чипами услуг, когда ярус неразличим (DRF-1531).
+#:
+#: Формулировка утверждена владельцем 06.09.2026 (`OPEN_DECISIONS.md` §35 п.12).
+#: Прежняя — «Уточните, пожалуйста, что именно подойдёт:» — звучала как
+#: продолжение чужой фразы. Эта работает с любой услугой и, главное, не
+#: требует грамматического рода: «Какой массаж?» собрать из каталога нельзя,
+#: род там не хранится, а «Какой косметология?» стоит дороже, чем экономит.
+CLARIFY_SERVICE_QUESTION = "Что именно вы ищете?"
 
 
 def clarifying_question(

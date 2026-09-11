@@ -57,14 +57,31 @@ on:
 #   * `github.event.pull_request.number` groups a PR with itself. A new
 #     commit makes the previous run's verdict meaningless, so superseding it
 #     is honest work, and that is the only case `cancel-in-progress` covers.
-#   * `github.sha` gives every push its own group. A burst of merges to `dev`
-#     can no longer collide, and with cancelling off for `push` it could not
-#     act even if it did. Landed code always gets its own verdict.
+#   * pushes are grouped by `github.ref`, and cancelling stays OFF for them.
+#
+# 2026-09-11 — the push group was `github.sha`: every push its own group, so
+# nothing ever collided and nothing was ever cancelled. Measured that day:
+# 24 runs queued behind 2 in progress on the bot, 6 behind 3 on the catalogue,
+# both repositories sharing one runner allowance, and a catalogue lint waiting
+# half an hour. Seven stale `dev` runs were cancelled by hand.
+#
+# The fix is NOT to turn `cancel-in-progress` back on for pushes — that is
+# exactly what DRF-1377 measured and removed (15 of 20 landed commits with no
+# verdict). It is to key pushes on the ref while leaving cancelling off.
+# GitHub keeps at most ONE pending run per concurrency group: a new push to
+# `dev` cancels the *pending* run it supersedes and leaves the *running* one
+# alone. The queue collapses to «one running, one waiting» per branch, and a
+# verdict that has started is never killed. The head of `dev` still gets its
+# own run — the pending one is always the newest push, so `deploy-dev`
+# (which listens for `ci` via `workflow_run`) always sees the head.
+#
+# What a superseded run loses is a verdict for an intermediate commit that
+# never started. That commit is contained in the head, and the head is judged.
 #
 # Not `github.workflow`: `ci-docs-skip.yml` is also named `ci`, so that
 # expression is ambiguous across the two files. The literal prefix is not.
 concurrency:
-  group: ci-${{ github.event.pull_request.number || github.sha }}
+  group: ci-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
@@ -485,6 +502,17 @@ jobs:
       # докстринге; там же названы файлы, которым подстановка разрешена.
       - name: Nutrition-target substitution guard (AST lint)
         run: uv run python tools/lint/nutrition_target_guard.py apps/
+
+      # Owner decision 11.09 §3: «payload.get("safety") or NOT_APPLICABLE»
+      # is forbidden and AST-guarded. The guard catches the CLASS — an
+      # `or` / `.get(default)` / `getattr(default)` / `x if x else` that
+      # supplies a SafetyState where a verdict was absent — not one
+      # spelling. UNKNOWN / not_evaluated() are the honest defaults and
+      # pass. What it cannot see (two-line defaults, renamed keys) is
+      # named in its docstring; the consumer's __post_init__ is the
+      # second line.
+      - name: Safety-default substitution guard (AST lint)
+        run: uv run python tools/lint/safety_default_guard.py apps/ tests/
 
       - name: Django manage.py check
         run: uv run python manage.py check
