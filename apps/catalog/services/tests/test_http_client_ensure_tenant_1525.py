@@ -102,6 +102,9 @@ class TestEachRefusalHasItsOwnName:
         httpx_mock.add_response(method="POST", url=_URL, status_code=403, json={"detail": "no"})
         with _client() as c, pytest.raises(CatalogProvisioningRefused) as info:
             c.ensure_tenant(slug="mednyy-kovsh", name="Медный ковш")
+        # Присутствие впереди отсутствия: это именно отказ провижининга —
+        # и НЕ тот класс, который синхронизация читает как сбой зеркала.
+        assert isinstance(info.value, CatalogProvisioningRefused)
         assert not isinstance(info.value, CatalogAuthError)
 
     def test_409_carries_the_existing_name(self, httpx_mock: HTTPXMock) -> None:
