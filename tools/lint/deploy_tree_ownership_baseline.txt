@@ -1,45 +1,85 @@
-# Objects in the dev deploy tree NOT owned by the deploy user, as they stood
+# Objects in the pilot deploy tree NOT owned by the deploy user, as they stood
 # when tools/lint/deploy_tree_ownership.py landed (DRF-1646).
 #
 # This file is a RATCHET, not a verdict. Every number here is damage already
-# done: 3315 objects the deploy user cannot overwrite, in a tree two accounts
+# done: objects the deploy user cannot overwrite, in a tree three identities
 # write to on every run. Lowering a number is progress and is done by hand
 # after the repair. Raising one is not allowed — the guard fails instead.
 #
 # Per category on purpose. A total would let a repair in staticfiles/ and a
 # regression in .git/ cancel out into a green run.
 #
-# MEASURED 2026-09-11 on /home/taximeter/ai-bot-platform-dev by the session
-# holding DRF-1646, which has shell access to the box. Not re-measured here:
-# this window has no host access, and a number copied from a report is a
-# number, not a measurement. If it disagrees with the tree, the tree wins —
-# re-measure and correct this file rather than arguing with it.
+# ─── WHICH BOX. Read this before trusting the numbers. ──────────────────────
 #
-# Owner split at the time of measurement: taximeter 940, root 735, other 2.
-# (Those count top-level-ish objects; the per-category numbers below count
-# every object in the walk, which is why they are larger.)
+#   host       ruvds-o1mqo / 176.119.159.141   ← api-dev.gobeauty.site
+#   tree       /home/taximeter/ai-bot-platform-dev
+#   owner      taximeter, uid 1000
+#   measured   2026-09-11T03:31:25Z, by ssh, by the window holding DRF-1629
 #
-# WHAT THE NUMBERS SAY ABOUT WHO DID IT
+# The host is named here because the first version of this file did NOT name
+# it, and the first measurement was taken on the WRONG BOX. There is a second
+# machine, ruvds-l2wyz / 194.87.99.126, carrying a checkout at the same path
+# with the same contour names. It is abandoned: its tree is frozen at
+# 2026-09-03 (`.git/FETCH_HEAD` has not moved since), its application
+# containers exited 7 days ago, and nothing listens on the port the deploy
+# smoke-tests. Its numbers looked entirely plausible — 3315 foreign objects
+# with the same shape — which is exactly why they were believed.
 #
-#   .git/ 2130 + other 1011  git ran as root in this tree, repeatedly. No
-#                            workflow does that: deploy-dev.yml:88-90 and
-#                            deploy.yml:125-127 both run fetch/pull as
-#                            ${DEV_USER}. A person, by hand. `other` includes
-#                            ordinary source files — tests/test_admin_humanize.py,
-#                            tests/support/migration_graph.py,
-#                            tests/contracts/test_master_address_has_no_readers.py
-#                            — i.e. working copies, not artefacts.
+# The path did not settle it; both boxes have it. What settled it was asking
+# the thing that uses the tree: `docker inspect ... project.working_dir` on
+# the live contour, plus DNS for api-dev.gobeauty.site. Re-measure the same
+# way before touching this file.
 #
-#   staticfiles/ 174         the container producer, and the only one this
-#                            repository explains: docker-compose.staging.yml
-#                            mounts ./:/app, the image has no USER, and
-#                            deploy-dev.yml runs `collectstatic` under
-#                            `sudo docker compose run`. Fixable in the repo.
+# ─── WHO WRITES. Three identities in ONE deploy run, 2026-09-11 03:24 UTC ───
 #
-#   __pycache__ 0            measured, not assumed. The prediction that this
-#                            would be the bulk was wrong; it is empty.
+#   root        73 files   .git/HEAD, .git/index, .git/refs/heads/dev
+#   taximeter   16 files   .git/FETCH_HEAD
+#   uid 1001     6 files   apps/miniapp/dist/**
+#
+# uid 1001 has NO passwd entry on this box. It is not a person and not the
+# deploy user: it is a container uid arriving through the `./:/app` bind
+# mount. A tree written by an identity that does not exist on the machine is
+# the clearest possible statement of DRF-1646's first point — the steps do not
+# name their actor, so nobody knew there were three.
+#
+# ─── WHAT IS ALREADY BROKEN, not "will be" ──────────────────────────────────
+#
+#   staticfiles/  is root 755. `touch staticfiles/x` as taximeter is REFUSED.
+#                 The deploy's own collectstatic step writes there.
+#   .git/         still writable: the directory is taximeter 775, and git
+#                 replaces files by rename, which needs the directory, not the
+#                 file. So `git pull` works TODAY while `.git/HEAD` and
+#                 `.git/index` are root-owned. This is latent, not harmless —
+#                 one `chmod` on the directory and the deploy stops with
+#                 Permission denied inside a git internal file, which reads as
+#                 a corrupted repository rather than as permissions.
+#
+# ─── WHY THE REPAIR IS NOT IN THIS PR ───────────────────────────────────────
+#
+# `sudo -n true` as taximeter: "a password is required". Changing ownership of
+# 3410 objects needs root, and this window has taximeter only. Measuring was
+# possible; repairing is not. That limit is named here rather than left as an
+# unfinished checkbox.
+#
+# ─── THE NUMBERS ────────────────────────────────────────────────────────────
+#
+#   objects walked        12430
+#   foreign               3410      (root 3398, uid 1001 12)
+#   unreadable on walk    0         ← a silently skipped subtree would be a
+#                                     false zero; the walk was complete
+#
+#   .git/ 2206   objects 1789, refs 208, logs 206, plus index/HEAD/ORIG_HEAD
+#   other 1029   includes working copies of source files —
+#                tests/test_admin_humanize.py, tests/support/migration_graph.py,
+#                tests/contracts/test_master_address_has_no_readers.py
+#   staticfiles/ 175   the container producer, and the only one this repository
+#                explains: docker-compose.staging.yml mounts ./:/app, the image
+#                declares no USER, and deploy-dev.yml runs collectstatic under
+#                `sudo docker compose run`
+#   __pycache__/ 0     measured, not assumed. The prediction that this would be
+#                the bulk was wrong; it is empty.
 
-.git/ = 2130
-staticfiles/ = 174
+.git/ = 2206
+staticfiles/ = 175
 __pycache__/ = 0
-other = 1011
+other = 1029

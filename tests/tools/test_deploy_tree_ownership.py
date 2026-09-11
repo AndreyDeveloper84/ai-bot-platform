@@ -130,16 +130,22 @@ def test_categorisation_matches_on_segments_not_substrings(path: str, expected: 
 def test_the_recorded_baseline_is_the_measured_one() -> None:
     """Храповик заведён числом с хоста, а не нулями «для начала».
 
-    Нули означали бы, что дерево чистое, — и первый же прогон объявил бы 3315
+    Нули означали бы, что дерево чистое, — и первый же прогон объявил бы 3410
     существующих объектов свежей регрессией, свалив вину на того, кто оказался
     рядом.
+
+    Число менялось один раз, и стоит помнить почему: первая редакция стояла на
+    3315, снятых на **другой машине** — заброшенной копии контура по тому же
+    пути. Путь спора не решил, потому что он есть на обеих; решило то, что
+    предмет назвал себя сам (`docker inspect ... project.working_dir` живого
+    контура и DNS пилота).
     """
     baseline = read_baseline()
 
-    assert baseline[GIT] == 2130
-    assert baseline[STATICFILES] == 174
-    assert baseline[OTHER] == 1011
-    assert sum(baseline.values()) == 3315
+    assert baseline[GIT] == 2206
+    assert baseline[STATICFILES] == 175
+    assert baseline[OTHER] == 1029
+    assert sum(baseline.values()) == 3410
 
 
 def test_growth_in_one_bucket_fails_even_when_the_total_shrinks() -> None:

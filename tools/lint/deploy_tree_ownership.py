@@ -3,10 +3,17 @@
 
 # The defect
 
-DRF-1646. The dev deploy tree `/home/taximeter/ai-bot-platform-dev` holds
-**3315 objects owned by root**, and the deploy user cannot overwrite them —
-verified by `touch`, refused. Two accounts write into one working tree on
-every run.
+DRF-1646. The pilot deploy tree — `/home/taximeter/ai-bot-platform-dev` on
+`ruvds-o1mqo` / 176.119.159.141, the box `api-dev.gobeauty.site` resolves to —
+holds **3410 objects the deploy user does not own**, and it cannot overwrite
+them: `touch staticfiles/x` as `taximeter` is refused.
+
+**Three** identities write into that one tree, all within the same deploy run
+of 2026-09-11 03:24 UTC: `root` (73 files), `taximeter` (16), and uid `1001`
+(6) — which has no `passwd` entry on the box at all, being a container uid
+arriving through the `./:/app` bind mount. Nobody knew there were three,
+because no step names its actor. That is point 1 of the ticket, stated by the
+filesystem rather than by argument.
 
 This is not "will bite one day". Among the root-owned objects are git's own
 bookkeeping files, including `.git/logs/refs/remotes/origin/measure/…` dated
@@ -17,15 +24,23 @@ deploy then fails for a reason that points at the wrong thing.
 
 # Two producers, and only one of them is in this repository
 
-Measured 2026-09-11 on the dev box, breakdown of the 3315:
+Measured 2026-09-11T03:31Z on the pilot box, 12430 objects walked, none
+unreadable. Breakdown of the 3410:
 
-    .git/           2130
-    other           1011   ← includes ordinary source files:
+    .git/           2206
+    other           1029   ← includes ordinary source files:
                            tests/test_admin_humanize.py,
                            tests/support/migration_graph.py,
                            tests/contracts/test_master_address_has_no_readers.py
-    staticfiles/     174
+    staticfiles/     175
     __pycache__        0
+
+The first version of this file carried 3315, measured on **a different
+machine** — `ruvds-l2wyz` / 194.87.99.126 holds a checkout at the same path,
+with the same contour names, abandoned since 2026-09-03. The path is not an
+address: both boxes have it. What settles it is asking the live contour where
+it was launched from (`docker inspect ... project.working_dir`) and resolving
+the pilot's DNS name — the subject naming itself, rather than being assumed.
 
 **The container producer is the small one.** `docker-compose.staging.yml`
 mounts `./:/app`, the image declares no `USER` (the Dockerfile says so
