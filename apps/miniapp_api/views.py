@@ -2172,6 +2172,77 @@ def personal_data_delete(request: HttpRequest) -> HttpResponse:
 
 
 # ---------------------------------------------------------------------------
+# Заявка на удаление аккаунта (§7 свода владельца, DRF-1699, срез D1)
+# ---------------------------------------------------------------------------
+
+
+@csrf_exempt
+@require_http_methods(["GET", "POST"])
+@require_init_data
+@with_request_tenant
+def deletion_request(request: HttpRequest) -> HttpResponse:
+    """``POST`` — завести заявку до любого стирания; ``GET`` — текущая.
+
+    §7: устойчивый ``DeletionRequest`` создаётся ДО показа успеха; человек
+    видит ``request_id``, точную крайнюю дату и статус; ошибка обязана
+    говорить, что удаление не началось.
+
+    Подтверждение — то же серверное ``DELETE_CONFIRMATION_TOKEN``, что у
+    ``DELETE /me/personal-data/`` (DRF-956 / T-05): клиентский лист — не
+    подтверждение. До совпадения токена ничего не происходит; после —
+    только заявка в каталоге. Стирания здесь нет: исполнитель — срез D3.
+
+    Ответы ``POST``: 201 заявка заведена / 200 уже была открыта (тот же
+    номер) — тело одно; 400 токен; 409 ``not_linked`` /
+    ``identity_conflict`` (повтор не поможет — человек не связан с Ayla
+    или связан дважды); 502 ``upstream_unavailable`` (повтор поможет).
+    В каждом отказе ``status: "not_started"`` — единственное слово о
+    состоянии данных, и оно правдиво.
+    """
+    from apps.identity.services.deletion_request import (
+        DeletionNotStarted,
+        current_account_deletion,
+        request_account_deletion,
+    )
+    from apps.identity.services.profile import DELETE_CONFIRMATION_TOKEN
+
+    bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
+
+    if request.method == "GET":
+        current = current_account_deletion(bot_user)
+        if current is None:
+            return JsonResponse({"status": "none", "request": None}, status=200)
+        return JsonResponse({"status": "found", "request": current.as_dict()}, status=200)
+
+    body = _json_object_body(request)
+    if isinstance(body, HttpResponse):
+        return body
+    if body.get("confirmation", "") != DELETE_CONFIRMATION_TOKEN:
+        return _error(
+            "confirmation_mismatch",
+            f"body.confirmation must equal {DELETE_CONFIRMATION_TOKEN!r}",
+            400,
+        )
+
+    try:
+        view = request_account_deletion(bot_user)
+    except DeletionNotStarted as exc:
+        return JsonResponse(
+            {
+                "status": "not_started",
+                "reason": exc.reason,
+                "retryable": exc.retryable,
+                "detail": str(exc),
+            },
+            status=502 if exc.retryable else 409,
+        )
+    return JsonResponse(
+        {"status": "accepted", "request": view.as_dict()},
+        status=201 if view.created else 200,
+    )
+
+
+# ---------------------------------------------------------------------------
 # Health-data consent (152-ФЗ ст. 10 special category) — DRF-1453.
 #
 # Отдельная ручка, а не поле в общем consents-объекте, ровно потому, что
