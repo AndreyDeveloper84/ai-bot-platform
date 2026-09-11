@@ -88,6 +88,14 @@ class Mode:
     name: str
     frees: str
     dismantles: frozenset[str]
+    #: Clear ``CatalogMaster.ayla_user_id`` on cards this person's identity
+    #: was written into. The catalog half deletes that user; a card still
+    #: pointing at it would read as «sold» (``sale_block`` asks only whether
+    #: the key is present) while every notification to the master went to
+    #: nobody. Cleared, the card reads ``ayla_unlinked`` — not sold until the
+    #: registration is done again, which is what «free the registration»
+    #: means for the card. The card itself stays: a reset is not an archive.
+    unlinks_master_card: bool = False
 
 
 _CLIENT_DISMANTLES = frozenset(
@@ -114,6 +122,7 @@ MODES: dict[str, Mode] = {
         # holds the salon's conversations, and removing it is a different
         # decision (owner question 2, DRF-1349).
         dismantles=_CLIENT_DISMANTLES | {"tenancy.TenantStaff.bot_user"},
+        unlinks_master_card=True,
     ),
 }
 
@@ -223,6 +232,7 @@ class Plan:
     ayla_user_ids: list[uuid.UUID]
     lines: list[Line]
     memory: Line
+    master_cards: Line
     kept: list[Kept]
 
     @property
@@ -336,6 +346,31 @@ def _memory_line(ayla_user_ids: list[uuid.UUID]) -> Line:
     )
 
 
+def _master_cards_q(bot_user_ids: list[uuid.UUID], ayla_user_ids: list[uuid.UUID]) -> models.Q:
+    q = models.Q(linked_bot_user_id__in=bot_user_ids)
+    if ayla_user_ids:
+        q |= models.Q(ayla_user_id__in=ayla_user_ids)
+    return q
+
+
+def _master_cards_line(
+    mode: Mode, bot_user_ids: list[uuid.UUID], ayla_user_ids: list[uuid.UUID]
+) -> Line:
+    from apps.catalog.models import CatalogMaster
+
+    rows = (
+        CatalogMaster.all_tenants.filter(_master_cards_q(bot_user_ids, ayla_user_ids))
+        .exclude(ayla_user_id__isnull=True)
+        .count()
+    )
+    return Line(
+        "catalog.CatalogMaster.ayla_user_id (ключ Ayla на карточке, не FK)",
+        "—",
+        "set_null" if mode.unlinks_master_card else "kept",
+        rows,
+    )
+
+
 def _kept(bot_user_ids: list[uuid.UUID], ayla_user_ids: list[uuid.UUID]) -> list[Kept]:
     out: list[Kept] = []
     for label, (family, column, reason) in KEPT_BY_DESIGN.items():
@@ -368,6 +403,7 @@ def plan(spec: str, mode_name: str) -> Plan:
         ayla_user_ids=ayla_user_ids,
         lines=lines,
         memory=_memory_line(ayla_user_ids),
+        master_cards=_master_cards_line(mode, bot_user_ids, ayla_user_ids),
         kept=_kept(bot_user_ids, ayla_user_ids),
     )
 
@@ -453,6 +489,16 @@ def apply(spec: str, mode_name: str) -> Report:
         if p.memory.rows:
             _, per_model = UserPersonalContext.objects.filter(user_id__in=p.ayla_user_ids).delete()
             removed.update(per_model)
+
+        if p.mode.unlinks_master_card and p.master_cards.rows:
+            from apps.catalog.models import CatalogMaster
+
+            n = (
+                CatalogMaster.all_tenants.filter(_master_cards_q(p.bot_user_ids, p.ayla_user_ids))
+                .exclude(ayla_user_id__isnull=True)
+                .update(ayla_user_id=None)
+            )
+            removed["catalog.CatalogMaster.ayla_user_id (снят)"] = n
 
         _, per_model = BotUser.all_tenants.filter(id__in=p.bot_user_ids).delete()
         removed.update(per_model)

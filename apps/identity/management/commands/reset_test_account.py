@@ -125,6 +125,7 @@ class Command(BaseCommand):
             "dismantled": "разбирается по замыслу режима",
             "protect_empty": "PROTECT, 0 строк — не блокирует",
             "blocks": "БЛОКИРУЕТ",
+            "kept": "остаётся как есть (режим не трогает)",
         }
         for ln in p.lines:
             self.stdout.write(
@@ -140,6 +141,8 @@ class Command(BaseCommand):
         for model_label, n in sorted(m.removes.items()):
             if model_label != "identity.UserPersonalContext":
                 self.stdout.write(f"            + {model_label} {n}")
+        c = p.master_cards
+        self.stdout.write(f"  {'—':9} {c.label:52} {c.rows:6}  {titles[c.disposition]}")
 
         self.stdout.write("")
         self.stdout.write(

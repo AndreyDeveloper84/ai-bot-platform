@@ -270,19 +270,41 @@ class TestTheMasterCardAfterAReset:
             external_updated_at=timezone.now(),
             invite_status=CatalogMaster.InviteStatus.ACCEPTED,
             is_active=True,
-            ayla_user_id=uuid.uuid4(),
+            ayla_user_id=bu.ayla_user_id,
             linked_bot_user=bu,
             accepted_at=timezone.now(),
         )
         assert is_enrolled(card)
+        assert sale_block(card) is None, "sold before the reset — the red line has a before"
+        assert reset.plan(ACCOUNT, "master-registration").master_cards.rows == 1
 
         reset.apply(ACCOUNT, "master-registration")
 
         card.refresh_from_db()
         assert card.linked_bot_user_id is None
+        assert card.ayla_user_id is None, "the catalog half deletes that user — no dangling key"
         assert card.archived_at is None, "reset is not archive: the master stays alive"
-        assert sale_block(card) is None, "sold, like a synced master without a bot identity"
+        assert sale_block(card) == "ayla_unlinked", "not sold until the registration is redone"
         assert not is_enrolled(card), "no cabinet until a new invite is redeemed"
+
+    def test_client_mode_leaves_the_card_key_alone(self, tenant, settings):
+        settings.ACCOUNT_RESET_ALLOWLIST = [ACCOUNT]
+        bu = _with_history(tenant)
+        card = CatalogMaster.all_tenants.create(
+            tenant=tenant,
+            name="Синхронизированная",
+            external_id=1001,
+            external_updated_at=timezone.now(),
+            invite_status=CatalogMaster.InviteStatus.ACCEPTED,
+            is_active=True,
+            ayla_user_id=bu.ayla_user_id,
+        )
+        p = reset.plan(ACCOUNT, "client-onboarding")
+        assert p.master_cards.rows == 1
+        assert p.master_cards.disposition == "kept"
+        reset.apply(ACCOUNT, "client-onboarding")
+        card.refresh_from_db()
+        assert card.ayla_user_id == bu.ayla_user_id
 
 
 # --- completeness inside the transaction ------------------------------------
@@ -345,6 +367,15 @@ class TestKeptByDesignNamesRealColumns:
         assert reset.verify([bu.id], [bu.ayla_user_id]) == []  # … and nothing points at it …
         kept = AuditLog.all_tenants.filter(target_id=bu.id).count()
         assert kept == 1  # … except the journal, which is the point of a journal.
+
+    def test_the_walk_sees_hidden_relations(self):
+        """``related_name="+"`` relations are invisible to ``get_fields()``
+        and were missed once (measurement 11.09: 20 → 25). The walk must
+        keep asking for them; this names one so the guard is not vacuous."""
+        rels = reset.incoming_relations()
+        hidden = [r.label for r in rels if r.hidden]
+        assert hidden, "no hidden relation at all — the walk dropped include_hidden"
+        assert "tenancy.StaffInvite.created_by" in hidden
 
     def test_every_mode_dismantles_only_relations_that_exist_and_are_protect(self):
         by_label = {r.label: r for r in reset.incoming_relations()}
