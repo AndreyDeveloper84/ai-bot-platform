@@ -112,7 +112,18 @@ class TestSomeoneWithATraceIsNotOffered:
             archived_at=timezone.now(),
         )
 
-        salon_handler._ask_for_code_with_solo_offer(_Event("привет"), bot_user)
+        # Тенантный контекст обязателен, и это не церемония теста.
+        # `CatalogMaster.objects` в режиме `audit` вне контекста молча
+        # отдаёт пустое (`apps/tenancy/managers.py:184`), то есть предикат
+        # ответил бы «карточки нет» и предложение показалось бы. В бою
+        # контекст гарантирован — `SalonMaxHandler.requires_tenant=True`, и
+        # `_handle_salon_event_inner` отказывается отвечать, если тенанта
+        # нет. Тест обязан воспроизводить то же условие, иначе он
+        # проверяет не тот мир.
+        from apps.tenancy.context import tenant_scope
+
+        with tenant_scope(salon):
+            salon_handler._ask_for_code_with_solo_offer(_Event("привет"), bot_user)
 
         assert said[0]["text"] == salon_handler.ASK_FOR_CODE
         assert salon_handler.SOLO_OFFER.strip() not in said[0]["text"]

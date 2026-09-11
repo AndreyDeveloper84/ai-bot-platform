@@ -568,7 +568,18 @@ def _has_a_master_card_here(bot_user) -> bool:
     """
     from apps.catalog.models import CatalogMaster
 
-    return CatalogMaster.all_tenants.filter(linked_bot_user=bot_user).exists()
+    # Читаем ТЕНАНТНО, а не через `all_tenants`. Первая редакция брала
+    # сквозной менеджер — и сторож границ импорта (MKT1) правильно её
+    # отверг: сквозное чтение каталога живёт в `apps/marketplace`, а не
+    # здесь.
+    #
+    # Сквозной он был и не нужен. `bot_user` — строка ЭТОГО салона, а
+    # карточка, которая должна подавить предложение, — карточка этого же
+    # салона: её сняли, и человек пришёл разбираться сюда. Мастер другого
+    # салона связан с ДРУГОЙ строкой того же человека, и его положение
+    # здесь — вопрос не этого предиката, а соседнего
+    # (`_already_has_a_solo_workspace`, он ищет по личности канала).
+    return CatalogMaster.objects.filter(linked_bot_user=bot_user).exists()
 
 
 def _already_has_a_solo_workspace(bot_user) -> bool:
