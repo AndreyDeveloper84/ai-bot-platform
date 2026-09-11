@@ -131,3 +131,111 @@ def test_the_long_lived_services_are_not_switched_to_another_user() -> None:
         f"сервисам задан user: {switched} — это меняет режим контура, "
         "а чинить надо владельцев файлов разовых команд"
     )
+
+
+def test_the_container_writes_as_the_tree_owner_not_as_the_caller(
+    steps: list[dict],
+) -> None:
+    """``--user`` берёт владельца ДЕРЕВА, а не того, кто зашёл.
+
+    Первая редакция брала ``$(id -u)`` — зовущего. Это был прокси для
+    «владелец дерева», верный ровно при допущении, что зовущий и есть
+    владелец. Допущение ложно: выкладка заходит root-ом, ``id -u`` давал 0,
+    и ``--user`` честно передавал ноль.
+
+    **Флаг работал ровно так, как написан, и не достигал цели.** Замер
+    11.09.2026: 154 root-объекта в ``staticfiles`` — ровно столько, сколько
+    ``collectstatic`` и сообщил. Сторож «флаг присутствует» такого не ловит:
+    флаг присутствует.
+    """
+    user_flags = []
+    for step in steps:
+        for line in (step.get("run") or "").splitlines():
+            bare = line.strip().lstrip("\\")
+            if bare.startswith("#"):
+                continue
+            if "--user" in bare:
+                user_flags.append(bare)
+
+    assert user_flags, "флага --user нет вовсе — ищу не там"
+    caller_based = [f for f in user_flags if "id -u" in f]
+    assert caller_based == [], (
+        "--user снова берёт uid ЗОВУЩЕГО. Выкладка заходит root-ом, и это "
+        f"передаст ноль: {caller_based}"
+    )
+    assert all("OWNER_UID" in f for f in user_flags), (
+        f"--user должен брать владельца дерева: {user_flags}"
+    )
+
+
+def test_the_owner_is_resolved_before_it_is_used(steps: list[dict]) -> None:
+    """Определение владельца стоит ДО первого ``--user``, иначе пусто.
+
+    Порядок значим: пустая подстановка дала бы ``--user :``, и docker отказал
+    бы отказом, к владельцам отношения не имеющим на вид.
+    """
+    for step in steps:
+        run = step.get("run") or ""
+        lines = [ln.strip().lstrip("\\") for ln in run.splitlines()]
+        code = [ln for ln in lines if not ln.startswith("#")]
+        where_set = next((i for i, ln in enumerate(code) if ln.startswith("OWNER_UID=")), -1)
+        where_used = next((i for i, ln in enumerate(code) if "--user" in ln), -1)
+        if where_used == -1:
+            continue
+        assert where_set != -1, "шаг зовёт --user, не определив владельца"
+        assert where_set < where_used, "владелец определяется ПОСЛЕ использования"
+
+
+def test_the_tarball_does_not_restore_owners_from_the_archive(steps: list[dict]) -> None:
+    """``tar --no-same-owner``: под root иначе переносятся чужие номера.
+
+    GNU tar под root по умолчанию берёт uid/gid из архива. Замер 11.09.2026:
+    шесть объектов в ``apps/miniapp/dist`` с uid 1001, которого в ``passwd``
+    хоста нет вовсе — то есть номер приехал из архива раннера.
+
+    Этот шаг гонит tar ПРЯМО по ssh, docker в нём не участвует, поэтому
+    ``--user`` на него не влияет по построению. Правка ему нужна своя.
+    """
+    extracts = []
+    for step in steps:
+        for line in (step.get("run") or "").splitlines():
+            bare = line.strip().lstrip("\\")
+            if bare.startswith("#"):
+                continue
+            if "tar" in bare and "-xf" in bare:
+                extracts.append(bare)
+
+    assert extracts, "распаковки tar не найдено — ищу не там"
+    unguarded = [e for e in extracts if "--no-same-owner" not in e]
+    assert unguarded == [], f"tar восстановит владельцев из архива: {unguarded}"
+
+
+def test_the_actor_is_printed_as_a_number_not_a_name(ssh_steps: list[dict]) -> None:
+    """Имя актора совпадает с секретом и вычёркивается из лога.
+
+    ``id -un`` печатал имя, равное значению ``DEV_USER``, и GitHub заменял
+    его на ``***``. Строка, заведённая ради снятия догадки об акторе,
+    догадку не снимала — и выглядела рабочим диагностическим выводом.
+    Носитель был, сведений в нём не было.
+
+    Ноль секретом не является. Число к тому же полезнее имени: именно оно
+    уходит в ``--user``.
+    """
+
+    def code_lines(step: dict) -> list[str]:
+        # Комментарии отбрасываются. Первая версия этой проверки падала на
+        # МОЁМ ЖЕ комментарии «``id -un`` выводил имя…» — сторож читал
+        # рассказ о коде вместо кода. Третий такой случай за сутки, и
+        # каждый раз чинился сторож, а не предмет.
+        out = []
+        for line in (step.get("run") or "").splitlines():
+            bare = line.strip().lstrip("\\")
+            if not bare.startswith("#"):
+                out.append(bare)
+        return out
+
+    numeric = [s for s in ssh_steps if any("id -u)" in ln for ln in code_lines(s))]
+    assert numeric, "ни один шаг не печатает uid числом"
+
+    masked = [s.get("name") for s in ssh_steps if any("id -un" in ln for ln in code_lines(s))]
+    assert masked == [], f"актор печатается именем и будет замаскирован: {masked}"
