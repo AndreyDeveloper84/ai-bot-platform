@@ -195,6 +195,10 @@ class TestTheAdapterNeverSubstitutesAPromise:
 
         tree = ast.parse(textwrap.dedent(inspect.getsource(func)))
         node = tree.body[0]
+        # The guard reads a FUNCTION body. Anything else here means the
+        # source handed in was not the adapter, and a guard that walked a
+        # class or a module would be reporting on the wrong subject.
+        assert isinstance(node, ast.FunctionDef), type(node).__name__
         stripped = list(node.body)
         if (
             stripped
