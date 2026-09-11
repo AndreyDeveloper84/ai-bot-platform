@@ -658,7 +658,18 @@ jobs:
       - name: apps/ collection census (sentinel for the shard layout)
         run: |
           set -o pipefail
-          uv run pytest apps/ --collect-only -q \
+          # NO `-q` HERE, DELIBERATELY. Quiet level is CUMULATIVE, and
+          # `pyproject.toml` addopts already carries `-q` (since the Sprint 0
+          # scaffold, b1e8e7bd). This step used to add a second one; the two
+          # made `-qq`, which prints per-file counts and NO total line, and the
+          # census died with `CENSUS UNREADABLE` in run 34557386291.
+          #
+          # Quiet level 1 is required, not merely tidier: at quiet 2 a
+          # collection of NOTHING prints nothing and exits 0, so `CENSUS EMPTY`
+          # and `CENSUS UNREADABLE` stop being distinguishable — and an empty
+          # census is the exact silent-green failure this sentinel exists to
+          # catch. Do not add `-q` back.
+          uv run pytest apps/ --collect-only \
             --deselect apps/miniapp_api/tests/test_c7_payments.py::TestPaymentMirrorReadModel::test_booking_confirmed_with_payment_id_stamps_hold \
             --deselect apps/miniapp_api/tests/test_c7_payments.py::TestPaymentMirrorReadModel::test_booking_confirmed_without_payment_id_no_mirror \
             --deselect apps/miniapp_api/tests/test_create_booking_ayla.py::TestLocalPathUnchanged::test_flag_off_keeps_local_path \
@@ -687,28 +698,11 @@ jobs:
             --deselect apps/skills/booking/tests/test_flow_continuation.py::TestNegatives::test_duplicate_text_confirm_no_double_mutation \
             > census-raw.txt 2>&1 || { tail -30 census-raw.txt; echo "CENSUS FAILED — apps/ did not collect."; exit 1; }
           tail -3 census-raw.txt
-          python3 - <<'PY'
-          import re
-          import sys
-
-          text = open("census-raw.txt", encoding="utf-8", errors="replace").read()
-          # `pytest -q --collect-only` ends with either
-          #   "13177/13203 tests collected (26 deselected) in 41.20s"
-          # or "13177 tests collected in 41.20s".
-          found = re.findall(r"(\d+)(?:/\d+)? tests? collected", text)
-          if not found:
-              print("CENSUS UNREADABLE — no 'tests collected' line in pytest output.")
-              sys.exit(1)
-
-          n = int(found[-1])
-          print(f"CENSUS apps/ collected={n}")
-          if n == 0:
-              print("CENSUS EMPTY — 0 tests collected from apps/. Not a green run.")
-              sys.exit(1)
-
-          with open("apps-census.txt", "w", encoding="utf-8") as fh:
-              fh.write(str(n))
-          PY
+          # Parser lives in .github/scripts/census_count.py so it can be tested:
+          # tests/tools/test_census_parser.py feeds it real captured pytest
+          # output for BOTH quiet levels, plus garbage, and asserts the two
+          # levels agree on the same collection.
+          python3 .github/scripts/census_count.py census-raw.txt apps-census.txt
 
       - name: Upload apps/ collection census
         if: always()
