@@ -106,13 +106,6 @@ function today(): string {
   return `${d.getFullYear()}-${m}-${day}`;
 }
 
-/** «10:00» из ISO-времени визита. */
-function hhmm(iso: string): string {
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return iso;
-  return `${`${d.getHours()}`.padStart(2, "0")}:${`${d.getMinutes()}`.padStart(2, "0")}`;
-}
-
 const BLOCK_REASON: Record<string, string> = {
   lunch: "перерыв",
   vacation: "отпуск",
@@ -164,6 +157,16 @@ function humanDate(iso: string): string {
  * пересчёт в часовой пояс браузера показал бы администратору в Калининграде
  * московские времена сдвинутыми. Показываем время салона, потому что
  * недоступность назначена в нём.
+ *
+ * Это правило было записано здесь с самого начала — и рядом жила вторая
+ * функция `hhmm`, которая делала ровно обратное через `new Date`. Ею
+ * печатались часы визитов и блоков и по ней же группировалась хронология,
+ * так что в UTC «14:00 салона» становилось «11:00», а группа разъезжалась
+ * надвое. Правило было перенесено, поведение — нет; поймал прогон CI,
+ * который идёт в UTC, а не местные прогоны в МSK (11.09.2026).
+ *
+ * Формат «HH:MM» без даты проходит насквозь: срез короче строки её не
+ * трогает, так что блоки, приходящие часами, печатаются как есть.
  */
 function wireTime(iso: string): string {
   return iso.length >= 16 ? iso.slice(11, 16) : iso;
@@ -203,7 +206,7 @@ function groupByStart(salon: SalonDayResponse): Array<[string, TimelineEntry[]]>
   const buckets = new Map<string, TimelineEntry[]>();
   for (const master of salon.masters) {
     for (const visit of master.visits) {
-      const key = visit.start_at ? hhmm(visit.start_at) : "—";
+      const key = visit.start_at ? wireTime(visit.start_at) : "—";
       const list = buckets.get(key) ?? [];
       list.push({ masterName: master.name, visit });
       buckets.set(key, list);
@@ -453,7 +456,7 @@ export function SalonPilotScheduleScreen({ me }: { me: MeResponse }) {
               <ul style={{ listStyle: "none", padding: 0, margin: 0 }}>
                 {day.bookings.map((b) => (
                   <li key={b.booking_id} style={{ padding: "2px 0" }}>
-                    {`${hhmm(b.visit_at)} · ${b.service_name} · ${b.client_first_name} ${b.client_last_initial}`}
+                    {`${wireTime(b.visit_at)} · ${b.service_name} · ${b.client_first_name} ${b.client_last_initial}`}
                     {b.is_in_progress && NOW_MARKER}
                   </li>
                 ))}
@@ -469,7 +472,7 @@ export function SalonPilotScheduleScreen({ me }: { me: MeResponse }) {
               <ul style={{ listStyle: "none", padding: 0, margin: 0 }}>
                 {day.blocks.map((bl) => (
                   <li key={bl.exception_id} style={{ padding: "2px 0" }}>
-                    {`${hhmm(bl.start)}–${hhmm(bl.end)} · ${BLOCK_REASON[bl.reason] ?? bl.reason}`}
+                    {`${wireTime(bl.start)}–${wireTime(bl.end)} · ${BLOCK_REASON[bl.reason] ?? bl.reason}`}
                   </li>
                 ))}
               </ul>
