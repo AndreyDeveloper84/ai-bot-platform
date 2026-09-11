@@ -163,6 +163,56 @@ class BotUser(models.Model):
         max_length=32,
         help_text="Channel slug — 'max', 'telegram', 'whatsapp', 'web'.",
     )
+
+    # ── Owner decision 11.09 §2 (DRF-1700, slice S2-1) ─────────────────────
+    #
+    # This shell IS the «SalonCustomer» of §2: one person's relationship with
+    # one salon. What the person is to Ayla — a LINKED client profile or a
+    # SHADOW the salon assistant created — is written HERE, on the
+    # relationship, because it is the relationship that a SHADOW restricts
+    # (§2.4: no goals, nutrition, health or cross-salon memory).
+    #
+    # Three values, and the default is the honest one. UNRESOLVED means the
+    # §2 rule has not been applied to this shell — not «shadow», not
+    # «linked». The schema migration writes UNRESOLVED to every row; the
+    # classification is a separate command (`resolve_salon_customers`) that
+    # reads only by default and prints its breakdown, because it decides
+    # who is a person and who is a fixture, and that is the owner's call.
+    class CustomerStatus(models.TextChoices):
+        UNRESOLVED = "unresolved", "Правило §2 не применялось"
+        LINKED = "linked", "Связан с профилем клиента Ayla"
+        SHADOW = "shadow", "Теневой профиль салонного помощника"
+
+    class CustomerSource(models.TextChoices):
+        UNKNOWN = "", "Не записано"
+        CLIENT_BOT = "client_bot", "Клиентский контур"
+        SALON_ASSISTANT = "salon_assistant", "Салонный помощник"
+
+    customer_status = models.CharField(
+        max_length=16,
+        choices=CustomerStatus.choices,
+        default=CustomerStatus.UNRESOLVED,
+        db_index=True,
+        help_text="§2: LINKED — matched to the client contour by MAX ID, an "
+        "identity link or a confirmed phone; SHADOW — none of those, a "
+        "restricted profile the salon assistant created; UNRESOLVED — the "
+        "rule was not applied yet (never a permission).",
+    )
+    customer_source = models.CharField(
+        max_length=32,
+        choices=CustomerSource.choices,
+        default=CustomerSource.UNKNOWN,
+        blank=True,
+        help_text="§2.3: where this relationship came from. SALON_ASSISTANT is "
+        "required on a SHADOW; CLIENT_BOT is the client contour's own shell.",
+    )
+    customer_status_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="When customer_status was last decided. NULL exactly while "
+        "UNRESOLVED: a status with no moment is a guess, not a decision.",
+    )
+
     channel_user_id = models.CharField(
         max_length=128,
         help_text="Stable user identifier within the channel. Stored as "
