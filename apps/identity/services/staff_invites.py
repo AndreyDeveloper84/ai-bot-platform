@@ -138,6 +138,17 @@ class PersonAlreadyMaster(InviteError):
     that was archived without unlinking, which leaves the person looking
     like a customer to ``resolve_role`` and like a master to the database).
 
+    **A deliberate divergence from the Mini App door, recorded here so it
+    is not mistaken for drift.** ``master_api.views.onboarding_accept``
+    answers this same shape with ``wrong_recipient`` too (DRF-1507,
+    #1412 — "Слуг переиспользован намеренно"), and its reason is a
+    front-end one: ``MasterOnboardingScreen`` already renders that slug,
+    and a second slug would mean teaching it a second text. The owner's
+    call for DRF-1650 is the opposite: these two need different words
+    because they need different actions — «нужен свой код» against «снять
+    прежнюю связь». Reconciling the two doors on this second case is a
+    decision for the owner, not something to settle here.
+
     The code is NOT consumed, for the same reason.
     """
 
@@ -514,10 +525,13 @@ def _link_master(invite: StaffInvite, bot_user: BotUser) -> RedeemResult:
     # bearer is that somebody.
     #
     # The Mini App door (``apps/master_api/views.py``, onboarding_claim /
-    # onboarding_accept) has answered this case since DRF-1424 — 403
-    # ``wrong_recipient``, token left unconsumed, with the note that it is
-    # "расхождение личности, а не ретрай". This is the same answer through
-    # the bot door, not a third behaviour.
+    # onboarding_accept) has answered this case since 3d5dfd95 (M0
+    # onboarding, PR 1) and had it reinforced by DRF-1507 (#1401, #1412):
+    # 403 ``wrong_recipient``, token left unconsumed, with the note that it
+    # is "расхождение личности, а не ретрай". This is the same answer
+    # through the bot door, not a third behaviour — and the condition is
+    # the same one, ``linked_bot_user_id is not None and != bot_user.id``;
+    # the equality half already returned above.
     if master.linked_bot_user_id is not None:
         logger.warning(
             "identity.staff_invite.wrong_recipient invite=%s master=%s "
