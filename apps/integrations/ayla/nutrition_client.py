@@ -208,6 +208,20 @@ class SummaryResponse:
     ai_comment: str | None = None
 
 
+def _targets_source(body: dict[str, Any]) -> str:
+    """``targets_provenance.source`` — или ``""``, если каталог его не прислал.
+
+    Каталог отдаёт блок обязательным с #316, поэтому пустая строка здесь
+    — сигнал нарушенного контракта, а не «ориентиров нет». Подставить
+    ``"none"`` было бы изготовлением состояния на границе: потребитель
+    напечатал бы человеку объяснение, которого каталог не давал.
+    """
+    provenance = body.get("targets_provenance")
+    if not isinstance(provenance, dict):
+        return ""
+    return str(provenance.get("source") or "")
+
+
 def _target_or_none(norms: dict[str, Any], key: str) -> int | None:
     """Ориентир из блока ``norms`` — или ``None``, если его там нет.
 
@@ -264,6 +278,14 @@ class ProfileResponse:
     activity: str = ""
     diet_preference: str = ""
     goal_overridden_by: str | None = None
+    #: Происхождение ориентира — ``targets_provenance.source`` каталога
+    #: (DRF-1623 N-b): ``none | unknown_legacy | ayla_calculated |
+    #: user_entered``. Пустая строка — ключ НЕ ПРИШЁЛ, и это не то же
+    #: самое, что ``"none"``: «прислали „нет“» и «не прислали» — разные
+    #: состояния, и второе нельзя изготовить из первого. Показывающая
+    #: сторона по ``"none"`` объясняет человеку, почему ориентиров нет, а
+    #: по ``""`` молчит и пишет warning: нарушен контракт, а не расчёт.
+    targets_source: str = ""
     raw: dict[str, Any] = field(default_factory=dict)
 
 
@@ -768,6 +790,7 @@ class NutritionClient:
                 health_flags=dict(body.get("health_flags") or {}),
                 disclaimer_acked=body.get("disclaimer_acked"),
                 goal_overridden_by=body.get("goal_overridden_by"),
+                targets_source=_targets_source(body),
                 raw=body,
             )
 
