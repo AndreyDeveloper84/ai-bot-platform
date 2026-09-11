@@ -71,6 +71,71 @@ class TestBlock:
         assert r.verdict == SafetyVerdict.BLOCK
 
 
+class TestDrugMentionIsNotStop:
+    """Owner 11.09 §3: a bare mention is not STOP; asking to pick/dose/schedule is.
+
+    Both sides of the same phrase, on purpose: a rule that only had the STOP
+    side would pass with the old bare-word pattern, and a rule that only had
+    the NORMAL side would pass with no pattern at all.
+    """
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "вчера выпила ибупрофен, можно сегодня на массаж?",
+            "принимаю парацетамол, это помешает процедуре?",
+            "у меня сейчас курс антибиотиков, записаться можно?",
+            "после кеторола голова прошла, спасибо",
+            "I took a painkiller this morning, is a facial ok?",
+        ],
+    )
+    def test_a_bare_mention_passes(self, text):
+        r = pre_check(text)
+        assert r.verdict == SafetyVerdict.ALLOW, (text, r.matched_patterns)
+        assert r.matched_patterns == []
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "посоветуйте ибупрофен перед массажем",
+            "подберите мне обезболивающее",
+            "сколько таблеток парацетамола можно выпить?",
+            "какую дозу кеторола принимать?",
+            "какая схема приёма антибиотика?",
+            "дайте анальгин",
+            "what painkiller should I take before waxing?",
+            "recommend a dosage of ibuprofen — tramadol?",
+        ],
+    )
+    def test_asking_to_pick_or_dose_is_stop(self, text):
+        r = pre_check(text)
+        assert r.verdict == SafetyVerdict.BLOCK, (text, r.matched_patterns)
+        assert len(r.matched_patterns) == 1
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "посоветуйте хорошего мастера по маникюру",
+            "дайте адрес салона",
+            "подберите мне время на массаж",
+            "сколько стоит стрижка?",
+            "recommend a good stylist for a bob",
+        ],
+    )
+    def test_an_ask_without_a_drug_is_the_bots_ordinary_work(self, text):
+        """The ask-half alone must not fire: «посоветуйте мастера» is what
+        this bot is for. Found by substitution — with the drug-lookahead
+        loosened to any word, nothing here went red until this test."""
+        r = pre_check(text)
+        assert r.verdict == SafetyVerdict.ALLOW, (text, r.matched_patterns)
+        assert r.matched_patterns == []
+
+    def test_the_two_sides_differ_by_the_ask_alone(self):
+        """Same drug, same words otherwise — only the asking changes the verdict."""
+        assert pre_check("ибупрофен перед массажем — нормально?").verdict == SafetyVerdict.ALLOW
+        assert pre_check("посоветуйте ибупрофен перед массажем").verdict == SafetyVerdict.BLOCK
+
+
 class TestClarify:
     def test_vague_medical_question(self):
         r = pre_check("почему болит спина?")
