@@ -2736,6 +2736,13 @@ def customer_recommendations(request: HttpRequest) -> HttpResponse:
     „translation hop, not a schema gate" отменена (§2.1 C3)». Оставь мы
     абзац, следующий прочёл бы его как действующий и вернул пропуск.
 
+    Та же судьба у формулировки «The Mini App side owns the rendering
+    contract»: она ОТМЕНЕНА контрактом резолвера (§2.1 C3, OD §53). У
+    формы ответа есть владелец — Recommendation Resolver, — и здесь это
+    не пометка в прозе, а исполнение: транзит проверяет форму ДО того,
+    как отдать её полке (`tests/contracts/test_recommendation_boundary_guard.py`
+    держит обе стороны за слово).
+
     Дефект был не в форме, а в проводе. Существуют ДВЕ ручки Ayla:
 
     * `internal/me/catalog/recommendations/` — легаси-полка, три слоя
