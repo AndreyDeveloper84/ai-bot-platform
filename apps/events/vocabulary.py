@@ -96,6 +96,18 @@ MASTER_PROFILE_INITIALIZED = "master.profile_initialized"
 MASTER_PROFILE_UPDATED_BY_ADMIN = "master.profile_updated_by_admin"
 MASTER_PHOTO_UPDATED_BY_ADMIN = "master.photo_updated_by_admin"
 
+# --- Подтверждение расписания (§83, DRF-1521 п. 6) -----------------------
+# Две записи, а не одна, потому что вопросов два и задаёт их один человек
+# в разное время: «кто и когда допустил этого мастера к продаже» и
+# «почему он с продажи ушёл». Ответить на второй молчанием нельзя — для
+# владелицы салона мастер исчезнет с витрины без объяснения.
+#   master.schedule_confirmed:
+#     {master_id, actor_role, source, fingerprint}
+#   master.schedule_confirmation_cleared:
+#     {master_id, reason, previous_fingerprint}  — актора нет, снимает машина
+MASTER_SCHEDULE_CONFIRMED = "master.schedule_confirmed"
+MASTER_SCHEDULE_CONFIRMATION_CLEARED = "master.schedule_confirmation_cleared"
+
 # --- Admin master invite flow (master-management MM2 backend / PR 3) -----
 # Emitted from apps.admin_api when an owner/admin issues a fresh
 # CatalogMaster invite. Payload contract:
@@ -105,9 +117,15 @@ MASTER_PHOTO_UPDATED_BY_ADMIN = "master.photo_updated_by_admin"
 #   master.invite_dispatched:
 #     {master_id, channel: "max", delivery: "queued"|"failed"|"skipped",
 #      error?: str}
-# The two events are paired: ``invited`` records the admin's intent +
-# the DB row creation, ``invite_dispatched`` records the side-channel
-# delivery attempt (queued post-commit via ``transaction.on_commit``).
+#
+# ``invite_dispatched`` НЕ ПИШЕТСЯ БОЛЬШЕ НИКЕМ (решение владельца §44.4
+# от 07.09.2026): оно описывало исход личного сообщения, которое
+# приглашение больше не отправляет. Имя оставлено в словаре ради строк,
+# уже лежащих в базе, — их читает лента в карточке мастера
+# (``apps/miniapp/src/screens/admin/AdminMasterDetailScreen.tsx``), и
+# без имени они рисовались бы сырым слагом. Новых таких строк не
+# появляется; если через год их не останется, имя можно снять вместе с
+# веткой ленты.
 MASTER_INVITED = "master.invited"
 MASTER_INVITE_DISPATCHED = "master.invite_dispatched"
 
@@ -329,6 +347,15 @@ VISITS_LISTED = "marketplace.visits.listed"
 VISIT_CARD_OPENED = "marketplace.visit_card.opened"
 REPEAT_CHECKED = "marketplace.repeat.checked"
 
+# DRF-1547 / §37 п.1 — отмена записи С КАРТОЧКИ, в чате.
+#
+# Своё имя, а не ``BOOKING_CANCELLED``: то событие пишет БЭКЕНД по
+# круговому ходу, а это — ход ЧЕЛОВЕКА на клиентской поверхности. Слить
+# их в одно значило бы потерять ровно тот вопрос, ради которого действие
+# переехало на карточку: пользуются ли отменой из чата и чем она
+# заканчивается.
+VISIT_CANCELLED = "marketplace.visit.cancelled"
+
 
 CANONICAL_EVENTS: frozenset[str] = frozenset(
     {
@@ -359,6 +386,8 @@ CANONICAL_EVENTS: frozenset[str] = frozenset(
         PAYMENT_FAILED_SKILL_TRIGGERED,
         MASTER_PROFILE_UPDATED_BY_ADMIN,
         MASTER_PHOTO_UPDATED_BY_ADMIN,
+        MASTER_SCHEDULE_CONFIRMED,
+        MASTER_SCHEDULE_CONFIRMATION_CLEARED,
         MASTER_INVITED,
         MASTER_INVITE_DISPATCHED,
         STAFF_INVITE_ISSUED,
@@ -394,6 +423,7 @@ CANONICAL_EVENTS: frozenset[str] = frozenset(
         VISITS_LISTED,
         VISIT_CARD_OPENED,
         REPEAT_CHECKED,
+        VISIT_CANCELLED,
     }
 )
 

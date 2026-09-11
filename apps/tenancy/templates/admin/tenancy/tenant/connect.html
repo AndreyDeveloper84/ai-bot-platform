@@ -17,54 +17,102 @@
     </div>
   {% endif %}
 
-  {% if result %}
+  {% if verified %}
+    <div class="messagelist">
+      <div class="success">
+        Верифицировано мастеров: {{ verified.verified }}.
+        Уже принятых пропущено: {{ verified.skipped }}.
+        {% if verified.blocked %}
+          {# DRF-1597 — строка с живым персональным приглашением не
+             подтверждается ни с одного экрана. Число печатается, потому
+             что «верифицировано: 0» без него читается как сбой. #}
+          Не подтверждено — ждут нажатия самого мастера:
+          {{ verified.blocked }}.
+        {% endif %}
+      </div>
+    </div>
+  {% endif %}
+
+  {% if salon %}
     <h2>Итог</h2>
-    <p>
-      Салон <strong>{{ result.tenant.name }}</strong>
-      (slug <code>{{ result.tenant.slug }}</code>, id
-      <code>{{ result.tenant.id }}</code>) создан.
-      По идентификатору в Ayla найдено: услуг — {{ result.probe.services }},
-      мастеров — {{ result.probe.specialists }}.
-    </p>
-    {% if result.sync_error %}
-      <p class="errornote">
-        Каталог не доехал: {{ result.sync_error }}. Это не «салон не
-        подключён»: строка есть, синхронизацию можно повторить командой
-        <code>sync_catalog --tenant {{ result.tenant.slug }}</code>
-        (при HTTP 429 — после паузы ограничителя Ayla).
+
+    {% if result %}
+      <p>
+        Салон <strong>{{ result.tenant.name }}</strong>
+        (slug <code>{{ result.tenant.slug }}</code>, id
+        <code>{{ result.tenant.id }}</code>) создан.
+        По идентификатору в Ayla найдено: услуг — {{ result.probe.services }},
+        мастеров — {{ result.probe.specialists }}.
       </p>
-    {% elif result.sync_skipped %}
-      <p class="errornote">
-        Синхронизация не запустилась: другой прогон держит блокировку.
-        Повторите позже командой
-        <code>sync_catalog --tenant {{ result.tenant.slug }}</code>.
-      </p>
+      {% if result.sync_error %}
+        <p class="errornote">
+          Каталог не доехал: {{ result.sync_error }}. Это не «салон не
+          подключён»: строка есть, синхронизацию можно повторить командой
+          <code>sync_catalog --tenant {{ result.tenant.slug }}</code>
+          (при HTTP 429 — после паузы ограничителя Ayla).
+        </p>
+      {% elif result.sync_skipped %}
+        <p class="errornote">
+          Синхронизация не запустилась: другой прогон держит блокировку.
+          Повторите позже командой
+          <code>sync_catalog --tenant {{ result.tenant.slug }}</code>.
+        </p>
+      {% else %}
+        <p>Синхронизация выполнена сразу после создания строки.</p>
+      {% endif %}
     {% else %}
-      <p>Синхронизация выполнена сразу после создания строки.</p>
+      <p>
+        Салон <strong>{{ salon.name }}</strong>
+        (slug <code>{{ salon.slug }}</code>) подключён.
+      </p>
     {% endif %}
 
+    {# DRF-1553: «0 из 9», а не «нет бронируемых». Одно число не говорит  #}
+    {# ничего — ноль из нуля это салон без мастеров, ноль из девяти это   #}
+    {# девять мастеров, которых что-то держит. Расхождение и есть ответ.  #}
     <p>
-      Активных услуг: {{ result.assessment.active_services }}.
-      Бронируемых мастеров: {{ result.assessment.bookable_masters }}.
+      Активных услуг: {{ assessment.active_services }}.<br>
+      Бронируемых мастеров:
+      <strong>{{ assessment.bookable_masters }}</strong>
+      из {{ assessment.masters_total }}.
     </p>
-    {% if result.assessment.is_visible %}
+
+    {% if assessment.is_visible %}
       <p><strong>Салон виден клиентам — подключение завершено.</strong></p>
     {% else %}
       <p><strong>Салон пока не виден клиентам. Причины:</strong></p>
       <ul>
-        {% for reason in result_reasons %}
+        {% for reason in assessment_reasons %}
           <li>{{ reason }}</li>
         {% endfor %}
       </ul>
+
+      {# Кнопка появляется только на подслучае «ждут верификации».        #}
+      {# При архиве или is_active=False предлагать нечего: верификация    #}
+      {# такого мастера бронируемым не сделает, и кнопка обещала бы       #}
+      {# исход, которого не будет (DRF-1553, OPEN_DECISIONS §51.1).       #}
+      {% if assessment.can_verify_masters %}
+        <form method="post">
+          {% csrf_token %}
+          <input type="hidden" name="{{ verify_field }}" value="{{ salon.id }}">
+          <div class="submit-row">
+            <input type="submit"
+                   value="Верифицировать {{ assessment.masters_awaiting_verification }} мастеров"
+                   class="default">
+          </div>
+        </form>
+        <p>После верификации салон появится в поиске.</p>
+      {% endif %}
     {% endif %}
+
     <p>
-      <a href="{% url 'admin:tenancy_tenant_change' result.tenant.id %}">
+      <a href="{% url 'admin:tenancy_tenant_change' salon.id %}">
         Открыть карточку салона
       </a>
     </p>
   {% endif %}
 
-  {% if not result %}
+  {% if not salon %}
     <form method="post" novalidate>
       {% csrf_token %}
       <fieldset class="module aligned">

@@ -4,6 +4,7 @@ from django.apps import AppConfig
 class TenancyConfig(AppConfig):
     default_auto_field = "django.db.models.BigAutoField"
     name = "apps.tenancy"
+    verbose_name = "Салоны"
 
     def ready(self) -> None:
         # Tenancy retro «missing abstract base»: register a Django

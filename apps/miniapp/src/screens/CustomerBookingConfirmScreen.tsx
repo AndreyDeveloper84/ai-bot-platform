@@ -12,8 +12,9 @@
  * Voice rules (founder F2 + §6 + §8 F4):
  *   - Title: «Подтверди запись» (registered) / «Чтобы записаться»
  *     (anonymous gate, founder-locked).
- *   - Cancellation policy: «Можно отменить за 4 часа до визита.»
- *     (compact, no scary preamble.)
+ *   - Cancellation policy: НЕ РИСУЕТСЯ — источника нет (см. блок 3
+ *     ниже по коду). Прежняя строка «Можно отменить за 4 часа до
+ *     визита.» была константой без ручки.
  *   - Notes label: «+ Добавить заметку мастеру» — collapsed by
  *     default per founder cut #3.
  *   - Primary CTA: «Записаться» (registered) / «Зарегистрироваться»
@@ -22,7 +23,7 @@
  * Founder priority order (§6.1, locked):
  *   1. Что / где / когда / цена  (the visit summary)
  *   2. Button «Записаться»
- *   3. Cancellation policy (compact)
+ *   3. Cancellation policy (compact) — снята до появления источника
  *   4. Loyalty block (graceful — hide on 404 / no balance per TL Q3)
  *   5. «+ Добавить заметку мастеру» (collapsed default)
  *
@@ -54,14 +55,21 @@
 
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { ApiError, authVerify } from "../lib/api";
+import { ApiError, authVerify, isHealthCheckSlug } from "../lib/api";
+import { OfflineBanner } from "../components/OfflineBanner";
 import { ScreenLayout } from "../components/ScreenLayout";
 import { StickyCta } from "../components/StickyCta";
 import { useClosingConfirmation } from "../hooks/useClosingConfirmation";
 import { useHaptics } from "../hooks/useHaptics";
+import { useOnline } from "../hooks/useOnline";
 import { createCustomerBooking } from "../lib/customer-booking";
 import { formatMoney, formatVisitFull } from "../lib/format";
-import { getInitData, getStartPayload, openPaymentConfirmation } from "../lib/max-sdk";
+import {
+  getInitData,
+  getStartPayload,
+  openExternalLink,
+  openPaymentConfirmation,
+} from "../lib/max-sdk";
 import { createPayment } from "../lib/payments";
 import {
   resolveEntryPoint,
@@ -87,6 +95,22 @@ type ErrState =
   | { kind: "other"; detail: string };
 
 /**
+ * DRF-1614 — the health-check handoff. Its own type, not a member of
+ * {@link ErrState}: nothing was broken and nothing needs retrying.
+ *
+ * `text` is the server's sentence, rendered verbatim. It is NOT composed
+ * here: the wording is the owner's, one copy lives in
+ * `apps/integrations/ayla/health_check.py`, and a second copy in the SPA
+ * would be a second contract to keep in sync.
+ *
+ * There is deliberately no second field for «does this promise a
+ * specialist». That distinction is real, but it lives entirely in the
+ * sentence the server sends, and a copy of it here would be a second
+ * place to keep in sync — and the first place the two could disagree.
+ */
+type HandoffState = { text: string };
+
+/**
  * C1 (billing eligibility) → client-facing slug. Frozen contract
  * (PILOT_CONTRACTS §2): the debt reason NEVER reaches the customer API —
  * the refusal arrives as generic UNAVAILABLE. W3 maps the seam refusal
@@ -107,6 +131,21 @@ const NOT_BOOKABLE_SLUGS = new Set([
   "service_not_offered",
   "service_unbookable",
   "master_archived",
+  // DRF-1548 — мастер без канонической связи с Ayla. Для клиента исход
+  // тот же, что у `master_not_bookable`: записаться к этому мастеру
+  // нельзя. Без этой строки слаг падал бы в ветку `other`, а она рисует
+  // `detail` бэкенда как есть — то есть английскую служебную фразу.
+  "master_ayla_unlinked",
+  // DRF-1521 — мастер приняла приглашение, но профиль не готов к
+  // продаже. Для клиента исход тот же: записаться нельзя. Без этой
+  // строки слаг падал бы в ветку `other`, а она рисует `detail`
+  // бэкенда как есть — служебную английскую фразу.
+  "master_profile_incomplete",
+  // §83 — владелец салона не подтвердил рабочие часы мастера (или они
+  // изменились после подтверждения). Клиенту исход тот же: записаться
+  // нельзя. Без этой строки слаг падал бы в ветку `other`, а она рисует
+  // `detail` бэкенда как есть — служебную английскую фразу.
+  "master_schedule_unconfirmed",
 ]);
 
 /** Payment choice per C7.4 / AMD-002 — online is optional (D6). */
@@ -122,11 +161,17 @@ function isAnonymous(): boolean {
 }
 
 export function CustomerBookingConfirmScreen() {
+  const online = useOnline();
   const navigate = useNavigate();
   const draft = useBookingDraft();
   const haptics = useHaptics();
   const [submitting, setSubmitting] = useState(false);
   const [err, setErr] = useState<ErrState | null>(null);
+  // DRF-1614 — kept apart from `err` on purpose. A handoff is an outcome,
+  // not a failure; sharing the error state would put it in the branch the
+  // contract test forbids, and the next person adding an error kind would
+  // have no way to see that one member of the union is not an error.
+  const [handoff, setHandoff] = useState<HandoffState | null>(null);
   const [notesOpen, setNotesOpen] = useState(false);
   const [note, setNote] = useState("");
   const [paymentChoice, setPaymentChoice] = useState<PaymentChoice>("onsite");
@@ -221,6 +266,7 @@ export function CustomerBookingConfirmScreen() {
     if (!draft.serviceId || !draft.masterId || !draft.visitAt) return;
     setSubmitting(true);
     setErr(null);
+    setHandoff(null);
     try {
       const { booking } = await createCustomerBooking({
         service_id: draft.serviceId,
@@ -260,6 +306,24 @@ export function CustomerBookingConfirmScreen() {
         replace: true,
       });
     } catch (e: unknown) {
+      if (e instanceof ApiError && isHealthCheckSlug(e.slug)) {
+        // DRF-1614 — NOT an error state, and deliberately not `setErr`.
+        // Ayla refused the booking because the service needs a screening
+        // question first; that is a decision somebody took about this
+        // person on purpose. Rendering it in the failure branch told them
+        // «что-то пошло не так» about a system working exactly as
+        // designed — and an error haptic would say the same thing again
+        // without words, which is why the buzz below moved into the
+        // branch that really is a failure.
+        //
+        // The text comes from the server verbatim: the wording is the
+        // owner's and lives in one place (`health_check.py`), so the two
+        // surfaces cannot drift apart. We branch on the slug only —
+        // never on the prose, never on the status.
+        setHandoff({ text: e.detail });
+        setSubmitting(false);
+        return;
+      }
       haptics.notify("error");
       if (e instanceof ApiError && e.slug === "slot_unavailable") {
         // Backend MAY return substitute candidate in the 409 body
@@ -286,6 +350,10 @@ export function CustomerBookingConfirmScreen() {
       setSubmitting(false);
     }
   }
+
+  // MAX OAuth (W4) на момент DRF-1319 не выкачен, поэтому переменная
+  // пуста во всех окружениях и человек видит объяснение, а не тупик.
+  const oauthUrl = (import.meta.env.VITE_MAX_OAUTH_URL ?? "").trim();
 
   function onStartRegistration() {
     // Spec §6.2 — P0 context preservation. Save BEFORE redirect to
@@ -341,22 +409,33 @@ export function CustomerBookingConfirmScreen() {
         "[customer-booking-confirm] saved intent + entering OAuth flow",
       );
     }
-    // Best-effort: open bot DM to drive registration. Will be
-    // replaced with the canonical MAX OAuth endpoint when W4 ships.
-    navigate("/", { replace: true });
+    // DRF-1319. Здесь стоял `navigate("/")` — кнопка «Зарегистрироваться»
+    // возвращала человека на главный экран. Теперь она ведёт туда, куда
+    // обещает, и существует ровно тогда, когда этому адресу есть куда
+    // вести: см. `oauthUrl` ниже.
+    openExternalLink(oauthUrl);
   }
 
   // ── Anonymous gate branch (§6.2) ─────────────────────────────────────
   if (anonymous) {
-    // VITE_MAX_OAUTH_ENABLED gates the *functional* registration CTA.
-    // Until W4 ships /auth/verify + the canonical MAX OAuth URL, the
-    // «Зарегистрироваться» button strands a sessionStorage intent + a
-    // navigate("/") — a UX dead-end (round-1 PRE_MERGE blocker #1).
-    // Acceptable degradation: render an «OAuth pending» placeholder
+    // Пока адреса MAX OAuth нет, кнопка «Зарегистрироваться» уводила бы
+    // в никуда: сохранённое намерение и `navigate("/")` — тупик
+    // (round-1 PRE_MERGE blocker #1). Допустимая деградация: показать
     // that lets the user keep exploring the catalog. Flip the env
     // flag when W4 lands.
-    const oauthEnabled = import.meta.env.VITE_MAX_OAUTH_ENABLED === "true";
-    if (!oauthEnabled) {
+    // DRF-1319. Выключателем служит САМ АДРЕС, а не булев флаг.
+    //
+    // Раньше здесь стоял `VITE_MAX_OAUTH_ENABLED`, упомянутый в одном
+    // месте и не заданный НИГДЕ, включая `.env.local.example`. Флаг без
+    // установщика всегда ложь — ветка не исполнялась ни в одном
+    // окружении и при этом читалась как существующая. А включи его
+    // кто-нибудь, он получил бы кнопку «Зарегистрироваться», которая
+    // возвращает на главный экран: хуже заглушки.
+    //
+    // Условие на непустой адрес снимает обе беды разом. Включить
+    // регистрацию нельзя, не дав ей куда вести, и не бывает состояния
+    // «включено, но некуда».
+    if (!oauthUrl) {
       return (
         <ScreenLayout back={back} title="Чтобы записаться">
           <section className="customer-confirm__oauth-pending">
@@ -400,11 +479,16 @@ export function CustomerBookingConfirmScreen() {
       back={back}
       title="Подтверди запись"
       cta={
-        <StickyCta onClick={onConfirm} disabled={submitting}>
+        <StickyCta onClick={onConfirm} disabled={submitting || !online}>
           {submitting ? "Записываю…" : "Записаться"}
         </StickyCta>
       }
     >
+      {/* Сети нет — сказать до нажатия. Кнопка «Записаться» здесь ЕДИНСТВЕННОЕ
+          действие, которое меняет мир, и без сети оно не произойдёт: раньше
+          человек жал её и получал ошибку сети вместо записи. */}
+      <OfflineBanner online={online} />
+
       {/* 1. Visit summary — что / где / когда / цена */}
       <div className="confirm-card">
         <dl>
@@ -463,10 +547,26 @@ export function CustomerBookingConfirmScreen() {
         </label>
       </fieldset>
 
-      {/* 3. Cancellation policy — compact */}
-      <p className="customer-confirm__policy">
-        Можно отменить за 4 часа до визита.
-      </p>
+      {/* 3. Условия отмены — БЛОКА НЕТ.
+
+          Здесь стояла строка «Можно отменить за 4 часа до визита.»,
+          нарисованная как authoritative. Источника у неё не было ни
+          одного: политику отмены не отдаёт ни `GET /bookings/<id>`, ни
+          ответ создания записи, ни каталог. Число «4 часа» не совпадало
+          даже с макетом §6.1 самого репозитория («12+ часов — без
+          штрафа»), то есть было выдумано на месте.
+
+          Обещание про деньги и сроки человеку — не косметика: по нему
+          планируют. Показывать то, чего мы не знаем и что не подтвердит
+          ни одна ручка, нельзя (тот же признак, что §35 п.3 «выдуманные
+          адреса» и п.11 «выдуманные отзывы»).
+
+          Заглушки взамен нет намеренно: ни «скоро», ни «уточните в
+          салоне» — второе тоже утверждение, которого мы не проверяли.
+
+          Вернуть блок — когда бэкенд начнёт отдавать политику отмены в
+          ответе бронирования; тогда он рисуется по данным ручки, а не
+          по константе, и закрывает §6.1 Q-BF-7 по-настоящему. */}
 
       {/* 4. Loyalty block — graceful degradation (TL Q3).
           Hidden when no balance / 404. No render means no error UI.
@@ -502,6 +602,29 @@ export function CustomerBookingConfirmScreen() {
           </button>
         )}
       </div>
+
+      {/* DRF-1614 — an outcome, above the error states and outside them.
+          `callout` without `--danger`: the neutral face the surface
+          already uses for «this cannot be booked, here is what now», and
+          `role="status"` rather than `role="alert"` because a screen
+          reader should hear this politely — an alert interrupts, and
+          nothing here is urgent. */}
+      {handoff && (
+        <div className="callout" role="status">
+          <p style={{ margin: 0 }}>{handoff.text}</p>
+          <button
+            type="button"
+            className="btn-secondary"
+            style={{ marginTop: "var(--s-3)" }}
+            onClick={() => navigate("/customer/catalog")}
+          >
+            {/* No «попробовать ещё раз» on either path: repeating the
+                request cannot change a screening decision, and offering
+                it would invite the person to hammer a closed door. */}
+            Посмотреть другие услуги
+          </button>
+        </div>
+      )}
 
       {/* Error states — §6.3 */}
       {err?.kind === "slot_unavailable" && (

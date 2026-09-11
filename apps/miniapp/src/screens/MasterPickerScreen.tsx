@@ -11,8 +11,15 @@ import { useHaptics } from "../hooks/useHaptics";
 import { setEntryPoint, setMaster, useBookingDraft } from "../state/booking";
 import { backTo } from "../lib/screen-back";
 
-/** Возврат (DRF-1493): в каталог — шаг назад легаси-сценария записи. */
-const BACK = backTo("/catalog");
+/**
+ * Возврат (DRF-1493): в каталог — шаг назад сценария записи.
+ *
+ * Адрес канонический (`/customer/catalog`), как и у карточки услуги
+ * (`ServiceDetailScreen`), с которой сюда и приходят. §31 оставил этот
+ * экран жить навсегда — значит и его возврат обязан вести в живое
+ * поколение, а не в `/catalog` прежнего.
+ */
+const BACK = backTo("/customer/catalog");
 
 type State =
   | { kind: "loading" }
@@ -44,7 +51,7 @@ export function MasterPickerScreen() {
 
   useEffect(() => {
     if (!draft.serviceId) {
-      navigate("/catalog", { replace: true });
+      navigate("/customer/catalog", { replace: true });
       return;
     }
     return load();
@@ -52,13 +59,14 @@ export function MasterPickerScreen() {
 
   function onPick(m: Master) {
     haptics.selection();
-    // DRF-1484 — provenance: /book/master is reachable only from the
+    // DRF-1484 — provenance: подбор мастера (§31: `/customer/book/master`,
+    // алиас `/book/master`) reachable only from the
     // service detail (catalog) flow, so the draft originates at the
     // catalog. Stamped here because ServiceDetailScreen is owned by
     // another change window; both spots stamp the same value.
     setEntryPoint("catalog");
     setMaster(m.id, m.name);
-    navigate("/book/when");
+    navigate("/customer/book/when");
   }
 
   if (state.kind === "loading") {
@@ -90,7 +98,7 @@ export function MasterPickerScreen() {
             type="button"
             className="btn-secondary"
             style={{ marginTop: "var(--s-3)" }}
-            onClick={() => navigate("/catalog", { replace: true })}
+            onClick={() => navigate("/customer/catalog", { replace: true })}
           >
             Другие услуги
           </button>

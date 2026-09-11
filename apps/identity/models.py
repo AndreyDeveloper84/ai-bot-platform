@@ -24,9 +24,21 @@ phone-as-secondary-key cross-channel consolidation (Sprint 3+).
   this table at query time.
 
 * **`chat_id` separate from `channel_user_id`** — in some channels
-  (Telegram private DM) they're identical, but in MAX the chat_id is
-  the conversation key that outbound `send_message` writes to, and may
-  differ from the user identity once group chats land Phase 1+.
+  (Telegram private DM) they're identical. **In MAX they are not, even
+  in a private dialog** (DRF-1558): measured on the pilot 2026-09-07,
+  `chat_id=518410834` while `channel_user_id=260237491` for the same
+  person in a one-to-one dialog. MAX's `chat_id` is the id of a
+  **dialog**, so it is meaningful only together with the bot that opened
+  it — and this row has no bot column, so all of one person's rows carry
+  the SAME `chat_id`, valid for at most one of our bots. That false
+  equality is what made storing one address per person look safe; a
+  salon bot sending there answers 404 `dialog.not.found`
+  (`docs/OPEN_DECISIONS.md` §55).
+
+  Therefore: a **reply** uses the inbound event's own `chat_id`, and
+  anything the bot **writes first** uses `channel_user_id` via
+  `outbound.send_message(user_id=...)`. `chat_id` on this row is not an
+  address for a bot-initiated send.
 
 * **Default manager = `TenantScopedManager`** — `(channel, channel_user_id)`
   is unique *within a tenant*, not globally. Same Telegram user can sign
@@ -87,6 +99,46 @@ class BotUser(models.Model):
         "envelope.user_id → BotUser for BookingReminder + Conversation update.",
     )
 
+    # DRF-1649. Which SORT of Ayla account the key above points at.
+    #
+    # Ayla's `IsBotServiceWithVerifiedClient` lazily creates an `is_proxy=True`
+    # User the first time it sees a bot-issued external identity, and resolves a
+    # REAL account only once one has been bound (`bind_external_identity`). Both
+    # are legitimate canonical ids for THIS person, and booking needs either —
+    # which is why `ensure_ayla_link` writes both and must keep writing both.
+    #
+    # The distinction matters one layer out. `CatalogMaster.ayla_user_id` is the
+    # bridge `master_user_id` → ORM join for booking notifications, and
+    # `apps/catalog/master_state.py:464-471` forbids a proxy id there in as many
+    # words: "он занял бы ключ значением, по которому совпадения не будет
+    # никогда". Before this column the sort was resolved, emitted to telemetry
+    # and dropped — so the consumer that needed it could not ask.
+    #
+    # Three-valued, and NULL is not "probably fine":
+    #   False  a real bound account — the only sort safe to copy onward
+    #   True   the isolated proxy — never into CatalogMaster
+    #   NULL   the sort is unknown, and it is genuinely unknowable for rows
+    #          written by `apps/identity/services/resolver.py:192`, which
+    #          receives an id from its caller, and for every row linked before
+    #          this column existed.
+    #
+    # Consumers fail closed on True AND on NULL. "We do not know" is not "yes";
+    # reading it as permission would turn an honest gap into a silent one.
+    ayla_user_id_is_proxy = models.BooleanField(
+        null=True,
+        blank=True,
+        default=None,
+        help_text=(
+            "Sort of the Ayla account `ayla_user_id` points at: False = a real "
+            "bound account, True = Ayla's isolated proxy, NULL = unknown (written "
+            "by a path that does not learn it, or predates this column). Written "
+            "in the same save() as the key by apps/identity/services/ayla_link.py "
+            "— a sort that could be filled in separately would create a fourth "
+            "state, 'key present, sort pending', worse than any of the three."
+        ),
+        verbose_name="Ключ Ayla — прокси",
+    )
+
     # Synced from Ayla's `user.profile.updated` domain event (Gamma #446,
     # event-contract.md §3.12). Mirror-only — Ayla owns the canonical
     # value per ADR-0009 §Hard rule #1. Refresh via REST GET
@@ -125,6 +177,11 @@ class BotUser(models.Model):
         help_text="E.164-normalised phone. PII — never write raw to "
         "AuditLog payload; reference by bot_user_id UUID instead.",
     )
+    # DRF-1558 — the help_text below predates the pilot measurement and its
+    # «Equal to channel_user_id in private DMs» is FALSE for MAX; see the
+    # module docstring. Left as-is on purpose: editing help_text generates
+    # an AlterField migration, and a schema migration is not what a
+    # correction to prose should cost.
     chat_id = models.CharField(
         max_length=128,
         blank=True,
@@ -217,16 +274,61 @@ class BotUser(models.Model):
         help_text="Customer-level opt-out of proactive bot-initiated "
         "messages (B11 post-visit follow-up etc.). False = receive.",
     )
+
+    # DRF-1497 — блокировка клиента из админки. ``blocked_at`` NULL =
+    # не заблокирован. Эффект — один: ``apps.channels.max.outbound``
+    # не отправляет заблокированному человеку ничего (ни ответы бота,
+    # ни проактив), пока блокировка не снята. Ставится и снимается
+    # только через ``apps.identity.services.blocking`` — с причиной и
+    # записью в журнал; правкой полей руками состояние не меняется.
+    blocked_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        db_index=True,
+        help_text="Когда клиента заблокировали из админки (DRF-1497). "
+        "NULL = не заблокирован. Non-null = исходящие ему не отправляются.",
+    )
+    blocked_reason = models.CharField(
+        max_length=500,
+        blank=True,
+        default="",
+        help_text="Причина блокировки — обязательна, см. "
+        "apps.identity.services.blocking. Показывается в карточке клиента.",
+    )
+    blocked_by_username = models.CharField(
+        max_length=150,
+        blank=True,
+        default="",
+        help_text="Кто заблокировал (username учётной записи админки). "
+        "Дублирует журнал, чтобы карточка читалась без второго запроса.",
+    )
     context = models.JSONField(
         default=dict,
         blank=True,
         help_text="Per-user scratch JSON for personalisation flags, "
         "consent timestamps, etc. Avoid raw PII — store IDs.",
     )
+    # DRF-1606. Умолчанием здесь стоял `Europe/Moscow` — НАСТОЯЩИЙ пояс в
+    # роли «никто не выбирал». Поэтому молчание 26 из 26 человек на пилоте
+    # было неотличимо от осознанного выбора москвича, и читатель пояса
+    # относил явный московский ответ к «не задано».
+    #
+    # Кто читает: `apps.nutrition_proactive.prefs.resolve_timezone`.
+    # Кто пишет: только `apps.identity.services.profile.update_profile`
+    # (через `PATCH /me`), с проверкой IANA — DRF-1477.
+    #
+    # Разбор решения живёт ЗДЕСЬ, а не в `help_text`: `help_text`
+    # рендерится на карточке клиента в админконсоли, рядом с телефоном и
+    # дневником питания, и её сторож (`adminconsole/tests/
+    # test_client_scope.py`) справедливо запрещает там всё, что пахнет
+    # медданными, — включая имя модуля `nutrition_proactive`. Оператору
+    # салона путь питоновского модуля не говорит ничего; ему нужно ровно
+    # одно — что означает пустота.
     timezone = models.CharField(
         max_length=64,
-        default="Europe/Moscow",
-        help_text="IANA timezone for time-of-day rendering in messages.",
+        default="",
+        blank=True,
+        help_text="Часовой пояс человека. Пусто означает «не задано».",
     )
 
     # GDPR-style soft delete (Phase 3 / F4). ``deleted_at`` set when the

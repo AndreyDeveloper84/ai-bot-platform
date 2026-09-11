@@ -37,7 +37,8 @@ from apps.identity.services.resolver import resolve_or_create_global_bot_user
 from apps.orchestrator.memory import short_term
 from apps.skills.menu import marketplace as menu_marketplace
 from apps.skills.menu.marketplace import (
-    BOT_ITEMS,
+    CALLBACK_EXTRA_HELP,
+    CALLBACK_EXTRA_OPEN,
     CALLBACK_HEALTH_DECLINE,
     CALLBACK_HEALTH_NEED_PREFIX,
     HEALTH_CHECK_FAILED_TEXT,
@@ -45,6 +46,7 @@ from apps.skills.menu.marketplace import (
     HEALTH_DECLINED_EARLIER_TEXT,
     HEALTH_DECLINED_TEXT,
     HEALTH_REQUEST_TEXT,
+    MAIN_ITEMS,
     MENU_ACTION_TYPE,
     MenuItem,
     health_tap_text,
@@ -54,38 +56,46 @@ pytestmark = pytest.mark.django_db
 
 _CHAT_ID = 7711
 
-#: Два пункта, снятые DRF-1543, — теми же записями, какими вернутся.
+#: Пищевые пункты для проверки ВОРОТ §25 п.6 — оба, и ботовый, и экранный.
 #:
-#: Ворота §25 п.6 остались, а рисовать им нечего: ``NUTRITION_ITEMS``
-#: пуст, пока нет ручек ``customer/food/*``. Класс ворот на живом пути без
-#: подстановки зеленел бы на пустом цикле — то есть перестал бы ловить ту
-#: поломку, ради которой написан.
-_REMOVED_BY_DRF1543: tuple[MenuItem, ...] = (
+#: Производственный кортеж после DRF-1547 несёт ОДИН пункт — ботовый
+#: дневник (§37 п.5). Сканер еды из него по-прежнему снят (§33: за ним нет
+#: рабочего экрана, ``guardProd`` бросает ``StubNotWiredError``), но
+#: механизм ворот обязан оставаться проверенным и для экранного пункта —
+#: иначе он молча разучится работать к тому дню, когда сканер вернётся.
+_GATED_ITEMS: tuple[MenuItem, ...] = (
     MenuItem(
-        label="📸 Сканер еды",
+        label="Дневник питания",
+        emoji="🥗",
+        callback="дневник питания",
+        line="дневник питания — что вы ели и пили",
+        where="bot",
+        surface="food_diary",
+    ),
+    MenuItem(
+        label="Сканер еды",
         callback="open_food_scan",
         line="сканер еды — снять тарелку и увидеть состав",
         where="miniapp",
-    ),
-    MenuItem(
-        label="📔 Дневник питания",
-        callback="open_food_diary",
-        line="дневник питания",
-        where="miniapp",
+        warning="Для снимка тарелки открою сканер.",
     ),
 )
 
-#: Девять пунктов, которые DRF-1543 обязан оставить нетронутыми.
-_NINE_REMAINING: tuple[tuple[str, str], ...] = (
+#: Семь пунктов главного меню (§37) — подпись и payload поимённо.
+#:
+#: Парная положительная стража к каждому «этого больше нет» (DRF-1411).
+#: Без неё «починка», стирающая меню целиком, была бы зелёной.
+_SEVEN_MAIN: tuple[tuple[str, str], ...] = (
+    ("Подобрать услугу", "Помоги подобрать услугу"),
+    ("Найти салон", "cb:catalog:salons"),
     ("📅 Записаться", "cb:menu:book"),
-    ("🔍 Показать салоны", "cb:catalog:salons"),
     ("📋 Мои записи", "cb:menu:my_bookings"),
-    ("🔄 Перенести запись", "cb:menu:reschedule"),
-    ("❌ Отменить запись", "cb:menu:cancel"),
-    ("👤 Профиль", "open_profile"),
-    ("🎯 Моя цель", "open_goal_select"),
-    ("📖 Каталог услуг", "open_catalog"),
-    ("🗓 История визитов", "open_visits"),
+    ("Моя цель", "cb:open:goal_select"),
+    ("Профиль", "cb:open:profile"),
+    # OD-UI-2 («Ещё убираем, помощь в главное меню») поставил «Помощь» на
+    # место «Ещё». Payload остался ``cb:extra:help``: под ``cb:menu:`` его
+    # перехватила бы ``resolve_tap_text`` и увела фразой к консьержу.
+    ("Помощь", CALLBACK_EXTRA_HELP),
 )
 
 
@@ -161,8 +171,8 @@ def nutrition_items(monkeypatch):
     ``handler._route_health_callback``. Механизм ворот при этом настоящий:
     меняется только состав.
     """
-    monkeypatch.setattr(menu_marketplace, "NUTRITION_ITEMS", _REMOVED_BY_DRF1543)
-    return _REMOVED_BY_DRF1543
+    monkeypatch.setattr(menu_marketplace, "NUTRITION_ITEMS", _GATED_ITEMS)
+    return _GATED_ITEMS
 
 
 @pytest.fixture
@@ -274,8 +284,8 @@ class TestCapabilitiesQuestionAnswersWithAMenu:
         payloads = _payloads(sent[0])
         # Положительная стража: клавиатура есть и в ней ботовые пункты меню.
         assert payloads, sent[0]
-        for item in BOT_ITEMS:
-            assert item.callback in payloads, payloads
+        for _label, payload in _SEVEN_MAIN:
+            assert payload in payloads, payloads
         # И только теперь отрицание имеет смысл: прозы консьержа не было.
         assert concierge.call_count == 0
         assert "Расскажи чуть подробнее" not in sent[0]["text"]
@@ -386,19 +396,29 @@ class TestHonestFallbackOnTheGlobalPath:
 # 3. Принятое совпадает с рисуемым                                             #
 # --------------------------------------------------------------------------- #
 class TestEveryDrawnButtonIsAccepted:
-    """Каждый нарисованный ``cb:`` payload кто-то разбирает.
+    """Каждый нарисованный payload кто-то разбирает.
 
     «Разбирает» здесь ровно то, что написано, и не больше: payload не
-    уезжает в модель сырым. Три из пяти ботовых пунктов
-    («Записаться», «Перенести», «Отменить») после подстановки фразы
+    уезжает в модель сырым. Часть ботовых пунктов после подстановки фразы
     отвечает консьерж — это принятое состояние (DRF-1051, таблица в
-    ``quick_actions._global_menu_text``), а не недосмотр. Детерминированную
-    воронку переноса и пикер дат заводит §25 п.5, отдельной задачей.
+    ``quick_actions._global_menu_text``), а не недосмотр.
+
+    После §37 в меню появился ТРЕТИЙ вид payload'а — сама ФРАЗА
+    («Подобрать услугу», «Дневник питания»). Это не исключение из правила,
+    а его предельный случай: тап и есть обычное сообщение, и разбирает
+    его та же лестница, что и набранный текст (DRF-1348).
     """
 
-    def test_bot_payloads_resolve_to_a_route(self, sent, fake_redis, concierge, health_consent):
+    def test_every_drawn_payload_has_someone_who_takes_it(
+        self, sent, fake_redis, concierge, health_consent
+    ):
         from apps.channels.max.quick_actions import resolve_tap_text
         from apps.orchestrator.discovery import CALLBACK_CATALOG_SALONS, execute_catalog_callback
+        from apps.skills.menu.marketplace import (
+            is_extra_callback,
+            is_open_callback,
+            open_callback_slug,
+        )
 
         _welcomed(70301)
         max_handler.handle_global_max_event(
@@ -412,15 +432,26 @@ class TestEveryDrawnButtonIsAccepted:
                 assert execute_catalog_callback(payload) is not None, payload
             elif payload.startswith("cb:menu:"):
                 assert resolve_tap_text(payload), payload
-            else:
+            elif is_extra_callback(payload):
+                continue  # своя ветка лестницы, проверена ниже живым тапом
+            elif is_open_callback(payload):
+                assert open_callback_slug(payload), payload
+            elif payload.startswith("cb:"):
                 raise AssertionError(f"нарисован payload, которого никто не ждёт: {payload}")
+            else:
+                # Фраза. Обязана НЕ выглядеть тапом ни для одного резолвера —
+                # иначе ниже по течению её подменят или потеряют.
+                assert resolve_tap_text(payload) is None, payload
 
-    def test_screen_payloads_are_declared_routes(self, sent, fake_redis, concierge):
+    def test_a_screen_item_opens_a_declared_route_after_the_warning(
+        self, sent, fake_redis, concierge
+    ):
+        """Слаг проверяется там, где он теперь и живёт, — под предупреждением."""
         from apps.skills.welcome.skill import MINIAPP_ROUTES
 
         _welcomed(70302)
         max_handler.handle_global_max_event(
-            _msg(text="что ты умеешь?", user_id=70302, mid="m-draw2")
+            _tap(payload="cb:open:profile", user_id=70302, callback_id="o-1")
         )
 
         slugs = _open_app_payloads(sent[0])
@@ -446,13 +477,19 @@ class TestNutritionGatesOnTheLivePath:
         settings.NUTRITION_ENABLED = False
         _welcomed(70401)
 
-        max_handler.handle_global_max_event(_msg(text="что ты умеешь?", user_id=70401, mid="m-n0"))
+        max_handler.handle_global_max_event(
+            _tap(payload=CALLBACK_EXTRA_OPEN, user_id=70401, callback_id="n-0")
+        )
 
         buttons = _keyboard(sent[0])
         labels = [b["text"] for b in buttons]
-        # Стража: меню построено, экранные пункты в нём есть.
-        assert "👤 Профиль" in labels, labels
-        for item in _REMOVED_BY_DRF1543:
+        # Стража: меню построено, соседние пункты в нём есть. Подменю
+        # снесено (OD-UI-2), и вчерашний ``cb:extra:open`` из истории чата
+        # отвечается ГЛАВНЫМ меню — там же, где теперь живёт пищевой пункт.
+        # «Назад» на роль стражи больше не годится: возвращаться неоткуда.
+        assert "Помощь" in labels, labels
+        assert "Профиль" in labels, labels
+        for item in _GATED_ITEMS:
             assert item.label not in labels, labels
 
     def test_flag_set_without_consent_leads_to_the_consent_request(
@@ -460,9 +497,12 @@ class TestNutritionGatesOnTheLivePath:
     ):
         _welcomed(70402)
 
-        max_handler.handle_global_max_event(_msg(text="что ты умеешь?", user_id=70402, mid="m-n1"))
+        max_handler.handle_global_max_event(
+            _tap(payload=CALLBACK_EXTRA_OPEN, user_id=70402, callback_id="n-00")
+        )
         payloads = _payloads(sent[0])
         assert f"{CALLBACK_HEALTH_NEED_PREFIX}food_scan" in payloads, payloads
+        assert f"{CALLBACK_HEALTH_NEED_PREFIX}food_diary" in payloads, payloads
 
         max_handler.handle_global_max_event(
             _tap(
@@ -481,17 +521,20 @@ class TestNutritionGatesOnTheLivePath:
     def test_flag_set_with_consent_opens_the_surface(
         self, sent, fake_redis, concierge, nutrition_on, health_consent, nutrition_items
     ):
+        """Ботовый пункт отвечает фразой, экранный — предупреждением."""
         health_consent(True)
         _welcomed(70403)
 
-        max_handler.handle_global_max_event(_msg(text="что ты умеешь?", user_id=70403, mid="m-n2"))
+        max_handler.handle_global_max_event(
+            _tap(payload=CALLBACK_EXTRA_OPEN, user_id=70403, callback_id="n-2")
+        )
 
-        slugs = _open_app_payloads(sent[0])
-        assert slugs, _keyboard(sent[0])
-        for item in _REMOVED_BY_DRF1543:
-            assert item.callback in slugs, slugs
+        payloads = _payloads(sent[0])
+        assert payloads, _keyboard(sent[0])
+        assert "дневник питания" in payloads, payloads
+        assert "cb:open:food_scan" in payloads, payloads
         # И ни один пищевой пункт не ведёт на запрос согласия.
-        assert not [p for p in _payloads(sent[0]) if p.startswith(CALLBACK_HEALTH_NEED_PREFIX)]
+        assert not [p for p in payloads if p.startswith(CALLBACK_HEALTH_NEED_PREFIX)]
 
 
 # --------------------------------------------------------------------------- #
@@ -505,9 +548,18 @@ class TestNutritionItemsAreGoneFromTheLiveMenu:
     ``HEALTH`` доходил до падающего экрана. Пунктов быть не должно.
     """
 
-    def test_the_menu_offers_nine_items_and_no_food(
-        self, sent, fake_redis, concierge, nutrition_on, health_consent
+    def test_the_main_menu_offers_seven_items_and_no_food(
+        self, sent, fake_redis, concierge, health_consent, settings
     ):
+        """При ЗАКРЫТЫХ воротах питания меню — ровно семёрка владельца.
+
+        §37 отправлял питание в «Ещё»; OD-UI-2 подменю снёс и поднял
+        дневник сюда. Значит «пищевого пункта в главном меню нет» стало
+        утверждением НЕ про меню, а про ПЕРВЫЕ ворота, и проверяется оно
+        теперь при выключенном флаге. Что видит человек с открытыми
+        воротами — в тесте ниже.
+        """
+        settings.NUTRITION_ENABLED = False
         health_consent(True)
         _welcomed(70601)
 
@@ -519,20 +571,67 @@ class TestNutritionItemsAreGoneFromTheLiveMenu:
         labels = [b["text"] for b in buttons]
         payloads = _payloads(sent[0]) + _open_app_payloads(sent[0])
         text = sent[0]["text"]
-        # Положительная стража НА ТЕХ ЖЕ ДАННЫХ: девять пунктов на месте,
+        # Положительная стража НА ТЕХ ЖЕ ДАННЫХ: семь пунктов на месте,
         # payload каждого не изменился, перечень в тексте собран.
-        assert len(buttons) == len(_NINE_REMAINING), labels
-        for label, payload in _NINE_REMAINING:
+        assert len(buttons) == len(_SEVEN_MAIN), labels
+        for label, payload in _SEVEN_MAIN:
             assert label in labels, labels
             assert payload in payloads, payloads
-        assert BOT_ITEMS[0].line in text, text
-        assert "открывается отдельным экраном" in text, text
+        assert MAIN_ITEMS[0].line in text, text
         # И только теперь отрицание.
-        for item in _REMOVED_BY_DRF1543:
-            assert item.label not in labels, labels
-            assert item.callback not in payloads, payloads
-            assert item.line not in text, text
+        assert "🥗 Дневник питания" not in labels, labels
+        assert "Сканер еды" not in labels, labels
         assert not [p for p in payloads if p.startswith(CALLBACK_HEALTH_NEED_PREFIX)], payloads
+
+    def test_but_an_open_gate_puts_the_diary_into_the_main_menu(
+        self, sent, fake_redis, concierge, nutrition_on, health_consent
+    ):
+        """Парная положительная стража к предыдущей (OD-UI-2, DRF-1411).
+
+        На боевом пилоте ``NUTRITION_ENABLED=True``, то есть человек видит
+        именно этот случай. Восемь кнопок вместо семи, дневник седьмой и
+        ботовый — payload это ФРАЗА, а не слаг приложения.
+        """
+        health_consent(True)
+        _welcomed(70602)
+
+        max_handler.handle_global_max_event(
+            _msg(text="что ты умеешь?", user_id=70602, mid="m-odui2")
+        )
+
+        buttons = _keyboard(sent[0])
+        labels = [b["text"] for b in buttons]
+        payloads = _payloads(sent[0]) + _open_app_payloads(sent[0])
+        assert len(buttons) == len(_SEVEN_MAIN) + 1, labels
+        assert labels[-2:] == ["🥗 Дневник питания", "Помощь"], labels
+        assert "дневник питания" in payloads, payloads
+        # Согласие есть — на запрос согласия тап не ведёт.
+        assert not [p for p in payloads if p.startswith(CALLBACK_HEALTH_NEED_PREFIX)], payloads
+
+    def test_the_food_scanner_is_still_gone_but_the_diary_came_back(
+        self, sent, fake_redis, concierge, nutrition_on, health_consent
+    ):
+        """§37 п.5 отменил §33 ТОЛЬКО для дневника — сканер остаётся снят.
+
+        За сканером по-прежнему нет живого экрана (``guardProd`` бросает
+        ``StubNotWiredError``), и признак «нет пути — нет кнопки» на него
+        распространяется без изменений.
+        """
+        health_consent(True)
+        _welcomed(70603)
+
+        max_handler.handle_global_max_event(
+            _tap(payload=CALLBACK_EXTRA_OPEN, user_id=70603, callback_id="x-1")
+        )
+
+        labels = [b["text"] for b in _keyboard(sent[0])]
+        payloads = _payloads(sent[0]) + _open_app_payloads(sent[0])
+        # Стража: дневник вернулся, и он ботовый — payload это фраза.
+        assert "🥗 Дневник питания" in labels, labels
+        assert "дневник питания" in payloads, payloads
+        # Отрицание: сканер не вернулся вместе с ним.
+        assert "Сканер еды" not in labels, labels
+        assert "open_food_scan" not in payloads, payloads
 
     def test_a_stale_food_payload_from_chat_history_answers_with_the_menu(
         self, sent, fake_redis, concierge, nutrition_on, health_consent
@@ -817,7 +916,9 @@ class TestFlagIsCheckedOnTheTapToo:
         """
         settings.NUTRITION_ENABLED = True
         _welcomed(70803)
-        max_handler.handle_global_max_event(_msg(text="что ты умеешь?", user_id=70803, mid="f-0"))
+        max_handler.handle_global_max_event(
+            _tap(payload=CALLBACK_EXTRA_OPEN, user_id=70803, callback_id="f-0")
+        )
         # Стража: пункт действительно был нарисован, тап настоящий.
         assert f"{CALLBACK_HEALTH_NEED_PREFIX}food_scan" in _payloads(sent[0]), _payloads(sent[0])
 
@@ -897,7 +998,7 @@ class TestZeroConfigStillShipsAWorkingMenu:
         # Стража на ТЕХ ЖЕ данных: клавиатура непуста и это ботовая половина.
         assert _keyboard(sent[0]), sent[0]
         payloads = _payloads(sent[0])
-        assert payloads == [item.callback for item in BOT_ITEMS], payloads
+        assert payloads == [item.callback for item in MAIN_ITEMS if item.where == "bot"], payloads
         # И только теперь отрицание: ни одной кнопки, которую негде открыть.
         assert not _open_app_payloads(sent[0]), _keyboard(sent[0])
         link_buttons = [b for b in _keyboard(sent[0]) if b.get("type") == "link"]

@@ -1,7 +1,28 @@
 # ai-bot-platform server deployment runbook
 
-**Target:** `app.penza.taxi` (1.8GB RAM, 50GB disk, taximeter user, sudo via masterkey).
-**Strategy:** logical isolation in host Postgres+Redis (RAM-constrained, no new containers).
+> **Superseded — this describes a host that no longer exists and a deploy
+> model that is no longer used.** `app.penza.taxi` does not resolve. The pilot
+> is `176.119.159.141`, `/home/taximeter/ai-bot-platform-dev`, and it runs
+> **Docker Compose** (project `ayla-bot-staging`, env `.env.staging`,
+> `docker-compose.yml` + `docker-compose.staging.yml` +
+> `docker-compose.staging.local.yml`, web on 8014) — not the venv + gunicorn
+> + systemd layout below. Deploys are performed by
+> `.github/workflows/deploy-dev.yml` on every green `ci` on `dev`, not by hand.
+> Kept as the Phase 0 record; **do not follow it as a procedure**. Current
+> procedure: [miniapp-deploy.md](miniapp-deploy.md) for the Mini App,
+> [admin-access.md](admin-access.md) for the Compose stack and its env.
+
+> **Dead host — do not work on `194.87.99.126`.** SSH to it still succeeds and
+> every command will report success, but the box serves nobody: `miniapp-dev`,
+> `proapp`, `dev` and `api-dev` `.gobeauty.site` all resolve to
+> `176.119.159.141`, and the `.126` vhost only proxies there. A change made on
+> `.126` never reaches a person. The pilot is `176.119.159.141`,
+> `/home/taximeter/ai-bot-platform-dev`, Compose project `ayla-bot-staging`,
+> port 8014, env `.env.staging`, files `docker-compose.yml` +
+> `docker-compose.staging.yml` + `docker-compose.staging.local.yml`.
+
+**Target (historical):** `app.penza.taxi` (1.8GB RAM, 50GB disk, taximeter user, sudo via masterkey).
+**Strategy (historical):** logical isolation in host Postgres+Redis (RAM-constrained, no new containers).
 **Owner:** Phase 0 infra deployment.
 
 ---
@@ -118,6 +139,12 @@ set -a; source /etc/ai-bot-platform/dev.env; set +a
 
 ### 2.6 Frontend build
 
+> **Do not do this.** The Mini App is built on the GitHub runner and shipped to
+> the box by `deploy-dev` (DRF-1538); there is no Node on the pilot. Building
+> here empties the live `dist` while it runs, which took `miniapp-dev` and
+> `proapp` down for eight seconds on 2026-08-21. See
+> [miniapp-deploy.md](miniapp-deploy.md).
+
 ```bash
 cd /home/taximeter/ai-bot-platform-dev/apps/miniapp
 npm ci
@@ -204,6 +231,12 @@ Identical to §2 but:
 ---
 
 ## 4. Routine deploys (after initial provisioning)
+
+> **Do not do this.** Routine deploys are `.github/workflows/deploy-dev.yml`,
+> triggered automatically by a green `ci` on `dev`: it rebuilds the Compose
+> services, migrates, restarts, then builds and ships the Mini App. The
+> `npm run build` below is specifically the step that must not be run on the
+> host. Kept for the record only.
 
 ```bash
 # Pull + restart

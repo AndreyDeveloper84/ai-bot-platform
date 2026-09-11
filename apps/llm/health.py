@@ -33,14 +33,80 @@ Running two separate periodic LLM calls would double the cost and the
 traffic to buy nothing. If the two ever need different cadences, split
 the beat entry — the logic below is already parameterless per concern.
 
+### WHICH provider the probe builds (DRF-1631)
+
+The vendor is **resolved, never named here**. The probe asks
+:func:`apps.llm.router.resolve_provider_tier` — the same function
+:meth:`apps.llm.router.LLMRouter.get_provider` asks on a live turn —
+and builds the answer with
+:func:`apps.llm.router.build_provider`, the same constructor the
+serving path uses. Not a rule that agrees with the router: the router's
+own code.
+
+Until DRF-1631 this module imported ``OpenAIProvider`` by name. The
+pilot has run ``LLM_PROVIDER=anthropic`` since DRF-1443, so the probe
+was measuring a vendor the product does not call. Both halves of that
+cost us:
+
+* **false alarm** — on 10.09.2026 the owner's panel showed
+  "🔴 LLM недоступна … LLMVendorCreditsExhausted … openai.complete:
+  vendor credits exhausted" for the **2018th** consecutive tick. The
+  OpenAI wallet really was empty; nothing was routed to it. Two hours
+  of bot logs held zero Anthropic errors and zero emergency replies to
+  customers. An alarm that has been red for 2018 ticks is furniture;
+  nobody walks over to it any more.
+* **blindness, which is worse** — had Anthropic failed, the probe would
+  have gone on reporting green, because it was asking OpenAI.
+
+### The rule this module now obeys (owner decision В-14, 10.09.2026)
+
+``LLM_PROVIDER`` is **authoritative** for the configured runtime
+vendor. Under ``LLM_PROVIDER=anthropic``:
+
+* production health checks MUST check Anthropic;
+* **OpenAI's health does not determine Ayla's LLM health**;
+* a silent runtime fall-back to OpenAI is **forbidden** — permitted only
+  under a fallback policy that has been designed, approved and tested,
+  and no such policy exists.
+
+Which gives the two readings an operator has to hold at once, both
+demonstrated this week:
+
+* **a red panel is not a broken Ayla** — 10.09, 2018 ticks of a wallet
+  nobody spends from;
+* **a green panel is not a live Ayla** — what the same code would have
+  shown had Anthropic died.
+
+And the sentence that names the mechanism behind both:
+
+    **Holding a secret is not permission to fall back.**
+
+Nobody decided the probe should ask OpenAI. The key was present and the
+class was imported, and the presence of a secret quietly became
+behaviour. That is why this module now resolves its vendor and refuses
+to inherit the router's quota-fallback wrapper: see
+:func:`build_probe_provider`, and the DRF-1631 note on
+:func:`apps.llm.router.provider_is_configured`, which arms the serving
+path's hop from exactly the same evidence — a key being set.
+
+The probe's context has no tenant and no skill, so the tier that
+answers it is tier 3, ``LLM_PROVIDER``. That is the honest scope of one
+cheap call, and it is stated rather than assumed: when
+``SKILL_LLM_PROVIDER`` routes some skill to another vendor, that vendor
+is NOT covered, and every tick logs ``llm.health.uncovered_vendors``
+naming it. Widening the probe to one call per configured vendor is a
+real change in cost and cadence and wants its own ticket; going quiet
+about the gap is not an option.
+
 ### Why a FRESH client on every probe
 
-:meth:`OpenAIProvider._get_client` caches its ``httpx`` client, and a
+Each provider's ``_get_client`` caches its ``httpx`` client, and a
 pooled, already-established tunnel would sail straight past exactly the
 failure we are trying to detect: the proxy refusing to *establish* new
 tunnels. So each probe constructs its own provider, and closes it in a
-``finally`` (see :meth:`OpenAIProvider.aclose` — otherwise every tick
-leaks a connection pool into the Celery worker).
+``finally`` (see :meth:`OpenAIProvider.aclose` and its DRF-1631 twin
+:meth:`AnthropicProvider.aclose` — otherwise every tick leaks a
+connection pool into the Celery worker).
 
 This also makes the warm-up meaningful. The 13.08 measurements were
 taken from separate short-lived processes, and the second one was still
@@ -110,6 +176,7 @@ import re
 import time
 from dataclasses import dataclass
 from datetime import datetime
+from typing import Any
 
 from django.conf import settings
 from django.core.cache import cache
@@ -180,8 +247,9 @@ def redact_secrets(text: str) -> str:
     1. a URL carrying userinfo → the userinfo replaced with ``***``,
        scheme and host kept (``http://***@proxy.example:3128``);
     2. the same shape with the scheme already stripped;
-    3. verbatim occurrences of ``OPENAI_PROXY`` / ``OPENAI_API_KEY``
-       replaced with ``***``.
+    3. verbatim occurrences of ``OPENAI_PROXY`` / ``OPENAI_API_KEY`` /
+       ``ANTHROPIC_PROXY`` / ``ANTHROPIC_API_KEY`` replaced with
+       ``***``.
 
     Layer 3 is the belt to layers 1–2's braces: it also covers a proxy
     URL that carries no userinfo but is itself not for publication.
@@ -197,6 +265,11 @@ def redact_secrets(text: str) -> str:
     for secret in (
         getattr(settings, "OPENAI_PROXY", "") or "",
         getattr(settings, "OPENAI_API_KEY", "") or "",
+        # DRF-1631 — the probe now follows ``LLM_PROVIDER``, so an
+        # Anthropic connection error can quote Anthropic's proxy and key
+        # back at us just as readily.
+        getattr(settings, "ANTHROPIC_PROXY", "") or "",
+        getattr(settings, "ANTHROPIC_API_KEY", "") or "",
     ):
         if secret and secret in out:
             out = out.replace(secret, "***")
@@ -214,6 +287,11 @@ class ProbeResult:
 
     Attributes:
       ok: the LLM path answered.
+      provider: the vendor that was actually asked — resolved from
+        ``LLM_PROVIDER`` through the router's own tier walk, never
+        assumed. Carried into the alert text so the panel names its
+        subject next to its verdict; DRF-1631 exists because for 2018
+        ticks it did not.
       latency_s: wall-clock seconds the attempt took — on success this
         is the DRF-1056 warm/cold signal, on failure it is how long the
         path took to fail (a 30 s failure is a hung tunnel, a 0.2 s
@@ -225,6 +303,7 @@ class ProbeResult:
 
     ok: bool
     latency_s: float
+    provider: str = ""
     error_class: str = ""
     error_message: str = ""
 
@@ -248,6 +327,87 @@ def _unwrap_error(exc: BaseException) -> BaseException:
     return exc
 
 
+def probe_target() -> tuple[str, str]:
+    """Which vendor this probe will ask, and which tier said so.
+
+    A one-line delegation to :func:`apps.llm.router.resolve_provider_tier`
+    with no tenant and no skill — the probe's real context — and it must
+    stay a delegation. The moment this function grows a rule of its own,
+    "the probe measures what the product uses" goes back to being a
+    coincidence that holds until somebody edits one of the two copies.
+    ``apps/llm/tests/test_health_probe_parity.py`` is the guard that
+    notices if it does.
+    """
+
+    from apps.llm.router import resolve_provider_tier
+
+    return resolve_provider_tier()
+
+
+def build_probe_provider(name: str) -> Any:
+    """A FRESH, unwrapped instance of vendor ``name`` for one probe.
+
+    Construction goes through :func:`apps.llm.router.build_provider`,
+    the same name→class step the serving path takes, so a vendor added
+    to the registry is probeable the day it lands.
+
+    What the probe deliberately does NOT inherit from
+    ``get_provider``:
+
+    * the router's per-process provider **cache** — a pooled tunnel
+      would hide the failure the probe exists to find (see the module
+      docstring);
+    * :class:`~apps.llm.router.QuotaFallbackProvider` — a probe that
+      hops on quota exhaustion reports the *other* vendor's health
+      under this one's name, which is the exact confusion DRF-1631 is
+      undoing;
+    * :class:`~apps.llm.pii_protected_provider.PIITokenizingProvider` —
+      the payload is the literal string ``ping``.
+
+    ``retry_policy`` is pinned to one attempt: see the module docstring,
+    "Why the probe does NOT retry".
+
+    Typed ``Any`` rather than :class:`~apps.llm.protocol.LLMProvider`
+    because the probe uses ``aclose``, which is deliberately NOT part of
+    that protocol — it is the short-lived-caller hook and this module is
+    the only short-lived caller.
+    """
+
+    from apps.llm.retry import RetryPolicy
+    from apps.llm.router import build_provider
+
+    return build_provider(name, retry_policy=RetryPolicy(max_attempts=1))
+
+
+def _log_uncovered_vendors(probed: str) -> list[str]:
+    """Name, every tick, the configured vendors this probe does not cover.
+
+    One cheap call answers for one vendor. When ``SKILL_LLM_PROVIDER``
+    points a skill at a second one, that second vendor is serving real
+    turns with nobody watching it — the same blindness DRF-1631 fixes
+    for tier 3, one tier up. This does not fix it; a probe per vendor
+    changes the cost and the cadence and wants its own ticket. It
+    refuses to let the gap be silent, which is the part that can be done
+    for free.
+
+    Returns the uncovered names so tests can assert on the count rather
+    than on a log string.
+    """
+
+    from apps.llm.router import configured_vendor_names
+
+    uncovered = [name for name in configured_vendor_names() if name != probed]
+    if uncovered:
+        logger.warning(
+            "llm.health.uncovered_vendors probed=%s uncovered=%s count=%d "
+            "(SKILL_LLM_PROVIDER routes live turns to a vendor this probe does not measure)",
+            probed,
+            ",".join(uncovered),
+            len(uncovered),
+        )
+    return uncovered
+
+
 async def probe_llm(*, model: str | None = None) -> ProbeResult:
     """Make one cheap real completion down the production LLM path.
 
@@ -262,17 +422,46 @@ async def probe_llm(*, model: str | None = None) -> ProbeResult:
     applies its scalar timeout per phase (connect, read, write, pool),
     so a pathological request can outlive any single phase budget, and a
     beat task must have a hard stop.
-    """
 
-    from apps.llm.providers.openai_provider import OpenAIProvider
-    from apps.llm.retry import RetryPolicy
+    WHICH vendor is asked comes from the router, not from this module —
+    see the docstring section "WHICH provider the probe builds".
+    """
 
     chosen_model = model or getattr(settings, "LLM_HEALTH_PROBE_MODEL", "") or None
     ceiling = float(getattr(settings, "LLM_HEALTH_PROBE_TIMEOUT_S", 60.0))
 
-    # max_attempts=1 — see module docstring "Why the probe does NOT retry".
-    provider = OpenAIProvider(retry_policy=RetryPolicy(max_attempts=1))
+    provider_name, source = probe_target()
+    _log_uncovered_vendors(provider_name)
+
     started = time.monotonic()
+    try:
+        provider = build_probe_provider(provider_name)
+    except Exception as exc:  # noqa: BLE001 — the probe reports, never raises
+        # A vendor that cannot even be CONSTRUCTED (missing SDK, unset
+        # key, malformed settings) is a dead path, not a skipped check.
+        # Pre-DRF-1631 this construction sat outside the try and could
+        # take the beat task with it, contradicting "never raises".
+        underlying = _unwrap_error(exc)
+        logger.error(
+            "llm.health.provider_build_failed provider=%s source=%s error=%s",
+            provider_name,
+            source,
+            type(underlying).__name__,
+        )
+        return ProbeResult(
+            ok=False,
+            latency_s=time.monotonic() - started,
+            provider=provider_name,
+            error_class=type(underlying).__name__,
+            error_message=redact_secrets(str(underlying))[:_MAX_ERROR_CHARS],
+        )
+
+    logger.info(
+        "llm.health.probe_target provider=%s source=%s model=%s",
+        provider_name,
+        source,
+        chosen_model or "<vendor default>",
+    )
     try:
         await asyncio.wait_for(
             provider.complete(
@@ -288,14 +477,35 @@ async def probe_llm(*, model: str | None = None) -> ProbeResult:
         return ProbeResult(
             ok=False,
             latency_s=time.monotonic() - started,
+            provider=provider_name,
             error_class=type(underlying).__name__,
             error_message=redact_secrets(str(underlying))[:_MAX_ERROR_CHARS],
         )
     finally:
         # Fresh client per probe by design — close it or leak a pool per tick.
-        await provider.aclose()
+        await _aclose(provider, provider_name)
 
-    return ProbeResult(ok=True, latency_s=time.monotonic() - started)
+    return ProbeResult(ok=True, latency_s=time.monotonic() - started, provider=provider_name)
+
+
+async def _aclose(provider: object, name: str) -> None:
+    """Close the probe's own client. Loud when a provider cannot.
+
+    ``aclose`` is not part of :class:`apps.llm.protocol.LLMProvider` —
+    it is the short-lived-caller hook, and only this module is a
+    short-lived caller. A vendor added without it leaks an httpx pool
+    per tick into the Celery worker, silently, which is precisely how
+    ``AnthropicProvider`` reached DRF-1631 with no ``aclose`` at all:
+    the probe could not reach it, so nothing complained. The getattr is
+    tolerant so one missing hook cannot break the monitor; the WARNING
+    is what stops it being tolerant *and quiet*.
+    """
+
+    close = getattr(provider, "aclose", None)
+    if close is None:
+        logger.warning("llm.health.provider_has_no_aclose provider=%s (pool leaked)", name)
+        return
+    await close()
 
 
 def run_probe_sync(*, model: str | None = None) -> ProbeResult:
@@ -401,6 +611,7 @@ def evaluate_probe(result: ProbeResult) -> str:
         AUDIT_HEALTH_DOWN,
         {
             "failures": failures,
+            "provider": result.provider,
             "error_class": result.error_class,
             "error_message": result.error_message,
             "latency_s": round(result.latency_s, 3),
@@ -456,8 +667,14 @@ def build_down_message(result: ProbeResult, *, failures: int) -> str:
         "🔴 LLM недоступна",
         "Проверка пути к языковой модели не проходит.",
         f"Неудачных проверок подряд: {failures}",
-        f"Ошибка: {result.error_class or 'unknown'}",
     ]
+    # DRF-1631 — the panel names its SUBJECT next to its verdict. The
+    # 10.09 alarm said "openai.complete: vendor credits exhausted" while
+    # the product ran on Anthropic, and nothing in the message let the
+    # reader see that mismatch.
+    if result.provider:
+        lines.append(f"Провайдер: {result.provider}")
+    lines.append(f"Ошибка: {result.error_class or 'unknown'}")
     if result.error_message:
         lines.append(f"Детали: {result.error_message}")
     lines.append(f"Проверка длилась: {result.latency_s:.1f} с")
@@ -473,6 +690,8 @@ def build_recovered_message(result: ProbeResult, *, down_since: object = None) -
         "🟢 LLM снова доступна",
         f"Ответ получен за {result.latency_s:.1f} с",
     ]
+    if result.provider:
+        lines.append(f"Провайдер: {result.provider}")
     downtime = _format_downtime(down_since)
     if downtime:
         lines.append(f"Недоступность длилась ≈ {downtime}")
@@ -493,17 +712,20 @@ def _notify(text: str) -> int:
     """
 
     try:
-        from apps.handoff.notify import get_notify_chat_ids, send_max_notification
+        from apps.handoff.notify import get_notify_addresses, send_max_notification
 
-        chat_ids = get_notify_chat_ids()
-        if not chat_ids:
+        recipients = get_notify_addresses()
+        if not recipients:
             logger.info("llm.health.notify_skipped reason=no_recipients")
             return 0
-        failures = send_max_notification(text=text, chat_ids=chat_ids)
+        # DRF-1559 — тот же список операторов, но выбор ключа адресации
+        # сделан за нас: людей предпочитаем диалогам.
+        failures = send_max_notification(text=text, addresses=recipients)
         logger.info(
-            "llm.health.notify_sent recipients=%d failures=%d",
-            len(chat_ids),
+            "llm.health.notify_sent recipients=%d failures=%d addressed_by=%s",
+            len(recipients),
             failures,
+            recipients[0].key,
         )
         return failures
     except Exception:  # noqa: BLE001 — alerting must never break the probe
@@ -534,24 +756,41 @@ def check_llm_availability(*, model: str | None = None) -> dict[str, object]:
     is the DRF-1054 monitor. Never raises.
 
     Returns a small dict for Celery result visibility and for tests:
-    ``{"skipped": ...}`` when no probe was made, otherwise
-    ``{"ok", "latency_s", "transition", "error_class"}``.
+    ``{"skipped": ..., "provider": ...}`` when no probe was made,
+    otherwise ``{"ok", "provider", "latency_s", "transition",
+    "error_class"}``.
     """
 
     if not getattr(settings, "LLM_HEALTH_PROBE_ENABLED", True):
         return {"skipped": SKIP_DISABLED}
 
-    if not (getattr(settings, "OPENAI_API_KEY", "") or ""):
+    from apps.llm.router import provider_is_configured
+
+    provider_name, _source = probe_target()
+
+    # DRF-1631: the key that matters is the RESOLVED vendor's, read
+    # through the router's own ``key_setting_name``. This used to test
+    # ``OPENAI_API_KEY`` unconditionally, which on an Anthropic pilot
+    # asks about a wallet nobody spends from: with the pilot's keys it
+    # waved a dead path through, and on a deployment that (rightly) sets
+    # only ``ANTHROPIC_API_KEY`` it would have skipped every tick and
+    # called the silence health.
+    if not provider_is_configured(provider_name):
         # No key: on a dev box this is normal, on the pilot it is a
         # deploy fault. We cannot tell the two apart from here, so we
         # refuse to page anyone and leave a WARNING that says why.
-        logger.warning("llm.health.skipped reason=%s", SKIP_NO_API_KEY)
-        return {"skipped": SKIP_NO_API_KEY}
+        logger.warning(
+            "llm.health.skipped reason=%s provider=%s",
+            SKIP_NO_API_KEY,
+            provider_name,
+        )
+        return {"skipped": SKIP_NO_API_KEY, "provider": provider_name}
 
     result = run_probe_sync(model=model)
     transition = evaluate_probe(result)
     return {
         "ok": result.ok,
+        "provider": result.provider,
         "latency_s": round(result.latency_s, 3),
         "transition": transition,
         "error_class": result.error_class,

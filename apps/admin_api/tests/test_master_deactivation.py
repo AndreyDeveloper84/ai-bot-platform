@@ -816,7 +816,7 @@ class TestExecute:
 
         sent_texts: list[str] = []
 
-        def _capture(chat_id: str, text: str, **kw):  # noqa: ARG001
+        def _capture(user_id: str, text: str, **kw):  # noqa: ARG001
             sent_texts.append(text)
             return {"ok": True}
 
@@ -859,7 +859,7 @@ class TestExecute:
 
         sent_texts: list[str] = []
 
-        def _capture(chat_id: str, text: str, **kw):  # noqa: ARG001
+        def _capture(user_id: str, text: str, **kw):  # noqa: ARG001
             sent_texts.append(text)
             return {"ok": True}
 
@@ -917,8 +917,8 @@ class TestExecute:
 
         sent_chats: list[str] = []
 
-        def _capture(chat_id: str, text: str, **kw):  # noqa: ARG001
-            sent_chats.append(chat_id)
+        def _capture(user_id: str, text: str, **kw):  # noqa: ARG001
+            sent_chats.append(user_id)
             return {"ok": True}
 
         with patch(
@@ -944,7 +944,7 @@ class TestExecute:
             )
         assert resp.status_code == 200
         # 2 customer DMs + 1 master DM
-        assert "chat-master-7001" in sent_chats
+        assert "7001" in sent_chats
         assert len(sent_chats) == 3
 
     def test_notification_failure_logged_but_not_rolled_back(
@@ -1144,7 +1144,10 @@ class TestReactivate:
             )
         assert resp.status_code == 200
         assert send_mock.called
-        assert send_mock.call_args.kwargs["chat_id"] == "chat-8001"
+        # DRF-1558 — «chat-8001» тоже лежит на строке; проверяем, что ушёл
+        # человек, а не диалог.
+        assert send_mock.call_args.kwargs["user_id"] == "8001"
+        assert "chat_id" not in send_mock.call_args.kwargs
 
     def test_reactivate_no_linked_bot_user_no_error(
         self,
@@ -1369,8 +1372,8 @@ class TestCustomerConsentGate:
         booking = _make_booking(tenant=tenant, master=master, service=service, bot_user=bot_user)
         sent: list[tuple[str, str]] = []
 
-        def _capture(chat_id: str, text: str, **kw):  # noqa: ARG001
-            sent.append((chat_id, text))
+        def _capture(user_id: str, text: str, **kw):  # noqa: ARG001
+            sent.append((user_id, text))
             return {"ok": True}
 
         with patch(
@@ -1394,7 +1397,7 @@ class TestCustomerConsentGate:
         bu = _make_customer_bot_user(tenant, 30)
         booking, sent, result = self._run(tenant, master, one_booking, bu, owner_bot_user)
 
-        assert [c for c, _ in sent] == ["chat-6030"]
+        assert [c for c, _ in sent] == ["6030"]
         assert result.customer_notifications_dispatched == 1
         assert result.customer_notifications_blocked == 0
         assert _audit_blocked_reasons()[str(booking.id)] == ""
@@ -1439,15 +1442,18 @@ class TestCustomerConsentGate:
         assert sent == []
         assert _audit_blocked_reasons()[str(booking.id)] == "consent_withdrawn"
 
-    def test_erased_client_with_surviving_chat_id_is_not_written_to(
+    def test_erased_client_with_surviving_address_is_not_written_to(
         self, tenant, master, one_booking, owner_bot_user
     ) -> None:
-        """The second mine: ``soft_delete_user()`` leaves ``chat_id`` set.
+        """The second mine: ``soft_delete_user()`` leaves the address set.
 
-        One pilot row is erased and still reachable.
+        One pilot row is erased and still reachable. Erasure scrubs
+        neither ``chat_id`` nor ``channel_user_id`` — the address the
+        sends moved to in DRF-1558 — so the gate above the transport is
+        the only thing between an erased person and a message.
         """
         bu = _make_customer_bot_user(tenant, 34, deleted=True)
-        assert bu.chat_id  # erasure scrubbed the PII, not the address
+        assert bu.channel_user_id  # erasure scrubbed the PII, not the address
         booking, sent, result = self._run(tenant, master, one_booking, bu, owner_bot_user)
 
         assert sent == []
@@ -1480,8 +1486,8 @@ class TestCustomerConsentGate:
 
         sent: list[str] = []
 
-        def _capture(chat_id: str, text: str, **kw):  # noqa: ARG001
-            sent.append(chat_id)
+        def _capture(user_id: str, text: str, **kw):  # noqa: ARG001
+            sent.append(user_id)
             return {"ok": True}
 
         with patch(
@@ -1497,7 +1503,7 @@ class TestCustomerConsentGate:
                 actor_role="owner",
             )
 
-        assert sent == ["chat-6040"]
+        assert sent == ["6040"]
         assert result.cancelled_count == 4
         assert result.customer_notifications_dispatched == 1
         assert result.customer_notifications_blocked == 3
@@ -1579,7 +1585,7 @@ class TestOutboundSafetyScope:
         )
         sent: list[str] = []
 
-        def _capture(chat_id: str, text: str, **kw):  # noqa: ARG001
+        def _capture(user_id: str, text: str, **kw):  # noqa: ARG001
             sent.append(text)
             return {"ok": True}
 

@@ -84,40 +84,179 @@ jobs:
         run: |
           ssh -i ~/.ssh/dev_deploy "${DEV_USER}@${DEV_HOST}" bash -lc "
             set -euo pipefail
+            # Кто исполняет шаг — В ЛОГ, первой строкой. Сегодня шаги молча
+            # мешают имя из секрета и повышение прав и нигде не называют
+            # актора, а в дереве лежат объекты ДВУХ учёток (DRF-1646). Две
+            # трети root-объектов — служебные файлы git и рабочие копии
+            # исходников, а git под sudo не зовёт ни один шаг: значит писал
+            # человек, и не однажды. Кодом это не чинится — чинится тем, что
+            # шаг называет актора вслух и перестаёт быть предметом догадок.
+            # Печатается ЧИСЛО, а не имя, и это не косметика.
+            #
+            # \`id -un\` выводил имя, совпадающее со значением секрета
+            # DEV_USER, и GitHub вычёркивал его: в логе стояло
+            # «пользователь ***». Строка, заведённая ради снятия догадки об
+            # акторе, догадку не снимала — и выглядела при этом рабочим
+            # диагностическим выводом. Носитель был, сведений в нём не было.
+            #
+            # Ноль секретом не является и маскировку переживает. Число к тому
+            # же полезнее имени: именно оно уходит в --user.
+            echo \"::notice::шаг идёт от uid \$(id -u), gid \$(id -g)\"
             cd '${DEV_DEPLOY_PATH}'
-            git fetch origin
-            git checkout dev
-            git pull --ff-only origin dev
+            # Владелец дерева определяется ДО первой записи, а не перед
+            # первым контейнером: до этой правки git успевал отработать
+            # root-ом раньше, чем кто-либо спрашивал про владельца.
+            #
+            # Замер 11.09.2026 после выкладки с --user: чужих объектов стало
+            # не меньше, а БОЛЬШЕ (298 → 434), и 96 из них создала сама
+            # выкладка. Основную массу пишет git по ssh, а --user управляет
+            # только тем, что происходит ВНУТРИ контейнера. До git он не
+            # достаёт по построению — это разные каналы записи, и мера,
+            # закрывшая один, о втором ничего не говорила.
+            OWNER=\$(stat -c %U '${DEV_DEPLOY_PATH}')
+            OWNER_UID=\$(stat -c %u '${DEV_DEPLOY_PATH}')
+            OWNER_GID=\$(stat -c %g '${DEV_DEPLOY_PATH}')
+            if [ -z \"\$OWNER\" ] || [ -z \"\$OWNER_UID\" ] || [ -z \"\$OWNER_GID\" ]; then
+              echo \"::error::не удалось определить владельца дерева выкладки\"
+              exit 1
+            fi
+            echo \"::notice::владелец дерева \$OWNER (\$OWNER_UID:\$OWNER_GID); все записи идут от него\"
+            # root остаётся тем, кто ВХОДИТ, но сам не пишет ничего.
+            #
+            # \`-H\` обязателен: без него \$HOME останется /root, и git с
+            # docker полезут в чужие конфиги — команда отработает от нужного
+            # пользователя, но с чужими настройками.
+            sudo -u \"\$OWNER\" -H git fetch origin
+            sudo -u \"\$OWNER\" -H git checkout dev
+            sudo -u \"\$OWNER\" -H git pull --ff-only origin dev
+            # Кому принадлежат файлы, которые напишет контейнер.
+            #
+            # Первая редакция брала \`id -u\` — ЗОВУЩЕГО. Это был прокси для
+            # «владелец дерева», верный ровно при допущении, что зовущий и
+            # есть владелец. Допущение оказалось ложным: выкладка заходит
+            # root-ом, \`id -u\` давал 0, и --user честно передавал ноль.
+            #
+            # Флаг работал безупречно и не достигал цели: 154 root-объекта в
+            # staticfiles после выкладки 11.09.2026, ровно столько, сколько
+            # collectstatic и сообщил. Мера, которая делает написанное и не
+            # делает нужного, сторожем «флаг присутствует» не ловится —
+            # флаг присутствует. Поэтому берётся то, что нужно на самом
+            # деле: владелец дерева.
+            #
+            # --user ОСТАЁТСЯ и после перевода команд на \`sudo -u\`. Это не
+            # два механизма на один эффект, а два механизма на РАЗНЫЕ
+            # предметы: \`sudo -u\` решает, кто выполняет команду НА ХОСТЕ,
+            # --user решает, под каким uid идёт процесс ВНУТРИ контейнера.
+            # Демон docker работает от root независимо от того, кто позвал
+            # клиента; членство в группе docker даёт доступ к сокету, а не
+            # смену пользователя контейнера. Снять --user значило бы вернуть
+            # запись в примонтированное дерево от root.
             # Откуда приезжает базовый слой (DRF-1440). Пилот достаёт
             # Docker Hub плохо — анонимный token-endpoint отвечает через
             # раз, и 31.08 две подряд выкладки умерли на нём до единой
             # скомпилированной строки. Скрипт перебирает источники от
             # зеркала в GHCR до прежнего поведения и печатает одну ссылку;
             # хуже, чем было, стать не может.
-            BASE_IMAGE=\"\$(DOCKER_CMD='sudo docker' ENV_FILE=.env.staging bash scripts/resolve-base-image.sh)\"
+            BASE_IMAGE=\"\$(sudo -u \"\$OWNER\" -H env DOCKER_CMD=docker ENV_FILE=.env.staging bash scripts/resolve-base-image.sh)\"
             # \`sudo env VAR=...\`, а не \`export\` перед \`sudo\`: sudo по
             # умолчанию сбрасывает окружение (env_reset), и compose,
             # запущенный под root, не увидел бы переменную —
             # интерполяция \${PYTHON_BASE_IMAGE:-...} молча вернулась бы к
             # Docker Hub, то есть ровно к тому, что мы убираем.
-            sudo env PYTHON_BASE_IMAGE=\"\$BASE_IMAGE\" \
+            sudo -u \"\$OWNER\" -H env PYTHON_BASE_IMAGE=\"\$BASE_IMAGE\" \
               docker compose --env-file .env.staging \
               -f docker-compose.yml -f docker-compose.staging.yml \
               -f docker-compose.staging.local.yml \
               -p ayla-bot-staging build web worker celery-worker celery-beat shadow-worker
+            # \`--user\` — чтобы то, что контейнер пишет в /app, ложилось на
+            # хост от ПОЛЬЗОВАТЕЛЯ ВЫКЛАДКИ, а не от root.
+            #
+            # Каталог проекта смонтирован внутрь (\`volumes: ./:/app\`), а сам
+            # контейнер работает от root. Всё, что он там создаёт, остаётся
+            # на хосте root-овым. Замер 11.09.2026: 174 root-объекта в
+            # \`staticfiles/\` дерева выкладки. Следующий \`git\`, идущий от
+            # пользователя, однажды упрётся в такой файл и упадёт с
+            # «Permission denied» в служебном файле — то есть отказом, к
+            # правам отношения не имеющим НА ВИД (DRF-1646).
+            #
+            # Здесь \`migrate\` в дерево не пишет, и строка выглядит лишней.
+            # Она не лишняя: второй канал того же дефекта, оставленный
+            # открытым, — ровно тот случай, когда чинят запись и оставляют
+            # чтение. Форма у обоих вызовов обязана быть одна, иначе
+            # следующий автор скопирует тот, где её нет.
+            #
+            # В \`docker-compose.staging.yml\` этого делать нельзя: \`user:\` на
+            # сервисе подействовал бы и на долгоживущие web/worker/celery,
+            # а это смена режима контура, а не починка владельцев файлов.
+            #
             # Migrations MUST land between build and up: the new code may
             # query columns the old schema lacks (additive MemoryEntry
             # migrations 0015-0018). run --rm web uses the freshly built
             # image, so schema and code never drift apart in production.
-            sudo docker compose --env-file .env.staging \
+            sudo -u \"\$OWNER\" -H docker compose --env-file .env.staging \
               -f docker-compose.yml -f docker-compose.staging.yml \
               -f docker-compose.staging.local.yml \
-              -p ayla-bot-staging run --rm web python manage.py migrate --noinput
-            sudo docker compose --env-file .env.staging \
+              -p ayla-bot-staging run --rm --user \"\$OWNER_UID:\$OWNER_GID\" \
+              web python manage.py migrate --noinput
+            # DRF-1610 — collectstatic. Шага не было НИКОГДА: \`git grep
+            # collectstatic origin/dev -- .github\` не находил ничего, и
+            # админка бота на пилоте с первого дня отдавалась без единого
+            # стиля. Замер 09.09.2026: \`GET https://api-dev.gobeauty.site/
+            # static/admin/css/base.css\` → 404 nginx/1.18.0, а внутри
+            # \`ayla-bot-staging-web-1\` \`ls /app/staticfiles\` → No such file
+            # or directory.
+            #
+            # Виноват был не nginx: vhost настроен верно (\`location /static/\`
+            # → alias \`{DEPLOY_PATH}/staticfiles/\`), а
+            # \`docker-compose.staging.yml\` монтирует \`./:/app\`, то есть
+            # \`/app/staticfiles\` контейнера И ЕСТЬ \`{DEPLOY_PATH}/staticfiles\`
+            # хоста. Каталога просто не существовало, потому что команду,
+            # которая его создаёт, не запускал никто. Отдать статику
+            # приложением тоже нечем: \`whitenoise\` в проекте отсутствует.
+            #
+            # Той же формой, что и \`migrate\` выше, и по той же причине:
+            # \`run --rm web\` берёт СВЕЖЕСОБРАННЫЙ образ, поэтому статика на
+            # диске и код в контейнерах не разъезжаются. Порядок — после
+            # миграций и до \`up -d\`: файлы кладутся на смонтированный хостовый
+            # каталог, работающие контейнеры для этого не нужны.
+            sudo -u \"\$OWNER\" -H docker compose --env-file .env.staging \
+              -f docker-compose.yml -f docker-compose.staging.yml \
+              -f docker-compose.staging.local.yml \
+              -p ayla-bot-staging run --rm --user \"\$OWNER_UID:\$OWNER_GID\" \
+              web python manage.py collectstatic --noinput
+            # Проверка ИСХОДА, а не кода возврата — DRF-1605 ровно про этот
+            # класс дефекта. \`collectstatic --noinput\` завершается нулём и при
+            # «0 static files copied»: неверный STATIC_ROOT, приложение без
+            # \`static/\`, пустой поиск — всё это молча зелёный шаг и
+            # по-прежнему голая админка. Молчаливо успешный шаг, ничего не
+            # собравший, неотличим от работающего.
+            #
+            # Смотрим по ХОСТУ, а не внутри контейнера: nginx читает
+            # \`{DEPLOY_PATH}/staticfiles/\` и никакого \`/app\` не знает.
+            # Каталог смонтирован, так что сегодня это один и тот же диск —
+            # но доказательство должно смотреть на тот путь, который отдают
+            # людям, а не на его зеркало.
+            if [ ! -d staticfiles ]; then
+              echo '::error::collectstatic отработал, но каталога staticfiles/ на хосте нет — nginx отдаст 404 на весь /static/'
+              exit 1
+            fi
+            if [ -z \"\$(find staticfiles -type f -print -quit)\" ]; then
+              echo '::error::staticfiles/ существует, но пуст — шаг зелёный, админка голая. Смотреть STATIC_ROOT (config/settings/base.py) и состав INSTALLED_APPS'
+              exit 1
+            fi
+            # Именной файл, а не только «непусто»: \`admin/css/base.css\` —
+            # ровно тот, на котором 09.09 приехал 404. Непустым каталог могли
+            # бы сделать и чужие остатки от ручной починки.
+            if [ ! -s staticfiles/admin/css/base.css ]; then
+              echo '::error::staticfiles/ непуст, но admin/css/base.css нет — django.contrib.admin не собрался, админка останется без стилей'
+              exit 1
+            fi
+            echo \"::notice::collectstatic: \$(find staticfiles -type f | wc -l) файлов в staticfiles/\"
+            sudo -u \"\$OWNER\" -H docker compose --env-file .env.staging \
               -f docker-compose.yml -f docker-compose.staging.yml \
               -f docker-compose.staging.local.yml \
               -p ayla-bot-staging up -d --force-recreate --no-deps web worker celery-worker celery-beat shadow-worker
-            sudo docker compose -p ayla-bot-staging ps
+            sudo -u \"\$OWNER\" -H docker compose -p ayla-bot-staging ps
           "
 
       # DRF-1538 — Mini App. Собирается НА РАННЕРЕ, а не на боевой машине.
@@ -133,13 +272,13 @@ jobs:
       # окружение фиксировано и совпадает с тем, в котором PR проходил проверки.
       - name: Checkout dev (для сборки Mini App)
         if: steps.guard.outputs.ready == 'true'
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           ref: dev
 
       - name: Node 20
         if: steps.guard.outputs.ready == 'true'
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: '20'
           cache: npm
@@ -175,10 +314,54 @@ jobs:
           SSH="ssh -i $HOME/.ssh/dev_deploy ${DEV_USER}@${DEV_HOST}"
           MA="${DEV_DEPLOY_PATH}/apps/miniapp"
 
-          $SSH "rm -rf '$MA/dist.new' && mkdir -p '$MA/dist.new'"
-          tar -C apps/miniapp/dist -cf - . | $SSH "tar -C '$MA/dist.new' -xf -"
+          # Владелец дерева разрешается НА ХОСТЕ и в каждом вызове заново:
+          # шаг состоит из отдельных ssh-команд, и переменная между ними не
+          # живёт. Дешевле спросить трижды, чем один раз угадать.
+          OWN="OWNER=\$(stat -c %U '${DEV_DEPLOY_PATH}'); [ -n \"\$OWNER\" ] || { echo '::error::владелец дерева не определён'; exit 1; };"
+
+          # Единственная запись, которую root делает САМ: возврат дерева
+          # владельцу. Всё остальное он только запускает от чужого имени.
+          #
+          # Уборка руками эту задачу не решает. Замер 11.09.2026: каталоги,
+          # переданные владельцу в 06:12, снова стали root-овыми после
+          # выкладки 06:37–06:52, которая ещё шла от root. И набор их НЕ
+          # ФИКСИРОВАН — каждый слитый PR с новым каталогом добавлял свой
+          # (каталог .github/linear-reality-check приехал именно так).
+          # Список лечить бессмысленно, лечится класс: что бы ни оказалось
+          # чужим,
+          # оно возвращается владельцу на входе.
+          #
+          # Идемпотентно: после первой выкладки — no-op, потому что условие
+          # уже выполнено. И печатает, ЧТО сделал: молчаливый chown хуже
+          # отказа — он меняет права и не оставляет следа.
+          $SSH "$OWN for d in '$MA/dist' '$MA/dist.prev'; do [ ! -e \"\$d\" ] || [ \"\$(stat -c %U \"\$d\")\" = \"\$OWNER\" ] || { echo \"::notice::\$d принадлежал \$(stat -c %U \"\$d\") — передан владельцу дерева (наследие выкладок от root, DRF-1646)\"; chown -R \"\$OWNER:\$OWNER\" \"\$d\"; }; done"
+
+          # Проверка ПЕРЕД rm -rf, и проверяет её ВЛАДЕЛЕЦ, а не root.
+          #
+          # Удалить содержимое каталога может тот, у кого права на сам
+          # каталог. Замер 11.09.2026 нашёл восемь каталогов root 755, среди
+          # них dist и dist.prev: под владельцем rm -rf упал бы с Permission
+          # denied — из шага, который к правам отношения не имеет.
+          #
+          # Проверять этим же root бессмысленно: test -w из-под root истинно
+          # всегда, и проверка сказала бы «можно» про каталог, который
+          # владельцу не отдан. Вопрос задаётся тому, кто будет писать.
+          $SSH "$OWN for d in '$MA/dist' '$MA/dist.prev'; do [ ! -e \"\$d\" ] || sudo -u \"\$OWNER\" test -w \"\$d\" || { echo \"::error::\$d не на запись владельцу дерева (\$(stat -c %U \"\$d\")) — каталоги не переданы владельцу, см. DRF-1646\"; exit 1; }; done"
+
+          $SSH "$OWN sudo -u \"\$OWNER\" rm -rf '$MA/dist.new' && sudo -u \"\$OWNER\" mkdir -p '$MA/dist.new'"
+          # --no-same-owner: не восстанавливать владельцев ИЗ АРХИВА.
+          #
+          # GNU tar под root по умолчанию берёт uid/gid из архива, под
+          # обычным пользователем игнорирует. Замер 11.09.2026: шесть
+          # объектов в apps/miniapp/dist с uid 1001, которого в passwd
+          # хоста нет вовсе. Это не «раннер записал» — это доказательство,
+          # что распаковывал root и добросовестно перенёс чужие номера.
+          #
+          # docker здесь не участвует, tar идёт прямо по ssh, поэтому
+          # --user на этот шаг не влияет по построению: у него своя правка.
+          tar -C apps/miniapp/dist -cf - . | $SSH "$OWN sudo -u \"\$OWNER\" tar --no-same-owner -C '$MA/dist.new' -xf -"
           $SSH "cd '$MA' && test -s dist.new/index.html && test -d dist.new/assets && ls -A dist.new/assets | grep -q ."
-          $SSH "cd '$MA' && rm -rf dist.prev && { [ -d dist ] && mv dist dist.prev || true; } && mv dist.new dist && stat -c '%y %n' dist/index.html"
+          $SSH "$OWN cd '$MA' && sudo -u \"\$OWNER\" rm -rf dist.prev && { [ -d dist ] && sudo -u \"\$OWNER\" mv dist dist.prev || true; } && sudo -u \"\$OWNER\" mv dist.new dist && stat -c '%y %n' dist/index.html"
 
       # Проверка снаружи, а не по диску: свежая дата файла обновится и при
       # сборке старого дерева. Достаём имя бандла из отданного по https
@@ -206,6 +389,17 @@ jobs:
           DEV_USER: ${{ secrets.DEV_USER }}
         run: |
           ssh -i ~/.ssh/dev_deploy "${DEV_USER}@${DEV_HOST}" bash -lc "
+            # Печатается ЧИСЛО, а не имя, и это не косметика.
+            #
+            # \`id -un\` выводил имя, совпадающее со значением секрета
+            # DEV_USER, и GitHub вычёркивал его: в логе стояло
+            # «пользователь ***». Строка, заведённая ради снятия догадки об
+            # акторе, догадку не снимала — и выглядела при этом рабочим
+            # диагностическим выводом. Носитель был, сведений в нём не было.
+            #
+            # Ноль секретом не является и маскировку переживает. Число к тому
+            # же полезнее имени: именно оно уходит в --user.
+            echo \"::notice::шаг идёт от uid \$(id -u), gid \$(id -g)\"
             for i in 1 2 3 4 5; do
               if curl -fsS http://127.0.0.1:8014/readyz/ >/dev/null; then
                 echo '::notice::readyz green (attempt '\$i')'; exit 0
@@ -225,8 +419,25 @@ jobs:
           SHA: ${{ github.sha }}
         run: |
           ssh -i ~/.ssh/dev_deploy "${DEV_USER}@${DEV_HOST}" bash -lc "
+            # Печатается ЧИСЛО, а не имя, и это не косметика.
+            #
+            # \`id -un\` выводил имя, совпадающее со значением секрета
+            # DEV_USER, и GitHub вычёркивал его: в логе стояло
+            # «пользователь ***». Строка, заведённая ради снятия догадки об
+            # акторе, догадку не снимала — и выглядела при этом рабочим
+            # диагностическим выводом. Носитель был, сведений в нём не было.
+            #
+            # Ноль секретом не является и маскировку переживает. Число к тому
+            # же полезнее имени: именно оно уходит в --user.
+            echo \"::notice::шаг идёт от uid \$(id -u), gid \$(id -g)\"
             cd '${DEV_DEPLOY_PATH}'
-            sudo docker compose --env-file .env.staging \
+            # Тот же владелец, хотя этот вызов в дерево не пишет. Правило
+            # без исключений проверяемо; правило с исключением требует,
+            # чтобы сторож знал, какие подкоманды docker пишут, а какие нет
+            # — а это знание устаревает молча.
+            OWNER=\$(stat -c %U '${DEV_DEPLOY_PATH}')
+            [ -n \"\$OWNER\" ] || { echo \"::error::владелец дерева не определён\"; exit 1; }
+            sudo -u \"\$OWNER\" -H docker compose --env-file .env.staging \
               -f docker-compose.yml -f docker-compose.staging.yml \
               -f docker-compose.staging.local.yml \
               -p ayla-bot-staging exec -T web \

@@ -387,3 +387,62 @@ class TestNextRoutesReachRealScreens:
                 f"{_APP_TSX.name}. The catch-all would render HelloScreen and the "
                 "person would land on a greeting instead of the catalog."
             )
+
+
+# ---------------------------------------------------------------------------
+# Параметризованный маршрут переноса (DRF-1547)
+# ---------------------------------------------------------------------------
+
+
+class TestRescheduleRouteHasNoSecondSpelling:
+    """«Перенести» открывает расписание КОНКРЕТНОЙ записи (§37 п.1, п.6).
+
+    Это ВТОРОЙ payload с параметром в системе — после приглашения мастера
+    ``master_invite_{uuid}``, — и он устроен так же: семейство по
+    префиксу, параметр по строгой форме. Плоской записи в
+    :data:`MINIAPP_ROUTES` у него быть не может, поэтому дрейф ловится
+    здесь, а не общим циклом по таблице.
+
+    Адрес пишут ДВЕ стороны: SPA — когда MAX приносит payload в
+    ``start_param``, и бот — когда мини-приложение настроено ссылкой, а
+    не ``web_app``. Разъехаться им нельзя: человек нажал бы одну и ту же
+    кнопку и попал бы на разные экраны в зависимости от настройки.
+    """
+
+    _BOOKING_ID = "11111111-1111-4111-8111-111111111111"
+
+    def _spa_path(self) -> str:
+        """Адрес, который построит сам SPA, — прочитан из ``max-sdk.ts``."""
+        src = _MAX_SDK_TS.read_text(encoding="utf-8")
+        prefix = re.search(r'RESCHEDULE_PATH_PREFIX = "([^"]+)"', src)
+        assert prefix is not None, (
+            f"RESCHEDULE_PATH_PREFIX not found in {_MAX_SDK_TS} — the parser and "
+            "the source have drifted apart. Fix the parser; do not delete the test."
+        )
+        return f"{prefix.group(1)}/{self._BOOKING_ID}/reschedule"
+
+    def test_the_parser_sees_both_sides(self):
+        """Стража от зелени на пустом чтении."""
+        src = _MAX_SDK_TS.read_text(encoding="utf-8")
+        assert 'RESCHEDULE_PAYLOAD_PREFIX = "reschedule_"' in src, src[:0]
+        assert self._spa_path().endswith("/reschedule")
+
+    def test_the_bot_and_the_spa_name_the_same_screen(self):
+        from apps.skills.welcome.skill import reschedule_route
+
+        assert "/" + reschedule_route(self._BOOKING_ID) == self._spa_path()
+
+    def test_that_screen_is_a_real_route(self):
+        from apps.skills.welcome.skill import reschedule_route
+
+        path = "/" + reschedule_route(self._BOOKING_ID)
+        assert _route_exists(path, _miniapp_routes()), (
+            f"{path!r} is not a route in {_APP_TSX.name}. «Перенести» открыло бы "
+            "SPA-заглушку вместо расписания."
+        )
+
+    def test_the_payload_prefix_is_one_definition_on_both_sides(self):
+        from apps.orchestrator.visits import RESCHEDULE_PAYLOAD_PREFIX
+
+        src = _MAX_SDK_TS.read_text(encoding="utf-8")
+        assert f'RESCHEDULE_PAYLOAD_PREFIX = "{RESCHEDULE_PAYLOAD_PREFIX}"' in src

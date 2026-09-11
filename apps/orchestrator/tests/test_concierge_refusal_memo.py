@@ -139,6 +139,10 @@ def penza_massage_only() -> Tenant:
             is_active=True,
             invite_status=CatalogMaster.InviteStatus.ACCEPTED,
             external_updated_at=_ts(),
+            # DRF-1540/1544 — синхронизированная строка несёт канонический ключ.
+            # Без него мастер не продаётся, и клиентские поверхности отвечали бы
+            # пустотой не потому, что сломаны.
+            ayla_user_id=uuid.uuid4(),
         )
         for name in ("Архипкин Денис", "Сазонова Инна")
     ]
@@ -365,6 +369,42 @@ class TestTheRepeatIsAnsweredWithoutTheModel:
         assert "Классический массаж" in second.text
         assert "Это другие услуги" in second.text
 
+    def test_the_repeat_arrives_with_the_keyboard_it_was_rendered_with(
+        self, monkeypatch, penza_massage_only
+    ) -> None:
+        """DRF-1576 — the repeat is RENDERED with chips; it must be SENT with them.
+
+        ``render_no_match`` has attached a keyboard to this refusal since
+        DRF-1492, but the short-circuit above rebuilt the reply by hand and
+        copied only ``text`` — so the alternative the sentence names arrived
+        with nothing to tap, on the one turn that most needs a way out.
+        Asserting the wording alone passed throughout the defect (the test
+        above does exactly that), so what this pins is the envelope.
+        """
+        provider = AsyncMock()
+        provider.complete.side_effect = [_show_masters_call(), _show_masters_call()]
+        monkeypatch.setattr(concierge, "get_router", lambda: _router_returning(provider))
+        monkeypatch.setattr(concierge, "discover_masters", lambda **kwargs: [])
+        bot_user, conversation = _bot_user_and_conversation("live-1576")
+
+        generate_concierge_reply(
+            _ASKED, bot_user=bot_user, conversation=conversation, trace_id=TRACE_ID
+        )
+        conversation.refresh_from_db()
+        second = generate_concierge_reply(
+            _ASKED, bot_user=bot_user, conversation=conversation, trace_id=TRACE_ID
+        )
+
+        assert "я уже ответил" in second.text
+        assert second.action_data is not None
+        buttons = second.action_data["attachments"][0]["payload"]["buttons"]
+        callbacks = [button["callback"] for button in buttons]
+        # Presence first, then the tie between the two halves: every chip is a
+        # service the sentence just named, which is the rule the missing
+        # ``action_data`` could not break only because there were no chips.
+        assert "Классический массаж" in callbacks
+        assert [name for name in callbacks if f"«{name}»" in second.text] == callbacks
+
 
 @pytest.mark.django_db(transaction=True)
 class TestTheModelIsToldWhatWasRefused:
@@ -462,6 +502,10 @@ class TestTheRepeatIsNarrow:
             is_active=True,
             invite_status=CatalogMaster.InviteStatus.ACCEPTED,
             external_updated_at=_ts(),
+            # DRF-1540/1544 — синхронизированная строка несёт канонический ключ.
+            # Без него мастер не продаётся, и клиентские поверхности отвечали бы
+            # пустотой не потому, что сломаны.
+            ayla_user_id=uuid.uuid4(),
         )
         provider, bot_user, conversation = self._refuse_manicure(monkeypatch, "narrow-2")
 

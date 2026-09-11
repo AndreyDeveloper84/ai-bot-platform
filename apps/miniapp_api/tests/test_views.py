@@ -65,6 +65,8 @@ def bot_user(tenant: Tenant) -> BotUser:
 
 @pytest.fixture
 def master(tenant: Tenant) -> CatalogMaster:
+    # DRF-1496: умолчание invite_status теперь PENDING — бронируемость
+    # декларируем явно, а не побочным эффектом умолчания.
     return CatalogMaster.all_tenants.create(
         tenant=tenant,
         external_id=1,
@@ -75,6 +77,7 @@ def master(tenant: Tenant) -> CatalogMaster:
         # заполнен. Без него мастер не бронируется, и клиентские ручки
         # ниже отвечали бы 404 не потому, что сломаны.
         ayla_user_id=uuid4(),
+        invite_status=CatalogMaster.InviteStatus.ACCEPTED,
     )
 
 
@@ -572,6 +575,155 @@ class TestMastersEndpoints:
         assert str(service.id) in payload["service_ids"]
 
 
+class TestCatalogShelfMatchesPicker:
+    """DRF-1549 — витрина услуг и подборщик мастеров отвечают одинаково.
+
+    ``is_bookable`` на карточке услуги — это обещание, а
+    ``GET /masters?service_id=`` — его исполнение. Разъедутся — клиент
+    увидит услугу доступной, откроет выбор мастера и упрётся в пустой
+    экран: тупик DRF-1164.
+
+    Разъехались они уже однажды и молча: витрина набирала столбцы
+    руками, ``bookable()`` вырос на ``ayla_user_id`` (DRF-1540), и ни
+    один тест этого не заметил, потому что все проверяли поведение
+    каждой поверхности по отдельности. Поэтому здесь проверяется не
+    «обе фильтруют по одним столбцам сегодня», а сам инвариант: на
+    одних и тех же данных ответы совпадают. Следующее условие,
+    добавленное в :data:`apps.catalog.master_state.AVAILABLE`, приедет
+    в обе поверхности сразу — или этот класс покраснеет.
+    """
+
+    #: Формы строки мастера, которые различает ``AVAILABLE``. Продаётся
+    #: только ``normal``; каждая остальная — отдельная причина отказа.
+    SHAPES = ("normal", "unlinked", "archived", "pending", "inactive")
+
+    @staticmethod
+    def _seed(tenant: Tenant) -> dict[str, CatalogService]:
+        """По услуге на каждую форму мастера; исполнитель у услуги ОДИН.
+
+        Единственный — чтобы ответ про услугу был ответом про эту
+        конкретную форму, а не про то, что рядом нашёлся кто-то ещё.
+        """
+
+        stamp = datetime(2026, 5, 18, tzinfo=timezone.utc)
+        overrides: dict[str, dict[str, object]] = {
+            "normal": {},
+            # DRF-1540: строка без канонического ключа продаётся, а
+            # уведомление о записи идёт мостом master_user_id и не
+            # доходит. Владелец выбрал видимый отказ.
+            "unlinked": {"ayla_user_id": None},
+            "archived": {"archived_at": stamp},
+            "pending": {"invite_status": CatalogMaster.InviteStatus.PENDING},
+            "inactive": {"is_active": False},
+        }
+        out: dict[str, CatalogService] = {}
+        for n, shape in enumerate(TestCatalogShelfMatchesPicker.SHAPES, start=1):
+            fields: dict[str, object] = {
+                "tenant": tenant,
+                "external_id": 154900 + n,
+                "external_updated_at": stamp,
+                "name": f"Мастер ({shape})",
+                "is_active": True,
+                "ayla_user_id": uuid4(),
+                "invite_status": CatalogMaster.InviteStatus.ACCEPTED,
+            }
+            fields.update(overrides[shape])
+            master = CatalogMaster.all_tenants.create(**fields)
+            service = CatalogService.all_tenants.create(
+                tenant=tenant,
+                external_id=154900 + n,
+                external_updated_at=stamp,
+                slug=f"usluga-{shape}",
+                name=f"Услуга ({shape})",
+                duration_min=60,
+                is_active=True,
+            )
+            MasterService.all_tenants.create(tenant=tenant, master=master, service=service)
+            out[shape] = service
+        return out
+
+    @staticmethod
+    def _shelf(client: Client) -> dict[str, bool]:
+        """``{service_id: is_bookable}`` — то, что обещает витрина."""
+
+        resp = client.get(
+            reverse("miniapp_api:services_list"),
+            HTTP_AUTHORIZATION=_init_data_header("12345"),
+        )
+        assert resp.status_code == 200
+        return {s["id"]: s["is_bookable"] for s in resp.json()["services"]}
+
+    @staticmethod
+    def _picker(client: Client, service: CatalogService) -> list[dict]:
+        """Мастера, которых подборщик реально покажет под эту услугу."""
+
+        resp = client.get(
+            reverse("miniapp_api:masters_list") + f"?service_id={service.id}",
+            HTTP_AUTHORIZATION=_init_data_header("12345"),
+        )
+        assert resp.status_code == 200
+        return resp.json()["masters"]
+
+    def test_normal_performer_is_bookable_and_shown(
+        self, client: Client, bot_user: BotUser, tenant: Tenant
+    ) -> None:
+        """Парная положительная стража (DRF-1411), и она идёт первой:
+        обычный исполнитель как продавался, так и продаётся, а подборщик
+        его показывает. Без этого всё отрицательное ниже было бы
+        согласием двух пустот."""
+
+        services = self._seed(tenant)
+        shelf = self._shelf(client)
+
+        assert shelf[str(services["normal"].id)] is True
+        assert [m["name"] for m in self._picker(client, services["normal"])] == ["Мастер (normal)"]
+
+    def test_unlinked_performer_is_not_bookable(
+        self, client: Client, bot_user: BotUser, tenant: Tenant
+    ) -> None:
+        """Единственный исполнитель без ``ayla_user_id`` — витрина
+        обещать его не имеет права: подборщик его уже не показывает."""
+
+        services = self._seed(tenant)
+        shelf = self._shelf(client)
+
+        assert shelf[str(services["normal"].id)] is True
+        assert shelf[str(services["unlinked"].id)] is False
+
+    def test_archived_performer_is_not_bookable(
+        self, client: Client, bot_user: BotUser, tenant: Tenant
+    ) -> None:
+        """Второй столбец, который прежняя ручная копия не спрашивала:
+        мастер, заархивированный при ``is_active=True``, оставался на
+        витрине."""
+
+        services = self._seed(tenant)
+        shelf = self._shelf(client)
+
+        assert shelf[str(services["normal"].id)] is True
+        assert shelf[str(services["archived"].id)] is False
+
+    def test_shelf_and_picker_never_disagree(
+        self, client: Client, bot_user: BotUser, tenant: Tenant
+    ) -> None:
+        """Инвариант целиком: на каждой форме мастера обещание витрины
+        равно тому, что показывает подборщик.
+
+        Это единственная защита от повторения: совпадение отдельных
+        случаев сегодня ничего не говорит про завтра, а равенство двух
+        множеств на всех формах разъехаться молча не может."""
+
+        services = self._seed(tenant)
+        shelf = self._shelf(client)
+        shelf_promises = sorted(sid for sid, bookable in shelf.items() if bookable)
+        picker_delivers = sorted(str(s.id) for s in services.values() if self._picker(client, s))
+
+        assert str(services["normal"].id) in shelf_promises
+        assert str(services["unlinked"].id) not in shelf_promises
+        assert str(services["archived"].id) not in shelf_promises
+        assert shelf_promises == picker_delivers
+
+
 class TestCreateBooking:
     def _picked_slot(self) -> str:
         # Pick a far-future Monday 12:00 MSK to bypass past + lead_time.
@@ -762,12 +914,19 @@ class TestCreateBooking:
         # different defect — a service nobody performs — and the new
         # `service_unbookable` gate would (correctly) answer first,
         # leaving "master does not perform this service" untested.
+        #
+        # DRF-1549: «бронируемая» здесь означает то же, что для
+        # `GET /masters?service_id=` — с DRF-1540 туда входит и
+        # `ayla_user_id`. Без ключа Ольга не исполнитель ни для
+        # витрины, ни для подборщика, и гейт `service_unbookable`
+        # снова ответил бы первым.
         other = CatalogMaster.all_tenants.create(
             tenant=tenant,
             external_id=7,
             external_updated_at=datetime(2026, 5, 18, tzinfo=timezone.utc),
             name="Ольга",
             is_active=True,
+            ayla_user_id=uuid4(),
             invite_status=CatalogMaster.InviteStatus.ACCEPTED,
         )
         MasterService.all_tenants.create(tenant=tenant, master=other, service=service)
@@ -910,6 +1069,45 @@ class TestBookingDetail:
         )
         assert resp.status_code == 200
         assert resp.json()["booking"]["id"] == str(confirmed_booking.id)
+
+    def test_address_carries_all_three_states(
+        self, client: Client, tenant: Tenant, bot_user: BotUser, confirmed_booking
+    ) -> None:
+        """«Клиент записался и не видит, куда ехать» (DRF-1652).
+
+        Заглушка адрес рисовала, настоящая ручка его не несла. Правка
+        обязана вернуть поле, СОХРАНИВ честность: адрес появляется, когда
+        его прислали, и отсутствие остаётся отличимым.
+
+        Три состояния проверяются по очереди на одной и той же записи, и
+        первым идёт положительное: если бы ключа в ответе не было вовсе,
+        проверки на `null` и `""` прошли бы одинаково и ничего не значили.
+        """
+
+        def _get() -> dict:
+            resp = client.get(
+                reverse(
+                    "miniapp_api:booking_detail",
+                    kwargs={"booking_id": str(confirmed_booking.id)},
+                ),
+                HTTP_AUTHORIZATION=_init_data_header("12345"),
+            )
+            assert resp.status_code == 200
+            return resp.json()["booking"]
+
+        tenant.address = "ул. Тверская 12"
+        tenant.save(update_fields=["address"])
+        body = _get()
+        assert "address" in body, "поля нет в ответе — проверки ниже ничего не значат"
+        assert body["address"] == "ул. Тверская 12"
+
+        tenant.address = ""
+        tenant.save(update_fields=["address"])
+        assert _get()["address"] == "", "салон ответил «адреса нет» — это ответ, не молчание"
+
+        tenant.address = None
+        tenant.save(update_fields=["address"])
+        assert _get()["address"] is None, "молчание источника схлопнуто в ответ салона"
 
     def test_other_user_404(
         self,

@@ -8,10 +8,13 @@ nobody opens that screen, so the feature effectively did not exist.
 
 Two properties carry the most weight here:
 
-* **a message to one master is not broadcast to the salon's shared chat.**
-  There is no fallback on the admin→master direction on purpose: leaking a
-  private conversation to whoever reads the fallback channel is worse than
-  not delivering it.
+* **a message to one master is not broadcast to a shared chat.** The
+  admin→master direction never had a fallback, on purpose; since
+  07.09.2026 the master→salon direction has none either, because the
+  global operator channel names no tenant and would have shown ten pilot
+  salons each other's staff correspondence. Leaking a private
+  conversation to whoever reads a shared chat is worse than not
+  delivering it.
 * **sensitive threads are not quoted.** The model already flags
   complaints and offboarding discussions; copying their text into a shared
   chat would defeat that flag.
@@ -57,6 +60,7 @@ def _bots(settings):
     settings.MAX_BOT_REGISTRY = (SALON_BOT,)
     settings.MAX_BOT_TOKEN = "token-client"  # pragma: allowlist secret
     settings.HANDOFF_NOTIFY_MAX_CHAT_IDS = []
+    settings.HANDOFF_NOTIFY_MAX_USER_IDS = []
 
 
 @pytest.fixture
@@ -96,6 +100,16 @@ def _message(thread, *, role: str, body: str = "Можно поменяться 
 
 
 class TestDirectionMasterToAdmin:
+    @staticmethod
+    def _addressed(sent) -> list[dict[str, str]]:
+        """Адрес И ключ, которым он ушёл (DRF-1559).
+
+        Проверять только значение мало: и человек, и диалог лежат в одной
+        настройке салона, и возврат к диалоговому ключу прошёл бы мимо.
+        """
+
+        return [a.send_kwargs() for a in sent.call_args.kwargs["addresses"]]
+
     def test_goes_to_the_salon_manager(self, tenant, sent):
         tenant.manager_chat_id = "555"
         tenant.save(update_fields=["manager_chat_id"])
@@ -103,26 +117,68 @@ class TestDirectionMasterToAdmin:
 
         notify.notify_internal_message(message=msg)
 
-        assert sent.call_args.kwargs["chat_ids"] == ["555"]
+        assert self._addressed(sent) == [{"chat_id": "555"}]
 
-    def test_falls_back_to_the_configured_channel(self, tenant, settings, sent):
-        # Same cascade as the booking notice, deliberately: a salon
-        # configures one destination, not one per feature.
-        settings.HANDOFF_NOTIFY_MAX_CHAT_IDS = ["777"]
+    def test_manager_with_a_user_id_is_addressed_as_a_person(self, tenant, sent):
+        """DRF-1559 — заполненный ``manager_user_id`` вытесняет диалог.
+
+        Значения намеренно разные: возврат к ``chat_id`` даёт другое, а не
+        то же самое, и пройти зелёным не может.
+        """
+        tenant.manager_user_id = "260237491"
+        tenant.manager_chat_id = "555"
+        tenant.save(update_fields=["manager_user_id", "manager_chat_id"])
         msg = _message(_thread(tenant, _master(tenant)), role=SenderRoleChoices.MASTER)
 
         notify.notify_internal_message(message=msg)
 
-        assert sent.call_args.kwargs["chat_ids"] == ["777"]
+        assert self._addressed(sent) == [{"user_id": "260237491"}]
 
-    def test_nowhere_to_send_is_loud_not_silent(self, tenant, sent, caplog):
+    def test_the_global_operator_channel_is_never_a_salon_address(
+        self, tenant, settings, sent, caplog
+    ):
+        """The fallback rung is GONE — owner's decision of 07.09.2026.
+
+        That list is global: it carries no tenant, so on the pilot every
+        salon's staff correspondence resolved to one shared, hand-typed
+        dialog — the very leak the admin→master direction already
+        refuses. Configured in BOTH shapes here, so the test cannot pass
+        merely because one shape was empty.
+        """
+
+        settings.HANDOFF_NOTIFY_MAX_CHAT_IDS = ["777"]
+        settings.HANDOFF_NOTIFY_MAX_USER_IDS = ["778"]
         msg = _message(_thread(tenant, _master(tenant)), role=SenderRoleChoices.MASTER)
 
-        with caplog.at_level("WARNING", logger="apps.internal_chat.notify"):
+        with caplog.at_level("INFO", logger="apps.internal_chat.notify"):
             notify.notify_internal_message(message=msg)
 
         sent.assert_not_called()
-        assert any("no_recipients" in r.message for r in caplog.records)
+        records = [r for r in caplog.records if r.name == "apps.internal_chat.notify"]
+        assert records, "the skipped salon copy must leave a trace"
+        skipped = [r for r in records if "no_salon_target" in r.getMessage()]
+        assert [r.levelname for r in skipped] == ["INFO"]
+        noisy = [r.getMessage() for r in records if r.levelno >= 30]
+        assert noisy == []  # empty-assert-ok: presence proved on `records` just above
+
+    def test_nowhere_to_send_is_observable_but_quiet(self, tenant, sent, caplog):
+        """An unconfigured salon is a normal state, not a configuration defect.
+
+        (The admin→master direction keeps its WARNING — see
+        ``TestDirectionAdminToMaster``: an unlinked master IS a defect.)
+        """
+
+        msg = _message(_thread(tenant, _master(tenant)), role=SenderRoleChoices.MASTER)
+
+        with caplog.at_level("INFO", logger="apps.internal_chat.notify"):
+            notify.notify_internal_message(message=msg)
+
+        sent.assert_not_called()
+        records = [r for r in caplog.records if r.name == "apps.internal_chat.notify"]
+        assert records, "an undelivered staff message must leave a trace"
+        assert any("no_salon_target" in r.getMessage() for r in records)
+        noisy = [r.getMessage() for r in records if r.levelno >= 30]
+        assert noisy == []  # empty-assert-ok: presence proved on `records` just above
 
 
 class TestDirectionAdminToMaster:
@@ -136,7 +192,9 @@ class TestDirectionAdminToMaster:
 
         notify.notify_internal_message(message=msg)
 
-        assert sent.call_args.kwargs["chat_ids"] == ["4242"]
+        # DRF-1558 — мастеру пишем как ЧЕЛОВЕКУ: эта отправка идёт под
+        # салонным ботом, а «4242» — диалог мастера с клиентским.
+        assert [a.send_kwargs() for a in sent.call_args.kwargs["addresses"]] == [{"user_id": "42"}]
 
     def test_an_unlinked_master_is_NOT_broadcast_to_the_salon(self, tenant, settings, sent):
         """The privacy property. No fallback on this direction, on purpose."""

@@ -168,9 +168,40 @@ function Sheet({
   );
 }
 
+/**
+ * Куда возвращает этот экран — и как называется место возврата.
+ *
+ * Экран создания записи открывают ДВЕ поверхности. Мост зовёт его без
+ * параметров, и возврат ведёт на «День салона» — как вёл всегда.
+ * Пилотная админка (DRF-1236) зовёт с `?return=today`, потому что иначе
+ * её главное действие оказалось бы дверью в один конец: с пятивкладочного
+ * моста назад в пилот не ведёт ни одна кнопка.
+ *
+ * Список закрытый, а не «взять адрес из параметра»: подставляемый адрес
+ * возврата — это чужая ссылка, решающая, куда уйдёт человек.
+ */
+const RETURN_TARGETS: Readonly<
+  Record<string, { path: string; back: string; open: string }>
+> = {
+  today: {
+    path: "/admin/today",
+    back: "← Сегодня",
+    open: "Открыть «Сегодня»",
+  },
+};
+
+/** Возврат по умолчанию — тот, что был до появления пилота. */
+const RETURN_DEFAULT = {
+  path: "/admin/day",
+  back: "← День салона",
+  open: "Открыть день салона",
+};
+
 export function AdminNewBookingScreen() {
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
+  const returnTo =
+    RETURN_TARGETS[searchParams.get("return") ?? ""] ?? RETURN_DEFAULT;
 
   const [draft, setDraft] = useState<BookingDraft>(EMPTY_DRAFT);
   const [sheet, setSheet] = useState<Sheet>(null);
@@ -363,9 +394,9 @@ export function AdminNewBookingScreen() {
       <button
         type="button"
         className="admin-flow-back"
-        onClick={() => navigate("/admin/day")}
+        onClick={() => navigate(returnTo.path)}
       >
-        ← День салона
+        {returnTo.back}
       </button>
       <h1 className="screen__title">Новая запись</h1>
 
@@ -480,9 +511,9 @@ export function AdminNewBookingScreen() {
               type="button"
               className="btn-secondary"
               style={{ marginTop: "var(--s-2)" }}
-              onClick={() => navigate("/admin/day")}
+              onClick={() => navigate(returnTo.path)}
             >
-              Открыть день салона
+              {returnTo.open}
             </button>
           )}
         </section>

@@ -1,6 +1,25 @@
 # DRF-955 Runtime Recovery & Deploy Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **Dead host — do not work on `194.87.99.126`.** SSH to it still succeeds and
+> every command will report success, but the box serves nobody: `miniapp-dev`,
+> `proapp`, `dev` and `api-dev` `.gobeauty.site` all resolve to
+> `176.119.159.141`, and the `.126` vhost only proxies there. A change made on
+> `.126` never reaches a person. The pilot is `176.119.159.141`,
+> `/home/taximeter/ai-bot-platform-dev`, Compose project `ayla-bot-staging`,
+> port 8014, env `.env.staging`, files `docker-compose.yml` +
+> `docker-compose.staging.yml` + `docker-compose.staging.local.yml`.
+
+> **This plan is history — do not execute it.** It was written on 2026-08-07,
+> when `194.87.99.126` *was* the pilot, and every `ssh taximeter@194.87.99.126`
+> below is left exactly as it was run so the record stays true. The addresses
+> are deliberately **not** updated to `176.119.159.141`: re-pointing 27
+> inspect-and-restart commands at the live pilot would turn a finished plan
+> into a live instruction to touch production. If you need any one of these
+> checks today, port it by hand, one command at a time, and read
+> `docs/runbooks/` for the current procedure.
+
+
+> **For agentic workers:** superseded by the banner above — do NOT run this plan. It is kept as the record of the 2026-08-07 window. Steps use checkbox (`- [ ]`) syntax; they are historical state, not a queue.
 
 **Goal:** Bring the Controlled Pilot staging runtime to a safe, reproducible, accepted baseline: producer OFF, consumer fail-closed, health/readiness green, privacy acceptance green, and stale legacy units disabled.
 

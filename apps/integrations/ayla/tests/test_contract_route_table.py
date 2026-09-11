@@ -140,17 +140,32 @@ ROUTE_TABLE: tuple[Route, ...] = (
     # point: the subject is named ONLY by the header, and there is no request
     # body a caller could use to substitute a different one.
     Route("GET", "/api/v1/internal/me/identity/", Auth.BEARER_EXT),
-    # profile_client (#978).
+    # profile_client (#978). Bearer ALONE, and that is not an oversight:
+    # this route serves the `user.profile.updated` consumer, where the actor
+    # is a NOTIFICATION about a person, not a person. There is no acting
+    # subject to name, so `X-External-User-ID` is not "missing" here — it is
+    # inapplicable, the same distinction §100 draws between "unknown" and
+    # "not applicable". Adding it for symmetry would invent an actor.
     Route("GET", "/api/v1/internal/users/{id}/", Auth.BEARER),
     # personal_context_client (M-B1, frozen contract v1.0 2026-07-09).
-    Route("GET", "/api/v1/internal/users/{id}/personal-context/", Auth.BEARER),
-    Route("PATCH", "/api/v1/internal/users/{id}/personal-context/", Auth.BEARER),
-    Route("GET", "/api/v1/internal/users/{id}/personal-context/ask-eligibility/", Auth.BEARER),
-    Route("POST", "/api/v1/internal/users/{id}/personal-context/mark-asked/", Auth.BEARER),
-    Route("POST", "/api/v1/internal/users/{id}/personal-context/skip/", Auth.BEARER),
+    # BEARER_EXT since CP-2 / DRF-1617: upstream now authorises the subject in
+    # the path against the one this header resolves to, so a leaked token can
+    # no longer reach an arbitrary person's declared profile.
+    Route("GET", "/api/v1/internal/users/{id}/personal-context/", Auth.BEARER_EXT),
+    Route("PATCH", "/api/v1/internal/users/{id}/personal-context/", Auth.BEARER_EXT),
+    Route(
+        "GET",
+        "/api/v1/internal/users/{id}/personal-context/ask-eligibility/",
+        Auth.BEARER_EXT,
+    ),
+    Route("POST", "/api/v1/internal/users/{id}/personal-context/mark-asked/", Auth.BEARER_EXT),
+    Route("POST", "/api/v1/internal/users/{id}/personal-context/skip/", Auth.BEARER_EXT),
     # personal_context_client C5 legs (PILOT_CONTRACTS §6; upstream = W2 S3.1).
-    Route("GET", "/api/v1/internal/users/{id}/personal-data/export/", Auth.BEARER),
-    Route("DELETE", "/api/v1/internal/users/{id}/personal-data/", Auth.BEARER),
+    # The 152-ФЗ pair — disclosure and erasure — is exactly where naming the
+    # subject matters most: without it the path alone decided whose data was
+    # exported and whose was destroyed.
+    Route("GET", "/api/v1/internal/users/{id}/personal-data/export/", Auth.BEARER_EXT),
+    Route("DELETE", "/api/v1/internal/users/{id}/personal-data/", Auth.BEARER_EXT),
     # billing_client — C2 billing status + C3 payout preview (pilot 2026-08-15).
     Route("GET", "/api/v1/internal/billing/specialists/{id}/status/", Auth.BEARER),
     Route("POST", "/api/v1/internal/billing/specialists/{id}/card-setup/", Auth.BEARER),
@@ -402,18 +417,21 @@ def _exercise_personal_context() -> None:
     from apps.integrations.ayla.personal_context_client import PersonalContextHttpClient
 
     uid = str(_PROFILE_UUID)
+    ext = _EXT_USER
     c = PersonalContextHttpClient()  # reads settings.AYLA_*; httpx.Client is patched
-    _swallow(lambda: c.get_context(ayla_user_id=uid))
+    _swallow(lambda: c.get_context(ayla_user_id=uid, external_user_id=ext))
     _swallow(
         lambda: c.patch_context(
-            ayla_user_id=uid, updates=[{"field": "diet_type", "value": "vegan"}]
+            ayla_user_id=uid,
+            external_user_id=ext,
+            updates=[{"field": "diet_type", "value": "vegan"}],
         )
     )
-    _swallow(lambda: c.get_ask_eligibility(ayla_user_id=uid))
-    _swallow(lambda: c.mark_asked(ayla_user_id=uid, field="diet_type"))
-    _swallow(lambda: c.skip(ayla_user_id=uid, field="diet_type"))
-    _swallow(lambda: c.get_personal_data_export(ayla_user_id=uid))
-    _swallow(lambda: c.delete_personal_data(ayla_user_id=uid))
+    _swallow(lambda: c.get_ask_eligibility(ayla_user_id=uid, external_user_id=ext))
+    _swallow(lambda: c.mark_asked(ayla_user_id=uid, external_user_id=ext, field="diet_type"))
+    _swallow(lambda: c.skip(ayla_user_id=uid, external_user_id=ext, field="diet_type"))
+    _swallow(lambda: c.get_personal_data_export(ayla_user_id=uid, external_user_id=ext))
+    _swallow(lambda: c.delete_personal_data(ayla_user_id=uid, external_user_id=ext))
 
 
 def _exercise_recommendations() -> None:

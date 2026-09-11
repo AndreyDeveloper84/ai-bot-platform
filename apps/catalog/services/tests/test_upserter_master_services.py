@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime, timezone
+from typing import Any
 
 import pytest
 
@@ -60,6 +61,14 @@ def _service(tenant: Tenant, *, name: str, slug: str = "svc") -> CatalogService:
     )
 
 
+#: «Аргумент не передавали» ≠ «передали None». Тот же приём и по той же
+#: причине, что в production: ключа НЕ БЫЛО в выгрузке и ключ пришёл со
+#: значением ``null`` — разные утверждения. Помощник, складывавший их в
+#: один ``None``, скрывал ровно ту разницу, ради которой заведён
+#: ``health_check_key_present``.
+_ABSENT = object()
+
+
 def _dto(
     master: CatalogMaster,
     service: CatalogService,
@@ -68,8 +77,9 @@ def _dto(
     is_active: bool = True,
     tenant_id: str | None = None,
     omit_tenant: bool = False,
-    resolved_health_check: bool | None = None,
+    resolved_health_check: Any = _ABSENT,
 ) -> CatalogSpecialistServiceDTO:
+    present = resolved_health_check is not _ABSENT
     return CatalogSpecialistServiceDTO(
         ayla_specialist_service_id=edge_id or str(uuid.uuid4()),
         salon_service=str(service.ayla_service_id),
@@ -80,7 +90,8 @@ def _dto(
         name=service.name,
         category_slug="massage",
         is_active=is_active,
-        resolved_requires_health_check=resolved_health_check,
+        resolved_requires_health_check=resolved_health_check if present else None,
+        health_check_key_present=present,
         raw={},
     )
 
@@ -256,9 +267,25 @@ class TestResolvedHealthCheck:
         edge_id = str(uuid.uuid4())
         upsert_master_services(tenant, [_dto(m, s, edge_id=edge_id, resolved_health_check=True)])
 
-        upsert_master_services(tenant, [_dto(m, s, edge_id=edge_id, resolved_health_check=None)])
+        upsert_master_services(tenant, [_dto(m, s, edge_id=edge_id)])
 
         assert MasterService.all_tenants.get(tenant=tenant).resolved_requires_health_check is True
+
+    def test_an_explicit_null_does_downgrade_a_known_one(self, tenant: Tenant) -> None:
+        """The other half: a sent ``null`` IS an answer, and it gets written.
+
+        Guard against the fix above collapsing into "never downgrade": a
+        catalog that says "I do not know" (a service with no canonical link)
+        must be able to clear a stale verdict, or a manufactured ``False``
+        stays in the mirror forever.
+        """
+        m, s = _master(tenant), _service(tenant, name="Массаж")
+        edge_id = str(uuid.uuid4())
+        upsert_master_services(tenant, [_dto(m, s, edge_id=edge_id, resolved_health_check=True)])
+
+        upsert_master_services(tenant, [_dto(m, s, edge_id=edge_id, resolved_health_check=None)])
+
+        assert MasterService.all_tenants.get(tenant=tenant).resolved_requires_health_check is None
 
     def test_unchanged_verdict_does_not_bump_updated_at(self, tenant: Tenant) -> None:
         """Same contract as the edge stamp: the MM4 matrix derives its

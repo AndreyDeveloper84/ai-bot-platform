@@ -18,7 +18,7 @@ from unittest.mock import patch
 import pytest
 
 from apps.identity.models import BotUser
-from apps.nutrition_proactive import prefs, tasks
+from apps.nutrition_proactive import antinag, prefs, tasks
 from apps.nutrition_proactive.tests.test_tasks import (
     NOON,
     make_user,
@@ -387,3 +387,69 @@ class TestStopButtonAttached:
 
         attachments = send.call_args.kwargs["attachments"]
         assert button_payloads(attachments) == ["cb:nutri:stop:report"]
+
+
+# ---------------------------------------------------------------------------
+# 5 — the solicited marker (DRF-1464 T6, Q-NUTRITION-05)
+# ---------------------------------------------------------------------------
+
+
+def solicited_entry(surface: str, *, days_ago: float = 1, at: datetime = NOON) -> dict:
+    """A journaled send the person ASKED for (opened the diary themselves).
+
+    Same entry shape plus the one marker key -- everything outgoing is
+    journaled, but only the unasked spends budget and builds streaks.
+    """
+    return {**outbox_entry(surface, days_ago=days_ago, at=at), "solicited": True}
+
+
+class TestSolicitedMarker:
+    def test_a_solicited_send_is_journaled_with_the_marker(self) -> None:
+        updated = prefs.append_outbox({}, surface="coach_hint", sent_at=NOON, solicited=True)
+        entries = prefs.outbox_entries(updated)
+        assert entries == [
+            {"surface": "coach_hint", "sent_at": NOON.isoformat(), "solicited": True}
+        ]
+
+    def test_an_unmarked_send_keeps_the_old_entry_shape(self) -> None:
+        """Regression: default append writes exactly what it wrote before the
+        marker existed -- an entry without the key IS an unsolicited send."""
+        updated = prefs.append_outbox({}, surface="report", sent_at=NOON)
+        assert prefs.outbox_entries(updated) == [{"surface": "report", "sent_at": NOON.isoformat()}]
+
+    def test_solicited_sends_do_not_spend_the_weekly_budget(self) -> None:
+        journal = {
+            prefs.OUTBOX_KEY: [
+                solicited_entry("coach_hint") for _ in range(prefs.MAX_WEEKLY_OUTBOUND_TOTAL)
+            ]
+        }
+        assert prefs.weekly_sent_count(journal, now_utc=NOON) == 0
+        assert prefs.weekly_cap_reason(journal, surface="coach_hint", now_utc=NOON) is None
+
+    def test_unmarked_sends_count_against_the_budget_as_before(self) -> None:
+        """Regression: drop the marker from the same journal and the same
+        arithmetic blocks -- today's behaviour, unchanged."""
+        journal = {
+            prefs.OUTBOX_KEY: [
+                outbox_entry("coach_hint") for _ in range(prefs.MAX_WEEKLY_OUTBOUND_TOTAL)
+            ]
+        }
+        assert prefs.weekly_sent_count(journal, now_utc=NOON) == prefs.MAX_WEEKLY_OUTBOUND_TOTAL
+        # Первым кусается пер-сурфовый потолок (coach_hint: 1/нед) — он и
+        # проверяется первым в ``weekly_cap_reason``; оба читают один счёт.
+        assert (
+            prefs.weekly_cap_reason(journal, surface="coach_hint", now_utc=NOON)
+            == "weekly_cap_surface"
+        )
+
+    def test_solicited_sends_do_not_build_the_ignore_streak(self, tenant: Tenant) -> None:
+        user = make_user(
+            tenant,
+            extra_prefs={prefs.OUTBOX_KEY: [solicited_entry("coach_hint") for _ in range(2)]},
+        )
+        stored = prefs.get_prefs(BotUser.all_tenants.get(pk=user.pk))
+        # Контроль присутствия: те же две записи без маркера — стрик 2,
+        # иначе «ноль при маркере» доказывал бы не маркер, а сломанный счёт.
+        unmarked = {prefs.OUTBOX_KEY: [outbox_entry("coach_hint") for _ in range(2)]}
+        assert antinag.surface_ignored_streak(user, unmarked, surface="coach_hint") == 2
+        assert antinag.surface_ignored_streak(user, stored, surface="coach_hint") == 0

@@ -107,6 +107,10 @@ class Command(BaseCommand):
         self.stdout.write(f"   reminders with visit_at in window: {in_window.count()}")
         self.stdout.write(f"   ... after excluding CANCELLED:     {not_cancelled.count()}")
         for label, kwargs in (
+            # «opted in» here means «the opt-out column is False». Since
+            # §35 п.9 the storage-consent revocation from the Mini App
+            # also sets that column, so this line mixes «chose not to be
+            # messaged» with «withdrew consent through the app».
             ("... with an opted-in BotUser", {"bot_user__proactive_messages_opt_out": False}),
             ("... not soft-deleted", {"bot_user__deleted_at__isnull": True}),
             ("... with consent_at set", {"bot_user__consent_at__isnull": False}),
@@ -120,6 +124,8 @@ class Command(BaseCommand):
         self.stdout.write("   -- population --")
         self.stdout.write(f"   BotUsers total: {BotUser.all_tenants.count()}")
         self.stdout.write(
+            # Same caveat as the funnel line above: self-serve consent
+            # revocation (§35 п.9) lands in this number too.
             "   ... opted out of proactive: "
             f"{BotUser.all_tenants.filter(proactive_messages_opt_out=True).count()}"
         )

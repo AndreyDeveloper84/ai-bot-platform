@@ -37,14 +37,34 @@ Ayla list responses use DRF ``PageNumberPagination``:
 Each ``fetch_*`` follows the ``next`` chain (absolute URLs) until exhausted.
 The catalog is small (one pilot salon); in-memory buffering is fine.
 
+Every walk asks for ``page_size=100`` (``_PAGE_SIZE``) on its first request;
+Ayla's ``next`` links carry the parameter forward, so the whole chain runs at
+that width. See ``_PAGE_SIZE`` for why the width is a quota question rather
+than a latency one.
+
 ### Retry policy
 
 Three attempts, exponential backoff (0.5s, 1s, 2s), on 5xx + network
 errors. 4xx raise immediately — retrying an auth/shape failure is wasted.
 
+``429`` is the one 4xx that is NOT wasted to retry, and since DRF-1595 it
+is handled apart from its neighbours: Ayla answers over-quota reads with
+``{"error":{"code":"THROTTLED","details":{"wait_seconds":54}}}``, i.e. it
+tells us exactly when to come back. Before DRF-1595 that number was parsed
+by nobody and the response fell into the generic 4xx branch below, so the
+pilot's head salon went three days without a catalog refresh while the bot
+told clients its services do not exist. We now sleep the time Ayla asked
+for and retry — but only as far as a shared
+:class:`~apps.catalog.services.throttle.ThrottleWaitBudget` allows, because
+the beat that drives this has a soft time limit and sleeping per request is
+how one broken salon becomes ten.
+
 * :class:`CatalogAuthError` — 401/403. Token mismatch or missing.
 * :class:`CatalogTransportError` — 5xx after retries exhausted / config gap.
-* :class:`CatalogClientError` — 4xx other than auth. Bug on either side.
+* :class:`CatalogClientError` — 4xx other than auth/throttle. Bug either side.
+* :class:`CatalogThrottledError` — 429 we could not wait out. Not a failure
+  of the salon: the caller records it as *skipped*, and the next beat puts
+  that salon first.
 """
 
 from __future__ import annotations
@@ -60,6 +80,7 @@ from typing import Any, TypeVar
 import httpx
 from django.conf import settings
 
+from apps.catalog.services.throttle import ThrottleWaitBudget
 from apps.integrations.ayla.url_builder import AylaUrlBuilder, AylaUrlError
 
 logger = logging.getLogger(__name__)
@@ -128,6 +149,21 @@ class CatalogSpecialistDTO:
     rating: Decimal | None = None
     review_count: int = 0
     is_active: bool = True
+    # DRF-1588 — гео. ``address`` трёхзначен и обязан таким остаться:
+    # ``None`` — ключа в строке НЕ БЫЛО (не знаем), ``""`` — ключ был и нёс
+    # пустое (источник ответил «адреса нет»), строка — адрес. Ровно тот же
+    # приём, что у ``resolved_requires_health_check`` ниже, и по той же
+    # причине: отсутствие, свёрнутое в значение, читается как факт.
+    # Координаты — ``None`` при любом отсутствии и НИКОГДА не ``0``.
+    address: str | None = None
+    location_lat: Decimal | None = None
+    location_lng: Decimal | None = None
+    # DRF-1588 — адрес САЛОНА, отдельным ключом ``tenant_address``, а не тем
+    # же ``address``, что у мастера: в одной строке приезжают оба. Складывать
+    # их здесь нечем и незачем — правило старшинства это DRF-1589. Ключа
+    # сегодня ещё нет (его заводит DRF-1587), поэтому ``None`` — штатное
+    # состояние, а не дефект.
+    tenant_address: str | None = None
     raw: dict[str, Any] = field(default_factory=dict)
 
 
@@ -157,9 +193,28 @@ class CatalogSpecialistServiceDTO:
     ``resolved_requires_health_check`` (DRF-1353) is now a first-class field
     because the gate finally has a reader for it
     (``apps.skills.booking.skill._service_requires_health_check``). It is
-    ``bool | None``: ``None`` means the upstream row did not carry the key at
-    all — an older Ayla — and MUST NOT be read as "no screening needed". Only
-    an explicit ``False`` opens the gate; ``None`` keeps it closed.
+    ``bool | None``: ``None`` means "no readable value" and MUST NOT be read
+    as "no screening needed". Only an explicit ``False`` opens the gate.
+
+    ``health_check_key_present`` splits that ``None`` in two, and the split
+    is load-bearing:
+
+    * **key absent** (``False``) — this payload does not speak about the
+      field at all: an older Ayla, a partial serializer, a transport hiccup.
+      The mirror must KEEP what it already knows. Overwriting a known
+      verdict with "unknown" on that basis would make a medical gate
+      flicker on every upstream wobble.
+    * **key present, value ``null``** (``True``, value ``None``) — the
+      catalog is speaking, and what it says is *"I do not know"*. That is an
+      answer, and the mirror must record it as ``NULL``, which the booking
+      gate reads as "screening required".
+
+    Before this split both arrived as the same Python ``None``, so the
+    upserter could only pick one behaviour for both — and it picked "keep",
+    correctly, to protect against the hiccup. The price was that an explicit
+    "unknown" could never reach the mirror at all. The catalog only started
+    sending one once ``SpecialistService.resolved_requires_health_check``
+    stopped turning a missing template into ``False``.
     """
 
     ayla_specialist_service_id: str
@@ -172,6 +227,11 @@ class CatalogSpecialistServiceDTO:
     category_slug: str = ""
     is_active: bool = True
     resolved_requires_health_check: bool | None = None
+    #: Нёс ли ключ сам ответ. См. докстринг выше: отличает «поле не
+    #: прислали» от «прислали null». Умолчание `False` — консервативное:
+    #: вызывающий, собравший DTO руками и про поле не сказавший, получает
+    #: прежнее поведение «сохранить, что было».
+    health_check_key_present: bool = False
     raw: dict[str, Any] = field(default_factory=dict)
 
 
@@ -206,6 +266,34 @@ class CatalogClientError(CatalogError):
     """4xx other than auth. Misshapen request — operator/code bug."""
 
 
+class CatalogThrottledError(CatalogError):
+    """429 from Ayla that this run could not wait out (DRF-1595).
+
+    Deliberately a sibling of :class:`CatalogClientError`, not a subclass,
+    even though 429 *is* a 4xx. The whole point of the ticket is that this
+    condition is not the same fact as "we sent a misshapen request": the
+    salon is healthy, our request was fine, and the correct response is to
+    stand down and come back — which the caller can only do if it can tell
+    the two apart with an ``except`` clause. Sub-classing would have made
+    every existing ``except CatalogClientError`` swallow it silently.
+
+    ``wait_seconds`` is what Ayla asked for (``None`` when it did not say).
+    ``budget_exhausted`` distinguishes "we ran out of permission to wait"
+    from "we waited the full number of attempts and Ayla is still closed".
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        wait_seconds: float | None = None,
+        budget_exhausted: bool = False,
+    ) -> None:
+        super().__init__(message)
+        self.wait_seconds = wait_seconds
+        self.budget_exhausted = budget_exhausted
+
+
 class CatalogTransportError(CatalogError):
     """5xx / network failure after retries exhausted, or a config gap."""
 
@@ -216,6 +304,20 @@ class CatalogTransportError(CatalogError):
 
 
 _BACKOFF_SECONDS = (0.5, 1.0, 2.0)
+
+# Rows per page to ask Ayla for. 100 is ``core.pagination.DefaultPagination
+# .max_page_size`` upstream — the documented ceiling, not a guess — and the
+# parameter name is that class's ``page_size_query_param``.
+#
+# Sending it on ALL THREE walks is a DRF-1595 change. Only the edge walk had
+# it; the other two ran at Ayla's ``PAGE_SIZE = 20`` default and therefore
+# spent five requests per hundred rows where they could spend one. That
+# multiplier lands on a quota far tighter than it looks: the internal catalog
+# viewsets carry ``authentication_classes = []`` (bot Bearer is not a JWT), so
+# ``request.user`` is anonymous and the throttle that fires is ``anon`` at
+# 30/min — not the 120/min ``user`` rate. Halving our own request count is the
+# cheapest lever we own on the limit that caused this ticket.
+_PAGE_SIZE = 100
 
 
 class CatalogHttpClient:
@@ -234,6 +336,7 @@ class CatalogHttpClient:
         timeout: int | None = None,
         retries: int | None = None,
         http_client: httpx.Client | None = None,
+        wait_budget: ThrottleWaitBudget | None = None,
     ) -> None:
         self._base_url = (
             base_url if base_url is not None else getattr(settings, "AYLA_BASE_URL", "")
@@ -246,6 +349,14 @@ class CatalogHttpClient:
         )
         self._retries = (
             retries if retries is not None else getattr(settings, "CATALOG_SYNC_HTTP_RETRIES", 3)
+        )
+        # One wait budget per RUN, not per request (DRF-1595). The beat hands
+        # the same object to every client it builds so ten salons cannot each
+        # sleep out their own 429 and blow the task's soft time limit between
+        # them. A caller that passes none (one-shot `manage.py sync_catalog`,
+        # onboarding) still gets a ceiling rather than an unbounded one.
+        self._wait_budget = (
+            wait_budget if wait_budget is not None else ThrottleWaitBudget.from_settings()
         )
         # Injected client for tests (pytest-httpx). Real callers leave this
         # None — we build a session on first use.
@@ -264,7 +375,11 @@ class CatalogHttpClient:
         """
         rows = self._fetch_all(
             "internal/catalog/salon-services/",
-            params={"tenant": tenant_id},
+            # page_size=100 — see PAGE_SIZE note on the class. Omitting it
+            # here (until DRF-1595) meant this walk ran at Ayla's PAGE_SIZE=20
+            # default, i.e. five requests where one would do, against a quota
+            # that turns out to be the anonymous one.
+            params={"tenant": tenant_id, "page_size": _PAGE_SIZE},
         )
         dtos, _failed = _parse_rows(
             rows, _parse_salon_service, path="internal/catalog/salon-services/"
@@ -290,7 +405,8 @@ class CatalogHttpClient:
         """
         rows = self._fetch_all(
             "internal/specialists/",
-            params={"tenant": tenant_id},
+            # page_size=100 — see PAGE_SIZE note on the class (DRF-1595).
+            params={"tenant": tenant_id, "page_size": _PAGE_SIZE},
         )
         dtos, _failed = _parse_rows(rows, _parse_specialist, path="internal/specialists/")
         return dtos
@@ -316,7 +432,7 @@ class CatalogHttpClient:
             # tie or a concurrent insert between page fetches can drop a row
             # from the snapshot, which would read as "deleted upstream".
             # Fewer pages ⇒ fewer seams where that can happen.
-            params={"tenant": tenant_id, "page_size": 100},
+            params={"tenant": tenant_id, "page_size": _PAGE_SIZE},
         )
         edges, failed = _parse_rows(
             rows, _parse_specialist_service, path="internal/catalog/specialist-services/"
@@ -410,6 +526,13 @@ class CatalogHttpClient:
                         f"Ayla catalog auth failed: HTTP {response.status_code} "
                         f"(token prefix={self._token[:4]!r}…)"
                     )
+                # 429 is checked BEFORE the generic 4xx branch below, and the
+                # order is the whole fix (DRF-1595). It used to fall through to
+                # that branch, which raises terminally — so the one 4xx that
+                # tells us how to succeed was the one we threw away.
+                if response.status_code == 429:
+                    self._wait_for_throttle(url, response, attempt=attempt, attempts=attempts)
+                    continue
                 if 400 <= response.status_code < 500:
                     raise CatalogClientError(
                         f"Ayla catalog 4xx: HTTP {response.status_code} url={url} "
@@ -421,6 +544,8 @@ class CatalogHttpClient:
             except CatalogAuthError:
                 raise
             except CatalogClientError:
+                raise
+            except CatalogThrottledError:
                 raise
             except (httpx.HTTPError, httpx.HTTPStatusError) as exc:
                 last_exc = exc
@@ -439,6 +564,55 @@ class CatalogHttpClient:
             f"Ayla catalog: exhausted {attempts} retries on {url}"
         ) from last_exc
 
+    def _wait_for_throttle(
+        self, url: str, response: httpx.Response, *, attempt: int, attempts: int
+    ) -> None:
+        """Sleep off one ``429``, or raise :class:`CatalogThrottledError`.
+
+        Returns normally only when the caller should retry immediately after
+        the sleep. Two ways it refuses instead, each a different fact:
+
+        * this was the last attempt — Ayla is still closed and we are out of
+          tries (``budget_exhausted=False``);
+        * the run's wait budget will not cover what Ayla asked for — we are
+          out of *permission* to wait (``budget_exhausted=True``, which the
+          beat reads to stand down for the rest of the cycle).
+
+        Both surface as the same exception type because both mean "this salon
+        did not sync and it is not the salon's fault". Neither is a
+        :class:`CatalogClientError` — see that class for why the distinction
+        has to survive as far as the caller.
+        """
+        wait = _throttle_wait_seconds(response)
+        if wait is None:
+            # Ayla returned 429 without saying when to come back. We are not
+            # entitled to invent a number, so fall back to the same backoff
+            # ladder a 5xx would get — cheap, and if it is still closed the
+            # next pass hits the "out of tries" branch above with the truth.
+            wait = _BACKOFF_SECONDS[min(attempt, len(_BACKOFF_SECONDS) - 1)]
+        if attempt == attempts - 1:
+            raise CatalogThrottledError(
+                f"Ayla catalog throttled: HTTP 429 url={url} — still limited after "
+                f"{attempts} attempts (last wait_seconds={wait})",
+                wait_seconds=wait,
+            )
+        if not self._wait_budget.consume(wait):
+            raise CatalogThrottledError(
+                f"Ayla catalog throttled: HTTP 429 url={url} — asked to wait {wait}s, "
+                f"run budget has {self._wait_budget.remaining_seconds}s of "
+                f"{self._wait_budget.total_seconds}s left",
+                wait_seconds=wait,
+                budget_exhausted=True,
+            )
+        logger.warning(
+            "catalog.http.throttled attempt=%s wait_seconds=%s budget_remaining=%s url=%s",
+            attempt + 1,
+            wait,
+            self._wait_budget.remaining_seconds,
+            url,
+        )
+        time.sleep(wait)
+
     def _client(self) -> httpx.Client:
         if self._http is None:
             self._http = httpx.Client(timeout=self._timeout)
@@ -454,6 +628,62 @@ class CatalogHttpClient:
 
     def __exit__(self, *_args: object) -> None:
         self.close()
+
+
+# ---------------------------------------------------------------------------
+# Throttle parsing
+# ---------------------------------------------------------------------------
+
+
+def _coerce_positive_seconds(raw: Any) -> float | None:
+    """``raw`` → a usable sleep duration, or ``None``.
+
+    Rejects the unusable rather than clamping it: a negative or
+    unparseable ``wait_seconds`` is upstream telling us nothing, and
+    silently turning nothing into ``0`` would spin the retry loop against a
+    limiter that is still closed.
+    """
+    if isinstance(raw, bool) or raw is None:
+        return None
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return None
+    if value <= 0 or value != value or value == float("inf"):
+        return None
+    return value
+
+
+def _throttle_wait_seconds(response: httpx.Response) -> float | None:
+    """How long Ayla asked us to wait, per its 429 envelope (DRF-1595).
+
+    The contract (Ayla ``djangoProject/exception_handler.py``, DRF
+    ``Throttled`` branch)::
+
+        {"error": {"code": "THROTTLED", "message": "Expected available in
+         54 seconds", "details": {"wait_seconds": 54}}}
+
+    ``details`` is omitted entirely when DRF's ``Throttled.wait`` is falsy,
+    so its absence is normal and means "unknown", not "zero".
+
+    ``Retry-After`` is read as a fallback because it is the standard header
+    for this and costs three lines — only its numeric form, since the
+    HTTP-date form would need a clock we do not trust more than the body we
+    already have.
+    """
+    try:
+        payload = response.json()
+    except Exception:  # noqa: BLE001 — a 429 with a non-JSON body is still a 429
+        payload = None
+    if isinstance(payload, dict):
+        error = payload.get("error")
+        if isinstance(error, dict):
+            details = error.get("details")
+            if isinstance(details, dict):
+                seconds = _coerce_positive_seconds(details.get("wait_seconds"))
+                if seconds is not None:
+                    return seconds
+    return _coerce_positive_seconds(response.headers.get("Retry-After"))
 
 
 # ---------------------------------------------------------------------------
@@ -526,6 +756,33 @@ def _parse_rows(
 def _parse_dt(raw: str) -> datetime:
     """ISO 8601 with optional trailing ``Z`` → aware datetime."""
     return datetime.fromisoformat(raw.replace("Z", "+00:00"))
+
+
+def _optional_str(row: dict[str, Any], key: str) -> str | None:
+    """Строка из ``row[key]`` так, чтобы ОТСУТСТВИЕ не стало ПУСТЫМ (DRF-1588).
+
+    Три исхода, и все три различимы у вызывающего:
+
+    * ключа в строке нет      → ``None``  («источник не сказал ничего»);
+    * ключ есть и это ``null``→ ``None``  (то же самое молчание, явным словом);
+    * ключ есть и это строка  → она сама, ДОСЛОВНО, включая ``""``.
+
+    Дословно — то есть без ``.strip()`` и без нормализации: ``raw`` это
+    сырой слепок чужой системы, и выводить из него что-либо, кроме того,
+    что там лежит буквально, — способ получить значение, неотличимое от
+    настоящего. Обрезкой и разбором занимается читатель, у которого есть
+    на это основание; у зеркала основания нет.
+
+    Привычное ``row.get(key) or ""`` делает ровно обратное: сворачивает
+    все три исхода в один и печатает «адреса нет» там, где верный ответ —
+    «не знаем».
+    """
+    if key not in row:
+        return None
+    value = row[key]
+    if value is None:
+        return None
+    return str(value)
 
 
 def _parse_decimal(raw: Any) -> Decimal | None:
@@ -634,6 +891,10 @@ def _parse_specialist_service(row: dict[str, Any]) -> CatalogSpecialistServiceDT
         resolved_requires_health_check=_parse_optional_bool(
             row.get("resolved_requires_health_check")
         ),
+        # `in`, а не `.get() is not None`: присланный `null` — это ОТВЕТ
+        # «не знаю», и он обязан отличаться от «ключа не было». Оба дают
+        # питоновский `None`, и до этой строки различить их было нечем.
+        health_check_key_present="resolved_requires_health_check" in row,
         raw=row,
     )
 
@@ -655,5 +916,14 @@ def _parse_specialist(row: dict[str, Any]) -> CatalogSpecialistDTO:
         is_active=bool(
             str(row.get("status", "")).lower() == "active" and row.get("is_available", True)
         ),
+        # DRF-1588 — ``_optional_str``/``_parse_decimal``, а не ``or ""`` /
+        # ``or 0``: последние стирают ровно ту разницу, ради которой поле
+        # заводилось. ``row.get("address") or ""`` превратил бы отсутствие
+        # ключа в пустой адрес, а ``or 0`` — отсутствие координаты в точку
+        # в Гвинейском заливе.
+        address=_optional_str(row, "address"),
+        location_lat=_parse_decimal(row.get("location_lat")),
+        location_lng=_parse_decimal(row.get("location_lng")),
+        tenant_address=_optional_str(row, "tenant_address"),
         raw=row,
     )

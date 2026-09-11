@@ -1,0 +1,50 @@
+{% extends "admin/base_site.html" %}
+{# Форма блокировки / снятия блокировки (DRF-1497). Без причины не проходит. #}
+
+{% block breadcrumbs %}
+  <div class="breadcrumbs">
+    <a href="{% url 'admin:index' %}">Админка</a>
+    &rsaquo; <a href="{% url 'admin:adminconsole_clients_search' %}">Клиенты</a>
+    &rsaquo; <a href="{{ card_url }}">{{ client.display_name|default:client.client_name|default:client.channel_user_id }}</a>
+    &rsaquo; {% if action == "block" %}Блокировка{% else %}Снятие блокировки{% endif %}
+  </div>
+{% endblock %}
+
+{% block content %}
+  <div id="content-main">
+    {% if action == "block" %}
+      <h1>Заблокировать клиента</h1>
+      <p style="max-width: 46em;">
+        Заблокированный перестаёт получать от бота всё: ответы, напоминания,
+        проактивные сообщения. Его сообщения продолжают записываться в диалог.
+        Действие попадёт в журнал с вашим именем и причиной.
+      </p>
+    {% else %}
+      <h1>Снять блокировку</h1>
+      <p style="max-width: 46em;">
+        Клиент снова начнёт получать ответы и сообщения бота. Причина нужна и
+        здесь: «почему вернули» — такой же вопрос журнала, как «за что выключили».
+      </p>
+    {% endif %}
+
+    {% if errors %}
+      <ul class="errorlist">
+        {% for error in errors %}<li>{{ error }}</li>{% endfor %}
+      </ul>
+    {% endif %}
+
+    <form method="post" action="">
+      {% csrf_token %}
+      <div class="form-row">
+        <label for="id_reason">Причина (обязательно):</label><br>
+        <textarea id="id_reason" name="reason" rows="4" cols="60" required>{{ reason }}</textarea>
+      </div>
+      <div class="submit-row" style="margin-top: 1em;">
+        <button type="submit" class="default">
+          {% if action == "block" %}Заблокировать{% else %}Снять блокировку{% endif %}
+        </button>
+        <a href="{{ card_url }}" style="margin-left: 1em;">Отмена</a>
+      </div>
+    </form>
+  </div>
+{% endblock %}

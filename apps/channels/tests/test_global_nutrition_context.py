@@ -50,8 +50,16 @@ def _raw_entry(text: str) -> dict:
 
 @pytest.fixture(autouse=True)
 def _flag_on(settings):
-    """DRF-1284 ships OFF; the wiring below is what an operator turns on."""
+    """DRF-1284 ships OFF; the wiring below is what an operator turns on.
+
+    Флагов два с DRF-1464 T4, и они про разное:
+    ``CONCIERGE_NUTRITION_CONTEXT_ENABLED`` — труба (эта картина вообще
+    собирается), ``NUTRITION_COACH_ENABLED`` — поверхность диетолога,
+    ради которой она собирается. Труба без диетолога — это ровно то, что
+    DRF-1284 измерил: токены растут, ответ не меняется.
+    """
     settings.CONCIERGE_NUTRITION_CONTEXT_ENABLED = True
+    settings.NUTRITION_COACH_ENABLED = True
 
 
 @pytest.fixture
@@ -182,7 +190,11 @@ def test_consented_user_without_records_gets_a_normal_turn(
         ),
     )
 
-    GlobalMaxHandler()(_raw_entry("Посоветуй мастера по маникюру"))
+    # Ход обязан быть ПРО ЕДУ. С §48 картина прикладывается только к
+    # таким ходам, и на «подбери мастера» блок был бы пуст независимо от
+    # того, что вернула Ayla, — тест доказывал бы работу предиката вместо
+    # работы пустой недели.
+    GlobalMaxHandler()(_raw_entry("Что мне съесть на ужин?"))
 
     assert captured_turn["nutrition_block"] == ""
     assert len(mock_send) == 2
@@ -227,7 +239,9 @@ def test_ayla_outage_costs_the_picture_not_the_reply(
     )
     _stub_ayla(monkeypatch, error=NutritionUnavailableError("circuit_open"))
 
-    GlobalMaxHandler()(_raw_entry("Подбери мастера"))
+    # Про еду — иначе пустой блок объяснялся бы предикатом, а не отказом
+    # Ayla, и тест перестал бы проверять деградацию.
+    GlobalMaxHandler()(_raw_entry("Что мне съесть на ужин?"))
 
     assert captured_turn["nutrition_block"] == ""
     assert len(mock_send) == 2
@@ -248,10 +262,51 @@ def test_builder_exploding_costs_the_picture_not_the_reply(
         lambda bot_user: (_ for _ in ()).throw(RuntimeError("contract broken")),
     )
 
-    GlobalMaxHandler()(_raw_entry("Подбери мастера"))
+    # Про еду: билдер обязан быть ВЫЗВАН, чтобы было чему сломаться.
+    GlobalMaxHandler()(_raw_entry("Что мне съесть на ужин?"))
 
     assert captured_turn["nutrition_block"] == ""
     assert len(mock_send) == 2
+
+
+def test_a_turn_that_is_not_about_food_never_reaches_ayla(
+    settings, monkeypatch, mock_send, fake_redis, captured_turn, no_memory
+) -> None:
+    """§48 + стоимость: нет еды в ходе — нет ни блока, ни похода в Ayla.
+
+    Две службы одного предиката. По §48 это ограничитель области действия
+    способности: не приложена картина — модель и не узнала, что ей что-то
+    разрешено. По стоимости — то, без чего включённый флаг платил бы два
+    похода в Ayla и ~200 токенов за КАЖДЫЙ ход, включая «во сколько вы
+    работаете».
+    """
+    GlobalMaxHandler()(_raw_entry("Привет"))
+    _grant(
+        _USER_ID,
+        ConsentRecord.ConsentType.PERSONAL_DATA.value,
+        ConsentRecord.ConsentType.HEALTH.value,
+    )
+    calls: list[str] = []
+
+    # Записываем вызов, а не бросаем из него: обвязка в handler глотает
+    # любое исключение билдера намеренно (ход дороже картины, и ключ
+    # идемпотентности уже занят), так что брошенное отсюда до теста бы не
+    # доехало и «не позвали» стало бы неотличимо от «позвали и упало».
+    def _record(bot_user):
+        calls.append("built")
+        return ""
+
+    monkeypatch.setattr(max_handler, "build_nutrition_context_block", _record)
+
+    GlobalMaxHandler()(_raw_entry("Во сколько вы работаете?"))
+    assert calls == []
+    assert captured_turn["nutrition_block"] == ""
+
+    # Контроль присутствия: тот же человек с тем же согласием на ходе ПРО
+    # ЕДУ билдер таки зовёт — иначе «не позвали» доказывало бы сломанную
+    # обвязку, а не работу предиката.
+    GlobalMaxHandler()(_raw_entry("Что мне съесть на ужин?"))
+    assert calls == ["built"]
 
 
 def test_rollback_flag_off_leaves_the_turn_untouched(

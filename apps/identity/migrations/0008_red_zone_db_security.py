@@ -69,6 +69,29 @@ def _add_red_zone_security(apps, schema_editor):
 
     # ─── 5 DB roles ──────────────────────────────────────────────────────
     # `CREATE ROLE IF NOT EXISTS` is not standard SQL; use DO block.
+    #
+    # WHY THE HANDLER NAMES TWO CODES (DRF-1349 / PR #1560).
+    #
+    # Roles are a CLUSTER object, not a database one. Parallel test
+    # databases — xdist workers inside a CI shard — migrate into the SAME
+    # cluster and collide on the very same role name.
+    #
+    # `duplicate_object` (42710) is raised by the catalog probe that runs
+    # BEFORE the insert. It fires only when the role was already committed,
+    # i.e. on a SEQUENTIAL repeat. When two workers race, both probes find
+    # nothing, both proceed, and the loser's insert hits the unique index
+    # on pg_authid — `unique_violation` (23505), a different code that a
+    # `WHEN duplicate_object` handler does NOT catch:
+    #
+    #   duplicate key value violates unique constraint
+    #   "pg_authid_rolname_index"
+    #   DETAIL: Key (rolname)=(ayla_ops_redzone_break_glass) already exists.
+    #
+    # So both codes are required, and they are required in ALL FIVE blocks:
+    # one role lost the race in run 34557386291, but the mechanism is shared
+    # and fixing a single block would leave four mines. Do not "simplify"
+    # this back to one code — see tests/tools/test_red_zone_role_race.py,
+    # which counts the blocks.
     # NOLOGIN for non-application roles — they're granted to login roles
     # via secret-manager flow (ayla_ops_redzone_break_glass) or used by
     # CI/deploy infrastructure (ayla_migrator, ayla_backup).
@@ -78,14 +101,14 @@ def _add_red_zone_security(apps, schema_editor):
         """
         DO $$ BEGIN
             CREATE ROLE ayla_app LOGIN;
-        EXCEPTION WHEN duplicate_object THEN NULL;
+        EXCEPTION WHEN duplicate_object OR unique_violation THEN NULL;
         END $$;
         """,
         # ayla_ops — read-only debugging. Login role for ops shell.
         """
         DO $$ BEGIN
             CREATE ROLE ayla_ops LOGIN;
-        EXCEPTION WHEN duplicate_object THEN NULL;
+        EXCEPTION WHEN duplicate_object OR unique_violation THEN NULL;
         END $$;
         """,
         # ayla_migrator — DDL only. Used by CI/deploy pipeline for
@@ -93,7 +116,7 @@ def _add_red_zone_security(apps, schema_editor):
         """
         DO $$ BEGIN
             CREATE ROLE ayla_migrator;
-        EXCEPTION WHEN duplicate_object THEN NULL;
+        EXCEPTION WHEN duplicate_object OR unique_violation THEN NULL;
         END $$;
         """,
         # ayla_backup — REPLICATION for pg_basebackup. NOLOGIN at role
@@ -101,7 +124,7 @@ def _add_red_zone_security(apps, schema_editor):
         """
         DO $$ BEGIN
             CREATE ROLE ayla_backup REPLICATION;
-        EXCEPTION WHEN duplicate_object THEN NULL;
+        EXCEPTION WHEN duplicate_object OR unique_violation THEN NULL;
         END $$;
         """,
         # ayla_ops_redzone_break_glass — emergency 1h grant. Standing role
@@ -110,7 +133,7 @@ def _add_red_zone_security(apps, schema_editor):
         """
         DO $$ BEGIN
             CREATE ROLE ayla_ops_redzone_break_glass;
-        EXCEPTION WHEN duplicate_object THEN NULL;
+        EXCEPTION WHEN duplicate_object OR unique_violation THEN NULL;
         END $$;
         """,
     ]:

@@ -119,8 +119,21 @@ beforeEach(() => {
   mockedList.mockResolvedValue({ items: [], next_cursor: null });
   mockedServices.mockResolvedValue({ services: [] });
   mockedMasters.mockResolvedValue({ masters: [] });
-  mockedRecs.mockResolvedValue({ recommendations: [] });
-  mockedBrowse.mockResolvedValue({ services: [], masters: [], picks: [] });
+  mockedRecs.mockResolvedValue({
+    data: {
+      decision_id: "dec-1",
+      request_id: "req-1",
+      resolver_spec_version: "1.0",
+      policy_versions: {},
+      ordered: [],
+    },
+  });
+  mockedBrowse.mockResolvedValue({
+    services: [],
+    masters: [],
+    picks: [],
+    picksOutcome: "OK",
+  });
   mockedToday.mockResolvedValue({
     calories_eaten: 1240,
     calories_target: 2100,

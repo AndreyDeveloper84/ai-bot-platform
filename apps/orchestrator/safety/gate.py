@@ -191,9 +191,13 @@ def guard_outbound(
     often does the assistant have to be stopped, and where» without a union
     over per-channel names.
 
-    Never raises. ``evaluate_outbound`` already fails open on a broken
-    pattern, and the emit is wrapped: a telemetry failure must not be the
-    thing that costs someone their answer.
+    Never raises, but no longer for the reason this docstring used to give.
+    ``evaluate_outbound`` used to fail OPEN on a broken pattern — it handed
+    back the unchecked draft. Since owner §111 it fails closed for this one
+    capability: an unlookable draft is replaced by :data:`REPLACEMENT_TEXT`,
+    so the person still gets an answer and it is not the one nobody checked.
+    The emit is still wrapped: a telemetry failure must not be the thing that
+    costs someone their answer.
     """
 
     verdict = evaluate_outbound(text)

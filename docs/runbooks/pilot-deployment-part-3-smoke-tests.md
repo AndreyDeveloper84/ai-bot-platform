@@ -5,6 +5,19 @@
 > Target completion sprint: 2026-07-15 pilot launch (Penza, salon «Формула тела»)
 > Owner: W1 (Delta — master/admin Mini App)
 
+> **Dead host — do not work on `194.87.99.126`.** SSH to it still succeeds and
+> every command will report success, but the box serves nobody: `miniapp-dev`,
+> `proapp`, `dev` and `api-dev` `.gobeauty.site` all resolve to
+> `176.119.159.141`, and the `.126` vhost only proxies there. A change made on
+> `.126` never reaches a person. The pilot is `176.119.159.141`,
+> `/home/taximeter/ai-bot-platform-dev`, Compose project `ayla-bot-staging`,
+> port 8014, env `.env.staging`, files `docker-compose.yml` +
+> `docker-compose.staging.yml` + `docker-compose.staging.local.yml`.
+
+> Оба vhost'а пилота — `proapp.gobeauty.site` и `miniapp-dev.gobeauty.site` — отдают один и тот
+> же `apps/miniapp/dist`, поэтому любой роут SPA отвечает на обоих. Домен
+> `ai-bot-platform.gobeauty.site`, который здесь стоял раньше, не существует вовсе.
+
 ## Purpose
 
 Manual smoke tests для master + admin Mini App после deploy в Пензе 2026-07-15. Запускаются operator'ом в окне T+0 → T+1h после launch (per [`project-pilot-deployment-runbook-scope`](../../../.claude/memory/project_pilot_deployment_runbook.md) PART 3). Цель: подтвердить что критичные user flow работают live before объявления pilot открытым для real masters.
@@ -48,7 +61,7 @@ Manual smoke tests для master + admin Mini App после deploy в Пенз�
 **Действия:**
 
 1. На устройстве test master: открыть мессенджер MAX → меню → найти бота `@ai_bot` (или ссылку из invite DM, если master ещё не linked).
-2. Если first launch: тап на invite link от admin (формат `https://ai-bot-platform.gobeauty.site/?invite=<token>`) → Mini App открывается на `MasterOnboardingScreen` → проходит Step 1 (claim) → Step 2 (accept) → Step 3 (bio + photo, optional).
+2. Если first launch: тап на invite link от admin (формат `https://proapp.gobeauty.site/?invite=<token>`) → Mini App открывается на `MasterOnboardingScreen` → проходит Step 1 (claim) → Step 2 (accept) → Step 3 (bio + photo, optional).
 3. Если master уже linked (existing pilot session): открыть Mini App из меню MAX → SessionToken в `DeviceStorage('master_token')` валидируется → landing on M1 dashboard.
 
 **Ожидаемый вывод:**
@@ -213,7 +226,7 @@ Manual smoke tests для master + admin Mini App после deploy в Пенз�
 
 **Действия:**
 
-1. Test admin account открывает admin Mini App (`https://ai-bot-platform.gobeauty.site/admin/`).
+1. Test admin account открывает admin Mini App (`https://proapp.gobeauty.site/admin/today`) — это роут SPA, а не Django admin на `api-dev`.
 2. Auth gate runs: init-data validation → role lookup → admin OR owner OR receptionist.
 3. Лендит на `AdminTeamScreen` (`/admin/team`).
 
@@ -354,21 +367,21 @@ Alternative: Django admin UI на `/django-admin/tenancy/tenantuserrelationship/
 
 1. Admin Mini App → `/admin/team` → header `[+ Добавить человека]` → лендит на `AdminAddPersonScreen` (`/admin/team/add`), ветка «Новый мастер».
 2. Заполнить: MAX-аккаунт `@testm2` + name «Test M2» + services (≥1 из existing) → `[Пригласить]`.
-3. POST `/api/v1/admin/masters/invite` → 201 + invite token generated. Ответ несёт `invite_link`, `max_dm_delivery` и `max_dm_error`.
-4. Verify: экран показывает **ссылку-приглашение** `https://max.ru/<салонный бот>?start=master_invite_<token>` и кнопку «Скопировать ссылку». Это основной путь доставки — личное сообщение уходит клиентским ботом и достигает только уже существующий чат (DRF-1505). Если `max_dm_delivery=failed`, экран обязан назвать причину, а не сказать «получит сообщение в течение минуты».
+3. POST `/api/v1/admin/masters/invite` → 201 + invite token generated. Ответ несёт `invite_link`. Полей `max_dm_delivery` / `max_dm_error` в нём НЕТ: эндпоинт с §44.4 не шлёт мастеру личного сообщения и не отчитывается о нём.
+4. Verify: экран показывает **ссылку-приглашение** `https://max.ru/<салонный бот>?start=master_invite_<token>`, кнопку «Скопировать ссылку» и под ними **готовый текст приглашения** с кнопкой «Скопировать текст» (§44.2). Это единственный путь доставки: отправляет владелец салона сам. Ни одной строки о доставке личного сообщения на экране быть не должно.
 5. Скопировать ссылку → открыть её с телефона Test M2 → салонный бот отвечает кнопкой «Принять приглашение» → Mini App → `MasterOnboardingScreen` Step 1 → preview profile → принимает → linked.
 6. Ветка «Уже работает у нас» (`/admin/team/access`): выдать код ресепшену → экран показывает код `AYLA-XXXX` **и** ссылку `?start=inv_AYLAXXXX` (без дефиса). Открыть ссылку → доступ открывается без ввода кода.
 
 **Ожидаемый вывод:**
 
 - Invite сreated successfully.
-- MAX DM с invite link arrives.
+- Ссылка и готовый текст на экране; оба копируются.
 - Master claim flow works end-to-end.
 - После accept: M2 master visible в admin roster (`/admin/team`) с status=ACTIVE.
 
 **Если не сработало:**
 
-- MAX DM не приходит: invited phone не registered в MAX OR send_message endpoint failed (см. PART 5.1 «MAX DM dispatch»).
+- `invite_link` пустой: в контуре нет салонного бота с Mini App-именем (`MAX_BOT_<SLUG>_WEB_APP`). Передать приглашение при этом нечем — личного сообщения больше нет, ссылка была вторым способом и осталась единственным.
 - Invite token expired: tokens по default expire через 7 дней (verify в `CatalogMaster.invite_expires_at`). Re-generate invite.
 - Role enum mismatch: «master» / «admin» / «receptionist» — verify в `apps/catalog/models.py::CatalogMaster.Role`.
 

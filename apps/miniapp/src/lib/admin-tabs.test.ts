@@ -1,5 +1,5 @@
 /**
- * DRF-1522 — правило «кто что видит» отдельно от разметки.
+ * DRF-1522 / DRF-1552 — правило «кто что видит» отдельно от разметки.
  *
  * Три места читают это правило: панель вкладок, страж закрытых адресов и
  * посадка. Тест держит их согласованными в одном месте, а экранные
@@ -54,8 +54,10 @@ describe("isReceptionOnly", () => {
 });
 
 describe("adminTabsFor", () => {
-  it("у ресепшн три вкладки, без «Чатов» и «Настроек»", () => {
-    expect(adminTabsFor(RECEPTION)).toEqual(["day", "team", "services"]);
+  it("у ресепшн две вкладки: «День» и «Команда»", () => {
+    // DRF-1552, решение владельца §35 п.1: «Услуги» убраны — для
+    // приёмной роли разрешённого сценария на этом экране нет.
+    expect(adminTabsFor(RECEPTION)).toEqual(["day", "team"]);
   });
 
   it("у владельца и администратора пять — состав не изменился", () => {
@@ -71,15 +73,22 @@ describe("adminTabsFor", () => {
 });
 
 describe("isAdminTabAllowed", () => {
-  it("закрывает ресепшн «Чаты» и «Настройки»", () => {
+  it("закрывает ресепшн «Чаты», «Настройки» и «Услуги»", () => {
     expect(isAdminTabAllowed(RECEPTION, "chats")).toBe(false);
     expect(isAdminTabAllowed(RECEPTION, "settings")).toBe(false);
+    expect(isAdminTabAllowed(RECEPTION, "services")).toBe(false);
   });
 
-  it("оставляет ресепшн «День», «Команду» и «Услуги»", () => {
+  it("оставляет ресепшн «День» и «Команду»", () => {
     expect(isAdminTabAllowed(RECEPTION, "day")).toBe(true);
     expect(isAdminTabAllowed(RECEPTION, "team")).toBe(true);
-    expect(isAdminTabAllowed(RECEPTION, "services")).toBe(true);
+  });
+
+  it("«Услуги» остаются открытыми владельцу и администратору", () => {
+    // Парная положительная стража (DRF-1411): запрет для ресепшн не
+    // должен был закрыть раздел всем.
+    expect(isAdminTabAllowed(OWNER, "services")).toBe(true);
+    expect(isAdminTabAllowed(ADMIN, "services")).toBe(true);
   });
 
   it("владельцу открыто всё", () => {

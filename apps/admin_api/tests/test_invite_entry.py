@@ -1,11 +1,10 @@
-"""The invite DM must carry a working entry into the Mini App (DRF-1349).
+"""Приглашение должно вести в рабочий вход в Mini App (DRF-1349).
 
 ## Why this file exists
 
 Found 30.08 by the owner on the **first live invitation of the pilot** —
-not by a test, not by a review, but by walking the flow by hand. The DM
-built in :func:`apps.admin_api.views_invite._dispatch_max_dm` offered two
-addresses and no button:
+not by a test, not by a review, but by walking the flow by hand. The
+invite DM of the day offered two addresses and no button:
 
 1. ``max://bot/<slug>?start=master_invite_<uuid>`` — MAX does not
    implement that scheme. The phone answered «Не удалось открыть
@@ -19,8 +18,20 @@ addresses and no button:
    session there is no tenant and no way to check the token at all.
 
 The working entry — the one the welcome grid already uses — is an
-``open_app`` button carried as an ``inline_keyboard`` attachment on the
-message itself. Nothing in the invite DM built one.
+``open_app`` button on a message in MAX. Nothing in the invite DM built
+one.
+
+## Что осталось от файла после §44.4
+
+Личного сообщения больше нет вовсе (решение владельца 07.09.2026), и
+классы, разбиравшие ЕГО кнопку и ЕГО отказ, ушли вместе с ним. Разрыв,
+ради которого файл заведён, никуда не делся: тот же payload
+``master_invite_<uuid>`` теперь едет в ссылке-приглашении
+(``?start=…``), которую владелец отправляет сам, и точно так же обязан
+совпадать с тем, что Mini App умеет разобрать, и вести на смонтированный
+маршрут. Это и держится здесь. Что кнопку строит именно ссылка, а не
+сообщение, проверяет ``test_invite_link.py``; что эндпоинт не шлёт
+ничего — ``test_invite_no_dm.py``.
 
 ## The shape of the assertions here
 
@@ -28,11 +39,9 @@ Rule of this contour, re-confirmed six times over 29–30.08:
 
     **A negative claim needs a positive guard on the same data.**
 
-«The message contains no ``max://``» passes on an empty message and
+«The payload contains no ``max://``» passes on an empty payload and
 therefore proves nothing. So every absence check below sits next to a
-presence check reading the very same dispatched call: the button exists,
-its payload is the invite token, and the Mini App's own rule resolves
-that payload to the onboarding route.
+presence check reading the very same value.
 
 ## Why the sources are parsed rather than restated
 
@@ -51,18 +60,11 @@ from __future__ import annotations
 import re
 import uuid
 from pathlib import Path
-from typing import Any
-from unittest.mock import patch
 
 import pytest
-from django.test import Client
-from django.urls import reverse
 
-from apps.admin_api.tests.conftest import init_data_header
 from apps.channels.max.outbound import _button_to_max
-from apps.identity.models import BotUser
 from apps.skills.welcome.tests.test_miniapp_routes import _miniapp_routes, _route_exists
-from apps.tenancy.models import Tenant
 
 #: Repo root — this file is ``<root>/apps/admin_api/tests/``.
 _ROOT = Path(__file__).resolve().parents[3]
@@ -183,50 +185,6 @@ def _fn_body(name: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _invite_url() -> str:
-    return reverse("admin_api:master_invite_create")
-
-
-def _valid_body() -> dict[str, Any]:
-    return {
-        "name": "Анна Петрова",
-        "contact_method": "max_username",
-        "contact_value": "@anna_styl",
-        "services": [],
-        "schedule_preset": "default_mon_fri_10_19",
-        "mode": "invite",
-    }
-
-
-@pytest.fixture
-def sent(client: Client, owner_bot_user: BotUser, tenant: Tenant, settings):
-    """Dispatch one real invite and return the ``send_message`` kwargs."""
-    settings.SITE_DOMAIN = _SITE
-    settings.MAX_BOT_WEB_APP = _WEB_APP
-    with patch("apps.admin_api.views_invite.max_outbound.send_message") as mock:
-        mock.return_value = {"ok": True}
-        resp = client.post(
-            _invite_url(),
-            data=_valid_body(),
-            content_type="application/json",
-            HTTP_AUTHORIZATION=init_data_header("5001"),
-        )
-    assert resp.status_code == 201, resp.content
-    mock.assert_called_once()
-    return {"kwargs": mock.call_args.kwargs, "token": resp.json()["invite_token"]}
-
-
-def _open_app_buttons(kwargs: dict[str, Any]) -> list[dict[str, Any]]:
-    """Every ``open_app`` button in the dispatched message's keyboard."""
-    out: list[dict[str, Any]] = []
-    for att in kwargs.get("attachments") or []:
-        if att.get("type") != "inline_keyboard":
-            continue
-        for row in att.get("payload", {}).get("buttons", []):
-            out.extend(b for b in row if b.get("type") == "open_app")
-    return out
-
-
 # ---------------------------------------------------------------------------
 # The parsers must actually see the sources
 # ---------------------------------------------------------------------------
@@ -300,209 +258,6 @@ class TestSlugIsPinnedOnBothSides:
         )
         assert wire["type"] == "open_app"
         assert wire["payload"] == payload
-
-
-# ---------------------------------------------------------------------------
-# What the invite DM actually sends
-# ---------------------------------------------------------------------------
-
-
-class TestInviteDmCarriesTheWorkingEntry:
-    """Presence first, absence second — on the same dispatched message."""
-
-    def test_dm_carries_an_open_app_button(self, sent):
-        buttons = _open_app_buttons(sent["kwargs"])
-        assert buttons, (
-            "the invite DM carries no `open_app` button. A MAX Mini App can "
-            "only be entered from a button on the message itself; a bare "
-            "address in the text cannot open it (max:// is not implemented "
-            "by MAX, https:// opens a browser that gets no initData)."
-        )
-
-    def test_the_button_payload_is_this_invite_token(self, sent):
-        buttons = _open_app_buttons(sent["kwargs"])
-        assert buttons
-        payload = buttons[0]["payload"]
-        assert payload == f"{_py_prefix()}{sent['token']}", (
-            f"button payload {payload!r} does not carry the invite token "
-            f"{sent['token']!r} — the Mini App would open with nothing to claim."
-        )
-
-    def test_the_button_payload_resolves_in_the_mini_app(self, sent):
-        """The producer's string, run through the consumer's own rule.
-
-        The Mini App resolves the payload with a strict prefix + UUID
-        match (``parseStartRoute`` in ``max-sdk.ts``). This mirrors that
-        rule against the source constants rather than restating a
-        literal, so a rename on either side fails here.
-        """
-        buttons = _open_app_buttons(sent["kwargs"])
-        assert buttons
-        payload = buttons[0]["payload"]
-        matched = _ts_invite_regex().fullmatch(payload)
-        assert matched is not None, (
-            f"the Mini App's own matcher rejects the payload the bot built: "
-            f"{payload!r} does not satisfy _MASTER_INVITE_RE. The button "
-            "would open the Mini App and resolve to null."
-        )
-        assert matched.group(1) == sent["token"]
-        assert _route_exists(_ts_const("MASTER_ONBOARDING_PATH"), _miniapp_routes())
-
-    def test_the_mini_app_matcher_is_strict(self):
-        """The recompiled matcher must reject what the real one rejects.
-
-        Without this the test above could pass against a parser that
-        rebuilt `.*` — every payload would «resolve», including the ones
-        the Mini App refuses.
-        """
-        rx = _ts_invite_regex()
-        prefix = _ts_const("MASTER_INVITE_PAYLOAD_PREFIX")
-        good = uuid.uuid4()
-        assert rx.fullmatch(f"{prefix}{good}")
-        # `uuid.UUID` accepts every one of these; the Mini App does not.
-        assert not rx.fullmatch(f"{prefix}{good.hex}")
-        assert not rx.fullmatch(f"{prefix}{{{good}}}")
-        assert not rx.fullmatch(f"{prefix}urn:uuid:{good}")
-        assert not rx.fullmatch(f"{prefix}../../admin/team")
-
-    def test_the_button_targets_the_configured_mini_app(self, sent):
-        buttons = _open_app_buttons(sent["kwargs"])
-        assert buttons
-        assert buttons[0].get("web_app") == _WEB_APP
-
-    def test_no_max_scheme_address_in_the_text(self, sent):
-        """Absence check — paired with the presence checks above.
-
-        On its own this passes for an empty message. It is meaningful
-        only because the same dispatched call is asserted to carry a
-        button with a resolvable payload.
-        """
-        assert "max://" not in sent["kwargs"]["text"], (
-            "the DM still offers a max:// address. MAX does not implement "
-            "the scheme — the device answers «Не удалось открыть ссылку»."
-        )
-
-    def test_no_promise_of_a_web_version(self, sent):
-        """«Не открывается в MAX? Используйте веб-версию» must be gone.
-
-        It pointed the reader at the one path that cannot work, and the
-        owner followed it on 30.08. The Mini App needs ``initData``,
-        which a browser never receives.
-        """
-        assert "веб-версию" not in sent["kwargs"]["text"], (
-            "the DM still directs the invited master to a web version. "
-            "Opening the invite outside MAX cannot work: no initData means "
-            "no session, and `validate_invite_token` resolves the token "
-            "through the session's tenant."
-        )
-
-
-# ---------------------------------------------------------------------------
-# The bottom rung: nothing sent, and the record that says so
-# ---------------------------------------------------------------------------
-
-
-class TestNoEntryConfigured:
-    """With neither a button nor an address, the invite reports failure.
-
-    The audit row is the only durable trace of this: the owner's screen
-    cannot render it yet (its failure callout is gated on a non-empty
-    ``fallback_link``, which is empty by construction here — see the
-    NOTE in ``_dispatch_max_dm``), and the response of the original call
-    is gone the moment it is read. If the row were not asserted, the
-    outcome would exist nowhere anyone can check.
-    """
-
-    def _invite(self, client, settings):
-        settings.DEBUG = False
-        settings.SITE_DOMAIN = ""
-        settings.MAX_BOT_WEB_APP = ""
-        with patch("apps.admin_api.views_invite.max_outbound.send_message") as mock:
-            resp = client.post(
-                _invite_url(),
-                data=_valid_body(),
-                content_type="application/json",
-                HTTP_AUTHORIZATION=init_data_header("5001"),
-            )
-        return resp, mock
-
-    def test_nothing_is_sent_and_the_reason_is_named(
-        self, client: Client, owner_bot_user: BotUser, tenant: Tenant, settings
-    ):
-        from apps.audit.models import AuditLog
-        from apps.events.vocabulary import MASTER_INVITE_DISPATCHED
-
-        resp, mock = self._invite(client, settings)
-        assert resp.status_code == 201, resp.content
-        mock.assert_not_called()
-        assert resp.json()["max_dm_delivery"] == "failed"
-
-        audit = AuditLog.all_tenants.get(
-            target_id=resp.json()["master_id"], action=MASTER_INVITE_DISPATCHED
-        )
-        assert audit.payload["delivery"] == "failed"
-        assert audit.payload["error"] == "no_entry_configured", (
-            "the audit row does not name WHY nothing was sent. «failed» alone "
-            "reads as a MAX outage and sends whoever investigates to the "
-            "wrong place — this failure is a missing setting."
-        )
-
-    def test_the_retry_does_not_claim_the_message_went_out(
-        self, client: Client, owner_bot_user: BotUser, tenant: Tenant, settings
-    ):
-        """The recovery path: operator fixes the config, owner re-invites.
-
-        The idempotency probe matches the still-PENDING row and returns
-        200 without dispatching. It used to hardcode
-        ``max_dm_delivery: "queued"`` — harmless while every dispatch at
-        least tried to send, and a lie the moment one could fail without
-        sending. The owner would have been told «queued» about a message
-        that was never sent and is not being sent now, for the whole
-        7-day TTL.
-        """
-        first, _ = self._invite(client, settings)
-        assert first.json()["max_dm_delivery"] == "failed"
-
-        settings.MAX_BOT_WEB_APP = _WEB_APP
-        with patch("apps.admin_api.views_invite.max_outbound.send_message") as mock:
-            mock.return_value = {"ok": True}
-            second = client.post(
-                _invite_url(),
-                data=_valid_body(),
-                content_type="application/json",
-                HTTP_AUTHORIZATION=init_data_header("5001"),
-            )
-        assert second.status_code == 200
-        assert second["X-Idempotent"] == "true"
-        assert second.json()["master_id"] == first.json()["master_id"]
-        assert second.json()["max_dm_delivery"] == "failed", (
-            "the idempotent replay reports a delivery that never happened. "
-            "Whoever reads it concludes the invite is on its way."
-        )
-
-    def test_a_successful_invite_still_replays_as_queued(
-        self, client: Client, owner_bot_user: BotUser, tenant: Tenant, settings
-    ):
-        """The positive guard for the test above.
-
-        Reporting the stored outcome must not degrade into reporting
-        «failed» for everything — that would read as «invites are
-        broken» on a healthy contour and is just the opposite lie.
-        """
-        settings.MAX_BOT_WEB_APP = _WEB_APP
-        settings.SITE_DOMAIN = _SITE
-        for _ in range(2):
-            with patch("apps.admin_api.views_invite.max_outbound.send_message") as mock:
-                mock.return_value = {"ok": True}
-                resp = client.post(
-                    _invite_url(),
-                    data=_valid_body(),
-                    content_type="application/json",
-                    HTTP_AUTHORIZATION=init_data_header("5001"),
-                )
-        assert resp.status_code == 200
-        assert resp["X-Idempotent"] == "true"
-        assert resp.json()["max_dm_delivery"] == "queued"
 
 
 # ---------------------------------------------------------------------------

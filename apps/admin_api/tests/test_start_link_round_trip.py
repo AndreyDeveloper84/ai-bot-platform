@@ -137,21 +137,21 @@ def _text(mock) -> str:
 
 
 def _invite_master(client: Client) -> dict[str, Any]:
-    with patch("apps.admin_api.views_invite.max_outbound.send_message") as dm:
-        dm.return_value = {"ok": True}
-        resp = client.post(
-            reverse("admin_api:master_invite_create"),
-            data={
-                "name": "Анна Петрова",
-                "contact_method": "max_username",
-                "contact_value": "@anna_styl",
-                "services": [],
-                "schedule_preset": "default_mon_fri_10_19",
-                "mode": "invite",
-            },
-            content_type="application/json",
-            HTTP_AUTHORIZATION=init_data_header("5001"),
-        )
+    # Никакой подмены исходящего: эндпоинт приглашения с §44.4 не шлёт
+    # ничего сам. Что он молчит — стережёт ``test_invite_no_dm.py``.
+    resp = client.post(
+        reverse("admin_api:master_invite_create"),
+        data={
+            "name": "Анна Петрова",
+            "contact_method": "max_username",
+            "contact_value": "@anna_styl",
+            "services": [],
+            "schedule_preset": "default_mon_fri_10_19",
+            "mode": "invite",
+        },
+        content_type="application/json",
+        HTTP_AUTHORIZATION=init_data_header("5001"),
+    )
     assert resp.status_code == 201, resp.content
     return resp.json()
 

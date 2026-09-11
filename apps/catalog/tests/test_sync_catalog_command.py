@@ -21,6 +21,7 @@ from django.utils import timezone as dj_timezone
 
 from apps.catalog.models import CatalogService
 from apps.catalog.services.http_client import CatalogSalonServiceDTO
+from apps.catalog.services.sync import SyncResult
 from apps.catalog.services.tests.test_sync import FakeHttpClient
 from apps.identity.constants import GLOBAL_BOT_TENANT_SLUG
 from apps.tenancy.models import Tenant
@@ -118,3 +119,37 @@ class TestDryRun:
         assert "upstream=2" in text
         assert "would_create=2" in text
         assert CatalogService.all_tenants.filter(tenant=salon).count() == 0
+
+
+class TestSkipReasonIsPrinted:
+    """A skip has to say WHY, because the reasons want opposite actions.
+
+    Before DRF-1595 a skip could only mean the Redis lock, so the message
+    named it unconditionally. Now it can also mean Ayla's rate limiter — and
+    this command is precisely what an operator reaches for to push a lagging
+    salon through. Telling them "another run holds the lock" while the truth
+    is "Ayla is throttling us" sends them hunting for a beat that is not
+    running.
+    """
+
+    def test_lock_held_still_says_the_lock(self, salon: Tenant) -> None:
+        out = StringIO()
+        with patch("apps.catalog.management.commands.sync_catalog.CatalogSyncService") as Mock:
+            Mock.return_value.run.return_value = SyncResult(
+                ran=False, skipped=True, skip_reason="lock_held"
+            )
+            call_command("sync_catalog", "--tenant", salon.slug, stdout=out)
+
+        assert "another run holds the lock" in out.getvalue()
+
+    def test_throttled_says_ayla_rate_limited_us(self, salon: Tenant) -> None:
+        out = StringIO()
+        with patch("apps.catalog.management.commands.sync_catalog.CatalogSyncService") as Mock:
+            Mock.return_value.run.return_value = SyncResult(
+                ran=False, skipped=True, skip_reason="throttled"
+            )
+            call_command("sync_catalog", "--tenant", salon.slug, stdout=out)
+
+        text = out.getvalue()
+        assert "429" in text
+        assert "another run holds the lock" not in text

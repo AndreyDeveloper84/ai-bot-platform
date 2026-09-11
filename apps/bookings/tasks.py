@@ -296,7 +296,11 @@ def send_due_reminders() -> dict[str, int]:
 
         try:
             send_message(
-                chat_id=row.chat_id,
+                # DRF-1558 — напоминание пишет человеку первым. Снимок
+                # ``row.chat_id`` — диалог с тем ботом, который его завёл;
+                # адресуем самого человека через живую строку BotUser
+                # (она уже в ``select_related``, лишнего запроса нет).
+                user_id=(getattr(row.bot_user, "channel_user_id", "") or "").strip(),
                 text=text,
                 attachments=attachments,
             )

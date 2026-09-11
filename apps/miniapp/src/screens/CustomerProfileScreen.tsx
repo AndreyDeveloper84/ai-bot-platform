@@ -12,13 +12,14 @@
  * # Section order (per spec §11.1 selected variant)
  *   R1 — header (avatar initials fallback + name; handle/scope rows
  *        render only when the real /me provides them)
- *   R2 — consent: 2 locked rows + marketing toggle (real notify_promo)
- *        + health-consent row + §4.2 accordion
+ *   R2 — consent: 2 locked rows + marketing toggle (реестр
+ *        `ConsentRecord(MARKETING)`, не зеркало `notify_promo`)
+ *        + health-consent row + «Хранение данных» (сценарий отзыва
+ *        с подтверждением, НЕ тумблер) + §4.2 accordion
  *        + «Запросить данные» / «Удалить аккаунт» → C5 sheets
  *        (PersonalDataSheets.tsx; support deeplink = error fallback)
  *   R3 — memory transparency: coming-soon card (no data, no clear)
- *   R4 — proactive AI toggle: HIDDEN until DRF-1520 (owner 05.09 —
- *        no non-working toggles)
+ *   R4 — «Подсказки от Ayla»: тумблер на `me/consents/proactive-hints/`
  *   R5 — notifications: MAX channel + soft timing + entry → support
  *   R6 — states: loading skeleton / API-down with retry / offline
  *        banner / toggle-change snackbar
@@ -44,8 +45,10 @@ import { useNavigate } from "react-router-dom";
 import { ComingSoonCard } from "../components/ComingSoonCard";
 import { ConsentRow } from "../components/ConsentRow";
 import { DisclosureSheet } from "../components/DisclosureSheet";
+import { TimezoneSheet, zoneLabel } from "../components/TimezoneSheet";
 import { NotificationCard } from "../components/NotificationCard";
 import {
+  DataStorageRevokeSheet,
   HealthConsentSheet,
   PersonalDataDeleteSheet,
   PersonalDataExportSheet,
@@ -60,9 +63,12 @@ import {
   fetchMe,
   formatConsentDate,
   setMarketingConsent,
+  saveTimezone,
+  setProactiveOptOut,
   type ConsentsResponse,
   type MeProfileResponse,
 } from "../lib/customer-profile";
+import { DELETE_CONFIRMATION_TOKEN } from "../lib/personal-data";
 import {
   fetchHealthConsent,
   type HealthConsentState,
@@ -72,14 +78,26 @@ import { useScreenBack } from "../hooks/useScreenBack";
 import { backTo } from "../lib/screen-back";
 
 // ---------------------------------------------------------------------------
-// Реальные данные (DRF-1475, часть Б, решение владельца 05.09): R1
-// identity header и R2 consent rows + marketing toggle читают/пишут
-// настоящий `/customer/me` (`customer-profile.ts` → lib/api.ts), имя и
-// маркетинговое согласие видны и работают в проде. Секции, у которых
-// пока нет backend («Подсказки от Ayla», «Хранение данных»), из
-// рендера УБРАНЫ — не disabled, не «скоро»: тумблер, который человек
-// двигает, а он ничего не делает, врёт про наличие контроля и хуже
-// отсутствующего. Возврат — после DRF-1520 (см. TODO у мест скрытия).
+// Реальные данные (DRF-1475 §24, DRF-1520). Экран целиком стоит на
+// настоящих ручках: R1 — `/customer/me`, R2 и R4 — `me/consents/`.
+//
+// 05.09 владелец решил не показывать неработающие тумблеры, и две
+// секции были убраны из рендера: тумблер, который человек двигает, а он
+// ничего не делает, врёт про наличие контроля. DRF-1520 дал ручки —
+// секции возвращаются РАБОТАЮЩИМИ, а не «скоро».
+//
+// Две вещи, которые здесь легко перепутать и нельзя:
+//
+// * «Хранение данных» — НЕ тумблер. Отзыв согласия необратим по
+//   последствиям, и переключатель показал бы их после действия. Строка
+//   `ConsentRow variant="action"` ведёт в лист с утверждённым текстом
+//   (§35 п.7), как это уже сделано медданным;
+// * отзыв согласия ≠ удаление аккаунта (§35 п.6). Аккаунт и доступ к
+//   записям остаются. «Удалить аккаунт» — отдельное действие ниже, и
+//   оба места говорят об этом словами, а не рассчитывают на догадку.
+//
+// Офлайн: баннер честный И действия выключены (правило #1421 — «баннер
+// честный, а кнопки живые» было дефектом).
 // ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------
@@ -98,6 +116,20 @@ type Status =
 interface ToastState {
   visible: boolean;
   message: string;
+}
+
+/**
+ * Состояние согласия на хранение данных словами — тот же разбор, что у
+ * медданных (`healthStatusText` ниже): ни один исход не притворяется
+ * другим. Дата берётся из `granted_at` реестра; её отсутствие при
+ * действующем согласии — не повод выдумать дату и не повод сказать
+ * «не разрешено».
+ */
+function dataStorageStatusText(consents: ConsentsResponse): string {
+  if (!consents.data_storage_granted) return "Не разрешено";
+  return consents.data_storage_consent_at
+    ? `Разрешено ${formatConsentDate(consents.data_storage_consent_at)}`
+    : "Разрешено";
 }
 
 const EMPTY_TOAST: ToastState = { visible: false, message: "" };
@@ -120,10 +152,13 @@ export function CustomerProfileScreen() {
   );
   const [toast, setToast] = useState<ToastState>(EMPTY_TOAST);
   const [marketingBusy, setMarketingBusy] = useState(false);
+  const [hintsBusy, setHintsBusy] = useState(false);
   const [exportOpen, setExportOpen] = useState(false);
   const [deleteOpen, setDeleteOpen] = useState(false);
+  const [storageOpen, setStorageOpen] = useState(false);
   const exportTriggerRef = useRef<HTMLButtonElement | null>(null);
   const deleteTriggerRef = useRef<HTMLButtonElement | null>(null);
+  const storageTriggerRef = useRef<HTMLButtonElement | null>(null);
   // Согласие на медданные (DRF-1453) — РЕАЛЬНЫЙ эндпоинт, у него свой
   // ресурс вне общего `Status` и своя загрузка: строка обязана быть
   // видна в проде всегда. Пока состояние неизвестно (`null`) строка
@@ -132,6 +167,8 @@ export function CustomerProfileScreen() {
   const [healthConsent, setHealthConsent] = useState<HealthConsentState | null>(null);
   const [healthFailed, setHealthFailed] = useState(false);
   const [healthSheetOpen, setHealthSheetOpen] = useState(false);
+  const [tzSheetOpen, setTzSheetOpen] = useState(false);
+  const tzTriggerRef = useRef<HTMLButtonElement | null>(null);
   const healthTriggerRef = useRef<HTMLButtonElement | null>(null);
 
   const load = useCallback(async () => {
@@ -192,6 +229,27 @@ export function CustomerProfileScreen() {
       ? "Отозвать разрешение учитывать питание"
       : "Разрешить учитывать питание";
 
+  /**
+   * Записать пояс и обновить экран ТЕМ, ЧТО ОТВЕТИЛ СЕРВЕР.
+   *
+   * Не тем, что человек нажал: сервер проверяет значение (DRF-1477) и
+   * он же — источник правды. Показать нажатое, не дождавшись ответа,
+   * значило бы завести на экране второе состояние того же поля.
+   *
+   * Ошибку НЕ глотаем — её показывает сам лист, и человек видит, что
+   * пояс остался прежним, а не уходит уверенным в обратном.
+   */
+  const onTimezoneSaved = useCallback(async (zone: string) => {
+    const saved = await saveTimezone(zone);
+    setStatus((prev) =>
+      prev.kind === "ready" ? { ...prev, me: { ...prev.me, timezone: saved } } : prev,
+    );
+    setToast({
+      visible: true,
+      message: `Запомнила: ${zoneLabel(saved)}. Изменить можно здесь же.`,
+    });
+  }, []);
+
   const onHealthSettled = useCallback((next: HealthConsentState) => {
     setHealthConsent(next);
     setToast({
@@ -238,6 +296,53 @@ export function CustomerProfileScreen() {
       });
     } finally {
       setMarketingBusy(false);
+    }
+  }, []);
+
+  // «Подсказки от Ayla». Контракт клиента говорит в терминах opt-out,
+  // экран — в терминах «включено»; инверсия одна и лежит в lib.
+  const onHintsToggle = useCallback(async (next: boolean) => {
+    setHintsBusy(true);
+    try {
+      const updated = await setProactiveOptOut(!next);
+      const enabled = !updated.proactive_messages_opt_out;
+      setStatus((s) =>
+        s.kind === "ready"
+          ? { ...s, consents: { ...s.consents, proactive_hints_enabled: enabled } }
+          : s,
+      );
+      setToast({
+        visible: true,
+        message: enabled
+          ? "Хорошо, иногда буду писать первой."
+          : "Поняла, первой писать не буду.",
+      });
+    } catch {
+      setToast({
+        visible: true,
+        message: "Не получилось сохранить. Попробуй ещё раз.",
+      });
+    } finally {
+      setHintsBusy(false);
+    }
+  }, []);
+
+  // Отзыв состоялся. Состояние берётся из ответа сервера целиком —
+  // включая «Подсказки» (§35 п.9): экран показывает то, что сказал
+  // сервер, а не то, чего требует решение.
+  const onStorageRevoked = useCallback((next: ConsentsResponse) => {
+    setStatus((s) => (s.kind === "ready" ? { ...s, consents: next } : s));
+  }, []);
+
+  // 409 stale_disclosure — тело чинить нечего. Перечитываем состояние,
+  // чтобы следующее открытие листа показало актуальное раскрытие.
+  const onStorageStaleDisclosure = useCallback(async () => {
+    try {
+      const fresh = await fetchConsents();
+      setStatus((s) => (s.kind === "ready" ? { ...s, consents: fresh } : s));
+    } catch {
+      // Перечитать не вышло — строка остаётся прежней, а лист уже
+      // сказал, что текст обновился. Достраивать состояние нечем.
     }
   }, []);
 
@@ -341,7 +446,7 @@ export function CustomerProfileScreen() {
                   title="Акции и предложения"
                   ariaLabel="Получать акции и предложения от салонов"
                   checked={status.consents.marketing_consent}
-                  busy={marketingBusy}
+                  busy={marketingBusy || offline}
                   onChange={onMarketingToggle}
                   description={
                     <>
@@ -350,12 +455,49 @@ export function CustomerProfileScreen() {
                     </>
                   }
                 />
-                {/* TODO(DRF-1520): строка «Хранение данных» скрыта — у
-                    неё нет честных данных (реальный /me не отдаёт дату
-                    общего согласия), а выдуманная дата — ложь о 152-ФЗ.
-                    При возврате это будет НЕ тумблер и не строка с
-                    датой, а сценарий с подтверждением последствий
-                    отзыва согласия (потеря работы Ayla с профилем). */}
+                {/* Хранение данных (DRF-1475 §24, ручка DRF-1520).
+                    Дата — `granted_at` реестра, а не `BotUser.consent_at`:
+                    ту приветственный поток ставит, а отзыв не снимает.
+                    Пустой `granted_at` — не пробел, а отсутствие
+                    действующей выдачи, и строка говорит именно это. */}
+                {status.consents.data_storage_granted ? (
+                  <ConsentRow
+                    variant="action"
+                    title="Хранение данных"
+                    statusText={dataStorageStatusText(status.consents)}
+                    actionLabel="Отозвать"
+                    actionAriaLabel="Отозвать согласие на хранение данных"
+                    busy={offline}
+                    triggerRef={storageTriggerRef}
+                    onAction={() => setStorageOpen(true)}
+                    description={
+                      <>
+                        Согласие, на котором <span lang="en">Ayla</span>{" "}
+                        хранит и использует твои данные. Отозвать можно
+                        здесь: аккаунт и доступ к записям останутся.
+                        Удаление аккаунта — отдельное действие ниже.
+                      </>
+                    }
+                  />
+                ) : (
+                  /* Согласия нет — и кнопки нет: выдача через эту ручку
+                     не проходит (сервер принимает только отзыв), а
+                     кнопка «Разрешить» обещала бы то, чего экран
+                     сделать не может. */
+                  <ConsentRow
+                    variant="info"
+                    title="Хранение данных"
+                    statusText="Не разрешено"
+                    description={
+                      <>
+                        Согласие на хранение данных сейчас не действует.{" "}
+                        <span lang="en">Ayla</span> не сохраняет и не
+                        использует данные по нему. Аккаунт и доступ к
+                        записям при этом остались.
+                      </>
+                    }
+                  />
+                )}
                 {/* Медданные — реальный эндпоинт, видно во всех сборках.
                     Вариант "action", а не тумблер: особая категория по
                     152-ФЗ ст. 10 не переключается одним касанием мимо
@@ -410,6 +552,49 @@ export function CustomerProfileScreen() {
             </section>
 
             {/* R3 — Memory transparency (deferred) */}
+            {/* Часовой пояс (DRF-1477). Своя секция, а не строка среди
+                согласий: пояс — не согласие, и складывать их вместе
+                значило бы предложить человеку «разрешить» своё
+                местоположение во времени.
+
+                Рядом на этом экране — имя, согласия и отзыв хранения.
+                Ничего про здоровье и питание здесь нет: пояс к особой
+                категории не относится, и подмешивать соседей нельзя. */}
+            <section
+              className="profile-section"
+              aria-labelledby="profile-tz-h2"
+            >
+              <h2 id="profile-tz-h2" className="profile-section__heading">
+                Часовой пояс
+              </h2>
+              <dl className="profile-consent-list">
+                <ConsentRow
+                  variant="action"
+                  title="Мой пояс"
+                  statusText={
+                    status.me.timezone
+                      ? zoneLabel(status.me.timezone)
+                      : "Не задан"
+                  }
+                  actionLabel={status.me.timezone ? "Изменить" : "Указать"}
+                  actionAriaLabel={
+                    status.me.timezone
+                      ? `Изменить часовой пояс, сейчас ${zoneLabel(status.me.timezone)}`
+                      : "Указать часовой пояс"
+                  }
+                  description={
+                    <>
+                      По нему <span lang="en">Ayla</span> считает время в
+                      напоминаниях. Пока пояс не задан, время считается по
+                      салону, в который ты записываешься.
+                    </>
+                  }
+                  onAction={() => setTzSheetOpen(true)}
+                  triggerRef={tzTriggerRef}
+                />
+              </dl>
+            </section>
+
             <section
               className="profile-section"
               aria-labelledby="profile-r3-h2"
@@ -420,13 +605,37 @@ export function CustomerProfileScreen() {
               <ComingSoonCard />
             </section>
 
-            {/* TODO(DRF-1520): секция R4 «Подсказки от Ayla» скрыта —
-                ручек me/proactive_opt_out пока нет, а тумблер, который
-                человек двигает, а он ничего не делает, врёт про наличие
-                контроля (решение владельца 05.09: «не показывать
-                неработающие тумблеры»). Код fetchProactivePrefs /
-                setProactiveOptOut в lib/customer-profile.ts сохранён —
-                вернуть секцию, когда DRF-1520 даст реальные эндпоинты. */}
+            {/* R4 — «Подсказки от Ayla» (ручка DRF-1520). Это не
+                ConsentRecord, а колонка `proactive_messages_opt_out`,
+                которую планировщики читают первой проверкой: до
+                DRF-1520 бот решал, писать ли первым, состоянием,
+                которого человек не видел и изменить не мог. */}
+            <section
+              className="profile-section"
+              aria-labelledby="profile-r4-h2"
+            >
+              <h2 id="profile-r4-h2" className="profile-section__heading">
+                Подсказки от <span lang="en">Ayla</span>
+              </h2>
+              <dl className="profile-consent-list">
+                <ConsentRow
+                  variant="toggle"
+                  title="Подсказки от Ayla"
+                  ariaLabel="Получать подсказки от Ayla"
+                  checked={status.consents.proactive_hints_enabled}
+                  busy={hintsBusy || offline}
+                  onChange={onHintsToggle}
+                  description={
+                    <>
+                      Иногда <span lang="en">Ayla</span> напишет первой —
+                      напомнит про уход или подскажет, когда пора
+                      повторить. Напоминания о твоих записях приходят
+                      отдельно и от этого тумблера не зависят.
+                    </>
+                  }
+                />
+              </dl>
+            </section>
 
             {/* Cards (C7.2 skeleton) — real screen, honest empty state
                 until the W3 passthrough ships. */}
@@ -517,6 +726,13 @@ export function CustomerProfileScreen() {
         granted={healthConsent?.granted ?? false}
         onSettled={onHealthSettled}
       />
+      <TimezoneSheet
+        open={tzSheetOpen}
+        triggerRef={tzTriggerRef}
+        onClose={() => setTzSheetOpen(false)}
+        current={status.kind === "ready" ? status.me.timezone : ""}
+        onSave={onTimezoneSaved}
+      />
       <PersonalDataExportSheet
         open={exportOpen}
         triggerRef={exportTriggerRef}
@@ -527,6 +743,21 @@ export function CustomerProfileScreen() {
         open={deleteOpen}
         triggerRef={deleteTriggerRef}
         onClose={() => setDeleteOpen(false)}
+      />
+      {/* Отзыв согласия на хранение данных (§35 п.6-п.9, п.16). Версия
+          раскрытия — из ответа сервера, токен — общий с C5-удалением. */}
+      <DataStorageRevokeSheet
+        open={storageOpen && status.kind === "ready"}
+        triggerRef={storageTriggerRef}
+        onClose={() => setStorageOpen(false)}
+        disclosureVersion={
+          status.kind === "ready"
+            ? status.consents.data_storage_disclosure_version
+            : ""
+        }
+        confirmationToken={DELETE_CONFIRMATION_TOKEN}
+        onRevoked={onStorageRevoked}
+        onStaleDisclosure={onStorageStaleDisclosure}
       />
 
       {/* Toggle confirmation toast (R6 §8.3 + marketing change). */}

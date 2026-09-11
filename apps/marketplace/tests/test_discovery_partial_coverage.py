@@ -24,6 +24,7 @@ This module pins the two functions that supply that verdict:
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from uuid import uuid4
 
 import pytest
 from django.conf import settings
@@ -71,6 +72,10 @@ def _master(tenant: Tenant, name: str, *, specialization: str = "") -> CatalogMa
         specialization=specialization,
         is_active=True,
         invite_status=CatalogMaster.InviteStatus.ACCEPTED,
+        # DRF-1540/1544 — синхронизированная строка несёт канонический ключ.
+        # Без него мастер не продаётся, и пустая выдача читалась бы как
+        # поломка подбора, а не как отсутствие связи с Ayla.
+        ayla_user_id=uuid4(),
     )
 
 

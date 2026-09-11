@@ -114,7 +114,7 @@ def _idempotency_lock_key(*, request_id: str, decision: str) -> str:
 def dispatch_master_decision_dm(
     self: Any,
     *,
-    chat_id: str,
+    user_id: str,
     decision: str,
     date_range_human: str,
     request_id: str,
@@ -150,7 +150,12 @@ def dispatch_master_decision_dm(
     metadata can linger in the result backend.
 
     Args:
-      chat_id: target MAX chat id (master's ``linked_bot_user.chat_id``).
+      user_id: the master as a PERSON — ``linked_bot_user.channel_user_id``
+        (DRF-1558). Not ``chat_id``: this DM is written first, and a
+        stored dialog id belongs to whichever bot opened that dialog.
+        The kwarg was renamed rather than reinterpreted so an in-flight
+        task enqueued by the previous release fails loudly on the worker
+        instead of quietly sending to a dialog id read as a person id.
       decision: ``"approved"`` or ``"rejected"`` — picks the message text.
       date_range_human: pre-formatted Russian date / range string.
       request_id: ScheduleChangeRequest UUID (logging context only).
@@ -192,11 +197,11 @@ def dispatch_master_decision_dm(
         )
         return {"sent": False, "reason": "invalid_decision"}
 
-    chat_id_norm = (chat_id or "").strip()
-    if not chat_id_norm:
+    user_id_norm = (user_id or "").strip()
+    if not user_id_norm:
         # Structured-only log: master / request ids, no text.
         logger.info(
-            "admin_api.tasks.dispatch_master_decision_dm.no_chat_id master=%s request=%s",
+            "admin_api.tasks.dispatch_master_decision_dm.no_user_id master=%s request=%s",
             master_id,
             request_id,
         )
@@ -223,7 +228,7 @@ def dispatch_master_decision_dm(
         return {"sent": False, "reason": "already_sent"}
 
     try:
-        send_message(chat_id=chat_id_norm, text=text)
+        send_message(user_id=user_id_norm, text=text)
     except MaxAPIError:
         # Surface #3: structured-only log — no rendered text, no
         # rejection_reason. ``exc_info=True`` retains the traceback

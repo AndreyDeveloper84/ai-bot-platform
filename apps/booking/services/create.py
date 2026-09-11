@@ -21,12 +21,20 @@ human-readable ``detail``. View layer maps ``slug`` to HTTP status:
 
 * ``service_not_found`` → 404
 * ``service_unbookable`` → 409
-* ``master_not_bookable`` → 404 (covers archive + invite_status filter)
+* ``master_not_bookable`` → 404 (invite is not accepted)
+* ``master_ayla_unlinked`` → 404 (DRF-1548: no canonical Ayla link, so
+  the booking notification would never reach the master)
 * ``service_not_offered`` → 404
 * ``visit_in_past`` → 400
 * ``slot_unavailable`` → 409
 * ``master_archived`` → 409 (race: deactivated after we resolved id)
 * ``tenant_mismatch`` → 403
+
+The three master refusals come from one place —
+``apps.booking.services.master_gate.master_sale_refusal`` — which asks
+the product-wide sale gate (``apps.catalog.master_state.sale_block``)
+instead of re-assembling its columns here. ``transitions.commit_reschedule``
+asks the same function; the slug is what ties the two sites together.
 
 ### Why a separate exception class instead of ValidationError
 
@@ -54,6 +62,7 @@ from apps.booking.services.attribution import (
     compute_assist_score,
     compute_billable,
 )
+from apps.booking.services.master_gate import master_sale_refusal
 from apps.catalog.models import CatalogMaster, CatalogService, MasterService
 from apps.events.services import emit
 from apps.identity.models import BotUser
@@ -240,17 +249,20 @@ def create_customer_booking(
             # Under-lock re-check: master may have been archived /
             # invite revoked / tenant mismatched between view lookup
             # and lock acquisition.
+            #
+            # DRF-1548. Гейт продажи спрашивается целиком
+            # (``master_sale_refusal`` → ``sale_block``), а не набирается
+            # здесь по столбцам: своя копия не знала ни про
+            # ``archived_at``, ни про ``ayla_user_id``, и мастер без
+            # канонической связи с Ayla бронь получал — а уведомление о
+            # ней не доходило. Порядок шагов под локом не изменился:
+            # проверка стоит там же, до ``MasterService``, до резолвера
+            # и до вставки.
             if master.tenant_id != inp.tenant.id:
                 raise BookingCreateError("tenant_mismatch", "master belongs to a different tenant")
-            if not master.is_active:
-                raise BookingCreateError(
-                    "master_archived", "master deactivated before booking confirmed"
-                )
-            if master.invite_status != CatalogMaster.InviteStatus.ACCEPTED:
-                raise BookingCreateError(
-                    "master_not_bookable",
-                    f"master invite_status={master.invite_status}",
-                )
+            refusal = master_sale_refusal(master)
+            if refusal is not None:
+                raise BookingCreateError(*refusal)
 
             if not MasterService.all_tenants.filter(
                 tenant_id=inp.tenant.id,

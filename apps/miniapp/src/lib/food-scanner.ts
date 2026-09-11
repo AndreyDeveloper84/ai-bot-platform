@@ -56,6 +56,8 @@
 // — frontend must null-safe; UI never crashes.
 // ---------------------------------------------------------------------------
 
+import { request } from "./api";
+
 export interface NutritionFacts {
   calories: number;
   protein_g: number;
@@ -111,7 +113,17 @@ export interface DailySummaryEntry {
 export interface DailySummaryResponse {
   date: string; // YYYY-MM-DD
   calories_total: number;
-  calories_goal: number;
+  /**
+   * `calories_goal` СНЯТО. Ayla ключ больше не присылает: плоскую норму
+   * 2000 ккал для всех владелец удалил 09.09.2026 (§82), а
+   * версионированный расчёт (§85) — отдельный срез. Обязательное поле
+   * здесь заставляло бы выдумать значение при любой попытке собрать
+   * этот объект — что стаб ниже и делал, подставляя 2100.
+   *
+   * Когда ориентир появится, он придёт НЕОБЯЗАТЕЛЬНЫМ (`?:`), как
+   * `calories_target` в `customer-wellness.ts`: экран обязан уметь
+   * его отсутствие, а не полагаться на то, что число всегда есть.
+   */
   protein_g: number;
   fat_g: number;
   carbs_g: number;
@@ -168,11 +180,9 @@ export class PhotoBytesMissingError extends Error {
  * is not wired, prod-mode calls throw → `StateError` renders. NEVER
  * ship fake recognition results / fake daily totals to a real customer.
  */
-class StubNotWiredError extends Error {
+export class StubNotWiredError extends Error {
   constructor() {
-    super(
-      "Скан еды ещё не подключён. Загрузка временно недоступна. Попробуй позже.",
-    );
+    super("Распознавание еды по фото ещё не подключено.");
     this.name = "StubNotWiredError";
   }
 }
@@ -290,7 +300,6 @@ const SCAN_STUB: Record<StubVariant, ScanResponse> = {
 
 interface DiaryState {
   entries: DailySummaryEntry[];
-  calories_goal: number;
 }
 
 const DIARY_STATE: { byDate: Map<string, DiaryState> } = {
@@ -308,7 +317,11 @@ function todayKey(): string {
 function ensureDiaryDay(date: string): DiaryState {
   let state = DIARY_STATE.byDate.get(date);
   if (!state) {
-    state = { entries: [], calories_goal: 2100 };
+    // Ориентира у стаба нет — ровно как у источника. Стояло
+    // `calories_goal: 2100`: выдуманное число, «подтверждавшее»
+    // константу вместо того, чтобы её ловить. Ровно так же здесь уже
+    // стояла выдуманная восьмёрка стаканов.
+    state = { entries: [] };
     DIARY_STATE.byDate.set(date, state);
   }
   return state;
@@ -395,34 +408,34 @@ export async function logMeal(
   return { log_id: logId, dish_name: dishName, meal_type: req.meal_type, calories };
 }
 
-export async function fetchDailySummary(
-  date?: string,
-): Promise<DailySummaryResponse> {
-  guardProd("GET /api/v1/customer/food/daily");
-  devWarn("fetchDailySummary served from stub — W4 follow-up");
-  const d = date ?? todayKey();
-  const day = ensureDiaryDay(d);
-  let calTotal = 0;
-  let pTotal = 0;
-  let fTotal = 0;
-  let cTotal = 0;
-  for (const e of day.entries) {
-    calTotal += e.calories;
-    // Approximate macros split when not available per-entry.
-    pTotal += Math.round(e.calories * 0.075);
-    fTotal += Math.round(e.calories * 0.018);
-    cTotal += Math.round(e.calories * 0.105);
-  }
-  return {
-    date: d,
-    calories_total: calTotal,
-    calories_goal: day.calories_goal,
-    protein_g: pTotal,
-    fat_g: fTotal,
-    carbs_g: cTotal,
-    entries: day.entries.slice(),
-  };
-}
+/*
+ * `fetchDailySummary` УДАЛЕНА 08.09.2026 вместе с выдуманным числом.
+ *
+ * Она читала `localStorage` и вычисляла БЖУ из калорий постоянными
+ * коэффициентами:
+ *
+ *     pTotal += Math.round(e.calories * 0.075);
+ *     fTotal += Math.round(e.calories * 0.018);
+ *     cTotal += Math.round(e.calories * 0.105);
+ *
+ * — и показывала это человеку как его белки, жиры и углеводы за день.
+ *
+ * До сих пор в этом контуре вычищали выдуманные НОРМЫ (§65): плоские
+ * 2000 ккал, восемь стаканов. Норма — выдуманная мишень, она врёт про
+ * то, к чему идти, и её можно оспорить. Здесь был выдуманный ФАКТ О
+ * ЧЕЛОВЕКЕ — про то, что он уже съел; свой факт о себе человек
+ * оспаривать не станет.
+ *
+ * Приближение было ещё и не нужно: настоящие `protein_g / fat_g /
+ * carbs_g` приходят НА КАЖДУЮ ЗАПИСЬ от источника
+ * (`nutrition/serializers.py::FoodLogEntrySerializer`).
+ *
+ * Снято тем же коммитом, которым подключены настоящие записи: до него
+ * выдумку закрывал `guardProd`, и одно лишь подключение данных само
+ * открыло бы ей дорогу к человеку.
+ *
+ * Настоящее чтение — `customer-wellness.ts::loadDiaryToday`.
+ */
 
 /**
  * Read the customer's health_flags. Production swap: read from
@@ -439,31 +452,60 @@ export async function fetchHealthFlags(): Promise<MeHealthFlagsResponse> {
 }
 
 // ---------------------------------------------------------------------------
-// 152-ФЗ consent gate persistence — DeviceStorage MVP, server-side
-// persist (`food_scanner_consent_at` field) deferred to W4 follow-up.
+// Согласие на сканирование еды (152-ФЗ) — источник правды СЕРВЕР.
 // ---------------------------------------------------------------------------
+//
+// Здесь стоял `localStorage`, и это был не «MVP-компромисс», а петля.
+//
+// Колонка `BotUser.food_scanner_consent_at` существует с миграции `0013`,
+// и её читает гейт навыка (`apps/skills/food_scanner/skill.py:463`).
+// Писателей у неё не было ни одного. Человек давал согласие в
+// мини-приложении, экран его принимал и пропускал дальше — а бот на то же
+// самое согласие отвечал «открой Mini App и дай согласие». Каждый раз. На
+// новом устройстве всё начиналось заново, потому что согласие лежало в
+// браузере предыдущего.
+//
+// Теперь согласие пишется ручкой `me/food-scanner-consent/` и читается
+// вместе с профилем. `localStorage` авторитетом быть перестал и здесь не
+// живёт вовсе: браузер на новом устройстве сказал бы «согласия нет» там,
+// где база говорит «есть», и разошлись бы они молча.
 
-const CONSENT_STORAGE_KEY = "ayla.food_scanner_consent_at";
-
-export function readConsentAt(): string | null {
-  if (typeof window === "undefined") return null;
-  try {
-    return window.localStorage.getItem(CONSENT_STORAGE_KEY);
-  } catch {
-    return null;
-  }
+/**
+ * Прочитать согласие у СЕРВЕРА (приезжает вместе с профилем).
+ *
+ * `null` — согласия нет, и экран обязан спросить. Отсутствие ключа
+ * читается так же: fail-closed, отсутствие доезжает отсутствием.
+ */
+export async function fetchConsentAt(): Promise<string | null> {
+  const me = await request<{ food_scanner_consent_at?: string | null }>("/me", {
+    method: "GET",
+  });
+  return me.food_scanner_consent_at ?? null;
 }
 
-export function saveConsentAccepted(): string {
-  const now = new Date().toISOString();
-  if (typeof window !== "undefined") {
-    try {
-      window.localStorage.setItem(CONSENT_STORAGE_KEY, now);
-    } catch {
-      /* private mode / quota — UI still proceeds for this session */
-    }
-  }
-  return now;
+/**
+ * Дать согласие. Возвращает момент выдачи, записанный СЕРВЕРОМ.
+ *
+ * Момент берётся из ответа, а не из часов браузера: у гейта и у экрана
+ * должно быть одно значение, а часы на устройстве человека могут
+ * показывать что угодно.
+ */
+export async function grantConsent(): Promise<string | null> {
+  const res = await request<{ granted_at?: string | null }>(
+    "/me/food-scanner-consent/",
+    { method: "POST" },
+  );
+  return res.granted_at ?? null;
+}
+
+/**
+ * Отозвать согласие. Отзыв доступен тем же способом, что и выдача, —
+ * иначе это была бы новая строка «право на отзыв недостижимо из
+ * приложения» (DRF-1520) в день закрытия старой.
+ */
+export async function withdrawConsent(): Promise<null> {
+  await request("/me/food-scanner-consent/", { method: "DELETE" });
+  return null;
 }
 
 // ---------------------------------------------------------------------------

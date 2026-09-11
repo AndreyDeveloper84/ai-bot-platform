@@ -82,8 +82,10 @@ def make_user(
     user = BotUser.all_tenants.create(
         tenant=tenant,
         channel="max",
-        channel_user_id=f"np-{suffix}",
-        chat_id="chat-np-1" if chat_id is None else chat_id,
+        # DRF-1558 — адрес проактивной отправки это ``channel_user_id``.
+        # ``chat_id`` намеренно другой: совпадение прятало бы регрессию.
+        channel_user_id=f"np-{suffix}" if chat_id is None else chat_id,
+        chat_id=f"dialog-of-np-{suffix}",
         proactive_messages_opt_out=opt_out,
         consent_at=now if consented else None,
         food_scanner_consent_at=now if consented else None,
@@ -267,7 +269,7 @@ class TestDefaultsAreOff:
         decisions = tasks.plan_water_reminders(now_utc=NOON, fetch=water_reader(0))
         assert only(decisions, user).reason == "no_consent"
 
-    def test_no_chat_id_is_not_even_a_candidate(self, tenant: Tenant) -> None:
+    def test_no_address_is_not_even_a_candidate(self, tenant: Tenant) -> None:
         user = make_user(tenant, chat_id="")
         decisions = tasks.plan_water_reminders(now_utc=NOON, fetch=water_reader(0))
         assert all(d.bot_user_id != user.pk for d in decisions)
@@ -504,7 +506,8 @@ class TestSwitches:
             result = tasks.send_water_reminders()
         assert result["sent"] == 1
         send.assert_called_once()
-        assert send.call_args.kwargs["chat_id"] == "chat-np-1"
+        assert send.call_args.kwargs["user_id"] == "np-1"
+        assert "chat_id" not in send.call_args.kwargs
 
         stored = prefs.get_prefs(BotUser.all_tenants.get(pk=user.pk))
         assert stored["water"]["sent"] == 1
@@ -600,7 +603,7 @@ class TestConsentGate:
         assert [d.reason for d in decisions] == ["no_consent"] * 2
 
     def test_erased_user_is_not_written_to(self, tenant: Tenant) -> None:
-        """``soft_delete_user()`` does not clear ``chat_id``.
+        """``soft_delete_user()`` does not clear the address.
 
         An erased row stays addressable, which is the whole reason this
         condition is in the gate rather than left to the queryset. One
@@ -609,7 +612,9 @@ class TestConsentGate:
         user = make_user(tenant, water=True, report="12:00")
         BotUser.all_tenants.filter(pk=user.pk).update(deleted_at=NOON)
         user.refresh_from_db()
-        assert (user.chat_id or "").strip(), "still addressable — that is why this gate exists"
+        assert (user.channel_user_id or "").strip(), (
+            "still addressable — that is why this gate exists"
+        )
 
         assert self._both(tenant, user) == []
         assert selection.check_common(user) == "deleted"

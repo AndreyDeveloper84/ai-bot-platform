@@ -13,11 +13,12 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from uuid import uuid4
 
 import pytest
 
 from apps.catalog.models import CatalogMaster, CatalogService, MasterService
-from apps.marketplace.discovery import _rotate_ties, discover_masters_for_service
+from apps.marketplace.discovery import rotate_ties, discover_masters_for_service
 from apps.tenancy.models import Tenant
 
 pytestmark = [pytest.mark.django_db]
@@ -49,6 +50,10 @@ def popular(penza: Tenant) -> CatalogService:
             name=f"Мастер {index:02d}",
             is_active=True,
             invite_status=CatalogMaster.InviteStatus.ACCEPTED,
+            # DRF-1540/1544 — синхронизированная строка несёт канонический ключ.
+            # Без него мастер не продаётся, и пустая выдача читалась бы как
+            # поломка подбора, а не как отсутствие связи с Ayla.
+            ayla_user_id=uuid4(),
         )
         MasterService.all_tenants.create(tenant=penza, master=master, service=service)
     return service
@@ -148,7 +153,7 @@ class TestScoreStillOutranksRotation:
     """Парная положительная стража (DRF-1411) для общей функции порядка.
 
     На этом пути кандидаты равны по построению, поэтому утверждение
-    проверяется на самой `_rotate_ties` — той функции, которой тап теперь
+    проверяется на самой `rotate_ties` — той функции, которой тап теперь
     пользуется. Если бы ротация умела двигать различённых кандидатов, чинить
     надо было бы её, а не вызывающего.
     """
@@ -162,18 +167,22 @@ class TestScoreStillOutranksRotation:
                 name=f"Мастер {index:02d}",
                 is_active=True,
                 invite_status=CatalogMaster.InviteStatus.ACCEPTED,
+                # DRF-1540/1544 — синхронизированная строка несёт канонический ключ.
+                # Без него мастер не продаётся, и пустая выдача читалась бы как
+                # поломка подбора, а не как отсутствие связи с Ayla.
+                ayla_user_id=uuid4(),
             )
             # ``setattr`` and not an assignment: ``match_score`` is put on the
             # row by the queryset's ``annotate``, not by the model, so the
             # attribute genuinely does not exist on the class — which is
-            # exactly the shape ``_rotate_ties`` reads it in.
+            # exactly the shape ``rotate_ties`` reads it in.
             setattr(master, "match_score", 1.0 if index == 3 else 0.5)  # noqa: B010
             masters.append(master)
 
-        winners = {_rotate_ties(masters, f"conv-{i}")[0].name for i in range(50)}
+        winners = {rotate_ties(masters, f"conv-{i}")[0].name for i in range(50)}
 
         # Positive first: everybody is still in the list, all fifty times.
-        assert all(len(_rotate_ties(masters, f"conv-{i}")) == 8 for i in range(50))
+        assert all(len(rotate_ties(masters, f"conv-{i}")) == 8 for i in range(50))
         assert winners == {"Мастер 03"}
 
     def test_ties_below_the_winner_still_rotate(self, penza: Tenant) -> None:
@@ -185,15 +194,19 @@ class TestScoreStillOutranksRotation:
                 name=f"Мастер {index:02d}",
                 is_active=True,
                 invite_status=CatalogMaster.InviteStatus.ACCEPTED,
+                # DRF-1540/1544 — синхронизированная строка несёт канонический ключ.
+                # Без него мастер не продаётся, и пустая выдача читалась бы как
+                # поломка подбора, а не как отсутствие связи с Ayla.
+                ayla_user_id=uuid4(),
             )
             # ``setattr`` and not an assignment: ``match_score`` is put on the
             # row by the queryset's ``annotate``, not by the model, so the
             # attribute genuinely does not exist on the class — which is
-            # exactly the shape ``_rotate_ties`` reads it in.
+            # exactly the shape ``rotate_ties`` reads it in.
             setattr(master, "match_score", 1.0 if index == 3 else 0.5)  # noqa: B010
             masters.append(master)
 
-        seconds = {_rotate_ties(masters, f"conv-{i}")[1].name for i in range(80)}
+        seconds = {rotate_ties(masters, f"conv-{i}")[1].name for i in range(80)}
 
         # The tie under the winner is a tie, and rotation is what orders it —
         # otherwise «Мастер 00» would be second in every conversation forever.

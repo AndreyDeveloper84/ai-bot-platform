@@ -25,7 +25,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 2
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
@@ -37,7 +37,14 @@ jobs:
           set -euo pipefail
           git fetch origin "$BASE_REF" --depth=1
           BASE_SHA="$(git rev-parse "origin/$BASE_REF")"
-          CHANGED="$(git diff --name-only "$BASE_SHA"...HEAD || true)"
+          # NUL-separated (-z) so git never quotes the path. Without it a
+          # filename holding Cyrillic or a space arrives C-escaped as
+          # "docs/…\320\236…" — the leading quote defeats the ^docs/ anchor
+          # below, and a genuinely docs-only PR is declared "mixed". This
+          # workflow then self-cancels while ci.yml stays silent on its
+          # paths-ignore, leaving the required check with no authority at
+          # all and the PR blocked forever (observed on PR #1504).
+          CHANGED="$(git diff --name-only -z "$BASE_SHA"...HEAD | tr '\0' '\n' || true)"
           if [ -z "$CHANGED" ]; then
             echo "::warning::No changed files detected — treating as docs-only no-op."
             echo "is_docs_only=true" >> "$GITHUB_OUTPUT"

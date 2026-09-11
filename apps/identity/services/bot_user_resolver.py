@@ -89,7 +89,25 @@ def resolve_bot_user(verified: Any, *, surface: str = "miniapp") -> BotUser | No
             verified.user_id,
         )
 
-    return qs.select_related("tenant").order_by("-last_seen").first()
+    # DRF-1653 — `-last_seen` alone is not a total order, and the third step
+    # is the one place where that matters.
+    #
+    # `last_seen` is `auto_now=True` (apps/identity/models.py:167), so two rows
+    # touched in the same clock tick carry the identical value. On a tie
+    # Postgres returns whichever row it reaches first, and "whichever" is not
+    # stable: an `UPDATE` moves a row within the heap, so the same person, the
+    # same two rows and the same query can resolve to a different tenant on two
+    # consecutive requests. This is authentication — the answer decides whether
+    # someone is an owner or a stranger — and an answer that changes without an
+    # input changing is worse than a wrong one, because it cannot be
+    # reproduced, reported, or tested.
+    #
+    # `pk` as the tie-break makes no claim about which row is better. It claims
+    # only that the same data yields the same answer. Choosing by recency is
+    # step 3's stated rule; when recency does not distinguish, nothing here
+    # knows more, and the honest fix is determinism rather than a new
+    # preference invented at the bottom of the fallback chain.
+    return qs.select_related("tenant").order_by("-last_seen", "pk").first()
 
 
 __all__ = ["resolve_bot_user", "resolve_tenant_slug_for_init_data"]

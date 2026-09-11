@@ -1253,10 +1253,53 @@ def build_concierge_system_prompt(
     if memory_block:
         parts.append(memory_block)
     if nutrition_block:
+        # §48 — разрешение едет ТОЛЬКО вместе с картиной. Это и есть
+        # детерминированный гейт: нет блока — нет и способности, и решает
+        # это код выше по стеку, а не модель и не тема разговора.
+        parts.append(_NUTRITION_WELLNESS_INTERPRETATION)
         parts.append(nutrition_block)
     if extra_system:
         parts.append(extra_system)
     return "\n\n".join(parts)
+
+
+#: Nutrition Wellness Interpretation — решение владельца §48 (07.09.2026).
+#:
+#: НЕ исключение из медицинской границы. Граница выше не тронута ни одним
+#: словом и остаётся в силе целиком; это отдельная, положительно
+#: определённая способность, которая существует рядом с ней.
+#:
+#: Название выбрано владельцем намеренно: «исключение из границы» — это
+#: формулировка, которая приглашает себя расширять, и каждый следующий
+#: случай просился бы в то же исключение. Расширить способность нельзя,
+#: дописав сюда строку: придётся расширить ГЕЙТ
+#: (:mod:`apps.orchestrator.nutrition_wellness`), а это видимое действие
+#: в дифе.
+#:
+#: Едет в промпт только когда к ходу приложена картина питания. Допуск
+#: решён кодом ДО этой точки — модель узнаёт о нём тем, что картина
+#: пришла.
+#:
+#: Юридический статус: продуктово-архитектурное направление, не
+#: канонический медицинский норматив. Перед превращением в канон —
+#: отдельный прогон через Privacy / Safety / Legal.
+_NUTRITION_WELLNESS_INTERPRETATION = (
+    "Питание (отдельная способность, границы выше остаются в силе):\n"
+    "- К этому ходу приложена картина питания клиента. Тебе разрешено "
+    "назвать связь между тем, что человек ел, и его запросом — своими "
+    "словами, коротко и БЕЗ ЦИФР.\n"
+    # Формулировка обходит слово «диагноз» намеренно, и не из
+    # брезгливости: исходящий страж ловит его ЛЮБОЕ вхождение, включая
+    # отрицающее («это не диагноз»), — шаблон _MEDICAL требует после него
+    # лишь слово, а разделитель у него необязателен. Пока это так, строка
+    # с «диагнозом» внутри промпта роняет бюджетный страж собственной
+    # копии бота. Дефект стража общий и вынесен отдельным PR; здесь он
+    # обойдён, а не замаскирован.
+    "- Это не медицинский совет: назначений, препаратов, добавок, "
+    "диет и целей по весу по-прежнему нет.\n"
+    "- Если тема уходит в симптом, боль, вес или лечение — граница выше "
+    "возвращается немедленно, и связь называть не нужно."
+)
 
 
 def _max_llm_passes() -> int:
@@ -1636,7 +1679,16 @@ def _concierge_turn(
             latency_total_ms=int((time.monotonic() - started) * 1000),
             skill_selected="concierge_refusal_repeat",
         )
-        return DiscoveryReply(text=rendered.text, persisted=True)
+        # DRF-1576 — the keyboard travels with the words, like it does on the
+        # seven other returns in this module. Dropping ``action_data`` here
+        # sent the repeat refusal out as bare text: the alternatives it names
+        # («Классический массаж») were rendered as chips and then discarded,
+        # so the one turn that most needs a way out arrived with none.
+        return DiscoveryReply(
+            text=rendered.text,
+            action_data=rendered.action_data,
+            persisted=True,
+        )
 
     llm_client = RouterLLMClient(skill=CONCIERGE_SKILL)
 
@@ -1980,6 +2032,10 @@ def _concierge_turn(
             bot_user=bot_user,
             conversation=conversation,
             trace_id=trace_id or "",
+            # DRF-1542 — реплика человека, а не пересказ модели. Вето
+            # health_screening считается по ней: иначе модель проверяет
+            # себя собой и всегда соглашается.
+            message_text=message_text,
         )
         if result is not None and result.reply_text:
             return _reply(
@@ -2072,6 +2128,10 @@ def _concierge_turn(
             # ``salon`` argument is checked against it before the platform
             # answers for a salon (see ``discovery.salon_named_in``).
             said=_conversation_text(conversation, message_text),
+            # C-01 — сид ротации услуг. Тот же разговор, что уже сеет
+            # ротацию мастеров, чтобы два экрана в одном диалоге не
+            # расходились в порядке.
+            conversation=conversation,
         )
         if catalog_reply is not None:
             # No re-clamp to _MAX_REPLY_CHARS here: the renderer already bounds

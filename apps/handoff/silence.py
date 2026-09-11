@@ -263,14 +263,18 @@ def release_notices_for(task: "AdminTask") -> int:
                 notice.conversation_id,
                 notice.silence_notified_at is not None,
             )
-            if notice.silence_notified_at is not None and notice.chat_id:
+            # DRF-1558 — освобождение уходит ПОЗЖЕ хода и вне его: адресуем
+            # человека, а не сохранённый диалог. ``notice.chat_id`` остаётся
+            # признаком «уведомление в этом эпизоде вообще отправлялось».
+            release_user_id = (getattr(notice.bot_user, "channel_user_id", "") or "").strip()
+            if notice.silence_notified_at is not None and notice.chat_id and release_user_id:
                 # Delivery and transcript are contained SEPARATELY, so the log
                 # names what actually broke. Folded together, a transcript
                 # failure was reported as `release_send_failed` — sending the
                 # next person to debug the network the message had just
                 # travelled over successfully.
                 try:
-                    _send(chat_id=notice.chat_id, text=SILENCE_RELEASED_TEXT)
+                    _send(user_id=release_user_id, text=SILENCE_RELEASED_TEXT)
                     sent += 1
                 except Exception:  # noqa: BLE001 — the episode is closed either way
                     logger.exception(
@@ -320,7 +324,7 @@ def _still_muted(notice: HandoffSilenceNotice) -> bool:
     )
 
 
-def _send(*, chat_id: str, text: str) -> None:
+def _send(*, chat_id: str | None = None, user_id: str | None = None, text: str) -> None:
     """Outbound for a notice. Short timeout — this is chrome, not an answer.
 
     Sender identity: neither the global nor the per-tenant client path
@@ -332,11 +336,16 @@ def _send(*, chat_id: str, text: str) -> None:
     ever acquire a ``bot_scope``, this call has to carry the bot forward
     explicitly instead: the release runs outside the turn, and the
     fallback would then answer as the wrong bot.
+
+    Two addresses, per DRF-1558. The mute notice goes out inside the turn
+    and keeps the event's ``chat_id``; the release notice goes out later,
+    from the admin or the sweep, and must name the person — a stored
+    dialog id is only valid for the bot that opened it.
     """
 
     from apps.channels.max.outbound import send_message
 
-    send_message(chat_id=chat_id, text=text, timeout=5.0)
+    send_message(chat_id=chat_id, user_id=user_id, text=text, timeout=5.0)
 
 
 def _record(*, conversation: "Conversation", text: str, action_type: str, trace_id: object) -> None:

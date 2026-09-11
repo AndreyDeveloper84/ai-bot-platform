@@ -53,6 +53,7 @@ import { BookingCard, BookingCardSkeleton } from "../components/BookingCard";
 import { EmptyRecordsState } from "../components/EmptyRecordsState";
 import { GoalInviteCard } from "../components/GoalInviteCard";
 import { TimeGroupHeader } from "../components/TimeGroupHeader";
+import { useOnline } from "../hooks/useOnline";
 import { ApiError } from "../lib/api";
 import {
   annotateItems,
@@ -74,11 +75,6 @@ type Slice<T> =
   | { kind: "loading" }
   | { kind: "ok"; data: T }
   | { kind: "error"; reason: "network" | "server" | "other" };
-
-function isOnline(): boolean {
-  if (typeof navigator === "undefined") return true;
-  return navigator.onLine !== false;
-}
 
 const FILTER_ALL = "__all__";
 
@@ -108,7 +104,7 @@ export function CustomerRecordsScreen() {
   const [history, setHistory] = useState<Slice<RecordsPage>>({
     kind: "loading",
   });
-  const [online, setOnline] = useState<boolean>(isOnline());
+  const online = useOnline();
   const [filter, setFilter] = useState<{ active: string }>({ active: FILTER_ALL });
   const [loadingMore, setLoadingMore] = useState(false);
 
@@ -165,19 +161,6 @@ export function CustomerRecordsScreen() {
       setLoadingMore(false);
     }
   }, [activeTab, upcoming, history]);
-
-  // ── online / offline transitions ─────────────────────────────────────
-  useEffect(() => {
-    if (typeof window === "undefined") return;
-    const onOnline = () => setOnline(true);
-    const onOffline = () => setOnline(false);
-    window.addEventListener("online", onOnline);
-    window.addEventListener("offline", onOffline);
-    return () => {
-      window.removeEventListener("online", onOnline);
-      window.removeEventListener("offline", onOffline);
-    };
-  }, []);
 
   // Reset filter when switching tabs.
   useEffect(() => {
@@ -301,7 +284,8 @@ export function CustomerRecordsScreen() {
           role="status"
           aria-live="polite"
         >
-          Записи могут быть устаревшими — нет сети.
+          Записи могут быть устаревшими — нет сети. Перенос, отмена и
+          новая запись сейчас недоступны.
         </div>
       )}
 
@@ -456,6 +440,7 @@ export function CustomerRecordsScreen() {
               onCancel: handleCancel,
               onRepeat: handleRepeat,
               onReview: handleReview,
+              offline: !online,
             })}
 
             {/* Real cursor pagination. */}
@@ -541,11 +526,21 @@ interface BucketProps {
   onCancel: (b: RecordItem) => void;
   onRepeat: () => void;
   onReview: (b: RecordItem) => void;
+  /** Сети нет — карточки выключают действия, которые без неё не пройдут. */
+  offline: boolean;
 }
 
 function renderTimeBuckets(props: BucketProps) {
-  const { items, activeTab, onOpen, onReschedule, onCancel, onRepeat, onReview } =
-    props;
+  const {
+    items,
+    activeTab,
+    onOpen,
+    onReschedule,
+    onCancel,
+    onRepeat,
+    onReview,
+    offline,
+  } = props;
 
   // Stable bucket order — preserves the order in which buckets first
   // appear in the data (backend already sorted rows by visit_at).
@@ -577,6 +572,7 @@ function renderTimeBuckets(props: BucketProps) {
                 onCancel={() => onCancel(b)}
                 onRepeat={onRepeat}
                 onReview={() => onReview(b)}
+                offline={offline}
               />
             </li>
           );

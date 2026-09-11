@@ -139,7 +139,15 @@ class TestExecuteNutritionTool:
     def test_unknown_tool_returns_none(self):
         assert (
             execute_nutrition_tool(
-                "order_pizza", {}, bot_user=Mock(), conversation=Mock(), trace_id="t"
+                "order_pizza",
+                {},
+                bot_user=Mock(),
+                conversation=Mock(),
+                trace_id="t",
+                # Реплика человека этому инструменту не нужна — но
+                # аргумент обязателен (DRF-1542), и пустая строка здесь
+                # сказана вслух, а не подставлена умолчанием.
+                message_text="",
             )
             is None
         )
@@ -152,6 +160,7 @@ class TestExecuteNutritionTool:
                 bot_user=Mock(),
                 conversation=Mock(),
                 trace_id="t",
+                message_text="выпил",
             )
             is None
         )
@@ -165,18 +174,24 @@ class TestExecuteNutritionTool:
             bot_user=Mock(),
             conversation=Mock(),
             trace_id="t",
+            message_text="привет, как дела у тебя сегодня",
         )
         assert result is None
 
     def test_health_screening_executes_real_skill(self):
         # Network-free skill: the deterministic diagnostic reply must come
         # from the same class the per-tenant registry would have run.
+        #
+        # DRF-1542 — ``message_text`` (реплика человека) теперь обязателен
+        # для скрининга: вето считается по ней, а не по ``symptom_text``
+        # модели. Здесь человек сказал ровно то же, что модель пересказала.
         result = execute_nutrition_tool(
             "health_screening",
             {"symptom_text": "болит спина"},
             bot_user=Mock(),
-            conversation=Mock(),
+            conversation=_conversation(),
             trace_id="t",
+            message_text="болит спина",
         )
         assert result is not None
         assert result.reply_text
@@ -362,6 +377,37 @@ class TestAnketaTapAsAHistoryTurn:
             assert options, step
             assert not [(lbl, slug) for lbl, slug in options if not lbl or not slug], step
 
+    @pytest.mark.parametrize("value", ["pregnancy_nursing", "eating_disorder", "condition", "none"])
+    def test_screening_tap_leaves_no_line_in_the_history(self, value):
+        """Скрининг §7.1 — единственный choice-шаг без подстановки метки.
+
+        Метка здесь — health-факт («Беременность или кормление»), и
+        подстановка положила бы его в ``record_global_message`` как реплику
+        человека, то есть в постоянную историю, которую на следующих ходах
+        читает промпт консьержа. Анкета эти ответы не хранит; история —
+        такое же хранилище, и исключения для неё нет.
+
+        ``none`` проверяется вместе с остальными намеренно: если метку не
+        подставлять только для «объявленных» состояний, само наличие строки
+        в истории станет признаком объявления.
+        """
+        tap = resolve_anketa_tap(f"cb:anketa:choice:screening:{value}")
+        assert tap is not None
+        assert tap.history_text is None
+
+    def test_screening_labels_exist_but_are_deliberately_unused_here(self):
+        """Сторож предыдущего теста: метки есть и они не пусты.
+
+        Без него ``history_text is None`` зеленел бы и на опустевшей
+        таблице — то есть доказывал бы отсутствие подстановки там, где
+        подставлять просто нечего.
+        """
+        from apps.skills.nutrition_anketa.fsm import choice_keyboard_options
+
+        options = choice_keyboard_options("screening")
+        assert options
+        assert all(lbl and slug for lbl, slug in options)
+
     @pytest.mark.parametrize("step", ["age", "height", "weight"])
     def test_text_input_steps_have_no_label_to_substitute(self, step):
         """Шаг без клавиатуры не может прийти как ``choice`` — и не подставляется."""
@@ -505,7 +551,7 @@ class TestNutriStopTapAsAHistoryTurn:
     навигационных тапов анкеты и ``cb:catalog:*``.
     """
 
-    @pytest.mark.parametrize("surface", ["report", "water"])
+    @pytest.mark.parametrize("surface", ["report", "water", "coach_hint"])
     def test_a_stop_tap_never_reaches_history(self, surface):
         tap = resolve_nutri_stop_tap(f"cb:nutri:stop:{surface}")
         assert tap is not None

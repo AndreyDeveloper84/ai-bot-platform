@@ -15,6 +15,7 @@ import hashlib
 import hmac
 import json
 import time as time_module
+import uuid
 from datetime import datetime, timedelta, timezone as dt_timezone
 from unittest.mock import patch
 from urllib.parse import urlencode
@@ -648,6 +649,93 @@ def test_revocation_is_idempotent(client: Client, bot_user, revoke_url, auth) ->
     )
 
 
+def test_revocation_switches_the_hints_off_on_every_shell(
+    client: Client, bot_user, url, revoke_url, auth
+) -> None:
+    """§35 п.9: после отзыва «Подсказки Ayla» показывают выключено.
+
+    Тумблер — орган управления, и включённым он врал бы: проактивные
+    сообщения после отзыва всё равно не уйдут, их останавливает
+    ``consent_blocker`` по ``consent_withdrawn``. Человек видел бы
+    включённый орган при выключенном по другой причине эффекте.
+
+    Гасится по ВСЕМ оболочкам человека — чат и мини-приложение разные
+    строки, и опт-аут, поставленный на одной, не остановил бы
+    планировщик, читающий другую.
+    """
+    sentinel = Tenant.objects.create(slug="consents-global-revoke", name="Global")
+    chat_shell = BotUser.all_tenants.create(
+        tenant=sentinel,
+        channel="max",
+        channel_user_id=CHANNEL_USER_ID,
+        chat_id=f"chat-{CHANNEL_USER_ID}",
+    )
+    # Есть чему меняться: до отзыва тумблер включён на обеих оболочках.
+    assert client.get(url, **auth).json()["proactive_hints"]["enabled"] is True
+    assert BotUser.all_tenants.get(pk=bot_user.pk).proactive_messages_opt_out is False
+    assert BotUser.all_tenants.get(pk=chat_shell.pk).proactive_messages_opt_out is False
+
+    res = _revoke(client, revoke_url, auth)
+
+    # Ответ ручки собирается из того же экземпляра — он обязан совпасть
+    # со строкой, а не показать значение, которого в базе уже нет.
+    assert res.json()["proactive_hints"]["enabled"] is False
+    assert BotUser.all_tenants.get(pk=bot_user.pk).proactive_messages_opt_out is True
+    assert BotUser.all_tenants.get(pk=chat_shell.pk).proactive_messages_opt_out is True
+    # Следующее чтение отдаёт то же: значение легло в базу, а не в память.
+    assert client.get(url, **auth).json()["proactive_hints"]["enabled"] is False
+
+
+def test_repeated_revocation_leaves_the_hints_off(
+    client: Client, bot_user, revoke_url, auth
+) -> None:
+    """Идемпотентность распространяется и на тумблер: то же состояние, не откат."""
+    first = _revoke(client, revoke_url, auth)
+    assert first.json()["proactive_hints"]["enabled"] is False
+
+    second = _revoke(client, revoke_url, auth)
+
+    assert second.status_code == 200
+    assert second.json()["proactive_hints"]["enabled"] is False
+    assert BotUser.all_tenants.get(pk=bot_user.pk).proactive_messages_opt_out is True
+
+
+def test_revocation_reaches_a_shell_linked_only_by_ayla_user_id(tenant, bot_user) -> None:
+    """Гашение идёт по ПОЛНОМУ резолву личности, а не по соседям по каналу.
+
+    Ровно тот случай, ради которого ``revoke_data_storage`` берёт
+    ``person_shell_ids`` вместо узкого ``_person_shells``: оболочка,
+    связанная с человеком только через ``ayla_user_id``, с другим
+    ``channel_user_id``. Соседский резолв её не увидит — и тест покраснеет,
+    если множество когда-нибудь сузят.
+
+    Каскад по накопленному здесь заглушён намеренно: связанная личность
+    заставила бы его пойти в Ayla по-настоящему, а проверяется шаг 1.
+    """
+    person_key = uuid.uuid4()
+    BotUser.all_tenants.filter(pk=bot_user.pk).update(ayla_user_id=person_key)
+    bot_user.refresh_from_db()
+    upstream = Tenant.objects.create(slug="consents-upstream", name="Upstream")
+    ayla_only_shell = BotUser.all_tenants.create(
+        tenant=upstream,
+        channel="max",
+        channel_user_id="1520999",  # другой канальный ключ — не сосед
+        chat_id="chat-1520999",
+        ayla_user_id=person_key,
+    )
+    # Есть чему меняться, и меняться именно по дальней оболочке.
+    assert BotUser.all_tenants.get(pk=ayla_only_shell.pk).proactive_messages_opt_out is False
+
+    with patch(
+        "apps.identity.services.privacy.delete_personal_data",
+        return_value=_NoOpCascade(),
+    ):
+        customer_consents.revoke_data_storage(bot_user)
+
+    assert BotUser.all_tenants.get(pk=bot_user.pk).proactive_messages_opt_out is True
+    assert BotUser.all_tenants.get(pk=ayla_only_shell.pk).proactive_messages_opt_out is True
+
+
 def test_consent_is_withdrawn_even_when_the_processing_step_fails(
     client: Client, bot_user, url, revoke_url, auth
 ) -> None:
@@ -692,6 +780,8 @@ def test_revocation_is_audited(client: Client, bot_user, revoke_url, auth) -> No
     row = revoked.first()
     assert row is not None
     assert row.payload["actor"] == "customer"
+    # Гашение тумблера подсказок — часть отзыва, и след у него тот же.
+    assert row.payload["proactive_hints_disabled"] is True
     # Процедура по накопленному пишет собственную строку со списком шагов.
     assert AuditLog.all_tenants.filter(action="privacy.personal_data_deleted").exists()
 
@@ -855,7 +945,15 @@ def test_person_with_live_consent_still_receives(tenant, bot_user, _followup_bea
 def test_revocation_stops_the_scheduler(
     client: Client, tenant, bot_user, revoke_url, auth, _followup_beat
 ) -> None:
-    """Отзыв проверяется по поведению: поле без эффекта — тот же обман."""
+    """Отзыв проверяется по поведению: поле без эффекта — тот же обман.
+
+    До §35 п.9 отозвавший оставался в плане с вето ``consent_withdrawn``:
+    колонка ``proactive_messages_opt_out`` отзывом не трогалась, и он
+    доходил до по-строчной проверки согласия. Теперь отзыв гасит и
+    тумблер, а опт-аут — вето уровня отбора: человек не становится
+    кандидатом вовсе, поэтому план пуст. Вето по согласию никуда не
+    делось и осталось вторым рубежом — просто до него больше не доходит.
+    """
     _make_due_reminder(tenant, bot_user, "yc-1520-revoke")
     plan_before = followups_mod.plan_post_visit_followups()
     assert [d.send for d in plan_before] == [True]  # человек был получателем
@@ -863,11 +961,8 @@ def test_revocation_stops_the_scheduler(
     res = _revoke(client, revoke_url, auth)
     assert res.json()["data_storage"]["granted"] is False
 
-    # Отозвавший из отбора не исчезает — он остаётся в плане с вето и
-    # названной причиной, чтобы сухой прогон показывал оператору, ЧТО
-    # сработало. Проверяем именно это, а не пустой список.
     plan_after = followups_mod.plan_post_visit_followups()
-    assert [(d.send, d.reason) for d in plan_after] == [(False, "consent_withdrawn")]
+    assert plan_after == []
     with patch("apps.bookings.followups.send_message") as mock_send:
         result = send_post_visit_followups()
     mock_send.assert_not_called()

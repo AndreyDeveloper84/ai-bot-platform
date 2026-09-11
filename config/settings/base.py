@@ -203,6 +203,11 @@ LOCAL_APPS = [
     # ``BotUser.context["nutrition_proactive"]``. Both beat tasks no-op
     # while ``NUTRITION_PROACTIVE_ENABLED`` is False (the default).
     "apps.nutrition_proactive",
+    # DRF-1464 — ИИ-диетолог: флаги, ридер цели, картина недели,
+    # триггеры и тексты подсказок. No models, so no migrations; every
+    # surface stays silent while NUTRITION_COACH_ENABLED is False
+    # (the default).
+    "apps.nutrition_coach",
     # DRF-1344 — повод OBSERVE от Personal Plan: конвейер до гейтов, без
     # текстов. No models, no migrations; the task evaluates the wellness
     # context document, runs both gates and records the trace — nothing
@@ -535,6 +540,24 @@ MAX_WEBHOOK_SECRET = os.environ.get("MAX_WEBHOOK_SECRET", "")
 HANDOFF_NOTIFY_MAX_CHAT_IDS = [
     p.strip() for p in os.environ.get("HANDOFF_NOTIFY_MAX_CHAT_IDS", "").split(",") if p.strip()
 ]
+
+# DRF-1559 — тот же список получателей, но как ЛЮДИ, а не как диалоги.
+#
+# chat_id в MAX — идентификатор ДИАЛОГА: он верен только для того бота, из
+# переписки с которым его скопировали. Пока бот был один, разницы не было;
+# с салонным ботом отправка по чужому диалогу отвечает 404 dialog.not.found
+# (замер 07.09.2026, docs/OPEN_DECISIONS.md §55, §56 — там упал и
+# channel=fallback, который адресуется ровно отсюда).
+#
+# Непустой HANDOFF_NOTIFY_MAX_USER_IDS ВЫТЕСНЯЕТ HANDOFF_NOTIFY_MAX_CHAT_IDS
+# целиком, а не дополняет: на время переноса это один и тот же человек,
+# записанный дважды, и объединение слало бы ему всё по два раза. Пусто —
+# читается старая настройка, то есть вчерашнее поведение со вчерашним же
+# ограничением. Выбор живёт в apps/channels/max/addressing.py, здесь только
+# значения.
+HANDOFF_NOTIFY_MAX_USER_IDS = [
+    p.strip() for p in os.environ.get("HANDOFF_NOTIFY_MAX_USER_IDS", "").split(",") if p.strip()
+]
 HANDOFF_ADMIN_BASE_URL = os.environ.get("HANDOFF_ADMIN_BASE_URL", "")
 
 # DRF-1488 — every handoff task gets an addressee and a deadline.
@@ -747,6 +770,22 @@ NUTRITION_SERVICE_TOKEN = (
 # production flips deliberately, never ad-hoc.
 BOOKING_VIA_AYLA_REST = os.environ.get("BOOKING_VIA_AYLA_REST", "false").lower() == "true"
 
+# §83 — требовать ли АКТУАЛЬНОЕ подтверждение расписания для продажи мастера.
+#
+# DEFAULT OFF, и умолчание здесь несёт цену, а не осторожность. В момент
+# включения с витрины уходят ВСЕ мастера без актуального подтверждения — по
+# правилу 1 решения владельца («по умолчанию расписание не подтверждено») это
+# верно, но это видимое изменение продукта. Порядок работ записан в DRF-1521
+# п. 7: сперва признак и способ его поставить, потом кампания подтверждения по
+# уже подключённым мастерам, и только потом гейт.
+#
+# Поэтому флаг переключает не «фичу», а МОМЕНТ, когда условие начинает снимать
+# людей с продажи, и нажать это должен владелец, увидев число, а не обнаружить
+# постфактум.
+MASTER_SCHEDULE_CONFIRMATION_REQUIRED = (
+    os.environ.get("MASTER_SCHEDULE_CONFIRMATION_REQUIRED", "false").lower() == "true"
+)
+
 # DRF-1531 — the size a top TIER of indistinguishable candidates has to reach
 # before Ayla stops sorting it and asks ONE distinguishing question instead
 # (owner decision §29.2). The tier is the set of masters sharing the best
@@ -776,46 +815,22 @@ DISCOVERY_CLARIFY_MIN_TIER = int(os.environ.get("DISCOVERY_CLARIFY_MIN_TIER", "4
 # request count (one request per day per tenant).
 AYLA_MIRROR_RECONCILE_WINDOW_DAYS = int(os.environ.get("AYLA_MIRROR_RECONCILE_WINDOW_DAYS", "45"))
 
-# DRF-1005 — Controlled Pilot: per-tenant fallback for the booking
-# health-check gate. DEMOTED by DRF-1353 — read the note below before
-# adding a tenant here.
+# DRF-1545 — the booking health-check gate has NO per-tenant override.
 #
-# Originally this was the ONLY way through the gate: under
-# ``BOOKING_VIA_AYLA_REST`` it failed CLOSED unconditionally
-# (#1034 / #1121) because the resolved (master×service)
-# requires-health-check source was believed not to exist, which made
-# automatic booking impossible for every tenant. Owner decision
-# 2026-08-12 (variant 3): an explicit, empty-by-default allowlist of
-# tenant UUIDs, with an audit record on every gate-disabled evaluation.
+# ``BOOKING_HEALTH_CHECK_GATE_DISABLED_TENANTS`` (DRF-1005) used to name
+# tenants whose UNKNOWN master×service edges opened instead of failing
+# closed. Owner decision 06.09.2026 (``docs/OPEN_DECISIONS.md`` §36)
+# removed the mechanism, not just the salon on it: the duty to ask about
+# contraindications belongs to the procedure, not to the venue — a salon
+# cannot cancel a contraindication.
 #
-# DRF-1353 found that source: it exists on Ayla
-# (``SpecialistService.resolved_requires_health_check``, escalate-only OR
-# across template floor → salon service → specialist) and is served by
-# ``/internal/catalog/specialist-services/``. It is now mirrored onto
-# ``MasterService.resolved_requires_health_check`` and the gate reads it
-# FIRST. This allowlist only decides edges whose resolved flag is
-# UNKNOWN — operator-owned MM4 rows, or a tenant catalog sync has not
-# reached. It can never override an explicit "screening required".
-#
-# Adding a tenant here is therefore no longer the way to unblock a salon:
-# run catalog sync for it. Reach for the allowlist only when the edges
-# genuinely cannot be mirrored.
-#
-# Empty/unset = gate closed for every unknown edge (behaviour unchanged).
-# Parsing reuses the strict T-02 allowlist parser: malformed input raises
-# ImproperlyConfigured at settings load — a process must not boot with a
-# half-parsed allowlist whose operator believes a tenant is listed when
-# it is not.
-try:
-    BOOKING_HEALTH_CHECK_GATE_DISABLED_TENANTS = _parse_ingest_tenant_allowlist(
-        os.environ.get("BOOKING_HEALTH_CHECK_GATE_DISABLED_TENANTS", ""),
-        setting_name="BOOKING_HEALTH_CHECK_GATE_DISABLED_TENANTS",
-    )
-except _IngestAllowlistConfigurationError as exc:
-    # Same fail-safe as the ingest allowlists below: refuse to boot.
-    raise ImproperlyConfigured(
-        f"Invalid booking health-check gate allowlist configuration: {exc}"
-    ) from exc
+# It cost nothing to remove: all 387 pilot edges carried a synced verdict,
+# which the gate reads first, so the allowlist decided nothing on the day
+# it went. That is also why it was dangerous — it did nothing visible and
+# would have opened silently the first time its salon got a screened
+# service. The setting is deliberately NOT re-declared here: an operator
+# setting the old env var must get no behaviour at all, not a half-wired
+# switch. See ``apps/skills/booking/skill.py``.
 
 # DRF-1007 — Controlled Pilot runs WITHOUT prepayment: per-tenant switch
 # for the ``payment_required`` flag on bot-created bookings.
@@ -1236,6 +1251,25 @@ CELERY_BEAT_SCHEDULE = {
         "task": "apps.catalog.tasks.sync_catalog_for_all_tenants",
         "schedule": crontab(minute="*/15"),
     },
+    "schedule_confirmation_sweep_every_15min": {
+        # §83 — сторожит СУЩЕСТВУЮЩИЕ подтверждения расписания: снимает те,
+        # под которыми часы в Ayla уже изменились.
+        #
+        # Обход, а не событие, потому что события нет: замер 09.09.2026 —
+        # топик ``master.schedule.updated`` не приходил ни разу за всю
+        # историю. Консьюмер для него написан и верен, но сегодня молчит.
+        #
+        # Цена, которую этот интервал назначает: до 15 минут между
+        # изменением часов и снятием подтверждения. В это окно мастер
+        # продаётся по часам, которые владелица подтверждала не глядя на
+        # нынешние. Правило 4 исполняется как «не позднее чем через цикл»,
+        # и короче цикл — короче окно.
+        #
+        # Смещение на :08 — чтобы не бить в одну минуту с фан-аутом
+        # синхронизации на :00/:15/:30/:45: обе задачи ходят в Ayla.
+        "task": "apps.catalog.tasks.sweep_schedule_confirmations",
+        "schedule": crontab(minute="8,23,38,53"),
+    },
     # DRF-1494 — the watchdog on the entry above. Scheduling a job is not
     # the same as knowing it ran: this entry has been here since 2026-05-13
     # and the pilot mirror still sat twelve days stale, because nothing read
@@ -1454,6 +1488,24 @@ CELERY_BEAT_SCHEDULE = {
         "task": "nutrition_proactive.send_water_reminders",
         "schedule": crontab(minute="20", hour="*/4"),
     },
+    # DRF-1464 (T5) — проактивная подсказка диетолога. Listed in advance
+    # for the same reason as the pair above: enabling is then an env
+    # change, not a deploy. No-ops while NUTRITION_COACH_ENABLED is
+    # False (the default) and only logs while NUTRITION_COACH_DRY_RUN
+    # is True (also the default).
+    #
+    # Once a day at 07:40 UTC = 10:40 MSK: waking hours for every pilot
+    # recipient (all on the default timezone, DRF-1477), late enough
+    # that the week's breakfasts and yesterday's dinner are already
+    # logged. The quiet-hours gate makes the tick a no-op for anyone it
+    # would wake, and the first non-quiet tick with a fired trigger
+    # spends the weekly budget (one hint a week, the DRF-1468 default
+    # for unlisted surfaces). :40 sits clear of the :00 / :05 / :20 /
+    # :37 beats.
+    "nutrition_proactive.send_coach_hints": {
+        "task": "nutrition_proactive.send_coach_hints",
+        "schedule": crontab(minute="40", hour="7"),
+    },
     # DRF-1111 + DRF-1161 — mirror ↔ canon reconciliation detector.
     # Compares live bookings in Ayla against RemoteBookingProxy per
     # tenant, identifier by identifier; divergence logs every tick and
@@ -1504,22 +1556,37 @@ NUTRITION_PROACTIVE_DRY_RUN = os.environ.get("NUTRITION_PROACTIVE_DRY_RUN", "tru
 )
 
 # DRF-1464 - the two switches in front of the AI dietologist
-# (apps/nutrition_coach). Same contract as the proactive pair above, and
-# the same deliberate sequencing: two conscious operator acts, in order,
-# before a single coach line reaches a real person.
+# (apps/nutrition_coach).
 #
 # NUTRITION_COACH_ENABLED: master switch. False - every coach surface
-#   (the reactive answer and, once DRF-1468 wires it, the proactive hint)
-#   stays silent without touching the database or Ayla.
-# NUTRITION_COACH_DRY_RUN: the safety inside the switch. True - the
-#   pipeline runs its full read path (goal reader, week picture) and logs
-#   exactly what it would have said and to whom, and says nothing.
+#   stays silent without touching the database or Ayla. True opens THREE
+#   of them, and only one of the three is held by anything else:
+#     * the reactive answer (apps/channels/max/handler.py) - live at
+#       once, though it stays blind until CONCIERGE_NUTRITION_CONTEXT_
+#       ENABLED is on too, since the picture is what it answers from;
+#     * the diary observation line (apps/orchestrator/coach_observation)
+#       - live at once;
+#     * the weekly coach_hint push (T5) - held by DRY_RUN below.
+# NUTRITION_COACH_DRY_RUN: the safety inside the switch, and it covers
+#   the PUSH ONLY. True - the beat runs its full read path (goal reader,
+#   week picture) and logs exactly what it would have said and to whom,
+#   and says nothing. Its sole reader is
+#   nutrition_proactive.tasks.send_coach_hints, via flags.dry_run.
 #
-# Order is fixed: ENABLED=True + DRY_RUN=True first, read the
-# ``nutrition_coach.*.dry_run`` log lines, and only then DRY_RUN=False.
-# Dry-run is the LAST switch to open: flipping both at once skips the
-# only step that can catch a wording or selection bug before a stranger
-# gets a message about what they eat. Runtime readers:
+# So the ramp is: ENABLED=True first (the two solicited surfaces go live
+# to real people at that moment - that is the decision this flag IS),
+# read the ``nutrition_coach.*.dry_run`` lines the beat writes, and only
+# then DRY_RUN=False for the push. Dry-run is the LAST switch to open:
+# flipping both at once skips the only step that can catch a wording or
+# selection bug before a stranger gets an UNSOLICITED message about what
+# they eat.
+#
+# The earlier wording here promised «two conscious operator acts before a
+# single coach line reaches a real person». That was true of the push and
+# false of the other two, and an operator reading it would think nothing
+# was visible until the second act. Corrected 07.09.2026; the open
+# question about which order to actually open them in is
+# docs/OPEN_DECISIONS.md §59. Runtime readers:
 # apps/nutrition_coach/flags.py (getattr with these defaults).
 NUTRITION_COACH_ENABLED = os.environ.get("NUTRITION_COACH_ENABLED", "false").lower() in (
     "true",
@@ -1966,6 +2033,25 @@ CATALOG_SYNC_LOCK_TTL_SECONDS = int(os.environ.get("CATALOG_SYNC_LOCK_TTL_SECOND
 CATALOG_SYNC_HTTP_TIMEOUT = int(os.environ.get("CATALOG_SYNC_HTTP_TIMEOUT", "30"))
 CATALOG_SYNC_HTTP_RETRIES = int(os.environ.get("CATALOG_SYNC_HTTP_RETRIES", "3"))
 
+# DRF-1595 — ceiling, in seconds, on the wall-clock ONE catalog sync run may
+# spend asleep waiting out Ayla's `429 THROTTLED` (its body carries the
+# `wait_seconds` to honour). Spent only on 429s: a healthy run never touches
+# it.
+#
+# 240 is one third of `sync_catalog_for_all_tenants`'s soft_time_limit=720,
+# which is itself under the 900s beat cadence. The budget has to exist at all
+# because the honest response to a 429 — sleep the time upstream asked for —
+# multiplied by tenants × three catalog surfaces would overrun that limit and
+# get the whole fan-out killed mid-cycle: every salon unsynced instead of the
+# two at the tail. 240 leaves ~480s for the actual fetch/upsert work while
+# still admitting roughly four waits at the wait_seconds=54 the pilot
+# observed. There is deliberately NO separate per-wait cap — the remaining
+# budget is itself the cap, so an upstream asking for ten minutes is refused
+# without a second knob to keep in sync.
+CATALOG_SYNC_THROTTLE_WAIT_BUDGET_SECONDS = int(
+    os.environ.get("CATALOG_SYNC_THROTTLE_WAIT_BUDGET_SECONDS", "240")
+)
+
 # DRF-1494 — age of `Tenant.last_catalog_sync_ok_at` above which
 # `apps.catalog.tasks.alert_stale_catalog_sync` pages the on-call channel.
 #
@@ -1978,6 +2064,17 @@ CATALOG_SYNC_HTTP_RETRIES = int(os.environ.get("CATALOG_SYNC_HTTP_RETRIES", "3")
 # makes it confidently deny services the salon sells. Full reasoning lives
 # in apps/catalog/staleness.py, next to the code that applies it.
 CATALOG_SYNC_STALE_AFTER_SECONDS = int(os.environ.get("CATALOG_SYNC_STALE_AFTER_SECONDS", "3600"))
+
+# DRF-1500 — экран здоровья контура (/admin/health/). Опрос Ayla за
+# полными числами услуг/мастеров: короткий таймаут (экран не ждёт дольше,
+# чем оператор) и кэш (свежесть в минутах достаточна против расхождения
+# в дни; бэкенд не бьём на каждое обновление страницы).
+CONTOUR_HEALTH_UPSTREAM_TIMEOUT_SECONDS = int(
+    os.environ.get("CONTOUR_HEALTH_UPSTREAM_TIMEOUT_SECONDS", "5")
+)
+CONTOUR_HEALTH_UPSTREAM_CACHE_SECONDS = int(
+    os.environ.get("CONTOUR_HEALTH_UPSTREAM_CACHE_SECONDS", "300")
+)
 
 # KB-RAG Sub-4b (GH #128) — Google Docs read-only client takes NO
 # credentials. It fetches source docs via the public Markdown export

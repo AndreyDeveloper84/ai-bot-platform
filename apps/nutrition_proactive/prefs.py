@@ -32,8 +32,25 @@ Schema (every key optional; a missing key means the conservative default)::
       "opted_out_at": "<iso8601>",            # set by the opt-out skill
       "outbox": [                             # shared send journal (DRF-1468)
           {"surface": "report", "sent_at": "<iso8601 utc>"},
+          # + "solicited": true on sends the person asked for (DRF-1464 T6)
       ],                                      # pruned by age, capped in length
     }
+
+### The solicited marker — учёт и лимит разделяем (DRF-1464 T6, Q-NUTRITION-05)
+
+Everything outgoing is journaled, but only the UNASKED is limited. A send
+the person provoked themselves — the dietologist observation shown when
+they open their own diary — is journaled with ``"solicited": True`` and:
+
+* still counts as a fact in the journal (the audit trail stays complete);
+* does NOT spend the weekly budget (``weekly_sent_count`` skips it) — a
+  reply to a person's own action is not an interruption;
+* does NOT build the ignore streak (``antinag.surface_ignored_streak``
+  skips it) — there was nothing to «ignore», the answer was read on the
+  screen it was rendered into.
+
+An entry WITHOUT the key is an unsolicited send: today's behaviour for
+every existing writer and every existing journal is unchanged.
 
 ### Both defaults are OFF
 
@@ -118,11 +135,16 @@ DEFAULT_WEEKLY_SURFACE_CAP = 1
 #: that surface pauses itself -- silently (policy R2: never «ты не ответила»).
 SURFACE_IGNORE_LIMIT = 2
 
-#: What ``BotUser.timezone`` holds when nobody ever set it -- the column
-#: default from ``apps.identity.models.BotUser``. Not "empty", which is why a
-#: naive "is it filled?" check on the pilot reports 100% and means 0%.
-UNSET_TZ_SENTINEL = "Europe/Moscow"
-
+#: Куда падаем, когда пояс не знает ни человек, ни салон.
+#:
+#: Здесь рядом стоял ``UNSET_TZ_SENTINEL = "Europe/Moscow"`` — значение,
+#: которое колонка держала, «когда никто её не задавал». Оно удалено
+#: вместе с породившим его умолчанием (DRF-1606): теперь «не задано»
+#: выражается ПУСТОТОЙ, и отличать его от настоящего московского ответа
+#: сравнением строк больше не нужно.
+#:
+#: Сентинел не оставлен «на всякий случай» рядом с новой проверкой: два
+#: способа сказать «не задано» — это два способа разойтись.
 FALLBACK_TZ = "Europe/Moscow"
 
 _HHMM_RE = re.compile(r"^([01]\d|2[0-3]):([0-5]\d)$")
@@ -188,21 +210,25 @@ def resolve_timezone(bot_user: Any) -> tuple[ZoneInfo, str]:
 
     Precedence:
 
-    1. ``BotUser.timezone`` when it is set to something other than the column
-       default -- the only case where we know a human (or an import) actually
-       chose it.
+    1. ``BotUser.timezone``, когда оно НЕПУСТО — единственный случай, когда
+       пояс кто-то действительно назвал. До DRF-1606 здесь стояло сравнение
+       с ``Europe/Moscow``: умолчанием колонки был настоящий пояс, и явный
+       московский ответ приходилось считать молчанием, потому что отличить
+       его было нечем. Теперь молчание пусто, и проверка — просто «есть ли
+       значение».
     2. ``Tenant.timezone`` -- the salon the person books with. For a
        single-city pilot this beats a global constant, and it is at least
        *someone's* deliberate configuration.
     3. ``Europe/Moscow``.
 
     ``source`` is returned rather than swallowed so the dry-run can show the
-    operator how many recipients ride on an unverified guess. On the pilot as
-    of 2026-08-23 that is all of them: 14/14 BotUsers carry the untouched
-    column default.
+    operator how many recipients ride on an unverified guess. Замер 08.09.2026
+    на пилоте: 26 из 26 несли нетронутое умолчание, то есть все ехали на
+    догадке. После DRF-1606 ``"botuser"`` начинает означать ровно то, что
+    написано, — а не «строка не равна Москве».
     """
     raw = (getattr(bot_user, "timezone", "") or "").strip()
-    if raw and raw != UNSET_TZ_SENTINEL:
+    if raw:
         tz = _safe_zoneinfo(raw)
         if tz is not None:
             return tz, "botuser"
@@ -329,6 +355,7 @@ def append_outbox(
     *,
     surface: str,
     sent_at: datetime,
+    solicited: bool = False,
 ) -> dict[str, Any]:
     """Return a copy of ``prefs`` with one send journaled.
 
@@ -336,10 +363,18 @@ def append_outbox(
     :data:`OUTBOX_CAP`, so the journal stays bounded no matter how long the
     feature runs. Timestamps compare as ISO strings -- every writer here
     stamps aware-UTC ``datetime.isoformat()``, which sorts chronologically.
+
+    ``solicited`` (DRF-1464 T6): the send answered the person's own action.
+    Journaled like everything else, but the weekly budget and the ignore
+    streak skip it. The marker key is written only when True, so entries
+    without it keep their previous shape -- and their previous meaning.
     """
     cutoff = (sent_at - timedelta(days=OUTBOX_KEEP_DAYS)).isoformat()
     entries = [e for e in outbox_entries(prefs) if str(e.get("sent_at", "")) >= cutoff]
-    entries.append({"surface": surface, "sent_at": sent_at.isoformat()})
+    entry: dict[str, Any] = {"surface": surface, "sent_at": sent_at.isoformat()}
+    if solicited:
+        entry["solicited"] = True
+    entries.append(entry)
     updated = dict(prefs)
     updated[OUTBOX_KEY] = entries[-OUTBOX_CAP:]
     return updated
@@ -351,12 +386,17 @@ def weekly_sent_count(
     now_utc: datetime,
     surface: str | None = None,
 ) -> int:
-    """Sends journaled in the sliding 7 days before ``now_utc``."""
+    """Sends journaled in the sliding 7 days before ``now_utc``.
+
+    Unsolicited sends only: a ``"solicited": True`` entry is journaled for
+    the audit trail but spends no budget (DRF-1464 T6, Q-NUTRITION-05).
+    """
     cutoff = (now_utc - timedelta(days=7)).isoformat()
     return sum(
         1
         for entry in outbox_entries(prefs)
         if str(entry.get("sent_at", "")) >= cutoff
+        and entry.get("solicited") is not True
         and (surface is None or entry.get("surface") == surface)
     )
 

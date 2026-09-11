@@ -2,14 +2,18 @@
 
 Pulls Ayla's canonical catalog and upserts the ``CatalogService`` mirror
 under a Redis advisory lock. Called by the Celery beat every 15 minutes
-(``apps.catalog.tasks.sync_catalog_for_all_tenants``) and, for a one-shot
-operator run, by ``manage.py sync_catalog``.
+(``apps.catalog.tasks.sync_catalog_for_all_tenants``), for a one-shot
+operator run by ``manage.py sync_catalog``, and from the admin
+force-resync action (DRF-1581) by
+``apps.catalog.tasks.sync_catalog_for_tenant``.
 
 (Until DRF-1494 this line promised an admin "force resync" action instead.
-There has never been one — C6/DRF-576 was never built — so for the whole
-life of the pilot the beat was the only way this code could run at all,
-and an operator who read this docstring while the catalog was twelve days
-stale would have gone looking for a button that does not exist.)
+There was none then — C6/DRF-576 was never built — so for the whole life
+of the pilot the beat was the only way this code could run at all, and an
+operator who read this docstring while the catalog was twelve days stale
+would have gone looking for a button that did not exist. The button has
+since landed: DRF-1581 added the force-resync action on
+``CatalogServiceAdmin``.)
 
 Three mirrors, pulled in FK order so each one's dependencies already exist:
 
@@ -52,7 +56,8 @@ from django.core.cache import cache
 from django.utils import timezone as dj_timezone
 
 from apps.audit.services import write_audit
-from apps.catalog.services.http_client import CatalogHttpClient
+from apps.catalog.services.http_client import CatalogHttpClient, CatalogThrottledError
+from apps.catalog.services.throttle import ThrottleWaitBudget
 from apps.catalog.services.upserter import (
     UpsertResult,
     upsert_master_services,
@@ -93,8 +98,14 @@ class SyncResult:
 
     Fields:
       ran: True when the lock was acquired and the cycle ran.
-      skipped: True when the lock was held by another beat — we returned
-               without doing work.
+      skipped: True when the cycle returned without doing work.
+      skip_reason: WHY it was skipped, when it was — ``"lock_held"`` (another
+               beat has this tenant) or ``"throttled"`` (Ayla rate-limited us
+               and this run had no wait budget left, DRF-1595). Empty when
+               ``skipped`` is False. It exists because the fan-out logs the
+               two outcomes as different events: a salon we chose not to
+               hammer is not a salon that broke, and for three pilot days
+               those were the same line in the journal.
       services: CatalogService (salon-services) mirror counters.
       masters: CatalogMaster (specialists) mirror counters — S3B masters.
       master_services: MasterService (specialist-services) bookable-edge
@@ -106,6 +117,7 @@ class SyncResult:
 
     ran: bool = False
     skipped: bool = False
+    skip_reason: str = ""
     services: MirrorCounts = field(default_factory=MirrorCounts)
     masters: MirrorCounts = field(default_factory=MirrorCounts)
     master_services: MirrorCounts = field(default_factory=MirrorCounts)
@@ -120,11 +132,17 @@ class CatalogSyncService:
         self,
         *,
         http_client: Any | None = None,
+        wait_budget: ThrottleWaitBudget | None = None,
     ) -> None:
         # ``Any`` instead of CatalogHttpClient — tests inject duck-typed
         # fakes that implement the same fetch_salon_services surface + the
         # context-manager protocol without inheriting the production class.
         self._http = http_client
+        # Shared across every tenant of one beat run (DRF-1595) — the fan-out
+        # owns it and hands the same object down, so the ceiling on 429 sleeps
+        # is per RUN and cannot be multiplied by the tenant count. A caller
+        # that passes none gets a per-run budget of its own from settings.
+        self._wait_budget = wait_budget
 
     def run(self, tenant: "Tenant") -> SyncResult:
         """Run one sync cycle. Returns :class:`SyncResult`.
@@ -140,7 +158,7 @@ class CatalogSyncService:
         # already exists. Canonical Django distributed advisory lock.
         if not cache.add(lock_key, "1", timeout=ttl):
             logger.info("catalog.sync.skipped reason=lock_held tenant_id=%s", tenant.id)
-            return SyncResult(ran=False, skipped=True)
+            return SyncResult(ran=False, skipped=True, skip_reason="lock_held")
 
         try:
             return self._run_locked(tenant)
@@ -153,11 +171,30 @@ class CatalogSyncService:
 
     def _run_locked(self, tenant: "Tenant") -> SyncResult:
         """Salon-services pull + upsert within the lock window."""
-        http = self._http if self._http is not None else CatalogHttpClient()
+        http = (
+            self._http
+            if self._http is not None
+            else CatalogHttpClient(wait_budget=self._wait_budget)
+        )
 
         try:
             with http:
                 salon_dtos = http.fetch_salon_services(tenant_id=str(tenant.id))
+        except CatalogThrottledError as exc:
+            # Ayla's rate limiter, not this salon's catalog (DRF-1595). Nothing
+            # landed, so the run is not "ran"; but calling it a FAILURE is the
+            # mistake that let this go unnoticed for three days — it put a
+            # healthy salon in the same counter as a broken one, and the
+            # unordered fan-out fed the same two salons into it every cycle.
+            # Skipped-with-a-reason is the honest record, and the caller uses
+            # it to stand down for the rest of the cycle instead of digging.
+            logger.warning(
+                "catalog.sync.skipped reason=throttled tenant_id=%s budget_exhausted=%s: %s",
+                tenant.id,
+                exc.budget_exhausted,
+                exc,
+            )
+            return SyncResult(ran=False, skipped=True, skip_reason="throttled")
         except Exception as exc:  # noqa: BLE001 — orchestrator boundary
             logger.exception("catalog.sync.fetch_failed tenant_id=%s", tenant.id)
             return SyncResult(ran=True, error=str(exc))

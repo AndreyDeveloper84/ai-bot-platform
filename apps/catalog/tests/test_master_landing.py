@@ -26,16 +26,22 @@ from uuid import uuid4
 
 import pytest
 from django.http import HttpRequest, JsonResponse
-from django.test import RequestFactory
+from django.test import RequestFactory, override_settings
+from django.utils.timezone import now as timezone_now
 
 from apps.admin_api.services.master_deactivation import _find_fallback_masters
 from apps.admin_api.services.staff_roster import build_staff_roster
 from apps.booking.models import BookingRequest
 from apps.catalog.master_state import (
     ACCEPTED,
+    AVAILABLE,
+    ENROLLED,
+    LANDED,
     RoleState,
     SaleBlock,
+    available_q,
     is_available,
+    is_enrolled,
     is_landed,
     master_state,
     sale_block,
@@ -126,14 +132,23 @@ def _state(
     is_active: bool = True,
     invite_status: str = ACCEPTED,
     ayla_user_id: object = None,
+    linked_bot_user_id: object = None,
+    accepted_at: datetime | None = None,
+    name: str = "Анна Петрова",
 ) -> str:
     """``master_state`` на голых столбцах, без похода в базу.
 
     Гейт принимает строку целиком, а строкой годится и словарь — тот же
     путь, которым его зовёт ростер через ``.values()``. Столбцы названы
-    по одному, чтобы тест ломался, когда гейт начнёт спрашивать пятый:
-    молчаливо подставленное умолчание — это ровно тот отказ, который
-    DRF-1540 убирает.
+    по одному, чтобы тест ломался, когда гейт начнёт спрашивать
+    следующий: молчаливо подставленное умолчание — это ровно тот отказ,
+    который DRF-1540 убирает.
+
+    DRF-1521 добавила сюда три: ``linked_bot_user_id`` и ``accepted_at``
+    (личность — ими гейт отличает «я сама сняла её с витрины» от «она не
+    дозаполнила профиль») и ``name`` (первое из трёх условий готовности).
+    Умолчание у имени — заполненное, потому что заполненное имя и есть
+    форма живых строк: пустого имени на контуре не бывает.
     """
 
     return master_state(
@@ -142,6 +157,9 @@ def _state(
             "is_active": is_active,
             "invite_status": invite_status,
             "ayla_user_id": ayla_user_id,
+            "linked_bot_user_id": linked_bot_user_id,
+            "accepted_at": accepted_at,
+            "name": name,
         }
     )
 
@@ -303,15 +321,25 @@ class TestTheSplitThatProducedDRF1080:
     мастер-приложения спрашивал только его и отвечал 403 на каждой
     ручке. Человек был мастером для платформы и никем для приложения.
 
-    Теперь оба спрашивают ``is_landed``, и разъехаться им нечем.
+    DRF-1506 свела их на ``is_landed``, DRF-1521 — на ``is_enrolled``.
+    Разъехаться им по-прежнему нечем: константа одна на оба места. Но
+    отвечают они теперь «да», а не «нет», и это не возврат дефекта, а
+    его вторая половина — см. второй тест класса.
     """
 
-    def test_all_five_gates_say_no_and_all_five_say_yes_when_she_is_active(
+    def test_the_two_entry_gates_never_disagree(
         self,
         tenant: Tenant,
         bot_user: BotUser,
-        service: CatalogService,
     ) -> None:
+        """Дефект DRF-1080 был в РАСХОЖДЕНИИ, а не в том или ином ответе.
+
+        Поэтому здесь два гейта сравниваются между собой на четырёх
+        формах строки подряд, а не каждый со своим ожиданием. Тест,
+        сверяющий каждый гейт с константой, зеленел бы и на паре,
+        сошедшейся случайно.
+        """
+
         master = _make_master(
             tenant,
             name="Деактивированная",
@@ -319,6 +347,51 @@ class TestTheSplitThatProducedDRF1080:
             invite_status=CatalogMaster.InviteStatus.ACCEPTED,
             is_active=True,
         )
+        master.refresh_from_db()
+
+        shapes: list[dict[str, object]] = [
+            {},
+            {"is_active": False},
+            {"invite_status": CatalogMaster.InviteStatus.PENDING},
+            {"archived_at": datetime.now(tz=timezone.utc)},
+        ]
+        seen: list[tuple[bool, bool]] = []
+        for shape in shapes:
+            for column, value in shape.items():
+                setattr(master, column, value)
+            master.save()
+            master.refresh_from_db()
+            pair = (_gate_master_api(master), _gate_role_resolver(bot_user))
+            assert pair[0] == pair[1], (shape, pair)
+            seen.append(pair)
+
+        # Положительная стража: пары не «все False». Тест, который умеет
+        # только сравнивать, зеленел бы на паре одинаково сломанных ворот.
+        assert (True, True) in seen
+        assert (False, False) in seen
+
+    def test_the_sale_gates_say_no_while_the_entry_gates_say_yes(
+        self,
+        tenant: Tenant,
+        bot_user: BotUser,
+        service: CatalogService,
+    ) -> None:
+        """Обе половины развилки DRF-1521 на одной строке и одних данных.
+
+        До неё выразить это было нечем: ``LANDED`` строилось поверх
+        ``ADMITTED``, а тот спрашивает ``is_active``, — при снятой
+        активности ложны были ОБА предиката, и «в кабинет входит, но не
+        продаётся» не существовало как состояние.
+        """
+
+        master = _make_master(
+            tenant,
+            name="Снятая с витрины",
+            linked_bot_user=bot_user,
+            invite_status=CatalogMaster.InviteStatus.ACCEPTED,
+            is_active=True,
+        )
+        master.refresh_from_db()
 
         # Положительная половина — та же строка, пока она активна.
         assert _gate_bookable(tenant, master) is True
@@ -330,13 +403,236 @@ class TestTheSplitThatProducedDRF1080:
         master.is_active = False
         master.save(update_fields=["is_active"])
 
-        # Отрицательная половина — все пятеро, а не двое из пяти.
-        assert is_landed(master) is False
+        # Витрина закрылась — все её ворота.
+        assert is_available(master) is False
         assert _gate_bookable(tenant, master) is False
+        assert _gate_fallback(tenant, master, service) is False
+
+        # Кабинет остался открыт — оба входных гейта. Это и есть DRF-1521:
+        # человеку, которого сняли с витрины, НУЖНО войти и починить то,
+        # из-за чего сняли.
+        assert is_enrolled(master) is True
+        assert _gate_master_api(master) is True
+        assert _gate_role_resolver(bot_user) is True
+
+        # ``is_landed`` осталась тем, чем была, — «прошла онбординг И на
+        # витрине». Её значение задача не переопределяла.
+        assert is_landed(master) is False
+
+        # Ростер: имя заполнено, значит владелица сняла её сама, и
+        # «доступ отозван» — честное слово. Ветку ``profile_incomplete``
+        # держит класс ниже.
+        assert _gate_roster(tenant, master) == "revoked"
+
+    def test_the_archive_is_the_door_that_really_closes(
+        self,
+        tenant: Tenant,
+        bot_user: BotUser,
+    ) -> None:
+        """Парная стража к предыдущему: одна дверь всё-таки закрывается.
+
+        Иначе «кабинет открыт» читалось бы как «кабинет открыт всем», а
+        это неправда: архив означает «ушла», и его пишет каскадная
+        деактивация вместе с ``is_active=False``.
+        """
+
+        master = _make_master(
+            tenant,
+            name="Ушедшая",
+            linked_bot_user=bot_user,
+            invite_status=CatalogMaster.InviteStatus.ACCEPTED,
+            is_active=True,
+        )
+        master.refresh_from_db()
+
+        # Положительная половина — до архива она входит везде.
+        assert is_enrolled(master) is True
+        assert _gate_master_api(master) is True
+        assert _gate_role_resolver(bot_user) is True
+
+        master.is_active = False
+        master.archived_at = datetime.now(tz=timezone.utc)
+        master.save(update_fields=["is_active", "archived_at"])
+
+        assert is_enrolled(master) is False
         assert _gate_master_api(master) is False
         assert _gate_role_resolver(bot_user) is False
+        assert _gate_bookable(tenant, master) is False
         assert _gate_roster(tenant, master) == "revoked"
-        assert _gate_fallback(tenant, master, service) is False
+
+
+class TestTheRosterCanSayProfileIncomplete:
+    """Четвёртый исход ростера — DRF-1521.
+
+    ``is_active=False`` при принятом приглашении отвечает на два разных
+    вопроса владелицы, и действия у них разные: «я сама сняла её с
+    витрины» (чинить нечего) и «она приняла приглашение и остановилась
+    на полпути» (написать мастеру). Одно слово ``revoked`` на обе
+    посылало бы её искать, кто отозвал доступ, — та же ложь, что
+    DRF-1506 убирал для PENDING.
+
+    **На живых данных 07.09.2026 этот исход недостижим:** имя заполнено
+    у всех строк, а из трёх условий готовности профиля сегодня выразимо
+    только оно (два других ждут пп. 5-6). Исход ГОТОВ, а не работает —
+    форму строки собирает тест, продакшен её не создаёт.
+    """
+
+    def test_an_unfinished_profile_is_not_a_revoke(self) -> None:
+        """Отрицание и положительная стража на одной функции и форме.
+
+        Строки отличаются ровно одним столбцом — именем.
+        """
+
+        linked = uuid4()
+        landed_at = datetime.now(tz=timezone.utc)
+
+        assert (
+            _state(is_active=False, name="", linked_bot_user_id=linked, accepted_at=landed_at)
+            == "profile_incomplete"
+        )
+        # Та же строка с именем — владелица сняла её сама.
+        assert (
+            _state(
+                is_active=False,
+                name="Анна Петрова",
+                linked_bot_user_id=linked,
+                accepted_at=landed_at,
+            )
+            == "revoked"
+        )
+
+    def test_a_master_who_never_arrived_is_still_a_revoke(self) -> None:
+        """Граница исхода: он про личность, а не про пустое имя.
+
+        Строка без бота и без имени — это не «человек не дозаполнил
+        профиль», а строка, за которой никто не приходил. Отправлять
+        владелицу писать ей было бы вторым сортом той же лжи.
+        """
+
+        # Положительная половина: с личностью пустое имя даёт новый исход.
+        assert (
+            _state(
+                is_active=False,
+                name="",
+                linked_bot_user_id=uuid4(),
+                accepted_at=datetime.now(tz=timezone.utc),
+            )
+            == "profile_incomplete"
+        )
+        # Отрицательная: без личности — прежнее слово, ничего не поменялось.
+        assert _state(is_active=False, name="", linked_bot_user_id=None) == "revoked"
+
+    def test_the_new_outcome_never_takes_anybody_off_sale(self) -> None:
+        """Порядок работ DRF-1521 п. 7, зашитый в тест.
+
+        Гейт продаваемости включается последним и за флагом. Новая ветка
+        выбирает СЛОВО для отказа, а не сам отказ: она живёт внутри
+        проверки ``is_active``, где мастер уже не продаётся.
+        """
+
+        active_row = {
+            "archived_at": None,
+            "is_active": True,
+            "invite_status": ACCEPTED,
+            "ayla_user_id": uuid4(),
+            "linked_bot_user_id": uuid4(),
+            "accepted_at": datetime.now(tz=timezone.utc),
+            "name": "",
+        }
+
+        # Пустое имя при живой активности продажу НЕ закрывает.
+        assert sale_block(active_row) is None
+        assert is_available(active_row) is True
+        # Положительная стража на тех же данных: закрывает её ровно
+        # снятая активность, и тогда причина — новая.
+        assert sale_block({**active_row, "is_active": False}) == "profile_incomplete"
+
+    def test_the_roster_shows_it_through_the_real_screen(
+        self,
+        tenant: Tenant,
+        bot_user: BotUser,
+    ) -> None:
+        """Ростер целиком, а не предикат: столбец ``accepted_at`` в ``.values()``.
+
+        Забыть его — это ``KeyError`` в ``sale_block``, но только на той
+        ветке, которую построчный тест не трогает. Поэтому исход
+        проверяется и через настоящий сборщик ростера.
+        """
+
+        master = _make_master(
+            tenant,
+            name="Не дозаполнившая",
+            linked_bot_user=bot_user,
+            invite_status=CatalogMaster.InviteStatus.ACCEPTED,
+            is_active=True,
+        )
+        master.refresh_from_db()
+        assert master.accepted_at is not None
+
+        # Положительная половина: ростер её видит и называет живой.
+        assert _gate_roster(tenant, master) == "active"
+
+        master.is_active = False
+        master.name = ""
+        master.save(update_fields=["is_active", "name"])
+
+        assert _gate_roster(tenant, master) == "profile_incomplete"
+        # И она по-прежнему входит в кабинет — обе половины развилки
+        # держатся на одних данных.
+        assert _gate_master_api(master) is True
+
+
+class TestEnrolledIsLandedMinusIsActive:
+    """``Q`` и построчный двойник обязаны совпадать на любой форме строки.
+
+    Предикатов стало три, и каждый живёт в двух экземплярах — выборкой и
+    функцией. Расхождение между экземплярами — тот же класс дефекта,
+    ради которого модуль заведён, только этажом ниже.
+    """
+
+    def test_enrolled_is_landed_minus_is_active(self, tenant: Tenant) -> None:
+        rows: list[CatalogMaster] = []
+        for archived in (None, datetime.now(tz=timezone.utc)):
+            for active in (True, False):
+                for status in (ACCEPTED, CatalogMaster.InviteStatus.PENDING):
+                    for linked in (True, False):
+                        bu = None
+                        if linked:
+                            bu = BotUser.all_tenants.create(
+                                tenant=tenant,
+                                channel="max",
+                                channel_user_id=f"e{len(rows)}",
+                                chat_id=f"e{len(rows)}",
+                            )
+                        rows.append(
+                            _make_master(
+                                tenant,
+                                name=f"Форма {len(rows)}",
+                                archived_at=archived,
+                                is_active=active,
+                                invite_status=status,
+                                linked_bot_user=bu,
+                            )
+                        )
+
+        landed_ids = set(
+            CatalogMaster.all_tenants.filter(LANDED, tenant=tenant).values_list("id", flat=True)
+        )
+        enrolled_ids = set(
+            CatalogMaster.all_tenants.filter(ENROLLED, tenant=tenant).values_list("id", flat=True)
+        )
+
+        for row in rows:
+            row.refresh_from_db()
+            assert is_landed(row) is (row.id in landed_ids), row.name
+            assert is_enrolled(row) is (row.id in enrolled_ids), row.name
+
+        # Приземление — это допуск ПЛЮС активность, и ничего кроме.
+        assert landed_ids == {r.id for r in rows if r.id in enrolled_ids and r.is_active}
+        # Положительная стража: обе выборки непусты и не совпадают, иначе
+        # равенство выше выполнилось бы по вырожденности.
+        assert len(landed_ids) >= 1
+        assert len(enrolled_ids) > len(landed_ids)
 
 
 class TestTheRosterStopsCallingAnInvitedMasterRevoked:
@@ -687,12 +983,12 @@ class TestAMasterWithNoAylaLinkIsNotSoldAndTheOwnerIsToldWhy:
 
 
 class TestTheReasonVocabularyCannotBeExtendedByHalves:
-    """Страховка для DRF-1521, которая придёт в этот же гейт.
+    """Страховка, которая сработала на DRF-1521.
 
-    Она добавит четвёртое условие готовности профиля и своё значение
-    причины. Добавить его в один словарь и забыть про второй — самая
-    дешёвая из возможных ошибок, и её ловит равенство ниже: ростер
-    владелицы не имеет права знать меньше причин, чем витрина.
+    Она добавила своё значение причины. Добавить его в один словарь и
+    забыть про второй — самая дешёвая из возможных ошибок, и её ловит
+    равенство ниже: ростер владелицы не имеет права знать меньше причин,
+    чем витрина.
     """
 
     def test_role_state_is_active_plus_every_sale_block(self) -> None:
@@ -700,4 +996,211 @@ class TestTheReasonVocabularyCannotBeExtendedByHalves:
         # Положительная стража: словари не пусты, и равенство выше не
         # выполнилось по вырожденности.
         assert "ayla_unlinked" in get_args(SaleBlock)
-        assert len(get_args(SaleBlock)) >= 3
+        assert "profile_incomplete" in get_args(SaleBlock)
+        # §83 — пятая причина. Строка добавлена сюда, а не заменена: цель
+        # положительной стражи в том, чтобы равенство выше не выполнилось
+        # по вырожденности, и старые члены проверяются наравне с новым.
+        assert "schedule_unconfirmed" in get_args(SaleBlock)
+        assert len(get_args(SaleBlock)) >= 5
+
+
+class TestTheMeasurementDRF1521OwesTheOwner:
+    """Замер до и после, зашитый в тест, а не оставленный в отчёте.
+
+    Форма боевого контура 06.09.2026: девять синхронизированных мастеров
+    (``linked_bot_user IS NULL``, ``ayla_user_id`` заполнен, продаются) и
+    инвайт-строки, которые не продаются и никуда не входят. Задача
+    обязана оставить обе цифры на месте, и ровно этого требует граница
+    брифа «девять синхронизированных мастеров не трогать».
+
+    Цифра, которая меняется, — третья: сколько человек может войти в
+    кабинет. Она обязана вырасти ровно на снятых с витрины, и ни на кого
+    больше.
+    """
+
+    def test_bookable_stays_and_only_the_cabinet_opens(
+        self,
+        tenant: Tenant,
+        bot_user: BotUser,
+    ) -> None:
+        for i in range(9):
+            _make_master(tenant, name=f"Синхронизированная {i}", linked_bot_user=None)
+        _make_master(
+            tenant,
+            name="Приглашённая",
+            invite_status=CatalogMaster.InviteStatus.PENDING,
+            is_active=False,
+            ayla_user_id=None,
+        )
+        taken_off = _make_master(
+            tenant,
+            name="Снятая с витрины",
+            linked_bot_user=bot_user,
+            is_active=True,
+        )
+        taken_off.refresh_from_db()
+
+        def counts() -> tuple[int, int]:
+            with tenant_scope(tenant):
+                bookable = CatalogMaster.objects.bookable().count()
+            enrolled = CatalogMaster.all_tenants.filter(ENROLLED, tenant=tenant).count()
+            return bookable, enrolled
+
+        # ДО: девять синхронизированных плюс приземлившаяся продаются;
+        # войти в кабинет может она одна — у остальных нет личности.
+        assert counts() == (10, 1)
+
+        taken_off.is_active = False
+        taken_off.save(update_fields=["is_active"])
+
+        # ПОСЛЕ снятия с витрины: продаваемых на одного меньше, а вход в
+        # кабинет НЕ закрылся. Девять синхронизированных не шелохнулись
+        # ни в одной из цифр.
+        assert counts() == (9, 1)
+        assert is_available(taken_off) is False
+        assert is_enrolled(taken_off) is True
+
+        synced = CatalogMaster.all_tenants.filter(tenant=tenant, linked_bot_user__isnull=True)
+        assert synced.filter(invite_status=ACCEPTED).count() == 9
+        assert all(is_available(m) for m in synced.filter(invite_status=ACCEPTED))
+        assert not any(is_enrolled(m) for m in synced)
+
+
+class TestTheScheduleGateIsOffUntilTheOwnerTurnsItOn:
+    """§83 — условие есть, но никого не снимает, пока флаг выключен.
+
+    Порядок работ DRF-1521 п. 7: сперва признак и способ его поставить,
+    потом кампания подтверждения по уже подключённым мастерам, и только
+    потом гейт. Между «признак есть» и «гейт включён» живут все тридцать
+    один продаваемый мастер пилота, и уронить их раньше времени — это не
+    строгость, а поломка витрины.
+    """
+
+    def test_an_unconfirmed_master_still_sells_while_the_flag_is_off(self, tenant: Tenant) -> None:
+        master = _make_master(tenant)
+
+        assert master.schedule_confirmed_at is None
+        assert sale_block(master) is None
+        assert is_available(master) is True
+        assert CatalogMaster.all_tenants.filter(available_q()).filter(pk=master.pk).exists()
+
+    @override_settings(MASTER_SCHEDULE_CONFIRMATION_REQUIRED=True)
+    def test_with_the_flag_on_the_same_master_stops_selling_and_says_why(
+        self, tenant: Tenant
+    ) -> None:
+        master = _make_master(tenant)
+
+        assert sale_block(master) == "schedule_unconfirmed"
+        assert is_available(master) is False
+        assert not CatalogMaster.all_tenants.filter(available_q()).filter(pk=master.pk).exists()
+
+    @override_settings(MASTER_SCHEDULE_CONFIRMATION_REQUIRED=True)
+    def test_a_confirmed_master_passes_the_gate(self, tenant: Tenant) -> None:
+        """Положительная стража: гейт не «снимает всех», он снимает
+        неподтверждённых. Без этой половины предыдущий тест зеленел бы и
+        на предикате, который не пускает никого."""
+
+        master = _make_master(tenant, schedule_confirmed_at=timezone_now())
+
+        assert sale_block(master) is None
+        assert is_available(master) is True
+        assert CatalogMaster.all_tenants.filter(available_q()).filter(pk=master.pk).exists()
+
+    @override_settings(MASTER_SCHEDULE_CONFIRMATION_REQUIRED=True)
+    def test_the_schedule_reason_never_outranks_a_reason_the_owner_cannot_fix_by_pressing(
+        self, tenant: Tenant
+    ) -> None:
+        """Отказ — это обещание «почини вот это, и мастер станет продаваться».
+
+        Мастеру без связи с Ayla подтверждение расписания продажи не
+        вернёт. Покажи мы «подтвердите расписание» — владелица нажала бы
+        кнопку и ничего не изменилось бы, а экран соврал.
+        """
+
+        unlinked = _make_master(tenant, ayla_user_id=None)
+        pending = _make_master(tenant, invite_status=CatalogMaster.InviteStatus.PENDING)
+
+        assert sale_block(unlinked) == "ayla_unlinked"
+        assert sale_block(pending) == "pending"
+
+    @override_settings(MASTER_SCHEDULE_CONFIRMATION_REQUIRED=True)
+    def test_the_whole_salon_going_dark_is_visible_as_a_count(self, tenant: Tenant) -> None:
+        """Счётчик, а не построчность.
+
+        Сумма построчных «не продаётся» — это «клиент не увидит никого», и
+        заметить это обязан тот же гейт, а не владелец на пилоте. Тест
+        считает витрину салона до и после включения условия.
+        """
+
+        for _ in range(5):
+            _make_master(tenant)
+        confirmed = _make_master(tenant, schedule_confirmed_at=timezone_now())
+
+        with override_settings(MASTER_SCHEDULE_CONFIRMATION_REQUIRED=False):
+            before = CatalogMaster.all_tenants.filter(available_q(), tenant=tenant).count()
+        after = CatalogMaster.all_tenants.filter(available_q(), tenant=tenant).count()
+
+        assert before == 6, "до включения продаются все шестеро"
+        assert after == 1, "после включения остаётся ровно подтверждённая"
+        assert after > 0, "витрина салона не обнулилась целиком"
+
+        # ``.first()`` возвращает ``None`` на пустом наборе, и ``after == 1``
+        # выше знает об этом только читатель, не проверяющий типов. Именованный
+        # отказ говорит, ЧТО именно перестало быть правдой, вместо
+        # ``AttributeError: 'NoneType'`` в строке про ``pk``.
+        survivor = CatalogMaster.all_tenants.filter(available_q(), tenant=tenant).first()
+        assert survivor is not None, "витрина пуста, хотя счётчик выше насчитал одного"
+        assert survivor.pk == confirmed.pk
+
+    @override_settings(MASTER_SCHEDULE_CONFIRMATION_REQUIRED=True)
+    def test_the_roster_survives_the_flag_and_says_the_word(
+        self, tenant: Tenant, bot_user: BotUser
+    ) -> None:
+        """Ростер владелицы читает строки через ``.values()`` со СПИСКОМ полей.
+
+        Гейт спрашивает ``schedule_confirmed_at``, когда флаг включён, а
+        ``sale_block`` читает строку строго — забытый в списке столбец даёт
+        не тихое умолчание, а ``KeyError`` на живом экране «Команда». То
+        есть в момент включения флага ростер салона упал бы целиком.
+
+        Тест проходит ростер по-настоящему, а не проверяет наличие строки
+        в исходнике: список полей — это то, что легко «поправить» обратно.
+        """
+
+        master = _make_master(tenant, linked_bot_user=bot_user, accepted_at=timezone_now())
+
+        assert _gate_roster(tenant, master) == "schedule_unconfirmed"
+
+        master.schedule_confirmed_at = timezone_now()
+        master.save(update_fields=["schedule_confirmed_at"])
+
+        assert _gate_roster(tenant, master) == "active"
+
+
+class TestTheTwoTwinsOfTheSalePredicateCannotDrift:
+    """``AVAILABLE`` (SQL) и :func:`sale_block` (построчно) — один вопрос.
+
+    ``AVAILABLE`` читает флаг ПРИ ИМПОРТЕ: ``Q`` это значение, а не вызов.
+    :func:`available_q` читает его в момент вызова. Разъехаться в СОСТАВЕ
+    они не имеют права — расходиться может только момент чтения флага, и
+    этот тест держит границу между двумя разницами.
+    """
+
+    def test_available_constant_equals_the_runtime_predicate(self) -> None:
+        assert AVAILABLE == available_q()
+
+    @override_settings(MASTER_SCHEDULE_CONFIRMATION_REQUIRED=True)
+    def test_the_runtime_predicate_answers_the_flag_the_constant_cannot(self) -> None:
+        """Именно поэтому ``bookable()`` зовёт функцию, а не константу."""
+
+        assert available_q() != AVAILABLE
+        assert "schedule_confirmed_at" in str(available_q())
+        assert "schedule_confirmed_at" not in str(AVAILABLE)
+
+    @override_settings(MASTER_SCHEDULE_CONFIRMATION_REQUIRED=True)
+    def test_the_manager_funnel_uses_the_runtime_predicate(self, tenant: Tenant) -> None:
+        """``bookable()`` — воронка витрины, и она обязана слушать флаг."""
+
+        _make_master(tenant)
+
+        assert CatalogMaster.objects.bookable().filter(tenant=tenant).count() == 0

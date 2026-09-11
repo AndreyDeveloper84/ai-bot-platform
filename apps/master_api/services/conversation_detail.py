@@ -645,7 +645,7 @@ def promote_to_human_locked(
       4. Update tier + tier_locked_at + tier_locked_by_master +
          reason_class + reason_text atomically.
       5. Audit + emit ``conversation.tier_promoted_to_human_locked``.
-      6. After commit: MAX DM to ``tenant.manager_chat_id`` (no-op if
+      6. After commit: MAX DM to the salon manager's address (no-op if
          empty, mirroring availability_request pattern).
     """
 
@@ -740,7 +740,7 @@ def _maybe_send_manager_dm(
 ) -> None:
     """Dispatch the «Анна передала диалог в админ-канал» DM.
 
-    No-op when ``manager_chat_id`` is empty — degraded mode aligned
+    No-op when no manager address is configured — degraded mode aligned
     with :func:`apps.master_api.views._maybe_send_manager_dm` and the
     reminder-escalation pattern.
 
@@ -748,8 +748,15 @@ def _maybe_send_manager_dm(
     don't need it.
     """
 
-    chat_id = (tenant.manager_chat_id or "").strip()
-    if not chat_id:
+    # DRF-1559 — адрес менеджера: человек, если у салона заполнен
+    # ``manager_user_id``, иначе прежний диалоговый идентификатор. Slug
+    # ``no_manager_chat_id`` сохранён — это эмитируемый ключ. Импорт
+    # локальный, как и у ``send_message`` ниже: apps.channels не нужен
+    # тем эндпоинтам master_api, которые сюда не заходят.
+    from apps.channels.max.addressing import manager_address
+
+    manager = manager_address(tenant)
+    if not manager:
         logger.info(
             "master_api.conversations.promote.no_manager_chat_id tenant=%s master=%s",
             tenant.id,
@@ -761,7 +768,7 @@ def _maybe_send_manager_dm(
 
     text = f"{master.name} передала диалог с {client_label} в админ-канал. Причина: {reason_class}"
     try:
-        send_message(chat_id=chat_id, text=text)
+        send_message(**manager.send_kwargs(), text=text)
     except MaxAPIError:
         logger.warning(
             "master_api.conversations.promote.manager_dm_failed tenant=%s master=%s",

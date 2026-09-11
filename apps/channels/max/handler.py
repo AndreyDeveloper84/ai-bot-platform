@@ -193,6 +193,7 @@ from apps.orchestrator.memory.personal_context import record_explicit_green_fact
 from apps.orchestrator.memory_ask import maybe_weave_question, try_handle_answer
 from apps.orchestrator.memory_block import build_concierge_memory_block
 from apps.orchestrator.nutrition_context import build_nutrition_context_block
+from apps.orchestrator.nutrition_wellness import interpretation_eligible
 from apps.orchestrator.safety.gate import (
     OUTBOUND_ACTION_TYPE,
     evaluate_inbound,
@@ -209,9 +210,11 @@ from apps.skills.booking.lookup import is_personal_booking_lookup
 from apps.skills.menu.marketplace import (
     FALLBACK_ACTION_TYPE,
     HEALTH_DECLINE_ACTION_TYPE,
-    HEALTH_REQUEST_ACTION_TYPE,
     MENU_ACTION_TYPE,
+    OPEN_WARNING_ACTION_TYPE,
+    is_extra_callback,
     is_health_callback,
+    is_open_callback,
     marketplace_fallback_reply,
     marketplace_menu_reply,
     matches_menu_request,
@@ -1034,6 +1037,7 @@ def _route_health_callback(
         HEALTH_REQUEST_TEXT,
         health_need_surface,
         health_request_action_data,
+        health_request_action_type,
         nutrition_enabled,
     )
 
@@ -1071,8 +1075,69 @@ def _route_health_callback(
     )
     return (
         DiscoveryReply(text=HEALTH_REQUEST_TEXT, action_data=health_request_action_data()),
-        HEALTH_REQUEST_ACTION_TYPE,
+        # DRF-1547 / §37 п.5 — метка несёт ПОВЕРХНОСТЬ, а не просто «здесь
+        # был запрос». Выдача согласия происходит в мини-приложении,
+        # отдельным HTTP-запросом, и без этой метки вернуть человека туда,
+        # куда он шёл, не по чему: в профиле он оказался бы с пустыми
+        # руками и обязанностью вспомнить, зачем пришёл.
+        health_request_action_type(surface),
     )
+
+
+def _route_menu_nav_callback(*, callback_text: str, bot_user: Any) -> tuple[DiscoveryReply, str]:
+    """Тап навигации по меню — ответ и его ``action_type`` (DRF-1547).
+
+    Два исхода, и ни один из них не молчание:
+
+    * ``cb:open:{слаг}`` — ПРЕДУПРЕЖДЕНИЕ перед открытием приложения
+      (§37 п.6) и уже под ним кнопка, которая его открывает;
+    * ВСЁ семейство ``cb:extra:*`` — главное меню.
+
+    Второй пункт с OD-UI-2 («Ещё убираем, помощь в главное меню») стал
+    правилом без исключений. Раньше ``cb:extra:open`` открывал подменю, а
+    ``back`` и ``help`` возвращали в главное меню; подменю снесено, и
+    открывать больше нечего.
+
+    Ветка при этом НЕ снята вместе с подменю, и это главное здесь:
+
+    * ``cb:extra:help`` — живая кнопка ГЛАВНОГО меню. Её payload
+      намеренно не переведён в ``cb:menu:help``: ``resolve_tap_text``
+      перехватывает весь ``cb:menu:*`` ВЫШЕ этой лестницы и подставляет
+      каноническую фразу, а для ``help`` эта фраза — «Что ты умеешь?»,
+      уезжающая к консьержу. Человек получил бы свободную прозу модели
+      вместо меню, что §25 п.2 и запрещает («отвечаем меню, а не
+      свободной прозой»), — а главное меню И ЕСТЬ ответ на этот вопрос;
+    * ``cb:extra:open`` и ``cb:extra:back`` кнопками больше не рисуются,
+      но лежат в истории чатов на вчерашних клавиатурах. Тап по кнопке,
+      которую бот сам нарисовал, обязан дойти до ответа: снять ветку —
+      значит отдать сырой ``cb:extra:…`` модели (ровно дефект DRF-1051)
+      или промолчать.
+
+    Незнакомый слаг любой из двух форм — снятая кнопка из истории чата.
+    Отвечается меню, тем же правилом, по которому ``resolve_tap_text``
+    переводит снятый ``cb:menu:*`` в «Что ты умеешь?»: чем кнопка была,
+    восстановить нечем, но ход терять нельзя.
+    """
+    from apps.skills.menu.marketplace import (
+        open_callback_slug,
+        open_warning_reply,
+    )
+
+    stripped = (callback_text or "").strip()
+
+    if is_open_callback(stripped):
+        slug = open_callback_slug(stripped)
+        warning = open_warning_reply(slug) if slug else None
+        if warning is not None:
+            warn_text, warn_data = warning
+            logger.info("channels.max.global.open_warned slug=%s", slug)
+            return (
+                DiscoveryReply(text=warn_text, action_data=warn_data),
+                OPEN_WARNING_ACTION_TYPE,
+            )
+
+    menu_text, menu_data = marketplace_menu_reply(bot_user=bot_user)
+    return DiscoveryReply(text=menu_text, action_data=menu_data), MENU_ACTION_TYPE
 
 
 def handle_global_max_event(payload: dict, trace_id: str | uuid.UUID | None = None) -> None:
@@ -1318,6 +1383,21 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
     # `startswith` в резолвер по форме; довод там же.
     is_visit_callback = event.text.startswith(VISIT_CALLBACK_PREFIXES)
 
+    # DRF-1547 — МОЛЧАНИЕ, и по тому же правилу, что у соседей выше.
+    #
+    #   `cb:extra:*` — «Ещё», «Помощь», «Назад». Навигация по меню, как
+    #       `cb:anketa:start` / `cb:anketa:edit`: человек ничего не сказал,
+    #       он открыл другой экран. Фразы за этими тапами нет — «Ещё» это
+    #       не высказывание, — а сырой payload в истории с ролью `user`
+    #       есть ровно дефект DRF-988.
+    #   `cb:open:*` — «открой экран приложения». То же самое, и добавочно:
+    #       ход отвечается ПРЕДУПРЕЖДЕНИЕМ, после которого человек ещё
+    #       может передумать. Записать это как его реплику значило бы
+    #       записать намерение, которое он не подтвердил.
+    #
+    # Ход при этом в переписке виден — ответ бота записывается всегда.
+    is_menu_nav_callback = is_extra_callback(event.text) or is_open_callback(event.text)
+
     # DRF-990, третий заход — СЕМЕЙСТВО `cb:discover:`, а не глагол `book:`.
     #
     # Боевой замер пилота 30.08: 55 из 68 сырых строк нажатия в истории — это
@@ -1384,6 +1464,7 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
         or is_catalog_callback
         or is_clarify_redraw_tap
         or is_visit_callback
+        or is_menu_nav_callback
         or stale_tap
         or inbound_history_text is None
     ):
@@ -1591,7 +1672,9 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
         # прочих колбэковых веток, по правилу ``_PASSTHROUGH_CALLBACK_PREFIXES``:
         # тап по кнопке, которую бот сам нарисовал, обязан дойти до ответа, а
         # не быть проглоченным приветствием или отданным модели сырым.
-        reply = DiscoveryReply(text=STALE_TAP_TEXT, action_data=first_contact_action_data())
+        reply = DiscoveryReply(
+            text=STALE_TAP_TEXT, action_data=first_contact_action_data(bot_user=bot_user)
+        )
         assistant_action_type = "stale_tap"
         # The tap could not be resolved to its intended action — a fallback,
         # not a successfully answered turn.
@@ -1644,6 +1727,35 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
             "booking_repeat"
             if event.text.startswith(CALLBACK_VISIT_REPEAT_PREFIX)
             else "visit_card"
+        )
+        _record_live_path_metric(
+            bot_user=bot_user,
+            conversation=conversation,
+            trace_id=trace_id,
+            message_text=event.text,
+            t_start=t_start,
+            outcome=AIRequestMetric.OUTCOME_SUCCESS,
+            skill_selected=assistant_action_type,
+        )
+    elif is_extra_callback(event.text) or is_open_callback(event.text):
+        # DRF-1547 / §37 + OD-UI-2 — «Помощь» главного меню, тапы по
+        # снесённому подменю из истории чата и предупреждение перед
+        # открытием приложения.
+        #
+        # Стоит здесь, среди колбэковых веток и ВЫШЕ приветствия, по тому
+        # же правилу, что и ``cb:health:``: тап по кнопке, которую бот сам
+        # нарисовал, обязан дойти до ответа, а не быть проглоченным
+        # приветствием или отданным модели сырым.
+        #
+        # Своё семейство, а не ``cb:menu:``, потому что ``resolve_tap_text``
+        # переводит весь ``cb:menu:*`` в фразу ВЫШЕ лестницы. Пока было
+        # подменю, «Ещё» превратилось бы в «Что ты умеешь?» и не открылось
+        # бы никогда; после OD-UI-2 тот же перехват держит «Помощь»: её
+        # фраза на глобальном пути уезжает к консьержу, и человек получил
+        # бы прозу модели вместо меню.
+        reply, assistant_action_type = _route_menu_nav_callback(
+            callback_text=event.text,
+            bot_user=bot_user,
         )
         _record_live_path_metric(
             bot_user=bot_user,
@@ -2011,9 +2123,29 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
                     # Best-effort exactly like its neighbours: this runs AFTER the
                     # idempotency key is claimed, so a raise would lose the reply
                     # on retry rather than retry it.
+                    # §48 — ПЕРВАЯ ступень гейта Nutrition Wellness
+                    # Interpretation, по ХОДУ. Дешёвый предикат до всякого
+                    # I/O: ход про еду и не про медицину. Вторая ступень (по
+                    # цели человека) стоит внутри билдера — там она видна.
+                    #
+                    # Две службы одного предиката. Без него включённый флаг
+                    # платит ДВА похода в Ayla и ~200 токенов за КАЖДЫЙ ход,
+                    # включая «во сколько вы работаете». А по §48 он же
+                    # ограничитель области действия способности: нет
+                    # приложенной картины — нет и разрешения модели о ней
+                    # говорить.
+                    #
+                    # Плюс флаг диетолога. Флагов два намеренно и они про
+                    # разное: CONCIERGE_NUTRITION_CONTEXT_ENABLED — труба
+                    # (DRF-1284), NUTRITION_COACH_ENABLED — поверхность
+                    # диетолога (DRF-1464). Труба без диетолога это ровно
+                    # то, что DRF-1284 измерил: токены растут, ответ нет.
                     nutrition_block = ""
                     try:
-                        nutrition_block = build_nutrition_context_block(bot_user)
+                        from apps.nutrition_coach import flags as _coach_flags
+
+                        if _coach_flags.enabled() and interpretation_eligible(event.text):
+                            nutrition_block = build_nutrition_context_block(bot_user)
                     except Exception:  # noqa: BLE001 — belt-and-braces; module is fail-closed
                         logger.exception(
                             "channels.max.global.nutrition_context_failed bot_user=%s",

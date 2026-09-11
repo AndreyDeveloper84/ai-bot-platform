@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from unittest.mock import Mock, patch
 
+from apps.consent.personal_calculation import ConsentAttestation
 from apps.integrations.ayla import (
     NutritionUnavailableError,
     ProfileResponse,
@@ -74,6 +75,20 @@ def _profile(
         disclaimer_acked=None,
         goal_overridden_by=goal_overridden_by,
     )
+
+
+#: DRF-1658: с этого PR тело POST профиля не собирается без утверждения о
+#: согласии (граница каталога #324). Тесты, доходящие до POST, объявляют
+#: предусловие «согласие на расчёт дано, версия такая-то» явно — а не
+#: через autouse, чтобы было видно, какой тест зависит от согласия.
+_ATTESTATION = ConsentAttestation(
+    type="personal_calculation", document_version="personal-calculation-v1"
+)
+_ATTESTATION_LOOKUP = "apps.consent.personal_calculation.current_attestation"
+
+
+def _consent_granted():
+    return patch(_ATTESTATION_LOOKUP, return_value=_ATTESTATION)
 
 
 # ─── matches ──────────────────────────────────────────────────────────────
@@ -156,9 +171,12 @@ class TestFullWalk:
                 message_text=text,
             )
 
-        with patch(
-            "apps.skills.nutrition_anketa.skill.get_nutrition_client",
-            return_value=client,
+        with (
+            patch(
+                "apps.skills.nutrition_anketa.skill.get_nutrition_client",
+                return_value=client,
+            ),
+            _consent_granted(),
         ):
             skill = NutritionAnketaSkill()
 
@@ -171,19 +189,24 @@ class TestFullWalk:
             r2 = skill.handle(_ctx("cb:anketa:choice:gender:female"))
             assert r2.action_type == "anketa_step_age"
 
-            # Turn 3: age (text).
+            # Turn 3: age (text) → screening, not height. The §7.1 gates
+            # come before the anthropometry questions on purpose.
             r3 = skill.handle(_ctx("28"))
-            assert r3.action_type == "anketa_step_height"
+            assert r3.action_type == "anketa_step_screening"
 
-            # Turn 4: height.
-            r4 = skill.handle(_ctx("168"))
-            assert r4.action_type == "anketa_step_weight"
+            # Turn 4: screening — nothing declared, flow continues.
+            r4 = skill.handle(_ctx("cb:anketa:choice:screening:none"))
+            assert r4.action_type == "anketa_step_height"
 
-            # Turn 5: weight.
-            r5 = skill.handle(_ctx("62"))
-            assert r5.action_type == "anketa_step_goal"
+            # Turn 5: height.
+            r5 = skill.handle(_ctx("168"))
+            assert r5.action_type == "anketa_step_weight"
 
-            # Turn 6: goal → complete.
+            # Turn 6: weight.
+            r6w = skill.handle(_ctx("62"))
+            assert r6w.action_type == "anketa_step_goal"
+
+            # Turn 7: goal → complete.
             r6 = skill.handle(_ctx("cb:anketa:choice:goal:maintain"))
             assert r6.action_type == "anketa_complete"
 
@@ -197,6 +220,11 @@ class TestFullWalk:
             "weight_kg": 62,
             "goal": "maintain",
             "activity_coefficient": 1.4,
+            # DRF-1658: утверждение о согласии в форме границы #324.
+            "consent": {
+                "type": "personal_calculation",
+                "document_version": "personal-calculation-v1",
+            },
         }
         assert captured[0]["external_user_id"] == "bot:max:12345"
 
@@ -316,9 +344,12 @@ class TestErrorPaths:
 
         client.upsert_profile = _upsert
 
-        with patch(
-            "apps.skills.nutrition_anketa.skill.get_nutrition_client",
-            return_value=client,
+        with (
+            patch(
+                "apps.skills.nutrition_anketa.skill.get_nutrition_client",
+                return_value=client,
+            ),
+            _consent_granted(),
         ):
             result = NutritionAnketaSkill().handle(ctx)
 
@@ -327,6 +358,202 @@ class TestErrorPaths:
         # final transition, so retry requires user re-walking the last
         # step. Document this — the alternative (rollback FSM) is more
         # surface area for Sprint 9.
+
+
+# ─── stop scenarios (§7.1) ───────────────────────────────────────────────
+
+
+def _client_that_must_not_be_called() -> Mock:
+    """Ayla client whose every call fails the test.
+
+    A stop scenario must not reach the network at all. Asserting
+    ``not called`` afterwards would pass just as well if the code called
+    a *different* method, so the guard is on the client itself.
+    """
+    client = Mock()
+
+    async def _boom(**kwargs):  # pragma: no cover - the point is not to run
+        raise AssertionError(f"Ayla was called during a stop scenario: {kwargs}")
+
+    client.upsert_profile = _boom
+    return client
+
+
+class TestStopScenarios:
+    """Owner decision §7.1 — no automatic calculation, diary intact."""
+
+    def test_minor_stops_before_weight_is_asked(self) -> None:
+        ctx, conversation = _context(
+            "15",
+            state={
+                "nutrition_anketa": {
+                    "current_step": "age",
+                    "answers": {"gender": "female"},
+                    "is_complete": False,
+                }
+            },
+        )
+        with patch(
+            "apps.skills.nutrition_anketa.skill.get_nutrition_client",
+            return_value=_client_that_must_not_be_called(),
+        ):
+            result = NutritionAnketaSkill().handle(ctx)
+
+        assert result.action_type == "anketa_stop"
+        assert result.meta["reply_kind"] == "anketa_stop_minor"
+        # The flow ends here: no further step is asked, so neither height
+        # nor weight is collected. Asserting on the absence of the words
+        # would be worse than useless — «просто» contains «рост».
+        assert not result.action_type.startswith("anketa_step_")
+        # The diary staying open is the decision, so it must be said.
+        assert "дневник" in result.reply_text.lower()
+        # State wiped — a parked FSM would re-ask on the next message.
+        assert "nutrition_anketa" not in conversation.skill_state
+
+    def test_adult_boundary_continues(self) -> None:
+        """18 passes. Without this the gate could be `<= 18` and still look
+        correct: every failing case would be a minor, and no test would
+        notice that adults were being refused too."""
+        ctx, conversation = _context(
+            "18",
+            state={
+                "nutrition_anketa": {
+                    "current_step": "age",
+                    "answers": {"gender": "female"},
+                    "is_complete": False,
+                }
+            },
+        )
+        result = NutritionAnketaSkill().handle(ctx)
+
+        assert result.action_type == "anketa_step_screening"
+        assert conversation.skill_state["nutrition_anketa"]["answers"]["age"] == 18
+
+    def test_declared_condition_stops_and_reaches_no_network(self) -> None:
+        ctx, conversation = _context(
+            "cb:anketa:choice:screening:pregnancy_nursing",
+            state={
+                "nutrition_anketa": {
+                    "current_step": "screening",
+                    "answers": {"gender": "female", "age": 30},
+                    "is_complete": False,
+                }
+            },
+        )
+        with patch(
+            "apps.skills.nutrition_anketa.skill.get_nutrition_client",
+            return_value=_client_that_must_not_be_called(),
+        ):
+            result = NutritionAnketaSkill().handle(ctx)
+
+        assert result.action_type == "anketa_stop"
+        assert result.meta["reply_kind"] == "anketa_stop_screening"
+        assert "дневник" in result.reply_text.lower()
+        assert "nutrition_anketa" not in conversation.skill_state
+
+    def test_declared_condition_is_not_stored_anywhere(self) -> None:
+        """Special-category answer (152-ФЗ): decided, then dropped.
+
+        Checks the whole persisted blob rather than one key — the answer
+        must not survive under any name, including a stray copy in
+        ``answers`` left behind by a future refactor.
+        """
+        ctx, conversation = _context(
+            "cb:anketa:choice:screening:eating_disorder",
+            state={
+                "nutrition_anketa": {
+                    "current_step": "screening",
+                    "answers": {"gender": "female", "age": 30},
+                    "is_complete": False,
+                }
+            },
+        )
+        with patch(
+            "apps.skills.nutrition_anketa.skill.get_nutrition_client",
+            return_value=_client_that_must_not_be_called(),
+        ):
+            result = NutritionAnketaSkill().handle(ctx)
+
+        # Exact, not «not in»: an emptiness check would pass just as well
+        # if the whole flow had collapsed, and this test would then be
+        # proving that nothing happened rather than that nothing was kept.
+        # The stop path clears the bucket, so the whole blob must be {}.
+        assert conversation.skill_state == {}
+
+        # Nor echoed back into the chat log by the reply itself. Presence
+        # first — otherwise an empty reply passes the negative.
+        assert "дневник" in result.reply_text.lower()
+        assert "расстройств" not in result.reply_text.lower()
+
+        # Nor smuggled out through the action payload the channel renders.
+        assert (result.action_data or {})["reason"] == "screening"
+        assert "eating_disorder" not in repr(result.action_data)
+
+    def test_clear_screening_answer_is_not_persisted(self) -> None:
+        """«Ничего из этого» is not kept either.
+
+        It is a health statement about the person and nothing downstream
+        reads it, so storing it would be storage without a purpose.
+        """
+        ctx, conversation = _context(
+            "cb:anketa:choice:screening:none",
+            state={
+                "nutrition_anketa": {
+                    "current_step": "screening",
+                    "answers": {"gender": "female", "age": 30},
+                    "is_complete": False,
+                }
+            },
+        )
+        result = NutritionAnketaSkill().handle(ctx)
+
+        assert result.action_type == "anketa_step_height"
+        bucket = conversation.skill_state["nutrition_anketa"]
+        # Presence first, on the same data: the answers that ARE needed
+        # survive. Without this the negative below would go green on a
+        # wiped bucket, i.e. on the flow being broken.
+        assert bucket["answers"]["age"] == 30
+        assert bucket["answers"]["gender"] == "female"
+        assert "screening" not in bucket["answers"]
+
+    def test_unparsable_screening_answer_re_asks_instead_of_stopping(self) -> None:
+        """A validation error is not a declaration.
+
+        The stop check reads ``answers`` after the transition; on a re-ask
+        nothing was stored, so a naive check would see the *previous*
+        answer to this step and stop on an input the person never gave.
+        """
+        ctx, conversation = _context(
+            "ага",
+            state={
+                "nutrition_anketa": {
+                    "current_step": "screening",
+                    "answers": {"gender": "female", "age": 30, "screening": "condition"},
+                    "is_complete": False,
+                }
+            },
+        )
+        result = NutritionAnketaSkill().handle(ctx)
+
+        assert result.action_type == "anketa_step_screening"
+        assert conversation.skill_state["nutrition_anketa"]["current_step"] == "screening"
+
+    def test_stop_offers_the_diary_it_promises(self) -> None:
+        """The branch says the diary stays open, so it has to open it."""
+        ctx, _conversation = _context(
+            "15",
+            state={
+                "nutrition_anketa": {
+                    "current_step": "age",
+                    "answers": {"gender": "female"},
+                    "is_complete": False,
+                }
+            },
+        )
+        result = NutritionAnketaSkill().handle(ctx)
+
+        buttons = (result.action_data or {}).get("buttons") or []
+        assert buttons, "stop scenario left the person with no next move"
 
 
 # ─── registration ────────────────────────────────────────────────────────
@@ -362,3 +589,62 @@ def test_imports_clean() -> None:
 
     importlib.reload(mod)
     assert mod.NutritionAnketaSkill.name == "nutrition_anketa"
+
+
+# ─── карточка норм: ноль не печатается как ориентир ───────────────────────
+
+
+class TestSummaryCardShowsOnlyRealTargets:
+    """Ноль в поле ориентира — отсутствие, а не «ориентир ноль» (§82, §85).
+
+    Карточка печатала пять строк безусловно, и после снятия формулы воды
+    выдавала «💧 Вода: 0 мл», а человеку без веса — ещё и «🔥 Калории:
+    0 ккал/день». Ни одна из пяти величин не бывает нулём у живого
+    человека, поэтому такая карточка не пустая, а лживая — и лжёт сразу
+    после слов «Готово, рассчитала твои нормы».
+    """
+
+    def test_a_full_calculation_still_shows_every_row(self) -> None:
+        """POSITIVE ВПЕРЕДИ: карточка не онемела, строки на месте."""
+        from apps.skills.nutrition_anketa.skill import _format_summary
+
+        text = _format_summary(_profile())
+        assert "Готово, рассчитала твои нормы:" in text
+        assert "🔥 Калории: 1900 ккал/день" in text
+        assert "💧 Вода: 2100 мл" in text
+
+    def test_a_zero_row_is_dropped_not_printed(self) -> None:
+        from dataclasses import replace
+
+        from apps.skills.nutrition_anketa.skill import _format_summary
+
+        text = _format_summary(replace(_profile(), water_ml=0))
+        # PRESENCE ВПЕРЕДИ: карточка отрисована и остальные строки на
+        # месте — снимается строка без значения, а не карточка целиком.
+        assert "🔥 Калории: 1900 ккал/день" in text
+        # ABSENCE: воды нет вовсе — ни подписи, ни нуля.
+        assert "Вода" not in text
+        assert "0 мл" not in text
+
+    def test_nothing_computed_does_not_pretend_to_be_a_calculation(self) -> None:
+        """Человек без веса: расчёта нет, и карточка это признаёт."""
+        from dataclasses import replace
+
+        from apps.skills.nutrition_anketa.skill import _format_summary
+
+        empty = replace(
+            _profile(),
+            daily_kcal=0,
+            protein_g=0,
+            fat_g=0,
+            carbs_g=0,
+            water_ml=0,
+        )
+        text = _format_summary(empty)
+        # PRESENCE ВПЕРЕДИ: ответ не пуст — человеку сказано, что
+        # дневник работает. Без этого отрицания ниже прошли бы и на
+        # пустой строке.
+        assert "Дневник готов" in text
+        # ABSENCE: расчётом карточка не притворяется и нолей не печатает.
+        assert "рассчитала твои нормы" not in text
+        assert "0" not in text

@@ -20,6 +20,7 @@ from django.core.cache import cache
 from django.test import Client
 from django.urls import reverse
 
+from apps.catalog.models import CatalogMaster
 from apps.catalog.services.http_client import (
     CatalogSalonServiceDTO,
     CatalogSpecialistDTO,
@@ -32,6 +33,7 @@ from apps.tenancy.onboarding import (
     REASON_CITY_MISSING,
     REASON_NEVER_SYNCED,
     REASON_NO_ACTIVE_SERVICES,
+    REASON_MASTERS_AWAIT_VERIFICATION,
     REASON_NO_BOOKABLE_MASTERS,
     REASON_TENANT_INACTIVE,
     ConnectError,
@@ -65,13 +67,49 @@ def _service(name: str = "Стрижка") -> CatalogSalonServiceDTO:
 
 
 def _specialist(*, active: bool = True) -> CatalogSpecialistDTO:
+    # ``user_id`` заполнен, потому что так выглядит боевая строка. DRF-1540
+    # (#1413) сделал связь с каноническим пользователем Ayla условием
+    # продаваемости: мастер без неё не показывается клиенту, потому что
+    # уведомление о записи до него не дойдёт. Замер контура 06.09.2026 —
+    # 31 бронируемый мастер, ни одного без ``ayla_user_id``.
+    #
+    # ``None`` здесь стоял с DRF-1525 и был законной формой провода
+    # (``CatalogSpecialistDTO.user_id`` объявлен ``str | None``), но не той
+    # формой, которую отдаёт Ayla. После #1413 фикстура начала рисовать
+    # салон, который не может быть виден клиенту, и три теста видимости
+    # стали падать на ``dev``.
     return CatalogSpecialistDTO(
         ayla_master_id=str(uuid.uuid4()),
-        user_id=None,
+        user_id=str(uuid.uuid4()),
         name="Анна",
         external_updated_at=_ts(),
         is_active=active,
     )
+
+
+def _verify_synced_masters(tenant: Tenant) -> int:
+    """Пройти за оператора ручную верификацию — как действие в админке.
+
+    DRF-1496: мастер, приехавший синхронизацией, рождается ``pending`` и
+    клиенту не продаётся, пока оператор не подтвердит её вручную.
+    Приглашения ей никто не слал, и прежнее умолчание ``accepted`` было
+    неправдой — ровно тот дефект, ради которого задача заведена.
+
+    Следствие для подключения салона: сразу после ``connect_salon``
+    бронируемых мастеров ноль, и ``no_bookable_masters`` — честный
+    ответ, а не сбой. Поэтому тесты видимости проходят этот шаг явно и
+    видимость получают им, а не побочным эффектом умолчания.
+
+    Ходит через ``save``, а не ``update``: это ровно то, что делает
+    действие ``verify_masters`` в ``apps/catalog/admin.py``.
+    """
+
+    verified = 0
+    for master in CatalogMaster.all_tenants.filter(tenant=tenant):
+        master.invite_status = CatalogMaster.InviteStatus.ACCEPTED
+        master.save(update_fields=["invite_status"])
+        verified += 1
+    return verified
 
 
 class FakeAylaHttp:
@@ -208,9 +246,27 @@ class TestOutcomeIsClientVisibility:
 
         assert result.sync_error is None
         assert result.assessment.active_services == 1
-        assert result.assessment.bookable_masters == 1
-        assert result.assessment.reasons == ()
-        assert result.assessment.is_visible is True
+        # DRF-1496: синхронизация приводит мастера в ``pending``, и до
+        # ручной верификации салон клиенту не виден. Это поведение
+        # задачи: приглашения этому мастеру никто не слал.
+        #
+        # DRF-1553 назвал этот подслучай отдельно: причина «ждут
+        # верификации», а не общее «нет бронируемых мастеров». Разница
+        # несущая — на первой экран даёт кнопку, на второй предлагать
+        # нечего.
+        assert result.assessment.bookable_masters == 0
+        assert REASON_MASTERS_AWAIT_VERIFICATION in result.assessment.reasons
+
+        # Верификация оператором — и тот же салон на тех же данных
+        # становится видимым. Парная положительная стража к отрицанию
+        # выше: «ноль» получен состоянием приглашения, а не сломанной
+        # синхронизацией.
+        assert _verify_synced_masters(result.tenant) == 1
+        verified = assess_salon(result.tenant)
+        assert verified.active_services == 1
+        assert verified.bookable_masters == 1
+        assert verified.reasons == ()
+        assert verified.is_visible is True
 
     def test_salon_without_bookable_masters_reason_named(self):
         """Услуги есть, мастер приехал неактивным → причина названа.
@@ -230,8 +286,11 @@ class TestOutcomeIsClientVisibility:
         # Парная положительная: с активным мастером той же витрины причина уходит.
         http_ok = FakeAylaHttp(services=[_service()], specialists=[_specialist()])
         ok = _connect(http_ok, slug="drugoy-salon", tenant_id=str(uuid.uuid4()))
-        assert ok.assessment.bookable_masters == 1
-        assert REASON_NO_BOOKABLE_MASTERS not in ok.assessment.reasons
+        # DRF-1496: активного мастера мало — его ещё надо верифицировать.
+        assert _verify_synced_masters(ok.tenant) == 1
+        ok_verified = assess_salon(ok.tenant)
+        assert ok_verified.bookable_masters == 1
+        assert REASON_NO_BOOKABLE_MASTERS not in ok_verified.reasons
 
     def test_sync_failure_is_not_connection_failure(self):
         """«Каталог не доехал» ≠ «салон не подключён» (HTTP 429 и т.п.)."""
@@ -291,8 +350,13 @@ class TestAssessSalon:
     def test_healthy_salon_has_no_reasons(self):
         """Парная положительная: полностью здоровый салон виден клиенту."""
         http = FakeAylaHttp(services=[_service()], specialists=[_specialist()])
-        result = _connect(http, sync_service=CatalogSyncService(http_client=http))
-        result = assess_salon(result.tenant)
+        connected = _connect(http, sync_service=CatalogSyncService(http_client=http))
+        # DRF-1496: до верификации причина названа, а не молчит.
+        # DRF-1553: и названа подслучаем — «ждут верификации».
+        assert REASON_MASTERS_AWAIT_VERIFICATION in connected.assessment.reasons
+
+        assert _verify_synced_masters(connected.tenant) == 1
+        result = assess_salon(connected.tenant)
         assert result.active_services == 1
         assert result.bookable_masters == 1
         assert result.reasons == ()

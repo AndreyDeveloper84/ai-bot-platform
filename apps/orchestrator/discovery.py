@@ -243,7 +243,17 @@ CALLBACK_CATALOG_SALONS = "cb:catalog:salons"
 #: The one label for that chip. Single wording point, same reason
 #: :func:`render_alternatives` is one: two spellings of the same button read
 #: as two different buttons.
-SHOW_SALONS_LABEL = "Показать салоны"
+#:
+#: DRF-1547 / §37 п.4, решение владельца дословно: «„Показать салоны“ →
+#: „Найти салон“. Это ДЕЙСТВИЕ, а не техническая команда интерфейсу.»
+#:
+#: Переименована КОНСТАНТА, а не только пункт меню, и это часть решения, а
+#: не расширение объёма: та же кнопка висит под тупиками этого модуля,
+#: под пустой историей визитов и под отказами повтора. Оставить её
+#: «Показать салоны» в одном месте и «Найти салон» в другом значило бы
+#: воспроизвести ровно ту несогласованность, ради устранения которой §37
+#: и написан.
+SHOW_SALONS_LABEL = "Найти салон"
 
 CATALOG_CALLBACK_PREFIXES = (
     CALLBACK_CATALOG_SERVICES_PREFIX,
@@ -761,18 +771,19 @@ def render_no_match(
         # been misheard again. The tail is the alternative, so the turn still
         # goes somewhere; without one, the same closing question as below.
         #
-        # NOTE the missing salon sentence, and it is deliberate: this is the
-        # ONE branch whose keyboard a live caller drops
-        # (``apps.orchestrator.concierge`` returns the repeat refusal as
-        # ``DiscoveryReply(text=…, persisted=True)``, keyboard and all left
-        # behind). Until that one line is fixed under DRF-1489, a sentence
-        # here that pointed at a button would point at nothing. The chips are
-        # still attached — they are correct wherever they survive, and an
-        # unexplained chip is a smaller failure than a named one that is absent.
+        # The salon sentence was withheld on this branch until DRF-1576, and
+        # the reason was the keyboard: ``apps.orchestrator.concierge`` returned
+        # the repeat refusal as ``DiscoveryReply(text=…, persisted=True)`` and
+        # left the buttons behind, so a sentence here naming a button would
+        # have pointed at nothing. That line now passes ``action_data`` like
+        # its seven neighbours, the keyboard survives, and the sentence rides
+        # by the same rule as every branch below — with the salon chip, only
+        # where the salon chip is the one actually drawn.
         where = f" в городе {place}" if place else ""
         text = f"Про «{service}»{where} я уже ответил: такого у наших мастеров нет."
         tail = offer or "Назовите другую услугу или другой город, и я поищу ещё."
-        return _reply_with_chips(f"{text} {tail}"[:_MAX_REPLY_CHARS], chips or salons)
+        salon_tail = "" if chips else tail_salons
+        return _reply_with_chips(f"{text} {tail}{salon_tail}"[:_MAX_REPLY_CHARS], chips or salons)
     if service and place:
         # «такого … нет», not «такой услуги … нет»: with both halves named we
         # know the COMBINATION matched nobody, not which half is missing —
@@ -1301,12 +1312,30 @@ def render_no_salons(city: str | None = None) -> DiscoveryReply:
 def _salon_place(card: SalonCard) -> str:
     """« — Пенза, ул. Леонова, 15а» / « — Пенза» / «» for a salon card.
 
-    The mirrored address usually ALREADY starts with the city (live pilot:
-    «Пенза, ул. Карпинского, 33А»), and gluing city + address unconditionally
-    printed it twice — «SPAtrium — Пенза, Пенза, ул. Карпинского, 33А». The
-    city is dropped from the prefix exactly when the address opens with it;
-    an address from another city (mirror drift) still shows both, because
-    then the two really are different facts.
+    The address usually ALREADY starts with the city (live pilot: «Пенза, ул.
+    Карпинского, 33А»), and gluing city + address unconditionally printed it
+    twice — «SPAtrium — Пенза, Пенза, ул. Карпинского, 33А». The city is
+    dropped from the prefix exactly when the address opens with it; an address
+    from another city (mirror drift) still shows both, because then the two
+    really are different facts.
+
+    ``card.address`` is three-valued since DRF-1609 — ``None`` (the source
+    said nothing about the address), "" (it said there is none), or a string.
+    The ``or ""`` below is what makes both empties print as nothing INSTEAD OF
+    the word «None»; it is load-bearing, not defensive noise. The distinction
+    itself survives on the DTO, where a reader that needs it can still see it.
+
+    УСЛОВИЕ, при котором молчание здесь верно (DRF-1611): сегодня ``None``
+    у ВСЕХ салонов — ключа ``tenant_address`` в фиде ещё нет. Подсказка,
+    повторённая десять раз в одном списке, читается как поломка, и человек
+    перестаёт видеть все десять, включая свой. Когда ключ появится и
+    ``None`` станет редким, подсказка станет действием, а не шумом, и
+    молчание придётся пересмотреть.
+
+    Это условие, а не свойство списка, и у него есть срок годности. На
+    карточке ОДНОГО визита (мини-апп, ``CustomerWellnessDashboardScreen``)
+    оба пустых состояния уже дают разный текст: там подсказка повторяется
+    один раз и читается как действие.
     """
     city = (card.city or "").strip()
     address = (card.address or "").strip()
@@ -1323,8 +1352,11 @@ def _render_salon_cards(
     """Render salons: name — city, address + a short «что там делают» sample,
     plus one chip per salon whose tap opens that salon's services.
 
-    ``address`` may legitimately be "" (the pilot salon's masters carry none)
-    — the line simply goes without it. A salon whose mirror holds no active
+    ``address`` may legitimately be absent — ``None`` today for every salon
+    (``Tenant.address`` is fed by the specialists feed's ``tenant_address``
+    key, which DRF-1587 is still landing), "" when the source says there is no
+    address. The line simply goes without it, and never prints «None»
+    (``test_catalog_surface`` guards both empties). A salon whose mirror holds no active
     services says «Услуги пока не загружены» instead of inventing a list —
     and gets no chip either: its tap would open an empty list.
     """
@@ -1822,7 +1854,7 @@ def _parse_service_tap(callback_text: str) -> tuple[UUID, int] | None:
 #: ends somewhere the user can act.
 CATALOG_STALE_CARD_TEXT = (
     "Эта карточка уже неактуальна — каталог с тех пор обновился. "
-    "Нажмите «Показать салоны», и я покажу заново."
+    "Нажмите «Найти салон», и я покажу заново."
 )
 
 
@@ -1886,7 +1918,14 @@ def execute_catalog_callback(
         salon = get_salon(tenant_id)
         if salon is None:
             return render_stale_card()
-        services = discover_services(tenant_id=tenant_id, limit=_MAX_SERVICE_CARDS + 1)
+        # C-01 — тот же сид, что уже отдаётся списку мастеров ниже.
+        # Восемь карточек на экране, услуг у салона больше: без ротации
+        # хвост алфавита не увидит никто и никогда.
+        services = discover_services(
+            tenant_id=tenant_id,
+            limit=_MAX_SERVICE_CARDS + 1,
+            rotation_seed=rotation_seed(conversation),
+        )
         logger.info(
             "orchestrator.discovery.catalog_tap kind=services count=%d",
             len(services),
@@ -1958,7 +1997,7 @@ def execute_catalog_callback(
 
 
 def execute_catalog_tool(
-    name: str, args: dict[str, Any], *, said: str = ""
+    name: str, args: dict[str, Any], *, said: str = "", conversation: Any = None
 ) -> DiscoveryReply | None:
     """Run the marketplace read behind a model-called salon/service tool.
 
@@ -2014,7 +2053,15 @@ def execute_catalog_tool(
             # is not enough on its own, see above.
             salon = None
         limit = _limit(args.get("limit"), _MAX_SERVICE_CARDS)
-        services = discover_services(salon=salon, city=city, query=query, limit=limit + 1)
+        services = discover_services(
+            salon=salon,
+            city=city,
+            query=query,
+            limit=limit + 1,
+            # C-01: тот же сид, что у чипа выше. ``None`` — прежний
+            # детерминированный порядок, поведение не меняется.
+            rotation_seed=rotation_seed(conversation),
+        )
         logger.info("orchestrator.discovery.show_services count=%d", len(services))
         if not services and salon:
             # «No such salon» and «the salon is here but its list is empty»
@@ -2724,6 +2771,12 @@ def reground_specialization(
     parsed = parse_stems(stems[-_MAX_REGROUNDED_TOKENS:])
     if not parsed.stems:
         return specialization
+    # C-01 сознательно НЕ трогает этот вызов, и разница принципиальная:
+    # здесь выдача не показывается человеку, а служит РЕШЕНИЮ — назвал ли
+    # он существующую услугу. Ротация меняла бы, какая услуга «выиграет»
+    # регрузку, то есть переставляла бы не показы, а вывод. §9 запрещает
+    # алфавитный fallback там, где отсечение делает его смещением ПОКАЗОВ;
+    # здесь показов нет.
     named = [
         card.name
         for card in discover_services(query=said, city=city, limit=_SERVICE_NAME_SCAN_LIMIT)

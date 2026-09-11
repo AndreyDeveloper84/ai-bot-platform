@@ -649,6 +649,77 @@ export const listMasters = (
   });
 };
 
+// --- DRF-1597 awaiting verification --------------------------------------
+
+/**
+ * Мастер, которого клиент не видит, пока владелица его не подтвердит.
+ *
+ * Заведённый через админку Ayla мастер приезжает синхронизацией со
+ * статусом приглашения `pending` — синхронизация это поле не пишет
+ * никогда, а гейт продажи требует `accepted`. До DRF-1597 перевести его
+ * могла только Django-админка, то есть человек с доступом к серверу.
+ */
+export interface AwaitingVerificationMaster {
+  id: string;
+  name: string;
+  specialization: string;
+  photo_url: string;
+  invite_status: string;
+}
+
+export interface AwaitingVerificationResponse {
+  items: AwaitingVerificationMaster[];
+  count: number;
+}
+
+export interface VerifyMastersResult {
+  verified: number;
+  skipped: number;
+  /**
+   * Строки, за которые решать нельзя: приглашение выписано лично, и
+   * принять его может только сама мастер. Отдельное число, а не часть
+   * `skipped`, — «уже принято» и «за неё нельзя» ведут владелицу к
+   * разным следующим шагам.
+   */
+  blocked: number;
+  /**
+   * Названные владелицей, но не отданные очереди: в архиве, снятые с
+   * активности, чужого салона, несуществующие. Молчать о них нельзя —
+   * у каждого пропуска должно быть имя (OPEN_DECISIONS §78).
+   */
+  not_eligible: number;
+  /**
+   * Подтверждены, но гейт продажи их всё равно не пускает. Обещание
+   * кнопки проверено замером, а не выведено из предиката: сегодня список
+   * пуст всегда, и если он перестанет быть пустым — это будет видно, а
+   * не молча.
+   */
+  still_hidden: string[];
+  remaining: number;
+}
+
+export const getMastersAwaitingVerification = (
+  init: { signal?: AbortSignal } = {},
+): Promise<AwaitingVerificationResponse> =>
+  request("/api/v1/admin/masters/awaiting-verification/", {
+    method: "GET",
+    signal: init.signal,
+  });
+
+/**
+ * Подтвердить мастеров. Без `masterIds` — всю очередь салона.
+ *
+ * Только владелец: сервер отвечает 403 админу и ресепшену. Экран это
+ * повторяет кнопкой, но решает сервер.
+ */
+export const verifyMasters = (
+  masterIds?: string[],
+): Promise<VerifyMastersResult> =>
+  request("/api/v1/admin/masters/awaiting-verification/", {
+    method: "POST",
+    body: JSON.stringify(masterIds ? { master_ids: masterIds } : {}),
+  });
+
 // --- MM5 deactivation preview --------------------------------------------
 
 export interface DeactivationFallbackMaster {
@@ -787,7 +858,6 @@ export const reactivateMaster = (
 export type InviteContactMethod = "max_username" | "max_phone";
 export type InviteSchedulePreset = "default_mon_fri_10_19" | "none";
 export type InviteMode = "invite" | "catalog_only";
-export type MaxDmDelivery = "queued" | "delivered" | "failed" | "skipped";
 
 export interface InviteMasterPayload {
   name: string;
@@ -802,31 +872,17 @@ export interface InviteMasterResponse {
   master_id: string;
   invite_token: string | null;
   invite_expires_at: string | null;
-  max_dm_delivery: MaxDmDelivery;
-  /**
-   * Why the DM did not go out — `no_entry_configured`, `max_status_404`,
-   * `max_phone_lookup_deferred`, … Empty string when there is nothing to
-   * confess (DRF-1505).
-   *
-   * The cause matters because the two shapes of failure need opposite
-   * reactions from the person reading the screen: a 404 from MAX means
-   * the handle in the field above is wrong and can be retyped, while
-   * `no_entry_configured` is a deployment variable the salon owner has
-   * never heard of and cannot fix. A bare «не удалось» sends them to
-   * retype a correct handle forever.
-   */
-  max_dm_error: string;
   fallback_link: string;
   /**
    * `https://max.ru/<salon bot>?start=master_invite_<token>` — the one
    * thing the owner can actually hand over (DRF-1424, surfaced by
    * DRF-1505).
    *
-   * The DM above it can only reach a MAX username the salon already
-   * knows, in a chat that already exists. This link opens anywhere,
-   * needs no authentication to follow, and lands the invitee in a chat
-   * with the salon bot — which is what makes the button's delivery
-   * guaranteed rather than hopeful.
+   * Since §44.4 it is also the ONLY thing: the endpoint no longer
+   * attempts a personal message of its own, so nothing reaches the
+   * invited master except what the owner sends. This link opens
+   * anywhere, needs no authentication to follow, and lands the invitee
+   * in a chat with the salon bot.
    *
    * Empty when the deployment has no salon bot with a Mini App name.
    * The backend returns "" rather than a half-built URL on purpose: a
@@ -937,7 +993,11 @@ export interface MasterDetail {
   archived_at: string | null;
   linked_bot_user: LinkedBotUser | null;
   services: MasterDetailService[];
-  working_hours_summary: string;
+  // §83 — здесь БЫЛО `working_hours_summary`. Строка приходила из
+  // локального зеркала `scheduling.WorkingHours`, а часы клиенту продаёт
+  // Ayla, поэтому она описывала не то расписание, по которому продают.
+  // Часы теперь берутся отдельным вызовом `getMasterSchedule` — тем же
+  // источником, с которого снимается отпечаток подтверждения.
 }
 
 interface MasterDetailEnvelope {
@@ -952,6 +1012,293 @@ export const getMasterDetail = (
     method: "GET",
     signal: init.signal,
   }).then((env) => env.master);
+
+/**
+ * Рабочие часы мастера и состояние их подтверждения (§83).
+ *
+ * Один день недели в том виде, в каком его отдаёт источник, по которому
+ * мастера продают. `break_start` / `break_end` здесь не украшение: перерыв
+ * входит в отпечаток, и показать часы без него значило бы просить владелицу
+ * заверить то, чего она не видела.
+ *
+ * `null` во времени означает «не задано», а не «ноль» — рисовать вместо него
+ * прочерк или «00:00» нельзя.
+ */
+export interface MasterScheduleDay {
+  day_of_week: number;
+  is_working_day: boolean;
+  start_time: string | null;
+  end_time: string | null;
+  break_start: string | null;
+  break_end: string | null;
+}
+
+/**
+ * Состояние подтверждения относительно ИМЕННО ЭТИХ часов.
+ *
+ * `is_current` — не «подтверждали когда-нибудь», а «подтверждено для этой
+ * версии часов». Экран обязан различать: `confirmed_at` без `is_current`
+ * означает, что часы изменились после подтверждения и мастера надо
+ * подтвердить заново.
+ *
+ * `fingerprint` возвращается на сервер при нажатии «Расписание верно» —
+ * так подтверждается увиденное, а не то, что успело измениться.
+ *
+ * `block` — причина, по которой нажимать нельзя, словом. `null` значит
+ * «можно». Сегодня единственное значение — `no_working_day`.
+ */
+export interface MasterScheduleConfirmation {
+  confirmed_at: string | null;
+  confirmed_by: { id: string; name: string } | null;
+  is_current: boolean;
+  fingerprint: string;
+  block: "no_working_day" | null;
+}
+
+export interface MasterSchedule {
+  source: string;
+  days: MasterScheduleDay[];
+  has_working_day: boolean;
+  confirmation: MasterScheduleConfirmation;
+}
+
+interface MasterScheduleEnvelope {
+  schedule: MasterSchedule;
+}
+
+export const getMasterSchedule = (
+  masterId: string,
+  init: { signal?: AbortSignal } = {},
+): Promise<MasterSchedule> =>
+  request<MasterScheduleEnvelope>(`/api/v1/admin/masters/${masterId}/schedule/`, {
+    method: "GET",
+    signal: init.signal,
+  }).then((env) => env.schedule);
+
+/**
+ * «Расписание верно». Отправляет отпечаток показанных часов: если они
+ * изменились, сервер ответит `stale_view`, а не подтвердит молча то, чего
+ * владелица не видела.
+ */
+/**
+ * Рабочий день мастера глазами салона (DRF-1237, срез A1).
+ *
+ * Форма — ровно та, что отдаёт `master_api.services.schedule.build_schedule`:
+ * салонная ручка это тонкий вид поверх него, а не свой расчёт. Считает сервер;
+ * клиент окна НЕ вычисляет — это «клиент выдумывает доступность» (§17).
+ *
+ * `working_hours` = null означает «в этот день не работает», а не «часы
+ * неизвестны»: неизвестность приезжает отказом ручки, а не пустым полем.
+ */
+export interface MasterDayBooking {
+  booking_id: string;
+  visit_at: string;
+  duration_min: number;
+  service_name: string;
+  client_first_name: string;
+  client_last_initial: string;
+  is_in_progress: boolean;
+  is_returning_customer: boolean;
+}
+
+export interface MasterDayBlock {
+  exception_id: string;
+  start: string;
+  end: string;
+  /** lunch | vacation | sick | personal | other */
+  reason: string;
+  approved: boolean;
+}
+
+export interface MasterDayFreeWindow {
+  start: string;
+  end: string;
+  duration_min: number;
+}
+
+export interface MasterDayConflict {
+  /** double_booking | outside_hours | overlapping_exception */
+  type: string;
+  booking_id: string;
+  description: string;
+}
+
+export interface MasterDay {
+  date: string;
+  is_off_day: boolean;
+  working_hours: { start: string; end: string } | null;
+  bookings: MasterDayBooking[];
+  blocks: MasterDayBlock[];
+  free_windows: MasterDayFreeWindow[];
+  conflicts: MasterDayConflict[];
+}
+
+export interface MasterDaySchedule {
+  tenant_tz: string;
+  from: string;
+  to: string;
+  days: MasterDay[];
+}
+
+export const getMasterDaySchedule = (
+  masterId: string,
+  params: { from?: string; to?: string } = {},
+  init: { signal?: AbortSignal } = {},
+): Promise<MasterDaySchedule> => {
+  const qs = new URLSearchParams();
+  if (params.from) qs.set("from", params.from);
+  if (params.to) qs.set("to", params.to);
+  const suffix = qs.toString() ? `?${qs.toString()}` : "";
+  return request<MasterDaySchedule>(
+    `/api/v1/admin/masters/${masterId}/day-schedule/${suffix}`,
+    { method: "GET", signal: init.signal },
+  );
+};
+
+// --- GET /api/v1/admin/day/frame/ (DRF-1237, срез A2) ---------------------
+
+/**
+ * Состояние одного списка интервалов — четыре исхода, а не «есть/нет».
+ *
+ * `absent` — ключа на проводе нет: контракт разошёлся.
+ * `none` — ключ есть, строк нет: сегодня пусто.
+ * `parsed` — строки разобраны, они в `rows`.
+ * `unreadable` — строки **есть**, но ни одна не опознана.
+ *
+ * Последнее состояние — причина, по которой их четыре. Форма непустой
+ * строки `breaks` не проверена ничем: перерывов на пилоте не завёл никто.
+ * Если неопознанная строка приедет сюда пустотой, экран покажет обед
+ * рабочим временем — поэтому «пусто» и «не разобрал» обязаны различаться,
+ * и экран обязан сказать второе словами.
+ */
+export type FrameListState = "absent" | "none" | "parsed" | "unreadable";
+
+export interface FrameInterval {
+  start: string;
+  end: string;
+}
+
+/**
+ * Список с провода вместе с состоянием — общая форма для всех салонных видов.
+ *
+ * Одно имя состояния на все списки намеренно: второй набор тех же четырёх
+ * слов рядом разошёлся бы с первым молча. Сервер отдаёт ту же форму из
+ * `apps/admin_api/services/wire_lists.py`.
+ */
+export interface WireList<Row> {
+  state: FrameListState;
+  rows: Row[];
+  /** Имена полей, встреченных в неопознанной строке. Не значения. */
+  seen_fields: string[];
+}
+
+export type FrameList = WireList<FrameInterval>;
+
+export interface SalonFrameMaster {
+  specialist_id: string;
+  display_name: string;
+  is_working_day: boolean;
+  schedule_note: string | null;
+  schedule_source: string | null;
+  working_intervals: FrameList;
+  breaks: FrameList;
+  absences: FrameList;
+}
+
+export interface SalonDayFrame {
+  date: string | null;
+  source: string;
+  masters: SalonFrameMaster[];
+  /** Какие списки экран не вправе показать полными. */
+  unreadable_lists: string[];
+}
+
+/**
+ * Смены, перерывы и отсутствия всех мастеров салона за один день.
+ *
+ * Записей здесь НЕТ намеренно: визиты берутся из `getSalonDay()`, который
+ * читает зеркало. Два источника записей на одном экране — то самое
+ * расхождение, ради недопущения которого зеркало и читается.
+ */
+// --- GET /api/v1/admin/masters/<id>/exceptions/ (DRF-1240, чтение) --------
+
+export interface MasterExceptionRow {
+  id: string;
+  date: string;
+  is_working_day: boolean;
+  /** Часы только у рабочего дня: «не работаю» с часами — противоречие. */
+  start: string | null;
+  end: string | null;
+}
+
+export interface MasterTimeOffRow {
+  id: string;
+  /** ISO со смещением САЛОНА, не браузера. */
+  start_at: string;
+  end_at: string;
+  reason: string;
+}
+
+export interface SalonClosureRow {
+  id: string;
+  date: string;
+  start: string | null;
+  end: string | null;
+  reason: string;
+}
+
+export interface MasterExceptions {
+  from: string;
+  to: string;
+  exceptions: WireList<MasterExceptionRow>;
+  time_off: WireList<MasterTimeOffRow>;
+  closures: WireList<SalonClosureRow>;
+  unreadable_lists: string[];
+  /**
+   * Можно ли отсюда менять график. Сегодня всегда `false`, и это говорит
+   * СЕРВЕР, а не догадывается экран: все записывающие маршруты салонной
+   * поверхности закрыты, а §117 разрешает credential path только после трёх
+   * проверок. Кнопка, которой сервер не примет, — то же пустое обещание,
+   * что «Найти время» без контракта доступности.
+   */
+  writable: boolean;
+}
+
+/** Что уже назначено мастеру: исключения, недоступность, закрытия салона. */
+export const getMasterExceptions = (
+  masterId: string,
+  params: { from?: string; to?: string } = {},
+  init: { signal?: AbortSignal } = {},
+): Promise<MasterExceptions> => {
+  const qs = new URLSearchParams();
+  if (params.from) qs.set("from", params.from);
+  if (params.to) qs.set("to", params.to);
+  const suffix = qs.toString() ? `?${qs.toString()}` : "";
+  return request<MasterExceptions>(
+    `/api/v1/admin/masters/${masterId}/exceptions/${suffix}`,
+    { method: "GET", signal: init.signal },
+  );
+};
+
+export const getSalonDayFrame = (
+  date?: string,
+  init: { signal?: AbortSignal } = {},
+): Promise<SalonDayFrame> => {
+  const qs = date ? `?date=${encodeURIComponent(date)}` : "";
+  return request<SalonDayFrame>(`/api/v1/admin/day/frame/${qs}`, {
+    method: "GET",
+    signal: init.signal,
+  });
+};
+
+export const confirmMasterSchedule = (
+  masterId: string,
+  fingerprint: string,
+): Promise<MasterSchedule> =>
+  request<MasterScheduleEnvelope>(`/api/v1/admin/masters/${masterId}/schedule/confirm/`, {
+    method: "POST",
+    body: JSON.stringify({ fingerprint }),
+  }).then((env) => env.schedule);
 
 /**
  * PATCH body for ``/api/v1/admin/masters/<id>/``. Only fields the
@@ -1490,13 +1837,34 @@ export type RoleSource = "access_code" | "master_invite" | "direct";
  * because nobody revoked anything and there is nothing for the owner to
  * un-revoke.
  *
+ * `profile_incomplete` (DRF-1521) is the salon's half of what used to be
+ * `revoked`: a master who accepted the invite and stopped halfway. Nobody
+ * revoked anything here either — the owner's next move is to nudge the
+ * master, not to look for who took the access away. It is unreachable on
+ * live data until DRF-1521 пп. 4-6 land; the word exists first so the
+ * screen is not the last place to learn about it.
+ *
+ * `schedule_unconfirmed` (§83) is the third condition of readiness: the
+ * salon owner has not vouched for this master's current working hours, or
+ * they changed after she did. Not `revoked` and not our fault either —
+ * the owner's next move is to open the master's card and press
+ * «Расписание верно». It appears only while the backend flag
+ * `MASTER_SCHEDULE_CONFIRMATION_REQUIRED` is on; the word exists first so
+ * the screen is not the last place to learn about it.
+ *
  * The backend grows this union in `apps/catalog/master_state.py`
  * (`SaleBlock`). A new member must be added to `STATE_SUFFIX` and
  * `STATE_CHIP_CLASS` in `AdminPeopleScreen.tsx` — both are exhaustive
  * `Record<RoleState, …>`, so the type checker refuses a half-done
  * addition rather than rendering an empty chip.
  */
-export type RoleState = "active" | "pending" | "revoked" | "ayla_unlinked";
+export type RoleState =
+  | "active"
+  | "pending"
+  | "revoked"
+  | "ayla_unlinked"
+  | "profile_incomplete"
+  | "schedule_unconfirmed";
 
 export interface StaffRoleGrant {
   role: "owner" | "admin" | "receptionist" | "master";
@@ -1540,3 +1908,54 @@ export const getStaffRoster = (
   init: { signal?: AbortSignal } = {},
 ): Promise<StaffRosterResponse> =>
   request("/api/v1/admin/staff/", { method: "GET", signal: init.signal });
+
+// --- /api/v1/admin/staff/revoke/ -----------------------------------------
+//
+// The other half of `issueStaffInvite`. The endpoint has existed since
+// DRF-1227 with no caller at all: access was grantable from the Mini App
+// and removable only from a psql session. DRF-1557 is the caller.
+//
+// Owner AND admin, unlike the roster above — `require_admin_role` admits
+// both and this view does not narrow. The caller must gate on the ROLE,
+// never on anything about the person being revoked; a screen that decides
+// by lifecycle offers buttons the server refuses.
+
+export interface StaffRevokePayload {
+  /**
+   * EXACTLY ONE of these two. The server rejects both-or-neither with
+   * 400 `bad_request`, so this is a union in the wire contract even
+   * though TypeScript cannot express it on an object literal here.
+   *
+   * `bot_user_id` names the person; `master_id` names a catalog row and
+   * the server resolves it to whoever is linked to it. Naming the person
+   * is the direct form — the master path exists for surfaces that hold a
+   * catalog id and nothing else, which the roster is not: it returns
+   * both, and `bot_user_id` is null exactly when there is no account and
+   * therefore nothing to take away.
+   */
+  bot_user_id?: string;
+  master_id?: string;
+  /** Free-form note, recorded in the audit row. Server caps at 200. */
+  reason?: string;
+}
+
+export interface StaffRevokeResponse {
+  /**
+   * False when the person already held nothing. Revoking twice answers
+   * 200, not an error — somebody unsure the first attempt landed will
+   * try again, and a failure would tell them it did not.
+   */
+  changed: boolean;
+  /** Role slugs actually taken away — empty when `changed` is false. */
+  roles_revoked: string[];
+  /** True when `CatalogMaster.linked_bot_user` was cleared. */
+  master_unlinked: boolean;
+}
+
+export const revokeStaffAccess = (
+  payload: StaffRevokePayload,
+): Promise<StaffRevokeResponse> =>
+  request("/api/v1/admin/staff/revoke/", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
