@@ -1113,7 +1113,7 @@ MAX_BOT_SALON_TENANT_SLUG=formula-tela
 `master_api/auth.py` резолвил субъекта так: `BotUser.all_tenants.filter(channel="max", channel_user_id=…).order_by("-last_seen").first()` — **без фильтра по тенанту**. Замер на пилоте:
 
 ```
-channel_user_id 83146139 → 2 строки
+channel_user_id 831… → 2 строки
   global_bot     last_seen 16:58   linked=False   ← её и выбирало
   formula-tela   last_seen 09:28   linked=True    ← настоящая, с TenantStaff(owner)
 ```
@@ -1604,7 +1604,7 @@ if has_revoked:
 
 Для **DRF-1227** серверная половина в Ayla уже есть и переиспользуема: `revoke_tenant_user_relationship` (`users/services.py:196`) — транзакция, `select_for_update`, всегда `OutboxEvent tenant.relationship.revoked`, каскад по уходу мастера. Нужен только служебный вход к ней, потому что бот не носит JWT администратора.
 
-**Атрибуция сохраняется** — проверил, это была моя главная тревога. Бот шлёт `X-External-User-ID: bot:{channel}:{channel_user_id}` (`apps/integrations/ayla/user_proxy.py:46`), то есть `bot:max:83146139` — это **конкретный человек**, а не единый актор бота. Действие приглашённого администратора оставит его идентификатор. Прокси-пользователь создаётся лениво с `is_proxy=True, role='client'` (`users/services.py:99`).
+**Атрибуция сохраняется** — проверил, это была моя главная тревога. Бот шлёт `X-External-User-ID: bot:{channel}:{channel_user_id}` (`apps/integrations/ayla/user_proxy.py:46`), то есть `bot:max:831…` — это **конкретный человек**, а не единый актор бота. Действие приглашённого администратора оставит его идентификатор. Прокси-пользователь создаётся лениво с `is_proxy=True, role='client'` (`users/services.py:99`).
 
 ## Что беру сейчас
 

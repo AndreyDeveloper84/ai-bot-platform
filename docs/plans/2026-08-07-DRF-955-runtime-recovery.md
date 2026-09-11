@@ -493,7 +493,7 @@ print(f\"identity conflicts: {conflicts}\")
 "
 '
 ```
-Expected: `max:83146139` has a single `ayla_user_id`; `max:888888` unlinked; `identity conflicts: 0`.
+Expected: `max:831…` has a single `ayla_user_id`; `max:888888` unlinked; `identity conflicts: 0`.
 
 ---
 
