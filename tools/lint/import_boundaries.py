@@ -636,6 +636,12 @@ CATALOG_CROSS_TENANT_BASELINE: frozenset[BaselineKey] = frozenset(
         # is unavailable for the same reason — revocation must also work from
         # a command, where no tenant ContextVar is set.
         "apps/identity/services/staff_revoke.py",
+        # §12 (11.09) — the read-only identity card is PERSON-level: one
+        # messenger identity across every salon it appears in, master cards
+        # looked up by that identity's own BotUser ids — never by tenant,
+        # never discovery. Read-only; the operator rendering masks every
+        # personal value and the person rendering never names another salon.
+        "apps/identity/services/identity_card.py",
         # DRF-1061 — operator command listing and picking a master to invite.
         # Every query is filtered on the --tenant the operator named, and it
         # runs at a terminal with no request and therefore no tenant
