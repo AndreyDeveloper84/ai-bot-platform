@@ -4804,12 +4804,12 @@ DRF-1558 → Done по критерию «отправитель шлёт по `
 
 Пилот на `eb40fb9` (правка DRF-1558, PR #1450). Создана настоящая запись через
 салонную ручку: `7972333c`, УЗ-чистка лица, 09.09 13:00, мастер Тихонова Ольга,
-связка на аккаунт `332809622`.
+связка на аккаунт `332…`.
 
 **Журнал отправки:**
 
 ```
-POST https://botapi.max.ru/messages?user_id=332809622 → 200 OK
+POST https://botapi.max.ru/messages?user_id=332… → 200 OK
 booking.notify.sent tenant=formula-tela
   appointment_id=7972333c-... channel=master recipients=1
 ```

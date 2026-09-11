@@ -138,7 +138,7 @@ docker exec -i ayla-bot-staging-web-1 python3 - <<PY
 PY
 ```
 
-Владелец пилота: MAX uid `83146139`, тенант `formula-tela`, `BotUser 42cc8f3e-…`.
+Владелец пилота: MAX uid `831…`, тенант `formula-tela`, `BotUser 42cc8f3e-…`.
 
 **Важно:** `docker exec … grep` и `python -c "import …"` по примонтированному исходнику **ложноположительны** — новый процесс видит новый файл, а обслуживающий держит старый модуль в памяти. Проверять только живым HTTP-запросом.
 
