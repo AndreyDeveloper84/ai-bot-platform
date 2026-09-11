@@ -1080,6 +1080,217 @@ export const getMasterSchedule = (
  * изменились, сервер ответит `stale_view`, а не подтвердит молча то, чего
  * владелица не видела.
  */
+/**
+ * Рабочий день мастера глазами салона (DRF-1237, срез A1).
+ *
+ * Форма — ровно та, что отдаёт `master_api.services.schedule.build_schedule`:
+ * салонная ручка это тонкий вид поверх него, а не свой расчёт. Считает сервер;
+ * клиент окна НЕ вычисляет — это «клиент выдумывает доступность» (§17).
+ *
+ * `working_hours` = null означает «в этот день не работает», а не «часы
+ * неизвестны»: неизвестность приезжает отказом ручки, а не пустым полем.
+ */
+export interface MasterDayBooking {
+  booking_id: string;
+  visit_at: string;
+  duration_min: number;
+  service_name: string;
+  client_first_name: string;
+  client_last_initial: string;
+  is_in_progress: boolean;
+  is_returning_customer: boolean;
+}
+
+export interface MasterDayBlock {
+  exception_id: string;
+  start: string;
+  end: string;
+  /** lunch | vacation | sick | personal | other */
+  reason: string;
+  approved: boolean;
+}
+
+export interface MasterDayFreeWindow {
+  start: string;
+  end: string;
+  duration_min: number;
+}
+
+export interface MasterDayConflict {
+  /** double_booking | outside_hours | overlapping_exception */
+  type: string;
+  booking_id: string;
+  description: string;
+}
+
+export interface MasterDay {
+  date: string;
+  is_off_day: boolean;
+  working_hours: { start: string; end: string } | null;
+  bookings: MasterDayBooking[];
+  blocks: MasterDayBlock[];
+  free_windows: MasterDayFreeWindow[];
+  conflicts: MasterDayConflict[];
+}
+
+export interface MasterDaySchedule {
+  tenant_tz: string;
+  from: string;
+  to: string;
+  days: MasterDay[];
+}
+
+export const getMasterDaySchedule = (
+  masterId: string,
+  params: { from?: string; to?: string } = {},
+  init: { signal?: AbortSignal } = {},
+): Promise<MasterDaySchedule> => {
+  const qs = new URLSearchParams();
+  if (params.from) qs.set("from", params.from);
+  if (params.to) qs.set("to", params.to);
+  const suffix = qs.toString() ? `?${qs.toString()}` : "";
+  return request<MasterDaySchedule>(
+    `/api/v1/admin/masters/${masterId}/day-schedule/${suffix}`,
+    { method: "GET", signal: init.signal },
+  );
+};
+
+// --- GET /api/v1/admin/day/frame/ (DRF-1237, срез A2) ---------------------
+
+/**
+ * Состояние одного списка интервалов — четыре исхода, а не «есть/нет».
+ *
+ * `absent` — ключа на проводе нет: контракт разошёлся.
+ * `none` — ключ есть, строк нет: сегодня пусто.
+ * `parsed` — строки разобраны, они в `rows`.
+ * `unreadable` — строки **есть**, но ни одна не опознана.
+ *
+ * Последнее состояние — причина, по которой их четыре. Форма непустой
+ * строки `breaks` не проверена ничем: перерывов на пилоте не завёл никто.
+ * Если неопознанная строка приедет сюда пустотой, экран покажет обед
+ * рабочим временем — поэтому «пусто» и «не разобрал» обязаны различаться,
+ * и экран обязан сказать второе словами.
+ */
+export type FrameListState = "absent" | "none" | "parsed" | "unreadable";
+
+export interface FrameInterval {
+  start: string;
+  end: string;
+}
+
+/**
+ * Список с провода вместе с состоянием — общая форма для всех салонных видов.
+ *
+ * Одно имя состояния на все списки намеренно: второй набор тех же четырёх
+ * слов рядом разошёлся бы с первым молча. Сервер отдаёт ту же форму из
+ * `apps/admin_api/services/wire_lists.py`.
+ */
+export interface WireList<Row> {
+  state: FrameListState;
+  rows: Row[];
+  /** Имена полей, встреченных в неопознанной строке. Не значения. */
+  seen_fields: string[];
+}
+
+export type FrameList = WireList<FrameInterval>;
+
+export interface SalonFrameMaster {
+  specialist_id: string;
+  display_name: string;
+  is_working_day: boolean;
+  schedule_note: string | null;
+  schedule_source: string | null;
+  working_intervals: FrameList;
+  breaks: FrameList;
+  absences: FrameList;
+}
+
+export interface SalonDayFrame {
+  date: string | null;
+  source: string;
+  masters: SalonFrameMaster[];
+  /** Какие списки экран не вправе показать полными. */
+  unreadable_lists: string[];
+}
+
+/**
+ * Смены, перерывы и отсутствия всех мастеров салона за один день.
+ *
+ * Записей здесь НЕТ намеренно: визиты берутся из `getSalonDay()`, который
+ * читает зеркало. Два источника записей на одном экране — то самое
+ * расхождение, ради недопущения которого зеркало и читается.
+ */
+// --- GET /api/v1/admin/masters/<id>/exceptions/ (DRF-1240, чтение) --------
+
+export interface MasterExceptionRow {
+  id: string;
+  date: string;
+  is_working_day: boolean;
+  /** Часы только у рабочего дня: «не работаю» с часами — противоречие. */
+  start: string | null;
+  end: string | null;
+}
+
+export interface MasterTimeOffRow {
+  id: string;
+  /** ISO со смещением САЛОНА, не браузера. */
+  start_at: string;
+  end_at: string;
+  reason: string;
+}
+
+export interface SalonClosureRow {
+  id: string;
+  date: string;
+  start: string | null;
+  end: string | null;
+  reason: string;
+}
+
+export interface MasterExceptions {
+  from: string;
+  to: string;
+  exceptions: WireList<MasterExceptionRow>;
+  time_off: WireList<MasterTimeOffRow>;
+  closures: WireList<SalonClosureRow>;
+  unreadable_lists: string[];
+  /**
+   * Можно ли отсюда менять график. Сегодня всегда `false`, и это говорит
+   * СЕРВЕР, а не догадывается экран: все записывающие маршруты салонной
+   * поверхности закрыты, а §117 разрешает credential path только после трёх
+   * проверок. Кнопка, которой сервер не примет, — то же пустое обещание,
+   * что «Найти время» без контракта доступности.
+   */
+  writable: boolean;
+}
+
+/** Что уже назначено мастеру: исключения, недоступность, закрытия салона. */
+export const getMasterExceptions = (
+  masterId: string,
+  params: { from?: string; to?: string } = {},
+  init: { signal?: AbortSignal } = {},
+): Promise<MasterExceptions> => {
+  const qs = new URLSearchParams();
+  if (params.from) qs.set("from", params.from);
+  if (params.to) qs.set("to", params.to);
+  const suffix = qs.toString() ? `?${qs.toString()}` : "";
+  return request<MasterExceptions>(
+    `/api/v1/admin/masters/${masterId}/exceptions/${suffix}`,
+    { method: "GET", signal: init.signal },
+  );
+};
+
+export const getSalonDayFrame = (
+  date?: string,
+  init: { signal?: AbortSignal } = {},
+): Promise<SalonDayFrame> => {
+  const qs = date ? `?date=${encodeURIComponent(date)}` : "";
+  return request<SalonDayFrame>(`/api/v1/admin/day/frame/${qs}`, {
+    method: "GET",
+    signal: init.signal,
+  });
+};
+
 export const confirmMasterSchedule = (
   masterId: string,
   fingerprint: string,

@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import json
 import uuid
-from datetime import datetime, timezone as dt_timezone
+from datetime import date, datetime, timedelta, timezone as dt_timezone
 
 import pytest
 from django.test import Client
@@ -51,14 +51,29 @@ def _wire_week(**overrides) -> list[dict]:
 
 
 class _FakeSalonClient:
-    def __init__(self, template, exc=None):
+    def __init__(self, template, exc=None, exceptions=None, time_off=None):
         self.template = template
         self.exc = exc
+        self.exceptions = exceptions or []
+        self.time_off = time_off or []
 
     def get_master_schedule(self, **kwargs):
         if self.exc:
             raise self.exc
         return self.template
+
+    # ``build_schedule`` читает кадр целиком: недельный шаблон, исключения по
+    # датам и отгулы. Заглушка обязана знать все три — иначе тест падает на
+    # стенде и говорит про `AttributeError`, а не про предмет.
+    def list_schedule_exceptions(self, **kwargs):
+        if self.exc:
+            raise self.exc
+        return list(self.exceptions)
+
+    def list_time_off(self, **kwargs):
+        if self.exc:
+            raise self.exc
+        return list(self.time_off)
 
 
 @pytest.fixture
@@ -67,9 +82,18 @@ def ayla(monkeypatch, settings):
 
     settings.BOOKING_VIA_AYLA_REST = True
 
-    def use(template, exc=None):
-        client = _FakeSalonClient(template, exc)
+    def use(template, exc=None, exceptions=None, time_off=None):
+        client = _FakeSalonClient(template, exc, exceptions, time_off)
+        # Два адреса, а не один, и это не перестраховка. Мой сервис
+        # импортирует ``get_salon_client`` ВНУТРИ функции — ему довольно
+        # исходного имени. ``schedule_frame`` импортирует его на уровне
+        # модуля (строка 48), то есть имя связано на импорте, и подмена
+        # исходного до него не доходит. Пропусти второй адрес — тест
+        # молча пойдёт в настоящего клиента.
         monkeypatch.setattr("apps.integrations.ayla.salon_client.get_salon_client", lambda: client)
+        monkeypatch.setattr(
+            "apps.master_api.services.schedule_frame.get_salon_client", lambda: client
+        )
         return client
 
     return use
@@ -323,3 +347,241 @@ class TestAnotherSalonsMasterIsNotVisibleHere:
         ayla(_wire_week())
 
         assert _get(client, foreign).status_code == 404
+
+
+# ─── день мастера для салона (DRF-1237, срез A1) ─────────────────────────────
+
+
+def _day_url(master: CatalogMaster) -> str:
+    return reverse("admin_api:master_day_schedule", args=[str(master.id)])
+
+
+def _get_day(client: Client, master: CatalogMaster, *, user_id: str = "5001", **params):
+    return client.get(_day_url(master), params, HTTP_AUTHORIZATION=init_data_header(user_id))
+
+
+class TestTheSalonSeesTheMastersDayThroughTheSameCalculator:
+    """Четвёртого вычислителя «свободного времени» в продукте не заводим.
+
+    Сегодня их три — резолвер на пути записи, ``build_schedule`` на экране
+    мастера, слоты каталога, — и они между собой расходятся (§117,
+    DRF-1637). Салонная вкладка подключается к существующему, а не считает
+    сама и тем более не считает на клиенте: последнее — «клиент выдумывает
+    доступность» (§17).
+    """
+
+    def test_the_day_comes_back_with_the_frame_not_just_the_visits(
+        self, client: Client, owner_bot_user: BotUser, synced_master: CatalogMaster, ayla
+    ) -> None:
+        """Именно рамка отличает этот ответ от «дня салона».
+
+        ``GET /api/v1/admin/day/`` отдаёт визиты и только визиты. Смены,
+        исключений и отгулов там нет, и построить из него «рабочий день
+        мастера» нельзя — это и есть причина, по которой вид существует.
+        """
+
+        ayla(_wire_week())
+
+        body = _get_day(client, synced_master).json()
+
+        assert body["from"] and body["to"] and body["tenant_tz"]
+        day = body["days"][0]
+        for field in (
+            "date",
+            "is_off_day",
+            "working_hours",
+            "bookings",
+            "blocks",
+            "free_windows",
+            "conflicts",
+        ):
+            assert field in day, field
+
+    def test_a_master_of_another_salon_is_not_found(
+        self, client: Client, owner_bot_user: BotUser, other_tenant: Tenant, ayla
+    ) -> None:
+        """Чужой мастер отвечает «нет такого», а не его расписанием.
+
+        Обязательно, а не осторожно: докстринг ``build_schedule`` говорит
+        прямо — «cross-master scoping happens at the auth layer; this helper
+        trusts the input». Сервис на скоуп не смотрит и смотреть не должен,
+        значит смотреть обязаны мы.
+        """
+
+        foreign = CatalogMaster.all_tenants.create(
+            tenant=other_tenant,
+            external_id=911,
+            external_updated_at=datetime.now(tz=dt_timezone.utc),
+            name="Чужая",
+            ayla_user_id=uuid.uuid4(),
+        )
+        ayla(_wire_week())
+
+        assert _get_day(client, foreign).status_code == 404
+
+    def test_the_range_limits_come_from_the_calculator_not_from_here(
+        self, client: Client, owner_bot_user: BotUser, synced_master: CatalogMaster, ayla
+    ) -> None:
+        """Два предела на один расчёт разъехались бы молча."""
+
+        from apps.master_api.services.schedule import MAX_RANGE_DAYS
+
+        ayla(_wire_week())
+        start = date(2026, 9, 10)
+        too_far = start + timedelta(days=MAX_RANGE_DAYS)
+
+        resp = _get_day(
+            client,
+            synced_master,
+            **{"from": start.isoformat(), "to": too_far.isoformat()},
+        )
+
+        assert resp.status_code == 400
+        assert str(MAX_RANGE_DAYS) in resp.json()["detail"]
+
+    def test_an_unreachable_source_is_named_not_drawn_as_a_free_day(
+        self, client: Client, owner_bot_user: BotUser, synced_master: CatalogMaster, ayla
+    ) -> None:
+        """Пустой день читался бы как «мастер свободен весь день»."""
+
+        ayla([], exc=SalonUnavailable("upstream down"))
+
+        resp = _get_day(client, synced_master)
+
+        assert resp.status_code == 503
+        assert resp.json()["error"] == "schedule_unavailable"
+
+
+class TestTheLunchBreakStoppedLeaking_2026_09_11:
+    """DRF-1638 ЗАКРЫТ 11.09.2026. Эталон перевёрнут, а не удалён.
+
+    Раньше этот класс был **negative-baseline artifact** (§114): он
+    фиксировал НЕ то, что перерыв обрабатывается, а то, что НЕ
+    обрабатывается, и обязан был покраснеть в день, когда обработку
+    добавят. День настал — покраснел, привёл сюда, сработал.
+
+    Перевёрнут на месте с датой, потому что молчаливое удаление и переворот
+    выглядят в диффе одинаково, а значат противоположное: из перевёрнутого
+    видно, что изменилось ПОВЕДЕНИЕ, из удалённого — что кто-то убрал
+    красное.
+
+    Чем была цепь до починки:
+
+    * провод недельного шаблона Ayla несёт ``break_start`` / ``break_end``;
+    * ``schedule_frame.FrameHours`` нёс три поля из семи и перерыв ронял;
+    * ``_compute_free_windows`` вычитает записи и блоки — перерыв не был ни
+      тем, ни другим;
+    * каталог при этом считает перерыв занятым и на чтении, и на записи
+      (``slot_builder``), то есть запись на обед отклонялась.
+
+    Экспозиция на 10.09.2026 была нулевой: 63 строки часов у девяти
+    мастеров, перерыв не заполнен ни у одного. Дефект не спал, а ждал первой
+    строки — и был закрыт до неё.
+
+    Чем закрыт: перерыв доезжает до кадра и вычитается ТЕМ ЖЕ механизмом,
+    что недоступность — как блок. Подробности и доказательства — в
+    ``apps/master_api/tests/test_lunch_break_1638.py``.
+    """
+
+    def test_the_lunch_break_now_changes_the_free_windows(
+        self, client: Client, owner_bot_user: BotUser, synced_master: CatalogMaster, ayla
+    ) -> None:
+        """Ответ с перерывом и без перерыва РАСХОДИТСЯ — утечки нет.
+
+        Форма сравнения оставлена прежней намеренно: два ответа при входе,
+        отличающемся ровно перерывом. Утверждение «окно накрывает
+        13:00–14:00» прошло бы и на расписании, где обеда просто нет, —
+        а расхождение выходов измеряет именно обработку перерыва.
+
+        До 11.09.2026 здесь стояло равенство, и оно было верным. Изменилось
+        поведение, а не тест.
+        """
+
+        monday = date(2026, 9, 7)
+        params = {"from": monday.isoformat(), "to": monday.isoformat()}
+
+        ayla(_wire_week())
+        without_break = _get_day(client, synced_master, **params).json()
+
+        ayla(_wire_week(day0={"break_start": "13:00", "break_end": "14:00"}))
+        with_break = _get_day(client, synced_master, **params).json()
+
+        windows_without = without_break["days"][0]["free_windows"]
+        windows_with = with_break["days"][0]["free_windows"]
+
+        # Положительная стража: окна вообще посчитаны. Без неё равенство
+        # выполнилось бы и на двух пустых списках — то есть на сломанном
+        # стенде, а не на дефекте.
+        assert windows_without, "окна не посчитаны — проверять нечего"
+
+        assert windows_with != windows_without, (
+            "перерыв снова не влияет на свободные окна — DRF-1638 вернулся. "
+            "Экран опять предложит время, которое создание записи отклонит."
+        )
+
+
+class TestTheFrontDeskSeesTheMastersDay:
+    """§141 (решение владельца 11.09.2026): ресепшн видит — на чтение.
+
+    До решения вид дня стоял под ``require_admin_role``, то есть УЖЕ
+    решённого. Вопрос был вынесен владельцу (DRF-1640) именно чтобы права
+    не определялись выбором декоратора; ответ получен, и вид приведён к нему.
+
+    Отрицательная половина важнее положительной: расширение обязано
+    оставаться чтением. Иначе через месяц тот же декоратор окажется на
+    изменяющей ручке, и права вырастут по названию, а не по решению.
+    """
+
+    def test_the_receptionist_sees_the_day(
+        self,
+        client: Client,
+        owner_bot_user: BotUser,
+        receptionist_bot_user: BotUser,
+        synced_master: CatalogMaster,
+        ayla,
+    ) -> None:
+        ayla(_wire_week())
+
+        assert _get_day(client, synced_master, user_id="5003").status_code == 200
+
+    def test_the_receptionist_cannot_confirm_the_schedule(
+        self,
+        client: Client,
+        owner_bot_user: BotUser,
+        receptionist_bot_user: BotUser,
+        synced_master: CatalogMaster,
+        ayla,
+    ) -> None:
+        # Вот где расширение обязано остановиться. Подтверждение делает
+        # мастера продаваемым клиенту — это решение владелицы салона, и
+        # ресепшн его не принимает. Видеть график и заверять его — разные
+        # права, и открытие первого не открывает второго.
+        ayla(_wire_week())
+
+        resp = client.post(
+            _confirm_url(synced_master),
+            data=json.dumps({"fingerprint": "whatever"}),
+            content_type="application/json",
+            HTTP_AUTHORIZATION=init_data_header("5003"),
+        )
+
+        assert resp.status_code == 403, resp.status_code
+
+    def test_the_day_view_refuses_an_unsafe_method_from_the_front_desk(
+        self,
+        client: Client,
+        owner_bot_user: BotUser,
+        receptionist_bot_user: BotUser,
+        synced_master: CatalogMaster,
+        ayla,
+    ) -> None:
+        ayla(_wire_week())
+
+        resp = client.post(
+            _day_url(synced_master),
+            data="{}",
+            content_type="application/json",
+            HTTP_AUTHORIZATION=init_data_header("5003"),
+        )
+
+        assert resp.status_code in (403, 405), resp.status_code

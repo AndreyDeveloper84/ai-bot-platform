@@ -21,8 +21,10 @@ from apps.admin_api import (
     views_customers,
     views_day,
     views_invite,
+    views_master_exceptions,
     views_master_schedule,
     views_master_verify,
+    views_salon_frame,
     views_staff_invite,
     views_staff_revoke,
     views_staff_roster,
@@ -37,6 +39,11 @@ urlpatterns = [
     # the front desk opens most often; ordering is cosmetic here (no
     # wildcard can swallow a literal "day" segment at this level).
     path("day/", views_day.salon_day, name="salon_day"),
+    # DRF-1237 A2 — кадр того же дня: смены, перерывы и отсутствия ВСЕХ
+    # мастеров одним вызовом Ayla. Соседствует с ``day/`` намеренно: это
+    # вторая половина одного экрана, визиты берутся из ``day/`` и только
+    # оттуда (см. докстринг ``views_salon_frame``).
+    path("day/frame/", views_salon_frame.salon_day_frame, name="salon_day_frame"),
     # Phase 2 — bookable starts for the manual-booking flow. Wraps Ayla's
     # canonical slots read; see the module docstring for why it refuses
     # rather than returning an empty list on upstream failure.
@@ -142,6 +149,23 @@ urlpatterns = [
         "masters/<str:master_id>/schedule/",
         views_master_schedule.master_schedule,
         name="master_schedule",
+    ),
+    # DRF-1237, срез A1 — рабочий день мастера глазами салона. Тонкий вид
+    # поверх ``master_api.services.schedule.build_schedule``: четвёртого
+    # вычислителя «свободного времени» в продукте заводить нельзя.
+    path(
+        "masters/<str:master_id>/day-schedule/",
+        views_master_schedule.master_day_schedule,
+        name="master_day_schedule",
+    ),
+    # DRF-1240 (чтение) — что уже назначено мастеру: исключения по датам,
+    # недоступность и закрытия салона. Записи нет: все записывающие маршруты
+    # салонной поверхности SERVICE_READ_ONLY, а §117 разрешает креденшел
+    # условно — сначала три проверки, потом использование.
+    path(
+        "masters/<str:master_id>/exceptions/",
+        views_master_exceptions.master_exceptions,
+        name="master_exceptions",
     ),
     path(
         "masters/<str:master_id>/schedule/confirm/",

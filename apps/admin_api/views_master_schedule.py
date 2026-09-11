@@ -55,10 +55,11 @@ import uuid
 from typing import Any
 
 from django.http import HttpRequest, HttpResponse, JsonResponse
+from django.utils import timezone
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_http_methods
 
-from apps.admin_api.auth import require_admin_role
+from apps.admin_api.auth import require_admin_or_reception_read, require_admin_role
 from apps.catalog.models import CatalogMaster
 from apps.catalog.services import schedule_confirmation as sc
 from apps.identity.services.role_resolver import RoleContext
@@ -226,3 +227,134 @@ def master_schedule_confirm(request: HttpRequest, master_id: str) -> HttpRespons
         template.source,
     )
     return JsonResponse({"schedule": _schedule_payload(master, template)})
+
+
+# ─── день мастера для салона (DRF-1237, срез A1) ─────────────────────────────
+
+
+@csrf_exempt
+@require_http_methods(["GET"])
+@require_admin_or_reception_read
+def master_day_schedule(request: HttpRequest, master_id: str) -> HttpResponse:
+    """Рабочий день мастера глазами салона: часы, записи, окна, конфликты.
+
+    # Почему это тонкий вид, а не свой расчёт
+
+    Способность посчитать доступность уже построена —
+    :func:`apps.master_api.services.schedule.build_schedule`: она отдаёт по
+    каждой дате ``is_off_day``, ``working_hours``, ``bookings``, ``blocks``,
+    ``free_windows`` и ``conflicts``, и считает это **сервер** из
+    авторитетного источника (внутри ``load_day_frame``, который ветвится по
+    ``BOOKING_VIA_AYLA_REST``).
+
+    Посчитать то же самое здесь — значит завести **четвёртый** вычислитель
+    «свободного времени» в одном продукте: сегодня их уже три (резолвер на
+    пути записи, ``build_schedule`` на экране мастера, слоты каталога), и они
+    между собой расходятся. Расхождение разбирается отдельно (§117, контракт
+    доступности); наша обязанность — не добавить к нему пятого.
+
+    Считать окна на клиенте нельзя тем более: это «клиент выдумывает
+    доступность» (§17), и запрет записан в ``admin-api.ts`` рядом с полем,
+    ради которого он там оказался.
+
+    # Кого пускаем — и что здесь НЕ решено
+
+    ``require_admin_role`` открывает тенантный скоуп, и :func:`_master_or_none`
+    ищет мастера **внутри него**: мастер чужого салона отвечает 404, как
+    несуществующий. Это обязательно, а не осторожность: докстринг
+    ``build_schedule`` прямо говорит «cross-master scoping happens at the auth
+    layer; this helper trusts the input» — то есть сервис на скоуп не смотрит
+    и смотреть не должен.
+
+    **Второй вопрос авторизации ОТВЕЧЕН владельцем 11.09.2026 — §141.**
+    «Мастер принадлежит салону» и «этот сотрудник вправе видеть график
+    мастера» — разные вопросы, и второй был вынесен владельцу (DRF-1640),
+    а не решён выбором декоратора. Ответ: ресепшн ВИДИТ расписание мастеров
+    своего салона — рабочие часы, свободные и занятые интервалы, отгулы,
+    изменения на выбранный день.
+
+    Поэтому здесь ``require_admin_or_reception_read``, а не
+    ``require_admin_role``: до решения вид был УЖЕ решённого, и оставить его
+    таким значило бы держать права уже решения — молча, по инерции.
+
+    **На чтение и только.** Декоратор пускает ресепшн лишь на безопасном
+    методе, и это не украшение: ``_RECEPTION_SAFE_METHODS`` — то, что не даёт
+    открытому виду стать открытой ручкой. Вид объявлен GET-only отдельно,
+    так что запрет держат двое.
+
+    # Известная слепота, которую этот вид наследует
+
+    **Обеденный перерыв показывается свободным временем.** Провод недельного
+    шаблона Ayla несёт ``break_start`` / ``break_end``, но
+    ``schedule_frame.FrameHours`` их не несёт, и до
+    ``_compute_free_windows`` они не доезжают: окна вычитают записи и блоки,
+    а перерыв не то и не другое.
+
+    Цепь замкнута с обеих сторон и на ЖИВОЙ ветке: каталог считает перерыв
+    занятым и на чтении, и на записи (``slot_builder``), то есть экран
+    предложит время, которое запись отклонит.
+
+    Экспозиция замерена на пилоте 10.09.2026: 63 строки часов у девяти
+    мастеров, перерыв не заполнен **ни у одного**, флаг включён. То есть
+    расхождение не спит — оно ждёт первой строки: первый салон, поставивший
+    мастеру обед, получит его показанным свободным.
+
+    Мы это **наследуем осознанно**, а не по незнанию: чинить разбор кадра —
+    предмет **DRF-1638** (эпик контракта доступности DRF-1637), а не салонной
+    вкладки, и четвёртый вычислитель ради обхода был бы хуже дефекта. Слепота
+    закреплена тестом ``test_the_lunch_break_is_known_to_leak_into_free_windows``:
+    он фиксирует НЕ то, что перерыв обрабатывается, а то, что не обрабатывается,
+    и обязан покраснеть в день, когда обработку добавят.
+    """
+
+    master = _master_or_none(master_id)
+    if master is None:
+        return _error("not_found", "master not found", 404)
+
+    from datetime import date as date_cls
+    from datetime import timedelta
+
+    from apps.master_api.services.schedule import (
+        DEFAULT_RANGE_DAYS,
+        MAX_RANGE_DAYS,
+        build_schedule,
+    )
+
+    def _parse(name: str) -> date_cls | None:
+        raw = request.GET.get(name)
+        if not raw:
+            return None
+        try:
+            return date_cls.fromisoformat(raw)
+        except ValueError:
+            return None
+
+    from_date = _parse("from")
+    if from_date is None and request.GET.get("from"):
+        return _error("bad_request", "'from' must be YYYY-MM-DD", 400)
+    if from_date is None:
+        from_date = timezone.localdate()
+
+    to_date = _parse("to")
+    if to_date is None and request.GET.get("to"):
+        return _error("bad_request", "'to' must be YYYY-MM-DD", 400)
+    if to_date is None:
+        to_date = from_date + timedelta(days=DEFAULT_RANGE_DAYS - 1)
+
+    # Границы диапазона берутся ИЗ ТОГО ЖЕ МОДУЛЯ, что и расчёт, а не
+    # объявляются здесь своими числами: два предела на один расчёт разъехались
+    # бы молча, и салон однажды запросил бы диапазон, который кабинет считает
+    # недопустимым.
+    if from_date > to_date:
+        return _error("bad_request", "'from' must be <= 'to'", 400)
+    if (to_date - from_date).days >= MAX_RANGE_DAYS:
+        return _error("bad_request", f"range exceeds {MAX_RANGE_DAYS} days", 400)
+
+    try:
+        payload = build_schedule(master, from_date=from_date, to_date=to_date)
+    except SalonNotConfigured as exc:
+        return _error("schedule_source_not_configured", str(exc), 503)
+    except SalonUnavailable as exc:
+        return _error("schedule_unavailable", str(exc), 503)
+
+    return JsonResponse(payload.to_dict())

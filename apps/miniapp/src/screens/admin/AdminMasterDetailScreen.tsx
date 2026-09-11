@@ -55,6 +55,10 @@ import { useNavigate, useParams } from "react-router-dom";
 
 import { Snackbar } from "../../components/Snackbar";
 import { StateError } from "../../components/StateError";
+import {
+  confirmationLabel,
+  confirmationState,
+} from "../../lib/schedule-confirmation-state";
 import { ApiError } from "../../lib/api";
 import {
   confirmMasterSchedule,
@@ -326,7 +330,7 @@ function MasterScheduleSection({ masterId, isOwner }: { masterId: string; isOwne
   }, [schedule, masterId, load]);
 
   const confirmation = schedule?.confirmation;
-  const stale = Boolean(confirmation?.confirmed_at) && confirmation?.is_current === false;
+  const state = confirmationState(confirmation);
 
   return (
     <section style={{ marginBottom: "var(--s-4)" }}>
@@ -367,16 +371,14 @@ function MasterScheduleSection({ masterId, isOwner }: { masterId: string; isOwne
             ))}
           </ul>
 
-          {confirmation?.is_current ? (
+          {state === "confirmed" ? (
             <p style={{ margin: "0 0 var(--s-2)" }}>
-              {`→ Подтверждено ${formatConfirmedAt(confirmation.confirmed_at)}${
-                confirmation.confirmed_by?.name ? ` — ${confirmation.confirmed_by.name}` : ""
-              }`}
+              {confirmationLabel(confirmation)}
             </p>
           ) : (
             <>
               <p style={{ margin: "0 0 var(--s-1)", fontWeight: 600 }}>
-                {stale ? "Часы изменились после подтверждения" : "Расписание не подтверждено"}
+                {confirmationLabel(confirmation)}
               </p>
               <p style={{ margin: "0 0 var(--s-2)", color: "var(--c-text-secondary)" }}>
                 {confirmation?.block === "no_working_day"
@@ -386,7 +388,7 @@ function MasterScheduleSection({ masterId, isOwner }: { masterId: string; isOwne
             </>
           )}
 
-          {!confirmation?.is_current && (
+          {state !== "confirmed" && (
             <button
               type="button"
               className="btn-secondary"
@@ -410,13 +412,6 @@ function MasterScheduleSection({ masterId, isOwner }: { masterId: string; isOwne
 }
 
 /** «9 сентября» — дата подтверждения словами, как в решении владельца. */
-function formatConfirmedAt(iso: string | null): string {
-  if (!iso) return "";
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return iso;
-  return d.toLocaleDateString("ru-RU", { day: "numeric", month: "long" });
-}
-
 export function AdminMasterDetailScreen({ me }: Props) {
   const navigate = useNavigate();
   const { masterId = "" } = useParams<{ masterId: string }>();
