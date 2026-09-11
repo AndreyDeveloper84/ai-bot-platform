@@ -52,6 +52,28 @@ class SafetyState(str, Enum):
     UNKNOWN = "unknown"
 
 
+class Handoff(str, Enum):
+    """What the verdict promises about the next step — §127, frozen at three.
+
+    > **Кризисный handoff не должен быть неотличим от обычного policy refusal.**
+
+    `BLOCK` and `HANDOFF` are not collapsed: both can stop an action, and they
+    make **different promises to the person**. `rule_id` is evidence about the
+    cause; this is a promise about what happens next, and it has to be readable
+    without knowing the rules.
+
+    Three values, not a boolean, and §127 is explicit about why: `NONE` means
+    "not required", **not** "the field was absent". Absence has its own home —
+    `SafetyState.UNKNOWN`, which already means the engine did not run. A verdict
+    that exists carries a handoff; a verdict that does not exist carries
+    nothing, and `__post_init__` enforces both directions.
+    """
+
+    NONE = "none"
+    RECOMMENDED = "recommended"
+    REQUIRED = "required"
+
+
 KNOWN_SAFETY_STATES: frozenset[SafetyState] = frozenset(
     {SafetyState.NORMAL, SafetyState.CLARIFY, SafetyState.CAUTION, SafetyState.STOP}
 )
@@ -75,6 +97,7 @@ class SafetyResult:
 
     state: SafetyState
     evaluated_at_revision: int | None
+    handoff: Handoff | None = None
     rule_id: str | None = None
     policy_version: str | None = None
     required_slots: tuple[str, ...] = ()
@@ -96,6 +119,18 @@ class SafetyResult:
             )
         if self.evaluated_at_revision is not None and self.evaluated_at_revision < 1:
             raise ValueError("SafetyResult.evaluated_at_revision must be >= 1")
+        if self.state in KNOWN_SAFETY_STATES and self.handoff is None:
+            raise ValueError(
+                f"SafetyResult({self.state.value}) states a verdict without a handoff. "
+                "§127 keeps BLOCK and HANDOFF apart because they promise the person "
+                "different things; a verdict that does not say which promise it makes "
+                "leaves the surface to guess, and NONE is a decision, not a default."
+            )
+        if self.state not in KNOWN_SAFETY_STATES and self.handoff is not None:
+            raise ValueError(
+                "a verdict that was never computed cannot promise a next step: "
+                f"state={self.state.value} with handoff={self.handoff.value}"
+            )
 
     @property
     def is_known(self) -> bool:
@@ -106,6 +141,16 @@ class SafetyResult:
 
         return (
             self.state.value,
+            # §127. Not because two promises would otherwise collide today:
+            # `rule_id` is in this projection too and the two promises happen to
+            # arrive from different rule buckets
+            # (`pre_check.regex:handoff` against `pre_check.regex:block`), so
+            # their digests already differ. That separation is a **coincidence
+            # of today's catalogue**, not a contract: two verdicts from one
+            # bucket with different promises would digest identically, and
+            # nothing here forbids it, because the projection had no notion of a
+            # promise. This line gives it one.
+            self.handoff.value if self.handoff else "",
             str(self.evaluated_at_revision),
             self.rule_id or "",
             self.policy_version or "",

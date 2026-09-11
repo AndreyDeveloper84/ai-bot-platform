@@ -30,7 +30,7 @@ from apps.orchestrator.decision_readiness.required_context import (
     RequiredSlot,
     SlotOwner,
 )
-from apps.orchestrator.decision_readiness.safety_input import SafetyResult, SafetyState
+from apps.orchestrator.decision_readiness.safety_input import Handoff, SafetyResult, SafetyState
 from apps.orchestrator.decision_readiness.state import ConversationState
 
 NOW = datetime(2026, 9, 10, 12, 0, tzinfo=UTC)
@@ -180,7 +180,9 @@ def make_input(**kwargs: object) -> eng.ReadinessInput:
         "state_revision": REVISION,
         "state": ConversationState(conversation_id="conv-1", revision=REVISION),
         "mode": Mode.DISCOVERY,
-        "safety": SafetyResult(state=SafetyState.NORMAL, evaluated_at_revision=REVISION),
+        "safety": SafetyResult(
+            state=SafetyState.NORMAL, evaluated_at_revision=REVISION, handoff=Handoff.NONE
+        ),
         "candidates": candidates(),
         "policy": calibrated_policy(),
         "required_context_spec": default_spec(),

@@ -15,7 +15,7 @@ from apps.orchestrator.decision_readiness import evidence as ev
 from apps.orchestrator.decision_readiness import required_context as rc
 from apps.orchestrator.decision_readiness.candidates import CandidateSetSignature
 from apps.orchestrator.decision_readiness.events import user_text_event
-from apps.orchestrator.decision_readiness.safety_input import SafetyResult, SafetyState
+from apps.orchestrator.decision_readiness.safety_input import Handoff, SafetyResult, SafetyState
 from apps.orchestrator.decision_readiness.state import (
     ConversationState,
     SlotState,
@@ -50,7 +50,8 @@ def _ctx(
         state=state or ConversationState(conversation_id="conv-1", revision=1),
         candidates=candidates or _candidates(),
         mode=mode,
-        safety=safety or SafetyResult(state=SafetyState.NORMAL, evaluated_at_revision=1),
+        safety=safety
+        or SafetyResult(state=SafetyState.NORMAL, evaluated_at_revision=1, handoff=Handoff.NONE),
         execution_required_params=execution_params,
     )
 
