@@ -705,7 +705,7 @@ class TestPaymentMirrorReadModel:
             event_id="e1",
         )
 
-        out = _booking_to_dict(booking)
+        out = _booking_to_dict(booking, tenant=tenant)
 
         assert out["payment"] == {"capture_state": "captured", "amount": "2000.00"}
 
@@ -714,4 +714,10 @@ class TestPaymentMirrorReadModel:
 
         booking = _make_booking(tenant, bot_user)
 
-        assert "payment" not in _booking_to_dict(booking)
+        out = _booking_to_dict(booking, tenant=tenant)
+
+        # Стража присутствия на ТЕХ ЖЕ данных: словарь собран и несёт
+        # запись. Без неё «ключа payment нет» было бы верно и для
+        # пустого словаря, то есть для сломанного сериализатора.
+        assert out["id"] == str(booking.id)
+        assert "payment" not in out

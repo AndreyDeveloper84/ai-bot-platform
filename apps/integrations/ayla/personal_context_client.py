@@ -180,15 +180,20 @@ class PersonalContextHttpClient:
     # Public API (contract §1–§5)
     # ------------------------------------------------------------------
 
-    def get_context(self, *, ayla_user_id: str) -> DeclaredContext:
+    def get_context(self, *, ayla_user_id: str, external_user_id: str) -> DeclaredContext:
         """``GET /personal-context/`` — full declared catalogue (lazy-create)."""
-        payload = self._send_with_retry("GET", f"internal/users/{ayla_user_id}/personal-context/")
+        payload = self._send_with_retry(
+            "GET",
+            f"internal/users/{ayla_user_id}/personal-context/",
+            external_user_id=external_user_id,
+        )
         return _declared_from_wire(payload, ayla_user_id=ayla_user_id)
 
     def patch_context(
         self,
         *,
         ayla_user_id: str,
+        external_user_id: str,
         updates: list[dict[str, Any]],
     ) -> DeclaredContext:
         """``PATCH /personal-context/`` — batch LWW update (idempotent).
@@ -206,14 +211,17 @@ class PersonalContextHttpClient:
         payload = self._send_with_retry(
             "PATCH",
             f"internal/users/{ayla_user_id}/personal-context/",
+            external_user_id=external_user_id,
             json_body={"updates": updates},
         )
         return _declared_from_wire(payload, ayla_user_id=ayla_user_id)
 
-    def get_ask_eligibility(self, *, ayla_user_id: str) -> AskEligibility:
+    def get_ask_eligibility(self, *, ayla_user_id: str, external_user_id: str) -> AskEligibility:
         """``GET ask-eligibility/`` — the ONE field Ayla allows asking now."""
         payload = self._send_with_retry(
-            "GET", f"internal/users/{ayla_user_id}/personal-context/ask-eligibility/"
+            "GET",
+            f"internal/users/{ayla_user_id}/personal-context/ask-eligibility/",
+            external_user_id=external_user_id,
         )
         data = _unwrap_data(payload)
         return AskEligibility(
@@ -225,15 +233,16 @@ class PersonalContextHttpClient:
             raw=data if isinstance(data, dict) else {},
         )
 
-    def mark_asked(self, *, ayla_user_id: str, field: str) -> None:
+    def mark_asked(self, *, ayla_user_id: str, external_user_id: str, field: str) -> None:
         """``POST mark-asked/`` — stamp the 24h cooldown. NOT retried."""
         self._send_single_attempt(
             "POST",
             f"internal/users/{ayla_user_id}/personal-context/mark-asked/",
+            external_user_id=external_user_id,
             json_body={"field": field},
         )
 
-    def skip(self, *, ayla_user_id: str, field: str) -> int:
+    def skip(self, *, ayla_user_id: str, external_user_id: str, field: str) -> int:
         """``POST skip/`` — increment the skip counter. NOT retried.
 
         Returns the server's ``skip_count`` (0 when the body omits it).
@@ -241,6 +250,7 @@ class PersonalContextHttpClient:
         payload = self._send_single_attempt(
             "POST",
             f"internal/users/{ayla_user_id}/personal-context/skip/",
+            external_user_id=external_user_id,
             json_body={"field": field},
         )
         data = _unwrap_data(payload)
@@ -258,7 +268,9 @@ class PersonalContextHttpClient:
     # the contract paths ahead of the upstream landing.
     # ------------------------------------------------------------------
 
-    def get_personal_data_export(self, *, ayla_user_id: str) -> dict[str, Any]:
+    def get_personal_data_export(
+        self, *, ayla_user_id: str, external_user_id: str
+    ) -> dict[str, Any]:
         """C5.1: ``GET /internal/users/{id}/personal-data/export/``.
 
         Synchronous JSON (profile subset + full declared-prefs
@@ -266,11 +278,13 @@ class PersonalContextHttpClient:
         read-only.
         """
         payload = self._send_with_retry(
-            "GET", f"internal/users/{ayla_user_id}/personal-data/export/"
+            "GET",
+            f"internal/users/{ayla_user_id}/personal-data/export/",
+            external_user_id=external_user_id,
         )
         return _unwrap_data(payload)
 
-    def delete_personal_data(self, *, ayla_user_id: str) -> None:
+    def delete_personal_data(self, *, ayla_user_id: str, external_user_id: str) -> None:
         """C5.2: ``DELETE /internal/users/{id}/personal-data/``.
 
         Idempotent server-side per C5 (repeat → 200/204), so transport
@@ -292,7 +306,11 @@ class PersonalContextHttpClient:
         context row in place upstream (backend matrix cell
         ``test_...delete_after_account_delete``), a gap owned by the backend.
         """
-        self._send_with_retry("DELETE", f"internal/users/{ayla_user_id}/personal-data/")
+        self._send_with_retry(
+            "DELETE",
+            f"internal/users/{ayla_user_id}/personal-data/",
+            external_user_id=external_user_id,
+        )
 
     # ------------------------------------------------------------------
     # Plumbing
@@ -303,6 +321,7 @@ class PersonalContextHttpClient:
         method: str,
         path: str,
         *,
+        external_user_id: str,
         json_body: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Idempotent verbs (GET/PATCH): up to ``retries`` attempts.
@@ -313,7 +332,12 @@ class PersonalContextHttpClient:
         last_exc: Exception | None = None
         for attempt in range(self._retries):
             try:
-                return self._send(method, path, json_body=json_body)
+                return self._send(
+                    method,
+                    path,
+                    external_user_id=external_user_id,
+                    json_body=json_body,
+                )
             except PersonalContextConfigError:
                 raise
             except PersonalContextTransportError as exc:
@@ -337,18 +361,36 @@ class PersonalContextHttpClient:
         method: str,
         path: str,
         *,
+        external_user_id: str,
         json_body: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Non-idempotent verbs (mark-asked/skip): exactly one attempt."""
-        return self._send(method, path, json_body=json_body)
+        return self._send(
+            method,
+            path,
+            external_user_id=external_user_id,
+            json_body=json_body,
+        )
 
     def _send(
         self,
         method: str,
         path: str,
         *,
+        external_user_id: str,
         json_body: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        if not external_user_id:
+            # An empty header would be indistinguishable on the wire from
+            # not sending one at all, and upstream that is precisely the
+            # difference between "the caller named itself" and "the caller
+            # named nobody". Fail here, where the caller is still visible in
+            # the traceback, rather than turn it into an upstream 403 whose
+            # cause is two services away.
+            raise PersonalContextConfigError(
+                "external_user_id is required: this surface names the acting "
+                "subject in X-External-User-ID"
+            )
         try:
             url = AylaUrlBuilder(self._base_url).build(path)
         except AylaUrlError as exc:
@@ -363,6 +405,17 @@ class PersonalContextHttpClient:
                 json=json_body,
                 headers={
                     "Authorization": f"Bearer {self._token}",
+                    # CP-2 / DRF-1617. The token says WHICH SERVICE called;
+                    # this says WHICH SUBJECT it is acting for. Upstream
+                    # resolves it — without creating a row — and refuses when
+                    # it does not resolve to the subject in the path, so a
+                    # leaked token can no longer reach an arbitrary person.
+                    #
+                    # This client was the only one of ten Ayla clients that
+                    # named no subject, and it happens to carry every
+                    # personal-data route: export, erasure, and the declared
+                    # profile the erasure empties.
+                    "X-External-User-ID": external_user_id,
                     "Accept": "application/json",
                     "Content-Type": "application/json",
                 },

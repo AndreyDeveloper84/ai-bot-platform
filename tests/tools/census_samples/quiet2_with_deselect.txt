@@ -1,0 +1,3 @@
+pkg_a/test_alpha.py: 3
+pkg_b/test_beta.py: 2
+

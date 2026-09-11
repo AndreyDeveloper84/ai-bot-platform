@@ -135,11 +135,11 @@ class _StubPCClient:
         self.calls: list[tuple[str, str]] = []
         self.closed = False
 
-    def get_personal_data_export(self, *, ayla_user_id: str):
+    def get_personal_data_export(self, *, ayla_user_id: str, external_user_id: str):
         self.calls.append(("export", ayla_user_id))
         return self.export_payload
 
-    def delete_personal_data(self, *, ayla_user_id: str) -> None:
+    def delete_personal_data(self, *, ayla_user_id: str, external_user_id: str) -> None:
         self.calls.append(("delete", ayla_user_id))
         if self.delete_exc:
             raise self.delete_exc
@@ -173,7 +173,7 @@ class TestExport:
 
     def test_upstream_failure_raises(self, bot_user) -> None:
         class _Failing(_StubPCClient):
-            def get_personal_data_export(self, *, ayla_user_id: str):
+            def get_personal_data_export(self, *, ayla_user_id: str, external_user_id: str):
                 raise PersonalContextTransportError("http_500")
 
         with pytest.raises(PrivacyUpstreamError):
@@ -537,7 +537,7 @@ class TestViews:
 
     def test_export_upstream_502(self, client: DjangoClient, bot_user, monkeypatch) -> None:
         class _Failing(_StubPCClient):
-            def get_personal_data_export(self, *, ayla_user_id: str):
+            def get_personal_data_export(self, *, ayla_user_id: str, external_user_id: str):
                 raise PersonalContextTransportError("http_500")
 
         monkeypatch.setattr(
@@ -852,7 +852,7 @@ class TestProfilePiiErase:
         _with_pii(bot_user)
 
         class _GoneOnRepeat(_StubPCClient):
-            def delete_personal_data(self, *, ayla_user_id: str) -> None:
+            def delete_personal_data(self, *, ayla_user_id: str, external_user_id: str) -> None:
                 already = ("delete", ayla_user_id) in self.calls
                 self.calls.append(("delete", ayla_user_id))
                 if already:
