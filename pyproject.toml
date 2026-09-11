@@ -219,7 +219,12 @@ asyncio_mode = "strict"
 # MasterService write-provenance context for the ~60 existing edge
 # fixtures. Rationale in that module; the gate itself is tested with the
 # context explicitly torn down.
-addopts = "-p config.pytest_env_guard -p config.pytest_master_service_provenance -q -m \"not smoke\""
+# `-p config.pytest_vendor_sdk_preimport` (DRF-1643) — imports the vendor
+# SDKs before any test can patch `httpx.AsyncClient`. Both SDKs derive a
+# class from it at import time, and a lazy first import landing inside
+# `with patch(...)` binds that class to the mock permanently. Same reason
+# as above for being a plugin: a conftest is imported too late.
+addopts = "-p config.pytest_env_guard -p config.pytest_master_service_provenance -p config.pytest_vendor_sdk_preimport -q -m \"not smoke\""
 markers = [
     "e2e: end-to-end test requiring real Redis + Postgres (CI services or docker compose locally). Skipped automatically when backing services aren't reachable.",
     "slow: opt-in performance / latency-SLO tests. Excluded from the default suite (`-m \"not slow\"`); run via `pytest -m slow` in nightly perf jobs.",

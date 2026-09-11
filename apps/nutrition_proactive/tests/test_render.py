@@ -205,7 +205,10 @@ class TestNeverTalksAboutTheBody:
             p.carbs_g,
             w.total_ml,
             w.norm_ml,
-            round(p.protein_g - s.protein_g),  # the shortfall in the remark
+            # `p.protein_g` здесь заведомо не `None` — фикстура его
+            # задаёт; проверка сужает тип для mypy и заодно называет
+            # предпосылку вслух (DRF-1623 N-c сделал поле необязательным).
+            round((p.protein_g or 0) - s.protein_g),  # the shortfall in the remark
         }
         assert printed <= allowed, f"unexplained numbers: {printed - allowed}"
 

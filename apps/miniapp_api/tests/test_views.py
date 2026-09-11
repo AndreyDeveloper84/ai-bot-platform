@@ -1070,6 +1070,45 @@ class TestBookingDetail:
         assert resp.status_code == 200
         assert resp.json()["booking"]["id"] == str(confirmed_booking.id)
 
+    def test_address_carries_all_three_states(
+        self, client: Client, tenant: Tenant, bot_user: BotUser, confirmed_booking
+    ) -> None:
+        """«Клиент записался и не видит, куда ехать» (DRF-1652).
+
+        Заглушка адрес рисовала, настоящая ручка его не несла. Правка
+        обязана вернуть поле, СОХРАНИВ честность: адрес появляется, когда
+        его прислали, и отсутствие остаётся отличимым.
+
+        Три состояния проверяются по очереди на одной и той же записи, и
+        первым идёт положительное: если бы ключа в ответе не было вовсе,
+        проверки на `null` и `""` прошли бы одинаково и ничего не значили.
+        """
+
+        def _get() -> dict:
+            resp = client.get(
+                reverse(
+                    "miniapp_api:booking_detail",
+                    kwargs={"booking_id": str(confirmed_booking.id)},
+                ),
+                HTTP_AUTHORIZATION=_init_data_header("12345"),
+            )
+            assert resp.status_code == 200
+            return resp.json()["booking"]
+
+        tenant.address = "ул. Тверская 12"
+        tenant.save(update_fields=["address"])
+        body = _get()
+        assert "address" in body, "поля нет в ответе — проверки ниже ничего не значат"
+        assert body["address"] == "ул. Тверская 12"
+
+        tenant.address = ""
+        tenant.save(update_fields=["address"])
+        assert _get()["address"] == "", "салон ответил «адреса нет» — это ответ, не молчание"
+
+        tenant.address = None
+        tenant.save(update_fields=["address"])
+        assert _get()["address"] is None, "молчание источника схлопнуто в ответ салона"
+
     def test_other_user_404(
         self,
         client: Client,

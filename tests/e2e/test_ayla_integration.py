@@ -145,11 +145,15 @@ class TestNutritionClient:
 
         profile = await client.get_profile(external_user_id=external_user_id)
         assert profile is not None
-        # Norms envelope unwrapped correctly.
-        assert profile.daily_kcal > 0
-        assert profile.protein_g > 0
-        assert profile.water_ml > 0
-        assert profile.bmr > 0
+        # Norms envelope unwrapped correctly. Каждый ориентир сперва
+        # проверяется на присутствие: с DRF-1623 N-c его отсутствие
+        # приезжает `None`, и `> 0` на `None` — падение типа, а не
+        # проверка. Присутствие здесь и есть предмет: контур обязан
+        # ПОСЧИТАТЬ на этих входах.
+        assert profile.daily_kcal is not None and profile.daily_kcal > 0
+        assert profile.protein_g is not None and profile.protein_g > 0
+        assert profile.water_ml is not None and profile.water_ml > 0
+        assert profile.bmr is not None and profile.bmr > 0
 
     @pytest.mark.asyncio
     async def test_water_log_round_trip(self, external_user_id: str) -> None:

@@ -61,23 +61,52 @@ def global_tenant() -> Tenant:
     return tenant
 
 
+def _set_last_seen(row: BotUser, when) -> None:
+    """Write `last_seen` for real. `create()`/`save()` cannot.
+
+    DRF-1653. `last_seen` is `auto_now=True` (apps/identity/models.py:167), so
+    every save overwrites whatever the caller passed — silently, with no error
+    and no warning. Until this was measured, the fixture below asked for an
+    eight-hour gap and got eight milliseconds:
+
+        asked for:  28800.0 s
+        stored:         0.008261 s
+
+    `QuerySet.update()` is the one path that does not run `auto_now`, because
+    it never loads or saves a model instance. Using it here is not a trick
+    around the ORM — it is the only way to state the fact the test is about.
+    """
+
+    BotUser.all_tenants.filter(pk=row.pk).update(last_seen=when)
+    row.refresh_from_db()
+
+
 @pytest.fixture
 def two_rows(salon_tenant, global_tenant) -> tuple[BotUser, BotUser]:
-    """The pilot's exact shape: the stale row is the linked one."""
+    """The pilot's exact shape: the stale row is the linked one.
+
+    That sentence used to be false. See `_set_last_seen`: the gap the fixture
+    appeared to create was discarded by `auto_now`, and the rows ended up
+    milliseconds apart. The tests then passed for a reason nobody chose — the
+    wall clock happened to tick between two inserts — and failed, once in two
+    runs, whenever a warm interpreter made the second insert fast enough to
+    land in the same tick. A tie in `ORDER BY last_seen DESC` lets Postgres
+    return either row.
+    """
 
     now = timezone.now()
     salon_row = BotUser.all_tenants.create(
         tenant=salon_tenant,
         channel="max",
         channel_user_id=CHANNEL_USER_ID,
-        last_seen=now - timedelta(hours=8),
     )
     global_row = BotUser.all_tenants.create(
         tenant=global_tenant,
         channel="max",
         channel_user_id=CHANNEL_USER_ID,
-        last_seen=now,
     )
+    _set_last_seen(salon_row, now - timedelta(hours=8))
+    _set_last_seen(global_row, now)
     CatalogMaster.all_tenants.create(
         tenant=salon_tenant,
         name="Архипкин Денис",

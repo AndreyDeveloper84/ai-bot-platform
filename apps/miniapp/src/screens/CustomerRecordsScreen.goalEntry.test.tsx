@@ -138,6 +138,10 @@ function booking(
     reschedulable: true,
     rating: null,
     can_rate: false,
+    // DRF-1652 — умолчание `null`, то есть «источник промолчал».
+    // НЕ `""`: это сказало бы, что салон ответил «адреса нет», и
+    // фикстура утверждала бы за салон то, чего он не говорил.
+    address: null,
     ...partial,
   };
 }
