@@ -80,6 +80,11 @@ class TestEachRefusalGetsItsOwnWords:
         ждать, вместо того чтобы написать сам.
         """
         for text in (salon_handler.WRONG_RECIPIENT, salon_handler.PERSON_ALREADY_MASTER):
+            # Присутствие — впереди отсутствия. Оба текста отправляют
+            # человека к администратору САМОГО; без этой строки «не
+            # обещает» зеленело бы и на пустой строке, и на тексте,
+            # который вообще ничего не советует.
+            assert "администратор" in text.lower()
             assert "уведом" not in text.lower()
             assert "сообщим" not in text.lower()
             assert "придёт" not in text.lower()
