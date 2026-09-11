@@ -74,6 +74,9 @@ def _profile(
         health_flags={},
         disclaimer_acked=None,
         goal_overridden_by=goal_overridden_by,
+        # DRF-1686 (§6): без названного происхождения DTO обнуляет ориентиры;
+        # этот профиль — посчитанный, и тесты ниже проверяют именно числа.
+        targets_source="ayla_calculated",
     )
 
 

@@ -44,6 +44,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import time
 from dataclasses import dataclass
 from typing import Any, Final
@@ -177,6 +178,20 @@ def decision_contract_violation(payload: Any) -> str | None:
             # диагностика: она говорит источнику, где именно он нарушил.
             return f"ответ невалиден целиком; первое нарушение — {problem}"
 
+    # DRF-1626: `excluded[]` проверялся ТОЛЬКО потребителем. Асимметрия
+    # означала, что транзит пропускает неконформный ответ дальше, а ловит
+    # его браузер человека — при том, что §9.4 требует обратного дословно:
+    # "ai-bot-platform обязан проверить схему, прежде чем передавать".
+    # Нашлось сторожем на расхождение половин, в первом же его прогоне.
+    excluded = data.get("excluded")
+    if excluded is not None:
+        if not isinstance(excluded, list):
+            return f"excluded отсутствует или не список: {_shape(excluded)}"
+        for index, item in enumerate(excluded):
+            problem = _excluded_violation(item, index)
+            if problem is not None:
+                return f"ответ невалиден целиком; первое нарушение — {problem}"
+
     for field in ("decision_id", "request_id", "policy_versions"):
         if field not in data:
             return f"обязательное поле {field} отсутствует"
@@ -223,6 +238,38 @@ def _candidate_violation(item: Any, index: int) -> str | None:
             f"ordered[{index}].evidence: ожидался список, получено {_shape(item.get('evidence'))}"
         )
     return None
+
+
+def _excluded_violation(item: Any, index: int) -> str | None:
+    """Зеркало `excludedViolation` потребителя (`api.ts`).
+
+    Половины границы обязаны проверять ОДНО И ТО ЖЕ: та, что проверяет
+    меньше, пропускает неконформный ответ дальше и делает виноватым
+    следующего.
+    """
+    if not isinstance(item, dict):
+        return f"excluded[{index}]: ожидался объект, получено {_shape(item)}"
+    candidate = item.get("candidate")
+    if not isinstance(candidate, dict) or not isinstance(candidate.get("id"), str):
+        return f"excluded[{index}].candidate: нет идентификатора кандидата"
+    reason_code = item.get("reason_code")
+    if not isinstance(reason_code, str):
+        return f"excluded[{index}].reason_code: ожидалась строка, получено {_shape(reason_code)}"
+    if not _EXCLUSION_CODE_RE.search(reason_code):
+        # §4.4: исключения фиксируются ТОЛЬКО на стадиях допустимости.
+        # Код не из семейства исключения означал бы, что упорядочивание
+        # тайком стало фильтром — ровно то, чего §4.4 не допускает.
+        return (
+            f"excluded[{index}].reason_code: ожидался код исключения, "
+            f"получено {_shape(reason_code)} (§4.4)"
+        )
+    if not isinstance(item.get("stage"), str):
+        return f"excluded[{index}].stage: ожидалась строка, получено {_shape(item.get('stage'))}"
+    return None
+
+
+#: Семейства кодов исключения — зеркало `EXCLUSION_CODE_RE` потребителя.
+_EXCLUSION_CODE_RE = re.compile(r"^(ELIG_EXCLUDED_|SCOPE_EXCLUDED_)|_EXCLUDED$")
 
 
 #: Поля, наличие которых означает, что источник снова собрал фразу за

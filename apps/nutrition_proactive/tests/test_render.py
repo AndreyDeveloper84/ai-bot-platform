@@ -34,6 +34,9 @@ _BASE_PROFILE = ProfileResponse(
     bmr=1400,
     health_flags={},
     disclaimer_acked=None,
+    # DRF-1686 (§6): без названного происхождения DTO обнуляет ориентиры;
+    # этот профиль — посчитанный, и тесты ниже проверяют именно числа.
+    targets_source="ayla_calculated",
 )
 
 _BASE_SUMMARY = SummaryResponse(
@@ -335,8 +338,12 @@ class TestNoTargetNoJudgement:
         # пустом отчёте.
         assert "Калории: 1500 ккал." in text
         assert "1500 из" not in text
-        # Строка воды исчезает целиком: она вся была «X из N мл».
-        assert "Вода:" not in text
+        # Вода — тот же принцип, что и калории: снимается ориентир, не
+        # факт. Раньше строка исчезала целиком; §6 свода 11.09 называет
+        # «фактически внесённые значения» доступными без ориентиров
+        # (DRF-1686), и выпитое остаётся на экране — без «из».
+        assert "Вода: 1600 мл." in text
+        assert "из" not in text.split("Вода:")[1].splitlines()[0]
 
     def test_no_word_about_overshoot_or_shortfall(self) -> None:
         # PRESENCE ВПЕРЕДИ: те же 3000 ккал при цели «снизить вес» и

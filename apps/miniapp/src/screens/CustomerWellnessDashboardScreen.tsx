@@ -18,7 +18,8 @@
  *   Block 1 — Greeting + human one-liner (Tau §3 / §11.9 + §11.10)
  *   Block 2 — Pulse strip (Питание + Вода + Цель)  — Tau §3 + §11.1
  *   Block 3 — Quick actions (💧 + 🎯 + 📅) — Tau §3 + §11.5 + §11.8
- *   Block 4 — Цели сегодня (text actions, no progress bars) — Tau §3
+ *   Block 4 — Шаги на сегодня (text actions, no progress bars) — Tau §3;
+ *     заголовок по решению владельца 11.09.2026 §5.2: привычка/шаг ≠ цель
  *   Block 5 — Ближайшая запись (multi-record indicator) — Tau §3 + §11.3
  *   Block 6 — Прогресс недели (cold-start ≥3 days) — Tau §3 + §11.4
  *   Block 7 — Recommendations embed (TL extension; phase 3.1: real
@@ -392,7 +393,13 @@ export function CustomerWellnessDashboardScreen() {
   // него не имеет (см. docstring `customer_wellness_today`). То есть в
   // бою она не рендерилась никогда. Вернуть — когда появится цель по
   // белку; поле оставлено в типе как метка.
-  // «Ещё N стаканов до цели» бывает только когда цель есть.
+  // «Ещё N стаканов до нормы» бывает только когда норма есть.
+  //
+  // «До нормы», не «до цели»: решение владельца 11.09.2026 §5.2 — Goal это
+  // желаемый результат, Habit — повторяющееся действие внутри плана,
+  // PlanStep — конкретное действие; привычка или действие не создают
+  // отдельную Goal. Стакан воды — шаг, норма воды — его мера. Назвать её
+  // целью значило бы завести человеку вторую цель, которой он не ставил.
   const waterRemaining =
     waterKnown && waterTargetKnown ? Math.max(0, waterTarget - waterEaten) : 0;
   const showTodayGoals = waterRemaining > 0;
@@ -598,14 +605,14 @@ export function CustomerWellnessDashboardScreen() {
           )}
         </section>
 
-        {/* Block 4 — Цели сегодня (text actions). */}
+        {/* Block 4 — Шаги на сегодня (text actions). */}
         {showTodayGoals && today.kind === "ok" && (
           <section
             className="wellness-dash__today-goals"
             aria-labelledby="tg-header"
           >
             <h2 id="tg-header" className="wellness-dash__section-header">
-              Цели сегодня
+              Шаги на сегодня
             </h2>
             <ul className="wellness-dash__goal-list">
               {waterRemaining > 0 && (
@@ -613,7 +620,7 @@ export function CustomerWellnessDashboardScreen() {
                   <span aria-hidden="true">💧</span>{" "}
                   <span>
                     Ещё {waterRemaining}{" "}
-                    {ruPluralWater(waterRemaining)} до цели
+                    {ruPluralWater(waterRemaining)} до нормы
                   </span>
                 </li>
               )}
@@ -944,7 +951,7 @@ function PulseStrip({ data }: { data: WellnessToday }) {
           </>
         ) : waterKnown ? (
           /* Норма не известна — показываем ровно то, что знаем: сколько
-             выпито. Ни шкалы, ни процентов, ни точек «до цели»: всё это
+             выпито. Ни шкалы, ни процентов, ни точек «до нормы»: всё это
              считается ОТ цели, а цели нет. Формулировка — из макета
              §Cold-start: «0 стаканов сегодня». */
           <div className="wellness-dash__pulse-numbers">

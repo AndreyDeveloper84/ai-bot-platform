@@ -37,7 +37,6 @@ from apps.catalog.models import CatalogMaster, CatalogService
 from apps.tenancy.onboarding import (
     REASON_MASTERS_AWAIT_VERIFICATION,
     REASON_NO_BOOKABLE_MASTERS,
-    BackendProbe,
     ConnectResult,
     assess_salon,
 )
@@ -112,7 +111,7 @@ def _render_connect_result(client: Client, tenant: Tenant, monkeypatch) -> str:
     """
     result = ConnectResult(
         tenant=tenant,
-        probe=BackendProbe(services=1, specialists=9),
+        created_in_ayla=False,
         sync_error=None,
         sync_skipped=False,
         assessment=assess_salon(tenant),
@@ -123,7 +122,6 @@ def _render_connect_result(client: Client, tenant: Tenant, monkeypatch) -> str:
         {
             "slug": tenant.slug,
             "name": tenant.name,
-            "tenant_id": str(tenant.pk),
             "city": tenant.city,
         },
         follow=True,

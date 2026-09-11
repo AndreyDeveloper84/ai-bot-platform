@@ -127,8 +127,26 @@ _DEFAULT_PATTERNS: dict[str, list[str]] = {
         r"(?i)(\bизбива|\bнасили|\babuse\b|\bbattered\b)",
     ],
     SafetyVerdict.BLOCK.value: [
-        # Specific drug names (recommend → block)
-        r"(?i)\b(ибупрофен|анальгин|парацетамол|кеторол|tramadol|opioid)\b",
+        # Owner decision 11.09 §3, verbatim: «Простое упоминание лекарства не
+        # является автоматическим STOP; запрос подобрать препарат, дозировку
+        # или схему — STOP». Until 11.09 the bare word was enough — «вчера
+        # выпила ибупрофен, можно на массаж?» was refused as if it asked for
+        # a prescription. Two lookaheads, order-free: the message must ASK
+        # (pick / advise / dose / how to take / what to take) AND name a
+        # drug or a drug noun. «подберите обезболивающее» is STOP with no
+        # brand named; «принимаю парацетамол, это помешает?» is not. Bare
+        # mention is NORMAL, not CAUTION: CAUTION has 0 rules by §126 and
+        # giving it its first one is the owner's act, not this patch's.
+        r"(?is)(?=.*\b(подбер\w*|подобра\w*|посовет\w*|порекоменд\w*|назнач\w*"
+        r"|дай(те)?|выпиш\w*|пропиш\w*|дозир\w*|доз[ауы]"
+        r"|сколько\s+(таблет\w*|мг|миллиграм\w*|раз\s+в\s+день)"
+        r"|схем\w*\s+(при[её]ма|лечения)|как\s+(принимать|пить|колоть)"
+        r"|что\s+(принять|выпить|попить|поколоть)"
+        r"|как[ойуюие]+\s+(препарат\w*|лекарств\w*|таблет\w*|обезболивающ\w*)"
+        r"|recommend|prescribe|dosage|how\s+much|what\s+to\s+take|should\s+i\s+take)\b)"
+        r"(?=.*\b(ибупрофен\w*|анальгин\w*|парацетамол\w*|кеторол\w*|tramadol|opioid\w*"
+        r"|препарат\w*|лекарств\w*|таблет\w*|обезболивающ\w*|антибиотик\w*"
+        r"|painkiller\w*|medication\w*|pills?)\b)",
         # Diagnosis requests with definitive words
         r"(?i)\b(поставьте диагноз|diagnose me|у меня (рак|онколог))",
         # Legal advice
