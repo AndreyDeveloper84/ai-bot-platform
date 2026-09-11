@@ -20,6 +20,8 @@ from unittest.mock import patch
 
 import pytest
 
+from opentelemetry import trace
+
 from apps.observability import otel
 
 
@@ -88,13 +90,41 @@ class TestConfigureOtel:
         assert captured.get("insecure") is True
 
     def test_sample_rate_threaded_through(self, settings: Any) -> None:
-        """OTEL_TRACES_SAMPLE_RATE setting propagates into the sampler."""
+        """OTEL_TRACES_SAMPLE_RATE setting propagates into the sampler.
+
+        DRF-1697: ``TraceIdRatioBased`` is mocked here to return a bare
+        float instead of a real sampler, purely so the assertion below can
+        read the argument it was called with. ``configure_otel`` still
+        calls ``trace.set_tracer_provider`` with a ``TracerProvider`` built
+        on top of that broken sampler — and ``set_tracer_provider`` is a
+        process-global one-shot in the OTel API, so letting that call
+        through would leave a permanently broken provider installed for
+        every other test in this pytest worker (see
+        apps/observability/tests/test_sentry.py::TestScrubEvent::
+        test_tags_attached_for_otel_context, which starts a real span and
+        blew up with "'float' object has no attribute 'should_sample'"
+        when it ran after this test with the SDK global untouched).
+        `trace.set_tracer_provider` is mocked too so the real global
+        provider is never touched, and the before/after comparison below
+        is a belt-and-braces guard against a regression here reintroducing
+        the leak.
+        """
         settings.OTEL_EXPORTER_OTLP_ENDPOINT = ""
         settings.OTEL_TRACES_SAMPLE_RATE = 0.25
 
+        provider_before = trace.get_tracer_provider()
         captured: dict[str, Any] = {}
-        with patch("opentelemetry.sdk.trace.sampling.TraceIdRatioBased") as mock_ratio:
+        with (
+            patch("opentelemetry.sdk.trace.sampling.TraceIdRatioBased") as mock_ratio,
+            patch("opentelemetry.trace.set_tracer_provider") as mock_set_provider,
+        ):
             mock_ratio.side_effect = lambda rate: captured.setdefault("rate", rate)
             otel.configure_otel()
 
         assert captured.get("rate") == 0.25
+        # configure_otel() did call through to set_tracer_provider() with a
+        # provider built on the mocked (broken) sampler...
+        mock_set_provider.assert_called_once()
+        # ...but because that call was mocked, the process-global provider
+        # was never actually replaced.
+        assert trace.get_tracer_provider() is provider_before

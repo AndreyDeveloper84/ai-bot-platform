@@ -255,10 +255,21 @@ NO_TARGETS_TEXT = (
     "как раньше."
 )
 
-#: ``targets_provenance.source`` каталога, при котором хвост добавляется.
-#: ``unknown_legacy`` (строки до очистки) и ``ayla_calculated`` /
-#: ``user_entered`` его не получают: у них ориентиры печатаются числами.
-_TARGETS_SOURCE_NONE = "none"
+#: Хвост добавляется, когда ориентиры НЕ НАСТРОЕНЫ — §6 свода 11.09
+#: (OD-NUT-1): ``none`` и ``unknown_legacy`` оба. Раньше хвост получал
+#: только ``none``, а ``unknown_legacy`` печатался числами — «Белки: 61
+#: из 95 г» у всех шести профилей пилота, у двух от подставленных 70 кг.
+#: Сами числа теперь до сюда не доезжают: граница читает их как ``None``;
+#: здесь решается лишь, объяснять ли человеку, почему их нет.
+#:
+#: Текст один на оба состояния намеренно: «считаю только с согласия на
+#: персональный расчёт, а его пока не было» — правда и для снятых, и для
+#: посчитанных до того, как согласие такого вида существовало. Второй
+#: текст был бы вторым источником истины об одном факте.
+#:
+#: Самого имени источника здесь больше нет: вопрос «настроено ли» задаётся
+#: DTO (``ProfileResponse.targets_are_configured``), а не сравнением строк
+#: на каждом экране.
 
 
 # ---------------------------------------------------------------------------
@@ -481,20 +492,22 @@ def _render_today(bot_user: Any, profile: Any) -> DiscoveryReply:
     text = render_daily_report(summary, water, profile, include_opt_out=False, include_entries=True)
     if profile is None:
         text = f"{text}\n\n{NO_PROFILE_TEXT}"
-    elif _targets_cleared(profile):
+    elif _targets_not_configured(profile):
         text = f"{text}\n\n{NO_TARGETS_TEXT}"
     return _reply(text, _diary_chips(profile))
 
 
-def _targets_cleared(profile: Any) -> bool:
-    """True when the catalog says the targets were cleared — and only then.
+def _targets_not_configured(profile: Any) -> bool:
+    """True when the targets have no named provenance — §6 ``NOT_CONFIGURED``.
 
     Three inputs, two outcomes:
 
-    * ``"none"`` — the catalog cleared the targets (DRF-1623 N-b) → the
-      person is told why;
-    * ``"unknown_legacy"`` / ``"ayla_calculated"`` / ``"user_entered"`` —
-      numbers are still printed, nothing to explain → no tail;
+    * ``"none"`` (cleared, DRF-1623 N-b) and ``"unknown_legacy"`` (computed
+      before provenance existed) — not configured → the person is told
+      why. The numbers themselves never reach this function: the client
+      boundary already reads them as ``None`` for both (§6 OD-NUT-1);
+    * ``"ayla_calculated"`` / ``"user_entered"`` — configured → numbers
+      are printed, nothing to explain → no tail;
     * ``""`` — the key did not arrive. That is a broken contract (the
       catalog declares the block required since #316), not an absent
       target, and the tail must not be manufactured from it: warn once
@@ -504,14 +517,13 @@ def _targets_cleared(profile: Any) -> bool:
     # ``ProfileResponse`` and a default here would be a third «absence»
     # indistinguishable from the client's own ``""``.
     source = str(profile.targets_source or "")
-    if source == _TARGETS_SOURCE_NONE:
-        return True
     if not source:
         logger.warning(
             "orchestrator.personal_surface.targets_source_missing: "
             "profile arrived without targets_provenance.source"
         )
-    return False
+        return False
+    return not profile.targets_are_configured
 
 
 def _render_week(bot_user: Any, profile: Any) -> DiscoveryReply:
@@ -549,14 +561,19 @@ def _render_week(bot_user: Any, profile: Any) -> DiscoveryReply:
 def _diary_chips(profile: Any) -> list[dict[str, str]]:
     """Chips for a diary view. Each callback is claimed deterministically.
 
-    Without a profile the anketa IS the next step — the diary has nothing to
-    be measured against until it exists, and today nothing anywhere offers
-    it: a person has to guess that ``/anketa`` is a command. With a profile,
-    the one-tap water log is the cheapest real thing the person can do next.
+    §6 свода 11.09 (OD-NUT-1): анкета не блокирует дневник и запрашивается
+    по функции, а не на входе. Вода — одним тапом — предлагается ВСЕГДА:
+    самое дешёвое настоящее действие, не требует ни профиля, ни ориентиров
+    (каталог для записи профиль не спрашивает). Анкета — вторым чипом,
+    когда ориентиры не настроены (нет профиля, ``none``, ``unknown_legacy``):
+    это «предложение настроить ориентиры» из §6 — рядом с действием, а не
+    вместо него. Раньше без профиля чип был один, анкета, и этот докстринг
+    говорил «the anketa IS the next step». §6 говорит обратное.
     """
-    if profile is None:
-        return [dict(CHIP_ANKETA)]
-    return [dict(CHIP_WATER)]
+    chips = [dict(CHIP_WATER)]
+    if profile is None or not profile.targets_are_configured:
+        chips.append(dict(CHIP_ANKETA))
+    return chips
 
 
 # ---------------------------------------------------------------------------
