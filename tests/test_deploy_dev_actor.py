@@ -114,29 +114,36 @@ def test_the_actor_is_resolved_on_the_host_not_on_the_runner(
     )
 
 
-def test_both_container_runs_write_as_the_deploy_user(steps: list[dict]) -> None:
-    """``--user`` у ОБОИХ вызовов ``run --rm``, а не только у пишущего.
+def test_every_container_process_carries_user(steps: list[dict]) -> None:
+    """``--user`` у КАЖДОГО ``run --rm`` и ``exec`` compose, не только у пишущих.
 
-    ``migrate`` сегодня в дерево не пишет, и строка у него выглядит лишней.
-    Она не лишняя: канал, оставленный открытым, — это тот самый случай,
-    когда чинят запись и оставляют чтение.
+    ``sudo -u`` на хосте решает, кто позвал клиента docker; кто работает
+    ВНУТРИ контейнера и чьим uid ложатся файлы в примонтированное дерево,
+    решает только ``--user``. Два механизма на разные предметы (#1586).
+
+    Прежняя редакция пинила ``run --rm`` и не видела ``exec``. Дыру нашёл
+    #1592 (11.09.2026): шаг с ``exec -T web python manage.py … --write`` под
+    безупречным ``sudo -u … -H`` — и записал бы root-овый файл в дерево
+    владельца. Сторож на ``run --rm`` был зелёным, потому что ``exec`` не
+    ``run``. Стережётся класс — процесс в контейнере, — а не одна подкоманда.
+
+    ``migrate`` и ``smoke_alert`` в дерево не пишут, и строка у них выглядит
+    лишней. Она не лишняя: правило без исключений проверяемо, а правило с
+    исключением требует, чтобы сторож знал, какие команды пишут, — знание,
+    которое устаревает молча.
     """
-    # Комментарии отбрасываются. Первая версия этого сторожа считала
-    # командами строки «run --rm web uses the freshly built image» и
-    # «\`run --rm web\` берёт СВЕЖЕСОБРАННЫЙ образ» — то есть читала рассказ
-    # о коде вместо кода. Дефект был в стороже, и починен сторож.
-    runs = []
-    for step in steps:
-        for line in (step.get("run") or "").splitlines():
-            bare = line.strip().lstrip("\\")
-            if bare.startswith("#"):
-                continue
-            if "run --rm" in bare:
-                runs.append(bare)
+    # Строки склеиваются по продолжению: ``exec -T`` стоит в одной строке,
+    # ``--user`` может стоять в следующей — команда одна.
+    procs = [
+        ln
+        for step in steps
+        for ln in logical_lines(step)
+        if "docker compose" in ln and (" run --rm" in ln or " exec " in ln)
+    ]
 
-    assert len(runs) >= 2, f"вызовов run --rm найдено {len(runs)} — ищу не там"
-    without = [r for r in runs if "--user" not in r]
-    assert without == [], f"контейнер запишет файлы от root: {without}"
+    assert len(procs) >= 3, f"процессов в контейнере найдено {len(procs)} — ищу не там"
+    without = [p for p in procs if "--user" not in p]
+    assert without == [], f"процесс в контейнере пойдёт от uid образа, не владельца: {without}"
 
 
 def test_the_long_lived_services_are_not_switched_to_another_user() -> None:

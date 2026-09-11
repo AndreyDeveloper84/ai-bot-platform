@@ -436,11 +436,22 @@ jobs:
             # чтобы сторож знал, какие подкоманды docker пишут, а какие нет
             # — а это знание устаревает молча.
             OWNER=\$(stat -c %U '${DEV_DEPLOY_PATH}')
-            [ -n \"\$OWNER\" ] || { echo \"::error::владелец дерева не определён\"; exit 1; }
+            OWNER_UID=\$(stat -c %u '${DEV_DEPLOY_PATH}')
+            OWNER_GID=\$(stat -c %g '${DEV_DEPLOY_PATH}')
+            [ -n \"\$OWNER\" ] && [ -n \"\$OWNER_UID\" ] && [ -n \"\$OWNER_GID\" ] || { echo \"::error::владелец дерева не определён\"; exit 1; }
+            # --user и на exec: sudo -u решает, кто позвал клиента docker, а
+            # кто работает ВНУТРИ контейнера — решает только --user. Этот
+            # вызов в дерево не пишет, но правило одно на все run/exec:
+            # #1592 был написан с exec без --user и записал бы root-овый
+            # файл в дерево владельца — класс, который сторож на run --rm
+            # не видел. Допущение, названное прямо: uid владельца внутри
+            # образа для manage.py не проверен на пилоте живьём; шаг стоит
+            # под || true, и если допущение ложно — это предупреждение,
+            # а не упавшая выкладка.
             sudo -u \"\$OWNER\" -H docker compose --env-file .env.staging \
               -f docker-compose.yml -f docker-compose.staging.yml \
               -f docker-compose.staging.local.yml \
-              -p ayla-bot-staging exec -T web \
+              -p ayla-bot-staging exec -T --user \"\$OWNER_UID:\$OWNER_GID\" web \
               python manage.py smoke_alert --severity=warning \
               --title='dev deploy' --body='${SHA}' || true
           "
