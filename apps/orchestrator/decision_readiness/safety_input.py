@@ -34,6 +34,8 @@ safety question. Records carrying it are still separable in the audit by
 
 from __future__ import annotations
 
+from datetime import datetime
+
 from dataclasses import dataclass, field
 from enum import Enum
 
@@ -50,6 +52,13 @@ class SafetyState(str, Enum):
     CAUTION = "caution"
     STOP = "stop"
     UNKNOWN = "unknown"
+    #: Свод владельца 11.09 §3: capability не принимает safety-sensitive
+    #: решения, и проверка к ней не относится. Это ОТВЕТ, а не отсутствие
+    #: ответа: он определяется capability (см. `not_applicable_for`), а не
+    #: тем, что поле не пришло — не пришло есть `UNKNOWN`. И он никогда не
+    #: превращается в «проверка пройдена»: `ELIG_SAFETY_CLEARED` выдаётся
+    #: только за `NORMAL`, и движок это стережёт.
+    NOT_APPLICABLE = "not_applicable"
 
 
 class Handoff(str, Enum):
@@ -75,7 +84,17 @@ class Handoff(str, Enum):
 
 
 KNOWN_SAFETY_STATES: frozenset[SafetyState] = frozenset(
-    {SafetyState.NORMAL, SafetyState.CLARIFY, SafetyState.CAUTION, SafetyState.STOP}
+    {
+        SafetyState.NORMAL,
+        SafetyState.CLARIFY,
+        SafetyState.CAUTION,
+        SafetyState.STOP,
+        # Известное: кто-то (capability) ответил. Не путать с `UNKNOWN` —
+        # «никто не ответил». Оба не выдают `ELIG_SAFETY_CLEARED`, но по
+        # разным причинам: второй блокирует, первый идёт обычным путём без
+        # заявления о пройденной проверке (§3).
+        SafetyState.NOT_APPLICABLE,
+    }
 )
 
 
@@ -102,6 +121,17 @@ class SafetyResult:
     policy_version: str | None = None
     required_slots: tuple[str, ...] = ()
     forbidden_capabilities: tuple[str, ...] = ()
+    #: §3: `NOT_APPLICABLE` определяется capability, не отсутствием поля. Это
+    #: имя той capability, которая заявила, что проверка к ней не относится.
+    #: Обязательно при `NOT_APPLICABLE`, запрещено при любом другом состоянии:
+    #: заявление без заявителя было бы ровно «отсутствием поля».
+    not_applicable_for: str | None = None
+    #: §3: safety-контекст между ходами несёт `activated_at` — стенные часы
+    #: момента, когда вердикт вступил в силу. Это ЕДИНСТВЕННОЕ поле с часами
+    #: на этом типе, и оно НЕ входит в `digest_fields()`: ключ идемпотентности
+    #: с часами делает два одинаковых решения разными при всех зелёных
+    #: проверках. Часы здесь — для истечения и отчёта, не для тождества.
+    activated_at: datetime | None = None
 
     @classmethod
     def not_evaluated(cls) -> SafetyResult:
@@ -131,6 +161,22 @@ class SafetyResult:
                 "a verdict that was never computed cannot promise a next step: "
                 f"state={self.state.value} with handoff={self.handoff.value}"
             )
+        if self.state is SafetyState.NOT_APPLICABLE and not self.not_applicable_for:
+            raise ValueError(
+                "SafetyResult(not_applicable) without `not_applicable_for`. §3: "
+                "NOT_APPLICABLE определяется capability, а не отсутствием поля — "
+                "заявление без заявителя и есть отсутствие поля, то есть UNKNOWN."
+            )
+        if self.state is not SafetyState.NOT_APPLICABLE and self.not_applicable_for:
+            raise ValueError(
+                f"SafetyResult({self.state.value}) carries not_applicable_for="
+                f"{self.not_applicable_for!r}: only NOT_APPLICABLE names a capability."
+            )
+        if self.state not in KNOWN_SAFETY_STATES and self.activated_at is not None:
+            raise ValueError(
+                "a verdict that was never computed has no moment it took effect: "
+                f"state={self.state.value} with activated_at={self.activated_at.isoformat()}"
+            )
 
     @property
     def is_known(self) -> bool:
@@ -156,6 +202,10 @@ class SafetyResult:
             self.policy_version or "",
             ",".join(sorted(self.required_slots)),
             ",".join(sorted(self.forbidden_capabilities)),
+            # Кто заявил неприменимость — часть содержания решения: две
+            # capability, заявившие одно и то же, дали два разных решения.
+            self.not_applicable_for or "",
+            # `activated_at` НЕ входит намеренно. См. поле.
         )
 
 

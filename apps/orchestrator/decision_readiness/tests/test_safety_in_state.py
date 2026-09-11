@@ -27,7 +27,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -308,22 +308,68 @@ def test_the_payload_carries_exactly_the_declared_keys() -> None:
     assert set(encoded["safety"]) == set(state_mod._SAFETY_CODEC_FIELDS)
 
 
-def test_no_wall_clock_reaches_the_safety_payload() -> None:
-    """Времени в этом ключе нет, и это не вкусовщина.
+def test_wall_clock_lives_only_in_activated_at_and_never_in_the_digest() -> None:
+    """Стенные часы разрешены ровно в одном поле — и не в ключе идемпотентности.
 
-    Отметка стенных часов, попавшая в вердикт, делает два одинаковых решения
-    разными — и идемпотентность исчезает **при всех зелёных проверках**, потому
-    что ключи и обязаны различаться, когда вход различен. Механизм работает
-    ровно наоборот и выглядит работающим.
+    ### Чем снята прежняя форма
 
-    Провенанс по времени остаётся у производителя и в состояние не едет.
+    Здесь стоял запрет на любое поле с часами в payload вердикта. Его снял
+    **свод владельца 2026-09-11 §3**: safety-контекст между ходами обязан нести
+    `activated_at`. Слово владельца старше довода исполнителя, и сторож
+    переворачивается вслух — с указанием, чем снят, — а не молча удаляется.
+
+    ### Что от прежнего довода остаётся, и он остаётся целиком
+
+    Довод был не «часов не должно быть», а «часов не должно быть **в ключе
+    идемпотентности**»: время в дайджесте делает два одинаковых решения
+    разными, и идемпотентность исчезает при всех зелёных проверках, потому что
+    ключи и обязаны различаться, когда вход различен. Механизм работает ровно
+    наоборот и выглядит работающим.
+
+    Поэтому сторож сужается, а не снимается:
+
+        payload   часы разрешены ТОЛЬКО в activated_at
+        digest    часов нет вовсе — два вердикта, различающиеся только
+                  activated_at, обязаны дать один дайджест
     """
-    state = ConversationState(conversation_id="c", revision=1).with_safety(_verdict(revision=1))
-    encoded = json.loads(state_mod._encode(state))
+    at = datetime(2026, 9, 11, 14, 30, tzinfo=UTC)
+    verdict = SafetyResult(
+        state=SafetyState.CLARIFY,
+        evaluated_at_revision=1,
+        handoff=Handoff.RECOMMENDED,
+        activated_at=at,
+    )
+    encoded = json.loads(
+        state_mod._encode(ConversationState(conversation_id="c", revision=1).with_safety(verdict))
+    )
 
     assert "safety" in encoded, "вердикт не записан — проверять в нём нечего"
-    clockish = [key for key in encoded["safety"] if "_at" in key and key != "evaluated_at_revision"]
-    assert clockish == [], f"в вердикт заехали часы: {clockish}"
+    clockish = [k for k in encoded["safety"] if "_at" in k and k != "evaluated_at_revision"]
+    assert clockish == ["activated_at"], f"часы вне разрешённого поля: {clockish}"
+    # Положительный контроль: часы действительно доехали до payload, а не
+    # потерялись — иначе «только в activated_at» выполнялось бы и пустотой.
+    assert encoded["safety"]["activated_at"] == at.isoformat()
+
+    later = SafetyResult(
+        state=SafetyState.CLARIFY,
+        evaluated_at_revision=1,
+        handoff=Handoff.RECOMMENDED,
+        activated_at=at + timedelta(hours=3),
+    )
+    assert verdict.digest_fields() == later.digest_fields(), (
+        "activated_at попал в ключ идемпотентности: два одинаковых решения "
+        "с разным временем активации стали разными"
+    )
+    # И обратный контроль, чтобы «дайджесты равны» не означало «дайджест пуст»:
+    # содержательное различие обязано менять дайджест.
+    other_rule = SafetyResult(
+        state=SafetyState.CLARIFY,
+        evaluated_at_revision=1,
+        handoff=Handoff.RECOMMENDED,
+        rule_id="pre_check.regex:other",
+        activated_at=at,
+    )
+    assert verdict.digest_fields() != other_rule.digest_fields()
 
 
 # ─── the tolerance carries its own measure ──────────────────────────────────
