@@ -103,11 +103,16 @@ def _as_uuid(value: object) -> uuid.UUID | None:
         return None
 
 
-def _persist(bot_user: "BotUser", resolved: uuid.UUID) -> tuple[int, int]:
-    """Blank-fill ``resolved`` across the person's shells.
+def _persist(bot_user: "BotUser", resolved: uuid.UUID, *, is_proxy: bool) -> tuple[int, int]:
+    """Blank-fill ``resolved`` across the person's shells, with its sort.
 
     Returns ``(rows_updated, rows_conflicting)``. Rows that already hold
     ``resolved`` are neither updated nor counted as conflicts.
+
+    DRF-1649 — ``is_proxy`` travels in the **same** ``save()`` as the key. A
+    sort that could be written separately would add a fourth state, "key
+    present, sort pending", and a consumer meeting it would have to guess
+    exactly the thing this column exists to stop it guessing.
     """
     shells = BotUser.all_tenants.filter(
         channel=bot_user.channel,
@@ -120,7 +125,10 @@ def _persist(bot_user: "BotUser", resolved: uuid.UUID) -> tuple[int, int]:
         current = _as_uuid(shell.ayla_user_id)
         if current is None:
             shell.ayla_user_id = resolved
-            shell.save(update_fields=["ayla_user_id"])
+            shell.ayla_user_id_is_proxy = is_proxy
+            # One save, both columns. See the docstring: two saves would make
+            # "key present, sort pending" reachable.
+            shell.save(update_fields=["ayla_user_id", "ayla_user_id_is_proxy"])
             rows_updated += 1
         elif current != resolved:
             # Never overwrite. Two distinct ids on one person is an
@@ -134,6 +142,7 @@ def _persist(bot_user: "BotUser", resolved: uuid.UUID) -> tuple[int, int]:
     # turn) sees the link without a refetch.
     if _as_uuid(bot_user.ayla_user_id) is None:
         bot_user.ayla_user_id = resolved
+        bot_user.ayla_user_id_is_proxy = is_proxy
 
     return rows_updated, rows_conflicting
 
@@ -219,7 +228,9 @@ def ensure_ayla_link(bot_user: "BotUser", *, trigger: str = "unknown") -> uuid.U
     )
 
     try:
-        rows_updated, rows_conflicting = _persist(bot_user, identity.ayla_user_id)
+        rows_updated, rows_conflicting = _persist(
+            bot_user, identity.ayla_user_id, is_proxy=identity.is_proxy
+        )
     except Exception:  # noqa: BLE001 — a persistence failure must not lose the turn
         # The id itself is still valid and usable for THIS action; the
         # next call will simply resolve again. Returning it is strictly
