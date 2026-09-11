@@ -66,11 +66,11 @@ class _StubClient:
         self.context = context or {}
         self.calls: list[tuple] = []
 
-    def get_context(self, *, ayla_user_id: str):
+    def get_context(self, *, ayla_user_id: str, external_user_id: str):
         self.calls.append(("get", ayla_user_id))
         return DeclaredContext(ayla_user_id=ayla_user_id, context=dict(self.context))
 
-    def patch_context(self, *, ayla_user_id: str, updates: list):
+    def patch_context(self, *, ayla_user_id: str, external_user_id: str, updates: list):
         self.calls.append(("patch", ayla_user_id, updates))
         return DeclaredContext(ayla_user_id=ayla_user_id, context=dict(self.context))
 
