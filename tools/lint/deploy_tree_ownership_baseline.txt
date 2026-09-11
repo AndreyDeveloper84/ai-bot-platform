@@ -14,6 +14,20 @@
 # path is not an address. What settles it is asking the live contour where it
 # was launched from (`docker inspect ... project.working_dir`) plus DNS.
 #
+# ─── PROVISIONAL. These numbers are scheduled to become wrong. ──────────────
+#
+# Measured while the cause is still live. DRF-1646's source fix (#1581 — derive
+# the container uid from the tree instead of from the caller) has not landed
+# here yet. When it does, and the leftover root-owned files are removed, this
+# count drops and MUST be re-measured — after that deploy, not before.
+#
+# Do not read 298 as a target or as "the normal amount". It is the size of a
+# leak that is being closed. A ratchet frozen on a number we are actively
+# removing would read as a repair, which is the opposite of what it is.
+#
+# Until re-measured, a shrinking count here is expected and means the fix is
+# working — not that someone should quietly lower the numbers and move on.
+#
 # ─── THIS IS A RATE, NOT A BACKLOG. Read before comparing. ──────────────────
 #
 # The numbers below are NOT accumulated damage. The tree was repaired to clean
