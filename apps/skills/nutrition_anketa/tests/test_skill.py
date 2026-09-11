@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from unittest.mock import Mock, patch
 
+from apps.consent.personal_calculation import ConsentAttestation
 from apps.integrations.ayla import (
     NutritionUnavailableError,
     ProfileResponse,
@@ -74,6 +75,20 @@ def _profile(
         disclaimer_acked=None,
         goal_overridden_by=goal_overridden_by,
     )
+
+
+#: DRF-1658: с этого PR тело POST профиля не собирается без утверждения о
+#: согласии (граница каталога #324). Тесты, доходящие до POST, объявляют
+#: предусловие «согласие на расчёт дано, версия такая-то» явно — а не
+#: через autouse, чтобы было видно, какой тест зависит от согласия.
+_ATTESTATION = ConsentAttestation(
+    type="personal_calculation", document_version="personal-calculation-v1"
+)
+_ATTESTATION_LOOKUP = "apps.consent.personal_calculation.current_attestation"
+
+
+def _consent_granted():
+    return patch(_ATTESTATION_LOOKUP, return_value=_ATTESTATION)
 
 
 # ─── matches ──────────────────────────────────────────────────────────────
@@ -156,9 +171,12 @@ class TestFullWalk:
                 message_text=text,
             )
 
-        with patch(
-            "apps.skills.nutrition_anketa.skill.get_nutrition_client",
-            return_value=client,
+        with (
+            patch(
+                "apps.skills.nutrition_anketa.skill.get_nutrition_client",
+                return_value=client,
+            ),
+            _consent_granted(),
         ):
             skill = NutritionAnketaSkill()
 
@@ -202,6 +220,11 @@ class TestFullWalk:
             "weight_kg": 62,
             "goal": "maintain",
             "activity_coefficient": 1.4,
+            # DRF-1658: утверждение о согласии в форме границы #324.
+            "consent": {
+                "type": "personal_calculation",
+                "document_version": "personal-calculation-v1",
+            },
         }
         assert captured[0]["external_user_id"] == "bot:max:12345"
 
@@ -321,9 +344,12 @@ class TestErrorPaths:
 
         client.upsert_profile = _upsert
 
-        with patch(
-            "apps.skills.nutrition_anketa.skill.get_nutrition_client",
-            return_value=client,
+        with (
+            patch(
+                "apps.skills.nutrition_anketa.skill.get_nutrition_client",
+                return_value=client,
+            ),
+            _consent_granted(),
         ):
             result = NutritionAnketaSkill().handle(ctx)
 
