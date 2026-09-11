@@ -27,7 +27,7 @@ from apps.orchestrator.decision_readiness import reason_codes as rc
 from apps.orchestrator.decision_readiness import required_context as rq
 from apps.orchestrator.decision_readiness import resume as res
 from apps.orchestrator.decision_readiness import state as state_mod
-from apps.orchestrator.decision_readiness.safety_input import SafetyResult, SafetyState
+from apps.orchestrator.decision_readiness.safety_input import Handoff, SafetyResult, SafetyState
 from apps.orchestrator.decision_readiness.state import ConversationState, StateLifecycle
 from apps.orchestrator.decision_readiness.tests.conftest import calibrated_policy, make_input
 from apps.orchestrator.decision_readiness.tests.fakes import FakeRedis
@@ -96,7 +96,9 @@ def _turn_after_the_gap(
         make_input(
             state_revision=9,
             state=ConversationState(conversation_id="conv-9", revision=9),
-            safety=SafetyResult(state=SafetyState.NORMAL, evaluated_at_revision=9),
+            safety=SafetyResult(
+                state=SafetyState.NORMAL, evaluated_at_revision=9, handoff=Handoff.NONE
+            ),
             required_context_spec=_spec(),
             catalog=q.QuestionCatalog(entries=(_entry(),)),
             question_ledger=ledger,
@@ -287,7 +289,9 @@ def test_the_expiry_mechanism_is_named_and_reaches_the_audit() -> None:
     request = make_input(
         state_revision=9,
         state=ConversationState(conversation_id="conv-9", revision=9),
-        safety=SafetyResult(state=SafetyState.NORMAL, evaluated_at_revision=9),
+        safety=SafetyResult(
+            state=SafetyState.NORMAL, evaluated_at_revision=9, handoff=Handoff.NONE
+        ),
         required_context_spec=_spec(),
         catalog=q.QuestionCatalog(entries=(_entry(),)),
         question_ledger=ledger,
