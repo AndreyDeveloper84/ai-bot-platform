@@ -42,6 +42,8 @@
 from __future__ import annotations
 
 import pytest
+from django.db import connection
+from django.test.utils import CaptureQueriesContext
 from django.utils import timezone
 
 from apps.identity.models import BotUser
@@ -95,8 +97,66 @@ def test_the_tie_is_real_before_anything_is_asserted_about_it(
     assert first.last_seen == second.last_seen
 
 
+def _order_by_clause(sql: str) -> str:
+    head, _, tail = sql.partition("ORDER BY")
+    assert tail, f"в запросе нет ORDER BY вовсе: {sql}"
+    return tail
+
+
+def _botuser_select(captured) -> str:
+    """Тот единственный SELECT по botuser, в котором и решается порядок."""
+
+    rows = [
+        q["sql"]
+        for q in captured.captured_queries
+        if "identity_botuser" in q["sql"] and q["sql"].lstrip().upper().startswith("SELECT")
+    ]
+    assert rows, f"ни одного SELECT по botuser не перехвачено: {captured.captured_queries}"
+    return rows[-1]
+
+
+def test_the_resolver_asks_the_database_for_a_TOTAL_order(
+    tied_rows: tuple[BotUser, BotUser],
+) -> None:
+    """Порядок обязан доопределяться уникальным полем — это проверка по SQL.
+
+    ### Почему не «ответ повторился»
+
+    Здесь стоял тест «позвали дважды, получили то же самое». Он **проходил и
+    без тай-брейка**, и это выяснилось подменой: произвольный порядок бывает
+    устойчивым. Postgres при ничьей волен вернуть любую строку — но «волен» не
+    значит «каждый раз другую». На одном и том же плане, с холодной таблицей и
+    без перемещений он отдаёт одну и ту же, сколько ни спрашивай.
+
+    То есть повторяемость **наблюдаемая** не отличает «порядок полный» от
+    «порядок произвольный, но сегодня стабильный». Сторож, зелёный на сломанном
+    коде, — не сторож.
+
+    Проверяемое утверждение здесь не про сегодняшний ответ, а про **обещание**,
+    которое запрос даёт базе: в `ORDER BY` должно стоять поле, уникальное по
+    строке. Тогда ответ один и тот же не потому, что повезло, а потому, что
+    другого быть не может.
+    """
+    with CaptureQueriesContext(connection) as captured:
+        resolved = resolve_bot_user(_Verified(CHANNEL_USER_ID), surface="probe")
+
+    assert resolved is not None, "резолвер никого не нашёл — проверять порядок не в чем"
+    order_by = _order_by_clause(_botuser_select(captured))
+
+    assert '"id"' in order_by, (
+        "ORDER BY не доопределён уникальным полем: "
+        f"{order_by.strip()!r}. При равном last_seen Postgres вправе вернуть "
+        "любую из строк — и вправе вернуть в следующий раз другую."
+    )
+
+
 def test_resolution_repeats_itself_on_a_tie(tied_rows: tuple[BotUser, BotUser]) -> None:
-    """Один и тот же вход — один и тот же ответ, дважды подряд."""
+    """Наблюдаемая половина того же: дважды подряд — один ответ.
+
+    Слабее предыдущего и сама по себе ничего не доказывает (см. его докстринг).
+    Оставлена потому, что проверяет другое: что обещание из `ORDER BY`
+    действительно доезжает до ответа, а не остаётся в тексте запроса.
+    """
     once = resolve_bot_user(_Verified(CHANNEL_USER_ID), surface="probe")
     twice = resolve_bot_user(_Verified(CHANNEL_USER_ID), surface="probe")
 
@@ -158,8 +218,17 @@ def test_reminder_routing_repeats_itself_on_a_tie(settings) -> None:
     seen = {row.last_seen for row in rows}
     assert len(seen) == 1, "ничья не построена — стеречь нечего"
 
-    once = _reminder_row(tenant=tenant, user_id=ayla_user_id)
+    with CaptureQueriesContext(connection) as captured:
+        once = _reminder_row(tenant=tenant, user_id=ayla_user_id)
     assert once is not None, "напоминание некому маршрутизировать — стеречь нечего"
+
+    order_by = _order_by_clause(_botuser_select(captured))
+    assert '"id"' in order_by, (
+        "маршрутизация напоминания просит у базы неполный порядок: "
+        f"{order_by.strip()!r}. Пара (tenant, ayla_user_id) неуникальна ПО "
+        "ПОСТРОЕНИЮ — по строке на канал, — значит ничья здесь ожидаема, а не "
+        "редка, и напоминание может уйти сегодня в один канал, завтра в другой."
+    )
 
     BotUser.all_tenants.filter(pk=once.pk).update(chat_id="moved")
     rows.update(last_seen=tie)
