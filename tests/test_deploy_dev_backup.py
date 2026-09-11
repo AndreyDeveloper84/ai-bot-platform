@@ -250,3 +250,31 @@ def test_the_snapshot_file_is_written_by_the_owner_not_by_a_redirect(backup: dic
     assert '> \\"\$BACKUP_PATH' not in dump, (
         "файл снимка открывает перенаправлением вызывающая оболочка — root"
     )
+
+
+def test_the_snapshot_never_lands_inside_the_deploy_tree(backup: dict) -> None:
+    """Файл, написанный выкладкой внутрь репозитория, ломает следующую выкладку.
+
+    ``git checkout dev`` откажет на изменённом отслеживаемом файле, а
+    неотслеживаемый растёт без ротации. Так упал бы #1591 (11.09.2026):
+    шаг писал ``docs/SURFACE_STATE.md`` — отслеживаемый файл — в дерево.
+    Снимок базы больше и чаще, и ошибка та же по классу.
+
+    Дом владельца обычно сосед дерева. «Обычно» — не проверка: шаг обязан
+    отказать сам, если пути вложены, а сторож — пинить, что отказ на месте
+    и стоит ДО первой записи.
+    """
+    lines = [
+        ln.strip()
+        for ln in backup["run"].splitlines()
+        if not ln.strip().lstrip("\\").startswith("#")
+    ]
+    guard = next((i for i, ln in enumerate(lines) if "внутри дерева выкладки" in ln), -1)
+    first_write = next((i for i, ln in enumerate(lines) if "mkdir -p" in ln), -1)
+
+    assert guard != -1, "нет отказа на снимок внутри дерева выкладки"
+    assert first_write != -1, "шаг перестал создавать каталог — проверять нечего"
+    assert guard < first_write, f"проверка вложенности ({guard}) стоит ПОСЛЕ записи ({first_write})"
+    assert any("DEV_DEPLOY_PATH" in ln and "case" not in ln and "/*)" in ln for ln in lines), (
+        "проверка не сравнивает путь снимка с путём дерева выкладки"
+    )
