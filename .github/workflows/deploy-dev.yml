@@ -409,6 +409,42 @@ jobs:
             echo '::error::readyz red after 5 attempts — investigate dev deploy'; exit 1
           "
 
+      # DRF-1661. Состояние поверхности снимается КОМАНДОЙ после каждой
+      # выкладки и кладётся в дерево — не в репозиторий: файл есть вывод, а
+      # не источник, и коммит превратил бы замер во мнение. Шаг стоит ПОСЛЕ
+      # smoke: числа с контейнера, который не поднялся, — не числа.
+      #
+      # Пишет в дерево — значит от владельца дерева (sudo -u "$OWNER" -H),
+      # как остальные шаги (#1586); голых обратных кавычек в ssh-строке нет —
+      # они уже роняли выкладку (#1576), и на них стоит сторож.
+      #
+      # continue-on-error: сорвавшийся замер не откатывает выкладку, но и не
+      # прячется — шаг виден жёлтым, а ::warning:: — в сводке прогона.
+      - name: Publish surface state (bot) into the deploy tree
+        if: steps.guard.outputs.ready == 'true'
+        continue-on-error: true
+        env:
+          DEV_HOST: ${{ secrets.DEV_HOST }}
+          DEV_USER: ${{ secrets.DEV_USER }}
+          DEV_DEPLOY_PATH: ${{ secrets.DEV_DEPLOY_PATH }}
+        run: |
+          ssh -i ~/.ssh/dev_deploy "${DEV_USER}@${DEV_HOST}" bash -lc "
+            set -euo pipefail
+            echo \"::notice::шаг идёт от uid \$(id -u), gid \$(id -g)\"
+            cd '${DEV_DEPLOY_PATH}'
+            OWNER=\$(stat -c %U '${DEV_DEPLOY_PATH}')
+            [ -n \"\$OWNER\" ] || { echo \"::error::владелец дерева не определён\"; exit 1; }
+            if sudo -u \"\$OWNER\" -H docker compose --env-file .env.staging \
+              -f docker-compose.yml -f docker-compose.staging.yml \
+              -f docker-compose.staging.local.yml \
+              -p ayla-bot-staging exec -T web \
+              python manage.py surface_state --write docs/SURFACE_STATE.md >/dev/null; then
+              echo \"::notice::surface_state (bot): записано docs/SURFACE_STATE.md, \$(wc -l < docs/SURFACE_STATE.md) строк, владелец \$(stat -c %U docs/SURFACE_STATE.md)\"
+            else
+              echo \"::warning::surface_state (bot) не отработала — состояние поверхности НЕ снято, docs/SURFACE_STATE.md в дереве устарел или отсутствует\"; exit 1
+            fi
+          "
+
       - name: Telegram smoke alert (informational)
         if: steps.guard.outputs.ready == 'true'
         continue-on-error: true
