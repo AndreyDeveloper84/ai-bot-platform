@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+from datetime import UTC, datetime
 
 import pytest
 
@@ -60,6 +61,10 @@ def _verdict(revision: int = 3) -> SafetyResult:
         required_slots=("trimester",),
         forbidden_capabilities=("booking.create",),
     )
+
+
+def _unreadable_blob() -> str:
+    return json.dumps({"v": 2, "conversation_id": "c", "revision": 1, "slots": {}, "safety": 7})
 
 
 def _state(conversation_id: str = "conv-safety") -> ConversationState:
@@ -314,3 +319,72 @@ def test_no_wall_clock_reaches_the_safety_payload() -> None:
     assert "safety" in encoded, "вердикт не записан — проверять в нём нечего"
     clockish = [key for key in encoded["safety"] if "_at" in key and key != "evaluated_at_revision"]
     assert clockish == [], f"в вердикт заехали часы: {clockish}"
+
+
+# ─── the tolerance carries its own measure ──────────────────────────────────
+
+
+def test_unreadable_entries_are_counted_not_only_logged(fake_redis: FakeRedis) -> None:
+    """«Это была раскатка» обязано быть утверждением с числом.
+
+    Терпимость к нечитаемой форме держится на одном допущении: это раскатка,
+    значит минуты, значит кончится. Проверить его можно только частотой — а
+    строки в логе, которые никто не считает, делают «только что выкатились» и
+    «сломано со вчера» **одинаковыми**: и то и другое выглядит россыпью строк.
+
+    Несколько за час — деплой. Те же строки каждый час — дефект, спрятавшийся
+    в шуме деплоев.
+    """
+    now = datetime(2026, 9, 11, 14, 30, tzinfo=UTC)
+
+    for _ in range(3):
+        state_mod._decode(_unreadable_blob())
+
+    tally = state_mod.count_unreadable_safety_entries(now=now)
+
+    assert tally, "счётчик пуст — мерили не то, что считали"
+    assert sum(tally.values()) == 3
+
+
+def test_a_healthy_read_counts_nothing(fake_redis: FakeRedis) -> None:
+    """Положительный контроль к счётчику, и оба утверждения сведены в одно число.
+
+    Счётчик, считающий каждое чтение, выглядел бы работающим и не отвечал бы ни
+    на один вопрос: «сколько раз сломалось» и «сколько раз прочитали» — разные
+    числа, и одинаково ненулевые.
+
+    Поэтому здесь сначала идут три **здоровых** чтения, потом одно нечитаемое, и
+    проверяется, что счётчик показывает ровно единицу. Число говорит сразу две
+    вещи: счётчик на этой корзине работает, и здоровые чтения в неё не попали.
+    Отдельная проверка «пусто» этого не даёт — пустота одинаково совместима с
+    «не считает лишнего» и «не считает вовсе».
+    """
+    now = datetime(2026, 9, 11, 14, 30, tzinfo=UTC)
+    saved = _state("conv-healthy").with_safety(_verdict(revision=1))
+    state_mod.save(saved)
+    state_mod.load("conv-healthy")
+    state_mod._decode(json.dumps({"v": 1, "conversation_id": "c", "revision": 1, "slots": {}}))
+
+    state_mod._decode(_unreadable_blob())
+    tally = state_mod.count_unreadable_safety_entries(now=now)
+
+    assert tally, "счётчик не сработал даже на нечитаемом входе — мерили не тот предмет"
+    assert sum(tally.values()) == 1
+
+
+def test_counting_never_costs_a_turn(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Redis лёг — чтение обязано продолжиться, а не упасть.
+
+    Запись ради наблюдаемости, способная бросить, превращает деградировавшее
+    чтение в потерянный ход человека. Это дефект хуже измеряемого, и заведённый
+    самим измерением.
+    """
+
+    def _boom() -> object:
+        raise ConnectionError("redis is down")
+
+    monkeypatch.setattr(state_mod, "_redis_client", _boom)
+
+    decoded = state_mod._decode(_unreadable_blob())
+
+    assert decoded.safety.state is SafetyState.UNKNOWN

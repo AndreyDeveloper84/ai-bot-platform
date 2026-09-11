@@ -62,7 +62,7 @@ import functools
 import json
 import logging
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from enum import Enum
 from typing import Any, cast
 
@@ -87,6 +87,11 @@ STATE_TTL_SECONDS = 2 * 3600
 # stay monotone across it. This is not a second state TTL — nothing but the
 # number survives here.
 REVISION_HORIZON_SECONDS = 24 * 3600
+
+# How long the hourly tally of unreadable safety entries is kept. Long enough
+# to answer "was that a rollout or has it been going on all day?" — see
+# `count_unreadable_safety_entries`.
+UNREADABLE_HORIZON_SECONDS = 48 * 3600
 
 
 class SlotState(str, Enum):
@@ -287,6 +292,71 @@ def next_revision(conversation_id: str) -> int:
     return int(result[0])
 
 
+def _unreadable_key(bucket: str) -> str:
+    return f"{_KEY_PREFIX}:safety_unreadable:{bucket}"
+
+
+def _hour_bucket(now: datetime | None = None) -> str:
+    return (now or datetime.now(UTC)).strftime("%Y-%m-%dT%H")
+
+
+def _tally_unreadable(*, now: datetime | None = None) -> int | None:
+    """Count one unreadable safety entry into this hour's bucket.
+
+    ### Why a counter and not only the log line
+
+    Tolerating an unreadable entry rests on one claim: it is a rollout, so it
+    lasts minutes and stops. That claim is checkable only by frequency — and a
+    log line nobody counts makes "a rollout just happened" and "this has been
+    broken since yesterday" look identical, because both are a scatter of lines
+    in a stream. A few in one hour is a deploy; the same lines every hour is a
+    defect hiding in the noise of deploys.
+
+    So the tolerance carries its own measure. Hourly buckets, because the unit
+    of the claim is "minutes, not hours", and a total since boot cannot answer
+    that.
+
+    ### It must never cost a turn
+
+    Returns `None` if the count could not be taken. An observability write that
+    can raise turns a degraded read into a lost turn — which is a worse defect
+    than the one being measured, and one introduced by the measuring.
+    """
+
+    try:
+        client = _redis_client()
+        key = _unreadable_key(_hour_bucket(now))
+        pipe = client.pipeline()
+        pipe.incr(key)
+        pipe.expire(key, UNREADABLE_HORIZON_SECONDS)
+        return int(pipe.execute()[0])
+    except Exception:  # noqa: BLE001 — measuring must not break the thing measured
+        logger.warning("dre.state.unreadable_tally_failed", exc_info=True)
+        return None
+
+
+def count_unreadable_safety_entries(
+    *, hours: int = 24, now: datetime | None = None
+) -> dict[str, int]:
+    """Unreadable safety entries per hour, most recent hour first.
+
+    The answer to "was that a rollout?" as a number rather than an impression.
+    An hour with no entries is absent from the mapping rather than present as
+    zero — the buckets only exist once something lands in them, and inventing
+    zeros would claim knowledge of hours past the horizon.
+    """
+
+    client = _redis_client()
+    start = now or datetime.now(UTC)
+    tally: dict[str, int] = {}
+    for offset in range(hours):
+        bucket = _hour_bucket(start - timedelta(hours=offset))
+        raw = cast("str | None", client.get(_unreadable_key(bucket)))
+        if raw is not None:
+            tally[bucket] = int(raw)
+    return tally
+
+
 def peek_revision(conversation_id: str) -> int | None:
     """Current revision without consuming one. `None` once past the 24h horizon."""
 
@@ -385,9 +455,14 @@ def _decode_safety(entry: Any) -> SafetyResult:
     if entry is None:
         return SafetyResult.not_evaluated()
     if not isinstance(entry, dict):
+        # The count goes in the same line as the event: a line saying "this is
+        # the 4th this hour" and a line saying "the 900th" describe different
+        # incidents, and without the number they are the same line.
         logger.warning(
-            "dre.state.safety_entry_unreadable type=%s — вердикт потерян, читаем как UNKNOWN",
+            "dre.state.safety_entry_unreadable type=%s this_hour=%s — вердикт потерян, "
+            "читаем как UNKNOWN",
             type(entry).__name__,
+            _tally_unreadable(),
         )
         return SafetyResult.not_evaluated()
     if SafetyState(entry["state"]) not in KNOWN_SAFETY_STATES:
