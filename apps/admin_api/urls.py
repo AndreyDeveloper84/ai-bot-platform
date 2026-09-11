@@ -21,6 +21,7 @@ from apps.admin_api import (
     views_customers,
     views_day,
     views_invite,
+    views_master_schedule,
     views_master_verify,
     views_staff_invite,
     views_staff_revoke,
@@ -133,6 +134,19 @@ urlpatterns = [
         "masters/<str:master_id>/photo/",
         views.master_photo_upload,
         name="master_photo_upload",
+    ),
+    # §83 — просмотр часов и «Расписание верно». Отдельно от карточки
+    # мастера намеренно: чтение ходит в Ayla по сети, и недоступность
+    # источника не должна ронять имя, услуги и состояние.
+    path(
+        "masters/<str:master_id>/schedule/",
+        views_master_schedule.master_schedule,
+        name="master_schedule",
+    ),
+    path(
+        "masters/<str:master_id>/schedule/confirm/",
+        views_master_schedule.master_schedule_confirm,
+        name="master_schedule_confirm",
     ),
     path(
         "masters/<str:master_id>/audit/",
