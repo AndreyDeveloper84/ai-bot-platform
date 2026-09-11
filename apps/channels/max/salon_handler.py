@@ -682,6 +682,22 @@ def _register_solo_provider(event: CanonicalEvent, bot_user) -> None:
         _reply(event, SOLO_FAILED)
         return
 
+    # §148: пробуем связать АВТОМАТИЧЕСКИ, падаем в SETUP_PENDING,
+    # оператор добивает. Попытка ничего не решает о готовности — её
+    # по-прежнему считает `setup_state` по строке каталога, поэтому в
+    # день, когда связывание начнёт получаться, здесь не изменится ни
+    # строки: изменится ответ каталога, и состояние переедет само.
+    #
+    # На пилоте попытка будет отказывать всегда, и это правильный исход:
+    # `resolve_external_user` заводит прокси лениво, а подставной ключ
+    # писать запрещено. Причина приезжает машинным именем, а не «не
+    # получилось», — см. `solo_link_attempt`.
+    link_refusal = None
+    if result.created:
+        from apps.identity.services.solo_link_attempt import attempt_solo_link
+
+        link_refusal = attempt_solo_link(result.master, bot_user)
+
     emit(
         "channels.max.salon.solo_registered",
         payload={
@@ -689,16 +705,18 @@ def _register_solo_provider(event: CanonicalEvent, bot_user) -> None:
             "created": result.created,
             "setup_state": result.setup_state.value,
             "blocked_by": result.blocked_by,
+            "link_refusal": link_refusal,
         },
     )
     logger.info(
         "channels.max.salon.solo_registered bot_user=%s tenant=%s created=%s "
-        "setup_state=%s blocked_by=%s",
+        "setup_state=%s blocked_by=%s link_refusal=%s",
         bot_user.id,
         result.tenant.slug,
         result.created,
         result.setup_state.value,
         result.blocked_by,
+        link_refusal,
     )
 
     if result.setup_state is SoloSetupState.READY:
