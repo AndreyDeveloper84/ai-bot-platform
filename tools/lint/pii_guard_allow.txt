@@ -1,0 +1,30 @@
+# pii_guard: пути, освобождённые от проверки, с причиной. Список только сокращается.
+# Формат: <путь-префикс>  # причина (задача)
+docs/catalog/MARKET_PENZA.md  # телефоны салонов Пензы из открытых источников — контакты организаций, не ПДн физлиц (DRF-1269)
+legacy_maxbot/  # замороженный снимок мигрированного кода (.FROZEN 2026-05-09), не редактируется
+legacy_formulatela_mcp/  # замороженный снимок
+legacy_notifications/  # замороженный снимок
+.secrets.baseline  # артефакт detect-secrets
+tools/lint/negative_assert_guard_baseline.txt  # генерируемый baseline другого сторожа; цитирует строку теста с фикстурным номером
+# Идентификатор внутренней учётной записи как фикстура в коде и тестах — вопрос владельцу
+# (DRF-1269, вписан главным окном 12.09.2026). Снять строки после его решения.
+apps/identity/services/account_reset.py  # DRF-1269: фикстурный id внутренней учётки — вопрос владельцу
+apps/identity/services/bot_user_resolver.py  # DRF-1269: то же (докстринг замера 16.08)
+apps/identity/management/commands/identity_card.py  # DRF-1269: то же (пример в --help)
+apps/identity/management/commands/reset_test_account.py  # DRF-1269: то же
+apps/channels/max/start_links.py  # DRF-1269: то же
+apps/admin_api/views_customers.py  # DRF-1269: то же (докстринг)
+apps/integrations/ayla/tests/test_me_bookings_contract.py  # DRF-1269: фикстура
+apps/integrations/ayla/tests/test_booking_client.py  # DRF-1269: фикстура
+apps/integrations/ayla/tests/test_salon_surface.py  # DRF-1269: фикстура
+apps/integrations/ayla/tests/test_salon_client.py  # DRF-1269: фикстура
+apps/integrations/ayla/tests/test_goals_client_cold_path.py  # DRF-1269: фикстура
+apps/master_api/tests/test_auth_bot_user_resolution.py  # DRF-1269: фикстура
+apps/admin_api/tests/test_auth_bot_user_resolution.py  # DRF-1269: фикстура
+apps/admin_api/tests/test_search_customers.py  # DRF-1269: фикстура
+apps/admin_api/tests/test_start_link_round_trip.py  # DRF-1269: фикстура
+apps/channels/tests/test_salon_invite_entry.py  # DRF-1269: фикстура
+apps/booking/services/tests/test_records.py  # DRF-1269: фикстура
+apps/orchestrator/tests/test_visits.py  # DRF-1269: фикстура
+apps/identity/tests/test_account_reset.py  # DRF-1269: фикстура
+apps/identity/services/tests/test_resolution_is_total_order_drf1653.py  # DRF-1269: фикстура

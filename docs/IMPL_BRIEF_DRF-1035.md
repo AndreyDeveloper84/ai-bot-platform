@@ -57,7 +57,7 @@ BotUser has no ayla_user_id — cannot create on behalf of an Ayla-unlinked user
 
 | Что | Якорь | Состояние |
 |---|---|---|
-| Вычисление внешнего идентификатора | `apps/integrations/ayla/user_proxy.py` | `external_user_id_for(bot_user)` → `bot:{channel}:{channel_user_id}`, например `bot:max:260237491`. Чистая функция, в БД не пишет |
+| Вычисление внешнего идентификатора | `apps/integrations/ayla/user_proxy.py` | `external_user_id_for(bot_user)` → `bot:{channel}:{channel_user_id}`, например `bot:max:260…`. Чистая функция, в БД не пишет |
 | Источник `client_id` для записи | `apps/skills/booking/provider.py:85` | `client_id=str(getattr(bot_user, "ayla_user_id", "") or "")` |
 | Место отказа | `apps/skills/booking/provider.py:186-190` | `if not self._client_id: raise YClientsAPIError("ayla_client_id_missing…")` |
 | Контракт создания записи | `apps/integrations/ayla/booking_client.py:802-841` | `create_appointment(external_user_id=<заголовок>, client_id=<тело>, …)` — идентификатор уходит **и** заголовком, **и** в теле |
@@ -70,7 +70,7 @@ BotUser has no ayla_user_id — cannot create on behalf of an Ayla-unlinked user
 | Что | Якорь | Состояние |
 |---|---|---|
 | Ленивое создание прокси-клиента | `users/services.py:75-120` `resolve_external_user(external_user_id)` | `get_or_create(username=external_user_id, defaults={role: client, is_proxy: True, is_guest: False})`. Если у прокси проставлен `linked_user` и тот активен — возвращается связанный настоящий аккаунт; при деактивированном — fail-closed на изолированный прокси |
-| Формат внешнего идентификатора | там же | `<source>:<id>[:<id>…]`, валидируется регуляркой. `bot:max:260237491` подходит |
+| Формат внешнего идентификатора | там же | `<source>:<id>[:<id>…]`, валидируется регуляркой. `bot:max:260…` подходит |
 | Привязка прокси → аккаунт | `users/services.py` `bind_external_identity` (~159, 250-290) | Существует |
 | Аутентификация вызовов бота | `users/permissions.py:133+` `IsBotServiceWithVerifiedClient` | Bearer + `X-External-User-ID` → `resolve_external_user` → **подмена `request.user` на резолвнутого**. То есть прокси создаётся как побочный эффект **любого** вызова под этим классом |
 | Почему `client_id` в теле обязателен | docstring там же | Дословно: «the view MUST cross-check the request body's `client_id` against `request.user.id`… a leaked token still requires the attacker to also know the victim's specific Ayla user-id». **Это защита от подстановки субъекта, а не второй фактор аутентификации в классическом смысле** — используй корректную терминологию |
@@ -103,7 +103,7 @@ BotUser has no ayla_user_id — cannot create on behalf of an Ayla-unlinked user
 
 Не начинай с кода. Сначала подтверди или опровергни фактами следующее.
 
-1. **Создаётся ли прокси уже сейчас.** Раз `resolve_external_user` вызывается в permission-классе на каждом вызове бота, прокси для «Моего Парка» мог быть создан ещё во время неудачной попытки записи. Проверь по БД backend, есть ли `User` с `username = bot:max:260237491`. Это меняет формулировку недостающего звена: возможно, не хватает только способа **узнать** идентификатор, а не создать пользователя.
+1. **Создаётся ли прокси уже сейчас.** Раз `resolve_external_user` вызывается в permission-классе на каждом вызове бота, прокси для «Моего Парка» мог быть создан ещё во время неудачной попытки записи. Проверь по БД backend, есть ли `User` с `username = bot:max:260…`. Это меняет формулировку недостающего звена: возможно, не хватает только способа **узнать** идентификатор, а не создать пользователя.
 2. **Минимальный недостающий контракт.** Какой самый маленький и безопасный способ отдать боту резолвнутый `client_id`. Изучи conventions backend (`internal_api.py`, `records_urls.py`, url_builder на стороне бота) и предложи форму, соответствующую существующей архитектуре, а не выдуманный URL.
 3. **Граница безопасности.** Если аутентифицированный контекст уже однозначно содержит внешний субъект — нельзя позволять вызывающему передать чужой `external_user_id` в теле. Определи правильную границу после изучения контракта, не ослабляй существующую проверку `client_id` в теле.
 4. **Идемпотентность и гонки.** `username` уникален на `AbstractUser` — проверь, что это даёт гарантию на уровне БД и что два параллельных резолва не создают дублей. Опиши, что происходит при гонке фактически, а не в теории.

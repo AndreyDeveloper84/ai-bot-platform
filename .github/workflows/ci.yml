@@ -472,6 +472,17 @@ jobs:
       - name: Unguarded-absence assertion guard (AST lint)
         run: uv run python tools/lint/negative_assert_guard.py apps/ tests/
 
+      # PII guard (DRF-1269). The measurement of 12.09.2026 found a phone
+      # number, an e-mail and six channel ids of real people on the head of
+      # `dev` — in documents, past detect-secrets, which only knows
+      # secrets. Whole-tree scan of every tracked file: phones outside test
+      # ranges, e-mails outside reserved/own domains, the known ids (by
+      # hash), unmasked `max:<digits>` in docs/, dump/log extensions.
+      # Positive proof lives in tests/tools/test_pii_guard.py. Allowlist
+      # with reasons: tools/lint/pii_guard_allow.txt — it only shrinks.
+      - name: PII guard (phones, e-mails, channel ids, dumps)
+        run: uv run python tools/lint/pii_guard.py --all
+
       # Decision-reversal guard (DRF-1656). §120 велел удалить три поля,
       # задача написана точно по нему; §144 отменил сужение — удаляется
       # весь набор. Задача к тому моменту уже слита, и НИЧЕГО не

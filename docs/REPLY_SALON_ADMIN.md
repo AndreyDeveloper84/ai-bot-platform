@@ -294,7 +294,7 @@ if existing:
   customer | bot:max:831…      ← актор бота здесь, но customer
   customer | drf954-test-customer
   customer | bot:max:663…
-  customer | bot:max:260237491
+  customer | bot:max:260…
 ```
 
 **Ни одной строки `admin`.** Ни у бота, ни у кого-либо ещё. Ты написал «скорее всего нет» — оказалось «нет вообще ни у кого».
