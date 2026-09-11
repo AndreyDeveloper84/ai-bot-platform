@@ -493,6 +493,18 @@ REPLAY_REDACTION_ALLOWLIST: list[str] = [
     p.strip() for p in os.environ.get("REPLAY_REDACTION_ALLOWLIST", "").split(",") if p.strip()
 ]
 
+# B-R (DRF-1617) — accounts `reset_test_account` may free, as
+# `channel:channel_user_id`. Empty means the command refuses EVERY account:
+# there is no confirmation flag and no environment check, because a
+# confirmation protects against inattention and this list protects against a
+# wrong identifier — the command can delete what the law says to keep, and
+# «are you sure» does not check who you are pointing at. Getting onto this
+# list is a deliberate, separate act on the host; it is never a side effect
+# of anything else. The pilot's list is empty.
+ACCOUNT_RESET_ALLOWLIST: list[str] = [
+    p.strip() for p in os.environ.get("ACCOUNT_RESET_ALLOWLIST", "").split(",") if p.strip()
+]
+
 # Sprint 3 / B4 — event fanout adapter registry. Each entry is the
 # dotted import path of an :class:`apps.events.fanout.EventFanout`
 # implementation. Default is the no-op adapter — Phase 0 keeps events

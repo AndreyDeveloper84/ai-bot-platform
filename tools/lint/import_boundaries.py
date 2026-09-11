@@ -695,6 +695,15 @@ CATALOG_CROSS_TENANT_BASELINE: frozenset[BaselineKey] = frozenset(
         # never discovery. Read-only; the operator rendering masks every
         # personal value and the person rendering never names another salon.
         "apps/identity/services/identity_card.py",
+        # B-R (DRF-1617) — the test-account reset is PERSON-level by
+        # construction: one (channel, channel_user_id) has a BotUser per
+        # tenant, and the command frees all of them, so it reads the master
+        # cards linked to THOSE BotUser ids / ayla_user_id — a lookup by the
+        # person's own keys, never by tenant, never discovery. `.objects`
+        # would see one tenant and miss the rest, which is the half-reset
+        # this command exists to prevent. Writes are behind
+        # ACCOUNT_RESET_ALLOWLIST (empty on the pilot).
+        "apps/identity/services/account_reset.py",
         # DRF-1061 — operator command listing and picking a master to invite.
         # Every query is filtered on the --tenant the operator named, and it
         # runs at a terminal with no request and therefore no tenant
