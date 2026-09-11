@@ -116,6 +116,42 @@ ASK_FOR_CODE = (
     "Код выглядит так: AYLA-7K3M."
 )
 
+#: Payload кнопки «я работаю сам». Отдельный слаг, а не свободный текст:
+#: свободный текст пришлось бы угадывать, а угаданное «да» — это
+#: регистрация человека, который её не просил.
+SOLO_REGISTER_CALLBACK = "cb:solo:register"
+
+SOLO_OFFER = (
+    "\n\nЕсли кода у вас нет и вы работаете сами, без салона, — можно завести свой кабинет."
+)
+
+SOLO_OFFER_BUTTON = "Я работаю сам"
+
+#: §122: регистрация НЕ завершается как «готово». Текст говорит ровно то,
+#: что произошло, и ровно то, чего ждать, — потому что произошло не всё.
+#:
+#: «Кабинет создан» без второй половины было бы той самой тишиной, ради
+#: которой заводилось `setup_state`: человек ушёл бы считать себя
+#: работающим и узнал бы обратное, не дождавшись ни одной записи.
+SOLO_CREATED_PENDING = (
+    "Кабинет создан: вы владелец и мастер в нём.\n\n"
+    "Пока вас не видно клиентам — нужно связать кабинет с вашей учётной "
+    "записью Ayla, это делает администратор. Напишите в поддержку салона, "
+    "с которым работаете, или в поддержку Ayla.\n\n"
+    "Записи к вам начнут приходить сразу после связывания."
+)
+
+#: Повторное нажатие — не ошибка и не повод молчать.
+SOLO_ALREADY_REGISTERED = (
+    "Кабинет у вас уже есть. Он ещё не связан с учётной записью Ayla — "
+    "поэтому клиентам вас пока не видно."
+)
+
+SOLO_FAILED = (
+    "Не получилось завести кабинет. Мы записали ошибку и разберёмся — "
+    "напишите в поддержку, если ответа не будет сегодня."
+)
+
 CODE_NOT_ACCEPTED = (
     "Код не подошёл. Возможно, он уже использован или истёк — "
     "попросите администратора выдать новый."
@@ -498,15 +534,153 @@ def _handle_salon_event_inner(event: CanonicalEvent, trace_id: str | uuid.UUID |
         # must not be read as an invite code — it would burn a rate-limit
         # attempt for a message they did not type.
         if _is_button_tap(event.text):
+            if event.text == SOLO_REGISTER_CALLBACK:
+                _register_solo_provider(event, bot_user)
+                return
             _reply(event, ASK_FOR_CODE)
             return
 
         code = _extract_code(event.text)
         if code is None:
-            _reply(event, ASK_FOR_CODE)
+            _ask_for_code_with_solo_offer(event, bot_user)
             return
 
         _redeem_and_greet(event, bot_user, code, tenant, entry)
+
+
+def _has_a_master_card_here(bot_user) -> bool:
+    """Есть ли у этого человека карточка мастера — в том числе архивная.
+
+    В ветку «роли нет» приходят ДВОЕ: человек, который здесь впервые, и
+    мастер, чью карточку сняли. Второго `resolve_role` называет клиентом,
+    потому что архивация пишет `is_active` и `archived_at` и **оставляет**
+    `linked_bot_user` (DRF-1654, чинит соседнее окно; здесь мы на это не
+    наступаем, а не лечим).
+
+    Предложить ему завести кабинет соло-мастера значило бы развести
+    одного человека на два тенанта при живом следе в первом — и сделать
+    это в тот момент, когда он пришёл разбираться, почему его сняли.
+
+    Замер пилота 11.09.2026: таких строк **ноль** (архивных три, связи ни
+    у одной). Проверка стережёт МЕХАНИЗМ, а не наблюдение: архивация
+    связь не снимает, значит первая же снятая связанная карточка создаст
+    этот случай.
+    """
+    from apps.catalog.models import CatalogMaster
+
+    # Читаем ТЕНАНТНО, а не через `all_tenants`. Первая редакция брала
+    # сквозной менеджер — и сторож границ импорта (MKT1) правильно её
+    # отверг: сквозное чтение каталога живёт в `apps/marketplace`, а не
+    # здесь.
+    #
+    # Сквозной он был и не нужен. `bot_user` — строка ЭТОГО салона, а
+    # карточка, которая должна подавить предложение, — карточка этого же
+    # салона: её сняли, и человек пришёл разбираться сюда. Мастер другого
+    # салона связан с ДРУГОЙ строкой того же человека, и его положение
+    # здесь — вопрос не этого предиката, а соседнего
+    # (`_already_has_a_solo_workspace`, он ищет по личности канала).
+    return CatalogMaster.objects.filter(linked_bot_user=bot_user).exists()
+
+
+def _already_has_a_solo_workspace(bot_user) -> bool:
+    """Заводил ли этот человек кабинет соло-мастера раньше.
+
+    Ищется по слагу, который `create_solo_provider` выводит из той же
+    пары `(channel, channel_user_id)` — то есть по тому же правилу, по
+    которому кабинет создавался. Спрашивать про карточку мастера здесь
+    бесполезно: кабинет заводит СВОЙ `BotUser` в своём тенанте, и по
+    салонной строке человека он не находится (замерено: предикат
+    `_has_a_master_card_here` на вернувшемся отвечает `False`).
+
+    Без этой проверки человек, у которого кабинет уже есть, получал бы
+    предложение завести его снова и узнавал бы правду только после
+    нажатия. Не молчание, но и не ответ.
+    """
+    from apps.identity.services.solo_onboarding import _solo_tenant_slug
+    from apps.tenancy.models import Tenant
+
+    slug = _solo_tenant_slug(bot_user.channel, bot_user.channel_user_id)
+    return Tenant.objects.filter(slug=slug).exists()
+
+
+def _ask_for_code_with_solo_offer(event: CanonicalEvent, bot_user) -> None:
+    """Попросить код — и, если уместно, предложить кабинет соло-мастера."""
+
+    if _has_a_master_card_here(bot_user):
+        _reply(event, ASK_FOR_CODE)
+        return
+
+    if _already_has_a_solo_workspace(bot_user):
+        # Второе посещение. Предлагать завести то, что уже заведено, —
+        # значит заставить человека нажать, чтобы узнать, что нажимать не
+        # надо было.
+        _reply(event, SOLO_ALREADY_REGISTERED)
+        return
+
+    from apps.channels.max import outbound
+
+    attachment = outbound.make_inline_keyboard_attachment(
+        [{"label": SOLO_OFFER_BUTTON, "callback": SOLO_REGISTER_CALLBACK}]
+    )
+    _reply(event, ASK_FOR_CODE + SOLO_OFFER, attachments=[attachment])
+
+
+def _register_solo_provider(event: CanonicalEvent, bot_user) -> None:
+    """Завести кабинет соло-мастера и сказать правду о его состоянии.
+
+    Правду — то есть `setup_state`, а не факт создания. §122: регистрация
+    не завершается как «готово», пока человека не видно клиентам, и
+    единственный способ не соврать здесь — спросить у результата, а не у
+    самого себя.
+    """
+    from apps.identity.services.solo_onboarding import (
+        SoloOnboardingError,
+        SoloSetupState,
+        create_solo_provider,
+    )
+
+    try:
+        result = create_solo_provider(
+            channel=bot_user.channel,
+            channel_user_id=bot_user.channel_user_id,
+            display_name=_sender_name(event) or bot_user.display_name or "",
+            chat_id=str(event.chat_id or ""),
+        )
+    except SoloOnboardingError:
+        logger.exception("channels.max.salon.solo_register_failed bot_user=%s", bot_user.id)
+        _reply(event, SOLO_FAILED)
+        return
+
+    emit(
+        "channels.max.salon.solo_registered",
+        payload={
+            "bot_user_id": str(bot_user.id),
+            "created": result.created,
+            "setup_state": result.setup_state.value,
+            "blocked_by": result.blocked_by,
+        },
+    )
+    logger.info(
+        "channels.max.salon.solo_registered bot_user=%s tenant=%s created=%s "
+        "setup_state=%s blocked_by=%s",
+        bot_user.id,
+        result.tenant.slug,
+        result.created,
+        result.setup_state.value,
+        result.blocked_by,
+    )
+
+    if result.setup_state is SoloSetupState.READY:
+        # Сегодня недостижимо — ключа взяться неоткуда, — но ветка есть,
+        # чтобы в день, когда связывание заработает, человек не получил
+        # текст про ожидание.
+        _send_menu(event, resolve_role(bot_user), result.tenant, None)
+        return
+
+    _reply(
+        event,
+        SOLO_CREATED_PENDING if result.created else SOLO_ALREADY_REGISTERED,
+    )
 
 
 def _is_button_tap(text: str) -> bool:
