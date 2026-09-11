@@ -33,6 +33,7 @@ import pytest
 
 from apps.orchestrator.decision_readiness import state as state_mod
 from apps.orchestrator.decision_readiness.safety_input import (
+    Handoff,
     SafetyResult,
     SafetyState,
 )
@@ -56,6 +57,10 @@ def _verdict(revision: int = 3) -> SafetyResult:
     return SafetyResult(
         state=SafetyState.CLARIFY,
         evaluated_at_revision=revision,
+        # §127: известное состояние обязано нести обещание. Конструктор не
+        # соберётся без него — и это правильно, поэтому здесь оно названо, а
+        # не подставлено умолчанием.
+        handoff=Handoff.RECOMMENDED,
         rule_id="pre_check.regex:pregnancy",
         policy_version="safety-2026-09-01",
         required_slots=("trimester",),
@@ -388,3 +393,66 @@ def test_counting_never_costs_a_turn(monkeypatch: pytest.MonkeyPatch) -> None:
     decoded = state_mod._decode(_unreadable_blob())
 
     assert decoded.safety.state is SafetyState.UNKNOWN
+
+
+# ─── §127 приехало позже кодека ─────────────────────────────────────────────
+
+
+def test_a_verdict_stored_before_handoff_existed_is_unknown_not_none(
+    fake_redis: FakeRedis,
+) -> None:
+    """Вердикт есть, обещания нет — читаем как «не сказали», а не как «не нужно».
+
+    Такой блоб появляется ровно один раз в жизни системы: между тем, как кодек
+    научился писать `"safety"`, и тем, как §127 добавила `handoff`. Прочитать
+    его как `Handoff.NONE` значило бы **пообещать человеку меньше, чем обещал
+    движок**, — а §127 и существует, чтобы «мы передадим вас человеку» не
+    сливалось с «мы отказываем».
+
+    Ронять ход тоже нельзя: у пропуска невиноватое происхождение — payload
+    старше поля. Поэтому это нечитаемая форма: `UNKNOWN`, посчитано, и оттого
+    заметно. Радиус ограничен TTL состояния: через два часа после выкладки
+    таких блобов не существует.
+    """
+    blob = json.dumps(
+        {
+            "v": 2,
+            "conversation_id": "c",
+            "revision": 1,
+            "slots": {},
+            "safety": {
+                "state": "clarify",
+                "evaluated_at_revision": 1,
+                "rule_id": "pre_check.regex:pregnancy",
+                "policy_version": "safety-2026-09-01",
+                "required_slots": [],
+                "forbidden_capabilities": [],
+            },
+        }
+    )
+
+    decoded = state_mod._decode(blob)
+
+    # Сначала — что блоб вообще прочитан, а не свалился на полпути.
+    assert decoded.conversation_id == "c"
+    # И предмет: вердикт не подставлен, а объявлен неизвестным.
+    assert decoded.safety.state is SafetyState.UNKNOWN
+    assert decoded.safety.handoff is None
+    assert state_mod.count_unreadable_safety_entries(
+        now=datetime(2026, 9, 11, 14, 30, tzinfo=UTC)
+    ), "неполный вердикт обязан попасть в счётчик, иначе он невидим"
+
+
+def test_the_promise_survives_redis(fake_redis: FakeRedis) -> None:
+    """Положительный контроль: `handoff` доезжает туда и обратно.
+
+    Без него предыдущий тест зеленел бы на кодеке, который не пишет `handoff`
+    никогда — то есть на том самом дефекте, который сторож полноты и поймал.
+    """
+    saved = _state("conv-promise").with_safety(_verdict(revision=1))
+    state_mod.save(saved)
+
+    result = state_mod.load("conv-promise")
+
+    assert result.state is not None
+    assert result.state.safety.handoff is Handoff.RECOMMENDED

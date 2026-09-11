@@ -69,7 +69,7 @@ from typing import Any, cast
 from django.conf import settings
 import redis
 
-from .safety_input import KNOWN_SAFETY_STATES, SafetyResult, SafetyState
+from .safety_input import KNOWN_SAFETY_STATES, Handoff, SafetyResult, SafetyState
 
 logger = logging.getLogger(__name__)
 
@@ -377,6 +377,13 @@ def peek_revision(conversation_id: str) -> int | None:
 _SAFETY_CODEC_FIELDS: tuple[str, ...] = (
     "state",
     "evaluated_at_revision",
+    # DRF-1629 / §127. `handoff` arrived on `SafetyResult` after this codec was
+    # written, and it arrived exactly the way the guard below predicted: as a
+    # red check naming the field, not as a value silently dropped at read time.
+    # It belongs in the payload because it is part of the promise made to the
+    # person — "we will hand you to a human" is not "we refuse" — and a promise
+    # that survives the engine but not Redis is a promise the next turn forgets.
+    "handoff",
     "rule_id",
     "policy_version",
     "required_slots",
@@ -418,6 +425,10 @@ def _encode_safety(verdict: SafetyResult) -> dict[str, Any] | None:
     return {
         "state": verdict.state.value,
         "evaluated_at_revision": verdict.evaluated_at_revision,
+        # A known verdict always carries one: `SafetyResult.__post_init__`
+        # refuses to construct otherwise. So this is never `None` here, and
+        # writing it unconditionally keeps the payload shape fixed.
+        "handoff": verdict.handoff.value if verdict.handoff else None,
         "rule_id": verdict.rule_id,
         "policy_version": verdict.policy_version,
         "required_slots": list(verdict.required_slots),
@@ -465,16 +476,60 @@ def _decode_safety(entry: Any) -> SafetyResult:
             _tally_unreadable(),
         )
         return SafetyResult.not_evaluated()
-    if SafetyState(entry["state"]) not in KNOWN_SAFETY_STATES:
+    try:
+        state = SafetyState(entry["state"])
+    except (KeyError, ValueError):
+        logger.warning(
+            "dre.state.safety_entry_unreadable reason=state this_hour=%s", _tally_unreadable()
+        )
+        return SafetyResult.not_evaluated()
+
+    if state not in KNOWN_SAFETY_STATES:
         raise StoredVerdictWithoutOrigin(
             f"a stored safety verdict says {entry['state']!r}, which is the absence of a "
             "verdict. Absence is written by omitting the key; an object saying so has a "
             "writer behind it, and «was never evaluated» is now indistinguishable from "
             "«something swallowed an error and returned the fail-closed value»."
         )
+    stored_handoff = entry.get("handoff")
+    try:
+        return _build_verdict(entry, state=state, stored_handoff=stored_handoff)
+    except ValueError as exc:
+        # A verdict that exists but does not satisfy its own type — today that
+        # means a blob written before §127 added `handoff`. The verdict is
+        # real; what it promised the person is not recorded.
+        #
+        # Not `Handoff.NONE`: that reads as "no handoff was required", a
+        # decision the engine never made, and §127 exists precisely to keep
+        # that apart from a crisis handoff. Not a raised error either: this has
+        # an innocent origin (a payload older than the field) and killing the
+        # turn buys nothing a block does not.
+        #
+        # So: unreadable shape, same as any other — `UNKNOWN`, counted, and
+        # therefore visible. The blast radius is bounded by the state TTL: two
+        # hours after §127 ships, no such blob exists.
+        logger.warning(
+            "dre.state.safety_entry_unreadable reason=incomplete this_hour=%s detail=%s",
+            _tally_unreadable(),
+            exc,
+        )
+        return SafetyResult.not_evaluated()
+
+
+def _build_verdict(
+    entry: dict[str, Any], *, state: SafetyState, stored_handoff: Any
+) -> SafetyResult:
     return SafetyResult(
-        state=SafetyState(entry["state"]),
+        state=state,
         evaluated_at_revision=entry.get("evaluated_at_revision"),
+        # A blob written before §127 landed has no `"handoff"` key, and it
+        # cannot be invented here: `Handoff.NONE` would read as "no handoff was
+        # required", which is a decision the engine never made. Passing `None`
+        # lets `__post_init__` refuse a known verdict without one — loudly, at
+        # the point of reading, rather than by quietly promising less than the
+        # verdict promised. Same rule as `state`: the decoder is a second door
+        # into the type and may not answer for the engine.
+        handoff=Handoff(stored_handoff) if stored_handoff else None,
         rule_id=entry.get("rule_id"),
         policy_version=entry.get("policy_version"),
         required_slots=tuple(entry.get("required_slots") or ()),
