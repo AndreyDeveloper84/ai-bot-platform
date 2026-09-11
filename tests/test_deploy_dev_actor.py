@@ -407,3 +407,46 @@ def test_a_continued_command_is_read_as_one() -> None:
 
     assert _unwrapped(wrapped) == []
     assert _unwrapped(bare) != []
+
+
+def test_the_only_write_root_does_itself_is_handing_the_tree_back(
+    steps: list[dict],
+) -> None:
+    """Исключение из правила «пишет владелец» — ровно одно, и оно названо.
+
+    Правило «все пишущие команды идут от владельца» имеет один осмысленный
+    предел: вернуть дерево владельцу может только тот, у кого права, то есть
+    root. Эта запись меняет не содержимое, а принадлежность, и она —
+    единственное, что root делает сам.
+
+    Исключение без стража превращается в дыру: следующий ``chown`` в этом
+    файле проехал бы молча. Поэтому граница пинится с обеих сторон —
+    ``chown`` ровно один во всём воркфлоу, он возвращает дерево ИМЕННО
+    владельцу и стоит ПЕРЕД проверкой прав.
+
+    Почему вообще нужен: уборка руками не держится. Каталоги, переданные
+    владельцу 11.09.2026 в 06:12, снова стали root-овыми после выкладки
+    06:37–06:52, шедшей ещё от root, и набор таких каталогов не фиксирован —
+    каждый слитый PR с новым каталогом добавлял свой.
+    """
+
+    ship = next((s for s in steps if "dist.new" in (s.get("run") or "")), None)
+    assert ship is not None, "шаг выкладки мини-аппа не найден — сторож смотрит не туда"
+
+    everywhere = [ln for s in steps for ln in logical_lines(s) if "chown" in ln]
+    assert len(everywhere) == 1, f"chown должен быть ровно один — граница исключения: {everywhere}"
+
+    lines = logical_lines(ship)
+    hand_back = next((i for i, ln in enumerate(lines) if "chown" in ln), -1)
+    probe = next((i for i, ln in enumerate(lines) if "test -w" in ln), -1)
+
+    assert hand_back != -1, "нечего вернуть владельцу — самолечения нет"
+    assert probe != -1, "проверка прав пропала — стеречь порядок не у чего"
+    assert hand_back < probe, (
+        f"возврат дерева ({hand_back}) стоит ПОСЛЕ проверки ({probe}) — "
+        "первая же выкладка упадёт на том, что умеет починить сама"
+    )
+    assert "$OWNER" in lines[hand_back], (
+        "chown отдаёт дерево не владельцу, а кому-то названному вслепую"
+    )
+    assert "::notice::" in lines[hand_back], "молчаливый chown меняет права и не оставляет следа"
