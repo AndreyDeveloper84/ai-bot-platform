@@ -108,7 +108,22 @@ class TestTheTypeCannotCarryAnUnexplainedTarget:
 
 class TestNoSurfacePrintsAnUnexplainedNumber:
     """Одни и те же три числа — ни одного при unknown_legacy, все при
-    ayla_calculated. Различает только происхождение."""
+    ayla_calculated. Различает только происхождение.
+
+    Поверхности, которые держит это утверждение, и где именно:
+
+    * дневной отчёт ``render_daily_report`` и реплика ``goal_remark`` — здесь;
+    * поверхность дневника в разговоре — ``test_personal_surface.py``
+      (``test_unknown_legacy_is_not_configured_too``);
+    * ручка Мини-аппа ``wellness/today`` — ``test_wellness_today.py``
+      (``TestTargetsRequireProvenance``);
+    * **суточный отчёт по расписанию** ``tasks.plan_daily_reports`` —
+      ``test_tasks.py`` (``test_report_without_configured_targets_prints_facts_only``).
+      Пятая поверхность; нашлась не чтением, а красным шардом CI.
+
+    Список здесь один, чтобы шестая поверхность добавлялась в него, а не
+    обнаруживалась тем же способом, что пятая.
+    """
 
     def test_unknown_legacy_prints_none_of_them(self) -> None:
         text = render_daily_report(_summary(), _water(), _profile("unknown_legacy"))
