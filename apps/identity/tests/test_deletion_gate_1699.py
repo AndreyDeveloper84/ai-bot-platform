@@ -63,6 +63,10 @@ def remembered(bot_user):
         sensitivity_zone=MemoryEntry.SENSITIVITY_GREEN,
         content={"drink": "tea"},
         source=MemoryEntry.SOURCE_EXPLICIT,
+        # Postgres-сторож memory_entry_explicit_requires_provenance: у явного
+        # факта обязано быть происхождение. sqlite локально его не держит —
+        # шард CI на Postgres поймал.
+        provenance=MemoryEntry.PROVENANCE_USER_STATED,
     )
     return upc
 
@@ -110,6 +114,7 @@ class TestMemoryRefusesByName:
         assert live.summary == "любит чай"
         assert len(live.green_facts) == 1
         assert live.refusal is None
+        assert len(read_green_entries(AYLA_ID)) == 1
 
         mark_deletion_requested(AYLA_ID, request_id=REQUEST_ID)
         view = read_personal_context(AYLA_ID)
