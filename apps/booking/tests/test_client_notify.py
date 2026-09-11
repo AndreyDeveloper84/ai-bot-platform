@@ -68,6 +68,11 @@ SERVICE_ID = "3d5f7e1c-8a2d-4e6f-b9c0-1d2e3f4a5b6c"
 START_AT = "2026-05-22T15:00:00+03:00"
 END_AT = "2026-05-22T16:00:00+03:00"
 
+#: MAX ``user_id`` клиента — то, чем адресуется проактивная отправка.
+CLIENT_USER_ID = "client-1"
+#: Идентификатор ДИАЛОГА той же строки. Отличается намеренно (DRF-1558):
+#: совпадение этих двух и есть то ложное равенство, из-за которого хранение
+#: одного ``chat_id`` на человека выглядело безопасным.
 CLIENT_CHAT_ID = "client-chat-1"
 
 
@@ -81,12 +86,23 @@ class SendRecorder:
     def __call__(
         self,
         *,
-        chat_id: str,
+        chat_id: str | None = None,
+        user_id: str | None = None,
         text: str,
         attachments: Any = None,
         timeout: float = 10.0,
     ) -> dict[str, Any]:
-        self.calls.append({"chat_id": chat_id, "text": text, "timeout": timeout})
+        # DRF-1558 — «addr» это адрес, «key» это то, КАКИМ ключом он ушёл.
+        self.calls.append(
+            {
+                "chat_id": chat_id,
+                "user_id": user_id,
+                "addr": user_id if user_id is not None else chat_id,
+                "key": "user_id" if user_id is not None else "chat_id",
+                "text": text,
+                "timeout": timeout,
+            }
+        )
         effects = self.side_effects
         if isinstance(effects, Exception):
             raise effects
@@ -134,7 +150,7 @@ def client_bot_user(tenant: Tenant) -> BotUser:
     return BotUser.all_tenants.create(
         tenant=tenant,
         channel="max",
-        channel_user_id="client-1",
+        channel_user_id=CLIENT_USER_ID,
         chat_id=CLIENT_CHAT_ID,
         display_name="Иван Клиентов",
         client_name="Иван Клиентов",
@@ -210,29 +226,36 @@ def _notify(tenant: Tenant, bot_user: BotUser | None) -> None:
 
 
 class TestAddressing:
-    def test_goes_to_the_clients_own_chat(
+    def test_goes_to_the_client_as_a_person_not_as_a_dialog(
         self, tenant: Tenant, client_bot_user: BotUser, send: SendRecorder
     ) -> None:
+        """DRF-1558 — подтверждение записи пишется первым, значит по ``user_id``.
+
+        Проверяем и адрес, и КЛЮЧ: значение ``CLIENT_CHAT_ID`` тоже лежит
+        на строке, и без проверки ключа возврат на диалог прошёл бы мимо.
+        """
         _notify(tenant, client_bot_user)
-        assert [c["chat_id"] for c in send.calls] == [CLIENT_CHAT_ID]
+        assert [c["addr"] for c in send.calls] == [CLIENT_USER_ID]
+        assert [c["key"] for c in send.calls] == ["user_id"]
 
     def test_no_bot_user_is_a_quiet_skip(self, tenant: Tenant, send: SendRecorder) -> None:
         """Booking in the Ayla app without ever opening the bot is normal.
 
         No message is possible and none is warned about — a WARNING on
-        ordinary traffic would bury the salon-side ``no_recipients``
-        warning, which does mean something is misconfigured.
+        ordinary traffic would bury ``booking.notify.specialist_unreachable``,
+        which does mean something is misconfigured.
         """
 
         _notify(tenant, None)
         assert send.calls == []
 
-    def test_blank_chat_id_is_treated_as_absent(self, tenant: Tenant, send: SendRecorder) -> None:
+    def test_blank_address_is_treated_as_absent(self, tenant: Tenant, send: SendRecorder) -> None:
+        """Пробелы — не адрес. Адрес после DRF-1558 это ``channel_user_id``."""
         bot_user = BotUser.all_tenants.create(
             tenant=tenant,
             channel="max",
-            channel_user_id="client-2",
-            chat_id="   ",
+            channel_user_id="   ",
+            chat_id="client-chat-2",
             ayla_user_id=AYLA_USER_ID,
         )
         _notify(tenant, bot_user)
@@ -525,7 +548,7 @@ class TestConsumerWiring:
         _make_master(tenant)
         with django_capture_on_commit_callbacks(execute=True):
             handle_booking_created(_created_envelope())
-        assert [c["chat_id"] for c in send.calls] == [CLIENT_CHAT_ID]
+        assert [c["addr"] for c in send.calls] == [CLIENT_USER_ID]
         text = send.calls[0]["text"]
         assert "Вы записаны" in text
         assert "УЗ-кавитация — 1 зона" in text
@@ -689,7 +712,7 @@ class TestPrepaymentFlow:
             handle_booking_created(_created_envelope(status="awaiting_payment"))
         with django_capture_on_commit_callbacks(execute=True):
             handle_booking_confirmed(_confirmed_envelope())
-        assert [c["chat_id"] for c in send.calls] == [CLIENT_CHAT_ID]
+        assert [c["addr"] for c in send.calls] == [CLIENT_USER_ID]
         text = send.calls[0]["text"]
         assert "УЗ-кавитация — 1 зона" in text
         assert "Тихонова Ольга" in text

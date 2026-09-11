@@ -52,7 +52,7 @@ def _salon_service_row(sid: str) -> dict[str, Any]:
 class TestAuthHeader:
     def test_attaches_bearer_token(self, httpx_mock: HTTPXMock) -> None:
         httpx_mock.add_response(
-            url=f"{_SALON_URL}?tenant={_TID}",
+            url=f"{_SALON_URL}?tenant={_TID}&page_size=100",
             json={"count": 0, "next": None, "previous": None, "results": []},
         )
         with _client() as c:
@@ -65,7 +65,7 @@ class TestAuthHeader:
 class TestTenantFilter:
     def test_tenant_passed_as_query_param(self, httpx_mock: HTTPXMock) -> None:
         httpx_mock.add_response(
-            url=f"{_SALON_URL}?tenant={_TID}",
+            url=f"{_SALON_URL}?tenant={_TID}&page_size=100",
             json={"count": 0, "next": None, "previous": None, "results": []},
         )
         with _client() as c:
@@ -77,12 +77,12 @@ class TestTenantFilter:
 
 class TestPagination:
     def test_follows_next_until_exhausted(self, httpx_mock: HTTPXMock) -> None:
-        next_url = f"{_SALON_URL}?tenant={_TID}&page=2"
+        next_url = f"{_SALON_URL}?tenant={_TID}&page_size=100&page=2"
         a = "aaaa0000-0000-4000-8000-000000000001"
         b = "bbbb0000-0000-4000-8000-000000000002"
         d = "dddd0000-0000-4000-8000-000000000003"
         httpx_mock.add_response(
-            url=f"{_SALON_URL}?tenant={_TID}",
+            url=f"{_SALON_URL}?tenant={_TID}&page_size=100",
             json={
                 "count": 3,
                 "next": next_url,
@@ -103,7 +103,7 @@ class TestDTOParsing:
     def test_salon_service_dto_fields(self, httpx_mock: HTTPXMock) -> None:
         sid = "6f1c2e9a-0000-4000-8000-000000000042"
         httpx_mock.add_response(
-            url=f"{_SALON_URL}?tenant={_TID}",
+            url=f"{_SALON_URL}?tenant={_TID}&page_size=100",
             json={
                 "count": 1,
                 "next": None,
@@ -131,7 +131,7 @@ class TestDTOParsing:
         row["duration_minutes"] = None
         row["template"] = None
         httpx_mock.add_response(
-            url=f"{_SALON_URL}?tenant={_TID}",
+            url=f"{_SALON_URL}?tenant={_TID}&page_size=100",
             json={"count": 1, "next": None, "previous": None, "results": [row]},
         )
         with _client() as c:
@@ -146,7 +146,9 @@ class TestAuthErrors:
     def test_auth_errors_raise_immediately(self, httpx_mock: HTTPXMock, status: int) -> None:
         # Only ONE response queued — we expect the client NOT to retry.
         httpx_mock.add_response(
-            url=f"{_SALON_URL}?tenant={_TID}", status_code=status, json={"detail": "forbidden"}
+            url=f"{_SALON_URL}?tenant={_TID}&page_size=100",
+            status_code=status,
+            json={"detail": "forbidden"},
         )
         with _client() as c, pytest.raises(CatalogAuthError):
             c.fetch_salon_services(tenant_id=_TID)
@@ -155,7 +157,9 @@ class TestAuthErrors:
 class TestClientErrors:
     def test_404_raises_client_error(self, httpx_mock: HTTPXMock) -> None:
         httpx_mock.add_response(
-            url=f"{_SALON_URL}?tenant={_TID}", status_code=404, json={"detail": "not found"}
+            url=f"{_SALON_URL}?tenant={_TID}&page_size=100",
+            status_code=404,
+            json={"detail": "not found"},
         )
         with _client() as c, pytest.raises(CatalogClientError):
             c.fetch_salon_services(tenant_id=_TID)
@@ -169,10 +173,10 @@ class TestRetry5xx:
         sid = "6f1c2e9a-0000-4000-8000-000000000001"
         for _ in range(2):
             httpx_mock.add_response(
-                url=f"{_SALON_URL}?tenant={_TID}", status_code=503, text="unavailable"
+                url=f"{_SALON_URL}?tenant={_TID}&page_size=100", status_code=503, text="unavailable"
             )
         httpx_mock.add_response(
-            url=f"{_SALON_URL}?tenant={_TID}",
+            url=f"{_SALON_URL}?tenant={_TID}&page_size=100",
             json={"count": 1, "next": None, "previous": None, "results": [_salon_service_row(sid)]},
         )
         with _client() as c:
@@ -185,7 +189,7 @@ class TestRetry5xx:
         monkeypatch.setattr("time.sleep", lambda _s: None)
         for _ in range(3):
             httpx_mock.add_response(
-                url=f"{_SALON_URL}?tenant={_TID}", status_code=500, text="burning"
+                url=f"{_SALON_URL}?tenant={_TID}&page_size=100", status_code=500, text="burning"
             )
         with _client() as c, pytest.raises(CatalogTransportError):
             c.fetch_salon_services(tenant_id=_TID)

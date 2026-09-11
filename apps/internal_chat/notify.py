@@ -23,12 +23,18 @@ customer-facing avatar.
 
 Direction decides the recipient:
 
-* **master → admin**: the salon side. ``Tenant.manager_chat_id`` first,
-  then the configured fallback channel — the same cascade the booking
-  notice uses, deliberately, so a salon configures one destination rather
-  than one per feature.
+* **master → admin**: the salon side, and only the salon's own manager
+  address. Which KEY that address uses is decided once, in
+  :mod:`apps.channels.max.addressing` (DRF-1559). This rung used to fall
+  back to the configured operator channel — removed by the owner's
+  decision of 2026-09-07, for the same reason the booking notice lost it:
+  that list is global, it carries no tenant, so on the pilot every salon's
+  staff correspondence resolved to one shared, hand-typed dialog. That is
+  exactly the leak the admin→master direction already refuses below. A
+  salon with no manager address configured simply has no MAX address, and
+  that is a normal state.
 * **admin → master**: that thread's master personally, via
-  ``CatalogMaster.linked_bot_user.chat_id``. There is no fallback here on
+  ``CatalogMaster.linked_bot_user.channel_user_id``. There is no fallback here on
   purpose: a message addressed to one master must not be broadcast to the
   salon's shared channel just because the link is missing. Silence plus a
   warning is the correct failure — the alternative leaks a private
@@ -60,6 +66,8 @@ from __future__ import annotations
 import logging
 
 from django.db import transaction
+
+from apps.channels.max.addressing import MaxAddress, manager_address
 
 logger = logging.getLogger(__name__)
 
@@ -128,30 +136,38 @@ def _salon_bot_for(tenant):
         return None
 
 
-def _recipients_for(message) -> tuple[list[str], str]:
-    """``(chat_ids, channel_label)`` for this message's direction."""
+def _recipients_for(message) -> tuple[tuple[MaxAddress, ...], str]:
+    """``(addresses, channel_label)`` for this message's direction.
 
-    from apps.handoff.notify import get_notify_chat_ids
+    Каждый получатель несёт СВОЙ ключ адресации, и ветвление по ключу
+    здесь не повторяется: с DRF-1559 выбор «человек, если задан, иначе
+    диалог» живёт в :mod:`apps.channels.max.addressing`, а этот резолвер
+    отвечает только на вопрос «кому».
+    """
 
     thread = message.thread
     tenant = thread.tenant
 
     if message.sender_role == "master":
-        # To the salon side. Same cascade as the booking notice so a salon
-        # configures one destination, not one per feature.
-        manager_chat_id = (getattr(tenant, "manager_chat_id", "") or "").strip()
-        if manager_chat_id:
-            return [manager_chat_id], "manager"
-        fallback = get_notify_chat_ids()
-        return (list(fallback), "fallback") if fallback else ([], "none")
+        # To the salon side, and only to this salon's own address. The
+        # global operator channel was removed on 2026-09-07 (see the
+        # module docstring): it names no tenant, so it would have shown
+        # ten salons each other's staff correspondence.
+        manager = manager_address(tenant)
+        if manager:
+            return (manager,), "manager"
+        return (), "none"
 
     # To the master personally. No fallback on purpose: broadcasting a
     # message meant for one master to the salon's shared channel would
     # leak a private conversation to whoever reads that chat.
     master = getattr(thread, "master", None)
     linked = getattr(master, "linked_bot_user", None)
-    chat_id = (getattr(linked, "chat_id", "") or "").strip() if linked else ""
-    return ([chat_id], "master") if chat_id else ([], "none")
+    # DRF-1558 — the person, not the dialog: this fan-out runs under the
+    # salon bot's ``bot_scope`` and the master's stored ``chat_id`` names
+    # their dialog with the CLIENT bot.
+    user_id = (getattr(linked, "channel_user_id", "") or "").strip() if linked else ""
+    return ((MaxAddress(user_id=user_id),), "master") if user_id else ((), "none")
 
 
 def notify_internal_message(*, message) -> None:
@@ -163,9 +179,25 @@ def notify_internal_message(*, message) -> None:
     try:
         thread = message.thread
         tenant = thread.tenant
-        chat_ids, channel = _recipients_for(message)
+        recipients, channel = _recipients_for(message)
+        recipient_count = len(recipients)
 
-        if not chat_ids:
+        if not recipient_count:
+            if message.sender_role == "master":
+                # Observable, but quiet. Since 2026-09-07 a salon with no
+                # manager address has no MAX address at all, and that is
+                # a normal state rather than a configuration defect — one
+                # INFO line per pass, no warning. (The admin→master
+                # direction below keeps its WARNING: an unlinked master
+                # IS a defect.)
+                logger.info(
+                    "internal_chat.notify.no_salon_target tenant=%s thread=%s message=%s "
+                    "— no manager address is configured, the salon copy is skipped",
+                    tenant.slug,
+                    thread.id,
+                    message.id,
+                )
+                return
             # Loud, not silent: an undeliverable staff message is a
             # configuration defect, and silence is what made the whole
             # internal-chat feature invisible in the first place.
@@ -181,7 +213,7 @@ def notify_internal_message(*, message) -> None:
 
         text = build_notification_text(message=message)
         with bot_scope(_salon_bot_for(tenant)):
-            failures = send_max_notification(text=text, chat_ids=chat_ids)
+            failures = send_max_notification(text=text, addresses=recipients)
 
         if failures:
             logger.warning(
@@ -190,7 +222,7 @@ def notify_internal_message(*, message) -> None:
                 tenant.slug,
                 thread.id,
                 channel,
-                len(chat_ids),
+                recipient_count,
                 failures,
             )
         else:
@@ -199,7 +231,7 @@ def notify_internal_message(*, message) -> None:
                 tenant.slug,
                 thread.id,
                 channel,
-                len(chat_ids),
+                recipient_count,
             )
     except Exception:  # noqa: BLE001 — a failed notice must not cost the message
         logger.exception(

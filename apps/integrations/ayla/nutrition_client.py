@@ -167,19 +167,112 @@ class FoodLogResponse:
     raw: dict[str, Any]
 
 
+def _optional_int(raw: Any) -> int | None:
+    """Число — или ``None``, когда ключа нет.
+
+    Не ``int(raw or 0)``. Тот вариант отвечал одинаково на три разных
+    вопроса: «ключа нет», «ключ null» и «ориентир ноль». Отличать их
+    обязан именно этот слой — он единственный видит сырое тело ответа;
+    ниже по конвейеру исходный ключ уже недоступен, и восстановить
+    различие будет неоткуда.
+
+    Ноль, пришедший ЯВНО, сохраняется как ноль: врать в обратную
+    сторону тоже нельзя. Ориентиром он при этом не станет — потребители
+    проверяют значение на положительность.
+    """
+    if raw is None:
+        return None
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return None
+
+
 @dataclass(frozen=True)
 class SummaryResponse:
     """Subset of ``NutritionSummaryResponseSerializer`` data we care about."""
 
     date: str
     calories_total: float
-    calories_goal: int
+    #: ``None`` — ОРИЕНТИРА НЕТ. Ayla перестала присылать ключ вовсе
+    #: (§82: «Текущая плоская норма калорий для всех удаляется»), и
+    #: нормализовать это в ноль на нашей стороне нельзя: ноль здесь
+    #: неотличим от «ориентир ноль», а дальше по конвейеру он рисуется
+    #: как «0 из 0 ккал · 0 %». Отсутствие едет отсутствием до экрана.
+    calories_goal: int | None
     protein_g: float
     fat_g: float
     carbs_g: float
     entries: list[dict[str, Any]]
     raw: dict[str, Any]
     ai_comment: str | None = None
+
+
+def _targets_source(body: dict[str, Any]) -> str:
+    """``targets_provenance.source`` — или ``""``, если каталог его не прислал.
+
+    Каталог отдаёт блок обязательным с #316, поэтому пустая строка здесь
+    — сигнал нарушенного контракта, а не «ориентиров нет». Подставить
+    ``"none"`` было бы изготовлением состояния на границе: потребитель
+    напечатал бы человеку объяснение, которого каталог не давал.
+    """
+    provenance = body.get("targets_provenance")
+    if not isinstance(provenance, dict):
+        return ""
+    return str(provenance.get("source") or "")
+
+
+#: §6 свода владельца 11.09 (OD-NUT-1): «неизвестные нормы имеют
+#: NOT_CONFIGURED, а не ноль». Настроенным ориентир считается ТОЛЬКО при
+#: названном происхождении. Всё остальное — не настроено:
+#:
+#:   none            расчёта не было или он снят (§103)
+#:   unknown_legacy  происхождение не сохранялось — число есть, объяснить
+#:                   его нечем; §103: «уже рассчитанный ориентир нельзя
+#:                   показывать как актуальный без происхождения»
+#:   ""              ключ не пришёл — контракт нарушен, число не подтверждено
+#:   ayla_proposed   посчитано, но человеком НЕ подтверждено (§5.1 свода,
+#:                   вводится ayla-a3) — не настроено до подтверждения
+#:
+#: Правило применяется ОДИН РАЗ, на границе: ниже, при разборе ответа,
+#: ориентиры не настроенного профиля читаются как ``None``, и ни одна
+#: поверхность не получает числа, которое ей нельзя показывать. Иначе
+#: правило пришлось бы повторять в каждом рендере, и первая же новая
+#: поверхность, прочитавшая ``profile.protein_g`` напрямую, напечатала бы
+#: число без происхождения — как это и было до этой правки у шести
+#: профилей пилота (все ``unknown_legacy``).
+TARGETS_CONFIGURED_SOURCES: frozenset[str] = frozenset({"ayla_calculated", "user_entered"})
+TARGETS_CONFIGURED = "configured"
+TARGETS_NOT_CONFIGURED = "not_configured"
+
+
+def targets_configured(source: str | None) -> bool:
+    """Есть ли у ориентира названное происхождение (§6, §103)."""
+    return (source or "") in TARGETS_CONFIGURED_SOURCES
+
+
+def _target_or_none(norms: dict[str, Any], key: str) -> int | None:
+    """Ориентир из блока ``norms`` — или ``None``, если его там нет.
+
+    Три состояния входа и ровно два исхода:
+
+    * ключа нет — ориентира нет, каталог сказал это отсутствием
+      (``norms: {}`` при несостоявшемся расчёте) → ``None``;
+    * ключ есть и значение ложное (``0``, ``null``) → тоже ``None``:
+      ориентир ноль калорий физически невозможен, а строки, посчитанные
+      ДО перехода каталога на пустой блок, ещё присылают нули;
+    * ключ есть и значение настоящее → число.
+
+    Второй пункт — не снисходительность к старому формату, а условие
+    того, чтобы поставка была наблюдаемой сразу: пока в базе каталога
+    лежат строки с ``daily_kcal = 0``, разница между «ноль» и «нет»
+    обязана исчезнуть здесь, а не через миграцию (она отдельный срез,
+    N-b, и ждёт решения владельца).
+    """
+    value = norms.get(key)
+    if not value:
+        return None
+    return int(value)
 
 
 @dataclass(frozen=True)
@@ -197,19 +290,74 @@ class ProfileResponse:
     height_cm: int
     weight_kg: int
     goal: str  # "lose" | "maintain" | "gain" | "tone" | ""
-    daily_kcal: int
-    protein_g: int
-    fat_g: int
-    carbs_g: int
-    water_ml: int
-    bmr: int
+    # ``None`` — ориентира НЕТ, и это не то же самое, что ноль. Ноль
+    # калорий в сутки физически невозможен, поэтому раньше он и служил
+    # молчаливым именем отсутствия — а необязательность в типе делает имя
+    # явным: читатель обязан решить, что показывать, вместо того чтобы
+    # напечатать «0 ккал» и не заметить (DRF-1623 N-c).
+    daily_kcal: int | None
+    protein_g: int | None
+    fat_g: int | None
+    carbs_g: int | None
+    water_ml: int | None
+    bmr: int | None
     health_flags: dict[str, Any]
     disclaimer_acked: dict[str, Any] | None
     goal_pace: str = ""
     activity: str = ""
     diet_preference: str = ""
     goal_overridden_by: str | None = None
+    #: Происхождение ориентира — ``targets_provenance.source`` каталога
+    #: (DRF-1623 N-b): ``none | unknown_legacy | ayla_calculated |
+    #: user_entered``. Пустая строка — ключ НЕ ПРИШЁЛ, и это не то же
+    #: самое, что ``"none"``: «прислали „нет“» и «не прислали» — разные
+    #: состояния, и второе нельзя изготовить из первого. Показывающая
+    #: сторона по ``"none"`` объясняет человеку, почему ориентиров нет, а
+    #: по ``""`` молчит и пишет warning: нарушен контракт, а не расчёт.
+    targets_source: str = ""
     raw: dict[str, Any] = field(default_factory=dict)
+
+    #: Поля, которые обязаны быть ``None`` у не настроенного профиля.
+    _TARGET_FIELDS = ("daily_kcal", "protein_g", "fat_g", "carbs_g", "water_ml", "bmr")
+
+    def __post_init__(self) -> None:
+        """Инвариант DTO: не настроено ⇒ ориентиров нет — при ЛЮБОМ способе сборки.
+
+        Правило §6 живёт здесь, а не в разборе ответа, потому что разбор —
+        не единственный конструктор: тесты и фикстуры собирают
+        ``ProfileResponse`` напрямую, и правило в разборе они бы обошли,
+        получив профиль с ``unknown_legacy`` И числами — состояние, которого
+        по §103 не бывает. Инвариант на типе обойти нельзя. Числа при этом
+        не теряются: они в ``raw``, для диагностики.
+        """
+        if targets_configured(self.targets_source):
+            return
+        for name in self._TARGET_FIELDS:
+            if getattr(self, name) is not None:
+                object.__setattr__(self, name, None)
+
+    @property
+    def targets_state(self) -> str:
+        """``configured`` | ``not_configured`` — имя отсутствия по §6.
+
+        Производное от ``targets_source``, а не отдельное поле: два поля
+        об одном факте разошлись бы при первом же новом источнике.
+        """
+        return (
+            TARGETS_CONFIGURED
+            if targets_configured(self.targets_source)
+            else TARGETS_NOT_CONFIGURED
+        )
+
+    @property
+    def targets_are_configured(self) -> bool:
+        """То же одним булевым — для поверхностей, которым нужен ответ, а не имя.
+
+        Единственный вопрос, который поверхность вправе задать: «можно ли
+        показывать ориентир». Ответ производится здесь, а не собирается на
+        каждом экране заново из ``targets_source``.
+        """
+        return targets_configured(self.targets_source)
 
 
 @dataclass(frozen=True)
@@ -228,7 +376,9 @@ class WaterEntryResponse:
     kcal: int
     milestone_text: str | None
     today_total_ml: int
-    today_norm_ml: int
+    #: ``None`` — ориентира по жидкости нет. Формула ``30 мл × вес``
+    #: снята до утверждения методики (§82, §85 раздел 4).
+    today_norm_ml: int | None
     alcohol_recovery_hint: bool
     raw: dict[str, Any] = field(default_factory=dict)
 
@@ -244,7 +394,7 @@ class WaterTodayResponse:
     """
 
     total_ml: int
-    norm_ml: int
+    norm_ml: int | None
     entries: list[dict[str, Any]]
     kcal_from_beverages: float = 0.0
     caffeine_mg: float = 0.0
@@ -535,7 +685,7 @@ class NutritionClient:
             return SummaryResponse(
                 date=str(body.get("date") or ""),
                 calories_total=float(body.get("calories_total") or 0.0),
-                calories_goal=int(body.get("calories_goal") or 0),
+                calories_goal=_optional_int(body.get("calories_goal")),
                 protein_g=float(body.get("protein_g") or 0.0),
                 fat_g=float(body.get("fat_g") or 0.0),
                 carbs_g=float(body.get("carbs_g") or 0.0),
@@ -675,6 +825,12 @@ class NutritionClient:
             # prefix per Ayla spec §1.1. Flat top-level fallback was removed
             # in DRF-270.
             norms = body.get("norms") or {}
+            # §6 / §103: число без названного происхождения наружу не
+            # выходит — но правило стоит не здесь, а на самом типе
+            # (``ProfileResponse.__post_init__``): разбор не единственный
+            # конструктор, и правило в разборе обошёл бы любой, кто
+            # собирает DTO руками. Здесь ориентиры читаются как есть;
+            # тип сам обнулит их у не настроенного профиля.
             return ProfileResponse(
                 gender=str(body.get("gender") or ""),
                 age=int(body.get("age") or 0),
@@ -687,15 +843,31 @@ class NutritionClient:
                 # is the back-compat string name.
                 activity=str(body.get("activity_coefficient") or body.get("activity") or ""),
                 diet_preference=str(body.get("diet_preference") or ""),
-                daily_kcal=int(norms.get("daily_kcal") or 0),
-                protein_g=int(norms.get("daily_protein_g") or 0),
-                fat_g=int(norms.get("daily_fat_g") or 0),
-                carbs_g=int(norms.get("daily_carbs_g") or 0),
-                water_ml=int(norms.get("daily_water_ml") or 0),
-                bmr=int(norms.get("bmr") or 0),
+                # Ориентир, которого нет, приезжает ОТСУТСТВИЕМ ключа и
+                # таким же уезжает дальше — ``None``, а не ноль.
+                #
+                # Стояло ``int(norms.get("daily_kcal") or 0)`` при
+                # ``daily_kcal: int`` в типе, и это изготовление
+                # правдоподобного значения на границе: «ключа нет» и
+                # «ноль» становились неразличимы раньше, чем кто-либо
+                # успевал увидеть разницу. Каталог с этой поставки
+                # присылает пустой ``norms``, когда расчёта не было
+                # (DRF-1623 N-c), — и без этой правки бот изготовил бы
+                # ноль заново, то есть половина поставки в каталоге не
+                # дала бы наблюдаемого эффекта.
+                #
+                # Отсутствие обязано пережить КАЖДЫЙ переход. Здесь
+                # переход последний перед экраном.
+                daily_kcal=_target_or_none(norms, "daily_kcal"),
+                protein_g=_target_or_none(norms, "daily_protein_g"),
+                fat_g=_target_or_none(norms, "daily_fat_g"),
+                carbs_g=_target_or_none(norms, "daily_carbs_g"),
+                water_ml=_target_or_none(norms, "daily_water_ml"),
+                bmr=_target_or_none(norms, "bmr"),
                 health_flags=dict(body.get("health_flags") or {}),
                 disclaimer_acked=body.get("disclaimer_acked"),
                 goal_overridden_by=body.get("goal_overridden_by"),
+                targets_source=_targets_source(body),
                 raw=body,
             )
 
@@ -767,7 +939,7 @@ class NutritionClient:
                 kcal=int(body.get("kcal") or 0),
                 milestone_text=body.get("milestone_text"),
                 today_total_ml=int(body.get("today_total_water_ml") or 0),
-                today_norm_ml=int(body.get("today_norm_water_ml") or 0),
+                today_norm_ml=_optional_int(body.get("today_norm_water_ml")),
                 alcohol_recovery_hint=bool(body.get("alcohol_recovery_hint") or False),
                 raw=body,
             )
@@ -848,7 +1020,7 @@ class NutritionClient:
             body = resp.json().get("data", {})
             return WaterTodayResponse(
                 total_ml=int(body.get("today_total_water_ml") or 0),
-                norm_ml=int(body.get("today_norm_water_ml") or 0),
+                norm_ml=_optional_int(body.get("today_norm_water_ml")),
                 entries=list(body.get("entries") or []),
                 kcal_from_beverages=float(body.get("today_kcal_from_beverages") or 0.0),
                 caffeine_mg=float(body.get("today_caffeine_mg") or 0.0),

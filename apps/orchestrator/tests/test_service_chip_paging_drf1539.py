@@ -60,6 +60,10 @@ def popular() -> CatalogService:
             name=f"Мастер {index:02d}",
             is_active=True,
             invite_status=CatalogMaster.InviteStatus.ACCEPTED,
+            # DRF-1540/1544 — синхронизированная строка несёт канонический ключ.
+            # Без него мастер не продаётся, и клиентские поверхности отвечали бы
+            # пустотой не потому, что сломаны.
+            ayla_user_id=uuid4(),
         )
         MasterService.all_tenants.create(tenant=tenant, master=master, service=service)
     return service

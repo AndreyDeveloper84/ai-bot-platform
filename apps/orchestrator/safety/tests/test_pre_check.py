@@ -71,6 +71,71 @@ class TestBlock:
         assert r.verdict == SafetyVerdict.BLOCK
 
 
+class TestDrugMentionIsNotStop:
+    """Owner 11.09 §3: a bare mention is not STOP; asking to pick/dose/schedule is.
+
+    Both sides of the same phrase, on purpose: a rule that only had the STOP
+    side would pass with the old bare-word pattern, and a rule that only had
+    the NORMAL side would pass with no pattern at all.
+    """
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "вчера выпила ибупрофен, можно сегодня на массаж?",
+            "принимаю парацетамол, это помешает процедуре?",
+            "у меня сейчас курс антибиотиков, записаться можно?",
+            "после кеторола голова прошла, спасибо",
+            "I took a painkiller this morning, is a facial ok?",
+        ],
+    )
+    def test_a_bare_mention_passes(self, text):
+        r = pre_check(text)
+        assert r.verdict == SafetyVerdict.ALLOW, (text, r.matched_patterns)
+        assert r.matched_patterns == []
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "посоветуйте ибупрофен перед массажем",
+            "подберите мне обезболивающее",
+            "сколько таблеток парацетамола можно выпить?",
+            "какую дозу кеторола принимать?",
+            "какая схема приёма антибиотика?",
+            "дайте анальгин",
+            "what painkiller should I take before waxing?",
+            "recommend a dosage of ibuprofen — tramadol?",
+        ],
+    )
+    def test_asking_to_pick_or_dose_is_stop(self, text):
+        r = pre_check(text)
+        assert r.verdict == SafetyVerdict.BLOCK, (text, r.matched_patterns)
+        assert len(r.matched_patterns) == 1
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "посоветуйте хорошего мастера по маникюру",
+            "дайте адрес салона",
+            "подберите мне время на массаж",
+            "сколько стоит стрижка?",
+            "recommend a good stylist for a bob",
+        ],
+    )
+    def test_an_ask_without_a_drug_is_the_bots_ordinary_work(self, text):
+        """The ask-half alone must not fire: «посоветуйте мастера» is what
+        this bot is for. Found by substitution — with the drug-lookahead
+        loosened to any word, nothing here went red until this test."""
+        r = pre_check(text)
+        assert r.verdict == SafetyVerdict.ALLOW, (text, r.matched_patterns)
+        assert r.matched_patterns == []
+
+    def test_the_two_sides_differ_by_the_ask_alone(self):
+        """Same drug, same words otherwise — only the asking changes the verdict."""
+        assert pre_check("ибупрофен перед массажем — нормально?").verdict == SafetyVerdict.ALLOW
+        assert pre_check("посоветуйте ибупрофен перед массажем").verdict == SafetyVerdict.BLOCK
+
+
 class TestClarify:
     def test_vague_medical_question(self):
         r = pre_check("почему болит спина?")
@@ -92,6 +157,35 @@ class TestVerdictPriority:
         # Drug name (block) + vague medical (clarify) → block wins.
         r = pre_check("почему болит, дайте парацетамол")
         assert r.verdict == SafetyVerdict.BLOCK
+
+    def test_the_order_is_the_owners_order_by_name(self):
+        """Owner 11.09 §3: `STOP > CLARIFY > CAUTION > NORMAL`.
+
+        The two phrase tests above hold the order by example; this one holds
+        it by name, so a reorder reddens with the decision in the message
+        rather than with a sentence about ibuprofen. Both STOPs (BLOCK,
+        HANDOFF) sit above CLARIFY; HANDOFF above BLOCK is §127, not §3.
+        CAUTION is absent here because `pre_check` has no bucket for it
+        (0 rules, §126) — that absence is the point, not an omission.
+        """
+        from apps.orchestrator.safety.pre_check import _VERDICT_PRIORITY
+
+        assert _VERDICT_PRIORITY == [
+            SafetyVerdict.ALLOW.value,
+            SafetyVerdict.CLARIFY.value,
+            SafetyVerdict.BLOCK.value,
+            SafetyVerdict.HANDOFF.value,
+        ], "priority list changed — §3 / §127 say which way it may"
+        assert "caution" not in _VERDICT_PRIORITY
+
+    def test_every_pair_of_buckets_reduces_to_the_higher(self):
+        """Not two hand-picked phrases: every ordered pair of buckets."""
+        from apps.orchestrator.safety.pre_check import _VERDICT_PRIORITY, _reduce_verdict
+
+        for i, lower in enumerate(_VERDICT_PRIORITY):
+            for higher in _VERDICT_PRIORITY[i + 1 :]:
+                assert _reduce_verdict({lower, higher}) == SafetyVerdict(higher), (lower, higher)
+                assert _reduce_verdict({higher, lower}) == SafetyVerdict(higher), (higher, lower)
 
 
 class TestRiskElevation:

@@ -8,9 +8,11 @@ told "someone will answer within 30 minutes", and nobody knew.
 
 ### Contract (brief §3, do not weaken)
 
-* **Off by default.** ``HANDOFF_NOTIFY_MAX_CHAT_IDS`` empty → the
-  mechanism is fully disabled: no network calls, no warning-level log
-  lines. That is the CI / local-dev default.
+* **Off by default.** Both ``HANDOFF_NOTIFY_MAX_USER_IDS`` and
+  ``HANDOFF_NOTIFY_MAX_CHAT_IDS`` empty → the mechanism is fully
+  disabled: no network calls, no warning-level log lines. That is the
+  CI / local-dev default. A non-empty USER_IDS list REPLACES the
+  CHAT_IDS one — see :func:`get_notify_addresses` (DRF-1559).
 * **After commit, never inside the transaction.** Callers register
   :func:`notify_admin_task_created` via ``transaction.on_commit`` — a
   rolled-back task must never notify (false alarm: the operator hunts
@@ -48,6 +50,7 @@ from django.conf import settings
 from django.utils import timezone
 
 from apps.audit.services import write_audit
+from apps.channels.max.addressing import MaxAddress, operator_addresses, split_addresses
 from apps.channels.max.outbound import send_message
 from apps.handoff.models import AdminTask
 
@@ -64,8 +67,48 @@ _MAX_REASON_LEN = 200
 _HIGH_PRIORITIES = frozenset({AdminTask.Priority.HIGH.value, AdminTask.Priority.URGENT.value})
 
 
+def get_notify_addresses() -> tuple[MaxAddress, ...]:
+    """Configured operator recipients; empty = mechanism off.
+
+    Since DRF-1559 the setting comes in two shapes and the choice between
+    them lives in one place — :func:`apps.channels.max.addressing.operator_addresses`.
+    A non-empty ``HANDOFF_NOTIFY_MAX_USER_IDS`` (people, valid for any of
+    our bots) REPLACES ``HANDOFF_NOTIFY_MAX_CHAT_IDS`` (dialogs, valid only
+    for the bot whose dialog they were copied out of) rather than adding to
+    it: during the migration both would name the same human, and the union
+    would message them twice per event.
+
+    **Operator-facing only.** This is ONE GLOBAL list with no tenant
+    binding, so it is never a stand-in for a salon's own address: on the
+    pilot all ten salons resolved to a single hand-typed dialog, which
+    would have shown each salon the others' bookings. The two salon-side
+    readers (booking notice, internal chat) were removed by the owner's
+    decision of 2026-09-07 and must not come back — that
+    ``channel=fallback`` is what answered 404 alongside the master
+    notification (`docs/OPEN_DECISIONS.md` §55, §60).
+
+    What is left addresses the OPERATOR — the person on the other end of
+    an escalation and of an LLM-health alert — for whom «one shared
+    recipient, no tenant» is the intent rather than a defect. Mind the
+    mine underneath: those three paths run outside any ``bot_scope``, and
+    that is the only reason a dialog-shaped entry still works for them.
+    The first legitimate move of an escalation under a salon bot repeats
+    the 404 — migrate that recipient to ``HANDOFF_NOTIFY_MAX_USER_IDS``
+    before making it.
+    """
+
+    return operator_addresses()
+
+
 def get_notify_chat_ids() -> list[str]:
-    """Configured MAX recipient chat_ids; empty list = mechanism off."""
+    """Только диалоговые получатели — совместимость для читателей настройки.
+
+    Оставлено, потому что ``apps/llm/health.py`` и пара сообщений в логах
+    спрашивают именно «настроен ли запасной канал», а не «каким ключом он
+    адресуется». Для ОТПРАВКИ использовать :func:`get_notify_addresses`:
+    этот список пуст, когда настроены люди, и вызывающий, спутавший одно
+    с другим, замолчит вместо того, чтобы отправить.
+    """
 
     return [c for c in getattr(settings, "HANDOFF_NOTIFY_MAX_CHAT_IDS", []) if c]
 
@@ -113,18 +156,60 @@ def build_admin_task_notification(task: AdminTask) -> str:
 def send_max_notification(
     *,
     text: str,
-    chat_ids: Sequence[str],
+    chat_ids: Sequence[str] = (),
+    user_ids: Sequence[str] = (),
+    addresses: Sequence[MaxAddress] = (),
     timeout: float = _SEND_TIMEOUT,
     on_failure: Callable[[str, Exception], None] | None = None,
 ) -> int:
-    """Fan out ``text`` to each MAX chat, best-effort. Returns failures.
+    """Fan out ``text`` to each MAX recipient, best-effort. Returns failures.
 
-    Every recipient is isolated: an exception on one chat is logged
+    Two recipient lists, because there are two kinds of address and only
+    one of them survives a change of sending bot (DRF-1558):
+
+    * ``user_ids`` — ``BotUser.channel_user_id``. The person. **This is
+      what a recipient resolved from our own database must use**: the
+      ``chat_id`` stored next to it names a dialog with whichever bot
+      wrote first, and a different bot sending there gets 404
+      ``dialog.not.found``.
+    * ``chat_ids`` — a dialog id an operator configured by hand
+      (``HANDOFF_NOTIFY_MAX_CHAT_IDS``, ``Tenant.manager_chat_id``).
+      We have no person id for those, so they stay as they are and
+      inherit the same limitation: they only work for the bot whose
+      dialog they were copied out of.
+
+    ``addresses`` (DRF-1559) is the third and preferred form: a
+    :class:`~apps.channels.max.addressing.MaxAddress` already carries which
+    of the two keys it is, so a caller that got its recipient from config
+    never has to branch. It is merged into the two lists below.
+
+    All three may be given; each recipient is addressed by its own key.
+
+    Every recipient is isolated: an exception on one address is logged
     (and reported via ``on_failure``) but never cancels the remaining
     sends. No retries — the sync path stays short by design.
     """
 
+    extra_chat_ids, extra_user_ids = split_addresses(addresses)
+    chat_ids = [*chat_ids, *extra_chat_ids]
+    user_ids = [*user_ids, *extra_user_ids]
+
     failures = 0
+    for user_id in user_ids:
+        try:
+            send_message(user_id=user_id, text=text, timeout=timeout)
+        except Exception as exc:  # noqa: BLE001 — best-effort by contract
+            failures += 1
+            logger.warning(
+                "handoff.notify.send_failed user_id=%s exc=%s",
+                user_id,
+                exc,
+            )
+            if on_failure is not None:
+                try:
+                    on_failure(user_id, exc)
+                except Exception:  # noqa: BLE001 — the hook is best-effort too
+                    logger.exception("handoff.notify.on_failure_hook_failed user_id=%s", user_id)
     for chat_id in chat_ids:
         try:
             send_message(chat_id=chat_id, text=text, timeout=timeout)
@@ -152,20 +237,21 @@ def notify_admin_task_created(task: AdminTask) -> None:
     """
 
     try:
-        chat_ids = get_notify_chat_ids()
-        if not chat_ids:
+        recipients = get_notify_addresses()
+        if not recipients:
             return  # fully disabled (§3.1)
         text = build_admin_task_notification(task)
 
-        def _audit_failure(chat_id: str, exc: Exception) -> None:
-            _write_notify_failure_audit(task, chat_id, exc)
+        def _audit_failure(address: str, exc: Exception) -> None:
+            _write_notify_failure_audit(task, address, exc)
 
-        failures = send_max_notification(text=text, chat_ids=chat_ids, on_failure=_audit_failure)
+        failures = send_max_notification(text=text, addresses=recipients, on_failure=_audit_failure)
         if failures == 0:
             logger.info(
-                "handoff.notify.sent task=%s recipients=%d",
+                "handoff.notify.sent task=%s recipients=%d addressed_by=%s",
                 task.id,
-                len(chat_ids),
+                len(recipients),
+                recipients[0].key,
             )
     except Exception:  # noqa: BLE001 — hard containment (§3.3)
         logger.exception("handoff.notify.unexpected task=%s", getattr(task, "id", None))
@@ -217,28 +303,38 @@ def notify_admin_task_unclaimed(task: AdminTask, *, waited_minutes: int) -> None
     """
 
     try:
-        chat_ids = get_notify_chat_ids()
-        if not chat_ids:
+        recipients = get_notify_addresses()
+        if not recipients:
             return  # fully disabled (§3.1)
         text = build_unclaimed_notification(task, waited_minutes=waited_minutes)
 
-        def _audit_failure(chat_id: str, exc: Exception) -> None:
-            _write_notify_failure_audit(task, chat_id, exc)
+        def _audit_failure(address: str, exc: Exception) -> None:
+            _write_notify_failure_audit(task, address, exc)
 
-        failures = send_max_notification(text=text, chat_ids=chat_ids, on_failure=_audit_failure)
+        failures = send_max_notification(text=text, addresses=recipients, on_failure=_audit_failure)
         if failures == 0:
             logger.info(
-                "handoff.notify.unclaimed_sent task=%s recipients=%d waited_minutes=%d",
+                "handoff.notify.unclaimed_sent task=%s recipients=%d waited_minutes=%d "
+                "addressed_by=%s",
                 task.id,
-                len(chat_ids),
+                len(recipients),
                 waited_minutes,
+                recipients[0].key,
             )
     except Exception:  # noqa: BLE001 — hard containment (§3.3)
         logger.exception("handoff.notify.unclaimed_unexpected task=%s", getattr(task, "id", None))
 
 
-def _write_notify_failure_audit(task: AdminTask, chat_id: str, exc: Exception) -> None:
-    """Audit a failed notification so the gap is visible after the fact."""
+def _write_notify_failure_audit(task: AdminTask, address: str, exc: Exception) -> None:
+    """Audit a failed notification so the gap is visible after the fact.
+
+    Ключ payload переименован ``chat_id`` → ``address`` (DRF-1559): под ним
+    теперь может лежать и идентификатор человека, и идентификатор диалога.
+    Оставить прежнее имя значило бы, что запись о сбое доставки называет
+    получателя не тем, чем он был, — а читают её именно тогда, когда
+    выясняют, кому не дошло. По репозиторию этот ключ никто не читает:
+    единственный тест на эту запись проверяет её наличие, не содержимое.
+    """
 
     try:
         write_audit(
@@ -247,7 +343,7 @@ def _write_notify_failure_audit(task: AdminTask, chat_id: str, exc: Exception) -
             target_id=task.id,
             payload={
                 "conversation_id": str(task.conversation_id),
-                "chat_id": str(chat_id),
+                "address": str(address),
                 "error": f"{type(exc).__name__}: {exc}"[:200],
             },
         )

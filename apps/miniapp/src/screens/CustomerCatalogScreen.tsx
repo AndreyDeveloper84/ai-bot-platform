@@ -39,7 +39,9 @@ import { MasterCard } from "../components/MasterCard";
 import { ScreenLayout } from "../components/ScreenLayout";
 import { ServiceCard } from "../components/ServiceCard";
 import { DelayedSkeleton, ServiceCardSkeleton } from "../components/Skeleton";
+import { OfflineBanner } from "../components/OfflineBanner";
 import { StateError } from "../components/StateError";
+import { useOnline } from "../hooks/useOnline";
 import type { Service } from "../lib/api";
 import { getCatalogBrowse, type CatalogBrowseData } from "../lib/customer-booking";
 import { resolveCatalogEmpty } from "../lib/customer-catalog-empty";
@@ -70,6 +72,7 @@ type State =
 const PICKS_CAP = 3;
 
 export function CustomerCatalogScreen() {
+  const online = useOnline();
   const navigate = useNavigate();
   const [state, setState] = useState<State>({ kind: "loading" });
   const [search, setSearch] = useState("");
@@ -164,6 +167,8 @@ export function CustomerCatalogScreen() {
 
   return (
     <ScreenLayout back={BACK} title="Найди мастера">
+      {/* Воронка записи говорит про сеть ДО нажатия, а не после. */}
+      <OfflineBanner online={online} />
       <div className="customer-catalog__search">
         <input
           type="search"

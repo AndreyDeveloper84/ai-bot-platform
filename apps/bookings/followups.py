@@ -626,6 +626,25 @@ def _eligible_reminders(window_start: datetime, window_end: datetime) -> list[Bo
     into the output. Opt-out and erasure need no such visibility — both
     are plain columns anyone can ``count()`` at any time, and neither is
     a number that changes what the operator does next.
+
+    **Caveat since §35 п.9 (``apps.consent.customer.revoke_data_storage``):
+    that separation is no longer clean for one route.** Revoking the
+    storage consent from the Mini App now also sets
+    ``proactive_messages_opt_out`` — the toggle must not read "on" while
+    the effect is off — so a *self-serve* revoker is filtered out here
+    and never reaches :func:`_consent_blocker`'s ``consent_withdrawn``.
+    Two consequences an operator has to know before reading the numbers
+    above as an answer:
+
+    * the opt-out count now mixes "chose not to be messaged" with
+      "withdrew their 152-ФЗ consent through the app";
+    * withdrawal by any other route (:func:`apps.consent.services.withdraw`
+      from the admin side) leaves the column ``False``, so those people
+      still surface with ``consent_withdrawn``. The same legal fact is
+      visible differently depending on which door it came through.
+
+    Nothing is delivered in either arrangement — both vetoes block — so
+    this is an observability caveat, not a delivery risk.
     """
     return list(
         BookingReminder.all_tenants.filter(
@@ -661,14 +680,17 @@ class Decision:
     visit_at: datetime | None
     send: bool
     reason: str
-    chat_id: str = ""
+    #: MAX ``user_id`` of the recipient — ``BotUser.channel_user_id``, the
+    #: person. NOT ``chat_id``: a follow-up writes first, and the stored
+    #: ``chat_id`` names a dialog with whichever bot opened one (DRF-1558).
+    user_id: str = ""
     text: str = ""
 
     def as_log(self) -> dict[str, Any]:
         """PII-free projection for logs and the dry-run listing.
 
-        ``text`` and ``chat_id`` are excluded on purpose. The rendered
-        nudge carries the master's name and the chat id is the address
+        ``text`` and ``user_id`` are excluded on purpose. The rendered
+        nudge carries the master's name and the user id is the address
         itself; neither belongs in a log line an operator will paste into
         a ticket.
         """
@@ -726,8 +748,12 @@ def plan_post_visit_followups(*, now_utc: datetime | None = None) -> list[Decisi
                 **kwargs,
             )
 
-        chat_id = (bu.chat_id or "").strip()
-        if not chat_id:
+        # Reason slug and the counter it feeds keep the name ``no_chat_id``
+        # even though the address moved to ``channel_user_id`` (DRF-1558):
+        # it is an emitted metric key, and renaming it silently zeroes
+        # whatever counts it today.
+        user_id = (bu.channel_user_id or "").strip()
+        if not user_id:
             logger.warning(
                 "bookings.followup.no_chat_id bot_user=%s tenant=%s",
                 bu.pk,
@@ -759,7 +785,7 @@ def plan_post_visit_followups(*, now_utc: datetime | None = None) -> list[Decisi
             decisions.append(decide(blocked_by))
             continue
 
-        decisions.append(decide("due", send=True, chat_id=chat_id, text=text))
+        decisions.append(decide("due", send=True, user_id=user_id, text=text))
 
     return decisions
 
@@ -833,7 +859,7 @@ def send_post_visit_followups() -> dict[str, int]:
             )
             continue
         try:
-            send_message(chat_id=decision.chat_id, text=decision.text, attachments=None)
+            send_message(user_id=decision.user_id, text=decision.text, attachments=None)
         except MaxAPIError as exc:
             logger.warning(
                 "bookings.followup.send_failed bot_user=%s status=%s err=%s",

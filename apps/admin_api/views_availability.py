@@ -241,6 +241,7 @@ def availability_request_approve(request: HttpRequest, request_id: str) -> HttpR
             tenant_id=tenant.id,
             actor=_resolve_django_user(bot_user),
             actor_bot_user_id=bot_user.id,
+            actor_bot_user=bot_user,
             actor_role=_resolve_actor_role(role_ctx),
         )
     except AvailabilityDecisionError as exc:

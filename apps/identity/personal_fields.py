@@ -212,14 +212,19 @@ PERSONAL_FIELDS: tuple[PersonalField, ...] = (
     ),
     PersonalField(
         site="identity.BotUser.timezone",
-        origin="SYSTEM",
+        origin="USER_STATED",
         owner="BOT",
         crosses_salons=False,
         why=(
-            "IANA zone for rendering times in messages. No runtime path "
-            "writes it today (it is only read, at "
-            "apps/identity/services/profile.py:96) — a personal slot standing "
-            "at its default."
+            "IANA-пояс человека для отрисовки времени в сообщениях. "
+            "Происхождение сменилось с SYSTEM на USER_STATED (DRF-1477): "
+            "здесь стояло «no runtime path writes it today — a personal slot "
+            "standing at its default», и это перестало быть правдой. Экран "
+            "профиля определяет пояс браузером, ПОКАЗЫВАЕТ его человеку "
+            "видимым значением и записывает только по подтверждению, через "
+            "`PATCH /me`. Значение с этого момента — ответ человека, а не "
+            "умолчание колонки: пусто означает «не задано» (DRF-1606), и "
+            "непустое означает, что его назвали."
         ),
     ),
     # -----------------------------------------------------------------
@@ -617,6 +622,15 @@ NOT_PERSONAL: Mapping[str, str] = {
     "identity.BotUser.id": "Row identity.",
     "identity.BotUser.tenant": "Scoping — which salon this shell of the person belongs to.",
     "identity.BotUser.ayla_user_id": "Identity bridge to the canonical Ayla user; an address, not a fact.",
+    "identity.BotUser.ayla_user_id_is_proxy": (
+        "A property of that address, not of the person: which sort of Ayla "
+        "account it points at (False real, True Ayla's isolated proxy, NULL "
+        "unknown). It says nothing about who the person is or what they want "
+        "— it tells a consumer whether the address is usable outside Ayla "
+        "(DRF-1649). Same class as ayla_user_id above, and it must travel "
+        "wherever that does, because a key without its sort is what forced "
+        "consumers to guess."
+    ),
     "identity.BotUser.channel": "Routing — which messenger this shell speaks over.",
     "identity.BotUser.channel_user_id": "Routing — the person's id inside that messenger.",
     "identity.BotUser.chat_id": "Routing — where outbound sends land. Decides where, never what.",
@@ -630,6 +644,18 @@ NOT_PERSONAL: Mapping[str, str] = {
     ),
     "identity.BotUser.food_scanner_consent_at": "Permission record for the food scanner surface.",
     "identity.BotUser.deleted_at": "Erasure bookkeeping — when deletion was requested.",
+    "identity.BotUser.blocked_at": (
+        "Block bookkeeping (DRF-1497) — when an admin blocked the person. It "
+        "decides only whether outbound sends are delivered, never what they say."
+    ),
+    "identity.BotUser.blocked_reason": (
+        "Block bookkeeping — the reason the admin typed. Shown back to staff, "
+        "never fed into what Ayla says to the person."
+    ),
+    "identity.BotUser.blocked_by_username": (
+        "Block bookkeeping — which admin account blocked. Audit duplicate, not a "
+        "fact about the person."
+    ),
     # identity.UserPreferences
     "identity.UserPreferences.bot_user": "Row identity — the person this row is.",
     "identity.UserPreferences.tenant": "Scoping.",

@@ -25,10 +25,11 @@ from django.urls import NoReverseMatch, reverse
 
 from apps.adminconsole.client_access import is_unrestricted, open_access
 from apps.adminconsole.models import ClientDataAccessGrant, ClientDataAccessLog
+from apps.adminconsole.theme import AylaAdminMedia
 
 
 @admin.register(LogEntry)
-class AdminActionLogAdmin(admin.ModelAdmin):
+class AdminActionLogAdmin(AylaAdminMedia, admin.ModelAdmin):
     list_display = (
         "action_time",
         "user",
@@ -39,6 +40,8 @@ class AdminActionLogAdmin(admin.ModelAdmin):
     )
     list_filter = ("action_flag", "content_type", "user")
     search_fields = ("object_repr", "change_message", "user__username")
+    search_help_text = "Ищет по названию изменённой строки, тексту изменения и имени сотрудника."
+    empty_value_display = "нет данных"
     date_hierarchy = "action_time"
     ordering = ("-action_time",)
 
@@ -83,7 +86,7 @@ _GRANT_VIEW_FIELDS = (
 
 
 @admin.register(ClientDataAccessGrant)
-class ClientDataAccessGrantAdmin(admin.ModelAdmin):
+class ClientDataAccessGrantAdmin(AylaAdminMedia, admin.ModelAdmin):
     """Экран «указать причину и открыть доступ» (DRF-1514).
 
     Единственная дверь к переписке и профилю клиента. Здесь заводится
@@ -109,6 +112,8 @@ class ClientDataAccessGrantAdmin(admin.ModelAdmin):
     )
     list_filter = ("tenant_slug",)
     search_fields = ("actor_username", "client_label", "reason")
+    search_help_text = "Ищет по сотруднику, подписи клиента и тексту причины."
+    empty_value_display = "нет данных"
     date_hierarchy = "created_at"
     ordering = ("-created_at",)
 
@@ -193,7 +198,7 @@ class ClientDataAccessGrantAdmin(admin.ModelAdmin):
 
 
 @admin.register(ClientDataAccessLog)
-class ClientDataAccessLogAdmin(admin.ModelAdmin):
+class ClientDataAccessLogAdmin(AylaAdminMedia, admin.ModelAdmin):
     """Журнал доступа — кто что видел (DRF-1514).
 
     Соседний экран ``/admin/admin/logentry/`` отвечает на другой вопрос:
@@ -219,6 +224,8 @@ class ClientDataAccessLogAdmin(admin.ModelAdmin):
     )
     list_filter = ("outcome", "screen", "tenant_slug")
     search_fields = ("actor_username", "client_label", "reason", "object_id")
+    search_help_text = "Ищет по сотруднику, подписи клиента, причине и идентификатору строки."
+    empty_value_display = "нет данных"
     date_hierarchy = "occurred_at"
     ordering = ("-occurred_at",)
 

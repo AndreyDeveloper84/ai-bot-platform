@@ -196,7 +196,11 @@ class TestHappyPath:
 
         assert mock_send.call_count == 1
         kwargs = mock_send.call_args.kwargs
-        assert kwargs["chat_id"] == "chat-fu-1"
+        # DRF-1558 — follow-up пишет первым: адрес это человек, не диалог.
+        # ``chat_id`` строки специально другой, поэтому регрессия на него
+        # даст другое значение, а не то же самое.
+        assert kwargs["user_id"] == "bu-fu-1"
+        assert "chat_id" not in kwargs
         assert kwargs["attachments"] is None
         text = kwargs["text"]
         # Copy should mention "вчерашний визит" + the master name.
@@ -534,15 +538,13 @@ class TestMultiTenant:
         t2 = Tenant.objects.create(slug="salon-fu-b", name="Salon B")
         bu1 = make_consented_user(
             t1,
-            channel_user_id="bu-fu-a",
-            chat_id="cli-A",
+            channel_user_id="cli-A",
             phone="79990000001",
             client_name="Alice",
         )
         bu2 = make_consented_user(
             t2,
-            channel_user_id="bu-fu-b",
-            chat_id="cli-B",
+            channel_user_id="cli-B",
             phone="79990000002",
             client_name="Bob",
         )
@@ -564,8 +566,8 @@ class TestMultiTenant:
 
         assert result["sent"] == 2
         assert mock_send.call_count == 2
-        chat_ids = {call.kwargs["chat_id"] for call in mock_send.call_args_list}
-        assert chat_ids == {"cli-A", "cli-B"}
+        user_ids = {call.kwargs["user_id"] for call in mock_send.call_args_list}
+        assert user_ids == {"cli-A", "cli-B"}
 
         bu1.refresh_from_db()
         bu2.refresh_from_db()
@@ -577,11 +579,11 @@ class TestMultiTenant:
 # 12. No chat_id → skip + WARN
 # ────────────────────────────────────────────────────────────────────
 class TestNoChatId:
-    def test_empty_chat_id_skipped(self, tenant: Tenant, caplog) -> None:
+    def test_empty_address_skipped(self, tenant: Tenant, caplog) -> None:
         bu = make_consented_user(
             tenant,
-            channel_user_id="bu-no-chat",
-            chat_id="",  # empty — can't reach them
+            channel_user_id="",  # empty — can't reach them (DRF-1558: адрес=user_id)
+            chat_id="chat-no-reach",
             phone="79990000099",
             client_name="No Reach",
         )
@@ -604,11 +606,11 @@ class TestNoChatId:
         bu.refresh_from_db()
         assert CONTEXT_KEY not in (bu.context or {})
 
-    def test_whitespace_only_chat_id_treated_as_empty(self, tenant: Tenant) -> None:
+    def test_whitespace_only_address_treated_as_empty(self, tenant: Tenant) -> None:
         bu = make_consented_user(
             tenant,
-            channel_user_id="bu-ws-chat",
-            chat_id="   ",
+            channel_user_id="   ",
+            chat_id="chat-ws",
             phone="79990000098",
             client_name="WS",
         )

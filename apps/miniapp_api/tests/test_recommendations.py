@@ -12,6 +12,7 @@ import hashlib
 import hmac
 import json
 import time as time_module
+import uuid
 from unittest.mock import patch
 from urllib.parse import urlencode
 
@@ -22,6 +23,7 @@ from django.urls import reverse
 
 from apps.identity.models import BotUser
 from apps.integrations.ayla import recommendations_client as rc
+from apps.integrations.ayla.recommendation_resolver_client import ResolveOutcome
 from apps.integrations.ayla.recommendations_client import (
     RecommendationsBadRequest,
     RecommendationsConfigError,
@@ -86,137 +88,314 @@ def bot_user(tenant: Tenant) -> BotUser:
     )
 
 
+def _decision_body(*ayla_ids: str) -> dict:
+    """Решение резолвера в форме, которую отдаёт Ayla."""
+    return {
+        "data": {
+            "decision_id": "d-1",
+            "request_id": "r-1",
+            "resolver_spec_version": "1.0.0",
+            "ordered": [
+                {
+                    "candidate": {"kind": "PROVIDER", "id": ayla_id},
+                    "rank": i + 1,
+                    "tier": 1,
+                    "reason_codes": ["MATCH_SERVICE_EXACT"],
+                    "evidence": [],
+                }
+                for i, ayla_id in enumerate(ayla_ids)
+            ],
+        }
+    }
+
+
 # ─── TestViewIntegration ────────────────────────────────────────────────
 
 
 class TestRecommendationsView:
+    """Ручка ходит на ГРАНИЦУ (§9.4), а не на легаси-полку (DRF-1626).
+
+    Дефект был не в форме ответа, а в проводе: существуют две ручки Ayla,
+    транзит ходил на `internal/me/catalog/recommendations/` (три слоя), а
+    полка мини-приложения написана против
+    `internal/recommendation/resolve/` (`ordered[]`). Валидатор отвергал
+    ответ целиком, `picks` оставался пустым — при том, что 55 вызовов из
+    56 отвечали `200`. Ломалось не то, что отвечало.
+
+    Тесты этого класса раньше закрепляли проводку на легаси-клиент, то
+    есть **держали дефект**. Они не удалены, а переписаны: каждое
+    утверждение, у которого предмет остался, сохранено (перевод ключей,
+    непотерянный кандидат, своя авария своим именем), а те, чей предмет
+    исчез вместе с чтением тела запроса, названы поимённо ниже.
+    """
+
     def _url(self) -> str:
         return reverse("miniapp_api:customer_recommendations")
 
-    def test_happy_path_pass_through(self, client: Client, bot_user: BotUser):
-        """Body forwarded, Ayla body returned verbatim, external_user_id set."""
-        ayla_response = {
-            "recommendations": [
-                {"service_id": "svc-1", "score": 0.92},
-                {"service_id": "svc-2", "score": 0.81},
-            ],
-            "trace_id": "ayla-trace-abc",
-        }
+    def _post(self, client: Client, bot_user: BotUser, **extra):
+        return client.post(
+            self._url(),
+            HTTP_AUTHORIZATION=_init_data_header(bot_user.channel_user_id),
+            **extra,
+        )
+
+    @staticmethod
+    def _resolver(outcome):
+        return patch(
+            "apps.integrations.ayla.recommendation_resolver_client.resolve_recommendation",
+            return_value=outcome,
+        )
+
+    def test_the_request_is_built_here_and_never_taken_from_the_caller(
+        self, client: Client, bot_user: BotUser
+    ):
+        """Тело запроса границы собирает сервер (§4.1).
+
+        Заменяет прежние `test_invalid_input_non_object_body` и
+        `test_empty_body_defaults_to_empty_dict`. У обоих предмет исчез:
+        полка шлёт `POST` БЕЗ тела, а `subject_ref` в запросе границы
+        отсутствует намеренно — кого спрашивают, определяет
+        аутентификация. Приняв часть запроса от клиента, мы позволили бы
+        ему получить решение за другого человека.
+
+        Проверяется именно это: даже присланное тело не доезжает до
+        границы, и обязательное `safety_state` уходит заполненным.
+        """
         captured: dict = {}
 
-        def _fake_fetch(*, external_user_id: str, payload: dict) -> dict:
+        def _fake(*, external_user_id: str, payload: dict):
             captured["external_user_id"] = external_user_id
             captured["payload"] = payload
-            return ayla_response
+            return ResolveOutcome("ok", decision=_decision_body()["data"])
 
         with patch(
-            "apps.integrations.ayla.recommendations_client.fetch_recommendations",
-            side_effect=_fake_fetch,
+            "apps.integrations.ayla.recommendation_resolver_client.resolve_recommendation",
+            side_effect=_fake,
         ):
-            resp = client.post(
-                self._url(),
-                data=json.dumps(
-                    {"lat": 55.75, "lon": 37.61, "goal": "relax", "tenant_history": []}
-                ),
+            resp = self._post(
+                client,
+                bot_user,
+                data=json.dumps({"lat": 999, "goal": "подсунутая цель"}),
                 content_type="application/json",
-                HTTP_AUTHORIZATION=_init_data_header(bot_user.channel_user_id),
             )
 
         assert resp.status_code == 200
-        assert resp.json() == ayla_response
         assert captured["external_user_id"] == f"bot:max:{bot_user.channel_user_id}"
-        assert captured["payload"] == {
-            "lat": 55.75,
-            "lon": 37.61,
-            "goal": "relax",
-            "tenant_history": [],
-        }
+        sent = captured["payload"]
+        assert "lat" not in sent, "тело клиента доехало до границы"
+        assert sent["safety_state"] == "NOT_APPLICABLE", (
+            "обязательное поле без умолчания уехало не заполненным"
+        )
+        assert sent["surface"] == "MINIAPP_HOME"
+        assert sent["request_id"], "нет ключа воспроизводимости (§9.4)"
 
-    def test_ayla_5xx_graceful(self, client: Client, bot_user: BotUser):
-        """Ayla outage → 502 ayla_unavailable (frontend retries)."""
-        with patch(
-            "apps.integrations.ayla.recommendations_client.fetch_recommendations",
-            side_effect=RecommendationsUnavailable("server: HTTP 503"),
+    def test_the_decision_reaches_the_shelf_in_its_envelope(
+        self, client: Client, bot_user: BotUser
+    ):
+        """Ответ уходит полке в конверте `{"data": …}` (§9.4).
+
+        Наследник `test_happy_path_pass_through`. Предмет сменился с
+        «тело Ayla возвращается дословно» на «решение границы возвращается
+        в объявленной форме»: дословность больше не свойство, потому что
+        транзит теперь обязан валидировать (§2.1 C3).
+        """
+        with self._resolver(ResolveOutcome("ok", decision=_decision_body()["data"])):
+            resp = self._post(client, bot_user)
+
+        assert resp.status_code == 200
+        body = resp.json()
+        assert "data" in body, "конверт §9.4 потерян — потребитель отвергнет ответ целиком"
+        assert body["data"]["resolver_spec_version"] == "1.0.0"
+        assert body["data"]["decision_id"] == "d-1"
+
+    def test_provider_keys_are_translated_to_mirror_ids(
+        self, client: Client, bot_user: BotUser, tenant: Tenant
+    ):
+        """Ключ Ayla заменяется ключом зеркала — иначе полка не узнает никого.
+
+        Полка живёт в ключах зеркала и ключа Ayla не знает: поля у неё
+        нет. Перевести может только этот слой (DRF-1598, OD §81).
+        """
+        from django.utils import timezone
+
+        from apps.catalog.models import CatalogMaster
+
+        ayla_id = uuid.uuid4()
+        master = CatalogMaster.all_tenants.create(
+            tenant=tenant,
+            external_updated_at=timezone.now(),
+            external_id=970001,
+            name="Мастер зеркала",
+            specialization="Парикмахер",
+            is_active=True,
+            invite_status=CatalogMaster.InviteStatus.ACCEPTED,
+            ayla_user_id=ayla_id,
+        )
+
+        with self._resolver(ResolveOutcome("ok", decision=_decision_body(str(ayla_id))["data"])):
+            resp = self._post(client, bot_user)
+
+        assert resp.status_code == 200
+        ordered = resp.json()["data"]["ordered"]
+        assert ordered[0]["candidate"]["id"] == str(master.id)
+        assert ordered[0]["candidate"]["kind"] == "PROVIDER"
+
+    def test_an_untranslatable_candidate_is_not_dropped(
+        self, client: Client, bot_user: BotUser, tenant: Tenant
+    ):
+        """Непустой `ordered` не превращается в пустой молча.
+
+        Отбрось мы непереводимого здесь — полка получила бы пустой подбор
+        при НЕПУСТОМ решении и назвала бы это состояние `OK`: её
+        классификатор смотрит на `ordered`, а он бы уже опустел.
+
+        Поэтому кандидат доезжает как есть, с ключом Ayla, и полка сама
+        поднимает `UNRENDERABLE_CANDIDATES` — имя у состояния уже есть,
+        второго классификатора мы не заводим.
+        """
+        stranger = str(uuid.uuid4())
+
+        with self._resolver(ResolveOutcome("ok", decision=_decision_body(stranger)["data"])):
+            resp = self._post(client, bot_user)
+
+        assert resp.status_code == 200
+        ordered = resp.json()["data"]["ordered"]
+        assert len(ordered) == 1, "кандидат обязан доехать, а не исчезнуть"
+        assert ordered[0]["candidate"]["id"] == stranger
+
+    def test_mirror_failure_is_unavailability_not_a_silent_pass_through(
+        self, client: Client, bot_user: BotUser
+    ):
+        """Своя авария называется своим именем.
+
+        Пропусти мы кандидатов непереведёнными при упавшем чтении зеркала,
+        полка сказала бы «нам прислали то, чего мы не умеем» — то есть
+        обвинила бы Ayla в НАШЕЙ аварии, и чинить пошли бы не там.
+        """
+        from django.db import DatabaseError
+
+        decision = _decision_body(str(uuid.uuid4()))["data"]
+        with (
+            self._resolver(ResolveOutcome("ok", decision=decision)),
+            patch(
+                "apps.marketplace.resolver_keys.translate_provider_keys",
+                side_effect=DatabaseError("mirror is down"),
+            ),
         ):
-            resp = client.post(
-                self._url(),
-                data=json.dumps({"goal": "relax"}),
-                content_type="application/json",
-                HTTP_AUTHORIZATION=_init_data_header(bot_user.channel_user_id),
-            )
+            resp = self._post(client, bot_user)
+
+        assert resp.status_code == 503
+        assert resp.json()["error"] == "mirror_unavailable"
+
+    def test_unavailable_is_quiet_and_named(self, client: Client, bot_user: BotUser):
+        """Граница не ответила — 502 `ayla_unavailable`.
+
+        Наследник `test_ayla_5xx_graceful` и `test_config_error_returns_503`.
+        Второй сменил число намеренно: клиент границы относит ошибку
+        конфигурации к недоступности («подбора нет, врать нельзя, шуметь
+        незачем»), поэтому отдельного 503 `not_configured` на этом пути
+        больше не существует. Это изменение поведения, и оно названо.
+        """
+        with self._resolver(ResolveOutcome("unavailable", detail="server: HTTP 503")):
+            resp = self._post(client, bot_user)
 
         assert resp.status_code == 502
         assert resp.json()["error"] == "ayla_unavailable"
 
-    def test_invalid_input_non_object_body(self, client: Client, bot_user: BotUser):
-        """Body is a JSON array — view rejects with 400 before any Ayla call."""
-        with patch(
-            "apps.integrations.ayla.recommendations_client.fetch_recommendations"
-        ) as mock_fetch:
-            resp = client.post(
-                self._url(),
-                data=json.dumps([1, 2, 3]),
-                content_type="application/json",
-                HTTP_AUTHORIZATION=_init_data_header(bot_user.channel_user_id),
-            )
+    def test_contract_violation_is_loud_and_told_apart_from_silence(
+        self, client: Client, bot_user: BotUser
+    ):
+        """Третий исход отличим от второго — и это половина задачи.
 
-        assert resp.status_code == 400
-        assert resp.json()["error"] == "malformed"
-        mock_fetch.assert_not_called()
+        Наследник `test_ayla_4xx_forwarded`, у которого предмет сменился
+        целиком: 4xx на запрос границы больше не «Ayla отвергла тело
+        клиента» (клиент тела не шлёт), а «мы и они разошлись в том, о чём
+        договорились».
 
-    def test_ayla_4xx_forwarded(self, client: Client, bot_user: BotUser):
-        """Ayla 4xx → 400 with ayla_error body forwarded for frontend display."""
-        with patch(
-            "apps.integrations.ayla.recommendations_client.fetch_recommendations",
-            side_effect=RecommendationsBadRequest(422, {"detail": "lat/lon out of range"}),
-        ):
-            resp = client.post(
-                self._url(),
-                data=json.dumps({"lat": 999, "lon": 999}),
-                content_type="application/json",
-                HTTP_AUTHORIZATION=_init_data_header(bot_user.channel_user_id),
-            )
+        До DRF-1626 несовместимость давала ПУСТУЮ ПОЛКУ, неотличимую от
+        «ничего не нашлось»: человек и дежурный видели одно и то же в двух
+        совершенно разных случаях.
+        """
+        with self._resolver(ResolveOutcome("contract_violation", detail="ordered отсутствует")):
+            resp = self._post(client, bot_user)
 
-        assert resp.status_code == 400
-        data = resp.json()
-        assert data["error"] == "ayla_bad_request"
-        assert data["ayla_error"] == {"detail": "lat/lon out of range"}
+        assert resp.status_code == 502
+        assert resp.json()["error"] == "contract_violation"
+        assert resp.json()["error"] != "ayla_unavailable"
 
-    def test_config_error_returns_503(self, client: Client, bot_user: BotUser):
-        """Missing AYLA_INTERNAL_API_TOKEN → 503 not_configured."""
-        with patch(
-            "apps.integrations.ayla.recommendations_client.fetch_recommendations",
-            side_effect=RecommendationsConfigError("AYLA_INTERNAL_API_TOKEN missing"),
-        ):
-            resp = client.post(
-                self._url(),
-                data=json.dumps({}),
-                content_type="application/json",
-                HTTP_AUTHORIZATION=_init_data_header(bot_user.channel_user_id),
-            )
+    def test_the_two_bad_outcomes_are_counted_apart(self, client: Client, bot_user: BotUser):
+        """Считаемый след, а не строка в логе (§9.4).
 
-        assert resp.status_code == 503
-        assert resp.json()["error"] == "not_configured"
+        «Отдельно в метрику» значит, что вопрос «сколько раз за неделю»
+        отвечается запросом. Строка лога на него не отвечает без парсера,
+        которого никто не напишет.
 
-    def test_empty_body_defaults_to_empty_dict(self, client: Client, bot_user: BotUser):
-        """No body → empty {} forwarded to Ayla (caller had no scoring hints)."""
-        captured: dict = {}
+        Проверяется РАЗЛИЧИМОСТЬ: два исхода обязаны дать два разных
+        действия в аудите. Совпадение означало бы, что посчитать
+        расхождение контракта отдельно нечем.
+        """
+        from apps.audit.models import AuditLog
 
-        def _fake_fetch(*, external_user_id: str, payload: dict) -> dict:
-            captured["payload"] = payload
-            return {"recommendations": []}
+        with self._resolver(ResolveOutcome("contract_violation", detail="ordered отсутствует")):
+            self._post(client, bot_user)
+        with self._resolver(ResolveOutcome("unavailable", detail="network")):
+            self._post(client, bot_user)
 
-        with patch(
-            "apps.integrations.ayla.recommendations_client.fetch_recommendations",
-            side_effect=_fake_fetch,
-        ):
-            resp = client.post(
-                self._url(),
-                HTTP_AUTHORIZATION=_init_data_header(bot_user.channel_user_id),
-            )
+        actions = {
+            row.action for row in AuditLog.all_tenants.filter(target="RecommendationBoundary")
+        }
+        assert actions, "исход границы не оставил следа — считать нечего"
+        assert actions == {
+            "recommendation.boundary.contract_violation",
+            "recommendation.boundary.unavailable",
+        }, f"два исхода записаны как {actions}"
 
-        assert resp.status_code == 200
-        assert captured["payload"] == {}
+    def test_the_controlled_empty_state_is_not_counted_as_a_failure(
+        self, client: Client, bot_user: BotUser
+    ):
+        """Три вещи, которые выглядят одной пустой полкой, считаются порознь.
+
+        §10.5.1: ноль подтверждённых связей — ШТАТНЫЙ результат, а не
+        ошибка, и «пустая полка перестаёт быть дефектом и становится
+        состоянием с именем и числом». Попади оно в счётчик поломок, мы
+        стали бы чинить работающее.
+
+        Контракт требует писать это событие с количествами, поэтому
+        проверяется и число: имя без числа отвечает «что-то пусто», но не
+        «чего именно не хватает».
+        """
+        from apps.audit.models import AuditLog
+
+        empty = _decision_body()["data"]
+        empty["excluded"] = [
+            {
+                "candidate": {"kind": "PROVIDER", "id": str(uuid.uuid4())},
+                "stage": "S1",
+                "reason_code": "ELIG_EXCLUDED_NOT_RECOMMENDABLE",
+            }
+        ]
+        with self._resolver(ResolveOutcome("ok", decision=empty)):
+            resp = self._post(client, bot_user)
+        with self._resolver(ResolveOutcome("contract_violation", detail="x")):
+            self._post(client, bot_user)
+        with self._resolver(ResolveOutcome("unavailable", detail="y")):
+            self._post(client, bot_user)
+
+        assert resp.status_code == 200, "штатный ноль подтверждённых — не ошибка"
+
+        rows = list(AuditLog.all_tenants.filter(target="RecommendationBoundary"))
+        actions = {r.action for r in rows}
+        assert actions == {
+            "recommendation.boundary.no_verified_candidates",
+            "recommendation.boundary.contract_violation",
+            "recommendation.boundary.unavailable",
+        }, f"три состояния записаны как {actions}"
+
+        controlled = next(
+            r for r in rows if r.action == "recommendation.boundary.no_verified_candidates"
+        )
+        assert controlled.payload["excluded_total"] == 1, "имя есть, числа нет"
+        assert controlled.payload["excluded_by_reason"] == {"ELIG_EXCLUDED_NOT_RECOMMENDABLE": 1}
 
 
 # ─── TestClient (HTTP layer) ────────────────────────────────────────────

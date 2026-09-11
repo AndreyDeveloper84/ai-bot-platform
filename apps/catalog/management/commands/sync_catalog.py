@@ -2,9 +2,11 @@
 
 Before this command the only way the catalog sync could run was the Celery
 beat. ``apps/catalog/services/sync.py`` claimed an admin "force resync"
-action existed; it did not (C6/DRF-576 was never built). So when the pilot
-mirror went stale there was no supported way to push a fix through without
-waiting for a beat that was, by then, the thing that was broken.
+action existed; it did not (C6/DRF-576 was never built — the admin button
+arrived later, as the DRF-1581 action on ``CatalogServiceAdmin``). So when
+the pilot mirror went stale there was no supported way to push a fix
+through without waiting for a beat that was, by then, the thing that was
+broken.
 
 Two modes, both explicit:
 
@@ -158,7 +160,23 @@ class Command(BaseCommand):
 
             after = self._mirror_count(tenant)
             if result.skipped:
-                self.stdout.write(f"{tenant.slug}: skipped (another run holds the lock)")
+                # The reason has to be printed, not assumed (DRF-1595). Until
+                # then a skip could only mean the lock, so the message named
+                # it; now it can also mean Ayla's rate limiter, and this
+                # command is exactly what an operator reaches for to catch a
+                # lagging salon up. Being told "another run holds the lock"
+                # while the real answer is "Ayla is throttling us" sends them
+                # hunting for a beat that is not running.
+                reasons = {
+                    "lock_held": "another run holds the lock",
+                    "throttled": (
+                        "Ayla rate-limited us (HTTP 429) and this run had no wait budget "
+                        "left — retry in a minute, or raise "
+                        "CATALOG_SYNC_THROTTLE_WAIT_BUDGET_SECONDS for a one-shot catch-up"
+                    ),
+                }
+                why = reasons.get(result.skip_reason, result.skip_reason or "reason not recorded")
+                self.stdout.write(f"{tenant.slug}: skipped ({why})")
                 continue
             if result.error:
                 failures += 1

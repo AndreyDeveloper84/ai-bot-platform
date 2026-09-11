@@ -158,5 +158,14 @@ RUN uv sync --locked --extra dev --extra ai-core
 #   docker exec <container> python /app/tools/env_guard.py --against-lock
 RUN python tools/env_guard.py --against-lock
 
+# Planning rules registry (D-1, owner's decision 2026-09-08): the artifact is
+# vendored into apps/planning_rules/data/ by scripts/sync_planning_rules_registry.py.
+# This check is offline (hash pin + contract form + major-version rejection) and
+# fails the build if the artifact is missing, tampered with or carries an
+# unknown major — a silent deploy on a stale/forged registry is worse than a
+# failed build. Freshness against ayla-knowledge is enforced separately by the
+# planning-rules-sync workflow (network drift check), not here.
+RUN python apps/planning_rules/check.py
+
 EXPOSE 8000
 CMD ["python", "manage.py", "runserver", "0.0.0.0:8000"]

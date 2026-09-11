@@ -71,6 +71,18 @@ urlpatterns = [
     ),
     # Согласия человека (DRF-1520). Чтение — всех типов сразу; запись —
     # по ресурсу на согласие, чтобы «сохрани все галочки» было невозможно.
+    # Согласие на сканирование еды (152-ФЗ) — DRF-1564. GET/POST/DELETE на
+    # одном ресурсе, как у health-consent: одно согласие — один ресурс.
+    #
+    # До этой ручки колонка `BotUser.food_scanner_consent_at` не имела ни
+    # одного писателя, а согласие человека оседало в localStorage браузера:
+    # экран его принимал, гейт навыка (`food_scanner/skill.py:463`) о нём не
+    # знал, и бот вечно отвечал «открой Mini App и дай согласие».
+    path(
+        "me/food-scanner-consent/",
+        views.food_scanner_consent,
+        name="food_scanner_consent",
+    ),
     path("me/consents/", views.customer_consents, name="customer_consents"),
     path(
         "me/consents/proactive-hints/",

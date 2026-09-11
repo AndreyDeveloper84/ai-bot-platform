@@ -34,6 +34,9 @@ _BASE_PROFILE = ProfileResponse(
     bmr=1400,
     health_flags={},
     disclaimer_acked=None,
+    # DRF-1686 (§6): без названного происхождения DTO обнуляет ориентиры;
+    # этот профиль — посчитанный, и тесты ниже проверяют именно числа.
+    targets_source="ayla_calculated",
 )
 
 _BASE_SUMMARY = SummaryResponse(
@@ -56,7 +59,13 @@ def summary(**overrides: Any) -> SummaryResponse:
     return replace(_BASE_SUMMARY, **overrides)
 
 
-def water(total_ml: int = 1600, norm_ml: int = 2000) -> WaterTodayResponse:
+def water(total_ml: int = 1600, norm_ml: int | None = 2000) -> WaterTodayResponse:
+    """Умолчание 2000 — фикстура состояния «ориентир ЕСТЬ».
+
+    `norm_ml=None` — штатное состояние с 09.09.2026 (§82, §85): формула
+    воды снята, и Ayla ключ не присылает. Тип расширен, чтобы это
+    состояние можно было изобразить, а не только описать словами.
+    """
     return WaterTodayResponse(total_ml=total_ml, norm_ml=norm_ml, entries=[])
 
 
@@ -199,7 +208,10 @@ class TestNeverTalksAboutTheBody:
             p.carbs_g,
             w.total_ml,
             w.norm_ml,
-            round(p.protein_g - s.protein_g),  # the shortfall in the remark
+            # `p.protein_g` здесь заведомо не `None` — фикстура его
+            # задаёт; проверка сужает тип для mypy и заодно называет
+            # предпосылку вслух (DRF-1623 N-c сделал поле необязательным).
+            round((p.protein_g or 0) - s.protein_g),  # the shortfall in the remark
         }
         assert printed <= allowed, f"unexplained numbers: {printed - allowed}"
 
@@ -305,3 +317,51 @@ class TestEmptyDay:
         )
         assert "Сегодня записей не было" not in text
         assert "Вода: 500 из 2000 мл." in text
+
+
+class TestNoTargetNoJudgement:
+    """Ориентира нет — отчёт называет факт и молчит про цель (§82, §85).
+
+    Владелец 09.09.2026: при отсутствии активного ориентира не
+    показываем цель, шкалу выполнения, проценты, дефицит или превышение.
+    Отчёт по питанию — такой же экран, как дневник, только приезжает
+    сам, и «Калорий вышло на 300 ккал больше нормы» без нормы было бы
+    приговором от чужого числа.
+    """
+
+    def test_the_calorie_line_drops_its_second_number(self) -> None:
+        text = render.render_daily_report(
+            summary(calories_goal=None), water(norm_ml=None), profile()
+        )
+        # POSITIVE: съеденное и выпитое на месте — снимается ориентир,
+        # не факт. Без этой половины отрицания ниже прошли бы и на
+        # пустом отчёте.
+        assert "Калории: 1500 ккал." in text
+        assert "1500 из" not in text
+        # Вода — тот же принцип, что и калории: снимается ориентир, не
+        # факт. Раньше строка исчезала целиком; §6 свода 11.09 называет
+        # «фактически внесённые значения» доступными без ориентиров
+        # (DRF-1686), и выпитое остаётся на экране — без «из».
+        assert "Вода: 1600 мл." in text
+        assert "из" not in text.split("Вода:")[1].splitlines()[0]
+
+    def test_no_word_about_overshoot_or_shortfall(self) -> None:
+        # PRESENCE ВПЕРЕДИ: те же 3000 ккал при цели «снизить вес» и
+        # ЖИВОМ ориентире дают приговор — значит фраза производима, и
+        # отрицание ниже про её отсутствие, а не про сломанный рендер.
+        with_target = render.goal_remark(
+            summary(calories_total=3000.0),
+            water(),
+            profile(goal="lose", protein_g=0),
+        )
+        assert "больше нормы" in with_target
+
+        # ABSENCE: без ориентира ответа нет вовсе — это сильнее трёх
+        # «not in», потому что закрывает и формулировки, которых мы не
+        # предусмотрели.
+        without_target = render.goal_remark(
+            summary(calories_total=3000.0, calories_goal=None),
+            water(total_ml=100, norm_ml=None),
+            profile(goal="lose", protein_g=0),
+        )
+        assert without_target == ""

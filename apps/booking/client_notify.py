@@ -184,10 +184,10 @@ def tenant_timezone(tenant: Tenant) -> ZoneInfo:
     return ZoneInfo("UTC")
 
 
-def resolve_client_chat_id(bot_user: BotUser | None) -> str:
+def resolve_client_user_id(bot_user: BotUser | None) -> str:
     """Channel chat id to answer in, or ``""`` when there is none."""
 
-    return str(getattr(bot_user, "chat_id", "") or "").strip()
+    return str(getattr(bot_user, "channel_user_id", "") or "").strip()
 
 
 def was_confirmed_in_chat(*, tenant: Tenant, appointment_id: UUID) -> bool:
@@ -272,13 +272,14 @@ def notify_client_booking_confirmed(
     """
 
     try:
-        chat_id = resolve_client_chat_id(bot_user)
-        if not chat_id:
+        user_id = resolve_client_user_id(bot_user)
+        if not user_id:
             # Normal, not a defect: the customer books in the Ayla
             # mobile app / Mini App and has never opened the bot, so
             # there is no conversation to answer in. INFO, because a
             # WARNING here would fire on ordinary traffic and drown the
-            # salon-side no_recipients warning that does mean something.
+            # booking.notify.specialist_unreachable warning that does
+            # mean something.
             logger.info(
                 "booking.client_notify.no_chat tenant=%s appointment_id=%s",
                 tenant.slug,
@@ -303,7 +304,7 @@ def notify_client_booking_confirmed(
             master_name=(getattr(master, "name", "") or "").strip() or _UNKNOWN,
         )
 
-        failures = send_max_notification(text=text, chat_ids=(chat_id,))
+        failures = send_max_notification(text=text, user_ids=(user_id,))
         if failures == 0:
             logger.info(
                 "booking.client_notify.sent tenant=%s appointment_id=%s",

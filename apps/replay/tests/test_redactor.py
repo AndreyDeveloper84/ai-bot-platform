@@ -24,7 +24,7 @@ class TestVersionConstant:
         and not in five unrelated modules that never chose the value.
         """
 
-        assert REDACTION_METHOD == "regex_v2"
+        assert REDACTION_METHOD == "regex_v3"
 
 
 class TestPhoneRedaction:
@@ -333,10 +333,10 @@ class TestKbChunkRedaction:
 # below fails against the old pattern.
 #
 # The canonical entries are deliberately free of an all-digit four-char
-# group, because OTP_RE still redacts those (44.07% of canonical UUIDs —
-# measured, documented on OTP_RE, tracked separately). Pinning one here
-# would test that unrelated defect instead of this one; it has its own
-# test at the bottom of this module.
+# group. That used to be because OTP_RE redacted those too (DRF-1389,
+# since closed); it stays that way so this list keeps testing the
+# ASCII-letter boundary and nothing else. The all-digit-group shape has
+# its own pinned list at the bottom of this module.
 _SLICED_AS_PHONE = [
     # trace_id=...-[PHONE]b5 — the match opened after an ASCII letter.
     "7c6b1c64-309c-4b1e-baca-1137780132b5",
@@ -518,19 +518,38 @@ class TestLuhnGate:
         assert "[CC]" in redactor.redact_text(card)
 
 
-class TestLuhnGateKnownMiss:
-    """The named price of the Luhn gate — pinned so it cannot drift.
+class TestWeldedCardIsRedacted:
+    """DRF-1390 — the miss side: a card welded to a neighbour is caught.
 
     ``re.sub`` does not retry a shorter match once the callback declines
-    one, so a card welded to a 1-3 digit neighbour by exactly one space
-    or dash is missed. At four digits or more the combined run overflows
-    ``{13,19}``, the engine backtracks onto the card alone, and it is
-    redacted normally.
+    one, so a card joined to a 1-3 digit neighbour by exactly one space
+    or dash used to leave the redactor with every digit intact.
+    Measured on 2 000 synthetic welded lines: **67.15%** of the cards
+    reached the trace unredacted before this fix, 0% after.
 
-    These assertions document a defect, not a decision anyone is happy
-    with. If a future change makes them fail because the card IS now
-    redacted, delete the test — do not "fix" the code back.
+    The number below is the standard Visa test value, not a real card,
+    and it is Luhn-valid on purpose — the gate is the thing under test.
     """
+
+    @pytest.mark.parametrize(
+        ("line", "expected"),
+        [
+            ("заказ 99 4111111111111111", "заказ 99 [CC]"),
+            ("заказ 999-4111111111111111", "заказ 999-[CC]"),
+            ("4111111111111111 9 ok", "[CC] 9 ok"),
+            ("4111111111111111-77 ok", "[CC]-77 ok"),
+        ],
+    )
+    def test_welded_card_is_cut_and_neighbour_survives(self, redactor, line, expected):
+        """Both halves of the fix in one assertion.
+
+        Asserted on the whole output, not on ``"[CC]" in result``: the
+        point of searching for the card's own span instead of redacting
+        the run whole is that the order number next to it stays readable
+        in the trace.
+        """
+
+        assert redactor.redact_text(line) == expected
 
     @pytest.mark.parametrize(
         "line",
@@ -540,8 +559,19 @@ class TestLuhnGateKnownMiss:
             "4111111111111111 9 ok",
         ],
     )
-    def test_card_welded_to_short_number_is_missed(self, redactor, line):
-        assert "[CC]" not in redactor.redact_text(line)
+    def test_no_digit_of_the_card_survives(self, redactor, line):
+        """Checked against the digits, not against a substring search.
+
+        A partial redaction leaves a masked-looking remnant whose digits
+        are split by separators, so ``card not in result`` reports
+        success while most of the number is still in the trace.
+        """
+
+        result = redactor.redact_text(line)
+        # Presence first: "no card digits left" is also true of a
+        # redactor that dropped the line on the floor.
+        assert "[CC]" in result
+        assert "1111111111111" not in _digits(result)
 
     @pytest.mark.parametrize(
         "line",
@@ -552,33 +582,201 @@ class TestLuhnGateKnownMiss:
             "заказ 99  4111111111111111",
         ],
     )
-    def test_one_digit_further_and_the_card_is_caught(self, redactor, line):
+    def test_the_shapes_that_always_worked_still_work(self, redactor, line):
+        """Unchanged: two separators, a comma, or a 4+ digit neighbour.
+
+        These reached the card by backtracking, not by the span search,
+        and they must not have become collateral of the new code path.
+        """
+
         assert "[CC]" in redactor.redact_text(line)
 
 
-class TestOtpStillSlicesCanonicalUuids:
-    r"""Measured, NOT fixed here — see the comment on OTP_RE (DRF-1382).
+class TestWeldedCardSearchDoesNotOverreach:
+    """DRF-1390 — the false-positive side of the span search.
 
-    A dash is not ``\w``, and the middle groups of a canonical UUID are
-    exactly four characters between two dashes. When such a group is all
-    digits it is redacted as an OTP: 44.07% of canonical UUIDs, measured
-    on 200 000 samples. That is the dominant remaining reason a trace_id
-    comes out of this file unsearchable, and it is an order of magnitude
-    worse than the 3.12% / 2.20% this ticket was opened for.
-
-    Closing it means adding ``-`` to the boundary class, which unlike the
-    ASCII-letter guard is not free: it stops redacting ``код-1234``. That
-    is a decision about which direction of error to accept, so it gets
-    its own ticket. This test pins the current, wrong behaviour so nobody
-    discovers it a third time by accident.
+    Re-testing sub-spans of a rejected run is new work, and every extra
+    Luhn test is a fresh 1-in-10 chance of calling an ordinary number a
+    card. These are the shapes that must keep coming through: a long
+    identifier standing next to a short number is the exact input the
+    span search now looks inside.
     """
 
-    def test_all_digit_uuid_group_is_redacted_as_otp(self, redactor):
-        line = "trace_id=c4202567-6706-417c-9a2f-1234567890ab"
-        assert redactor.redact_text(line) == "trace_id=c4202567-[OTP]-417c-9a2f-1234567890ab"
+    @pytest.mark.parametrize(
+        "line",
+        [
+            # Single digit run — the span search must not even start.
+            "record_id=1234567890123456",
+            "order=98765432109876",
+            "ts_ns=1756080000000000001",
+            # Multi-group runs: the sub-span is now Luhn-tested and must
+            # still fail. Pinned values, not generated.
+            "заказ 99 12345678901234567",
+            "id 777-12345678901234",
+            "order 12345678901234 создан",
+        ],
+    )
+    def test_non_card_runs_still_survive(self, redactor, line):
+        assert redactor.redact_text(line) == line
+
+    def test_single_group_run_is_not_searched(self):
+        """The cheap path, asserted on the function and not on a timing.
+
+        ``_find_card_span`` is the only new cost on the failure path —
+        the common one — and it is bounded by returning immediately when
+        the run has nothing to split.
+        """
+
+        from apps.replay.redactor import _find_card_span
+
+        assert _find_card_span("1234567890123456") is None
+
+    def test_rescued_span_is_the_card_and_not_the_whole_run(self):
+        """The span search returns offsets into the match, not a verdict.
+
+        Pinned on the helper as well as through ``redact_text`` above,
+        because an off-by-one here is the difference between eating the
+        neighbour and leaving half a card in the trace.
+        """
+
+        from apps.replay.redactor import _find_card_span
+
+        assert _find_card_span("99 4111111111111111") == (3, 19)
+
+    def test_longest_valid_span_wins(self):
+        """Two Luhn-valid spans in one run — the longer one is taken.
+
+        Both ``9771834170471`` (13) and ``9771834170471874`` (16) pass
+        Luhn here; the search must not stop at the first. The digits are
+        synthetic and start with a 9, which no card network issues, so
+        nothing below resembles a real number.
+        """
+
+        from apps.replay.redactor import _find_card_span
+
+        assert _find_card_span("9771834170471 874 63") == (0, 17)
+
+
+# Canonical UUIDs with an all-digit four-character middle group — the
+# exact shape OTP_RE used to cut. PINNED, not generated: a test that
+# rolls its own UUID asserts on a value it never chose, which is how
+# this defect reached production in the first place. Each entry fails
+# against the pre-DRF-1389 pattern.
+_UUIDS_WITH_ALL_DIGIT_GROUP = [
+    # group 2 all digits
+    "c4202567-6706-417c-9a2f-1234567890ab",
+    # group 3 (the version group) all digits
+    "a1b2c3d4-ab12-4123-8def-0123456789ab",
+    # group 4 (the variant group) all digits
+    "a1b2c3d4-abcd-4ef0-8123-0123456789ab",
+    # all three at once
+    "a1b2c3d4-1234-4567-8901-0123456789ab",
+    # upper-case hex — the guard is case-insensitive on purpose
+    "A1B2C3D4-1234-4567-8901-0123456789AB",
+    # leading group all digits too, so nothing anchors on a letter
+    "6706c420-1234-4d1e-9a2f-1137780132b5",
+]
+
+
+class TestOtpLeavesCanonicalUuidsIntact:
+    r"""DRF-1389 — the false-positive side: UUIDs come out whole.
+
+    A dash is not ``\w``, and the middle groups of a canonical UUID are
+    exactly four characters between two dashes, so an all-digit group
+    looked like a standalone code. Measured on 200 000 random uuid4
+    before the fix: **43.91%** of canonical UUIDs left this file damaged,
+    43.72% of them by OTP_RE alone. After: **0%** from OTP_RE.
+
+    (0.71% of canonical UUIDs are still cut, all of it by PHONE_RE — the
+    residual DRF-1382 left behind, not this ticket's subject.)
+    """
+
+    @pytest.mark.parametrize("identifier", _UUIDS_WITH_ALL_DIGIT_GROUP)
+    def test_all_digit_uuid_group_survives(self, redactor, identifier):
+        line = f"trace_id={identifier}"
+        assert redactor.redact_text(line) == line
+
+    @pytest.mark.parametrize("identifier", _UUIDS_WITH_ALL_DIGIT_GROUP)
+    def test_bare_identifier_survives(self, redactor, identifier):
+        """No ``trace_id=`` prefix, so the guard borrows no boundary."""
+
+        assert redactor.redact_text(identifier) == identifier
 
     def test_dash_free_hex_id_is_unaffected(self, redactor):
-        """0 of 200 000 — the dashes are the whole cause."""
+        """0 of 200 000 before and after — the dashes were the whole cause."""
 
         line = "trace_id=b6f193748406483c85ddd8ec1b8cb00e"
         assert redactor.redact_text(line) == line
+
+
+# Every code shape the module comment claims still gets cut. Prose, not
+# identifiers: this is the half of the measurement that stops the fix
+# from being "narrow the pattern until nothing matches".
+_OTP_FORMS_STILL_REDACTED = [
+    "код 1234",
+    "код: 1234",
+    "Ваш код 123456",
+    "код подтверждения 4821",
+    "код-1234",
+    "OTP-123456",
+    "PIN-4821",
+    "code=1234",
+    "(1234)",
+    "'123456'",
+    "[1234]",
+    "введите 1234 в приложении",
+    "sms 123456 ok",
+    "код 1234.",
+    "код — 1234",
+    "1234",
+    "123456",
+    "verification-code-1234",
+    "код=123456",
+    "код\t1234",
+]
+
+
+class TestNoOtpFormStoppedBeingRedacted:
+    """DRF-1389 — the miss side. Narrowing a pattern buys ids with codes.
+
+    The wide fix (adding ``-`` to the boundary class) fails this class on
+    ``код-1234`` and ``OTP-123456``. That is the whole reason the narrow
+    guard exists, so it is asserted here rather than described in a
+    comment.
+    """
+
+    @pytest.mark.parametrize("raw", _OTP_FORMS_STILL_REDACTED)
+    def test_every_code_form_is_redacted(self, redactor, raw):
+        result = redactor.redact_text(raw)
+        assert "[OTP]" in result, f"code survived redaction: {result!r}"
+        assert _digits(result) == "", f"digits survived redaction: {result!r}"
+
+
+class TestOtpNarrowingPriceIsPinned:
+    """DRF-1389 — what the narrow guard gives up, in assertions.
+
+    Four digits between two dashes with four hex characters on either
+    side is identifier-shaped text, and it is no longer redacted. These
+    assertions document a deliberate loss, not a decision anyone is
+    happy with. If a future change makes them fail because the code IS
+    redacted again, check what it did to ``_UUIDS_WITH_ALL_DIGIT_GROUP``
+    before calling it a fix.
+    """
+
+    @pytest.mark.parametrize("raw", ["abcd-1234-ef01", "face-1234-beef"])
+    def test_hex_dash_sandwich_is_not_redacted(self, redactor, raw):
+        assert redactor.redact_text(raw) == raw
+
+    @pytest.mark.parametrize(
+        "raw",
+        [
+            # "code" carries a non-hex "o" -> still a code
+            "code-1234-ab",
+            # only two hex characters after the dash -> still a code
+            "abcd-1234-ef",
+            # nothing after the digits at all -> still a code
+            "abcd-1234",
+        ],
+    )
+    def test_the_guard_does_not_leak_past_that_shape(self, redactor, raw):
+        assert "[OTP]" in redactor.redact_text(raw)

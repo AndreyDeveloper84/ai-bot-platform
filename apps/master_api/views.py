@@ -312,10 +312,15 @@ def _glue_target(
     строку; не нашли — заполняем свою.
 
     ``ayla_user_id is None`` — это не отказ, а «моста с Ayla ещё нет»:
-    ``BotUser.ayla_user_id`` заполняет единственный писатель
-    (``apps/identity/services/ayla_link.py``) и только перед действием,
-    которому персональный субъект действительно нужен. Пока он NULL,
     склеивать не по чему и конфликтовать тоже не с чем.
+
+    DRF-1649 — здесь раньше стояло «заполняет единственный писатель
+    (``apps/identity/services/ayla_link.py``)». Писателей **два**:
+    ``ayla_link`` и ``apps/identity/services/resolver.py:192``
+    (``get_or_create(defaults=...)`` на sentinel-тенанте), и второй получает
+    идентификатор от вызывающего, то есть сорта не знает. Отсюда же и
+    трёхзначность ``BotUser.ayla_user_id_is_proxy``: ``NULL`` — это не «ещё
+    не дошли руки», а честное «этот писатель знать не мог».
     """
 
     if ayla_user_id is None:
@@ -641,7 +646,26 @@ def onboarding_accept(request: HttpRequest) -> HttpResponse:
             # потом пишем. Обоснование порядка — в докстринге
             # :func:`_glue_target`; коротко: обратный порядок даёт 500 на
             # живых данных подключённого салона и зелёные тесты локально.
-            person_ayla_user_id = _as_uuid(bot_user.ayla_user_id)
+            # DRF-1649. The key on a ``BotUser`` may be Ayla's isolated proxy,
+            # and that is correct there: booking needs it and
+            # ``ensure_ayla_link`` is right to write it. It is NOT correct one
+            # layer out — ``apps/catalog/master_state.py:464-471`` forbids a
+            # proxy id in ``CatalogMaster.ayla_user_id`` because "он занял бы
+            # ключ значением, по которому совпадения не будет никогда", and the
+            # same applies to searching by it: looking a master up by a proxy id
+            # is as pointless as storing one.
+            #
+            # Fail closed on BOTH unusable sorts. ``None`` is not "probably a
+            # real account": it is a row written by a path that never learned
+            # the sort (``apps/identity/services/resolver.py:192`` takes the id
+            # from its caller) or one linked before the column existed. Reading
+            # it as permission would turn an honest gap into a silent one — and
+            # the honest gap already has a correct downstream behaviour, because
+            # an empty ``CatalogMaster.ayla_user_id`` is a named state
+            # (``ayla_unlinked``), not a crash.
+            person_ayla_user_id = (
+                _as_uuid(bot_user.ayla_user_id) if bot_user.ayla_user_id_is_proxy is False else None
+            )
             glue = _glue_target(
                 tenant_id=bot_user.tenant_id,
                 ayla_user_id=person_ayla_user_id,
@@ -1042,7 +1066,7 @@ def _maybe_send_manager_dm(*, tenant: Any, master: CatalogMaster, request_id: uu
     """Dispatch the «Анна просит выходной» DM to the salon manager.
 
     Per master-mobile §M3 line 458: «server marks slot blocked → owner
-    notified (audit + bot DM)». No-op when ``manager_chat_id`` is
+    notified (audit + bot DM)». No-op when the manager's MAX address is
     empty — degraded mode aligned with the reminder-escalation pattern
     (apps/bookings/tasks::escalate_stale_reminders).
 
@@ -1051,8 +1075,15 @@ def _maybe_send_manager_dm(*, tenant: Any, master: CatalogMaster, request_id: uu
     every master endpoint.
     """
 
-    chat_id = (tenant.manager_chat_id or "").strip()
-    if not chat_id:
+    # DRF-1559 — адрес менеджера: человек, если у салона заполнен
+    # ``manager_user_id``, иначе прежний диалоговый идентификатор. Slug
+    # ``no_manager_chat_id`` сохранён — это эмитируемый ключ. Импорт
+    # локальный, как и у ``send_message`` ниже: apps.channels не нужен
+    # тем эндпоинтам master_api, которые сюда не заходят.
+    from apps.channels.max.addressing import manager_address
+
+    manager = manager_address(tenant)
+    if not manager:
         logger.info(
             "master_api.availability.no_manager_chat_id tenant=%s master=%s",
             tenant.id,
@@ -1075,7 +1106,7 @@ def _maybe_send_manager_dm(*, tenant: Any, master: CatalogMaster, request_id: uu
         f"[Открыть запрос]({admin_url}?request_id={request_id})"
     )
     try:
-        send_message(chat_id=chat_id, text=text)
+        send_message(**manager.send_kwargs(), text=text)
     except MaxAPIError:
         # Best-effort: the audit + DB row are the source of truth. DM
         # failures are logged for ops but don't propagate.
@@ -1187,7 +1218,7 @@ def availability_request(request: HttpRequest) -> HttpResponse:
     Side effects:
       * Audit row: ``master.availability_change_requested``.
       * Event emit (same slug) for analytics fanout.
-      * MAX DM to ``tenant.manager_chat_id`` post-commit. No-op when
+      * MAX DM to the salon manager's address post-commit. No-op when
         empty (degraded mode, matches reminder-escalation pattern).
     """
 

@@ -129,9 +129,9 @@ init-data string.
 ## Real admin invite flow (preferred — PR 3 / MM2)
 
 This is the production-shape flow. Prefer this over the test management
-command (see deprecated section below) — it exercises the audit trail,
-the MAX DM dispatch, and the idempotency guard the same way a real owner
-would in the admin Mini App.
+command (see deprecated section below) — it exercises the audit trail
+and the idempotency guard the same way a real owner would in the admin
+Mini App.
 
 Prerequisites:
 - A tenant exists in the dev DB.
@@ -165,7 +165,6 @@ Response on success (HTTP 201):
   "master_id": "<uuid>",
   "invite_token": "<uuid>",
   "invite_expires_at": "2026-05-27T17:00:00+00:00",
-  "max_dm_delivery": "queued",
   "fallback_link": "http://localhost:5173/onboarding/master?token=<token>",
   "invite_link": "https://max.ru/<salon_bot>?start=master_invite_<token>"
 }
@@ -178,9 +177,15 @@ Side effects (all rolled back atomically on any failure):
   `schedule_preset=default_mon_fri_10_19`).
 - `MasterService` rows for every UUID in `services[]`.
 - `master.invited` audit row.
-- After commit: MAX bot DM dispatched to `contact_value` carrying the
-  deeplink + the `fallback_link` web URL. `master.invite_dispatched`
-  audit row reflects the outcome (`queued` / `failed` / `skipped`).
+
+Ничего после коммита не происходит. Личное сообщение мастеру эндпоинт
+слал до 07.09.2026; решение владельца §44.4 убрало и попытку, и парную
+аудит-строку `master.invite_dispatched`. Сообщение уходило **клиентским**
+ботом и достигало только тот чат, который уже существует, — незнакомому
+мастеру оно не доходило никогда, а владелец салона читал про него «не
+дошло» почти на каждом приглашении. Приглашение передаёт владелец сам:
+ссылкой `invite_link` и готовым текстом, который экран собирает рядом с
+ней (§44.2).
 
 ### The three links, and which one you can actually send (DRF-1424)
 
@@ -191,7 +196,11 @@ look like nothing happened:
 |---|---|---|
 | `invite_link` | anywhere — chat, SMS, another messenger, read aloud | — |
 | `fallback_link` | inside MAX's own webview | a browser: no `initData`, «MAX не передал данные для входа» |
-| the DM's button | the chat it was sent to | requires a known `max_username` and an existing chat |
+
+Третьей строкой здесь стояла кнопка в личном сообщении — «работает в том
+чате, куда её отправили; требует известного `max_username` и уже
+существующей переписки». Именно поэтому её и убрали (§44.4): у
+приглашения обоих условий по определению нет.
 
 **`invite_link` is the one to hand over.** Opening it starts the salon
 bot, which receives `bot_started` with `payload=master_invite_<token>`
@@ -213,10 +222,11 @@ is the honest answer rather than a link leading to an apology. The
 
 > **Pilot prerequisite — the blocker is gone, the variable is not yet
 > set (DRF-1504).** `MAX_BOT_SALON_WEB_APP` is still commented out in
-> `.env.staging`, so `invite_link` returns `""` on the pilot today and
-> the invitation goes out by DM only. That is now a config gap, **not**
-> a code defect: turning the variable on is the fix, and nothing else
-> has to change first.
+> `.env.staging`, so `invite_link` returns `""` on the pilot today —
+> и с §44.4 это значит, что передать приглашение НЕЧЕМ: личного
+> сообщения больше нет, ссылка была вторым способом и осталась
+> единственным. Это конфигурационный пробел, **не** дефект кода:
+> включить переменную — и есть вся починка.
 >
 > _History, and why it no longer applies._ The variable was set on the
 > morning of 30.08 and rolled back the same day: with a `web_app`
@@ -339,15 +349,16 @@ Steps:
        --max-handle anna_styl
    ```
    **NOTE: deprecated** — emits a stderr warning. This bypasses the
-   audit + DM dispatch side effects of the real flow and exists only
-   for backend tests + the very-first-tenant bootstrap before any
-   admin can sign in.
+   audit side effects of the real flow and exists only for backend
+   tests + the very-first-tenant bootstrap before any admin can sign
+   in.
 
    The command prints:
    - `master_id` — the `CatalogMaster.id`
    - `invite_token` — fresh UUID, 7 days TTL
-   - `open_app payload` — `master_invite_<token>`, the payload the real
-     invite DM carries on its «Принять приглашение» button
+   - `open_app payload` — `master_invite_<token>`, the payload the
+     salon bot puts on its «Принять приглашение» button when somebody
+     opens the invite link
    - `web URL` — `http://localhost:5173/onboarding/master?token=<token>`
      (for **local Vite dev with the dev bypass only**; override host with
      `settings.SITE_DOMAIN`)
@@ -366,19 +377,21 @@ Steps:
    > `validate_invite_token` resolves it through the tenant of the
    > session's `BotUser`. A Mini App is entered **only** from an
    > `open_app` button on a MAX message. Testing the invite for real
-   > means sending it for real (`POST /api/v1/admin/masters/invite`) with
-   > `MAX_BOT_WEB_APP` set.
+   > means creating it for real (`POST /api/v1/admin/masters/invite`)
+   > with `MAX_BOT_WEB_APP` set and opening the `invite_link` it
+   > returns.
 
-2. **Open the invitation from MAX** — tap «Принять приглашение» on the
-   bot DM; MAX passes the payload as `start_param` and the Mini App opens
-   at `/onboarding/master?token=…`.
+2. **Open the invitation from MAX** — open the `invite_link` from the
+   create response,
+   `https://max.ru/<salon_bot>?start=master_invite_<token>`. The bot
+   starts, receives `bot_started` with the token in `payload`, and
+   answers with the «Принять приглашение» button; tapping it passes the
+   payload as `start_param` and the Mini App opens at
+   `/onboarding/master?token=…`.
 
-   Or, when there is no DM to tap (no known `max_username`, or you are
-   testing the handover route): open the `invite_link` from the create
-   response, `https://max.ru/<salon_bot>?start=master_invite_<token>`.
-   The bot starts, receives `bot_started` with the token in `payload`,
-   and answers with the same button. Then verify each step below
-   identically — from here on the two routes are the same flow.
+   Это единственный маршрут. Прежде здесь стоял второй — «нажать кнопку
+   в личном сообщении, которое прислал эндпоинт»; личного сообщения
+   больше нет (§44.4).
 
    Checking what actually arrived, when a start link seems to do
    nothing — read the stream, not `docker compose logs`, which is lost

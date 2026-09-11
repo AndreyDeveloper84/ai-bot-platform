@@ -93,6 +93,14 @@ RepeatStatus = Literal[
     "backend_unavailable",
 ]
 
+#: Исход отмены ОДНОЙ записи (DRF-1547).
+#:
+#: ``already_gone`` отделено от ``ok`` намеренно: для человека оба исхода
+#: успешны — записи больше нет, — но сказать «отменила» про запись,
+#: которой уже не было, значит приписать себе чужое действие. Отдельный
+#: слаг позволяет вызывающему сказать правду, не вводя второго вызова.
+CancelStatus = Literal["ok", "already_gone", "not_found", "refused", "backend_unavailable"]
+
 
 @dataclass(frozen=True)
 class Visit:
@@ -270,6 +278,60 @@ def get_visit(*, bot_user, appointment_id: str) -> Visit | None:
         logger.warning("records.get_visit.unavailable booking_id=%s err=%s", appointment_id, exc)
         return None
     return _visit_from_record(record)
+
+
+def cancel_booking(*, bot_user, appointment_id: str) -> CancelStatus:
+    """Cancel ONE booking of this person. A slug out, never text.
+
+    DRF-1547 / §37 п.1. Until now the bot could show a person their
+    bookings and could not cancel any of them: «Отменить запись» was a menu
+    item that turned into the phrase «Отменить запись» and reached the
+    concierge, whose tool roster has no cancel verb. The owner's reason for
+    moving the action onto the card — «так меньше риск отменить не тот
+    визит» — needs an action that exists, and this is it.
+
+    Who owns the booking is decided by AYLA, not here: the request carries
+    ``X-External-User-ID`` and the backend answers 404 for anybody else's
+    row. That is the same rule ``get_visit`` relies on, and it is why a
+    forged id buys nothing — it ends as ``not_found``, never as somebody
+    else's cancellation.
+
+    The idempotency key is derived, not random: a double tap during a
+    network stall must be the same intent, not a second one. Same seed
+    shape as the Mini App's cancel (``miniapp_api.views._cancel_via_ayla``),
+    so the two entrances cannot be told apart upstream.
+
+    The ``RemoteBookingProxy`` mirror is deliberately NOT written here —
+    same no-dual-write contract the Mini App path states: the row flips on
+    the ``booking.cancelled`` round trip, and a local write would be a
+    second truth about the same booking.
+    """
+    import hashlib
+
+    external = external_user_id_for(bot_user)
+    seed = "|".join([external, "cancel", str(appointment_id)])
+    idempotency_key = hashlib.sha256(seed.encode("utf-8")).hexdigest()[:32]
+
+    client = get_ayla_booking_client()
+    try:
+        cancelled = client.cancel_appointment(
+            external_user_id=external,
+            appointment_id=str(appointment_id),
+            idempotency_key=idempotency_key,
+        )
+    except BookingBadRequestError as exc:
+        if exc.status_code == 404 or (exc.code or "").upper() == "NOT_FOUND":
+            logger.info("records.cancel_booking.not_found booking_id=%s", appointment_id)
+            return "not_found"
+        logger.info("records.cancel_booking.refused booking_id=%s err=%s", appointment_id, exc)
+        return "refused"
+    except BookingUnavailableError:
+        logger.warning("records.cancel_booking.unavailable booking_id=%s", appointment_id)
+        return "backend_unavailable"
+    except BookingAPIError as exc:
+        logger.warning("records.cancel_booking.failed booking_id=%s err=%s", appointment_id, exc)
+        return "backend_unavailable"
+    return "ok" if cancelled else "already_gone"
 
 
 def prepare_repeat(*, bot_user, appointment_id: str) -> RepeatResult:

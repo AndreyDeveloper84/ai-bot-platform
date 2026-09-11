@@ -1,0 +1,325 @@
+# Ayla Planning Rules Registry — machine-readable носитель планировочных правил
+#
+# Canonical source: ayla-knowledge / 03 AI System/Contracts/planning-rules-registry.yaml
+# Нормативный источник семантики: PLANNING_CONSTRAINTS_CONTRACT_v1.0.md
+# (docs/specs/, рабочее дерево Ayla), решение владельца D-1 от 08.09.2026
+# (docs/OPEN_DECISIONS.md §70).
+# Change control: изменение этого файла — через change control ayla-knowledge;
+#   additive-изменение = minor, изменение семантики = major.
+# registry_version версионирует ЭТОТ реестр; runtime отвергает неизвестную
+# major ДО разбора тела (образец: ai-bot-platform
+# apps/integrations/ayla/recommendation_resolver_client.py, SUPPORTED_SPEC_MAJOR).
+registry: ayla.planning-rules-registry
+registry_version: "0.1"
+compatible_contract_version: "1.0"   # PLANNING_CONSTRAINTS_CONTRACT_v1.0
+status: draft
+updated: 2026-09-08
+
+# Закрытый перечень типов (контракт §3). Четырнадцатый тип не заводится —
+# рантайм не расширяет перечень по аналогии с v1.1 §14.4.
+kinds:
+  - CAPABILITY_SEMANTICS
+  - SERVICE_CAPABILITY_MAPPING
+  - DURATION
+  - EVENT_WINDOW
+  - MIN_INTERVAL
+  - MAX_INTERVAL
+  - REPETITION
+  - SEQUENCE
+  - PRECONDITION
+  - COMPATIBILITY
+  - INCOMPATIBILITY
+  - RECOVERY_WINDOW
+  - SAFETY_CONSTRAINT
+
+# Закрытый перечень статусов записи (направление владельца 08.09.2026).
+#   KNOWN                    — правило есть, значение и unit заполнены;
+#   UNKNOWN                  — значение отсутствует как факт; value обязан
+#                              нести reason/asked_source/as_of (контракт §4.1);
+#   INTENTIONALLY_UNSUPPORTED — тип пуст по принятому решению владельца,
+#                              а не потому, что работу забыли выполнить.
+statuses:
+  - KNOWN
+  - UNKNOWN
+  - INTENTIONALLY_UNSUPPORTED
+
+# Закрытый перечень причин UNKNOWN (контракт §4.2).
+unknown_reasons:
+  - NO_RULE_EXISTS
+  - RULE_NOT_APPLICABLE
+  - SOURCE_UNREACHABLE
+  - SOURCE_STALE
+  - MAPPING_MISSING
+  - POLICY_WITHHELD
+
+# Срез на 08.09.2026: ни один вид не имеет KNOWN-правила в этом реестре.
+# UNKNOWN здесь — первоклассный результат замера, а не пропущенная работа
+# (инвентарь PLANNING_CONSTRAINTS_INVENTORY.md, перепроверено 08.09).
+rules:
+  - rule_id: PR-CAPABILITY_SEMANTICS-0001
+    kind: CAPABILITY_SEMANTICS
+    status: UNKNOWN
+    value:
+      reason: NO_RULE_EXISTS
+      asked_source: "ayla-knowledge:03 AI System/Contracts/planning-rules-registry.yaml"
+      as_of: 2026-09-08
+    unit: null
+    applicability:
+      scope: GENERAL
+      subject_kind: capability
+      subject_ids: []
+      conditions: []
+    provenance:
+      source: "ayla-knowledge:03 AI System/Contracts/planning-rules-registry.yaml"
+      version: "0.1"
+    note: >-
+      Машиночитаемой семантики способностей не существует. Есть только проза:
+      ayla-knowledge/00 Foundation/Ayla Domain Capability Registry.md —
+      27 записей, но это способности ПОДСИСТЕМ, не услуг
+      (инвентарь §T1, §8).
+
+  - rule_id: PR-SERVICE_CAPABILITY_MAPPING-0001
+    kind: SERVICE_CAPABILITY_MAPPING
+    status: UNKNOWN
+    value:
+      reason: NO_RULE_EXISTS
+      asked_source: "ayla-knowledge:03 AI System/Contracts/planning-rules-registry.yaml"
+      as_of: 2026-09-08
+    unit: null
+    applicability:
+      scope: GENERAL
+      subject_kind: capability
+      subject_ids: []
+      conditions: []
+    provenance:
+      source: "ayla-knowledge:03 AI System/Contracts/planning-rules-registry.yaml"
+      version: "0.1"
+    note: >-
+      Сопоставления услуга ↔ способность не существует — включая сам словарь
+      статусов VERIFIED / REVIEW_REQUIRED / UNMAPPED, которого нет нигде,
+      включая канонический репозиторий (инвентарь §T2, §D-3).
+
+  - rule_id: PR-DURATION-0001
+    kind: DURATION
+    status: UNKNOWN
+    value:
+      reason: NO_RULE_EXISTS
+      asked_source: "ayla-knowledge:03 AI System/Contracts/planning-rules-registry.yaml"
+      as_of: 2026-09-08
+    unit: null
+    applicability:
+      scope: GENERAL
+      subject_kind: canonical_service
+      subject_ids: []
+      conditions: []
+    provenance:
+      source: "ayla-knowledge:03 AI System/Contracts/planning-rules-registry.yaml"
+      version: "0.1"
+    note: >-
+      В ЭТОМ реестре правил длительности нет и по D-1 быть не должно:
+      живой источник — бэкенд Ayla (цепочка SpecialistService → SalonService
+      → ServiceTemplate + SlotConfig), единственный заполненный тип
+      (инвентарь §T3). Источник не имеет схемы версий (контракт §5.3),
+      поэтому перенос его значений сюда без версии запрещён.
+
+  - rule_id: PR-EVENT_WINDOW-0001
+    kind: EVENT_WINDOW
+    status: UNKNOWN
+    value:
+      reason: NO_RULE_EXISTS
+      asked_source: "ayla-knowledge:03 AI System/Contracts/planning-rules-registry.yaml"
+      as_of: 2026-09-08
+    unit: null
+    applicability:
+      scope: GENERAL
+      subject_kind: canonical_service
+      subject_ids: []
+      conditions: []
+    provenance:
+      source: "ayla-knowledge:03 AI System/Contracts/planning-rules-registry.yaml"
+      version: "0.1"
+    note: >-
+      Окон подготовки к дате события не существует ни в одном источнике
+      (инвентарь §T4). Окна атрибуции — другой предмет.
+
+  - rule_id: PR-MIN_INTERVAL-0001
+    kind: MIN_INTERVAL
+    status: UNKNOWN
+    value:
+      reason: NO_RULE_EXISTS
+      asked_source: "ayla-knowledge:03 AI System/Contracts/planning-rules-registry.yaml"
+      as_of: 2026-09-08
+    unit: null
+    applicability:
+      scope: GENERAL
+      subject_kind: canonical_service
+      subject_ids: []
+      conditions: []
+    provenance:
+      source: "ayla-knowledge:03 AI System/Contracts/planning-rules-registry.yaml"
+      version: "0.1"
+    note: >-
+      Минимальных интервалов между процедурами не существует
+      (инвентарь §T5/T6).
+
+  - rule_id: PR-MAX_INTERVAL-0001
+    kind: MAX_INTERVAL
+    status: UNKNOWN
+    value:
+      reason: NO_RULE_EXISTS
+      asked_source: "ayla-knowledge:03 AI System/Contracts/planning-rules-registry.yaml"
+      as_of: 2026-09-08
+    unit: null
+    applicability:
+      scope: GENERAL
+      subject_kind: canonical_service
+      subject_ids: []
+      conditions: []
+    provenance:
+      source: "ayla-knowledge:03 AI System/Contracts/planning-rules-registry.yaml"
+      version: "0.1"
+    note: >-
+      Максимальных интервалов между процедурами не существует
+      (инвентарь §T5/T6).
+
+  - rule_id: PR-REPETITION-0001
+    kind: REPETITION
+    status: INTENTIONALLY_UNSUPPORTED
+    value: null
+    unit: null
+    applicability:
+      scope: GENERAL
+      subject_kind: canonical_service
+      subject_ids: []
+      conditions: []
+    provenance:
+      source: "ayla-knowledge:05 Architecture/ADR-0012 Dynamic User Model.md:N-04"
+      version: "0.2"
+    note: >-
+      Тип пуст по принятому решению, а не по забывчивости. ADR-0012 N-04
+      дословно: «Запрещено: предложить курс процедур (существенная
+      рекомендация) только потому, что из поведения выведено…». Владелец
+      08.09.2026: «совместимость и повторяемость — не пробел, а принятое
+      решение НЕ делать». Источник — draft (version 0.2), это зафиксировано
+      честно.
+
+  - rule_id: PR-SEQUENCE-0001
+    kind: SEQUENCE
+    status: UNKNOWN
+    value:
+      reason: NO_RULE_EXISTS
+      asked_source: "ayla-knowledge:03 AI System/Contracts/planning-rules-registry.yaml"
+      as_of: 2026-09-08
+    unit: null
+    applicability:
+      scope: GENERAL
+      subject_kind: canonical_service
+      subject_ids: []
+      conditions: []
+    provenance:
+      source: "ayla-knowledge:03 AI System/Contracts/planning-rules-registry.yaml"
+      version: "0.1"
+    note: >-
+      Последовательности шагов для процедур не существует (инвентарь §T8).
+      Последовательность слотов интента в intent-registry.yaml — другой
+      предмет.
+
+  - rule_id: PR-PRECONDITION-0001
+    kind: PRECONDITION
+    status: UNKNOWN
+    value:
+      reason: NO_RULE_EXISTS
+      asked_source: "ayla-knowledge:03 AI System/Contracts/planning-rules-registry.yaml"
+      as_of: 2026-09-08
+    unit: null
+    applicability:
+      scope: GENERAL
+      subject_kind: canonical_service
+      subject_ids: []
+      conditions: []
+    provenance:
+      source: "ayla-knowledge:03 AI System/Contracts/planning-rules-registry.yaml"
+      version: "0.1"
+    note: >-
+      Предусловий для процедур не существует (инвентарь §T9).
+
+  - rule_id: PR-COMPATIBILITY-0001
+    kind: COMPATIBILITY
+    status: INTENTIONALLY_UNSUPPORTED
+    value: null
+    unit: null
+    applicability:
+      scope: GENERAL
+      subject_kind: canonical_service
+      subject_ids: []
+      conditions: []
+    provenance:
+      source: "ayla-knowledge:05 Architecture/Ayla Goal Outcome Semantic Model Working Design.md:OD-CI-4"
+      version: "0.9"
+    note: >-
+      Тип пуст по принятому решению. OD-CI-4: «Глобальный compatibility
+      registry не создаётся» — совместимость оценивается по полной
+      interpretation, а не реестром. Источник — draft (version 0.9),
+      это зафиксировано честно.
+
+  - rule_id: PR-INCOMPATIBILITY-0001
+    kind: INCOMPATIBILITY
+    status: INTENTIONALLY_UNSUPPORTED
+    value: null
+    unit: null
+    applicability:
+      scope: GENERAL
+      subject_kind: canonical_service
+      subject_ids: []
+      conditions: []
+    provenance:
+      source: "ayla-knowledge:05 Architecture/Ayla Goal Outcome Semantic Model Working Design.md:OD-CI-5"
+      version: "0.9"
+    note: >-
+      Тип пуст по принятому решению. OD-CI-5: «Pairwise matrix, graph,
+      mutual exclusions и conditional subset constraints не проектируются».
+      Источник — draft (version 0.9), это зафиксировано честно.
+
+  - rule_id: PR-RECOVERY_WINDOW-0001
+    kind: RECOVERY_WINDOW
+    status: UNKNOWN
+    value:
+      reason: NO_RULE_EXISTS
+      asked_source: "ayla-knowledge:03 AI System/Contracts/planning-rules-registry.yaml"
+      as_of: 2026-09-08
+    unit: null
+    applicability:
+      scope: GENERAL
+      subject_kind: canonical_service
+      subject_ids: []
+      conditions: []
+    provenance:
+      source: "ayla-knowledge:03 AI System/Contracts/planning-rules-registry.yaml"
+      version: "0.1"
+    note: >-
+      Правил восстановления не существует; поле aftercare_text в бэкенде
+      пусто (EXISTS_EMPTY) и правилом не является — свободный текст без
+      provenance (контракт §5.5, инвентарь §T12).
+
+  - rule_id: PR-SAFETY_CONSTRAINT-0001
+    kind: SAFETY_CONSTRAINT
+    status: UNKNOWN
+    value:
+      reason: NO_RULE_EXISTS
+      asked_source: "ayla-knowledge:03 AI System/Contracts/planning-rules-registry.yaml"
+      as_of: 2026-09-08
+    unit: null
+    applicability:
+      scope: GENERAL
+      subject_kind: canonical_service
+      subject_ids: []
+      conditions: []
+    provenance:
+      source: "ayla-knowledge:03 AI System/Contracts/planning-rules-registry.yaml"
+      version: "0.1"
+    note: >-
+      В этом реестре правил безопасности плана нет. Частичный сигнал живёт
+      вне ayla-knowledge: булев флаг resolved_requires_health_check (бэкенд
+      Ayla) и константы apps/orchestrator/safety/* (ai-bot-platform).
+      Канон §15.7 назначает владельцем ayla-knowledge — перенос сюда ещё
+      не выполнен (инвентарь §T13).

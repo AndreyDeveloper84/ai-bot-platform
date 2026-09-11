@@ -88,8 +88,18 @@ def sent(monkeypatch):
 
     calls: list[dict] = []
 
-    def fake_send(*, chat_id, text, attachments=None, timeout=10.0, bot=None):
-        calls.append({"chat_id": str(chat_id), "text": text})
+    def fake_send(*, chat_id=None, user_id=None, text, attachments=None, timeout=10.0, bot=None):
+        # DRF-1558 — «addr» это адрес, «key» — каким ключом он ушёл: ответ в
+        # ход идёт по ``chat_id`` события, освобождение позже — по человеку.
+        calls.append(
+            {
+                "chat_id": None if chat_id is None else str(chat_id),
+                "user_id": None if user_id is None else str(user_id),
+                "addr": str(user_id if user_id is not None else chat_id),
+                "key": "user_id" if user_id is not None else "chat_id",
+                "text": text,
+            }
+        )
         return {"ok": True}
 
     monkeypatch.setattr(max_handler, "send_message", fake_send)
@@ -176,7 +186,10 @@ class TestSilenceIsExplainedOnce:
         _run_global("вы тут?", mid="tr-1")
 
         assert [c["text"] for c in sent] == [SILENCE_TRANSFERRED_TEXT]
-        assert sent[0]["chat_id"] == str(CHAT_ID)
+        # Уведомление о молчании отправляется ВНУТРИ хода — по диалогу
+        # события, как любой другой ответ (DRF-1558 его не трогает).
+        assert sent[0]["key"] == "chat_id"
+        assert sent[0]["addr"] == str(CHAT_ID)
         # Никаких идентификаторов задачи, тенанта и очереди человеку.
         body = sent[0]["text"]
         assert str(task.id) not in body

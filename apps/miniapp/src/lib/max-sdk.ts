@@ -135,8 +135,39 @@ export const MASTER_ONBOARDING_PATH = "/onboarding/master";
  * on (`validate_invite_token` looks the token up by UUID), so anything
  * else is refused here rather than forwarded and refused later.
  */
+/**
+ * Payload prefix for «перенести ЭТУ запись» (DRF-1547).
+ *
+ * The bot builds `${RESCHEDULE_PAYLOAD_PREFIX}${bookingId}` in
+ * `apps/orchestrator/visits.py` (constant of the same name there), and
+ * `apps/skills/welcome/skill.py::reschedule_route` builds the same path
+ * for the link-button fallback. `test_miniapp_routes.py` reads both
+ * sources and fails when they drift.
+ *
+ * Owner decision §37: the schedule is the one thing a chat cannot do
+ * well, so it — and only it — opens the app, and only after the bot has
+ * said so. A person who has already picked WHICH booking must not be
+ * asked to pick it again here, so the payload carries the id.
+ */
+export const RESCHEDULE_PAYLOAD_PREFIX = "reschedule_";
+
+/** Canonical address of the reschedule screen (DRF-1481). */
+export const RESCHEDULE_PATH_PREFIX = "/customer/records";
+
 const _MASTER_INVITE_RE = new RegExp(
   `^${MASTER_INVITE_PAYLOAD_PREFIX}` +
+    "([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-" +
+    "[0-9a-fA-F]{4}-[0-9a-fA-F]{12})$",
+);
+
+/**
+ * Strict shape of a reschedule payload — the prefix and a canonical UUID,
+ * anchored at both ends. Same rule and same reason as
+ * `_MASTER_INVITE_RE` above: the tail becomes part of the app's own URL,
+ * so "anything after the prefix" is a hole, not a shortcut.
+ */
+const _RESCHEDULE_RE = new RegExp(
+  `^${RESCHEDULE_PAYLOAD_PREFIX}` +
     "([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-" +
     "[0-9a-fA-F]{4}-[0-9a-fA-F]{12})$",
 );
@@ -151,8 +182,9 @@ const _ROUTE_MAP: Record<string, string> = {
   // Before DRF-1326 these three pointed at the legacy pre-reskin screens
   // (/catalog, /my-visits, /me) while the link fallback pointed at the
   // /customer/* ones — same button, two destinations depending on config.
-  // The legacy routes stay mounted in App.tsx for reschedule flows and
-  // old bot DMs; they are simply no longer what the welcome menu opens.
+  // /catalog and /my-visits stay mounted in App.tsx as compatibility
+  // aliases; /me and its screen were removed with DRF-1485. None of the
+  // three is what the welcome menu opens any more.
   open_catalog: "/customer/catalog",
   open_visits: "/customer/records",
   open_profile: "/customer/profile",
@@ -218,6 +250,15 @@ export function parseStartRoute(payload: string): string | null {
   if (payload.startsWith(MASTER_INVITE_PAYLOAD_PREFIX)) {
     const invite = _MASTER_INVITE_RE.exec(payload);
     return invite ? `${MASTER_ONBOARDING_PATH}?token=${invite[1]}` : null;
+  }
+  // Перенос конкретной записи (DRF-1547) — второй и последний payload с
+  // параметром. Claimed by prefix, resolved by the strict form, for the
+  // same reason the invitation is: a payload that announces itself as a
+  // reschedule and then isn't one is refused outright rather than left to
+  // the querystring fallback below.
+  if (payload.startsWith(RESCHEDULE_PAYLOAD_PREFIX)) {
+    const move = _RESCHEDULE_RE.exec(payload);
+    return move ? `${RESCHEDULE_PATH_PREFIX}/${move[1]}/reschedule` : null;
   }
   // Fall back to legacy querystring shape (``route=<value>``).
   if (payload.includes("=")) {
@@ -311,6 +352,30 @@ export function removeDeviceStorage(key: string): void {
     } catch {
       /* private mode / SSR — best effort */
     }
+  }
+}
+
+/**
+ * Открыть внешний адрес: в MAX — через оболочку (webview overlay), в
+ * обычном браузере — новой вкладкой.
+ *
+ * Заведена как отдельная функция, потому что тем же механизмом
+ * пользуется не только оплата (DRF-1319). Звать `openPaymentConfirmation`
+ * ради OAuth значило бы назвать вход оплатой — имя, обвиняющее не тот
+ * предмет, дороже лишней функции: по нему потом ищут не там.
+ */
+export function openExternalLink(url: string): void {
+  const b = maxBridge();
+  if (b?.openLink) {
+    try {
+      b.openLink(url);
+      return;
+    } catch (err) {
+      console.warn("[max-sdk] openLink failed, falling back to window.open", err);
+    }
+  }
+  if (typeof window !== "undefined") {
+    window.open(url, "_blank", "noopener,noreferrer");
   }
 }
 

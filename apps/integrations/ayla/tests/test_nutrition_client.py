@@ -301,6 +301,11 @@ class TestProfile:
                             "daily_water_ml": 2100,
                             "bmr": 1450,
                         },
+                        # Каталог объявляет блок обязательным с #316; без
+                        # него DTO читает ориентиры как не настроенные
+                        # (DRF-1686, §6) — этот тест про разбор чисел, а
+                        # не про отсутствие происхождения.
+                        "targets_provenance": {"source": "ayla_calculated"},
                     }
                 },
             )
@@ -334,6 +339,71 @@ class TestProfile:
         _set_transport(transport)
 
         assert await client.get_profile(external_user_id="bot:1") is None
+
+
+# ─── profile: происхождение ориентира (DRF-1623 N-b) ──────────────────────
+
+
+def _profile_body(**over: Any) -> dict[str, Any]:
+    body: dict[str, Any] = {
+        "gender": "female",
+        "age": 32,
+        "height_cm": 168,
+        "weight_kg": 62,
+        "goal": "maintain",
+        "norms": {},
+    }
+    body.update(over)
+    return body
+
+
+class TestProfileTargetsSource:
+    """``targets_provenance.source`` доезжает до ``ProfileResponse``.
+
+    Каталог с #316 отдаёт этот ключ ОБЯЗАТЕЛЬНЫМ (значения ``none |
+    unknown_legacy | ayla_calculated | user_entered``). Бот обязан отличать
+    «прислали „нет“» от «не прислали»: второе — нарушение контракта, а не
+    отсутствие ориентира, и изготовить из него ``"none"`` нельзя.
+    """
+
+    @staticmethod
+    async def _fetch(body: dict[str, Any]) -> nc.ProfileResponse:
+        def handler(_: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json={"data": body})
+
+        client, transport = _client_with_handler(handler)
+        _set_transport(transport)
+        profile = await client.get_profile(external_user_id="bot:1")
+        assert profile is not None
+        return profile
+
+    @pytest.mark.asyncio
+    async def test_source_none_arrives_as_none(self) -> None:
+        body = _profile_body(targets_provenance={"source": "none", "method_versions": {}})
+        profile = await self._fetch(body)
+        assert profile.targets_source == "none"
+        assert profile.protein_g is None
+
+    @pytest.mark.asyncio
+    async def test_source_ayla_calculated_arrives_verbatim(self) -> None:
+        body = _profile_body(
+            norms={"daily_kcal": 1900, "daily_protein_g": 95},
+            targets_provenance={"source": "ayla_calculated"},
+        )
+        profile = await self._fetch(body)
+        assert profile.targets_source == "ayla_calculated"
+        assert profile.protein_g == 95
+
+    @pytest.mark.asyncio
+    async def test_missing_key_is_empty_not_none(self) -> None:
+        """«Не прислали» ≠ «прислали „нет“»: у отсутствия своё имя — ``""``."""
+        profile = await self._fetch(_profile_body())
+        assert profile.targets_source == ""
+
+    @pytest.mark.asyncio
+    async def test_provenance_without_source_is_empty_too(self) -> None:
+        profile = await self._fetch(_profile_body(targets_provenance={"method_versions": {}}))
+        assert profile.targets_source == ""
 
 
 # ─── water envelope ────────────────────────────────────────────────────────

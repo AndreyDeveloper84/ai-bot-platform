@@ -61,7 +61,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 from datetime import date as date_cls, datetime, time, timedelta, timezone as dt_timezone
-from typing import Any
+from typing import Any, NamedTuple
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from django.utils import timezone as dj_timezone
@@ -340,34 +340,88 @@ def _day_bounds_utc(day: date_cls, tz: ZoneInfo) -> tuple[datetime, datetime]:
 # --- working block lookup ----------------------------------------------
 
 
+class DayWindow(NamedTuple):
+    """Рамка дня и перерыв внутри неё — ОДНИМ решением.
+
+    Перерыв возвращается отсюда, а не вычисляется отдельной функцией,
+    потому что правило приоритета («исключение на дату бьёт недельный
+    шаблон») одно. Вторая функция с тем же приоритетом разошлась бы с
+    первой молча — ровно тот дефект, который мы весь день ловим в других
+    местах.
+    """
+
+    working: tuple[time, time] | None
+    lunch: tuple[time, time] | None
+
+
+def _lunch_of(row: Any, *, master_id: Any, day: date_cls) -> tuple[time, time] | None:
+    """Перерыв строки, если он назван ПОЛНОСТЬЮ.
+
+    Читается защищённо: локальные модели (``scheduling.WorkingHours``,
+    ``ScheduleException``) колонок перерыва не имеют вовсе, и ветка с
+    выключенным флагом обязана продолжать работать.
+
+    Половина перерыва — не перерыв. Вычесть её нельзя, а промолчать
+    нельзя тем более: в логе остаётся имя, потому что «перерыв назван
+    наполовину» и «перерыва нет» — разные состояния данных, и второе
+    читается как норма.
+    """
+
+    start = getattr(row, "break_start", None)
+    end = getattr(row, "break_end", None)
+    if start is None and end is None:
+        return None
+    if start is None or end is None or start >= end:
+        logger.warning(
+            "schedule.lunch_half_named master=%s day=%s start=%s end=%s",
+            master_id,
+            day.isoformat(),
+            start,
+            end,
+        )
+        return None
+    return (start, end)
+
+
 def _working_block_for_day(
     master: CatalogMaster,
     day: date_cls,
     exceptions_by_date: dict[date_cls, ExceptionLike],
     wh_by_weekday: dict[int, WorkingHoursLike],
-) -> tuple[time, time] | None:
-    """Return the master's effective working window for ``day``, in tenant-local time.
+) -> DayWindow:
+    """Рамка мастера на ``day`` в местном времени тенанта — вместе с перерывом.
 
     Priority: ScheduleException (custom_hours → use; full-day-off →
     None) → WorkingHours for the weekday (skip is_working=False).
-    Returns None when the master isn't working that day.
+    ``working is None`` when the master isn't working that day.
 
     Caller passes pre-fetched dicts so we don't re-hit the DB per day.
+
+    DRF-1638: перерыв приезжает отсюда же. До 11.09.2026 функция возвращала
+    только окно, перерыв терялся ещё раньше — при разборе кадра, — и обед
+    попадал в «свободное время». Каталог при этом считает перерыв занятым и
+    на чтении, и на записи: экран предлагал время, которое запись отклоняла.
     """
 
     exc = exceptions_by_date.get(day)
     if exc is not None:
         if exc.type == ScheduleException.Type.CUSTOM_HOURS:
             if exc.start_time and exc.end_time:
-                return (exc.start_time, exc.end_time)
-            return None
+                return DayWindow(
+                    working=(exc.start_time, exc.end_time),
+                    lunch=_lunch_of(exc, master_id=master.id, day=day),
+                )
+            return DayWindow(None, None)
         # Any other exception type is full-day off.
-        return None
+        return DayWindow(None, None)
 
     wh = wh_by_weekday.get(day.weekday())
     if wh is None or not wh.is_working or not wh.start_time or not wh.end_time:
-        return None
-    return (wh.start_time, wh.end_time)
+        return DayWindow(None, None)
+    return DayWindow(
+        working=(wh.start_time, wh.end_time),
+        lunch=_lunch_of(wh, master_id=master.id, day=day),
+    )
 
 
 # --- free-window + conflict computation -------------------------------
@@ -665,7 +719,8 @@ def _build_one_day(
 ) -> ScheduleDay:
     """Build a single :class:`ScheduleDay`. See :func:`build_schedule`."""
 
-    working_block = _working_block_for_day(master, day, exceptions_by_date, wh_by_weekday)
+    day_window = _working_block_for_day(master, day, exceptions_by_date, wh_by_weekday)
+    working_block = day_window.working
     # An «off day» is one with no working hours configured AT ALL —
     # i.e. WorkingHours row is missing OR is_working=False. A full-day
     # ScheduleException (vacation/sick) on a normally-working day is
@@ -738,7 +793,29 @@ def _build_one_day(
     # Partial-day absences (Ayla time-off, flag ON): the local model has
     # no per-hours absence, so these arrive only from the wire. They are
     # real occupied time — free windows and the conflict pass both see them.
-    for extra in extra_blocks or []:
+    # DRF-1638 — перерыв вычитается ТЕМ ЖЕ механизмом, что недоступность.
+    #
+    # Своей арифметики он не получает намеренно: ``_compute_free_windows``
+    # уже умеет вычитать блоки, и заводить рядом второй способ «убрать кусок
+    # из рамки» значило бы завести второе определение занятости. Заодно
+    # перерыв появляется в ``blocks`` — экран уже рисует reason ``lunch``
+    # словом «перерыв», отдельной работы на клиенте не нужно.
+    #
+    # Только в рабочий день: перерыв в день, когда мастер не работает, —
+    # это данные, а не событие, и вычитать его не из чего.
+    day_blocks = list(extra_blocks or [])
+    if day_window.lunch is not None and working_block is not None:
+        lunch_start, lunch_end = day_window.lunch
+        day_blocks.append(
+            FrameBlock(
+                id=f"lunch-{day.isoformat()}",
+                start_local=lunch_start,
+                end_local=lunch_end,
+                reason="lunch",
+            )
+        )
+
+    for extra in day_blocks:
         start_utc = datetime.combine(day, extra.start_local, tzinfo=tz).astimezone(dt_timezone.utc)
         end_utc = datetime.combine(day, extra.end_local, tzinfo=tz).astimezone(dt_timezone.utc)
         blocks.append(
@@ -946,7 +1023,7 @@ def notify_manager_of_availability_request(*, tenant, master, request_id) -> Non
     """DM «Анна просит выходной» администратору салона.
 
     Спека master-mobile §M3 строка 458: «server marks slot blocked →
-    owner notified (audit + bot DM)». Пустой ``manager_chat_id`` — не
+    owner notified (audit + bot DM)». Ненастроенный адрес менеджера — не
     ошибка, а деградация: тот же режим, что у эскалации напоминаний.
 
     Живёт здесь, а не в вызывающем модуле, потому что заявку теперь
@@ -963,8 +1040,15 @@ def notify_manager_of_availability_request(*, tenant, master, request_id) -> Non
 
     from django.conf import settings
 
-    chat_id = (getattr(tenant, "manager_chat_id", "") or "").strip()
-    if not chat_id:
+    # DRF-1559 — адрес менеджера: человек, если у салона заполнен
+    # ``manager_user_id``, иначе прежний диалоговый идентификатор. Slug
+    # ``no_manager_chat_id`` сохранён — это эмитируемый ключ. Импорт
+    # локальный, как и у ``send_message`` ниже: apps.channels не нужен
+    # тем эндпоинтам master_api, которые сюда не заходят.
+    from apps.channels.max.addressing import manager_address
+
+    manager = manager_address(tenant)
+    if not manager:
         logger.info(
             "master_api.availability.no_manager_chat_id tenant=%s master=%s",
             tenant.id,
@@ -984,7 +1068,7 @@ def notify_manager_of_availability_request(*, tenant, master, request_id) -> Non
         f"[Открыть запрос]({admin_url}?request_id={request_id})"
     )
     try:
-        send_message(chat_id=chat_id, text=text)
+        send_message(**manager.send_kwargs(), text=text)
     except MaxAPIError:
         # Best-effort: источник правды — строка в базе и аудит.
         logger.warning(

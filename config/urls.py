@@ -16,6 +16,9 @@ urlpatterns = [
     # urlpatterns so the specific prefix wins over admin's catch-all
     # include (Django matches patterns in declared order).
     path("admin/observability/", include("apps.observability.urls", namespace="observability")),
+    # DRF-1500 — экран здоровья контура. До catch-all админки, как и
+    # observability выше: иначе префикс проиграет admin.site.urls.
+    path("admin/health/", include("apps.adminconsole.urls", namespace="adminconsole")),
     path("admin/", admin.site.urls),
     path("", include("apps.orchestrator.urls")),
     path("api/v1/ingress/", include("apps.ingress.urls", namespace="ingress")),

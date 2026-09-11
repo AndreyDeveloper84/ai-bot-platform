@@ -165,9 +165,11 @@ class AnonymizeResult:
 #: contact patterns run and restored after — see :func:`_redact`.
 #:
 #: The lookarounds are written as explicit character classes rather than as a
-#: word boundary on purpose: a word boundary is exactly what breaks
+#: word boundary on purpose: a word boundary is exactly what used to break
 #: ``apps.replay.redactor.OTP_RE`` on this input, because ``-`` is not a word
-#: character and so the digit groups INSIDE a UUID satisfy it.
+#: character and so the digit groups INSIDE a UUID satisfied it. That upstream
+#: hole is closed (DRF-1389); this class is kept as written because the same
+#: trap is one edit away for any pattern that reaches this list.
 _UUID_RE = re.compile(
     "(?<![0-9a-zA-Z-])[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}(?![0-9a-zA-Z-])"
 )
@@ -203,11 +205,16 @@ def _redact(text: str) -> str:
     ``apps/conversations/tests/test_erasure_redaction.py``:
 
     **1. UUIDs are masked before the patterns run and restored after.** The
-    full redactor corrupts **43.8% of canonical UUIDs** — 20 000 samples,
-    measured against ``origin/dev`` at ``a7c144d``, i.e. AFTER DRF-1382 tightened
-    the phone and card shapes. That ticket cut two of the three contributors
-    (``PHONE_RE`` 611 → 148, ``CC_RE`` 410 → 29) and left the dominant one
-    untouched: ``OTP_RE`` still hits 8 679 of 20 000 on its own.
+    full redactor used to corrupt **43.8% of canonical UUIDs** — 20 000
+    samples, measured against ``origin/dev`` at ``a7c144d``. DRF-1389 has
+    since closed the dominant contributor upstream, and the re-measurement on
+    the same 20 000 samples is **0.73%**: ``OTP_RE`` 0 (was 8 664),
+    ``PHONE_RE`` 147, ``CC_RE`` 24 matched and all declined by the Luhn gate.
+
+    The masking stays, because 0.73% is not 0 and ``PHONE_RE`` is under its own
+    ticket. It is a smaller reason than it was, and the test module says so at
+    a threshold rather than at a number, so the day that reaches zero the
+    masking can go.
 
     ``action_data`` and ``tool_call`` are dense with UUIDs (master, service and
     conversation ids), and an archive whose foreign keys are mangled on almost

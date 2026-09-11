@@ -21,6 +21,11 @@ from apps.admin_api import (
     views_customers,
     views_day,
     views_invite,
+    views_master_exceptions,
+    views_schedule_impact,
+    views_master_schedule,
+    views_master_verify,
+    views_salon_frame,
     views_staff_invite,
     views_staff_revoke,
     views_staff_roster,
@@ -35,6 +40,11 @@ urlpatterns = [
     # the front desk opens most often; ordering is cosmetic here (no
     # wildcard can swallow a literal "day" segment at this level).
     path("day/", views_day.salon_day, name="salon_day"),
+    # DRF-1237 A2 — кадр того же дня: смены, перерывы и отсутствия ВСЕХ
+    # мастеров одним вызовом Ayla. Соседствует с ``day/`` намеренно: это
+    # вторая половина одного экрана, визиты берутся из ``day/`` и только
+    # оттуда (см. докстринг ``views_salon_frame``).
+    path("day/frame/", views_salon_frame.salon_day_frame, name="salon_day_frame"),
     # Phase 2 — bookable starts for the manual-booking flow. Wraps Ayla's
     # canonical slots read; see the module docstring for why it refuses
     # rather than returning an empty list on upstream failure.
@@ -78,6 +88,14 @@ urlpatterns = [
         name="booking_slots",
     ),
     path("masters/", views.masters_list, name="masters_list"),
+    # DRF-1597 — очередь «ждут подтверждения» и само подтверждение.
+    # Перед masters/<id>/ по той же причине, что masters/invite/ ниже:
+    # ``str``-конвертер Django съел бы литерал как master_id.
+    path(
+        "masters/awaiting-verification/",
+        views_master_verify.masters_awaiting_verification,
+        name="masters_awaiting_verification",
+    ),
     # PR 3 / MM2 — must precede masters/<id>/ so the literal "invite"
     # segment is not consumed as a master_id. Django's path resolver is
     # order-sensitive for ``str`` converters (greedy match).
@@ -124,6 +142,41 @@ urlpatterns = [
         "masters/<str:master_id>/photo/",
         views.master_photo_upload,
         name="master_photo_upload",
+    ),
+    # §83 — просмотр часов и «Расписание верно». Отдельно от карточки
+    # мастера намеренно: чтение ходит в Ayla по сети, и недоступность
+    # источника не должна ронять имя, услуги и состояние.
+    path(
+        "masters/<str:master_id>/schedule/",
+        views_master_schedule.master_schedule,
+        name="master_schedule",
+    ),
+    # DRF-1237, срез A1 — рабочий день мастера глазами салона. Тонкий вид
+    # поверх ``master_api.services.schedule.build_schedule``: четвёртого
+    # вычислителя «свободного времени» в продукте заводить нельзя.
+    path(
+        "masters/<str:master_id>/day-schedule/",
+        views_master_schedule.master_day_schedule,
+        name="master_day_schedule",
+    ),
+    # DRF-1240 (чтение) — что уже назначено мастеру: исключения по датам,
+    # недоступность и закрытия салона. Записи нет: все записывающие маршруты
+    # салонной поверхности SERVICE_READ_ONLY, а §117 разрешает креденшел
+    # условно — сначала три проверки, потом использование.
+    path(
+        "masters/<str:master_id>/exceptions/",
+        views_master_exceptions.master_exceptions,
+        name="master_exceptions",
+    ),
+    path(
+        "masters/<str:master_id>/schedule/impact/",
+        views_schedule_impact.master_schedule_impact,
+        name="master_schedule_impact",
+    ),
+    path(
+        "masters/<str:master_id>/schedule/confirm/",
+        views_master_schedule.master_schedule_confirm,
+        name="master_schedule_confirm",
     ),
     path(
         "masters/<str:master_id>/audit/",

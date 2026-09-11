@@ -200,12 +200,49 @@ class TestRequireMasterInitData:
         assert resp.status_code == 401
         assert _resp_json(resp)["error"] == "not_a_master"
 
-    def test_inactive_master(self, tenant: Tenant, bot_user: BotUser) -> None:
+    def test_inactive_master_still_gets_in(self, tenant: Tenant, bot_user: BotUser) -> None:
+        """DRF-1521 — снятая с витрины мастер входит в кабинет.
+
+        Раньше здесь стоял 403, и это была вторая половина DRF-1080:
+        человек, которого сняли с продажи, терял единственное место, где
+        он мог бы починить то, из-за чего его сняли. Витрину этот вход
+        не открывает — за неё отвечает ``is_available``, и её проверяет
+        ``apps/catalog/tests/test_master_landing.py``.
+
+        Парная стража к ``test_archived_master`` ниже: дверь, которая
+        закрывается по-настоящему, — архив.
+        """
+
         make_master(
             tenant,
             invite_status=CatalogMaster.InviteStatus.ACCEPTED,
             linked_bot_user=bot_user,
             is_active=False,
+            invite_token=None,
+            expires_in_days=None,
+        )
+
+        @require_master_init_data
+        def view(request: HttpRequest) -> JsonResponse:
+            return JsonResponse({"ok": True})
+
+        rf = RequestFactory()
+        resp = view(rf.get("/", HTTP_AUTHORIZATION=init_data_header("12345")))
+        assert resp.status_code == 200
+
+    def test_master_with_a_pending_invite(self, tenant: Tenant, bot_user: BotUser) -> None:
+        """Отрицательная половина на том же коде ответа.
+
+        ``master_inactive`` не остался без теста после того, как снятая
+        активность перестала его вызывать: приглашение, на которое не
+        ответили, по-прежнему в кабинет не пускает.
+        """
+
+        make_master(
+            tenant,
+            invite_status=CatalogMaster.InviteStatus.PENDING,
+            linked_bot_user=bot_user,
+            is_active=True,
             invite_token=None,
             expires_in_days=None,
         )

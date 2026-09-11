@@ -1,0 +1,132 @@
+{% extends "admin/base_site.html" %}
+{# Карточка клиента (DRF-1497). Метаданные — да; тексты переписки,
+   телефон и медданные — нет. Согласия только показываются, не ставятся. #}
+
+{% block breadcrumbs %}
+  <div class="breadcrumbs">
+    <a href="{% url 'admin:index' %}">Админка</a>
+    &rsaquo; <a href="{{ search_url }}">Клиенты</a>
+    &rsaquo; {{ client.display_name|default:client.client_name|default:client.channel_user_id }}
+  </div>
+{% endblock %}
+
+{% block content %}
+  <div id="content-main">
+    <h1>
+      {{ client.display_name|default:client.client_name|default:"Клиент" }}
+      {% if blocked %}<span style="color: #ba2121;">— заблокирован(а)</span>{% endif %}
+    </h1>
+
+    <ul class="object-tools" style="float: none; margin: 0 0 1.5em 0;">
+      {% if can_block %}
+        {% if blocked %}
+          <li><a href="{{ unblock_url }}">Снять блокировку</a></li>
+        {% else %}
+          <li><a href="{{ block_url }}" class="deletelink">Заблокировать</a></li>
+        {% endif %}
+      {% endif %}
+      <li><a href="{{ queue_url }}">Очередь обращений</a></li>
+    </ul>
+
+    <fieldset class="module aligned">
+      <h2>Кто это</h2>
+      <div class="form-row"><dt>Канал</dt><dd>{{ client.channel }}</dd></div>
+      <div class="form-row"><dt>Идентификатор в канале</dt><dd>{{ client.channel_user_id }}</dd></div>
+      <div class="form-row"><dt>Имя из канала</dt><dd>{{ client.display_name|default:"—" }}</dd></div>
+      <div class="form-row"><dt>Имя, которое назвал сам</dt><dd>{{ client.client_name|default:"—" }}</dd></div>
+      <div class="form-row"><dt>Салон этой записи</dt><dd>{{ client.tenant.name }}</dd></div>
+      <div class="form-row"><dt>Пришёл</dt><dd>{{ client.first_seen|date:"d.m.Y H:i" }}</dd></div>
+      <div class="form-row"><dt>Был в последний раз</dt><dd>{{ client.last_seen|date:"d.m.Y H:i" }}</dd></div>
+      <div class="form-row"><dt>Активная цель</dt><dd>{{ active_goal }}</dd></div>
+      {% if blocked %}
+        <div class="form-row"><dt>Заблокирован</dt>
+          <dd>{{ client.blocked_at|date:"d.m.Y H:i" }} — {{ client.blocked_by_username }}:
+              «{{ client.blocked_reason }}»</dd></div>
+      {% endif %}
+    </fieldset>
+
+    <fieldset class="module aligned">
+      <h2>Салоны, где он есть</h2>
+      {% if salons %}
+        <table style="width: 100%;">
+          <thead><tr><th>Салон</th><th>Пришёл</th><th>Был в последний раз</th></tr></thead>
+          <tbody>
+            {% for shell in salons %}
+              <tr>
+                <td>{{ shell.tenant.name }}{% if shell.pk == client.pk %} (эта запись){% endif %}</td>
+                <td>{{ shell.first_seen|date:"d.m.Y" }}</td>
+                <td>{{ shell.last_seen|date:"d.m.Y H:i" }}</td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      {% else %}
+        <p>Записей нет.</p>
+      {% endif %}
+    </fieldset>
+
+    <fieldset class="module aligned">
+      <h2>Согласия</h2>
+      <p style="max-width: 46em; color: var(--body-quiet-color, #666);">
+        Согласия здесь только показываются. Проставить согласие за человека
+        из админки нельзя — согласие, поставленное сотрудником, согласием не является.
+      </p>
+      {% if consents %}
+        <table style="width: 100%;">
+          <thead>
+            <tr><th>Тип</th><th>Состояние</th><th>Выдано</th><th>Отозвано</th><th>Версия документа</th></tr>
+          </thead>
+          <tbody>
+            {% for consent in consents %}
+              <tr>
+                <td>{{ consent.get_consent_type_display }}</td>
+                <td>
+                  {% if consent.withdrawn_at %}отозвано
+                  {% elif consent.granted %}<strong>действует</strong>
+                  {% else %}отказ{% endif %}
+                </td>
+                <td>{{ consent.captured_at|date:"d.m.Y H:i" }}</td>
+                <td>{{ consent.withdrawn_at|date:"d.m.Y H:i"|default:"—" }}</td>
+                <td>{{ consent.document_version|default:"—" }}</td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      {% else %}
+        <p>Согласий не выдавалось — поэтому часть поверхностей человеку и закрыта.</p>
+      {% endif %}
+    </fieldset>
+
+    <fieldset class="module aligned">
+      <h2>Диалоги</h2>
+      <p style="max-width: 46em; color: var(--body-quiet-color, #666);">
+        Текстов сообщений здесь нет. Переписка открывается отдельно — по
+        обращению, с причиной просмотра (очередь обращений → «Указать причину
+        и открыть доступ»).
+      </p>
+      {% if dialogs %}
+        <table style="width: 100%;">
+          <thead>
+            <tr><th>Состояние</th><th>Активен</th><th>Сообщений</th><th>Последнее сообщение</th></tr>
+          </thead>
+          <tbody>
+            {% for dialog in dialogs %}
+              <tr>
+                <td>{{ dialog.get_state_display }}</td>
+                <td>{% if dialog.is_active %}да{% else %}нет{% endif %}</td>
+                <td>{{ dialog.message_count }}</td>
+                <td>{{ dialog.last_message_at|date:"d.m.Y H:i"|default:"—" }}</td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      {% else %}
+        <p>Диалогов нет — человек ещё ни разу не написал.</p>
+      {% endif %}
+      {% if open_tasks %}
+        <p><strong>Открытые обращения: {{ open_tasks|length }}</strong> —
+        пока обращение открыто, бот молчит, потому что с человеком работает оператор.</p>
+      {% endif %}
+    </fieldset>
+  </div>
+{% endblock %}

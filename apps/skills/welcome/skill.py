@@ -1046,6 +1046,26 @@ def _miniapp_url(base: str, slug: str) -> str:
     return _join(base, MINIAPP_ROUTES[slug])
 
 
+def reschedule_route(booking_id: str) -> str:
+    """Путь экрана переноса КОНКРЕТНОЙ записи в мини-приложении.
+
+    DRF-1547. Не запись в :data:`MINIAPP_ROUTES`: та таблица плоская —
+    «слаг это путь», — и параметра в ней быть не может, а слаг без
+    параметра открыл бы экран, который не знает, что переносить.
+
+    Канонический адрес закреплён DRF-1481 (``RescheduleScreen`` смонтирован
+    и по нему, и по legacy-алиасу ``/my-visits/:id/reschedule``); экран
+    читает запись сам, по id из адреса, поэтому ссылка работает и как
+    первый экран сессии, а не только как переход изнутри приложения.
+
+    Одно определение на обе формы кнопки: ``open_app`` кладёт
+    ``reschedule_{id}`` в payload и путь строит SPA, внешняя ссылка строит
+    путь здесь. Разъехаться им нельзя — тест
+    ``apps/skills/welcome/tests/test_miniapp_routes.py`` сверяет обе.
+    """
+    return f"customer/records/{booking_id}/reschedule"
+
+
 def _join(base: str, route: str) -> str:
     """Append a route segment to the Mini App base URL.
 

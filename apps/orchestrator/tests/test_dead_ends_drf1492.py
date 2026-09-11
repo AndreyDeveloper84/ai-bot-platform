@@ -70,6 +70,10 @@ def _salon(slug: str, name: str, *, city: str = ""):
         name=f"Мастер {name}",
         is_active=True,
         invite_status=CatalogMaster.InviteStatus.ACCEPTED,
+        # DRF-1540/1544 — синхронизированная строка несёт канонический ключ.
+        # Без него мастер не продаётся, и клиентские поверхности отвечали бы
+        # пустотой не потому, что сломаны.
+        ayla_user_id=uuid.uuid4(),
     )
     return tenant
 
@@ -155,6 +159,30 @@ class TestDiscoveryRefusals:
 
         assert "уже ответил" in reply.text
         assert _callbacks(reply) == ["Массаж спины"]
+
+    def test_the_repeat_names_the_salon_list_it_actually_carries(self) -> None:
+        """DRF-1576 — the sentence this branch withheld, restored.
+
+        While ``apps.orchestrator.concierge`` dropped this branch's keyboard,
+        ``render_no_match`` deliberately said nothing about «посмотрите, какие
+        салоны есть»: naming a button that would not arrive is the same
+        text/buttons divergence, mirrored. The keyboard arrives now, so the
+        sentence comes back — and only on the variant where the salon chip is
+        the button actually drawn, which is the rule every branch below obeys.
+        """
+        salon_only = render_no_match(city="Пенза", specialization="маникюр", already_refused=True)
+
+        assert "какие салоны есть" in salon_only.text
+        assert _callbacks(salon_only) == [CALLBACK_CATALOG_SALONS]
+
+        with_alternatives = render_no_match(
+            specialization="маникюр", already_refused=True, alternatives=["Массаж спины"]
+        )
+
+        # No salon chip here, so no salon sentence: the fix must not turn one
+        # unnamed button into one named absent one.
+        assert "какие салоны есть" not in with_alternatives.text
+        assert _callbacks(with_alternatives) == ["Массаж спины"]
 
     def test_a_branch_that_names_no_alternatives_shows_no_service_chips(self) -> None:
         """The mirror of the ticket: a KEYBOARD the text never mentions.

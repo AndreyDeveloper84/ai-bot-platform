@@ -42,12 +42,18 @@ from apps.channels.max.quick_actions import (
     RETRY_LABEL,
     SECONDARY_ACTION,
     STALE_TAP_TEXT,
+    first_contact_action_data,
     first_contact_buttons,
     quick_action_callback,
     render_first_contact,
     resolve_tap_text,
 )
 from apps.conversations.services import resolve_active_global_conversation
+from apps.skills.menu.marketplace import (
+    CALLBACK_HEALTH_NEED_PREFIX,
+    DIARY_TAP_TEXT,
+    marketplace_menu_buttons,
+)
 from apps.identity.services.resolver import resolve_or_create_global_bot_user
 from apps.orchestrator.memory import short_term
 
@@ -264,7 +270,14 @@ class TestFirstScreen:
         assert labels == [a.label for a in FIRST_CONTACT_QUICK_ACTIONS] + [SECONDARY_ACTION.label]
 
     def test_button_ceiling_is_not_breached(self):
-        """BOT-001 AC-4.2 / DRF-1200 — не больше пяти кнопок на первом экране."""
+        """Предел первого экрана — пять (BOT-001 AC-4.2 / DRF-1200), потом
+        семь (§38), теперь восемь (решение владельца 07.09.2026, дневник).
+
+        Число менялось трижды и трижды решением. Смысл ограничения не
+        менялся ни разу: кнопка не должна появиться на первом экране
+        незаметно, и этот тест — то место, где «незаметно» становится
+        невозможным.
+        """
         assert len(first_contact_buttons()) <= MAX_FIRST_CONTACT_BUTTONS
 
     def test_no_quick_actions_state_drops_the_hint_with_the_chips(self):
@@ -612,3 +625,255 @@ class TestTransientTypingIndicator:
         max_handler.handle_global_max_event(_msg(text="Хочу выглядеть свежее", user_id=63001))
 
         assert actions == ["mark_seen", "typing_on"]
+
+
+# --------------------------------------------------------------------------- #
+# Дневник питания на первом появлении                                          #
+# --------------------------------------------------------------------------- #
+class TestDiaryOnFirstContact:
+    """Решение владельца 07.09.2026 — ПЕРЕСМОТР §37 п.5, не починка дефекта.
+
+    §37 п.5 (решение того же владельца) поселил дневник в подменю «Ещё»,
+    то есть за двумя тапами от первого экрана. Новое решение выводит его
+    на ПЕРВОЕ ПОЯВЛЕНИЕ и прежнее место при этом НЕ отменяет: дневник
+    живёт в обоих, и :meth:`test_the_new_place_does_not_replace_the_old`
+    краснеет, если одно из мест исчезнет.
+
+    Ворота у пункта прежние и общие с «Ещё» — своей копии здесь нет
+    (``quick_actions._diary_buttons`` зовёт
+    ``marketplace.nutrition_entry_buttons``). Поэтому проверяется не
+    «нарисовалась ли кнопка», а то, что она ведёт ТУДА ЖЕ, куда из «Ещё»:
+    без согласия — на запрос согласия, с согласием — в сам дневник.
+    """
+
+    @pytest.fixture
+    def person(self):
+        """Достаточно для ворот: они читают только согласие этого человека."""
+        return SimpleNamespace(id="stub-bot-user")
+
+    @pytest.fixture
+    def nutrition_on(self, settings):
+        settings.NUTRITION_ENABLED = True
+        # Безсогласный случай рисуется только с настроенным приложением:
+        # согласие выдаётся в профиле, и запрос вёл бы в никуда.
+        settings.MAX_BOT_WEB_APP = "aylabot"
+        settings.MAX_MINIAPP_URL = ""
+        return settings
+
+    @pytest.fixture
+    def consent(self, monkeypatch):
+        """Согласие ``HEALTH`` без похода в базу.
+
+        Подменяется ``apps.consent.health.is_granted`` — тот самый
+        предикат, которым ходит ``marketplace.health_granted``, — а не
+        сам ``health_granted``: иначе экран проверялся бы против
+        собственной заглушки, а не против сторожа согласия.
+        """
+
+        def _set(granted: bool) -> None:
+            monkeypatch.setattr("apps.consent.health.is_granted", lambda _u: granted)
+
+        _set(False)
+        return _set
+
+    @staticmethod
+    def _labels(buttons):
+        return [b["label"] for b in buttons]
+
+    @staticmethod
+    def _callbacks(buttons):
+        return [b["callback"] for b in buttons]
+
+    # -- место на экране --------------------------------------------------- #
+
+    def test_diary_sits_after_the_chips_and_before_the_secondary_entry(
+        self, person, consent, nutrition_on
+    ):
+        """Порядок несущий, и он не «где-нибудь после чипов».
+
+        Вторичный вход «Найти услугу →» оставлен ПОСЛЕДНИМ решением
+        владельца 24.08 («малый вес»); дневник встаёт перед ним, а не
+        после, иначе сегодняшнее решение молча отменило бы то.
+        """
+        buttons = first_contact_buttons(bot_user=person)
+        labels = self._labels(buttons)
+
+        assert labels, "пустая клавиатура прошла бы любую проверку о порядке"
+        assert labels[: len(FIRST_CONTACT_QUICK_ACTIONS)] == [
+            a.label for a in FIRST_CONTACT_QUICK_ACTIONS
+        ]
+        assert labels[-2].endswith("Дневник питания")
+        assert labels[-1] == SECONDARY_ACTION.label
+
+    def test_the_real_screen_ships_it(self, person, consent, nutrition_on):
+        """Через ``_to_discovery_reply`` — тем же входом, что и живой бот."""
+        result = SimpleNamespace(
+            reply_text="ignored",
+            action_data=None,
+            meta={"reply_kind": "welcome_s5_first_action"},
+        )
+        reply = _to_discovery_reply(result, person)
+
+        labels = self._labels(reply.action_data["buttons"])
+        assert labels, "экран без кнопок сделал бы проверку состава пустой"
+        assert [label for label in labels if label.endswith("Дневник питания")]
+
+    # -- ворота ------------------------------------------------------------ #
+
+    def test_without_consent_the_tap_leads_to_the_consent_request(
+        self, person, consent, nutrition_on
+    ):
+        callbacks = self._callbacks(first_contact_buttons(bot_user=person))
+        assert callbacks, "см. выше"
+        assert f"{CALLBACK_HEALTH_NEED_PREFIX}food_diary" in callbacks
+        assert DIARY_TAP_TEXT not in callbacks
+
+    def test_with_consent_the_tap_is_the_diary_phrase(self, person, consent, nutrition_on):
+        consent(True)
+        callbacks = self._callbacks(first_contact_buttons(bot_user=person))
+        assert callbacks, "см. выше"
+        assert DIARY_TAP_TEXT in callbacks
+        assert f"{CALLBACK_HEALTH_NEED_PREFIX}food_diary" not in callbacks
+
+    def test_the_flag_removes_the_item_entirely(self, person, consent, nutrition_on):
+        """``NUTRITION_ENABLED`` снят — пункта НЕТ, а не есть-и-не-работает.
+
+        Отрицание парное: рядом, на тех же данных, стоит утверждение, что
+        экран при этом жив и все прежние кнопки на месте. Иначе «дневник
+        пропал» зеленело бы и на пустой клавиатуре.
+        """
+        nutrition_on.NUTRITION_ENABLED = False
+        labels = self._labels(first_contact_buttons(bot_user=person))
+
+        assert labels == [a.label for a in FIRST_CONTACT_QUICK_ACTIONS] + [SECONDARY_ACTION.label]
+        assert not [label for label in labels if label.endswith("Дневник питания")]
+
+    def test_without_a_person_there_is_no_personal_entry(self, consent, nutrition_on):
+        """Вход персональный: без человека ворота нечем считать.
+
+        Это не заглушка ради тестов — нарисовать кнопку, не зная согласия,
+        значит не знать, куда она ведёт.
+        """
+        labels = self._labels(first_contact_buttons())
+        assert labels, "экран без человека всё равно несёт чипы и выход"
+        assert not [label for label in labels if label.endswith("Дневник питания")]
+
+    # -- прежнее место сохранено ------------------------------------------- #
+
+    def test_the_new_place_does_not_replace_the_old(self, person, consent, nutrition_on):
+        """«Дневник остаётся и в меню» — прямое условие решения.
+
+        Условие было сформулировано про «Ещё»; подменю снесено (OD-UI-2),
+        и пункт вместе с воротами поднялся в ГЛАВНОЕ меню. Условие от
+        этого не изменилось: первый экран не ЗАМЕНЯЕТ меню, а добавляется
+        к нему, и проверять это надо там, где пункт теперь живёт.
+        """
+        on_first_contact = self._labels(first_contact_buttons(bot_user=person))
+        in_menu = self._labels(marketplace_menu_buttons(bot_user=person))
+
+        assert [label for label in on_first_contact if label.endswith("Дневник питания")]
+        assert [label for label in in_menu if label.endswith("Дневник питания")]
+
+    # -- предел кнопок ----------------------------------------------------- #
+
+    def test_the_full_screen_is_exactly_the_ceiling(self, person, consent, nutrition_on):
+        """Восемь — ровно предел, а не «меньше предела».
+
+        Проверка на ``<=`` прошла бы и на предел в сто. Здесь пришпилено
+        РАВЕНСТВО: следующая кнопка потребует решения владельца, а не
+        довода «там всё равно был запас».
+        """
+        buttons = first_contact_buttons(bot_user=person)
+        assert len(buttons) == len(FIRST_CONTACT_QUICK_ACTIONS) + 2
+        assert len(buttons) == MAX_FIRST_CONTACT_BUTTONS == 8
+
+    # -- эмодзи (решение 1 на этой поверхности) ---------------------------- #
+
+    def test_only_the_diary_carries_an_emoji_here(self, person, consent, nutrition_on):
+        """Чипы значков не носят, и это не забывчивость.
+
+        У goal-like чипа ``label`` и ``text`` СОВПАДАЮТ намеренно: человек
+        видит на кнопке ровно ту реплику, которая уйдёт от его имени.
+        Значок в такой подписи оказался бы значком в сообщении человека.
+        Дневник — не реплика, а вход, и подпись у него своя.
+        """
+        buttons = first_contact_buttons(bot_user=person)
+        labels = self._labels(buttons)
+        assert labels, "см. выше"
+
+        marked = [label for label in labels if any(ord(ch) >= 0x1F300 for ch in label)]
+        assert marked, "решение владельца вернуло значок как раз сюда"
+        assert [label.split(" ", 1)[1] for label in marked] == ["Дневник питания"]
+
+    def test_the_action_data_form_is_unchanged(self, person, consent, nutrition_on):
+        """Восьмая кнопка не поменяла форму конверта: столбик прежний."""
+        data = first_contact_action_data(bot_user=person)
+        assert data["button_columns"] == 1
+        assert len(data["buttons"]) == MAX_FIRST_CONTACT_BUTTONS
+
+    # -- ни один payload не уедет в модель сырым --------------------------- #
+
+    def test_no_shipped_payload_reaches_the_model_raw(self, person, consent, nutrition_on):
+        """Дыра, которую этот пункт проделал в стороже соседнего класса.
+
+        ``TestNoShippedButtonReachesTheModelRaw`` собирает роспись кнопок
+        на импорте модуля, то есть БЕЗ человека, — а пищевой вход без
+        человека не рисуется вовсе. Значит именно эта кнопка проезжает
+        мимо той параметризации, и обещание файла («кнопка, добавленная
+        через месяц, не может проехать мимо проверки») перестало бы быть
+        правдой ровно с этого PR.
+
+        Проверяется то же самое и на тех же данных: у каждого payload'а
+        первого экрана есть ветка, которая его заберёт, — либо перевод в
+        фразу (``resolve_tap_text``), либо ветка семейства ``cb:health:``
+        (``handler._route_health_callback``), либо payload САМ является
+        фразой, которую забирает детерминированный разбор дневника.
+
+        Прогоняется в обоих состояниях согласия: без него кнопка несёт
+        ``cb:health:need:*``, с ним — фразу, и это два разных payload'а.
+        """
+        from apps.orchestrator.personal_surface import looks_like_diary_request
+        from apps.skills.menu.marketplace import is_health_callback
+
+        for granted in (False, True):
+            consent(granted)
+            callbacks = self._callbacks(first_contact_buttons(bot_user=person))
+            assert callbacks, "пустая клавиатура прошла бы эту проверку ни о чём"
+
+            unroutable = [
+                cb
+                for cb in callbacks
+                if not (
+                    resolve_tap_text(cb) or is_health_callback(cb) or looks_like_diary_request(cb)
+                )
+            ]
+            assert unroutable == [], f"согласие={granted}: {unroutable}"
+
+    def test_that_guard_can_actually_see_an_unroutable_payload(self):
+        """Стража стражи: проверка выше обязана уметь краснеть.
+
+        Без неё «все payload'ы маршрутизируются» осталось бы зелёным и
+        тогда, когда три предиката перестали бы что-либо отвергать —
+        то есть ровно тогда, когда проверять стало нечего.
+
+        Поэтому здесь каждый предикат показывается с ДВУХ сторон: он
+        принимает свой настоящий payload (иначе отрицания ниже пусты по
+        построению) и отвергает чужой.
+        """
+        from apps.orchestrator.personal_surface import looks_like_diary_request
+        from apps.skills.menu.marketplace import CALLBACK_HEALTH_NEED_PREFIX, is_health_callback
+
+        # Присутствие: каждый предикат умеет сказать «да» — своему.
+        assert resolve_tap_text(quick_action_callback(SECONDARY_ACTION))
+        assert is_health_callback(f"{CALLBACK_HEALTH_NEED_PREFIX}food_diary")
+        assert looks_like_diary_request(DIARY_TAP_TEXT)
+
+        # И только теперь отрицание — на payload'е, которого нет ни у кого.
+        bogus = "cb:nosuchfamily:whatever"
+        # empty-assert-ok: payload несуществующего семейства — отвергнуть его
+        # обязаны все три, и присутствие каждого показано строками выше.
+        assert not resolve_tap_text(bogus)
+        # empty-assert-ok: то же самое, см. присутствие выше.
+        assert not is_health_callback(bogus)
+        # empty-assert-ok: то же самое, см. присутствие выше.
+        assert not looks_like_diary_request(bogus)

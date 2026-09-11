@@ -44,7 +44,7 @@ import uuid
 from django.db import models
 from django.utils import timezone
 
-from apps.catalog.master_state import AVAILABLE
+from apps.catalog.master_state import available_q
 from apps.tenancy.managers import TenantScopedManager
 
 
@@ -56,12 +56,15 @@ class _MirrorBase(models.Model):
     mirror wants live here.
     """
 
-    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    id = models.UUIDField(
+        primary_key=True, default=uuid.uuid4, editable=False, verbose_name="Идентификатор"
+    )
     tenant = models.ForeignKey(
         "tenancy.Tenant",
         on_delete=models.CASCADE,
         help_text="Owning tenant. CASCADE — mirrors are derived from "
         "mysite via catalog sync; tenant delete also drops them.",
+        verbose_name="Салон",
     )
     external_id = models.IntegerField(
         null=True,
@@ -70,16 +73,19 @@ class _MirrorBase(models.Model):
         "the mirror onto the Ayla stable-id (UUID): Ayla-fed rows leave this "
         "NULL and key on (tenant, ayla_service_id / ayla_user_id). Kept for "
         "legacy rows — unique_together (tenant, external_id) stays NULL-safe.",
+        verbose_name="Идентификатор в источнике",
     )
     external_updated_at = models.DateTimeField(
         help_text="Upstream `updated_at` at last sync. Drives the "
         "`?since=` cursor (C2) and last-writer-wins on concurrent beats "
         "(C4 Risk #5).",
+        verbose_name="Изменено в источнике",
     )
     synced_at = models.DateTimeField(
         auto_now=True,
         help_text="When the platform last touched this row. Differs "
         "from `external_updated_at` (upstream's timestamp).",
+        verbose_name="Синхронизировано",
     )
 
     objects = TenantScopedManager()
@@ -108,20 +114,26 @@ class CatalogService(_MirrorBase):
     read-replica, never the source of truth.
     """
 
-    slug = models.SlugField(max_length=100)
-    name = models.CharField(max_length=200)
-    short_description = models.TextField(blank=True, default="")
-    description = models.TextField(blank=True, default="")
-    price_from = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
-    duration_min = models.IntegerField(null=True, blank=True)
-    is_active = models.BooleanField(default=True)
-    is_popular = models.BooleanField(default=False)
-    seo_title = models.CharField(max_length=255, blank=True, default="")
-    seo_description = models.TextField(blank=True, default="")
-    goals = models.JSONField(default=list, blank=True)
-    requires_health_check = models.BooleanField(default=False)
-    contraindications = models.TextField(blank=True, default="")
-    raw = models.JSONField(default=dict, blank=True)
+    slug = models.SlugField(max_length=100, verbose_name="Код услуги")
+    name = models.CharField(max_length=200, verbose_name="Название услуги")
+    short_description = models.TextField(blank=True, default="", verbose_name="Краткое описание")
+    description = models.TextField(blank=True, default="", verbose_name="Описание")
+    price_from = models.DecimalField(
+        max_digits=10, decimal_places=2, null=True, blank=True, verbose_name="Цена от, ₽"
+    )
+    duration_min = models.IntegerField(null=True, blank=True, verbose_name="Длительность, мин")
+    is_active = models.BooleanField(default=True, verbose_name="Продаётся")
+    is_popular = models.BooleanField(default=False, verbose_name="Популярная")
+    seo_title = models.CharField(
+        max_length=255, blank=True, default="", verbose_name="SEO-заголовок"
+    )
+    seo_description = models.TextField(blank=True, default="", verbose_name="SEO-описание")
+    goals = models.JSONField(default=list, blank=True, verbose_name="Цели клиента (теги)")
+    requires_health_check = models.BooleanField(
+        default=False, verbose_name="Требует проверки здоровья"
+    )
+    contraindications = models.TextField(blank=True, default="", verbose_name="Противопоказания")
+    raw = models.JSONField(default=dict, blank=True, verbose_name="Сырой ответ источника")
 
     # #444 — link to Ayla's canonical Service.id (UUID). Coexists with
     # the legacy mysite integer ``external_id``: mysite-synced rows set
@@ -139,6 +151,7 @@ class CatalogService(_MirrorBase):
             "a separate cleanup PR removes external_id once mysite is "
             "fully retired."
         ),
+        verbose_name="Идентификатор услуги в Ayla",
     )
 
     # #444 — mirror-staleness signal. Bumped on every service.updated
@@ -155,11 +168,12 @@ class CatalogService(_MirrorBase):
             "it in their cache key so increments transparently "
             "invalidate stale entries. No active cache reads it today."
         ),
+        verbose_name="Версия кеша",
     )
 
     class Meta:
-        verbose_name = "Catalog: service"
-        verbose_name_plural = "Catalog: services"
+        verbose_name = "Услуга каталога"
+        verbose_name_plural = "Услуги каталога"
         ordering = ["name"]
         unique_together = (("tenant", "external_id"),)
         constraints = [
@@ -214,7 +228,7 @@ class _MasterManager(TenantScopedManager):
     """
 
     def bookable(self):
-        return self.filter(AVAILABLE)
+        return self.filter(available_q())
 
 
 class CatalogMaster(_MirrorBase):
@@ -223,11 +237,14 @@ class CatalogMaster(_MirrorBase):
 
     See ``docs/design/handoffs/2026-05-18-master-management-handoff.md``.
 
-    Sync (``upserter._master_fields``) overwrites: name, specialization,
-    bio, experience, rating, is_active, yclients_staff_id, raw.
+    Sync (``upserter.upsert_specialists``) overwrites: name, specialization,
+    bio, experience, rating, is_active, yclients_staff_id, raw, and — since
+    DRF-1588 — address, location_lat, location_lng.
     Platform fields NEVER touched by sync: invite_status, mode,
     photo_url, archived_at, invited_at, accepted_at, max_handle,
-    linked_bot_user. That list is why the pilot's nine active masters
+    linked_bot_user and — since §83 — the schedule-confirmation trio
+    (schedule_confirmed_at, schedule_confirmed_by, schedule_fingerprint).
+    That list is why the pilot's nine active masters
     all carry ``linked_bot_user IS NULL`` — they arrived by sync, which
     has no platform side to fill in (DRF-1506).
     """
@@ -242,27 +259,57 @@ class CatalogMaster(_MirrorBase):
         INVITE = "invite", "Invite-based access"
         CATALOG_ONLY = "catalog_only", "Catalog only (no login)"
 
-    name = models.CharField(max_length=200)
-    specialization = models.CharField(max_length=255, blank=True, default="")
-    bio = models.TextField(blank=True, default="")
-    experience = models.CharField(max_length=255, blank=True, default="")
-    rating = models.DecimalField(max_digits=3, decimal_places=2, null=True, blank=True)
+    name = models.CharField(max_length=200, verbose_name="Имя мастера")
+    specialization = models.CharField(
+        max_length=255, blank=True, default="", verbose_name="Специализация"
+    )
+    bio = models.TextField(blank=True, default="", verbose_name="О себе")
+    experience = models.CharField(max_length=255, blank=True, default="", verbose_name="Опыт")
+    # DRF-1535 / DRF-1224 — the rating domain is 1..5. A stored ``0.00`` is
+    # therefore not a low rating, it is the ABSENCE of one, and the pilot's
+    # nine zero rows are exactly that: no master on the contour has a single
+    # review. Readers must treat 0.00 as "no data" — never render it (see
+    # ``apps.orchestrator.discovery._render_master_cards``) and never let it
+    # push a master down a list.
+    rating = models.DecimalField(
+        max_digits=3,
+        decimal_places=2,
+        null=True,
+        blank=True,
+        help_text=(
+            "Mirrored from the source feed. Domain is 1..5, so a stored "
+            "0.00 means «no rating yet», not «rated zero» — it is never "
+            "rendered (DRF-1224) and takes no part in discovery ordering "
+            "(DRF-1535)."
+        ),
+        verbose_name="Рейтинг",
+    )
+    # DRF-1535 — this help_text used to promise a discovery Bayesian
+    # trust-score (#1060) «so a 5.0 from 1 review can't outrank a 4.8 from
+    # 200». That score was never written, and nothing outside tests has ever
+    # read this column. A docstring describing code that does not exist is
+    # worse than no docstring: it is read as a guarantee, and the next author
+    # builds on it. The promise is gone; the field stays, because sync fills
+    # it and removing it would drop data we will want when reviews land.
     review_count = models.PositiveIntegerField(
         default=0,
         help_text=(
             "Number of reviews backing ``rating``, mirrored from Ayla's "
-            "``reviews_count``. Feeds the discovery Bayesian trust-score "
-            "(#1060) so a 5.0 from 1 review can't outrank a 4.8 from 200. "
-            "Populated by catalog sync once retargeted to Ayla (#1044); "
-            "defaults to 0 until then."
+            "``reviews_count``. Written by catalog sync "
+            "(``catalog/services/upserter._master_fields``) and read by "
+            "nobody: discovery neither ranks nor filters on it, and there is "
+            "no trust-score behind it. Collecting reviews is DRF-1527; until "
+            "that lands this is 0 on every pilot row."
         ),
+        verbose_name="Отзывов",
     )
-    is_active = models.BooleanField(default=True)
+    is_active = models.BooleanField(default=True, verbose_name="Активна по данным синхронизации")
     yclients_staff_id = models.IntegerField(
         null=True,
         blank=True,
         help_text="YClients staff id — pre-populated from mysite so the "
         "Phase 1 booking flow can dispatch without a second lookup.",
+        verbose_name="Идентификатор в YClients",
     )
     ayla_user_id = models.UUIDField(
         null=True,
@@ -274,8 +321,75 @@ class CatalogMaster(_MirrorBase):
             "Nullable because legacy mysite-synced rows lack this — "
             "back-filled by catalog-sync service or master event consumer."
         ),
+        verbose_name="Идентификатор пользователя в Ayla",
     )
-    raw = models.JSONField(default=dict, blank=True)
+    raw = models.JSONField(default=dict, blank=True, verbose_name="Сырой ответ источника")
+
+    # DRF-1588 — адрес и координаты мастера. Данные приезжали и раньше, но
+    # только внутрь ``raw``: замер на пилоте 08.09.2026 нашёл гео-ключи в
+    # слепке у 31 строки из 34, а колонок под них не было ни одной. Пока
+    # значение живёт в JSON, по нему нельзя ни искать, ни фильтровать, ни
+    # сортировать — данные есть, доступа к ним нет. Эти три колонки и есть
+    # доступ; читателя они себе не назначают.
+    #
+    # Источник — ``users_specialistprofile.address / location_lat /
+    # location_lng`` в самой Ayla (OPEN_DECISIONS §45): адрес физически
+    # хранится у СПЕЦИАЛИСТА, а не у салона. Правило старшинства «салон
+    # против мастера» — DRF-1589, и здесь его нет.
+    #
+    # ``NULL`` против ``""`` — разница смысловая, и она единственное, что
+    # стоит между нами и повтором дефекта §65:
+    #
+    # * ``address is None`` — ключа ``address`` в слепке НЕ БЫЛО. Мы не
+    #   знаем. Три пилотные строки из 34 именно такие.
+    # * ``address == ""``   — ключ был и нёс пустую строку. Источник
+    #   ответил «адреса нет». Это ответ, а не молчание.
+    #
+    # Координаты по той же причине ``null=True`` и НИКОГДА не ``0.0``:
+    # на пилоте они ``None`` у всех 31 строки, а нулевая пара — это точка
+    # в Гвинейском заливе, которая выглядит как настоящее значение и
+    # уедет на карту как настоящее. Отсутствие координаты обязано остаться
+    # отсутствием.
+    address = models.CharField(
+        max_length=500,
+        null=True,
+        blank=True,
+        default=None,
+        help_text=(
+            "Адрес мастера, зеркалится из ключа ``address`` фида "
+            "специалистов. NULL — ключа в слепке не было (не знаем); "
+            '"" — ключ был и нёс пустое (источник ответил «нет»). '
+            "Разница обязательна: подставленное значение неотличимо от "
+            "настоящего."
+        ),
+        verbose_name="Адрес приёма",
+    )
+    location_lat = models.DecimalField(
+        max_digits=9,
+        decimal_places=6,
+        null=True,
+        blank=True,
+        default=None,
+        help_text=(
+            "Широта из ключа ``location_lat``. NULL — координаты нет "
+            "(ключ отсутствовал либо нёс null). НИКОГДА не 0.0: пара "
+            "нулей — точка в Гвинейском заливе, неотличимая от настоящей."
+        ),
+        verbose_name="Широта",
+    )
+    location_lng = models.DecimalField(
+        max_digits=9,
+        decimal_places=6,
+        null=True,
+        blank=True,
+        default=None,
+        help_text=(
+            "Долгота из ключа ``location_lng``. NULL — координаты нет "
+            "(ключ отсутствовал либо нёс null). НИКОГДА не 0.0 — см. "
+            "``location_lat``."
+        ),
+        verbose_name="Долгота",
+    )
 
     # #445 — slot cache staleness counter. Bumped on every
     # master.schedule.updated event. Forward-compatible signal for
@@ -293,23 +407,35 @@ class CatalogMaster(_MirrorBase):
             "No active cache layer reads this today — it's a "
             "forward-compatible signal."
         ),
+        verbose_name="Версия кеша",
     )
 
     invite_status = models.CharField(
         max_length=16,
         choices=InviteStatus.choices,
-        default=InviteStatus.ACCEPTED,
+        default=InviteStatus.PENDING,
         db_index=True,
-        help_text="Default ACCEPTED so backfilled/sync masters are "
-        "bookable. Invite create-path writes PENDING.",
+        help_text=(
+            "Default PENDING (DRF-1496): a master born by sync was never "
+            "invited, so she is not bookable until an operator verifies "
+            "her by hand (journaled admin action). The pre-DRF-1496 "
+            "default was ACCEPTED; rows that existed on 04.09.2026 were "
+            "grandfathered as ACCEPTED by migration 0017 so the pilot's "
+            "booking pick-list did not silently collapse. Invite "
+            "create-path writes PENDING explicitly, as before."
+        ),
+        verbose_name="Состояние приглашения",
     )
     mode = models.CharField(
         max_length=16,
         choices=Mode.choices,
         default=Mode.CATALOG_ONLY,
+        verbose_name="Режим работы с ботом",
     )
-    photo_url = models.URLField(max_length=500, blank=True, default="")
-    archived_at = models.DateTimeField(null=True, blank=True)
+    photo_url = models.URLField(
+        max_length=500, blank=True, default="", verbose_name="Ссылка на фото"
+    )
+    archived_at = models.DateTimeField(null=True, blank=True, verbose_name="В архиве с")
     archive_reason = models.TextField(
         blank=True,
         default="",
@@ -319,8 +445,9 @@ class CatalogMaster(_MirrorBase):
             "to the AuditLog row; cleared on reactivate so the next "
             "deactivation starts fresh."
         ),
+        verbose_name="Причина архива",
     )
-    invited_at = models.DateTimeField(null=True, blank=True)
+    invited_at = models.DateTimeField(null=True, blank=True, verbose_name="Приглашение выписано")
     accepted_at = models.DateTimeField(
         null=True,
         blank=True,
@@ -333,8 +460,9 @@ class CatalogMaster(_MirrorBase):
             "события, а не флаг. NULL у синхронизированных мастеров — "
             "они в бот не приземлялись."
         ),
+        verbose_name="Приглашение принято",
     )
-    max_handle = models.CharField(max_length=64, blank=True, default="")
+    max_handle = models.CharField(max_length=64, blank=True, default="", verbose_name="Ник в MAX")
 
     # M0 onboarding (master mobile handoff §M0 + master-management MM2).
     # invite_token: opaque UUID emitted by MM2 POST /api/v1/masters/invite,
@@ -353,11 +481,13 @@ class CatalogMaster(_MirrorBase):
         db_index=True,
         help_text="One-shot opaque token from MM2 invite-create. Cleared "
         "on accept; uniqueness enforced so a stale token can't collide.",
+        verbose_name="Одноразовый ключ приглашения",
     )
     invite_expires_at = models.DateTimeField(
         null=True,
         blank=True,
         help_text="invited_at + 7d (Q-MM2). Past-expiry tokens 410.",
+        verbose_name="Приглашение действует до",
     )
     linked_bot_user = models.OneToOneField(
         "identity.BotUser",
@@ -367,14 +497,60 @@ class CatalogMaster(_MirrorBase):
         related_name="master_identity",
         help_text="MAX/Telegram BotUser this master signs in with. "
         "SET_NULL on BotUser delete preserves the master audit trail.",
+        verbose_name="Связанный аккаунт в мессенджере",
+    )
+
+    # ── подтверждение расписания (§83, DRF-1521 п. 6) ─────────────────────
+    #
+    # Три столбца, а не булево, и живут они ЗДЕСЬ, а не на
+    # ``scheduling.WorkingHours``, — решение владельца от 09.09.2026:
+    # подтверждение это «состояние допуска мастера к продаже», а не
+    # свойство часов. Часы говорят, когда мастер работает; подтверждение
+    # говорит, что этого мастера можно показывать клиентам.
+    #
+    # Столбцы платформенные: синхронизация их не трогает — она пишет
+    # только перечисленный список зеркальных полей через ``update_fields``
+    # (``apps/catalog/services/upserter.py``). Тот же класс, что
+    # ``invite_status`` и ``accepted_at``.
+    #
+    # Умолчание — НЕ подтверждено, и заполнять их миграцией запрещено
+    # (правило 6 решения): массовая простановка выглядит как «включили
+    # функцию», а означает «объявили проверенным непроверенное».
+    schedule_confirmed_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="Когда владелец салона подтвердил рабочие часы этого "
+        "мастера. NULL — не подтверждены; по умолчанию так у всех.",
+        verbose_name="Расписание подтверждено",
+    )
+    schedule_confirmed_by = models.ForeignKey(
+        "identity.BotUser",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="+",
+        help_text="Кто подтвердил. SET_NULL сохраняет след подтверждения, "
+        "даже если аккаунт удалён: «подтверждено» и «известно кем» — "
+        "разные утверждения, и первое не должно исчезать со вторым.",
+        verbose_name="Кем подтверждено",
+    )
+    schedule_fingerprint = models.CharField(
+        max_length=128,
+        blank=True,
+        default="",
+        help_text="Отпечаток ИМЕННО ТЕХ часов, которые подтвердили. Без "
+        "него «подтверждено» означает «кто-то когда-то нажал»: нечем "
+        "отличить подтверждённую версию часов от нынешней. Формат и "
+        "состав — apps/catalog/services/schedule_confirmation.py.",
+        verbose_name="Отпечаток подтверждённых часов",
     )
 
     objects = _MasterManager()  # type: ignore[misc]
     all_tenants = models.Manager()  # type: ignore[misc]
 
     class Meta:
-        verbose_name = "Catalog: master"
-        verbose_name_plural = "Catalog: masters"
+        verbose_name = "Мастер"
+        verbose_name_plural = "Мастера"
         ordering = ["name"]
         unique_together = (("tenant", "external_id"),)
         indexes = [
@@ -554,21 +730,26 @@ class MasterService(models.Model):
     operator unchecks a cell.
     """
 
-    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    id = models.UUIDField(
+        primary_key=True, default=uuid.uuid4, editable=False, verbose_name="Идентификатор"
+    )
     tenant = models.ForeignKey(
         "tenancy.Tenant",
         on_delete=models.CASCADE,
         related_name="master_services",
+        verbose_name="Салон",
     )
     master = models.ForeignKey(
         "catalog.CatalogMaster",
         on_delete=models.CASCADE,
         related_name="services_offered",
+        verbose_name="Мастер",
     )
     service = models.ForeignKey(
         "catalog.CatalogService",
         on_delete=models.CASCADE,
         related_name="masters_offering",
+        verbose_name="Услуга",
     )
     # DEAD SINCE 0002 (DRF-975 finding). No writer has ever populated this —
     # not the MM4 matrix, not the invite seeder, not sync, not the dev seed.
@@ -585,6 +766,7 @@ class MasterService(models.Model):
         null=True,
         blank=True,
         related_name="+",
+        verbose_name="Кем заведена связь",
     )
 
     # DRF-975 — mandatory write provenance. Both columns are stamped by the
@@ -613,6 +795,7 @@ class MasterService(models.Model):
             "MasterServiceSource). NULL = created before DRF-975 shipped; "
             "author unrecoverable."
         ),
+        verbose_name="Откуда взялась связь",
     )
     created_by_actor_id = models.UUIDField(
         null=True,
@@ -623,10 +806,11 @@ class MasterService(models.Model):
             "predating DRF-975. Not an FK on purpose: this is a forensic "
             "stamp that must survive the BotUser row being deleted."
         ),
+        verbose_name="Автор (идентификатор в Ayla)",
     )
 
-    created_at = models.DateTimeField(auto_now_add=True)
-    updated_at = models.DateTimeField(auto_now=True)
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name="Заведена")
+    updated_at = models.DateTimeField(auto_now=True, verbose_name="Изменена")
 
     # DRF-945 — provenance + Ayla's canonical bookable-edge id
     # (``SpecialistService.id``). NULL ⇒ operator-owned (MM4 matrix / invite
@@ -642,6 +826,7 @@ class MasterService(models.Model):
             "operator (MM4 matrix / invite seeding) and catalog sync must "
             "never reconcile it away."
         ),
+        verbose_name="Идентификатор связи в Ayla",
     )
 
     # DRF-1353 — the RESOLVED (master×service) health-check flag, mirrored
@@ -668,6 +853,7 @@ class MasterService(models.Model):
             "NULL = unknown (never synced); the booking health-check gate "
             "treats NULL as 'screening required'."
         ),
+        verbose_name="Требует проверки здоровья (итог)",
     )
 
     # DRF-975 — both managers carry the provenance-checking ``bulk_create``.
@@ -675,8 +861,8 @@ class MasterService(models.Model):
     all_tenants = models.Manager.from_queryset(MasterServiceQuerySet)()  # type: ignore[misc]
 
     class Meta:
-        verbose_name = "Catalog: master-service mapping"
-        verbose_name_plural = "Catalog: master-service mappings"
+        verbose_name = "Связь мастера с услугой"
+        verbose_name_plural = "Связи мастеров с услугами"
         ordering = ["master_id", "service_id"]
         unique_together = (("master", "service"),)
         constraints = [
@@ -702,14 +888,16 @@ class MasterService(models.Model):
 class CatalogFaq(_MirrorBase):
     """Mirror of `mysite/services_app.FAQ`."""
 
-    question = models.CharField(max_length=500)
-    answer = models.TextField()
-    category_slug = models.SlugField(max_length=100, blank=True, default="")
-    raw = models.JSONField(default=dict, blank=True)
+    question = models.CharField(max_length=500, verbose_name="Вопрос")
+    answer = models.TextField(verbose_name="Ответ")
+    category_slug = models.SlugField(
+        max_length=100, blank=True, default="", verbose_name="Код раздела"
+    )
+    raw = models.JSONField(default=dict, blank=True, verbose_name="Сырой ответ источника")
 
     class Meta:
-        verbose_name = "Catalog: FAQ"
-        verbose_name_plural = "Catalog: FAQs"
+        verbose_name = "Вопрос и ответ"
+        verbose_name_plural = "Вопросы и ответы"
         ordering = ["question"]
         unique_together = (("tenant", "external_id"),)
         indexes = [
@@ -729,15 +917,15 @@ class CatalogHelpArticle(_MirrorBase):
     FAQ on the public site.
     """
 
-    question = models.CharField(max_length=500)
-    answer = models.TextField()
-    order = models.IntegerField(default=0)
-    is_active = models.BooleanField(default=True)
-    raw = models.JSONField(default=dict, blank=True)
+    question = models.CharField(max_length=500, verbose_name="Заголовок")
+    answer = models.TextField(verbose_name="Текст")
+    order = models.IntegerField(default=0, verbose_name="Порядок")
+    is_active = models.BooleanField(default=True, verbose_name="Показывается")
+    raw = models.JSONField(default=dict, blank=True, verbose_name="Сырой ответ источника")
 
     class Meta:
-        verbose_name = "Catalog: help article"
-        verbose_name_plural = "Catalog: help articles"
+        verbose_name = "Статья справки"
+        verbose_name_plural = "Статьи справки"
         ordering = ["order", "question"]
         unique_together = (("tenant", "external_id"),)
         indexes = [

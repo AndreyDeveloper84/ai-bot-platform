@@ -20,7 +20,7 @@ no new queue, no dependency on the mobile app.
 ### Delivery fan-out
 
 * **The specialist personally** — when the appointment's master has a
-  linked MAX account (``CatalogMaster.linked_bot_user.chat_id``), he
+  linked MAX account (``CatalogMaster.linked_bot_user.channel_user_id``), he
   receives his own copy, addressed to him («У вас новая запись»). The
   epic's contract is «if the master does not learn, the visit does not
   happen», so the specialist is an *additional* recipient, not an
@@ -33,16 +33,28 @@ no new queue, no dependency on the mobile app.
   WARNING log line and a ``booking.specialist_unreachable`` audit row.
   The push era hid exactly this state behind a quiet ``failed`` in the
   database; it must never be silent again.
-* **The salon cascade (first hit wins)** — ``Tenant.manager_chat_id``,
-  then ``HANDOFF_NOTIFY_MAX_CHAT_IDS``. Deliberately the *same* setting
-  as DRF-1029 rather than a new one: on the pilot it already holds the
-  owner's chat, so the booking notification reaches a human on day one
-  without an env change. If a salon later wants booking alerts split
-  from escalation alerts, that is a settings-level split, not a
-  rewrite of this module.
-* **Nobody at all** — an explicit WARNING log line. Silence was the old
-  behaviour and it is exactly what made the gap invisible for months;
-  a booking that could not be announced must leave a trace.
+* **The salon — its own manager address, and nothing else.** It carries
+  its own addressing key (DRF-1559): a manager with ``manager_user_id``
+  filled in is written to as a PERSON, and only a salon not yet migrated
+  uses its dialog id. That matters precisely here — this message goes out
+  under the SALON bot, and a dialog id copied out of the client bot's
+  chat answers 404 ``dialog.not.found`` (`docs/OPEN_DECISIONS.md` §55).
+
+  Until the owner's decision of 2026-09-07 this rung fell back to the
+  configured operator channel. That channel is a single GLOBAL list with
+  no tenant binding of any kind: on the pilot all ten salons resolved to
+  the very same hand-typed address, so each salon would have been shown
+  the others' bookings — and being a dialog id sent under the salon bot,
+  it answered ``404 chat.not.found`` in the same pass in which the
+  master's own copy answered ``200`` (`docs/OPEN_DECISIONS.md` §60). It
+  is not a salon address and cannot be made into one. The rung is gone;
+  a salon that wants booking alerts configures itself.
+* **No salon address is a NORMAL state** — one INFO line per pass, no
+  warning. An empty manager address means this salon has not asked for
+  MAX alerts, not that a delivery failed; the noisy log on a routine
+  state is meant to be switched off after a week of watching. The
+  specialist's personal copy is unaffected and keeps its own loud
+  ``booking.specialist_unreachable`` trace.
 
 ### Contract (mirrors DRF-1029 §3 — do not weaken)
 
@@ -86,7 +98,8 @@ from django.db.models import Q
 from apps.audit.services import write_audit
 from apps.catalog.models import CatalogMaster, CatalogService
 from apps.channels.bot_context import bot_scope
-from apps.handoff.notify import get_notify_chat_ids, send_max_notification
+from apps.channels.max.addressing import MaxAddress, manager_address
+from apps.handoff.notify import send_max_notification
 from apps.tenancy.context import tenant_scope
 from apps.tenancy.models import Tenant
 
@@ -136,19 +149,27 @@ CHAT_ORIGIN_SOURCE: Final[str] = "ayla_bot"
 class NotifyTarget:
     """Resolved salon recipients plus the cascade step that produced them.
 
-    ``channel`` is one of ``manager`` / ``fallback`` / ``none`` and
+    ``channel`` is ``manager`` or ``none`` and
     exists so logs (and tests) can assert *which* rung of the cascade
     answered, not merely that something was sent. The specialist's
     personal address is resolved separately — see
-    :func:`resolve_specialist_chat_id` — because it is an additional
+    :func:`resolve_specialist_user_id` — because it is an additional
     recipient, not a rung of this cascade.
     """
 
-    chat_ids: tuple[str, ...]
+    #: Получатели этой ступени, каждый со СВОИМ ключом адресации
+    #: (DRF-1559). Не ``chat_ids``: у менеджера теперь может быть
+    #: идентификатор человека, и тогда сообщение уходит по нему — иначе
+    #: салонный бот пишет в чужой диалог и получает 404.
+    addresses: tuple[MaxAddress, ...]
     channel: str
 
 
-def _clean_chat_id(value: object) -> str:
+def _clean_id(value: object) -> str:
+    """Прежнее имя — ``_clean_chat_id``. Чистить осталось только
+    ``channel_user_id`` (DRF-1558): адрес менеджера теперь приходит готовым
+    из :func:`~apps.channels.max.addressing.manager_address` (DRF-1559)."""
+
     return str(value or "").strip()
 
 
@@ -200,39 +221,44 @@ def resolve_service_name(*, tenant: Tenant, service_id: UUID | None) -> str:
     return (row.name if row else "").strip() or _UNKNOWN
 
 
-def resolve_specialist_chat_id(master: CatalogMaster | None) -> str:
-    """The specialist's personal MAX chat_id, or ``""`` when unreachable.
+def resolve_specialist_user_id(master: CatalogMaster | None) -> str:
+    """The specialist's MAX ``user_id``, or ``""`` when unreachable.
 
     «Reachable» means a *linked account*: ``linked_bot_user`` is set by
-    the staff-invite accept flow and by solo onboarding, and the BotUser
-    carries the chat_id of the master's own dialog with the bot. On the
+    the staff-invite accept flow and by solo onboarding. On the
     pilot every master is unlinked today — linking them is a data
     change, not a code change, and this resolver starts answering the
     moment it happens.
+
+    Reads ``channel_user_id``, not ``chat_id`` (DRF-1558). This message
+    goes out under the SALON bot's token, and the stored ``chat_id`` is
+    the master's dialog with whichever bot opened one first — the client
+    bot, on the pilot. Sending there answered 404 ``dialog.not.found``
+    on 2026-09-07 (`docs/OPEN_DECISIONS.md` §55) for exactly one reason:
+    a dialog id means nothing to a bot that is not in that dialog. The
+    person id does.
     """
 
     linked = getattr(master, "linked_bot_user", None) if master is not None else None
-    return _clean_chat_id(getattr(linked, "chat_id", ""))
+    return _clean_id(getattr(linked, "channel_user_id", ""))
 
 
 def resolve_salon_target(*, tenant: Tenant) -> NotifyTarget:
-    """Walk the salon-side cascade; the first rung with an address wins.
+    """This salon's own address, or none at all.
 
-    The salon rungs stay exclusive among themselves (a manager who
-    receives every booking does not also need the fallback copy); only
-    the specialist's personal copy is additive — see the module
-    docstring.
+    One rung, by the owner's decision of 2026-09-07: the salon is
+    whoever :func:`~apps.channels.max.addressing.manager_address` names.
+    There is no fallback to the operator channel — see the module
+    docstring for why that global list was never a salon address. An
+    empty result is a normal state, not a failure: the caller records it
+    at INFO and sends nothing.
     """
 
-    manager_chat_id = _clean_chat_id(getattr(tenant, "manager_chat_id", ""))
-    if manager_chat_id:
-        return NotifyTarget(chat_ids=(manager_chat_id,), channel="manager")
+    manager = manager_address(tenant)
+    if manager:
+        return NotifyTarget(addresses=(manager,), channel="manager")
 
-    fallback = tuple(c for c in (_clean_chat_id(c) for c in get_notify_chat_ids()) if c)
-    if fallback:
-        return NotifyTarget(chat_ids=fallback, channel="fallback")
-
-    return NotifyTarget(chat_ids=(), channel="none")
+    return NotifyTarget(addresses=(), channel="none")
 
 
 def _tenant_tz(tenant: Tenant) -> ZoneInfo:
@@ -386,7 +412,7 @@ def notify_booking_created(
 
     try:
         master = resolve_master(tenant=tenant, specialist_id=specialist_id)
-        specialist_chat_id = resolve_specialist_chat_id(master)
+        specialist_user_id = resolve_specialist_user_id(master)
         service_name = resolve_service_name(tenant=tenant, service_id=service_id)
         specialist_notified = False
 
@@ -405,7 +431,7 @@ def notify_booking_created(
         # tone, whereas silence is worse in substance. That is the one case
         # where the wrong avatar beats no message.
         with bot_scope(_salon_bot_for(tenant)):
-            if specialist_chat_id:
+            if specialist_user_id:
                 # The specialist goes FIRST: if MAX dies mid-fan-out, the
                 # epic's priority recipient already has the message.
                 personal = build_specialist_booking_notification(
@@ -415,7 +441,7 @@ def notify_booking_created(
                     service_name=service_name,
                     raw_source=raw_source,
                 )
-                failures = send_max_notification(text=personal, chat_ids=(specialist_chat_id,))
+                failures = send_max_notification(text=personal, user_ids=(specialist_user_id,))
                 specialist_notified = failures == 0
                 if specialist_notified:
                     logger.info(
@@ -457,7 +483,7 @@ def notify_booking_created(
                 )
 
             target = resolve_salon_target(tenant=tenant)
-            if target.chat_ids:
+            if target.addresses:
                 text = build_booking_created_notification(
                     tenant=tenant,
                     appointment_id=appointment_id,
@@ -466,14 +492,14 @@ def notify_booking_created(
                     master_name=(getattr(master, "name", "") or "").strip() or _UNKNOWN,
                     raw_source=raw_source,
                 )
-                failures = send_max_notification(text=text, chat_ids=target.chat_ids)
+                failures = send_max_notification(text=text, addresses=target.addresses)
                 if failures == 0:
                     logger.info(
                         "booking.notify.sent tenant=%s appointment_id=%s channel=%s recipients=%d",
                         tenant.slug,
                         appointment_id,
                         target.channel,
-                        len(target.chat_ids),
+                        len(target.addresses),
                     )
                 else:
                     logger.warning(
@@ -482,22 +508,26 @@ def notify_booking_created(
                         tenant.slug,
                         appointment_id,
                         target.channel,
-                        len(target.chat_ids),
+                        len(target.addresses),
                         failures,
                     )
-            elif not specialist_notified:
-                # An unannounceable booking must be loud. Every address
-                # being empty is a configuration defect, not a normal
-                # state. (When the specialist WAS notified the booking is
-                # announced — a missing salon address is then a quieter
-                # observation, already covered by the cascade semantics.)
-                logger.warning(
-                    "booking.notify.no_recipients tenant=%s appointment_id=%s "
-                    "specialist_id=%s — no linked master chat, no manager_chat_id, "
-                    "no HANDOFF_NOTIFY_MAX_CHAT_IDS: nobody was told about this booking",
+            else:
+                # Observable, but quiet: since the owner's decision of
+                # 2026-09-07 a salon with no manager address simply has
+                # no MAX address, which is a normal state and not a
+                # refusal. One INFO line per pass so the silence can be
+                # counted while the pilot fills the field in; a WARNING
+                # here would cry defect on every booking of every salon
+                # that has not asked for alerts. An unreachable
+                # *specialist* stays loud — that trace is above and is
+                # untouched.
+                logger.info(
+                    "booking.notify.no_salon_target tenant=%s appointment_id=%s "
+                    "specialist_notified=%s — no manager address is configured, "
+                    "the salon copy is skipped",
                     tenant.slug,
                     appointment_id,
-                    specialist_id,
+                    specialist_notified,
                 )
     except Exception:  # noqa: BLE001 — hard containment; ingest must not break
         logger.exception(

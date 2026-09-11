@@ -92,3 +92,8 @@ secrets/
 # rotated key dropped into the folder can't accidentally be committed.
 !infra/secrets/
 infra/secrets/*.json
+
+# DRF-1661. Вывод `manage.py surface_state --write` — замер, а не исходник.
+# Пишется шагом выкладки в дерево от владельца; отслеживаемым он ронял бы
+# следующий `git checkout dev` («local changes would be overwritten»).
+docs/generated/

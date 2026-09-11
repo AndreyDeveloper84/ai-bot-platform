@@ -29,6 +29,9 @@ import { StatusBadge, tintColourVar } from "./StatusBadge";
 
 export type BookingCardVariant = "nearest" | "future" | "past";
 
+/** Причина, по которой действие выключено — одна и та же на всех кнопках. */
+const OFFLINE_HINT = "Нет сети";
+
 interface Props {
   item: RecordItem;
   variant: BookingCardVariant;
@@ -37,6 +40,20 @@ interface Props {
   onCancel?: () => void;
   onRepeat?: () => void;
   onReview?: () => void;
+  /**
+   * Сети нет — действия, которые без неё не произойдут, выключены.
+   *
+   * Экран записей рисовал честную полосу «нет сети», а кнопки под ней
+   * оставались живыми: «Перенести» и «Отменить» уводили на экраны,
+   * которые ничего не загрузят и ничего не отправят, «Записаться ещё» —
+   * в каталог, который не придёт. Полоса без этого — предупреждение,
+   * которое приложение само же и опровергает следующим касанием.
+   *
+   * «Открыть запись» остаётся живой: это чтение уже показанной записи,
+   * у экрана детали есть собственное состояние ошибки, и запирать
+   * человека без выхода незачем.
+   */
+  offline?: boolean;
 }
 
 export function BookingCard({
@@ -47,6 +64,7 @@ export function BookingCard({
   onCancel,
   onRepeat,
   onReview,
+  offline = false,
 }: Props) {
   const { rendering } = renderStatus(item.status);
   const accent = tintColourVar(rendering.tint);
@@ -108,6 +126,8 @@ export function BookingCard({
               type="button"
               className="btn-secondary records-card__action"
               onClick={onReschedule}
+              disabled={offline}
+              title={offline ? OFFLINE_HINT : undefined}
             >
               Перенести
             </button>
@@ -117,6 +137,8 @@ export function BookingCard({
             type="button"
             className="btn-secondary records-card__action records-card__action--danger"
             onClick={onCancel}
+            disabled={offline}
+            title={offline ? OFFLINE_HINT : undefined}
           >
             Отменить
           </button>
@@ -128,6 +150,8 @@ export function BookingCard({
             type="button"
             className="btn-secondary records-card__action"
             onClick={onRepeat}
+            disabled={offline}
+            title={offline ? OFFLINE_HINT : undefined}
           >
             Записаться ещё
           </button>
@@ -137,6 +161,8 @@ export function BookingCard({
             type="button"
             className="btn-secondary records-card__action"
             onClick={onReview}
+            disabled={offline}
+            title={offline ? OFFLINE_HINT : undefined}
           >
             Оставить отзыв
           </button>

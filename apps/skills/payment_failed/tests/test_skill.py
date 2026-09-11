@@ -63,11 +63,14 @@ def make_bot_user(tenant):
     from apps.identity.models import BotUser
 
     def _factory(*, ayla_user_id, chat_id="max-12345", display_name=""):
+        # DRF-1558 — ``chat_id`` параметра стал MAX ``user_id``: адрес DM
+        # это человек. Диалог кладём НАМЕРЕННО другой, чтобы возврат на
+        # него дал другое значение, а не то же самое.
         return BotUser.all_tenants.create(
             tenant=tenant,
             channel="max",
             channel_user_id=chat_id,
-            chat_id=chat_id,
+            chat_id=f"dialog-of-{chat_id}",
             ayla_user_id=ayla_user_id,
             display_name=display_name,
         )
@@ -80,8 +83,16 @@ def sent_dms(monkeypatch):
     """Spy для send_message — собирает все calls."""
     calls: list[dict[str, Any]] = []
 
-    def _spy(*, chat_id, text, attachments=None, timeout=10.0):
-        calls.append({"chat_id": chat_id, "text": text, "attachments": attachments})
+    def _spy(*, chat_id=None, user_id=None, text, attachments=None, timeout=10.0):
+        calls.append(
+            {
+                "chat_id": chat_id,
+                "user_id": user_id,
+                "addr": user_id if user_id is not None else chat_id,
+                "text": text,
+                "attachments": attachments,
+            }
+        )
         return {"ok": True}
 
     monkeypatch.setattr("apps.channels.max.outbound.send_message", _spy)
@@ -323,10 +334,10 @@ class TestMasterDMDispatch:
         on_payment_failed_event(_enriched_data(tenant_id_override=str(tenant.pk)))
 
         # Two DMs — client + master.
-        chat_ids = sorted(d["chat_id"] for d in sent_dms)
+        chat_ids = sorted(d["addr"] for d in sent_dms)
         assert chat_ids == ["max-client", "max-master"]
 
-        master_dm = next(d for d in sent_dms if d["chat_id"] == "max-master")
+        master_dm = next(d for d in sent_dms if d["addr"] == "max-master")
         assert "⚠ Платёж не прошёл" in master_dm["text"]
         assert "Клиент: Анна" in master_dm["text"]
         assert "Маникюр" in master_dm["text"]
@@ -356,7 +367,7 @@ class TestMasterDMDispatch:
 
         on_payment_failed_event(_enriched_data(tenant_id_override=str(tenant.pk)))
 
-        master_dm = next(d for d in sent_dms if d["chat_id"] == "max-master")
+        master_dm = next(d for d in sent_dms if d["addr"] == "max-master")
         # No «Сумма» line at all when amount missing.
         assert "Сумма:" not in master_dm["text"]
         # But the rest of the template is intact.
@@ -381,7 +392,7 @@ class TestMasterDMDispatch:
         on_payment_failed_event(_enriched_data(tenant_id_override=str(tenant.pk)))
 
         # Only client DM fires.
-        chat_ids = [d["chat_id"] for d in sent_dms]
+        chat_ids = [d["addr"] for d in sent_dms]
         assert chat_ids == ["max-client"]
 
         skip_audits = [
@@ -485,7 +496,8 @@ class TestMasterDMDispatch:
         # Client DM с inline button still arrives.
         assert len(sent_dms) == 1
         client_dm = sent_dms[0]
-        assert client_dm["chat_id"] == "max-client"
+        assert client_dm["addr"] == "max-client"
+        assert client_dm["chat_id"] is None, "DRF-1558 — по человеку, не по диалогу"
         buttons = client_dm["attachments"][0]["payload"]["buttons"]
         assert buttons[0]["callback"] == f"cb:payment:retry:{PAYMENT_ID}"
 
@@ -518,7 +530,7 @@ class TestMasterDMDispatch:
             )
 
         # No raise — master DM still fires.
-        master_dm = next(d for d in sent_dms if d["chat_id"] == "max-master")
+        master_dm = next(d for d in sent_dms if d["addr"] == "max-master")
         # Falls back to default 3 in template.
         assert "Это 3-я попытка оплаты подряд" in master_dm["text"]
         # Defensive warn logged.
@@ -552,7 +564,7 @@ class TestMasterDMDispatch:
         on_payment_failed_event(_enriched_data(tenant_id_override=str(tenant_b.pk)))
 
         # Master DM MUST NOT fire — cross-tenant query blocked.
-        chat_ids = [d["chat_id"] for d in sent_dms]
+        chat_ids = [d["addr"] for d in sent_dms]
         assert "max-master" not in chat_ids
         skip_audits = [
             a for a in written_audits if a["action"] == "payment_failed.master_dm_skipped"

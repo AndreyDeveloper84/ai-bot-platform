@@ -20,7 +20,8 @@
   см. ниже.
 * :func:`revoke_data_storage` — отзыв согласия на хранение данных: остановка
   дальнейшего необязательного хранения плюс предусмотренная процедура по уже
-  накопленному.
+  накопленному. Тем же движением гасит «Подсказки Ayla» (§35 п.9), чтобы
+  тумблер не показывал включено при остановленных сообщениях.
 
 ### Главный источник правды для маркетингового согласия
 
@@ -77,6 +78,8 @@ from apps.consent.models import ConsentRecord
 from apps.consent.services import record_global_consent, withdraw
 
 if TYPE_CHECKING:
+    from datetime import datetime
+
     from apps.identity.models import BotUser
     from apps.identity.services.privacy import DeleteCascadeResult
 
@@ -289,6 +292,79 @@ def set_proactive_hints(bot_user: "BotUser", *, enabled: bool) -> None:
     )
 
 
+def set_food_scanner_consent(bot_user: "BotUser", *, granted: bool) -> "datetime | None":
+    """Записать или снять согласие на сканирование еды. Идемпотентно.
+
+    ### Зачем эта функция появилась (DRF-1564)
+
+    Колонка ``BotUser.food_scanner_consent_at`` существует с миграции
+    ``0013_botuser_food_scanner_consent_at``, и её читает гейт навыка
+    (``apps/skills/food_scanner/skill.py:463`` — требует настоящий
+    ``datetime``). **Писателей у неё не было ни одного.**
+
+    Согласие при этом человек давал: мини-приложение складывало отметку
+    в ``localStorage`` браузера. Получалась петля, из которой человек не
+    выходит своими силами: экран согласие принимает и пропускает дальше,
+    а бот на то же самое согласие отвечает «открой Mini App и дай
+    согласие» — и так каждый раз, на любом устройстве.
+
+    Класс дефекта: миграция есть, гейт есть, комментарии говорят, что
+    согласие работает, — и всё это правда по отдельности, а пути между
+    ними нет.
+
+    ### По всем оболочкам, а не по одной строке
+
+    Тот же довод, что у :func:`set_proactive_hints`: чат и
+    мини-приложение — разные строки ``BotUser``, и согласие, записанное
+    на одной, не открыло бы гейт, читающий другую. Человек дал согласие
+    один раз и вправе не давать его снова, сменив поверхность.
+
+    ### Отзыв
+
+    ``granted=False`` ставит ``NULL`` — то самое состояние, которое гейт
+    читает как «согласия нет». Отзыв обязан быть доступен тем же
+    способом, что и выдача: право на отзыв, недостижимое из приложения,
+    — предмет DRF-1520, и заводить его заново одной строкой ниже было бы
+    странно.
+
+    Returns:
+      Момент выдачи (``datetime``) либо ``None`` после отзыва — ровно то,
+      что теперь лежит в колонке.
+    """
+    from django.utils import timezone as dj_timezone
+
+    from apps.identity.models import BotUser as BotUserModel
+
+    shells = _person_shells(bot_user)
+    consent_at = dj_timezone.now() if granted else None
+    with transaction.atomic():
+        BotUserModel.all_tenants.filter(id__in=[s.id for s in shells]).update(
+            food_scanner_consent_at=consent_at
+        )
+    # Экземпляр вызывающего должен совпасть со строкой — ответ не имеет
+    # права показать значение, которого в базе уже нет.
+    bot_user.food_scanner_consent_at = consent_at
+
+    write_audit(
+        "consent.food_scanner_changed",
+        target="BotUser",
+        target_id=bot_user.id,
+        actor_id=bot_user.id,
+        payload={
+            "actor": "customer",
+            "granted": granted,
+            "shells": len(shells),
+        },
+    )
+    logger.info(
+        "consent.customer.food_scanner bot_user=%s granted=%s shells=%d",
+        bot_user.id,
+        granted,
+        len(shells),
+    )
+    return consent_at
+
+
 def _mirror_notify_promo(shells: list["BotUser"], *, granted: bool) -> None:
     """Свести зеркало ``UserPreferences.notify_promo`` к состоянию реестра.
 
@@ -381,7 +457,22 @@ def revoke_data_storage(bot_user: "BotUser") -> "DeleteCascadeResult":
        и нутриционной поверхности отказывают: дальнейшее необязательное
        хранение и проактивные сообщения останавливаются немедленно.
        Маркетинговое согласие снимается тем же движением — вместе с
-       зеркалом ``notify_promo``.
+       зеркалом ``notify_promo``. Тем же движением гасится тумблер
+       «Подсказки Ayla» (``proactive_messages_opt_out = True`` по всем
+       оболочкам, решение владельца §35 п.9): орган управления обязан
+       показывать выключено, раз эффект выключен, — иначе человек видит
+       включённый тумблер при остановленных сообщениях.
+
+       Это **сброс, а не замок**, и границу стоит назвать вслух.
+       :func:`set_proactive_hints` согласия не проверяет, поэтому сразу
+       после отзыва человек может включить тумблер обратно — и снова
+       увидит «включено» при остановленных ``consent_withdrawn``
+       сообщениях. В обратную сторону: повторная выдача согласия колонку
+       не возвращает в ``False``, подсказки остаются выключенными, пока
+       человек сам не включит их. Обе ветки — вопрос к владельцу
+       (TODO(Q-CLIENT-04)): §35 п.9 говорит про момент отзыва и молчит
+       про то, что происходит после него. Пока сделано ровно то, что
+       решено, и ни шага сверх.
     2. **Потом запускается процедура по уже накопленному** —
        :func:`apps.identity.services.privacy.delete_personal_data`, та самая
        предусмотренная процедура C5.2: удаление персональных данных в Ayla,
@@ -437,6 +528,22 @@ def revoke_data_storage(bot_user: "BotUser") -> "DeleteCascadeResult":
             source=DATA_STORAGE_WITHDRAW_SOURCE,
         )
         _apply_marketing(shells, granted=False)
+        # Тумблер обязан показать выключено, а не «включено, но не
+        # работает»: проактивные сообщения после отзыва всё равно не уйдут
+        # — их остановит ``consent_blocker`` по ``consent_withdrawn``.
+        # Пишется тем же способом, что и сеттер :func:`set_proactive_hints`
+        # — одним ``update`` по всем оболочкам человека, здесь по более
+        # широкому множеству полного резолва личности. Идемпотентно:
+        # повторный отзыв присваивает то же ``True``.
+        BotUserModel.all_tenants.filter(id__in=shell_ids).update(proactive_messages_opt_out=True)
+    # Экземпляр вызывающего должен совпасть со строкой — ответ ручки
+    # собирается из него же и не имеет права показать значение, которого
+    # в базе уже нет. Присваивание стоит ЗА блоком: исключение внутри
+    # него сюда не доводит, и рассинхрона «в памяти True, в базе False»
+    # не будет. (Во внешней транзакции блок был бы лишь savepoint —
+    # сегодня ``revoke_data_storage`` в такую не заворачивают, а
+    # ``ATOMIC_REQUESTS`` платформа держит выключенным осознанно.)
+    bot_user.proactive_messages_opt_out = True
 
     write_audit(
         "consent.data_storage_revoked",
@@ -447,6 +554,12 @@ def revoke_data_storage(bot_user: "BotUser") -> "DeleteCascadeResult":
             "actor": "customer",
             "shells": len(shells),
             "disclosure_version": DATA_STORAGE_REVOCATION_DISCLOSURE_VERSION,
+            # Тумблер подсказок аудируется всегда — отдельной строкой из
+            # сеттера, здесь полем этой, чтобы «почему подсказки
+            # выключены» не осталось без ответа. Гарантии «следа не может
+            # не быть» это поле не даёт: ``write_audit`` стоит вне
+            # транзакции шага 1, и его отказ оставит колонку записанной.
+            "proactive_hints_disabled": True,
         },
     )
 

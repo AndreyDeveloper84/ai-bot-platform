@@ -23,8 +23,11 @@ import { StateError } from "../../components/StateError";
 import { ApiError } from "../../lib/api";
 import {
   getAvailabilityRequests,
+  getMastersAwaitingVerification,
   listMasters,
   reactivateMaster,
+  verifyMasters,
+  type AwaitingVerificationMaster,
   type MasterListItem,
   type MeResponse,
 } from "../../lib/admin-api";
@@ -90,6 +93,18 @@ export function AdminTeamScreen({ me }: Props) {
   const [internalChatUnreadCount, setInternalChatUnreadCount] =
     useState<number>(0);
 
+  // DRF-1597 — очередь «ждут подтверждения».
+  //
+  // НЕ best-effort, в отличие от двух бэйджей выше: те украшают ссылку
+  // на соседний экран, а этот список — единственное место, где владелица
+  // вообще узнаёт, что заведённого ею мастера клиент не видит. Молчание
+  // при ошибке здесь было бы тем же молчанием, ради которого задача и
+  // заведена, поэтому ошибка называется словами (`awaitingErr`).
+  const [awaiting, setAwaiting] = useState<AwaitingVerificationMaster[]>([]);
+  const [awaitingCount, setAwaitingCount] = useState<number>(0);
+  const [awaitingErr, setAwaitingErr] = useState<boolean>(false);
+  const [verifying, setVerifying] = useState<boolean>(false);
+
   useEffect(() => {
     // Tab bar is at the root — hide MAX BackButton on the team screen.
     setBackButton(false);
@@ -135,6 +150,27 @@ export function AdminTeamScreen({ me }: Props) {
       cancelled = true;
     };
   }, [me.is_admin, me.is_owner]);
+
+  const loadAwaiting = useCallback(async (signal?: AbortSignal) => {
+    if (!(me.is_owner || me.is_admin)) return;
+    try {
+      const res = await getMastersAwaitingVerification({ signal });
+      if (signal?.aborted) return;
+      setAwaiting(res.items);
+      setAwaitingCount(res.count);
+      setAwaitingErr(false);
+    } catch {
+      if (signal?.aborted) return;
+      setAwaitingErr(true);
+    }
+  }, [me.is_admin, me.is_owner]);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    void loadAwaiting(controller.signal);
+    return () => controller.abort();
+  }, [loadAwaiting]);
+
 
   // Polish item (a) from PR #498 review — 300ms debounce on search +
   // AbortController to cancel in-flight requests when input changes.
@@ -187,6 +223,59 @@ export function AdminTeamScreen({ me }: Props) {
   const manualReload = useCallback(() => {
     void reload();
   }, [reload]);
+
+  const handleVerifyAll = useCallback(async () => {
+    if (verifying) return;
+    setVerifying(true);
+    try {
+      const res = await verifyMasters();
+      hapticImpact();
+      // Три исхода называются по отдельности. «Подтверждено: 0» без
+      // причины читается как сбой, а причин у нуля две разных, и ведут
+      // они владелицу в разные стороны.
+      const parts = [`Подтверждено: ${res.verified}.`];
+      if (res.blocked > 0) {
+        parts.push(
+          `Ждут нажатия самого мастера: ${res.blocked} — им приглашение ` +
+            `выписано лично, принять его может только сама мастер.`,
+        );
+      }
+      if (res.not_eligible > 0) {
+        parts.push(
+          `Не подошли: ${res.not_eligible} — в архиве или сняты с ` +
+            `активности; подтверждение их клиенту не откроет.`,
+        );
+      }
+      if (res.still_hidden.length > 0) {
+        // Сегодня сюда не попадает никто. Если попадёт — владелица узнает
+        // об этом от нас, а не по тому, что мастер так и не появился у
+        // клиента (§78).
+        parts.push(
+          `Подтверждены, но клиент их всё ещё не видит: ` +
+            `${res.still_hidden.join(", ")}. Напишите нам.`,
+        );
+      }
+      setToast(parts.join(" "));
+      await Promise.all([loadAwaiting(), reload()]);
+    } catch (e) {
+      setToast(
+        e instanceof ApiError && e.status === 403
+          ? "Подтвердить мастера может только владелец салона."
+          : "Не удалось подтвердить. Попробуйте ещё раз.",
+      );
+    } finally {
+      setVerifying(false);
+    }
+  }, [loadAwaiting, reload, verifying]);
+
+  // Кто именно ждёт подтверждения — по ответу сервера, а не по второму
+  // правилу на клиенте. Нужен для подписи в списке: `pending` у строки
+  // из очереди и `pending` у лично приглашённой — разные состояния, и
+  // одно слово на оба врало бы про одно из них.
+  const awaitingIds = useMemo(
+    () => new Set(awaiting.map((m) => m.id)),
+    [awaiting],
+  );
 
   // Sync filter back into the URL so the «Открыть архив» deep-link
   // round-trips when the user navigates back from MM5 Step 4.
@@ -314,6 +403,74 @@ export function AdminTeamScreen({ me }: Props) {
           </button>
         )}
       </header>
+
+      {/*
+        DRF-1597 — очередь «ждут подтверждения».
+
+        Стоит ПЕРВЫМ блоком под шапкой, выше фильтров и поиска, и это не
+        вкусовщина. Мастер, заведённый через админку Ayla, приезжает
+        сюда со статусом приглашения `pending` и клиенту не виден;
+        подсказка на форме заведения (DRF-1596) об этом говорит, но
+        сделать шаг оттуда нельзя. Место, где владелица про это узнаёт,
+        должно быть тем же, где она это чинит, — и оно не должно
+        требовать прокрутки.
+
+        Карточка появляется только когда очередь непуста: постоянный
+        блок «ждут: 0» приучил бы её не читать.
+      */}
+      {(me.is_owner || me.is_admin) && awaitingErr && (
+        <div className="admin-notice admin-notice--warn" role="status">
+          Не удалось проверить, все ли мастера видны клиенту. Обновите
+          экран — пока список не загрузился, судить об этом нельзя.
+        </div>
+      )}
+
+      {(me.is_owner || me.is_admin) && awaitingCount > 0 && (
+        <section
+          className="admin-notice admin-notice--warn"
+          aria-label="Мастера, которых не видит клиент"
+        >
+          <div style={{ fontWeight: 600 }}>
+            {`Клиент не видит ${awaitingCount} ${awaitingCount === 1 ? "мастера" : "мастеров"}`}
+          </div>
+          <p style={{ margin: "var(--s-2) 0" }}>
+            Они заведены и активны, но их ещё никто не подтвердил. Пока
+            вы этого не сделаете, записаться к ним нельзя.
+          </p>
+          <ul style={{ margin: "0 0 var(--s-2)", paddingInlineStart: "var(--s-4)" }}>
+            {awaiting.map((m) => (
+              <li key={m.id}>
+                {m.name}
+                {m.specialization ? ` — ${m.specialization}` : ""}
+              </li>
+            ))}
+          </ul>
+          {me.is_owner ? (
+            <button
+              type="button"
+              className="cta-bar__button"
+              disabled={verifying}
+              onClick={() => {
+                hapticSelection();
+                void handleVerifyAll();
+              }}
+            >
+              {verifying
+                ? "Подтверждаю…"
+                : `Подтвердить ${awaitingCount} ${awaitingCount === 1 ? "мастера" : "мастеров"}`}
+            </button>
+          ) : (
+            /* Админ видит очередь, но не нажимает: подтверждение делает
+               человека продаваемым клиенту, и владелец пилота назвал
+               ответственной за своих людей владелицу салона. Сервер
+               отвечает 403 в любом случае — кнопка не прячет решение,
+               она его не обещает. */
+            <p style={{ margin: 0 }}>
+              Подтвердить может только владелец салона.
+            </p>
+          )}
+        </section>
+      )}
 
       {/*
         DRF-1505 — одна кнопка вместо двух.
@@ -539,9 +696,23 @@ export function AdminTeamScreen({ me }: Props) {
                       flexWrap: "wrap",
                     }}
                   >
-                    {m.invite_status === "pending" && (
-                      <span className="admin-chip admin-chip--warn">приглашён</span>
-                    )}
+                    {/*
+                      DRF-1597 — «приглашён» больше не подпись для всех
+                      `pending`. Мастеру, приехавшему синхронизацией,
+                      приглашения никто не отправлял: подпись обещала
+                      событие, которого не было, и владелица ждала
+                      ответа, которого не будет. Кто именно ждёт
+                      подтверждения — говорит сервер (`awaitingIds`), а
+                      не второе правило на клиенте.
+                    */}
+                    {m.invite_status === "pending" &&
+                      (awaitingIds.has(m.id) ? (
+                        <span className="admin-chip admin-chip--warn">
+                          не подтверждён — клиент не видит
+                        </span>
+                      ) : (
+                        <span className="admin-chip admin-chip--warn">приглашён</span>
+                      ))}
                     <span className="admin-chip">{`${m.services_count} услуг`}</span>
                   </span>
                 </span>

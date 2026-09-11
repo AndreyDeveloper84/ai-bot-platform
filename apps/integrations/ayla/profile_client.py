@@ -170,6 +170,17 @@ def fetch_profile_fields(user_id: UUID) -> ProfileFields:
         url = AylaUrlBuilder(base_url).build(f"internal/users/{user_id}/")
     except AylaUrlError as exc:
         raise ProfileFetchError(f"invalid AYLA_BASE_URL: {exc}") from exc
+    # No ``X-External-User-ID`` here, and that is not an omission to be tidied
+    # up for symmetry. Every other Ayla client names the subject it acts for;
+    # this one is called by the ``user.profile.updated`` consumer, where the
+    # actor is a NOTIFICATION about a person, not a person. There is nobody to
+    # name, so the header would have to be invented — and an invented actor on
+    # an authorising header is worse than an absent one. Same distinction as
+    # "unknown" vs "not applicable": this is the second.
+    #
+    # What stands in for the check on this route is the shape of its answer:
+    # two fields, ``display_name`` and ``avatar_url`` (CP-2 / DRF-1617 purpose
+    # registry, P6).
     headers = {
         "Authorization": f"Bearer {token}",
         "Accept": "application/json",

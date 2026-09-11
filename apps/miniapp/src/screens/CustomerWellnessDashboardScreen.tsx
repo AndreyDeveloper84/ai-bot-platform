@@ -18,7 +18,8 @@
  *   Block 1 — Greeting + human one-liner (Tau §3 / §11.9 + §11.10)
  *   Block 2 — Pulse strip (Питание + Вода + Цель)  — Tau §3 + §11.1
  *   Block 3 — Quick actions (💧 + 🎯 + 📅) — Tau §3 + §11.5 + §11.8
- *   Block 4 — Цели сегодня (text actions, no progress bars) — Tau §3
+ *   Block 4 — Шаги на сегодня (text actions, no progress bars) — Tau §3;
+ *     заголовок по решению владельца 11.09.2026 §5.2: привычка/шаг ≠ цель
  *   Block 5 — Ближайшая запись (multi-record indicator) — Tau §3 + §11.3
  *   Block 6 — Прогресс недели (cold-start ≥3 days) — Tau §3 + §11.4
  *   Block 7 — Recommendations embed (TL extension; phase 3.1: real
@@ -82,6 +83,7 @@ import { useCallback, useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { ApiError, type Service } from "../lib/api";
 import { formatDuration, formatMoney } from "../lib/format";
+import { visitAddressText } from "../lib/visit-address";
 import {
   enqueueWaterLog,
   flushWaterQueue,
@@ -315,14 +317,29 @@ export function CustomerWellnessDashboardScreen() {
   // its keys, and every derived number below has to treat that as
   // «unknown» rather than folding it into «nothing logged».
   const caloriesEaten = todayData?.calories_eaten;
-  const caloriesTarget = todayData?.calories_target;
-  const caloriesKnown =
-    caloriesEaten !== undefined && caloriesTarget !== undefined;
+  // Съеденное и цель — РАЗНЫЕ факты, ровно как у воды ниже. Цель Ayla
+  // отдаёт только тем, кто прошёл анкету питания, и «цели нет» обязано
+  // читаться как «цели нет», а не как «не удалось загрузить»: иначе
+  // человек вместо своих калорий видит НЕДОСТУПНО.
+  //
+  // Здесь это ещё и меняло поведение карточки первого шага ниже
+  // (``showOnboarding``): она требует ЗНАНИЯ о пустом дне, а знание
+  // подменялось наличием цели — то есть карточка «Начнём с малого?»
+  // не показалась бы ровно тому, для кого она написана: человеку без
+  // анкеты.
+  const caloriesKnown = caloriesEaten !== undefined;
   const waterEaten = todayData?.water_glasses_eaten;
   const waterTarget = todayData?.water_glasses_target;
-  const waterKnown = waterEaten !== undefined && waterTarget !== undefined;
+  // Выпитое и цель — РАЗНЫЕ факты, и знать их можно порознь. Норму воды
+  // Ayla отдаёт только тем, кто прошёл анкету питания; раньше на её
+  // месте стояла константа «8 стаканов», и человек видел чужое число
+  // как свою дневную цель. Теперь цели просто нет — а выпитое остаётся.
+  const waterKnown = waterEaten !== undefined;
+  const waterTargetKnown = waterTarget !== undefined;
   const waterRatio =
-    waterKnown && waterTarget > 0 ? waterEaten / waterTarget : 0;
+    waterTargetKnown && waterTarget > 0 && waterEaten !== undefined
+      ? waterEaten / waterTarget
+      : undefined;
   const hasAnyLogs =
     !!todayData && ((caloriesEaten ?? 0) > 0 || (waterEaten ?? 0) > 0);
   const oneLiner = todayData
@@ -376,8 +393,15 @@ export function CustomerWellnessDashboardScreen() {
   // него не имеет (см. docstring `customer_wellness_today`). То есть в
   // бою она не рендерилась никогда. Вернуть — когда появится цель по
   // белку; поле оставлено в типе как метка.
+  // «Ещё N стаканов до нормы» бывает только когда норма есть.
+  //
+  // «До нормы», не «до цели»: решение владельца 11.09.2026 §5.2 — Goal это
+  // желаемый результат, Habit — повторяющееся действие внутри плана,
+  // PlanStep — конкретное действие; привычка или действие не создают
+  // отдельную Goal. Стакан воды — шаг, норма воды — его мера. Назвать её
+  // целью значило бы завести человеку вторую цель, которой он не ставил.
   const waterRemaining =
-    waterKnown ? Math.max(0, waterTarget - waterEaten) : 0;
+    waterKnown && waterTargetKnown ? Math.max(0, waterTarget - waterEaten) : 0;
   const showTodayGoals = waterRemaining > 0;
 
   // ── render ────────────────────────────────────────────────────────────
@@ -581,14 +605,14 @@ export function CustomerWellnessDashboardScreen() {
           )}
         </section>
 
-        {/* Block 4 — Цели сегодня (text actions). */}
+        {/* Block 4 — Шаги на сегодня (text actions). */}
         {showTodayGoals && today.kind === "ok" && (
           <section
             className="wellness-dash__today-goals"
             aria-labelledby="tg-header"
           >
             <h2 id="tg-header" className="wellness-dash__section-header">
-              Цели сегодня
+              Шаги на сегодня
             </h2>
             <ul className="wellness-dash__goal-list">
               {waterRemaining > 0 && (
@@ -596,7 +620,7 @@ export function CustomerWellnessDashboardScreen() {
                   <span aria-hidden="true">💧</span>{" "}
                   <span>
                     Ещё {waterRemaining}{" "}
-                    {ruPluralWater(waterRemaining)} до цели
+                    {ruPluralWater(waterRemaining)} до нормы
                   </span>
                 </li>
               )}
@@ -634,7 +658,7 @@ export function CustomerWellnessDashboardScreen() {
               onReschedule={() =>
                 activity.data.next_booking &&
                 navigate(
-                  `/my-visits/${activity.data.next_booking.booking_id}/reschedule`,
+                  `/customer/records/${activity.data.next_booking.booking_id}/reschedule`,
                 )
               }
               onAll={() => navigate("/customer/records")}
@@ -693,7 +717,7 @@ export function CustomerWellnessDashboardScreen() {
                       service={service}
                       reasons={reasons}
                       onOpen={() =>
-                        navigate(`/catalog/${service.id}`)
+                        navigate(`/customer/catalog/${service.id}`)
                       }
                     />
                   </li>
@@ -793,17 +817,23 @@ function PulseStrip({ data }: { data: WellnessToday }) {
   // normally; an ABSENT key means the read failed and must say so.
   const caloriesEaten = data.calories_eaten;
   const caloriesTarget = data.calories_target;
-  const caloriesKnown =
-    caloriesEaten !== undefined && caloriesTarget !== undefined;
+  // По образцу воды парой строк ниже: съеденное и цель — раздельно.
+  const caloriesKnown = caloriesEaten !== undefined;
+  const caloriesTargetKnown = caloriesTarget !== undefined;
   const waterEaten = data.water_glasses_eaten;
   const waterTarget = data.water_glasses_target;
-  const waterKnown = waterEaten !== undefined && waterTarget !== undefined;
+  // Знать выпитое и не знать нормы — обычное состояние, а не сбой.
+  const waterKnown = waterEaten !== undefined;
+  const waterTargetKnown = waterTarget !== undefined;
+  // «Ещё ничего не залогировано» — состояние всего дня, а не одной
+  // строки, поэтому считается один раз и решает и текст, и шкалу.
+  const dayIsEmpty = caloriesEaten === 0 && waterEaten === 0;
   const caloriesPct =
-    caloriesKnown && caloriesTarget > 0
+    caloriesKnown && caloriesTargetKnown && caloriesTarget > 0
       ? Math.round((caloriesEaten / caloriesTarget) * 100)
       : 0;
   const waterPct =
-    waterKnown && waterTarget > 0
+    waterKnown && waterTargetKnown && waterTarget > 0
       ? Math.round((waterEaten / waterTarget) * 100)
       : 0;
   // Tri-state, same contract as the quick-action label (DRF-1476):
@@ -818,22 +848,24 @@ function PulseStrip({ data }: { data: WellnessToday }) {
       <div
         className="wellness-dash__pulse-row"
         aria-label={
-          caloriesKnown
-            ? `Питание: ${caloriesEaten} из ${caloriesTarget} килокалорий, ${caloriesPct} процентов${
-                data.pfc
-                  ? `. Белки ${data.pfc.protein_g}, жиры ${data.pfc.fat_g}, углеводы ${data.pfc.carbs_g} граммов`
-                  : ""
-              }`
-            : `Питание: ${UNAVAILABLE}`
+          !caloriesKnown
+            ? `Питание: ${UNAVAILABLE}`
+            : caloriesTargetKnown
+              ? `Питание: ${caloriesEaten} из ${caloriesTarget} килокалорий, ${caloriesPct} процентов${
+                  data.pfc
+                    ? `. Белки ${data.pfc.protein_g}, жиры ${data.pfc.fat_g}, углеводы ${data.pfc.carbs_g} граммов`
+                    : ""
+                }`
+              : `Питание: ${caloriesEaten} килокалорий сегодня`
         }
       >
         <div className="wellness-dash__pulse-head">
           <span aria-hidden="true">🍽 </span>Питание
         </div>
-        {caloriesKnown ? (
+        {caloriesKnown && caloriesTargetKnown ? (
           <>
             <div className="wellness-dash__pulse-numbers" aria-hidden="true">
-              {caloriesEaten === 0 && waterEaten === 0
+              {dayIsEmpty
                 ? "Ещё ничего не залогировано"
                 : `${caloriesEaten} / ${caloriesTarget} ккал · ${caloriesPct} %`}
             </div>
@@ -844,21 +876,36 @@ function PulseStrip({ data }: { data: WellnessToday }) {
                 {data.pfc.carbs_g} г
               </div>
             )}
-            <div
-              className="wellness-dash__progress"
-              role="progressbar"
-              aria-valuenow={caloriesEaten}
-              aria-valuemin={0}
-              aria-valuemax={caloriesTarget}
-              aria-label={`Калории: ${caloriesEaten} из ${caloriesTarget}`}
-            >
+            {/* Пустой день — без шкалы. Полоса при нуле не видна глазом,
+                но `role="progressbar"` озвучивает «0 из 2000», то есть
+                противоречит строке над ней ровно для того человека,
+                который не может проверить глазами. */}
+            {!dayIsEmpty && (
               <div
-                className="wellness-dash__progress-fill"
-                style={{ width: `${Math.min(100, caloriesPct)}%` }}
-                aria-hidden="true"
-              />
-            </div>
+                className="wellness-dash__progress"
+                role="progressbar"
+                aria-valuenow={caloriesEaten}
+                aria-valuemin={0}
+                aria-valuemax={caloriesTarget}
+                aria-label={`Калории: ${caloriesEaten} из ${caloriesTarget}`}
+              >
+                <div
+                  className="wellness-dash__progress-fill"
+                  style={{ width: `${Math.min(100, caloriesPct)}%` }}
+                  aria-hidden="true"
+                />
+              </div>
+            )}
           </>
+        ) : caloriesKnown ? (
+          /* Цель не известна — показываем ровно то, что знаем: сколько
+             съедено. Ни шкалы, ни процентов: и то и другое считается ОТ
+             цели, а цели нет. Та же форма, что у воды ниже. */
+          <div className="wellness-dash__pulse-numbers">
+            {dayIsEmpty
+              ? "Ещё ничего не залогировано"
+              : `${caloriesEaten} ккал сегодня`}
+          </div>
         ) : (
           /* Read failed - no numbers, no bar. «0 / 0 ккал · 0 %» would
              read as a logged-nothing day, which is a different fact. */
@@ -872,15 +919,17 @@ function PulseStrip({ data }: { data: WellnessToday }) {
       <div
         className="wellness-dash__pulse-row"
         aria-label={
-          waterKnown
-            ? `Вода: ${waterEaten} из ${waterTarget} стаканов`
-            : `Вода: ${UNAVAILABLE}`
+          !waterKnown
+            ? `Вода: ${UNAVAILABLE}`
+            : waterTargetKnown
+              ? `Вода: ${waterEaten} из ${waterTarget} стаканов`
+              : `Вода: ${waterEaten} ${ruPluralWater(waterEaten)} сегодня`
         }
       >
         <div className="wellness-dash__pulse-head">
           <span aria-hidden="true">💧 </span>Вода
         </div>
-        {waterKnown ? (
+        {waterKnown && waterTargetKnown ? (
           <>
             <div className="wellness-dash__pulse-numbers" aria-hidden="true">
               {waterEaten} / {waterTarget} стаканов
@@ -900,6 +949,14 @@ function PulseStrip({ data }: { data: WellnessToday }) {
               </span>
             </div>
           </>
+        ) : waterKnown ? (
+          /* Норма не известна — показываем ровно то, что знаем: сколько
+             выпито. Ни шкалы, ни процентов, ни точек «до нормы»: всё это
+             считается ОТ цели, а цели нет. Формулировка — из макета
+             §Cold-start: «0 стаканов сегодня». */
+          <div className="wellness-dash__pulse-numbers">
+            {waterEaten} {ruPluralWater(waterEaten)} сегодня
+          </div>
         ) : (
           /* Read failed. The «+ стакан» quick action stays live - it is
              a separate handle (POST /wellness/water) and still works. */
@@ -1010,7 +1067,18 @@ function BookingCard({
       <div className="wellness-dash__booking-who">
         у {b.master_name} · {b.salon_name}
       </div>
-      <div className="wellness-dash__booking-where">{b.address}</div>
+      {/* Адрес — три состояния, и на экране их два разных текста
+          (DRF-1611). Строка есть ВСЕГДА: человек идёт на визит, и
+          нужда у него одна и та же независимо от того, чей это
+          пробел — салона или наш.
+
+          Асимметрия иначе выходила бы обратная задуманной: при `""`
+          состояние окончательное (салон ответил, спрашивать некого),
+          при `null` — исправимое (адрес скорее всего есть). Спрятать
+          строку у `null` значило бы дать меньше тому, кому нужнее. */}
+      <div className="wellness-dash__booking-where">
+        {visitAddressText(b.address)}
+      </div>
 
       {/* §11.3 — multi-record indicator. */}
       {moreThisWeek && (
@@ -1084,7 +1152,8 @@ function RecoCard({
         {!service.is_bookable && (
           // DRF-1164 — the scorer ranks by fit, not by staffing, so a pick
           // can be a service nobody performs. Same label as the catalog
-          // card; the tap lands on /catalog/:id, which withholds the CTA.
+          // card; the tap lands on /customer/catalog/:id, which withholds
+          // the CTA.
           <UnbookableBadge />
         )}
         <div id={metaId} className="wellness-dash__reco-meta">

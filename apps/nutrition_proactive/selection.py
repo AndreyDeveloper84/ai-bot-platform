@@ -24,7 +24,11 @@ it asks anything of its own (DRF-1314):
 
 Then two conditions only this surface has:
 
-* ``chat_id`` -- no address, no message. Also applied as a queryset filter
+* ``channel_user_id`` -- no address, no message. This is the address a
+  proactive send uses (DRF-1558): a stored ``chat_id`` names a dialog with
+  whichever bot opened one, so it is not an address for writing first.
+  The reason slug stays ``no_chat_id`` -- it is an emitted key. Also
+  applied as a queryset filter
   in :func:`base_queryset`, so in production this per-row check is
   belt-and-braces; it exists for callers that hand :func:`check_common` a
   row they built themselves.
@@ -130,8 +134,8 @@ def base_queryset():
     return (
         BotUser.all_tenants.filter(proactive_messages_opt_out=False)
         .filter(deleted_at__isnull=True)
-        .exclude(chat_id="")
-        .exclude(chat_id__isnull=True)
+        .exclude(channel_user_id="")
+        .exclude(channel_user_id__isnull=True)
         .select_related("tenant")
         .order_by("pk")[:BATCH_LIMIT]
     )
@@ -153,7 +157,7 @@ def check_common(bot_user: Any) -> str | None:
     blocked = consent_blocker(bot_user)
     if blocked:
         return blocked
-    if not (getattr(bot_user, "chat_id", "") or "").strip():
+    if not (getattr(bot_user, "channel_user_id", "") or "").strip():
         return "no_chat_id"
     if getattr(bot_user, "food_scanner_consent_at", None) is None:
         return "no_food_consent"

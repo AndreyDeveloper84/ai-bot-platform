@@ -43,7 +43,8 @@ import { Link, Navigate, Route, Routes, useLocation, useNavigate } from "react-r
 
 import { ApiError } from "./lib/api";
 import { getMe, type MeResponse } from "./lib/admin-api";
-import { adminLandingPath, isReceptionOnly } from "./lib/admin-tabs";
+import { adminLandingPath, isAdminTabAllowed } from "./lib/admin-tabs";
+import { canOpenSalonPilot } from "./lib/salon-pilot";
 import { getStartPayload, parseStartRoute } from "./lib/max-sdk";
 import {
   SurfaceModeContext,
@@ -72,10 +73,10 @@ import { AdminSectionDeniedScreen } from "./screens/admin/AdminSectionDeniedScre
 import { AdminServicesMatrixScreen } from "./screens/admin/AdminServicesMatrixScreen";
 import { AdminSettingsPlaceholderScreen } from "./screens/admin/AdminSettingsPlaceholderScreen";
 import { AdminTeamScreen } from "./screens/admin/AdminTeamScreen";
-import { BookingConfirmScreen } from "./screens/BookingConfirmScreen";
-import { BookingSuccessScreen } from "./screens/BookingSuccessScreen";
+import { SalonPilotAylaScreen } from "./screens/admin/SalonPilotAylaScreen";
+import { SalonPilotScheduleScreen } from "./screens/admin/SalonPilotScheduleScreen";
+import { SalonPilotTodayScreen } from "./screens/admin/SalonPilotTodayScreen";
 import { BookingWhenScreen } from "./screens/BookingWhenScreen";
-import { CatalogScreen } from "./screens/CatalogScreen";
 import { CustomerBookingConfirmScreen } from "./screens/CustomerBookingConfirmScreen";
 import { CustomerBookingDetailScreen } from "./screens/CustomerBookingDetailScreen";
 import { CustomerBookingSuccessScreen } from "./screens/CustomerBookingSuccessScreen";
@@ -113,9 +114,6 @@ import { MasterAylaScreen } from "./screens/MasterAylaScreen";
 import { MasterScheduleScreen } from "./screens/MasterScheduleScreen";
 import { MasterServicesScreen } from "./screens/MasterServicesScreen";
 import { MasterSettingsScreen } from "./screens/MasterSettingsScreen";
-import { MyVisitDetailScreen } from "./screens/MyVisitDetailScreen";
-import { MyVisitsScreen } from "./screens/MyVisitsScreen";
-import { ProfileScreen } from "./screens/ProfileScreen";
 import { RescheduleScreen } from "./screens/RescheduleScreen";
 import { ServiceDetailScreen } from "./screens/ServiceDetailScreen";
 
@@ -191,6 +189,69 @@ function NoRoleScreen({ onRetry }: { onRetry: () => void }) {
 function adminRouteElements(me: MeResponse): React.ReactNode {
   return (
     <>
+      {/*
+        Пилотная салонная админка — «Сегодня · Расписание · Ayla»
+        (DRF-1235, решение владельца 07.09.2026).
+
+        Три адреса стоят РЯДОМ с пятивкладочным мостом, а не вместо
+        него: мост — двадцать живых экранов, на которых салон работает
+        сегодня, и выключать его владелец не просил. Обе поверхности
+        живут параллельно, у каждой своя нижняя панель и своё правило
+        доступа.
+
+        Страж — не украшение, и он НЕ повторяет собой гейт ручки.
+        `GET /api/v1/admin/day/`, за которым ходит «Сегодня», с DRF-1552
+        пускает и ресепшн (`require_admin_or_reception_read`), так что
+        403 сам собой её отсюда не выставит. Закрывает её решение о
+        поверхности: пилотную админку владелец открыл владельцу и
+        администратору, а вопрос, какие салонные сценарии отдать
+        ресепшн, отдельный и незакрытый (`docs/OPEN_DECISIONS.md` §35).
+        До ответа она не должна попадать сюда даже по прямой ссылке из
+        закладок или старого сообщения бота.
+
+        Проверка спрашивает наличие управляющей роли
+        (`canOpenSalonPilot`), а не отсутствие приёмной: владелец,
+        которому заодно проставили ресепшн, остаётся владельцем.
+
+        Отказ рисует общий `AdminSectionDeniedScreen` — тот же, что на
+        «Чатах», «Настройках» и «Услугах». Своего экрана у пилота для
+        этого нет намеренно: два отказа с разными словами про одно и то
+        же разъезжаются на первой же правке текста.
+
+        Посадка приложения не тронута: `adminLandingPath` по-прежнему
+        ведёт на мост. Какая из двух поверхностей встречает человека при
+        входе — решение владельца, и принимать его здесь нечем.
+      */}
+      <Route
+        path="/admin/today"
+        element={
+          canOpenSalonPilot(me) ? (
+            <SalonPilotTodayScreen me={me} />
+          ) : (
+            <AdminSectionDeniedScreen me={me} section="Сегодня" />
+          )
+        }
+      />
+      <Route
+        path="/admin/schedule"
+        element={
+          canOpenSalonPilot(me) ? (
+            <SalonPilotScheduleScreen me={me} />
+          ) : (
+            <AdminSectionDeniedScreen me={me} section="Расписание" />
+          )
+        }
+      />
+      <Route
+        path="/admin/ayla"
+        element={
+          canOpenSalonPilot(me) ? (
+            <SalonPilotAylaScreen me={me} />
+          ) : (
+            <AdminSectionDeniedScreen me={me} section="Ayla" />
+          )
+        }
+      />
       {/* Phase 2 — the salon's day. First tab in AdminTabBar. */}
       <Route path="/admin/day" element={<AdminSalonDayScreen me={me} />} />
       <Route path="/admin/booking/new" element={<AdminNewBookingScreen />} />
@@ -263,9 +324,23 @@ function adminRouteElements(me: MeResponse): React.ReactNode {
         path="/admin/team/:masterId"
         element={<AdminMasterDetailScreen me={me} />}
       />
+      {/*
+        «Услуги» — матрица «мастер × услуга» с правкой и массовым
+        применением. У ресепшн вкладку убрали (DRF-1552, решение
+        владельца §35 п.1: разрешённого сценария для неё нет), поэтому
+        страж стоит и на адресе: ссылка переживает вкладку — в закладке,
+        в старом сообщении бота, в `AdminMasterDetailScreen`, который
+        уводит сюда с `?master_id=`.
+      */}
       <Route
         path="/admin/services"
-        element={<AdminServicesMatrixScreen me={me} />}
+        element={
+          isAdminTabAllowed(me, "services") ? (
+            <AdminServicesMatrixScreen me={me} />
+          ) : (
+            <AdminSectionDeniedScreen me={me} section="Услуги" />
+          )
+        }
       />
       <Route
         path="/admin/availability-requests"
@@ -283,20 +358,20 @@ function adminRouteElements(me: MeResponse): React.ReactNode {
       <Route
         path="/admin/internal-chat"
         element={
-          isReceptionOnly(me) ? (
-            <AdminSectionDeniedScreen me={me} section="Чаты" />
-          ) : (
+          isAdminTabAllowed(me, "chats") ? (
             <AdminInternalChatListScreen me={me} />
+          ) : (
+            <AdminSectionDeniedScreen me={me} section="Чаты" />
           )
         }
       />
       <Route
         path="/admin/internal-chat/threads/:threadId"
         element={
-          isReceptionOnly(me) ? (
-            <AdminSectionDeniedScreen me={me} section="Чаты" />
-          ) : (
+          isAdminTabAllowed(me, "chats") ? (
             <AdminInternalChatThreadScreen me={me} />
+          ) : (
+            <AdminSectionDeniedScreen me={me} section="Чаты" />
           )
         }
       />
@@ -317,10 +392,10 @@ function adminRouteElements(me: MeResponse): React.ReactNode {
       <Route
         path="/admin/settings"
         element={
-          isReceptionOnly(me) ? (
-            <AdminSectionDeniedScreen me={me} section="Настройки" />
-          ) : (
+          isAdminTabAllowed(me, "settings") ? (
             <AdminSettingsPlaceholderScreen me={me} />
+          ) : (
+            <AdminSectionDeniedScreen me={me} section="Настройки" />
           )
         }
       />
@@ -1213,15 +1288,48 @@ export function CustomerRoutes() {
         from bot DMs» как основание устарело: алиасы остаются страховкой
         для СТАРЫХ внешних ссылок, ушедших наружу ранее (пересланные
         сообщения, закладки, сторонние посты). Внутренние переходы на
-        них не ведут. Удаление самих экранов — отдельная задача
-        (DRF-1485).
+        них не ведут — это замерено, а не заявлено (DRF-1485).
+
+        Остались ровно те алиасы, за которыми стоит КАНОНИЧЕСКИЙ экран:
+        `/catalog/:serviceId` — тот же `ServiceDetailScreen`, что на
+        каноническом адресе. Три экрана прежнего поколения, на которые
+        не вело уже ничего, сняты вместе со своими адресами (DRF-1485):
+        `/book/confirm`, `/book/success/:bookingId` и `/me`. Алиасами
+        они быть не могли — каждый показывал СВОЙ экран, а не
+        канонический по старому адресу, так что оставить адрес значило
+        бы оставить и экран.
+
+        DRF-1625 — `/catalog` (`CatalogScreen`) снят по тому же
+        критерию, под который он подпадал всё это время: канонический
+        каталог это `CustomerCatalogScreen` на `/customer/catalog`, а
+        `CatalogScreen` был СВОИМ экраном, а не тем же по старому
+        адресу. Внутренний вход в него был ровно один — из
+        `MyVisitsScreen`, снятого тем же пакетом; продюсеров пути
+        `/catalog` в репозитории нет: единственный маршрутный литерал у
+        продюсеров — `"open_catalog": "customer/catalog"`
+        (`apps/skills/welcome/skill.py:172`), а протухший payload
+        `catalog` из старых клавиатур `_ROUTE_MAP` резолвит в
+        `/customer/catalog`.
+
+        `/catalog/:serviceId` остаётся: это настоящий псевдоним.
       */}
-      <Route path="/catalog" element={<CatalogScreen />} />
       <Route path="/catalog/:serviceId" element={<ServiceDetailScreen />} />
+      {/*
+        §31 (решение владельца 06.09.2026) — `MasterPickerScreen` и
+        `BookingWhenScreen` исключены из удаления DRF-1485 и
+        КАНОНИЗИРОВАНЫ по адресам `/customer/book/master` и
+        `/customer/book/when`. Старые `/book/*` остаются алиасами —
+        ровно как сказано в решении, ни один адрес наружу не ломается.
+
+        Каноническая пара идёт ПЕРВОЙ: внутренние переходы ведут только
+        на неё (`ServiceDetailScreen`, `MasterPickerScreen`,
+        `BookingWhenScreen`), а `/book/master` и `/book/when` ниже
+        держат ранее ушедшие наружу ссылки.
+      */}
+      <Route path="/customer/book/master" element={<MasterPickerScreen />} />
+      <Route path="/customer/book/when" element={<BookingWhenScreen />} />
       <Route path="/book/master" element={<MasterPickerScreen />} />
       <Route path="/book/when" element={<BookingWhenScreen />} />
-      <Route path="/book/confirm" element={<BookingConfirmScreen />} />
-      <Route path="/book/success/:bookingId" element={<BookingSuccessScreen />} />
       {/*
         Customer booking flow F1-F5 — Tier 1 Priority 3 Phase B
         (Ayla-first reskin per docs/screens/customer-booking-flow.md).
@@ -1296,8 +1404,8 @@ export function CustomerRoutes() {
         element={<CustomerBookingSuccessScreen />}
       />
       {/* Tier 1 Priority 5 Phase B — customer records (Tau R1-R6).
-          New canonical routes. Legacy /my-visits stays mounted as a
-          compatibility alias (см. комментарий у алиасов выше). */}
+          Канонические адреса. От легаси-`/my-visits` остался только
+          псевдоним экрана переноса — см. комментарий ниже (DRF-1625). */}
       <Route path="/customer/records" element={<CustomerRecordsScreen />} />
       <Route
         path="/customer/records/:bookingId"
@@ -1313,15 +1421,42 @@ export function CustomerRoutes() {
         path="/customer/records/:bookingId/reschedule"
         element={<RescheduleScreen />}
       />
-      <Route path="/my-visits" element={<MyVisitsScreen />} />
-      <Route path="/my-visits/:bookingId" element={<MyVisitDetailScreen />} />
+      {/*
+        DRF-1625 — от старого пространства имён `/my-visits` остался
+        ровно один адрес, и он настоящий псевдоним: тот же
+        `RescheduleScreen`, что на каноническом
+        `/customer/records/:bookingId/reschedule` выше.
+
+        `/my-visits` (`MyVisitsScreen`) и `/my-visits/:bookingId`
+        (`MyVisitDetailScreen`) сняты вместе со своими экранами. Они
+        подпадали под критерий DRF-1485, записанный у алиасов выше:
+        каждый показывал СВОЙ экран, а не канонический по старому
+        адресу, — то есть оставить адрес значило бы оставить и
+        поверхность прежнего поколения, беднее канонической
+        (`MyVisitDetailScreen` не рисовал ни оплату, ни оценку).
+
+        Внешних ссылок на них нет, и это замерено, а не предположено:
+        ни один продюсер ссылок в репозитории никогда не выдавал пути
+        `/my-visits` — `git log -S` по `apps/skills`, `apps/orchestrator`,
+        `apps/channels`, `apps/notifications`, `apps/booking`,
+        `apps/miniapp_api`, `config` находит ровно один коммит, и тот
+        добавляет строку докстринга. Клавиатуры, ушедшие в историю чата
+        раньше, несут не URL, а payload (`open_visits`, `route=visits`),
+        и `_ROUTE_MAP` в `lib/max-sdk.ts` резолвит его сегодня в
+        `/customer/records`.
+
+        Сторож: `App.legacyRoutes.test.ts` — легаси-адрес имеет право
+        существовать только как псевдоним канонического экрана.
+      */}
       <Route
         path="/my-visits/:bookingId/reschedule"
         element={<RescheduleScreen />}
       />
       {/* Tier 1 Priority 6 Phase B — customer profile tab (Tau R1-R6,
-          deferred Variant 3 per tech-lead 2026-06-01). New canonical
-          route. Legacy /me stays mounted as a compatibility alias. */}
+          deferred Variant 3 per tech-lead 2026-06-01). Единственный
+          профиль клиента: легаси-`/me` (`ProfileScreen`) снят вместе с
+          экраном (DRF-1485) — алиасом он быть не мог, потому что
+          показывал ДРУГОЙ экран, а не тот же по другому адресу. */}
       <Route path="/customer/profile" element={<CustomerProfileScreen />} />
       <Route
         path="/customer/notification-settings"
@@ -1355,7 +1490,6 @@ export function CustomerRoutes() {
         path="/customer/food-scanner/manual"
         element={<FoodScannerManualScreen />}
       />
-      <Route path="/me" element={<ProfileScreen />} />
       <Route path="/feedback/:bookingId" element={<FeedbackScreen />} />
       {/* DRF-1349 — the surface an invited master actually boots into.
           `/api/v1/me` returns is_master=false until the invitation is

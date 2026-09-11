@@ -494,11 +494,11 @@ def _to_discovery_reply(result: Any, bot_user: Any = None) -> DiscoveryReply:
         # здесь единственный вход в 152-ФЗ (см. :data:`_RETURN_KINDS`).
         if not _consent_captured(bot_user):
             return _consent_entry_reply()
-        text, action_data = render_first_contact(result.reply_text)
+        text, action_data = render_first_contact(result.reply_text, bot_user=bot_user)
         return DiscoveryReply(text=text, action_data=action_data)
 
     if reply_kind == _S5_KIND:
-        text, action_data = render_first_contact(GLOBAL_S5_TEXT)
+        text, action_data = render_first_contact(GLOBAL_S5_TEXT, bot_user=bot_user)
         return DiscoveryReply(text=text, action_data=action_data)
 
     # S2 consent prompt / S2a details / refusal / ask-food-water prompts →

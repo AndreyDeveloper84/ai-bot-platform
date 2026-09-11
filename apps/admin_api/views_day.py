@@ -2,10 +2,16 @@
 
 ``GET /api/v1/admin/day/?date=YYYY-MM-DD``
 
-Owner / Admin / — via :func:`require_admin_role` — read-only. Receptionist
-is rejected by that decorator today; when the front-desk role is opened up
-this is the first endpoint it should get, because reading the day is
-exactly the receptionist's job.
+Owner / Admin / Receptionist — via
+:func:`require_admin_or_reception_read` — read-only.
+
+The front desk was opened up here, and only here (DRF-1552, owner's
+decision ``docs/OPEN_DECISIONS.md`` §35 п.1: «Ресепшн открыть чтение
+"Дня салона". Только GET»). This endpoint was named as the first one the
+receptionist should get because reading the day is exactly her job; the
+rest of ``/api/v1/admin/`` — staff invites, master deactivation,
+availability decisions — keeps :func:`require_admin_role` and keeps
+answering her 403.
 
 The business logic lives in :mod:`apps.admin_api.services.salon_day`; this
 is a thin HTTP shell that parses one query parameter and serialises one
@@ -23,7 +29,7 @@ from django.http import HttpRequest, HttpResponse, JsonResponse
 from django.utils import timezone as dj_timezone
 from django.views.decorators.http import require_http_methods
 
-from apps.admin_api.auth import require_admin_role
+from apps.admin_api.auth import require_admin_or_reception_read
 from apps.admin_api.services.salon_day import (
     DayVisit,
     SalonDay,
@@ -82,13 +88,18 @@ def _day_payload(day: SalonDay) -> dict[str, Any]:
 
 
 @require_http_methods(["GET"])
-@require_admin_role
+@require_admin_or_reception_read
 def salon_day(request: HttpRequest) -> HttpResponse:
     """Read the salon's day for one tenant-local calendar date.
 
     ``date`` defaults to today **in the tenant's timezone**, not the
     server's: a salon in Kaliningrad opening at 09:00 must not be shown
     yesterday because the container runs on UTC.
+
+    Readable by the receptionist as well as owner and admin (DRF-1552).
+    Nothing role-specific is stripped from the payload because there is
+    nothing to strip: no phone number crosses this boundary for anyone
+    (DRF-1039), and the client is named by first name plus last initial.
     """
 
     tenant = request.tenant  # type: ignore[attr-defined]

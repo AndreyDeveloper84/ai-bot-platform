@@ -113,10 +113,7 @@ function mountedScreens(): string[] {
  * делает и появление экрана, и его исчезновение видимыми в диффе.
  */
 const EXPECTED_SCREENS = [
-  "BookingConfirmScreen",
-  "BookingSuccessScreen",
   "BookingWhenScreen",
-  "CatalogScreen",
   "CustomerBookingConfirmScreen",
   "CustomerBookingDetailScreen",
   "CustomerBookingSuccessScreen",
@@ -139,9 +136,6 @@ const EXPECTED_SCREENS = [
   "GoalSelectScreen",
   "HelloScreen",
   "MasterPickerScreen",
-  "MyVisitDetailScreen",
-  "MyVisitsScreen",
-  "ProfileScreen",
   "RescheduleScreen",
   "RoleNotReadyScreen",
   "ServiceDetailScreen",

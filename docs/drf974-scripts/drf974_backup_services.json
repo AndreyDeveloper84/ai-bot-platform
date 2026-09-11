@@ -1,0 +1,466 @@
+[
+ {
+  "id": "4d1e6e2c-bce4-4b88-9f6b-56cc607577c2",
+  "name": "Антицеллюлитный массаж",
+  "category_id": "25071d7a-1d04-440d-8363-476520998ab8",
+  "category_name": "Массаж тела",
+  "template_id": null,
+  "is_active": true
+ },
+ {
+  "id": "532734ee-3f80-4a3a-820c-b2d3a4b39997",
+  "name": "Верхняя губа",
+  "category_id": "25071d7a-1d04-440d-8363-476520998ab8",
+  "category_name": "Массаж тела",
+  "template_id": null,
+  "is_active": true
+ },
+ {
+  "id": "3e7900b2-2662-4e55-9220-949af34cb971",
+  "name": "Бёдра  полностью",
+  "category_id": "25071d7a-1d04-440d-8363-476520998ab8",
+  "category_name": "Массаж тела",
+  "template_id": null,
+  "is_active": true
+ },
+ {
+  "id": "8b25a35b-4685-4fcf-b348-04427771c74b",
+  "name": "RF-лифтинг — Лицо/шея/декольте",
+  "category_id": "25071d7a-1d04-440d-8363-476520998ab8",
+  "category_name": "Массаж тела",
+  "template_id": null,
+  "is_active": true
+ },
+ {
+  "id": "1d6fe3be-607f-44f8-a39f-b825a69a5cb7",
+  "name": "Must Have (подмышки+ глубокое бикини)",
+  "category_id": "25071d7a-1d04-440d-8363-476520998ab8",
+  "category_name": "Массаж тела",
+  "template_id": null,
+  "is_active": true
+ },
+ {
+  "id": "c83ab6ec-c911-487c-9c57-75c87754cba6",
+  "name": "Пилинг FERULIC PEEL C+",
+  "category_id": "25071d7a-1d04-440d-8363-476520998ab8",
+  "category_name": "Массаж тела",
+  "template_id": null,
+  "is_active": true
+ },
+ {
+  "id": "2b1969b6-b30b-4757-b028-91724ee190c5",
+  "name": "Альгинатная маска",
+  "category_id": "25071d7a-1d04-440d-8363-476520998ab8",
+  "category_name": "Массаж тела",
+  "template_id": null,
+  "is_active": true
+ },
+ {
+  "id": "ad0c993d-4a3e-46f7-991a-d0abe8a1ec9e",
+  "name": "VelaShape",
+  "category_id": "25071d7a-1d04-440d-8363-476520998ab8",
+  "category_name": "Массаж тела",
+  "template_id": null,
+  "is_active": true
+ },
+ {
+  "id": "4e990f8a-201d-49cd-8bd5-658fcc1037ec",
+  "name": "Массаж ног — снятие усталости и отёков (30 минут)",
+  "category_id": "25071d7a-1d04-440d-8363-476520998ab8",
+  "category_name": "Массаж тела",
+  "template_id": null,
+  "is_active": true
+ },
+ {
+  "id": "a1500e85-ace5-4fd6-8f8d-7c5f5ab8d6ee",
+  "name": "Массаж ног — глубокое восстановление и лёгкость (60 минут)",
+  "category_id": "25071d7a-1d04-440d-8363-476520998ab8",
+  "category_name": "Массаж тела",
+  "template_id": null,
+  "is_active": true
+ },
+ {
+  "id": "fbcf8f9a-3fe7-45da-b00e-019176374669",
+  "name": "Массаж ног — глубокое расслабление и лимфодренаж (45 минут)",
+  "category_id": "25071d7a-1d04-440d-8363-476520998ab8",
+  "category_name": "Массаж тела",
+  "template_id": null,
+  "is_active": true
+ },
+ {
+  "id": "a4f31641-8d1c-4dce-bd57-aae85b4e4ef8",
+  "name": "УЗ-кавитация — 1 зона",
+  "category_id": "25071d7a-1d04-440d-8363-476520998ab8",
+  "category_name": "Массаж тела",
+  "template_id": null,
+  "is_active": true
+ },
+ {
+  "id": "6c9ef866-3717-4c7b-8936-219a9fad5d4a",
+  "name": "Массаж спины — снятие боли и зажимов (30 минут)",
+  "category_id": "25071d7a-1d04-440d-8363-476520998ab8",
+  "category_name": "Массаж тела",
+  "template_id": null,
+  "is_active": true
+ },
+ {
+  "id": "98089120-5629-4105-aea4-a83aa86086b2",
+  "name": "Массаж спины — глубокая проработка (45 минут)",
+  "category_id": "25071d7a-1d04-440d-8363-476520998ab8",
+  "category_name": "Массаж тела",
+  "template_id": null,
+  "is_active": true
+ },
+ {
+  "id": "15856017-e223-4cc1-a664-959372746ce0",
+  "name": "Массаж спины премиум — максимальная проработка (60 минут)",
+  "category_id": "25071d7a-1d04-440d-8363-476520998ab8",
+  "category_name": "Массаж тела",
+  "template_id": null,
+  "is_active": true
+ },
+ {
+  "id": "4a763d13-741d-4937-87ac-1a06a73c2f3f",
+  "name": "Спортивный массаж",
+  "category_id": "25071d7a-1d04-440d-8363-476520998ab8",
+  "category_name": "Массаж тела",
+  "template_id": null,
+  "is_active": true
+ },
+ {
+  "id": "47127bb8-c018-4b58-8219-5de9e66c1db9",
+  "name": "Комплекс \"Лёгкие ноги\": лимфодренажный массаж + вибромассаж (60 минут)",
+  "category_id": "25071d7a-1d04-440d-8363-476520998ab8",
+  "category_name": "Массаж тела",
+  "template_id": null,
+  "is_active": true
+ },
+ {
+  "id": "31cf62d7-608b-4326-94ee-81a07ee473e3",
+  "name": "Вибромассаж — Спина/руки",
+  "category_id": "25071d7a-1d04-440d-8363-476520998ab8",
+  "category_name": "Массаж тела",
+  "template_id": null,
+  "is_active": true
+ },
+ {
+  "id": "d9429e4b-2c7d-4cf8-99dd-1a2ee808a411",
+  "name": "Комплекс \"Гладкая кожа\": антицеллюлитный массаж (45 мин) + VelaShape (60 минут)",
+  "category_id": "25071d7a-1d04-440d-8363-476520998ab8",
+  "category_name": "Массаж тела",
+  "template_id": null,
+  "is_active": true
+ },
+ {
+  "id": "e7bf3fa2-4290-4bbe-90ce-e440dc2a2f87",
+  "name": "Классика (голени с коленями + глубокое бикини + подмышки)",
+  "category_id": "25071d7a-1d04-440d-8363-476520998ab8",
+  "category_name": "Массаж тела",
+  "template_id": null,
+  "is_active": true
+ },
+ {
+  "id": "2afdf823-e4a2-40d6-88e3-f43f02820294",
+  "name": "Массаж лица пластический / скульптурный",
+  "category_id": "25071d7a-1d04-440d-8363-476520998ab8",
+  "category_name": "Массаж тела",
+  "template_id": null,
+  "is_active": true
+ },
+ {
+  "id": "1f9167ed-3cbe-496a-96de-d2b19f7db2ce",
+  "name": "Вибромассаж — Бёдра/ягодицы",
+  "category_id": "25071d7a-1d04-440d-8363-476520998ab8",
+  "category_name": "Массаж тела",
+  "template_id": null,
+  "is_active": true
+ },
+ {
+  "id": "ecbacefb-1733-4dba-9c8c-b8f4fbc87cc0",
+  "name": "Чистка лица + пилинг",
+  "category_id": "25071d7a-1d04-440d-8363-476520998ab8",
+  "category_name": "Массаж тела",
+  "template_id": null,
+  "is_active": true
+ },
+ {
+  "id": "fd6edd3b-d8e5-4ba0-89e7-36102089c50b",
+  "name": "Вибромассаж — Живот",
+  "category_id": "25071d7a-1d04-440d-8363-476520998ab8",
+  "category_name": "Массаж тела",
+  "template_id": null,
+  "is_active": true
+ },
+ {
+  "id": "4a6672c6-294f-4a3a-a8c9-0e6a87be6a51",
+  "name": "Биоэнергетический массаж детский",
+  "category_id": "25071d7a-1d04-440d-8363-476520998ab8",
+  "category_name": "Массаж тела",
+  "template_id": null,
+  "is_active": true
+ },
+ {
+  "id": "1b5c8b24-42c1-4bca-a410-0ac9497f3b24",
+  "name": "Лимфодренажный массаж всего тела (60 минут)",
+  "category_id": "25071d7a-1d04-440d-8363-476520998ab8",
+  "category_name": "Массаж тела",
+  "template_id": null,
+  "is_active": true
+ },
+ {
+  "id": "852218eb-c94e-477b-8704-5441b64c5fb2",
+  "name": "Лимфодренажный массаж — снятие отёков (экспресс 30 минут)",
+  "category_id": "25071d7a-1d04-440d-8363-476520998ab8",
+  "category_name": "Массаж тела",
+  "template_id": null,
+  "is_active": true
+ },
+ {
+  "id": "423f69bd-0713-4e7a-ad72-97bf1637bf26",
+  "name": "Массаж стоп",
+  "category_id": "25071d7a-1d04-440d-8363-476520998ab8",
+  "category_name": "Массаж тела",
+  "template_id": null,
+  "is_active": true
+ },
+ {
+  "id": "17afe9cf-d037-46c1-91ff-332bee576a93",
+  "name": "Пилинг Миндальный",
+  "category_id": "25071d7a-1d04-440d-8363-476520998ab8",
+  "category_name": "Массаж тела",
+  "template_id": null,
+  "is_active": true
+ },
+ {
+  "id": "81ceb7e5-09e1-4c1e-aff3-10bd3190847c",
+  "name": "Спина без боли - комплекс массажа",
+  "category_id": "25071d7a-1d04-440d-8363-476520998ab8",
+  "category_name": "Массаж тела",
+  "template_id": null,
+  "is_active": true
+ },
+ {
+  "id": "c5dcc211-2e5d-4bb9-a2af-ccc54d05e310",
+  "name": "УЗ-чистка лица",
+  "category_id": "25071d7a-1d04-440d-8363-476520998ab8",
+  "category_name": "Массаж тела",
+  "template_id": null,
+  "is_active": true
+ },
+ {
+  "id": "7d37e3ef-c243-4f3a-b4a2-980f54b0ec6c",
+  "name": "Комбинированная чистка лица",
+  "category_id": "25071d7a-1d04-440d-8363-476520998ab8",
+  "category_name": "Массаж тела",
+  "template_id": null,
+  "is_active": true
+ },
+ {
+  "id": "d8ee3bab-a3cd-4337-b490-cfb185207e3a",
+  "name": "Бикини глубокое",
+  "category_id": "25071d7a-1d04-440d-8363-476520998ab8",
+  "category_name": "Массаж тела",
+  "template_id": null,
+  "is_active": true
+ },
+ {
+  "id": "afc41f2f-2dbe-4cdc-a164-de5bc63b2e11",
+  "name": "Парный массаж",
+  "category_id": "25071d7a-1d04-440d-8363-476520998ab8",
+  "category_name": "Массаж тела",
+  "template_id": null,
+  "is_active": true
+ },
+ {
+  "id": "89bbd62b-24fb-429d-a27a-c47806fc5816",
+  "name": "Пилинг AZELAIC PEEL",
+  "category_id": "25071d7a-1d04-440d-8363-476520998ab8",
+  "category_name": "Массаж тела",
+  "template_id": null,
+  "is_active": true
+ },
+ {
+  "id": "c48694ba-2cd6-4c85-936a-39c3e65c7084",
+  "name": "Карбокситерапия",
+  "category_id": "25071d7a-1d04-440d-8363-476520998ab8",
+  "category_name": "Массаж тела",
+  "template_id": null,
+  "is_active": true
+ },
+ {
+  "id": "3486577f-218d-4dcd-973d-f6fc68a9ed49",
+  "name": "Руки до локтя",
+  "category_id": "25071d7a-1d04-440d-8363-476520998ab8",
+  "category_name": "Массаж тела",
+  "template_id": null,
+  "is_active": true
+ },
+ {
+  "id": "dbbd7951-a8c1-46c0-a4b0-db79693bf698",
+  "name": "Лазерная эпиляция бёдер (передняя/задняя/боковая часть)",
+  "category_id": "25071d7a-1d04-440d-8363-476520998ab8",
+  "category_name": "Массаж тела",
+  "template_id": null,
+  "is_active": true
+ },
+ {
+  "id": "5491f8aa-2a4e-4914-afd7-fb617728168f",
+  "name": "Карбокситерапия+пилинг",
+  "category_id": "25071d7a-1d04-440d-8363-476520998ab8",
+  "category_name": "Массаж тела",
+  "template_id": null,
+  "is_active": true
+ },
+ {
+  "id": "fcfb4212-1956-4066-90a9-cd62a7ce04b9",
+  "name": "Пилинг PROBIO PEEL",
+  "category_id": "25071d7a-1d04-440d-8363-476520998ab8",
+  "category_name": "Массаж тела",
+  "template_id": null,
+  "is_active": true
+ },
+ {
+  "id": "d9609b6b-a621-4d69-b1d1-6903e0e309d0",
+  "name": "Руки полностью",
+  "category_id": "25071d7a-1d04-440d-8363-476520998ab8",
+  "category_name": "Массаж тела",
+  "template_id": null,
+  "is_active": true
+ },
+ {
+  "id": "8a879e61-b165-41c6-bdfd-7b48a53bbdab",
+  "name": "Ягодицы",
+  "category_id": "25071d7a-1d04-440d-8363-476520998ab8",
+  "category_name": "Массаж тела",
+  "template_id": null,
+  "is_active": true
+ },
+ {
+  "id": "fb8c9387-3c6a-4e34-9c4b-547619494ff3",
+  "name": "Бикини тотальное",
+  "category_id": "25071d7a-1d04-440d-8363-476520998ab8",
+  "category_name": "Массаж тела",
+  "template_id": null,
+  "is_active": true
+ },
+ {
+  "id": "af1a80ed-0f18-4470-9cb3-23329a3b841d",
+  "name": "Лазерная эпиляция подбородка",
+  "category_id": "25071d7a-1d04-440d-8363-476520998ab8",
+  "category_name": "Массаж тела",
+  "template_id": null,
+  "is_active": true
+ },
+ {
+  "id": "a9088cff-0296-453d-8476-028a0e10d30a",
+  "name": "Голени с коленями",
+  "category_id": "25071d7a-1d04-440d-8363-476520998ab8",
+  "category_name": "Массаж тела",
+  "template_id": null,
+  "is_active": true
+ },
+ {
+  "id": "a7927a4a-9687-477c-ba5c-8a781b39d928",
+  "name": "Биоэнергетический массаж",
+  "category_id": "25071d7a-1d04-440d-8363-476520998ab8",
+  "category_name": "Массаж тела",
+  "template_id": null,
+  "is_active": true
+ },
+ {
+  "id": "f5f7bb93-c661-4c99-8a32-08d11ef41ba4",
+  "name": "Классический массаж",
+  "category_id": "25071d7a-1d04-440d-8363-476520998ab8",
+  "category_name": "Массаж тела",
+  "template_id": null,
+  "is_active": true
+ },
+ {
+  "id": "e996012f-e3c7-4f85-a020-dc194d95dc90",
+  "name": "Бикини  по линии белья",
+  "category_id": "25071d7a-1d04-440d-8363-476520998ab8",
+  "category_name": "Массаж тела",
+  "template_id": null,
+  "is_active": true
+ },
+ {
+  "id": "12158976-76da-4fa8-97bb-86649dcd8c44",
+  "name": "RF-лифтинг — Лицо/шея",
+  "category_id": "25071d7a-1d04-440d-8363-476520998ab8",
+  "category_name": "Массаж тела",
+  "template_id": null,
+  "is_active": true
+ },
+ {
+  "id": "98bca941-7da3-464d-b2cf-411008c5500e",
+  "name": "Super (ноги полностью + глубокое бикини + подмышки)",
+  "category_id": "25071d7a-1d04-440d-8363-476520998ab8",
+  "category_name": "Массаж тела",
+  "template_id": null,
+  "is_active": true
+ },
+ {
+  "id": "1e8e0c43-c40d-42b2-9533-364517871eb5",
+  "name": "Глубокая проработка проблемной зоны (60 минут)",
+  "category_id": "25071d7a-1d04-440d-8363-476520998ab8",
+  "category_name": "Массаж тела",
+  "template_id": null,
+  "is_active": true
+ },
+ {
+  "id": "fd1b690a-e8bc-4205-9e7b-84bf1ecefd51",
+  "name": "Лазерная эпиляция ног полностью",
+  "category_id": "25071d7a-1d04-440d-8363-476520998ab8",
+  "category_name": "Массаж тела",
+  "template_id": null,
+  "is_active": true
+ },
+ {
+  "id": "00afda85-4c98-4c4f-935f-73ec9422a5b7",
+  "name": "Всё тело (руки полностью,ноги полностью,тотальное бикини,подмышки.",
+  "category_id": "25071d7a-1d04-440d-8363-476520998ab8",
+  "category_name": "Массаж тела",
+  "template_id": null,
+  "is_active": true
+ },
+ {
+  "id": "4bc87089-5a7d-48f4-aa82-182f6d20b3d0",
+  "name": "Вибромассаж — Всё тело",
+  "category_id": "25071d7a-1d04-440d-8363-476520998ab8",
+  "category_name": "Массаж тела",
+  "template_id": null,
+  "is_active": true
+ },
+ {
+  "id": "0dcf81f5-f204-46de-b6bf-a769c0d0e0cf",
+  "name": "Массаж шейно-воротниковой зоны",
+  "category_id": "25071d7a-1d04-440d-8363-476520998ab8",
+  "category_name": "Массаж тела",
+  "template_id": null,
+  "is_active": true
+ },
+ {
+  "id": "3d68eef1-cd57-4051-8578-e7bbaefe46f3",
+  "name": "Подмышки",
+  "category_id": "25071d7a-1d04-440d-8363-476520998ab8",
+  "category_name": "Массаж тела",
+  "template_id": null,
+  "is_active": true
+ },
+ {
+  "id": "761d12a4-3dea-497a-b18d-30b236569120",
+  "name": "Классический массаж задней поверхности тела",
+  "category_id": "25071d7a-1d04-440d-8363-476520998ab8",
+  "category_name": "Массаж тела",
+  "template_id": null,
+  "is_active": true
+ },
+ {
+  "id": "2196464c-690c-4cd0-8b5f-e435e2445c61",
+  "name": "Массаж в 4 руки",
+  "category_id": "25071d7a-1d04-440d-8363-476520998ab8",
+  "category_name": "Массаж тела",
+  "template_id": null,
+  "is_active": true
+ }
+]

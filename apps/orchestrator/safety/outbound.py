@@ -23,7 +23,16 @@ handful of shapes that are unambiguous in Russian and expensive when wrong:
   цель», «давно не работали», «вы пропустили», virtue streaks and counters
   («дней подряд», «серия»). Written for the proactive path, where an
   unsolicited reproach is the worst sentence there is; the shapes are
-  banned in any reply.
+  banned in any reply;
+* **planning claims** (P1-D1, `OPEN_DECISIONS.md` §50) — «между курсами
+  нужно три-четыре недели», «курс из пяти процедур», «нельзя совмещать с
+  пилингом», «восстановление занимает три дня». Правило «модель не
+  придумывает тайминги» до этого существовало **только как намерение**:
+  антигаллюцинационные списки во всех промптах перечисляли мастера, цену,
+  адрес, длительность и ID — про интервалы, курсы, совместимость,
+  восстановление и подготовку не было ни одного правила, и здесь не было
+  категории. Инвентарь Трека D показал, что 11 из 13 типов ограничений в
+  каноне — `UNKNOWN`, то есть утверждать их нам **нечем**.
 
 Anything subtler stays with the prompt. A greedy filter that mangles decent
 replies would get itself turned off within a week, and then there would be
@@ -61,7 +70,23 @@ _MEDICAL = (
     r"(?i)\b(примите|выпейте|принимайте|назначаю|пропейте)\b",
     r"(?i)\b(ибупрофен|анальгин|парацетамол|кеторол|антибиотик\w*)\b",
     r"(?i)\b(это\s+точно|у\s+вас\s+явно)\s+\w*(аллерг|инфекц|заболевани)",
-    r"(?i)\bдиагноз\w*\s+(—|-|:)?\s*\w+",
+    # Разделитель ОБЯЗАТЕЛЕН — в этом вся правка. Прежняя редакция
+    # делала его необязательным и ловила слово «диагноз» при любом
+    # вхождении, включая ОТРИЦАЮЩЕЕ: «это не диагноз и не лечение»
+    # блокировалось наравне с «диагноз — дерматит, лечите мазью».
+    #
+    # Докстринг выше обещает «требуется утвердительный глагол»; именно эта
+    # половина обещание не держала. Утвердительная форма диагноза в русском
+    # несёт связку («диагноз — дерматит», «диагноз: экзема»), отрицающая —
+    # нет, и разделитель разводит их без списка исключений.
+    #
+    # Цена правки названа честно: «ваш диагноз аллергия» без связки теперь
+    # проходит. Это редкая форма, а соседний шаблон ловит её обычную запись
+    # («у вас аллергия»). Обратная цена была выше: канон ПРЕДПИСЫВАЕТ боту
+    # говорить «это наблюдение, а не диагноз»
+    # (docs/design/handoffs/2026-05-19-wellness-symptom-handoff.md), то есть
+    # страж ел ровно ту фразу, которую политика велит произносить.
+    r"(?i)\bдиагноз\w*\s*(—|-|:)\s*\w+",
 )
 
 #: Promises the assistant cannot keep on the salon's behalf.
@@ -136,18 +161,137 @@ _NAG = (
     r"(?i)\bсери[яиюе]\b(?!\s+процедур)",
 )
 
+#: Числительные словами и цифрами. Планировочная выдумка почти никогда
+#: не пишется цифрой: «три-четыре недели», «пара сеансов», «полтора
+#: месяца». Список без цифр ловил бы ровно половину случаев.
+_NUM = (
+    r"(?:\d+|одн\w+|дв[еа]|двух|тр[иё]|трёх|трех|четыр\w+|пят\w+|шест\w+|"
+    r"сем\w+|восьм\w+|восем\w+|девят\w+|десят\w+|полтора|полутора|пар[ауы])"
+)
+
+#: Единицы, которыми меряют план: время и штуки процедур.
+#:
+#: «день» перечислено ОТДЕЛЬНО, а не как `дн\w*`: в именительном падеже
+#: беглая гласная разрывает основу, и `дн` в слове «день» не встречается
+#: вовсе. Первая редакция ловила «дня» и «дней», а «за день до процедуры
+#: не загорайте» пропускала — молча, потому что ложный пропуск ничего не
+#: печатает.
+_DAY = r"(?:день|дн(?:я|ей|ю|ём|ем))"
+_UNIT = rf"(?:недел\w*|{_DAY}|сут(?:ок|ки)|месяц\w*|сеанс\w*|процедур\w*)"
+
+#: Модальность ДОЛЖЕНСТВОВАНИЯ — то, что отличает утверждение о норме от
+#: приглашения. «Приходите через месяц, если понравится» никакой нормы не
+#: утверждает и проходит; «между курсами нужно три-четыре недели» —
+#: утверждает, и утверждать нам это нечем.
+#:
+#: Ровно на этом различии стоит вся категория. Без модальности пришлось бы
+#: ловить любой интервал в тексте, и первым, что фильтр съел бы, стали бы
+#: живые человеческие фразы вроде «загляните на следующей неделе».
+_MODAL = (
+    r"(?:нужн\w*|необходим\w*|следует|требуется|должн\w*|обязательн\w*|"
+    r"рекоменд\w*|оптимальн\w*|минимум|минимальн\w*|положено|"
+    r"не\s+раньше|не\s+ранее|не\s+чаще|не\s+менее)"
+)
+
+#: Внутри ОДНОГО предложения: `[^.!?\n]` не пускает совпадение через точку.
+#: «Нужен мастер. Приходите через месяц» не должно читаться как норма
+#: интервала только потому, что оба слова оказались в одном ответе.
+_GAP = r"[^.!?\n]{0,60}"
+_QTY = rf"{_NUM}\s*(?:[-–—]\s*{_NUM}\s*)?{_UNIT}"
+
+#: Только ВРЕМЕННЫЕ единицы — без «процедур» и «сеансов». Нужно для формы
+#: без числа («нужно приходить через месяц»), где счёта нет вовсе.
+_TIME_UNIT = rf"(?:недел\w*|{_DAY}|сут(?:ок|ки)|месяц\w*|год|года|полгода)"
+
+#: Предлог интервала. Он и делает форму без числа безопасной: «нужно
+#: записаться на процедуру» модальность содержит, но интервала не
+#: утверждает и проходит; «приходить нужно через месяц» — утверждает.
+#: Без этого условия категория съела бы половину операционных фраз.
+_EVERY = r"(?:через|спустя|раз\s+в|кажд\w+)"
+
+_PLANNING = (
+    # норма → количество и обратно, в пределах предложения
+    rf"(?i)\b{_MODAL}\b{_GAP}\b{_QTY}",
+    rf"(?i)\b{_QTY}{_GAP}\b{_MODAL}\b",
+    # то же, но БЕЗ числа: «приходить нужно через месяц». Спасает предлог
+    # интервала — см. _EVERY.
+    rf"(?i)\b{_MODAL}\b{_GAP}\b{_EVERY}\s+(?:{_NUM}\s*)?{_TIME_UNIT}",
+    rf"(?i)\b{_EVERY}\s+(?:{_NUM}\s*)?{_TIME_UNIT}{_GAP}\b{_MODAL}\b",
+    # интервал и курс как утверждения сами по себе
+    r"(?i)\b(?:интервал\w*|перерыв\w*)\s+(?:между|в)\b",
+    rf"(?i)\bкурс\w*\s+из\s+{_NUM}",
+    r"(?i)\b(?:повтор\w*|приходит[ья]|записыва\w*)\s+(?:кажд\w+|раз\s+в)\b",
+    r"(?i)\bраз\s+в\s+(?:недел\w*|месяц\w*|полгода|год)\b",
+    # совместимость — OD-CI-4/CI-5: реестра нет и не будет, значит сказать нечего
+    r"(?i)\bнельзя\s+(?:совмещать|сочетать|делать\s+вместе)",
+    r"(?i)\b(?:не\s+)?совместим\w*\s+(?:с|со)\b",
+    r"(?i)\bнесовместим\w*",
+    # восстановление и подготовка
+    r"(?i)\b(?:восстановлени\w*|реабилитаци\w*|заживлени\w*)\s+"
+    r"(?:занима\w*|длит\w*|составля\w*|проходит|идёт|идет)",
+    # Подготовка: «за неделю до процедуры не загорайте». Числа может не
+    # быть вовсе («за сутки до»), поэтому единица допускается голой.
+    #
+    # Но одного «за N до» мало: «за день до визита напомню» — это про НАС
+    # и никакой нормы не утверждает. Поэтому требуется ещё и запрет либо
+    # предписание человеку. Без этого условия фильтр съел бы полезное
+    # напоминание, а такой фильтр выключают через неделю.
+    rf"(?i)\bза\s+(?:{_QTY}|{_UNIT})\s+до\b{_GAP}"
+    r"(?:нельзя|не\s+рекоменд\w*|не\s+стоит|воздержит\w*|откажит\w*|"
+    r"нужно|необходимо|"
+    r"не\s+(?:загора\w*|моч(?:и|ите)\w*|принима\w*|пейте|пить|ешьте|"
+    r"есть|употребля\w*|наноси\w*|брейте|брить))",
+    r"(?i)\bпосле\s+процедур\w*\s+(?:нельзя|не\s+рекомендуется|нужно|нельзя\s+будет)",
+)
+
 _CATEGORIES: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("medical", _MEDICAL),
     ("promise", _PROMISES),
     ("contact", _CONTACTS + _PARTIAL_PHONES),
     ("nag", _NAG),
+    ("planning", _PLANNING),
 )
 
 #: What the person reads instead. Says the shape of the problem without
 #: pretending the assistant knows the answer.
+#: Owner §128 — the approved line, verbatim. It replaces a draft the check
+#: refused AND a draft the check could not look at, because the person must
+#: not be able to tell our judgement from our outage.
+#:
+#: Two prohibitions come with it, and both say the same thing — **a failed
+#: check is not an empty world**:
+#:
+#: * never «ничего не найдено» when the catalogue is not empty — our fault
+#:   must not read as a bare shelf;
+#: * never «не могу помочь» when a controlled continuation exists — our fault
+#:   must not read as the end of the conversation.
+#:
+#: The previous line («тут нужен человек… спросите администратора») broke the
+#: second one: it closed the conversation and handed the person an errand.
 REPLACEMENT_TEXT = (
-    "Не могу это ответить — тут нужен человек, а не помощник. Спросите администратора салона."
+    "Пока у меня недостаточно подтверждённых данных, чтобы уверенно "
+    "посоветовать конкретный вариант. Могу показать доступные услуги "
+    "или помочь уточнить, что тебе сейчас нужно."
 )
+
+#: The two continuations §128 names alongside the text. They are declared here
+#: and NOT yet carried by :class:`OutboundVerdict`, which has room for
+#: ``allowed``, ``text`` and ``categories`` and nothing else.
+#:
+#: Wiring them is a separate slice, and saying so is the point: adding a field
+#: quietly would make «the person was offered a way out» look delivered while
+#: no surface renders one. Until then the text names both continuations in
+#: prose, which the person can act on by saying so — the sentence is written
+#: to survive exactly this gap.
+OFFERED_CONTINUATIONS: tuple[str, ...] = ("Посмотреть услуги", "Уточнить запрос")
+
+#: Category recorded when the check itself could not run. Deliberately not one
+#: of the content labels: an operator has to be able to separate "the draft
+#: matched a banned shape" from "we never got to look at the draft". The first
+#: says the model wrote something it should not; the second says our own check
+#: is broken. Same replacement line outward, different counters inward, and
+#: opposite fixes.
+CHECK_FAILED_CATEGORY = "check_failed"
 
 
 @dataclass(frozen=True)
@@ -166,13 +310,16 @@ class OutboundVerdict:
 def evaluate_outbound(text: str) -> OutboundVerdict:
     """Check a drafted reply before it reaches a person.
 
-    Returns the original text when clean, and :data:`REPLACEMENT_TEXT`
-    with the matched categories when not. Never raises: a crash in a
-    safety check must not be the thing that costs someone their answer.
+    Returns the original text when clean, and :data:`REPLACEMENT_TEXT` when
+    not — whether "not" means a category matched or the check could not run
+    at all. Never raises: a crash here must not propagate into the turn.
     """
 
     body = text or ""
     if not body.strip():
+        # Nothing drafted, so nothing to check and nothing to send. Replacing
+        # an empty draft would turn a no-op into a message the person never
+        # had coming.
         return OutboundVerdict(allowed=True, text=body)
 
     hits: list[str] = []
@@ -180,9 +327,34 @@ def evaluate_outbound(text: str) -> OutboundVerdict:
         for label, patterns in _CATEGORIES:
             if any(re.search(p, body) for p in patterns):
                 hits.append(label)
-    except Exception:  # noqa: BLE001 — a broken regex must not eat the turn
+    except Exception:  # noqa: BLE001 — a crash must not raise into the turn
+        # The check did not run, so nothing is known about this draft.
+        # Sending it anyway was the old behaviour, and its reasoning was sound
+        # as far as it went: a crash in a safety check must not cost someone
+        # their answer.
+        #
+        # What that reasoning missed is that those were never the only two
+        # options. :data:`REPLACEMENT_TEXT` already exists, so the choice is
+        # not "send the unchecked text" versus "say nothing" — it is "send the
+        # unchecked text" versus "send the safe line". The person still gets
+        # an answer; it is simply not the one we were unable to check.
+        #
+        # Owner §111: Safety uncertain → fail closed for the AFFECTED
+        # capability, not for the product. This is exactly that, scoped to one
+        # capability: this draft.
+        #
+        # The category is :data:`CHECK_FAILED_CATEGORY` rather than one of the
+        # content labels on purpose. "Replaced because it matched" and
+        # "replaced because we could not look" are different states with
+        # opposite fixes, and an operator reading the audit a month from now
+        # has to tell them apart. Outward both are the same line; inward they
+        # are separate counters.
         logger.exception("safety.outbound.check_failed")
-        return OutboundVerdict(allowed=True, text=body)
+        return OutboundVerdict(
+            allowed=False,
+            text=REPLACEMENT_TEXT,
+            categories=(CHECK_FAILED_CATEGORY,),
+        )
 
     if not hits:
         return OutboundVerdict(allowed=True, text=body)
@@ -193,4 +365,10 @@ def evaluate_outbound(text: str) -> OutboundVerdict:
     return OutboundVerdict(allowed=False, text=REPLACEMENT_TEXT, categories=tuple(hits))
 
 
-__all__ = ["REPLACEMENT_TEXT", "OutboundVerdict", "evaluate_outbound"]
+__all__ = [
+    "CHECK_FAILED_CATEGORY",
+    "OFFERED_CONTINUATIONS",
+    "REPLACEMENT_TEXT",
+    "OutboundVerdict",
+    "evaluate_outbound",
+]

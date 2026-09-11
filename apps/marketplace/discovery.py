@@ -17,7 +17,7 @@ from __future__ import annotations
 import hashlib
 import re
 from dataclasses import replace
-from typing import NamedTuple
+from typing import Any, NamedTuple, Protocol, TypeVar
 from uuid import UUID
 
 from django.core.paginator import Paginator
@@ -38,6 +38,7 @@ from django.db.models import (
 from django.db.models.expressions import CombinedExpression
 from django.db.models.functions import Cast, Coalesce, Length, Replace, Trim
 
+from apps.catalog.master_state import AVAILABLE
 from apps.catalog.models import CatalogMaster, CatalogService
 from apps.marketplace.dto import MasterCard, SalonCard, ServiceCard
 from apps.tenancy.models import Tenant
@@ -516,13 +517,16 @@ def _known_cities() -> list[str]:
     this marketplace can serve». One small DISTINCT; the ``all_tenants``
     carve-out (MKT1) applies here for the same reason it applies to discovery
     itself — the set spans every tenant.
+
+    «Bookable» is :data:`apps.catalog.master_state.AVAILABLE` (DRF-1544), the
+    same predicate :func:`_bookable_qs` selects on. Sharing it is what keeps
+    a city out of the recognition set once its last sellable master is gone:
+    a hand-written copy here would keep recognising «Пенза» and route the
+    query to a city that answers with nobody.
     """
     return [
         c
-        for c in CatalogMaster.all_tenants.filter(
-            is_active=True,
-            invite_status=CatalogMaster.InviteStatus.ACCEPTED,
-        )
+        for c in CatalogMaster.all_tenants.filter(AVAILABLE)
         .values_list("tenant__city", flat=True)
         .distinct()
         if c
@@ -1348,9 +1352,16 @@ def _bookable_qs(
 ) -> QuerySet[CatalogMaster]:
     """Cross-tenant queryset of bookable masters, optionally filtered.
 
-    The SOLE ``all_tenants`` carve-out (MKT1). Only ``is_active`` +
-    invite-``accepted`` masters (the same ``bookable`` predicate
-    customer-facing reads use). Optional ``city`` (exact, case-insensitive, on
+    The SOLE ``all_tenants`` carve-out (MKT1). Bookability is asked of
+    :data:`apps.catalog.master_state.AVAILABLE` and nowhere else (DRF-1544):
+    this read used to spell out ``is_active`` + invite-``accepted`` by hand,
+    which made it one more hand-rolled copy of a predicate that has since
+    grown two conditions it never learned about — ``archived_at IS NULL``
+    (DRF-1506) and a canonical ``ayla_user_id`` (DRF-1540, owner decision:
+    a master the booking notification cannot reach is not sold). Reading
+    the shared ``Q`` means
+    the next condition (DRF-1521's profile completeness) arrives here without
+    anyone editing this line. Optional ``city`` (exact, case-insensitive, on
     the owning tenant) and ``specialization`` narrow it.
 
     ### Matching a service (DRF-945)
@@ -1395,10 +1406,7 @@ def _bookable_qs(
     than join it.
     """
     qs = (
-        CatalogMaster.all_tenants.filter(
-            is_active=True,
-            invite_status=CatalogMaster.InviteStatus.ACCEPTED,
-        )
+        CatalogMaster.all_tenants.filter(AVAILABLE)
         .select_related("tenant")  # N+1-safe tenant.city / tenant_id
         .order_by("name", "id")
     )
@@ -1550,8 +1558,27 @@ def _rotation_key(seed: str, master_id: UUID) -> bytes:
     return hashlib.blake2b(payload, digest_size=16).digest()
 
 
-def _rotate_ties(masters: list[CatalogMaster], seed: str) -> list[CatalogMaster]:
-    """Order ``masters`` by score, breaking EXACT ties by :func:`_rotation_key`.
+class _Rotatable(Protocol):
+    """Что нужно ротации от строки: идентификатор, и всё.
+
+    Протокол, а не ``CatalogMaster``, потому что тот же самый порядок нужен
+    услугам (C-01): ``discover_services`` резала алфавитом с отсечением
+    top-N — ровно то, что §9 запрещает. Заводить вторую ротацию для второго
+    типа значило бы завести и второй ключ, а ключ — это и есть контракт
+    «стабильно внутри человека, равномерно между людьми».
+
+    ``match_score`` не в протоколе намеренно: он есть не на всех выдачах, и
+    его отсутствие читается как «все равны» (см. ниже).
+    """
+
+    id: Any
+
+
+_R = TypeVar("_R", bound=_Rotatable)
+
+
+def rotate_ties(rows: list[_R], seed: str) -> list[_R]:
+    """Order ``rows`` by score, breaking EXACT ties by :func:`_rotation_key`.
 
     Score first, always. Rotation is the answer to «these candidates are
     indistinguishable», not a re-ranking: where :func:`_match_precision` tells
@@ -1564,10 +1591,10 @@ def _rotate_ties(masters: list[CatalogMaster], seed: str) -> list[CatalogMaster]
     equal, and today they are ordered by surname.
     """
     return sorted(
-        masters,
-        key=lambda master: (
-            -float(getattr(master, "match_score", 0.0) or 0.0),
-            _rotation_key(seed, master.id),
+        rows,
+        key=lambda row: (
+            -float(getattr(row, "match_score", 0.0) or 0.0),
+            _rotation_key(seed, row.id),
         ),
     )
 
@@ -1608,7 +1635,7 @@ def discover_masters_window(
     qs = _bookable_qs(city=city, specialization=specialization)
     candidates = list(qs[:_CANDIDATE_SCAN_CAP])
     if rotation_seed:
-        candidates = _rotate_ties(candidates, rotation_seed)
+        candidates = rotate_ties(candidates, rotation_seed)
     total = len(candidates)
     masters = candidates[offset : offset + limit]
     cards = [_to_card(master) for master in masters]
@@ -2024,20 +2051,6 @@ def _bookable_tenants(
     return {t.id: t for t in Tenant.objects.filter(id__in=tenant_ids)}
 
 
-def _master_address(master: CatalogMaster) -> str:
-    """The salon address as mirrored on a master row, or "".
-
-    The address is per-master, not per-tenant: ``Tenant`` has no address
-    column — the Ayla specialists feed carries it in the specialist payload,
-    mirrored into ``CatalogMaster.raw``. Four of the pilot's masters carry
-    none, so "" is a normal value, not an error.
-    """
-    raw = master.raw
-    if not isinstance(raw, dict):
-        return ""
-    return str(raw.get("address") or "").strip()
-
-
 def discover_salons(
     *,
     city: str | None = None,
@@ -2049,8 +2062,9 @@ def discover_salons(
     Optional ``city`` (exact, case-insensitive, on the tenant) narrows the
     result — same semantics as :func:`discover_masters`; ``tenant_id`` narrows
     it to one salon (the chip-tap read — see :func:`get_salon`). Each card carries
-    the salon's address (first non-empty one among its bookable masters —
-    "" when none of them has one), its bookable-master count, and a count +
+    the salon's address (``Tenant.address`` verbatim — ``None`` when the source
+    said nothing, "" when it said there is none; DRF-1609 stopped deriving it
+    from the masters' addresses), its bookable-master count, and a count +
     short sample of its active services («что там делают»). Three bounded
     queries total: masters, tenants, service names.
     """
@@ -2076,7 +2090,28 @@ def discover_salons(
         salon_masters = masters_by_tenant.get(tenant_id, [])
         if not salon_masters:
             continue  # inactive tenant — its masters are not a public salon
-        address = next((a for a in (_master_address(m) for m in salon_masters) if a), "")
+        # DRF-1609 — адрес САЛОНА берётся из колонки салона.
+        #
+        # Здесь стояло ``next((a for a in (_master_address(m) …) if a), "")``:
+        # первый непустой адрес среди мастеров. OPEN_DECISIONS §45 назвал это
+        # лотереей, и буквально: подтвердили нового мастера, деактивировали
+        # старого — и клиент видит ДРУГОЙ адрес того же салона, хотя салон не
+        # переезжал. DRF-1587 завела ``Tenant.address`` (миграция
+        # tenancy/0015, 08.09) ровно затем, чтобы читать колонку, а не
+        # угадывать; синхронизация уже пишет её (``_write_tenant_address``,
+        # apps/catalog/services/upserter.py).
+        #
+        # ``None`` НЕ схлопывается в "". Это два разных ответа источника, и
+        # различает их та же DRF-1587: ``None`` — источник об адресе ничего
+        # не сказал (сегодня это все салоны: ключа ``tenant_address`` в фиде
+        # ещё нет), "" — источник сказал, что адреса нет. Подстановка "" на
+        # месте молчания сделала бы «мы не знаем» неотличимым от «адреса
+        # нет», а рендер и так печатает пустоту одинаково — значит платить
+        # за слияние нечем, а терять есть что.
+        #
+        # Старшинство «салон против мастера» (DRF-1589) здесь не решается:
+        # мастерский адрес в карточку САЛОНА не попадает вовсе.
+        address = tenant.address
         service_names = services_by_tenant.get(tenant_id, [])
         cards.append(
             SalonCard(
@@ -2167,6 +2202,7 @@ def discover_services(
     city: str | None = None,
     query: str | None = None,
     limit: int = _DEFAULT_LIMIT,
+    rotation_seed: str | None = None,
 ) -> list[ServiceCard]:
     """Return active services of salons on the platform, as public DTOs.
 
@@ -2186,6 +2222,29 @@ def discover_services(
 
     Only services of tenants with at least one bookable master are shown:
     a salon no client can book at is not on the surface.
+
+    ``rotation_seed`` — C-01. До этой правки ничьи разводились алфавитом, а
+    срез в ``limit`` делал SQL: значит услуги, чьё имя стоит дальше по
+    алфавиту, не показывались НИКОГДА, и кто именно выпал, решала первая
+    буква. Канон §9 запрещает алфавитный fallback именно при отсечении
+    top-N — отсечение превращает порядок в систематическое смещение показов.
+    DRF-1529 вылечила эту болезнь на списке мастеров и назвала три точки;
+    вылечена была одна.
+
+    Кандидаты поэтому набираются до :data:`_CANDIDATE_SCAN_CAP` и режутся
+    ЗДЕСЬ, в питоне, ровно как в :func:`discover_masters_window`. Срез в SQL
+    оставлял бы ротации нечего переставлять — та же причина, по которой
+    DRF-1530 ничего не переупорядочила.
+
+    ``None`` (сида нет) сохраняет прежний детерминированный порядок, так что
+    ни один существующий вызывающий не меняет поведения молча.
+
+    **Следствие, которое стоит назвать:** на выдаче БЕЗ запроса прежний
+    порядок группировал услуги по салону (``tenant__name``). С сидом
+    группировка уступает ротации — все кандидаты там равны, и «равны» на
+    этой поверхности означает именно то же, что и на соседней: сегодня их
+    порядок решает алфавит. Это тот же выбор, который уже сделан для
+    мастеров, а не новый.
     """
     limit = max(1, min(limit, _MAX_LIMIT))
     bookable_tenant_ids = _bookable_qs().order_by().values_list("tenant_id", flat=True).distinct()
@@ -2238,7 +2297,14 @@ def discover_services(
     performs_it = _bookable_qs().order_by().filter(services_offered__service_id=OuterRef("pk"))
     qs = qs.annotate(has_bookable_master=Exists(performs_it))
 
-    rows = qs.order_by(*order)[:limit]
+    # Набираем до потолка и режем в питоне — иначе ротации нечего
+    # переставлять. Потолок (200) не меньше любого возможного ``limit``
+    # (он клампится тем же числом выше), так что кандидатов для среза
+    # всегда достаточно.
+    candidates = list(qs.order_by(*order)[:_CANDIDATE_SCAN_CAP])
+    if rotation_seed:
+        candidates = rotate_ties(candidates, rotation_seed)
+    rows = candidates[:limit]
     return [
         ServiceCard(
             tenant_id=service.tenant_id,
@@ -2293,7 +2359,7 @@ def discover_masters_for_service(
     them — there is no gap for match precision to find. That is not a gap in
     the fix: it is what «полное равенство кандидатов» (§29.6) means, and the
     honest answer to it is the rotation below, not an invented tiebreak.
-    ``_rotate_ties`` is therefore given the whole list, and it orders by score
+    ``rotate_ties`` is therefore given the whole list, and it orders by score
     first regardless — if a future filter ever does separate these candidates,
     its verdict stands and rotation cannot move them (DRF-1411).
 
@@ -2318,7 +2384,7 @@ def discover_masters_for_service(
         ]
     )
     if rotation_seed:
-        candidates = _rotate_ties(candidates, rotation_seed)
+        candidates = rotate_ties(candidates, rotation_seed)
     masters = candidates[offset : offset + limit]
     return [
         replace(_to_card(master), service_id=service.id, service_name=service.name)

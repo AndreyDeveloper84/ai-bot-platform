@@ -170,6 +170,15 @@ a {
   color: var(--c-danger);
 }
 
+/* Успех сохранения. Пара к `--danger`: до DRF-1435 отказ имел голос, а
+   успех не имел никакого — ни цвета, ни `aria-live`. Токен `--c-success`
+   объявлен в `tokens.css` в обеих темах и сведён к 4.5:1; литерал рядом с
+   токеном линт `miniapp_token_contrast.py` не примет, и правильно. */
+.callout--success {
+  background: color-mix(in srgb, var(--c-success) 10%, var(--c-surface-2));
+  color: var(--c-success);
+}
+
 /* Secondary button used in error / empty / not-found states. */
 .btn-secondary {
   display: inline-block;
@@ -744,13 +753,6 @@ a {
   margin: 0;
 }
 
-/* Rating badge on visit cards. */
-.visit-rating {
-  color: var(--c-accent);
-  letter-spacing: 2px;
-  font-size: var(--font-size-300);
-}
-
 /* HelloScreen error panel — warmer than the generic .callout--danger. */
 .hello-error {
   background: var(--c-surface-1);
@@ -763,14 +765,6 @@ a {
   margin: 0;
   color: var(--c-text-primary);
   line-height: 1.5;
-}
-
-/* My-visits row wrapper — card + inline "Оценить" CTA. */
-.visit-row {
-  display: flex;
-  flex-direction: column;
-  gap: var(--s-2);
-  margin-bottom: var(--s-3);
 }
 
 
@@ -908,17 +902,6 @@ a {
    главное действие на остальных экранах, и она на виду независимо от
    длины документа. Условие C-2 («анкета — не ворота») от этого только
    крепче: выход виден не прокручивая. */
-
-/* Inline action row under each visit card. */
-.visit-row__actions {
-  display: flex;
-  gap: var(--s-2);
-  flex-wrap: wrap;
-}
-
-.visit-row__actions .btn-secondary {
-  flex: 0 1 auto;
-}
 
 /* ===========================================================================
    Master M1 dashboard (master-mobile §M1).
@@ -1270,6 +1253,244 @@ a {
   border-radius: 50%;
   background: var(--c-warning);
   border: 1.5px solid var(--c-surface-1);
+}
+
+/* ---- Пилотная салонная админка: три вкладки (DRF-1235) ---- */
+
+/*
+ * Панель пилота переиспользует `.master-tabbar` целиком — позицию,
+ * фон, границу, отступы — и переопределяет только число колонок.
+ * Правило стоит ПОСЛЕ `.master-tabbar` и `.master-tabbar--admin`
+ * намеренно: селекторы односоставные, специфичность у них одинаковая,
+ * и решает порядок в файле.
+ *
+ * Настоящее число колонок ставит сам компонент (`style=
+ * {{ gridTemplateColumns }}`); тройка здесь — запасной вариант и то,
+ * что читает `tools/lint/miniapp_style_contract.py`, сверяя колонки с
+ * числом вкладок в `SalonPilotTabBar.tsx`.
+ */
+.salon-pilot-tabbar {
+  grid-template-columns: repeat(3, 1fr);
+}
+
+/*
+ * Название салона над заголовком раздела — подпись, а не кнопка:
+ * выбор салона из макета убран, пока multi-salon не входит в P0
+ * (DRF-1235).
+ */
+.salon-pilot__brand {
+  margin: 0;
+  font-size: var(--font-size-200);
+  font-weight: 600;
+  color: var(--c-text-primary);
+}
+
+/* Дата под заголовком «Сегодня» — приходит с сервера, в поясе салона. */
+.salon-pilot__subtitle {
+  margin: calc(var(--s-3) * -1) 0 var(--s-3);
+  font-size: var(--font-size-300);
+  color: var(--c-text-secondary);
+}
+
+/* Строка ожидания: экран уже пошёл за данными, ответа ещё нет. */
+.salon-pilot__note {
+  margin: 0;
+  color: var(--c-text-secondary);
+}
+
+/* ---- «Сегодня»: содержимое главного экрана (DRF-1236) ---- */
+
+/*
+ * Главное действие экрана. Своего `.btn-primary` в приложении нет —
+ * заливка акцентом живёт только в `.cta-bar__button`, а он приколочен к
+ * низу экрана, где уже стоит панель вкладок. Кнопка на макете стоит в
+ * потоке, сразу под датой, поэтому правило своё, а токены — те же.
+ */
+.salon-today__cta {
+  display: block;
+  width: 100%;
+  min-height: 48px; /* главное действие — как `.cta-bar__button` */
+  margin: 0 0 var(--s-4);
+  padding: 0 var(--s-4);
+  background: var(--c-accent);
+  color: var(--c-text-on-accent);
+  font-size: var(--font-size-300);
+  font-weight: 600;
+  border-radius: var(--r-md);
+  transition: background-color var(--dur-fast) var(--ease-out);
+}
+
+.salon-today__cta:active {
+  background: var(--c-accent-pressed);
+}
+
+.salon-today__section {
+  margin: 0 0 var(--s-5);
+}
+
+.salon-today__heading {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+  margin: 0 0 var(--s-2);
+  font-size: var(--font-size-300);
+  font-weight: 700;
+  color: var(--c-text-primary);
+}
+
+/* Счётчик у «Сейчас» — сколько записей идёт в этот момент. */
+.salon-today__count {
+  min-width: 24px;
+  padding: 0 var(--s-2);
+  border-radius: var(--r-md);
+  background: var(--c-accent-subtle);
+  color: var(--c-accent-pressed);
+  font-size: var(--font-size-100);
+  font-weight: 600;
+  text-align: center;
+}
+
+/* Подпись под заголовком блока — то, что известно про блок наверняка. */
+.salon-today__section-note {
+  margin: calc(var(--s-1) * -1) 0 var(--s-3);
+  font-size: var(--font-size-100);
+  color: var(--c-text-secondary);
+}
+
+.salon-today__list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  background: var(--c-surface-1);
+  border: 1px solid var(--c-divider);
+  border-radius: var(--r-md);
+  overflow: hidden;
+}
+
+.salon-today__visit {
+  display: flex;
+  gap: var(--s-3);
+  padding: var(--s-3);
+  border-bottom: 1px solid var(--c-divider);
+}
+
+.salon-today__list .salon-today__visit:last-child {
+  border-bottom: 0;
+}
+
+/*
+ * Зелёная полоса идущей записи. Цвет ВСПОМОГАТЕЛЬНЫЙ: смысл несёт
+ * заголовок блока «Сейчас», и человек, не различающий зелёное, ничего
+ * не теряет (DRF-1236: «цвет не является единственным носителем
+ * смысла»).
+ */
+.salon-today__visit--now {
+  border-left: 3px solid var(--c-success);
+}
+
+.salon-today__visit-time {
+  display: flex;
+  flex-direction: column;
+  min-width: 6.5em;
+  font-variant-numeric: tabular-nums;
+}
+
+.salon-today__visit-clock {
+  font-weight: 600;
+  color: var(--c-text-primary);
+}
+
+.salon-today__visit-duration {
+  font-size: var(--font-size-100);
+  color: var(--c-text-secondary);
+}
+
+.salon-today__visit-body {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: var(--s-1);
+}
+
+.salon-today__visit-client {
+  font-weight: 600;
+  color: var(--c-text-primary);
+}
+
+.salon-today__visit-service {
+  font-size: var(--font-size-100);
+  color: var(--c-text-secondary);
+}
+
+.salon-today__visit-master {
+  font-size: var(--font-size-100);
+  color: var(--c-text-secondary);
+}
+
+/* Запись, чей специалист не сошёлся ни с одним мастером каталога. */
+.salon-today__visit-orphan {
+  font-size: var(--font-size-100);
+  color: var(--c-warning);
+}
+
+/* Раскрыть остаток дня на месте — см. комментарий экрана про «Расписание». */
+.salon-today__more {
+  display: block;
+  width: 100%;
+  min-height: 44px; /* второстепенное действие — как `.btn-secondary` */
+  margin-top: var(--s-2);
+  color: var(--c-accent);
+  font-size: var(--font-size-200);
+  font-weight: 600;
+  text-align: center;
+}
+
+.salon-today__masters {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-3);
+}
+
+.salon-today__master {
+  display: flex;
+  align-items: center;
+  gap: var(--s-3);
+}
+
+/*
+ * Кружок с буквой имени. Фотографий мастеров в ответе дня нет — буква
+ * выведена из имени, которое есть, а не подставлена вместо неизвестного
+ * фото.
+ */
+.salon-today__avatar {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 40px;
+  flex: 0 0 40px;
+  border-radius: 50%;
+  background: var(--c-accent-subtle);
+  color: var(--c-accent-pressed);
+  font-weight: 700;
+}
+
+.salon-today__master-body {
+  display: flex;
+  flex-direction: column;
+}
+
+.salon-today__master-name {
+  font-weight: 600;
+  color: var(--c-text-primary);
+}
+
+.salon-today__master-count {
+  font-size: var(--font-size-100);
+  color: var(--c-text-secondary);
 }
 
 /* ---- Solo provider 8-tab bottom nav (Tau §5.1) ---- */
@@ -2721,6 +2942,29 @@ a {
   color: var(--c-text-secondary);
 }
 
+/*
+  DRF-1597 — блок «клиент не видит N мастеров» на «Команде».
+
+  Не `--danger`: сломанного ничего нет, мастер заведён верно и ждёт
+  осознанного шага владелицы. И не нейтральная сводка: пока шага нет,
+  салон недосчитывается людей на витрине, и блок обязан читаться как
+  требующий действия. Отсюда та же семантика предупреждения, что у
+  `admin-chip--warn`, — один язык цвета на экран.
+*/
+.admin-notice {
+  margin-top: var(--s-3);
+  padding: var(--s-3);
+  border-radius: var(--r-md);
+  font-size: var(--font-size-200);
+  background: var(--c-surface-2);
+  color: var(--c-text-primary);
+}
+
+.admin-notice--warn {
+  background: color-mix(in srgb, var(--c-warning) 10%, var(--c-surface-2));
+  border: 1px solid color-mix(in srgb, var(--c-warning) 35%, transparent);
+}
+
 .admin-template-preview {
   margin-top: var(--s-2);
 }
@@ -3976,11 +4220,6 @@ a {
   color: var(--c-text-secondary);
 }
 
-.customer-confirm__policy {
-  margin: var(--s-2) 0;
-  font-size: var(--font-size-200);
-  color: var(--c-text-secondary);
-}
 .customer-confirm__notes {
   margin-top: var(--s-3);
 }
@@ -4025,7 +4264,8 @@ a {
 }
 
 /* F4 anonymous-gate OAuth pending placeholder (round-1) — shown
-   when VITE_MAX_OAUTH_ENABLED !== "true". Replaces the prior
+   when VITE_MAX_OAUTH_URL is empty (DRF-1319: выключателем служит сам
+   адрес, а не булев флаг без установщика). Replaces the prior
    dead-end «Зарегистрироваться» CTA with a soft «coming soon»
    message + a fallback nav back to catalog. */
 .customer-confirm__oauth-pending {
@@ -4667,6 +4907,21 @@ a {
   padding: var(--s-2) var(--s-3);
   font-size: var(--font-size-200);
   text-align: center;
+}
+/* Та же полоса на экранах воронки записи (см. OfflineBanner.tsx). */
+.offline-banner {
+  background: var(--c-warning);
+  color: var(--c-text-on-accent);
+  padding: var(--s-2) var(--s-3);
+  margin-bottom: var(--s-3);
+  border-radius: var(--r-md);
+  font-size: var(--font-size-200);
+  text-align: center;
+}
+/* Действие, которого без сети не будет, читается выключенным. */
+.records-card__action:disabled {
+  opacity: 0.5;
+  cursor: default;
 }
 .records-screen__tabs {
   display: flex;
@@ -5621,6 +5876,36 @@ a {
   line-height: var(--leading-normal);
 }
 
+/* Выбор часового пояса (DRF-1477). Список кнопок, а не `select`:
+   родной селект в MAX-вебвью открывает системное колесо, где не видно
+   ни текущего значения, ни того, сколько всего вариантов — а их здесь
+   намеренно немного. */
+.timezone-sheet__list {
+  margin: var(--s-3) 0 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-1);
+  max-height: 46vh;
+  overflow-y: auto;
+}
+.timezone-sheet__option {
+  width: 100%;
+  text-align: left;
+  padding: var(--s-3) var(--s-4);
+  background: var(--c-surface-1);
+  border: 1px solid var(--c-divider);
+  border-radius: var(--r-md);
+  font-size: var(--font-size-300);
+  color: var(--c-text-primary);
+  cursor: pointer;
+}
+.timezone-sheet__option[aria-current="true"] {
+  border-color: var(--c-accent);
+  font-weight: 600;
+}
+
 /* Destructive-confirmation input (C5 erasure, DRF-956). Mirrors the
    typed-token field on the legacy profile delete card. */
 .profile-support-sheet__input {
@@ -6190,6 +6475,28 @@ a {
   font-size: var(--font-size-200);
   color: var(--c-text-secondary);
 }
+/* «Ответ пришёл, но записей в нём нет» — своё состояние, не ошибка и
+   не пустой день. Выглядит как карточка соседних групп, чтобы человек
+   читал это как часть дневника, а не как сломанный экран. */
+.food-scanner-diary__unreadable {
+  background: var(--c-surface-1);
+  border: 1px solid var(--c-divider);
+  border-radius: var(--r-md);
+  padding: var(--s-4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+  align-items: flex-start;
+}
+.food-scanner-diary__unreadable p {
+  margin: 0;
+  font-size: var(--font-size-200);
+  color: var(--c-text-primary);
+}
+.food-scanner-diary__unreadable-hint {
+  color: var(--c-text-secondary);
+}
+
 .food-scanner-diary__group {
   background: var(--c-surface-1);
   border: 1px solid var(--c-divider);
@@ -6495,6 +6802,18 @@ a {
 
 .shareable__copy {
   width: 100%;
+}
+
+/* Готовый текст приглашения (DRF-1505, решение владельца §44.2).
+
+   Поле правится: владелец копирует то, что видит, а не исходную
+   заготовку. Моноширинного шрифта здесь нет намеренно — это не адрес,
+   а сообщение, и читать его надо так же, как его прочтёт мастер. */
+.invite-message__text {
+  margin: var(--s-2) 0;
+  background: var(--c-surface-1);
+  font-size: var(--font-size-200);
+  line-height: 1.4;
 }
 
 .shareable__failed {

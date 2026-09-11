@@ -21,7 +21,9 @@ import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { ScreenLayout } from "../components/ScreenLayout";
 import { StickyCta } from "../components/StickyCta";
 import { DelayedSkeleton, MasterCardSkeleton } from "../components/Skeleton";
+import { OfflineBanner } from "../components/OfflineBanner";
 import { StateError } from "../components/StateError";
+import { useOnline } from "../hooks/useOnline";
 import {
   getCustomerMaster,
   type CustomerMaster,
@@ -39,6 +41,7 @@ type State =
   | { kind: "error"; err: unknown };
 
 export function CustomerMasterDetailScreen() {
+  const online = useOnline();
   const navigate = useNavigate();
   const { masterId } = useParams<{ masterId: string }>();
   const [params] = useSearchParams();
@@ -110,11 +113,12 @@ export function CustomerMasterDetailScreen() {
       back={BACK}
       title={m.name}
       cta={
-        <StickyCta onClick={onChooseTime}>
+        <StickyCta onClick={onChooseTime} disabled={!online}>
           Выбрать время
         </StickyCta>
       }
     >
+      <OfflineBanner online={online} />
       <section className="customer-master__intro">
         <div className="customer-master__identity">
           <div className="customer-master__name">{m.name}</div>

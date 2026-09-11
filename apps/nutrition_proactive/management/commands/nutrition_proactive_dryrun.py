@@ -32,7 +32,9 @@ _STUB_WATER = WaterTodayResponse(total_ml=0, norm_ml=0, entries=[])
 _STUB_SUMMARY = SummaryResponse(
     date="",
     calories_total=0.0,
-    calories_goal=0,
+    # Ориентира нет — сухой прогон обязан выглядеть как боевой
+    # (§82). Ноль здесь означал бы «ориентир ноль».
+    calories_goal=None,
     protein_g=0.0,
     fat_g=0.0,
     carbs_g=0.0,

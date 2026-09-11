@@ -27,6 +27,7 @@ import {
   FoodNotRecognizedError,
   NutritionUnavailableError,
   PhotoBytesMissingError,
+  StubNotWiredError,
   scanPhoto,
   type MealType,
 } from "../lib/food-scanner";
@@ -226,16 +227,28 @@ function ScanErrorScreen({
   const navigate = useNavigate();
   const isNotRecognized = err instanceof FoodNotRecognizedError;
   const isPhotoFailed = err instanceof PhotoBytesMissingError;
+  // Ручки `/api/v1/customer/food/{scan,log,daily}` на боевом контуре
+  // отвечают 404, и `food-scanner.ts::guardProd` вне DEV бросает
+  // `StubNotWiredError` (тот же признак, что снял вход с главной,
+  // DRF-1546). Это НЕ сбой сети и НЕ перегрузка: через минуту ничего не
+  // изменится, потому что менять нечего — ручки не существует. Текст
+  // «сервис временно недоступен, попробуй через минуту» врал о природе
+  // отказа и звал человека возвращаться.
+  const isNotWired = err instanceof StubNotWiredError;
   const headline = isNotRecognized
     ? "Не разобралась"
     : isPhotoFailed
       ? "Не получилось загрузить"
-      : "Сервис недоступен";
+      : isNotWired
+        ? "Пока не подключено"
+        : "Сервис недоступен";
   const body = isNotRecognized
     ? "Фото немного сложное — не разобралась. Можно переснять поближе или просто написать, что было."
     : isPhotoFailed
       ? "Фото пришло, но скачать не получилось — пришли ещё раз, пожалуйста."
-      : "Сервис распознавания временно недоступен. Попробуй через минуту.";
+      : isNotWired
+        ? "Распознавание еды по фото в приложении ещё не работает. Дневник питания сейчас ведёт Ayla в чате."
+        : "Сервис распознавания временно недоступен. Попробуй через минуту.";
   return (
     <div className="food-scanner-screen">
       <header className="records-screen__header">
@@ -271,7 +284,10 @@ function ScanErrorScreen({
           {body}
         </div>
         <div className="food-scanner-screen__cta-stack">
-          {!isPhotoFailed && (
+          {/* Когда ручек нет, «Переснять» и «Написать вручную» ведут в ту
+              же стену: `logMeal` закрыт тем же `guardProd`. Предлагать их
+              значило бы врать второй раз, уже действием. */}
+          {!isPhotoFailed && !isNotWired && (
             <button
               type="button"
               className="btn-primary"
@@ -296,7 +312,7 @@ function ScanErrorScreen({
               Сделать заново
             </button>
           )}
-          {!isPhotoFailed && (
+          {!isPhotoFailed && !isNotWired && (
             <button
               type="button"
               className="btn-secondary"
