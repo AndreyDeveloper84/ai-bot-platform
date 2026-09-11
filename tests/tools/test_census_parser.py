@@ -195,3 +195,15 @@ def test_main_publishes_the_number_on_a_good_run(tmp_path, capsys) -> None:
     assert census.main(["census_count.py", str(raw), str(out)]) == 0
     assert "CENSUS apps/ collected=5" in capsys.readouterr().out
     assert out.read_text(encoding="utf-8") == "5"
+
+
+def test_crlf_report_is_not_mistaken_for_unreadable() -> None:
+    """A fail-closed answer for the wrong reason is still a wrong answer.
+
+    `$` in MULTILINE matches before `\n` but not before the `\r` of a CRLF
+    pair, so an un-normalised CRLF report would be reported as unreadable and
+    the blame would land on pytest rather than on line endings.
+    """
+    crlf = "apps/a/test_x.py: 30\r\napps/b/test_y.py: 19\r\n"
+    assert census.parse_census(crlf) == 49
+    assert census.parse_census(crlf.replace("\r\n", "\n")) == 49

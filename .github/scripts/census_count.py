@@ -63,6 +63,14 @@ def parse_census(text: str) -> int:
     Raises CensusUnreadable when no form parsed. Returns 0 only when pytest
     explicitly said so; the caller decides that 0 is fatal.
     """
+    # Normalise line endings first. `_PER_FILE` is anchored with `$`, which
+    # in MULTILINE matches before a newline but NOT before the CR of a CRLF
+    # pair, so a CRLF report would parse as "unreadable" — a fail-closed
+    # answer that points at pytest instead of at the line endings. main()
+    # reads in text mode and never sees CRLF, but parse_census is also
+    # called directly.
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+
     total = _TOTAL.findall(text)
     if total:
         return int(total[-1])
