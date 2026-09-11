@@ -103,9 +103,32 @@ jobs:
             # же полезнее имени: именно оно уходит в --user.
             echo \"::notice::шаг идёт от uid \$(id -u), gid \$(id -g)\"
             cd '${DEV_DEPLOY_PATH}'
-            git fetch origin
-            git checkout dev
-            git pull --ff-only origin dev
+            # Владелец дерева определяется ДО первой записи, а не перед
+            # первым контейнером: до этой правки git успевал отработать
+            # root-ом раньше, чем кто-либо спрашивал про владельца.
+            #
+            # Замер 11.09.2026 после выкладки с --user: чужих объектов стало
+            # не меньше, а БОЛЬШЕ (298 → 434), и 96 из них создала сама
+            # выкладка. Основную массу пишет git по ssh, а --user управляет
+            # только тем, что происходит ВНУТРИ контейнера. До git он не
+            # достаёт по построению — это разные каналы записи, и мера,
+            # закрывшая один, о втором ничего не говорила.
+            OWNER=\$(stat -c %U '${DEV_DEPLOY_PATH}')
+            OWNER_UID=\$(stat -c %u '${DEV_DEPLOY_PATH}')
+            OWNER_GID=\$(stat -c %g '${DEV_DEPLOY_PATH}')
+            if [ -z \"\$OWNER\" ] || [ -z \"\$OWNER_UID\" ] || [ -z \"\$OWNER_GID\" ]; then
+              echo \"::error::не удалось определить владельца дерева выкладки\"
+              exit 1
+            fi
+            echo \"::notice::владелец дерева \$OWNER (\$OWNER_UID:\$OWNER_GID); все записи идут от него\"
+            # root остаётся тем, кто ВХОДИТ, но сам не пишет ничего.
+            #
+            # \`-H\` обязателен: без него \$HOME останется /root, и git с
+            # docker полезут в чужие конфиги — команда отработает от нужного
+            # пользователя, но с чужими настройками.
+            sudo -u \"\$OWNER\" -H git fetch origin
+            sudo -u \"\$OWNER\" -H git checkout dev
+            sudo -u \"\$OWNER\" -H git pull --ff-only origin dev
             # Кому принадлежат файлы, которые напишет контейнер.
             #
             # Первая редакция брала \`id -u\` — ЗОВУЩЕГО. Это был прокси для
@@ -119,26 +142,28 @@ jobs:
             # делает нужного, сторожем «флаг присутствует» не ловится —
             # флаг присутствует. Поэтому берётся то, что нужно на самом
             # деле: владелец дерева.
-            OWNER_UID=\$(stat -c %u '${DEV_DEPLOY_PATH}')
-            OWNER_GID=\$(stat -c %g '${DEV_DEPLOY_PATH}')
-            if [ -z \"\$OWNER_UID\" ] || [ -z \"\$OWNER_GID\" ]; then
-              echo \"::error::не удалось определить владельца дерева выкладки\"
-              exit 1
-            fi
-            echo \"::notice::файлы пишутся от \$OWNER_UID:\$OWNER_GID (владелец дерева)\"
+            #
+            # --user ОСТАЁТСЯ и после перевода команд на \`sudo -u\`. Это не
+            # два механизма на один эффект, а два механизма на РАЗНЫЕ
+            # предметы: \`sudo -u\` решает, кто выполняет команду НА ХОСТЕ,
+            # --user решает, под каким uid идёт процесс ВНУТРИ контейнера.
+            # Демон docker работает от root независимо от того, кто позвал
+            # клиента; членство в группе docker даёт доступ к сокету, а не
+            # смену пользователя контейнера. Снять --user значило бы вернуть
+            # запись в примонтированное дерево от root.
             # Откуда приезжает базовый слой (DRF-1440). Пилот достаёт
             # Docker Hub плохо — анонимный token-endpoint отвечает через
             # раз, и 31.08 две подряд выкладки умерли на нём до единой
             # скомпилированной строки. Скрипт перебирает источники от
             # зеркала в GHCR до прежнего поведения и печатает одну ссылку;
             # хуже, чем было, стать не может.
-            BASE_IMAGE=\"\$(DOCKER_CMD='sudo docker' ENV_FILE=.env.staging bash scripts/resolve-base-image.sh)\"
+            BASE_IMAGE=\"\$(sudo -u \"\$OWNER\" -H env DOCKER_CMD=docker ENV_FILE=.env.staging bash scripts/resolve-base-image.sh)\"
             # \`sudo env VAR=...\`, а не \`export\` перед \`sudo\`: sudo по
             # умолчанию сбрасывает окружение (env_reset), и compose,
             # запущенный под root, не увидел бы переменную —
             # интерполяция \${PYTHON_BASE_IMAGE:-...} молча вернулась бы к
             # Docker Hub, то есть ровно к тому, что мы убираем.
-            sudo env PYTHON_BASE_IMAGE=\"\$BASE_IMAGE\" \
+            sudo -u \"\$OWNER\" -H env PYTHON_BASE_IMAGE=\"\$BASE_IMAGE\" \
               docker compose --env-file .env.staging \
               -f docker-compose.yml -f docker-compose.staging.yml \
               -f docker-compose.staging.local.yml \
@@ -168,7 +193,7 @@ jobs:
             # query columns the old schema lacks (additive MemoryEntry
             # migrations 0015-0018). run --rm web uses the freshly built
             # image, so schema and code never drift apart in production.
-            sudo docker compose --env-file .env.staging \
+            sudo -u \"\$OWNER\" -H docker compose --env-file .env.staging \
               -f docker-compose.yml -f docker-compose.staging.yml \
               -f docker-compose.staging.local.yml \
               -p ayla-bot-staging run --rm --user \"\$OWNER_UID:\$OWNER_GID\" \
@@ -194,7 +219,7 @@ jobs:
             # диске и код в контейнерах не разъезжаются. Порядок — после
             # миграций и до \`up -d\`: файлы кладутся на смонтированный хостовый
             # каталог, работающие контейнеры для этого не нужны.
-            sudo docker compose --env-file .env.staging \
+            sudo -u \"\$OWNER\" -H docker compose --env-file .env.staging \
               -f docker-compose.yml -f docker-compose.staging.yml \
               -f docker-compose.staging.local.yml \
               -p ayla-bot-staging run --rm --user \"\$OWNER_UID:\$OWNER_GID\" \
@@ -227,11 +252,11 @@ jobs:
               exit 1
             fi
             echo \"::notice::collectstatic: \$(find staticfiles -type f | wc -l) файлов в staticfiles/\"
-            sudo docker compose --env-file .env.staging \
+            sudo -u \"\$OWNER\" -H docker compose --env-file .env.staging \
               -f docker-compose.yml -f docker-compose.staging.yml \
               -f docker-compose.staging.local.yml \
               -p ayla-bot-staging up -d --force-recreate --no-deps web worker celery-worker celery-beat shadow-worker
-            sudo docker compose -p ayla-bot-staging ps
+            sudo -u \"\$OWNER\" -H docker compose -p ayla-bot-staging ps
           "
 
       # DRF-1538 — Mini App. Собирается НА РАННЕРЕ, а не на боевой машине.
@@ -289,7 +314,24 @@ jobs:
           SSH="ssh -i $HOME/.ssh/dev_deploy ${DEV_USER}@${DEV_HOST}"
           MA="${DEV_DEPLOY_PATH}/apps/miniapp"
 
-          $SSH "rm -rf '$MA/dist.new' && mkdir -p '$MA/dist.new'"
+          # Владелец дерева разрешается НА ХОСТЕ и в каждом вызове заново:
+          # шаг состоит из отдельных ssh-команд, и переменная между ними не
+          # живёт. Дешевле спросить трижды, чем один раз угадать.
+          OWN="OWNER=\$(stat -c %U '${DEV_DEPLOY_PATH}'); [ -n \"\$OWNER\" ] || { echo '::error::владелец дерева не определён'; exit 1; };"
+
+          # Проверка ПЕРЕД rm -rf, и проверяет её ВЛАДЕЛЕЦ, а не root.
+          #
+          # Удалить содержимое каталога может тот, у кого права на сам
+          # каталог. Замер 11.09.2026 нашёл восемь каталогов root 755, среди
+          # них dist и dist.prev: под владельцем rm -rf упал бы с Permission
+          # denied — из шага, который к правам отношения не имеет.
+          #
+          # Проверять этим же root бессмысленно: test -w из-под root истинно
+          # всегда, и проверка сказала бы «можно» про каталог, который
+          # владельцу не отдан. Вопрос задаётся тому, кто будет писать.
+          $SSH "$OWN for d in '$MA/dist' '$MA/dist.prev'; do [ ! -e \"\$d\" ] || sudo -u \"\$OWNER\" test -w \"\$d\" || { echo \"::error::\$d не на запись владельцу дерева (\$(stat -c %U \"\$d\")) — каталоги не переданы владельцу, см. DRF-1646\"; exit 1; }; done"
+
+          $SSH "$OWN sudo -u \"\$OWNER\" rm -rf '$MA/dist.new' && sudo -u \"\$OWNER\" mkdir -p '$MA/dist.new'"
           # --no-same-owner: не восстанавливать владельцев ИЗ АРХИВА.
           #
           # GNU tar под root по умолчанию берёт uid/gid из архива, под
@@ -300,9 +342,9 @@ jobs:
           #
           # docker здесь не участвует, tar идёт прямо по ssh, поэтому
           # --user на этот шаг не влияет по построению: у него своя правка.
-          tar -C apps/miniapp/dist -cf - . | $SSH "tar --no-same-owner -C '$MA/dist.new' -xf -"
+          tar -C apps/miniapp/dist -cf - . | $SSH "$OWN sudo -u \"\$OWNER\" tar --no-same-owner -C '$MA/dist.new' -xf -"
           $SSH "cd '$MA' && test -s dist.new/index.html && test -d dist.new/assets && ls -A dist.new/assets | grep -q ."
-          $SSH "cd '$MA' && rm -rf dist.prev && { [ -d dist ] && mv dist dist.prev || true; } && mv dist.new dist && stat -c '%y %n' dist/index.html"
+          $SSH "$OWN cd '$MA' && sudo -u \"\$OWNER\" rm -rf dist.prev && { [ -d dist ] && sudo -u \"\$OWNER\" mv dist dist.prev || true; } && sudo -u \"\$OWNER\" mv dist.new dist && stat -c '%y %n' dist/index.html"
 
       # Проверка снаружи, а не по диску: свежая дата файла обновится и при
       # сборке старого дерева. Достаём имя бандла из отданного по https
@@ -372,7 +414,13 @@ jobs:
             # же полезнее имени: именно оно уходит в --user.
             echo \"::notice::шаг идёт от uid \$(id -u), gid \$(id -g)\"
             cd '${DEV_DEPLOY_PATH}'
-            sudo docker compose --env-file .env.staging \
+            # Тот же владелец, хотя этот вызов в дерево не пишет. Правило
+            # без исключений проверяемо; правило с исключением требует,
+            # чтобы сторож знал, какие подкоманды docker пишут, а какие нет
+            # — а это знание устаревает молча.
+            OWNER=\$(stat -c %U '${DEV_DEPLOY_PATH}')
+            [ -n \"\$OWNER\" ] || { echo \"::error::владелец дерева не определён\"; exit 1; }
+            sudo -u \"\$OWNER\" -H docker compose --env-file .env.staging \
               -f docker-compose.yml -f docker-compose.staging.yml \
               -f docker-compose.staging.local.yml \
               -p ayla-bot-staging exec -T web \
