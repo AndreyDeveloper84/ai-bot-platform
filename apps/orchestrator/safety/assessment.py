@@ -159,9 +159,11 @@ class SafetyAssessment:
     #: this is ``sha256(policy_version + the pattern that fired)[:12]``: an
     #: auditor holding the rule catalogue can resolve it to the exact pattern;
     #: the conversation state never carries the pattern itself. When several
-    #: patterns fired, the reference is to the highest-priority bucket's
-    #: FIRST match in `matched_patterns` order — one reference, named as such.
-    #: ``None`` exactly when nothing fired (`triggered=False`).
+    #: patterns fired, the reference is to the first match that belongs to
+    #: the WINNING bucket — one reference, named as such. ``None`` when nothing
+    #: fired, and also when the verdict has no catalogue pattern of its own
+    #: (risk elevation, tenant brand-voice phrase): `rule_id` still names the
+    #: bucket, but there is nothing in the catalogue to resolve to.
     evidence_ref: str | None = None
 
     def __post_init__(self) -> None:
@@ -199,6 +201,7 @@ def assess(
     state, handoff = _MAPPING[verdict]
     matched = tuple(getattr(verdict_result, "matched_patterns", ()) or ())
     version = policy_version()
+    evidence = _winning_pattern(verdict, matched)
     return SafetyAssessment(
         state=state,
         handoff=handoff,
@@ -209,8 +212,23 @@ def assess(
         triggered=bool(matched),
         rule_id=f"{_RULE_ID_PREFIX}:{verdict.value}" if matched else None,
         policy_version_id=version,
-        evidence_ref=evidence_ref(version, matched[0]) if matched else None,
+        evidence_ref=evidence_ref(version, evidence) if evidence is not None else None,
     )
+
+
+def _winning_pattern(verdict: SafetyVerdict, matched: tuple[str, ...]) -> str | None:
+    """The first fired pattern that belongs to the WINNING bucket.
+
+    `pre_check` records every match across every bucket (forensic), so
+    ``matched_patterns[0]`` may be a CLARIFY pattern under a BLOCK verdict —
+    evidence for a bystander, not for the verdict. A verdict that came from
+    risk elevation or a tenant's brand-voice phrase has no catalogue pattern of
+    its own: ``None``, and `rule_id` still names the bucket.
+    """
+    from apps.orchestrator.safety.pre_check import _verdict_patterns
+
+    own = _verdict_patterns().get(verdict.value, [])
+    return next((p for p in matched if p in own), None)
 
 
 def evidence_ref(version: str, pattern: str) -> str:

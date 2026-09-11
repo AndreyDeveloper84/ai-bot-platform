@@ -237,11 +237,14 @@ class TestTheRecorderHidesNothing:
         """§3: `evidence_ref` between turns — resolvable by an auditor with the
         rule catalogue, unreadable without it. The pattern itself never
         enters the state."""
-        recorded = record_verdict(CONV, _result(SafetyVerdict.BLOCK, ["secret-pattern"]), now=NOW)
+        from apps.orchestrator.safety.pre_check import _verdict_patterns
+
+        pattern = _verdict_patterns()[SafetyVerdict.BLOCK.value][0]
+        recorded = record_verdict(CONV, _result(SafetyVerdict.BLOCK, [pattern]), now=NOW)
         assert recorded.assessment.evidence_ref is not None
         raw = fake_redis.values[state_mod._state_key(CONV)]
         assert recorded.assessment.evidence_ref in raw, "the reference is in the blob …"
-        assert "secret-pattern" not in raw, "… the pattern is not"
+        assert pattern not in raw, "… the pattern is not"
         read = state_mod.load(CONV).state
         assert read is not None
         assert read.safety.evidence_ref == recorded.assessment.evidence_ref

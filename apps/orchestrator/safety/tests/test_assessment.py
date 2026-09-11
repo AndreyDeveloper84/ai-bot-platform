@@ -375,6 +375,12 @@ class TestWhatIsUnreachableStaysNamed:
         assert set(_MAPPING) == set(SafetyVerdict)
 
 
+def _block_pattern(index: int = 0) -> str:
+    from apps.orchestrator.safety.pre_check import _verdict_patterns
+
+    return _verdict_patterns()[SafetyVerdict.BLOCK.value][index]
+
+
 class TestTheEvidenceReferenceIsAReference:
     """§3: `evidence_ref` = sha256(policy_version + pattern)[:12]. Resolvable
     with the catalogue, unreadable without; part of the verdict's content."""
@@ -386,39 +392,55 @@ class TestTheEvidenceReferenceIsAReference:
         assert to_readiness_input(a).evidence_ref is None
 
     def test_the_reference_does_not_carry_the_pattern(self):
-        a = assess(_result(SafetyVerdict.BLOCK, matched=["(?i)секретный шаблон"]), state_revision=1)
+        a = assess(_result(SafetyVerdict.BLOCK, matched=[_block_pattern()]), state_revision=1)
         assert a.evidence_ref is not None
         assert len(a.evidence_ref) == 12
-        assert "секретный" not in a.evidence_ref
+        assert "ибупрофен" not in a.evidence_ref
 
     def test_same_policy_same_pattern_same_reference(self):
-        a = assess(_result(SafetyVerdict.BLOCK, matched=["p1"]), state_revision=1)
-        b = assess(_result(SafetyVerdict.BLOCK, matched=["p1"]), state_revision=9)
+        a = assess(_result(SafetyVerdict.BLOCK, matched=[_block_pattern()]), state_revision=1)
+        b = assess(_result(SafetyVerdict.BLOCK, matched=[_block_pattern()]), state_revision=9)
         assert a.evidence_ref == b.evidence_ref, "the revision is not evidence"
 
     def test_another_pattern_is_another_reference(self):
-        a = assess(_result(SafetyVerdict.BLOCK, matched=["p1"]), state_revision=1)
-        b = assess(_result(SafetyVerdict.BLOCK, matched=["p2"]), state_revision=1)
+        a = assess(_result(SafetyVerdict.BLOCK, matched=[_block_pattern()]), state_revision=1)
+        b = assess(_result(SafetyVerdict.BLOCK, matched=[_block_pattern(1)]), state_revision=1)
         assert a.evidence_ref != b.evidence_ref
 
     def test_another_policy_is_another_reference(self, settings):
-        a = assess(_result(SafetyVerdict.BLOCK, matched=["p1"]), state_revision=1)
+        a = assess(_result(SafetyVerdict.BLOCK, matched=[_block_pattern()]), state_revision=1)
         settings.SAFETY_PATTERNS = {SafetyVerdict.BLOCK.value: [r"(?i)one-more-rule"]}
         reset_policy_version_cache()
-        b = assess(_result(SafetyVerdict.BLOCK, matched=["p1"]), state_revision=1)
+        b = assess(_result(SafetyVerdict.BLOCK, matched=[_block_pattern()]), state_revision=1)
         assert a.policy_version_id != b.policy_version_id
         assert a.evidence_ref != b.evidence_ref, (
             "same pattern under another policy is other evidence"
         )
 
     def test_the_reference_is_the_digests_business(self):
-        a = assess(_result(SafetyVerdict.BLOCK, matched=["p1"]), state_revision=1)
-        b = assess(_result(SafetyVerdict.BLOCK, matched=["p2"]), state_revision=1)
+        a = assess(_result(SafetyVerdict.BLOCK, matched=[_block_pattern()]), state_revision=1)
+        b = assess(_result(SafetyVerdict.BLOCK, matched=[_block_pattern(1)]), state_revision=1)
         assert to_readiness_input(a).digest_fields() != to_readiness_input(b).digest_fields()
 
-    def test_the_reference_is_computed_by_one_function(self):
-        a = assess(_result(SafetyVerdict.BLOCK, matched=["p1", "p2"]), state_revision=1)
-        assert a.evidence_ref == evidence_ref(a.policy_version_id, "p1"), "first match, as named"
+    def test_the_reference_is_the_winning_buckets_pattern_not_a_bystanders(self):
+        """`matched_patterns` carries every bucket's hits, lower ones first in
+        dict order. A BLOCK verdict with a CLARIFY pattern listed before the
+        BLOCK pattern must reference the BLOCK pattern."""
+        from apps.orchestrator.safety.pre_check import _verdict_patterns
+
+        clarify_p = _verdict_patterns()[SafetyVerdict.CLARIFY.value][0]
+        block_p = _verdict_patterns()[SafetyVerdict.BLOCK.value][0]
+        a = assess(_result(SafetyVerdict.BLOCK, matched=[clarify_p, block_p]), state_revision=1)
+        assert a.evidence_ref == evidence_ref(a.policy_version_id, block_p)
+        assert a.evidence_ref != evidence_ref(a.policy_version_id, clarify_p)
+
+    def test_a_verdict_without_a_catalogue_pattern_has_no_reference(self):
+        """Risk elevation / brand-voice: the bucket is named, the evidence is not
+        in the catalogue — None, not a hash of something an auditor cannot find."""
+        a = assess(_result(SafetyVerdict.HANDOFF, matched=["(?i)tenant-phrase"]), state_revision=1)
+        assert a.triggered is True
+        assert a.rule_id == "pre_check.regex:handoff"
+        assert a.evidence_ref is None
 
     def test_activated_at_is_the_assessments_own_clock(self):
         now = datetime(2026, 9, 11, 12, 0, tzinfo=timezone.utc)
