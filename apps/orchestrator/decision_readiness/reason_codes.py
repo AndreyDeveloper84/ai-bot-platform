@@ -29,6 +29,12 @@ SAFETY_STOP: Final = "SAFETY_STOP"
 SAFETY_CLARIFY_REQUIRED: Final = "SAFETY_CLARIFY_REQUIRED"
 SAFETY_CAUTION_CONSTRAINED: Final = "SAFETY_CAUTION_CONSTRAINED"
 SAFETY_UNKNOWN: Final = "SAFETY_UNKNOWN"
+#: Свод владельца 11.09 §3: «NORMAL — проверка применима, выполнена, значимых
+#: сигналов нет; допустим ELIG_SAFETY_CLEARED». Выдаётся ТОЛЬКО за NORMAL.
+#: NOT_APPLICABLE его не выдаёт по замыслу: «обычное выполнение без заявления о
+#: пройденной проверке» — проверки не было, заявлять нечего. Сторож в
+#: tests/test_safety_not_applicable.py, с положительным контролем на NORMAL.
+ELIG_SAFETY_CLEARED: Final = "ELIG_SAFETY_CLEARED"
 
 # --- blockers ----------------------------------------------------------------
 BLOCK_NO_ADMISSIBLE_CANDIDATES: Final = "BLOCK_NO_ADMISSIBLE_CANDIDATES"
@@ -85,6 +91,7 @@ ALL_CODES: Final[frozenset[str]] = frozenset(
         SAFETY_CLARIFY_REQUIRED,
         SAFETY_CAUTION_CONSTRAINED,
         SAFETY_UNKNOWN,
+        ELIG_SAFETY_CLEARED,
         BLOCK_NO_ADMISSIBLE_CANDIDATES,
         BLOCK_CATALOG_NOT_RECOMMENDABLE,
         BLOCK_READINESS_INPUT_UNAVAILABLE,

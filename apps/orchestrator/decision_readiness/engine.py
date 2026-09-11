@@ -301,6 +301,14 @@ def f(
 
     if safety.state is SafetyState.CAUTION:
         codes.append(rc.SAFETY_CAUTION_CONSTRAINED)
+    if safety.state is SafetyState.NORMAL:
+        # §3 (свод владельца 11.09): «проверка применима, выполнена, значимых
+        # сигналов нет» — единственное состояние, за которое можно заявить,
+        # что проверка пройдена. Сравнение через `is NORMAL`, а не через
+        # `not in {...}`: NOT_APPLICABLE прошёл бы отрицательный список и
+        # получил бы заявление о проверке, которой не было. Именно это §3
+        # запрещает, и именно на этой строке стоит сторож.
+        codes.append(rc.ELIG_SAFETY_CLEARED)
 
     # 3. Structurally impossible to recommend. Checked before required context:
     #    asking a person to narrow a set that cannot yield a recommendation is
