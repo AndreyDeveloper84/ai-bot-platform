@@ -56,6 +56,9 @@ _CALLS: dict[str, dict[str, Any]] = {
     "skip": {"field": "diet_type"},
     "get_personal_data_export": {},
     "delete_personal_data": {},
+    # DRF-1699 D1 — заявка на удаление: тот же субъект в X-External-User-ID.
+    "create_deletion_request": {},
+    "get_current_deletion_request": {},
 }
 
 
