@@ -53,6 +53,27 @@ def fake_redis(monkeypatch: pytest.MonkeyPatch) -> FakeRedis:
     return client
 
 
+@pytest.fixture()
+def frozen_now(monkeypatch: pytest.MonkeyPatch) -> datetime:
+    """One clock for the writer and the reader of the hourly tally.
+
+    `_tally_unreadable()` buckets by the REAL hour; the three counter tests
+    pinned `now=14:30` for the reader only. That held until 15:00 UTC on the
+    pinned day and then went red on every run — green because the runner's
+    clock agreed, not because the counter worked. Freezing `state_mod.datetime`
+    makes both sides see the same hour, on any day, at any hour.
+    """
+    fixed = datetime(2026, 9, 11, 14, 30, tzinfo=UTC)
+
+    class _Frozen(datetime):
+        @classmethod
+        def now(cls, tz=None):  # type: ignore[override]
+            return fixed if tz is None else fixed.astimezone(tz)
+
+    monkeypatch.setattr(state_mod, "datetime", _Frozen)
+    return fixed
+
+
 def _verdict(revision: int = 3) -> SafetyResult:
     return SafetyResult(
         state=SafetyState.CLARIFY,
@@ -375,7 +396,9 @@ def test_wall_clock_lives_only_in_activated_at_and_never_in_the_digest() -> None
 # ─── the tolerance carries its own measure ──────────────────────────────────
 
 
-def test_unreadable_entries_are_counted_not_only_logged(fake_redis: FakeRedis) -> None:
+def test_unreadable_entries_are_counted_not_only_logged(
+    fake_redis: FakeRedis, frozen_now: datetime
+) -> None:
     """«Это была раскатка» обязано быть утверждением с числом.
 
     Терпимость к нечитаемой форме держится на одном допущении: это раскатка,
@@ -386,7 +409,7 @@ def test_unreadable_entries_are_counted_not_only_logged(fake_redis: FakeRedis) -
     Несколько за час — деплой. Те же строки каждый час — дефект, спрятавшийся
     в шуме деплоев.
     """
-    now = datetime(2026, 9, 11, 14, 30, tzinfo=UTC)
+    now = frozen_now
 
     for _ in range(3):
         state_mod._decode(_unreadable_blob())
@@ -397,7 +420,7 @@ def test_unreadable_entries_are_counted_not_only_logged(fake_redis: FakeRedis) -
     assert sum(tally.values()) == 3
 
 
-def test_a_healthy_read_counts_nothing(fake_redis: FakeRedis) -> None:
+def test_a_healthy_read_counts_nothing(fake_redis: FakeRedis, frozen_now: datetime) -> None:
     """Положительный контроль к счётчику, и оба утверждения сведены в одно число.
 
     Счётчик, считающий каждое чтение, выглядел бы работающим и не отвечал бы ни
@@ -410,7 +433,7 @@ def test_a_healthy_read_counts_nothing(fake_redis: FakeRedis) -> None:
     Отдельная проверка «пусто» этого не даёт — пустота одинаково совместима с
     «не считает лишнего» и «не считает вовсе».
     """
-    now = datetime(2026, 9, 11, 14, 30, tzinfo=UTC)
+    now = frozen_now
     saved = _state("conv-healthy").with_safety(_verdict(revision=1))
     state_mod.save(saved)
     state_mod.load("conv-healthy")
@@ -446,6 +469,7 @@ def test_counting_never_costs_a_turn(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_a_verdict_stored_before_handoff_existed_is_unknown_not_none(
     fake_redis: FakeRedis,
+    frozen_now: datetime,
 ) -> None:
     """Вердикт есть, обещания нет — читаем как «не сказали», а не как «не нужно».
 
@@ -484,9 +508,9 @@ def test_a_verdict_stored_before_handoff_existed_is_unknown_not_none(
     # И предмет: вердикт не подставлен, а объявлен неизвестным.
     assert decoded.safety.state is SafetyState.UNKNOWN
     assert decoded.safety.handoff is None
-    assert state_mod.count_unreadable_safety_entries(
-        now=datetime(2026, 9, 11, 14, 30, tzinfo=UTC)
-    ), "неполный вердикт обязан попасть в счётчик, иначе он невидим"
+    assert state_mod.count_unreadable_safety_entries(now=frozen_now), (
+        "неполный вердикт обязан попасть в счётчик, иначе он невидим"
+    )
 
 
 def test_the_promise_survives_redis(fake_redis: FakeRedis) -> None:
