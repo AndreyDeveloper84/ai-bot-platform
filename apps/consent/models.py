@@ -61,9 +61,12 @@ class ConsentRecord(models.Model):
     """
 
     class ConsentType(models.TextChoices):
-        # Sprint 3 ships 4 types per PHASE0_DESIGN §3.7. New types added
-        # in later sprints follow the same ADR-0007-style alter_choices
-        # migration recipe.
+        # Sprint 3 shipped the first 4 per PHASE0_DESIGN §3.7; типов с тех
+        # пор стало девять. Новый тип добавляется той же миграцией
+        # ``alter_choices`` в духе ADR-0007 — и ТОЛЬКО ею: класть новое
+        # согласие мимо этой таблицы значит потерять версию текста, способ
+        # получения и отзыв, которых требует §92 п.6. Так уже вышло с
+        # ``BotUser.food_scanner_consent_at`` — см. ``apps/consent/customer.py``.
         PERSONAL_DATA = "personal_data", "Personal data (152-ФЗ)"
         MARKETING = "marketing", "Marketing"
         PHOTO_BIOMETRIC = "photo_biometric", "Photo / biometric"
@@ -75,6 +78,25 @@ class ConsentRecord(models.Model):
         MEMORY_GREEN = "memory_green", "Memory — green zone"
         MEMORY_YELLOW = "memory_yellow", "Memory — yellow zone"
         MEMORY_RED = "memory_red", "Memory — red zone (special category)"
+        # Питание — решение владельца 10.09.2026 (`OPEN_DECISIONS.md` §92).
+        # ДВА согласия, показываемые на одном экране, но отзываемые
+        # независимо друг от друга.
+        #
+        # Почему два, а не одно: человек вправе вести дневник, НЕ передавая
+        # параметров тела. Объединённое согласие заставило бы его отдать
+        # лишние данные ради базовой функции — довод владельца дословно.
+        #
+        # Почему ни один существующий тип не подошёл:
+        # * ``HEALTH`` занят скринингом боли и противопоказаниями. Объёмы
+        #   и последствия отзыва разные, и наложение сделало бы отзыв
+        #   одного отзывом другого;
+        # * ``PHOTO_BIOMETRIC`` — растянуть его на снимок тарелки значило
+        #   бы объявить еду биометрией со всеми вытекающими требованиями.
+        NUTRITION_DIARY = "nutrition_diary", "Nutrition diary (food, drinks, photos, voice)"
+        PERSONAL_CALCULATION = (
+            "personal_calculation",
+            "Personal calculation (weight, height, age, sex, activity, goal)",
+        )
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     tenant = models.ForeignKey(
