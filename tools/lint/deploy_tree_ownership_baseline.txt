@@ -5,8 +5,7 @@
 #   host       ruvds-o1mqo / 176.119.159.141   ← api-dev.gobeauty.site
 #   tree       /home/taximeter/ai-bot-platform-dev
 #   owner      taximeter, uid 1000
-#   measured   2026-09-11T05:12:25Z at HEAD 64014365, by ssh, 12527 objects
-#              walked, 0 unreadable
+#   measured   2026-09-11T11:39:50Z at HEAD d8a1804d, by ssh, 0 unreadable
 #
 # The host is named because the first version of this file did not name it and
 # was measured on the WRONG BOX — ruvds-l2wyz / 194.87.99.126 carries an
@@ -14,84 +13,65 @@
 # path is not an address. What settles it is asking the live contour where it
 # was launched from (`docker inspect ... project.working_dir`) plus DNS.
 #
-# ─── PROVISIONAL. These numbers are scheduled to become wrong. ──────────────
+# ─── THE LEAK IS CLOSED. What this file now measures is the RESIDUE. ─────────
 #
-# Measured while the cause is still live. DRF-1646's source fix (#1581 — derive
-# the container uid from the tree instead of from the caller) has not landed
-# here yet. When it does, and the leftover root-owned files are removed, this
-# count drops and MUST be re-measured — after that deploy, not before.
+# Source fix landed in three steps and was verified by count, not by merge:
+#   #1581  --user on docker compose run      → void: deploy ran as root, so
+#                                              $(id -u) expanded to 0:0
+#   #1586  every writing command via          → 4 deploys 10:23–10:31 wrote
+#          sudo -u <tree owner>                 .git as owner; 0 fresh foreign
+#   #1588  root hands dist/ back to the owner  → first full deploy 11:07: mini
+#          on entry (self-healing)               app step passed, dist/ owner
 #
-# Do not read 298 as a target or as "the normal amount". It is the size of a
-# leak that is being closed. A ratchet frozen on a number we are actively
-# removing would read as a repair, which is the opposite of what it is.
+# Measured after that first full deploy, 2026-09-11T11:39:50Z, HEAD d8a1804d:
 #
-# Until re-measured, a shrinking count here is expected and means the fix is
-# working — not that someone should quietly lower the numbers and move on.
+#   fresh foreign files since 11:00      0
+#   fresh foreign directories            0
+#   fresh files written by the owner    25   ← the deploy did write; as owner
 #
-# ─── THIS IS A RATE, NOT A BACKLOG. Read before comparing. ──────────────────
+# So the per-deploy leak is ZERO. The numbers below are not a rate any more —
+# they are what root left behind BEFORE the fix and nobody has rewritten since:
+# git objects (immutable), unchanged working-tree files, static files that
+# collectstatic found unmodified. They cannot shrink on their own; they need
+# one cleanup by the owner, after which this file reads all zeros.
 #
-# The numbers below are NOT accumulated damage. The tree was repaired to clean
-# at ~04:30 UTC on 2026-09-11; ONE deploy at 05:04 produced all 298. A later
-# run rewrites mostly the same paths, so the count stays roughly flat while the
-# cause persists — it does not climb, and a flat count is therefore NOT
-# evidence that nothing is wrong.
+# The guard's job from here: fail if the residue GROWS. Growth now means the
+# leak reopened — a new root-run step, a new manual root session — and that is
+# precisely the event worth a red check.
 #
-# So a green check here means "this deploy wrote no more foreign objects than
-# the last one did". It will read zero only when the deploy stops writing as
-# root. Until then the guard is watching a leak, not a puddle.
+# ─── STILL NOT MEASURED, stated so it is not read as measured ───────────────
 #
-# ─── THE CAUSE, and why the first fix was void ──────────────────────────────
+#   collectstatic under --user   has written ZERO files across every deploy
+#                                since the fix (all static unmodified). It is
+#                                neither proven nor disproven. Proves itself
+#                                on the first deploy that changes static.
+#   .github/* under the owner    no PR has added a new directory since #1586.
+#                                Proves itself on the first one that does.
 #
-# The deploy logs in as **root**, not as the tree owner. Proof by elimination:
-# `sudo -n -l` as taximeter answers "a password is required" — no NOPASSWD
-# entries at all — yet the deploy step runs `sudo docker compose` four times
-# and is green. Files are owned by uid 0, and the only account with uid >= 1000
-# on the box is taximeter.
+# ─── THE TWO ROOT DIRECTORIES LEFT ──────────────────────────────────────────
 #
-# Therefore `--user "$(id -u):$(id -g)"`, added to stop containers writing as
-# root, expands under root to `--user 0:0`. The flag is escaped correctly,
-# placed correctly, reaches docker, and faithfully says "run as whoever called
-# me". Root called it. A measure that works exactly as written and changes
-# nothing.
+#   .github/linear-reality-check           root 755, owner write REFUSED
+#   .github/linear-reality-check/fixtures  root 755, owner write REFUSED
 #
-# The cure is to derive the uid from the TREE rather than from the caller:
-# `stat -c %u "$DEV_DEPLOY_PATH"`. `id -u` was a proxy for "owner of the tree",
-# true only while caller and owner coincide.
+# Created 06:37 by root's checkout of a merged PR, before #1586. Harmless to
+# the deploy (nothing writes there) but they are the residue's only
+# directories, and a directory is what blocks — see DRF-1646's history. Part
+# of the one cleanup.
 #
-# ─── THERE IS ONE ACTOR, NOT THREE ──────────────────────────────────────────
+# ─── THE NUMBERS — residue on 2026-09-11T11:39:50Z, 12 fewer than at 10:55 ────
 #
-#   uid 0     292  written by root, by creation-and-rename (git index, HEAD,
-#                  refs, new working-tree files) or by collectstatic
-#   uid 1001    6  apps/miniapp/dist/** — a uid with NO passwd entry on this
-#                  box. It is proof the extractor was root: GNU tar restores
-#                  owners from the archive when run as root (--same-owner is
-#                  root's default) and ignores them otherwise. These are the
-#                  runner's uids, carried in by root's tar.
-#   taximeter      files git rewrites IN PLACE (FETCH_HEAD) keep their old
-#                  owner — root can write any file, and an in-place write does
-#                  not change ownership. This is what made one process look
-#                  like two owners writing in the same second.
+#   .git/         303   objects 258 + refs/logs/index 45 — created by root
+#                       before the fix; git never rewrites objects
+#   staticfiles/  153   collectstatic skips unmodified files; root's stay
+#   other         105   working-tree files unchanged since root's checkout,
+#                       plus the two .github directories above
+#   __pycache__/    0   measured, not assumed
 #
-# The difference between the three is not who wrote, but HOW: in place, or by
-# replacement.
-#
-# ─── WHY THE REPAIR IS NOT IN THIS PR ───────────────────────────────────────
-#
-# `sudo -n true` as taximeter: "a password is required". Changing ownership
-# needs root, and this window has taximeter only. Measuring was possible;
-# repairing is not. Named here rather than left as an unfinished checkbox.
-#
-# ─── THE NUMBERS ────────────────────────────────────────────────────────────
-#
-#   .git/         67   index, HEAD, refs, loose objects — created by rename
-#   staticfiles/ 154   exactly the "154 static files copied" the deploy log
-#                      reports: collectstatic wrote every file it copied, as
-#                      root, with --user in place and pointing at 0:0
-#   other         77   working-tree files created by the checkout, e.g.
-#                      tests/contracts/test_master_address_has_no_readers.py
-#   __pycache__/   0   measured, not assumed
+# 561 total. Was 573; the 12 that vanished were apps/miniapp/dist/**,
+# rewritten by the owner in the 11:07 deploy — the first residue to heal by
+# itself, and proof that rewriting is what heals.
 
-.git/ = 67
-staticfiles/ = 154
+.git/ = 303
+staticfiles/ = 153
 __pycache__/ = 0
-other = 77
+other = 105
