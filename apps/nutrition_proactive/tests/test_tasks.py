@@ -22,7 +22,7 @@ from django.core.management import call_command
 
 from apps.consent.models import ConsentRecord
 from apps.identity.models import BotUser
-from apps.integrations.ayla import SummaryResponse, WaterTodayResponse
+from apps.integrations.ayla import ProfileResponse, SummaryResponse, WaterTodayResponse
 from apps.nutrition_proactive import prefs, selection, tasks
 from apps.tenancy.models import Tenant
 
@@ -98,6 +98,32 @@ def make_user(
 
 def water_reader(total_ml: int, norm_ml: int = 2000):
     return lambda _ext: WaterTodayResponse(total_ml=total_ml, norm_ml=norm_ml, entries=[])
+
+
+def configured_profile(source: str = "ayla_calculated") -> ProfileResponse:
+    """Профиль с НАЗВАННЫМ происхождением ориентиров (DRF-1686, §6).
+
+    Без него ``ProfileResponse`` обнуляет ориентиры, а отчёт печатает
+    только факт — «Калории: 1500 ккал.» без «из». Тесты, которым нужен
+    отчёт С ориентирами, берут этот профиль; тесты про отчёт без них
+    передают ``None`` или ``unknown_legacy`` явно.
+    """
+    return ProfileResponse(
+        gender="female",
+        age=32,
+        height_cm=168,
+        weight_kg=64,
+        goal="maintain",
+        daily_kcal=1900,
+        protein_g=95,
+        fat_g=60,
+        carbs_g=210,
+        water_ml=2000,
+        bmr=1400,
+        health_flags={},
+        disclaimer_acked=None,
+        targets_source=source,
+    )
 
 
 def summary_reader(profile=None):
@@ -309,11 +335,32 @@ class TestDailyReportSchedule:
 
     def test_report_body_carries_no_scolding(self, tenant: Tenant) -> None:
         make_user(tenant, report="19:00")
-        decisions = tasks.plan_daily_reports(now_utc=at_msk(19), fetch=summary_reader())
+        decisions = tasks.plan_daily_reports(
+            now_utc=at_msk(19), fetch=summary_reader(profile=configured_profile())
+        )
         text = next(d.text for d in decisions if d.send)
         assert "Калории: 1500 из 1900 ккал." in text
         assert "Вода: 1200 из 2000 мл." in text
         assert "не пиши мне" in text
+
+    def test_report_without_configured_targets_prints_facts_only(self, tenant: Tenant) -> None:
+        """§6 свода 11.09 (DRF-1686): суточный отчёт — пятая поверхность.
+
+        Без профиля и при ``unknown_legacy`` (все шесть профилей пилота)
+        в отчёт не попадает ни одно число ориентира — ни из профиля, ни из
+        сводки, ни из ответа по воде. Факт остаётся: съедено, выпито.
+        Нашлось не чтением, а красным шардом CI на этом самом файле.
+        """
+        make_user(tenant, report="19:00")
+        for profile in (None, configured_profile("unknown_legacy")):
+            decisions = tasks.plan_daily_reports(
+                now_utc=at_msk(19), fetch=summary_reader(profile=profile)
+            )
+            text = next(d.text for d in decisions if d.send)
+            assert "Калории: 1500 ккал." in text, profile
+            assert "Вода: 1200 мл." in text, profile
+            assert " из " not in text, profile
+            assert "1900" not in text and "2000" not in text, profile
 
 
 class TestQuotaAndAutoDisable:

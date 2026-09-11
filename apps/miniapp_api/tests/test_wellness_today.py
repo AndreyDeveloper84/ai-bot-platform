@@ -150,9 +150,17 @@ def _url() -> str:
 
 @dataclass
 class _FakeProfile:
-    """Только то, что читает ручка. Остальные поля профиля ей не нужны."""
+    """Только то, что читает ручка. Остальные поля профиля ей не нужны.
+
+    ``targets_are_configured`` — признак §6 свода 11.09 (OD-NUT-1): ручка
+    отдаёт ориентиры только при названном происхождении. По умолчанию
+    ``True``, чтобы тесты, проверяющие округление и состав ключей цели,
+    проверяли именно это, а не молча упирались в новое правило.
+    """
 
     health_flags: dict = None  # type: ignore[assignment]
+    targets_are_configured: bool = True
+    targets_source: str = "ayla_calculated"
 
 
 _NO_PROFILE = object()
@@ -163,8 +171,13 @@ def _patch_nutrition(*, summary, water, profile=_NO_PROFILE):
 
     `summary` / `water` / `profile` — либо значение (вернётся), либо
     экземпляр исключения (бросится), чтобы гонять ветки деградации.
-    По умолчанию профиль — «анкеты нет» (`None`): так ведёт себя
-    большинство людей на пилоте, и числа при этом показываются.
+
+    По умолчанию профиль — НАСТРОЕННЫЙ (``_FakeProfile()``). До §6 свода
+    11.09 умолчанием было «анкеты нет» (`None`) с оговоркой «числа при
+    этом показываются». §6 это перевернул: без анкеты ориентиров нет, и
+    ключей цели в ответе не бывает. Тесты, которым нужен человек без
+    профиля, передают ``profile=None`` явно — и проверяют отсутствие
+    ключей, а не их значения (``TestTargetsRequireProvenance``).
     """
     from unittest.mock import AsyncMock
 
@@ -177,12 +190,70 @@ def _patch_nutrition(*, summary, water, profile=_NO_PROFILE):
         client.get_water_today = AsyncMock(side_effect=water)
     else:
         client.get_water_today = AsyncMock(return_value=water)
-    resolved = None if profile is _NO_PROFILE else profile
+    resolved = _FakeProfile() if profile is _NO_PROFILE else profile
     if isinstance(resolved, Exception):
         client.get_profile = AsyncMock(side_effect=resolved)
     else:
         client.get_profile = AsyncMock(return_value=resolved)
     return patch("apps.integrations.ayla.get_nutrition_client", return_value=client)
+
+
+class TestTargetsRequireProvenance:
+    """DRF-1686 (§6 свода 11.09, OD-NUT-1): ориентир уходит на экран только с
+    названным происхождением. ``calories_goal`` сводки и ``norm_ml`` воды
+    приезжают отдельными ответами и происхождения не несут; решает профиль.
+
+    Три случая «нет» и один «да»: без последнего первые три были бы
+    зелёными и у ручки, которая не отдаёт ориентиров никогда.
+    """
+
+    def _get(self, client: Client, bot_user: BotUser) -> dict:
+        resp = client.get(_url(), HTTP_AUTHORIZATION=_init_data_header(bot_user.channel_user_id))
+        assert resp.status_code == 200
+        return resp.json()
+
+    def test_no_profile_means_no_targets_even_if_the_neighbours_send_numbers(
+        self, client: Client, bot_user: BotUser
+    ):
+        with _patch_nutrition(summary=_FakeSummary(), water=_FakeWater(), profile=None):
+            data = self._get(client, bot_user)
+        # Факт остаётся — снимается ориентир.
+        assert data["calories_eaten"] == 1240
+        assert data["water_glasses_eaten"] == 4
+        assert "calories_target" not in data
+        assert "water_glasses_target" not in data
+
+    def test_unknown_legacy_is_not_configured(self, client: Client, bot_user: BotUser):
+        """Все шесть профилей пилота на 11.09 — ``unknown_legacy``. Числа в
+        сводке у них есть; показывать их §103 запрещает."""
+        legacy = _FakeProfile()
+        legacy.targets_are_configured = False
+        legacy.targets_source = "unknown_legacy"
+        with _patch_nutrition(summary=_FakeSummary(), water=_FakeWater(), profile=legacy):
+            data = self._get(client, bot_user)
+        assert data["calories_eaten"] == 1240
+        assert "calories_target" not in data
+        assert "water_glasses_target" not in data
+
+    def test_an_unreadable_profile_hides_targets_fail_closed(
+        self, client: Client, bot_user: BotUser
+    ):
+        """Профиль не прочитан — происхождение не подтверждено — ориентира
+        нет. Та же несимметричная цена, что у ``nutrition_numbers_hidden``."""
+        with _patch_nutrition(
+            summary=_FakeSummary(), water=_FakeWater(), profile=NutritionUnavailableError("down")
+        ):
+            data = self._get(client, bot_user)
+        assert data["calories_eaten"] == 1240
+        assert "calories_target" not in data
+        assert "water_glasses_target" not in data
+
+    def test_a_configured_profile_sends_both_targets(self, client: Client, bot_user: BotUser):
+        """Положительная стража ко всем трём выше."""
+        with _patch_nutrition(summary=_FakeSummary(), water=_FakeWater(), profile=_FakeProfile()):
+            data = self._get(client, bot_user)
+        assert data["calories_target"] == 2100
+        assert data["water_glasses_target"] == 8
 
 
 class TestWellnessTodayHappyPath:
