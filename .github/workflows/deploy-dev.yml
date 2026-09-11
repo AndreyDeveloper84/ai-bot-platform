@@ -127,6 +127,9 @@ jobs:
             # быть его.
             OWNER=\$(stat -c %U '${DEV_DEPLOY_PATH}')
             [ -n \"\$OWNER\" ] || { echo \"::error::владелец дерева не определён\"; exit 1; }
+            OWNER_UID=\$(stat -c %u '${DEV_DEPLOY_PATH}')
+            OWNER_GID=\$(stat -c %g '${DEV_DEPLOY_PATH}')
+            [ -n \"\$OWNER_UID\" ] && [ -n \"\$OWNER_GID\" ] || { echo \"::error::uid/gid владельца дерева не определены\"; exit 1; }
             OWNER_HOME=\$(getent passwd \"\$OWNER\" | cut -d: -f6)
             [ -n \"\$OWNER_HOME\" ] || { echo \"::error::у владельца дерева нет домашнего каталога\"; exit 1; }
             BACKUP_DIR=\"\$OWNER_HOME/ayla-bot-staging-backups\"
@@ -201,9 +204,15 @@ jobs:
             # Контейнер знает их по построению, и спросить его дешевле, чем
             # угадать. Кавычки вокруг переменных внутри одинарных — чтобы их
             # раскрыл удалённый sh, а не наш ssh.
+            # --user у exec, и тот же владелец дерева, что у остальных run/exec
+            # (#1596): правило одно на все процессы в контейнерах. У postgres
+            # дерево не примонтировано, но без флага exec шёл бы root-ом
+            # образа (USER в postgres:16-alpine не задан). Измерено 11.09.2026
+            # на том же образе: pg_dump от uid 1000:1000 ходит по локальному
+            # сокету (drwxrwsr-t, pg_hba local trust) и отдаёт дамп, rc=0.
             # Перенаправление делает ВЫЗЫВАЮЩАЯ оболочка, а она root: файл лёг бы
             # root-ом в каталог владельца. Пишет tee от владельца.
-            sudo -u \"\$OWNER\" -H docker compose --env-file .env.staging -f docker-compose.yml -f docker-compose.staging.yml -f docker-compose.staging.local.yml -p ayla-bot-staging exec -T postgres sh -c 'pg_dump -U \"\$POSTGRES_USER\" \"\$POSTGRES_DB\"' | gzip | sudo -u \"\$OWNER\" -H tee \"\$BACKUP_PATH\" > /dev/null
+            sudo -u \"\$OWNER\" -H docker compose --env-file .env.staging -f docker-compose.yml -f docker-compose.staging.yml -f docker-compose.staging.local.yml -p ayla-bot-staging exec -T --user \"\$OWNER_UID:\$OWNER_GID\" postgres sh -c 'pg_dump -U \"\$POSTGRES_USER\" \"\$POSTGRES_DB\"' | gzip | sudo -u \"\$OWNER\" -H tee \"\$BACKUP_PATH\" > /dev/null
             # Проверка размера: пустой бэкап блокирует выкладку. Порог тот
             # же, что на боевой тропе. Ноль здесь обязан иметь положительную
             # стражу: pg_dump, упавший внутри пайпа, оставляет валидный
