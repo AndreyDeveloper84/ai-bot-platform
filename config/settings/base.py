@@ -734,6 +734,15 @@ AYLA_BASE_URL = os.environ.get("AYLA_BASE_URL", "")
 #    recommendations + profile move onto it in S0-B.
 AYLA_INTERNAL_API_TOKEN = os.environ.get("AYLA_INTERNAL_API_TOKEN", "")
 
+# DRF-1525 — второй секрет, другая сила (§11 свода владельца). Общий Bearer
+# выше читает зеркало и пишет записи; этот — заводит салон в каталоге
+# (``POST /api/v1/internal/tenants/``, сторож ``IsIdentityProvisioningBearer``)
+# и, по §11, служит автоматическому связыванию S2. Каталог отвергает общий
+# токен на этой ручке по построению и требует, чтобы два значения
+# РАЗЛИЧАЛИСЬ (``users.E001`` там). Пусто = экран «подключить салон»
+# отвечает ``SETUP_PENDING`` с именем причины, а не ложным успехом.
+AYLA_IDENTITY_PROVISIONING_TOKEN = os.environ.get("AYLA_IDENTITY_PROVISIONING_TOKEN", "")
+
 # C7 client-payments: fallback ``return_url`` for the YooKassa confirmation
 # flows (payment create / card setup) when the miniapp request doesn't carry
 # one. W4's master-side flows send return_url explicitly (precedent); the
