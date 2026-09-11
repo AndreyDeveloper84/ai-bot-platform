@@ -317,6 +317,25 @@ class ProfileResponse:
     targets_source: str = ""
     raw: dict[str, Any] = field(default_factory=dict)
 
+    #: Поля, которые обязаны быть ``None`` у не настроенного профиля.
+    _TARGET_FIELDS = ("daily_kcal", "protein_g", "fat_g", "carbs_g", "water_ml", "bmr")
+
+    def __post_init__(self) -> None:
+        """Инвариант DTO: не настроено ⇒ ориентиров нет — при ЛЮБОМ способе сборки.
+
+        Правило §6 живёт здесь, а не в разборе ответа, потому что разбор —
+        не единственный конструктор: тесты и фикстуры собирают
+        ``ProfileResponse`` напрямую, и правило в разборе они бы обошли,
+        получив профиль с ``unknown_legacy`` И числами — состояние, которого
+        по §103 не бывает. Инвариант на типе обойти нельзя. Числа при этом
+        не теряются: они в ``raw``, для диагностики.
+        """
+        if targets_configured(self.targets_source):
+            return
+        for name in self._TARGET_FIELDS:
+            if getattr(self, name) is not None:
+                object.__setattr__(self, name, None)
+
     @property
     def targets_state(self) -> str:
         """``configured`` | ``not_configured`` — имя отсутствия по §6.
@@ -806,14 +825,12 @@ class NutritionClient:
             # prefix per Ayla spec §1.1. Flat top-level fallback was removed
             # in DRF-270.
             norms = body.get("norms") or {}
-            source = _targets_source(body)
-            # §6 / §103: число без названного происхождения не выдаётся
-            # наружу вовсе. Для ``unknown_legacy`` каталог до команды
-            # очистки (#332) ещё присылает числа — здесь они и остаются:
-            # в ``raw`` для диагностики, но не в полях, которые читают
-            # экраны. Одно место, все поверхности.
-            if not targets_configured(source):
-                norms = {}
+            # §6 / §103: число без названного происхождения наружу не
+            # выходит — но правило стоит не здесь, а на самом типе
+            # (``ProfileResponse.__post_init__``): разбор не единственный
+            # конструктор, и правило в разборе обошёл бы любой, кто
+            # собирает DTO руками. Здесь ориентиры читаются как есть;
+            # тип сам обнулит их у не настроенного профиля.
             return ProfileResponse(
                 gender=str(body.get("gender") or ""),
                 age=int(body.get("age") or 0),
@@ -850,7 +867,7 @@ class NutritionClient:
                 health_flags=dict(body.get("health_flags") or {}),
                 disclaimer_acked=body.get("disclaimer_acked"),
                 goal_overridden_by=body.get("goal_overridden_by"),
-                targets_source=source,
+                targets_source=_targets_source(body),
                 raw=body,
             )
 

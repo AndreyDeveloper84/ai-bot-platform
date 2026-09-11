@@ -3083,10 +3083,13 @@ def customer_wellness_today(request: HttpRequest) -> HttpResponse:
     # профиль не прочитан, происхождение числа не подтверждено, и §103
     # запрещает выдавать его за актуальный ориентир. Нет профиля вовсе —
     # нет и ориентиров, это не отказ, а ответ.
+    # ``getattr(..., False)``, а не прямое обращение: чужой объект без
+    # этого признака — не настроен. Ошибка типа здесь превратилась бы в
+    # 500 дашборда, а fail-closed — в отсутствие ключа, что и требуется.
     targets_configured = (
         profile_res is not None
         and not isinstance(profile_res, Exception)
-        and profile_res.targets_are_configured
+        and bool(getattr(profile_res, "targets_are_configured", False))
     )
 
     # ── hydration (from get_water_today) ────────────────────────────────

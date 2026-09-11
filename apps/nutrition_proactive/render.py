@@ -140,8 +140,18 @@ def render_daily_report(
     lines.append(_macro_line("Белки", summary.protein_g, _target(profile, "protein_g"), "г"))
     lines.append(_macro_line("Жиры", summary.fat_g, _target(profile, "fat_g"), "г"))
     lines.append(_macro_line("Углеводы", summary.carbs_g, _target(profile, "carbs_g"), "г"))
-    if water is not None and water.norm_ml:
-        lines.append(_macro_line("Вода", water.total_ml, water.norm_ml, "мл"))
+    if water is not None:
+        # Норма воды приезжает в ответе по воде и происхождения не несёт —
+        # как и ``calories_goal`` сводки. Показывается только при
+        # настроенных ориентирах профиля; иначе строка без «из» (§6:
+        # «фактически внесённые значения» доступны без анкеты — факт
+        # остаётся, снимается ориентир). Раньше без нормы исчезала вся
+        # строка, вместе с фактом. Этот случай нашёл сторож, а не чтение:
+        # три поверхности были закрыты, четвёртая — вода — пропускала
+        # 2100 мл наружу.
+        norm = _water_norm(water, profile)
+        if water.total_ml or norm is not None:
+            lines.append(_macro_line("Вода", water.total_ml, norm, "мл"))
 
     if include_entries:
         entries_lines = _entry_lines(summary)
@@ -199,8 +209,9 @@ def goal_remark(
         tail = f" — при цели «{goal_label}» его обычно добирают первым" if goal_label else ""
         return f"Белка сегодня меньше нормы из профиля на {short} г{tail}."
 
-    if water is not None and water.norm_ml and water.total_ml < water.norm_ml * SHORTFALL_RATIO:
-        return f"До нормы воды из профиля осталось {water.norm_ml - water.total_ml} мл."
+    water_norm = _water_norm(water, profile) if water is not None else None
+    if water is not None and water_norm and water.total_ml < water_norm * SHORTFALL_RATIO:
+        return f"До нормы воды из профиля осталось {round(water_norm - water.total_ml)} мл."
 
     if (
         profile.goal in {"lose", "tone"}
@@ -291,6 +302,18 @@ def _target(profile: ProfileResponse | None, field: str) -> float | None:
         return None
     value = getattr(profile, field, None)
     return None if value is None else float(value)
+
+
+def _water_norm(water: WaterTodayResponse, profile: ProfileResponse | None) -> float | None:
+    """``norm_ml`` ответа по воде — только при настроенных ориентирах профиля.
+
+    Тот же довод, что у :func:`_summary_goal`: число едет отдельным ответом
+    и своего происхождения не имеет; профиль знает, можно ли его показывать.
+    """
+    if profile is None or not profile.targets_are_configured:
+        return None
+    norm = water.norm_ml
+    return None if not norm else float(norm)
 
 
 def _summary_goal(summary: SummaryResponse, profile: ProfileResponse | None) -> float | None:
