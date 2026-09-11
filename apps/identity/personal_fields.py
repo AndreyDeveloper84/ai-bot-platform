@@ -637,6 +637,21 @@ NOT_PERSONAL: Mapping[str, str] = {
     "identity.BotUser.first_seen": "Row bookkeeping.",
     "identity.BotUser.last_seen": "Row bookkeeping; activity recency for the profile is a separate derived field.",
     "identity.BotUser.welcomed_at": "Onboarding bookkeeping — whether S1 welcome already ran.",
+    # Owner 11.09 §2 (DRF-1700, S2-1). Three columns about the RELATIONSHIP's
+    # standing with Ayla, not about the person: whether this salon shell was
+    # matched to the client contour (by identifiers, never by name), where
+    # the relationship came from, and when that was decided. They carry no
+    # fact anyone told us; a SHADOW is what a reader must refuse to enrich
+    # (§2.4), and that refusal is the point of the column.
+    "identity.BotUser.customer_status": (
+        "§2 standing of this shell — UNRESOLVED / LINKED / SHADOW. A verdict "
+        "of the matching rule over identifiers, not a fact about the person."
+    ),
+    "identity.BotUser.customer_source": (
+        "§2.3 provenance of the relationship — client bot or salon assistant. "
+        "Which door the shell came through, not who came through it."
+    ),
+    "identity.BotUser.customer_status_at": "When customer_status was decided; NULL while UNRESOLVED.",
     "identity.BotUser.consent_at": (
         "A permission record, not a fact about the person. Note DRF-1314: it "
         "answers «ever consented», never «may we write to them», and is "
