@@ -356,6 +356,30 @@ export function removeDeviceStorage(key: string): void {
 }
 
 /**
+ * Открыть внешний адрес: в MAX — через оболочку (webview overlay), в
+ * обычном браузере — новой вкладкой.
+ *
+ * Заведена как отдельная функция, потому что тем же механизмом
+ * пользуется не только оплата (DRF-1319). Звать `openPaymentConfirmation`
+ * ради OAuth значило бы назвать вход оплатой — имя, обвиняющее не тот
+ * предмет, дороже лишней функции: по нему потом ищут не там.
+ */
+export function openExternalLink(url: string): void {
+  const b = maxBridge();
+  if (b?.openLink) {
+    try {
+      b.openLink(url);
+      return;
+    } catch (err) {
+      console.warn("[max-sdk] openLink failed, falling back to window.open", err);
+    }
+  }
+  if (typeof window !== "undefined") {
+    window.open(url, "_blank", "noopener,noreferrer");
+  }
+}
+
+/**
  * Open the payment confirmation page (C7.4) — YooKassa checkout URL
  * returned by the payment-create passthrough. In MAX we hand the URL
  * to the wrapper's openLink (webview overlay); in a plain browser we

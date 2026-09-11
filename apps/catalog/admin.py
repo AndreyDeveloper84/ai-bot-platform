@@ -247,6 +247,14 @@ _PLATFORM_FIELDS = (
     "accepted_at",
     "archived_at",
     "archive_reason",
+    # §83 — подтверждение расписания. Только для чтения, и это не
+    # осторожность: правимый отпечаток означал бы, что подтверждение
+    # можно ВПИСАТЬ, а не выдать. Ставит его один писатель —
+    # ``catalog.services.schedule_confirmation.confirm_schedule``, с
+    # живым чтением часов и автором (правило 6).
+    "schedule_confirmed_at",
+    "schedule_confirmed_by",
+    "schedule_fingerprint",
 )
 
 
@@ -352,6 +360,22 @@ class CatalogMasterAdmin(_MirrorAdminBase):
             },
         ),
         (
+            "Подтверждение расписания",
+            {
+                "description": (
+                    "Допуск мастера к продаже (§83). Проставляет владелец "
+                    "салона в салонной поверхности, а не форма: отпечаток "
+                    "снимается с живых часов в момент подтверждения. Любое "
+                    "изменение часов отменяет подтверждение автоматически."
+                ),
+                "fields": (
+                    "schedule_confirmed_at",
+                    "schedule_confirmed_by",
+                    "schedule_fingerprint",
+                ),
+            },
+        ),
+        (
             "Архив",
             {
                 "description": (
@@ -446,6 +470,9 @@ class CatalogMasterAdmin(_MirrorAdminBase):
         # заполняет она. Текст для владелицы салона живёт отдельно, в
         # ``AdminPeopleScreen.tsx``.
         "profile_incomplete": "профиль не заполнен",
+        # §83. Чинится не здесь и не в источнике синхронизации: часы
+        # подтверждает владелец салона в салонной поверхности.
+        "schedule_unconfirmed": "расписание не подтверждено",
     }
 
     @admin.display(description="Почему не бронируется")

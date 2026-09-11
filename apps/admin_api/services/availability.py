@@ -109,6 +109,7 @@ def _block_time_in_ayla(
     start_at,
     end_at,
     reason: str,
+    actor_bot_user=None,
 ) -> None:
     """Write the approved absence into Ayla, the system of record (DRF-1062).
 
@@ -136,14 +137,56 @@ def _block_time_in_ayla(
         ScheduleBlockConflictError,
         get_ayla_booking_client,
     )
+    from apps.integrations.ayla.user_proxy import external_user_id_for
 
     try:
+        # §117, attribution. Закрытие графика — операция с последствиями, и
+        # на той стороне она обязана быть приписана ЧЕЛОВЕКУ, а не боту.
+        # Три из четырёх записей этого клиента уже несут X-External-User-ID
+        # (создание записи, отмена, перенос); эта была единственной без него,
+        # и Ayla видела «сервис» там, где закрыли чужой рабочий день.
+        #
+        # Раз человека не передавали, никакая проверка ЕГО прав наверху была
+        # невозможна в принципе — не потому, что там её не написали, а
+        # потому, что проверять было нечего.
+        external_actor = (
+            external_user_id_for(actor_bot_user) if actor_bot_user is not None else None
+        )
+        if external_actor is None:
+            # §143 (решение владельца 11.09.2026): для чувствительной
+            # операции действует fail-closed — «если автора нельзя надёжно
+            # определить, операция НЕ ВЫПОЛНЯЕТСЯ», и «запись "автор
+            # неизвестен" недопустима, потому что создаёт ложную видимость
+            # полноценного аудита».
+            #
+            # Первая редакция этой правки писала с неназванным автором и
+            # оставляла предупреждение в логе, а вопрос «отказывать ли»
+            # выносила владельцу. Владелец ответил: отказывать. Здесь
+            # остаётся исполнение ответа, а не продолжение спора.
+            #
+            # Закрытие рабочего времени мастера — именно чувствительная
+            # операция: оно делает клиентов незаписываемыми и, если время
+            # занято, ведёт к переносам и отменам. Журнал, в котором такое
+            # действие числится без автора, хуже отсутствующего: он
+            # выглядит полным.
+            logger.warning(
+                "availability.ayla_block_refused_no_actor master=%s tenant=%s",
+                master.id,
+                tenant_id,
+            )
+            raise AvailabilityDecisionError(
+                "actor_required",
+                "Cannot close a master's time without a named actor: the audit "
+                "record would claim an unknown author (§143).",
+                status=409,
+            )
         get_ayla_booking_client().create_specialist_time_off(
             specialist_id=str(master.id),
             tenant_id=str(tenant_id),
             start_at=start_at.isoformat(),
             end_at=end_at.isoformat(),
             reason=reason,
+            external_user_id=external_actor,
         )
     except ScheduleBlockConflictError as exc:
         # Not a failure of the approval — the time is booked. Say so, so
@@ -512,6 +555,7 @@ def approve_availability_request(
     tenant_id: UUID,
     actor: Any,
     actor_bot_user_id: UUID | None = None,
+    actor_bot_user: Any = None,
     actor_role: str = "",
     now: datetime | None = None,
 ) -> DecisionResult:
@@ -547,6 +591,31 @@ def approve_availability_request(
 
     if now is None:
         now = dj_timezone.now()
+
+    # §143 (решение владельца 11.09.2026), fail-closed: «если автора нельзя
+    # надёжно определить, операция НЕ ВЫПОЛНЯЕТСЯ».
+    #
+    # Проверка стоит ЗДЕСЬ, а не только перед записью в Ayla, и это не
+    # перестраховка. Одобрение закрывает рабочее время мастера при ЛЮБОМ
+    # состоянии флага: при включённом — в Ayla, при выключенном — локально,
+    # и в обоих случаях пишет строку аудита. Проверка внутри одной из двух
+    # веток оставила бы вторую открытой — тот же дефект «починили запись,
+    # оставили чтение», за который я сегодня трижды цеплялся в чужом коде.
+    #
+    # Отказ ДО транзакции: ничего не изменено, заявка остаётся PENDING,
+    # человек видит названную причину, а не молчаливый успех.
+    if actor_bot_user is None:
+        logger.warning(
+            "availability.approve_refused_no_actor request=%s tenant=%s",
+            request_id,
+            tenant_id,
+        )
+        raise AvailabilityDecisionError(
+            "actor_required",
+            "Cannot approve time off without a named actor: the audit record "
+            "would claim an unknown author (§143).",
+            status=409,
+        )
 
     with transaction.atomic():
         try:
@@ -647,6 +716,7 @@ def approve_availability_request(
             start_at=req.requested_start,
             end_at=req.requested_end,
             reason=req.reason_text or "",
+            actor_bot_user=actor_bot_user,
         )
 
         # Materialise — one ScheduleException per covered date.

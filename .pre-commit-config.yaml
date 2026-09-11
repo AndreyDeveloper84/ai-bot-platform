@@ -18,8 +18,16 @@ repos:
       - id: check-yaml
         exclude: ^docker-compose.*\.yml$  # uses GitHub Actions ${{ }} which yamllint flags
       - id: check-json
+      # `tests/tools/census_samples/` is CAPTURED pytest output kept as
+      # evidence, not source. Trimming it would quietly edit the reference
+      # the census parser is tested against — and a doctored reference still
+      # passes its own test. `quiet2_empty.txt` is a single newline on
+      # purpose: that is exactly what `--collect-only -qq` prints when it
+      # collects nothing.
       - id: trailing-whitespace
+        exclude: ^tests/tools/census_samples/
       - id: end-of-file-fixer
+        exclude: ^tests/tools/census_samples/
       - id: check-merge-conflict
       - id: check-added-large-files
         args: ["--maxkb=500"]

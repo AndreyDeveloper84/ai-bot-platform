@@ -30,6 +30,17 @@ person. Guessing at 5 attempts an hour needs ~14 years for a 50% chance.
 * ``master`` → links ``CatalogMaster.linked_bot_user`` on the **existing**
   catalog row and flips it to accepted+active.
 
+The master link is one-to-one in both directions, and both directions
+refuse rather than overwrite:
+
+* the card already belongs to someone else → ``MasterAlreadyLinked``
+  (DRF-1647), the same ``wrong_recipient`` answer the Mini App door gives;
+* the person already holds another card → ``PersonAlreadyMaster``
+  (DRF-1650), which used to escape as a bare ``IntegrityError`` and
+  therefore as no answer at all.
+
+Neither consumes the code.
+
 The master path never creates a catalog row. All four pilot masters already
 exist, and a duplicate would be invisible to the booking mirror (whose
 ``specialist_id`` points at the original), leaving the master staring at an
@@ -93,6 +104,55 @@ class InviteMasterMissing(InviteError):
     """A master invite whose catalog row disappeared between issue and use."""
 
     slug = "invite_master_missing"
+
+
+class MasterAlreadyLinked(InviteError):
+    """The catalog row this code points at already belongs to someone else.
+
+    DRF-1647. The slug is deliberately the one the Mini App path already
+    answers with — ``apps/master_api/views.py`` returns ``wrong_recipient``
+    403 for exactly this situation, and the two doors into the same card
+    must not disagree about what happened. It is an identity mismatch, not
+    a retry: the bearer is simply not the person this invite was for.
+
+    The code is NOT consumed. Raising from inside ``redeem_staff_invite``'s
+    ``transaction.atomic`` rolls the whole redemption back, ``used_at``
+    included, so the master it was actually issued to can still use it.
+    """
+
+    slug = "wrong_recipient"
+
+
+class PersonAlreadyMaster(InviteError):
+    """This person is already the linked account of another master row.
+
+    DRF-1650. ``CatalogMaster.linked_bot_user`` is a ``OneToOneField``: one
+    person, one card. Before this class existed the second link attempt
+    surfaced as a raw ``IntegrityError``, which no caller catches — the
+    person got no answer at all, while eleven other refusal branches
+    answered in words.
+
+    Distinct from :class:`MasterAlreadyLinked` because the cure is
+    different. There the person needs their own code; here no code helps —
+    the existing link has to be released first (the usual cause is a card
+    that was archived without unlinking, which leaves the person looking
+    like a customer to ``resolve_role`` and like a master to the database).
+
+    **A deliberate divergence from the Mini App door, recorded here so it
+    is not mistaken for drift.** ``master_api.views.onboarding_accept``
+    answers this same shape with ``wrong_recipient`` too (DRF-1507,
+    #1412 — "Слуг переиспользован намеренно"), and its reason is a
+    front-end one: ``MasterOnboardingScreen`` already renders that slug,
+    and a second slug would mean teaching it a second text. The owner's
+    call for DRF-1650 is the opposite: these two need different words
+    because they need different actions — «нужен свой код» against «снять
+    прежнюю связь». Reconciling the two doors on this second case is a
+    decision for the owner, not something to settle here.
+
+    The code is NOT consumed, for the same reason.
+    """
+
+    slug = "person_already_master"
 
 
 class OwnerAlreadyExists(InviteError):
@@ -293,7 +353,13 @@ def redeem_staff_invite(*, code: str, bot_user: BotUser, tenant) -> RedeemResult
 
     Raises:
       InviteRateLimited, InviteNotFound, InviteMasterMissing,
-      OwnerAlreadyExists — all with a stable ``.slug``.
+      MasterAlreadyLinked, PersonAlreadyMaster, OwnerAlreadyExists — all
+      with a stable ``.slug``.
+
+      The last three leave the code unspent: they are raised inside the
+      atomic block, before ``used_at`` is written, and the rollback takes
+      the write with it. Burning a code because the wrong person typed it
+      would punish the person it was issued to.
     """
 
     _check_rate_limit(bot_user)
@@ -449,20 +515,86 @@ def _link_master(invite: StaffInvite, bot_user: BotUser) -> RedeemResult:
             catalog_master_id=str(master.id),
         )
 
+    # DRF-1647 — the card already belongs to SOMEONE ELSE.
+    #
+    # Until this guard existed the assignment below was unconditional, so a
+    # freshly issued code handed the card to whoever typed it: the master
+    # who was actually working lost her appointments, her schedule and her
+    # notifications, and learned about it from silence. A code being valid
+    # says the operator meant to invite somebody; it does not say the
+    # bearer is that somebody.
+    #
+    # The Mini App door (``apps/master_api/views.py``, onboarding_claim /
+    # onboarding_accept) has answered this case since 3d5dfd95 (M0
+    # onboarding, PR 1) and had it reinforced by DRF-1507 (#1401, #1412):
+    # 403 ``wrong_recipient``, token left unconsumed, with the note that it
+    # is "расхождение личности, а не ретрай". This is the same answer
+    # through the bot door, not a third behaviour — and the condition is
+    # the same one, ``linked_bot_user_id is not None and != bot_user.id``;
+    # the equality half already returned above.
+    if master.linked_bot_user_id is not None:
+        logger.warning(
+            "identity.staff_invite.wrong_recipient invite=%s master=%s "
+            "linked_to=%s presented_by=%s",
+            invite.id,
+            master.id,
+            master.linked_bot_user_id,
+            bot_user.id,
+        )
+        raise MasterAlreadyLinked("catalog master is linked to a different person")
+
     master.linked_bot_user = bot_user
     master.invite_status = CatalogMaster.InviteStatus.ACCEPTED
     master.mode = CatalogMaster.Mode.INVITE
     master.invite_token = None
     master.is_active = True
-    master.save(
-        update_fields=[
-            "linked_bot_user",
-            "invite_status",
-            "mode",
-            "invite_token",
-            "is_active",
-        ]
-    )
+
+    # DRF-1650 — the PERSON is already somebody's master.
+    #
+    # ``linked_bot_user`` is a OneToOneField, so this UPDATE can violate its
+    # unique index even though the row we are writing is free: the conflict
+    # is on the other side of the link. Nothing up the call chain catches
+    # ``IntegrityError`` — not ``_redeem_and_greet``, not
+    # ``handle_salon_max_event`` — so it used to leave the person with no
+    # answer whatsoever while every other refusal said something.
+    #
+    # The savepoint is what makes the diagnosis possible: an IntegrityError
+    # poisons the enclosing transaction, and the query below would die with
+    # TransactionManagementError without one. It rolls back only the failed
+    # UPDATE; the outer atomic (which still has to roll back the whole
+    # redemption) is untouched.
+    #
+    # An IntegrityError we cannot explain is re-raised unchanged. Answering
+    # "you are already a master" to an unrelated constraint failure would
+    # be a lie that hides a real defect.
+    try:
+        with transaction.atomic():
+            master.save(
+                update_fields=[
+                    "linked_bot_user",
+                    "invite_status",
+                    "mode",
+                    "invite_token",
+                    "is_active",
+                ]
+            )
+    except IntegrityError as exc:
+        held = (
+            CatalogMaster.all_tenants.filter(linked_bot_user_id=bot_user.id)
+            .exclude(pk=master.pk)
+            .first()
+        )
+        if held is None:
+            raise
+        logger.warning(
+            "identity.staff_invite.person_already_master invite=%s master=%s "
+            "already_holds=%s bot_user=%s",
+            invite.id,
+            master.id,
+            held.id,
+            bot_user.id,
+        )
+        raise PersonAlreadyMaster("person is already linked to another master row") from exc
 
     return RedeemResult(
         role=StaffInvite.Role.MASTER,

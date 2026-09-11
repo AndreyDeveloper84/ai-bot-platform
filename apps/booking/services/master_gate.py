@@ -71,6 +71,7 @@ SALE_BLOCK_SLUG: Final[Mapping[SaleBlock, str]] = MappingProxyType(
         "pending": "master_not_bookable",
         "ayla_unlinked": "master_ayla_unlinked",
         "profile_incomplete": "master_profile_incomplete",
+        "schedule_unconfirmed": "master_schedule_unconfirmed",
     }
 )
 
@@ -100,6 +101,8 @@ def master_sale_refusal(master: Any) -> tuple[str, str] | None:
         return slug, "master has no canonical ayla_user_id; booking notification would not arrive"
     if block == "profile_incomplete":
         return slug, "master accepted the invite but her profile is not ready for sale"
+    if block == "schedule_unconfirmed":
+        return slug, "the salon owner has not confirmed this master's current working hours"
     return slug, "master deactivated before booking confirmed"
 
 

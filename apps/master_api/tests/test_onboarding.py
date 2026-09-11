@@ -522,7 +522,12 @@ class TestOnboardingAcceptGlue:
     ) -> None:
         ayla_user_id = uuid.uuid4()
         bot_user.ayla_user_id = ayla_user_id
-        bot_user.save(update_fields=["ayla_user_id"])
+        # DRF-1649: сорт объявлен явно — эти сценарии про человека со
+        # СВЯЗАННЫМ НАСТОЯЩИМ аккаунтом. Без объявления столбец остаётся
+        # NULL, потребитель честно отказывается, и тест проверял бы отказ
+        # по неизвестности вместо того, ради чего написан.
+        bot_user.ayla_user_id_is_proxy = False
+        bot_user.save(update_fields=["ayla_user_id", "ayla_user_id_is_proxy"])
         synced = _synced_master(tenant, ayla_user_id=ayla_user_id, external_id=7)
         invited = make_master(tenant, external_id=1_000_000)
 
@@ -573,7 +578,8 @@ class TestOnboardingAcceptGlue:
         """
 
         bot_user.ayla_user_id = uuid.uuid4()
-        bot_user.save(update_fields=["ayla_user_id"])
+        bot_user.ayla_user_id_is_proxy = False  # DRF-1649, связанный настоящий
+        bot_user.save(update_fields=["ayla_user_id", "ayla_user_id_is_proxy"])
         # Строка ДРУГОГО человека того же салона — склейка не должна её взять.
         other = _synced_master(
             tenant,
@@ -611,9 +617,11 @@ class TestOnboardingAcceptGlue:
         """Положительная стража: разные люди — разные строки."""
 
         bot_user.ayla_user_id = uuid.uuid4()
-        bot_user.save(update_fields=["ayla_user_id"])
+        bot_user.ayla_user_id_is_proxy = False  # DRF-1649, связанный настоящий
+        bot_user.save(update_fields=["ayla_user_id", "ayla_user_id_is_proxy"])
         other_bot_user.ayla_user_id = uuid.uuid4()
-        other_bot_user.save(update_fields=["ayla_user_id"])
+        other_bot_user.ayla_user_id_is_proxy = False
+        other_bot_user.save(update_fields=["ayla_user_id", "ayla_user_id_is_proxy"])
 
         first = make_master(tenant, external_id=1_000_000)
         second = make_master(
@@ -649,10 +657,11 @@ class TestOnboardingAcceptGlue:
     ) -> None:
         """``BotUser.ayla_user_id`` пуст — склеивать не по чему, и это норма.
 
-        Мост с Ayla ставит единственный писатель
-        (``apps/identity/services/ayla_link.py``) и только перед действием,
-        которому персональный субъект нужен. Пока он пуст, приземление
-        обязано работать как раньше и НЕ писать в столбец ничего.
+        Мост с Ayla ставят два писателя — ``ayla_link.py`` и
+        ``apps/identity/services/resolver.py:192`` (DRF-1649 поправила и
+        докстринг ``_glue_target``, который утверждал, что писатель один).
+        Пока он пуст, приземление обязано работать как раньше и НЕ писать
+        в столбец ничего.
         """
 
         assert bot_user.ayla_user_id is None
@@ -681,7 +690,12 @@ class TestOnboardingAcceptGlue:
 
         ayla_user_id = uuid.uuid4()
         bot_user.ayla_user_id = ayla_user_id
-        bot_user.save(update_fields=["ayla_user_id"])
+        # DRF-1649: сорт объявлен явно — эти сценарии про человека со
+        # СВЯЗАННЫМ НАСТОЯЩИМ аккаунтом. Без объявления столбец остаётся
+        # NULL, потребитель честно отказывается, и тест проверял бы отказ
+        # по неизвестности вместо того, ради чего написан.
+        bot_user.ayla_user_id_is_proxy = False
+        bot_user.save(update_fields=["ayla_user_id", "ayla_user_id_is_proxy"])
         taken = _synced_master(tenant, ayla_user_id=ayla_user_id, external_id=7)
         taken.linked_bot_user = other_bot_user
         taken.save(update_fields=["linked_bot_user"])
@@ -697,6 +711,143 @@ class TestOnboardingAcceptGlue:
         assert resp.json()["error"] == "wrong_recipient"
         invited.refresh_from_db()
         assert invited.invite_status == CatalogMaster.InviteStatus.PENDING
+
+
+class TestProxyKeyNeverReachesCatalogMaster:
+    """DRF-1649 — ключ прокси-аккаунта не едет в ``CatalogMaster``.
+
+    ``BotUser.ayla_user_id`` может держать **изолированный прокси** Ayla, и
+    на ``BotUser`` это верное значение: бронированию он нужен, и
+    ``ensure_ayla_link`` права, что его пишет. Слоем выше он запрещён —
+    ``apps/catalog/master_state.py:464-471``: он «занял бы ключ значением,
+    по которому совпадения не будет никогда».
+
+    Проверяется НЕ «сработала ли проверка», а **что ключ не записан**:
+    сторож, утверждающий срабатывание, зеленел бы и на коде, который
+    просто перестал писать всегда. Поэтому рядом стоит положительный
+    контроль на ``is_proxy=False``.
+
+    Каналов два и затвор один: ``person_ayla_user_id`` питает и поиск
+    склейки (``views.py:669``), и запись (``views.py:715``). Оба здесь и
+    проверены — чинить половину механизма значит перенести дефект, а не
+    убрать.
+    """
+
+    def _accept(self, client: Client, invited: CatalogMaster):
+        return _post_json(
+            client,
+            "master_api:onboarding_accept",
+            body={"token": str(invited.invite_token)},
+            header=init_data_header("12345"),
+        )
+
+    def test_proxy_key_is_not_written_into_the_row(
+        self,
+        client: Client,
+        bot_user: BotUser,
+        tenant: Tenant,
+    ) -> None:
+        """``is_proxy=True`` — приземление проходит, столбец остаётся пуст."""
+
+        bot_user.ayla_user_id = uuid.uuid4()
+        bot_user.ayla_user_id_is_proxy = True
+        bot_user.save(update_fields=["ayla_user_id", "ayla_user_id_is_proxy"])
+        invited = make_master(tenant, external_id=1_000_000)
+
+        resp = self._accept(client, invited)
+
+        # Отказ касается ТОЛЬКО ключа: человек обязан приземлиться.
+        # Пустой ``CatalogMaster.ayla_user_id`` — это названное состояние
+        # (``ayla_unlinked``), а не поломка.
+        assert resp.status_code == 200, resp.content
+        invited.refresh_from_db()
+        assert invited.linked_bot_user_id == bot_user.id
+        assert invited.invite_status == CatalogMaster.InviteStatus.ACCEPTED
+        # И вот предмет: ключ прокси не записан.
+        assert invited.ayla_user_id is None
+
+    def test_real_key_still_is_written(
+        self,
+        client: Client,
+        bot_user: BotUser,
+        tenant: Tenant,
+    ) -> None:
+        """Положительный контроль: ``is_proxy=False`` записывается.
+
+        Без него предыдущий тест зеленел бы на коде, который не пишет
+        ``ayla_user_id`` никогда — то есть на сломанном.
+        """
+
+        bot_user.ayla_user_id = uuid.uuid4()
+        bot_user.ayla_user_id_is_proxy = False
+        bot_user.save(update_fields=["ayla_user_id", "ayla_user_id_is_proxy"])
+        invited = make_master(tenant, external_id=1_000_000)
+
+        resp = self._accept(client, invited)
+
+        assert resp.status_code == 200, resp.content
+        invited.refresh_from_db()
+        assert invited.ayla_user_id is not None
+        assert str(invited.ayla_user_id) == str(bot_user.ayla_user_id)
+
+    def test_unknown_sort_is_refused_exactly_like_a_proxy(
+        self,
+        client: Client,
+        bot_user: BotUser,
+        tenant: Tenant,
+    ) -> None:
+        """``NULL`` — тоже отказ. «Не знаем» не есть «можно».
+
+        Так выглядят строки, связанные ДО появления столбца, и всё, что
+        пишет ``resolver.py:192``: он получает идентификатор от
+        вызывающего и сорта знать не может. Мягкое чтение ``NULL``
+        обратило бы столбец в свою противоположность — дало бы разрешение
+        ровно там, где до него был честный пробел.
+        """
+
+        bot_user.ayla_user_id = uuid.uuid4()
+        bot_user.save(update_fields=["ayla_user_id"])
+        bot_user.refresh_from_db()
+        assert bot_user.ayla_user_id is not None
+        assert bot_user.ayla_user_id_is_proxy is None
+
+        invited = make_master(tenant, external_id=1_000_000)
+        resp = self._accept(client, invited)
+
+        assert resp.status_code == 200, resp.content
+        invited.refresh_from_db()
+        assert invited.linked_bot_user_id == bot_user.id
+        assert invited.ayla_user_id is None
+
+    def test_proxy_key_does_not_glue_onto_a_synced_row(
+        self,
+        client: Client,
+        bot_user: BotUser,
+        tenant: Tenant,
+    ) -> None:
+        """Второй канал: по прокси-ключу склейка не ищется.
+
+        Строка синхронизации с ТЕМ ЖЕ значением в ``ayla_user_id`` стоит
+        рядом — и если бы поиск шёл по прокси, человек приземлился бы в
+        неё. Чинить только запись значило бы оставить ту же ошибку вторым
+        входом.
+        """
+
+        shared = uuid.uuid4()
+        bot_user.ayla_user_id = shared
+        bot_user.ayla_user_id_is_proxy = True
+        bot_user.save(update_fields=["ayla_user_id", "ayla_user_id_is_proxy"])
+        synced = _synced_master(tenant, ayla_user_id=shared, external_id=7)
+        invited = make_master(tenant, external_id=1_000_000)
+
+        resp = self._accept(client, invited)
+
+        assert resp.status_code == 200, resp.content
+        # Приземлились в СВОЮ строку, а не в найденную по прокси-ключу.
+        assert resp.json()["master_id"] == str(invited.id)
+        synced.refresh_from_db()
+        assert synced.ayla_user_id is not None
+        assert synced.linked_bot_user_id is None
 
 
 class TestReinviteAfterExpiryReachesTheCabinet:

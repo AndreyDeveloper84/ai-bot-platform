@@ -1155,3 +1155,58 @@ class TestCanonicalVersionRead:
 
         with pytest.raises(bc.BookingAPIError):
             client.get_appointment_version(external_user_id="bot:max:1", booking_id="a")
+
+
+class TestTimeOffCarriesTheActingHuman:
+    """§117, attribution — на проводе, а не на границе метода.
+
+    Первая версия сторожа стояла в сервисном тесте и подменяла ВЕСЬ метод
+    клиента подделкой. Подмена «клиент выбрасывает имя человека по дороге»
+    на ней промолчала — и это не дефект теста и не половина предмета, а
+    третий случай: **шов теста лежал выше подменяемого кода**, внутренности
+    метода подделка просто заменила собой.
+
+    Поэтому проверка здесь, на транспорте: заголовок либо ушёл, либо нет.
+
+    Замер 10.09.2026: из четырёх записывающих вызовов этого клиента три
+    несли ``X-External-User-ID``, а закрытие графика — единственное — не
+    несло. Ayla видела «сервис» там, где закрыли чужой рабочий день.
+    """
+
+    def _capture(self):
+        captured: list[httpx.Request] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            captured.append(request)
+            return httpx.Response(201, json={"id": "off-1"})
+
+        return handler, captured
+
+    def test_the_header_names_the_person_who_approved(self) -> None:
+        handler, captured = self._capture()
+
+        _client_with(handler).create_specialist_time_off(
+            specialist_id="sp-1",
+            tenant_id="t-1",
+            start_at="2026-09-13T10:00:00+03:00",
+            end_at="2026-09-13T14:00:00+03:00",
+            external_user_id="bot:max:7788",
+        )
+
+        assert captured[0].url.path == "/api/v1/internal/specialists/sp-1/time-off/"
+        assert captured[0].headers["X-External-User-ID"] == "bot:max:7788"
+
+    def test_without_a_person_the_header_is_absent_not_invented(self) -> None:
+        # Положительный контроль к тесту выше: без него утверждение «заголовок
+        # ставится» зеленело бы и на клиенте, который ставит его всегда и
+        # чем попало.
+        handler, captured = self._capture()
+
+        _client_with(handler).create_specialist_time_off(
+            specialist_id="sp-1",
+            tenant_id="t-1",
+            start_at="2026-09-13T10:00:00+03:00",
+            end_at="2026-09-13T14:00:00+03:00",
+        )
+
+        assert "X-External-User-ID" not in captured[0].headers

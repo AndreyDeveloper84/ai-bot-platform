@@ -123,6 +123,10 @@ const STATE_SUFFIX: Record<RoleState, string> = {
   // («не удалось» — это наша вина, а эта причина не наша), и называть
   // следующий шаг владелицы, а он один — написать мастеру.
   profile_incomplete: " — профиль не заполнен",
+  // §83, текст владельца дословно. Не читается ни как `revoked` (никто
+  // ничего не отзывал), ни как `ayla_unlinked` (вина не наша): следующий
+  // шаг владелицы — открыть карточку мастера и проверить часы.
+  schedule_unconfirmed: " — расписание не подтверждено",
 };
 
 const STATE_CHIP_CLASS: Record<RoleState, string> = {
@@ -138,6 +142,9 @@ const STATE_CHIP_CLASS: Record<RoleState, string> = {
   // движением владелицы. `--fault` здесь был бы неправдой: сломанного
   // ничего нет.
   profile_incomplete: "admin-chip admin-chip--warn",
+  // `--warn`, а не `--fault`: сломанного ничего нет, шаг остался за
+  // владелицей — ровно как у `pending` и `profile_incomplete`.
+  schedule_unconfirmed: "admin-chip admin-chip--warn",
 };
 
 /**
@@ -172,6 +179,9 @@ const STATE_REVOCABLE: Record<RoleState, boolean> = {
   // (и входит ИМЕННО затем, чтобы дозаполнить профиль). Доступ реален,
   // значит его есть что отозвать, если владелица решит.
   profile_incomplete: true,
+  // §83 — по тому же доводу: причина не в доступе. Она принята, связана и
+  // входит в кабинет; отзывать есть что, если владелица решит.
+  schedule_unconfirmed: true,
 };
 
 const MONTHS_GEN = [

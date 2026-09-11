@@ -54,7 +54,20 @@ logger = logging.getLogger(__name__)
 
 
 class WorkingHoursLike(Protocol):
-    """The three attributes the schedule screen reads off a working row."""
+    """Минимум, который есть у ОБОИХ источников рабочей строки.
+
+    Перерыва здесь НЕТ намеренно (DRF-1638). Он есть только у ayla-строки:
+    локальная ``apps.scheduling.WorkingHours`` колонок перерыва не имеет
+    вовсе — в боте перерыв живёт только на проводе Ayla.
+
+    Объявить его здесь значило бы потребовать от локальной модели поля,
+    которого у неё нет, то есть сломать ветку с выключенным флагом ради
+    ветки с включённым. Поэтому протокол описывает пересечение, а перерыв
+    читается у потребителя защищённо (``getattr(row, "break_start", None)``
+    в ``schedule._lunch_of``) — «поля нет» и «перерыв не назначен» там
+    сходятся в один ответ, и это единственное место, где они смеют
+    сойтись.
+    """
 
     is_working: bool
     start_time: time | None
@@ -62,7 +75,11 @@ class WorkingHoursLike(Protocol):
 
 
 class ExceptionLike(Protocol):
-    """The four attributes the schedule screen reads off an exception row."""
+    """Минимум, который есть у ОБОИХ источников строки-исключения.
+
+    Перерыва здесь нет по той же причине, что у рабочей строки: локальная
+    ``ScheduleException`` колонок перерыва не имеет. См. выше.
+    """
 
     id: Any
     type: str
@@ -72,11 +89,21 @@ class ExceptionLike(Protocol):
 
 @dataclass
 class FrameHours:
-    """One weekday of the weekly template, Ayla-wire flavour."""
+    """One weekday of the weekly template, Ayla-wire flavour.
+
+    DRF-1638: перерыв несут, а не роняют. До 11.09.2026 этот класс нёс три
+    поля из семи, и ``break_start`` / ``break_end`` терялись здесь молча —
+    провод их отдавал, расчёт свободных окон их не видел, и обед показывался
+    свободным временем. Экспозиция была нулевой (на пилоте перерыв не
+    заполнен ни у одного из девяти мастеров), то есть дефект не спал, а ждал
+    первой строки.
+    """
 
     is_working: bool
     start_time: time | None
     end_time: time | None
+    break_start: time | None = None
+    break_end: time | None = None
 
 
 @dataclass
@@ -94,6 +121,8 @@ class FrameException:
     type: str
     start_time: time | None
     end_time: time | None
+    break_start: time | None = None
+    break_end: time | None = None
 
 
 @dataclass
@@ -256,6 +285,8 @@ def _weekly_template(rows: list[dict[str, Any]]) -> dict[int, WorkingHoursLike]:
             is_working=bool(row.get("is_working_day")),
             start_time=_hhmm(row.get("start_time")),
             end_time=_hhmm(row.get("end_time")),
+            break_start=_hhmm(row.get("break_start")),
+            break_end=_hhmm(row.get("break_end")),
         )
     return out
 
@@ -273,6 +304,8 @@ def _exceptions(rows: list[dict[str, Any]]) -> dict[date_cls, ExceptionLike]:
                 type=ScheduleException.Type.CUSTOM_HOURS,
                 start_time=_hhmm(row.get("start_time")),
                 end_time=_hhmm(row.get("end_time")),
+                break_start=_hhmm(row.get("break_start")),
+                break_end=_hhmm(row.get("break_end")),
             )
         else:
             out[day] = FrameException(

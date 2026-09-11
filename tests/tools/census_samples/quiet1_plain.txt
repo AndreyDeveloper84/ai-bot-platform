@@ -1,0 +1,9 @@
+pkg_a/test_alpha.py::test_one
+pkg_a/test_alpha.py::test_two
+pkg_a/test_alpha.py::test_p[0]
+pkg_a/test_alpha.py::test_p[1]
+pkg_a/test_alpha.py::test_p[2]
+pkg_b/test_beta.py::test_x
+pkg_b/test_beta.py::test_y
+
+7 tests collected in 0.02s
