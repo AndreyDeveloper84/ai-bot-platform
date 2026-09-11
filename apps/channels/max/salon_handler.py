@@ -571,11 +571,39 @@ def _has_a_master_card_here(bot_user) -> bool:
     return CatalogMaster.all_tenants.filter(linked_bot_user=bot_user).exists()
 
 
+def _already_has_a_solo_workspace(bot_user) -> bool:
+    """Заводил ли этот человек кабинет соло-мастера раньше.
+
+    Ищется по слагу, который `create_solo_provider` выводит из той же
+    пары `(channel, channel_user_id)` — то есть по тому же правилу, по
+    которому кабинет создавался. Спрашивать про карточку мастера здесь
+    бесполезно: кабинет заводит СВОЙ `BotUser` в своём тенанте, и по
+    салонной строке человека он не находится (замерено: предикат
+    `_has_a_master_card_here` на вернувшемся отвечает `False`).
+
+    Без этой проверки человек, у которого кабинет уже есть, получал бы
+    предложение завести его снова и узнавал бы правду только после
+    нажатия. Не молчание, но и не ответ.
+    """
+    from apps.identity.services.solo_onboarding import _solo_tenant_slug
+    from apps.tenancy.models import Tenant
+
+    slug = _solo_tenant_slug(bot_user.channel, bot_user.channel_user_id)
+    return Tenant.objects.filter(slug=slug).exists()
+
+
 def _ask_for_code_with_solo_offer(event: CanonicalEvent, bot_user) -> None:
     """Попросить код — и, если уместно, предложить кабинет соло-мастера."""
 
     if _has_a_master_card_here(bot_user):
         _reply(event, ASK_FOR_CODE)
+        return
+
+    if _already_has_a_solo_workspace(bot_user):
+        # Второе посещение. Предлагать завести то, что уже заведено, —
+        # значит заставить человека нажать, чтобы узнать, что нажимать не
+        # надо было.
+        _reply(event, SOLO_ALREADY_REGISTERED)
         return
 
     from apps.channels.max import outbound

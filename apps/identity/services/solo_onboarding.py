@@ -82,7 +82,7 @@ import logging
 import struct
 from dataclasses import dataclass
 from enum import Enum
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 from uuid import UUID
 
 from django.db import connection, transaction
@@ -92,6 +92,9 @@ from apps.catalog.models import CatalogMaster
 from apps.events.services import emit
 from apps.identity.models import BotUser
 from apps.tenancy.models import Tenant, TenantStaff
+
+if TYPE_CHECKING:  # pragma: no cover — только для аннотации
+    from apps.catalog.master_state import SaleBlock
 
 logger = logging.getLogger(__name__)
 
@@ -208,7 +211,7 @@ class SoloOnboardingResult:
         return SoloSetupState.READY if self.blocked_by is None else SoloSetupState.SETUP_PENDING
 
     @property
-    def blocked_by(self) -> Optional[str]:
+    def blocked_by(self) -> "Optional[SaleBlock]":
         """Почему не готов — машинным именем, или `None`, если готов.
 
         Имя причины нужно человеку, а не логу: «не готов» без причины

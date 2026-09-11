@@ -180,3 +180,61 @@ class TestTheDoorIsReachedOnlyByItsOwnButton:
             # значило бы проверять его, а не дверь.
             assert salon_handler._is_button_tap("cb:menu:requests")
             assert salon_handler._is_button_tap(salon_handler.SOLO_REGISTER_CALLBACK)
+
+
+class TestTheSecondVisitIsNotTreatedAsTheFirst:
+    """Вернувшийся не получает предложения завести то, что уже завёл.
+
+    Разрыв нашло главное окно, но его диагноз не подтвердился замером, и
+    это стоит записать: они предполагали, что сработает
+    `_has_a_master_card_here` и человек получит голое «пришлите код».
+    На деле предикат отвечает `False` — карточка соло-мастера связана со
+    СВОИМ `BotUser` в своём тенанте, а не с салонной строкой человека.
+
+    Настоящий исход был мягче и всё равно плох: предложение заводить
+    кабинет показывалось снова, и правду человек узнавал только после
+    нажатия. Не молчание, но и не ответ.
+    """
+
+    def test_a_returning_owner_is_told_the_workspace_exists(self, bot_user, said):
+        salon_handler._register_solo_provider(
+            _Event(salon_handler.SOLO_REGISTER_CALLBACK), bot_user
+        )
+        said.clear()
+
+        salon_handler._ask_for_code_with_solo_offer(_Event("привет"), bot_user)
+
+        assert said[0]["text"] == salon_handler.SOLO_ALREADY_REGISTERED
+        assert salon_handler.SOLO_OFFER.strip() not in said[0]["text"]
+        assert not said[0]["attachments"]
+
+    def test_the_salon_card_predicate_does_not_see_the_solo_card(self, bot_user, said):
+        """Замер, на котором построена предыдущая проверка.
+
+        Записан тестом, а не комментарием: следующий, кто захочет
+        объединить два предиката в один, увидит, почему их двое.
+        """
+        salon_handler._register_solo_provider(
+            _Event(salon_handler.SOLO_REGISTER_CALLBACK), bot_user
+        )
+
+        assert salon_handler._has_a_master_card_here(bot_user) is False
+        assert salon_handler._already_has_a_solo_workspace(bot_user) is True
+
+    def test_a_newcomer_is_still_offered(self, salon, said):
+        """Положительная стража: проверка возврата не закрыла дверь всем.
+
+        Без неё тесты выше зеленели бы и на коде, который перестал
+        предлагать кабинет вообще.
+        """
+        other = BotUser.all_tenants.create(
+            tenant=salon,
+            channel="max",
+            channel_user_id="solo-door-2",
+            display_name="Анна",
+        )
+
+        salon_handler._ask_for_code_with_solo_offer(_Event("привет"), other)
+
+        assert salon_handler.SOLO_OFFER.strip() in said[0]["text"]
+        assert said[0]["attachments"]
