@@ -3176,6 +3176,28 @@ def customer_wellness_today(request: HttpRequest) -> HttpResponse:
     else:
         numbers_hidden = False
 
+    # ── настроены ли ориентиры (from get_profile) — §6 свода 11.09 ─────
+    # Ориентир показывается только с названным происхождением
+    # (``ayla_calculated`` / ``user_entered``). ``calories_goal`` сводки и
+    # ``norm_ml`` воды приезжают ОТДЕЛЬНЫМИ ответами и происхождения не
+    # несут: у ``unknown_legacy`` каталог до команды очистки (#332)
+    # присылает в них числа — на пилоте это все шесть профилей, у двух
+    # число выведено от подставленных 70 кг. Профиль своё происхождение
+    # знает, и он же решает за соседние ответы.
+    #
+    # Fail-closed, как ``numbers_hidden`` выше и по той же причине: пока
+    # профиль не прочитан, происхождение числа не подтверждено, и §103
+    # запрещает выдавать его за актуальный ориентир. Нет профиля вовсе —
+    # нет и ориентиров, это не отказ, а ответ.
+    # ``getattr(..., False)``, а не прямое обращение: чужой объект без
+    # этого признака — не настроен. Ошибка типа здесь превратилась бы в
+    # 500 дашборда, а fail-closed — в отсутствие ключа, что и требуется.
+    targets_configured = (
+        profile_res is not None
+        and not isinstance(profile_res, Exception)
+        and bool(getattr(profile_res, "targets_are_configured", False))
+    )
+
     # ── hydration (from get_water_today) ────────────────────────────────
     water_known = True
     water_glasses_eaten = 0
@@ -3233,8 +3255,9 @@ def customer_wellness_today(request: HttpRequest) -> HttpResponse:
     # загрузить» for an absent slice and numbers for a present one.
     if summary_known:
         payload["calories_eaten"] = calories_eaten
-        # Цель уходит, только когда она есть. Ключа нет = цели нет.
-        if calories_target is not None:
+        # Цель уходит, только когда она есть И настроена. Ключа нет = цели
+        # нет; ``NOT_CONFIGURED`` §6 на этой границе — отсутствие ключа.
+        if calories_target is not None and targets_configured:
             payload["calories_target"] = calories_target
         if pfc is not None:
             payload["pfc"] = pfc
@@ -3248,8 +3271,9 @@ def customer_wellness_today(request: HttpRequest) -> HttpResponse:
         payload["nutrition_numbers_hidden"] = numbers_hidden
     if water_known:
         payload["water_glasses_eaten"] = water_glasses_eaten
-        # Цель уходит, только когда она есть. Ключа нет = нормы нет.
-        if water_glasses_target is not None:
+        # Цель уходит, только когда она есть И настроена — то же правило,
+        # что у калорий: норма без происхождения не показывается.
+        if water_glasses_target is not None and targets_configured:
             payload["water_glasses_target"] = water_glasses_target
     # Omitted — not `[]` — when the goal layer could not be reached: an
     # empty list means «no goal chosen», and saying that on an outage is
