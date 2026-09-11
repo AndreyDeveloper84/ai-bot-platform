@@ -91,11 +91,41 @@ jobs:
             # исходников, а git под sudo не зовёт ни один шаг: значит писал
             # человек, и не однажды. Кодом это не чинится — чинится тем, что
             # шаг называет актора вслух и перестаёт быть предметом догадок.
-            echo \"::notice::шаг идёт от пользователя \$(id -un)\"
+            # Печатается ЧИСЛО, а не имя, и это не косметика.
+            #
+            # \`id -un\` выводил имя, совпадающее со значением секрета
+            # DEV_USER, и GitHub вычёркивал его: в логе стояло
+            # «пользователь ***». Строка, заведённая ради снятия догадки об
+            # акторе, догадку не снимала — и выглядела при этом рабочим
+            # диагностическим выводом. Носитель был, сведений в нём не было.
+            #
+            # Ноль секретом не является и маскировку переживает. Число к тому
+            # же полезнее имени: именно оно уходит в --user.
+            echo \"::notice::шаг идёт от uid \$(id -u), gid \$(id -g)\"
             cd '${DEV_DEPLOY_PATH}'
             git fetch origin
             git checkout dev
             git pull --ff-only origin dev
+            # Кому принадлежат файлы, которые напишет контейнер.
+            #
+            # Первая редакция брала \`id -u\` — ЗОВУЩЕГО. Это был прокси для
+            # «владелец дерева», верный ровно при допущении, что зовущий и
+            # есть владелец. Допущение оказалось ложным: выкладка заходит
+            # root-ом, \`id -u\` давал 0, и --user честно передавал ноль.
+            #
+            # Флаг работал безупречно и не достигал цели: 154 root-объекта в
+            # staticfiles после выкладки 11.09.2026, ровно столько, сколько
+            # collectstatic и сообщил. Мера, которая делает написанное и не
+            # делает нужного, сторожем «флаг присутствует» не ловится —
+            # флаг присутствует. Поэтому берётся то, что нужно на самом
+            # деле: владелец дерева.
+            OWNER_UID=\$(stat -c %u '${DEV_DEPLOY_PATH}')
+            OWNER_GID=\$(stat -c %g '${DEV_DEPLOY_PATH}')
+            if [ -z \"\$OWNER_UID\" ] || [ -z \"\$OWNER_GID\" ]; then
+              echo \"::error::не удалось определить владельца дерева выкладки\"
+              exit 1
+            fi
+            echo \"::notice::файлы пишутся от \$OWNER_UID:\$OWNER_GID (владелец дерева)\"
             # Откуда приезжает базовый слой (DRF-1440). Пилот достаёт
             # Docker Hub плохо — анонимный token-endpoint отвечает через
             # раз, и 31.08 две подряд выкладки умерли на нём до единой
@@ -141,7 +171,7 @@ jobs:
             sudo docker compose --env-file .env.staging \
               -f docker-compose.yml -f docker-compose.staging.yml \
               -f docker-compose.staging.local.yml \
-              -p ayla-bot-staging run --rm --user \"\$(id -u):\$(id -g)\" \
+              -p ayla-bot-staging run --rm --user \"\$OWNER_UID:\$OWNER_GID\" \
               web python manage.py migrate --noinput
             # DRF-1610 — collectstatic. Шага не было НИКОГДА: \`git grep
             # collectstatic origin/dev -- .github\` не находил ничего, и
@@ -167,7 +197,7 @@ jobs:
             sudo docker compose --env-file .env.staging \
               -f docker-compose.yml -f docker-compose.staging.yml \
               -f docker-compose.staging.local.yml \
-              -p ayla-bot-staging run --rm --user \"\$(id -u):\$(id -g)\" \
+              -p ayla-bot-staging run --rm --user \"\$OWNER_UID:\$OWNER_GID\" \
               web python manage.py collectstatic --noinput
             # Проверка ИСХОДА, а не кода возврата — DRF-1605 ровно про этот
             # класс дефекта. \`collectstatic --noinput\` завершается нулём и при
@@ -260,7 +290,17 @@ jobs:
           MA="${DEV_DEPLOY_PATH}/apps/miniapp"
 
           $SSH "rm -rf '$MA/dist.new' && mkdir -p '$MA/dist.new'"
-          tar -C apps/miniapp/dist -cf - . | $SSH "tar -C '$MA/dist.new' -xf -"
+          # --no-same-owner: не восстанавливать владельцев ИЗ АРХИВА.
+          #
+          # GNU tar под root по умолчанию берёт uid/gid из архива, под
+          # обычным пользователем игнорирует. Замер 11.09.2026: шесть
+          # объектов в apps/miniapp/dist с uid 1001, которого в passwd
+          # хоста нет вовсе. Это не «раннер записал» — это доказательство,
+          # что распаковывал root и добросовестно перенёс чужие номера.
+          #
+          # docker здесь не участвует, tar идёт прямо по ssh, поэтому
+          # --user на этот шаг не влияет по построению: у него своя правка.
+          tar -C apps/miniapp/dist -cf - . | $SSH "tar --no-same-owner -C '$MA/dist.new' -xf -"
           $SSH "cd '$MA' && test -s dist.new/index.html && test -d dist.new/assets && ls -A dist.new/assets | grep -q ."
           $SSH "cd '$MA' && rm -rf dist.prev && { [ -d dist ] && mv dist dist.prev || true; } && mv dist.new dist && stat -c '%y %n' dist/index.html"
 
@@ -290,7 +330,17 @@ jobs:
           DEV_USER: ${{ secrets.DEV_USER }}
         run: |
           ssh -i ~/.ssh/dev_deploy "${DEV_USER}@${DEV_HOST}" bash -lc "
-            echo \"::notice::шаг идёт от пользователя \$(id -un)\"
+            # Печатается ЧИСЛО, а не имя, и это не косметика.
+            #
+            # \`id -un\` выводил имя, совпадающее со значением секрета
+            # DEV_USER, и GitHub вычёркивал его: в логе стояло
+            # «пользователь ***». Строка, заведённая ради снятия догадки об
+            # акторе, догадку не снимала — и выглядела при этом рабочим
+            # диагностическим выводом. Носитель был, сведений в нём не было.
+            #
+            # Ноль секретом не является и маскировку переживает. Число к тому
+            # же полезнее имени: именно оно уходит в --user.
+            echo \"::notice::шаг идёт от uid \$(id -u), gid \$(id -g)\"
             for i in 1 2 3 4 5; do
               if curl -fsS http://127.0.0.1:8014/readyz/ >/dev/null; then
                 echo '::notice::readyz green (attempt '\$i')'; exit 0
@@ -310,7 +360,17 @@ jobs:
           SHA: ${{ github.sha }}
         run: |
           ssh -i ~/.ssh/dev_deploy "${DEV_USER}@${DEV_HOST}" bash -lc "
-            echo \"::notice::шаг идёт от пользователя \$(id -un)\"
+            # Печатается ЧИСЛО, а не имя, и это не косметика.
+            #
+            # \`id -un\` выводил имя, совпадающее со значением секрета
+            # DEV_USER, и GitHub вычёркивал его: в логе стояло
+            # «пользователь ***». Строка, заведённая ради снятия догадки об
+            # акторе, догадку не снимала — и выглядела при этом рабочим
+            # диагностическим выводом. Носитель был, сведений в нём не было.
+            #
+            # Ноль секретом не является и маскировку переживает. Число к тому
+            # же полезнее имени: именно оно уходит в --user.
+            echo \"::notice::шаг идёт от uid \$(id -u), gid \$(id -g)\"
             cd '${DEV_DEPLOY_PATH}'
             sudo docker compose --env-file .env.staging \
               -f docker-compose.yml -f docker-compose.staging.yml \
