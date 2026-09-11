@@ -69,6 +69,8 @@ from typing import Any, cast
 from django.conf import settings
 import redis
 
+from .safety_input import KNOWN_SAFETY_STATES, SafetyResult, SafetyState
+
 logger = logging.getLogger(__name__)
 
 
@@ -154,6 +156,20 @@ class ConversationState:
     slots: dict[str, SlotValue] = field(default_factory=dict)
     epoch_started_at_revision: int = 1
     last_activity_at: datetime | None = None
+    #: The Safety Engine's verdict for this conversation.
+    #:
+    #: The default is `not_evaluated()` — `UNKNOWN` — and that is not the
+    #: silent default §11.4 forbids. The two are opposites: a default of
+    #: `NORMAL` would **grant** permission nobody gave, while `UNKNOWN` gives
+    #: `BLOCKED(SAFETY_UNKNOWN)` and grants nothing. A default is admissible
+    #: exactly when forgetting to set it withholds rather than permits.
+    #:
+    #: It lives on the state rather than being passed alongside it because the
+    #: verdict and the revision it was computed for are one fact (see
+    #: `SafetyResult`), and `f()` checks that fact against `state.revision`.
+    #: Carrying them separately is what lets a verdict from before the person's
+    #: last message be read as an answer to their last message.
+    safety: SafetyResult = field(default_factory=SafetyResult.not_evaluated)
 
     def slot(self, name: str) -> SlotValue:
         """A slot never asked about is `UNKNOWN` — never `None`.
@@ -175,6 +191,27 @@ class ConversationState:
             slots=updated,
             epoch_started_at_revision=self.epoch_started_at_revision,
             last_activity_at=self.last_activity_at,
+            safety=self.safety,
+        )
+
+    def with_safety(self, verdict: SafetyResult) -> ConversationState:
+        """Return a new state carrying `verdict`. The state itself is frozen.
+
+        Deliberately not a setter and deliberately not validating the revision:
+        the producer may evaluate for a revision this object has already moved
+        past, and hiding that here would turn a checkable staleness (P3, which
+        `f()` enforces against `state.revision`) into a value that was quietly
+        refused at the door. The verdict is carried as given; whether it is
+        fresh enough is the engine's question, asked out loud.
+        """
+
+        return ConversationState(
+            conversation_id=self.conversation_id,
+            revision=self.revision,
+            slots=dict(self.slots),
+            epoch_started_at_revision=self.epoch_started_at_revision,
+            last_activity_at=self.last_activity_at,
+            safety=verdict,
         )
 
 
@@ -260,9 +297,123 @@ def peek_revision(conversation_id: str) -> int | None:
     return None if raw is None else int(raw)
 
 
+#: Fields of `SafetyResult` the codec knows how to carry, in a stable order.
+#:
+#: Named rather than derived so the payload shape does not drift when the type
+#: gains a field — and guarded, in `tests/test_safety_in_state.py`, against
+#: `dataclasses.fields(SafetyResult)`, so that a field added upstream fails a
+#: check instead of being dropped on the floor at read time. A claim of
+#: completeness with no guard behind it lives only until the next addition.
+_SAFETY_CODEC_FIELDS: tuple[str, ...] = (
+    "state",
+    "evaluated_at_revision",
+    "rule_id",
+    "policy_version",
+    "required_slots",
+    "forbidden_capabilities",
+)
+
+
+class StoredVerdictWithoutOrigin(ValueError):
+    """A blob carried a `"safety"` object whose state is `UNKNOWN`.
+
+    Nothing in this package writes that: `_encode` omits the key entirely for a
+    verdict that does not exist, because **absence already means "not
+    evaluated"**. So a stored `UNKNOWN` has a second origin, and the two are
+    indistinguishable once written: "the engine did not run" and "an adapter
+    swallowed an error and returned the fail-closed value" arrive identical.
+
+    That second one is the dangerous half, and it is dangerous precisely
+    because it is fail-closed. A wrong `NORMAL` gets noticed — it lets through
+    something that should have stopped. A wrong `UNKNOWN` looks like caution,
+    blocks for a plausible reason, and nobody ever asks which reason. The
+    mechanism would block correctly nine times and on a swallowed error the
+    tenth, indistinguishably from outside.
+
+    `SafetyResult.__post_init__` cannot catch this and not from weakness:
+    `UNKNOWN` with no revision is its *permitted* pair. Origin is not visible
+    from the value. The storage format is the only place it can be kept, and it
+    keeps it by having no way to say it.
+    """
+
+
+def _encode_safety(verdict: SafetyResult) -> dict[str, Any] | None:
+    """`None` for a verdict that does not exist — the caller omits the key.
+
+    Not `null`, not an object saying `UNKNOWN`: one representation per fact.
+    """
+
+    if not verdict.is_known:
+        return None
+    return {
+        "state": verdict.state.value,
+        "evaluated_at_revision": verdict.evaluated_at_revision,
+        "rule_id": verdict.rule_id,
+        "policy_version": verdict.policy_version,
+        "required_slots": list(verdict.required_slots),
+        "forbidden_capabilities": list(verdict.forbidden_capabilities),
+    }
+
+
+def _decode_safety(entry: Any) -> SafetyResult:
+    """No key — including a payload written before the key existed — is `UNKNOWN`.
+
+    This is the whole point of the field being stored at all. A state blob
+    written yesterday has no `"safety"` key, and a decoder that answered
+    `NORMAL` there would let the fail-closed construction collapse **silently,
+    on data already in Redis**. `SafetyResult` has no default for `state` for
+    exactly this reason; the decoder is a second door into the same type and
+    the prohibition applies to it whole.
+
+    Three inputs, three different answers, and the differences are deliberate:
+
+    * **key absent** — a fact with one meaning. `UNKNOWN`, no complaint.
+    * **key present, unreadable shape** — `UNKNOWN`, because an older reader
+      meeting a newer writer during a rolling deploy is a real event, and
+      killing the person's turn over it buys nothing a block does not. What is
+      lost is the verdict, and the honest reading of a lost verdict is that we
+      were not told.
+    * **key present, readable, says `UNKNOWN`** — refused. Nothing writes it,
+      so it can only come from a writer that had no verdict and wrote one
+      anyway. See `StoredVerdictWithoutOrigin`.
+
+    The middle case is tolerance about *shape*; the last is strictness about
+    *value*. A format may outlive its readers; it may not hold a fact it has a
+    shorter way of not holding.
+    """
+
+    if entry is None:
+        return SafetyResult.not_evaluated()
+    if not isinstance(entry, dict):
+        logger.warning(
+            "dre.state.safety_entry_unreadable type=%s — вердикт потерян, читаем как UNKNOWN",
+            type(entry).__name__,
+        )
+        return SafetyResult.not_evaluated()
+    if SafetyState(entry["state"]) not in KNOWN_SAFETY_STATES:
+        raise StoredVerdictWithoutOrigin(
+            f"a stored safety verdict says {entry['state']!r}, which is the absence of a "
+            "verdict. Absence is written by omitting the key; an object saying so has a "
+            "writer behind it, and «was never evaluated» is now indistinguishable from "
+            "«something swallowed an error and returned the fail-closed value»."
+        )
+    return SafetyResult(
+        state=SafetyState(entry["state"]),
+        evaluated_at_revision=entry.get("evaluated_at_revision"),
+        rule_id=entry.get("rule_id"),
+        policy_version=entry.get("policy_version"),
+        required_slots=tuple(entry.get("required_slots") or ()),
+        forbidden_capabilities=tuple(entry.get("forbidden_capabilities") or ()),
+    )
+
+
 def _encode(state: ConversationState) -> str:
     payload: dict[str, Any] = {
-        "v": 1,
+        # v2 — DRF-1629: the "safety" key below. The version says which shape
+        # was read; it does not decide anything. A v1 blob is read correctly
+        # because `_decode_safety` handles the missing key, not because the
+        # number is inspected.
+        "v": 2,
         "conversation_id": state.conversation_id,
         "revision": state.revision,
         "epoch_started_at_revision": state.epoch_started_at_revision,
@@ -279,6 +430,12 @@ def _encode(state: ConversationState) -> str:
             for name, slot in sorted(state.slots.items())
         },
     }
+    # Omitted, not written as null: a verdict that does not exist is said by
+    # the key not being there. One representation per fact — see
+    # `StoredVerdictWithoutOrigin` for what the second one would cost.
+    encoded_safety = _encode_safety(state.safety)
+    if encoded_safety is not None:
+        payload["safety"] = encoded_safety
     return json.dumps(payload, ensure_ascii=False)
 
 
@@ -299,6 +456,7 @@ def _decode(raw: str) -> ConversationState:
         },
         epoch_started_at_revision=int(payload.get("epoch_started_at_revision", 1)),
         last_activity_at=datetime.fromisoformat(last_activity) if last_activity else None,
+        safety=_decode_safety(payload.get("safety")),
     )
 
 
@@ -317,6 +475,7 @@ def save(state: ConversationState, *, now: datetime | None = None) -> None:
         slots=dict(state.slots),
         epoch_started_at_revision=state.epoch_started_at_revision,
         last_activity_at=now or datetime.now(UTC),
+        safety=state.safety,
     )
     _redis_client().set(
         _state_key(state.conversation_id),
@@ -379,4 +538,9 @@ def open_epoch(conversation_id: str, *, after: LoadResult) -> ConversationState:
         revision=revision,
         slots={},
         epoch_started_at_revision=revision,
+        # A new epoch inherits no verdict, and says so rather than omitting it.
+        # The previous epoch's safety answer was computed for a revision this
+        # one is already past; carrying it across the gap would be the stale
+        # input §15.2 blocks on, wearing a fresh state's number.
+        safety=SafetyResult.not_evaluated(),
     )
