@@ -140,6 +140,18 @@ class NutritionUnavailableError(NutritionAPIError):
     """Ayla is down or the circuit is open — caller should show a fallback."""
 
 
+class NothingToConfirmError(NutritionAPIError):
+    """Каталог ответил ``409 NOTHING_TO_CONFIRM``: ориентир не в состоянии
+    ``ayla_proposed``. Несёт текущий источник — у трёх состояний три
+    разных ответа человеку («ещё не считали» / «уже подтверждено» /
+    «поставлено рукой»), и склеивать их в одно «не вышло» нельзя.
+    """
+
+    def __init__(self, source: str) -> None:
+        self.source = source
+        super().__init__(f"nothing_to_confirm:{source or 'unknown'}")
+
+
 class FoodNotRecognizedError(NutritionAPIError):
     """Ayla returned 400 FOOD_NOT_RECOGNIZED — not food / unreadable photo."""
 
@@ -267,6 +279,55 @@ TARGETS_NOT_CONFIGURED = "not_configured"
 def targets_configured(source: str | None) -> bool:
     """Есть ли у ориентира названное происхождение (§6, §103)."""
     return (source or "") in TARGETS_CONFIGURED_SOURCES
+
+
+#: Источник, при котором числа в ``norms`` — ПРЕДЛОЖЕНИЕ (§5.1, каталог
+#: #369): показать можно и нужно — как предложение; действовать они не
+#: действуют, и инвариант ``ProfileResponse`` их обнуляет. Читать их
+#: отсюда, из ``raw`` — единственный санкционированный путь.
+TARGETS_PROPOSED = "ayla_proposed"
+
+#: Префикс имён отказа расчёта по health-фактору (каталог #372, §5.1):
+#: ``health_factor_pregnant`` и т. д. в ``overrides_applied``.
+HEALTH_FACTOR_PREFIX = "health_factor_"
+
+
+def proposed_norms(profile: "ProfileResponse") -> dict[str, int | None]:
+    """Числа предложения — из ``raw``, только при ``ayla_proposed``.
+
+    Инвариант DTO (§6) обнуляет поля ориентиров у не настроенного
+    источника, и это правильно для всех читателей, кроме одного: экрана,
+    который обязан показать предложение как предложение, чтобы человек
+    мог его подтвердить (§5.1). Для любого другого источника — пустой
+    словарь: предложением называется только то, что каталог так назвал.
+    """
+    if profile.targets_source != TARGETS_PROPOSED:
+        return {}
+    norms = profile.raw.get("norms") or {}
+    if not isinstance(norms, dict):
+        return {}
+    return {
+        "daily_kcal": _target_or_none(norms, "daily_kcal"),
+        "protein_g": _target_or_none(norms, "daily_protein_g"),
+        "fat_g": _target_or_none(norms, "daily_fat_g"),
+        "carbs_g": _target_or_none(norms, "daily_carbs_g"),
+        "water_ml": _target_or_none(norms, "daily_water_ml"),
+    }
+
+
+def health_factor_refusals(profile: "ProfileResponse") -> list[str]:
+    """Имена health-факторов, по которым каталог отказал считать (§5.1).
+
+    ``["pregnant"]`` из ``{"reason": "health_factor_pregnant"}``. Пусто —
+    отказа по здоровью не было (или ключа нет — тогда и сказать нечего).
+    """
+    overrides = profile.raw.get("overrides_applied") or []
+    names: list[str] = []
+    for entry in overrides:
+        reason = str((entry or {}).get("reason") or "") if isinstance(entry, dict) else ""
+        if reason.startswith(HEALTH_FACTOR_PREFIX):
+            names.append(reason[len(HEALTH_FACTOR_PREFIX) :])
+    return names
 
 
 def _target_or_none(norms: dict[str, Any], key: str) -> int | None:
@@ -843,6 +904,50 @@ class NutritionClient:
         # the type-checker rather than runtime.
         assert result is not None
         return result
+
+    async def confirm_targets(
+        self,
+        *,
+        external_user_id: str,
+    ) -> tuple[ProfileResponse, str]:
+        """POST ``/api/v1/nutrition/internal/profile/targets/confirm/`` (§5.1).
+
+        Человек подтверждает предложенный ориентир: ``ayla_proposed`` →
+        ``ayla_calculated``. Тела нет — подтверждается ровно то, что
+        предложено. Возвращает профиль и исход: ``confirmed`` либо
+        ``already_confirmed`` (повтор кнопки — не ошибка). ``409
+        NOTHING_TO_CONFIRM`` → :class:`NothingToConfirmError` с текущим
+        источником.
+        """
+        now = time.monotonic()
+        if self._circuit.is_open(now=now):
+            raise NutritionUnavailableError("circuit_open")
+
+        url = self._urls.build("nutrition/internal/profile/targets/confirm/")
+        headers = {
+            "X-Service-Token": self._token,
+            "X-External-User-ID": external_user_id,
+        }
+        try:
+            async with httpx.AsyncClient(timeout=self._timeout_s) as http:
+                resp = await http.post(url, headers=headers, json={})
+        except (httpx.TimeoutException, httpx.NetworkError) as exc:
+            self._circuit.record_failure(now=now)
+            raise NutritionUnavailableError(f"network: {type(exc).__name__}") from exc
+
+        if resp.status_code == 409:
+            self._circuit.record_success()
+            try:
+                err = resp.json().get("error") or {}
+            except ValueError:
+                err = {}
+            source = str(((err.get("details") or {}).get("targets_source")) or "")
+            raise NothingToConfirmError(source)
+
+        result = self._parse_profile_response(resp, allow_404=False)
+        assert result is not None
+        outcome = str((result.raw.get("confirmation") or {}).get("outcome") or "")
+        return result, outcome
 
     def _parse_profile_response(
         self,
