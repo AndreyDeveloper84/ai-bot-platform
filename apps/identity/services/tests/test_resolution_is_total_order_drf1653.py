@@ -100,7 +100,10 @@ def test_resolution_repeats_itself_on_a_tie(tied_rows: tuple[BotUser, BotUser]) 
     once = resolve_bot_user(_Verified(CHANNEL_USER_ID), surface="probe")
     twice = resolve_bot_user(_Verified(CHANNEL_USER_ID), surface="probe")
 
+    # Оба конца проверяются до сравнения: `None == None` прошло бы молча и
+    # означало бы «резолвер не нашёл никого», а не «нашёл одно и то же».
     assert once is not None
+    assert twice is not None
     assert once.pk == twice.pk
 
 
@@ -156,9 +159,11 @@ def test_reminder_routing_repeats_itself_on_a_tie(settings) -> None:
     assert len(seen) == 1, "ничья не построена — стеречь нечего"
 
     once = _reminder_row(tenant=tenant, user_id=ayla_user_id)
+    assert once is not None, "напоминание некому маршрутизировать — стеречь нечего"
+
     BotUser.all_tenants.filter(pk=once.pk).update(chat_id="moved")
     rows.update(last_seen=tie)
     twice = _reminder_row(tenant=tenant, user_id=ayla_user_id)
 
-    assert once is not None
+    assert twice is not None
     assert once.pk == twice.pk
