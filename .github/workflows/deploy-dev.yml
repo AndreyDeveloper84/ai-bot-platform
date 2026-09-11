@@ -409,6 +409,58 @@ jobs:
             echo '::error::readyz red after 5 attempts — investigate dev deploy'; exit 1
           "
 
+      # DRF-1661. Состояние поверхности снимается КОМАНДОЙ после каждой
+      # выкладки и кладётся в дерево — не в репозиторий: файл есть вывод, а
+      # не источник, и коммит превратил бы замер во мнение. Шаг стоит ПОСЛЕ
+      # smoke: числа с контейнера, который не поднялся, — не числа.
+      #
+      # Путь — docs/generated/ (в .gitignore). Отслеживаемый файл,
+      # перезаписанный здесь, уронил бы СЛЕДУЮЩУЮ выкладку: git checkout
+      # dev откажет «local changes would be overwritten» ещё до миграций.
+      #
+      # `run --rm --user "$OWNER_UID:$OWNER_GID"`, как у migrate и
+      # collectstatic, а не `exec -T`: sudo -u решает, кто позвал docker на
+      # хосте, а кто пишет в примонтированное дерево — решает --user
+      # внутри контейнера. Через exec файл вышел бы root-овым в дереве
+      # владельца (разбор #1586: два механизма на два разных предмета).
+      # Живой контейнер команде не нужен — она читает базу и настройки.
+      #
+      # Голых обратных кавычек в ssh-строке нет — они уже роняли выкладку
+      # (#1576), и на них стоит сторож.
+      #
+      # continue-on-error: сорвавшийся замер не откатывает выкладку, но и не
+      # прячется — шаг виден жёлтым, а ::warning:: — в сводке прогона.
+      - name: Publish surface state (bot) into the deploy tree
+        if: steps.guard.outputs.ready == 'true'
+        continue-on-error: true
+        env:
+          DEV_HOST: ${{ secrets.DEV_HOST }}
+          DEV_USER: ${{ secrets.DEV_USER }}
+          DEV_DEPLOY_PATH: ${{ secrets.DEV_DEPLOY_PATH }}
+        run: |
+          ssh -i ~/.ssh/dev_deploy "${DEV_USER}@${DEV_HOST}" bash -lc "
+            set -euo pipefail
+            echo \"::notice::шаг идёт от uid \$(id -u), gid \$(id -g)\"
+            cd '${DEV_DEPLOY_PATH}'
+            OWNER=\$(stat -c %U '${DEV_DEPLOY_PATH}')
+            OWNER_UID=\$(stat -c %u '${DEV_DEPLOY_PATH}')
+            OWNER_GID=\$(stat -c %g '${DEV_DEPLOY_PATH}')
+            if [ -z \"\$OWNER\" ] || [ -z \"\$OWNER_UID\" ] || [ -z \"\$OWNER_GID\" ]; then
+              echo \"::error::владелец дерева не определён\"; exit 1
+            fi
+            OUT=docs/generated/SURFACE_STATE.md
+            sudo -u \"\$OWNER\" -H mkdir -p docs/generated
+            if sudo -u \"\$OWNER\" -H docker compose --env-file .env.staging \
+              -f docker-compose.yml -f docker-compose.staging.yml \
+              -f docker-compose.staging.local.yml \
+              -p ayla-bot-staging run --rm --user \"\$OWNER_UID:\$OWNER_GID\" \
+              web python manage.py surface_state --write \"\$OUT\" >/dev/null; then
+              echo \"::notice::surface_state (bot): записано \$OUT, \$(wc -l < \"\$OUT\") строк, владелец uid \$(stat -c %u \"\$OUT\") (дерево: \$OWNER_UID)\"
+            else
+              echo \"::warning::surface_state (bot) не отработала — состояние поверхности НЕ снято, \$OUT в дереве устарел или отсутствует\"; exit 1
+            fi
+          "
+
       - name: Telegram smoke alert (informational)
         if: steps.guard.outputs.ready == 'true'
         continue-on-error: true
