@@ -68,149 +68,90 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  test:
-    name: pytest + ruff + mypy
+
+  # ---------------------------------------------------------------------
+  # DRF-1349 — WHAT THIS FILE LOOKED LIKE BEFORE, AND WHY IT CHANGED.
+  #
+  # Until this ticket there was ONE Python job, `pytest + ruff + mypy`,
+  # that did everything in sequence. Measured on the `ci` run of PR #1544
+  # (run 34482744443, job 102889320629, SHA e0640f3) from the jobs API —
+  # job `started_at` 13:27:26Z -> `completed_at` 14:06:26Z = 39m00s —
+  # step by step:
+  #
+  #     29m10s   75%   pytest apps/ (full suite)      <- the subject
+  #      3m37s    9%   detect-secrets (baseline audit)
+  #      3m20s    9%   pytest tests/ (cross-cutting)
+  #      1m05s    3%   eventbus booking lifecycle
+  #      0m37s    2%   mypy
+  #      0m22s    1%   ruff + 8 AST guards + django check + migration drift
+  #      0m20s         set up job + containers + checkout
+  #      0m16s         apt postgresql-client + uv install + uv sync
+  #                    (`uv sync --frozen` is 4s — the cache works; there
+  #                     are no savings hiding in dependency install)
+  #
+  # Everything waited on everything above it. A red `pytest apps/` was
+  # learned at ~35 min. A leaked credential was learned at ~4 min, but
+  # only because the secret guard had been hoisted to the top of that one
+  # job — which pushed the tests 3m37s further out on every green run.
+  # That trade was forced by the single-job shape, not chosen.
+  #
+  # THE SHAPE NOW — four Python jobs that all start at the same moment:
+  #
+  #   secret-scan   detect-secrets only. ~3.7 min. Nothing waits on it and
+  #                 it waits on nothing. Still blocking: the aggregate
+  #                 below refuses to be green without it.
+  #   checks        ruff, the 8 AST guards, django check, migration drift,
+  #                 tests/smoke, tests/ cross-cutting, the Ayla route-table
+  #                 contract, the eventbus gate, mypy, and the collection
+  #                 census. ~7 min.
+  #   apps-shard    `pytest apps/` split five ways by MEASURED time — see
+  #                 the layout table on that job. ~8 min each, all at once.
+  #   test          the aggregate. Does no work. Owns the name the branch
+  #                 protection requires, and is the only job that has it.
+  #
+  # Expected critical path: ~8.5 min against the 39 min above.
+  #
+  # WHY AN AGGREGATE JOB EXISTS AT ALL — READ THIS BEFORE RESTRUCTURING.
+  # `pytest + ruff + mypy` is a REQUIRED status check on `dev`. Verified
+  # 2026-09-11 against the protection API, not assumed:
+  #
+  #     required_status_checks.checks =
+  #       [{"context": "pytest + ruff + mypy"},
+  #        {"context": "miniapp (typecheck + vitest)"},
+  #        {"context": "replay fixtures (golden + adversarial + voice)"},
+  #        {"context": "ticket reference (DRF-NNN or named NO-TICKET)"}]
+  #
+  # A check context IS the job name. Turning the old job into a matrix
+  # would have reported `pytest + ruff + mypy (1)`, `(2)`, ... — five new
+  # contexts and NOT the required one. The required check would then never
+  # arrive and every open PR would block on it forever. Editing the
+  # protection list is an owner-only action, so it is not a way out.
+  #
+  # The name therefore survives on a job that does no work: `test` below
+  # depends on the other three and republishes their verdict under the
+  # required name. If you split, rename or merge jobs here, the ONE
+  # invariant is that exactly one job is still called
+  # `pytest + ruff + mypy`.
+  # ---------------------------------------------------------------------
+
+  # ---------------------------------------------------------------------
+  # detect-secrets, lifted off the hot path.
+  #
+  # It used to be the first three steps of the single Python job, placed
+  # there deliberately so a leaked credential went red at ~4 min instead
+  # of ~35. That reasoning was right about the problem and is preserved
+  # verbatim below. What it cost was 3m37s in front of every green run.
+  #
+  # As its own job it gets both halves: a credential still goes red at
+  # ~4 min, and it no longer stands in front of anything. It is not
+  # weakened — `test` below cannot be green unless this job is.
+  # ---------------------------------------------------------------------
+  secret-scan:
+    name: secret scan (detect-secrets)
     runs-on: ubuntu-latest
-    # DRF-1121 bumped this from 15 to 45: the new "pytest apps/ (full
-    # suite)" step alone measured ~30 min against Postgres locally
-    # (7246 tests). Flagged for tech-lead confirmation in
-    # REPORT_MECHANIZATION.md — a real CI-feedback-latency tradeoff,
-    # not a free win.
-    #
-    # DRF-1253 left it at 45 and recorded: the whole job "measured
-    # 26m05s ... The headroom is real; do not spend it."
-    #
-    # DRF-1381 — THAT CONCLUSION IS DEAD, AND THAT IS THE LESSON.
-    # It was true the day it was written. Nothing re-checked it while
-    # the thing it described changed underneath: the same job now
-    # measures a 42.5 min median, +63% on the 26m05s quoted above. The
-    # sentence stayed confident, so three PRs were debugged for a
-    # failure that was really this line.
-    #
-    # MEASURED 25.08 from the GitHub jobs API. JOB duration
-    # (`started_at` -> `completed_at` of this job), NOT run duration:
-    # a run's `createdAt` -> `updatedAt` includes queue time and this
-    # repo has `success` runs with 89 min of wall-clock. Sample = the
-    # last 60 `ci` runs, all after DRF-1377 de-duplicated the triggers,
-    # so this is the suite's own cost and not two runs elbowing each
-    # other on one runner pool.
-    #
-    #   19 runs finished the job:  min 36.7   median 42.5   max 44.9
-    #   11 runs were killed by THIS ceiling, all at 45.2-45.4 min
-    #
-    #   (19 further runs were cancelled by `concurrency`, not by the
-    #   clock — they stop early by design and carry no duration
-    #   information, so they are excluded rather than averaged in.)
-    #
-    # READ THE SECOND LINE BEFORE TRUSTING THE FIRST. Of the 30 runs
-    # allowed to do the work, 11 — 37% — hit the ceiling. So "max
-    # observed = 44.9" is not the maximum of anything: the distribution
-    # is CENSORED at 45, and its entire upper tail was deleted before
-    # it could be recorded. Sizing a new ceiling off 44.9 would repeat
-    # the DRF-1253 mistake with fresher-looking numbers.
-    #
-    # Fitting a censored (Tobit) normal to all 30 observations — the 19
-    # exact durations plus the 11 "longer than 45" facts — recovers the
-    # distribution this ceiling has been hiding:
-    #
-    #   mu = 44.15 min      sigma = 2.64 min
-    #
-    # Cross-check before using it: that fit predicts 37.4% of runs
-    # exceeding 45 min, against 36.7% observed. It reproduces the
-    # failure it is being used to size away from, so its tail is worth
-    # quoting — p99 = 50.3 min, p99.9 = 52.3 min.
-    #
-    # 45 was therefore never a ceiling over this suite. It sits 0.3
-    # sigma above the median: a coin-flip the suite happens to win
-    # about six times in ten. PRs #1275, #1278 and #1282 each lost it
-    # once overnight on healthy code — 45 wasted minutes and a manual
-    # restart apiece.
-    #
-    # THE NEW NUMBER, AND WHERE IT COMES FROM:
-    #
-    #   p99.9 of the fitted distribution          52.3 min
-    #   + one infrastructure stall                 +7.2 min
-    #       measured, not guessed: the observed
-    #       peak-to-trough spread of the single
-    #       `pytest apps/` step, 1932s .. 2366s
-    #       across these same runs
-    #   = 59.5 min, rounded up to the 5-min grid   60 min
-    #
-    # Not a round number that felt roomy — 60 is where that arithmetic
-    # lands. Under the fit it is ~6 sigma out.
-    #
-    # THE TRADE-OFF, STATED PLAINLY: a job that genuinely hangs now
-    # burns 60 runner-minutes before the clock kills it instead of 45.
-    # That is the price of the ceiling no longer firing on healthy
-    # runs, and it is the right side to err on: a hang is rare, 37% of
-    # honest runs dying was not.
-    #
-    # WHAT THIS DOES NOT DO: it does not make the suite faster, and it
-    # is not meant to. 88% of the job is one step — `pytest apps/`, a
-    # 2266s median — running single-process, with `pytest-xdist` absent
-    # from the dependency tree entirely. Dependency install is NOT the
-    # cost (`uv sync --frozen` is 3s; the uv cache works). Making the
-    # suite faster is its own ticket with its own measurement, and is
-    # deliberately not attempted here.
-    #
-    # WHEN TO RE-MEASURE — do not inherit this block as fact the way
-    # DRF-1253's sentence was inherited. It is sized against a 42.5 min
-    # median and a fitted mu of 44.15 min as of 25.08.2026. If the
-    # median job passes ~50 min, the margin computed above is spent and
-    # this number is stale again. Re-measure from the jobs API. Do not
-    # assume.
-    #
-    # AND HOW THIS NUMBER GETS FALSIFIED. No soak was run to "prove" 60,
-    # deliberately: with p99.9 = 52.3 min a soak can only report the zero
-    # it was built to report — that is staging a test, not running one —
-    # while costing ~700 runner-minutes against PRs queued to merge. The
-    # evidence is collected by OBSERVATION of real traffic instead, which
-    # is also the better sample: real runs carry different diffs, load and
-    # contention. The claim is therefore refutable, and here is the line:
-    #
-    #   IF ANY RUN IS CANCELLED AT THE 60-MIN CEILING WITHIN THE NEXT 20
-    #   RUNS, THIS NUMBER IS WRONG.
-    #
-    # That would mean the fit above understated the tail. Recompute it
-    # from fresh jobs-API data — do not simply nudge the ceiling upward.
-    timeout-minutes: 60
-
-    services:
-      postgres:
-        image: postgres:16-alpine
-        env:
-          POSTGRES_DB: ai_bot_platform
-          POSTGRES_USER: platform
-          POSTGRES_PASSWORD: platform
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd "pg_isready -U platform -d ai_bot_platform"
-          --health-interval 5s
-          --health-timeout 3s
-          --health-retries 10
-      redis:
-        image: redis:7-alpine
-        ports:
-          - 6379:6379
-        options: >-
-          --health-cmd "redis-cli ping"
-          --health-interval 5s
-          --health-timeout 3s
-          --health-retries 10
-
-    env:
-      DJANGO_SETTINGS_MODULE: config.settings.local
-      DJANGO_SECRET_KEY: ci-test-secret-do-not-use-in-prod
-      DJANGO_DEBUG: "False"
-      DJANGO_ALLOWED_HOSTS: localhost,127.0.0.1
-      POSTGRES_HOST: localhost
-      POSTGRES_PORT: "5432"
-      POSTGRES_DB: ai_bot_platform
-      POSTGRES_USER: platform
-      POSTGRES_PASSWORD: platform
-      REDIS_URL: redis://localhost:6379/0
-      OPENAI_API_KEY: ci-fake-key-not-real
+    # 3m37s measured (above). 15 is ~4x: enough to absorb an apt/pip
+    # stall, small enough that a hang is cheap.
+    timeout-minutes: 15
 
     steps:
       - uses: actions/checkout@v4
@@ -289,6 +230,63 @@ jobs:
           git ls-files \
             | grep -vE '^(\.secrets\.baseline|uv\.lock|.*\.lock|tests/fixtures/.*|apps/planning_rules/data/.*|legacy_maxbot/.*|legacy_formulatela_mcp/.*|legacy_notifications/.*)$' \
             | xargs detect-secrets-hook --baseline .secrets.baseline
+
+  # ---------------------------------------------------------------------
+  # Everything that is not `pytest apps/`: lint, the AST guards, the
+  # cross-cutting suites, mypy — plus the collection census that guards
+  # the shard layout.
+  #
+  # Kept as ONE job rather than split further. End to end it is ~7 min,
+  # already under the ~8 min shards, so splitting it buys nothing on the
+  # critical path and pays another job's setup.
+  # ---------------------------------------------------------------------
+  checks:
+    name: lint + guards + cross-cutting tests + mypy
+    runs-on: ubuntu-latest
+    # Measured parts (above): 22s lint+guards, 4s smoke, 3m20s tests/, 2s
+    # contract, 1m05s eventbus, 37s mypy, ~36s setup = ~6.5 min, plus ~1
+    # min of census. 25 is ~3x that.
+    timeout-minutes: 25
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: ai_bot_platform
+          POSTGRES_USER: platform
+          POSTGRES_PASSWORD: platform
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U platform -d ai_bot_platform"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+
+    env:
+      DJANGO_SETTINGS_MODULE: config.settings.local
+      DJANGO_SECRET_KEY: ci-test-secret-do-not-use-in-prod
+      DJANGO_DEBUG: "False"
+      DJANGO_ALLOWED_HOSTS: localhost,127.0.0.1
+      POSTGRES_HOST: localhost
+      POSTGRES_PORT: "5432"
+      POSTGRES_DB: ai_bot_platform
+      POSTGRES_USER: platform
+      POSTGRES_PASSWORD: platform
+      REDIS_URL: redis://localhost:6379/0
+      OPENAI_API_KEY: ci-fake-key-not-real
+
+    steps:
+      - uses: actions/checkout@v4
 
       # postgresql-client (pg_dump / pg_restore) needed for
       # apps/identity/tests/test_backup_restore.py — the test verifies
@@ -619,6 +617,313 @@ jobs:
       - name: eventbus booking lifecycle tests
         run: uv run pytest apps/eventbus/tests/ -q
 
+      # mypy is blocking. `strict=False` keeps the bar reasonable while
+      # apps/ are mostly empty AppConfigs; tighten to strict per-package
+      # as real code lands. New untyped imports must add stubs or
+      # `# type: ignore[<code>]` rather than slip through.
+      - name: mypy
+        run: uv run mypy apps config tests
+
+      # ------------------------------------------------------------------
+      # DRF-1349 — the collection census, and what it guards against.
+      #
+      # `pytest apps/` is five jobs now, each collecting a different slice.
+      # The failure mode that shape introduces is silent AND green: a slice
+      # whose path filter matches nothing collects zero tests, runs zero
+      # tests, exits zero, and reports success. Five of those would publish
+      # a fully green `pytest + ruff + mypy` over a suite that never ran.
+      #
+      # Each shard already refuses `tests == 0` on its own junit, but that
+      # only catches a shard that lost ALL of its tests. It does not catch
+      # a shard that lost half of them, and it does not catch a path that
+      # fell out of every shard's selector at once.
+      #
+      # So: collect the WHOLE of apps/ once, here, with the same deselect
+      # list the shards use, and write the number down. `test` below sums
+      # the five shard junits and refuses to be green unless the sum equals
+      # this number. Recomputed every run, so unlike a hard-coded expected
+      # count it cannot go stale and start lying.
+      #
+      # `--collect-only` needs no database and no services: ~1 min of
+      # imports, on a job that is not the critical path.
+      #
+      # The deselect list below is the SAME list as in the shard job. Two
+      # copies is a known hazard, and the rule is the one the
+      # detect-secrets exclusions already carry: if you touch one, touch
+      # the other in the same commit. They are also checked against each
+      # other on every run by construction — a deselect present here and
+      # missing there makes the shard sum exceed the census, and `test`
+      # goes red naming both numbers.
+      # ------------------------------------------------------------------
+      - name: apps/ collection census (sentinel for the shard layout)
+        run: |
+          set -o pipefail
+          uv run pytest apps/ --collect-only -q \
+            --deselect apps/miniapp_api/tests/test_c7_payments.py::TestPaymentMirrorReadModel::test_booking_confirmed_with_payment_id_stamps_hold \
+            --deselect apps/miniapp_api/tests/test_c7_payments.py::TestPaymentMirrorReadModel::test_booking_confirmed_without_payment_id_no_mirror \
+            --deselect apps/miniapp_api/tests/test_create_booking_ayla.py::TestLocalPathUnchanged::test_flag_off_keeps_local_path \
+            --deselect apps/booking/tests/test_reschedule.py::TestRescheduleCustomerBooking::test_happy_path \
+            --deselect apps/booking/tests/test_reschedule.py::TestRescheduleCustomerBooking::test_q12a_over_90d_breaks_chain \
+            --deselect apps/booking/tests/test_reschedule.py::TestRescheduleCustomerBooking::test_not_owned_rejected \
+            --deselect apps/booking/tests/test_reschedule.py::TestRescheduleCustomerBooking::test_already_cancelled_rejected \
+            --deselect apps/booking/tests/test_reschedule.py::TestRescheduleCustomerBooking::test_q12a_cancel_requested_rejected \
+            --deselect apps/booking/tests/test_reschedule.py::TestRescheduleCustomerBooking::test_not_found_rejected \
+            --deselect apps/booking/tests/test_reschedule.py::TestRescheduleCustomerBooking::test_q12a_541_price_hike_breaks_chain_end_to_end \
+            --deselect apps/booking/tests/test_reschedule.py::TestRescheduleCustomerBooking::test_q12a_541_identity_unchanged_preserves_chain_and_root_snapshot \
+            --deselect apps/booking/tests/test_reschedule.py::TestRescheduleCustomerBooking::test_q12a_616_root_snapshot_read_uses_select_for_update \
+            --deselect apps/booking/tests/test_reschedule.py::TestRescheduleCustomerBooking::test_q12a_616_root_snapshot_read_calls_select_for_update_with_of_self \
+            --deselect apps/bookings/tests/test_booking_callbacks.py::TestConfirmTapReschedule::test_happy_path_notifies_manager \
+            --deselect apps/skills/booking/tests/test_tools_q12a.py::TestQ12aContinuationLLMPath::test_within_90d_same_service_continuation_chain \
+            --deselect apps/skills/booking/tests/test_tools_q12a.py::TestQ12aContinuationLLMPath::test_over_90d_breaks_chain_billable_fresh_sale \
+            --deselect apps/skills/booking/tests/test_tools_q12a.py::TestQ12aContinuationLLMPath::test_b1_null_service_id_does_not_falsely_flag_swap \
+            --deselect apps/skills/booking/tests/test_tools_reschedule.py::TestExecuteReschedule::test_happy_path \
+            --deselect apps/skills/booking/tests/test_tools_reschedule.py::TestExecuteReschedule::test_new_row_carries_ai_direct_attribution \
+            --deselect apps/skills/booking/tests/test_tools_reschedule.py::TestIdempotencyMarkerAnchored::test_spoofed_substring_does_not_short_circuit_reschedule \
+            --deselect apps/skills/booking/tests/test_tools_reschedule.py::TestLocalCreateSplitBrainRecovery::test_local_create_fails_compensate_succeeds_recovers_cleanly \
+            --deselect apps/skills/booking/tests/test_tools_reschedule.py::TestLocalCreateSplitBrainRecovery::test_local_create_fails_compensate_fails_alerts_critical \
+            --deselect apps/skills/booking/tests/test_flow_continuation.py::TestSequenceA::test_full_reschedule_flow \
+            --deselect apps/skills/booking/tests/test_flow_continuation.py::TestSequenceB::test_combined_selection_slot_turn \
+            --deselect apps/skills/booking/tests/test_flow_continuation.py::TestSequenceC::test_callback_confirm_executes \
+            --deselect apps/skills/booking/tests/test_flow_continuation.py::TestNegatives::test_duplicate_text_confirm_no_double_mutation \
+            > census-raw.txt 2>&1 || { tail -30 census-raw.txt; echo "CENSUS FAILED — apps/ did not collect."; exit 1; }
+          tail -3 census-raw.txt
+          python3 - <<'PY'
+          import re
+          import sys
+
+          text = open("census-raw.txt", encoding="utf-8", errors="replace").read()
+          # `pytest -q --collect-only` ends with either
+          #   "13177/13203 tests collected (26 deselected) in 41.20s"
+          # or "13177 tests collected in 41.20s".
+          found = re.findall(r"(\d+)(?:/\d+)? tests? collected", text)
+          if not found:
+              print("CENSUS UNREADABLE — no 'tests collected' line in pytest output.")
+              sys.exit(1)
+
+          n = int(found[-1])
+          print(f"CENSUS apps/ collected={n}")
+          if n == 0:
+              print("CENSUS EMPTY — 0 tests collected from apps/. Not a green run.")
+              sys.exit(1)
+
+          with open("apps-census.txt", "w", encoding="utf-8") as fh:
+              fh.write(str(n))
+          PY
+
+      - name: Upload apps/ collection census
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: apps-census-${{ github.sha }}
+          path: apps-census.txt
+          retention-days: 14
+          if-no-files-found: warn
+
+  # ---------------------------------------------------------------------
+  # DRF-1349 — `pytest apps/`, split five ways BY MEASURED TIME.
+  #
+  # WHERE THE SPLIT COMES FROM. Not from counting files — from the junit
+  # artefact of the run quoted at the top of this file (artifact
+  # junit-apps-e0640f3..., 13177 testcases, each with its own `time`,
+  # recorded under the same `-n 4 --dist load` these shards use). Summed
+  # per directory that is 4962.6s of test time, and it is not remotely
+  # uniform: `apps/skills/` alone is 30.1% of it, and ONE FILE,
+  # apps/skills/booking/tests/test_lookup_routing.py, is 23.3% (872 tests,
+  # 1153.8s). An even split by file count would have put that file in a
+  # bin with other work and left that shard running twice as long as the
+  # rest, which is the whole cost of the exercise.
+  #
+  #   shard  selector                                tests  test-time  share
+  #   -----  --------------------------------------  -----  ---------  -----
+  #     1    skills/booking/tests/test_lookup_routing   872    1153.8s  23.3%
+  #     2    orchestrator + channels                   2880    1010.5s  20.4%
+  #     3    identity + replay                         1380    1028.8s  20.7%
+  #     4    consent + skills(-shard 1) + admin_api    2051     991.1s  20.0%
+  #     5    everything else in apps/                  5994     778.3s  15.7%
+  #   -----  --------------------------------------  -----  ---------  -----
+  #                                                  13177    4962.6s
+  #
+  # 13177 in, 13177 out, verified by replaying the selectors below against
+  # that junit file: every testcase matched exactly one shard — 0 matched
+  # none, 0 matched more than one.
+  #
+  # Shard 1 is a single file because a single file is 23% of the suite.
+  # It is also the floor on how fast this can get: no directory-level
+  # split can make that shard shorter, so five shards — not six, not ten —
+  # is where the returns stop.
+  #
+  # ESTIMATED WALL TIME, and the model, so it can be checked rather than
+  # believed: an LPT (longest-processing-time) schedule of the real
+  # per-test times onto 4 xdist workers gives a makespan of 1241s for the
+  # whole suite, against the 1748s the step actually took — so the junit
+  # times account for 71% of the step and the remaining 29% (per-test
+  # setup/teardown, test-database creation, collection) is carried as a
+  # x1.409 calibration. Applying the same schedule per shard and adding
+  # ~60s of job setup:
+  #
+  #   shard 1  466s (7.8 min)   shard 2  416s (6.9 min)
+  #   shard 3  422s (7.0 min)   shard 4  409s (6.8 min)
+  #   shard 5  334s (5.6 min)
+  #
+  # That model is calibrated on one run and prorates a fixed cost, so it
+  # flatters the small shards; treat ~8 min as the number to check the
+  # first real run against, not as a promise.
+  #
+  # HOW THE SELECTORS ARE BUILT, and why shard 5 is written as a
+  # subtraction. Shards 1-4 name paths explicitly. Shard 5 is `apps/`
+  # MINUS exactly those paths — so a newly added `apps/<something>/` lands
+  # in shard 5 automatically and is TESTED, instead of falling through the
+  # gaps of five explicit lists and being silently skipped forever. If you
+  # move a directory between shards, it must leave one selector and enter
+  # the other in the same edit; the census in `checks` above will catch
+  # you if it does not.
+  #
+  # EVERY SHARD GETS THE WHOLE DESELECT LIST. `--deselect` in pytest is
+  # prefix matching over already-collected items (`_pytest/main.py`,
+  # `pytest_collection_modifyitems`): an id that matches nothing in this
+  # shard is a silent no-op, not an error. So the list is not partitioned
+  # along with the tests — it is passed intact to all five, which is the
+  # only version of this that cannot lose an entry.
+  #
+  # Each shard is its own job, so each gets its own `services:` — its own
+  # Postgres container, on its own localhost. No two shards share a
+  # database, and pytest-django's `_gwN` suffix keeps the 4 workers inside
+  # a shard apart, exactly as before.
+  # ---------------------------------------------------------------------
+  apps-shard:
+    name: apps shard ${{ matrix.shard.id }}
+    runs-on: ubuntu-latest
+    # ~8 min estimated (above), against ~29 min for the unsharded step.
+    # 30 is ~3.7x the estimate. The old job's ceiling was 60 min and the
+    # long comment reproduced further down explains how that number was
+    # fitted — to a 44 min single-job distribution that no longer exists.
+    # Do not carry 60 over here: re-measure from the jobs API once these
+    # shards have real history. Same falsification rule as before — if any
+    # shard is cancelled at this ceiling within the next 20 runs, this
+    # number is wrong and gets refitted, not nudged.
+    timeout-minutes: 30
+
+    strategy:
+      # A red shard must not cancel its siblings. With fail-fast the run
+      # would report one failure and four `cancelled`, and a second failure
+      # elsewhere in apps/ would be invisible until the next push.
+      fail-fast: false
+      matrix:
+        shard:
+          - id: "1"
+            args: "apps/skills/booking/tests/test_lookup_routing.py"
+          - id: "2"
+            args: "apps/orchestrator apps/channels"
+          - id: "3"
+            args: "apps/identity apps/replay"
+          - id: "4"
+            args: "apps/consent apps/skills apps/admin_api --ignore=apps/skills/booking/tests/test_lookup_routing.py"
+          - id: "5"
+            args: "apps/ --ignore=apps/skills --ignore=apps/orchestrator --ignore=apps/identity --ignore=apps/consent --ignore=apps/replay --ignore=apps/channels --ignore=apps/admin_api"
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: ai_bot_platform
+          POSTGRES_USER: platform
+          POSTGRES_PASSWORD: platform
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U platform -d ai_bot_platform"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+
+    env:
+      DJANGO_SETTINGS_MODULE: config.settings.local
+      DJANGO_SECRET_KEY: ci-test-secret-do-not-use-in-prod
+      DJANGO_DEBUG: "False"
+      DJANGO_ALLOWED_HOSTS: localhost,127.0.0.1
+      POSTGRES_HOST: localhost
+      POSTGRES_PORT: "5432"
+      POSTGRES_DB: ai_bot_platform
+      POSTGRES_USER: platform
+      POSTGRES_PASSWORD: platform
+      REDIS_URL: redis://localhost:6379/0
+      OPENAI_API_KEY: ci-fake-key-not-real
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # postgresql-client (pg_dump / pg_restore) needed for
+      # apps/identity/tests/test_backup_restore.py — the test verifies
+      # ADR-0011 §11.1 invariant (tombstoned entries stay unreadable
+      # after restore). Without these binaries the test self-skips via
+      # `shutil.which('pg_dump') is None`, so the gate is defence-in-
+      # depth: install here so CI exercises the real backup cycle; the
+      # skipif keeps local dev (Windows, minimal Docker) from breaking.
+      - name: Install postgresql-client (for backup-restore test)
+        run: sudo apt-get update && sudo apt-get install -y postgresql-client
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          version: "0.11.12"
+          enable-cache: true
+
+      - name: Set up Python 3.12
+        run: uv python install 3.12
+
+      # ayla-ai-core lives in a separate repo that is PUBLIC — owner's
+      # decision of 04.09.2026, recorded in OPEN_DECISIONS.md §22 (that
+      # register lives in the workspace root, outside this repo), and
+      # re-checked anonymously the same day (`"private": false`). An
+      # unauthenticated `git fetch` of the pinned SHA succeeds; measured
+      # 04.09.2026 against an empty git config, and visible independently
+      # in beautygo_backend Dependabot PRs #282-284, which installed
+      # ayla-ai-core with an EMPTY GH_DEPLOY_TOKEN and went green.
+      #
+      # So the token is OPTIONAL here, not required:
+      #   present  -> `insteadOf` rewrites `git+https://github.com/...` to
+      #               `https://x-access-token:<token>@...` at fetch time,
+      #               without the token ever entering the lockfile;
+      #   absent   -> a notice, and the fetch goes out anonymously.
+      #
+      # Support for the token is kept deliberately. The decision says
+      # public "for now" (пока); if the visibility is closed again this
+      # step starts authenticating with no further edit.
+      #
+      # What this step must NOT do is fail the run when the token is
+      # missing. It used to `exit 1` on a `::error::`, and that killed the
+      # Dependabot runs (#1360, #1362, #1363) at ~2 min on a prediction
+      # that was false: Dependabot has its own secret scope which does not
+      # carry GH_DEPLOY_TOKEN, and the fetch the guard predicted would
+      # fail would have succeeded anonymously. Do not restore the exit —
+      # the correct signal for an unreachable dep is `uv sync` failing on
+      # the real fetch, not a guess made before it (DRF-1466).
+      #
+      # K12 (DRF-570) pins `ayla-ai-core` to an exact SHA — `--frozen`
+      # makes any drift a hard CI failure (the lockfile must match).
+      - name: Configure git auth for the ayla-ai-core dep (token optional)
+        env:
+          GH_DEPLOY_TOKEN: ${{ secrets.GH_DEPLOY_TOKEN }}
+        run: |
+          if [ -n "$GH_DEPLOY_TOKEN" ]; then
+            git config --global url."https://x-access-token:${GH_DEPLOY_TOKEN}@github.com/".insteadOf "https://github.com/"
+            echo "GH_DEPLOY_TOKEN present — ayla-ai-core will be fetched with auth."
+          else
+            echo "::notice::GH_DEPLOY_TOKEN not set — fetching ayla-ai-core anonymously (the repo is public, DRF-1466). Expected on Dependabot runs."
+          fi
+
+      - name: uv sync (with ai-core extra)
+        run: uv sync --extra dev --extra ai-core --frozen
+
       # DRF-1121 — CI ran 41 of 410 apps/ test files; everything else was
       # green locally and defended nothing in CI. Full apps/ (7246 tests,
       # measured against Postgres — the SQLite default that most of
@@ -680,11 +985,25 @@ jobs:
       # `--dist load`: any idle worker takes the next test; per-worker
       # test databases come from pytest-django's `_gwN` suffix, so no
       # two workers ever share a schema.
-      - name: pytest apps/ (full suite)
+      #
+      # DRF-1349 — the invocation below is the one described above, with
+      # `apps/` replaced by this shard's selector. `-n 4 --dist load` and
+      # the deselect list are unchanged.
+      - name: pytest apps/ (shard ${{ matrix.shard.id }})
+        env:
+          # Via env, not interpolated into the script: the value is a
+          # literal from the matrix above, and keeping `${{ }}` out of
+          # `run:` is the habit that stops the day one of these comes from
+          # a branch name. Left unquoted on use, on purpose — the word
+          # splitting IS the point, each shard passes several arguments.
+          SHARD_ID: ${{ matrix.shard.id }}
+          SHARD_ARGS: ${{ matrix.shard.args }}
+          JUNIT_FILE: junit-apps-shard-${{ matrix.shard.id }}.xml
         run: |
-          rm -f junit-apps.xml
-          uv run pytest apps/ -q -n 4 --dist load \
-            --junitxml=junit-apps.xml \
+          rm -f "$JUNIT_FILE"
+          echo "SHARD $SHARD_ID selector: $SHARD_ARGS"
+          uv run pytest $SHARD_ARGS -q -n 4 --dist load \
+            --junitxml="$JUNIT_FILE" \
             --deselect apps/miniapp_api/tests/test_c7_payments.py::TestPaymentMirrorReadModel::test_booking_confirmed_with_payment_id_stamps_hold \
             --deselect apps/miniapp_api/tests/test_c7_payments.py::TestPaymentMirrorReadModel::test_booking_confirmed_without_payment_id_no_mirror \
             --deselect apps/miniapp_api/tests/test_create_booking_ayla.py::TestLocalPathUnchanged::test_flag_off_keeps_local_path \
@@ -736,7 +1055,15 @@ jobs:
       #
       # `if: always()` because the run worth reading is exactly the one
       # where the step above failed.
-      - name: pytest apps/ test counts (junit)
+      #
+      # DRF-1349 — now one of five. `tests == 0` is refused here per shard,
+      # which catches a shard whose selector matched nothing; the sum
+      # across shards is checked against the collection census in the
+      # aggregate job below, which catches the partial version of the same
+      # mistake.
+      - name: pytest apps/ shard test counts (junit)
+        env:
+          JUNIT_FILE: junit-apps-shard-${{ matrix.shard.id }}.xml
         if: always()
         run: |
           python3 - <<'PY'
@@ -744,7 +1071,7 @@ jobs:
           import sys
           import xml.etree.ElementTree as ET
 
-          path = "junit-apps.xml"
+          path = os.environ["JUNIT_FILE"]
 
           if not os.path.exists(path):
               print(
@@ -778,25 +1105,216 @@ jobs:
           PY
 
       # The junit XML itself, so a red run is triaged by downloading one
-      # file instead of scrolling ~30 minutes of log. `if-no-files-found:
-      # warn` and not `error`: the missing-file case is already reported,
-      # with its cause, by the step above — a second red X here would only
-      # bury it.
-      - name: Upload pytest junit (apps/)
+      # file instead of scrolling the log. `if-no-files-found: warn` and
+      # not `error`: the missing-file case is already reported, with its
+      # cause, by the step above — a second red X here would only bury it.
+      #
+      # One artefact per shard. The aggregate job downloads all of them by
+      # pattern and sums them; the per-shard file names differ, so
+      # `merge-multiple` cannot collide them.
+      - name: Upload pytest junit (apps/ shard ${{ matrix.shard.id }})
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: junit-apps-${{ github.sha }}
-          path: junit-apps.xml
+          name: junit-apps-${{ github.sha }}-shard-${{ matrix.shard.id }}
+          path: junit-apps-shard-${{ matrix.shard.id }}.xml
           retention-days: 14
           if-no-files-found: warn
 
-      # mypy is blocking. `strict=False` keeps the bar reasonable while
-      # apps/ are mostly empty AppConfigs; tighten to strict per-package
-      # as real code lands. New untyped imports must add stubs or
-      # `# type: ignore[<code>]` rather than slip through.
-      - name: mypy
-        run: uv run mypy apps config tests
+  # ---------------------------------------------------------------------
+  # THE REQUIRED CHECK. This job does no testing. Its entire purpose is to
+  # carry the name `pytest + ruff + mypy` — see the long note at the top
+  # of `jobs:` for why that name cannot move and cannot be duplicated.
+  #
+  # Two things happen here, in this order:
+  #
+  #   1. THE NUMBERS. The five shard junits are summed and printed, with
+  #      `tests` BEFORE `failures`, because `failures=0` on `tests=0` means
+  #      "nothing ran" and reads as green to anyone skimming. The sum is
+  #      then checked against the collection census taken in `checks`. An
+  #      empty or short total is refused.
+  #   2. THE VERDICT. Every `needs.*.result` is printed and required to be
+  #      exactly `success`. Not `!failure()`, not `success()` — an explicit
+  #      equality, evaluated in the job's own shell, over all three
+  #      dependencies. `cancelled` and `skipped` are NOT success: a shard
+  #      killed by the concurrency group or by its timeout must make this
+  #      job red, and a `skipped` dependency means the graph did not run
+  #      what it promised to run.
+  #
+  # Both steps carry `if: always()`, so the job still runs — and still
+  # reports — when a dependency has failed. That is the only configuration
+  # in which it is a gate at all: `needs` alone would SKIP this job on an
+  # upstream failure, and a skipped required check never turns red, it
+  # just never arrives.
+  # ---------------------------------------------------------------------
+  test:
+    name: pytest + ruff + mypy
+    runs-on: ubuntu-latest
+    needs: [secret-scan, checks, apps-shard]
+    if: always()
+    # Downloads a handful of small XML files and adds up integers.
+    timeout-minutes: 10
+
+    steps:
+      # `continue-on-error` because a missing artefact is a real outcome
+      # this job must REPORT, not an infrastructure error it should die
+      # on. download-artifact fails the step when its pattern matches
+      # nothing (e.g. every shard died before uploading); the summing step
+      # below then says so in words and exits non-zero.
+      - name: Download shard junit artefacts
+        if: always()
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          pattern: junit-apps-${{ github.sha }}-shard-*
+          path: shard-junit
+          merge-multiple: true
+
+      - name: Download apps/ collection census
+        if: always()
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: apps-census-${{ github.sha }}
+          path: census
+
+      - name: apps/ test counts, summed across shards
+        if: always()
+        env:
+          # Kept next to the matrix it describes. If you add or remove a
+          # shard above, this number moves in the same edit — a missing
+          # shard is otherwise indistinguishable from a shard that simply
+          # never uploaded.
+          EXPECTED_SHARDS: "5"
+        run: |
+          python3 - <<'PY'
+          import glob
+          import os
+          import sys
+          import xml.etree.ElementTree as ET
+
+          expected = int(os.environ["EXPECTED_SHARDS"])
+          files = sorted(glob.glob("shard-junit/*.xml"))
+
+          print(f"JUNIT shard files found={len(files)} expected={expected}")
+          for f in files:
+              print(f"  {f}")
+
+          if not files:
+              print(
+                  "JUNIT MISSING — no shard junit was downloaded at all. The shards "
+                  "did not reach test collection, or did not run. This is NOT zero "
+                  "failures."
+              )
+              sys.exit(1)
+
+          tests = failures = errors = skipped = 0
+          unreadable = []
+          for f in files:
+              try:
+                  root = ET.parse(f).getroot()
+              except ET.ParseError as exc:
+                  unreadable.append(f"{f}: {exc}")
+                  continue
+              suite = root if root.tag == "testsuite" else root.find("testsuite")
+              if suite is None:
+                  unreadable.append(f"{f}: no <testsuite> element")
+                  continue
+
+              def count(key, _s=suite):
+                  return int(_s.get(key) or 0)
+
+              tests += count("tests")
+              failures += count("failures")
+              errors += count("errors")
+              skipped += count("skipped")
+
+          # tests first, on purpose — see the note on this job.
+          print(f"JUNIT TOTAL tests={tests}")
+          print(
+              f"JUNIT TOTAL failures={failures} errors={errors} skipped={skipped}"
+          )
+          print(f"JUNIT TOTAL passed={tests - failures - errors - skipped}")
+
+          bad = False
+
+          for u in unreadable:
+              print(f"JUNIT UNREADABLE — {u}")
+              bad = True
+
+          if len(files) != expected:
+              print(
+                  f"JUNIT SHORT — {len(files)} of {expected} shard junits present. "
+                  "The total above is a sum over an incomplete set and does not "
+                  "describe this run."
+              )
+              bad = True
+
+          if tests == 0:
+              print(
+                  "JUNIT EMPTY — 0 tests collected across every shard. An empty run "
+                  "is not a green run."
+              )
+              bad = True
+
+          # The sentinel against a shard layout that quietly drops tests.
+          census_path = "census/apps-census.txt"
+          if not os.path.exists(census_path):
+              print(
+                  "CENSUS MISSING — checks did not publish an apps/ collection "
+                  "count, so the shard sum above is unverified. This is NOT a pass."
+              )
+              bad = True
+          else:
+              census = int(open(census_path, encoding="utf-8").read().strip() or 0)
+              print(f"CENSUS apps/ collected (unsharded)={census}")
+              print(f"CENSUS shard sum={tests}  delta={tests - census}")
+              if tests != census:
+                  print(
+                      "CENSUS MISMATCH — the shards together ran a different number "
+                      "of tests than a single unsharded collection of apps/ finds. "
+                      "A path has fallen out of every shard's selector, or is in two "
+                      "of them. This is a defect in the shard layout, not a rounding "
+                      "difference: fix the selectors in the `apps-shard` matrix."
+                  )
+                  bad = True
+
+          if failures or errors:
+              print(f"JUNIT RED — {failures} failures, {errors} errors.")
+              bad = True
+
+          sys.exit(1 if bad else 0)
+          PY
+
+      - name: Verdict
+        if: always()
+        env:
+          R_SECRET_SCAN: ${{ needs.secret-scan.result }}
+          R_CHECKS: ${{ needs.checks.result }}
+          R_APPS_SHARD: ${{ needs.apps-shard.result }}
+        run: |
+          bad=0
+          for pair in "secret-scan=$R_SECRET_SCAN" "checks=$R_CHECKS" "apps-shard=$R_APPS_SHARD"; do
+            job="${pair%%=*}"
+            res="${pair#*=}"
+            echo "needs.${job}.result = ${res}"
+            if [ "$res" != "success" ]; then
+              bad=1
+            fi
+          done
+
+          if [ "$bad" -ne 0 ]; then
+            echo
+            echo "FAILED — at least one dependency is not 'success'."
+            echo "Anything other than 'success' — failure, cancelled, skipped —"
+            echo "is a red verdict here. A cancelled shard has not passed; it has"
+            echo 'not run. needs.apps-shard.result is the aggregate of all five'
+            echo "matrix legs: it is 'success' only when every leg succeeded."
+            exit 1
+          fi
+
+          echo
+          echo "OK — secret-scan, checks and all apps shards reported success."
 
   # ---------------------------------------------------------------------
   # DRF-1229 — Mini App front-end gate.
