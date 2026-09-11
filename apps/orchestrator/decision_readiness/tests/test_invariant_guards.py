@@ -35,7 +35,7 @@ from apps.orchestrator.decision_readiness import questions as q
 from apps.orchestrator.decision_readiness import reason_codes as rc
 from apps.orchestrator.decision_readiness import required_context as rq
 from apps.orchestrator.decision_readiness.events import user_text_event
-from apps.orchestrator.decision_readiness.safety_input import SafetyResult, SafetyState
+from apps.orchestrator.decision_readiness.safety_input import Handoff, SafetyResult, SafetyState
 from apps.orchestrator.decision_readiness.state import ConversationState
 from apps.orchestrator.decision_readiness.tests.conftest import (
     SplittingProbe,
@@ -131,7 +131,11 @@ def _turn(
         make_input(
             state_revision=revision,
             state=ConversationState(conversation_id="conv-1542", revision=revision),
-            safety=SafetyResult(state=safety_state, evaluated_at_revision=revision),
+            # §127 (#1558): известное состояние обязано нести обещание.
+            # Фикстуры приведены к контракту; семантика инвариантов не менялась.
+            safety=SafetyResult(
+                state=safety_state, evaluated_at_revision=revision, handoff=Handoff.NONE
+            ),
             required_context_spec=_spec(),
             catalog=_catalog(),
             question_ledger=ledger,
@@ -386,7 +390,9 @@ def test_the_required_context_spec_can_actually_refuse() -> None:
         state=ConversationState(conversation_id="c", revision=1),
         candidates=candidates(),
         mode=rq.Mode.DISCOVERY,
-        safety=SafetyResult(state=SafetyState.NORMAL, evaluated_at_revision=1),
+        safety=SafetyResult(
+            state=SafetyState.NORMAL, evaluated_at_revision=1, handoff=Handoff.NONE
+        ),
     )
     row = rq.RequiredSlot(
         slot=BODY_AREA,
