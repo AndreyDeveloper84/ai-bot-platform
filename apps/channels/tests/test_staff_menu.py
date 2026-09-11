@@ -473,6 +473,26 @@ class TestApproveFromChat:
             reason_class="personal",
         )
 
+    @staticmethod
+    def _tapper(tenant):
+        """Тот, кто нажал кнопку в чате.
+
+        Живой путь (``salon_handler``) передаёт сюда настоящего
+        ``bot_user``; ``actor=None`` было упрощением теста. С §143
+        (11.09.2026) упрощение перестало быть безобидным: одобрение без
+        названного автора теперь ОТКАЗЫВАЕТ, потому что строка аудита иначе
+        числилась бы без человека. Фикстура приводит тест к тому, что
+        происходит в жизни.
+        """
+        from apps.identity.models import BotUser
+
+        return BotUser.objects.create(
+            tenant=tenant,
+            channel="max",
+            channel_user_id=f"tap-{uuid4().hex[:8]}",
+            display_name="Карина",
+        )
+
     def test_approving_moves_the_request_out_of_pending(self, tenant):
         from apps.scheduling.models import ScheduleChangeRequest
 
@@ -481,7 +501,7 @@ class TestApproveFromChat:
 
         with tenant_scope(tenant):
             outcome = staff_actions.approve_request(
-                tenant=tenant, request_id=str(req.id), actor=None
+                tenant=tenant, request_id=str(req.id), actor=self._tapper(tenant)
             )
 
         req.refresh_from_db()
@@ -493,9 +513,11 @@ class TestApproveFromChat:
         req = self._pending(tenant, master)
 
         with tenant_scope(tenant):
-            staff_actions.approve_request(tenant=tenant, request_id=str(req.id), actor=None)
+            staff_actions.approve_request(
+                tenant=tenant, request_id=str(req.id), actor=self._tapper(tenant)
+            )
             second = staff_actions.approve_request(
-                tenant=tenant, request_id=str(req.id), actor=None
+                tenant=tenant, request_id=str(req.id), actor=self._tapper(tenant)
             )
 
         # Two people tapping the same button is normal, not an error.
@@ -504,7 +526,7 @@ class TestApproveFromChat:
     def test_unknown_id_is_answered_not_raised(self, tenant):
         with tenant_scope(tenant):
             assert "не найдена" in staff_actions.approve_request(
-                tenant=tenant, request_id=str(uuid4()), actor=None
+                tenant=tenant, request_id=str(uuid4()), actor=self._tapper(tenant)
             )
 
     def test_malformed_id_is_answered_not_raised(self, tenant):

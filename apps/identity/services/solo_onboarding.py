@@ -41,29 +41,22 @@ there.
 | Q6 | §H.3 BORDERLINE | Mandatory adversarial review pre-merge |
 | Q7 | D + B-signature | Dedicated solo bot + kwargs signature with channel/channel_user_id/display_name/phone/chat_id/tenant_name |
 
-# Ops setup required BEFORE this service runs
+# Вход: САЛОННЫЙ бот, а не выделенный (§26 п.2, 05.09.2026)
 
-The bootstrap tenant + dedicated MAX bot are **ops/pre-pilot setup**,
-NOT created by this code. Setup steps:
+Докстринг выше описывает выделенного бота «Ayla Solo» и bootstrap-тенант
+`ayla_solo_bootstrap`. **Владелец этот вариант отменил**: «в клиентском
+боте не надо делать кнопку „Я соло мастер"… это всё будет жить конечно в
+салонном боте». Третьего бота не заводим.
 
-1. Create new MAX bot for solo registration (e.g. `@ayla_solo_bot`).
-2. Add the bot's secret token to `CHANNEL_TOKEN_TO_TENANT_SLUG`:
-   ```bash
-   CHANNEL_TOKEN_TO_TENANT_SLUG=<solo_bot_token>=ayla_solo_bootstrap
-   ```
-3. Seed the bootstrap tenant via management shell:
-   ```python
-   from apps.tenancy.models import Tenant
-   Tenant.objects.create(
-       slug="ayla_solo_bootstrap",
-       name="Ayla Solo — Registration",
-       is_active=True,
-   )
-   ```
+Оставлять прежнее описание рядом с новым поведением нельзя: правило
+приоритета — принятое решение > реализация > устаревший комментарий, — и
+комментарий здесь был устаревшим. Ops-настройки под отменённого бота
+больше не требуется, предполётная проверка снята (см. комментарий в теле
+функции).
 
-If the bootstrap tenant is missing when the service runs,
-`BootstrapTenantMissing` is raised — fail-loud so ops knows to complete
-setup.
+`BOOTSTRAP_TENANT_SLUG` оставлен константой: на него ссылаются тесты и
+ранбук, а удаление имени ничего не чинит. Ни одного чтения тенанта по
+этому слагу в коде не осталось.
 
 # Caller contract
 
@@ -88,7 +81,8 @@ import hashlib
 import logging
 import struct
 from dataclasses import dataclass
-from typing import Optional
+from enum import Enum
+from typing import TYPE_CHECKING, Optional
 from uuid import UUID
 
 from django.db import connection, transaction
@@ -98,6 +92,9 @@ from apps.catalog.models import CatalogMaster
 from apps.events.services import emit
 from apps.identity.models import BotUser
 from apps.tenancy.models import Tenant, TenantStaff
+
+if TYPE_CHECKING:  # pragma: no cover — только для аннотации
+    from apps.catalog.master_state import SaleBlock
 
 logger = logging.getLogger(__name__)
 
@@ -142,15 +139,30 @@ class SoloOnboardingPartialStateError(SoloOnboardingError):
     """
 
 
-class BootstrapTenantMissing(SoloOnboardingError):
-    """The `ayla_solo_bootstrap` tenant doesn't exist yet.
+# ─── Result dataclass ───────────────────────────────────────────────────
 
-    Fail-loud signal that ops pre-pilot setup is incomplete. See module
-    docstring for the 3-step setup procedure.
+
+class SoloSetupState(str, Enum):
+    """Готов ли соло-мастер принимать записи — или ещё нет.
+
+    §122 (10.09.2026): «соло-мастер не должен оставаться в состоянии, где
+    он зарегистрирован, но невидим клиентам навсегда», и —
+    «регистрация не должна ложно завершаться как „готово"».
+
+    Второе требование — про ЭТОТ тип. До него у `create_solo_provider`
+    было ровно два исхода: `created=True` (посеял) и `created=False`
+    (уже было). Ни один из них не отвечал на вопрос, который человека
+    единственно и волнует: **увидят ли меня клиенты**. Успех и полууспех
+    в контракте были неотличимы, и «неотличимы» здесь значит, что
+    вызывающий, честно проверивший `created`, отчитается «готово» о
+    человеке, которого не видно.
     """
 
-
-# ─── Result dataclass ───────────────────────────────────────────────────
+    #: Все условия продаваемости выполнены — человек в выдаче.
+    READY = "ready"
+    #: Записи заведены, но чего-то не хватает. Не отказ и не ошибка:
+    #: состояние, у которого есть имя, причина и выход.
+    SETUP_PENDING = "setup_pending"
 
 
 @dataclass(frozen=True)
@@ -166,7 +178,8 @@ class SoloOnboardingResult:
         admin_staff: `TenantStaff(role=admin)` row.
         master: `CatalogMaster` row with `linked_bot_user=bot_user`.
         created: True if this call SEEDED the records; False if all 4
-            already existed (idempotent return).
+            already existed (idempotent return). **Про готовность НЕ
+            говорит ничего** — см. :attr:`setup_state`.
     """
 
     tenant: Tenant
@@ -175,6 +188,49 @@ class SoloOnboardingResult:
     admin_staff: TenantStaff
     master: CatalogMaster
     created: bool
+
+    @property
+    def setup_state(self) -> SoloSetupState:
+        """Готовность, ВЫЧИСЛЕННАЯ по строке, а не переданная в неё.
+
+        Поля здесь нет намеренно. Поле можно не заполнить, а незаполненное
+        поле снаружи неотличимо от отсутствующего — и тогда сторож ловил
+        бы наличие атрибута вместо невозможности соврать. Свойство без
+        сеттера отнимает у вызывающего саму возможность объявить
+        готовность: чтобы ответить `READY`, ему пришлось бы изменить
+        строку каталога, то есть сделать человека продаваемым на самом
+        деле.
+
+        Считает не своим правилом, а ЕДИНСТВЕННЫМ: `sale_block` —
+        то же место, которым витрина решает, показывать ли мастера, и
+        которым ростер салона называет его состояние (DRF-1506, одно
+        определение на пять поверхностей). Своя копия условий разъехалась
+        бы с витриной, и разъехалась бы молча: человек читался бы готовым
+        здесь и непродаваемым там.
+        """
+        return SoloSetupState.READY if self.blocked_by is None else SoloSetupState.SETUP_PENDING
+
+    @property
+    def blocked_by(self) -> "Optional[SaleBlock]":
+        """Почему не готов — машинным именем, или `None`, если готов.
+
+        Имя причины нужно человеку, а не логу: «не готов» без причины
+        отправляет его искать дверь, а `ayla_unlinked` говорит, что
+        ждать надо связывания, и что оно наша работа, а не его.
+        """
+        from apps.catalog.master_state import sale_block
+
+        return sale_block(self.master)
+
+    @property
+    def is_ready(self) -> bool:
+        """Короткая форма для вызывающего, который спрашивает одно.
+
+        Существует, чтобы `if result.created:` не оставалось самой
+        удобной проверкой в файле: удобная неверная проверка вытесняет
+        верную неудобную.
+        """
+        return self.setup_state is SoloSetupState.READY
 
 
 # ─── Helpers ────────────────────────────────────────────────────────────
@@ -288,7 +344,6 @@ def create_solo_provider(
         SoloOnboardingResult with all 5 records + `created` flag.
 
     Raises:
-        BootstrapTenantMissing: ops setup incomplete (see module docstring).
         SoloOnboardingPartialStateError: existing solo tenant has missing
             related rows (owner / admin / master). Manual ops inspection.
     """
@@ -310,14 +365,24 @@ def create_solo_provider(
             "identity-hijack risk via idempotency path."
         )
 
-    # Pre-flight: bootstrap tenant must exist (ops setup gate).
-    if not Tenant.objects.filter(slug=BOOTSTRAP_TENANT_SLUG).exists():
-        raise BootstrapTenantMissing(
-            f"Bootstrap tenant {BOOTSTRAP_TENANT_SLUG!r} not found. "
-            "Ops pre-pilot setup incomplete — see "
-            "apps/identity/services/solo_onboarding.py docstring for the "
-            "3-step procedure (create solo MAX bot + map token + seed tenant)."
-        )
+    # ПРЕДПОЛЁТНОЙ ПРОВЕРКИ BOOTSTRAP-ТЕНАНТА БОЛЬШЕ НЕТ, и это исполнение
+    # решения, а не послабление.
+    #
+    # Она сторожила, что операторы выполнили настройку ВЫДЕЛЕННОГО бота
+    # «Ayla Solo»: завести бота, отобразить его токен на тенант
+    # `ayla_solo_bootstrap`, засеять тенант. Владелец отменил выделенного
+    # бота §26 п.2 — вход соло-мастера идёт через САЛОННОГО, который уже
+    # настроен и без которого это сообщение сюда бы не доехало.
+    #
+    # Сам тенант в засеве не участвовал никогда: `create_solo_provider`
+    # создаёт СВОЙ тенант на человека, а `ayla_solo_bootstrap` был лишь
+    # посадочной площадкой отменённой схемы. Проверено переписью: во всём
+    # `apps/` слаг встречался только в этой проверке и в тексте её
+    # ошибки.
+    #
+    # Замер пилота 11.09.2026: тенанта `ayla_solo_bootstrap` там нет, а
+    # двенадцать других есть. То есть проверка не «ещё не настроено» —
+    # она требовала настройки под дверь, которую закрыли.
 
     target_slug = _solo_tenant_slug(channel, channel_user_id)
 
@@ -436,14 +501,7 @@ def create_solo_provider(
         },
         distinct_id=str(new_bot_user.id),
     )
-    logger.info(
-        "identity.solo_provider.created tenant=%s bot_user=%s channel=%s",
-        new_tenant.slug,
-        new_bot_user.id,
-        channel,
-    )
-
-    return SoloOnboardingResult(
+    result = SoloOnboardingResult(
         tenant=new_tenant,
         bot_user=new_bot_user,
         owner_staff=owner,
@@ -451,6 +509,20 @@ def create_solo_provider(
         master=master,
         created=True,
     )
+    # Готовность пишется в лог РЯДОМ с фактом создания, одной строкой.
+    # Порознь они читаются как «завели» — и через месяц по логам не
+    # восстановить, скольким из заведённых людей это что-нибудь дало.
+    logger.info(
+        "identity.solo_provider.created tenant=%s bot_user=%s channel=%s "
+        "setup_state=%s blocked_by=%s",
+        new_tenant.slug,
+        new_bot_user.id,
+        channel,
+        result.setup_state.value,
+        result.blocked_by,
+    )
+
+    return result
 
 
 # ─── is_solo_provider — Веха 3 (/api/v1/me extension) ──────────────────

@@ -42,6 +42,7 @@ import {
 } from "../lib/api";
 import { displayStatusFor, getBookingDetail, renderStatus } from "../lib/customer-records";
 import { formatDuration, formatMoney, formatVisitFull } from "../lib/format";
+import { visitAddressText } from "../lib/visit-address";
 import { useScreenBack } from "../hooks/useScreenBack";
 import { backTo } from "../lib/screen-back";
 
@@ -250,6 +251,16 @@ export function CustomerBookingDetailScreen() {
                 <dd>{formatDuration(b.duration_min)}</dd>
               </>
             )}
+            {/* DRF-1652 — «клиент записался и не видит, куда ехать».
+                Строка БЕЗУСЛОВНА, в отличие от соседей выше: те скрывают
+                себя, когда значения нет, и это верно для мастера и
+                длительности — их отсутствие человеку ничего не говорит.
+                Адрес другой: «куда ехать» — вопрос, который у
+                записавшегося уже возник, и промолчать на него значит
+                оставить его без ответа вместо того, чтобы сказать, где
+                ответ взять. Разбор трёхзначности — в lib/visit-address. */}
+            <dt>Адрес</dt>
+            <dd>{visitAddressText(b.address)}</dd>
             {b.payment?.amount && (
               <>
                 <dt>Сумма</dt>

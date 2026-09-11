@@ -273,10 +273,30 @@ def _resolve_bot_user(*, user_id: UUID, tenant: Tenant) -> BotUser | None:
     matches user expectation ("send the reminder where I last opened
     the bot") and aligns with the model's default ``ordering =
     ["-last_seen"]`` (apps/identity/models.py:169).
+
+    ### Why the second sort key (DRF-1653)
+
+    The paragraph above was right about the defect and half-right about the
+    cure. ``-last_seen`` removes arbitrariness only while the values differ.
+    ``last_seen`` is ``auto_now=True``, so two rows touched in the same clock
+    tick hold the identical value — and this query's filter is
+    ``(tenant, ayla_user_id)``, which the model does **not** make unique. Ties
+    here are not a corner case; multiple channels for one Ayla user is the
+    stated reason the ordering exists at all.
+
+    On a tie Postgres is free to return either row, and free to return a
+    different one next time: an ``UPDATE`` relocates a row within the heap.
+    So the reminder could go to MAX today and Telegram tomorrow with nothing
+    having changed.
+
+    ``pk`` decides the tie. It claims nothing about which channel is better —
+    recency is still the rule, and this only says what happens when recency
+    has no opinion. Removing it restores the non-determinism the docstring
+    above promises to have removed.
     """
     return (
         BotUser.all_tenants.filter(tenant=tenant, ayla_user_id=user_id)
-        .order_by("-last_seen")
+        .order_by("-last_seen", "pk")
         .first()
     )
 

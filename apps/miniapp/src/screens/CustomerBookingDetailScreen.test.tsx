@@ -55,6 +55,10 @@ function booking(partial: Partial<BookingItem> & Pick<BookingItem, "id">): Booki
     reschedulable: true,
     rating: null,
     can_rate: false,
+    // DRF-1652 — умолчание `null`, то есть «источник промолчал».
+    // НЕ `""`: это сказало бы, что салон ответил «адреса нет», и
+    // фикстура утверждала бы за салон то, чего он не говорил.
+    address: null,
     ...partial,
   };
 }
@@ -110,6 +114,48 @@ describe("CustomerBookingDetailScreen (real data)", () => {
     expect(screen.getByText(/Анна Соколова/)).toBeInTheDocument();
     expect(screen.getByText("Подтверждена")).toBeInTheDocument();
     expect(screen.getByText(/1 ч 30 мин/)).toBeInTheDocument();
+  });
+
+  // DRF-1652 — «клиент записался и не видит, куда ехать».
+  //
+  // Три состояния проверяются порознь и вместе с положительным
+  // контролем: сначала убеждаемся, что адрес вообще доезжает до экрана,
+  // иначе «показано „уточните"» было бы верно и для экрана, который не
+  // умеет показывать адрес вовсе.
+  it("адрес известен — показан дословно", async () => {
+    mockedFetch.mockResolvedValue({
+      booking: booking({ id: "b-addr", address: "ул. Тверская 12" }),
+    });
+    renderScreen("b-addr");
+    expect(await screen.findByText("ул. Тверская 12")).toBeInTheDocument();
+  });
+
+  it("салон сказал «адреса нет» — это ОТВЕТ, а не молчание", async () => {
+    mockedFetch.mockResolvedValue({ booking: booking({ id: "b-addr", address: "" }) });
+    renderScreen("b-addr");
+    expect(await screen.findByText("Адрес не указан")).toBeInTheDocument();
+    // Не «уточните в салоне»: спрашивать некого, салон уже ответил.
+    expect(screen.queryByText("Уточните адрес в салоне")).not.toBeInTheDocument();
+  });
+
+  it("источник промолчал — человеку сказано, у кого спросить", async () => {
+    mockedFetch.mockResolvedValue({ booking: booking({ id: "b-addr", address: null }) });
+    renderScreen("b-addr");
+    expect(await screen.findByText("Уточните адрес в салоне")).toBeInTheDocument();
+    expect(screen.queryByText("Адрес не указан")).not.toBeInTheDocument();
+  });
+
+  it("строка адреса безусловна — в отличие от мастера и длительности", async () => {
+    // Соседи по списку прячут себя, когда значения нет, и для них это
+    // верно. Адрес — нет: «куда ехать» у записавшегося уже возник, и
+    // молчание оставило бы вопрос без ответа вместо указания, где ответ.
+    mockedFetch.mockResolvedValue({
+      booking: booking({ id: "b-addr", address: null, master_name: "", duration_min: null }),
+    });
+    renderScreen("b-addr");
+    expect(await screen.findByText("Адрес")).toBeInTheDocument();
+    expect(screen.queryByText("Мастер")).not.toBeInTheDocument();
+    expect(screen.queryByText("Длительность")).not.toBeInTheDocument();
   });
 
   it("runs the 2-step cancel with an undo window", async () => {

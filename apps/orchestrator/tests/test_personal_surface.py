@@ -55,6 +55,8 @@ from apps.orchestrator.personal_surface import (
     CHIP_WATER,
     CONSENT_CLOSED_TEXT,
     DIARY_UNAVAILABLE_TEXT,
+    NO_PROFILE_TEXT,
+    NO_TARGETS_TEXT,
     PERSONAL_TOOL_ACTIONS,
     SHOW_MY_RECORDS_TOOL_SPEC,
     execute_personal_tool,
@@ -282,6 +284,150 @@ class TestEveryNumberTraces:
 
         assert " из 128 " not in reply.text
         assert "Норм пока нет" in reply.text
+
+
+# ─── the cleared profile says why (DRF-1623 N-b) ──────────────────────────
+
+
+def _cleared_profile(**over: Any) -> ProfileResponse:
+    """Профиль ПОСЛЕ очистки каталогом: ``norms == {}``, происхождение ``none``.
+
+    Прежние числа (те самые «из 95 г», что человек видел вчера) сюда не
+    попадают вовсе — каталог их не присылает, а бот не хранит.
+    """
+    payload: dict[str, Any] = dict(
+        daily_kcal=None,
+        protein_g=None,
+        fat_g=None,
+        carbs_g=None,
+        water_ml=None,
+        bmr=None,
+        targets_source="none",
+        raw={"norms": {}, "targets_provenance": {"source": "none"}},
+    )
+    payload.update(over)
+    return _profile(**payload)
+
+
+def _bare_summary() -> SummaryResponse:
+    """Итог дня без ориентира по калориям — то, что каталог отдаёт рядом с
+    очищенным профилем."""
+    return _summary(calories_goal=None)
+
+
+class TestAClearedProfileSaysWhy:
+    """Ориентиры сняты — человек слышит, почему, а не видит пропажу без слов.
+
+    На пилоте ноль (2 из 6 писали дневник, последняя запись май 2026),
+    стережём механизм, а не наблюдение: §92 нарушается механизмом, а не
+    экспозицией — «Белки: 61 г» без «из» и без объяснения появится у
+    первого же, кто спросит «что я ел» после очистки.
+    """
+
+    _PRIOR_TARGETS = (128, 95, 1994, 2400)  # что печаталось ДО очистки
+
+    def test_source_none_gets_the_tail_and_not_the_no_profile_line(self, monkeypatch):
+        _install_ayla(
+            monkeypatch,
+            _FakeAyla(
+                summary=_bare_summary(), water=_water(norm_ml=None), profile=_cleared_profile()
+            ),
+        )
+
+        reply = render_diary(_bot_user("cleared-1"))
+
+        assert NO_TARGETS_TEXT in reply.text
+        # «я ещё не считала» — ложь про очищенный профиль: считала и сняла.
+        assert NO_PROFILE_TEXT not in reply.text
+        assert " из " not in reply.text
+        assert "из профиля" not in reply.text
+
+    def test_the_tail_never_quotes_a_prior_target(self, monkeypatch):
+        """Ни в тексте, ни в подсказке рядом не должно всплыть ПРЕЖНЕЕ число
+        ориентира — того, что было до очистки. Единственные цифры в ответе —
+        то, что человек записал сам."""
+        import re
+
+        summary = _bare_summary()
+        _install_ayla(
+            monkeypatch,
+            _FakeAyla(summary=summary, water=_water(norm_ml=None), profile=_cleared_profile()),
+        )
+
+        reply = render_diary(_bot_user("cleared-2"))
+
+        printed = {int(n) for n in re.findall(r"\d+", reply.text)}
+        allowed = {
+            round(summary.calories_total),
+            round(summary.protein_g),
+            round(summary.fat_g),
+            round(summary.carbs_g),
+            _water().total_ml,
+        }
+        assert printed <= allowed, f"unexplained numbers: {printed - allowed}"
+        assert not (printed & set(self._PRIOR_TARGETS))
+        assert NO_TARGETS_TEXT in reply.text  # presence: the tail really is there
+        # empty-assert-ok: the constant names no number by design
+        assert not re.findall(r"\d", NO_TARGETS_TEXT)
+
+    @pytest.mark.parametrize("source", ["ayla_calculated", "user_entered"])
+    def test_a_computed_profile_keeps_its_numbers_and_gets_no_tail(self, monkeypatch, source):
+        _install_ayla(
+            monkeypatch,
+            _FakeAyla(summary=_summary(), water=_water(), profile=_profile(targets_source=source)),
+        )
+
+        reply = render_diary(_bot_user(f"computed-{source}"))
+
+        assert NO_TARGETS_TEXT not in reply.text
+        assert " из 128 " in reply.text
+
+    def test_unknown_legacy_is_left_alone(self, monkeypatch):
+        """Состояние ДО очистки: числа ещё печатаются, хвоста нет — их показ
+        меняет другой срез, не этот."""
+        _install_ayla(
+            monkeypatch,
+            _FakeAyla(
+                summary=_summary(),
+                water=_water(),
+                profile=_profile(targets_source="unknown_legacy"),
+            ),
+        )
+
+        reply = render_diary(_bot_user("legacy-1"))
+
+        assert NO_TARGETS_TEXT not in reply.text
+        assert " из 128 " in reply.text
+
+    def test_a_missing_key_is_a_contract_breach_not_an_absent_target(self, monkeypatch, caplog):
+        """Ключ не пришёл → ``""`` → хвоста нет, а в лог — warning: изготовить
+        «ориентиров нет» из «не прислали» нельзя."""
+        import logging
+
+        _install_ayla(
+            monkeypatch,
+            _FakeAyla(
+                summary=_bare_summary(),
+                water=_water(norm_ml=None),
+                profile=_cleared_profile(targets_source="", raw={"norms": {}}),
+            ),
+        )
+
+        with caplog.at_level(logging.WARNING, logger="apps.orchestrator.personal_surface"):
+            reply = render_diary(_bot_user("nokey-1"))
+
+        assert NO_TARGETS_TEXT not in reply.text
+        assert NO_PROFILE_TEXT not in reply.text
+        breaches = [r for r in caplog.records if "targets_source_missing" in r.getMessage()]
+        assert len(breaches) == 1, [r.getMessage() for r in caplog.records]
+
+    def test_the_tail_is_not_a_door_and_not_a_reproach(self):
+        """Экрана согласий пока нет (#1523) — текст не зовёт туда; и не
+        говорит «ты не заполнил» (copy-policy R2)."""
+        low = NO_TARGETS_TEXT.lower()
+        assert "ориентир" in low  # presence first: an empty string bans nothing
+        for banned in ("нажми", "кнопк", "настройк", "экран", "не заполн", "не указал", "забыл"):
+            assert banned not in low, banned
 
 
 # ─── the chip contract ─────────────────────────────────────────────────────

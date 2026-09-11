@@ -622,6 +622,15 @@ NOT_PERSONAL: Mapping[str, str] = {
     "identity.BotUser.id": "Row identity.",
     "identity.BotUser.tenant": "Scoping — which salon this shell of the person belongs to.",
     "identity.BotUser.ayla_user_id": "Identity bridge to the canonical Ayla user; an address, not a fact.",
+    "identity.BotUser.ayla_user_id_is_proxy": (
+        "A property of that address, not of the person: which sort of Ayla "
+        "account it points at (False real, True Ayla's isolated proxy, NULL "
+        "unknown). It says nothing about who the person is or what they want "
+        "— it tells a consumer whether the address is usable outside Ayla "
+        "(DRF-1649). Same class as ayla_user_id above, and it must travel "
+        "wherever that does, because a key without its sort is what forced "
+        "consumers to guess."
+    ),
     "identity.BotUser.channel": "Routing — which messenger this shell speaks over.",
     "identity.BotUser.channel_user_id": "Routing — the person's id inside that messenger.",
     "identity.BotUser.chat_id": "Routing — where outbound sends land. Decides where, never what.",
