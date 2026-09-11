@@ -125,6 +125,13 @@ def test_the_covered_enums_are_the_ones_the_package_has() -> None:
         "ConflictSource",
         "Severity",
         "BlockedBy",
+        # E10. Both describe how the *observation* went, not a case the decision
+        # distinguishes: FlagSource says where a flag's value came from and
+        # ShadowOutcome says what a shadow run did. Every member of both is
+        # produced — a reachability register over them would be a list of things
+        # that are all reachable.
+        "FlagSource",
+        "ShadowOutcome",
     }
 
     from enum import Enum
