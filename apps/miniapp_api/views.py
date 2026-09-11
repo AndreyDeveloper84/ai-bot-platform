@@ -303,8 +303,38 @@ def auth_verify(request: HttpRequest) -> HttpResponse:
 
     Response always includes `pending_booking_intent` (the current
     cached value OR null if nothing cached / expired).
+
+    # identity (DRF-1319 B+E, решение владельца §124)
+
+    Ответ несёт блок ``identity`` — единственное серверное утверждение о
+    том, кто перед нами, в словаре §124::
+
+        identity: {
+          channel: "identified" | "dev_bypass",
+          subject: "linked" | "unlinked",
+          ayla_user_id: "<uuid>" | null,
+        }
+
+    ``channel`` — как человек опознан: ``identified`` — MAX ``initData``
+    достоверно назвал его (только так сюда и попадают снаружи);
+    ``dev_bypass`` — DEBUG-обход, человека канал НЕ называл, и притворяться
+    обратным нельзя.
+
+    ``subject`` — есть ли у этого channel user доменный субъект в Ayla.
+    «Регистрация» внутри MAX по §124 — это не экран и не OAuth, а
+    привязка channel identity к каноническому субъекту; она делается
+    здесь, при первом же входе, через ``ensure_ayla_link`` — тем же
+    механизмом, что у брони и платежей. Ayla недоступна → ``unlinked``
+    и 200: вход не ломается, следующий вход попробует снова.
+
+    Понятия «аноним» / «гость» в этом контракте НЕТ намеренно: внутри
+    MAX пустой ``initData`` — отказ транспорта, а не гость (1319-D), и
+    сервер до этой ручки в таком случае не доходит вовсе (401/400 в
+    декораторе).
     """
     import json
+
+    from apps.identity.services.ayla_link import ensure_ayla_link
 
     from apps.miniapp_api.pending_intent import (
         PendingIntentInvalid,
@@ -313,7 +343,8 @@ def auth_verify(request: HttpRequest) -> HttpResponse:
         validate_intent,
     )
 
-    verified: VerifiedInitData = request.verified_init_data  # type: ignore[attr-defined]
+    # ``None`` на DEBUG-обходе (см. ``require_init_data``): канал человека не называл.
+    verified: VerifiedInitData | None = request.verified_init_data  # type: ignore[attr-defined]
     bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
 
     # Optional body — Mini App may call /auth/verify without any pending
@@ -337,12 +368,23 @@ def auth_verify(request: HttpRequest) -> HttpResponse:
 
     cached_intent = get_intent(bot_user.id)
 
+    # DRF-1319 E: привязка субъекта при входе. Идемпотентно (попадание в
+    # кеш по ``ayla_user_id`` не ходит в сеть), fail-soft (``None`` —
+    # остаться непривязанным, не ронять вход).
+    ayla_user_id = ensure_ayla_link(bot_user, trigger="miniapp_auth_verify")
+    identity = {
+        "channel": "identified" if verified is not None else "dev_bypass",
+        "subject": "linked" if ayla_user_id is not None else "unlinked",
+        "ayla_user_id": str(ayla_user_id) if ayla_user_id is not None else None,
+    }
+
+    first_name = verified.user.get("first_name", "") if verified is not None else ""
     return JsonResponse(
         {
             "user": {
                 "id": str(bot_user.id),
                 "channel_user_id": bot_user.channel_user_id,
-                "display_name": bot_user.display_name or verified.user.get("first_name", ""),
+                "display_name": bot_user.display_name or first_name,
                 "client_name": bot_user.client_name,
             },
             "tenant": {
@@ -351,6 +393,7 @@ def auth_verify(request: HttpRequest) -> HttpResponse:
                 "timezone": bot_user.tenant.timezone,
             },
             "pending_booking_intent": cached_intent,
+            "identity": identity,
         }
     )
 
