@@ -144,6 +144,7 @@ ALLOWED_DOMAIN_SUFFIXES = (
 #: Placeholder domains used by redaction tests and design hand-offs.
 ALLOWED_DOMAINS_EXACT = {
     "localhost",
+    "test.com",
     "host.tld",
     "domain.com",
     "domain.ru",
@@ -157,6 +158,7 @@ ALLOWED_DOMAINS_EXACT = {
     "evil.com",
     "company.com",
     "sub.example.co",
+    "sub.example.co.uk",
     "subdomain.example.co.uk",
 }
 
