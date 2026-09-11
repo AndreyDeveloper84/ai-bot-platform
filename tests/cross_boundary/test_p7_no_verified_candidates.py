@@ -86,17 +86,35 @@ def test_no_verified_candidates_arrives_as_absence_with_a_name(
         layer_1["reason_codes"]
     )
 
-    # Слой 2: отсутствие С ИМЕНЕМ — и имя зависит от того, пуст ли каталог.
-    expected = NO_EVIDENCE if scenario == "empty" else NOT_RECOMMENDABLE
-    assert expected in layer_2["reason_codes"], (
-        f"сценарий {scenario}: ожидался код {expected}, каталог назвал {layer_2['reason_codes']}"
-    )
-    # Положительная стража к самому различению: коды двух сценариев не
-    # должны появляться вместе — иначе golden не различал бы состояния.
-    other = NOT_RECOMMENDABLE if scenario == "empty" else NO_EVIDENCE
-    assert other not in layer_2["reason_codes"], (
-        f"сценарий {scenario}: код другого сценария {other} тоже пришёл — стенд посеян не так"
-    )
+    # Слой 2: отсутствие С ИМЕНЕМ. Два кода — про РАЗНОЕ, и это выяснилось
+    # на стенде, не в голове: QUALITY_NO_EVIDENCE говорит о ранжировании
+    # («свидетельств нет») и приходит в ОБОИХ сценариях; различает их
+    # ELIG_EXCLUDED_NOT_RECOMMENDABLE — «каталог видно, рекомендовать
+    # нечего», он есть только когда мастера существуют. Первая редакция
+    # требовала, чтобы коды не встречались вместе, и покраснела на
+    # посеянном стенде: l2=['ELIG_EXCLUDED_NOT_RECOMMENDABLE',
+    # 'QUALITY_NO_EVIDENCE']. Стенд был посеян верно — неверным было
+    # ожидание.
+    codes = layer_2["reason_codes"]
+    assert NO_EVIDENCE in codes, f"слой 2 без имени отсутствия: {codes}"
+    if scenario == "empty":
+        assert NOT_RECOMMENDABLE not in codes, (
+            f"пустой каталог назвал исключённых мастеров — стенд не пуст: {codes}"
+        )
+    else:
+        assert NOT_RECOMMENDABLE in codes, (
+            f"сценарий p7: мастера посеяны, а каталог их не увидел — {codes}"
+        )
+
+    # Слой 3 — полка «что вообще есть». Матрица зовёт её лучшим узлом
+    # контура: при нуле допущенных она живёт. Пустой каталог — пустая
+    # полка; мастера без VERIFIED — категория ЕСТЬ, кандидатов нет.
+    # Различает сценарии вторым, независимым от кодов способом.
+    categories = layer_3.get("categories") or []
+    if scenario == "empty":
+        assert categories == [], categories
+    else:
+        assert categories, "мастера посеяны, а полка «что есть» пуста — честного пустого ответа нет"
 
 
 def test_the_answer_is_stable_across_two_calls(bot_points_at_catalog: Catalog) -> None:
