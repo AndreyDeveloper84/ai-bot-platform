@@ -57,6 +57,7 @@ import httpx
 from django.conf import settings
 
 from apps.integrations.ayla.url_builder import AylaUrlBuilder, AylaUrlError
+from apps.integrations.ayla.request_id import with_request_id
 
 logger = logging.getLogger(__name__)
 
@@ -403,22 +404,24 @@ class PersonalContextHttpClient:
                 method,
                 url,
                 json=json_body,
-                headers={
-                    "Authorization": f"Bearer {self._token}",
-                    # CP-2 / DRF-1617. The token says WHICH SERVICE called;
-                    # this says WHICH SUBJECT it is acting for. Upstream
-                    # resolves it — without creating a row — and refuses when
-                    # it does not resolve to the subject in the path, so a
-                    # leaked token can no longer reach an arbitrary person.
-                    #
-                    # This client was the only one of ten Ayla clients that
-                    # named no subject, and it happens to carry every
-                    # personal-data route: export, erasure, and the declared
-                    # profile the erasure empties.
-                    "X-External-User-ID": external_user_id,
-                    "Accept": "application/json",
-                    "Content-Type": "application/json",
-                },
+                headers=with_request_id(
+                    {
+                        "Authorization": f"Bearer {self._token}",
+                        # CP-2 / DRF-1617. The token says WHICH SERVICE called;
+                        # this says WHICH SUBJECT it is acting for. Upstream
+                        # resolves it — without creating a row — and refuses when
+                        # it does not resolve to the subject in the path, so a
+                        # leaked token can no longer reach an arbitrary person.
+                        #
+                        # This client was the only one of ten Ayla clients that
+                        # named no subject, and it happens to carry every
+                        # personal-data route: export, erasure, and the declared
+                        # profile the erasure empties.
+                        "X-External-User-ID": external_user_id,
+                        "Accept": "application/json",
+                        "Content-Type": "application/json",
+                    }
+                ),
                 timeout=self._timeout,
             )
         except httpx.HTTPError as exc:

@@ -57,6 +57,7 @@ from apps.integrations.ayla.recommendations_client import (
     _circuit,
 )
 from apps.integrations.ayla.url_builder import AylaUrlBuilder, AylaUrlError
+from apps.integrations.ayla.request_id import with_request_id
 
 logger = logging.getLogger(__name__)
 
@@ -306,12 +307,14 @@ def _build_url() -> str:
 
 
 def _headers(external_user_id: str) -> dict[str, str]:
-    return {
-        "Authorization": f"Bearer {settings.AYLA_INTERNAL_API_TOKEN}",
-        "X-External-User-ID": external_user_id,
-        "Accept": "application/json",
-        "Content-Type": "application/json",
-    }
+    return with_request_id(
+        {
+            "Authorization": f"Bearer {settings.AYLA_INTERNAL_API_TOKEN}",
+            "X-External-User-ID": external_user_id,
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+        }
+    )
 
 
 def _shape(value: Any) -> str:

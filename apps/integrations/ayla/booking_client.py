@@ -47,6 +47,7 @@ from django.conf import settings
 from django.core.cache import cache
 
 from apps.integrations.ayla.url_builder import AylaUrlBuilder
+from apps.integrations.ayla.request_id import with_request_id
 
 
 logger = logging.getLogger(__name__)
@@ -693,11 +694,13 @@ class AylaBookingHTTPClient:
         added for writes / ``me`` reads so Ayla binds the action to the
         consenting client (``IsBotServiceWithVerifiedClient``).
         """
-        headers = {
-            "Authorization": f"Bearer {self._token}",
-            "Accept": "application/json",
-            "Content-Type": "application/json",
-        }
+        headers = with_request_id(
+            {
+                "Authorization": f"Bearer {self._token}",
+                "Accept": "application/json",
+                "Content-Type": "application/json",
+            }
+        )
         if external_user_id is not None:
             headers["X-External-User-ID"] = external_user_id
         return headers

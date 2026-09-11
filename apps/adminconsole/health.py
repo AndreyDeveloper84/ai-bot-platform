@@ -57,6 +57,7 @@ from apps.handoff.models import AdminTask
 from apps.integrations.ayla.url_builder import AylaUrlBuilder, AylaUrlError
 from apps.tenancy.context import tenant_scope
 from apps.tenancy.models import Tenant
+from apps.integrations.ayla.request_id import with_request_id
 
 logger = logging.getLogger(__name__)
 
@@ -250,7 +251,9 @@ class AylaUpstreamCounter:
             response = httpx.get(
                 url,
                 params={"tenant": tenant_id, "page_size": 1},
-                headers={"Authorization": f"Bearer {self._token}", "Accept": "application/json"},
+                headers=with_request_id(
+                    {"Authorization": f"Bearer {self._token}", "Accept": "application/json"}
+                ),
                 timeout=self._timeout,
             )
             response.raise_for_status()
