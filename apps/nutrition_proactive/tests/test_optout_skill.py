@@ -38,6 +38,7 @@ def bot_user(tenant: Tenant) -> BotUser:
     return BotUser.all_tenants.create(
         tenant=tenant,
         channel="max",
+        customer_status=BotUser.CustomerStatus.LINKED,  # S2-2: the client contour knows this person
         channel_user_id="np-oo-1",
         chat_id="chat-oo-1",
         consent_at=now,

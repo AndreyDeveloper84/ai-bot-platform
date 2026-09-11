@@ -157,6 +157,15 @@ def check_common(bot_user: Any) -> str | None:
     blocked = consent_blocker(bot_user)
     if blocked:
         return blocked
+    # Owner 11.09 §2.4 (S2-2): nutrition is closed to a SHADOW — and to an
+    # UNRESOLVED — salon shell. Asked here, by name, so the planner's reason
+    # says «shadow», not «water_off»: `prefs.get_prefs` answers empty for the
+    # same shell, and an empty answer would name the wrong cause.
+    from apps.identity.services.person_context_gate import person_context_access
+
+    refused = person_context_access(bot_user)
+    if refused is not None:
+        return refused.reason
     if not (getattr(bot_user, "channel_user_id", "") or "").strip():
         return "no_chat_id"
     if getattr(bot_user, "food_scanner_consent_at", None) is None:

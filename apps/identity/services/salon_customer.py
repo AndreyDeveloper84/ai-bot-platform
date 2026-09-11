@@ -134,6 +134,34 @@ def apply_classification(c: Classification, *, now: datetime | None = None) -> i
     return written
 
 
+def advance_to_linked(channel: str, channel_user_id: str, *, now: datetime | None = None) -> int:
+    """An identity link was just written: the person is LINKED by §2.1(3).
+
+    Every shell of the person that is still SHADOW or UNRESOLVED becomes
+    LINKED; the source is kept where it was set and filled where it was
+    not (salon shells → SALON_ASSISTANT, client contour → CLIENT_BOT).
+    A shell already LINKED is left alone. Returns rows written.
+    """
+    moment = now or datetime.now(UTC)
+    pending = BotUser.all_tenants.filter(channel=channel, channel_user_id=channel_user_id).exclude(
+        customer_status=BotUser.CustomerStatus.LINKED
+    )
+    written = 0
+    for shell in pending.select_related("tenant"):
+        is_client = shell.tenant.slug == GLOBAL_BOT_TENANT_SLUG
+        source = shell.customer_source or (
+            BotUser.CustomerSource.CLIENT_BOT
+            if is_client
+            else BotUser.CustomerSource.SALON_ASSISTANT
+        )
+        written += BotUser.all_tenants.filter(pk=shell.pk).update(
+            customer_status=BotUser.CustomerStatus.LINKED,
+            customer_source=source,
+            customer_status_at=moment,
+        )
+    return written
+
+
 def unresolved_count() -> int:
     return BotUser.all_tenants.filter(Q(customer_status=BotUser.CustomerStatus.UNRESOLVED)).count()
 
@@ -144,6 +172,7 @@ __all__ = [
     "MATCH_PHONE",
     "MATCH_SHADOW",
     "Classification",
+    "advance_to_linked",
     "apply_classification",
     "classify",
     "salon_people",
