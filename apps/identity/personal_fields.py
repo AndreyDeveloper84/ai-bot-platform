@@ -686,6 +686,14 @@ NOT_PERSONAL: Mapping[str, str] = {
     "identity.UserPersonalContext.updated_at": "Row bookkeeping.",
     "identity.UserPersonalContext.soft_deleted_at": "Erasure bookkeeping — the forget-all tombstone.",
     "identity.UserPersonalContext.forget_all_requested_at": "Erasure bookkeeping — when the person asked.",
+    "identity.UserPersonalContext.deletion_requested_at": (
+        "Erasure bookkeeping (DRF-1699 D2) — when the account-deletion request was accepted; "
+        "the personalisation stop-gate reads it."
+    ),
+    "identity.UserPersonalContext.deletion_request_id": (
+        "Erasure bookkeeping (DRF-1699 D2) — the catalog DeletionRequest number the person saw; "
+        "named in every refusal."
+    ),
     # loyalty.LoyaltyAccount
     "loyalty.LoyaltyAccount.id": "Row identity.",
     "loyalty.LoyaltyAccount.tenant": "Scoping.",

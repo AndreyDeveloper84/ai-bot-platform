@@ -765,6 +765,24 @@ class UserPersonalContext(models.Model):
         "forget-all (per ADR-0011 §3.3). Records user-intent moment; "
         "async sweep then soft-deletes all entries.",
     )
+    # DRF-1699 D2 (§7 свода) — живая заявка на удаление аккаунта. Ставится в
+    # момент приёма заявки (до показа успеха), снимается исполнителем по
+    # COMPLETED. Читатели памяти, рекомендаций и проактива отвечают отказом
+    # С ИМЕНЕМ ``deletion_requested`` и этим номером — не пустым видом, как
+    # ``forget_all_requested_at`` выше: пустота читалась бы как «новый
+    # человек» и включила бы сбор заново. Если выставлены оба флага —
+    # побеждает этот (шире и с номером). Единственный писатель —
+    # ``apps.identity.services.deletion_gate``.
+    deletion_requested_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="Set when the person's account-deletion request was accepted (§7). Personalisation stops.",
+    )
+    deletion_request_id = models.UUIDField(
+        null=True,
+        blank=True,
+        help_text="Catalog DeletionRequest id the person saw on screen.",
+    )
     minor_lock = models.BooleanField(
         default=False,
         help_text="Per ADR-0011 §10.2 + spec §1: set true when "
