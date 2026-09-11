@@ -267,3 +267,13 @@ exclude = ["^legacy_maxbot/", "^legacy_formulatela_mcp/", "^legacy_notifications
 
 [tool.django-stubs]
 django_settings_module = "config.settings.local"
+
+# mypy 2.3 (Dependabot #1363 → #1630): `import-untyped` стал ошибкой при текущем
+# конфиге — 44 файла `apps/*/apps.py` импортируют `django_celery_beat.models`, а у
+# пакета (2.9.0) нет ни стабов, ни `py.typed`. На dev с mypy 2.0.0 — 0 ошибок,
+# с 2.3.1 без этой секции — 44, все одного модуля. Это не ослабление проверки:
+# типов у пакета нет, проверять нечего; для всех остальных модулей правило
+# прежнее.
+[[tool.mypy.overrides]]
+module = ["django_celery_beat", "django_celery_beat.*"]
+ignore_missing_imports = true
