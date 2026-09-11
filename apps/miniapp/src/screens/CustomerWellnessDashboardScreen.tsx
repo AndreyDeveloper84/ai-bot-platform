@@ -81,7 +81,8 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { ApiError, type Service } from "../lib/api";
+import { type Service } from "../lib/api";
+import { authErrorCopy, loadErrorReason, type LoadErrorReason } from "../lib/auth-error-copy";
 import { formatDuration, formatMoney } from "../lib/format";
 import { visitAddressText } from "../lib/visit-address";
 import {
@@ -114,7 +115,7 @@ import { screenRoot } from "../lib/screen-back";
 type Slice<T> =
   | { kind: "loading" }
   | { kind: "ok"; data: T }
-  | { kind: "error"; reason: "network" | "server" | "other" };
+  | { kind: "error"; reason: LoadErrorReason };
 
 function isOnline(): boolean {
   if (typeof navigator === "undefined") return true;
@@ -176,38 +177,20 @@ export function CustomerWellnessDashboardScreen() {
     if (todayRes.status === "fulfilled") {
       setToday({ kind: "ok", data: todayRes.value });
     } else {
-      const e = todayRes.reason;
-      setToday({
-        kind: "error",
-        reason:
-          e instanceof ApiError && e.status >= 500
-            ? "server"
-            : e instanceof ApiError
-              ? "other"
-              : "network",
-      });
+      setToday({ kind: "error", reason: loadErrorReason(todayRes.reason) });
     }
 
     if (activityRes.status === "fulfilled") {
       setActivity({ kind: "ok", data: activityRes.value });
     } else {
-      const e = activityRes.reason;
-      setActivity({
-        kind: "error",
-        reason:
-          e instanceof ApiError && e.status >= 500
-            ? "server"
-            : e instanceof ApiError
-              ? "other"
-              : "network",
-      });
+      setActivity({ kind: "error", reason: loadErrorReason(activityRes.reason) });
     }
 
     if (recsRes.status === "fulfilled") {
       setRecs({ kind: "ok", data: recsRes.value });
     } else {
       // Recommendations errors hide the whole block silently per spec.
-      setRecs({ kind: "error", reason: "other" });
+      setRecs({ kind: "error", reason: loadErrorReason(recsRes.reason) });
     }
   }, []);
 
@@ -1182,16 +1165,22 @@ function BlockError({
   reason,
   onRetry,
 }: {
-  reason: "network" | "server" | "other";
+  reason: LoadErrorReason;
   onRetry: () => void;
 }) {
-  // Warm copy per Tau §5 State 3 + §7 brand voice.
+  // Warm copy per Tau §5 State 3 + §7 brand voice. DRF-1319 D-1: отказ
+  // входа — своим именем, как на Hello и в StateError, а не «через минуту».
   const text =
-    reason === "network"
-      ? "Не получилось загрузить. Проверь интернет и попробуй ещё раз."
-      : "Что-то пошло не так. Попробуй ещё раз через минуту.";
+    reason.kind === "auth"
+      ? authErrorCopy(reason.slug).body
+      : reason.kind === "network"
+        ? "Не получилось загрузить. Проверь интернет и попробуй ещё раз."
+        : "Что-то пошло не так. Попробуй ещё раз через минуту.";
   return (
     <div className="wellness-dash__block-error" role="status" aria-live="polite">
+      {reason.kind === "auth" && (
+        <p style={{ fontWeight: 600 }}>{authErrorCopy(reason.slug).title}</p>
+      )}
       <p>{text}</p>
       <button type="button" className="btn-secondary" onClick={onRetry}>
         Обновить

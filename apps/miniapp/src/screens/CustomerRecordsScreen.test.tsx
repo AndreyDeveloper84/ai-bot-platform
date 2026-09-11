@@ -35,7 +35,8 @@ vi.mock("../lib/api", async (importOriginal) => {
   };
 });
 
-import { fetchMyBookings, type BookingItem } from "../lib/api";
+import { ApiError, fetchMyBookings, type BookingItem } from "../lib/api";
+import { authErrorCopy } from "../lib/auth-error-copy";
 import { CustomerRecordsScreen } from "./CustomerRecordsScreen";
 
 const mockedList = vi.mocked(fetchMyBookings);
@@ -211,6 +212,22 @@ describe("CustomerRecordsScreen (real data)", () => {
     expect(await screen.findByText(/Не получилось загрузить/)).toBeInTheDocument();
     await user.click(screen.getAllByRole("button", { name: "Обновить" })[0]!);
     expect(await screen.findByRole("tab", { name: "Ближайшие (2)" })).toBeInTheDocument();
+  });
+
+  it("DRF-1319 D-1: отказ входа (400 malformed) назван своим именем, не «через минуту»", async () => {
+    mockedList.mockRejectedValueOnce(new ApiError(400, "malformed", "missing Authorization header"));
+    renderScreen();
+    expect(await screen.findByText(authErrorCopy("malformed").title)).toBeInTheDocument();
+    expect(screen.getByText(authErrorCopy("malformed").body)).toBeInTheDocument();
+    expect(screen.queryByText(/через минуту/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/missing Authorization header/)).not.toBeInTheDocument();
+  });
+
+  it("DRF-1319 D-1: прочий 4xx — по-прежнему «попробуй через минуту» (положительная стража)", async () => {
+    mockedList.mockRejectedValueOnce(new ApiError(422, "validation_error", "bad section"));
+    renderScreen();
+    expect(await screen.findByText(/через минуту/)).toBeInTheDocument();
+    expect(screen.queryByText(authErrorCopy("malformed").title)).not.toBeInTheDocument();
   });
 
   it("opens the booking detail from a card", async () => {

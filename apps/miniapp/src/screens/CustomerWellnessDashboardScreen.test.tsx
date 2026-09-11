@@ -33,6 +33,7 @@ vi.mock("../lib/max-sdk", () => ({
   onBackButton: () => () => undefined,
 }));
 
+import { authErrorCopy } from "../lib/auth-error-copy";
 import { getCatalogBrowse } from "../lib/customer-booking";
 
 const mockedBrowse = vi.mocked(getCatalogBrowse);
@@ -698,6 +699,59 @@ describe("CustomerWellnessDashboardScreen — degraded reads (DRF-1546)", () => 
  * покраснеет первый случай; сделайте `waterKnown` снова зависимым от
  * цели — покраснеет положительная проверка про «2 стакана сегодня».
  */
+describe("CustomerWellnessDashboardScreen — отказ входа назван своим именем (DRF-1319 D-1)", () => {
+  /** Ручка today отвечает отказом; activity — обычно. */
+  function serveTodayRefused(status: number, slug: string, detail: string) {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: unknown) => {
+        const u = String(url);
+        if (u.includes("/wellness/today")) {
+          return {
+            ok: false,
+            status,
+            statusText: "refused",
+            json: async () => ({ error: slug, detail }),
+          } as unknown as Response;
+        }
+        if (u.includes("/recent-activity")) {
+          return {
+            ok: true,
+            status: 200,
+            json: async () => ({ this_week_booking_count: 0 }),
+          } as unknown as Response;
+        }
+        throw new Error(`unexpected fetch: ${u}`);
+      }),
+    );
+  }
+
+  beforeEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllEnvs();
+    mockedBrowse.mockResolvedValue({ services: [], masters: [], picks: [], picksOutcome: "OK" });
+    window.history.replaceState({}, "", "/customer/main");
+  });
+
+  it("400 malformed → «MAX не передал данные для входа», не «через минуту»", async () => {
+    serveTodayRefused(400, "malformed", "missing Authorization header");
+    await renderScreen(false);
+
+    expect(await screen.findByText(authErrorCopy("malformed").title)).toBeInTheDocument();
+    expect(screen.getByText(authErrorCopy("malformed").body)).toBeInTheDocument();
+    expect(screen.queryByText(/через минуту/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/missing Authorization header/)).not.toBeInTheDocument();
+  });
+
+  it("прочий 4xx → по-прежнему «через минуту» (положительная стража)", async () => {
+    serveTodayRefused(422, "validation_error", "bad day");
+    await renderScreen(false);
+
+    expect(await screen.findByText(/через минуту/)).toBeInTheDocument();
+    expect(screen.queryByText(authErrorCopy("malformed").title)).not.toBeInTheDocument();
+  });
+});
+
 describe("CustomerWellnessDashboardScreen — норма воды не выдумывается", () => {
   function serve(today: unknown) {
     vi.stubGlobal(

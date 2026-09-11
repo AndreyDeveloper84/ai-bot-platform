@@ -54,7 +54,7 @@ import { EmptyRecordsState } from "../components/EmptyRecordsState";
 import { GoalInviteCard } from "../components/GoalInviteCard";
 import { TimeGroupHeader } from "../components/TimeGroupHeader";
 import { useOnline } from "../hooks/useOnline";
-import { ApiError } from "../lib/api";
+import { authErrorCopy, loadErrorReason, type LoadErrorReason } from "../lib/auth-error-copy";
 import {
   annotateItems,
   getMyBookings,
@@ -74,7 +74,7 @@ import { screenRoot } from "../lib/screen-back";
 type Slice<T> =
   | { kind: "loading" }
   | { kind: "ok"; data: T }
-  | { kind: "error"; reason: "network" | "server" | "other" };
+  | { kind: "error"; reason: LoadErrorReason };
 
 const FILTER_ALL = "__all__";
 
@@ -116,15 +116,7 @@ export function CustomerRecordsScreen() {
       const data = await getMyBookings(section);
       setSlice({ kind: "ok", data });
     } catch (e) {
-      setSlice({
-        kind: "error",
-        reason:
-          e instanceof ApiError && e.status >= 500
-            ? "server"
-            : e instanceof ApiError
-              ? "other"
-              : "network",
-      });
+      setSlice({ kind: "error", reason: loadErrorReason(e) });
     }
   }, []);
 
@@ -383,10 +375,16 @@ export function CustomerRecordsScreen() {
         {/* Error. */}
         {slice.kind === "error" && (
           <div className="records-screen__error" role="status" aria-live="polite">
+            {/* DRF-1319 D-1: отказ входа — своим именем, как на Hello и в StateError. */}
+            {slice.reason.kind === "auth" && (
+              <p style={{ fontWeight: 600 }}>{authErrorCopy(slice.reason.slug).title}</p>
+            )}
             <p>
-              {slice.reason === "network"
-                ? "Не получилось загрузить. Проверь интернет."
-                : "Что-то пошло не так. Попробуй ещё раз через минуту."}
+              {slice.reason.kind === "auth"
+                ? authErrorCopy(slice.reason.slug).body
+                : slice.reason.kind === "network"
+                  ? "Не получилось загрузить. Проверь интернет."
+                  : "Что-то пошло не так. Попробуй ещё раз через минуту."}
             </p>
             <button
               type="button"
