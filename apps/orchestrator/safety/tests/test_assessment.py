@@ -326,3 +326,47 @@ class TestThePolicyVersionMovesByItself:
 
         assert projected.policy_version
         assert projected.policy_version.startswith("pre_check-")
+
+
+class TestAnUnmappableVerdictFailsLoudly:
+    """The defence that would look like caution and behave like a lie.
+
+    A future ``except`` inside :func:`assess` — or a
+    ``_MAPPING.get(verdict, something)`` — would turn "we do not know how to
+    map this" into "nobody evaluated". That is worse than it sounds, because
+    the consumer's own guard cannot catch it: ``UNKNOWN`` with no revision is
+    its **legal** pair, so a swallowed error arrives wearing the exact shape
+    of an honest absence.
+
+    Today the mapping is a bare subscript and raises. This pins that, so the
+    day somebody makes it "safer" the test says what the safety cost is.
+    """
+
+    def test_it_raises_instead_of_manufacturing_an_absence(self):
+        class _UnknownVerdict:
+            value = "invented"
+
+        class _Result:
+            verdict = _UnknownVerdict()
+            matched_patterns = ["p"]
+
+        with pytest.raises(KeyError):
+            assess(_Result(), state_revision=1, now=_NOW)
+
+    def test_the_mapping_is_not_a_lookup_with_a_fallback(self):
+        """Reading the call site, not the behaviour.
+
+        ``_MAPPING[verdict]`` and ``_MAPPING.get(verdict, X)`` behave
+        identically on every input the enum can produce — the difference only
+        shows on the input that should never arrive. So it is asserted on the
+        source, where the difference is visible.
+        """
+        import inspect
+
+        source = inspect.getsource(assess)
+
+        assert "_MAPPING[" in source, "the mapping stopped being a strict lookup"
+        assert "_MAPPING.get(" not in source, (
+            "a fallback appeared in the mapping — an unmappable verdict would "
+            "become a manufactured verdict instead of an error"
+        )
