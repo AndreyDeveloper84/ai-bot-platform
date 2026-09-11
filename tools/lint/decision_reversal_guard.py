@@ -367,9 +367,7 @@ def main(argv: list[str]) -> int:
     repo_root = _PROJECT_ROOT
 
     baseline = read_baseline()
-    cancelling, violations, stale = scan(
-        target.read_text(encoding="utf-8"), repo_root, baseline
-    )
+    cancelling, violations, stale = scan(target.read_text(encoding="utf-8"), repo_root, baseline)
 
     # Printed on every run, green or red. A count is the only thing that
     # tells «nothing violated» apart from «nothing inspected».

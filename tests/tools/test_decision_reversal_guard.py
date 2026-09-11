@@ -161,10 +161,7 @@ def test_path_that_does_not_exist_is_red() -> None:
 
 
 def test_one_missing_path_among_real_ones_is_still_red() -> None:
-    mixed = (
-        _FORGED_NO_BLOCK
-        + f"\n**Затронутый код:**\n\n- `{_REAL_PATH}`\n- `{_FAKE_PATH}`\n"
-    )
+    mixed = _FORGED_NO_BLOCK + f"\n**Затронутый код:**\n\n- `{_REAL_PATH}`\n- `{_FAKE_PATH}`\n"
     _, violations, _ = _scan(mixed)
     assert len(violations) == 1, f"нарушений: {len(violations)}"
     assert violations[0].paths == [_FAKE_PATH]
@@ -183,10 +180,7 @@ def test_block_full_of_prose_instead_of_paths_is_red() -> None:
 
 
 def test_not_applicable_with_a_reason_is_green() -> None:
-    na = (
-        _FORGED_NO_BLOCK
-        + "\n**Затронутый код:** НЕ ПРИМЕНИМО — решение о порядке работы окон.\n"
-    )
+    na = _FORGED_NO_BLOCK + "\n**Затронутый код:** НЕ ПРИМЕНИМО — решение о порядке работы окон.\n"
     cancelling, violations, _ = _scan(na)
     assert len(cancelling) == 1, f"совпадений: {len(cancelling)}"
     assert violations == [], "\n".join(v.render() for v in violations)
