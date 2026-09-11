@@ -120,7 +120,16 @@ jobs:
             # соседствует с системной ротацией — в /var/backups уже пишет apt
             # (alternatives.tar.*, apt.extended_states.* с суффиксами .0 и
             # .1.gz), и наши снимки оказались бы в её окружении.
-            BACKUP_DIR=\"\$HOME/ayla-bot-staging-backups\"
+            # Владелец дерева и ЕГО дом. Не \$HOME входящего: тот — root,
+            # и снимок в /root (drwx------) дотянется только до root. После
+            # #1586 всё в дереве пишет владелец, снимок не исключение —
+            # откатывать будет тот, кто владеет деревом, и снимок должен
+            # быть его.
+            OWNER=\$(stat -c %U '${DEV_DEPLOY_PATH}')
+            [ -n \"\$OWNER\" ] || { echo \"::error::владелец дерева не определён\"; exit 1; }
+            OWNER_HOME=\$(getent passwd \"\$OWNER\" | cut -d: -f6)
+            [ -n \"\$OWNER_HOME\" ] || { echo \"::error::у владельца дерева нет домашнего каталога\"; exit 1; }
+            BACKUP_DIR=\"\$OWNER_HOME/ayla-bot-staging-backups\"
             # Глубина — теперь РЕШЕНИЕ, а не умолчание. Первая редакция
             # честно говорила «размер дампа не измерен, десять взято как
             # число, заведомо лучшее бесконечности» и требовала назначить
@@ -151,28 +160,29 @@ jobs:
             # вычёркивает GitHub только значения секретов; совпасть с
             # DEV_USER имя могло единственным образом.
             #
-            # Значит \$HOME здесь — всегда /root, а он drwx------: снимок
-            # есть, но дотянется до него только root (или sudo). Откат самой
-            # выкладкой при этом работает — она сама root. Это не поломка, а
-            # названный предел, и место ему в логе, а не в переписке.
+            # Значит \$HOME входящего — /root (drwx------), и снимок там
+            # дотянулся бы только до root. Поэтому каталог берётся из дома
+            # ВЛАДЕЛЬЦА (выше), и пишет в него владелец: тот предел, что
+            # стоял здесь как «названный», снят после #1586 — root больше
+            # ничего не пишет сам.
             #
             # Печатаем ЧИСЛО, а не имя: имя равно значению секрета DEV_USER и
             # уходит в лог как \`***\` — носитель есть, сведений в нём нет.
             # Ноль секретом не является. Та же правка, что в шагах выкладки
             # (DRF-1646), и тот же сторож её держит.
-            echo \"::notice::бэкап: uid \$(id -u), gid \$(id -g), каталог \$BACKUP_DIR\"
-            mkdir -p \"\$BACKUP_DIR\"
+            echo \"::notice::бэкап: вход от uid \$(id -u), пишет \$OWNER, каталог \$BACKUP_DIR\"
+            sudo -u \"\$OWNER\" -H mkdir -p \"\$BACKUP_DIR\"
             # Проверка записи ТЕМ ЖЕ пользователем и ДО pg_dump. Без неё
             # первым о потерянных правах сказал бы pg_dump — то есть отказ
             # пришёл бы из шага, который к правам отношения не имеет, и
             # читался бы как сбой базы. Проверять под sudo значило бы
             # ответить на чужой вопрос: пишет сюда не root.
             PROBE=\"\$BACKUP_DIR/.write-probe.\$\$\"
-            if ! (: > \"\$PROBE\") 2>/dev/null; then
+            if ! sudo -u \"\$OWNER\" -H touch \"\$PROBE\" 2>/dev/null; then
               echo \"::error::каталог бэкапов не записываем пользователем выкладки: \$BACKUP_DIR\"
               exit 1
             fi
-            rm -f \"\$PROBE\"
+            sudo -u \"\$OWNER\" -H rm -f \"\$PROBE\"
             # Пользователь и имя базы берутся ИЗ САМОГО КОНТЕЙНЕРА, а не
             # вписаны сюда. На боевой тропе они захардкожены, и это верно
             # ровно до первого стенда с другим окружением: пилот поднимается
@@ -180,7 +190,9 @@ jobs:
             # Контейнер знает их по построению, и спросить его дешевле, чем
             # угадать. Кавычки вокруг переменных внутри одинарных — чтобы их
             # раскрыл удалённый sh, а не наш ssh.
-            sudo docker compose --env-file .env.staging -f docker-compose.yml -f docker-compose.staging.yml -f docker-compose.staging.local.yml -p ayla-bot-staging exec -T postgres sh -c 'pg_dump -U \"\$POSTGRES_USER\" \"\$POSTGRES_DB\"' | gzip > \"\$BACKUP_PATH\"
+            # Перенаправление делает ВЫЗЫВАЮЩАЯ оболочка, а она root: файл лёг бы
+            # root-ом в каталог владельца. Пишет tee от владельца.
+            sudo -u \"\$OWNER\" -H docker compose --env-file .env.staging -f docker-compose.yml -f docker-compose.staging.yml -f docker-compose.staging.local.yml -p ayla-bot-staging exec -T postgres sh -c 'pg_dump -U \"\$POSTGRES_USER\" \"\$POSTGRES_DB\"' | gzip | sudo -u \"\$OWNER\" -H tee \"\$BACKUP_PATH\" > /dev/null
             # Проверка размера: пустой бэкап блокирует выкладку. Порог тот
             # же, что на боевой тропе. Ноль здесь обязан иметь положительную
             # стражу: pg_dump, упавший внутри пайпа, оставляет валидный
@@ -198,7 +210,7 @@ jobs:
             # Сортировка по ИМЕНИ в обратном порядке, а не по времени
             # файловой системы: имя несёт метку времени снимка и не сдвинется
             # от постороннего касания файла.
-            ls -1 \"\$BACKUP_DIR\"/pre-deploy-*.sql.gz 2>/dev/null | sort -r | tail -n +\$((KEEP + 1)) | while read -r OLD; do rm -f \"\$OLD\"; done
+            ls -1 \"\$BACKUP_DIR\"/pre-deploy-*.sql.gz 2>/dev/null | sort -r | tail -n +\$((KEEP + 1)) | while read -r OLD; do sudo -u \"\$OWNER\" -H rm -f \"\$OLD\"; done
             KEPT=\$(ls -1 \"\$BACKUP_DIR\"/pre-deploy-*.sql.gz 2>/dev/null | wc -l)
             TOTAL=\$(du -sh \"\$BACKUP_DIR\" | cut -f1)
             echo \"::notice::снимков в \$BACKUP_DIR: \$KEPT (глубина \$KEEP), занято \$TOTAL\"

@@ -120,34 +120,37 @@ def test_the_backup_addresses_the_same_stack_the_deploy_restarts(
     assert f"-p {project.group(1)}" in backup["run"]
 
 
-def test_the_backup_path_needs_no_root(backup: dict) -> None:
-    """Файловые операции шага идут БЕЗ sudo — иначе шаг ставит на sudoers.
+def test_root_never_escalates_it_only_descends(backup: dict) -> None:
+    """Каждый ``sudo`` в шаге — понижение до владельца, ни одного повышения.
 
-    Замер на пилоте 10.09.2026: ``/var/backups`` — root:root, каталога
-    ``ayla-bot-staging`` там нет, ``touch`` от пользователя выкладки
-    отвечает ``Permission denied``. Первая редакция обходила это через
-    ``sudo mkdir`` и ``sudo tee``, и это была ставка на незаглянутое: все
-    восемь вызовов sudo в этом воркфлоу — про docker, то есть правило
-    sudoers вполне может быть выдано ровно на docker.
+    Этот тест ПЕРЕВЁРНУТ 11.09.2026. Прежняя редакция запрещала любой sudo
+    вне docker: ``sudo`` тогда значил повышение до root ради /var/backups, и
+    ставка на sudoers была ставкой на незаглянутое. После #1586 входящий по
+    ssh — root, и ``sudo`` значит обратное: понижение до владельца дерева.
+    Правило поменялось, и сторож, верный прежнему, красил бы верный код.
 
-    Тогда блокирующий шаг упал бы на ``mkdir`` и остановил выкладку —
-    механизм, заведённый ради защиты, сломал бы то, что защищает.
-
-    Домашний каталог снимает вопрос: прав достаточно по построению.
-    ``sudo docker`` остаётся — он единственный, чья работа на хосте
-    доказана тем, что выкладка идёт.
+    Что стережётся теперь: (1) ни одного ``sudo`` без ``-u`` — root ничего
+    не делает от себя, кроме входа; (2) ``-H`` при каждом — иначе HOME
+    останется /root и docker с git полезут в чужие конфиги; (3) каталог
+    снимков — в доме ВЛАДЕЛЬЦА, а не входящего: снимок в /root (drwx------)
+    дотянулся бы только до root, а откатывать будет тот, кто владеет деревом.
     """
     run = backup["run"]
     commands = [
         line.strip()
         for line in run.splitlines()
-        # Комментарии внутри ssh-строки начинаются с экранированной решётки;
-        # они законно упоминают sudo, объясняя, почему его тут нет.
         if "sudo" in line and not line.strip().lstrip("\\").startswith("#")
     ]
-    non_docker = [c for c in commands if "sudo docker" not in c]
-    assert non_docker == [], f"sudo вне docker: {non_docker}"
-    assert "$HOME/" in run, "каталог бэкапов не в домашнем каталоге пользователя"
+    assert commands, "в шаге нет ни одного sudo — значит пишет root, и тест смотрит не туда"
+
+    escalating = [c for c in commands if "sudo -u" not in c]
+    assert escalating == [], f"sudo без -u — повышение до root: {escalating}"
+
+    homeless = [c for c in commands if "sudo -u" in c and " -H " not in c]
+    assert homeless == [], f"sudo -u без -H — чужой HOME: {homeless}"
+
+    assert "$OWNER_HOME/" in run, "каталог снимков не в доме владельца дерева"
+    assert "$HOME/" not in run, "каталог снимков привязан к HOME входящего, а он root"
 
 
 def test_the_write_is_probed_before_the_dump(backup: dict) -> None:
@@ -219,3 +222,31 @@ def test_the_step_says_who_writes_and_where(backup: dict) -> None:
     assert dump != -1, "шаг перестал делать дамп — проверять нечего"
     assert said < dump, f"актор печатается ({said}) ПОСЛЕ дампа ({dump})"
     assert "каталог" in backup["run"], "путь бэкапа не назван в выводе"
+
+
+def test_the_snapshot_file_is_written_by_the_owner_not_by_a_redirect(backup: dict) -> None:
+    """Перенаправление ``>`` делает вызывающая оболочка, а она — root.
+
+    Обернуть ``docker compose`` в ``sudo -u`` мало: пайп ``… | gzip > файл``
+    открывает файл ТА оболочка, что читает строку, то есть root, и снимок
+    лёг бы root-ом в каталог владельца. Пишет ``tee`` от владельца.
+
+    Найдено пробой 11.09.2026: подмена ``tee`` обратно на ``>`` не красила
+    ни одного стража. ``tee`` не в списке пишущих команд, а стороже
+    «sudo только понижает» строка без sudo не видна. Дыра названа и закрыта
+    здесь.
+    """
+    lines = [
+        ln.strip()
+        for ln in backup["run"].splitlines()
+        if "pg_dump" in ln and not ln.strip().lstrip("\\").startswith("#")
+    ]
+    assert len(lines) == 1, f"строка дампа должна быть одна: {lines}"
+    dump = lines[0]
+
+    assert "tee" in dump and "sudo -u" in dump.split("tee")[0], (
+        "файл снимка пишет не владелец через tee"
+    )
+    assert '> \\"\$BACKUP_PATH' not in dump, (
+        "файл снимка открывает перенаправлением вызывающая оболочка — root"
+    )
