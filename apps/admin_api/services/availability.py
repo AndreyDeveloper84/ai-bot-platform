@@ -153,15 +153,32 @@ def _block_time_in_ayla(
             external_user_id_for(actor_bot_user) if actor_bot_user is not None else None
         )
         if external_actor is None:
-            # Случай «человек не назван» существовал и до правки: канал MAX
-            # допускает actor=None. Семантику отказа не меняю — это
-            # продуктовое решение, — но и молчать нельзя: запись уйдёт
-            # неприписанной, и знать об этом нужно из лога, а не из спора
-            # через месяц.
+            # §143 (решение владельца 11.09.2026): для чувствительной
+            # операции действует fail-closed — «если автора нельзя надёжно
+            # определить, операция НЕ ВЫПОЛНЯЕТСЯ», и «запись "автор
+            # неизвестен" недопустима, потому что создаёт ложную видимость
+            # полноценного аудита».
+            #
+            # Первая редакция этой правки писала с неназванным автором и
+            # оставляла предупреждение в логе, а вопрос «отказывать ли»
+            # выносила владельцу. Владелец ответил: отказывать. Здесь
+            # остаётся исполнение ответа, а не продолжение спора.
+            #
+            # Закрытие рабочего времени мастера — именно чувствительная
+            # операция: оно делает клиентов незаписываемыми и, если время
+            # занято, ведёт к переносам и отменам. Журнал, в котором такое
+            # действие числится без автора, хуже отсутствующего: он
+            # выглядит полным.
             logger.warning(
-                "availability.ayla_block_unattributed master=%s tenant=%s",
+                "availability.ayla_block_refused_no_actor master=%s tenant=%s",
                 master.id,
                 tenant_id,
+            )
+            raise AvailabilityDecisionError(
+                "actor_required",
+                "Cannot close a master's time without a named actor: the audit "
+                "record would claim an unknown author (§143).",
+                status=409,
             )
         get_ayla_booking_client().create_specialist_time_off(
             specialist_id=str(master.id),
@@ -574,6 +591,31 @@ def approve_availability_request(
 
     if now is None:
         now = dj_timezone.now()
+
+    # §143 (решение владельца 11.09.2026), fail-closed: «если автора нельзя
+    # надёжно определить, операция НЕ ВЫПОЛНЯЕТСЯ».
+    #
+    # Проверка стоит ЗДЕСЬ, а не только перед записью в Ayla, и это не
+    # перестраховка. Одобрение закрывает рабочее время мастера при ЛЮБОМ
+    # состоянии флага: при включённом — в Ayla, при выключенном — локально,
+    # и в обоих случаях пишет строку аудита. Проверка внутри одной из двух
+    # веток оставила бы вторую открытой — тот же дефект «починили запись,
+    # оставили чтение», за который я сегодня трижды цеплялся в чужом коде.
+    #
+    # Отказ ДО транзакции: ничего не изменено, заявка остаётся PENDING,
+    # человек видит названную причину, а не молчаливый успех.
+    if actor_bot_user is None:
+        logger.warning(
+            "availability.approve_refused_no_actor request=%s tenant=%s",
+            request_id,
+            tenant_id,
+        )
+        raise AvailabilityDecisionError(
+            "actor_required",
+            "Cannot approve time off without a named actor: the audit record "
+            "would claim an unknown author (§143).",
+            status=409,
+        )
 
     with transaction.atomic():
         try:
