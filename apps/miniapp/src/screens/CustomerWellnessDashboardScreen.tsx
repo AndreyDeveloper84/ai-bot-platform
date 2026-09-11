@@ -82,6 +82,7 @@ import { useCallback, useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { ApiError, type Service } from "../lib/api";
 import { formatDuration, formatMoney } from "../lib/format";
+import { visitAddressText } from "../lib/visit-address";
 import {
   enqueueWaterLog,
   flushWaterQueue,
@@ -1069,11 +1070,7 @@ function BookingCard({
           при `null` — исправимое (адрес скорее всего есть). Спрятать
           строку у `null` значило бы дать меньше тому, кому нужнее. */}
       <div className="wellness-dash__booking-where">
-        {b.address === null
-          ? "Уточните адрес в салоне"
-          : b.address === ""
-            ? "Адрес не указан"
-            : b.address}
+        {visitAddressText(b.address)}
       </div>
 
       {/* §11.3 — multi-record indicator. */}
