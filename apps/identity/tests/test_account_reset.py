@@ -23,6 +23,7 @@ from apps.catalog.master_state import is_enrolled, sale_block
 from apps.catalog.models import CatalogMaster
 from apps.consent.models import ConsentRecord
 from apps.conversations.models import Conversation, Message
+from apps.handoff.models import AdminTask
 from apps.identity.models import BotUser, MemoryEntry, UserPersonalContext
 from apps.identity.services import account_reset as reset
 from apps.observability.models import AIRequestMetric
@@ -203,10 +204,13 @@ class TestTheDryRunWritesNothing:
 
 
 class TestProtectRefusesByName:
-    def test_a_metric_blocks_and_nothing_is_written(self, tenant, settings):
+    def test_a_metric_survives_without_its_subject(self, tenant, settings):
+        """Owner §16.1: SET_NULL. The metric is about the system; the row
+        stays, the link goes. Before this decision the same row was a PROTECT
+        blocker, and the three real accounts with history were unresettable."""
         settings.ACCOUNT_RESET_ALLOWLIST = [ACCOUNT]
         bu = _with_history(tenant)
-        AIRequestMetric.all_tenants.create(
+        metric = AIRequestMetric.all_tenants.create(
             tenant=tenant,
             bot_user=bu,
             request_id=uuid.uuid4(),
@@ -214,10 +218,39 @@ class TestProtectRefusesByName:
             latency_total_ms=1,
             outcome=AIRequestMetric.OUTCOME_SUCCESS,
         )
+        line = next(
+            ln
+            for ln in reset.plan(ACCOUNT, "client-onboarding").lines
+            if ln.label == "observability.AIRequestMetric.bot_user"
+        )
+        assert (line.on_delete, line.disposition, line.rows) == ("SET_NULL", "set_null", 1)
+
+        report = reset.apply(ACCOUNT, "client-onboarding")
+
+        assert report.leftovers == []
+        metric.refresh_from_db()
+        assert metric.bot_user_id is None
+        assert metric.conversation_id is None, "the dialogue went, so its pointer went too"
+        assert metric.latency_total_ms == 1, "the technical measure is what the row is for"
+
+    def test_an_admin_task_blocks_and_nothing_is_written(self, tenant, settings):
+        settings.ACCOUNT_RESET_ALLOWLIST = [ACCOUNT]
+        bu = _with_history(tenant)
+        conv = Conversation.all_tenants.get(bot_user=bu)
+        with tenant_scope(tenant):
+            AdminTask.objects.create(
+                tenant=tenant, bot_user=bu, conversation=conv, task_type=AdminTask.TaskType.HANDOFF
+            )
         with pytest.raises(reset.Blocked) as exc:
             reset.apply(ACCOUNT, "client-onboarding")
-        assert [ln.label for ln in exc.value.lines] == ["observability.AIRequestMetric.bot_user"]
-        assert exc.value.lines[0].rows == 1
+        labels = {ln.label for ln in exc.value.lines}
+        # Both the direct PROTECT and the one a dismantled conversation would
+        # have hit one level down — named, not discovered mid-delete.
+        assert labels == {"handoff.AdminTask.bot_user", "conversations.Conversation.bot_user"}
+        held = next(
+            ln for ln in exc.value.lines if ln.label == "conversations.Conversation.bot_user"
+        )
+        assert held.removes["handoff.AdminTask"] == 1
         # Refused BEFORE the first write: the dialogue is still there.
         assert Conversation.all_tenants.filter(bot_user=bu).exists()
         assert BotUser.all_tenants.filter(id=bu.id).exists()

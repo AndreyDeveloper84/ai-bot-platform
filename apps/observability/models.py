@@ -182,13 +182,20 @@ class AIRequestMetric(models.Model):
     )
     bot_user = models.ForeignKey(
         "identity.BotUser",
-        on_delete=models.PROTECT,
+        # Owner decision 11.09 §16.1: SET_NULL, not PROTECT. The metric is
+        # about the SYSTEM — latency, tokens, cost, outcome — and its value
+        # is not in bot_user_id. PROTECT kept the row by refusing to let the
+        # person go, which is the wrong way round for a row that holds no
+        # text and no direct identifier beyond this key: the row stays, the
+        # link goes. Nullable already, for system-triggered calls.
+        on_delete=models.SET_NULL,
         related_name="ai_request_metrics",
         null=True,
         blank=True,
-        help_text="The user whose message triggered the AI request. PROTECT "
-        "to preserve metric history; nullable for system-triggered AI calls "
-        "(e.g. proactive nudges, scheduled retention messages).",
+        help_text="The user whose message triggered the AI request. SET_NULL "
+        "on BotUser delete (owner §16.1): the metric survives, the subject "
+        "does not. Nullable for system-triggered AI calls (proactive nudges, "
+        "scheduled retention messages).",
     )
     conversation = models.ForeignKey(
         "conversations.Conversation",

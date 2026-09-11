@@ -118,9 +118,11 @@ MODES: dict[str, Mode] = {
         name="master-registration",
         frees="готов к проверке регистрации мастера",
         # The role is what a registration creates; freeing the registration
-        # means the role goes. The TENANT does not — a solo master's tenant
-        # holds the salon's conversations, and removing it is a different
-        # decision (owner question 2, DRF-1349).
+        # means the role goes. The TENANT does not (owner 11.09 §16.2): a
+        # solo master's tenant holds the salon's conversations and other
+        # people's data; no second salon is created; the way back into the
+        # existing one is a confirmed former identity or an administrator,
+        # and until then the person is SETUP_PENDING.
         dismantles=_CLIENT_DISMANTLES | {"tenancy.TenantStaff.bot_user"},
         unlinks_master_card=True,
     ),
