@@ -287,3 +287,77 @@ class TestTheSourceRefusesByName:
 
         assert resp.status_code == 400
         assert fake.calls == []
+
+
+class TestTheFrontDeskMayReadButNotChange:
+    """§141 (решение владельца 11.09.2026) — и его отрицательная половина.
+
+    Положительная: ресепшн ВИДИТ расписание мастеров своего салона, включая
+    отгулы и изменения на день. До решения вид стоял под
+    ``require_admin_role``, то есть уже решённого, и оставить его таким
+    значило бы держать права уже решения — молча, по инерции.
+
+    Отрицательная важнее: декоратор обязан ЗАПРЕЩАТЬ запись так же явно, как
+    разрешает чтение. Иначе через месяц его переиспользуют на изменяющей
+    ручке, и расширение прав произойдёт по НАЗВАНИЮ декоратора, а не по
+    решению владельца.
+    """
+
+    def test_the_receptionist_sees_what_is_assigned(
+        self,
+        client: Client,
+        owner_bot_user: BotUser,
+        receptionist_bot_user: BotUser,
+        synced_master: CatalogMaster,
+        ayla,
+    ) -> None:
+        # Владелец в фикстуре нужен не для прав, а чтобы у тенанта был тот,
+        # чьи права Ayla проверяет при чтении.
+        ayla()
+
+        assert _get(client, synced_master, user_id="5003").status_code == 200
+
+    def test_the_receptionist_cannot_reach_it_with_an_unsafe_method(
+        self,
+        client: Client,
+        owner_bot_user: BotUser,
+        receptionist_bot_user: BotUser,
+        synced_master: CatalogMaster,
+        ayla,
+    ) -> None:
+        # Запрет держат ДВОЕ: декоратор пускает ресепшн только на безопасном
+        # методе, и вид отдельно объявлен GET-only. Снятие любого одного
+        # оставляет второго — поэтому проверяется исход, а не механизм:
+        # небезопасный метод НЕ должен пройти.
+        ayla()
+
+        resp = client.post(
+            _url(synced_master),
+            data="{}",
+            content_type="application/json",
+            HTTP_AUTHORIZATION=init_data_header("5003"),
+        )
+
+        assert resp.status_code in (403, 405), resp.status_code
+
+    def test_a_master_still_cannot_read_it(
+        self,
+        client: Client,
+        owner_bot_user: BotUser,
+        master_only_bot_user: BotUser,
+        synced_master: CatalogMaster,
+        ayla,
+    ) -> None:
+        # Положительный контроль к расширению: открыли ресепшену — не значит
+        # открыли всем. Без этого теста «ресепшн видит» зеленело бы и на
+        # виде, снявшем проверку роли вовсе.
+        ayla()
+
+        assert (
+            _get(
+                client,
+                synced_master,
+                user_id=str(master_only_bot_user.channel_user_id),
+            ).status_code
+            == 403
+        )

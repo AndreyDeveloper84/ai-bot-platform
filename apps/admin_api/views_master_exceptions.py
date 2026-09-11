@@ -45,10 +45,14 @@ privilege escalation». Проверки не сделаны, значит за�
 
 # Кого пускаем
 
-``require_admin_role``, как и день мастера: это график конкретного человека,
-а не день салона. Вправе ли ресепшн видеть его — вопрос владельцу
-(**DRF-1640**), и отвечать на него выбором декоратора значило бы принять
-продуктовое решение молча.
+``require_admin_or_reception_read``. Вопрос «вправе ли ресепшн видеть график
+мастера» был вынесен владельцу (DRF-1640) и **отвечен 11.09.2026 — §141**:
+да, на чтение, включая отгулы и изменения на выбранный день. Это ровно то,
+что отдаёт этот вид.
+
+На чтение и только: декоратор пускает ресепшн лишь на безопасном методе, и
+вид отдельно объявлен GET-only. Записи здесь нет вовсе (см. ``writable``
+ниже), так что расширение прав на чтение не открывает ничего, кроме чтения.
 """
 
 from __future__ import annotations
@@ -64,7 +68,7 @@ from django.http import HttpRequest, HttpResponse, JsonResponse
 from django.utils import timezone
 from django.views.decorators.http import require_http_methods
 
-from apps.admin_api.auth import require_admin_role
+from apps.admin_api.auth import require_admin_or_reception_read
 from apps.admin_api.services.wire_lists import UNREADABLE, read_rows
 from apps.catalog.models import CatalogMaster
 from apps.integrations.ayla.salon_client import (
@@ -192,7 +196,7 @@ def _parse_range(request: HttpRequest) -> tuple[date_cls, date_cls] | JsonRespon
 
 
 @require_http_methods(["GET"])
-@require_admin_role
+@require_admin_or_reception_read
 def master_exceptions(request: HttpRequest, master_id: str) -> HttpResponse:
     """Что уже назначено мастеру: исключения, недоступность, закрытия салона."""
 

@@ -509,3 +509,70 @@ class TestTheKnownBlindnessIsPinnedNotInherited:
             "Это ХОРОШАЯ новость: снимите этот тест и проверьте, что вкладка "
             "салона перестала предлагать время, которое запись отклоняет."
         )
+
+
+class TestTheFrontDeskSeesTheMastersDay:
+    """§141 (решение владельца 11.09.2026): ресепшн видит — на чтение.
+
+    До решения вид дня стоял под ``require_admin_role``, то есть УЖЕ
+    решённого. Вопрос был вынесен владельцу (DRF-1640) именно чтобы права
+    не определялись выбором декоратора; ответ получен, и вид приведён к нему.
+
+    Отрицательная половина важнее положительной: расширение обязано
+    оставаться чтением. Иначе через месяц тот же декоратор окажется на
+    изменяющей ручке, и права вырастут по названию, а не по решению.
+    """
+
+    def test_the_receptionist_sees_the_day(
+        self,
+        client: Client,
+        owner_bot_user: BotUser,
+        receptionist_bot_user: BotUser,
+        synced_master: CatalogMaster,
+        ayla,
+    ) -> None:
+        ayla(_wire_week())
+
+        assert _get_day(client, synced_master, user_id="5003").status_code == 200
+
+    def test_the_receptionist_cannot_confirm_the_schedule(
+        self,
+        client: Client,
+        owner_bot_user: BotUser,
+        receptionist_bot_user: BotUser,
+        synced_master: CatalogMaster,
+        ayla,
+    ) -> None:
+        # Вот где расширение обязано остановиться. Подтверждение делает
+        # мастера продаваемым клиенту — это решение владелицы салона, и
+        # ресепшн его не принимает. Видеть график и заверять его — разные
+        # права, и открытие первого не открывает второго.
+        ayla(_wire_week())
+
+        resp = client.post(
+            _confirm_url(synced_master),
+            data=json.dumps({"fingerprint": "whatever"}),
+            content_type="application/json",
+            HTTP_AUTHORIZATION=init_data_header("5003"),
+        )
+
+        assert resp.status_code == 403, resp.status_code
+
+    def test_the_day_view_refuses_an_unsafe_method_from_the_front_desk(
+        self,
+        client: Client,
+        owner_bot_user: BotUser,
+        receptionist_bot_user: BotUser,
+        synced_master: CatalogMaster,
+        ayla,
+    ) -> None:
+        ayla(_wire_week())
+
+        resp = client.post(
+            _day_url(synced_master),
+            data="{}",
+            content_type="application/json",
+            HTTP_AUTHORIZATION=init_data_header("5003"),
+        )
+
+        assert resp.status_code in (403, 405), resp.status_code

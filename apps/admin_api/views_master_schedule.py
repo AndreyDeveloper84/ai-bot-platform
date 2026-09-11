@@ -59,7 +59,7 @@ from django.utils import timezone
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_http_methods
 
-from apps.admin_api.auth import require_admin_role
+from apps.admin_api.auth import require_admin_or_reception_read, require_admin_role
 from apps.catalog.models import CatalogMaster
 from apps.catalog.services import schedule_confirmation as sc
 from apps.identity.services.role_resolver import RoleContext
@@ -234,7 +234,7 @@ def master_schedule_confirm(request: HttpRequest, master_id: str) -> HttpRespons
 
 @csrf_exempt
 @require_http_methods(["GET"])
-@require_admin_role
+@require_admin_or_reception_read
 def master_day_schedule(request: HttpRequest, master_id: str) -> HttpResponse:
     """Рабочий день мастера глазами салона: часы, записи, окна, конфликты.
 
@@ -266,13 +266,21 @@ def master_day_schedule(request: HttpRequest, master_id: str) -> HttpResponse:
     layer; this helper trusts the input» — то есть сервис на скоуп не смотрит
     и смотреть не должен.
 
-    **Второй вопрос авторизации здесь НЕ решён, и это намеренно.** «Мастер
-    принадлежит салону» и «этот сотрудник вправе видеть график мастера» —
-    разные вопросы. Ресепшн решением владельца (§35 п. 1, DRF-1552) видит день
-    салона, а график мастера ей никто не открывал и не закрывал. Ответить на
-    это тем, какой декоратор я поставил, значило бы принять продуктовое
-    решение молча; вопрос вынесен владельцу — **DRF-1640**. Пока действует
-    более узкое правило поверхности: владелец и администратор.
+    **Второй вопрос авторизации ОТВЕЧЕН владельцем 11.09.2026 — §141.**
+    «Мастер принадлежит салону» и «этот сотрудник вправе видеть график
+    мастера» — разные вопросы, и второй был вынесен владельцу (DRF-1640),
+    а не решён выбором декоратора. Ответ: ресепшн ВИДИТ расписание мастеров
+    своего салона — рабочие часы, свободные и занятые интервалы, отгулы,
+    изменения на выбранный день.
+
+    Поэтому здесь ``require_admin_or_reception_read``, а не
+    ``require_admin_role``: до решения вид был УЖЕ решённого, и оставить его
+    таким значило бы держать права уже решения — молча, по инерции.
+
+    **На чтение и только.** Декоратор пускает ресепшн лишь на безопасном
+    методе, и это не украшение: ``_RECEPTION_SAFE_METHODS`` — то, что не даёт
+    открытому виду стать открытой ручкой. Вид объявлен GET-only отдельно,
+    так что запрет держат двое.
 
     # Известная слепота, которую этот вид наследует
 
