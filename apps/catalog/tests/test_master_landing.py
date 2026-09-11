@@ -1143,10 +1143,14 @@ class TestTheScheduleGateIsOffUntilTheOwnerTurnsItOn:
         assert before == 6, "до включения продаются все шестеро"
         assert after == 1, "после включения остаётся ровно подтверждённая"
         assert after > 0, "витрина салона не обнулилась целиком"
-        assert (
-            CatalogMaster.all_tenants.filter(available_q(), tenant=tenant).first().pk
-            == confirmed.pk
-        )
+
+        # ``.first()`` возвращает ``None`` на пустом наборе, и ``after == 1``
+        # выше знает об этом только читатель, не проверяющий типов. Именованный
+        # отказ говорит, ЧТО именно перестало быть правдой, вместо
+        # ``AttributeError: 'NoneType'`` в строке про ``pk``.
+        survivor = CatalogMaster.all_tenants.filter(available_q(), tenant=tenant).first()
+        assert survivor is not None, "витрина пуста, хотя счётчик выше насчитал одного"
+        assert survivor.pk == confirmed.pk
 
     @override_settings(MASTER_SCHEDULE_CONFIRMATION_REQUIRED=True)
     def test_the_roster_survives_the_flag_and_says_the_word(
