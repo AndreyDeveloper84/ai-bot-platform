@@ -211,16 +211,41 @@ class TestTheRecorderHidesNothing:
         }
         assert "not_evaluated" not in called, "the recorder records evaluations, not their absence"
 
-    def test_the_wall_clock_stays_out_of_the_payload(self, fake_redis: FakeRedis) -> None:
+    def test_the_wall_clock_enters_the_payload_only_as_activated_at(
+        self, fake_redis: FakeRedis
+    ) -> None:
+        """§3 (owner 11.09) via #1611: the context between turns carries
+        `activated_at`, and that is the ONLY clock in the verdict. Before
+        #1611 this test held the opposite ("no wall clock in the payload");
+        it flipped with the decision, not silently — the assertion is now
+        exactly one occurrence, under exactly one key, equal to when the
+        assessment was made."""
         recorded = record_verdict(CONV, _result(SafetyVerdict.ALLOW), now=NOW)
         assert recorded.assessment.evaluated_at == NOW
         raw = fake_redis.values[state_mod._state_key(CONV)]
         safety_payload = raw.split('"safety"', 1)[1]
-        # Presence first: the payload is there and carries the verdict …
         assert '"normal"' in safety_payload
-        # … and the clock is in the blob (last_activity_at) but not in the verdict.
-        assert NOW.isoformat() in raw
-        assert NOW.isoformat() not in safety_payload
+        assert safety_payload.count(NOW.isoformat()) == 1
+        assert f'"activated_at": "{NOW.isoformat()}"' in safety_payload
+        read = state_mod.load(CONV).state
+        assert read is not None
+        assert read.safety.activated_at == NOW
+
+    def test_the_evidence_reference_survives_redis_and_is_a_reference(
+        self, fake_redis: FakeRedis
+    ) -> None:
+        """§3: `evidence_ref` between turns — resolvable by an auditor with the
+        rule catalogue, unreadable without it. The pattern itself never
+        enters the state."""
+        recorded = record_verdict(CONV, _result(SafetyVerdict.BLOCK, ["secret-pattern"]), now=NOW)
+        assert recorded.assessment.evidence_ref is not None
+        raw = fake_redis.values[state_mod._state_key(CONV)]
+        assert recorded.assessment.evidence_ref in raw, "the reference is in the blob …"
+        assert "secret-pattern" not in raw, "… the pattern is not"
+        read = state_mod.load(CONV).state
+        assert read is not None
+        assert read.safety.evidence_ref == recorded.assessment.evidence_ref
+        assert read.safety.evidence_ref in read.safety.digest_fields()
 
     def test_the_module_exports_exactly_the_seam(self) -> None:
         assert record_mod.__all__ == ["Recorded", "record_verdict"]

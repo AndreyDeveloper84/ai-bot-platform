@@ -36,6 +36,7 @@ from apps.orchestrator.safety.assessment import (
     UNREACHABLE_TODAY,
     SafetyAssessment,
     assess,
+    evidence_ref,
     policy_version,
     reset_policy_version_cache,
     to_readiness_input,
@@ -372,6 +373,57 @@ class TestWhatIsUnreachableStaysNamed:
         from apps.orchestrator.safety.assessment import _MAPPING
 
         assert set(_MAPPING) == set(SafetyVerdict)
+
+
+class TestTheEvidenceReferenceIsAReference:
+    """§3: `evidence_ref` = sha256(policy_version + pattern)[:12]. Resolvable
+    with the catalogue, unreadable without; part of the verdict's content."""
+
+    def test_nothing_fired_means_no_reference(self):
+        a = assess(_result(SafetyVerdict.ALLOW, matched=[]), state_revision=1)
+        assert a.triggered is False
+        assert a.evidence_ref is None
+        assert to_readiness_input(a).evidence_ref is None
+
+    def test_the_reference_does_not_carry_the_pattern(self):
+        a = assess(_result(SafetyVerdict.BLOCK, matched=["(?i)секретный шаблон"]), state_revision=1)
+        assert a.evidence_ref is not None
+        assert len(a.evidence_ref) == 12
+        assert "секретный" not in a.evidence_ref
+
+    def test_same_policy_same_pattern_same_reference(self):
+        a = assess(_result(SafetyVerdict.BLOCK, matched=["p1"]), state_revision=1)
+        b = assess(_result(SafetyVerdict.BLOCK, matched=["p1"]), state_revision=9)
+        assert a.evidence_ref == b.evidence_ref, "the revision is not evidence"
+
+    def test_another_pattern_is_another_reference(self):
+        a = assess(_result(SafetyVerdict.BLOCK, matched=["p1"]), state_revision=1)
+        b = assess(_result(SafetyVerdict.BLOCK, matched=["p2"]), state_revision=1)
+        assert a.evidence_ref != b.evidence_ref
+
+    def test_another_policy_is_another_reference(self, settings):
+        a = assess(_result(SafetyVerdict.BLOCK, matched=["p1"]), state_revision=1)
+        settings.SAFETY_PATTERNS = {SafetyVerdict.BLOCK.value: [r"(?i)one-more-rule"]}
+        reset_policy_version_cache()
+        b = assess(_result(SafetyVerdict.BLOCK, matched=["p1"]), state_revision=1)
+        assert a.policy_version_id != b.policy_version_id
+        assert a.evidence_ref != b.evidence_ref, (
+            "same pattern under another policy is other evidence"
+        )
+
+    def test_the_reference_is_the_digests_business(self):
+        a = assess(_result(SafetyVerdict.BLOCK, matched=["p1"]), state_revision=1)
+        b = assess(_result(SafetyVerdict.BLOCK, matched=["p2"]), state_revision=1)
+        assert to_readiness_input(a).digest_fields() != to_readiness_input(b).digest_fields()
+
+    def test_the_reference_is_computed_by_one_function(self):
+        a = assess(_result(SafetyVerdict.BLOCK, matched=["p1", "p2"]), state_revision=1)
+        assert a.evidence_ref == evidence_ref(a.policy_version_id, "p1"), "first match, as named"
+
+    def test_activated_at_is_the_assessments_own_clock(self):
+        now = datetime(2026, 9, 11, 12, 0, tzinfo=timezone.utc)
+        a = assess(_result(SafetyVerdict.ALLOW), state_revision=1, now=now)
+        assert to_readiness_input(a).activated_at == now
 
 
 class TestThePolicyVersionMovesByItself:

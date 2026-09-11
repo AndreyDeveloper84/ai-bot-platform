@@ -155,6 +155,14 @@ class SafetyAssessment:
     required_slots: tuple[str, ...] = ()
     forbidden_capabilities: tuple[str, ...] = ()
     policy_version_id: str = ""
+    #: §3 — a reference to the evidence, not the evidence. For `pre_check`
+    #: this is ``sha256(policy_version + the pattern that fired)[:12]``: an
+    #: auditor holding the rule catalogue can resolve it to the exact pattern;
+    #: the conversation state never carries the pattern itself. When several
+    #: patterns fired, the reference is to the highest-priority bucket's
+    #: FIRST match in `matched_patterns` order — one reference, named as such.
+    #: ``None`` exactly when nothing fired (`triggered=False`).
+    evidence_ref: str | None = None
 
     def __post_init__(self) -> None:
         if self.evaluated_at_revision < 1:
@@ -190,6 +198,7 @@ def assess(
     verdict = verdict_result.verdict
     state, handoff = _MAPPING[verdict]
     matched = tuple(getattr(verdict_result, "matched_patterns", ()) or ())
+    version = policy_version()
     return SafetyAssessment(
         state=state,
         handoff=handoff,
@@ -199,8 +208,20 @@ def assess(
         # A fired rule is what makes NORMAL an answer rather than a default.
         triggered=bool(matched),
         rule_id=f"{_RULE_ID_PREFIX}:{verdict.value}" if matched else None,
-        policy_version_id=policy_version(),
+        policy_version_id=version,
+        evidence_ref=evidence_ref(version, matched[0]) if matched else None,
     )
+
+
+def evidence_ref(version: str, pattern: str) -> str:
+    """``sha256(policy_version + pattern)[:12]`` — resolvable, not readable.
+
+    Twelve hex characters, the same width as :func:`policy_version`'s digest.
+    The separator is a newline so that ``("ab", "c")`` and ``("a", "bc")``
+    cannot collide by concatenation.
+    """
+    material = f"{version}\n{pattern}"
+    return hashlib.sha256(material.encode()).hexdigest()[:12]
 
 
 def to_readiness_input(assessment: SafetyAssessment) -> SafetyResult:
@@ -232,6 +253,12 @@ def to_readiness_input(assessment: SafetyAssessment) -> SafetyResult:
         policy_version=assessment.policy_version_id,
         required_slots=assessment.required_slots,
         forbidden_capabilities=assessment.forbidden_capabilities,
+        # §3 (11.09): the context between turns carries the moment the verdict
+        # took effect and a reference to its evidence. Both are the
+        # assessment's own — `evaluated_at` is when it was made, `evidence_ref`
+        # points at what fired — passed as-is, like everything else here.
+        activated_at=assessment.evaluated_at,
+        evidence_ref=assessment.evidence_ref,
     )
 
 
@@ -240,6 +267,7 @@ __all__ = [
     "Handoff",
     "SafetyAssessment",
     "assess",
+    "evidence_ref",
     "policy_version",
     "reset_policy_version_cache",
     "to_readiness_input",
