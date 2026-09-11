@@ -25,9 +25,19 @@ class ObservabilityConfig(AppConfig):
         from apps.observability.checks import (
             check_allowed_hosts_not_wildcard,
             check_env_file_drift,
+            check_outbox_backlog,
+            log_outbox_backlog,
             log_startup_config_drift,
         )
 
         register(check_env_file_drift)
         register(check_allowed_hosts_not_wildcard)
         log_startup_config_drift()
+
+        # W012 — исходящий ящик. Стоит ЗДЕСЬ, а не в `apps/eventbus`,
+        # намеренно: единственная тревога шины (`_emit_dlq_alert`) живёт
+        # внутри `dispatch_pending_events` и потому не звучит ровно
+        # тогда, когда нужна — когда диспетчер не идёт. Этот сторож о
+        # диспетчере не знает и смотрит только на таблицу.
+        register(check_outbox_backlog)
+        log_outbox_backlog()
