@@ -130,7 +130,7 @@ def test_not_applicable_is_not_blocked_as_unknown() -> None:
     output = eng.evaluate(make_input(safety=_not_applicable()))
 
     assert output.readiness_state is not eng.ReadinessState.BLOCKED or all(
-        b.type is not eng.BlockerType.SAFETY_UNKNOWN for b in output.blockers
+        b.blocker_type is not eng.BlockerType.SAFETY_UNKNOWN for b in output.blockers
     ), output.blockers
 
 
