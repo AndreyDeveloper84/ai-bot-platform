@@ -185,6 +185,15 @@ def require_init_data(view_func: Callable[..., HttpResponse]) -> Callable[..., H
         # Look up scoped to that tenant — including soft-deleted rows so
         # we can return a distinct error for those users (they need to
         # contact support, not silently re-onboard).
+        # DRF-1653 — этот `order_by` разбирали как третий случай ничьей и
+        # оставили как есть: ничьей здесь быть не может. Фильтр совпадает с
+        # `unique_together = (("tenant", "channel", "channel_user_id"))`
+        # (apps/identity/models.py:323), то есть строк не больше одной, и
+        # сортировка ни на что не влияет. Тай-брейк сюда добавили бы «за
+        # компанию» — а это ровно тот способ, которым появляются меры без
+        # предмета. Строка оставлена, потому что она безвредна и выражает
+        # намерение; менять её без причины значило бы трогать чужой код ради
+        # единообразия.
         existing = (
             BotUser.all_tenants.filter(
                 tenant=bot_tenant,
