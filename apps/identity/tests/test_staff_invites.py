@@ -29,7 +29,9 @@ from apps.identity.services.staff_invites import (
     InviteMasterMissing,
     InviteNotFound,
     InviteRateLimited,
+    MasterAlreadyLinked,
     OwnerAlreadyExists,
+    PersonAlreadyMaster,
     format_code,
     generate_code,
     issue_staff_invite,
@@ -253,6 +255,257 @@ class TestRedeemMaster:
 
         with pytest.raises(InviteMasterMissing):
             redeem_staff_invite(code=code, bot_user=person, tenant=tenant)
+
+
+class TestMasterLinkIsNotTransferable:
+    """DRF-1647 — a valid code must not take a card off its real master.
+
+    The observed defect: ``_link_master`` asked only «is this the SAME
+    person», and assigned ``linked_bot_user`` unconditionally otherwise. A
+    second code for a card that was already claimed silently moved it, and
+    the master who was working lost her appointments, her schedule and her
+    notifications with no message on either side.
+
+    The behaviour asserted here is not invented: ``apps/master_api/views.py``
+    (onboarding_claim / onboarding_accept) has answered ``wrong_recipient``
+    403 for this case, without consuming the token, since the Mini App door
+    was built. These tests pin the bot door to the same answer.
+    """
+
+    def test_a_stranger_does_not_take_the_card(self, tenant, person, other_person):
+        master = _master(tenant)
+        master.linked_bot_user = person
+        master.save(update_fields=["linked_bot_user"])
+        _, code = issue_staff_invite(
+            tenant=tenant, role=StaffInvite.Role.MASTER, catalog_master=master
+        )
+
+        with pytest.raises(MasterAlreadyLinked):
+            redeem_staff_invite(code=code, bot_user=other_person, tenant=tenant)
+
+        master.refresh_from_db()
+        assert master.linked_bot_user_id == person.id
+
+    def test_the_real_master_keeps_her_role(self, tenant, person, other_person):
+        # The counter that matters to her: after the refusal she is still
+        # the master the resolver reports, and he is still nobody.
+        master = _master(tenant)
+        master.linked_bot_user = person
+        master.save(update_fields=["linked_bot_user"])
+        _, code = issue_staff_invite(
+            tenant=tenant, role=StaffInvite.Role.MASTER, catalog_master=master
+        )
+
+        with pytest.raises(MasterAlreadyLinked):
+            redeem_staff_invite(code=code, bot_user=other_person, tenant=tenant)
+
+        assert resolve_role(person).is_master is True
+        assert resolve_role(other_person).is_master is False
+
+    def test_the_slug_matches_the_mini_app_door(self, tenant, person, other_person):
+        # One situation, one name. `master_api.views` answers 403
+        # "wrong_recipient"; the bot path must not invent a second word for
+        # it, or the two doors drift and nobody notices.
+        master = _master(tenant)
+        master.linked_bot_user = person
+        master.save(update_fields=["linked_bot_user"])
+        _, code = issue_staff_invite(
+            tenant=tenant, role=StaffInvite.Role.MASTER, catalog_master=master
+        )
+
+        with pytest.raises(MasterAlreadyLinked) as exc:
+            redeem_staff_invite(code=code, bot_user=other_person, tenant=tenant)
+
+        assert exc.value.slug == "wrong_recipient"
+
+    def test_the_code_is_not_burned(self, tenant, person, other_person):
+        # The invite was issued legitimately. Spending it because the wrong
+        # person typed it punishes the person it was meant for.
+        master = _master(tenant)
+        master.linked_bot_user = person
+        master.save(update_fields=["linked_bot_user"])
+        invite, code = issue_staff_invite(
+            tenant=tenant, role=StaffInvite.Role.MASTER, catalog_master=master
+        )
+
+        with pytest.raises(MasterAlreadyLinked):
+            redeem_staff_invite(code=code, bot_user=other_person, tenant=tenant)
+
+        invite.refresh_from_db()
+        assert invite.used_at is None
+        assert invite.used_by_id is None
+
+
+class TestPersonAlreadyHoldsAnotherCard:
+    """DRF-1650 — the one refusal out of twelve that said nothing.
+
+    ``CatalogMaster.linked_bot_user`` is a ``OneToOneField``. A person who
+    already holds one card and types a code for another used to trip its
+    unique index, and the resulting ``IntegrityError`` passed straight
+    through ``_link_master``, ``_redeem_and_greet`` and
+    ``handle_salon_max_event``, none of which catch it. The transaction
+    rolled back and the code survived — but the person got no reply at all.
+
+    Reachable in the bot precisely when ``resolve_role`` disagrees with the
+    database about whether this person is a master: ``ENROLLED`` asks
+    ``archived_at IS NULL``, while archiving a master
+    (``apps/admin_api/services/master_deactivation.py``) writes only
+    ``is_active`` / ``archived_at`` / ``archive_reason`` and leaves
+    ``linked_bot_user`` in place. She reads as a customer, so the bot
+    offers her the code prompt; the unique index disagrees.
+    """
+
+    def _already_a_master(self, tenant, person, **card_kwargs):
+        held = _master(tenant, name="Прежняя карточка", **card_kwargs)
+        held.linked_bot_user = person
+        held.save(update_fields=["linked_bot_user"])
+        return held
+
+    def test_the_person_gets_an_answer(self, tenant, person):
+        self._already_a_master(tenant, person)
+        fresh = _master(tenant, name="Новая карточка")
+        _, code = issue_staff_invite(
+            tenant=tenant, role=StaffInvite.Role.MASTER, catalog_master=fresh
+        )
+
+        with pytest.raises(PersonAlreadyMaster) as exc:
+            redeem_staff_invite(code=code, bot_user=person, tenant=tenant)
+
+        # An InviteError is the contract every caller already handles; a
+        # bare IntegrityError is the silence this test exists to prevent.
+        assert exc.value.slug == "person_already_master"
+
+    def test_it_is_answered_even_when_the_old_card_is_archived(self, tenant, person):
+        # The reachable-in-the-bot shape: archived card, link left behind.
+        self._already_a_master(tenant, person, archived_at=timezone.now(), is_active=False)
+        fresh = _master(tenant, name="Новая карточка")
+        _, code = issue_staff_invite(
+            tenant=tenant, role=StaffInvite.Role.MASTER, catalog_master=fresh
+        )
+
+        assert resolve_role(person).is_master is False  # the bot sees a customer
+
+        with pytest.raises(PersonAlreadyMaster):
+            redeem_staff_invite(code=code, bot_user=person, tenant=tenant)
+
+    def test_the_new_card_is_left_alone(self, tenant, person):
+        self._already_a_master(tenant, person)
+        fresh = _master(tenant, name="Новая карточка")
+        _, code = issue_staff_invite(
+            tenant=tenant, role=StaffInvite.Role.MASTER, catalog_master=fresh
+        )
+
+        with pytest.raises(PersonAlreadyMaster):
+            redeem_staff_invite(code=code, bot_user=person, tenant=tenant)
+
+        fresh.refresh_from_db()
+        assert fresh.linked_bot_user_id is None
+        assert fresh.mode == CatalogMaster.Mode.CATALOG_ONLY
+
+    def test_the_code_is_not_burned(self, tenant, person):
+        self._already_a_master(tenant, person)
+        fresh = _master(tenant, name="Новая карточка")
+        invite, code = issue_staff_invite(
+            tenant=tenant, role=StaffInvite.Role.MASTER, catalog_master=fresh
+        )
+
+        with pytest.raises(PersonAlreadyMaster):
+            redeem_staff_invite(code=code, bot_user=person, tenant=tenant)
+
+        invite.refresh_from_db()
+        assert invite.used_at is None
+        assert invite.used_by_id is None
+
+    def test_the_two_refusals_are_told_apart(self, tenant, person, other_person):
+        # Different cures: «нужен свой код» versus «сначала снять старую
+        # связь». Collapsing them into one slug would send the second
+        # person hunting for a code that cannot help.
+        taken = _master(tenant, name="Чужая карточка")
+        taken.linked_bot_user = person
+        taken.save(update_fields=["linked_bot_user"])
+        _, taken_code = issue_staff_invite(
+            tenant=tenant, role=StaffInvite.Role.MASTER, catalog_master=taken
+        )
+
+        held = _master(tenant, name="Своя прежняя карточка")
+        held.linked_bot_user = other_person
+        held.save(update_fields=["linked_bot_user"])
+        fresh = _master(tenant, name="Новая карточка")
+        _, fresh_code = issue_staff_invite(
+            tenant=tenant, role=StaffInvite.Role.MASTER, catalog_master=fresh
+        )
+
+        with pytest.raises(MasterAlreadyLinked) as taken_exc:
+            redeem_staff_invite(code=taken_code, bot_user=other_person, tenant=tenant)
+        cache.clear()
+        with pytest.raises(PersonAlreadyMaster) as held_exc:
+            redeem_staff_invite(code=fresh_code, bot_user=other_person, tenant=tenant)
+
+        assert isinstance(taken_exc.value, MasterAlreadyLinked)
+        assert isinstance(held_exc.value, PersonAlreadyMaster)
+        assert taken_exc.value.slug != held_exc.value.slug
+        # And neither may hide inside the «wrong code / used / expired» pile,
+        # which has a different cure again — ask for a new code.
+        assert not isinstance(taken_exc.value, InviteNotFound)
+        assert not isinstance(held_exc.value, InviteNotFound)
+
+    def test_an_unrelated_integrity_error_is_not_relabelled(self, tenant, person, monkeypatch):
+        # Positive control for the narrowing. Answering «you are already a
+        # master» to any IntegrityError would turn an unrelated defect into
+        # a polite lie.
+        from django.db import IntegrityError as _IntegrityError
+
+        fresh = _master(tenant, name="Новая карточка")
+        _, code = issue_staff_invite(
+            tenant=tenant, role=StaffInvite.Role.MASTER, catalog_master=fresh
+        )
+
+        def _boom(self, *args, **kwargs):  # noqa: ANN001, ARG001
+            raise _IntegrityError("something else entirely")
+
+        monkeypatch.setattr(CatalogMaster, "save", _boom)
+
+        with pytest.raises(_IntegrityError):
+            redeem_staff_invite(code=code, bot_user=person, tenant=tenant)
+
+
+class TestTheLegitimateMasterPathStillWorks:
+    """Positive control for both guards above.
+
+    Without it, a change that simply refused EVERYONE would turn every
+    defect test green and read as a fix.
+    """
+
+    def test_a_free_card_still_links(self, tenant, person):
+        master = _master(tenant)
+        invite, code = issue_staff_invite(
+            tenant=tenant, role=StaffInvite.Role.MASTER, catalog_master=master
+        )
+
+        result = redeem_staff_invite(code=code, bot_user=person, tenant=tenant)
+
+        master.refresh_from_db()
+        invite.refresh_from_db()
+        assert result.already_had_role is False
+        assert master.linked_bot_user_id == person.id
+        assert master.is_active is True
+        assert resolve_role(person).is_master is True
+        assert invite.used_at is not None  # the legitimate path DOES spend it
+
+    def test_the_same_person_with_a_second_code_is_greeted_not_refused(self, tenant, person):
+        master = _master(tenant)
+        _, first = issue_staff_invite(
+            tenant=tenant, role=StaffInvite.Role.MASTER, catalog_master=master
+        )
+        _, second = issue_staff_invite(
+            tenant=tenant, role=StaffInvite.Role.MASTER, catalog_master=master
+        )
+        redeem_staff_invite(code=first, bot_user=person, tenant=tenant)
+
+        result = redeem_staff_invite(code=second, bot_user=person, tenant=tenant)
+
+        assert result.already_had_role is True
+        assert result.catalog_master_id == str(master.id)
 
 
 class TestRedeemFailures:

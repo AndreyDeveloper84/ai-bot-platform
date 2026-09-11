@@ -254,9 +254,44 @@ _CATEGORIES: tuple[tuple[str, tuple[str, ...]], ...] = (
 
 #: What the person reads instead. Says the shape of the problem without
 #: pretending the assistant knows the answer.
+#: Owner §128 — the approved line, verbatim. It replaces a draft the check
+#: refused AND a draft the check could not look at, because the person must
+#: not be able to tell our judgement from our outage.
+#:
+#: Two prohibitions come with it, and both say the same thing — **a failed
+#: check is not an empty world**:
+#:
+#: * never «ничего не найдено» when the catalogue is not empty — our fault
+#:   must not read as a bare shelf;
+#: * never «не могу помочь» when a controlled continuation exists — our fault
+#:   must not read as the end of the conversation.
+#:
+#: The previous line («тут нужен человек… спросите администратора») broke the
+#: second one: it closed the conversation and handed the person an errand.
 REPLACEMENT_TEXT = (
-    "Не могу это ответить — тут нужен человек, а не помощник. Спросите администратора салона."
+    "Пока у меня недостаточно подтверждённых данных, чтобы уверенно "
+    "посоветовать конкретный вариант. Могу показать доступные услуги "
+    "или помочь уточнить, что тебе сейчас нужно."
 )
+
+#: The two continuations §128 names alongside the text. They are declared here
+#: and NOT yet carried by :class:`OutboundVerdict`, which has room for
+#: ``allowed``, ``text`` and ``categories`` and nothing else.
+#:
+#: Wiring them is a separate slice, and saying so is the point: adding a field
+#: quietly would make «the person was offered a way out» look delivered while
+#: no surface renders one. Until then the text names both continuations in
+#: prose, which the person can act on by saying so — the sentence is written
+#: to survive exactly this gap.
+OFFERED_CONTINUATIONS: tuple[str, ...] = ("Посмотреть услуги", "Уточнить запрос")
+
+#: Category recorded when the check itself could not run. Deliberately not one
+#: of the content labels: an operator has to be able to separate "the draft
+#: matched a banned shape" from "we never got to look at the draft". The first
+#: says the model wrote something it should not; the second says our own check
+#: is broken. Same replacement line outward, different counters inward, and
+#: opposite fixes.
+CHECK_FAILED_CATEGORY = "check_failed"
 
 
 @dataclass(frozen=True)
@@ -275,13 +310,16 @@ class OutboundVerdict:
 def evaluate_outbound(text: str) -> OutboundVerdict:
     """Check a drafted reply before it reaches a person.
 
-    Returns the original text when clean, and :data:`REPLACEMENT_TEXT`
-    with the matched categories when not. Never raises: a crash in a
-    safety check must not be the thing that costs someone their answer.
+    Returns the original text when clean, and :data:`REPLACEMENT_TEXT` when
+    not — whether "not" means a category matched or the check could not run
+    at all. Never raises: a crash here must not propagate into the turn.
     """
 
     body = text or ""
     if not body.strip():
+        # Nothing drafted, so nothing to check and nothing to send. Replacing
+        # an empty draft would turn a no-op into a message the person never
+        # had coming.
         return OutboundVerdict(allowed=True, text=body)
 
     hits: list[str] = []
@@ -289,9 +327,34 @@ def evaluate_outbound(text: str) -> OutboundVerdict:
         for label, patterns in _CATEGORIES:
             if any(re.search(p, body) for p in patterns):
                 hits.append(label)
-    except Exception:  # noqa: BLE001 — a broken regex must not eat the turn
+    except Exception:  # noqa: BLE001 — a crash must not raise into the turn
+        # The check did not run, so nothing is known about this draft.
+        # Sending it anyway was the old behaviour, and its reasoning was sound
+        # as far as it went: a crash in a safety check must not cost someone
+        # their answer.
+        #
+        # What that reasoning missed is that those were never the only two
+        # options. :data:`REPLACEMENT_TEXT` already exists, so the choice is
+        # not "send the unchecked text" versus "say nothing" — it is "send the
+        # unchecked text" versus "send the safe line". The person still gets
+        # an answer; it is simply not the one we were unable to check.
+        #
+        # Owner §111: Safety uncertain → fail closed for the AFFECTED
+        # capability, not for the product. This is exactly that, scoped to one
+        # capability: this draft.
+        #
+        # The category is :data:`CHECK_FAILED_CATEGORY` rather than one of the
+        # content labels on purpose. "Replaced because it matched" and
+        # "replaced because we could not look" are different states with
+        # opposite fixes, and an operator reading the audit a month from now
+        # has to tell them apart. Outward both are the same line; inward they
+        # are separate counters.
         logger.exception("safety.outbound.check_failed")
-        return OutboundVerdict(allowed=True, text=body)
+        return OutboundVerdict(
+            allowed=False,
+            text=REPLACEMENT_TEXT,
+            categories=(CHECK_FAILED_CATEGORY,),
+        )
 
     if not hits:
         return OutboundVerdict(allowed=True, text=body)
@@ -302,4 +365,10 @@ def evaluate_outbound(text: str) -> OutboundVerdict:
     return OutboundVerdict(allowed=False, text=REPLACEMENT_TEXT, categories=tuple(hits))
 
 
-__all__ = ["REPLACEMENT_TEXT", "OutboundVerdict", "evaluate_outbound"]
+__all__ = [
+    "CHECK_FAILED_CATEGORY",
+    "OFFERED_CONTINUATIONS",
+    "REPLACEMENT_TEXT",
+    "OutboundVerdict",
+    "evaluate_outbound",
+]

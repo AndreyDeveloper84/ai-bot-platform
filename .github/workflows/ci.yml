@@ -154,7 +154,7 @@ jobs:
     timeout-minutes: 15
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # ------------------------------------------------------------------
       # DRF-1275 — secret guard. Before this ticket `detect-secrets` was
@@ -184,7 +184,7 @@ jobs:
       # the ayla-ai-core fetch is broken, which is precisely a moment
       # when credentials are being moved around.
       - name: Set up Python 3.12 (secret guard)
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: "3.12"
 
@@ -286,7 +286,7 @@ jobs:
       OPENAI_API_KEY: ci-fake-key-not-real
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # postgresql-client (pg_dump / pg_restore) needed for
       # apps/identity/tests/test_backup_restore.py — the test verifies
@@ -299,7 +299,7 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y postgresql-client
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v3
+        uses: astral-sh/setup-uv@v7
         with:
           version: "0.11.12"
           enable-cache: true
@@ -413,6 +413,18 @@ jobs:
       # import of tokens.css comes back empty inside a test.
       - name: Mini App palette contract
         run: uv run python tools/lint/miniapp_token_contrast.py apps/miniapp
+
+      # Словарь состояний подтверждения расписания (DRF-1237 B1, §29.5).
+      # Состояния жили в двух экранах и разошлись молча: одно и то же
+      # называлось «Расписание не подтверждено» и «Расписание не
+      # подтверждено — салон его не заверял». Сведение чинит сегодняшний
+      # день, сторож — следующий: он роняет и вторую формулировку, и второй
+      # вывод состояния (чтение `is_current` мимо словаря), потому что
+      # одинаковые слова при разном выводе — то же расхождение, только
+      # незаметнее. Здесь, а не в vitest: обход исходников требует
+      # `node:fs`, а `@types/node` в mini-app нет.
+      - name: Mini App schedule-confirmation vocabulary
+        run: uv run python tools/lint/schedule_vocabulary_guard.py apps/miniapp
 
       # Personal-field owner guard (DRF-1365). The memory audit of
       # 2026-08-24 returned «C — multiple competing memory systems»: six
@@ -725,7 +737,7 @@ jobs:
 
       - name: Upload apps/ collection census
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: apps-census-${{ github.sha }}
           path: apps-census.txt
@@ -989,7 +1001,7 @@ jobs:
       OPENAI_API_KEY: ci-fake-key-not-real
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # postgresql-client (pg_dump / pg_restore) needed for
       # apps/identity/tests/test_backup_restore.py — the test verifies
@@ -1002,7 +1014,7 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y postgresql-client
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v3
+        uses: astral-sh/setup-uv@v7
         with:
           version: "0.11.12"
           enable-cache: true
@@ -1244,7 +1256,7 @@ jobs:
       # `merge-multiple` cannot collide them.
       - name: Upload pytest junit (apps/ shard ${{ matrix.shard.id }})
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: junit-apps-${{ github.sha }}-shard-${{ matrix.shard.id }}
           path: junit-apps-shard-${{ matrix.shard.id }}.xml
@@ -1294,7 +1306,7 @@ jobs:
       - name: Download shard junit artefacts
         if: always()
         continue-on-error: true
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           pattern: junit-apps-${{ github.sha }}-shard-*
           path: shard-junit
@@ -1303,7 +1315,7 @@ jobs:
       - name: Download apps/ collection census
         if: always()
         continue-on-error: true
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: apps-census-${{ github.sha }}
           path: census
@@ -1476,7 +1488,7 @@ jobs:
     timeout-minutes: 15
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           # Full history: the change-detection step below diffs against
           # the PR base, which a depth-1 checkout cannot reach.
@@ -1576,7 +1588,7 @@ jobs:
       # with. Regenerating it under npm 11 produces a lockfile npm 10 rejects.
       - name: Set up Node (from apps/miniapp/.nvmrc)
         if: steps.detect.outputs.run_fe == 'true'
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version-file: apps/miniapp/.nvmrc
           cache: npm
@@ -1631,7 +1643,7 @@ jobs:
       # bundle was built from.
       - name: Upload dist artefact
         if: steps.detect.outputs.run_fe == 'true'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: miniapp-dist-${{ github.sha }}
           path: apps/miniapp/dist

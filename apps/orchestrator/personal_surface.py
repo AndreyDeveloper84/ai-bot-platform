@@ -239,6 +239,27 @@ CONSENT_CLOSED_TEXT = (
 #: is not a suggestion here — it is the missing half of the answer.
 NO_PROFILE_TEXT = "Норм пока нет — я ещё не считала их для тебя."
 
+#: Анкета есть, ориентиров нет — каталог их снял (``targets_provenance.source
+#: == "none"``, DRF-1623 N-b). Человек, который вчера видел «из 95 г»,
+#: сегодня видит «Белки: 61 г» без «из» — и без этой строки не узнал бы,
+#: почему. ``NO_PROFILE_TEXT`` сюда не годится: «я ещё не считала» — ложь
+#: про очищенный профиль, считала и сняла.
+#:
+#: Текст не зовёт в дверь, которой нет (экрана согласий пока нет — #1523),
+#: не говорит «ты не заполнил» (copy-policy R2) и не называет ни одного
+#: числа — ни прежнего, ни нового. Формулировка — предложение исполнителя,
+#: вынесена владельцу на утверждение (реестр, окно ЦЕЛИ И ПЛАН).
+NO_TARGETS_TEXT = (
+    "Ориентиров в профиле сейчас нет: считаю их только с согласия на "
+    "персональный расчёт, а его пока не было. Записи и итоги дня работают "
+    "как раньше."
+)
+
+#: ``targets_provenance.source`` каталога, при котором хвост добавляется.
+#: ``unknown_legacy`` (строки до очистки) и ``ayla_calculated`` /
+#: ``user_entered`` его не получают: у них ориентиры печатаются числами.
+_TARGETS_SOURCE_NONE = "none"
+
 
 # ---------------------------------------------------------------------------
 # Deterministic trigger — the diary half.
@@ -460,7 +481,37 @@ def _render_today(bot_user: Any, profile: Any) -> DiscoveryReply:
     text = render_daily_report(summary, water, profile, include_opt_out=False, include_entries=True)
     if profile is None:
         text = f"{text}\n\n{NO_PROFILE_TEXT}"
+    elif _targets_cleared(profile):
+        text = f"{text}\n\n{NO_TARGETS_TEXT}"
     return _reply(text, _diary_chips(profile))
+
+
+def _targets_cleared(profile: Any) -> bool:
+    """True when the catalog says the targets were cleared — and only then.
+
+    Three inputs, two outcomes:
+
+    * ``"none"`` — the catalog cleared the targets (DRF-1623 N-b) → the
+      person is told why;
+    * ``"unknown_legacy"`` / ``"ayla_calculated"`` / ``"user_entered"`` —
+      numbers are still printed, nothing to explain → no tail;
+    * ``""`` — the key did not arrive. That is a broken contract (the
+      catalog declares the block required since #316), not an absent
+      target, and the tail must not be manufactured from it: warn once
+      per reply and stay silent.
+    """
+    # Direct attribute, not ``getattr(..., "")``: the field is part of
+    # ``ProfileResponse`` and a default here would be a third «absence»
+    # indistinguishable from the client's own ``""``.
+    source = str(profile.targets_source or "")
+    if source == _TARGETS_SOURCE_NONE:
+        return True
+    if not source:
+        logger.warning(
+            "orchestrator.personal_surface.targets_source_missing: "
+            "profile arrived without targets_provenance.source"
+        )
+    return False
 
 
 def _render_week(bot_user: Any, profile: Any) -> DiscoveryReply:

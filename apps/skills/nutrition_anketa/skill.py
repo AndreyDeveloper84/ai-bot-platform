@@ -97,7 +97,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import ClassVar
+from typing import TYPE_CHECKING, ClassVar
 
 from apps.integrations.ayla import (
     NutritionAPIError,
@@ -116,6 +116,9 @@ from apps.skills.nutrition_anketa.fsm import (
     choice_keyboard_options,
 )
 from apps.skills.registry import register
+
+if TYPE_CHECKING:
+    from apps.consent.personal_calculation import ConsentAttestation
 
 logger = logging.getLogger(__name__)
 
@@ -154,6 +157,26 @@ _STOP_SCREENING = (
 )
 
 _STOP_TEXTS = {"minor": _STOP_MINOR, "screening": _STOP_SCREENING}
+
+# ─── нет утверждения о согласии на расчёт (DRF-1658, N-a3) ───────────────
+#
+# Граница каталога (#324) не принимает параметры тела без утверждения
+# «согласие вида personal_calculation, версия текста такая-то». Если у
+# бота такого утверждения нет — POST не уходит вовсе, и человеку об этом
+# говорится прямо. Тихая отправка без поля дала бы 422 из каталога и
+# профиль, который ВЫГЛЯДИТ обработанным, а не является.
+#
+# Текст не обещает несуществующего: экрана согласия нет, «дай согласие
+# вон там» отправило бы человека в место, которого нет. Собранные ответы
+# стираются вместе с FSM — держать параметры тела в skill_state без
+# основания нельзя.
+_CONSENT_ATTESTATION_MISSING = (
+    "Персональный расчёт пока не запускаю: на обработку веса, роста, возраста "
+    "и остального нужно отдельное согласие с версией текста, а у меня его нет — "
+    "экран с ним ещё не готов.\n\n"
+    "Дневник от этого не закрывается: записывай еду и воду, я посчитаю и покажу, "
+    "сколько вышло за день. Как появится экран — предложу посчитать ориентир."
+)
 
 
 @register
@@ -317,7 +340,22 @@ class NutritionAnketaSkill:
 
     def _on_complete(self, context: SkillContext, answers: dict) -> SkillResult:
         external_id = external_user_id_for(context.bot_user)
-        payload = self._build_ayla_payload(answers)
+
+        # DRF-1658: утверждение о согласии берётся ДО сборки тела и ДО
+        # сети. Без него параметры тела не уходят — ни с полем, ни без.
+        # Импорт ленивый, как у остальных обращений к моделям из скиллов:
+        # реестр скиллов собирается раньше, чем готовы приложения Django.
+        from apps.consent.personal_calculation import (
+            ConsentAttestationUnavailable,
+            current_attestation,
+        )
+
+        try:
+            attestation = current_attestation(context.bot_user)
+        except ConsentAttestationUnavailable as exc:
+            return self._render_consent_attestation_missing(context, reason=exc.reason)
+
+        payload = self._build_ayla_payload(answers, attestation)
 
         try:
             profile = asyncio.run(
@@ -446,13 +484,45 @@ class NutritionAnketaSkill:
             meta={"reply_kind": f"anketa_{step}"},
         )
 
-    def _build_ayla_payload(self, answers: dict) -> dict:
+    def _render_consent_attestation_missing(
+        self, context: SkillContext, *, reason: str
+    ) -> SkillResult:
+        """DRF-1658: утверждения нет — отказ по названной причине, POST не ушёл.
+
+        ``reason`` — одна из трёх констант
+        :mod:`apps.consent.personal_calculation`; в лог идёт она, а не
+        общее «нет согласия»: у трёх причин три разных адреса починки.
+        """
+        # Незавершённая анкета не переживает отказ — иначе следующий ход
+        # человека попал бы в FSM, стоящую на «готово», а параметры тела
+        # лежали бы в skill_state без основания.
+        self._clear_state(context)
+        logger.info(
+            "anketa.consent_attestation_missing reason=%s conv=%s",
+            reason,
+            getattr(context.conversation, "id", None),
+        )
+        return SkillResult(
+            reply_text=_CONSENT_ATTESTATION_MISSING,
+            action_type="anketa_consent_required",
+            action_data={"reason": reason, "buttons": _post_anketa_chips()},
+            meta={"reply_kind": "anketa_consent_required"},
+        )
+
+    def _build_ayla_payload(self, answers: dict, attestation: "ConsentAttestation") -> dict:
         """Map FSM answers to the Ayla profile schema.
 
         Activity is hardcoded to ``1.4`` (sedentary) for Sprint 9.
         Phase 1 collects activity as a step.
+
+        Утверждение о согласии — обязательный аргумент, не флаг и не
+        ``None`` по умолчанию: все шесть полей ниже закрыты границей
+        каталога (#324), и тело без утверждения собрать здесь нельзя
+        даже по ошибке.
         """
-        return {
+        from apps.consent.personal_calculation import attach as attach_consent
+
+        body = {
             "gender": answers["gender"],
             "age": int(answers["age"]),
             "height_cm": int(answers["height"]),
@@ -460,6 +530,7 @@ class NutritionAnketaSkill:
             "goal": answers["goal"],
             "activity_coefficient": 1.4,
         }
+        return attach_consent(body, attestation)
 
 
 # ─── helpers ──────────────────────────────────────────────────────────────

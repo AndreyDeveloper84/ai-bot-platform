@@ -40,6 +40,8 @@ from collections.abc import Generator
 
 import pytest
 
+from apps.consent.personal_calculation import ConsentAttestation
+from apps.consent.personal_calculation import attach as attach_consent
 from apps.integrations.ayla import (
     FoodNotRecognizedError,
     NutritionUnavailableError,
@@ -131,16 +133,25 @@ class TestNutritionClient:
         """Round-trip: write a profile, fetch it, assert the norms
         envelope shape (DRF-270 ``data.norms.*``)."""
         client = get_nutrition_client()
+        # DRF-1658: параметры тела граница каталога (#324) принимает
+        # только с утверждением о согласии — оно часть ВАЛИДНОГО запроса,
+        # а не предмет этого теста. Форма — та же, что шлёт анкета.
+        attestation = ConsentAttestation(
+            type="personal_calculation", document_version="e2e-personal-calculation-v1"
+        )
         await client.upsert_profile(
             external_user_id=external_user_id,
-            data={
-                "gender": "female",
-                "age": 30,
-                "height_cm": 168,
-                "weight_kg": 62,
-                "goal": "maintain",
-                "activity_coefficient": 1.4,
-            },
+            data=attach_consent(
+                {
+                    "gender": "female",
+                    "age": 30,
+                    "height_cm": 168,
+                    "weight_kg": 62,
+                    "goal": "maintain",
+                    "activity_coefficient": 1.4,
+                },
+                attestation,
+            ),
         )
 
         profile = await client.get_profile(external_user_id=external_user_id)
