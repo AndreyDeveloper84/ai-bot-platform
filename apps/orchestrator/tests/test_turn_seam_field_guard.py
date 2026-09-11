@@ -26,7 +26,7 @@ import logging
 import uuid
 from dataclasses import dataclass
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -48,6 +48,7 @@ from apps.orchestrator.turn_seam import (
     unmapped_fields,
 )
 from apps.skills.base import SkillResult
+from apps.tenancy.models import Tenant
 
 SEAM_LOGGER = "apps.orchestrator.turn_seam"
 
@@ -77,7 +78,8 @@ def _run_per_tenant(monkeypatch, result: Any) -> TurnReply:
     monkeypatch.setattr("apps.skills.registry.dispatch", lambda skill_ctx: result)
     from apps.tenancy.context import tenant_scope
 
-    with tenant_scope(SimpleNamespace(id=uuid.uuid4())):
+    # заглушка: tenant_scope читает только .id/.slug, полноценный Tenant не нужен
+    with tenant_scope(cast(Tenant, SimpleNamespace(id=uuid.uuid4()))):
         return orchestrate_turn(_ctx())
 
 
