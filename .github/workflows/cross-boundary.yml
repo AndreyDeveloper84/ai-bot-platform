@@ -1,0 +1,183 @@
+name: cross-boundary
+
+# Golden через настоящую HTTP-границу бот↔каталог (способность 41 матрицы,
+# план docs/PLAN_CROSS_BOUNDARY_GOLDEN.md, стенд A). Каталог поднимается
+# ЗДЕСЬ, из своего репозитория, на ПРИКОЛОЧЕННОМ SHA — и SHA печатается
+# рядом с числом тестов. Обновление SHA — отдельный PR с перечнем
+# изменившихся маршрутов; «всегда dev каталога» дало бы зелень из чужого
+# слияния.
+#
+# ВКЛЮЧЕНИЕ. Job не запускается, пока repository variable
+# CROSS_BOUNDARY_ENABLED не равна 'true'. Это не «пропуск, читаемый как
+# зелень»: выключенный job стоит в проверках PR СЕРЫМ skipped, не зелёным,
+# и в обязательные проверки не входит. Включать после того, как в секретах
+# появится CATALOG_CHECKOUT_TOKEN (см. ниже) — и тогда же добавлять в
+# обязательные. Пока выключен, единственное доказательство стенда —
+# локальный прогон по tests/cross_boundary/README.md.
+#
+# СЕКРЕТ. CATALOG_CHECKOUT_TOKEN — fine-grained PAT (или GitHub App) с
+# ЕДИНСТВЕННЫМ правом Contents: Read на ОДИН репозиторий
+# AndreyDeveloper84/beautygo_backend, со сроком. Ничего сверх: job только
+# читает исходники каталога, чтобы поднять его.
+#
+# СТЕНД НЕ ПОДНЯЛСЯ ≠ ЗЕЛЁНЫЙ. Три способа не подняться, и все три — красный
+# с причиной: (1) каталог не установился — шаг красный; (2) поднялся, но не
+# мигрировал — readiness каталога проверяет checks.migrations.ok, пульс
+# бота его читает; (3) поднялся, а бот не увидел — conftest бота ПАДАЕТ на
+# пустых переменных, не пропускает. Плюс junit: tests == 0 — отказ.
+
+on:
+  pull_request:
+    branches: [dev]
+  workflow_dispatch:
+
+concurrency:
+  group: cross-boundary-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Приколоченный SHA каталога. Обновлять ОТДЕЛЬНЫМ PR с перечнем
+  # изменившихся маршрутов /internal/*. Должен содержать seed_golden
+  # (beautygo_backend PR #373).
+  CATALOG_REPO: AndreyDeveloper84/beautygo_backend
+  CATALOG_SHA: c40666f4
+  CATALOG_PORT: "8091"
+  # Имя базы ОБЯЗАНО содержать «golden»: seed_golden иначе откажется
+  # писать — это его сторож от пилота, и здесь он не обходится флагом.
+  CATALOG_DB: golden_ci
+  CATALOG_TOKEN: ci-cross-boundary-token
+
+jobs:
+  cross-boundary:
+    if: vars.CROSS_BOUNDARY_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: postgres
+          # Пароля нет намеренно: контейнер живёт один прогон и слушает
+          # только loopback раннера. Литерал пароля в workflow — это то,
+          # на чём краснеет detect-secrets, и правильно краснеет.
+          POSTGRES_HOST_AUTH_METHOD: trust
+          POSTGRES_DB: golden_ci
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+
+    steps:
+      - name: Checkout bot
+        uses: actions/checkout@v4
+
+      - name: Checkout catalog @ pinned SHA
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.CATALOG_REPO }}
+          ref: ${{ env.CATALOG_SHA }}
+          token: ${{ secrets.CATALOG_CHECKOUT_TOKEN }}
+          path: catalog
+          fetch-depth: 1
+
+      - name: Print the subject next to the result
+        # Предмет рядом с числом: чей код поднимаем и чей гоняем.
+        run: |
+          echo "bot     $(git rev-parse HEAD)"
+          echo "catalog $(git -C catalog rev-parse HEAD)  (pinned ${CATALOG_SHA})"
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Ephemeral Django key for both processes
+        # Не секрет: рождается здесь, умирает с раннером, в лог не попадает.
+        # Литерал ключа в workflow — то, на чём краснеет detect-secrets,
+        # и правильно: настоящий и поддельный литералы неразличимы глазом.
+        run: |
+          value="cb-$(openssl rand -hex 16)"
+          { printf 'DJANGO_SECRET_KEY='; printf '%s' "$value"; echo; } >> "$GITHUB_ENV"
+
+      - name: Install catalog
+        working-directory: catalog
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Migrate + seed catalog (scenario p7)
+        working-directory: catalog
+        env:
+          DJANGO_SETTINGS_MODULE: djangoProject.settings.test
+          POSTGRES_HOST: localhost
+          POSTGRES_PORT: "5432"
+          POSTGRES_USER: postgres
+          POSTGRES_DB: ${{ env.CATALOG_DB }}
+          AYLA_INTERNAL_API_TOKEN: ${{ env.CATALOG_TOKEN }}
+          SENTRY_DSN: ""
+          LOG_FORMAT: human
+        run: |
+          python manage.py migrate --noinput
+          python manage.py seed_golden --scenario p7
+
+      - name: Start catalog
+        working-directory: catalog
+        env:
+          DJANGO_SETTINGS_MODULE: djangoProject.settings.test
+          POSTGRES_HOST: localhost
+          POSTGRES_PORT: "5432"
+          POSTGRES_USER: postgres
+          POSTGRES_DB: ${{ env.CATALOG_DB }}
+          AYLA_INTERNAL_API_TOKEN: ${{ env.CATALOG_TOKEN }}
+          SENTRY_DSN: ""
+          LOG_FORMAT: human
+        run: |
+          nohup python manage.py runserver 127.0.0.1:${CATALOG_PORT} --noreload > catalog.log 2>&1 &
+          for i in $(seq 1 30); do
+            if curl -fsS "http://127.0.0.1:${CATALOG_PORT}/api/v1/health/ready/" > /tmp/ready.json 2>/dev/null; then
+              echo "readiness: $(cat /tmp/ready.json)"; exit 0
+            fi
+            sleep 2
+          done
+          echo "::error::catalog did not become ready in 60s"; tail -50 catalog.log; exit 1
+
+      - name: Install bot
+        run: |
+          pip install uv
+          uv sync --frozen --all-extras --dev
+
+      - name: Cross-boundary golden (P7)
+        env:
+          DJANGO_SETTINGS_MODULE: config.settings.local
+          CROSS_BOUNDARY_CATALOG_URL: http://127.0.0.1:${{ env.CATALOG_PORT }}
+          CROSS_BOUNDARY_CATALOG_TOKEN: ${{ env.CATALOG_TOKEN }}
+          CROSS_BOUNDARY_CATALOG_SHA: ${{ env.CATALOG_SHA }}
+          CROSS_BOUNDARY_SCENARIO: p7
+        run: |
+          rm -f junit-cross-boundary.xml
+          uv run pytest tests/cross_boundary -m cross_boundary -v -s \
+            --junitxml=junit-cross-boundary.xml
+
+      - name: junit — пустой прогон не зелёный
+        if: always()
+        run: |
+          if [ ! -f junit-cross-boundary.xml ]; then
+            echo "::error::JUNIT MISSING — pytest не дошёл до записи отчёта"; exit 1
+          fi
+          python - <<'PY'
+          import sys, xml.etree.ElementTree as ET
+          root = ET.parse("junit-cross-boundary.xml").getroot()
+          suite = root if root.tag == "testsuite" else root.find("testsuite")
+          tests = int(suite.get("tests", 0)); failures = int(suite.get("failures", 0)); errors = int(suite.get("errors", 0))
+          print(f"JUNIT tests={tests} failures={failures} errors={errors}")
+          if tests == 0:
+              print("::error::JUNIT EMPTY — 0 tests collected. An empty run is not a green run."); sys.exit(1)
+          sys.exit(1 if failures or errors else 0)
+          PY
+
+      - name: Catalog log on failure
+        if: failure()
+        run: tail -100 catalog/catalog.log || true
