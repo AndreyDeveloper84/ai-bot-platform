@@ -83,6 +83,20 @@ export interface AuthVerifyResponse {
    * multi-device — sessionStorage stays the PRIMARY restore path).
    */
   pending_booking_intent?: ServerPendingBookingIntent | null;
+  /**
+   * DRF-1319 B+E (§124) — единственное серверное утверждение о том, кто
+   * перед нами. `channel`: как человек опознан (`identified` — MAX
+   * initData; `dev_bypass` — DEBUG-обход, канал его не называл).
+   * `subject`: есть ли доменный субъект в Ayla — привязка делается на
+   * сервере при входе (`ensure_ayla_link`), клиент её не вычисляет.
+   * Необязательное поле только ради совместимости с сервером старой
+   * версии; читать через `lib/identity.ts::subjectIdentity`.
+   */
+  identity?: {
+    channel: "identified" | "dev_bypass";
+    subject: "linked" | "unlinked";
+    ayla_user_id: string | null;
+  };
 }
 
 /**
