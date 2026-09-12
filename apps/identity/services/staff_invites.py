@@ -60,7 +60,7 @@ from django.utils import timezone
 
 from apps.catalog.models import CatalogMaster
 from apps.identity.models import BotUser
-from apps.tenancy.models import StaffInvite, TenantStaff
+from apps.tenancy.models import StaffInvite, Tenant, TenantStaff
 
 logger = logging.getLogger(__name__)
 
@@ -167,12 +167,19 @@ class OwnerAlreadyExists(InviteError):
 
 @dataclass(frozen=True)
 class RedeemResult:
-    """Outcome of a successful redemption."""
+    """Outcome of a successful redemption.
+
+    ``bot_user`` / ``tenant`` are filled by :func:`redeem_staff_invite_by_identity`
+    (DRF-1784): the caller had no row before the code, so the row the code
+    created — and the salon the code belonged to — are the answer.
+    """
 
     role: str
     tenant_id: str
     already_had_role: bool
     catalog_master_id: str | None = None
+    bot_user: BotUser | None = None
+    tenant: "Tenant | None" = None
 
 
 def normalize_code(raw: str) -> str:
@@ -271,7 +278,13 @@ def issue_staff_invite(
 
 
 def _attempt_key(bot_user: BotUser) -> str:
-    return f"staff_invite:attempts:{bot_user.channel}:{bot_user.channel_user_id}"
+    return _attempt_key_for(bot_user.channel, bot_user.channel_user_id)
+
+
+def _attempt_key_for(channel: str, channel_user_id: str) -> str:
+    # Keyed on the messenger IDENTITY, not on a row (DRF-1784): the salon
+    # bot counts a stranger's guesses before any row of theirs exists.
+    return f"staff_invite:attempts:{channel}:{channel_user_id}"
 
 
 def _check_rate_limit(bot_user: BotUser) -> None:
@@ -292,9 +305,15 @@ def _check_rate_limit(bot_user: BotUser) -> None:
     single-use codes plus a 7-day expiry are the actual bounds.
     """
 
+    _check_rate_limit_for(bot_user.channel, bot_user.channel_user_id)
+
+
+def _check_rate_limit_for(channel: str, channel_user_id: str) -> None:
+    """Same brake, keyed on the identity (see :func:`_check_rate_limit`)."""
+
     from django.core.cache import cache
 
-    key = _attempt_key(bot_user)
+    key = _attempt_key_for(channel, channel_user_id)
     try:
         if cache.add(key, 1, timeout=ATTEMPT_WINDOW_SECONDS):
             return  # First attempt in this window.
@@ -309,7 +328,7 @@ def _check_rate_limit(bot_user: BotUser) -> None:
     if attempts > MAX_ATTEMPTS:
         logger.warning(
             "identity.staff_invite.rate_limited channel_user_id=%s attempts=%s",
-            bot_user.channel_user_id,
+            channel_user_id,
             attempts,
         )
         raise InviteRateLimited("too many attempts")
@@ -326,8 +345,103 @@ def _clear_rate_limit(bot_user: BotUser) -> None:
         pass
 
 
+def redeem_staff_invite_by_identity(
+    *,
+    code: str,
+    channel: str,
+    channel_user_id: str,
+    display_name: str = "",
+    chat_id: str = "",
+) -> RedeemResult:
+    """Turn a code into staff access for a person who has NO row yet (DRF-1784).
+
+    Owner 12.09.2026 (DRF-1705 / D2 → б): the salon bot does not belong to
+    a salon, and a stranger gets no ``BotUser`` until they prove a path.
+    So the tenant comes **from the code** — ``StaffInvite`` is looked up by
+    hash across tenants — and the person's row is created **in the code's
+    tenant**, inside the same transaction, right before the role. There is
+    no state where the row exists and the role does not, or the code is
+    spent and the row is not.
+
+    The older :func:`redeem_staff_invite` required the caller's tenant as a
+    filter, on the reasoning that a code for salon B typed into salon A's
+    bot must not be found. That reasoning presumed a bot per salon; with one
+    bot for every salon there is no «salon A's bot» to type it into. The
+    remaining guards are unchanged: single use, expiry, and the per-identity
+    attempt brake.
+
+    Raises the same family as :func:`redeem_staff_invite`.
+    """
+
+    from apps.identity.services.resolver import resolve_or_create_bot_user
+    from apps.tenancy.context import tenant_scope
+
+    _check_rate_limit_for(channel, channel_user_id)
+    normalized = normalize_code(code)
+    code_hash = _hash_code(normalized)
+    now = timezone.now()
+
+    with transaction.atomic():
+        # No select_related under the row lock (DRF-1130 guard): the tenant
+        # is read lazily below, one extra query, no LEFT OUTER JOIN under
+        # FOR UPDATE.
+        invite = StaffInvite.all_tenants.select_for_update().filter(code_hash=code_hash).first()
+        if invite is None:
+            logger.info("identity.staff_invite.miss channel_user_id=%s", channel_user_id)
+            raise InviteNotFound("no such invite")
+        if invite.used_at is not None:
+            logger.info("identity.staff_invite.already_used invite=%s", invite.id)
+            raise InviteNotFound("already used")
+        if invite.expires_at <= now:
+            logger.info("identity.staff_invite.expired invite=%s", invite.id)
+            raise InviteNotFound("expired")
+
+        # The row is born HERE, in the code's tenant — the first thing the
+        # person has proven about themselves. Idempotent for a person who
+        # already has a row there (resolve_or_create).
+        with tenant_scope(invite.tenant):
+            bot_user = resolve_or_create_bot_user(
+                channel=channel,
+                channel_user_id=channel_user_id,
+                display_name=display_name,
+                chat_id=chat_id,
+            )
+
+        if invite.role == StaffInvite.Role.MASTER:
+            result = _link_master(invite, bot_user)
+        else:
+            result = _grant_staff_role(invite, bot_user)
+
+        invite.used_at = now
+        invite.used_by = bot_user
+        invite.save(update_fields=["used_at", "used_by"])
+
+    _clear_rate_limit(bot_user)
+    logger.info(
+        "identity.staff_invite.redeemed invite=%s role=%s tenant=%s by_identity=1",
+        invite.id,
+        invite.role,
+        invite.tenant.slug,
+    )
+    return RedeemResult(
+        role=result.role,
+        tenant_id=result.tenant_id,
+        already_had_role=result.already_had_role,
+        catalog_master_id=result.catalog_master_id,
+        bot_user=bot_user,
+        tenant=invite.tenant,
+    )
+
+
 def redeem_staff_invite(*, code: str, bot_user: BotUser, tenant) -> RedeemResult:
     """Turn a code into staff access for ``bot_user`` in ``tenant``.
+
+    **12.09.2026 (DRF-1784):** the salon bot no longer calls this — it has
+    no row for a stranger and takes the tenant from the code
+    (:func:`redeem_staff_invite_by_identity`). This form stays for callers
+    that already hold a row AND a tenant (a Mini App session, an operator
+    command); the tenant-filter argument below described a bot per salon
+    and is kept only as that caller's own assertion of where it stands.
 
     ``tenant`` is required, and it is the salon whose bot the person is
     talking to — not a hint taken from the invite. A code issued for

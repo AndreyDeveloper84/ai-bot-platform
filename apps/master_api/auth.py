@@ -223,13 +223,20 @@ def generate_invite_token() -> uuid.UUID:
 
 def validate_invite_token(
     token: str | uuid.UUID,
-    tenant: Any,
+    tenant: Any = None,
 ) -> CatalogMaster:
     """Atomic invite-token validation with row lock.
 
+    ``tenant=None`` (DRF-1784, 12.09.2026) — resolve by the token alone and
+    let the row say which salon it belongs to. The salon bot opens
+    invitation links for every salon and holds no tenant before the link is
+    read; a UUIDv4 token is unguessable, so the tenant filter never added
+    security here — it only encoded «the bot belongs to one salon». Mini App
+    callers still pass their verified tenant and keep the filter.
+
     Returns the :class:`CatalogMaster` row when the token is:
 
-    * resolvable in the given tenant
+    * resolvable in the given tenant (or in any, when ``tenant`` is None)
     * status PENDING
     * not past ``invite_expires_at``
 
@@ -252,11 +259,10 @@ def validate_invite_token(
     # ``select_for_update`` locks the row for the duration of the enclosing
     # transaction. Combined with the unique constraint on invite_token, this
     # serializes any concurrent accept/reject/claim against the same token.
-    qs = CatalogMaster.all_tenants.select_for_update().filter(
-        invite_token=token_uuid,
-        tenant=tenant,
-    )
-    master = qs.first()
+    qs = CatalogMaster.all_tenants.select_for_update().filter(invite_token=token_uuid)
+    if tenant is not None:
+        qs = qs.filter(tenant=tenant)
+    master = qs.select_related("tenant").first()
     if master is None:
         raise InvalidInviteToken("token not found for this tenant")
 

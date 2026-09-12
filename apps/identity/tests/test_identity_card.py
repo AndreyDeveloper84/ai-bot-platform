@@ -270,12 +270,20 @@ class TestTheSalonDoor:
         assert "card-other" not in text
 
     def test_whoami_beats_ask_for_code_for_someone_with_no_role(self, salon):
+        """Человек без роли получает карточку, не «введите код» — как и раньше.
+
+        12.09.2026 (DRF-1784): у такого человека нет рабочей строки, и бот
+        отвечает ему по личности, не читая тенант записи, — раздела «здесь»
+        («роль здесь: клиент») в карточке больше нет: салона «здесь» у него
+        пока нет. Раньше строка `customer` в тенанте записи делала салон
+        «здешним» для любого написавшего.
+        """
         BotUser.all_tenants.create(tenant=salon, channel="max", channel_user_id=CID)
         with patch("apps.channels.max.outbound.send_message") as sent, tenant_scope(salon):
             handle_salon_max_event(self._message("/whoami"))
         text = sent.call_args.kwargs["text"]
         assert "Что я о вас знаю" in text
-        assert "роль здесь: клиент" in text
+        assert "роль здесь" not in text
         assert "код" not in text.lower()
 
 
