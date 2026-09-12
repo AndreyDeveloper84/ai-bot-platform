@@ -101,6 +101,9 @@ _GATE_COLUMNS = (
     "invite_status",
     "ayla_user_id",
     "accepted_at",
+    # DRF-1795 — статус связи соло-мастера (ruling 6): ключ в столбце ещё
+    # не ``LINKED``; у мастера салона строки связи нет — NULL.
+    "identity_link__status",
 )
 
 

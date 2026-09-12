@@ -47,7 +47,7 @@ from apps.catalog.master_state import (
     sale_block,
 )
 from apps.catalog.models import CatalogMaster, CatalogService, MasterService
-from apps.identity.models import BotUser
+from apps.identity.models import BotUser, SoloIdentityLink
 from apps.identity.services.role_resolver import resolve_role
 from apps.master_api.auth import require_master_init_data
 from apps.master_api.tests.conftest import BOT_TOKEN, init_data_header
@@ -135,6 +135,7 @@ def _state(
     linked_bot_user_id: object = None,
     accepted_at: datetime | None = None,
     name: str = "Анна Петрова",
+    identity_link_status: str | None = None,
 ) -> str:
     """``master_state`` на голых столбцах, без похода в базу.
 
@@ -149,6 +150,10 @@ def _state(
     дозаполнила профиль») и ``name`` (первое из трёх условий готовности).
     Умолчание у имени — заполненное, потому что заполненное имя и есть
     форма живых строк: пустого имени на контуре не бывает.
+
+    DRF-1795 добавила ``identity_link__status``: статус связи соло-мастера.
+    Умолчание ``None`` — форма мастера салона, у которого строки связи
+    нет и вопрос решает один столбец.
     """
 
     return master_state(
@@ -160,6 +165,7 @@ def _state(
             "linked_bot_user_id": linked_bot_user_id,
             "accepted_at": accepted_at,
             "name": name,
+            "identity_link__status": identity_link_status,
         }
     )
 
@@ -538,6 +544,7 @@ class TestTheRosterCanSayProfileIncomplete:
             "linked_bot_user_id": uuid4(),
             "accepted_at": datetime.now(tz=timezone.utc),
             "name": "",
+            "identity_link__status": None,
         }
 
         # Пустое имя при живой активности продажу НЕ закрывает.
@@ -980,6 +987,140 @@ class TestAMasterWithNoAylaLinkIsNotSoldAndTheOwnerIsToldWhy:
         master.ayla_user_id = None
         master.save(update_fields=["ayla_user_id"])
         assert sale_block(master) == "ayla_unlinked"
+
+
+# --- DRF-1795 — статус связи как условие продажи (ruling 6) ----------------
+
+
+def _open_solo_link(master: CatalogMaster, bot_user: BotUser, status: str) -> SoloIdentityLink:
+    """Строка ``SoloIdentityLink`` нужного статуса — форма, которую пишет
+    ``solo_identity_link``: аудит-пакет заполнен, решение — как задано."""
+
+    return SoloIdentityLink.objects.create(
+        master=master,
+        status=status,
+        solo_registration_id=master.tenant_id,
+        channel=bot_user.channel,
+        channel_user_id=bot_user.channel_user_id,
+        tenant_id_snapshot=master.tenant_id,
+    )
+
+
+class TestAKeyWithARejectedLinkDoesNotSell:
+    """Ruling 6 владельца 12.09: публикация только при ``identity_link = LINKED``.
+
+    До этой задачи гейт спрашивал один столбец, ``ayla_user_id``. Ключ
+    пишется раньше статуса, а отказ оператора ключ не стирает — он аудит.
+    Строка «настоящий ключ + REJECTED» продавалась бы, и никто бы не
+    заметил: столбец заполнен, слово — «продаётся». Это названное
+    слепое пятно карты онбординга (§2.7), здесь оно закрывается.
+    """
+
+    def test_linked_literal_matches_the_enum(self) -> None:
+        from apps.catalog.master_state import IDENTITY_LINKED
+
+        assert IDENTITY_LINKED == SoloIdentityLink.Status.LINKED
+
+    def test_rejected_after_a_real_key_closes_the_storefront(
+        self,
+        tenant: Tenant,
+        bot_user: BotUser,
+        service: CatalogService,
+    ) -> None:
+        """Проба, которая до правки была зелёной в обратную сторону.
+
+        Обе половины в одном теле: та же строка с ``LINKED`` продаётся,
+        с ``REJECTED`` — нет. Отличается ровно статус; ключ на месте в
+        обоих случаях.
+        """
+
+        master = _make_master(
+            tenant,
+            name="С ключом и отказом",
+            linked_bot_user=bot_user,
+            invite_status=CatalogMaster.InviteStatus.ACCEPTED,
+            is_active=True,
+            ayla_user_id=uuid4(),
+        )
+        link = _open_solo_link(master, bot_user, SoloIdentityLink.Status.LINKED)
+
+        # Положительная стража: LINKED с ключом — продаётся всеми воротами.
+        master.refresh_from_db()
+        assert sale_block(master) is None
+        assert _gate_bookable(tenant, master) is True
+        assert _gate_fallback(tenant, master, service) is True
+        assert _gate_roster(tenant, master) == "active"
+
+        link.status = SoloIdentityLink.Status.REJECTED
+        link.save(update_fields=["status"])
+        master.refresh_from_db()
+        assert master.ayla_user_id is not None  # ключ остался — предмет теста
+
+        # Витрина закрыта тем же словом, что и пустой столбец: действие
+        # владелицы одно — к оператору.
+        assert sale_block(master) == "ayla_unlinked"
+        assert _gate_bookable(tenant, master) is False
+        assert _gate_fallback(tenant, master, service) is False
+        assert _gate_roster(tenant, master) == "ayla_unlinked"
+
+        # Кабинет открыт: отказ оператора — про продажу, не про личность.
+        assert is_landed(master) is True
+
+    def test_pending_with_a_key_reads_as_unlinked_not_half_linked(
+        self,
+        tenant: Tenant,
+        bot_user: BotUser,
+    ) -> None:
+        """Противоречие «ключ есть, статус PENDING» гейт не сглаживает."""
+
+        master = _make_master(
+            tenant,
+            name="Ключ раньше статуса",
+            linked_bot_user=bot_user,
+            ayla_user_id=uuid4(),
+        )
+        _open_solo_link(master, bot_user, SoloIdentityLink.Status.PENDING)
+        master.refresh_from_db()
+
+        assert sale_block(master) == "ayla_unlinked"
+        assert _gate_bookable(tenant, master) is False
+
+    def test_a_salon_master_without_a_link_row_still_sells_by_the_column(
+        self,
+        tenant: Tenant,
+        bot_user: BotUser,
+    ) -> None:
+        """Мастер салона строки связи не имеет — для него ничего не изменилось."""
+
+        master = _make_master(tenant, name="Из синхронизации", linked_bot_user=bot_user)
+        assert not SoloIdentityLink.objects.filter(master=master).exists()
+
+        assert sale_block(master) is None
+        assert _gate_bookable(tenant, master) is True
+        assert _gate_roster(tenant, master) == "active"
+
+    def test_the_roster_row_names_the_status_column(self) -> None:
+        """Ростер читает ``.values()`` со списком полей — забытый столбец
+        обязан падать, а не читаться как «связи нет»."""
+
+        with pytest.raises(KeyError):
+            master_state(
+                {
+                    "archived_at": None,
+                    "is_active": True,
+                    "invite_status": ACCEPTED,
+                    "ayla_user_id": uuid4(),
+                    "linked_bot_user_id": uuid4(),
+                    "accepted_at": datetime.now(tz=timezone.utc),
+                    "name": "Без столбца",
+                }
+            )
+        assert _state(ayla_user_id=uuid4(), identity_link_status=None) == "active"
+        assert _state(ayla_user_id=uuid4(), identity_link_status="IDENTITY_LINKED") == "active"
+        assert (
+            _state(ayla_user_id=uuid4(), identity_link_status="IDENTITY_LINK_REJECTED")
+            == "ayla_unlinked"
+        )
 
 
 class TestTheReasonVocabularyCannotBeExtendedByHalves:
