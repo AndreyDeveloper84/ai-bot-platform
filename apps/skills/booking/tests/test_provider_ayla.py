@@ -123,6 +123,8 @@ class FakeAylaBooking:
         start_datetime: str,
         idempotency_key: str | None = None,
         payment_required: bool = True,
+        quoted_price: str | None = None,
+        quoted_duration_minutes: int | None = None,
     ) -> AylaBookingRecord:
         self.calls.append(
             {

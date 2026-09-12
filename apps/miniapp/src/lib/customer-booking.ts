@@ -69,6 +69,7 @@
  */
 
 import {
+  ApiError,
   fetchMaster,
   fetchMasters,
   fetchRecommendations,
@@ -76,6 +77,7 @@ import {
   fetchSlots,
   createBooking,
   decisionContractViolation,
+  request,
   NOT_CAPABLE_CODE,
   NOT_RECOMMENDABLE_CODE,
   SAFETY_EXCLUDED_CODE,
@@ -489,6 +491,61 @@ export interface BookingCreatePayload {
   visit_at: string;
   /** AMD-002 / C7.4 — user's payment choice from the summary screen. */
   payment_required?: boolean;
+  /**
+   * DRF-1708 (решение владельца, пакет 2, D4): ровно то, что человек
+   * ВИДЕЛ на подтверждении. Цена — десятичной строкой как пришла из
+   * котировки, не числом: сравнение по значению делает сервер, написание
+   * наше и должно быть точным. Без котировки поля не шлются — прежний
+   * контракт.
+   */
+  quoted_price?: string;
+  quoted_duration_minutes?: number;
+}
+
+/**
+ * Что будет стоить и сколько займёт НОВАЯ запись к этому мастеру на эту
+ * услугу (DRF-1708). `null` — значение неизвестно: экран его не рисует и
+ * ничего не выдумывает. `source` — откуда число: ребро мастер+услуга (то,
+ * что штампуется на запись) или значения услуги из зеркала.
+ */
+export interface BookingQuote {
+  price: string | null;
+  duration_minutes: number | null;
+  source: "edge" | "service";
+}
+
+export const getBookingQuote = async (
+  masterId: string,
+  serviceId: string,
+): Promise<BookingQuote> => {
+  const params = new URLSearchParams({ master_id: masterId, service_id: serviceId });
+  const res = await request<{ quote: BookingQuote }>(`/quote?${params.toString()}`, {
+    method: "GET",
+  });
+  return res.quote;
+};
+
+/** Наружное имя отказа «то, что ты видел, уже не действует» (DRF-1708). */
+export const QUOTE_CHANGED_SLUG = "quote_changed";
+
+/** Подробности `quote_changed`, как их прислал сервер — обе пары. */
+export interface QuoteChange {
+  field: "price" | "duration_minutes";
+  quoted: string | number;
+  applied: string | number;
+}
+
+/** Разобрать `ApiError.details` в {@link QuoteChange}; `null` — не тот отказ. */
+export function quoteChangeOf(e: ApiError): QuoteChange | null {
+  if (e.slug !== QUOTE_CHANGED_SLUG) return null;
+  const d = e.details ?? {};
+  const field = d.field;
+  if (field !== "price" && field !== "duration_minutes") return null;
+  const quoted = d.quoted;
+  const applied = d.applied;
+  const ok = (v: unknown): v is string | number => typeof v === "string" || typeof v === "number";
+  if (!ok(quoted) || !ok(applied)) return null;
+  return { field, quoted, applied };
 }
 export interface BookingCreateResponse {
   booking: CreatedBooking;
