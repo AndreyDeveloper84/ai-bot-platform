@@ -56,6 +56,7 @@ import {
   SOURCE_FAILURE_TEXT,
   absenceFrame,
   SURFACE_AVAILABLE_SERVICES,
+  SURFACE_NEARBY,
 } from "../lib/recommendation-absence";
 import { StateError } from "../components/StateError";
 import { useOnline } from "../hooks/useOnline";
@@ -66,6 +67,15 @@ import {
   type CatalogBrowseData,
 } from "../lib/customer-booking";
 import { closeApp, maxBridge } from "../lib/max-sdk";
+import {
+  NEARBY_BUTTON,
+  NEARBY_DENIED,
+  NEARBY_EXPLANATION,
+  NEARBY_LOCATING,
+  hasKnownDistance,
+  locateOnce,
+} from "../lib/nearby";
+import { fetchMasters } from "../lib/api";
 import { resolveCatalogEmpty } from "../lib/customer-catalog-empty";
 import { backTo } from "../lib/screen-back";
 
@@ -134,6 +144,29 @@ export function CustomerCatalogScreen() {
    */
   const picksOutcome = state.kind === "ok" ? state.data.picksOutcome : "UNAVAILABLE";
   const [retryingPicks, setRetryingPicks] = useState(false);
+
+  // DRF-1707 / D3 — «Показать рядом со мной». Координаты не хранятся:
+  // они уходят одним запросом за мастерами и забываются; в состоянии
+  // экрана остаётся только исход («идёт» / «не удалось»).
+  const [nearby, setNearby] = useState<"idle" | "locating" | "denied">("idle");
+  const showNearby = useCallback(async () => {
+    if (state.kind !== "ok" || nearby === "locating") return;
+    setNearby("locating");
+    const coords = await locateOnce();
+    if (!coords) {
+      setNearby("denied");
+      return;
+    }
+    try {
+      const { masters: withDistance } = await fetchMasters({ coords });
+      setState((prev) =>
+        prev.kind === "ok" ? { kind: "ok", data: { ...prev.data, masters: withDistance } } : prev,
+      );
+      setNearby("idle");
+    } catch {
+      setNearby("denied");
+    }
+  }, [state, nearby]);
 
   // «Попробовать снова» на отказе источника (DRF-1768): повторяется ТОЛЬКО
   // запрос подбора; услуги и мастера остаются как есть. Пока идёт повтор,
@@ -390,8 +423,29 @@ export function CustomerCatalogScreen() {
       {masters.length > 0 && (
         <section aria-labelledby="catalog-masters">
           <h2 id="catalog-masters" className="customer-catalog__section-title">
-            Мастера
+            {/* «Рядом с вами» — только когда в данных есть расстояние
+                (#1653): имя обещает сортировку по близости. */}
+            {hasKnownDistance(masters) ? SURFACE_NEARBY : "Мастера"}
           </h2>
+          {/* D3: пояснение стоит ДО вызова ОС, на самой кнопке. */}
+          {!hasKnownDistance(masters) && (
+            <div className="customer-catalog__nearby">
+              <p className="customer-catalog__nearby-note">{NEARBY_EXPLANATION}</p>
+              <button
+                type="button"
+                className="btn-secondary"
+                disabled={nearby === "locating"}
+                onClick={() => void showNearby()}
+              >
+                {nearby === "locating" ? NEARBY_LOCATING : NEARBY_BUTTON}
+              </button>
+              {nearby === "denied" && (
+                <p className="customer-catalog__nearby-note" role="status">
+                  {NEARBY_DENIED}
+                </p>
+              )}
+            </div>
+          )}
           {masters.map((master) => (
             <article key={master.id}>
               <MasterCard

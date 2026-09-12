@@ -93,7 +93,13 @@ class FakeAylaBooking:
         self._maybe_raise()
         return list(self.services_rows)
 
-    def get_masters(self, *, specialist_id: str | None = None) -> list[AylaMaster]:
+    def get_masters(
+        self,
+        *,
+        specialist_id: str | None = None,
+        lat: float | None = None,
+        lon: float | None = None,
+    ) -> list[AylaMaster]:
         self._maybe_raise()
         return list(self.masters_rows)
 
