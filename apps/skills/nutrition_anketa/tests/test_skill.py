@@ -822,6 +822,68 @@ class TestProposalCard:
         assert "Готово, рассчитала твои нормы" not in text
         assert "Дневных ориентиров пока не считаю" not in text
 
+    def test_fluids_reference_caption_is_printed_only_when_the_catalogue_names_it(self) -> None:
+        """Каталог #403: вода — справочник по полу, версия ``fluids`` рядом
+        с ``calories``. Подпись обязана сказать «не от веса», потому что
+        строкой выше стоит «от твоих данных: вес — 62 кг».
+
+        Три положения: (1) версия прислана — подпись есть и вода в
+        строках; (2) версии нет — подписи нет, хоть число воды и есть;
+        (3) неизвестная версия печатается как есть, как у калорий.
+        """
+        from apps.skills.nutrition_anketa.skill import _format_summary
+
+        with_fluids = _proposed_profile(
+            targets_method_versions={
+                "calories": "mifflin_st_jeor_v1",
+                "fluids": "adult_beverages_reference_v1",
+            },
+            raw={
+                "norms": {
+                    "daily_kcal": 1650,
+                    "daily_protein_g": 100,
+                    "daily_fat_g": 55,
+                    "daily_carbs_g": 190,
+                    "daily_water_ml": 2200,
+                },
+                "targets_provenance": {
+                    "source": "ayla_proposed",
+                    "method_versions": {
+                        "calories": "mifflin_st_jeor_v1",
+                        "fluids": "adult_beverages_reference_v1",
+                    },
+                },
+            },
+        )
+        text = _format_summary(with_fluids)
+        assert "💧 Вода: 2200 мл" in text
+        assert "Считала по методике Миффлин — Сан Жеор, версия 1 от твоих данных:" in text
+        assert (
+            "Вода — справочный ориентир по выпитой жидкости для взрослых по полу "
+            "(2200 мл женщине, 3000 мл мужчине), не расчёт от веса и активности."
+        ) in text
+        # Подпись стоит ПОСЛЕ строки методики и ДО оговорки о предложении.
+        assert (
+            text.index("от твоих данных")
+            < text.index("Вода — справочный")
+            < text.index("пока ты его не подтвердишь")
+        )
+
+        without_version = _proposed_profile(
+            raw={"norms": {"daily_kcal": 1650, "daily_water_ml": 2100}},
+        )
+        text = _format_summary(without_version)
+        assert "💧 Вода: 2100 мл" in text  # число каталог прислал…
+        assert "Вода — справочный" not in text  # …а методику не назвал — подписи нет
+
+        unknown = _proposed_profile(
+            targets_method_versions={
+                "calories": "mifflin_st_jeor_v1",
+                "fluids": "adult_beverages_reference_v2",
+            },
+        )
+        assert "Вода — adult_beverages_reference_v2." in _format_summary(unknown)
+
     def test_confirm_chip_comes_first_only_for_a_proposal(self) -> None:
         from apps.skills.nutrition_anketa.skill import CB_CONFIRM_TARGETS, _post_anketa_chips
 
