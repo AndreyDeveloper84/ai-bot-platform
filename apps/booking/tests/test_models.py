@@ -153,4 +153,5 @@ class TestBookingReminder:
             "escalated",
             "failed",
             "stale_dropped",
+            "muted",
         }
