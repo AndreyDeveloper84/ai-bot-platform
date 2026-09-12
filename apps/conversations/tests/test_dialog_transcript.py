@@ -191,10 +191,13 @@ class TestMasksAndListing:
             content="мой номер +7 927 123-45-67, почта ivan@example.com",
         )
         text = _run("--conv", str(conversation.id))
+        # Присутствие раньше отсутствия: реплика напечатана, и на месте
+        # номера и почты стоят плейсхолдеры редактора.
+        assert "мой номер [PHONE], почта [EMAIL]" in text
         assert "123-45-67" not in text
         assert "ivan@example.com" not in text
-        assert str(conversation.bot_user_id) not in text
         assert short_hash(conversation.bot_user_id) in text
+        assert str(conversation.bot_user_id) not in text
 
     def test_list_shows_the_dialog_with_counts(self, monkeypatch):
         conversation = _owner_dialog(monkeypatch)
