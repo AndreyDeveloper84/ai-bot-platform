@@ -43,6 +43,7 @@ from apps.tenancy.onboarding import (
     ConnectError,
     ConnectPending,
     assess_salon,
+    connect_preflight,
     connect_salon,
     verify_salon_masters,
 )
@@ -440,6 +441,11 @@ class TenantAdmin(AylaAdminMedia, admin.ModelAdmin):
 
         verify_of = request.POST.get(self.VERIFY_FIELD) if request.method == "POST" else None
 
+        # DRF-1613: невозможность подключения называется ДО формы, по факту
+        # из настроек, а не после нажатия. Верификацию (``verify_of``) это
+        # не гейтит — токен ей не нужен.
+        preflight = connect_preflight()
+
         form = SalonConnectForm(request.POST if verify_of is None else None)
         result = None
         error = None
@@ -466,6 +472,10 @@ class TenantAdmin(AylaAdminMedia, admin.ModelAdmin):
                 )
             else:
                 verified = verify_salon_masters(salon, user=request.user)
+        elif request.method == "POST" and not preflight.ok:
+            # Кнопки на экране нет, но POST руками возможен: тот же факт,
+            # тот же текст, в каталог не ходим, строки нет.
+            pass
         elif request.method == "POST" and form.is_valid():
             try:
                 result = connect_salon(
@@ -510,6 +520,7 @@ class TenantAdmin(AylaAdminMedia, admin.ModelAdmin):
             "verify_field": self.VERIFY_FIELD,
             "error": error,
             "pending": pending,
+            "preflight": preflight,
             "opts": self.model._meta,  # noqa: SLF001 — admin chrome API
         }
         return TemplateResponse(request, "admin/tenancy/tenant/connect.html", context)

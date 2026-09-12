@@ -131,14 +131,31 @@
   {% endif %}
 
   {% if not salon %}
-    <form method="post" novalidate>
-      {% csrf_token %}
-      <fieldset class="module aligned">
-        {{ form.as_p }}
-      </fieldset>
-      <div class="submit-row">
-        <input type="submit" value="Подключить и проверить исход" class="default">
+    {% if not preflight.ok %}
+      {# DRF-1613 — факт из настроек, известный до нажатия. Форма не      #}
+      {# показывается: заполнять три поля ради заведомого SETUP_PENDING   #}
+      {# незачем. Код причины тот же, что был бы в SETUP_PENDING.          #}
+      <div class="messagelist">
+        <div class="warning">
+          Подключение сейчас невозможно (<code>{{ preflight.reason }}</code>):
+          {{ preflight.label }}.
+        </div>
       </div>
-    </form>
+      <p>
+        Уже подключённые салоны от этого не зависят: их настройки и
+        верификация мастеров — на карточках салонов в
+        <a href="{% url 'admin:tenancy_tenant_changelist' %}">списке</a>.
+      </p>
+    {% else %}
+      <form method="post" novalidate>
+        {% csrf_token %}
+        <fieldset class="module aligned">
+          {{ form.as_p }}
+        </fieldset>
+        <div class="submit-row">
+          <input type="submit" value="Подключить и проверить исход" class="default">
+        </div>
+      </form>
+    {% endif %}
   {% endif %}
 {% endblock %}
