@@ -92,7 +92,10 @@ class TestPricePattern:
         "text", ["2 недели", "в течение 3 дней", "Свежий вид", "Рядом с домом"]
     )
     def test_numbers_without_currency_are_not_prices(self, text: str) -> None:
-        assert not PRICE_RE.search(text)
+        # Присутствие рядом с отсутствием: тот же шаблон на цене срабатывает,
+        # а на числе без валюты — нет (иначе зеленел бы и сломанный шаблон).
+        assert PRICE_RE.search(f"{text} — 1500 ₽")
+        assert PRICE_RE.search(text) is None
 
 
 class TestViolationByRole:
