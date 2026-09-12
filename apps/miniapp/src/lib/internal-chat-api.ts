@@ -28,6 +28,7 @@
 
 import { ApiError } from "./api";
 import { applyDevBypassHeaders } from "./dev-bypass";
+import { applySalonChoiceHeader } from "./salon-choice";
 import { getInitData } from "./max-sdk";
 
 const INTERNAL_CHAT_API_BASE = "/api/v1/internal-chat";
@@ -42,6 +43,7 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   const headers = new Headers(init.headers);
   if (initData) headers.set("Authorization", `MaxInitData ${initData}`);
   applyDevBypassHeaders(headers);
+  applySalonChoiceHeader(headers);
   if (init.body && !headers.has("Content-Type")) {
     headers.set("Content-Type", "application/json");
   }

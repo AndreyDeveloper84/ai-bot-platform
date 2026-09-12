@@ -181,6 +181,13 @@ SOLO_DRAFT_MISSING = (
     "Регистрация не начата или устарела. Нажмите «Я работаю сам», чтобы начать заново."
 )
 
+#: DRF-1766 — a person with a role in several salons is asked, not guessed for.
+#: The tap comes back as ``cb:salon:choose:<tenant slug>``; the answer is kept
+#: per identity for the length of a conversation, not written anywhere.
+CB_SALON_CHOOSE_PREFIX = "cb:salon:choose:"
+SALON_CHOICE_PROMPT = "У вас есть роль в нескольких салонах. В каком вы сейчас?"
+SALON_CHOICE_TTL_SECONDS = 12 * 3600
+
 #: §122: регистрация НЕ завершается как «готово». Текст говорит ровно то,
 #: что произошло, и ровно то, чего ждать, — потому что произошло не всё.
 #:
@@ -577,10 +584,28 @@ def _handle_salon_event_inner(event: CanonicalEvent, trace_id: str | uuid.UUID |
        The tenant of the registry entry is not read on this path at all.
     """
 
-    from apps.identity.services.bot_user_resolver import resolve_working_bot_user
+    from apps.identity.services.bot_user_resolver import (
+        SalonChoiceRequired,
+        resolve_working_bot_user,
+    )
     from apps.tenancy.context import tenant_scope
 
-    working = resolve_working_bot_user(event.channel_user_id, surface="salon_bot")
+    # DRF-1766: a tap on «which salon» is the answer to the question below —
+    # remember it for this identity, then resolve with it. A tap naming a
+    # salon the person has no role in is not honoured (the resolver checks),
+    # and the question is simply asked again.
+    chosen = _remembered_salon_choice(event)
+    if event.text.startswith(CB_SALON_CHOOSE_PREFIX):
+        chosen = event.text[len(CB_SALON_CHOOSE_PREFIX) :].strip() or None
+        _remember_salon_choice(event, chosen)
+
+    try:
+        working = resolve_working_bot_user(
+            event.channel_user_id, surface="salon_bot", chosen_slug=chosen
+        )
+    except SalonChoiceRequired as exc:
+        _ask_which_salon(event, exc.tenants)
+        return
     if working is not None:
         with tenant_scope(working.tenant):
             _serve(event, trace_id, tenant=working.tenant, bot_user=working)
@@ -592,6 +617,64 @@ def _handle_salon_event_inner(event: CanonicalEvent, trace_id: str | uuid.UUID |
     # here: a stranger's tenant is decided by the code they type, or by
     # «Я работаю сам» — never by the salon the entry happens to name.
     _serve_stranger(event, trace_id)
+
+
+def _salon_choice_key(event: CanonicalEvent) -> str:
+    return f"salon_choice:{event.channel}:{event.channel_user_id}"
+
+
+def _remembered_salon_choice(event: CanonicalEvent) -> str | None:
+    """The salon this identity chose earlier in the conversation, or ``None``."""
+
+    from django.core.cache import cache
+
+    try:
+        value = cache.get(_salon_choice_key(event))
+    except Exception:  # noqa: BLE001 — a cache outage means «ask again», never a crash
+        return None
+    return str(value) if value else None
+
+
+def _remember_salon_choice(event: CanonicalEvent, slug: str | None) -> None:
+    from django.core.cache import cache
+
+    try:
+        if slug:
+            cache.set(_salon_choice_key(event), slug, timeout=SALON_CHOICE_TTL_SECONDS)
+        else:
+            cache.delete(_salon_choice_key(event))
+    except Exception:  # noqa: BLE001
+        logger.warning(
+            "channels.max.salon.choice_cache_unavailable channel_user_id=%s", event.channel_user_id
+        )
+
+
+def _ask_which_salon(event: CanonicalEvent, tenants) -> None:
+    """One button per salon the person holds a role in, in the resolver's order (DRF-1766).
+
+    Answered as the salon bot — the one on ``max_salon`` — because the person
+    has not chosen a tenant yet and the bot does not belong to one.
+    """
+
+    from apps.channels.bot_registry import effective_registry, resolve_by_stream
+
+    entry = resolve_by_stream(SALON_STREAM, effective_registry())
+    if entry is None:
+        logger.error(
+            "channels.max.salon.no_salon_bot channel_user_id=%s — cannot ask which salon",
+            event.channel_user_id,
+        )
+        return
+    buttons = [
+        {"label": (t.name or t.slug), "callback": f"{CB_SALON_CHOOSE_PREFIX}{t.slug}"}
+        for t in tenants
+    ]
+    with bot_scope(entry):
+        _reply(
+            event,
+            SALON_CHOICE_PROMPT,
+            attachments=[outbound.make_inline_keyboard_attachment(buttons, columns=1)],
+        )
 
 
 def _serve(event: CanonicalEvent, trace_id: str | uuid.UUID | None, *, tenant, bot_user) -> None:
@@ -662,7 +745,10 @@ def _serve(event: CanonicalEvent, trace_id: str | uuid.UUID | None, *, tenant, b
             return
 
         # A button tap arrives as the callback payload in `text`.
-        if _is_button_tap(event.text):
+        if event.text.startswith(CB_SALON_CHOOSE_PREFIX):
+            # DRF-1766: the person just chose THIS salon — open with its menu.
+            _send_menu(event, role_ctx, tenant, entry)
+        elif _is_button_tap(event.text):
             _handle_button(event, role_ctx, bot_user, tenant, entry)
         else:
             _handle_talk(event, role_ctx, bot_user, tenant, entry)

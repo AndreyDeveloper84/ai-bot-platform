@@ -34,7 +34,12 @@ from django.http import HttpRequest, HttpResponse, JsonResponse
 from django.views.decorators.http import require_http_methods
 
 from apps.identity.models import BotUser
-from apps.identity.services.bot_user_resolver import is_staff_surface, resolve_working_bot_user
+from apps.identity.services.bot_user_resolver import (
+    SalonChoiceRequired,
+    is_staff_surface,
+    resolve_working_bot_user,
+    salon_choice_from,
+)
 from apps.identity.services.role_resolver import resolve_role
 from apps.miniapp_api.views import require_init_data
 
@@ -107,7 +112,23 @@ def me_view(request: HttpRequest) -> HttpResponse:
     bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
     verified = getattr(request, "verified_init_data", None)
     if verified is not None and is_staff_surface(verified):
-        working = resolve_working_bot_user(verified.user_id, surface="me")
+        try:
+            working = resolve_working_bot_user(
+                verified.user_id, surface="me", chosen_slug=salon_choice_from(request)
+            )
+        except SalonChoiceRequired as exc:
+            # DRF-1766: the Mini App renders «В каком салоне вы сейчас?» and
+            # repeats the request with X-Salon-Choice.
+            return JsonResponse(
+                {
+                    "error": "salon_choice_required",
+                    "detail": "this account holds a role in several salons — choose one",
+                    "details": {
+                        "tenants": [{"slug": t.slug, "name": t.name or t.slug} for t in exc.tenants]
+                    },
+                },
+                status=409,
+            )
         if working is not None:
             bot_user = working
     tenant = bot_user.tenant

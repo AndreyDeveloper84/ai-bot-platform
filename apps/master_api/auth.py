@@ -47,7 +47,11 @@ from django.utils import timezone
 from apps.catalog.master_state import is_enrolled
 from apps.catalog.models import CatalogMaster
 from apps.identity.models import BotUser
-from apps.identity.services.bot_user_resolver import resolve_bot_user
+from apps.identity.services.bot_user_resolver import (
+    SalonChoiceRequired,
+    resolve_bot_user,
+    salon_choice_from,
+)
 from apps.miniapp_api.auth import (
     InitDataBadSignature,
     InitDataError,
@@ -290,7 +294,22 @@ def _error(slug: str, detail: str, status: int) -> JsonResponse:
     return JsonResponse({"error": slug, "detail": detail}, status=status)
 
 
-def _resolve_bot_user(verified) -> BotUser | None:
+def _salon_choice_response(exc: "SalonChoiceRequired") -> JsonResponse:
+    """409 — the identity holds a role in several salons; the person chooses (DRF-1766)."""
+
+    return JsonResponse(
+        {
+            "error": "salon_choice_required",
+            "detail": "this account holds a role in several salons — choose one",
+            "details": {
+                "tenants": [{"slug": t.slug, "name": t.name or t.slug} for t in exc.tenants]
+            },
+        },
+        status=409,
+    )
+
+
+def _resolve_bot_user(verified, *, chosen_slug: str | None = None) -> BotUser | None:
     """Find the BotUser this Mini App request belongs to (DRF-1083).
 
     The rule itself now lives in
@@ -301,7 +320,7 @@ def _resolve_bot_user(verified) -> BotUser | None:
     point so call sites and tests keep their name.
     """
 
-    return resolve_bot_user(verified, surface="master_api")
+    return resolve_bot_user(verified, surface="master_api", chosen_slug=chosen_slug)
 
 
 def require_master_init_data(
@@ -350,7 +369,12 @@ def require_master_init_data(
             except InitDataError as exc:
                 return _error("unauthorized", str(exc), 401)
 
-            bot_user = _resolve_bot_user(verified)
+            try:
+                bot_user = _resolve_bot_user(verified, chosen_slug=salon_choice_from(request))
+            except SalonChoiceRequired as exc:
+                # DRF-1766: several salons, the person decides — the Mini App
+                # shows the chooser and repeats with X-Salon-Choice.
+                return _salon_choice_response(exc)
         if bot_user is None:
             return _error(
                 "user_not_registered",
@@ -452,7 +476,12 @@ def require_init_data_only(
             except InitDataError as exc:
                 return _error("unauthorized", str(exc), 401)
 
-            bot_user = _resolve_bot_user(verified)
+            try:
+                bot_user = _resolve_bot_user(verified, chosen_slug=salon_choice_from(request))
+            except SalonChoiceRequired as exc:
+                # DRF-1766: several salons, the person decides — the Mini App
+                # shows the chooser and repeats with X-Salon-Choice.
+                return _salon_choice_response(exc)
         if bot_user is None:
             return _error(
                 "user_not_registered",

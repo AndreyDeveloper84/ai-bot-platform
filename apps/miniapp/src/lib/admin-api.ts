@@ -18,6 +18,7 @@
 import { getInitData } from "./max-sdk";
 import { ApiError } from "./api";
 import { applyDevBypassHeaders } from "./dev-bypass";
+import { applySalonChoiceHeader } from "./salon-choice";
 
 interface ErrorBody {
   error: string;
@@ -48,6 +49,7 @@ async function requestWithResponse<T>(
   const headers = new Headers(init.headers);
   if (initData) headers.set("Authorization", `MaxInitData ${initData}`);
   applyDevBypassHeaders(headers);
+  applySalonChoiceHeader(headers);
   if (init.body && !headers.has("Content-Type")) {
     headers.set("Content-Type", "application/json");
   }
@@ -241,6 +243,7 @@ export const createSalonBooking = async (
   const headers = new Headers({ "Content-Type": "application/json" });
   if (initData) headers.set("Authorization", `MaxInitData ${initData}`);
   applyDevBypassHeaders(headers);
+  applySalonChoiceHeader(headers);
 
   let res: Response;
   try {
@@ -306,6 +309,7 @@ export const cancelSalonBooking = async (
   const headers = new Headers({ "Content-Type": "application/json" });
   if (initData) headers.set("Authorization", `MaxInitData ${initData}`);
   applyDevBypassHeaders(headers);
+  applySalonChoiceHeader(headers);
 
   let res: Response;
   try {
@@ -376,6 +380,7 @@ export const completeSalonBooking = async (
   const headers = new Headers({ "Content-Type": "application/json" });
   if (initData) headers.set("Authorization", `MaxInitData ${initData}`);
   applyDevBypassHeaders(headers);
+  applySalonChoiceHeader(headers);
 
   let res: Response;
   try {
@@ -416,6 +421,7 @@ export const rescheduleSalonBooking = async (
   const headers = new Headers({ "Content-Type": "application/json" });
   if (initData) headers.set("Authorization", `MaxInitData ${initData}`);
   applyDevBypassHeaders(headers);
+  applySalonChoiceHeader(headers);
 
   let res: Response;
   try {
@@ -1410,6 +1416,7 @@ export const uploadMasterPhoto = async (
   const headers = new Headers();
   if (initData) headers.set("Authorization", `MaxInitData ${initData}`);
   applyDevBypassHeaders(headers);
+  applySalonChoiceHeader(headers);
   // No Content-Type — let fetch set the multipart boundary.
   const res = await fetch(`/api/v1/admin/masters/${masterId}/photo/`, {
     method: "POST",
@@ -1605,6 +1612,7 @@ export const patchServicesMapping = async (
   headers.set("Content-Type", "application/json");
   if (initData) headers.set("Authorization", `MaxInitData ${initData}`);
   applyDevBypassHeaders(headers);
+  applySalonChoiceHeader(headers);
 
   const res = await fetch("/api/v1/admin/services-mapping/bulk/", {
     method: "POST",
@@ -1727,6 +1735,7 @@ async function decisionFetch(
   headers.set("Content-Type", "application/json");
   if (initData) headers.set("Authorization", `MaxInitData ${initData}`);
   applyDevBypassHeaders(headers);
+  applySalonChoiceHeader(headers);
 
   const res = await fetch(url, {
     method: "POST",

@@ -77,7 +77,36 @@ def resolve_tenant_slug_for_init_data(verified: Any) -> str:
     return getattr(settings, "MAX_BOT_TENANT_SLUG", "") or ""
 
 
-def resolve_working_bot_user(channel_user_id: str, *, surface: str = "miniapp") -> BotUser | None:
+#: ``X-Salon-Choice: <tenant slug>`` — the Mini App's answer to
+#: :class:`SalonChoiceRequired`, remembered client-side for the session.
+SALON_CHOICE_HEADER = "HTTP_X_SALON_CHOICE"
+
+
+class SalonChoiceRequired(Exception):
+    """This identity holds a working role in several tenants — a person must choose (DRF-1766).
+
+    Owner (DRF-1705): «выбор салона, не страж». Carries the candidate tenants
+    in a stable order (oldest first) so every surface shows the same list;
+    the answer comes back as ``X-Salon-Choice`` (Mini App) or a button tap
+    the bot remembers per identity, and is honoured ONLY when it names one
+    of these tenants — a header cannot pick a salon the person has no role in.
+    """
+
+    def __init__(self, tenants: list) -> None:
+        self.tenants = tenants
+        super().__init__("salon choice required: " + ", ".join(t.slug for t in tenants))
+
+
+def salon_choice_from(request) -> str | None:
+    """The slug named in ``X-Salon-Choice``, or ``None``. Read only; validated by the resolver."""
+
+    value = (request.META.get(SALON_CHOICE_HEADER, "") or "").strip()
+    return value or None
+
+
+def resolve_working_bot_user(
+    channel_user_id: str, *, surface: str = "miniapp", chosen_slug: str | None = None
+) -> BotUser | None:
     """The row of this MAX identity that carries a working role, or ``None``.
 
     «Working» is what :func:`apps.identity.services.role_resolver.resolve_role`
@@ -98,11 +127,14 @@ def resolve_working_bot_user(channel_user_id: str, *, surface: str = "miniapp") 
       signing-bot rule; nothing about a plain customer changes.
     * the single working row — regardless of which bot signed.
     * with several working rows (0 identities on the pilot, 12.09.2026):
-      the row whose tenant is the oldest, ``pk`` as tie-break — and a
-      WARNING with every candidate. Deterministic on purpose and NOT by
-      ``last_seen`` (DRF-1653: a race with the clock). The real answer
-      for this case is a salon chooser (DRF-1766); until it exists the
-      WARNING is the trigger to build it.
+      the one whose tenant ``chosen_slug`` names, when the caller carries a
+      choice — otherwise :class:`SalonChoiceRequired` with the candidates,
+      oldest tenant first (DRF-1766). Never a silent pick: until this slice
+      the oldest tenant won with a WARNING, which decided for the person
+      exactly what the owner ruled a person decides.
+
+    Raises:
+        SalonChoiceRequired: several working rows and no valid choice.
     """
 
     if not channel_user_id:
@@ -128,15 +160,24 @@ def resolve_working_bot_user(channel_user_id: str, *, surface: str = "miniapp") 
         return working[0]
 
     working.sort(key=lambda row: (row.tenant.created_at, str(row.pk)))
-    logger.warning(
-        "%s.auth.several_working_tenants channel_user_id=%s tenants=%s picked=%s — "
-        "salon chooser not built yet (DRF-1766)",
+    if chosen_slug:
+        for row in working:
+            if row.tenant.slug == chosen_slug:
+                return row
+        logger.info(
+            "%s.auth.salon_choice_not_working channel_user_id=%s chosen=%s tenants=%s",
+            surface,
+            channel_user_id,
+            chosen_slug,
+            [row.tenant.slug for row in working],
+        )
+    logger.info(
+        "%s.auth.salon_choice_required channel_user_id=%s tenants=%s",
         surface,
         channel_user_id,
         [row.tenant.slug for row in working],
-        working[0].tenant.slug,
     )
-    return working[0]
+    raise SalonChoiceRequired([row.tenant for row in working])
 
 
 def is_staff_surface(verified: Any) -> bool:
@@ -158,8 +199,13 @@ def is_staff_surface(verified: Any) -> bool:
     return entry is not None and entry.stream == SALON_STREAM
 
 
-def resolve_bot_user(verified: Any, *, surface: str = "miniapp") -> BotUser | None:
+def resolve_bot_user(
+    verified: Any, *, surface: str = "miniapp", chosen_slug: str | None = None
+) -> BotUser | None:
     """Find the BotUser this request belongs to, or ``None``.
+
+    Raises :class:`SalonChoiceRequired` when the identity has several
+    working rows and ``chosen_slug`` names none of them (DRF-1766).
 
     ``surface`` only labels the log line — the resolution rule is
     identical for every Mini App surface, and that is the point.
@@ -169,7 +215,7 @@ def resolve_bot_user(verified: Any, *, surface: str = "miniapp") -> BotUser | No
     serves both audiences and applies it only behind :func:`is_staff_surface`.
     """
 
-    working = resolve_working_bot_user(verified.user_id, surface=surface)
+    working = resolve_working_bot_user(verified.user_id, surface=surface, chosen_slug=chosen_slug)
     if working is not None:
         return working
 
@@ -212,8 +258,11 @@ def resolve_bot_user(verified: Any, *, surface: str = "miniapp") -> BotUser | No
 
 
 __all__ = [
+    "SALON_CHOICE_HEADER",
+    "SalonChoiceRequired",
     "is_staff_surface",
     "resolve_bot_user",
     "resolve_tenant_slug_for_init_data",
     "resolve_working_bot_user",
+    "salon_choice_from",
 ]

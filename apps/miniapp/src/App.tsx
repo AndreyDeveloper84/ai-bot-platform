@@ -43,6 +43,11 @@ import { Link, Navigate, Route, Routes, useLocation, useNavigate } from "react-r
 
 import { ApiError } from "./lib/api";
 import { getMe, type MeResponse } from "./lib/admin-api";
+import {
+  type SalonChoiceTenant,
+  salonChoiceTenantsFrom,
+  setSalonChoice,
+} from "./lib/salon-choice";
 import { adminLandingPath, isAdminTabAllowed } from "./lib/admin-tabs";
 import { canOpenSalonPilot } from "./lib/salon-pilot";
 import { getStartPayload, parseStartRoute } from "./lib/max-sdk";
@@ -119,12 +124,14 @@ import { SoloSetupGate } from "./components/SoloSetupGate";
 import { RescheduleScreen } from "./screens/RescheduleScreen";
 import { ServiceDetailScreen } from "./screens/ServiceDetailScreen";
 
-type BootStatus = "loading" | "ready" | "error" | "no_role";
+type BootStatus = "loading" | "ready" | "error" | "no_role" | "choose_salon";
 
 interface BootState {
   status: BootStatus;
   me: MeResponse | null;
   err: unknown;
+  /** DRF-1766: салоны на выбор, когда сервер ответил `salon_choice_required`. */
+  salons?: SalonChoiceTenant[];
 }
 
 const INITIAL: BootState = { status: "loading", me: null, err: null };
@@ -146,6 +153,48 @@ function SplashScreen() {
         <p style={{ color: "var(--c-text-secondary)" }}>
           Загружаем рабочее место…
         </p>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * «В каком салоне вы сейчас?» — DRF-1766 (срез 5 DRF-1705). Показывается,
+ * когда `/api/v1/me` ответил `409 salon_choice_required`: у этой личности
+ * рабочая роль в нескольких салонах, и решение владельца — спросить, а не
+ * выбрать за человека. Выбор живёт на сессию и уходит заголовком
+ * `X-Salon-Choice` на каждый запрос; сервер принимает его только среди
+ * салонов из этого списка.
+ */
+function SalonChooserScreen({
+  salons,
+  onChoose,
+}: {
+  salons: SalonChoiceTenant[];
+  onChoose: (slug: string) => void;
+}) {
+  return (
+    <div className="screen">
+      <h1 className="screen__title">В каком салоне вы сейчас?</h1>
+      <p>У вас есть роль в нескольких салонах. Выберите, с каким работать сейчас.</p>
+      <div
+        style={{
+          display: "flex",
+          flexDirection: "column",
+          gap: "var(--s-2)",
+          marginTop: "var(--s-4)",
+        }}
+      >
+        {salons.map((t) => (
+          <button
+            key={t.slug}
+            type="button"
+            className="btn-primary"
+            onClick={() => onChoose(t.slug)}
+          >
+            {t.name}
+          </button>
+        ))}
       </div>
     </div>
   );
@@ -1613,6 +1662,13 @@ export function App() {
         setBoot({ status: "no_role", me: null, err: e });
         return;
       }
+      const salons = salonChoiceTenantsFrom(e);
+      if (salons) {
+        // DRF-1766: several salons — ask, then boot again with the choice.
+        setSalonChoice(null);
+        setBoot({ status: "choose_salon", me: null, err: e, salons });
+        return;
+      }
       // Any other failure — log and fall back to customer surface
       // with a retry banner. This keeps single-tenant Phase 0 demos
       // resilient when the /me endpoint can't be reached.
@@ -1669,6 +1725,17 @@ export function App() {
     if (boot.status === "loading") return <SplashScreen />;
     if (boot.status === "no_role") {
       return <NoRoleScreen onRetry={() => void loadMe()} />;
+    }
+    if (boot.status === "choose_salon" && boot.salons) {
+      return (
+        <SalonChooserScreen
+          salons={boot.salons}
+          onChoose={(slug) => {
+            setSalonChoice(slug);
+            void loadMe();
+          }}
+        />
+      );
     }
 
     if (boot.status === "ready" && boot.me) {

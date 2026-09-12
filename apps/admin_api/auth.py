@@ -51,8 +51,10 @@ from typing import Any, Callable
 from django.http import HttpRequest, HttpResponse, JsonResponse
 
 from apps.identity.services.bot_user_resolver import (
+    SalonChoiceRequired,
     resolve_bot_user,
     resolve_tenant_slug_for_init_data,
+    salon_choice_from,
 )
 from apps.identity.services.role_resolver import RoleContext, resolve_role
 from apps.miniapp_api.auth import (
@@ -159,7 +161,22 @@ def _gate(
                 500,
             )
 
-        bot_user = resolve_bot_user(verified, surface="admin_api")
+        try:
+            bot_user = resolve_bot_user(
+                verified, surface="admin_api", chosen_slug=salon_choice_from(request)
+            )
+        except SalonChoiceRequired as exc:
+            # DRF-1766: several salons — the admin Mini App shows the chooser.
+            return JsonResponse(
+                {
+                    "error": "salon_choice_required",
+                    "detail": "this account holds a role in several salons — choose one",
+                    "details": {
+                        "tenants": [{"slug": t.slug, "name": t.name or t.slug} for t in exc.tenants]
+                    },
+                },
+                status=409,
+            )
         if bot_user is None:
             return _error(
                 "user_not_registered",
