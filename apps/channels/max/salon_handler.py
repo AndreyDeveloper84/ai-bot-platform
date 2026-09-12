@@ -130,6 +130,57 @@ SOLO_OFFER = (
 
 SOLO_OFFER_BUTTON = "Я работаю сам"
 
+# ─── Регистрация соло: имя → город → сводка → «Создать мой профиль» (DRF-1793, M1) ───
+#
+# Слово владельца 12.09 (PROMPT §12): кабинет не создаётся до явного
+# подтверждения; имя из MAX — prefill, который можно исправить; город —
+# из контролируемого списка, не свободный текст. Все шаги — callback-кнопки
+# с префиксом ``cb:solo:``; единственный свободный ввод — имя, и его дверь
+# принимает только когда у личности есть черновик на шаге «имя».
+SOLO_NAME_KEEP_CALLBACK = "cb:solo:name:keep"
+SOLO_NAME_EDIT_CALLBACK = "cb:solo:name:edit"
+SOLO_CITY_CALLBACK_PREFIX = "cb:solo:city:"
+SOLO_CONFIRM_CALLBACK = "cb:solo:confirm"
+SOLO_CANCEL_CALLBACK = "cb:solo:cancel"
+
+SOLO_ASK_NAME = (
+    "Заведём ваш кабинет. Сначала — имя, которое увидят клиенты.\n\nНапишите его сообщением."
+)
+SOLO_ASK_NAME_WITH_PREFILL = (
+    "Заведём ваш кабинет. Сначала — имя, которое увидят клиенты.\n\n"
+    "Оставить «{name}» — нажмите кнопку, или напишите другое имя сообщением."
+)
+SOLO_NAME_KEEP_BUTTON = "Оставить «{name}»"
+SOLO_NAME_REJECTED = {
+    "empty": "Имя пустое. Напишите имя, которое увидят клиенты.",
+    "too_short": "Слишком коротко. Напишите имя хотя бы из двух букв.",
+    "too_long": "Слишком длинно — до 80 символов.",
+    "no_letters": "В имени нужны буквы. Напишите имя, которое увидят клиенты.",
+    "looks_like_a_command": "Это похоже на команду, а не на имя. Напишите имя сообщением.",
+}
+SOLO_ASK_CITY = "В каком городе вы принимаете клиентов? Выберите из списка."
+SOLO_NO_CITIES = (
+    "Пока не задан список городов, в которых работает Ayla, — регистрацию "
+    "продолжить нельзя. Напишите в поддержку Ayla."
+)
+SOLO_CITY_UNKNOWN = "Такого города в списке нет. Выберите город кнопкой."
+SOLO_SUMMARY = (
+    "Проверьте:\n\n"
+    "Имя: {name}\n"
+    "Город: {city}\n\n"
+    "Нажмите «Создать мой профиль» — и кабинет будет создан. "
+    "До этого ничего не создаётся."
+)
+SOLO_CONFIRM_BUTTON = "Создать мой профиль"
+SOLO_EDIT_NAME_BUTTON = "Изменить имя"
+SOLO_CANCEL_BUTTON = "Отмена"
+SOLO_CANCELLED = "Хорошо, ничего не создано. Если передумаете — нажмите «Я работаю сам»."
+#: Кнопка без черновика (протух, отменён, или нажата не по порядку) —
+#: не гадать, а начать заново.
+SOLO_DRAFT_MISSING = (
+    "Регистрация не начата или устарела. Нажмите «Я работаю сам», чтобы начать заново."
+)
+
 #: §122: регистрация НЕ завершается как «готово». Текст говорит ровно то,
 #: что произошло, и ровно то, чего ждать, — потому что произошло не всё.
 #:
@@ -665,14 +716,18 @@ def _serve_stranger(event: CanonicalEvent, trace_id: str | uuid.UUID | None) -> 
         # read as an invite code — it would burn a rate-limit attempt for a
         # message they did not type.
         if _is_button_tap(event.text):
-            if event.text == SOLO_REGISTER_CALLBACK:
-                _register_solo_provider(event, entry=entry)
+            if _solo_registration_step(event, entry=entry):
                 return
             _reply(event, ASK_FOR_CODE)
             return
 
         code = _extract_code(event.text)
         if code is None:
+            # DRF-1793: свободный текст — это имя ТОЛЬКО когда у личности
+            # есть живой черновик на шаге «имя». Код всегда старше: тот, кто
+            # прислал AYLA-XXXX посреди регистрации, хотел войти по коду.
+            if _solo_registration_takes_name(event):
+                return
             _ask_for_code_with_solo_offer(event, entry=entry)
             return
 
@@ -843,8 +898,211 @@ def _ask_for_code_with_solo_offer(event: CanonicalEvent, *, entry=None) -> None:
     _reply(event, ASK_FOR_CODE + SOLO_OFFER, attachments=[attachment])
 
 
-def _register_solo_provider(event: CanonicalEvent, *, entry=None) -> None:
+# ─── DRF-1793 (M1): диалог регистрации соло — имя → город → сводка → подтверждение ───
+
+
+def _solo_registration_step(event: CanonicalEvent, *, entry=None) -> bool:
+    """Обработать нажатие ``cb:solo:*``; ``True`` — нажатие было нашим и отвечено.
+
+    Порядок шагов держит черновик (``SoloRegistrationDraft``), не память
+    процесса: кнопка без черновика или не на своём шаге — «начните заново»,
+    а не догадка. Кабинет создаётся ровно в одной ветке — подтверждении.
+    """
+
+    from apps.identity.services import solo_registration_draft as drafts
+
+    text = event.text
+    identity = _Identity.of(event)
+    if text == SOLO_REGISTER_CALLBACK:
+        _start_solo_registration(event, identity, entry=entry)
+        return True
+    if not text.startswith("cb:solo:"):
+        return False
+
+    draft = drafts.get_draft(channel=identity.channel, channel_user_id=identity.channel_user_id)
+    if draft is None:
+        _reply(event, SOLO_DRAFT_MISSING, attachments=_solo_offer_attachments())
+        return True
+
+    if text == SOLO_CANCEL_CALLBACK:
+        drafts.discard_draft(draft)
+        _reply(event, SOLO_CANCELLED, attachments=_solo_offer_attachments())
+        return True
+    if text == SOLO_NAME_KEEP_CALLBACK:
+        if draft.step != drafts.SoloRegistrationDraft.Step.NAME or not draft.display_name:
+            _reply(event, SOLO_DRAFT_MISSING, attachments=_solo_offer_attachments())
+            return True
+        drafts.accept_name(draft, draft.display_name)
+        _ask_solo_city(event, draft)
+        return True
+    if text == SOLO_NAME_EDIT_CALLBACK:
+        drafts.back_to_name(draft)
+        _ask_solo_name(event, draft)
+        return True
+    if text.startswith(SOLO_CITY_CALLBACK_PREFIX):
+        if draft.step not in (
+            drafts.SoloRegistrationDraft.Step.CITY,
+            drafts.SoloRegistrationDraft.Step.CONFIRM,
+        ):
+            _reply(event, SOLO_DRAFT_MISSING, attachments=_solo_offer_attachments())
+            return True
+        try:
+            drafts.accept_city(draft, text[len(SOLO_CITY_CALLBACK_PREFIX) :])
+        except drafts.CityRejected as exc:
+            if exc.reason == "no_cities_configured":
+                logger.error("channels.max.salon.solo_no_cities_configured")
+                _reply(event, SOLO_NO_CITIES)
+            else:
+                _ask_solo_city(event, draft, preface=SOLO_CITY_UNKNOWN)
+            return True
+        _show_solo_summary(event, draft)
+        return True
+    if text == SOLO_CONFIRM_CALLBACK:
+        if not drafts.is_confirmable(draft):
+            _reply(event, SOLO_DRAFT_MISSING, attachments=_solo_offer_attachments())
+            return True
+        _register_solo_provider(
+            event, entry=entry, display_name=draft.display_name, city=draft.city
+        )
+        drafts.discard_draft(draft)
+        return True
+    return False
+
+
+def _solo_registration_takes_name(event: CanonicalEvent) -> bool:
+    """Свободный текст незнакомца — это имя, если черновик ждёт имя. Иначе ``False``."""
+
+    from apps.identity.services import solo_registration_draft as drafts
+
+    identity = _Identity.of(event)
+    draft = drafts.get_draft(channel=identity.channel, channel_user_id=identity.channel_user_id)
+    if draft is None or draft.step != drafts.SoloRegistrationDraft.Step.NAME:
+        return False
+    try:
+        drafts.accept_name(draft, event.text)
+    except drafts.NameRejected as exc:
+        _reply(event, SOLO_NAME_REJECTED[exc.reason], attachments=_name_keep_attachments(draft))
+        return True
+    _ask_solo_city(event, draft)
+    return True
+
+
+def _start_solo_registration(event: CanonicalEvent, identity: "_Identity", *, entry=None) -> None:
+    """«Я работаю сам»: те же отказы, что у предложения, иначе — черновик и вопрос об имени."""
+
+    from apps.identity.services import solo_registration_draft as drafts
+
+    if _has_a_master_card_anywhere(identity):
+        _reply(event, ASK_FOR_CODE)
+        return
+    if _already_has_a_solo_workspace(identity):
+        if _solo_identity_rejected(identity):
+            from apps.identity.services.solo_identity_link import REJECTED_RECOVERY_TEXT
+
+            _reply(event, REJECTED_RECOVERY_TEXT)
+            return
+        _reply(event, SOLO_ALREADY_REGISTERED, attachments=_open_cabinet_attachments(entry))
+        return
+
+    draft = drafts.start_draft(
+        channel=identity.channel,
+        channel_user_id=identity.channel_user_id,
+        chat_id=identity.chat_id,
+        prefill_name=identity.display_name,
+    )
+    emit(
+        "channels.max.salon.solo_registration_started",
+        payload={"channel": identity.channel, "channel_user_id": str(identity.channel_user_id)},
+    )
+    _ask_solo_name(event, draft)
+
+
+def _ask_solo_name(event: CanonicalEvent, draft) -> None:
+    if draft.display_name:
+        _reply(
+            event,
+            SOLO_ASK_NAME_WITH_PREFILL.format(name=draft.display_name),
+            attachments=_name_keep_attachments(draft),
+        )
+        return
+    _reply(event, SOLO_ASK_NAME, attachments=_cancel_attachments())
+
+
+def _ask_solo_city(event: CanonicalEvent, draft, *, preface: str = "") -> None:
+    from apps.channels.max import outbound
+    from apps.identity.services import solo_registration_draft as drafts
+
+    options = drafts.city_options()
+    if not options:
+        logger.error("channels.max.salon.solo_no_cities_configured")
+        _reply(event, SOLO_NO_CITIES)
+        return
+    buttons = [
+        {"label": option.name, "callback": f"{SOLO_CITY_CALLBACK_PREFIX}{option.code}"}
+        for option in options
+    ] + [{"label": SOLO_CANCEL_BUTTON, "callback": SOLO_CANCEL_CALLBACK}]
+    text = f"{preface}\n\n{SOLO_ASK_CITY}" if preface else SOLO_ASK_CITY
+    _reply(event, text, attachments=[outbound.make_inline_keyboard_attachment(buttons)])
+
+
+def _show_solo_summary(event: CanonicalEvent, draft) -> None:
+    from apps.channels.max import outbound
+
+    buttons = [
+        {"label": SOLO_CONFIRM_BUTTON, "callback": SOLO_CONFIRM_CALLBACK},
+        {"label": SOLO_EDIT_NAME_BUTTON, "callback": SOLO_NAME_EDIT_CALLBACK},
+        {"label": SOLO_CANCEL_BUTTON, "callback": SOLO_CANCEL_CALLBACK},
+    ]
+    _reply(
+        event,
+        SOLO_SUMMARY.format(name=draft.display_name, city=draft.city),
+        attachments=[outbound.make_inline_keyboard_attachment(buttons)],
+    )
+
+
+def _name_keep_attachments(draft) -> list:
+    from apps.channels.max import outbound
+
+    buttons = []
+    if draft.display_name:
+        buttons.append(
+            {
+                "label": SOLO_NAME_KEEP_BUTTON.format(name=draft.display_name),
+                "callback": SOLO_NAME_KEEP_CALLBACK,
+            }
+        )
+    buttons.append({"label": SOLO_CANCEL_BUTTON, "callback": SOLO_CANCEL_CALLBACK})
+    return [outbound.make_inline_keyboard_attachment(buttons)]
+
+
+def _cancel_attachments() -> list:
+    from apps.channels.max import outbound
+
+    return [
+        outbound.make_inline_keyboard_attachment(
+            [{"label": SOLO_CANCEL_BUTTON, "callback": SOLO_CANCEL_CALLBACK}]
+        )
+    ]
+
+
+def _solo_offer_attachments() -> list:
+    from apps.channels.max import outbound
+
+    return [
+        outbound.make_inline_keyboard_attachment(
+            [{"label": SOLO_OFFER_BUTTON, "callback": SOLO_REGISTER_CALLBACK}]
+        )
+    ]
+
+
+def _register_solo_provider(
+    event: CanonicalEvent, *, entry=None, display_name: str | None = None, city: str = ""
+) -> None:
     """Завести кабинет соло-мастера и сказать правду о его состоянии.
+
+    DRF-1793: зовётся из подтверждения сводки — ``display_name`` и ``city``
+    приходят из черновика; без них (прямой вызов, прежние тесты) имя —
+    из события, город пустой.
 
     Правду — то есть `setup_state`, а не факт создания. §122: регистрация
     не завершается как «готово», пока человека не видно клиентам, и
@@ -867,8 +1125,9 @@ def _register_solo_provider(event: CanonicalEvent, *, entry=None) -> None:
         result = create_solo_provider(
             channel=identity.channel,
             channel_user_id=identity.channel_user_id,
-            display_name=identity.display_name,
+            display_name=display_name if display_name is not None else identity.display_name,
             chat_id=identity.chat_id,
+            city=city,
         )
     except SoloOnboardingError:
         logger.exception(
