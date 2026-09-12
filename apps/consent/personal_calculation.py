@@ -25,15 +25,14 @@ activity_coefficient / goal`` обязан нести **утверждение**
 :data:`NOT_GRANTED`. Слить их значило бы чинить «дай согласие» там, где
 чинить надо «под какой текст».
 
-### Почему строка, а не член перечисления
+### Одно значение на два конца
 
-Тип ``personal_calculation`` вводит в ``ConsentRecord.ConsentType`` PR
-ai-bot-platform#1523 (срез N-a), ещё не слитый. Здесь он назван строкой
-намеренно, чтобы не стековать PR: значение — контракт границы (константа
-``PERSONAL_CALCULATION`` в ``nutrition/services/personal_calculation_consent.py``
-каталога), а не имя из модели. **Когда #1523 сольётся — заменить строку на
-``ConsentRecord.ConsentType.PERSONAL_CALCULATION.value``, не заводить
-вторую константу.**
+Тип ``personal_calculation`` ввёл в ``ConsentRecord.ConsentType`` #1602
+(сужение #1523, срез N-a). :data:`PERSONAL_CALCULATION` читается из
+перечисления, а не дублируется строкой: значение — одновременно имя типа
+в реестре и контракт границы (константа ``PERSONAL_CALCULATION`` в
+``nutrition/services/personal_calculation_consent.py`` каталога), и два
+написания одного факта разошлись бы молча.
 
 ### Предел
 
@@ -62,14 +61,35 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-#: Вид согласия — контракт границы каталога (#324), не имя из модели.
-#: TODO(#1523): после слияния заменить на
-#: ``ConsentRecord.ConsentType.PERSONAL_CALCULATION.value``.
-PERSONAL_CALCULATION = "personal_calculation"
+#: Вид согласия — и имя типа в реестре, и контракт границы каталога (#324).
+PERSONAL_CALCULATION = ConsentRecord.ConsentType.PERSONAL_CALCULATION.value
+
+#: Назначение согласия — словами владельца (пакет 12.09 §2): ТОЛЬКО
+#: персональный расчёт норм, не дневник питания и не «здоровье вообще».
+#: Не подменяется общим HEALTH_CONSENT: тот закрывает другой объём.
+#: Проводное значение типа остаётся ``personal_calculation`` — это
+#: контракт границы каталога (#324) и слитая миграция (#1602); имя
+#: назначения живёт рядом, чтобы читатель кода видел, ЧТО этот тип
+#: покрывает, не переименовывая колонку в двух репозиториях.
+PURPOSE = "NUTRITION_PERSONAL_NORMS"
 
 #: Ключ утверждения в теле POST профиля — как его читает
 #: ``NutritionProfileUpsertSerializer.consent`` в каталоге.
 PAYLOAD_KEY = "consent"
+
+#: Версия текста, который человеку показывают перед анкетой. Меняется
+#: ВМЕСТЕ с текстом: версия — снимок того, на что согласились, а не
+#: украшение. При следующей редакции константа поднимается, старые
+#: согласия перестают её предъявлять, и человека спрашивают заново.
+#:
+#: Та же дисциплина, что у ``HEALTH_CONSENT_DOCUMENT_VERSION``
+#: (``apps/consent/health.py``) — форма взята оттуда намеренно, чтобы два
+#: согласия не расходились в устройстве.
+PERSONAL_CALCULATION_DOCUMENT_VERSION = "personal-calculation-v1"
+
+#: Откуда пришла выдача и отзыв. Свободная форма по контракту модели.
+GRANT_SOURCE = "max:nutrition_anketa_consent"
+WITHDRAW_SOURCE = "max:nutrition_anketa_consent_withdraw"
 
 # ── причины отказа ────────────────────────────────────────────────────────
 # Три разных «нет», и у каждого свой адрес починки: первое чинится
@@ -161,3 +181,69 @@ def current_attestation(bot_user: BotUser) -> ConsentAttestation:
 def attach(payload: dict[str, Any], attestation: ConsentAttestation) -> dict[str, Any]:
     """Тело POST с утверждением. Исходный словарь не меняется."""
     return {**payload, PAYLOAD_KEY: attestation.as_payload()}
+
+
+class UnknownDisclosureVersionError(ValueError):
+    """Показали одну версию текста, записать просят другую.
+
+    Не педантизм: ``document_version`` — единственное доказательство
+    того, ЧТО именно человеку показали в момент согласия. Принять чужую
+    строку значит записать в юридический журнал непроверяемое
+    утверждение, а граница каталога (#324) требует версию именно затем,
+    чтобы через полгода согласие можно было отличить от согласия на
+    другой текст.
+    """
+
+
+def grant(bot_user: BotUser, *, document_version: str) -> bool:
+    """Записать согласие на персональный расчёт. Идемпотентно.
+
+    Возвращает ``True``, если после вызова действующее согласие есть, —
+    проверкой ЧТЕНИЕМ, а не оптимистичным «мы же только что записали».
+    Читающая сторона (`current_attestation`) и пишущая обязаны сойтись,
+    иначе экран скажет «разрешено», а анкета продолжит отказывать.
+
+    Raises:
+      UnknownDisclosureVersionError: версия не та, что показывали.
+    """
+    from apps.consent.services import record_person_consent
+
+    if document_version != PERSONAL_CALCULATION_DOCUMENT_VERSION:
+        raise UnknownDisclosureVersionError(document_version)
+
+    record_person_consent(
+        bot_user,
+        consent_type=PERSONAL_CALCULATION,
+        source=GRANT_SOURCE,
+        document_version=PERSONAL_CALCULATION_DOCUMENT_VERSION,
+    )
+    return is_granted(bot_user)
+
+
+def withdraw(bot_user: BotUser) -> int:
+    """Отозвать согласие. Идемпотентно; строки не удаляются.
+
+    §92 требует хранить отзыв, а не забывать его: ``withdrawn_at``
+    проставляется, append-only журнал остаётся целиком.
+    """
+    from apps.consent.services import withdraw_person_consent
+
+    return withdraw_person_consent(
+        bot_user,
+        consent_type=PERSONAL_CALCULATION,
+        source=WITHDRAW_SOURCE,
+    )
+
+
+def is_granted(bot_user: BotUser) -> bool:
+    """Есть ли действующее согласие СЕЙЧАС — тем же чтением, что у границы.
+
+    Намеренно выражено через :func:`current_attestation`, а не своим
+    запросом: экран не должен уметь сказать «разрешено» в случае, когда
+    утверждение собрать нельзя. Один предикат — одна правда.
+    """
+    try:
+        current_attestation(bot_user)
+    except ConsentAttestationUnavailable:
+        return False
+    return True

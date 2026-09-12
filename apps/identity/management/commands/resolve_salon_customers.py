@@ -63,6 +63,15 @@ class Command(BaseCommand):
             )
             + f"  людей={sum(totals.values())}"
         )
+        # People who only ever met the client bot: outside §2's list, LINKED /
+        # client_bot by construction. Printed as their own line so the operator
+        # sees them apart from the salon people the owner decided about.
+        contour = sc.client_contour_only()
+        self.stdout.write(f"клиентский контур без салонной оболочки: {len(contour)}")
+        for channel, cid in contour:
+            self.stdout.write(f"    {channel}:{cid:26} → LINKED / client_bot")
+            if apply:
+                written += sc.stamp_client_contour(channel, cid)
         if apply:
             self.stdout.write(f"записано строк: {written}")
         self.stdout.write(f"UNRESOLVED после: {sc.unresolved_count()}")

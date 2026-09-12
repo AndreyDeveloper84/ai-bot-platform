@@ -238,6 +238,20 @@ class TestConciergeNutritionTurn:
             chat_id="drf1268-e2e-chat",
         )
         conversation = resolve_active_global_conversation(bot_user)
+        # §92 п.1 / DRF-1698 — согласие на персональный расчёт. Гейт стоит НА
+        # ВХОДЕ в анкету (#1593): без согласия анкета ничего не спрашивает, и
+        # этот тест проверял бы отказ вместо потока. Выдаётся НАСТОЯЩИМ
+        # писателем (тем же, что экран согласия), а не подменой предиката:
+        # тест гоняет живой обработчик, и предусловие обязано быть таким же
+        # живым. У отказа свои тесты — test_consent_gate_at_entry.py.
+        from apps.consent.personal_calculation import (
+            PERSONAL_CALCULATION_DOCUMENT_VERSION,
+            grant as grant_personal_calculation,
+        )
+
+        assert grant_personal_calculation(
+            bot_user, document_version=PERSONAL_CALCULATION_DOCUMENT_VERSION
+        )
         return bot_user, conversation
 
     def test_nutrition_tool_specs_reach_the_model(self, monkeypatch):
@@ -255,7 +269,16 @@ class TestConciergeNutritionTurn:
         generate_concierge_reply("привет", bot_user=bot_user, conversation=conversation)
 
         tool_names = {t["name"] for t in captured["tools"]}
-        assert NUTRITION_TOOL_ACTIONS <= tool_names
+        # DRF-1779 — ``health_screening`` предлагается модели только когда
+        # исполнитель его не отвергнет: на «привет» симптома нет,
+        # ``HealthScreeningSkill.matches`` вернул бы False, и вызов ушёл бы в
+        # veto → проза. Остальные nutrition-инструменты — всегда.
+        assert (NUTRITION_TOOL_ACTIONS - {"health_screening"}) <= tool_names
+        assert "health_screening" not in tool_names
+
+        captured.clear()
+        generate_concierge_reply("болит спина", bot_user=bot_user, conversation=conversation)
+        assert NUTRITION_TOOL_ACTIONS <= {t["name"] for t in captured["tools"]}
 
     def test_health_screening_tool_call_returns_skill_reply(self, monkeypatch):
         provider = AsyncMock()
@@ -303,6 +326,16 @@ class TestAnketaOnGlobalPath:
             chat_id="drf1268-anketa-chat",
         )
         conversation = resolve_active_global_conversation(bot_user)
+        # §92 п.1 / DRF-1698 — согласие на расчёт настоящим писателем: гейт
+        # стоит на входе в анкету, без него тест проверял бы отказ.
+        from apps.consent.personal_calculation import (
+            PERSONAL_CALCULATION_DOCUMENT_VERSION,
+            grant as grant_personal_calculation,
+        )
+
+        assert grant_personal_calculation(
+            bot_user, document_version=PERSONAL_CALCULATION_DOCUMENT_VERSION
+        )
         return bot_user, conversation
 
     def test_anketa_start_writes_fsm_state(self):

@@ -113,6 +113,48 @@ def _token(bot: "BotEntry | None" = None) -> str:
     return getattr(settings, "MAX_BOT_TOKEN", "")
 
 
+def keyboard_trace(attachments: list[dict[str, Any]] | None) -> str:
+    """«клавиатура=4[«Ничего из этого»|«Беременность или кормление»|…]» — или «клавиатура=нет».
+
+    DRF-1781. Диалог владельца 12.09 01:33: у реплики ``anketa_step_screening``
+    в базе лежали четыре кнопки, на экране вариантов не было, а что ушло
+    на провод к MAX — не знал никто: след отправки не писался ни в базу,
+    ни в лог, и лог контейнера не переживает выкладку. Эта строка — тот
+    самый след: что было В ТЕЛЕ ЗАПРОСА к MAX, а не в ``action_data``.
+
+    Подписи кнопок — продуктовый текст, не персональные данные; текст
+    сообщения сюда НЕ попадает (DRF-1039: лог не расширяется о человеке).
+    Считаются только ``inline_keyboard``-вложения; прочие (медиа) — числом.
+    """
+    if not attachments:
+        return "клавиатура=нет"
+    labels: list[str] = []
+    keyboards = 0
+    for attachment in attachments:
+        if not isinstance(attachment, dict) or attachment.get("type") != "inline_keyboard":
+            continue
+        keyboards += 1
+        rows = (attachment.get("payload") or {}).get("buttons") or []
+        for row in rows:
+            for button in row if isinstance(row, list) else []:
+                if isinstance(button, dict):
+                    labels.append(f"«{button.get('text', '')}»")
+    if keyboards == 0:
+        return f"клавиатура=нет вложений_без_клавиатуры={len(attachments)}"
+    return f"клавиатура={len(labels)}[{'|'.join(labels)}]"
+
+
+def _created_message_id(payload: Any) -> str:
+    """``mid`` созданного сообщения из конверта MAX — или пустая строка."""
+    if not isinstance(payload, dict):
+        return ""
+    message = payload.get("message")
+    body = message.get("body") if isinstance(message, dict) else None
+    if not isinstance(body, dict):
+        return ""
+    return str(body.get("mid") or body.get("seq") or "")
+
+
 def _addressed(*, chat_id: str | None = None, user_id: str | None = None) -> str:
     """``"chat_id=…"`` or ``"user_id=…"`` — the address, for a log line.
 
@@ -267,25 +309,40 @@ def send_message(
         raise MaxAPIError(0, str(exc)) from exc
 
     if response.status_code >= 400:
+        # DRF-1781: отвергнутая клавиатура должна быть видна КАК клавиатура —
+        # иначе «MAX отверг кнопки» и «MAX отверг текст» неразличимы в логе.
         logger.warning(
-            "channels.max.outbound.http_error %s status=%s body=%r",
+            "channels.max.outbound.http_error %s status=%s %s body=%r",
             addressed,
             response.status_code,
+            keyboard_trace(attachments),
             response.text[:200],
         )
         raise MaxAPIError(response.status_code, response.text)
 
     # 2xx — parse JSON. MAX returns the created-message envelope.
     try:
-        return response.json()
+        payload = response.json()
     except ValueError:
         # 2xx with non-JSON body shouldn't happen, but don't crash.
         logger.warning(
-            "channels.max.outbound.non_json_2xx %s status=%s",
+            "channels.max.outbound.non_json_2xx %s status=%s %s",
             addressed,
             response.status_code,
+            keyboard_trace(attachments),
         )
         return {}
+    # DRF-1781: след отправки — что ушло на провод и под каким mid легло.
+    # Единственное место, где это известно; база хранит action_data ДО
+    # сборки вложений, лог контейнера не переживает выкладку.
+    logger.info(
+        "channels.max.outbound.sent %s status=%s mid=%s %s",
+        addressed,
+        response.status_code,
+        _created_message_id(payload) or "-",
+        keyboard_trace(attachments),
+    )
+    return payload
 
 
 # ─── in-place message edit ────────────────────────────────────────────────

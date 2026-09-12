@@ -581,14 +581,14 @@ def _handle_salon_event_inner(event: CanonicalEvent, trace_id: str | uuid.UUID |
         # attempt for a message they did not type.
         if _is_button_tap(event.text):
             if event.text == SOLO_REGISTER_CALLBACK:
-                _register_solo_provider(event, bot_user)
+                _register_solo_provider(event, bot_user, entry=entry)
                 return
             _reply(event, ASK_FOR_CODE)
             return
 
         code = _extract_code(event.text)
         if code is None:
-            _ask_for_code_with_solo_offer(event, bot_user)
+            _ask_for_code_with_solo_offer(event, bot_user, entry=entry)
             return
 
         _redeem_and_greet(event, bot_user, code, tenant, entry)
@@ -649,8 +649,47 @@ def _already_has_a_solo_workspace(bot_user) -> bool:
     return Tenant.objects.filter(slug=slug).exists()
 
 
-def _ask_for_code_with_solo_offer(event: CanonicalEvent, bot_user) -> None:
-    """Попросить код — и, если уместно, предложить кабинет соло-мастера."""
+def _solo_identity_rejected(bot_user) -> bool:
+    """Отклонил ли оператор связь личности этого соло-мастера (§6)."""
+    from apps.identity.models import SoloIdentityLink
+
+    return SoloIdentityLink.objects.filter(
+        channel=bot_user.channel,
+        channel_user_id=bot_user.channel_user_id,
+        status=SoloIdentityLink.Status.REJECTED,
+    ).exists()
+
+
+def _open_cabinet_attachments(entry) -> list[dict] | None:
+    """Дверь в кабинет соло-мастера — или ничего, если двери нет (DRF-1756).
+
+    Та же кнопка и тот же источник адреса, что у меню сотрудников
+    (``staff_menu._miniapp_button``): ``web_app`` записи бота, иначе
+    ``miniapp_url``, иначе ``None``. Кнопка, которая не может сработать,
+    хуже её отсутствия — поэтому без записи или без адреса вложений нет.
+
+    Фриз §5: после создания рабочего пространства — «Открыть кабинет», и
+    «реализация не завершена, если аккаунт есть, а мастер не может открыть
+    обычное рабочее пространство». До этого среза оба текста соло-пути
+    уходили без вложений, и из салонного бота в Mini App у соло-мастера не
+    было ни одной кнопки; куда эта кнопка ведёт — решает резолвер
+    (DRF-1755: к строке его собственного тенанта).
+    """
+    from apps.channels.max.outbound import make_inline_keyboard_attachment
+    from apps.channels.max.staff_menu import _miniapp_button
+
+    button = _miniapp_button(entry, "🏠 Открыть кабинет")
+    if button is None:
+        return None
+    return [make_inline_keyboard_attachment([button], columns=1)]
+
+
+def _ask_for_code_with_solo_offer(event: CanonicalEvent, bot_user, entry=None) -> None:
+    """Попросить код — и, если уместно, предложить кабинет соло-мастера.
+
+    ``entry`` — запись салонного бота; нужна только вернувшемуся владельцу
+    кабинета, чтобы вместе с ответом получить дверь в него.
+    """
 
     if _has_a_master_card_here(bot_user):
         _reply(event, ASK_FOR_CODE)
@@ -660,7 +699,17 @@ def _ask_for_code_with_solo_offer(event: CanonicalEvent, bot_user) -> None:
         # Второе посещение. Предлагать завести то, что уже заведено, —
         # значит заставить человека нажать, чтобы узнать, что нажимать не
         # надо было.
-        _reply(event, SOLO_ALREADY_REGISTERED)
+        #
+        # §6: если оператор ОТКЛОНИЛ связь — человек получает безопасное
+        # сообщение с путём (поддержка), а не «кабинет уже есть»: второе
+        # обещало бы кабинет, которого не будет. Дверь в него — тем более.
+        if _solo_identity_rejected(bot_user):
+            from apps.identity.services.solo_identity_link import REJECTED_RECOVERY_TEXT
+
+            _reply(event, REJECTED_RECOVERY_TEXT)
+            return
+        # Вместо предложения — дверь (DRF-1756).
+        _reply(event, SOLO_ALREADY_REGISTERED, attachments=_open_cabinet_attachments(entry))
         return
 
     from apps.channels.max import outbound
@@ -671,13 +720,18 @@ def _ask_for_code_with_solo_offer(event: CanonicalEvent, bot_user) -> None:
     _reply(event, ASK_FOR_CODE + SOLO_OFFER, attachments=[attachment])
 
 
-def _register_solo_provider(event: CanonicalEvent, bot_user) -> None:
+def _register_solo_provider(event: CanonicalEvent, bot_user, entry=None) -> None:
     """Завести кабинет соло-мастера и сказать правду о его состоянии.
 
     Правду — то есть `setup_state`, а не факт создания. §122: регистрация
     не завершается как «готово», пока человека не видно клиентам, и
     единственный способ не соврать здесь — спросить у результата, а не у
     самого себя.
+
+    ``entry`` — запись салонного бота: из неё берётся дверь «Открыть
+    кабинет» (DRF-1756, фриз §5). Правда о состоянии и дверь не спорят:
+    кабинет существует и в нём можно готовить профиль, даже пока клиентам
+    мастера не видно.
     """
     from apps.identity.services.solo_onboarding import (
         SoloOnboardingError,
@@ -709,9 +763,16 @@ def _register_solo_provider(event: CanonicalEvent, bot_user) -> None:
     # получилось», — см. `solo_link_attempt`.
     link_refusal = None
     if result.created:
+        from apps.identity.services.solo_identity_link import open_link, record_attempt
         from apps.identity.services.solo_link_attempt import attempt_solo_link
 
+        # §6 пакета 12.09: связь личности — состояние с провенансом и
+        # аудит-пакетом, а не только столбец ключа. PENDING заводится ДО
+        # попытки, чтобы оператор видел заявку даже когда попытка упала.
+        link = open_link(result.master, bot_user=bot_user, tenant=result.tenant)
         link_refusal = attempt_solo_link(result.master, bot_user)
+        result.master.refresh_from_db(fields=["ayla_user_id"])
+        record_attempt(link, refusal=link_refusal, ayla_user_id=result.master.ayla_user_id)
 
     emit(
         "channels.max.salon.solo_registered",
@@ -737,13 +798,18 @@ def _register_solo_provider(event: CanonicalEvent, bot_user) -> None:
     if result.setup_state is SoloSetupState.READY:
         # Сегодня недостижимо — ключа взяться неоткуда, — но ветка есть,
         # чтобы в день, когда связывание заработает, человек не получил
-        # текст про ожидание.
-        _send_menu(event, resolve_role(bot_user), result.tenant, None)
+        # текст про ожидание. Меню — по строке СОЛО-тенанта
+        # (`result.bot_user`), а не по салонной `bot_user`: `resolve_role`
+        # читает роли в тенанте своей строки, и салонная строка — customer.
+        # До DRF-1756 здесь стояли `resolve_role(bot_user)` и `entry=None`
+        # — меню клиента без двери.
+        _send_menu(event, resolve_role(result.bot_user), result.tenant, entry)
         return
 
     _reply(
         event,
         SOLO_CREATED_PENDING if result.created else SOLO_ALREADY_REGISTERED,
+        attachments=_open_cabinet_attachments(entry),
     )
 
 
@@ -985,22 +1051,23 @@ def _sender_name(event: CanonicalEvent) -> str:
 
 
 def _bot_slug_for(tenant) -> str:
-    """Find which registry entry serves this tenant.
+    """Slug of the salon bot — the ONE serving ``max_salon``, whichever tenant.
 
-    Matched on BOTH tenant and stream. Tenant alone is not enough: nothing
-    in the registry forbids a salon from also having a per-tenant client bot
-    (`stream=max`), and picking that one would send staff replies from the
-    customer-facing token — which, since MAX chat_ids are per-bot, most
-    likely 4xxs, leaves the entry unacked in the PEL, and the person gets
-    nothing at all.
+    Until DRF-1705 this matched ``entry.tenant_slug == tenant.slug``: the
+    salon bot was assumed to belong to a salon, and a master whose tenant is
+    not the bot's (every solo master) got ``""`` → «refuse to answer rather
+    than answer as the wrong bot» → silence. The bot does not belong to a
+    salon (owner decision 12.09.2026); ``parse_registry`` guarantees there is
+    at most one on the stream, so the pick is not arbitrary.
+
+    ``tenant`` stays in the signature: the call site's log line names it,
+    and the day a per-tenant staff bot returns this is where the choice
+    would go back in.
     """
+    from apps.channels.bot_registry import effective_registry, resolve_by_stream
 
-    from apps.channels.bot_registry import effective_registry
-
-    for entry in effective_registry():
-        if entry.tenant_slug == tenant.slug and entry.stream == SALON_STREAM:
-            return entry.slug
-    return ""
+    entry = resolve_by_stream(SALON_STREAM, effective_registry())
+    return entry.slug if entry is not None else ""
 
 
 def _redeem_and_greet(event: CanonicalEvent, bot_user, code: str, tenant, entry) -> None:

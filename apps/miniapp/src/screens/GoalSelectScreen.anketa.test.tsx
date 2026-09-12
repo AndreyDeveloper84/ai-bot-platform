@@ -144,14 +144,14 @@ beforeEach(() => {
 // ---------------------------------------------------------------------------
 
 describe("шаг анкеты рисуется тем, что прислал сервер", () => {
-  it("вопрос, номер и варианты — из документа", async () => {
+  it("вопрос и варианты — из документа, номера нет", async () => {
     mockedFetch.mockResolvedValue(STEP_ONE);
     renderScreen();
 
     expect(
       await screen.findByText("Что сейчас хочется привести в порядок?"),
     ).toBeInTheDocument();
-    expect(screen.getByText("Вопрос 1 из 3")).toBeInTheDocument();
+    expect(screen.queryByText(/Вопрос \d+ из \d+/)).toBeNull();
 
     const group = screen.getByRole("group", {
       name: "Что сейчас хочется привести в порядок?",
@@ -189,7 +189,7 @@ describe("шаг анкеты рисуется тем, что прислал с�
     expect(
       await screen.findByText("Как хочешь себя чувствовать после?"),
     ).toBeInTheDocument();
-    expect(screen.getByText("Вопрос 2 из 3")).toBeInTheDocument();
+    expect(screen.queryByText(/Вопрос \d+ из \d+/)).toBeNull();
     expect(screen.getByRole("button", { name: "Отдохнувшей" })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Лицо и кожа" })).toBeNull();
   });

@@ -25,6 +25,8 @@ from apps.channels.bot_registry import (
     api_tokens,
     parse_registry,
     resolve_by_slug,
+    resolve_by_stream,
+    resolve_by_tenant_stream,
     resolve_by_webhook_secret,
     with_legacy_fallback,
 )
@@ -373,3 +375,67 @@ class TestPilotConfiguration:
             "pilot-client-token",
             "pilot-salon-token",
         )
+
+
+class TestTheSalonBotDoesNotBelongToASalon:
+    """DRF-1705, срез 1 (DRF-1726). Решение владельца 12.09.2026: салонный
+    бот — платформенная поверхность мастеров всех салонов и соло-мастеров.
+    Исходящие выбирают его по ПОТОКУ; тенант записи ничего не решает.
+    """
+
+    def test_resolve_by_stream_finds_the_salon_bot_whatever_the_tenant(self):
+        registry = parse_registry(TWO_BOTS)
+
+        entry = resolve_by_stream("max_salon", registry)
+        assert entry is not None and entry.slug == "salon"
+        # Тенант записи остаётся formula-tela (входы ещё на нём — следующие
+        # срезы), но на выбор он больше не влияет.
+        assert entry.tenant_slug == "formula-tela"
+
+    def test_a_solo_masters_tenant_used_to_resolve_to_nobody(self):
+        """Отрицательный эталон, ПЕРЕВЁРНУТЫЙ 12.09.2026.
+
+        До среза 1 уведомление мастеру соло-тенанта выбирало бота по
+        ``(solo-…, max_salon)`` → ``None`` → «do not speak as anyone» — и
+        ниже по течению это означало токен КЛИЕНТСКОГО бота, в чат, которого
+        у того бота никогда не было. Сообщение строилось и терялось.
+        Теперь тот же вопрос по потоку даёт салонного бота.
+        """
+        registry = parse_registry(TWO_BOTS)
+
+        assert resolve_by_tenant_stream("solo-max-0badc0de", "max_salon", registry) is None
+        assert resolve_by_stream("max_salon", registry).slug == "salon"
+
+    def test_resolve_by_stream_answers_none_for_a_stream_nobody_serves(self):
+        registry = parse_registry(TWO_BOTS)
+        assert resolve_by_stream("whatsapp_salon", registry) is None
+        assert resolve_by_stream("", registry) is None
+        assert resolve_by_stream("max_salon", ()) is None
+
+    def test_two_salon_bots_are_refused_at_parse_time_by_name(self):
+        """Страж единственности: ``resolve_by_stream`` вернул бы «какого-то».
+
+        Отказ при загрузке, с именами обеих записей — а не молчаливый выбор
+        первой по порядку в ``MAX_BOTS``.
+        """
+        env = dict(TWO_BOTS)
+        env["MAX_BOTS"] = "client,salon,salon2"
+        env["MAX_BOT_SALON2_WEBHOOK_SECRET"] = "secret-salon2"  # pragma: allowlist secret
+        env["MAX_BOT_SALON2_API_TOKEN"] = "token-salon2"  # pragma: allowlist secret
+        env["MAX_BOT_SALON2_STREAM"] = "max_salon"
+
+        with pytest.raises(BotRegistryConfigurationError) as exc:
+            parse_registry(env)
+        assert "salon" in str(exc.value) and "salon2" in str(exc.value)
+        assert "DRF-1705" in str(exc.value)
+
+    def test_two_bots_on_other_streams_are_still_fine(self):
+        """Отрицательный контроль на сам страж: правило узкое, про max_salon."""
+        env = dict(TWO_BOTS)
+        env["MAX_BOTS"] = "client,salon,client2"
+        env["MAX_BOT_CLIENT2_WEBHOOK_SECRET"] = "secret-client2"  # pragma: allowlist secret
+        env["MAX_BOT_CLIENT2_API_TOKEN"] = "token-client2"  # pragma: allowlist secret
+        env["MAX_BOT_CLIENT2_STREAM"] = "max"
+        env["MAX_BOT_CLIENT2_TENANT_SLUG"] = "other-salon"
+
+        assert len(parse_registry(env)) == 3

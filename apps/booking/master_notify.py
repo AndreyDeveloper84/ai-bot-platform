@@ -344,7 +344,17 @@ def build_specialist_booking_notification(
 
 
 def _salon_bot_for(tenant: Tenant):
-    """The salon's staff bot, or ``None`` when it has none.
+    """The platform's staff bot, or ``None`` when the deployment has none.
+
+    Chosen by STREAM, not by the tenant of a registry entry (DRF-1705,
+    срез 1): the salon bot does not belong to a salon. Before this a master
+    in a solo tenant (``solo-…``) resolved to ``None`` here — and ``None``
+    below means «send with the single configured token», i.e. the CLIENT
+    bot's, into a chat that bot has never had. The message was built and
+    lost.
+
+    ``tenant`` is kept in the signature for the log line and for the day a
+    per-tenant staff bot exists again; it no longer decides anything.
 
     ``None`` means outbound keeps using the single configured token, i.e.
     exactly the behaviour before DRF-1061 — see the call site for why that
@@ -352,9 +362,9 @@ def _salon_bot_for(tenant: Tenant):
     """
 
     try:
-        from apps.channels.bot_registry import effective_registry, resolve_by_tenant_stream
+        from apps.channels.bot_registry import effective_registry, resolve_by_stream
 
-        return resolve_by_tenant_stream(tenant.slug, SALON_STREAM, effective_registry())
+        return resolve_by_stream(SALON_STREAM, effective_registry())
     except Exception:  # noqa: BLE001 — identity must never break ingest
         logger.warning("booking.notify.registry_unavailable tenant=%s", tenant.slug)
         return None

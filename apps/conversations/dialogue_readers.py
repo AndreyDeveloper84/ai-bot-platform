@@ -470,6 +470,21 @@ DIALOGUE_READERS: dict[str, DialogueReader] = {
             "rather than by intention: an empty body cannot start with «cb:»."
         ),
     ),
+    "apps.conversations.management.commands.dialog_transcript:Command._transcript": DialogueReader(
+        storage="db_message",
+        reaches_prompt=False,
+        why=(
+            "DRF-1754 — расшифровка диалога с пилота для оператора: реплики и "
+            "служебный след каждого ответа бота печатаются в терминал или в "
+            "файл вне репозитория (docs/dialogs/ в .gitignore). Ни одна строка "
+            "не собирается в промпт: команда только читает и печатает, и её "
+            "тест ловит любой не-SELECT. Текст проходит через Redactor "
+            "regex_v3 (телефоны, почта, карты), идентификаторы — восемь знаков "
+            "md5. После «удалить всё» колонка пуста, и расшифровка честно "
+            "печатает пустые реплики: команда читает Message, не "
+            "ArchivedMessage, и к архиву не обращается."
+        ),
+    ),
     "apps.master_api.services.dashboard:get_inbox_preview": DialogueReader(
         storage="db_message",
         reaches_prompt=False,

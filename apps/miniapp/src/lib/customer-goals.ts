@@ -39,9 +39,18 @@ export interface AnketaOption {
 }
 
 /** Server-computed position of the current question. Never derived here. */
+/**
+ * Где человек в проходе. `index`/`total` экран больше НЕ рисует (DRF-1743,
+ * доктрина 12.09): «Вопрос 2 из 3» — счётчик, честный лишь пока порядок
+ * вопросов фиксирован; с движком вопросов общее число неизвестно
+ * заранее, и число стало бы выдумкой. Рисуется только `is_last` — факт,
+ * который сервер гарантирует («Ещё один короткий вопрос»). Числа
+ * остаются в типе на один релиз, пока сервер их шлёт.
+ */
 export interface AnketaProgress {
-  index: number;
-  total: number;
+  index?: number;
+  total?: number;
+  is_last?: boolean;
 }
 
 export interface MissingItem {
@@ -56,10 +65,10 @@ export interface MissingItem {
    * refused by the server (409) instead of being filed under the
    * wrong question — NOT so the client can choose a step.
    *
-   * There is deliberately no "is this the last one" flag and no list
-   * of remaining steps: the sequence is the server's, and the screen
-   * must not be able to compute what comes next. `progress` arrives
-   * ready-made for the same reason.
+   * There is deliberately no list of remaining steps: the sequence is
+   * the server's, and the screen must not be able to compute what comes
+   * next. `progress.is_last` is a server-guaranteed fact rendered as
+   * one phrase, not material for arithmetic (DRF-1743).
    */
   step?: string;
   options?: AnketaOption[];
@@ -109,9 +118,28 @@ export interface NextStep {
   label: string;
 }
 
+/**
+ * Строка блока «Уже учла» (DRF-1744): ответ на шаг открытого прохода,
+ * как его прислал сервер. Несёт `options` шага, чтобы «Изменить» было
+ * чем ответить без списка вопросов на клиенте; `revisable` — решение
+ * сервера, экран его не выводит.
+ */
+export interface KnownAnketaAnswer {
+  step: string;
+  prompt: string;
+  option_key: string | null;
+  label: string;
+  options: AnketaOption[];
+  revisable: boolean;
+}
+
 export interface DecisionContext {
   version: number;
-  known: { goal: KnownGoal | null };
+  known: {
+    goal: KnownGoal | null;
+    /** Absent on documents before DRF-1744 — then there is no block. */
+    anketa?: KnownAnketaAnswer[];
+  };
   missing: MissingItem[];
   suggestions: GoalSuggestion[];
   intents: GoalIntent[];
@@ -140,7 +168,12 @@ export type GoalSelectBody =
       answer: { step: string; option_key: string };
       source_channel: "miniapp";
     }
-  | { answer: { step: string; text: string }; source_channel: "miniapp" };
+  | { answer: { step: string; text: string }; source_channel: "miniapp" }
+  /** DRF-1744 — пересмотр уже данного ответа («Изменить» в «Уже учла»). */
+  | {
+      answer: { step: string; option_key: string; revise: true };
+      source_channel: "miniapp";
+    };
 
 /** GET /decision-context — current decision-context document. */
 export const fetchDecisionContext = async (): Promise<DecisionContext> => {

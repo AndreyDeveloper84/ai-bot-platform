@@ -495,8 +495,10 @@ def _to_yc_service(svc: AylaService) -> Service:
     return Service(
         id=svc.id,  # type: ignore[arg-type]
         title=svc.title,
-        price_min=svc.price_min,
-        price_max=svc.price_max,
+        # DRF-1727: ``None`` = no price in the catalog; the YClients DTO is
+        # float-typed (anti-touch) and nothing downstream renders these two.
+        price_min=svc.price_min,  # type: ignore[arg-type]
+        price_max=svc.price_max,  # type: ignore[arg-type]
         duration_s=svc.duration_s,
         category_id=svc.category_id,  # type: ignore[arg-type]
         raw=svc.raw,

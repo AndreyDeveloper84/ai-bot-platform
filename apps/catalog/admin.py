@@ -315,6 +315,8 @@ class CatalogMasterAdmin(_MirrorAdminBase):
         "revoke_invite_masters",
         "archive_masters",
         "unarchive_masters",
+        "confirm_solo_identity_link",
+        "reject_solo_identity_link",
     )
     fieldsets = (
         (
@@ -498,6 +500,83 @@ class CatalogMasterAdmin(_MirrorAdminBase):
             # чинят в источнике синхронизации.
             return "в архиве"
         return self._BOOKABLE_NOTES.get(block, block)
+
+    # ─── §6 пакета 12.09 — operator-assisted identity linking (Phase 0) ────
+    #
+    # Identity-токен боту не выдаётся. Оператор связывает личность в
+    # КАТАЛОГЕ (действие «Связать с Ayla», beautygo_backend#339), а здесь
+    # ПОДТВЕРЖДАЕТ: бот перечитывает ответ каталога тем же сторожем, что
+    # при регистрации, и записывает LINKED с провенансом OPERATOR_VERIFIED
+    # и operator_id. Ни одно из действий не правит БД руками и не
+    # присваивает личность: ключ пишет единственная дверь
+    # `link_solo_provider_to_ayla`, и только настоящий.
+
+    @admin.action(
+        permissions=["change"],
+        description="Соло: проверить связь с Ayla и подтвердить (§6)",
+    )
+    def confirm_solo_identity_link(self, request, queryset) -> None:  # type: ignore[no-untyped-def]
+        from apps.identity.models import BotUser, SoloIdentityLink
+        from apps.identity.services.solo_identity_link import confirm_by_operator
+
+        linked, pending, skipped = 0, [], 0
+        for master in queryset:
+            link = SoloIdentityLink.objects.filter(master=master).first()
+            if link is None:
+                skipped += 1
+                continue
+            bot_user = BotUser.all_tenants.filter(
+                channel=link.channel,
+                channel_user_id=link.channel_user_id,
+                tenant_id=link.tenant_id_snapshot,
+            ).first()
+            if bot_user is None:
+                skipped += 1
+                continue
+            outcome = confirm_by_operator(link, bot_user=bot_user, operator=request.user)
+            if outcome.linked:
+                linked += 1
+            else:
+                pending.append(f"{master.name}: {outcome.refusal}")
+        text = f"Связано: {linked}. Не соло-мастера или без заявки: {skipped}."
+        if pending:
+            text += (
+                " Остались в ожидании — " + "; ".join(pending) + ". "
+                "Причина proxy_identity значит: личность ещё не связана в каталоге — "
+                "сначала действие «Связать с Ayla» в админке Ayla, затем сюда."
+            )
+        self.message_user(request, text, level=messages.SUCCESS if linked else messages.WARNING)
+
+    @admin.action(
+        permissions=["change"],
+        description="Соло: отклонить связь с Ayla (причина — identity_unverifiable)",
+    )
+    def reject_solo_identity_link(self, request, queryset) -> None:  # type: ignore[no-untyped-def]
+        """Отказ с причиной из таксономии. В списке действий Django нет
+        формы для выбора причины — по умолчанию ``identity_unverifiable``;
+        другую причину и комментарий оператор ставит на карточке связи
+        (`identity.SoloIdentityLink`), где они доступны как поля."""
+        from apps.identity.models import SoloIdentityLink
+        from apps.identity.services.solo_identity_link import reject_by_operator
+
+        rejected, skipped = 0, 0
+        for master in queryset:
+            link = SoloIdentityLink.objects.filter(master=master).first()
+            if link is None or link.status == SoloIdentityLink.Status.LINKED:
+                skipped += 1
+                continue
+            reject_by_operator(
+                link,
+                operator=request.user,
+                reason=SoloIdentityLink.RejectReason.IDENTITY_UNVERIFIABLE,
+            )
+            rejected += 1
+        self.message_user(
+            request,
+            f"Отклонено: {rejected}. Пропущено (нет заявки или уже связан): {skipped}. "
+            "Человек получит безопасное сообщение без причины при следующем обращении.",
+            level=messages.WARNING,
+        )
 
     @admin.action(
         permissions=["change"],

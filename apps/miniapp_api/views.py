@@ -31,6 +31,7 @@ from __future__ import annotations
 import logging
 import re
 import uuid
+from decimal import Decimal, InvalidOperation
 from datetime import UTC, date as date_cls, datetime, timedelta
 from functools import wraps
 from typing import Any, Callable, NamedTuple
@@ -856,7 +857,72 @@ def masters_list(request: HttpRequest) -> HttpResponse:
             "master_id", flat=True
         )
         qs = qs.filter(id__in=list(master_ids))
-    return JsonResponse({"masters": [_master_to_dict(m) for m in qs]})
+    rows = [_master_to_dict(m) for m in qs]
+
+    # DRF-1707 / OD-PILOT-9 distance contract + решение владельца D3.
+    # ``?lat=&lon=`` — одноразовые координаты по кнопке «Показать рядом со
+    # мной». Расстояние считает КАТАЛОГ (до подтверждённого места оказания
+    # услуги, §9) — бот его не выводит из координат профиля в зеркале.
+    # Координаты не сохраняются и в журнал не пишутся: только факт «с гео».
+    coords, coords_error = _parse_coords(request.GET)
+    if coords_error:
+        return _error("bad_request", coords_error, 400)
+    if coords is not None:
+        rows = _attach_distance(rows, lat=coords[0], lon=coords[1])
+    return JsonResponse({"masters": rows})
+
+
+def _parse_coords(query) -> tuple[tuple[float, float] | None, str | None]:
+    """``(lat, lon)`` из запроса; оба или ни одного; в пределах глобуса."""
+    lat_raw = query.get("lat")
+    lon_raw = query.get("lon")
+    if lat_raw is None and lon_raw is None:
+        return None, None
+    if lat_raw is None or lon_raw is None:
+        return None, "lat and lon must be sent together"
+    try:
+        lat = float(lat_raw)
+        lon = float(lon_raw)
+    except (TypeError, ValueError):
+        return None, "lat and lon must be numbers"
+    if not (-90.0 <= lat <= 90.0 and -180.0 <= lon <= 180.0):
+        return None, "lat and lon are out of range"
+    return (lat, lon), None
+
+
+def _attach_distance(rows: list[dict[str, Any]], *, lat: float, lon: float) -> list[dict[str, Any]]:
+    """Дописать ``distance_meters`` с провода каталога и отсортировать по близости.
+
+    Без ответа каталога (флаг выключен, источник лежит, мастер не найден
+    в ответе) поля нет вовсе — экран тогда не называет список «Рядом с
+    вами» (#1653: имя только при наличии поля). Неизвестное расстояние
+    (``null``) — в конец, порядок имён между ними сохраняется.
+    """
+    if not getattr(settings, "BOOKING_VIA_AYLA_REST", False):
+        return rows
+    from apps.integrations.ayla.booking_client import (
+        BookingAPIError,
+        get_ayla_booking_client,
+    )
+
+    try:
+        remote = get_ayla_booking_client().get_masters(lat=lat, lon=lon)
+    except BookingAPIError:
+        logger.warning("miniapp_api.masters_list.distance_unavailable geo=1")
+        return rows
+    by_id = {m.id: m.distance_meters for m in remote}
+    matched = 0
+    for row in rows:
+        if row["id"] in by_id:
+            row["distance_meters"] = by_id[row["id"]]
+            matched += 1
+    logger.info("miniapp_api.masters_list.distance geo=1 masters=%d matched=%d", len(rows), matched)
+    if matched == 0:
+        return rows
+    known = [r for r in rows if r.get("distance_meters") is not None]
+    unknown = [r for r in rows if r.get("distance_meters") is None]
+    known.sort(key=lambda r: r["distance_meters"])
+    return known + unknown
 
 
 @require_http_methods(["GET"])
@@ -936,6 +1002,19 @@ _ERROR_SLUG_TO_STATUS = {
 }
 
 
+#: Наружное имя отказа «то, что ты видел, уже не действует» (DRF-1708).
+QUOTE_CHANGED_SLUG = "quote_changed"
+
+
+def _quote_kwargs(price: str | None, duration: int | None) -> dict[str, Any]:
+    out: dict[str, Any] = {}
+    if price is not None:
+        out["quoted_price"] = price
+    if duration is not None:
+        out["quoted_duration_minutes"] = duration
+    return out
+
+
 def _create_booking_via_ayla(
     *,
     bot_user,
@@ -944,6 +1023,8 @@ def _create_booking_via_ayla(
     master_id: str,
     visit_at,
     payment_required: bool,
+    quoted_price: str | None = None,
+    quoted_duration_minutes: int | None = None,
 ) -> HttpResponse:
     """Ayla-first booking create (BOOKING_VIA_AYLA_REST ON).
 
@@ -1048,8 +1129,40 @@ def _create_booking_via_ayla(
             start_datetime=visit_at.isoformat(),
             idempotency_key=idempotency_key,
             payment_required=payment_required,
+            # DRF-1708 / D4: авторитетна та execution option, которую
+            # человек видел; расхождение Ayla отвергает внутри транзакции.
+            # Только когда прислано: клиент без котировки — прежний вызов,
+            # и подделки клиента в чужих тестах не обязаны знать новые поля.
+            **_quote_kwargs(quoted_price, quoted_duration_minutes),
         )
     except BookingBadRequestError as exc:
+        if exc.status_code == 409 and (exc.code or "") == "QUOTE_CHANGED":
+            # DRF-1708 (owner package 2, D4): displayed 60 мин / 1500 ₽,
+            # backend would apply something else → MATERIAL_CHANGE. Not a
+            # broken server and not a taken slot: the person must SEE both
+            # values and confirm anew. The two numbers ride verbatim from
+            # Ayla (`details = {field, quoted, applied}`); nothing here is
+            # re-derived or normalised.
+            details = exc.details or {}
+            logger.info(
+                "miniapp_api.create_booking.quote_changed tenant=%s service=%s master=%s field=%s",
+                tenant.id,
+                service_id,
+                master_id,
+                details.get("field"),
+            )
+            return JsonResponse(
+                {
+                    "error": QUOTE_CHANGED_SLUG,
+                    "detail": "price or duration changed since it was shown",
+                    "details": {
+                        "field": details.get("field"),
+                        "quoted": details.get("quoted"),
+                        "applied": details.get("applied"),
+                    },
+                },
+                status=409,
+            )
         if exc.status_code == 422 and is_health_check_code(exc.code):
             # DRF-1614. A medical decision taken upstream, not a rejected
             # payload — and emphatically not a broken server. Caught
@@ -1128,6 +1241,112 @@ def _create_booking_via_ayla(
     )
 
 
+def _parse_quote(body: dict) -> tuple[str | None, int | None, str | None]:
+    """``(quoted_price, quoted_duration_minutes, error)`` from a create body.
+
+    Price travels as a decimal STRING (Ayla's ``DecimalField``): a float
+    would turn «1500.00» into 1500.0 on one side and back into «1500» on
+    the other, and the comparison is by value on Ayla, so the spelling is
+    ours to keep exact, not to normalise.
+    """
+    price_raw = body.get("quoted_price")
+    duration_raw = body.get("quoted_duration_minutes")
+    quoted_price: str | None = None
+    quoted_duration: int | None = None
+    if price_raw is not None:
+        try:
+            quoted_price = str(Decimal(str(price_raw)))
+        except (InvalidOperation, ValueError):
+            return None, None, "quoted_price must be a decimal number"
+        if Decimal(quoted_price) < 0:
+            return None, None, "quoted_price must not be negative"
+    if duration_raw is not None:
+        if isinstance(duration_raw, bool) or not isinstance(duration_raw, int) or duration_raw < 1:
+            return None, None, "quoted_duration_minutes must be a positive integer"
+        quoted_duration = duration_raw
+    return quoted_price, quoted_duration, None
+
+
+@require_http_methods(["GET"])
+@require_init_data
+@with_request_tenant
+def booking_quote(request: HttpRequest) -> HttpResponse:
+    """GET /customer/quote?master_id=&service_id= — what a NEW booking of
+    this master+service would cost and how long it would take (DRF-1708).
+
+    The number the confirmation screen SHOWS is the number it then sends
+    back as ``quoted_*`` — so it has to come from the same place Ayla
+    stamps onto the appointment: the (specialist, salon service) edge
+    (DRF-1067, ``get_specialist_service_edges``). When the edge is not
+    readable (flag off, no row, upstream down) the mirror's service-level
+    values are returned with ``source: "service"`` — still real data, and
+    still compared by Ayla: a base price that differs from the edge is
+    refused as QUOTE_CHANGED rather than booked silently. ``null`` means
+    «no value known» — the screen shows nothing for it, never a made-up
+    number.
+    """
+    master_id = request.GET.get("master_id") or ""
+    service_id = request.GET.get("service_id") or ""
+    try:
+        uuid.UUID(str(master_id))
+        uuid.UUID(str(service_id))
+    except ValueError:
+        return _error("bad_request", "master_id and service_id must be UUIDs", 400)
+    try:
+        service = CatalogService.objects.get(id=service_id, is_active=True)
+    except CatalogService.DoesNotExist:
+        return _error("not_found", "service not found", 404)
+    try:
+        master = CatalogMaster.objects.bookable().get(id=master_id)
+    except CatalogMaster.DoesNotExist:
+        return _error("not_found", "master not found or not bookable", 404)
+
+    price: str | None = str(service.price_from) if service.price_from is not None else None
+    duration: int | None = int(service.duration_min) if service.duration_min else None
+    source = "service"
+
+    if (
+        getattr(settings, "BOOKING_VIA_AYLA_REST", False)
+        and service.ayla_service_id
+        and master.ayla_user_id
+    ):
+        from apps.integrations.ayla.booking_client import (
+            BookingAPIError,
+            get_ayla_booking_client,
+        )
+
+        try:
+            rows = get_ayla_booking_client().get_specialist_service_edges(
+                specialist_id=str(master.id),
+                service_id=str(service.ayla_service_id),
+            )
+        except BookingAPIError:
+            logger.warning(
+                "miniapp_api.booking_quote.edge_unavailable master=%s service=%s",
+                master_id,
+                service_id,
+            )
+            rows = []
+        if rows:
+            edge = rows[0]
+            edge_price = edge.get("price")
+            edge_duration = edge.get("duration_minutes")
+            try:
+                if edge_price is not None:
+                    price = str(Decimal(str(edge_price)))
+                    source = "edge"
+            except (InvalidOperation, ValueError):
+                logger.warning("miniapp_api.booking_quote.bad_edge_price value=%r", edge_price)
+            if isinstance(edge_duration, int) and edge_duration > 0:
+                duration = edge_duration
+                source = "edge"
+
+    return JsonResponse(
+        {"quote": {"price": price, "duration_minutes": duration, "source": source}},
+        status=200,
+    )
+
+
 @csrf_exempt
 @require_http_methods(["POST"])
 @require_init_data
@@ -1170,6 +1389,14 @@ def create_booking(request: HttpRequest) -> HttpResponse:
     # true → AWAITING_PAYMENT + pending Payment. The chat flow's
     # execute_confirm default (True) is intentionally NOT shared here.
     payment_required = bool(body.get("payment_required", False))
+
+    # DRF-1708: what the confirmation screen showed. Optional — a client
+    # that shows nothing sends nothing and gets the old behaviour. Parsed
+    # here, compared by Ayla inside the create transaction; a malformed
+    # value is a bad request, not a silent «no quote».
+    quoted_price, quoted_duration_minutes, quote_error = _parse_quote(body)
+    if quote_error:
+        return _error("bad_request", quote_error, 400)
 
     # DRF-1164 — the server-side half of "no performer, no booking".
     # The catalog now ships `is_bookable` and the Mini App drops the CTA,
@@ -1219,6 +1446,8 @@ def create_booking(request: HttpRequest) -> HttpResponse:
             master_id=master_id,
             visit_at=visit_at,
             payment_required=payment_required,
+            quoted_price=quoted_price,
+            quoted_duration_minutes=quoted_duration_minutes,
         )
 
     from apps.booking.services.create import (

@@ -64,8 +64,14 @@ import { StickyCta } from "../components/StickyCta";
 import { useClosingConfirmation } from "../hooks/useClosingConfirmation";
 import { useHaptics } from "../hooks/useHaptics";
 import { useOnline } from "../hooks/useOnline";
-import { createCustomerBooking } from "../lib/customer-booking";
-import { formatMoney, formatVisitFull } from "../lib/format";
+import {
+  createCustomerBooking,
+  getBookingQuote,
+  quoteChangeOf,
+  type BookingQuote,
+  type QuoteChange,
+} from "../lib/customer-booking";
+import { formatDuration, formatMoney, formatVisitFull } from "../lib/format";
 import {
   getStartPayload,
   openExternalLink,
@@ -88,6 +94,12 @@ import { backTo } from "../lib/screen-back";
 
 type ErrState =
   | { kind: "slot_unavailable"; substituteName?: string; substituteTime?: string }
+  /**
+   * DRF-1708 (решение владельца, пакет 2, D4): показанное уже не действует.
+   * Не поломка и не занятый слот — MATERIAL_CHANGE: человек видит, что
+   * было и что стало, и подтверждает заново. Молчаливой подмены нет.
+   */
+  | { kind: "quote_changed"; change: QuoteChange }
   | { kind: "master_unavailable" }
   | { kind: "not_bookable" }
   | { kind: "salon_suspended" }
@@ -173,6 +185,10 @@ export function CustomerBookingConfirmScreen() {
   const [notesOpen, setNotesOpen] = useState(false);
   const [note, setNote] = useState("");
   const [paymentChoice, setPaymentChoice] = useState<PaymentChoice>("onsite");
+  // DRF-1708 — что человек ВИДИТ и что уедет как quoted_*. `null` до
+  // ответа или когда котировка недоступна: тогда строки не рисуются и
+  // поля не шлются — прежнее поведение, а не выдуманное число.
+  const [quote, setQuote] = useState<BookingQuote | null>(null);
   const [noInitData] = useState<boolean>(() => channelIdentity() === "no_init_data");
 
   // Возврат (DRF-1493) — к выбору времени у того же мастера, то есть к
@@ -253,6 +269,25 @@ export function CustomerBookingConfirmScreen() {
     };
   }, []);
 
+  // DRF-1708 — котировка ребра мастер+услуга: цена и длительность, которые
+  // Ayla поставит на запись. Fail-soft: без ответа экран прежний.
+  const quoteMasterId = draft.masterId;
+  const quoteServiceId = draft.serviceId;
+  useEffect(() => {
+    if (!quoteMasterId || !quoteServiceId) return;
+    let cancelled = false;
+    getBookingQuote(quoteMasterId, quoteServiceId)
+      .then((q) => {
+        if (!cancelled) setQuote(q);
+      })
+      .catch(() => {
+        if (!cancelled) setQuote(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [quoteMasterId, quoteServiceId]);
+
   // Missing prerequisites — bounce back to catalog (founder cut #1
   // graceful degradation).
   if (!draft.serviceId || !draft.masterId || !draft.visitAt) {
@@ -272,6 +307,12 @@ export function CustomerBookingConfirmScreen() {
         visit_at: draft.visitAt,
         // AMD-002 / C7.4 — user's payment choice rides the create call.
         payment_required: paymentChoice === "online",
+        // DRF-1708 / D4 — ровно то, что показано в карточке выше; сервер
+        // сверит с применяемым внутри транзакции создания.
+        ...(quote?.price != null ? { quoted_price: quote.price } : {}),
+        ...(quote?.duration_minutes != null
+          ? { quoted_duration_minutes: quote.duration_minutes }
+          : {}),
       });
       // C7.4 — online choice: create the two-stage payment right after
       // the booking and open the checkout webview. A payment-create
@@ -319,6 +360,14 @@ export function CustomerBookingConfirmScreen() {
         // surfaces cannot drift apart. We branch on the slug only —
         // never on the prose, never on the status.
         setHandoff({ text: e.detail });
+        setSubmitting(false);
+        return;
+      }
+      const change = e instanceof ApiError ? quoteChangeOf(e) : null;
+      if (change) {
+        // DRF-1708 — не поломка: то, что человек видел, уже не действует.
+        // Без error-haптики — здесь ему предстоит решить, а не чинить.
+        setErr({ kind: "quote_changed", change });
         setSubmitting(false);
         return;
       }
@@ -496,10 +545,22 @@ export function CustomerBookingConfirmScreen() {
           <dd>{draft.masterName || "—"}</dd>
           <dt>Время</dt>
           <dd>{formatVisitFull(draft.visitAt)}</dd>
-          {/* Price omitted until backend supplies a per-slot price
-              snapshot. Founder cut #2: pricing transparency
-              expansion is post-pilot — strict «что/где/когда/цена»
-              is preserved by rendering the value when present. */}
+          {/* DRF-1708 — длительность и цена из котировки ребра: то, что
+              здесь показано, уезжает как quoted_* и сверяется сервером.
+              Неизвестное не рисуется — никакого числа из воздуха.
+              Прежнее «post-pilot» отменено доктриной 12.09. */}
+          {quote?.duration_minutes != null && (
+            <>
+              <dt>Длительность</dt>
+              <dd data-testid="confirm-duration">{formatDuration(quote.duration_minutes)}</dd>
+            </>
+          )}
+          {quote?.price != null && (
+            <>
+              <dt>Цена</dt>
+              <dd data-testid="confirm-price">{formatMoney(quote.price)}</dd>
+            </>
+          )}
         </dl>
       </div>
 
@@ -621,6 +682,47 @@ export function CustomerBookingConfirmScreen() {
                 it would invite the person to hammer a closed door. */}
             Посмотреть другие услуги
           </button>
+        </div>
+      )}
+
+      {/* DRF-1708 / D4 — MATERIAL_CHANGE: показать, что было и что стало,
+          и попросить новое подтверждение. `role="status"`, не alert:
+          ничего не сломалось — человеку предстоит решить. «Подтвердить с
+          новыми условиями» переписывает карточку применяемым значением;
+          сама запись создаётся только следующим явным «Записаться». */}
+      {err?.kind === "quote_changed" && (
+        <div className="callout" role="status" data-testid="quote-changed">
+          <p style={{ margin: 0 }}>
+            {err.change.field === "price"
+              ? `Пока ты выбирала, цена изменилась: было ${formatMoney(err.change.quoted)}, стало ${formatMoney(err.change.applied)}.`
+              : `Пока ты выбирала, длительность изменилась: было ${formatDuration(Number(err.change.quoted))}, стало ${formatDuration(Number(err.change.applied))}.`}
+            {" "}Запись не создана.
+          </p>
+          <div style={{ display: "flex", gap: "var(--s-2)", marginTop: "var(--s-3)", flexWrap: "wrap" }}>
+            <button
+              type="button"
+              className="btn-secondary"
+              onClick={() => {
+                const c = err.change;
+                setQuote((q) => ({
+                  price: c.field === "price" ? String(c.applied) : (q?.price ?? null),
+                  duration_minutes:
+                    c.field === "duration_minutes" ? Number(c.applied) : (q?.duration_minutes ?? null),
+                  source: q?.source ?? "edge",
+                }));
+                setErr(null);
+              }}
+            >
+              Подтвердить с новыми условиями
+            </button>
+            <button
+              type="button"
+              className="btn-secondary"
+              onClick={() => navigate(`/customer/masters/${draft.masterId}/slots`)}
+            >
+              Выбрать другое время
+            </button>
+          </div>
         </div>
       )}
 
