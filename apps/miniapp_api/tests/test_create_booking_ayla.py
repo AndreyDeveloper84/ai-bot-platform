@@ -115,7 +115,10 @@ def bot_user(tenant) -> BotUser:
         channel="max",
         channel_user_id="12345",
         chat_id="12345",
+        # A LINKED person: a real key, of known real sort (DRF-1790,
+        # 12.09.2026). A key without a sort is «unknown» and is asked again.
         ayla_user_id=AYLA_UID,
+        ayla_user_id_is_proxy=False,
     )
 
 
@@ -193,13 +196,13 @@ def stub_resolve(monkeypatch) -> Any:
     """
 
     calls: list[str] = []
-    state: dict[str, Any] = {"uuid": uuid.uuid4(), "error": None}
+    state: dict[str, Any] = {"uuid": uuid.uuid4(), "error": None, "is_proxy": True}
 
     def _fake(external_user_id: str) -> ResolvedIdentity:
         calls.append(external_user_id)
         if state["error"] is not None:
             raise state["error"]
-        return ResolvedIdentity(ayla_user_id=state["uuid"], is_proxy=True)
+        return ResolvedIdentity(ayla_user_id=state["uuid"], is_proxy=state["is_proxy"])
 
     monkeypatch.setattr(
         "apps.integrations.ayla.identity_client.resolve_identity", _fake, raising=True
@@ -365,15 +368,39 @@ class TestIdentityResolve:
     def test_second_booking_costs_no_network(
         self, client, tenant, service, master, stub_client, stub_resolve
     ) -> None:
+        """J-O3: a linked person does not go to Ayla twice.
+
+        12.09.2026 (DRF-1790): «linked» means the catalog answered a REAL
+        key. The stub used to answer a proxy here and the test still passed
+        — because a proxy key was cached forever, which is the hole
+        DRF-1790 closes. A proxy answer is now asked again (next test).
+        """
         BotUser.all_tenants.create(
             tenant=tenant, channel="max", channel_user_id="777", ayla_user_id=None
         )
+        stub_resolve.state["is_proxy"] = False
 
         _post_as(client, service, master, user_id="777")
         _post_as(client, service, master, user_id="777", extra={"payment_required": True})
 
         assert len(stub_client.calls) == 2
         assert len(stub_resolve.calls) == 1  # resolved once, then cache_hit
+
+    def test_a_proxy_answer_is_asked_again_on_the_next_booking(
+        self, client, tenant, service, master, stub_client, stub_resolve
+    ) -> None:
+        """The other side of J-O3 (DRF-1790): a proxy key is not a link, so the
+        second dependent action asks the catalog again — one call per
+        dependent action, never on «hello»."""
+        BotUser.all_tenants.create(
+            tenant=tenant, channel="max", channel_user_id="778", ayla_user_id=None
+        )
+
+        _post_as(client, service, master, user_id="778")
+        _post_as(client, service, master, user_id="778", extra={"payment_required": True})
+
+        assert len(stub_client.calls) == 2
+        assert len(stub_resolve.calls) == 2
 
     def test_already_linked_user_never_resolves(
         self, client, bot_user, service, master, stub_client, stub_resolve
