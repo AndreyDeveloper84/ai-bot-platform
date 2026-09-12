@@ -204,6 +204,45 @@ export type GoalSelectBody =
       source_channel: "miniapp";
     };
 
+/**
+ * DRF-1751 — граница C03 (макет P23): «не спрашиваем бюджет, район, время,
+ * мастера, салон, акции, оплату». Сервер держит её своим сторожем; экран
+ * — отрицательной стражей на `step`: шаг с таким ключом вопросом не
+ * рисуется и логируется. Один список с сервером.
+ */
+export const C03_FORBIDDEN_STEP_KEYS: ReadonlySet<string> = new Set([
+  "budget",
+  "price",
+  "district",
+  "distance",
+  "time",
+  "date",
+  "master",
+  "rating",
+  "salon",
+  "discount",
+  "promo",
+  "payment",
+]);
+
+export function isOutsideC03Boundary(item: MissingItem): boolean {
+  return typeof item.step === "string" && C03_FORBIDDEN_STEP_KEYS.has(item.step);
+}
+
+/**
+ * Документ без вопросов за границей C03. Тот, что за ней, — не рисуется и
+ * называется в консоли: молча выкинуть было бы вторым способом спрятать
+ * нарушение.
+ */
+export function withinC03Boundary(doc: DecisionContext): DecisionContext {
+  const outside = doc.missing.filter(isOutsideC03Boundary);
+  if (outside.length === 0) return doc;
+  for (const item of outside) {
+    console.warn(`[c03-boundary] шаг «${item.step}» за границей C03 — вопрос не показан`);
+  }
+  return { ...doc, missing: doc.missing.filter((item) => !isOutsideC03Boundary(item)) };
+}
+
 /** GET /decision-context — current decision-context document. */
 export const fetchDecisionContext = async (): Promise<DecisionContext> => {
   const env = await request<DecisionContextEnvelope>("/decision-context", {
