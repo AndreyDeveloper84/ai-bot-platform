@@ -875,6 +875,16 @@ a {
 .master-card__distance {
   font-size: var(--font-size-100);
   color: var(--c-text-secondary);
+/* DRF-1778 — «Другие специалисты» с карточки мастера: тихая ссылка под
+   блоком слотов; число отзывов — тем же вторичным цветом, что рейтинг. */
+.customer-master__others {
+  margin: var(--s-3) 0;
+}
+
+.customer-master__reviews,
+.master-card__reviews {
+  color: var(--c-text-secondary);
+  font-weight: 400;
 }
 
 .goal-select__prompt {
