@@ -7250,3 +7250,131 @@ a {
   flex-wrap: wrap;
   gap: var(--s-2);
 }
+
+/* DRF-1807 — экран 01 «всё готово»: чек-лист readiness и бар без
+   процентов. Нижней навигации на экране нет (макет §7). */
+.setup-landing__title {
+  margin: 0 0 var(--s-2);
+  font-size: var(--font-size-400);
+  font-weight: 700;
+  color: var(--c-text-primary);
+}
+
+.setup-landing__lead {
+  margin: 0 0 var(--s-2);
+  font-size: var(--font-size-200);
+  color: var(--c-text-secondary);
+}
+
+.setup-landing__bar {
+  height: 6px;
+  margin: var(--s-4) 0;
+  background: var(--c-surface-2);
+  border-radius: 999px;
+  overflow: hidden;
+}
+
+.setup-landing__bar-fill {
+  height: 100%;
+  background: var(--c-accent);
+  border-radius: 999px;
+}
+
+.setup-landing__section-title {
+  margin: 0 0 var(--s-2);
+  font-size: var(--font-size-100);
+  font-weight: 600;
+  color: var(--c-text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.setup-landing__list {
+  list-style: none;
+  margin: 0 0 var(--s-4);
+  padding: 0;
+}
+
+.setup-landing__item + .setup-landing__item {
+  border-top: 1px solid var(--c-divider);
+}
+
+.setup-landing__row {
+  display: flex;
+  align-items: center;
+  gap: var(--s-3);
+  width: 100%;
+  min-height: 44px;
+  padding: var(--s-3) 0;
+  background: none;
+  border: 0;
+  text-align: left;
+  font-size: var(--font-size-200);
+  color: var(--c-text-primary);
+}
+
+.setup-landing__row--tappable {
+  cursor: pointer;
+}
+
+.setup-landing__mark {
+  flex: 0 0 auto;
+  width: 24px;
+  text-align: center;
+  color: var(--c-accent);
+}
+
+.setup-landing__label {
+  flex: 1 1 auto;
+}
+
+.setup-landing__state {
+  flex: 0 0 auto;
+  font-size: var(--font-size-100);
+  color: var(--c-text-secondary);
+}
+
+.setup-landing__item--missing .setup-landing__state {
+  color: var(--c-accent-pressed);
+  font-weight: 600;
+}
+
+.setup-landing__identity,
+.setup-landing__note {
+  margin: 0 0 var(--s-3);
+  font-size: var(--font-size-100);
+  color: var(--c-text-secondary);
+}
+
+.setup-landing__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s-2);
+  margin-top: var(--s-4);
+}
+
+/* DRF-1807 — карточка «Продолжить настройку» в «Моём дне». */
+.setup-card {
+  padding: var(--s-3);
+  background: var(--c-surface-1);
+  border: 1px solid var(--c-divider);
+  border-radius: var(--r-md);
+}
+
+.setup-card__title {
+  margin: 0 0 var(--s-2);
+  font-size: var(--font-size-200);
+  font-weight: 600;
+  color: var(--c-text-primary);
+}
+
+.setup-card__list {
+  margin: 0 0 var(--s-3);
+  padding-left: var(--s-4);
+  font-size: var(--font-size-200);
+  color: var(--c-text-secondary);
+}
+
+.setup-card__item + .setup-card__item {
+  margin-top: var(--s-1);
+}

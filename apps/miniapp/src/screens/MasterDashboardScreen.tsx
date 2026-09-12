@@ -60,6 +60,7 @@ import {
 } from "../lib/max-sdk";
 import { MasterTabBar } from "../components/MasterTabBar";
 import { PayoutPreviewCard } from "../components/PayoutPreviewCard";
+import { SetupProgressCard } from "../components/SetupProgressCard";
 import {
   formatDateLong,
   formatRelativePast,
@@ -344,6 +345,9 @@ export function MasterDashboardScreen() {
       {isStale ? (
         <StaleBanner onRetry={() => load(true)} refreshing={refreshing} />
       ) : null}
+
+      {/* DRF-1807 — карточка «Продолжить настройку», пока readiness не закрыт. */}
+      <SetupProgressCard />
 
       {isDayDone ? (
         <DayDoneSection

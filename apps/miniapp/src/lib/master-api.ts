@@ -257,6 +257,56 @@ export interface MasterMeResponse {
 export const getMasterMe = (): Promise<MasterMeResponse> =>
   request("/me", { method: "GET" });
 
+// --- M2/M15 onboarding readiness (DRF-1794 / DRF-1807) --------------------
+// Mirrors apps/master_api/services/onboarding_readiness.py. Проекция по
+// фактам: ничего не хранится, экран ничего не вычисляет — только рисует.
+
+export type ReadinessItemKey = "services" | "location" | "hours" | "profile";
+/**
+ * `done` / `missing` — факт; `unknown` — канон не ответил (`reason` — имя
+ * исключения): экран НЕ пишет «настройте», а показывает «не удалось
+ * прочитать»; `unavailable` — возможности ещё нет (`capability_not_built`):
+ * пункт не рисуется вовсе.
+ */
+export type ReadinessItemState = "done" | "missing" | "unknown" | "unavailable";
+
+export interface ReadinessItem {
+  key: ReadinessItemKey | string;
+  state: ReadinessItemState | string;
+  detail: Record<string, unknown>;
+  reason: string | null;
+  deep_link: string;
+}
+
+/** Связь личности — условие ПУБЛИКАЦИИ (ruling 6), не настройки. */
+export type IdentityState = "linked" | "pending" | "rejected" | "unlinked";
+
+export interface OnboardingReadiness {
+  ready: boolean;
+  blocking: string[];
+  items: ReadinessItem[];
+  identity: { state: IdentityState | string; link_status: string | null };
+  setup_state: "READY" | "SETUP_PENDING" | string;
+  sale_block: string | null;
+}
+
+export const getOnboardingReadiness = (): Promise<OnboardingReadiness> =>
+  request("/onboarding/readiness", { method: "GET" });
+
+/** Пункты, которые экран рисует: всё, кроме `unavailable`. */
+export const drawnReadinessItems = (items: ReadinessItem[]): ReadinessItem[] =>
+  items.filter((item) => item.state !== "unavailable");
+
+/**
+ * Бар готовности — доля закрытых пунктов среди нарисованных. Число не
+ * показывается словами: ни процентов, ни «N из M» (макет: «no fake percent
+ * complete»; доктрина 12.09 — счётчик как обещание времени).
+ */
+export const readinessFill = (items: ReadinessItem[]): { done: number; total: number } => {
+  const drawn = drawnReadinessItems(items);
+  return { done: drawn.filter((item) => item.state === "done").length, total: drawn.length };
+};
+
 /**
  * PATCH master profile — bio only (JSON path).
  *
