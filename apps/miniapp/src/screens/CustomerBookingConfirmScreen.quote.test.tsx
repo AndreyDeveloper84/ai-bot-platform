@@ -67,11 +67,15 @@ const CREATED = {
   },
 };
 
+/** В будущем относительно часов теста (DRF-1776): прошедшее время экран
+ * считает устаревшим подтверждением и прячет «Записаться». */
+const FUTURE_VISIT = new Date(Date.now() + 7 * 24 * 3600 * 1000).toISOString();
+
 function seedDraft() {
   resetBooking();
   setService("svc-1", "Маникюр");
   setMaster("mst-1", "Анна Соколова");
-  setVisitAt("2026-08-01T16:00:00+03:00");
+  setVisitAt(FUTURE_VISIT);
 }
 
 function renderScreen() {

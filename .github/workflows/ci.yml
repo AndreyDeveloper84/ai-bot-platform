@@ -37,9 +37,9 @@ on:
     branches:
       - main
       - dev
-    paths-ignore:
-      - "docs/**"
-      - "**/*.md"
+    # No `paths-ignore` here on purpose (DRF-1675, 12.09.2026): the docs-only
+    # case is decided by the `changes` job inside this run, so that there is
+    # ONE workflow named `ci` and one run per push. See `changes` below.
   workflow_dispatch:
 
 # DRF-1377 — keyed on the PR number, and cancelling restricted to PRs.
@@ -78,13 +78,78 @@ on:
 # What a superseded run loses is a verdict for an intermediate commit that
 # never started. That commit is contained in the head, and the head is judged.
 #
-# Not `github.workflow`: `ci-docs-skip.yml` is also named `ci`, so that
-# expression is ambiguous across the two files. The literal prefix is not.
+# The literal prefix, not `github.workflow`: until 12.09.2026 a twin file
+# (`ci-docs-skip.yml`) was also named `ci` and the expression was ambiguous;
+# the twin is gone (DRF-1675), the literal stays because it is unambiguous.
 concurrency:
   group: ci-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  # ---------------------------------------------------------------------
+  # DRF-1675 (12.09.2026) — one run per push.
+  #
+  # Until today docs-only PRs were served by a sister workflow
+  # (`ci-docs-skip.yml`, same `name: ci`, same job names) that triggered on
+  # `paths: docs/**` and SELF-CANCELLED when the PR turned out to be mixed.
+  # `paths:` is OR-semantics, so every PR touching one .md next to code
+  # fired both workflows in the same second; the twin cancelled itself and
+  # left a *cancelled* check run named exactly like the required one on
+  # the PR head. Branch protection reads the newest check run per name —
+  # a cancelled twin, created a tick later than the real one, is what it
+  # reads. Measured 12.09: 8 of 15 twin runs cancelled, 4 PRs BLOCKED at
+  # green mandatory checks, each freed by re-running the real run by hand
+  # (which merely made it the newer one).
+  #
+  # Fix: detect the change set HERE, in the one and only `ci` workflow,
+  # and skip the engineering jobs on a docs-only PR. A job skipped by `if:`
+  # still reports — as "skipped", which branch protection accepts for a
+  # required check — so docs-only PRs land and mixed PRs get exactly one
+  # verdict from exactly one run. `paths-ignore` stays on `push`: a
+  # docs-only push to `dev` still costs nothing and, since `deploy-dev`
+  # keys off this workflow's conclusion, still deploys nothing.
+  #
+  # Same logic as the `miniapp` job below (which detected its own change
+  # set already) and as the deleted twin — NUL-separated names, so a
+  # Cyrillic path never arrives C-quoted (PR #1504).
+  # ---------------------------------------------------------------------
+  changes:
+    name: change set (docs-only or code)
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    outputs:
+      code: ${{ steps.detect.outputs.code }}
+    steps:
+      - uses: actions/checkout@v7
+        if: github.event_name == 'pull_request'
+        with:
+          fetch-depth: 0
+
+      - name: Detect docs-only vs code
+        id: detect
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT" != "pull_request" ]; then
+            echo "code=true" >> "$GITHUB_OUTPUT"
+            echo "event=$EVENT — not a pull request, engineering jobs run."
+            exit 0
+          fi
+          git fetch origin "$BASE_REF" --depth=1
+          BASE_SHA="$(git rev-parse "origin/$BASE_REF")"
+          CHANGED="$(git diff --name-only -z "$BASE_SHA"...HEAD | tr '\0' '\n' || true)"
+          NON_DOCS="$(printf '%s\n' "$CHANGED" | grep -vE '^$|^docs/|\.md$' || true)"
+          if [ -z "$NON_DOCS" ]; then
+            echo "code=false" >> "$GITHUB_OUTPUT"
+            echo "docs-only PR — engineering jobs are skipped (they report 'skipped', which satisfies branch protection)."
+          else
+            echo "code=true" >> "$GITHUB_OUTPUT"
+            echo "code changes present:"
+            printf '%s\n' "$NON_DOCS"
+          fi
+
 
   # ---------------------------------------------------------------------
   # DRF-1349 — WHAT THIS FILE LOOKED LIKE BEFORE, AND WHY IT CHANGED.
@@ -166,6 +231,8 @@ jobs:
   secret-scan:
     name: secret scan (detect-secrets)
     runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     # 3m37s measured (above). 15 is ~4x: enough to absorb an apt/pip
     # stall, small enough that a hang is cheap.
     timeout-minutes: 15
@@ -260,6 +327,8 @@ jobs:
   checks:
     name: lint + guards + cross-cutting tests + mypy
     runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     # Measured parts (above): 22s lint+guards, 4s smoke, 3m20s tests/, 2s
     # contract, 1m05s eventbus, 37s mypy, ~36s setup = ~6.5 min, plus ~1
     # min of census. 25 is ~3x that.
@@ -846,6 +915,8 @@ jobs:
   apps-shard:
     name: apps shard ${{ matrix.shard.id }}
     runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     # ~8 min estimated (above), against ~29 min for the unsharded step.
     # 30 is ~3.7x the estimate.
     #
@@ -1320,7 +1391,7 @@ jobs:
   test:
     name: pytest + ruff + mypy
     runs-on: ubuntu-latest
-    needs: [secret-scan, checks, apps-shard]
+    needs: [changes, secret-scan, checks, apps-shard]
     if: always()
     # Downloads a handful of small XML files and adds up integers.
     timeout-minutes: 10
@@ -1459,10 +1530,20 @@ jobs:
       - name: Verdict
         if: always()
         env:
+          CODE: ${{ needs.changes.outputs.code }}
+          R_CHANGES: ${{ needs.changes.result }}
           R_SECRET_SCAN: ${{ needs.secret-scan.result }}
           R_CHECKS: ${{ needs.checks.result }}
           R_APPS_SHARD: ${{ needs.apps-shard.result }}
         run: |
+          # DRF-1675: on a docs-only PR the engineering jobs were skipped by
+          # design and this required check reports OK. Only when `changes`
+          # itself succeeded and said so — a failed detection is red, not a
+          # free pass.
+          if [ "$R_CHANGES" = "success" ] && [ "$CODE" = "false" ]; then
+            echo "OK — docs-only PR: secret-scan, checks and apps shards skipped by the changes gate."
+            exit 0
+          fi
           bad=0
           for pair in "secret-scan=$R_SECRET_SCAN" "checks=$R_CHECKS" "apps-shard=$R_APPS_SHARD"; do
             job="${pair%%=*}"
@@ -1523,10 +1604,10 @@ jobs:
           fetch-depth: 0
 
       # Per-job `paths:` filters do not exist in GitHub Actions — only
-      # per-workflow. Rather than split this into a sister workflow (and
-      # inherit the required-check-never-reports trap that ci-docs-skip.yml
-      # exists to work around), detect the change set inside the job, the
-      # same way ci-docs-skip.yml does. The job therefore ALWAYS reports a
+      # per-workflow. Rather than split this into a sister workflow (the
+      # required-check-never-reports trap, and — DRF-1675 — the cancelled-twin
+      # trap), detect the change set inside the job, the same way the
+      # `changes` job at the top does. The job therefore ALWAYS reports a
       # verdict and is safe to mark as a required check, while the
       # expensive steps only run when apps/miniapp/** actually changed.
       #

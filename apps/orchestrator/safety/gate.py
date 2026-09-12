@@ -67,7 +67,7 @@ from dataclasses import dataclass, field
 
 import logging
 
-from apps.orchestrator.safety.outbound import evaluate_outbound
+from apps.orchestrator.safety.outbound import evaluate_action_promise, evaluate_outbound
 from apps.orchestrator.safety.pre_check import SafetyResult, SafetyVerdict, pre_check
 
 logger = logging.getLogger(__name__)
@@ -182,8 +182,18 @@ def guard_outbound(
     surface: str,
     bot_user: object | None = None,
     trace_id: object | None = None,
+    acted: bool | None = None,
 ) -> OutboundGuardOutcome:
     """Check a drafted reply on its way to a person; emit once if it is blocked.
+
+    ``acted`` (DRF-1827) — состоялось ли на этом ходу действие: сработал ли
+    инструмент, чьим результатом является черновик. ``False`` включает класс
+    ``action_promise`` (см. ``outbound.evaluate_action_promise``): проза,
+    обещающая «проверю / поищу / запускаю / секундочку», не выпускается —
+    вместо неё уходит, чего ассистент не умеет и что может прямо сейчас.
+    ``None`` (умолчание) — вызывающий не знает; класс не применяется, и все
+    прежние вызывающие видят прежнее поведение. ``True`` — действие было,
+    и «покажу ещё» после сработавшего show_masters честно.
 
     ``surface`` is the free-form name of the place the reply was about to
     leave from (``"max"``, ``"telegram"``, ``"concierge"``). It rides in the
@@ -201,6 +211,8 @@ def guard_outbound(
     """
 
     verdict = evaluate_outbound(text)
+    if verdict.allowed and acted is False:
+        verdict = evaluate_action_promise(text)
     if verdict.allowed:
         return OutboundGuardOutcome(allowed=True, text=verdict.text)
 

@@ -112,8 +112,15 @@ def grant_consent(bot_user: BotUser, *, consent_type: str | None = None) -> Cons
     )
 
 
-def make_consented_user(tenant: Tenant, **kwargs) -> BotUser:
-    """A BotUser that clears the consent gate unless a kwarg says otherwise."""
+def make_consented_user(tenant: Tenant, *, marketing: bool = True, **kwargs) -> BotUser:
+    """A BotUser that clears the consent gate unless a kwarg says otherwise.
+
+    Two records, not one: the beat is PROMO class (DRF-1731,
+    ``apps.notifications.proactive.PROACTIVE_SENDERS``), so a person who
+    only gave the 152-ФЗ baseline is *not* somebody it may write to. The
+    delivery suite below needs recipients who flipped «Акции и
+    предложения» as well; ``marketing=False`` builds the one who did not.
+    """
     kwargs.setdefault("channel", "max")
     kwargs.setdefault("channel_user_id", "bu-fu-1")
     kwargs.setdefault("chat_id", "chat-fu-1")
@@ -122,6 +129,8 @@ def make_consented_user(tenant: Tenant, **kwargs) -> BotUser:
     user = BotUser.all_tenants.create(tenant=tenant, **kwargs)
     if user.consent_at is not None:
         grant_consent(user)
+        if marketing:
+            grant_consent(user, consent_type=ConsentRecord.ConsentType.MARKETING.value)
     return user
 
 
@@ -1257,6 +1266,60 @@ class TestConsentGate:
             result = send_post_visit_followups()
         mock_send.assert_not_called()
         assert result["skipped_blocked"] == 1
+        assert [d.reason for d in followups_mod.plan_post_visit_followups()] == [
+            "consent_withdrawn"
+        ]
+
+    def test_withdrawn_marketing_consent_is_not_written_to(
+        self, tenant: Tenant, bot_user: BotUser
+    ) -> None:
+        """DRF-1731, 38-ФЗ ст. 18: the toggle went off → zero sends, this tick.
+
+        PERSONAL_DATA stays active and ``consent_at`` stays set — only the
+        MARKETING record carries ``withdrawn_at``. A gate that read the
+        152-ФЗ baseline alone (the beat until DRF-1731) would still send.
+        Run through the TASK to the ``send_message`` mock, not through
+        the predicate: the proof is «no message», not «a False».
+        """
+        ConsentRecord.all_tenants.filter(
+            bot_user=bot_user, consent_type=ConsentRecord.ConsentType.MARKETING.value
+        ).update(withdrawn_at=NOW_UTC)
+        bot_user.refresh_from_db()
+        assert bot_user.consent_at is not None
+        # POSITIVE control: the same person WITH the toggle is written to.
+        self._remind(tenant, bot_user)
+        with patch("apps.bookings.followups.send_message") as mock_send:
+            result = send_post_visit_followups()
+        mock_send.assert_not_called()
+        assert result["skipped_blocked"] == 1
+        assert [d.reason for d in followups_mod.plan_post_visit_followups()] == [
+            "no_marketing_consent"
+        ]
+
+    def test_never_granted_marketing_consent_is_not_written_to(self, tenant: Tenant) -> None:
+        """§35 п.17: an unproven marketing consent is an absent one."""
+        user = make_consented_user(tenant, marketing=False)
+        self._remind(tenant, user)
+        with patch("apps.bookings.followups.send_message") as mock_send:
+            result = send_post_visit_followups()
+        mock_send.assert_not_called()
+        assert result["skipped_blocked"] == 1
+        assert [d.reason for d in followups_mod.plan_post_visit_followups()] == [
+            "no_marketing_consent"
+        ]
+
+    def test_marketing_consent_alone_does_not_outrank_the_152fz_baseline(
+        self, tenant: Tenant, bot_user: BotUser
+    ) -> None:
+        """Order of grounds: baseline first. With PERSONAL_DATA withdrawn
+        and MARKETING active the slug is still ``consent_withdrawn``."""
+        ConsentRecord.all_tenants.filter(
+            bot_user=bot_user, consent_type=ConsentRecord.ConsentType.PERSONAL_DATA.value
+        ).update(withdrawn_at=NOW_UTC)
+        self._remind(tenant, bot_user)
+        with patch("apps.bookings.followups.send_message") as mock_send:
+            send_post_visit_followups()
+        mock_send.assert_not_called()
         assert [d.reason for d in followups_mod.plan_post_visit_followups()] == [
             "consent_withdrawn"
         ]

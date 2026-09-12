@@ -178,6 +178,30 @@ class TestOperatorRejectsWithATaxonomyAndASafeMessage:
         result.master.refresh_from_db()
         assert result.master.ayla_user_id is None
 
+    def test_reject_after_a_real_link_closes_publication_but_keeps_the_key(
+        self, monkeypatch, result, bot_user, operator
+    ):
+        """DRF-1795 (ruling 6): отказ оператора после LINKED — ключ остаётся
+        как аудит, а публикация закрывается по СТАТУСУ, не по столбцу.
+
+        Обе половины на одной строке: после LINKED — READY, после
+        REJECTED с тем же ключом — SETUP_PENDING/ayla_unlinked.
+        """
+
+        link = svc.open_link(result.master, bot_user=bot_user, tenant=result.tenant)
+        key = uuid.uuid4()
+        _patch_resolver(monkeypatch, returns=_Identity(key, is_proxy=False))
+        assert svc.confirm_by_operator(link, bot_user=bot_user, operator=operator).linked is True
+        result.master.refresh_from_db()
+        assert result.setup_state is SoloSetupState.READY
+
+        svc.reject_by_operator(link, operator=operator, reason="identity_unverifiable")
+
+        result.master.refresh_from_db()
+        assert result.master.ayla_user_id == key  # ключ не стёрт — предмет теста
+        assert result.setup_state is SoloSetupState.SETUP_PENDING
+        assert result.blocked_by == "ayla_unlinked"
+
     def test_the_recovery_text_names_no_reason(self):
         low = svc.REJECTED_RECOVERY_TEXT.lower()
         assert "поддержк" in low

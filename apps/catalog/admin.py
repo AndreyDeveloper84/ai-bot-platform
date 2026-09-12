@@ -411,7 +411,7 @@ class CatalogMasterAdmin(_MirrorAdminBase):
     readonly_fields = _SYNC_MANAGED_FIELDS + _PLATFORM_FIELDS
 
     def get_queryset(self, request):  # type: ignore[no-untyped-def]
-        return self.model.all_tenants.select_related("tenant")
+        return self.model.all_tenants.select_related("tenant", "identity_link")
 
     def has_change_permission(self, request: HttpRequest, obj=None) -> bool:
         # Единственный из зеркал, где право на change живое: без него

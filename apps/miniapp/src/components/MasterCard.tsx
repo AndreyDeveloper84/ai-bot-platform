@@ -1,6 +1,6 @@
 import type { Master } from "../lib/api";
 import { formatDistance } from "../lib/nearby";
-import { publicRating } from "../lib/rating";
+import { publicRating, reviewCountLabel } from "../lib/rating";
 
 interface Props {
   master: Master;
@@ -37,6 +37,9 @@ export function MasterCard({ master, selected, onSelect }: Props) {
         {rating !== null && (
           <div className="master-card__rating" aria-label={`Рейтинг ${rating.toFixed(1)}`}>
             ★ {rating.toFixed(1)}
+            {reviewCountLabel(master.review_count) && (
+              <span className="master-card__reviews"> ({reviewCountLabel(master.review_count)})</span>
+            )}
           </div>
         )}
         {/* DRF-1707 — расстояние с провода каталога; неизвестное не рисуется. */}

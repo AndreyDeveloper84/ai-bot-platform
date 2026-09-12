@@ -90,7 +90,9 @@ def tenant() -> Tenant:
 
 @pytest.fixture
 def customer(tenant: Tenant) -> BotUser:
-    """Клиент, прошедший 152-ФЗ: иначе запрос отзыва режет consent-гейт."""
+    """Клиент, прошедший 152-ФЗ и давший рекламное согласие: иначе запрос
+    отзыва режет consent-гейт раньше, чем дело доходит до ``completed_by``
+    (пост-визитный отклик — PROMO-класс, DRF-1731)."""
     user = BotUser.all_tenants.create(
         tenant=tenant,
         channel="max",
@@ -104,6 +106,13 @@ def customer(tenant: Tenant) -> BotUser:
         tenant=tenant,
         bot_user=user,
         consent_type=ConsentRecord.ConsentType.PERSONAL_DATA.value,
+        granted=True,
+        source="test:cbgate",
+    )
+    ConsentRecord.all_tenants.create(
+        tenant=tenant,
+        bot_user=user,
+        consent_type=ConsentRecord.ConsentType.MARKETING.value,
         granted=True,
         source="test:cbgate",
     )

@@ -18,6 +18,7 @@ import pytest
 
 from apps.llm.protocol import CompletionResult, ToolCall
 from apps.orchestrator import concierge
+from apps.orchestrator.safety.outbound import ACTION_PROMISE_TEXT
 from apps.orchestrator.concierge import (
     _looks_like_promise_without_tool,
     generate_concierge_reply,
@@ -275,9 +276,12 @@ class TestForcedToolRetry:
 
         assert provider.complete.await_count == 2
         assert _tool_choices(provider) == [None, "required"]
-        # The FIRST answer is kept: shipping the second tool-less reply
-        # would buy the client nothing.
-        assert "подберу" in reply.text
+        # The FIRST answer is kept as the draft: shipping the second tool-less
+        # reply would buy the client nothing. DRF-1827 — but a promise with no
+        # tool behind it does not reach the person either: the outbound guard
+        # swaps it for the honest line (not X / can Y). What survives of the
+        # retry is «no third call», not the promise itself.
+        assert reply.text == ACTION_PROMISE_TEXT
 
     def test_gate_is_tool_agnostic_not_bound_to_show_masters(self, monkeypatch) -> None:
         """DRF-1268 — the retry must not be wired to one tool name.
@@ -386,7 +390,10 @@ class TestForcedToolRetry:
             trace_id=TRACE_ID,
         )
 
-        assert "подберу" in reply.text
+        # DRF-1827 — the draft we already have is a promise nobody kept; the
+        # guard ships the honest line instead of the promise. The retry's
+        # failure still costs nothing beyond that: one call, no third.
+        assert reply.text == ACTION_PROMISE_TEXT
         assert provider.complete.await_count == 2
 
     def test_provider_ignoring_the_force_keeps_the_first_answer(self, monkeypatch) -> None:
@@ -412,7 +419,9 @@ class TestForcedToolRetry:
             trace_id=TRACE_ID,
         )
 
-        assert "подберу" in reply.text
+        # DRF-1827 — the first answer is the one metered as used, but what the
+        # person sees is the honest line, not the ignored promise.
+        assert reply.text == ACTION_PROMISE_TEXT
         discarded, used = _metrics()
         # The discarded call is the FORCED one here, not the first.
         assert discarded.fallback_triggered is True

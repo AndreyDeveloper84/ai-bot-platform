@@ -79,6 +79,9 @@ def _patched(fake: _FakeHttpxClient):
     return patch("apps.integrations.ayla.profile_client.httpx.Client", return_value=fake)
 
 
+_SUBJECT = "bot:max:900000001"
+
+
 class TestFetchProfileFields:
     def test_happy_path_returns_fields(self):
         fake = _FakeHttpxClient(
@@ -88,7 +91,7 @@ class TestFetchProfileFields:
             )
         )
         with _patched(fake):
-            fields = fetch_profile_fields(_USER_ID)
+            fields = fetch_profile_fields(_USER_ID, on_behalf_of=_SUBJECT)
         assert fields.display_name == "Ольга"
         assert fields.avatar_url == "https://cdn/a.jpg"
 
@@ -101,9 +104,25 @@ class TestFetchProfileFields:
             )
         )
         with _patched(fake):
-            fetch_profile_fields(_USER_ID)
+            fetch_profile_fields(_USER_ID, on_behalf_of=_SUBJECT)
         assert fake.last_call["url"] == f"https://ayla.test/api/v1/internal/users/{_USER_ID}/"
         assert fake.last_call["headers"]["Authorization"] == "Bearer tok"
+        # DRF-1709 (12.09.2026): the subject is named. Until this day the
+        # header was deliberately absent on this route — see the module.
+        assert fake.last_call["headers"]["X-External-User-ID"] == _SUBJECT
+
+    def test_an_unnamed_subject_is_refused_before_any_request(self):
+        """The catalog refuses an unnamed caller on this route; failing here
+        keeps the refusal local and keeps the wire free of a request that
+        cannot succeed. Positive guard: the fake never sees a call."""
+        fake = _FakeHttpxClient(
+            response=_FakeResponse(
+                status_code=200, payload={"display_name": "n", "avatar_url": "u"}
+            )
+        )
+        with _patched(fake), pytest.raises(ProfileFetchError):
+            fetch_profile_fields(_USER_ID, on_behalf_of="")
+        assert fake.last_call == {}
 
     def test_extra_fields_dropped(self):
         """PII §7: extra fields (phone/email) never propagate past the closed shape."""
@@ -119,32 +138,32 @@ class TestFetchProfileFields:
             )
         )
         with _patched(fake):
-            fields = fetch_profile_fields(_USER_ID)
+            fields = fetch_profile_fields(_USER_ID, on_behalf_of=_SUBJECT)
         assert not hasattr(fields, "phone")
         assert not hasattr(fields, "email")
 
     def test_config_error_when_token_missing(self, settings):
         settings.AYLA_INTERNAL_API_TOKEN = ""
         with pytest.raises(ProfileFetchError, match="AYLA_INTERNAL_API_TOKEN"):
-            fetch_profile_fields(_USER_ID)
+            fetch_profile_fields(_USER_ID, on_behalf_of=_SUBJECT)
 
     def test_404_raises_not_found(self):
         fake = _FakeHttpxClient(response=_FakeResponse(status_code=404, payload={}))
         with _patched(fake):
             with pytest.raises(ProfileFetchError, match="not_found"):
-                fetch_profile_fields(_USER_ID)
+                fetch_profile_fields(_USER_ID, on_behalf_of=_SUBJECT)
 
     def test_401_raises_auth(self):
         fake = _FakeHttpxClient(response=_FakeResponse(status_code=401, payload={}))
         with _patched(fake):
             with pytest.raises(ProfileFetchError, match="auth"):
-                fetch_profile_fields(_USER_ID)
+                fetch_profile_fields(_USER_ID, on_behalf_of=_SUBJECT)
 
     def test_5xx_raises_server(self):
         fake = _FakeHttpxClient(response=_FakeResponse(status_code=503, payload={}))
         with _patched(fake):
             with pytest.raises(ProfileFetchError, match="server"):
-                fetch_profile_fields(_USER_ID)
+                fetch_profile_fields(_USER_ID, on_behalf_of=_SUBJECT)
 
     def test_missing_keys_raises_malformed(self):
         """Key absent (not empty string) → refuse to overwrite the local mirror."""
@@ -153,7 +172,7 @@ class TestFetchProfileFields:
         )
         with _patched(fake):
             with pytest.raises(ProfileFetchError, match="missing keys"):
-                fetch_profile_fields(_USER_ID)
+                fetch_profile_fields(_USER_ID, on_behalf_of=_SUBJECT)
 
     def test_malformed_json_raises(self):
         fake = _FakeHttpxClient(
@@ -161,13 +180,13 @@ class TestFetchProfileFields:
         )
         with _patched(fake):
             with pytest.raises(ProfileFetchError, match="malformed_json"):
-                fetch_profile_fields(_USER_ID)
+                fetch_profile_fields(_USER_ID, on_behalf_of=_SUBJECT)
 
     def test_network_error_raises(self):
         fake = _FakeHttpxClient(raise_exc=httpx.ConnectTimeout("slow"))
         with _patched(fake):
             with pytest.raises(ProfileFetchError, match="network"):
-                fetch_profile_fields(_USER_ID)
+                fetch_profile_fields(_USER_ID, on_behalf_of=_SUBJECT)
 
     def test_circuit_opens_after_threshold(self, monkeypatch: pytest.MonkeyPatch):
         """5 consecutive 5xx → breaker opens; next call short-circuits."""
@@ -177,9 +196,9 @@ class TestFetchProfileFields:
         with _patched(fake):
             for _ in range(pc.CIRCUIT_FAILURE_THRESHOLD):
                 with pytest.raises(ProfileFetchError, match="server"):
-                    fetch_profile_fields(_USER_ID)
+                    fetch_profile_fields(_USER_ID, on_behalf_of=_SUBJECT)
             with pytest.raises(ProfileFetchError, match="circuit open"):
-                fetch_profile_fields(_USER_ID)
+                fetch_profile_fields(_USER_ID, on_behalf_of=_SUBJECT)
 
 
 def test_fake_response_json_roundtrips():

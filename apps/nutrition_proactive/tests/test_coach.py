@@ -19,6 +19,7 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 import pytest
+from django.utils import timezone as dj_timezone
 
 from apps.consent.models import ConsentRecord
 from apps.identity.models import BotUser
@@ -65,10 +66,23 @@ def grant_health(bot_user: BotUser) -> ConsentRecord:
     )
 
 
+def grant_marketing(bot_user: BotUser) -> ConsentRecord:
+    """The advertising consent (38-ФЗ ст. 18): a coach hint is PROMO class
+    (DRF-1731) — a tip nobody asked for that morning."""
+    return ConsentRecord.all_tenants.create(
+        tenant=bot_user.tenant,
+        bot_user=bot_user,
+        consent_type=ConsentRecord.ConsentType.MARKETING.value,
+        granted=True,
+        source="test:fixture",
+    )
+
+
 def coach_user(tenant: Tenant, **kwargs) -> BotUser:
     """A recipient who clears every gate the planner asks about."""
     user = make_user(tenant, **kwargs)
     grant_health(user)
+    grant_marketing(user)
     return user
 
 
@@ -193,6 +207,35 @@ class TestHealthBasis:
         monkeypatch.setattr("apps.consent.services.has_global_consent", boom)
         decisions = plan(user)
         assert only(decisions, user).reason == "no_health_consent"
+
+
+class TestMarketingBasis:
+    """DRF-1731: PROMO class — the advertising consent, by record, after
+    the health basis and before the subscription pref."""
+
+    def test_no_marketing_consent_blocks_a_health_consenting_person(self, tenant: Tenant) -> None:
+        user = make_user(tenant)
+        grant_health(user)  # baseline + special category, no advertising consent
+        assert only(plan(user), user).reason == "no_marketing_consent"
+
+    def test_withdrawn_marketing_consent_blocks_the_same_tick(self, tenant: Tenant) -> None:
+        user = coach_user(tenant)
+        # POSITIVE control first: with the toggle on, the planner gets past
+        # every consent question (whatever it decides later is not consent).
+        assert only(plan(user), user).reason not in (
+            "no_marketing_consent",
+            "no_health_consent",
+            "consent_withdrawn",
+        )
+        ConsentRecord.all_tenants.filter(
+            bot_user=user, consent_type=ConsentRecord.ConsentType.MARKETING.value
+        ).update(withdrawn_at=dj_timezone.now())
+        decision = only(plan(user), user)
+        assert decision.send is False
+        assert decision.reason == "no_marketing_consent"
+
+    def test_the_slug_is_in_the_surface_vocabulary(self) -> None:
+        assert "no_marketing_consent" in coach.BLOCK_REASONS
 
 
 class TestSubscriptionPref:
