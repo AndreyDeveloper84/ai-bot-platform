@@ -118,6 +118,13 @@ STRICT_OPT_OUT_PREFIXES = (
     # opt-out strict_block answered 400 TENANT_REQUIRED to every
     # legitimate booking.*/payment.*/billing.* delivery.
     "/api/v1/internal/events/",
+    # §7 D3 (DRF-1725) — бот-половина удаления аккаунта по просьбе
+    # исполнителя каталога. Тот же издатель, что у ingest выше: X-Tenant
+    # не шлёт, оболочки человека лежат в нескольких тенантах, сторож —
+    # HMAC ingest'а. Без opt-out strict-режим отвечал бы 400
+    # TENANT_REQUIRED раньше подписи, и COMPLETED в каталоге не наступал бы
+    # никогда.
+    "/api/v1/internal/privacy/",
 )
 
 # Exact paths (not prefixes) that opt out of strict mode.

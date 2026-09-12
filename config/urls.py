@@ -57,6 +57,12 @@ urlpatterns = [
         "api/v1/internal/events/",
         include("apps.eventbus.urls", namespace="eventbus_internal"),
     ),
+    # §7 D3 (DRF-1725) — бот-половина удаления аккаунта по просьбе
+    # исполнителя каталога; тот же HMAC, что у ingest выше.
+    path(
+        "api/v1/internal/privacy/",
+        include("apps.identity.internal_urls", namespace="identity_internal"),
+    ),
     # Phase 1 / CH1 (DRF-848) — Telegram channel adapter webhook.
     # Tenant resolution happens from the URL slug, not the X-Tenant
     # header (Telegram has no equivalent). The view authenticates with
