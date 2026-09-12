@@ -92,6 +92,7 @@ import {
   postGoalSelect,
   type DecisionContext,
   type GoalSelectBody,
+  withinC03Boundary,
   type MissingItem,
 } from "../lib/customer-goals";
 import { backTo, screenRoot, type BackIntent } from "../lib/screen-back";
@@ -179,7 +180,7 @@ export function GoalSelectScreen({ initialDoc }: Props = {}) {
   // поверхность. Ни на один вопрос документа это не влияет.
   const { canSwitch } = useSurfaceMode();
   const [state, setState] = useState<State>(
-    initialDoc ? { kind: "ok", doc: initialDoc } : { kind: "loading" },
+    initialDoc ? { kind: "ok", doc: withinC03Boundary(initialDoc) } : { kind: "loading" },
   );
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
@@ -199,7 +200,8 @@ export function GoalSelectScreen({ initialDoc }: Props = {}) {
     let cancelled = false;
     fetchDecisionContext()
       .then((doc) => {
-        if (!cancelled) setState({ kind: "ok", doc });
+        // DRF-1751 — вопрос за границей C03 не рисуется (и называется в консоли).
+        if (!cancelled) setState({ kind: "ok", doc: withinC03Boundary(doc) });
       })
       .catch((err: unknown) => {
         if (!cancelled) setState({ kind: "error", err });
@@ -245,7 +247,7 @@ export function GoalSelectScreen({ initialDoc }: Props = {}) {
     setSavedNotice(null);
     postGoalSelect(body)
       .then((doc) => {
-        setState({ kind: "ok", doc });
+        setState({ kind: "ok", doc: withinC03Boundary(doc) });
         setGoalText("");
         setRevisingStep(null);
         setSavedNotice(noticeFor(body));
