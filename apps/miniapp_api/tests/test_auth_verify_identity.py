@@ -77,13 +77,13 @@ def stub_resolve(monkeypatch) -> Any:
     """Подмена HTTP-плеча ``resolve_identity`` — там же, где его импортирует
     ``ensure_ayla_link`` (лениво, из ``identity_client``)."""
     calls: list[str] = []
-    state: dict[str, Any] = {"uuid": uuid.uuid4(), "error": None}
+    state: dict[str, Any] = {"uuid": uuid.uuid4(), "error": None, "is_proxy": True}
 
     def _fake(external_user_id: str) -> ResolvedIdentity:
         calls.append(external_user_id)
         if state["error"] is not None:
             raise state["error"]
-        return ResolvedIdentity(ayla_user_id=state["uuid"], is_proxy=True)
+        return ResolvedIdentity(ayla_user_id=state["uuid"], is_proxy=state["is_proxy"])
 
     monkeypatch.setattr(
         "apps.integrations.ayla.identity_client.resolve_identity", _fake, raising=True
@@ -132,16 +132,47 @@ class TestIdentityBlock:
     def test_already_linked_user_does_not_hit_ayla(
         self, client: Client, bot_user: BotUser, stub_resolve
     ) -> None:
-        """Положительная стража на идемпотентность: кеш по ``ayla_user_id``."""
+        """Положительная стража на идемпотентность: кеш по ``ayla_user_id``.
+
+        12.09.2026 (DRF-1790): «привязанный» — это ключ НАСТОЯЩЕГО сорта
+        (``ayla_user_id_is_proxy=False``). Фикстура раньше клала ключ без
+        сорта и звалась привязанной; теперь она говорит правду о себе. Ключ
+        прокси или неизвестного сорта — не привязанный, и он переспрашивается
+        (следующий тест).
+        """
         known = uuid.uuid4()
         bot_user.ayla_user_id = known
-        bot_user.save(update_fields=["ayla_user_id"])
+        bot_user.ayla_user_id_is_proxy = False
+        bot_user.save(update_fields=["ayla_user_id", "ayla_user_id_is_proxy"])
 
         data = _verify(client)
 
         assert data["identity"]["subject"] == "linked"
         assert data["identity"]["ayla_user_id"] == str(known)
         assert stub_resolve.calls == [], "привязанный не должен ходить в Ayla повторно"
+
+    def test_a_proxy_key_is_asked_again_until_it_is_real(
+        self, client: Client, bot_user: BotUser, stub_resolve
+    ) -> None:
+        """Обратная сторона J-O3 (DRF-1790): прокси-ключ — не привязка.
+
+        Каталог мог привязать человека после первого ответа; ключ прокси
+        переспрашивается на каждом зависимом действии, и настоящий ответ
+        заменяет его (identity.rebound).
+        """
+        proxy_key = uuid.uuid4()
+        bot_user.ayla_user_id = proxy_key
+        bot_user.ayla_user_id_is_proxy = True
+        bot_user.save(update_fields=["ayla_user_id", "ayla_user_id_is_proxy"])
+        stub_resolve.state["is_proxy"] = False
+
+        data = _verify(client)
+
+        assert len(stub_resolve.calls) == 1
+        assert data["identity"]["ayla_user_id"] == str(stub_resolve.state["uuid"])
+        bot_user.refresh_from_db()
+        assert bot_user.ayla_user_id == stub_resolve.state["uuid"]
+        assert bot_user.ayla_user_id_is_proxy is False
 
     def test_unlinked_is_retried_on_next_launch(
         self, client: Client, bot_user: BotUser, stub_resolve
