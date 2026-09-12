@@ -186,7 +186,8 @@ class TestTwoTapsUpdateOneMessage:
         """
         _open_multiselect(monkeypatch, fake_redis)
         _run(_tap("cb:clarify:tg:0:1", mid="m-open"))
-        assert wire[-1]["text"] == _QUESTION
+        # DRF-1760 — под вопросом появляется «Выбрано: N»; сам вопрос — как был.
+        assert wire[-1]["text"].startswith(_QUESTION)
 
     def test_a_raw_payload_never_enters_the_dialog_history(self, wire, fake_redis, monkeypatch):
         """DRF-988: a `cb:` string in history is what the model happily
@@ -364,4 +365,4 @@ class TestOutboundGuardOutranksTheRedraw:
         _open_multiselect(monkeypatch, fake_redis)
         _run(_tap("cb:clarify:tg:0:0", mid="m-open"))
         assert wire[-1]["kind"] == "edit"
-        assert wire[-1]["text"] == _QUESTION
+        assert wire[-1]["text"].startswith(_QUESTION)
