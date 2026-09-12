@@ -23,6 +23,7 @@ class _Event:
     chat_id = "1"
     channel_user_id = "42"
     channel = "max"
+    raw: dict = {}  # DRF-1784: личность читается из события, имя — из raw
 
 
 @pytest.fixture
@@ -43,11 +44,11 @@ class TestEachRefusalGetsItsOwnWords:
     def test_a_card_that_belongs_to_someone_else(self, monkeypatch, said):
         monkeypatch.setattr(
             salon_handler,
-            "redeem_staff_invite",
+            "redeem_staff_invite_by_identity",
             _redeem_raising(MasterAlreadyLinked("занято")),
         )
 
-        salon_handler._redeem_and_greet(_Event(), object(), "AYLA-7K3M", object(), object())
+        salon_handler._redeem_and_greet(_Event(), "AYLA-7K3M", object())
 
         assert said == [salon_handler.WRONG_RECIPIENT]
         assert said[0] != salon_handler.CODE_NOT_ACCEPTED
@@ -55,11 +56,11 @@ class TestEachRefusalGetsItsOwnWords:
     def test_a_person_who_already_has_a_card(self, monkeypatch, said):
         monkeypatch.setattr(
             salon_handler,
-            "redeem_staff_invite",
+            "redeem_staff_invite_by_identity",
             _redeem_raising(PersonAlreadyMaster("занято")),
         )
 
-        salon_handler._redeem_and_greet(_Event(), object(), "AYLA-7K3M", object(), object())
+        salon_handler._redeem_and_greet(_Event(), "AYLA-7K3M", object())
 
         assert said == [salon_handler.PERSON_ALREADY_MASTER]
         assert said[0] != salon_handler.CODE_NOT_ACCEPTED
@@ -101,10 +102,10 @@ class TestTheGeneralBranchStillCatchesTheRest:
 
         monkeypatch.setattr(
             salon_handler,
-            "redeem_staff_invite",
+            "redeem_staff_invite_by_identity",
             _redeem_raising(InviteError("прочее")),
         )
 
-        salon_handler._redeem_and_greet(_Event(), object(), "AYLA-7K3M", object(), object())
+        salon_handler._redeem_and_greet(_Event(), "AYLA-7K3M", object())
 
         assert said == [salon_handler.CODE_NOT_ACCEPTED]

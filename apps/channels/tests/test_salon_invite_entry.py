@@ -384,20 +384,23 @@ class TestARefusalSaysWhatIsWrong:
         assert _text(sent), "silence is not an answer"  # presence, then absence
         assert _invite_buttons(sent) == []
 
-    def test_a_token_from_another_salon_is_not_found_here(self, tenant, other_tenant, sent):
-        """Cross-tenant: the same filter ``validate_invite_token`` applies.
+    def test_a_token_from_another_salon_opens_there_2026_09_12(self, tenant, other_tenant, sent):
+        """Эталон ПЕРЕВЁРНУТ 12.09.2026 (DRF-1784, срез 4b).
 
-        And the same deliberate collapse — «not found» rather than «not
-        yours», so the answer cannot be used to discover that a token is
-        live somewhere else.
+        Раньше токен другого салона здесь «не находился»: фильтр по тенанту
+        записи бота — «салонный бот принадлежит салону». Решение владельца
+        12.09: бот один на все салоны, и токен сам говорит, чей он. Ссылка
+        открывается — в САЛОН токена, не в тот, что стоит в записи; текст
+        называет тот салон.
         """
 
         foreign = _master(other_tenant)
 
         _open(tenant, f"{_invite_prefix()}{foreign.invite_token}")
 
-        assert _text(sent), "silence is not an answer"  # presence, then absence
-        assert _invite_buttons(sent) == []
+        assert _text(sent), "silence is not an answer"
+        assert _invite_buttons(sent) != []
+        assert (other_tenant.name or other_tenant.slug) in _text(sent)
 
     def test_that_same_token_works_in_its_own_salon(self, other_tenant, sent):
         """Positive guard: the refusal above is about the tenant, not the row."""

@@ -104,7 +104,6 @@ class TestTheFreshWorkspaceGetsADoor:
 
         salon_handler._register_solo_provider(
             _Event(salon_handler.SOLO_REGISTER_CALLBACK),
-            bot_user,
             entry=_entry(miniapp_url="https://app.example/solo"),
         )
 
@@ -117,7 +116,6 @@ class TestTheFreshWorkspaceGetsADoor:
     def test_web_app_wins_over_the_link(self, bot_user, said):
         salon_handler._register_solo_provider(
             _Event(salon_handler.SOLO_REGISTER_CALLBACK),
-            bot_user,
             entry=_entry(miniapp_url="https://app.example/solo", web_app="solo-app"),
         )
 
@@ -132,11 +130,11 @@ class TestTheReturningOwnerGetsTheSameDoor:
 
         entry = _entry(miniapp_url="https://app.example/solo")
         salon_handler._register_solo_provider(
-            _Event(salon_handler.SOLO_REGISTER_CALLBACK), bot_user, entry=entry
+            _Event(salon_handler.SOLO_REGISTER_CALLBACK), entry=entry
         )
         said.clear()
 
-        salon_handler._ask_for_code_with_solo_offer(_Event("привет"), bot_user, entry=entry)
+        salon_handler._ask_for_code_with_solo_offer(_Event("привет"), entry=entry)
 
         assert said[0]["text"] == salon_handler.SOLO_ALREADY_REGISTERED
         assert _door(said[0]["attachments"]) is not None, said[0]["attachments"]
@@ -145,8 +143,8 @@ class TestTheReturningOwnerGetsTheSameDoor:
         entry = _entry(miniapp_url="https://app.example/solo")
         event = _Event(salon_handler.SOLO_REGISTER_CALLBACK)
 
-        salon_handler._register_solo_provider(event, bot_user, entry=entry)
-        salon_handler._register_solo_provider(event, bot_user, entry=entry)
+        salon_handler._register_solo_provider(event, entry=entry)
+        salon_handler._register_solo_provider(event, entry=entry)
 
         assert said[1]["text"] == salon_handler.SOLO_ALREADY_REGISTERED
         assert _door(said[1]["attachments"]) is not None
@@ -157,7 +155,7 @@ class TestNoDoorThatCannotOpen:
 
     def test_entry_without_an_app_gives_text_only(self, bot_user, said):
         salon_handler._register_solo_provider(
-            _Event(salon_handler.SOLO_REGISTER_CALLBACK), bot_user, entry=_entry()
+            _Event(salon_handler.SOLO_REGISTER_CALLBACK), entry=_entry()
         )
 
         assert said[0]["text"] == salon_handler.SOLO_CREATED_PENDING
@@ -165,7 +163,7 @@ class TestNoDoorThatCannotOpen:
 
     def test_no_entry_gives_text_only(self, bot_user, said):
         salon_handler._register_solo_provider(
-            _Event(salon_handler.SOLO_REGISTER_CALLBACK), bot_user
+            _Event(salon_handler.SOLO_REGISTER_CALLBACK), entry=None
         )
 
         assert not said[0]["attachments"]
@@ -174,7 +172,7 @@ class TestNoDoorThatCannotOpen:
         """Предложение завести кабинет — по-прежнему одна кнопка «Я работаю сам», без двери в несуществующий кабинет."""
 
         salon_handler._ask_for_code_with_solo_offer(
-            _Event("привет"), bot_user, entry=_entry(miniapp_url="https://app.example/solo")
+            _Event("привет"), entry=_entry(miniapp_url="https://app.example/solo")
         )
 
         buttons = _buttons(said[0]["attachments"])
@@ -214,7 +212,7 @@ class TestTheReadyBranchBuildsTheMenuForTheSoloRow:
         entry = _entry(miniapp_url="https://app.example/solo")
 
         salon_handler._register_solo_provider(
-            _Event(salon_handler.SOLO_REGISTER_CALLBACK), bot_user, entry=entry
+            _Event(salon_handler.SOLO_REGISTER_CALLBACK), entry=entry
         )
 
         assert len(seen) == 1, said

@@ -173,24 +173,26 @@ class TestTheWorkingRowDecidesTheTenant:
 
 
 class TestTheStrangerPathIsHandedToSliceFourB:
-    def test_a_stranger_under_the_entry_tenant_is_served_as_before(self, salon, sent):
-        """До 4b (DRF-1784) незнакомец — как раньше: строка в тенанте записи, «введите код».
+    def test_a_stranger_under_the_entry_tenant_gets_no_row_2026_09_12(self, salon, sent):
+        """Эталон 4a ПЕРЕВЁРНУТ тем же днём срезом 4b (DRF-1784).
 
-        Зелёный до и после. Эталон, который 4b перевернёт: строк станет 0.
+        В 4a незнакомец под тенантом записи ещё получал строку там — «как
+        раньше». 4b: строки нет; тенант записи на пути незнакомца не
+        читается. Полный сторож — test_salon_stranger_without_botuser.py.
         """
 
         _handle("привет", salon)
 
-        assert len(_rows()) == 1 and _rows()[0].tenant == salon
+        assert _rows() == []
         assert "код" in sent.call_args.kwargs["text"].lower()
 
-    def test_a_stranger_without_any_tenant_is_refused_by_name_not_in_silence(
+    def test_a_stranger_without_any_tenant_is_answered_2026_09_12(
         self, salon, sent, settings, caplog
     ):
-        """Красный до правки: тот же исход — молчание, — но под именем no_tenant_scope.
+        """Эталон 4a ПЕРЕВЁРНУТ срезом 4b (DRF-1784): ERROR «…until_4b» больше нечего ждать.
 
-        Имя важно: оно говорит, чего не хватает (среза 4b), а не «консумер
-        забыл войти в scope». Строк не создаётся.
+        Незнакомец без тенанта записи получает «введите код / Я работаю
+        сам», строки нет, ни одной ошибки в логе.
         """
 
         settings.MAX_BOT_REGISTRY = (SALON_BOT_TENANTLESS,)
@@ -198,12 +200,9 @@ class TestTheStrangerPathIsHandedToSliceFourB:
         with caplog.at_level(logging.ERROR, logger="apps.channels.max.salon_handler"):
             _handle("привет", None)
 
-        sent.assert_not_called()
+        sent.assert_called()
         assert _rows() == []
-        assert any("stranger_without_tenant_until_4b" in r.getMessage() for r in caplog.records), [
-            r.getMessage() for r in caplog.records
-        ]
-        assert not any("no_tenant_scope" in r.getMessage() for r in caplog.records)
+        assert [r.getMessage() for r in caplog.records] == []
 
 
 class TestTheConsumerNoLongerRequiresATenant:

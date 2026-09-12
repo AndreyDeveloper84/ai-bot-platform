@@ -36,6 +36,11 @@ pytestmark = pytest.mark.django_db
 class _Event:
     """Минимальное событие: ровно те поля, которые дверь читает.
 
+    С 12.09.2026 (DRF-1784) дверь читает личность ИЗ СОБЫТИЯ — `channel`,
+    `channel_user_id`, имя из `raw`, `chat_id` — строки у незнакомца нет.
+    Фикстура `bot_user` ниже осталась образом человека, у которого строка в
+    салоне уже есть (архивный мастер, «след»), — не незнакомца.
+
     `raw` обязателен — `_sender_name` берёт имя из `message.sender.name`,
     туда, куда его кладёт MAX. Пустой словарь здесь честнее выдуманного
     имени: дверь должна работать и когда имени нет.
@@ -77,7 +82,7 @@ def said(monkeypatch):
 
 class TestTheOfferAppearsForSomeoneWithNoTrace:
     def test_a_newcomer_is_offered_a_workspace(self, bot_user, said):
-        salon_handler._ask_for_code_with_solo_offer(_Event("здравствуйте"), bot_user)
+        salon_handler._ask_for_code_with_solo_offer(_Event("здравствуйте"), entry=None)
 
         assert len(said) == 1
         assert salon_handler.ASK_FOR_CODE in said[0]["text"]
@@ -89,7 +94,7 @@ class TestTheOfferAppearsForSomeoneWithNoTrace:
         Угадывать «да» пришлось бы по словам, а угаданное «да» — это
         регистрация человека, который её не просил.
         """
-        salon_handler._ask_for_code_with_solo_offer(_Event("привет"), bot_user)
+        salon_handler._ask_for_code_with_solo_offer(_Event("привет"), entry=None)
 
         attachments = said[0]["attachments"]
         assert attachments, "предложение без кнопки — это предложение без ответа"
@@ -123,7 +128,7 @@ class TestSomeoneWithATraceIsNotOffered:
         from apps.tenancy.context import tenant_scope
 
         with tenant_scope(salon):
-            salon_handler._ask_for_code_with_solo_offer(_Event("привет"), bot_user)
+            salon_handler._ask_for_code_with_solo_offer(_Event("привет"), entry=None)
 
         assert said[0]["text"] == salon_handler.ASK_FOR_CODE
         assert salon_handler.SOLO_OFFER.strip() not in said[0]["text"]
@@ -139,7 +144,7 @@ class TestRegistrationTellsTheTruthAboutItsOutcome:
         `setup_state`: человек ушёл бы считать себя работающим.
         """
         salon_handler._register_solo_provider(
-            _Event(salon_handler.SOLO_REGISTER_CALLBACK), bot_user
+            _Event(salon_handler.SOLO_REGISTER_CALLBACK), entry=None
         )
 
         assert said[0]["text"] == salon_handler.SOLO_CREATED_PENDING
@@ -166,8 +171,8 @@ class TestRegistrationTellsTheTruthAboutItsOutcome:
         """Повтор — не ошибка и не повод молчать."""
         event = _Event(salon_handler.SOLO_REGISTER_CALLBACK)
 
-        salon_handler._register_solo_provider(event, bot_user)
-        salon_handler._register_solo_provider(event, bot_user)
+        salon_handler._register_solo_provider(event, entry=None)
+        salon_handler._register_solo_provider(event, entry=None)
 
         assert said[0]["text"] == salon_handler.SOLO_CREATED_PENDING
         assert said[1]["text"] == salon_handler.SOLO_ALREADY_REGISTERED
@@ -209,11 +214,11 @@ class TestTheSecondVisitIsNotTreatedAsTheFirst:
 
     def test_a_returning_owner_is_told_the_workspace_exists(self, bot_user, said):
         salon_handler._register_solo_provider(
-            _Event(salon_handler.SOLO_REGISTER_CALLBACK), bot_user
+            _Event(salon_handler.SOLO_REGISTER_CALLBACK), entry=None
         )
         said.clear()
 
-        salon_handler._ask_for_code_with_solo_offer(_Event("привет"), bot_user)
+        salon_handler._ask_for_code_with_solo_offer(_Event("привет"), entry=None)
 
         assert said[0]["text"] == salon_handler.SOLO_ALREADY_REGISTERED
         assert salon_handler.SOLO_OFFER.strip() not in said[0]["text"]
@@ -223,17 +228,22 @@ class TestTheSecondVisitIsNotTreatedAsTheFirst:
         # получает «Открыть кабинет» — test_salon_solo_door_opens_the_cabinet.py.
         assert not said[0]["attachments"]
 
-    def test_the_salon_card_predicate_does_not_see_the_solo_card(self, bot_user, said):
-        """Замер, на котором построена предыдущая проверка.
+    def test_a_live_solo_card_is_a_workspace_not_a_trace_2026_09_12(self, bot_user, said):
+        """Эталон ПЕРЕВЁРНУТ 12.09.2026 (DRF-1784): предикат стал предикатом по личности.
 
-        Записан тестом, а не комментарием: следующий, кто захочет
-        объединить два предиката в один, увидит, почему их двое.
+        Раньше он звался `_has_a_master_card_here`, смотрел одну салонную
+        строку и соло-карточку не видел «по построению» — тест это и
+        фиксировал. Теперь строки у незнакомца нет, предикат смотрит все
+        строки личности, и различает не «здесь / не здесь», а «снятая /
+        живая»: живая соло-карточка — кабинет (ответ «уже есть»), снятая —
+        след (ответ «введите код»). Двух предикатов по-прежнему двое, но
+        по другой оси.
         """
         salon_handler._register_solo_provider(
-            _Event(salon_handler.SOLO_REGISTER_CALLBACK), bot_user
+            _Event(salon_handler.SOLO_REGISTER_CALLBACK), entry=None
         )
 
-        assert salon_handler._has_a_master_card_here(bot_user) is False
+        assert salon_handler._has_a_master_card_anywhere(bot_user) is False  # живая — не след
         assert salon_handler._already_has_a_solo_workspace(bot_user) is True
 
     def test_a_newcomer_is_still_offered(self, salon, said):
@@ -242,14 +252,11 @@ class TestTheSecondVisitIsNotTreatedAsTheFirst:
         Без неё тесты выше зеленели бы и на коде, который перестал
         предлагать кабинет вообще.
         """
-        other = BotUser.all_tenants.create(
-            tenant=salon,
-            channel="max",
-            channel_user_id="solo-door-2",
-            display_name="Анна",
-        )
+        # 12.09.2026 (DRF-1784): личность берётся из события, а не из строки.
+        event = _Event("привет")
+        event.channel_user_id = "solo-door-2"
 
-        salon_handler._ask_for_code_with_solo_offer(_Event("привет"), other)
+        salon_handler._ask_for_code_with_solo_offer(event, entry=None)
 
         assert salon_handler.SOLO_OFFER.strip() in said[0]["text"]
         assert said[0]["attachments"]
@@ -263,7 +270,7 @@ class TestIdentityLinkIsAStateNotJustAColumn:
         from apps.identity.models import SoloIdentityLink
 
         salon_handler._register_solo_provider(
-            _Event(salon_handler.SOLO_REGISTER_CALLBACK), bot_user
+            _Event(salon_handler.SOLO_REGISTER_CALLBACK), entry=None
         )
 
         link = SoloIdentityLink.objects.get(channel="max", channel_user_id="solo-door-1")
@@ -283,11 +290,11 @@ class TestIdentityLinkIsAStateNotJustAColumn:
         )
 
         salon_handler._register_solo_provider(
-            _Event(salon_handler.SOLO_REGISTER_CALLBACK), bot_user
+            _Event(salon_handler.SOLO_REGISTER_CALLBACK), entry=None
         )
         said.clear()
         # Положительная стража: до отказа возвращающийся видит «уже есть».
-        salon_handler._ask_for_code_with_solo_offer(_Event("привет"), bot_user)
+        salon_handler._ask_for_code_with_solo_offer(_Event("привет"), entry=None)
         assert said[0]["text"] == salon_handler.SOLO_ALREADY_REGISTERED
         said.clear()
 
@@ -295,7 +302,7 @@ class TestIdentityLinkIsAStateNotJustAColumn:
         operator = get_user_model().objects.create_user(username="op-door", password="x")  # noqa: S106
         reject_by_operator(link, operator=operator, reason="identity_unverifiable")
 
-        salon_handler._ask_for_code_with_solo_offer(_Event("привет"), bot_user)
+        salon_handler._ask_for_code_with_solo_offer(_Event("привет"), entry=None)
 
         assert said[0]["text"] == REJECTED_RECOVERY_TEXT
         assert "поддержк" in said[0]["text"].lower()

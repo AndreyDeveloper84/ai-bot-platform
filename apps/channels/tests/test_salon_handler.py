@@ -285,11 +285,19 @@ class TestDefensive:
         # Tolerate-and-skip: a lifecycle update must not retry-storm the PEL.
         sent.assert_not_called()
 
-    def test_without_tenant_scope_it_refuses_to_guess(self, sent):
-        # Attaching a person to the wrong salon is worse than not answering.
+    def test_without_tenant_scope_it_answers_without_guessing_2026_09_12(self, sent):
+        """Эталон ПЕРЕВЁРНУТ 12.09.2026 (DRF-1784, срез 4b).
+
+        Раньше: без тенанта записи — молчание, «привязать человека к
+        неверному салону хуже, чем не ответить». Теперь незнакомцу не
+        нужен тенант, чтобы получить ответ: строки не создаётся вовсе,
+        салон решает код, который он введёт. Что осталось от прежнего
+        эталона — вторая строка: никого ни к какому салону не привязали.
+        """
         handle_salon_max_event(_payload("привет"))
 
-        sent.assert_not_called()
+        sent.assert_called()
+        assert "код" in sent.call_args.kwargs["text"].lower()
         assert not BotUser.all_tenants.filter(channel_user_id=CHANNEL_USER_ID).exists()
 
 

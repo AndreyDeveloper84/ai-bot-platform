@@ -83,7 +83,7 @@ from apps.identity.services.staff_invites import (
     InviteRateLimited,
     OwnerAlreadyExists,
     looks_like_code,
-    redeem_staff_invite,
+    redeem_staff_invite_by_identity,
 )
 from apps.tools.idempotency import AlreadyClaimed, with_idempotency
 
@@ -393,7 +393,7 @@ def _extract_invite_token(text: str) -> str | None:
     return candidate if _INVITE_TOKEN_RE.match(candidate) else None
 
 
-def _handle_master_invite(event: CanonicalEvent, token: str, bot_user, tenant, entry) -> None:
+def _handle_master_invite(event: CanonicalEvent, token: str, entry) -> None:
     """Answer an invitation link with the way into the invitation.
 
     ### What this does NOT do, and why that is the design
@@ -415,11 +415,12 @@ def _handle_master_invite(event: CanonicalEvent, token: str, bot_user, tenant, e
 
     ### Ownership that CAN be decided here
 
-    Which salon the token belongs to. ``validate_invite_token`` filters
-    by tenant, and the tenant is already known — the salon bot is
-    tenant-bound by construction and the consumer entered its scope. So
-    a token issued by another salon is «not found» here, in the same
-    deliberately collapsed way the Mini App reports it.
+    Which salon the token belongs to — the token says (DRF-1784, 12.09.2026).
+    Until that day ``validate_invite_token`` was filtered by the tenant the
+    consumer had entered from the bot's registry entry: «the salon bot is
+    tenant-bound by construction». The owner reversed the premise (the bot
+    serves every salon), so the token is resolved alone and the card names
+    its salon; a UUIDv4 token never needed the tenant for security.
 
     The call is a locking read inside ``atomic`` (the function does
     ``select_for_update``), exactly as ``/onboarding/claim`` uses it. It
@@ -449,7 +450,7 @@ def _handle_master_invite(event: CanonicalEvent, token: str, bot_user, tenant, e
 
     try:
         with transaction.atomic():
-            validate_invite_token(token, tenant)
+            master = validate_invite_token(token)
     except InviteExpired:
         _reply(event, INVITE_EXPIRED)
         return
@@ -464,6 +465,7 @@ def _handle_master_invite(event: CanonicalEvent, token: str, bot_user, tenant, e
         _reply(event, INVITE_NOT_FOUND)
         return
 
+    tenant = master.tenant
     web_app = getattr(entry, "web_app", "")
     if not web_app:
         # Nothing to build a button from, and no address worth offering:
@@ -496,7 +498,7 @@ def _handle_master_invite(event: CanonicalEvent, token: str, bot_user, tenant, e
     # detail, and neither is needed to count openings.
     emit(
         "channels.max.salon.invite_link_opened",
-        payload={"bot_user_id": str(bot_user.id)},
+        payload={"channel": event.channel, "channel_user_id": str(event.channel_user_id)},
     )
 
     _reply(event, INVITE_WELCOME.format(salon=salon), attachments=[attachment])
@@ -516,19 +518,16 @@ def _handle_salon_event_inner(event: CanonicalEvent, trace_id: str | uuid.UUID |
        master therefore lands in her own workspace, and no ``customer``
        row is created for her in the salon the entry happens to name —
        until this slice that row was created first thing, for everyone.
-    2. **No working row — the stranger path.** Until срез 4b (DRF-1784) it
-       is unchanged: it needs a tenant to create the row in, and takes it
-       from the scope the consumer entered from the entry
-       (``MAX_BOT_SALON_TENANT_SLUG``). Without one it refuses by the NAME
-       of what is missing — the next slice — not by the old
-       ``no_tenant_scope``, which read as «the consumer forgot to enter
-       scope». Ingress is untouched here: while the variable stands, the
-       entry's tenant arrives as before; срез 4c removes it last.
+    2. **No working row — the stranger path** (:func:`_serve_stranger`,
+       DRF-1784, owner D2 → б): no ``BotUser`` is created until the person
+       proves a path. A staff code decides the tenant by itself and the row
+       is born there; «Я работаю сам» creates the solo workspace from the
+       event alone; anything else is answered by identity, without a row.
+       The tenant of the registry entry is not read on this path at all.
     """
 
     from apps.identity.services.bot_user_resolver import resolve_working_bot_user
-    from apps.identity.services.resolver import resolve_or_create_bot_user
-    from apps.tenancy.context import current_tenant, tenant_scope
+    from apps.tenancy.context import tenant_scope
 
     working = resolve_working_bot_user(event.channel_user_id, surface="salon_bot")
     if working is not None:
@@ -536,27 +535,22 @@ def _handle_salon_event_inner(event: CanonicalEvent, trace_id: str | uuid.UUID |
             _serve(event, trace_id, tenant=working.tenant, bot_user=working)
         return
 
-    tenant = current_tenant()
-    if tenant is None:
-        logger.error(
-            "channels.max.salon.stranger_without_tenant_until_4b channel_user_id=%s — "
-            "no working row for this identity and no tenant on the entry; the stranger "
-            "path without a BotUser is срез 4b (DRF-1784)",
-            event.channel_user_id,
-        )
-        return
-
-    bot_user = resolve_or_create_bot_user(
-        channel=event.channel,
-        channel_user_id=event.channel_user_id,
-        display_name=_sender_name(event),
-        chat_id=event.chat_id,
-    )
-    _serve(event, trace_id, tenant=tenant, bot_user=bot_user)
+    # No working row → the stranger path, WITHOUT a row (DRF-1784, D2 → б).
+    # The tenant the consumer may still have entered from the registry entry
+    # (``MAX_BOT_SALON_TENANT_SLUG``, until срез 4c) is deliberately not read
+    # here: a stranger's tenant is decided by the code they type, or by
+    # «Я работаю сам» — never by the salon the entry happens to name.
+    _serve_stranger(event, trace_id)
 
 
 def _serve(event: CanonicalEvent, trace_id: str | uuid.UUID | None, *, tenant, bot_user) -> None:
-    """The salon bot's conversation for ``bot_user`` in ``tenant`` — invite, whoami, roles, menu."""
+    """The salon bot's conversation for a person WITH a working row in ``tenant``.
+
+    Invite link, whoami, buttons, talk, menu — the staff flow. ``bot_user``
+    is the working row (DRF-1755): it carries a role in ``tenant`` by
+    construction, so the «no role yet» branches live in
+    :func:`_serve_stranger`, not here.
+    """
 
     from apps.channels.bot_registry import effective_registry, resolve_by_slug
 
@@ -585,7 +579,7 @@ def _serve(event: CanonicalEvent, trace_id: str | uuid.UUID | None, *, tenant, b
         # without an error. See the module docstring.
         invite_token = _extract_invite_token(event.text)
         if invite_token is not None:
-            _handle_master_invite(event, invite_token, bot_user, tenant, entry)
+            _handle_master_invite(event, invite_token, entry)
             return
 
         if event.text.strip() == WHOAMI_COMMAND:
@@ -604,64 +598,155 @@ def _serve(event: CanonicalEvent, trace_id: str | uuid.UUID | None, *, tenant, b
 
         role_ctx = resolve_role(bot_user)
 
-        if role_ctx.primary_role != "customer":
-            # A button tap arrives as the callback payload in `text`.
-            if _is_button_tap(event.text):
-                _handle_button(event, role_ctx, bot_user, tenant, entry)
-            else:
-                _handle_talk(event, role_ctx, bot_user, tenant, entry)
+        if role_ctx.primary_role == "customer":
+            # The working row lost its role between resolution and here (a
+            # revoke racing this message). Not an error to the person: they
+            # are a stranger now, and the stranger path answers strangers.
+            logger.info(
+                "channels.max.salon.working_row_lost_its_role bot_user=%s tenant=%s",
+                bot_user.id,
+                tenant.slug,
+            )
+            _serve_stranger(event, trace_id)
             return
 
-        # No role yet. A stray button tap from someone who lost their access
-        # must not be read as an invite code — it would burn a rate-limit
-        # attempt for a message they did not type.
+        # A button tap arrives as the callback payload in `text`.
+        if _is_button_tap(event.text):
+            _handle_button(event, role_ctx, bot_user, tenant, entry)
+        else:
+            _handle_talk(event, role_ctx, bot_user, tenant, entry)
+
+
+def _serve_stranger(event: CanonicalEvent, trace_id: str | uuid.UUID | None) -> None:
+    """The salon bot's conversation for a person with NO working row — and no row at all.
+
+    Owner D2 (12.09.2026) → (б): a ``BotUser`` is not created for a stranger
+    until they prove a path. Two paths prove it: a staff code (the tenant is
+    the code's; the row is born there, inside the redemption) and «Я работаю
+    сам» (``create_solo_provider`` builds the solo tenant and its row from
+    the event alone). Everything else — the code prompt, ``/whoami``, an
+    invitation link, a refused code, the attempt brake — is answered by
+    identity ``(channel, channel_user_id)``, leaving nothing behind.
+
+    The bot is the one on the ``max_salon`` stream (DRF-1726); the tenant of
+    its registry entry is not consulted here.
+    """
+
+    from apps.channels.bot_registry import effective_registry, resolve_by_stream
+
+    entry = resolve_by_stream(SALON_STREAM, effective_registry())
+    if entry is None:
+        logger.error(
+            "channels.max.salon.no_salon_bot channel_user_id=%s — refusing to reply; "
+            "declare a bot with MAX_BOT_<SLUG>_STREAM=%s",
+            event.channel_user_id,
+            SALON_STREAM,
+        )
+        return
+
+    identity = _Identity.of(event)
+    with bot_scope(entry):
+        invite_token = _extract_invite_token(event.text)
+        if invite_token is not None:
+            _handle_master_invite(event, invite_token, entry)
+            return
+
+        if event.text.strip() == WHOAMI_COMMAND:
+            # By identity, no salon to name «here»: the person has none yet.
+            _reply(
+                event,
+                render_for_person(
+                    build_card(identity.channel, identity.channel_user_id), tenant_slug=None
+                ),
+            )
+            return
+
+        # A stray button tap from someone who lost their access must not be
+        # read as an invite code — it would burn a rate-limit attempt for a
+        # message they did not type.
         if _is_button_tap(event.text):
             if event.text == SOLO_REGISTER_CALLBACK:
-                _register_solo_provider(event, bot_user, entry=entry)
+                _register_solo_provider(event, entry=entry)
                 return
             _reply(event, ASK_FOR_CODE)
             return
 
         code = _extract_code(event.text)
         if code is None:
-            _ask_for_code_with_solo_offer(event, bot_user, entry=entry)
+            _ask_for_code_with_solo_offer(event, entry=entry)
             return
 
-        _redeem_and_greet(event, bot_user, code, tenant, entry)
+        _redeem_and_greet(event, code, entry)
 
 
-def _has_a_master_card_here(bot_user) -> bool:
-    """Есть ли у этого человека карточка мастера — в том числе архивная.
+class _Identity:
+    """The messenger identity of an event — what the stranger path knows about a person.
 
-    В ветку «роли нет» приходят ДВОЕ: человек, который здесь впервые, и
+    Same attribute names as ``BotUser`` (``channel``, ``channel_user_id``,
+    ``display_name``, ``chat_id``) so the identity-level helpers below —
+    ``_already_has_a_solo_workspace``, ``_solo_identity_rejected`` — accept
+    either a row or this, and the difference is not a second code path.
+    """
+
+    def __init__(self, channel: str, channel_user_id: str, display_name: str, chat_id: str) -> None:
+        self.channel = channel
+        self.channel_user_id = channel_user_id
+        self.display_name = display_name
+        self.chat_id = chat_id
+
+    @classmethod
+    def of(cls, event: CanonicalEvent) -> "_Identity":
+        return cls(
+            channel=event.channel,
+            channel_user_id=event.channel_user_id,
+            display_name=_sender_name(event),
+            chat_id=str(event.chat_id or ""),
+        )
+
+
+def _has_a_master_card_anywhere(identity) -> bool:
+    """Есть ли у этого человека карточка мастера хоть в одном тенанте — в том числе архивная.
+
+    В путь незнакомца приходят ДВОЕ: человек, который здесь впервые, и
     мастер, чью карточку сняли. Второго `resolve_role` называет клиентом,
     потому что архивация пишет `is_active` и `archived_at` и **оставляет**
-    `linked_bot_user` (DRF-1654, чинит соседнее окно; здесь мы на это не
-    наступаем, а не лечим).
+    `linked_bot_user` (DRF-1654). Предложить ему завести кабинет соло-мастера
+    значило бы развести одного человека на два тенанта при живом следе в
+    первом — и сделать это в тот момент, когда он пришёл разбираться, почему
+    его сняли.
 
-    Предложить ему завести кабинет соло-мастера значило бы развести
-    одного человека на два тенанта при живом следе в первом — и сделать
-    это в тот момент, когда он пришёл разбираться, почему его сняли.
+    До DRF-1784 предикат звался `_has_a_master_card_here` и смотрел одну
+    строку — салонную, которую бот создавал первым сообщением. Строки
+    больше нет; смотрим по личности: каждую строку человека — в её же
+    тенанте, тенантным менеджером (сквозное чтение каталога живёт в
+    `apps/marketplace`, MKT1). Без строк — `False` по построению.
 
-    Замер пилота 11.09.2026: таких строк **ноль** (архивных три, связи ни
-    у одной). Проверка стережёт МЕХАНИЗМ, а не наблюдение: архивация
-    связь не снимает, значит первая же снятая связанная карточка создаст
-    этот случай.
+    Считается только СНЯТАЯ карточка (`archived_at` или `is_active=False`).
+    Живая карточка делает строку рабочей, и такой человек на путь
+    незнакомца не попадает вовсе (срез 4a); в прямых вызовах предиката
+    (тесты двери) живая соло-карточка — не «след», а кабинет, и ответ на
+    неё — «кабинет уже есть», не «введите код».
+
+    Замер пилота 11.09.2026: таких карточек **ноль** (архивных три, связи ни
+    у одной). Проверка стережёт МЕХАНИЗМ, а не наблюдение.
     """
-    from apps.catalog.models import CatalogMaster
+    from django.db.models import Q
 
-    # Читаем ТЕНАНТНО, а не через `all_tenants`. Первая редакция брала
-    # сквозной менеджер — и сторож границ импорта (MKT1) правильно её
-    # отверг: сквозное чтение каталога живёт в `apps/marketplace`, а не
-    # здесь.
-    #
-    # Сквозной он был и не нужен. `bot_user` — строка ЭТОГО салона, а
-    # карточка, которая должна подавить предложение, — карточка этого же
-    # салона: её сняли, и человек пришёл разбираться сюда. Мастер другого
-    # салона связан с ДРУГОЙ строкой того же человека, и его положение
-    # здесь — вопрос не этого предиката, а соседнего
-    # (`_already_has_a_solo_workspace`, он ищет по личности канала).
-    return CatalogMaster.objects.filter(linked_bot_user=bot_user).exists()
+    from apps.catalog.models import CatalogMaster
+    from apps.identity.models import BotUser
+    from apps.tenancy.context import tenant_scope
+
+    rows = BotUser.all_tenants.filter(
+        channel=identity.channel, channel_user_id=identity.channel_user_id
+    ).select_related("tenant")
+    for row in rows:
+        with tenant_scope(row.tenant):
+            retired = CatalogMaster.objects.filter(linked_bot_user=row).filter(
+                Q(archived_at__isnull=False) | Q(is_active=False)
+            )
+            if retired.exists():
+                return True
+    return False
 
 
 def _already_has_a_solo_workspace(bot_user) -> bool:
@@ -720,18 +805,20 @@ def _open_cabinet_attachments(entry) -> list[dict] | None:
     return [make_inline_keyboard_attachment([button], columns=1)]
 
 
-def _ask_for_code_with_solo_offer(event: CanonicalEvent, bot_user, entry=None) -> None:
+def _ask_for_code_with_solo_offer(event: CanonicalEvent, *, entry=None) -> None:
     """Попросить код — и, если уместно, предложить кабинет соло-мастера.
 
-    ``entry`` — запись салонного бота; нужна только вернувшемуся владельцу
-    кабинета, чтобы вместе с ответом получить дверь в него.
+    По личности события, без строки (DRF-1784). ``entry`` — запись салонного
+    бота; нужна только вернувшемуся владельцу кабинета, чтобы вместе с
+    ответом получить дверь в него.
     """
 
-    if _has_a_master_card_here(bot_user):
+    identity = _Identity.of(event)
+    if _has_a_master_card_anywhere(identity):
         _reply(event, ASK_FOR_CODE)
         return
 
-    if _already_has_a_solo_workspace(bot_user):
+    if _already_has_a_solo_workspace(identity):
         # Второе посещение. Предлагать завести то, что уже заведено, —
         # значит заставить человека нажать, чтобы узнать, что нажимать не
         # надо было.
@@ -739,7 +826,7 @@ def _ask_for_code_with_solo_offer(event: CanonicalEvent, bot_user, entry=None) -
         # §6: если оператор ОТКЛОНИЛ связь — человек получает безопасное
         # сообщение с путём (поддержка), а не «кабинет уже есть»: второе
         # обещало бы кабинет, которого не будет. Дверь в него — тем более.
-        if _solo_identity_rejected(bot_user):
+        if _solo_identity_rejected(identity):
             from apps.identity.services.solo_identity_link import REJECTED_RECOVERY_TEXT
 
             _reply(event, REJECTED_RECOVERY_TEXT)
@@ -756,7 +843,7 @@ def _ask_for_code_with_solo_offer(event: CanonicalEvent, bot_user, entry=None) -
     _reply(event, ASK_FOR_CODE + SOLO_OFFER, attachments=[attachment])
 
 
-def _register_solo_provider(event: CanonicalEvent, bot_user, entry=None) -> None:
+def _register_solo_provider(event: CanonicalEvent, *, entry=None) -> None:
     """Завести кабинет соло-мастера и сказать правду о его состоянии.
 
     Правду — то есть `setup_state`, а не факт создания. §122: регистрация
@@ -775,15 +862,19 @@ def _register_solo_provider(event: CanonicalEvent, bot_user, entry=None) -> None
         create_solo_provider,
     )
 
+    identity = _Identity.of(event)
     try:
         result = create_solo_provider(
-            channel=bot_user.channel,
-            channel_user_id=bot_user.channel_user_id,
-            display_name=_sender_name(event) or bot_user.display_name or "",
-            chat_id=str(event.chat_id or ""),
+            channel=identity.channel,
+            channel_user_id=identity.channel_user_id,
+            display_name=identity.display_name,
+            chat_id=identity.chat_id,
         )
     except SoloOnboardingError:
-        logger.exception("channels.max.salon.solo_register_failed bot_user=%s", bot_user.id)
+        logger.exception(
+            "channels.max.salon.solo_register_failed channel_user_id=%s",
+            identity.channel_user_id,
+        )
         _reply(event, SOLO_FAILED)
         return
 
@@ -805,15 +896,17 @@ def _register_solo_provider(event: CanonicalEvent, bot_user, entry=None) -> None
         # §6 пакета 12.09: связь личности — состояние с провенансом и
         # аудит-пакетом, а не только столбец ключа. PENDING заводится ДО
         # попытки, чтобы оператор видел заявку даже когда попытка упала.
-        link = open_link(result.master, bot_user=bot_user, tenant=result.tenant)
-        link_refusal = attempt_solo_link(result.master, bot_user)
+        # The SOLO row (DRF-1784): the link is about the workspace, and the
+        # person has no other row — the salon one is not created any more.
+        link = open_link(result.master, bot_user=result.bot_user, tenant=result.tenant)
+        link_refusal = attempt_solo_link(result.master, result.bot_user)
         result.master.refresh_from_db(fields=["ayla_user_id"])
         record_attempt(link, refusal=link_refusal, ayla_user_id=result.master.ayla_user_id)
 
     emit(
         "channels.max.salon.solo_registered",
         payload={
-            "bot_user_id": str(bot_user.id),
+            "bot_user_id": str(result.bot_user.id),
             "created": result.created,
             "setup_state": result.setup_state.value,
             "blocked_by": result.blocked_by,
@@ -823,7 +916,7 @@ def _register_solo_provider(event: CanonicalEvent, bot_user, entry=None) -> None
     logger.info(
         "channels.max.salon.solo_registered bot_user=%s tenant=%s created=%s "
         "setup_state=%s blocked_by=%s link_refusal=%s",
-        bot_user.id,
+        result.bot_user.id,
         result.tenant.slug,
         result.created,
         result.setup_state.value,
@@ -1106,11 +1199,23 @@ def _bot_slug_for(tenant) -> str:
     return entry.slug if entry is not None else ""
 
 
-def _redeem_and_greet(event: CanonicalEvent, bot_user, code: str, tenant, entry) -> None:
-    """Try the code and answer with the outcome, in the person's terms."""
+def _redeem_and_greet(event: CanonicalEvent, code: str, entry) -> None:
+    """Try the code and answer with the outcome, in the person's terms.
 
+    The person has no row yet (DRF-1784): the code decides the salon, and
+    the row is born there inside the redemption — see
+    :func:`redeem_staff_invite_by_identity`.
+    """
+
+    identity = _Identity.of(event)
     try:
-        result = redeem_staff_invite(code=code, bot_user=bot_user, tenant=tenant)
+        result = redeem_staff_invite_by_identity(
+            code=code,
+            channel=identity.channel,
+            channel_user_id=identity.channel_user_id,
+            display_name=identity.display_name,
+            chat_id=identity.chat_id,
+        )
     except InviteRateLimited:
         _reply(event, TOO_MANY_ATTEMPTS)
         return
@@ -1138,6 +1243,9 @@ def _redeem_and_greet(event: CanonicalEvent, bot_user, code: str, tenant, entry)
         _reply(event, CODE_NOT_ACCEPTED)
         return
 
+    bot_user = result.bot_user
+    tenant = result.tenant
+    assert bot_user is not None and tenant is not None  # by_identity fills both
     emit(
         "channels.max.salon.invite_redeemed",
         payload={
@@ -1155,12 +1263,15 @@ def _redeem_and_greet(event: CanonicalEvent, bot_user, code: str, tenant, entry)
 
     # Re-resolve rather than infer from the invite: the person may hold
     # several roles, and the menu must reflect all of them.
-    role_ctx = resolve_role(bot_user)
-    _reply(
-        event,
-        f"{greeting}\n\n{menu_header(role_ctx, tenant)}",
-        attachments=menu_attachments(role_ctx, entry),
-    )
+    from apps.tenancy.context import tenant_scope
+
+    with tenant_scope(tenant):
+        role_ctx = resolve_role(bot_user)
+        _reply(
+            event,
+            f"{greeting}\n\n{menu_header(role_ctx, tenant)}",
+            attachments=menu_attachments(role_ctx, entry),
+        )
 
 
 def _reply(event: CanonicalEvent, text: str, attachments: list | None = None) -> None:
