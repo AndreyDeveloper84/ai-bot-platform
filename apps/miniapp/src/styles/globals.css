@@ -7242,3 +7242,11 @@ a {
   color: var(--c-text-secondary);
   text-align: right;
 }
+
+/* DRF-1745 — подтверждение известного (макет C03.3): два ответа в ряд,
+   «Да, всё так» главным. Переносится на узком экране. */
+.anketa-confirm {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s-2);
+}

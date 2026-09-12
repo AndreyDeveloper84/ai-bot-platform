@@ -14,8 +14,11 @@
  * - `scale`: деления в порядке `options` с подписями концов из `scale`;
  *   тап = `{option_key}`;
  * - `text`: короткое поле с лимитом `text_limit`, «Отправить» — `{text}`;
- * - `confirm`: компонент подтверждения известного — DRF-1745; до него
- *   рисуется как `single`.
+ * - `confirm` (DRF-1745, макет C03.3): «Да, всё так» шлёт `{confirm: true}`
+ *   — значение экран не пересылает, его помнит сервер; «Изменилось»
+ *   раскрывает обычный вопрос шага (`question`) компонентом `answer_mode`;
+ *   «Не знаю» — общая escape-ссылка, если шаг её предлагает. Без
+ *   `known_value` режим `confirm` подтверждать нечего — рисуется `single`.
  *
  * Опция с ролью `escape` («Не знаю», DRF-1747) — полноценный ответ, но
  * не вариант: рисуется тихой ссылкой ПОД вариантами, отдельно от них, и в
@@ -30,10 +33,13 @@ import type { MissingItem } from "../lib/customer-goals";
 export type AnketaAnswer =
   | { step: string; option_key: string }
   | { step: string; option_keys: string[] }
-  | { step: string; text: string };
+  | { step: string; text: string }
+  | { step: string; confirm: true };
 
 export const MULTI_CONTINUE_LABEL = "Продолжить";
 export const TEXT_SUBMIT_LABEL = "Отправить";
+export const CONFIRM_YES_LABEL = "Да, всё так";
+export const CONFIRM_CHANGED_LABEL = "Изменилось";
 /** Лимит поля, если сервер не прислал свой: тот же, что у сервера. */
 export const TEXT_LIMIT_FALLBACK = 120;
 
@@ -54,7 +60,10 @@ export function AnketaStepInput({ item, submitting, onAnswer }: Props) {
   const allOptions = item.options ?? [];
   const escape = allOptions.find((o) => o.role === "escape") ?? null;
   const options = allOptions.filter((o) => o.role !== "escape");
-  const mode = renderedMode(item.mode);
+  const confirming = item.mode === "confirm" && Boolean(item.known_value);
+  const [changed, setChanged] = useState(false);
+  // «Изменилось» — обычный вопрос шага тем компонентом, что назвал сервер.
+  const mode = renderedMode(confirming ? item.answer_mode : item.mode);
 
   const escapeLink = escape ? (
     <div className="goal-select__minor">
@@ -70,8 +79,39 @@ export function AnketaStepInput({ item, submitting, onAnswer }: Props) {
     </div>
   ) : null;
 
+  if (confirming && !changed) {
+    return (
+      <>
+        <div className="goal-select__actions anketa-confirm" data-testid="anketa-confirm">
+          <button
+            type="button"
+            className="btn-primary"
+            disabled={submitting}
+            onClick={() => onAnswer({ step, confirm: true })}
+          >
+            {CONFIRM_YES_LABEL}
+          </button>
+          <button
+            type="button"
+            className="btn-secondary"
+            disabled={submitting}
+            onClick={() => setChanged(true)}
+          >
+            {CONFIRM_CHANGED_LABEL}
+          </button>
+        </div>
+        {escapeLink}
+      </>
+    );
+  }
+
   return (
     <>
+      {confirming && item.question && (
+        <p className="goal-select__prompt" data-testid="anketa-confirm-question">
+          {item.question}
+        </p>
+      )}
       <StepBody
         mode={mode}
         step={step}
