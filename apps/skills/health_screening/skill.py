@@ -45,6 +45,7 @@ from typing import ClassVar
 
 from apps.skills.base import SkillContext, SkillResult
 from apps.skills.health_screening.classifier import PainSignal, classify
+from apps.orchestrator.open_question import open_question
 from apps.skills.health_screening.memo import (
     remember_screening_asked,
     screening_asked_recently,
@@ -122,6 +123,15 @@ class HealthScreeningSkill:
             # Красный флаг сюда не пишется — его памятка не гасит, и
             # запоминать нечего.
             remember_screening_asked(context.conversation)
+            # DRF-1779 — и записывается, что бот ЖДЁТ ответа: памятка выше
+            # гасит повтор вопросов, а это — даёт следующей реплике человека
+            # адрес. Без второго факта ответ «1. Спина, 2. После работы»
+            # читался как новая тема (диалог владельца 12.09).
+            open_question(
+                context.conversation,
+                "health_screening.soft",
+                asked_text=SOFT_PAIN_REPLY,
+            )
             return SkillResult(
                 reply_text=SOFT_PAIN_REPLY,
                 meta={"reply_kind": "health_soft_pain"},
