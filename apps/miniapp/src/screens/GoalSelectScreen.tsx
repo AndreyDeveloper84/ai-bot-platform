@@ -493,32 +493,57 @@ export function GoalSelectScreen({ initialDoc }: Props = {}) {
         <section aria-label="Изменить ответ">
           <p className="goal-select__prompt">{revising.prompt}</p>
           <div className="chip-row" role="group" aria-label={revising.prompt}>
-            {revising.options.map((option) => (
-              <button
-                key={option.key}
-                type="button"
-                className="chip"
-                disabled={submitting}
-                aria-pressed={option.key === revising.option_key}
-                onClick={() =>
-                  submit({
-                    answer: { step: revising.step, option_key: option.key, revise: true },
-                    source_channel: "miniapp",
-                  })
-                }
-              >
-                {option.label}
-              </button>
-            ))}
+            {revising.options
+              .filter((option) => option.role !== "escape")
+              .map((option) => (
+                <button
+                  key={option.key}
+                  type="button"
+                  className="chip"
+                  disabled={submitting}
+                  aria-pressed={option.key === revising.option_key}
+                  onClick={() =>
+                    submit({
+                      answer: { step: revising.step, option_key: option.key, revise: true },
+                      source_channel: "miniapp",
+                    })
+                  }
+                >
+                  {option.label}
+                </button>
+              ))}
           </div>
-          <button
-            type="button"
-            className="goal-select__minor-action"
-            disabled={submitting}
-            onClick={() => setRevisingStep(null)}
-          >
-            Оставить как есть
-          </button>
+          <div className="goal-select__minor">
+            {/* DRF-1747 — «Не знаю» и при пересмотре стоит отдельно от
+                вариантов: полноценный ответ, но не вариант. */}
+            {revising.options
+              .filter((option) => option.role === "escape")
+              .map((option) => (
+                <button
+                  key={option.key}
+                  type="button"
+                  className="goal-select__minor-action"
+                  data-testid="anketa-escape"
+                  disabled={submitting}
+                  onClick={() =>
+                    submit({
+                      answer: { step: revising.step, option_key: option.key, revise: true },
+                      source_channel: "miniapp",
+                    })
+                  }
+                >
+                  {option.label}
+                </button>
+              ))}
+            <button
+              type="button"
+              className="goal-select__minor-action"
+              disabled={submitting}
+              onClick={() => setRevisingStep(null)}
+            >
+              Оставить как есть
+            </button>
+          </div>
         </section>
       )}
 

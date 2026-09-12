@@ -36,6 +36,13 @@ export type MissingKind =
 export interface AnketaOption {
   key: string;
   label: string;
+  /**
+   * DRF-1747 — роль опции. `escape` = «Не знаю»: полноценный ответ,
+   * рисуется тихо и отдельно от вариантов; тап шлёт `{option_key}` и на
+   * multi-шаге тоже (заменяет отмеченное). Отсутствие роли — обычный
+   * вариант.
+   */
+  role?: "escape" | string;
 }
 
 /** Server-computed position of the current question. Never derived here. */
@@ -138,6 +145,10 @@ export interface KnownAnketaAnswer {
   /** DRF-1746 — ключи multi-ответа; [] у остальных режимов. */
   option_keys?: string[];
   mode?: string;
+  /** DRF-1747 — ответ «Не знаю»: сказанное, но не известный факт. */
+  unknown?: boolean;
+  /** Происхождение факта: conversation / anketa / operator. */
+  origin?: string;
   step: string;
   prompt: string;
   option_key: string | null;
