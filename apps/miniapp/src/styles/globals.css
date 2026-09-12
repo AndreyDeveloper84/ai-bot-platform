@@ -856,6 +856,27 @@ a {
   overflow-wrap: anywhere;
 }
 
+/* «Рядом со мной» (DRF-1707): пояснение стоит до кнопки — D3 «понятно,
+   зачем location нужна» — тихим текстом; расстояние на карточке — рядом
+   с рейтингом, тем же вторичным цветом. */
+.customer-catalog__nearby {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+  margin: 0 0 var(--s-3);
+}
+
+.customer-catalog__nearby-note {
+  margin: 0;
+  font-size: var(--font-size-100);
+  color: var(--c-text-secondary);
+}
+
+.master-card__distance {
+  font-size: var(--font-size-100);
+  color: var(--c-text-secondary);
+}
+
 .goal-select__prompt {
   margin: 0 0 var(--s-2);
   color: var(--c-text-primary);

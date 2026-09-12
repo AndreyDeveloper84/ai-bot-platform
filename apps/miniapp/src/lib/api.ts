@@ -176,15 +176,27 @@ export interface Master {
   experience: string;
   rating: string | null;
   photo_url: string;
+  /**
+   * DRF-1707 / OD-PILOT-9: метры до места оказания услуги, как их посчитал
+   * каталог. Присутствует только в ответе на запрос с координатами;
+   * `null` = неизвестно (DISTANCE_UNKNOWN) — не ноль и не «далеко».
+   */
+  distance_meters?: number | null;
 }
 export interface MasterDetail extends Master {
   service_ids: string[];
 }
 export const fetchMasters = (params?: {
   serviceId?: string;
+  /** DRF-1707: одноразовые координаты — только в этот запрос, не хранятся. */
+  coords?: { lat: number; lon: number };
 }): Promise<{ masters: Master[] }> => {
   const q = new URLSearchParams();
   if (params?.serviceId) q.set("service_id", params.serviceId);
+  if (params?.coords) {
+    q.set("lat", params.coords.lat.toFixed(6));
+    q.set("lon", params.coords.lon.toFixed(6));
+  }
   const qs = q.toString();
   return request(`/masters${qs ? `?${qs}` : ""}`, { method: "GET" });
 };
