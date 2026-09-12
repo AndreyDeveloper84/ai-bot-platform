@@ -255,7 +255,16 @@ class TestConciergeNutritionTurn:
         generate_concierge_reply("привет", bot_user=bot_user, conversation=conversation)
 
         tool_names = {t["name"] for t in captured["tools"]}
-        assert NUTRITION_TOOL_ACTIONS <= tool_names
+        # DRF-1779 — ``health_screening`` предлагается модели только когда
+        # исполнитель его не отвергнет: на «привет» симптома нет,
+        # ``HealthScreeningSkill.matches`` вернул бы False, и вызов ушёл бы в
+        # veto → проза. Остальные nutrition-инструменты — всегда.
+        assert (NUTRITION_TOOL_ACTIONS - {"health_screening"}) <= tool_names
+        assert "health_screening" not in tool_names
+
+        captured.clear()
+        generate_concierge_reply("болит спина", bot_user=bot_user, conversation=conversation)
+        assert NUTRITION_TOOL_ACTIONS <= {t["name"] for t in captured["tools"]}
 
     def test_health_screening_tool_call_returns_skill_reply(self, monkeypatch):
         provider = AsyncMock()

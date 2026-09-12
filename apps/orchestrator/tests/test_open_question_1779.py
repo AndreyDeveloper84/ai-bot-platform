@@ -207,6 +207,8 @@ class TestOwnerDialogue:
         assert "Человек ответил" not in first["system"]
         # Ход 2: тот же инструмент НЕ предложен (памятка знает, что вопросы
         # заданы — суд вынесен до вызова модели), а вопрос и ответ — в prompt.
+        # Присутствие раньше отсутствия: остальные инструменты на месте.
+        assert "show_masters" in second["tools"]
         assert "health_screening" not in second["tools"]
         assert "Ты спросил: «Понимаю. Уточню, чтобы посоветовать точно:" in second["system"]
         assert "Человек ответил: «1. Спина, 2. После работы»" in second["system"]
@@ -232,7 +234,11 @@ class TestOwnerDialogue:
         _run_turns(sent, *OWNER_TURNS)
         for text in OWNER_TURNS[2:]:
             for call in _calls_for(model, text):
+                # Присутствие раньше отсутствия: инструменты и prompt на месте,
+                # без скрининга и без блока ответа.
+                assert "show_masters" in call["tools"]
                 assert "health_screening" not in call["tools"]
+                assert "Сегодня:" in call["system"]
                 assert "Человек ответил" not in call["system"]
 
 
