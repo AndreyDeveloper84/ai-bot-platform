@@ -78,6 +78,7 @@ from django.utils import timezone
 
 from apps.audit.services import write_audit
 from apps.consent.models import ConsentRecord
+from apps.consent.customer import _mirror_notify_promo
 from apps.consent.services import withdraw_personal_data_for_bot_users
 from apps.identity.export_coverage import build_coverage_section
 from apps.identity.models import BotUser, UserPreferences
@@ -662,12 +663,24 @@ def delete_personal_data(
     # the withdrawal must not depend on a linkage that is NULL in production
     # (ruling §5). Subject = the same shell set step 4 erases.
     try:
-        withdraw_personal_data_for_bot_users(
+        shells = list(
             BotUser.all_tenants.filter(id__in=_person_shell_ids(bot_user, link)).select_related(
                 "tenant"
-            ),
-            source="privacy_delete",
+            )
         )
+        # DRF-1731 замер 12.09: реестр и зеркало ``notify_promo`` — два
+        # носителя одного факта. Раньше зеркало здесь не писалось вовсе и
+        # «сходилось» только потому, что шаг 4 удалял строку
+        # ``UserPreferences`` целиком; при падении шага 4 после шага 3
+        # реестр уже отозван, а зеркало оставалось ``True`` — тумблер
+        # показывал «получаю акции» человеку, который просил стереть всё.
+        # Теперь оба — в одной транзакции и тем же писателем, что у
+        # ``set_marketing`` (``_mirror_notify_promo``): либо отозван и
+        # реестр, и зеркало, либо ни то ни другое — и шаг назван
+        # неудавшимся.
+        with transaction.atomic():
+            withdraw_personal_data_for_bot_users(shells, source="privacy_delete")
+            _mirror_notify_promo(shells, granted=False)
         steps.append(
             DeleteStep(
                 "consent_withdraw",
