@@ -727,9 +727,11 @@ class TestSummaryCardShowsMethodAndInputs:
         from apps.skills.nutrition_anketa.skill import _format_summary
 
         text = _format_summary(_profile())
+        # POSITIVE впереди: карточка отрисована, строки норм на месте —
+        # иначе «строки нет» ничего не доказывает (negative_assert_guard).
+        assert "🔥 Калории: 1900 ккал/день" in text
         assert "от твоих данных" not in text
         assert "Считала" not in text
-        assert "🔥 Калории: 1900 ккал/день" in text
 
     def test_unknown_method_version_is_printed_as_is(self) -> None:
         """Подписи, которой каталог не давал, не изготавливаем."""
