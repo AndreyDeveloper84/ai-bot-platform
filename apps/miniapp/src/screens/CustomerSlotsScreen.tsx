@@ -47,7 +47,7 @@ import { useOnline } from "../hooks/useOnline";
 import { useHaptics } from "../hooks/useHaptics";
 import { getCustomerSlots } from "../lib/customer-booking";
 import { formatDateLabel, formatSlotTime } from "../lib/format";
-import { getInitData } from "../lib/max-sdk";
+import { channelIdentity } from "../lib/identity";
 import { setVisitAt, useBookingDraft } from "../state/booking";
 import { backTo } from "../lib/screen-back";
 
@@ -67,7 +67,7 @@ type State =
   | { kind: "error"; err: unknown };
 
 /** Tau §8 F3 state-dependent header per founder cut #4. */
-type CustomerMode = "anonymous" | "registered" | "loyal";
+type CustomerMode = "no_init_data" | "registered" | "loyal";
 
 function suggestionsHeader(mode: CustomerMode, personalised: boolean): string {
   // Нет сигнала персонализации — нет и персонализирующего обещания.
@@ -76,7 +76,7 @@ function suggestionsHeader(mode: CustomerMode, personalised: boolean): string {
   // сохранённого предпочтения по времени бэкенд не отдаёт вовсе.
   if (!personalised) return "Ближайшие свободные";
   switch (mode) {
-    case "anonymous":
+    case "no_init_data":
       return "Ближайшие свободные";
     case "loyal":
       return "Твоё обычное время";
@@ -99,12 +99,12 @@ function suggestionsHeader(mode: CustomerMode, personalised: boolean): string {
  * the deeplink) as «registered», surfacing «Похоже подойдёт» — wrong
  * tone for first-time visitors. Now we consult MAX initData first.
  */
-function isAnonymousCustomer(): boolean {
-  return getInitData() === "";
-}
-
+// DRF-1319 B. Здесь стояло второе определение «анонима» — теперь одно,
+// в `lib/identity.ts`. Режим `no_init_data` — не «гость»: внутри MAX
+// пустой initData значит «канал не передал данные для входа». Тексты
+// заголовка не меняются (1319-D заперт), меняется только имя состояния.
 function detectCustomerMode(): CustomerMode {
-  if (isAnonymousCustomer()) return "anonymous";
+  if (channelIdentity() === "no_init_data") return "no_init_data";
   return "registered";
 }
 

@@ -303,8 +303,38 @@ def auth_verify(request: HttpRequest) -> HttpResponse:
 
     Response always includes `pending_booking_intent` (the current
     cached value OR null if nothing cached / expired).
+
+    # identity (DRF-1319 B+E, решение владельца §124)
+
+    Ответ несёт блок ``identity`` — единственное серверное утверждение о
+    том, кто перед нами, в словаре §124::
+
+        identity: {
+          channel: "identified" | "dev_bypass",
+          subject: "linked" | "unlinked",
+          ayla_user_id: "<uuid>" | null,
+        }
+
+    ``channel`` — как человек опознан: ``identified`` — MAX ``initData``
+    достоверно назвал его (только так сюда и попадают снаружи);
+    ``dev_bypass`` — DEBUG-обход, человека канал НЕ называл, и притворяться
+    обратным нельзя.
+
+    ``subject`` — есть ли у этого channel user доменный субъект в Ayla.
+    «Регистрация» внутри MAX по §124 — это не экран и не OAuth, а
+    привязка channel identity к каноническому субъекту; она делается
+    здесь, при первом же входе, через ``ensure_ayla_link`` — тем же
+    механизмом, что у брони и платежей. Ayla недоступна → ``unlinked``
+    и 200: вход не ломается, следующий вход попробует снова.
+
+    Понятия «аноним» / «гость» в этом контракте НЕТ намеренно: внутри
+    MAX пустой ``initData`` — отказ транспорта, а не гость (1319-D), и
+    сервер до этой ручки в таком случае не доходит вовсе (401/400 в
+    декораторе).
     """
     import json
+
+    from apps.identity.services.ayla_link import ensure_ayla_link
 
     from apps.miniapp_api.pending_intent import (
         PendingIntentInvalid,
@@ -313,7 +343,8 @@ def auth_verify(request: HttpRequest) -> HttpResponse:
         validate_intent,
     )
 
-    verified: VerifiedInitData = request.verified_init_data  # type: ignore[attr-defined]
+    # ``None`` на DEBUG-обходе (см. ``require_init_data``): канал человека не называл.
+    verified: VerifiedInitData | None = request.verified_init_data  # type: ignore[attr-defined]
     bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
 
     # Optional body — Mini App may call /auth/verify without any pending
@@ -337,12 +368,23 @@ def auth_verify(request: HttpRequest) -> HttpResponse:
 
     cached_intent = get_intent(bot_user.id)
 
+    # DRF-1319 E: привязка субъекта при входе. Идемпотентно (попадание в
+    # кеш по ``ayla_user_id`` не ходит в сеть), fail-soft (``None`` —
+    # остаться непривязанным, не ронять вход).
+    ayla_user_id = ensure_ayla_link(bot_user, trigger="miniapp_auth_verify")
+    identity = {
+        "channel": "identified" if verified is not None else "dev_bypass",
+        "subject": "linked" if ayla_user_id is not None else "unlinked",
+        "ayla_user_id": str(ayla_user_id) if ayla_user_id is not None else None,
+    }
+
+    first_name = verified.user.get("first_name", "") if verified is not None else ""
     return JsonResponse(
         {
             "user": {
                 "id": str(bot_user.id),
                 "channel_user_id": bot_user.channel_user_id,
-                "display_name": bot_user.display_name or verified.user.get("first_name", ""),
+                "display_name": bot_user.display_name or first_name,
                 "client_name": bot_user.client_name,
             },
             "tenant": {
@@ -351,6 +393,7 @@ def auth_verify(request: HttpRequest) -> HttpResponse:
                 "timezone": bot_user.tenant.timezone,
             },
             "pending_booking_intent": cached_intent,
+            "identity": identity,
         }
     )
 
@@ -2129,6 +2172,77 @@ def personal_data_delete(request: HttpRequest) -> HttpResponse:
 
 
 # ---------------------------------------------------------------------------
+# Заявка на удаление аккаунта (§7 свода владельца, DRF-1699, срез D1)
+# ---------------------------------------------------------------------------
+
+
+@csrf_exempt
+@require_http_methods(["GET", "POST"])
+@require_init_data
+@with_request_tenant
+def deletion_request(request: HttpRequest) -> HttpResponse:
+    """``POST`` — завести заявку до любого стирания; ``GET`` — текущая.
+
+    §7: устойчивый ``DeletionRequest`` создаётся ДО показа успеха; человек
+    видит ``request_id``, точную крайнюю дату и статус; ошибка обязана
+    говорить, что удаление не началось.
+
+    Подтверждение — то же серверное ``DELETE_CONFIRMATION_TOKEN``, что у
+    ``DELETE /me/personal-data/`` (DRF-956 / T-05): клиентский лист — не
+    подтверждение. До совпадения токена ничего не происходит; после —
+    только заявка в каталоге. Стирания здесь нет: исполнитель — срез D3.
+
+    Ответы ``POST``: 201 заявка заведена / 200 уже была открыта (тот же
+    номер) — тело одно; 400 токен; 409 ``not_linked`` /
+    ``identity_conflict`` (повтор не поможет — человек не связан с Ayla
+    или связан дважды); 502 ``upstream_unavailable`` (повтор поможет).
+    В каждом отказе ``status: "not_started"`` — единственное слово о
+    состоянии данных, и оно правдиво.
+    """
+    from apps.identity.services.deletion_request import (
+        DeletionNotStarted,
+        current_account_deletion,
+        request_account_deletion,
+    )
+    from apps.identity.services.profile import DELETE_CONFIRMATION_TOKEN
+
+    bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
+
+    if request.method == "GET":
+        current = current_account_deletion(bot_user)
+        if current is None:
+            return JsonResponse({"status": "none", "request": None}, status=200)
+        return JsonResponse({"status": "found", "request": current.as_dict()}, status=200)
+
+    body = _json_object_body(request)
+    if isinstance(body, HttpResponse):
+        return body
+    if body.get("confirmation", "") != DELETE_CONFIRMATION_TOKEN:
+        return _error(
+            "confirmation_mismatch",
+            f"body.confirmation must equal {DELETE_CONFIRMATION_TOKEN!r}",
+            400,
+        )
+
+    try:
+        view = request_account_deletion(bot_user)
+    except DeletionNotStarted as exc:
+        return JsonResponse(
+            {
+                "status": "not_started",
+                "reason": exc.reason,
+                "retryable": exc.retryable,
+                "detail": str(exc),
+            },
+            status=502 if exc.retryable else 409,
+        )
+    return JsonResponse(
+        {"status": "accepted", "request": view.as_dict()},
+        status=201 if view.created else 200,
+    )
+
+
+# ---------------------------------------------------------------------------
 # Health-data consent (152-ФЗ ст. 10 special category) — DRF-1453.
 #
 # Отдельная ручка, а не поле в общем consents-объекте, ровно потому, что
@@ -2790,12 +2904,48 @@ def customer_recommendations(request: HttpRequest) -> HttpResponse:
     # `subject_ref` в теле нет намеренно — кого спрашивают, определяет
     # аутентификация). Приняв часть запроса от клиента, мы позволили бы
     # ему получить решение за другого человека.
+    # D2 (§7, DRF-1699): живая заявка на удаление — подбора нет и в каталог
+    # не ходим: лишний запрос по человеку, который просил его не
+    # обрабатывать, сам есть обработка. Отказ с именем и номером — 423, как
+    # отвечает и каталог, чтобы полка видела одно и то же с любой стороны.
+    from apps.identity.services.deletion_gate import (
+        deletion_gate,
+        mark_deletion_requested,
+    )
+    from apps.identity.services.privacy import resolve_person_link
+
+    link = resolve_person_link(bot_user)
+    gate = deletion_gate(None if link.conflict else link.ayla_user_id)
+    if gate.blocked:
+        return JsonResponse(
+            {
+                "error": gate.reason,
+                "detail": "personalisation stopped: deletion requested",
+                "request_id": gate.request_id,
+            },
+            status=423,
+        )
+
     payload = build_shelf_request(goal_key=None)
 
     outcome = resolve_recommendation(
         external_user_id=external_user_id_for(bot_user),
         payload=payload,
     )
+
+    if outcome.state == "refused":
+        # Каталог узнал о заявке раньше нас (заведена из приложения):
+        # отражаем флаг, чтобы память и проактив закрылись тем же ходом.
+        if link.ayla_user_id is not None and not link.conflict and outcome.request_id:
+            mark_deletion_requested(link.ayla_user_id, request_id=outcome.request_id)
+        return JsonResponse(
+            {
+                "error": "deletion_requested",
+                "detail": "personalisation stopped: deletion requested",
+                "request_id": outcome.request_id,
+            },
+            status=423,
+        )
 
     if outcome.state == "contract_violation":
         # ГРОМКО и отдельно от недоступности. Это и есть вторая половина

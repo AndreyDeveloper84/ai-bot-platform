@@ -49,6 +49,7 @@ import httpx
 from django.conf import settings
 
 from apps.integrations.ayla.url_builder import AylaUrlBuilder
+from apps.integrations.ayla.request_id import with_request_id
 
 
 logger = logging.getLogger(__name__)
@@ -504,10 +505,12 @@ class NutritionClient:
             raise NutritionUnavailableError("circuit_open")
 
         url = self._urls.build("nutrition/internal/scan/")
-        headers = {
-            "X-Service-Token": self._token,
-            "X-External-User-ID": external_user_id,
-        }
+        headers = with_request_id(
+            {
+                "X-Service-Token": self._token,
+                "X-External-User-ID": external_user_id,
+            }
+        )
         files = {"image": (filename, image_bytes, "image/jpeg")}
         data: dict[str, str] = {}
         if portion_multiplier is not None:
@@ -596,10 +599,12 @@ class NutritionClient:
             raise NutritionUnavailableError("circuit_open")
 
         url = self._urls.build("nutrition/internal/food-log/")
-        headers: dict[str, str] = {
-            "X-Service-Token": self._token,
-            "X-External-User-ID": external_user_id,
-        }
+        headers: dict[str, str] = with_request_id(
+            {
+                "X-Service-Token": self._token,
+                "X-External-User-ID": external_user_id,
+            }
+        )
         if idempotency_key:
             headers["X-Idempotency-Key"] = idempotency_key
         body: dict[str, Any] = {
@@ -672,10 +677,12 @@ class NutritionClient:
             raise NutritionUnavailableError("circuit_open")
 
         url = self._urls.build("nutrition/internal/summary/")
-        headers = {
-            "X-Service-Token": self._token,
-            "X-External-User-ID": external_user_id,
-        }
+        headers = with_request_id(
+            {
+                "X-Service-Token": self._token,
+                "X-External-User-ID": external_user_id,
+            }
+        )
         params: dict[str, str] = {}
         if date:
             params["date"] = date
@@ -736,10 +743,12 @@ class NutritionClient:
             raise NutritionUnavailableError("circuit_open")
 
         url = self._urls.build("nutrition/internal/deficits/")
-        headers = {
-            "X-Service-Token": self._token,
-            "X-External-User-ID": external_user_id,
-        }
+        headers = with_request_id(
+            {
+                "X-Service-Token": self._token,
+                "X-External-User-ID": external_user_id,
+            }
+        )
         try:
             async with httpx.AsyncClient(timeout=self._timeout_s) as http:
                 resp = await http.get(url, headers=headers, params={"days": str(days)})
@@ -784,10 +793,12 @@ class NutritionClient:
             raise NutritionUnavailableError("circuit_open")
 
         url = self._urls.build("nutrition/internal/profile/")
-        headers = {
-            "X-Service-Token": self._token,
-            "X-External-User-ID": external_user_id,
-        }
+        headers = with_request_id(
+            {
+                "X-Service-Token": self._token,
+                "X-External-User-ID": external_user_id,
+            }
+        )
         try:
             async with httpx.AsyncClient(timeout=self._timeout_s) as http:
                 resp = await http.get(url, headers=headers)
@@ -814,10 +825,12 @@ class NutritionClient:
             raise NutritionUnavailableError("circuit_open")
 
         url = self._urls.build("nutrition/internal/profile/")
-        headers = {
-            "X-Service-Token": self._token,
-            "X-External-User-ID": external_user_id,
-        }
+        headers = with_request_id(
+            {
+                "X-Service-Token": self._token,
+                "X-External-User-ID": external_user_id,
+            }
+        )
         try:
             async with httpx.AsyncClient(timeout=self._timeout_s) as http:
                 resp = await http.post(url, headers=headers, json=data)
@@ -932,10 +945,12 @@ class NutritionClient:
             raise NutritionUnavailableError("circuit_open")
 
         url = self._urls.build("nutrition/internal/water/")
-        headers: dict[str, str] = {
-            "X-Service-Token": self._token,
-            "X-External-User-ID": external_user_id,
-        }
+        headers: dict[str, str] = with_request_id(
+            {
+                "X-Service-Token": self._token,
+                "X-External-User-ID": external_user_id,
+            }
+        )
         if idempotency_key:
             headers["X-Idempotency-Key"] = idempotency_key
         body: dict[str, Any] = {"ml": ml}
@@ -997,10 +1012,12 @@ class NutritionClient:
             raise NutritionUnavailableError("circuit_open")
 
         url = self._urls.build(f"nutrition/internal/water/{entry_id}/")
-        headers = {
-            "X-Service-Token": self._token,
-            "X-External-User-ID": external_user_id,
-        }
+        headers = with_request_id(
+            {
+                "X-Service-Token": self._token,
+                "X-External-User-ID": external_user_id,
+            }
+        )
         try:
             async with httpx.AsyncClient(timeout=self._timeout_s) as http:
                 resp = await http.delete(url, headers=headers)
@@ -1030,10 +1047,12 @@ class NutritionClient:
             raise NutritionUnavailableError("circuit_open")
 
         url = self._urls.build("nutrition/internal/water/today/")
-        headers = {
-            "X-Service-Token": self._token,
-            "X-External-User-ID": external_user_id,
-        }
+        headers = with_request_id(
+            {
+                "X-Service-Token": self._token,
+                "X-External-User-ID": external_user_id,
+            }
+        )
         try:
             async with httpx.AsyncClient(timeout=self._timeout_s) as http:
                 resp = await http.get(url, headers=headers)
@@ -1079,10 +1098,12 @@ class NutritionClient:
             raise NutritionUnavailableError("circuit_open")
 
         url = self._urls.build("nutrition/internal/insights/cross_domain/")
-        headers = {
-            "X-Service-Token": self._token,
-            "X-External-User-ID": external_user_id,
-        }
+        headers = with_request_id(
+            {
+                "X-Service-Token": self._token,
+                "X-External-User-ID": external_user_id,
+            }
+        )
 
         try:
             async with httpx.AsyncClient(timeout=self._timeout_s) as http:
@@ -1176,10 +1197,12 @@ class NutritionClient:
             raise NutritionUnavailableError("circuit_open")
 
         url = self._urls.build(f"nutrition/internal/insights/cross_domain/{action}/{shown_id}/")
-        headers = {
-            "X-Service-Token": self._token,
-            "X-External-User-ID": external_user_id,
-        }
+        headers = with_request_id(
+            {
+                "X-Service-Token": self._token,
+                "X-External-User-ID": external_user_id,
+            }
+        )
 
         try:
             async with httpx.AsyncClient(timeout=self._timeout_s) as http:

@@ -145,15 +145,15 @@ class IsProApp:
 Проверил в боевой Ayla:
 
 ```
-bot:83146139  →  customer в ayla-marketplace     (не тот тенант, не та роль)
+bot:831…  →  customer в ayla-marketplace     (не тот тенант, не та роль)
 
 все связи в тенанте formula-tela:
   customer | bot:99999777
   customer | bot:74393095
   customer | bot:max:e2e-probe-1
-  customer | bot:max:83146139      ← актор бота здесь, но customer
+  customer | bot:max:831…      ← актор бота здесь, но customer
   customer | drf954-test-customer
-  customer | bot:max:66368800
+  customer | bot:max:663…
   customer | bot:max:260237491
 ```
 

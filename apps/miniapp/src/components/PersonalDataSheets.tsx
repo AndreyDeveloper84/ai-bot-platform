@@ -7,7 +7,12 @@
  * endpoints (`apps/miniapp_api`):
  *
  *   GET    /api/v1/customer/me/personal-data/export/  → JSON attachment
- *   DELETE /api/v1/customer/me/personal-data/         → {status:"deleted"}
+ *   POST   /api/v1/customer/me/deletion-request/      → {status:"accepted", request}
+ *
+ * DRF-1699 (§7 свода владельца, 11.09.2026): удаление — не синхронный
+ * каскад, а ЗАЯВКА. Лист заводит `DeletionRequest` в каталоге и показывает
+ * человеку, что запрос принят, точную крайнюю дату, номер и статус.
+ * Стирание делает исполнитель на сервере (срез D3), не этот лист.
  *
  * DRF-1453 добавляет сюда третий лист — согласие на медданные
  * ({@link HealthConsentSheet}). Он живёт в этом же файле, а не рядом, чтобы
@@ -20,13 +25,18 @@
  * - **UI idempotency** — while a request is in flight both actions are
  *   disabled and Escape/backdrop are ignored, so repeat taps never spawn
  *   repeat requests. Backend repeats stay safe regardless (C5.2).
- * - **Honest partial** — a 502 `{status:"partial", failed_steps}` maps to
- *   humanised step labels (raw backend slugs never render) + retry +
- *   support deeplink (#949 fallback on every failure view).
- * - **Retention boundary** — delete copy states what the pilot cascade
- *   covers (memory, personal context, consents) and that bookings /
- *   payments may be retained per law. No timeframe promises, no 30-day
- *   grace wording (founder-locked anti-patterns, spec §14).
+ * - **Honest refusal** — the server says ONE thing about the data on
+ *   failure: `not_started` (§7). No «partial»: the sheet never has to
+ *   explain which half happened. Retry only when the server says it can
+ *   help; support deeplink on every failure view (#949).
+ * - **Retention boundary and the 30-day deadline** — the confirmation
+ *   lists exactly what §7 lists: account off, profile / goals / plans /
+ *   diaries / addresses / personal context erased, done within 30 days,
+ *   bookings and payments possibly kept limited or anonymised where the
+ *   law requires, irreversible once started. The former rule «no 30-day
+ *   grace wording» (spec §14) is RETIRED by the owner's §7 decision of
+ *   11.09.2026 — the decision is newer than the spec, and a screen that
+ *   kept obeying the old rule would be wrong by the new one.
  *
  * # A11y (mirrors SupportEntrySheet, WCAG 2.2 AA)
  *
@@ -49,10 +59,14 @@ import {
 } from "../lib/customer-profile";
 import {
   DELETE_CONFIRMATION_TOKEN,
-  deletePersonalData,
+  DELETION_STATUS_LABELS,
+  DeletionNotStartedError,
   exportPersonalData,
-  PersonalDataPartialDeleteError,
+  formatDeadline,
+  getCurrentDeletionRequest,
+  requestAccountDeletion,
   triggerDownload,
+  type DeletionRequestInfo,
 } from "../lib/personal-data";
 import {
   grantHealthConsent,
@@ -287,44 +301,101 @@ export function PersonalDataExportSheet({ open, triggerRef, onClose }: SheetProp
 }
 
 // ---------------------------------------------------------------------------
-// C5.2 — Delete
+// DRF-1699 — Заявка на удаление аккаунта и личных данных (§7)
 // ---------------------------------------------------------------------------
 
 type DeleteView =
   | "confirm"
   | "busy"
-  | "done"
-  | "partial"
-  // Structural failure (no Ayla linkage): local erasure succeeded, the
-  // remote leg is impossible, so we say so instead of offering a retry
-  // that can never work.
-  | "unretryable"
+  | "accepted"
+  // Сервер сказал единственное, что вправе сказать при отказе: удаление
+  // НЕ НАЧАЛОСЬ. Данные в прежнем состоянии. Повтор — только если сервер
+  // сказал, что он поможет.
+  | "not_started"
   | "error";
 
-/** Backend cascade slugs → human copy (raw slugs never render). */
-const FAILED_STEP_LABELS: Record<string, string> = {
-  ayla_delete: "удалить данные в основной системе",
-  memory_delete: "очистить память",
-  consent_withdraw: "отозвать согласия",
-  profile_pii_erase: "очистить контакты и имя в профиле",
-};
+/**
+ * Пять пунктов подтверждения — §7 свода дословно, ни одним меньше и ни
+ * одним больше. Экспортированы, чтобы тест сверял состав, а не угадывал
+ * по обрывкам фраз.
+ */
+export const DELETION_CONFIRMATION_POINTS: readonly string[] = [
+  "аккаунт будет отключён;",
+  "профиль, цели, планы, дневники, адреса и персональный контекст будут удалены;",
+  "срок завершения — не позднее 30 дней;",
+  "состоявшиеся записи и оплаты могут сохраняться ограниченно или обезличенно, если этого требует закон;",
+  "после начала удаления действие нельзя отменить.",
+];
 
-function humanizeFailedSteps(steps: string[]): string {
-  return steps
-    .map((s) => FAILED_STEP_LABELS[s] ?? "завершить один из шагов")
-    .join(", ");
+/** «Принято» — с датой, номером и статусом словами; сырые слаги не выходят. */
+export function DeletionRequestSummary({
+  request,
+  created,
+}: {
+  request: DeletionRequestInfo;
+  created: boolean;
+}) {
+  return (
+    <>
+      <p className="profile-support-sheet__body">
+        {created ? "Запрос принят." : "Запрос уже был принят раньше."} Удаление будет
+        завершено не позднее <b>{formatDeadline(request.deadline_at)}</b>.
+      </p>
+      <p className="profile-support-sheet__body">
+        Номер запроса: <code>{request.request_id}</code>
+        <br />
+        Статус: {DELETION_STATUS_LABELS[request.status] ?? "в работе"}
+      </p>
+    </>
+  );
+}
+
+/**
+ * Строка состояния в профиле: у человека уже есть заявка → он видит номер,
+ * срок и статус при каждом заходе, а не только в момент нажатия (§7:
+ * «текущий статус»). Ничего нет или не удалось прочитать — ничего не
+ * рисуется: отсутствие строки — не ошибка экрана.
+ */
+export function DeletionRequestStatus() {
+  const [request, setRequest] = useState<DeletionRequestInfo | null>(null);
+
+  useEffect(() => {
+    let alive = true;
+    getCurrentDeletionRequest()
+      .then((r) => {
+        if (alive) setRequest(r);
+      })
+      .catch(() => {
+        /* профиль без сведений о заявке — не ошибка экрана */
+      });
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  if (!request) return null;
+  return (
+    <div className="profile-section__caption" role="status" data-testid="deletion-request-status">
+      <DeletionRequestSummary request={request} created={false} />
+    </div>
+  );
 }
 
 export function PersonalDataDeleteSheet({ open, triggerRef, onClose }: SheetProps) {
   const [view, setView] = useState<DeleteView>("confirm");
-  const [failedSteps, setFailedSteps] = useState<string[]>([]);
   const [typed, setTyped] = useState("");
+  const [accepted, setAccepted] = useState<{
+    request: DeletionRequestInfo;
+    created: boolean;
+  } | null>(null);
+  const [refusal, setRefusal] = useState<DeletionNotStartedError | null>(null);
 
   useEffect(() => {
     if (open) {
       setView("confirm");
-      setFailedSteps([]);
       setTyped("");
+      setAccepted(null);
+      setRefusal(null);
     }
   }, [open]);
 
@@ -336,12 +407,13 @@ export function PersonalDataDeleteSheet({ open, triggerRef, onClose }: SheetProp
     if (!confirmed) return;
     setView("busy");
     try {
-      await deletePersonalData(typed.trim());
-      setView("done");
+      const result = await requestAccountDeletion(typed.trim());
+      setAccepted(result);
+      setView("accepted");
     } catch (err) {
-      if (err instanceof PersonalDataPartialDeleteError) {
-        setFailedSteps(err.failedSteps);
-        setView(err.isUnretryable ? "unretryable" : "partial");
+      if (err instanceof DeletionNotStartedError) {
+        setRefusal(err);
+        setView("not_started");
       } else {
         setView("error");
       }
@@ -354,22 +426,19 @@ export function PersonalDataDeleteSheet({ open, triggerRef, onClose }: SheetProp
   return (
     <SheetChrome
       headlineId="personal-data-delete-headline"
-      headline="Удалить мои данные?"
+      headline="Удалить аккаунт и личные данные?"
       closeDisabled={busy}
       triggerRef={triggerRef}
       onClose={onClose}
     >
       {view === "confirm" && (
         <>
-          <p className="profile-support-sheet__body">
-            Удалю во всех наших системах: что <span lang="en">Ayla</span>{" "}
-            помнит о тебе, твои персональные настройки и согласия. Это
-            действие нельзя отменить.
-          </p>
-          <p className="profile-support-sheet__body">
-            Записи и оплаты могут храниться дольше, если этого требует
-            закон.
-          </p>
+          <p className="profile-support-sheet__body">Что произойдёт:</p>
+          <ul className="profile-support-sheet__list">
+            {DELETION_CONFIRMATION_POINTS.map((point) => (
+              <li key={point}>{point}</li>
+            ))}
+          </ul>
           <label
             className="profile-support-sheet__body"
             htmlFor="personal-data-delete-confirm"
@@ -403,29 +472,30 @@ export function PersonalDataDeleteSheet({ open, triggerRef, onClose }: SheetProp
               disabled={!confirmed}
               onClick={start}
             >
-              Удалить данные
+              Удалить аккаунт
             </button>
           </div>
         </>
       )}
       {view === "busy" && (
         <>
-          <p className="profile-support-sheet__body">Удаляю…</p>
+          <p className="profile-support-sheet__body">Отправляю запрос…</p>
           <div className="profile-support-sheet__actions">
             <button type="button" disabled className="btn-secondary">
               Отмена
             </button>
             <button type="button" disabled className="btn-primary">
-              Удаляю…
+              Отправляю…
             </button>
           </div>
         </>
       )}
-      {view === "done" && (
+      {view === "accepted" && accepted && (
         <>
+          <DeletionRequestSummary request={accepted.request} created={accepted.created} />
           <p className="profile-support-sheet__body">
-            Данные удалены. <span lang="en">Ayla</span> больше не
-            использует твою память, настройки и согласия.
+            Персонализация и новая обработка твоих данных прекращаются
+            сразу. Отменить удаление нельзя.
           </p>
           <div className="profile-support-sheet__actions">
             <button
@@ -438,35 +508,16 @@ export function PersonalDataDeleteSheet({ open, triggerRef, onClose }: SheetProp
           </div>
         </>
       )}
-      {view === "unretryable" && (
+      {view === "not_started" && (
         <>
           <p className="profile-support-sheet__body">
-            Здесь, в боте, я всё удалила: что помню о тебе, твои настройки и
-            согласия.
+            Удаление не началось. Твои данные в прежнем состоянии — ничего
+            не удалено и не изменено.
           </p>
           <p className="profile-support-sheet__body">
-            А вот {humanizeFailedSteps(failedSteps)} автоматически не вышло.
-            Напиши в поддержку — мы доведём это вручную. Повторная попытка
-            здесь не поможет.
-          </p>
-          <div className="profile-support-sheet__actions">
-            <button
-              type="button"
-              className="btn-primary profile-support-sheet__primary"
-              onClick={onClose}
-            >
-              Закрыть
-            </button>
-            <SupportLink />
-          </div>
-        </>
-      )}
-      {view === "partial" && (
-        <>
-          <p className="profile-support-sheet__body">
-            Не всё удалено. Не получилось {humanizeFailedSteps(failedSteps)}.
-            Повторное удаление безопасно — попробуй ещё раз, а если снова
-            не выйдет, напиши в поддержку.
+            {refusal?.retryable
+              ? "Попробуй ещё раз. Если снова не выйдет — напиши в поддержку."
+              : "Повторная попытка здесь не поможет — напиши в поддержку, мы примем запрос вручную."}
           </p>
           <div className="profile-support-sheet__actions">
             <button
@@ -476,13 +527,15 @@ export function PersonalDataDeleteSheet({ open, triggerRef, onClose }: SheetProp
             >
               Отмена
             </button>
-            <button
-              type="button"
-              className="btn-primary profile-support-sheet__primary"
-              onClick={start}
-            >
-              Попробовать ещё раз
-            </button>
+            {refusal?.retryable && (
+              <button
+                type="button"
+                className="btn-primary profile-support-sheet__primary"
+                onClick={start}
+              >
+                Попробовать ещё раз
+              </button>
+            )}
             <SupportLink />
           </div>
         </>
@@ -490,8 +543,8 @@ export function PersonalDataDeleteSheet({ open, triggerRef, onClose }: SheetProp
       {view === "error" && (
         <>
           <p className="profile-support-sheet__body">
-            Не получилось удалить данные. Попробуй ещё раз — если снова
-            не выйдет, напиши в поддержку, мы удалим вручную.
+            Удаление не началось: не удалось отправить запрос. Попробуй ещё
+            раз — если снова не выйдет, напиши в поддержку.
           </p>
           <div className="profile-support-sheet__actions">
             <button

@@ -297,7 +297,7 @@ describe("CustomerProfileScreen (настоящие ручки согласий)
     ).not.toBeInTheDocument();
     // §35 п.6 — отзыв и удаление аккаунта не сливаются.
     expect(
-      screen.getByRole("button", { name: "Удалить аккаунт" }),
+      screen.getByRole("button", { name: "Удалить аккаунт и личные данные" }),
     ).toBeInTheDocument();
   }, 15000);
 
@@ -524,9 +524,11 @@ describe("CustomerProfileScreen (настоящие ручки согласий)
     const user = userEvent.setup();
     await renderFresh();
     await user.click(
-      await screen.findByRole("button", { name: "Удалить аккаунт" }),
+      await screen.findByRole("button", { name: "Удалить аккаунт и личные данные" }),
     );
-    expect(await screen.findByText("Удалить мои данные?")).toBeInTheDocument();
+    expect(
+      await screen.findByText("Удалить аккаунт и личные данные?"),
+    ).toBeInTheDocument();
     await user.keyboard("{Escape}");
     await waitFor(() =>
       expect(screen.queryByRole("dialog")).not.toBeInTheDocument(),

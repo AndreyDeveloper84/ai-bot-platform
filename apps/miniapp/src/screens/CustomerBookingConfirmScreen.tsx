@@ -37,8 +37,9 @@
  *   «Выбрать другое время» CTA returning to F3.
  *
  * Anonymous gate:
- *   Detection: `getInitData()` empty → anonymous. When user is
- *   anonymous AND a slot has been picked, the screen renders the
+ *   Detection: `channelIdentity() === "no_init_data"` (DRF-1319, one
+ *   definition in `lib/identity.ts`; not «anonymous» — the channel did
+ *   not deliver initData). When so AND a slot has been picked, the screen renders the
  *   `<AnonymousGateOverlay>` panel instead of the registered card.
  *   The overlay's «Зарегистрироваться» button:
  *     1. Calls `savePendingIntent({...})` (sessionStorage).
@@ -56,6 +57,7 @@
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { ApiError, authVerify, isHealthCheckSlug } from "../lib/api";
+import { channelIdentity } from "../lib/identity";
 import { OfflineBanner } from "../components/OfflineBanner";
 import { ScreenLayout } from "../components/ScreenLayout";
 import { StickyCta } from "../components/StickyCta";
@@ -65,7 +67,6 @@ import { useOnline } from "../hooks/useOnline";
 import { createCustomerBooking } from "../lib/customer-booking";
 import { formatMoney, formatVisitFull } from "../lib/format";
 import {
-  getInitData,
   getStartPayload,
   openExternalLink,
   openPaymentConfirmation,
@@ -151,14 +152,11 @@ const NOT_BOOKABLE_SLUGS = new Set([
 /** Payment choice per C7.4 / AMD-002 — online is optional (D6). */
 type PaymentChoice = "onsite" | "online";
 
-/**
- * Anonymous == no MAX initData available. In dev mode with a VITE
- * override, initData is non-empty so we treat the user as registered
- * for parity with the booking endpoint behaviour.
- */
-function isAnonymous(): boolean {
-  return getInitData() === "";
-}
+// DRF-1319 B. Здесь стояло второе, независимое определение «анонима»
+// (`getInitData() === ""`) — см. `lib/identity.ts`, теперь оно одно.
+// Ветка ниже по-прежнему называется «gate»: что показывать человеку, у
+// которого канал не передал initData, — срез 1319-D, заперт решением о
+// MAX OAuth. Меняется только имя состояния, не экран.
 
 export function CustomerBookingConfirmScreen() {
   const online = useOnline();
@@ -175,7 +173,7 @@ export function CustomerBookingConfirmScreen() {
   const [notesOpen, setNotesOpen] = useState(false);
   const [note, setNote] = useState("");
   const [paymentChoice, setPaymentChoice] = useState<PaymentChoice>("onsite");
-  const [anonymous] = useState<boolean>(() => isAnonymous());
+  const [noInitData] = useState<boolean>(() => channelIdentity() === "no_init_data");
 
   // Возврат (DRF-1493) — к выбору времени у того же мастера, то есть к
   // предыдущему шагу сценария, а не к предыдущей странице истории:
@@ -416,8 +414,8 @@ export function CustomerBookingConfirmScreen() {
     openExternalLink(oauthUrl);
   }
 
-  // ── Anonymous gate branch (§6.2) ─────────────────────────────────────
-  if (anonymous) {
+  // ── Gate branch (§6.2): канал не передал initData ─────────────────────
+  if (noInitData) {
     // Пока адреса MAX OAuth нет, кнопка «Зарегистрироваться» уводила бы
     // в никуда: сохранённое намерение и `navigate("/")` — тупик
     // (round-1 PRE_MERGE blocker #1). Допустимая деградация: показать

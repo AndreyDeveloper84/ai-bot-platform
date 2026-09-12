@@ -18,26 +18,41 @@ vi.mock("../lib/personal-data", async (importOriginal) => {
   return {
     ...original,
     exportPersonalData: vi.fn(),
-    deletePersonalData: vi.fn(),
+    requestAccountDeletion: vi.fn(),
+    getCurrentDeletionRequest: vi.fn(),
     triggerDownload: vi.fn(),
   };
 });
 
 import {
   DELETE_CONFIRMATION_TOKEN,
-  deletePersonalData,
+  DeletionNotStartedError,
   exportPersonalData,
-  PersonalDataPartialDeleteError,
+  getCurrentDeletionRequest,
+  requestAccountDeletion,
   triggerDownload,
+  type DeletionRequestInfo,
 } from "../lib/personal-data";
 import {
+  DELETION_CONFIRMATION_POINTS,
+  DeletionRequestStatus,
   PersonalDataDeleteSheet,
   PersonalDataExportSheet,
 } from "./PersonalDataSheets";
 
 const mockedExport = vi.mocked(exportPersonalData);
-const mockedDelete = vi.mocked(deletePersonalData);
+const mockedRequest = vi.mocked(requestAccountDeletion);
+const mockedCurrent = vi.mocked(getCurrentDeletionRequest);
 const mockedDownload = vi.mocked(triggerDownload);
+
+const REQUEST: DeletionRequestInfo = {
+  request_id: "7a1b2c3d-0000-4000-8000-000000001699",
+  status: "DELETION_REQUESTED",
+  requested_at: "2026-09-11T14:00:00+00:00",
+  deadline_at: "2026-10-11T14:00:00+00:00",
+  completed_at: null,
+  is_open: true,
+};
 
 function renderExport(onClose = vi.fn()) {
   const triggerRef = createRef<HTMLButtonElement>();
@@ -57,7 +72,7 @@ function renderDelete(onClose = vi.fn()) {
   render(
     <>
       <button ref={triggerRef} type="button">
-        Удалить аккаунт
+        Удалить аккаунт и личные данные
       </button>
       <PersonalDataDeleteSheet open triggerRef={triggerRef} onClose={onClose} />
     </>,
@@ -146,35 +161,41 @@ async function confirmDelete(user: ReturnType<typeof userEvent.setup>) {
     screen.getByLabelText(/Чтобы подтвердить/),
     DELETE_CONFIRMATION_TOKEN,
   );
-  await user.click(screen.getByRole("button", { name: "Удалить данные" }));
+  await user.click(screen.getByRole("button", { name: "Удалить аккаунт" }));
 }
 
 describe("PersonalDataDeleteSheet", () => {
-  it("asks for confirmation and states the retention boundary honestly", () => {
+  it("lists the five §7 points — the 30-day deadline included — and focuses Cancel first", () => {
     renderDelete();
-    expect(screen.getByText("Удалить мои данные?")).toBeInTheDocument();
-    // Retention per contract §6: transactional records may be kept by law.
+    expect(screen.getByText("Удалить аккаунт и личные данные?")).toBeInTheDocument();
+    // Состав подтверждения — §7 свода дословно: пять пунктов, каждый на экране.
+    expect(DELETION_CONFIRMATION_POINTS).toHaveLength(5);
+    for (const point of DELETION_CONFIRMATION_POINTS) {
+      expect(screen.getByText(point)).toBeInTheDocument();
+    }
+    // Срок — на экране. Прежнее правило «no 30-day wording» снято решением
+    // владельца от 11.09.2026 (правило поменялось — код не должен быть
+    // верен прежнему).
+    expect(screen.getByText(/не позднее 30 дней/)).toBeInTheDocument();
     expect(screen.getByText(/записи и оплаты/i)).toBeInTheDocument();
-    // No grace-period / timeframe promises (founder-locked anti-pattern).
-    expect(screen.queryByText(/30 дней/)).not.toBeInTheDocument();
+    expect(screen.getByText(/нельзя отменить/)).toBeInTheDocument();
     const cancel = screen.getByRole("button", { name: "Отмена" });
     expect(document.activeElement).toBe(cancel);
     expect(document.activeElement).not.toBe(
-      screen.getByRole("button", { name: "Удалить данные" }),
+      screen.getByRole("button", { name: "Удалить аккаунт" }),
     );
   });
 
   it("keeps the destructive button inert until the token is typed", async () => {
     const user = userEvent.setup();
     renderDelete();
-    const primary = screen.getByRole("button", { name: "Удалить данные" });
+    const primary = screen.getByRole("button", { name: "Удалить аккаунт" });
     expect(primary).toBeDisabled();
 
-    // A near-miss must not arm it — the server would reject it anyway.
     await user.type(screen.getByLabelText(/Чтобы подтвердить/), "удалить");
     expect(primary).toBeDisabled();
     await user.click(primary);
-    expect(mockedDelete).not.toHaveBeenCalled();
+    expect(mockedRequest).not.toHaveBeenCalled();
 
     await user.clear(screen.getByLabelText(/Чтобы подтвердить/));
     await user.type(
@@ -187,137 +208,108 @@ describe("PersonalDataDeleteSheet", () => {
   it("passes the typed token to the backend, which verifies it", async () => {
     const user = userEvent.setup();
     renderDelete();
-    mockedDelete.mockResolvedValueOnce({ status: "deleted" });
+    mockedRequest.mockResolvedValueOnce({ request: REQUEST, created: true });
     await confirmDelete(user);
-    expect(mockedDelete).toHaveBeenCalledWith(DELETE_CONFIRMATION_TOKEN);
+    expect(mockedRequest).toHaveBeenCalledWith(DELETE_CONFIRMATION_TOKEN);
   });
 
-  it("runs the delete cascade once even on repeated taps, then shows status", async () => {
+  it("shows «принято» with the exact deadline date, request id and status", async () => {
     const user = userEvent.setup();
     renderDelete();
-    let resolveDelete: ((v: { status: "deleted" }) => void) | undefined;
-    mockedDelete.mockImplementation(
+    mockedRequest.mockResolvedValueOnce({ request: REQUEST, created: true });
+    await confirmDelete(user);
+
+    expect(await screen.findByText(/Запрос принят\./)).toBeInTheDocument();
+    // Точная крайняя дата словами, не ISO-строка и не «через 30 дней».
+    expect(screen.getByText(/11 октября 2026/)).toBeInTheDocument();
+    expect(screen.getByText(REQUEST.request_id)).toBeInTheDocument();
+    expect(screen.getByText(/принят, ожидает выполнения/)).toBeInTheDocument();
+    // Сырой слаг статуса наружу не выходит.
+    expect(screen.queryByText(/DELETION_REQUESTED/)).not.toBeInTheDocument();
+    expect(screen.getByText(/прекращаются сразу/)).toBeInTheDocument();
+  });
+
+  it("says «уже был принят» on a repeat (created=false) with the same number", async () => {
+    const user = userEvent.setup();
+    renderDelete();
+    mockedRequest.mockResolvedValueOnce({ request: REQUEST, created: false });
+    await confirmDelete(user);
+    expect(await screen.findByText(/уже был принят раньше/)).toBeInTheDocument();
+    expect(screen.getByText(REQUEST.request_id)).toBeInTheDocument();
+  });
+
+  it("sends the request once even on repeated taps (UI idempotency)", async () => {
+    const user = userEvent.setup();
+    renderDelete();
+    let resolveRequest: ((v: { request: DeletionRequestInfo; created: boolean }) => void) | undefined;
+    mockedRequest.mockImplementation(
       () =>
         new Promise((resolve) => {
-          resolveDelete = resolve;
+          resolveRequest = resolve;
         }),
     );
-    // Hold the element reference from BEFORE the first tap: the confirm
-    // view unmounts on click, so re-querying by name would miss it and the
-    // repeat-tap invariant would stop being tested at all.
     await user.type(
       screen.getByLabelText(/Чтобы подтвердить/),
       DELETE_CONFIRMATION_TOKEN,
     );
-    const primary = screen.getByRole("button", { name: "Удалить данные" });
+    const primary = screen.getByRole("button", { name: "Удалить аккаунт" });
     await user.click(primary);
     await user.click(primary);
-    expect(mockedDelete).toHaveBeenCalledTimes(1);
-    resolveDelete!({ status: "deleted" });
-    expect(await screen.findByText(/Данные удалены/)).toBeInTheDocument();
+    expect(mockedRequest).toHaveBeenCalledTimes(1);
+    resolveRequest!({ request: REQUEST, created: true });
+    expect(await screen.findByText(/Запрос принят/)).toBeInTheDocument();
   });
 
-  it("reports a partial delete with humanised steps, retry and support link", async () => {
+  it("says plainly that deletion did NOT start on a retryable refusal, and offers retry", async () => {
     const user = userEvent.setup();
     renderDelete();
-    mockedDelete.mockRejectedValueOnce(
-      new PersonalDataPartialDeleteError(["memory_delete", "consent_withdraw"]),
+    mockedRequest.mockRejectedValueOnce(
+      new DeletionNotStartedError("upstream_unavailable", true, "Удаление не началось."),
     );
     await confirmDelete(user);
-    expect(await screen.findByText(/Не всё удалено/)).toBeInTheDocument();
-    expect(screen.getByText(/очистить память/)).toBeInTheDocument();
-    expect(screen.getByText(/отозвать согласия/)).toBeInTheDocument();
-    // Raw backend slugs never reach the UI.
-    expect(screen.queryByText(/memory_delete/)).not.toBeInTheDocument();
-    expect(
-      screen.getByRole("link", { name: "Написать в поддержку" }),
-    ).toHaveAttribute("href", "https://max.me/aylasupport");
-    mockedDelete.mockResolvedValueOnce({ status: "deleted" });
+
+    expect(await screen.findByText(/Удаление не началось/)).toBeInTheDocument();
+    expect(screen.getByText(/ничего не удалено и не изменено/)).toBeInTheDocument();
+    // Нет ни «частично», ни «удалено»: состояние данных одно, и оно названо.
+    expect(screen.queryByText(/Не всё удалено/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/upstream_unavailable/)).not.toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Написать в поддержку" })).toBeInTheDocument();
+
+    mockedRequest.mockResolvedValueOnce({ request: REQUEST, created: true });
     await user.click(screen.getByRole("button", { name: "Попробовать ещё раз" }));
-    expect(await screen.findByText(/Данные удалены/)).toBeInTheDocument();
+    expect(await screen.findByText(/Запрос принят/)).toBeInTheDocument();
   });
 
-  it("offers no retry when the failure is structural (not_linked)", async () => {
+  it("offers no retry when the server says a retry cannot help (not_linked)", async () => {
     const user = userEvent.setup();
     renderDelete();
-    mockedDelete.mockRejectedValueOnce(
-      new PersonalDataPartialDeleteError(["ayla_delete"], {
-        ayla_delete: "not_linked",
-      }),
+    mockedRequest.mockRejectedValueOnce(
+      new DeletionNotStartedError("not_linked", false, "Удаление не началось."),
     );
     await confirmDelete(user);
 
-    // Says plainly what DID happen locally...
-    expect(await screen.findByText(/я всё удалила/)).toBeInTheDocument();
-    // ...and does not invite a retry that can never succeed.
+    expect(await screen.findByText(/Удаление не началось/)).toBeInTheDocument();
+    expect(screen.getByText(/не поможет/)).toBeInTheDocument();
     expect(
       screen.queryByRole("button", { name: "Попробовать ещё раз" }),
     ).not.toBeInTheDocument();
     expect(screen.getByRole("link", { name: "Написать в поддержку" })).toBeInTheDocument();
-    expect(screen.queryByText(/ayla_delete/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/not_linked/)).not.toBeInTheDocument();
   });
 
-  it("offers no retry on an identity conflict either (also structural)", async () => {
+  it("shows an honest «не началось» on unexpected failures too", async () => {
     const user = userEvent.setup();
     renderDelete();
-    mockedDelete.mockRejectedValueOnce(
-      new PersonalDataPartialDeleteError(["ayla_delete", "memory_delete"], {
-        ayla_delete: "identity_conflict",
-        memory_delete: "identity_conflict",
-      }),
-    );
+    mockedRequest.mockRejectedValueOnce(new Error("[503] http_error"));
     await confirmDelete(user);
-
-    expect(await screen.findByText(/я всё удалила/)).toBeInTheDocument();
-    expect(
-      screen.queryByRole("button", { name: "Попробовать ещё раз" }),
-    ).not.toBeInTheDocument();
-    // Raw reason slugs never reach the UI.
-    expect(screen.queryByText(/identity_conflict/)).not.toBeInTheDocument();
-  });
-
-  it("still offers a retry when the failure is transient", async () => {
-    const user = userEvent.setup();
-    renderDelete();
-    mockedDelete.mockRejectedValueOnce(
-      new PersonalDataPartialDeleteError(["ayla_delete"], {}),
-    );
-    await confirmDelete(user);
-    expect(await screen.findByText(/Не всё удалено/)).toBeInTheDocument();
-    expect(
-      screen.getByRole("button", { name: "Попробовать ещё раз" }),
-    ).toBeInTheDocument();
-  });
-
-  it("still offers a retry when only SOME failures are structural", async () => {
-    const user = userEvent.setup();
-    renderDelete();
-    mockedDelete.mockRejectedValueOnce(
-      new PersonalDataPartialDeleteError(["ayla_delete", "consent_withdraw"], {
-        ayla_delete: "not_linked",
-        // consent_withdraw failed transiently — retry can still fix that half.
-      }),
-    );
-    await confirmDelete(user);
-    expect(await screen.findByText(/Не всё удалено/)).toBeInTheDocument();
-    expect(
-      screen.getByRole("button", { name: "Попробовать ещё раз" }),
-    ).toBeInTheDocument();
-  });
-
-  it("shows a generic honest error on unexpected failures", async () => {
-    const user = userEvent.setup();
-    renderDelete();
-    mockedDelete.mockRejectedValueOnce(new Error("[503] http_error"));
-    await confirmDelete(user);
-    expect(await screen.findByText(/Не получилось удалить данные/)).toBeInTheDocument();
+    expect(await screen.findByText(/Удаление не началось/)).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Попробовать ещё раз" })).toBeInTheDocument();
   });
 
-  it("ignores Escape while a delete request is in flight", async () => {
+  it("ignores Escape while the request is in flight", async () => {
     const user = userEvent.setup();
     const onClose = renderDelete();
-    mockedDelete.mockImplementation(() => new Promise(() => undefined));
+    mockedRequest.mockImplementation(() => new Promise(() => undefined));
     await confirmDelete(user);
     await user.keyboard("{Escape}");
     expect(onClose).not.toHaveBeenCalled();
@@ -329,7 +321,7 @@ describe("PersonalDataDeleteSheet", () => {
     const { rerender } = render(
       <>
         <button ref={triggerRef} type="button">
-          Удалить аккаунт
+          Удалить аккаунт и личные данные
         </button>
         <PersonalDataDeleteSheet open triggerRef={triggerRef} onClose={vi.fn()} />
       </>,
@@ -341,7 +333,7 @@ describe("PersonalDataDeleteSheet", () => {
     rerender(
       <>
         <button ref={triggerRef} type="button">
-          Удалить аккаунт
+          Удалить аккаунт и личные данные
         </button>
         <PersonalDataDeleteSheet
           open={false}
@@ -353,12 +345,36 @@ describe("PersonalDataDeleteSheet", () => {
     rerender(
       <>
         <button ref={triggerRef} type="button">
-          Удалить аккаунт
+          Удалить аккаунт и личные данные
         </button>
         <PersonalDataDeleteSheet open triggerRef={triggerRef} onClose={vi.fn()} />
       </>,
     );
     expect(screen.getByLabelText(/Чтобы подтвердить/)).toHaveValue("");
-    expect(screen.getByRole("button", { name: "Удалить данные" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Удалить аккаунт" })).toBeDisabled();
+  });
+});
+
+describe("DeletionRequestStatus", () => {
+  it("renders nothing when there is no request or the read fails", async () => {
+    mockedCurrent.mockResolvedValueOnce(null);
+    const { unmount } = render(<DeletionRequestStatus />);
+    await vi.waitFor(() => expect(mockedCurrent).toHaveBeenCalledTimes(1));
+    expect(screen.queryByTestId("deletion-request-status")).not.toBeInTheDocument();
+    unmount();
+
+    mockedCurrent.mockRejectedValueOnce(new Error("[500] boom"));
+    render(<DeletionRequestStatus />);
+    await vi.waitFor(() => expect(mockedCurrent).toHaveBeenCalledTimes(2));
+    expect(screen.queryByTestId("deletion-request-status")).not.toBeInTheDocument();
+  });
+
+  it("shows number, deadline and status for a person with a request", async () => {
+    mockedCurrent.mockResolvedValueOnce({ ...REQUEST, status: "DELETION_PROCESSING" });
+    render(<DeletionRequestStatus />);
+    expect(await screen.findByTestId("deletion-request-status")).toBeInTheDocument();
+    expect(screen.getByText(REQUEST.request_id)).toBeInTheDocument();
+    expect(screen.getByText(/11 октября 2026/)).toBeInTheDocument();
+    expect(screen.getByText(/Статус: выполняется/)).toBeInTheDocument();
   });
 });

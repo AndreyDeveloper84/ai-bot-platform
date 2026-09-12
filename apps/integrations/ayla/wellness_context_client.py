@@ -54,6 +54,7 @@ import httpx
 from django.conf import settings
 
 from apps.integrations.ayla.url_builder import AylaUrlBuilder, AylaUrlError
+from apps.integrations.ayla.request_id import with_request_id
 
 logger = logging.getLogger(__name__)
 
@@ -173,11 +174,13 @@ class WellnessContextHttpClient:
         try:
             response = self._client().get(
                 url,
-                headers={
-                    "Authorization": f"Bearer {self._token}",
-                    "X-External-User-ID": external_user_id,
-                    "Accept": "application/json",
-                },
+                headers=with_request_id(
+                    {
+                        "Authorization": f"Bearer {self._token}",
+                        "X-External-User-ID": external_user_id,
+                        "Accept": "application/json",
+                    }
+                ),
                 timeout=self._timeout,
             )
         except httpx.HTTPError as exc:

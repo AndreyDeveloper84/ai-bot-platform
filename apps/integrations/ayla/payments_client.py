@@ -60,6 +60,7 @@ import httpx
 from django.conf import settings
 
 from apps.integrations.ayla.url_builder import AylaUrlBuilder, AylaUrlError
+from apps.integrations.ayla.request_id import with_request_id
 
 logger = logging.getLogger(__name__)
 
@@ -261,14 +262,16 @@ class AylaClientPaymentsClient:
                 method,
                 url,
                 json=json_body,
-                headers={
-                    "Authorization": f"Bearer {self._token}",
-                    # IsBotServiceWithVerifiedClient: resolves the actor
-                    # User; without it Ayla 403s before the view (C7.6).
-                    "X-External-User-ID": external_user_id,
-                    "Accept": "application/json",
-                    "Content-Type": "application/json",
-                },
+                headers=with_request_id(
+                    {
+                        "Authorization": f"Bearer {self._token}",
+                        # IsBotServiceWithVerifiedClient: resolves the actor
+                        # User; without it Ayla 403s before the view (C7.6).
+                        "X-External-User-ID": external_user_id,
+                        "Accept": "application/json",
+                        "Content-Type": "application/json",
+                    }
+                ),
                 timeout=self._timeout,
             )
         except httpx.HTTPError as exc:
