@@ -1635,6 +1635,10 @@ def generate_concierge_reply(
                 content=reply.text,
                 rendered_text=reply.text,
                 action_type=store.action_type,
+                # DRF-1780 — клавиатура/карточки консьержа тоже оставляют
+                # след: до этого все его строки шли с action_data=NULL, и
+                # расшифровка не могла сказать, были ли у ответа кнопки.
+                action_data=reply.action_data,
                 tokens_in=store.tokens_in,
                 tokens_out=store.tokens_out,
                 latency_ms=store.latency_ms or None,
