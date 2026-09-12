@@ -269,8 +269,11 @@ class AylaService:
 
     id: str
     title: str
-    price_min: float
-    price_max: float
+    # ``None`` = the catalog carries no price for this row (``base_price``
+    # is null on ``salon-services``; the price lives on the master×service
+    # edge). Not ``0.0``: zero is a price, absence is not (DRF-1727, §103).
+    price_min: float | None
+    price_max: float | None
     duration_s: int
     category_id: str | None
     raw: dict[str, Any] = field(default_factory=dict)
@@ -519,7 +522,9 @@ def _service_from_wire(d: dict[str, Any]) -> AylaService:
     raw_price = d.get("base_price")
     if raw_price is None:
         raw_price = d.get("price")
-    price = float(raw_price or 0.0)
+    # DRF-1727: no price on either field is absence, not a zero-rouble
+    # service. A numeric ``"0.00"`` stays ``0.0`` — that one is a real price.
+    price = None if raw_price is None or raw_price == "" else float(raw_price)
     dur_min = int(d.get("duration_minutes") or 0)
     category = d.get("category")
     return AylaService(

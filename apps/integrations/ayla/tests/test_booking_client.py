@@ -266,6 +266,44 @@ class TestReadRoundTrip:
         assert by_id["svc-new"].price_min == 2800.0
         assert by_id["svc-old"].price_min == 1500.0
 
+    def test_get_services_no_price_is_none_not_zero(self, db) -> None:
+        """DRF-1727 (§103 class): ``base_price: null`` with no legacy ``price``
+        is ABSENCE — ``None`` — not a zero-rouble service. A numeric ``"0.00"``
+        stays ``0.0``: zero is a price, absence is not. Found by golden P1
+        through the real boundary: the edge cost 1500, the list said 0."""
+        tenant = Tenant.objects.create(slug="svc-noprice", name="T")
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                json={
+                    "count": 3,
+                    "next": None,
+                    "results": [
+                        {
+                            "id": "svc-null",
+                            "name": "Null",
+                            "base_price": None,
+                            "duration_minutes": 45,
+                        },
+                        {"id": "svc-absent", "name": "Absent", "duration_minutes": 45},
+                        {
+                            "id": "svc-zero",
+                            "name": "Zero",
+                            "base_price": "0.00",
+                            "duration_minutes": 45,
+                        },
+                    ],
+                },
+            )
+
+        with tenant_scope(tenant):
+            out = _client_with(handler).get_services()
+        by_id = {s.id: s for s in out}
+        assert (by_id["svc-null"].price_min, by_id["svc-null"].price_max) == (None, None)
+        assert (by_id["svc-absent"].price_min, by_id["svc-absent"].price_max) == (None, None)
+        assert (by_id["svc-zero"].price_min, by_id["svc-zero"].price_max) == (0.0, 0.0)
+
     def test_get_services_requires_tenant_scope(self) -> None:
         """DRF-1004: no tenant in scope is a call error, not an empty catalog."""
 
