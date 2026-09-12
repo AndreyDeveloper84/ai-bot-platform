@@ -207,7 +207,13 @@ def test_what_the_bot_quoted_is_what_the_catalog_recorded(
     )
 
     findings: list[str] = []
-    if recorded_price != quoted_price:
+    if recorded_price is None:
+        # Отсутствие — не разница: вычитать нечего, и это отдельная находка.
+        findings.append(
+            f"ЦЕНА: показано {quoted_price} (ребро SpecialistService.price), "
+            "в брони цены НЕТ (price=null)"
+        )
+    elif recorded_price != quoted_price:
         findings.append(
             f"ЦЕНА: показано {quoted_price} (ребро SpecialistService.price), "
             f"записано {recorded_price} — разница {recorded_price - quoted_price:+.2f}"
