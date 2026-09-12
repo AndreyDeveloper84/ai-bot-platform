@@ -95,7 +95,8 @@ export const ACTION_WRITE_AYLA = "Написать Ayla";
  * Слова, которых в кадре безопасности быть не может: он не изображает
  * медицинскую диагностику (тело DRF-1270, C04.5). Сторож — в тестах.
  */
-export const DIAGNOSIS_WORDS = /диагноз|болезн|заболеван|лечен|симптом|назнач|препарат/i;
+export const DIAGNOSIS_WORDS =
+  /диагноз|болезн|заболеван|лечен|симптом|назнач|препарат|опасно ли|что это такое/i;
 
 /** Какой кадр рисовать на пустом подборе; `null` — подбор не пуст. */
 export function absenceFrame(outcome: PicksOutcome): AbsenceKind | null {
