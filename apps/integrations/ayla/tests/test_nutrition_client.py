@@ -635,6 +635,10 @@ class TestProposedNormsAndConfirm:
             {"source": source, "method_versions": {}} if source else {"method_versions": {}}
         )
         profile = await self._fetch(_profile_body(norms=self._NORMS, targets_provenance=provenance))
+        # POSITIVE впереди: числа в ответе ЕСТЬ (в raw) — иначе «не
+        # предложение» доказывало бы пустоту, а не источник.
+        assert profile.raw["norms"]["daily_kcal"] == 1650
+        assert profile.targets_source == source
         assert nc.proposed_norms(profile) == {}
 
     @pytest.mark.asyncio
