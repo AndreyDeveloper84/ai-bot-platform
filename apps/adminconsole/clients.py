@@ -46,9 +46,13 @@ from django.http import HttpRequest, HttpResponse, HttpResponseRedirect
 from django.shortcuts import render
 from django.urls import reverse
 
+from apps.adminconsole.client_access import is_platform_operator, record_denial, record_view
 from apps.identity.services.blocking import block_user, is_blocked, unblock_user
 
 logger = logging.getLogger(__name__)
+
+#: Имя экрана в журнале доступа для межсалонных блоков карточки (S2-4).
+CROSS_SALON_SCREEN = "client_card.cross_salon"
 
 _MARKER = "_ayla_client_card"
 
@@ -87,6 +91,11 @@ def install_client_card() -> None:
                 "console/clients/<uuid:bot_user_id>/unblock/",
                 view(client_unblock_view),
                 name="adminconsole_client_unblock",
+            ),
+            path(
+                "console/identity/",
+                view(identity_queue_view),
+                name="adminconsole_identity_queue",
             ),
         ]
         return custom + original()
@@ -145,6 +154,26 @@ def client_card_view(request: HttpRequest, bot_user_id: Any) -> HttpResponse:
     if bot_user is None:
         return _not_found(request)
 
+    # S2-4: межсалонное присутствие и факт цели — только с пропуском
+    # платформы, и с записью в журнале доступа ДО показа (как у
+    # переписки, DRF-1514): просмотр без следа хуже отказа.
+    platform = is_platform_operator(request.user)
+    if platform:
+        record_view(
+            actor=request.user, grant=None, screen=CROSS_SALON_SCREEN, object_id=str(bot_user.pk)
+        )
+        salons = _salons_of(bot_user)
+        active_goal = _active_goal_fact(bot_user)
+    else:
+        record_denial(
+            actor=request.user,
+            screen=CROSS_SALON_SCREEN,
+            object_id=str(bot_user.pk),
+            detail="platform pass required",
+        )
+        salons = []
+        active_goal = ""
+
     return render(
         request,
         "adminconsole/client_card.html",
@@ -153,15 +182,18 @@ def client_card_view(request: HttpRequest, bot_user_id: Any) -> HttpResponse:
             "client": bot_user,
             "blocked": is_blocked(bot_user),
             "can_block": request.user.has_perm("identity.change_botuser"),
-            "salons": _salons_of(bot_user),
+            "platform_operator": platform,
+            "salons": salons,
             "consents": _consents_of(bot_user),
             "dialogs": _dialogs_of(bot_user),
             "open_tasks": _open_tasks_of(bot_user),
-            "active_goal": _active_goal_fact(bot_user),
+            "active_goal": active_goal,
+            "deletion": _deletion_request_of(bot_user),
             "block_url": reverse("admin:adminconsole_client_block", args=[bot_user.pk]),
             "unblock_url": reverse("admin:adminconsole_client_unblock", args=[bot_user.pk]),
             "search_url": reverse("admin:adminconsole_clients_search"),
             "queue_url": reverse("admin:handoff_admintask_changelist"),
+            "identity_queue_url": reverse("admin:adminconsole_identity_queue"),
         },
     )
 
@@ -309,6 +341,105 @@ def _active_goal_fact(bot_user: Any) -> str:
     if isinstance(goal, dict) and (goal.get("goal_key") or goal.get("goal_text")):
         return "есть"
     return "нет"
+
+
+def _deletion_request_of(bot_user: Any) -> dict[str, Any] | None:
+    """Живая заявка на удаление у этого человека (§7, D2): номер и с какого
+    момента персонализация остановлена. Носитель заявки — каталог; здесь
+    флаг бота по ``ayla_user_id`` человека (все его оболочки)."""
+    from apps.identity.models import UserPersonalContext
+    from apps.identity.services.privacy import resolve_person_link
+
+    link = resolve_person_link(bot_user)
+    if link.conflict or link.ayla_user_id is None:
+        return None
+    row = (
+        UserPersonalContext.objects.filter(
+            user_id=link.ayla_user_id, deletion_requested_at__isnull=False
+        )
+        .values("deletion_requested_at", "deletion_request_id")
+        .first()
+    )
+    if row is None:
+        return None
+    return {
+        "request_id": str(row["deletion_request_id"] or ""),
+        "since": row["deletion_requested_at"],
+    }
+
+
+# ── очередь идентичности (S2-4, §6) ───────────────────────────────────
+
+
+def identity_queue_view(request: HttpRequest) -> HttpResponse:
+    """Всё, что ждёт оператора по личности, в одном месте: PENDING-привязки
+    соло-мастеров (§6, решаются действиями на карточке мастера) и живые
+    заявки на удаление (§7; исполняет каталог, здесь — кто и с какого
+    момента закрыт). Метаданные; телефона нет (DRF-1039)."""
+    denial = _require_perm(request, "identity.view_botuser")
+    if denial is not None:
+        return denial
+
+    can_see_links = request.user.has_perm("identity.view_soloidentitylink")
+    return render(
+        request,
+        "adminconsole/identity_queue.html",
+        {
+            **_admin_context(request),
+            "pending_links": _pending_links() if can_see_links else None,
+            "deletion_flags": _deletion_flags(),
+            "search_url": reverse("admin:adminconsole_clients_search"),
+            "queue_url": reverse("admin:handoff_admintask_changelist"),
+        },
+    )
+
+
+def _pending_links() -> list[dict[str, Any]]:
+    from apps.identity.models import SoloIdentityLink
+
+    rows = []
+    for link in (
+        SoloIdentityLink.objects.filter(status=SoloIdentityLink.Status.PENDING)
+        .select_related("master")
+        .order_by("requested_at")
+    ):
+        rows.append(
+            {
+                "link": link,
+                "master_url": reverse("admin:catalog_catalogmaster_change", args=[link.master_id]),
+            }
+        )
+    return rows
+
+
+def _deletion_flags() -> list[dict[str, Any]]:
+    from apps.identity.models import BotUser, UserPersonalContext
+
+    rows = []
+    flagged = UserPersonalContext.objects.filter(deletion_requested_at__isnull=False).order_by(
+        "deletion_requested_at"
+    )
+    for upc in flagged:
+        shells = list(
+            BotUser.all_tenants.filter(ayla_user_id=upc.user_id)
+            .select_related("tenant")
+            .order_by("tenant__name")
+        )
+        rows.append(
+            {
+                "ayla_user_id": str(upc.user_id),
+                "request_id": str(upc.deletion_request_id or ""),
+                "since": upc.deletion_requested_at,
+                "shells": [
+                    {
+                        "shell": shell,
+                        "card_url": reverse("admin:adminconsole_client_card", args=[shell.pk]),
+                    }
+                    for shell in shells
+                ],
+            }
+        )
+    return rows
 
 
 # ── служебное ─────────────────────────────────────────────────────────
