@@ -55,6 +55,23 @@ class MasterNotificationPrefs(models.Model):
     on-demand by the GET endpoint (lazy materialisation) so newly-
     onboarded masters don't need a backfill migration.
 
+    **Readers (DRF-1123, measured 2026-09-12).** A toggle only means
+    something when a sender reads it. Today:
+
+    * ``new_booking`` — read by
+      :func:`apps.booking.master_notify.master_muted_new_booking` before
+      the personal «🆕 У вас новая запись» copy. The only toggle with a
+      live sender.
+    * ``booking_change``, ``personal_message``, ``morning_brief``,
+      ``evening_summary`` — **no sender addresses the master** for these
+      events (measured: reschedule/cancel notices go to the manager,
+      customer free text is never forwarded to a master — DRF-1039, no
+      daily brief task exists). The switches are honest only as «nothing
+      to mute yet»; a sender added later must read its toggle first.
+    * ``urgent`` — forced ON by spec, nothing reads it by design.
+    * ``quiet_hours_*`` — not applied by any sender yet (a quiet window
+      means *defer*, not drop; that is its own change).
+
     The ``urgent`` field carries a CHECK constraint forcing it ON —
     spec §805 «нельзя выключить». PATCH-layer validation raises 400
     ``urgent_forced_on`` before the DB sees the offending row; the

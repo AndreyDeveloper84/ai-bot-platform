@@ -1040,3 +1040,63 @@ class TestSenderIdentity:
         )
 
         assert seen == ["token-client"]
+
+
+class TestMasterNewBookingToggle:
+    """DRF-1123: ``MasterNotificationPrefs`` had a model, a screen and an
+    audit trail — and no reader. The master switched «Новая запись» off,
+    saw «сохранено», and the personal copy kept coming.
+
+    Three positions: switch off → no personal copy, the salon copy still
+    goes, the skip is named in the log; switch on explicitly → personal
+    copy; no prefs row (screen never opened) → personal copy. Without the
+    last two, the first would also pass for «nobody gets anything».
+    """
+
+    @staticmethod
+    def _prefs(tenant: Tenant, master: CatalogMaster, **over: Any):
+        from apps.notifications.models import MasterNotificationPrefs
+
+        return MasterNotificationPrefs.all_tenants.create(tenant=tenant, master=master, **over)
+
+    def test_switch_off_mutes_only_the_personal_copy(
+        self, tenant: Tenant, send: SendRecorder, caplog
+    ) -> None:
+        import logging
+
+        _make_service(tenant)
+        master = _make_master(tenant, linked_user_id="master-chat-1")
+        tenant.manager_chat_id = "manager-chat-1"
+        tenant.save(update_fields=["manager_chat_id"])
+        self._prefs(tenant, master, new_booking=False)
+
+        with caplog.at_level(logging.INFO, logger="apps.booking.master_notify"):
+            _notify(tenant)
+
+        assert [c["addr"] for c in send.calls] == ["manager-chat-1"]  # salon copy only
+        assert "Мастер: Тихонова Ольга" in send.calls[0]["text"]
+        muted = [
+            r.getMessage()
+            for r in caplog.records
+            if "booking.notify.master_muted" in r.getMessage()
+        ]
+        assert len(muted) == 1 and "toggle=new_booking" in muted[0]
+
+    def test_switch_on_sends_the_personal_copy(self, tenant: Tenant, send: SendRecorder) -> None:
+        _make_service(tenant)
+        master = _make_master(tenant, linked_user_id="master-chat-1")
+        tenant.manager_chat_id = "manager-chat-1"
+        tenant.save(update_fields=["manager_chat_id"])
+        self._prefs(tenant, master, new_booking=True)
+        _notify(tenant)
+        assert [c["addr"] for c in send.calls] == ["master-chat-1", "manager-chat-1"]
+        assert send.calls[0]["text"].startswith("🆕 У вас новая запись")
+
+    def test_no_prefs_row_means_not_muted(self, tenant: Tenant, send: SendRecorder) -> None:
+        from apps.notifications.models import MasterNotificationPrefs
+
+        _make_service(tenant)
+        master = _make_master(tenant, linked_user_id="master-chat-1")
+        assert not MasterNotificationPrefs.all_tenants.filter(master=master).exists()
+        _notify(tenant)
+        assert [c["addr"] for c in send.calls][:1] == ["master-chat-1"]
