@@ -175,6 +175,30 @@ _QUICK_ACTION_RE = re.compile(r"^cb:qa:[a-z_]+$")
 #: лестнице с самого верха. Тот же принцип, что у чипов, и по той же
 #: причине — сценария у кнопки быть не должно.
 RETRY_CALLBACK = "cb:retry:last"
+#: DRF-1762 — «Повторить», привязанное к ходу: ``cb:retry:{id строки
+#: человека}``. Кнопка повторяет ровно тот ход, под которым нарисована, и
+#: только пока он последний: повтор сам ложится новой строкой, так что второй
+#: тап по той же кнопке — уже не последний ход и протухает честно. Форма
+#: ``cb:retry:last`` остаётся для клавиатур, нарисованных до этого.
+RETRY_CALLBACK_PREFIX = "cb:retry:"
+_RETRY_TURN_RE = re.compile(r"^cb:retry:([0-9a-f]{32})$")
+
+
+def retry_callback(turn_id: str | None) -> str:
+    """Payload «Повторить» для хода ``turn_id`` (hex UUID строки человека)."""
+    return f"{RETRY_CALLBACK_PREFIX}{turn_id}" if turn_id else RETRY_CALLBACK
+
+
+def is_retry_callback(text: str) -> bool:
+    stripped = (text or "").strip()
+    return stripped == RETRY_CALLBACK or bool(_RETRY_TURN_RE.match(stripped))
+
+
+def retry_turn_id(text: str) -> str | None:
+    """Ход, к которому привязан тап, или None для ``cb:retry:last``."""
+    match = _RETRY_TURN_RE.match((text or "").strip())
+    return match.group(1) if match else None
+
 
 _ALL_ACTIONS: tuple[QuickAction, ...] = (*FIRST_CONTACT_QUICK_ACTIONS, SECONDARY_ACTION)
 _BY_SLUG: dict[str, QuickAction] = {a.slug: a for a in _ALL_ACTIONS}
@@ -369,9 +393,16 @@ STALE_TAP_TEXT = (
 )
 
 
-def ai_unavailable_action_data() -> dict[str, Any]:
-    """Клавиатура экрана «AI недоступна»: одна кнопка «Повторить»."""
-    return {"buttons": [{"label": RETRY_LABEL, "callback": RETRY_CALLBACK}], "button_columns": 1}
+def ai_unavailable_action_data(turn_id: str | None = None) -> dict[str, Any]:
+    """Клавиатура экрана «AI недоступна»: одна кнопка «Повторить».
+
+    ``turn_id`` (DRF-1762) привязывает кнопку к строке человека, чей ход не
+    состоялся; без него — прежняя форма «последний ход».
+    """
+    return {
+        "buttons": [{"label": RETRY_LABEL, "callback": retry_callback(turn_id)}],
+        "button_columns": 1,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -425,7 +456,8 @@ def resolve_tap_text(text: str, *, last_user_text: str | None = None) -> str | N
 
     * ``cb:qa:{slug}``  — чип C01 или вторичный вход;
     * ``cb:menu:{slug}``— главное меню (DRF-1051);
-    * ``cb:retry:last`` — «Повторить» с экрана «AI недоступна».
+    * ``cb:retry:last`` / ``cb:retry:{id}`` — «Повторить» с экрана «AI
+      недоступна» (привязанная к ходу форма — DRF-1762).
 
     Ни один ``cb:`` другого семейства (``cb:discover:``, ``cb:catalog:``,
     ``cb:book:``, ``cb:welcome:``, ``cb:visit:``, ``cb:anketa:``…) сюда не
@@ -464,7 +496,7 @@ def resolve_tap_text(text: str, *, last_user_text: str | None = None) -> str | N
         )
         return resolved
 
-    if stripped == RETRY_CALLBACK:
+    if is_retry_callback(stripped):
         resolved_retry = (last_user_text or "").strip()
         logger.info("channels.max.global.retry_tapped resolved=%s", bool(resolved_retry))
         return resolved_retry or None
@@ -511,4 +543,4 @@ def is_stale_tap(text: str) -> bool:
     поэтому «Повторить» с историей сюда уже не доходит.
     """
     stripped = (text or "").strip()
-    return is_quick_action_callback(stripped) or stripped == RETRY_CALLBACK
+    return is_quick_action_callback(stripped) or is_retry_callback(stripped)

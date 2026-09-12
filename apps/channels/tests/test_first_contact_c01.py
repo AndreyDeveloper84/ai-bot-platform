@@ -44,9 +44,11 @@ from apps.channels.max.quick_actions import (
     STALE_TAP_TEXT,
     first_contact_action_data,
     first_contact_buttons,
+    is_retry_callback,
     quick_action_callback,
     render_first_contact,
     resolve_tap_text,
+    retry_turn_id,
 )
 from apps.conversations.services import resolve_active_global_conversation
 from apps.skills.menu.marketplace import (
@@ -539,7 +541,9 @@ class TestAiUnavailable:
         assert sent[-1]["text"] == AI_UNAVAILABLE_TEXT
         buttons = _buttons(sent[-1]["attachments"])
         assert [b["text"] for b in buttons] == [RETRY_LABEL]
-        assert buttons[0]["payload"] == RETRY_CALLBACK
+        # DRF-1762 — кнопка привязана к строке хода, а не «последнее что было».
+        assert is_retry_callback(buttons[0]["payload"])
+        assert retry_turn_id(buttons[0]["payload"]) is not None
 
     def test_retry_resends_the_persons_own_words(self, sent, fake_redis, broken_model, monkeypatch):
         _welcomed_user(62002)
