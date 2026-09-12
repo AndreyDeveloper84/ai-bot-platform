@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import os
+from collections.abc import Iterator
 from dataclasses import dataclass
 
 import httpx
@@ -64,7 +65,7 @@ def catalog() -> Catalog:
 
 
 @pytest.fixture(scope="session")
-def http() -> httpx.Client:
+def http() -> Iterator[httpx.Client]:
     with httpx.Client(timeout=15.0) as client:
         yield client
 
