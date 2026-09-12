@@ -218,8 +218,12 @@ class TestQuotedPassthrough:
         """Положительная стража: прежний клиент не шлёт — прежний вызов."""
         r = _post(client, service, master)
         assert r.status_code == 201
-        assert "quoted_price" not in stub.calls[0]
-        assert "quoted_duration_minutes" not in stub.calls[0]
+        # Присутствие — прежние поля на месте (стража присутствия перед
+        # стражей отсутствия); отсутствие — новых полей нет.
+        sent = stub.calls[0]
+        assert sent["service_id"] == str(SERVICE_AYLA_ID)
+        assert sent["payment_required"] is False
+        assert set(sent) & {"quoted_price", "quoted_duration_minutes"} == set()
 
     @pytest.mark.parametrize("extra", [
         {"quoted_price": "abc"},
@@ -269,3 +273,41 @@ class TestQuoteChanged:
         r = _post(client, service, master, quoted_price="1500.00")
         assert r.status_code == 409
         assert r.json()["error"] == "slot_unavailable"
+
+
+# ─── клиент Ayla: details доезжают с провода ───────────────────────────────
+
+
+class TestClientCarriesDetails:
+    def test_error_details_ride_from_the_wire(self):
+        """``error.details`` читается дословно; без него — None, не {}."""
+        import httpx
+
+        from apps.integrations.ayla.booking_client import _err_details
+
+        with_details = httpx.Response(
+            409,
+            json={"error": {"code": "QUOTE_CHANGED", "message": "x",
+                            "details": {"field": "price", "quoted": "1500.00", "applied": "1700.00"}}},
+        )
+        assert _err_details(with_details) == {"field": "price", "quoted": "1500.00", "applied": "1700.00"}
+        assert _err_details(httpx.Response(409, json={"error": {"code": "X"}})) is None
+        assert _err_details(httpx.Response(409, content=b"not json")) is None
+
+    def test_fail_status_puts_details_on_the_exception(self):
+        import httpx
+
+        from apps.integrations.ayla.booking_client import AylaBookingHTTPClient
+
+        client = AylaBookingHTTPClient.__new__(AylaBookingHTTPClient)
+        client._circuit = type("C", (), {"record_failure": lambda self, now: None})()
+        resp = httpx.Response(
+            409,
+            json={"error": {"code": "QUOTE_CHANGED", "message": "x",
+                            "details": {"field": "duration_minutes", "quoted": 60, "applied": 45}}},
+        )
+        with pytest.raises(BookingBadRequestError) as info:
+            client._fail_status(resp, now=0.0)
+        assert info.value.code == "QUOTE_CHANGED"
+        assert info.value.details == {"field": "duration_minutes", "quoted": 60, "applied": 45}
+
