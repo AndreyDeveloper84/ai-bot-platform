@@ -520,17 +520,36 @@ export function CustomerBookingConfirmScreen() {
     );
   }
 
+  // DRF-1776 — «подтверждение устарело»: выбранное время уже прошло
+  // (долгий возврат из OAuth, восстановленное намерение, сон телефона).
+  // Не ошибка и не «слот заняли» — время просто миновало; единственное
+  // честное действие — выбрать время заново, здесь же, не с C01.
+  const stale = new Date(draft.visitAt).getTime() < Date.now();
+
   // ── Registered branch (§6.1) — founder priority order ─────────────────
   return (
     <ScreenLayout
       back={back}
       title="Подтверди запись"
       cta={
-        <StickyCta onClick={onConfirm} disabled={submitting || !online}>
-          {submitting ? "Записываю…" : "Записаться"}
-        </StickyCta>
+        stale ? (
+          <StickyCta onClick={() => navigate(`/customer/masters/${draft.masterId}/slots`)}>
+            Выбрать время заново
+          </StickyCta>
+        ) : (
+          <StickyCta onClick={onConfirm} disabled={submitting || !online}>
+            {submitting ? "Записываю…" : "Записаться"}
+          </StickyCta>
+        )
       }
     >
+      {stale && (
+        <div className="callout" role="status" data-testid="confirm-stale">
+          <p style={{ margin: 0 }}>
+            Подтверждение устарело — выбранное время уже прошло. Проверь время заново.
+          </p>
+        </div>
+      )}
       {/* Сети нет — сказать до нажатия. Кнопка «Записаться» здесь ЕДИНСТВЕННОЕ
           действие, которое меняет мир, и без сети оно не произойдёт: раньше
           человек жал её и получал ошибку сети вместо записи. */}
@@ -742,7 +761,11 @@ export function CustomerBookingConfirmScreen() {
             className="btn-secondary"
             style={{ marginTop: "var(--s-3)" }}
             onClick={() =>
-              navigate(`/customer/masters/${draft.masterId}/slots`)
+              // DRF-1776: экран слотов называет занятый слот, а не
+              // показывает тот же список молча.
+              navigate(`/customer/masters/${draft.masterId}/slots`, {
+                state: { unavailableSlot: draft.visitAt },
+              })
             }
           >
             Выбрать другое время

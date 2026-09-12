@@ -33,7 +33,7 @@
  */
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { useNavigate, useParams } from "react-router-dom";
+import { useLocation, useNavigate, useParams } from "react-router-dom";
 import { ScreenLayout } from "../components/ScreenLayout";
 import { StickyCta } from "../components/StickyCta";
 import {
@@ -115,6 +115,13 @@ export function CustomerSlotsScreen() {
   const haptics = useHaptics();
   const draft = useBookingDraft();
   const [state, setState] = useState<State>({ kind: "loading" });
+  // DRF-1776 — «Другие даты»: сдвиг окна в днях; 0 — ближайшие две недели.
+  const [windowOffset, setWindowOffset] = useState(0);
+  // DRF-1776 — слот, который только что оказался занят (возврат с
+  // подтверждения по 409): назвать его, а не показать тот же список молча.
+  const location = useLocation();
+  const unavailableSlot =
+    (location.state as { unavailableSlot?: string } | null)?.unavailableSlot ?? null;
 
   // Возврат (DRF-1493) — к карточке того мастера, чьи окна показаны.
   // Не `-1`: по deep link в оформление истории нет, а мастер известен
@@ -131,6 +138,7 @@ export function CustomerSlotsScreen() {
       masterId,
       serviceId: draft.serviceId,
       days: 14,
+      offsetDays: windowOffset,
     })
       .then(({ slots }) => {
         if (cancelled) return;
@@ -153,7 +161,7 @@ export function CustomerSlotsScreen() {
     return () => {
       cancelled = true;
     };
-  }, [masterId, draft.serviceId]);
+  }, [masterId, draft.serviceId, windowOffset]);
 
   useEffect(() => {
     if (!masterId || !draft.serviceId) {
@@ -219,12 +227,18 @@ export function CustomerSlotsScreen() {
   }
 
   // Tau §5.3 master substitution — full 14-day fully-booked case.
+  // DRF-1776: из этого состояния есть два пути, оба локальные (не в C01):
+  // «Другие даты» — следующее окно того же мастера; «Другой специалист» —
+  // выбор мастера под ту же услугу.
   if (state.slots.length === 0) {
     return (
       <ScreenLayout back={back} title="Выбери время">
         <MasterSubstitutionCallout
           masterName={draft.masterName ?? "она"}
-          onBack={() => navigate("/customer/catalog")}
+          laterWindow={windowOffset > 0}
+          canLookFurther={windowOffset + WINDOW_DAYS < MAX_LOOKAHEAD_DAYS}
+          onOtherDates={() => setWindowOffset((o) => o + WINDOW_DAYS)}
+          onOtherMaster={() => navigate("/customer/book/master")}
         />
       </ScreenLayout>
     );
@@ -247,6 +261,23 @@ export function CustomerSlotsScreen() {
       }
     >
       <OfflineBanner online={online} />
+      {/* DRF-1776 — слот занят между выбором и подтверждением: сказать,
+          какой именно, и оставить человека здесь же (не в C01). */}
+      {unavailableSlot && (
+        <div className="callout" role="status" data-testid="slot-unavailable-note">
+          <p style={{ margin: 0 }}>
+            {formatSlotTime(unavailableSlot)} уже заняли — выбери другое время.
+          </p>
+        </div>
+      )}
+      {windowOffset > 0 && (
+        <p className="customer-slots__window-note" role="status">
+          Окна на две недели позже обычного.{" "}
+          <button type="button" className="goal-select__minor-action" onClick={() => setWindowOffset(0)}>
+            Ближайшие
+          </button>
+        </p>
+      )}
       {suggestions.length > 0 && (
         <section aria-labelledby="slots-suggestions-title">
           <h2 id="slots-suggestions-title" className="customer-slots__section-title">
@@ -329,28 +360,47 @@ export function CustomerSlotsScreen() {
  * `substitution_candidates`, swap the placeholder for real data and
  * keep the wording template.
  */
+/** Размер одного окна слотов — потолок сервера на запрос. */
+const WINDOW_DAYS = 14;
+/** Докуда листать «Другие даты»: дальше расписание обычно ещё не открыто. */
+const MAX_LOOKAHEAD_DAYS = 56;
+
+export const OTHER_DATES_LABEL = "Другие даты";
+export const OTHER_MASTER_LABEL = "Другой специалист";
+
 function MasterSubstitutionCallout({
   masterName,
-  onBack,
+  laterWindow,
+  canLookFurther,
+  onOtherDates,
+  onOtherMaster,
 }: {
   masterName: string;
-  onBack: () => void;
+  laterWindow: boolean;
+  canLookFurther: boolean;
+  onOtherDates: () => void;
+  onOtherMaster: () => void;
 }) {
   return (
     <div className="callout" role="status">
       <p style={{ margin: 0 }}>
-        {masterName} занята на 2 недели вперёд.
+        {laterWindow
+          ? `${masterName} занята и на следующие 2 недели.`
+          : `${masterName} занята на 2 недели вперёд.`}
       </p>
       <p style={{ margin: "var(--s-2) 0 0 0", color: "var(--c-text-secondary)" }}>
-        Если хочешь раньше — посмотри других мастеров в каталоге.
+        {canLookFurther
+          ? "Можно посмотреть даты позже или выбрать другого специалиста на ту же услугу."
+          : "Дальше расписание ещё не открыто — можно выбрать другого специалиста на ту же услугу."}
       </p>
       <div style={{ display: "flex", gap: "var(--s-2)", marginTop: "var(--s-3)", flexWrap: "wrap" }}>
-        <button
-          type="button"
-          className="btn-secondary"
-          onClick={onBack}
-        >
-          Посмотреть других
+        {canLookFurther && (
+          <button type="button" className="btn-secondary" onClick={onOtherDates}>
+            {OTHER_DATES_LABEL}
+          </button>
+        )}
+        <button type="button" className="btn-secondary" onClick={onOtherMaster}>
+          {OTHER_MASTER_LABEL}
         </button>
       </div>
     </div>

@@ -565,9 +565,15 @@ export const getCustomerSlots = (params: {
   masterId: string;
   serviceId: string;
   days?: number;
+  /**
+   * DRF-1776 — «Другие даты»: окно сдвигается на N дней вперёд, размер
+   * окна прежний (сервер держит потолок 14 дней на запрос).
+   */
+  offsetDays?: number;
 }): Promise<SlotsResponse> => {
   const days = params.days ?? 14;
   const today = new Date();
+  today.setDate(today.getDate() + (params.offsetDays ?? 0));
   const future = new Date(today);
   future.setDate(today.getDate() + days);
   const isoDate = (d: Date): string =>

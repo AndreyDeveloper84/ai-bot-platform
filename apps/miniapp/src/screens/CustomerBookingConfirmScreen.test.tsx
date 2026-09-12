@@ -75,11 +75,19 @@ const CREATED = {
   },
 };
 
+/**
+ * Время визита — в будущем ОТНОСИТЕЛЬНО часов теста (DRF-1776): экран
+ * подтверждения считает прошедшее время «устаревшим подтверждением» и
+ * прячет «Записаться». Прибитая дата «2026-08-01» стала прошлым 02.08 и
+ * уронила бы весь файл в один день, никого не спросив.
+ */
+const FUTURE_VISIT = new Date(Date.now() + 7 * 24 * 3600 * 1000).toISOString();
+
 function seedDraft() {
   resetBooking();
   setService("svc-1", "Маникюр");
   setMaster("mst-1", "Анна Соколова");
-  setVisitAt("2026-08-01T16:00:00+03:00");
+  setVisitAt(FUTURE_VISIT);
 }
 
 function renderScreen() {
@@ -243,7 +251,7 @@ describe("payment choice (C7.4 / AMD-002)", () => {
       expect.objectContaining({
         service_id: "svc-1",
         master_id: "mst-1",
-        visit_at: "2026-08-01T16:00:00+03:00",
+        visit_at: FUTURE_VISIT,
         payment_required: false,
       }),
     );
