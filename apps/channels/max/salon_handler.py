@@ -503,18 +503,47 @@ def _handle_master_invite(event: CanonicalEvent, token: str, bot_user, tenant, e
 
 
 def _handle_salon_event_inner(event: CanonicalEvent, trace_id: str | uuid.UUID | None) -> None:
-    """Resolve who is speaking, then either onboard them or show the menu."""
+    """Resolve who is speaking, then either onboard them or show the menu.
 
-    from apps.channels.bot_registry import effective_registry, resolve_by_slug
+    The tenant comes FROM THE PERSON, not from the bot's registry entry
+    (DRF-1783, срез 4a of DRF-1705; owner 12.09.2026: the salon bot does
+    not belong to a salon). Order:
+
+    1. **A working row** — the one ``BotUser`` of this MAX identity that
+       carries a staff role or a live master card
+       (:func:`resolve_working_bot_user`, DRF-1755). Its tenant is the
+       tenant; the staff flow runs in ``tenant_scope`` of THAT row. A solo
+       master therefore lands in her own workspace, and no ``customer``
+       row is created for her in the salon the entry happens to name —
+       until this slice that row was created first thing, for everyone.
+    2. **No working row — the stranger path.** Until срез 4b (DRF-1784) it
+       is unchanged: it needs a tenant to create the row in, and takes it
+       from the scope the consumer entered from the entry
+       (``MAX_BOT_SALON_TENANT_SLUG``). Without one it refuses by the NAME
+       of what is missing — the next slice — not by the old
+       ``no_tenant_scope``, which read as «the consumer forgot to enter
+       scope». Ingress is untouched here: while the variable stands, the
+       entry's tenant arrives as before; срез 4c removes it last.
+    """
+
+    from apps.identity.services.bot_user_resolver import resolve_working_bot_user
     from apps.identity.services.resolver import resolve_or_create_bot_user
-    from apps.tenancy.context import current_tenant
+    from apps.tenancy.context import current_tenant, tenant_scope
+
+    working = resolve_working_bot_user(event.channel_user_id, surface="salon_bot")
+    if working is not None:
+        with tenant_scope(working.tenant):
+            _serve(event, trace_id, tenant=working.tenant, bot_user=working)
+        return
 
     tenant = current_tenant()
     if tenant is None:
-        # The consumer enters tenant_scope from the registry entry; without
-        # it we cannot tell which salon this is, and guessing would attach
-        # a person to the wrong one.
-        logger.error("channels.max.salon.no_tenant_scope channel_user_id=%s", event.channel_user_id)
+        logger.error(
+            "channels.max.salon.stranger_without_tenant_until_4b channel_user_id=%s — "
+            "no working row for this identity and no tenant on the entry; the stranger "
+            "path without a BotUser is срез 4b (DRF-1784)",
+            event.channel_user_id,
+        )
         return
 
     bot_user = resolve_or_create_bot_user(
@@ -523,6 +552,13 @@ def _handle_salon_event_inner(event: CanonicalEvent, trace_id: str | uuid.UUID |
         display_name=_sender_name(event),
         chat_id=event.chat_id,
     )
+    _serve(event, trace_id, tenant=tenant, bot_user=bot_user)
+
+
+def _serve(event: CanonicalEvent, trace_id: str | uuid.UUID | None, *, tenant, bot_user) -> None:
+    """The salon bot's conversation for ``bot_user`` in ``tenant`` — invite, whoami, roles, menu."""
+
+    from apps.channels.bot_registry import effective_registry, resolve_by_slug
 
     entry = resolve_by_slug(_bot_slug_for(tenant), effective_registry())
     if entry is None:

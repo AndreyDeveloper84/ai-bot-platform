@@ -877,6 +877,18 @@ a {
   color: var(--c-text-secondary);
 }
 
+/* DRF-1778 — «Другие специалисты» с карточки мастера: тихая ссылка под
+   блоком слотов; число отзывов — тем же вторичным цветом, что рейтинг. */
+.customer-master__others {
+  margin: var(--s-3) 0;
+}
+
+.customer-master__reviews,
+.master-card__reviews {
+  color: var(--c-text-secondary);
+  font-weight: 400;
+}
+
 .goal-select__prompt {
   margin: 0 0 var(--s-2);
   color: var(--c-text-primary);
@@ -4140,6 +4152,13 @@ a {
 }
 
 /* F3 — Slots. */
+/* DRF-1776 — окно «на две недели позже»: тихая строка над списком. */
+.customer-slots__window-note {
+  margin: 0 0 var(--s-2);
+  font-size: var(--font-size-100);
+  color: var(--c-text-secondary);
+}
+
 .customer-slots__section-title {
   font-size: var(--font-size-300);
   font-weight: 600;
@@ -7203,4 +7222,23 @@ a {
 .ayla-entry__chevron {
   color: var(--c-text-secondary);
   flex: none;
+}
+
+/* DRF-1746 — типы ответа на шаге анкеты (макет C03 P11): шкала с
+   подписями концов и короткое текстовое поле со счётчиком лимита. Фишки
+   и кнопки — общие классы выше. */
+.anketa-scale__ends {
+  display: flex;
+  justify-content: space-between;
+  margin-top: calc(-1 * var(--s-2));
+  margin-bottom: var(--s-3);
+  font-size: var(--font-size-100);
+  color: var(--c-text-secondary);
+}
+
+.anketa-text__limit {
+  margin: var(--s-1) 0 0;
+  font-size: var(--font-size-100);
+  color: var(--c-text-secondary);
+  text-align: right;
 }

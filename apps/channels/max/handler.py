@@ -113,13 +113,14 @@ from apps.channels.max.outbound import (
 from apps.channels.max.parser import CanonicalEvent, ParseError, parse_max_webhook
 from apps.channels.max.quick_actions import (
     AI_UNAVAILABLE_TEXT,
-    RETRY_CALLBACK,
     STALE_TAP_TEXT,
     ai_unavailable_action_data,
     first_contact_action_data,
+    is_retry_callback,
     is_stale_tap,
     looks_like_callback_payload,
     resolve_tap_text,
+    retry_turn_id,
 )
 from apps.orchestrator.llm.templates import get_fallback
 from apps.channels.max.photo import (
@@ -152,6 +153,7 @@ from apps.persona.memory_surface import render_current_personal_context
 from apps.persona.voice import SALON_BUSINESS_NAME
 from apps.orchestrator.concierge import generate_direct_show_masters_reply
 from apps.orchestrator.fast_path import claims_direct_show_masters
+from apps.orchestrator.open_question import close_question
 from apps.orchestrator.discovery import (
     CALLBACK_DISCOVER_BOOK_PREFIX,
     CALLBACK_DISCOVER_MORE_PREFIX,
@@ -268,8 +270,16 @@ def _last_assistant_content(history: list[dict[str, Any]] | None) -> str | None:
 def _last_user_content(
     history: list[dict[str, Any]] | None,
     conversation: Any = None,
+    *,
+    turn_id: str | None = None,
 ) -> str | None:
     """Последняя реплика САМОГО человека, или None.
+
+    ``turn_id`` (DRF-1762) — кнопка привязана к строке: реплика отдаётся,
+    только если эта строка всё ещё последняя у человека. Повтор ложится новой
+    строкой, поэтому второй тап по той же кнопке и тап после новой реплики —
+    оба «не последний ход» и подставить им нечего. Короткая память здесь не
+    годится: у неё нет id строк, поэтому привязанный тап читает таблицу.
 
     Что подставляет «Повторить» с экрана «AI недоступна» (DRF-1348): повтор —
     это «отправь то же самое ещё раз», а не «спроси модель заново», поэтому
@@ -284,23 +294,34 @@ def _last_user_content(
     Тап по самой кнопке сюда попасть не может: подстановка стоит ДО записи
     входящего хода, поэтому ``cb:retry:last`` в истории не оказывается.
     """
-    for item in reversed(history or []):
-        if item.get("role") == "user":
-            content = item.get("content")
-            if isinstance(content, str) and content.strip():
-                return content
+    if turn_id is None:
+        for item in reversed(history or []):
+            if item.get("role") == "user":
+                content = item.get("content")
+                if isinstance(content, str) and content.strip():
+                    return content
     conversation_id = getattr(conversation, "id", None)
     if conversation_id is None:
         return None
     try:
         from apps.conversations.models import Message
 
-        row = (
+        last = (
             Message.all_tenants.filter(conversation_id=conversation_id, role="user")
             .order_by("-created_at")
-            .values_list("content", flat=True)
+            .values_list("id", "content")
             .first()
         )
+        row = last[1] if last is not None else None
+        if turn_id is not None:
+            is_last = last is not None and last[0].hex == turn_id
+            logger.info(
+                "channels.max.global.retry_bound conversation=%s is_last=%s",
+                conversation_id,
+                is_last,
+            )
+            if not is_last:
+                return None
     except Exception:  # noqa: BLE001 — a retry must never break the turn
         logger.exception(
             "channels.max.global.retry_history_probe_failed conversation=%s",
@@ -353,6 +374,12 @@ def _last_clarification_offer(conversation: Any) -> tuple[str, list[str]]:
                 continue
             options = [str(o) for o in (block.get("options") or []) if str(o).strip()]
             if options:
+                # DRF-1760 — вопрос берётся из блока, где он лежит без
+                # «Выбрано: N»; строки, записанные до этого, несут его в
+                # ``content`` — как прежде.
+                asked = block.get("question")
+                if isinstance(asked, str) and asked.strip():
+                    return asked, options
                 return (content if isinstance(content, str) else ""), options
     except Exception:  # noqa: BLE001 — a tap must never break the turn
         logger.exception(
@@ -1269,8 +1296,8 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
     tap_text = resolve_tap_text(
         event.text,
         last_user_text=(
-            _last_user_content(history, conversation)
-            if (event.text or "").strip() == RETRY_CALLBACK
+            _last_user_content(history, conversation, turn_id=retry_turn_id(event.text))
+            if is_retry_callback(event.text)
             else None
         ),
     )
@@ -1321,6 +1348,11 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
             clarify_outcome = None
         elif clarify_outcome is None:
             clarify_outcome = ClarifyOutcome(reply=DiscoveryReply(text=CLARIFY_STALE_TEXT))
+        elif clarify_outcome.answer_text:
+            # DRF-1760 — ответ дан тапом («Не знаю») и в модель не идёт:
+            # открытый вопрос (DRF-1779) закрывается здесь, иначе следующая
+            # реплика прочиталась бы как второй ответ на него.
+            close_question(conversation, clarify_outcome.answer_text)
 
     # A submitted answer no longer starts with the prefix, so it is persisted
     # as the user turn it now is; a redraw tap still does not reach history.
@@ -2280,7 +2312,12 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
                                 or not turn_reply.reply_text
                                 else turn_reply.reply_text
                             ),
-                            action_data=ai_unavailable_action_data(),
+                            # DRF-1762 — кнопка привязана к строке этого
+                            # хода: повторяет его один раз и только пока он
+                            # последний.
+                            action_data=ai_unavailable_action_data(
+                                user_msg.id.hex if user_msg is not None else None
+                            ),
                             persisted=turn_reply.assistant_persisted,
                         )
                         assistant_action_type = "ai_unavailable"

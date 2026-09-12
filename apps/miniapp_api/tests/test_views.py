@@ -506,6 +506,29 @@ class TestServicesEndpoints:
 
 
 class TestMastersEndpoints:
+    def test_review_count_rides_from_the_mirror(
+        self,
+        client: Client,
+        bot_user: BotUser,
+        master: CatalogMaster,
+    ) -> None:
+        """DRF-1778: число отзывов — из зеркала (`reviews_count` фида), как
+        есть; ноль остаётся нулём, а не пропадает и не становится единицей."""
+        CatalogMaster.all_tenants.filter(id=master.id).update(review_count=108)
+        resp = client.get(
+            reverse("miniapp_api:masters_list"),
+            HTTP_AUTHORIZATION=_init_data_header("12345"),
+        )
+        assert resp.status_code == 200
+        (row,) = resp.json()["masters"]
+        assert row["review_count"] == 108
+        CatalogMaster.all_tenants.filter(id=master.id).update(review_count=0)
+        detail = client.get(
+            reverse("miniapp_api:master_detail", args=[master.id]),
+            HTTP_AUTHORIZATION=_init_data_header("12345"),
+        )
+        assert detail.json()["master"]["review_count"] == 0
+
     def test_list_bookable_only(
         self,
         client: Client,

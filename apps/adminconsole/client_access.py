@@ -101,6 +101,29 @@ def is_unrestricted(user: Any) -> bool:
     )
 
 
+def is_platform_operator(user: Any) -> bool:
+    """Пропуск платформы, не салона (S2-4, §2 п.6 свода).
+
+    Карточка клиента показывает межсалонное присутствие (``_salons_of``) и
+    факт активной цели — то, что салону видеть запрещено. Сегодня все
+    учётные записи консоли — платформенные (суперпользователь, роли
+    ``ayla-viewer`` / ``ayla-editor``), и это условие держится на именах
+    групп, а не на слове «оператор»: учётная запись, заведённая иначе
+    (будущий сотрудник салона с правами на модели), под него не попадает
+    и этих блоков не получает. При сомнении — закрыто.
+    """
+    if user is None or not getattr(user, "is_authenticated", False):
+        return False
+    if is_unrestricted(user):
+        return True
+    from apps.adminconsole.roles import ROLE_GROUPS
+
+    try:
+        return user.groups.filter(name__in=list(ROLE_GROUPS.values())).exists()
+    except Exception:  # noqa: BLE001 — не похоже на вошедшего человека
+        return False
+
+
 def client_label(bot_user: Any) -> str:
     """Подпись клиента для пропуска и журнала. Без телефона (DRF-1039)."""
     if bot_user is None:

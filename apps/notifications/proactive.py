@@ -127,7 +127,87 @@ BLOCK_REASONS = (
     # "no_consent" so a dry run tells "no 152-ФЗ baseline" apart from
     # "no health consent".
     "no_health_consent",
+    # DRF-1731: missing MARKETING for a PROMO-class sender (38-ФЗ ст. 18,
+    # §35 п.17 — an unproven marketing consent is an absent one).
+    "no_marketing_consent",
 )
+
+# ── Sender classes (DRF-1731, 38-ФЗ ст. 18) ─────────────────────────────
+#
+# Every bot-initiated message to a client is one of two things: a
+# SERVICE notice about the person's own booking / payment / dialogue —
+# something the service is not rendered without — or a PROMO: a nudge,
+# a tip, an offer, sent because we chose to, not because they acted.
+# 38-ФЗ ст. 18 ч. 1 allows the second kind only with prior consent to
+# advertising; that consent exists in this codebase as
+# ``ConsentType.MARKETING`` (Mini App toggle «Акции и предложения»,
+# ``apps/consent/customer.py set_marketing``) and, until DRF-1731,
+# **nobody read it** — the follow-up beat said so in its own docstring.
+#
+# The registry below is the named list. Its two jobs:
+#
+# 1. A PROMO sender gates on :data:`PROMO_REQUIRED_CONSENTS` — through
+#    :func:`consent_blocker` or :func:`marketing_blocker` — and its tests
+#    prove «consent withdrawn → zero sends» by running the sender, not
+#    the predicate.
+# 2. A SERVICE sender is *named* as such, with the reason, instead of
+#    being silently ungated. Naming is not gating: a service notice is
+#    still subject to the admin block on the transport
+#    (``apps/channels/max/outbound._recipient_blocked``).
+#
+# ``UNCLEAR`` is deliberate: senders where the basis is the person's own
+# opt-in to a feature (daily nutrition report, water reminder) or their
+# own action a second earlier (resume after granting HEALTH) — neither a
+# booking nor an advert. The owner decides their class (DRF-1731, «что
+# нужно от владельца»); until then they keep the gate they have.
+#
+# Keys are ``"module:callable"`` and resolve by import — a renamed or
+# removed sender breaks the registry test rather than quietly leaving
+# the list. Adding a sender means adding a row here and a row in the
+# class test; the measurement behind the rows is
+# ``Ayla/docs/REPORT_SUB_MARKETING_CONSENT_SENDERS.md`` (12.09.2026).
+
+SENDER_CLASS_SERVICE = "service"
+SENDER_CLASS_PROMO = "promo"
+SENDER_CLASS_UNCLEAR = "unclear"
+
+#: Consent types a PROMO-class sender must see active, in the order the
+#: gaps are reported: no 152-ФЗ baseline first, then no advertising consent.
+PROMO_REQUIRED_CONSENTS: tuple[str, ...] = ("personal_data", "marketing")
+
+PROACTIVE_SENDERS: dict[str, str] = {
+    # PROMO — a nudge or a tip nobody asked for on that day.
+    "apps.bookings.followups:send_post_visit_followups": SENDER_CLASS_PROMO,
+    "apps.nutrition_proactive.coach:plan_coach_hints": SENDER_CLASS_PROMO,
+    # SERVICE — about the person's own booking, payment or dialogue.
+    "apps.bookings.tasks:send_due_reminders": SENDER_CLASS_SERVICE,  # T-24h / T-2h of THEIR booking
+    "apps.booking.client_notify:notify_client_booking_confirmed": SENDER_CLASS_SERVICE,
+    "apps.skills.payment_failed.skill:_try_send_client_dm": SENDER_CLASS_SERVICE,  # THEIR payment
+    "apps.admin_api.services.master_deactivation:execute_deactivation": SENDER_CLASS_SERVICE,
+    "apps.handoff.silence:release_notices_for": SENDER_CLASS_SERVICE,  # THEIR dialogue, they asked
+    # UNCLEAR — basis is the person's own opt-in or own action; owner decides.
+    "apps.nutrition_proactive.tasks:send_daily_reports": SENDER_CLASS_UNCLEAR,
+    "apps.nutrition_proactive.tasks:send_water_reminders": SENDER_CLASS_UNCLEAR,
+    "apps.orchestrator.health_return:resume_after_health_consent": SENDER_CLASS_UNCLEAR,
+}
+
+
+def marketing_blocker(bot_user: Any) -> str | None:
+    """``"no_marketing_consent"`` unless an active MARKETING record exists.
+
+    For PROMO-class senders that have already passed the shared gate for
+    the 152-ФЗ baseline and want to ask the advertising question on its
+    own line (:mod:`apps.nutrition_proactive.coach`). Same predicate as
+    the ``MARKETING`` leg of :func:`consent_blocker` — by record, not by
+    any column: :func:`apps.consent.services.withdraw` stamps
+    ``withdrawn_at`` and the record stops counting (DRF-1314's lesson).
+    """
+    from apps.consent.services import has_global_consent
+
+    if has_global_consent(bot_user, "marketing"):
+        return None
+    return "no_marketing_consent"
+
 
 #: The subset of :data:`BLOCK_REASONS` reachable by a call that leaves
 #: ``required_consents`` at its default. Callers that never pass the
@@ -221,4 +301,15 @@ def vet_outbound(text: str) -> tuple[str, str | None]:
     return text, None
 
 
-__all__ = ["BLOCK_REASONS", "DEFAULT_BLOCK_REASONS", "consent_blocker", "vet_outbound"]
+__all__ = [
+    "BLOCK_REASONS",
+    "DEFAULT_BLOCK_REASONS",
+    "PROACTIVE_SENDERS",
+    "PROMO_REQUIRED_CONSENTS",
+    "SENDER_CLASS_PROMO",
+    "SENDER_CLASS_SERVICE",
+    "SENDER_CLASS_UNCLEAR",
+    "consent_blocker",
+    "marketing_blocker",
+    "vet_outbound",
+]

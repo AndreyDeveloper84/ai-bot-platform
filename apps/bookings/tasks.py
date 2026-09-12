@@ -161,6 +161,24 @@ def _target_status(kind: str) -> str:
     return BookingReminder.Status.SENT
 
 
+def _reminders_muted(row: Any) -> bool:
+    """Has the person switched booking reminders off?
+
+    ``UserPreferences.notify_reminders`` — default ``True``; a missing
+    preferences row means «never touched the switch», i.e. not muted.
+    One indexed lookup by primary key per row that reaches the send
+    path; nothing is cached across rows, so a flip lands the same tick.
+    """
+    from apps.identity.models import UserPreferences
+
+    value = (
+        UserPreferences.all_tenants.filter(bot_user_id=row.bot_user_id)
+        .values_list("notify_reminders", flat=True)
+        .first()
+    )
+    return value is False
+
+
 @shared_task(name="bookings.send_due_reminders")
 def send_due_reminders() -> dict[str, int]:
     """Dispatch every reminder whose ``scheduled_at`` has passed.
@@ -184,7 +202,8 @@ def send_due_reminders() -> dict[str, int]:
        see module docstring.
 
     Returns a dict
-    ``{"sent": int, "failed": int, "skipped": int, "stale": int, "deferred": int}``
+    ``{"sent": int, "failed": int, "skipped": int, "stale": int, "deferred": int,
+    "muted": int}``
     for telemetry / test visibility.
 
     ``stale`` counts reminders dropped at dispatch because the underlying
@@ -208,6 +227,7 @@ def send_due_reminders() -> dict[str, int]:
     skipped = 0
     stale = 0
     deferred = 0
+    muted = 0
     for row in due_qs:
         # Send-time re-check invariant (P0 PRE_PILOT). See
         # ``_recheck_booking_state`` docstring + module-level rationale
@@ -273,7 +293,38 @@ def send_due_reminders() -> dict[str, int]:
             stale += 1
             continue
 
-        # action == _ACTION_SEND — normal dispatch path.
+        # action == _ACTION_SEND — the booking is still worth reminding
+        # about. Now the person's own switch. ``notify_reminders`` is the
+        # ONE toggle the model promises applies here («only soft
+        # reminders mute», apps/identity/models.py), and until DRF-1833's
+        # measurement nobody read it — a promise on a settings screen
+        # with no reader behind it. Read at send time, not at schedule
+        # time: the toggle can flip between the two, and the row is the
+        # same either way. Service class (DRF-1833 registry): no consent
+        # gate here — this IS the person's own booking — but their own
+        # «no» is honoured.
+        if _reminders_muted(row):
+            rowcount = BookingReminder.all_tenants.filter(
+                pk=row.pk,
+                status=BookingReminder.Status.PENDING,
+            ).update(status=BookingReminder.Status.MUTED)
+            if rowcount == 0:
+                skipped += 1
+                continue
+            muted += 1
+            logger.info("bookings.dispatch.muted pk=%s kind=%s", row.pk, row.kind)
+            write_audit(
+                action="bookings.reminder.muted",
+                target="BookingReminder",
+                target_id=row.pk,
+                payload={
+                    "kind": row.kind,
+                    "yclients_record_id": row.yclients_record_id,
+                    "reason": "notify_reminders_off",
+                },
+            )
+            continue
+
         target_status = _target_status(row.kind)
         # Compare-and-set: only proceed if we are the first to claim
         # this row. .update() returns the affected rowcount; 0 means
@@ -363,14 +414,15 @@ def send_due_reminders() -> dict[str, int]:
         )
         sent += 1
 
-    if sent or failed or skipped or stale or deferred:
+    if sent or failed or skipped or stale or deferred or muted:
         logger.info(
-            "bookings.dispatch.summary sent=%d failed=%d skipped=%d stale=%d deferred=%d",
+            "bookings.dispatch.summary sent=%d failed=%d skipped=%d stale=%d deferred=%d muted=%d",
             sent,
             failed,
             skipped,
             stale,
             deferred,
+            muted,
         )
     return {
         "sent": sent,
@@ -378,6 +430,7 @@ def send_due_reminders() -> dict[str, int]:
         "skipped": skipped,
         "stale": stale,
         "deferred": deferred,
+        "muted": muted,
     }
 
 

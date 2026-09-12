@@ -52,6 +52,7 @@ from django.views.decorators.http import require_http_methods
 from apps.audit.services import write_audit
 from apps.catalog.handles import canonical_handle
 from apps.catalog.models import CatalogMaster, CatalogService, MasterService
+from apps.catalog.master_state import sale_block
 from apps.conversations.models import AiDraft
 from apps.master_api.services.conversations import (
     ConversationsListError,
@@ -74,6 +75,7 @@ from apps.master_api.services.conversation_detail import (
 )
 from apps.master_api.services.catalog import list_master_services
 from apps.master_api.services.customers import list_master_customers
+from apps.master_api.services.onboarding_readiness import build_readiness, identity_facts
 from apps.master_api.services.dashboard import build_dashboard
 from apps.master_api.services.billing import (
     BillingProxyResult,
@@ -982,6 +984,10 @@ def me(request: HttpRequest) -> HttpResponse:
     """
 
     master: CatalogMaster = request.master  # type: ignore[attr-defined]
+    # DRF-1794: мастер видит своё состояние продажи тем же словом, что
+    # витрина и ростер (один ``sale_block``); до этого кабинет молчал о
+    # том, что человек не опубликован.
+    block = sale_block(master)
     return JsonResponse(
         {
             "master": {
@@ -1001,8 +1007,28 @@ def me(request: HttpRequest) -> HttpResponse:
                 "can_edit_services": True,
                 "can_message_customers": True,
             },
+            "setup_state": "READY" if block is None else "SETUP_PENDING",
+            "sale_block": block,
+            "identity": identity_facts(master),
         }
     )
+
+
+# --- GET /onboarding/readiness --------------------------------------------
+
+
+@require_http_methods(["GET"])
+@require_master_init_data
+def onboarding_readiness(request: HttpRequest) -> HttpResponse:
+    """Чек-лист «Осталось настроить» — проекция по фактам (DRF-1794, M2).
+
+    Read-only, без аудита и без хранимого состояния: см.
+    :mod:`apps.master_api.services.onboarding_readiness`. Экран 01 и карточка
+    «продолжить настройку» в ``/solo/my-day`` читают только это.
+    """
+
+    master: CatalogMaster = request.master  # type: ignore[attr-defined]
+    return JsonResponse(build_readiness(master).as_dict())
 
 
 # --- GET /dashboard --------------------------------------------------------

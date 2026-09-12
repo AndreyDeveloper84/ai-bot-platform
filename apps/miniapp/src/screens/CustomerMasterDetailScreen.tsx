@@ -28,7 +28,7 @@ import {
   getCustomerMaster,
   type CustomerMaster,
 } from "../lib/customer-booking";
-import { publicRating } from "../lib/rating";
+import { publicRating, reviewCountLabel } from "../lib/rating";
 import { setEntryPoint, setMaster, setService, useBookingDraft } from "../state/booking";
 import { backTo } from "../lib/screen-back";
 
@@ -39,6 +39,8 @@ type State =
   | { kind: "loading" }
   | { kind: "ok"; master: CustomerMaster }
   | { kind: "error"; err: unknown };
+
+export const OTHER_MASTERS_LABEL = "Другие специалисты";
 
 export function CustomerMasterDetailScreen() {
   const online = useOnline();
@@ -129,6 +131,12 @@ export function CustomerMasterDetailScreen() {
             >
               <span aria-hidden="true">⭐ </span>
               {rating}
+              {/* DRF-1778 — число отзывов только из данных, иначе без скобок. */}
+              {reviewCountLabel(m.review_count) && (
+                <span className="customer-master__reviews" data-testid="master-reviews">
+                  {" "}({reviewCountLabel(m.review_count)})
+                </span>
+              )}
             </div>
           )}
           {m.specialization && (
@@ -157,6 +165,28 @@ export function CustomerMasterDetailScreen() {
           Выбери удобное время — покажу свободные.
         </p>
       </section>
+
+      {/* DRF-1778 (C05.3): «Другие специалисты» — с карточки, не только
+          из ошибки. С известной услугой — выбор мастера под неё; без —
+          каталог с той же секцией мастеров. Не marketplace: ни фильтров,
+          ни сравнения. */}
+      <div className="customer-master__others">
+        <button
+          type="button"
+          className="goal-select__minor-action"
+          onClick={() => {
+            const svc = draft.serviceId || serviceId;
+            if (svc) {
+              if (!draft.serviceId) setService(svc, "");
+              navigate("/customer/book/master");
+            } else {
+              navigate("/customer/catalog");
+            }
+          }}
+        >
+          {OTHER_MASTERS_LABEL}
+        </button>
+      </div>
 
       {/* Secondary CTA «Сообщить по записи» — hidden in round-1 until
           the messaging route ships. `/customer/masters/{id}/message`

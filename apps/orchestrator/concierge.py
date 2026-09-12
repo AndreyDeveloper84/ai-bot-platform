@@ -58,6 +58,7 @@ from apps.identity.services.global_tenant import get_global_bot_tenant
 from apps.llm.model_tiers import TIER_SMART
 from apps.llm.pricing import UnknownModelError, compute_cost
 from apps.llm.router import get_router
+from apps.orchestrator.clarify_guard import filter_clarification_options
 from apps.marketplace.discovery import (
     city_service_samples,
     discover_masters,
@@ -115,6 +116,7 @@ from apps.orchestrator.open_question import (
     open_question,
     render_answer_block,
 )
+from apps.orchestrator.safety.outbound import ACTION_PROMISE_STEMS
 from apps.orchestrator.refusal_memo import (
     RefusedQuery,
     recall_refusals,
@@ -218,70 +220,10 @@ def _to_openai_shape(result: Any) -> Any:
 # call onto a turn the model answered correctly in words. We therefore
 # match first-person commitments and the wait-markers, both of which only
 # make sense when the assistant is about to act itself.
-_PROMISE_STEMS: tuple[str, ...] = (
-    # first-person commitment to act
-    "подберу",
-    "подберем",
-    "подберём",
-    "подбираю",
-    "подбираем",
-    "посмотрю",
-    "посмотрим",
-    "гляну",
-    "глянем",
-    "уточню",
-    "уточним",
-    "найду",
-    "поищу",
-    "покажу",
-    "покажем",
-    "проверю",
-    "проверим",
-    "помогу подобрать",
-    "помогу выбрать",
-    # explicit wait - an assistant that asks the client to wait without
-    # emitting a tool call is ALWAYS a bug: nothing is running.
-    "секундочк",
-    "минуточк",
-    "минутку",
-    "одну минут",
-    "одну секунд",
-    "подождит",
-    "подожди",
-    # "вот варианты" / "вот кто подойдёт" - announces a result
-    # that, without a tool call, does not exist.
-    "вот вариант",
-    "вот кто",
-    "вот подходящ",
-    # joint-action framing of the same promise
-    "давайте подбер",
-    "давай подбер",
-    "давайте уточн",
-    "давай уточн",
-    # DRF-1268 — the gate itself is tool-agnostic (it fires on "the model
-    # called NO tool", not on a list of action types), but this LEXICON was
-    # tuned on master-search vocabulary and missed "записываю 200 мл воды"
-    # entirely. Recording verbs are the promise form the nutrition tools
-    # (log_water, clarify_food_entry, start_nutrition_anketa,
-    # health_screening) attract, so they belong here too.
-    "запишу",
-    "запишем",
-    "записываю",
-    "сохраню",
-    "сохраним",
-    "сохраняю",
-    "зафиксирую",
-    "зафиксируем",
-    "оформлю",
-    "оформим",
-    "заполню",
-    "заполним",
-    "заведу",
-    # Deliberately NOT here: "добавлю" / "отмечу". Both are ordinary Russian
-    # discourse markers ("Добавлю, что цены могут отличаться") and would fire
-    # on turns the model answered correctly in words — the same false-positive
-    # cost that made this list narrower than the legacy one.
-)
+# DRF-1827 — единый словарь обещаний живёт в исходящем стороже
+# (``safety.outbound.ACTION_PROMISE_STEMS``): им же судится черновик на
+# выходе, и два списка разошлись бы за один тикет. Здесь — тот же объект.
+_PROMISE_STEMS: tuple[str, ...] = ACTION_PROMISE_STEMS
 
 
 def _looks_like_promise_without_tool(content: str | None) -> bool:
@@ -941,6 +883,22 @@ def _dispatch_tool(tool_call: Any, context: Any) -> ToolResult:
     )
 
 
+def _tool_acted(tool_trace: Any) -> bool:
+    """Сработал ли на этом ходу хоть один инструмент (DRF-1827).
+
+    Запись трассы без ``result`` — инструмент выполнен (карточки, запись,
+    уточнение); ``result=declined_*`` — исполнитель отказал, и ответом ушла
+    проза рядом с вызовом. Пустая трасса — модель отвечала только словами.
+    """
+
+    for entry in tool_trace or ():
+        if not isinstance(entry, dict):
+            continue
+        if not str(entry.get("result") or "").startswith("declined"):
+            return True
+    return False
+
+
 def _tool_trace_entry(dto: Any) -> dict[str, Any]:
     """One element of the DRF-1385 tool trace: the tool's name + arguments.
 
@@ -1225,6 +1183,14 @@ def build_concierge_system_prompt(
         "если хочешь записаться» — это тупик: клиент уже сказал, чего "
         "хочет. Не показывай список мастеров второй раз, если нужный "
         "мастер в нём уже был.",
+        # DRF-1827 — обещание действия без действия. Живой ход 12.09:
+        # «Сейчас проверю», «запускаю проверку» рядом с отказавшим
+        # инструментом. Правило читается как правило; исходящий сторож
+        # (класс action_promise) — последняя линия, не первая.
+        "Никогда не обещай «проверю», «поищу», «подберу», «запускаю» и не "
+        "проси подождать: ты ничего не делаешь между ходами. Либо вызови "
+        "нужный инструмент на ЭТОМ же ходу, либо скажи, что можешь сделать "
+        "прямо сейчас, и спроси, что из этого сделать.",
         # DRF-1304 — the salon/service tools exist now (tool_definitions).
         # DRF-1355 sharpens the first two lines against the live failure:
         # «покажи мне салоны» went to show_services with an invented salon.
@@ -1613,7 +1579,18 @@ def generate_concierge_reply(
     # let it reach the prompt.
     from apps.orchestrator.safety.gate import guard_outbound
 
-    _guarded = guard_outbound(reply.text, surface="concierge", bot_user=bot_user, trace_id=trace_id)
+    # DRF-1827 — состоялось ли действие: в трассе есть инструмент, который
+    # НЕ отказал. Отказавший (``result=declined_*``, DRF-1754) действием не
+    # считается — это ровно ход 12.09: вызов был, инструмент отказал, «Сейчас
+    # проверю» ушло в чат. Без трассы (ответ только словами, аварийный
+    # fallback) действия тоже не было.
+    _guarded = guard_outbound(
+        reply.text,
+        surface="concierge",
+        bot_user=bot_user,
+        trace_id=trace_id,
+        acted=_tool_acted(reply.tool_trace),
+    )
     if _guarded.blocked:
         # action_data goes with the text (the channel drops keyboards on a
         # block for the same reason). ``persisted`` is preserved so the row
@@ -2232,10 +2209,18 @@ def _concierge_turn(
             # would be the second way of lying, and «отвечу через минуту»
             # was the first.
             return _reply(text=get_no_answer("ru"), persisted=True)
+        # DRF-1765 — граница C02 держится ЗДЕСЬ, на опциях модели, а не в
+        # рендере: уточнение по материалу каталога (DRF-1531, §29.2) нарочно
+        # называет услуги и через этот фильтр не идёт.
+        options, _dropped = filter_clarification_options(
+            [str(o).strip() for o in (data.get("options") or []) if str(o).strip()]
+        )
         rendered = _render_ask_clarification(
             question,
-            list(data.get("options") or []),
+            options,
             data.get("mode"),
+            # DRF-1760 — «Не знаю» на free-вопросе модели (макет C02.3).
+            offer_dont_know=True,
         )
         # DRF-1779 — вопрос задан: следующая реплика человека — ответ на него.
         open_question(conversation, "ask_clarification", asked_text=str(question))

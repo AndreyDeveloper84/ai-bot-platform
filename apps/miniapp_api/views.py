@@ -773,6 +773,9 @@ def _master_to_dict(m: CatalogMaster) -> dict[str, Any]:
         "experience": m.experience,
         "rating": str(m.rating) if m.rating is not None else None,
         "photo_url": m.photo_url,
+        # DRF-1778 — trust signal только из данных: число отзывов из
+        # зеркала (`reviews_count` фида). 0 — экран скобок не рисует.
+        "review_count": int(m.review_count or 0),
     }
 
 

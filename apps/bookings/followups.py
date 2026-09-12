@@ -119,12 +119,21 @@ What is gated now, in :func:`_consent_blocker`, and why each is here:
   client_name / phone / context but **not** ``chat_id``, so an erased
   person stays reachable and, before this commit, stayed a recipient.
 
-Deliberately NOT gated on ``ConsentType.MARKETING``. A «как прошёл
-визит?» nudge is arguably marketing, but nothing in this codebase
-collects that consent, so gating on it would silence the feature
-permanently while looking like it worked. That is an owner decision,
-not one to smuggle in under a bug fix — raised as an open question in
-``docs/REPORT_DRF1301.md``.
+**Gated on ``ConsentType.MARKETING`` since DRF-1731.** This paragraph
+used to say the opposite — «deliberately NOT gated … nothing in this
+codebase collects that consent, so gating on it would silence the
+feature permanently» — and that was true when written. Two things
+changed: the consent is collected now (Mini App toggle «Акции и
+предложения», ``apps/consent/customer.py set_marketing``, DRF-1520),
+and the owner's consent epic (DRF-1728/1731) classes this beat as
+PROMO: «как прошёл визит?» is a nudge the person did not ask for, and
+38-ФЗ ст. 18 ч. 1 allows it only with prior consent to advertising;
+§35 п.17 — an unproven marketing consent is an absent one. So the beat
+asks for ``PERSONAL_DATA`` *and* ``MARKETING``, both by record, and a
+missing second one is its own slug, ``no_marketing_consent``. The
+feature is silent for people who never flipped the toggle — that is
+the law, not a bug, and the dry run names it per row. Registered in
+:data:`apps.notifications.proactive.PROACTIVE_SENDERS`.
 
 ### Two switches, both closed (DRF-1301)
 
@@ -490,9 +499,10 @@ def _consent_blocker(bot_user: Any) -> str | None:
     condition is in the shared gate.
     """
 
-    from apps.notifications.proactive import consent_blocker
+    from apps.notifications.proactive import PROMO_REQUIRED_CONSENTS, consent_blocker
 
-    return consent_blocker(bot_user)
+    # DRF-1731: PROMO class — 152-ФЗ baseline AND advertising consent.
+    return consent_blocker(bot_user, required_consents=PROMO_REQUIRED_CONSENTS)
 
 
 def _payment_failures_blocker(bot_user: Any, tenant: Any) -> str | None:
@@ -830,7 +840,7 @@ def send_post_visit_followups() -> dict[str, int]:
 
     ``skipped_blocked`` counts consent-gate and B11 blocker hits —
     ``opt_out``, ``no_consent``, ``consent_withdrawn``,
-    ``consent_unproven``, ``deleted``, ``completed_at_null``, terminal
+    ``consent_unproven``, ``no_marketing_consent``, ``deleted``, ``completed_at_null``, terminal
     booking status, payment-failure threshold, and an outbound-safety
     hit (per :func:`_should_send_b11` and :func:`vet_outbound`).
     """

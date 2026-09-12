@@ -140,13 +140,16 @@ ROUTE_TABLE: tuple[Route, ...] = (
     # point: the subject is named ONLY by the header, and there is no request
     # body a caller could use to substitute a different one.
     Route("GET", "/api/v1/internal/me/identity/", Auth.BEARER_EXT),
-    # profile_client (#978). Bearer ALONE, and that is not an oversight:
-    # this route serves the `user.profile.updated` consumer, where the actor
-    # is a NOTIFICATION about a person, not a person. There is no acting
-    # subject to name, so `X-External-User-ID` is not "missing" here — it is
-    # inapplicable, the same distinction §100 draws between "unknown" and
-    # "not applicable". Adding it for symmetry would invent an actor.
-    Route("GET", "/api/v1/internal/users/{id}/", Auth.BEARER),
+    # profile_client (#978 → DRF-1709, 12.09.2026). Until this day: Bearer
+    # ALONE, on the reading that the `user.profile.updated` consumer acts on
+    # a NOTIFICATION about a person and has nobody to name. Reversed with
+    # B-2.1/B-2.2: the card fetched is the card of the person the
+    # notification is about, the refresh serves that person's own mirror,
+    # and the catalog refuses this route to a caller who does not name the
+    # subject in the URL. The consumer now collects the rows first and names
+    # the identity of the row it is about to refresh — the actor IS the
+    # subject, nothing is invented.
+    Route("GET", "/api/v1/internal/users/{id}/", Auth.BEARER_EXT),
     # personal_context_client (M-B1, frozen contract v1.0 2026-07-09).
     # BEARER_EXT since CP-2 / DRF-1617: upstream now authorises the subject in
     # the path against the one this header resolves to, so a leaked token can
@@ -410,7 +413,7 @@ def _exercise_profile() -> None:
     from apps.integrations.ayla import profile_client
 
     profile_client._circuit.record_success()
-    _swallow(lambda: profile_client.fetch_profile_fields(_PROFILE_UUID))
+    _swallow(lambda: profile_client.fetch_profile_fields(_PROFILE_UUID, on_behalf_of=_EXT_USER))
 
 
 def _exercise_identity() -> None:
@@ -602,18 +605,26 @@ def test_matcher_catches_drift() -> None:
     """Prove the matcher rejects each drift class without touching prod code."""
     uid = "11111111-2222-3333-4444-555555555555"
     bearer = {"authorization": f"Bearer {_INTERNAL_TOKEN}"}
+    # DRF-1709 (12.09.2026): the profile route names its subject, so the
+    # good request carries the header and «bearer alone» joins the drift.
+    named = {**bearer, "x-external-user-id": _EXT_USER}
 
-    ok = Captured("GET", f"/api/v1/internal/users/{uid}/", bearer)
+    ok = Captured("GET", f"/api/v1/internal/users/{uid}/", named)
     route, err = _match(ok)
     assert route is not None and err is None, "sanity: the good request must match"
 
     drift = {
-        "missing /api/v1 prefix": Captured("GET", f"/internal/users/{uid}/", bearer),
-        "double /api/v1 prefix": Captured("GET", f"/api/v1/api/v1/internal/users/{uid}/", bearer),
-        "wrong method": Captured("POST", f"/api/v1/internal/users/{uid}/", bearer),
-        "dropped trailing slash": Captured("GET", f"/api/v1/internal/users/{uid}", bearer),
+        "missing /api/v1 prefix": Captured("GET", f"/internal/users/{uid}/", named),
+        "double /api/v1 prefix": Captured("GET", f"/api/v1/api/v1/internal/users/{uid}/", named),
+        "wrong method": Captured("POST", f"/api/v1/internal/users/{uid}/", named),
+        "dropped trailing slash": Captured("GET", f"/api/v1/internal/users/{uid}", named),
         "wrong token value": Captured(
-            "GET", f"/api/v1/internal/users/{uid}/", {"authorization": "Bearer WRONG"}
+            "GET",
+            f"/api/v1/internal/users/{uid}/",
+            {"authorization": "Bearer WRONG", "x-external-user-id": _EXT_USER},
+        ),
+        "profile card fetched without naming the subject": Captured(
+            "GET", f"/api/v1/internal/users/{uid}/", bearer
         ),
         "missing X-External-User-ID on a write": Captured(
             "POST", "/api/v1/internal/me/catalog/recommendations/", bearer

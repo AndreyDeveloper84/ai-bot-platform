@@ -80,7 +80,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from collections.abc import Set as AbstractSet
 from typing import Any, Literal
 from uuid import UUID
@@ -112,6 +112,7 @@ from apps.integrations.yclients import (
 )
 from apps.skills.booking.provider import (
     YClientsHealthCheckHandoffError,
+    YClientsQuoteChangedError,
     YClientsScheduleUnavailableError,
     YClientsSpecialistUnavailableError,
     YClientsStaleVersionError,
@@ -955,6 +956,15 @@ def confirm_booking(
         "master_name": master_name,
         "service_name": service_name,
     }
+    # DRF-1708 / D4: то, что превью ПОКАЖЕТ, ложится в снимок pending и
+    # уедет в создание как quoted_*; неизвестное — не кладётся.
+    quoted_price, quoted_duration = _quote_for_preview(
+        client, master_id=master_id, service_id=service_id
+    )
+    if quoted_price is not None:
+        payload["quoted_price"] = str(quoted_price)
+    if quoted_duration is not None:
+        payload["quoted_duration_minutes"] = quoted_duration
     token = create_pending(
         tenant=tenant,
         bot_user=bot_user,
@@ -989,6 +999,8 @@ def confirm_booking(
         master_name=master_name,
         service_name=service_name,
         slot_datetime=slot_datetime,
+        quoted_price=payload.get("quoted_price"),
+        quoted_duration_minutes=payload.get("quoted_duration_minutes"),
     )
     keyboard = confirm_2_button(str(token))
 
@@ -1013,11 +1025,35 @@ def confirm_booking(
     )
 
 
+def _format_money(value: Any) -> str:
+    """«1 500 ₽» из десятичной строки/числа; пусто — если не число."""
+    try:
+        n = int(round(float(Decimal(str(value)))))
+    except (InvalidOperation, ValueError, TypeError):
+        return ""
+    return f"{n:,}".replace(",", " ") + " ₽"
+
+
+def _format_minutes(value: Any) -> str:
+    try:
+        m = int(value)
+    except (ValueError, TypeError):
+        return ""
+    if m <= 0:
+        return ""
+    if m < 60:
+        return f"{m} мин"
+    h, rest = divmod(m, 60)
+    return f"{h} ч" if rest == 0 else f"{h} ч {rest} мин"
+
+
 def _format_confirm_preview(
     *,
     master_name: str,
     service_name: str,
     slot_datetime: str,
+    quoted_price: Any = None,
+    quoted_duration_minutes: Any = None,
 ) -> str:
     """Render the Russian preview body for a ``confirm_booking`` card.
 
@@ -1025,6 +1061,9 @@ def _format_confirm_preview(
     boilerplate). The second LLM call in :class:`BookingSkill` MAY
     rephrase; this is the deterministic fallback the channel adapter
     uses if the LLM returns empty.
+
+    DRF-1708: длительность и цена — из котировки ребра, ровно те, что
+    уедут как ``quoted_*``; неизвестное не рисуется.
     """
     parts = ["Записываю:"]
     if service_name:
@@ -1033,8 +1072,36 @@ def _format_confirm_preview(
         parts.append(f"• Мастер: {master_name}")
     if slot_datetime:
         parts.append(f"• Время: {slot_datetime}")
+    duration = _format_minutes(quoted_duration_minutes)
+    if duration:
+        parts.append(f"• Длительность: {duration}")
+    price = _format_money(quoted_price)
+    if price:
+        parts.append(f"• Цена: {price}")
     parts.append("Подтверждаете?")
     return "\n".join(parts)
+
+
+def _quote_for_preview(
+    client: Any, *, master_id: int | str, service_id: int | str | None
+) -> tuple[Decimal | None, int | None]:
+    """Котировка ребра для превью (DRF-1708); любой сбой → «неизвестно».
+
+    Только на пути Ayla с клиентом, который умеет котировать; иначе
+    ``(None, None)`` — превью без цены, как раньше.
+    """
+    if not _booking_via_ayla() or not hasattr(client, "get_specialist_service_quote"):
+        return None, None
+    try:
+        return client.get_specialist_service_quote(staff_id=master_id, service_id=service_id)
+    except (YClientsUnavailableError, YClientsAPIError) as exc:
+        logger.warning(
+            "booking.confirm.quote_failed master_id=%s service_id=%s err=%s",
+            master_id,
+            service_id,
+            exc,
+        )
+        return None, None
 
 
 def _resolve_payment_required(tenant: Any, payload: dict[str, Any]) -> bool:
@@ -1140,6 +1207,26 @@ def execute_confirm(
             error="invalid_payload",
         )
 
+    # DRF-1708: котировка из снимка pending — ровно то, что человек видел
+    # в превью. Только когда есть: без неё прежний вызов, и клиент без
+    # этих именованных параметров (B1 YClients) их не получает.
+    quote_kwargs: dict[str, Any] = {}
+    if payload.get("quoted_price") is not None:
+        try:
+            quote_kwargs["quoted_price"] = Decimal(str(payload["quoted_price"]))
+        except (InvalidOperation, ValueError):
+            logger.warning(
+                "booking.confirm.exec.bad_quoted_price value=%r", payload["quoted_price"]
+            )
+    if payload.get("quoted_duration_minutes") is not None:
+        try:
+            quote_kwargs["quoted_duration_minutes"] = int(payload["quoted_duration_minutes"])
+        except (ValueError, TypeError):
+            logger.warning(
+                "booking.confirm.exec.bad_quoted_duration value=%r",
+                payload["quoted_duration_minutes"],
+            )
+
     try:
         record: BookingRecord = client.create_record(
             staff_id=master_id,
@@ -1152,6 +1239,53 @@ def execute_confirm(
             # BOOKING_NO_PREPAYMENT_TENANTS (пилот без предоплаты);
             # вне allowlist — прежний дефолт «с предоплатой».
             payment_required=_resolve_payment_required(tenant, payload),
+            **quote_kwargs,
+        )
+    except YClientsQuoteChangedError as exc:
+        # DRF-1708 / D4 — MATERIAL_CHANGE: не поломка и не занятый слот.
+        # Показать, что было и что стало, и попросить новое подтверждение:
+        # новый pending с применяемым значением, старый снят. Запись НЕ
+        # создана — и это сказано словами.
+        logger.info("booking.confirm.exec.quote_changed field=%s", exc.field)
+        _audit_tool(tenant_id=tenant_id, tool="execute_confirm", outcome="quote_changed")
+        write_audit(
+            EVENT_BOOKING_CONFIRM_FAILED,
+            target="BookingSkill",
+            payload={"tenant_id": tenant_id, "reason": "quote_changed", "field": exc.field},
+        )
+        new_payload = dict(payload)
+        if exc.field == "price":
+            new_payload["quoted_price"] = str(exc.applied)
+            was, now = _format_money(exc.quoted), _format_money(exc.applied)
+            changed = f"цена изменилась: было {was}, стало {now}"
+        else:
+            new_payload["quoted_duration_minutes"] = int(exc.applied)
+            was, now = _format_minutes(exc.quoted), _format_minutes(exc.applied)
+            changed = f"длительность изменилась: было {was}, стало {now}"
+        new_token = create_pending(
+            tenant=tenant,
+            bot_user=bot_user,
+            kind=PendingBookingAction.Kind.CONFIRM,
+            payload=new_payload,
+        )
+        preview = _format_confirm_preview(
+            master_name=master_name,
+            service_name=service_name,
+            slot_datetime=slot_datetime,
+            quoted_price=new_payload.get("quoted_price"),
+            quoted_duration_minutes=new_payload.get("quoted_duration_minutes"),
+        )
+        text = f"Пока вы выбирали, {changed}. Запись не создана.\n\n{preview}"
+        return BookingToolResult(
+            text=text,
+            error="quote_changed",
+            confirmation=ConfirmationResult(ok=False, error="quote_changed"),
+            pending=PendingPreview(
+                kind=PendingBookingAction.Kind.CONFIRM,
+                token=new_token,
+                preview_text=text,
+                keyboard=confirm_2_button(str(new_token)),
+            ),
         )
     except YClientsScheduleUnavailableError as exc:
         logger.warning("booking.confirm.exec.schedule_unavailable err=%s", exc)

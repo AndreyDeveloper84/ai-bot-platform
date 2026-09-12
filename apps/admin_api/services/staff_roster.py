@@ -499,6 +499,11 @@ def _build(tenant: Any) -> tuple[list[Person], int, bool]:
         # столбец не дал бы тихого умолчания: ``sale_block`` читает строку
         # строго и упал бы ``KeyError``, и это замысел.
         "schedule_confirmed_at",
+        # DRF-1795 — статус связи соло-мастера (ruling 6): ключ в столбце
+        # ещё не ``LINKED``. У мастера салона строки связи нет — NULL, и
+        # гейт читает это как «вопрос решает столбец». Забытый здесь
+        # столбец — ``KeyError`` в гейте, и это замысел.
+        "identity_link__status",
         "linked_bot_user__display_name",
         "linked_bot_user__client_name",
     )

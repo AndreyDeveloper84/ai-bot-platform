@@ -26,6 +26,7 @@
         {% endif %}
       {% endif %}
       <li><a href="{{ queue_url }}">Очередь обращений</a></li>
+      <li><a href="{{ identity_queue_url }}">Очередь идентичности</a></li>
     </ul>
 
     <fieldset class="module aligned">
@@ -37,7 +38,14 @@
       <div class="form-row"><dt>Салон этой записи</dt><dd>{{ client.tenant.name }}</dd></div>
       <div class="form-row"><dt>Пришёл</dt><dd>{{ client.first_seen|date:"d.m.Y H:i" }}</dd></div>
       <div class="form-row"><dt>Был в последний раз</dt><dd>{{ client.last_seen|date:"d.m.Y H:i" }}</dd></div>
-      <div class="form-row"><dt>Активная цель</dt><dd>{{ active_goal }}</dd></div>
+      {% if platform_operator %}
+        <div class="form-row"><dt>Активная цель</dt><dd>{{ active_goal }}</dd></div>
+      {% endif %}
+      {% if deletion %}
+        <div class="form-row"><dt>Заявка на удаление</dt>
+          <dd><strong>№ {{ deletion.request_id }}</strong> — с {{ deletion.since|date:"d.m.Y H:i" }}
+              персонализация остановлена; исполняет каталог, отменить нельзя.</dd></div>
+      {% endif %}
       {% if blocked %}
         <div class="form-row"><dt>Заблокирован</dt>
           <dd>{{ client.blocked_at|date:"d.m.Y H:i" }} — {{ client.blocked_by_username }}:
@@ -47,7 +55,11 @@
 
     <fieldset class="module aligned">
       <h2>Салоны, где он есть</h2>
-      {% if salons %}
+      {% if not platform_operator %}
+        <p>Межсалонное присутствие и факт цели открываются
+           только с пропуском платформы (роли ayla-viewer / ayla-editor).
+           Салону чужие салоны не показываются (§2 п.6); попытка записана в журнал доступа.</p>
+      {% elif salons %}
         <table style="width: 100%;">
           <thead><tr><th>Салон</th><th>Пришёл</th><th>Был в последний раз</th></tr></thead>
           <tbody>

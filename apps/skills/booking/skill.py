@@ -2133,6 +2133,9 @@ def _skill_result_for_existing_pending(
         master_name=str(payload.get("master_name") or ""),
         service_name=str(payload.get("service_name") or ""),
         slot_datetime=str(payload.get("slot_datetime") or ""),
+        # DRF-1708: тот же снимок, та же цена — превью не пересчитывается.
+        quoted_price=payload.get("quoted_price"),
+        quoted_duration_minutes=payload.get("quoted_duration_minutes"),
     )
     result = BookingToolResult(
         text=preview_text,

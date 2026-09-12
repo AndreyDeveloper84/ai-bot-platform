@@ -203,6 +203,8 @@ class AylaYClientsAdapter:
         notify_by_sms: int = 0,
         notify_by_email: int = 0,
         payment_required: bool = True,
+        quoted_price: Decimal | None = None,
+        quoted_duration_minutes: int | None = None,
     ) -> BookingRecord:
         # ``notify_*`` / phone / name are YClients-specific; Ayla owns
         # notifications and resolves the client from client_id + X-External-User-ID.
@@ -218,6 +220,14 @@ class AylaYClientsAdapter:
         key = _idempotency_key(
             self._external_user_id, "create", staff_id, service_id, datetime, payment_required
         )
+        # DRF-1708 / D4: то, что человек видел в превью, едет в создание —
+        # Ayla сверит с применяемым внутри транзакции. Только когда
+        # прислано: без котировки — прежний вызов.
+        quote_kwargs: dict[str, Any] = {}
+        if quoted_price is not None:
+            quote_kwargs["quoted_price"] = str(quoted_price)
+        if quoted_duration_minutes is not None:
+            quote_kwargs["quoted_duration_minutes"] = int(quoted_duration_minutes)
         with _translate_errors():
             record = self._client.create_appointment(
                 external_user_id=self._external_user_id,
@@ -227,6 +237,7 @@ class AylaYClientsAdapter:
                 start_datetime=datetime,
                 idempotency_key=key,
                 payment_required=payment_required,
+                **quote_kwargs,
             )
         return BookingRecord(
             record_id=0,
@@ -317,6 +328,31 @@ class AylaYClientsAdapter:
             rows = self._client.get_user_appointments(external_user_id=self._external_user_id)
         return [_to_yc_user_record(r) for r in rows]
 
+    def get_specialist_service_quote(
+        self,
+        *,
+        staff_id: int | str,
+        service_id: int | str | None,
+    ) -> tuple[Decimal | None, int | None]:
+        """Цена и длительность ребра мастер+услуга — то, что Ayla поставит
+        на НОВУЮ запись (DRF-1708). ``None`` в любой позиции — значение
+        не известно; превью тогда его не показывает и не шлёт.
+        """
+        with _translate_errors():
+            rows = self._client.get_specialist_service_edges(
+                specialist_id=str(staff_id),
+                service_id=str(service_id),
+            )
+        if not rows:
+            return None, None
+        duration = rows[0].get("duration_minutes")
+        return (
+            _parse_edge_price(rows[0].get("price")),
+            duration
+            if isinstance(duration, int) and not isinstance(duration, bool) and duration > 0
+            else None,
+        )
+
     def get_specialist_service_price(
         self,
         *,
@@ -404,6 +440,22 @@ class YClientsHealthCheckHandoffError(YClientsAPIError):
         self.handoff = handoff
 
 
+class YClientsQuoteChangedError(YClientsAPIError):
+    """DRF-1708 (владелец, пакет 2, D4): показанное уже не действует.
+
+    Ayla сверила ``quoted_*`` с применяемым внутри транзакции создания и
+    отказала ``409 QUOTE_CHANGED``. Не поломка и не занятый слот —
+    MATERIAL_CHANGE: человек обязан увидеть, что было и что стало, и
+    подтвердить заново. Обе пары едут с провода дословно.
+    """
+
+    def __init__(self, detail: str = "", *, field: str, quoted: Any, applied: Any) -> None:
+        super().__init__(detail)
+        self.field = field
+        self.quoted = quoted
+        self.applied = applied
+
+
 class YClientsStaleVersionError(YClientsAPIError):
     """Optimistic concurrency conflict on Ayla reschedule.
 
@@ -434,6 +486,13 @@ def _is_c1_debt_block(exc: BaseException) -> bool:
     code = getattr(exc, "code", None)
     status = getattr(exc, "status_code", None)
     return status == 409 and isinstance(code, str) and code.lower() == "subscription_past_due"
+
+
+def _is_quote_changed(exc: BaseException) -> bool:
+    """True when the Ayla 4xx is ``409 QUOTE_CHANGED`` (DRF-1708)."""
+    code = getattr(exc, "code", None)
+    status = getattr(exc, "status_code", None)
+    return status == 409 and isinstance(code, str) and code.upper() == "QUOTE_CHANGED"
 
 
 def _is_stale_version(exc: BaseException) -> bool:
@@ -474,6 +533,14 @@ class _translate_errors:
             raise YClientsSpecialistUnavailableError(str(exc)) from exc
         if issubclass(exc_type, BookingBadRequestError) and _is_stale_version(exc):
             raise YClientsStaleVersionError(str(exc)) from exc
+        if issubclass(exc_type, BookingBadRequestError) and _is_quote_changed(exc):
+            details = getattr(exc, "details", None) or {}
+            raise YClientsQuoteChangedError(
+                str(exc),
+                field=str(details.get("field") or ""),
+                quoted=details.get("quoted"),
+                applied=details.get("applied"),
+            ) from exc
         # DRF-997: 429 after retries is a transient schedule outage, not a
         # generic YClients outage, so the skill can reply "try again in a
         # minute" instead of handing off to a manager.

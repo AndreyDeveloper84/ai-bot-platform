@@ -37,7 +37,12 @@ from unittest.mock import AsyncMock, MagicMock, Mock
 import pytest
 
 from apps.channels.max import handler as max_handler
-from apps.channels.max.quick_actions import AI_UNAVAILABLE_TEXT, RETRY_CALLBACK, RETRY_LABEL
+from apps.channels.max.quick_actions import (
+    AI_UNAVAILABLE_TEXT,
+    RETRY_LABEL,
+    is_retry_callback,
+    retry_turn_id,
+)
 from apps.conversations.services import resolve_active_global_conversation
 from apps.identity.services.resolver import resolve_or_create_global_bot_user
 from apps.llm.protocol import CompletionResult, ToolCall
@@ -366,7 +371,9 @@ class TestOutageStillGetsTheButton:
         max_handler.handle_global_max_event(_msg(text="мне бы совет", user_id=user_id, mid="rp"))
 
         buttons = _buttons(sent[-1]["attachments"])
-        assert buttons[0]["payload"] == RETRY_CALLBACK
+        # DRF-1762 — живой payload привязан к строке хода.
+        assert is_retry_callback(buttons[0]["payload"])
+        assert retry_turn_id(buttons[0]["payload"]) is not None
 
     def test_empty_completion_shows_the_owners_line_with_the_button(
         self, monkeypatch, sent, fake_redis

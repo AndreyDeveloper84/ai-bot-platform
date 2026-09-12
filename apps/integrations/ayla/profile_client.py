@@ -143,8 +143,16 @@ class ProfileFields:
     avatar_url: str
 
 
-def fetch_profile_fields(user_id: UUID) -> ProfileFields:
+def fetch_profile_fields(user_id: UUID, *, on_behalf_of: str) -> ProfileFields:
     """Fetch ``display_name`` + ``avatar_url`` for an Ayla user.
+
+    ``on_behalf_of`` — the external identity (``bot:{channel}:{id}``) of the
+    person whose card is being refreshed, sent as ``X-External-User-ID``.
+    Required, keyword-only, never defaulted: the catalog (DRF-1709,
+    B-2.2) checks that the named subject IS the person in the URL, and an
+    empty header is refused there — so an unnamed call would fail at the
+    far end anyway, and a caller that has nobody to name has nobody to
+    refresh either (see the consumer: it collects the rows first).
 
     Raises :class:`ProfileFetchError` on any failure (timeout, 5xx,
     auth, circuit open, malformed response). The consumer treats
@@ -171,21 +179,25 @@ def fetch_profile_fields(user_id: UUID) -> ProfileFields:
         url = AylaUrlBuilder(base_url).build(f"internal/users/{user_id}/")
     except AylaUrlError as exc:
         raise ProfileFetchError(f"invalid AYLA_BASE_URL: {exc}") from exc
-    # No ``X-External-User-ID`` here, and that is not an omission to be tidied
-    # up for symmetry. Every other Ayla client names the subject it acts for;
-    # this one is called by the ``user.profile.updated`` consumer, where the
-    # actor is a NOTIFICATION about a person, not a person. There is nobody to
-    # name, so the header would have to be invented — and an invented actor on
-    # an authorising header is worse than an absent one. Same distinction as
-    # "unknown" vs "not applicable": this is the second.
-    #
-    # What stands in for the check on this route is the shape of its answer:
-    # two fields, ``display_name`` and ``avatar_url`` (CP-2 / DRF-1617 purpose
-    # registry, P6).
+    # ``X-External-User-ID`` names the subject (DRF-1709, 12.09.2026). Until
+    # this day the header was deliberately absent here: the caller is the
+    # ``user.profile.updated`` consumer, and «a notification about a person
+    # is not a person» read as «there is nobody to name». That reading was
+    # reversed with B-2.1/B-2.2: the card being fetched is the card of the
+    # person the notification is about, the refresh serves THAT person's own
+    # mirror, and the catalog now refuses this route to a caller who does not
+    # name the subject in the URL. Naming the subject is not inventing an
+    # actor — the actor is the subject. What the previous comment was right
+    # about stays: the answer is two fields, ``display_name`` and
+    # ``avatar_url`` (CP-2 / DRF-1617 purpose registry, P6), and the
+    # consumer never asks for anyone it has no row for.
+    if not on_behalf_of:
+        raise ProfileFetchError("on_behalf_of is required — the catalog refuses an unnamed subject")
     headers = with_request_id(
         {
             "Authorization": f"Bearer {token}",
             "Accept": "application/json",
+            "X-External-User-ID": on_behalf_of,
         }
     )
 

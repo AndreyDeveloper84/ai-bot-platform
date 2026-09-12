@@ -81,6 +81,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { AlreadyNoted } from "../components/AlreadyNoted";
+import { AnketaStepInput, renderedMode } from "../components/AnketaStepInput";
 import { ScreenLayout } from "../components/ScreenLayout";
 import { DelayedSkeleton, ServiceCardSkeleton } from "../components/Skeleton";
 import { StateError } from "../components/StateError";
@@ -295,6 +296,11 @@ export function GoalSelectScreen({ initialDoc }: Props = {}) {
   const formulateOwnLabel = intentLabel("formulate_own");
   const guidanceLabel = intentLabel("need_guidance");
   const startAnketaLabel = intentLabel("start_anketa");
+  // DRF-1758 — «Изменить» у цели = повторный проход (start_anketa), и
+  // только когда сервер его предложил; иначе кнопки нет.
+  const reviseGoal = startAnketaLabel
+    ? () => submit({ intent: "start_anketa", source_channel: "miniapp" })
+    : null;
   const anketaStep = currentAnketaStep(doc);
   const knownAnswers = doc.known.anketa ?? [];
   // Пересматриваемый шаг берётся из документа, не из памяти экрана: если
@@ -330,9 +336,15 @@ export function GoalSelectScreen({ initialDoc }: Props = {}) {
   // оставляет проход, всё рисуется ровно как раньше — ни один
   // сегодняшний документ вида не меняет. Экран гарантирует лишь, что
   // под человеком есть пол.
-  const stepAllowsFreeText = Boolean(anketaStep?.allow_free_text && anketaStep.step);
+  // Шаг в режиме `text` рисует своё короткое поле (DRF-1746): нижнее
+  // поле цели на нём не дублируется, и пол под человеком уже есть — это
+  // поле и есть дорога дальше.
+  const stepOwnTextField = Boolean(anketaStep?.step && renderedMode(anketaStep.mode) === "text");
+  const stepAllowsFreeText = Boolean(
+    anketaStep?.allow_free_text && anketaStep.step && !stepOwnTextField,
+  );
   const hasFreeText = Boolean(formulateOwnLabel) || stepAllowsFreeText;
-  const hasOnward = Boolean(nextRoute);
+  const hasOnward = Boolean(nextRoute) || stepOwnTextField;
   const documentIsGate = !hasFreeText && !hasOnward;
   const showFreeText = hasFreeText || documentIsGate;
   const freeTextLabel = formulateOwnLabel ?? FREE_TEXT_FALLBACK_LABEL;
@@ -443,6 +455,7 @@ export function GoalSelectScreen({ initialDoc }: Props = {}) {
           answers={knownAnswers}
           disabled={submitting}
           onRevise={setRevisingStep}
+          onReviseGoal={reviseGoal ?? undefined}
         />
       ) : (
         knownGoal &&
@@ -451,7 +464,25 @@ export function GoalSelectScreen({ initialDoc }: Props = {}) {
             <h2 id="goal-select-current" className="goal-select__section-title">
               Текущая цель
             </h2>
-            <p className="goal-select__current">{knownLabel}</p>
+            <p className="goal-select__current">
+              {knownLabel}
+              {/* DRF-1758 — «Твоя цель: … · Изменить» (макет C02.1): кнопка
+                  ровно когда сервер прислал намерение start_anketa. */}
+              {reviseGoal && (
+                <>
+                  {" · "}
+                  <button
+                    type="button"
+                    className="goal-select__minor-action"
+                    disabled={submitting}
+                    onClick={reviseGoal}
+                    aria-label={`Изменить: ${knownLabel}`}
+                  >
+                    Изменить
+                  </button>
+                </>
+              )}
+            </p>
           </section>
         )
       )}
@@ -462,32 +493,57 @@ export function GoalSelectScreen({ initialDoc }: Props = {}) {
         <section aria-label="Изменить ответ">
           <p className="goal-select__prompt">{revising.prompt}</p>
           <div className="chip-row" role="group" aria-label={revising.prompt}>
-            {revising.options.map((option) => (
-              <button
-                key={option.key}
-                type="button"
-                className="chip"
-                disabled={submitting}
-                aria-pressed={option.key === revising.option_key}
-                onClick={() =>
-                  submit({
-                    answer: { step: revising.step, option_key: option.key, revise: true },
-                    source_channel: "miniapp",
-                  })
-                }
-              >
-                {option.label}
-              </button>
-            ))}
+            {revising.options
+              .filter((option) => option.role !== "escape")
+              .map((option) => (
+                <button
+                  key={option.key}
+                  type="button"
+                  className="chip"
+                  disabled={submitting}
+                  aria-pressed={option.key === revising.option_key}
+                  onClick={() =>
+                    submit({
+                      answer: { step: revising.step, option_key: option.key, revise: true },
+                      source_channel: "miniapp",
+                    })
+                  }
+                >
+                  {option.label}
+                </button>
+              ))}
           </div>
-          <button
-            type="button"
-            className="goal-select__minor-action"
-            disabled={submitting}
-            onClick={() => setRevisingStep(null)}
-          >
-            Оставить как есть
-          </button>
+          <div className="goal-select__minor">
+            {/* DRF-1747 — «Не знаю» и при пересмотре стоит отдельно от
+                вариантов: полноценный ответ, но не вариант. */}
+            {revising.options
+              .filter((option) => option.role === "escape")
+              .map((option) => (
+                <button
+                  key={option.key}
+                  type="button"
+                  className="goal-select__minor-action"
+                  data-testid="anketa-escape"
+                  disabled={submitting}
+                  onClick={() =>
+                    submit({
+                      answer: { step: revising.step, option_key: option.key, revise: true },
+                      source_channel: "miniapp",
+                    })
+                  }
+                >
+                  {option.label}
+                </button>
+              ))}
+            <button
+              type="button"
+              className="goal-select__minor-action"
+              disabled={submitting}
+              onClick={() => setRevisingStep(null)}
+            >
+              Оставить как есть
+            </button>
+          </div>
         </section>
       )}
 
@@ -499,25 +555,16 @@ export function GoalSelectScreen({ initialDoc }: Props = {}) {
                 <p className="goal-select__progress">{LAST_QUESTION_NOTE}</p>
               )}
               <p className="goal-select__prompt">{item.prompt}</p>
-              {item.step && item.options && item.options.length > 0 && (
-                <div className="chip-row" role="group" aria-label={item.prompt}>
-                  {item.options.map((option) => (
-                    <button
-                      key={option.key}
-                      type="button"
-                      className="chip"
-                      disabled={submitting}
-                      onClick={() =>
-                        submit({
-                          answer: { step: item.step as string, option_key: option.key },
-                          source_channel: "miniapp",
-                        })
-                      }
-                    >
-                      {option.label}
-                    </button>
-                  ))}
-                </div>
+              {/* DRF-1746 — компонент по типу ответа (`mode`); экран
+                  ничего не выводит, только рисует то, что прислано. */}
+              {item.step && (
+                <AnketaStepInput
+                  item={item}
+                  submitting={submitting}
+                  onAnswer={(answer) =>
+                    submit({ answer, source_channel: "miniapp" } as GoalSelectBody)
+                  }
+                />
               )}
             </div>
           ))}

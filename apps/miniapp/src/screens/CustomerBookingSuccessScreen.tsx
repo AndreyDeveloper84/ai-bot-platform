@@ -34,9 +34,9 @@ import { useEffect } from "react";
 import { useLocation, useNavigate, useParams } from "react-router-dom";
 import { PaymentStatusBadge } from "../components/PaymentStatusBadge";
 import { ScreenLayout } from "../components/ScreenLayout";
-import { StickyCta } from "../components/StickyCta";
+import { StickyBar, StickyCtaButton } from "../components/StickyCta";
 import { formatVisitFull } from "../lib/format";
-import { hapticNotify, maxBridge } from "../lib/max-sdk";
+import { closeApp, hapticNotify, maxBridge } from "../lib/max-sdk";
 import { backTo } from "../lib/screen-back";
 
 /**
@@ -55,6 +55,8 @@ interface SuccessState {
   /** C7.3 — capture_state right after payment create (online path). */
   payment_capture_state?: string | null;
 }
+
+export const RETURN_TO_CHAT_LABEL = "Вернуться в чат";
 
 export function CustomerBookingSuccessScreen() {
   const { bookingId } = useParams<{ bookingId: string }>();
@@ -81,20 +83,31 @@ export function CustomerBookingSuccessScreen() {
       }.`
     : "Записала.";
 
+  // DRF-1777 (C05.7, P0 actions DONE / RETURN_TO_CHAT): «Вернуться в
+  // чат» закрывает мини-приложение и возвращает в диалог с Ayla — только
+  // внутри MAX, где есть куда возвращаться; в браузере кнопки нет.
+  const insideMax = maxBridge() !== null;
+
   return (
     <ScreenLayout
       back={BACK}
       title=""
+      tallCta={insideMax}
       cta={
-        <StickyCta
-          onClick={() =>
-            bookingId
-              ? navigate(`/customer/records/${bookingId}`, { replace: true })
-              : navigate("/customer/catalog", { replace: true })
-          }
-        >
-          Открыть запись
-        </StickyCta>
+        <StickyBar>
+          <StickyCtaButton
+            onClick={() =>
+              bookingId
+                ? navigate(`/customer/records/${bookingId}`, { replace: true })
+                : navigate("/customer/catalog", { replace: true })
+            }
+          >
+            Открыть запись
+          </StickyCtaButton>
+          {insideMax && (
+            <StickyCtaButton onClick={() => closeApp()}>{RETURN_TO_CHAT_LABEL}</StickyCtaButton>
+          )}
+        </StickyBar>
       }
     >
       <h1 className="customer-success__headline">{headline}</h1>

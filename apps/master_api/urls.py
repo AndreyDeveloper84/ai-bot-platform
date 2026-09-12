@@ -16,6 +16,7 @@ urlpatterns = [
     path("onboarding/accept", views.onboarding_accept, name="onboarding_accept"),
     path("onboarding/reject", views.onboarding_reject, name="onboarding_reject"),
     path("onboarding/profile", views.onboarding_profile, name="onboarding_profile"),
+    path("onboarding/readiness", views.onboarding_readiness, name="onboarding_readiness"),
     # M4 alias — same view, post-onboarding edit URL. Idempotent +
     # last-write-wins; audit event slug still reads MASTER_PROFILE_INITIALIZED
     # until the dedicated MASTER_PROFILE_UPDATED slug ships in a follow-up

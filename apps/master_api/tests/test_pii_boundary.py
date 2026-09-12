@@ -473,6 +473,12 @@ SWEPT_READ_ROUTES: dict[str, SweptRoute] = {
         why="the master's own service list",
         carries_customer_data=False,
     ),
+    "onboarding_readiness": SweptRoute(
+        lambda: reverse("master_api:onboarding_readiness"),
+        witness="capability_not_built",
+        why="the master's own setup checklist (DRF-1794): items, identity, sale_block",
+        carries_customer_data=False,
+    ),
     "dashboard": SweptRoute(
         lambda: reverse("master_api:dashboard"),
         witness=CUSTOMER_FIRST_NAME,

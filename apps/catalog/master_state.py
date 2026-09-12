@@ -45,6 +45,17 @@ DRF-1521; до неё их было два, и второй молча отве�
 проданного, до которого не доходят уведомления.** Настоящая починка —
 канонический идентификатор в приглашении, контракт Ayla (DRF-1541).
 
+**Про статус связи (``SoloIdentityLink``) он спрашивает тоже — DRF-1795,
+ruling 6 владельца 12.09.** Публикация соло-мастера требует
+``identity_link = LINKED``, а не «ключ откуда-то появился». Столбец и
+статус — два разных факта: ключ пишется раньше статуса
+(``solo_identity_link.record_attempt``), а отказ оператора
+(``reject_by_operator``) ключ не стирает — он аудит, а не право. Строка
+с ключом и ``REJECTED`` по одному столбцу продавалась бы, и это ровно
+та дыра, которую закрывает ветка ``ayla_unlinked`` по статусу. У мастера
+салона строки связи нет вовсе — для него вопрос решает один столбец, как
+и раньше.
+
 Приземлилась ли она в боте (:func:`is_landed`)
 ----------------------------------------------
 Вопрос онбординга: административно в порядке И у неё есть привязанный
@@ -302,11 +313,34 @@ RoleState = Literal[
 #: эти две надстройки намеренно разные.
 ADMITTED = Q(is_active=True, archived_at__isnull=True, invite_status=ACCEPTED)
 
-#: У строки есть канонический ``ayla_user_id`` — мост для ``master_user_id``.
+#: Значение ``SoloIdentityLink.Status.LINKED`` строкой.
+#:
+#: Литерал по той же причине, что :data:`ACCEPTED`: ``apps.identity.models``
+#: тянет за собой ``apps.catalog.models``, а тот — этот модуль. За
+#: перечислением закреплён тестом ``test_linked_literal_matches_the_enum``.
+IDENTITY_LINKED: Final[str] = "IDENTITY_LINKED"
+
+#: Имя столбца статуса связи в строке ростера (``.values()``).
+#:
+#: Обратная сторона ``SoloIdentityLink.master`` (``related_name="identity_link"``):
+#: у мастера салона строки связи нет, и ``.values()`` кладёт сюда ``NULL``.
+IDENTITY_LINK_STATUS_COLUMN: Final[str] = "identity_link__status"
+
+#: У строки есть канонический ``ayla_user_id`` — мост для ``master_user_id``, —
+#: и статус связи этому не противоречит.
 #:
 #: ``ayla_user_id`` это ``UUIDField(null=True)``: пустой строки в нём не
 #: бывает, поэтому ``IS NOT NULL`` — полная проверка, а не половина.
-LINKED_TO_AYLA = Q(ayla_user_id__isnull=False)
+#:
+#: Второй конъюнкт — DRF-1795 (ruling 6): ключ в столбце ещё не значит
+#: ``LINKED``. Строки связи может не быть (мастер салона — вопрос решает
+#: столбец); если она есть, её статус обязан быть ``LINKED``. ``PENDING`` с
+#: ключом — противоречие, которого писатель не производит, и оно читается
+#: как «не связан», а не как «связан наполовину»; ``REJECTED`` с ключом —
+#: отказ оператора, который ключ не стирает и продажу закрывает.
+LINKED_TO_AYLA = Q(ayla_user_id__isnull=False) & (
+    Q(identity_link__isnull=True) | Q(identity_link__status=IDENTITY_LINKED)
+)
 
 #: Расписание мастера подтверждено владельцем салона (§83).
 #:
@@ -466,6 +500,29 @@ def _has_identity(row: Any) -> bool:
     return linked is not None and _field(row, "accepted_at") is not None
 
 
+def _identity_link_status(row: Any) -> str | None:
+    """Статус ``SoloIdentityLink`` строки; ``None`` — строки связи нет.
+
+    Построчный двойник второго конъюнкта :data:`LINKED_TO_AYLA`.
+
+    У словаря спрашивается строго по имени
+    :data:`IDENTITY_LINK_STATUS_COLUMN`: ростер обязан назвать столбец в
+    ``.values()``, а забытый столбец — ``KeyError``, не тихое «связи нет»
+    (тот же замысел, что у ``accepted_at`` и ``schedule_confirmed_at``).
+
+    У модели читается обратная ``OneToOne``: отсутствие строки Django
+    поднимает ``RelatedObjectDoesNotExist`` — он наследует ``AttributeError``,
+    и умолчание ``getattr`` его ловит. Это один запрос на человека, и
+    зовётся он там, где строка уже пришла моделью (бронь, админка,
+    ``setup_state``); цикл ростера идёт словарями и сюда не попадает.
+    """
+
+    if isinstance(row, Mapping):
+        return row[IDENTITY_LINK_STATUS_COLUMN]
+    link = getattr(row, "identity_link", None)
+    return None if link is None else link.status
+
+
 def _profile_is_filled(row: Any) -> bool:
     """Готов ли профиль настолько, чтобы мастера можно было продавать.
 
@@ -558,6 +615,15 @@ def sale_block(row: Any) -> SaleBlock | None:
         # ключ значением, по которому совпадения не будет никогда), а
         # склейка по имени или телефону — признак, дающий уверенность
         # без основания. Поэтому здесь отказ, а не догадка.
+        return "ayla_unlinked"
+    link_status = _identity_link_status(row)
+    if link_status is not None and link_status != IDENTITY_LINKED:
+        # DRF-1795, ruling 6. Ключ есть, а связь не ``LINKED``: либо
+        # оператор отклонил (``REJECTED`` — ключ остаётся как аудит), либо
+        # статус отстал от столбца (``PENDING`` с ключом). Оба случая —
+        # тот же ответ «не связан», что и пустой столбец: слово одно,
+        # потому что действие владелицы одно — идти к оператору, а не
+        # искать, откуда взялся ключ.
         return "ayla_unlinked"
     if _schedule_gate_enabled() and _field(row, "schedule_confirmed_at") is None:
         # §83. Ветка стоит ПОСЛЕДНЕЙ, и это не порядок написания.
