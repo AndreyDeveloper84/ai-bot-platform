@@ -295,6 +295,11 @@ export function GoalSelectScreen({ initialDoc }: Props = {}) {
   const formulateOwnLabel = intentLabel("formulate_own");
   const guidanceLabel = intentLabel("need_guidance");
   const startAnketaLabel = intentLabel("start_anketa");
+  // DRF-1758 — «Изменить» у цели = повторный проход (start_anketa), и
+  // только когда сервер его предложил; иначе кнопки нет.
+  const reviseGoal = startAnketaLabel
+    ? () => submit({ intent: "start_anketa", source_channel: "miniapp" })
+    : null;
   const anketaStep = currentAnketaStep(doc);
   const knownAnswers = doc.known.anketa ?? [];
   // Пересматриваемый шаг берётся из документа, не из памяти экрана: если
@@ -443,6 +448,7 @@ export function GoalSelectScreen({ initialDoc }: Props = {}) {
           answers={knownAnswers}
           disabled={submitting}
           onRevise={setRevisingStep}
+          onReviseGoal={reviseGoal ?? undefined}
         />
       ) : (
         knownGoal &&
@@ -451,7 +457,25 @@ export function GoalSelectScreen({ initialDoc }: Props = {}) {
             <h2 id="goal-select-current" className="goal-select__section-title">
               Текущая цель
             </h2>
-            <p className="goal-select__current">{knownLabel}</p>
+            <p className="goal-select__current">
+              {knownLabel}
+              {/* DRF-1758 — «Твоя цель: … · Изменить» (макет C02.1): кнопка
+                  ровно когда сервер прислал намерение start_anketa. */}
+              {reviseGoal && (
+                <>
+                  {" · "}
+                  <button
+                    type="button"
+                    className="goal-select__minor-action"
+                    disabled={submitting}
+                    onClick={reviseGoal}
+                    aria-label={`Изменить: ${knownLabel}`}
+                  >
+                    Изменить
+                  </button>
+                </>
+              )}
+            </p>
           </section>
         )
       )}

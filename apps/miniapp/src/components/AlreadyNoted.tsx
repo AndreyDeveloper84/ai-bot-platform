@@ -48,6 +48,12 @@ interface Props {
   answers: KnownAnketaAnswer[];
   disabled?: boolean;
   onRevise: (step: string) => void;
+  /**
+   * «Изменить» у цели (DRF-1758, макет C02.1 «Твоя цель: … · Изменить»).
+   * Появляется ровно когда сервер прислал намерение `start_anketa` —
+   * экран не решает, можно ли менять цель, он читает документ.
+   */
+  onReviseGoal?: () => void;
 }
 
 /** Строки блока из документа: цель первой, затем ответы в порядке сервера. */
@@ -82,7 +88,7 @@ export function summaryLabel(count: number): string {
   return `${count} ${plural(count, "ответ", "ответа", "ответов")}`;
 }
 
-export function AlreadyNoted({ goalLabel, answers, disabled, onRevise }: Props) {
+export function AlreadyNoted({ goalLabel, answers, disabled, onRevise, onReviseGoal }: Props) {
   const [expanded, setExpanded] = useState(false);
   const rows = alreadyNotedRows(goalLabel, answers);
   if (rows.length === 0) return null;
@@ -109,6 +115,17 @@ export function AlreadyNoted({ goalLabel, answers, disabled, onRevise }: Props) 
                   className="goal-select__minor-action"
                   disabled={disabled}
                   onClick={() => onRevise(row.reviseStep as string)}
+                  aria-label={`${REVISE_LABEL}: ${row.label}`}
+                >
+                  {REVISE_LABEL}
+                </button>
+              )}
+              {row.key === "goal" && onReviseGoal && (
+                <button
+                  type="button"
+                  className="goal-select__minor-action"
+                  disabled={disabled}
+                  onClick={onReviseGoal}
                   aria-label={`${REVISE_LABEL}: ${row.label}`}
                 >
                   {REVISE_LABEL}
