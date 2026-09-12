@@ -2053,7 +2053,18 @@ def _concierge_turn(
         # pick the same tool with the same arguments, and the parser would
         # refuse them again — a button that loops. The old «отвечу через
         # минуту» was worse: nobody returns to this turn at all.
+        #
+        # DRF-1754 — исход инструмента едет в трассу. Диалог владельца 12.09:
+        # четыре ответа подряд с action_type=health_screening и
+        # outcome=success, а на экране «Не разобрала» и «Сейчас проверю» —
+        # инструмент отказал, ответом ушла проза рядом с ним, и ни одна
+        # строка базы об этом не говорила. Помечается ТА ЖЕ запись трассы
+        # (резолвер намерения читает из неё tool/arguments и лишний ключ
+        # не замечает), а не новая — иначе он посчитает отказ вторым
+        # намерением.
         text = (dto.content or "").strip()
+        if tool_trace and isinstance(tool_trace[-1], dict):
+            tool_trace[-1]["result"] = "declined_prose" if text else "declined_not_parsed"
         if text:
             return _reply(text=text[:_MAX_REPLY_CHARS], persisted=True)
         return _reply(text=get_not_parsed("ru"), persisted=True)

@@ -543,6 +543,7 @@ def _capture_live_replay(
     reply_text: str,
     skill_name: str = "",
     keyboard_size: int = 0,
+    tool_trace: Any = None,
 ) -> None:
     """DRF-1209 step 18 — one ``ReplayTrace`` row for a live-path turn.
 
@@ -595,7 +596,15 @@ def _capture_live_replay(
             },
             {
                 "step": "routing",
-                "payload": {"branch": branch, "skill": skill_name},
+                # DRF-1754 — трасса выбора инструментов (DRF-1385) едет в
+                # строку, а не только в лог: без неё расшифровка диалога
+                # не говорит, какой инструмент выбрала модель и что он
+                # вернул. Редактор ниже проходит и по аргументам.
+                "payload": {
+                    "branch": branch,
+                    "skill": skill_name,
+                    "tool_trace": list(tool_trace) if tool_trace else [],
+                },
             },
             {
                 "step": "pre_check",
@@ -2439,6 +2448,9 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
         post_verdict=post_verdict,
         reply_text=reply.text,
         keyboard_size=len(_build_attachments(reply.action_data) or []),
+        # ``turn_reply`` существует только на ветке консьержа — там же, где
+        # его читает резолвер намерения ниже.
+        tool_trace=getattr(turn_reply, "tool_trace", None) if concierge_turn_ran else None,
     )
 
     # DRF-1273 — canonical intent resolution (Output Contract 0.5) for
