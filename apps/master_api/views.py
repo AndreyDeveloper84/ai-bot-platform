@@ -53,6 +53,24 @@ from apps.audit.services import write_audit
 from apps.catalog.handles import canonical_handle
 from apps.catalog.models import CatalogMaster, CatalogService, MasterService
 from apps.catalog.master_state import sale_block
+from apps.catalog.services.schedule_confirmation import (
+    ScheduleConfirmationError,
+    confirm_schedule,
+)
+from apps.admin_api.services.availability import (
+    AvailabilityDecisionError,
+    approve_availability_request,
+)
+from apps.identity.services.solo_onboarding import is_solo_provider
+from apps.integrations.ayla.booking_client import (
+    BookingAPIError,
+    BookingBadRequestError,
+    BookingUnavailableError,
+    ScheduleBlockConflictError,
+    get_ayla_booking_client,
+)
+from apps.integrations.ayla.salon_client import SalonAPIError
+from apps.integrations.ayla.user_proxy import external_user_id_for
 from apps.conversations.models import AiDraft
 from apps.master_api.services.conversations import (
     ConversationsListError,
@@ -1014,6 +1032,123 @@ def me(request: HttpRequest) -> HttpResponse:
     )
 
 
+# --- GET/PUT /working-hours (DRF-1816, M24) --------------------------------
+
+
+@csrf_exempt
+@require_http_methods(["GET", "PUT"])
+@require_master_init_data
+def working_hours(request: HttpRequest) -> HttpResponse:
+    """The master's own weekly template — read and written in the catalog.
+
+    Макет 7.1–7.5 (M24). Прокси в ``/internal/specialists/{id}/working-hours/``
+    каталога (DRF-1815): часы живут там и только там — второго хранилища в
+    боте нет (§16 «Source of truth»), ответ — то, что каталог ПРОЧИТАЛ
+    после записи, не эхо запроса.
+
+    Субъект — сам мастер: ``X-External-User-ID`` несёт его bot-личность, и
+    каталог пускает только к его собственному профилю. До связи в
+    каталоге (LINKED) записывать некуда — 403 ``not_linked`` честно, а не
+    «сохранено» в никуда.
+
+    Соло (§83): владелец = мастер, поэтому после удачной записи
+    расписание подтверждается тем же человеком — иначе он застрял бы в
+    ``schedule_unconfirmed`` при включённом гейте, ожидая владельца,
+    которым сам и является. Подтверждение читает часы ЗАНОВО из источника
+    (readback), а не берёт их из ответа: ``schedule_confirmed_at`` обязан
+    описывать то, что лежит в каталоге.
+    """
+
+    master: CatalogMaster = request.master  # type: ignore[attr-defined]
+    bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
+    actor = external_user_id_for(bot_user)
+    client = get_ayla_booking_client()
+
+    if request.method == "GET":
+        try:
+            data = client.get_working_hours(specialist_id=str(master.id), external_user_id=actor)
+        except BookingBadRequestError as exc:
+            return _working_hours_refusal(exc)
+        except BookingUnavailableError:
+            return _error("schedule_unavailable", "Расписание сейчас недоступно.", 503)
+        return JsonResponse(_working_hours_payload(data))
+
+    try:
+        body = json.loads(request.body or b"{}")
+    except ValueError:
+        return _error("invalid_json", "Body must be JSON.", 400)
+    schedule = body.get("schedule") if isinstance(body, dict) else None
+    if not isinstance(schedule, list):
+        return _error("validation_error", "schedule must be a list of 7 days.", 400)
+
+    try:
+        data = client.put_working_hours(
+            specialist_id=str(master.id), external_user_id=actor, schedule=schedule
+        )
+    except ScheduleBlockConflictError:
+        return _error(
+            "has_active_appointments",
+            "В это время уже есть записи. Сначала разберитесь с ними.",
+            409,
+        )
+    except BookingBadRequestError as exc:
+        return _working_hours_refusal(exc)
+    except BookingUnavailableError:
+        return _error("schedule_unavailable", "Расписание сейчас недоступно.", 503)
+
+    confirmed = False
+    if is_solo_provider(master.tenant):
+        # §83 — соло: подтверждает тот же человек, и только после того,
+        # как каталог прочёл записанное (readback внутри confirm_schedule).
+        try:
+            confirm_schedule(master, by=bot_user)
+            confirmed = True
+        except ScheduleConfirmationError as exc:
+            # Например, ни одного рабочего дня: часы сохранены, подтверждать
+            # нечего — и это не ошибка сохранения.
+            logger.info(
+                "master_api.working_hours.not_confirmed master=%s reason=%s",
+                master.id,
+                exc.args[0] if exc.args else "",
+            )
+        except (BookingAPIError, SalonAPIError):
+            # Часы сохранены; подтвердить не удалось прочитать заново —
+            # экран увидит schedule_confirmed=false и «Расписание верно»
+            # останется доступным.
+            logger.warning(
+                "master_api.working_hours.confirm_readback_failed master=%s",
+                master.id,
+                exc_info=True,
+            )
+
+    payload = _working_hours_payload(data)
+    payload["schedule_confirmed"] = confirmed
+    return JsonResponse(payload)
+
+
+def _working_hours_payload(data: dict[str, Any]) -> dict[str, Any]:
+    """Форма для экрана — ровно то, что прислал каталог, без дорисовки."""
+    return {
+        "specialist_id": data.get("specialist_id"),
+        "timezone": data.get("timezone"),
+        "schedule": data.get("schedule") or [],
+    }
+
+
+def _working_hours_refusal(exc: BookingBadRequestError) -> HttpResponse:
+    if exc.status_code == 403:
+        return _error(
+            "not_linked",
+            "Профиль ещё не связан с каталогом — сохранить часы пока некуда.",
+            403,
+        )
+    if exc.status_code == 400:
+        return _error(
+            "validation_error", "Проверьте время: начало раньше конца, перерыв внутри смены.", 400
+        )
+    return _error("schedule_unavailable", "Расписание сейчас недоступно.", 502)
+
+
 # --- GET /onboarding/readiness --------------------------------------------
 
 
@@ -1298,15 +1433,38 @@ def availability_request(request: HttpRequest) -> HttpResponse:
             )
 
             request_id = req.id
-            transaction.on_commit(
-                lambda: _maybe_send_manager_dm(
-                    tenant=tenant,
-                    master=master,
-                    request_id=request_id,
+            solo = is_solo_provider(tenant)
+            if not solo:
+                transaction.on_commit(
+                    lambda: _maybe_send_manager_dm(
+                        tenant=tenant,
+                        master=master,
+                        request_id=request_id,
+                    )
                 )
-            )
     except AvailabilityRequestError as exc:
         return _error(exc.slug, exc.detail, 400)
+
+    if solo:
+        # DRF-1816 (M24, карта P69/P71) — соло: владелец = мастер, и
+        # «заявка владельцу» была бы заявкой самому себе. Выходной ставится
+        # одним действием: та же материализация, что у одобрения владельцем
+        # (в Ayla при включённом флаге, локально при выключенном), с тем же
+        # автором в аудите. Отказ (записи в это время, Ayla недоступна) —
+        # честно наружу, заявка при этом не остаётся висеть «на решении».
+        try:
+            approve_availability_request(
+                request_id=req.id,
+                tenant_id=master.tenant_id,
+                actor=None,
+                actor_bot_user_id=bot_user.id,
+                actor_bot_user=bot_user,
+                actor_role="owner",
+            )
+        except AvailabilityDecisionError as exc:
+            req.delete()
+            return _error(exc.slug, exc.detail, exc.status)
+        req.refresh_from_db()
 
     return JsonResponse(
         {
@@ -1316,6 +1474,8 @@ def availability_request(request: HttpRequest) -> HttpResponse:
             "requested_end": (req.requested_end.isoformat() if req.requested_end else None),
             "reason_class": req.reason_class,
             "created_at": req.created_at.isoformat(),
+            # DRF-1816 — соло: выходной уже стоит, ждать некого.
+            "applied": bool(solo),
         },
         status=201,
     )

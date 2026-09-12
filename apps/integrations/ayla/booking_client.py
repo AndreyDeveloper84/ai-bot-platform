@@ -1236,6 +1236,56 @@ class AylaBookingHTTPClient:
             raise ScheduleBlockConflictError("has_active_appointments")
         return self._ok(resp, success=(200, 201))
 
+    # ── DRF-1816 (M24): the master's own weekly hours, written by the master ─
+
+    def get_working_hours(
+        self,
+        *,
+        specialist_id: str,
+        external_user_id: str,
+    ) -> dict[str, Any]:
+        """``GET internal/specialists/{id}/working-hours/`` — the subject's
+        own weekly template (7 rows) plus the profile ``timezone``.
+
+        ``external_user_id`` names the SUBJECT, not an administrator: the
+        route is guarded by the catalog's subject check (DRF-1815) — the
+        profile in the URL must be the caller's own. A master whose bot
+        identity is not yet linked in the catalog gets 403 there, and it
+        surfaces here as :class:`BookingBadRequestError` with status 403.
+        """
+        resp = self._request(
+            "GET",
+            f"specialists/{specialist_id}/working-hours/",
+            external_user_id=external_user_id,
+        )
+        return self._ok(resp, success=(200,))
+
+    def put_working_hours(
+        self,
+        *,
+        specialist_id: str,
+        external_user_id: str,
+        schedule: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        """``PUT internal/specialists/{id}/working-hours/`` — replace all 7 days.
+
+        The catalog validates (``start < end``, break inside the shift, all
+        seven days) and refuses to shrink over live bookings with 409
+        ``HAS_ACTIVE_APPOINTMENTS`` — raised here as
+        :class:`ScheduleBlockConflictError`, the same class the time-off
+        write uses for the same situation. The response is the catalog's
+        readback of what it stored, not an echo of the request.
+        """
+        resp = self._request(
+            "PUT",
+            f"specialists/{specialist_id}/working-hours/",
+            json_body={"schedule": schedule},
+            external_user_id=external_user_id,
+        )
+        if resp.status_code == 409:
+            raise ScheduleBlockConflictError("has_active_appointments")
+        return self._ok(resp, success=(200,))
+
     def get_specialist_service_edges(
         self,
         *,

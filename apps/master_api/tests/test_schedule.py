@@ -581,6 +581,19 @@ class TestScheduleConflicts:
 # --- POST /availability ----------------------------------------------------
 
 
+@pytest.fixture
+def salon_owner(tenant: Tenant, other_bot_user: BotUser):
+    """Второй человек в тенанте — владелец. Без него тенант с одним мастером
+    по §3.1 — соло, и заявка о недоступности (DRF-1816) ставится одним
+    действием, а не уходит владельцу на решение. Наборы ниже — про салон."""
+    from apps.tenancy.models import TenantStaff
+
+    return TenantStaff.all_tenants.create(
+        tenant=tenant, bot_user=other_bot_user, role=TenantStaff.Role.OWNER
+    )
+
+
+@pytest.mark.usefixtures("salon_owner")
 class TestAvailabilityRequest:
     def test_valid_request_creates_row(
         self,
@@ -817,6 +830,7 @@ class TestAvailabilityRequest:
 # --- GET /availability/pending ---------------------------------------------
 
 
+@pytest.mark.usefixtures("salon_owner")
 class TestAvailabilityPending:
     def test_returns_own_pending(
         self,
