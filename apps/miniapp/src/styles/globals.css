@@ -4140,6 +4140,13 @@ a {
 }
 
 /* F3 — Slots. */
+/* DRF-1776 — окно «на две недели позже»: тихая строка над списком. */
+.customer-slots__window-note {
+  margin: 0 0 var(--s-2);
+  font-size: var(--font-size-100);
+  color: var(--c-text-secondary);
+}
+
 .customer-slots__section-title {
   font-size: var(--font-size-300);
   font-weight: 600;

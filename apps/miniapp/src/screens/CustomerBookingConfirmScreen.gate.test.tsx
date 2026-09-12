@@ -28,6 +28,10 @@ vi.mock("../lib/customer-booking", async (importOriginal) => {
 
 import { authVerify } from "../lib/api";
 import { resetBooking, setMaster, setService, setVisitAt } from "../state/booking";
+
+/** В будущем относительно часов теста (DRF-1776): прошедшее время экран
+ * считает устаревшим подтверждением и прячет «Записаться». */
+const FUTURE_VISIT = new Date(Date.now() + 7 * 24 * 3600 * 1000).toISOString();
 import { createCustomerBooking } from "../lib/customer-booking";
 import { CustomerBookingConfirmScreen } from "./CustomerBookingConfirmScreen";
 
@@ -57,7 +61,7 @@ beforeEach(() => {
   resetBooking();
   setService("svc-1", "Маникюр");
   setMaster("mst-1", "Анна Соколова");
-  setVisitAt("2026-08-01T16:00:00+03:00");
+  setVisitAt(FUTURE_VISIT);
 });
 
 describe("гейт решается lib/identity, не экраном", () => {
