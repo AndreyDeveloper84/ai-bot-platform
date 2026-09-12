@@ -36,7 +36,12 @@ const mockedFetch = vi.mocked(fetchDecisionContext);
 
 const PROMPT = "Что сейчас хочется привести в порядок?";
 const LAST_NOTE = "Ещё один короткий вопрос";
-const COUNTER = /\bиз \d/;
+/**
+ * Без `\b`: в JS-регулярке граница слова — только ASCII, перед кириллицей
+ * она не срабатывает, и сторож с `\bиз` молчал бы на живом «Вопрос 1 из 3»
+ * (проба показала 4 красных вместо 6). Пробел или начало строки — явно.
+ */
+const COUNTER = /(^|\s)из \d/;
 
 function docWith(progress: AnketaProgress | undefined): DecisionContext {
   return {
@@ -70,6 +75,14 @@ function renderScreen() {
 
 beforeEach(() => {
   vi.clearAllMocks();
+});
+
+describe("сторож счётчика видит счётчик", () => {
+  it("ловит «Вопрос 1 из 3» и не ловит фразу без числа", () => {
+    expect(COUNTER.test("Вопрос 1 из 3")).toBe(true);
+    expect(COUNTER.test("Выбрано: 2 из 3")).toBe(true);
+    expect(COUNTER.test("Ещё один короткий вопрос")).toBe(false);
+  });
 });
 
 describe("«Ещё один короткий вопрос» — только когда сервер сказал is_last", () => {
