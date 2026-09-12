@@ -3,10 +3,17 @@
 # Activated 2026-06 (was the DRF-891 skeleton). Runs ONLY after the `ci`
 # workflow succeeds on `dev`, so a red build never deploys.
 #
-# ### Inert until configured
-# The first step is a guard: if `DEV_HOST` is unset the whole job is a clean
-# no-op (a green check, NOT a red pipeline). Nothing deploys until the
-# operator lands the repo secrets + bootstraps the box.
+# ### Three outcomes, readable from `gh run list` without opening a log (DRF-1605)
+#   success  — deployed; the pilot carries this commit
+#   skipped  — `ci` was red (or this was not a green `ci` run): no job ran,
+#              nothing was attempted
+#   failure  — attempted and could not, INCLUDING an unconfigured target:
+#              job `deploy target NOT configured — nothing was deployed` is
+#              red and names the outcome
+# It used to be a green no-op when `DEV_HOST` was unset — «a green check, NOT
+# a red pipeline», by design of the DRF-891 skeleton. That made a deploy that
+# never happened indistinguishable from one that did. A checkmark that means
+# two things means nothing.
 #
 # ### Operator prerequisites (one-time, DRF-891)
 # Repo → Settings → Secrets and variables → Actions:
@@ -50,28 +57,52 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  deploy:
-    name: deploy-dev
+  # Только зелёный ci (или ручной запуск). Не прошло — ни одно задание не
+  # стартует, и прогон читается `skipped`: «ничего не пытались», своим знаком.
+  preflight:
+    name: preflight — is there a deploy target
     runs-on: ubuntu-latest
-    timeout-minutes: 15
-    # Deploy only a green CI run (or a manual dispatch).
+    timeout-minutes: 2
     if: >-
       github.event_name == 'workflow_dispatch' ||
       github.event.workflow_run.conclusion == 'success'
-
+    outputs:
+      ready: ${{ steps.guard.outputs.ready }}
     steps:
-      - name: Guard — no-op if deploy secrets are unset
+      - name: Guard — is DEV_HOST set
         id: guard
         env:
           DEV_HOST: ${{ secrets.DEV_HOST }}
         run: |
           if [ -z "${DEV_HOST}" ]; then
-            echo "::notice::DEV_HOST not set — deploy-dev is inert (secrets + bootstrap pending DRF-891). No-op."
             echo "ready=false" >> "$GITHUB_OUTPUT"
           else
             echo "ready=true" >> "$GITHUB_OUTPUT"
           fi
 
+  # Несостоявшаяся выкладка — КРАСНОЕ задание с именем, а не зелёный no-op.
+  # Раньше незаданный DEV_HOST давал `::notice::` и зелёную галку: «выложили»
+  # и «выкладывать некуда» выглядели одинаково. Снять секрет — и выкладки
+  # прекращаются молча, под зелёным.
+  not-configured:
+    name: deploy target NOT configured — nothing was deployed
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    needs: preflight
+    if: needs.preflight.outputs.ready != 'true'
+    steps:
+      - run: |
+          echo "::error::DEV_HOST is not set — deploy-dev has no target. Nothing was deployed. Secrets + bootstrap: DRF-891."
+          exit 1
+
+  deploy:
+    name: deploy-dev
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: preflight
+    if: needs.preflight.outputs.ready == 'true'
+
+    steps:
       # B-5 (5.2): выкладывается ПРОВЕРЕННЫЙ коммит, а не голова dev.
       #
       # workflow_run несёт head_sha прогона ci, который и был зелёным. Голова
@@ -82,7 +113,6 @@ jobs:
       # той ветки, на которой нажали.
       - name: Verified SHA — what ci actually passed
         id: verified
-        if: steps.guard.outputs.ready == 'true'
         env:
           RUN_SHA: ${{ github.event.workflow_run.head_sha }}
           DISPATCH_SHA: ${{ github.sha }}
@@ -102,7 +132,6 @@ jobs:
           echo "::notice::выкладывается проверенный ${SHA} (event=${{ github.event_name }})"
 
       - name: Configure SSH
-        if: steps.guard.outputs.ready == 'true'
         env:
           DEV_SSH_KEY: ${{ secrets.DEV_SSH_KEY }}
           DEV_HOST: ${{ secrets.DEV_HOST }}
@@ -123,7 +152,6 @@ jobs:
       # пилот, а `main` не выкладывался с 19.05 — то есть защита стояла там,
       # где её некому применять.
       - name: Postgres backup before deploy
-        if: steps.guard.outputs.ready == 'true'
         env:
           DEV_HOST: ${{ secrets.DEV_HOST }}
           DEV_USER: ${{ secrets.DEV_USER }}
@@ -266,7 +294,6 @@ jobs:
           "
 
       - name: Pull + rebuild + restart dev services
-        if: steps.guard.outputs.ready == 'true'
         env:
           DEPLOY_SHA: ${{ steps.verified.outputs.sha }}
           DEV_HOST: ${{ secrets.DEV_HOST }}
@@ -484,13 +511,11 @@ jobs:
       # Тот же проверенный SHA, что и на хосте: витрина и бот из ОДНОГО
       # коммита, иначе экран может ждать поле, которого у сервера ещё нет.
       - name: Checkout the verified SHA (для сборки Mini App)
-        if: steps.guard.outputs.ready == 'true'
         uses: actions/checkout@v7
         with:
           ref: ${{ steps.verified.outputs.sha }}
 
       - name: Node 20
-        if: steps.guard.outputs.ready == 'true'
         uses: actions/setup-node@v7
         with:
           node-version: '20'
@@ -498,7 +523,6 @@ jobs:
           cache-dependency-path: apps/miniapp/package-lock.json
 
       - name: Build Mini App on the runner
-        if: steps.guard.outputs.ready == 'true'
         working-directory: apps/miniapp
         run: |
           npm ci --no-audit --no-fund
@@ -518,7 +542,6 @@ jobs:
       # не лежит на диске целиком. Прежний остаётся в dist.prev для отката:
       #   mv dist dist.broken && mv dist.prev dist
       - name: Ship Mini App to the box and swap
-        if: steps.guard.outputs.ready == 'true'
         env:
           DEV_HOST: ${{ secrets.DEV_HOST }}
           DEV_USER: ${{ secrets.DEV_USER }}
@@ -582,7 +605,6 @@ jobs:
       # новый код. Информационный: nginx и сборка — разные отказы, путать их не
       # надо, поэтому выкладку не валит.
       - name: Smoke — Mini App answers over https
-        if: steps.guard.outputs.ready == 'true'
         continue-on-error: true
         run: |
           B=$(curl -fsS https://miniapp-dev.gobeauty.site/ | grep -oE 'index-[A-Za-z0-9_-]+[.]js' | head -1)
@@ -596,7 +618,6 @@ jobs:
           fi
 
       - name: Smoke — /readyz/ on dev (port 8014)
-        if: steps.guard.outputs.ready == 'true'
         env:
           DEV_HOST: ${{ secrets.DEV_HOST }}
           DEV_USER: ${{ secrets.DEV_USER }}
@@ -644,7 +665,6 @@ jobs:
       # continue-on-error: сорвавшийся замер не откатывает выкладку, но и не
       # прячется — шаг виден жёлтым, а ::warning:: — в сводке прогона.
       - name: Publish surface state (bot) into the deploy tree
-        if: steps.guard.outputs.ready == 'true'
         continue-on-error: true
         env:
           DEV_HOST: ${{ secrets.DEV_HOST }}
@@ -675,7 +695,6 @@ jobs:
           "
 
       - name: Telegram smoke alert (informational)
-        if: steps.guard.outputs.ready == 'true'
         continue-on-error: true
         env:
           DEV_HOST: ${{ secrets.DEV_HOST }}
