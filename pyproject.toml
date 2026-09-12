@@ -224,10 +224,11 @@ asyncio_mode = "strict"
 # class from it at import time, and a lazy first import landing inside
 # `with patch(...)` binds that class to the mock permanently. Same reason
 # as above for being a plugin: a conftest is imported too late.
-addopts = "-p config.pytest_env_guard -p config.pytest_master_service_provenance -p config.pytest_vendor_sdk_preimport -q -m \"not smoke\""
+addopts = "-p config.pytest_env_guard -p config.pytest_master_service_provenance -p config.pytest_vendor_sdk_preimport -q -m \"not smoke and not cross_boundary\""
 markers = [
     "e2e: end-to-end test requiring real Redis + Postgres (CI services or docker compose locally). Skipped automatically when backing services aren't reachable.",
     "slow: opt-in performance / latency-SLO tests. Excluded from the default suite (`-m \"not slow\"`); run via `pytest -m slow` in nightly perf jobs.",
+    "cross_boundary: golden через настоящую HTTP-границу бот↔каталог (tests/cross_boundary/). Исключён из обычного прогона (`-m \"not cross_boundary\"`), потому что требует поднятого каталога; без стенда ПАДАЕТ, а не пропускается. Запуск: см. tests/cross_boundary/README.md.",
     "smoke: opt-in smoke test that hits real seeded ChromaDB + real OpenAI (KB-RAG Sub-6 / GH #119). Excluded from the default suite (`-m \"not smoke\"`); run via `pytest -m smoke apps/kb/services/tests/test_global_fallback_smoke.py -v` after seeding the `global_kb` corpus.",
 ]
 
