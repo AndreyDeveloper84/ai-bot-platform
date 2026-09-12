@@ -65,6 +65,7 @@ from apps.nutrition_coach.goals import Goal
 from apps.nutrition_coach.history import WeekPicture
 from apps.nutrition_proactive import antinag, prefs, render, selection
 from apps.nutrition_proactive.tasks import Decision, vet_outbound
+from apps.notifications.proactive import marketing_blocker
 
 logger = logging.getLogger(__name__)
 
@@ -79,6 +80,9 @@ SURFACE = "coach_hint"
 BLOCK_REASONS = (
     *selection.BLOCK_REASONS,
     "no_health_consent",
+    # DRF-1731: a coach hint is PROMO — a tip nobody asked for that
+    # morning — so it also needs the advertising consent (38-ФЗ ст. 18).
+    "no_marketing_consent",
     "hints_off",
     "sensitive_perimeter",
     "no_goal",
@@ -124,6 +128,16 @@ def plan_coach_hints(
 
         if not _health_basis(bot_user):
             decisions.append(Decision(bot_user.pk, ext, False, "no_health_consent"))
+            continue
+
+        # DRF-1731: PROMO class (apps.notifications.proactive.PROACTIVE_SENDERS).
+        # Asked after the health basis so the reason names the FIRST
+        # missing ground in legal order: baseline → special category →
+        # advertising. By record: a withdrawn toggle stops the hint the
+        # same tick.
+        marketing_blocked = marketing_blocker(bot_user)
+        if marketing_blocked:
+            decisions.append(Decision(bot_user.pk, ext, False, marketing_blocked))
             continue
 
         user_prefs = prefs.get_prefs(bot_user)
