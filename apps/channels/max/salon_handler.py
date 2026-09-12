@@ -985,22 +985,23 @@ def _sender_name(event: CanonicalEvent) -> str:
 
 
 def _bot_slug_for(tenant) -> str:
-    """Find which registry entry serves this tenant.
+    """Slug of the salon bot — the ONE serving ``max_salon``, whichever tenant.
 
-    Matched on BOTH tenant and stream. Tenant alone is not enough: nothing
-    in the registry forbids a salon from also having a per-tenant client bot
-    (`stream=max`), and picking that one would send staff replies from the
-    customer-facing token — which, since MAX chat_ids are per-bot, most
-    likely 4xxs, leaves the entry unacked in the PEL, and the person gets
-    nothing at all.
+    Until DRF-1705 this matched ``entry.tenant_slug == tenant.slug``: the
+    salon bot was assumed to belong to a salon, and a master whose tenant is
+    not the bot's (every solo master) got ``""`` → «refuse to answer rather
+    than answer as the wrong bot» → silence. The bot does not belong to a
+    salon (owner decision 12.09.2026); ``parse_registry`` guarantees there is
+    at most one on the stream, so the pick is not arbitrary.
+
+    ``tenant`` stays in the signature: the call site's log line names it,
+    and the day a per-tenant staff bot returns this is where the choice
+    would go back in.
     """
+    from apps.channels.bot_registry import effective_registry, resolve_by_stream
 
-    from apps.channels.bot_registry import effective_registry
-
-    for entry in effective_registry():
-        if entry.tenant_slug == tenant.slug and entry.stream == SALON_STREAM:
-            return entry.slug
-    return ""
+    entry = resolve_by_stream(SALON_STREAM, effective_registry())
+    return entry.slug if entry is not None else ""
 
 
 def _redeem_and_greet(event: CanonicalEvent, bot_user, code: str, tenant, entry) -> None:

@@ -302,8 +302,18 @@ class TestWrongBotGuard:
     customer-facing avatar: invisible in logs, alarming to the recipient.
     """
 
-    def test_no_registry_entry_means_silence_not_a_wrong_sender(self, tenant, settings, sent):
-        # Registry declares a bot for a DIFFERENT salon.
+    def test_the_salon_bot_answers_a_tenant_not_named_in_its_entry_2026_09_12(
+        self, tenant, settings, sent
+    ):
+        """Эталон ПЕРЕВЁРНУТ 12.09.2026 (DRF-1705, срез 1 — DRF-1726).
+
+        Раньше запись реестра с чужим ``tenant_slug`` читалась как «бот
+        другого салона», и обработчик молчал — «refuse to answer rather than
+        answer as the wrong bot». Для соло-мастера это означало: салонный бот
+        не отвечает ему никогда, потому что его тенант в реестре не стоит.
+        Решение владельца: бот один на инсталляцию и не принадлежит салону.
+        Запись найдена по потоку, ответ уходит.
+        """
         settings.MAX_BOT_REGISTRY = (
             BotEntry(
                 slug="other",
@@ -313,6 +323,15 @@ class TestWrongBotGuard:
                 stream="max_salon",
             ),
         )
+
+        _handle("привет", tenant)
+
+        sent.assert_called()
+
+    def test_no_salon_bot_at_all_still_means_silence(self, tenant, settings, sent):
+        """Что осталось от прежнего эталона: без записи на потоке max_salon
+        отвечать некому — молчание, а не клиентский токен."""
+        settings.MAX_BOT_REGISTRY = ()
 
         _handle("привет", tenant)
 

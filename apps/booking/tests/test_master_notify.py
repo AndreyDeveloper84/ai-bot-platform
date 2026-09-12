@@ -957,7 +957,19 @@ class TestSenderIdentity:
 
         assert seen == ["token-client"]
 
-    def test_another_salons_bot_is_not_borrowed(self, tenant, settings, monkeypatch, _tokens):
+    def test_the_salon_bot_serves_a_master_of_any_tenant_2026_09_12(
+        self, tenant, settings, monkeypatch, _tokens
+    ):
+        """Эталон ПЕРЕВЁРНУТ 12.09.2026 (DRF-1705, срез 1 — DRF-1726).
+
+        До этого дня тест назывался «чужой салонный бот не заимствуется» и
+        требовал ``token-client``: запись реестра с другим ``tenant_slug``
+        считалась ботом ДРУГОГО салона, и уведомление уходило с токена
+        клиентского бота — в чат, которого у того бота никогда не было.
+        Решение владельца: салонный бот не принадлежит салону, он один на
+        инсталляцию и говорит с мастерами всех тенантов — в том числе
+        соло-мастеров, чей тенант в реестре не значился никогда.
+        """
         settings.MAX_BOT_REGISTRY = (self._salon_entry("some-other-salon"),)
         tenant.manager_chat_id = "salon-chat-1"
         seen = self._capture_token(monkeypatch)
@@ -971,8 +983,9 @@ class TestSenderIdentity:
             raw_source="chat",
         )
 
-        # Not token-salon: that bot belongs to a different salon.
-        assert seen == ["token-client"]
+        # token-salon: единственный бот на потоке max_salon — вне зависимости
+        # от того, какой тенант стоит в его записи.
+        assert seen == ["token-salon"]
 
     def test_a_client_bot_on_the_same_tenant_is_not_mistaken_for_the_staff_bot(
         self, tenant, settings, monkeypatch, _tokens
