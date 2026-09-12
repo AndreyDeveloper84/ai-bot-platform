@@ -830,6 +830,53 @@ a {
   line-height: 1.5;
 }
 
+/* «Уже учла» (DRF-1744): память заметна, но не спорит с вопросом —
+   тот же тихий фон, что у «Текущей цели», строки в один ряд, действие
+   «Изменить» — тихая текстовая кнопка, как у побочных намерений. */
+.already-noted__list {
+  list-style: none;
+  margin: 0;
+  padding: var(--s-2) var(--s-3);
+  background: var(--c-surface-2);
+  border-radius: var(--r-md);
+}
+
+.already-noted__row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s-2);
+  padding: var(--s-1) 0;
+  color: var(--c-text-primary);
+  line-height: 1.5;
+}
+
+.already-noted__label {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+/* «Рядом со мной» (DRF-1707): пояснение стоит до кнопки — D3 «понятно,
+   зачем location нужна» — тихим текстом; расстояние на карточке — рядом
+   с рейтингом, тем же вторичным цветом. */
+.customer-catalog__nearby {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+  margin: 0 0 var(--s-3);
+}
+
+.customer-catalog__nearby-note {
+  margin: 0;
+  font-size: var(--font-size-100);
+  color: var(--c-text-secondary);
+}
+
+.master-card__distance {
+  font-size: var(--font-size-100);
+  color: var(--c-text-secondary);
+}
+
 .goal-select__prompt {
   margin: 0 0 var(--s-2);
   color: var(--c-text-primary);

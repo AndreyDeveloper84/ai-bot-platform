@@ -383,6 +383,76 @@ def _client_that_must_not_be_called() -> Mock:
     return client
 
 
+class TestScreeningQuestionSitsWhereItSays:
+    """Живой путь владельца 12.09 01:33–01:34 (MAX, до #1664): пол → возраст
+    → «И последнее перед расчётом…» → рост → вес → цель. Два наблюдения:
+    вопрос о здоровье назвал себя последним, будучи третьим из шести, и
+    пришёл «без вариантов».
+
+    Первое чинится здесь и стережётся КЛАССОМ: ни один шаг не вправе
+    называть себя последним, если за ним есть шаг. Второе по коду не
+    воспроизводится — варианты прикреплены на каждом пути (скилл →
+    ``_build_attachments`` MAX → ``send_message`` без отката «без
+    клавиатуры»); тест ниже держит провод до формы канала, а расхождение с
+    наблюдением решает сохранённый ``action_data`` той реплики на пилоте.
+    """
+
+    def test_no_step_calls_itself_last_unless_it_is(self) -> None:
+        from apps.skills.fsm import COMPLETE
+        from apps.skills.nutrition_anketa.fsm import AnketaFSM
+
+        liars = [
+            name
+            for name, step in AnketaFSM.STEPS.items()
+            if "последн" in step.prompt.lower() and step.next != COMPLETE
+        ]
+        assert liars == [], f"шаг назвал себя последним, но за ним есть шаг: {liars}"
+        # POSITIVE: сторож смотрит на непустой набор шагов с известным порядком.
+        assert list(AnketaFSM.STEPS) == ["gender", "age", "screening", "height", "weight", "goal"]
+
+    def test_screening_prompt_names_what_follows(self) -> None:
+        from apps.skills.nutrition_anketa.fsm import AnketaFSM
+
+        step = AnketaFSM.STEPS["screening"]
+        assert step.next == "height" and AnketaFSM.STEPS["height"].next == "weight"
+        assert step.prompt.startswith("Перед ростом и весом — есть ли сейчас что-то из этого?")
+        assert "последнее" not in step.prompt.lower()
+
+    def test_screening_arrives_with_its_choices_down_to_the_max_wire_shape(self) -> None:
+        """Ответ на возраст → вопрос о здоровье С вариантами, и они доживают
+        до формы MAX-канала (inline_keyboard, 4 кнопки, «Ничего из этого»
+        первой), а не только до ``action_data`` скилла."""
+        from apps.channels.max.handler import _build_attachments
+
+        ctx, _conversation = _context(
+            "30",
+            state={
+                "nutrition_anketa": {
+                    "current_step": "age",
+                    "answers": {"gender": "female"},
+                    "is_complete": False,
+                }
+            },
+        )
+        result = NutritionAnketaSkill().handle(ctx)
+        assert result.action_type == "anketa_step_screening"
+        # Формулировку здесь не проверяем намеренно: этот сторож — про
+        # кнопки, и краснеть от смены слов он не должен.
+
+        attachments = _build_attachments(result.action_data)
+        assert attachments and attachments[0]["type"] == "inline_keyboard"
+        rows = attachments[0]["payload"]["buttons"]
+        flat = [button for row in rows for button in row]
+        assert [b["text"] for b in flat] == [
+            "Ничего из этого",
+            "Беременность или кормление",
+            "Расстройство пищевого поведения",
+            "Заболевание, влияющее на питание",
+        ]
+        assert flat[0]["payload"] == "cb:anketa:choice:screening:none"
+        assert all(b["type"] == "callback" for b in flat)
+
+
 class TestStopScenarios:
     """Owner decision §7.1 — no automatic calculation, diary intact."""
 
@@ -821,6 +891,68 @@ class TestProposalCard:
         assert "пока ты его не подтвердишь, в дневнике оно не действует" in text
         assert "Готово, рассчитала твои нормы" not in text
         assert "Дневных ориентиров пока не считаю" not in text
+
+    def test_fluids_reference_caption_is_printed_only_when_the_catalogue_names_it(self) -> None:
+        """Каталог #403: вода — справочник по полу, версия ``fluids`` рядом
+        с ``calories``. Подпись обязана сказать «не от веса», потому что
+        строкой выше стоит «от твоих данных: вес — 62 кг».
+
+        Три положения: (1) версия прислана — подпись есть и вода в
+        строках; (2) версии нет — подписи нет, хоть число воды и есть;
+        (3) неизвестная версия печатается как есть, как у калорий.
+        """
+        from apps.skills.nutrition_anketa.skill import _format_summary
+
+        with_fluids = _proposed_profile(
+            targets_method_versions={
+                "calories": "mifflin_st_jeor_v1",
+                "fluids": "adult_beverages_reference_v1",
+            },
+            raw={
+                "norms": {
+                    "daily_kcal": 1650,
+                    "daily_protein_g": 100,
+                    "daily_fat_g": 55,
+                    "daily_carbs_g": 190,
+                    "daily_water_ml": 2200,
+                },
+                "targets_provenance": {
+                    "source": "ayla_proposed",
+                    "method_versions": {
+                        "calories": "mifflin_st_jeor_v1",
+                        "fluids": "adult_beverages_reference_v1",
+                    },
+                },
+            },
+        )
+        text = _format_summary(with_fluids)
+        assert "💧 Вода: 2200 мл" in text
+        assert "Считала по методике Миффлин — Сан Жеор, версия 1 от твоих данных:" in text
+        assert (
+            "Вода — справочный ориентир по выпитой жидкости для взрослых по полу "
+            "(2200 мл женщине, 3000 мл мужчине), не расчёт от веса и активности."
+        ) in text
+        # Подпись стоит ПОСЛЕ строки методики и ДО оговорки о предложении.
+        assert (
+            text.index("от твоих данных")
+            < text.index("Вода — справочный")
+            < text.index("пока ты его не подтвердишь")
+        )
+
+        without_version = _proposed_profile(
+            raw={"norms": {"daily_kcal": 1650, "daily_water_ml": 2100}},
+        )
+        text = _format_summary(without_version)
+        assert "💧 Вода: 2100 мл" in text  # число каталог прислал…
+        assert "Вода — справочный" not in text  # …а методику не назвал — подписи нет
+
+        unknown = _proposed_profile(
+            targets_method_versions={
+                "calories": "mifflin_st_jeor_v1",
+                "fluids": "adult_beverages_reference_v2",
+            },
+        )
+        assert "Вода — adult_beverages_reference_v2." in _format_summary(unknown)
 
     def test_confirm_chip_comes_first_only_for_a_proposal(self) -> None:
         from apps.skills.nutrition_anketa.skill import CB_CONFIRM_TARGETS, _post_anketa_chips

@@ -46,16 +46,36 @@ import { OfflineBanner } from "../components/OfflineBanner";
 import { recommendationShelfEnabled } from "../lib/feature-flags";
 import {
   ACTION_CLARIFY_REQUEST,
+  ACTION_RETRY,
   ACTION_SHOW_SERVICES,
+  ACTION_WRITE_AYLA,
   CANONICAL_SHELF_TITLE,
+  NO_CAPABLE_TEXT,
   NO_VERIFIED_EVIDENCE_TEXT,
+  SAFETY_BOUNDARY_TEXT,
+  SOURCE_FAILURE_TEXT,
+  absenceFrame,
   SURFACE_AVAILABLE_SERVICES,
-  showsNoVerifiedEvidence,
+  SURFACE_NEARBY,
 } from "../lib/recommendation-absence";
 import { StateError } from "../components/StateError";
 import { useOnline } from "../hooks/useOnline";
 import type { Service } from "../lib/api";
-import { getCatalogBrowse, type CatalogBrowseData } from "../lib/customer-booking";
+import {
+  getCatalogBrowse,
+  resolveCatalogPicks,
+  type CatalogBrowseData,
+} from "../lib/customer-booking";
+import { closeApp, maxBridge } from "../lib/max-sdk";
+import {
+  NEARBY_BUTTON,
+  NEARBY_DENIED,
+  NEARBY_EXPLANATION,
+  NEARBY_LOCATING,
+  hasKnownDistance,
+  locateOnce,
+} from "../lib/nearby";
+import { fetchMasters } from "../lib/api";
 import { resolveCatalogEmpty } from "../lib/customer-catalog-empty";
 import { backTo } from "../lib/screen-back";
 
@@ -123,6 +143,53 @@ export function CustomerCatalogScreen() {
    * nothing it can explain right now.
    */
   const picksOutcome = state.kind === "ok" ? state.data.picksOutcome : "UNAVAILABLE";
+  const [retryingPicks, setRetryingPicks] = useState(false);
+
+  // DRF-1707 / D3 — «Показать рядом со мной». Координаты не хранятся:
+  // они уходят одним запросом за мастерами и забываются; в состоянии
+  // экрана остаётся только исход («идёт» / «не удалось»).
+  const [nearby, setNearby] = useState<"idle" | "locating" | "denied">("idle");
+  const showNearby = useCallback(async () => {
+    if (state.kind !== "ok" || nearby === "locating") return;
+    setNearby("locating");
+    const coords = await locateOnce();
+    if (!coords) {
+      setNearby("denied");
+      return;
+    }
+    try {
+      const { masters: withDistance } = await fetchMasters({ coords });
+      setState((prev) =>
+        prev.kind === "ok" ? { kind: "ok", data: { ...prev.data, masters: withDistance } } : prev,
+      );
+      setNearby("idle");
+    } catch {
+      setNearby("denied");
+    }
+  }, [state, nearby]);
+
+  // «Попробовать снова» на отказе источника (DRF-1768): повторяется ТОЛЬКО
+  // запрос подбора; услуги и мастера остаются как есть. Пока идёт повтор,
+  // кнопка заблокирована — второй тап не плодит второй запрос.
+  const retryPicks = useCallback(() => {
+    if (state.kind !== "ok" || retryingPicks) return;
+    const { services } = state.data;
+    setRetryingPicks(true);
+    resolveCatalogPicks(services)
+      .then(({ picks, picksOutcome: outcome }) => {
+        setState((prev) =>
+          prev.kind === "ok" ? { kind: "ok", data: { ...prev.data, picks, picksOutcome: outcome } } : prev,
+        );
+      })
+      .finally(() => setRetryingPicks(false));
+  }, [state, retryingPicks]);
+
+  const scrollToServices = () =>
+    document
+      .getElementById("catalog-services")
+      ?.scrollIntoView({ behavior: "smooth", block: "start" });
+  const frame = !query ? absenceFrame(picksOutcome) : null;
+  const insideMax = maxBridge() !== null;
 
   const picksWithWhy = useMemo(() => {
     if (state.kind !== "ok") return [];
@@ -208,7 +275,7 @@ export function CustomerCatalogScreen() {
           Только этот исход — остальные пустоты остаются молчаливыми
           (см. `recommendation-absence.ts`). Не показывается поверх
           поиска: с запросом человек уже делает то, что ему предлагают. */}
-      {!query && showsNoVerifiedEvidence(picksOutcome) && (
+      {frame === "no_verified" && (
         <section
           className="callout"
           role="status"
@@ -218,15 +285,7 @@ export function CustomerCatalogScreen() {
             {NO_VERIFIED_EVIDENCE_TEXT}
           </p>
           <div className="chip-row" style={{ marginTop: "var(--s-3)" }}>
-            <button
-              type="button"
-              className="btn-secondary"
-              onClick={() =>
-                document
-                  .getElementById("catalog-services")
-                  ?.scrollIntoView({ behavior: "smooth", block: "start" })
-              }
-            >
+            <button type="button" className="btn-secondary" onClick={scrollToServices}>
               {ACTION_SHOW_SERVICES}
             </button>
             <button
@@ -235,6 +294,80 @@ export function CustomerCatalogScreen() {
               onClick={() => navigate("/customer/goal-select")}
             >
               {ACTION_CLARIFY_REQUEST}
+            </button>
+          </div>
+        </section>
+      )}
+
+      {/* C04.5 (DRF-1767): медицинский гейт закрыл совет — говорим это
+          словами гейта, без диагноза, и даём разрешённое действие.
+          Ни одной кнопки записи: CTA на заблокированное запрещён. */}
+      {frame === "safety_boundary" && (
+        <section
+          className="callout"
+          role="status"
+          aria-labelledby="catalog-safety-boundary"
+        >
+          <p id="catalog-safety-boundary" style={{ margin: 0 }}>
+            {SAFETY_BOUNDARY_TEXT}
+          </p>
+          <div className="chip-row" style={{ marginTop: "var(--s-3)" }}>
+            <button type="button" className="btn-secondary" onClick={scrollToServices}>
+              {ACTION_SHOW_SERVICES}
+            </button>
+            {insideMax && (
+              <button type="button" className="btn-secondary" onClick={() => closeApp()}>
+                {ACTION_WRITE_AYLA}
+              </button>
+            )}
+          </div>
+        </section>
+      )}
+
+      {/* DRF-1768: нужда названа, никто не совпал — вопрос к запросу. */}
+      {frame === "no_capable" && (
+        <section
+          className="callout"
+          role="status"
+          aria-labelledby="catalog-no-capable"
+        >
+          <p id="catalog-no-capable" style={{ margin: 0 }}>
+            {NO_CAPABLE_TEXT}
+          </p>
+          <div className="chip-row" style={{ marginTop: "var(--s-3)" }}>
+            <button
+              type="button"
+              className="btn-secondary"
+              onClick={() => navigate("/customer/goal-select")}
+            >
+              {ACTION_CLARIFY_REQUEST}
+            </button>
+            <button type="button" className="btn-secondary" onClick={scrollToServices}>
+              {ACTION_SHOW_SERVICES}
+            </button>
+          </div>
+        </section>
+      )}
+
+      {/* DRF-1768: отказ источника — не состояние знания. Повтор — только
+          запроса подбора, каталог под кадром не трогается. */}
+      {frame === "source_failure" && (
+        <section
+          className="callout"
+          role="status"
+          aria-labelledby="catalog-source-failure"
+        >
+          <p id="catalog-source-failure" style={{ margin: 0 }}>
+            {SOURCE_FAILURE_TEXT}
+          </p>
+          <div className="chip-row" style={{ marginTop: "var(--s-3)" }}>
+            <button
+              type="button"
+              className="btn-secondary"
+              disabled={retryingPicks}
+              onClick={retryPicks}
+            >
+              {ACTION_RETRY}
             </button>
           </div>
         </section>
@@ -290,8 +423,29 @@ export function CustomerCatalogScreen() {
       {masters.length > 0 && (
         <section aria-labelledby="catalog-masters">
           <h2 id="catalog-masters" className="customer-catalog__section-title">
-            Мастера
+            {/* «Рядом с вами» — только когда в данных есть расстояние
+                (#1653): имя обещает сортировку по близости. */}
+            {hasKnownDistance(masters) ? SURFACE_NEARBY : "Мастера"}
           </h2>
+          {/* D3: пояснение стоит ДО вызова ОС, на самой кнопке. */}
+          {!hasKnownDistance(masters) && (
+            <div className="customer-catalog__nearby">
+              <p className="customer-catalog__nearby-note">{NEARBY_EXPLANATION}</p>
+              <button
+                type="button"
+                className="btn-secondary"
+                disabled={nearby === "locating"}
+                onClick={() => void showNearby()}
+              >
+                {nearby === "locating" ? NEARBY_LOCATING : NEARBY_BUTTON}
+              </button>
+              {nearby === "denied" && (
+                <p className="customer-catalog__nearby-note" role="status">
+                  {NEARBY_DENIED}
+                </p>
+              )}
+            </div>
+          )}
           {masters.map((master) => (
             <article key={master.id}>
               <MasterCard

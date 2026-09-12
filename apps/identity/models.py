@@ -1286,3 +1286,104 @@ class RedZoneAccessLog(models.Model):
             f"RedZoneAccessLog[{self.access_type} entry={self.memory_entry_id} "
             f"user={self.user_id} ts={self.ts:%Y-%m-%d %H:%M:%S}]"
         )
+
+
+class SoloIdentityLink(models.Model):
+    """Связь соло-мастера с личностью Ayla — состояние и его провенанс (§6 пакета 12.09).
+
+    Владелец: identity-токен боту не выдаётся (NO-GO); Phase 0 —
+    operator-assisted linking как контролируемый provisioning step:
+
+        solo registration → IDENTITY_LINK_PENDING
+        → controlled operator verification/link → LINKED (provenance
+          OPERATOR_VERIFIED, operator_id, timestamp)
+        → publication readiness.
+
+    ``PENDING`` — не полный успех: кабинет настраивать можно, публикация
+    требует ``LINKED``. ``REJECTED`` — контролируемый отказ с внутренней
+    таксономией причин и безопасным сообщением человеку.
+
+    Сам ключ личности живёт в ``CatalogMaster.ayla_user_id`` (единственная
+    дверь — ``solo_ayla_link.link_solo_provider_to_ayla``); эта строка —
+    **о том, как он туда попал и кто за это отвечает**. Без неё LINKED
+    неотличим от «ключ появился откуда-то», а §6 требует провенанс и
+    аудит-пакет по каждой связи.
+
+    Аудит-пакет (§6 «минимальный»): solo_registration_id (= id тенанта
+    соло-мастера), channel, channel_user_id, tenant_id, master_id, телефон
+    если есть, время запроса. Значения — идентификаторы и телефон, не
+    содержимое разговоров.
+    """
+
+    class Status(models.TextChoices):
+        PENDING = "IDENTITY_LINK_PENDING", "Ожидает связывания"
+        LINKED = "IDENTITY_LINKED", "Связан"
+        REJECTED = "IDENTITY_LINK_REJECTED", "Отклонено"
+
+    class Provenance(models.TextChoices):
+        OPERATOR_VERIFIED = "OPERATOR_VERIFIED", "Проверил оператор"
+        CATALOG_RESOLVED = "CATALOG_RESOLVED", "Каталог ответил настоящим ключом"
+
+    class RejectReason(models.TextChoices):
+        """Внутренняя таксономия отказа — оператору; человеку уходит
+        безопасное сообщение, не причина."""
+
+        NOT_A_MASTER = "not_a_master", "Не мастер"
+        DUPLICATE_PERSON = "duplicate_person", "Уже есть аккаунт мастера"
+        IDENTITY_UNVERIFIABLE = "identity_unverifiable", "Личность не подтверждена"
+        FRAUD_SUSPECTED = "fraud_suspected", "Подозрение на злоупотребление"
+        OTHER = "other", "Другое (в комментарии)"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    master = models.OneToOneField(
+        "catalog.CatalogMaster",
+        on_delete=models.CASCADE,
+        related_name="identity_link",
+    )
+    status = models.CharField(max_length=32, choices=Status.choices, default=Status.PENDING)
+    provenance = models.CharField(max_length=32, choices=Provenance.choices, blank=True, default="")
+    # --- аудит-пакет (§6) ---
+    solo_registration_id = models.UUIDField(
+        help_text="id тенанта соло-мастера — регистрация одна на тенант."
+    )
+    channel = models.CharField(max_length=16)
+    channel_user_id = models.CharField(max_length=128)
+    tenant_id_snapshot = models.UUIDField()
+    phone = models.CharField(max_length=32, blank=True, default="")
+    requested_at = models.DateTimeField(auto_now_add=True)
+    # --- исход ---
+    operator_id = models.PositiveIntegerField(
+        null=True,
+        blank=True,
+        help_text="auth.User.pk оператора в админке бота (int, как LogEntry.user_id).",
+    )
+    operator_username = models.CharField(max_length=150, blank=True, default="")
+    decided_at = models.DateTimeField(null=True, blank=True)
+    ayla_user_id = models.UUIDField(
+        null=True,
+        blank=True,
+        help_text="Что записано в CatalogMaster.ayla_user_id в момент LINKED.",
+    )
+    reject_reason = models.CharField(
+        max_length=32, choices=RejectReason.choices, blank=True, default=""
+    )
+    reject_note = models.CharField(max_length=500, blank=True, default="")
+    last_attempt_refusal = models.CharField(
+        max_length=64,
+        blank=True,
+        default="",
+        help_text="Машинная причина последнего отказа автосвязи (solo_link_attempt).",
+    )
+    last_attempt_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        verbose_name = "Связь соло-мастера с Ayla"
+        verbose_name_plural = "Связи соло-мастеров с Ayla"
+        indexes = [models.Index(fields=["status"], name="solo_identity_link_status_idx")]
+
+    def __str__(self) -> str:
+        return f"SoloIdentityLink[{self.master_id} {self.status}]"
+
+    @property
+    def is_linked(self) -> bool:
+        return self.status == self.Status.LINKED

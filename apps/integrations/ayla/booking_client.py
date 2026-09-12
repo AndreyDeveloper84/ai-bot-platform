@@ -205,11 +205,17 @@ class BookingBadRequestError(BookingAPIError):
         status_code: int | None = None,
         code: str | None = None,
         handoff: bool | None = None,
+        details: dict[str, Any] | None = None,
     ) -> None:
         super().__init__(message)
         self.status_code = status_code
         self.code = code
         self.handoff = handoff
+        # DRF-1708: ``error.details`` as Ayla sent it. ``QUOTE_CHANGED``
+        # carries ``{field, quoted, applied}`` — the two numbers the
+        # person must see (owner package 2, D4: show what was and what
+        # became; no silent normalisation). ``None`` = absent on the wire.
+        self.details = details
 
 
 class ScheduleBlockConflictError(BookingBadRequestError):
@@ -289,6 +295,12 @@ class AylaMaster:
     rating: float
     position: str
     raw: dict[str, Any] = field(default_factory=dict)
+    #: DRF-1707 / OD-PILOT-9: метры до точки предложения, как их посчитал
+    #: каталог (`tenants.distance`); ``None`` = DISTANCE_UNKNOWN — нет
+    #: координаты клиента или у мастера нет подтверждённого места. Бот
+    #: расстояние не считает: координаты профиля в зеркале принадлежат
+    #: человеку (§9), а не месту оказания услуги.
+    distance_meters: int | None = None
 
 
 @dataclass(frozen=True)
@@ -406,7 +418,13 @@ class AylaBookingClient(Protocol):
 
     def get_services(self) -> list[AylaService]: ...
 
-    def get_masters(self, *, specialist_id: str | None = ...) -> list[AylaMaster]: ...
+    def get_masters(
+        self,
+        *,
+        specialist_id: str | None = ...,
+        lat: float | None = ...,
+        lon: float | None = ...,
+    ) -> list[AylaMaster]: ...
 
     def get_available_dates(
         self,
@@ -434,6 +452,8 @@ class AylaBookingClient(Protocol):
         start_datetime: str,
         idempotency_key: str | None = ...,
         payment_required: bool = ...,
+        quoted_price: str | None = ...,
+        quoted_duration_minutes: int | None = ...,
     ) -> AylaBookingRecord: ...
 
     def cancel_appointment(
@@ -538,6 +558,17 @@ def _service_from_wire(d: dict[str, Any]) -> AylaService:
     )
 
 
+def _distance_meters_from_wire(value: Any) -> int | None:
+    """``distance_meters`` с провода: целое или ``None``; всё иное — ``None``.
+
+    Каталог шлёт целое либо ``null`` (DISTANCE_UNKNOWN). Строка, дробь или
+    отрицательное число — не «примерно столько», а не-расстояние.
+    """
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        return None
+    return value
+
+
 def _master_from_wire(d: dict[str, Any]) -> AylaMaster:
     return AylaMaster(
         id=str(d.get("id") or ""),
@@ -546,6 +577,7 @@ def _master_from_wire(d: dict[str, Any]) -> AylaMaster:
         rating=float(d.get("rating") or 0.0),
         position=str(d.get("position") or ""),
         raw=d,
+        distance_meters=_distance_meters_from_wire(d.get("distance_meters")),
     )
 
 
@@ -808,6 +840,7 @@ class AylaBookingHTTPClient:
             status_code=resp.status_code,
             code=_err_code(resp),
             handoff=_err_handoff(resp),
+            details=_err_details(resp),
         )
 
     def _ok(self, resp: httpx.Response, *, success: tuple[int, ...] = (200, 201)) -> Any:
@@ -900,8 +933,19 @@ class AylaBookingHTTPClient:
             raise BookingUnavailableError("catalog_incomplete")
         return rows
 
-    def get_masters(self, *, specialist_id: str | None = None) -> list[AylaMaster]:
+    def get_masters(
+        self,
+        *,
+        specialist_id: str | None = None,
+        lat: float | None = None,
+        lon: float | None = None,
+    ) -> list[AylaMaster]:
         """One specialist by id, or the ACTIVE TENANT's whole roster (DRF-1473).
+
+        ``lat``/``lon`` (DRF-1707): одноразовые координаты клиента, только
+        для этого запроса — каталог считает по ним ``distance_meters`` до
+        точки предложения. Здесь они не сохраняются и не пишутся в журнал
+        (решение владельца D3: координаты не хранятся).
 
         The roster read is the origin of the pilot's «Контекст записи
         устарел» dead-end. ``internal/specialists/`` is a paginated DRF list
@@ -932,7 +976,11 @@ class AylaBookingHTTPClient:
             payload = self._ok(resp)
             return [_master_from_wire(payload)] if isinstance(payload, dict) and payload else []
         tenant_id = _require_tenant_id()
-        rows = self._get_all_rows("specialists/", params={"tenant": tenant_id})
+        params: dict[str, Any] = {"tenant": tenant_id}
+        if lat is not None and lon is not None:
+            params["lat"] = f"{lat:.6f}"
+            params["lon"] = f"{lon:.6f}"
+        rows = self._get_all_rows("specialists/", params=params)
         return [_master_from_wire(r) for r in rows]
 
     def get_available_times(
@@ -1021,17 +1069,27 @@ class AylaBookingHTTPClient:
         start_datetime: str,
         idempotency_key: str | None = None,
         payment_required: bool = True,
+        quoted_price: str | None = None,
+        quoted_duration_minutes: int | None = None,
     ) -> AylaBookingRecord:
         # AMD-002 (D6): payment_required=false → запись без предоплаты,
         # Ayla подтверждает сразу (CONFIRMED + booking.confirmed), Payment
         # не создаётся. default true — обратная совместимость контракта.
-        body = {
+        body: dict[str, Any] = {
             "client_id": client_id,
             "specialist_id": specialist_id,
             "service_id": service_id,
             "start_datetime": start_datetime,
             "payment_required": payment_required,
         }
+        # DRF-1708: what the person SAW rides to the create; Ayla compares
+        # it with what would apply inside the transaction and refuses with
+        # 409 QUOTE_CHANGED on a mismatch. Absent = the old contract (no
+        # comparison) — callers that never quoted are untouched.
+        if quoted_price is not None:
+            body["quoted_price"] = quoted_price
+        if quoted_duration_minutes is not None:
+            body["quoted_duration_minutes"] = quoted_duration_minutes
         resp = self._request(
             "POST",
             "appointments/",
@@ -1456,6 +1514,15 @@ def _err_code(resp: httpx.Response) -> str:
         return (resp.json().get("error") or {}).get("code", "") or "unknown"
     except (ValueError, AttributeError):
         return "unknown"
+
+
+def _err_details(resp: httpx.Response) -> dict[str, Any] | None:
+    """Pull ``error.details`` from a 4xx body verbatim, or None if absent."""
+    try:
+        details = (resp.json().get("error") or {}).get("details")
+    except (ValueError, AttributeError):
+        return None
+    return details if isinstance(details, dict) else None
 
 
 def _err_handoff(resp: httpx.Response) -> bool | None:

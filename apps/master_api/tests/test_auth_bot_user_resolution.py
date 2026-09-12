@@ -147,8 +147,28 @@ class TestResolutionByBotTenant:
 
         assert resolved == salon_row
 
-    def test_without_any_tenant_hint_keeps_historical_behaviour(self, settings, two_rows):
-        _, global_row = two_rows
+    def test_without_any_tenant_hint_the_linked_row_wins_2026_09_12(self, settings, two_rows):
+        """Эталон ПЕРЕВЁРНУТ 12.09.2026 (DRF-1755, срез 2 DRF-1705).
+
+        До этого дня тест назывался «без подсказки о тенанте — историческое
+        поведение» и ждал ``global_row``: без реестра и без
+        ``MAX_BOT_TENANT_SLUG`` резолвер брал самую свежую строку, а свежая
+        — клиентская. Теперь шаг 0: у человека ровно одна строка с рабочей
+        ролью (карточка мастера на ``salon_row``), и она побеждает раньше
+        любой подсказки. Свежесть решает только среди строк без роли.
+        """
+        salon_row, _global_row = two_rows
+        settings.MAX_BOT_REGISTRY = ()
+        settings.MAX_BOT_TENANT_SLUG = ""
+
+        resolved = _resolve_bot_user(_Verified(CHANNEL_USER_ID))
+
+        assert resolved == salon_row
+
+    def test_without_any_tenant_hint_and_no_role_recency_still_decides(self, settings, two_rows):
+        """Что осталось от прежнего эталона: без рабочей строки — по свежести, как раньше."""
+        salon_row, global_row = two_rows
+        CatalogMaster.all_tenants.filter(linked_bot_user=salon_row).delete()
         settings.MAX_BOT_REGISTRY = ()
         settings.MAX_BOT_TENANT_SLUG = ""
 

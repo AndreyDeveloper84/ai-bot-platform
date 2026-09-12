@@ -97,3 +97,6 @@ infra/secrets/*.json
 # Пишется шагом выкладки в дерево от владельца; отслеживаемым он ронял бы
 # следующий `git checkout dev` («local changes would be overwritten»).
 docs/generated/
+
+# DRF-1754 — расшифровки диалогов с пилота (dialog_transcript --out): содержат речь людей, в репозиторий не попадают
+docs/dialogs/

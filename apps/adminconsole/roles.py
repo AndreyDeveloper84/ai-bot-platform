@@ -110,6 +110,10 @@ EDITOR_DENIED_APP_LABELS: frozenset[str] = frozenset(
 EDITOR_DENIED_MODELS: frozenset[str] = frozenset(
     {
         "conversations.message",
+        # §6 пакета 12.09 (DRF-1695): связь соло-мастера с Ayla меняется
+        # только контролируемыми действиями оператора на карточке мастера
+        # (провенанс + аудит), не формой; форма — только чтение.
+        "identity.soloidentitylink",
         "tenancy.tenant",
     }
 )

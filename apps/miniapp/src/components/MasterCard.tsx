@@ -1,4 +1,5 @@
 import type { Master } from "../lib/api";
+import { formatDistance } from "../lib/nearby";
 import { publicRating } from "../lib/rating";
 
 interface Props {
@@ -36,6 +37,12 @@ export function MasterCard({ master, selected, onSelect }: Props) {
         {rating !== null && (
           <div className="master-card__rating" aria-label={`Рейтинг ${rating.toFixed(1)}`}>
             ★ {rating.toFixed(1)}
+          </div>
+        )}
+        {/* DRF-1707 — расстояние с провода каталога; неизвестное не рисуется. */}
+        {formatDistance(master.distance_meters) && (
+          <div className="master-card__distance" data-testid="master-distance">
+            {formatDistance(master.distance_meters)}
           </div>
         )}
       </div>

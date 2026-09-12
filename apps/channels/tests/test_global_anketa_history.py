@@ -120,6 +120,20 @@ def _welcomed_user(user_id: int):
         source="test:drf990",
         document_version="welcome-s2-v1",
     )
+    # §92 п.1 / DRF-1698 — согласие на персональный расчёт. Гейт стоит НА
+    # ВХОДЕ в анкету (#1593): без согласия анкета ничего не спрашивает, и
+    # этот тест проверял бы отказ вместо потока. Выдаётся НАСТОЯЩИМ
+    # писателем (тем же, что экран согласия), а не подменой предиката:
+    # тест гоняет живой обработчик, и предусловие обязано быть таким же
+    # живым. У отказа свои тесты — test_consent_gate_at_entry.py.
+    from apps.consent.personal_calculation import (
+        PERSONAL_CALCULATION_DOCUMENT_VERSION,
+        grant as grant_personal_calculation,
+    )
+
+    assert grant_personal_calculation(
+        bot_user, document_version=PERSONAL_CALCULATION_DOCUMENT_VERSION
+    )
     bot_user.refresh_from_db()
     return bot_user, resolve_active_global_conversation(bot_user)
 

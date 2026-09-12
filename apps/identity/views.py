@@ -34,6 +34,7 @@ from django.http import HttpRequest, HttpResponse, JsonResponse
 from django.views.decorators.http import require_http_methods
 
 from apps.identity.models import BotUser
+from apps.identity.services.bot_user_resolver import is_staff_surface, resolve_working_bot_user
 from apps.identity.services.role_resolver import resolve_role
 from apps.miniapp_api.views import require_init_data
 
@@ -90,9 +91,25 @@ def me_view(request: HttpRequest) -> HttpResponse:
     the bot's configured tenant; the resolver only looks at that tenant.
     A forged init-data for a user in another tenant cannot reach a
     different tenant's role rows.
+
+    One exception, and only on the staff surface (DRF-1755): when the
+    SALON bot signed the initData, the answer is the row that carries the
+    person's working role — a solo master's own tenant, not the
+    ``customer`` row the salon bot's tenant holds for them. This endpoint
+    decides which screen the Mini App mounts (``is_solo_provider``,
+    ``is_master``), so ``master_api`` answering 200 while ``/me`` still
+    said «customer of the salon» would open the doors and hide them. The
+    customer surface is untouched: the client bot keeps asking «who are
+    you as a client». The identity is still the HMAC-verified one — a
+    forged initData reaches no row it could not reach before.
     """
 
     bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
+    verified = getattr(request, "verified_init_data", None)
+    if verified is not None and is_staff_surface(verified):
+        working = resolve_working_bot_user(verified.user_id, surface="me")
+        if working is not None:
+            bot_user = working
     tenant = bot_user.tenant
 
     role_ctx = resolve_role(bot_user)

@@ -118,9 +118,28 @@ export interface NextStep {
   label: string;
 }
 
+/**
+ * Строка блока «Уже учла» (DRF-1744): ответ на шаг открытого прохода,
+ * как его прислал сервер. Несёт `options` шага, чтобы «Изменить» было
+ * чем ответить без списка вопросов на клиенте; `revisable` — решение
+ * сервера, экран его не выводит.
+ */
+export interface KnownAnketaAnswer {
+  step: string;
+  prompt: string;
+  option_key: string | null;
+  label: string;
+  options: AnketaOption[];
+  revisable: boolean;
+}
+
 export interface DecisionContext {
   version: number;
-  known: { goal: KnownGoal | null };
+  known: {
+    goal: KnownGoal | null;
+    /** Absent on documents before DRF-1744 — then there is no block. */
+    anketa?: KnownAnketaAnswer[];
+  };
   missing: MissingItem[];
   suggestions: GoalSuggestion[];
   intents: GoalIntent[];
@@ -149,7 +168,12 @@ export type GoalSelectBody =
       answer: { step: string; option_key: string };
       source_channel: "miniapp";
     }
-  | { answer: { step: string; text: string }; source_channel: "miniapp" };
+  | { answer: { step: string; text: string }; source_channel: "miniapp" }
+  /** DRF-1744 — пересмотр уже данного ответа («Изменить» в «Уже учла»). */
+  | {
+      answer: { step: string; option_key: string; revise: true };
+      source_channel: "miniapp";
+    };
 
 /** GET /decision-context — current decision-context document. */
 export const fetchDecisionContext = async (): Promise<DecisionContext> => {

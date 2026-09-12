@@ -39,12 +39,12 @@ same decision with a third of the intrusion.
   (Mifflin-St Jeor, flat ±10% goal correction) has no pace term yet.
   The question lands with the calculation service, not here — otherwise
   we would be asking for a number nothing consumes.
-* **Consent before the weight question.** The decision requires a
-  separate consent for weight (§2.2); whether it also covers the
-  special-category screening answers is an open question with the owner
-  (docs/PLAN_NUTRITION_TARGETS.md, question 1). Wiring one consent that
-  silently covers both is exactly what must not be done, so the consent
-  screen lands in its own change once that is answered.
+* **Consent is not a step here.** It sits BEFORE the FSM is entered:
+  ``skill.py`` (``_on_enter``, #1664, §92) shows the
+  ``personal_calculation`` consent screen and only constructs this FSM
+  once the consent is recorded — so the first question a person sees is
+  the consent, then gender. The screening answer stays outside that
+  consent by construction: it is decided and dropped, never stored.
 * ``gain_clarify``, ``bmi_ladder``, ``allergies`` / ``meds`` — unchanged
   from the DRF-820 scope note.
 """
@@ -111,8 +111,16 @@ class AnketaFSM(SkillFSM):
             next="screening",
         ),
         "screening": _Step(
+            # Third of six, and the prompt says so. It used to open with
+            # «И последнее перед расчётом» — the owner walked the live
+            # path 12.09 01:33 and got height, weight and goal AFTER «the
+            # last question». A prompt that names its place wrongly is
+            # the same defect class as a number without provenance: the
+            # person cannot tell what is coming. The guard in test_skill
+            # (``TestScreeningQuestionSitsWhereItSays``) holds the class,
+            # not this wording: no step may call itself last unless it is.
             prompt=(
-                "И последнее перед расчётом — есть ли сейчас что-то из этого? "
+                "Перед ростом и весом — есть ли сейчас что-то из этого? "
                 "Спрашиваю потому, что в таких случаях числа должен называть "
                 "специалист, а не я."
             ),

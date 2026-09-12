@@ -134,6 +134,12 @@ GRANTED_PRECONDITIONS = (
     "food_scanner fixture gets the «открой Mini App» refusal)",
     "NUTRITION_ENABLED / FOOD_PHOTO_SCAN_ENABLED are on (their default is "
     "off, and off means the «функция готовится» placeholder)",
+    "ConsentRecord PERSONAL_CALCULATION is granted with its document version "
+    "(§92 п.1 / DRF-1698; the gate sits at the anketa ENTRANCE, so without it "
+    "every anketa fixture gets the consent screen instead of its question). "
+    "Same terms as the ones above: the refusal branch has its own tests in "
+    "apps/skills/nutrition_anketa/tests/test_consent_gate_at_entry.py, so a "
+    "fixture written for it has to stop being granted here",
 )
 
 
@@ -226,6 +232,18 @@ def golden_run(monkeypatch, fake_redis, golden_tenant, settings):
                 bot_user.welcomed_at = timezone.now()
                 bot_user.food_scanner_consent_at = timezone.now()
                 bot_user.save(update_fields=["welcomed_at", "food_scanner_consent_at"])
+                # §92 п.1 / DRF-1698 — согласие на расчёт, НАСТОЯЩИМ
+                # писателем экрана согласия, не подменой предиката: фикстуры
+                # гоняют живой обработчик, и предусловие обязано быть таким
+                # же живым.
+                from apps.consent.personal_calculation import (
+                    PERSONAL_CALCULATION_DOCUMENT_VERSION,
+                    grant as grant_personal_calculation,
+                )
+
+                assert grant_personal_calculation(
+                    bot_user, document_version=PERSONAL_CALCULATION_DOCUMENT_VERSION
+                )
 
                 with tripwire, model_probe:
                     for i, setup_text in enumerate(prior_texts(fixture)):

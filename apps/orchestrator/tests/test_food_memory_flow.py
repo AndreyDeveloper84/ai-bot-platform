@@ -108,6 +108,20 @@ def person(ayla):
         ConsentRecord.ConsentType.MEMORY_GREEN.value,
     ):
         record_global_consent(bot_user, consent_type=consent_type, source="welcome")
+    # §92 п.1 / DRF-1698 — согласие на персональный расчёт. Гейт стоит НА
+    # ВХОДЕ в анкету (#1593): без согласия анкета ничего не спрашивает, и
+    # этот тест проверял бы отказ вместо потока. Выдаётся НАСТОЯЩИМ
+    # писателем (тем же, что экран согласия), а не подменой предиката:
+    # тест гоняет живой обработчик, и предусловие обязано быть таким же
+    # живым. У отказа свои тесты — test_consent_gate_at_entry.py.
+    from apps.consent.personal_calculation import (
+        PERSONAL_CALCULATION_DOCUMENT_VERSION,
+        grant as grant_personal_calculation,
+    )
+
+    assert grant_personal_calculation(
+        bot_user, document_version=PERSONAL_CALCULATION_DOCUMENT_VERSION
+    )
     conversation = resolve_active_global_conversation(bot_user)
     return bot_user, conversation
 
@@ -282,8 +296,10 @@ class TestAnketaAnswersAreNotCorrections:
         # веса намеренно (``apps/skills/nutrition_anketa/fsm.py``), чтобы никто
         # в стоп-сценарии не дошёл до вопроса о весе. Предмет этого теста —
         # что ЧИСЛО доехало до анкеты, а не легло весом порции, — от порядка
-        # шагов не зависит: числовых ответов здесь по-прежнему два.
-        assert "перед расчётом" in asked_screening.reply_text.lower()
+        # шагов не зависит: числовых ответов здесь по-прежнему два. Шаг
+        # опознаётся по имени, не по словам вопроса: формулировка — предмет
+        # анкеты, а не этого теста.
+        assert asked_screening.meta.get("reply_kind") == "anketa_screening"
 
         asked_height = _turn(person, text="cb:anketa:choice:screening:none")
         assert asked_height is not None

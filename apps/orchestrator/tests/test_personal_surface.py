@@ -561,21 +561,27 @@ class TestChipsExecute:
             reply = render_diary(_bot_user(uid))
             assert _callbacks(reply) == [CHIP_WATER["callback"]], uid
 
-    def test_the_anketa_finale_offers_the_two_steps_that_exist(self, monkeypatch):
+    def test_the_anketa_finale_offers_the_steps_that_exist(self, monkeypatch):
         """Post-anketa the bot used to hand over five numbers and go quiet.
         The diary chip is conditional because only the GLOBAL path claims its
         callback — off that path it would be a button answering «я вас не
-        понял»."""
-        from apps.skills.nutrition_anketa.skill import _post_anketa_chips
+        понял». The withdraw chip (DRF-1698, владелец 12.09 §2) is
+        unconditional: the place where norms appear is where they can be
+        switched off."""
+        from apps.skills.nutrition_anketa.skill import WITHDRAW_CALLBACK, _post_anketa_chips
 
         monkeypatch.setattr(personal_surface, "diary_is_reachable", lambda: True)
         assert [c["callback"] for c in _post_anketa_chips()] == [
             CHIP_WATER["callback"],
             CHIP_DIARY["callback"],
+            WITHDRAW_CALLBACK,
         ]
 
         monkeypatch.setattr(personal_surface, "diary_is_reachable", lambda: False)
-        assert [c["callback"] for c in _post_anketa_chips()] == [CHIP_WATER["callback"]]
+        assert [c["callback"] for c in _post_anketa_chips()] == [
+            CHIP_WATER["callback"],
+            WITHDRAW_CALLBACK,
+        ]
 
 
 # ─── honesty ───────────────────────────────────────────────────────────────
