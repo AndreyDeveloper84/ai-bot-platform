@@ -930,7 +930,22 @@ def _followup_beat(settings):
         yield
 
 
-def test_person_with_live_consent_still_receives(tenant, bot_user, _followup_beat) -> None:
+@pytest.fixture
+def _promo_consent(bot_user):
+    """Тумблер «Акции и предложения» включён — через настоящий писатель.
+
+    Пост-визитный отклик — PROMO-класс (DRF-1731, 38-ФЗ ст. 18): одного
+    152-ФЗ-согласия ему мало. Три теста ниже — про отзыв и опт-аут, и
+    человек в них обязан СНАЧАЛА быть получателем; без рекламного
+    согласия он не был бы им ещё до того, о чём эти тесты.
+    """
+    customer_consents.set_marketing(bot_user, granted=True)
+    return bot_user
+
+
+def test_person_with_live_consent_still_receives(
+    tenant, bot_user, _promo_consent, _followup_beat
+) -> None:
     """Парная положительная проверка: чинить так, чтобы не получал никто, — не починка."""
     _make_due_reminder(tenant, bot_user, "yc-1520-ok")
 
@@ -943,7 +958,7 @@ def test_person_with_live_consent_still_receives(tenant, bot_user, _followup_bea
 
 
 def test_revocation_stops_the_scheduler(
-    client: Client, tenant, bot_user, revoke_url, auth, _followup_beat
+    client: Client, tenant, bot_user, _promo_consent, revoke_url, auth, _followup_beat
 ) -> None:
     """Отзыв проверяется по поведению: поле без эффекта — тот же обман.
 
@@ -970,7 +985,7 @@ def test_revocation_stops_the_scheduler(
 
 
 def test_hints_off_stops_the_scheduler(
-    client: Client, tenant, bot_user, hints_url, auth, _followup_beat
+    client: Client, tenant, bot_user, _promo_consent, hints_url, auth, _followup_beat
 ) -> None:
     """Тумблер подсказок влияет на поведение, а не только на экран."""
     _make_due_reminder(tenant, bot_user, "yc-1520-hints")
