@@ -890,6 +890,9 @@ class TestSiteDomainFallback:
         # приглашение вообще не создалось.
         assert body["invite_token"]
         assert body["fallback_link"] == ""
+        # DRF-1079 (12.09.2026): withheld BY NAME — the screen can say what
+        # is missing instead of hiding a block. Красный до правки: KeyError.
+        assert body["fallback_unavailable"] == "site_domain_unset"
 
     def test_unset_domain_is_harmless_when_the_mini_app_is_configured(
         self,

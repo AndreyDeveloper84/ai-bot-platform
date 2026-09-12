@@ -870,6 +870,12 @@ export interface InviteMasterResponse {
   invite_expires_at: string | null;
   fallback_link: string;
   /**
+   * DRF-1079: почему `fallback_link` пуст — `"site_domain_unset"`, когда на
+   * сервере не задан `SITE_DOMAIN` (ссылка вела бы на localhost и её не
+   * отдают), `null` — когда веб-адрес есть или не полагается по режиму.
+   */
+  fallback_unavailable?: "site_domain_unset" | string | null;
+  /**
    * `https://max.ru/<salon bot>?start=master_invite_<token>` — the one
    * thing the owner can actually hand over (DRF-1424, surfaced by
    * DRF-1505).

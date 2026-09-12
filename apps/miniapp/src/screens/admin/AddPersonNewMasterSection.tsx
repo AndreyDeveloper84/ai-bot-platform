@@ -379,6 +379,13 @@ export function AddPersonNewMasterSection({ me, switcher }: Props) {
               </p>
             )}
 
+            {!result.fallback_link && result.fallback_unavailable === "site_domain_unset" && (
+              <p className="admin-hint" data-testid="fallback-unavailable">
+                Веб-адрес анкеты недоступен: на сервере не задан SITE_DOMAIN.
+                Приглашение работает по ссылке выше — она от этого не зависит.
+              </p>
+            )}
+
             {result.fallback_link && (
               <details className="admin-details">
                 <summary>Веб-адрес анкеты — только внутри MAX</summary>
