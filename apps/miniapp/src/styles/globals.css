@@ -7378,3 +7378,125 @@ a {
 .setup-card__item + .setup-card__item {
   margin-top: var(--s-1);
 }
+
+/* DRF-1817 — экран 06 «Рабочие часы»: дни-чекбоксы (общие фишки), одно
+   время на все, неделя списком, редактор дня в листе. */
+.working-hours__title {
+  margin: 0 0 var(--s-2);
+  font-size: var(--font-size-400);
+  font-weight: 700;
+  color: var(--c-text-primary);
+}
+
+.working-hours__note,
+.working-hours__tz,
+.working-hours__empty {
+  margin: 0 0 var(--s-3);
+  font-size: var(--font-size-100);
+  color: var(--c-text-secondary);
+}
+
+.working-hours__section-title {
+  margin: var(--s-4) 0 var(--s-2);
+  font-size: var(--font-size-100);
+  font-weight: 600;
+  color: var(--c-text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.working-hours__bulk {
+  margin-bottom: var(--s-3);
+}
+
+.working-hours__times {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s-3);
+  margin-bottom: var(--s-3);
+}
+
+.working-hours__time {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+  font-size: var(--font-size-200);
+  color: var(--c-text-primary);
+}
+
+.working-hours__input {
+  min-height: 44px;
+  padding: var(--s-1) var(--s-2);
+  background: var(--c-surface-1);
+  border: 1px solid var(--c-divider);
+  border-radius: var(--r-md);
+  font-size: var(--font-size-200);
+  color: var(--c-text-primary);
+}
+
+.working-hours__list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.working-hours__item + .working-hours__item {
+  border-top: 1px solid var(--c-divider);
+}
+
+.working-hours__row {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--s-3);
+  width: 100%;
+  min-height: 44px;
+  padding: var(--s-3) 0;
+  background: none;
+  border: 0;
+  text-align: left;
+  font-size: var(--font-size-200);
+  color: var(--c-text-primary);
+  cursor: pointer;
+}
+
+.working-hours__day {
+  flex: 1 1 auto;
+}
+
+.working-hours__summary {
+  flex: 0 0 auto;
+  color: var(--c-text-secondary);
+}
+
+.working-hours__summary--error,
+.working-hours__error {
+  color: var(--c-danger);
+}
+
+.working-hours__error {
+  margin: 0 0 var(--s-3);
+  font-size: var(--font-size-100);
+}
+
+.working-hours__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s-2);
+  margin-top: var(--s-4);
+}
+
+.working-hours__switch-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s-3);
+  margin-bottom: var(--s-3);
+  font-size: var(--font-size-200);
+  color: var(--c-text-primary);
+}
+
+.schedule-week__setup {
+  display: inline-flex;
+  margin-top: var(--s-2);
+  text-decoration: none;
+}

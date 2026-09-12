@@ -136,6 +136,16 @@ export function MasterSettingsScreen() {
         {COPY.comingSoon}
       </p>
 
+      {/* DRF-1817 — экран 06: рабочие часы на общем контракте /working-hours. */}
+      <button
+        type="button"
+        className="btn-secondary"
+        style={{ width: "100%", justifyContent: "center", marginBottom: "var(--s-3)" }}
+        onClick={() => navigate("/solo/working-hours")}
+      >
+        Рабочие часы
+      </button>
+
       {/* Phase 2b — billing / payout surface (C2/C3, real proxies). */}
       <button
         type="button"

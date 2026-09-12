@@ -42,7 +42,7 @@ import {
   useState,
   type ReactNode,
 } from "react";
-import { useNavigate } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 import { ApiError } from "../lib/api";
 import { DEFAULT_SALON_OWNER_HINT } from "../lib/salonOwnerHint";
 import {
@@ -928,6 +928,11 @@ function WeekView({
         <p className="master-dashboard__empty-line">
           {COPY.emptyWeek(DEFAULT_SALON_OWNER_HINT)}
         </p>
+        {/* DRF-1817 — часы можно задать самому (экран 06); для соло владелец
+            и есть мастер. */}
+        <Link to="/solo/working-hours" className="btn-secondary schedule-week__setup">
+          Настроить рабочие часы
+        </Link>
       </section>
     );
   }

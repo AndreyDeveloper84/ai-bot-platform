@@ -293,6 +293,36 @@ export interface OnboardingReadiness {
 export const getOnboardingReadiness = (): Promise<OnboardingReadiness> =>
   request("/onboarding/readiness", { method: "GET" });
 
+// --- M24/M25 working hours (DRF-1816 / DRF-1817) ---------------------------
+// Mirrors apps/master_api/views.py::working_hours — a proxy to the catalog's
+// working-hours route. The response is the catalog's readback, never an echo.
+
+export interface WorkingHoursDay {
+  day_of_week: number; // 0 = Monday … 6 = Sunday
+  day_name?: string;
+  is_working_day: boolean;
+  start_time: string | null; // "HH:MM"
+  end_time: string | null;
+  break_start: string | null;
+  break_end: string | null;
+}
+
+export interface WorkingHoursResponse {
+  specialist_id: string | null;
+  timezone: string | null;
+  schedule: WorkingHoursDay[];
+  /** PUT only — §83: соло подтверждает своё расписание сразу после записи. */
+  schedule_confirmed?: boolean;
+}
+
+export const getWorkingHours = (): Promise<WorkingHoursResponse> =>
+  request("/working-hours", { method: "GET" });
+
+export const putWorkingHours = (
+  schedule: WorkingHoursDay[],
+): Promise<WorkingHoursResponse> =>
+  request("/working-hours", { method: "PUT", body: JSON.stringify({ schedule }) });
+
 /** Пункты, которые экран рисует: всё, кроме `unavailable`. */
 export const drawnReadinessItems = (items: ReadinessItem[]): ReadinessItem[] =>
   items.filter((item) => item.state !== "unavailable");
