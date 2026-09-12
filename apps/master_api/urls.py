@@ -26,6 +26,8 @@ urlpatterns = [
     path("dashboard", views.dashboard, name="dashboard"),
     # M3 schedule self-service (master-mobile §M3, PR Tier1.2)
     path("schedule", views.schedule, name="schedule"),
+    # DRF-1816 (M24) — недельный шаблон часов мастера: прокси в каталог.
+    path("working-hours", views.working_hours, name="working_hours"),
     path("availability", views.availability_request, name="availability_request"),
     path(
         "availability/pending",

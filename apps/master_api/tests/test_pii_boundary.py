@@ -903,6 +903,11 @@ NOT_SWEPT_ROUTES: dict[str, str] = {
     ),
     "assistant_ask": "POST; calls the LLM — covered by test_assistant_api",
     "assistant_confirm": "POST mutation; body is a signed action token only",
+    "working_hours": (
+        "GET/PUT proxy to the catalog's working-hours route (DRF-1816): the "
+        "response is the master's own weekly template + timezone, no customer "
+        "record — swept with a stubbed client in test_working_hours_1816"
+    ),
 }
 
 
