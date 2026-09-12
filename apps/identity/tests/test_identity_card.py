@@ -12,6 +12,7 @@ from __future__ import annotations
 import io
 import json
 import uuid
+from datetime import timedelta
 from unittest.mock import patch
 
 import pytest
@@ -71,8 +72,19 @@ def _person(salon: Tenant, other: Tenant, third: Tenant) -> BotUser:
         phone=PHONE,
         ayla_user_id=ayla,
     )
-    BotUser.all_tenants.create(tenant=other, channel="max", channel_user_id=CID, ayla_user_id=ayla)
-    BotUser.all_tenants.create(tenant=third, channel="max", channel_user_id=CID)
+    second = BotUser.all_tenants.create(
+        tenant=other, channel="max", channel_user_id=CID, ayla_user_id=ayla
+    )
+    last = BotUser.all_tenants.create(tenant=third, channel="max", channel_user_id=CID)
+    # DRF-1836 (12.09.2026): the card orders shells by `first_seen`, then `id`.
+    # `first_seen` is auto_now_add — three creates in one tick tie, and the
+    # tie-break is a random UUID, so «creation order» was a coincidence the
+    # test asserted (1 red in 5). State the fact the test is about: the
+    # shells appeared in this order. `update()` is the one path auto_now_add
+    # does not overwrite.
+    base = timezone.now() - timedelta(days=3)
+    for offset, row in enumerate((home, second, last)):
+        BotUser.all_tenants.filter(pk=row.pk).update(first_seen=base + timedelta(days=offset))
     TenantStaff.all_tenants.create(tenant=salon, bot_user=home, role=TenantStaff.Role.OWNER)
     CatalogMaster.all_tenants.create(
         tenant=salon,
