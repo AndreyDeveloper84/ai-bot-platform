@@ -253,6 +253,34 @@ describe("ссылка-приглашение", () => {
     ).toBeInTheDocument();
   });
 
+  it("называет, почему веб-адреса нет, а не прячет блок (DRF-1079)", async () => {
+    const user = userEvent.setup();
+    mockedInvite.mockResolvedValue({
+      ...INVITED,
+      fallback_link: "",
+      fallback_unavailable: "site_domain_unset",
+    });
+    renderNewMaster();
+
+    await submitInvite(user);
+
+    expect(await screen.findByTestId("fallback-unavailable")).toHaveTextContent(
+      /SITE_DOMAIN/,
+    );
+    expect(screen.queryByText(/Веб-адрес анкеты — только внутри MAX/)).toBeNull();
+  });
+
+  it("молчит о веб-адресе, когда его просто нет по режиму", async () => {
+    const user = userEvent.setup();
+    mockedInvite.mockResolvedValue({ ...INVITED, fallback_link: "", fallback_unavailable: null });
+    renderNewMaster();
+
+    await submitInvite(user);
+
+    expect(await screen.findByText(INVITED.invite_link)).toBeInTheDocument();
+    expect(screen.queryByTestId("fallback-unavailable")).toBeNull();
+  });
+
   it("не обещает ссылку, которой нет", async () => {
     const user = userEvent.setup();
     mockedInvite.mockResolvedValue({ ...INVITED, invite_link: "" });

@@ -261,6 +261,25 @@ def _site_domain_is_loopback() -> bool:
     return host.lower() in LOOPBACK_HOSTS
 
 
+FALLBACK_UNAVAILABLE_SITE_DOMAIN_UNSET = "site_domain_unset"
+"""Machine name of the one reason the web fallback is withheld (DRF-1079).
+
+An empty ``fallback_link`` alone is a blank: the owner's screen hid the
+block and nobody on that side could tell «withheld on purpose» from
+«never existed». The name travels in the envelope so the screen can say
+what is missing and the deploy log, the ERROR line and the response all
+speak the same word.
+"""
+
+
+def _fallback_unavailable_reason() -> str | None:
+    """Why :func:`_fallback_link` returns ``""`` — or ``None`` when it does not."""
+
+    if not settings.DEBUG and _site_domain_is_loopback():
+        return FALLBACK_UNAVAILABLE_SITE_DOMAIN_UNSET
+    return None
+
+
 def _fallback_link(token: uuid.UUID) -> str:
     """Web fallback URL, or ``""`` when it would point at localhost.
 
@@ -571,6 +590,7 @@ def _response_payload(
             "invite_token": None,
             "invite_expires_at": None,
             "fallback_link": "",
+            "fallback_unavailable": None,
             "invite_link": "",
         }
     return {
@@ -580,6 +600,8 @@ def _response_payload(
         if master.invite_expires_at is not None
         else None,
         "fallback_link": _fallback_link(master.invite_token),
+        # DRF-1079: withheld on purpose — and said so, by name.
+        "fallback_unavailable": _fallback_unavailable_reason(),
         "invite_link": _bot_start_link(tenant, master.invite_token),
     }
 
