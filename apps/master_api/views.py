@@ -76,6 +76,7 @@ from apps.master_api.services.conversation_detail import (
 from apps.master_api.services.catalog import list_master_services
 from apps.master_api.services.customers import list_master_customers
 from apps.master_api.services.onboarding_readiness import build_readiness, identity_facts
+from apps.master_api.services.permissions import permissions_from_facts
 from apps.master_api.services.dashboard import build_dashboard
 from apps.master_api.services.billing import (
     BillingProxyResult,
@@ -978,9 +979,10 @@ def me(request: HttpRequest) -> HttpResponse:
     rebuild local state after the session token is loaded from
     DeviceStorage.
 
-    Permissions block: PR 1 hardcodes all three to True. The full
-    permission model (PR 11+) will compute these from role + tenant
-    settings.
+    Permissions block (DRF-1805): из фактов проводки — право есть ровно
+    тогда, когда в URLconf стоит маршрут, принимающий действие
+    (:mod:`apps.master_api.services.permissions`); ``can_edit_services``
+    ложно, пока нет ручки M10. Права роли/тенанта — не этот срез.
     """
 
     master: CatalogMaster = request.master  # type: ignore[attr-defined]
@@ -1002,11 +1004,7 @@ def me(request: HttpRequest) -> HttpResponse:
                 "tenant_id": str(master.tenant_id),
                 "name": master.tenant.name,
             },
-            "permissions": {
-                "can_edit_schedule": True,
-                "can_edit_services": True,
-                "can_message_customers": True,
-            },
+            "permissions": permissions_from_facts(),
             "setup_state": "READY" if block is None else "SETUP_PENDING",
             "sale_block": block,
             "identity": identity_facts(master),
