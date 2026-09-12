@@ -582,6 +582,14 @@ class BookingReminder(models.Model):
         # отдельный signal для post-pilot analytics (stale-rate spike
         # detection per master / service / time-of-day).
         STALE_DROPPED = "stale_dropped", "Dropped at dispatch (booking changed)"
+        # DRF-1731 замер 12.09: ``UserPreferences.notify_reminders``
+        # обещал «only soft reminders mute», а напоминания его не читали
+        # (0 hits в apps/bookings/). MUTED — «человек выключил напоминания»:
+        # запись цела, подтверждение цело, ушло только напоминание.
+        # Отдельно от STALE_DROPPED (запись изменилась) и CANCELLED
+        # (отменил вебхук), чтобы аналитика не читала выключенный тумблер
+        # как испорченную запись.
+        MUTED = "muted", "Muted by the person (notify_reminders off)"
 
     id = models.UUIDField(
         primary_key=True, default=uuid.uuid4, editable=False, verbose_name="Идентификатор"
