@@ -238,3 +238,14 @@ class TestOwnerTurns:
         _model(monkeypatch, _prose(HONEST))
         screen, _ = _screen(sent, text="и?")
         assert screen == HONEST
+
+    def test_honest_prose_beside_a_declined_tool_still_reaches_the_person(self, monkeypatch, sent):
+        """DRF-1542 сохраняется: после вето ход идёт обратно к модели, и её
+        честный текст (без обещания) доезжает. Сторож — это стем И
+        отсутствие действия, а не любой ход с acted=False."""
+        _model(monkeypatch, _tool_with_prose("log_water", {"drink_text": "чай"}, HONEST))
+        monkeypatch.setattr(concierge, "execute_nutrition_tool", lambda *a, **kw: None)
+
+        screen, _ = _screen(sent, text="выпил чай")
+
+        assert screen == HONEST
