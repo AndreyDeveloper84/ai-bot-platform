@@ -167,12 +167,12 @@ ALLOWED_DOMAINS_EXACT = {
 #: ``python -c "import hashlib;print(hashlib.sha256(b'<id>').hexdigest())"``.
 KNOWN_ID_HASHES = frozenset(
     {
-        "20b03aa0c288ea81466dd582a81f0ebda10ef44e463d9e28799c714e12b4543d",
-        "2f3dae3bfa039bb025e89618c7f8cfe68b7afbe6e889635d0873a12d67c0d7ca",
-        "3501a5e5b6d68c34d1ac73eb0a69b927b15f516dcd5dcb767bea91cdac1cfdb5",
-        "64e6bf61c846260ab60e5e1937293d37db26eef59dc30a48950d969e6c842023",
-        "7a11a8a4ca320df2e8eeacfb57f86104183ca1e273ccde69394bf38d5eebc4a7",
-        "b981a1539bfe2c4e5d54bc24524cd13d0933d9f8928a648736ba1d3de264fb64",
+        "20b03aa0c288ea81466dd582a81f0ebda10ef44e463d9e28799c714e12b4543d",  # pragma: allowlist secret
+        "2f3dae3bfa039bb025e89618c7f8cfe68b7afbe6e889635d0873a12d67c0d7ca",  # pragma: allowlist secret
+        "3501a5e5b6d68c34d1ac73eb0a69b927b15f516dcd5dcb767bea91cdac1cfdb5",  # pragma: allowlist secret
+        "64e6bf61c846260ab60e5e1937293d37db26eef59dc30a48950d969e6c842023",  # pragma: allowlist secret
+        "7a11a8a4ca320df2e8eeacfb57f86104183ca1e273ccde69394bf38d5eebc4a7",  # pragma: allowlist secret
+        "b981a1539bfe2c4e5d54bc24524cd13d0933d9f8928a648736ba1d3de264fb64",  # pragma: allowlist secret
     }
 )
 

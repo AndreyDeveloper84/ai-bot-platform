@@ -43,6 +43,9 @@ class TestPhones:
         assert _REAL_RANGE_PHONE not in findings[0], "сторож не должен печатать значение"
 
     def test_test_range_and_masked_pass(self):
+        # положительная стража: шаблон ВИДИТ оба номера — молчание сторожа ниже не от слепоты
+        assert g.PHONE.search(_TEST_RANGE_PHONE) is not None
+        assert g.PHONE.search(_PAIRS_FIXTURE_PHONE) is not None
         assert _scan("тестовый " + _TEST_RANGE_PHONE) == []
         assert _scan("фикстура " + _PAIRS_FIXTURE_PHONE) == []
         assert _scan("маска +7 9xx xxx-xx-xx") == []
@@ -58,14 +61,22 @@ class TestEmails:
 
     def test_reserved_and_own_domains_pass(self):
         for addr in (
-            "<имя>@example.org",
             "test@example.com",
             "ops@gobeauty.site",
             "x@stg.penza.taxi",
             "a@b.test",
             "noreply@anthropic.com",
         ):
+            assert g.EMAIL.search(addr) is not None, addr  # шаблон видит адрес
             assert _scan("адрес " + addr) == [], addr
+
+    def test_cyrillic_mask_is_outside_the_pattern_by_design(self):
+        # «<имя>@example.org» шаблон не считает адресом вовсе — маска и не должна
+        # выглядеть адресом; сторож молчит не потому, что домен разрешён.
+        assert g.EMAIL.search("<имя>@example.org") is None
+        assert (
+            _scan("адрес <имя>@example.org") == []
+        )  # empty-assert-ok: маска вне шаблона намеренно
 
 
 class TestChannelIds:
@@ -76,6 +87,7 @@ class TestChannelIds:
         assert len(findings) == 1 and "§12" in findings[0]
         assert fake_id not in findings[0]
         # без хэша тот же текст чист — значений в стороже нет
+        assert g.DIGIT_RUN.search(fake_id) is not None  # цифровой ряд на месте
         assert g.scan_text("apps/x.py", "user_id = " + fake_id, known_hashes=frozenset()) == []
 
     def test_unmasked_handle_in_docs_only(self):
@@ -95,9 +107,11 @@ class TestFiles:
     def test_binary_and_clean_text_pass(self, tmp_path: Path):
         img = tmp_path / "x.bin"
         img.write_bytes(b"\0\1\2" + _REAL_RANGE_PHONE.encode())
+        assert img.read_bytes()  # файл не пуст
         assert g.scan_file(img, "x.bin") == []
         doc = tmp_path / "note.md"
         doc.write_text("ничего личного, только 2026-09-12 и DRF-1269\n", encoding="utf-8")
+        assert doc.read_text(encoding="utf-8")  # файл не пуст
         assert g.scan_file(doc, "note.md") == []
 
 
