@@ -30,6 +30,7 @@
 
 import { ApiError } from "./api";
 import { applyDevBypassHeaders } from "./dev-bypass";
+import { applySalonChoiceHeader } from "./salon-choice";
 import { getInitData } from "./max-sdk";
 
 const API_BASE = "/api/v1/customer";
@@ -92,6 +93,7 @@ function buildAuthHeaders(): Headers {
   const initData = getInitData();
   if (initData) headers.set("Authorization", `MaxInitData ${initData}`);
   applyDevBypassHeaders(headers);
+  applySalonChoiceHeader(headers);
   return headers;
 }
 

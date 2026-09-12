@@ -16,6 +16,7 @@
 import { getInitData } from "./max-sdk";
 import { ApiError } from "./api";
 import { applyDevBypassHeaders } from "./dev-bypass";
+import { applySalonChoiceHeader } from "./salon-choice";
 
 const MASTER_API_BASE = "/api/v1/master";
 
@@ -29,6 +30,7 @@ export async function request<T>(path: string, init: RequestInit = {}): Promise<
   const headers = new Headers(init.headers);
   if (initData) headers.set("Authorization", `MaxInitData ${initData}`);
   applyDevBypassHeaders(headers);
+  applySalonChoiceHeader(headers);
   // Don't auto-set Content-Type for FormData (the browser writes the
   // boundary string). JSON callers explicitly set it.
   const body = init.body;
@@ -370,6 +372,7 @@ export const uploadMasterProfilePhoto = async (
   const headers = new Headers();
   if (initData) headers.set("Authorization", `MaxInitData ${initData}`);
   applyDevBypassHeaders(headers);
+  applySalonChoiceHeader(headers);
   // No Content-Type — let fetch set the multipart boundary.
   const res = await fetch(`${MASTER_API_BASE}/profile`, {
     method: "PATCH",

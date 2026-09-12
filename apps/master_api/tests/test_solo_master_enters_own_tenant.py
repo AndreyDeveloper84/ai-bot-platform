@@ -24,7 +24,6 @@ targeted proof, а не описание желаемого.
 from __future__ import annotations
 
 import json
-import logging
 import time as time_module
 from datetime import timedelta
 
@@ -179,13 +178,20 @@ class TestZeroWorkingRowsKeepsTodaysRule:
         assert resolve_bot_user(_Verified("no-such-person")) is None
 
 
-class TestTwoWorkingRowsUntilSliceFive:
-    def test_deterministic_first_by_tenant_age_with_a_warning(self, salon_bot, salon, solo, caplog):
-        """Две рабочие строки (0 таких на пилоте 12.09) — до DRF-1766 выбираем детерминированно и говорим об этом.
+class TestTwoWorkingRowsAskThePerson:
+    def test_two_working_rows_are_a_question_not_a_silent_pick_2026_09_12(
+        self, salon_bot, salon, solo
+    ):
+        """Эталон ПЕРЕВЁРНУТ 12.09.2026 (DRF-1766, срез 5).
 
-        Не по ``last_seen`` (гонка с часами, DRF-1653), а по возрасту тенанта
-        и pk: одни и те же данные — один и тот же ответ.
+        Раньше (заглушка среза 2 «до DRF-1766»): две рабочие строки → старейший
+        тенант детерминированно + WARNING several_working_tenants. Решение
+        владельца — выбор, не страж: резолвер поднимает SalonChoiceRequired
+        с обоими тенантами, а поверхности спрашивают человека. Что осталось
+        от прежнего эталона — порядок кандидатов по возрасту тенанта, не по
+        ``last_seen`` (DRF-1653): одни и те же данные — один и тот же список.
         """
+        from apps.identity.services.bot_user_resolver import SalonChoiceRequired
 
         a = BotUser.all_tenants.create(tenant=salon, channel="max", channel_user_id=CHANNEL_USER_ID)
         b = BotUser.all_tenants.create(tenant=solo, channel="max", channel_user_id=CHANNEL_USER_ID)
@@ -195,20 +201,23 @@ class TestTwoWorkingRowsUntilSliceFive:
         TenantStaff.all_tenants.create(
             tenant=solo, bot_user=b, role=TenantStaff.Role.OWNER, created_by=b
         )
-        # B свежее — по свежести выбрали бы B; правило про возраст тенанта.
         _touch(a, timezone.now() - timedelta(days=3))
         _touch(b, timezone.now())
-        older = min((salon, solo), key=lambda t: (t.created_at, t.pk))
-        expected = a if older == salon else b
+        older_first = sorted((salon, solo), key=lambda t: (t.created_at, str(t.pk)))
 
-        with caplog.at_level(logging.WARNING, logger="apps.identity.services.bot_user_resolver"):
-            first = _resolve_bot_user(_Verified(CHANNEL_USER_ID, bot_slug="salon"))
-            second = _resolve_bot_user(_Verified(CHANNEL_USER_ID, bot_slug="salon"))
+        with pytest.raises(SalonChoiceRequired) as exc:
+            _resolve_bot_user(_Verified(CHANNEL_USER_ID, bot_slug="salon"))
 
-        assert first == second == expected
-        assert any("several_working_tenants" in r.getMessage() for r in caplog.records), [
-            r.getMessage() for r in caplog.records
-        ]
+        assert [t.slug for t in exc.value.tenants] == [t.slug for t in older_first]
+        # And the choice, once made, is honoured — either way round.
+        assert (
+            _resolve_bot_user(_Verified(CHANNEL_USER_ID, bot_slug="salon"), chosen_slug=solo.slug)
+            == b
+        )
+        assert (
+            _resolve_bot_user(_Verified(CHANNEL_USER_ID, bot_slug="salon"), chosen_slug=salon.slug)
+            == a
+        )
 
 
 class TestMeAnswersForTheWorkingTenantOnTheSalonSurface:
