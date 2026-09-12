@@ -643,6 +643,20 @@ MAX_MINIAPP_URL = os.environ.get("MAX_MINIAPP_URL", "")
 MASTER_SESSION_SECRET = os.environ.get("MASTER_SESSION_SECRET", "")
 MASTER_SESSION_TTL_DAYS = int(os.environ.get("MASTER_SESSION_TTL_DAYS", "30"))
 
+# Solo registration in the salon bot (DRF-1793, M1; owner's word 12.09
+# PROMPT §12): the city is chosen from a CONTROLLED list of cities we
+# serve, never typed as free text. Stored spellings, comma-separated;
+# the default is the pilot city (the same one migration 0010 backfilled).
+# An empty list fails closed: the dialog refuses at the city step with a
+# named reason instead of accepting anything.
+SOLO_REGISTRATION_CITIES: list[str] = [
+    c.strip() for c in os.environ.get("SOLO_REGISTRATION_CITIES", "Пенза").split(",") if c.strip()
+]
+# How long a half-finished registration draft is kept (hours). Long
+# enough to survive a chat TTL and a night's sleep, short enough that a
+# stale name/city is not confirmed a month later without a fresh look.
+SOLO_REGISTRATION_DRAFT_TTL_HOURS = int(os.environ.get("SOLO_REGISTRATION_DRAFT_TTL_HOURS", "72"))
+
 # Master invite flow (PR 3 / MM2). The admin invite endpoint
 # (`apps/admin_api/views_invite.py`) renders a web fallback URL that
 # embeds the invite token, shown by the owner's UI as a "copy invite

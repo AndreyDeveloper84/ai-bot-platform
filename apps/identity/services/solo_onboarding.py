@@ -317,6 +317,7 @@ def create_solo_provider(
     phone: str = "",
     chat_id: str = "",
     tenant_name: Optional[str] = None,
+    city: str = "",
 ) -> SoloOnboardingResult:
     """Atomic seed for self-employed solo provider registration.
 
@@ -457,6 +458,7 @@ def create_solo_provider(
     new_tenant = Tenant.objects.create(
         slug=target_slug,
         name=final_name,
+        city=(city or "").strip(),  # DRF-1793: город из регистрации; «» — не спрашивали
         is_active=True,
     )
     new_bot_user = BotUser.all_tenants.create(

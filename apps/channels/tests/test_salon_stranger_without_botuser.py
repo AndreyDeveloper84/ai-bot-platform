@@ -221,24 +221,63 @@ class TestTheCodeDecidesTheTenant:
         assert "код приглашения" not in _text(sent)
 
 
+def _register_solo_through_the_dialog(salon: Tenant, *, first_update_id: int = 1) -> int:
+    """DRF-1793 (M1): «Я работаю сам» → имя (prefill из MAX) → город → «Создать мой профиль».
+
+    Возвращает следующий свободный ``update_id``. Кабинет появляется только
+    на последнем шаге — это и есть слово владельца «не создавать Tenant до
+    final confirmation».
+    """
+
+    from apps.identity.services.solo_registration_draft import city_code
+
+    uid = first_update_id
+    _handle(salon_handler.SOLO_REGISTER_CALLBACK, salon, update_id=uid)
+    uid += 1
+    _handle(salon_handler.SOLO_NAME_KEEP_CALLBACK, salon, update_id=uid)
+    uid += 1
+    city = salon_handler_city()
+    _handle(f"{salon_handler.SOLO_CITY_CALLBACK_PREFIX}{city_code(city)}", salon, update_id=uid)
+    uid += 1
+    _handle(salon_handler.SOLO_CONFIRM_CALLBACK, salon, update_id=uid)
+    return uid + 1
+
+
+def salon_handler_city() -> str:
+    from apps.identity.services.solo_registration_draft import served_cities
+
+    cities = served_cities()
+    assert cities, "SOLO_REGISTRATION_CITIES must name at least one city for this test"
+    return cities[0]
+
+
 class TestSoloRegistrationFromTheEventAlone:
     def test_i_work_alone_creates_exactly_one_row_in_the_solo_tenant(self, salon, sent):
-        """Красный до правки: две строки — салонная customer и соло."""
+        """Красный до правки: две строки — салонная customer и соло.
 
-        _handle(salon_handler.SOLO_REGISTER_CALLBACK, salon)
+        DRF-1793: кнопка «Я работаю сам» открывает диалог, а не заводит
+        кабинет; строка появляется только после «Создать мой профиль» — и
+        ровно одна, в соло-тенанте.
+        """
+
+        _handle(salon_handler.SOLO_REGISTER_CALLBACK, salon, update_id=1)
+        assert _rows() == [], "до подтверждения строки нет (M1)"
+
+        _register_solo_through_the_dialog(salon, first_update_id=2)
 
         rows = _rows()
         assert len(rows) == 1, [r.tenant.slug for r in rows]
         assert rows[0].tenant.slug.startswith("solo-")
+        assert rows[0].tenant.city == salon_handler_city()
         assert _text(sent) == salon_handler.SOLO_CREATED_PENDING
 
     def test_a_returning_solo_master_is_served_in_her_workspace(self, salon, sent):
         """Второй визит после «Я работаю сам»: рабочая строка есть — 4a ведёт в кабинет."""
 
-        _handle(salon_handler.SOLO_REGISTER_CALLBACK, salon, update_id=1)
+        next_uid = _register_solo_through_the_dialog(salon, first_update_id=1)
         sent.reset_mock()
 
-        _handle("привет", salon, update_id=2)
+        _handle("привет", salon, update_id=next_uid)
 
         assert len(_rows()) == 1
         assert _rows()[0].tenant.slug.startswith("solo-")

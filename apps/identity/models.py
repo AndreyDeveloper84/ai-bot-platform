@@ -1387,3 +1387,52 @@ class SoloIdentityLink(models.Model):
     @property
     def is_linked(self) -> bool:
         return self.status == self.Status.LINKED
+
+
+class SoloRegistrationDraft(models.Model):
+    """Черновик регистрации соло-мастера в MAX — по личности, до создания кабинета (DRF-1793, M1).
+
+    Слово владельца (PROMPT §12): «Я работаю сам» → имя → город → сводка →
+    «Создать мой профиль» → явное подтверждение → создание. **Тенант не
+    создаётся до подтверждения.** У незнакомца строки ``BotUser`` нет
+    (DRF-1784), а диалог из трёх шагов должен пережить и TTL чата, и
+    перезапуск процесса (фриз §19) — поэтому черновик durable и ключуется
+    личностью ``(channel, channel_user_id)``, не строкой.
+
+    Это не заявка и не аккаунт: одна строка на личность, перезаписывается
+    при новом «Я работаю сам», удаляется при создании кабинета и при
+    отмене, протухает по ``expires_at``. Телефона здесь нет.
+    """
+
+    class Step(models.TextChoices):
+        NAME = "name", "Ждём имя"
+        CITY = "city", "Ждём город"
+        CONFIRM = "confirm", "Ждём подтверждение"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    channel = models.CharField(max_length=16)
+    channel_user_id = models.CharField(max_length=128)
+    chat_id = models.CharField(max_length=64, blank=True, default="")
+    step = models.CharField(max_length=16, choices=Step.choices, default=Step.NAME)
+    #: Имя, которое увидят клиенты. Prefill — имя отправителя из MAX,
+    #: человек его подтверждает или заменяет.
+    display_name = models.CharField(max_length=80, blank=True, default="")
+    #: Город из контролируемого списка (``settings.SOLO_REGISTRATION_CITIES``),
+    #: хранимое написание.
+    city = models.CharField(max_length=120, blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    expires_at = models.DateTimeField()
+
+    class Meta:
+        verbose_name = "Черновик регистрации соло-мастера"
+        verbose_name_plural = "Черновики регистрации соло-мастеров"
+        constraints = [
+            models.UniqueConstraint(
+                fields=["channel", "channel_user_id"],
+                name="solo_registration_draft_one_per_identity",
+            ),
+        ]
+
+    def __str__(self) -> str:
+        return f"SoloRegistrationDraft[{self.channel}:{self.channel_user_id} {self.step}]"
