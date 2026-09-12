@@ -162,6 +162,45 @@ def advance_to_linked(channel: str, channel_user_id: str, *, now: datetime | Non
     return written
 
 
+def client_contour_only() -> list[tuple[str, str]]:
+    """People with a ``global_bot`` shell and NO salon shell, still UNRESOLVED.
+
+    Outside §2's fourteen — they never met a salon — and therefore outside
+    :func:`salon_people`. Their standing is nonetheless fixed by construction
+    (the client contour IS the profile's side), and a status that stays
+    UNRESOLVED for them forever would make ``unresolved_count`` lie about the
+    one thing it exists to say. Found on the pilot 12.09: four such shells
+    (900284–900287) after the first ``--apply``.
+    """
+    salon = {tuple(p) for p in salon_people()}
+    out: list[tuple[str, str]] = []
+    for channel, cid in (
+        BotUser.all_tenants.filter(
+            tenant__slug=GLOBAL_BOT_TENANT_SLUG, customer_status=BotUser.CustomerStatus.UNRESOLVED
+        )
+        .order_by("first_seen", "id")
+        .values_list("channel", "channel_user_id")
+    ):
+        if (channel, cid) not in salon and (channel, cid) not in out:
+            out.append((channel, cid))
+    return out
+
+
+def stamp_client_contour(channel: str, channel_user_id: str, *, now: datetime | None = None) -> int:
+    """LINKED / CLIENT_BOT on the person's global shells that are still UNRESOLVED."""
+    moment = now or datetime.now(UTC)
+    return BotUser.all_tenants.filter(
+        tenant__slug=GLOBAL_BOT_TENANT_SLUG,
+        channel=channel,
+        channel_user_id=channel_user_id,
+        customer_status=BotUser.CustomerStatus.UNRESOLVED,
+    ).update(
+        customer_status=BotUser.CustomerStatus.LINKED,
+        customer_source=BotUser.CustomerSource.CLIENT_BOT,
+        customer_status_at=moment,
+    )
+
+
 def unresolved_count() -> int:
     return BotUser.all_tenants.filter(Q(customer_status=BotUser.CustomerStatus.UNRESOLVED)).count()
 
@@ -175,6 +214,8 @@ __all__ = [
     "advance_to_linked",
     "apply_classification",
     "classify",
+    "client_contour_only",
     "salon_people",
+    "stamp_client_contour",
     "unresolved_count",
 ]
