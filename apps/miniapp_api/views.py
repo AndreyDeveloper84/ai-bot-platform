@@ -1081,7 +1081,10 @@ def _create_booking_via_ayla(
             details = exc.details or {}
             logger.info(
                 "miniapp_api.create_booking.quote_changed tenant=%s service=%s master=%s field=%s",
-                tenant.id, service_id, master_id, details.get("field"),
+                tenant.id,
+                service_id,
+                master_id,
+                details.get("field"),
             )
             return JsonResponse(
                 {
@@ -1253,7 +1256,11 @@ def booking_quote(request: HttpRequest) -> HttpResponse:
                 service_id=str(service.ayla_service_id),
             )
         except BookingAPIError:
-            logger.warning("miniapp_api.booking_quote.edge_unavailable master=%s service=%s", master_id, service_id)
+            logger.warning(
+                "miniapp_api.booking_quote.edge_unavailable master=%s service=%s",
+                master_id,
+                service_id,
+            )
             rows = []
         if rows:
             edge = rows[0]

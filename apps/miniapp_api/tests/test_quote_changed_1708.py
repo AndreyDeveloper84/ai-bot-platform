@@ -18,6 +18,7 @@
   парами дословно; это не ``slot_unavailable`` и не ``bad_request``;
 - кривая котировка — 400 до любого вызова Ayla.
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -87,7 +88,10 @@ def tenant(db) -> Tenant:
 @pytest.fixture
 def bot_user(tenant) -> BotUser:
     return BotUser.all_tenants.create(
-        tenant=tenant, channel="max", channel_user_id="17080", chat_id="17080",
+        tenant=tenant,
+        channel="max",
+        channel_user_id="17080",
+        chat_id="17080",
         ayla_user_id=AYLA_UID,
     )
 
@@ -97,9 +101,13 @@ def master(tenant) -> CatalogMaster:
     from django.utils import timezone as tz
 
     return CatalogMaster.all_tenants.create(
-        tenant=tenant, external_updated_at=tz.now(), name="Ольга",
-        specialization="Маникюр", is_active=True,
-        invite_status=CatalogMaster.InviteStatus.ACCEPTED, ayla_user_id=MASTER_AYLA_ID,
+        tenant=tenant,
+        external_updated_at=tz.now(),
+        name="Ольга",
+        specialization="Маникюр",
+        is_active=True,
+        invite_status=CatalogMaster.InviteStatus.ACCEPTED,
+        ayla_user_id=MASTER_AYLA_ID,
     )
 
 
@@ -110,16 +118,27 @@ def service(tenant, master) -> CatalogService:
     from apps.catalog.models import MasterService
 
     svc = CatalogService.all_tenants.create(
-        tenant=tenant, external_updated_at=tz.now(), name="Маникюр", slug="manikyur",
-        duration_min=60, price_from=1500, is_active=True, ayla_service_id=SERVICE_AYLA_ID,
+        tenant=tenant,
+        external_updated_at=tz.now(),
+        name="Маникюр",
+        slug="manikyur",
+        duration_min=60,
+        price_from=1500,
+        is_active=True,
+        ayla_service_id=SERVICE_AYLA_ID,
     )
     MasterService.all_tenants.create(tenant=tenant, master=master, service=svc)
     return svc
 
 
 class _StubAylaClient:
-    def __init__(self, *, exc: Exception | None = None, edges: list[dict] | None = None,
-                 edges_exc: Exception | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        exc: Exception | None = None,
+        edges: list[dict] | None = None,
+        edges_exc: Exception | None = None,
+    ) -> None:
         self.exc = exc
         self.edges = edges if edges is not None else []
         self.edges_exc = edges_exc
@@ -130,7 +149,9 @@ class _StubAylaClient:
         self.calls.append(kwargs)
         if self.exc:
             raise self.exc
-        return AylaBookingRecord(appointment_id=str(uuid.uuid4()), raw={"id": "x", "status": "confirmed"})
+        return AylaBookingRecord(
+            appointment_id=str(uuid.uuid4()), raw={"id": "x", "status": "confirmed"}
+        )
 
     def get_specialist_service_edges(self, **kwargs):
         self.edge_calls.append(kwargs)
@@ -147,14 +168,26 @@ def stub(monkeypatch) -> _StubAylaClient:
 
 
 def _post(client: DjangoClient, service, master, **extra: Any):
-    body = {"service_id": str(service.id), "master_id": str(master.id), "visit_at": visit_at().isoformat(), **extra}
-    return client.post("/api/v1/customer/bookings", data=json.dumps(body),
-                       content_type="application/json", HTTP_AUTHORIZATION=_auth())
+    body = {
+        "service_id": str(service.id),
+        "master_id": str(master.id),
+        "visit_at": visit_at().isoformat(),
+        **extra,
+    }
+    return client.post(
+        "/api/v1/customer/bookings",
+        data=json.dumps(body),
+        content_type="application/json",
+        HTTP_AUTHORIZATION=_auth(),
+    )
 
 
 def _quote(client: DjangoClient, service, master):
-    return client.get("/api/v1/customer/quote", {"master_id": str(master.id), "service_id": str(service.id)},
-                      HTTP_AUTHORIZATION=_auth())
+    return client.get(
+        "/api/v1/customer/quote",
+        {"master_id": str(master.id), "service_id": str(service.id)},
+        HTTP_AUTHORIZATION=_auth(),
+    )
 
 
 # ─── GET /customer/quote ───────────────────────────────────────────────────
@@ -167,14 +200,24 @@ class TestQuote:
         assert r.status_code == 200, r.content
         assert r.json()["quote"] == {"price": "1700.00", "duration_minutes": 45, "source": "edge"}
         # Ребро спрашивается по тем же id, что и создание записи.
-        assert stub.edge_calls == [{"specialist_id": str(master.id), "service_id": str(SERVICE_AYLA_ID)}]
+        assert stub.edge_calls == [
+            {"specialist_id": str(master.id), "service_id": str(SERVICE_AYLA_ID)}
+        ]
 
-    def test_no_edge_falls_back_to_the_mirror_service_values(self, client, bot_user, master, service, stub):
+    def test_no_edge_falls_back_to_the_mirror_service_values(
+        self, client, bot_user, master, service, stub
+    ):
         r = _quote(client, service, master)
         assert r.status_code == 200
-        assert r.json()["quote"] == {"price": "1500.00", "duration_minutes": 60, "source": "service"}
+        assert r.json()["quote"] == {
+            "price": "1500.00",
+            "duration_minutes": 60,
+            "source": "service",
+        }
 
-    def test_edge_read_failure_degrades_to_service_values(self, client, bot_user, master, service, stub):
+    def test_edge_read_failure_degrades_to_service_values(
+        self, client, bot_user, master, service, stub
+    ):
         stub.edges_exc = BookingUnavailableError("down")
         r = _quote(client, service, master)
         assert r.status_code == 200
@@ -186,13 +229,19 @@ class TestQuote:
         assert r.json()["quote"] == {"price": None, "duration_minutes": None, "source": "service"}
 
     def test_unknown_master_is_404(self, client, bot_user, master, service, stub):
-        r = client.get("/api/v1/customer/quote", {"master_id": str(uuid.uuid4()), "service_id": str(service.id)},
-                       HTTP_AUTHORIZATION=_auth())
+        r = client.get(
+            "/api/v1/customer/quote",
+            {"master_id": str(uuid.uuid4()), "service_id": str(service.id)},
+            HTTP_AUTHORIZATION=_auth(),
+        )
         assert r.status_code == 404
 
     def test_malformed_ids_are_400(self, client, bot_user, master, service, stub):
-        r = client.get("/api/v1/customer/quote", {"master_id": "nope", "service_id": str(service.id)},
-                       HTTP_AUTHORIZATION=_auth())
+        r = client.get(
+            "/api/v1/customer/quote",
+            {"master_id": "nope", "service_id": str(service.id)},
+            HTTP_AUTHORIZATION=_auth(),
+        )
         assert r.status_code == 400
 
 
@@ -206,7 +255,9 @@ class TestQuotedPassthrough:
         assert stub.calls[0]["quoted_price"] == "1500.00"
         assert stub.calls[0]["quoted_duration_minutes"] == 60
 
-    def test_price_stays_a_decimal_string_not_a_float(self, client, bot_user, master, service, stub):
+    def test_price_stays_a_decimal_string_not_a_float(
+        self, client, bot_user, master, service, stub
+    ):
         # 1500 как число в JSON → строка «1500», не 1500.0: сравнение по
         # значению делает Ayla, написание — наше и должно быть точным.
         r = _post(client, service, master, quoted_price=1500)
@@ -225,14 +276,19 @@ class TestQuotedPassthrough:
         assert sent["payment_required"] is False
         assert set(sent) & {"quoted_price", "quoted_duration_minutes"} == set()
 
-    @pytest.mark.parametrize("extra", [
-        {"quoted_price": "abc"},
-        {"quoted_price": "-1"},
-        {"quoted_duration_minutes": 0},
-        {"quoted_duration_minutes": "60"},
-        {"quoted_duration_minutes": True},
-    ])
-    def test_malformed_quote_is_400_before_ayla(self, client, bot_user, master, service, stub, extra):
+    @pytest.mark.parametrize(
+        "extra",
+        [
+            {"quoted_price": "abc"},
+            {"quoted_price": "-1"},
+            {"quoted_duration_minutes": 0},
+            {"quoted_duration_minutes": "60"},
+            {"quoted_duration_minutes": True},
+        ],
+    )
+    def test_malformed_quote_is_400_before_ayla(
+        self, client, bot_user, master, service, stub, extra
+    ):
         r = _post(client, service, master, **extra)
         assert r.status_code == 400, r.content
         assert stub.calls == []
@@ -242,34 +298,58 @@ class TestQuotedPassthrough:
 
 
 class TestQuoteChanged:
-    def test_409_quote_changed_carries_both_values_verbatim(self, client, bot_user, master, service, monkeypatch):
-        s = _StubAylaClient(exc=BookingBadRequestError(
-            "http_409_QUOTE_CHANGED", status_code=409, code="QUOTE_CHANGED",
-            details={"field": "price", "quoted": "1500.00", "applied": "1700.00"},
-        ))
-        monkeypatch.setattr("apps.integrations.ayla.booking_client.get_ayla_booking_client", lambda: s)
+    def test_409_quote_changed_carries_both_values_verbatim(
+        self, client, bot_user, master, service, monkeypatch
+    ):
+        s = _StubAylaClient(
+            exc=BookingBadRequestError(
+                "http_409_QUOTE_CHANGED",
+                status_code=409,
+                code="QUOTE_CHANGED",
+                details={"field": "price", "quoted": "1500.00", "applied": "1700.00"},
+            )
+        )
+        monkeypatch.setattr(
+            "apps.integrations.ayla.booking_client.get_ayla_booking_client", lambda: s
+        )
         r = _post(client, service, master, quoted_price="1500.00", quoted_duration_minutes=60)
         assert r.status_code == 409, r.content
         body = r.json()
         assert body["error"] == "quote_changed"
         assert body["details"] == {"field": "price", "quoted": "1500.00", "applied": "1700.00"}
 
-    def test_duration_change_keeps_its_own_field(self, client, bot_user, master, service, monkeypatch):
-        s = _StubAylaClient(exc=BookingBadRequestError(
-            "http_409_QUOTE_CHANGED", status_code=409, code="QUOTE_CHANGED",
-            details={"field": "duration_minutes", "quoted": 60, "applied": 45},
-        ))
-        monkeypatch.setattr("apps.integrations.ayla.booking_client.get_ayla_booking_client", lambda: s)
+    def test_duration_change_keeps_its_own_field(
+        self, client, bot_user, master, service, monkeypatch
+    ):
+        s = _StubAylaClient(
+            exc=BookingBadRequestError(
+                "http_409_QUOTE_CHANGED",
+                status_code=409,
+                code="QUOTE_CHANGED",
+                details={"field": "duration_minutes", "quoted": 60, "applied": 45},
+            )
+        )
+        monkeypatch.setattr(
+            "apps.integrations.ayla.booking_client.get_ayla_booking_client", lambda: s
+        )
         r = _post(client, service, master, quoted_price="1500.00", quoted_duration_minutes=60)
         assert r.status_code == 409
         assert r.json()["details"] == {"field": "duration_minutes", "quoted": 60, "applied": 45}
 
-    def test_other_409_is_still_not_quote_changed(self, client, bot_user, master, service, monkeypatch):
+    def test_other_409_is_still_not_quote_changed(
+        self, client, bot_user, master, service, monkeypatch
+    ):
         """Положительная стража: занятый слот не переименовывается."""
-        s = _StubAylaClient(exc=BookingBadRequestError(
-            "http_409_SLOT_TAKEN", status_code=409, code="slot_taken",
-        ))
-        monkeypatch.setattr("apps.integrations.ayla.booking_client.get_ayla_booking_client", lambda: s)
+        s = _StubAylaClient(
+            exc=BookingBadRequestError(
+                "http_409_SLOT_TAKEN",
+                status_code=409,
+                code="slot_taken",
+            )
+        )
+        monkeypatch.setattr(
+            "apps.integrations.ayla.booking_client.get_ayla_booking_client", lambda: s
+        )
         r = _post(client, service, master, quoted_price="1500.00")
         assert r.status_code == 409
         assert r.json()["error"] == "slot_unavailable"
@@ -287,10 +367,19 @@ class TestClientCarriesDetails:
 
         with_details = httpx.Response(
             409,
-            json={"error": {"code": "QUOTE_CHANGED", "message": "x",
-                            "details": {"field": "price", "quoted": "1500.00", "applied": "1700.00"}}},
+            json={
+                "error": {
+                    "code": "QUOTE_CHANGED",
+                    "message": "x",
+                    "details": {"field": "price", "quoted": "1500.00", "applied": "1700.00"},
+                }
+            },
         )
-        assert _err_details(with_details) == {"field": "price", "quoted": "1500.00", "applied": "1700.00"}
+        assert _err_details(with_details) == {
+            "field": "price",
+            "quoted": "1500.00",
+            "applied": "1700.00",
+        }
         assert _err_details(httpx.Response(409, json={"error": {"code": "X"}})) is None
         assert _err_details(httpx.Response(409, content=b"not json")) is None
 
@@ -303,11 +392,15 @@ class TestClientCarriesDetails:
         client._circuit = type("C", (), {"record_failure": lambda self, now: None})()
         resp = httpx.Response(
             409,
-            json={"error": {"code": "QUOTE_CHANGED", "message": "x",
-                            "details": {"field": "duration_minutes", "quoted": 60, "applied": 45}}},
+            json={
+                "error": {
+                    "code": "QUOTE_CHANGED",
+                    "message": "x",
+                    "details": {"field": "duration_minutes", "quoted": 60, "applied": 45},
+                }
+            },
         )
         with pytest.raises(BookingBadRequestError) as info:
             client._fail_status(resp, now=0.0)
         assert info.value.code == "QUOTE_CHANGED"
         assert info.value.details == {"field": "duration_minutes", "quoted": 60, "applied": 45}
-
