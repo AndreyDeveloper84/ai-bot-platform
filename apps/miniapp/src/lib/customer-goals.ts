@@ -39,9 +39,18 @@ export interface AnketaOption {
 }
 
 /** Server-computed position of the current question. Never derived here. */
+/**
+ * Где человек в проходе. `index`/`total` экран больше НЕ рисует (DRF-1743,
+ * доктрина 12.09): «Вопрос 2 из 3» — счётчик, честный лишь пока порядок
+ * вопросов фиксирован; с движком вопросов общее число неизвестно
+ * заранее, и число стало бы выдумкой. Рисуется только `is_last` — факт,
+ * который сервер гарантирует («Ещё один короткий вопрос»). Числа
+ * остаются в типе на один релиз, пока сервер их шлёт.
+ */
 export interface AnketaProgress {
-  index: number;
-  total: number;
+  index?: number;
+  total?: number;
+  is_last?: boolean;
 }
 
 export interface MissingItem {
@@ -56,10 +65,10 @@ export interface MissingItem {
    * refused by the server (409) instead of being filed under the
    * wrong question — NOT so the client can choose a step.
    *
-   * There is deliberately no "is this the last one" flag and no list
-   * of remaining steps: the sequence is the server's, and the screen
-   * must not be able to compute what comes next. `progress` arrives
-   * ready-made for the same reason.
+   * There is deliberately no list of remaining steps: the sequence is
+   * the server's, and the screen must not be able to compute what comes
+   * next. `progress.is_last` is a server-guaranteed fact rendered as
+   * one phrase, not material for arithmetic (DRF-1743).
    */
   step?: string;
   options?: AnketaOption[];
