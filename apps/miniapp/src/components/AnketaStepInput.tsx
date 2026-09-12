@@ -16,6 +16,12 @@
  * - `text`: короткое поле с лимитом `text_limit`, «Отправить» — `{text}`;
  * - `confirm`: компонент подтверждения известного — DRF-1745; до него
  *   рисуется как `single`.
+ *
+ * Опция с ролью `escape` («Не знаю», DRF-1747) — полноценный ответ, но
+ * не вариант: рисуется тихой ссылкой ПОД вариантами, отдельно от них, и в
+ * любом режиме шлёт `{option_key}` сразу — на multi она заменяет
+ * отмеченное, «Продолжить» ей не нужен. Экран не решает, где ей быть:
+ * есть в `options` — рисуется, нет — нет.
  */
 import { useState } from "react";
 
@@ -45,9 +51,55 @@ export function renderedMode(mode: string | undefined): "single" | "multi" | "sc
 
 export function AnketaStepInput({ item, submitting, onAnswer }: Props) {
   const step = item.step ?? "";
-  const options = item.options ?? [];
+  const allOptions = item.options ?? [];
+  const escape = allOptions.find((o) => o.role === "escape") ?? null;
+  const options = allOptions.filter((o) => o.role !== "escape");
   const mode = renderedMode(item.mode);
 
+  const escapeLink = escape ? (
+    <div className="goal-select__minor">
+      <button
+        type="button"
+        className="goal-select__minor-action"
+        data-testid="anketa-escape"
+        disabled={submitting}
+        onClick={() => onAnswer({ step, option_key: escape.key })}
+      >
+        {escape.label}
+      </button>
+    </div>
+  ) : null;
+
+  return (
+    <>
+      <StepBody
+        mode={mode}
+        step={step}
+        item={item}
+        options={options}
+        submitting={submitting}
+        onAnswer={onAnswer}
+      />
+      {escapeLink}
+    </>
+  );
+}
+
+function StepBody({
+  mode,
+  step,
+  item,
+  options,
+  submitting,
+  onAnswer,
+}: {
+  mode: ReturnType<typeof renderedMode>;
+  step: string;
+  item: MissingItem;
+  options: { key: string; label: string }[];
+  submitting: boolean;
+  onAnswer: (answer: AnketaAnswer) => void;
+}) {
   if (mode === "text") {
     return (
       <TextAnswer
