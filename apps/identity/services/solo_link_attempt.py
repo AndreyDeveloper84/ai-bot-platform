@@ -101,5 +101,14 @@ def attempt_solo_link(master, bot_user) -> Optional[str]:
         )
         return exc.reason
 
+    # DRF-1790 — the master card now carries the real key; the person's
+    # BotUser rows must follow in the same moment, or the bot keeps naming a
+    # proxy subject on every subject-bound call until the next dependent
+    # action happens to re-ask. Same writer as ensure_ayla_link, same rule
+    # (proxy → real is the one permitted overwrite), the identity we already
+    # hold — no second HTTP call.
+    from apps.identity.services.ayla_link import persist_resolved_identity
+
+    persist_resolved_identity(bot_user, identity, trigger="solo_link")
     logger.info("identity.solo_link.attempt_linked master=%s", getattr(master, "pk", None))
     return None

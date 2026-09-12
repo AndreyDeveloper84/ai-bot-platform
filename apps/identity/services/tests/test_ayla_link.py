@@ -86,15 +86,42 @@ def test_in_memory_instance_is_updated_without_refetch(
 # ─── §15.2 existing linked BotUser → no network ─────────────────────────────
 
 
-def test_linked_user_short_circuits(global_user: BotUser, stub_resolve: Any) -> None:
+def test_linked_user_short_circuits_2026_09_12(global_user: BotUser, stub_resolve: Any) -> None:
+    """Эталон ПЕРЕВЁРНУТ 12.09.2026 (DRF-1790).
+
+    Раньше короткое замыкание срабатывало на ЛЮБОЙ сохранённый ключ — и
+    ключ прокси жил в строке вечно, хотя каталог после привязки отвечал
+    настоящим. Теперь cache hit — только для ключа известно-настоящего
+    сорта (``ayla_user_id_is_proxy=False``). AC-3 «без лишнего резолва»
+    остаётся верным ровно для него.
+    """
     known = uuid.uuid4()
+    global_user.ayla_user_id = known
+    global_user.ayla_user_id_is_proxy = False
+    global_user.save(update_fields=["ayla_user_id", "ayla_user_id_is_proxy"])
+
+    resolved = ensure_ayla_link(global_user, trigger="booking")
+
+    assert resolved == known
+    assert stub_resolve.calls == []  # AC-3: no redundant resolve — for a REAL key
+
+
+def test_a_stored_key_of_unknown_sort_is_asked_again(
+    global_user: BotUser, stub_resolve: Any
+) -> None:
+    """Что осталось от прежнего эталона, перевёрнутое: ключ без сорта — не cache hit.
+
+    Каталог спрашивается; если он подтверждает ключ, сорт записывается и
+    следующий вызов уже замкнётся. См. test_ayla_link_rebound.py.
+    """
+    known = stub_resolve.state["uuid"]
     global_user.ayla_user_id = known
     global_user.save(update_fields=["ayla_user_id"])
 
     resolved = ensure_ayla_link(global_user, trigger="booking")
 
     assert resolved == known
-    assert stub_resolve.calls == []  # AC-3: no redundant resolve
+    assert len(stub_resolve.calls) == 1
 
 
 # ─── §15.3 / §15.4 existing vs newly created proxy upstream ─────────────────
@@ -113,7 +140,15 @@ def test_is_proxy_false_is_accepted(global_user: BotUser, stub_resolve: Any) -> 
 # ─── §15.5 repeat / §15.15 no duplicate identity ────────────────────────────
 
 
-def test_repeat_call_resolves_once(global_user: BotUser, stub_resolve: Any) -> None:
+def test_repeat_call_resolves_once_for_a_real_key_2026_09_12(
+    global_user: BotUser, stub_resolve: Any
+) -> None:
+    """Эталон ПЕРЕВЁРНУТ 12.09.2026 (DRF-1790): AC-4 «один резолв, потом
+    cache hit» держится для НАСТОЯЩЕГО ключа. Ключ прокси переспрашивается
+    на каждом зависимом действии, пока каталог не ответит настоящим —
+    см. test_ayla_link_rebound.py::test_a_stored_proxy_key_is_not_a_cache_hit.
+    """
+    stub_resolve.state["is_proxy"] = False
     first = ensure_ayla_link(global_user, trigger="booking")
     second = ensure_ayla_link(global_user, trigger="booking")
     third = ensure_ayla_link(global_user, trigger="memory_write")
