@@ -116,6 +116,12 @@ def _delete_request(
 
 
 def _seed_memory(bu: BotUser, ayla_user_id: uuid.UUID) -> None:
+    # S2-2 (owner §2.4): memory is written only for a shell the client contour
+    # knows. These fixtures build shells directly, not through the resolver
+    # that classifies at creation, so the standing is written here — a shell
+    # that gets memory seeded IS, by the fixture's own premise, LINKED.
+    BotUser.all_tenants.filter(pk=bu.pk).update(customer_status=BotUser.CustomerStatus.LINKED)
+    bu.refresh_from_db(fields=["customer_status"])
     _grant(bu, CT.PERSONAL_DATA)
     record_inferred_green_facts(
         bu,

@@ -37,8 +37,15 @@ def tenant(db) -> Tenant:
 def _bot_user(tenant: Tenant, ayla_user_id, cuid: str = "u1"):
     from apps.identity.models import BotUser
 
+    # S2-2 (owner §2.4): a shell with an identity link is LINKED by the §2 rule;
+    # these tests build it directly rather than through the resolver, which is
+    # what classifies at creation — so the standing is written here explicitly.
     return BotUser.all_tenants.create(
-        tenant=tenant, channel="max", channel_user_id=cuid, ayla_user_id=ayla_user_id
+        tenant=tenant,
+        channel="max",
+        channel_user_id=cuid,
+        ayla_user_id=ayla_user_id,
+        customer_status=BotUser.CustomerStatus.LINKED,
     )
 
 

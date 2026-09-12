@@ -62,6 +62,13 @@ urlpatterns = [
         views.personal_data_delete,
         name="personal_data_delete",
     ),
+    # DRF-1699 (§7 свода) — заявка на удаление аккаунта: POST заводит до
+    # любого стирания, GET показывает текущую. Стирания здесь нет (D3).
+    path(
+        "me/deletion-request/",
+        views.deletion_request,
+        name="deletion_request",
+    ),
     # Health-data consent (152-ФЗ ст. 10) — DRF-1453. GET/POST/DELETE on one
     # resource: одно согласие — один ресурс, выдача только явным POST.
     path(

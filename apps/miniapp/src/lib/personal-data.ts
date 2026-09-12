@@ -183,3 +183,112 @@ export function triggerDownload(blob: Blob, filename: string): void {
   anchor.remove();
   window.setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
+
+// ---------------------------------------------------------------------------
+// DRF-1699 (§7 свода владельца) — заявка на удаление аккаунта.
+//
+// Замена синхронному «нажал → стёрто → 200» выше: сначала устойчивая
+// заявка в каталоге, потом показ «принято» с номером, точной крайней датой
+// и статусом. Стирание — исполнитель на сервере (срез D3), не этот вызов.
+//
+//   POST /api/v1/customer/me/deletion-request/ {confirmation}
+//     → 201 | 200 {status:"accepted", request:{…}}
+//     → 4xx/5xx {status:"not_started", reason, retryable, detail}
+//   GET  /api/v1/customer/me/deletion-request/
+//     → 200 {status:"none"|"found", request}
+// ---------------------------------------------------------------------------
+
+const DELETION_REQUEST_PATH = "/me/deletion-request/";
+
+/** Статусы заявки — как их называет каталог (`users.DeletionRequest`). */
+export type DeletionRequestStatus =
+  | "DELETION_REQUESTED"
+  | "DELETION_PROCESSING"
+  | "DELETION_COMPLETED"
+  | "DELETION_FAILED";
+
+export interface DeletionRequestInfo {
+  request_id: string;
+  status: DeletionRequestStatus;
+  requested_at: string;
+  deadline_at: string;
+  completed_at: string | null;
+  is_open: boolean;
+}
+
+/**
+ * Удаление НЕ НАЧАЛОСЬ — единственное, что сервер говорит о состоянии
+ * данных при отказе, и оно правдиво (§7). `retryable` — поможет ли повтор:
+ * сеть — да; человек не связан с основной системой — нет, пока связь не
+ * установят.
+ */
+export class DeletionNotStartedError extends Error {
+  constructor(
+    readonly reason: string,
+    readonly retryable: boolean,
+    readonly detail: string,
+  ) {
+    super(detail || "удаление не началось");
+    this.name = "DeletionNotStartedError";
+  }
+}
+
+/**
+ * Завести заявку на удаление. Возвращает то, что показать человеку, и
+ * `created`: заведена сейчас (201) или уже была открыта (200) — второе
+ * нажатие говорит «уже принято», а не «принято».
+ */
+export async function requestAccountDeletion(
+  confirmation: string,
+): Promise<{ request: DeletionRequestInfo; created: boolean }> {
+  const headers = buildAuthHeaders();
+  headers.set("Content-Type", "application/json");
+  const res = await fetch(`${API_BASE}${DELETION_REQUEST_PATH}`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({ confirmation }),
+  });
+  if (res.ok) {
+    const body = (await res.json()) as { status: string; request: DeletionRequestInfo };
+    return { request: body.request, created: res.status === 201 };
+  }
+  let body: { status?: string; reason?: string; retryable?: boolean; detail?: string } = {};
+  try {
+    body = await res.json();
+  } catch {
+    /* non-JSON — generic error below */
+  }
+  if (body.status === "not_started") {
+    throw new DeletionNotStartedError(
+      body.reason ?? "unknown",
+      body.retryable ?? true,
+      body.detail ?? "",
+    );
+  }
+  return throwApiError(res);
+}
+
+/** Текущая заявка человека для профиля, или `null`, если её нет. */
+export async function getCurrentDeletionRequest(): Promise<DeletionRequestInfo | null> {
+  const res = await fetch(`${API_BASE}${DELETION_REQUEST_PATH}`, {
+    headers: buildAuthHeaders(),
+  });
+  if (!res.ok) await throwApiError(res);
+  const body = (await res.json()) as { status: "none" | "found"; request: DeletionRequestInfo | null };
+  return body.status === "found" ? body.request : null;
+}
+
+/** Точная крайняя дата, как её видит человек: «11 октября 2026». */
+export function formatDeadline(iso: string): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso;
+  return d.toLocaleDateString("ru-RU", { day: "numeric", month: "long", year: "numeric" });
+}
+
+/** Статус заявки словами; сырые слаги наружу не выходят. */
+export const DELETION_STATUS_LABELS: Record<DeletionRequestStatus, string> = {
+  DELETION_REQUESTED: "принят, ожидает выполнения",
+  DELETION_PROCESSING: "выполняется",
+  DELETION_COMPLETED: "выполнен",
+  DELETION_FAILED: "выполняется — потребовалась повторная попытка",
+};

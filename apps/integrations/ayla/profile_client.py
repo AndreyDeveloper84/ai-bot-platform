@@ -45,6 +45,7 @@ import httpx
 from django.conf import settings
 
 from apps.integrations.ayla.url_builder import AylaUrlBuilder, AylaUrlError
+from apps.integrations.ayla.request_id import with_request_id
 
 
 logger = logging.getLogger(__name__)
@@ -181,10 +182,12 @@ def fetch_profile_fields(user_id: UUID) -> ProfileFields:
     # What stands in for the check on this route is the shape of its answer:
     # two fields, ``display_name`` and ``avatar_url`` (CP-2 / DRF-1617 purpose
     # registry, P6).
-    headers = {
-        "Authorization": f"Bearer {token}",
-        "Accept": "application/json",
-    }
+    headers = with_request_id(
+        {
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/json",
+        }
+    )
 
     try:
         with httpx.Client(timeout=TIMEOUT_S) as http:

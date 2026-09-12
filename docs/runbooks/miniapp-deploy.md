@@ -115,8 +115,16 @@ Two traps it handles, both of which have already burned someone here:
   version even when the sources are identical, so the hash is never compared.
   Sources are the invariant; bytes are not.
 
-`.github/workflows/miniapp-drift.yml` runs the same guard on every push to
-`dev` that touches `apps/miniapp/**`, plus on a daily schedule.
+`.github/workflows/miniapp-drift.yml` runs the same guard **after every
+successful `deploy-dev`**, plus on a daily schedule at 06:17 UTC.
+
+It used to run on every push to `dev` touching `apps/miniapp/**`, and that was
+wrong in a way worth remembering (DRF-1605): publication only happens after a
+green `ci`, 25-40 minutes later, so a push-triggered run always caught the
+pilot mid-flight and went red. Eleven of twelve runs on 2026-09-08 were red for
+that reason alone. The guard was reporting merges, not drift. Triggering it on
+the deploy — and only on a deploy that actually succeeded — is what gives a red
+back its meaning: the deploy said it published, and the pilot says otherwise.
 
 ---
 

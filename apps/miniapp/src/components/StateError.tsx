@@ -16,6 +16,7 @@
  */
 
 import { ApiError } from "../lib/api";
+import { authErrorCopy, isAuthRefusalSlug } from "../lib/auth-error-copy";
 
 interface Props {
   err: unknown;
@@ -24,20 +25,35 @@ interface Props {
   screenId?: string;
 }
 
-function pickCopy(err: unknown): string {
+type Copy = { title?: string; body: string };
+
+function pickCopy(err: unknown): Copy {
   if (err instanceof ApiError) {
-    if (err.status >= 500) return "Что-то у нас не получается прямо сейчас.";
-    if (err.status === 403) return "Этот раздел сейчас недоступен.";
-    return err.detail || "Не получилось загрузить.";
+    // DRF-1319 D-1. Отказ входа (нет/протух initData, удалённый аккаунт,
+    // сервер без токена) раньше падал в ветку `err.detail` и показывал
+    // человеку «missing Authorization header» по-английски. Теперь — та
+    // же копия, что на HelloScreen: одно состояние, одно имя. Проверка
+    // стоит ПЕРЕД 5xx/403, потому что `server_misconfigured` — 500, а
+    // `user_deleted` — 403, и общие фразы для них хуже точных.
+    if (isAuthRefusalSlug(err.slug)) {
+      const copy = authErrorCopy(err.slug);
+      return { title: copy.title, body: copy.body };
+    }
+    if (err.status >= 500) return { body: "Что-то у нас не получается прямо сейчас." };
+    if (err.status === 403) return { body: "Этот раздел сейчас недоступен." };
+    return { body: err.detail || "Не получилось загрузить." };
   }
-  return "Не получилось загрузить. Проверьте интернет и попробуйте снова.";
+  return { body: "Не получилось загрузить. Проверьте интернет и попробуйте снова." };
 }
 
 export function StateError({ err, onRetry }: Props) {
-  const headline = pickCopy(err);
+  const copy = pickCopy(err);
   return (
     <div className="callout callout--danger" role="alert">
-      <p style={{ margin: 0 }}>{headline}</p>
+      {copy.title && (
+        <p style={{ margin: 0, fontWeight: 600 }}>{copy.title}</p>
+      )}
+      <p style={{ margin: copy.title ? "var(--s-1) 0 0" : 0 }}>{copy.body}</p>
       <div style={{ marginTop: "var(--s-3)" }}>
         <button type="button" className="btn-secondary" onClick={onRetry}>
           Попробовать снова

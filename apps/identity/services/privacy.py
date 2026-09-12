@@ -244,6 +244,13 @@ def _resolve_person_link(bot_user: BotUser) -> _PersonLink:
     return _PersonLink(ayla_user_id=next(iter(candidates), None))
 
 
+#: Публичное имя для соседей по пакету (DRF-1699 — заявка на удаление
+#: обязана определять человека ТЕМ ЖЕ способом, что и стирание: иначе
+#: заявка легла бы на одного, а каскад прошёл по другому).
+resolve_person_link = _resolve_person_link
+PersonLink = _PersonLink
+
+
 def _bot_user_ids_for(ayla_user_id: uuid.UUID) -> list[uuid.UUID]:
     """Every BotUser of the person across tenants (memory is global)."""
     return list(BotUser.all_tenants.filter(ayla_user_id=ayla_user_id).values_list("id", flat=True))
