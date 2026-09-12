@@ -91,6 +91,21 @@ export interface MissingItem {
   mode?: "single" | "multi" | "confirm" | "scale" | "text" | string;
   scale?: { low_label: string; high_label: string };
   text_limit?: number;
+  /**
+   * DRF-1745 — подтверждение известного (`mode: "confirm"`). `prompt` —
+   * вопрос подтверждения («Раньше ты выбирала «X». Всё ещё так?»),
+   * `question` — обычный вопрос шага (для «Изменилось»), `answer_mode` —
+   * каким компонентом на него отвечать, `known_value` — что подтверждаем.
+   * «Да» шлёт `{confirm: true}`; значение экран не пересылает.
+   */
+  known_value?: {
+    option_key: string | null;
+    option_keys?: string[];
+    text?: string | null;
+    label: string;
+  };
+  question?: string;
+  answer_mode?: string;
 }
 
 export interface GoalSuggestion {
@@ -195,6 +210,11 @@ export type GoalSelectBody =
   /** DRF-1746 — режим multi: массив ключей одним ответом. */
   | {
       answer: { step: string; option_keys: string[] };
+      source_channel: "miniapp";
+    }
+  /** DRF-1745 — «Да, всё так» на шаге подтверждения. */
+  | {
+      answer: { step: string; confirm: true };
       source_channel: "miniapp";
     }
   | { answer: { step: string; text: string }; source_channel: "miniapp" }
