@@ -71,6 +71,7 @@ from apps.eventbus.ingest_dispatcher import register
 from apps.eventbus.ingest_envelope import IngestEnvelope
 from apps.eventbus.ingest_tenancy import assert_envelope_tenant_authorized
 from apps.identity.models import BotUser
+from apps.integrations.ayla.user_proxy import external_user_id_for
 from apps.integrations.ayla.profile_client import (
     fetch_profile_fields,
 )
@@ -183,10 +184,6 @@ def handle_user_profile_updated(envelope: IngestEnvelope) -> None:
         )
         return
 
-    # Fetch from Ayla. ProfileFetchError → dispatcher dead-letters
-    # → Ayla retries. NEVER swallow + skip (stale projection forever).
-    profile = fetch_profile_fields(user_id)
-
     # Locate the BotUser rows for this Ayla user. ``display_name`` and
     # ``avatar_url`` are user-global, so a genuinely tenant-null envelope
     # legitimately fans out across tenants + channels (one user may have
@@ -201,7 +198,14 @@ def handle_user_profile_updated(envelope: IngestEnvelope) -> None:
     user_rows = BotUser.all_tenants.filter(ayla_user_id=user_id)
     if envelope.tenant_id is not None:
         user_rows = user_rows.filter(tenant_id=envelope.tenant_id)
-    bot_users = list(user_rows)
+    # Rows FIRST, then the fetch (DRF-1709, 12.09.2026). Two reasons: the
+    # catalog now requires the subject to be named on this route, and the
+    # only honest name is the identity of a row we are about to refresh;
+    # and a user with no projection here has nothing to refresh, so the
+    # REST call used to be spent for nothing. Deterministic pick among
+    # several rows (MAX + Telegram of one person): every row names the same
+    # person, so any one of them resolves to ``user_id`` on the far side.
+    bot_users = sorted(user_rows, key=lambda row: (row.channel, row.channel_user_id))
     if not bot_users:
         logger.info(
             "eventbus.consumer.identity.profile_updated.no_bot_users "
@@ -212,6 +216,9 @@ def handle_user_profile_updated(envelope: IngestEnvelope) -> None:
         )
         return
 
+    # Fetch from Ayla. ProfileFetchError → dispatcher dead-letters
+    # → Ayla retries. NEVER swallow + skip (stale projection forever).
+    profile = fetch_profile_fields(user_id, on_behalf_of=external_user_id_for(bot_users[0]))
     updated_count = 0
     skipped_count = 0
     for bot_user in bot_users:
