@@ -4,7 +4,17 @@ import { applyDevBypassHeaders } from "./dev-bypass";
 const API_BASE = "/api/v1/customer";
 
 export class ApiError extends Error {
-  constructor(readonly status: number, readonly slug: string, readonly detail: string) {
+  constructor(
+    readonly status: number,
+    readonly slug: string,
+    readonly detail: string,
+    /**
+     * Структурные подробности отказа, если сервер их прислал (DRF-1708:
+     * `quote_changed` несёт `{field, quoted, applied}` — две пары, которые
+     * человек обязан увидеть). Отсутствуют у прежних отказов.
+     */
+    readonly details?: Record<string, unknown>,
+  ) {
     super(`[${status}] ${slug}: ${detail}`);
     this.name = "ApiError";
   }
@@ -13,6 +23,7 @@ export class ApiError extends Error {
 interface ErrorBody {
   error: string;
   detail: string;
+  details?: Record<string, unknown>;
 }
 
 export async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
@@ -30,7 +41,7 @@ export async function request<T>(path: string, init: RequestInit = {}): Promise<
     } catch {
       /* non-JSON 5xx */
     }
-    throw new ApiError(res.status, body.error, body.detail);
+    throw new ApiError(res.status, body.error, body.detail, body.details);
   }
   if (res.status === 204) return undefined as T;
   return (await res.json()) as T;
@@ -694,6 +705,9 @@ export const createBooking = (body: {
   visit_at: string;
   /** AMD-002: user-chosen online payment (C7). */
   payment_required?: boolean;
+  /** DRF-1708: what the confirmation screen showed — see customer-booking.ts. */
+  quoted_price?: string;
+  quoted_duration_minutes?: number;
 }): Promise<{ booking: CreatedBooking }> =>
   request("/bookings", { method: "POST", body: JSON.stringify(body) });
 
