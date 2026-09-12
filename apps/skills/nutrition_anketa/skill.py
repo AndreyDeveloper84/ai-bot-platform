@@ -58,11 +58,12 @@ learn elsewhere in this codebase:
 
 1. **Nothing is sent to Ayla.** Not "sent and ignored" — not sent.
    ``profile_upsert_service._recompute_and_persist`` recomputes on every
-   upsert unconditionally, and the current override ladder *adds* kcal
-   and water for pregnancy and nursing (+200/+400 kcal, +300/+700 ml).
-   Forwarding those answers today would make the outcome worse than not
-   asking at all. The ladder is being replaced by the calculation
-   service; until it is, the stop ends before the network call.
+   upsert unconditionally. The override ladder that once *added* kcal
+   and water for pregnancy and nursing (+200/+400 kcal, +300/+700 ml) is
+   gone — catalogue #372 refuses by name instead, and #403 writes the
+   fluids target as a reference by sex, not a formula from weight — but
+   the stop still ends before the network call: the answer to a health
+   screen is not data to forward.
 2. **The screening answer is not stored.** It decides, then it is
    dropped — not written to ``skill_state``, not put in ``health_flags``,
    not remembered. It is special-category data under 152-ФЗ and the
@@ -685,6 +686,21 @@ _METHOD_LABELS: dict[str, str] = {
     "mifflin_st_jeor_v1": "Миффлин — Сан Жеор, версия 1",
 }
 
+#: Подписи методик ориентира по жидкости (ключ ``fluids`` в
+#: ``targets_method_versions``, каталог #403). Раздел 4 решения 09.09:
+#: «справочный ориентир по напиткам: женщина 2200 мл/сутки, мужчина
+#: 3000 мл/сутки… активность, жара, беременность, кормление и заболевания
+#: автоматически не прибавляются». Подпись обязана сказать человеку, что
+#: это НЕ расчёт от его веса — иначе цифра рядом с «от твоих данных: вес —
+#: 62 кг» читается как посчитанная от веса, а это как раз то, что владелец
+#: снял (§82).
+_FLUIDS_METHOD_LABELS: dict[str, str] = {
+    "adult_beverages_reference_v1": (
+        "справочный ориентир по выпитой жидкости для взрослых по полу "
+        "(2200 мл женщине, 3000 мл мужчине), не расчёт от веса и активности"
+    ),
+}
+
 _GENDER_LABELS: dict[str, str] = {"female": "женский", "male": "мужской"}
 _GOAL_LABELS: dict[str, str] = {
     "lose": "похудеть",
@@ -743,6 +759,25 @@ def _method_and_inputs_line(profile) -> str:
         else "Считала"
     )
     return f"{head} от твоих данных: {', '.join(facts)}."
+
+
+def _fluids_reference_line(profile) -> str:
+    """«Вода — справочный ориентир …» — или пустая строка.
+
+    Печатается только когда каталог назвал методику жидкости (ключ
+    ``fluids`` в ``targets_method_versions``): без версии строки нет —
+    не «вода по справочнику» на слово, а подпись под тем, что каталог
+    подписал. Неизвестная версия печатается как есть, как и у калорий.
+
+    Строка отдельная от ``_method_and_inputs_line`` намеренно: та
+    говорит «от твоих данных: вес — 62 кг», и вода в той же фразе
+    читалась бы как посчитанная от веса.
+    """
+    versions: dict = dict(getattr(profile, "targets_method_versions", None) or {})
+    version = versions.get("fluids")
+    if not version:
+        return ""
+    return f"Вода — {_FLUIDS_METHOD_LABELS.get(str(version), str(version))}."
 
 
 #: Подписи health-факторов для человека (§5.1, каталог #372). Имя из
@@ -810,6 +845,9 @@ def _format_summary(profile) -> str:
             method_line = _method_and_inputs_line(profile)
             if method_line:
                 proposal_parts.append(method_line)
+            fluids_line = _fluids_reference_line(profile)
+            if fluids_line:
+                proposal_parts.append(fluids_line)
             proposal_parts.append(
                 "Это предложение: пока ты его не подтвердишь, в дневнике оно не "
                 "действует — ни «осталось на сегодня», ни оценок по нему не будет."
@@ -836,6 +874,9 @@ def _format_summary(profile) -> str:
     method_line = _method_and_inputs_line(profile)
     if method_line:
         parts.append(method_line)
+    fluids_line = _fluids_reference_line(profile)
+    if fluids_line:
+        parts.append(fluids_line)
     if profile.goal_overridden_by:
         # Ayla applied a safety override (pregnancy / eating-disorder /
         # BMI floor). Mention it gently — the override is the right call,
