@@ -160,6 +160,29 @@ class TestTheCommand:
             == 5
         )
 
+    def test_a_client_contour_only_person_is_stamped_too(self, salon, other, global_bot):
+        """Found on the pilot 12.09: after the first --apply four global_bot
+        shells stayed UNRESOLVED — people who never met a salon. Outside the
+        §2 list, LINKED / client_bot by construction, and «UNRESOLVED после»
+        must be able to reach zero."""
+        self._people(salon, other, global_bot)
+        _shell(global_bot, "4009")  # client bot only
+        out = io.StringIO()
+        call_command("resolve_salon_customers", stdout=out)
+        text = out.getvalue()
+        assert "клиентский контур без салонной оболочки: 1" in text
+        assert "max:4009" in text
+        assert "людей=3" in text, "the §2 breakdown does not count them"
+        assert BotUser.all_tenants.get(channel_user_id="4009").customer_status == "unresolved"
+
+        out = io.StringIO()
+        call_command("resolve_salon_customers", "--apply", stdout=out)
+        assert "записано строк: 6" in out.getvalue()
+        assert "UNRESOLVED после: 0" in out.getvalue()
+        only = BotUser.all_tenants.get(channel_user_id="4009")
+        assert only.customer_status == BotUser.CustomerStatus.LINKED
+        assert only.customer_source == BotUser.CustomerSource.CLIENT_BOT
+
     def test_apply_stamps_shells_and_only_unresolved_ones(self, salon, other, global_bot):
         self._people(salon, other, global_bot)
         out = io.StringIO()
