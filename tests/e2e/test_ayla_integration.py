@@ -59,6 +59,11 @@ _BASE_URL = os.environ.get("AYLA_BASE_URL")
 _SERVICE_TOKEN = os.environ.get("NUTRITION_SERVICE_TOKEN") or os.environ.get("AYLA_SERVICE_TOKEN")
 _INTERNAL_TOKEN = os.environ.get("AYLA_INTERNAL_API_TOKEN")
 _PROFILE_USER_ID = os.environ.get("AYLA_E2E_PROFILE_USER_ID")
+# DRF-1709 (12.09.2026): the profile route is subject-bound — the caller names
+# the person it acts for, and the catalog checks that name against the URL.
+# For the 200 round-trip the two must belong to one person: the external id
+# (``bot:max:<id>``) bound to that staging user.
+_PROFILE_EXTERNAL_USER_ID = os.environ.get("AYLA_E2E_PROFILE_EXTERNAL_USER_ID")
 
 # Module-level gate: skip everything unless a base URL + at least one Ayla
 # credential is present. Each test class below adds a skipif for the specific
@@ -263,22 +268,24 @@ class TestProfileClient:
         )
 
         with pytest.raises(ProfileFetchError) as exc:
-            fetch_profile_fields(uuid.uuid4())
+            fetch_profile_fields(uuid.uuid4(), on_behalf_of=f"bot:e2e:{uuid.uuid4().hex[:12]}")
         msg = str(exc.value)
-        # Assumption: Ayla's internal by-id lookup returns 404 for an unknown
-        # user (not a 403 existence-hiding response). If a future Ayla build
-        # 403s here instead, this asserts 'auth' and fails loudly — which is
-        # itself worth investigating, so the assumption fails safe.
-        assert "not_found" in msg, (
-            f"expected a 404 'not_found' (route + Bearer OK, user absent); "
-            f"got {msg!r} — 'auth' would mean the token was rejected (401/403)."
-        )
+        # Two regimes, both healthy (DRF-1709, 12.09.2026): a catalog before
+        # beautygo_backend#411 answers 404 'not_found' for an unknown user; a
+        # catalog after it answers 403 — an unknown UUID is a FOREIGN subject
+        # and the route no longer says whether such a user exists. Either way
+        # the route resolved and the Bearer was accepted; what would be
+        # unhealthy is a timeout/5xx or a malformed body.
+        assert (
+            "not_found" in msg or "auth" in msg
+        ), f"expected 'not_found' (pre-#411) or 'auth' (post-#411, foreign subject); got {msg!r}"
 
     @pytest.mark.skipif(
-        not _PROFILE_USER_ID,
+        not (_PROFILE_USER_ID and _PROFILE_EXTERNAL_USER_ID),
         reason=(
-            "Set AYLA_E2E_PROFILE_USER_ID to a real staging user UUID for the "
-            "full 200 body-shape round-trip."
+            "Set AYLA_E2E_PROFILE_USER_ID to a real staging user UUID and "
+            "AYLA_E2E_PROFILE_EXTERNAL_USER_ID to the external identity bound to it "
+            "(bot:max:<id>) for the full 200 body-shape round-trip."
         ),
     )
     def test_known_user_returns_pii_subset(self) -> None:
@@ -288,7 +295,10 @@ class TestProfileClient:
         """
         from apps.integrations.ayla.profile_client import fetch_profile_fields
 
-        fields = fetch_profile_fields(uuid.UUID(_PROFILE_USER_ID))
+        assert _PROFILE_USER_ID and _PROFILE_EXTERNAL_USER_ID  # narrowed for mypy
+        fields = fetch_profile_fields(
+            uuid.UUID(_PROFILE_USER_ID), on_behalf_of=_PROFILE_EXTERNAL_USER_ID
+        )
         assert isinstance(fields.display_name, str)
         assert isinstance(fields.avatar_url, str)
 
