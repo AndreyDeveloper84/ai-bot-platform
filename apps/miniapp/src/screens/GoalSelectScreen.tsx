@@ -81,6 +81,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { AlreadyNoted } from "../components/AlreadyNoted";
+import { AnketaStepInput, renderedMode } from "../components/AnketaStepInput";
 import { ScreenLayout } from "../components/ScreenLayout";
 import { DelayedSkeleton, ServiceCardSkeleton } from "../components/Skeleton";
 import { StateError } from "../components/StateError";
@@ -335,9 +336,15 @@ export function GoalSelectScreen({ initialDoc }: Props = {}) {
   // оставляет проход, всё рисуется ровно как раньше — ни один
   // сегодняшний документ вида не меняет. Экран гарантирует лишь, что
   // под человеком есть пол.
-  const stepAllowsFreeText = Boolean(anketaStep?.allow_free_text && anketaStep.step);
+  // Шаг в режиме `text` рисует своё короткое поле (DRF-1746): нижнее
+  // поле цели на нём не дублируется, и пол под человеком уже есть — это
+  // поле и есть дорога дальше.
+  const stepOwnTextField = Boolean(anketaStep?.step && renderedMode(anketaStep.mode) === "text");
+  const stepAllowsFreeText = Boolean(
+    anketaStep?.allow_free_text && anketaStep.step && !stepOwnTextField,
+  );
   const hasFreeText = Boolean(formulateOwnLabel) || stepAllowsFreeText;
-  const hasOnward = Boolean(nextRoute);
+  const hasOnward = Boolean(nextRoute) || stepOwnTextField;
   const documentIsGate = !hasFreeText && !hasOnward;
   const showFreeText = hasFreeText || documentIsGate;
   const freeTextLabel = formulateOwnLabel ?? FREE_TEXT_FALLBACK_LABEL;
@@ -523,25 +530,16 @@ export function GoalSelectScreen({ initialDoc }: Props = {}) {
                 <p className="goal-select__progress">{LAST_QUESTION_NOTE}</p>
               )}
               <p className="goal-select__prompt">{item.prompt}</p>
-              {item.step && item.options && item.options.length > 0 && (
-                <div className="chip-row" role="group" aria-label={item.prompt}>
-                  {item.options.map((option) => (
-                    <button
-                      key={option.key}
-                      type="button"
-                      className="chip"
-                      disabled={submitting}
-                      onClick={() =>
-                        submit({
-                          answer: { step: item.step as string, option_key: option.key },
-                          source_channel: "miniapp",
-                        })
-                      }
-                    >
-                      {option.label}
-                    </button>
-                  ))}
-                </div>
+              {/* DRF-1746 — компонент по типу ответа (`mode`); экран
+                  ничего не выводит, только рисует то, что прислано. */}
+              {item.step && (
+                <AnketaStepInput
+                  item={item}
+                  submitting={submitting}
+                  onAnswer={(answer) =>
+                    submit({ answer, source_channel: "miniapp" } as GoalSelectBody)
+                  }
+                />
               )}
             </div>
           ))}

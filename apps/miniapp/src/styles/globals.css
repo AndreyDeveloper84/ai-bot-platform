@@ -7223,3 +7223,22 @@ a {
   color: var(--c-text-secondary);
   flex: none;
 }
+
+/* DRF-1746 — типы ответа на шаге анкеты (макет C03 P11): шкала с
+   подписями концов и короткое текстовое поле со счётчиком лимита. Фишки
+   и кнопки — общие классы выше. */
+.anketa-scale__ends {
+  display: flex;
+  justify-content: space-between;
+  margin-top: calc(-1 * var(--s-2));
+  margin-bottom: var(--s-3);
+  font-size: var(--font-size-100);
+  color: var(--c-text-secondary);
+}
+
+.anketa-text__limit {
+  margin: var(--s-1) 0 0;
+  font-size: var(--font-size-100);
+  color: var(--c-text-secondary);
+  text-align: right;
+}
