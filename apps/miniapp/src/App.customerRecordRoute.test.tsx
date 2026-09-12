@@ -17,7 +17,7 @@
  * же `RescheduleScreen`, что и на каноническом адресе, — второй кейс
  * ниже это и проверяет.
  */
-import { render, screen } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -95,7 +95,9 @@ describe("canonical record route registration", () => {
     expect(await screen.findByText("Маникюр")).toBeInTheDocument();
     expect(screen.getByText(/Анна Соколова/)).toBeInTheDocument();
     // The id from the URL is the id the detail screen actually loads.
-    expect(mockedFetchBooking).toHaveBeenCalledWith("bk-77");
+    // Загрузка — в эффекте ПОСЛЕ первого рендера заголовка: ждать вызов,
+    // а не проверять его синхронно (под нагрузкой заголовок успевает раньше).
+    await waitFor(() => expect(mockedFetchBooking).toHaveBeenCalledWith("bk-77"));
   });
 });
 
@@ -107,7 +109,9 @@ describe("canonical reschedule route registration (DRF-1481)", () => {
       await screen.findByRole("heading", { name: "Перенести" }),
     ).toBeInTheDocument();
     // The id from the URL is the id the screen actually loads.
-    expect(mockedFetchBooking).toHaveBeenCalledWith("bk-77");
+    // Загрузка — в эффекте ПОСЛЕ первого рендера заголовка: ждать вызов,
+    // а не проверять его синхронно (под нагрузкой заголовок успевает раньше).
+    await waitFor(() => expect(mockedFetchBooking).toHaveBeenCalledWith("bk-77"));
   });
 
   it("legacy /my-visits/:bookingId/reschedule alias mounts the same screen", async () => {
@@ -117,6 +121,8 @@ describe("canonical reschedule route registration (DRF-1481)", () => {
     expect(
       await screen.findByRole("heading", { name: "Перенести" }),
     ).toBeInTheDocument();
-    expect(mockedFetchBooking).toHaveBeenCalledWith("bk-77");
+    // Загрузка — в эффекте ПОСЛЕ первого рендера заголовка: ждать вызов,
+    // а не проверять его синхронно (под нагрузкой заголовок успевает раньше).
+    await waitFor(() => expect(mockedFetchBooking).toHaveBeenCalledWith("bk-77"));
   });
 });
