@@ -12,7 +12,7 @@
 
 ## Резюме для главного окна (60 секунд)
 
-1. **Гипотеза §4.1 опровергнута.** Прокси-пользователя `bot:max:260237491` в backend **нет** (VERIFIED, чтение БД). Не хватает не «способа узнать id» — не хватает **и создания, и узнавания**. Причина: чтения каталога/слотов идут без `X-External-User-ID`, а единственный вызов с этим заголовком (`create_appointment`) до backend не дошёл — провайдер упал локально раньше.
+1. **Гипотеза §4.1 опровергнута.** Прокси-пользователя `bot:max:260…` в backend **нет** (VERIFIED, чтение БД). Не хватает не «способа узнать id» — не хватает **и создания, и узнавания**. Причина: чтения каталога/слотов идут без `X-External-User-ID`, а единственный вызов с этим заголовком (`create_appointment`) до backend не дошёл — провайдер упал локально раньше.
 
 2. **Найдена более глубокая системная причина, чем сформулировано в §2 брифа.** В проде **нет ни одного writer'а** `BotUser.ayla_user_id` (VERIFIED). Механизм записи в резолвере существует (blank-fill, never-overwrite), но оба production-обработчика каналов вызывают его без этого аргумента. Поле не «иногда не заполнено» — оно **не заполняется никогда и ни для кого**.
 
@@ -44,7 +44,7 @@
 
 **A.2.1. Прокси-пользователя для «Моего Парка» не существует.** (VERIFIED — чтение БД `dev-db-1` 13.08)
 
-Всего строк `users_user` с `username LIKE 'bot:%'` — **10**. `bot:max:260237491` среди них нет (`count() == 0`). Из десяти:
+Всего строк `users_user` с `username LIKE 'bot:%'` — **10**. `bot:max:260…` среди них нет (`count() == 0`). Из десяти:
 
 - 6 строк формата `bot:<digits>` (одно-сегментный legacy-формат nutrition/payments), созданы 05–07.05.2026, все `linked_user=None`;
 - 4 строки формата `bot:max:<id>` — `bot:max:831…` (владелец), `bot:max:e2e-probe-1`, `bot:max:drf954-test-001`, и они же покрывают тестовые прогоны;
@@ -110,7 +110,7 @@ Booking завязан на №2. Существует и корректно р�
 |---|---|---|
 | `resolve_external_user` = `get_or_create(username=external_user_id, defaults={role:client, is_proxy:True, is_guest:False})` | `users/services.py:109-112` | VERIFIED |
 | Привязанный и активный `linked_user` → возвращается связанный аккаунт; деактивированный/удалённый → fail-closed на изолированный прокси | `users/services.py:113-120` | VERIFIED |
-| Регулярка `^[a-z][a-z0-9_-]*(?::[A-Za-z0-9_-]{1,64})+$`; `bot:max:260237491` проходит | `users/services.py:69` | VERIFIED |
+| Регулярка `^[a-z][a-z0-9_-]*(?::[A-Za-z0-9_-]{1,64})+$`; `bot:max:260…` проходит | `users/services.py:69` | VERIFIED |
 | `IsBotServiceWithVerifiedClient`: Bearer + `X-External-User-ID` → `resolve_external_user` → **подмена `request.user`** | `users/permissions.py:173-207` | VERIFIED |
 | Cross-check `client_id` в теле создания записи существует и не формален | `appointments/internal_api.py:166-174` | VERIFIED |
 | Тело `client_id` используется **только как проверка**; реальным субъектом становится `request.user.id` | `appointments/internal_api.py:179` | VERIFIED |

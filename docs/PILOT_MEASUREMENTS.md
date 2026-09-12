@@ -712,7 +712,7 @@ doc['data']['version']      -> 2
 
 ```
 bot:max:831…    goal_key=skin_care   выбрана 2026-09-08 18:54 UTC
-bot:max:260237491   goal_key=relax       выбрана 2026-09-04 13:55 UTC
+bot:max:260…   goal_key=relax       выбрана 2026-09-04 13:55 UTC
 bot:max:229…   goal_key=relax       выбрана 2026-09-08 11:01 UTC
 bot:max:663…    goal=None            (цели нет — честный None)
 ```

@@ -154,7 +154,7 @@ bot:831…  →  customer в ayla-marketplace     (не тот тенант, н�
   customer | bot:max:831…      ← актор бота здесь, но customer
   customer | drf954-test-customer
   customer | bot:max:663…
-  customer | bot:max:260237491
+  customer | bot:max:260…
 ```
 
 **В `formula-tela` нет ни одной строки с ролью `admin`.** Ни у бота, ни у кого-либо ещё.

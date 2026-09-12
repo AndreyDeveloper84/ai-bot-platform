@@ -146,6 +146,21 @@ repos:
         files: ^(apps|tests)/.*test_.*\.py$
         pass_filenames: false
 
+      # PII guard (DRF-1269). detect-secrets looks for secrets; a person's
+      # phone number, a contractor's e-mail and six real channel ids sat
+      # on the head of `dev` in documents and passed it, because none of
+      # them is high-entropy. This hook refuses phones outside the test
+      # ranges, e-mails outside reserved/own domains, the six known ids
+      # (held as SHA-256, never as values), unmasked `max:<digits>` in
+      # docs/, and dump/log extensions outright. Runs on the staged files
+      # it is given; CI runs the same script over every tracked file.
+      # Allowlist with reasons: tools/lint/pii_guard_allow.txt.
+      - id: pii-guard
+        name: PII guard (phones, e-mails, channel ids, dumps)
+        entry: python tools/lint/pii_guard.py
+        language: system
+        pass_filenames: true
+
       - id: personal-field-guard
         name: Personal-field owner guard (AST lint)
         entry: python tools/lint/personal_field_guard.py apps/

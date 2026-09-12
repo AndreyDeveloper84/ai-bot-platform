@@ -448,7 +448,7 @@ bot=salon   1
   customer | bot:max:831…      ← актор бота здесь, но customer
   customer | drf954-test-customer
   customer | bot:max:663…
-  customer | bot:max:260237491
+  customer | bot:max:260…
 ```
 
 **Ни одной строки с ролью `admin`.** Ни у бота, ни у кого бы то ни было.
