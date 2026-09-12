@@ -20,6 +20,7 @@ urlpatterns = [
     path("masters", views.masters_list, name="masters_list"),
     path("masters/<uuid:master_id>", views.master_detail, name="master_detail"),
     path("bookings", views.create_booking, name="create_booking"),
+    path("quote", views.booking_quote, name="booking_quote"),
     # Customer cancel + reschedule (customer-cancellation-reschedule-spec).
     path("bookings/list", views.bookings_list, name="bookings_list"),
     path("bookings/<uuid:booking_id>", views.booking_detail, name="booking_detail"),

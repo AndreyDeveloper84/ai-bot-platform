@@ -205,11 +205,17 @@ class BookingBadRequestError(BookingAPIError):
         status_code: int | None = None,
         code: str | None = None,
         handoff: bool | None = None,
+        details: dict[str, Any] | None = None,
     ) -> None:
         super().__init__(message)
         self.status_code = status_code
         self.code = code
         self.handoff = handoff
+        # DRF-1708: ``error.details`` as Ayla sent it. ``QUOTE_CHANGED``
+        # carries ``{field, quoted, applied}`` — the two numbers the
+        # person must see (owner package 2, D4: show what was and what
+        # became; no silent normalisation). ``None`` = absent on the wire.
+        self.details = details
 
 
 class ScheduleBlockConflictError(BookingBadRequestError):
@@ -434,6 +440,8 @@ class AylaBookingClient(Protocol):
         start_datetime: str,
         idempotency_key: str | None = ...,
         payment_required: bool = ...,
+        quoted_price: str | None = ...,
+        quoted_duration_minutes: int | None = ...,
     ) -> AylaBookingRecord: ...
 
     def cancel_appointment(
@@ -808,6 +816,7 @@ class AylaBookingHTTPClient:
             status_code=resp.status_code,
             code=_err_code(resp),
             handoff=_err_handoff(resp),
+            details=_err_details(resp),
         )
 
     def _ok(self, resp: httpx.Response, *, success: tuple[int, ...] = (200, 201)) -> Any:
@@ -1021,17 +1030,27 @@ class AylaBookingHTTPClient:
         start_datetime: str,
         idempotency_key: str | None = None,
         payment_required: bool = True,
+        quoted_price: str | None = None,
+        quoted_duration_minutes: int | None = None,
     ) -> AylaBookingRecord:
         # AMD-002 (D6): payment_required=false → запись без предоплаты,
         # Ayla подтверждает сразу (CONFIRMED + booking.confirmed), Payment
         # не создаётся. default true — обратная совместимость контракта.
-        body = {
+        body: dict[str, Any] = {
             "client_id": client_id,
             "specialist_id": specialist_id,
             "service_id": service_id,
             "start_datetime": start_datetime,
             "payment_required": payment_required,
         }
+        # DRF-1708: what the person SAW rides to the create; Ayla compares
+        # it with what would apply inside the transaction and refuses with
+        # 409 QUOTE_CHANGED on a mismatch. Absent = the old contract (no
+        # comparison) — callers that never quoted are untouched.
+        if quoted_price is not None:
+            body["quoted_price"] = quoted_price
+        if quoted_duration_minutes is not None:
+            body["quoted_duration_minutes"] = quoted_duration_minutes
         resp = self._request(
             "POST",
             "appointments/",
@@ -1456,6 +1475,15 @@ def _err_code(resp: httpx.Response) -> str:
         return (resp.json().get("error") or {}).get("code", "") or "unknown"
     except (ValueError, AttributeError):
         return "unknown"
+
+
+def _err_details(resp: httpx.Response) -> dict[str, Any] | None:
+    """Pull ``error.details`` from a 4xx body verbatim, or None if absent."""
+    try:
+        details = (resp.json().get("error") or {}).get("details")
+    except (ValueError, AttributeError):
+        return None
+    return details if isinstance(details, dict) else None
 
 
 def _err_handoff(resp: httpx.Response) -> bool | None:
