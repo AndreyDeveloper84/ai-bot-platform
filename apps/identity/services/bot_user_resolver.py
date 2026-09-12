@@ -80,10 +80,16 @@ def resolve_tenant_slug_for_init_data(verified: Any) -> str:
 def resolve_working_bot_user(channel_user_id: str, *, surface: str = "miniapp") -> BotUser | None:
     """The row of this MAX identity that carries a working role, or ``None``.
 
-    «Working» is the same word :func:`apps.identity.services.solo_onboarding.is_solo_provider`
-    uses: an active ``TenantStaff`` (``deactivated_at IS NULL``) on the
-    row, or a live ``CatalogMaster`` (``archived_at IS NULL``) linked to
-    it. Soft-deleted rows are never working — a deleted account cannot be
+    «Working» is what :func:`apps.identity.services.role_resolver.resolve_role`
+    already answers for one row: any primary role above ``customer`` — an
+    active ``TenantStaff`` in the row's own tenant, or a live master card
+    linked to it (archived cards and revoked staff resolve to ``customer``
+    there, so they are not working here either). The question is asked
+    per row, in that row's own tenant, through the one reader the
+    import-boundary guard sanctions for it (MKT1: no new cross-tenant
+    catalog read outside ``apps/marketplace/``; an identity has a handful
+    of rows at most, so a query pair per row is the honest cost).
+    Soft-deleted rows are never working — a deleted account cannot be
     somebody's staff answer.
 
     Returns:
@@ -110,23 +116,12 @@ def resolve_working_bot_user(channel_user_id: str, *, surface: str = "miniapp") 
     if not rows:
         return None
 
-    # Local imports, as role_resolver does: identity must not pull catalog
-    # and tenancy into its import graph for every process touching a BotUser.
-    from apps.catalog.models import CatalogMaster
-    from apps.tenancy.models import TenantStaff
+    # Local import: role_resolver pulls catalog/tenancy models lazily itself;
+    # importing it at module load would drag them into every process that
+    # touches a BotUser.
+    from apps.identity.services.role_resolver import resolve_role
 
-    ids = [row.pk for row in rows]
-    staff_rows = set(
-        TenantStaff.all_tenants.filter(
-            bot_user_id__in=ids, deactivated_at__isnull=True
-        ).values_list("bot_user_id", flat=True)
-    )
-    master_rows = set(
-        CatalogMaster.all_tenants.filter(
-            linked_bot_user_id__in=ids, archived_at__isnull=True
-        ).values_list("linked_bot_user_id", flat=True)
-    )
-    working = [row for row in rows if row.pk in staff_rows or row.pk in master_rows]
+    working = [row for row in rows if resolve_role(row).primary_role != "customer"]
     if not working:
         return None
     if len(working) == 1:
