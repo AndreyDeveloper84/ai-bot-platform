@@ -584,3 +584,123 @@ class TestSingleton:
         nc.reset_nutrition_client()
         with pytest.raises(ValueError, match="AYLA_BASE_URL"):
             nc.get_nutrition_client()
+
+
+# ─── §5.1: предложение и подтверждение ────────────────────────────────────
+
+
+class TestProposedNormsAndConfirm:
+    """``ayla_proposed`` показывается как предложение и подтверждается кнопкой.
+
+    Инвариант DTO (§6) обнуляет числа у не настроенного источника — и
+    ``ayla_proposed`` не настроен по построению. Единственный санкционированный
+    путь к числам предложения — ``proposed_norms`` из ``raw``; для любого
+    другого источника он пуст.
+    """
+
+    _fetch = staticmethod(TestProfileTargetsSource._fetch)
+
+    _NORMS = {"daily_kcal": 1650, "daily_protein_g": 100, "daily_fat_g": 55, "daily_carbs_g": 190}
+
+    @pytest.mark.asyncio
+    async def test_proposed_numbers_are_nulled_on_the_dto_but_readable_as_a_proposal(
+        self,
+    ) -> None:
+        profile = await self._fetch(
+            _profile_body(
+                norms=self._NORMS,
+                targets_provenance={
+                    "source": "ayla_proposed",
+                    "method_versions": {},
+                    "confirmed_at": None,
+                },
+            )
+        )
+        assert profile.daily_kcal is None  # инвариант §6 держится
+        assert profile.targets_state == nc.TARGETS_NOT_CONFIGURED
+        assert nc.proposed_norms(profile) == {
+            "daily_kcal": 1650,
+            "protein_g": 100,
+            "fat_g": 55,
+            "carbs_g": 190,
+            "water_ml": None,
+        }
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "source", ["ayla_calculated", "user_entered", "none", "unknown_legacy", ""]
+    )
+    async def test_other_sources_are_not_a_proposal(self, source: str) -> None:
+        provenance = (
+            {"source": source, "method_versions": {}} if source else {"method_versions": {}}
+        )
+        profile = await self._fetch(_profile_body(norms=self._NORMS, targets_provenance=provenance))
+        # POSITIVE впереди: числа в ответе ЕСТЬ (в raw) — иначе «не
+        # предложение» доказывало бы пустоту, а не источник.
+        assert profile.raw["norms"]["daily_kcal"] == 1650
+        assert profile.targets_source == source
+        assert nc.proposed_norms(profile) == {}
+
+    @pytest.mark.asyncio
+    async def test_health_factor_refusals_are_read_by_name(self) -> None:
+        profile = await self._fetch(
+            _profile_body(
+                norms={},
+                overrides_applied=[
+                    {"reason": "health_factor_pregnant"},
+                    {"reason": "bmr_floor", "from": {}, "to": {}},
+                    {"reason": "health_factor_minor"},
+                ],
+                targets_provenance={"source": "none", "method_versions": {}},
+            )
+        )
+        assert nc.health_factor_refusals(profile) == ["pregnant", "minor"]
+
+    @pytest.mark.asyncio
+    async def test_confirm_targets_posts_without_a_body_and_returns_the_outcome(self) -> None:
+        seen: list[httpx.Request] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen.append(request)
+            body = _profile_body(
+                norms=self._NORMS,
+                targets_provenance={
+                    "source": "ayla_calculated",
+                    "method_versions": {},
+                    "confirmed_at": "2026-09-11T10:00:00.000Z",
+                },
+            )
+            body["confirmation"] = {"outcome": "confirmed"}
+            return httpx.Response(200, json={"data": body})
+
+        client, transport = _client_with_handler(handler)
+        _set_transport(transport)
+        profile, outcome = await client.confirm_targets(external_user_id="bot:1")
+
+        assert outcome == "confirmed"
+        assert profile.targets_source == "ayla_calculated"
+        assert profile.daily_kcal == 1650  # подтверждённое — действует, DTO числа не прячет
+        req = seen[0]
+        assert req.url.path.endswith("/nutrition/internal/profile/targets/confirm/")
+        assert req.headers["X-External-User-ID"] == "bot:1"
+        assert req.content in (b"{}", b"")
+
+    @pytest.mark.asyncio
+    async def test_nothing_to_confirm_carries_the_source(self) -> None:
+        def handler(_: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                409,
+                json={
+                    "error": {
+                        "code": "NOTHING_TO_CONFIRM",
+                        "message": "…",
+                        "details": {"targets_source": "user_entered"},
+                    }
+                },
+            )
+
+        client, transport = _client_with_handler(handler)
+        _set_transport(transport)
+        with pytest.raises(nc.NothingToConfirmError) as exc:
+            await client.confirm_targets(external_user_id="bot:1")
+        assert exc.value.source == "user_entered"

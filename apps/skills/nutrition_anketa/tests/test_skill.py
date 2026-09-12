@@ -7,6 +7,7 @@ unit tests; this file targets the skill-level integration.
 
 from __future__ import annotations
 
+from typing import Any
 from unittest.mock import Mock, patch
 
 from apps.consent.personal_calculation import ConsentAttestation
@@ -744,3 +745,168 @@ class TestSummaryCardShowsMethodAndInputs:
         )
         text = _format_summary(profile)
         assert "Считала по методике mifflin_st_jeor_v2 от твоих данных:" in text
+
+
+# ─── §5.1: предложение показывается как предложение и подтверждается ──────
+
+
+def _proposed_profile(**over: Any) -> ProfileResponse:
+    """Профиль с ``ayla_proposed``: DTO обнуляет числа, они живут в ``raw``."""
+    raw: dict[str, Any] = {
+        "norms": {
+            "daily_kcal": 1650,
+            "daily_protein_g": 100,
+            "daily_fat_g": 55,
+            "daily_carbs_g": 190,
+        },
+        "overrides_applied": [],
+        "targets_provenance": {
+            "source": "ayla_proposed",
+            "method_versions": {"calories": "mifflin_st_jeor_v1"},
+        },
+    }
+    raw.update(over.pop("raw", {}))
+    kwargs: dict[str, Any] = dict(
+        gender="female",
+        age=30,
+        height_cm=168,
+        weight_kg=62,
+        goal="maintain",
+        daily_kcal=1650,
+        protein_g=100,
+        fat_g=55,
+        carbs_g=190,
+        water_ml=None,
+        bmr=1400,
+        health_flags={},
+        disclaimer_acked=None,
+        goal_overridden_by=None,
+        targets_source="ayla_proposed",
+        targets_method_versions={"calories": "mifflin_st_jeor_v1"},
+        targets_input_snapshot={
+            "gender": "female",
+            "age": 30,
+            "height_cm": 168,
+            "weight_kg": 62.0,
+            "activity_coefficient": 1.375,
+            "goal": "maintain",
+            "pace": "moderate",
+        },
+        raw=raw,
+    )
+    kwargs.update(over)
+    return ProfileResponse(**kwargs)
+
+
+class TestProposalCard:
+    """Решение владельца 11.09.2026 §5.1: результат становится шагом только
+    после подтверждения. Каталог (#369) отдаёт расчёт как ``ayla_proposed``;
+    бот обязан показать его КАК ПРЕДЛОЖЕНИЕ с кнопкой подтверждения — а не
+    как «ориентиров нет» (так прочитал бы инвариант DTO без этой правки).
+
+    Оговорка о предмете: анкета на пилоте закрыта fail-closed до экрана
+    согласия — предложений сегодня не получит никто; стережём механизм.
+    """
+
+    def test_proposal_is_rendered_from_raw_with_the_method_line(self) -> None:
+        from apps.skills.nutrition_anketa.skill import _format_summary
+
+        profile = _proposed_profile()
+        assert profile.daily_kcal is None  # инвариант DTO держится
+        text = _format_summary(profile)
+        assert text.startswith("Предлагаю ориентиры — посмотри и подтверди:")
+        assert "🔥 Калории: 1650 ккал/день" in text
+        assert "🍗 Белок: 100 г" in text
+        assert "Считала по методике Миффлин — Сан Жеор, версия 1 от твоих данных:" in text
+        assert "пока ты его не подтвердишь, в дневнике оно не действует" in text
+        assert "Готово, рассчитала твои нормы" not in text
+        assert "Дневных ориентиров пока не считаю" not in text
+
+    def test_confirm_chip_comes_first_only_for_a_proposal(self) -> None:
+        from apps.skills.nutrition_anketa.skill import CB_CONFIRM_TARGETS, _post_anketa_chips
+
+        chips = _post_anketa_chips(_proposed_profile())
+        assert chips[0]["callback"] == CB_CONFIRM_TARGETS
+        assert chips[0]["label"] == "✅ Подтвердить ориентиры"
+        # Без предложения кнопки нет — она обещала бы действие без предмета.
+        for profile in (_profile(), None):
+            assert all(c["callback"] != CB_CONFIRM_TARGETS for c in _post_anketa_chips(profile))
+
+    def test_health_factor_refusal_is_named_not_silent(self) -> None:
+        from apps.skills.nutrition_anketa.skill import _format_summary
+
+        profile = _proposed_profile(
+            targets_source="none",
+            raw={
+                "norms": {},
+                "overrides_applied": [
+                    {"reason": "health_factor_pregnant"},
+                    {"reason": "health_factor_minor"},
+                ],
+                "targets_provenance": {"source": "none", "method_versions": {}},
+            },
+        )
+        text = _format_summary(profile)
+        assert text.startswith("Норму не считаю: при беременности, возрасте до 18 лет")
+        assert "Дневник и вода работают как раньше" in text
+        assert "ккал" not in text  # ни одного числа
+        assert "Дневных ориентиров пока не считаю" not in text  # не безымянный отказ
+
+    def test_matches_the_confirm_callback(self) -> None:
+        from apps.skills.nutrition_anketa.skill import CB_CONFIRM_TARGETS
+
+        ctx, _ = _context(CB_CONFIRM_TARGETS)
+        assert NutritionAnketaSkill().matches(ctx)
+
+
+class TestConfirmTargetsHandler:
+    def _run(self, confirm):
+        from apps.skills.nutrition_anketa.skill import CB_CONFIRM_TARGETS
+
+        client = Mock()
+        client.confirm_targets = confirm
+        ctx, _ = _context(CB_CONFIRM_TARGETS)
+        with patch("apps.skills.nutrition_anketa.skill.get_nutrition_client", return_value=client):
+            return NutritionAnketaSkill().handle(ctx)
+
+    def test_confirmed_shows_the_acting_card_and_no_confirm_chip(self) -> None:
+        from apps.skills.nutrition_anketa.skill import CB_CONFIRM_TARGETS
+
+        async def _confirm(**kwargs):
+            assert kwargs["external_user_id"]
+            return _profile(daily_kcal=1650), "confirmed"
+
+        result = self._run(_confirm)
+        assert result.action_type == "anketa_targets_confirmed"
+        assert result.reply_text.startswith("Ориентиры подтверждены — теперь действуют в дневнике.")
+        assert "🔥 Калории: 1650 ккал/день" in result.reply_text
+        assert (result.action_data or {})["outcome"] == "confirmed"
+        chips = (result.action_data or {})["buttons"]
+        assert all(c["callback"] != CB_CONFIRM_TARGETS for c in chips)
+
+    def test_already_confirmed_is_said_without_a_second_confirmation(self) -> None:
+        async def _confirm(**kwargs):
+            return _profile(), "already_confirmed"
+
+        result = self._run(_confirm)
+        assert result.reply_text.startswith("Ориентиры уже были подтверждены")
+
+    def test_nothing_to_confirm_answers_by_source(self) -> None:
+        from apps.integrations.ayla.nutrition_client import NothingToConfirmError
+
+        async def _confirm(**kwargs):
+            raise NothingToConfirmError("user_entered")
+
+        result = self._run(_confirm)
+        assert result.action_type == "anketa_confirm_targets_nothing"
+        assert "заданы тобой вручную" in result.reply_text
+        assert (result.action_data or {})["targets_source"] == "user_entered"
+
+    def test_ayla_down_is_the_common_fallback(self) -> None:
+        from apps.integrations.ayla import NutritionUnavailableError
+
+        async def _confirm(**kwargs):
+            raise NutritionUnavailableError("circuit_open")
+
+        result = self._run(_confirm)
+        assert result.meta["reply_kind"] == "anketa_ayla_down"

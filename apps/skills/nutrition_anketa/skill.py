@@ -105,6 +105,12 @@ from apps.integrations.ayla import (
     external_user_id_for,
     get_nutrition_client,
 )
+from apps.integrations.ayla.nutrition_client import (
+    TARGETS_PROPOSED,
+    NothingToConfirmError,
+    health_factor_refusals,
+    proposed_norms,
+)
 from apps.orchestrator.ui.keyboards import anketa_choice_keyboard, parse_callback
 from apps.skills.base import SkillContext, SkillResult
 from apps.skills.fsm import Completed, NextStep
@@ -204,6 +210,10 @@ class NutritionAnketaSkill:
         if text.startswith("cb:anketa:edit:"):
             return True
 
+        # §5.1: подтверждение предложенного ориентира — кнопка под карточкой.
+        if text == CB_CONFIRM_TARGETS:
+            return True
+
         return False
 
     # ─── handle ──────────────────────────────────────────────────────────
@@ -218,6 +228,10 @@ class NutritionAnketaSkill:
         # Edit: jump back to a step.
         if text.startswith("cb:anketa:edit:"):
             return self._on_edit(context, text)
+
+        # §5.1: человек подтверждает предложение.
+        if text == CB_CONFIRM_TARGETS:
+            return self._on_confirm_targets(context)
 
         # Resume — load FSM + transition.
         return self._on_transition(context, text)
@@ -399,9 +413,62 @@ class NutritionAnketaSkill:
                 # asks a model to guess. A photo cannot be a chip -- the
                 # person has to send one -- so the closing line invites it in
                 # words instead of a button that could not deliver.
-                "buttons": _post_anketa_chips(),
+                "buttons": _post_anketa_chips(profile),
             },
             meta={"reply_kind": "anketa_complete"},
+        )
+
+    # ─── confirm (cb:anketa:confirm_targets) — §5.1 ───────────────────────
+
+    def _on_confirm_targets(self, context: SkillContext) -> SkillResult:
+        """Предложение → действующий ориентир. Только по нажатию человека.
+
+        Кнопка подтверждает ТО, что предложено: тела нет, каталог
+        переводит ``ayla_proposed`` в ``ayla_calculated`` и возвращает
+        профиль уже с числами (инвариант DTO их больше не прячет).
+        ``already_confirmed`` — повтор кнопки, отвечаем тем же, без
+        второго «подтверждено». ``NOTHING_TO_CONFIRM`` — три разных
+        ответа по источнику; «не вышло» без имени здесь запрещено.
+        """
+        external_id = external_user_id_for(context.bot_user)
+        try:
+            profile, outcome = asyncio.run(
+                get_nutrition_client().confirm_targets(external_user_id=external_id)
+            )
+        except NothingToConfirmError as exc:
+            logger.info("anketa.confirm_targets.nothing user=%s source=%s", external_id, exc.source)
+            return SkillResult(
+                reply_text=_NOTHING_TO_CONFIRM_TEXTS.get(exc.source, _NOTHING_TO_CONFIRM_TEXTS[""]),
+                action_type="anketa_confirm_targets_nothing",
+                action_data={"targets_source": exc.source, "buttons": _post_anketa_chips(None)},
+                meta={"reply_kind": "anketa_confirm_targets_nothing"},
+            )
+        except NutritionUnavailableError:
+            logger.warning("anketa.confirm_targets.ayla_unavailable user=%s", external_id)
+            return SkillResult(
+                reply_text=_AYLA_DOWN_FALLBACK, meta={"reply_kind": "anketa_ayla_down"}
+            )
+        except NutritionAPIError:
+            logger.exception("anketa.confirm_targets.ayla_api_error user=%s", external_id)
+            return SkillResult(
+                reply_text=_AYLA_DOWN_FALLBACK, meta={"reply_kind": "anketa_ayla_error"}
+            )
+
+        logger.info("anketa.confirm_targets user=%s outcome=%s", external_id, outcome)
+        head = (
+            "Ориентиры уже были подтверждены — действуют в дневнике."
+            if outcome == "already_confirmed"
+            else "Ориентиры подтверждены — теперь действуют в дневнике."
+        )
+        return SkillResult(
+            reply_text=f"{head}\n\n{_format_summary(profile)}",
+            action_type="anketa_targets_confirmed",
+            action_data={
+                "outcome": outcome,
+                "daily_kcal": profile.daily_kcal,
+                "buttons": _post_anketa_chips(profile),
+            },
+            meta={"reply_kind": "anketa_targets_confirmed"},
         )
 
     # ─── helpers ────────────────────────────────────────────────────────
@@ -556,17 +623,42 @@ def _is_real_orm_conversation(conversation: object) -> bool:
 # ─── summary rendering ────────────────────────────────────────────────────
 
 
-def _post_anketa_chips() -> list[dict[str, str]]:
-    """The two next steps that really execute after the norms land.
+#: Кнопка подтверждения предложенного ориентира (§5.1). Callback
+#: заявляется этим скиллом детерминированно (``matches``), как и прочие
+#: ``cb:anketa:*``.
+CB_CONFIRM_TARGETS = "cb:anketa:confirm_targets"
+CHIP_CONFIRM_TARGETS = {"label": "✅ Подтвердить ориентиры", "callback": CB_CONFIRM_TARGETS}
+
+#: Ответы на ``NOTHING_TO_CONFIRM`` — по источнику, а не одно «не вышло».
+_NOTHING_TO_CONFIRM_TEXTS: dict[str, str] = {
+    "none": "Подтверждать пока нечего — ориентиров сейчас нет. Пройди анкету: /anketa.",
+    "ayla_calculated": "Ориентиры уже подтверждены — действуют в дневнике.",
+    "user_entered": "Ориентиры заданы тобой вручную — подтверждать их не нужно.",
+    "unknown_legacy": "Эти ориентиры посчитаны давно, без сохранённого основания — "
+    "подтвердить их нельзя. Пройди анкету заново: /anketa.",
+    "": "Подтверждать пока нечего.",
+}
+
+
+def _post_anketa_chips(profile=None) -> list[dict[str, str]]:
+    """The next steps that really execute after the norms land.
 
     Kept next to the summary it ships with, and built from the
     ``personal_surface`` constants so the labels and callbacks cannot drift
     apart from the matchers that claim them.
+
+    §5.1: при предложении (``ayla_proposed``) первой стоит кнопка
+    подтверждения — единственный шаг, который переводит число из
+    «предлагаю» в «действует». Без предложения кнопки нет: она обещала бы
+    действие, у которого нет предмета.
     """
 
     from apps.orchestrator.personal_surface import CHIP_DIARY, CHIP_WATER, diary_is_reachable
 
-    chips = [dict(CHIP_WATER)]
+    chips: list[dict[str, str]] = []
+    if profile is not None and profile.targets_source == TARGETS_PROPOSED:
+        chips.append(dict(CHIP_CONFIRM_TARGETS))
+    chips.append(dict(CHIP_WATER))
     if diary_is_reachable():
         # Only the global path claims «что я ел сегодня» deterministically.
         # On a salon bot the same tap would fall through the skill ladder to a
@@ -653,6 +745,32 @@ def _method_and_inputs_line(profile) -> str:
     return f"{head} от твоих данных: {', '.join(facts)}."
 
 
+#: Подписи health-факторов для человека (§5.1, каталог #372). Имя из
+#: ``overrides_applied`` — часть контракта; неизвестное печатается как есть.
+_HEALTH_FACTOR_LABELS: dict[str, str] = {
+    "pregnant": "беременности",
+    "breastfeeding": "грудном вскармливании",
+    "eating_disorder": "расстройстве пищевого поведения",
+    "minor": "возрасте до 18 лет",
+}
+
+
+def _format_health_factor_refusal(names: list[str]) -> str:
+    """«Норму не считаю: при … Ayla индивидуальные ориентиры не рассчитывает».
+
+    Решение владельца 11.09.2026 §5.1: «При health-факторах Ayla не
+    рассчитывает индивидуальную норму». Отказ назван по факту, без
+    чисел и без обещания «сделаю позже»; дневник при этом открыт (§92:
+    отказ не закрывает дневник).
+    """
+    labels = [_HEALTH_FACTOR_LABELS.get(n, n) for n in names]
+    joined = ", ".join(labels)
+    return (
+        f"Норму не считаю: при {joined} Ayla индивидуальные ориентиры не рассчитывает.\n"
+        "Дневник и вода работают как раньше — записывай, я всё сохраню."
+    )
+
+
 def _format_summary(profile) -> str:
     """Карточка после анкеты — только те ориентиры, которые ЕСТЬ.
 
@@ -672,6 +790,32 @@ def _format_summary(profile) -> str:
     Ноль читается как отсутствие, а не как «ориентир ноль»: ни одна из
     пяти величин не может быть нулём у живого человека.
     """
+    # §5.1: отказ по health-фактору — сказать ПОЧЕМУ, а не «не считаю».
+    refused_for = health_factor_refusals(profile)
+    if refused_for:
+        return _format_health_factor_refusal(refused_for)
+
+    # §5.1: предложение показывается как предложение. Числа — из ``raw``:
+    # инвариант DTO обнуляет поля у не настроенного источника, и это
+    # верно для всех читателей, кроме этого экрана.
+    proposal = proposed_norms(profile)
+    if proposal:
+        rows = [
+            f"{label}: {value} {unit}"
+            for label, field, unit in _SUMMARY_ROWS
+            if (value := int(proposal.get(field) or 0)) > 0
+        ]
+        if rows:
+            proposal_parts = ["Предлагаю ориентиры — посмотри и подтверди:", "\n".join(rows)]
+            method_line = _method_and_inputs_line(profile)
+            if method_line:
+                proposal_parts.append(method_line)
+            proposal_parts.append(
+                "Это предложение: пока ты его не подтвердишь, в дневнике оно не "
+                "действует — ни «осталось на сегодня», ни оценок по нему не будет."
+            )
+            return "\n\n".join(proposal_parts)
+
     rows = [
         f"{label}: {value} {unit}"
         for label, field, unit in _SUMMARY_ROWS
