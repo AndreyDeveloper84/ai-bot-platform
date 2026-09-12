@@ -43,6 +43,7 @@ import httpx
 from django.conf import settings
 
 from apps.integrations.ayla.url_builder import AylaUrlBuilder, AylaUrlError
+from apps.integrations.ayla.request_id import with_request_id
 
 logger = logging.getLogger(__name__)
 
@@ -234,12 +235,14 @@ def _request(
     if _circuit.is_open(now=now):
         raise GoalsUnavailable("circuit_open")
 
-    headers = {
-        "Authorization": f"Bearer {token}",
-        "X-External-User-ID": external_user_id,
-        "Accept": "application/json",
-        "Content-Type": "application/json",
-    }
+    headers = with_request_id(
+        {
+            "Authorization": f"Bearer {token}",
+            "X-External-User-ID": external_user_id,
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+        }
+    )
 
     # Бюджеты читаются на КАЖДЫЙ запрос, а не запекаются в клиент при
     # постройке: пул живёт весь процесс, и константы должны оставаться

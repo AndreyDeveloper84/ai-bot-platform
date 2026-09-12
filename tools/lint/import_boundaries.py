@@ -184,6 +184,40 @@ class Contract:
     triage_note_required: bool = False
 
 
+# ── S2.6 (DRF-1700, owner 11.09 §2.6) — what a SALON surface is, and what it
+# may not read. Prefixes are files and directories; `startswith` matching,
+# so a single file is a valid prefix.
+SALON_SURFACE_PREFIXES: tuple[str, ...] = (
+    "apps/channels/max/salon_handler.py",
+    "apps/channels/max/staff_menu.py",
+    "apps/admin_api/",
+    "apps/master_api/",
+    "apps/internal_chat/",
+)
+
+# The person's memory, goals, nutrition, wellness and health — the readers,
+# the models and the Ayla clients. Named by module so that a new reader in
+# one of these packages is covered without editing this list; a new PACKAGE
+# is not, and that is the named blind spot of this contract.
+PERSONAL_CONTEXT_MODULES: tuple[str, ...] = (
+    "apps.identity.models.UserPersonalContext",
+    "apps.identity.models.MemoryEntry",
+    "apps.identity.models.RedZoneAccessLog",
+    "apps.identity.services.personal_context",
+    "apps.identity.services.memory_reader",
+    "apps.identity.services.memory_inferred",
+    "apps.identity.services.red_zone_reader",
+    "apps.orchestrator.memory.personal_context",
+    "apps.orchestrator.personal_surface",
+    "apps.persona.memory_surface",
+    "apps.persona.memory_commands",
+    "apps.nutrition_proactive",
+    "apps.integrations.ayla.personal_context_client",
+    "apps.integrations.ayla.nutrition_client",
+    "apps.integrations.ayla.goals_client",
+    "apps.integrations.ayla.wellness_context_client",
+)
+
 CONTRACTS: tuple[Contract, ...] = (
     Contract(
         id="G2.1-skills-no-yclients",
@@ -252,6 +286,25 @@ CONTRACTS: tuple[Contract, ...] = (
             "historical read, add it to BASELINE with that note and a tracking "
             "issue; if not, route through apps/booking/ or Ayla REST."
         ),
+    ),
+    Contract(
+        id="S2.6-salon-surfaces-no-personal-context",
+        issue="DRF-1700",
+        source_prefixes=SALON_SURFACE_PREFIXES,
+        forbidden_modules=PERSONAL_CONTEXT_MODULES,
+        message=(
+            "owner decision 11.09 §2.6: «салон не видит цели, домашний/рабочий "
+            "адрес, питание и историю других салонов». A salon-facing surface "
+            "(salon bot, staff menu, admin/master API, internal chat) must not "
+            "import the person's memory, goals, nutrition, wellness or health "
+            "readers — those belong to the client contour and to Ayla. "
+            "Measured 11.09: zero such imports on dev; this contract keeps the "
+            "zero a rule rather than a coincidence. If a salon feature needs a "
+            "FACT (not the content) — e.g. «has an active goal» — route it "
+            "through a reader that returns the fact only, and pin it here with "
+            "a BaselineNote naming what leaves and to whom."
+        ),
+        triage_note_required=True,
     ),
 )
 
@@ -642,6 +695,15 @@ CATALOG_CROSS_TENANT_BASELINE: frozenset[BaselineKey] = frozenset(
         # never discovery. Read-only; the operator rendering masks every
         # personal value and the person rendering never names another salon.
         "apps/identity/services/identity_card.py",
+        # B-R (DRF-1617) — the test-account reset is PERSON-level by
+        # construction: one (channel, channel_user_id) has a BotUser per
+        # tenant, and the command frees all of them, so it reads the master
+        # cards linked to THOSE BotUser ids / ayla_user_id — a lookup by the
+        # person's own keys, never by tenant, never discovery. `.objects`
+        # would see one tenant and miss the rest, which is the half-reset
+        # this command exists to prevent. Writes are behind
+        # ACCOUNT_RESET_ALLOWLIST (empty on the pilot).
+        "apps/identity/services/account_reset.py",
         # DRF-1061 — operator command listing and picking a master to invite.
         # Every query is filtered on the --tenant the operator named, and it
         # runs at a terminal with no request and therefore no tenant

@@ -55,6 +55,7 @@ from requests.adapters import HTTPAdapter  # type: ignore[import-untyped]
 from urllib3.util.retry import Retry
 
 from apps.integrations.ayla.url_builder import AylaUrlBuilder, AylaUrlError
+from apps.integrations.ayla.request_id import with_request_id
 
 
 logger = logging.getLogger(__name__)
@@ -292,10 +293,12 @@ class AylaPaymentsClient:
             "recipient_name": recipient_name,
             "buyer_email": buyer_email,
         }
-        headers = {
-            "Authorization": f"Bearer {self._api_token}",
-            "Idempotence-Key": str(idempotence_key),
-        }
+        headers = with_request_id(
+            {
+                "Authorization": f"Bearer {self._api_token}",
+                "Idempotence-Key": str(idempotence_key),
+            }
+        )
         # Build the URL through the seam here (not __init__) so the dormant-boot
         # contract holds. ``base_url`` is non-empty (checked above); a malformed
         # base is a config error — map ``AylaUrlError`` to the payments domain

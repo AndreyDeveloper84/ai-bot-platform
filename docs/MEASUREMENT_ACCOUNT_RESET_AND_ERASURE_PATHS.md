@@ -21,14 +21,50 @@ beautygo_backend  origin/dev = 89a6f794
 
 ---
 
+## Поправка от 11.09 (вторая половина дня) — что в первой редакции было неверно
+
+Первая редакция снята чтением кода; ниже то, что изменил замер пилота и
+перепись с исправленным правилом. Прежний текст оставлен, поправки стоят
+рядом с тем, что они поправляют.
+
+```
+перепись связей         55 → 66      правило отбора было честным и неполным (см. §3)
+                                     identity.BotUser 20 → 26 (d8a1804d), users.User 35 → 40 (fc771674)
+                                     «41 в каталоге» считала privacy_audit из НЕСЛИТОГО #318 — на dev её нет
+каскады в базе           нет вовсе   все FK на пилоте — NO ACTION; каскад существует только в ORM.
+                                     Значит сброс обязан идти через ORM, и план ORM — единственная правда
+«ни один аккаунт          неверно    старым helper'ом сбрасываются 14 из 26; но 8 из 14 — фикстуры,
+ не сбрасывается»                    реальных MAX-идентификаторов 6, с историей 3
+«команды сброса нет»     устарело    команда есть — B-R, `reset_test_account` в обоих репозиториях
+                                     (бот: apps/identity/services/account_reset.py; каталог: users/account_reset.py)
+бот-только сброс         половинчат  каталог держит proxy bot:max:<id> (20 строк, 3/3 у использованных
+                                     аккаунтов), и повторный /start резолвится в ТОТ ЖЕ ayla_user_id
+память бота              не на BotUser  UserPersonalContext/MemoryEntry ключуются на ayla_user_id;
+                                     удаление BotUser её не трогает — сброс несёт две семьи идентификаторов
+RedZoneAccessLog         help_text лжёт  «RunSQL добавляет сырой FK ON DELETE NO ACTION» — в миграциях
+                                     RunSQL с FK нет, на пилоте FK у identity_redzoneaccesslog нет
+```
+
+Замер пилота: `176.119.159.141` (hostname `ruvds-o1mqo`, `now()` = 2026-09-11
+11:15 UTC), только чтение. `194.87.99.126` — заброшенная копия, не замерялась.
+
+Что команда НЕ решает и что ушло владельцу (DRF-1349): три аккаунта с
+историей упираются в `observability.AIRequestMetric.bot_user = PROTECT`;
+режим `master-registration` не снимает тенант; `appointments.Appointment.client`
+остаётся отказом.
+
+---
+
 ## Ответ одной строкой
 
 **Путей стирания два, они расходятся по существу, и тот из них, который дал
 бы «первый запуск», уже не работает ровно для тех аккаунтов, которые нужно
 сбросить.**
 
-Поэтому команды сброса нет: она была бы обёрткой вокруг механизма, который
-падает на каждом реальном аккаунте.
+~~Поэтому команды сброса нет: она была бы обёрткой вокруг механизма, который
+падает на каждом реальном аккаунте.~~ — **снято 11.09**: команда написана не
+обёрткой вокруг helper'а, а поверх плана ORM с отказом по имени на каждом
+PROTECT, который режим не разбирает. См. поправку выше.
 
 ---
 
@@ -85,7 +121,15 @@ beautygo_backend  origin/dev = 89a6f794
 ORM даёт **шесть**, и `tenancy.StaffAssignment` **не существует** — модель
 называется `tenancy.TenantStaff`. Искали бы по несуществующему имени.
 
-### Перепись входящих связей на `identity.BotUser` — всего 20
+### Перепись входящих связей на `identity.BotUser` — всего 20 (поправка: 26 на d8a1804d)
+
+Первое правило отбора (`get_fields()` без `include_hidden=True`) не видит
+связей с `related_name="+"`. Их на `BotUser` шесть, все `SET_NULL`:
+`catalog.CatalogMaster.schedule_confirmed_by`, `internal_chat.MasterAdminMessage.sender_user`,
+`internal_chat.MasterAdminThread.assigned_admin`, `scheduling.ScheduleChangeRequest.requested_by`,
+`tenancy.StaffInvite.created_by`, `tenancy.TenantStaff.created_by`. Удаление их
+учитывает, перепись без них — нет. Команда сброса перечисляет связи с
+`include_hidden=True`, и на это стоит сторож.
 
 ```
 PROTECT   6    conversations.Conversation.bot_user          ← разбирает helper
@@ -107,7 +151,13 @@ SET_NULL  3    booking.BookingRequest · catalog.CatalogMaster.linked_bot_user
 
 **Настоящих блокеров четыре**, а не три.
 
-### Перепись входящих связей на `users.User` (каталог) — всего 35
+### Перепись входящих связей на `users.User` (каталог) — всего 35 (поправка: 40 на fc771674)
+
+Пять скрытых: `users.User_groups.user`, `users.User_user_permissions.user`
+(CASCADE, служебные M2M) и `services.DraftSalonService.confirmed_by`,
+`services.SalonService.mapping_confirmed_by`, `services.ServiceTemplate.approved_by`,
+`services.ServiceTemplateSynonym.confirmed_by` (SET_NULL). Строка
+`privacy_audit.PersonalDataAccessLog.actor` ниже — из неслитого #318, на dev её нет.
 
 ```
 PROTECT   7    appointments.Appointment.client
@@ -133,9 +183,9 @@ SET_NULL  6    analytics.AnalyticsEvent.actor
 ### Итог переписи
 
 ```
-55 связей в двух системах
-13 из них PROTECT
- 2 из тринадцати разобраны
+55 связей в двух системах        поправка 11.09: 66 (26 + 40)
+13 из них PROTECT                без изменений
+ 2 из тринадцати разобраны       без изменений
 ```
 
 **Содержание среза — решение про одиннадцать неразобранных, и оно частью
@@ -241,4 +291,6 @@ privacy_audit.PersonalDataAccessLog.actor = SET_NULL
   замер, и он нужен до первой боевой команды, а не до постановки.
 * **Правило отбора для переписи:** входящие связи модели по
   `Model._meta.get_fields()`, у которых есть `field` и которые не `concrete`.
-  Это все обратные связи, включая те, что объявлены в других приложениях.
+  ~~Это все обратные связи~~ — **нет**: без `include_hidden=True` это все
+  обратные связи, кроме объявленных с `related_name="+"`. Поправлено 11.09,
+  числа выше пересняты.

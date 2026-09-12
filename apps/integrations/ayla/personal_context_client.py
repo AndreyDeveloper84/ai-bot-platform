@@ -57,6 +57,7 @@ import httpx
 from django.conf import settings
 
 from apps.integrations.ayla.url_builder import AylaUrlBuilder, AylaUrlError
+from apps.integrations.ayla.request_id import with_request_id
 
 logger = logging.getLogger(__name__)
 
@@ -313,6 +314,48 @@ class PersonalContextHttpClient:
         )
 
     # ------------------------------------------------------------------
+    # DRF-1699 — заявка на удаление аккаунта (§7 свода владельца)
+    # ------------------------------------------------------------------
+
+    def create_deletion_request(
+        self, *, ayla_user_id: str, external_user_id: str, initiator: str = "bot"
+    ) -> dict[str, Any]:
+        """``POST /internal/users/{id}/deletion-requests/`` → заявка.
+
+        Идемпотентно на стороне каталога (открытая заявка возвращается той
+        же, 200 против 201), поэтому транспортные повторы безопасны и ходят
+        через ``_send_with_retry``. Возвращает ``data`` как есть:
+        ``{request_id, status, requested_at, deadline_at, completed_at,
+        is_open}``. Ничего не стирает — это заявка, а не действие.
+        """
+        payload = self._send_with_retry(
+            "POST",
+            f"internal/users/{ayla_user_id}/deletion-requests/",
+            external_user_id=external_user_id,
+            json_body={"initiator": initiator},
+        )
+        return _unwrap_data(payload)
+
+    def get_current_deletion_request(
+        self, *, ayla_user_id: str, external_user_id: str
+    ) -> dict[str, Any] | None:
+        """``GET /internal/users/{id}/deletion-requests/`` → текущая или ``None``.
+
+        404 здесь — «заявок не было», не «человек не найден»: каталог
+        отвечает одним кодом на оба, и различать их профилю незачем — в
+        обоих случаях показывать нечего.
+        """
+        try:
+            payload = self._send_with_retry(
+                "GET",
+                f"internal/users/{ayla_user_id}/deletion-requests/",
+                external_user_id=external_user_id,
+            )
+        except PersonalContextNotFoundError:
+            return None
+        return _unwrap_data(payload)
+
+    # ------------------------------------------------------------------
     # Plumbing
     # ------------------------------------------------------------------
 
@@ -403,22 +446,24 @@ class PersonalContextHttpClient:
                 method,
                 url,
                 json=json_body,
-                headers={
-                    "Authorization": f"Bearer {self._token}",
-                    # CP-2 / DRF-1617. The token says WHICH SERVICE called;
-                    # this says WHICH SUBJECT it is acting for. Upstream
-                    # resolves it — without creating a row — and refuses when
-                    # it does not resolve to the subject in the path, so a
-                    # leaked token can no longer reach an arbitrary person.
-                    #
-                    # This client was the only one of ten Ayla clients that
-                    # named no subject, and it happens to carry every
-                    # personal-data route: export, erasure, and the declared
-                    # profile the erasure empties.
-                    "X-External-User-ID": external_user_id,
-                    "Accept": "application/json",
-                    "Content-Type": "application/json",
-                },
+                headers=with_request_id(
+                    {
+                        "Authorization": f"Bearer {self._token}",
+                        # CP-2 / DRF-1617. The token says WHICH SERVICE called;
+                        # this says WHICH SUBJECT it is acting for. Upstream
+                        # resolves it — without creating a row — and refuses when
+                        # it does not resolve to the subject in the path, so a
+                        # leaked token can no longer reach an arbitrary person.
+                        #
+                        # This client was the only one of ten Ayla clients that
+                        # named no subject, and it happens to carry every
+                        # personal-data route: export, erasure, and the declared
+                        # profile the erasure empties.
+                        "X-External-User-ID": external_user_id,
+                        "Accept": "application/json",
+                        "Content-Type": "application/json",
+                    }
+                ),
                 timeout=self._timeout,
             )
         except httpx.HTTPError as exc:
