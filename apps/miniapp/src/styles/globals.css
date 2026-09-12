@@ -830,6 +830,32 @@ a {
   line-height: 1.5;
 }
 
+/* «Уже учла» (DRF-1744): память заметна, но не спорит с вопросом —
+   тот же тихий фон, что у «Текущей цели», строки в один ряд, действие
+   «Изменить» — тихая текстовая кнопка, как у побочных намерений. */
+.already-noted__list {
+  list-style: none;
+  margin: 0;
+  padding: var(--s-2) var(--s-3);
+  background: var(--c-surface-2);
+  border-radius: var(--r-md);
+}
+
+.already-noted__row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s-2);
+  padding: var(--s-1) 0;
+  color: var(--c-text-primary);
+  line-height: 1.5;
+}
+
+.already-noted__label {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
 .goal-select__prompt {
   margin: 0 0 var(--s-2);
   color: var(--c-text-primary);

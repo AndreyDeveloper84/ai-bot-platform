@@ -80,6 +80,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
+import { AlreadyNoted } from "../components/AlreadyNoted";
 import { ScreenLayout } from "../components/ScreenLayout";
 import { DelayedSkeleton, ServiceCardSkeleton } from "../components/Skeleton";
 import { StateError } from "../components/StateError";
@@ -166,7 +167,7 @@ function noticeFor(body: GoalSelectBody): string | null {
   // `in`, а не доступ к полю: `GoalSelectBody` — размеченное объединение,
   // и у ветки с `goal_key` поля `goal_text` не существует вовсе.
   if ("goal_key" in body || "goal_text" in body) return "Цель сохранена.";
-  if ("answer" in body) return "Ответ сохранён.";
+  if ("answer" in body) return "revise" in body.answer ? "Ответ изменён." : "Ответ сохранён.";
   return null;
 }
 
@@ -187,6 +188,10 @@ export function GoalSelectScreen({ initialDoc }: Props = {}) {
   // «не понимаю, получилось ли» была ровно про это.
   const [savedNotice, setSavedNotice] = useState<string | null>(null);
   const [goalText, setGoalText] = useState("");
+  // Шаг, который человек пересматривает по «Изменить» (DRF-1744). Пока
+  // он открыт, текущий вопрос уступает ему место: один экран — одна
+  // задача (макет C03). Сбрасывается любым ответом сервера.
+  const [revisingStep, setRevisingStep] = useState<string | null>(null);
 
   const load = useCallback(() => {
     setState({ kind: "loading" });
@@ -241,6 +246,7 @@ export function GoalSelectScreen({ initialDoc }: Props = {}) {
       .then((doc) => {
         setState({ kind: "ok", doc });
         setGoalText("");
+        setRevisingStep(null);
         setSavedNotice(noticeFor(body));
       })
       .catch(() => {
@@ -290,6 +296,12 @@ export function GoalSelectScreen({ initialDoc }: Props = {}) {
   const guidanceLabel = intentLabel("need_guidance");
   const startAnketaLabel = intentLabel("start_anketa");
   const anketaStep = currentAnketaStep(doc);
+  const knownAnswers = doc.known.anketa ?? [];
+  // Пересматриваемый шаг берётся из документа, не из памяти экрана: если
+  // сервер его уже не показывает, пересматривать нечего.
+  const revising = revisingStep
+    ? knownAnswers.find((a) => a.step === revisingStep && a.revisable) ?? null
+    : null;
   const nextStep = doc.next ?? null;
   const nextRoute = nextStep ? NEXT_ROUTES[nextStep.id] : undefined;
 
@@ -422,16 +434,64 @@ export function GoalSelectScreen({ initialDoc }: Props = {}) {
         </div>
       )}
 
-      {knownGoal && knownLabel && (
-        <section aria-labelledby="goal-select-current">
-          <h2 id="goal-select-current" className="goal-select__section-title">
-            Текущая цель
-          </h2>
-          <p className="goal-select__current">{knownLabel}</p>
+      {/* «Уже учла» (DRF-1744) — пока идёт проход: цель (если есть) и
+          ответы с «Изменить». Без ответов — прежняя секция «Текущая
+          цель», чтобы документы до DRF-1744 рисовались как раньше. */}
+      {knownAnswers.length > 0 ? (
+        <AlreadyNoted
+          goalLabel={knownLabel}
+          answers={knownAnswers}
+          disabled={submitting}
+          onRevise={setRevisingStep}
+        />
+      ) : (
+        knownGoal &&
+        knownLabel && (
+          <section aria-labelledby="goal-select-current">
+            <h2 id="goal-select-current" className="goal-select__section-title">
+              Текущая цель
+            </h2>
+            <p className="goal-select__current">{knownLabel}</p>
+          </section>
+        )
+      )}
+
+      {/* Пересмотр ответа занимает место вопроса: варианты — те, что
+          сервер прислал в строке «Уже учла», ответ уходит с `revise`. */}
+      {revising && (
+        <section aria-label="Изменить ответ">
+          <p className="goal-select__prompt">{revising.prompt}</p>
+          <div className="chip-row" role="group" aria-label={revising.prompt}>
+            {revising.options.map((option) => (
+              <button
+                key={option.key}
+                type="button"
+                className="chip"
+                disabled={submitting}
+                aria-pressed={option.key === revising.option_key}
+                onClick={() =>
+                  submit({
+                    answer: { step: revising.step, option_key: option.key, revise: true },
+                    source_channel: "miniapp",
+                  })
+                }
+              >
+                {option.label}
+              </button>
+            ))}
+          </div>
+          <button
+            type="button"
+            className="goal-select__minor-action"
+            disabled={submitting}
+            onClick={() => setRevisingStep(null)}
+          >
+            Оставить как есть
+          </button>
         </section>
       )}
 
-      {doc.missing.length > 0 && (
+      {!revising && doc.missing.length > 0 && (
         <section aria-label="Вопросы">
           {doc.missing.map((item, index) => (
             <div key={`${item.kind}-${index}`}>
