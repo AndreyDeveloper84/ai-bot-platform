@@ -108,6 +108,20 @@ def person(ayla):
         ConsentRecord.ConsentType.MEMORY_GREEN.value,
     ):
         record_global_consent(bot_user, consent_type=consent_type, source="welcome")
+    # §92 п.1 / DRF-1698 — согласие на персональный расчёт. Гейт стоит НА
+    # ВХОДЕ в анкету (#1593): без согласия анкета ничего не спрашивает, и
+    # этот тест проверял бы отказ вместо потока. Выдаётся НАСТОЯЩИМ
+    # писателем (тем же, что экран согласия), а не подменой предиката:
+    # тест гоняет живой обработчик, и предусловие обязано быть таким же
+    # живым. У отказа свои тесты — test_consent_gate_at_entry.py.
+    from apps.consent.personal_calculation import (
+        PERSONAL_CALCULATION_DOCUMENT_VERSION,
+        grant as grant_personal_calculation,
+    )
+
+    assert grant_personal_calculation(
+        bot_user, document_version=PERSONAL_CALCULATION_DOCUMENT_VERSION
+    )
     conversation = resolve_active_global_conversation(bot_user)
     return bot_user, conversation
 

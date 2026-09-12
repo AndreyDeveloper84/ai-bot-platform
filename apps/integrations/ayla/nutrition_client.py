@@ -951,6 +951,46 @@ class NutritionClient:
         outcome = str((result.raw.get("confirmation") or {}).get("outcome") or "")
         return result, outcome
 
+    async def purge_body_parameters(self, *, external_user_id: str) -> bool:
+        """``DELETE /api/v1/nutrition/internal/profile/body-parameters/`` (DRF-1698).
+
+        Отзыв согласия на персональный расчёт (владелец 12.09 §2): каталог
+        обнуляет вес/рост/возраст/пол и снимок ввода целей, инвалидирует
+        нормы; история дневника остаётся. Идемпотентно. ``True`` — каталог
+        подтвердил (200/204, повтор — тоже), ``False`` — ручки ещё нет
+        (404): вызывающий обязан сказать «не подтверждено», не «удалено».
+
+        Raises:
+            NutritionUnavailableError: circuit / 5xx / network.
+            NutritionAPIError: прочие 4xx.
+        """
+        now = time.monotonic()
+        if self._circuit.is_open(now=now):
+            raise NutritionUnavailableError("circuit_open")
+        url = self._urls.build("nutrition/internal/profile/body-parameters/")
+        headers = with_request_id(
+            {
+                "X-Service-Token": self._token,
+                "X-External-User-ID": external_user_id,
+            }
+        )
+        try:
+            async with httpx.AsyncClient(timeout=self._timeout_s) as http:
+                resp = await http.delete(url, headers=headers)
+        except (httpx.TimeoutException, httpx.NetworkError) as exc:
+            self._circuit.record_failure(now=now)
+            raise NutritionUnavailableError(f"network: {type(exc).__name__}") from exc
+        if resp.status_code in (200, 204):
+            self._circuit.record_success()
+            return True
+        if resp.status_code == 404:
+            # Ручки ещё нет на этой выкладке — не «удалено».
+            return False
+        if resp.status_code >= 500:
+            self._circuit.record_failure(now=now)
+            raise NutritionUnavailableError(f"http_{resp.status_code}")
+        raise NutritionAPIError(f"purge_body_parameters: HTTP {resp.status_code}")
+
     def _parse_profile_response(
         self,
         resp: httpx.Response,

@@ -176,6 +176,98 @@ _STOP_TEXTS = {"minor": _STOP_MINOR, "screening": _STOP_SCREENING}
 # вон там» отправило бы человека в место, которого нет. Собранные ответы
 # стираются вместе с FSM — держать параметры тела в skill_state без
 # основания нельзя.
+# ЧЕРНОВИК ТЕКСТОВ. Владельцем не утверждён: это его слова к людям.
+# Состав согласия взят из §92 дословно — вес, рост, возраст,
+# физиологический пол, активность и цель; шесть параметров, и ни одним
+# больше.
+#
+# Чего в тексте намеренно НЕТ:
+#   * обещания, что отказ можно передумать «в настройках» — экрана
+#     отзыва в боте сегодня нет, и обещать дверь, которой нет, нельзя;
+#   * слова «анонимно» и «обезличенно» — параметры тела хранятся под
+#     учётной записью человека, и называть это обезличиванием было бы
+#     неправдой;
+#   * юридических формул сверх необходимого: человек читает это в
+#     мессенджере между делом.
+# Тексты — дословно из пакета решений владельца 12.09 §2 (DRF-1698):
+# «APPROVE WITH TEXT CHANGES». Согласие относится ТОЛЬКО к персональному
+# расчёту норм; дневник работает и без него, и текст говорит это сам.
+CONSENT_ASK = (
+    "Хотите, чтобы Ayla рассчитывала ваши персональные нормы?\n\n"
+    "Для расчёта понадобятся шесть параметров: вес, рост, возраст, пол для "
+    "расчёта, уровень активности и ваша цель.\n\n"
+    "Я сохраню эти данные в вашем профиле и буду использовать их только для "
+    "персонального расчёта и пересчёта норм, когда данные изменятся.\n\n"
+    "Это необязательно. Без персонального расчёта дневник продолжит работать: "
+    "вы сможете записывать еду и воду и видеть итоги за день.\n\n"
+    "Согласие можно отозвать в любой момент. После отзыва Ayla перестанет "
+    "использовать эти параметры для персонального расчёта."
+)
+
+#: Свои слаги, а не свободный текст: угаданное «да» — это запись
+#: согласия за человека, который его не давал.
+CONSENT_GRANT_CALLBACK = "cb:pc_consent:grant"
+CONSENT_DECLINE_CALLBACK = "cb:pc_consent:decline"
+
+CONSENT_BUTTON_GRANT = "Рассчитать мои нормы"
+CONSENT_BUTTON_DECLINE = "Не сейчас"
+
+#: Фраза, которой человек включает расчёт позже (владелец §2: «если такого
+#: UI-раздела ещё нет — напишите: „Рассчитать мои нормы“»). Раздела
+#: «Питание» с этим действием в Mini App нет — действует вторая редакция.
+ENTRY_PHRASE = "рассчитать мои нормы"
+
+CONSENT_DECLINED = (
+    "Хорошо, персональный расчёт не включаем.\n\n"
+    "Дневник продолжит работать как обычно: записывайте еду и воду, а Ayla "
+    "покажет итог за день.\n\n"
+    "Если передумаете, напишите: «Рассчитать мои нормы»."
+)
+
+#: Fail-close ТОЛЬКО расчёта: дневник от этого не закрывается (владелец §2).
+CONSENT_RECORDED_BUT_UNREADABLE = (
+    "Записал согласие, но перечитать его не смог — персональный расчёт не "
+    "начинаю, пока не буду уверен. Попробуйте ещё раз через пару минут. "
+    "Дневник при этом работает как обычно."
+)
+
+# ─── Отзыв — детерминированная canonical action (владелец §2) ──────────────
+#
+# Free text может инициировать отзыв, но не единственный путь: есть кнопка
+# и слаг. Перед удалением — подтверждение, потому что после него параметры
+# удаляются, а нормы становятся недоступны.
+
+WITHDRAW_ACTION_TEXT = "Отключить персональный расчёт"
+WITHDRAW_CALLBACK = "cb:pc_consent:withdraw"
+WITHDRAW_CONFIRM_CALLBACK = "cb:pc_consent:withdraw_confirm"
+WITHDRAW_KEEP_CALLBACK = "cb:pc_consent:withdraw_keep"
+WITHDRAW_BUTTON_CONFIRM = "Отключить и удалить"
+WITHDRAW_BUTTON_KEEP = "Оставить как есть"
+
+WITHDRAW_CONFIRM_ASK = (
+    "Отключить персональный расчёт?\n\n"
+    "Ayla перестанет использовать ваши вес, рост, возраст, пол для расчёта, "
+    "уровень активности и цель, удалит их из профиля, а персональные нормы "
+    "станут недоступны. История дневника сохранится."
+)
+WITHDRAW_DONE = (
+    "Персональный расчёт отключён. Параметры удалены, нормы больше не "
+    "показываются. Дневник продолжает работать как обычно.\n\n"
+    "Если захотите вернуть расчёт, напишите: «Рассчитать мои нормы»."
+)
+#: Согласие снято, но каталог не подтвердил удаление: правда важнее
+#: гладкости — параметры уже НЕ используются, а «удалены» сказать нельзя.
+WITHDRAW_DELETE_UNCONFIRMED = (
+    "Персональный расчёт отключён: параметры больше не используются и нормы "
+    "не показываются. Удаление из профиля пока не подтверждено — повторите "
+    "«Отключить персональный расчёт» через пару минут, я доведу его до конца."
+)
+WITHDRAW_KEPT = "Оставляю как есть: персональный расчёт работает."
+WITHDRAW_NOTHING_TO_WITHDRAW = (
+    "Персональный расчёт и так не включён — отключать нечего. Дневник работает как обычно."
+)
+
+
 _CONSENT_ATTESTATION_MISSING = (
     "Персональный расчёт пока не запускаю: на обработку веса, роста, возраста "
     "и остального нужно отдельное согласие с версией текста, а у меня его нет — "
@@ -196,8 +288,20 @@ class NutritionAnketaSkill:
     def matches(self, context: SkillContext) -> bool:
         text = context.message_text.strip()
 
-        # Entry path — explicit command OR start callback.
-        if text == "/anketa" or text == "cb:anketa:start":
+        # Entry path — explicit command OR start callback OR the phrase the
+        # declined text itself promises («напишите: „Рассчитать мои нормы“»).
+        if text == "/anketa" or text == "cb:anketa:start" or _is_entry_phrase(text):
+            return True
+
+        # Ответ на экран согласия. Забираем оба, включая отказ: молчание
+        # на «не сейчас» человек прочтёт как поломку.
+        if text in (CONSENT_GRANT_CALLBACK, CONSENT_DECLINE_CALLBACK):
+            return True
+
+        # Отзыв — canonical action: кнопка/слаг и та же фраза текстом.
+        if text in (WITHDRAW_CALLBACK, WITHDRAW_CONFIRM_CALLBACK, WITHDRAW_KEEP_CALLBACK):
+            return True
+        if _is_withdraw_phrase(text):
             return True
 
         # Resume path — claim turns while an FSM is in flight.
@@ -221,8 +325,22 @@ class NutritionAnketaSkill:
     def handle(self, context: SkillContext) -> SkillResult:
         text = context.message_text.strip()
 
+        # Ответ на экран согласия — до всего остального.
+        if text == CONSENT_GRANT_CALLBACK:
+            return self._on_consent_granted(context)
+        if text == CONSENT_DECLINE_CALLBACK:
+            return self._on_consent_declined(context)
+
+        # Отзыв: спросить → подтвердить / оставить.
+        if text == WITHDRAW_CALLBACK or _is_withdraw_phrase(text):
+            return self._on_withdraw_ask(context)
+        if text == WITHDRAW_CONFIRM_CALLBACK:
+            return self._on_withdraw_confirm(context)
+        if text == WITHDRAW_KEEP_CALLBACK:
+            return self._on_withdraw_keep(context)
+
         # Entry: start fresh FSM.
-        if text in ("/anketa", "cb:anketa:start"):
+        if text in ("/anketa", "cb:anketa:start") or _is_entry_phrase(text):
             return self._on_enter(context)
 
         # Edit: jump back to a step.
@@ -239,6 +357,26 @@ class NutritionAnketaSkill:
     # ─── entry ──────────────────────────────────────────────────────────
 
     def _on_enter(self, context: SkillContext) -> SkillResult:
+        # ГЕЙТ НА ВХОДЕ, А НЕ НА ШАГЕ ВЕСА И НЕ НА ЗАВЕРШЕНИИ.
+        #
+        # Проверка утверждения стояла в `_on_complete` — то есть ПОСЛЕ
+        # того, как человек назвал пол, возраст, рост, вес и цель, а FSM
+        # сохранила их в `Conversation.skill_state`. Пять параметров из
+        # шести, перечисленных §92, оказывались собраны и записаны до
+        # того, как появлялось основание их собирать.
+        #
+        # §92 требует гейт на входе в анкету прямым текстом, и довод там
+        # тот же: гейт на шаге веса «исполнил бы букву правила и оставил
+        # четыре параметра из шести собранными без основания».
+        #
+        # Прежняя проверка в `_on_complete` НЕ снимается: она вторая
+        # линия. Согласие может быть отозвано между входом и завершением,
+        # и тогда параметры не должны уехать в каталог.
+        from apps.consent.personal_calculation import is_granted
+
+        if not is_granted(context.bot_user):
+            return self._render_consent_ask()
+
         fsm = AnketaFSM()
         step_result = fsm.enter()
         self._save_state(context, fsm)
@@ -540,6 +678,155 @@ class NutritionAnketaSkill:
         _step, _, value = ref.partition(":")
         return value or text
 
+    def _render_consent_ask(self) -> SkillResult:
+        """Экран согласия: текст с версией и два действия.
+
+        Версия не показывается человеку — она записывается вместе с
+        согласием. Показывать её значило бы требовать от человека помнить
+        номер; доказывать, на что он согласился, — наша работа, а не его.
+        """
+        from apps.consent.personal_calculation import (
+            PERSONAL_CALCULATION_DOCUMENT_VERSION,
+        )
+
+        return SkillResult(
+            reply_text=CONSENT_ASK,
+            action_type="anketa_consent_ask",
+            action_data={
+                "document_version": PERSONAL_CALCULATION_DOCUMENT_VERSION,
+                "buttons": [
+                    {"label": CONSENT_BUTTON_GRANT, "callback": CONSENT_GRANT_CALLBACK},
+                    {
+                        "label": CONSENT_BUTTON_DECLINE,
+                        "callback": CONSENT_DECLINE_CALLBACK,
+                    },
+                ],
+            },
+            meta={"reply_kind": "anketa_consent_ask"},
+        )
+
+    def _on_consent_granted(self, context: SkillContext) -> SkillResult:
+        """Записать согласие и начать анкету — но только если записалось.
+
+        `grant` возвращает результат ЧТЕНИЯ, а не факт вызова. Если
+        реестр не отдал запись обратно, анкета не начинается: собрать
+        параметры и потом обнаружить, что основания нет, хуже, чем
+        попросить человека повторить.
+        """
+        from apps.consent.personal_calculation import (
+            PERSONAL_CALCULATION_DOCUMENT_VERSION,
+            grant,
+        )
+
+        recorded = grant(
+            context.bot_user,
+            document_version=PERSONAL_CALCULATION_DOCUMENT_VERSION,
+        )
+        logger.info(
+            "anketa.consent_granted conv=%s recorded=%s version=%s",
+            getattr(context, "conversation_id", None),
+            recorded,
+            PERSONAL_CALCULATION_DOCUMENT_VERSION,
+        )
+        if not recorded:
+            return SkillResult(
+                reply_text=CONSENT_RECORDED_BUT_UNREADABLE,
+                meta={"reply_kind": "anketa_consent_unreadable"},
+            )
+        return self._on_enter(context)
+
+    def _on_consent_declined(self, context: SkillContext) -> SkillResult:
+        """Отказ — не ошибка и не тупик.
+
+        §92: «отказ не закрывает дневник» — он продолжает работать в
+        своём объёме, и текст говорит об этом первым делом, а не
+        последним.
+        """
+        logger.info(
+            "anketa.consent_declined conv=%s",
+            getattr(context, "conversation_id", None),
+        )
+        return SkillResult(
+            reply_text=CONSENT_DECLINED,
+            meta={"reply_kind": "anketa_consent_declined"},
+        )
+
+    # ─── отзыв согласия (владелец 12.09 §2) ───────────────────────────────
+
+    def _on_withdraw_ask(self, context: SkillContext) -> SkillResult:
+        """Canonical action «Отключить персональный расчёт» → подтверждение.
+
+        Ничего не удаляется до нажатия «Отключить и удалить»: после него
+        параметры уходят из профиля, и вернуть их можно только заново
+        рассказав. Нечего отключать — говорим и это, а не «готово».
+        """
+        from apps.consent.personal_calculation import is_granted
+
+        if not is_granted(context.bot_user):
+            return SkillResult(
+                reply_text=WITHDRAW_NOTHING_TO_WITHDRAW,
+                meta={"reply_kind": "anketa_withdraw_nothing"},
+            )
+        return SkillResult(
+            reply_text=WITHDRAW_CONFIRM_ASK,
+            action_type="anketa_withdraw_ask",
+            action_data={
+                "buttons": [
+                    {"label": WITHDRAW_BUTTON_CONFIRM, "callback": WITHDRAW_CONFIRM_CALLBACK},
+                    {"label": WITHDRAW_BUTTON_KEEP, "callback": WITHDRAW_KEEP_CALLBACK},
+                ]
+            },
+            meta={"reply_kind": "anketa_withdraw_ask"},
+        )
+
+    def _on_withdraw_confirm(self, context: SkillContext) -> SkillResult:
+        """Снять согласие, удалить параметры в каталоге, закрыть нормы.
+
+        Порядок — сначала согласие: с этого мига параметры НЕ используются
+        (гейт анкеты закрыт, утверждения для POST нет), что бы ни случилось
+        дальше. Затем удаление в каталоге — оно инвалидирует нормы там же.
+        Если каталог не подтвердил, сказать «удалены» нельзя: человек
+        получает честное «отключено, удаление не подтверждено» и путь
+        повторить тем же действием.
+        """
+        from apps.consent.personal_calculation import withdraw
+
+        withdrawn = withdraw(context.bot_user)
+        self._clear_state(context)
+        logger.info(
+            "anketa.consent_withdrawn conv=%s rows=%s",
+            getattr(context, "conversation_id", None),
+            withdrawn,
+        )
+
+        external_id = external_user_id_for(context.bot_user)
+        try:
+            deleted = asyncio.run(
+                get_nutrition_client().purge_body_parameters(external_user_id=external_id)
+            )
+        except (NutritionUnavailableError, NutritionAPIError) as exc:
+            logger.warning(
+                "anketa.withdraw_purge_unconfirmed user=%s error=%s",
+                external_id,
+                exc.__class__.__name__,
+            )
+            deleted = False
+        if not deleted:
+            return SkillResult(
+                reply_text=WITHDRAW_DELETE_UNCONFIRMED,
+                meta={"reply_kind": "anketa_withdraw_unconfirmed"},
+            )
+        return SkillResult(
+            reply_text=WITHDRAW_DONE,
+            meta={"reply_kind": "anketa_withdraw_done"},
+        )
+
+    def _on_withdraw_keep(self, context: SkillContext) -> SkillResult:
+        return SkillResult(
+            reply_text=WITHDRAW_KEPT,
+            meta={"reply_kind": "anketa_withdraw_kept"},
+        )
+
     def _render_step(self, step: str, prompt: str) -> SkillResult:
         action_data: dict = {"step": step}
         if step in CHOICE_STEPS:
@@ -640,6 +927,18 @@ _NOTHING_TO_CONFIRM_TEXTS: dict[str, str] = {
 }
 
 
+def _normalise_phrase(text: str) -> str:
+    return " ".join(text.lower().replace("ё", "е").strip(" .!?«»\"'").split())
+
+
+def _is_entry_phrase(text: str) -> bool:
+    return _normalise_phrase(text) == _normalise_phrase(ENTRY_PHRASE)
+
+
+def _is_withdraw_phrase(text: str) -> bool:
+    return _normalise_phrase(text) == _normalise_phrase(WITHDRAW_ACTION_TEXT)
+
+
 def _post_anketa_chips(profile=None) -> list[dict[str, str]]:
     """The next steps that really execute after the norms land.
 
@@ -665,6 +964,10 @@ def _post_anketa_chips(profile=None) -> list[dict[str, str]]:
         # generic reply -- a button that answers «я вас не понял», which is
         # worse than no button.
         chips.append(dict(CHIP_DIARY))
+    # Владелец 12.09 §2: отзыв — детерминированная canonical action, не
+    # только свободный текст. Кнопка живёт там, где нормы только что
+    # появились: человек видит, что их можно и выключить.
+    chips.append({"label": WITHDRAW_ACTION_TEXT, "callback": WITHDRAW_CALLBACK})
     return chips
 
 
