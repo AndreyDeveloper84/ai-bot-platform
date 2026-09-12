@@ -296,8 +296,10 @@ class TestAnketaAnswersAreNotCorrections:
         # веса намеренно (``apps/skills/nutrition_anketa/fsm.py``), чтобы никто
         # в стоп-сценарии не дошёл до вопроса о весе. Предмет этого теста —
         # что ЧИСЛО доехало до анкеты, а не легло весом порции, — от порядка
-        # шагов не зависит: числовых ответов здесь по-прежнему два.
-        assert "перед расчётом" in asked_screening.reply_text.lower()
+        # шагов не зависит: числовых ответов здесь по-прежнему два. Шаг
+        # опознаётся по имени, не по словам вопроса: формулировка — предмет
+        # анкеты, а не этого теста.
+        assert asked_screening.meta.get("reply_kind") == "anketa_screening"
 
         asked_height = _turn(person, text="cb:anketa:choice:screening:none")
         assert asked_height is not None
