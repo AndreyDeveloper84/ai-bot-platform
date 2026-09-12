@@ -385,6 +385,28 @@ export async function getCatalogBrowse(): Promise<CatalogBrowseData> {
     fetchServices(),
     fetchMasters(),
   ]);
+  const { picks, picksOutcome } = await resolveCatalogPicks(servicesRes.services);
+  return {
+    services: servicesRes.services,
+    masters: mastersRes.masters,
+    picks,
+    picksOutcome,
+    emptyReason: servicesRes.empty_reason ?? null,
+  };
+}
+
+/**
+ * Только подбор — без повторного чтения услуг и мастеров (DRF-1768).
+ *
+ * «Попробовать снова» на отказе источника обязано повторять именно
+ * запрос рекомендаций, а не перезагружать экран: услуги и мастера
+ * пришли из зеркала и ни в чём не виноваты. Вынесено из
+ * :func:`getCatalogBrowse`, чтобы у экрана не было второго способа
+ * посчитать picks — один код, два вызывающих.
+ */
+export async function resolveCatalogPicks(
+  services: Service[],
+): Promise<{ picks: ServicePick[]; picksOutcome: PicksOutcome }> {
   let picks: ServicePick[] = [];
   const recs = await loadRecommendations();
   let picksOutcome: PicksOutcome = recs.state;
@@ -407,7 +429,7 @@ export async function getCatalogBrowse(): Promise<CatalogBrowseData> {
     // стоящий рядом.
     picksOutcome = classifyEmptiness(recs.decision);
   } else if (recs.state === "OK") {
-    const known = new Set(servicesRes.services.map((s) => s.id));
+    const known = new Set(services.map((s) => s.id));
     // Кандидаты, которые эта поверхность вообще способна показать:
     // услуга (не мастер, не слот) и притом известная зеркалу.
     const renderable = recs.decision.ordered.filter(
@@ -442,13 +464,7 @@ export async function getCatalogBrowse(): Promise<CatalogBrowseData> {
       // является рекомендацией Ayla. Одна строка, весь гейт.
       .filter((p) => p.reasons.length > 0);
   }
-  return {
-    services: servicesRes.services,
-    masters: mastersRes.masters,
-    picks,
-    picksOutcome,
-    emptyReason: servicesRes.empty_reason ?? null,
-  };
+  return { picks, picksOutcome };
 }
 
 // ---------------------------------------------------------------------------
