@@ -244,3 +244,136 @@ class TestArguments:
     def test_no_arguments_is_an_error(self):
         with pytest.raises(CommandError):
             _run()
+
+
+# --------------------------------------------------------------------------- #
+# DRF-1780 — клавиатура реплики бота в строке «след:»                          #
+# --------------------------------------------------------------------------- #
+class TestKeyboardLine:
+    """Разбор 12.09: ayla-69 не мог доказать, была ли клавиатура у «И последнее
+    перед расчётом» 01:33:55 (по коду 4 кнопки, по наблюдению владельца — без
+    вариантов). Строка базы (``anketa_step_screening``, ``buttons`` × 4) отвечает
+    на половину вопроса — приложена ли клавиатура; расшифровка обязана это
+    печатать, а не молчать."""
+
+    def _kb(self, action_data):
+        from apps.conversations.management.commands.dialog_transcript import keyboard_line
+        from apps.replay.redactor import Redactor
+
+        return keyboard_line(action_data, Redactor())
+
+    def test_flat_buttons_like_the_anketa_screening_step(self):
+        line = self._kb(
+            {
+                "step": "screening",
+                "buttons": [
+                    {"label": "Беременность", "callback": "cb:anketa:scr:1"},
+                    {"label": "Диабет", "callback": "cb:anketa:scr:2"},
+                    {"label": "Другое", "callback": "cb:anketa:scr:3"},
+                    {"label": "Ничего из этого", "callback": "cb:anketa:scr:0"},
+                ],
+            }
+        )
+        assert line.startswith("клавиатура: 4 кнопок [")
+        assert "«Беременность»" in line and "«Ничего из этого»" in line
+
+    def test_envelope_form_of_the_concierge_cards(self):
+        line = self._kb(
+            {
+                "attachments": [
+                    {
+                        "type": "inline_keyboard",
+                        "payload": {
+                            "buttons": [{"label": "Записаться к Анне", "callback": "cb:x"}]
+                        },
+                    }
+                ]
+            }
+        )
+        assert line == "клавиатура: 1 кнопок [«Записаться к Анне»]"
+
+    def test_button_rows_form(self):
+        line = self._kb(
+            {
+                "button_rows": [
+                    [{"label": "Да", "callback": "y"}],
+                    [{"label": "Нет", "callback": "n"}],
+                ]
+            }
+        )
+        assert line == "клавиатура: 2 кнопок [«Да», «Нет»]"
+
+    def test_no_action_data_is_named(self):
+        assert self._kb(None) == "клавиатура: нет (action_data пуст)"
+
+    def test_action_data_without_buttons_names_its_keys(self):
+        assert self._kb({"step": "age"}) == "клавиатура: нет кнопок (ключи: step)"
+
+    def test_labels_are_redacted(self):
+        line = self._kb({"buttons": [{"label": "+7 927 123-45-67", "callback": "c"}]})
+        assert "[PHONE]" in line
+        assert "123-45-67" not in line
+
+
+class TestKeyboardReachesTheTranscript:
+    def test_anketa_style_reply_with_four_buttons_is_printed(self, monkeypatch):
+        conversation = _owner_dialog(monkeypatch)
+        from apps.conversations.services import record_global_message
+
+        record_global_message(
+            conversation,
+            role="assistant",
+            content="И последнее перед расчётом — есть ли сейчас что-то из этого?",
+            action_type="anketa_step_screening",
+            action_data={
+                "step": "screening",
+                "buttons": [{"label": f"Вариант {i}", "callback": f"cb:{i}"} for i in range(4)],
+            },
+        )
+        text = _run("--conv", str(conversation.id))
+        line = next(line for line in text.splitlines() if "И последнее перед расчётом" in line)
+        trace = text.splitlines()[text.splitlines().index(line) + 1]
+        assert "action=anketa_step_screening" in trace
+        assert "клавиатура: 4 кнопок [«Вариант 0», «Вариант 1», «Вариант 2», «Вариант 3»]" in trace
+
+    def test_concierge_reply_persists_its_keyboard(self, monkeypatch):
+        """DRF-1780: до этого строки консьержа шли с action_data=NULL (все
+        четыре ответа 03:01–03:09 в диалоге владельца), и расшифровка не могла
+        сказать, были ли у них кнопки. Ход с ask_clarification оставляет след."""
+        provider = AsyncMock()
+        provider.complete.return_value = CompletionResult(
+            text="",
+            tool_calls=[
+                ToolCall(
+                    id="c1",
+                    name="ask_clarification",
+                    arguments={
+                        "question": "Какой массаж?",
+                        "options": ["Классический", "Спортивный"],
+                        "mode": "choose_one",
+                    },
+                )
+            ],
+            prompt_tokens=30,
+            completion_tokens=6,
+            model="gpt-4o-mini",
+            provider="openai",
+            finish_reason="tool_calls",
+        )
+        router = Mock()
+        router.get_provider.return_value = provider
+        monkeypatch.setattr(concierge, "get_router", lambda: router)
+        _bot_user, conversation = _welcomed_user(71780)
+        trace = uuid.uuid4()
+        with trace_id_scope(str(trace)):
+            max_handler.handle_global_max_event(
+                _msg(text="хочу массаж", user_id=71780, mid="m0"), trace_id=trace
+            )
+        reply = Message.all_tenants.filter(conversation=conversation, role="assistant").latest(
+            "created_at"
+        )
+        assert reply.action_data is not None
+        assert "Классический" in str(reply.action_data)
+
+        text = _run("--conv", str(conversation.id))
+        assert "клавиатура: 2 кнопок [«Классический», «Спортивный»]" in text

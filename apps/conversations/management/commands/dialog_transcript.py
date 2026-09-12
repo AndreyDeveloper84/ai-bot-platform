@@ -157,11 +157,73 @@ def format_replay(row: ReplayTrace) -> str:
     return " ".join(parts) or "есть, без routing/pre/post"
 
 
-def trace_line(message: Message, *, replay_flag: bool) -> str:
+#: Сколько подписей кнопок печатается рядом с их числом.
+_MAX_BUTTON_LABELS = 6
+
+
+def _button_labels(action_data: Any) -> list[str] | None:
+    """Подписи кнопок из ``Message.action_data`` — в тех же трёх формах, что
+    читает ``apps.channels.max.handler._build_attachments``: envelope
+    ``attachments[inline_keyboard].payload.buttons``, ``button_rows``,
+    плоский ``buttons``. None — форма не найдена (клавиатуры не было)."""
+
+    if not isinstance(action_data, dict):
+        return None
+
+    def _labels(items: Any) -> list[str]:
+        out: list[str] = []
+        for item in items or []:
+            if isinstance(item, list):
+                out.extend(_labels(item))
+            elif isinstance(item, dict):
+                out.append(str(item.get("label") or item.get("text") or "?"))
+            else:
+                out.append(str(item))
+        return out
+
+    envelope = action_data.get("attachments")
+    if isinstance(envelope, list):
+        for att in envelope:
+            if isinstance(att, dict) and att.get("type") == "inline_keyboard":
+                buttons = (att.get("payload") or {}).get("buttons")
+                if isinstance(buttons, list) and buttons:
+                    return _labels(buttons)
+    rows = action_data.get("button_rows")
+    if isinstance(rows, list) and rows:
+        return _labels(rows)
+    buttons = action_data.get("buttons")
+    if isinstance(buttons, list) and buttons:
+        return _labels(buttons)
+    return None
+
+
+def keyboard_line(action_data: Any, redactor: Redactor) -> str:
+    """``клавиатура: N кнопок [«…», …]`` — или именованное отсутствие (DRF-1780).
+
+    Разбор 12.09: ayla-69 не мог доказать, была ли клавиатура у «И последнее
+    перед расчётом» (по коду 4 кнопки, по наблюдению владельца — без
+    вариантов). Строка базы отвечает на половину вопроса — приложена ли
+    клавиатура к реплике; дошла ли до экрана — вопрос канала, в базе следа
+    отправки нет, и эта строка о нём не говорит.
+    """
+
+    if action_data is None:
+        return "клавиатура: нет (action_data пуст)"
+    labels = _button_labels(action_data)
+    if labels is None:
+        keys = ",".join(sorted(action_data)) if isinstance(action_data, dict) else "?"
+        return f"клавиатура: нет кнопок (ключи: {keys or '—'})"
+    shown = ", ".join(f"«{redactor.redact_text(label)}»" for label in labels[:_MAX_BUTTON_LABELS])
+    more = f", …+{len(labels) - _MAX_BUTTON_LABELS}" if len(labels) > _MAX_BUTTON_LABELS else ""
+    return f"клавиатура: {len(labels)} кнопок [{shown}{more}]"
+
+
+def trace_line(message: Message, *, replay_flag: bool, redactor: Redactor | None = None) -> str:
     """Служебный след ОДНОЙ реплики бота — всё, что база знает по её trace_id."""
 
     parts: list[str] = []
     parts.append(f"action={message.action_type or '—'}")
+    parts.append(keyboard_line(message.action_data, redactor or Redactor()))
     if message.trace_id is None:
         parts.append("trace_id: нет — след не привязать")
         for name, why in KNOWN_ABSENCES:
@@ -268,7 +330,11 @@ class Command(BaseCommand):
             body = body.replace("\n", "\n" + " " * 21)
             lines.append(f"{message.created_at:%H:%M:%S}  {message.role:<9}  {body}")
             if message.role == Message.Role.ASSISTANT:
-                lines.append(" " * 10 + "след: " + trace_line(message, replay_flag=replay_flag))
+                lines.append(
+                    " " * 10
+                    + "след: "
+                    + trace_line(message, replay_flag=replay_flag, redactor=redactor)
+                )
         return "\n".join(lines) + "\n"
 
     @staticmethod
