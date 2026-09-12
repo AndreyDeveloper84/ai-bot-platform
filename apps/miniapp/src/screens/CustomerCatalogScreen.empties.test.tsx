@@ -211,10 +211,10 @@ describe("отказ источника (DRF-1768)", () => {
     renderScreen();
     await catalogReady();
 
-    let release: (() => void) | null = null;
+    const pending: { release: () => void } = { release: () => undefined };
     mockedRecs.mockImplementationOnce(
       () => new Promise((resolve) => {
-        release = () => resolve(decision([]) as never);
+        pending.release = () => resolve(decision([]) as never);
       }),
     );
     const retry = screen.getByRole("button", { name: ACTION_RETRY });
@@ -222,7 +222,7 @@ describe("отказ источника (DRF-1768)", () => {
     expect(retry).toBeDisabled();
     await userEvent.click(retry);
     expect(mockedRecs).toHaveBeenCalledTimes(2);
-    release?.();
+    pending.release();
   });
 
   it("CONTRACT_VIOLATION и UNRENDERABLE — тот же кадр отказа источника", async () => {
