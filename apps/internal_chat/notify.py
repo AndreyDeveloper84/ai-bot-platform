@@ -125,12 +125,13 @@ def build_notification_text(*, message) -> str:
 
 
 def _salon_bot_for(tenant):
-    """The salon's staff bot, or None. See apps/booking/master_notify.py."""
+    """The platform's staff bot, or None. Chosen by stream, not by the
+    tenant of a registry entry (DRF-1705) — see apps/booking/master_notify.py."""
 
     try:
-        from apps.channels.bot_registry import effective_registry, resolve_by_tenant_stream
+        from apps.channels.bot_registry import effective_registry, resolve_by_stream
 
-        return resolve_by_tenant_stream(tenant.slug, SALON_STREAM, effective_registry())
+        return resolve_by_stream(SALON_STREAM, effective_registry())
     except Exception:  # noqa: BLE001 — identity must never break messaging
         logger.warning("internal_chat.notify.registry_unavailable tenant=%s", tenant.slug)
         return None

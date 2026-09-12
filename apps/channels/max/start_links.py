@@ -86,11 +86,13 @@ def salon_bot_handle(tenant) -> str:
     correctly-configured contour that simply has none.
     """
 
-    from apps.channels.bot_registry import effective_registry, resolve_by_tenant_stream
+    from apps.channels.bot_registry import effective_registry, resolve_by_stream
     from apps.channels.max.salon_handler import SALON_STREAM
 
     slug = tenant.slug
-    entry = resolve_by_tenant_stream(slug, SALON_STREAM, effective_registry())
+    # По потоку, не по тенанту записи (DRF-1705): ссылка для мастера
+    # соло-тенанта раньше не собиралась вовсе — записи с его тенантом нет.
+    entry = resolve_by_stream(SALON_STREAM, effective_registry())
     if entry is None or not entry.web_app:
         logger.warning(
             "channels.max.start_links.no_salon_bot tenant=%s — no salon bot with a "
