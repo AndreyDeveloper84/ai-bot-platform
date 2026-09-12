@@ -125,9 +125,9 @@ on:
     branches:
       - main
       - dev
-    paths-ignore:
-      - "docs/**"
-      - "**/*.md"
+    # No `paths-ignore` (DRF-1675, 12.09.2026): docs-only is decided by the
+    # `changes` job inside this run — one workflow named `replay`, one run
+    # per push. The `replay-docs-skip.yml` twin is gone.
   workflow_dispatch:
 
 # Keyed on the PR, not the ref (DRF-1373). A new commit on a PR makes the
@@ -141,6 +141,69 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  # ---------------------------------------------------------------------
+  # DRF-1675 (12.09.2026) — one run per push.
+  #
+  # Until today docs-only PRs were served by a sister workflow
+  # (`replay-docs-skip.yml`, same `name: replay`, same job names) that triggered on
+  # `paths: docs/**` and SELF-CANCELLED when the PR turned out to be mixed.
+  # `paths:` is OR-semantics, so every PR touching one .md next to code
+  # fired both workflows in the same second; the twin cancelled itself and
+  # left a *cancelled* check run named exactly like the required one on
+  # the PR head. Branch protection reads the newest check run per name —
+  # a cancelled twin, created a tick later than the real one, is what it
+  # reads. Measured 12.09: 8 of 15 twin runs cancelled, 4 PRs BLOCKED at
+  # green mandatory checks, each freed by re-running the real run by hand
+  # (which merely made it the newer one).
+  #
+  # Fix: detect the change set HERE, in the one and only `replay` workflow,
+  # and skip the engineering jobs on a docs-only PR. A job skipped by `if:`
+  # still reports — as "skipped", which branch protection accepts for a
+  # required check — so docs-only PRs land and mixed PRs get exactly one
+  # verdict from exactly one run. `paths-ignore` stays on `push`: a
+  # docs-only push to `dev` still costs nothing and, since `deploy-dev`
+  # keys off this workflow's conclusion, still deploys nothing.
+  #
+  # Same logic as `ci.yml` and as the deleted twin — NUL-separated names, so a
+  # Cyrillic path never arrives C-quoted (PR #1504).
+  # ---------------------------------------------------------------------
+  changes:
+    name: change set (docs-only or code)
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    outputs:
+      code: ${{ steps.detect.outputs.code }}
+    steps:
+      - uses: actions/checkout@v7
+        if: github.event_name == 'pull_request'
+        with:
+          fetch-depth: 0
+
+      - name: Detect docs-only vs code
+        id: detect
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT" != "pull_request" ]; then
+            echo "code=true" >> "$GITHUB_OUTPUT"
+            echo "event=$EVENT — not a pull request, engineering jobs run."
+            exit 0
+          fi
+          git fetch origin "$BASE_REF" --depth=1
+          BASE_SHA="$(git rev-parse "origin/$BASE_REF")"
+          CHANGED="$(git diff --name-only -z "$BASE_SHA"...HEAD | tr '\0' '\n' || true)"
+          NON_DOCS="$(printf '%s\n' "$CHANGED" | grep -vE '^$|^docs/|\.md$' || true)"
+          if [ -z "$NON_DOCS" ]; then
+            echo "code=false" >> "$GITHUB_OUTPUT"
+            echo "docs-only PR — engineering jobs are skipped (they report 'skipped', which satisfies branch protection)."
+          else
+            echo "code=true" >> "$GITHUB_OUTPUT"
+            echo "code changes present:"
+            printf '%s\n' "$NON_DOCS"
+          fi
+
   fixtures:
     name: replay fixtures (golden + adversarial + voice)
     runs-on: ubuntu-latest
@@ -174,11 +237,15 @@ jobs:
     # only with a measurement in the PR.
     timeout-minutes: 15
 
+    needs: changes
     # E2 — `prompt-regression-accepted` label skips the gate.
     # Pushes (not PRs) always run; the label only fires on pull_request.
+    # DRF-1675 — and a docs-only PR skips it too (reports "skipped").
     if: >-
-      github.event_name != 'pull_request' ||
-      !contains(github.event.pull_request.labels.*.name, 'prompt-regression-accepted')
+      needs.changes.outputs.code == 'true' && (
+        github.event_name != 'pull_request' ||
+        !contains(github.event.pull_request.labels.*.name, 'prompt-regression-accepted')
+      )
 
     services:
       postgres:
