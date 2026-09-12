@@ -289,6 +289,12 @@ class AylaMaster:
     rating: float
     position: str
     raw: dict[str, Any] = field(default_factory=dict)
+    #: DRF-1707 / OD-PILOT-9: метры до точки предложения, как их посчитал
+    #: каталог (`tenants.distance`); ``None`` = DISTANCE_UNKNOWN — нет
+    #: координаты клиента или у мастера нет подтверждённого места. Бот
+    #: расстояние не считает: координаты профиля в зеркале принадлежат
+    #: человеку (§9), а не месту оказания услуги.
+    distance_meters: int | None = None
 
 
 @dataclass(frozen=True)
@@ -406,7 +412,13 @@ class AylaBookingClient(Protocol):
 
     def get_services(self) -> list[AylaService]: ...
 
-    def get_masters(self, *, specialist_id: str | None = ...) -> list[AylaMaster]: ...
+    def get_masters(
+        self,
+        *,
+        specialist_id: str | None = ...,
+        lat: float | None = ...,
+        lon: float | None = ...,
+    ) -> list[AylaMaster]: ...
 
     def get_available_dates(
         self,
@@ -538,6 +550,17 @@ def _service_from_wire(d: dict[str, Any]) -> AylaService:
     )
 
 
+def _distance_meters_from_wire(value: Any) -> int | None:
+    """``distance_meters`` с провода: целое или ``None``; всё иное — ``None``.
+
+    Каталог шлёт целое либо ``null`` (DISTANCE_UNKNOWN). Строка, дробь или
+    отрицательное число — не «примерно столько», а не-расстояние.
+    """
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        return None
+    return value
+
+
 def _master_from_wire(d: dict[str, Any]) -> AylaMaster:
     return AylaMaster(
         id=str(d.get("id") or ""),
@@ -546,6 +569,7 @@ def _master_from_wire(d: dict[str, Any]) -> AylaMaster:
         rating=float(d.get("rating") or 0.0),
         position=str(d.get("position") or ""),
         raw=d,
+        distance_meters=_distance_meters_from_wire(d.get("distance_meters")),
     )
 
 
@@ -900,8 +924,19 @@ class AylaBookingHTTPClient:
             raise BookingUnavailableError("catalog_incomplete")
         return rows
 
-    def get_masters(self, *, specialist_id: str | None = None) -> list[AylaMaster]:
+    def get_masters(
+        self,
+        *,
+        specialist_id: str | None = None,
+        lat: float | None = None,
+        lon: float | None = None,
+    ) -> list[AylaMaster]:
         """One specialist by id, or the ACTIVE TENANT's whole roster (DRF-1473).
+
+        ``lat``/``lon`` (DRF-1707): одноразовые координаты клиента, только
+        для этого запроса — каталог считает по ним ``distance_meters`` до
+        точки предложения. Здесь они не сохраняются и не пишутся в журнал
+        (решение владельца D3: координаты не хранятся).
 
         The roster read is the origin of the pilot's «Контекст записи
         устарел» dead-end. ``internal/specialists/`` is a paginated DRF list
@@ -932,7 +967,11 @@ class AylaBookingHTTPClient:
             payload = self._ok(resp)
             return [_master_from_wire(payload)] if isinstance(payload, dict) and payload else []
         tenant_id = _require_tenant_id()
-        rows = self._get_all_rows("specialists/", params={"tenant": tenant_id})
+        params: dict[str, Any] = {"tenant": tenant_id}
+        if lat is not None and lon is not None:
+            params["lat"] = f"{lat:.6f}"
+            params["lon"] = f"{lon:.6f}"
+        rows = self._get_all_rows("specialists/", params=params)
         return [_master_from_wire(r) for r in rows]
 
     def get_available_times(

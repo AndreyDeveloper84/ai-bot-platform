@@ -87,7 +87,13 @@ class FakeAyla:
     def get_services(self) -> list[Any]:
         return []
 
-    def get_masters(self, *, specialist_id: str | None = None) -> list[Any]:
+    def get_masters(
+        self,
+        *,
+        specialist_id: str | None = None,
+        lat: float | None = None,
+        lon: float | None = None,
+    ) -> list[Any]:
         return []
 
     def get_available_dates(

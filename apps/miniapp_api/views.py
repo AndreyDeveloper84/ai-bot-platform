@@ -856,7 +856,72 @@ def masters_list(request: HttpRequest) -> HttpResponse:
             "master_id", flat=True
         )
         qs = qs.filter(id__in=list(master_ids))
-    return JsonResponse({"masters": [_master_to_dict(m) for m in qs]})
+    rows = [_master_to_dict(m) for m in qs]
+
+    # DRF-1707 / OD-PILOT-9 distance contract + решение владельца D3.
+    # ``?lat=&lon=`` — одноразовые координаты по кнопке «Показать рядом со
+    # мной». Расстояние считает КАТАЛОГ (до подтверждённого места оказания
+    # услуги, §9) — бот его не выводит из координат профиля в зеркале.
+    # Координаты не сохраняются и в журнал не пишутся: только факт «с гео».
+    coords, coords_error = _parse_coords(request.GET)
+    if coords_error:
+        return _error("bad_request", coords_error, 400)
+    if coords is not None:
+        rows = _attach_distance(rows, lat=coords[0], lon=coords[1])
+    return JsonResponse({"masters": rows})
+
+
+def _parse_coords(query) -> tuple[tuple[float, float] | None, str | None]:
+    """``(lat, lon)`` из запроса; оба или ни одного; в пределах глобуса."""
+    lat_raw = query.get("lat")
+    lon_raw = query.get("lon")
+    if lat_raw is None and lon_raw is None:
+        return None, None
+    if lat_raw is None or lon_raw is None:
+        return None, "lat and lon must be sent together"
+    try:
+        lat = float(lat_raw)
+        lon = float(lon_raw)
+    except (TypeError, ValueError):
+        return None, "lat and lon must be numbers"
+    if not (-90.0 <= lat <= 90.0 and -180.0 <= lon <= 180.0):
+        return None, "lat and lon are out of range"
+    return (lat, lon), None
+
+
+def _attach_distance(rows: list[dict[str, Any]], *, lat: float, lon: float) -> list[dict[str, Any]]:
+    """Дописать ``distance_meters`` с провода каталога и отсортировать по близости.
+
+    Без ответа каталога (флаг выключен, источник лежит, мастер не найден
+    в ответе) поля нет вовсе — экран тогда не называет список «Рядом с
+    вами» (#1653: имя только при наличии поля). Неизвестное расстояние
+    (``null``) — в конец, порядок имён между ними сохраняется.
+    """
+    if not getattr(settings, "BOOKING_VIA_AYLA_REST", False):
+        return rows
+    from apps.integrations.ayla.booking_client import (
+        BookingAPIError,
+        get_ayla_booking_client,
+    )
+
+    try:
+        remote = get_ayla_booking_client().get_masters(lat=lat, lon=lon)
+    except BookingAPIError:
+        logger.warning("miniapp_api.masters_list.distance_unavailable geo=1")
+        return rows
+    by_id = {m.id: m.distance_meters for m in remote}
+    matched = 0
+    for row in rows:
+        if row["id"] in by_id:
+            row["distance_meters"] = by_id[row["id"]]
+            matched += 1
+    logger.info("miniapp_api.masters_list.distance geo=1 masters=%d matched=%d", len(rows), matched)
+    if matched == 0:
+        return rows
+    known = [r for r in rows if r.get("distance_meters") is not None]
+    unknown = [r for r in rows if r.get("distance_meters") is None]
+    known.sort(key=lambda r: r["distance_meters"])
+    return known + unknown
 
 
 @require_http_methods(["GET"])
