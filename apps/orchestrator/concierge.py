@@ -2243,6 +2243,8 @@ def _concierge_turn(
             question,
             options,
             data.get("mode"),
+            # DRF-1760 — «Не знаю» на free-вопросе модели (макет C02.3).
+            offer_dont_know=True,
         )
         # DRF-1779 — вопрос задан: следующая реплика человека — ответ на него.
         open_question(conversation, "ask_clarification", asked_text=str(question))

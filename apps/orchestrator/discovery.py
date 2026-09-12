@@ -2156,6 +2156,8 @@ def _render_ask_clarification(
     question: str,
     options: list[str],
     mode: Any = None,
+    *,
+    offer_dont_know: bool = False,
 ) -> DiscoveryReply:
     """Render an ``ask_clarification`` tool call as reply text + a tap keyboard.
 
@@ -2181,11 +2183,40 @@ def _render_ask_clarification(
     The option-less branch keeps ``action_data=None`` for the same reason,
     one step stricter: with no keyboard there is nothing to disambiguate, and
     a bare question that used to carry ``None`` must keep carrying ``None``.
+
+    DRF-1760 — ``offer_dont_know=True`` (only the model's own
+    ``ask_clarification`` in free mode) adds the single «Не знаю» button to the
+    option-less branch. Off by default so the canon-prescribed no-criteria
+    replies (:func:`render_no_criteria_clarification` and its service twin)
+    keep their bytes — those are the canon window's to change.
     """
     text = (question or "Уточните, пожалуйста?").strip()[:_MAX_REPLY_CHARS]
     cleaned = [str(opt).strip() for opt in options if str(opt).strip()]
-    if not cleaned:
+    if not cleaned and not offer_dont_know:
         return DiscoveryReply(text=text)
+    if not cleaned:
+        # DRF-1760 — режим free: единственная кнопка «Не знаю» (макет C02.3:
+        # «Не знаю» — отдельная ссылка; C03: полноценный ответ там, где
+        # человек может не знать). Текст вопроса и ``mode`` — как прежде.
+        return DiscoveryReply(
+            text=text,
+            action_data={
+                "attachments": [
+                    {
+                        "type": "inline_keyboard",
+                        "payload": {
+                            "buttons": [
+                                {
+                                    "label": CLARIFY_DONT_KNOW_LABEL,
+                                    "callback": CLARIFY_DONT_KNOW_CALLBACK,
+                                }
+                            ]
+                        },
+                    }
+                ],
+                "clarification": {"mode": CLARIFICATION_MODE_FREE, "options": []},
+            },
+        )
     resolved = normalize_clarification_mode(mode, cleaned)
     shown = cleaned[:_MAX_CLARIFICATION_OPTIONS]
     buttons = [{"label": opt[:_MAX_OPTION_LABEL_CHARS], "callback": opt} for opt in shown]
@@ -2232,6 +2263,9 @@ CLARIFY_CALLBACK_PREFIX = "cb:clarify:"
 CLARIFY_TOGGLE_PREFIX = "cb:clarify:tg:"
 CLARIFY_SUBMIT_PREFIX = "cb:clarify:ok:"
 CLARIFY_NONE_CALLBACK = "cb:clarify:no"
+#: DRF-1760 — «Не знаю» в режиме ``free``: явный ответ-незнание, а не текст,
+#: который модель классифицировала бы как ``other`` (матрица P9).
+CLARIFY_DONT_KNOW_CALLBACK = "cb:clarify:dk"
 
 #: Selected / unselected marks. Prefixed, not appended: MAX truncates a long
 #: button label at the tail, so a trailing mark is the first thing lost.
@@ -2240,6 +2274,14 @@ CLARIFY_MARK_OFF = "☐ "
 
 CLARIFY_SUBMIT_LABEL = "Продолжить"
 CLARIFY_NONE_LABEL = "Ни один вариант"
+CLARIFY_DONT_KNOW_LABEL = "Не знаю"
+#: Ответ на «Не знаю» — по макету C03: «Ayla либо продолжает без этого
+#: факта, либо задаёт более простой вопрос». Без движка простой вопрос
+#: один: своими словами или показать, что доступно.
+CLARIFY_DONT_KNOW_TEXT = (
+    "Хорошо, это не обязательно знать. Расскажите своими словами, что вас "
+    "беспокоит или чего хочется, — или посмотрим доступные услуги?"
+)
 
 
 @dataclass(frozen=True)
@@ -2269,6 +2311,8 @@ def parse_clarify_callback(callback_text: str) -> ClarifyTap | None:
         return None
     if callback_text == CLARIFY_NONE_CALLBACK:
         return ClarifyTap(kind="none")
+    if callback_text == CLARIFY_DONT_KNOW_CALLBACK:
+        return ClarifyTap(kind="dontknow")
     if callback_text.startswith(CLARIFY_TOGGLE_PREFIX):
         rest = callback_text[len(CLARIFY_TOGGLE_PREFIX) :]
         parts = rest.split(":")
@@ -2346,6 +2390,10 @@ class ClarifyOutcome:
     reply: DiscoveryReply | None = None
     submit_text: str = ""
     redraw: bool = False
+    #: DRF-1760 — чем закрыть открытый вопрос (DRF-1779), когда ответ дан
+    #: тапом и в модель не идёт: «не знаю» — полноценный ответ, и следующая
+    #: реплика не должна читаться как второй ответ на тот же вопрос.
+    answer_text: str = ""
 
 
 def execute_clarify_callback(
@@ -2376,6 +2424,14 @@ def execute_clarify_callback(
     tap = parse_clarify_callback(callback_text)
     if tap is None:
         return None
+
+    if tap.kind == "dontknow":
+        # До проверки «вопрос протух»: у free-вопроса опций нет по
+        # построению, и «Не знаю» на нём — штатный ответ, не протухший тап.
+        logger.info("orchestrator.discovery.clarify_tap kind=dontknow outcome=answered")
+        return ClarifyOutcome(
+            reply=DiscoveryReply(text=CLARIFY_DONT_KNOW_TEXT), answer_text=CLARIFY_DONT_KNOW_LABEL
+        )
 
     if not options:
         # The mask is meaningless without the labels it indexes.
@@ -2448,6 +2504,15 @@ def render_multiselect_clarification(
     shown = cleaned[:_MAX_CLARIFICATION_OPTIONS]
     if not shown:
         return DiscoveryReply(text=text)
+    # DRF-1760 — «Выбрано: N» (макет C02.2): честное число отмеченного,
+    # считается по маске тех же кнопок; при нуле строки нет. Сам вопрос
+    # уходит в ``clarification.question`` отдельно от текста: перерисовка
+    # сохраняется строкой ассистента, и следующий тап читает вопрос оттуда —
+    # иначе счётчик наслаивался бы на счётчик.
+    asked = text
+    selected = len(selected_clarification_options(shown, mask))
+    if selected:
+        text = f"{asked}\n\nВыбрано: {selected}"[:_MAX_REPLY_CHARS]
 
     rows: list[list[dict[str, str]]] = []
     for i, opt in enumerate(shown):
@@ -2464,6 +2529,7 @@ def render_multiselect_clarification(
             "mode": CLARIFICATION_MODE_CHOOSE_MANY,
             "options": shown,
             "mask": mask,
+            "question": asked,
         },
     }
     return DiscoveryReply(text=text, action_data=action_data)

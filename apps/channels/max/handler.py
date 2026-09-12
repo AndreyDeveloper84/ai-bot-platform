@@ -152,6 +152,7 @@ from apps.persona.memory_surface import render_current_personal_context
 from apps.persona.voice import SALON_BUSINESS_NAME
 from apps.orchestrator.concierge import generate_direct_show_masters_reply
 from apps.orchestrator.fast_path import claims_direct_show_masters
+from apps.orchestrator.open_question import close_question
 from apps.orchestrator.discovery import (
     CALLBACK_DISCOVER_BOOK_PREFIX,
     CALLBACK_DISCOVER_MORE_PREFIX,
@@ -353,6 +354,12 @@ def _last_clarification_offer(conversation: Any) -> tuple[str, list[str]]:
                 continue
             options = [str(o) for o in (block.get("options") or []) if str(o).strip()]
             if options:
+                # DRF-1760 — вопрос берётся из блока, где он лежит без
+                # «Выбрано: N»; строки, записанные до этого, несут его в
+                # ``content`` — как прежде.
+                asked = block.get("question")
+                if isinstance(asked, str) and asked.strip():
+                    return asked, options
                 return (content if isinstance(content, str) else ""), options
     except Exception:  # noqa: BLE001 — a tap must never break the turn
         logger.exception(
@@ -1321,6 +1328,11 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
             clarify_outcome = None
         elif clarify_outcome is None:
             clarify_outcome = ClarifyOutcome(reply=DiscoveryReply(text=CLARIFY_STALE_TEXT))
+        elif clarify_outcome.answer_text:
+            # DRF-1760 — ответ дан тапом («Не знаю») и в модель не идёт:
+            # открытый вопрос (DRF-1779) закрывается здесь, иначе следующая
+            # реплика прочиталась бы как второй ответ на него.
+            close_question(conversation, clarify_outcome.answer_text)
 
     # A submitted answer no longer starts with the prefix, so it is persisted
     # as the user turn it now is; a redraw tap still does not reach history.
