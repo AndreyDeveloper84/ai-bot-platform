@@ -406,6 +406,62 @@ class TestProfileTargetsSource:
         assert profile.targets_source == ""
 
 
+class TestProfileMethodAndInputsArrive:
+    """Методика и снимок входов доезжают до ``ProfileResponse`` (§5.1 11.09.2026).
+
+    Каталог с PR #362 шлёт ``targets_provenance.input_snapshot`` владельцу
+    данных: «методика и использованные данные показываются человеку».
+    Бот обязан довезти их до карточки как есть — и не изготавливать,
+    когда их нет.
+    """
+
+    _fetch = staticmethod(TestProfileTargetsSource._fetch)
+
+    @pytest.mark.asyncio
+    async def test_method_versions_and_snapshot_arrive_verbatim(self) -> None:
+        snapshot = {
+            "gender": "female",
+            "age": 32,
+            "height_cm": 168,
+            "weight_kg": 62.0,
+            "activity_coefficient": 1.375,
+            "goal": "maintain",
+            "pace": "moderate",
+        }
+        profile = await self._fetch(
+            _profile_body(
+                targets_provenance={
+                    "source": "ayla_calculated",
+                    "method_versions": {"calories": "mifflin_st_jeor_v1"},
+                    "computed_at": "2026-09-11T10:00:00.000Z",
+                    "input_snapshot": snapshot,
+                }
+            )
+        )
+        assert profile.targets_method_versions == {"calories": "mifflin_st_jeor_v1"}
+        assert profile.targets_input_snapshot == snapshot
+
+    @pytest.mark.asyncio
+    async def test_absent_snapshot_is_empty_dict_not_invented(self) -> None:
+        profile = await self._fetch(
+            _profile_body(
+                targets_provenance={
+                    "source": "none",
+                    "method_versions": {},
+                    "computed_at": None,
+                }
+            )
+        )
+        assert profile.targets_method_versions == {}
+        assert profile.targets_input_snapshot == {}
+
+    @pytest.mark.asyncio
+    async def test_no_provenance_block_gives_empty_dicts(self) -> None:
+        profile = await self._fetch(_profile_body())
+        assert profile.targets_method_versions == {}
+        assert profile.targets_input_snapshot == {}
+
+
 # ─── water envelope ────────────────────────────────────────────────────────
 
 

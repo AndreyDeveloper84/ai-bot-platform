@@ -587,6 +587,72 @@ _SUMMARY_ROWS: tuple[tuple[str, str, str], ...] = (
 )
 
 
+#: Подписи методик по версии из каталога. Неизвестная версия печатается
+#: как есть — это лучше, чем подпись, которой каталог не давал.
+_METHOD_LABELS: dict[str, str] = {
+    "mifflin_st_jeor_v1": "Миффлин — Сан Жеор, версия 1",
+}
+
+_GENDER_LABELS: dict[str, str] = {"female": "женский", "male": "мужской"}
+_GOAL_LABELS: dict[str, str] = {
+    "lose": "похудеть",
+    "maintain": "поддерживать",
+    "gain": "набрать",
+    "tone": "подтянуть",
+}
+_PACE_LABELS: dict[str, str] = {"gentle": "мягкий", "moderate": "средний"}
+
+
+def _method_and_inputs_line(profile) -> str:
+    """«Считала по … от твоих данных: …» — или пустая строка.
+
+    Решение владельца 11.09.2026 §5.1: «методика и использованные данные
+    показываются человеку». Ориентир без слов «от чего посчитан» — число,
+    которому человек должен верить на слово; с этой строкой он видит и
+    формулу, и свои же ответы, из которых она посчитана, — и может
+    заметить, если что-то ввёл не так.
+
+    Печатается только то, что каталог прислал: пустой снимок — строки
+    нет, а не «от твоих данных» без данных; неизвестная версия методики —
+    как есть, без подписи. Значения из снимка — ТЕ ЖЕ входы, что и в
+    расчёте (каталог собирает снимок по ``SNAPSHOT_INPUTS`` в момент
+    расчёта), а не текущие поля профиля.
+    """
+    snapshot: dict = dict(getattr(profile, "targets_input_snapshot", None) or {})
+    if not snapshot:
+        return ""
+    versions: dict = dict(getattr(profile, "targets_method_versions", None) or {})
+    version = versions.get("calories")
+
+    facts: list[str] = []
+    gender = snapshot.get("gender")
+    if gender:
+        facts.append(f"пол — {_GENDER_LABELS.get(str(gender), str(gender))}")
+    if snapshot.get("age") is not None:
+        facts.append(f"возраст — {snapshot['age']}")
+    if snapshot.get("height_cm") is not None:
+        facts.append(f"рост — {snapshot['height_cm']} см")
+    if snapshot.get("weight_kg") is not None:
+        weight = snapshot["weight_kg"]
+        weight_text = f"{weight:g}" if isinstance(weight, (int, float)) else str(weight)
+        facts.append(f"вес — {weight_text} кг")
+    if snapshot.get("activity_coefficient") is not None:
+        facts.append(f"активность — {snapshot['activity_coefficient']}")
+    goal = snapshot.get("goal")
+    if goal:
+        facts.append(f"цель — {_GOAL_LABELS.get(str(goal), str(goal))}")
+    pace = snapshot.get("pace")
+    if pace:
+        facts.append(f"темп — {_PACE_LABELS.get(str(pace), str(pace))}")
+
+    head = (
+        f"Считала по методике {_METHOD_LABELS.get(str(version), str(version))}"
+        if version
+        else "Считала"
+    )
+    return f"{head} от твоих данных: {', '.join(facts)}."
+
+
 def _format_summary(profile) -> str:
     """Карточка после анкеты — только те ориентиры, которые ЕСТЬ.
 
@@ -623,6 +689,9 @@ def _format_summary(profile) -> str:
 
     parts: list[str] = ["Готово, рассчитала твои нормы:"]
     parts.append("\n".join(rows))
+    method_line = _method_and_inputs_line(profile)
+    if method_line:
+        parts.append(method_line)
     if profile.goal_overridden_by:
         # Ayla applied a safety override (pregnancy / eating-disorder /
         # BMI floor). Mention it gently — the override is the right call,
