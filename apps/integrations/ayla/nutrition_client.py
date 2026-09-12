@@ -924,10 +924,12 @@ class NutritionClient:
             raise NutritionUnavailableError("circuit_open")
 
         url = self._urls.build("nutrition/internal/profile/targets/confirm/")
-        headers = {
-            "X-Service-Token": self._token,
-            "X-External-User-ID": external_user_id,
-        }
+        headers = with_request_id(
+            {
+                "X-Service-Token": self._token,
+                "X-External-User-ID": external_user_id,
+            }
+        )
         try:
             async with httpx.AsyncClient(timeout=self._timeout_s) as http:
                 resp = await http.post(url, headers=headers, json={})
