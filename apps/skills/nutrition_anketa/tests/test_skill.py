@@ -383,6 +383,76 @@ def _client_that_must_not_be_called() -> Mock:
     return client
 
 
+class TestScreeningQuestionSitsWhereItSays:
+    """Живой путь владельца 12.09 01:33–01:34 (MAX, до #1664): пол → возраст
+    → «И последнее перед расчётом…» → рост → вес → цель. Два наблюдения:
+    вопрос о здоровье назвал себя последним, будучи третьим из шести, и
+    пришёл «без вариантов».
+
+    Первое чинится здесь и стережётся КЛАССОМ: ни один шаг не вправе
+    называть себя последним, если за ним есть шаг. Второе по коду не
+    воспроизводится — варианты прикреплены на каждом пути (скилл →
+    ``_build_attachments`` MAX → ``send_message`` без отката «без
+    клавиатуры»); тест ниже держит провод до формы канала, а расхождение с
+    наблюдением решает сохранённый ``action_data`` той реплики на пилоте.
+    """
+
+    def test_no_step_calls_itself_last_unless_it_is(self) -> None:
+        from apps.skills.fsm import COMPLETE
+        from apps.skills.nutrition_anketa.fsm import AnketaFSM
+
+        liars = [
+            name
+            for name, step in AnketaFSM.STEPS.items()
+            if "последн" in step.prompt.lower() and step.next != COMPLETE
+        ]
+        assert liars == [], f"шаг назвал себя последним, но за ним есть шаг: {liars}"
+        # POSITIVE: сторож смотрит на непустой набор шагов с известным порядком.
+        assert list(AnketaFSM.STEPS) == ["gender", "age", "screening", "height", "weight", "goal"]
+
+    def test_screening_prompt_names_what_follows(self) -> None:
+        from apps.skills.nutrition_anketa.fsm import AnketaFSM
+
+        step = AnketaFSM.STEPS["screening"]
+        assert step.next == "height" and AnketaFSM.STEPS["height"].next == "weight"
+        assert step.prompt.startswith("Перед ростом и весом — есть ли сейчас что-то из этого?")
+        assert "последнее" not in step.prompt.lower()
+
+    def test_screening_arrives_with_its_choices_down_to_the_max_wire_shape(self) -> None:
+        """Ответ на возраст → вопрос о здоровье С вариантами, и они доживают
+        до формы MAX-канала (inline_keyboard, 4 кнопки, «Ничего из этого»
+        первой), а не только до ``action_data`` скилла."""
+        from apps.channels.max.handler import _build_attachments
+
+        ctx, _conversation = _context(
+            "30",
+            state={
+                "nutrition_anketa": {
+                    "current_step": "age",
+                    "answers": {"gender": "female"},
+                    "is_complete": False,
+                }
+            },
+        )
+        result = NutritionAnketaSkill().handle(ctx)
+        assert result.action_type == "anketa_step_screening"
+        # Формулировку здесь не проверяем намеренно: этот сторож — про
+        # кнопки, и краснеть от смены слов он не должен.
+
+        attachments = _build_attachments(result.action_data)
+        assert attachments and attachments[0]["type"] == "inline_keyboard"
+        rows = attachments[0]["payload"]["buttons"]
+        flat = [button for row in rows for button in row]
+        assert [b["text"] for b in flat] == [
+            "Ничего из этого",
+            "Беременность или кормление",
+            "Расстройство пищевого поведения",
+            "Заболевание, влияющее на питание",
+        ]
+        assert flat[0]["payload"] == "cb:anketa:choice:screening:none"
+        assert all(b["type"] == "callback" for b in flat)
+
+
 class TestStopScenarios:
     """Owner decision §7.1 — no automatic calculation, diary intact."""
 
