@@ -276,9 +276,9 @@ class TestProfileClient:
         # and the route no longer says whether such a user exists. Either way
         # the route resolved and the Bearer was accepted; what would be
         # unhealthy is a timeout/5xx or a malformed body.
-        assert (
-            "not_found" in msg or "auth" in msg
-        ), f"expected 'not_found' (pre-#411) or 'auth' (post-#411, foreign subject); got {msg!r}"
+        assert "not_found" in msg or "auth" in msg, (
+            f"expected 'not_found' (pre-#411) or 'auth' (post-#411, foreign subject); got {msg!r}"
+        )
 
     @pytest.mark.skipif(
         not (_PROFILE_USER_ID and _PROFILE_EXTERNAL_USER_ID),
