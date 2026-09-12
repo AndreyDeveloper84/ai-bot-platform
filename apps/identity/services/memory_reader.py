@@ -54,10 +54,19 @@ class GreenFact:
 
 @dataclass(frozen=True)
 class PersonalContextView:
-    """What the concierge may surface about a user this turn."""
+    """What the concierge may surface about a user this turn.
+
+    ``refusal`` (DRF-1699 D2) — почему вид пуст, когда он пуст НЕ ПОТОМУ,
+    что помнить нечего: ``deletion_requested`` — у человека живая заявка на
+    удаление, персонализация остановлена. Потребитель, который видит имя,
+    не подставит ничего и не пойдёт собирать заново; потребитель, который
+    видит просто пустой вид, сделал бы и то и другое.
+    """
 
     summary: str | None = None
     green_facts: list[GreenFact] = field(default_factory=list)
+    refusal: str | None = None
+    refusal_request_id: str | None = None
 
     def is_empty(self) -> bool:
         return not self.summary and not self.green_facts
@@ -113,7 +122,9 @@ def read_green_entries(user_id: uuid.UUID) -> list[MemoryEntry]:
     ``content`` decrypts via the field descriptor.
     """
 
-    if get_personal_context(user_id) is None:
+    from apps.identity.services.deletion_gate import deletion_gate
+
+    if deletion_gate(user_id).blocked or get_personal_context(user_id) is None:
         return []
 
     return list(
@@ -132,6 +143,15 @@ def read_personal_context(user_id: uuid.UUID) -> PersonalContextView:
     Returns an empty view (never raises) when there is no live UPC — the
     happy-path caller treats an empty view as «no memory to surface».
     """
+
+    # D2 (§7): заявка на удаление — раньше forget-all и по имени. Порядок
+    # не случаен: при обоих флагах человек обязан получить отказ с номером,
+    # а не пустой вид (сторож test_forget_all_and_deletion_do_not_argue).
+    from apps.identity.services.deletion_gate import deletion_gate
+
+    gate = deletion_gate(user_id)
+    if gate.blocked:
+        return PersonalContextView(refusal=gate.reason, refusal_request_id=gate.request_id)
 
     upc = get_personal_context(user_id)
     if upc is None:

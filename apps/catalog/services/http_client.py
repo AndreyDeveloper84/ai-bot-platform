@@ -71,6 +71,7 @@ from __future__ import annotations
 
 import logging
 import time
+import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -82,6 +83,7 @@ from django.conf import settings
 
 from apps.catalog.services.throttle import ThrottleWaitBudget
 from apps.integrations.ayla.url_builder import AylaUrlBuilder, AylaUrlError
+from apps.integrations.ayla.request_id import with_request_id
 
 logger = logging.getLogger(__name__)
 
@@ -298,6 +300,54 @@ class CatalogTransportError(CatalogError):
     """5xx / network failure after retries exhausted, or a config gap."""
 
 
+class CatalogProvisioningTokenMissing(CatalogError):
+    """``AYLA_IDENTITY_PROVISIONING_TOKEN`` пуст НА НАШЕЙ стороне (DRF-1525).
+
+    Отдельно от :class:`CatalogProvisioningRefused`: там токен был послан
+    и отвергнут каталогом, здесь его не с чем посылать. Оба — «токен не
+    настроен», но чинятся в разных контейнерах, и одно имя на двоих
+    отправило бы оператора искать не там.
+    """
+
+
+class CatalogProvisioningRefused(CatalogError):
+    """Каталог ответил 403 на провижининг (DRF-1525).
+
+    На стороне каталога токен пуст или не совпадает с нашим. Не
+    :class:`CatalogAuthError`: тот означает «общий Bearer зеркала не
+    подошёл», и его перехватывают как сбой синхронизации; здесь же —
+    ожидаемый исход «контур не донастроен», который экран обязан назвать
+    ``SETUP_PENDING``, а не ошибкой.
+    """
+
+
+class CatalogSlugTaken(CatalogError):
+    """Каталог ответил 409: slug занят салоном с другим названием."""
+
+    def __init__(self, message: str, *, slug: str, existing_name: str, requested_name: str) -> None:
+        super().__init__(message)
+        self.slug = slug
+        self.existing_name = existing_name
+        self.requested_name = requested_name
+
+
+@dataclass(frozen=True)
+class EnsuredTenantDTO:
+    """Ответ ``POST /api/v1/internal/tenants/`` (DRF-1525).
+
+    ``created`` — 201 против 200: салон только что заведён в каталоге или
+    уже был там. Экран говорит человеку разное, а строка бота в обоих
+    случаях одна и та же.
+    """
+
+    id: uuid.UUID
+    slug: str
+    name: str
+    city: str | None
+    is_active: bool
+    created: bool
+
+
 # ---------------------------------------------------------------------------
 # Client
 # ---------------------------------------------------------------------------
@@ -337,6 +387,7 @@ class CatalogHttpClient:
         retries: int | None = None,
         http_client: httpx.Client | None = None,
         wait_budget: ThrottleWaitBudget | None = None,
+        provisioning_token: str | None = None,
     ) -> None:
         self._base_url = (
             base_url if base_url is not None else getattr(settings, "AYLA_BASE_URL", "")
@@ -344,6 +395,11 @@ class CatalogHttpClient:
         self._token = (
             token if token is not None else getattr(settings, "AYLA_INTERNAL_API_TOKEN", "")
         )
+        # Второй секрет, другая сила (DRF-1525, §11 свода владельца): общий
+        # Bearer читает зеркало, провижининг-токен заводит салоны. Читается
+        # лениво в :meth:`ensure_tenant`, а не здесь: клиент синхронизации
+        # не должен падать оттого, что токен для другой операции не задан.
+        self._provisioning_token = provisioning_token
         self._timeout = (
             timeout if timeout is not None else getattr(settings, "CATALOG_SYNC_HTTP_TIMEOUT", 30)
         )
@@ -450,6 +506,94 @@ class CatalogHttpClient:
     # Plumbing
     # ------------------------------------------------------------------
 
+    # ------------------------------------------------------------------
+    # Provisioning (DRF-1525)
+    # ------------------------------------------------------------------
+
+    def ensure_tenant(self, *, slug: str, name: str, city: str = "") -> EnsuredTenantDTO:
+        """Салон по slug в каталоге: найти или завести, вернуть его UUID.
+
+        ``POST /api/v1/internal/tenants/`` под ``AYLA_IDENTITY_PROVISIONING_TOKEN``
+        (не под общим Bearer — см. ``_provisioning_token``). Идемпотентно
+        по slug на стороне каталога: 201 завёл / 200 уже был.
+
+        Без ретраев, кроме тех, что и так внутри ``httpx``: это не выборка,
+        которую можно повторить бесплатно, а действие, и повторять его
+        вслепую после таймаута значило бы не знать, случилось ли оно.
+        Каталог идемпотентен, так что оператор повторит нажатием сам.
+
+        Исходы по имени: :class:`CatalogProvisioningTokenMissing` (у нас
+        пусто), :class:`CatalogProvisioningRefused` (403 — пусто или не
+        совпадает у них), :class:`CatalogSlugTaken` (409),
+        :class:`CatalogClientError` (прочие 4xx),
+        :class:`CatalogTransportError` (сеть / 5xx / кривой ответ).
+        """
+        token = (
+            self._provisioning_token
+            if self._provisioning_token is not None
+            else getattr(settings, "AYLA_IDENTITY_PROVISIONING_TOKEN", "")
+        )
+        if not token:
+            raise CatalogProvisioningTokenMissing(
+                "AYLA_IDENTITY_PROVISIONING_TOKEN not configured on the bot side"
+            )
+        try:
+            url = AylaUrlBuilder(self._base_url).build("/internal/tenants/")
+        except AylaUrlError as exc:
+            raise CatalogTransportError(f"invalid AYLA_BASE_URL: {exc}") from exc
+
+        try:
+            response = self._client().post(
+                url,
+                json={"slug": slug, "name": name, "city": city or ""},
+                headers=with_request_id(
+                    {
+                        "Authorization": f"Bearer {token}",
+                        "Accept": "application/json",
+                    }
+                ),
+                timeout=self._timeout,
+            )
+        except httpx.HTTPError as exc:
+            raise CatalogTransportError(
+                f"Ayla tenants: transport failure on {url}: {exc.__class__.__name__}"
+            ) from exc
+
+        if response.status_code in (401, 403):
+            raise CatalogProvisioningRefused(
+                f"Ayla tenants: provisioning refused with HTTP {response.status_code}"
+            )
+        if response.status_code == 409:
+            details = _json_or_empty(response).get("error", {}).get("details", {}) or {}
+            raise CatalogSlugTaken(
+                f"Ayla tenants: slug {slug!r} taken by {details.get('existing_name')!r}",
+                slug=slug,
+                existing_name=str(details.get("existing_name") or ""),
+                requested_name=str(details.get("requested_name") or name),
+            )
+        if 400 <= response.status_code < 500:
+            raise CatalogClientError(
+                f"Ayla tenants 4xx: HTTP {response.status_code} body={response.text[:200]!r}"
+            )
+        if response.status_code >= 500:
+            raise CatalogTransportError(f"Ayla tenants: HTTP {response.status_code}")
+
+        data = _json_or_empty(response).get("data")
+        if not isinstance(data, dict):
+            raise CatalogTransportError("Ayla tenants: response without data")
+        try:
+            tenant_id = uuid.UUID(str(data["id"]))
+        except (KeyError, ValueError) as exc:
+            raise CatalogTransportError("Ayla tenants: response without a UUID id") from exc
+        return EnsuredTenantDTO(
+            id=tenant_id,
+            slug=str(data.get("slug") or slug),
+            name=str(data.get("name") or name),
+            city=str(data["city"]) if data.get("city") else None,
+            is_active=bool(data.get("is_active", True)),
+            created=response.status_code == 201,
+        )
+
     def _fetch_all(self, path: str, *, params: dict[str, Any]) -> list[dict[str, Any]]:
         """Walk the pagination chain. Returns a flat list of raw row dicts."""
         return self._fetch_all_checked(path, params=params)[0]
@@ -515,10 +659,12 @@ class CatalogHttpClient:
                 response = client.get(
                     url,
                     params=params,
-                    headers={
-                        "Authorization": f"Bearer {self._token}",
-                        "Accept": "application/json",
-                    },
+                    headers=with_request_id(
+                        {
+                            "Authorization": f"Bearer {self._token}",
+                            "Accept": "application/json",
+                        }
+                    ),
                     timeout=self._timeout,
                 )
                 if response.status_code in (401, 403):
@@ -633,6 +779,14 @@ class CatalogHttpClient:
 # ---------------------------------------------------------------------------
 # Throttle parsing
 # ---------------------------------------------------------------------------
+
+
+def _json_or_empty(response: httpx.Response) -> dict[str, Any]:
+    try:
+        payload = response.json()
+    except ValueError:
+        return {}
+    return payload if isinstance(payload, dict) else {}
 
 
 def _coerce_positive_seconds(raw: Any) -> float | None:

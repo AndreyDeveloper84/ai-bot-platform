@@ -56,6 +56,7 @@ import httpx
 from django.conf import settings
 
 from apps.integrations.ayla.url_builder import AylaUrlBuilder, AylaUrlError
+from apps.integrations.ayla.request_id import with_request_id
 
 
 logger = logging.getLogger(__name__)
@@ -213,13 +214,15 @@ def resolve_identity(external_user_id: str) -> ResolvedIdentity:
     except AylaUrlError as exc:
         raise IdentityResolveError(f"invalid AYLA_BASE_URL: {exc}") from exc
 
-    headers = {
-        "Authorization": f"Bearer {token}",
-        "Accept": "application/json",
-        # The ONLY place the subject is named. No request body exists, so
-        # a caller cannot substitute a different subject (DRF-1035 §E.4).
-        "X-External-User-ID": external_user_id,
-    }
+    headers = with_request_id(
+        {
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/json",
+            # The ONLY place the subject is named. No request body exists, so
+            # a caller cannot substitute a different subject (DRF-1035 §E.4).
+            "X-External-User-ID": external_user_id,
+        }
+    )
 
     try:
         with httpx.Client(timeout=TIMEOUT_S) as http:
