@@ -166,6 +166,10 @@ ROUTE_TABLE: tuple[Route, ...] = (
     # exported and whose was destroyed.
     Route("GET", "/api/v1/internal/users/{id}/personal-data/export/", Auth.BEARER_EXT),
     Route("DELETE", "/api/v1/internal/users/{id}/personal-data/", Auth.BEARER_EXT),
+    # DRF-1699 D1 (§7 свода) — заявка на удаление аккаунта: POST заводит
+    # (идемпотентно), GET без номера — текущая для профиля.
+    Route("POST", "/api/v1/internal/users/{id}/deletion-requests/", Auth.BEARER_EXT),
+    Route("GET", "/api/v1/internal/users/{id}/deletion-requests/", Auth.BEARER_EXT),
     # billing_client — C2 billing status + C3 payout preview (pilot 2026-08-15).
     Route("GET", "/api/v1/internal/billing/specialists/{id}/status/", Auth.BEARER),
     Route("POST", "/api/v1/internal/billing/specialists/{id}/card-setup/", Auth.BEARER),
@@ -432,6 +436,8 @@ def _exercise_personal_context() -> None:
     _swallow(lambda: c.skip(ayla_user_id=uid, external_user_id=ext, field="diet_type"))
     _swallow(lambda: c.get_personal_data_export(ayla_user_id=uid, external_user_id=ext))
     _swallow(lambda: c.delete_personal_data(ayla_user_id=uid, external_user_id=ext))
+    _swallow(lambda: c.create_deletion_request(ayla_user_id=uid, external_user_id=ext))
+    _swallow(lambda: c.get_current_deletion_request(ayla_user_id=uid, external_user_id=ext))
 
 
 def _exercise_recommendations() -> None:

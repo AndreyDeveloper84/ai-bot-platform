@@ -493,6 +493,18 @@ REPLAY_REDACTION_ALLOWLIST: list[str] = [
     p.strip() for p in os.environ.get("REPLAY_REDACTION_ALLOWLIST", "").split(",") if p.strip()
 ]
 
+# B-R (DRF-1617) — accounts `reset_test_account` may free, as
+# `channel:channel_user_id`. Empty means the command refuses EVERY account:
+# there is no confirmation flag and no environment check, because a
+# confirmation protects against inattention and this list protects against a
+# wrong identifier — the command can delete what the law says to keep, and
+# «are you sure» does not check who you are pointing at. Getting onto this
+# list is a deliberate, separate act on the host; it is never a side effect
+# of anything else. The pilot's list is empty.
+ACCOUNT_RESET_ALLOWLIST: list[str] = [
+    p.strip() for p in os.environ.get("ACCOUNT_RESET_ALLOWLIST", "").split(",") if p.strip()
+]
+
 # Sprint 3 / B4 — event fanout adapter registry. Each entry is the
 # dotted import path of an :class:`apps.events.fanout.EventFanout`
 # implementation. Default is the no-op adapter — Phase 0 keeps events
@@ -734,14 +746,16 @@ AYLA_BASE_URL = os.environ.get("AYLA_BASE_URL", "")
 #    recommendations + profile move onto it in S0-B.
 AYLA_INTERNAL_API_TOKEN = os.environ.get("AYLA_INTERNAL_API_TOKEN", "")
 
-# DRF-1525 — второй секрет, другая сила (§11 свода владельца). Общий Bearer
-# выше читает зеркало и пишет записи; этот — заводит салон в каталоге
-# (``POST /api/v1/internal/tenants/``, сторож ``IsIdentityProvisioningBearer``)
-# и, по §11, служит автоматическому связыванию S2. Каталог отвергает общий
-# токен на этой ручке по построению и требует, чтобы два значения
-# РАЗЛИЧАЛИСЬ (``users.E001`` там). Пусто = экран «подключить салон»
+# DRF-1525 / DRF-1695 (C1) — второй секрет, другая сила. Общий Bearer выше
+# читает зеркало и пишет записи; этот — заводит салон в каталоге
+# (``POST /api/v1/internal/tenants/``, сторож ``IsTenantProvisioningBearer``).
+# НЕ identity-токен: право присваивать личность (bind-external) боту не
+# выдаётся — OPEN_DECISIONS §151 «запрещено явно», и в окружении бота
+# ``AYLA_IDENTITY_PROVISIONING_TOKEN`` лежать не должен. Каталог требует,
+# чтобы этот секрет отличался и от общего Bearer, и от identity-токена
+# (users.E002/E003 при его старте). Пусто = экран «подключить салон»
 # отвечает ``SETUP_PENDING`` с именем причины, а не ложным успехом.
-AYLA_IDENTITY_PROVISIONING_TOKEN = os.environ.get("AYLA_IDENTITY_PROVISIONING_TOKEN", "")
+AYLA_TENANT_PROVISIONING_TOKEN = os.environ.get("AYLA_TENANT_PROVISIONING_TOKEN", "")
 
 # C7 client-payments: fallback ``return_url`` for the YooKassa confirmation
 # flows (payment create / card setup) when the miniapp request doesn't carry

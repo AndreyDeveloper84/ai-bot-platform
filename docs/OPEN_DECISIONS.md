@@ -4804,12 +4804,12 @@ DRF-1558 → Done по критерию «отправитель шлёт по `
 
 Пилот на `eb40fb9` (правка DRF-1558, PR #1450). Создана настоящая запись через
 салонную ручку: `7972333c`, УЗ-чистка лица, 09.09 13:00, мастер Тихонова Ольга,
-связка на аккаунт `332809622`.
+связка на аккаунт `332…`.
 
 **Журнал отправки:**
 
 ```
-POST https://botapi.max.ru/messages?user_id=332809622 → 200 OK
+POST https://botapi.max.ru/messages?user_id=332… → 200 OK
 booking.notify.sent tenant=formula-tela
   appointment_id=7972333c-... channel=master recipients=1
 ```
@@ -9504,7 +9504,12 @@ authority, evidence и `unknown_behavior`»; §5.3: «если система н
   на предложение. **Предел:** показ предложения как предложения и кнопка подтверждения в боте — следующий PR; до него вызывающего у
   подтверждения нет (механизм закрыт, экспозиция ноль). `nutrition/` целиком: tests=749, failures=1 (порядко-зависимый тест сирот фото,
   класс DRF-1663), errors=0.
-* Следующий — **N-g** (5 SP): при health-факторах отказ с именем вместо лестницы поправок.
+* **N-g (§5.1)** — `beautygo_backend` #372 (стек #361 → #362 → #369): четыре health-фактора — `pregnant`, `breastfeeding`,
+  `eating_disorder`, несовершеннолетие (< 18) — отказ с именем `health_factor_<имя>` на каждый; Safety проверяется раньше полноты
+  входов; лестница поправок (maintain, +200/+400 ккал, +25 г белка) и её константы сняты — она считала число там, где владелец
+  запретил число; цель не переписывается; предложение не создаётся. Проба «отказ отключён» — 11 из 14 красных. **Предел:** текст
+  человеку «при беременности норму не считаю» и показ предложения — половина бота, следующим PR.
+* Следующий — бот: показ `ayla_proposed` как предложения + кнопка подтверждения + текст отказа по health-фактору (после #1616).
 
 ---
 
@@ -9537,3 +9542,19 @@ authority, evidence и `unknown_behavior`»; §5.3: «если система н
 ### Затронутый код
 
 `apps/skills/salon/` (бот, витрина impact) · `users/internal_schedule_api.py`, `appointments/models.py` (каталог, колонка автора) · Б-б1 — `users/services.py` привязка, отдельным решением о процедуре.
+
+## §153. ОТВЕЧЕНО 12.09.2026 — пакет решений владельца (девять rulings, CLOSED)
+
+Канонический текст — `docs/OWNER_DECISIONS_2026-09-12.md`. Карта соответствия:
+
+| № | Тема | Ruling | Закрывает | Кому |
+|---|---|---|---|---|
+| 1 | DRF-979 / #353 credential на пилоте | read-only Deploy Key; «ключ стоит» = ключ + права + origin по SSH без credential + успешный `git fetch` от taximeter; PAT отзывать только после green SSH deploy | решение 1 DRF-1349 | хост — владелец; #353 + Dockerfile — окно выкладки |
+| 2 | DRF-1698 consent | APPROVE WITH TEXT CHANGES: purpose `NUTRITION_PERSONAL_NORMS`, новые тексты CONSENT_ASK/DECLINED, кнопки «Рассчитать мои нормы» / «Не сейчас», детерминированный отзыв «Отключить персональный расчёт» с подтверждением; UNREADABLE закрывает только расчёт | DRF-1698, #1593 | окно согласий |
+| 3 | OD-PILOT-9 полка рекомендаций | первый Controlled Pilot БЕЗ полки; путь direct service → catalog → location/distance → availability → booking; текст «недостаточно подтверждённых данных…» с действиями «Посмотреть услуги»/«Уточнить запрос»; Stage 2 gate (8 условий); `distance_meters: integer`, UI <1000 м / ≥1000 км; поверхности «Рядом с вами», «Доступные услуги»; «Ayla рекомендует» — только canonical | §145, §150, DRF-1622 | окно канона + клиентское окно |
+| 4 | §2 Person vs ClientProfile | canonical = `Person` (identity-level, не tenant-owned); таблицу не создавать ради переименования; SHADOW/status остаётся на BotUser до identity migration | DRF-1700 | окно идентичности |
+| 5 | Synthetic fixtures | CLEAN BEFORE MIGRATION по явному allowlist 7 записей; dry-run с ID/причиной/связями/`REAL RECORDS TOUCHED = 0`; эвристики запрещены; acceptance: clients total = 7 | DRF-1700, §12 | окно идентичности; `--apply` — по dry-run |
+| 6 | S2 без identity-токена у бота | NO-GO широкому credential; Phase 0 — operator-assisted linking (IDENTITY_LINK_PENDING → controlled operator action с аудитом → LINKED; публикация только при LINKED); Phase 1 — OTP через specialist path; DoD Phase 0: «no operator intervention» снято только для identity-linking; provisioning-token scope минимальный | §151, §11, Phase 0 фриза C1 | окно админки |
+| 7 | ayla-90 write window | временный выход из auto-mode для pre-reviewed idempotent package; отчёт APPLIED/UNCHANGED/FAILED + AUTO MODE RESTORED | решение 8 DRF-1349 | окно Linear |
+| 8 | DRF 3.18 в каталоге | HOLD до compatibility migration: golden contract PATCH personal-context, exact delta BEFORE/AFTER, consumer census, error normalizer → стабильный canonical envelope | #284, Dependabot-триаж | окно оценки |
+| 9 | Ruff 0.16 | tool upgrade GO (#1632 — как 0.15, 0 семантических изменений); 413 правил — HOLD до census (SAFE/REVIEW/SEMANTIC_RISK/NOT_APPLICABLE/POST_PILOT); repository-wide .md formatting — HOLD; версия пиннится одинаково в local/CI/pre-commit | #1632 | окно оценки |

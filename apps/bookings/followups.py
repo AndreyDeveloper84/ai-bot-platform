@@ -381,6 +381,12 @@ def _should_send_b11(
     blockers, but the consent gate + payment-failure gate still apply.
     Phase 1 Ayla event integration tightens this.
     """
+    # D2 (§7, DRF-1699): живая заявка на удаление — раньше всех прочих
+    # вето, включая согласие: человек, попросивший себя удалить, не
+    # получает от нас ничего непрошеного, и причина названа своим именем.
+    deletion_blocker = _deletion_blocker(bot_user)
+    if deletion_blocker:
+        return (False, deletion_blocker)
     consent_blocker = _consent_blocker(bot_user)
     if consent_blocker:
         return (False, consent_blocker)
@@ -433,6 +439,14 @@ def _should_send_b11(
         return (False, "completed_by_system")
 
     return (True, None)
+
+
+def _deletion_blocker(bot_user: Any) -> str | None:
+    """``deletion_requested`` when the person has a live deletion request."""
+    from apps.identity.services.deletion_gate import deletion_gate
+
+    gate = deletion_gate(getattr(bot_user, "ayla_user_id", None))
+    return gate.reason if gate.blocked else None
 
 
 def _consent_blocker(bot_user: Any) -> str | None:

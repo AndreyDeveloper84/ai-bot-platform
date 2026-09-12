@@ -104,6 +104,16 @@ def resolve_or_create_bot_user(
     )
 
     enriched = False
+    if created:
+        # Owner 11.09 §2 (S2-2): classify the new shell NOW, by the same rule
+        # the migration command applies, so a person already known to the
+        # client contour does not sit UNRESOLVED until the next --apply.
+        from apps.identity.services.salon_customer import apply_classification, classify
+
+        apply_classification(classify(channel, channel_user_id))
+        bot_user.refresh_from_db(
+            fields=["customer_status", "customer_source", "customer_status_at"]
+        )
     if not created:
         # Opportunistic enrichment — fill blanks, never overwrite.
         update_fields: list[str] = []

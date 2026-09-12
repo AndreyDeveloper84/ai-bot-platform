@@ -83,6 +83,7 @@ from django.conf import settings
 
 from apps.catalog.services.throttle import ThrottleWaitBudget
 from apps.integrations.ayla.url_builder import AylaUrlBuilder, AylaUrlError
+from apps.integrations.ayla.request_id import with_request_id
 
 logger = logging.getLogger(__name__)
 
@@ -300,7 +301,7 @@ class CatalogTransportError(CatalogError):
 
 
 class CatalogProvisioningTokenMissing(CatalogError):
-    """``AYLA_IDENTITY_PROVISIONING_TOKEN`` пуст НА НАШЕЙ стороне (DRF-1525).
+    """``AYLA_TENANT_PROVISIONING_TOKEN`` пуст НА НАШЕЙ стороне (DRF-1525).
 
     Отдельно от :class:`CatalogProvisioningRefused`: там токен был послан
     и отвергнут каталогом, здесь его не с чем посылать. Оба — «токен не
@@ -512,7 +513,7 @@ class CatalogHttpClient:
     def ensure_tenant(self, *, slug: str, name: str, city: str = "") -> EnsuredTenantDTO:
         """Салон по slug в каталоге: найти или завести, вернуть его UUID.
 
-        ``POST /api/v1/internal/tenants/`` под ``AYLA_IDENTITY_PROVISIONING_TOKEN``
+        ``POST /api/v1/internal/tenants/`` под ``AYLA_TENANT_PROVISIONING_TOKEN``
         (не под общим Bearer — см. ``_provisioning_token``). Идемпотентно
         по slug на стороне каталога: 201 завёл / 200 уже был.
 
@@ -530,11 +531,11 @@ class CatalogHttpClient:
         token = (
             self._provisioning_token
             if self._provisioning_token is not None
-            else getattr(settings, "AYLA_IDENTITY_PROVISIONING_TOKEN", "")
+            else getattr(settings, "AYLA_TENANT_PROVISIONING_TOKEN", "")
         )
         if not token:
             raise CatalogProvisioningTokenMissing(
-                "AYLA_IDENTITY_PROVISIONING_TOKEN not configured on the bot side"
+                "AYLA_TENANT_PROVISIONING_TOKEN not configured on the bot side"
             )
         try:
             url = AylaUrlBuilder(self._base_url).build("/internal/tenants/")
@@ -545,10 +546,12 @@ class CatalogHttpClient:
             response = self._client().post(
                 url,
                 json={"slug": slug, "name": name, "city": city or ""},
-                headers={
-                    "Authorization": f"Bearer {token}",
-                    "Accept": "application/json",
-                },
+                headers=with_request_id(
+                    {
+                        "Authorization": f"Bearer {token}",
+                        "Accept": "application/json",
+                    }
+                ),
                 timeout=self._timeout,
             )
         except httpx.HTTPError as exc:
@@ -656,10 +659,12 @@ class CatalogHttpClient:
                 response = client.get(
                     url,
                     params=params,
-                    headers={
-                        "Authorization": f"Bearer {self._token}",
-                        "Accept": "application/json",
-                    },
+                    headers=with_request_id(
+                        {
+                            "Authorization": f"Bearer {self._token}",
+                            "Accept": "application/json",
+                        }
+                    ),
                     timeout=self._timeout,
                 )
                 if response.status_code in (401, 403):

@@ -16,7 +16,7 @@
  *        `ConsentRecord(MARKETING)`, не зеркало `notify_promo`)
  *        + health-consent row + «Хранение данных» (сценарий отзыва
  *        с подтверждением, НЕ тумблер) + §4.2 accordion
- *        + «Запросить данные» / «Удалить аккаунт» → C5 sheets
+ *        + «Запросить данные» / «Удалить аккаунт и личные данные» → C5 sheets
  *        (PersonalDataSheets.tsx; support deeplink = error fallback)
  *   R3 — memory transparency: coming-soon card (no data, no clear)
  *   R4 — «Подсказки от Ayla»: тумблер на `me/consents/proactive-hints/`
@@ -49,6 +49,7 @@ import { TimezoneSheet, zoneLabel } from "../components/TimezoneSheet";
 import { NotificationCard } from "../components/NotificationCard";
 import {
   DataStorageRevokeSheet,
+  DeletionRequestStatus,
   HealthConsentSheet,
   PersonalDataDeleteSheet,
   PersonalDataExportSheet,
@@ -546,9 +547,12 @@ export function CustomerProfileScreen() {
                   className="btn-secondary profile-section__cta--cautious"
                   onClick={() => setDeleteOpen(true)}
                 >
-                  Удалить аккаунт
+                  Удалить аккаунт и личные данные
                 </button>
               </div>
+              {/* DRF-1699 (§7): у кого заявка уже есть — номер, срок и
+                  статус при каждом заходе, а не только в момент нажатия. */}
+              <DeletionRequestStatus />
             </section>
 
             {/* R3 — Memory transparency (deferred) */}

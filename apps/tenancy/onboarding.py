@@ -120,14 +120,14 @@ PENDING_PROVISIONING_REFUSED = "provisioning_refused"
 
 PENDING_LABELS: dict[str, str] = {
     PENDING_PROVISIONING_TOKEN_MISSING: (
-        "в окружении бота не задан AYLA_IDENTITY_PROVISIONING_TOKEN — без него "
+        "в окружении бота не задан AYLA_TENANT_PROVISIONING_TOKEN — без него "
         "бот не может завести салон в Ayla; задайте его (значение должно "
         "совпадать с каталогом и отличаться от AYLA_INTERNAL_API_TOKEN) и "
         "нажмите «Подключить» ещё раз"
     ),
     PENDING_PROVISIONING_REFUSED: (
         "Ayla отвергла провижининг-токен бота (HTTP 403): на стороне каталога "
-        "AYLA_IDENTITY_PROVISIONING_TOKEN пуст или не совпадает с нашим; "
+        "AYLA_TENANT_PROVISIONING_TOKEN пуст или не совпадает с нашим; "
         "приведите значения к одному и нажмите «Подключить» ещё раз"
     ),
 }
