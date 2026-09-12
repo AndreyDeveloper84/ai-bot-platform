@@ -148,15 +148,24 @@ class TestTheTwoActions:
 
 class TestTheTextsPromiseNothingThatDoesNotExist:
     def test_no_promise_of_a_settings_screen(self):
-        """Экрана отзыва в боте нет — обещать дверь, которой нет, нельзя."""
+        """Экрана отзыва в боте нет — обещать дверь, которой нет, нельзя.
+
+        Дверь, которая ЕСТЬ, названа впереди: отзыв — словами (§2), а
+        не экраном настроек.
+        """
         for text in (anketa.CONSENT_ASK, anketa.CONSENT_DECLINED):
-            assert "настройк" not in text.lower()
+            low = text.lower()
+            assert "дневник" in low
+            assert "настройк" not in low
+        assert "отозвать" in anketa.CONSENT_ASK.lower()
 
     def test_no_claim_of_anonymity(self):
         """Параметры тела хранятся под учётной записью — называть это
-        обезличиванием было бы неправдой."""
+        обезличиванием было бы неправдой. Где хранятся — сказано впереди."""
+        assert "в вашем профиле" in anketa.CONSENT_ASK.lower()
         for text in (anketa.CONSENT_ASK, anketa.CONSENT_DECLINED):
             low = text.lower()
+            assert "дневник" in low
             assert "аноним" not in low
             assert "обезлич" not in low
 
@@ -165,3 +174,144 @@ class TestTheTextsPromiseNothingThatDoesNotExist:
         low = anketa.CONSENT_ASK.lower()
         for word in ("вес", "рост", "возраст", "пол", "активност", "цел"):
             assert word in low, word
+
+
+# ---------------------------------------------------------------------------
+# Пакет решений владельца 12.09 §2 (DRF-1698): тексты дословно, вход фразой,
+# отзыв — canonical action с подтверждением, fail-close только расчёта.
+# ---------------------------------------------------------------------------
+
+
+class TestTheOwnersTextsAreVerbatim:
+    def test_ask_is_the_owners_text_and_buttons(self):
+        assert anketa.CONSENT_ASK.startswith(
+            "Хотите, чтобы Ayla рассчитывала ваши персональные нормы?"
+        )
+        assert "пол для расчёта" in anketa.CONSENT_ASK
+        assert "Это необязательно." in anketa.CONSENT_ASK
+        assert anketa.CONSENT_BUTTON_GRANT == "Рассчитать мои нормы"
+        assert anketa.CONSENT_BUTTON_DECLINE == "Не сейчас"
+
+    def test_declined_names_the_phrase_that_really_reenters(self):
+        """Вариант без UI-раздела «Питание» (его нет): обещанная фраза
+        обязана быть настоящим входом, иначе текст врёт."""
+        assert "напишите: «Рассчитать мои нормы»" in anketa.CONSENT_DECLINED
+        assert "раздел" not in anketa.CONSENT_DECLINED.lower()
+        skill = NutritionAnketaSkill()
+        for spelled in (
+            "Рассчитать мои нормы",
+            "рассчитать мои нормы!",
+            "  Рассчитать   мои нормы. ",
+        ):
+            ctx, _ = _ctx(spelled)
+            assert skill.matches(ctx), spelled
+
+    def test_the_entry_phrase_is_gated_like_any_entry(self):
+        ctx, conversation = _ctx("Рассчитать мои нормы")
+        with patch(_IS_GRANTED, return_value=False):
+            result = NutritionAnketaSkill().handle(ctx)
+        assert result.reply_text == anketa.CONSENT_ASK
+        assert "nutrition_anketa" not in conversation.skill_state
+
+    def test_unreadable_grant_closes_only_the_calculation(self):
+        assert "Дневник при этом работает" in anketa.CONSENT_RECORDED_BUT_UNREADABLE
+
+    def test_purpose_is_specific_not_general_health(self):
+        from apps.consent.personal_calculation import PURPOSE
+
+        assert PURPOSE == "NUTRITION_PERSONAL_NORMS"
+        assert "HEALTH" not in PURPOSE
+
+
+_WITHDRAW = "apps.consent.personal_calculation.withdraw"
+_CLIENT = "apps.skills.nutrition_anketa.skill.get_nutrition_client"
+
+
+class _FakeClient:
+    def __init__(self, purge=True, raise_exc=None, order=None):
+        self._purge = purge
+        self._raise = raise_exc
+        self.calls = 0
+        self.order = order if order is not None else []
+
+    async def purge_body_parameters(self, *, external_user_id):
+        self.calls += 1
+        self.order.append("purge")
+        if self._raise is not None:
+            raise self._raise
+        return self._purge
+
+
+class TestWithdrawalIsACanonicalActionWithConfirmation:
+    def test_the_action_is_claimed_by_button_and_by_text(self):
+        skill = NutritionAnketaSkill()
+        for t in (
+            anketa.WITHDRAW_CALLBACK,
+            anketa.WITHDRAW_ACTION_TEXT,
+            "отключить персональный расчет",
+        ):
+            ctx, _ = _ctx(t)
+            assert skill.matches(ctx), t
+
+    def test_asking_deletes_nothing_and_offers_two_buttons(self):
+        ctx, _ = _ctx(anketa.WITHDRAW_CALLBACK)
+        with patch(_IS_GRANTED, return_value=True), patch(_WITHDRAW) as withdraw:
+            result = NutritionAnketaSkill().handle(ctx)
+
+        withdraw.assert_not_called()
+        assert result.reply_text == anketa.WITHDRAW_CONFIRM_ASK
+        labels = [b["label"] for b in result.action_data["buttons"]]
+        assert labels == ["Отключить и удалить", "Оставить как есть"]
+        assert "История дневника сохранится" in result.reply_text
+
+    def test_keep_changes_nothing(self):
+        ctx, _ = _ctx(anketa.WITHDRAW_KEEP_CALLBACK)
+        with patch(_WITHDRAW) as withdraw:
+            result = NutritionAnketaSkill().handle(ctx)
+        withdraw.assert_not_called()
+        assert result.reply_text == anketa.WITHDRAW_KEPT
+
+    def test_confirm_withdraws_first_then_purges_and_says_deleted(self):
+        ctx, _ = _ctx(anketa.WITHDRAW_CONFIRM_CALLBACK)
+        order: list[str] = []
+        fake = _FakeClient(purge=True, order=order)
+        with (
+            patch(_WITHDRAW, side_effect=lambda u: order.append("withdraw") or 1) as withdraw,
+            patch(_CLIENT, return_value=fake),
+        ):
+            result = NutritionAnketaSkill().handle(ctx)
+
+        withdraw.assert_called_once()
+        assert fake.calls == 1
+        # Сначала согласие (использование прекращено), потом удаление.
+        assert order == ["withdraw", "purge"]
+        assert result.reply_text == anketa.WITHDRAW_DONE
+        assert "Параметры удалены" in result.reply_text
+
+    def test_confirm_without_catalog_confirmation_says_unconfirmed_not_deleted(self):
+        """Правда важнее гладкости: согласие снято (использование прекращено),
+        но «удалены» — только когда каталог подтвердил."""
+        from apps.integrations.ayla import NutritionUnavailableError
+
+        for fake in (
+            _FakeClient(purge=False),
+            _FakeClient(raise_exc=NutritionUnavailableError("down")),
+        ):
+            ctx, _ = _ctx(anketa.WITHDRAW_CONFIRM_CALLBACK)
+            with patch(_WITHDRAW, return_value=1) as withdraw, patch(_CLIENT, return_value=fake):
+                result = NutritionAnketaSkill().handle(ctx)
+            withdraw.assert_called_once()
+            assert result.reply_text == anketa.WITHDRAW_DELETE_UNCONFIRMED
+            assert "не подтверждено" in result.reply_text
+            assert result.reply_text != anketa.WITHDRAW_DONE
+
+    def test_nothing_to_withdraw_is_said_not_pretended(self):
+        ctx, _ = _ctx(anketa.WITHDRAW_ACTION_TEXT)
+        with patch(_IS_GRANTED, return_value=False), patch(_WITHDRAW) as withdraw:
+            result = NutritionAnketaSkill().handle(ctx)
+        withdraw.assert_not_called()
+        assert result.reply_text == anketa.WITHDRAW_NOTHING_TO_WITHDRAW
+
+    def test_the_action_is_offered_where_norms_appear(self):
+        chips = anketa._post_anketa_chips()
+        assert {"label": anketa.WITHDRAW_ACTION_TEXT, "callback": anketa.WITHDRAW_CALLBACK} in chips
