@@ -84,9 +84,9 @@
 
 | срез | что | где | SP | зависит |
 |---|---|---|---|---|
-| **4a** DRF-1757 | вход: `requires_tenant=False`; ingress → `None` для `max_salon`; обработчик определяет тенант **от человека** (`resolve_working_bot_user` → `tenant_scope(row.tenant)`), штатный поток без изменений; без рабочей строки — передача в путь незнакомца | `handlers.py`, `ingress/services.py`, `salon_handler.py:505-600` | **3** | DRF-1755 ✅ |
-| **4b** | путь незнакомца **без `BotUser`**: код → тенант из `StaffInvite`/`MasterInvite` по самому коду, строка создаётся в тенанте кода при выкупе; «Я работаю сам» → `create_solo_provider` из события; лимит попыток по личности; `_has_a_master_card_here` по личности; тексты — старые | `salon_handler.py`, `identity/services/staff_invites.py` | **2** | 4a |
-| **4c** | снять `MAX_BOT_SALON_TENANT_SLUG` на пилоте (env, руками владельца/главного окна после выкладки 4a+4b), `is_tenant_less` = «тенант позже», докстринги и 29 упоминаний в тестах перевернуть с датой, `admin_api` 503 — только «реестр пуст» | `bot_registry.py`, `base.py`, тесты `channels`/`ingress`, `admin_api/auth.py` | **1** | 4a, 4b |
+| **4a** DRF-1783 | вход: `requires_tenant=False`; ingress → `None` для `max_salon`; обработчик определяет тенант **от человека** (`resolve_working_bot_user` → `tenant_scope(row.tenant)`), штатный поток без изменений; без рабочей строки — передача в путь незнакомца | `handlers.py`, `ingress/services.py`, `salon_handler.py:505-600` | **3** | DRF-1755 ✅ |
+| **4b** DRF-1784 | путь незнакомца **без `BotUser`**: код → тенант из `StaffInvite`/`MasterInvite` по самому коду, строка создаётся в тенанте кода при выкупе; «Я работаю сам» → `create_solo_provider` из события; лимит попыток по личности; `_has_a_master_card_here` по личности; тексты — старые | `salon_handler.py`, `identity/services/staff_invites.py` | **2** | 4a |
+| **4c** DRF-1785 | снять `MAX_BOT_SALON_TENANT_SLUG` на пилоте (env, руками владельца/главного окна после выкладки 4a+4b), `is_tenant_less` = «тенант позже», докстринги и 29 упоминаний в тестах перевернуть с датой, `admin_api` 503 — только «реестр пуст» | `bot_registry.py`, `base.py`, тесты `channels`/`ingress`, `admin_api/auth.py` | **1** | 4a, 4b |
 
 Порядок 4a → 4b → 4c одним стеком; **переменную снимать последней** — пока она
 стоит, старое поведение (строка в салоне) и новое (тенант от человека) дают один
