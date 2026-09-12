@@ -20,6 +20,18 @@ both call it.
 
 Resolution order:
 
+0. **The one row that carries a working role** (DRF-1755, срез 2 DRF-1705).
+   Among every row of this identity, «working» means: an active
+   ``TenantStaff`` in its tenant, or a live ``CatalogMaster`` linked to it.
+   Exactly one such row → that row, whichever bot signed. This is what
+   lets a solo master into the cabinet from the salon bot: the salon
+   bot's own tenant holds a ``customer`` row for them (their first
+   message created it), and steps 1–3 below never looked past it — the
+   fallback in step 3 needs the bot-tenant row to be ABSENT, and on the
+   solo path it is always present. Zero working rows → steps 1–3, so a
+   plain customer keeps today's answer. Two or more → DRF-1766 (salon
+   chooser); until then the oldest tenant wins deterministically, with a
+   WARNING naming all of them. See :func:`resolve_working_bot_user`.
 1. **The tenant of the bot whose token signed this initData.** A Mini App
    is opened from a bot, and the signature is the only trustworthy
    statement of which one (DRF-1061) — the URL cannot say, and the
@@ -65,12 +77,101 @@ def resolve_tenant_slug_for_init_data(verified: Any) -> str:
     return getattr(settings, "MAX_BOT_TENANT_SLUG", "") or ""
 
 
+def resolve_working_bot_user(channel_user_id: str, *, surface: str = "miniapp") -> BotUser | None:
+    """The row of this MAX identity that carries a working role, or ``None``.
+
+    «Working» is what :func:`apps.identity.services.role_resolver.resolve_role`
+    already answers for one row: any primary role above ``customer`` — an
+    active ``TenantStaff`` in the row's own tenant, or a live master card
+    linked to it (archived cards and revoked staff resolve to ``customer``
+    there, so they are not working here either). The question is asked
+    per row, in that row's own tenant, through the one reader the
+    import-boundary guard sanctions for it (MKT1: no new cross-tenant
+    catalog read outside ``apps/marketplace/``; an identity has a handful
+    of rows at most, so a query pair per row is the honest cost).
+    Soft-deleted rows are never working — a deleted account cannot be
+    somebody's staff answer.
+
+    Returns:
+
+    * ``None`` — no row, or no working row. The caller falls back to the
+      signing-bot rule; nothing about a plain customer changes.
+    * the single working row — regardless of which bot signed.
+    * with several working rows (0 identities on the pilot, 12.09.2026):
+      the row whose tenant is the oldest, ``pk`` as tie-break — and a
+      WARNING with every candidate. Deterministic on purpose and NOT by
+      ``last_seen`` (DRF-1653: a race with the clock). The real answer
+      for this case is a salon chooser (DRF-1766); until it exists the
+      WARNING is the trigger to build it.
+    """
+
+    if not channel_user_id:
+        return None
+
+    rows = list(
+        BotUser.all_tenants.filter(
+            channel="max", channel_user_id=channel_user_id, deleted_at__isnull=True
+        ).select_related("tenant")
+    )
+    if not rows:
+        return None
+
+    # Local import: role_resolver pulls catalog/tenancy models lazily itself;
+    # importing it at module load would drag them into every process that
+    # touches a BotUser.
+    from apps.identity.services.role_resolver import resolve_role
+
+    working = [row for row in rows if resolve_role(row).primary_role != "customer"]
+    if not working:
+        return None
+    if len(working) == 1:
+        return working[0]
+
+    working.sort(key=lambda row: (row.tenant.created_at, str(row.pk)))
+    logger.warning(
+        "%s.auth.several_working_tenants channel_user_id=%s tenants=%s picked=%s — "
+        "salon chooser not built yet (DRF-1766)",
+        surface,
+        channel_user_id,
+        [row.tenant.slug for row in working],
+        working[0].tenant.slug,
+    )
+    return working[0]
+
+
+def is_staff_surface(verified: Any) -> bool:
+    """Did the SALON bot sign this initData — i.e. is this the masters' surface?
+
+    The customer surface asks «who are you as a client» and must keep
+    answering with the signing bot's tenant: a solo master booking a
+    haircut somewhere is a customer there. Only the staff surface asks
+    «which of your rows is staff». The signature is the one trustworthy
+    statement of which bot opened the Mini App (DRF-1061).
+    """
+
+    bot_slug = getattr(verified, "bot_slug", "") or ""
+    if not bot_slug:
+        return False
+    from apps.channels.bot_registry import SALON_STREAM, effective_registry, resolve_by_slug
+
+    entry = resolve_by_slug(bot_slug, effective_registry())
+    return entry is not None and entry.stream == SALON_STREAM
+
+
 def resolve_bot_user(verified: Any, *, surface: str = "miniapp") -> BotUser | None:
     """Find the BotUser this request belongs to, or ``None``.
 
     ``surface`` only labels the log line — the resolution rule is
     identical for every Mini App surface, and that is the point.
+
+    Callers are the STAFF surfaces (``master_api``, ``admin_api``), so
+    step 0 — the working row — applies unconditionally here. ``/api/v1/me``
+    serves both audiences and applies it only behind :func:`is_staff_surface`.
     """
+
+    working = resolve_working_bot_user(verified.user_id, surface=surface)
+    if working is not None:
+        return working
 
     tenant_slug = resolve_tenant_slug_for_init_data(verified)
 
@@ -110,4 +211,9 @@ def resolve_bot_user(verified: Any, *, surface: str = "miniapp") -> BotUser | No
     return qs.select_related("tenant").order_by("-last_seen", "pk").first()
 
 
-__all__ = ["resolve_bot_user", "resolve_tenant_slug_for_init_data"]
+__all__ = [
+    "is_staff_surface",
+    "resolve_bot_user",
+    "resolve_tenant_slug_for_init_data",
+    "resolve_working_bot_user",
+]

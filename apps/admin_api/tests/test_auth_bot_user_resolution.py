@@ -118,20 +118,25 @@ class TestBotUserResolution:
         assert resp.status_code == 404
         assert resp.json()["error"] == "user_not_registered"
 
-    def test_role_is_read_from_the_resolved_rows_own_tenant(
+    def test_the_owner_of_another_salon_is_served_in_her_own_salon_2026_09_12(
         self,
         client: Client,
         settings,
         tenant: Tenant,
         other_tenant: Tenant,
     ) -> None:
-        """A wrong pick can only under-privilege, never over-privilege.
+        """Эталон ПЕРЕВЁРНУТ 12.09.2026 (DRF-1755, срез 2 DRF-1705).
 
-        The staff row sits in `other_tenant`; the signing bot serves
-        `tenant`, where this account holds nothing. Resolving to the
-        `tenant` row must yield 403 — the role is read from that row's own
-        tenant, so a mis-resolution cannot borrow someone else's owner
-        rights.
+        До этого дня тест назывался «роль читается из тенанта выбранной
+        строки» и ждал 403: строка owner лежит в ``other_tenant``, а бот
+        подписи обслуживает ``tenant``, где у человека ничего нет, — и
+        резолвер брал строку ``tenant``. Решение владельца 12.09: бот не
+        принадлежит салону. Единственная РАБОЧАЯ строка личности — owner в
+        ``other_tenant`` — побеждает, и владелица видит свой салон, а не
+        403 в чужом. Свойство безопасности при этом не ослабло: роль
+        по-прежнему читается из тенанта выбранной строки, а выбранная
+        строка — её собственная. Заимствовать чужие права по-прежнему
+        нельзя — см. следующий тест.
         """
         _make_bot_user(tenant, "5007")
         elsewhere = _make_bot_user(other_tenant, "5007")
@@ -150,5 +155,31 @@ class TestBotUserResolution:
         )
 
         resp = client.get(_masters_url(), HTTP_AUTHORIZATION=init_data_header("5007"))
+        assert resp.status_code == 200, resp.content
+
+    def test_a_person_with_no_role_anywhere_is_still_403(
+        self,
+        client: Client,
+        settings,
+        tenant: Tenant,
+        other_tenant: Tenant,
+    ) -> None:
+        """Что осталось от прежнего эталона: без рабочей строки — строка бота подписи, роль customer, 403.
+
+        Две строки, ни одной роли: правило шага 0 не срабатывает, и
+        мис-резолюция по-прежнему может только недодать прав, не добавить.
+        """
+        _make_bot_user(tenant, "5008")
+        _make_bot_user(other_tenant, "5008")
+        settings.MAX_BOT_REGISTRY = (
+            BotEntry(
+                slug="salon",
+                webhook_secret="",
+                api_token=BOT_TOKEN,
+                tenant_slug=tenant.slug,
+            ),
+        )
+
+        resp = client.get(_masters_url(), HTTP_AUTHORIZATION=init_data_header("5008"))
         assert resp.status_code == 403
         assert resp.json()["error"] == "forbidden"
