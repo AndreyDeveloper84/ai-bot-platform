@@ -168,17 +168,54 @@ class TestRosterIsCovered:
 
 
 class TestRosterIsTheRealOne:
-    """The constant this file reads is the one the concierge actually passes."""
+    """The constant this file reads is the one the concierge actually passes.
 
-    def test_tool_definitions_is_the_constant(self) -> None:
+    DRF-1779 changed the shape: the roster handed to the model is no longer
+    the constant itself but ``_tools_offered(text, conversation)`` — the
+    constant MINUS the tools whose executor would deterministically refuse
+    the call (today: ``health_screening`` when no symptom is named or the
+    screening questions were already asked). The guard therefore checks two
+    things: the call site hands over ``_tools_offered``, and ``_tools_offered``
+    subtracts from THIS constant — the same spec objects, in the same order —
+    rather than from a private copy that could drift.
+    """
+
+    def test_tool_definitions_is_the_computed_roster(self) -> None:
         src = _CONCIERGE_PY.read_text(encoding="utf-8")
-        assert re.search(r"tool_definitions\s*=\s*CONCIERGE_TOOL_SPECS\b", src), (
-            f"{_CONCIERGE_PY} no longer hands `tool_definitions` the "
-            "CONCIERGE_TOOL_SPECS constant. Whatever it hands over instead is "
-            "the real roster, and this file is no longer guarding it — point "
-            "the concierge back at the constant, or teach this reader the new "
+        assert re.search(r"tool_definitions\s*=\s*_tools_offered\(", src), (
+            f"{_CONCIERGE_PY} no longer hands `tool_definitions` to "
+            "`_tools_offered(...)`. Whatever it hands over instead is the real "
+            "roster, and this file is no longer guarding it — point the "
+            "concierge back at `_tools_offered`, or teach this reader the new "
             "shape. Do not delete the test (DRF-1328)."
         )
+
+    def test_full_roster_is_the_constant_itself(self) -> None:
+        """A symptom with no prior screening → nothing subtracted: the very
+        same spec objects, in the constant's order."""
+        from apps.orchestrator.concierge import _tools_offered
+
+        offered = _tools_offered("болит спина", conversation=None)
+        assert [id(spec) for spec in offered] == [id(spec) for spec in CONCIERGE_TOOL_SPECS]
+
+    def test_reduced_roster_is_the_constant_minus_the_refused_tool(self) -> None:
+        """No symptom → ``health_screening`` is the ONLY tool withheld, and
+        every remaining spec IS an element of the constant (not a copy)."""
+        from apps.orchestrator.concierge import _tools_offered
+
+        offered = _tools_offered("привет", conversation=None)
+        constant_ids = {id(spec): spec for spec in CONCIERGE_TOOL_SPECS}
+        assert all(id(spec) in constant_ids for spec in offered)
+        withheld = sorted(_roster() - {str(spec["name"]) for spec in offered})
+        assert withheld == ["health_screening"], withheld
+
+    def test_subtraction_reads_the_constant_not_a_copy(self) -> None:
+        """Source-level: the helper's body names CONCIERGE_TOOL_SPECS and no
+        other list literal of specs."""
+        src = _CONCIERGE_PY.read_text(encoding="utf-8")
+        start = src.index("def _tools_offered(")
+        body = src[start : src.index("\n\n\n", start)]
+        assert body.count("CONCIERGE_TOOL_SPECS") >= 2, body
 
 
 class TestSampleTurnsRouteAsDeclared:
