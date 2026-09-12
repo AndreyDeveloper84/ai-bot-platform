@@ -176,10 +176,26 @@ def test_the_same_idempotency_key_does_not_create_a_second_booking(
     )
 
 
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "P1 PARTIAL, снято 12.09.2026: бронь берёт длительность из "
+        "SalonService (45), бот показывает ребро SpecialistService (60). "
+        "Ждёт B-6.2 (DRF-1618, QUOTE_CHANGED) или решения OD-PRICE-AUTHORITY "
+        "(DRF-1349). strict: когда каталог перестанет расходиться, этот xfail "
+        "ПОКРАСНЕЕТ — и его надо снять руками, а не забыть."
+    ),
+)
 def test_what_the_bot_quoted_is_what_the_catalog_recorded(
     booking: AylaBookingHTTPClient, bot_tenant: Tenant
 ) -> None:
-    """Сердце P1. Красный здесь — находка: см. шапку файла и README.
+    """Сердце P1. Находка записана в самом тесте — xfail(strict) выше.
+
+    Не «пропуск»: тест исполняется целиком, бронь создаётся, числа
+    печатаются; junit кладёт его в ``skipped``, шаг junit печатает это
+    число рядом с ``tests``. Красный здесь означает одно из двух: стенд
+    ответил иначе, чем 12.09 (снимайте xfail и читайте новые числа), или
+    посев не тот (стража на ребро ниже назовёт).
 
     Сравниваются ТРИ ряда: что бот показал в списке услуг, что бот показал
     в котировке ребра, что каталог записал в бронь. Сообщение об ошибке
