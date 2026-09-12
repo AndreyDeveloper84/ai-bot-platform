@@ -141,9 +141,10 @@ class TestMe:
         data = resp.json()
         assert data["master"]["id"] == str(accepted_master.id)
         assert data["salon"]["tenant_id"] == str(accepted_master.tenant_id)
-        # Spec: hardcode all three True in PR 1.
+        # DRF-1805: права — из проводки. Ручки правки услуг (M10) ещё нет —
+        # право ложно; заявка о недоступности и ответ клиенту есть.
         assert data["permissions"]["can_edit_schedule"] is True
-        assert data["permissions"]["can_edit_services"] is True
+        assert data["permissions"]["can_edit_services"] is False
         assert data["permissions"]["can_message_customers"] is True
         # Services list populated from the M2M fixture.
         assert len(data["master"]["services"]) >= 1
