@@ -109,6 +109,12 @@ from apps.orchestrator.personal_surface import (
     SHOW_MY_RECORDS_TOOL_SPEC,
     execute_personal_tool,
 )
+from apps.orchestrator.open_question import (
+    AnsweredQuestion,
+    close_question,
+    open_question,
+    render_answer_block,
+)
 from apps.orchestrator.refusal_memo import (
     RefusedQuery,
     recall_refusals,
@@ -685,6 +691,35 @@ CONCIERGE_TOOL_SPECS: list[dict[str, Any]] = [
     *NUTRITION_TOOL_SPECS,
     SHOW_MY_RECORDS_TOOL_SPEC,
 ]
+
+
+def _tools_offered(message_text: str, conversation: Any) -> list[dict[str, Any]]:
+    """Инструменты этого хода — без тех, которые исполнитель отвергнет.
+
+    DRF-1779. ``execute_nutrition_tool`` судит ``health_screening`` по словам
+    человека и памятке DRF-1542 ДЕТЕРМИНИРОВАННО — но после вызова модели.
+    На живом ходу 12.09 модель четыре раза подряд выбирала этот инструмент,
+    исполнитель четыре раза отказывал, и в чат уходила проза рядом с
+    несработавшим вызовом («Не разобрала», «Сейчас проверю»). Тот же суд,
+    выполненный ДО вызова модели, просто не даёт ей такого выбора.
+
+    Красный флаг проходит всегда (§35 п.5 — ``HealthScreeningSkill.matches``
+    возвращает True до чтения памятки); здесь тот же порядок, тем же
+    классификатором. Остальные инструменты не трогаются: их парсеры судят
+    грамматику, а не память разговора, и заранее их вердикт не известен.
+    """
+
+    from apps.skills.health_screening.classifier import PainSignal, classify
+    from apps.skills.health_screening.memo import screening_asked_recently
+
+    signal = classify(message_text)
+    offer_screening = signal == PainSignal.RED_FLAG or (
+        signal != PainSignal.NONE and not screening_asked_recently(conversation)
+    )
+    if offer_screening:
+        return list(CONCIERGE_TOOL_SPECS)
+    return [spec for spec in CONCIERGE_TOOL_SPECS if spec["name"] != "health_screening"]
+
 
 # Cap on a tool argument written to the turn log. Both values are bounded by
 # the model's own output, not by anything upstream, and a log line is not the
@@ -1690,6 +1725,17 @@ def _concierge_turn(
             persisted=True,
         )
 
+    # DRF-1779 — если бот на прошлом ходу задал вопрос, эта реплика — ответ на
+    # него. Вопрос снимается ДО вызова модели (второй раз его не задать), ответ
+    # ложится в состояние, а модель получает это фактом в system-prompt.
+    answered: AnsweredQuestion | None = close_question(conversation, message_text)
+    if answered is not None:
+        logger.info(
+            "orchestrator.concierge.answer_to_open_question question=%s trace=%s",
+            answered.question.question_id,
+            trace_id,
+        )
+
     llm_client = RouterLLMClient(skill=CONCIERGE_SKILL)
 
     concierge = AIConcierge(
@@ -1701,7 +1747,7 @@ def _concierge_turn(
             summary_text="",
             tenant_id=GLOBAL_TENANT_ID,
         ),
-        tool_definitions=CONCIERGE_TOOL_SPECS,
+        tool_definitions=_tools_offered(message_text, conversation),
         tool_dispatcher=_dispatch_tool,
     )
 
@@ -1710,7 +1756,10 @@ def _concierge_turn(
     # The transcript already carried it on 04.09 and the model re-opened it
     # anyway; an instruction is read as an instruction.
     refusal_block = render_refusal_block(conversation)
-    turn_extra_system = "\n\n".join(part for part in (extra_system, refusal_block) if part)
+    answer_block = render_answer_block(answered)
+    turn_extra_system = "\n\n".join(
+        part for part in (extra_system, refusal_block, answer_block) if part
+    )
 
     def _renderer(_ctx: Any) -> str:
         return build_concierge_system_prompt(
@@ -2173,6 +2222,8 @@ def _concierge_turn(
             list(data.get("options") or []),
             data.get("mode"),
         )
+        # DRF-1779 — вопрос задан: следующая реплика человека — ответ на него.
+        open_question(conversation, "ask_clarification", asked_text=str(question))
         return _reply(
             text=rendered.text,
             action_data=rendered.action_data,
