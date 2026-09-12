@@ -193,6 +193,11 @@ export interface Master {
    * `null` = неизвестно (DISTANCE_UNKNOWN) — не ноль и не «далеко».
    */
   distance_meters?: number | null;
+  /**
+   * DRF-1778 — число отзывов из зеркала; `0`/отсутствие — скобок нет.
+   * Trust signal только из фактических данных (тело C05, C05.3).
+   */
+  review_count?: number;
 }
 export interface MasterDetail extends Master {
   service_ids: string[];
