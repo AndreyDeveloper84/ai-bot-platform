@@ -12,11 +12,13 @@
 from __future__ import annotations
 
 from datetime import timedelta
+from typing import cast
 
 import pytest
 from django.utils import timezone
 
 from apps.channels.max import salon_handler
+from apps.channels.max.parser import CanonicalEvent
 from apps.identity.models import BotUser, SoloRegistrationDraft
 from apps.identity.services import solo_registration_draft as drafts
 from apps.tenancy.models import Tenant
@@ -27,6 +29,8 @@ IDENTITY = "solo-dialog-1"
 
 
 class _Event:
+    """Фейк события — ровно те поля, которые читает дверь (как в test_salon_solo_door)."""
+
     def __init__(self, text: str, *, name: str | None = "Ольга"):
         self.text = text
         self.chat_id = "555"
@@ -67,12 +71,17 @@ def _labels(reply: dict) -> list[str]:
     return [b["text"] for b in _buttons(reply)]
 
 
+def _event(text: str, *, name: str | None = "Ольга") -> CanonicalEvent:
+    # Фейк удовлетворяет дверь по полям, не по классу; cast говорит это mypy явно.
+    return cast(CanonicalEvent, _Event(text, name=name))
+
+
 def _tap(callback: str, *, name: str | None = "Ольга") -> None:
-    assert salon_handler._solo_registration_step(_Event(callback, name=name), entry=None) is True
+    assert salon_handler._solo_registration_step(_event(callback, name=name), entry=None) is True
 
 
 def _say(text: str) -> bool:
-    return salon_handler._solo_registration_takes_name(_Event(text))
+    return salon_handler._solo_registration_takes_name(_event(text))
 
 
 def _solo_tenants() -> list[Tenant]:
