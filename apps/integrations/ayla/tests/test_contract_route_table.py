@@ -190,6 +190,9 @@ ROUTE_TABLE: tuple[Route, ...] = (
     Route("GET", "/api/v1/nutrition/internal/deficits/", Auth.SERVICE_EXT),
     Route("GET", "/api/v1/nutrition/internal/profile/", Auth.SERVICE_EXT),
     Route("POST", "/api/v1/nutrition/internal/profile/", Auth.SERVICE_EXT),
+    # DRF-1698 (владелец 12.09 §2) — отзыв согласия на персональный расчёт:
+    # стереть шесть параметров и ориентиры, дневник оставить.
+    Route("DELETE", "/api/v1/nutrition/internal/profile/body-parameters/", Auth.SERVICE_EXT),
     Route("POST", "/api/v1/nutrition/internal/water/", Auth.SERVICE_EXT),
     Route("DELETE", "/api/v1/nutrition/internal/water/{id}/", Auth.SERVICE_EXT),
     Route("GET", "/api/v1/nutrition/internal/water/today/", Auth.SERVICE_EXT),
@@ -536,6 +539,7 @@ async def _exercise_nutrition() -> None:
     await guard(c.weekly_deficits(external_user_id=_EXT_USER))
     await guard(c.get_profile(external_user_id=_EXT_USER))
     await guard(c.upsert_profile(external_user_id=_EXT_USER, data={}))
+    await guard(c.purge_body_parameters(external_user_id=_EXT_USER))
     await guard(c.add_water(external_user_id=_EXT_USER, ml=250))
     await guard(c.undo_water(external_user_id=_EXT_USER, entry_id="ENTRYID"))
     await guard(c.get_water_today(external_user_id=_EXT_USER))
