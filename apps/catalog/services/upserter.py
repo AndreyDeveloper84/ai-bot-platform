@@ -157,8 +157,25 @@ def upsert_specialists(tenant: "Tenant", dtos: list["CatalogSpecialistDTO"]) -> 
     Update overwrites ONLY mirror fields (name, bio, experience, rating,
     review_count, is_active, ayla_user_id, external_updated_at, raw, and
     the DRF-1588 geo trio address / location_lat / location_lng) —
-    platform-owned fields (invite_status, mode, photo_url, archived_at,
-    invited_at, max_handle, linked_bot_user) are NEVER touched by sync.
+    platform-owned fields (invite_status, mode, archived_at, invited_at,
+    max_handle, linked_bot_user) are NEVER touched by sync.
+
+    ### Фото и «о себе» — один владелец, каталог (DRF-1812, M20)
+
+    ``bio`` зеркальное давно; ``photo_url`` с этого среза — тоже: значение
+    ``avatar`` каталога переписывает платформенное. Два хранилища фото
+    (``CatalogMaster.photo_url`` бот против ``SpecialistProfile.avatar``
+    каталог) давали два разных «фото для публикации»; решение — каталог
+    (§16 «Source of truth»: никаких параллельных моделей в боте, если
+    каталог уже authority).
+
+    Переходное правило до ручки записи в каталог (M21): пока у каталога фото
+    НЕТ (``avatar_url == ""``), платформенное ``photo_url`` не стирается —
+    иначе загруженное через кабинет фото пропадало бы при каждой
+    синхронизации, а положить его в каталог пока некуда. Как только у
+    каталога фото есть — оно и есть фото; ключа в ответе нет (старая Ayla)
+    — поле не трогается. С M21 ветка «нет в каталоге → оставить» снимается,
+    и ``photo_url`` становится зеркалом без оговорок.
 
     Missing-from-feed rows are kept as-is (same policy as salon-services:
     upsert-only, no proactive deactivation — documented in the S3B PR
@@ -214,6 +231,11 @@ def upsert_specialists(tenant: "Tenant", dtos: list["CatalogSpecialistDTO"]) -> 
                 "external_updated_at": dto.external_updated_at,
                 "raw": dto.raw,
             }
+            if dto.avatar_url:
+                # DRF-1812 — фото каталога переписывает платформенное; пустое
+                # и отсутствующее поле оставляют ``photo_url`` как есть (см.
+                # докстринг: переходное правило до M21).
+                mirror["photo_url"] = dto.avatar_url
             try:
                 with transaction.atomic():
                     # DRF-1507 — сначала канонический ключ, потом ключ склейки.
