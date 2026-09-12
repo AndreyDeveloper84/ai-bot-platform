@@ -87,6 +87,19 @@ DECLARED_WITHOUT_PRODUCER: tuple[Undeclared, ...] = (
         ),
     ),
     Undeclared(
+        member=SafetyState.NOT_APPLICABLE,
+        blocked_on=(
+            "the capability adapter (owner digest 2026-09-11 §3). NOT_APPLICABLE is "
+            "declared BY A CAPABILITY that makes no safety-sensitive decision — it "
+            "cannot be produced inside this package, which has no capabilities, only "
+            "their verdicts. The engine consumes it: passes it through without "
+            "ELIG_SAFETY_CLEARED. Producer arrives with the first capability that "
+            "declares itself out of scope, and §3's forbidding conditions "
+            "(requires_health_check, health input, safety-sensitive candidate) live "
+            "with that producer, not here."
+        ),
+    ),
+    Undeclared(
         member=QuestionKind.SAFETY_CLARIFICATION,
         blocked_on=(
             "the same matrix. The kind has a priority in §13.6 and an exemption in "

@@ -791,6 +791,10 @@ class TestBaselineAnnotations:
             "G9-booking-request-outside-owner",
             "DRF1130-no-join-under-row-lock",
             "DRF1158-no-builtin-hash-into-stored-value",
+            # S2.6 bans packages, not a construct: a salon feature that needs a
+            # FACT about the person (never the content) may be pinned, and the
+            # pin must say what leaves and to whom (owner 11.09 §2.6).
+            "S2.6-salon-surfaces-no-personal-context",
         }
 
     def test_every_required_entry_carries_a_note(self) -> None:
@@ -913,3 +917,130 @@ class TestNewRulesAgainstRealRepo:
         # this rule crosses the production boundary.
         assert ib.HASH_SINK_BASELINE
         assert all(ib._is_test_file(k[1]) for k in ib.HASH_SINK_BASELINE)
+
+
+# ── S2.6 — salon surfaces do not read the person's context (DRF-1700) ────
+
+
+class TestSalonSurfacesNoPersonalContext:
+    """Owner 11.09 §2.6, both sides: the salon may not, the client contour may.
+
+    Measured 11.09: zero such imports on dev. A contract that only held a
+    zero it had never seen broken would be a coincidence, so the last test
+    injects one import into a REAL salon file and expects exactly one hit
+    naming the contract.
+    """
+
+    _S26 = next(c for c in ib.CONTRACTS if c.id == "S2.6-salon-surfaces-no-personal-context")
+
+    def _scan_s26(self, root):
+        # Only S2.6 is under test: no import baseline, and an EMPTY catalog
+        # baseline — otherwise a tmp tree that lacks a pinned catalog file
+        # reports that pin as stale, which is MKT1's business, not this one's.
+        return ib.scan_paths(
+            [root / "apps"],
+            root,
+            contracts=(self._S26,),
+            baseline=frozenset(),
+            catalog_baseline=frozenset(),
+        )
+
+    @pytest.mark.parametrize(
+        "rel",
+        [
+            "apps/channels/max/salon_handler.py",
+            "apps/channels/max/staff_menu.py",
+            "apps/admin_api/views.py",
+            "apps/master_api/services/dashboard.py",
+            "apps/internal_chat/services.py",
+        ],
+    )
+    @pytest.mark.parametrize(
+        "stmt",
+        [
+            "from apps.identity.models import UserPersonalContext",
+            "from apps.identity.services.memory_reader import read_green_entries",
+            "from apps.persona.memory_surface import render_current_personal_context",
+            "from apps.integrations.ayla.goals_client import GoalsClient",
+            "from apps.nutrition_proactive import prefs",
+            "import apps.orchestrator.personal_surface",
+        ],
+    )
+    def test_a_salon_surface_may_not(self, tmp_path, rel: str, stmt: str) -> None:
+        _write(tmp_path, rel, stmt + "\n")
+        v = self._scan_s26(tmp_path)
+        assert len(v) == 1, [x.format() for x in v]
+        assert "S2.6" in v[0].message
+        assert "§2.6" in v[0].message
+
+    @pytest.mark.parametrize(
+        "rel",
+        [
+            "apps/channels/max/handler.py",  # the CLIENT bot — this is where memory lives
+            "apps/orchestrator/pipeline.py",
+            "apps/miniapp_api/views.py",
+        ],
+    )
+    def test_the_client_contour_may(self, tmp_path, rel: str) -> None:
+        stmt = "from apps.identity.models import UserPersonalContext\n"
+        # Presence first: the same import in a salon file IS caught, so the
+        # silence below is the contract declining, not the scanner not looking.
+        _write(tmp_path, "apps/master_api/probe.py", stmt)
+        assert self._scan_s26(tmp_path)
+        (tmp_path / "apps" / "master_api" / "probe.py").unlink()
+        _write(tmp_path, rel, stmt)
+        assert self._scan_s26(tmp_path) == []
+
+    def test_a_salon_surface_may_read_its_own_things(self, tmp_path) -> None:
+        # Presence first: the same file with one forbidden line IS caught …
+        _write(
+            tmp_path,
+            "apps/channels/max/salon_handler.py",
+            "from apps.identity.models import BotUser\nfrom apps.identity.models import MemoryEntry\n",
+        )
+        assert len(self._scan_s26(tmp_path)) == 1
+        # … and without it, the salon's own imports are its own business.
+        _write(
+            tmp_path,
+            "apps/channels/max/salon_handler.py",
+            "from apps.identity.models import BotUser\n"
+            "from apps.identity.services.role_resolver import resolve_role\n"
+            "from apps.tenancy.models import TenantStaff\n",
+        )
+        assert self._scan_s26(tmp_path) == []
+
+    def test_the_real_salon_files_are_clean_today(self) -> None:
+        found = ib.scan_paths(
+            [_PROJECT_ROOT / "apps"], _PROJECT_ROOT, contracts=(self._S26,), baseline=frozenset()
+        )
+        v = [x for x in found if x.key is not None and x.key[0] == self._S26.id]
+        assert v == [], "\n".join(x.format() for x in v)
+
+    def test_one_injected_import_into_the_real_salon_door_is_found(self, tmp_path) -> None:
+        """§18.7 — the positive probe on the live file, not on a sample."""
+        real = _PROJECT_ROOT / "apps" / "channels" / "max" / "salon_handler.py"
+        source = real.read_text(encoding="utf-8")
+        anchor = "from apps.identity.services.role_resolver import resolve_role\n"
+        assert source.count(anchor) == 1, "anchor moved — the probe would test nothing"
+        broken = source.replace(
+            anchor, anchor + "from apps.identity.models import UserPersonalContext\n"
+        )
+        _write(tmp_path, "apps/channels/max/salon_handler.py", broken)
+        v = self._scan_s26(tmp_path)
+        assert len(v) == 1, [x.format() for x in v]
+        assert "UserPersonalContext" in v[0].message
+        assert "S2.6" in v[0].message
+
+    def test_every_forbidden_module_exists(self) -> None:
+        """A list of names rots silently; each must resolve on the tree today."""
+        import importlib
+
+        for name in ib.PERSONAL_CONTEXT_MODULES:
+            module, _, attr = name.rpartition(".")
+            try:
+                mod = importlib.import_module(name)
+                continue
+            except ImportError:
+                pass
+            mod = importlib.import_module(module)
+            assert hasattr(mod, attr), name

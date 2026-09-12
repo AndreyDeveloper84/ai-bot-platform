@@ -144,6 +144,15 @@ def _persist(bot_user: "BotUser", resolved: uuid.UUID, *, is_proxy: bool) -> tup
         bot_user.ayla_user_id = resolved
         bot_user.ayla_user_id_is_proxy = is_proxy
 
+    # Owner 11.09 §2 (S2-2): an identity link is the second criterion of the
+    # matching rule, so the moment it is written the person's salon shells
+    # stop being SHADOW / UNRESOLVED. The client-contour shell is LINKED by
+    # construction and is stamped the same way for the same reason.
+    if rows_updated:
+        from apps.identity.services.salon_customer import advance_to_linked
+
+        advance_to_linked(bot_user.channel, bot_user.channel_user_id)
+
     return rows_updated, rows_conflicting
 
 

@@ -44,6 +44,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import time
 from dataclasses import dataclass
 from typing import Any, Final
@@ -56,6 +57,7 @@ from apps.integrations.ayla.recommendations_client import (
     _circuit,
 )
 from apps.integrations.ayla.url_builder import AylaUrlBuilder, AylaUrlError
+from apps.integrations.ayla.request_id import with_request_id
 
 logger = logging.getLogger(__name__)
 
@@ -72,11 +74,17 @@ _PATH: Final[str] = "internal/recommendation/resolve/"
 
 @dataclass(frozen=True)
 class ResolveOutcome:
-    """Исход вызова. Ровно один из трёх, и они не сливаются."""
+    """Исход вызова. Ровно один из четырёх, и они не сливаются.
 
-    state: str  # "ok" | "unavailable" | "contract_violation"
+    ``refused`` (DRF-1699 D2) — подбора нет ПО ВОЛЕ ЧЕЛОВЕКА: живая заявка
+    на удаление, ``detail`` = ``deletion_requested``. Не ``unavailable``:
+    там источник не ответил и повтор осмыслен, здесь ответ и есть отказ.
+    """
+
+    state: str  # "ok" | "unavailable" | "contract_violation" | "refused"
     decision: dict | None = None
     detail: str | None = None
+    request_id: str | None = None
 
     @property
     def is_ok(self) -> bool:
@@ -114,6 +122,14 @@ def resolve_recommendation(*, external_user_id: str, payload: dict[str, Any]) ->
     if response.status_code >= 500 or response.status_code == 503:
         _circuit.record_failure(now=time.monotonic())
         return ResolveOutcome("unavailable", detail=f"server: HTTP {response.status_code}")
+    if response.status_code == 423:
+        # D2 (§7): каталог отказал по воле человека — живая заявка на
+        # удаление. Не «unavailable» (повтор осмыслен) и не «мы прислали не
+        # то»: ответ и есть отказ, с номером. Отражение флага — у вызывающего,
+        # который держит bot_user; транспорт базы не трогает.
+        return ResolveOutcome(
+            "refused", detail="deletion_requested", request_id=_request_id_from_423(response)
+        )
     if response.status_code != 200:
         # 4xx: мы отправили не то. Предохранитель не трогаем — источник жив.
         logger.warning("resolver_client.client_error status=%d", response.status_code)
@@ -177,6 +193,20 @@ def decision_contract_violation(payload: Any) -> str | None:
             # диагностика: она говорит источнику, где именно он нарушил.
             return f"ответ невалиден целиком; первое нарушение — {problem}"
 
+    # DRF-1626: `excluded[]` проверялся ТОЛЬКО потребителем. Асимметрия
+    # означала, что транзит пропускает неконформный ответ дальше, а ловит
+    # его браузер человека — при том, что §9.4 требует обратного дословно:
+    # "ai-bot-platform обязан проверить схему, прежде чем передавать".
+    # Нашлось сторожем на расхождение половин, в первом же его прогоне.
+    excluded = data.get("excluded")
+    if excluded is not None:
+        if not isinstance(excluded, list):
+            return f"excluded отсутствует или не список: {_shape(excluded)}"
+        for index, item in enumerate(excluded):
+            problem = _excluded_violation(item, index)
+            if problem is not None:
+                return f"ответ невалиден целиком; первое нарушение — {problem}"
+
     for field in ("decision_id", "request_id", "policy_versions"):
         if field not in data:
             return f"обязательное поле {field} отсутствует"
@@ -225,6 +255,38 @@ def _candidate_violation(item: Any, index: int) -> str | None:
     return None
 
 
+def _excluded_violation(item: Any, index: int) -> str | None:
+    """Зеркало `excludedViolation` потребителя (`api.ts`).
+
+    Половины границы обязаны проверять ОДНО И ТО ЖЕ: та, что проверяет
+    меньше, пропускает неконформный ответ дальше и делает виноватым
+    следующего.
+    """
+    if not isinstance(item, dict):
+        return f"excluded[{index}]: ожидался объект, получено {_shape(item)}"
+    candidate = item.get("candidate")
+    if not isinstance(candidate, dict) or not isinstance(candidate.get("id"), str):
+        return f"excluded[{index}].candidate: нет идентификатора кандидата"
+    reason_code = item.get("reason_code")
+    if not isinstance(reason_code, str):
+        return f"excluded[{index}].reason_code: ожидалась строка, получено {_shape(reason_code)}"
+    if not _EXCLUSION_CODE_RE.search(reason_code):
+        # §4.4: исключения фиксируются ТОЛЬКО на стадиях допустимости.
+        # Код не из семейства исключения означал бы, что упорядочивание
+        # тайком стало фильтром — ровно то, чего §4.4 не допускает.
+        return (
+            f"excluded[{index}].reason_code: ожидался код исключения, "
+            f"получено {_shape(reason_code)} (§4.4)"
+        )
+    if not isinstance(item.get("stage"), str):
+        return f"excluded[{index}].stage: ожидалась строка, получено {_shape(item.get('stage'))}"
+    return None
+
+
+#: Семейства кодов исключения — зеркало `EXCLUSION_CODE_RE` потребителя.
+_EXCLUSION_CODE_RE = re.compile(r"^(ELIG_EXCLUDED_|SCOPE_EXCLUDED_)|_EXCLUDED$")
+
+
 #: Поля, наличие которых означает, что источник снова собрал фразу за
 #: потребителя. Проверяется рекурсивно: «Рейтинг 4.9» пришёл человеку
 #: именно такой строкой.
@@ -259,12 +321,14 @@ def _build_url() -> str:
 
 
 def _headers(external_user_id: str) -> dict[str, str]:
-    return {
-        "Authorization": f"Bearer {settings.AYLA_INTERNAL_API_TOKEN}",
-        "X-External-User-ID": external_user_id,
-        "Accept": "application/json",
-        "Content-Type": "application/json",
-    }
+    return with_request_id(
+        {
+            "Authorization": f"Bearer {settings.AYLA_INTERNAL_API_TOKEN}",
+            "X-External-User-ID": external_user_id,
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+        }
+    )
 
 
 def _shape(value: Any) -> str:
@@ -277,3 +341,17 @@ def _shape(value: Any) -> str:
     if isinstance(value, dict):
         return f"object{sorted(value)[:5]}"
     return type(value).__name__
+
+
+# ---------------------------------------------------------------------------
+# DRF-1699 D2 — разбор отказа 423
+# ---------------------------------------------------------------------------
+
+
+def _request_id_from_423(response: httpx.Response) -> str | None:
+    try:
+        details = response.json().get("error", {}).get("details", {}) or {}
+    except ValueError:
+        return None
+    rid = details.get("request_id")
+    return str(rid) if rid else None

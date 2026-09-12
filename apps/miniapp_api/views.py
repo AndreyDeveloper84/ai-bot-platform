@@ -303,8 +303,38 @@ def auth_verify(request: HttpRequest) -> HttpResponse:
 
     Response always includes `pending_booking_intent` (the current
     cached value OR null if nothing cached / expired).
+
+    # identity (DRF-1319 B+E, решение владельца §124)
+
+    Ответ несёт блок ``identity`` — единственное серверное утверждение о
+    том, кто перед нами, в словаре §124::
+
+        identity: {
+          channel: "identified" | "dev_bypass",
+          subject: "linked" | "unlinked",
+          ayla_user_id: "<uuid>" | null,
+        }
+
+    ``channel`` — как человек опознан: ``identified`` — MAX ``initData``
+    достоверно назвал его (только так сюда и попадают снаружи);
+    ``dev_bypass`` — DEBUG-обход, человека канал НЕ называл, и притворяться
+    обратным нельзя.
+
+    ``subject`` — есть ли у этого channel user доменный субъект в Ayla.
+    «Регистрация» внутри MAX по §124 — это не экран и не OAuth, а
+    привязка channel identity к каноническому субъекту; она делается
+    здесь, при первом же входе, через ``ensure_ayla_link`` — тем же
+    механизмом, что у брони и платежей. Ayla недоступна → ``unlinked``
+    и 200: вход не ломается, следующий вход попробует снова.
+
+    Понятия «аноним» / «гость» в этом контракте НЕТ намеренно: внутри
+    MAX пустой ``initData`` — отказ транспорта, а не гость (1319-D), и
+    сервер до этой ручки в таком случае не доходит вовсе (401/400 в
+    декораторе).
     """
     import json
+
+    from apps.identity.services.ayla_link import ensure_ayla_link
 
     from apps.miniapp_api.pending_intent import (
         PendingIntentInvalid,
@@ -313,7 +343,8 @@ def auth_verify(request: HttpRequest) -> HttpResponse:
         validate_intent,
     )
 
-    verified: VerifiedInitData = request.verified_init_data  # type: ignore[attr-defined]
+    # ``None`` на DEBUG-обходе (см. ``require_init_data``): канал человека не называл.
+    verified: VerifiedInitData | None = request.verified_init_data  # type: ignore[attr-defined]
     bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
 
     # Optional body — Mini App may call /auth/verify without any pending
@@ -337,12 +368,23 @@ def auth_verify(request: HttpRequest) -> HttpResponse:
 
     cached_intent = get_intent(bot_user.id)
 
+    # DRF-1319 E: привязка субъекта при входе. Идемпотентно (попадание в
+    # кеш по ``ayla_user_id`` не ходит в сеть), fail-soft (``None`` —
+    # остаться непривязанным, не ронять вход).
+    ayla_user_id = ensure_ayla_link(bot_user, trigger="miniapp_auth_verify")
+    identity = {
+        "channel": "identified" if verified is not None else "dev_bypass",
+        "subject": "linked" if ayla_user_id is not None else "unlinked",
+        "ayla_user_id": str(ayla_user_id) if ayla_user_id is not None else None,
+    }
+
+    first_name = verified.user.get("first_name", "") if verified is not None else ""
     return JsonResponse(
         {
             "user": {
                 "id": str(bot_user.id),
                 "channel_user_id": bot_user.channel_user_id,
-                "display_name": bot_user.display_name or verified.user.get("first_name", ""),
+                "display_name": bot_user.display_name or first_name,
                 "client_name": bot_user.client_name,
             },
             "tenant": {
@@ -351,6 +393,7 @@ def auth_verify(request: HttpRequest) -> HttpResponse:
                 "timezone": bot_user.tenant.timezone,
             },
             "pending_booking_intent": cached_intent,
+            "identity": identity,
         }
     )
 
@@ -2129,6 +2172,77 @@ def personal_data_delete(request: HttpRequest) -> HttpResponse:
 
 
 # ---------------------------------------------------------------------------
+# Заявка на удаление аккаунта (§7 свода владельца, DRF-1699, срез D1)
+# ---------------------------------------------------------------------------
+
+
+@csrf_exempt
+@require_http_methods(["GET", "POST"])
+@require_init_data
+@with_request_tenant
+def deletion_request(request: HttpRequest) -> HttpResponse:
+    """``POST`` — завести заявку до любого стирания; ``GET`` — текущая.
+
+    §7: устойчивый ``DeletionRequest`` создаётся ДО показа успеха; человек
+    видит ``request_id``, точную крайнюю дату и статус; ошибка обязана
+    говорить, что удаление не началось.
+
+    Подтверждение — то же серверное ``DELETE_CONFIRMATION_TOKEN``, что у
+    ``DELETE /me/personal-data/`` (DRF-956 / T-05): клиентский лист — не
+    подтверждение. До совпадения токена ничего не происходит; после —
+    только заявка в каталоге. Стирания здесь нет: исполнитель — срез D3.
+
+    Ответы ``POST``: 201 заявка заведена / 200 уже была открыта (тот же
+    номер) — тело одно; 400 токен; 409 ``not_linked`` /
+    ``identity_conflict`` (повтор не поможет — человек не связан с Ayla
+    или связан дважды); 502 ``upstream_unavailable`` (повтор поможет).
+    В каждом отказе ``status: "not_started"`` — единственное слово о
+    состоянии данных, и оно правдиво.
+    """
+    from apps.identity.services.deletion_request import (
+        DeletionNotStarted,
+        current_account_deletion,
+        request_account_deletion,
+    )
+    from apps.identity.services.profile import DELETE_CONFIRMATION_TOKEN
+
+    bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
+
+    if request.method == "GET":
+        current = current_account_deletion(bot_user)
+        if current is None:
+            return JsonResponse({"status": "none", "request": None}, status=200)
+        return JsonResponse({"status": "found", "request": current.as_dict()}, status=200)
+
+    body = _json_object_body(request)
+    if isinstance(body, HttpResponse):
+        return body
+    if body.get("confirmation", "") != DELETE_CONFIRMATION_TOKEN:
+        return _error(
+            "confirmation_mismatch",
+            f"body.confirmation must equal {DELETE_CONFIRMATION_TOKEN!r}",
+            400,
+        )
+
+    try:
+        view = request_account_deletion(bot_user)
+    except DeletionNotStarted as exc:
+        return JsonResponse(
+            {
+                "status": "not_started",
+                "reason": exc.reason,
+                "retryable": exc.retryable,
+                "detail": str(exc),
+            },
+            status=502 if exc.retryable else 409,
+        )
+    return JsonResponse(
+        {"status": "accepted", "request": view.as_dict()},
+        status=201 if view.created else 200,
+    )
+
+
+# ---------------------------------------------------------------------------
 # Health-data consent (152-ФЗ ст. 10 special category) — DRF-1453.
 #
 # Отдельная ручка, а не поле в общем consents-объекте, ровно потому, что
@@ -2608,6 +2722,68 @@ def submit_feedback(request: HttpRequest, booking_id) -> HttpResponse:  # type: 
 # --- /customer/recommendations — Ayla catalog proxy ------------------------
 
 
+def _audit_no_verified_candidates(bot_user, payload: dict, decision: dict) -> None:
+    """Пустая полка с именем и числом (§10.5.1).
+
+    «Пустая полка перестаёт быть дефектом и становится состоянием с
+    именем и числом» — но только если число посчитано. Здесь считаются
+    коды исключения из `excluded[]`: по ним видно, чего именно не
+    хватает — подтверждений или самих связей.
+
+    Отдельным действием, а не полем внутри общего: три вещи, которые
+    сегодня выглядят одинаково пустой полкой — нарушенный контракт,
+    штатный ноль подтверждённых и отсутствие кандидатов вовсе, — обязаны
+    считаться порознь.
+    """
+    from collections import Counter
+
+    from apps.audit.services import write_audit
+
+    excluded = decision.get("excluded")
+    tally = Counter(
+        str(item.get("reason_code") or "MISSING")
+        for item in (excluded if isinstance(excluded, list) else [])
+        if isinstance(item, dict)
+    )
+    write_audit(
+        "recommendation.boundary.no_verified_candidates",
+        target="RecommendationBoundary",
+        payload={
+            "tenant_id": str(getattr(getattr(bot_user, "tenant", None), "id", "") or ""),
+            "request_id": payload.get("request_id", ""),
+            "excluded_by_reason": dict(tally),
+            "excluded_total": sum(tally.values()),
+        },
+    )
+
+
+def _audit_resolver_outcome(bot_user, state: str, payload: dict, detail: str | None) -> None:
+    """Считаемый след исхода границы — в аудит, а не только в лог.
+
+    `CONTRACT_VIOLATION` и `UNAVAILABLE` пишутся РАЗНЫМИ действиями, а не
+    одним с полем-различителем: §9.4 требует, чтобы третий исход попадал
+    в метрику отдельно от второго, и агрегат «сколько раз за неделю»
+    должен строиться запросом, а не глазами по логу.
+
+    `request_id` кладётся рядом: он же ключ воспроизводимости (§9.4), и
+    по нему дежурный найдёт в журнале границы тот же самый вызов.
+    """
+    from apps.audit.services import write_audit
+
+    write_audit(
+        f"recommendation.boundary.{state}",
+        target="RecommendationBoundary",
+        payload={
+            "tenant_id": str(getattr(getattr(bot_user, "tenant", None), "id", "") or ""),
+            "request_id": payload.get("request_id", ""),
+            # Причина словами источника. Значения полей уносить сюда
+            # можно и нужно: адресат этой записи — дежурный, а не консоль
+            # браузера человека (§9.4 про разную диагностику двух половин).
+            "detail": detail or "",
+        },
+    )
+
+
 @csrf_exempt
 @require_http_methods(["POST"])
 @require_init_data
@@ -2665,74 +2841,154 @@ def customer_recommendations(request: HttpRequest) -> HttpResponse:
     аварии. Имя, обвиняющее не ту сторону, хуже отсутствия имени: по нему
     идут чинить не там.
 
-    ЛЕГАСИ. Формулировка «The Mini App side owns the rendering contract»
-    ОТМЕНЕНА контрактом резолвера (§2.1 C3, OD §53): у формы ответа есть
-    владелец — Recommendation Resolver, и валидация на границе обязательна.
-    Пропуск формы как есть сохранён намеренно (см.
-    `recommendations_client.fetch_recommendations`); валидацию несёт
-    `apps.integrations.ayla.recommendation_resolver_client`, который
-    разводит три исхода.
+    ### Форма на проводе одна, и она объявлена в контракте (DRF-1626)
+
+    Здесь стояло: «Пропуск формы как есть сохранён намеренно». Это
+    описывало решение, которое канон уже отменил — §9.4 требует
+    обратного дословно: «Транзитный слой валидирует. `ai-bot-platform`
+    обязан проверить схему, прежде чем передавать дальше. Роль
+    „translation hop, not a schema gate" отменена (§2.1 C3)». Оставь мы
+    абзац, следующий прочёл бы его как действующий и вернул пропуск.
+
+    Та же судьба у формулировки «The Mini App side owns the rendering
+    contract»: она ОТМЕНЕНА контрактом резолвера (§2.1 C3, OD §53). У
+    формы ответа есть владелец — Recommendation Resolver, — и здесь это
+    не пометка в прозе, а исполнение: транзит проверяет форму ДО того,
+    как отдать её полке (`tests/contracts/test_recommendation_boundary_guard.py`
+    держит обе стороны за слово).
+
+    Дефект был не в форме, а в проводе. Существуют ДВЕ ручки Ayla:
+
+    * `internal/me/catalog/recommendations/` — легаси-полка, три слоя
+      `layer_1/2/3`, никакого идентификатора выдачи;
+    * `internal/recommendation/resolve/` — граница §9.4, `ordered[]`,
+      `decision_id`, `resolver_spec_version`.
+
+    Транзит ходил на первую, а полка мини-приложения написана против
+    второй, поэтому валидатор отвергал ответ целиком и `picks` оставался
+    пустым — при том, что 55 вызовов из 56 отвечали `200`. Ломалось не
+    то, что отвечало: легаси-ручка исправно работала.
+
+    «Научить полку принимать обе формы» запрещено владельцем и было бы
+    хуже общего довода про удвоение предмета: это навсегда закрепило бы
+    в потребителе знание о ручке, которую §9.4 уже заменил.
+
+    ### Три исхода, и они не сливаются
+
+    * `OK` — форма проверена, ключи кандидатов переведены, тело уходит
+      полке в конверте `{"data": …}`, как объявляет §9.4;
+    * `UNAVAILABLE` — сеть, таймаут, 5xx, открытый предохранитель.
+      Подбор необязателен, молчание законно;
+    * `CONTRACT_VIOLATION` — источник ОТВЕТИЛ, но не в объявленной
+      форме. Обязано быть громким и считаться отдельно: без этого
+      несовместимость даёт пустую полку, неотличимую от «ничего не
+      нашлось».
 
     Failure mapping:
 
-    * 400 — body not valid JSON object, OR Ayla returned 4xx
-      (Ayla's response body forwarded under ``ayla_error``).
-    * 502 — Ayla timeout / 5xx / malformed JSON.
-    * 503 — bot-platform misconfigured (missing service token / base URL).
+    * 502 `contract_violation` — граница ответила не в своей форме.
+    * 502 `ayla_unavailable` — граница не ответила.
+    * 503 `mirror_unavailable` — не ответило НАШЕ зеркало ключей.
     """
-    import json
-
     from django.db import DatabaseError
 
-    from apps.marketplace.resolver_keys import translate_provider_keys
     from apps.integrations.ayla import external_user_id_for
-    from apps.integrations.ayla.recommendations_client import (
-        RecommendationsBadRequest,
-        RecommendationsConfigError,
-        RecommendationsUnavailable,
-        fetch_recommendations,
-    )
+    from apps.integrations.ayla.recommendation_resolver_client import resolve_recommendation
+    from apps.marketplace.resolver_keys import translate_provider_keys
+    from apps.marketplace.resolver_request import build_shelf_request
 
     bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
 
-    # Match the /auth/verify pattern: only parse JSON when the caller
-    # explicitly declares `Content-Type: application/json`. Empty/
-    # multipart bodies are treated as «no scoring hints» — Ayla receives
-    # `{}` and returns its default ranking.
-    body: dict = {}
-    content_type = (request.content_type or "").split(";")[0].strip().lower()
-    if content_type == "application/json" and request.body:
-        try:
-            parsed = json.loads(request.body)
-        except ValueError:
-            return _error("malformed", "body is not valid JSON", 400)
-        if not isinstance(parsed, dict):
-            return _error("malformed", "body must be a JSON object", 400)
-        body = parsed
+    # Тело не читается. Полка шлёт `POST /recommendations` без него, а
+    # запрос границы собирается из того, что знает сервер (§4.1:
+    # `subject_ref` в теле нет намеренно — кого спрашивают, определяет
+    # аутентификация). Приняв часть запроса от клиента, мы позволили бы
+    # ему получить решение за другого человека.
+    # D2 (§7, DRF-1699): живая заявка на удаление — подбора нет и в каталог
+    # не ходим: лишний запрос по человеку, который просил его не
+    # обрабатывать, сам есть обработка. Отказ с именем и номером — 423, как
+    # отвечает и каталог, чтобы полка видела одно и то же с любой стороны.
+    from apps.identity.services.deletion_gate import (
+        deletion_gate,
+        mark_deletion_requested,
+    )
+    from apps.identity.services.privacy import resolve_person_link
 
-    try:
-        ayla_body = fetch_recommendations(
-            external_user_id=external_user_id_for(bot_user),
-            payload=body,
-        )
-    except RecommendationsConfigError as exc:
-        logger.error("customer_recommendations.config_error: %s", exc)
-        return _error("not_configured", "ayla recommendations not configured", 503)
-    except RecommendationsBadRequest as exc:
+    link = resolve_person_link(bot_user)
+    gate = deletion_gate(None if link.conflict else link.ayla_user_id)
+    if gate.blocked:
         return JsonResponse(
             {
-                "error": "ayla_bad_request",
-                "detail": f"ayla returned HTTP {exc.status_code}",
-                "ayla_error": exc.body,
+                "error": gate.reason,
+                "detail": "personalisation stopped: deletion requested",
+                "request_id": gate.request_id,
             },
-            status=400,
+            status=423,
         )
-    except RecommendationsUnavailable as exc:
-        logger.warning("customer_recommendations.unavailable: %s", exc)
-        return _error("ayla_unavailable", "ayla recommendations unavailable", 502)
+
+    payload = build_shelf_request(goal_key=None)
+
+    outcome = resolve_recommendation(
+        external_user_id=external_user_id_for(bot_user),
+        payload=payload,
+    )
+
+    if outcome.state == "refused":
+        # Каталог узнал о заявке раньше нас (заведена из приложения):
+        # отражаем флаг, чтобы память и проактив закрылись тем же ходом.
+        if link.ayla_user_id is not None and not link.conflict and outcome.request_id:
+            mark_deletion_requested(link.ayla_user_id, request_id=outcome.request_id)
+        return JsonResponse(
+            {
+                "error": "deletion_requested",
+                "detail": "personalisation stopped: deletion requested",
+                "request_id": outcome.request_id,
+            },
+            status=423,
+        )
+
+    if outcome.state == "contract_violation":
+        # ГРОМКО и отдельно от недоступности. Это и есть вторая половина
+        # критерия DRF-1626: сегодня несовместимость давала пустую полку,
+        # неотличимую от «ничего не нашлось», и человек с дежурным видели
+        # одно и то же в двух совершенно разных случаях.
+        #
+        # Счётчик в аудите, а не только в логе: по строке лога нельзя
+        # ответить «сколько раз за неделю», не написав парсер, которого
+        # никто не напишет.
+        logger.error(
+            "customer_recommendations.contract_violation request_id=%s detail=%s",
+            payload["request_id"],
+            outcome.detail,
+        )
+        _audit_resolver_outcome(bot_user, "contract_violation", payload, outcome.detail)
+        return _error("contract_violation", "recommendation boundary answered off-contract", 502)
+
+    if not outcome.is_ok:
+        # Подбор — необязательное украшение: молчание здесь законно, и
+        # детектор, кричащий на каждый мёртвый источник, глушат за неделю.
+        logger.warning(
+            "customer_recommendations.unavailable request_id=%s detail=%s",
+            payload["request_id"],
+            outcome.detail,
+        )
+        _audit_resolver_outcome(bot_user, "unavailable", payload, outcome.detail)
+        return _error("ayla_unavailable", "recommendation boundary unavailable", 502)
+
+    decision = outcome.decision or {}
+    if not decision.get("ordered"):
+        # §10.5.1: ноль подтверждённых связей — ШТАТНЫЙ результат, а не
+        # ошибка. Считается ОТДЕЛЬНО от двух плохих исходов: попади оно в
+        # счётчик поломок, мы стали бы чинить работающее.
+        #
+        # Контракт требует писать это событие «с количеством
+        # REVIEW_REQUIRED и UNMAPPED». Числа берутся из того, что решение
+        # реально несёт — из кодов в `excluded[]`; выводить их из чего-то
+        # ещё значило бы придумать замер.
+        _audit_no_verified_candidates(bot_user, payload, decision)
 
     try:
-        translated, keys = translate_provider_keys(ayla_body)
+        translated, keys = translate_provider_keys({"data": decision})
     except DatabaseError as exc:
         # Наша база, не их ответ. Пропустив кандидатов непереведёнными,
         # мы получили бы у полки `UNRENDERABLE_CANDIDATES` — имя, которое
@@ -3070,6 +3326,28 @@ def customer_wellness_today(request: HttpRequest) -> HttpResponse:
     else:
         numbers_hidden = False
 
+    # ── настроены ли ориентиры (from get_profile) — §6 свода 11.09 ─────
+    # Ориентир показывается только с названным происхождением
+    # (``ayla_calculated`` / ``user_entered``). ``calories_goal`` сводки и
+    # ``norm_ml`` воды приезжают ОТДЕЛЬНЫМИ ответами и происхождения не
+    # несут: у ``unknown_legacy`` каталог до команды очистки (#332)
+    # присылает в них числа — на пилоте это все шесть профилей, у двух
+    # число выведено от подставленных 70 кг. Профиль своё происхождение
+    # знает, и он же решает за соседние ответы.
+    #
+    # Fail-closed, как ``numbers_hidden`` выше и по той же причине: пока
+    # профиль не прочитан, происхождение числа не подтверждено, и §103
+    # запрещает выдавать его за актуальный ориентир. Нет профиля вовсе —
+    # нет и ориентиров, это не отказ, а ответ.
+    # ``getattr(..., False)``, а не прямое обращение: чужой объект без
+    # этого признака — не настроен. Ошибка типа здесь превратилась бы в
+    # 500 дашборда, а fail-closed — в отсутствие ключа, что и требуется.
+    targets_configured = (
+        profile_res is not None
+        and not isinstance(profile_res, Exception)
+        and bool(getattr(profile_res, "targets_are_configured", False))
+    )
+
     # ── hydration (from get_water_today) ────────────────────────────────
     water_known = True
     water_glasses_eaten = 0
@@ -3127,8 +3405,9 @@ def customer_wellness_today(request: HttpRequest) -> HttpResponse:
     # загрузить» for an absent slice and numbers for a present one.
     if summary_known:
         payload["calories_eaten"] = calories_eaten
-        # Цель уходит, только когда она есть. Ключа нет = цели нет.
-        if calories_target is not None:
+        # Цель уходит, только когда она есть И настроена. Ключа нет = цели
+        # нет; ``NOT_CONFIGURED`` §6 на этой границе — отсутствие ключа.
+        if calories_target is not None and targets_configured:
             payload["calories_target"] = calories_target
         if pfc is not None:
             payload["pfc"] = pfc
@@ -3142,8 +3421,9 @@ def customer_wellness_today(request: HttpRequest) -> HttpResponse:
         payload["nutrition_numbers_hidden"] = numbers_hidden
     if water_known:
         payload["water_glasses_eaten"] = water_glasses_eaten
-        # Цель уходит, только когда она есть. Ключа нет = нормы нет.
-        if water_glasses_target is not None:
+        # Цель уходит, только когда она есть И настроена — то же правило,
+        # что у калорий: норма без происхождения не показывается.
+        if water_glasses_target is not None and targets_configured:
             payload["water_glasses_target"] = water_glasses_target
     # Omitted — not `[]` — when the goal layer could not be reached: an
     # empty list means «no goal chosen», and saying that on an outage is

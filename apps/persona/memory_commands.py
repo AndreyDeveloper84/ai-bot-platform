@@ -285,6 +285,15 @@ def _user_id_of(bot_user) -> uuid.UUID | None:
         return None
 
 
+def _closed_to(bot_user) -> bool:
+    """§2.4 (S2-2): a shell the gate refuses gets the honest empty answer, never a fact."""
+    if bot_user is None:
+        return False
+    from apps.identity.services.person_context_gate import person_context_access
+
+    return person_context_access(bot_user) is not None
+
+
 def render_memory_summary(bot_user, *, user_id: uuid.UUID | None = None) -> str:
     """The «помню, что ты …» line, as a PUBLIC entry point (DRF-1305).
 
@@ -297,6 +306,8 @@ def render_memory_summary(bot_user, *, user_id: uuid.UUID | None = None) -> str:
     Empty memory returns the honest line, never a placeholder fact.
     """
 
+    if _closed_to(bot_user):
+        return _summary_line([], None)
     resolved = user_id or _user_id_of(bot_user)
     if resolved is None:
         return _summary_line([], None)
@@ -332,6 +343,8 @@ def memory_show_chips(bot_user, *, user_id: uuid.UUID | None = None) -> list[dic
     :mod:`apps.orchestrator.personal_surface` prints instead.
     """
 
+    if _closed_to(bot_user):
+        return []
     resolved = user_id or _user_id_of(bot_user)
     if resolved is None:
         return []
@@ -465,6 +478,10 @@ def handle_memory_command(
 
     norm = _normalise(text)
     if not norm:
+        return None
+    if _closed_to(bot_user):
+        # §2.4 (S2-2): no memory to show or forget — the turn falls through to
+        # discovery exactly as it does while memory is dormant.
         return None
 
     # 1. «забудь всё» confirmation — the single word «удалить» right after we

@@ -144,6 +144,7 @@ from apps.identity.services import (
     resolve_or_create_global_bot_user,
 )
 from apps.identity.services.global_tenant import get_global_bot_tenant
+from apps.identity.services.identity_card import WHOAMI_COMMAND, build_card, render_for_person
 from apps.observability.ai_metrics import record_ai_request
 from apps.observability.models import AIRequestMetric
 from apps.persona.memory_commands import handle_memory_command
@@ -1811,6 +1812,18 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
             outcome=AIRequestMetric.OUTCOME_SUCCESS,
             skill_selected="booking_lookup",
         )
+    elif event.text.strip() == WHOAMI_COMMAND:
+        # Owner 11.09 §12.3 — the person asks what this bot knows about them
+        # and gets their own card whole (it is their data), with other salons
+        # as a number and never by name. Typed, so it sits ABOVE onboarding
+        # the way `/start` does: a command must not be swallowed by the
+        # welcome for a user who has not been welcomed yet.
+        reply = DiscoveryReply(
+            text=render_for_person(
+                build_card(bot_user.channel, bot_user.channel_user_id), tenant_slug=None
+            )
+        )
+        assistant_action_type = "whoami"
     elif getattr(settings, "GLOBAL_BOT_ONBOARDING", False) and needs_onboarding(
         bot_user, event.text, conversation
     ):

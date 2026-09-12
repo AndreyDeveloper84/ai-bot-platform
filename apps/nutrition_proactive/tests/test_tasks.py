@@ -22,7 +22,7 @@ from django.core.management import call_command
 
 from apps.consent.models import ConsentRecord
 from apps.identity.models import BotUser
-from apps.integrations.ayla import SummaryResponse, WaterTodayResponse
+from apps.integrations.ayla import ProfileResponse, SummaryResponse, WaterTodayResponse
 from apps.nutrition_proactive import prefs, selection, tasks
 from apps.tenancy.models import Tenant
 
@@ -82,6 +82,10 @@ def make_user(
     user = BotUser.all_tenants.create(
         tenant=tenant,
         channel="max",
+        # S2-2 (owner §2.4): these tests model a person the client contour
+        # knows — a LINKED shell. A SHADOW gets nothing, and that is proven
+        # in ``TestShadowIsClosed`` against a shell built without this line.
+        customer_status=BotUser.CustomerStatus.LINKED,
         # DRF-1558 — адрес проактивной отправки это ``channel_user_id``.
         # ``chat_id`` намеренно другой: совпадение прятало бы регрессию.
         channel_user_id=f"np-{suffix}" if chat_id is None else chat_id,
@@ -98,6 +102,32 @@ def make_user(
 
 def water_reader(total_ml: int, norm_ml: int = 2000):
     return lambda _ext: WaterTodayResponse(total_ml=total_ml, norm_ml=norm_ml, entries=[])
+
+
+def configured_profile(source: str = "ayla_calculated") -> ProfileResponse:
+    """Профиль с НАЗВАННЫМ происхождением ориентиров (DRF-1686, §6).
+
+    Без него ``ProfileResponse`` обнуляет ориентиры, а отчёт печатает
+    только факт — «Калории: 1500 ккал.» без «из». Тесты, которым нужен
+    отчёт С ориентирами, берут этот профиль; тесты про отчёт без них
+    передают ``None`` или ``unknown_legacy`` явно.
+    """
+    return ProfileResponse(
+        gender="female",
+        age=32,
+        height_cm=168,
+        weight_kg=64,
+        goal="maintain",
+        daily_kcal=1900,
+        protein_g=95,
+        fat_g=60,
+        carbs_g=210,
+        water_ml=2000,
+        bmr=1400,
+        health_flags={},
+        disclaimer_acked=None,
+        targets_source=source,
+    )
 
 
 def summary_reader(profile=None):
@@ -252,6 +282,7 @@ class TestDefaultsAreOff:
         user = BotUser.all_tenants.create(
             tenant=tenant,
             channel="max",
+            customer_status=BotUser.CustomerStatus.LINKED,
             channel_user_id="np-virgin",
             chat_id="chat-virgin",
             consent_at=datetime(2026, 5, 1, tzinfo=dt_timezone.utc),
@@ -309,11 +340,32 @@ class TestDailyReportSchedule:
 
     def test_report_body_carries_no_scolding(self, tenant: Tenant) -> None:
         make_user(tenant, report="19:00")
-        decisions = tasks.plan_daily_reports(now_utc=at_msk(19), fetch=summary_reader())
+        decisions = tasks.plan_daily_reports(
+            now_utc=at_msk(19), fetch=summary_reader(profile=configured_profile())
+        )
         text = next(d.text for d in decisions if d.send)
         assert "Калории: 1500 из 1900 ккал." in text
         assert "Вода: 1200 из 2000 мл." in text
         assert "не пиши мне" in text
+
+    def test_report_without_configured_targets_prints_facts_only(self, tenant: Tenant) -> None:
+        """§6 свода 11.09 (DRF-1686): суточный отчёт — пятая поверхность.
+
+        Без профиля и при ``unknown_legacy`` (все шесть профилей пилота)
+        в отчёт не попадает ни одно число ориентира — ни из профиля, ни из
+        сводки, ни из ответа по воде. Факт остаётся: съедено, выпито.
+        Нашлось не чтением, а красным шардом CI на этом самом файле.
+        """
+        make_user(tenant, report="19:00")
+        for profile in (None, configured_profile("unknown_legacy")):
+            decisions = tasks.plan_daily_reports(
+                now_utc=at_msk(19), fetch=summary_reader(profile=profile)
+            )
+            text = next(d.text for d in decisions if d.send)
+            assert "Калории: 1500 ккал." in text, profile
+            assert "Вода: 1200 мл." in text, profile
+            assert " из " not in text, profile
+            assert "1900" not in text and "2000" not in text, profile
 
 
 class TestQuotaAndAutoDisable:
@@ -539,6 +591,37 @@ class TestSwitches:
 # ────────────────────────────────────────────────────────────────────
 # DRF-1314 — who may be written to first
 # ────────────────────────────────────────────────────────────────────
+
+
+class TestShadowIsClosed:
+    """Owner 11.09 §2.4 (S2-2): nutrition is closed to a SHADOW salon shell.
+
+    Same shape as ``TestConsentGate``: one person differs from
+    :func:`make_user` in exactly one respect — the standing of the shell —
+    and both planners name that respect. ``unresolved`` has its own name:
+    «the rule was not applied» and «the rule said shadow» need different
+    people to act.
+    """
+
+    def _both(self, user: BotUser):
+        water = tasks.plan_water_reminders(now_utc=NOON, fetch=water_reader(0))
+        report = tasks.plan_daily_reports(now_utc=NOON, fetch=summary_reader())
+        return [d for d in [*water, *report] if d.bot_user_id == user.pk]
+
+    @pytest.mark.parametrize("status", ["shadow", "unresolved"])
+    def test_a_shadow_gets_nothing_and_the_reason_says_so(
+        self, tenant: Tenant, status: str
+    ) -> None:
+        # Presence first: the LINKED twin, built the same way, is written to.
+        linked = make_user(tenant, water=True, report="12:00", suffix="twin")
+        assert {d.reason for d in self._both(linked)} == {"behind_proportional_norm", "due"}
+
+        user = make_user(tenant, water=True, report="12:00", suffix=status)
+        BotUser.all_tenants.filter(pk=user.pk).update(customer_status=status)
+        decisions = self._both(user)
+        assert len(decisions) == 2
+        assert [d.reason for d in decisions] == [status] * 2
+        assert all(d.send is False for d in decisions)
 
 
 class TestConsentGate:

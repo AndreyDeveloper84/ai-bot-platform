@@ -49,6 +49,7 @@ import httpx
 from django.conf import settings
 
 from apps.integrations.ayla.url_builder import AylaUrlBuilder
+from apps.integrations.ayla.request_id import with_request_id
 
 
 logger = logging.getLogger(__name__)
@@ -222,6 +223,35 @@ def _targets_source(body: dict[str, Any]) -> str:
     return str(provenance.get("source") or "")
 
 
+#: §6 свода владельца 11.09 (OD-NUT-1): «неизвестные нормы имеют
+#: NOT_CONFIGURED, а не ноль». Настроенным ориентир считается ТОЛЬКО при
+#: названном происхождении. Всё остальное — не настроено:
+#:
+#:   none            расчёта не было или он снят (§103)
+#:   unknown_legacy  происхождение не сохранялось — число есть, объяснить
+#:                   его нечем; §103: «уже рассчитанный ориентир нельзя
+#:                   показывать как актуальный без происхождения»
+#:   ""              ключ не пришёл — контракт нарушен, число не подтверждено
+#:   ayla_proposed   посчитано, но человеком НЕ подтверждено (§5.1 свода,
+#:                   вводится ayla-a3) — не настроено до подтверждения
+#:
+#: Правило применяется ОДИН РАЗ, на границе: ниже, при разборе ответа,
+#: ориентиры не настроенного профиля читаются как ``None``, и ни одна
+#: поверхность не получает числа, которое ей нельзя показывать. Иначе
+#: правило пришлось бы повторять в каждом рендере, и первая же новая
+#: поверхность, прочитавшая ``profile.protein_g`` напрямую, напечатала бы
+#: число без происхождения — как это и было до этой правки у шести
+#: профилей пилота (все ``unknown_legacy``).
+TARGETS_CONFIGURED_SOURCES: frozenset[str] = frozenset({"ayla_calculated", "user_entered"})
+TARGETS_CONFIGURED = "configured"
+TARGETS_NOT_CONFIGURED = "not_configured"
+
+
+def targets_configured(source: str | None) -> bool:
+    """Есть ли у ориентира названное происхождение (§6, §103)."""
+    return (source or "") in TARGETS_CONFIGURED_SOURCES
+
+
 def _target_or_none(norms: dict[str, Any], key: str) -> int | None:
     """Ориентир из блока ``norms`` — или ``None``, если его там нет.
 
@@ -287,6 +317,48 @@ class ProfileResponse:
     #: по ``""`` молчит и пишет warning: нарушен контракт, а не расчёт.
     targets_source: str = ""
     raw: dict[str, Any] = field(default_factory=dict)
+
+    #: Поля, которые обязаны быть ``None`` у не настроенного профиля.
+    _TARGET_FIELDS = ("daily_kcal", "protein_g", "fat_g", "carbs_g", "water_ml", "bmr")
+
+    def __post_init__(self) -> None:
+        """Инвариант DTO: не настроено ⇒ ориентиров нет — при ЛЮБОМ способе сборки.
+
+        Правило §6 живёт здесь, а не в разборе ответа, потому что разбор —
+        не единственный конструктор: тесты и фикстуры собирают
+        ``ProfileResponse`` напрямую, и правило в разборе они бы обошли,
+        получив профиль с ``unknown_legacy`` И числами — состояние, которого
+        по §103 не бывает. Инвариант на типе обойти нельзя. Числа при этом
+        не теряются: они в ``raw``, для диагностики.
+        """
+        if targets_configured(self.targets_source):
+            return
+        for name in self._TARGET_FIELDS:
+            if getattr(self, name) is not None:
+                object.__setattr__(self, name, None)
+
+    @property
+    def targets_state(self) -> str:
+        """``configured`` | ``not_configured`` — имя отсутствия по §6.
+
+        Производное от ``targets_source``, а не отдельное поле: два поля
+        об одном факте разошлись бы при первом же новом источнике.
+        """
+        return (
+            TARGETS_CONFIGURED
+            if targets_configured(self.targets_source)
+            else TARGETS_NOT_CONFIGURED
+        )
+
+    @property
+    def targets_are_configured(self) -> bool:
+        """То же одним булевым — для поверхностей, которым нужен ответ, а не имя.
+
+        Единственный вопрос, который поверхность вправе задать: «можно ли
+        показывать ориентир». Ответ производится здесь, а не собирается на
+        каждом экране заново из ``targets_source``.
+        """
+        return targets_configured(self.targets_source)
 
 
 @dataclass(frozen=True)
@@ -409,10 +481,12 @@ class NutritionClient:
             raise NutritionUnavailableError("circuit_open")
 
         url = self._urls.build("nutrition/internal/scan/")
-        headers = {
-            "X-Service-Token": self._token,
-            "X-External-User-ID": external_user_id,
-        }
+        headers = with_request_id(
+            {
+                "X-Service-Token": self._token,
+                "X-External-User-ID": external_user_id,
+            }
+        )
         files = {"image": (filename, image_bytes, "image/jpeg")}
         data: dict[str, str] = {}
         if portion_multiplier is not None:
@@ -501,10 +575,12 @@ class NutritionClient:
             raise NutritionUnavailableError("circuit_open")
 
         url = self._urls.build("nutrition/internal/food-log/")
-        headers: dict[str, str] = {
-            "X-Service-Token": self._token,
-            "X-External-User-ID": external_user_id,
-        }
+        headers: dict[str, str] = with_request_id(
+            {
+                "X-Service-Token": self._token,
+                "X-External-User-ID": external_user_id,
+            }
+        )
         if idempotency_key:
             headers["X-Idempotency-Key"] = idempotency_key
         body: dict[str, Any] = {
@@ -577,10 +653,12 @@ class NutritionClient:
             raise NutritionUnavailableError("circuit_open")
 
         url = self._urls.build("nutrition/internal/summary/")
-        headers = {
-            "X-Service-Token": self._token,
-            "X-External-User-ID": external_user_id,
-        }
+        headers = with_request_id(
+            {
+                "X-Service-Token": self._token,
+                "X-External-User-ID": external_user_id,
+            }
+        )
         params: dict[str, str] = {}
         if date:
             params["date"] = date
@@ -641,10 +719,12 @@ class NutritionClient:
             raise NutritionUnavailableError("circuit_open")
 
         url = self._urls.build("nutrition/internal/deficits/")
-        headers = {
-            "X-Service-Token": self._token,
-            "X-External-User-ID": external_user_id,
-        }
+        headers = with_request_id(
+            {
+                "X-Service-Token": self._token,
+                "X-External-User-ID": external_user_id,
+            }
+        )
         try:
             async with httpx.AsyncClient(timeout=self._timeout_s) as http:
                 resp = await http.get(url, headers=headers, params={"days": str(days)})
@@ -689,10 +769,12 @@ class NutritionClient:
             raise NutritionUnavailableError("circuit_open")
 
         url = self._urls.build("nutrition/internal/profile/")
-        headers = {
-            "X-Service-Token": self._token,
-            "X-External-User-ID": external_user_id,
-        }
+        headers = with_request_id(
+            {
+                "X-Service-Token": self._token,
+                "X-External-User-ID": external_user_id,
+            }
+        )
         try:
             async with httpx.AsyncClient(timeout=self._timeout_s) as http:
                 resp = await http.get(url, headers=headers)
@@ -719,10 +801,12 @@ class NutritionClient:
             raise NutritionUnavailableError("circuit_open")
 
         url = self._urls.build("nutrition/internal/profile/")
-        headers = {
-            "X-Service-Token": self._token,
-            "X-External-User-ID": external_user_id,
-        }
+        headers = with_request_id(
+            {
+                "X-Service-Token": self._token,
+                "X-External-User-ID": external_user_id,
+            }
+        )
         try:
             async with httpx.AsyncClient(timeout=self._timeout_s) as http:
                 resp = await http.post(url, headers=headers, json=data)
@@ -792,6 +876,12 @@ class NutritionClient:
             # prefix per Ayla spec §1.1. Flat top-level fallback was removed
             # in DRF-270.
             norms = body.get("norms") or {}
+            # §6 / §103: число без названного происхождения наружу не
+            # выходит — но правило стоит не здесь, а на самом типе
+            # (``ProfileResponse.__post_init__``): разбор не единственный
+            # конструктор, и правило в разборе обошёл бы любой, кто
+            # собирает DTO руками. Здесь ориентиры читаются как есть;
+            # тип сам обнулит их у не настроенного профиля.
             return ProfileResponse(
                 gender=str(body.get("gender") or ""),
                 age=int(body.get("age") or 0),
@@ -867,10 +957,12 @@ class NutritionClient:
             raise NutritionUnavailableError("circuit_open")
 
         url = self._urls.build("nutrition/internal/water/")
-        headers: dict[str, str] = {
-            "X-Service-Token": self._token,
-            "X-External-User-ID": external_user_id,
-        }
+        headers: dict[str, str] = with_request_id(
+            {
+                "X-Service-Token": self._token,
+                "X-External-User-ID": external_user_id,
+            }
+        )
         if idempotency_key:
             headers["X-Idempotency-Key"] = idempotency_key
         body: dict[str, Any] = {"ml": ml}
@@ -932,10 +1024,12 @@ class NutritionClient:
             raise NutritionUnavailableError("circuit_open")
 
         url = self._urls.build(f"nutrition/internal/water/{entry_id}/")
-        headers = {
-            "X-Service-Token": self._token,
-            "X-External-User-ID": external_user_id,
-        }
+        headers = with_request_id(
+            {
+                "X-Service-Token": self._token,
+                "X-External-User-ID": external_user_id,
+            }
+        )
         try:
             async with httpx.AsyncClient(timeout=self._timeout_s) as http:
                 resp = await http.delete(url, headers=headers)
@@ -965,10 +1059,12 @@ class NutritionClient:
             raise NutritionUnavailableError("circuit_open")
 
         url = self._urls.build("nutrition/internal/water/today/")
-        headers = {
-            "X-Service-Token": self._token,
-            "X-External-User-ID": external_user_id,
-        }
+        headers = with_request_id(
+            {
+                "X-Service-Token": self._token,
+                "X-External-User-ID": external_user_id,
+            }
+        )
         try:
             async with httpx.AsyncClient(timeout=self._timeout_s) as http:
                 resp = await http.get(url, headers=headers)
@@ -1014,10 +1110,12 @@ class NutritionClient:
             raise NutritionUnavailableError("circuit_open")
 
         url = self._urls.build("nutrition/internal/insights/cross_domain/")
-        headers = {
-            "X-Service-Token": self._token,
-            "X-External-User-ID": external_user_id,
-        }
+        headers = with_request_id(
+            {
+                "X-Service-Token": self._token,
+                "X-External-User-ID": external_user_id,
+            }
+        )
 
         try:
             async with httpx.AsyncClient(timeout=self._timeout_s) as http:
@@ -1111,10 +1209,12 @@ class NutritionClient:
             raise NutritionUnavailableError("circuit_open")
 
         url = self._urls.build(f"nutrition/internal/insights/cross_domain/{action}/{shown_id}/")
-        headers = {
-            "X-Service-Token": self._token,
-            "X-External-User-ID": external_user_id,
-        }
+        headers = with_request_id(
+            {
+                "X-Service-Token": self._token,
+                "X-External-User-ID": external_user_id,
+            }
+        )
 
         try:
             async with httpx.AsyncClient(timeout=self._timeout_s) as http:
