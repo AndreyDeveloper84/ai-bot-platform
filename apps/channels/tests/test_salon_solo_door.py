@@ -217,6 +217,10 @@ class TestTheSecondVisitIsNotTreatedAsTheFirst:
 
         assert said[0]["text"] == salon_handler.SOLO_ALREADY_REGISTERED
         assert salon_handler.SOLO_OFFER.strip() not in said[0]["text"]
+        # 12.09.2026 (DRF-1756): без записи бота двери в кабинет нет — это
+        # уже не «вложений не бывает», а «кнопка, которая не сработает, не
+        # ставится». С записью и адресом Mini App вернувшийся владелец
+        # получает «Открыть кабинет» — test_salon_solo_door_opens_the_cabinet.py.
         assert not said[0]["attachments"]
 
     def test_the_salon_card_predicate_does_not_see_the_solo_card(self, bot_user, said):
