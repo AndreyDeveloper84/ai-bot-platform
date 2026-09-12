@@ -127,6 +127,15 @@ const GUARD_EXIT_ROUTE = "/customer/catalog";
 const GUARD_EXIT_LABEL = "Посмотреть услуги";
 const FREE_TEXT_FALLBACK_LABEL = "Опиши своими словами";
 
+/**
+ * Единственное, что экран говорит о месте в проходе (DRF-1743). Числа
+ * «Вопрос N из M» не рисуются: макет C03 — «формулировку „Ещё один
+ * короткий вопрос“ используем только если действительно уверены, что
+ * вопрос последний», а уверен в этом сервер (`progress.is_last`), не
+ * экран. Сторож на отсутствие счётчика — `GoalSelectScreen.progress.test.tsx`.
+ */
+const LAST_QUESTION_NOTE = "Ещё один короткий вопрос";
+
 /** The anketa step currently on the surface, if the server sent one. */
 function currentAnketaStep(doc: DecisionContext): MissingItem | null {
   return doc.missing.find((item) => typeof item.step === "string") ?? null;
@@ -426,10 +435,8 @@ export function GoalSelectScreen({ initialDoc }: Props = {}) {
         <section aria-label="Вопросы">
           {doc.missing.map((item, index) => (
             <div key={`${item.kind}-${index}`}>
-              {item.progress && (
-                <p className="goal-select__progress">
-                  Вопрос {item.progress.index} из {item.progress.total}
-                </p>
+              {item.progress?.is_last === true && (
+                <p className="goal-select__progress">{LAST_QUESTION_NOTE}</p>
               )}
               <p className="goal-select__prompt">{item.prompt}</p>
               {item.step && item.options && item.options.length > 0 && (
