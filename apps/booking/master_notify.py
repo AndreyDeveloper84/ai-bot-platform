@@ -405,6 +405,29 @@ def _audit_specialist_unreachable(
         )
 
 
+def master_muted_new_booking(master: CatalogMaster | None) -> bool:
+    """Has the master switched «Новая запись» off in their own settings?
+
+    DRF-1123: ``MasterNotificationPrefs`` had a model, a CRUD screen and
+    an audit trail — and zero readers among senders. The master flipped
+    the toggle, saw «сохранено», and the DM kept coming. This is the
+    reader for the one toggle that has a live sender today
+    (``new_booking`` → the personal copy below). A missing row means
+    the master never opened the screen — defaults apply, i.e. ON. The
+    salon copy is not the master's toggle and is not read here.
+    """
+    if master is None:
+        return False
+    from apps.notifications.models import MasterNotificationPrefs
+
+    value = (
+        MasterNotificationPrefs.all_tenants.filter(master=master)
+        .values_list("new_booking", flat=True)
+        .first()
+    )
+    return value is False
+
+
 def notify_booking_created(
     *,
     tenant: Tenant,
@@ -441,7 +464,18 @@ def notify_booking_created(
         # tone, whereas silence is worse in substance. That is the one case
         # where the wrong avatar beats no message.
         with bot_scope(_salon_bot_for(tenant)):
-            if specialist_user_id:
+            if specialist_user_id and master_muted_new_booking(master):
+                # DRF-1123 — the master's own «Новая запись» switch is
+                # off. Named, not silent: the salon copy below still
+                # goes, and the master's diary row exists either way.
+                logger.info(
+                    "booking.notify.master_muted tenant=%s appointment_id=%s "
+                    "specialist_id=%s toggle=new_booking",
+                    tenant.slug,
+                    appointment_id,
+                    specialist_id,
+                )
+            elif specialist_user_id:
                 # The specialist goes FIRST: if MAX dies mid-fan-out, the
                 # epic's priority recipient already has the message.
                 personal = build_specialist_booking_notification(
