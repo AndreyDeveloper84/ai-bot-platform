@@ -38,9 +38,9 @@ concurrency:
 env:
   # Приколоченный SHA каталога. Обновлять ОТДЕЛЬНЫМ PR с перечнем
   # изменившихся маршрутов /internal/*. Должен содержать seed_golden
-  # (beautygo_backend PR #373).
+  # с обоими сценариями: p7 (beautygo_backend #373) и p1 (#391).
   CATALOG_REPO: AndreyDeveloper84/beautygo_backend
-  CATALOG_SHA: c40666f4
+  CATALOG_SHA: 7f86b5dc
   CATALOG_PORT: "8091"
   # Имя базы ОБЯЗАНО содержать «golden»: seed_golden иначе откажется
   # писать — это его сторож от пилота, и здесь он не обходится флагом.
@@ -52,6 +52,18 @@ jobs:
     if: vars.CROSS_BOUNDARY_ENABLED == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 25
+    # Один сценарий — один стенд. P7 доказывает «мастера есть, VERIFIED нет,
+    # рекомендовать некого»; P1 сеет VERIFIED-мастера. В одной базе P1
+    # опроверг бы P7 — не потому что P7 сломан, а потому что стенд другой.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - scenario: p7
+            tests: tests/cross_boundary/test_pulse.py tests/cross_boundary/test_p7_no_verified_candidates.py
+          - scenario: p1
+            tests: tests/cross_boundary/test_pulse.py tests/cross_boundary/test_p1_direct_service_booking.py
+    name: cross-boundary (${{ matrix.scenario }})
 
     services:
       postgres:
@@ -108,7 +120,7 @@ jobs:
           pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Migrate + seed catalog (scenario p7)
+      - name: Migrate + seed catalog (scenario ${{ matrix.scenario }})
         working-directory: catalog
         env:
           DJANGO_SETTINGS_MODULE: djangoProject.settings.test
@@ -121,7 +133,7 @@ jobs:
           LOG_FORMAT: human
         run: |
           python manage.py migrate --noinput
-          python manage.py seed_golden --scenario p7
+          python manage.py seed_golden --scenario ${{ matrix.scenario }}
 
       - name: Start catalog
         working-directory: catalog
@@ -149,16 +161,16 @@ jobs:
           pip install uv
           uv sync --frozen --all-extras --dev
 
-      - name: Cross-boundary golden (P7)
+      - name: Cross-boundary golden (${{ matrix.scenario }})
         env:
           DJANGO_SETTINGS_MODULE: config.settings.local
           CROSS_BOUNDARY_CATALOG_URL: http://127.0.0.1:${{ env.CATALOG_PORT }}
           CROSS_BOUNDARY_CATALOG_TOKEN: ${{ env.CATALOG_TOKEN }}
           CROSS_BOUNDARY_CATALOG_SHA: ${{ env.CATALOG_SHA }}
-          CROSS_BOUNDARY_SCENARIO: p7
+          CROSS_BOUNDARY_SCENARIO: ${{ matrix.scenario }}
         run: |
           rm -f junit-cross-boundary.xml
-          uv run pytest tests/cross_boundary -m cross_boundary -v -s \
+          uv run pytest ${{ matrix.tests }} -m cross_boundary -v -s -rxX \
             --junitxml=junit-cross-boundary.xml
 
       - name: junit — пустой прогон не зелёный
@@ -172,7 +184,10 @@ jobs:
           root = ET.parse("junit-cross-boundary.xml").getroot()
           suite = root if root.tag == "testsuite" else root.find("testsuite")
           tests = int(suite.get("tests", 0)); failures = int(suite.get("failures", 0)); errors = int(suite.get("errors", 0))
-          print(f"JUNIT tests={tests} failures={failures} errors={errors}")
+          skipped = int(suite.get("skipped", 0))
+          # skipped здесь = xfail(strict) в P1: находки, записанные в самих тестах.
+          # Печатается рядом с числом, чтобы «passed» не читалось как «всё зелено».
+          print(f"JUNIT tests={tests} failures={failures} errors={errors} skipped(xfail)={skipped}")
           if tests == 0:
               print("::error::JUNIT EMPTY — 0 tests collected. An empty run is not a green run."); sys.exit(1)
           sys.exit(1 if failures or errors else 0)
