@@ -114,6 +114,8 @@ import { MasterAylaScreen } from "./screens/MasterAylaScreen";
 import { MasterScheduleScreen } from "./screens/MasterScheduleScreen";
 import { MasterServicesScreen } from "./screens/MasterServicesScreen";
 import { MasterSettingsScreen } from "./screens/MasterSettingsScreen";
+import { MasterSetupLandingScreen } from "./screens/MasterSetupLandingScreen";
+import { SoloSetupGate } from "./components/SoloSetupGate";
 import { RescheduleScreen } from "./screens/RescheduleScreen";
 import { ServiceDetailScreen } from "./screens/ServiceDetailScreen";
 
@@ -1194,8 +1196,11 @@ function UnifiedSoloSurface({ me }: { me: MeResponse }) {
   return (
     <div className="solo-surface">
       <Routes>
-        {/* Default landing — Tau §5.1 specifies «Мой день» as solo home. */}
-        <Route path="/" element={<Navigate to="/solo/my-day" replace />} />
+        {/* Default landing — Tau §5.1 specifies «Мой день» as solo home;
+         * DRF-1807: пока настройка не закрыта (readiness M2), корень
+         * ведёт на экран 01 «всё готово», иначе — «Мой день». */}
+        <Route path="/" element={<SoloSetupGate />} />
+        <Route path="/solo/setup" element={<MasterSetupLandingScreen />} />
 
         {/* Bottom-bar destinations. */}
         <Route path="/solo/my-day" element={<MasterDashboardScreen />} />
