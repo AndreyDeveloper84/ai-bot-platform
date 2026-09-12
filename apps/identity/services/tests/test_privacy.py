@@ -20,7 +20,7 @@ import pytest
 from django.test import Client as DjangoClient
 
 from apps.consent.models import ConsentRecord
-from apps.identity.models import BotUser, MemoryEntry
+from apps.identity.models import BotUser, MemoryEntry, UserPreferences
 from apps.identity.services.memory_inferred import (
     InferredGreenFact,
     record_inferred_green_facts,
@@ -1503,3 +1503,67 @@ class TestExportMarksCurrency:
         self._two_conflicting_facts(ayla_user_id)
         payload = export_personal_data(bot_user, client=_StubPCClient())  # type: ignore[arg-type]
         assert all("status" in m for m in payload["memory"])
+
+
+class TestConsentWithdrawMirrorsNotifyPromoAtomically:
+    """DRF-1731 замер 12.09: реестр MARKETING и зеркало ``notify_promo`` —
+    два носителя одного факта. Шаг 3 стирания отзывал реестр, зеркало не
+    писал, и оно «сходилось» лишь потому, что шаг 4 удалял строку
+    ``UserPreferences``. Здесь — сценарий дефекта (шаг 4 упал) и обратный
+    (зеркало упало): либо оба сняты, либо ни одно — и шаг назван.
+    """
+
+    @staticmethod
+    def _promo_on(bu: BotUser) -> None:
+        from apps.consent import customer as customer_consents
+
+        customer_consents.set_marketing(bu, granted=True)
+        assert UserPreferences.all_tenants.get(bot_user=bu).notify_promo is True
+
+    def test_step_4_failure_no_longer_leaves_the_mirror_on(self, bot_user, monkeypatch) -> None:
+        self._promo_on(bot_user)
+        monkeypatch.setattr(
+            "apps.identity.services.privacy._erase_bot_user_pii",
+            lambda *a, **k: (_ for _ in ()).throw(RuntimeError("step 4 down")),
+        )
+        result = delete_personal_data(bot_user, client=_StubPCClient())  # type: ignore[arg-type]
+
+        assert "profile_pii_erase" in result.failed_steps
+        assert next(s for s in result.steps if s.step == "consent_withdraw").ok
+        # Реестр отозван…
+        assert not ConsentRecord.all_tenants.filter(
+            bot_user=bot_user, consent_type=CT.MARKETING, withdrawn_at__isnull=True
+        ).exists()
+        # …и зеркало снято той же транзакцией, хотя строка настроек жива.
+        assert UserPreferences.all_tenants.get(bot_user=bot_user).notify_promo is False
+
+    def test_mirror_failure_rolls_the_registry_back_and_names_the_step(
+        self, bot_user, monkeypatch
+    ) -> None:
+        self._promo_on(bot_user)
+        monkeypatch.setattr(
+            "apps.identity.services.privacy._mirror_notify_promo",
+            lambda *a, **k: (_ for _ in ()).throw(RuntimeError("mirror down")),
+        )
+        result = delete_personal_data(bot_user, client=_StubPCClient())  # type: ignore[arg-type]
+
+        assert "consent_withdraw" in result.failed_steps
+        assert not result.all_ok
+        # Ни один носитель не изменился: реестр всё ещё действует…
+        assert ConsentRecord.all_tenants.filter(
+            bot_user=bot_user, consent_type=CT.MARKETING, withdrawn_at__isnull=True
+        ).exists()
+        # …и это видно, а не спрятано за зелёным шагом. Зеркало — по шагу 4
+        # (строка настроек удалена и пересоздаётся выключенной), поэтому
+        # расхождения «реестр отозван, зеркало True» нет ни в одной ветке.
+        assert not UserPreferences.all_tenants.filter(bot_user=bot_user, notify_promo=True).exists()
+
+    def test_happy_path_withdraws_both_carriers(self, bot_user) -> None:
+        """POSITIVE: без подмен оба носителя сняты и шаг зелёный."""
+        self._promo_on(bot_user)
+        result = delete_personal_data(bot_user, client=_StubPCClient())  # type: ignore[arg-type]
+        assert next(s for s in result.steps if s.step == "consent_withdraw").ok
+        assert not ConsentRecord.all_tenants.filter(
+            bot_user=bot_user, consent_type=CT.MARKETING, withdrawn_at__isnull=True
+        ).exists()
+        assert not UserPreferences.all_tenants.filter(bot_user=bot_user, notify_promo=True).exists()
