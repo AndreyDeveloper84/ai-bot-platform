@@ -45,7 +45,7 @@ import hashlib
 import re
 from datetime import timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from django.core.management.base import BaseCommand, CommandError
 from django.db.models import Count, Max, Min
@@ -94,9 +94,11 @@ def parse_since(value: str) -> timedelta:
     if match is None:
         raise CommandError(f"--since: ожидается вид 24h / 30m / 2d, получено {value!r}")
     amount, unit = int(match.group(1)), match.group(2)
-    return {"m": timedelta(minutes=amount), "h": timedelta(hours=amount), "d": timedelta(days=amount)}[
-        unit
-    ]
+    return {
+        "m": timedelta(minutes=amount),
+        "h": timedelta(hours=amount),
+        "d": timedelta(days=amount),
+    }[unit]
 
 
 def short_hash(value: Any) -> str:
@@ -222,11 +224,16 @@ class Command(BaseCommand):
             self.stderr.write(f"записано: {path}")
 
     def _list(self, since: Any) -> None:
-        rows = (
-            Message.all_tenants.filter(created_at__gte=since)
-            .values("conversation_id", "conversation__tenant__slug")
-            .annotate(n=Count("id"), first=Min("created_at"), last=Max("created_at"))
-            .order_by("-last")[:50]
+        # cast — django-stubs выводит для values().annotate() тип,
+        # который не индексируется; строки здесь — обычные dict.
+        rows = cast(
+            list[dict[str, Any]],
+            list(
+                Message.all_tenants.filter(created_at__gte=since)
+                .values("conversation_id", "conversation__tenant__slug")
+                .annotate(n=Count("id"), first=Min("created_at"), last=Max("created_at"))
+                .order_by("-last")[:50]
+            ),
         )
         self.stdout.write("conv_id | tenant | n | first | last | hash")
         for row in rows:

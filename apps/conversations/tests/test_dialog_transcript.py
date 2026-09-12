@@ -217,7 +217,11 @@ class TestMasksAndListing:
 
         with CaptureQueriesContext(connection) as ctx:
             _run("--conv", str(conversation.id))
-        writes = [q["sql"] for q in ctx.captured_queries if not q["sql"].lstrip().upper().startswith("SELECT")]
+        writes = [
+            q["sql"]
+            for q in ctx.captured_queries
+            if not q["sql"].lstrip().upper().startswith("SELECT")
+        ]
         assert writes == [], writes
 
 
