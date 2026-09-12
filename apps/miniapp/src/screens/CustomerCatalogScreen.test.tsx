@@ -138,9 +138,10 @@ beforeEach(() => {
 
 describe("CustomerCatalogScreen (real mirror data)", () => {
   it("renders real services and masters; picks capped at 3 in resolver order", async () => {
+    vi.stubEnv("VITE_RECOMMENDATION_SHELF", "1"); // полка за флагом (OD-PILOT-9)
     mockHappyPath();
     renderScreen();
-    const picks = await screen.findByRole("region", { name: /Ayla подобрала/ });
+    const picks = await screen.findByRole("region", { name: /Ayla рекомендует/ });
     const pickCards = within(picks).getAllByRole("article");
     expect(pickCards).toHaveLength(3);
     // Порядок резолвера: Педикюр, Маникюр, Брови — Массаж за срезом k.
@@ -153,7 +154,7 @@ describe("CustomerCatalogScreen (real mirror data)", () => {
     expect(pickCards[1]).toHaveTextContent("В твоём городе");
     expect(pickCards[2]).toHaveTextContent("Подходит под твою цель");
 
-    const servicesSection = screen.getByRole("region", { name: "Услуги" });
+    const servicesSection = screen.getByRole("region", { name: "Доступные услуги" });
     expect(within(servicesSection).getAllByRole("article")).toHaveLength(4);
 
     const mastersSection = screen.getByRole("region", { name: "Мастера" });
@@ -165,7 +166,7 @@ describe("CustomerCatalogScreen (real mirror data)", () => {
   it("never renders the old fake stub salons", async () => {
     mockHappyPath();
     renderScreen();
-    await screen.findByRole("region", { name: "Услуги" });
+    await screen.findByRole("region", { name: "Доступные услуги" });
     for (const fake of ["Beauty Place", "Формула тела", "Студия Лотос", "Casa Bella"]) {
       expect(screen.queryByText(fake)).not.toBeInTheDocument();
     }
@@ -176,8 +177,8 @@ describe("CustomerCatalogScreen (real mirror data)", () => {
     mockedFetchMasters.mockResolvedValue({ masters: MASTERS });
     mockedFetchRecommendations.mockRejectedValue(new Error("[502] ayla_unavailable"));
     renderScreen();
-    await screen.findByRole("region", { name: "Услуги" });
-    expect(screen.queryByRole("region", { name: /Ayla подобрала/ })).not.toBeInTheDocument();
+    await screen.findByRole("region", { name: "Доступные услуги" });
+    expect(screen.queryByRole("region", { name: /Ayla рекомендует/ })).not.toBeInTheDocument();
     expect(screen.getByText("Анна Соколова")).toBeInTheDocument();
   });
 
@@ -190,12 +191,12 @@ describe("CustomerCatalogScreen (real mirror data)", () => {
     mockedFetchRecommendations.mockResolvedValue(RECS_NO_WHY);
     renderScreen();
     // The branded signature is gone…
-    expect(await screen.findByRole("region", { name: "Услуги" })).toBeInTheDocument();
+    expect(await screen.findByRole("region", { name: "Доступные услуги" })).toBeInTheDocument();
     expect(
-      screen.queryByRole("region", { name: /Ayla подобрала/ }),
+      screen.queryByRole("region", { name: /Ayla рекомендует/ }),
     ).not.toBeInTheDocument();
     // …but the plain catalog underneath is untouched.
-    expect(within(screen.getByRole("region", { name: "Услуги" })).getAllByRole("article")).toHaveLength(4);
+    expect(within(screen.getByRole("region", { name: "Доступные услуги" })).getAllByRole("article")).toHaveLength(4);
     expect(screen.getByRole("region", { name: "Мастера" })).toBeInTheDocument();
     // And no generic stand-in WHY was invented in its place.
     for (const fake of [/подходит тебе/i, /выбрано по твоей цели/i, /Ayla рекомендует/i, /подобрано для вас/i]) {
@@ -215,13 +216,14 @@ describe("CustomerCatalogScreen (real mirror data)", () => {
       ]),
     );
     renderScreen();
-    await screen.findByRole("region", { name: "Услуги" });
+    await screen.findByRole("region", { name: "Доступные услуги" });
     expect(
-      screen.queryByRole("region", { name: /Ayla подобрала/ }),
+      screen.queryByRole("region", { name: /Ayla рекомендует/ }),
     ).not.toBeInTheDocument();
   });
 
   it("показывает только тех, кого есть чем объяснить", async () => {
+    vi.stubEnv("VITE_RECOMMENDATION_SHELF", "1"); // полка за флагом (OD-PILOT-9)
     mockedFetchServices.mockResolvedValue({ services: SERVICES });
     mockedFetchMasters.mockResolvedValue({ masters: MASTERS });
     mockedFetchRecommendations.mockResolvedValue(
@@ -231,7 +233,7 @@ describe("CustomerCatalogScreen (real mirror data)", () => {
       ]),
     );
     renderScreen();
-    const picks = await screen.findByRole("region", { name: /Ayla подобрала/ });
+    const picks = await screen.findByRole("region", { name: /Ayla рекомендует/ });
     const cards = within(picks).getAllByRole("article");
     expect(cards).toHaveLength(1);
     expect(cards[0]).toHaveTextContent("Маникюр");
@@ -246,14 +248,14 @@ describe("CustomerCatalogScreen (real mirror data)", () => {
     expect(await screen.findByRole("alert")).toBeInTheDocument();
     mockHappyPath();
     await user.click(screen.getByRole("button", { name: "Попробовать снова" }));
-    expect(await screen.findByRole("region", { name: "Услуги" })).toBeInTheDocument();
+    expect(await screen.findByRole("region", { name: "Доступные услуги" })).toBeInTheDocument();
   });
 
   it("filters the services list by the search query", async () => {
     const user = userEvent.setup();
     mockHappyPath();
     renderScreen();
-    const servicesSection = await screen.findByRole("region", { name: "Услуги" });
+    const servicesSection = await screen.findByRole("region", { name: "Доступные услуги" });
     await user.type(screen.getByRole("searchbox", { name: "Поиск по услугам" }), "ман");
     expect(within(servicesSection).getByText("Маникюр")).toBeInTheDocument();
     expect(within(servicesSection).queryByText("Педикюр")).not.toBeInTheDocument();
@@ -263,7 +265,7 @@ describe("CustomerCatalogScreen (real mirror data)", () => {
     const user = userEvent.setup();
     mockHappyPath();
     renderScreen();
-    const servicesSection = await screen.findByRole("region", { name: "Услуги" });
+    const servicesSection = await screen.findByRole("region", { name: "Доступные услуги" });
     await user.click(within(servicesSection).getByRole("button", { name: /Маникюр/ }));
     expect(await screen.findByText("SERVICE-svc-1")).toBeInTheDocument();
   });
@@ -304,7 +306,7 @@ describe("CustomerCatalogScreen (real mirror data)", () => {
     mockedFetchRecommendations.mockResolvedValue(RECS);
     renderScreen();
 
-    const servicesSection = await screen.findByRole("region", { name: "Услуги" });
+    const servicesSection = await screen.findByRole("region", { name: "Доступные услуги" });
     expect(within(servicesSection).getByText(/Гладкая кожа/)).toBeInTheDocument();
     expect(
       within(servicesSection).getByText("Сейчас нет свободных мастеров"),
@@ -328,7 +330,7 @@ describe("CustomerCatalogScreen (real mirror data)", () => {
     vi.stubEnv("DEV", false);
     mockHappyPath();
     renderScreen();
-    expect(await screen.findByRole("region", { name: "Услуги" })).toBeInTheDocument();
+    expect(await screen.findByRole("region", { name: "Доступные услуги" })).toBeInTheDocument();
     expect(screen.queryByText(/выдуманных/)).not.toBeInTheDocument();
     expect(screen.queryByText("Beauty Place")).not.toBeInTheDocument();
   });
@@ -349,7 +351,7 @@ describe("CustomerCatalogScreen — empty states (DRF-1482)", () => {
     const user = userEvent.setup();
     mockHappyPath();
     renderScreen();
-    await screen.findByRole("region", { name: "Услуги" });
+    await screen.findByRole("region", { name: "Доступные услуги" });
 
     // The audit defect: free-text search filters services to zero while
     // masters stay — the old gate rendered NOTHING here.
@@ -370,7 +372,7 @@ describe("CustomerCatalogScreen — empty states (DRF-1482)", () => {
     // каноническому адресу (DRF-1481).
     await user.click(screen.getByRole("button", { name: "Посмотреть все услуги" }));
     expect(screen.getByTestId("path")).toHaveTextContent("/customer/catalog");
-    const servicesSection = await screen.findByRole("region", { name: "Услуги" });
+    const servicesSection = await screen.findByRole("region", { name: "Доступные услуги" });
     expect(within(servicesSection).getAllByRole("article")).toHaveLength(4);
     expect(screen.queryByText(SEARCH_NO_MATCH_TEXT)).not.toBeInTheDocument();
   });
@@ -391,7 +393,7 @@ describe("CustomerCatalogScreen — empty states (DRF-1482)", () => {
     mockedFetchServices.mockResolvedValue({ services: SERVICES });
     mockedFetchMasters.mockResolvedValue({ masters: MASTERS });
     await user.click(screen.getByRole("button", { name: "Проверить снова" }));
-    expect(await screen.findByRole("region", { name: "Услуги" })).toBeInTheDocument();
+    expect(await screen.findByRole("region", { name: "Доступные услуги" })).toBeInTheDocument();
     expect(screen.queryByText(REGION_EMPTY_TEXT)).not.toBeInTheDocument();
   });
 
@@ -418,7 +420,7 @@ describe("CustomerCatalogScreen — empty states (DRF-1482)", () => {
     expect(screen.queryByText(SEARCH_NO_MATCH_TEXT)).not.toBeInTheDocument();
     expect(screen.queryByText(REGION_EMPTY_TEXT)).not.toBeInTheDocument();
     // The shop window stays (DRF-1164): услуги видны, с честной пометкой.
-    expect(screen.getByRole("region", { name: "Услуги" })).toBeInTheDocument();
+    expect(screen.getByRole("region", { name: "Доступные услуги" })).toBeInTheDocument();
 
     // «Смотреть все услуги» ведёт на канонический /customer/catalog.
     await user.click(screen.getByRole("button", { name: "Смотреть все услуги" }));
@@ -455,7 +457,7 @@ describe("CustomerCatalogScreen — empty states (DRF-1482)", () => {
   it("non-empty bookable catalog: no empty state at all (positive guard)", async () => {
     mockHappyPath();
     renderScreen();
-    await screen.findByRole("region", { name: "Услуги" });
+    await screen.findByRole("region", { name: "Доступные услуги" });
     expect(screen.queryByText(SEARCH_NO_MATCH_TEXT)).not.toBeInTheDocument();
     expect(screen.queryByText(REGION_EMPTY_TEXT)).not.toBeInTheDocument();
     expect(screen.queryByText(BOOKING_UNAVAILABLE_TEXT)).not.toBeInTheDocument();

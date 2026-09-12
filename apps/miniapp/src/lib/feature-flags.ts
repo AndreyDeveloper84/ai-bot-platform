@@ -41,3 +41,21 @@
  * Удалять его — отдельная уборка, а не побочный эффект этой правки.
  */
 export const STUB_SURFACES_ENABLED = import.meta.env.DEV;
+
+/**
+ * Полка рекомендаций (WHAT + WHY) — OD-PILOT-9 (`docs/OWNER_DECISIONS_2026-09-12.md`
+ * §3): первый Controlled Pilot запускается БЕЗ полки; включение — через
+ * feature flag / pilot cohort после Stage 2 gate (human review mappings,
+ * `VERIFIED > 0`, candidate-level Safety DRF-1627, единственный
+ * Recommendation Authority, grounded WHY, честные empty states,
+ * `recommendation_id` attribution).
+ *
+ * Выключено по умолчанию. `VITE_RECOMMENDATION_SHELF=1` включает. Функция,
+ * а не константа: читается при рендере, чтобы тест мог включить флаг
+ * на один случай без перезагрузки модуля.
+ * Пока флаг выключен, блок не рендерится даже если резолвер прислал
+ * picks с WHY — data-gate (25.08) остаётся вторым условием, не первым.
+ */
+export function recommendationShelfEnabled(): boolean {
+  return (import.meta.env.VITE_RECOMMENDATION_SHELF as string | undefined) === "1";
+}
