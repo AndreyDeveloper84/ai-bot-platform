@@ -74,6 +74,16 @@ export interface MissingItem {
   options?: AnketaOption[];
   allow_free_text?: boolean;
   progress?: AnketaProgress;
+  /**
+   * DRF-1746 — тип ответа по смыслу. Отсутствие = `single`; незнакомое
+   * значение экран рисует как `single` (к простому, не к пустому).
+   * `multi` отвечает `{option_keys: [...]}` одним запросом, `scale` —
+   * деления в порядке `options` с подписями концов, `text` — короткое
+   * поле с `text_limit`. `confirm` — компонент подтверждения (DRF-1745).
+   */
+  mode?: "single" | "multi" | "confirm" | "scale" | "text" | string;
+  scale?: { low_label: string; high_label: string };
+  text_limit?: number;
 }
 
 export interface GoalSuggestion {
@@ -125,6 +135,9 @@ export interface NextStep {
  * сервера, экран его не выводит.
  */
 export interface KnownAnketaAnswer {
+  /** DRF-1746 — ключи multi-ответа; [] у остальных режимов. */
+  option_keys?: string[];
+  mode?: string;
   step: string;
   prompt: string;
   option_key: string | null;
@@ -166,6 +179,11 @@ export type GoalSelectBody =
   | { intent: "start_anketa"; source_channel: "miniapp" }
   | {
       answer: { step: string; option_key: string };
+      source_channel: "miniapp";
+    }
+  /** DRF-1746 — режим multi: массив ключей одним ответом. */
+  | {
+      answer: { step: string; option_keys: string[] };
       source_channel: "miniapp";
     }
   | { answer: { step: string; text: string }; source_channel: "miniapp" }
