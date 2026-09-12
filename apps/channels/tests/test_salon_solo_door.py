@@ -249,3 +249,50 @@ class TestTheSecondVisitIsNotTreatedAsTheFirst:
 
         assert salon_handler.SOLO_OFFER.strip() in said[0]["text"]
         assert said[0]["attachments"]
+
+
+class TestIdentityLinkIsAStateNotJustAColumn:
+    """§6 пакета 12.09: регистрация заводит PENDING с аудит-пакетом;
+    отклонённый оператором человек получает безопасное сообщение."""
+
+    def test_registration_opens_a_pending_link_with_the_package(self, bot_user, said):
+        from apps.identity.models import SoloIdentityLink
+
+        salon_handler._register_solo_provider(
+            _Event(salon_handler.SOLO_REGISTER_CALLBACK), bot_user
+        )
+
+        link = SoloIdentityLink.objects.get(channel="max", channel_user_id="solo-door-1")
+        assert link.status == SoloIdentityLink.Status.PENDING
+        assert link.last_attempt_at is not None
+        # На пилоте автопопытка отказывает по имени — оно записано.
+        assert link.last_attempt_refusal in ("proxy_identity", "ayla_unreachable")
+        assert said[0]["text"] == salon_handler.SOLO_CREATED_PENDING
+
+    def test_a_rejected_person_gets_the_recovery_text_not_already_registered(self, bot_user, said):
+        from django.contrib.auth import get_user_model
+
+        from apps.identity.models import SoloIdentityLink
+        from apps.identity.services.solo_identity_link import (
+            REJECTED_RECOVERY_TEXT,
+            reject_by_operator,
+        )
+
+        salon_handler._register_solo_provider(
+            _Event(salon_handler.SOLO_REGISTER_CALLBACK), bot_user
+        )
+        said.clear()
+        # Положительная стража: до отказа возвращающийся видит «уже есть».
+        salon_handler._ask_for_code_with_solo_offer(_Event("привет"), bot_user)
+        assert said[0]["text"] == salon_handler.SOLO_ALREADY_REGISTERED
+        said.clear()
+
+        link = SoloIdentityLink.objects.get(channel="max", channel_user_id="solo-door-1")
+        operator = get_user_model().objects.create_user(username="op-door", password="x")  # noqa: S106
+        reject_by_operator(link, operator=operator, reason="identity_unverifiable")
+
+        salon_handler._ask_for_code_with_solo_offer(_Event("привет"), bot_user)
+
+        assert said[0]["text"] == REJECTED_RECOVERY_TEXT
+        assert "поддержк" in said[0]["text"].lower()
+        assert not said[0]["attachments"]

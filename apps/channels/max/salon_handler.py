@@ -649,6 +649,17 @@ def _already_has_a_solo_workspace(bot_user) -> bool:
     return Tenant.objects.filter(slug=slug).exists()
 
 
+def _solo_identity_rejected(bot_user) -> bool:
+    """Отклонил ли оператор связь личности этого соло-мастера (§6)."""
+    from apps.identity.models import SoloIdentityLink
+
+    return SoloIdentityLink.objects.filter(
+        channel=bot_user.channel,
+        channel_user_id=bot_user.channel_user_id,
+        status=SoloIdentityLink.Status.REJECTED,
+    ).exists()
+
+
 def _ask_for_code_with_solo_offer(event: CanonicalEvent, bot_user) -> None:
     """Попросить код — и, если уместно, предложить кабинет соло-мастера."""
 
@@ -660,6 +671,15 @@ def _ask_for_code_with_solo_offer(event: CanonicalEvent, bot_user) -> None:
         # Второе посещение. Предлагать завести то, что уже заведено, —
         # значит заставить человека нажать, чтобы узнать, что нажимать не
         # надо было.
+        #
+        # §6: если оператор ОТКЛОНИЛ связь — человек получает безопасное
+        # сообщение с путём (поддержка), а не «кабинет уже есть»: второе
+        # обещало бы кабинет, которого не будет.
+        if _solo_identity_rejected(bot_user):
+            from apps.identity.services.solo_identity_link import REJECTED_RECOVERY_TEXT
+
+            _reply(event, REJECTED_RECOVERY_TEXT)
+            return
         _reply(event, SOLO_ALREADY_REGISTERED)
         return
 
@@ -709,9 +729,16 @@ def _register_solo_provider(event: CanonicalEvent, bot_user) -> None:
     # получилось», — см. `solo_link_attempt`.
     link_refusal = None
     if result.created:
+        from apps.identity.services.solo_identity_link import open_link, record_attempt
         from apps.identity.services.solo_link_attempt import attempt_solo_link
 
+        # §6 пакета 12.09: связь личности — состояние с провенансом и
+        # аудит-пакетом, а не только столбец ключа. PENDING заводится ДО
+        # попытки, чтобы оператор видел заявку даже когда попытка упала.
+        link = open_link(result.master, bot_user=bot_user, tenant=result.tenant)
         link_refusal = attempt_solo_link(result.master, bot_user)
+        result.master.refresh_from_db(fields=["ayla_user_id"])
+        record_attempt(link, refusal=link_refusal, ayla_user_id=result.master.ayla_user_id)
 
     emit(
         "channels.max.salon.solo_registered",

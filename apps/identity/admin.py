@@ -40,7 +40,7 @@ import logging
 from django.contrib import admin
 from django.db import connection
 
-from apps.identity.models import BotUser, ClientProfile
+from apps.identity.models import BotUser, ClientProfile, SoloIdentityLink
 
 logger = logging.getLogger(__name__)
 
@@ -219,6 +219,54 @@ class ClientProfileAdmin(admin.ModelAdmin):
         return False
 
     def has_change_permission(self, request, obj=None):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        return False
+
+
+@admin.register(SoloIdentityLink)
+class SoloIdentityLinkAdmin(admin.ModelAdmin):
+    """Связь соло-мастера с Ayla — состояние, провенанс, аудит-пакет (§6).
+
+    Статус и провенанс — только чтение: их меняют контролируемые действия
+    на карточке мастера (`CatalogMasterAdmin`), не рука. Редактируются
+    только причина отказа и комментарий — таксономия для оператора.
+    """
+
+    list_display = (
+        "master",
+        "status",
+        "provenance",
+        "channel",
+        "channel_user_id",
+        "requested_at",
+        "decided_at",
+        "operator_username",
+    )
+    list_filter = ("status", "provenance", "reject_reason")
+    search_fields = ("channel_user_id", "operator_username", "master__name")
+    readonly_fields = (
+        "id",
+        "master",
+        "status",
+        "provenance",
+        "solo_registration_id",
+        "channel",
+        "channel_user_id",
+        "tenant_id_snapshot",
+        "phone",
+        "requested_at",
+        "operator_id",
+        "operator_username",
+        "decided_at",
+        "ayla_user_id",
+        "last_attempt_refusal",
+        "last_attempt_at",
+    )
+    fields = readonly_fields + ("reject_reason", "reject_note")
+
+    def has_add_permission(self, request):
         return False
 
     def has_delete_permission(self, request, obj=None):
