@@ -8,14 +8,17 @@
  * screen renders only what the bot mirror + Ayla scorer actually
  * provide:
  *
- *   «✨ Ayla подобрала» — top-3 services by scorer rank (founder cut
+ *   честное отсутствие (OD-PILOT-9, 12.09) — когда резолвер отвергает
+ *     кандидатов как неподтверждённые, показывается текст владельца и
+ *     два действия («Посмотреть услуги» / «Уточнить запрос»);
+ *   «✨ Ayla рекомендует» — полка, за флагом `RECOMMENDATION_SHELF_ENABLED`
+ *     до Stage 2 gate; top-3 services by resolver order (founder cut
  *     #1 cap), each with the WHY the source sent. Owner ruling 25.08:
- *     «Нет displayable WHY → нет блока „Ayla подобрала"» — the section
- *     renders only while `data.picks` is non-empty, and the lib puts a
- *     pick there only when the SOURCE explained it. Today the scorer
- *     sends `{service_id, score}` only, so the branded block is
- *     silently absent; «Услуги» and «Мастера» below are untouched;
- *   «Услуги» — all active services (mirror) → service detail
+ *     «Нет displayable WHY → нет блока» — the section renders only
+ *     while `data.picks` is non-empty, and the lib puts a pick there
+ *     only when the SOURCE explained it. Термин «Ayla рекомендует» —
+ *     только за canonical Recommendation;
+ *   «Доступные услуги» — all active services (mirror) → service detail
  *     (`/customer/catalog/:serviceId` — canonical address of the shared
  *     ServiceDetailScreen (DRF-1481), real screen continuing the
  *     booking flow);
@@ -40,6 +43,15 @@ import { ScreenLayout } from "../components/ScreenLayout";
 import { ServiceCard } from "../components/ServiceCard";
 import { DelayedSkeleton, ServiceCardSkeleton } from "../components/Skeleton";
 import { OfflineBanner } from "../components/OfflineBanner";
+import { recommendationShelfEnabled } from "../lib/feature-flags";
+import {
+  ACTION_CLARIFY_REQUEST,
+  ACTION_SHOW_SERVICES,
+  CANONICAL_SHELF_TITLE,
+  NO_VERIFIED_EVIDENCE_TEXT,
+  SURFACE_AVAILABLE_SERVICES,
+  showsNoVerifiedEvidence,
+} from "../lib/recommendation-absence";
 import { StateError } from "../components/StateError";
 import { useOnline } from "../hooks/useOnline";
 import type { Service } from "../lib/api";
@@ -110,6 +122,8 @@ export function CustomerCatalogScreen() {
    * ruling 25.08). So an empty list means exactly one thing: Ayla has
    * nothing it can explain right now.
    */
+  const picksOutcome = state.kind === "ok" ? state.data.picksOutcome : "UNAVAILABLE";
+
   const picksWithWhy = useMemo(() => {
     if (state.kind !== "ok") return [];
     const byId = new Map(state.data.services.map((s) => [s.id, s]));
@@ -188,15 +202,55 @@ export function CustomerCatalogScreen() {
         />
       )}
 
-      {/* Owner ruling 25.08 — «Нет displayable WHY → нет блока „Ayla
-          подобрала"». The gate is the DATA, not a feature flag: the
-          section shows exactly while the source sent picks it can
-          explain, so it revives by itself when `POST /recommendations`
-          starts returning reasons. Never render a stand-in WHY here. */}
-      {picksWithWhy.length > 0 && (
+      {/* OD-PILOT-9 (12.09) — первый пилот без полки: когда резолвер
+          ответил «связи не подтверждены», человеку это говорится словами
+          владельца и даются два действия, которые работают сегодня.
+          Только этот исход — остальные пустоты остаются молчаливыми
+          (см. `recommendation-absence.ts`). Не показывается поверх
+          поиска: с запросом человек уже делает то, что ему предлагают. */}
+      {!query && showsNoVerifiedEvidence(picksOutcome) && (
+        <section
+          className="callout"
+          role="status"
+          aria-labelledby="catalog-no-verified"
+        >
+          <p id="catalog-no-verified" style={{ margin: 0 }}>
+            {NO_VERIFIED_EVIDENCE_TEXT}
+          </p>
+          <div className="chip-row" style={{ marginTop: "var(--s-3)" }}>
+            <button
+              type="button"
+              className="btn-secondary"
+              onClick={() =>
+                document
+                  .getElementById("catalog-services")
+                  ?.scrollIntoView({ behavior: "smooth", block: "start" })
+              }
+            >
+              {ACTION_SHOW_SERVICES}
+            </button>
+            <button
+              type="button"
+              className="btn-secondary"
+              onClick={() => navigate("/customer/goal-select")}
+            >
+              {ACTION_CLARIFY_REQUEST}
+            </button>
+          </div>
+        </section>
+      )}
+
+      {/* Полка за флагом до Stage 2 gate (OD-PILOT-9); второе условие —
+          owner ruling 25.08 «Нет displayable WHY → нет блока»: the gate
+          on DATA stays — the section shows only while the source sent
+          picks it can explain. Never render a stand-in WHY here. Имя —
+          «Ayla рекомендует»: источник блока — canonical resolver (#1529),
+          и только за ним владелец закрепил этот термин. */}
+      {recommendationShelfEnabled() && picksWithWhy.length > 0 && (
         <section aria-labelledby="catalog-picks">
           <h2 id="catalog-picks" className="customer-catalog__section-title">
-            <span aria-hidden="true">✨ </span>Ayla подобрала
+            <span aria-hidden="true">✨ </span>
+            {CANONICAL_SHELF_TITLE}
           </h2>
           {picksWithWhy.map(({ service, reasons }) => (
             <article key={service.id} className="customer-catalog__card-l2">
@@ -220,7 +274,7 @@ export function CustomerCatalogScreen() {
       {visibleServices.length > 0 && (
         <section aria-labelledby="catalog-services">
           <h2 id="catalog-services" className="customer-catalog__section-title">
-            Услуги
+            {SURFACE_AVAILABLE_SERVICES}
           </h2>
           {visibleServices.map((service) => (
             <article key={service.id}>
