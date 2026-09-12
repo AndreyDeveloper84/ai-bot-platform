@@ -7,6 +7,7 @@ unit tests; this file targets the skill-level integration.
 
 from __future__ import annotations
 
+from typing import Any
 from unittest.mock import Mock, patch
 
 from apps.consent.personal_calculation import ConsentAttestation
@@ -749,9 +750,9 @@ class TestSummaryCardShowsMethodAndInputs:
 # ─── §5.1: предложение показывается как предложение и подтверждается ──────
 
 
-def _proposed_profile(**over) -> ProfileResponse:
+def _proposed_profile(**over: Any) -> ProfileResponse:
     """Профиль с ``ayla_proposed``: DTO обнуляет числа, они живут в ``raw``."""
-    raw = {
+    raw: dict[str, Any] = {
         "norms": {
             "daily_kcal": 1650,
             "daily_protein_g": 100,
@@ -765,7 +766,7 @@ def _proposed_profile(**over) -> ProfileResponse:
         },
     }
     raw.update(over.pop("raw", {}))
-    kwargs = dict(
+    kwargs: dict[str, Any] = dict(
         gender="female",
         age=30,
         height_cm=168,
