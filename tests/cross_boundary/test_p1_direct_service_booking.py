@@ -14,7 +14,7 @@
 SalonService.duration_minutes      = 45   каталог берёт в бронь (service_resolver, AMD-019)
 SpecialistService.duration_minutes = 60   бот ПОКАЗЫВАЕТ (specialist-services, «путь котировки»)
 SpecialistService.price            = 1500 ребро — и бронь, и котировка
-SalonService.base_price            = null список услуг (salon-services): цены у слоя нет
+SalonService.base_price            = null список услуг (salon-services): цены у слоя нет → None (DRF-1727)
 ```
 
 Что показал локальный стенд 12.09.2026 (каталог ``feat/seed-golden-p1``):
@@ -241,16 +241,19 @@ def test_the_service_list_does_not_show_a_zero_price_for_a_priced_edge(
 ) -> None:
     """Второй ряд: список услуг, который человек видит ДО котировки.
 
-    ``salon-services`` несёт ``base_price``, у слоя её нет (``null``), и
-    клиент бота превращает это в ``0.0`` — ноль как имя отсутствия, тот же
-    класс, что §103. Человек видит «0 ₽» на услуге, у которой ребро стоит
-    1500. Красный здесь — вторая находка P1, отдельная от длительности.
+    ``salon-services`` несёт ``base_price``, у слоя её нет (``null``). До
+    DRF-1727 клиент бота превращал это в ``0.0`` — ноль как имя отсутствия,
+    тот же класс, что §103, — и этот тест был красным. Теперь отсутствие
+    приходит как ``None``: честное «салонной цены нет», и это допустимо.
+    Красный здесь — снова подставленный ноль на услуге, у которой ребро
+    стоит 1500.
     """
     service = _golden_service(booking, bot_tenant)
     print(
         f"\n[CROSS-BOUNDARY P1] список услуг: price_min={service.price_min} price_max={service.price_max}"
     )
-    assert service.price_min > 0 or service.price_max > 0, (
-        f"список услуг показывает цену {service.price_min}/{service.price_max} на услуге, "
-        f"у которой ребро стоит {SEEDED_EDGE_PRICE}: ноль подставлен вместо отсутствия"
-    )
+    for name, value in (("price_min", service.price_min), ("price_max", service.price_max)):
+        assert value is None or value > 0, (
+            f"список услуг показывает {name}={value} на услуге, у которой ребро стоит "
+            f"{SEEDED_EDGE_PRICE}: ноль подставлен вместо отсутствия (DRF-1727)"
+        )
