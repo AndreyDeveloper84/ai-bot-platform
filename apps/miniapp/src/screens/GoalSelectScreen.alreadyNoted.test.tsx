@@ -144,10 +144,10 @@ describe("«Уже учла» рисуется из документа", () => {
     renderScreen();
 
     expect(await screen.findByText(FINAL_PROMPT)).toBeInTheDocument();
-    const items = within(block()).getAllByRole("listitem");
-    expect(items[0]).toHaveTextContent("хочу маникюр");
-    expect(within(items[0]).queryByRole("button")).toBeNull();
-    expect(items[1]).toHaveTextContent("Лицо и кожа");
+    const [goalRow, areaRow] = within(block()).getAllByRole("listitem");
+    expect(goalRow).toHaveTextContent("хочу маникюр");
+    expect(within(goalRow as HTMLElement).queryByRole("button")).toBeNull();
+    expect(areaRow).toHaveTextContent("Лицо и кожа");
     // Прежняя секция «Текущая цель» не дублирует цель второй раз.
     expect(screen.queryByText("Текущая цель")).toBeNull();
   });
