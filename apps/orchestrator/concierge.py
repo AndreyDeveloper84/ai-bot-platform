@@ -58,6 +58,7 @@ from apps.identity.services.global_tenant import get_global_bot_tenant
 from apps.llm.model_tiers import TIER_SMART
 from apps.llm.pricing import UnknownModelError, compute_cost
 from apps.llm.router import get_router
+from apps.orchestrator.clarify_guard import filter_clarification_options
 from apps.marketplace.discovery import (
     city_service_samples,
     discover_masters,
@@ -2232,9 +2233,15 @@ def _concierge_turn(
             # would be the second way of lying, and «отвечу через минуту»
             # was the first.
             return _reply(text=get_no_answer("ru"), persisted=True)
+        # DRF-1765 — граница C02 держится ЗДЕСЬ, на опциях модели, а не в
+        # рендере: уточнение по материалу каталога (DRF-1531, §29.2) нарочно
+        # называет услуги и через этот фильтр не идёт.
+        options, _dropped = filter_clarification_options(
+            [str(o).strip() for o in (data.get("options") or []) if str(o).strip()]
+        )
         rendered = _render_ask_clarification(
             question,
-            list(data.get("options") or []),
+            options,
             data.get("mode"),
         )
         # DRF-1779 — вопрос задан: следующая реплика человека — ответ на него.
