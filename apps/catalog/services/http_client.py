@@ -132,7 +132,13 @@ class CatalogSpecialistDTO:
     ``is_active`` mirrors status==active AND is_available upstream; the
     feed's queryset already filters to those, but the mapping stays
     explicit for forward-compat. Platform-owned fields (invite_status,
-    photo_url, archived_at…) never ride here — sync must not touch them.
+    archived_at…) never ride here — sync must not touch them.
+
+    ``avatar_url`` (DRF-1812, M20) — фото мастера, владелец которого каталог
+    (``SpecialistProfile.avatar``). Трёхзначно, как ``address``: ``None`` —
+    ключа ``avatar`` в строке не было (старая Ayla, не знаем), ``""`` — ключ
+    был и пуст (фото в каталоге нет), строка — URL. ``photo_url`` у
+    ``CatalogMaster`` с этого среза зеркальное поле (см. upserter).
 
     ``tenant`` is the owning salon as Ayla states it (DRF-1313). It exists so
     the upsert can check the scope it asked for instead of trusting that the
@@ -166,6 +172,7 @@ class CatalogSpecialistDTO:
     # сегодня ещё нет (его заводит DRF-1587), поэтому ``None`` — штатное
     # состояние, а не дефект.
     tenant_address: str | None = None
+    avatar_url: str | None = None
     raw: dict[str, Any] = field(default_factory=dict)
 
 
@@ -1079,5 +1086,9 @@ def _parse_specialist(row: dict[str, Any]) -> CatalogSpecialistDTO:
         location_lat=_parse_decimal(row.get("location_lat")),
         location_lng=_parse_decimal(row.get("location_lng")),
         tenant_address=_optional_str(row, "tenant_address"),
+        # DRF-1812 — ``avatar`` каталога: ImageField сериализуется абсолютным
+        # URL (в контексте запроса); относительный — тоже URL, только без
+        # хоста, и подменять его здесь нечем, поэтому берётся дословно.
+        avatar_url=_optional_str(row, "avatar"),
         raw=row,
     )
