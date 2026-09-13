@@ -1413,8 +1413,15 @@ jobs:
       # on. download-artifact fails the step when its pattern matches
       # nothing (e.g. every shard died before uploading); the summing step
       # below then says so in words and exits non-zero.
+      # DRF-1786 (12.09): on a docs-only PR the shards never ran, so there is
+      # no junit to download and no census to sum — these three steps are
+      # SKIPPED (by name, in the log), not executed against nothing. Executed
+      # against nothing they said «JUNIT MISSING» and went red (bot #1714,
+      # the first docs-only PR after the twin workflows were removed) — and
+      # that message is correct when code changed and shards vanished, which
+      # is exactly why it must not fire when no code changed.
       - name: Download shard junit artefacts
-        if: always()
+        if: always() && needs.changes.outputs.code == 'true'
         continue-on-error: true
         uses: actions/download-artifact@v8
         with:
@@ -1423,7 +1430,7 @@ jobs:
           merge-multiple: true
 
       - name: Download apps/ collection census
-        if: always()
+        if: always() && needs.changes.outputs.code == 'true'
         continue-on-error: true
         uses: actions/download-artifact@v8
         with:
@@ -1431,7 +1438,7 @@ jobs:
           path: census
 
       - name: apps/ test counts, summed across shards
-        if: always()
+        if: always() && needs.changes.outputs.code == 'true'
         env:
           # Kept next to the matrix it describes. If you add or remove a
           # shard above, this number moves in the same edit — a missing

@@ -150,6 +150,83 @@ class ConnectPending(Exception):
         self.blocked_by = blocked_by
 
 
+#: Причины «подключение сейчас невозможно», известные ДО нажатия (DRF-1613).
+#:
+#: :func:`connect_salon` узнаёт о пустом токене только внутри
+#: ``ensure_tenant`` — то есть после того, как оператор заполнил три поля
+#: и нажал. Форма, которая заведомо не сработает, обязана сказать это до
+#: того, как её заполнят. Пустой токен — тот же факт, что
+#: :data:`PENDING_PROVISIONING_TOKEN_MISSING`, поэтому и код тот же: один
+#: факт — одно имя, на баннере и в ``SETUP_PENDING``.
+#:
+#: Второе условие вычисляется, а не угадывается: каталог отвергает при
+#: старте конфигурацию, где провижининг-токен равен общему Bearer
+#: (``users.E002``). Если у бота они равны, подключение не состоится ни
+#: при каком ответе каталога — либо 403, либо каталог с таким же токеном
+#: не поднялся бы вовсе.
+#:
+#: Отказ каталога (403) отсюда не виден и не выдумывается — он остаётся
+#: фактом момента нажатия (:data:`PENDING_PROVISIONING_REFUSED`).
+PREFLIGHT_TOKEN_MISSING = PENDING_PROVISIONING_TOKEN_MISSING
+PREFLIGHT_TOKEN_EQUALS_INTERNAL = "provisioning_token_equals_internal"
+
+PREFLIGHT_LABELS: dict[str, str] = {
+    PREFLIGHT_TOKEN_MISSING: (
+        "в окружении бота не задан AYLA_TENANT_PROVISIONING_TOKEN. Подключить "
+        "салон — ни новый, ни существующий в Ayla — без него нельзя: единственный "
+        "путь идёт через POST /internal/tenants/ под этим токеном. Задайте его "
+        "(значение должно совпадать с каталогом и отличаться от "
+        "AYLA_INTERNAL_API_TOKEN) и откройте этот экран снова"
+    ),
+    PREFLIGHT_TOKEN_EQUALS_INTERNAL: (
+        "в окружении бота AYLA_TENANT_PROVISIONING_TOKEN совпадает с "
+        "AYLA_INTERNAL_API_TOKEN. Каталог такую пару отвергает (users.E002): "
+        "общий Bearer не вправе заводить салоны. Выдайте провижинингу отдельный "
+        "секрет и откройте этот экран снова"
+    ),
+}
+
+
+@dataclass(frozen=True)
+class ConnectPreflight:
+    """Можно ли сейчас вообще нажимать «Подключить» — по факту из настроек.
+
+    ``ok=True`` не обещает успеха: каталог ещё может ответить 403 или 409,
+    и это узнаётся только нажатием. ``ok=False`` обещает отказ: до
+    каталога дело не дойдёт.
+    """
+
+    ok: bool
+    reason: str = ""
+    label: str = ""
+
+
+def connect_preflight() -> ConnectPreflight:
+    """Прочитать те же настройки, что читает ``ensure_tenant``, и назвать исход.
+
+    Источник один и тот же (``settings.AYLA_TENANT_PROVISIONING_TOKEN``),
+    чтобы экран не расходился с клиентом: что здесь «пусто», то и там
+    :class:`~apps.catalog.services.http_client.CatalogProvisioningTokenMissing`.
+    """
+    from django.conf import settings
+
+    token = getattr(settings, "AYLA_TENANT_PROVISIONING_TOKEN", "") or ""
+    if not token:
+        return ConnectPreflight(
+            ok=False,
+            reason=PREFLIGHT_TOKEN_MISSING,
+            label=PREFLIGHT_LABELS[PREFLIGHT_TOKEN_MISSING],
+        )
+    internal = getattr(settings, "AYLA_INTERNAL_API_TOKEN", "") or ""
+    if internal and token == internal:
+        return ConnectPreflight(
+            ok=False,
+            reason=PREFLIGHT_TOKEN_EQUALS_INTERNAL,
+            label=PREFLIGHT_LABELS[PREFLIGHT_TOKEN_EQUALS_INTERNAL],
+        )
+    return ConnectPreflight(ok=True)
+
+
 @dataclass(frozen=True)
 class SalonAssessment:
     """Состояние одного салона глазами клиента."""
