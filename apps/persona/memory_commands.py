@@ -146,6 +146,8 @@ _KEY_KEYWORDS: dict[str, tuple[str, ...]] = {
     "preferred_districts": ("район", "метро", "округ", "географ"),
     "price_range": ("бюджет", "цен", "стоимост", "деньг", "рубл"),
     "favorite_masters": ("мастер",),
+    "city": ("город",),
+    "visit_context": ("когда прихож", "после работ", "вечер", "выходн"),
 }
 
 # Scanner-correction keys (DRF-1454) carry the dish in the key itself
@@ -178,6 +180,8 @@ _DOMAIN_LABELS: dict[str, str] = {
     "preferred_districts": "районы",
     "price_range": "бюджет",
     "favorite_masters": "любимых мастеров",
+    "city": "город",
+    "visit_context": "когда приходишь",
 }
 
 

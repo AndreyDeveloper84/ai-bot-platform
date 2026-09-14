@@ -205,7 +205,8 @@ def _merge_inferred(bot_user: Any, facts: dict, confidences: dict, sources: dict
         # `favorite_masters` carries a NAME (the block would render it as a
         # bogus «id=Анна»). Both reach the prompt through the DECLARED side
         # post-bridge; the local row is for the show/forget loop.
-        if raw_key in ("price_range", "favorite_masters"):
+        # said_memory (city / visit_context) — свой блок промпта, не ai-core.
+        if raw_key in ("price_range", "favorite_masters", "city", "visit_context"):
             continue
         key = _INFERRED_KEY_MAP.get(raw_key, raw_key)
         value = content.get("value")
