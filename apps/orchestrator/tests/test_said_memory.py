@@ -157,6 +157,7 @@ class TestHealthMeaningWritesNothing:
         written = said_memory.record_said_facts(bot_user, conversation, OWNER_SCREENING_ANSWER)
 
         assert written == 0
+        # empty-assert-ok: ответ на вопросы скрининга не читается по построению — строк быть не должно
         assert _said(bot_user) == {}
 
     def test_owner_first_turn_stores_evening_and_nothing_about_the_back(self, settings):
@@ -198,6 +199,7 @@ class TestCity:
         )
 
         assert written == 0
+        # empty-assert-ok: город назвал только ассистент — человеком не сказан, строк быть не должно
         assert _said(bot_user) == {}
 
     def test_city_without_a_search_is_not_stored(self, settings):
@@ -205,6 +207,7 @@ class TestCity:
         # Город назван человеком и распознан — но модель его не искала.
         assert said_memory._person_named_cities(conversation, "я из Пензы") == ["Пенза"]
         assert said_memory.record_said_facts(bot_user, conversation, "я из Пензы") == 0
+        # empty-assert-ok: модель не искала мастеров — город не пишется по построению
         assert _said(bot_user) == {}
 
     def test_city_we_do_not_serve_is_not_stored(self, settings, monkeypatch):
