@@ -85,6 +85,21 @@ def food_drink_clarify_keyboard() -> list[dict[str, str]]:
     )
 
 
+def food_text_estimate_keyboard() -> list[dict[str, str]]:
+    """DRF-1837 — карточка оценки по ТЕКСТУ («Я распознала так», §109).
+
+    Без ``scan_id``: оценка по тексту не создаёт скана, её держит
+    ``Conversation.skill_state`` (:mod:`apps.skills.food_clarify.text_entry`).
+    «✏️ Поправить граммы» — единственная правка на этом шаге: блюдо правится
+    новой фразой («Не то» → написать заново).
+    """
+    return _to_keyboard(
+        Button(label="✅ В дневник", callback="cb:food:text_log"),
+        Button(label="✏️ Поправить граммы", callback="cb:food:text_grams"),
+        Button(label="❌ Не то", callback="cb:food:text_reject"),
+    )
+
+
 def food_recognition_keyboard(scan_id: str) -> list[dict[str, str]]:
     """P1 food_scanner confirmation card.
 
