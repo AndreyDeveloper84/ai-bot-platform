@@ -199,6 +199,10 @@ def _prompt_visible(fact: GreenFact) -> bool:
 
     content = fact.content if isinstance(fact.content, dict) else {}
     key = content.get("key")
+    # Память сказанного (said_memory) идёт в промпт своим блоком с правилом
+    # «предложи подтвердить»; здесь она была бы вторым, голым утверждением.
+    if key in ("city", "visit_context"):
+        return False
     return not (isinstance(key, str) and key.startswith(_PROMPT_EXCLUDED_KEY_PREFIXES))
 
 

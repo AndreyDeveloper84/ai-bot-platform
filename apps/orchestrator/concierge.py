@@ -117,6 +117,7 @@ from apps.orchestrator.open_question import (
     render_answer_block,
 )
 from apps.orchestrator.safety.outbound import ACTION_PROMISE_STEMS
+from apps.orchestrator.said_memory import render_said_block
 from apps.orchestrator.refusal_memo import (
     RefusedQuery,
     recall_refusals,
@@ -1738,8 +1739,10 @@ def _concierge_turn(
     # anyway; an instruction is read as an instruction.
     refusal_block = render_refusal_block(conversation)
     answer_block = render_answer_block(answered)
+    # Бриф «Мозг» п.4 — что человек уже сказал о себе в прошлых разговорах.
+    said_block = render_said_block(bot_user)
     turn_extra_system = "\n\n".join(
-        part for part in (extra_system, refusal_block, answer_block) if part
+        part for part in (extra_system, refusal_block, answer_block, said_block) if part
     )
 
     def _renderer(_ctx: Any) -> str:
