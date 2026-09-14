@@ -1234,6 +1234,9 @@ def _register_solo_provider(
     # писать запрещено. Причина приезжает машинным именем, а не «не
     # получилось», — см. `solo_link_attempt`.
     link_refusal = None
+    catalog_refusal = None
+    from apps.identity.services.solo_catalog_provisioning import provision_catalog_workspace
+
     if result.created:
         from apps.identity.services.solo_identity_link import open_link, record_attempt
         from apps.identity.services.solo_link_attempt import attempt_solo_link
@@ -1244,9 +1247,36 @@ def _register_solo_provider(
         # The SOLO row (DRF-1784): the link is about the workspace, and the
         # person has no other row — the salon one is not created any more.
         link = open_link(result.master, bot_user=result.bot_user, tenant=result.tenant)
+        # DRF-1830 (G1/G4): каталожный workspace с тем же UUID и DRAFT-профиль —
+        # до автосвязи, чтобы оператору было что связывать. Сбой не отменяет
+        # кабинет в боте: причина пишется на связь, повтор — у оператора.
+        catalog_refusal = provision_catalog_workspace(
+            link,
+            tenant=result.tenant,
+            bot_user=result.bot_user,
+            display_name=result.bot_user.display_name or result.master.name,
+        )
         link_refusal = attempt_solo_link(result.master, result.bot_user)
         result.master.refresh_from_db(fields=["ayla_user_id"])
         record_attempt(link, refusal=link_refusal, ayla_user_id=result.master.ayla_user_id)
+
+    else:
+        # Повторное «Создать мой профиль»: кабинет уже есть, но каталог мог
+        # не принять первый раз (токен, сеть) — повторяем провижининг, если
+        # он ещё не подтверждён. Уже подтверждённый не вызывается (readback).
+        from apps.identity.models import SoloIdentityLink
+
+        master = getattr(result, "master", None)
+        existing_link = (
+            SoloIdentityLink.objects.filter(master=master).first() if master is not None else None
+        )
+        if existing_link is not None:
+            catalog_refusal = provision_catalog_workspace(
+                existing_link,
+                tenant=result.tenant,
+                bot_user=result.bot_user,
+                display_name=result.bot_user.display_name or result.master.name,
+            )
 
     emit(
         "channels.max.salon.solo_registered",
@@ -1256,6 +1286,7 @@ def _register_solo_provider(
             "setup_state": result.setup_state.value,
             "blocked_by": result.blocked_by,
             "link_refusal": link_refusal,
+            "catalog_provisioning_refusal": catalog_refusal,
         },
     )
     logger.info(

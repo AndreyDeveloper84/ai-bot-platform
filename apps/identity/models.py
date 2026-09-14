@@ -1375,6 +1375,28 @@ class SoloIdentityLink(models.Model):
         help_text="Машинная причина последнего отказа автосвязи (solo_link_attempt).",
     )
     last_attempt_at = models.DateTimeField(null=True, blank=True)
+    # --- каталожный workspace (DRF-1830, M29; решение владельца G1/G4) ---
+    # Три разных «SETUP_PENDING» не имеют права делить одно слово: токена
+    # нет у нас, каталог отказал, каталог не ответил — чинятся в разных
+    # местах. Поэтому провижининг пишет свой исход рядом со связью, а не
+    # в ``last_attempt_refusal`` автосвязи.
+    catalog_specialist_id = models.UUIDField(
+        null=True,
+        blank=True,
+        help_text="SpecialistProfile.id DRAFT-профиля, заведённого в каталоге для этого workspace.",
+    )
+    catalog_provisioned_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="Когда каталог подтвердил solo-workspace (readback ответа), не когда послали.",
+    )
+    catalog_provisioning_refusal = models.CharField(
+        max_length=64,
+        blank=True,
+        default="",
+        help_text="Машинная причина последнего неуспешного провижининга в каталоге; "
+        "пусто после успеха.",
+    )
 
     class Meta:
         verbose_name = "Связь соло-мастера с Ayla"
