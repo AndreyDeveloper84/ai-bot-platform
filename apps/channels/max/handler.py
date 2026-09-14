@@ -1651,6 +1651,13 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
     was_memory_command = False
     concierge_turn_ran = False
     safety = evaluate_inbound(event.text)
+    # DRF-1885 — ход открывает новую ревизию DecisionReadiness и пишет в неё
+    # вердикт pre_check. Ответ не меняет: решение ниже принимает прежний
+    # путь; читатель вердикта сегодня — теневой движок (флаг
+    # DRE_SHADOW_ENABLED), без флага — ноль работы. Не бросает.
+    from apps.orchestrator.dr_shadow import record_turn_safety
+
+    record_turn_safety(conversation, safety)
     if not safety.allowed:
         _emit_safety_shortcircuit(bot_user, safety, is_global=True)
         reply = DiscoveryReply(text=safety.reply_text)
