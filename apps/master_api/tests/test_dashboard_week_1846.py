@@ -61,7 +61,9 @@ class TestCounts:
         _visit(tenant, m, datetime(2026, 5, 19, 10, 0, tzinfo=MSK))
         _visit(tenant, m, datetime(2026, 5, 19, 12, 0, tzinfo=MSK), "cancelled")
         _visit(tenant, m, datetime(2026, 5, 19, 14, 0, tzinfo=MSK), "no_show")
-        peer = make_master(tenant, name="Коллега", invite_status=CatalogMaster.InviteStatus.ACCEPTED)
+        peer = make_master(
+            tenant, name="Коллега", invite_status=CatalogMaster.InviteStatus.ACCEPTED
+        )
         _visit(tenant, peer, datetime(2026, 5, 19, 16, 0, tzinfo=MSK), "completed")
 
         week = ds.get_week_summary(m, NOW)
@@ -82,7 +84,9 @@ class TestRating:
         master.review_count = count
         master.save(update_fields=["rating", "review_count"])
 
-    def test_backed_by_reviews_is_shown(self, tenant: Tenant, accepted_master: CatalogMaster) -> None:
+    def test_backed_by_reviews_is_shown(
+        self, tenant: Tenant, accepted_master: CatalogMaster
+    ) -> None:
         self._rate(accepted_master, "4.80", 12)
         assert ds.get_week_summary(accepted_master, NOW).rating == {
             "value": 4.8,
