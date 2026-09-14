@@ -66,6 +66,11 @@ SECTIONS: Mapping[str, str] = {
     "memory_key:preferred_districts": "memory",
     "memory_key:price_range": "memory",
     "memory_key:favorite_masters": "memory",
+    # DRF-1872 — память сказанного (said_memory): те же зелёные строки, тот же
+    # экспорт `read_green_entries` без фильтра по ключу — перечислены, чтобы
+    # таблица оставалась полной описью.
+    "memory_key:city": "memory",
+    "memory_key:visit_context": "memory",
     # The Mini App profile screen's own values. Added by DRF-1370: a person
     # who exported their data did not see the preferences they had set
     # themselves, on our own screen, minutes earlier.

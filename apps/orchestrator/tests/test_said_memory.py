@@ -282,6 +282,16 @@ class TestSaidBlock:
 # --------------------------------------------------------------------------- #
 # Условие 2: стирание существующими путями                                    #
 # --------------------------------------------------------------------------- #
+class _EmptyAylaExport:
+    """Клиент Ayla для выгрузки: пустая половина Ayla, чтобы проверялась половина бота."""
+
+    def get_personal_data_export(self, *, ayla_user_id: str, external_user_id: str) -> dict:
+        return {}
+
+    def close(self) -> None:
+        return None
+
+
 class TestErasure:
     def _with_both_facts(self, settings):
         bot_user, conversation = _person(settings)
@@ -320,6 +330,29 @@ class TestErasure:
         delete_personal_data(bot_user, client=ayla)
 
         assert _said(bot_user) == {}
+
+    def test_personal_data_export_carries_both_facts_under_memory(self, settings):
+        """152-ФЗ ст. 14: выгрузка по запросу содержит сказанное — в разделе
+        ``memory`` (``export_coverage.SECTIONS``), с происхождением и датой."""
+        from apps.identity.services.privacy import export_personal_data
+
+        bot_user, _conversation = self._with_both_facts(settings)
+
+        # Пустая выгрузка Ayla — как `_NoAyla` у сторожа export_coverage: здесь
+        # проверяется половина бота, раздел `memory`.
+        payload = export_personal_data(bot_user, client=_EmptyAylaExport())
+
+        rows = {
+            row["content"].get("key"): row
+            for row in payload["memory"]
+            if isinstance(row.get("content"), dict)
+        }
+        assert rows["city"]["content"]["value"] == "Пенза"
+        assert rows["visit_context"]["content"]["value"] == "after_work"
+        for key in ("city", "visit_context"):
+            assert rows[key]["content"]["origin"] == said_memory.ORIGIN_CONVERSATION
+            assert rows[key]["content"]["said_at"]
+            assert rows[key]["is_current"] is True
 
     def test_show_names_them_and_forget_city_removes_only_the_city(self, settings):
         bot_user, _conversation = self._with_both_facts(settings)
