@@ -109,6 +109,11 @@ ROUTE_TABLE: tuple[Route, ...] = (
     Route("GET", "/api/v1/internal/specialists/", Auth.BEARER),
     Route("GET", "/api/v1/internal/specialists/{id}/", Auth.BEARER),
     Route("GET", "/api/v1/internal/specialists/{id}/slots/", Auth.BEARER),
+    # DRF-1802 (M10) — заявки мастера о разрыве канона, под субъектом (M9).
+    Route("GET", "/api/v1/internal/specialists/{id}/canon-gap-requests/", Auth.BEARER_EXT),
+    Route("POST", "/api/v1/internal/specialists/{id}/canon-gap-requests/", Auth.BEARER_EXT),
+    Route("GET", "/api/v1/internal/specialists/{id}/canon-gap-requests/similar/", Auth.BEARER_EXT),
+    Route("GET", "/api/v1/internal/specialists/{id}/canon-gap-requests/{id}/", Auth.BEARER_EXT),
     # Writes pin X-Idempotency-Key — the double-booking dedup guarantee
     # (В2.4), same rationale as payments' Idempotence-Key row below.
     Route(
@@ -407,6 +412,28 @@ def _exercise_booking() -> None:
     _swallow(lambda: c.get_repeat_intent(external_user_id=_EXT_USER, booking_id="APPTID"))
     # DRF-1233 canonical version read.
     _swallow(lambda: c.get_appointment_version(external_user_id=_EXT_USER, booking_id="APPTID"))
+    # DRF-1802 (M10) — canon gap requests under the subject.
+    _swallow(lambda: c.list_canon_gap_requests(specialist_id="SPECID", external_user_id=_EXT_USER))
+    _swallow(
+        lambda: c.create_canon_gap_request(
+            specialist_id="SPECID",
+            external_user_id=_EXT_USER,
+            name="Татуаж",
+            description="",
+            duration_minutes=60,
+            price="1000",
+        )
+    )
+    _swallow(
+        lambda: c.similar_canon_templates(
+            specialist_id="SPECID", external_user_id=_EXT_USER, name="Татуаж"
+        )
+    )
+    _swallow(
+        lambda: c.get_canon_gap_request(
+            specialist_id="SPECID", external_user_id=_EXT_USER, request_id=str(_PROFILE_UUID)
+        )
+    )
 
 
 def _exercise_profile() -> None:

@@ -1286,6 +1286,90 @@ class AylaBookingHTTPClient:
             raise ScheduleBlockConflictError("has_active_appointments")
         return self._ok(resp, success=(200,))
 
+    # ── DRF-1802 (M10): «своя услуга» мастера = заявка о разрыве канона (M9) ─
+
+    def list_canon_gap_requests(
+        self,
+        *,
+        specialist_id: str,
+        external_user_id: str,
+    ) -> dict[str, Any]:
+        """``GET internal/specialists/{id}/canon-gap-requests/`` — свои заявки.
+
+        Субъект — мастер (как у часов, DRF-1815): профиль в URL обязан быть
+        его собственным, иначе каталог отвечает 403 → :class:`BookingBadRequestError`.
+        """
+        resp = self._request(
+            "GET",
+            f"specialists/{specialist_id}/canon-gap-requests/",
+            external_user_id=external_user_id,
+        )
+        return self._ok(resp, success=(200,))
+
+    def create_canon_gap_request(
+        self,
+        *,
+        specialist_id: str,
+        external_user_id: str,
+        name: str,
+        description: str,
+        duration_minutes: int,
+        price: str,
+    ) -> dict[str, Any]:
+        """``POST internal/specialists/{id}/canon-gap-requests/`` — завести PENDING.
+
+        Каталог ничего не создаёт в каноне и возвращает заявку плюс подсказку
+        «похожая услуга» без связи. Решения из бота нет — только владелец в
+        Django-admin каталога.
+        """
+        resp = self._request(
+            "POST",
+            f"specialists/{specialist_id}/canon-gap-requests/",
+            json_body={
+                "name": name,
+                "description": description,
+                "duration_minutes": duration_minutes,
+                "price": price,
+            },
+            external_user_id=external_user_id,
+        )
+        return self._ok(resp, success=(201,))
+
+    def similar_canon_templates(
+        self,
+        *,
+        specialist_id: str,
+        external_user_id: str,
+        name: str,
+    ) -> dict[str, Any]:
+        """``GET internal/specialists/{id}/canon-gap-requests/similar/?name=`` — только чтение."""
+        resp = self._request(
+            "GET",
+            f"specialists/{specialist_id}/canon-gap-requests/similar/",
+            params={"name": name},
+            external_user_id=external_user_id,
+        )
+        return self._ok(resp, success=(200,))
+
+    def get_canon_gap_request(
+        self,
+        *,
+        specialist_id: str,
+        external_user_id: str,
+        request_id: str,
+    ) -> dict[str, Any]:
+        """``GET internal/specialists/{id}/canon-gap-requests/{request_id}/``.
+
+        Чужая заявка неотличима от несуществующей: 404 приходит как
+        :class:`BookingBadRequestError` со ``status_code=404``.
+        """
+        resp = self._request(
+            "GET",
+            f"specialists/{specialist_id}/canon-gap-requests/{request_id}/",
+            external_user_id=external_user_id,
+        )
+        return self._ok(resp, success=(200,))
+
     def get_specialist_service_edges(
         self,
         *,
