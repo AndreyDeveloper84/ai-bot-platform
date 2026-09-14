@@ -18,6 +18,8 @@
  * одно имя, поэтому карта здесь, а экраны только читают.
  */
 
+import { ApiError } from "./api";
+
 export type ErrorCopy = {
   title: string;
   body: string;
@@ -94,4 +96,27 @@ const FALLBACK: ErrorCopy = {
 /** Копия по слагу; неизвестный слаг — общий «не удалось войти». */
 export function authErrorCopy(slug: string): ErrorCopy {
   return AUTH_ERROR_COPY[slug] ?? FALLBACK;
+}
+
+/**
+ * Причина ошибки загрузки для экранов со своей копией по месту
+ * (Records, блоки дашборда). До этого три одинаковых тернарника
+ * `status >= 500 → server, ApiError → other, иначе network` жили в трёх
+ * местах и ни один не отличал отказ входа от «прочего 4xx»: на пустой
+ * `initData` человек читал «Что-то пошло не так, попробуй через минуту»
+ * — а минута тут не поможет. Правило то же, что у `StateError` (D-1).
+ */
+export type LoadErrorReason =
+  | { kind: "auth"; slug: string }
+  | { kind: "server" }
+  | { kind: "network" }
+  | { kind: "other" };
+
+export function loadErrorReason(e: unknown): LoadErrorReason {
+  if (e instanceof ApiError) {
+    if (isAuthRefusalSlug(e.slug)) return { kind: "auth", slug: e.slug };
+    if (e.status >= 500) return { kind: "server" };
+    return { kind: "other" };
+  }
+  return { kind: "network" };
 }
