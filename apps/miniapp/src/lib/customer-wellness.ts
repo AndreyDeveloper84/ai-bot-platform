@@ -688,7 +688,10 @@ let flushInFlight: Promise<number> | null = null;
  * accepted stay accepted — they are not re-sent. A PERMANENT rejection
  * drops just that one entry and the loop continues.
  */
-export async function flushWaterQueue(): Promise<number> {
+export async function flushWaterQueue(
+  /** DRF-1842: id принятой записи — чтобы вызывающий мог предложить её отменить. */
+  onAccepted?: (result: WaterLogResult) => void,
+): Promise<number> {
   if (flushInFlight) return flushInFlight;
   flushInFlight = (async () => {
     const queue = readWaterQueue();
@@ -698,8 +701,9 @@ export async function flushWaterQueue(): Promise<number> {
     let synced = 0;
 
     for (const [i, entry] of queue.entries()) {
+      let accepted: WaterLogResult | null = null;
       try {
-        await postWaterLog(entry);
+        accepted = await postWaterLog(entry);
         synced += 1;
       } catch (err) {
         if (isPermanentRejection(err)) {
@@ -710,6 +714,15 @@ export async function flushWaterQueue(): Promise<number> {
         // Retryable — this entry and every later one stay queued.
         remaining.push(...queue.slice(i));
         break;
+      }
+      // Вне try: сбой подсказки в интерфейсе не должен превращать уже
+      // принятый стакан в «повторить отправку» — это был бы дубль.
+      if (accepted && onAccepted) {
+        try {
+          onAccepted(accepted);
+        } catch {
+          /* подсказка «отменить» — не часть синхронизации */
+        }
       }
     }
 
