@@ -152,6 +152,41 @@ class TestRegistrationProvisionsTheCatalogWorkspace:
         assert len(catalog.calls) == calls_after_success  # подтверждённый не заводится снова
 
 
+class TestThePilotTodayTokenMissingIsVisibleAndHarmless:
+    """Пилот 15.09: ``AYLA_TENANT_PROVISIONING_TOKEN`` пуст в обоих контурах (A3 не сделано).
+
+    Живой исход каждой регистрации до «токен задан» — ``token_missing``. Это
+    не баг, и тест держит три свойства, чтобы его не приняли за баг:
+    кабинет в боте создан и человек получает тот же текст; причина видна на
+    ``SoloIdentityLink`` и в логе; в логе нет ни одного секрета.
+    """
+
+    def test_registration_without_a_token_keeps_the_cabinet_and_names_the_reason(
+        self, said, settings, caplog, httpx_mock
+    ):
+        settings.AYLA_TENANT_PROVISIONING_TOKEN = ""
+        settings.AYLA_INTERNAL_API_TOKEN = "runtime-secret-must-not-leak-1830"  # noqa: S105
+
+        with caplog.at_level("WARNING", logger="apps.identity.services.solo_catalog_provisioning"):
+            salon_handler._register_solo_provider(
+                _Event(), entry=None, display_name="Ольга", city="Пенза"
+            )
+
+        link = _link_for_channel_user()
+        # Кабинет в боте не пострадал.
+        assert link.master.tenant.slug.startswith("solo-")
+        assert said[-1]["text"] == salon_handler.SOLO_CREATED_PENDING
+        # Причина — на связи, машинным именем; запросов в сеть нет.
+        assert link.catalog_provisioning_refusal == "token_missing"
+        assert link.catalog_provisioned_at is None
+        assert httpx_mock.get_requests() == []
+        # В логе — причина и идентификаторы, без секретов.
+        lines = [r.getMessage() for r in caplog.records if "solo_catalog" in r.getMessage()]
+        assert any("refusal=token_missing" in line for line in lines), lines
+        assert all("runtime-secret-must-not-leak-1830" not in line for line in lines)
+        assert all("Bearer" not in line for line in lines)
+
+
 class TestEveryRefusalHasItsOwnName:
     @pytest.mark.parametrize(
         "outcome, reason",
