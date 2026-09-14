@@ -59,7 +59,8 @@ import {
   setBackButton,
   signalReady,
 } from "../lib/max-sdk";
-import { MasterTabBar } from "../components/MasterTabBar";
+import { IconMessage, MasterTabBar } from "../components/MasterTabBar";
+import { unreadBadgeText } from "../lib/unread-badge";
 import { PayoutPreviewCard } from "../components/PayoutPreviewCard";
 import { SetupProgressCard } from "../components/SetupProgressCard";
 import {
@@ -349,6 +350,8 @@ export function MasterDashboardScreen() {
         masterName={data.master.name}
         photoUrl={data.master.photo_url}
         nowIso={data.now_iso}
+        unreadCount={tab_badges.conversations_unread}
+        onInbox={onInboxCardTap}
       />
 
       {isStale ? (
@@ -452,16 +455,29 @@ function DashboardFrame({
 // Header
 // ----------------------------------------------------------------------------
 
-function DashboardHeader({
+/**
+ * Шапка дашборда (§M1 «Студия Карина [Анна ●]»).
+ *
+ * DRF-1848 (карта кабинета D01, D02): имя мастера — видимым текстом, а не
+ * только подписью аватара; значок диалогов с числом непрочитанных. Число
+ * берётся из того же `tab_badges.conversations_unread`, что и у вкладки
+ * «Диалоги», и пишется тем же `unreadBadgeText` — второго источника нет.
+ * Тап ведёт туда же, куда карточки входящих (`onInboxCardTap`).
+ */
+export function DashboardHeader({
   salonName,
   masterName,
   photoUrl,
   nowIso,
+  unreadCount,
+  onInbox,
 }: {
   salonName: string;
   masterName: string;
   photoUrl: string;
   nowIso: string;
+  unreadCount: number;
+  onInbox: () => void;
 }) {
   // We render the master's first name + initial-circle when the photo is
   // missing. Spec §M1 lines 289-291: «Студия Карина [Анна ●] / Среда, 21
@@ -472,6 +488,7 @@ function DashboardHeader({
     if (!parts.length) return "—";
     return parts.slice(0, 2).map((p) => p[0]?.toUpperCase() ?? "").join("");
   }, [masterName]);
+  const badge = unreadBadgeText(unreadCount);
   return (
     <header className="master-dashboard__header">
       <div className="master-dashboard__header-left">
@@ -479,12 +496,28 @@ function DashboardHeader({
         <div className="master-dashboard__date">{formatDateLong(nowIso)}</div>
       </div>
       <div className="master-dashboard__header-right">
-        <div className="master-dashboard__avatar" aria-label={firstName}>
-          {photoUrl ? (
-            <img src={photoUrl} alt="" />
-          ) : (
-            <span>{initials}</span>
-          )}
+        <div className="master-dashboard__who">
+          {firstName ? <div className="master-dashboard__name">{firstName}</div> : null}
+          <button
+            type="button"
+            className="master-dashboard__inbox"
+            onClick={onInbox}
+            aria-label={badge ? `Диалоги, непрочитанных: ${unreadCount}` : "Диалоги"}
+          >
+            <IconMessage />
+            {badge ? (
+              <span className="master-tabbar__badge" aria-hidden="true">
+                {badge}
+              </span>
+            ) : null}
+          </button>
+          <div className="master-dashboard__avatar" aria-label={firstName}>
+            {photoUrl ? (
+              <img src={photoUrl} alt="" />
+            ) : (
+              <span>{initials}</span>
+            )}
+          </div>
         </div>
         <div className="master-dashboard__time">{formatTimeHM(nowIso)}</div>
       </div>
