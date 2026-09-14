@@ -24,6 +24,7 @@ import {
   flushWaterQueue,
   getRecentActivity,
   getWellnessToday,
+  loadDiaryToday,
   readWaterQueue,
   undoWaterLog,
 } from "./customer-wellness";
@@ -270,6 +271,20 @@ describe("the reads reach the backend instead of inventing a day", () => {
     // Positive guard: the value came from the server, not the stub.
     expect(today.calories_eaten).toBe(777);
     expect(today.calories_eaten).not.toBe(1240);
+  });
+
+  it("только дневник ставит признак surface=diary; главная — нет (DRF-1897)", async () => {
+    vi.stubEnv("DEV", false);
+    fetchMock.mockResolvedValue(okJson({ ...LIVE_TODAY, entries: [] }));
+
+    const day = await loadDiaryToday();
+    await getWellnessToday();
+
+    // POSITIVE first: both reads reached the endpoint.
+    expect(day.state).toBe("empty");
+    expect(String(callAt(0)[0])).toContain("/wellness/today?surface=diary");
+    expect(String(callAt(1)[0])).toContain("/wellness/today");
+    expect(String(callAt(1)[0])).not.toContain("surface");
   });
 
   it("getRecentActivity asks the endpoint and returns what it answered", async () => {

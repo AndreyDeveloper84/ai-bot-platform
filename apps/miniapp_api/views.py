@@ -3349,6 +3349,55 @@ def _active_goals_from_context(doc: Any, *, now: datetime) -> list[dict[str, Any
     return [entry]
 
 
+#: Значение ``?surface=`` у ``wellness/today``, по которому — и ТОЛЬКО по
+#: нему — ручка решает и журналирует строку диетолога (DRF-1897).
+_DIARY_SURFACE = "diary"
+
+
+def _diary_coach_observation(bot_user: BotUser, profile_res: Any) -> str | None:
+    """Строка диетолога для открытого дневника Mini App, или ``None`` (DRF-1897).
+
+    Та же лестница и тот же текст, что у дневника в чате
+    (:func:`apps.orchestrator.personal_surface._with_coach_observation`):
+    флаги, HEALTH, чувствительный периметр, цель, триггер, свой потолок
+    «раз в сутки и не повторять неизменившееся», страж исходящего.
+
+    Решает её не ручка и не экран по косвенным признакам, а явный признак
+    ``?surface=diary``: ``wellness/today`` читает и главная, и дневник, и
+    журнал обязан записывать заход в дневник, а не открытие главной — иначе
+    главная тратила бы суточный слот, и настоящий заход в дневник молчал бы.
+
+    Журнал — только показанное: строка возвращается лишь после
+    :func:`persist_observation`. Отсюда два условия до лестницы:
+
+    * гейт контекста отказывает оболочке → ``None``. ``merge_prefs`` такой
+      оболочке ничего не пишет, и строка ушла бы на экран без записи в
+      журнале — ровно та ложь, которую разделение decide/persist запрещает;
+    * любой сбой → ``None``: строка, о которой не спрашивали, не стоит
+      дневника, о котором спросили.
+    """
+    try:
+        from apps.identity.services.person_context_gate import person_context_access
+        from apps.orchestrator import coach_observation
+
+        if person_context_access(bot_user) is not None:
+            return None
+        # Непрочитанный профиль — «не знаем», и лестница читает его как
+        # молчание (``remarks_suppressed(None)``), как и в чате.
+        profile = None if isinstance(profile_res, Exception) else profile_res
+        cadence = coach_observation.Cadence.TRACKED
+        observation = coach_observation.decide_observation(
+            bot_user, profile=profile, cadence=cadence
+        )
+        if observation is None:
+            return None
+        coach_observation.persist_observation(bot_user, observation, cadence=cadence)
+    except Exception:  # noqa: BLE001 — the diary must survive its garnish
+        logger.exception("wellness_today.coach_observation_failed")
+        return None
+    return observation.text
+
+
 @require_http_methods(["GET"])
 @require_init_data
 def customer_wellness_today(request: HttpRequest) -> HttpResponse:
@@ -3418,6 +3467,14 @@ def customer_wellness_today(request: HttpRequest) -> HttpResponse:
       decision, not a wiring one.
     * ``pfc.protein_target_g`` + ``day_pattern_hint`` — omitted (no
       clean source). Frontend treats both as optional.
+
+    ## coach_observation — только с ``?surface=diary`` (DRF-1897)
+
+    Ручку читают две поверхности: главная и дневник. Строка диетолога и
+    запись в журнал наблюдений — только дневнику и только по явному
+    признаку, который ставит сам экран дневника (:func:`_diary_coach_observation`).
+    Без признака (главная) лестница не вызывается вовсе. Нет строки —
+    нет ключа, и ответ побайтно тот же, что без признака.
     """
     import asyncio
 
@@ -3662,6 +3719,13 @@ def customer_wellness_today(request: HttpRequest) -> HttpResponse:
     # the defect this ticket closes. See docstring.
     if goals_known:
         payload["active_goals"] = active_goals
+    # Строка диетолога — только дневнику, по явному признаку (DRF-1897).
+    # И только когда записи прочитаны: без них экран рисует «не удалось
+    # загрузить», строку не показывает, а журнал записал бы непоказанное.
+    if request.GET.get("surface") == _DIARY_SURFACE and entries is not None:
+        observation_text = _diary_coach_observation(bot_user, profile_res)
+        if observation_text is not None:
+            payload["coach_observation"] = observation_text
 
     return JsonResponse(payload)
 

@@ -6675,6 +6675,17 @@ a {
   flex-direction: column;
   gap: var(--s-2);
 }
+/* DRF-1897 — строка диетолога под итогами. Карточкой, как соседние группы:
+   это часть дневника, а не всплывающая подсказка. */
+.food-scanner-diary__observation {
+  margin: 0;
+  background: var(--c-surface-1);
+  border: 1px solid var(--c-divider);
+  border-radius: var(--r-md);
+  padding: var(--s-3) var(--s-4);
+  font-size: var(--font-size-200);
+  color: var(--c-text-primary);
+}
 .food-scanner-diary__comment {
   margin: var(--s-2) 0 0;
   font-size: var(--font-size-200);
