@@ -1622,9 +1622,7 @@ class AylaBookingHTTPClient:
         if not review_id:
             # A 201 we cannot read is not «saved»: the caller would tell the
             # person their review is in while nobody can point at it.
-            logger.warning(
-                "booking_client.review_unexpected_shape type=%s", type(payload).__name__
-            )
+            logger.warning("booking_client.review_unexpected_shape type=%s", type(payload).__name__)
             raise BookingUnavailableError("malformed_response")
         return AylaReview(
             id=review_id,
