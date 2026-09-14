@@ -1,12 +1,14 @@
 name: food_clarify_cb_diary_redirect
 description: |
-  Click on the "В дневник" button (cb:food:diary) — the skill redirects to
-  photo-scan path because text-only food log is not in scope for Phase 0.
+  Click on the "В дневник" button (cb:food:diary) without the phrase it was
+  about (replay has no prior turn) — since DRF-1837 the skill asks what was
+  eaten and how many grams, and still mentions the photo as the second way.
 input:
   channel: max
   text: "cb:food:diary"
 must_pass:
   - response_contains_any:
+      - граммов
       - фото
 voice_check:
   max_length: 300

@@ -512,6 +512,7 @@ def food_tap_labels(scan_id: str) -> dict[str, str]:
         correction_choice_keyboard,
         food_drink_clarify_keyboard,
         food_recognition_keyboard,
+        food_text_estimate_keyboard,
     )
 
     return {
@@ -520,6 +521,7 @@ def food_tap_labels(scan_id: str) -> dict[str, str]:
             *food_drink_clarify_keyboard(),
             *food_recognition_keyboard(scan_id),
             *correction_choice_keyboard(scan_id),
+            *food_text_estimate_keyboard(),
         )
     }
 
@@ -602,6 +604,22 @@ def _food_correction_pending(conversation: Any) -> bool:
         return False
 
 
+def _food_text_pending(conversation: Any) -> bool:
+    """Ждёт ли текстовый ввод еды ответа — граммов или «что было»? (DRF-1837)
+
+    Тот же вопрос, что у анкеты и поправки скана: бот спросил — ответ его.
+    Свежесть решает сам навык; ошибка чтения — «не ждёт», ход уходит дальше.
+    """
+
+    try:
+        from apps.skills.food_clarify.text_entry import has_pending_text_entry
+
+        return has_pending_text_entry(conversation)
+    except Exception:  # noqa: BLE001 — a routing hint must never break the turn
+        logger.exception("orchestrator.nutrition_global.food_text_pending_check_failed")
+        return False
+
+
 def is_structured_nutrition_turn(
     *,
     text: str,
@@ -620,7 +638,11 @@ def is_structured_nutrition_turn(
         return True  # photo-only turn → food scanner
     if stripped == "/anketa" or stripped.startswith(_STRUCTURED_CALLBACK_PREFIXES):
         return True
-    return _anketa_fsm_active(conversation) or _food_correction_pending(conversation)
+    return (
+        _anketa_fsm_active(conversation)
+        or _food_correction_pending(conversation)
+        or _food_text_pending(conversation)
+    )
 
 
 def try_handle_structured_nutrition_turn(

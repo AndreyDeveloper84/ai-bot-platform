@@ -1033,6 +1033,37 @@ a {
   font-variant-numeric: tabular-nums;
 }
 
+/* DRF-1848 — имя мастера текстом, значок диалогов, аватар в одну строку. */
+.master-dashboard__who {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+}
+
+.master-dashboard__name {
+  max-width: 12ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--font-size-200);
+  font-weight: 600;
+  color: var(--c-text-primary);
+}
+
+.master-dashboard__inbox {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--c-text-secondary);
+  cursor: pointer;
+}
+
 .master-dashboard__section {
   margin-bottom: var(--s-4);
 }
