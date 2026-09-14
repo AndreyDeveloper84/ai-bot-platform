@@ -19,6 +19,7 @@ vi.mock("../../lib/admin-api", async (importOriginal) => {
     cancelSalonBooking: vi.fn(),
     getBookingVersion: vi.fn(),
     completeSalonBooking: vi.fn(),
+    noShowSalonBooking: vi.fn(),
     getBookingSlots: vi.fn(),
     rescheduleSalonBooking: vi.fn(),
   };
@@ -28,6 +29,7 @@ import {
   cancelSalonBooking,
   completeSalonBooking,
   getBookingSlots,
+  noShowSalonBooking,
   getBookingVersion,
   getSalonDay,
   rescheduleSalonBooking,
@@ -40,6 +42,7 @@ const mockedDay = vi.mocked(getSalonDay);
 const mockedCancel = vi.mocked(cancelSalonBooking);
 const mockedVersion = vi.mocked(getBookingVersion);
 const mockedComplete = vi.mocked(completeSalonBooking);
+const mockedNoShow = vi.mocked(noShowSalonBooking);
 const mockedSlots = vi.mocked(getBookingSlots);
 const mockedMove = vi.mocked(rescheduleSalonBooking);
 
@@ -436,6 +439,49 @@ describe("closing a visit", () => {
 
     expect(await screen.findByText(/Возможно, визит закрыт/)).toBeInTheDocument();
     await waitFor(() => expect(mockedDay).toHaveBeenCalledTimes(2));
+  });
+
+  // DRF-1851 — третий честный ответ в том же диалоге.
+  it("«Не пришёл» sends the operator's version to the no-show write, not to closure", async () => {
+    const user = userEvent.setup();
+    mockedDay.mockResolvedValue(dayWithOneVisit());
+    mockedVersion.mockResolvedValue(version({ version: 5 }));
+    mockedNoShow.mockResolvedValue({ outcome: "committed", detail: "ok" });
+    renderScreen();
+
+    await user.click(await screen.findByRole("button", { name: /Визит состоялся: Мария/ }));
+    await screen.findByRole("dialog", { name: "Закрытие визита" });
+    await user.click(screen.getByRole("button", { name: "Не пришёл" }));
+
+    await waitFor(() => expect(mockedNoShow).toHaveBeenCalledWith("v-1", 5));
+    expect(mockedComplete).not.toHaveBeenCalled();
+    expect(await screen.findByText("Отмечено: клиент не пришёл.")).toBeInTheDocument();
+  });
+
+  it("«Не пришёл» waits for the canonical version like closure does", async () => {
+    const user = userEvent.setup();
+    mockedDay.mockResolvedValue(dayWithOneVisit());
+    mockedVersion.mockImplementation(() => new Promise(() => {}));
+    renderScreen();
+
+    await user.click(await screen.findByRole("button", { name: /Визит состоялся: Мария/ }));
+
+    expect(screen.getByRole("button", { name: "Не пришёл" })).toBeDisabled();
+    expect(mockedNoShow).not.toHaveBeenCalled();
+  });
+
+  it("«Не пришёл» that the schedule did not answer is not called a failure", async () => {
+    const user = userEvent.setup();
+    mockedDay.mockResolvedValue(dayWithOneVisit());
+    mockedVersion.mockResolvedValue(version());
+    mockedNoShow.mockResolvedValue({ outcome: "pending", detail: "no answer" });
+    renderScreen();
+
+    await user.click(await screen.findByRole("button", { name: /Визит состоялся: Мария/ }));
+    await screen.findByRole("dialog", { name: "Закрытие визита" });
+    await user.click(screen.getByRole("button", { name: "Не пришёл" }));
+
+    expect(await screen.findByText(/Возможно, неявка уже отмечена/)).toBeInTheDocument();
   });
 
   it("offers nothing to close on a released visit", async () => {

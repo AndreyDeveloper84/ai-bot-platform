@@ -575,6 +575,39 @@ class AylaSalonClient:
             json_body={"expected_version": expected_version},
         )
 
+    def mark_no_show(
+        self,
+        *,
+        actor_external_id: str,
+        tenant_slug: str,
+        appointment_id: str,
+        expected_version: int,
+    ) -> dict[str, Any]:
+        """«Не пришёл» (DRF-1851). Same version rule as :meth:`complete_appointment`.
+
+        Ayla runs the state machine (``CONFIRMED → NO_SHOW``; a completed or
+        cancelled visit is refused) and emits ``booking.cancelled`` with
+        ``reason_code="user_no_show"`` — the mirror flips from that event, not
+        from this response.
+        """
+
+        if not tenant_slug:
+            raise SalonValidationError("tenant_slug is required")
+        if not appointment_id:
+            raise SalonValidationError("appointment_id is required")
+        if isinstance(expected_version, bool) or not isinstance(expected_version, int):
+            raise SalonValidationError("expected_version must be a positive integer")
+        if expected_version < 1:
+            raise SalonValidationError("expected_version must be a positive integer")
+
+        return self._post(
+            f"appointments/{appointment_id}/no-show/",
+            actor_external_id=actor_external_id,
+            idempotency_key=f"no-show:{appointment_id}:{expected_version}",
+            tenant_slug=tenant_slug,
+            json_body={"expected_version": expected_version},
+        )
+
     MIN_QUERY = 2
 
     def search_customers(

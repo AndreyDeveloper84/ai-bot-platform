@@ -195,6 +195,15 @@ SALON_ROUTES: tuple[SalonRoute, ...] = (
         access=SalonRouteAccess.CALLABLE,
         client_method="complete_appointment",
     ),
+    # DRF-1851 — «не пришёл» on the same surface; Ayla shares the domain
+    # function with the mobile path (completion.mark_booking_no_show).
+    SalonRoute(
+        name="tenants-booking-no-show",
+        method="POST",
+        path="appointments/{appointment_id}/no-show/",
+        access=SalonRouteAccess.CALLABLE,
+        client_method="mark_no_show",
+    ),
     # ── Group 2 continued — master schedule, time-off, exceptions ────────
     SalonRoute(
         name="tenants-master-schedule",

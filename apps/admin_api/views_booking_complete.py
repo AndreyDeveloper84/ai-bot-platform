@@ -2,6 +2,7 @@
 
 ``GET  /api/v1/admin/bookings/<appointment_id>/``
 ``POST /api/v1/admin/bookings/<appointment_id>/complete/``
+``POST /api/v1/admin/bookings/<appointment_id>/no-show/``
 ``POST /api/v1/admin/bookings/<appointment_id>/reschedule/``
 
 ### Why these are two endpoints and not one
@@ -113,18 +114,35 @@ def booking_version(request: HttpRequest, appointment_id: str) -> HttpResponse:
     )
 
 
-@csrf_exempt
-@require_http_methods(["POST"])
-@require_admin_role
-def complete_booking(request: HttpRequest, appointment_id: str) -> HttpResponse:
-    """Close a visit on behalf of the calling administrator.
+#: What each visit-settling write says in its refusals. One mapping of
+#: Ayla's answers for both, so «не пришёл» and «состоялся» can never drift
+#: into telling the operator different things about the same situation.
+_SETTLE_COPY = {
+    "complete_appointment": {
+        "log": "complete_booking",
+        "not_configured": "закрытие визита не настроено",
+        "unauthorized": "закрытие сейчас недоступно — обратитесь к поддержке",
+        "committed": "visit closed",
+    },
+    "mark_no_show": {
+        "log": "no_show_booking",
+        "not_configured": "отметка неявки не настроена",
+        "unauthorized": "отметка неявки сейчас недоступна — обратитесь к поддержке",
+        "committed": "visit marked no-show",
+    },
+}
 
-    Everything that hangs off closure — commission, payment capture, the
-    review request, RFM — starts from Ayla's ``booking.completed``. None
-    of it had ever run in production, because the only people entitled to
-    close a visit had no way to reach the endpoint.
+
+def _settle_visit(request: HttpRequest, appointment_id: str, *, write: str) -> HttpResponse:
+    """Settle a visit through Ayla's state machine on behalf of the admin.
+
+    ``write`` is the salon-client method: ``complete_appointment`` or
+    ``mark_no_show``. The bot never sets a status itself — Ayla re-checks
+    the transition on the locked row and the mirror follows its event.
     """
 
+    copy = _SETTLE_COPY[write]
+    log = copy["log"]
     tenant = request.tenant  # type: ignore[attr-defined]
     bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
 
@@ -163,7 +181,7 @@ def complete_booking(request: HttpRequest, appointment_id: str) -> HttpResponse:
     actor = external_user_id_for(bot_user)
 
     try:
-        get_salon_client().complete_appointment(
+        getattr(get_salon_client(), write)(
             actor_external_id=actor,
             tenant_slug=tenant.slug,
             appointment_id=str(appointment_id),
@@ -172,18 +190,20 @@ def complete_booking(request: HttpRequest, appointment_id: str) -> HttpResponse:
     except SalonValidationError as exc:
         return _outcome("blocked", str(exc), 400)
     except SalonNotConfigured as exc:
-        logger.error("admin_api.complete_booking.not_configured err=%s", exc)
-        return _outcome("blocked", "закрытие визита не настроено", 503)
+        logger.error("admin_api.%s.not_configured err=%s", log, exc)
+        return _outcome("blocked", copy["not_configured"], 503)
     except SalonUnauthorized as exc:
         logger.error(
-            "admin_api.complete_booking.upstream_unauthorized tenant=%s err=%s",
+            "admin_api.%s.upstream_unauthorized tenant=%s err=%s",
+            log,
             tenant.id,
             exc,
         )
-        return _outcome("blocked", "закрытие сейчас недоступно — обратитесь к поддержке", 503)
+        return _outcome("blocked", copy["unauthorized"], 503)
     except SalonForbidden as exc:
         logger.warning(
-            "admin_api.complete_booking.forbidden actor=%s tenant=%s err=%s",
+            "admin_api.%s.forbidden actor=%s tenant=%s err=%s",
+            log,
             actor,
             tenant.id,
             exc,
@@ -198,41 +218,74 @@ def complete_booking(request: HttpRequest, appointment_id: str) -> HttpResponse:
             409,
         )
     except SalonNotAllowed as exc:
-        # Cancelled, or already closed. Settled, not contended.
+        # Cancelled, or already settled. Settled, not contended.
         return _outcome("blocked", str(exc), 409)
     except SalonSlotTaken as exc:
         return _outcome("conflict", str(exc), 409)
     except SalonNotFound as exc:
         logger.warning(
-            "admin_api.complete_booking.mirror_divergence appointment=%s err=%s",
+            "admin_api.%s.mirror_divergence appointment=%s err=%s",
+            log,
             appointment_id,
             exc,
         )
         return _outcome("conflict", "запись не найдена в расписании — обновите день", 409)
     except SalonUnavailable as exc:
         # May have been applied. Never a failure — a second press on an
-        # already-closed visit is refused, but the operator should be
+        # already-settled visit is refused, but the operator should be
         # told to look rather than to retry blindly.
-        logger.warning("admin_api.complete_booking.unknown actor=%s err=%s", actor, exc)
+        logger.warning("admin_api.%s.unknown actor=%s err=%s", log, actor, exc)
         return _outcome(
             "pending",
             "расписание не ответило — обновите день, прежде чем повторять",
             504,
         )
     except SalonAPIError as exc:
-        logger.warning("admin_api.complete_booking.error actor=%s err=%s", actor, exc)
+        logger.warning("admin_api.%s.error actor=%s err=%s", log, actor, exc)
         return _outcome("failed", str(exc), 502)
 
     logger.info(
-        "admin_api.complete_booking.committed appointment=%s actor=%s tenant=%s",
+        "admin_api.%s.committed appointment=%s actor=%s tenant=%s",
+        log,
         appointment_id,
         actor,
         tenant.id,
     )
-    return _outcome("committed", "visit closed", 200, appointment_id=str(appointment_id))
+    return _outcome("committed", copy["committed"], 200, appointment_id=str(appointment_id))
 
 
-__all__ = ["booking_version", "complete_booking", "reschedule_booking"]
+@csrf_exempt
+@require_http_methods(["POST"])
+@require_admin_role
+def complete_booking(request: HttpRequest, appointment_id: str) -> HttpResponse:
+    """Close a visit on behalf of the calling administrator.
+
+    Everything that hangs off closure — commission, payment capture, the
+    review request, RFM — starts from Ayla's ``booking.completed``. None
+    of it had ever run in production, because the only people entitled to
+    close a visit had no way to reach the endpoint.
+    """
+
+    return _settle_visit(request, appointment_id, write="complete_appointment")
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+@require_admin_role
+def no_show_booking(request: HttpRequest, appointment_id: str) -> HttpResponse:
+    """«Не пришёл» on behalf of the calling administrator (DRF-1851, OD-V1).
+
+    Before this the day dialog offered «состоялся / перенести / отменить»,
+    and a client who never came could only be cancelled — losing the fact
+    that the slot was held. Same version rule and the same answers as
+    closure; Ayla's state machine decides, the mirror follows its
+    ``booking.cancelled`` + ``reason_code="user_no_show"`` event.
+    """
+
+    return _settle_visit(request, appointment_id, write="mark_no_show")
+
+
+__all__ = ["booking_version", "complete_booking", "no_show_booking", "reschedule_booking"]
 
 
 @csrf_exempt

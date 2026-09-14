@@ -72,6 +72,12 @@ urlpatterns = [
         views_booking_complete.complete_booking,
         name="complete_booking",
     ),
+    # DRF-1851 — «не пришёл», the same version rule as closure.
+    path(
+        "bookings/<uuid:appointment_id>/no-show/",
+        views_booking_complete.no_show_booking,
+        name="no_show_booking",
+    ),
     path(
         "bookings/<uuid:appointment_id>/reschedule/",
         views_booking_complete.reschedule_booking,

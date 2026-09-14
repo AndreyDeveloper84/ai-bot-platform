@@ -27,6 +27,7 @@ import {
   CANCEL_REASONS,
   cancelSalonBooking,
   completeSalonBooking,
+  noShowSalonBooking,
   getBookingSlots,
   getBookingVersion,
   getSalonDay,
@@ -311,6 +312,7 @@ function CompleteDialog({
   version,
   busy,
   onConfirm,
+  onNoShow,
   onDismiss,
 }: {
   visit: SalonDayVisit;
@@ -318,6 +320,8 @@ function CompleteDialog({
   version: { version: number; status: string } | null;
   busy: boolean;
   onConfirm: () => void;
+  /** DRF-1851 — третий честный ответ: клиент не пришёл. */
+  onNoShow: () => void;
   onDismiss: () => void;
 }) {
   return (
@@ -351,6 +355,15 @@ function CompleteDialog({
           disabled={busy || version === null}
         >
           {busy ? "Закрываем…" : "Да, состоялся"}
+        </button>
+        <button
+          type="button"
+          className="btn"
+          onClick={onNoShow}
+          // The same version travels back: never invented locally.
+          disabled={busy || version === null}
+        >
+          Не пришёл
         </button>
       </div>
     </div>
@@ -535,6 +548,40 @@ export function AdminSalonDayScreen({ me }: { me: MeResponse }) {
           break;
         default:
           setNotice(res.detail || "Не удалось закрыть визит.");
+      }
+      if (res.outcome !== "blocked") await load(date);
+    } finally {
+      setCloseBusy(false);
+    }
+  }, [closing, closingVersion, closeBusy, date, load]);
+
+  // DRF-1851 — «не пришёл»: тот же прочитанный оператором version, те же
+  // пять исходов; статус меняет машина состояний Ayla, не экран.
+  const confirmNoShow = useCallback(async () => {
+    const visit = closing;
+    const version = closingVersion;
+    if (!visit || version === null || closeBusy) return;
+    setCloseBusy(true);
+    try {
+      const res = await noShowSalonBooking(visit.id, version.version);
+      setClosing(null);
+      switch (res.outcome) {
+        case "committed":
+          setNotice("Отмечено: клиент не пришёл.");
+          break;
+        case "conflict":
+          setNotice("Запись изменилась — день обновлён, посмотрите ещё раз.");
+          break;
+        case "pending":
+          setNotice(
+            "Расписание не ответило. Возможно, неявка уже отмечена — проверьте день, прежде чем повторять.",
+          );
+          break;
+        case "blocked":
+          setNotice(res.detail || "Для этого визита неявку отметить нельзя.");
+          break;
+        default:
+          setNotice(res.detail || "Не удалось отметить неявку.");
       }
       if (res.outcome !== "blocked") await load(date);
     } finally {
@@ -842,6 +889,7 @@ export function AdminSalonDayScreen({ me }: { me: MeResponse }) {
           version={closingVersion}
           busy={closeBusy}
           onConfirm={() => void confirmComplete()}
+          onNoShow={() => void confirmNoShow()}
           onDismiss={() => setClosing(null)}
         />
       )}
