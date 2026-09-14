@@ -4,8 +4,8 @@ What is locked:
 
 * the calendar week is Monday 00:00 – Sunday 23:59 in the TENANT's zone:
   a visit at 00:30 on Monday and one at 23:30 on Sunday (MSK) are in, the
-  neighbours a minute across either edge are out — both are a different
-  UTC day, so a UTC week would get them wrong;
+  neighbours half an hour across either edge are out — each of the four is
+  a different UTC day than its MSK day, so a UTC week would get them wrong;
 * cancelled / no-show visits did not take the master's time and are not
   counted; another master's visits are not counted;
 * the rating is shown only with at least one review behind it; a seeded
