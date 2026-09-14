@@ -50,6 +50,7 @@ import {
   type DashboardNextVisit,
   type DashboardResponse,
   type DashboardTodaySummary,
+  type DashboardWeekSummary,
   type SlaTier,
 } from "../lib/master-api";
 import {
@@ -76,6 +77,7 @@ const COPY = {
     next: "СЛЕДУЮЩИЙ КЛИЕНТ",
     needsAttention: (n: number) => `ТРЕБУЮТ ВНИМАНИЯ (${n})`,
     today: "СЕГОДНЯ",
+    week: "ЭТА НЕДЕЛЯ",
   },
   active: {
     inProgress: "Сейчас идёт визит",
@@ -100,6 +102,13 @@ const COPY = {
     nextWindow: (start: string, end: string) =>
       `Следующее окно: ${start}–${end}`,
     scheduleWeekCta: "Расписание на неделю ›",
+  },
+  weekSummary: {
+    bookingsAndCompleted: (bookings: number, completed: number) =>
+      `На этой неделе: ${bookings} ${pluralRu(bookings, "запись", "записи", "записей")} · ${completed} состоялось`,
+    rating: (value: number, reviews: number) =>
+      `★ ${value.toFixed(1)} · ${reviews} ${pluralRu(reviews, "отзыв", "отзыва", "отзывов")}`,
+    noReviews: "Отзывов пока нет",
   },
   empty: {
     noClientsToday: (firstName: string | null, time: string | null) =>
@@ -378,6 +387,8 @@ export function MasterDashboardScreen() {
           />
         </>
       )}
+
+      <WeekSection summary={data.week_summary} />
 
       <AylaEntrySection onOpen={onAylaOpen} />
 
@@ -705,6 +716,31 @@ function TodaySection({
       >
         {COPY.todaySummary.scheduleWeekCta}
       </button>
+    </section>
+  );
+}
+
+// ----------------------------------------------------------------------------
+// ЭТА НЕДЕЛЯ (DRF-1846)
+// ----------------------------------------------------------------------------
+
+/** Неделя — вне ветки «сегодня»: пустой или законченный день не отменяет
+ * неделю. Ничего не считает сам: оба числа и оценка приходят от сервера,
+ * оценка без отзывов не рисуется. */
+export function WeekSection({ summary }: { summary: DashboardWeekSummary }) {
+  return (
+    <section className="master-dashboard__section" aria-labelledby="m1-week">
+      <h2 className="master-dashboard__section-title" id="m1-week">
+        {COPY.sections.week}
+      </h2>
+      <p className="master-dashboard__today-line">
+        {COPY.weekSummary.bookingsAndCompleted(summary.bookings, summary.completed)}
+      </p>
+      <p className="master-dashboard__today-line">
+        {summary.rating
+          ? COPY.weekSummary.rating(summary.rating.value, summary.rating.review_count)
+          : COPY.weekSummary.noReviews}
+      </p>
     </section>
   );
 }

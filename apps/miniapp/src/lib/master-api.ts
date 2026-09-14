@@ -153,6 +153,17 @@ export interface DashboardTodaySummary {
   next_free_window: { start: string; end: string } | null;
 }
 
+/** DRF-1846 — календарная неделя в поясе салона. Числа только от сервера;
+ * `rating` — `null`, пока за оценкой нет ни одного отзыва. Выручки нет:
+ * у зеркала броней нет цены. */
+export interface DashboardWeekSummary {
+  week_start: string; // YYYY-MM-DD, понедельник
+  week_end: string; // YYYY-MM-DD, воскресенье
+  bookings: number;
+  completed: number;
+  rating: { value: number; review_count: number } | null;
+}
+
 export interface DashboardTabBadges {
   conversations_unread: number;
   schedule_has_pending_change: boolean;
@@ -174,6 +185,7 @@ export interface DashboardResponse {
   today_summary: DashboardTodaySummary;
   tab_badges: DashboardTabBadges;
   states: DashboardStatesFlags;
+  week_summary: DashboardWeekSummary;
 }
 
 // --- endpoints -------------------------------------------------------------
