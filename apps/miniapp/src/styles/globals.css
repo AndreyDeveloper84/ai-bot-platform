@@ -4650,6 +4650,20 @@ a {
   font-size: var(--font-size-200);
   align-self: flex-start;
 }
+/* DRF-1842 — «Отменить» внутри тоста воды. Цвет наследуется от тоста
+   (токены --c-text-primary / --c-surface-1 выше), своих литералов нет:
+   кнопка обязана оставаться читаемой на той же подложке при смене палитры. */
+.wellness-dash__toast-action {
+  margin-left: var(--s-2);
+  padding: 0 var(--s-2);
+  background: none;
+  color: inherit;
+  border: 1px solid currentColor;
+  border-radius: var(--r-sm);
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
 .wellness-dash__today-goals,
 .wellness-dash__booking,
 .wellness-dash__weekly,
