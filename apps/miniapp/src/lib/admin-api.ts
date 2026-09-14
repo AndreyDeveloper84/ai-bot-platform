@@ -372,8 +372,27 @@ export interface CompleteBookingResult {
  * outcomes as the other writes, and the same rule: never throws on a
  * business answer, and `pending` is «unknown», not «failed».
  */
-export const completeSalonBooking = async (
+export const completeSalonBooking = (
   appointmentId: string,
+  expectedVersion: number,
+): Promise<CompleteBookingResult> =>
+  settleSalonBooking(appointmentId, "complete", expectedVersion);
+
+/**
+ * POST /api/v1/admin/bookings/<id>/no-show/ — «не пришёл» (DRF-1851).
+ *
+ * Same version rule and the same five outcomes as closure: Ayla's state
+ * machine decides, and `pending` is «unknown», not «failed».
+ */
+export const noShowSalonBooking = (
+  appointmentId: string,
+  expectedVersion: number,
+): Promise<CompleteBookingResult> =>
+  settleSalonBooking(appointmentId, "no-show", expectedVersion);
+
+const settleSalonBooking = async (
+  appointmentId: string,
+  action: "complete" | "no-show",
   expectedVersion: number,
 ): Promise<CompleteBookingResult> => {
   const initData = getInitData();
@@ -385,7 +404,7 @@ export const completeSalonBooking = async (
   let res: Response;
   try {
     res = await fetch(
-      `/api/v1/admin/bookings/${encodeURIComponent(appointmentId)}/complete/`,
+      `/api/v1/admin/bookings/${encodeURIComponent(appointmentId)}/${action}/`,
       {
         method: "POST",
         headers,

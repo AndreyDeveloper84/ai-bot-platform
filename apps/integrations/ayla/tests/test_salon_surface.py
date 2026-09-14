@@ -309,6 +309,12 @@ CALLS: dict[str, Any] = {
         appointment_id="APPOINTMENT-ARG",
         expected_version=3,
     ),
+    "mark_no_show": lambda c: c.mark_no_show(
+        actor_external_id=ACTOR,
+        tenant_slug=TENANT,
+        appointment_id="APPOINTMENT-ARG",
+        expected_version=3,
+    ),
     "get_master_schedule": lambda c: c.get_master_schedule(
         actor_external_id=ACTOR, tenant_slug=TENANT, specialist_id="SPECIALIST-ARG"
     ),
