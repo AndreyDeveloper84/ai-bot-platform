@@ -162,6 +162,7 @@ class TestDashboardAuth:
             "today_summary",
             "tab_badges",
             "states",
+            "week_summary",
         }
 
     def test_no_linked_master_returns_401(
