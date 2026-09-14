@@ -180,6 +180,31 @@ class FoodLogResponse:
     raw: dict[str, Any]
 
 
+@dataclass(frozen=True)
+class DishEstimate:
+    """Оценка блюда БЕЗ записи — ``internal/food-estimate/`` (DRF-1837, §109).
+
+    ``portion_estimated`` — граммов человек не называл, порция взята базовая;
+    карточка обязана назвать это оценкой.
+    """
+
+    matched_dish: str
+    portion_g: float
+    portion_estimated: bool
+    kcal: float
+    protein_g: float | None
+    fat_g: float | None
+    carbs_g: float | None
+    raw: dict[str, Any]
+
+
+def _float_or_none(raw: Any) -> float | None:
+    try:
+        return None if raw is None else float(raw)
+    except (TypeError, ValueError):
+        return None
+
+
 def _optional_int(raw: Any) -> int | None:
     """Число — или ``None``, когда ключа нет.
 
@@ -641,6 +666,74 @@ class NutritionClient:
 
     # ─── log meal ─────────────────────────────────────────────────────────
 
+    async def estimate_dish(
+        self,
+        *,
+        external_user_id: str,
+        dish_name: str,
+        portion_g: float | None = None,
+    ) -> DishEstimate:
+        """POST ``/api/v1/nutrition/internal/food-estimate/`` — оценка без записи.
+
+        DRF-1837, §109 шаги 2–4: показать «Я распознала так» до того, как
+        число стало данными человека. Каталог не пишет ничего.
+
+        Raises:
+            NutritionUnavailableError: circuit open, network error, 5xx, timeout.
+            FoodNotRecognizedError: 400 FOOD_NOT_RECOGNIZED — блюда нет в справочнике.
+            NutritionAPIError: other 4xx.
+        """
+        now = time.monotonic()
+        if self._circuit.is_open(now=now):
+            raise NutritionUnavailableError("circuit_open")
+
+        url = self._urls.build("nutrition/internal/food-estimate/")
+        headers = with_request_id(
+            {
+                "X-Service-Token": self._token,
+                "X-External-User-ID": external_user_id,
+            }
+        )
+        body: dict[str, Any] = {"dish_name": dish_name}
+        if portion_g is not None:
+            body["portion_g"] = portion_g
+
+        try:
+            async with httpx.AsyncClient(timeout=self._timeout_s) as http:
+                resp = await http.post(url, headers=headers, json=body)
+        except (httpx.TimeoutException, httpx.NetworkError) as exc:
+            self._circuit.record_failure(now=now)
+            logger.warning(
+                "nutrition_client.estimate.network ext=%s err=%s",
+                external_user_id,
+                type(exc).__name__,
+            )
+            raise NutritionUnavailableError(f"network: {type(exc).__name__}") from exc
+
+        if resp.status_code == 200:
+            self._circuit.record_success()
+            data = resp.json().get("data", {})
+            return DishEstimate(
+                matched_dish=str(data.get("matched_dish") or dish_name),
+                portion_g=float(data.get("portion_g") or 0.0),
+                portion_estimated=bool(data.get("portion_estimated")),
+                kcal=float(data.get("kcal") or 0.0),
+                protein_g=_float_or_none(data.get("protein_g")),
+                fat_g=_float_or_none(data.get("fat_g")),
+                carbs_g=_float_or_none(data.get("carbs_g")),
+                raw=data,
+            )
+        if resp.status_code >= 500:
+            self._circuit.record_failure(now=now)
+            raise NutritionUnavailableError(f"http_{resp.status_code}")
+        try:
+            err_code = (resp.json().get("error") or {}).get("code", "")
+        except ValueError:
+            err_code = ""
+        if err_code == "FOOD_NOT_RECOGNIZED":
+            raise FoodNotRecognizedError("dish_not_found")
+        raise NutritionAPIError(f"http_{resp.status_code}_{err_code or 'unknown'}")
+
     async def log_meal(
         self,
         *,
@@ -650,6 +743,7 @@ class NutritionClient:
         meal_type: str,
         portion_multiplier: float = 1.0,
         idempotency_key: str | None = None,
+        entry_origin: str | None = None,
     ) -> FoodLogResponse:
         """POST ``/api/v1/nutrition/internal/food-log/``.
 
@@ -676,6 +770,10 @@ class NutritionClient:
             body["scan_id"] = scan_id
         if dish_name:
             body["dish_name"] = dish_name
+        if entry_origin:
+            # §136: чем получено число записи; решается на карточке, которую
+            # человек видел, и не угадывается задним числом.
+            body["entry_origin"] = entry_origin
 
         try:
             async with httpx.AsyncClient(timeout=self._timeout_s) as http:
