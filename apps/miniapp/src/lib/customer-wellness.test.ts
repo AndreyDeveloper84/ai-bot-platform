@@ -293,3 +293,42 @@ describe("the reads reach the backend instead of inventing a day", () => {
     await expect(getRecentActivity()).rejects.toThrow();
   });
 });
+
+
+describe("flushWaterQueue — onAccepted hands the entry id to the caller (DRF-1842)", () => {
+  it("is called once per accepted glass with the server entry id", async () => {
+    enqueueWaterLog(250);
+    fetchMock.mockImplementation(async () => okEntry("entry-7"));
+    const seen: string[] = [];
+
+    const synced = await flushWaterQueue((r) => seen.push(r.entry_id));
+
+    expect(synced).toBe(1);
+    expect(seen).toEqual(["entry-7"]);
+  });
+
+  it("is not called for a glass that did not reach Ayla", async () => {
+    enqueueWaterLog(250);
+    fetchMock.mockRejectedValue(new TypeError("network down"));
+    const seen: string[] = [];
+
+    const synced = await flushWaterQueue((r) => seen.push(r.entry_id));
+
+    // POSITIVE first: the glass is still queued — the flush did run.
+    expect(readWaterQueue()).toHaveLength(1);
+    expect(synced).toBe(0);
+    expect(seen).toEqual([]);
+  });
+
+  it("a throwing callback does not turn an accepted glass into a retry", async () => {
+    enqueueWaterLog(250);
+    fetchMock.mockImplementation(async () => okEntry("entry-8"));
+
+    const synced = await flushWaterQueue(() => {
+      throw new Error("ui hiccup");
+    });
+
+    expect(synced).toBe(1);
+    expect(readWaterQueue()).toHaveLength(0);
+  });
+});

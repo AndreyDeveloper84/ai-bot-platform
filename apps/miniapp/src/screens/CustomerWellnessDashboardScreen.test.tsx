@@ -12,7 +12,7 @@
  * file is about the layout, and a screen test that also exercised HTTP
  * would fail for reasons that have nothing to do with it.
  */
-import { render, screen, within } from "@testing-library/react";
+import { fireEvent, render, screen, within } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -920,5 +920,103 @@ describe("CustomerWellnessDashboardScreen — цель калорий не вы�
     // озвучивал «Калории: 0 из 2100» — дефект доставался ровно тому, кто
     // не может проверить глазами.
     expect(screen.queryByLabelText("Калории: 0 из 2100")).not.toBeInTheDocument();
+  });
+});
+
+
+describe("CustomerWellnessDashboardScreen — отмена стакана (DRF-1842)", () => {
+  beforeEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllEnvs();
+    window.localStorage.clear();
+    mockedBrowse.mockResolvedValue({
+      services: [],
+      masters: [],
+      picks: [],
+      picksOutcome: "OK",
+    });
+  });
+
+  function json(body: unknown, status = 200): Response {
+    return new Response(JSON.stringify(body), {
+      status,
+      headers: { "Content-Type": "application/json" },
+    });
+  }
+
+  /** Live prod home + the two water handles; records every call. */
+  function serveWater(undo: () => Response): string[] {
+    const calls: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: unknown, init?: RequestInit) => {
+        const u = String(url);
+        const method = (init?.method ?? "GET").toUpperCase();
+        calls.push(`${method} ${u}`);
+        if (method === "DELETE" && u.includes("/wellness/water/")) return undo();
+        if (method === "POST" && u.includes("/wellness/water")) {
+          return json({
+            entry_id: "entry-9",
+            ml: 250,
+            water_ml: 250,
+            today_total_ml: 250,
+            today_norm_ml: 0,
+            water_glasses_eaten: 1,
+          });
+        }
+        if (u.includes("/wellness/today")) {
+          return json({
+            calories_eaten: 0,
+            water_glasses_eaten: 0,
+            active_goals: [],
+            display_name: "Анна",
+          });
+        }
+        if (u.includes("/recent-activity")) return json({ this_week_booking_count: 0 });
+        throw new Error(`unexpected fetch: ${method} ${u}`);
+      }),
+    );
+    return calls;
+  }
+
+  async function tapWater() {
+    await renderScreen(true);
+    const qa = within(await screen.findByRole("region", { name: "Что сделаем сейчас" }));
+    fireEvent.click(qa.getByRole("button", { name: "Добавить стакан воды 250 мл" }));
+  }
+
+  it("принятый стакан можно отменить: DELETE по id записи, тост «Стакан убран»", async () => {
+    const calls = serveWater(() => new Response(null, { status: 204 }));
+    await tapWater();
+
+    fireEvent.click(await screen.findByRole("button", { name: "Отменить стакан" }));
+
+    expect(await screen.findByText("Стакан убран")).toBeInTheDocument();
+    expect(calls).toContain("DELETE /api/v1/customer/wellness/water/entry-9");
+  });
+
+  it("окно отмены закрылось — сказано, что стакан остался", async () => {
+    serveWater(() => json({ error: "not_undoable" }, 404));
+    await tapWater();
+
+    fireEvent.click(await screen.findByRole("button", { name: "Отменить стакан" }));
+
+    expect(
+      await screen.findByText(/окно отмены закрылось, стакан остался в дневнике/),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("Стакан убран")).not.toBeInTheDocument();
+  });
+
+  it("сбой при отмене — ничего не убрано, кнопка возвращается", async () => {
+    serveWater(() => json({ error: "ayla_unavailable" }, 502));
+    await tapWater();
+
+    fireEvent.click(await screen.findByRole("button", { name: "Отменить стакан" }));
+
+    expect(
+      await screen.findByText("Не получилось убрать — попробуй ещё раз"),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Отменить стакан" })).toBeInTheDocument();
+    expect(screen.queryByText("Стакан убран")).not.toBeInTheDocument();
   });
 });

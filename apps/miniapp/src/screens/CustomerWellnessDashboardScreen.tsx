@@ -94,6 +94,7 @@ import {
   pickGreeting,
   pickOneLiner,
   readWaterQueue,
+  undoWaterLog,
   type RecentActivity,
   type WellnessToday,
 } from "../lib/customer-wellness";
@@ -155,6 +156,10 @@ export function CustomerWellnessDashboardScreen() {
     () => readWaterQueue().length,
   );
   const [waterToast, setWaterToast] = useState<string | null>(null);
+  // DRF-1842 — id последнего принятого стакана, пока его можно отменить.
+  // Ручка отмены (`DELETE /wellness/water/{id}`, `undoWaterLog`) была, а
+  // кнопки не было ни одной: ошибочный тап оставался в дневнике навсегда.
+  const [undoEntryId, setUndoEntryId] = useState<string | null>(null);
   const [onboardingDismissed, setOnboardingDismissed] = useState<boolean>(
     () => isOnboardingDismissed(),
   );
@@ -234,12 +239,19 @@ export function CustomerWellnessDashboardScreen() {
     };
   }, []);
 
-  // Auto-clear transient toasts after 3s.
+  // Auto-clear transient toasts after 3s — 8s while «Отменить» is on offer:
+  // за три секунды кнопку не успеть нажать.
   useEffect(() => {
     if (!waterToast) return;
-    const t = setTimeout(() => setWaterToast(null), 3000);
+    const t = setTimeout(
+      () => {
+        setWaterToast(null);
+        setUndoEntryId(null);
+      },
+      undoEntryId ? 8000 : 3000,
+    );
     return () => clearTimeout(t);
-  }, [waterToast]);
+  }, [waterToast, undoEntryId]);
   // ── quick-action handlers ────────────────────────────────────────────
   //
   // Быстрого действия «📸 Сфотографируй еду» здесь БОЛЬШЕ НЕТ
@@ -254,6 +266,7 @@ export function CustomerWellnessDashboardScreen() {
   const onWaterTap = useCallback(() => {
     // §11.8 — offline: queue to localStorage 24h TTL. Real POST is
     // wired by W4; STUB MODE simulates instant accept when online.
+    setUndoEntryId(null);
     if (!online) {
       const len = enqueueWaterLog(250);
       setWaterQueueLen(len);
@@ -266,11 +279,35 @@ export function CustomerWellnessDashboardScreen() {
     // as a single durable code path while STUB doesn't have a real
     // endpoint. Once W4 ships, the online branch will skip enqueue.
     enqueueWaterLog(250);
-    void flushWaterQueue().then(() => {
+    void flushWaterQueue((accepted) => setUndoEntryId(accepted.entry_id)).then(() => {
       setWaterQueueLen(readWaterQueue().length);
     });
     setWaterToast("+1 стакан зачтён");
   }, [online]);
+
+  const onUndoWater = useCallback(() => {
+    const id = undoEntryId;
+    if (!id) return;
+    setUndoEntryId(null);
+    void undoWaterLog(id).then(
+      (removed) => {
+        // `false` — окно отмены закрылось: стакан ОСТАЛСЯ, и сказать
+        // «убран» было бы той самой ложью, ради которой `undoWaterLog`
+        // различает 404 и сбой.
+        setWaterToast(
+          removed
+            ? "Стакан убран"
+            : "Уже не убрать: окно отмены закрылось, стакан остался в дневнике",
+        );
+        if (removed) void fetchAll();
+      },
+      () => {
+        // Сбой сети/сервера — ничего не удалено; кнопку возвращаем.
+        setUndoEntryId(id);
+        setWaterToast("Не получилось убрать — попробуй ещё раз");
+      },
+    );
+  }, [undoEntryId, fetchAll]);
 
   const onGoalTap = useCallback(() => {
     // §11.2 — context-aware label; the destination is the real goal
@@ -601,6 +638,16 @@ export function CustomerWellnessDashboardScreen() {
               aria-live="polite"
             >
               {waterToast}
+              {undoEntryId && (
+                <button
+                  type="button"
+                  className="wellness-dash__toast-action"
+                  aria-label="Отменить стакан"
+                  onClick={onUndoWater}
+                >
+                  Отменить
+                </button>
+              )}
             </div>
           )}
         </section>
