@@ -338,6 +338,37 @@ class CatalogSlugTaken(CatalogError):
         self.requested_name = requested_name
 
 
+class CatalogSoloProvisioningRefused(CatalogError):
+    """Каталог ответил 409 на provisioning solo-workspace (DRF-1830, M29).
+
+    ``reason`` — машинное имя причины из ``details.reason`` каталога
+    (``slug_taken`` / ``tenant_id_taken`` / ``claim_bound_elsewhere`` /
+    ``invalid_external_user_id``). Ничего не создано ни там, ни здесь;
+    чинит оператор, не повтор.
+    """
+
+    def __init__(self, message: str, *, reason: str) -> None:
+        super().__init__(message)
+        self.reason = reason
+
+
+@dataclass(frozen=True)
+class ProvisionedSoloWorkspaceDTO:
+    """Ответ ``POST /api/v1/internal/tenants/solo-workspaces/`` (DRF-1828/1830).
+
+    ``created`` — 201 против 200: workspace заведён этим вызовом или уже был
+    заведён для той же личности (идемпотентность по claim на стороне
+    каталога).
+    """
+
+    tenant_id: uuid.UUID
+    slug: str
+    specialist_id: uuid.UUID
+    user_id: uuid.UUID
+    status: str
+    created: bool
+
+
 @dataclass(frozen=True)
 class EnsuredTenantDTO:
     """Ответ ``POST /api/v1/internal/tenants/`` (DRF-1525).
@@ -770,6 +801,104 @@ class CatalogHttpClient:
         if self._http is None:
             self._http = httpx.Client(timeout=self._timeout)
         return self._http
+
+    def provision_solo_workspace(
+        self,
+        *,
+        tenant_id: uuid.UUID | str,
+        slug: str,
+        name: str,
+        city: str,
+        external_user_id: str,
+        display_name: str,
+    ) -> ProvisionedSoloWorkspaceDTO:
+        """Каталожный workspace соло-мастера: Tenant с тем же UUID + DRAFT-профиль (DRF-1830).
+
+        ``POST /api/v1/internal/tenants/solo-workspaces/`` под
+        ``AYLA_TENANT_PROVISIONING_TOKEN`` — тот же секрет и та же сторона
+        ответственности, что у :meth:`ensure_tenant`. Идемпотентно на
+        стороне каталога по ``external_user_id``: 201 завёл / 200 уже был.
+
+        Без ретраев сверх ``httpx``: это действие, а не выборка; повтор
+        делает вызывающий (регистрация, оператор) по записанной причине.
+
+        Исходы по имени: :class:`CatalogProvisioningTokenMissing`,
+        :class:`CatalogProvisioningRefused` (403), :class:`CatalogSoloProvisioningRefused`
+        (409 с ``reason``), :class:`CatalogClientError` (прочие 4xx),
+        :class:`CatalogTransportError` (сеть / 5xx / кривой ответ).
+        """
+        token = (
+            self._provisioning_token
+            if self._provisioning_token is not None
+            else getattr(settings, "AYLA_TENANT_PROVISIONING_TOKEN", "")
+        )
+        if not token:
+            raise CatalogProvisioningTokenMissing(
+                "AYLA_TENANT_PROVISIONING_TOKEN not configured on the bot side"
+            )
+        try:
+            url = AylaUrlBuilder(self._base_url).build("/internal/tenants/solo-workspaces/")
+        except AylaUrlError as exc:
+            raise CatalogTransportError(f"invalid AYLA_BASE_URL: {exc}") from exc
+
+        try:
+            response = self._client().post(
+                url,
+                json={
+                    "tenant_id": str(tenant_id),
+                    "slug": slug,
+                    "name": name,
+                    "city": city or "",
+                    "external_user_id": external_user_id,
+                    "display_name": display_name,
+                },
+                headers=with_request_id(
+                    {
+                        "Authorization": f"Bearer {token}",
+                        "Accept": "application/json",
+                    }
+                ),
+                timeout=self._timeout,
+            )
+        except httpx.HTTPError as exc:
+            raise CatalogTransportError(
+                f"Ayla solo-workspaces: transport failure on {url}: {exc.__class__.__name__}"
+            ) from exc
+
+        if response.status_code in (401, 403):
+            raise CatalogProvisioningRefused(
+                f"Ayla solo-workspaces: provisioning refused with HTTP {response.status_code}"
+            )
+        if response.status_code == 409:
+            details = _json_or_empty(response).get("error", {}).get("details", {}) or {}
+            reason = str(details.get("reason") or "conflict")
+            raise CatalogSoloProvisioningRefused(
+                f"Ayla solo-workspaces: refused ({reason})", reason=reason
+            )
+        if 400 <= response.status_code < 500:
+            raise CatalogClientError(
+                f"Ayla solo-workspaces 4xx: HTTP {response.status_code} "
+                f"body={response.text[:200]!r}"
+            )
+        if response.status_code >= 500:
+            raise CatalogTransportError(f"Ayla solo-workspaces: HTTP {response.status_code}")
+
+        data = _json_or_empty(response).get("data")
+        if not isinstance(data, dict):
+            raise CatalogTransportError("Ayla solo-workspaces: response without data")
+        try:
+            return ProvisionedSoloWorkspaceDTO(
+                tenant_id=uuid.UUID(str(data["tenant_id"])),
+                slug=str(data.get("slug") or slug),
+                specialist_id=uuid.UUID(str(data["specialist_id"])),
+                user_id=uuid.UUID(str(data["user_id"])),
+                status=str(data.get("status") or ""),
+                created=response.status_code == 201,
+            )
+        except (KeyError, ValueError) as exc:
+            raise CatalogTransportError(
+                "Ayla solo-workspaces: response without tenant_id/specialist_id/user_id"
+            ) from exc
 
     def close(self) -> None:
         if self._http is not None:

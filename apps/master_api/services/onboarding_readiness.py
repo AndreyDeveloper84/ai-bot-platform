@@ -66,7 +66,7 @@ REQUIRED_ITEMS: tuple[str, ...] = ("services", "location", "hours", "profile")
 DEEP_LINKS: dict[str, str] = {
     "services": "/solo/services",
     "location": "/solo/settings",
-    "hours": "/solo/schedule",
+    "hours": "/solo/working-hours",  # M25 (#1711): редактор часов, не журнал записей
     "profile": "/solo/profile",
 }
 
