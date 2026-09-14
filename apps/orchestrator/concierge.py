@@ -1982,6 +1982,12 @@ def _concierge_turn(
             trace_id,
             pass_index,
         )
+        # DRF-1882 — сколько мастеров нашлось и в каком порядке едет в запись
+        # трассы этого вызова: из неё теневой DecisionReadiness строит подпись
+        # кандидатов (id мастеров — адреса каталога, не сведения о человеке).
+        if tool_trace and isinstance(tool_trace[-1], dict):
+            tool_trace[-1]["result_count"] = len(cards)
+            tool_trace[-1]["ordered_ids"] = [str(getattr(card, "master_id", "")) for card in cards]
         if not cards:
             # DRF-1474 — the fact, written down where it is established. Every
             # branch below that can answer an empty search reads it back, and

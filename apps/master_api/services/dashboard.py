@@ -133,6 +133,25 @@ class TodaySummary:
 
 
 @dataclass(frozen=True)
+class WeekSummary:
+    """The master's calendar week in numbers the mirror actually holds (DRF-1846).
+
+    ``bookings`` — visits that occupy the master's time this week (upcoming
+    and completed); ``completed`` — of them, closed. ``rating`` is
+    ``{"value", "review_count"}`` only when at least one review backs it,
+    otherwise ``None`` (owner decision 06.09: zero is «no data», not a
+    score). There is deliberately no revenue: the booking mirror carries no
+    price, and a number built without one would be invented.
+    """
+
+    week_start: str  # tenant-local Monday, YYYY-MM-DD
+    week_end: str  # tenant-local Sunday, YYYY-MM-DD
+    bookings: int
+    completed: int
+    rating: dict[str, Any] | None
+
+
+@dataclass(frozen=True)
 class TabBadges:
     conversations_unread: int
     schedule_has_pending_change: bool
@@ -159,6 +178,7 @@ class DashboardSnapshot:
     today_summary: TodaySummary
     tab_badges: TabBadges
     states: DashboardStates
+    week_summary: WeekSummary
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -171,6 +191,7 @@ class DashboardSnapshot:
             "today_summary": _dc_to_dict(self.today_summary),
             "tab_badges": _dc_to_dict(self.tab_badges),
             "states": _dc_to_dict(self.states),
+            "week_summary": _dc_to_dict(self.week_summary),
         }
 
 
@@ -667,6 +688,55 @@ def get_today_summary(master: CatalogMaster, now: datetime) -> TodaySummary:
     )
 
 
+# Week summary ----------------------------------------------------------
+
+
+def _week_bounds(now: datetime, tz: ZoneInfo) -> tuple[datetime, datetime, date, date]:
+    """(start_utc, end_utc, monday, sunday) of the tenant-local calendar week."""
+
+    today = now.astimezone(tz).date()
+    monday = today - timedelta(days=today.weekday())
+    sunday = monday + timedelta(days=6)
+    start_local = datetime.combine(monday, time.min, tzinfo=tz)
+    end_local = datetime.combine(sunday, time.max, tzinfo=tz)
+    return (
+        start_local.astimezone(dt_timezone.utc),
+        end_local.astimezone(dt_timezone.utc),
+        monday,
+        sunday,
+    )
+
+
+def _rating_if_backed(master: CatalogMaster) -> dict[str, Any] | None:
+    """The rating only when a review stands behind it (owner decision 06.09).
+
+    ``0.00`` and ``review_count == 0`` are both «no rating yet»; the pilot's
+    seeded ratings have no reviews and are not shown here.
+    """
+
+    count = master.review_count or 0
+    if count < 1 or master.rating is None or master.rating <= 0:
+        return None
+    return {"value": round(float(master.rating), 1), "review_count": count}
+
+
+def get_week_summary(master: CatalogMaster, now: datetime) -> WeekSummary:
+    """Counts for the current calendar week (Mon–Sun, tenant TZ)."""
+
+    tz = get_tenant_tz(master.tenant)
+    start_utc, end_utc, monday, sunday = _week_bounds(now, tz)
+    # Same status set as «today»: cancelled and no-show rows did not take
+    # the master's time.
+    week = master_visits(master, start=start_utc, end=end_utc)
+    return WeekSummary(
+        week_start=monday.isoformat(),
+        week_end=sunday.isoformat(),
+        bookings=len(week),
+        completed=sum(1 for visit in week if visit.is_completed),
+        rating=_rating_if_backed(master),
+    )
+
+
 # Tab badges ------------------------------------------------------------
 
 
@@ -815,6 +885,7 @@ def build_dashboard(master: CatalogMaster, now: datetime) -> DashboardSnapshot:
         today_summary=get_today_summary(master, now),
         tab_badges=get_tab_badges(master, now),
         states=get_states(master, now),
+        week_summary=get_week_summary(master, now),
     )
 
 
@@ -827,6 +898,7 @@ __all__ = [
     "NextVisit",
     "TabBadges",
     "TodaySummary",
+    "WeekSummary",
     "build_dashboard",
     "get_active_visit",
     "get_inbox_preview",

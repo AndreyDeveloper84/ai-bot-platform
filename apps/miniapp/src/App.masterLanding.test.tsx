@@ -131,6 +131,13 @@ const DASHBOARD: DashboardResponse = {
     profile_has_owner_pending_change: false,
   },
   states: { is_day_done: false, is_offline_safe_response: false },
+  week_summary: {
+    week_start: "2026-08-31",
+    week_end: "2026-09-06",
+    bookings: 1,
+    completed: 0,
+    rating: null,
+  },
 };
 
 function renderAppAt(path: string) {

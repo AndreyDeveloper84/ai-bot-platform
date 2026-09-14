@@ -2491,6 +2491,18 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
         tool_trace=getattr(turn_reply, "tool_trace", None) if concierge_turn_ran else None,
     )
 
+    # DRF-1882 — теневой DecisionReadiness (решение владельца C1): после
+    # отправки, одна строка лога «что решил бы движок / что сделал путь».
+    # Флаг DRE_SHADOW_ENABLED выключен — ноль работы; не бросает.
+    from apps.orchestrator.dr_shadow import observe_live_turn
+
+    observe_live_turn(
+        conversation,
+        tool_trace=getattr(turn_reply, "tool_trace", None) if concierge_turn_ran else None,
+        trace_id=trace_id,
+        branch=assistant_action_type or ("concierge" if concierge_turn_ran else ""),
+    )
+
     # DRF-1273 — canonical intent resolution (Output Contract 0.5) for
     # free-text concierge turns. Runs AFTER the reply is delivered: zero
     # added user-visible latency, and a resolver failure can never affect

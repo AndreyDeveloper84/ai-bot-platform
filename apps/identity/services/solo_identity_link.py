@@ -109,6 +109,16 @@ def confirm_by_operator(link: SoloIdentityLink, *, bot_user, operator) -> Operat
     if link.status == SoloIdentityLink.Status.REJECTED:
         return OperatorLinkOutcome(status=link.status, refusal="rejected")
 
+    # DRF-1830: оператору нечего связывать, пока каталожного workspace нет —
+    # повторяем провижининг здесь же (уже подтверждённый не вызывается).
+    from apps.identity.services.solo_catalog_provisioning import provision_catalog_workspace
+
+    provision_catalog_workspace(
+        link,
+        tenant=link.master.tenant,
+        bot_user=bot_user,
+        display_name=getattr(bot_user, "display_name", "") or link.master.name,
+    )
     refusal = attempt_solo_link(link.master, bot_user)
     link.last_attempt_at = timezone.now()
     link.last_attempt_refusal = refusal or ""
