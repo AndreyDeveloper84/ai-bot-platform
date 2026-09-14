@@ -337,6 +337,56 @@ export const putWorkingHours = (
 ): Promise<WorkingHoursResponse> =>
   request("/working-hours", { method: "PUT", body: JSON.stringify({ schedule }) });
 
+// --- M18a «Свои услуги» — заявки о разрыве канона (DRF-1896 / DRF-1802) ---------
+// Mirrors apps/master_api/views.py::canon_gap_requests / canon_gap_similar /
+// canon_gap_request_detail — a proxy to the catalog (DRF-1801). The answer is
+// the catalog's, never an echo; the owner decides, the screen only shows.
+
+export type CanonGapStatus = "pending" | "approved" | "needs_clarification" | "rejected";
+
+export interface CanonGapRequest {
+  id: string;
+  specialist_id: string;
+  name: string;
+  description: string;
+  duration_minutes: number;
+  price: string;
+  status: CanonGapStatus | string;
+  /** Одно из четырёх слов мастеру — от сервера, не вычисляется на экране. */
+  status_label: string;
+  resolved_template_id: string | null;
+  clarification_question: string | null;
+  rejection_reason: string | null;
+  decided_at: string | null;
+  created_at: string;
+}
+
+export interface CanonGapSimilar {
+  template_id: string;
+  name: string;
+  matched_by: "synonym" | "canonical_name" | string;
+}
+
+export interface CanonGapRequestCreate {
+  name: string;
+  description: string;
+  duration_minutes: number;
+  price: string;
+}
+
+export const listCanonGapRequests = (): Promise<{ requests: CanonGapRequest[] }> =>
+  request("/canon-gap-requests", { method: "GET" });
+
+export const createCanonGapRequest = (
+  body: CanonGapRequestCreate,
+): Promise<{ request: CanonGapRequest; similar: CanonGapSimilar[] }> =>
+  request("/canon-gap-requests", { method: "POST", body: JSON.stringify(body) });
+
+export const getSimilarCanonTemplates = (
+  name: string,
+): Promise<{ similar: CanonGapSimilar[] }> =>
+  request(`/canon-gap-requests/similar?name=${encodeURIComponent(name)}`, { method: "GET" });
+
 /** Пункты, которые экран рисует: всё, кроме `unavailable`. */
 export const drawnReadinessItems = (items: ReadinessItem[]): ReadinessItem[] =>
   items.filter((item) => item.state !== "unavailable");
