@@ -193,6 +193,7 @@ from apps.orchestrator.visits import (
 )
 from apps.orchestrator.memory import short_term
 from apps.orchestrator.memory.personal_context import record_explicit_green_facts
+from apps.orchestrator.said_memory import record_said_facts
 from apps.orchestrator.memory_ask import maybe_weave_question, try_handle_answer
 from apps.orchestrator.memory_block import build_concierge_memory_block
 from apps.orchestrator.nutrition_context import build_nutrition_context_block
@@ -2545,6 +2546,14 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
     # the 152-ФЗ erasure. A forget/show turn must never write memory.
     if not was_memory_command:
         record_explicit_green_facts(bot_user, event.text)
+        # Бриф «Мозг» п.4 — город поиска и «когда удобно приходить», если их
+        # сказал сам человек. После отправки, не бросает.
+        record_said_facts(
+            bot_user,
+            conversation,
+            event.text,
+            tool_trace=getattr(turn_reply, "tool_trace", None) if concierge_turn_ran else None,
+        )
 
 
 def _remember_time_preference(conversation, bot_user, text: str, reply):
