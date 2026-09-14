@@ -13,7 +13,7 @@
  * would fail for reasons that have nothing to do with it.
  */
 import { fireEvent, render, screen, within } from "@testing-library/react";
-import { MemoryRouter } from "react-router-dom";
+import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("../lib/customer-booking", async (importOriginal) => {
@@ -173,6 +173,32 @@ describe("CustomerWellnessDashboardScreen — the home surface", () => {
     ).toBeInTheDocument();
     expect(qa.getByRole("button", { name: "Выбери цель" })).toBeInTheDocument();
     expect(qa.getByRole("button", { name: "Найди услугу" })).toBeInTheDocument();
+    // DRF-1839: вход в дневник — живая ручка `/wellness/today`.
+    expect(qa.getByRole("button", { name: "Дневник питания" })).toBeInTheDocument();
+  });
+
+  it("«📔 Дневник питания» ведёт на экран дневника (DRF-1839)", async () => {
+    // До DRF-1839 входа в дневник с главной не было ни одного: записи из
+    // чата человек в Mini App не видел. Проверяется переход, а не кнопка —
+    // кнопка без маршрута была бы той же дырой в новой обёртке.
+    vi.resetModules();
+    const { CustomerWellnessDashboardScreen } = await import(
+      "./CustomerWellnessDashboardScreen"
+    );
+    render(
+      <MemoryRouter initialEntries={["/customer/main"]}>
+        <Routes>
+          <Route path="/customer/main" element={<CustomerWellnessDashboardScreen />} />
+          <Route
+            path="/customer/food-scanner/diary"
+            element={<div>экран дневника</div>}
+          />
+        </Routes>
+      </MemoryRouter>,
+    );
+    const qa = within(await screen.findByRole("region", { name: "Что сделаем сейчас" }));
+    fireEvent.click(qa.getByRole("button", { name: "Дневник питания" }));
+    expect(await screen.findByText("экран дневника")).toBeInTheDocument();
   });
 
   it("prod build: «Главная» is the active tab and «День» is not offered", async () => {

@@ -305,6 +305,15 @@ export function CustomerWellnessDashboardScreen() {
     navigate("/customer/catalog");
   }, [navigate]);
 
+  // DRF-1839 — вход в дневник. Экран `/customer/food-scanner/diary`
+  // читает живую `/wellness/today` (без `guardProd`), но входа в него не
+  // было ни одного: slug `open_food_diary` без кнопки в боте и экран
+  // «Сохранённое», сам недостижимый. Записи, сделанные в чате, человек
+  // здесь не видел — пустой экран был неотличим от «ничего не ел».
+  const onDiaryTap = useCallback(() => {
+    navigate("/customer/food-scanner/diary");
+  }, [navigate]);
+
   const onDismissOnboarding = useCallback(() => {
     markOnboardingDismissed();
     setOnboardingDismissed(true);
@@ -599,6 +608,17 @@ export function CustomerWellnessDashboardScreen() {
                 📅
               </span>
               <span className="wellness-dash__qa-label">Найди услугу</span>
+            </button>
+            <button
+              type="button"
+              className="wellness-dash__qa-btn"
+              aria-label="Дневник питания"
+              onClick={onDiaryTap}
+            >
+              <span className="wellness-dash__qa-icon" aria-hidden="true">
+                📔
+              </span>
+              <span className="wellness-dash__qa-label">Дневник питания</span>
             </button>
           </div>
 
