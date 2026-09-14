@@ -145,6 +145,7 @@ class TestFlagOffDoesNothing:
 
         assert screen == PROSE
         assert engine_spy.call_count == 0
+        # empty-assert-ok: флаг не задан — тень не пишет ничего по построению; присутствие строки доказывает соседний тест с включённым флагом
         assert _shadow_lines(caplog) == []
 
 
