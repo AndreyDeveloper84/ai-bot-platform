@@ -38,6 +38,8 @@ urlpatterns = [
         views.canon_gap_request_detail,
         name="canon_gap_request_detail",
     ),
+    # DRF-1845 — «Принимаю записи»; не путать с «availability» (заявка на выходной).
+    path("accepting-bookings", views.accepting_bookings, name="accepting_bookings"),
     path("availability", views.availability_request, name="availability_request"),
     path(
         "availability/pending",

@@ -61,6 +61,7 @@ import {
 } from "../lib/max-sdk";
 import { IconMessage, MasterTabBar } from "../components/MasterTabBar";
 import { unreadBadgeText } from "../lib/unread-badge";
+import { AcceptingBookingsToggle } from "../components/AcceptingBookingsToggle";
 import { PayoutPreviewCard } from "../components/PayoutPreviewCard";
 import { SetupProgressCard } from "../components/SetupProgressCard";
 import {
@@ -360,6 +361,9 @@ export function MasterDashboardScreen() {
 
       {/* DRF-1807 — карточка «Продолжить настройку», пока readiness не закрыт. */}
       <SetupProgressCard />
+
+      {/* DRF-1845 — «Принимаю записи»: сам грузится, прячется при отказе. */}
+      <AcceptingBookingsToggle />
 
       {isDayDone ? (
         <DayDoneSection
