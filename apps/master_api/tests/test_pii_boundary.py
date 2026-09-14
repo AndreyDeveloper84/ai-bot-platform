@@ -908,6 +908,23 @@ NOT_SWEPT_ROUTES: dict[str, str] = {
         "response is the master's own weekly template + timezone, no customer "
         "record — swept with a stubbed client in test_working_hours_1816"
     ),
+    # DRF-1802 (M10) — «своя услуга» мастера: прокси заявок о разрыве канона
+    # в каталог. Отдают только собственные заявки мастера (название, цена,
+    # длительность, статус) — клиентских данных там нет по построению; ответ
+    # приходит из каталога, поэтому свип живым клиентом не собрать — покрыты
+    # подменённым клиентом в test_canon_gap_requests_1802.
+    "canon_gap_requests": (
+        "proxy of the master's own canon-gap requests to the catalog; no customer "
+        "record — covered with a stubbed client in test_canon_gap_requests_1802"
+    ),
+    "canon_gap_similar": (
+        "canonical-template name hint from the catalog; no customer record — covered "
+        "with a stubbed client in test_canon_gap_requests_1802"
+    ),
+    "canon_gap_request_detail": (
+        "one own canon-gap request from the catalog; no customer record — covered "
+        "with a stubbed client in test_canon_gap_requests_1802"
+    ),
 }
 
 
