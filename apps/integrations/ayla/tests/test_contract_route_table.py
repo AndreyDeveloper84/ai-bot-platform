@@ -188,6 +188,9 @@ ROUTE_TABLE: tuple[Route, ...] = (
     Route("POST", "/api/v1/internal/billing/specialists/{id}/card-setup/", Auth.BEARER),
     Route("POST", "/api/v1/internal/billing/specialists/{id}/pay-debt/", Auth.BEARER),
     Route("GET", "/api/v1/internal/specialists/{id}/payout-preview/", Auth.BEARER),
+    # DRF-1813 (M21) — профиль и аватар мастера под субъектом (каталог #455).
+    Route("PATCH", "/api/v1/internal/specialists/{id}/profile/", Auth.BEARER_EXT),
+    Route("POST", "/api/v1/internal/specialists/{id}/media/avatar/", Auth.BEARER_EXT),
     # DRF-1895 (M10b) — выбор услуг мастера и его цена под субъектом (каталог #443/#444).
     Route("GET", "/api/v1/internal/specialists/{id}/services/selection/", Auth.BEARER_EXT),
     Route("POST", "/api/v1/internal/specialists/{id}/services/selection/", Auth.BEARER_EXT),
@@ -390,6 +393,21 @@ def _exercise_booking() -> None:
     # route was not covered at all. ``get_specialist_service_edges`` is that
     # live reader (quote/repeat, DRF-1067). It takes no tenant scope by design.
     _swallow(lambda: c.get_specialist_service_edges(specialist_id="SPECID", service_id="SVCID"))
+    # DRF-1813 (M21) — профиль и аватар мастера.
+    _swallow(
+        lambda: c.patch_specialist_profile(
+            specialist_id="SPECID", external_user_id=_EXT_USER, bio="о себе"
+        )
+    )
+    _swallow(
+        lambda: c.upload_specialist_avatar(
+            specialist_id="SPECID",
+            external_user_id=_EXT_USER,
+            filename="a.jpg",
+            content=b"\xff\xd8",
+            content_type="image/jpeg",
+        )
+    )
     # DRF-1895 (M10b) — выбор услуг и цена мастера.
     _swallow(lambda: c.get_service_selection(specialist_id="SPECID", external_user_id=_EXT_USER))
     _swallow(
