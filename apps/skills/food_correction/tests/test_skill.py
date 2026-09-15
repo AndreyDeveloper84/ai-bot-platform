@@ -718,4 +718,5 @@ class TestGramsReachTheDiaryEntry:
         result, written = self._answer("500", card=card)
 
         assert result.reply_text == STALE_CARD_ACK
+        assert written[-1] == ("food_correction", None)  # the state-write path ran
         assert not any(key == "food_scan_grams" for key, _ in written)

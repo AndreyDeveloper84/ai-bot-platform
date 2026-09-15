@@ -586,6 +586,7 @@ class TestCorrectedGramsReachTheLog:
 
         assert len(captured) == 1
         assert result.meta["reply_kind"] == "food_scanner_log_unavailable"
+        # empty-assert-ok: log_meal raised, so no state write of any kind is expected
         assert not any(key == "food_scan_logged" for key, _ in written)
 
     def test_the_card_keeps_the_scan_portion(self) -> None:

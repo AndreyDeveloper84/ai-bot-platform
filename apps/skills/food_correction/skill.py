@@ -420,7 +420,9 @@ def _carry_grams(
             False,
         )
     if multiplier is OUT_OF_RANGE:
-        shown = int(portion) if float(portion).is_integer() else portion
+        shown = portion
+        if isinstance(portion, float) and portion.is_integer():
+            shown = int(portion)
         return (
             GRAMS_OUT_OF_RANGE_ACK.format(value=grams, portion=shown),
             "food_correction_grams_out_of_range",
