@@ -58,12 +58,6 @@ EXPECTED: dict[str, tuple[str, str]] = {
         FRAME,
         "сам переключатель: флаг OFF — локальные таблицы, ON — каталог",
     ),
-    "apps/miniapp_api/views.py": (
-        CLIENT_PATH_X6,
-        "клиентский путь: SlotConfig и локальный резолвер слотов; решение — "
-        "вопрос владельца X6; на пилоте scheduling_slotconfig 0 строк "
-        "(замер главного окна 15.09.2026 ~23:20 UTC), горизонт по умолчанию 60 дней",
-    ),
     "apps/master_api/services/schedule.py": (
         DEBT,
         "DRF-2019: request_availability_change сверяет пересечение по локальному "
@@ -85,24 +79,24 @@ EXPECTED: dict[str, tuple[str, str]] = {
         "подтверждение недели: свой флаг-осведомлённый выбор источника, "
         "FrameHours брать нельзя — теряются перерывы",
     ),
-    "apps/booking/services/create.py": (
-        WRITER_OR_OPERATOR,
-        "локальное создание записи пути «флаг выключен»; вопрос X5",
-    ),
-    "apps/channels/max/staff_actions.py": (
-        WRITER_OR_OPERATOR,
-        "операторские действия сотрудника в чате; вопрос X5",
-    ),
     "apps/catalog/management/commands/seed_dev_formula_tela.py": (
         WRITER_OR_OPERATOR,
         "dev-фикстура",
     ),
 }
 
+#: Предмет переписи — две модели РАМКИ дня (`WorkingHours`, `ScheduleException`).
+#: Читатели `SlotConfig` и `TimeBlock` сюда не входят и намеренно не значатся:
+#: клиентский горизонт слотов (`miniapp_api/views.py:641`) — вопрос владельца
+#: X6, локальный резолвер слотов и локальное создание записи пути «флаг
+#: выключен» — X5. Они не читают рамку и не могут показать мастеру чужое
+#: рабочее время; называть их здесь значило бы держать в переписи записи,
+#: которых сканер не видит, — и тогда «убрать запись» краснело бы вечно.
+#:
 #: Нижняя граница скана: меньше — значит сканер сломан, а не стало чисто.
 MIN_FILES_SCANNED = 100
-MIN_CLASSIFIED_FILES = 10
-MIN_MENTIONS = 20
+MIN_CLASSIFIED_FILES = 7
+MIN_MENTIONS = 35
 
 
 #: Что перепись видит, а что нет — названный предел, а не молчание.

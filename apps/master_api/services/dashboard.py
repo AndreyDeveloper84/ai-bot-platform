@@ -57,7 +57,13 @@ from apps.master_api.services.visit_source import (
 )
 from apps.catalog.models import CatalogMaster, CatalogService
 from apps.internal_chat.models import MasterAdminMessage
-from apps.scheduling.models import ScheduleChangeRequest, ScheduleException, WorkingHours
+from apps.integrations.ayla.salon_client import (
+    SalonAPIError,
+    SalonNotConfigured,
+    SalonUnavailable,
+)
+from apps.master_api.services.schedule_frame import load_day_frame
+from apps.scheduling.models import ScheduleChangeRequest
 
 logger = logging.getLogger(__name__)
 
@@ -579,35 +585,54 @@ def _occupied_intervals_today(
     return intervals
 
 
-def _working_block_today(master: CatalogMaster, today_local: date) -> tuple[time, time] | None:
-    """Today's effective working block in tenant-local time.
+def _working_block_today(
+    master: CatalogMaster, today_local: date, *, tz: ZoneInfo
+) -> tuple[time, time] | None:
+    """Today's effective working block in tenant-local time — из ЖИВОГО источника.
 
-    Picks ScheduleException for the date if present (custom_hours →
-    those times; full-day-off types → None). Otherwise falls back to
-    WorkingHours for the weekday (None if is_working=False).
+    DRF-2014. Здесь стоял прямой запрос к локальным ``ScheduleException`` и
+    ``WorkingHours`` мимо ``BOOKING_VIA_AYLA_REST``, тогда как занятость того же
+    окна дашборд берёт из каталожного зеркала ``RemoteBookingProxy``. «Ближайшее
+    свободное окно» получалось пересечением **устаревшей рамки** со **свежей
+    занятостью**: окно показывалось там, где мастер в каталоге не работает, и
+    пряталось там, где работает, но в копии бота его нет (замер главного окна на
+    пилоте 15.09.2026 ~23:20 UTC: копия — 28 строк у 4 мастеров от 22.07, каталог
+    — 63 строки у 9; у наблюдения есть срок годности).
+
+    Теперь рамку даёт ``load_day_frame`` (``services/schedule_frame.py:152``) —
+    тот же переключатель, которым уже пользуются экран расписания и готовность
+    мастера: флаг включён — каталог, выключен — прежние локальные таблицы. Правило
+    приоритета «исключение дня → неделя» не переписано, а взято там же, где его
+    применяет экран расписания (``services/schedule.py::_working_block_for_day``):
+    два одинаковых правила в двух местах расходятся с первой правкой.
+
+    Каталог не прочитан — окна нет, и локальная копия НЕ подставляется тихо:
+    «не знаю» не равно «весь день свободен» (DRF-1111). Наружу у мастера одно имя
+    («окна нет») — третье состояние в контракте Mini App это вопрос владельца X7;
+    внутрь причина названа отдельной строкой лога.
+
+    Копию ``apps/scheduling`` эта правка не трогает (вопрос владельца X5), пути
+    записи не меняет.
     """
 
-    exc = ScheduleException.all_tenants.filter(
-        tenant_id=master.tenant_id,
-        master_id=master.id,
-        date=today_local,
-    ).first()
-    if exc is not None:
-        if exc.type == ScheduleException.Type.CUSTOM_HOURS:
-            if exc.start_time and exc.end_time:
-                return (exc.start_time, exc.end_time)
-            return None
-        # Any other exception type is a full-day off.
+    from apps.master_api.services.schedule import _working_block_for_day
+
+    try:
+        wh_by_weekday, exceptions_by_date, _extra_blocks = load_day_frame(
+            master,
+            from_date=today_local,
+            to_date=today_local,
+            tz=tz,
+        )
+    except (SalonNotConfigured, SalonUnavailable, SalonAPIError) as exc:
+        logger.info(
+            "master.dashboard.frame_unreadable master=%s reason=%s",
+            master.id,
+            type(exc).__name__,
+        )
         return None
 
-    wh = WorkingHours.all_tenants.filter(
-        tenant_id=master.tenant_id,
-        master_id=master.id,
-        day_of_week=today_local.weekday(),
-    ).first()
-    if wh is None or not wh.is_working or not wh.start_time or not wh.end_time:
-        return None
-    return (wh.start_time, wh.end_time)
+    return _working_block_for_day(master, today_local, exceptions_by_date, wh_by_weekday).working
 
 
 def _next_free_window(master: CatalogMaster, now: datetime) -> dict[str, str] | None:
@@ -616,7 +641,7 @@ def _next_free_window(master: CatalogMaster, now: datetime) -> dict[str, str] | 
     tz = get_tenant_tz(master.tenant)
     local_now = now.astimezone(tz)
     today_local = local_now.date()
-    block = _working_block_today(master, today_local)
+    block = _working_block_today(master, today_local, tz=tz)
     if block is None:
         return None
     block_start, block_end = block
