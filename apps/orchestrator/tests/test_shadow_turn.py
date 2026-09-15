@@ -49,9 +49,41 @@ def _fake_classify(intent="booking", skill="booking", confidence=0.9):
 
 @pytest.fixture
 def fake_classify(monkeypatch):
+    # ``captured`` is a function attribute and outlives a test: without the
+    # reset a test whose classify never ran reads the previous test's call.
+    _fake_classify.__dict__.pop("captured", None)
     fake = _fake_classify()
     monkeypatch.setattr("apps.orchestrator.intent_router.classify", fake)
     return fake
+
+
+class _ShadowClock:
+    """Controlled monotonic clock for the shadow budget (DRF-2011).
+
+    Stands still unless a test advances it, so the budget verdict does not
+    depend on how long the real steps take on the machine running the tests
+    (the memory step alone waits ~2 s on a closed local Redis).
+    """
+
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def monotonic(self) -> float:
+        return self.now
+
+    def advance_ms(self, ms: int) -> None:
+        self.now += ms / 1000
+
+
+@pytest.fixture(autouse=True)
+def shadow_clock(monkeypatch):
+    # Replace only shadow_turn's own ``time`` name: the global time.monotonic
+    # (asyncio.run, pytest) stays real.
+    import apps.orchestrator.shadow_turn as shadow_turn_module
+
+    clock = _ShadowClock()
+    monkeypatch.setattr(shadow_turn_module, "time", SimpleNamespace(monotonic=clock.monotonic))
+    return clock
 
 
 def _ctx(**overrides) -> TurnContext:
@@ -166,6 +198,62 @@ class TestComputeShadowTurn:
             text="hi", conversation=_conversation(), tenant=None, timeout_ms=-1
         )
         assert result.execution_status == EXEC_TIMEOUT
+
+    def test_timeout_before_intent(self, monkeypatch, shadow_clock, fake_classify):
+        """DRF-2011 — the memory step overruns the budget → TIMEOUT before
+        classify, whatever the real step costs on this machine."""
+        from apps.orchestrator.memory import coordinator
+        from apps.orchestrator.shadow_turn import shadow_timeout_ms
+
+        budget_ms = shadow_timeout_ms()
+        real_load_snapshot = coordinator.load_snapshot
+
+        def _overrunning_load_snapshot(conversation):
+            shadow_clock.advance_ms(budget_ms + 1)
+            return real_load_snapshot(conversation)
+
+        monkeypatch.setattr(
+            "apps.orchestrator.memory.coordinator.load_snapshot", _overrunning_load_snapshot
+        )
+        result = compute_shadow_turn(text="hi", conversation=_conversation(), tenant=None)
+        assert (result.execution_status, result.error) == (EXEC_TIMEOUT, "budget:before_intent")
+        assert not hasattr(_fake_classify, "captured")  # classify never ran
+
+    def test_timeout_after_intent(self, monkeypatch, shadow_clock):
+        """DRF-2011 — classify overruns the budget → TIMEOUT after intent,
+        intent kept."""
+        from apps.orchestrator.shadow_turn import shadow_timeout_ms
+
+        budget_ms = shadow_timeout_ms()
+        classify = _fake_classify()
+
+        async def _overrunning_classify(text, **kwargs):
+            shadow_clock.advance_ms(budget_ms + 1)
+            return await classify(text, **kwargs)
+
+        monkeypatch.setattr("apps.orchestrator.intent_router.classify", _overrunning_classify)
+        result = compute_shadow_turn(text="hi", conversation=_conversation(), tenant=None)
+        assert (result.execution_status, result.error, result.intent) == (
+            EXEC_TIMEOUT,
+            "budget:after_intent",
+            "booking",
+        )
+
+    def test_budget_exactly_spent_is_not_timeout(self, monkeypatch, shadow_clock):
+        """DRF-2011 — the budget is exceeded only strictly: spending exactly
+        the budget still passes."""
+        from apps.orchestrator.shadow_turn import shadow_timeout_ms
+
+        budget_ms = shadow_timeout_ms()
+        classify = _fake_classify()
+
+        async def _budget_spending_classify(text, **kwargs):
+            shadow_clock.advance_ms(budget_ms)
+            return await classify(text, **kwargs)
+
+        monkeypatch.setattr("apps.orchestrator.intent_router.classify", _budget_spending_classify)
+        result = compute_shadow_turn(text="hi", conversation=_conversation(), tenant=None)
+        assert (result.execution_status, result.intent) == (EXEC_PASS, "booking")
 
     def test_memory_context_available(self, monkeypatch, fake_classify):
         """§15.12 — snapshot is passed into classify when available."""
