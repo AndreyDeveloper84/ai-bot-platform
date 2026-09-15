@@ -16,7 +16,8 @@
  */
 
 import { ApiError } from "../lib/api";
-import { authErrorCopy, isAuthRefusalSlug } from "../lib/auth-error-copy";
+import { authErrorCopy, isAuthRefusalSlug, isTransportRefusalSlug } from "../lib/auth-error-copy";
+import { OpenFromMaxBody } from "./OpenFromMaxScreen";
 
 interface Props {
   err: unknown;
@@ -47,6 +48,8 @@ function pickCopy(err: unknown): Copy {
 }
 
 export function StateError({ err, onRetry }: Props) {
+  // DRF-1893 — отказ транспорта: возврат в MAX вместо повтора.
+  if (err instanceof ApiError && isTransportRefusalSlug(err.slug)) return <OpenFromMaxBody />;
   const copy = pickCopy(err);
   return (
     <div className="callout callout--danger" role="alert">

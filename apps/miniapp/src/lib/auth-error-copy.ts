@@ -27,22 +27,41 @@ export type ErrorCopy = {
   retryLabel?: string;
 };
 
+/**
+ * DRF-1893 — отказ транспорта: сервер отвечает 401 `no_init_data` на пустой,
+ * испорченный, чужой или просроченный initData. Старые слаги (`malformed`,
+ * `bad_signature`, `stale`) читаются так же — закэшированный бандл может
+ * встретить новый сервер или наоборот. Решение владельца (раздел U):
+ * Mini App работает только из MAX; повтор здесь не поможет, поэтому кнопки
+ * повтора нет — только возврат в MAX.
+ *
+ * Заголовок — формулировка владельца; тело и кнопка — на подтверждение
+ * владельцу (обращение на «вы», как во всей копии Mini App).
+ */
+export const OPEN_FROM_MAX_COPY = {
+  title: "Открой Ayla из MAX",
+  body: "Мини-приложение работает только внутри MAX. Вернитесь в чат с Ayla и откройте его оттуда.",
+  action: "Вернуться в MAX",
+} as const;
+
+export const TRANSPORT_REFUSAL_SLUGS: ReadonlySet<string> = new Set([
+  "no_init_data",
+  "malformed",
+  "bad_signature",
+  "stale",
+]);
+
+export function isTransportRefusalSlug(slug: string | undefined): boolean {
+  return slug !== undefined && TRANSPORT_REFUSAL_SLUGS.has(slug);
+}
+
+const OPEN_FROM_MAX: ErrorCopy = { title: OPEN_FROM_MAX_COPY.title, body: OPEN_FROM_MAX_COPY.body };
+
 export const AUTH_ERROR_COPY: Record<string, ErrorCopy> = {
-  bad_signature: {
-    title: "Не получилось подтвердить личность",
-    body: "Это может быть проблема с авторизацией в MAX. Закройте Mini App и откройте заново. Если проблема повторится — напишите в студию.",
-    retryLabel: "Попробовать снова",
-  },
-  stale: {
-    title: "Сессия устарела",
-    body: "Прошло больше часа с момента открытия. Просто откройте Mini App заново.",
-    retryLabel: "Попробовать снова",
-  },
-  malformed: {
-    title: "Не получилось войти",
-    body: "MAX не передал данные для входа. Попробуйте закрыть Mini App и открыть заново — это часто помогает.",
-    retryLabel: "Попробовать снова",
-  },
+  no_init_data: OPEN_FROM_MAX,
+  bad_signature: OPEN_FROM_MAX,
+  stale: OPEN_FROM_MAX,
+  malformed: OPEN_FROM_MAX,
   user_deleted: {
     title: "Аккаунт удалён",
     body: "Вы попросили удалить данные ранее. Чтобы восстановить профиль, напишите боту студии — мы поможем.",
@@ -75,6 +94,7 @@ export const AUTH_ERROR_COPY: Record<string, ErrorCopy> = {
  * входа, а сеть, и у списковых экранов для неё своя общая фраза.
  */
 export const AUTH_REFUSAL_SLUGS: ReadonlySet<string> = new Set([
+  "no_init_data",
   "bad_signature",
   "stale",
   "malformed",
