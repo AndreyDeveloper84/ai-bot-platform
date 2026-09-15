@@ -250,7 +250,8 @@ class TestConciergeOffer:
         said_memory.record_said_facts(
             bot_user, conversation, "хочу массаж в Пензе", tool_trace=SHOW_MASTERS_PENZA
         )
-        names = {spec["name"] for spec in concierge._tools_offered("привет", conversation)}
+        # DRF-1923: предлагается только в ходе C05 — реплика называет услугу.
+        names = {spec["name"] for spec in concierge._tools_offered("хочу массаж", conversation)}
         assert said_memory.CONFIRM_SAID_FACT_TOOL in names
 
     def test_tool_call_renders_the_bot_question_with_buttons_and_opens_it(
@@ -282,3 +283,105 @@ class TestConciergeOffer:
         conversation.refresh_from_db()
         question = pending_question(conversation)
         assert question is not None and question.question_id == "said.city"
+
+
+class TestOfferedOnlyInExecutionStage:
+    """DRF-1923, H7-B: в DISCOVERY город и время не спрашиваются — это C05."""
+
+    def _penza(self, settings):
+        uid, bot_user, conversation = _person(settings)
+        said_memory.record_said_facts(
+            bot_user, conversation, "хочу массаж в Пензе", tool_trace=SHOW_MASTERS_PENZA
+        )
+        assert _said(bot_user) == {"city": "Пенза"}
+        return bot_user, conversation
+
+    def _assistant_row(self, conversation, action_type: str, *, hours_ago: float = 0):
+        from datetime import timedelta
+
+        from apps.conversations.services import record_global_message
+        from apps.tenancy.context import tenant_scope
+
+        with tenant_scope(conversation.tenant):
+            row = record_global_message(
+                conversation, role="assistant", content="ответ", action_type=action_type
+            )
+        if hours_ago:
+            Message.all_tenants.filter(pk=row.pk).update(
+                created_at=timezone.now() - timedelta(hours=hours_ago)
+            )
+
+    def _offered(self, text, conversation) -> bool:
+        names = {spec["name"] for spec in concierge._tools_offered(text, conversation)}
+        return said_memory.CONFIRM_SAID_FACT_TOOL in names
+
+    def test_discovery_turn_does_not_offer_and_the_block_does_not_suggest(self, settings):
+        bot_user, conversation = self._penza(settings)
+
+        assert self._offered("что посоветуешь?", conversation) is False
+        block = said_memory.render_said_block(bot_user, offer_confirm=False)
+        assert "город — Пенза" in block
+        assert said_memory.CONFIRM_SAID_FACT_TOOL not in block
+
+    def test_a_named_service_is_execution(self, settings):
+        _bot_user, conversation = self._penza(settings)
+        assert self._offered("хочу массаж", conversation) is True
+
+    def test_a_search_earlier_on_this_path_is_execution(self, settings):
+        _bot_user, conversation = self._penza(settings)
+        self._assistant_row(conversation, "show_masters")
+        assert self._offered("а что ещё есть?", conversation) is True
+
+    def test_a_search_older_than_the_path_window_is_not(self, settings):
+        _bot_user, conversation = self._penza(settings)
+        self._assistant_row(conversation, "show_masters", hours_ago=3)
+        assert self._offered("а что ещё есть?", conversation) is False
+
+    def test_looking_up_own_bookings_is_not_a_search(self, settings):
+        _bot_user, conversation = self._penza(settings)
+        self._assistant_row(conversation, "booking_lookup")
+        assert self._offered("а что ещё есть?", conversation) is False
+
+    def test_the_execution_vocabulary_covers_every_concierge_search_tool(self):
+        from apps.orchestrator.discovery import CATALOG_TOOL_ACTIONS
+
+        search_tools = {
+            concierge.ActionType.SHOW_MASTERS,
+            concierge.START_BOOKING_ACTION,
+            *CATALOG_TOOL_ACTIONS,
+        }
+        assert {str(tool) for tool in search_tools} <= said_memory.EXECUTION_ACTION_TYPES
+
+    @pytest.mark.parametrize(
+        ("text", "expect_confirm"), [("что посоветуешь?", False), ("хочу массаж", True)]
+    )
+    def test_concierge_prompt_follows_the_stage(self, settings, monkeypatch, text, expect_confirm):
+        bot_user, conversation = self._penza(settings)
+        systems: list[str] = []
+
+        class _Capturing:
+            async def complete(self, messages, *, model, tools=None, **kwargs):
+                systems.append(
+                    "\n".join(m["content"] for m in messages if m.get("role") == "system")
+                )
+                return CompletionResult(
+                    text="Хорошо.",
+                    tool_calls=[],
+                    prompt_tokens=10,
+                    completion_tokens=5,
+                    model="gpt-4o-mini",
+                    provider="openai",
+                    finish_reason="stop",
+                )
+
+        router = Mock()
+        router.get_provider.return_value = _Capturing()
+        monkeypatch.setattr(concierge, "get_router", lambda: router)
+
+        concierge.generate_concierge_reply(
+            text, bot_user=bot_user, conversation=conversation, trace_id=str(uuid.uuid4())
+        )
+
+        assert systems, "модель не вызывалась"
+        assert "город — Пенза" in systems[0]
+        assert (said_memory.CONFIRM_SAID_FACT_TOOL in systems[0]) is expect_confirm
