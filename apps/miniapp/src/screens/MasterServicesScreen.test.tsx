@@ -365,6 +365,54 @@ describe("MasterServicesScreen — экран 04 «Цены и длительн�
     expect(screen.getByTestId("location")).toHaveTextContent("/solo/setup");
   });
 
+  it("M17: nothing selected → «Выбрать из каталога» leads to screen 03", async () => {
+    mockedSelection.mockResolvedValue(EMPTY_SELECTION);
+    await renderScreen();
+
+    expect(screen.getByText("Выбери хотя бы одну услугу")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Выбрать из каталога" }));
+    await settle();
+    expect(screen.getByTestId("location")).toHaveTextContent("/solo/services/select");
+  });
+
+  it("M17: something selected → no «Выбрать из каталога» next to the hint", async () => {
+    mockedSelection.mockResolvedValue(state([row("a", "Коррекция бровей")], 1, 0));
+    await renderScreen();
+
+    expect(screen.getByRole("button", { name: "Продолжить" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Выбрать из каталога" })).not.toBeInTheDocument();
+  });
+
+  it.each([
+    [
+      "salon_managed",
+      new ApiError(409, "salon_catalog_owner_managed", "…", { reason: "salon_catalog_owner_managed" }),
+      "Услуги салона ведёт владелец салона.",
+    ],
+    ["not_linked", new ApiError(403, "not_linked", "…"), "Доступ не настроен"],
+  ])("M17: %s → no way into the selection", async (_name, error, witness) => {
+    mockedSelection.mockRejectedValue(error);
+    await renderScreen();
+
+    expect(screen.getByText(witness)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Выбрать из каталога" })).not.toBeInTheDocument();
+  });
+
+  it("M17: readiness «services» pointing at screen 03 is still this step and is skipped — no loop", async () => {
+    mockedSelection.mockResolvedValue(state([configured("a", "А", "1000.00", 60)], 1, 1));
+    mockedReadiness.mockResolvedValue(
+      readiness([
+        { key: "services", state: "missing", deep_link: "/solo/services/select" },
+        { key: "profile", state: "missing", deep_link: "/solo/profile" },
+      ]),
+    );
+    await renderScreen();
+
+    fireEvent.click(screen.getByRole("button", { name: "Продолжить" }));
+    await settle();
+    expect(screen.getByTestId("location")).toHaveTextContent("/solo/profile");
+  });
+
   it("S7: the sheet has exactly two fields and saves through PUT, state from the response", async () => {
     mockedSelection.mockResolvedValue(state([row("svc-1", "Коррекция бровей")], 1, 0));
     mockedPut.mockResolvedValue({
@@ -616,6 +664,25 @@ describe("MasterServicesScreen — «Свои услуги»", () => {
 
     expect(mockedCreate).toHaveBeenCalledTimes(1);
     expect(mockedCreate).toHaveBeenCalledWith(expect.objectContaining({ name: "Ламинирование", duration_minutes: 60, price: "2000.50" }));
+  });
+
+  it("K: a new submission clears the previous message — an invalid one included", async () => {
+    await renderScreen();
+    fireEvent.click(within(ownSection()).getByRole("button", { name: ADD_OWN_LABEL }));
+    fill(FIELD_NAME, "Ламинирование");
+    fill(FIELD_DURATION, "60");
+    fill(FIELD_PRICE, "2000");
+    fireEvent.click(within(ownSection()).getByRole("button", { name: ADD_OWN_LABEL }));
+    await settle();
+    expect(within(ownSection()).getByText(SENT_MESSAGE)).toBeInTheDocument();
+
+    // Открыть форму снова и отправить пустой: прежнее сообщение уходит в момент отправки.
+    fireEvent.click(within(ownSection()).getByRole("button", { name: ADD_OWN_LABEL }));
+    fireEvent.click(within(ownSection()).getByRole("button", { name: ADD_OWN_LABEL }));
+    await settle();
+
+    expect(within(ownSection()).getByText(ERR_NAME)).toBeInTheDocument();
+    expect(within(ownSection()).queryByText(SENT_MESSAGE)).not.toBeInTheDocument();
   });
 
   it("G: own requests not linked → explanation, no form", async () => {

@@ -17,6 +17,56 @@ from apps.orchestrator.health import (
 pytestmark = pytest.mark.django_db
 
 
+class TestCheckIntentRouterSaysWhatItDoesNotCheck:
+    """DRF-1938: ``ok`` здесь — «не блокирует трафик», а не «LLM здорова».
+
+    Breaker ``openai.complete`` стоит только на старом ``intent_router``
+    (путь per-tenant). Путь консьержа (``apps.llm.router``) breaker не имеет
+    ни у одного вендора, и проверка обязана это сказать: ``checked=False``,
+    ``detail`` и ``vendor`` — всегда, при любом состоянии breaker.
+    """
+
+    @pytest.mark.parametrize("vendor", ["anthropic", "openai"])
+    @pytest.mark.parametrize("state", ["CLOSED", "HALF_OPEN", None])
+    def test_a_closed_legacy_breaker_is_not_a_verdict_on_the_llm(self, settings, vendor, state):
+        from apps.orchestrator.llm.breaker import State
+
+        settings.LLM_PROVIDER = vendor
+        settings.SKILL_LLM_PROVIDER = {}
+        value = getattr(State, state) if state else None
+        with patch("apps.orchestrator.llm.breaker.get_state", return_value=value):
+            r = check_intent_router()
+
+        assert r["ok"] is True
+        assert r["checked"] is False
+        assert r["vendor"] == vendor
+        assert r["detail"] == "llm_breaker_not_on_concierge_path"
+
+    def test_anthropic_vendor_with_the_openai_breaker_is_never_a_bare_ok(self, settings):
+        """Сторож подменой: прежний ответ «openai closed → ok» без оговорки — красный."""
+        from apps.orchestrator.llm.breaker import State
+
+        settings.LLM_PROVIDER = "anthropic"
+        settings.SKILL_LLM_PROVIDER = {}
+        with patch("apps.orchestrator.llm.breaker.get_state", return_value=State.CLOSED):
+            r = check_intent_router()
+
+        assert set(r) >= {"ok", "error", "duration_ms", "checked", "vendor", "detail"}
+        assert not (r["ok"] is True and r["checked"] is not False)
+
+    def test_the_check_never_calls_an_llm(self, settings, monkeypatch):
+        settings.LLM_PROVIDER = "anthropic"
+
+        def _no_llm(*_a, **_k):
+            raise AssertionError("readyz не зовёт внешний API")
+
+        monkeypatch.setattr("apps.llm.router.build_provider", _no_llm)
+        monkeypatch.setattr("apps.llm.router.get_router", _no_llm)
+        r = check_intent_router()
+
+        assert r["checked"] is False
+
+
 class TestCheckIntentRouter:
     def test_breaker_closed_returns_ok(self):
         from apps.orchestrator.llm.breaker import State
