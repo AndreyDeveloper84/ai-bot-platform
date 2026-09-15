@@ -166,7 +166,7 @@ def ayla(monkeypatch) -> MagicMock:
 def _call(site: tuple, http: Client) -> Any:
     _id, method, name, kwargs, kind, body, _client_method = site
     url = reverse(f"master_api:{name}", kwargs=kwargs or None)
-    auth = {"HTTP_AUTHORIZATION": init_data_header("12345")}
+    auth: dict[str, Any] = {"HTTP_AUTHORIZATION": init_data_header("12345")}
     if kind == "json":
         return getattr(http, method)(
             url, data=json.dumps(body), content_type="application/json", **auth
