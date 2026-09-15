@@ -340,6 +340,136 @@ _RED_FLAG_PATTERNS: tuple[re.Pattern[str], ...] = (
     # now; future versions can add tiered red-flags.
 )
 
+# -- S1 groups G2–G7 (DRF-2004, S-1d) ----------------------------------------
+# Only obvious red flags. Each group is narrowed by its own text in
+# ``docs/safety/F0-C3-safety-matrix.md`` (:197-203), the matrix's illustrative
+# phrases (:205), T-S1-11 (:286) and the G4 boundary in clinical-review-001
+# (:400-413). No numeric thresholds, no diagnoses. The fidelity of every pattern
+# and every exception awaits the clinical expert (VQ1).
+
+#: Emotional idioms («от смеха / восторга …») — the same exception as breathing (S-1b).
+_S1_EMOTIONAL_IDIOM = r"(?!\s+от\s+(?:смеха|хохота|восторга|счастья|радости))"
+
+#: G2 — «потеря сознания или выраженное нарушение сознания» (:198); «теряю сознание» (:205).
+_S1_G2_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"\bпотерял\w*\s+сознани\w*+" + _S1_EMOTIONAL_IDIOM, re.IGNORECASE),
+    re.compile(r"\bбез\s+сознания\b", re.IGNORECASE),
+    re.compile(r"\bобморок\w*", re.IGNORECASE),
+    re.compile(r"\bв\s+глазах\s+(?:темнеет|потемнело|темно)", re.IGNORECASE),
+)
+
+#: G3 — «внезапная сильная боль / давление в груди» (:199); «резко давит в груди и плохо» (:205).
+_S1_G3_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(
+        r"\b(?:боль|болит|колет|жж[её]т|давит|сдавливает|сжимает)\s+в\s+груди", re.IGNORECASE
+    ),
+    re.compile(r"\bв\s+груди\s+(?:болит|колет|жж[её]т|давит|сдавливает|сжимает)", re.IGNORECASE),
+)
+
+#: G4 — «слабость одной стороны тела, нарушение речи, … внезапная потеря движения /
+#: чувствительности» (:200); «не чувствую половину лица, речь заплетается» (:205).
+#: Boundary (clinical-review :400-413): numbness or weakness WITHOUT «внезапно / одна
+#: сторона / речь» is S2, so «половина лица / тела» needs a neurological word next to
+#: it, and «отнялась» needs a body part.
+_S1_NEURO = r"(?:не\s+чувству\w*|онемел\w*|немеет|не\s+двига\w*|перекосил\w*|парализ\w*)"
+_S1_G4_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(
+        _S1_NEURO
+        + r"[^.!?]{0,30}половин\w+\s+(?:лица|тела)|половин\w+\s+(?:лица|тела)[^.!?]{0,30}"
+        + _S1_NEURO,
+        re.IGNORECASE,
+    ),
+    re.compile(r"\bперекосил\w*\s+лиц\w*|\bлицо\s+перекосил\w*", re.IGNORECASE),
+    re.compile(r"\b(?:речь|язык)\s+заплета\w*", re.IGNORECASE),
+    re.compile(
+        r"\bотнял(?:ась|ся|ись)\s+(?:рука|нога|руки|ноги|половин\w+|сторон\w+|лицо|язык)"
+        r"|\b(?:рука|нога|руки|ноги)\s+отнял\w+",
+        re.IGNORECASE,
+    ),
+    re.compile(r"\bвнезапн\w+\s+(?:слабость|онемени\w*)", re.IGNORECASE),
+)
+
+#: G5 — «значительное или неконтролируемое кровотечение» (:201); «кровь не останавливается»
+#: (:205). «кровит» is caught too: «после эпиляции немного кровит — это нормально?» is a
+#: legitimate ambiguous G5 under the fail-closed expectation — a named cost.
+_S1_G5_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"\bкровь\s+не\s+останавлива\w*", re.IGNORECASE),
+    re.compile(r"\b(?:сильн\w+|обильн\w+)\s+кровотечени\w*", re.IGNORECASE),
+    re.compile(r"\bкров(?:ит|оточит|оточат)\b", re.IGNORECASE),
+)
+
+#: G6 — «признаки тяжёлой аллергической реакции с дыхательными / системными проявлениями»
+#: (:202); «после укола отекло горло, тяжело дышать» (:205); T-S1-11 (:286). A local rash
+#: is not G6, so «сыпь» needs a swelling or breathing sign next to it.
+_S1_SYSTEMIC = (
+    r"(?:от[её]к\w*|отекл\w*|опух\w*|трудно\s+дышать|тяжело\s+дышать|задыха\w*|удушь\w*|горл\w*)"
+)
+_S1_G6_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"\bанафилакт\w*", re.IGNORECASE),
+    re.compile(
+        r"\b(?:отекл[оа]|отекает|опухл[оа]|опухает)\s+(?:горло|гортань|язык|губы)", re.IGNORECASE
+    ),
+    re.compile(r"\b(?:от[её]к|отек)\w*\s+(?:горла|гортани|языка|квинке)", re.IGNORECASE),
+    re.compile(r"\bсыпь[^.!?]{0,40}" + _S1_SYSTEMIC, re.IGNORECASE),
+)
+
+#: G7 — «иное внезапное тяжёлое системное ухудшение» (:203). The weakest source: the
+#: matrix gives no illustrative phrase for G7, and «плохо» is ambiguous in Russian. Rules
+#: (main window, 15.09):
+#:
+#: * a bare «плохо» needs an intensifier («очень / резко / совсем»); «резко стало
+#:   плохо», «сейчас упаду»;
+#: * exceptions only right next to «плохо»: «плохо сделал(а) / видно / подходит /
+#:   спал(а) / сплю / с деньгами» — never anywhere in the phrase;
+#: * «мне / стало плохо» next to a bodily sign or a procedure («после укола», «сделали
+#:   инъекцию») is caught regardless of any exception.
+#:
+#: Known miss by decision of the main window: «плохо себя чувствую» without context — a
+#: reschedule for feeling unwell must not turn into «лучше к врачу».
+_S1_G7_ADJACENT_EXCEPTION = r"(?!\s+(?:сделал\w*|видно|подход\w*|спал\w*|сплю|с\s+деньгами))"
+_S1_BODY_SIGN = (
+    r"(?:кружится\s+голова|голова\s+кружится|головокружени\w*|холодный\s+пот|в\s+пот\s+бросает"
+    r"|темнеет\s+в\s+глазах|в\s+глазах\s+темнеет|падаю|сердце\w*|тряс[её]т|знобит)"
+)
+_S1_PROCEDURE = (
+    r"(?:после\s+(?:процедур\w*|укол\w*|инъекци\w*|сеанс\w*)"
+    r"|сделали\s+(?:укол|инъекци\w*|процедур\w*)|сделал\w*\s+(?:укол|инъекци\w*))"
+)
+_S1_G7_CO_SIGNAL = "(?:" + _S1_BODY_SIGN + "|" + _S1_PROCEDURE + ")"
+_S1_BARE_PLOHO = r"\b(?:мне|стало|становится)\s+(?:(?:очень|резко|совсем|как-то)\s+)?плохо\b"
+_S1_G7_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(
+        r"\b(?:мне|стало|становится)\s+(?:очень|резко|совсем)\s+плохо\b"
+        + _S1_G7_ADJACENT_EXCEPTION,
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\bрезко\s+(?:стало\s+)?(?:очень\s+)?плохо\b" + _S1_G7_ADJACENT_EXCEPTION, re.IGNORECASE
+    ),
+    re.compile(r"\bсейчас\s+упаду\b", re.IGNORECASE),
+    re.compile(
+        _S1_BARE_PLOHO
+        + r"[^.!?]{0,40}"
+        + _S1_G7_CO_SIGNAL
+        + "|"
+        + _S1_G7_CO_SIGNAL
+        + r"[^.!?]{0,40}"
+        + _S1_BARE_PLOHO,
+        re.IGNORECASE,
+    ),
+)
+
+# One group per line, so a probe can take a whole group out with a one-line edit.
+_RED_FLAG_PATTERNS = (
+    _RED_FLAG_PATTERNS
+    + _S1_G2_PATTERNS
+    + _S1_G3_PATTERNS
+    + _S1_G4_PATTERNS
+    + _S1_G5_PATTERNS
+    + _S1_G6_PATTERNS
+    + _S1_G7_PATTERNS
+)
+
 
 def classify(text: str) -> PainSignal:
     """Return the strongest pain signal in ``text``.
