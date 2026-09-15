@@ -225,6 +225,8 @@ _SYNC_MANAGED_FIELDS = (
     "is_active",
     "yclients_staff_id",
     "ayla_user_id",
+    # DRF-1933: id профиля в каталоге — пишут синк и провижининг соло.
+    "catalog_specialist_id",
     "external_id",
     "external_updated_at",
     "synced_at",
@@ -400,6 +402,7 @@ class CatalogMasterAdmin(_MirrorAdminBase):
                     "photo_url",
                     "yclients_staff_id",
                     "ayla_user_id",
+                    "catalog_specialist_id",
                     "external_id",
                     "external_updated_at",
                     "synced_at",
