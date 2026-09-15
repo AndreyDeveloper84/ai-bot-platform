@@ -138,10 +138,6 @@ def _restore_url(entry_id: str = ENTRY_ID) -> str:
     return reverse("miniapp_api:customer_wellness_food_entry_restore", args=[entry_id])
 
 
-def _auth(bot_user: BotUser) -> dict[str, str]:
-    return {"HTTP_AUTHORIZATION": _init_data_header(bot_user.channel_user_id)}
-
-
 DELETION = MealDeletion(log_id=ENTRY_ID, restore_window_expires_at="2026-09-15T12:15:00+00:00")
 
 
@@ -149,7 +145,9 @@ class TestDelete:
     def test_delete_returns_the_restore_window(self, client: Client, bot_user: BotUser, consent):
         patcher, fake = _patch_client(delete=DELETION)
         with patcher:
-            resp = client.delete(_entry_url(), **_auth(bot_user))
+            resp = client.delete(
+                _entry_url(), HTTP_AUTHORIZATION=_init_data_header(bot_user.channel_user_id)
+            )
 
         assert resp.status_code == 200, resp.content
         assert resp.json() == {
@@ -164,7 +162,9 @@ class TestDelete:
     def test_delete_does_not_need_consent(self, client: Client, bot_user: BotUser, no_consent):
         patcher, fake = _patch_client(delete=DELETION)
         with patcher:
-            resp = client.delete(_entry_url(), **_auth(bot_user))
+            resp = client.delete(
+                _entry_url(), HTTP_AUTHORIZATION=_init_data_header(bot_user.channel_user_id)
+            )
 
         assert resp.status_code == 200
         assert fake.delete_meal.await_count == 1
@@ -183,7 +183,9 @@ class TestDelete:
     ):
         patcher, fake = _patch_client(delete=refusal)
         with patcher:
-            resp = client.delete(_entry_url(), **_auth(bot_user))
+            resp = client.delete(
+                _entry_url(), HTTP_AUTHORIZATION=_init_data_header(bot_user.channel_user_id)
+            )
 
         assert fake.delete_meal.await_count == 1
         assert resp.status_code == status
@@ -195,7 +197,9 @@ class TestDelete:
         settings.NUTRITION_ENABLED = False
         patcher, fake = _patch_client(delete=DELETION)
         with patcher:
-            resp = client.delete(_entry_url(), **_auth(bot_user))
+            resp = client.delete(
+                _entry_url(), HTTP_AUTHORIZATION=_init_data_header(bot_user.channel_user_id)
+            )
 
         assert resp.status_code == 404
         assert resp.json()["error"] == "nutrition_disabled"
@@ -214,7 +218,9 @@ class TestRestore:
     def test_restore_returns_the_entry(self, client: Client, bot_user: BotUser, consent):
         patcher, fake = _patch_client(restore=_FakeLog(calories=300.0))
         with patcher:
-            resp = client.post(_restore_url(), **_auth(bot_user))
+            resp = client.post(
+                _restore_url(), HTTP_AUTHORIZATION=_init_data_header(bot_user.channel_user_id)
+            )
 
         assert resp.status_code == 200, resp.content
         assert resp.json() == {
@@ -230,7 +236,9 @@ class TestRestore:
     ):
         patcher, fake = _patch_client(restore=MealRestoreExpiredError("restore_window_expired"))
         with patcher:
-            resp = client.post(_restore_url(), **_auth(bot_user))
+            resp = client.post(
+                _restore_url(), HTTP_AUTHORIZATION=_init_data_header(bot_user.channel_user_id)
+            )
 
         assert fake.restore_meal.await_count == 1
         assert resp.status_code == 410
@@ -241,7 +249,9 @@ class TestRestore:
     ):
         patcher, fake = _patch_client(restore=_FakeLog())
         with patcher:
-            resp = client.post(_restore_url(), **_auth(bot_user))
+            resp = client.post(
+                _restore_url(), HTTP_AUTHORIZATION=_init_data_header(bot_user.channel_user_id)
+            )
 
         assert resp.status_code == 403
         assert resp.json()["error"] == "consent_required"
@@ -256,7 +266,7 @@ class TestCorrectGrams:
                 _entry_url(),
                 data=json.dumps({"grams": 250}),
                 content_type="application/json",
-                **_auth(bot_user),
+                HTTP_AUTHORIZATION=_init_data_header(bot_user.channel_user_id),
             )
 
         assert resp.status_code == 200, resp.content
@@ -276,7 +286,7 @@ class TestCorrectGrams:
                 _entry_url(),
                 data=json.dumps({"grams": 5}),
                 content_type="application/json",
-                **_auth(bot_user),
+                HTTP_AUTHORIZATION=_init_data_header(bot_user.channel_user_id),
             )
 
         assert resp.status_code == 400
@@ -292,7 +302,7 @@ class TestCorrectGrams:
                 _entry_url(),
                 data=json.dumps({"grams": 250}),
                 content_type="application/json",
-                **_auth(bot_user),
+                HTTP_AUTHORIZATION=_init_data_header(bot_user.channel_user_id),
             )
 
         assert resp.status_code == 403
@@ -313,7 +323,7 @@ class TestEdgesFromReview:
                 _entry_url(),
                 data=json.dumps(body),
                 content_type="application/json",
-                **_auth(bot_user),
+                HTTP_AUTHORIZATION=_init_data_header(bot_user.channel_user_id),
             )
 
         assert resp.status_code == 400
@@ -330,9 +340,11 @@ class TestEdgesFromReview:
                 _entry_url(),
                 data=json.dumps({"grams": 250}),
                 content_type="application/json",
-                **_auth(bot_user),
+                HTTP_AUTHORIZATION=_init_data_header(bot_user.channel_user_id),
             )
-            restored = client.post(_restore_url(), **_auth(bot_user))
+            restored = client.post(
+                _restore_url(), HTTP_AUTHORIZATION=_init_data_header(bot_user.channel_user_id)
+            )
 
         assert (patched.status_code, patched.json()["error"]) == (404, "nutrition_disabled")
         assert (restored.status_code, restored.json()["error"]) == (404, "nutrition_disabled")
@@ -350,7 +362,7 @@ class TestEdgesFromReview:
                 _entry_url(),
                 data=json.dumps({"grams": 250}),
                 content_type="application/json",
-                **_auth(bot_user),
+                HTTP_AUTHORIZATION=_init_data_header(bot_user.channel_user_id),
             )
 
         assert fake.update_meal.await_count == 1
