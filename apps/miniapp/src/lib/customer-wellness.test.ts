@@ -474,6 +474,19 @@ describe("the reads reach the backend instead of inventing a day", () => {
     expect(String(callAt(1)[0])).not.toContain("surface");
   });
 
+  it("DRF-1927: нет согласия — дневник в своём состоянии, не «не удалось прочитать»", async () => {
+    vi.stubEnv("DEV", false);
+    // Ключей дневника нет: сервер его не читал, потому что нет согласия.
+    fetchMock.mockResolvedValue(
+      okJson({ consent_required: true, active_goals: [], display_name: "Анна" }),
+    );
+
+    const day = await loadDiaryToday();
+
+    expect(day.state).toBe("consent_required");
+    expect(day.state).not.toBe("unreadable");
+  });
+
   it("getRecentActivity asks the endpoint and returns what it answered", async () => {
     vi.stubEnv("DEV", false);
     fetchMock.mockResolvedValue(okJson(LIVE_ACTIVITY));

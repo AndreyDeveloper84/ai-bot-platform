@@ -38,6 +38,7 @@ vi.mock("../lib/customer-wellness", async (importOriginal) => {
 import {
   correctFoodEntryGrams,
   deleteFoodEntry,
+  DIARY_CONSENT_REQUIRED_TEXT,
   loadDiaryToday,
   restoreFoodEntry,
   type WellnessToday,
@@ -194,6 +195,17 @@ describe("четыре состояния различимы попарно", ()
     expect(screen.getByText(/Записи не потерялись/)).toBeInTheDocument();
     // Отсутствие: «ничего не записано» тут было бы ложью.
     expect(screen.queryByText(/Пока ничего не записано/)).not.toBeInTheDocument();
+  });
+
+  it("DRF-1927: нет согласия — говорим про согласие, не про сбой и не про пустой день", async () => {
+    mockedLoad.mockResolvedValue({ state: "consent_required" });
+    renderScreen();
+
+    expect(await screen.findByText(DIARY_CONSENT_REQUIRED_TEXT)).toBeInTheDocument();
+    expect(screen.queryByText(/Не удалось загрузить дневник/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Пока ничего не записано/)).not.toBeInTheDocument();
+    // Повтор ничего не даст — кнопки повтора нет.
+    expect(screen.queryByText(/Попробовать снова/)).not.toBeInTheDocument();
   });
 
   it("ответ не пришёл — состояние ошибки, а не пустой день", async () => {
