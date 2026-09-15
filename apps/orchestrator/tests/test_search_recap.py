@@ -122,6 +122,7 @@ class TestNothingElseGetsIn:
         assert clipped == "массаж, маникюр, педикюр"
 
     def test_the_line_never_claims_a_recommendation(self):
+        assert RECAP_PREFIX == "Искала по твоим словам: "
         for word in ("подобрала", "подходит", "рекоменд", "важн"):
             assert word not in RECAP_PREFIX.lower()
 

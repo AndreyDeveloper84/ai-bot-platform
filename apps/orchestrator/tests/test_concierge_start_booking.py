@@ -246,7 +246,11 @@ class TestProseKeepsTheKeyboard:
             trace_id=TRACE_ID,
         )
 
-        assert reply.text == "В Пензе массаж делают Архипкин Денис и Сазонова Инна."
+        # DRF-1908: слова модели целиком, строка «по твоим словам» — последней.
+        assert reply.text == (
+            "В Пензе массаж делают Архипкин Денис и Сазонова Инна."
+            "\n\nИскала по твоим словам: массаж"
+        )
         assert reply.action_data is not None
         buttons = reply.action_data["attachments"][0]["payload"]["buttons"]
         assert buttons[0]["label"] == "Записаться к Архипкин Денис"
@@ -277,7 +281,10 @@ class TestNoEmptyAssistantRows:
         )
 
         rows = _rows(conversation)
-        assert [r.content for r in rows] == ["Вот кто делает массаж в Пензе."]
+        # DRF-1908: сохранённая строка — ровно то, что человек прочитал.
+        assert [r.content for r in rows] == [
+            "Вот кто делает массаж в Пензе.\n\nИскала по твоим словам: массаж"
+        ]
 
 
 @pytest.mark.django_db(transaction=True)

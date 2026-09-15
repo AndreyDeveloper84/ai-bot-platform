@@ -515,4 +515,5 @@ class TestForcedToolRetryMetrics:
         )
 
         assert provider.complete.await_count == 3
-        assert reply.text == "Анна свободна завтра"
+        # DRF-1908: слова модели целиком, строка «по твоим словам» — последней.
+        assert reply.text == "Анна свободна завтра\n\nИскала по твоим словам: массажистов"
