@@ -220,3 +220,47 @@ class TestErasure:
 
         # empty-assert-ok: после «забудь всё» гейт said_facts закрыт по построению; присутствие доказано строкой выше
         assert _build(bot_user, conversation).content["said"] == []
+
+
+class TestSaidVocabularyByKey:
+    """DRF-1911: «похоже на код» — не сторож смысла; said[] сверяется по ключу."""
+
+    CITIES = frozenset({"Пенза", "Самара"})
+
+    @pytest.mark.parametrize(
+        "rows",
+        [
+            [{"key": "visit_context", "value": "pregnant"}],
+            [{"key": "city", "value": "back_pain"}],
+            [{"key": "city", "value": "Penza"}],
+            [{"key": "health", "value": "evening"}],
+        ],
+    )
+    def test_value_or_key_outside_the_vocabulary_is_rejected(self, rows):
+        with pytest.raises(cs.SnapshotRejected):
+            cs.assert_said_in_vocabulary(rows, cities=self.CITIES)
+
+    def test_the_writers_own_values_pass(self):
+        cs.assert_said_in_vocabulary(
+            [{"key": "city", "value": "Пенза"}, {"key": "visit_context", "value": "evening"}],
+            cities=self.CITIES,
+        )
+        cs.assert_said_in_vocabulary([], cities=self.CITIES)
+
+    def test_visit_vocabulary_is_the_writers_rule_codes(self):
+        """Один источник: словарь сторожа — ровно коды, которые пишет память сказанного."""
+        assert set(said_memory.VISIT_CONTEXT_LABELS) == {
+            code for code, _rule in said_memory._VISIT_RULES
+        }
+
+    def test_builder_refuses_a_code_shaped_word_outside_the_vocabulary(self, settings, monkeypatch):
+        """«pregnant» проходит форму кода — сборщик обязан отказать по словарю ключа."""
+        bot_user, conversation = _person(settings)
+        assert cs._CODE_RE.match("pregnant")
+        monkeypatch.setattr(
+            said_memory,
+            "said_facts",
+            lambda _bu: [said_memory.SaidFact(key="visit_context", value="pregnant", said_at=None)],
+        )
+        with pytest.raises(cs.SnapshotRejected):
+            _build(bot_user, conversation)
