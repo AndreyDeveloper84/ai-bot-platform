@@ -33,6 +33,17 @@ def visit_address_text(address: str | None) -> str:
     return address
 
 
+def tenant_address_line(tenant: Any) -> str:
+    """Строка адреса для текста человеку: «Адрес: …» или «Адрес не указан».
+
+    Салон ответил, что адреса нет (``""``), — строка сама говорит это, без
+    «Адрес: » перед ней: «Адрес: Адрес не указан» было бы тавтологией.
+    """
+    if getattr(tenant, "address", None) == "":
+        return ADDRESS_SAID_NONE
+    return f"Адрес: {tenant_address_text(tenant)}"
+
+
 def tenant_address_text(tenant: Any) -> str:
     """Фраза адреса салона ``tenant`` — тенанта ЗАПИСИ, не контекста разговора."""
     return visit_address_text(getattr(tenant, "address", None))

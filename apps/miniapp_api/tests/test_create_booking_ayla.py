@@ -612,3 +612,11 @@ class TestSalonAddressInResponse:
         resp = _post(client, service, master)
         assert resp.status_code == 201
         assert resp.json()["booking"]["address"] == "ул. Карпинского, 33А"
+
+    def test_the_created_booking_carries_none_when_the_mirror_is_silent(
+        self, client, tenant, bot_user, service, master, stub_client
+    ) -> None:
+        assert Tenant.objects.get(pk=tenant.pk).address is None
+        resp = _post(client, service, master)
+        assert resp.status_code == 201
+        assert resp.json()["booking"]["address"] is None

@@ -28,3 +28,17 @@ def test_phrases_and_rule_match_the_mini_app() -> None:
     assert visit_address_text(None) == ADDRESS_UNKNOWN
     assert visit_address_text("") == ADDRESS_SAID_NONE
     assert visit_address_text("ул. Карпинского, 33А") == "ул. Карпинского, 33А"
+
+
+def test_the_address_line_never_says_address_twice() -> None:
+    """«Адрес не указан» — сама строка, без «Адрес: » перед ней (ревью DRF-1952)."""
+    from types import SimpleNamespace
+
+    from apps.tenancy.visit_address import tenant_address_line
+
+    assert (
+        tenant_address_line(SimpleNamespace(address="ул. Карпинского, 33А"))
+        == "Адрес: ул. Карпинского, 33А"
+    )
+    assert tenant_address_line(SimpleNamespace(address=None)) == "Адрес: Уточните адрес в салоне"
+    assert tenant_address_line(SimpleNamespace(address="")) == "Адрес не указан"

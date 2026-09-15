@@ -996,7 +996,7 @@ def confirm_booking(
         )
 
     preview_text = _format_confirm_preview(
-        address_text=_salon_address_text(tenant),
+        address_line=_salon_address_line(tenant),
         master_name=master_name,
         service_name=service_name,
         slot_datetime=slot_datetime,
@@ -1048,11 +1048,11 @@ def _format_minutes(value: Any) -> str:
     return f"{h} ч" if rest == 0 else f"{h} ч {rest} мин"
 
 
-def _salon_address_text(tenant: Any) -> str:
-    """DRF-1952 — адрес салона ЭТОЙ записи для человека (фразы ``visit-address.ts``)."""
-    from apps.tenancy.visit_address import tenant_address_text
+def _salon_address_line(tenant: Any) -> str:
+    """DRF-1952 — строка адреса салона ЭТОЙ записи (фразы ``visit-address.ts``)."""
+    from apps.tenancy.visit_address import tenant_address_line
 
-    return tenant_address_text(tenant)
+    return tenant_address_line(tenant)
 
 
 def _format_confirm_preview(
@@ -1060,7 +1060,7 @@ def _format_confirm_preview(
     master_name: str,
     service_name: str,
     slot_datetime: str,
-    address_text: str,
+    address_line: str,
     quoted_price: Any = None,
     quoted_duration_minutes: Any = None,
 ) -> str:
@@ -1082,7 +1082,7 @@ def _format_confirm_preview(
     if slot_datetime:
         parts.append(f"• Время: {slot_datetime}")
     # DRF-1952 — куда идти. Всегда: пустой адрес — честная фраза, не пропуск.
-    parts.append(f"• Адрес: {address_text}")
+    parts.append(f"• {address_line}")
     duration = _format_minutes(quoted_duration_minutes)
     if duration:
         parts.append(f"• Длительность: {duration}")
@@ -1280,7 +1280,7 @@ def execute_confirm(
             payload=new_payload,
         )
         preview = _format_confirm_preview(
-            address_text=_salon_address_text(tenant),
+            address_line=_salon_address_line(tenant),
             master_name=master_name,
             service_name=service_name,
             slot_datetime=slot_datetime,
@@ -1554,7 +1554,7 @@ def execute_confirm(
         master_name=master_name,
         service_name=service_name,
     )
-    text = _format_confirmation_text(confirmation, address_text=_salon_address_text(tenant))
+    text = _format_confirmation_text(confirmation, address_line=_salon_address_line(tenant))
     return BookingToolResult(text=text, confirmation=confirmation)
 
 
@@ -1595,7 +1595,7 @@ def _schedule_reminders(
         logger.exception("booking.reminder.schedule_failed yc_id=%s", yc_id)
 
 
-def _format_confirmation_text(confirmation: ConfirmationResult, *, address_text: str) -> str:
+def _format_confirmation_text(confirmation: ConfirmationResult, *, address_line: str) -> str:
     if not confirmation.ok:
         return "Не удалось создать запись — переключу на менеджера."
     parts: list[str] = ["Готово! Записала."]
@@ -1606,7 +1606,7 @@ def _format_confirmation_text(confirmation: ConfirmationResult, *, address_text:
     if confirmation.visit_at:
         parts.append(f"Время: {confirmation.visit_at}.")
     # DRF-1952 — адрес салона записи; пустой — фраза visit-address.ts.
-    parts.append(f"Адрес: {address_text.rstrip('.')}.")
+    parts.append(address_line if address_line.endswith(".") else f"{address_line}.")
     return " ".join(parts)
 
 
@@ -2166,7 +2166,7 @@ def _execute_reschedule_ayla(
         service_name=service_name or booking.service_name,
     )
     return BookingToolResult(
-        text=_format_confirmation_text(confirmation, address_text=_salon_address_text(tenant)),
+        text=_format_confirmation_text(confirmation, address_line=_salon_address_line(tenant)),
         confirmation=confirmation,
     )
 

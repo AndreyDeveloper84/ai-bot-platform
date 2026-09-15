@@ -748,6 +748,30 @@ class TestCatalogShelfMatchesPicker:
 
 
 class TestCreateBooking:
+    def test_the_created_booking_carries_the_salon_address(
+        self,
+        client: Client,
+        tenant: Tenant,
+        bot_user: BotUser,
+        master: CatalogMaster,
+        service: CatalogService,
+        master_service,
+        working_hours,
+    ) -> None:
+        """DRF-1952: пара к «адрес неизвестен» — адрес салона доезжает в ответ."""
+        Tenant.objects.filter(pk=tenant.pk).update(address="ул. Карпинского, 33А")
+        visit_at = self._picked_slot()
+        resp = client.post(
+            reverse("miniapp_api:create_booking"),
+            data=json.dumps(
+                {"service_id": str(service.id), "master_id": str(master.id), "visit_at": visit_at}
+            ),
+            content_type="application/json",
+            HTTP_AUTHORIZATION=_init_data_header("12345"),
+        )
+        assert resp.status_code == 201, resp.json()
+        assert resp.json()["booking"]["address"] == "ул. Карпинского, 33А"
+
     def test_the_created_booking_carries_the_salon_address_even_when_unknown(
         self,
         client: Client,

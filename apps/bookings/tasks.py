@@ -90,9 +90,9 @@ BATCH_LIMIT = 200
 
 def _salon_address_line(reminder: BookingReminder) -> str:
     """DRF-1952 — адрес салона записи (FK ``reminder.tenant``, он в ``select_related``)."""
-    from apps.tenancy.visit_address import tenant_address_text
+    from apps.tenancy.visit_address import tenant_address_line
 
-    return f"Адрес: {tenant_address_text(reminder.tenant)}"
+    return tenant_address_line(reminder.tenant)
 
 
 def _format_day_before_text(reminder: BookingReminder) -> str:
