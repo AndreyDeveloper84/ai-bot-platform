@@ -384,3 +384,70 @@ class TestSnapshotFingerprintInTheLine:
         lines = _shadow_lines(caplog)
         assert len(lines) == 1
         assert lines[0]["context_snapshot"] == {"rejected": True}
+
+
+# --------------------------------------------------------------------------- #
+# DRF-1904 — исход Decision Policy v0 в строке тени                            #
+# --------------------------------------------------------------------------- #
+class TestDecisionPolicyInTheLine:
+    def test_ordinary_turn_is_input_unavailable_and_not_writable(
+        self, settings, monkeypatch, sent, dr_redis, caplog
+    ):
+        from apps.orchestrator.decision_policy import DECISION_POLICY_VERSION
+
+        settings.DRE_SHADOW_ENABLED = True
+        _model(monkeypatch, _completion(PROSE))
+
+        with caplog.at_level(logging.INFO):
+            screen = _turn(sent, "хочу массаж")
+
+        assert screen == PROSE
+        lines = _shadow_lines(caplog)
+        assert len(lines) == 1
+        assert "BLOCK_READINESS_INPUT_UNAVAILABLE" in lines[0]["reason_codes"]
+        assert lines[0]["decision_policy"] == {
+            "result_status": "POLICY_INPUT_UNAVAILABLE",
+            "reason_codes": ["POLICY_READINESS_INPUT_UNAVAILABLE"],
+            "facts_used": ["safety.state", "engine.reason_codes"],
+            "decision_policy_version": DECISION_POLICY_VERSION,
+            "catalog_writable": False,
+        }
+
+    def test_crisis_turn_is_a_safety_boundary_and_the_reply_is_the_same(
+        self, settings, monkeypatch, sent, dr_redis, caplog
+    ):
+        from apps.orchestrator.safety.gate import CRISIS_REPLY_TEXT
+
+        settings.DRE_SHADOW_ENABLED = True
+        _model(monkeypatch, _completion(PROSE))
+
+        with caplog.at_level(logging.INFO):
+            screen = _turn(sent, "не хочу больше жить")
+
+        assert screen == CRISIS_REPLY_TEXT
+        lines = _shadow_lines(caplog)
+        assert len(lines) == 1
+        policy = lines[0]["decision_policy"]
+        assert policy["result_status"] == "SAFETY_BOUNDARY"
+        assert "POLICY_SAFETY_STOP" in policy["reason_codes"]
+        assert policy["catalog_writable"] is True
+
+    def test_a_failing_policy_is_a_code_and_the_turn_is_intact(
+        self, settings, monkeypatch, sent, dr_redis, caplog
+    ):
+        from apps.orchestrator import decision_policy
+
+        def _boom(*_args, **_kwargs):
+            raise RuntimeError("policy down")
+
+        settings.DRE_SHADOW_ENABLED = True
+        monkeypatch.setattr(decision_policy, "decide", _boom)
+        _model(monkeypatch, _completion(PROSE))
+
+        with caplog.at_level(logging.INFO):
+            screen = _turn(sent, "хочу массаж")
+
+        assert screen == PROSE
+        lines = _shadow_lines(caplog)
+        assert len(lines) == 1
+        assert lines[0]["decision_policy"] == {"error": "RuntimeError"}
