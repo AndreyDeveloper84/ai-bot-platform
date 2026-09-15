@@ -179,6 +179,9 @@ ROUTE_TABLE: tuple[Route, ...] = (
     # exported and whose was destroyed.
     Route("GET", "/api/v1/internal/users/{id}/personal-data/export/", Auth.BEARER_EXT),
     Route("DELETE", "/api/v1/internal/users/{id}/personal-data/", Auth.BEARER_EXT),
+    # DRF-1950 (M3) — authoritative readback стирания (каталог C5.3 / AMD-020, DRF-1984):
+    # «удалено» человеку — только после этого чтения.
+    Route("GET", "/api/v1/internal/users/{id}/personal-data/erasure-status/", Auth.BEARER_EXT),
     # DRF-1699 D1 (§7 свода) — заявка на удаление аккаунта: POST заводит
     # (идемпотентно), GET без номера — текущая для профиля.
     Route("POST", "/api/v1/internal/users/{id}/deletion-requests/", Auth.BEARER_EXT),
@@ -570,6 +573,7 @@ def _exercise_personal_context() -> None:
     _swallow(lambda: c.skip(ayla_user_id=uid, external_user_id=ext, field="diet_type"))
     _swallow(lambda: c.get_personal_data_export(ayla_user_id=uid, external_user_id=ext))
     _swallow(lambda: c.delete_personal_data(ayla_user_id=uid, external_user_id=ext))
+    _swallow(lambda: c.get_erasure_status(ayla_user_id=uid, external_user_id=ext))
     _swallow(lambda: c.create_deletion_request(ayla_user_id=uid, external_user_id=ext))
     _swallow(lambda: c.get_current_deletion_request(ayla_user_id=uid, external_user_id=ext))
 
