@@ -154,9 +154,20 @@ def build_readiness(master: CatalogMaster) -> Readiness:
 
 def _services_item(master: CatalogMaster) -> ReadinessItem:
     rows = list_master_services(master=master)
-    configured = [r for r in rows if r["price_rub"] is not None and (r["duration_min"] or 0) > 0]
+    # DRF-1989: «настроено» — только продаваемое: непродаваемое ребро и цена
+    # ниже 1 ₽ (``price_rub is None``) не настроены. Форма ``detail`` прежняя;
+    # когда не настроено ничего, а непродаваемое есть, причина — в ``reason``
+    # (слаг ``offer_not_sellable``, как у отказа записи).
+    configured = [
+        r
+        for r in rows
+        if r["sellable"] and r["price_rub"] is not None and (r["duration_min"] or 0) > 0
+    ]
     detail = {"selected": len(rows), "configured": len(configured)}
-    return ReadinessItem("services", "done" if configured else "missing", detail)
+    if configured:
+        return ReadinessItem("services", "done", detail)
+    reason = "offer_not_sellable" if any(not r["sellable"] for r in rows) else None
+    return ReadinessItem("services", "missing", detail, reason=reason)
 
 
 def _location_item() -> ReadinessItem:

@@ -30,6 +30,7 @@ from apps.booking.services.records import (
     prepare_repeat,
 )
 from apps.bookings.keyboards import CALLBACK_BOOK_PICK_MASTER_PREFIX
+from apps.integrations.ayla.offer_refusal import OFFER_NOT_SELLABLE_SLUG, client_text_for
 from apps.events.services import emit
 from apps.events.vocabulary import (
     REPEAT_CHECKED,
@@ -819,6 +820,11 @@ def _repeat_refusal(result: RepeatResult) -> tuple[str, list[dict[str, str]]]:
             f"{gone} Посмотрите наши салоны — подберём другого мастера.",
             [show_salons_button()],
         )
+    if result.status == OFFER_NOT_SELLABLE_SLUG:
+        # DRF-1989: услугу оказывают, но онлайн её сейчас не купить. Кнопки
+        # нет: следующий шаг — написать администратору салона, и текст так и
+        # говорит, ничего не обещая.
+        return (client_text_for(result.details.get("reason")), [])
     if result.status == "service_unavailable":
         return (
             "Эту услугу сейчас не оказывают. Посмотрите, что есть в наших салонах.",

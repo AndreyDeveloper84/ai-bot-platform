@@ -42,6 +42,7 @@ from apps.integrations.ayla.booking_client import (
     RepeatIntentUnusableError,
     get_ayla_booking_client,
 )
+from apps.integrations.ayla.offer_refusal import OFFER_NOT_SELLABLE_SLUG, reason_from_edge
 from apps.integrations.ayla.user_proxy import external_user_id_for
 
 
@@ -89,6 +90,8 @@ RepeatStatus = Literal[
     "master_unavailable",
     "service_unavailable",
     "link_unavailable",
+    # DRF-1989 — ребро есть, но не продаётся; причина в ``details["reason"]``.
+    "offer_not_sellable",
     "prefill_unusable",
     "backend_unavailable",
 ]
@@ -389,11 +392,23 @@ def prepare_repeat(*, bot_user, appointment_id: str) -> RepeatResult:
             service_name=service_name,
             master_name=master_name,
             historical_price=historical_price,
+            details=_offer_details(edge) if eligibility == OFFER_NOT_SELLABLE_SLUG else {},
         )
 
     if edge is None:
         edge = _specialist_service_edge(
             client, specialist_id=entry.specialist_id, service_id=entry.service_id
+        )
+    if edge is not None and reason_from_edge(edge) is not None:
+        # DRF-1989: слоты открыты, а ребро не продаётся (каталог до полной
+        # выкладки) — не «сейчас — 0 ₽», а причина.
+        return RepeatResult(
+            status="offer_not_sellable",
+            entry=entry,
+            service_name=service_name,
+            master_name=master_name,
+            historical_price=historical_price,
+            details=_offer_details(edge),
         )
     return RepeatResult(
         status="ok",
@@ -490,6 +505,10 @@ def _service_or_link(
         return "backend_unavailable", None
     if not rows:
         return "link_unavailable", None
+    if reason_from_edge(rows[0]) is not None:
+        # DRF-1989: ребро есть, но не продаётся — услугу оказывают, купить её
+        # нельзя, пока у мастера нет цены. Не «не оказывают».
+        return "offer_not_sellable", rows[0]
     return "service_unavailable", rows[0]
 
 
@@ -527,6 +546,11 @@ def _current_price(client, *, specialist_id: str, service_id: str) -> Decimal | 
     if edge is None:
         return None
     return _as_decimal(edge.get("price"))
+
+
+def _offer_details(edge: dict[str, Any] | None) -> dict[str, Any]:
+    """``{"reason": ...}`` непродаваемого ребра для ответа человеку (DRF-1989)."""
+    return {"reason": reason_from_edge(edge) if edge else None}
 
 
 def _visit_from_record(record: AylaUserRecord) -> Visit:

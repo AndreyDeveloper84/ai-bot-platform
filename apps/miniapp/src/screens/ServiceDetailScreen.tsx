@@ -14,7 +14,7 @@ import { StickyCta } from "../components/StickyCta";
 import { DelayedSkeleton, Skeleton } from "../components/Skeleton";
 import { StateError } from "../components/StateError";
 import { useHaptics } from "../hooks/useHaptics";
-import { formatDuration, formatMoney } from "../lib/format";
+import { formatDuration, priceFromLabel } from "../lib/format";
 import { UNBOOKABLE_DETAIL } from "../components/UnbookableNote";
 import { setService } from "../state/booking";
 import { backTo } from "../lib/screen-back";
@@ -151,8 +151,9 @@ export function ServiceDetailScreen() {
           <dt>Длительность и цена</dt>
           <dd>
             {formatDuration(s.duration_min)}
-            {s.duration_min && s.price_from ? " • " : ""}
-            {formatMoney(s.price_from)}
+            {/* DRF-1989 — цена ниже 1 ₽ не рисуется. */}
+            {s.duration_min && s.price_from && priceFromLabel(s.price_from) ? " • " : ""}
+            {priceFromLabel(s.price_from)}
           </dd>
           {s.short_description && (
             <>

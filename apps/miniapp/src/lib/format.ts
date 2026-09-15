@@ -13,6 +13,18 @@ export function formatMoney(p: string | number | null): string {
   return `${n.toString().replace(/\B(?=(\d{3})+(?!\d))/g, " ")} ₽`;
 }
 
+/**
+ * Цена «от» для витрины (DRF-1989): ниже 1 ₽ — пустая строка.
+ *
+ * Каталог не продаёт предложение дешевле 1 ₽: такая цена — незаполненное
+ * поле, и «0 ₽» читалось бы как «бесплатно». `null` остаётся «—», как у
+ * {@link formatMoney}. Только показ: значение в ответе не меняется.
+ */
+export function priceFromLabel(p: string | number | null): string {
+  if (p !== null && p !== undefined && Number(p) < 1) return "";
+  return formatMoney(p);
+}
+
 export function formatDuration(min: number | null): string {
   if (!min) return "";
   if (min < 60) return `${min} мин`;

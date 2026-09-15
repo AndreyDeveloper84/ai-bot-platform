@@ -83,6 +83,7 @@ from django.conf import settings
 
 from apps.catalog.services.throttle import ThrottleWaitBudget
 from apps.integrations.ayla.url_builder import AylaUrlBuilder, AylaUrlError
+from apps.integrations.ayla.offer_refusal import KNOWN_REASONS
 from apps.integrations.ayla.request_id import with_request_id
 
 logger = logging.getLogger(__name__)
@@ -1156,8 +1157,9 @@ def _parse_salon_service(row: dict[str, Any]) -> CatalogSalonServiceDTO:
     )
 
 
-#: Причины, которые каталог называет (``services/offer_sellable.py``, DRF-1962).
-KNOWN_UNSELLABLE_REASONS = frozenset({"price_below_minimum", "inactive"})
+#: Причины, которые каталог называет (``services/offer_sellable.py``, DRF-1962) —
+#: один словарь с чтением ребра и отказа записи (DRF-1989).
+KNOWN_UNSELLABLE_REASONS = KNOWN_REASONS
 
 
 def _parse_sellable(row: dict[str, Any]) -> dict[str, Any]:

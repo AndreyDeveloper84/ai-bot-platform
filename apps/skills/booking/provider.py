@@ -55,6 +55,7 @@ from apps.integrations.ayla.booking_client import (
     BookingUnavailableError,
 )
 from apps.integrations.ayla.health_check import is_health_check_code
+from apps.integrations.ayla.offer_refusal import reason_from_edge, reason_from_refusal
 from apps.integrations.yclients.client import (
     AvailableTime,
     BookingRecord,
@@ -395,6 +396,7 @@ class AylaYClientsAdapter:
             )
         if not rows:
             return None, None
+        _refuse_unsellable(rows[0])
         duration = rows[0].get("duration_minutes")
         return (
             _parse_edge_price(rows[0].get("price")),
@@ -431,6 +433,7 @@ class AylaYClientsAdapter:
             )
         if not rows:
             return None
+        _refuse_unsellable(rows[0])
         return _parse_edge_price(rows[0].get("price"))
 
 
@@ -506,6 +509,29 @@ class YClientsQuoteChangedError(YClientsAPIError):
         self.applied = applied
 
 
+class YClientsOfferNotSellableError(YClientsAPIError):
+    """DRF-1989: каталог не продаёт это предложение — и назвал причину.
+
+    Два источника одной причины: ребро ``sellable=false`` в котировке и отказ
+    создания ``422 SERVICE_NOT_ACTIVE`` с ``details.reason``. Не поломка и не
+    передача менеджеру: у отказа есть слова (``offer_refusal.client_text_for``).
+    """
+
+    def __init__(self, detail: str = "", *, reason: str) -> None:
+        super().__init__(detail)
+        self.reason = reason
+
+
+def _refuse_unsellable(row: dict[str, Any]) -> None:
+    """Непродаваемое ребро → именованный отказ вместо цены (DRF-1989).
+
+    Ответ без ключа ``sellable`` (каталог до DRF-1962) ничего не меняет.
+    """
+    reason = reason_from_edge(row)
+    if reason is not None:
+        raise YClientsOfferNotSellableError("offer_not_sellable", reason=reason)
+
+
 class YClientsStaleVersionError(YClientsAPIError):
     """Optimistic concurrency conflict on Ayla reschedule.
 
@@ -579,6 +605,14 @@ class _translate_errors:
                 raise YClientsHealthCheckHandoffError(
                     str(exc), code=health_code, handoff=getattr(exc, "handoff", None)
                 ) from exc
+        if issubclass(exc_type, BookingBadRequestError):
+            # DRF-1989 — осознанный отказ каталога с именем причины, а не
+            # безымянный YClientsAPIError, за которым шла передача менеджеру.
+            offer_reason = reason_from_refusal(
+                getattr(exc, "code", None), getattr(exc, "details", None)
+            )
+            if offer_reason is not None:
+                raise YClientsOfferNotSellableError(str(exc), reason=offer_reason) from exc
         if issubclass(exc_type, BookingBadRequestError) and _is_c1_debt_block(exc):
             raise YClientsSpecialistUnavailableError(str(exc)) from exc
         if issubclass(exc_type, BookingBadRequestError) and _is_stale_version(exc):

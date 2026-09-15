@@ -326,8 +326,7 @@ def test_confirm_tap_reply_is_the_refusal_not_the_manager_handoff(
 def test_confirm_tap_on_a_health_check_handoff_keeps_todays_reply(
     tenant: Tenant, bot_user: BotUser, conversation: Conversation
 ) -> None:
-    """Закрепление СЕГОДНЯШНЕГО поведения, не желаемого — исправляется в листе P1
-    главного окна (ключ: TODO-1989-P1).
+    """Закрепление СЕГОДНЯШНЕГО поведения, не желаемого — исправляется в DRF-2012.
 
     На ✅ ``_dispatch_confirm`` превращает любой ``result.error`` в «Не удалось
     создать запись — переключаю на менеджера», и именованный медицинский отказ

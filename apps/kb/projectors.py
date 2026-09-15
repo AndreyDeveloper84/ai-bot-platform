@@ -106,7 +106,8 @@ def service_to_body(row: "CatalogService") -> str:
         parts.append(row.short_description)
     if row.description:
         parts.append(row.description)
-    if row.price_from is not None:
+    # DRF-1989: ниже 1 ₽ — незаполненное поле, а не «бесплатно».
+    if row.price_from is not None and row.price_from >= 1:
         parts.append(f"Цена от: {row.price_from}")
     if row.duration_min is not None:
         parts.append(f"Длительность: {row.duration_min} мин")

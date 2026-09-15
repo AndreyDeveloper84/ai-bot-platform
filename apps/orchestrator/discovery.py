@@ -1530,7 +1530,8 @@ def _render_service_cards(
     buttons: list[dict[str, str]] = []
     for card in visible:
         line = f"• {card.name}"
-        if card.price_from is not None and card.price_from > 0:
+        # DRF-1989: ниже 1 ₽ — не цена (каталог такое не продаёт), строки нет.
+        if card.price_from is not None and card.price_from >= 1:
             line += f" — от {_format_price(card.price_from)} ₽"
         if card.duration_min:
             line += f" · {card.duration_min} мин"
