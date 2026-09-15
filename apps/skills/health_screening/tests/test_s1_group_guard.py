@@ -23,6 +23,7 @@ from apps.skills.health_screening.tests.s1_fixtures import (
     KINDS,
     KNOWN_MISSES,
     KNOWN_MISSES_COUNT,
+    LONG_NEGATIVES,
     LONG_PREFIX,
     S1A,
     S1B,
@@ -76,6 +77,14 @@ def test_a_known_miss_is_still_a_miss(fixture: S1Fixture) -> None:
         f"детектор теперь ловит {fixture.key}: сними запись ({leaf}) из KNOWN_MISSES "
         "и уменьши KNOWN_MISSES_COUNT"
     )
+
+
+@pytest.mark.parametrize("text", LONG_NEGATIVES, ids=lambda t: t[:40])
+def test_a_long_message_without_s1_is_not_s1(text: str) -> None:
+    """Порог длины снят (S-1a): длинный рассказ без S1 не должен давать S1."""
+
+    assert len(text) > 200
+    assert s1_detected(text) is False
 
 
 def test_the_known_miss_register_is_counted_and_points_at_fixtures() -> None:
