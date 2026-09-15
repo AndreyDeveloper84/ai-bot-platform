@@ -130,6 +130,8 @@ class TestNoConsentNoDiaryRead:
             body = _get(client, bot_user).json()
 
         assert body["consent_required"] is True
+        # Сначала присутствие на том же ответе: имя пришло, пропала только цель.
+        assert "display_name" in body
         assert "active_goals" not in body
 
     def test_a_consent_read_that_raises_reads_as_no_consent(
@@ -149,8 +151,9 @@ class TestConsentKeepsTheDiary:
         with patch(CONSENT, return_value=True):
             body = _get(client, bot_user).json()
 
-        assert "consent_required" not in body
+        # Сначала присутствие на том же ответе: дневник пришёл.
         assert body["calories_eaten"] == 1240
+        assert "consent_required" not in body
         assert "water_glasses_eaten" in body
         assert body["entries"] == []
         nutrition.daily_summary.assert_called_once()
