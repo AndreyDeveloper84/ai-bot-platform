@@ -156,6 +156,17 @@ urlpatterns = [
         views.customer_wellness_water_undo,
         name="customer_wellness_water_undo",
     ),
+    # DRF-1838 — правка / удаление / возврат записи еды (§109 шаг 7).
+    path(
+        "wellness/food/<str:entry_id>/restore",
+        views.customer_wellness_food_entry_restore,
+        name="customer_wellness_food_entry_restore",
+    ),
+    path(
+        "wellness/food/<str:entry_id>",
+        views.customer_wellness_food_entry,
+        name="customer_wellness_food_entry",
+    ),
     # Dashboard rollup — next booking + this-week count (bookings-only).
     path(
         "recent-activity",

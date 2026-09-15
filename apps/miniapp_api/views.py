@@ -3914,6 +3914,173 @@ def customer_wellness_water_undo(request: HttpRequest, entry_id: str) -> HttpRes
     return HttpResponse(status=204)
 
 
+# --- /customer/wellness/food/{entry_id} — правка, удаление, возврат (DRF-1838) ---
+
+#: Граммы, которые экран может прислать. Та же база, что у записи текстом в
+#: чате (``food_clarify.text_entry``): ``portion_multiplier = граммы / 100``.
+_FOOD_GRAMS_MIN = 10
+_FOOD_GRAMS_MAX = 2000
+_FOOD_BASELINE_G = 100.0
+
+
+def _food_entry_gate(bot_user: BotUser, *, needs_consent: bool) -> JsonResponse | None:
+    """Ворота — как у бота, а не как у воды на этой же поверхности.
+
+    Бот (``apps.skills.food_clarify.text_entry``): удаление своей записи
+    согласия не требует — убрать своё человек вправе всегда, это не новая
+    обработка; правка и возврат снова пишут в дневник и требуют согласия на
+    персональные данные. Ручки воды здесь согласия не проверяют вовсе — это
+    их долг, а не образец: одна и та же запись не должна быть правимой в
+    Mini App и неправимой в чате.
+    """
+    from django.conf import settings as dj_settings
+
+    if not getattr(dj_settings, "NUTRITION_ENABLED", False):
+        return _error("nutrition_disabled", "food diary is not enabled", 404)
+    if needs_consent:
+        from apps.orchestrator.personal_surface import personal_records_consent_open
+
+        if not personal_records_consent_open(bot_user):
+            return _error("consent_required", "personal data consent is required", 403)
+    return None
+
+
+def _food_entry_refusal(exc: Exception, *, external_id: str, step: str) -> JsonResponse:
+    """Каждый отказ каталога — своим кодом: экран говорит разные фразы."""
+    from apps.integrations.ayla import (
+        MealEditConflictError,
+        MealNotFoundError,
+        MealRestoreExpiredError,
+        NutritionUncertainOutcomeError,
+        NutritionUnavailableError,
+    )
+
+    if isinstance(exc, MealRestoreExpiredError):
+        return _error("restore_expired", "restore window has closed; the deletion is final", 410)
+    if isinstance(exc, MealNotFoundError):
+        return _error("not_found", "entry not found", 404)
+    if isinstance(exc, MealEditConflictError):
+        return _error("water_managed", "this entry is managed by the water log", 409)
+    if isinstance(exc, NutritionUncertainOutcomeError):
+        # Запрос ушёл, ответ не вернулся: изменение МОГЛО пройти.
+        logger.warning("wellness_food_entry.%s.uncertain ext=%s err=%s", step, external_id, exc)
+        return _error(
+            "ayla_uncertain", "ayla did not answer in time; the change may have been applied", 502
+        )
+    if isinstance(exc, NutritionUnavailableError):
+        logger.warning("wellness_food_entry.%s.unavailable ext=%s err=%s", step, external_id, exc)
+        return _error("ayla_unavailable", "ayla nutrition unavailable", 502)
+    logger.warning("wellness_food_entry.%s.rejected ext=%s err=%s", step, external_id, exc)
+    return _error("ayla_bad_request", "ayla rejected the change", 400)
+
+
+def _food_log_payload(log: Any) -> dict[str, Any]:
+    return {
+        "id": log.log_id,
+        "dish_name": log.dish_name,
+        "calories": log.calories,
+        "meal_type": log.meal_type,
+    }
+
+
+@csrf_exempt
+@require_http_methods(["DELETE", "PATCH"])
+@require_init_data
+def customer_wellness_food_entry(request: HttpRequest, entry_id: str) -> HttpResponse:
+    """DELETE — убрать запись (обратимо 15 минут); PATCH ``{"grams"}`` — исправить порцию.
+
+    §109 шаг 7: сохранённую запись можно изменить или удалить. Каталог
+    (beautygo_backend#450) удаляет строку и держит снимок на окно
+    восстановления; пересчёт порции и происхождение (§136) — тоже там.
+
+    Граммы — только для записей, сделанных текстом: у фото-записи порция
+    считается от скана, и «граммы ÷ 100» соврали бы. Экран показывает
+    «Исправить граммы» только у ``entry_origin`` ``text_*``; ручка сама
+    происхождение не видит (в ответе каталога его нет).
+    """
+    import asyncio
+    import json as json_module
+
+    from apps.integrations.ayla import NutritionAPIError, external_user_id_for, get_nutrition_client
+
+    entry_id = (entry_id or "").strip()
+    if not entry_id:
+        return _error("malformed", "entry_id is required", 400)
+    bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
+    external_id = external_user_id_for(bot_user)
+
+    if request.method == "DELETE":
+        refused = _food_entry_gate(bot_user, needs_consent=False)
+        if refused is not None:
+            return refused
+        try:
+            deletion = asyncio.run(
+                get_nutrition_client().delete_meal(external_user_id=external_id, log_id=entry_id)
+            )
+        except NutritionAPIError as exc:
+            return _food_entry_refusal(exc, external_id=external_id, step="delete")
+        return JsonResponse(
+            {
+                "entry_id": deletion.log_id,
+                "restore_window_expires_at": deletion.restore_window_expires_at,
+            }
+        )
+
+    refused = _food_entry_gate(bot_user, needs_consent=True)
+    if refused is not None:
+        return refused
+    try:
+        body = json_module.loads(request.body or b"null")
+    except ValueError:
+        return _error("malformed", "body is not valid JSON", 400)
+    grams = body.get("grams") if isinstance(body, dict) else None
+    if (
+        isinstance(grams, bool)
+        or not isinstance(grams, int)
+        or not _FOOD_GRAMS_MIN <= grams <= _FOOD_GRAMS_MAX
+    ):
+        return _error(
+            "malformed", f"grams must be an integer {_FOOD_GRAMS_MIN}..{_FOOD_GRAMS_MAX}", 400
+        )
+    try:
+        log = asyncio.run(
+            get_nutrition_client().update_meal(
+                external_user_id=external_id,
+                log_id=entry_id,
+                portion_multiplier=round(grams / _FOOD_BASELINE_G, 3),
+            )
+        )
+    except NutritionAPIError as exc:
+        return _food_entry_refusal(exc, external_id=external_id, step="update")
+    return JsonResponse(_food_log_payload(log))
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+@require_init_data
+def customer_wellness_food_entry_restore(request: HttpRequest, entry_id: str) -> HttpResponse:
+    """POST — вернуть удалённую запись в окне восстановления; после окна — 410."""
+    import asyncio
+
+    from apps.integrations.ayla import NutritionAPIError, external_user_id_for, get_nutrition_client
+
+    entry_id = (entry_id or "").strip()
+    if not entry_id:
+        return _error("malformed", "entry_id is required", 400)
+    bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
+    refused = _food_entry_gate(bot_user, needs_consent=True)
+    if refused is not None:
+        return refused
+    external_id = external_user_id_for(bot_user)
+    try:
+        log = asyncio.run(
+            get_nutrition_client().restore_meal(external_user_id=external_id, log_id=entry_id)
+        )
+    except NutritionAPIError as exc:
+        return _food_entry_refusal(exc, external_id=external_id, step="restore")
+    return JsonResponse(_food_log_payload(log))
+
+
 # --- /customer/recent-activity — dashboard rollup --------------------------
 
 # Russian short weekday names (Mon=0 … Sun=6) for the date_human label.

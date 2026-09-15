@@ -6719,6 +6719,7 @@ a {
 }
 .food-scanner-diary__entry {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
   gap: var(--s-2);
@@ -6771,6 +6772,77 @@ a {
   padding: var(--s-3) var(--s-4);
   font-size: var(--font-size-200);
   color: var(--c-text-primary);
+}
+/* DRF-1838 — правка и удаление записи в дневнике. Кнопки строки — тихие,
+   как подпись времени; форма граммов — на всю ширину строки под записью. */
+.food-scanner-diary__entry-actions {
+  display: flex;
+  gap: var(--s-1);
+  flex: 0 0 auto;
+}
+.food-scanner-diary__entry-action {
+  padding: 0 var(--s-2);
+  background: none;
+  color: var(--c-text-secondary);
+  border: 1px solid var(--c-divider);
+  border-radius: var(--r-sm);
+  font: inherit;
+  font-size: var(--font-size-100);
+}
+.food-scanner-diary__grams {
+  flex-basis: 100%;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s-2);
+}
+.food-scanner-diary__grams-label {
+  flex-basis: 100%;
+  font-size: var(--font-size-100);
+  color: var(--c-text-secondary);
+}
+.food-scanner-diary__grams-input {
+  width: 6em;
+  padding: var(--s-1) var(--s-2);
+  border: 1px solid var(--c-divider);
+  border-radius: var(--r-sm);
+  background: var(--c-surface-1);
+  color: var(--c-text-primary);
+  font: inherit;
+}
+.food-scanner-diary__grams-error {
+  flex-basis: 100%;
+  margin: 0;
+  font-size: var(--font-size-100);
+  color: var(--c-text-secondary);
+}
+/* Живая область уведомлений дневника — всегда в дереве, в раскладке не
+   участвует (DRF-1838, ревью: область, вставленная вместе с текстом,
+   часть экранных дикторов пропускает). */
+.food-scanner-diary__notice-slot {
+  display: contents;
+}
+/* Уведомление о действии над записью — та же пара цветов, что у тоста
+   воды на главной (wellness-dash__toast): контраст уже проверен. */
+.food-scanner-diary__notice {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s-2);
+  background: var(--c-text-primary);
+  color: var(--c-surface-1);
+  padding: var(--s-2) var(--s-3);
+  border-radius: var(--r-sm);
+  font-size: var(--font-size-200);
+}
+.food-scanner-diary__notice-action {
+  padding: 0 var(--s-2);
+  background: none;
+  color: inherit;
+  border: 1px solid currentColor;
+  border-radius: var(--r-sm);
+  font: inherit;
+  font-weight: 600;
 }
 .food-scanner-diary__comment {
   margin: var(--s-2) 0 0;

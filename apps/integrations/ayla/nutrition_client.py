@@ -940,8 +940,10 @@ class NutritionClient:
             except ValueError:
                 body = None
             if not isinstance(body, dict):
-                # Удаление могло пройти, но ответ не читается — назвать, а не упасть мимо скилла.
-                raise NutritionAPIError("http_200_malformed_body")
+                # 200 пришёл — удаление ПРОШЛО, но ответ не читается. Это
+                # неизвестный исход, а не «ничего не изменилось»: иначе человек
+                # услышит неправду про уже удалённую запись и не получит «Вернуть».
+                raise NutritionUncertainOutcomeError("http_200_malformed_body")
             return MealDeletion(
                 log_id=str(body.get("entry_id") or log_id),
                 restore_window_expires_at=body.get("restore_window_expires_at"),
