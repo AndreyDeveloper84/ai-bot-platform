@@ -1089,6 +1089,7 @@ def _render_master_cards(
     missing_services: list[str] | None = None,
     more_offset: int | None = None,
     more_service_id: UUID | None = None,
+    recap: str | None = None,
 ) -> DiscoveryReply:
     """Render discovered masters as a reply + a one-button-per-card keyboard.
 
@@ -1144,6 +1145,14 @@ def _render_master_cards(
         screen, and a person tapping «Показать ещё» must not be able to tell
         which door they came through. When it is set, ``more_offset`` still
         decides WHETHER the button appears; the id only decides what it says.
+
+        ### «Искала по твоим словам» (DRF-1908)
+
+        ``recap`` is a ready line from
+        :func:`apps.orchestrator.search_recap.render_search_recap`, or ``None``.
+        It goes directly above the list (placement agreed with the client
+        surface window, 15.09) — it explains the list under it. Passed in
+        rather than computed here so this stays a function of what it is handed.
     """
     if not cards:
         return render_no_match(city=city, specialization=specialization)
@@ -1162,6 +1171,8 @@ def _render_master_cards(
         lines = [missing_line, "", header]
     else:
         lines = ["Вот мастера, которые могут подойти:"]
+    if recap:
+        lines.insert(len(lines) - 1, recap)
     buttons: list[dict[str, str]] = []
     for card in cards:
         # The rating domain is 1..5, so a stored 0.00 is not a rating at all

@@ -515,4 +515,6 @@ class TestForcedToolRetryMetrics:
         )
 
         assert provider.complete.await_count == 3
+        # DRF-1908: «массажистов» называет специалиста, не услугу, — строки нет,
+        # и слова модели остаются ровно такими, как были.
         assert reply.text == "Анна свободна завтра"

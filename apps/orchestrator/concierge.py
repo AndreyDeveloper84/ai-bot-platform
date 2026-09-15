@@ -126,6 +126,7 @@ from apps.orchestrator.said_memory import (
     said_facts,
     said_question_id,
 )
+from apps.orchestrator.search_recap import render_search_recap
 from apps.orchestrator.refusal_memo import (
     RefusedQuery,
     recall_refusals,
@@ -1475,7 +1476,10 @@ def _render_zero_result(
 
 
 def _render_pending(
-    cards: list[Any], args: dict[str, Any], more_offset: int | None = None
+    cards: list[Any],
+    args: dict[str, Any],
+    more_offset: int | None = None,
+    recap: str | None = None,
 ) -> DiscoveryReply:
     """Render the last executed ``show_masters`` result deterministically.
 
@@ -1498,6 +1502,7 @@ def _render_pending(
             city=city,
             specialization=specialization,
             more_offset=more_offset,
+            recap=recap,
         )
     return _render_zero_result(city=city, specialization=specialization)
 
@@ -1860,7 +1865,17 @@ def _concierge_turn(
                 # An EMPTY `pending_cards` is not «no data», it is a searched
                 # zero, and since DRF-1474 it gets the refusal that names an
                 # alternative rather than the same one with a shorter tail.
-                rendered = _render_pending(pending_cards, pending_args, pending_more_offset)
+                rendered = _render_pending(
+                    pending_cards,
+                    pending_args,
+                    pending_more_offset,
+                    recap=render_search_recap(
+                        message_text,
+                        conversation,
+                        city=(pending_args or {}).get("city"),
+                        specialization=(pending_args or {}).get("specialization"),
+                    ),
+                )
                 return _reply(
                     text=rendered.text,
                     action_data=rendered.action_data,
@@ -2053,6 +2068,9 @@ def _concierge_turn(
                 available_services=available,
                 missing_services=missing,
                 more_offset=more_offset,
+                recap=render_search_recap(
+                    message_text, conversation, city=city, specialization=specialization
+                ),
             )
             return _reply(
                 text=rendered.text,
@@ -2075,6 +2093,9 @@ def _concierge_turn(
                     city=city,
                     specialization=specialization,
                     more_offset=more_offset,
+                    recap=render_search_recap(
+                        message_text, conversation, city=city, specialization=specialization
+                    ),
                 )
                 if cards
                 # DRF-1474 — this is the branch the live refusal came out of
@@ -2307,7 +2328,17 @@ def _concierge_turn(
         # over an answer we already have would be the same lie pointing the
         # other way.
         if pending_cards is not None:
-            rendered = _render_pending(pending_cards, pending_args, pending_more_offset)
+            rendered = _render_pending(
+                pending_cards,
+                pending_args,
+                pending_more_offset,
+                recap=render_search_recap(
+                    message_text,
+                    conversation,
+                    city=(pending_args or {}).get("city"),
+                    specialization=(pending_args or {}).get("specialization"),
+                ),
+            )
             return _reply(
                 text=rendered.text,
                 action_data=rendered.action_data,
@@ -2341,6 +2372,7 @@ def _concierge_turn(
     # Same cards, same callbacks, same order — the tap path is identical to
     # the pre-DRF-1266 reply.
     action_data = None
+    reply_text = text[:_MAX_REPLY_CHARS]
     if pending_cards:
         action_data = _render_master_cards(
             pending_cards[:_MAX_MASTER_CARDS],
@@ -2348,7 +2380,17 @@ def _concierge_turn(
             specialization=pending_args.get("specialization"),
             more_offset=pending_more_offset,
         ).action_data
-    return _reply(text=text[:_MAX_REPLY_CHARS], action_data=action_data, persisted=True)
+        # DRF-1908 — the model keeps the words; the «по твоим словам» line is
+        # the last line of text, directly above the cards' keyboard.
+        recap = render_search_recap(
+            message_text,
+            conversation,
+            city=pending_args.get("city"),
+            specialization=pending_args.get("specialization"),
+        )
+        if recap:
+            reply_text = f"{text[: _MAX_REPLY_CHARS - len(recap) - 2].rstrip()}\n\n{recap}"
+    return _reply(text=reply_text, action_data=action_data, persisted=True)
 
 
 def generate_direct_show_masters_reply(
@@ -2513,7 +2555,12 @@ def generate_direct_show_masters_reply(
         started=started,
         outcome=AIRequestMetric.OUTCOME_SUCCESS,
     )
-    return _render_master_cards(cards, specialization=message_text, more_offset=more_offset)
+    return _render_master_cards(
+        cards,
+        specialization=message_text,
+        more_offset=more_offset,
+        recap=render_search_recap(message_text, conversation, specialization=message_text),
+    )
 
 
 def _record_direct_metric(

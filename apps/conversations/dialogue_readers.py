@@ -485,6 +485,17 @@ DIALOGUE_READERS: dict[str, DialogueReader] = {
             "ArchivedMessage, и к архиву не обращается."
         ),
     ),
+    "apps.orchestrator.search_recap:_path_user_turns": DialogueReader(
+        storage="db_message",
+        reaches_prompt=False,
+        why=(
+            "DRF-1908: реплики человека за два часа нужны только чтобы узнать, "
+            "назвал ли он САМ город поиска; слова сравниваются со списком городов "
+            "с мастерами, наружу уходит только хранимое написание города, текст "
+            "реплик — нигде и не в промпт. После «удалить всё» колонка пуста, "
+            "город не находится, и строка «по твоим словам» его не называет."
+        ),
+    ),
     "apps.orchestrator.said_memory:_person_named_cities": DialogueReader(
         storage="db_message",
         reaches_prompt=False,
