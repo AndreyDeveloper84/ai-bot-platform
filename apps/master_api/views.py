@@ -1374,6 +1374,118 @@ def onboarding_readiness(request: HttpRequest) -> HttpResponse:
     return JsonResponse(build_readiness(master).as_dict())
 
 
+# --- /publication/readiness, /publication, /publication/status (DRF-1797, M5) ---
+
+_PUBLICATION_UNAVAILABLE = "Каталог сейчас недоступен — попробуйте позже."
+_PUBLICATION_REFUSED_REASONS = frozenset(
+    {"command_id_reused", "salon_publication_owner_managed", "no_workspace_tenant"}
+)
+
+
+def _publication_refusal(exc: BookingBadRequestError) -> HttpResponse:
+    """Один перевод отказов публикации каталога (M4) на имена экрана — с их данными."""
+    details = exc.details or {}
+    if exc.status_code == 403:
+        return _error("not_linked", "Профиль ещё не связан с каталогом.", 403)
+    if exc.status_code == 404:
+        if exc.code == "SPECIALIST_NOT_FOUND":
+            return _error("specialist_not_found", "Профиль мастера не найден в каталоге.", 404)
+        return _error("not_found", "Не найдено.", 404)
+    if exc.status_code == 409:
+        if exc.code == "PUBLICATION_NOT_READY":
+            # Не ``_error_with``: у него третий параметр называется ``status``,
+            # а готовность каталога несёт своё поле ``status`` (READY /
+            # NOT_READY) — та же форма ответа, собранная без столкновения имён.
+            return JsonResponse(
+                {
+                    "error": "not_ready",
+                    "detail": "Профиль ещё не готов к публикации.",
+                    "details": {
+                        "status": details.get("status"),
+                        "missing": list(details.get("missing") or []),
+                    },
+                },
+                status=409,
+            )
+        if exc.code == "PUBLICATION_REFUSED":
+            reason = details.get("reason")
+            slug = reason if reason in _PUBLICATION_REFUSED_REASONS else "publication_refused"
+            return _error_with(slug, "Публикация сейчас недоступна.", 409, reason=reason)
+    if exc.status_code == 400:
+        return _error("validation_error", "Каталог не принял запрос.", 400)
+    return _error("catalog_refused", "Каталог отказал.", exc.status_code or 400)
+
+
+@require_http_methods(["GET"])
+@require_master_init_data
+def publication_readiness(request: HttpRequest) -> HttpResponse:
+    """«Готов к публикации?» — прокси готовности каталога (M5; каталог M4 #453).
+
+    Ответ — как его прислал каталог: READY / NOT_READY и поимённый ``missing``;
+    бот его не пересчитывает. Субъект — сам мастер, профиль — его
+    ``CatalogMaster.id``.
+    """
+    master: CatalogMaster = request.master  # type: ignore[attr-defined]
+    bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
+    try:
+        data = get_ayla_booking_client().get_publication_readiness(
+            specialist_id=str(master.id), external_user_id=external_user_id_for(bot_user)
+        )
+    except BookingBadRequestError as exc:
+        return _publication_refusal(exc)
+    except BookingUnavailableError:
+        return _error("catalog_unavailable", _PUBLICATION_UNAVAILABLE, 503)
+    return JsonResponse(data)
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+@require_master_init_data
+def publication_publish(request: HttpRequest) -> HttpResponse:
+    """«Опубликовать» — прокси команды каталога (M5; каталог M4 #453).
+
+    ``command_id`` (UUID) присылает экран: повтор с тем же ключом безопасен,
+    каталог вернёт ту же команду. Без ключа — 400 без вызова каталога.
+    201 — только когда каталог сделал переход; повтор и «уже на проверке» — 200.
+    ACTIVE ставит модератор — не эта команда.
+    """
+    master: CatalogMaster = request.master  # type: ignore[attr-defined]
+    bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
+    body = _json_object(request)
+    command_id = body.get("command_id") if body is not None else None
+    if not _is_uuid(command_id):
+        return _error("validation_error", "Нужен command_id (UUID) — ключ повтора команды.", 400)
+    try:
+        data = get_ayla_booking_client().publish(
+            specialist_id=str(master.id),
+            external_user_id=external_user_id_for(bot_user),
+            command_id=str(command_id),
+        )
+    except BookingBadRequestError as exc:
+        return _publication_refusal(exc)
+    except BookingUnavailableError:
+        return _error("catalog_unavailable", _PUBLICATION_UNAVAILABLE, 503)
+    created = bool(data.pop("created", False))
+    return JsonResponse(data, status=201 if created else 200)
+
+
+@require_http_methods(["GET"])
+@require_master_init_data
+def publication_status(request: HttpRequest) -> HttpResponse:
+    """«Проверить статус» — прокси статуса публикации каталога (M5; каталог M4 #453)."""
+    master: CatalogMaster = request.master  # type: ignore[attr-defined]
+    bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
+    try:
+        data = get_ayla_booking_client().get_publication_status(
+            specialist_id=str(master.id), external_user_id=external_user_id_for(bot_user)
+        )
+    except BookingBadRequestError as exc:
+        return _publication_refusal(exc)
+    except BookingUnavailableError:
+        return _error("catalog_unavailable", _PUBLICATION_UNAVAILABLE, 503)
+    return JsonResponse(data)
+
+
 # --- /services/selection, /services/<id>/offer, /services/<id> (DRF-1895, M10b) ---
 
 _SELECTION_UNAVAILABLE = "Каталог сейчас недоступен."

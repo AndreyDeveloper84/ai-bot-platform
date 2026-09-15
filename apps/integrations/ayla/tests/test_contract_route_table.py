@@ -193,6 +193,10 @@ ROUTE_TABLE: tuple[Route, ...] = (
     Route("POST", "/api/v1/internal/specialists/{id}/services/selection/", Auth.BEARER_EXT),
     Route("PUT", "/api/v1/internal/specialists/{id}/services/{id}/offer/", Auth.BEARER_EXT),
     Route("DELETE", "/api/v1/internal/specialists/{id}/services/{id}/", Auth.BEARER_EXT),
+    # DRF-1797 (M5) — готовность, публикация и статус соло-мастера под субъектом (каталог #453).
+    Route("GET", "/api/v1/internal/specialists/{id}/publication/readiness/", Auth.BEARER_EXT),
+    Route("POST", "/api/v1/internal/specialists/{id}/publication/", Auth.BEARER_EXT),
+    Route("GET", "/api/v1/internal/specialists/{id}/publication/status/", Auth.BEARER_EXT),
     # payments_client — C7 client payments (§7.5, REVIEW; upstream W1 pending).
     # IsBotServiceWithVerifiedClient: Bearer + X-External-User-ID on every leg.
     Route("POST", "/api/v1/internal/appointments/{id}/payment/", Auth.BEARER_EXT),
@@ -411,6 +415,16 @@ def _exercise_booking() -> None:
             specialist_id="SPECID", external_user_id=_EXT_USER, salon_service_id=str(_PROFILE_UUID)
         )
     )
+    # DRF-1797 (M5) — публикация соло-мастера.
+    _swallow(
+        lambda: c.get_publication_readiness(specialist_id="SPECID", external_user_id=_EXT_USER)
+    )
+    _swallow(
+        lambda: c.publish(
+            specialist_id="SPECID", external_user_id=_EXT_USER, command_id=str(_PROFILE_UUID)
+        )
+    )
+    _swallow(lambda: c.get_publication_status(specialist_id="SPECID", external_user_id=_EXT_USER))
     _swallow(lambda: c.get_masters(specialist_id="SPECID"))
     _swallow(
         lambda: c.get_available_times(specialist_id="SPECID", date="2026-07-03", service_id="SVCID")
