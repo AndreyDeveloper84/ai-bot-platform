@@ -130,6 +130,11 @@ from apps.channels.max.photo import (
     extract_first_photo_url,
     safe_hostname,
 )
+from apps.channels.max.voice import (
+    VOICE_ACTION_TYPE,
+    VOICE_NOT_SUPPORTED_TEXT,
+    is_voice_only,
+)
 from apps.conversations.models import Conversation
 from apps.conversations.services import (
     record_global_message,
@@ -1657,6 +1662,11 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
     #      consent capture. Variant A «soft gate»: we greet + capture consent but
     #      do NOT block discovery on it. When onboarding runs we do NOT call
     #      generate_discovery_reply this turn.
+    #   1.5. Voice message (DRF-1939) — a turn of only ``audio`` attachments and no
+    #      text gets a deterministic «аудио и голосовые пока не понимаю» reply,
+    #      no LLM, nothing downloaded. AFTER onboarding on purpose: above it the
+    #      reply would be the conversation's second row and the DRF-1207 guard
+    #      would cancel the welcome for good (GLOBAL_BOT_ONBOARDING=true on pilot).
     #   2. Discovery → booking handoff (the user tapped a master card → transition
     #      into tenant T's booking flow, #1020).
     #   2.5. Post-handoff booking taps (DRF-988): pick_date / pick_slot /
@@ -1928,6 +1938,26 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
             t_start=t_start,
             outcome=AIRequestMetric.OUTCOME_SUCCESS,
             skill_selected="onboarding",
+        )
+    elif is_voice_only(event.text, event.attachments):
+        # DRF-1939 — голосовое: честный ответ до фото-ветки и консьержа (иначе
+        # консьерж получал пустую строку). Без LLM; аудио не скачивается и не
+        # хранится. Временная заглушка до DRF-1942.
+        #
+        # ПОСЛЕ онбординга, не выше: первое голосовое нового человека получает
+        # приветствие и вход в согласие. Заглушка выше записала бы вторую
+        # строку разговора, и сторож DRF-1207 (`_conversation_already_under_way`)
+        # навсегда отменил бы приветствие (на пилоте GLOBAL_BOT_ONBOARDING=true).
+        reply = DiscoveryReply(text=VOICE_NOT_SUPPORTED_TEXT)
+        assistant_action_type = VOICE_ACTION_TYPE
+        _record_live_path_metric(
+            bot_user=bot_user,
+            conversation=conversation,
+            trace_id=trace_id,
+            message_text=event.text,
+            t_start=t_start,
+            outcome=AIRequestMetric.OUTCOME_SUCCESS,
+            skill_selected=VOICE_ACTION_TYPE,
         )
     elif said_outcome is not None:
         # DRF-1878 — «Другой город» / устаревшая кнопка подтверждения: ответ
@@ -2874,6 +2904,51 @@ def _handle_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.UUID | N
             pre_verdict=safety.verdict,
             post_verdict="",
             reply_text=safety.reply_text,
+        )
+        return
+
+    # DRF-1939 — голосовое сообщение: честный ответ до фото-блока и навыков.
+    # Ход без текста с одними audio-вложениями иначе шёл в food_scanner как
+    # «фото без байтов». Аудио не скачивается и не хранится. Оператор ведёт
+    # диалог (HUMAN_HANDOFF) — бот молчит, как диспетчер ниже.
+    if (
+        is_voice_only(event.text, event.attachments)
+        and conversation.state != Conversation.State.HUMAN_HANDOFF
+    ):
+        voice_text = VOICE_NOT_SUPPORTED_TEXT
+        voice_guard = guard_outbound(
+            voice_text, surface="max", bot_user=bot_user, trace_id=trace_id
+        )
+        if voice_guard.blocked:
+            voice_text = voice_guard.text
+        record_message(
+            conversation,
+            role="assistant",
+            content=voice_text,
+            rendered_text=voice_text,
+            action_type=VOICE_ACTION_TYPE,
+            trace_id=trace_id,
+        )
+        short_term.append(conversation.id, role="assistant", content=voice_text)
+        _record_live_path_metric(
+            bot_user=bot_user,
+            conversation=conversation,
+            trace_id=trace_id,
+            message_text=event.text,
+            t_start=t_start,
+            tenant=conversation.tenant,
+            outcome=AIRequestMetric.OUTCOME_SUCCESS,
+            skill_selected=VOICE_ACTION_TYPE,
+        )
+        send_message(chat_id=event.chat_id, text=voice_text)
+        _capture_live_replay(
+            trace_id=trace_id,
+            event=event,
+            surface="max_per_tenant",
+            branch=VOICE_ACTION_TYPE,
+            pre_verdict=safety.verdict,
+            post_verdict="block" if voice_guard.blocked else "allow",
+            reply_text=voice_text,
         )
         return
 
