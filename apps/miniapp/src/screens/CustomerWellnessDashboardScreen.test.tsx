@@ -1025,7 +1025,10 @@ describe("CustomerWellnessDashboardScreen — отмена стакана (DRF-1
   }
 
   /** Live prod home + the two water handles; records every call. */
-  function serveWater(undo: () => Response, post?: () => Response): string[] {
+  function serveWater(
+    undo: () => Response,
+    post?: () => Response | Promise<Response>,
+  ): string[] {
     const calls: string[] = [];
     vi.stubGlobal(
       "fetch",
@@ -1094,6 +1097,31 @@ describe("CustomerWellnessDashboardScreen — отмена стакана (DRF-1
 
     expect(await screen.findByText("+1 стакан зачтён")).toBeInTheDocument();
     expect(await screen.findByRole("button", { name: "Отменить стакан" })).toBeInTheDocument();
+  });
+
+  it("DRF-1919: пока сервер не ответил, «зачтён» не показан — и показан после", async () => {
+    let answer: (r: Response) => void = () => {};
+    const pending = new Promise<Response>((resolve) => {
+      answer = resolve;
+    });
+    const calls = serveWater(() => new Response(null, { status: 204 }), () => pending);
+    await tapWater();
+
+    // POST ушёл, ответа ещё нет: обещать «зачтён» не на чем.
+    await vi.waitFor(() => expect(calls).toContain("POST /api/v1/customer/wellness/water"));
+    expect(screen.queryByText("+1 стакан зачтён")).not.toBeInTheDocument();
+
+    answer(
+      json({
+        entry_id: "entry-9",
+        ml: 250,
+        water_ml: 250,
+        today_total_ml: 250,
+        today_norm_ml: 0,
+        water_glasses_eaten: 1,
+      }),
+    );
+    expect(await screen.findByText("+1 стакан зачтён")).toBeInTheDocument();
   });
 
   it("DRF-1919: нет согласия — сказано, что не записано, и как это исправить", async () => {
