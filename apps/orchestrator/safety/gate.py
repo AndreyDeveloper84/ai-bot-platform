@@ -109,6 +109,11 @@ class SafetyGateOutcome:
     reply_text: str = ""
     reason: str = ""
     matched_patterns: list[str] = field(default_factory=list)
+    #: DRF-1885 — сырой результат ``pre_check`` на ВСЕХ ветках. Нужен
+    #: производителю вердикта DecisionReadiness (``safety.record``):
+    #: ``assess()`` ставит ``rule_id``/``evidence_ref`` по совпавшему
+    #: паттерну, а ветка CLARIFY/ALLOW выше отдаёт только строку verdict.
+    result: SafetyResult | None = None
 
 
 def evaluate_inbound(text: str) -> SafetyGateOutcome:
@@ -132,6 +137,7 @@ def evaluate_inbound(text: str) -> SafetyGateOutcome:
             reply_text=CRISIS_REPLY_TEXT,
             reason=result.reason,
             matched_patterns=list(result.matched_patterns),
+            result=result,
         )
     if verdict == SafetyVerdict.BLOCK:
         return SafetyGateOutcome(
@@ -140,10 +146,13 @@ def evaluate_inbound(text: str) -> SafetyGateOutcome:
             reply_text=BLOCK_REPLY_TEXT,
             reason=result.reason,
             matched_patterns=list(result.matched_patterns),
+            result=result,
         )
 
     # CLARIFY + ALLOW → proceed to normal handling.
-    return SafetyGateOutcome(allowed=True, verdict=verdict.value, reason=result.reason)
+    return SafetyGateOutcome(
+        allowed=True, verdict=verdict.value, reason=result.reason, result=result
+    )
 
 
 # --------------------------------------------------------------------------- #

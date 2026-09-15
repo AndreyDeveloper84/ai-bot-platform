@@ -17,10 +17,11 @@
 * **Состояние** — чтение DR-состояния без ``INCR``: теневой прогон не имеет
   права двигать нумерацию ревизий, которую потом будут читать настоящие
   писатели.
-* **Безопасность** — то, что лежит в состоянии; сегодня с живого пути вердикт
-  не пишет никто (``record_verdict`` — 0 вызывающих), значит ``not_evaluated``
-  → ``SAFETY_UNKNOWN``, и движок честно блокирует. Замер 14.09: так на КАЖДОМ
-  ходу. Это первый пробел входа, и лог его показывает, а не прячет.
+* **Безопасность** — то, что лежит в состоянии. С DRF-1885 ход открывает новую
+  ревизию и пишет в неё вердикт ``pre_check`` (:func:`record_turn_safety`, при
+  включённом флаге), поэтому тень читает вердикт ЭТОГО хода. До того на каждом
+  ходу было ``not_evaluated`` → ``SAFETY_UNKNOWN`` (замер 14.09); следующий
+  пробел — ``BLOCK_READINESS_INPUT_UNAVAILABLE`` (probe/ledger/кандидаты).
 * **Кандидаты** — подпись из ``show_masters`` этого хода: сколько показано и в
   каком порядке. ``recommendation_eligible_count=None`` — в боте не видно,
   прошла ли услуга VERIFIED (решение C2); ``separation=None`` — **вид**
@@ -212,6 +213,66 @@ def observe_live_turn(
         return None
 
 
+def _open_turn_revision(conversation_id: str) -> Any:
+    """Новая ревизия на входящее сообщение (карта C03, D1-A).
+
+    ``safety.record.record_verdict`` ревизию сам не двигает — по его докстрингу
+    «какая ревизия текущая» решает производитель хода, до safety. Без этого
+    вердикт о новом сообщении получил бы ревизию прошлого — устарелость, которую
+    ловит P3. LIVE-состояние сохраняется со следующим номером (слоты и эпоха —
+    как были), ABSENT/EXPIRED открывает эпоху выше последней выданной ревизии.
+    """
+
+    from apps.orchestrator.decision_readiness import state as state_mod
+
+    found = state_mod.load(conversation_id)
+    if found.state is not None:
+        current = found.state
+        state = state_mod.ConversationState(
+            conversation_id=conversation_id,
+            revision=state_mod.next_revision(conversation_id),
+            slots=dict(current.slots),
+            epoch_started_at_revision=current.epoch_started_at_revision,
+            last_activity_at=current.last_activity_at,
+            safety=current.safety,
+        )
+    else:
+        state = state_mod.open_epoch(conversation_id, after=found)
+    state_mod.save(state)
+    return state
+
+
+def record_turn_safety(conversation: Any, gate_outcome: Any) -> Any:
+    """Открыть ревизию хода и записать в неё вердикт ``pre_check`` (DRF-1885).
+
+    Пишет только при включённом теневом режиме: сегодня это единственный
+    читатель DR-состояния, и запись без читателя — работа на каждом ходу ради
+    ничего. ``record_verdict`` намеренно не глотает сбой записи — перехват здесь,
+    у вызывающего: ход не падает, WARN называет разговор и вердикт.
+    Возвращает ``Recorded`` или None.
+    """
+
+    from apps.orchestrator.decision_readiness.shadow import shadow_flag
+
+    raw = getattr(gate_outcome, "result", None)
+    try:
+        if conversation is None or raw is None or not shadow_flag().value:
+            return None
+        from apps.orchestrator.safety.record import record_verdict
+
+        conversation_id = str(conversation.id)
+        _open_turn_revision(conversation_id)
+        return record_verdict(conversation_id, raw, source="pre_check")
+    except Exception:  # noqa: BLE001 — вердикт в тень не стоит хода
+        logger.warning(
+            "decision_readiness.safety_record_failed conversation=%s verdict=%s",
+            getattr(conversation, "id", None),
+            getattr(gate_outcome, "verdict", None),
+            exc_info=True,
+        )
+        return None
+
+
 __all__ = [
     "LIVE_LOG_EVENT",
     "NOT_SEARCHED",
@@ -219,4 +280,5 @@ __all__ = [
     "build_live_input",
     "candidate_signature",
     "observe_live_turn",
+    "record_turn_safety",
 ]
