@@ -14,15 +14,20 @@ I1 (а), владелец 15.09: закрытой таблицы сочетан�
 автоматической связи. Роль варианта — как в каталоге: ``primary`` /
 ``alternative`` (``Recommendation.Role``).
 
-### Словари — пустые до слова владельца
+### Словари — решение владельца 15.09 (DRF-1945)
 
-* :data:`TARGET_PHRASES` — «фраза → target» (J1);
-* :data:`TARGET_DEFAULTS` — «target → (family, action_type)» (J2).
+* :data:`TARGET_PHRASES` — «фраза → target» (J1): только явный список
+  ``PROMPT_ORCHESTRATOR_AYLA_CONTROLLED_PILOT_NEXT_WAVE.md`` §3, без синонимов и
+  эвристик. «Близкие косметические формулировки» к ``FACE_FRESHNESS``: пусто,
+  ждёт списка владельца. «Беспокоят отёки», «сильно устаю», «время себе»,
+  «важное событие» — цели нет, ключей для них нет намеренно.
+* :data:`TARGET_DEFAULTS` — «target → (family, action_type)» (J2), §4.
+  ``PUFFINESS_REDUCTION`` из фраз J1 недостижима; её умолчание есть, выбор —
+  только в safety-clear контексте (правила безопасности политики идут первыми).
 
-Правило выбора NBA — политика §31, и её значения утверждает владелец
-(``OWNER_QUESTIONS_2026-09-12.md`` раздел J). Пока словари пусты, тень честно
-пишет ``NBA_TARGET_NOT_RECOGNIZED``; сторож ``test_nba_taxonomy`` краснеет, если
-значения въедут молча, без смены :data:`TAXONOMY_VERSION`.
+Правило выбора NBA — политика §31, её значения утверждает владелец. Сторож
+``test_nba_taxonomy`` сверяет боевые словари с утверждённым списком строкой:
+любая правка краснит его — и идёт вместе со сменой :data:`TAXONOMY_VERSION`.
 
 ### Признаки, при которых NBA не выбирается
 
@@ -56,14 +61,26 @@ ACTION_TYPES: tuple[str, ...] = ("PROVIDER_SESSION", "SELF_CARE", "OBSERVE", "PL
 ROLE_PRIMARY = "primary"
 ROLE_ALTERNATIVE = "alternative"
 
-#: Метка версии таксономии (≤ 32 знаков, одна константа на метку). Коды H5 есть,
-#: словаря фраз нет — версия не утверждает того, чего нет.
-TAXONOMY_VERSION = "h5-codes:no-phrase-map"
+#: Метка версии таксономии (≤ 32 знаков, одна константа на метку): коды H5 и
+#: словари J1/J2 по решению владельца 15.09.
+TAXONOMY_VERSION = "h5-j1j2:owner-2026-09-15"
 
-#: J1 — ждёт слова владельца. Ключ — фраза, значение — код из :data:`TARGETS`.
-TARGET_PHRASES: Mapping[str, str] = {}
-#: J2 — ждёт слова владельца. target → (family, action_type).
-TARGET_DEFAULTS: Mapping[str, tuple[str, str]] = {}
+#: J1, владелец 15.09 (§3) — дословно. Ключ — фраза, значение — код из :data:`TARGETS`.
+TARGET_PHRASES: Mapping[str, str] = {
+    "хочу выглядеть свежее": "FACE_FRESHNESS",
+    "хочу снять напряжение": "RELAXATION",
+    "хочу расслабить спину": "BACK_COMFORT",
+    "спина напряжена": "BACK_COMFORT",
+    "хочу снять зажимы": "BACK_COMFORT",
+    "устала спина после работы": "BACK_COMFORT",
+}
+#: J2, владелец 15.09 (§4). target → (family, action_type).
+TARGET_DEFAULTS: Mapping[str, tuple[str, str]] = {
+    "FACE_FRESHNESS": ("ADDRESS", "PROVIDER_SESSION"),
+    "PUFFINESS_REDUCTION": ("ADDRESS", "PROVIDER_SESSION"),
+    "RELAXATION": ("SUPPORT", "PROVIDER_SESSION"),
+    "BACK_COMFORT": ("RECOVER", "PROVIDER_SESSION"),
+}
 
 #: I2 (а), владелец 15.09 — дословно, в нормализованной форме (ё → е).
 PAIN_SIGNAL_WORDS: frozenset[str] = frozenset(
