@@ -18,6 +18,13 @@ pk черновика. Ни id человека в канале (``channel_user_
 * соседние имена ``user_id`` / ``chat_id`` / ``name`` / ``username`` (перепись 15.09: 73 вызова).
   Там смесь идентификаторов канала и внутренних ключей, имя их не различает. Разбор по файлам —
   лист DRF-2010; в этом сторожe их нет.
+
+**Третий класс утечки — текст исключения.** ``logger.exception`` печатает трассу вместе с
+сообщением исключения, поэтому строка, чистая по аргументам, продолжает течь, если класс имён
+попал в текст ``raise`` — и ловит это уже не проверка вызова логгера, а
+``test_no_raise_message_carries_a_channel_identity_or_a_name``. Предел и у неё есть: сообщение,
+собранное не f-строкой (конкатенация, ``%``, ``.format``), и текст чужого исключения из
+библиотеки сторожу не видны.
 """
 
 from __future__ import annotations
@@ -113,6 +120,41 @@ def _scan() -> tuple[int, int, dict[str, list[tuple[int, str]]]]:
     return len(files), total_calls, found
 
 
+def _raise_violations(tree: ast.AST) -> tuple[int, int, list[tuple[int, str]]]:
+    """``raise`` с f-строкой в сообщении: сколько всего и какие несут класс имён."""
+    raises = 0
+    fstrings = 0
+    hits: list[tuple[int, str]] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Raise) or node.exc is None:
+            continue
+        raises += 1
+        joined = [sub for sub in ast.walk(node) if isinstance(sub, ast.JoinedStr)]
+        if not joined:
+            continue
+        fstrings += 1
+        tokens: list[str] = []
+        for piece in joined:
+            tokens.extend(_identity_tokens(piece))
+        if tokens:
+            hits.append((node.lineno, ",".join(sorted(set(tokens)))))
+    return raises, fstrings, hits
+
+
+def _scan_raises() -> tuple[int, int, int, dict[str, list[tuple[int, str]]]]:
+    files = _production_files()
+    total_raises = 0
+    total_fstrings = 0
+    found: dict[str, list[tuple[int, str]]] = {}
+    for path in files:
+        raises, fstrings, hits = _raise_violations(ast.parse(path.read_text(encoding="utf-8")))
+        total_raises += raises
+        total_fstrings += fstrings
+        if hits:
+            found[path.relative_to(ROOT).as_posix()] = hits
+    return len(files), total_raises, total_fstrings, found
+
+
 def test_the_scan_is_not_vacuous():
     """Квантор «ни одного нарушения» пуст на пустом скане — нижняя граница."""
     files, calls, _found = _scan()
@@ -142,6 +184,22 @@ def test_no_log_call_carries_a_channel_identity_or_a_name():
     unlisted = {path: hits for path, hits in found.items() if path not in FIXED_IN_1783}
     assert unlisted == {}, "\n".join(
         f"{path}:{line} {tokens}" for path, hits in unlisted.items() for line, tokens in hits
+    )
+
+
+def test_no_raise_message_carries_a_channel_identity_or_a_name():
+    """Трасса — аргумент, которого нет в вызове логгера.
+
+    ``except SoloOnboardingError: logger.exception(...)`` печатает текст исключения, поэтому
+    ``channel_user_id`` в сообщении ``raise`` попадает в лог даже из «чистой» строки. Нижняя
+    граница здесь своя: на пустом скане квантор «ни одного» пуст.
+    """
+    files, raises, fstrings, found = _scan_raises()
+    assert files >= 600, f"скан нашёл {files} файлов — не тот корень"
+    assert raises >= 900, f"скан нашёл {raises} raise — шаблон сломан"
+    assert fstrings >= 450, f"скан нашёл {fstrings} raise с f-строкой — шаблон сломан"
+    assert found == {}, "\n".join(
+        f"{path}:{line} {tokens}" for path, hits in found.items() for line, tokens in hits
     )
 
 
