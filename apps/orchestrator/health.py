@@ -41,21 +41,53 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 
+#: DRF-1938 — breaker LLM на пути консьержа нет ни у одного вендора: единственный
+#: breaker ``openai.complete`` стоит на старом ``intent_router`` (путь per-tenant),
+#: а консьерж ходит через ``apps.llm.router`` без breaker. Проверка это говорит.
+LLM_BREAKER_NOT_ON_CONCIERGE_PATH = "llm_breaker_not_on_concierge_path"
+
+
+def _resolved_vendor() -> str | None:
+    """Вендор, которого выбирает роутер (тот же вызов, что у пробы). Без вызова API."""
+
+    try:
+        from apps.llm.router import resolve_provider_tier
+
+        return str(resolve_provider_tier()[0])
+    except Exception:  # noqa: BLE001 — health never raises
+        logger.warning("health.check_intent_router.vendor_unresolved", exc_info=True)
+        return None
+
+
 def check_intent_router() -> dict[str, Any]:
-    """Verify the OpenAI breaker isn't open.
+    """Legacy intent-router breaker, and an honest note on what it does NOT cover.
 
     Returns a dict matching the readyz check shape:
-    ``{"ok": bool, "error": str | None, "duration_ms": int}``.
+    ``{"ok": bool, "error": str | None, "duration_ms": int}`` plus, since
+    DRF-1938, ``checked`` / ``vendor`` / ``detail``.
+
+    ``ok`` here means «does not block traffic», not «the LLM is healthy»:
+    readyz must not depend on an external API, so LLM health lives in the
+    periodic probe (:mod:`apps.llm.health`) and its alerts. ``checked`` says
+    whether this check measured the LLM path of the resolved vendor — today
+    it never does (see :data:`LLM_BREAKER_NOT_ON_CONCIERGE_PATH`). The
+    pre-existing gate stays: an OPEN legacy ``openai.complete`` breaker is
+    still ``ok=False``.
     """
 
     start = time.monotonic()
+    honest = {
+        "checked": False,
+        "vendor": _resolved_vendor(),
+        "detail": LLM_BREAKER_NOT_ON_CONCIERGE_PATH,
+    }
     try:
         from apps.orchestrator.llm.breaker import State, get_state
 
         # _BREAKER_NAME from openai_provider — duplicate the constant
         # here to avoid importing the OpenAI module just for a string.
         # get_state returns None when the breaker hasn't been instantiated
-        # yet (cold boot) — treat as CLOSED / healthy.
+        # yet (cold boot) — treat as CLOSED / not blocking.
         breaker_state = get_state("openai.complete")
         duration_ms = int((time.monotonic() - start) * 1000)
         if breaker_state == State.OPEN:
@@ -63,14 +95,16 @@ def check_intent_router() -> dict[str, Any]:
                 "ok": False,
                 "error": "openai_breaker_open",
                 "duration_ms": duration_ms,
+                **honest,
             }
-        return {"ok": True, "error": None, "duration_ms": duration_ms}
+        return {"ok": True, "error": None, "duration_ms": duration_ms, **honest}
     except Exception as exc:  # noqa: BLE001 — health never raises
         logger.exception("health.check_intent_router.error")
         return {
             "ok": False,
             "error": f"{type(exc).__name__}: {exc}",
             "duration_ms": int((time.monotonic() - start) * 1000),
+            **honest,
         }
 
 
