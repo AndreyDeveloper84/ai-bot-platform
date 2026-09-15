@@ -27,6 +27,7 @@ from apps.skills.health_screening.tests.s1_fixtures import (
     LONG_PREFIX,
     S1A,
     S1B,
+    S1_DECISION,
     S1D,
     S1Fixture,
 )
@@ -92,5 +93,5 @@ def test_the_known_miss_register_is_counted_and_points_at_fixtures() -> None:
 
     assert len(KNOWN_MISSES) == KNOWN_MISSES_COUNT
     assert [key for key in KNOWN_MISSES if key not in keys] == []
-    assert set(KNOWN_MISSES.values()) <= {S1A, S1B, S1D}
+    assert set(KNOWN_MISSES.values()) <= {S1A, S1B, S1D, S1_DECISION}
     assert len(FIXTURES) == len(keys)
