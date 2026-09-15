@@ -198,3 +198,32 @@ def test_personal_data_delete_with_the_deletion_queued_is_200_started(
     assert res.status_code == 200, res.content
     assert res.json() == {"status": "deletion_started"}
     assert ayla.calls == ["delete", "status"]
+
+
+def test_revocation_during_account_deletion_is_not_started(client: Client, tenant, auth) -> None:
+    """Сторож: 403 при удалении аккаунта — superseded; человеку не «запущено», а частичный исход."""
+    from django.utils import timezone
+
+    from apps.identity.models import UserPersonalContext
+    from apps.integrations.ayla.personal_context_client import PersonalContextAuthError
+
+    user = _user(tenant, linked=True)
+    UserPersonalContext.objects.create(
+        user_id=user.ayla_user_id,
+        deletion_requested_at=timezone.now(),
+        deletion_request_id=uuid.uuid4(),
+    )
+
+    class _Forbidden(_Ayla):
+        def delete_personal_data(self, *, ayla_user_id: str, external_user_id: str) -> None:
+            self.calls.append("delete")
+            raise PersonalContextAuthError("403")
+
+    ayla = _Forbidden([NOT_CONFIRMED])
+    with patch("apps.identity.services.privacy.PersonalContextHttpClient", return_value=ayla):
+        res = _revoke(client, auth)
+
+    assert res.status_code == 200, res.content
+    revocation = res.json()["revocation"]
+    assert revocation["status"] == "revoked_partial_processing"
+    assert revocation["failed_details"]["ayla_delete"] == "superseded_by_account_deletion"

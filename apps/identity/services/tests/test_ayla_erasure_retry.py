@@ -238,6 +238,7 @@ class TestFirstAttemptInTheCascade:
         assert _ayla_step(result).detail == "superseded_by_account_deletion"
         job = AylaErasureJob.objects.get()
         assert job.status == AylaErasureJob.Status.SUPERSEDED
+        assert job.external_user_id == ""
         assert page.call_count == 0
         row = AuditLog.all_tenants.get(action="identity.ayla_erasure.superseded")
         assert str(row.target_id) == str(job.pk)
@@ -285,6 +286,9 @@ class TestWhereNoJobIsQueued:
 
         assert (_ayla_step(result).ok, _ayla_step(result).detail) == (True, "")
         assert ayla.verbs() == ["delete"]
+        from apps.identity.models import AylaErasureJob
+
+        assert AylaErasureJob.objects.count() == 0
 
     def test_not_linked_starts_nothing(self, settings, tenant):
         settings.AYLA_ERASURE_RETRY_ENABLED = True
@@ -315,6 +319,9 @@ class TestWhereNoJobIsQueued:
             execute_bot_half(ayla_user_id=ayla_user_id, external_user_ids=[], request_id="d3-test")
 
         assert ayla.verbs() == ["delete"]
+        from apps.identity.models import AylaErasureJob
+
+        assert AylaErasureJob.objects.count() == 0
 
 
 # ── Подметальщик: повтор по расписанию, исчерпание, алерт ───────────────────
@@ -444,3 +451,169 @@ class TestSchedule:
         assert sweep.call_count == 0
         job.refresh_from_db()
         assert job.attempts == 1
+
+
+# ── Ревью, второй заход ──────────────────────────────────────────────────────
+
+
+class TestReviewPass2:
+    def test_an_unexpected_error_in_the_job_does_not_stop_the_cascade(self, enabled, bot_user):
+        """B1: сбой механики задания не отменяет локальные шаги и не говорит «запущено»."""
+        with patch(
+            "apps.identity.services.ayla_erasure.erase_with_readback",
+            side_effect=RuntimeError("db hiccup"),
+        ):
+            result = delete_personal_data(bot_user, client=_Ayla(), retry_source=SOURCE)  # type: ignore[arg-type]
+
+        step = _ayla_step(result)
+        assert (step.ok, step.detail) == (False, "")
+        assert result.deletion_started is False
+        assert "memory_delete" in [s.step for s in result.steps]
+
+    def test_a_new_request_gives_a_reused_job_fresh_attempts(self, enabled, bot_user):
+        """S1: новый законный запрос человека — новые попытки, а не последняя из старых."""
+        from apps.identity.models import AylaErasureJob
+
+        job = _job(bot_user, attempts=9, next_attempt_at=timezone.now() + timedelta(hours=1))
+        result = delete_personal_data(
+            bot_user, client=_Ayla(statuses=[NOT_CONFIRMED]), retry_source=SOURCE
+        )  # type: ignore[arg-type]
+
+        job.refresh_from_db()
+        assert (job.status, job.attempts) == (AylaErasureJob.Status.PENDING, 1)
+        assert _ayla_step(result).detail == "deletion_started"
+
+    def test_a_failed_job_is_never_reported_as_started(self, enabled, bot_user):
+        """S1: исчерпанное задание — не «запущено»: механизма повтора у него больше нет."""
+        from apps.identity.services.ayla_erasure import FAILED, ErasureOutcome
+
+        with patch(
+            "apps.identity.services.ayla_erasure.erase_with_readback",
+            return_value=ErasureOutcome(state=FAILED, job_id=uuid.uuid4()),
+        ):
+            result = delete_personal_data(bot_user, client=_Ayla(), retry_source=SOURCE)  # type: ignore[arg-type]
+
+        assert (_ayla_step(result).ok, _ayla_step(result).detail) == (False, "")
+        assert result.deletion_started is False
+
+    def test_a_job_closed_meanwhile_is_not_reopened_by_the_first_attempt(
+        self, enabled, bot_user, ayla_user_id
+    ):
+        """S2: пока синхронная попытка ждала каталог, задание закрыли — её итог его не перезапишет."""
+        from apps.identity.models import AylaErasureJob
+
+        class _ClosedMeanwhile(_Ayla):
+            def get_erasure_status(self, *, ayla_user_id: str, external_user_id: str) -> dict:
+                AylaErasureJob.objects.filter(ayla_user_id=ayla_user_id).update(
+                    status=AylaErasureJob.Status.COMPLETED, external_user_id=""
+                )
+                return super().get_erasure_status(
+                    ayla_user_id=ayla_user_id, external_user_id=external_user_id
+                )
+
+        with patch("apps.identity.services.ayla_erasure.page", return_value=True) as page:
+            delete_personal_data(
+                bot_user, client=_ClosedMeanwhile(statuses=[NOT_CONFIRMED]), retry_source=SOURCE
+            )  # type: ignore[arg-type]
+
+        job = AylaErasureJob.objects.get()
+        assert job.status == AylaErasureJob.Status.COMPLETED
+        assert job.external_user_id == ""
+        assert page.call_count == 0
+
+    def test_the_sweep_claims_the_job_before_calling_ayla(self, enabled, bot_user):
+        """S3: задание взято арендой до сети — второй проход подметальщика его не возьмёт."""
+        from apps.identity.models import AylaErasureJob
+        from apps.identity.services.ayla_erasure import sweep_due_jobs
+
+        job = _job(bot_user)
+        seen: list = []
+
+        class _Recording(_Ayla):
+            def delete_personal_data(self, *, ayla_user_id: str, external_user_id: str) -> None:
+                seen.append(AylaErasureJob.objects.get(pk=job.pk).next_attempt_at)
+                super().delete_personal_data(
+                    ayla_user_id=ayla_user_id, external_user_id=external_user_id
+                )
+
+        sweep_due_jobs(client=_Recording(statuses=[NOT_CONFIRMED]))  # type: ignore[arg-type]
+
+        assert seen and seen[0] > timezone.now()
+
+    def test_alerted_at_stays_empty_when_the_page_did_not_go_out(self, enabled, bot_user):
+        """S4: «алерт отправлен» — только если он действительно ушёл."""
+        from apps.identity.models import AylaErasureJob
+        from apps.identity.services.ayla_erasure import MAX_ATTEMPTS, sweep_due_jobs
+
+        job = _job(bot_user, attempts=MAX_ATTEMPTS - 1)
+        with patch("apps.identity.services.ayla_erasure.page", return_value=False):
+            sweep_due_jobs(client=_Ayla(delete_exc=PersonalContextTransportError("http_500")))  # type: ignore[arg-type]
+
+        job.refresh_from_db()
+        assert job.status == AylaErasureJob.Status.FAILED
+        assert job.alerted_at is None
+
+    def test_the_first_attempt_in_the_cascade_uses_a_short_client(self, enabled, bot_user):
+        """S7: синхронный путь не ждёт всех повторов клиента — остальное повторит задание."""
+        ayla = _Ayla(statuses=[CONFIRMED])
+        with patch(
+            "apps.identity.services.privacy.PersonalContextHttpClient", return_value=ayla
+        ) as ctor:
+            delete_personal_data(bot_user, retry_source=SOURCE)
+
+        assert ctor.call_args.kwargs == {"retries": 1, "timeout": 10}
+
+    def test_a_config_error_is_named_config(self, enabled, bot_user):
+        """N1: пробел конфигурации — не «транспорт»: повтор его не лечит."""
+        from apps.identity.models import AylaErasureJob
+        from apps.integrations.ayla.personal_context_client import PersonalContextConfigError
+
+        delete_personal_data(
+            bot_user,
+            client=_Ayla(delete_exc=PersonalContextConfigError("no token")),
+            retry_source=SOURCE,
+        )  # type: ignore[arg-type]
+
+        assert AylaErasureJob.objects.get().last_error_kind == "config"
+
+
+class TestReviewPass2Guards:
+    """Сторожа на подмены, которые ревью назвало непойманными (зелёные и до, и после)."""
+
+    def test_the_pending_job_keeps_the_external_id_snapshot(self, enabled, bot_user):
+        from apps.identity.models import AylaErasureJob
+        from apps.integrations.ayla.user_proxy import external_user_id_for
+
+        expected = external_user_id_for(bot_user)
+        assert expected
+        delete_personal_data(bot_user, client=_Ayla(statuses=[NOT_CONFIRMED]), retry_source=SOURCE)  # type: ignore[arg-type]
+
+        assert AylaErasureJob.objects.get().external_user_id == expected
+
+    @pytest.mark.parametrize(
+        "status",
+        [
+            {"erased": True, "identities": []},
+            {"erased": True, "identities": [_identity("holds_values", True)]},
+            {"erased": False, "identities": [_identity("tombstone", True)]},
+        ],
+        ids=["no-identities", "erased-flag-on-values", "overall-false"],
+    )
+    def test_a_readback_that_does_not_fully_confirm_keeps_the_job_pending(
+        self, enabled, bot_user, status
+    ):
+        from apps.identity.models import AylaErasureJob
+
+        delete_personal_data(bot_user, client=_Ayla(statuses=[status]), retry_source=SOURCE)  # type: ignore[arg-type]
+
+        assert AylaErasureJob.objects.get().status == AylaErasureJob.Status.PENDING
+
+    def test_a_404_on_delete_still_needs_the_readback(self, enabled, bot_user):
+        from apps.identity.models import AylaErasureJob
+        from apps.integrations.ayla.personal_context_client import PersonalContextNotFoundError
+
+        ayla = _Ayla(delete_exc=PersonalContextNotFoundError("gone"), statuses=[NOT_CONFIRMED])
+        delete_personal_data(bot_user, client=ayla, retry_source=SOURCE)  # type: ignore[arg-type]
+
+        assert ayla.verbs() == ["delete", "status"]
+        assert AylaErasureJob.objects.get().status == AylaErasureJob.Status.PENDING

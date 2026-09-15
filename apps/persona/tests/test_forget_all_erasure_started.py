@@ -90,6 +90,7 @@ def test_an_unconfirmed_erasure_says_the_deletion_is_started(tenant) -> None:
 
     assert result is not None
     assert STARTED in result.text
+    assert not result.text.startswith("Готово")
     assert "не достучалась" not in result.text
     assert "забыла всё, что о тебе помнила" not in result.text
     assert ayla.calls == ["delete", "status"]
@@ -117,3 +118,16 @@ def test_an_unlinked_person_is_not_told_the_deletion_is_started(tenant) -> None:
     assert "не достучалась" in result.text
     assert STARTED not in result.text
     assert ayla.calls == []
+
+
+def test_with_the_flag_off_the_chat_keeps_todays_path(tenant, settings) -> None:
+    """Сторож: без флага — прежний путь, без readback (названный долг против правила владельца)."""
+    settings.AYLA_ERASURE_RETRY_ENABLED = False
+    bot_user = _user(tenant, linked=True)
+    ayla = _Ayla([NOT_CONFIRMED])
+
+    result = _confirm(bot_user, ayla)
+
+    assert result is not None
+    assert result.text.startswith("Готово — я забыла всё, что о тебе помнила.")
+    assert ayla.calls == ["delete"]
