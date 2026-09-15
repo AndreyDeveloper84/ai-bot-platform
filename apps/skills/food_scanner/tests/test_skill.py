@@ -495,6 +495,7 @@ class TestCorrectedGramsReachTheLog:
         grams_map: dict | None = None,
         echoed_origin: str | None = "photo_user_corrected",
         raise_exc: Exception | None = None,
+        logged: dict | None = None,
     ):
         ctx = _context("cb:food:to_diary:scan-1")
         state: dict = {}
@@ -502,6 +503,8 @@ class TestCorrectedGramsReachTheLog:
             state["food_scan"] = card
         if grams_map is not None:
             state["food_scan_grams"] = grams_map
+        if logged is not None:
+            state["food_scan_logged"] = logged
         ctx.conversation.skill_state = state
         client = Mock()
         captured: list[dict] = []
@@ -596,6 +599,19 @@ class TestCorrectedGramsReachTheLog:
         assert len(captured) == 1
         assert result.meta["reply_kind"] == "food_scanner_log_unavailable"
         assert written == [("food_scan_logged", {"scan-1": None})]
+
+    def test_a_repeat_tap_does_not_downgrade_a_logged_scan(self) -> None:
+        # Первый тап записал, человек видел «Записала»; повторный ушёл по таймауту.
+        # Скан не должен стать «в полёте» — иначе ответ про вес скажет «не знаю,
+        # дошла ли» сразу после «Записала».
+        result, captured, written = self._to_diary(
+            logged={"scan-1": "log-0"}, raise_exc=NutritionUnavailableError("down")
+        )
+
+        assert len(captured) == 1
+        assert result.meta["reply_kind"] == "food_scanner_log_unavailable"
+        # empty-assert-ok: the scan is already logged and the repeat call failed — no mark to write
+        assert not any(value == {"scan-1": None} for _, value in written)
 
     @pytest.mark.parametrize(
         ("exc", "reply_kind"),

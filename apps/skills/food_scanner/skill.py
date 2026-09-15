@@ -321,7 +321,9 @@ class FoodScannerSkill:
             extra = {"portion_multiplier": corrected, "entry_origin": "photo_user_corrected"}
         # «В полёте» ДО сетевого вызова: ответ про граммы, пришедший, пока запись
         # летит, не пообещает вес, который в неё уже не попадёт.
-        _mark_logged(context, scan_id, None)
+        # Уже записанный скан не понижается: повтор ключа вернёт ту же запись.
+        if _logged_id(context, scan_id) is None:
+            _mark_logged(context, scan_id, None)
         try:
             log = asyncio.run(
                 get_nutrition_client().log_meal(
@@ -565,6 +567,13 @@ def _correction_for(context: SkillContext, scan_id: str) -> dict | None:
     entries = _state(context).get(GRAMS_STATE_KEY)
     entry = entries.get(scan_id) if isinstance(entries, dict) else None
     return entry if isinstance(entry, dict) else None
+
+
+def _logged_id(context: SkillContext, scan_id: str) -> str | None:
+    """``log_id`` уже записанного скана, или ``None`` (не записан / «в полёте»)."""
+    logged = _state(context).get(LOGGED_STATE_KEY)
+    value = logged.get(scan_id) if isinstance(logged, dict) else None
+    return value if isinstance(value, str) and value else None
 
 
 def _mark_logged(context: SkillContext, scan_id: str, log_id: str | None) -> None:
