@@ -178,6 +178,8 @@ ROUTE_TABLE: tuple[Route, ...] = (
     # (идемпотентно), GET без номера — текущая для профиля.
     Route("POST", "/api/v1/internal/users/{id}/deletion-requests/", Auth.BEARER_EXT),
     Route("GET", "/api/v1/internal/users/{id}/deletion-requests/", Auth.BEARER_EXT),
+    # DRF-1855 — a client's review of their own visit, written as that person.
+    Route("POST", "/api/v1/internal/users/{id}/reviews/", Auth.BEARER_EXT),
     # billing_client — C2 billing status + C3 payout preview (pilot 2026-08-15).
     Route("GET", "/api/v1/internal/billing/specialists/{id}/status/", Auth.BEARER),
     Route("POST", "/api/v1/internal/billing/specialists/{id}/card-setup/", Auth.BEARER),
@@ -432,6 +434,15 @@ def _exercise_booking() -> None:
     _swallow(
         lambda: c.get_canon_gap_request(
             specialist_id="SPECID", external_user_id=_EXT_USER, request_id=str(_PROFILE_UUID)
+        )
+    )
+    # DRF-1855 review under the client's subject.
+    _swallow(
+        lambda: c.create_review(
+            external_user_id=_EXT_USER,
+            ayla_user_id=str(_PROFILE_UUID),
+            appointment_id="APPTID",
+            rating=5,
         )
     )
 

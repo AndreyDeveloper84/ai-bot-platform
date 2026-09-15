@@ -1033,6 +1033,37 @@ a {
   font-variant-numeric: tabular-nums;
 }
 
+/* DRF-1848 — имя мастера текстом, значок диалогов, аватар в одну строку. */
+.master-dashboard__who {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+}
+
+.master-dashboard__name {
+  max-width: 12ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--font-size-200);
+  font-weight: 600;
+  color: var(--c-text-primary);
+}
+
+.master-dashboard__inbox {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--c-text-secondary);
+  cursor: pointer;
+}
+
 .master-dashboard__section {
   margin-bottom: var(--s-4);
 }
@@ -6643,6 +6674,17 @@ a {
   display: flex;
   flex-direction: column;
   gap: var(--s-2);
+}
+/* DRF-1897 — строка диетолога под итогами. Карточкой, как соседние группы:
+   это часть дневника, а не всплывающая подсказка. */
+.food-scanner-diary__observation {
+  margin: 0;
+  background: var(--c-surface-1);
+  border: 1px solid var(--c-divider);
+  border-radius: var(--r-md);
+  padding: var(--s-3) var(--s-4);
+  font-size: var(--font-size-200);
+  color: var(--c-text-primary);
 }
 .food-scanner-diary__comment {
   margin: var(--s-2) 0 0;

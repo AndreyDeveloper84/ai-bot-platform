@@ -608,6 +608,29 @@ PERSONAL_FIELDS: tuple[PersonalField, ...] = (
             "contract wants. See POLICY_DEBT — it must not cross, and does."
         ),
     ),
+    PersonalField(
+        site="memory_key:city",
+        origin="USER_STATED",
+        owner="BOT",
+        crosses_salons=True,
+        why=(
+            "The city the person named while asking for masters — written only "
+            "when the search city is in the person's own words and is a city we "
+            "serve (apps/orchestrator/said_memory.py). Where the person looks, not "
+            "a relationship with one salon, so crossing salons is the point."
+        ),
+    ),
+    PersonalField(
+        site="memory_key:visit_context",
+        origin="USER_STATED",
+        owner="BOT",
+        crosses_salons=True,
+        why=(
+            "«after work / evening / weekend» from a want-to-come sentence, closed "
+            "vocabulary; a clause with any health meaning yields nothing and "
+            "answers to screening questions are never read (DRF-1729)."
+        ),
+    ),
 )
 
 

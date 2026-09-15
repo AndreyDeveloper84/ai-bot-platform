@@ -400,6 +400,16 @@ class AylaRepeatIntent:
     raw: dict[str, Any] = field(default_factory=dict)
 
 
+@dataclass(frozen=True)
+class AylaReview:
+    """A review Ayla stored for a client's own completed visit (DRF-1855)."""
+
+    id: str
+    appointment_id: str
+    rating: int
+    raw: dict[str, Any] = field(default_factory=dict)
+
+
 # ─── protocol ────────────────────────────────────────────────────────────────
 
 
@@ -1638,6 +1648,70 @@ class AylaBookingHTTPClient:
             suggested_slots=[s for s in slots if isinstance(s, str)]
             if isinstance(slots, list)
             else [],
+            raw=data,
+        )
+
+    # ── reviews ──────────────────────────────────────────────────────────────
+
+    def create_review(
+        self,
+        *,
+        external_user_id: str,
+        ayla_user_id: str,
+        appointment_id: str,
+        rating: int,
+        text: str = "",
+        is_anonymous: bool = False,
+    ) -> AylaReview:
+        """A client's review of their own visit (``POST users/{id}/reviews/``).
+
+        DRF-1855. Until this route the only door to a review was the client
+        app with the person's own JWT, so an answer given to Ayla in the chat
+        had nowhere to go. Upstream applies the app door's rules through the
+        same service: the visit must be this client's and ``completed``; one
+        review per visit.
+
+        **Subject.** The path names the Ayla user; ``X-External-User-ID``
+        names who is acting; upstream refuses (403) unless they are the same
+        person. The review is written *as* that person, so there is no body
+        field through which a caller could name somebody else.
+
+        **Refusals** surface as :class:`BookingBadRequestError` with the wire
+        code: ``REVIEW_EXISTS`` (409) — already reviewed, which a caller may
+        treat as done; ``APPOINTMENT_NOT_COMPLETED`` (400); ``NOT_FOUND``
+        (404) — not this client's visit, indistinguishable from none.
+
+        **No idempotency key.** The one-review-per-visit rule is the dedup:
+        a repeat after a lost response answers ``REVIEW_EXISTS`` and never
+        creates a second row.
+        """
+        # A caller bug fails before the wire: bool is an int in Python, and
+        # ``True`` would otherwise travel as a one-star review.
+        if isinstance(rating, bool) or not isinstance(rating, int) or not 1 <= rating <= 5:
+            raise ValueError(f"rating must be an int in 1..5, got {rating!r}")
+        resp = self._request(
+            "POST",
+            f"users/{ayla_user_id}/reviews/",
+            external_user_id=external_user_id,
+            json_body={
+                "appointment_id": appointment_id,
+                "rating": rating,
+                "text": text,
+                "is_anonymous": is_anonymous,
+            },
+        )
+        payload = self._ok(resp, success=(201,))
+        data = payload if isinstance(payload, dict) else {}
+        review_id = str(data.get("id") or "")
+        if not review_id:
+            # A 201 we cannot read is not «saved»: the caller would tell the
+            # person their review is in while nobody can point at it.
+            logger.warning("booking_client.review_unexpected_shape type=%s", type(payload).__name__)
+            raise BookingUnavailableError("malformed_response")
+        return AylaReview(
+            id=review_id,
+            appointment_id=appointment_id,
+            rating=rating,
             raw=data,
         )
 

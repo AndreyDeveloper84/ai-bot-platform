@@ -13,7 +13,7 @@
  * would fail for reasons that have nothing to do with it.
  */
 import { fireEvent, render, screen, within } from "@testing-library/react";
-import { MemoryRouter } from "react-router-dom";
+import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("../lib/customer-booking", async (importOriginal) => {
@@ -33,6 +33,7 @@ vi.mock("../lib/max-sdk", () => ({
   onBackButton: () => () => undefined,
 }));
 
+import { authErrorCopy } from "../lib/auth-error-copy";
 import { getCatalogBrowse } from "../lib/customer-booking";
 
 const mockedBrowse = vi.mocked(getCatalogBrowse);
@@ -172,6 +173,32 @@ describe("CustomerWellnessDashboardScreen — the home surface", () => {
     ).toBeInTheDocument();
     expect(qa.getByRole("button", { name: "Выбери цель" })).toBeInTheDocument();
     expect(qa.getByRole("button", { name: "Найди услугу" })).toBeInTheDocument();
+    // DRF-1839: вход в дневник — живая ручка `/wellness/today`.
+    expect(qa.getByRole("button", { name: "Дневник питания" })).toBeInTheDocument();
+  });
+
+  it("«📔 Дневник питания» ведёт на экран дневника (DRF-1839)", async () => {
+    // До DRF-1839 входа в дневник с главной не было ни одного: записи из
+    // чата человек в Mini App не видел. Проверяется переход, а не кнопка —
+    // кнопка без маршрута была бы той же дырой в новой обёртке.
+    vi.resetModules();
+    const { CustomerWellnessDashboardScreen } = await import(
+      "./CustomerWellnessDashboardScreen"
+    );
+    render(
+      <MemoryRouter initialEntries={["/customer/main"]}>
+        <Routes>
+          <Route path="/customer/main" element={<CustomerWellnessDashboardScreen />} />
+          <Route
+            path="/customer/food-scanner/diary"
+            element={<div>экран дневника</div>}
+          />
+        </Routes>
+      </MemoryRouter>,
+    );
+    const qa = within(await screen.findByRole("region", { name: "Что сделаем сейчас" }));
+    fireEvent.click(qa.getByRole("button", { name: "Дневник питания" }));
+    expect(await screen.findByText("экран дневника")).toBeInTheDocument();
   });
 
   it("prod build: «Главная» is the active tab and «День» is not offered", async () => {
@@ -698,6 +725,59 @@ describe("CustomerWellnessDashboardScreen — degraded reads (DRF-1546)", () => 
  * покраснеет первый случай; сделайте `waterKnown` снова зависимым от
  * цели — покраснеет положительная проверка про «2 стакана сегодня».
  */
+describe("CustomerWellnessDashboardScreen — отказ входа назван своим именем (DRF-1319 D-1)", () => {
+  /** Ручка today отвечает отказом; activity — обычно. */
+  function serveTodayRefused(status: number, slug: string, detail: string) {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: unknown) => {
+        const u = String(url);
+        if (u.includes("/wellness/today")) {
+          return {
+            ok: false,
+            status,
+            statusText: "refused",
+            json: async () => ({ error: slug, detail }),
+          } as unknown as Response;
+        }
+        if (u.includes("/recent-activity")) {
+          return {
+            ok: true,
+            status: 200,
+            json: async () => ({ this_week_booking_count: 0 }),
+          } as unknown as Response;
+        }
+        throw new Error(`unexpected fetch: ${u}`);
+      }),
+    );
+  }
+
+  beforeEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllEnvs();
+    mockedBrowse.mockResolvedValue({ services: [], masters: [], picks: [], picksOutcome: "OK" });
+    window.history.replaceState({}, "", "/customer/main");
+  });
+
+  it("400 malformed → «MAX не передал данные для входа», не «через минуту»", async () => {
+    serveTodayRefused(400, "malformed", "missing Authorization header");
+    await renderScreen(false);
+
+    expect(await screen.findByText(authErrorCopy("malformed").title)).toBeInTheDocument();
+    expect(screen.getByText(authErrorCopy("malformed").body)).toBeInTheDocument();
+    expect(screen.queryByText(/через минуту/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/missing Authorization header/)).not.toBeInTheDocument();
+  });
+
+  it("прочий 4xx → по-прежнему «через минуту» (положительная стража)", async () => {
+    serveTodayRefused(422, "validation_error", "bad day");
+    await renderScreen(false);
+
+    expect(await screen.findByText(/через минуту/)).toBeInTheDocument();
+    expect(screen.queryByText(authErrorCopy("malformed").title)).not.toBeInTheDocument();
+  });
+});
+
 describe("CustomerWellnessDashboardScreen — норма воды не выдумывается", () => {
   function serve(today: unknown) {
     vi.stubGlobal(

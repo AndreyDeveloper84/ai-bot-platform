@@ -446,6 +446,16 @@ REPLAY_LIVE_CAPTURE_ENABLED = os.environ.get("REPLAY_LIVE_CAPTURE_ENABLED", "fal
     "1",
 )
 
+# Теневой режим DecisionReadiness (решение владельца C1; DRF-1882 — провод,
+# этот блок — чтение из окружения). Ключ настройки существует ТОЛЬКО если
+# переменная задана, и значение передаётся СЫРОЙ строкой: `shadow_flag()`
+# (`apps/orchestrator/decision_readiness/shadow.py`) сам различает три
+# «выкл» — ключа нет (read_default), выключено словом (settings), значение не
+# из словаря (malformed). `bool(...)` здесь превратил бы "false" в True, а
+# умолчание False стёрло бы разницу между «не настроено» и «выключено».
+if "DRE_SHADOW_ENABLED" in os.environ:
+    DRE_SHADOW_ENABLED = os.environ["DRE_SHADOW_ENABLED"]
+
 # #433 umbrella — HANDLER_EXCEPTION → DLQ threshold. A handler that
 # raises gets retried by Ayla per §6.3; after this many failed
 # attempts (counted per event_id + handler), bot-platform upserts a

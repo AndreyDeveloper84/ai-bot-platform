@@ -157,6 +157,15 @@ export interface WellnessToday {
    */
   nutrition_numbers_hidden?: boolean;
   /**
+   * Строка диетолога (DRF-1897) — тот же текст, что в дневнике в чате.
+   *
+   * Приходит ТОЛЬКО на `?surface=diary` (`loadDiaryToday`): сервер
+   * решает её и пишет в журнал наблюдений лишь для открытого дневника.
+   * Главная этот признак не ставит и строки не получает — иначе её
+   * открытие тратило бы суточный слот наблюдения. Ключа нет — строки нет.
+   */
+  coach_observation?: string;
+  /**
    * Active goals (cap=1 for MVP — multi-goal post-pilot). Read from
    * Ayla's goal layer — the same `known.goal` the goal screen renders
    * (`customer-goals.ts`), so the two surfaces cannot disagree.
@@ -465,7 +474,9 @@ export type DiaryToday =
     };
 
 export async function loadDiaryToday(): Promise<DiaryToday> {
-  const today = await getWellnessToday();
+  // Явный признак «открыт именно дневник» (DRF-1897): по нему и только по
+  // нему сервер решает строку диетолога и пишет журнал.
+  const today = await getWellnessToday({ surface: "diary" });
   if (!Array.isArray(today.entries)) return { state: "unreadable" };
   const hideNumbers = today.nutrition_numbers_hidden !== false;
   // `today` едет целиком, а не разобранным на итоги: у его ключей уже
@@ -476,9 +487,16 @@ export async function loadDiaryToday(): Promise<DiaryToday> {
     : { state: "entries", entries: today.entries, hideNumbers, today };
 }
 
-export async function getWellnessToday(): Promise<WellnessToday> {
+export async function getWellnessToday(
+  /** `diary` — зовёт экран дневника; главная признак не передаёт. */
+  options: { surface?: "diary" } = {},
+): Promise<WellnessToday> {
   const variant = pickStubOrLive();
-  if (variant === null) return request<WellnessToday>("/wellness/today");
+  if (variant === null) {
+    return request<WellnessToday>(
+      options.surface === "diary" ? "/wellness/today?surface=diary" : "/wellness/today",
+    );
+  }
   // Simulate realistic network latency for skeleton testing (~300ms).
   await new Promise<void>((resolve) => setTimeout(resolve, 300));
   return TODAY_STUB[variant];

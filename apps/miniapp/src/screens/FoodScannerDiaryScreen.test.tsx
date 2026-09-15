@@ -211,3 +211,91 @@ describe("ни одна съеденная тарелка не исчезает"
     expect(within(other).getByText("Ночной кефир")).toBeInTheDocument();
   });
 });
+
+
+describe("пустой день не зовёт в неработающий скан (DRF-1839)", () => {
+  it("прод: подпись зовёт в чат, кнопки скана нет", async () => {
+    // Экран скана под `guardProd` падает в прод-сборке; работающий вход
+    // записи — текстовый ввод в чате (DRF-1837).
+    vi.stubEnv("DEV", false);
+    try {
+      mockedLoad.mockResolvedValue({
+        state: "empty",
+        hideNumbers: false,
+        today: today({ calories_eaten: 0 }),
+      });
+      renderScreen();
+      expect(
+        await screen.findByText(/Напиши Ayla в чате, что было/),
+      ).toBeInTheDocument();
+      expect(
+        screen.queryByRole("button", { name: "Добавить приём" }),
+      ).not.toBeInTheDocument();
+      expect(screen.queryByText(/через скан/)).not.toBeInTheDocument();
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("DEV: кнопка скана остаётся — заглушки там живы", async () => {
+    mockedLoad.mockResolvedValue({
+      state: "empty",
+      hideNumbers: false,
+      today: today({ calories_eaten: 0 }),
+    });
+    renderScreen();
+    expect(
+      await screen.findByRole("button", { name: "Добавить приём" }),
+    ).toBeInTheDocument();
+  });
+
+  it("запись из чата (meal_type other) видна в «Другое»", async () => {
+    // Текстовый ввод DRF-1837 пишет тип приёма «не указан» — он обязан
+    // остаться на экране, а не пропасть из списка.
+    mockedLoad.mockResolvedValue({
+      state: "entries",
+      entries: [{ ...SOUP, id: "fl-chat", dish_name: "борщ", meal_type: "other" }],
+      hideNumbers: false,
+      today: today(),
+    });
+    renderScreen();
+    expect(await screen.findByText("борщ")).toBeInTheDocument();
+    expect(screen.getByText("Другое")).toBeInTheDocument();
+  });
+});
+
+
+describe("строка диетолога (DRF-1897)", () => {
+  const LINE = "Третий вечер ужин после девяти. Если хочешь, подумаем, что можно сдвинуть.";
+
+  it("пришла — стоит под итогами дословно", async () => {
+    mockedLoad.mockResolvedValue({
+      state: "entries",
+      entries: [OATS],
+      hideNumbers: false,
+      today: today({ coach_observation: LINE }),
+    });
+    renderScreen();
+
+    const line = await screen.findByText(LINE);
+    const totals = screen.getByRole("region", { name: "Сегодня" });
+    // Под итогами: итоги в документе раньше строки.
+    expect(
+      totals.compareDocumentPosition(line) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+  });
+
+  it("не пришла — ни абзаца", async () => {
+    mockedLoad.mockResolvedValue({
+      state: "entries",
+      entries: [OATS],
+      hideNumbers: false,
+      today: today(),
+    });
+    const { container } = renderScreen();
+
+    // POSITIVE first: the ready diary did render.
+    expect(await screen.findByText("Овсянка с ягодами")).toBeInTheDocument();
+    expect(container.querySelector(".food-scanner-diary__observation")).toBeNull();
+  });
+});

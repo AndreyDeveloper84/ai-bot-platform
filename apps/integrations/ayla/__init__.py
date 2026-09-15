@@ -32,6 +32,7 @@ from apps.integrations.ayla.booking_client import (
 from apps.integrations.ayla.nutrition_client import (
     CrossDomainInsight,
     DeficitsResponse,
+    DishEstimate,
     FoodLogResponse,
     FoodNotRecognizedError,
     NutritionAPIError,
@@ -73,6 +74,7 @@ __all__ = [
     "BookingUnavailableError",
     "CrossDomainInsight",
     "DeficitsResponse",
+    "DishEstimate",
     "FoodLogResponse",
     "FoodNotRecognizedError",
     "NutritionAPIError",
