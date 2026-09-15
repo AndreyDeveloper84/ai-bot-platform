@@ -365,6 +365,54 @@ describe("MasterServicesScreen — экран 04 «Цены и длительн�
     expect(screen.getByTestId("location")).toHaveTextContent("/solo/setup");
   });
 
+  it("M17: nothing selected → «Выбрать из каталога» leads to screen 03", async () => {
+    mockedSelection.mockResolvedValue(EMPTY_SELECTION);
+    await renderScreen();
+
+    expect(screen.getByText("Выбери хотя бы одну услугу")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Выбрать из каталога" }));
+    await settle();
+    expect(screen.getByTestId("location")).toHaveTextContent("/solo/services/select");
+  });
+
+  it("M17: something selected → no «Выбрать из каталога» next to the hint", async () => {
+    mockedSelection.mockResolvedValue(state([row("a", "Коррекция бровей")], 1, 0));
+    await renderScreen();
+
+    expect(screen.getByRole("button", { name: "Продолжить" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Выбрать из каталога" })).not.toBeInTheDocument();
+  });
+
+  it.each([
+    [
+      "salon_managed",
+      new ApiError(409, "salon_catalog_owner_managed", "…", { reason: "salon_catalog_owner_managed" }),
+      "Услуги салона ведёт владелец салона.",
+    ],
+    ["not_linked", new ApiError(403, "not_linked", "…"), "Доступ не настроен"],
+  ])("M17: %s → no way into the selection", async (_name, error, witness) => {
+    mockedSelection.mockRejectedValue(error);
+    await renderScreen();
+
+    expect(screen.getByText(witness)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Выбрать из каталога" })).not.toBeInTheDocument();
+  });
+
+  it("M17: readiness «services» pointing at screen 03 is still this step and is skipped — no loop", async () => {
+    mockedSelection.mockResolvedValue(state([configured("a", "А", "1000.00", 60)], 1, 1));
+    mockedReadiness.mockResolvedValue(
+      readiness([
+        { key: "services", state: "missing", deep_link: "/solo/services/select" },
+        { key: "profile", state: "missing", deep_link: "/solo/profile" },
+      ]),
+    );
+    await renderScreen();
+
+    fireEvent.click(screen.getByRole("button", { name: "Продолжить" }));
+    await settle();
+    expect(screen.getByTestId("location")).toHaveTextContent("/solo/profile");
+  });
+
   it("S7: the sheet has exactly two fields and saves through PUT, state from the response", async () => {
     mockedSelection.mockResolvedValue(state([row("svc-1", "Коррекция бровей")], 1, 0));
     mockedPut.mockResolvedValue({

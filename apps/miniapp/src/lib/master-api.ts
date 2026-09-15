@@ -445,6 +445,36 @@ export const removeService = (
 ): Promise<ServiceSelectionState & { removal: "deleted" | "deactivated" }> =>
   request(`/services/${salonServiceId}`, { method: "DELETE" });
 
+// --- DRF-1799 (M7) канон для экрана 03 ------------------------------------------
+// Mirrors apps/master_api/views.py::service_directions / service_templates —
+// proxies to the catalog's canon. Directions are exactly the catalog's list (no
+// count or codes kept here); template rows carry no price or duration.
+
+export interface ServiceDirection {
+  id: string;
+  name: string;
+  slug: string;
+  icon: string;
+  sort_order: number;
+}
+
+export interface ServiceTemplate {
+  id: string;
+  name: string;
+  name_short: string | null;
+  is_popular: boolean;
+  category_id: string | null;
+  category_name: string | null;
+}
+
+export const getServiceDirections = (): Promise<{ directions: ServiceDirection[] }> =>
+  request("/services/directions", { method: "GET" });
+
+export const getServiceTemplates = (
+  directionId: string,
+): Promise<{ direction_id: string; templates: ServiceTemplate[] }> =>
+  request(`/services/templates?direction_id=${encodeURIComponent(directionId)}`, { method: "GET" });
+
 /** Пункты, которые экран рисует: всё, кроме `unavailable`. */
 export const drawnReadinessItems = (items: ReadinessItem[]): ReadinessItem[] =>
   items.filter((item) => item.state !== "unavailable");

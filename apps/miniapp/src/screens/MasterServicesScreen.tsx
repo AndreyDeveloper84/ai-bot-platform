@@ -36,19 +36,26 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 
+import {
+  ADD_OWN_LABEL,
+  NOT_LINKED_MESSAGE,
+  OWN_EMPTY,
+  OWN_NOTE,
+  OWN_TITLE,
+  OwnServiceForm,
+  SENT_MESSAGE,
+  pickedMessage,
+  type PickAvailability,
+} from "../components/OwnServiceForm";
 import { ApiError } from "../lib/api";
 import { SUPPORT_DEEPLINK } from "../lib/customer-profile";
 import {
-  createCanonGapRequest,
   getOnboardingReadiness,
   getServiceSelection,
-  getSimilarCanonTemplates,
   listCanonGapRequests,
   putServiceOffer,
   removeService,
-  selectServices,
   type CanonGapRequest,
-  type CanonGapSimilar,
   type SelectedService,
   type ServiceSelectionState,
 } from "../lib/master-api";
@@ -64,6 +71,8 @@ const COPY = {
   continue: "Продолжить",
   selectAtLeastOne: "Выбери хотя бы одну услугу",
   later: "Сохранить и продолжить позже",
+  // DRF-1809 (M17): единственный выход из нулевого выбора — экран 03.
+  chooseFromCatalog: "Выбрать из каталога",
   loadError: "Не удалось загрузить услуги.",
   retryLoad: "Повторить",
   salonManaged: "Услуги салона ведёт владелец салона.",
@@ -103,37 +112,39 @@ const OTHER_MINUTES_MAX = 480;
 const SETUP_PATH = "/solo/setup";
 /** Пункт готовности этого же экрана: вести на него из «Продолжить» — петля. */
 const SELF_READINESS_KEY = "services";
+/** Экран 03 — выбор услуг из каталога (DRF-1809, M17). */
+export const SELECT_PATH = "/solo/services/select";
 
 // --- «Свои услуги» copy (DRF-1896) ----------------------------------------
+// Форма «Добавить мою» и её слова живут в components/OwnServiceForm (DRF-1809:
+// её переиспользует экран 03); здесь — переэкспорт для тех, кто импортирует
+// их из экрана.
 
-export const OWN_TITLE = "Свои услуги";
-export const OWN_NOTE =
-  "Услуги, которых нет в каталоге. Их проверяет владелец; клиенты увидят услугу только после подтверждения.";
-export const OWN_EMPTY = "Своих услуг пока нет.";
-export const ADD_OWN_LABEL = "Добавить мою";
-export const ADD_ANYWAY_LABEL = "Всё равно добавить мою";
-export const PICK_CANON_LABEL = "Выбрать эту услугу";
-// DRF-1895: кнопка активна ⇔ выбор канона доступен этому мастеру (состояние
-// выбора загрузилось с сервера). Салон, чей каталог ведёт владелец, выбрать не
-// может — экран говорит это словами; любой другой отказ — кнопка выключена.
-export const PICK_CANON_UNAVAILABLE = "Выбор услуги из каталога сейчас недоступен.";
-export const SALON_MANAGED_MESSAGE =
-  "Каталог салона ведёт владелец — выбрать услугу из каталога здесь нельзя.";
-/** Счётчик — из ответа сервера, экран его не считает. */
-export const pickedMessage = (selected: number) =>
-  `Добавили в ваши услуги. Выбрано услуг: ${selected}.`;
-export const SIMILAR_TITLE = "В каталоге есть похожая услуга:";
-export const SENT_MESSAGE = "Отправили на проверку.";
-export const NOT_LINKED_MESSAGE =
-  "Профиль ещё не связан с каталогом — заявку пока некуда отправить.";
+export {
+  ADD_ANYWAY_LABEL,
+  ADD_OWN_LABEL,
+  ERR_DURATION,
+  ERR_NAME,
+  ERR_PRICE,
+  FIELD_DESCRIPTION,
+  FIELD_DURATION,
+  FIELD_NAME,
+  FIELD_PRICE,
+  NOT_LINKED_MESSAGE,
+  OWN_EMPTY,
+  OWN_NOTE,
+  OWN_TITLE,
+  PICK_CANON_LABEL,
+  PICK_CANON_UNAVAILABLE,
+  SALON_MANAGED_MESSAGE,
+  SENT_MESSAGE,
+  SIMILAR_TITLE,
+  pickedMessage,
+  validateOwnService,
+  type OwnServiceDraft,
+  type OwnServiceErrors,
+} from "../components/OwnServiceForm";
 export const OWN_LOAD_ERROR = "Не получилось загрузить свои услуги";
-export const FIELD_NAME = "Название";
-export const FIELD_DESCRIPTION = "Описание";
-export const FIELD_DURATION = "Длительность, мин";
-export const FIELD_PRICE = "Цена, ₽";
-export const ERR_NAME = "Укажите название.";
-export const ERR_DURATION = "Длительность — целое число минут, не меньше 1.";
-export const ERR_PRICE = "Укажите цену — число, не меньше 0.";
 
 // --- helpers (pure) ------------------------------------------------------------
 
@@ -405,28 +416,7 @@ function OfferSheet({
   );
 }
 
-// --- «Свои услуги»: validation (pure, exported for tests) --------------------
-
-export interface OwnServiceDraft {
-  name: string;
-  description: string;
-  duration: string;
-  price: string;
-}
-
-export type OwnServiceErrors = Partial<Record<"name" | "duration" | "price", string>>;
-
-export function validateOwnService(draft: OwnServiceDraft): OwnServiceErrors {
-  const errors: OwnServiceErrors = {};
-  if (!draft.name.trim()) errors.name = ERR_NAME;
-  const duration = Number(draft.duration);
-  if (!/^\d+$/.test(draft.duration.trim()) || !Number.isInteger(duration) || duration < 1) {
-    errors.duration = ERR_DURATION;
-  }
-  const price = Number(draft.price.replace(",", "."));
-  if (!draft.price.trim() || !Number.isFinite(price) || price < 0) errors.price = ERR_PRICE;
-  return errors;
-}
+// --- «Свои услуги» ------------------------------------------------------------
 
 function OwnRequestCard({ item }: { item: CanonGapRequest }) {
   return (
@@ -447,11 +437,6 @@ function OwnRequestCard({ item }: { item: CanonGapRequest }) {
   );
 }
 
-const EMPTY_DRAFT: OwnServiceDraft = { name: "", description: "", duration: "", price: "" };
-
-/** Доступность выбора канона — из загрузки выбора, которую делает экран (одна на экран). */
-type PickAvailability = "loading" | "available" | "salon_managed" | "unavailable";
-
 function OwnServicesSection({
   availability,
   onSelected,
@@ -463,15 +448,7 @@ function OwnServicesSection({
   const [loadError, setLoadError] = useState<string | null>(null);
   const [notLinked, setNotLinked] = useState(false);
   const [formOpen, setFormOpen] = useState(false);
-  const [draft, setDraft] = useState<OwnServiceDraft>(EMPTY_DRAFT);
-  const [errors, setErrors] = useState<OwnServiceErrors>({});
-  const [similar, setSimilar] = useState<CanonGapSimilar[] | null>(null);
-  const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
-  const [submitError, setSubmitError] = useState<string | null>(null);
-  // Отказ «каталог ведёт владелец» на самом выборе сильнее загруженного состояния.
-  const [salonRefused, setSalonRefused] = useState(false);
-  const selection: PickAvailability = salonRefused ? "salon_managed" : availability;
 
   const load = useCallback(() => {
     setLoadError(null);
@@ -493,92 +470,6 @@ function OwnServicesSection({
   useEffect(() => {
     void load();
   }, [load]);
-
-  const refusal = (e: unknown) => {
-    if (e instanceof ApiError && e.slug === "not_linked") {
-      setNotLinked(true);
-      return;
-    }
-    setSubmitError(e instanceof ApiError ? e.detail || e.slug : "Сеть недоступна");
-  };
-
-  const create = async () => {
-    setBusy(true);
-    setSubmitError(null);
-    try {
-      await createCanonGapRequest({
-        name: draft.name.trim(),
-        description: draft.description.trim(),
-        duration_minutes: Number(draft.duration),
-        price: draft.price.trim().replace(",", "."),
-      });
-      setFormOpen(false);
-      setDraft(EMPTY_DRAFT);
-      setSimilar(null);
-      setMessage(SENT_MESSAGE);
-      // Список и счётчик — заново с сервера, а не дописанной локально строкой.
-      await load();
-    } catch (e: unknown) {
-      refusal(e);
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const pick = async (templateId: string) => {
-    setBusy(true);
-    setSubmitError(null);
-    try {
-      const res = await selectServices([templateId]);
-      setFormOpen(false);
-      setDraft(EMPTY_DRAFT);
-      setSimilar(null);
-      setMessage(pickedMessage(res.selected));
-      // Выбранная услуга появляется в «Цены и длительность» — из ответа сервера.
-      onSelected(res);
-    } catch (e: unknown) {
-      if (e instanceof ApiError && e.slug === "salon_catalog_owner_managed") {
-        setSalonRefused(true);
-        return;
-      }
-      refusal(e);
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const submit = async () => {
-    const found = validateOwnService(draft);
-    setErrors(found);
-    setMessage(null);
-    if (Object.keys(found).length > 0) return;
-    setBusy(true);
-    setSubmitError(null);
-    try {
-      const res = await getSimilarCanonTemplates(draft.name.trim());
-      if (res.similar.length > 0) {
-        // Подсказка — и только: связь не создаётся, заявка не отправлена.
-        setSimilar(res.similar);
-        setBusy(false);
-        return;
-      }
-    } catch (e: unknown) {
-      if (e instanceof ApiError && e.slug === "not_linked") {
-        setNotLinked(true);
-        setBusy(false);
-        return;
-      }
-      // Подсказка недоступна — это не повод не принять заявку.
-    }
-    setBusy(false);
-    await create();
-  };
-
-  const field = (key: keyof OwnServiceDraft) => ({
-    value: draft[key],
-    onChange: (e: { target: { value: string } }) =>
-      setDraft((d) => ({ ...d, [key]: e.target.value })),
-  });
 
   return (
     <section className="master-services__section master-services__own" aria-label={OWN_TITLE}>
@@ -611,70 +502,22 @@ function OwnServicesSection({
       )}
 
       {!notLinked && formOpen && (
-        <form
-          className="master-services__own-form"
-          onSubmit={(e) => {
-            e.preventDefault();
-            void submit();
+        <OwnServiceForm
+          availability={availability}
+          onCreated={async () => {
+            setFormOpen(false);
+            setMessage(SENT_MESSAGE);
+            // Список и счётчик — заново с сервера, а не дописанной локально строкой.
+            await load();
           }}
-        >
-          <label>
-            {FIELD_NAME}
-            <input type="text" {...field("name")} />
-          </label>
-          {errors.name && <p className="master-services__field-error">{errors.name}</p>}
-          <label>
-            {FIELD_DESCRIPTION}
-            <textarea {...field("description")} />
-          </label>
-          <label>
-            {FIELD_DURATION}
-            <input type="text" inputMode="numeric" {...field("duration")} />
-          </label>
-          {errors.duration && <p className="master-services__field-error">{errors.duration}</p>}
-          <label>
-            {FIELD_PRICE}
-            <input type="text" inputMode="decimal" {...field("price")} />
-          </label>
-          {errors.price && <p className="master-services__field-error">{errors.price}</p>}
-          {submitError && (
-            <p className="master-services__field-error" role="alert">
-              {submitError}
-            </p>
-          )}
-
-          {similar && similar.length > 0 ? (
-            <div className="master-services__similar">
-              <p>{SIMILAR_TITLE}</p>
-              {similar.map((s) => (
-                <div key={s.template_id} className="master-services__similar-item">
-                  <span>{s.name}</span>
-                  <button
-                    type="button"
-                    className="btn-secondary"
-                    disabled={busy || selection !== "available"}
-                    title={selection === "available" ? undefined : PICK_CANON_UNAVAILABLE}
-                    onClick={() => void pick(s.template_id)}
-                  >
-                    {PICK_CANON_LABEL}
-                  </button>
-                </div>
-              ))}
-              {selection === "salon_managed" ? (
-                <p className="master-services__similar-later">{SALON_MANAGED_MESSAGE}</p>
-              ) : selection === "unavailable" ? (
-                <p className="master-services__similar-later">{PICK_CANON_UNAVAILABLE}</p>
-              ) : null}
-              <button type="button" className="btn-primary" disabled={busy} onClick={() => void create()}>
-                {ADD_ANYWAY_LABEL}
-              </button>
-            </div>
-          ) : (
-            <button type="submit" className="btn-primary" disabled={busy}>
-              {ADD_OWN_LABEL}
-            </button>
-          )}
-        </form>
+          onSelected={(res) => {
+            setFormOpen(false);
+            setMessage(pickedMessage(res.selected));
+            // Выбранная услуга появляется в «Цены и длительность» — из ответа сервера.
+            onSelected(res);
+          }}
+          onNotLinked={() => setNotLinked(true)}
+        />
       )}
     </section>
   );
@@ -839,7 +682,14 @@ export function MasterServicesScreen() {
             {COPY.continue}
           </button>
           {state.selected === 0 && (
-            <p className="master-services__actions-hint">{COPY.selectAtLeastOne}</p>
+            <>
+              <p className="master-services__actions-hint">{COPY.selectAtLeastOne}</p>
+              {/* DRF-1809: выход из нулевого выбора — только в ready: салон и
+                  непривязанный профиль сюда не доходят, каталог им откажет. */}
+              <button type="button" className="btn-primary" onClick={() => navigate(SELECT_PATH)}>
+                {COPY.chooseFromCatalog}
+              </button>
+            </>
           )}
           <button type="button" className="btn-secondary" onClick={() => navigate(SETUP_PATH)}>
             {COPY.later}
