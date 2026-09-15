@@ -1,13 +1,13 @@
-"""Согласие на сканирование еды доезжает до гейта навыка (DRF-1564).
+"""Согласие на дневник/сканер доезжает до гейта навыка — через реестр (DRF-1564, DRF-1963).
 
-Предмет строки: колонка ``BotUser.food_scanner_consent_at`` существует с
-миграции ``0013`` и её читает гейт (``apps/skills/food_scanner/skill.py``),
-а **писателей у неё не было ни одного**. Согласие человека оседало в
-``localStorage`` мини-приложения: экран его принимал и пропускал дальше, а
-бот на то же самое согласие отвечал «открой Mini App и дай согласие».
+DRF-1564 разомкнул петлю «экран согласие принял, бот просит открыть Mini App»:
+ручка стала писать то, что читает гейт. DRF-1963 (M1, владелец 15.09) перенёс
+само согласие из колонки ``BotUser.food_scanner_consent_at`` в единый реестр:
+строка ``food_diary_processing`` с версией текста, источником и отзывом,
+который не стирает факт выдачи.
 
-Петля, из которой человек не выходит своими силами. Тесты держат обе её
-половины: запись доезжает до колонки, и гейт после записи открывается.
+Тесты держат обе половины на настоящих строках ``ConsentRecord``: запись
+доезжает до реестра, и гейт после записи открывается; отзыв закрывает его.
 """
 
 from __future__ import annotations
@@ -22,7 +22,10 @@ import pytest
 from django.test import Client
 from django.urls import reverse
 
+from apps.consent.models import ConsentRecord
+from apps.consent.nutrition import DIARY, FOOD_DIARY_CONSENT_DOCUMENT_VERSION, diary_is_granted
 from apps.identity.models import BotUser
+from apps.identity.services.profile import LEGACY_ME_CONSENT_KEY
 from apps.tenancy.models import Tenant
 
 BOT_TOKEN = "test-bot-token-scanner"  # noqa: S105 — test fixture  # pragma: allowlist secret
@@ -70,23 +73,58 @@ def _url() -> str:
     return reverse("miniapp_api:food_scanner_consent")
 
 
+def _grant(
+    client: Client, bot_user: BotUser, version: str | None = FOOD_DIARY_CONSENT_DOCUMENT_VERSION
+):
+    body = {} if version is None else {"document_version": version}
+    return client.post(
+        _url(),
+        data=json.dumps(body),
+        content_type="application/json",
+        HTTP_AUTHORIZATION=_init_data_header(bot_user.channel_user_id),
+    )
+
+
+def _active_rows(bot_user: BotUser):
+    return ConsentRecord.all_tenants.filter(
+        bot_user=bot_user, consent_type=DIARY, granted=True, withdrawn_at__isnull=True
+    )
+
+
 @pytest.mark.django_db
 class TestFoodScannerConsentEndpoint:
-    def test_grant_writes_the_column_the_skill_gate_reads(self, client: Client, bot_user: BotUser):
-        # Присутствие ВПЕРЕДИ: до запроса колонка пуста — иначе тест
-        # зеленел бы на строке, где согласие уже стояло.
-        bot_user.refresh_from_db()
-        assert bot_user.food_scanner_consent_at is None
+    def test_grant_writes_a_versioned_registry_row(self, client: Client, bot_user: BotUser):
+        # Присутствие ВПЕРЕДИ: до запроса строк нет — иначе тест зеленел бы на
+        # строке, где согласие уже стояло.
+        assert _active_rows(bot_user).count() == 0
 
-        resp = client.post(_url(), HTTP_AUTHORIZATION=_init_data_header(bot_user.channel_user_id))
+        resp = _grant(client, bot_user)
         assert resp.status_code == 200
         body = resp.json()
         assert body["granted"] is True
         assert body["granted_at"]
+        assert body["document_version"] == FOOD_DIARY_CONSENT_DOCUMENT_VERSION
+        assert body["current_document_version"] == FOOD_DIARY_CONSENT_DOCUMENT_VERSION
 
-        bot_user.refresh_from_db()
-        # Та самая колонка, и настоящий datetime — гейт требует именно его.
-        assert bot_user.food_scanner_consent_at is not None
+        rows = list(_active_rows(bot_user))
+        assert len(rows) == 1
+        assert rows[0].document_version == FOOD_DIARY_CONSENT_DOCUMENT_VERSION
+        assert rows[0].source == "miniapp:food_scanner_consent"
+        assert body["granted_at"] == rows[0].captured_at.isoformat()
+
+    def test_grant_without_a_version_is_refused_and_writes_nothing(
+        self, client: Client, bot_user: BotUser
+    ):
+        resp = _grant(client, bot_user, version=None)
+        assert resp.status_code == 400
+        assert _active_rows(bot_user).count() == 0
+
+    def test_grant_under_an_unknown_version_is_refused_and_writes_nothing(
+        self, client: Client, bot_user: BotUser
+    ):
+        resp = _grant(client, bot_user, version="food-diary-v999")
+        assert resp.status_code == 409
+        assert _active_rows(bot_user).count() == 0
 
     def test_the_skill_gate_opens_after_the_grant(
         self, client: Client, bot_user: BotUser, settings
@@ -94,88 +132,74 @@ class TestFoodScannerConsentEndpoint:
         """Половина, ради которой ручка написана: петля разомкнулась.
 
         Гейт спрашивает по порядку: рубильник питания, гейт фото,
-        PERSONAL_DATA (DRF-1948) и согласие сканера. Первые три здесь
+        PERSONAL_DATA (DRF-1948) и согласие дневника. Первые три здесь
         подняты намеренно — иначе тест зеленел бы на чужом отказе и ничего
-        не говорил бы про согласие сканера.
+        не говорил бы про согласие дневника.
         """
         settings.NUTRITION_ENABLED = True
 
         from unittest.mock import Mock
 
+        from apps.consent.services import record_global_consent
         from apps.skills.base import SkillContext
         from apps.skills.food_scanner.skill import _check_gates
 
         def _ctx(bu: BotUser) -> SkillContext:
-            """Настоящий `SkillContext`, а не самодельная заглушка.
+            return SkillContext(conversation=Mock(id="conv-consent"), bot_user=bu, message_text="")
 
-            Способ подсмотрен у соседей (`apps/skills/food_scanner/tests/
-            test_skill.py`), а не выдуман: гейту нужен объявленный тип, и
-            подсовывать ему свой лёгкий класс значит проверять не то, что
-            зовёт живой код. Разговор здесь `Mock` — гейт трогает у него
-            только `id`, и заводить строку в базе ради `logger.info`
-            было бы платой ни за что.
-            """
-            return SkillContext(
-                conversation=Mock(id="conv-consent"),
-                bot_user=bu,
-                message_text="",
-            )
-
-        from apps.consent.services import record_global_consent
-
-        # DRF-1948: запись дневника требует PERSONAL_DATA — выдано, чтобы
-        # отказ «ДО» был отказом именно колонки сканера.
         record_global_consent(bot_user, source="test:scanner-gate")
-        bot_user.refresh_from_db()
         # ДО: гейт отказывает и просит открыть мини-приложение.
         before = _check_gates(_ctx(bot_user), require_photo_scan=False, kind="callback")
         assert before is not None
         assert before.meta["reply_kind"] == "food_scanner_consent_required"
 
-        client.post(_url(), HTTP_AUTHORIZATION=_init_data_header(bot_user.channel_user_id))
-        bot_user.refresh_from_db()
+        _grant(client, bot_user)
 
-        # ПОСЛЕ: отказа нет. Это и есть предмет DRF-1564.
+        # ПОСЛЕ: отказа нет.
         assert _check_gates(_ctx(bot_user), require_photo_scan=False, kind="callback") is None
 
-    def test_withdraw_clears_it_and_the_gate_closes_again(self, client: Client, bot_user: BotUser):
-        hdr = _init_data_header(bot_user.channel_user_id)
-        client.post(_url(), HTTP_AUTHORIZATION=hdr)
-        bot_user.refresh_from_db()
+    def test_withdraw_closes_the_gate_and_keeps_the_grant_on_record(
+        self, client: Client, bot_user: BotUser
+    ):
+        _grant(client, bot_user)
         # Положительная стража впереди: согласие действительно стояло.
-        assert bot_user.food_scanner_consent_at is not None
+        assert diary_is_granted(bot_user) is True
 
-        resp = client.delete(_url(), HTTP_AUTHORIZATION=hdr)
+        resp = client.delete(_url(), HTTP_AUTHORIZATION=_init_data_header(bot_user.channel_user_id))
         assert resp.status_code == 200
         assert resp.json()["granted"] is False
 
-        bot_user.refresh_from_db()
-        assert bot_user.food_scanner_consent_at is None
+        assert diary_is_granted(bot_user) is False
+        # Колонка стирала факт выдачи — реестр его хранит, отзыв проставлен.
+        rows = list(ConsentRecord.all_tenants.filter(bot_user=bot_user, consent_type=DIARY))
+        assert len(rows) == 1
+        assert rows[0].withdrawn_at is not None
 
     def test_grant_is_idempotent(self, client: Client, bot_user: BotUser):
-        hdr = _init_data_header(bot_user.channel_user_id)
-        first = client.post(_url(), HTTP_AUTHORIZATION=hdr).json()
-        second = client.post(_url(), HTTP_AUTHORIZATION=hdr).json()
+        first = _grant(client, bot_user).json()
+        second = _grant(client, bot_user).json()
         assert first["granted"] is True
         assert second["granted"] is True
-        # Момент обновляется — согласие даётся заново, и это честно:
-        # человек нажал кнопку второй раз, значит подтвердил второй раз.
-        assert second["granted_at"] >= first["granted_at"]
+        assert second["granted_at"] == first["granted_at"]
+        assert _active_rows(bot_user).count() == 1
 
     def test_get_reports_the_state_without_changing_it(self, client: Client, bot_user: BotUser):
         hdr = _init_data_header(bot_user.channel_user_id)
-        assert client.get(_url(), HTTP_AUTHORIZATION=hdr).json()["granted"] is False
-        bot_user.refresh_from_db()
+        body = client.get(_url(), HTTP_AUTHORIZATION=hdr).json()
+        assert (
+            body["current_document_version"] == FOOD_DIARY_CONSENT_DOCUMENT_VERSION
+        )  # ответ пришёл
+        assert body["granted"] is False
         # Чтение не выдаёт согласия — иначе «посмотреть» значило бы «дать».
-        assert bot_user.food_scanner_consent_at is None
+        assert ConsentRecord.all_tenants.filter(bot_user=bot_user, consent_type=DIARY).count() == 0
 
     def test_the_profile_carries_the_same_value(self, client: Client, bot_user: BotUser):
-        """Один вызов, один источник: экран не спрашивает согласие отдельно."""
+        """D5: ``/me`` отдаёт дату той же строки реестра — под прежним ключом."""
         hdr = _init_data_header(bot_user.channel_user_id)
-        granted_at = client.post(_url(), HTTP_AUTHORIZATION=hdr).json()["granted_at"]
+        granted_at = _grant(client, bot_user).json()["granted_at"]
 
         me = client.get(reverse("miniapp_api:me"), HTTP_AUTHORIZATION=hdr).json()
-        assert me["food_scanner_consent_at"] == granted_at
+        assert me[LEGACY_ME_CONSENT_KEY] == granted_at
 
     def test_no_consent_reaches_the_profile_as_null_not_as_a_missing_key(
         self, client: Client, bot_user: BotUser
@@ -184,11 +208,9 @@ class TestFoodScannerConsentEndpoint:
         me = client.get(reverse("miniapp_api:me"), HTTP_AUTHORIZATION=hdr).json()
         # Присутствие впереди: ответ профиля пришёл и он не пуст.
         assert me["bot_user_id"]
-        # Ключ ЕСТЬ и он `null` — «спросили, согласия нет». Отсутствие
-        # ключа означало бы «не спросили», и экран читает его так же
-        # (fail-closed), но состояния это разные.
-        assert "food_scanner_consent_at" in me
-        assert me["food_scanner_consent_at"] is None
+        # Ключ ЕСТЬ и он `null` — «спросили, согласия нет».
+        assert LEGACY_ME_CONSENT_KEY in me
+        assert me[LEGACY_ME_CONSENT_KEY] is None
 
 
 @pytest.mark.django_db
@@ -196,58 +218,47 @@ class TestFoodScannerConsentAcrossShells:
     """Согласие даётся человеком, а не строкой в таблице.
 
     Чат и мини-приложение — разные ``BotUser`` одного человека. Согласие,
-    записанное в одну строку, не открыло бы гейт, читающий другую, и
-    человек давал бы его заново при каждой смене поверхности.
+    записанное на одну строку, не открыло бы гейт, читающий другую.
     """
 
-    def test_the_grant_reaches_every_shell_of_the_person(self, client: Client, bot_user: BotUser):
-        from apps.consent.customer import _person_shells
+    def test_the_grant_and_the_withdrawal_reach_every_shell(
+        self, client: Client, bot_user: BotUser
+    ):
+        from apps.consent.services import _person_shell_bot_users
 
-        shells = _person_shells(bot_user)
-        # Положительная стража впереди: оболочек хотя бы одна, и ни у
-        # одной согласия нет.
+        shells = _person_shell_bot_users(bot_user)
         assert len(shells) >= 1
-        assert all(s.food_scanner_consent_at is None for s in shells)
+        assert not any(diary_is_granted(s) for s in shells)
 
-        client.post(_url(), HTTP_AUTHORIZATION=_init_data_header(bot_user.channel_user_id))
+        _grant(client, bot_user)
+        assert all(diary_is_granted(s) for s in shells)
 
-        refreshed = BotUser.all_tenants.filter(id__in=[s.id for s in shells])
-        assert refreshed.count() == len(shells)
-        assert all(s.food_scanner_consent_at is not None for s in refreshed)
-
-    def test_the_withdrawal_reaches_every_shell_too(self, client: Client, bot_user: BotUser):
-        from apps.consent.customer import _person_shells
-
-        hdr = _init_data_header(bot_user.channel_user_id)
-        client.post(_url(), HTTP_AUTHORIZATION=hdr)
-        shells = _person_shells(bot_user)
-        refreshed = BotUser.all_tenants.filter(id__in=[s.id for s in shells])
-        assert all(s.food_scanner_consent_at is not None for s in refreshed)
-
-        client.delete(_url(), HTTP_AUTHORIZATION=hdr)
-
-        refreshed = BotUser.all_tenants.filter(id__in=[s.id for s in shells])
-        assert all(s.food_scanner_consent_at is None for s in refreshed)
+        client.delete(_url(), HTTP_AUTHORIZATION=_init_data_header(bot_user.channel_user_id))
+        assert not any(diary_is_granted(s) for s in shells)
 
 
 @pytest.mark.django_db
 class TestFoodScannerConsentAudit:
-    def test_the_grant_leaves_a_trace(self, client: Client, bot_user: BotUser):
-        """Согласие — юридический факт: «кто и когда» обязано остаться."""
+    def test_the_grant_leaves_a_trace_in_the_consent_journal(
+        self, client: Client, bot_user: BotUser, django_capture_on_commit_callbacks
+    ):
+        """Согласие — юридический факт: «кто и когда» обязано остаться.
+
+        Раньше след был отдельной audit-строкой ``consent.food_scanner_changed``
+        мимо ``ConsentRecord``. Теперь это общий журнал согласий: строка реестра и
+        её audit ``consent.granted`` с типом. Audit пишется ``on_commit`` —
+        колбэки исполняются явно, иначе тест зеленел бы на НУЛЕ строк.
+        """
         from apps.audit.models import AuditLog
 
-        # `all_tenants`, а не `objects`: обычный менеджер тенант-скоупится
-        # и вне запроса возвращает пусто. С `objects` этот тест зеленел бы
-        # НА НУЛЕ — то есть доказывал бы отсутствие строки вместо её
-        # наличия, а сам аудит при этом работал.
-        before = AuditLog.all_tenants.filter(action="consent.food_scanner_changed").count()
-        client.post(_url(), HTTP_AUTHORIZATION=_init_data_header(bot_user.channel_user_id))
-        rows = AuditLog.all_tenants.filter(action="consent.food_scanner_changed")
-        assert rows.count() == before + 1
-        row = rows.last()
-        # Сужение явное, а не `# type: ignore`: строку выше доказывает
-        # СРАВНЕНИЕ количеств, но проверяющему типов об этом неизвестно,
-        # и `ignore` похоронил бы доказательство под отметкой вместо
-        # того, чтобы его использовать.
-        assert row is not None
-        assert row.payload["granted"] is True
+        journal = AuditLog.all_tenants.filter(action="consent.granted")
+        before = journal.count()
+        with django_capture_on_commit_callbacks(execute=True) as callbacks:
+            _grant(client, bot_user)
+        assert len(callbacks) >= 1  # presence first: the grant scheduled its trace
+
+        new_rows = list(journal.order_by("-created_at")[: journal.count() - before])
+        assert len(new_rows) == 1
+        assert new_rows[0].payload["consent_type"] == DIARY
+        assert new_rows[0].payload["document_version"] == FOOD_DIARY_CONSENT_DOCUMENT_VERSION
+        assert AuditLog.all_tenants.filter(action="consent.food_scanner_changed").count() == 0

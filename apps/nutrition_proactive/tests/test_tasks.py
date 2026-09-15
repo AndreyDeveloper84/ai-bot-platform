@@ -55,6 +55,18 @@ def grant_consent(bot_user: BotUser) -> ConsentRecord:
     )
 
 
+def grant_food_diary(bot_user: BotUser) -> ConsentRecord:
+    """The diary/scanner consent — a registry row since DRF-1963 (M1)."""
+    return ConsentRecord.all_tenants.create(
+        tenant=bot_user.tenant,
+        bot_user=bot_user,
+        consent_type=ConsentRecord.ConsentType.FOOD_DIARY_PROCESSING.value,
+        granted=True,
+        source="test:fixture",
+        document_version="food-diary-v0",
+    )
+
+
 def make_user(
     tenant: Tenant,
     *,
@@ -92,11 +104,11 @@ def make_user(
         chat_id=f"dialog-of-np-{suffix}",
         proactive_messages_opt_out=opt_out,
         consent_at=now if consented else None,
-        food_scanner_consent_at=now if consented else None,
         context={prefs.CONTEXT_KEY: user_prefs},
     )
     if consented:
         grant_consent(user)
+        grant_food_diary(user)
     return user
 
 
@@ -286,10 +298,10 @@ class TestDefaultsAreOff:
             channel_user_id="np-virgin",
             chat_id="chat-virgin",
             consent_at=datetime(2026, 5, 1, tzinfo=dt_timezone.utc),
-            food_scanner_consent_at=datetime(2026, 5, 1, tzinfo=dt_timezone.utc),
             context={},
         )
         grant_consent(user)
+        grant_food_diary(user)
         water = tasks.plan_water_reminders(now_utc=NOON, fetch=water_reader(0))
         report = tasks.plan_daily_reports(now_utc=NOON, fetch=summary_reader())
         assert only(water, user).reason == "water_off"
@@ -715,14 +727,22 @@ class TestConsentGate:
     def test_missing_food_consent_blocks_a_fully_consenting_person(self, tenant: Tenant) -> None:
         """The nutrition-specific condition survived the delegation.
 
-        ``food_scanner_consent_at`` has no ``ConsentRecord`` behind it —
-        ``ConsentType`` has no food-scanner member — so it is still read
-        from the column, and it must still bite for somebody who cleared
-        the shared gate completely.
+        Since DRF-1963 (M1) the diary/scanner consent is a registry row,
+        ``food_diary_processing``. A WITHDRAWN row must bite for somebody who
+        cleared the shared gate completely — withdrawn, not deleted: the
+        grant stays on record, and the layer still says no.
         """
+        from django.utils import timezone
+
         user = make_user(tenant, water=True, report="12:00")
-        BotUser.all_tenants.filter(pk=user.pk).update(food_scanner_consent_at=None)
-        user.refresh_from_db()
+        diary = ConsentRecord.all_tenants.filter(
+            bot_user=user,
+            consent_type=ConsentRecord.ConsentType.FOOD_DIARY_PROCESSING.value,
+            granted=True,
+            withdrawn_at__isnull=True,
+        )
+        assert diary.count() == 1  # presence first: there is a grant to withdraw
+        diary.update(withdrawn_at=timezone.now())
 
         decisions = self._both(tenant, user)
         assert [d.reason for d in decisions] == ["no_food_consent"] * 2

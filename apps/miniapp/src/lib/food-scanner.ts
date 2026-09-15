@@ -30,9 +30,8 @@
  * # 152-ФЗ consent gate
  *
  * Per spec §2 — first scan requires explicit consent (accept/decline
- * sheet). Persisted via DeviceStorage key
- * `food_scanner_consent_at` (ISO timestamp). Real backend persist
- * via `/me` field deferred to W4 follow-up.
+ * sheet). Stored server-side in the consent registry as
+ * `food_diary_processing` (DRF-1963) via `me/food-scanner-consent/`.
  *
  * # Stub variants for dev QA
  *
@@ -457,30 +456,31 @@ export async function fetchHealthFlags(): Promise<MeHealthFlagsResponse> {
 //
 // Здесь стоял `localStorage`, и это был не «MVP-компромисс», а петля.
 //
-// Колонка `BotUser.food_scanner_consent_at` существует с миграции `0013`,
-// и её читает гейт навыка (`apps/skills/food_scanner/skill.py:463`).
-// Писателей у неё не было ни одного. Человек давал согласие в
-// мини-приложении, экран его принимал и пропускал дальше — а бот на то же
-// самое согласие отвечал «открой Mini App и дай согласие». Каждый раз. На
-// новом устройстве всё начиналось заново, потому что согласие лежало в
-// браузере предыдущего.
-//
-// Теперь согласие пишется ручкой `me/food-scanner-consent/` и читается
-// вместе с профилем. `localStorage` авторитетом быть перестал и здесь не
-// живёт вовсе: браузер на новом устройстве сказал бы «согласия нет» там,
-// где база говорит «есть», и разошлись бы они молча.
+// Здесь когда-то стоял `localStorage`, потом — колонка
+// `BotUser.food_scanner_consent_at`. С DRF-1963 (M1, владелец 15.09) согласие
+// — строка единого реестра согласий `food_diary_processing`: с версией
+// текста, источником и отзывом, который не стирает факт выдачи. Экран и гейт
+// бота читают одну и ту же строку через `me/food-scanner-consent/`.
 
 /**
- * Прочитать согласие у СЕРВЕРА (приезжает вместе с профилем).
+ * Версия текста согласия, который показывает экран. Меняется ВМЕСТЕ с текстом
+ * и с `FOOD_DIARY_CONSENT_DOCUMENT_VERSION` в `apps/consent/nutrition.py`:
+ * сервер отвергает выдачу под версией, которой не знает (409).
+ */
+export const FOOD_DIARY_CONSENT_DOCUMENT_VERSION = "food-diary-v0";
+
+/**
+ * Прочитать согласие у СЕРВЕРА.
  *
  * `null` — согласия нет, и экран обязан спросить. Отсутствие ключа
  * читается так же: fail-closed, отсутствие доезжает отсутствием.
  */
 export async function fetchConsentAt(): Promise<string | null> {
-  const me = await request<{ food_scanner_consent_at?: string | null }>("/me", {
-    method: "GET",
-  });
-  return me.food_scanner_consent_at ?? null;
+  const res = await request<{ granted?: boolean; granted_at?: string | null }>(
+    "/me/food-scanner-consent/",
+    { method: "GET" },
+  );
+  return res.granted ? (res.granted_at ?? null) : null;
 }
 
 /**
@@ -488,12 +488,16 @@ export async function fetchConsentAt(): Promise<string | null> {
  *
  * Момент берётся из ответа, а не из часов браузера: у гейта и у экрана
  * должно быть одно значение, а часы на устройстве человека могут
- * показывать что угодно.
+ * показывать что угодно. Версия текста уезжает в теле — без неё сервер
+ * согласие не запишет.
  */
 export async function grantConsent(): Promise<string | null> {
   const res = await request<{ granted_at?: string | null }>(
     "/me/food-scanner-consent/",
-    { method: "POST" },
+    {
+      method: "POST",
+      body: JSON.stringify({ document_version: FOOD_DIARY_CONSENT_DOCUMENT_VERSION }),
+    },
   );
   return res.granted_at ?? null;
 }

@@ -463,14 +463,21 @@ class TestTheScannerWiringNotJustTheFormatter:
 
     @staticmethod
     def _context(bot_user):
-        from datetime import datetime, timezone
         from unittest.mock import Mock
 
+        from apps.consent.nutrition import DIARY, FOOD_DIARY_CONSENT_DOCUMENT_VERSION
+        from apps.consent.services import record_global_consent
         from apps.skills.base import SkillContext
 
         conversation = Mock(id="conv-1467")
         conversation.last_photo_bytes = b"jpegdata"
-        bot_user.food_scanner_consent_at = datetime.now(timezone.utc)
+        # DRF-1963 (M1): согласие дневника/сканера — строка реестра; идемпотентно.
+        record_global_consent(
+            bot_user,
+            consent_type=DIARY,
+            source="test:scanner-wiring",
+            document_version=FOOD_DIARY_CONSENT_DOCUMENT_VERSION,
+        )
         return SkillContext(
             conversation=conversation,
             bot_user=bot_user,

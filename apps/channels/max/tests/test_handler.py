@@ -187,14 +187,18 @@ class TestAttachmentOnly:
         monkeypatch.setattr(_h, "download_photo", _raise_download)
 
         with tenant_scope(tenant_a), trace_id_scope(str(uuid4())):
-            from django.utils import timezone
-
-            bu = _mark_welcomed()  # isolate from the #85 auto-welcome → reach food_scanner
-            bu.food_scanner_consent_at = timezone.now()  # pass the feature-consent gate
-            bu.save(update_fields=["food_scanner_consent_at"])
-            # DRF-1948: и PERSONAL_DATA — сканер пишет в дневник только при нём.
+            from apps.consent.nutrition import DIARY, FOOD_DIARY_CONSENT_DOCUMENT_VERSION
             from apps.consent.services import record_global_consent
 
+            bu = _mark_welcomed()  # isolate from the #85 auto-welcome → reach food_scanner
+            # pass the feature-consent gate — a registry row since DRF-1963 (M1)
+            record_global_consent(
+                bu,
+                consent_type=DIARY,
+                source="test:attachment-only",
+                document_version=FOOD_DIARY_CONSENT_DOCUMENT_VERSION,
+            )
+            # DRF-1948: и PERSONAL_DATA — сканер пишет в дневник только при нём.
             record_global_consent(bu, source="test:attachment-only")
             max_handler.handle_max_event(
                 _payload(

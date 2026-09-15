@@ -82,9 +82,10 @@ newer photo replacing the card does not lose a promised weight.
 
 Skipped for Sprint 9 — folded into P5 or Phase 1:
 
-* Consent flow (``food_scanner_consent_at`` BotUser field). The mysite
-  version asked first-time scanners for opt-in; we assume the channel
-  adapter handles consent uplink in Phase 1.
+* Consent flow in chat. The mysite version asked first-time scanners for
+  opt-in; here the consent is given on the Mini App screen and lives in the
+  consent registry (``food_diary_processing``, DRF-1963) — see
+  :func:`_gate`.
 * Meal-type buttons (``Завтрак|Обед|Ужин|Перекус``). The mysite
   ``on_log_meal`` callback took ``cb:nutrition:log:{scan_id}:{meal_type}``;
   here we log without meal type (Ayla defaults to "other"). Adding
@@ -461,9 +462,12 @@ def _check_gates(
        rule every other diary write already follows (text entry, Mini App
        edit/restore): no PERSONAL_DATA, no diary. Refused with the text entry's
        own ``CONSENT_TEXT`` so the two ways into the diary say the same thing.
-    4. ``BotUser.food_scanner_consent_at`` — feature-specific acknowledgement
-       for the photo, ON TOP of PERSONAL_DATA, not instead of it.
-       NULL → redirect-to-Mini-App reply.
+    4. ``food_diary_processing`` (DRF-1963, M1) — the diary/scanner consent,
+       ON TOP of PERSONAL_DATA, not instead of it. Read from the consent
+       registry via :func:`apps.consent.nutrition.diary_is_granted` — the
+       same predicate the Mini App screen and the proactive layer ask, so a
+       withdrawn row closes all three at once. Missing → redirect-to-Mini-App
+       reply (``reply_kind`` unchanged: M2+ recovery keys on it).
 
     ``kind`` is a label («photo» / «callback») used in the meta so
     observability can distinguish refusal sites.
@@ -517,16 +521,18 @@ def _check_gates(
             meta={"reply_kind": "food_scanner_personal_data_required"},
         )
 
-    # Адверсариальный обзор #2 — Mock(spec=None).food_scanner_consent_at
-    # авто-генерирует truthy Mock-объект вместо None, и тест без явной
-    # установки атрибута молча проходит гейт. Защита: требуем datetime
-    # (production-shape — Django возвращает aware datetime либо None).
-    # Это покрывает replay fixtures, integration stubs и любые будущие
-    # тесты, которые забыли inscribe ``food_scanner_consent_at = …``.
-    from datetime import datetime as _datetime
+    # DRF-1963 (M1) — согласие дневника и сканера живёт в реестре. Раньше
+    # здесь читалась колонка ``BotUser.food_scanner_consent_at``: без версии
+    # текста, без источника, и её отзыв стирал сам факт выдачи. Сбой проверки
+    # — отказ, как у PERSONAL_DATA выше: не доказано согласие — нет записи.
+    from apps.consent.nutrition import diary_is_granted
 
-    consent_at = getattr(context.bot_user, "food_scanner_consent_at", None)
-    if not isinstance(consent_at, _datetime):
+    try:
+        diary_open = diary_is_granted(context.bot_user)
+    except Exception:  # noqa: BLE001 — fail-closed: no consent proven, no diary write
+        logger.exception("food_scanner.gate.consent_check_failed kind=%s", kind)
+        diary_open = False
+    if not diary_open:
         logger.info(
             "food_scanner.gate.consent_missing kind=%s conv=%s",
             kind,

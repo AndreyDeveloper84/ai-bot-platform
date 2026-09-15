@@ -470,6 +470,13 @@ MEMORY_ZONE_CONSENT = {
 # стирание, оставался бы с ДЕЙСТВУЮЩИМ маркетинговым согласием в реестре и
 # выключенным зеркалом — то самое расхождение двух источников правды, ради
 # устранения которого реестр и объявлен главным.
+#
+# DRF-1963 (M1, решение D6) добавляет ``food_diary_processing``. Согласие
+# дневника и сканера стоит поверх personal_data (DRF-1948); раньше его снимал
+# отдельный ``update`` колонки в одной-единственной ручке отзыва, и любой
+# другой путь отзыва personal_data оставлял его действующим. Теперь это строка
+# реестра, и снимается она там же, где снимаются остальные надстройки.
+# ``personal_calculation`` в каскаде нет — вне M1, вопрос назван в PR.
 _PERSONAL_DATA_CASCADE = (
     ConsentRecord.ConsentType.PERSONAL_DATA,
     ConsentRecord.ConsentType.HEALTH,
@@ -477,6 +484,7 @@ _PERSONAL_DATA_CASCADE = (
     ConsentRecord.ConsentType.MEMORY_GREEN,
     ConsentRecord.ConsentType.MEMORY_YELLOW,
     ConsentRecord.ConsentType.MEMORY_RED,
+    ConsentRecord.ConsentType.FOOD_DIARY_PROCESSING,
 )
 
 

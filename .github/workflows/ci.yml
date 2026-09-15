@@ -475,6 +475,15 @@ jobs:
       - name: Consent-column direct-read guard (AST lint)
         run: uv run python tools/lint/consent_column_guard.py apps/
 
+      # Dead-column guard (DRF-1963, M1). `BotUser.food_scanner_consent_at`
+      # is no longer a consent record — the food diary / scanner consent is a
+      # `food_diary_processing` row of the consent registry. The column stays
+      # in the schema for one release; this guard keeps it without readers and
+      # writers (tests included) until the second half removes it. See
+      # `tools/lint/food_scanner_column_guard.py` for the allowlist and limits.
+      - name: Food-scanner dead-column guard (AST lint)
+        run: uv run python tools/lint/food_scanner_column_guard.py apps/
+
       # Mini App style contract (DRF-1066). A class name written in a
       # screen and never given a rule renders as nothing: on 2026-08-14
       # that turned the booking payment block into

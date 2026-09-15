@@ -1009,27 +1009,37 @@ def test_revocation_closes_the_food_scanner(
 ) -> None:
     """DRF-1948: отзыв хранения данных снимает и согласие сканера.
 
-    Колонка ``food_scanner_consent_at`` оставалась после отзыва, и «В дневник»
-    продолжал писать в дневник Ayla. Проверяется колонка И сам навык на живом
-    пользователе: запись не доходит до ``log_meal``.
+    Согласие сканера оставалось после отзыва, и «В дневник» продолжал писать в
+    дневник Ayla. С DRF-1963 это строка реестра ``food_diary_processing``, и
+    снимает её каскад отзыва personal_data (D6). Проверяется строка И сам навык
+    на живом пользователе: запись не доходит до ``log_meal``.
     """
     from unittest.mock import AsyncMock, Mock
 
-    from django.utils import timezone
-
+    from apps.consent.nutrition import DIARY, FOOD_DIARY_CONSENT_DOCUMENT_VERSION, diary_is_granted
     from apps.skills.base import SkillContext
     from apps.skills.food_scanner.skill import FoodScannerSkill
 
     settings.NUTRITION_ENABLED = True
-    BotUser.all_tenants.filter(pk=bot_user.pk).update(food_scanner_consent_at=timezone.now())
-    bot_user.refresh_from_db()
-    assert bot_user.food_scanner_consent_at is not None  # есть что снимать
+    record_global_consent(
+        bot_user,
+        consent_type=DIARY,
+        source="test:revoke",
+        document_version=FOOD_DIARY_CONSENT_DOCUMENT_VERSION,
+    )
+    assert diary_is_granted(bot_user) is True  # есть что снимать
 
     res = _revoke(client, revoke_url, auth)
     assert res.status_code == 200
 
-    bot_user.refresh_from_db()
-    assert bot_user.food_scanner_consent_at is None
+    assert diary_is_granted(bot_user) is False
+    # Отзыв, а не стирание: строка выдачи осталась с ``withdrawn_at``.
+    assert (
+        ConsentRecord.all_tenants.filter(
+            bot_user=bot_user, consent_type=DIARY, withdrawn_at__isnull=False
+        ).count()
+        == 1
+    )
 
     ayla = Mock()
     ayla.log_meal = AsyncMock()
@@ -1042,25 +1052,25 @@ def test_revocation_closes_the_food_scanner(
     with patch("apps.skills.food_scanner.skill.get_nutrition_client", return_value=ayla):
         result = FoodScannerSkill().handle(ctx)
 
-    # PERSONAL_DATA проверяется раньше колонки — отказ именно его. Что снята
-    # сама колонка, доказывает проверка выше, а по всем оболочкам — тест ниже.
+    # PERSONAL_DATA проверяется раньше согласия дневника — отказ именно его. Что
+    # снято само согласие дневника, доказывает проверка выше, а по всем
+    # оболочкам — тест ниже.
     assert result.meta.get("reply_kind") == "food_scanner_personal_data_required"
     ayla.log_meal.assert_not_called()
 
 
 def test_revocation_clears_the_scanner_consent_on_every_shell(tenant, bot_user) -> None:
-    """DRF-1948: колонка сканера снимается по ПОЛНОМУ резолву личности.
+    """DRF-1948: согласие сканера снимается по ПОЛНОМУ резолву личности.
 
     Та же дальняя оболочка, что в ``test_revocation_reaches_a_shell_linked_only_by_ayla_user_id``:
     связана с человеком только через ``ayla_user_id``. Каскад по накопленному
-    заглушён — проверяется шаг 1.
+    заглушён — проверяется шаг 1. С DRF-1963 согласие — строка реестра
+    ``food_diary_processing`` на каждой оболочке, снимаемая каскадом (D6).
     """
-    from django.utils import timezone
+    from apps.consent.nutrition import DIARY, FOOD_DIARY_CONSENT_DOCUMENT_VERSION, diary_is_granted
 
     person_key = uuid.uuid4()
-    BotUser.all_tenants.filter(pk=bot_user.pk).update(
-        ayla_user_id=person_key, food_scanner_consent_at=timezone.now()
-    )
+    BotUser.all_tenants.filter(pk=bot_user.pk).update(ayla_user_id=person_key)
     bot_user.refresh_from_db()
     upstream = Tenant.objects.create(slug="consents-scanner-upstream", name="Upstream")
     far_shell = BotUser.all_tenants.create(
@@ -1069,10 +1079,16 @@ def test_revocation_clears_the_scanner_consent_on_every_shell(tenant, bot_user) 
         channel_user_id="1521999",  # другой канальный ключ — не сосед
         chat_id="chat-1521999",
         ayla_user_id=person_key,
-        food_scanner_consent_at=timezone.now(),
     )
+    for shell in (bot_user, far_shell):
+        record_global_consent(
+            shell,
+            consent_type=DIARY,
+            source="test:revoke-shells",
+            document_version=FOOD_DIARY_CONSENT_DOCUMENT_VERSION,
+        )
     # Есть что снимать — и именно на дальней оболочке.
-    assert BotUser.all_tenants.get(pk=far_shell.pk).food_scanner_consent_at is not None
+    assert diary_is_granted(far_shell) is True
 
     with patch(
         "apps.identity.services.privacy.delete_personal_data",
@@ -1080,5 +1096,5 @@ def test_revocation_clears_the_scanner_consent_on_every_shell(tenant, bot_user) 
     ):
         customer_consents.revoke_data_storage(bot_user)
 
-    assert BotUser.all_tenants.get(pk=bot_user.pk).food_scanner_consent_at is None
-    assert BotUser.all_tenants.get(pk=far_shell.pk).food_scanner_consent_at is None
+    assert diary_is_granted(bot_user) is False
+    assert diary_is_granted(far_shell) is False
