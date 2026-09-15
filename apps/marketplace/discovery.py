@@ -39,7 +39,7 @@ from django.db.models.expressions import CombinedExpression
 from django.db.models.functions import Cast, Coalesce, Length, Replace, Trim
 
 from apps.catalog.master_state import AVAILABLE
-from apps.catalog.models import CatalogMaster, CatalogService
+from apps.catalog.models import CatalogMaster, CatalogService, sellable_edge_q
 from apps.marketplace.dto import MasterCard, SalonCard, ServiceCard
 from apps.tenancy.models import Tenant
 
@@ -1008,8 +1008,11 @@ def _service_row_q() -> Q:
     tenant at once, so it should not depend on a writer-side guarantee to
     avoid surfacing a master for a service they do not offer.
     """
-    return Q(services_offered__service__is_active=True) & Q(
-        services_offered__service__tenant_id=F("tenant_id")
+    return (
+        Q(services_offered__service__is_active=True)
+        & Q(services_offered__service__tenant_id=F("tenant_id"))
+        # DRF-1964a — непродаваемое ребро не предлагается; тот же Q, та же строка.
+        & sellable_edge_q("services_offered__")
     )
 
 
@@ -2294,7 +2297,11 @@ def discover_services(
     # a normal state (a salon lists a service its masters are not mapped to),
     # and a chip leading there would spend the user's trust on a dead end.
     # ``.order_by()`` because an EXISTS subquery has nothing to sort.
-    performs_it = _bookable_qs().order_by().filter(services_offered__service_id=OuterRef("pk"))
+    performs_it = (
+        _bookable_qs()
+        .order_by()
+        .filter(sellable_edge_q("services_offered__"), services_offered__service_id=OuterRef("pk"))
+    )
     qs = qs.annotate(has_bookable_master=Exists(performs_it))
 
     # Набираем до потолка и режем в питоне — иначе ротации нечего
@@ -2379,9 +2386,9 @@ def discover_masters_for_service(
     # tenant_id from the SERVICE, not from the caller: an edge may only bind a
     # master to a service of their own tenant (see _service_row_q).
     candidates = list(
-        _bookable_qs(tenant_id=service.tenant_id).filter(services_offered__service_id=service.id)[
-            :_CANDIDATE_SCAN_CAP
-        ]
+        _bookable_qs(tenant_id=service.tenant_id).filter(
+            sellable_edge_q("services_offered__"), services_offered__service_id=service.id
+        )[:_CANDIDATE_SCAN_CAP]
     )
     if rotation_seed:
         candidates = rotate_ties(candidates, rotation_seed)

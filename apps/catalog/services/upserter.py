@@ -511,6 +511,19 @@ def upsert_master_services(
     return result
 
 
+def _sellable_fields(dto: "CatalogSpecialistServiceDTO") -> dict[str, Any]:
+    """Что синк пишет в ``sellable`` / ``unsellable_reason`` (DRF-1964a).
+
+    Пусто, когда ключа в ответе не было: каталог до DRF-1962 не меняет в зеркале
+    ничего — это и делает безопасным порядок «бот раньше каталога».
+    """
+    if not dto.sellable_key_present:
+        return {}
+    if dto.sellable:
+        return {"sellable": True, "unsellable_reason": ""}
+    return {"sellable": False, "unsellable_reason": dto.unsellable_reason or "unknown"}
+
+
 def _upsert_one_master_service(
     *,
     tenant: "Tenant",
@@ -666,6 +679,7 @@ def _upsert_one_master_service(
             # the model's tri-state NULL means "unknown", and the booking
             # gate keeps such an edge closed.
             resolved_requires_health_check=dto.resolved_requires_health_check,
+            **_sellable_fields(dto),
         )
         result.created += 1
         return True
@@ -708,6 +722,11 @@ def _upsert_one_master_service(
     ):
         existing.resolved_requires_health_check = dto.resolved_requires_health_check
         changed.append("resolved_requires_health_check")
+    # DRF-1964a — только при присланном ключе, только изменившееся поле.
+    for name, value in _sellable_fields(dto).items():
+        if getattr(existing, name) != value:
+            setattr(existing, name, value)
+            changed.append(name)
     if changed:
         existing.save(update_fields=[*changed, "updated_at"])
     result.updated += 1

@@ -47,20 +47,31 @@ def _bot_token(settings) -> None:
 
 @pytest.fixture
 def tenant(db) -> Tenant:
-    return Tenant.objects.create(slug="mn-sell-1988", name="Mini App Sellable", timezone="Europe/Moscow")
+    return Tenant.objects.create(
+        slug="mn-sell-1988", name="Mini App Sellable", timezone="Europe/Moscow"
+    )
 
 
 @pytest.fixture
 def bot_user(tenant: Tenant) -> BotUser:
     return BotUser.all_tenants.create(
-        tenant=tenant, channel="max", channel_user_id="19880", display_name="Клиент", chat_id="19880",
+        tenant=tenant,
+        channel="max",
+        channel_user_id="19880",
+        display_name="Клиент",
+        chat_id="19880",
     )
 
 
 def _master(tenant: Tenant, name: str, external_id: int) -> CatalogMaster:
     return CatalogMaster.all_tenants.create(
-        tenant=tenant, external_id=external_id, external_updated_at=_TS, name=name,
-        is_active=True, ayla_user_id=uuid4(), invite_status=CatalogMaster.InviteStatus.ACCEPTED,
+        tenant=tenant,
+        external_id=external_id,
+        external_updated_at=_TS,
+        name=name,
+        is_active=True,
+        ayla_user_id=uuid4(),
+        invite_status=CatalogMaster.InviteStatus.ACCEPTED,
     )
 
 
@@ -72,39 +83,69 @@ def master(tenant: Tenant) -> CatalogMaster:
 @pytest.fixture
 def neck(tenant: Tenant) -> CatalogService:
     return CatalogService.all_tenants.create(
-        tenant=tenant, external_id=1988, external_updated_at=_TS, slug="neck-1988",
-        name="Массаж шейно-воротниковой зоны", duration_min=30, is_active=True,
+        tenant=tenant,
+        external_id=1988,
+        external_updated_at=_TS,
+        slug="neck-1988",
+        name="Массаж шейно-воротниковой зоны",
+        duration_min=30,
+        is_active=True,
     )
 
 
 @pytest.fixture
 def working_hours(tenant: Tenant, master: CatalogMaster) -> None:
-    for wd in (Weekday.MONDAY, Weekday.TUESDAY, Weekday.WEDNESDAY, Weekday.THURSDAY,
-               Weekday.FRIDAY, Weekday.SATURDAY, Weekday.SUNDAY):
+    for wd in (
+        Weekday.MONDAY,
+        Weekday.TUESDAY,
+        Weekday.WEDNESDAY,
+        Weekday.THURSDAY,
+        Weekday.FRIDAY,
+        Weekday.SATURDAY,
+        Weekday.SUNDAY,
+    ):
         WorkingHours.all_tenants.create(
-            tenant=tenant, master=master, day_of_week=wd, is_working=True,
-            start_time=time(10, 0), end_time=time(19, 0),
+            tenant=tenant,
+            master=master,
+            day_of_week=wd,
+            is_working=True,
+            start_time=time(10, 0),
+            end_time=time(19, 0),
         )
 
 
-def _unsellable_link(tenant: Tenant, master: CatalogMaster, service: CatalogService) -> MasterService:
-    assert {"sellable", "unsellable_reason"} <= {f.name for f in MasterService._meta.get_fields()}, (
-        "у MasterService нет колонок sellable / unsellable_reason"
-    )
+def _unsellable_link(
+    tenant: Tenant, master: CatalogMaster, service: CatalogService
+) -> MasterService:
+    assert {"sellable", "unsellable_reason"} <= {
+        f.name for f in MasterService._meta.get_fields()
+    }, "у MasterService нет колонок sellable / unsellable_reason"
     return MasterService.all_tenants.create(
-        tenant=tenant, master=master, service=service, sellable=False, unsellable_reason="price_below_minimum",
+        tenant=tenant,
+        master=master,
+        service=service,
+        sellable=False,
+        unsellable_reason="price_below_minimum",
     )
 
 
-def test_slots_for_unsellable_edge_answer_404(client: Client, bot_user, tenant, master, neck, working_hours):
+def test_slots_for_unsellable_edge_answer_404(
+    client: Client, bot_user, tenant, master, neck, working_hours
+):
     _unsellable_link(tenant, master, neck)
     target = date.today() + timedelta(days=30)
 
     resp = client.get(
-        reverse("miniapp_api:slots") + "?" + urlencode({
-            "master_id": str(master.id), "service_id": str(neck.id),
-            "date_from": target.isoformat(), "date_to": target.isoformat(),
-        }),
+        reverse("miniapp_api:slots")
+        + "?"
+        + urlencode(
+            {
+                "master_id": str(master.id),
+                "service_id": str(neck.id),
+                "date_from": target.isoformat(),
+                "date_to": target.isoformat(),
+            }
+        ),
         HTTP_AUTHORIZATION=_init_data_header(),
     )
 
@@ -112,7 +153,9 @@ def test_slots_for_unsellable_edge_answer_404(client: Client, bot_user, tenant, 
     assert "does not perform" in resp.json()["detail"]
 
 
-def test_service_whose_only_edge_is_unsellable_is_not_bookable(client: Client, bot_user, tenant, master, neck):
+def test_service_whose_only_edge_is_unsellable_is_not_bookable(
+    client: Client, bot_user, tenant, master, neck
+):
     _unsellable_link(tenant, master, neck)
 
     resp = client.get(reverse("miniapp_api:services_list"), HTTP_AUTHORIZATION=_init_data_header())
@@ -128,7 +171,8 @@ def test_masters_of_service_exclude_unsellable_edge(client: Client, bot_user, te
     MasterService.all_tenants.create(tenant=tenant, master=sold, service=neck)
 
     resp = client.get(
-        reverse("miniapp_api:masters_list") + f"?service_id={neck.id}", HTTP_AUTHORIZATION=_init_data_header(),
+        reverse("miniapp_api:masters_list") + f"?service_id={neck.id}",
+        HTTP_AUTHORIZATION=_init_data_header(),
     )
 
     assert resp.status_code == 200
@@ -136,6 +180,16 @@ def test_masters_of_service_exclude_unsellable_edge(client: Client, bot_user, te
 
 
 def test_master_detail_omits_unsellable_service(client: Client, bot_user, tenant, master, neck):
+    back = CatalogService.all_tenants.create(
+        tenant=tenant,
+        external_id=1989,
+        external_updated_at=_TS,
+        slug="back-1988",
+        name="Массаж спины",
+        duration_min=60,
+        is_active=True,
+    )
+    MasterService.all_tenants.create(tenant=tenant, master=master, service=back)
     _unsellable_link(tenant, master, neck)
 
     resp = client.get(
@@ -144,4 +198,6 @@ def test_master_detail_omits_unsellable_service(client: Client, bot_user, tenant
     )
 
     assert resp.status_code == 200
-    assert str(neck.id) not in resp.json()["master"]["service_ids"]
+    service_ids = resp.json()["master"]["service_ids"]
+    assert str(back.id) in service_ids  # список не пуст: продаваемая услуга мастера на месте
+    assert str(neck.id) not in service_ids

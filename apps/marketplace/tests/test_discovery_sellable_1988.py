@@ -35,14 +35,24 @@ def penza() -> Tenant:
 
 def _master(tenant: Tenant, name: str) -> CatalogMaster:
     return CatalogMaster.all_tenants.create(
-        tenant=tenant, external_updated_at=_TS, name=name, specialization="",
-        is_active=True, invite_status=CatalogMaster.InviteStatus.ACCEPTED, ayla_user_id=uuid4(),
+        tenant=tenant,
+        external_updated_at=_TS,
+        name=name,
+        specialization="",
+        is_active=True,
+        invite_status=CatalogMaster.InviteStatus.ACCEPTED,
+        ayla_user_id=uuid4(),
     )
 
 
 def _service(tenant: Tenant, name: str, slug: str) -> CatalogService:
     return CatalogService.all_tenants.create(
-        tenant=tenant, slug=slug, name=name, is_active=True, ayla_service_id=uuid4(), external_updated_at=_TS,
+        tenant=tenant,
+        slug=slug,
+        name=name,
+        is_active=True,
+        ayla_service_id=uuid4(),
+        external_updated_at=_TS,
     )
 
 
@@ -56,7 +66,9 @@ def _link(tenant: Tenant, master: CatalogMaster, service: CatalogService) -> Mas
 
 def _unsellable(edge: MasterService) -> None:
     assert _has_column(), "у MasterService нет колонок sellable / unsellable_reason"
-    MasterService.all_tenants.filter(pk=edge.pk).update(sellable=False, unsellable_reason="price_below_minimum")
+    MasterService.all_tenants.filter(pk=edge.pk).update(
+        sellable=False, unsellable_reason="price_below_minimum"
+    )
 
 
 def test_master_whose_only_matching_edge_is_unsellable_is_not_found(penza):
@@ -74,7 +86,9 @@ def test_master_is_still_found_for_the_sellable_service(penza):
     _link(penza, master, _service(penza, "Спортивный массаж", "sport"))
     neck = _link(penza, master, _service(penza, "Массаж шейно-воротниковой зоны", "neck"))
     if _has_column():
-        MasterService.all_tenants.filter(pk=neck.pk).update(sellable=False, unsellable_reason="price_below_minimum")
+        MasterService.all_tenants.filter(pk=neck.pk).update(
+            sellable=False, unsellable_reason="price_below_minimum"
+        )
 
     cards = discover_masters(city="Пенза", specialization="спортивный массаж")
 

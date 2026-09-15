@@ -49,21 +49,57 @@ NOT_SALE_PATH = "NOT_SALE_PATH"
 #: Перепись бот ``dev`` ``8bf99f7c`` (15.09.2026): 14 файлов, 41 упоминание.
 EXPECTED: dict[str, tuple[int, str, str]] = {
     # ── путь продажи, DRF-1964a ──
-    "apps/marketplace/discovery.py": (12, SELLABLE, "поиск мастеров по услуге, мастера услуги, витрина"),
-    "apps/orchestrator/handoff.py": (4, SELLABLE, "тап по услуге, «не выполняет», меню услуг мастера"),
-    "apps/miniapp_api/views.py": (4, SELLABLE, "слоты, is_bookable витрины, подборщик, карточка мастера"),
+    "apps/marketplace/discovery.py": (
+        12,
+        SELLABLE,
+        "поиск мастеров по услуге, мастера услуги, витрина",
+    ),
+    "apps/orchestrator/handoff.py": (
+        4,
+        SELLABLE,
+        "тап по услуге, «не выполняет», меню услуг мастера",
+    ),
+    "apps/miniapp_api/views.py": (
+        4,
+        SELLABLE,
+        "слоты, is_bookable витрины, подборщик, карточка мастера",
+    ),
     # ── путь продажи, вторая половина DRF-1989 ──
-    "apps/skills/booking/skill.py": (1, PENDING_1989, "ворота здоровья навыка записи — причина вместо «консультации»"),
+    "apps/skills/booking/skill.py": (
+        1,
+        PENDING_1989,
+        "ворота здоровья навыка записи — причина вместо «консультации»",
+    ),
     "apps/booking/services/create.py": (1, PENDING_1989, "локальная запись — маппинг отказа"),
     "apps/booking/services/transitions.py": (1, PENDING_1989, "локальный перенос — маппинг отказа"),
-    "apps/master_api/services/catalog.py": (1, PENDING_1989, "кабинет мастера — показ причины, не скрытие"),
+    "apps/master_api/services/catalog.py": (
+        1,
+        PENDING_1989,
+        "кабинет мастера — показ причины, не скрытие",
+    ),
     "apps/master_api/views.py": (1, PENDING_1989, "кабинет мастера — показ причины, не скрытие"),
-    "apps/admin_api/views.py": (1, PENDING_1989, "салонная админка, услуги мастера — показ причины"),
+    "apps/admin_api/views.py": (
+        1,
+        PENDING_1989,
+        "салонная админка, услуги мастера — показ причины",
+    ),
     # ── не путь продажи ──
-    "apps/admin_api/views_services_mapping.py": (6, NOT_SALE_PATH, "матрица MM4 — оператор пишет строки"),
+    "apps/admin_api/views_services_mapping.py": (
+        6,
+        NOT_SALE_PATH,
+        "матрица MM4 — оператор пишет строки",
+    ),
     "apps/admin_api/views_invite.py": (2, NOT_SALE_PATH, "сидер приглашения — писатель"),
-    "apps/admin_api/services/master_deactivation.py": (2, NOT_SALE_PATH, "переназначение при уходе мастера — оператор"),
-    "apps/catalog/management/commands/cleanup_orphan_master_services.py": (4, NOT_SALE_PATH, "ремонт операторских строк"),
+    "apps/admin_api/services/master_deactivation.py": (
+        2,
+        NOT_SALE_PATH,
+        "переназначение при уходе мастера — оператор",
+    ),
+    "apps/catalog/management/commands/cleanup_orphan_master_services.py": (
+        4,
+        NOT_SALE_PATH,
+        "ремонт операторских строк",
+    ),
     "apps/catalog/management/commands/seed_dev_formula_tela.py": (1, NOT_SALE_PATH, "dev-фикстура"),
 }
 
@@ -159,6 +195,10 @@ def test_guard_catches_a_sale_path_reader_without_the_predicate():
     )
     expected = {"apps/x/views.py": (1, SELLABLE, "синтетика")}
 
-    assert violations({"apps/x/views.py": raw}, expected) == ["apps/x/views.py: путь продажи без предиката sellable"]
+    assert violations({"apps/x/views.py": raw}, expected) == [
+        "apps/x/views.py: путь продажи без предиката sellable"
+    ]
     assert violations({"apps/x/views.py": fixed}, expected) == []
-    assert violations({"apps/x/views.py": fixed}, {}) == ["apps/x/views.py: 1 упоминаний зеркала рёбер, файл не классифицирован"]
+    assert violations({"apps/x/views.py": fixed}, {}) == [
+        "apps/x/views.py: 1 упоминаний зеркала рёбер, файл не классифицирован"
+    ]

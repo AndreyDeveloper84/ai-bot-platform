@@ -30,24 +30,39 @@ def _tenant(slug: str) -> Tenant:
 
 def _master(tenant: Tenant, name: str = "Инна") -> CatalogMaster:
     return CatalogMaster.all_tenants.create(
-        tenant=tenant, external_id=1, external_updated_at=_TS, name=name, specialization="массаж",
-        ayla_user_id=uuid4(), is_active=True, invite_status=CatalogMaster.InviteStatus.ACCEPTED,
+        tenant=tenant,
+        external_id=1,
+        external_updated_at=_TS,
+        name=name,
+        specialization="массаж",
+        ayla_user_id=uuid4(),
+        is_active=True,
+        invite_status=CatalogMaster.InviteStatus.ACCEPTED,
     )
 
 
 def _service(tenant: Tenant, name: str, slug: str) -> CatalogService:
     return CatalogService.all_tenants.create(
-        tenant=tenant, slug=slug, name=name, is_active=True, ayla_service_id=uuid4(), external_updated_at=_TS,
+        tenant=tenant,
+        slug=slug,
+        name=name,
+        is_active=True,
+        ayla_service_id=uuid4(),
+        external_updated_at=_TS,
     )
 
 
-def _link(tenant: Tenant, master: CatalogMaster, service: CatalogService, *, sellable: bool = True) -> MasterService:
+def _link(
+    tenant: Tenant, master: CatalogMaster, service: CatalogService, *, sellable: bool = True
+) -> MasterService:
     edge = MasterService.all_tenants.create(tenant=tenant, master=master, service=service)
     if not sellable:
-        assert {"sellable", "unsellable_reason"} <= {f.name for f in MasterService._meta.get_fields()}, (
-            "у MasterService нет колонок sellable / unsellable_reason"
+        assert {"sellable", "unsellable_reason"} <= {
+            f.name for f in MasterService._meta.get_fields()
+        }, "у MasterService нет колонок sellable / unsellable_reason"
+        MasterService.all_tenants.filter(pk=edge.pk).update(
+            sellable=False, unsellable_reason="price_below_minimum"
         )
-        MasterService.all_tenants.filter(pk=edge.pk).update(sellable=False, unsellable_reason="price_below_minimum")
     return edge
 
 
@@ -70,12 +85,15 @@ def test_tap_on_unsellable_edge_is_not_dispatched_and_reads_as_not_offered(setti
     gbu = resolve_or_create_global_bot_user(channel="max", channel_user_id="1988")
     events: list[tuple[str, dict]] = []
     monkeypatch.setattr(
-        "apps.orchestrator.handoff.emit", lambda name, payload=None, **kw: events.append((name, payload or {})),
+        "apps.orchestrator.handoff.emit",
+        lambda name, payload=None, **kw: events.append((name, payload or {})),
     )
     called: list = []
     monkeypatch.setattr("apps.skills.registry.dispatch", lambda ctx: called.append(1))
 
-    reply = handoff_to_booking(global_bot_user=gbu, tenant_id=t.id, master_id=master.id, service_id=neck.id)
+    reply = handoff_to_booking(
+        global_bot_user=gbu, tenant_id=t.id, master_id=master.id, service_id=neck.id
+    )
 
     assert called == [], "непродаваемое ребро ушло в запись"
     assert "нет услуги «Массаж шейно-воротниковой зоны»" in reply.text
