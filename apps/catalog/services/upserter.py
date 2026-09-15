@@ -217,6 +217,9 @@ def upsert_specialists(tenant: "Tenant", dtos: list["CatalogSpecialistDTO"]) -> 
                 "review_count": dto.review_count,
                 "is_active": dto.is_active,
                 "ayla_user_id": dto.user_id,
+                # DRF-1933: id каталога — и на новой строке (== pk), и на
+                # склеенной строке приглашения (pk остаётся uuid4).
+                "catalog_specialist_id": dto.ayla_master_id,
                 # DRF-1588 — гео едет в колонки. Раньше оно доезжало только
                 # внутрь ``raw`` (ниже), то есть было, но было недоступно:
                 # по JSON-ключу нельзя ни искать, ни фильтровать, ни

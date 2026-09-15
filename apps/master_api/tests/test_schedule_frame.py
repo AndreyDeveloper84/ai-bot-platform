@@ -34,7 +34,11 @@ def tenant() -> Tenant:
 
 @pytest.fixture
 def master(tenant: Tenant) -> CatalogMaster:
+    # DRF-1933: строка как у синка — id каталога равен первичному ключу.
+    row_id = uuid.uuid4()
     return CatalogMaster.all_tenants.create(
+        id=row_id,
+        catalog_specialist_id=row_id,
         tenant=tenant,
         external_id=7,
         external_updated_at=dt.datetime.now(tz=dt.timezone.utc),

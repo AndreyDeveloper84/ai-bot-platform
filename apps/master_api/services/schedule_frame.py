@@ -42,6 +42,7 @@ from zoneinfo import ZoneInfo
 
 from django.conf import settings
 
+from apps.catalog.specialist_ref import CatalogSpecialistUnresolved, catalog_specialist_id
 from apps.integrations.ayla.salon_client import (
     SalonNotConfigured,
     SalonUnavailable,
@@ -204,20 +205,26 @@ def _load_ayla(master: Any, *, from_date: date_cls, to_date: date_cls, tz: ZoneI
     actor = external_user_id_for(actor_user)
     client = get_salon_client()
     slug = tenant.slug
-    specialist_id = str(master.id)
+    try:
+        catalog_specialist_id(master)
+    except CatalogSpecialistUnresolved as exc:
+        # DRF-1933: у строки нет id профиля в каталоге — читать не по чему.
+        # Класс, который вызывающие уже разбирают: пустота не становится
+        # «весь день свободен».
+        raise SalonNotConfigured(str(exc)) from exc
 
     wh_by_weekday = _weekly_template(
         client.get_master_schedule(
             actor_external_id=actor,
             tenant_slug=slug,
-            specialist_id=specialist_id,
+            specialist_id=catalog_specialist_id(master),
         )
     )
     exceptions_by_date = _exceptions(
         client.list_schedule_exceptions(
             actor_external_id=actor,
             tenant_slug=slug,
-            specialist_id=specialist_id,
+            specialist_id=catalog_specialist_id(master),
             date_from=from_date.isoformat(),
             date_to=to_date.isoformat(),
         )
@@ -226,7 +233,7 @@ def _load_ayla(master: Any, *, from_date: date_cls, to_date: date_cls, tz: ZoneI
         client.list_time_off(
             actor_external_id=actor,
             tenant_slug=slug,
-            specialist_id=specialist_id,
+            specialist_id=catalog_specialist_id(master),
             date_from=from_date.isoformat(),
             date_to=to_date.isoformat(),
         ),

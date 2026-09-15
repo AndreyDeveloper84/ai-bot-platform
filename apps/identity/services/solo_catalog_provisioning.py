@@ -95,6 +95,11 @@ def provision_catalog_workspace(
                 "catalog_provisioning_refusal",
             ]
         )
+        # DRF-1933: тот же readback — на строку зеркала, которую читают
+        # прокси кабинета (apps/catalog/specialist_ref.py). У соло-мастера
+        # первичный ключ строки — uuid4, а не id профиля каталога.
+        link.master.catalog_specialist_id = dto.specialist_id
+        link.master.save(update_fields=["catalog_specialist_id"])
         logger.info(
             "identity.solo_catalog.provisioned master=%s tenant=%s specialist=%s created=%s",
             link.master_id,

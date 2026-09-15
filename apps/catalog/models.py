@@ -311,6 +311,17 @@ class CatalogMaster(_MirrorBase):
         "Phase 1 booking flow can dispatch without a second lookup.",
         verbose_name="Идентификатор в YClients",
     )
+    # DRF-1933 — каким id строку знает каталог. Совпадает с первичным ключом
+    # только у строки синка; у соло-мастера и у склеенного приглашения
+    # (DRF-1507) первичный ключ — uuid4. Пишут синк и провижининг соло,
+    # читает apps/catalog/specialist_ref.py; пусто — отказ, не pk.
+    catalog_specialist_id = models.UUIDField(
+        null=True,
+        blank=True,
+        db_index=True,
+        verbose_name="Id профиля в каталоге",
+        help_text="SpecialistProfile.id в каталоге. Пусто — строку каталог не знает (DRF-1933).",
+    )
     ayla_user_id = models.UUIDField(
         null=True,
         blank=True,
@@ -613,6 +624,12 @@ class CatalogMaster(_MirrorBase):
                 fields=["tenant", "ayla_user_id"],
                 condition=models.Q(ayla_user_id__isnull=False),
                 name="uq_catalog_master_tenant_ayla_user_id",
+            ),
+            # DRF-1933: один id каталога — одна строка салона.
+            models.UniqueConstraint(
+                fields=["tenant", "catalog_specialist_id"],
+                condition=models.Q(catalog_specialist_id__isnull=False),
+                name="uq_catalog_master_tenant_catalog_specialist_id",
             ),
         ]
 
