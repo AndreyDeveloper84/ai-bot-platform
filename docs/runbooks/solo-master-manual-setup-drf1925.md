@@ -101,7 +101,7 @@ provisioned DRAFT-профиля (DRF-1874). Публикация (шаг 8) т�
 |---|---|---|
 | `photo_missing`, `display_name_missing` | profile | 4 |
 | `no_configured_service` | services | 3 |
-| `location_not_assigned`, `location_not_participating` | location | 5 |
+| `location_not_assigned`, `location_inactive` | location | 5 |
 | `no_working_day` | hours | 6 |
 | `identity_not_linked` | identity | 7 |
 
@@ -278,9 +278,13 @@ M16), поэтому путь — админка каталога и коман�
 4. **Привязка мастера.** Админка каталога → профиль специалиста → поле `works_at`
    (raw id) = id места. Больше ничего на форме профиля не менять (см. «НЕ делает»).
 
-**Проверка:** в `missing()` нет `location_not_assigned` / `location_not_participating`.
-Участие = `confirmed` ∧ `geocode_status ∈ {ok, confirmed}` ∧ обе координаты ∧ не (0, 0)
-(`tenants/distance.py::participating_place_q`).
+**Проверка:** в `missing()` нет `location_not_assigned` / `location_inactive`.
+С DRF-1957 готовность «к проверке» координат и подтверждения места не требует: место
+в `review_required` отправляется. Одобрение модератором (`approve_specialists`) само
+подтверждает своё место мастера (`confirmed`, «модерация профиля <id>»); не хватает
+только этого — в отказе модератору `location_not_confirmed`. Расстояние до места
+считается после геокода: `confirmed` ∧ `geocode_status ∈ {ok, confirmed}` ∧ обе
+координаты ∧ не (0, 0) (`tenants/distance.py::participating_place_q`).
 
 **Откат:** очистить `works_at` на профиле; место — `status = inactive` (не удалять).
 
