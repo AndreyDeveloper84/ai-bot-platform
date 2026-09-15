@@ -169,3 +169,21 @@ class TestUncertainAndMalformed:
 
         with pytest.raises(NutritionAPIError):
             _call("delete_meal")
+
+
+class TestUnreadableSuccessIsUncertain:
+    """Ревью Mini App: DELETE ответил 200, тело не читается — удаление ПРОШЛО.
+
+    Назвать это обычной ошибкой значит сказать человеку «ничего не
+    изменилось» про уже удалённую запись и не предложить её вернуть.
+    """
+
+    def test_an_unreadable_delete_body_is_an_uncertain_outcome(self, ayla) -> None:
+        ayla["json"] = {"data": None}
+
+        with pytest.raises(NutritionAPIError) as caught:
+            _call("delete_meal")
+
+        # POSITIVE first: Ayla did receive and answer the DELETE.
+        assert ayla["seen"] == [("DELETE", f"/api/v1/nutrition/internal/food-log/{LOG_ID}/")]
+        assert type(caught.value).__name__ == "NutritionUncertainOutcomeError"

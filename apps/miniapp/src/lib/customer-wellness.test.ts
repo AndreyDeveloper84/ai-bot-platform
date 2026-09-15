@@ -27,6 +27,9 @@ import {
   loadDiaryToday,
   readWaterQueue,
   undoWaterLog,
+  correctFoodEntryGrams,
+  deleteFoodEntry,
+  restoreFoodEntry,
 } from "./customer-wellness";
 
 const fetchMock = vi.fn();
@@ -346,4 +349,70 @@ describe("flushWaterQueue — onAccepted hands the entry id to the caller (DRF-1
     expect(synced).toBe(1);
     expect(readWaterQueue()).toHaveLength(0);
   });
+});
+
+
+describe("правка и удаление записи еды (DRF-1838)", () => {
+  it("deleteFoodEntry — DELETE /wellness/food/<id> и окно восстановления", async () => {
+    fetchMock.mockResolvedValue(
+      jsonResponse({ entry_id: "a/b c", restore_window_expires_at: "2026-09-15T12:15:00+00:00" }),
+    );
+
+    const out = await deleteFoodEntry("a/b c");
+
+    const [url, init] = callAt(0);
+    expect(url).toBe("/api/v1/customer/wellness/food/a%2Fb%20c");
+    expect(init.method).toBe("DELETE");
+    expect(out.restore_window_expires_at).toBe("2026-09-15T12:15:00+00:00");
+  });
+
+  it.each([
+    [200, "restored"],
+    [410, "expired"],
+    [404, "gone"],
+  ] as const)("restoreFoodEntry: %s → %s", async (status, outcome) => {
+    fetchMock.mockResolvedValue(
+      jsonResponse(
+        status === 200
+          ? { id: "fl-1" }
+          : { error: status === 404 ? "not_found" : "restore_expired", detail: "x" },
+        status,
+      ),
+    );
+
+    await expect(restoreFoodEntry("fl-1")).resolves.toBe(outcome);
+
+    const [url, init] = callAt(0);
+    expect(url).toBe("/api/v1/customer/wellness/food/fl-1/restore");
+    expect(init.method).toBe("POST");
+  });
+
+  it("restoreFoodEntry — сбой не выдаётся ни за «вернула», ни за «окно закрыто»", async () => {
+    fetchMock.mockResolvedValue(jsonResponse({ error: "ayla_unavailable", detail: "x" }, 502));
+
+    await expect(restoreFoodEntry("fl-1")).rejects.toThrow();
+  });
+
+  it("correctFoodEntryGrams — PATCH с граммами", async () => {
+    fetchMock.mockResolvedValue(jsonResponse({ id: "fl-1", calories: 125 }));
+
+    await correctFoodEntryGrams("fl-1", 250);
+
+    const [url, init] = callAt(0);
+    expect(url).toBe("/api/v1/customer/wellness/food/fl-1");
+    expect(init.method).toBe("PATCH");
+    expect(bodyOf(0)).toEqual({ grams: 250 });
+  });
+});
+
+
+describe("restoreFoodEntry — «записи нет» только по not_found (ревью DRF-1838)", () => {
+  it.each([["nutrition_disabled"], ["http_error"]])(
+    "404 %s — не «записи нет», а ошибка",
+    async (slug) => {
+      fetchMock.mockResolvedValue(jsonResponse({ error: slug, detail: "x" }, 404));
+
+      await expect(restoreFoodEntry("fl-1")).rejects.toThrow();
+    },
+  );
 });
