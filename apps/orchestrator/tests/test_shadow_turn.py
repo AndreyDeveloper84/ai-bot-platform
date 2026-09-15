@@ -8,6 +8,7 @@ these tests — shadow must never touch it.
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from types import SimpleNamespace
 
@@ -41,7 +42,9 @@ def _fake_classify(intent="booking", skill="booking", confidence=0.9):
     from apps.orchestrator.intent_router import IntentDecision
 
     async def _classify(text, **kwargs):
-        _fake_classify.captured = {"text": text, **kwargs}
+        # Recorded on this very function, not on ``_fake_classify``: each test
+        # gets its own, so no test can read the call of the one before it.
+        _classify.captured = {"text": text, **kwargs}
         return IntentDecision(intent=intent, skill=skill, confidence=confidence, risk_level="low")
 
     return _classify
@@ -49,9 +52,6 @@ def _fake_classify(intent="booking", skill="booking", confidence=0.9):
 
 @pytest.fixture
 def fake_classify(monkeypatch):
-    # ``captured`` is a function attribute and outlives a test: without the
-    # reset a test whose classify never ran reads the previous test's call.
-    _fake_classify.__dict__.pop("captured", None)
     fake = _fake_classify()
     monkeypatch.setattr("apps.orchestrator.intent_router.classify", fake)
     return fake
@@ -152,13 +152,13 @@ class TestComputeShadowTurn:
     def test_tenant_less_global(self, fake_classify):
         """§15.5 — tenant=None reaches classify as None; nothing fabricated."""
         compute_shadow_turn(text="hi", conversation=_conversation(), tenant=None)
-        assert _fake_classify.captured["tenant"] is None
+        assert fake_classify.captured["tenant"] is None
 
     def test_per_tenant(self, fake_classify):
         """§15.6 — a real tenant object is threaded through."""
         tenant = SimpleNamespace(id=uuid.uuid4())
         compute_shadow_turn(text="hi", conversation=_conversation(), tenant=tenant)
-        assert _fake_classify.captured["tenant"] is tenant
+        assert fake_classify.captured["tenant"] is tenant
 
     def test_intent_ambiguity(self, monkeypatch):
         """§15.7 — unknown intent is not a failure; L2 degrades honestly."""
@@ -215,9 +215,13 @@ class TestComputeShadowTurn:
         monkeypatch.setattr(
             "apps.orchestrator.memory.coordinator.load_snapshot", _overrunning_load_snapshot
         )
+        # Presence first: the fake does record a call when it runs.
+        asyncio.run(fake_classify("probe"))
+        assert fake_classify.captured["text"] == "probe"
+
         result = compute_shadow_turn(text="hi", conversation=_conversation(), tenant=None)
         assert (result.execution_status, result.error) == (EXEC_TIMEOUT, "budget:before_intent")
-        assert not hasattr(_fake_classify, "captured")  # classify never ran
+        assert fake_classify.captured["text"] == "probe"  # compute added no call
 
     def test_timeout_after_intent(self, monkeypatch, shadow_clock):
         """DRF-2011 — classify overruns the budget → TIMEOUT after intent,
@@ -268,7 +272,7 @@ class TestComputeShadowTurn:
             ),
         )
         compute_shadow_turn(text="hi", conversation=_conversation(), tenant=None)
-        snapshot_arg = _fake_classify.captured["memory_snapshot"]
+        snapshot_arg = fake_classify.captured["memory_snapshot"]
         assert snapshot_arg["long_term"] == {"rfm_segment": "vip"}
 
     def test_memory_context_unavailable(self, monkeypatch, fake_classify):
