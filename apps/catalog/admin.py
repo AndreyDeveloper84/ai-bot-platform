@@ -767,6 +767,8 @@ class MasterServiceAdmin(AylaAdminMedia, admin.ModelAdmin):
                     "id",
                     "ayla_specialist_service_id",
                     "resolved_requires_health_check",
+                    "sellable",
+                    "unsellable_reason",
                     "updated_at",
                 ),
             },

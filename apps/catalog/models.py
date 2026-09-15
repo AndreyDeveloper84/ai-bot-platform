@@ -668,6 +668,23 @@ class CatalogMaster(_MirrorBase):
         return f"CatalogMaster[{self.name}@{self.external_id}]"
 
 
+#: Причины непродаваемого ребра в зеркале: две называет каталог
+#: (``services/offer_sellable.py``, DRF-1962), ``unknown`` — всё остальное,
+#: и такое ребро остаётся непродаваемым (fail-closed).
+UNSELLABLE_REASONS = ("price_below_minimum", "inactive", "unknown")
+
+
+def sellable_edge_q(prefix: str = "") -> models.Q:
+    """Ребро продаётся (DRF-1964a) — единственная форма условия ``sellable``.
+
+    ``prefix`` — путь связи до ``MasterService``: ``"services_offered__"`` от
+    мастера, ``"masters_offering__"`` от услуги. Ставить в ТОТ ЖЕ ``filter()``,
+    что и остальные условия на ребро: отдельный ``filter()`` по многозначной
+    связи привязал бы условие к другой строке ребра.
+    """
+    return models.Q(**{f"{prefix}sellable": True})
+
+
 class MasterServiceQuerySet(models.QuerySet):
     """QuerySet that closes the one hole ``pre_save`` cannot see.
 
@@ -683,6 +700,10 @@ class MasterServiceQuerySet(models.QuerySet):
     ``.all_tenants`` are equally covered — an escape hatch that skipped the
     check would be the first thing found and used.
     """
+
+    def sellable(self) -> "MasterServiceQuerySet":
+        """Только продаваемые рёбра (DRF-1964a); см. :func:`sellable_edge_q`."""
+        return self.filter(sellable_edge_q())
 
     def bulk_create(self, objs, *args, **kwargs):  # type: ignore[no-untyped-def]
         from apps.catalog.provenance import require_master_service_write
@@ -745,6 +766,17 @@ class MasterService(models.Model):
     and would make a non-bookable service bookable. Delete also matches the
     table's existing lifecycle — the MM4 matrix deletes the row when an
     operator unchecks a cell.
+
+    ### Sellable (DRF-1964a)
+
+    One exception to "presence is the contract": a catalog edge that is not
+    for sale (price below 1 ₽, DRF-1962) stays in the catalog feed with
+    ``sellable=false`` + a reason, so the row stays here too and carries the
+    reason instead of vanishing. Every sale-path reader reads it through
+    ``MasterService.objects.sellable()`` / :func:`sellable_edge_q`; the census
+    guard ``apps/catalog/tests/test_master_service_sellable_census.py`` turns a
+    reader that does not into a red test. Operator rows stay ``sellable=True``:
+    they carry no catalog price, so there is nothing to say.
     """
 
     id = models.UUIDField(
@@ -873,6 +905,25 @@ class MasterService(models.Model):
         verbose_name="Требует проверки здоровья (итог)",
     )
 
+    # DRF-1964a — продаётся ли ребро, зеркало ``sellable`` / ``unsellable_reason``
+    # каталога (DRF-1962). Пишет только синк и только когда ключ пришёл: ответ без
+    # ключа (каталог до DRF-1962) не меняет строку. Читать — через ``sellable()``.
+    sellable = models.BooleanField(
+        default=True,
+        help_text=(
+            "Mirrored Ayla edge `sellable` (DRF-1962). False = the edge stays in the "
+            "catalog but is not for sale; sale-path readers skip it."
+        ),
+        verbose_name="Продаётся",
+    )
+    unsellable_reason = models.CharField(
+        max_length=32,
+        blank=True,
+        default="",
+        help_text="price_below_minimum | inactive | unknown; empty when the edge is for sale.",
+        verbose_name="Почему не продаётся",
+    )
+
     # DRF-975 — both managers carry the provenance-checking ``bulk_create``.
     objects = TenantScopedManager.from_queryset(MasterServiceQuerySet)()  # type: ignore[misc]
     all_tenants = models.Manager.from_queryset(MasterServiceQuerySet)()  # type: ignore[misc]
@@ -891,6 +942,14 @@ class MasterService(models.Model):
                 fields=["tenant", "ayla_specialist_service_id"],
                 condition=models.Q(ayla_specialist_service_id__isnull=False),
                 name="uq_master_service_tenant_ayla_specialist_service_id",
+            ),
+            # DRF-1964a — непродаваемое ребро всегда с причиной, продаваемое — без.
+            models.CheckConstraint(
+                condition=(
+                    models.Q(sellable=True, unsellable_reason="")
+                    | (models.Q(sellable=False) & ~models.Q(unsellable_reason=""))
+                ),
+                name="ck_master_service_sellable_has_reason",
             ),
         ]
         indexes = [

@@ -55,7 +55,7 @@ from apps.integrations.ayla.user_proxy import external_user_id_for
 from django.conf import settings
 from django.utils.dateparse import parse_datetime
 
-from apps.catalog.models import CatalogMaster, CatalogService, MasterService
+from apps.catalog.models import CatalogMaster, CatalogService, MasterService, sellable_edge_q
 from apps.identity.models import BotUser
 from apps.tenancy.models import Tenant
 from apps.miniapp_api.auth import (
@@ -631,7 +631,11 @@ def slots(request: HttpRequest) -> HttpResponse:
 
     # Per master-management handoff §MM4: customer can book a master
     # for a service only if the (master, service) mapping exists.
-    if not MasterService.objects.filter(master_id=master.id, service_id=service.id).exists():
+    if (
+        not MasterService.objects.filter(master_id=master.id, service_id=service.id)
+        .sellable()
+        .exists()
+    ):
         return _error(
             "not_found",
             "master does not perform this service",
@@ -745,7 +749,11 @@ def _bookable_master_exists() -> Exists:
     code — plus the ``OuterRef`` join onto the already-scoped service row.
     """
 
-    return Exists(CatalogMaster.objects.bookable().filter(services_offered__service=OuterRef("pk")))
+    return Exists(
+        CatalogMaster.objects.bookable().filter(
+            sellable_edge_q("services_offered__"), services_offered__service=OuterRef("pk")
+        )
+    )
 
 
 def _services_with_bookability():
@@ -867,8 +875,10 @@ def masters_list(request: HttpRequest) -> HttpResponse:
         # Existence join via MasterService. Filter via FK lookup so
         # Django coerces the string UUID; raw service_id= would fail
         # mypy strict UUID type check.
-        master_ids = MasterService.objects.filter(service__id=service_id).values_list(
-            "master_id", flat=True
+        master_ids = (
+            MasterService.objects.filter(service__id=service_id)
+            .sellable()
+            .values_list("master_id", flat=True)
         )
         qs = qs.filter(id__in=list(master_ids))
     rows = [_master_to_dict(m) for m in qs]
@@ -952,9 +962,9 @@ def master_detail(request: HttpRequest, master_id: str) -> HttpResponse:
     # disable services the master doesn't offer.
     service_ids = [
         str(sid)
-        for sid in MasterService.objects.filter(master_id=master.id).values_list(
-            "service_id", flat=True
-        )
+        for sid in MasterService.objects.filter(master_id=master.id)
+        .sellable()
+        .values_list("service_id", flat=True)
     ]
     payload = _master_to_dict(master)
     payload["service_ids"] = service_ids
