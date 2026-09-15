@@ -1320,3 +1320,27 @@ export const setAcceptingBookings = (
     method: "PATCH",
     body: JSON.stringify({ accepting_bookings: accepting }),
   });
+
+// --- DRF-1857 «Мои отзывы» --------------------------------------------------
+// Mirrors apps/master_api/views.py::reviews — a proxy to the catalog's
+// own-reviews route under the master as subject. Rows are whitelisted by the
+// bot; the client is «Имя Ф.» / «Клиент» / null (anonymous); no rating until a
+// review exists.
+
+export interface MasterReview {
+  id: string;
+  rating: number;
+  text: string;
+  client_name: string | null;
+  service_name: string | null;
+  created_at: string;
+}
+
+export interface MasterReviewsResponse {
+  review_count: number;
+  rating: number | null;
+  reviews: MasterReview[];
+}
+
+export const getMasterReviews = (): Promise<MasterReviewsResponse> =>
+  request("/reviews", { method: "GET" });

@@ -955,6 +955,12 @@ NOT_SWEPT_ROUTES: dict[str, str] = {
         "response is exactly {accepting_bookings: bool, status} of the master's "
         "own profile, no customer record — shape pinned in test_accepting_bookings_1845"
     ),
+    "reviews": (
+        "GET proxy to the catalog's own-reviews route (DRF-1857): lives in the "
+        "catalog, so a live sweep cannot build it; the client is «Имя Ф.» / «Клиент» / "
+        "null, rows whitelisted to id/rating/text/client_name/service_name/created_at — "
+        "no phone, surname or username pinned with a stubbed client in test_master_reviews_1857"
+    ),
 }
 
 

@@ -57,6 +57,8 @@ urlpatterns = [
     ),
     # DRF-1845 — «Принимаю записи»; не путать с «availability» (заявка на выходной).
     path("accepting-bookings", views.accepting_bookings, name="accepting_bookings"),
+    # DRF-1857 (K14) — «Мои отзывы»: прокси в каталог под субъектом мастера.
+    path("reviews", views.reviews, name="reviews"),
     path("availability", views.availability_request, name="availability_request"),
     path(
         "availability/pending",
