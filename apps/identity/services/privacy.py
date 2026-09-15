@@ -646,7 +646,10 @@ def delete_personal_data(
         # внешнего id берётся здесь, до локальных шагов, которые стирают
         # идентификаторы оболочек.
         owns = client is None
-        client = client or PersonalContextHttpClient()
+        client = client or PersonalContextHttpClient(
+            retries=ayla_erasure.SYNC_RETRIES, timeout=ayla_erasure.SYNC_TIMEOUT_SECONDS
+        )
+        outcome: ayla_erasure.ErasureOutcome | None
         try:
             outcome = ayla_erasure.erase_with_readback(
                 bot_user=bot_user,
@@ -655,10 +658,17 @@ def delete_personal_data(
                 source=retry_source,
                 client=client,
             )
+        except Exception:  # noqa: BLE001 — сбой механики задания не отменяет локальные шаги (ревью B1)
+            logger.exception("identity.privacy.ayla_erasure_job_failed")
+            outcome = None
         finally:
             if owns:
                 client.close()
-        if outcome.state == ayla_erasure.CONFIRMED:
+        if outcome is None or outcome.state == ayla_erasure.FAILED:
+            # Задание могло не сохраниться или его повторы исчерпаны — «запущено»
+            # здесь было бы ложью: честный частичный исход.
+            steps.append(DeleteStep("ayla_delete", False))
+        elif outcome.state == ayla_erasure.CONFIRMED:
             steps.append(DeleteStep("ayla_delete", True, "confirmed"))
         elif outcome.state == ayla_erasure.SUPERSEDED:
             steps.append(DeleteStep("ayla_delete", False, "superseded_by_account_deletion"))

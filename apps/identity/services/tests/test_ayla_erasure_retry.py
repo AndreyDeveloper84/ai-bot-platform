@@ -205,7 +205,9 @@ class TestFirstAttemptInTheCascade:
 
         jobs = AylaErasureJob.objects.all()
         assert jobs.count() == 1
-        assert jobs.get().attempts == 2
+        # Решение главного окна S1: новый законный запрос даёт свежие попытки —
+        # после второго запроса на счётчике одна попытка, а не две.
+        assert jobs.get().attempts == 1
 
     def test_a_403_after_account_deletion_is_not_a_completion(self, enabled, bot_user):
         """После D3 каталог отвечает боту 403 на всей поверхности — это не «стёрто»."""

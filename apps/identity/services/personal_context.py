@@ -277,7 +277,13 @@ def erase_declared_prefs(
         from apps.identity.services import ayla_erasure
 
         if ayla_erasure.retry_enabled():
-            # DRF-1950 (M3): OK — только после readback каталога.
+            # DRF-1950 (M3): OK — только после readback каталога. Синхронная
+            # попытка — короткий клиент: остальное повторит задание.
+            if owns:
+                client.close()
+                client = PersonalContextHttpClient(
+                    retries=ayla_erasure.SYNC_RETRIES, timeout=ayla_erasure.SYNC_TIMEOUT_SECONDS
+                )
             try:
                 outcome = ayla_erasure.erase_with_readback(
                     bot_user=bot_user,
@@ -286,11 +292,16 @@ def erase_declared_prefs(
                     source=retry_source,
                     client=client,
                 )
+            except Exception:  # noqa: BLE001 — сбой механики задания: честный отказ, не «запущено»
+                logger.exception("identity.personal_context.erase_job_failed")
+                return GatedResult(status=GateStatus.ERROR)
             finally:
                 if owns:
                     client.close()
             if outcome.state == ayla_erasure.CONFIRMED:
                 return GatedResult(status=GateStatus.OK)
+            if outcome.state == ayla_erasure.FAILED:
+                return GatedResult(status=GateStatus.ERROR)
             return GatedResult(status=GateStatus.STARTED)
     try:
         client.delete_personal_data(

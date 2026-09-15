@@ -51,6 +51,7 @@ from django.utils import timezone
 from apps.audit.services import write_audit
 from apps.integrations.ayla.personal_context_client import (
     PersonalContextAuthError,
+    PersonalContextConfigError,
     PersonalContextError,
     PersonalContextHttpClient,
     PersonalContextNotFoundError,
@@ -80,6 +81,15 @@ RETRY_DELAYS: tuple[timedelta, ...] = (
     timedelta(hours=24),
 )
 MAX_ATTEMPTS = len(RETRY_DELAYS) + 1
+
+#: Синхронная попытка в каскаде и чате не ждёт всех повторов клиента (3 × 30 с на
+#: DELETE и на чтение): человек ждёт ответа экрана, остальное повторит задание.
+SYNC_RETRIES = 1
+SYNC_TIMEOUT_SECONDS = 10
+
+#: Аренда задания подметальщиком: пока идёт сеть, второй проход его не возьмёт.
+#: Больше худшего времени одной попытки (2 вызова × 3 повтора × 30 с + паузы).
+CLAIM_LEASE = timedelta(minutes=10)
 
 CONFIRMED = "confirmed"
 STARTED = "started"
@@ -153,15 +163,19 @@ def erase_with_readback(
         external_user_id=external_user_id,
         source=source,
     )
-    state = _attempt(job, client=client)
-    _persist(job, state)
+    state = _persist(job, _attempt(job, client=client))
     return ErasureOutcome(state=state, job_id=job.pk)
 
 
 def sweep_due_jobs(
     *, client: PersonalContextHttpClient | None = None, now: Any = None
 ) -> dict[str, int]:
-    """Повторить просроченные открытые задания; каждое — под ``select_for_update(skip_locked)``."""
+    """Повторить просроченные открытые задания.
+
+    Каждое берётся арендой в короткой транзакции (``select_for_update(skip_locked)``,
+    срок перепроверяется под блокировкой, ``next_attempt_at`` сдвигается на
+    :data:`CLAIM_LEASE`), сеть и запись итога — вне транзакции.
+    """
     from apps.identity.models import AylaErasureJob
 
     now = now or timezone.now()
@@ -174,7 +188,6 @@ def sweep_due_jobs(
     )
     summary = {
         "due": len(ids),
-        CONFIRMED: 0,
         "completed": 0,
         "rescheduled": 0,
         FAILED: 0,
@@ -190,14 +203,20 @@ def sweep_due_jobs(
             with transaction.atomic():
                 job = (
                     AylaErasureJob.objects.select_for_update(skip_locked=True)
-                    .filter(pk=job_id, status=AylaErasureJob.Status.PENDING)
+                    .filter(
+                        pk=job_id,
+                        status=AylaErasureJob.Status.PENDING,
+                        next_attempt_at__lte=timezone.now(),
+                    )
                     .first()
                 )
                 if job is None:
                     summary["skipped_locked"] += 1
                     continue
-                state = _attempt(job, client=client)
-                _persist(job, state)
+                AylaErasureJob.objects.filter(pk=job.pk).update(
+                    next_attempt_at=timezone.now() + CLAIM_LEASE
+                )
+            state = _persist(job, _attempt(job, client=client))
             if state == CONFIRMED:
                 summary["completed"] += 1
             elif state == STARTED:
@@ -228,23 +247,30 @@ def _open_job(
     from apps.identity.models import AylaErasureJob
 
     pending = AylaErasureJob.Status.PENDING
-    existing = AylaErasureJob.objects.filter(ayla_user_id=ayla_user_id, status=pending).first()
-    if existing is not None:
-        if external_user_id and not existing.external_user_id:
-            existing.external_user_id = external_user_id
-        return existing
-    try:
-        with transaction.atomic():
-            return AylaErasureJob.objects.create(
-                bot_user=bot_user,
-                ayla_user_id=ayla_user_id,
-                external_user_id=external_user_id,
-                source=source,
-                status=pending,
-            )
-    except IntegrityError:
-        # Одновременный запрос того же человека успел открыть задание первым.
-        return AylaErasureJob.objects.get(ayla_user_id=ayla_user_id, status=pending)
+    for _ in range(2):
+        existing = AylaErasureJob.objects.filter(ayla_user_id=ayla_user_id, status=pending).first()
+        if existing is not None:
+            # Новый законный запрос человека — новые попытки, а не последняя из
+            # старых: иначе одна неудача сразу исчерпала бы задание (ревью S1).
+            existing.attempts = 0
+            existing.alerted_at = None
+            if external_user_id and not existing.external_user_id:
+                existing.external_user_id = external_user_id
+            return existing
+        try:
+            with transaction.atomic():
+                return AylaErasureJob.objects.create(
+                    bot_user=bot_user,
+                    ayla_user_id=ayla_user_id,
+                    external_user_id=external_user_id,
+                    source=source,
+                    status=pending,
+                )
+        except IntegrityError:
+            # Одновременный запрос того же человека успел открыть задание первым —
+            # перечитать; если его уже закрыли, открыть своё на втором круге.
+            continue
+    raise RuntimeError(f"AylaErasureJob: не удалось открыть задание для {ayla_user_id}")
 
 
 def _attempt(job: AylaErasureJob, *, client: PersonalContextHttpClient) -> str:
@@ -264,6 +290,8 @@ def _attempt(job: AylaErasureJob, *, client: PersonalContextHttpClient) -> str:
         )
     except PersonalContextAuthError:
         kind = "auth"
+    except PersonalContextConfigError:
+        kind = "config"
     except PersonalContextTransportError:
         kind = "transport"
     except PersonalContextError:
@@ -288,14 +316,47 @@ def _attempt(job: AylaErasureJob, *, client: PersonalContextHttpClient) -> str:
     if job.attempts >= MAX_ATTEMPTS:
         job.status = AylaErasureJob.Status.FAILED
         job.next_attempt_at = None
-        job.alerted_at = now
         return FAILED
     job.next_attempt_at = now + RETRY_DELAYS[job.attempts - 1]
     return STARTED
 
 
-def _persist(job: AylaErasureJob, state: str) -> None:
-    job.save()
+_PERSISTED_FIELDS = (
+    "status",
+    "attempts",
+    "next_attempt_at",
+    "last_error_kind",
+    "external_user_id",
+    "completed_at",
+    "alerted_at",
+)
+_CLOSED_TO_STATE = {
+    "completed": CONFIRMED,
+    "superseded_by_account_deletion": SUPERSEDED,
+    "failed": FAILED,
+}
+
+
+def _persist(job: AylaErasureJob, state: str) -> str:
+    """Записать итог попытки — только поверх ещё открытого задания (ревью S2).
+
+    Если задание закрыли, пока шла сеть (подметальщик подтвердил стирание или
+    исчерпал повторы), итог этой попытки его не переоткроет и второй алерт не
+    уйдёт; возвращается состояние из базы.
+    """
+    from apps.identity.models import AylaErasureJob
+
+    fields = {name: getattr(job, name) for name in _PERSISTED_FIELDS}
+    fields["updated_at"] = timezone.now()
+    written = AylaErasureJob.objects.filter(pk=job.pk, status=AylaErasureJob.Status.PENDING).update(
+        **fields
+    )
+    if not written:
+        job.refresh_from_db()
+        logger.warning(
+            "identity.ayla_erasure.closed_meanwhile job=%s status=%s", job.pk, job.status
+        )
+        return _CLOSED_TO_STATE.get(job.status, STARTED)
     if state == SUPERSEDED:
         write_audit(
             SUPERSEDED_AUDIT_ACTION,
@@ -311,7 +372,7 @@ def _persist(job: AylaErasureJob, state: str) -> None:
             job.attempts,
             job.last_error_kind,
         )
-        page(
+        sent = page(
             "error",
             "Удаление в Ayla не подтверждено: повторы исчерпаны",
             (
@@ -325,3 +386,9 @@ def _persist(job: AylaErasureJob, state: str) -> None:
             ),
             dedup_key=f"ayla_erasure:{job.pk}",
         )
+        if sent:
+            # «Алерт отправлен» — только если он ушёл (ревью S4). Иначе поле пустое,
+            # и исчерпанное задание без алерта видно запросом по alerted_at IS NULL.
+            job.alerted_at = timezone.now()
+            AylaErasureJob.objects.filter(pk=job.pk).update(alerted_at=job.alerted_at)
+    return state

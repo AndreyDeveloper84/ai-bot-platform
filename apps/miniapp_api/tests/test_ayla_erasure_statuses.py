@@ -208,6 +208,7 @@ def test_revocation_during_account_deletion_is_not_started(client: Client, tenan
     from apps.integrations.ayla.personal_context_client import PersonalContextAuthError
 
     user = _user(tenant, linked=True)
+    assert user.ayla_user_id is not None
     UserPersonalContext.objects.create(
         user_id=user.ayla_user_id,
         deletion_requested_at=timezone.now(),
