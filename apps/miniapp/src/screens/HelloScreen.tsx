@@ -14,7 +14,8 @@
 import { useCallback, useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { ApiError, authVerify, type AuthVerifyResponse } from "../lib/api";
-import { authErrorCopy } from "../lib/auth-error-copy";
+import { authErrorCopy, isTransportRefusalSlug } from "../lib/auth-error-copy";
+import { OpenFromMaxScreen } from "../components/OpenFromMaxScreen";
 import { ScreenLayout } from "../components/ScreenLayout";
 import { StickyCta } from "../components/StickyCta";
 import { signalReady } from "../lib/max-sdk";
@@ -87,6 +88,8 @@ export function HelloScreen() {
   }
 
   if (state.kind === "error") {
+    // DRF-1893 — отказ транспорта: один экран возврата в MAX.
+    if (isTransportRefusalSlug(state.slug)) return <OpenFromMaxScreen />;
     const copy = authErrorCopy(state.slug);
     return (
       <ScreenLayout back={BACK} title={copy.title}>

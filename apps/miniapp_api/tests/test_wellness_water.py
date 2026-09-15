@@ -250,8 +250,9 @@ class TestAddWaterValidation:
 
     def test_unauthenticated_write_is_refused(self, client: Client, db):
         # No Authorization header -> require_init_data answers 400
-        # ("malformed") before the view body, same as every other
+        # ("no_init_data") before the view body, same as every other
         # customer endpoint. What matters is that nothing reaches Ayla.
+        # 15.09.2026 UTC (DRF-1893): отказ транспорта — один код 401 no_init_data (было 400 malformed / 401 bad_signature).
         patcher, fake = _patch_client(add=_FakeEntry())
         with patcher:
             resp = client.post(
@@ -259,7 +260,7 @@ class TestAddWaterValidation:
                 data=json.dumps({"ml": 250}),
                 content_type="application/json",
             )
-        assert resp.status_code == 400
+        assert resp.status_code == 401
         fake.add_water.assert_not_awaited()
 
     def test_get_not_allowed(self, client: Client, bot_user: BotUser):
@@ -320,10 +321,11 @@ class TestUndoWater:
         assert resp.status_code == 502
 
     def test_unauthenticated_undo_is_refused(self, client: Client, db):
+        # 15.09.2026 UTC (DRF-1893): отказ транспорта — один код 401 no_init_data (было 400 malformed / 401 bad_signature).
         patcher, fake = _patch_client(undo=True)
         with patcher:
             resp = client.delete(_undo_url("entry-abc"))
-        assert resp.status_code == 400
+        assert resp.status_code == 401
         fake.undo_water.assert_not_awaited()
 
 

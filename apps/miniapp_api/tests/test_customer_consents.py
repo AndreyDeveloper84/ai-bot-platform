@@ -883,6 +883,7 @@ def test_unauthenticated_requests_are_rejected(
     client: Client, bot_user, url, hints_url, marketing_url, revoke_url, auth
 ) -> None:
     """Без initData ничьё состояние не отдаётся и ничьё не меняется."""
+    # 15.09.2026 UTC (DRF-1893): отказ транспорта — один код 401 no_init_data (было 400 malformed / 401 bad_signature).
     assert "consents" in client.get(url, **auth).json()  # с аутентификацией — отдаётся
 
     read = client.get(url)
@@ -894,7 +895,7 @@ def test_unauthenticated_requests_are_rejected(
 
     for res in (read, hints, marketing, revoke):
         # 400 — платформенный слог отказа require_init_data (не 401).
-        assert res.status_code == 400
+        assert res.status_code == 401
     assert "consents" not in read.json()
     assert BotUser.all_tenants.get(pk=bot_user.pk).proactive_messages_opt_out is False
     assert has_global_consent(bot_user, "marketing") is False

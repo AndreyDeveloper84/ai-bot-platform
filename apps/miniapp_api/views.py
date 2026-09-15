@@ -58,16 +58,8 @@ from django.utils.dateparse import parse_datetime
 from apps.catalog.models import CatalogMaster, CatalogService, MasterService
 from apps.identity.models import BotUser
 from apps.tenancy.models import Tenant
-from apps.miniapp_api.auth import (
-    InitDataBadSignature,
-    InitDataError,
-    InitDataMalformed,
-    InitDataNotConfigured,
-    InitDataStale,
-    VerifiedInitData,
-    extract_init_data,
-    verify_init_data,
-)
+from apps.miniapp_api.auth import VerifiedInitData
+from apps.miniapp_api.transport_refusal import GUARD_ATTR, verify_request_init_data
 from apps.miniapp_api.dev_bypass import try_dev_bypass
 from apps.scheduling.services.resolver import (
     collect_time_block_intervals,
@@ -160,21 +152,11 @@ def require_init_data(view_func: Callable[..., HttpResponse]) -> Callable[..., H
             request.tenant = bot_user_b.tenant  # type: ignore[attr-defined]
             return view_func(request, *args, **kwargs)
 
-        header = request.headers.get("Authorization", "")
-        try:
-            raw = extract_init_data(header)
-            verified = verify_init_data(raw)
-        except InitDataNotConfigured:
-            logger.error("miniapp_api.auth.not_configured")
-            return _error("server_misconfigured", "MAX bot token not configured", 500)
-        except InitDataBadSignature:
-            return _error("bad_signature", "initData signature mismatch", 401)
-        except InitDataStale:
-            return _error("stale", "initData expired — reopen the Mini App", 401)
-        except InitDataMalformed as exc:
-            return _error("malformed", str(exc), 400)
-        except InitDataError as exc:  # safety net
-            return _error("unauthorized", str(exc), 401)
+        # DRF-1893 — один отказ транспорта: 401 no_init_data, причина в логе.
+        verified, refusal = verify_request_init_data(request, surface="miniapp_api")
+        if refusal is not None:
+            return refusal
+        assert verified is not None
 
         # Tenant resolution: in single-bot mode the env binds the bot to
         # exactly one tenant. Multi-tenant ingress will rewire this later
@@ -241,6 +223,7 @@ def require_init_data(view_func: Callable[..., HttpResponse]) -> Callable[..., H
         request.tenant = bot_user.tenant  # type: ignore[attr-defined]
         return view_func(request, *args, **kwargs)
 
+    setattr(wrapper, GUARD_ATTR, "customer")
     return wrapper
 
 

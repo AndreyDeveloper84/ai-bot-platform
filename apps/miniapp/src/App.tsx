@@ -51,6 +51,8 @@ import {
 import { adminLandingPath, isAdminTabAllowed } from "./lib/admin-tabs";
 import { canOpenSalonPilot } from "./lib/salon-pilot";
 import { getStartPayload, parseStartRoute } from "./lib/max-sdk";
+import { channelIdentity } from "./lib/identity";
+import { OpenFromMaxScreen } from "./components/OpenFromMaxScreen";
 import {
   SurfaceModeContext,
   type SurfaceModeContextValue,
@@ -1622,7 +1624,19 @@ function CustomerFallbackWithBanner({
   );
 }
 
+/**
+ * DRF-1893 — без initData Mini App не стартует: ни `/api/v1/me`, ни одного
+ * дерева маршрутов. Решение владельца (раздел U): пустой initData — отказ
+ * транспорта, а не анонимный клиент; экран один на всех входах.
+ * Определение пустоты — одно, в `lib/identity.ts`.
+ */
 export function App() {
+  const [identity] = useState(() => channelIdentity());
+  if (identity === "no_init_data") return <OpenFromMaxScreen />;
+  return <AppShell />;
+}
+
+function AppShell() {
   const [boot, setBoot] = useState<BootState>(INITIAL);
   // Surface choice drives the cascade below, so it has to be reactive —
   // a bare localStorage read wouldn't re-render when the user picks

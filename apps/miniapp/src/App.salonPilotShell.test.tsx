@@ -36,6 +36,15 @@ import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+// DRF-1893 (15.09.2026 UTC): App не стартует без initData (решение владельца U —
+// пустой initData это отказ транспорта, экран «Открой Ayla из MAX»). Эти
+// тесты — про запуск из MAX, поэтому канал объявлен опознанным явно: в jsdom
+// моста MAX нет, и без этой строки App честно показал бы экран отказа.
+vi.mock("./lib/identity", async (importOriginal) => {
+  const original = await importOriginal<typeof import("./lib/identity")>();
+  return { ...original, channelIdentity: () => "identified" as const };
+});
+
 vi.mock("./lib/admin-api", async (importOriginal) => {
   const original = await importOriginal<typeof import("./lib/admin-api")>();
   return {

@@ -61,7 +61,8 @@ def _priced_service(
 
 class TestAuthBoundary:
     def test_without_init_data_rejected(self, client: Client, db) -> None:
-        assert client.get(reverse(URL_NAME)).status_code == 400
+        # 15.09.2026 UTC (DRF-1893): отказ транспорта — один код 401 no_init_data (было 400 malformed / 401 bad_signature).
+        assert client.get(reverse(URL_NAME)).status_code == 401
 
     def test_non_master_rejected(self, client: Client, bot_user: BotUser) -> None:
         resp = _get(client)

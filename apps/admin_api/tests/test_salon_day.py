@@ -307,8 +307,9 @@ class TestEndpoint:
         assert resp.status_code == 403
 
     def test_unauthenticated_is_rejected(self, client: Client, tenant: Tenant) -> None:
+        # 15.09.2026 UTC (DRF-1893): отказ транспорта — один код 401 no_init_data (было 400 malformed / 401 bad_signature).
         resp = client.get(_url("2026-08-20"))
-        assert resp.status_code == 400
+        assert resp.status_code == 401
 
     def test_bad_date_is_a_400_not_a_500(
         self, client: Client, owner_bot_user, tenant: Tenant

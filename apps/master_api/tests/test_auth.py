@@ -168,13 +168,14 @@ class TestRequireMasterInitData:
 
     def test_missing_init_data(self, db) -> None:
         @require_master_init_data
+        # 15.09.2026 UTC (DRF-1893): отказ транспорта — один код 401 no_init_data (было 400 malformed / 401 bad_signature).
         def view(request: HttpRequest) -> JsonResponse:
             return JsonResponse({"ok": True})
 
         rf = RequestFactory()
         resp = view(rf.get("/"))
-        assert resp.status_code == 400
-        assert _resp_json(resp)["error"] == "malformed"
+        assert resp.status_code == 401
+        assert _resp_json(resp)["error"] == "no_init_data"
 
     def test_no_bot_user(self, db) -> None:
         """initData verifies but no BotUser registered → 404."""
