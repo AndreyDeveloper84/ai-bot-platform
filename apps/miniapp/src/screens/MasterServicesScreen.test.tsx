@@ -270,6 +270,24 @@ describe("MasterServicesScreen — экран 04 «Цены и длительн�
     expect(screen.getByRole("button", { name: "Продолжить" })).toBeDisabled();
   });
 
+  it("S4: nothing selected → «Продолжить» is off with a hint; «Позже» stays on", async () => {
+    mockedSelection.mockResolvedValue(EMPTY_SELECTION);
+    await renderScreen();
+
+    expect(screen.getByRole("button", { name: "Продолжить" })).toBeDisabled();
+    expect(screen.getByText("Выбери хотя бы одну услугу")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Сохранить и продолжить позже" })).toBeEnabled();
+  });
+
+  it("S4: one selected and not configured → «Продолжить» is off, no hint", async () => {
+    mockedSelection.mockResolvedValue(state([row("a", "Коррекция бровей")], 1, 0));
+    await renderScreen();
+
+    expect(screen.getByRole("button", { name: "Продолжить" })).toBeDisabled();
+    expect(screen.queryByText("Выбери хотя бы одну услугу")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Сохранить и продолжить позже" })).toBeEnabled();
+  });
+
   it("S4: 6/6 enables «Продолжить»", async () => {
     mockedSelection.mockResolvedValue(state([configured("a", "А", "1000.00", 60)], 6, 6));
     await renderScreen();

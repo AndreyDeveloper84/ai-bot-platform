@@ -1977,6 +1977,13 @@ a {
   gap: var(--s-2);
 }
 
+.master-services__actions-hint {
+  margin: 0;
+  color: var(--c-text-secondary);
+  font-size: var(--font-size-100);
+  text-align: center;
+}
+
 .master-services__sheet {
   position: fixed;
   left: 0;

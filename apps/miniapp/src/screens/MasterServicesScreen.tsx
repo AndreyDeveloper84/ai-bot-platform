@@ -14,7 +14,8 @@
  *     `selected`); экран строки не пересчитывает.
  *   - Шторка 4.2: ровно два поля — цена и длительность — и «Убрать из моих
  *     услуг». После записи состояние берётся из ответа сервера, не дописывается.
- *   - «Продолжить» активна ⇔ configured === selected. Ведёт на deep_link первого
+ *   - «Продолжить» активна ⇔ выбрана хотя бы одна услуга и configured === selected
+ *     (при 0 выбранных — выключена с подсказкой). Ведёт на deep_link первого
  *     missing-пункта готовности онбординга (M2); нет такого или готовность не
  *     прочиталась — /solo/setup. «Сохранить и продолжить позже» → /solo/setup:
  *     одна точка «позже» для всех шагов онбординга, как M25.
@@ -61,6 +62,7 @@ const COPY = {
   noServices: "Вы ещё не выбрали услуги из каталога.",
   noDirection: "Другое",
   continue: "Продолжить",
+  selectAtLeastOne: "Выбери хотя бы одну услугу",
   later: "Сохранить и продолжить позже",
   loadError: "Не удалось загрузить услуги.",
   retryLoad: "Повторить",
@@ -831,11 +833,14 @@ export function MasterServicesScreen() {
           <button
             type="button"
             className="btn-primary"
-            disabled={leaving || state.configured !== state.selected}
+            disabled={leaving || state.selected === 0 || state.configured !== state.selected}
             onClick={() => void proceed()}
           >
             {COPY.continue}
           </button>
+          {state.selected === 0 && (
+            <p className="master-services__actions-hint">{COPY.selectAtLeastOne}</p>
+          )}
           <button type="button" className="btn-secondary" onClick={() => navigate(SETUP_PATH)}>
             {COPY.later}
           </button>
