@@ -18,9 +18,13 @@ I1 (а), владелец 15.09: закрытой таблицы сочетан�
 
 * :data:`TARGET_PHRASES` — «фраза → target» (J1): только явный список
   ``PROMPT_ORCHESTRATOR_AYLA_CONTROLLED_PILOT_NEXT_WAVE.md`` §3, без синонимов и
-  эвристик. «Близкие косметические формулировки» к ``FACE_FRESHNESS``: пусто,
-  ждёт списка владельца. «Беспокоят отёки», «сильно устаю», «время себе»,
+  эвристик; R2 (раздел S) добавил две формулировки спины. R1: близкие формулировки
+  к ``FACE_FRESHNESS`` не вводятся, новые фразы — явно по shadow evidence, никакого
+  semantic/LLM-расширения. «Беспокоят отёки», «сильно устаю», «время себе»,
   «важное событие» — цели нет, ключей для них нет намеренно.
+* Пересечение (R2): совпавшая фраза, лежащая в реплике внутри другой совпавшей,
+  более длинной, не считается — побеждает более специфичная, телесно-привязанная
+  формулировка. Считается по словам реплики; отдельные вхождения считаются все.
 * :data:`TARGET_DEFAULTS` — «target → (family, action_type)» (J2), §4.
   ``PUFFINESS_REDUCTION`` из фраз J1 недостижима; её умолчание есть, выбор —
   только в safety-clear контексте (правила безопасности политики идут первыми).
@@ -62,8 +66,8 @@ ROLE_PRIMARY = "primary"
 ROLE_ALTERNATIVE = "alternative"
 
 #: Метка версии таксономии (≤ 32 знаков, одна константа на метку): коды H5 и
-#: словари J1/J2 по решению владельца 15.09.
-TAXONOMY_VERSION = "h5-j1j2:owner-2026-09-15"
+#: словари J1/J2 по решению владельца 15.09, с R1/R2 (раздел S).
+TAXONOMY_VERSION = "h5-j1j2:owner-2026-09-15:r2"
 
 #: J1, владелец 15.09 (§3) — дословно. Ключ — фраза, значение — код из :data:`TARGETS`.
 TARGET_PHRASES: Mapping[str, str] = {
@@ -73,6 +77,9 @@ TARGET_PHRASES: Mapping[str, str] = {
     "спина напряжена": "BACK_COMFORT",
     "хочу снять зажимы": "BACK_COMFORT",
     "устала спина после работы": "BACK_COMFORT",
+    # R2, владелец 15.09 (раздел S).
+    "напряжение в спине": "BACK_COMFORT",
+    "хочу снять напряжение в спине": "BACK_COMFORT",
 }
 #: J2, владелец 15.09 (§4). target → (family, action_type).
 TARGET_DEFAULTS: Mapping[str, tuple[str, str]] = {
@@ -133,12 +140,39 @@ def words(text: str | None) -> tuple[str, ...]:
     return tuple(_WORD_RE.findall((text or "").casefold().replace("ё", "е")))
 
 
-def _contains(haystack: tuple[str, ...], needle: tuple[str, ...]) -> bool:
+def _spans(haystack: tuple[str, ...], needle: tuple[str, ...]) -> list[tuple[int, int]]:
+    """Все вхождения ``needle`` в ``haystack`` как полуинтервалы индексов слов."""
+
     if not needle or len(needle) > len(haystack):
-        return False
-    return any(
-        haystack[i : i + len(needle)] == needle for i in range(len(haystack) - len(needle) + 1)
-    )
+        return []
+    size = len(needle)
+    return [
+        (i, i + size) for i in range(len(haystack) - size + 1) if haystack[i : i + size] == needle
+    ]
+
+
+def _contains(haystack: tuple[str, ...], needle: tuple[str, ...]) -> bool:
+    return bool(_spans(haystack, needle))
+
+
+def _specific_targets(said: tuple[str, ...], phrases: Mapping[str, str]) -> set[str]:
+    """R2: цели фраз, у которых есть вхождение не внутри более длинного совпадения.
+
+    Вхождение ``(start, end)`` не считается, если в реплике есть совпадение другой
+    фразы ``(s2, e2)`` строго длиннее и накрывающее его: ``s2 <= start`` и
+    ``end <= e2``. Частичное перекрытие без вложения — обе считаются.
+    """
+
+    matches = [
+        (start, end, target)
+        for phrase, target in phrases.items()
+        for start, end in _spans(said, words(phrase))
+    ]
+    return {
+        target
+        for start, end, target in matches
+        if not any(s2 <= start and end <= e2 and (e2 - s2) > (end - start) for s2, e2, _ in matches)
+    }
 
 
 def validate(phrases: Mapping[str, str], defaults: Mapping[str, tuple[str, str]]) -> None:
@@ -171,7 +205,7 @@ def read_turn_needs(
     said = words(message_text)
     health = any(_contains(said, words(p)) for p in HEALTH_CONTEXT_PHRASES)
     pain = any(word in PAIN_SIGNAL_WORDS for word in said)
-    found = {target for phrase, target in phrases.items() if _contains(said, words(phrase))}
+    found = _specific_targets(said, phrases)
     # п.6: при health-контексте цели нет вовсе — распознанную не пишем.
     targets = () if health else tuple(t for t in TARGETS if t in found)
     return TurnNeeds(recognized_targets=targets, pain_signal=pain, health_context=health)
