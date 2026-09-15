@@ -186,8 +186,11 @@ class TestTheStrangerPathIsHandedToSliceFourB:
         assert _rows() == []
         assert "код" in sent.call_args.kwargs["text"].lower()
 
+    @pytest.mark.parametrize(
+        "setting_tenant", ["", "formula-tela"], ids=["no-setting", "client-setting-formula-tela"]
+    )
     def test_a_stranger_without_any_tenant_is_answered_2026_09_12(
-        self, salon, sent, settings, caplog
+        self, salon, sent, settings, caplog, setting_tenant
     ):
         """Эталон 4a ПЕРЕВЁРНУТ срезом 4b (DRF-1784): ERROR «…until_4b» больше нечего ждать.
 
@@ -196,6 +199,9 @@ class TestTheStrangerPathIsHandedToSliceFourB:
         """
 
         settings.MAX_BOT_REGISTRY = (SALON_BOT_TENANTLESS,)
+        # DRF-1785: вебхук не читает настройку клиентского бота. На пилоте 15.09
+        # MAX_BOT_TENANT_SLUG=formula-tela — вариант с ней краснеет, если чтение появится.
+        settings.MAX_BOT_TENANT_SLUG = setting_tenant
 
         with caplog.at_level(logging.ERROR, logger="apps.channels.max.salon_handler"):
             _handle("привет", None)
