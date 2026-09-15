@@ -1771,6 +1771,84 @@ def _error_with(slug: str, detail: str, status: int, **details: object) -> JsonR
     return JsonResponse({"error": slug, "detail": detail, "details": details}, status=status)
 
 
+# --- GET /services/directions, /services/templates (DRF-1799, M7) -----------
+
+_CANON_UNAVAILABLE = "Каталог услуг сейчас недоступен."
+
+#: Строки направления и шаблона — белым списком. Экран 03 выбирает услуги
+#: без цен и минут, поэтому ни цена, ни длительность из каталога до него не
+#: доходят; что бы каталог ни добавил, экран получает только это.
+_DIRECTION_FIELDS = ("id", "name", "slug", "icon", "sort_order")
+_TEMPLATE_FIELDS = ("id", "name", "name_short", "is_popular", "category_id", "category_name")
+
+
+def _pick(row: dict[str, Any], fields: tuple[str, ...]) -> dict[str, Any]:
+    return {field: row.get(field) for field in fields}
+
+
+@csrf_exempt
+@require_http_methods(["GET"])
+@require_master_init_data
+def service_directions(request: HttpRequest) -> HttpResponse:
+    """Направления канона для экрана 03 — прокси в каталог (DRF-1799, M7).
+
+    Список — ровно ответ каталога ``/internal/services/directions/``: ни числа
+    направлений, ни их кодов бот не знает и не держит. Оговорка #454 / G7:
+    сегодня это корни канона, а не шесть направлений экрана 02; ответ G7 меняет
+    данные каталога, а не этот прокси. Не прочитался — 502/503, а не пустой
+    список.
+    """
+    client = get_ayla_booking_client()
+    try:
+        data = client.get_service_directions()
+    except BookingBadRequestError:
+        return _error("catalog_unavailable", _CANON_UNAVAILABLE, 502)
+    except BookingUnavailableError:
+        return _error("catalog_unavailable", _CANON_UNAVAILABLE, 503)
+    if not isinstance(data, list):
+        return _error("catalog_unavailable", _CANON_UNAVAILABLE, 502)
+    return JsonResponse(
+        {"directions": [_pick(row, _DIRECTION_FIELDS) for row in data if isinstance(row, dict)]}
+    )
+
+
+@csrf_exempt
+@require_http_methods(["GET"])
+@require_master_init_data
+def service_templates(request: HttpRequest) -> HttpResponse:
+    """Шаблоны одного направления для экрана 03 — прокси в каталог (DRF-1799, M7).
+
+    Каталог отдаёт всё поддерево направления одним запросом (M7a) — логики
+    дерева в боте нет. Без ``direction_id`` (UUID) — 400 без вызова каталога;
+    не направление — ``not_a_direction``, неизвестное — ``direction_not_found``.
+    """
+    direction_id = request.GET.get("direction_id")
+    if not _is_uuid(direction_id):
+        return _error("validation_error", "Нужен direction_id — UUID направления.", 400)
+    client = get_ayla_booking_client()
+    try:
+        data = client.get_service_templates(direction_id=str(direction_id))
+    except BookingBadRequestError as exc:
+        if exc.status_code == 404:
+            return _error("direction_not_found", "Направление не найдено в каталоге.", 404)
+        if exc.status_code == 400 and exc.code == "NOT_A_DIRECTION":
+            return _error("not_a_direction", "Это не направление каталога.", 400)
+        return _error("catalog_unavailable", _CANON_UNAVAILABLE, 502)
+    except BookingUnavailableError:
+        return _error("catalog_unavailable", _CANON_UNAVAILABLE, 503)
+    templates = data.get("templates") if isinstance(data, dict) else None
+    if not isinstance(templates, list):
+        return _error("catalog_unavailable", _CANON_UNAVAILABLE, 502)
+    return JsonResponse(
+        {
+            "direction_id": str(direction_id),
+            "templates": [
+                _pick(row, _TEMPLATE_FIELDS) for row in templates if isinstance(row, dict)
+            ],
+        }
+    )
+
+
 # --- GET /dashboard --------------------------------------------------------
 
 

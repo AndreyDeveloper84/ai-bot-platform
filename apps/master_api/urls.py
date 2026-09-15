@@ -31,6 +31,9 @@ urlpatterns = [
     # DRF-1895 (M10b) — выбор канонических услуг и цена мастера: прокси в
     # каталог (M8a / M8b). `selection` раньше `<uuid:salon_service_id>`.
     path("services/selection", views.service_selection, name="service_selection"),
+    # DRF-1799 (M7) — канон для экрана 03: направления и шаблоны направления.
+    path("services/directions", views.service_directions, name="service_directions"),
+    path("services/templates", views.service_templates, name="service_templates"),
     path(
         "services/<uuid:salon_service_id>/offer",
         views.service_offer,
