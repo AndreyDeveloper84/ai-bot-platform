@@ -298,6 +298,18 @@ class FoodScannerSkill:
 
         # action == "to_diary"
         external_id = external_user_id_for(context.bot_user)
+        card = _card_for(context, scan_id)
+        corrected = _corrected_portion(card)
+        if corrected is _OUT_OF_RANGE:
+            return SkillResult(
+                reply_text=GRAMS_OUT_OF_RANGE_TEXT.format(grams=(card or {}).get("grams")),
+                meta={"reply_kind": "food_scanner_log_grams_out_of_range"},
+            )
+        extra: dict = {}
+        if isinstance(corrected, float):
+            # DRF-1579: вес, названный на карточке, — множитель от распознанной
+            # порции; число исправлено человеком (§136).
+            extra = {"portion_multiplier": corrected, "entry_origin": "photo_user_corrected"}
         try:
             log = asyncio.run(
                 get_nutrition_client().log_meal(
@@ -305,6 +317,7 @@ class FoodScannerSkill:
                     scan_id=scan_id,
                     meal_type="other",  # P1 doesn't show meal-type buttons
                     idempotency_key=f"diary:{external_id}:{scan_id}",
+                    **extra,
                 )
             )
         except FoodNotRecognizedError:
@@ -325,6 +338,7 @@ class FoodScannerSkill:
                 meta={"reply_kind": "food_scanner_log_error"},
             )
 
+        _mark_card_logged(context, card, log.log_id)
         return SkillResult(
             reply_text=f"Записала: {log.dish_name} — {int(log.calories)} ккал.",
             action_type="food_logged",
@@ -477,6 +491,58 @@ def _check_gates(
     return None
 
 
+#: Границы множителя, которые каталог принимает в запись (FoodLogCreateSerializer).
+_MIN_PORTION_MULTIPLIER = 0.1
+_MAX_PORTION_MULTIPLIER = 20.0
+_OUT_OF_RANGE = object()
+GRAMS_OUT_OF_RANGE_TEXT = (
+    "Вес {grams} г слишком далёк от распознанной порции — пересчитать не могу. "
+    "Напиши вес ещё раз или запиши текстом."
+)
+
+
+def _card_for(context: SkillContext, scan_id: str) -> dict | None:
+    """Карточка ЭТОГО скана из состояния разговора, или ``None``."""
+    raw = getattr(context.conversation, "skill_state", None)
+    card = raw.get(LAST_CARD_STATE_KEY) if isinstance(raw, dict) else None
+    if isinstance(card, dict) and card.get("scan_id") == scan_id:
+        return card
+    return None
+
+
+def _corrected_portion(card: dict | None):
+    """Множитель от поправленного веса (DRF-1579), ``None`` без поправки, или ``_OUT_OF_RANGE``."""
+    if not card:
+        return None
+    grams = card.get("grams")
+    portion = card.get("portion_g")
+    if isinstance(grams, bool) or not isinstance(grams, int):
+        return None
+    if isinstance(portion, bool) or not isinstance(portion, (int, float)) or portion <= 0:
+        return None
+    multiplier = round(grams / float(portion), 3)
+    if not _MIN_PORTION_MULTIPLIER <= multiplier <= _MAX_PORTION_MULTIPLIER:
+        return _OUT_OF_RANGE
+    return multiplier
+
+
+def _mark_card_logged(context: SkillContext, card: dict | None, log_id: str) -> None:
+    """После записи карточка «записана»: поправка веса больше не делает вид, что применится."""
+    if not card:
+        return
+    marked = {key: value for key, value in card.items() if key != "grams"}
+    marked.update({"logged": True, "log_id": log_id})
+    try:
+        from apps.conversations.services import write_skill_state
+
+        write_skill_state(context.conversation, LAST_CARD_STATE_KEY, marked)
+    except Exception:  # noqa: BLE001 — the entry is written; a lost mark costs one wrong ack
+        logger.debug(
+            "food_scanner.card_mark_skipped conversation=%s",
+            getattr(context.conversation, "id", None),
+        )
+
+
 def _stash_last_card(context: SkillContext, scan) -> None:
     """Tie ``scan_id`` → dish in ``Conversation.skill_state``. Best-effort.
 
@@ -494,7 +560,13 @@ def _stash_last_card(context: SkillContext, scan) -> None:
         write_skill_state(
             context.conversation,
             LAST_CARD_STATE_KEY,
-            {"scan_id": scan.scan_id, "dish": scan.dish_name or ""},
+            # DRF-1579: порция, которую распознал скан, — от неё считается
+            # множитель, если человек поправит вес до «В дневник».
+            {
+                "scan_id": scan.scan_id,
+                "dish": scan.dish_name or "",
+                "portion_g": getattr(scan, "portion_g", None),
+            },
         )
     except Exception:  # noqa: BLE001 — degraded memory beats a lost reply
         logger.debug(

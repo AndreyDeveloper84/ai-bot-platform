@@ -476,3 +476,95 @@ class TestMemoryOnTheCard:
 
         assert result.reply_text == REJECTED_ACK
         assert seen == ["scan-1"]
+
+
+class TestCorrectedGramsReachTheLog:
+    """DRF-1579 (F3): граммы, названные на карточке, пишутся в дневник.
+
+    Множитель — от порции, которую распознал скан (``portion_g``): запись по
+    скану масштабирует ЕГО итоги, а не 100 г. Происхождение — §136
+    ``photo_user_corrected``. Без правки вызов прежний.
+    """
+
+    def _to_diary(self, card: dict):
+        ctx = _context("cb:food:to_diary:scan-1")
+        ctx.conversation.skill_state = {"food_scan": card}
+        client = Mock()
+        captured: list[dict] = []
+        written: list = []
+
+        async def _log(**kwargs):
+            captured.append(kwargs)
+            return _log_response()
+
+        client.log_meal = _log
+        with (
+            patch("apps.skills.food_scanner.skill.get_nutrition_client", return_value=client),
+            patch(
+                "apps.conversations.services.write_skill_state",
+                side_effect=lambda conv, key, value: written.append((key, value)),
+            ),
+        ):
+            result = FoodScannerSkill().handle(ctx)
+        return result, captured, written
+
+    def test_corrected_grams_set_the_portion_and_the_origin(self) -> None:
+        card = {"scan_id": "scan-1", "dish": "Борщ", "portion_g": 250, "grams": 500}
+
+        result, captured, written = self._to_diary(card)
+
+        assert result.action_type == "food_logged"
+        assert captured[0]["scan_id"] == "scan-1"
+        assert captured[0]["portion_multiplier"] == 2.0
+        assert captured[0]["entry_origin"] == "photo_user_corrected"
+        # The card now says «logged»: a later correction must not pretend to apply.
+        assert written[-1][0] == "food_scan"
+        assert written[-1][1]["logged"] is True
+        assert "grams" not in written[-1][1]
+
+    def test_without_a_correction_the_log_call_is_unchanged(self) -> None:
+        card = {"scan_id": "scan-1", "dish": "Борщ", "portion_g": 250}
+
+        _, captured, written = self._to_diary(card)
+
+        assert captured[0]["scan_id"] == "scan-1"
+        assert "portion_multiplier" not in captured[0]
+        assert "entry_origin" not in captured[0]
+        assert written[-1] == ("food_scan", {**card, "logged": True, "log_id": "log-1"})
+
+    def test_a_correction_for_another_scan_is_not_applied(self) -> None:
+        card = {"scan_id": "scan-2", "dish": "Суп", "portion_g": 250, "grams": 500}
+
+        _, captured, _ = self._to_diary(card)
+
+        assert captured[0]["scan_id"] == "scan-1"
+        assert "portion_multiplier" not in captured[0]
+
+    def test_a_correction_the_catalogue_cannot_scale_is_not_logged(self) -> None:
+        # 5000 г от распознанных 10 г — множитель 500, каталог принимает 0.1…20.
+        card = {"scan_id": "scan-1", "dish": "Борщ", "portion_g": 10, "grams": 5000}
+
+        result, captured, _ = self._to_diary(card)
+
+        assert result.reply_text == (
+            "Вес 5000 г слишком далёк от распознанной порции — пересчитать не могу. "
+            "Напиши вес ещё раз или запиши текстом."
+        )
+        assert captured == []
+
+    def test_the_card_keeps_the_scan_portion(self) -> None:
+        from types import SimpleNamespace
+
+        from apps.skills.food_scanner.skill import _stash_last_card
+
+        ctx = _context("")
+        written: list = []
+        with patch(
+            "apps.conversations.services.write_skill_state",
+            side_effect=lambda conv, key, value: written.append((key, value)),
+        ):
+            _stash_last_card(
+                ctx, SimpleNamespace(scan_id="scan-9", dish_name="Плов", portion_g=320.0)
+            )
+
+        assert written == [("food_scan", {"scan_id": "scan-9", "dish": "Плов", "portion_g": 320.0})]

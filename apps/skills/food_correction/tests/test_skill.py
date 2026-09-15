@@ -242,33 +242,6 @@ class TestGramsAndMacrosAreAcceptedNotStored:
     такую правку — честный ack: значение принято, без «запомнила» и без
     «больше не спрошу». Хранится только имя блюда (см. TestKeepOrChange)."""
 
-    def test_a_grams_answer_is_acknowledged_and_never_kept(self) -> None:
-        from apps.orchestrator.memory import food as food_memory
-
-        skill = FoodCorrectionSkill()
-        written: list = []
-        with (
-            patch(
-                "apps.orchestrator.memory.food.remember_correction",
-                return_value=food_memory.Outcome.NOT_REMEMBERED,
-            ) as remember,
-            patch(
-                "apps.conversations.services.write_skill_state",
-                side_effect=lambda conv, key, value: written.append((key, value)),
-            ),
-        ):
-            result = skill.handle(_pending_context("500"))
-
-        assert (
-            result.reply_text
-            == "Поняла: 500 г. Вес пока не запоминаю — в следующий раз уточню снова."
-        )
-        assert result.action_data == {"field": "grams", "value": 500, "stored": False}
-        assert "апомнила" not in result.reply_text
-        assert "не спрошу" not in result.reply_text
-        remember.assert_called_once()  # решение о владении живёт в memory, одно на всех
-        assert written and written[-1][1] is None  # вопрос закрыт
-
     def test_a_macros_answer_is_acknowledged_and_never_kept(self) -> None:
         from apps.orchestrator.memory import food as food_memory
 
@@ -624,3 +597,71 @@ class TestRollbackSwitchOnTheSkill:
 
         assert result.reply_text == _PROMPTS_FOR_TEST["grams"]  # чистый вопрос, как прежде
         assert not written
+
+
+class TestGramsReachTheDiaryEntry:
+    """DRF-1579 (F3): вес, названный на карточке ДО «В дневник», доезжает в запись.
+
+    Решение 2026-09-04 (Q-NUTRITION-01, вариант А) держало ответ про граммы
+    «прочитан и выброшен» до ручки правки дневника (DRF-825). Ручка теперь есть
+    (beautygo_backend#450), но правка здесь — до записи: граммы кладутся в
+    состояние карточки, и ``food_scanner`` пишет запись уже с ними. В память
+    вес не попадает (дневник — Ayla), в состояние разговора — до записи.
+
+    После записи вес здесь не пересчитывается: множитель для фото считается от
+    порции скана, это отдельный лист (DRF-1917). Честная фраза вместо «учла».
+    """
+
+    def _answer(self, text: str, *, card: dict):
+        from apps.orchestrator.memory import food as food_memory
+
+        ctx = _pending_context(text)
+        ctx.conversation.skill_state["food_scan"] = card
+        written: list = []
+        with (
+            patch(
+                "apps.orchestrator.memory.food.remember_correction",
+                return_value=food_memory.Outcome.NOT_REMEMBERED,
+            ),
+            patch(
+                "apps.conversations.services.write_skill_state",
+                side_effect=lambda conv, key, value: written.append((key, value)),
+            ),
+        ):
+            result = FoodCorrectionSkill().handle(ctx)
+        return result, written
+
+    def test_grams_before_logging_are_kept_on_the_card_for_the_diary(self) -> None:
+        card = {"scan_id": "scan-1", "dish": "борщ", "portion_g": 250}
+
+        result, written = self._answer("500", card=card)
+
+        assert result.reply_text == "Поняла: 500 г — запишу в дневник с этим весом."
+        assert ("food_scan", {**card, "grams": 500}) in written
+        assert written[-1] == ("food_correction", None)  # вопрос закрыт
+        assert "не запоминаю" not in result.reply_text
+
+    def test_after_logging_the_weight_is_not_recomputed_here(self) -> None:
+        card = {"scan_id": "scan-1", "dish": "борщ", "portion_g": 250, "logged": True}
+
+        result, written = self._answer("500", card=card)
+
+        assert result.reply_text == (
+            "Это блюдо уже в дневнике — чтобы поменять вес, удали запись и запиши заново."
+        )
+        # POSITIVE first: the question was settled…
+        assert written[-1] == ("food_correction", None)
+        # …and the card did not get a weight nobody will ever apply.
+        assert not any(key == "food_scan" for key, _ in written)
+
+    def test_without_the_scan_portion_there_is_nothing_to_recompute_from(self) -> None:
+        card = {"scan_id": "scan-1", "dish": "борщ"}
+
+        result, written = self._answer("500", card=card)
+
+        assert result.reply_text == (
+            "Поняла: 500 г. Не знаю, какую порцию я распознала на фото, — пересчитать "
+            "не из чего. Можно записать текстом, например «борщ 500 г»."
+        )
+        assert written[-1] == ("food_correction", None)
+        assert not any(key == "food_scan" for key, _ in written)
