@@ -1273,6 +1273,89 @@ def _canon_gap_refusal(exc: BookingBadRequestError) -> HttpResponse:
     return _error("catalog_unavailable", "Каталог сейчас недоступен.", 502)
 
 
+# --- GET/PATCH /accepting-bookings (DRF-1845) -------------------------------
+
+_ACCEPTING_UNAVAILABLE = "Настройка приёма записей сейчас недоступна."
+
+
+@csrf_exempt
+@require_http_methods(["GET", "PATCH"])
+@require_master_init_data
+def accepting_bookings(request: HttpRequest) -> HttpResponse:
+    """«Принимаю записи / Не принимаю» — прокси в каталог (DRF-1845).
+
+    Флаг живёт в каталоге (``SpecialistProfile.is_booking_enabled``) и только
+    там — второй копии в боте нет; ответ — то, что каталог прочёл после
+    записи. Субъект — сам мастер, как у часов (``working_hours``).
+
+    Бот узнаёт о паузе на следующем синке каталога (≤15 мин): до этого
+    мастер ещё виден клиентам в боте — экран говорит это словами, а не
+    обещает мгновенного эффекта. Не путать с ``availability`` — там заявка
+    на выходной.
+    """
+
+    master: CatalogMaster = request.master  # type: ignore[attr-defined]
+    bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
+    actor = external_user_id_for(bot_user)
+    client = get_ayla_booking_client()
+
+    if request.method == "GET":
+        try:
+            data = client.get_accepting_bookings(
+                specialist_id=str(master.id), external_user_id=actor
+            )
+        except BookingBadRequestError as exc:
+            return _accepting_bookings_refusal(exc)
+        except BookingUnavailableError:
+            return _error("accepting_bookings_unavailable", _ACCEPTING_UNAVAILABLE, 503)
+        return _accepting_bookings_response(data)
+
+    try:
+        body = json.loads(request.body or b"{}")
+    except ValueError:
+        return _error("invalid_json", "Body must be JSON.", 400)
+    value = body.get("accepting_bookings") if isinstance(body, dict) else None
+    if not isinstance(value, bool):
+        return _error("validation_error", "accepting_bookings must be true or false.", 400)
+
+    try:
+        data = client.set_accepting_bookings(
+            specialist_id=str(master.id), external_user_id=actor, accepting=value
+        )
+    except BookingBadRequestError as exc:
+        return _accepting_bookings_refusal(exc)
+    except BookingUnavailableError:
+        return _error("accepting_bookings_unavailable", _ACCEPTING_UNAVAILABLE, 503)
+    return _accepting_bookings_response(data)
+
+
+def _accepting_bookings_response(data: dict[str, Any]) -> HttpResponse:
+    """Ровно то, что прочёл каталог. Без флага в ответе — не «не принимаю»,
+    а непрочитанный ответ: экран не должен нарисовать паузу, которой нет."""
+    value = data.get("accepting_bookings") if isinstance(data, dict) else None
+    if not isinstance(value, bool):
+        return _error("accepting_bookings_unavailable", _ACCEPTING_UNAVAILABLE, 502)
+    return JsonResponse({"accepting_bookings": value, "status": data.get("status")})
+
+
+def _accepting_bookings_refusal(exc: BookingBadRequestError) -> HttpResponse:
+    if exc.status_code == 403:
+        return _error(
+            "not_linked",
+            "Профиль ещё не связан с каталогом — настроить приём записей пока нельзя.",
+            403,
+        )
+    if exc.status_code == 409:
+        return _error(
+            "profile_not_active",
+            "Профиль ещё не опубликован — принимать записи можно после проверки.",
+            409,
+        )
+    if exc.status_code == 400:
+        return _error("validation_error", "accepting_bookings must be true or false.", 400)
+    return _error("accepting_bookings_unavailable", _ACCEPTING_UNAVAILABLE, 502)
+
+
 # --- GET /onboarding/readiness --------------------------------------------
 
 
