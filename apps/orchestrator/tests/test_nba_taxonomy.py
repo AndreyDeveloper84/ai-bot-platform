@@ -148,3 +148,49 @@ class TestSignals:
         phrases = {"спину": "BACK_COMFORT", "свежее": "FACE_FRESHNESS"}
         needs = tx.read_turn_needs("хочу расслабить спину и выглядеть свежее", phrases=phrases)
         assert needs.recognized_targets == ("FACE_FRESHNESS", "BACK_COMFORT")
+
+
+# --------------------------------------------------------------------------- #
+# DRF-1945 — боевые словари J1/J2 по решению владельца 15.09                   #
+# (docs/PROMPT_ORCHESTRATOR_AYLA_CONTROLLED_PILOT_NEXT_WAVE.md §3–§4)          #
+# --------------------------------------------------------------------------- #
+
+#: J2 владельца (§4) — дословно.
+OWNER_J2 = {
+    "FACE_FRESHNESS": ("ADDRESS", "PROVIDER_SESSION"),
+    "PUFFINESS_REDUCTION": ("ADDRESS", "PROVIDER_SESSION"),
+    "RELAXATION": ("SUPPORT", "PROVIDER_SESSION"),
+    "BACK_COMFORT": ("RECOVER", "PROVIDER_SESSION"),
+}
+
+#: §3 NO TARGET: тексты кнопок первого хода (``apps/channels/max/quick_actions.py``)
+#: и краткие формы владельца.
+NO_TARGET_PHRASES = (
+    "Беспокоят отёки",
+    "Последнее время сильно устаю",
+    "Хочу больше времени уделять себе",
+    "Готовлюсь к важному событию",
+    "Сильно устаю",
+    "Время себе",
+    "Важное событие",
+)
+
+
+class TestOwnerDefaultsJ2:
+    @pytest.mark.parametrize("target", tx.TARGETS)
+    def test_each_target_gets_the_owner_triple(self, target):
+        (triple,) = tx.triples_for((target,))
+        assert triple == tx.Triple(target, *OWNER_J2[target])
+
+
+class TestOwnerNoTargetPhrases:
+    @pytest.mark.parametrize("text", NO_TARGET_PHRASES)
+    def test_no_target_is_assigned(self, text):
+        assert tx.words(text), text
+        # empty-assert-ok: отсутствие цели — предмет теста (§3 NO TARGET)
+        assert tx.read_turn_needs(text).recognized_targets == ()
+
+    def test_no_owner_phrase_reaches_puffiness(self):
+        """J: PUFFINESS_REDUCTION на пилоте из утверждённых фраз недостижима — это честно."""
+        assert tx.TARGET_PHRASES, "словарь J1 пуст"
+        assert "PUFFINESS_REDUCTION" not in set(tx.TARGET_PHRASES.values())

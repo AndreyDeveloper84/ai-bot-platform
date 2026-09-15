@@ -305,3 +305,117 @@ class TestCandidateStaysInTheShadow:
 
         assert len(scanned) >= 500, f"скан пуст или не тот корень: {apps_root}"
         assert naming == ["apps/orchestrator/decision_policy.py"]
+
+
+# --------------------------------------------------------------------------- #
+# DRF-1945 — боевые словари: safety первой, NBA = NONE без fallback (§3, §5)   #
+# --------------------------------------------------------------------------- #
+#: Фраза владельца из J1 (§3 BACK_COMFORT).
+OWNER_BACK_PHRASE = "Хочу расслабить спину"
+#: §3: стоп-фразы I2 — дословно.
+OWNER_STOP_PHRASES = ("ноет спина", "болит спина", "простреливает", "онемение", "отдаёт")
+
+
+def _decide_production(text, *, safety_state="normal", reason_codes=READY, handoff=None):
+    """Боевые словари J1/J2 — без подстановки."""
+    return dp.decide(
+        _evidence(safety_state, reason_codes), handoff=handoff, needs=tx.read_turn_needs(text)
+    )
+
+
+class TestSafetyBlocksTheProductionChoice:
+    """§3/§5: цель может быть распознана, выбор NBA — нет. Вход готовности
+    недоступен, как на пилоте (τ не откалиброван), — ``candidate_nba`` тоже нет."""
+
+    @pytest.mark.parametrize(
+        "safety_state, handoff, status, reason",
+        [
+            ("stop", None, dp.PolicyStatus.SAFETY_BOUNDARY, dp.POLICY_SAFETY_STOP),
+            ("normal", "required", dp.PolicyStatus.SAFETY_BOUNDARY, dp.POLICY_HANDOFF_REQUIRED),
+            (
+                "unknown",
+                None,
+                dp.PolicyStatus.POLICY_INPUT_UNAVAILABLE,
+                dp.POLICY_SAFETY_VERDICT_UNAVAILABLE,
+            ),
+        ],
+    )
+    def test_boundary_or_unknown_safety_gives_no_nba(self, safety_state, handoff, status, reason):
+        verdict = _decide_production(
+            OWNER_BACK_PHRASE,
+            safety_state=safety_state,
+            handoff=handoff,
+            reason_codes=INPUT_UNAVAILABLE,
+        )
+
+        assert verdict.result_status is status
+        assert verdict.reason_codes == (reason,)
+        assert verdict.primary is None and verdict.alternatives == ()
+        assert verdict.candidate_nba is None
+
+    def test_clarify_recognizes_the_target_and_selects_nothing(self):
+        verdict = _decide_production(
+            OWNER_BACK_PHRASE, safety_state="clarify", reason_codes=INPUT_UNAVAILABLE
+        )
+
+        assert verdict.result_status is dp.PolicyStatus.SAFETY_CLARIFICATION_PENDING
+        assert verdict.recognized_targets == ("BACK_COMFORT",)
+        assert verdict.primary is None
+        assert verdict.candidate_nba is None
+
+    def test_pain_with_an_owner_phrase_recognizes_the_target_and_selects_nothing(self):
+        verdict = _decide_production(
+            "Хочу расслабить спину, но простреливает", reason_codes=INPUT_UNAVAILABLE
+        )
+
+        assert verdict.result_status is dp.PolicyStatus.SAFETY_CLARIFICATION_PENDING
+        assert verdict.reason_codes == (dp.POLICY_PAIN_SIGNAL,)
+        assert verdict.recognized_targets == ("BACK_COMFORT",)
+        assert verdict.primary is None
+        assert verdict.candidate_nba is None
+
+
+class TestOwnerStopPhrases:
+    @pytest.mark.parametrize("text", OWNER_STOP_PHRASES)
+    def test_stop_phrase_is_pending_without_nba(self, text):
+        verdict = _decide_production(text, reason_codes=INPUT_UNAVAILABLE)
+
+        assert verdict.result_status is dp.PolicyStatus.SAFETY_CLARIFICATION_PENDING
+        assert verdict.reason_codes == (dp.POLICY_PAIN_SIGNAL,)
+        assert verdict.primary is None
+        assert verdict.candidate_nba is None
+
+
+class TestOwnerButtonsWithoutATarget:
+    @pytest.mark.parametrize(
+        "text, status, reason",
+        [
+            (
+                "Беспокоят отёки",
+                dp.PolicyStatus.SAFETY_CLARIFICATION_PENDING,
+                dp.POLICY_HEALTH_SENSITIVE_CONTEXT,
+            ),
+            (
+                "Последнее время сильно устаю",
+                dp.PolicyStatus.NBA_TARGET_NOT_RECOGNIZED,
+                dp.POLICY_TARGET_NOT_RECOGNIZED,
+            ),
+            (
+                "Хочу больше времени уделять себе",
+                dp.PolicyStatus.NBA_TARGET_NOT_RECOGNIZED,
+                dp.POLICY_TARGET_NOT_RECOGNIZED,
+            ),
+            (
+                "Готовлюсь к важному событию",
+                dp.PolicyStatus.NBA_TARGET_NOT_RECOGNIZED,
+                dp.POLICY_TARGET_NOT_RECOGNIZED,
+            ),
+        ],
+    )
+    def test_button_without_a_target_selects_nothing(self, text, status, reason):
+        verdict = _decide_production(text)
+
+        assert verdict.result_status is status
+        assert verdict.reason_codes == (reason,)
+        assert verdict.primary is None
+        assert verdict.candidate_nba is None
