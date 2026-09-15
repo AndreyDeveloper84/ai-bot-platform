@@ -343,6 +343,22 @@ class TestWaterGates:
         assert resp.json()["error"] == "consent_required"
         fake.add_water.assert_not_awaited()
 
+    def test_the_gate_answers_before_the_body_is_read(
+        self, client: Client, bot_user: BotUser, no_consent
+    ):
+        # Как PATCH еды: без согласия ответ — 403, какое бы тело ни пришло.
+        patcher, fake = _patch_client(add=_FakeEntry())
+        with patcher:
+            resp = client.post(
+                _post_url(),
+                data="not json",
+                content_type="application/json",
+                HTTP_AUTHORIZATION=_init_data_header(bot_user.channel_user_id),
+            )
+        assert resp.status_code == 403
+        assert resp.json()["error"] == "consent_required"
+        fake.add_water.assert_not_awaited()
+
     def test_a_glass_with_consent_reaches_ayla(self, client: Client, bot_user: BotUser):
         patcher, fake = _patch_client(add=_FakeEntry())
         with patcher:

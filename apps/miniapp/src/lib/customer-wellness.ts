@@ -570,11 +570,20 @@ function mintQueueKey(ts: number): string {
  * indicator).
  */
 export function enqueueWaterLog(volume_ml = 250): number {
+  return enqueueWaterLogEntry(volume_ml).length;
+}
+
+/**
+ * DRF-1919 — то же, но возвращает и сам стакан: вызывающий узнаёт СВОЙ стакан
+ * в колбэках синхронизации по `key`, а не по «что-то приняли».
+ */
+export function enqueueWaterLogEntry(volume_ml = 250): { entry: QueuedWaterLog; length: number } {
   const queue = readWaterQueue();
   const ts = Date.now();
-  queue.push({ ts, volume_ml, key: mintQueueKey(ts) });
+  const entry: QueuedWaterLog = { ts, volume_ml, key: mintQueueKey(ts) };
+  queue.push(entry);
   writeWaterQueue(queue);
-  return queue.length;
+  return { entry, length: queue.length };
 }
 
 /**
@@ -657,13 +666,30 @@ export const DIARY_CONSENT_REQUIRED_TEXT =
   "Чтобы менять дневник, нужно согласие на обработку личных данных — дай его в чате с Ayla.";
 
 /**
- * DRF-1919 — что сказать, когда сервер навсегда отказал в стакане. Стакан
- * выброшен из очереди, то есть НЕ записан, — фраза говорит именно это.
+ * DRF-1919 — что сказать, когда сервер навсегда отказал в стаканах. Они
+ * выброшены из очереди, то есть НЕ записаны: фраза называет, сколько, откуда
+ * (`fromQueue` — не только что нажатый, а ждавший в очереди) и почему.
  */
-export function waterRefusalText(err: ApiError): string {
-  if (err.slug === "consent_required") return DIARY_CONSENT_REQUIRED_TEXT;
-  if (err.slug === "nutrition_disabled") return "Дневник воды сейчас выключен — стакан не записан.";
-  return "Стакан не записан — дневник его не принял.";
+export function waterRefusalText(
+  refused: readonly ApiError[],
+  { fromQueue = false }: { fromQueue?: boolean } = {},
+): string {
+  const n = refused.length;
+  const one = n === 1;
+  const where = fromQueue ? " из очереди" : "";
+  const head = one ? `Стакан${where} не записан` : `${n} ${glassesWord(n)}${where} не записаны`;
+  const slugs = new Set(refused.map((e) => e.slug));
+  if (slugs.has("consent_required")) return `${head}. ${DIARY_CONSENT_REQUIRED_TEXT}`;
+  if (slugs.has("nutrition_disabled")) return `${head}: дневник воды сейчас выключен.`;
+  return `${head} — дневник ${one ? "его" : "их"} не принял.`;
+}
+
+function glassesWord(n: number): string {
+  const mod10 = n % 10;
+  const mod100 = n % 100;
+  if (mod10 === 1 && mod100 !== 11) return "стакан";
+  if (mod10 >= 2 && mod10 <= 4 && (mod100 < 12 || mod100 > 14)) return "стакана";
+  return "стаканов";
 }
 
 /**
@@ -747,6 +773,11 @@ export async function correctFoodEntryGrams(entryId: string, grams: number): Pro
 function isPermanentRejection(err: unknown): boolean {
   if (!(err instanceof ApiError)) return false; // network / parse — retry
   if (err.status === 408 || err.status === 429) return false;
+  // DRF-1919: 401 — истекла сессия Mini App, а не отказ дневника: стакан
+  // уйдёт после перезахода. 404 без slug сервера (прокси, сервер без этого
+  // маршрута — `request` подставляет `http_error`) — тоже не отказ.
+  if (err.status === 401) return false;
+  if (err.status === 404 && err.slug === "http_error") return false;
   return err.status >= 400 && err.status < 500;
 }
 
@@ -777,11 +808,20 @@ let flushInFlight: Promise<number> | null = null;
  */
 export async function flushWaterQueue(
   /** DRF-1842: id принятой записи — чтобы вызывающий мог предложить её отменить. */
-  onAccepted?: (result: WaterLogResult) => void,
+  onAccepted?: (result: WaterLogResult, entry: QueuedWaterLog) => void,
   /** DRF-1919: постоянный отказ — стакан выброшен из очереди, экран обязан это сказать. */
-  onRejected?: (err: ApiError) => void,
+  onRejected?: (err: ApiError, entry: QueuedWaterLog) => void,
 ): Promise<number> {
-  if (flushInFlight) return flushInFlight;
+  if (flushInFlight) {
+    // DRF-1919: присоединившийся ждёт идущую синхронизацию. Остались стаканы
+    // (например, его собственный, добавленный во время неё) — он досылает их
+    // со СВОИМИ колбэками: иначе его стакан висел бы до следующего тапа, а
+    // отказ в нём никто бы не сказал.
+    const joined = await flushInFlight;
+    if (!onAccepted && !onRejected) return joined;
+    if (readWaterQueue().length === 0) return joined;
+    return flushWaterQueue(onAccepted, onRejected);
+  }
   flushInFlight = (async () => {
     const queue = readWaterQueue();
     if (queue.length === 0) return 0;
@@ -800,7 +840,7 @@ export async function flushWaterQueue(
           console.warn("[customer-wellness] water entry refused, dropping", err);
           if (onRejected && err instanceof ApiError) {
             try {
-              onRejected(err);
+              onRejected(err, entry);
             } catch {
               /* фраза об отказе — не часть синхронизации */
             }
@@ -815,7 +855,7 @@ export async function flushWaterQueue(
       // принятый стакан в «повторить отправку» — это был бы дубль.
       if (accepted && onAccepted) {
         try {
-          onAccepted(accepted);
+          onAccepted(accepted, entry);
         } catch {
           /* подсказка «отменить» — не часть синхронизации */
         }

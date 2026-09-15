@@ -3770,6 +3770,7 @@ def customer_wellness_water(request: HttpRequest) -> HttpResponse:
     malformed body or Ayla 4xx; 502 — Ayla outage/circuit-open.
     DRF-1919: 404 ``nutrition_disabled`` — дневник выключен; 403
     ``consent_required`` — нет согласия на персональные данные (как у еды).
+    Ворота — до разбора тела, как у PATCH еды.
     """
     import asyncio
     import json
@@ -3779,6 +3780,13 @@ def customer_wellness_water(request: HttpRequest) -> HttpResponse:
         NutritionAPIError,
         NutritionUnavailableError,
     )
+
+    bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
+    # DRF-1919: новый стакан — запись в дневник, за теми же воротами, что
+    # запись и правка еды: без согласия на персональные данные — 403.
+    refusal = _diary_entry_gate(bot_user, needs_consent=True)
+    if refusal is not None:
+        return refusal
 
     content_type = (request.content_type or "").split(";")[0].strip().lower()
     if content_type != "application/json" or not request.body:
@@ -3818,12 +3826,6 @@ def customer_wellness_water(request: HttpRequest) -> HttpResponse:
         if not re.fullmatch(r"[A-Za-z0-9._:-]+", idempotency_key):
             return _error("malformed", "idempotency_key has invalid characters", 400)
 
-    bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
-    # DRF-1919: новый стакан — запись в дневник, за теми же воротами, что
-    # запись и правка еды: без согласия на персональные данные — 403.
-    refusal = _diary_entry_gate(bot_user, needs_consent=True)
-    if refusal is not None:
-        return refusal
     external_id = external_user_id_for(bot_user)
 
     try:

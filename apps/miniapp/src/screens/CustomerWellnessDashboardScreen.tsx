@@ -87,6 +87,7 @@ import { formatDuration, formatMoney } from "../lib/format";
 import { visitAddressText } from "../lib/visit-address";
 import {
   enqueueWaterLog,
+  enqueueWaterLogEntry,
   flushWaterQueue,
   getRecentActivity,
   getWellnessToday,
@@ -210,8 +211,11 @@ export function CustomerWellnessDashboardScreen() {
     const onOnline = () => {
       setOnline(true);
       // Auto-flush water queue on reconnect (Tau §11.8).
-      void flushWaterQueue(undefined, (err) => setWaterToast(waterRefusalText(err))).then(() => {
+      // DRF-1919: отказанные стаканы из очереди называются числом, а не молча.
+      const refused: ApiError[] = [];
+      void flushWaterQueue(undefined, (err) => refused.push(err)).then(() => {
         setWaterQueueLen(readWaterQueue().length);
+        if (refused.length > 0) setWaterToast(waterRefusalText(refused, { fromQueue: true }));
       });
     };
     const onOffline = () => setOnline(false);
@@ -262,29 +266,39 @@ export function CustomerWellnessDashboardScreen() {
     // Online — also enqueue + immediately flush. This keeps the queue
     // as a single durable code path while STUB doesn't have a real
     // endpoint. Once W4 ships, the online branch will skip enqueue.
-    enqueueWaterLog(250);
-    // DRF-1919: «зачтён» — только когда сервер принял стакан. Отказ говорится
-    // своей фразой (стакан не записан); сбой сети — стакан ждёт в очереди.
-    let settled = false;
+    // DRF-1919: «зачтён» и «Отменить» — только про СВОЙ стакан этого тапа
+    // (сверка по key): в одну синхронизацию уходят и стаканы, ждавшие в
+    // очереди. Отказ в них не затирается принятием нового; свой стакан, не
+    // дошедший по сети, — «ждёт синхронизации».
+    const { entry: own } = enqueueWaterLogEntry(250);
+    const refusedOwn: ApiError[] = [];
+    const refusedQueued: ApiError[] = [];
+    let ownAccepted = false;
     void flushWaterQueue(
-      (accepted) => {
-        settled = true;
+      (accepted, entry) => {
+        if (entry.key !== own.key) return;
+        ownAccepted = true;
         setUndoEntryId(accepted.entry_id);
-        setWaterToast("+1 стакан зачтён");
       },
-      (err) => {
-        settled = true;
-        setUndoEntryId(null);
-        setWaterToast(waterRefusalText(err));
+      (err, entry) => {
+        (entry.key === own.key ? refusedOwn : refusedQueued).push(err);
       },
     ).then(() => {
-      const len = readWaterQueue().length;
-      setWaterQueueLen(len);
-      if (!settled && len > 0) {
-        setWaterToast(
-          `+1 стакан · ${len} ${ruPluralWater(len)} ${ruPluralWaterWaits(len)} синхронизации`,
-        );
+      const queue = readWaterQueue();
+      setWaterQueueLen(queue.length);
+      const parts: string[] = [];
+      if (ownAccepted) {
+        parts.push("+1 стакан зачтён");
+      } else if (queue.some((e) => e.key === own.key)) {
+        const len = queue.length;
+        parts.push(`+1 стакан · ${len} ${ruPluralWater(len)} ${ruPluralWaterWaits(len)} синхронизации`);
       }
+      if (refusedOwn.length > 0) {
+        parts.push(waterRefusalText([...refusedOwn, ...refusedQueued]));
+      } else if (refusedQueued.length > 0) {
+        parts.push(waterRefusalText(refusedQueued, { fromQueue: true }));
+      }
+      if (parts.length > 0) setWaterToast(parts.join(". "));
     });
   }, [online]);
 

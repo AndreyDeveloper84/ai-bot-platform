@@ -27,10 +27,12 @@ import {
   loadDiaryToday,
   readWaterQueue,
   undoWaterLog,
+  waterRefusalText,
   correctFoodEntryGrams,
   deleteFoodEntry,
   restoreFoodEntry,
 } from "./customer-wellness";
+import { ApiError } from "./api";
 
 const fetchMock = vi.fn();
 
@@ -198,6 +200,88 @@ describe("flushWaterQueue — the queue reaches Ayla", () => {
     expect(a).toBe(1);
     expect(b).toBe(1);
     expect(readWaterQueue()).toHaveLength(0);
+  });
+});
+
+describe("DRF-1919 — очередь воды: чей стакан, что повторять, что сказать", () => {
+  it("401 (истекла сессия) — стакан остаётся в очереди, это не отказ дневника", async () => {
+    enqueueWaterLog(250);
+    fetchMock.mockResolvedValueOnce(jsonResponse({ error: "stale", detail: "expired" }, 401));
+    const refused: string[] = [];
+
+    const synced = await flushWaterQueue(undefined, (err) => refused.push(err.slug));
+
+    expect(readWaterQueue()).toHaveLength(1);
+    expect(synced).toBe(0);
+    expect(refused).toEqual([]);
+  });
+
+  it("404 без slug сервера (прокси, сервер без маршрута) — стакан остаётся в очереди", async () => {
+    enqueueWaterLog(250);
+    fetchMock.mockResolvedValueOnce(new Response("Not Found", { status: 404 }));
+
+    const synced = await flushWaterQueue();
+
+    expect(readWaterQueue()).toHaveLength(1);
+    expect(synced).toBe(0);
+  });
+
+  it("колбэки получают сам стакан — вызывающий узнаёт свой по key", async () => {
+    enqueueWaterLog(250);
+    const own = readWaterQueue()[0];
+    fetchMock.mockImplementation(async () => okEntry("entry-1"));
+    const keys: (string | undefined)[] = [];
+
+    await flushWaterQueue((_r, entry) => keys.push(entry.key));
+
+    expect(own?.key).toBeTruthy();
+    expect(keys).toEqual([own?.key]);
+  });
+
+  it("присоединившийся к идущей синхронизации досылает свой стакан со своими колбэками", async () => {
+    enqueueWaterLog(250);
+    let release: () => void = () => {};
+    fetchMock.mockImplementationOnce(
+      () =>
+        new Promise<Response>((resolve) => {
+          release = () => resolve(okEntry("entry-1"));
+        }),
+    );
+    fetchMock.mockImplementation(async () => okEntry("entry-2"));
+
+    const first = flushWaterQueue();
+    enqueueWaterLog(500);
+    const seen: string[] = [];
+    const second = flushWaterQueue((r) => seen.push(r.entry_id));
+    release();
+    await Promise.all([first, second]);
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(seen).toEqual(["entry-2"]);
+    expect(readWaterQueue()).toHaveLength(0);
+  });
+
+  it("фраза отказа говорит, сколько стаканов не записано и откуда они", () => {
+    const consent = new ApiError(403, "consent_required", "no consent");
+    const bad = new ApiError(400, "ayla_bad_request", "rejected");
+
+    expect(waterRefusalText([consent])).toBe(
+      "Стакан не записан. Чтобы менять дневник, нужно согласие на обработку личных данных — дай его в чате с Ayla.",
+    );
+    expect(waterRefusalText([bad], { fromQueue: true })).toBe(
+      "Стакан из очереди не записан — дневник его не принял.",
+    );
+    expect(waterRefusalText([bad, bad, bad], { fromQueue: true })).toBe(
+      "3 стакана из очереди не записаны — дневник их не принял.",
+    );
+    expect(waterRefusalText([bad, bad, bad, bad, bad])).toBe(
+      "5 стаканов не записаны — дневник их не принял.",
+    );
+  });
+
+  it("404 без slug у отмены — сбой, а не «окно закрылось»", async () => {
+    fetchMock.mockResolvedValueOnce(new Response("Not Found", { status: 404 }));
+    await expect(undoWaterLog("entry-42")).rejects.toThrow();
   });
 });
 
