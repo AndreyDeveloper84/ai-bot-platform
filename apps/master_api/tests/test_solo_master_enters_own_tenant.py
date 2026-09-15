@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import json
 import time as time_module
+import uuid
 from datetime import timedelta
 
 import pytest
@@ -218,6 +219,62 @@ class TestTwoWorkingRowsAskThePerson:
             _resolve_bot_user(_Verified(CHANNEL_USER_ID, bot_slug="salon"), chosen_slug=salon.slug)
             == a
         )
+
+
+class TestTenantOrderIsTotalOnACreatedAtTie:
+    def test_tied_created_at_orders_by_tenant_pk_not_by_row_pk(self, salon_bot, salon):
+        """DRF-1907: порядок кандидатов — порядок ТЕНАНТОВ, ключ полный.
+
+        Эталон выше сортирует тенанты по ``(created_at, tenant.pk)``, а резолвер
+        разбивал ничью ``created_at`` по pk строки ``BotUser``. Тенанты в тестах
+        заводятся в одну и ту же долю секунды, и на грубых часах ничья
+        настоящая: локально эталон краснел 1 раз из 1060.
+
+        Ничья здесь принудительная, а pk подобраны так, чтобы порядок строк был
+        обратным порядку тенантов, и строка «старшего» тенанта заведена первой —
+        иначе и ключ по строке, и ключ без разбивки ничьей проходили бы
+        случайно. Красный ДО правки: ``[tie-high, tie-low]``.
+        """
+        from apps.identity.services.bot_user_resolver import SalonChoiceRequired
+
+        low = Tenant.all_objects.create(
+            id=uuid.UUID("10000000-0000-4000-8000-000000001907"),
+            slug="tie-low-1907",
+            name="Ничья A",
+        )
+        high = Tenant.all_objects.create(
+            id=uuid.UUID("f0000000-0000-4000-8000-000000001907"),
+            slug="tie-high-1907",
+            name="Ничья B",
+        )
+        Tenant.all_objects.filter(pk__in=[low.pk, high.pk]).update(
+            created_at=timezone.now() - timedelta(days=10)
+        )
+        row_high = BotUser.all_tenants.create(
+            id=uuid.UUID("01111111-0000-4000-8000-000000001907"),
+            tenant=high,
+            channel="max",
+            channel_user_id=CHANNEL_USER_ID,
+        )
+        row_low = BotUser.all_tenants.create(
+            id=uuid.UUID("f1111111-0000-4000-8000-000000001907"),
+            tenant=low,
+            channel="max",
+            channel_user_id=CHANNEL_USER_ID,
+        )
+        for tenant, row in ((low, row_low), (high, row_high)):
+            TenantStaff.all_tenants.create(
+                tenant=tenant, bot_user=row, role=TenantStaff.Role.OWNER, created_by=row
+            )
+        assert (
+            Tenant.all_objects.get(pk=low.pk).created_at
+            == Tenant.all_objects.get(pk=high.pk).created_at
+        )
+
+        with pytest.raises(SalonChoiceRequired) as exc:
+            _resolve_bot_user(_Verified(CHANNEL_USER_ID, bot_slug="salon"))
+
+        assert [t.slug for t in exc.value.tenants] == ["tie-low-1907", "tie-high-1907"]
 
 
 class TestMeAnswersForTheWorkingTenantOnTheSalonSurface:

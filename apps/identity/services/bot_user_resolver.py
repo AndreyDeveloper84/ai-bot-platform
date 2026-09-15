@@ -159,7 +159,9 @@ def resolve_working_bot_user(
     if len(working) == 1:
         return working[0]
 
-    working.sort(key=lambda row: (row.tenant.created_at, str(row.pk)))
+    # The order is the tenants' — a full key, the same as the candidates are shown
+    # in: a created_at tie is broken by the tenant pk, not the row pk (DRF-1907).
+    working.sort(key=lambda row: (row.tenant.created_at, str(row.tenant.pk)))
     if chosen_slug:
         for row in working:
             if row.tenant.slug == chosen_slug:
