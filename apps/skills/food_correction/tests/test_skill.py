@@ -670,8 +670,24 @@ class TestGramsReachTheDiaryEntry:
     def test_after_logging_the_weight_is_not_recomputed_here(self) -> None:
         result, written = self._answer("500", card=self.CARD, logged={"scan-1": "log-7"})
 
+        # Совет — текстом: этой карточке вес уже не передать (ключ повтора и
+        # отметка «записано» держат её и после удаления записи).
         assert result.reply_text == (
-            "Это блюдо уже в дневнике — чтобы поменять вес, удали запись и запиши заново."
+            "Это блюдо уже в дневнике — чтобы поменять вес, удали запись и запиши "
+            "заново текстом, например «борщ 500 г»."
+        )
+        assert written[-1] == ("food_correction", None)
+        assert not any(key == "food_scan_grams" for key, _ in written)
+
+    def test_a_scan_in_flight_does_not_take_a_new_weight(self) -> None:
+        # «В дневник» уже летит или ушёл по таймауту: исход неизвестен, и
+        # повтор ключа вернёт ту запись, какой бы вес ни назвали сейчас.
+        result, written = self._answer("300", card=self.CARD, logged={"scan-1": None})
+
+        assert result.reply_text == (
+            "Запись этого блюда уже отправлена в дневник, и я пока не знаю, дошла ли она, "
+            "— вес так не поменять. Открой дневник: если записи нет, нажми «✅ В дневник» "
+            "ещё раз; если есть — удали её и запиши заново текстом, например «борщ 300 г»."
         )
         assert written[-1] == ("food_correction", None)
         assert not any(key == "food_scan_grams" for key, _ in written)

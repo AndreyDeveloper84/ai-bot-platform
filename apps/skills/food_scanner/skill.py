@@ -72,7 +72,9 @@ The dish behind a card is stashed in ``Conversation.skill_state`` under
 
 DRF-1579: a weight named on the card before «✅ В дневник» lives in
 :data:`GRAMS_STATE_KEY` (written only by ``food_correction``), and which scans
-are already logged lives in :data:`LOGGED_STATE_KEY` (written only here). Each
+are already logged lives in :data:`LOGGED_STATE_KEY` (written only here, and
+marked in flight BEFORE ``log_meal`` — a weight named while the entry is on its
+way, or after a timeout with an unknown outcome, is not promised). Each
 subkey has one writer, so neither clobbers the other from a stale read, and a
 newer photo replacing the card does not lose a promised weight.
 
@@ -317,6 +319,9 @@ class FoodScannerSkill:
             # DRF-1579: вес, названный на карточке, — множитель от распознанной
             # порции; число исправлено человеком (§136).
             extra = {"portion_multiplier": corrected, "entry_origin": "photo_user_corrected"}
+        # «В полёте» ДО сетевого вызова: ответ про граммы, пришедший, пока запись
+        # летит, не пообещает вес, который в неё уже не попадёт.
+        _mark_logged(context, scan_id, None)
         try:
             log = asyncio.run(
                 get_nutrition_client().log_meal(
@@ -328,17 +333,21 @@ class FoodScannerSkill:
                 )
             )
         except FoodNotRecognizedError:
+            _clear_in_flight(context, scan_id)
             return SkillResult(
                 reply_text=NOT_RECOGNIZED_FALLBACK,
                 meta={"reply_kind": "food_scanner_log_not_recognized"},
             )
         except NutritionUnavailableError:
+            # Таймаут / 5xx / неизвестный исход: запись могла лечь — отметка
+            # «в полёте» остаётся.
             logger.warning("food_scanner.log.unavailable user=%s", external_id)
             return SkillResult(
                 reply_text=AYLA_DOWN_FALLBACK,
                 meta={"reply_kind": "food_scanner_log_unavailable"},
             )
         except NutritionAPIError:
+            _clear_in_flight(context, scan_id)
             logger.exception("food_scanner.log.error user=%s", external_id)
             return SkillResult(
                 reply_text=AYLA_DOWN_FALLBACK,
@@ -508,8 +517,9 @@ def _check_gates(
 #: карточки последнего фото — новое фото не теряет обещанный вес, а два
 #: писателя одного подключа затирали бы друг друга по старому чтению.
 GRAMS_STATE_KEY = "food_scan_grams"
-#: DRF-1579 — какие сканы уже записаны: ``{scan_id: log_id}``. Пишет ТОЛЬКО
-#: этот скилл (после успешного ``log_meal``).
+#: DRF-1579 — какие сканы уже записаны: ``{scan_id: log_id}``; ``None`` — запись
+#: отправлена, исход неизвестен. Пишет ТОЛЬКО этот скилл: «в полёте» до
+#: ``log_meal``, ``log_id`` после успеха; снимает, только когда каталог отказал.
 LOGGED_STATE_KEY = "food_scan_logged"
 _MAX_LOGGED = 10
 
@@ -523,7 +533,7 @@ GRAMS_OUT_OF_RANGE_TEXT = (
 )
 GRAMS_NOT_APPLIED_TEXT = (
     "Вес {grams} г не применился: это блюдо уже было в дневнике. "
-    "Чтобы поменять вес, удали запись и запиши заново."
+    "Чтобы поменять вес, удали запись и запиши заново текстом."
 )
 
 
@@ -557,13 +567,28 @@ def _correction_for(context: SkillContext, scan_id: str) -> dict | None:
     return entry if isinstance(entry, dict) else None
 
 
-def _mark_logged(context: SkillContext, scan_id: str, log_id: str) -> None:
-    """После записи скан «записан»: поправка веса больше не делает вид, что применится."""
+def _mark_logged(context: SkillContext, scan_id: str, log_id: str | None) -> None:
+    """Скан «записан» (``log_id``) или «в полёте» (``None``).
+
+    Поправка веса после этого больше не делает вид, что применится.
+    """
     current = _state(context).get(LOGGED_STATE_KEY)
     logged = dict(current) if isinstance(current, dict) else {}
     logged.pop(scan_id, None)
     logged[scan_id] = log_id
-    logged = dict(list(logged.items())[-_MAX_LOGGED:])
+    _write_logged(context, dict(list(logged.items())[-_MAX_LOGGED:]))
+
+
+def _clear_in_flight(context: SkillContext, scan_id: str) -> None:
+    """Каталог отказал — записи нет: снять «в полёте», вес снова можно назвать."""
+    current = _state(context).get(LOGGED_STATE_KEY)
+    logged = dict(current) if isinstance(current, dict) else {}
+    if logged.get(scan_id) is None:
+        logged.pop(scan_id, None)
+    _write_logged(context, logged)
+
+
+def _write_logged(context: SkillContext, logged: dict) -> None:
     try:
         from apps.conversations.services import write_skill_state
 

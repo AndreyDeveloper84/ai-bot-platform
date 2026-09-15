@@ -24,6 +24,7 @@ import pytest
 from apps.integrations.ayla import (
     FoodLogResponse,
     FoodNotRecognizedError,
+    NutritionAPIError,
     NutritionUnavailableError,
     ScanResponse,
 )
@@ -508,6 +509,7 @@ class TestCorrectedGramsReachTheLog:
 
         async def _log(**kwargs):
             captured.append(kwargs)
+            self.written_at_call = list(written)
             if raise_exc is not None:
                 raise raise_exc
             raw = {"entry_origin": echoed_origin} if "entry_origin" in kwargs else {}
@@ -537,6 +539,12 @@ class TestCorrectedGramsReachTheLog:
         assert captured[0]["entry_origin"] == "photo_user_corrected"
         assert ("food_scan_logged", {"scan-1": "log-1"}) in written
 
+    def test_the_scan_is_marked_in_flight_before_the_call(self) -> None:
+        # Ответ про граммы, пришедший, пока запись летит, должен это видеть.
+        self._to_diary(grams_map=self.GRAMS)
+
+        assert self.written_at_call == [("food_scan_logged", {"scan-1": None})]
+
     def test_without_a_correction_the_log_call_is_unchanged(self) -> None:
         _, captured, written = self._to_diary(
             card={"scan_id": "scan-1", "dish": "Борщ", "portion_g": 250}
@@ -561,7 +569,7 @@ class TestCorrectedGramsReachTheLog:
         assert captured[0]["portion_multiplier"] == 2.0
         assert result.reply_text == (
             "Записала: Борщ — 250 ккал. Вес 500 г не применился: это блюдо уже было в "
-            "дневнике. Чтобы поменять вес, удали запись и запиши заново."
+            "дневнике. Чтобы поменять вес, удали запись и запиши заново текстом."
         )
 
     def test_a_correction_the_catalogue_cannot_scale_is_not_logged(self) -> None:
@@ -579,15 +587,30 @@ class TestCorrectedGramsReachTheLog:
         assert captured[0]["scan_id"] == "scan-1"
         assert "portion_multiplier" not in captured[0]
 
-    def test_a_failed_log_is_not_marked_logged(self) -> None:
+    def test_an_uncertain_failure_leaves_the_scan_in_flight(self) -> None:
+        # Таймаут/5xx: запись могла лечь. Не «записано» и не «свободно».
         result, captured, written = self._to_diary(
             grams_map=self.GRAMS, raise_exc=NutritionUnavailableError("down")
         )
 
         assert len(captured) == 1
         assert result.meta["reply_kind"] == "food_scanner_log_unavailable"
-        # empty-assert-ok: log_meal raised, so no state write of any kind is expected
-        assert not any(key == "food_scan_logged" for key, _ in written)
+        assert written == [("food_scan_logged", {"scan-1": None})]
+
+    @pytest.mark.parametrize(
+        ("exc", "reply_kind"),
+        [
+            (FoodNotRecognizedError("nutrition_missing"), "food_scanner_log_not_recognized"),
+            (NutritionAPIError("http_400_unknown"), "food_scanner_log_error"),
+        ],
+    )
+    def test_a_definite_refusal_clears_the_in_flight_mark(self, exc, reply_kind) -> None:
+        # Каталог ответил отказом — записи нет, вес снова можно назвать.
+        result, _, written = self._to_diary(grams_map=self.GRAMS, raise_exc=exc)
+
+        assert result.meta["reply_kind"] == reply_kind
+        assert written[0] == ("food_scan_logged", {"scan-1": None})
+        assert written[-1] == ("food_scan_logged", {})
 
     def test_the_card_keeps_the_scan_portion(self) -> None:
         from types import SimpleNamespace

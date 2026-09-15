@@ -120,7 +120,19 @@ DEFERRED_ACK: dict[str, str] = {
 GRAMS_CARRIED_ACK = "Поняла: {value} г — запишу в дневник с этим весом."
 # Карточка уже записана: множитель для фото считается от порции скана, и
 # пересчёт сохранённой записи — отдельный лист (DRF-1917). Не «учла».
-GRAMS_AFTER_LOG_ACK = "Это блюдо уже в дневнике — чтобы поменять вес, удали запись и запиши заново."
+# Совет — текстом: ключ повтора и отметка «записано» держат эту карточку и
+# после удаления записи, так что «запиши заново» с неё не сработает.
+GRAMS_AFTER_LOG_ACK = (
+    "Это блюдо уже в дневнике — чтобы поменять вес, удали запись и запиши "
+    "заново текстом, например «{dish} {value} г»."
+)
+# «В дневник» уже отправлен, исход неизвестен (летит или ушёл по таймауту):
+# повтор ключа вернёт ту запись, какой бы вес ни назвали сейчас.
+GRAMS_IN_FLIGHT_ACK = (
+    "Запись этого блюда уже отправлена в дневник, и я пока не знаю, дошла ли она, "
+    "— вес так не поменять. Открой дневник: если записи нет, нажми «✅ В дневник» "
+    "ещё раз; если есть — удали её и запиши заново текстом, например «{dish} {value} г»."
+)
 # Скан не назвал порцию — множитель считать не от чего, выдумывать его нельзя.
 GRAMS_NO_PORTION_ACK = (
     "Поняла: {value} г. Не знаю, какую порцию я распознала на фото, — пересчитать "
@@ -133,7 +145,7 @@ GRAMS_OUT_OF_RANGE_ACK = (
     "Вес {value} г слишком далёк от распознанной порции ({portion} г) — так пересчитать "
     "не могу. Напиши вес ещё раз."
 )
-_MAX_CARRIED_CORRECTIONS = 5
+_MAX_CARRIED_CORRECTIONS = 20
 
 # Stored nothing (no consent / no link / write failed). A soft ack, never a
 # promise we did not keep.
@@ -410,7 +422,17 @@ def _carry_grams(
         return STALE_CARD_ACK, "food_correction_stale_card", False
     logged = state.get(LOGGED_STATE_KEY)
     if isinstance(logged, dict) and scan_id in logged:
-        return GRAMS_AFTER_LOG_ACK, "food_correction_grams_after_log", False
+        if logged[scan_id] is None:
+            return (
+                GRAMS_IN_FLIGHT_ACK.format(dish=dish, value=grams),
+                "food_correction_grams_in_flight",
+                False,
+            )
+        return (
+            GRAMS_AFTER_LOG_ACK.format(dish=dish, value=grams),
+            "food_correction_grams_after_log",
+            False,
+        )
     portion = card.get("portion_g")
     multiplier = corrected_multiplier(grams, portion)
     if multiplier is None:
