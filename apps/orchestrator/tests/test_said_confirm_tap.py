@@ -130,7 +130,7 @@ def _city_statuses(bot_user) -> list[str]:
     # ``content`` зашифрован (EncryptedJSONField): ключ по нему не ищется в
     # базе, только после чтения.
     return sorted(
-        row.status
+        str(row.status)
         for row in MemoryEntry.objects.filter(user_id=bot_user.ayla_user_id)
         if isinstance(row.content, dict) and row.content.get("key") == "city"
     )
