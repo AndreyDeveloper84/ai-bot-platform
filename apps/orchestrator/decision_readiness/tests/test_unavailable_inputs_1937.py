@@ -73,6 +73,8 @@ class TestEachConditionHasItsCode:
         assert len(set(eng.UNAVAILABLE_INPUT_CODES)) == 7
 
     def test_a_complete_input_has_none(self):
+        # Сначала присутствие на тех же данных: тот же вход со сломанным журналом не пуст.
+        assert _found(make_input(**CASES[0][1]))
         assert _found(make_input()) == ()
 
     @pytest.mark.parametrize(("code", "override"), CASES, ids=[c for c, _ in CASES])
