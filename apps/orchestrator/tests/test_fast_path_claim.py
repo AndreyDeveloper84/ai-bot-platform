@@ -198,6 +198,8 @@ class TestRosterIsTheRealOne:
         from apps.orchestrator.concierge import _tools_offered
 
         monkeypatch.setattr(concierge, "_has_said_facts", lambda _conversation: True)
+        # DRF-1923: и ход C05 — иначе confirm_said_fact отнимается по стадии.
+        monkeypatch.setattr(concierge, "execution_stage_turn", lambda _text, _conversation: True)
         offered = _tools_offered("болит спина", conversation=None)
         assert [id(spec) for spec in offered] == [id(spec) for spec in CONCIERGE_TOOL_SPECS]
 

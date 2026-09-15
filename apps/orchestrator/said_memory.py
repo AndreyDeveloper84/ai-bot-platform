@@ -417,7 +417,7 @@ def said_facts(bot_user: Any) -> list[SaidFact]:
     return out
 
 
-def render_said_block(bot_user: Any) -> str:
+def render_said_block(bot_user: Any, *, offer_confirm: bool = True) -> str:
     """Абзац system-prompt: что человек уже сказал о себе и как этим пользоваться."""
 
     facts = said_facts(bot_user)
@@ -431,12 +431,78 @@ def render_said_block(bot_user: Any) -> str:
         else:
             label = VISIT_CONTEXT_LABELS.get(fact.value, fact.value)
             lines.append(f"- когда удобно приходить — {label}{when} [key={KEY_VISIT_CONTEXT}]")
+    if not offer_confirm:
+        # DRF-1923, H7-B: до того, как понятна услуга, город и время не спрашивают —
+        # это вопросы выбора исполнителя (C05). Факты остаются контекстом.
+        lines.append(
+            "Не спрашивай это заново и не предлагай подтвердить сейчас: город и время — "
+            "вопросы выбора исполнителя, до того как понятна услуга, их не задают. "
+            "Не выдавай это за сегодняшний факт."
+        )
+        return "\n".join(lines)
     lines.append(
         "Не спрашивай это заново. Если относится к запросу — не спрашивай текстом, "
         f"вызови {CONFIRM_SAID_FACT_TOOL} с этим key: вопрос и кнопки нарисует бот. "
         "Назовёт другое — иди за новым и не спорь. Не выдавай это за сегодняшний факт."
     )
     return "\n".join(lines)
+
+
+# --------------------------------------------------------------------------- #
+# Стадия хода (DRF-1923, H7-B)                                                 #
+# --------------------------------------------------------------------------- #
+#: Типы ответа ассистента (``Message.action_type``), означающие ход C05 — поиск,
+#: показ или запись исполнителя. Имена инструментов консьержа (строка консьержа
+#: несёт выбранный инструмент) и ветки хендлера. Литералы, а не импорт из
+#: concierge: said_memory импортирует консьерж, не наоборот. Сторож сверяет их
+#: с инструментами консьержа.
+EXECUTION_ACTION_TYPES = frozenset(
+    {
+        "show_masters",
+        "start_booking",
+        "show_salons",
+        "show_services",
+        "discovery_show_masters_direct",
+        "catalog_card",
+        "discovery_more",
+        "booking_continued",
+    }
+)
+#: Окно «этого пути» — срок пригодности контекста разговора (владелец, B13).
+EXECUTION_WINDOW_HOURS = 2
+
+
+def execution_stage_turn(message_text: str, conversation: Any) -> bool:
+    """Ход C05: реплика называет услугу или в этом пути уже шёл поиск/запись.
+
+    Решение владельца 15.09, H7-B: в DISCOVERY до Recommendation не спрашивать
+    район, время и прочее — это C05. Подтверждение сказанного города и времени
+    допустимо только в ходе выбора исполнителя. Не бросает: при сбое — False
+    (не предлагать), это безопасная сторона.
+    """
+
+    try:
+        from apps.skills.menu.matching import mentions_service
+
+        if mentions_service(message_text or ""):
+            return True
+        if conversation is None:
+            return False
+        from datetime import timedelta
+
+        from django.utils import timezone
+
+        from apps.conversations.models import Message
+
+        return Message.all_tenants.filter(
+            conversation=conversation,
+            role="assistant",
+            action_type__in=EXECUTION_ACTION_TYPES,
+            created_at__gte=timezone.now() - timedelta(hours=EXECUTION_WINDOW_HOURS),
+        ).exists()
+    except Exception:  # noqa: BLE001 — без признака стадии подтверждение не предлагается
+        logger.warning("orchestrator.said_memory.stage_read_failed", exc_info=True)
+        return False
 
 
 # --------------------------------------------------------------------------- #
@@ -589,6 +655,9 @@ def confirm_said_fact(bot_user: Any, key: str) -> bool:
 
 
 __all__ = [
+    "EXECUTION_ACTION_TYPES",
+    "EXECUTION_WINDOW_HOURS",
+    "execution_stage_turn",
     "CONFIRM_SAID_FACT_TOOL",
     "CONFIRM_SAID_FACT_TOOL_SPEC",
     "OTHER_LABELS",

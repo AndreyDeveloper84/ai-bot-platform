@@ -122,6 +122,7 @@ from apps.orchestrator.said_memory import (
     CONFIRM_SAID_FACT_TOOL_SPEC,
     confirm_keyboard,
     confirm_offer,
+    execution_stage_turn,
     render_said_block,
     said_facts,
     said_question_id,
@@ -688,7 +689,9 @@ def _tools_offered(message_text: str, conversation: Any) -> list[dict[str, Any]]
     withheld: set[str] = set()
     if not offer_screening:
         withheld.add("health_screening")
-    if not _has_said_facts(conversation):
+    # DRF-1923, H7-B: подтверждение сказанного города и времени — только в ходе
+    # выбора исполнителя (C05), не в DISCOVERY.
+    if not (_has_said_facts(conversation) and execution_stage_turn(message_text, conversation)):
         withheld.add(CONFIRM_SAID_FACT_TOOL)
     if not withheld:
         return list(CONCIERGE_TOOL_SPECS)
@@ -1780,7 +1783,9 @@ def _concierge_turn(
     refusal_block = render_refusal_block(conversation)
     answer_block = render_answer_block(answered)
     # Бриф «Мозг» п.4 — что человек уже сказал о себе в прошлых разговорах.
-    said_block = render_said_block(bot_user)
+    said_block = render_said_block(
+        bot_user, offer_confirm=execution_stage_turn(message_text, conversation)
+    )
     turn_extra_system = "\n\n".join(
         part for part in (extra_system, refusal_block, answer_block, said_block) if part
     )

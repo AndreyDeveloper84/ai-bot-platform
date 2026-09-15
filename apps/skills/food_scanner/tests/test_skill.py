@@ -24,6 +24,7 @@ import pytest
 from apps.integrations.ayla import (
     FoodLogResponse,
     FoodNotRecognizedError,
+    NutritionAPIError,
     NutritionUnavailableError,
     ScanResponse,
 )
@@ -476,3 +477,170 @@ class TestMemoryOnTheCard:
 
         assert result.reply_text == REJECTED_ACK
         assert seen == ["scan-1"]
+
+
+class TestCorrectedGramsReachTheLog:
+    """DRF-1579 (F3): граммы, названные на карточке, пишутся в дневник.
+
+    Вес берётся из ``food_scan_grams`` по ``scan_id`` — не из карточки
+    последнего фото: новое фото не теряет обещанный вес. Множитель — от порции,
+    которую распознал скан. Происхождение — §136 ``photo_user_corrected``.
+    Отметку «записано» сканер пишет в свой подключ ``food_scan_logged``.
+    """
+
+    def _to_diary(
+        self,
+        *,
+        card: dict | None = None,
+        grams_map: dict | None = None,
+        echoed_origin: str | None = "photo_user_corrected",
+        raise_exc: Exception | None = None,
+        logged: dict | None = None,
+    ):
+        ctx = _context("cb:food:to_diary:scan-1")
+        state: dict = {}
+        if card is not None:
+            state["food_scan"] = card
+        if grams_map is not None:
+            state["food_scan_grams"] = grams_map
+        if logged is not None:
+            state["food_scan_logged"] = logged
+        ctx.conversation.skill_state = state
+        client = Mock()
+        captured: list[dict] = []
+        written: list = []
+
+        async def _log(**kwargs):
+            captured.append(kwargs)
+            self.written_at_call = list(written)
+            if raise_exc is not None:
+                raise raise_exc
+            raw = {"entry_origin": echoed_origin} if "entry_origin" in kwargs else {}
+            return FoodLogResponse(
+                log_id="log-1", dish_name="Борщ", meal_type="other", calories=250.0, raw=raw
+            )
+
+        client.log_meal = _log
+        with (
+            patch("apps.skills.food_scanner.skill.get_nutrition_client", return_value=client),
+            patch(
+                "apps.conversations.services.write_skill_state",
+                side_effect=lambda conv, key, value: written.append((key, value)),
+            ),
+        ):
+            result = FoodScannerSkill().handle(ctx)
+        return result, captured, written
+
+    GRAMS = {"scan-1": {"grams": 500, "portion_g": 250}}
+
+    def test_corrected_grams_set_the_portion_and_the_origin(self) -> None:
+        result, captured, written = self._to_diary(grams_map=self.GRAMS)
+
+        assert result.reply_text == "Записала: Борщ — 250 ккал."
+        assert captured[0]["scan_id"] == "scan-1"
+        assert captured[0]["portion_multiplier"] == 2.0
+        assert captured[0]["entry_origin"] == "photo_user_corrected"
+        assert ("food_scan_logged", {"scan-1": "log-1"}) in written
+
+    def test_the_scan_is_marked_in_flight_before_the_call(self) -> None:
+        # Ответ про граммы, пришедший, пока запись летит, должен это видеть.
+        self._to_diary(grams_map=self.GRAMS)
+
+        assert self.written_at_call == [("food_scan_logged", {"scan-1": None})]
+
+    def test_without_a_correction_the_log_call_is_unchanged(self) -> None:
+        _, captured, written = self._to_diary(
+            card={"scan_id": "scan-1", "dish": "Борщ", "portion_g": 250}
+        )
+
+        assert captured[0]["scan_id"] == "scan-1"
+        assert "portion_multiplier" not in captured[0]
+        assert "entry_origin" not in captured[0]
+        assert ("food_scan_logged", {"scan-1": "log-1"}) in written
+
+    def test_a_newer_photo_does_not_lose_the_promised_weight(self) -> None:
+        newer = {"scan_id": "scan-2", "dish": "Суп", "portion_g": 300}
+
+        _, captured, _ = self._to_diary(card=newer, grams_map=self.GRAMS)
+
+        assert captured[0]["portion_multiplier"] == 2.0
+
+    def test_a_replayed_key_that_returns_the_old_entry_says_the_weight_did_not_apply(self) -> None:
+        # Первый тап ушёл по таймауту, запись уже была: каталог вернул прежнюю строку.
+        result, captured, _ = self._to_diary(grams_map=self.GRAMS, echoed_origin=None)
+
+        assert captured[0]["portion_multiplier"] == 2.0
+        assert result.reply_text == (
+            "Записала: Борщ — 250 ккал. Вес 500 г не применился: это блюдо уже было в "
+            "дневнике. Чтобы поменять вес, удали запись и запиши заново текстом."
+        )
+
+    def test_a_correction_the_catalogue_cannot_scale_is_not_logged(self) -> None:
+        result, captured, _ = self._to_diary(grams_map={"scan-1": {"grams": 5000, "portion_g": 10}})
+
+        assert result.reply_text == (
+            "Вес 5000 г слишком далёк от распознанной порции — пересчитать не могу. "
+            "Нажми «✏️ Уточнить» → «⚖️ Грамм» и укажи вес ещё раз."
+        )
+        assert captured == []
+
+    def test_a_correction_for_another_scan_is_not_applied(self) -> None:
+        _, captured, _ = self._to_diary(grams_map={"scan-2": {"grams": 500, "portion_g": 250}})
+
+        assert captured[0]["scan_id"] == "scan-1"
+        assert "portion_multiplier" not in captured[0]
+
+    def test_an_uncertain_failure_leaves_the_scan_in_flight(self) -> None:
+        # Таймаут/5xx: запись могла лечь. Не «записано» и не «свободно».
+        result, captured, written = self._to_diary(
+            grams_map=self.GRAMS, raise_exc=NutritionUnavailableError("down")
+        )
+
+        assert len(captured) == 1
+        assert result.meta["reply_kind"] == "food_scanner_log_unavailable"
+        assert written == [("food_scan_logged", {"scan-1": None})]
+
+    def test_a_repeat_tap_does_not_downgrade_a_logged_scan(self) -> None:
+        # Первый тап записал, человек видел «Записала»; повторный ушёл по таймауту.
+        # Скан не должен стать «в полёте» — иначе ответ про вес скажет «не знаю,
+        # дошла ли» сразу после «Записала».
+        result, captured, written = self._to_diary(
+            logged={"scan-1": "log-0"}, raise_exc=NutritionUnavailableError("down")
+        )
+
+        assert len(captured) == 1
+        assert result.meta["reply_kind"] == "food_scanner_log_unavailable"
+        # empty-assert-ok: the scan is already logged and the repeat call failed — no mark to write
+        assert not any(value == {"scan-1": None} for _, value in written)
+
+    @pytest.mark.parametrize(
+        ("exc", "reply_kind"),
+        [
+            (FoodNotRecognizedError("nutrition_missing"), "food_scanner_log_not_recognized"),
+            (NutritionAPIError("http_400_unknown"), "food_scanner_log_error"),
+        ],
+    )
+    def test_a_definite_refusal_clears_the_in_flight_mark(self, exc, reply_kind) -> None:
+        # Каталог ответил отказом — записи нет, вес снова можно назвать.
+        result, _, written = self._to_diary(grams_map=self.GRAMS, raise_exc=exc)
+
+        assert result.meta["reply_kind"] == reply_kind
+        assert written[0] == ("food_scan_logged", {"scan-1": None})
+        assert written[-1] == ("food_scan_logged", {})
+
+    def test_the_card_keeps_the_scan_portion(self) -> None:
+        from types import SimpleNamespace
+
+        from apps.skills.food_scanner.skill import _stash_last_card
+
+        ctx = _context("")
+        written: list = []
+        with patch(
+            "apps.conversations.services.write_skill_state",
+            side_effect=lambda conv, key, value: written.append((key, value)),
+        ):
+            _stash_last_card(
+                ctx, SimpleNamespace(scan_id="scan-9", dish_name="Плов", portion_g=320.0)
+            )
+
+        assert written == [("food_scan", {"scan_id": "scan-9", "dish": "Плов", "portion_g": 320.0})]
