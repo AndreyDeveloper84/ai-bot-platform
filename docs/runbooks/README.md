@@ -27,6 +27,7 @@ When the time comes to actually run a procedure (rolling back the canary at 02:3
 | [`admin-access.md`](admin-access.md) | draft | Controlled Pilot (DRF-1023) | Platform Lead |
 | [`connect-five-salons-drf1510.md`](connect-five-salons-drf1510.md) | draft | Pilot 2026-09-05 (DRF-1510) | Platform Lead |
 | [`solo-master-manual-setup-drf1925.md`](solo-master-manual-setup-drf1925.md) | draft | Pilot 2026-09-15 (DRF-1925) | Platform Lead |
+| [`salon-operator-onboarding.md`](salon-operator-onboarding.md) | draft | Controlled Pilot 2026-09-15 (раздел Q) | Platform Lead |
 
 ## Setup (one-time procedures)
 
