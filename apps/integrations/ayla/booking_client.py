@@ -761,6 +761,7 @@ class AylaBookingHTTPClient:
         params: dict[str, Any] | None = None,
         json_body: dict[str, Any] | None = None,
         idempotency_key: str | None = None,
+        files: dict[str, Any] | None = None,
     ) -> httpx.Response:
         """Issue one request through the breaker. Maps network/timeout to
         :class:`BookingUnavailableError`; 429 is retried with backoff.
@@ -785,6 +786,10 @@ class AylaBookingHTTPClient:
 
         url = self._urls.build(f"internal/{endpoint.lstrip('/')}")
         headers = self._headers(external_user_id=external_user_id)
+        if files is not None:
+            # DRF-1813: multipart — границу ставит httpx; навязанный JSON-тип
+            # сделал бы тело неразборчивым для каталога.
+            headers.pop("Content-Type", None)
         if idempotency_key:
             headers["X-Idempotency-Key"] = idempotency_key
 
@@ -798,7 +803,9 @@ class AylaBookingHTTPClient:
 
         for attempt in range(RATE_LIMIT_MAX_RETRIES + 1):
             try:
-                resp = http.request(method, url, headers=headers, params=params, json=json_body)
+                resp = http.request(
+                    method, url, headers=headers, params=params, json=json_body, files=files
+                )
             except (httpx.TimeoutException, httpx.NetworkError) as exc:
                 self._circuit.record_failure(now=now)
                 logger.warning("booking_client.%s.network err=%s", endpoint, type(exc).__name__)
@@ -1451,6 +1458,50 @@ class AylaBookingHTTPClient:
                 "is_active": "true",
             },
         )
+
+    # ── M21 профиль мастера (DRF-1813; каталог #455) ─────────────────────────
+    # Субъект — сам мастер. Лимиты и отказы — у каталога: имя ≥ 2 символов,
+    # «о себе» ≤ 500, аватар JPEG/PNG/WebP ≤ 5 МБ и квадрат ±2 %.
+
+    def patch_specialist_profile(
+        self,
+        *,
+        specialist_id: str,
+        external_user_id: str,
+        display_name: str | None = None,
+        bio: str | None = None,
+    ) -> dict[str, Any]:
+        """``PATCH internal/specialists/{id}/profile/`` — только переданные поля."""
+        body: dict[str, Any] = {}
+        if display_name is not None:
+            body["display_name"] = display_name
+        if bio is not None:
+            body["bio"] = bio
+        resp = self._request(
+            "PATCH",
+            f"specialists/{specialist_id}/profile/",
+            json_body=body,
+            external_user_id=external_user_id,
+        )
+        return self._ok(resp, success=(200,))
+
+    def upload_specialist_avatar(
+        self,
+        *,
+        specialist_id: str,
+        external_user_id: str,
+        filename: str,
+        content: bytes,
+        content_type: str,
+    ) -> dict[str, Any]:
+        """``POST internal/specialists/{id}/media/avatar/`` — multipart ``image``."""
+        resp = self._request(
+            "POST",
+            f"specialists/{specialist_id}/media/avatar/",
+            files={"image": (filename, content, content_type)},
+            external_user_id=external_user_id,
+        )
+        return self._ok(resp, success=(200,))
 
     # ── M8 выбор услуг мастера и его цена (DRF-1895; каталог #443 / #444) ─────
     # Субъект — сам мастер: профиль в URL обязан быть его собственным, иначе

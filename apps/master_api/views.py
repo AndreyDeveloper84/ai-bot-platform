@@ -40,7 +40,6 @@ import logging
 import re
 import uuid
 from datetime import datetime, timedelta, timezone as dt_timezone
-from pathlib import Path
 from typing import Any
 
 from django.conf import settings
@@ -140,7 +139,6 @@ from apps.master_api.auth import (
 logger = logging.getLogger(__name__)
 
 
-MAX_BIO_LENGTH = 280
 """Per master-mobile §M0 Step 3 — twitter-length bio limit."""
 
 
@@ -871,50 +869,49 @@ def onboarding_reject(request: HttpRequest) -> HttpResponse:
 # --- PATCH /onboarding/profile --------------------------------------------
 
 
-def _save_master_photo(master: CatalogMaster, file_obj: Any) -> str:
-    """Save the uploaded photo + return the absolute URL.
-
-    Phase 1 (this PR): raw upload only, no resize pipeline. Lives under
-    ``MEDIA_ROOT/master_photos/<master_id>.<ext>`` and the URL is
-    ``MEDIA_URL + master_photos/<master_id>.<ext>``.
-
-    TODO(master PR 4+): proper resize pipeline (Pillow → 800×800 JPEG
-    + thumbnail). Track via media-pipeline ticket. For now we accept
-    PNG/JPEG/WEBP and trust the extension; content-type sniffing is
-    a follow-up.
-    """
-
-    ext = (Path(file_obj.name).suffix or ".jpg").lower()
-    if ext not in (".jpg", ".jpeg", ".png", ".webp"):
-        ext = ".jpg"
-
-    media_root = Path(getattr(settings, "MEDIA_ROOT", "media"))
-    media_url = getattr(settings, "MEDIA_URL", "/media/")
-    photos_dir = media_root / "master_photos"
-    photos_dir.mkdir(parents=True, exist_ok=True)
-
-    out_path = photos_dir / f"{master.id}{ext}"
-    with open(out_path, "wb") as f:
-        for chunk in file_obj.chunks():
-            f.write(chunk)
-
-    return f"{media_url.rstrip('/')}/master_photos/{master.id}{ext}"
+def _profile_refusal(exc: BookingBadRequestError) -> HttpResponse:
+    """Отказы каталога на запись профиля — по имени, данные под ``details``."""
+    details = exc.details or {}
+    if exc.status_code == 403:
+        return _error("not_linked", "Профиль ещё не связан с каталогом.", 403)
+    if exc.status_code == 404:
+        if exc.code == "SPECIALIST_NOT_FOUND":
+            return _error("specialist_not_found", "Профиль мастера не найден в каталоге.", 404)
+        return _error("not_found", "Не найдено.", 404)
+    if exc.status_code == 400:
+        # Не ``_error_with``: у него третий параметр назван ``status`` — ответ
+        # собран напрямую, чтобы поле каталога с тем же именем не столкнулось.
+        return JsonResponse(
+            {
+                "error": "validation_error",
+                "detail": "Каталог не принял профиль.",
+                "details": dict(details),
+            },
+            status=400,
+        )
+    return _error("catalog_refused", "Каталог отказал.", exc.status_code or 400)
 
 
 @csrf_exempt
 @require_http_methods(["PATCH"])
 @require_master_init_data
 def onboarding_profile(request: HttpRequest) -> HttpResponse:
-    """M0 Step 3 — populate bio + photo. Idempotent.
+    """«О себе» и фото мастера — прокси в каталог (DRF-1813, M21; каталог #455).
 
-    Accepts multipart (for photo) OR JSON (bio-only). The bio comes from
-    either ``request.POST['bio']`` (multipart) or the JSON body.
+    Принимает multipart (с фото) или JSON (только текст). Владелец полей —
+    каталог: «о себе» уходит в ``PATCH …/profile/``, фото — в
+    ``POST …/media/avatar/``. Лимиты и отказы — его (имя ≥ 2, «о себе» ≤ 500,
+    форматы, квадрат); бот своих не держит и файлов не пишет. Зеркало
+    ``CatalogMaster`` берёт ОТВЕТ каталога сразу — кабинет видит правку, не
+    дожидаясь синхронизации. Аудит ``master.profile_initialized`` — только
+    после успешной записи.
     """
 
     master: CatalogMaster = request.master  # type: ignore[attr-defined]
     bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
 
-    bio: str | None = None
+    bio: Any = None
+    display_name: Any = None
     photo_file = None
 
     content_type = request.headers.get("Content-Type", "")
@@ -932,33 +929,62 @@ def onboarding_profile(request: HttpRequest) -> HttpResponse:
             return _error("bad_request", "malformed multipart body", 400)
         if "bio" in post:
             bio = str(post["bio"])
+        if "display_name" in post:
+            display_name = str(post["display_name"])
         photo_file = files.get("photo")
     else:
         body = _parse_json_body(request)
         if isinstance(body, JsonResponse):
             return body
-        if "bio" in body:
-            bio = body["bio"]
+        bio = body.get("bio")
+        display_name = body.get("display_name")
 
+    if bio is not None and not isinstance(bio, str):
+        return _error("bad_request", "bio must be a string", 400)
+    if display_name is not None and not isinstance(display_name, str):
+        return _error("bad_request", "display_name must be a string", 400)
+
+    client = get_ayla_booking_client()
+    actor = external_user_id_for(bot_user)
     fields_populated: list[str] = []
     update_fields: list[str] = []
-
-    if bio is not None:
-        if len(bio) > MAX_BIO_LENGTH:
-            return _error(
-                "bad_request",
-                f"bio exceeds {MAX_BIO_LENGTH} characters",
-                400,
+    try:
+        if bio is not None or display_name is not None:
+            state = client.patch_specialist_profile(
+                specialist_id=str(master.id),
+                external_user_id=actor,
+                display_name=display_name,
+                bio=bio,
             )
-        master.bio = bio
-        update_fields.append("bio")
-        if bio.strip():
-            fields_populated.append("bio")
-
-    if photo_file is not None:
-        master.photo_url = _save_master_photo(master, photo_file)
-        update_fields.append("photo_url")
-        fields_populated.append("photo")
+            if bio is not None:
+                master.bio = str(state.get("bio") or "")
+                update_fields.append("bio")
+                if master.bio.strip():
+                    fields_populated.append("bio")
+            if display_name is not None:
+                master.name = str(state.get("display_name") or master.name)
+                update_fields.append("name")
+                fields_populated.append("name")
+        if photo_file is not None:
+            state = client.upload_specialist_avatar(
+                specialist_id=str(master.id),
+                external_user_id=actor,
+                filename=photo_file.name or "photo",
+                content=photo_file.read(),
+                content_type=photo_file.content_type or "application/octet-stream",
+            )
+            master.photo_url = str(state.get("avatar_url") or "")
+            update_fields.append("photo_url")
+            fields_populated.append("photo")
+    except BookingBadRequestError as exc:
+        # Что каталог уже принял до отказа — в зеркало; аудита нет.
+        if update_fields:
+            master.save(update_fields=update_fields)
+        return _profile_refusal(exc)
+    except BookingUnavailableError:
+        if update_fields:
+            master.save(update_fields=update_fields)
+        return _error("catalog_unavailable", "Каталог сейчас недоступен — попробуйте позже.", 503)
 
     if update_fields:
         master.save(update_fields=update_fields)

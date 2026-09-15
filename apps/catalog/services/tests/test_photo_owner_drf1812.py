@@ -11,10 +11,9 @@
   URL → дословно (относительный тоже дословно, хост не выдумывается);
 - upsert: фото каталога переписывает платформенное; повторный sync с новым
   фото — новое; ``bio`` как раньше — зеркало целиком;
-- переходное правило до M21: у каталога фото нет (``""``) или ключа нет
-  (``None``) — загруженное в кабинете фото не стирается (иначе оно
-  пропадало бы при каждой синхронизации, а положить его в каталог пока
-  некуда);
+- с M21 (DRF-1813) фото пишется в каталог, и зеркало без оговорок: пустое
+  фото каталога (``""``) стирает платформенное; нет ключа (``None``,
+  старый каталог без поля) — поле не трогается;
 - readiness читает то же поле — фото из каталога закрывает пункт
   ``profile``.
 """
@@ -99,19 +98,31 @@ class TestCatalogOwnsThePhoto:
         upsert_specialists(tenant, [_dto(mid, avatar_url=AVATAR, bio="")])
         assert CatalogMaster.all_tenants.get(id=mid).bio == ""
 
-    @pytest.mark.parametrize("avatar_url", ["", None])
-    def test_until_m21_a_platform_photo_survives_when_the_catalog_has_none(
-        self, tenant: Tenant, avatar_url
-    ):
-        """Переходное правило: положить фото в каталог пока некуда (M21), и
-        стирать загруженное в кабинете при каждом sync было бы регрессом."""
+    def test_with_m21_an_empty_catalog_photo_clears_the_mirror(self, tenant: Tenant):
+        """DRF-1813 (M21): у каталога есть ручка записи фото — переходное правило
+        снято, пустое фото каталога стирает платформенное. Замер перед
+        переворотом (главное окно, пилот ruvds-o1mqo, 15.09 ~06:00 UTC):
+        ``photo_url`` непустой у 0 из 34 мастеров — терять было нечего."""
         mid = str(uuid.uuid4())
         upsert_specialists(tenant, [_dto(mid, avatar_url=None)])
         m = CatalogMaster.all_tenants.get(id=mid)
         m.photo_url = "https://bot.test/master_photos/mine.jpg"
         m.save(update_fields=["photo_url"])
 
-        upsert_specialists(tenant, [_dto(mid, avatar_url=avatar_url)])
+        upsert_specialists(tenant, [_dto(mid, avatar_url="")])
+        m.refresh_from_db()
+        assert m.photo_url == ""
+
+    def test_an_absent_avatar_key_leaves_the_mirror_alone(self, tenant: Tenant):
+        """Нет ключа ``avatar`` — это каталог без поля, а не «фото нет»: парсер
+        различает ``None`` и ``""``, и отсутствие не превращается в стирание."""
+        mid = str(uuid.uuid4())
+        upsert_specialists(tenant, [_dto(mid, avatar_url=None)])
+        m = CatalogMaster.all_tenants.get(id=mid)
+        m.photo_url = "https://bot.test/master_photos/mine.jpg"
+        m.save(update_fields=["photo_url"])
+
+        upsert_specialists(tenant, [_dto(mid, avatar_url=None)])
         m.refresh_from_db()
         assert m.photo_url == "https://bot.test/master_photos/mine.jpg"
 
