@@ -53,6 +53,28 @@ def _enable_nutrition(settings):
     settings.FOOD_PHOTO_SCAN_ENABLED = True
 
 
+@pytest.fixture(autouse=True)
+def _personal_data_granted():
+    """DRF-1948: запись дневника требует PERSONAL_DATA (как запись еды текстом).
+
+    Поведенческие тесты идут с выданным согласием; отказ пришпилен в
+    ``TestGates`` фикстурой ``no_personal_data``. Без подмены предикат
+    fail-closed отказал бы Mock-пользователю и скрыл бы всё остальное.
+    """
+    with patch(
+        "apps.orchestrator.personal_surface.personal_records_consent_open", return_value=True
+    ) as granted:
+        yield granted
+
+
+@pytest.fixture
+def no_personal_data():
+    with patch(
+        "apps.orchestrator.personal_surface.personal_records_consent_open", return_value=False
+    ) as missing:
+        yield missing
+
+
 def _context(
     text: str = "",
     *,
@@ -404,6 +426,65 @@ class TestGates:
         ctx.bot_user.food_scanner_consent_at = None
         result = FoodScannerSkill().handle(ctx)
         assert result.reply_text == NUTRITION_OFF_FALLBACK
+
+    # ── DRF-1948: PERSONAL_DATA перед согласием сканера ─────────────────────
+
+    def test_scanner_consent_without_personal_data_refuses_the_photo(
+        self, settings, no_personal_data
+    ) -> None:
+        from apps.skills.food_clarify.text_entry import CONSENT_TEXT
+
+        ctx = _context(has_attachments=True, photo_bytes=b"jpeg")
+        assert isinstance(ctx.bot_user.food_scanner_consent_at, datetime)  # согласие сканера есть
+        with patch(
+            "apps.skills.food_scanner.skill.get_nutrition_client",
+            side_effect=AssertionError("Ayla MUST NOT be called without PERSONAL_DATA"),
+        ):
+            result = FoodScannerSkill().handle(ctx)
+        assert result.reply_text == CONSENT_TEXT
+        assert result.meta.get("reply_kind") == "food_scanner_personal_data_required"
+
+    def test_scanner_consent_without_personal_data_refuses_to_diary(
+        self, settings, no_personal_data
+    ) -> None:
+        from apps.skills.food_clarify.text_entry import CONSENT_TEXT
+
+        ctx = _context("cb:food:to_diary:scan-1")
+        assert isinstance(ctx.bot_user.food_scanner_consent_at, datetime)
+        with patch(
+            "apps.skills.food_scanner.skill.get_nutrition_client",
+            side_effect=AssertionError("log_meal MUST NOT run without PERSONAL_DATA"),
+        ):
+            result = FoodScannerSkill().handle(ctx)
+        assert result.reply_text == CONSENT_TEXT
+        assert result.meta.get("reply_kind") == "food_scanner_personal_data_required"
+
+    def test_personal_data_is_checked_before_the_scanner_consent(
+        self, settings, no_personal_data
+    ) -> None:
+        from apps.skills.food_clarify.text_entry import CONSENT_TEXT
+
+        ctx = _context(has_attachments=True, photo_bytes=b"jpeg")
+        ctx.bot_user.food_scanner_consent_at = None
+        result = FoodScannerSkill().handle(ctx)
+        assert result.reply_text == CONSENT_TEXT
+
+    def test_nutrition_off_beats_personal_data(self, settings, no_personal_data) -> None:
+        settings.NUTRITION_ENABLED = False
+        ctx = _context(has_attachments=True, photo_bytes=b"jpeg")
+        result = FoodScannerSkill().handle(ctx)
+        assert result.reply_text == NUTRITION_OFF_FALLBACK
+
+    def test_photo_scan_off_beats_personal_data(self, settings, no_personal_data) -> None:
+        settings.FOOD_PHOTO_SCAN_ENABLED = False
+        ctx = _context(has_attachments=True, photo_bytes=b"jpeg")
+        result = FoodScannerSkill().handle(ctx)
+        assert result.reply_text == PHOTO_SCAN_OFF_FALLBACK
+
+    def test_reject_works_without_personal_data(self, settings, no_personal_data) -> None:
+        ctx = _context("cb:food:reject:scan-1")
+        result = FoodScannerSkill().handle(ctx)
+        assert result.reply_text == REJECTED_ACK
 
     def test_mock_shaped_consent_does_not_silently_pass(self, settings) -> None:
         # Адверсариальный обзор PRE_PILOT #2 — bare Mock() auto-generates

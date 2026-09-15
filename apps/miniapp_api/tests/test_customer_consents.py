@@ -1002,3 +1002,48 @@ def test_hints_off_stops_the_scheduler(
         result = send_post_visit_followups()
     mock_send.assert_not_called()
     assert result["sent"] == 0
+
+
+def test_revocation_closes_the_food_scanner(
+    client: Client, bot_user, revoke_url, auth, settings
+) -> None:
+    """DRF-1948: отзыв хранения данных снимает и согласие сканера.
+
+    Колонка ``food_scanner_consent_at`` оставалась после отзыва, и «В дневник»
+    продолжал писать в дневник Ayla. Проверяется колонка И сам навык на живом
+    пользователе: запись не доходит до ``log_meal``.
+    """
+    from unittest.mock import AsyncMock, Mock
+
+    from django.utils import timezone
+
+    from apps.skills.base import SkillContext
+    from apps.skills.food_scanner.skill import FoodScannerSkill
+
+    settings.NUTRITION_ENABLED = True
+    BotUser.all_tenants.filter(pk=bot_user.pk).update(food_scanner_consent_at=timezone.now())
+    bot_user.refresh_from_db()
+    assert bot_user.food_scanner_consent_at is not None  # есть что снимать
+
+    res = _revoke(client, revoke_url, auth)
+    assert res.status_code == 200
+
+    bot_user.refresh_from_db()
+    assert bot_user.food_scanner_consent_at is None
+
+    ayla = Mock()
+    ayla.log_meal = AsyncMock()
+    conversation = Mock(id="conv-revoked")
+    conversation.skill_state = {}
+    del conversation.last_photo_bytes
+    ctx = SkillContext(
+        conversation=conversation, bot_user=bot_user, message_text="cb:food:to_diary:scan-1"
+    )
+    with patch("apps.skills.food_scanner.skill.get_nutrition_client", return_value=ayla):
+        result = FoodScannerSkill().handle(ctx)
+
+    assert result.meta.get("reply_kind") in {
+        "food_scanner_personal_data_required",
+        "food_scanner_consent_required",
+    }
+    ayla.log_meal.assert_not_called()

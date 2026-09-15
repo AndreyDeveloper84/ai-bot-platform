@@ -457,8 +457,13 @@ def _check_gates(
     2. ``settings.FOOD_PHOTO_SCAN_ENABLED`` — cross-border gate.
        Only consulted when ``require_photo_scan=True`` (new scans).
        False → manual-entry hint.
-    3. ``BotUser.food_scanner_consent_at`` — feature-specific 152-ФЗ
-       acknowledgement. NULL → redirect-to-Mini-App reply.
+    3. PERSONAL_DATA (DRF-1948) — ``personal_records_consent_open``, the same
+       rule every other diary write already follows (text entry, Mini App
+       edit/restore): no PERSONAL_DATA, no diary. Refused with the text entry's
+       own ``CONSENT_TEXT`` so the two ways into the diary say the same thing.
+    4. ``BotUser.food_scanner_consent_at`` — feature-specific acknowledgement
+       for the photo, ON TOP of PERSONAL_DATA, not instead of it.
+       NULL → redirect-to-Mini-App reply.
 
     ``kind`` is a label («photo» / «callback») used in the meta so
     observability can distinguish refusal sites.
@@ -489,6 +494,26 @@ def _check_gates(
         return SkillResult(
             reply_text=PHOTO_SCAN_OFF_FALLBACK,
             meta={"reply_kind": "food_scanner_photo_scan_off"},
+        )
+
+    # DRF-1948 — запись в дневник требует PERSONAL_DATA, как у записи еды
+    # текстом и правки в Mini App. Раньше сканер смотрел только на свою
+    # колонку, и дневник писался без согласия на обработку личных данных.
+    # Импорт ленивый: пакет food_clarify регистрирует навыки, а порядок
+    # регистрации значим.
+    from apps.orchestrator.personal_surface import personal_records_consent_open
+
+    if not personal_records_consent_open(context.bot_user):
+        from apps.skills.food_clarify.text_entry import CONSENT_TEXT
+
+        logger.info(
+            "food_scanner.gate.personal_data_missing kind=%s conv=%s",
+            kind,
+            getattr(context.conversation, "id", None),
+        )
+        return SkillResult(
+            reply_text=CONSENT_TEXT,
+            meta={"reply_kind": "food_scanner_personal_data_required"},
         )
 
     # Адверсариальный обзор #2 — Mock(spec=None).food_scanner_consent_at
