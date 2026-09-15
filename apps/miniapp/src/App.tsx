@@ -860,7 +860,7 @@ function UnifiedAdminMasterRoutes({ me }: { me: MeResponse }) {
  *   📋 День     → MasterDashboardScreen  (today agenda; reuse)
  *   📅 Записи   → MasterScheduleScreen   (booking calendar; reuse)
  *   👥 Клиенты  → MasterCustomersScreen  (Tier 2 read-only roster — this PR)
- *   💼 Услуги   → MasterServicesScreen   (Tier 2 read-only catalog — this PR)
+ *   💼 Услуги   → MasterServicesScreen   (экран 04: цены и длительность — DRF-1810)
  *   ⋯ Ещё      → opens bottom sheet (does NOT navigate)
  *
  * «Ещё» bottom sheet (Tau §3 spec):

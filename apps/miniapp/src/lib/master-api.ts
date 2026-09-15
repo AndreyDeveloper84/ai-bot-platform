@@ -408,6 +408,11 @@ export interface SelectedService {
   mapping_status: string;
   offer: SelectedServiceOffer | null;
   configured: boolean;
+  /** Каталог M8a/M8b: категория услуги и корень её дерева — «направление» (DRF-1912). */
+  category_name: string | null;
+  direction_id: string | null;
+  direction_name: string | null;
+  direction_sort_order: number | null;
 }
 
 export interface ServiceSelectionState {

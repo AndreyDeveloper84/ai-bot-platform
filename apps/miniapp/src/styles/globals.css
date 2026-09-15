@@ -1923,14 +1923,112 @@ a {
   font-size: var(--font-size-100);
 }
 
-.master-services__locked-edit-note {
-  margin: var(--s-4) 0 0;
-  padding: var(--s-3);
+/* Экран 04 «Цены и длительность» (DRF-1810) — направления, шторка 4.2. */
+.master-services__progress {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--s-2);
   color: var(--c-text-secondary);
   font-size: var(--font-size-100);
-  background: var(--c-surface-2);
-  border-radius: var(--r-md);
+}
+
+.master-services__progress p {
+  margin: 0;
+}
+
+.master-services__direction {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+}
+
+.master-services__direction-title {
+  margin: var(--s-2) 0 0;
+  font-size: var(--font-size-200);
+}
+
+.master-services__direction-toggle {
+  width: 100%;
+  min-height: 44px;
+  padding: 0;
+  border: none;
+  background: none;
+  color: inherit;
+  font: inherit;
+  font-weight: 600;
+  text-align: left;
+}
+
+.master-services__row {
+  width: 100%;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.master-services__row-pending {
+  color: var(--c-warning);
+}
+
+.master-services__actions {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+}
+
+.master-services__actions-hint {
+  margin: 0;
+  color: var(--c-text-secondary);
+  font-size: var(--font-size-100);
   text-align: center;
+}
+
+.master-services__sheet {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 50;
+  max-height: 90vh;
+  overflow-y: auto;
+  padding: var(--s-4);
+  background: var(--c-surface-1);
+  border-radius: var(--r-md) var(--r-md) 0 0;
+  box-shadow: 0 -4px 16px rgba(0, 0, 0, 0.12);
+}
+
+.master-services__sheet-title {
+  margin: 0 0 var(--s-3);
+  font-size: var(--font-size-200);
+}
+
+.master-services__offer-form {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.master-services__offer-form label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.master-services__chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s-2);
+}
+
+.master-services__offer-form .master-services__chip {
+  flex-direction: row;
+  align-items: center;
+  gap: 6px;
+  min-height: 44px;
+  padding: 0 var(--s-3);
+  border: 1px solid var(--c-divider);
+  border-radius: var(--r-md);
 }
 
 /* M18a «Свои услуги» (DRF-1896) — заявки о разрыве канона, отдельно от каталога. */
