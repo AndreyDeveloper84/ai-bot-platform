@@ -84,7 +84,9 @@ def _params(*, auth_date: int | None = None) -> dict[str, str]:
 INPUTS: dict[str, Callable[[], dict[str, str]]] = {
     "missing": lambda: {},
     "empty": lambda: {"HTTP_AUTHORIZATION": "MaxInitData "},
-    "bad_signature": lambda: {"HTTP_AUTHORIZATION": f"MaxInitData {_sign(_params(), token='wrong')}"},
+    "bad_signature": lambda: {
+        "HTTP_AUTHORIZATION": f"MaxInitData {_sign(_params(), token='wrong')}"
+    },
     "stale": lambda: {
         "HTTP_AUTHORIZATION": f"MaxInitData {_sign(_params(auth_date=int(time_module.time()) - 7200))}"
     },
@@ -176,7 +178,9 @@ def test_refusal_reason_is_logged_without_the_init_data_value(caplog):
     messages = [r.getMessage() for r in caplog.records]
     refused = [m for m in messages if "miniapp.auth.transport_refused" in m]
     assert refused, "отказ транспорта не пишется в лог"
-    logged_reasons = {part.split("=", 1)[1] for m in refused for part in m.split() if part.startswith("reason=")}
+    logged_reasons = {
+        part.split("=", 1)[1] for m in refused for part in m.split() if part.startswith("reason=")
+    }
     assert logged_reasons == set(requests)
     for raw in (signed, stale):
         assert all(raw not in m for m in messages), "значение initData попало в лог"
@@ -223,4 +227,6 @@ def test_guard_catches_a_route_without_the_marker():
 
     setattr(marked, GUARD_ATTR, "customer")
 
-    assert _unguarded([("api/v1/customer/x", bare), ("api/v1/customer/y", marked)]) == ["api/v1/customer/x"]
+    assert _unguarded([("api/v1/customer/x", bare), ("api/v1/customer/y", marked)]) == [
+        "api/v1/customer/x"
+    ]
