@@ -1534,6 +1534,62 @@ class AylaBookingHTTPClient:
         )
         return self._ok(resp, success=(200,))
 
+    # ── M4 публикация соло-мастера (DRF-1797; каталог #453) ──────────────────
+    # Субъект — сам мастер: профиль в URL обязан быть его собственным, иначе
+    # каталог отвечает 403 → BookingBadRequestError. Готовность считает
+    # каталог; клиент её не трогает.
+
+    def get_publication_readiness(
+        self,
+        *,
+        specialist_id: str,
+        external_user_id: str,
+    ) -> dict[str, Any]:
+        """``GET internal/specialists/{id}/publication/readiness/`` — READY / NOT_READY."""
+        resp = self._request(
+            "GET",
+            f"specialists/{specialist_id}/publication/readiness/",
+            external_user_id=external_user_id,
+        )
+        return self._ok(resp, success=(200,))
+
+    def publish(
+        self,
+        *,
+        specialist_id: str,
+        external_user_id: str,
+        command_id: str,
+    ) -> dict[str, Any]:
+        """``POST internal/specialists/{id}/publication/`` ``{command_id}`` — «Опубликовать».
+
+        201 — каталог сделал переход DRAFT → PENDING; 200 — повтор той же
+        команды или «уже на проверке / опубликован». Факт перехода у каталога
+        есть только в статусе ответа, поэтому он возвращается рядом с телом
+        как ``created``.
+        """
+        resp = self._request(
+            "POST",
+            f"specialists/{specialist_id}/publication/",
+            json_body={"command_id": command_id},
+            external_user_id=external_user_id,
+        )
+        data = self._ok(resp, success=(200, 201))
+        return {**data, "created": resp.status_code == 201}
+
+    def get_publication_status(
+        self,
+        *,
+        specialist_id: str,
+        external_user_id: str,
+    ) -> dict[str, Any]:
+        """``GET internal/specialists/{id}/publication/status/`` — статус, готовность, последняя команда."""
+        resp = self._request(
+            "GET",
+            f"specialists/{specialist_id}/publication/status/",
+            external_user_id=external_user_id,
+        )
+        return self._ok(resp, success=(200,))
+
     def get_user_bookings_page(
         self,
         *,

@@ -907,6 +907,18 @@ NOT_SWEPT_ROUTES: dict[str, str] = {
         "DELETE proxy (DRF-1895): removes the master's own selected service; response "
         "is the selection state — pinned in test_service_selection_1895"
     ),
+    "publication_readiness": (
+        "GET proxy to the catalog's publication readiness (DRF-1797): the master's own "
+        "checklist codes, no customer record — pinned in test_publication_proxy_1797"
+    ),
+    "publication": (
+        "POST proxy (DRF-1797): the master's own publish command; response is the "
+        "catalog's command record — pinned in test_publication_proxy_1797"
+    ),
+    "publication_status": (
+        "GET proxy (DRF-1797): the master's own profile status and readiness, no "
+        "customer record — pinned in test_publication_proxy_1797"
+    ),
     "assistant_history": (
         "the master's own transcript with Ayla — no customer record is "
         "rendered as fields; swept for forbidden keys and for the "

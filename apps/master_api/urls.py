@@ -17,6 +17,10 @@ urlpatterns = [
     path("onboarding/reject", views.onboarding_reject, name="onboarding_reject"),
     path("onboarding/profile", views.onboarding_profile, name="onboarding_profile"),
     path("onboarding/readiness", views.onboarding_readiness, name="onboarding_readiness"),
+    # DRF-1797 (M5) — готовность, «Опубликовать» и статус — прокси в каталог M4.
+    path("publication/readiness", views.publication_readiness, name="publication_readiness"),
+    path("publication/status", views.publication_status, name="publication_status"),
+    path("publication", views.publication_publish, name="publication"),
     # M4 alias — same view, post-onboarding edit URL. Idempotent +
     # last-write-wins; audit event slug still reads MASTER_PROFILE_INITIALIZED
     # until the dedicated MASTER_PROFILE_UPDATED slug ships in a follow-up
