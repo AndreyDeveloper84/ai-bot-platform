@@ -37,6 +37,8 @@ import {
   ITEM_STATE_TEXT,
   LATER_LABEL,
   MasterSetupLandingScreen,
+  PUBLICATION_ROUTE,
+  PUBLISH_ENTRY_LABEL,
   SETUP_RESUME_NOTE,
   START_LABEL,
 } from "./MasterSetupLandingScreen";
@@ -206,6 +208,22 @@ describe("экран 01", () => {
     expect(screen.queryByTestId("setup-identity")).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Открыть кабинет" }));
     expect(screen.getByTestId("location")).toHaveTextContent("/solo/my-day");
+  });
+
+  it("готово по серверу — главная кнопка ведёт на экран 08 отправки на проверку (M26)", async () => {
+    mockedReadiness.mockResolvedValue(
+      readiness([item("services", "done"), item("hours", "done"), item("profile", "done")]),
+    );
+    renderScreen();
+    fireEvent.click(await screen.findByRole("button", { name: PUBLISH_ENTRY_LABEL }));
+    expect(screen.getByTestId("location")).toHaveTextContent(PUBLICATION_ROUTE);
+  });
+
+  it("не готово — кнопки отправки на проверку нет", async () => {
+    mockedReadiness.mockResolvedValue(FRESH);
+    renderScreen();
+    expect(await screen.findByRole("button", { name: START_LABEL })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: PUBLISH_ENTRY_LABEL })).toBeNull();
   });
 
   it("без имени экран всё равно рисуется", async () => {

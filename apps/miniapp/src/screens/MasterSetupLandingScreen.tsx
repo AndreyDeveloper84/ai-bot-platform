@@ -37,6 +37,8 @@ import { setBackButton, signalReady } from "../lib/max-sdk";
 
 export const SETUP_ROUTE = "/solo/setup";
 export const HOME_ROUTE = "/solo/my-day";
+/** Экран 08 — отправка профиля на проверку (DRF-1818, M26): вход только из готового чек-листа. */
+export const PUBLICATION_ROUTE = "/solo/publication";
 
 /** Подписи пунктов — по макету 1.1; профиль — по контракту readiness (D8: место решает дизайнер). */
 export const READINESS_ITEM_LABELS: Record<string, string> = {
@@ -59,6 +61,7 @@ export const START_LABEL = "Начать настройку";
 export const CONTINUE_LABEL = "Продолжить настройку";
 export const LATER_LABEL = "Продолжить позже";
 export const ALL_DONE_TITLE = "Всё настроено";
+export const PUBLISH_ENTRY_LABEL = "Отправить профиль на проверку";
 export const IDENTITY_PENDING_NOTE = "Подтверждение личности — ожидает оператора.";
 export const IDENTITY_UNLINKED_NOTE =
   "Отправить профиль на проверку можно будет после подтверждения личности.";
@@ -193,9 +196,18 @@ export function MasterSetupLandingScreen() {
             {fill.done > 0 ? CONTINUE_LABEL : START_LABEL}
           </button>
         ) : null}
+        {readiness.ready && (
+          <button
+            type="button"
+            className="btn-primary"
+            onClick={() => navigate(PUBLICATION_ROUTE)}
+          >
+            {PUBLISH_ENTRY_LABEL}
+          </button>
+        )}
         <button
           type="button"
-          className={next ? "btn-secondary" : "btn-primary"}
+          className={next || readiness.ready ? "btn-secondary" : "btn-primary"}
           onClick={() => navigate(HOME_ROUTE)}
         >
           {next ? LATER_LABEL : "Открыть кабинет"}

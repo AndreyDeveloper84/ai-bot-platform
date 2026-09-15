@@ -7952,3 +7952,136 @@ a {
   gap: var(--s-2);
   cursor: pointer;
 }
+
+/* DRF-1818 — экран 08 «отправка профиля на проверку»: чек-лист по кодам
+   каталога, услуги на проверке, текстовая сводка вместо карточки до M22. */
+.publication {
+  display: block;
+}
+
+.publication__title {
+  margin: 0 0 var(--s-2);
+  font-size: var(--font-size-400);
+  font-weight: 700;
+  color: var(--c-text-primary);
+}
+
+.publication__lead {
+  margin: 0 0 var(--s-3);
+  font-size: var(--font-size-200);
+  color: var(--c-text-secondary);
+}
+
+.publication__list,
+.publication__services,
+.publication__days {
+  list-style: none;
+  margin: 0 0 var(--s-4);
+  padding: 0;
+}
+
+.publication__item {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--s-3);
+  padding: var(--s-3) 0;
+}
+
+.publication__item + .publication__item {
+  border-top: 1px solid var(--c-divider);
+}
+
+.publication__item--missing .publication__mark {
+  color: var(--c-accent-pressed);
+  font-weight: 700;
+}
+
+.publication__mark {
+  flex: 0 0 auto;
+  width: 24px;
+  text-align: center;
+  color: var(--c-accent);
+}
+
+.publication__body {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: var(--s-1);
+}
+
+.publication__label,
+.publication__name {
+  margin: 0;
+  font-size: var(--font-size-200);
+  font-weight: 600;
+  color: var(--c-text-primary);
+}
+
+.publication__detail {
+  margin: 0;
+  font-size: var(--font-size-100);
+  color: var(--c-text-secondary);
+}
+
+.publication__detail--missing {
+  color: var(--c-accent-pressed);
+  font-weight: 600;
+}
+
+.publication__action {
+  align-self: flex-start;
+  margin-top: var(--s-1);
+}
+
+.publication__review,
+.publication__summary,
+.publication__uncertain {
+  margin: 0 0 var(--s-4);
+  padding: var(--s-3);
+  background: var(--c-surface-1);
+  border: 1px solid var(--c-divider);
+  border-radius: var(--r-md);
+}
+
+.publication__section-title {
+  margin: 0 0 var(--s-2);
+  font-size: var(--font-size-100);
+  font-weight: 600;
+  color: var(--c-text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.publication__service,
+.publication__day {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s-2);
+  padding: var(--s-1) 0;
+  font-size: var(--font-size-200);
+  color: var(--c-text-primary);
+}
+
+.publication__chip {
+  flex: 0 0 auto;
+  padding: 2px var(--s-2);
+  font-size: var(--font-size-100);
+  color: var(--c-text-secondary);
+  background: var(--c-surface-2);
+  border-radius: 999px;
+}
+
+.publication__note {
+  margin: 0 0 var(--s-3);
+  font-size: var(--font-size-100);
+  color: var(--c-text-secondary);
+}
+
+.publication__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s-2);
+  margin-top: var(--s-4);
+}
