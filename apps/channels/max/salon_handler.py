@@ -612,8 +612,8 @@ def _handle_salon_event_inner(event: CanonicalEvent, trace_id: str | uuid.UUID |
         return
 
     # No working row → the stranger path, WITHOUT a row (DRF-1784, D2 → б).
-    # The tenant the consumer may still have entered from the registry entry
-    # (``MAX_BOT_SALON_TENANT_SLUG``, until срез 4c) is deliberately not read
+    # Since срез 4c (DRF-1785) ingress enters no tenant for this stream at all,
+    # and a tenant in scope would still be deliberately not read
     # here: a stranger's tenant is decided by the code they type, or by
     # «Я работаю сам» — never by the salon the entry happens to name.
     _serve_stranger(event, trace_id)

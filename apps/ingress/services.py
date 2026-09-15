@@ -119,6 +119,14 @@ def _resolve_tenant(channel_token: str):
     # entry declares no tenant (see config/settings/base.py), so existing
     # deployments fall through to the map exactly as before.
     bot = resolve_bot(channel_token)
+    # DRF-1785 (срез 4c DRF-1705, решение владельца R4 а): салонный бот не
+    # принадлежит салону — тенант его обновления решает человек (salon_handler:
+    # рабочая строка, код приглашения, «Я работаю сам»). На этом стриме не
+    # читаются ни тенант записи, ни карта токенов: никакого fallback.
+    from apps.channels.bot_registry import SALON_STREAM
+
+    if bot is not None and bot.stream == SALON_STREAM:
+        return None
     if bot is not None and bot.tenant_slug:
         from apps.tenancy.models import Tenant
 

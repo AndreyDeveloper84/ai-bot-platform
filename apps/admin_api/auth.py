@@ -153,7 +153,14 @@ def _gate(
         # it. Cross-tenant escalation is not a risk here: resolve_role
         # reads TenantStaff within the resolved row's OWN tenant, so a
         # wrong pick can only under-privilege (403), never over.
-        if not resolve_tenant_slug_for_init_data(verified):
+        #
+        # DRF-1785 (срез 4c, главное окно Q2 15.09): 500 — только когда тенант не
+        # может прийти ниоткуда: initData не подписан ни одним ботом реестра И
+        # MAX_BOT_TENANT_SLUG пуст. Подпись бота реестра идёт в резолвер — у
+        # салонного бота тенант решает человек, а не запись и не настройка.
+        if not getattr(verified, "bot_slug", "") and not resolve_tenant_slug_for_init_data(
+            verified
+        ):
             logger.error("admin_api.auth.no_tenant_slug")
             return _error(
                 "server_misconfigured",
