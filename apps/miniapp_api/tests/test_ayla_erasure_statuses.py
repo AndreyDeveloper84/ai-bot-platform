@@ -19,6 +19,7 @@ import hmac
 import json
 import time as time_module
 import uuid
+from typing import Any
 from unittest.mock import patch
 from urllib.parse import urlencode
 
@@ -135,7 +136,7 @@ def _revoke(client: Client, auth: dict):
     )
 
 
-def _ayla_client(statuses: list) -> tuple[_Ayla, object]:
+def _ayla_client(statuses: list) -> tuple[_Ayla, Any]:
     ayla = _Ayla(statuses)
     return ayla, patch(
         "apps.identity.services.privacy.PersonalContextHttpClient", return_value=ayla
