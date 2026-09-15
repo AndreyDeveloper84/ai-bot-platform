@@ -1383,6 +1383,74 @@ def _accepting_bookings_refusal(exc: BookingBadRequestError) -> HttpResponse:
     return _error("accepting_bookings_unavailable", _ACCEPTING_UNAVAILABLE, 502)
 
 
+# --- GET /reviews (DRF-1857) -----------------------------------------------
+
+_REVIEWS_UNAVAILABLE = "Отзывы сейчас недоступны."
+
+#: What a review row may carry to the screen. Anything else the catalog adds is
+#: dropped here — the bot's own boundary, not a trust in the upstream shape.
+_REVIEW_FIELDS = ("id", "rating", "text", "client_name", "service_name", "created_at")
+
+
+@csrf_exempt
+@require_http_methods(["GET"])
+@require_master_init_data
+def reviews(request: HttpRequest) -> HttpResponse:
+    """«Мои отзывы» — прокси в каталог (DRF-1857, карта кабинета K14).
+
+    Отзывы живут в каталоге и только там — копии в боте нет. Субъект — сам
+    мастер, как у часов и «Принимаю записи»: каталог отдаёт отзывы только
+    своего профиля и журналирует чтение. Клиент в ответе — «Имя Ф.» /
+    «Клиент» / ``null`` для анонимного; поля строки — белым списком
+    :data:`_REVIEW_FIELDS`. Оценки нет, пока нет ни одного отзыва: ноль —
+    это «нет данных», а не 0.0.
+    """
+
+    master: CatalogMaster = request.master  # type: ignore[attr-defined]
+    bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
+    actor = external_user_id_for(bot_user)
+    client = get_ayla_booking_client()
+    try:
+        data = client.get_specialist_reviews(specialist_id=str(master.id), external_user_id=actor)
+    except BookingBadRequestError as exc:
+        return _reviews_refusal(exc)
+    except BookingUnavailableError:
+        return _error("reviews_unavailable", _REVIEWS_UNAVAILABLE, 503)
+    return _reviews_response(data)
+
+
+def _reviews_response(data: dict[str, Any]) -> HttpResponse:
+    """Число, оценка и строки ровно из ответа каталога — или 502, если его не прочесть.
+
+    Без числа или списка это не «отзывов нет», а непрочитанный ответ: экран не
+    должен нарисовать пустоту, которой нет."""
+    count = data.get("review_count") if isinstance(data, dict) else None
+    rows = data.get("reviews") if isinstance(data, dict) else None
+    if not isinstance(count, int) or isinstance(count, bool) or not isinstance(rows, list):
+        return _error("reviews_unavailable", _REVIEWS_UNAVAILABLE, 502)
+    return JsonResponse(
+        {
+            "review_count": count,
+            "rating": data.get("rating") if count > 0 else None,
+            "reviews": [
+                {field: row.get(field) for field in _REVIEW_FIELDS}
+                for row in rows
+                if isinstance(row, dict)
+            ],
+        }
+    )
+
+
+def _reviews_refusal(exc: BookingBadRequestError) -> HttpResponse:
+    if exc.status_code == 403:
+        return _error(
+            "not_linked", "Профиль ещё не связан с каталогом — отзывы пока не прочесть.", 403
+        )
+    if exc.status_code == 404:
+        return _error("not_found", "Профиль мастера не найден в каталоге.", 404)
+    return _error("reviews_unavailable", _REVIEWS_UNAVAILABLE, 502)
+
+
 # --- GET /onboarding/readiness --------------------------------------------
 
 

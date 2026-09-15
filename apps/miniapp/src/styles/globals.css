@@ -7812,3 +7812,88 @@ a {
   margin-top: var(--s-2);
   text-decoration: none;
 }
+
+/* DRF-1857 — «Мои отзывы» мастера. */
+.master-reviews {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-3);
+}
+
+.master-reviews__title {
+  font-size: var(--font-size-400);
+  font-weight: 600;
+  color: var(--c-text-primary);
+}
+
+.master-reviews__status,
+.master-reviews__empty-hint,
+.master-reviews__meta {
+  font-size: var(--font-size-200);
+  color: var(--c-text-secondary);
+}
+
+.master-reviews__summary {
+  font-size: var(--font-size-300);
+  font-weight: 600;
+  color: var(--c-text-primary);
+}
+
+.master-reviews__empty {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-1);
+  padding: var(--s-4);
+  border-radius: var(--r-md);
+  background: var(--c-surface-1);
+}
+
+.master-reviews__empty-title {
+  font-size: var(--font-size-300);
+  font-weight: 600;
+  color: var(--c-text-primary);
+}
+
+.master-reviews__list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.master-reviews__item {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-1);
+  padding: var(--s-3);
+  border-radius: var(--r-md);
+  background: var(--c-surface-1);
+}
+
+.master-reviews__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s-2);
+}
+
+.master-reviews__client {
+  font-size: var(--font-size-300);
+  font-weight: 600;
+  color: var(--c-text-primary);
+}
+
+.master-reviews__stars {
+  flex: none;
+  font-size: var(--font-size-200);
+  color: var(--c-accent);
+  letter-spacing: 1px;
+}
+
+.master-reviews__text {
+  font-size: var(--font-size-300);
+  color: var(--c-text-primary);
+  white-space: pre-line;
+}

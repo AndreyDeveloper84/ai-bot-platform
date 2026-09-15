@@ -140,6 +140,8 @@ ROUTE_TABLE: tuple[Route, ...] = (
     # DRF-1845 — «Принимаю записи» мастера под его субъектом.
     Route("GET", "/api/v1/internal/specialists/{id}/availability/", Auth.BEARER_EXT),
     Route("PATCH", "/api/v1/internal/specialists/{id}/availability/", Auth.BEARER_EXT),
+    # DRF-1857 — «Мои отзывы» мастера под его субъектом.
+    Route("GET", "/api/v1/internal/specialists/{id}/reviews/", Auth.BEARER_EXT),
     Route("GET", "/api/v1/internal/me/bookings/", Auth.BEARER_EXT),
     # DRF-1032 customer records: visit card + «Записаться ещё» prefill.
     Route("GET", "/api/v1/internal/me/bookings/{id}/", Auth.BEARER_EXT),
@@ -519,6 +521,12 @@ def _exercise_booking() -> None:
     _swallow(
         lambda: c.set_accepting_bookings(
             specialist_id=str(_PROFILE_UUID), external_user_id=_EXT_USER, accepting=False
+        )
+    )
+    # DRF-1857 «Мои отзывы».
+    _swallow(
+        lambda: c.get_specialist_reviews(
+            specialist_id=str(_PROFILE_UUID), external_user_id=_EXT_USER
         )
     )
 
