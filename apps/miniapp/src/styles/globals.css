@@ -1888,6 +1888,47 @@ a {
   text-align: center;
 }
 
+/* M18a «Свои услуги» (DRF-1896) — заявки о разрыве канона, отдельно от каталога. */
+.master-services__own-note,
+.master-services__similar-later {
+  font-size: var(--font-size-100);
+  opacity: 0.7;
+}
+
+.own-service-card__status {
+  font-size: var(--font-size-100);
+  font-weight: 600;
+}
+
+.own-service-card__note {
+  font-size: var(--font-size-100);
+}
+
+.master-services__own-form {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.master-services__own-form label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.master-services__field-error {
+  margin: 0;
+  color: var(--c-danger);
+  font-size: var(--font-size-100);
+}
+
+.master-services__similar-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+}
+
 /* ---- Solo «Скоро» placeholder screen (Tau §5.4 empty-state voice) ---- */
 
 .soon-screen {
