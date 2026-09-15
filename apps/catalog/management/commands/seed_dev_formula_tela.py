@@ -198,6 +198,11 @@ class Command(BaseCommand):
                     "external_updated_at": now,
                 },
             )
+            if mst.catalog_specialist_id is None:
+                # DRF-1933: сид стоит на месте строки синка — id каталога равен
+                # первичному ключу, иначе рёбра и расписание не найдут мастера.
+                mst.catalog_specialist_id = mst.pk
+                mst.save(update_fields=["catalog_specialist_id"])
             masters_by_ext[spec["external_id"]] = mst
             self.stdout.write(f"  {'+' if mst_created else '='} Master {mst.name}")
 

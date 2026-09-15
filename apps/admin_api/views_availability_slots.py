@@ -31,6 +31,7 @@ from typing import Any
 from django.http import HttpRequest, HttpResponse, JsonResponse
 from django.views.decorators.http import require_http_methods
 
+from apps.catalog.specialist_ref import CatalogSpecialistUnresolved, catalog_specialist_id
 from apps.admin_api.auth import require_admin_role
 from apps.admin_api.services.salon_day import tenant_tz
 from apps.admin_api.views import _get_master_or_404
@@ -118,9 +119,19 @@ def booking_slots(request: HttpRequest) -> HttpResponse:
         get_ayla_booking_client,
     )
 
+    # DRF-1933: у строки зеркала нет id профиля в каталоге — звать каталог
+    # не с чем; первичный ключ зеркала туда не уходит.
+    try:
+        catalog_specialist_id(master)
+    except CatalogSpecialistUnresolved:
+        return _error(
+            "catalog_profile_unresolved",
+            "master is not set up in the catalog yet",
+            409,
+        )
     try:
         slots = get_ayla_booking_client().get_available_times(
-            specialist_id=str(master.id),
+            specialist_id=catalog_specialist_id(master),
             date=day.isoformat(),
             service_id=str(service.ayla_service_id),
         )

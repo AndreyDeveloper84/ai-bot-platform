@@ -70,6 +70,7 @@ from django.db import transaction
 from django.db.models import Q
 from django.utils import timezone as dj_timezone
 
+from apps.catalog.specialist_ref import CatalogSpecialistUnresolved, catalog_specialist_id
 from apps.audit.services import write_audit
 from apps.catalog.models import CatalogMaster
 from apps.events.services import emit
@@ -180,8 +181,18 @@ def _block_time_in_ayla(
                 "record would claim an unknown author (§143).",
                 status=409,
             )
+        # DRF-1933: у строки зеркала нет id профиля в каталоге — звать каталог
+        # не с чем; первичный ключ зеркала туда не уходит.
+        try:
+            catalog_specialist_id(master)
+        except CatalogSpecialistUnresolved:
+            raise AvailabilityDecisionError(
+                "catalog_profile_unresolved",
+                "The master is not set up in the catalog yet — time off cannot be closed there.",
+                status=409,
+            ) from None
         get_ayla_booking_client().create_specialist_time_off(
-            specialist_id=str(master.id),
+            specialist_id=catalog_specialist_id(master),
             tenant_id=str(tenant_id),
             start_at=start_at.isoformat(),
             end_at=end_at.isoformat(),

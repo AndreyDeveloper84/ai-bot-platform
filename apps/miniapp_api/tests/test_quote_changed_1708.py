@@ -42,6 +42,7 @@ from apps.integrations.ayla.booking_client import (
     BookingUnavailableError,
 )
 from apps.tenancy.models import Tenant
+from tests.support.catalog_mirror import sync_shaped
 
 pytestmark = pytest.mark.django_db
 
@@ -100,14 +101,16 @@ def bot_user(tenant) -> BotUser:
 def master(tenant) -> CatalogMaster:
     from django.utils import timezone as tz
 
-    return CatalogMaster.all_tenants.create(
-        tenant=tenant,
-        external_updated_at=tz.now(),
-        name="Ольга",
-        specialization="Маникюр",
-        is_active=True,
-        invite_status=CatalogMaster.InviteStatus.ACCEPTED,
-        ayla_user_id=MASTER_AYLA_ID,
+    return sync_shaped(
+        CatalogMaster.all_tenants.create(
+            tenant=tenant,
+            external_updated_at=tz.now(),
+            name="Ольга",
+            specialization="Маникюр",
+            is_active=True,
+            invite_status=CatalogMaster.InviteStatus.ACCEPTED,
+            ayla_user_id=MASTER_AYLA_ID,
+        )
     )
 
 
