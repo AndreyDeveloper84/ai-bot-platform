@@ -70,7 +70,27 @@ _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 #: Классы вопросов, чей id сам по себе — смысл здоровья. По префиксу, а не по
 #: списку имён: новый вопрос скрининга не должен проскочить потому, что его
 #: забыли дописать.
+#:
+#: Зеркало правила каталога DRF-1906 (``recommendation/snapshots.py``:
+#: ``HEALTH_PREFIXES``, ``_SEGMENT_RE``, ``health_prefix``; DRF-1913). Id режется по
+#: ``. : / -``, и каждый сегмент без учёта регистра проверяется на начало с
+#: префикса; подстрока не ищется — «xhealth_y» не класс здоровья, а «said.health_x»
+#: и «Health_Status» — класс. Одно место на сборщик и сторож.
 HEALTH_QUESTION_PREFIXES: tuple[str, ...] = ("health_", "screening", "safety_", "wellness_")
+_SEGMENT_RE = re.compile(r"[.:/\-]")
+#: Зеркало ``_QUESTION_ID_RE`` каталога DRF-1906: id вопроса не длиннее 64 знаков.
+_QUESTION_ID_RE = re.compile(r"^[A-Za-z0-9_.:/\-]{1,64}$")
+
+
+def health_prefix(code: str) -> str | None:
+    """Префикс класса здоровья, с которого начинается сегмент id, — или None."""
+
+    for segment in _SEGMENT_RE.split(code or ""):
+        low = segment.casefold()
+        for prefix in HEALTH_QUESTION_PREFIXES:
+            if low.startswith(prefix):
+                return prefix
+    return None
 
 
 class SnapshotRejected(ValueError):
@@ -112,6 +132,20 @@ def assert_said_in_vocabulary(said: Any, *, cities: frozenset[str]) -> None:
             raise SnapshotRejected(f"$.said[{index}].key: ключ вне словаря сказанного")
         if row.get("value") not in allowed:
             raise SnapshotRejected(f"$.said[{index}].value: значение вне словаря ключа {key}")
+
+
+def assert_answered_question(answered: Any) -> None:
+    """``answered_question`` — null или ровно ``{question_id}``: не класс здоровья, ≤ 64 (DRF-1913)."""
+
+    if answered is None:
+        return
+    if not isinstance(answered, dict) or set(answered) != {"question_id"}:
+        raise SnapshotRejected("$.answered_question: ожидается ровно {question_id}")
+    question_id = answered["question_id"]
+    if not isinstance(question_id, str) or not _QUESTION_ID_RE.match(question_id):
+        raise SnapshotRejected("$.answered_question.question_id: не код длиной до 64")
+    if health_prefix(question_id) is not None:
+        raise SnapshotRejected("$.answered_question.question_id: класс здоровья")
 
 
 def assert_codes_only(value: Any, *, closed: frozenset[str], path: str = "$") -> None:
@@ -164,7 +198,7 @@ def _answered_section(conversation: Any) -> dict[str, Any] | None:
     if not isinstance(row, dict) or not row.get("question_id"):
         return None
     question_id = str(row["question_id"])
-    if question_id.startswith(HEALTH_QUESTION_PREFIXES):
+    if health_prefix(question_id) is not None:
         return None
     # Только идентификатор вопроса: ни asked_text, ни answer_text в снимок не идут.
     return {"question_id": question_id}
@@ -191,6 +225,7 @@ def build_turn_snapshot(
     }
     closed = _closed_values()
     assert_said_in_vocabulary(content["said"], cities=closed)
+    assert_answered_question(content["answered_question"])
     assert_codes_only(content, closed=closed)
     return TurnSnapshot(content=content, content_digest=content_digest(content))
 
@@ -200,7 +235,9 @@ __all__ = [
     "SNAPSHOT_VERSION",
     "SnapshotRejected",
     "TurnSnapshot",
+    "assert_answered_question",
     "assert_codes_only",
+    "health_prefix",
     "assert_said_in_vocabulary",
     "build_turn_snapshot",
     "content_digest",
