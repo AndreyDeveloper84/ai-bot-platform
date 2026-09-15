@@ -103,7 +103,11 @@ def ayla(monkeypatch, settings):
 def synced_master(tenant: Tenant) -> CatalogMaster:
     """Мастер в форме, в которой он приезжает синхронизацией."""
 
+    # DRF-1933: строка как у синка — id каталога равен первичному ключу.
+    row_id = uuid.uuid4()
     return CatalogMaster.all_tenants.create(
+        id=row_id,
+        catalog_specialist_id=row_id,
         tenant=tenant,
         external_id=901,
         external_updated_at=datetime.now(tz=dt_timezone.utc),

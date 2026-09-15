@@ -41,6 +41,8 @@ import re
 import uuid
 from datetime import datetime, timedelta, timezone as dt_timezone
 from typing import Any
+from collections.abc import Callable
+from functools import wraps
 
 from django.conf import settings
 from django.db import transaction
@@ -51,6 +53,7 @@ from django.views.decorators.http import require_http_methods
 
 from apps.audit.services import write_audit
 from apps.catalog.handles import canonical_handle
+from apps.catalog.specialist_ref import CatalogSpecialistUnresolved, catalog_specialist_id
 from apps.catalog.models import CatalogMaster, CatalogService, MasterService
 from apps.catalog.master_state import sale_block
 from apps.catalog.services.schedule_confirmation import (
@@ -893,8 +896,38 @@ def _profile_refusal(exc: BookingBadRequestError) -> HttpResponse:
 
 
 @csrf_exempt
+def _catalog_profile_required(
+    view_func: Callable[..., HttpResponse],
+) -> Callable[..., HttpResponse]:
+    """DRF-1933: прокси мастерской зовут каталог по id его профиля.
+
+    Id берёт :func:`apps.catalog.specialist_ref.catalog_specialist_id` прямо
+    в аргументах вызова клиента; пустая колонка поднимает отказ ДО вызова,
+    и здесь он становится ответом по имени. Первичный ключ зеркала в
+    каталог не уходит: у соло-мастера и склеенного приглашения это uuid4.
+    """
+
+    @wraps(view_func)
+    def wrapper(request: HttpRequest, *args: Any, **kwargs: Any) -> HttpResponse:
+        try:
+            return view_func(request, *args, **kwargs)
+        except CatalogSpecialistUnresolved:
+            master = getattr(request, "master", None)
+            logger.warning(
+                "master_api.catalog_profile_unresolved master=%s", getattr(master, "pk", None)
+            )
+            return _error(
+                "catalog_profile_unresolved",
+                "Профиль мастера ещё не заведён в каталоге.",
+                409,
+            )
+
+    return wrapper
+
+
 @require_http_methods(["PATCH"])
 @require_master_init_data
+@_catalog_profile_required
 def onboarding_profile(request: HttpRequest) -> HttpResponse:
     """«О себе» и фото мастера — прокси в каталог (DRF-1813, M21; каталог #455).
 
@@ -951,7 +984,7 @@ def onboarding_profile(request: HttpRequest) -> HttpResponse:
     try:
         if bio is not None or display_name is not None:
             state = client.patch_specialist_profile(
-                specialist_id=str(master.id),
+                specialist_id=catalog_specialist_id(master),
                 external_user_id=actor,
                 display_name=display_name,
                 bio=bio,
@@ -967,7 +1000,7 @@ def onboarding_profile(request: HttpRequest) -> HttpResponse:
                 fields_populated.append("name")
         if photo_file is not None:
             state = client.upload_specialist_avatar(
-                specialist_id=str(master.id),
+                specialist_id=catalog_specialist_id(master),
                 external_user_id=actor,
                 filename=photo_file.name or "photo",
                 content=photo_file.read(),
@@ -1063,6 +1096,7 @@ def me(request: HttpRequest) -> HttpResponse:
 @csrf_exempt
 @require_http_methods(["GET", "PUT"])
 @require_master_init_data
+@_catalog_profile_required
 def working_hours(request: HttpRequest) -> HttpResponse:
     """The master's own weekly template — read and written in the catalog.
 
@@ -1091,7 +1125,9 @@ def working_hours(request: HttpRequest) -> HttpResponse:
 
     if request.method == "GET":
         try:
-            data = client.get_working_hours(specialist_id=str(master.id), external_user_id=actor)
+            data = client.get_working_hours(
+                specialist_id=catalog_specialist_id(master), external_user_id=actor
+            )
         except BookingBadRequestError as exc:
             return _working_hours_refusal(exc)
         except BookingUnavailableError:
@@ -1108,7 +1144,7 @@ def working_hours(request: HttpRequest) -> HttpResponse:
 
     try:
         data = client.put_working_hours(
-            specialist_id=str(master.id), external_user_id=actor, schedule=schedule
+            specialist_id=catalog_specialist_id(master), external_user_id=actor, schedule=schedule
         )
     except ScheduleBlockConflictError:
         return _error(
@@ -1180,6 +1216,7 @@ def _working_hours_refusal(exc: BookingBadRequestError) -> HttpResponse:
 @csrf_exempt
 @require_http_methods(["GET", "POST"])
 @require_master_init_data
+@_catalog_profile_required
 def canon_gap_requests(request: HttpRequest) -> HttpResponse:
     """«Своя услуга» мастера = заявка о разрыве канона к владельцу (G6 / D6).
 
@@ -1199,7 +1236,7 @@ def canon_gap_requests(request: HttpRequest) -> HttpResponse:
     if request.method == "GET":
         try:
             data = client.list_canon_gap_requests(
-                specialist_id=str(master.id), external_user_id=actor
+                specialist_id=catalog_specialist_id(master), external_user_id=actor
             )
         except BookingBadRequestError as exc:
             return _canon_gap_refusal(exc)
@@ -1227,7 +1264,7 @@ def canon_gap_requests(request: HttpRequest) -> HttpResponse:
 
     try:
         data = client.create_canon_gap_request(
-            specialist_id=str(master.id),
+            specialist_id=catalog_specialist_id(master),
             external_user_id=actor,
             name=name,
             description=str(body.get("description") or ""),
@@ -1245,6 +1282,7 @@ def canon_gap_requests(request: HttpRequest) -> HttpResponse:
 
 @require_http_methods(["GET"])
 @require_master_init_data
+@_catalog_profile_required
 def canon_gap_similar(request: HttpRequest) -> HttpResponse:
     """Подсказка «похожая услуга» — канон по подтверждённым синонимам и имени.
 
@@ -1258,7 +1296,7 @@ def canon_gap_similar(request: HttpRequest) -> HttpResponse:
     bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
     try:
         data = get_ayla_booking_client().similar_canon_templates(
-            specialist_id=str(master.id),
+            specialist_id=catalog_specialist_id(master),
             external_user_id=external_user_id_for(bot_user),
             name=name,
         )
@@ -1271,13 +1309,14 @@ def canon_gap_similar(request: HttpRequest) -> HttpResponse:
 
 @require_http_methods(["GET"])
 @require_master_init_data
+@_catalog_profile_required
 def canon_gap_request_detail(request: HttpRequest, request_id: uuid.UUID) -> HttpResponse:
     """Одна своя заявка; чужая неотличима от несуществующей (404)."""
     master: CatalogMaster = request.master  # type: ignore[attr-defined]
     bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
     try:
         data = get_ayla_booking_client().get_canon_gap_request(
-            specialist_id=str(master.id),
+            specialist_id=catalog_specialist_id(master),
             external_user_id=external_user_id_for(bot_user),
             request_id=str(request_id),
         )
@@ -1308,6 +1347,7 @@ _ACCEPTING_UNAVAILABLE = "Настройка приёма записей сей�
 @csrf_exempt
 @require_http_methods(["GET", "PATCH"])
 @require_master_init_data
+@_catalog_profile_required
 def accepting_bookings(request: HttpRequest) -> HttpResponse:
     """«Принимаю записи / Не принимаю» — прокси в каталог (DRF-1845).
 
@@ -1329,7 +1369,7 @@ def accepting_bookings(request: HttpRequest) -> HttpResponse:
     if request.method == "GET":
         try:
             data = client.get_accepting_bookings(
-                specialist_id=str(master.id), external_user_id=actor
+                specialist_id=catalog_specialist_id(master), external_user_id=actor
             )
         except BookingBadRequestError as exc:
             return _accepting_bookings_refusal(exc)
@@ -1347,7 +1387,7 @@ def accepting_bookings(request: HttpRequest) -> HttpResponse:
 
     try:
         data = client.set_accepting_bookings(
-            specialist_id=str(master.id), external_user_id=actor, accepting=value
+            specialist_id=catalog_specialist_id(master), external_user_id=actor, accepting=value
         )
     except BookingBadRequestError as exc:
         return _accepting_bookings_refusal(exc)
@@ -1395,6 +1435,7 @@ _REVIEW_FIELDS = ("id", "rating", "text", "client_name", "service_name", "create
 @csrf_exempt
 @require_http_methods(["GET"])
 @require_master_init_data
+@_catalog_profile_required
 def reviews(request: HttpRequest) -> HttpResponse:
     """«Мои отзывы» — прокси в каталог (DRF-1857, карта кабинета K14).
 
@@ -1411,7 +1452,9 @@ def reviews(request: HttpRequest) -> HttpResponse:
     actor = external_user_id_for(bot_user)
     client = get_ayla_booking_client()
     try:
-        data = client.get_specialist_reviews(specialist_id=str(master.id), external_user_id=actor)
+        data = client.get_specialist_reviews(
+            specialist_id=catalog_specialist_id(master), external_user_id=actor
+        )
     except BookingBadRequestError as exc:
         return _reviews_refusal(exc)
     except BookingUnavailableError:
@@ -1512,6 +1555,7 @@ def _publication_refusal(exc: BookingBadRequestError) -> HttpResponse:
 
 @require_http_methods(["GET"])
 @require_master_init_data
+@_catalog_profile_required
 def publication_readiness(request: HttpRequest) -> HttpResponse:
     """«Готов к публикации?» — прокси готовности каталога (M5; каталог M4 #453).
 
@@ -1523,7 +1567,8 @@ def publication_readiness(request: HttpRequest) -> HttpResponse:
     bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
     try:
         data = get_ayla_booking_client().get_publication_readiness(
-            specialist_id=str(master.id), external_user_id=external_user_id_for(bot_user)
+            specialist_id=catalog_specialist_id(master),
+            external_user_id=external_user_id_for(bot_user),
         )
     except BookingBadRequestError as exc:
         return _publication_refusal(exc)
@@ -1535,6 +1580,7 @@ def publication_readiness(request: HttpRequest) -> HttpResponse:
 @csrf_exempt
 @require_http_methods(["POST"])
 @require_master_init_data
+@_catalog_profile_required
 def publication_publish(request: HttpRequest) -> HttpResponse:
     """«Опубликовать» — прокси команды каталога (M5; каталог M4 #453).
 
@@ -1551,7 +1597,7 @@ def publication_publish(request: HttpRequest) -> HttpResponse:
         return _error("validation_error", "Нужен command_id (UUID) — ключ повтора команды.", 400)
     try:
         data = get_ayla_booking_client().publish(
-            specialist_id=str(master.id),
+            specialist_id=catalog_specialist_id(master),
             external_user_id=external_user_id_for(bot_user),
             command_id=str(command_id),
         )
@@ -1565,13 +1611,15 @@ def publication_publish(request: HttpRequest) -> HttpResponse:
 
 @require_http_methods(["GET"])
 @require_master_init_data
+@_catalog_profile_required
 def publication_status(request: HttpRequest) -> HttpResponse:
     """«Проверить статус» — прокси статуса публикации каталога (M5; каталог M4 #453)."""
     master: CatalogMaster = request.master  # type: ignore[attr-defined]
     bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
     try:
         data = get_ayla_booking_client().get_publication_status(
-            specialist_id=str(master.id), external_user_id=external_user_id_for(bot_user)
+            specialist_id=catalog_specialist_id(master),
+            external_user_id=external_user_id_for(bot_user),
         )
     except BookingBadRequestError as exc:
         return _publication_refusal(exc)
@@ -1596,6 +1644,7 @@ _SELECTION_REFUSED_REASONS = frozenset(
 @csrf_exempt
 @require_http_methods(["GET", "POST"])
 @require_master_init_data
+@_catalog_profile_required
 def service_selection(request: HttpRequest) -> HttpResponse:
     """«Выберите услуги» мастера-соло — прокси в каталог (M8a).
 
@@ -1610,7 +1659,7 @@ def service_selection(request: HttpRequest) -> HttpResponse:
     if request.method == "GET":
         try:
             data = client.get_service_selection(
-                specialist_id=str(master.id), external_user_id=actor
+                specialist_id=catalog_specialist_id(master), external_user_id=actor
             )
         except BookingBadRequestError as exc:
             return _selection_refusal(exc)
@@ -1627,7 +1676,7 @@ def service_selection(request: HttpRequest) -> HttpResponse:
         return _error("validation_error", "Нужен список template_ids: от 1 до 200 UUID.", 400)
     try:
         data = client.select_services(
-            specialist_id=str(master.id),
+            specialist_id=catalog_specialist_id(master),
             external_user_id=actor,
             template_ids=[str(value) for value in template_ids],
         )
@@ -1641,6 +1690,7 @@ def service_selection(request: HttpRequest) -> HttpResponse:
 @csrf_exempt
 @require_http_methods(["PUT"])
 @require_master_init_data
+@_catalog_profile_required
 def service_offer(request: HttpRequest, salon_service_id: uuid.UUID) -> HttpResponse:
     """Цена и длительность выбранной услуги — прокси в каталог (M8b).
 
@@ -1662,7 +1712,7 @@ def service_offer(request: HttpRequest, salon_service_id: uuid.UUID) -> HttpResp
         return _error("validation_error", "Нужны цена от 1 и длительность от 5 до 480 минут.", 400)
     try:
         data = get_ayla_booking_client().put_service_offer(
-            specialist_id=str(master.id),
+            specialist_id=catalog_specialist_id(master),
             external_user_id=external_user_id_for(bot_user),
             salon_service_id=str(salon_service_id),
             price=str(price),
@@ -1680,13 +1730,14 @@ def service_offer(request: HttpRequest, salon_service_id: uuid.UUID) -> HttpResp
 @csrf_exempt
 @require_http_methods(["DELETE"])
 @require_master_init_data
+@_catalog_profile_required
 def selected_service(request: HttpRequest, salon_service_id: uuid.UUID) -> HttpResponse:
     """«Убрать из моих услуг» — прокси в каталог (M8b)."""
     master: CatalogMaster = request.master  # type: ignore[attr-defined]
     bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
     try:
         data = get_ayla_booking_client().remove_service(
-            specialist_id=str(master.id),
+            specialist_id=catalog_specialist_id(master),
             external_user_id=external_user_id_for(bot_user),
             salon_service_id=str(salon_service_id),
         )
