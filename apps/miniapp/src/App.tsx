@@ -115,6 +115,7 @@ import { MasterOnboardingScreen } from "./screens/MasterOnboardingScreen";
 import { MasterPickerScreen } from "./screens/MasterPickerScreen";
 import { MasterNotificationSettingsScreen } from "./screens/MasterNotificationSettingsScreen";
 import { MasterProfileScreen } from "./screens/MasterProfileScreen";
+import { MasterReviewsScreen } from "./screens/MasterReviewsScreen";
 import { MasterAylaScreen } from "./screens/MasterAylaScreen";
 import { MasterScheduleScreen } from "./screens/MasterScheduleScreen";
 import { MasterServicesScreen } from "./screens/MasterServicesScreen";
@@ -1274,7 +1275,7 @@ function UnifiedSoloSurface({ me }: { me: MeResponse }) {
         />
         <Route
           path="/solo/reviews"
-          element={<SoonScreen tab="Отзывы" slug="solo-reviews-screen" />}
+          element={<MasterReviewsScreen />}
         />
         <Route path="/solo/ai" element={<MasterConversationsScreen />} />
         <Route path="/solo/profile" element={<MasterProfileScreen />} />

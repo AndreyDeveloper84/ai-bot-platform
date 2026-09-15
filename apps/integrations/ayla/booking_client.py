@@ -1429,6 +1429,27 @@ class AylaBookingHTTPClient:
         )
         return self._ok(resp, success=(200,))
 
+    def get_specialist_reviews(
+        self,
+        *,
+        specialist_id: str,
+        external_user_id: str,
+    ) -> dict[str, Any]:
+        """``GET internal/specialists/{id}/reviews/`` — «Мои отзывы».
+
+        DRF-1857. ``external_user_id`` names the SUBJECT: the catalog lets a
+        master read only reviews of their own profile (403 otherwise). The
+        answer carries visible reviews only, the client as «Имя Ф.» / «Клиент»
+        / ``null`` for an anonymous review, and a rating only when a review
+        exists; the catalog journals the read.
+        """
+        resp = self._request(
+            "GET",
+            f"specialists/{specialist_id}/reviews/",
+            external_user_id=external_user_id,
+        )
+        return self._ok(resp, success=(200,))
+
     def get_specialist_service_edges(
         self,
         *,
