@@ -24,7 +24,9 @@ from apps.tenancy.models import Tenant
 
 pytestmark = pytest.mark.django_db
 
-VOICE_TEXT = "Аудио и голосовые я пока не понимаю — напиши, пожалуйста, текстом."
+VOICE_TEXT = (
+    "Я пока не умею разбирать голосовые и аудиофайлы. Напиши, пожалуйста, текстом — я помогу."
+)
 _DOWNLOAD_TARGET = "apps.channels.max.handler.download_photo"
 
 # По документации v0.0.33, не подтверждено живым вебхуком.
