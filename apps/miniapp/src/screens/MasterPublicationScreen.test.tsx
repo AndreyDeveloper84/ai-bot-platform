@@ -291,6 +291,27 @@ describe("экран 08 — состояния из ответа каталог�
     expect(screen.getByTestId("location")).toHaveTextContent("/solo/profile");
   });
 
+  it("S2c: NOT_READY — недействительное место названо своим текстом, а не запасным", async () => {
+    mockedStatus.mockResolvedValue({
+      ...DRAFT_READY,
+      readiness: {
+        status: "NOT_READY",
+        missing: [{ code: "location_inactive", section: "location", detail: { area_option: "location_area_unavailable" } }],
+      },
+    });
+    await renderScreen();
+
+    expect(title()).toHaveTextContent(PUBLICATION_COPY.notReadyTitle);
+    const place = screen.getByTestId("publication-section-location");
+    expect(place).toHaveTextContent(missing("location_inactive"));
+    expect(place).not.toHaveTextContent("Пункт не заполнен.");
+  });
+
+  it("S2d: кодов, которых каталог больше не шлёт, в словаре экрана нет", () => {
+    expect(Object.keys(PUBLICATION_MISSING_TEXT)).toContain("location_inactive");
+    expect(Object.keys(PUBLICATION_MISSING_TEXT)).not.toContain("location_not_participating");
+  });
+
   it("S2b: NOT_READY — «Настроить расписание» ведёт по deep_link пункта hours", async () => {
     mockedStatus.mockResolvedValue(NOT_READY);
     await renderScreen();
