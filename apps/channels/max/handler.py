@@ -1724,21 +1724,6 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
             outcome=AIRequestMetric.OUTCOME_SUCCESS,
             skill_selected="safety_pre_check",
         )
-    elif is_voice_only(event.text, event.attachments):
-        # DRF-1939 — голосовое: честный ответ сразу после safety, до фото-ветки
-        # и консьержа (иначе консьерж получал пустую строку). Без LLM; аудио не
-        # скачивается и не хранится. Временная заглушка до DRF-1942.
-        reply = DiscoveryReply(text=VOICE_NOT_SUPPORTED_TEXT)
-        assistant_action_type = VOICE_ACTION_TYPE
-        _record_live_path_metric(
-            bot_user=bot_user,
-            conversation=conversation,
-            trace_id=trace_id,
-            message_text=event.text,
-            t_start=t_start,
-            outcome=AIRequestMetric.OUTCOME_SUCCESS,
-            skill_selected=VOICE_ACTION_TYPE,
-        )
     elif (_opt_out_reply := try_handle_opt_out(text=event.text, bot_user=bot_user)) is not None:
         # DRF-1285 — «не пиши мне» must work on THIS surface too. The skill
         # registry is dispatched only on the per-tenant path below, and the
@@ -1948,6 +1933,26 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
             t_start=t_start,
             outcome=AIRequestMetric.OUTCOME_SUCCESS,
             skill_selected="onboarding",
+        )
+    elif is_voice_only(event.text, event.attachments):
+        # DRF-1939 — голосовое: честный ответ до фото-ветки и консьержа (иначе
+        # консьерж получал пустую строку). Без LLM; аудио не скачивается и не
+        # хранится. Временная заглушка до DRF-1942.
+        #
+        # ПОСЛЕ онбординга, не выше: первое голосовое нового человека получает
+        # приветствие и вход в согласие. Заглушка выше записала бы вторую
+        # строку разговора, и сторож DRF-1207 (`_conversation_already_under_way`)
+        # навсегда отменил бы приветствие (на пилоте GLOBAL_BOT_ONBOARDING=true).
+        reply = DiscoveryReply(text=VOICE_NOT_SUPPORTED_TEXT)
+        assistant_action_type = VOICE_ACTION_TYPE
+        _record_live_path_metric(
+            bot_user=bot_user,
+            conversation=conversation,
+            trace_id=trace_id,
+            message_text=event.text,
+            t_start=t_start,
+            outcome=AIRequestMetric.OUTCOME_SUCCESS,
+            skill_selected=VOICE_ACTION_TYPE,
         )
     elif said_outcome is not None:
         # DRF-1878 — «Другой город» / устаревшая кнопка подтверждения: ответ

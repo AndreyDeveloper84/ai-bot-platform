@@ -23,7 +23,7 @@ from apps.orchestrator.memory import short_term
 
 pytestmark = pytest.mark.django_db
 
-VOICE_TEXT = "Голосовые сообщения я пока не понимаю — напиши, пожалуйста, текстом."
+VOICE_TEXT = "Аудио и голосовые я пока не понимаю — напиши, пожалуйста, текстом."
 
 # По документации v0.0.33, не подтверждено живым вебхуком.
 AUDIO = {
@@ -146,3 +146,74 @@ class TestNotVoiceOnly:
         assert len(mock_send) == 1
         assert mock_send[0]["text"] != VOICE_TEXT
         assert _voice_rows() == 0
+
+
+class TestVoiceMeetsOnboarding:
+    """На пилоте GLOBAL_BOT_ONBOARDING=true (замер главного окна 15.09 ~09:15 UTC).
+
+    Ветка голосового стоит ПОСЛЕ онбординга: первое голосовое нового человека
+    получает приветствие и вход в согласие, как сегодня. Иначе заглушка
+    записывала бы вторую строку разговора, и сторож DRF-1207
+    (`_conversation_already_under_way`) навсегда отменил бы приветствие.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _onboarding_on(self, settings):
+        settings.GLOBAL_BOT_ONBOARDING = True
+
+    def test_a_new_persons_first_voice_gets_the_welcome_and_the_next_gets_the_reply(
+        self, mock_send, fake_redis, spy_concierge
+    ):
+        from apps.channels.max.global_onboarding import GLOBAL_WELCOME_TEXT
+        from apps.identity.services.resolver import resolve_or_create_global_bot_user
+
+        max_handler.handle_global_max_event(
+            _payload(attachments=[AUDIO], user_id=7772, mid="m-new-1"),
+            trace_id=str(uuid.uuid4()),
+        )
+
+        assert len(mock_send) == 1
+        assert mock_send[0]["text"] == GLOBAL_WELCOME_TEXT
+        assert _voice_rows() == 0
+        bot_user = resolve_or_create_global_bot_user(
+            channel="max", channel_user_id="7772", chat_id="8881"
+        )
+        assert bot_user.welcomed_at is not None
+
+        max_handler.handle_global_max_event(
+            _payload(attachments=[AUDIO], user_id=7772, mid="m-new-2"),
+            trace_id=str(uuid.uuid4()),
+        )
+
+        assert len(mock_send) == 2
+        assert mock_send[1]["text"] == VOICE_TEXT
+        assert _voice_rows() == 1
+        spy_concierge.assert_not_called()
+
+    def test_a_welcomed_person_gets_the_voice_reply(self, mock_send, fake_redis, spy_concierge):
+        from django.utils import timezone
+
+        from apps.consent.services import record_global_consent
+        from apps.identity.services.resolver import resolve_or_create_global_bot_user
+
+        bot_user = resolve_or_create_global_bot_user(
+            channel="max", channel_user_id="7773", chat_id="8881"
+        )
+        bot_user.welcomed_at = timezone.now()
+        bot_user.save(update_fields=["welcomed_at"])
+        record_global_consent(
+            bot_user,
+            consent_type="personal_data",
+            source="test:voice",
+            document_version="welcome-s2-v1",
+        )
+
+        max_handler.handle_global_max_event(
+            _payload(attachments=[AUDIO], user_id=7773, mid="m-welcomed-1"),
+            trace_id=str(uuid.uuid4()),
+        )
+
+        assert len(mock_send) == 1
+        assert mock_send[0]["text"] == VOICE_TEXT
+        assert _voice_rows() == 1
+        spy_concierge.assert_not_called()

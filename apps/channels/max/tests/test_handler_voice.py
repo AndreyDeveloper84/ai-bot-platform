@@ -17,14 +17,14 @@ import pytest
 
 from apps.channels.max import handler as max_handler
 from apps.channels.max.photo import PhotoDownloadError
-from apps.conversations.models import Message
+from apps.conversations.models import Conversation, Message
 from apps.orchestrator.memory import short_term
 from apps.tenancy.context import tenant_scope, trace_id_scope
 from apps.tenancy.models import Tenant
 
 pytestmark = pytest.mark.django_db
 
-VOICE_TEXT = "Голосовые сообщения я пока не понимаю — напиши, пожалуйста, текстом."
+VOICE_TEXT = "Аудио и голосовые я пока не понимаю — напиши, пожалуйста, текстом."
 _DOWNLOAD_TARGET = "apps.channels.max.handler.download_photo"
 
 # По документации v0.0.33, не подтверждено живым вебхуком.
@@ -104,3 +104,26 @@ class TestVoiceOnTenantPath:
         mock_dl.assert_called_once()
         assert len(mock_send) == 1
         assert mock_send[0]["text"] != VOICE_TEXT
+
+
+class TestVoiceWhileOperatorDriving:
+    def test_the_bot_stays_silent_on_voice_when_an_operator_is_driving(
+        self, tenant, mock_send, fake_redis
+    ):
+        # Сторож: ветка голосового стоит ДО диспетчера, который молчит при
+        # HUMAN_HANDOFF, — она не должна вклиниться поверх оператора.
+        with tenant_scope(tenant), trace_id_scope(str(uuid4())):
+            max_handler.handle_max_event(_payload(text="привет", attachments=[], mid="m-voice-h1"))
+        assert len(mock_send) == 1  # первый контакт ответил — диалог есть
+        mock_send.clear()
+        conv = Conversation.all_tenants.get(tenant=tenant)
+        Conversation.all_tenants.filter(pk=conv.pk).update(state=Conversation.State.HUMAN_HANDOFF)
+
+        with tenant_scope(tenant), trace_id_scope(str(uuid4())):
+            max_handler.handle_max_event(_payload(attachments=[AUDIO], mid="m-voice-h2"))
+
+        assert Conversation.all_tenants.get(pk=conv.pk).state == Conversation.State.HUMAN_HANDOFF
+        assert mock_send == []
+        assert (
+            Message.all_tenants.filter(action_type="voice_not_supported").count() == 0
+        )  # empty-assert-ok: under HUMAN_HANDOFF no bot reply of any kind is written

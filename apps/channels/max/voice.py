@@ -16,8 +16,9 @@ from __future__ import annotations
 
 from typing import Any
 
-#: Черновик на утверждение (DRF-1939).
-VOICE_NOT_SUPPORTED_TEXT = "Голосовые сообщения я пока не понимаю — напиши, пожалуйста, текстом."
+#: Черновик на утверждение владельца (DRF-1939). ``audio`` — любой аудиофайл, не только
+#: голосовое, поэтому «аудио и голосовые».
+VOICE_NOT_SUPPORTED_TEXT = "Аудио и голосовые я пока не понимаю — напиши, пожалуйста, текстом."
 VOICE_ACTION_TYPE = "voice_not_supported"
 
 
