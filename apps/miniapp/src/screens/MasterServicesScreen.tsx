@@ -518,6 +518,7 @@ function OwnServicesSection({
             onSelected(res);
           }}
           onNotLinked={() => setNotLinked(true)}
+          onSubmitStart={() => setMessage(null)}
         />
       )}
     </section>

@@ -406,6 +406,7 @@ export function MasterServiceSelectScreen() {
               applySelection(state);
             }}
             onNotLinked={() => setOwnNotLinked(true)}
+            onSubmitStart={() => setMessage(null)}
           />
         ) : (
           <button type="button" className="btn-secondary" onClick={() => setOwnOpen(true)}>

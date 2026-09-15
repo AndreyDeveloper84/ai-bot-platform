@@ -666,6 +666,25 @@ describe("MasterServicesScreen — «Свои услуги»", () => {
     expect(mockedCreate).toHaveBeenCalledWith(expect.objectContaining({ name: "Ламинирование", duration_minutes: 60, price: "2000.50" }));
   });
 
+  it("K: a new submission clears the previous message — an invalid one included", async () => {
+    await renderScreen();
+    fireEvent.click(within(ownSection()).getByRole("button", { name: ADD_OWN_LABEL }));
+    fill(FIELD_NAME, "Ламинирование");
+    fill(FIELD_DURATION, "60");
+    fill(FIELD_PRICE, "2000");
+    fireEvent.click(within(ownSection()).getByRole("button", { name: ADD_OWN_LABEL }));
+    await settle();
+    expect(within(ownSection()).getByText(SENT_MESSAGE)).toBeInTheDocument();
+
+    // Открыть форму снова и отправить пустой: прежнее сообщение уходит в момент отправки.
+    fireEvent.click(within(ownSection()).getByRole("button", { name: ADD_OWN_LABEL }));
+    fireEvent.click(within(ownSection()).getByRole("button", { name: ADD_OWN_LABEL }));
+    await settle();
+
+    expect(within(ownSection()).getByText(ERR_NAME)).toBeInTheDocument();
+    expect(within(ownSection()).queryByText(SENT_MESSAGE)).not.toBeInTheDocument();
+  });
+
   it("G: own requests not linked → explanation, no form", async () => {
     mockedList.mockRejectedValue(new ApiError(403, "not_linked", "…"));
     await renderScreen();

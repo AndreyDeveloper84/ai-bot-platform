@@ -80,6 +80,7 @@ export function OwnServiceForm({
   onCreated,
   onSelected,
   onNotLinked,
+  onSubmitStart,
 }: {
   availability: PickAvailability;
   /** Заявка принята сервером — экран перечитывает список и показывает сообщение. */
@@ -88,6 +89,8 @@ export function OwnServiceForm({
   onSelected: (state: ServiceSelectionState) => void;
   /** Профиль не связан — экран прячет форму и объясняет. */
   onNotLinked: () => void;
+  /** Новая отправка началась — экран снимает прежнее сообщение (как до выноса формы). */
+  onSubmitStart?: () => void;
 }) {
   const [draft, setDraft] = useState<OwnServiceDraft>(EMPTY_DRAFT);
   const [errors, setErrors] = useState<OwnServiceErrors>({});
@@ -146,6 +149,7 @@ export function OwnServiceForm({
   };
 
   const submit = async () => {
+    onSubmitStart?.();
     const found = validateOwnService(draft);
     setErrors(found);
     if (Object.keys(found).length > 0) return;
