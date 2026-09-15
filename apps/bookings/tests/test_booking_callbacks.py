@@ -213,12 +213,21 @@ def _patch_yclients(client: FakeYClients):
 def _patch_booking_provider(client: FakeYClients):
     """The OTHER half of the gate's client path (DRF-2012).
 
-    ``_patch_yclients`` covers the YClients factory. The gate itself selects a
-    provider (``apps.bookings.callbacks`` → ``get_booking_provider``), and with
-    ``BOOKING_VIA_AYLA_REST`` on that is the Ayla adapter, which needs a base
-    URL no test environment sets — the tap then answers «Сейчас не могу
-    записать…» before ``_dispatch_confirm`` ever sees a result. Any test that
-    taps under the live flag needs this one too.
+    The path has two halves, and a test needs BOTH of them:
+
+    * ``_patch_yclients`` — the YClients factory
+      (``apps.integrations.yclients.get_yclients_client``);
+    * this one — the gate's provider fork at ``apps/bookings/callbacks.py``
+      lines 789-791, where ``get_booking_provider`` is called. With
+      ``BOOKING_VIA_AYLA_REST`` ON that returns the Ayla adapter, which needs
+      a base URL no test environment sets.
+
+    One without the other does not leave a gap you can see: the tap answers
+    «Сейчас не могу записать, попробуйте чуть позже» from the
+    ``bookings.gate.yclients_init_failed`` branch and never reaches
+    ``_dispatch_confirm`` — the assertion then measures the early refusal
+    instead of the path under test. Any test that taps under the live flag
+    needs both.
     """
 
     return patch("apps.skills.booking.provider.get_booking_provider", return_value=client)
