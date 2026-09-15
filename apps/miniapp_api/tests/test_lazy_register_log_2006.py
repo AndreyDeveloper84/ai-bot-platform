@@ -99,5 +99,10 @@ def test_repeat_contact_writes_no_second_record(tenant, caplog):
         again = _lazy_register_bot_user(tenant, _verified())
 
     assert again.pk == first.pk
-    assert BotUser.all_tenants.filter(tenant=tenant, channel="max", channel_user_id=str(MAX_USER_ID)).count() == 1
+    assert (
+        BotUser.all_tenants.filter(
+            tenant=tenant, channel="max", channel_user_id=str(MAX_USER_ID)
+        ).count()
+        == 1
+    )
     assert _lazy_records(caplog) == []

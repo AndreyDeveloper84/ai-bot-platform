@@ -116,11 +116,14 @@ def _lazy_register_bot_user(tenant: Tenant, verified: VerifiedInitData) -> BotUs
         },
     )
     if created:
+        # DRF-2006: без персональных данных. MAX id, имя и slug тенанта (у
+        # соло-кабинета он привязан к человеку) в лог не пишутся — их не
+        # маскирует ни pii_guard (он читает файлы коммита), ни
+        # PIIRedactingFilter (только телефоны, e-mail, карты). bot_user —
+        # псевдонимный внутренний ключ: сам по себе человека не называет.
         logger.info(
-            "miniapp_api.auth.lazy_register tenant=%s channel_user_id=%s display=%r",
-            tenant.slug,
-            verified.user_id,
-            display,
+            "miniapp_api.auth.lazy_register surface=miniapp_api created=1 bot_user=%s",
+            bot_user.pk,
         )
     return bot_user
 
