@@ -1662,6 +1662,11 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
     #      consent capture. Variant A «soft gate»: we greet + capture consent but
     #      do NOT block discovery on it. When onboarding runs we do NOT call
     #      generate_discovery_reply this turn.
+    #   1.5. Voice message (DRF-1939) — a turn of only ``audio`` attachments and no
+    #      text gets a deterministic «аудио и голосовые пока не понимаю» reply,
+    #      no LLM, nothing downloaded. AFTER onboarding on purpose: above it the
+    #      reply would be the conversation's second row and the DRF-1207 guard
+    #      would cancel the welcome for good (GLOBAL_BOT_ONBOARDING=true on pilot).
     #   2. Discovery → booking handoff (the user tapped a master card → transition
     #      into tenant T's booking flow, #1020).
     #   2.5. Post-handoff booking taps (DRF-988): pick_date / pick_slot /
