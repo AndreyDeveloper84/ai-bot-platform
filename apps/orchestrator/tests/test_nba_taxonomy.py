@@ -17,6 +17,8 @@ from apps.orchestrator import nba_taxonomy as tx
 
 
 class TestCodesAreTheOwnersBytes:
+    # Пара с beautygo_backend/recommendation/tests/test_pilot_taxonomy.py
+    # ::TestCodesAreTheOwnersBytes (#468) — менять вместе.
     def test_targets_h5(self):
         # recommendation.models.Target (каталог, DRF-1922)
         assert tx.TARGETS == ("FACE_FRESHNESS", "PUFFINESS_REDUCTION", "RELAXATION", "BACK_COMFORT")
