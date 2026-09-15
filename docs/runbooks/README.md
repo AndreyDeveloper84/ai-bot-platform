@@ -26,6 +26,7 @@ When the time comes to actually run a procedure (rolling back the canary at 02:3
 | [`jwks-rotation.md`](jwks-rotation.md) | partial | Pre-pilot 2026-07-15 (issue #565 / NS2) | Security stream (S2) |
 | [`admin-access.md`](admin-access.md) | draft | Controlled Pilot (DRF-1023) | Platform Lead |
 | [`connect-five-salons-drf1510.md`](connect-five-salons-drf1510.md) | draft | Pilot 2026-09-05 (DRF-1510) | Platform Lead |
+| [`solo-master-manual-setup-drf1925.md`](solo-master-manual-setup-drf1925.md) | draft | Pilot 2026-09-15 (DRF-1925) | Platform Lead |
 
 ## Setup (one-time procedures)
 
