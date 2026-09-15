@@ -192,6 +192,10 @@ class TestAttachmentOnly:
             bu = _mark_welcomed()  # isolate from the #85 auto-welcome → reach food_scanner
             bu.food_scanner_consent_at = timezone.now()  # pass the feature-consent gate
             bu.save(update_fields=["food_scanner_consent_at"])
+            # DRF-1948: и PERSONAL_DATA — сканер пишет в дневник только при нём.
+            from apps.consent.services import record_global_consent
+
+            record_global_consent(bu, source="test:attachment-only")
             max_handler.handle_max_event(
                 _payload(
                     text="",

@@ -1042,8 +1042,43 @@ def test_revocation_closes_the_food_scanner(
     with patch("apps.skills.food_scanner.skill.get_nutrition_client", return_value=ayla):
         result = FoodScannerSkill().handle(ctx)
 
-    assert result.meta.get("reply_kind") in {
-        "food_scanner_personal_data_required",
-        "food_scanner_consent_required",
-    }
+    # PERSONAL_DATA проверяется раньше колонки — отказ именно его. Что снята
+    # сама колонка, доказывает проверка выше, а по всем оболочкам — тест ниже.
+    assert result.meta.get("reply_kind") == "food_scanner_personal_data_required"
     ayla.log_meal.assert_not_called()
+
+
+def test_revocation_clears_the_scanner_consent_on_every_shell(tenant, bot_user) -> None:
+    """DRF-1948: колонка сканера снимается по ПОЛНОМУ резолву личности.
+
+    Та же дальняя оболочка, что в ``test_revocation_reaches_a_shell_linked_only_by_ayla_user_id``:
+    связана с человеком только через ``ayla_user_id``. Каскад по накопленному
+    заглушён — проверяется шаг 1.
+    """
+    from django.utils import timezone
+
+    person_key = uuid.uuid4()
+    BotUser.all_tenants.filter(pk=bot_user.pk).update(
+        ayla_user_id=person_key, food_scanner_consent_at=timezone.now()
+    )
+    bot_user.refresh_from_db()
+    upstream = Tenant.objects.create(slug="consents-scanner-upstream", name="Upstream")
+    far_shell = BotUser.all_tenants.create(
+        tenant=upstream,
+        channel="max",
+        channel_user_id="1521999",  # другой канальный ключ — не сосед
+        chat_id="chat-1521999",
+        ayla_user_id=person_key,
+        food_scanner_consent_at=timezone.now(),
+    )
+    # Есть что снимать — и именно на дальней оболочке.
+    assert BotUser.all_tenants.get(pk=far_shell.pk).food_scanner_consent_at is not None
+
+    with patch(
+        "apps.identity.services.privacy.delete_personal_data",
+        return_value=_NoOpCascade(),
+    ):
+        customer_consents.revoke_data_storage(bot_user)
+
+    assert BotUser.all_tenants.get(pk=bot_user.pk).food_scanner_consent_at is None
+    assert BotUser.all_tenants.get(pk=far_shell.pk).food_scanner_consent_at is None
