@@ -110,7 +110,6 @@ _PAIN_STEMS: frozenset[str] = frozenset(
         "усталость в",
         "не могу повернуть",
         "не могу нагнуться",
-        "трудно дышать",
     }
 )
 
@@ -321,14 +320,25 @@ _RED_FLAG_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"не могу встать", re.IGNORECASE),
     re.compile(r"не могу ходить", re.IGNORECASE),
     re.compile(r"теря(?:ю|ет) сознание", re.IGNORECASE),
+    # Breathing — S1 group G1 (DRF-1997, S-1b). «трудно дышать» used to sit in
+    # _PAIN_STEMS: a person short of breath got two questions about where it
+    # hurts instead of the protective answer (CLINICAL-F01).
+    #
+    # The only exception is an emotional idiom («задыхаюсь от смеха») — not a
+    # clinical ruling, for the clinical expert to check (VQ1). There is NO
+    # exception for a stuffy room («в зале душно, не хватает воздуха»): an
+    # asthma or panic attack indoors is real, and a false «лучше к врачу» is
+    # cheaper than a missed breathing red flag. Known false positive, named:
+    # irony («не могу дышать без этого крема, шучу»).
+    re.compile(r"\b(?:трудно|тяжело)\s+дышать", re.IGNORECASE),
+    re.compile(r"\bне\s+могу\s+(?:вдохнуть|дышать|отдышаться)", re.IGNORECASE),
+    re.compile(r"\bзадыха\w*+(?!\s+от\s+(?:смеха|хохота|восторга|счастья|радости))", re.IGNORECASE),
+    re.compile(r"\bудушь\w*", re.IGNORECASE),
+    re.compile(r"(?:не\s+хватает\s+воздуха|воздуха\s+не\s+хватает)", re.IGNORECASE),
     # Pregnancy + back pain is a soft red-flag — surface but don't block;
     # caller emits the warning. We keep this OUT of the regex list for
     # now; future versions can add tiered red-flags.
 )
-
-
-# Cap message length — long free-text is a question, not a pain report.
-_MAX_LEN = 200
 
 
 def classify(text: str) -> PainSignal:
@@ -336,11 +346,18 @@ def classify(text: str) -> PainSignal:
 
     Type-tolerant: non-``str`` returns :data:`PainSignal.NONE`. We never
     raise — bad upstream data is a router bug, not a classifier bug.
+
+    No length cap (DRF-1996, S-1a). A 200-character cap used to return
+    ``NONE`` before the red-flag scan, so a person who described an
+    emergency in more words got no red flag at all (CLINICAL-F01). The S1
+    detector validation report requires «отсутствие length cap / иных
+    silent-miss механизмов» (clinical-review-001 F01 п. 2). The patterns are
+    plain linear scans; message size is bounded by the channel.
     """
     if not isinstance(text, str):
         return PainSignal.NONE
     stripped = text.strip()
-    if not stripped or len(stripped) > _MAX_LEN:
+    if not stripped:
         return PainSignal.NONE
 
     # DRF-973 — the false-friend phrases are blanked ONCE and both tiers
