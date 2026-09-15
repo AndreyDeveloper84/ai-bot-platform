@@ -142,10 +142,49 @@ def build_live_input(conversation_id: str, tool_trace: Any) -> Any:
 class LivePathSink:
     """Одна строка: что решил бы движок — и что сделал текущий путь."""
 
-    def __init__(self, *, branch: str, tools: list[str], cards_shown: int) -> None:
+    def __init__(
+        self,
+        *,
+        branch: str,
+        tools: list[str],
+        cards_shown: int,
+        conversation: Any = None,
+        dr_state: Any = None,
+    ) -> None:
         self._branch = branch
         self._tools = tools
         self._cards_shown = cards_shown
+        self._conversation = conversation
+        self._dr_state = dr_state
+
+    def _snapshot_field(self, readiness_state: str | None) -> dict[str, Any] | None:
+        """Версия и digest снимка контекста хода (DRF-1903) — без содержимого.
+
+        Содержимое уходит только в каталог (DRF-1906); в лог — отпечаток, по
+        которому запись каталога сверяется с ходом. Отказ сторожа снимка
+        («не код») — код ``rejected``, не текст; любой другой сбой — имя типа.
+        Наблюдение не бросает.
+        """
+
+        if self._conversation is None:
+            return None
+        from apps.orchestrator.context_snapshot import SnapshotRejected, build_turn_snapshot
+
+        try:
+            snapshot = build_turn_snapshot(
+                bot_user=getattr(self._conversation, "bot_user", None),
+                conversation=self._conversation,
+                dr_state=self._dr_state,
+                readiness_state=readiness_state,
+            )
+        except SnapshotRejected:
+            return {"rejected": True}
+        except Exception as exc:  # noqa: BLE001 — наблюдение не стоит хода
+            return {"error": type(exc).__name__}
+        return {
+            "snapshot_version": snapshot.snapshot_version,
+            "content_digest": snapshot.content_digest,
+        }
 
     def record(self, evidence: Any) -> None:
         question = evidence.question or {}
@@ -175,6 +214,7 @@ class LivePathSink:
                     "path_recommended_without_readiness": (
                         self._cards_shown > 0 and not evidence.allow_recommend
                     ),
+                    "context_snapshot": self._snapshot_field(evidence.readiness_state),
                 },
                 ensure_ascii=False,
                 sort_keys=True,
@@ -205,6 +245,8 @@ def observe_live_turn(
             branch=branch or "",
             tools=tools,
             cards_shown=request.candidates.visible_count,
+            conversation=conversation,
+            dr_state=request.state,
         )
         evaluation_id = str(trace_id) if trace_id else f"no-trace:{uuid.uuid4()}"
         return observe(request, evaluation_id=evaluation_id, sink=sink)
