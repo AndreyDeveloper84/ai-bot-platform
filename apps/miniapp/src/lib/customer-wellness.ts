@@ -82,6 +82,12 @@ export interface FoodDiaryEntry {
   carbs_g: number;
   meal_type: string;
   logged_at: string;
+  /**
+   * §136 — чем получено число записи (`text_*` / `photo_*`), `null` для
+   * старых. Экран дневника по нему решает, можно ли править граммы:
+   * `граммы ÷ 100` верно только для записи текстом (DRF-1838).
+   */
+  entry_origin?: string | null;
 }
 
 export interface WellnessToday {
@@ -665,6 +671,54 @@ export async function undoWaterLog(entryId: string): Promise<boolean> {
     if (err instanceof ApiError && err.status === 404) return false;
     throw err;
   }
+}
+
+/** DRF-1838 — ответ на удаление записи еды: окно, в котором её можно вернуть. */
+export interface FoodEntryDeletion {
+  entry_id: string;
+  restore_window_expires_at: string | null;
+}
+
+/**
+ * Убрать запись еды из дневника. Обратимо в окне восстановления каталога.
+ * Любой отказ бросает `ApiError` — вызывающий называет его своей фразой.
+ */
+export async function deleteFoodEntry(entryId: string): Promise<FoodEntryDeletion> {
+  return request<FoodEntryDeletion>(`/wellness/food/${encodeURIComponent(entryId)}`, {
+    method: "DELETE",
+  });
+}
+
+/**
+ * Исход возврата удалённой записи — три РАЗНЫХ ответа, и сбой ни одним из них
+ * не является: `expired` — окно закрылось, удаление окончательно; `gone` —
+ * такой удалённой записи нет. Всё остальное бросает.
+ */
+export type FoodEntryRestore = "restored" | "expired" | "gone";
+
+export async function restoreFoodEntry(entryId: string): Promise<FoodEntryRestore> {
+  try {
+    await request<unknown>(`/wellness/food/${encodeURIComponent(entryId)}/restore`, {
+      method: "POST",
+    });
+    return "restored";
+  } catch (err) {
+    if (err instanceof ApiError && err.status === 410) return "expired";
+    // «Записи нет» — только если так сказал сам сервер. 404 от прокси или от
+    // сервера без этого маршрута (Mini App выложен раньше) — сбой, не исход.
+    if (err instanceof ApiError && err.status === 404 && err.slug === "not_found") {
+      return "gone";
+    }
+    throw err;
+  }
+}
+
+/** Исправить граммы записи, сделанной текстом (`portion = граммы / 100` на сервере). */
+export async function correctFoodEntryGrams(entryId: string, grams: number): Promise<void> {
+  await request<unknown>(`/wellness/food/${encodeURIComponent(entryId)}`, {
+    method: "PATCH",
+    body: JSON.stringify({ grams }),
+  });
 }
 
 /**
