@@ -186,8 +186,11 @@ class TestTheStrangerPathIsHandedToSliceFourB:
         assert _rows() == []
         assert "код" in sent.call_args.kwargs["text"].lower()
 
+    @pytest.mark.parametrize(
+        "setting_tenant", ["", "formula-tela"], ids=["no-setting", "client-setting-formula-tela"]
+    )
     def test_a_stranger_without_any_tenant_is_answered_2026_09_12(
-        self, salon, sent, settings, caplog
+        self, salon, sent, settings, caplog, setting_tenant
     ):
         """Эталон 4a ПЕРЕВЁРНУТ срезом 4b (DRF-1784): ERROR «…until_4b» больше нечего ждать.
 
@@ -196,6 +199,9 @@ class TestTheStrangerPathIsHandedToSliceFourB:
         """
 
         settings.MAX_BOT_REGISTRY = (SALON_BOT_TENANTLESS,)
+        # DRF-1785: вебхук не читает настройку клиентского бота. На пилоте 15.09
+        # MAX_BOT_TENANT_SLUG=formula-tela — вариант с ней краснеет, если чтение появится.
+        settings.MAX_BOT_TENANT_SLUG = setting_tenant
 
         with caplog.at_level(logging.ERROR, logger="apps.channels.max.salon_handler"):
             _handle("привет", None)
@@ -210,3 +216,63 @@ class TestTheConsumerNoLongerRequiresATenant:
         """Красный до правки: ``requires_tenant`` наследовал True («tenant-bound by construction»)."""
 
         assert SalonMaxHandler.__dict__.get("requires_tenant") is False
+
+
+class TestFailClosedWithoutTheVariable:
+    """DRF-1785 (срез 4c): запись салонного бота без тенанта — правила владельца R4 (а).
+
+    Зелёные до и после правки 4c: 4a/4b уже решают тенант от человека; эти тесты — сторож,
+    что снятие переменной их не ломает. «Нет роли → незнакомец без строки» держит
+    ``TestTheStrangerPathIsHandedToSliceFourB::test_a_stranger_without_any_tenant_is_answered_2026_09_12``.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _tenantless(self, settings):
+        settings.MAX_BOT_REGISTRY = (SALON_BOT_TENANTLESS,)
+
+    def test_one_active_salon_role_is_served_in_its_tenant(self, salon, sent):
+        row = BotUser.all_tenants.create(
+            tenant=salon, channel="max", channel_user_id=CHANNEL_USER_ID
+        )
+        TenantStaff.all_tenants.create(
+            tenant=salon, bot_user=row, role=TenantStaff.Role.ADMIN, created_by=row
+        )
+
+        _handle("привет", None)
+
+        assert len(_rows()) == 1
+        assert "Формула тела" in sent.call_args.kwargs["text"]
+
+    def test_several_salons_ask_which_one_and_create_nothing(self, salon, solo, sent):
+        from apps.channels.max.salon_handler import SALON_CHOICE_PROMPT
+
+        for tenant in (salon, solo):
+            row = BotUser.all_tenants.create(
+                tenant=tenant, channel="max", channel_user_id=CHANNEL_USER_ID
+            )
+            TenantStaff.all_tenants.create(
+                tenant=tenant, bot_user=row, role=TenantStaff.Role.ADMIN, created_by=row
+            )
+
+        _handle("привет", None)
+
+        assert sent.call_args.kwargs["text"] == SALON_CHOICE_PROMPT
+        assert len(_rows()) == 2
+
+    def test_a_resolver_error_fails_closed(self, salon, sent):
+        from apps.channels.max import salon_handler
+
+        with (
+            patch(
+                "apps.identity.services.bot_user_resolver.resolve_working_bot_user",
+                side_effect=RuntimeError("resolver down"),
+            ) as resolver,
+            patch.object(salon_handler, "_serve_stranger") as stranger,
+            pytest.raises(RuntimeError),
+        ):
+            _handle("привет", None)
+
+        assert resolver.called
+        stranger.assert_not_called()
+        sent.assert_not_called()
+        assert _rows() == []

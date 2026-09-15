@@ -61,6 +61,11 @@ def resolve_tenant_slug_for_init_data(verified: Any) -> str:
 
     Returns ``""`` when neither source is configured; callers then fall
     back to a cross-tenant lookup.
+
+    DRF-1785 (срез 4c, решение владельца R4 а): подпись САЛОННОГО бота → ``""``.
+    Салонный бот не принадлежит салону, и ``MAX_BOT_TENANT_SLUG`` — настройка
+    клиентского бота, а не запасной тенант для мастеров (на пилоте 15.09 —
+    ``formula-tela``).
     """
 
     bot_slug = getattr(verified, "bot_slug", "") or ""
@@ -68,9 +73,11 @@ def resolve_tenant_slug_for_init_data(verified: Any) -> str:
         # Local import: the bot registry reads settings at call time, and
         # importing it at module load would pull channels into identity's
         # import graph for every process that touches a BotUser.
-        from apps.channels.bot_registry import effective_registry, resolve_by_slug
+        from apps.channels.bot_registry import SALON_STREAM, effective_registry, resolve_by_slug
 
         entry = resolve_by_slug(bot_slug, effective_registry())
+        if entry is not None and entry.stream == SALON_STREAM:
+            return ""
         if entry is not None and entry.tenant_slug:
             return entry.tenant_slug
 
@@ -220,6 +227,17 @@ def resolve_bot_user(
     working = resolve_working_bot_user(verified.user_id, surface=surface, chosen_slug=chosen_slug)
     if working is not None:
         return working
+
+    if is_staff_surface(verified):
+        # DRF-1785 (R4 а, главное окно Q1 15.09): подпись салонного бота без рабочей
+        # строки — никто. Ни тенант подписи / MAX_BOT_TENANT_SLUG, ни «последняя строка
+        # любого тенанта»: оба шага подставили бы строку, где у человека нет роли.
+        logger.info(
+            "%s.auth.salon_signature_without_working_row channel_user_id=%s",
+            surface,
+            verified.user_id,
+        )
+        return None
 
     tenant_slug = resolve_tenant_slug_for_init_data(verified)
 

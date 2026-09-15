@@ -101,10 +101,10 @@ class SalonMaxHandler(TenantAwareTask):
     identity's working row and enters ``tenant_scope`` of that row itself.
     The isolation argument still holds, one level down: every read runs in
     the scope of the row being served, and a person with no working row
-    reaches nobody's data. While ``MAX_BOT_SALON_TENANT_SLUG`` still stands
-    the entry's tenant keeps arriving on the stream and serves the stranger
-    path unchanged (until DRF-1784); the base class simply no longer
-    refuses an entry without one.
+    reaches nobody's data. Since DRF-1785 (15.09.2026) ingress puts no
+    tenant on the ``max_salon`` stream — not even where the environment
+    still names one for the entry — and the base class does not refuse an
+    entry without a tenant.
 
     Deliberately NOT the conversational pipeline. The handler runs no LLM
     and dispatches no skills — staff get a control panel, not a chat

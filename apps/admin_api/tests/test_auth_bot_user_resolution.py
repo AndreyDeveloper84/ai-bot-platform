@@ -183,3 +183,45 @@ class TestBotUserResolution:
         resp = client.get(_masters_url(), HTTP_AUTHORIZATION=init_data_header("5008"))
         assert resp.status_code == 403
         assert resp.json()["error"] == "forbidden"
+
+
+class TestTheSalonBotWithoutTheVariable:
+    """DRF-1785 (срез 4c): ``MAX_BOT_SALON_TENANT_SLUG`` снят — запись салонного бота без тенанта."""
+
+    @staticmethod
+    def _salon_registry(settings) -> None:
+        settings.MAX_BOT_REGISTRY = (
+            BotEntry(
+                slug="salon",
+                webhook_secret="",
+                api_token=BOT_TOKEN,
+                tenant_slug="",
+                stream="max_salon",
+            ),
+        )
+
+    def test_an_owner_is_served_without_any_tenant_setting(
+        self, client: Client, settings, other_tenant: Tenant
+    ) -> None:
+        """Красный до правки: 500 «Bot tenant not configured» раньше, чем ищется рабочая строка."""
+        owner = _make_bot_user(other_tenant, "5011")
+        TenantStaff.all_tenants.create(
+            tenant=other_tenant, bot_user=owner, role=TenantStaff.Role.OWNER
+        )
+        self._salon_registry(settings)
+        settings.MAX_BOT_TENANT_SLUG = ""
+
+        resp = client.get(_masters_url(), HTTP_AUTHORIZATION=init_data_header("5011"))
+        assert resp.status_code == 200, resp.content
+
+    def test_a_stranger_is_not_resolved_to_the_setting_tenant(
+        self, client: Client, settings, tenant: Tenant
+    ) -> None:
+        """Красный до правки: строка customer тенанта настройки → 403; теперь её не берут → 404."""
+        _make_bot_user(tenant, "5012")
+        self._salon_registry(settings)
+        assert settings.MAX_BOT_TENANT_SLUG == tenant.slug
+
+        resp = client.get(_masters_url(), HTTP_AUTHORIZATION=init_data_header("5012"))
+        assert resp.status_code == 404, resp.content
+        assert resp.json()["error"] == "user_not_registered"
