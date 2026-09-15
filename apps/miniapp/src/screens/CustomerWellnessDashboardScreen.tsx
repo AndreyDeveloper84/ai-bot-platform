@@ -162,6 +162,18 @@ export function CustomerWellnessDashboardScreen() {
     () => readWaterQueue().length,
   );
   const [waterToast, setWaterToast] = useState<string | null>(null);
+  // DRF-1919: отказ стаканов из очереди, которых этот экран не ждал, — не молча.
+  // Тап, пришедший следом, допишет эту фразу к своей, а не затрёт её.
+  const queueRefusalNote = useRef<string | null>(null);
+  useEffect(
+    () =>
+      onWaterQueueRefused((refused) => {
+        const note = waterRefusalText(refused, { fromQueue: true });
+        queueRefusalNote.current = note;
+        setWaterToast(note);
+      }),
+    [],
+  );
   // DRF-1842 — id последнего принятого стакана, пока его можно отменить.
   // Ручка отмены (`DELETE /wellness/water/{id}`, `undoWaterLog`) была, а
   // кнопки не было ни одной: ошибочный тап оставался в дневнике навсегда.
@@ -258,6 +270,7 @@ export function CustomerWellnessDashboardScreen() {
     // wired by W4; STUB MODE simulates instant accept when online.
     setUndoEntryId(null);
     if (!online) {
+      queueRefusalNote.current = null;
       const len = enqueueWaterLog(250);
       setWaterQueueLen(len);
       setWaterToast(
@@ -288,6 +301,10 @@ export function CustomerWellnessDashboardScreen() {
           ownText = waterRefusalText([outcome.err]);
         } else if (outcome.err instanceof ApiError && outcome.err.status === 401) {
           ownText = WATER_SESSION_EXPIRED_TEXT;
+        } else if (!readWaterQueue().some((e) => e.key === own.key)) {
+          // Стакана нет ни в очереди, ни в исходе: хранилище его не сохранило.
+          // «Ждёт синхронизации» было бы обещанием, которое нечем выполнить.
+          ownText = "Стакан не сохранён — попробуй ещё раз.";
         } else {
           ownText = `+1 стакан · ${len} ${ruPluralWater(len)} ${ruPluralWaterWaits(len)} синхронизации`;
         }
@@ -298,20 +315,9 @@ export function CustomerWellnessDashboardScreen() {
     });
   }, [online]);
 
-  // DRF-1919: отказ стаканов из очереди, которых этот экран не ждал, — не молча.
-  // Тап, пришедший следом, допишет эту фразу к своей, а не затрёт её.
-  const queueRefusalNote = useRef<string | null>(null);
-  useEffect(
-    () =>
-      onWaterQueueRefused((refused) => {
-        const note = waterRefusalText(refused, { fromQueue: true });
-        queueRefusalNote.current = note;
-        setWaterToast(note);
-      }),
-    [],
-  );
-
   const onUndoWater = useCallback(() => {
+    // Фраза об отказах из очереди уже показана — к следующему тосту не приклеивать.
+    queueRefusalNote.current = null;
     const id = undoEntryId;
     if (!id) return;
     setUndoEntryId(null);

@@ -315,6 +315,20 @@ describe("DRF-1919 — очередь воды: чей стакан, что по
     expect(heard).toEqual([["ayla_bad_request"]]);
   });
 
+  it("повторный syncWaterEntry того же стакана — оба ожидающих получают исход", async () => {
+    const own = enqueueWaterLogEntry(250).entry;
+    fetchMock.mockImplementation(async () => okEntry("entry-same"));
+
+    const [a, b] = await Promise.all([
+      (async () => syncWaterEntry(own))(),
+      (async () => syncWaterEntry(own))(),
+    ]);
+
+    expect(a.kind).toBe("accepted");
+    expect(b.kind).toBe("accepted");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  }, 2000);
+
   it("401 — стакан остаётся в очереди, и исход говорит почему", async () => {
     const own = enqueueWaterLogEntry(250).entry;
     fetchMock.mockResolvedValueOnce(jsonResponse({ error: "stale", detail: "expired" }, 401));

@@ -1228,8 +1228,13 @@ describe("CustomerWellnessDashboardScreen — отмена стакана (DRF-1
     releaseFirst();
 
     await vi.waitFor(() => expect(posts()).toBe(2));
-    // Оба стакана ушли: в очереди ничего не ждёт (а «зачтён» уже показал первый тап).
-    await vi.waitFor(() => expect(screen.queryByText(/ждёт синхронизации|ждут синхронизации/)).toBeNull());
+    // Оба стакана ушли: очередь в хранилище пуста — стакан второго тапа снимается
+    // из неё ТОЛЬКО принятым («зачтён» уже показал первый тап, это не доказательство).
+    await vi.waitFor(() =>
+      expect(
+        JSON.parse(window.localStorage.getItem("max:wellness_water_offline_queue") ?? "null"),
+      ).toEqual([]),
+    );
   });
 
   it("DRF-1919: после возврата сети отказанные стаканы из очереди названы числом", async () => {
@@ -1340,6 +1345,21 @@ describe("CustomerWellnessDashboardScreen — отмена стакана (DRF-1
       ),
     ).toBeInTheDocument();
     expect(screen.queryByText(/зачтён/)).not.toBeInTheDocument();
+  });
+
+  it("DRF-1919: стакан не сохранился (хранилище не пишет) — так и сказано, без «ждёт»", async () => {
+    const calls = serveWater(() => new Response(null, { status: 204 }));
+    await renderScreen(true);
+    const qa = within(await screen.findByRole("region", { name: "Что сделаем сейчас" }));
+    vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => {
+      throw new DOMException("quota", "QuotaExceededError");
+    });
+
+    fireEvent.click(qa.getByRole("button", { name: "Добавить стакан воды 250 мл" }));
+
+    expect(await screen.findByText("Стакан не сохранён — попробуй ещё раз.")).toBeInTheDocument();
+    expect(screen.queryByText(/синхронизации/)).not.toBeInTheDocument();
+    expect(calls.filter((c) => c.startsWith("POST"))).toEqual([]);
   });
 
   it("сбой при отмене — ничего не убрано, кнопка возвращается", async () => {

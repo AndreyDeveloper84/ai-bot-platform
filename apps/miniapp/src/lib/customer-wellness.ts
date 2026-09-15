@@ -938,14 +938,26 @@ export async function syncWaterEntry(entry: QueuedWaterLog): Promise<WaterEntryO
   const outcome = new Promise<WaterEntryOutcome>((resolve) => {
     resolveOutcome = resolve;
   });
-  entryWatchers.set(key, resolveOutcome);
-  for (let attempt = 0; attempt < 3 && entryWatchers.get(key) === resolveOutcome; attempt += 1) {
+  // Второй ожидающий того же стакана цепляется к первому — исход получают оба.
+  const previous = entryWatchers.get(key);
+  entryWatchers.set(
+    key,
+    previous
+      ? (o) => {
+          previous(o);
+          resolveOutcome(o);
+        }
+      : resolveOutcome,
+  );
+  for (let attempt = 0; attempt < 3 && entryWatchers.has(key); attempt += 1) {
     await flushWaterQueue();
   }
-  if (entryWatchers.get(key) === resolveOutcome) {
-    // Стакан не попал ни в один проход (очередь очищена / TTL) — исход не известен.
+  const pending = entryWatchers.get(key);
+  if (pending) {
+    // Стакан не попал ни в один проход (не сохранился в хранилище, очередь
+    // очищена, TTL) — исход не известен; вызывающий проверит очередь сам.
     entryWatchers.delete(key);
-    return { kind: "queued", err: null };
+    pending({ kind: "queued", err: null });
   }
   return outcome;
 }
