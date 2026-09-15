@@ -240,7 +240,7 @@ class TestFirstAttemptInTheCascade:
         assert job.status == AylaErasureJob.Status.SUPERSEDED
         assert page.call_count == 0
         row = AuditLog.all_tenants.get(action="identity.ayla_erasure.superseded")
-        assert row.target_id == str(job.pk)
+        assert str(row.target_id) == str(job.pk)
         assert row.payload["reason"] == "account_deletion"
         for secret in ("424242", "bot:max", str(ayla_user_id)):
             assert secret not in str(row.payload), secret

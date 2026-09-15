@@ -49,6 +49,7 @@
 import { Fragment, useCallback, useEffect, useRef, useState } from "react";
 
 import {
+  DATA_STORAGE_DELETION_STARTED_NOTE,
   DATA_STORAGE_PARTIAL_PROCESSING_NOTE,
   DATA_STORAGE_REVOCATION_DISCLOSURE_TEXT,
   DataStorageRevocationFailedError,
@@ -807,6 +808,8 @@ type DataStorageRevokeView =
   | "busy"
   // Отзыв состоялся полностью.
   | "revoked"
+  // Отзыв состоялся, удаление в Ayla в задании — readback ещё не подтвердил (DRF-1950).
+  | "started"
   // Отзыв состоялся, часть обработки накопленного не отработала.
   | "partial"
   // 409: сервер обновил текст последствий — повтор тем же телом не пройдёт.
@@ -870,7 +873,13 @@ export function DataStorageRevokeSheet({
       // §35 п.9: состояние берётся из ответа сервера, а не достраивается
       // из решения. Что сервер сказал, то экран и покажет.
       onRevoked(result.consents);
-      setView(result.status === "revoked" ? "revoked" : "partial");
+      setView(
+        result.status === "revoked"
+          ? "revoked"
+          : result.status === "revoked_deletion_started"
+            ? "started"
+            : "partial",
+      );
     } catch (err) {
       if (err instanceof DataStorageStaleDisclosureError) {
         onStaleDisclosure();
@@ -938,6 +947,23 @@ export function DataStorageRevokeSheet({
         <>
           <p className="profile-support-sheet__body">
             Согласие отозвано. Данные, которые можно удалить, удалены.
+          </p>
+          <div className="profile-support-sheet__actions">
+            <button
+              type="button"
+              className="btn-primary profile-support-sheet__primary"
+              onClick={onClose}
+            >
+              Закрыть
+            </button>
+          </div>
+        </>
+      )}
+      {view === "started" && (
+        <>
+          <p className="profile-support-sheet__body">Согласие отозвано.</p>
+          <p className="profile-support-sheet__body">
+            {DATA_STORAGE_DELETION_STARTED_NOTE}
           </p>
           <div className="profile-support-sheet__actions">
             <button

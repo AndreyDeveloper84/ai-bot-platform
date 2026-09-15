@@ -395,7 +395,6 @@ describe("CustomerProfileScreen (настоящие ручки согласий)
           revocation: {
             status: "revoked_deletion_started",
             failed_steps: ["ayla_delete"],
-            failed_details: { ayla_delete: "deletion_started" },
           },
         }),
     });
