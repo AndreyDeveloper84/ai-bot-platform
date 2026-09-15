@@ -1025,7 +1025,7 @@ describe("CustomerWellnessDashboardScreen — отмена стакана (DRF-1
   }
 
   /** Live prod home + the two water handles; records every call. */
-  function serveWater(undo: () => Response): string[] {
+  function serveWater(undo: () => Response, post?: () => Response): string[] {
     const calls: string[] = [];
     vi.stubGlobal(
       "fetch",
@@ -1035,6 +1035,7 @@ describe("CustomerWellnessDashboardScreen — отмена стакана (DRF-1
         calls.push(`${method} ${u}`);
         if (method === "DELETE" && u.includes("/wellness/water/")) return undo();
         if (method === "POST" && u.includes("/wellness/water")) {
+          if (post) return post();
           return json({
             entry_id: "entry-9",
             ml: 250,
@@ -1085,6 +1086,54 @@ describe("CustomerWellnessDashboardScreen — отмена стакана (DRF-1
       await screen.findByText(/окно отмены закрылось, стакан остался в дневнике/),
     ).toBeInTheDocument();
     expect(screen.queryByText("Стакан убран")).not.toBeInTheDocument();
+  });
+
+  it("DRF-1919: «+1 стакан зачтён» — только после того, как сервер принял стакан", async () => {
+    serveWater(() => new Response(null, { status: 204 }));
+    await tapWater();
+
+    expect(await screen.findByText("+1 стакан зачтён")).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: "Отменить стакан" })).toBeInTheDocument();
+  });
+
+  it("DRF-1919: нет согласия — сказано, что не записано, и как это исправить", async () => {
+    serveWater(
+      () => new Response(null, { status: 204 }),
+      () => json({ error: "consent_required", detail: "no consent" }, 403),
+    );
+    await tapWater();
+
+    expect(
+      await screen.findByText(
+        "Чтобы менять дневник, нужно согласие на обработку личных данных — дай его в чате с Ayla.",
+      ),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("+1 стакан зачтён")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Отменить стакан" })).not.toBeInTheDocument();
+  });
+
+  it("DRF-1919: сервер недоступен — стакан ждёт синхронизации, а не «зачтён»", async () => {
+    serveWater(
+      () => new Response(null, { status: 204 }),
+      () => json({ error: "ayla_unavailable" }, 502),
+    );
+    await tapWater();
+
+    // Тост — точным текстом: индикатор очереди тоже говорит «ждёт синхронизации».
+    expect(await screen.findByText("+1 стакан · 1 стакан ждёт синхронизации")).toBeInTheDocument();
+    expect(screen.queryByText("+1 стакан зачтён")).not.toBeInTheDocument();
+  });
+
+  it("DRF-1919: дневник выключен — отмена говорит об этом, а не «окно закрылось»", async () => {
+    serveWater(() => json({ error: "nutrition_disabled" }, 404));
+    await tapWater();
+
+    fireEvent.click(await screen.findByRole("button", { name: "Отменить стакан" }));
+
+    expect(
+      await screen.findByText("Дневник воды сейчас выключен — убрать стакан не получилось."),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/окно отмены закрылось/)).not.toBeInTheDocument();
   });
 
   it("сбой при отмене — ничего не убрано, кнопка возвращается", async () => {

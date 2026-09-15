@@ -220,6 +220,15 @@ describe("undoWaterLog", () => {
     await expect(undoWaterLog("entry-42")).resolves.toBe(false);
   });
 
+  it("DRF-1919: a 404 from the diary switch is NOT «окно закрылось» — it throws", async () => {
+    // POSITIVE twin first: the server's own «not undoable» still reads as false.
+    fetchMock.mockResolvedValueOnce(jsonResponse({ error: "not_undoable" }, 404));
+    await expect(undoWaterLog("entry-42")).resolves.toBe(false);
+
+    fetchMock.mockResolvedValueOnce(jsonResponse({ error: "nutrition_disabled" }, 404));
+    await expect(undoWaterLog("entry-42")).rejects.toThrow();
+  });
+
   it("propagates a real outage instead of pretending the glass is gone", async () => {
     fetchMock.mockResolvedValue(
       jsonResponse({ error: "ayla_unavailable", detail: "down" }, 502),
@@ -336,6 +345,21 @@ describe("flushWaterQueue — onAccepted hands the entry id to the caller (DRF-1
     expect(readWaterQueue()).toHaveLength(1);
     expect(synced).toBe(0);
     expect(seen).toEqual([]);
+  });
+
+  it("DRF-1919: a permanent refusal is handed to the caller, not dropped silently", async () => {
+    enqueueWaterLog(250);
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse({ error: "consent_required", detail: "no consent" }, 403),
+    );
+    const refused: string[] = [];
+
+    const synced = await flushWaterQueue(undefined, (err) => refused.push(err.slug ?? ""));
+
+    expect(refused).toEqual(["consent_required"]);
+    expect(synced).toBe(0);
+    // The queue must not be poisoned by it either.
+    expect(readWaterQueue()).toHaveLength(0);
   });
 
   it("a throwing callback does not turn an accepted glass into a retry", async () => {

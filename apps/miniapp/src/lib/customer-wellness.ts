@@ -652,11 +652,26 @@ export async function postWaterLog(entry: QueuedWaterLog): Promise<WaterLogResul
   });
 }
 
+/** DRF-1919 — одна фраза на «нет согласия» для дневника еды и воды. */
+export const DIARY_CONSENT_REQUIRED_TEXT =
+  "Чтобы менять дневник, нужно согласие на обработку личных данных — дай его в чате с Ayla.";
+
+/**
+ * DRF-1919 — что сказать, когда сервер навсегда отказал в стакане. Стакан
+ * выброшен из очереди, то есть НЕ записан, — фраза говорит именно это.
+ */
+export function waterRefusalText(err: ApiError): string {
+  if (err.slug === "consent_required") return DIARY_CONSENT_REQUIRED_TEXT;
+  if (err.slug === "nutrition_disabled") return "Дневник воды сейчас выключен — стакан не записан.";
+  return "Стакан не записан — дневник его не принял.";
+}
+
 /**
  * Undo a logged glass — the way back when the customer mis-tapped.
  *
  * Returns `true` when Ayla removed it, `false` when the restore window
- * has closed (404) and the glass therefore STAYS counted. Anything else
+ * has closed (404 `not_undoable`) and the glass therefore STAYS counted.
+ * DRF-1919: a 404 `nutrition_disabled` (diary off) is not that — it throws. Anything else
  * (outage, 5xx) throws: a caller must never be told «removed» on the
  * strength of a failed request. That confusion is exactly the bug this
  * whole change exists to remove.
@@ -668,7 +683,7 @@ export async function undoWaterLog(entryId: string): Promise<boolean> {
     });
     return true;
   } catch (err) {
-    if (err instanceof ApiError && err.status === 404) return false;
+    if (err instanceof ApiError && err.status === 404 && err.slug === "not_undoable") return false;
     throw err;
   }
 }
@@ -763,6 +778,8 @@ let flushInFlight: Promise<number> | null = null;
 export async function flushWaterQueue(
   /** DRF-1842: id принятой записи — чтобы вызывающий мог предложить её отменить. */
   onAccepted?: (result: WaterLogResult) => void,
+  /** DRF-1919: постоянный отказ — стакан выброшен из очереди, экран обязан это сказать. */
+  onRejected?: (err: ApiError) => void,
 ): Promise<number> {
   if (flushInFlight) return flushInFlight;
   flushInFlight = (async () => {
@@ -781,6 +798,13 @@ export async function flushWaterQueue(
         if (isPermanentRejection(err)) {
           // eslint-disable-next-line no-console
           console.warn("[customer-wellness] water entry refused, dropping", err);
+          if (onRejected && err instanceof ApiError) {
+            try {
+              onRejected(err);
+            } catch {
+              /* фраза об отказе — не часть синхронизации */
+            }
+          }
           continue;
         }
         // Retryable — this entry and every later one stay queued.

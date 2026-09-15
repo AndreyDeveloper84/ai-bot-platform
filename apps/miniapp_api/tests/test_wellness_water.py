@@ -58,6 +58,28 @@ def _bot_token(settings):
     settings.MAX_BOT_TOKEN = BOT_TOKEN
 
 
+@pytest.fixture(autouse=True)
+def _diary_on(settings):
+    """DRF-1919: ручки воды за теми же воротами, что правка еды (#1745)."""
+    settings.NUTRITION_ENABLED = True
+
+
+@pytest.fixture(autouse=True)
+def consent():
+    with patch(
+        "apps.orchestrator.personal_surface.personal_records_consent_open", return_value=True
+    ) as m:
+        yield m
+
+
+@pytest.fixture
+def no_consent():
+    with patch(
+        "apps.orchestrator.personal_surface.personal_records_consent_open", return_value=False
+    ) as m:
+        yield m
+
+
 @pytest.fixture
 def tenant(db, settings) -> Tenant:
     t = Tenant.objects.create(slug="water-test", name="Water Test", timezone="Europe/Moscow")
@@ -302,4 +324,65 @@ class TestUndoWater:
         with patcher:
             resp = client.delete(_undo_url("entry-abc"))
         assert resp.status_code == 400
+        fake.undo_water.assert_not_awaited()
+
+
+class TestWaterGates:
+    """DRF-1919: новый стакан — запись в дневник, она за согласием на персональные
+    данные, как запись и правка еды (#1745). Убрать свой стакан — не новая
+    обработка: согласия не требует, как удаление еды. Обе ручки — за
+    ``NUTRITION_ENABLED``, как у еды."""
+
+    def test_a_glass_without_consent_is_refused_before_ayla(
+        self, client: Client, bot_user: BotUser, no_consent
+    ):
+        patcher, fake = _patch_client(add=_FakeEntry())
+        with patcher:
+            resp = _post(client, bot_user, {"ml": 250})
+        assert resp.status_code == 403
+        assert resp.json()["error"] == "consent_required"
+        fake.add_water.assert_not_awaited()
+
+    def test_a_glass_with_consent_reaches_ayla(self, client: Client, bot_user: BotUser):
+        patcher, fake = _patch_client(add=_FakeEntry())
+        with patcher:
+            resp = _post(client, bot_user, {"ml": 250})
+        assert resp.status_code == 201
+        fake.add_water.assert_awaited_once()
+
+    def test_a_glass_with_the_diary_off_is_refused_before_ayla(
+        self, client: Client, bot_user: BotUser, settings
+    ):
+        settings.NUTRITION_ENABLED = False
+        patcher, fake = _patch_client(add=_FakeEntry())
+        with patcher:
+            resp = _post(client, bot_user, {"ml": 250})
+        assert resp.status_code == 404
+        assert resp.json()["error"] == "nutrition_disabled"
+        fake.add_water.assert_not_awaited()
+
+    def test_undoing_own_glass_does_not_need_consent(
+        self, client: Client, bot_user: BotUser, no_consent
+    ):
+        patcher, fake = _patch_client(undo=True)
+        with patcher:
+            resp = client.delete(
+                _undo_url("entry-abc"),
+                HTTP_AUTHORIZATION=_init_data_header(bot_user.channel_user_id),
+            )
+        assert resp.status_code == 204
+        fake.undo_water.assert_awaited_once()
+
+    def test_undo_with_the_diary_off_is_refused_before_ayla(
+        self, client: Client, bot_user: BotUser, settings
+    ):
+        settings.NUTRITION_ENABLED = False
+        patcher, fake = _patch_client(undo=True)
+        with patcher:
+            resp = client.delete(
+                _undo_url("entry-abc"),
+                HTTP_AUTHORIZATION=_init_data_header(bot_user.channel_user_id),
+            )
+        assert resp.status_code == 404
+        assert resp.json()["error"] == "nutrition_disabled"
         fake.undo_water.assert_not_awaited()

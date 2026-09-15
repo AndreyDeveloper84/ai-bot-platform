@@ -30,6 +30,7 @@ import {
   restoreFoodEntry,
   type DiaryToday,
   type FoodDiaryEntry,
+  DIARY_CONSENT_REQUIRED_TEXT,
 } from "../lib/customer-wellness";
 import { ApiError } from "../lib/api";
 import { useScreenBack } from "../hooks/useScreenBack";
@@ -473,7 +474,7 @@ function isTextEntry(entry: FoodDiaryEntry): boolean {
 function entryErrorText(err: unknown): string {
   if (err instanceof ApiError) {
     if (err.slug === "consent_required") {
-      return "Чтобы менять дневник, нужно согласие на обработку личных данных — дай его в чате с Ayla.";
+      return DIARY_CONSENT_REQUIRED_TEXT;
     }
     if (err.slug === "ayla_uncertain") {
       return "Не знаю, дошло ли — обнови дневник, прежде чем повторять.";

@@ -3768,6 +3768,8 @@ def customer_wellness_water(request: HttpRequest) -> HttpResponse:
 
     Failure mapping mirrors :func:`customer_goal_select`: 400 —
     malformed body or Ayla 4xx; 502 — Ayla outage/circuit-open.
+    DRF-1919: 404 ``nutrition_disabled`` — дневник выключен; 403
+    ``consent_required`` — нет согласия на персональные данные (как у еды).
     """
     import asyncio
     import json
@@ -3817,6 +3819,11 @@ def customer_wellness_water(request: HttpRequest) -> HttpResponse:
             return _error("malformed", "idempotency_key has invalid characters", 400)
 
     bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
+    # DRF-1919: новый стакан — запись в дневник, за теми же воротами, что
+    # запись и правка еды: без согласия на персональные данные — 403.
+    refusal = _diary_entry_gate(bot_user, needs_consent=True)
+    if refusal is not None:
+        return refusal
     external_id = external_user_id_for(bot_user)
 
     try:
@@ -3871,8 +3878,10 @@ def customer_wellness_water(request: HttpRequest) -> HttpResponse:
 def customer_wellness_water_undo(request: HttpRequest, entry_id: str) -> HttpResponse:
     """Undo a water entry — the way back when the customer mis-tapped.
 
-    204 when Ayla soft-deleted the entry; 404 when it refused (restore
-    window expired, or the id was never ours).
+    204 when Ayla soft-deleted the entry; 404 ``not_undoable`` when it refused
+    (restore window expired, or the id was never ours); 404
+    ``nutrition_disabled`` when the diary is off (DRF-1919) — a different slug,
+    because the screen must not call that «окно отмены закрылось».
 
     DIVERGENCE from :func:`card_delete`, which maps an upstream 404 to
     an idempotent 204: a closed restore window means the glass is STILL
@@ -3893,6 +3902,11 @@ def customer_wellness_water_undo(request: HttpRequest, entry_id: str) -> HttpRes
         return _error("malformed", "entry_id is required", 400)
 
     bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
+    # DRF-1919: убрать свой стакан — не новая обработка, согласия не требует
+    # (как удаление еды); выключенный дневник — 404 со своим slug.
+    refusal = _diary_entry_gate(bot_user, needs_consent=False)
+    if refusal is not None:
+        return refusal
     external_id = external_user_id_for(bot_user)
 
     try:
@@ -3923,15 +3937,15 @@ _FOOD_GRAMS_MAX = 2000
 _FOOD_BASELINE_G = 100.0
 
 
-def _food_entry_gate(bot_user: BotUser, *, needs_consent: bool) -> JsonResponse | None:
-    """Ворота — как у бота, а не как у воды на этой же поверхности.
+def _diary_entry_gate(bot_user: BotUser, *, needs_consent: bool) -> JsonResponse | None:
+    """Ворота записи дневника — еда и вода (DRF-1838, DRF-1919).
 
-    Бот (``apps.skills.food_clarify.text_entry``): удаление своей записи
-    согласия не требует — убрать своё человек вправе всегда, это не новая
-    обработка; правка и возврат снова пишут в дневник и требуют согласия на
-    персональные данные. Ручки воды здесь согласия не проверяют вовсе — это
-    их долг, а не образец: одна и та же запись не должна быть правимой в
-    Mini App и неправимой в чате.
+    Образец — запись еды в боте (``apps.skills.food_clarify.text_entry``):
+    удаление своей записи согласия не требует — убрать своё человек вправе
+    всегда, это не новая обработка; новая запись, правка и возврат пишут в
+    дневник и требуют согласия на персональные данные. Вода в ЧАТЕ этих
+    ворот пока не имеет (``WaterSkill``) — это долг чата (DRF-1926), а не
+    образец для Mini App.
     """
     from django.conf import settings as dj_settings
 
@@ -4010,7 +4024,7 @@ def customer_wellness_food_entry(request: HttpRequest, entry_id: str) -> HttpRes
     external_id = external_user_id_for(bot_user)
 
     if request.method == "DELETE":
-        refused = _food_entry_gate(bot_user, needs_consent=False)
+        refused = _diary_entry_gate(bot_user, needs_consent=False)
         if refused is not None:
             return refused
         try:
@@ -4026,7 +4040,7 @@ def customer_wellness_food_entry(request: HttpRequest, entry_id: str) -> HttpRes
             }
         )
 
-    refused = _food_entry_gate(bot_user, needs_consent=True)
+    refused = _diary_entry_gate(bot_user, needs_consent=True)
     if refused is not None:
         return refused
     try:
@@ -4068,7 +4082,7 @@ def customer_wellness_food_entry_restore(request: HttpRequest, entry_id: str) ->
     if not entry_id:
         return _error("malformed", "entry_id is required", 400)
     bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
-    refused = _food_entry_gate(bot_user, needs_consent=True)
+    refused = _diary_entry_gate(bot_user, needs_consent=True)
     if refused is not None:
         return refused
     external_id = external_user_id_for(bot_user)

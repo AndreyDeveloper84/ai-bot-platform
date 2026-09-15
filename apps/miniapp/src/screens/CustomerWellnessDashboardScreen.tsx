@@ -81,7 +81,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { type Service } from "../lib/api";
+import { ApiError, type Service } from "../lib/api";
 import { authErrorCopy, loadErrorReason, type LoadErrorReason } from "../lib/auth-error-copy";
 import { formatDuration, formatMoney } from "../lib/format";
 import { visitAddressText } from "../lib/visit-address";
@@ -96,6 +96,7 @@ import {
   pickOneLiner,
   readWaterQueue,
   undoWaterLog,
+  waterRefusalText,
   type RecentActivity,
   type WellnessToday,
 } from "../lib/customer-wellness";
@@ -209,7 +210,7 @@ export function CustomerWellnessDashboardScreen() {
     const onOnline = () => {
       setOnline(true);
       // Auto-flush water queue on reconnect (Tau §11.8).
-      void flushWaterQueue().then(() => {
+      void flushWaterQueue(undefined, (err) => setWaterToast(waterRefusalText(err))).then(() => {
         setWaterQueueLen(readWaterQueue().length);
       });
     };
@@ -262,10 +263,29 @@ export function CustomerWellnessDashboardScreen() {
     // as a single durable code path while STUB doesn't have a real
     // endpoint. Once W4 ships, the online branch will skip enqueue.
     enqueueWaterLog(250);
-    void flushWaterQueue((accepted) => setUndoEntryId(accepted.entry_id)).then(() => {
-      setWaterQueueLen(readWaterQueue().length);
+    // DRF-1919: «зачтён» — только когда сервер принял стакан. Отказ говорится
+    // своей фразой (стакан не записан); сбой сети — стакан ждёт в очереди.
+    let settled = false;
+    void flushWaterQueue(
+      (accepted) => {
+        settled = true;
+        setUndoEntryId(accepted.entry_id);
+        setWaterToast("+1 стакан зачтён");
+      },
+      (err) => {
+        settled = true;
+        setUndoEntryId(null);
+        setWaterToast(waterRefusalText(err));
+      },
+    ).then(() => {
+      const len = readWaterQueue().length;
+      setWaterQueueLen(len);
+      if (!settled && len > 0) {
+        setWaterToast(
+          `+1 стакан · ${len} ${ruPluralWater(len)} ${ruPluralWaterWaits(len)} синхронизации`,
+        );
+      }
     });
-    setWaterToast("+1 стакан зачтён");
   }, [online]);
 
   const onUndoWater = useCallback(() => {
@@ -284,7 +304,12 @@ export function CustomerWellnessDashboardScreen() {
         );
         if (removed) void fetchAll();
       },
-      () => {
+      (err: unknown) => {
+        // DRF-1919: дневник выключен — повтор не поможет, кнопку не возвращаем.
+        if (err instanceof ApiError && err.slug === "nutrition_disabled") {
+          setWaterToast("Дневник воды сейчас выключен — убрать стакан не получилось.");
+          return;
+        }
         // Сбой сети/сервера — ничего не удалено; кнопку возвращаем.
         setUndoEntryId(id);
         setWaterToast("Не получилось убрать — попробуй ещё раз");
