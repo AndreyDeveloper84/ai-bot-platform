@@ -114,4 +114,5 @@ class TestRefusals:
         ayla.get_specialist_reviews.return_value = payload
         resp = _get(client)
         assert resp.status_code == 502
+        assert resp.json()["error"] == "reviews_unavailable"
         assert "reviews" not in resp.json()
