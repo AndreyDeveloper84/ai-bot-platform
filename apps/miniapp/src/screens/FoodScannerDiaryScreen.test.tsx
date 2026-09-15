@@ -19,17 +19,31 @@
  * **3. Ни одна съеденная тарелка не исчезает.** Незнакомый `meal_type`
  * попадает в «Другое», а не выбрасывается (§78).
  */
-import { render, screen, within } from "@testing-library/react";
+import { fireEvent, render, screen, within } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("../lib/customer-wellness", async (importOriginal) => {
   const original =
     await importOriginal<typeof import("../lib/customer-wellness")>();
-  return { ...original, loadDiaryToday: vi.fn() };
+  return {
+    ...original,
+    loadDiaryToday: vi.fn(),
+    deleteFoodEntry: vi.fn(),
+    restoreFoodEntry: vi.fn(),
+    correctFoodEntryGrams: vi.fn(),
+  };
 });
 
-import { loadDiaryToday, type WellnessToday } from "../lib/customer-wellness";
+import {
+  correctFoodEntryGrams,
+  deleteFoodEntry,
+  DIARY_CONSENT_REQUIRED_TEXT,
+  loadDiaryToday,
+  restoreFoodEntry,
+  type WellnessToday,
+} from "../lib/customer-wellness";
+import { ApiError } from "../lib/api";
 import { FoodScannerDiaryScreen } from "./FoodScannerDiaryScreen";
 
 const mockedLoad = vi.mocked(loadDiaryToday);
@@ -183,6 +197,17 @@ describe("четыре состояния различимы попарно", ()
     expect(screen.queryByText(/Пока ничего не записано/)).not.toBeInTheDocument();
   });
 
+  it("DRF-1927: нет согласия — говорим про согласие, не про сбой и не про пустой день", async () => {
+    mockedLoad.mockResolvedValue({ state: "consent_required" });
+    renderScreen();
+
+    expect(await screen.findByText(DIARY_CONSENT_REQUIRED_TEXT)).toBeInTheDocument();
+    expect(screen.queryByText(/Не удалось загрузить дневник/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Пока ничего не записано/)).not.toBeInTheDocument();
+    // Повтор ничего не даст — кнопки повтора нет.
+    expect(screen.queryByText(/Попробовать снова/)).not.toBeInTheDocument();
+  });
+
   it("ответ не пришёл — состояние ошибки, а не пустой день", async () => {
     mockedLoad.mockRejectedValue(new Error("[502] upstream"));
     renderScreen();
@@ -209,5 +234,307 @@ describe("ни одна съеденная тарелка не исчезает"
     // И у неё есть своя группа с именем, а не чужая.
     const other = screen.getByRole("region", { name: /Другое/ });
     expect(within(other).getByText("Ночной кефир")).toBeInTheDocument();
+  });
+});
+
+
+describe("пустой день не зовёт в неработающий скан (DRF-1839)", () => {
+  it("прод: подпись зовёт в чат, кнопки скана нет", async () => {
+    // Экран скана под `guardProd` падает в прод-сборке; работающий вход
+    // записи — текстовый ввод в чате (DRF-1837).
+    vi.stubEnv("DEV", false);
+    try {
+      mockedLoad.mockResolvedValue({
+        state: "empty",
+        hideNumbers: false,
+        today: today({ calories_eaten: 0 }),
+      });
+      renderScreen();
+      expect(
+        await screen.findByText(/Напиши Ayla в чате, что было/),
+      ).toBeInTheDocument();
+      expect(
+        screen.queryByRole("button", { name: "Добавить приём" }),
+      ).not.toBeInTheDocument();
+      expect(screen.queryByText(/через скан/)).not.toBeInTheDocument();
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("DEV: кнопка скана остаётся — заглушки там живы", async () => {
+    mockedLoad.mockResolvedValue({
+      state: "empty",
+      hideNumbers: false,
+      today: today({ calories_eaten: 0 }),
+    });
+    renderScreen();
+    expect(
+      await screen.findByRole("button", { name: "Добавить приём" }),
+    ).toBeInTheDocument();
+  });
+
+  it("запись из чата (meal_type other) видна в «Другое»", async () => {
+    // Текстовый ввод DRF-1837 пишет тип приёма «не указан» — он обязан
+    // остаться на экране, а не пропасть из списка.
+    mockedLoad.mockResolvedValue({
+      state: "entries",
+      entries: [{ ...SOUP, id: "fl-chat", dish_name: "борщ", meal_type: "other" }],
+      hideNumbers: false,
+      today: today(),
+    });
+    renderScreen();
+    expect(await screen.findByText("борщ")).toBeInTheDocument();
+    expect(screen.getByText("Другое")).toBeInTheDocument();
+  });
+});
+
+
+describe("строка диетолога (DRF-1897)", () => {
+  const LINE = "Третий вечер ужин после девяти. Если хочешь, подумаем, что можно сдвинуть.";
+
+  it("пришла — стоит под итогами дословно", async () => {
+    mockedLoad.mockResolvedValue({
+      state: "entries",
+      entries: [OATS],
+      hideNumbers: false,
+      today: today({ coach_observation: LINE }),
+    });
+    renderScreen();
+
+    const line = await screen.findByText(LINE);
+    const totals = screen.getByRole("region", { name: "Сегодня" });
+    // Под итогами: итоги в документе раньше строки.
+    expect(
+      totals.compareDocumentPosition(line) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+  });
+
+  it("не пришла — ни абзаца", async () => {
+    mockedLoad.mockResolvedValue({
+      state: "entries",
+      entries: [OATS],
+      hideNumbers: false,
+      today: today(),
+    });
+    const { container } = renderScreen();
+
+    // POSITIVE first: the ready diary did render.
+    expect(await screen.findByText("Овсянка с ягодами")).toBeInTheDocument();
+    expect(container.querySelector(".food-scanner-diary__observation")).toBeNull();
+  });
+});
+
+
+describe("правка и удаление записи (DRF-1838)", () => {
+  const TEXT_ENTRY = {
+    ...OATS,
+    id: "fl-text",
+    dish_name: "Гречка",
+    entry_origin: "text_estimated_confirmed",
+  };
+  const PHOTO_ENTRY = { ...SOUP, id: "fl-photo", entry_origin: "photo_estimated_confirmed" };
+  const mockedDelete = vi.mocked(deleteFoodEntry);
+  const mockedRestore = vi.mocked(restoreFoodEntry);
+  const mockedCorrect = vi.mocked(correctFoodEntryGrams);
+
+  function serveDay(entries: Array<typeof OATS & { entry_origin?: string | null }>) {
+    mockedLoad.mockResolvedValue({
+      state: "entries",
+      entries,
+      hideNumbers: false,
+      today: today(),
+    });
+  }
+
+  const DELETION = { entry_id: "fl-text", restore_window_expires_at: "2026-09-15T12:15:00+00:00" };
+
+  it("у каждой записи «Удалить», «Исправить граммы» — только у записи текстом", async () => {
+    serveDay([TEXT_ENTRY, PHOTO_ENTRY]);
+    renderScreen();
+
+    expect(await screen.findByRole("button", { name: "Удалить: Гречка" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Удалить: Куриный суп" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Исправить граммы: Гречка" })).toBeInTheDocument();
+    // У фото-записи порция считается от скана, не от 100 г — «граммы ÷ 100» соврали бы.
+    expect(
+      screen.queryByRole("button", { name: "Исправить граммы: Куриный суп" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("«Удалить» убирает запись, перечитывает день и предлагает вернуть", async () => {
+    serveDay([TEXT_ENTRY]);
+    mockedDelete.mockResolvedValue(DELETION);
+    renderScreen();
+
+    fireEvent.click(await screen.findByRole("button", { name: "Удалить: Гречка" }));
+
+    expect(await screen.findByText("Убрано: Гречка. Вернуть можно 15 минут.")).toBeInTheDocument();
+    expect(mockedDelete).toHaveBeenCalledWith("fl-text");
+    expect(mockedLoad).toHaveBeenCalledTimes(2);
+    expect(screen.getByRole("button", { name: "Вернуть" })).toBeInTheDocument();
+  });
+
+  it("«Вернуть» в окне возвращает запись и перечитывает день", async () => {
+    serveDay([TEXT_ENTRY]);
+    mockedDelete.mockResolvedValue(DELETION);
+    mockedRestore.mockResolvedValue("restored");
+    renderScreen();
+
+    fireEvent.click(await screen.findByRole("button", { name: "Удалить: Гречка" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Вернуть" }));
+
+    expect(await screen.findByText("Вернула: Гречка.")).toBeInTheDocument();
+    expect(mockedRestore).toHaveBeenCalledWith("fl-text");
+    expect(mockedLoad).toHaveBeenCalledTimes(3);
+  });
+
+  it("после окна — сказано, что удалено окончательно, «Вернуть» больше нет", async () => {
+    serveDay([TEXT_ENTRY]);
+    mockedDelete.mockResolvedValue(DELETION);
+    mockedRestore.mockResolvedValue("expired");
+    renderScreen();
+
+    fireEvent.click(await screen.findByRole("button", { name: "Удалить: Гречка" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Вернуть" }));
+
+    expect(
+      await screen.findByText("Уже не вернуть: прошло больше 15 минут, запись удалена окончательно."),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Вернуть" })).not.toBeInTheDocument();
+  });
+
+  it("«Исправить граммы» отправляет граммы и перечитывает день", async () => {
+    serveDay([TEXT_ENTRY]);
+    mockedCorrect.mockResolvedValue(undefined);
+    renderScreen();
+
+    fireEvent.click(await screen.findByRole("button", { name: "Исправить граммы: Гречка" }));
+    fireEvent.change(screen.getByLabelText("Сколько граммов было: Гречка"), {
+      target: { value: "250" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Сохранить" }));
+
+    expect(await screen.findByText("Исправила: Гречка.")).toBeInTheDocument();
+    expect(mockedCorrect).toHaveBeenCalledWith("fl-text", 250);
+    expect(mockedLoad).toHaveBeenCalledTimes(2);
+  });
+
+  it("граммы вне 10…2000 не отправляются", async () => {
+    serveDay([TEXT_ENTRY]);
+    renderScreen();
+
+    fireEvent.click(await screen.findByRole("button", { name: "Исправить граммы: Гречка" }));
+    fireEvent.change(screen.getByLabelText("Сколько граммов было: Гречка"), {
+      target: { value: "5" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Сохранить" }));
+
+    expect(await screen.findByText("Граммы — числом от 10 до 2000.")).toBeInTheDocument();
+    expect(mockedCorrect).not.toHaveBeenCalled();
+  });
+
+  it("без согласия — сказано, как его дать", async () => {
+    serveDay([TEXT_ENTRY]);
+    mockedCorrect.mockRejectedValue(new ApiError(403, "consent_required", "consent"));
+    renderScreen();
+
+    fireEvent.click(await screen.findByRole("button", { name: "Исправить граммы: Гречка" }));
+    fireEvent.change(screen.getByLabelText("Сколько граммов было: Гречка"), {
+      target: { value: "250" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Сохранить" }));
+
+    expect(
+      await screen.findByText(
+        "Чтобы менять дневник, нужно согласие на обработку личных данных — дай его в чате с Ayla.",
+      ),
+    ).toBeInTheDocument();
+  });
+
+  it("неизвестный исход удаления — не «ничего не изменилось»", async () => {
+    serveDay([TEXT_ENTRY]);
+    mockedDelete.mockRejectedValue(new ApiError(502, "ayla_uncertain", "timeout"));
+    renderScreen();
+
+    fireEvent.click(await screen.findByRole("button", { name: "Удалить: Гречка" }));
+
+    expect(
+      await screen.findByText("Не знаю, дошло ли — обнови дневник, прежде чем повторять."),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/ничего не изменилось/)).not.toBeInTheDocument();
+  });
+});
+
+
+describe("правка и удаление записи — края из ревью (DRF-1838)", () => {
+  const ENTRY = { ...OATS, id: "fl-edge", dish_name: "Гречка", entry_origin: "text_estimated_confirmed" };
+  const mockedDelete = vi.mocked(deleteFoodEntry);
+  const mockedRestore = vi.mocked(restoreFoodEntry);
+  const mockedCorrect = vi.mocked(correctFoodEntryGrams);
+  const DELETION = { entry_id: "fl-edge", restore_window_expires_at: "2026-09-15T12:15:00+00:00" };
+
+  function serve() {
+    mockedLoad.mockResolvedValue({
+      state: "entries",
+      entries: [ENTRY],
+      hideNumbers: false,
+      today: today(),
+    });
+  }
+
+  it("двойной тап «Удалить» шлёт одно удаление", async () => {
+    serve();
+    mockedDelete.mockReturnValue(new Promise(() => {}));
+    renderScreen();
+
+    const button = await screen.findByRole("button", { name: "Удалить: Гречка" });
+    fireEvent.click(button);
+    fireEvent.click(button);
+
+    expect(mockedDelete).toHaveBeenCalledTimes(1);
+  });
+
+  it("двойной тап «Вернуть» шлёт один возврат", async () => {
+    serve();
+    mockedDelete.mockResolvedValue(DELETION);
+    mockedRestore.mockReturnValue(new Promise(() => {}));
+    renderScreen();
+
+    fireEvent.click(await screen.findByRole("button", { name: "Удалить: Гречка" }));
+    const undo = await screen.findByRole("button", { name: "Вернуть" });
+    fireEvent.click(undo);
+    fireEvent.click(undo);
+
+    expect(mockedRestore).toHaveBeenCalledTimes(1);
+  });
+
+  it("неизвестный исход перечитывает день — показать правду, а не прежний список", async () => {
+    serve();
+    mockedDelete.mockRejectedValue(new ApiError(502, "ayla_uncertain", "timeout"));
+    renderScreen();
+
+    fireEvent.click(await screen.findByRole("button", { name: "Удалить: Гречка" }));
+
+    expect(
+      await screen.findByText("Не знаю, дошло ли — обнови дневник, прежде чем повторять."),
+    ).toBeInTheDocument();
+    expect(mockedLoad).toHaveBeenCalledTimes(2);
+  });
+
+  it("отказ каталога — своя фраза, не «ничего не изменилось» и не «не отвечает»", async () => {
+    serve();
+    mockedCorrect.mockRejectedValue(new ApiError(400, "ayla_bad_request", "rejected"));
+    renderScreen();
+
+    fireEvent.click(await screen.findByRole("button", { name: "Исправить граммы: Гречка" }));
+    fireEvent.change(screen.getByLabelText("Сколько граммов было: Гречка"), {
+      target: { value: "250" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Сохранить" }));
+
+    expect(
+      await screen.findByText("Дневник не принял изменение — проверь запись и попробуй ещё раз."),
+    ).toBeInTheDocument();
   });
 });

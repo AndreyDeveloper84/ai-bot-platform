@@ -118,6 +118,19 @@ def goals_stub():
         yield m
 
 
+@pytest.fixture(autouse=True)
+def _diary_consent_open():
+    """DRF-1927: тесты этого файла — про дневник при согласии.
+
+    Без подмены каждый тест мерил бы отказ по согласию; сами ворота —
+    в ``test_wellness_today_consent_1927.py``.
+    """
+    with patch(
+        "apps.orchestrator.personal_surface.personal_records_consent_open", return_value=True
+    ):
+        yield
+
+
 # Minimal stand-ins for the dataclass responses the NutritionClient returns.
 @dataclass
 class _FakeSummary:
@@ -891,3 +904,168 @@ class TestWellnessTodayNumbersHidden:
         assert "eating_disorder" not in body
         assert "health_flags" not in body
         assert "pregnancy" not in body
+
+
+class TestDiaryCoachObservation:
+    """DRF-1897 — строка диетолога в дневнике Mini App, только по явному признаку.
+
+    ``wellness/today`` читают главная и дневник. Решать строку и писать
+    журнал наблюдений ручка обязана только для дневника, и узнаёт она об
+    этом из ``?surface=diary``, который ставит экран дневника, а не из
+    догадки. Главная, открытая утром, иначе тратила бы суточный слот
+    наблюдения, и заход в дневник вечером молчал бы.
+
+    Лестница наблюдения подменяется целиком (у неё свои тесты,
+    ``apps/orchestrator/tests/test_coach_observation.py``); журнал — НАСТОЯЩИЙ
+    ``persist_observation``, и читается он из строки БД в обход гейта
+    контекста, чтобы отказ гейта не выглядел пустым журналом.
+    """
+
+    TEXT = "Третий вечер ужин после девяти. Если хочешь, подумаем, что можно сдвинуть."
+
+    @pytest.fixture
+    def linked(self, bot_user: BotUser) -> BotUser:
+        bot_user.customer_status = BotUser.CustomerStatus.LINKED
+        bot_user.save(update_fields=["customer_status"])
+        return bot_user
+
+    @pytest.fixture
+    def due(self):
+        from apps.orchestrator.coach_observation import Observation
+
+        observation = Observation(
+            text=self.TEXT, content_key="late_dinner", local_date="2026-09-15"
+        )
+        with patch(
+            "apps.orchestrator.coach_observation.decide_observation",
+            return_value=observation,
+        ) as decide:
+            yield decide
+
+    @staticmethod
+    def _get(client: Client, user: BotUser, *, summary=None, **params: str):
+        with _patch_nutrition(
+            summary=_FakeSummary(entries=[]) if summary is None else summary,
+            water=_FakeWater(),
+        ):
+            return client.get(
+                _url(), params, HTTP_AUTHORIZATION=_init_data_header(user.channel_user_id)
+            )
+
+    @staticmethod
+    def _journal(user: BotUser) -> list[dict[str, Any]]:
+        from apps.nutrition_proactive import prefs
+
+        stored = BotUser.all_tenants.get(pk=user.pk)
+        context = stored.context if isinstance(stored.context, dict) else {}
+        return prefs.outbox_entries(context.get(prefs.CONTEXT_KEY) or {})
+
+    def test_the_diary_gets_the_line_and_the_journal_records_it(
+        self, client: Client, linked: BotUser, due
+    ):
+        resp = self._get(client, linked, surface="diary")
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["coach_observation"] == self.TEXT
+        assert due.call_count == 1
+        journal = self._journal(linked)
+        assert len(journal) == 1
+        assert journal[0]["surface"] == "coach_hint"
+        assert journal[0]["solicited"] is True
+
+    def test_opening_the_home_screen_does_not_write_the_dietologist_line(
+        self, client: Client, linked: BotUser, due
+    ):
+        resp = self._get(client, linked)
+
+        # POSITIVE first: the very same read happened and answered.
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["entries"] == []
+        assert data["calories_eaten"] == 1240
+        # The home screen neither decides, shows, nor journals the line.
+        assert due.call_count == 0
+        assert "coach_observation" not in data
+        # The gate lets this person be written: an empty journal is «the ladder
+        # did not write», not «the gate refused to».
+        assert linked.customer_status == BotUser.CustomerStatus.LINKED
+        assert self._journal(linked) == []
+
+    def test_any_other_surface_value_is_the_home_screen(self, client: Client, linked: BotUser, due):
+        resp = self._get(client, linked, surface="dashboard")
+
+        assert resp.status_code == 200
+        assert "entries" in resp.json()
+        assert due.call_count == 0
+        assert "coach_observation" not in resp.json()
+        # The gate lets this person be written: an empty journal is «the ladder
+        # did not write», not «the gate refused to».
+        assert linked.customer_status == BotUser.CustomerStatus.LINKED
+        assert self._journal(linked) == []
+
+    def test_nothing_due_leaves_the_diary_byte_identical(self, client: Client, linked: BotUser):
+        with patch(
+            "apps.orchestrator.coach_observation.decide_observation", return_value=None
+        ) as decide:
+            diary = self._get(client, linked, surface="diary")
+            home = self._get(client, linked)
+
+        assert decide.call_count == 1
+        assert diary.status_code == 200
+        assert diary.content == home.content
+        # The gate lets this person be written: an empty journal is «the ladder
+        # did not write», not «the gate refused to».
+        assert linked.customer_status == BotUser.CustomerStatus.LINKED
+        assert self._journal(linked) == []
+
+    def test_an_unreadable_diary_neither_shows_nor_journals(
+        self, client: Client, linked: BotUser, due
+    ):
+        resp = self._get(client, linked, summary=NutritionUnavailableError("down"), surface="diary")
+
+        assert resp.status_code == 200
+        data = resp.json()
+        # POSITIVE first: the other halves still answered.
+        assert data["water_glasses_eaten"] == 4
+        # The screen will say «не удалось загрузить» and show no line —
+        # so nothing may be journaled as shown.
+        assert "entries" not in data
+        assert due.call_count == 0
+        assert "coach_observation" not in data
+        # The gate lets this person be written: an empty journal is «the ladder
+        # did not write», not «the gate refused to».
+        assert linked.customer_status == BotUser.CustomerStatus.LINKED
+        assert self._journal(linked) == []
+
+    def test_a_refused_shell_gets_no_line_it_could_not_journal(
+        self, client: Client, bot_user: BotUser, due
+    ):
+        # `bot_user` of this file is UNRESOLVED outside the global tenant:
+        # the context gate refuses it, `merge_prefs` would write nothing.
+        assert bot_user.customer_status == BotUser.CustomerStatus.UNRESOLVED
+
+        resp = self._get(client, bot_user, surface="diary")
+
+        assert resp.status_code == 200
+        assert resp.json()["entries"] == []
+        assert due.call_count == 0
+        assert "coach_observation" not in resp.json()
+        assert self._journal(bot_user) == []
+
+    def test_a_failing_observation_never_breaks_the_diary(self, client: Client, linked: BotUser):
+        with patch(
+            "apps.orchestrator.coach_observation.decide_observation",
+            side_effect=RuntimeError("ladder broke"),
+        ) as decide:
+            resp = self._get(client, linked, surface="diary")
+
+        assert decide.call_count == 1
+        assert resp.status_code == 200
+        assert resp.json()["entries"] == []
+        assert resp.json()["calories_eaten"] == 1240
+        assert "coach_observation" not in resp.json()
+        # The gate lets this person be written: an empty journal is «the ladder
+        # did not write», not «the gate refused to».
+        assert linked.customer_status == BotUser.CustomerStatus.LINKED
+        assert self._journal(linked) == []

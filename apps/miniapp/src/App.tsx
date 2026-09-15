@@ -115,8 +115,11 @@ import { MasterOnboardingScreen } from "./screens/MasterOnboardingScreen";
 import { MasterPickerScreen } from "./screens/MasterPickerScreen";
 import { MasterNotificationSettingsScreen } from "./screens/MasterNotificationSettingsScreen";
 import { MasterProfileScreen } from "./screens/MasterProfileScreen";
+import { MasterReviewsScreen } from "./screens/MasterReviewsScreen";
 import { MasterAylaScreen } from "./screens/MasterAylaScreen";
 import { MasterScheduleScreen } from "./screens/MasterScheduleScreen";
+import { MasterPublicationScreen } from "./screens/MasterPublicationScreen";
+import { MasterServiceSelectScreen } from "./screens/MasterServiceSelectScreen";
 import { MasterServicesScreen } from "./screens/MasterServicesScreen";
 import { MasterSettingsScreen } from "./screens/MasterSettingsScreen";
 import { MasterSetupLandingScreen } from "./screens/MasterSetupLandingScreen";
@@ -860,7 +863,7 @@ function UnifiedAdminMasterRoutes({ me }: { me: MeResponse }) {
  *   📋 День     → MasterDashboardScreen  (today agenda; reuse)
  *   📅 Записи   → MasterScheduleScreen   (booking calendar; reuse)
  *   👥 Клиенты  → MasterCustomersScreen  (Tier 2 read-only roster — this PR)
- *   💼 Услуги   → MasterServicesScreen   (Tier 2 read-only catalog — this PR)
+ *   💼 Услуги   → MasterServicesScreen   (экран 04: цены и длительность — DRF-1810)
  *   ⋯ Ещё      → opens bottom sheet (does NOT navigate)
  *
  * «Ещё» bottom sheet (Tau §3 spec):
@@ -1251,6 +1254,7 @@ function UnifiedSoloSurface({ me }: { me: MeResponse }) {
          * ведёт на экран 01 «всё готово», иначе — «Мой день». */}
         <Route path="/" element={<SoloSetupGate />} />
         <Route path="/solo/setup" element={<MasterSetupLandingScreen />} />
+        <Route path="/solo/publication" element={<MasterPublicationScreen />} />
         {/* DRF-1817 — экран 06: рабочие часы на общем контракте /working-hours. */}
         <Route path="/solo/working-hours" element={<MasterWorkingHoursScreen />} />
 
@@ -1259,6 +1263,8 @@ function UnifiedSoloSurface({ me }: { me: MeResponse }) {
         <Route path="/solo/bookings" element={<MasterScheduleScreen />} />
         <Route path="/solo/customers" element={<MasterCustomersScreen />} />
         <Route path="/solo/services" element={<MasterServicesScreen />} />
+        {/* DRF-1809 (M17) — экран 03: выбор услуг из каталога по направлению. */}
+        <Route path="/solo/services/select" element={<MasterServiceSelectScreen />} />
         {/* /solo/more — deep-link only; redirects synchronously to
          * /solo/my-day. The parent (`UnifiedSoloSurface`) reads the URL
          * on mount and initialises `moreOpen=true` for this path, so
@@ -1274,7 +1280,7 @@ function UnifiedSoloSurface({ me }: { me: MeResponse }) {
         />
         <Route
           path="/solo/reviews"
-          element={<SoonScreen tab="Отзывы" slug="solo-reviews-screen" />}
+          element={<MasterReviewsScreen />}
         />
         <Route path="/solo/ai" element={<MasterConversationsScreen />} />
         <Route path="/solo/profile" element={<MasterProfileScreen />} />

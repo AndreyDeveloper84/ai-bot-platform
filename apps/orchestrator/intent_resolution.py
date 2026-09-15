@@ -563,6 +563,27 @@ def _validate_and_build(
 _SHOW_MASTERS_TOOL = "show_masters"
 _START_BOOKING_TOOL = "start_booking"
 _ASK_CLARIFICATION_TOOL = "ask_clarification"
+#: DRF-1920. Модель спрашивает человека подтвердить сказанный раньше факт
+#: (DRF-1878); вопрос и кнопки рисует бот. Литерал, а не импорт из
+#: said_memory, — по той же причине, что и соседи выше.
+_CONFIRM_SAID_FACT_TOOL = "confirm_said_fact"
+#: Какой вопрос задан — по ключу факта, без значения: значение взято из памяти,
+#: а не из реплики, и в контракт хода не идёт.
+_CONFIRM_SAID_FACT_QUESTIONS = {
+    "city": "Подтвердить город поиска из прошлого разговора",
+    "visit_context": "Подтвердить, когда удобно приходить, из прошлого разговора",
+}
+
+#: DRF-1920 — инструменты консьержа, у которых честного отображения в контракт
+#: 0.5 нет, с причиной. Ход с ними уходит в LLM-проход намеренно. Сторож класса
+#: (``test_intent_resolution_tool_choice``) требует, чтобы каждый инструмент
+#: консьержа либо имел строку ниже, либо был записан здесь.
+NO_HONEST_MAPPING: dict[str, str] = {
+    "show_my_records": (
+        "показ дневника не выражает намерения хода: человек мог спросить о "
+        "записях, о еде или просто открыть дневник — тип выводит LLM-проход"
+    ),
+}
 _CATALOG_TOOLS = frozenset({"show_salons", "show_services"})
 _CONTEXT_TOOLS = frozenset(
     {"health_screening", "log_water", "clarify_food_entry", "start_nutrition_anketa"}
@@ -719,6 +740,24 @@ def build_draft_from_tool_choice(
         draft = _base_draft("UNKNOWN", "needs_clarification", 0.4)
         draft["requires_clarification"] = True
         draft["clarification_question"] = question.strip()
+        draft["clarification_reason"] = "intent_low_confidence"
+        draft["clarification_effect"] = "blocks_current_action"
+        draft["status_reason"] = "low_confidence"
+        _ensure_evidence(draft, user_text)
+        return draft
+
+    if tool == _CONFIRM_SAID_FACT_TOOL:
+        # DRF-1920. Форма ask_clarification: модель в этом ходе не фиксирует
+        # факт, а спрашивает человека и ждёт ответа. PROVIDE_CONTEXT/resolved
+        # утверждал бы, что человек дал контекст в этом ходе, — факт же взят из
+        # памяти. needs_clarification допускает только intent-level причины;
+        # intent_low_confidence натянута ровно так же, как у ask_clarification.
+        question = _CONFIRM_SAID_FACT_QUESTIONS.get(str(arguments.get("key") or ""))
+        if question is None:
+            return None
+        draft = _base_draft("UNKNOWN", "needs_clarification", 0.4)
+        draft["requires_clarification"] = True
+        draft["clarification_question"] = question
         draft["clarification_reason"] = "intent_low_confidence"
         draft["clarification_effect"] = "blocks_current_action"
         draft["status_reason"] = "low_confidence"

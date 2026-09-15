@@ -337,6 +337,197 @@ export const putWorkingHours = (
 ): Promise<WorkingHoursResponse> =>
   request("/working-hours", { method: "PUT", body: JSON.stringify({ schedule }) });
 
+// --- M18a «Свои услуги» — заявки о разрыве канона (DRF-1896 / DRF-1802) ---------
+// Mirrors apps/master_api/views.py::canon_gap_requests / canon_gap_similar /
+// canon_gap_request_detail — a proxy to the catalog (DRF-1801). The answer is
+// the catalog's, never an echo; the owner decides, the screen only shows.
+
+export type CanonGapStatus = "pending" | "approved" | "needs_clarification" | "rejected";
+
+export interface CanonGapRequest {
+  id: string;
+  specialist_id: string;
+  name: string;
+  description: string;
+  duration_minutes: number;
+  price: string;
+  status: CanonGapStatus | string;
+  /** Одно из четырёх слов мастеру — от сервера, не вычисляется на экране. */
+  status_label: string;
+  resolved_template_id: string | null;
+  clarification_question: string | null;
+  rejection_reason: string | null;
+  decided_at: string | null;
+  created_at: string;
+}
+
+export interface CanonGapSimilar {
+  template_id: string;
+  name: string;
+  matched_by: "synonym" | "canonical_name" | string;
+}
+
+export interface CanonGapRequestCreate {
+  name: string;
+  description: string;
+  duration_minutes: number;
+  price: string;
+}
+
+export const listCanonGapRequests = (): Promise<{ requests: CanonGapRequest[] }> =>
+  request("/canon-gap-requests", { method: "GET" });
+
+export const createCanonGapRequest = (
+  body: CanonGapRequestCreate,
+): Promise<{ request: CanonGapRequest; similar: CanonGapSimilar[] }> =>
+  request("/canon-gap-requests", { method: "POST", body: JSON.stringify(body) });
+
+export const getSimilarCanonTemplates = (
+  name: string,
+): Promise<{ similar: CanonGapSimilar[] }> =>
+  request(`/canon-gap-requests/similar?name=${encodeURIComponent(name)}`, { method: "GET" });
+
+// --- DRF-1895 (M10b) выбор канонических услуг и цена мастера ------------------
+// Mirrors apps/master_api/views.py::service_selection / service_offer /
+// selected_service — a proxy to the catalog (M8a / M8b). The counters
+// `selected` / `configured` are the server's; the screen never computes them.
+
+export interface SelectedServiceOffer {
+  id: string;
+  price: string;
+  duration_minutes: number;
+  is_active: boolean;
+}
+
+export interface SelectedService {
+  salon_service_id: string;
+  template_id: string;
+  name: string;
+  category_id: string | null;
+  is_active: boolean;
+  mapping_status: string;
+  offer: SelectedServiceOffer | null;
+  configured: boolean;
+  /** Каталог M8a/M8b: категория услуги и корень её дерева — «направление» (DRF-1912). */
+  category_name: string | null;
+  direction_id: string | null;
+  direction_name: string | null;
+  direction_sort_order: number | null;
+}
+
+export interface ServiceSelectionState {
+  specialist_id: string;
+  tenant_id: string;
+  selected: number;
+  configured: number;
+  services: SelectedService[];
+}
+
+export const getServiceSelection = (): Promise<ServiceSelectionState> =>
+  request("/services/selection", { method: "GET" });
+
+export const selectServices = (
+  templateIds: string[],
+): Promise<ServiceSelectionState & { created: number }> =>
+  request("/services/selection", {
+    method: "POST",
+    body: JSON.stringify({ template_ids: templateIds }),
+  });
+
+export const putServiceOffer = (
+  salonServiceId: string,
+  body: { price: string; duration_minutes: number },
+): Promise<ServiceSelectionState & { offer_id: string }> =>
+  request(`/services/${salonServiceId}/offer`, { method: "PUT", body: JSON.stringify(body) });
+
+export const removeService = (
+  salonServiceId: string,
+): Promise<ServiceSelectionState & { removal: "deleted" | "deactivated" }> =>
+  request(`/services/${salonServiceId}`, { method: "DELETE" });
+
+// --- DRF-1799 (M7) канон для экрана 03 ------------------------------------------
+// Mirrors apps/master_api/views.py::service_directions / service_templates —
+// proxies to the catalog's canon. Directions are exactly the catalog's list (no
+// count or codes kept here); template rows carry no price or duration.
+
+export interface ServiceDirection {
+  id: string;
+  name: string;
+  slug: string;
+  icon: string;
+  sort_order: number;
+}
+
+export interface ServiceTemplate {
+  id: string;
+  name: string;
+  name_short: string | null;
+  is_popular: boolean;
+  category_id: string | null;
+  category_name: string | null;
+}
+
+export const getServiceDirections = (): Promise<{ directions: ServiceDirection[] }> =>
+  request("/services/directions", { method: "GET" });
+
+export const getServiceTemplates = (
+  directionId: string,
+): Promise<{ direction_id: string; templates: ServiceTemplate[] }> =>
+  request(`/services/templates?direction_id=${encodeURIComponent(directionId)}`, { method: "GET" });
+
+// --- M5/M26 publication (DRF-1797 / DRF-1818) ------------------------------
+// Mirrors apps/master_api/views.py::publication_status / publication_publish —
+// thin proxies of the catalog M4 routes. The screen reads the catalog's answer
+// and never recomputes readiness on its own.
+
+export type PublicationProfileStatus = "draft" | "pending" | "active";
+
+export interface PublicationMissingItem {
+  code: string;
+  /** Те же ключи, что у пунктов readiness бота, плюс `identity`. */
+  section: string;
+  detail: Record<string, unknown>;
+}
+
+export interface PublicationReadiness {
+  status: "READY" | "NOT_READY" | string;
+  missing: PublicationMissingItem[];
+}
+
+export interface PublicationRequestRecord {
+  id: string;
+  command_id: string;
+  outcome: string;
+  from_status: string;
+  to_status: string;
+  created_at: string;
+}
+
+export interface PublicationStatus {
+  specialist_id: string;
+  profile_status: PublicationProfileStatus | string;
+  readiness: PublicationReadiness;
+  last_request: PublicationRequestRecord | null;
+}
+
+export interface PublishResponse {
+  specialist_id: string;
+  profile_status: PublicationProfileStatus | string;
+  replayed: boolean;
+  request: PublicationRequestRecord;
+}
+
+export const getPublicationStatus = (): Promise<PublicationStatus> =>
+  request("/publication/status", { method: "GET" });
+
+/** `commandId` — ключ одной попытки: повтор с тем же ключом каталог не выполнит второй раз. */
+export const publishProfile = (commandId: string, signal?: AbortSignal): Promise<PublishResponse> =>
+  request("/publication", {
+    method: "POST",
+    body: JSON.stringify({ command_id: commandId }),
+    signal,
+  });
+
 /** Пункты, которые экран рисует: всё, кроме `unavailable`. */
 export const drawnReadinessItems = (items: ReadinessItem[]): ReadinessItem[] =>
   items.filter((item) => item.state !== "unavailable");
@@ -1191,3 +1382,48 @@ export const confirmAylaAction = (token: string): Promise<AylaConfirmResponse> =
     method: "POST",
     body: JSON.stringify({ token }),
   });
+
+// --- DRF-1845 «Принимаю записи» ---------------------------------------------
+// Mirrors apps/master_api/views.py::accepting_bookings — a proxy to the
+// catalog's availability route. The flag lives in the catalog only; the answer
+// is its readback. The bot sees a pause on its next catalog sync (≤15 min).
+
+export interface AcceptingBookingsResponse {
+  accepting_bookings: boolean;
+  status: string | null;
+}
+
+export const getAcceptingBookings = (): Promise<AcceptingBookingsResponse> =>
+  request("/accepting-bookings", { method: "GET" });
+
+export const setAcceptingBookings = (
+  accepting: boolean,
+): Promise<AcceptingBookingsResponse> =>
+  request("/accepting-bookings", {
+    method: "PATCH",
+    body: JSON.stringify({ accepting_bookings: accepting }),
+  });
+
+// --- DRF-1857 «Мои отзывы» --------------------------------------------------
+// Mirrors apps/master_api/views.py::reviews — a proxy to the catalog's
+// own-reviews route under the master as subject. Rows are whitelisted by the
+// bot; the client is «Имя Ф.» / «Клиент» / null (anonymous); no rating until a
+// review exists.
+
+export interface MasterReview {
+  id: string;
+  rating: number;
+  text: string;
+  client_name: string | null;
+  service_name: string | null;
+  created_at: string;
+}
+
+export interface MasterReviewsResponse {
+  review_count: number;
+  rating: number | null;
+  reviews: MasterReview[];
+}
+
+export const getMasterReviews = (): Promise<MasterReviewsResponse> =>
+  request("/reviews", { method: "GET" });

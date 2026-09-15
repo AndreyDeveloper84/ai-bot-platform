@@ -11,7 +11,7 @@
  * (per spec §10 Appendix ED Mode).
  */
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 
 import { Skeleton } from "../components/Skeleton";
@@ -24,10 +24,15 @@ import {
   type MealType,
 } from "../lib/food-scanner";
 import {
+  correctFoodEntryGrams,
+  deleteFoodEntry,
   loadDiaryToday,
+  restoreFoodEntry,
   type DiaryToday,
   type FoodDiaryEntry,
+  DIARY_CONSENT_REQUIRED_TEXT,
 } from "../lib/customer-wellness";
+import { ApiError } from "../lib/api";
 import { useScreenBack } from "../hooks/useScreenBack";
 import { backTo } from "../lib/screen-back";
 
@@ -50,6 +55,8 @@ type Status =
   | { kind: "loading" }
   | { kind: "error"; err: unknown }
   | { kind: "unreadable" }
+  // DRF-1927 — нет согласия: дневник не читался, повтор ничего не даст.
+  | { kind: "consent_required" }
   | {
       kind: "ready";
       day: Extract<DiaryToday, { state: "empty" | "entries" }>;
@@ -86,7 +93,11 @@ export function FoodScannerDiaryScreen() {
       // «Ответ пришёл, записей в нём нет» — своё состояние, не ошибка
       // и не пустой день.
       setStatus(
-        day.state === "unreadable" ? { kind: "unreadable" } : { kind: "ready", day },
+        day.state === "unreadable"
+          ? { kind: "unreadable" }
+          : day.state === "consent_required"
+            ? { kind: "consent_required" }
+            : { kind: "ready", day },
       );
     } catch (err) {
       setStatus({ kind: "error", err });
@@ -96,6 +107,78 @@ export function FoodScannerDiaryScreen() {
   useEffect(() => {
     load();
   }, [load]);
+
+  // DRF-1838 — §109 шаг 7: сохранённую запись можно исправить или удалить.
+  // Уведомление живёт ВНЕ списка: после каждого действия день перечитывается,
+  // и «Вернуть» обязано пережить это перечитывание.
+  const [notice, setNotice] = useState<EntryNotice | null>(null);
+  // Одно действие за раз: двойной тап слал бы два запроса — второй «Удалить»
+  // получал 404 и стирал «Вернуть», второй «Вернуть» говорил «записи нет»
+  // про только что возвращённую запись. Ref — чтобы защита не ждала рендера.
+  const busy = useRef(false);
+  const [pending, setPending] = useState(false);
+
+  const runEntryAction = useCallback(
+    async (action: () => Promise<void>) => {
+      if (busy.current) return;
+      busy.current = true;
+      setPending(true);
+      try {
+        await action();
+      } catch (err) {
+        setNotice({ text: entryErrorText(err) });
+        // Неизвестный исход: изменение могло пройти — показать правду.
+        if (err instanceof ApiError && err.slug === "ayla_uncertain") await load();
+      } finally {
+        busy.current = false;
+        setPending(false);
+      }
+    },
+    [load],
+  );
+
+  const onDelete = useCallback(
+    (entry: FoodDiaryEntry) =>
+      runEntryAction(async () => {
+        await deleteFoodEntry(entry.id);
+        setNotice({
+          text: `Убрано: ${entry.dish_name}. Вернуть можно ${RESTORE_WINDOW_MINUTES} минут.`,
+          undo: entry,
+        });
+        await load();
+      }),
+    [load, runEntryAction],
+  );
+
+  const onUndo = useCallback(
+    (entry: FoodDiaryEntry) =>
+      runEntryAction(async () => {
+        // «Вернуть» снимается ДО запроса: второго шанса нажать его нет.
+        setNotice((current) => (current ? { text: current.text } : current));
+        const outcome = await restoreFoodEntry(entry.id);
+        if (outcome === "restored") {
+          setNotice({ text: `Вернула: ${entry.dish_name}.` });
+          await load();
+        } else if (outcome === "expired") {
+          setNotice({
+            text: `Уже не вернуть: прошло больше ${RESTORE_WINDOW_MINUTES} минут, запись удалена окончательно.`,
+          });
+        } else {
+          setNotice({ text: ENTRY_GONE_TEXT });
+        }
+      }),
+    [load, runEntryAction],
+  );
+
+  const onCorrect = useCallback(
+    (entry: FoodDiaryEntry, grams: number) =>
+      runEntryAction(async () => {
+        await correctFoodEntryGrams(entry.id, grams);
+        setNotice({ text: `Исправила: ${entry.dish_name}.` });
+        await load();
+      }),
+    [load, runEntryAction],
+  );
 
   return (
     <div className="food-scanner-screen">
@@ -120,6 +203,28 @@ export function FoodScannerDiaryScreen() {
       </header>
 
       <main className="food-scanner-screen__main">
+        {/* Живая область есть всегда, меняется только текст: область,
+            вставленная вместе с текстом, часть экранных дикторов пропускает. */}
+        <div className="food-scanner-diary__notice-slot" aria-live="polite">
+          {notice && (
+            <div className="food-scanner-diary__notice">
+              <span>{notice.text}</span>
+              {notice.undo && (
+                <button
+                  type="button"
+                  className="food-scanner-diary__notice-action"
+                  disabled={pending}
+                  onClick={() => {
+                    if (notice.undo) void onUndo(notice.undo);
+                  }}
+                >
+                  Вернуть
+                </button>
+              )}
+            </div>
+          )}
+        </div>
+
         {status.kind === "loading" && (
           <div className="food-scanner-diary__skeleton" aria-hidden="true">
             <Skeleton width="40%" height="1.1em" />
@@ -148,10 +253,21 @@ export function FoodScannerDiaryScreen() {
           </div>
         )}
 
+        {/* DRF-1927 — без согласия дневник не читался: не сбой и не пустой
+            день, повтор ничего не даст, поэтому и кнопки повтора нет. */}
+        {status.kind === "consent_required" && (
+          <div className="food-scanner-diary__unreadable" role="status">
+            <p>{DIARY_CONSENT_REQUIRED_TEXT}</p>
+          </div>
+        )}
+
         {status.kind === "ready" && (
           <DiaryReady
             day={status.day}
             onAddTap={() => navigate("/customer/food-scanner/capture")}
+            onDelete={onDelete}
+            onCorrect={onCorrect}
+            pending={pending}
           />
         )}
       </main>
@@ -162,10 +278,17 @@ export function FoodScannerDiaryScreen() {
 function DiaryReady({
   day,
   onAddTap,
+  onDelete,
+  onCorrect,
+  pending,
 }: {
   day: Extract<DiaryToday, { state: "empty" | "entries" }>;
   onAddTap: () => void;
+  onDelete: (entry: FoodDiaryEntry) => Promise<void>;
+  onCorrect: (entry: FoodDiaryEntry, grams: number) => Promise<void>;
+  pending: boolean;
 }) {
+  const [editing, setEditing] = useState<string | null>(null);
   const entries = day.state === "entries" ? day.entries : [];
   const grouped = groupByMeal(entries);
   const totalCount = entries.length;
@@ -173,11 +296,17 @@ function DiaryReady({
   // «прятать» на уровне чтения (fail-closed, §10 Appendix ED Mode).
   const showNumbers = !day.hideNumbers;
   const { calories_eaten: eaten, calories_target: target, pfc } = day.today;
+  // DRF-1839. Добавление через скан — экран под `guardProd`, в прод-сборке
+  // он падает в момент использования (§33, DRF-1546 сняли его с главной по
+  // той же причине). Работающий вход записи — чат: текстовый ввод DRF-1837
+  // («гречка 200 г» → оценка → подтверждение). Кнопка скана остаётся только
+  // в DEV, где заглушки живы.
+  const scanEntryLive = import.meta.env.DEV;
   return (
     <>
       <p className="food-scanner-diary__caption">
         {totalCount === 0
-          ? "Пока ничего не записано. Можно добавить приём через скан."
+          ? "Пока ничего не записано. Напиши Ayla в чате, что было, — например «гречка 200 г»: она посчитает и покажет, прежде чем записать."
           : `Сегодня — ${entriesLabel(totalCount)}.`}
       </p>
 
@@ -212,6 +341,40 @@ function DiaryReady({
                     <span className="food-scanner-diary__entry-cal">
                       ~{entry.calories} ккал
                     </span>
+                  )}
+                  <div className="food-scanner-diary__entry-actions">
+                    {isTextEntry(entry) && (
+                      <button
+                        type="button"
+                        className="food-scanner-diary__entry-action"
+                        aria-label={`Исправить граммы: ${entry.dish_name}`}
+                        disabled={pending}
+                        onClick={() => setEditing(entry.id)}
+                      >
+                        Граммы
+                      </button>
+                    )}
+                    <button
+                      type="button"
+                      className="food-scanner-diary__entry-action"
+                      aria-label={`Удалить: ${entry.dish_name}`}
+                      disabled={pending}
+                      onClick={() => {
+                        void onDelete(entry);
+                      }}
+                    >
+                      Удалить
+                    </button>
+                  </div>
+                  {editing === entry.id && (
+                    <GramsForm
+                      entry={entry}
+                      onSave={(grams) => {
+                        setEditing(null);
+                        void onCorrect(entry, grams);
+                      }}
+                      onCancel={() => setEditing(null)}
+                    />
                   )}
                 </li>
               ))}
@@ -250,15 +413,26 @@ function DiaryReady({
         </section>
       )}
 
-      <div className="food-scanner-screen__cta-stack">
-        <button
-          type="button"
-          className="btn-primary"
-          onClick={onAddTap}
-        >
-          Добавить приём
-        </button>
-      </div>
+      {/* Строка диетолога (DRF-1897) — под итогами, тем же текстом, что в
+          чате. Сервер присылает её только этому экрану и уже записал её
+          в журнал как показанную; нет ключа — нет и абзаца. */}
+      {day.today.coach_observation && (
+        <p className="food-scanner-diary__observation">
+          {day.today.coach_observation}
+        </p>
+      )}
+
+      {scanEntryLive && (
+        <div className="food-scanner-screen__cta-stack">
+          <button
+            type="button"
+            className="btn-primary"
+            onClick={onAddTap}
+          >
+            Добавить приём
+          </button>
+        </div>
+      )}
     </>
   );
 }
@@ -287,4 +461,98 @@ function groupByMeal(
     out[key] = bucket;
   }
   return out;
+}
+
+// ─── DRF-1838: правка и удаление записи ─────────────────────────────────
+
+/** Окно восстановления каталога (`food_log_edit_service.RESTORE_WINDOW_MINUTES`). */
+const RESTORE_WINDOW_MINUTES = 15;
+const GRAMS_MIN = 10;
+const GRAMS_MAX = 2000;
+const ENTRY_GONE_TEXT = "Этой записи уже нет в дневнике.";
+
+type EntryNotice = { text: string; undo?: FoodDiaryEntry };
+
+/**
+ * «Граммы ÷ 100» верно только для записи, сделанной текстом: у фото-записи
+ * порция считается от скана. Старые записи без происхождения — тоже нет.
+ */
+function isTextEntry(entry: FoodDiaryEntry): boolean {
+  return (
+    entry.entry_origin === "text_estimated_confirmed" ||
+    entry.entry_origin === "text_user_corrected"
+  );
+}
+
+/** Каждый отказ — своей фразой. «Не знаю, дошло ли» ≠ «ничего не изменилось». */
+function entryErrorText(err: unknown): string {
+  if (err instanceof ApiError) {
+    if (err.slug === "consent_required") {
+      return DIARY_CONSENT_REQUIRED_TEXT;
+    }
+    if (err.slug === "ayla_uncertain") {
+      return "Не знаю, дошло ли — обнови дневник, прежде чем повторять.";
+    }
+    if (err.slug === "water_managed") {
+      return "Эту запись ведёт учёт воды — её убирает отмена стакана.";
+    }
+    if (err.slug === "not_found") return ENTRY_GONE_TEXT;
+    if (err.slug === "ayla_bad_request") {
+      return "Дневник не принял изменение — проверь запись и попробуй ещё раз.";
+    }
+  }
+  return "Дневник сейчас не отвечает — ничего не изменилось. Попробуй позже.";
+}
+
+function GramsForm({
+  entry,
+  onSave,
+  onCancel,
+}: {
+  entry: FoodDiaryEntry;
+  onSave: (grams: number) => void;
+  onCancel: () => void;
+}) {
+  const [value, setValue] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const inputId = `food-diary-grams-${entry.id}`;
+  return (
+    <form
+      className="food-scanner-diary__grams"
+      onSubmit={(event) => {
+        event.preventDefault();
+        const grams = Number(value.trim());
+        if (!Number.isInteger(grams) || grams < GRAMS_MIN || grams > GRAMS_MAX) {
+          setError(`Граммы — числом от ${GRAMS_MIN} до ${GRAMS_MAX}.`);
+          return;
+        }
+        onSave(grams);
+      }}
+    >
+      <label htmlFor={inputId} className="food-scanner-diary__grams-label">
+        {`Сколько граммов было: ${entry.dish_name}`}
+      </label>
+      {/* Текстовое поле, а не type="number": границы проверяет код и
+          называет ошибку словами, а не браузер молча. */}
+      <input
+        id={inputId}
+        className="food-scanner-diary__grams-input"
+        type="text"
+        inputMode="numeric"
+        value={value}
+        onChange={(event) => setValue(event.target.value)}
+      />
+      <button type="submit" className="btn-secondary">
+        Сохранить
+      </button>
+      <button type="button" className="btn-secondary" onClick={onCancel}>
+        Отмена
+      </button>
+      {error && (
+        <p className="food-scanner-diary__grams-error" role="alert">
+          {error}
+        </p>
+      )}
+    </form>
+  );
 }

@@ -68,6 +68,7 @@ from django.http import HttpRequest, HttpResponse, JsonResponse
 from django.utils import timezone
 from django.views.decorators.http import require_http_methods
 
+from apps.catalog.specialist_ref import CatalogSpecialistUnresolved, catalog_specialist_id
 from apps.admin_api.auth import require_admin_or_reception_read
 from apps.admin_api.services.wire_lists import UNREADABLE, read_rows
 from apps.catalog.models import CatalogMaster
@@ -233,17 +234,27 @@ def master_exceptions(request: HttpRequest, master_id: str) -> HttpResponse:
     client = get_salon_client()
     window = {"date_from": from_date.isoformat(), "date_to": to_date.isoformat()}
 
+    # DRF-1933: у строки зеркала нет id профиля в каталоге — звать каталог
+    # не с чем; первичный ключ зеркала туда не уходит.
+    try:
+        catalog_specialist_id(master)
+    except CatalogSpecialistUnresolved:
+        return _error(
+            "catalog_profile_unresolved",
+            "master is not set up in the catalog yet",
+            409,
+        )
     try:
         exceptions = client.list_schedule_exceptions(
             actor_external_id=actor,
             tenant_slug=tenant.slug,
-            specialist_id=str(master.id),
+            specialist_id=catalog_specialist_id(master),
             **window,
         )
         time_off = client.list_time_off(
             actor_external_id=actor,
             tenant_slug=tenant.slug,
-            specialist_id=str(master.id),
+            specialist_id=catalog_specialist_id(master),
             **window,
         )
         closures = client.list_closures(

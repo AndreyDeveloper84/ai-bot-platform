@@ -79,15 +79,19 @@
  *      explicit verified tokens (handled in globals.css).
  */
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { type Service } from "../lib/api";
+import { ApiError, type Service } from "../lib/api";
 import { authErrorCopy, loadErrorReason, type LoadErrorReason } from "../lib/auth-error-copy";
 import { formatDuration, formatMoney } from "../lib/format";
 import { visitAddressText } from "../lib/visit-address";
 import {
   enqueueWaterLog,
+  enqueueWaterLogEntry,
   flushWaterQueue,
+  onWaterQueueRefused,
+  syncWaterEntry,
+  WATER_SESSION_EXPIRED_TEXT,
   getRecentActivity,
   getWellnessToday,
   isOnboardingDismissed,
@@ -96,8 +100,10 @@ import {
   pickOneLiner,
   readWaterQueue,
   undoWaterLog,
+  waterRefusalText,
   type RecentActivity,
   type WellnessToday,
+  DIARY_CONSENT_REQUIRED_TEXT,
 } from "../lib/customer-wellness";
 import {
   getCatalogBrowse,
@@ -157,6 +163,18 @@ export function CustomerWellnessDashboardScreen() {
     () => readWaterQueue().length,
   );
   const [waterToast, setWaterToast] = useState<string | null>(null);
+  // DRF-1919: отказ стаканов из очереди, которых этот экран не ждал, — не молча.
+  // Тап, пришедший следом, допишет эту фразу к своей, а не затрёт её.
+  const queueRefusalNote = useRef<string | null>(null);
+  useEffect(
+    () =>
+      onWaterQueueRefused((refused) => {
+        const note = waterRefusalText(refused, { fromQueue: true });
+        queueRefusalNote.current = note;
+        setWaterToast(note);
+      }),
+    [],
+  );
   // DRF-1842 — id последнего принятого стакана, пока его можно отменить.
   // Ручка отмены (`DELETE /wellness/water/{id}`, `undoWaterLog`) была, а
   // кнопки не было ни одной: ошибочный тап оставался в дневнике навсегда.
@@ -209,6 +227,7 @@ export function CustomerWellnessDashboardScreen() {
     const onOnline = () => {
       setOnline(true);
       // Auto-flush water queue on reconnect (Tau §11.8).
+      // Отказы стаканов из очереди скажет подписка `onWaterQueueRefused` (DRF-1919).
       void flushWaterQueue().then(() => {
         setWaterQueueLen(readWaterQueue().length);
       });
@@ -230,6 +249,7 @@ export function CustomerWellnessDashboardScreen() {
       () => {
         setWaterToast(null);
         setUndoEntryId(null);
+        queueRefusalNote.current = null;
       },
       undoEntryId ? 8000 : 3000,
     );
@@ -251,6 +271,7 @@ export function CustomerWellnessDashboardScreen() {
     // wired by W4; STUB MODE simulates instant accept when online.
     setUndoEntryId(null);
     if (!online) {
+      queueRefusalNote.current = null;
       const len = enqueueWaterLog(250);
       setWaterQueueLen(len);
       setWaterToast(
@@ -261,14 +282,43 @@ export function CustomerWellnessDashboardScreen() {
     // Online — also enqueue + immediately flush. This keeps the queue
     // as a single durable code path while STUB doesn't have a real
     // endpoint. Once W4 ships, the online branch will skip enqueue.
-    enqueueWaterLog(250);
-    void flushWaterQueue((accepted) => setUndoEntryId(accepted.entry_id)).then(() => {
-      setWaterQueueLen(readWaterQueue().length);
+    // DRF-1919: «зачтён» и «Отменить» — только про СВОЙ стакан этого тапа
+    // (сверка по key): в одну синхронизацию уходят и стаканы, ждавшие в
+    // очереди. Отказ в них не затирается принятием нового; свой стакан, не
+    // дошедший по сети, — «ждёт синхронизации».
+    const { entry: own } = enqueueWaterLogEntry(250);
+    void syncWaterEntry(own).then((outcome) => {
+      const len = readWaterQueue().length;
+      setWaterQueueLen(len);
+      let ownText: string;
+      if (outcome.kind === "accepted") {
+        setUndoEntryId(outcome.result.entry_id);
+        ownText = "+1 стакан зачтён";
+      } else {
+        // «Отменить» могла остаться от стакана другого тапа — рядом с этим
+        // тостом она была бы про чужой стакан.
+        setUndoEntryId(null);
+        if (outcome.kind === "rejected") {
+          ownText = waterRefusalText([outcome.err]);
+        } else if (outcome.err instanceof ApiError && outcome.err.status === 401) {
+          ownText = WATER_SESSION_EXPIRED_TEXT;
+        } else if (!readWaterQueue().some((e) => e.key === own.key)) {
+          // Стакана нет ни в очереди, ни в исходе: хранилище его не сохранило.
+          // «Ждёт синхронизации» было бы обещанием, которое нечем выполнить.
+          ownText = "Стакан не сохранён — попробуй ещё раз.";
+        } else {
+          ownText = `+1 стакан · ${len} ${ruPluralWater(len)} ${ruPluralWaterWaits(len)} синхронизации`;
+        }
+      }
+      const note = queueRefusalNote.current;
+      queueRefusalNote.current = null;
+      setWaterToast(joinSentences(note ? [ownText, note] : [ownText]));
     });
-    setWaterToast("+1 стакан зачтён");
   }, [online]);
 
   const onUndoWater = useCallback(() => {
+    // Фраза об отказах из очереди уже показана — к следующему тосту не приклеивать.
+    queueRefusalNote.current = null;
     const id = undoEntryId;
     if (!id) return;
     setUndoEntryId(null);
@@ -284,7 +334,12 @@ export function CustomerWellnessDashboardScreen() {
         );
         if (removed) void fetchAll();
       },
-      () => {
+      (err: unknown) => {
+        // DRF-1919: дневник выключен — повтор не поможет, кнопку не возвращаем.
+        if (err instanceof ApiError && err.slug === "nutrition_disabled") {
+          setWaterToast("Дневник воды сейчас выключен — убрать стакан не получилось.");
+          return;
+        }
         // Сбой сети/сервера — ничего не удалено; кнопку возвращаем.
         setUndoEntryId(id);
         setWaterToast("Не получилось убрать — попробуй ещё раз");
@@ -303,6 +358,15 @@ export function CustomerWellnessDashboardScreen() {
 
   const onCatalogTap = useCallback(() => {
     navigate("/customer/catalog");
+  }, [navigate]);
+
+  // DRF-1839 — вход в дневник. Экран `/customer/food-scanner/diary`
+  // читает живую `/wellness/today` (без `guardProd`), но входа в него не
+  // было ни одного: slug `open_food_diary` без кнопки в боте и экран
+  // «Сохранённое», сам недостижимый. Записи, сделанные в чате, человек
+  // здесь не видел — пустой экран был неотличим от «ничего не ел».
+  const onDiaryTap = useCallback(() => {
+    navigate("/customer/food-scanner/diary");
   }, [navigate]);
 
   const onDismissOnboarding = useCallback(() => {
@@ -600,6 +664,17 @@ export function CustomerWellnessDashboardScreen() {
               </span>
               <span className="wellness-dash__qa-label">Найди услугу</span>
             </button>
+            <button
+              type="button"
+              className="wellness-dash__qa-btn"
+              aria-label="Дневник питания"
+              onClick={onDiaryTap}
+            >
+              <span className="wellness-dash__qa-icon" aria-hidden="true">
+                📔
+              </span>
+              <span className="wellness-dash__qa-label">Дневник питания</span>
+            </button>
           </div>
 
           {/* Sync indicator for offline water queue (§11.8). */}
@@ -871,6 +946,9 @@ function PulseStrip({ data }: { data: WellnessToday }) {
   const goalsKnown = data.active_goals !== undefined;
   // Одна цель, не несколько (решение владельца №13, 06.09).
   const goal = data.active_goals?.[0];
+  // DRF-1927 — ключей дневника нет, потому что нет согласия, а не потому,
+  // что чтение упало: говорим, что нужно, а не «Не удалось загрузить».
+  const sliceClosedCopy = data.consent_required ? DIARY_CONSENT_REQUIRED_TEXT : UNAVAILABLE;
 
   return (
     <div className="wellness-dash__pulse-card">
@@ -879,7 +957,7 @@ function PulseStrip({ data }: { data: WellnessToday }) {
         className="wellness-dash__pulse-row"
         aria-label={
           !caloriesKnown
-            ? `Питание: ${UNAVAILABLE}`
+            ? `Питание: ${sliceClosedCopy}`
             : caloriesTargetKnown
               ? `Питание: ${caloriesEaten} из ${caloriesTarget} килокалорий, ${caloriesPct} процентов${
                   data.pfc
@@ -939,7 +1017,7 @@ function PulseStrip({ data }: { data: WellnessToday }) {
         ) : (
           /* Read failed - no numbers, no bar. «0 / 0 ккал · 0 %» would
              read as a logged-nothing day, which is a different fact. */
-          <div className="wellness-dash__pulse-numbers">{UNAVAILABLE}</div>
+          <div className="wellness-dash__pulse-numbers">{sliceClosedCopy}</div>
         )}
       </div>
 
@@ -950,7 +1028,7 @@ function PulseStrip({ data }: { data: WellnessToday }) {
         className="wellness-dash__pulse-row"
         aria-label={
           !waterKnown
-            ? `Вода: ${UNAVAILABLE}`
+            ? `Вода: ${sliceClosedCopy}`
             : waterTargetKnown
               ? `Вода: ${waterEaten} из ${waterTarget} стаканов`
               : `Вода: ${waterEaten} ${ruPluralWater(waterEaten)} сегодня`
@@ -990,7 +1068,7 @@ function PulseStrip({ data }: { data: WellnessToday }) {
         ) : (
           /* Read failed. The «+ стакан» quick action stays live - it is
              a separate handle (POST /wellness/water) and still works. */
-          <div className="wellness-dash__pulse-numbers">{UNAVAILABLE}</div>
+          <div className="wellness-dash__pulse-numbers">{sliceClosedCopy}</div>
         )}
       </div>
 
@@ -1252,6 +1330,11 @@ function ruPluralWater(n: number): string {
 // Verb agreement for "стакан(а/ов) ждёт/ждут синхронизации".
 // Singular forms (1, 21, 31, ...) take "ждёт"; rest take "ждут".
 // Excludes the 11-14 teen-irregular range.
+/** Предложения тоста через пробел; точка ставится там, где её нет. */
+function joinSentences(parts: string[]): string {
+  return parts.map((p, i) => (i < parts.length - 1 && !/[.!?]$/.test(p) ? `${p}.` : p)).join(" ");
+}
+
 function ruPluralWaterWaits(n: number): string {
   const mod10 = n % 10;
   const mod100 = n % 100;

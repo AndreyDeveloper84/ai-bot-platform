@@ -153,7 +153,7 @@ from apps.persona.memory_surface import render_current_personal_context
 from apps.persona.voice import SALON_BUSINESS_NAME
 from apps.orchestrator.concierge import generate_direct_show_masters_reply
 from apps.orchestrator.fast_path import claims_direct_show_masters
-from apps.orchestrator.open_question import close_question
+from apps.orchestrator.open_question import close_question, open_question
 from apps.orchestrator.discovery import (
     CALLBACK_DISCOVER_BOOK_PREFIX,
     CALLBACK_DISCOVER_MORE_PREFIX,
@@ -193,6 +193,21 @@ from apps.orchestrator.visits import (
 )
 from apps.orchestrator.memory import short_term
 from apps.orchestrator.memory.personal_context import record_explicit_green_facts
+from apps.orchestrator.said_memory import (
+    OTHER_QUESTIONS as SAID_OTHER_QUESTIONS,
+)
+from apps.orchestrator.said_memory import (
+    STALE_TEXT as SAID_STALE_TEXT,
+)
+from apps.orchestrator.said_memory import (
+    VERDICT_YES as SAID_VERDICT_YES,
+)
+from apps.orchestrator.said_memory import (
+    confirm_said_fact,
+    record_said_facts,
+    resolve_said_tap,
+    said_question_id,
+)
 from apps.orchestrator.memory_ask import maybe_weave_question, try_handle_answer
 from apps.orchestrator.memory_block import build_concierge_memory_block
 from apps.orchestrator.nutrition_context import build_nutrition_context_block
@@ -1358,6 +1373,27 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
     # as the user turn it now is; a redraw tap still does not reach history.
     is_clarify_redraw_tap = event.text.startswith(CLARIFY_CALLBACK_PREFIX)
 
+    # DRF-1878 — подтверждение сказанного одним тапом (`cb:said:*`). ФРАЗА, а
+    # не молчание, по образцу `cb:food:*` («✅ В дневник» ложится меткой):
+    # «Да, Пенза» — высказывание человека о себе, в историю идёт метка кнопки,
+    # payload — никогда. «Да» — факт переписывается свежей строкой, и ход идёт
+    # дальше ТЕКСТОМ МЕТКИ (как «Продолжить» у уточнения выше): консьерж сам
+    # закроет открытый вопрос `said.<key>` этой репликой. «Другое» — бот
+    # спрашивает сам, без модели, и открывает вопрос заново. Кнопка, за
+    # которой факта уже нет, — устаревшая: ответ без модели, в историю ничего.
+    said_tap = resolve_said_tap(event.text, bot_user)
+    said_outcome: DiscoveryReply | None = None
+    if said_tap is not None:
+        if said_tap.history_text is None:
+            said_outcome = DiscoveryReply(text=SAID_STALE_TEXT)
+        elif said_tap.verdict == SAID_VERDICT_YES:
+            confirm_said_fact(bot_user, said_tap.key)
+            event = replace(event, text=said_tap.history_text)
+        else:
+            said_question = SAID_OTHER_QUESTIONS[said_tap.key]
+            open_question(conversation, said_question_id(said_tap.key), asked_text=said_question)
+            said_outcome = DiscoveryReply(text=said_question)
+
     # DRF-990 — the anketa taps. Same defect class as DRF-988/DRF-1304, and
     # NOT closed by DRF-1268: that one routes `cb:anketa:*` deterministically
     # in the CURRENT turn, while history is what the concierge reads on the
@@ -1490,7 +1526,15 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
     health_tap = resolve_health_tap(event.text)
 
     inbound_history_text: str | None = event.text
-    for tap in (anketa_tap, welcome_tap, food_tap, discover_tap, nutri_stop_tap, health_tap):
+    for tap in (
+        anketa_tap,
+        welcome_tap,
+        food_tap,
+        discover_tap,
+        nutri_stop_tap,
+        health_tap,
+        said_tap,
+    ):
         if tap is None:
             # «Это не тап моего семейства» — резолвер пропускает ход дальше и
             # не трогает ни текст, ни персистенс.
@@ -1651,6 +1695,13 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
     was_memory_command = False
     concierge_turn_ran = False
     safety = evaluate_inbound(event.text)
+    # DRF-1885 — ход открывает новую ревизию DecisionReadiness и пишет в неё
+    # вердикт pre_check. Ответ не меняет: решение ниже принимает прежний
+    # путь; читатель вердикта сегодня — теневой движок (флаг
+    # DRE_SHADOW_ENABLED), без флага — ноль работы. Не бросает.
+    from apps.orchestrator.dr_shadow import record_turn_safety
+
+    record_turn_safety(conversation, safety)
     if not safety.allowed:
         _emit_safety_shortcircuit(bot_user, safety, is_global=True)
         reply = DiscoveryReply(text=safety.reply_text)
@@ -1878,6 +1929,11 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
             outcome=AIRequestMetric.OUTCOME_SUCCESS,
             skill_selected="onboarding",
         )
+    elif said_outcome is not None:
+        # DRF-1878 — «Другой город» / устаревшая кнопка подтверждения: ответ
+        # бота без модели, по той же причине, что у соседних колбэков.
+        reply = said_outcome
+        assistant_action_type = "said_confirm"
     elif clarify_outcome is not None:
         # DRF-1362 — a multi-select redraw or its close. Sits with the other
         # callback branches and BEFORE the concierge for the same reason they
@@ -2500,6 +2556,8 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
         tool_trace=getattr(turn_reply, "tool_trace", None) if concierge_turn_ran else None,
         trace_id=trace_id,
         branch=assistant_action_type or ("concierge" if concierge_turn_ran else ""),
+        # DRF-1932 — реплика только для словарей выбора NBA; в строку лога не идёт.
+        message_text=event.text,
     )
 
     # DRF-1273 — canonical intent resolution (Output Contract 0.5) for
@@ -2538,6 +2596,14 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
     # the 152-ФЗ erasure. A forget/show turn must never write memory.
     if not was_memory_command:
         record_explicit_green_facts(bot_user, event.text)
+        # Бриф «Мозг» п.4 — город поиска и «когда удобно приходить», если их
+        # сказал сам человек. После отправки, не бросает.
+        record_said_facts(
+            bot_user,
+            conversation,
+            event.text,
+            tool_trace=getattr(turn_reply, "tool_trace", None) if concierge_turn_ran else None,
+        )
 
 
 def _remember_time_preference(conversation, bot_user, text: str, reply):

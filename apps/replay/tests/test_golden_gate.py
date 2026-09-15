@@ -140,6 +140,13 @@ GRANTED_PRECONDITIONS = (
     "Same terms as the ones above: the refusal branch has its own tests in "
     "apps/skills/nutrition_anketa/tests/test_consent_gate_at_entry.py, so a "
     "fixture written for it has to stop being granted here",
+    "ConsentRecord PERSONAL_DATA is granted through record_global_consent "
+    "(DRF-1926; the water log sits behind the same consent as the food diary "
+    "in chat, so without it every water fixture gets the consent sentence "
+    "instead of its «250 мл»). The refusal branch has its own tests in "
+    "apps/skills/water/tests/test_skill.py and "
+    "apps/orchestrator/tests/test_water_consent_1926.py, so a fixture written "
+    "for it has to stop being granted here",
 )
 
 
@@ -232,6 +239,16 @@ def golden_run(monkeypatch, fake_redis, golden_tenant, settings):
                 bot_user.welcomed_at = timezone.now()
                 bot_user.food_scanner_consent_at = timezone.now()
                 bot_user.save(update_fields=["welcomed_at", "food_scanner_consent_at"])
+                # DRF-1926 — согласие на обработку личных данных тем же
+                # писателем, что экран приветствия, не подменой предиката.
+                from apps.consent.services import record_global_consent
+
+                record_global_consent(
+                    bot_user,
+                    consent_type="personal_data",
+                    source="replay:golden-gate",
+                    document_version="welcome-s2-v1",
+                )
                 # §92 п.1 / DRF-1698 — согласие на расчёт, НАСТОЯЩИМ
                 # писателем экрана согласия, не подменой предиката: фикстуры
                 # гоняют живой обработчик, и предусловие обязано быть таким

@@ -50,6 +50,7 @@ from apps.booking.models import BookingRequest, RemoteBookingProxy
 from apps.catalog.models import CatalogMaster, CatalogService
 from apps.identity.models import BotUser
 from apps.tenancy.models import Tenant
+from tests.support.catalog_mirror import sync_shaped
 
 pytestmark = pytest.mark.django_db
 
@@ -120,14 +121,16 @@ def _make_service(tenant: Tenant, *, name: str, ayla_service_id: uuid.UUID) -> C
 
 
 def _make_master(tenant: Tenant, *, name: str) -> CatalogMaster:
-    return CatalogMaster.all_tenants.create(
-        tenant=tenant,
-        external_updated_at=timezone.now(),
-        name=name,
-        specialization="Массаж",
-        is_active=True,
-        invite_status=CatalogMaster.InviteStatus.ACCEPTED,
-        ayla_user_id=uuid.uuid4(),
+    return sync_shaped(
+        CatalogMaster.all_tenants.create(
+            tenant=tenant,
+            external_updated_at=timezone.now(),
+            name=name,
+            specialization="Массаж",
+            is_active=True,
+            invite_status=CatalogMaster.InviteStatus.ACCEPTED,
+            ayla_user_id=uuid.uuid4(),
+        )
     )
 
 

@@ -1033,6 +1033,82 @@ a {
   font-variant-numeric: tabular-nums;
 }
 
+/* DRF-1848 — имя мастера текстом, значок диалогов, аватар в одну строку. */
+.master-dashboard__who {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+}
+
+.master-dashboard__name {
+  max-width: 12ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--font-size-200);
+  font-weight: 600;
+  color: var(--c-text-primary);
+}
+
+/* DRF-1845 — переключатель «Принимаю записи». */
+.accepting-bookings__row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s-3);
+}
+
+.accepting-bookings__label {
+  font-size: var(--font-size-300);
+  font-weight: 600;
+  color: var(--c-text-primary);
+}
+
+.accepting-bookings__switch {
+  position: relative;
+  flex: none;
+  width: 48px;
+  height: 28px;
+  padding: 0;
+  border: 0;
+  border-radius: 14px;
+  background: var(--c-surface-2);
+  cursor: pointer;
+}
+
+.accepting-bookings__switch--on {
+  background: var(--c-accent);
+}
+
+.accepting-bookings__knob {
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: var(--c-text-on-accent);
+  transition: transform 0.15s ease;
+}
+
+.accepting-bookings__switch--on .accepting-bookings__knob {
+  transform: translateX(20px);
+}
+
+.master-dashboard__inbox {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--c-text-secondary);
+  cursor: pointer;
+}
+
 .master-dashboard__section {
   margin-bottom: var(--s-4);
 }
@@ -1847,14 +1923,153 @@ a {
   font-size: var(--font-size-100);
 }
 
-.master-services__locked-edit-note {
-  margin: var(--s-4) 0 0;
-  padding: var(--s-3);
+/* Экран 04 «Цены и длительность» (DRF-1810) — направления, шторка 4.2. */
+.master-services__progress {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--s-2);
   color: var(--c-text-secondary);
   font-size: var(--font-size-100);
-  background: var(--c-surface-2);
-  border-radius: var(--r-md);
+}
+
+.master-services__progress p {
+  margin: 0;
+}
+
+.master-services__direction {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+}
+
+.master-services__direction-title {
+  margin: var(--s-2) 0 0;
+  font-size: var(--font-size-200);
+}
+
+.master-services__direction-toggle {
+  width: 100%;
+  min-height: 44px;
+  padding: 0;
+  border: none;
+  background: none;
+  color: inherit;
+  font: inherit;
+  font-weight: 600;
+  text-align: left;
+}
+
+.master-services__row {
+  width: 100%;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.master-services__row-pending {
+  color: var(--c-warning);
+}
+
+.master-services__actions {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+}
+
+.master-services__actions-hint {
+  margin: 0;
+  color: var(--c-text-secondary);
+  font-size: var(--font-size-100);
   text-align: center;
+}
+
+.master-services__sheet {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 50;
+  max-height: 90vh;
+  overflow-y: auto;
+  padding: var(--s-4);
+  background: var(--c-surface-1);
+  border-radius: var(--r-md) var(--r-md) 0 0;
+  box-shadow: 0 -4px 16px rgba(0, 0, 0, 0.12);
+}
+
+.master-services__sheet-title {
+  margin: 0 0 var(--s-3);
+  font-size: var(--font-size-200);
+}
+
+.master-services__offer-form {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.master-services__offer-form label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.master-services__chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s-2);
+}
+
+.master-services__offer-form .master-services__chip {
+  flex-direction: row;
+  align-items: center;
+  gap: 6px;
+  min-height: 44px;
+  padding: 0 var(--s-3);
+  border: 1px solid var(--c-divider);
+  border-radius: var(--r-md);
+}
+
+/* M18a «Свои услуги» (DRF-1896) — заявки о разрыве канона, отдельно от каталога. */
+.master-services__own-note,
+.master-services__similar-later {
+  font-size: var(--font-size-100);
+  opacity: 0.7;
+}
+
+.own-service-card__status {
+  font-size: var(--font-size-100);
+  font-weight: 600;
+}
+
+.own-service-card__note {
+  font-size: var(--font-size-100);
+}
+
+.master-services__own-form {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.master-services__own-form label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.master-services__field-error {
+  margin: 0;
+  color: var(--c-danger);
+  font-size: var(--font-size-100);
+}
+
+.master-services__similar-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
 }
 
 /* ---- Solo «Скоро» placeholder screen (Tau §5.4 empty-state voice) ---- */
@@ -6602,6 +6817,7 @@ a {
 }
 .food-scanner-diary__entry {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
   gap: var(--s-2);
@@ -6643,6 +6859,88 @@ a {
   display: flex;
   flex-direction: column;
   gap: var(--s-2);
+}
+/* DRF-1897 — строка диетолога под итогами. Карточкой, как соседние группы:
+   это часть дневника, а не всплывающая подсказка. */
+.food-scanner-diary__observation {
+  margin: 0;
+  background: var(--c-surface-1);
+  border: 1px solid var(--c-divider);
+  border-radius: var(--r-md);
+  padding: var(--s-3) var(--s-4);
+  font-size: var(--font-size-200);
+  color: var(--c-text-primary);
+}
+/* DRF-1838 — правка и удаление записи в дневнике. Кнопки строки — тихие,
+   как подпись времени; форма граммов — на всю ширину строки под записью. */
+.food-scanner-diary__entry-actions {
+  display: flex;
+  gap: var(--s-1);
+  flex: 0 0 auto;
+}
+.food-scanner-diary__entry-action {
+  padding: 0 var(--s-2);
+  background: none;
+  color: var(--c-text-secondary);
+  border: 1px solid var(--c-divider);
+  border-radius: var(--r-sm);
+  font: inherit;
+  font-size: var(--font-size-100);
+}
+.food-scanner-diary__grams {
+  flex-basis: 100%;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s-2);
+}
+.food-scanner-diary__grams-label {
+  flex-basis: 100%;
+  font-size: var(--font-size-100);
+  color: var(--c-text-secondary);
+}
+.food-scanner-diary__grams-input {
+  width: 6em;
+  padding: var(--s-1) var(--s-2);
+  border: 1px solid var(--c-divider);
+  border-radius: var(--r-sm);
+  background: var(--c-surface-1);
+  color: var(--c-text-primary);
+  font: inherit;
+}
+.food-scanner-diary__grams-error {
+  flex-basis: 100%;
+  margin: 0;
+  font-size: var(--font-size-100);
+  color: var(--c-text-secondary);
+}
+/* Живая область уведомлений дневника — всегда в дереве, в раскладке не
+   участвует (DRF-1838, ревью: область, вставленная вместе с текстом,
+   часть экранных дикторов пропускает). */
+.food-scanner-diary__notice-slot {
+  display: contents;
+}
+/* Уведомление о действии над записью — та же пара цветов, что у тоста
+   воды на главной (wellness-dash__toast): контраст уже проверен. */
+.food-scanner-diary__notice {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s-2);
+  background: var(--c-text-primary);
+  color: var(--c-surface-1);
+  padding: var(--s-2) var(--s-3);
+  border-radius: var(--r-sm);
+  font-size: var(--font-size-200);
+}
+.food-scanner-diary__notice-action {
+  padding: 0 var(--s-2);
+  background: none;
+  color: inherit;
+  border: 1px solid currentColor;
+  border-radius: var(--r-sm);
+  font: inherit;
+  font-weight: 600;
 }
 .food-scanner-diary__comment {
   margin: var(--s-2) 0 0;
@@ -7513,4 +7811,277 @@ a {
   display: inline-flex;
   margin-top: var(--s-2);
   text-decoration: none;
+}
+
+/* DRF-1857 — «Мои отзывы» мастера. */
+.master-reviews {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-3);
+}
+
+.master-reviews__title {
+  font-size: var(--font-size-400);
+  font-weight: 600;
+  color: var(--c-text-primary);
+}
+
+.master-reviews__status,
+.master-reviews__empty-hint,
+.master-reviews__meta {
+  font-size: var(--font-size-200);
+  color: var(--c-text-secondary);
+}
+
+.master-reviews__summary {
+  font-size: var(--font-size-300);
+  font-weight: 600;
+  color: var(--c-text-primary);
+}
+
+.master-reviews__empty {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-1);
+  padding: var(--s-4);
+  border-radius: var(--r-md);
+  background: var(--c-surface-1);
+}
+
+.master-reviews__empty-title {
+  font-size: var(--font-size-300);
+  font-weight: 600;
+  color: var(--c-text-primary);
+}
+
+.master-reviews__list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.master-reviews__item {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-1);
+  padding: var(--s-3);
+  border-radius: var(--r-md);
+  background: var(--c-surface-1);
+}
+
+.master-reviews__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s-2);
+}
+
+.master-reviews__client {
+  font-size: var(--font-size-300);
+  font-weight: 600;
+  color: var(--c-text-primary);
+}
+
+.master-reviews__stars {
+  flex: none;
+  font-size: var(--font-size-200);
+  color: var(--c-accent);
+  letter-spacing: 1px;
+}
+
+.master-reviews__text {
+  font-size: var(--font-size-300);
+  color: var(--c-text-primary);
+  white-space: pre-line;
+}
+
+/* DRF-1809 (M17) — экран 03: выбор услуг из каталога по направлению. */
+.service-select__counter {
+  margin: 0;
+  font-size: var(--font-size-200);
+  font-weight: 600;
+  color: var(--c-text-primary);
+}
+
+.service-select__directions,
+.service-select__direction,
+.service-select__done {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+}
+
+.service-select__direction-row {
+  flex-direction: row;
+  align-items: center;
+  justify-content: space-between;
+  text-align: left;
+  cursor: pointer;
+}
+
+.service-select__search {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-1);
+  font-size: var(--font-size-100);
+  color: var(--c-text-secondary);
+}
+
+.service-select__group {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.service-select__group-title {
+  padding: 0;
+  font-size: var(--font-size-100);
+  font-weight: 600;
+  color: var(--c-text-secondary);
+}
+
+.service-select__item {
+  flex-direction: row;
+  align-items: center;
+  gap: var(--s-2);
+  cursor: pointer;
+}
+
+/* DRF-1818 — экран 08 «отправка профиля на проверку»: чек-лист по кодам
+   каталога, услуги на проверке, текстовая сводка вместо карточки до M22. */
+.publication {
+  display: block;
+}
+
+.publication__title {
+  margin: 0 0 var(--s-2);
+  font-size: var(--font-size-400);
+  font-weight: 700;
+  color: var(--c-text-primary);
+}
+
+.publication__lead {
+  margin: 0 0 var(--s-3);
+  font-size: var(--font-size-200);
+  color: var(--c-text-secondary);
+}
+
+.publication__list,
+.publication__services,
+.publication__days {
+  list-style: none;
+  margin: 0 0 var(--s-4);
+  padding: 0;
+}
+
+.publication__item {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--s-3);
+  padding: var(--s-3) 0;
+}
+
+.publication__item + .publication__item {
+  border-top: 1px solid var(--c-divider);
+}
+
+.publication__item--missing .publication__mark {
+  color: var(--c-accent-pressed);
+  font-weight: 700;
+}
+
+.publication__mark {
+  flex: 0 0 auto;
+  width: 24px;
+  text-align: center;
+  color: var(--c-accent);
+}
+
+.publication__body {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: var(--s-1);
+}
+
+.publication__label,
+.publication__name {
+  margin: 0;
+  font-size: var(--font-size-200);
+  font-weight: 600;
+  color: var(--c-text-primary);
+}
+
+.publication__detail {
+  margin: 0;
+  font-size: var(--font-size-100);
+  color: var(--c-text-secondary);
+}
+
+.publication__detail--missing {
+  color: var(--c-accent-pressed);
+  font-weight: 600;
+}
+
+.publication__action {
+  align-self: flex-start;
+  margin-top: var(--s-1);
+}
+
+.publication__review,
+.publication__summary,
+.publication__uncertain {
+  margin: 0 0 var(--s-4);
+  padding: var(--s-3);
+  background: var(--c-surface-1);
+  border: 1px solid var(--c-divider);
+  border-radius: var(--r-md);
+}
+
+.publication__section-title {
+  margin: 0 0 var(--s-2);
+  font-size: var(--font-size-100);
+  font-weight: 600;
+  color: var(--c-text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.publication__service,
+.publication__day {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s-2);
+  padding: var(--s-1) 0;
+  font-size: var(--font-size-200);
+  color: var(--c-text-primary);
+}
+
+.publication__chip {
+  flex: 0 0 auto;
+  padding: 2px var(--s-2);
+  font-size: var(--font-size-100);
+  color: var(--c-text-secondary);
+  background: var(--c-surface-2);
+  border-radius: 999px;
+}
+
+.publication__note {
+  margin: 0 0 var(--s-3);
+  font-size: var(--font-size-100);
+  color: var(--c-text-secondary);
+}
+
+.publication__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s-2);
+  margin-top: var(--s-4);
 }

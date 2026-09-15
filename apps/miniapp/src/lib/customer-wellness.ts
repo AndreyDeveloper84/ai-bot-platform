@@ -82,9 +82,23 @@ export interface FoodDiaryEntry {
   carbs_g: number;
   meal_type: string;
   logged_at: string;
+  /**
+   * §136 — чем получено число записи (`text_*` / `photo_*`), `null` для
+   * старых. Экран дневника по нему решает, можно ли править граммы:
+   * `граммы ÷ 100` верно только для записи текстом (DRF-1838).
+   */
+  entry_origin?: string | null;
 }
 
 export interface WellnessToday {
+  /**
+   * DRF-1927 — `true`, когда у человека нет согласия на обработку личных
+   * данных: сервер дневник НЕ читал, и ключей дневника (калории, БЖУ,
+   * записи, вода) в ответе нет не из-за сбоя. Экран вместо «Не удалось
+   * загрузить» говорит {@link DIARY_CONSENT_REQUIRED_TEXT}. Цель
+   * (`active_goals`) приходит как обычно.
+   */
+  consent_required?: boolean;
   /**
    * Eaten today (kcal), and the target. `0` is a real value — «nothing
    * logged yet». **Both keys are ABSENT when the nutrition read failed**
@@ -156,6 +170,15 @@ export interface WellnessToday {
    * и принята: пока чтение профиля не работает, числа спрятаны у всех.
    */
   nutrition_numbers_hidden?: boolean;
+  /**
+   * Строка диетолога (DRF-1897) — тот же текст, что в дневнике в чате.
+   *
+   * Приходит ТОЛЬКО на `?surface=diary` (`loadDiaryToday`): сервер
+   * решает её и пишет в журнал наблюдений лишь для открытого дневника.
+   * Главная этот признак не ставит и строки не получает — иначе её
+   * открытие тратило бы суточный слот наблюдения. Ключа нет — строки нет.
+   */
+  coach_observation?: string;
   /**
    * Active goals (cap=1 for MVP — multi-goal post-pilot). Read from
    * Ayla's goal layer — the same `known.goal` the goal screen renders
@@ -456,6 +479,9 @@ const ACTIVITY_STUB: Record<StubVariant, RecentActivity> = import.meta.env.DEV
  */
 export type DiaryToday =
   | { state: "unreadable" }
+  // DRF-1927 — нет согласия на обработку личных данных: сервер дневник не
+  // читал. Не сбой (повтор ничего не даст) и не пустой день.
+  | { state: "consent_required" }
   | { state: "empty"; hideNumbers: boolean; today: WellnessToday }
   | {
       state: "entries";
@@ -465,7 +491,10 @@ export type DiaryToday =
     };
 
 export async function loadDiaryToday(): Promise<DiaryToday> {
-  const today = await getWellnessToday();
+  // Явный признак «открыт именно дневник» (DRF-1897): по нему и только по
+  // нему сервер решает строку диетолога и пишет журнал.
+  const today = await getWellnessToday({ surface: "diary" });
+  if (today.consent_required === true) return { state: "consent_required" };
   if (!Array.isArray(today.entries)) return { state: "unreadable" };
   const hideNumbers = today.nutrition_numbers_hidden !== false;
   // `today` едет целиком, а не разобранным на итоги: у его ключей уже
@@ -476,9 +505,16 @@ export async function loadDiaryToday(): Promise<DiaryToday> {
     : { state: "entries", entries: today.entries, hideNumbers, today };
 }
 
-export async function getWellnessToday(): Promise<WellnessToday> {
+export async function getWellnessToday(
+  /** `diary` — зовёт экран дневника; главная признак не передаёт. */
+  options: { surface?: "diary" } = {},
+): Promise<WellnessToday> {
   const variant = pickStubOrLive();
-  if (variant === null) return request<WellnessToday>("/wellness/today");
+  if (variant === null) {
+    return request<WellnessToday>(
+      options.surface === "diary" ? "/wellness/today?surface=diary" : "/wellness/today",
+    );
+  }
   // Simulate realistic network latency for skeleton testing (~300ms).
   await new Promise<void>((resolve) => setTimeout(resolve, 300));
   return TODAY_STUB[variant];
@@ -546,11 +582,20 @@ function mintQueueKey(ts: number): string {
  * indicator).
  */
 export function enqueueWaterLog(volume_ml = 250): number {
+  return enqueueWaterLogEntry(volume_ml).length;
+}
+
+/**
+ * DRF-1919 — то же, но возвращает и сам стакан: вызывающий узнаёт СВОЙ стакан
+ * в колбэках синхронизации по `key`, а не по «что-то приняли».
+ */
+export function enqueueWaterLogEntry(volume_ml = 250): { entry: QueuedWaterLog; length: number } {
   const queue = readWaterQueue();
   const ts = Date.now();
-  queue.push({ ts, volume_ml, key: mintQueueKey(ts) });
+  const entry: QueuedWaterLog = { ts, volume_ml, key: mintQueueKey(ts) };
+  queue.push(entry);
   writeWaterQueue(queue);
-  return queue.length;
+  return { entry, length: queue.length };
 }
 
 /**
@@ -628,11 +673,43 @@ export async function postWaterLog(entry: QueuedWaterLog): Promise<WaterLogResul
   });
 }
 
+/** DRF-1919 — одна фраза на «нет согласия» для дневника еды и воды. */
+export const DIARY_CONSENT_REQUIRED_TEXT =
+  "Чтобы менять дневник, нужно согласие на обработку личных данных — дай его в чате с Ayla.";
+
+/**
+ * DRF-1919 — что сказать, когда сервер навсегда отказал в стаканах. Они
+ * выброшены из очереди, то есть НЕ записаны: фраза называет, сколько, откуда
+ * (`fromQueue` — не только что нажатый, а ждавший в очереди) и почему.
+ */
+export function waterRefusalText(
+  refused: readonly ApiError[],
+  { fromQueue = false }: { fromQueue?: boolean } = {},
+): string {
+  const n = refused.length;
+  const one = n === 1;
+  const where = fromQueue ? " из очереди" : "";
+  const head = one ? `Стакан${where} не записан` : `${n} ${glassesWord(n)}${where} не записаны`;
+  const slugs = new Set(refused.map((e) => e.slug));
+  if (slugs.has("consent_required")) return `${head}. ${DIARY_CONSENT_REQUIRED_TEXT}`;
+  if (slugs.has("nutrition_disabled")) return `${head}: дневник воды сейчас выключен.`;
+  return `${head} — дневник ${one ? "его" : "их"} не принял.`;
+}
+
+function glassesWord(n: number): string {
+  const mod10 = n % 10;
+  const mod100 = n % 100;
+  if (mod10 === 1 && mod100 !== 11) return "стакан";
+  if (mod10 >= 2 && mod10 <= 4 && (mod100 < 12 || mod100 > 14)) return "стакана";
+  return "стаканов";
+}
+
 /**
  * Undo a logged glass — the way back when the customer mis-tapped.
  *
  * Returns `true` when Ayla removed it, `false` when the restore window
- * has closed (404) and the glass therefore STAYS counted. Anything else
+ * has closed (404 `not_undoable`) and the glass therefore STAYS counted.
+ * DRF-1919: a 404 `nutrition_disabled` (diary off) is not that — it throws. Anything else
  * (outage, 5xx) throws: a caller must never be told «removed» on the
  * strength of a failed request. That confusion is exactly the bug this
  * whole change exists to remove.
@@ -644,9 +721,57 @@ export async function undoWaterLog(entryId: string): Promise<boolean> {
     });
     return true;
   } catch (err) {
-    if (err instanceof ApiError && err.status === 404) return false;
+    if (err instanceof ApiError && err.status === 404 && err.slug === "not_undoable") return false;
     throw err;
   }
+}
+
+/** DRF-1838 — ответ на удаление записи еды: окно, в котором её можно вернуть. */
+export interface FoodEntryDeletion {
+  entry_id: string;
+  restore_window_expires_at: string | null;
+}
+
+/**
+ * Убрать запись еды из дневника. Обратимо в окне восстановления каталога.
+ * Любой отказ бросает `ApiError` — вызывающий называет его своей фразой.
+ */
+export async function deleteFoodEntry(entryId: string): Promise<FoodEntryDeletion> {
+  return request<FoodEntryDeletion>(`/wellness/food/${encodeURIComponent(entryId)}`, {
+    method: "DELETE",
+  });
+}
+
+/**
+ * Исход возврата удалённой записи — три РАЗНЫХ ответа, и сбой ни одним из них
+ * не является: `expired` — окно закрылось, удаление окончательно; `gone` —
+ * такой удалённой записи нет. Всё остальное бросает.
+ */
+export type FoodEntryRestore = "restored" | "expired" | "gone";
+
+export async function restoreFoodEntry(entryId: string): Promise<FoodEntryRestore> {
+  try {
+    await request<unknown>(`/wellness/food/${encodeURIComponent(entryId)}/restore`, {
+      method: "POST",
+    });
+    return "restored";
+  } catch (err) {
+    if (err instanceof ApiError && err.status === 410) return "expired";
+    // «Записи нет» — только если так сказал сам сервер. 404 от прокси или от
+    // сервера без этого маршрута (Mini App выложен раньше) — сбой, не исход.
+    if (err instanceof ApiError && err.status === 404 && err.slug === "not_found") {
+      return "gone";
+    }
+    throw err;
+  }
+}
+
+/** Исправить граммы записи, сделанной текстом (`portion = граммы / 100` на сервере). */
+export async function correctFoodEntryGrams(entryId: string, grams: number): Promise<void> {
+  await request<unknown>(`/wellness/food/${encodeURIComponent(entryId)}`, {
+    method: "PATCH",
+    body: JSON.stringify({ grams }),
+  });
 }
 
 /**
@@ -660,7 +785,51 @@ export async function undoWaterLog(entryId: string): Promise<boolean> {
 function isPermanentRejection(err: unknown): boolean {
   if (!(err instanceof ApiError)) return false; // network / parse — retry
   if (err.status === 408 || err.status === 429) return false;
+  // DRF-1919: 401 — истекла сессия Mini App, а не отказ дневника: стакан
+  // уйдёт после перезахода. 404 без slug сервера (прокси, сервер без этого
+  // маршрута — `request` подставляет `http_error`) — тоже не отказ.
+  if (err.status === 401) return false;
+  if (err.status === 404 && err.slug === "http_error") return false;
   return err.status >= 400 && err.status < 500;
+}
+
+/**
+ * DRF-1919 — исход ОДНОГО стакана: принят, отказан навсегда или остался в
+ * очереди (с причиной — сеть, 5xx, истёкшая сессия).
+ */
+export type WaterEntryOutcome =
+  | { kind: "accepted"; result: WaterLogResult }
+  | { kind: "rejected"; err: ApiError }
+  | { kind: "queued"; err: unknown };
+
+/** Кто ждёт исхода какого стакана — по ключу стакана, а не по проходу. */
+const entryWatchers = new Map<string, (outcome: WaterEntryOutcome) => void>();
+/** Кому сказать об отказе стаканов, исхода которых никто не ждёт. */
+const queueRefusalListeners = new Set<(refused: ApiError[]) => void>();
+
+function notifyEntry(entry: QueuedWaterLog, outcome: WaterEntryOutcome): boolean {
+  const key = idempotencyKeyFor(entry);
+  const watcher = entryWatchers.get(key);
+  if (!watcher) return false;
+  entryWatchers.delete(key);
+  try {
+    watcher(outcome);
+  } catch {
+    /* исход для экрана — не часть синхронизации */
+  }
+  return true;
+}
+
+/**
+ * DRF-1919 — подписка на отказы стаканов из очереди, которых никто не ждёт
+ * (офлайн-стаканы, ушедшие при возврате сети или вместе с новым тапом): отказ
+ * не должен пропадать молча. Возвращает отписку.
+ */
+export function onWaterQueueRefused(listener: (refused: ApiError[]) => void): () => void {
+  queueRefusalListeners.add(listener);
+  return () => {
+    queueRefusalListeners.delete(listener);
+  };
 }
 
 /** Guards against two overlapping flushes double-posting the same entry. */
@@ -690,14 +859,19 @@ let flushInFlight: Promise<number> | null = null;
  */
 export async function flushWaterQueue(
   /** DRF-1842: id принятой записи — чтобы вызывающий мог предложить её отменить. */
-  onAccepted?: (result: WaterLogResult) => void,
+  onAccepted?: (result: WaterLogResult, entry: QueuedWaterLog) => void,
+  /** DRF-1919: постоянный отказ — стакан выброшен из очереди, экран обязан это сказать. */
+  onRejected?: (err: ApiError, entry: QueuedWaterLog) => void,
 ): Promise<number> {
+  // Исход СВОЕГО стакана вызывающий узнаёт через `syncWaterEntry`, а не через
+  // колбэки прохода: присоединившийся к идущему проходу своих колбэков не имеет.
   if (flushInFlight) return flushInFlight;
   flushInFlight = (async () => {
     const queue = readWaterQueue();
     if (queue.length === 0) return 0;
 
     const remaining: QueuedWaterLog[] = [];
+    const unwatchedRefusals: ApiError[] = [];
     let synced = 0;
 
     for (const [i, entry] of queue.entries()) {
@@ -709,17 +883,29 @@ export async function flushWaterQueue(
         if (isPermanentRejection(err)) {
           // eslint-disable-next-line no-console
           console.warn("[customer-wellness] water entry refused, dropping", err);
+          if (err instanceof ApiError) {
+            if (onRejected) {
+              try {
+                onRejected(err, entry);
+              } catch {
+                /* фраза об отказе — не часть синхронизации */
+              }
+            }
+            if (!notifyEntry(entry, { kind: "rejected", err })) unwatchedRefusals.push(err);
+          }
           continue;
         }
         // Retryable — this entry and every later one stay queued.
+        for (const left of queue.slice(i)) notifyEntry(left, { kind: "queued", err });
         remaining.push(...queue.slice(i));
         break;
       }
       // Вне try: сбой подсказки в интерфейсе не должен превращать уже
       // принятый стакан в «повторить отправку» — это был бы дубль.
+      if (accepted) notifyEntry(entry, { kind: "accepted", result: accepted });
       if (accepted && onAccepted) {
         try {
-          onAccepted(accepted);
+          onAccepted(accepted, entry);
         } catch {
           /* подсказка «отменить» — не часть синхронизации */
         }
@@ -733,6 +919,15 @@ export async function flushWaterQueue(
       (e) => !queue.some((sent) => sent.ts === e.ts && sent.key === e.key),
     );
     writeWaterQueue([...remaining, ...appended]);
+    if (unwatchedRefusals.length > 0) {
+      for (const listener of queueRefusalListeners) {
+        try {
+          listener(unwatchedRefusals);
+        } catch {
+          /* фраза об отказе — не часть синхронизации */
+        }
+      }
+    }
     return synced;
   })();
   try {
@@ -741,6 +936,47 @@ export async function flushWaterQueue(
     flushInFlight = null;
   }
 }
+
+/**
+ * DRF-1919 — отправить стакан и узнать ЕГО исход, какой бы проход его ни взял.
+ *
+ * Идущий проход снял снимок очереди до этого стакана — дождаться его и
+ * запустить проход, в котором стакан есть. Любой проход, взявший стакан,
+ * называет его исход (принят / отказан / остался в очереди с причиной).
+ */
+export async function syncWaterEntry(entry: QueuedWaterLog): Promise<WaterEntryOutcome> {
+  const key = idempotencyKeyFor(entry);
+  let resolveOutcome: (outcome: WaterEntryOutcome) => void = () => {};
+  const outcome = new Promise<WaterEntryOutcome>((resolve) => {
+    resolveOutcome = resolve;
+  });
+  // Второй ожидающий того же стакана цепляется к первому — исход получают оба.
+  const previous = entryWatchers.get(key);
+  entryWatchers.set(
+    key,
+    previous
+      ? (o) => {
+          previous(o);
+          resolveOutcome(o);
+        }
+      : resolveOutcome,
+  );
+  for (let attempt = 0; attempt < 3 && entryWatchers.has(key); attempt += 1) {
+    await flushWaterQueue();
+  }
+  const pending = entryWatchers.get(key);
+  if (pending) {
+    // Стакан не попал ни в один проход (не сохранился в хранилище, очередь
+    // очищена, TTL) — исход не известен; вызывающий проверит очередь сам.
+    entryWatchers.delete(key);
+    pending({ kind: "queued", err: null });
+  }
+  return outcome;
+}
+
+/** DRF-1919 — 401: стакан сохранён, но сам не уйдёт, пока приложение не открыть заново. */
+export const WATER_SESSION_EXPIRED_TEXT =
+  "Стакан сохранён, но не отправлен: сессия истекла — открой приложение заново.";
 
 // ---------------------------------------------------------------------------
 // Onboarding card dismiss state (localStorage flag) — §11.6.

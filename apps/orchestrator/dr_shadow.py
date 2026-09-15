@@ -17,10 +17,11 @@
 * **Состояние** — чтение DR-состояния без ``INCR``: теневой прогон не имеет
   права двигать нумерацию ревизий, которую потом будут читать настоящие
   писатели.
-* **Безопасность** — то, что лежит в состоянии; сегодня с живого пути вердикт
-  не пишет никто (``record_verdict`` — 0 вызывающих), значит ``not_evaluated``
-  → ``SAFETY_UNKNOWN``, и движок честно блокирует. Замер 14.09: так на КАЖДОМ
-  ходу. Это первый пробел входа, и лог его показывает, а не прячет.
+* **Безопасность** — то, что лежит в состоянии. С DRF-1885 ход открывает новую
+  ревизию и пишет в неё вердикт ``pre_check`` (:func:`record_turn_safety`, при
+  включённом флаге), поэтому тень читает вердикт ЭТОГО хода. До того на каждом
+  ходу было ``not_evaluated`` → ``SAFETY_UNKNOWN`` (замер 14.09); следующий
+  пробел — ``BLOCK_READINESS_INPUT_UNAVAILABLE`` (probe/ledger/кандидаты).
 * **Кандидаты** — подпись из ``show_masters`` этого хода: сколько показано и в
   каком порядке. ``recommendation_eligible_count=None`` — в боте не видно,
   прошла ли услуга VERIFIED (решение C2); ``separation=None`` — **вид**
@@ -141,10 +142,83 @@ def build_live_input(conversation_id: str, tool_trace: Any) -> Any:
 class LivePathSink:
     """Одна строка: что решил бы движок — и что сделал текущий путь."""
 
-    def __init__(self, *, branch: str, tools: list[str], cards_shown: int) -> None:
+    def __init__(
+        self,
+        *,
+        branch: str,
+        tools: list[str],
+        cards_shown: int,
+        conversation: Any = None,
+        dr_state: Any = None,
+        message_text: str | None = None,
+        unavailable_inputs: dict[str, Any] | None = None,
+    ) -> None:
         self._branch = branch
         self._tools = tools
         self._cards_shown = cards_shown
+        self._conversation = conversation
+        self._dr_state = dr_state
+        #: DRF-1932 — только для словарей выбора NBA; в строку лога не пишется.
+        self._message_text = message_text
+        #: DRF-1937 — какой вход держит готовность: коды, без текста блокера.
+        self._unavailable_inputs = unavailable_inputs
+
+    def _snapshot_field(self, readiness_state: str | None) -> dict[str, Any] | None:
+        """Версия и digest снимка контекста хода (DRF-1903) — без содержимого.
+
+        Содержимое уходит только в каталог (DRF-1906); в лог — отпечаток, по
+        которому запись каталога сверяется с ходом. Отказ сторожа снимка
+        («не код») — код ``rejected``, не текст; любой другой сбой — имя типа.
+        Наблюдение не бросает.
+        """
+
+        if self._conversation is None:
+            return None
+        from apps.orchestrator.context_snapshot import SnapshotRejected, build_turn_snapshot
+
+        try:
+            snapshot = build_turn_snapshot(
+                bot_user=getattr(self._conversation, "bot_user", None),
+                conversation=self._conversation,
+                dr_state=self._dr_state,
+                readiness_state=readiness_state,
+            )
+        except SnapshotRejected:
+            return {"rejected": True}
+        except Exception as exc:  # noqa: BLE001 — наблюдение не стоит хода
+            return {"error": type(exc).__name__}
+        return {
+            "snapshot_version": snapshot.snapshot_version,
+            "content_digest": snapshot.content_digest,
+        }
+
+    def _policy_field(self, evidence: Any) -> dict[str, Any]:
+        """Что решила бы Decision Policy v0 (DRF-1904) — коды, на ход не влияет.
+
+        ``catalog_writable`` — пропустила бы граница записи каталога этот
+        статус (до таксономии — только ``SAFETY_BOUNDARY``). Наблюдение не
+        бросает: сбой — имя типа.
+        """
+
+        from apps.orchestrator.decision_policy import decide
+        from apps.orchestrator.nba_taxonomy import read_turn_needs
+
+        try:
+            safety = getattr(self._dr_state, "safety", None)
+            # DRF-1932: реплика читается словарями и дальше этой строки не идёт —
+            # в лог уходят только коды.
+            needs = read_turn_needs(self._message_text) if self._message_text is not None else None
+            verdict = decide(evidence, handoff=getattr(safety, "handoff", None), needs=needs)
+        except Exception as exc:  # noqa: BLE001 — наблюдение не стоит хода
+            return {"error": type(exc).__name__}
+        return {
+            "result_status": verdict.result_status.value,
+            "reason_codes": list(verdict.reason_codes),
+            "facts_used": list(verdict.facts_used),
+            "decision_policy_version": verdict.decision_policy_version,
+            "catalog_writable": verdict.catalog_writable,
+            **verdict.nba_fields(),
+        }
 
     def record(self, evidence: Any) -> None:
         question = evidence.question or {}
@@ -174,11 +248,50 @@ class LivePathSink:
                     "path_recommended_without_readiness": (
                         self._cards_shown > 0 and not evidence.allow_recommend
                     ),
+                    "context_snapshot": self._snapshot_field(evidence.readiness_state),
+                    "decision_policy": self._policy_field(evidence),
+                    # DRF-1937: первый недоступный вход и все недоступные — кодами.
+                    "readiness_input_unavailable": self._unavailable_inputs,
                 },
                 ensure_ascii=False,
                 sort_keys=True,
             ),
         )
+
+
+#: DRF-1937 — условие недоступности, которого нет в закрытом словаре движка.
+UNAVAILABLE_INPUT_UNCLASSIFIED = "UNCLASSIFIED"
+
+
+def unavailable_input_field(request: Any) -> dict[str, Any]:
+    """Какой вход держит готовность: первый и все недоступные, кодами (DRF-1937).
+
+    Источник — тот же ``engine.unavailable_inputs``, из которого движок берёт
+    свой блокер, поэтому вердикт и список не расходятся. Текст блокера в лог не
+    идёт; код вне ``UNAVAILABLE_INPUT_CODES`` — ``UNCLASSIFIED``. Запись §19
+    (``DecisionEvidence``) не меняется: причина живёт только в строке тени
+    (решение главного окна 15.09). Не бросает: сбой — имя типа.
+    """
+
+    from apps.orchestrator.decision_readiness import engine as eng
+
+    try:
+        found = eng.unavailable_inputs(
+            availability=request.availability,
+            probe_usable=request.probe_usable,
+            safety=request.safety,
+            state_revision=request.state_revision,
+            candidates=request.candidates,
+            measures=request.measures,
+            policy=request.policy,
+        )
+    except Exception as exc:  # noqa: BLE001 — наблюдение не стоит хода
+        return {"error": type(exc).__name__}
+    codes = [
+        code if code in eng.UNAVAILABLE_INPUT_CODES else UNAVAILABLE_INPUT_UNCLASSIFIED
+        for code, _attribution in found
+    ]
+    return {"first": codes[0] if codes else None, "all": codes}
 
 
 def observe_live_turn(
@@ -187,10 +300,12 @@ def observe_live_turn(
     tool_trace: Any,
     trace_id: Any,
     branch: str,
+    message_text: str | None = None,
 ) -> Any:
     """Прогнать движок в тени для этого хода. Возвращает ``ShadowRecord`` или None.
 
-    При выключенном флаге — None и ноль работы. Не бросает.
+    При выключенном флаге — None и ноль работы. Не бросает. ``message_text`` —
+    реплика человека, только для словарей выбора NBA (DRF-1932); в лог не пишется.
     """
 
     from apps.orchestrator.decision_readiness.shadow import observe, shadow_flag
@@ -204,11 +319,75 @@ def observe_live_turn(
             branch=branch or "",
             tools=tools,
             cards_shown=request.candidates.visible_count,
+            conversation=conversation,
+            dr_state=request.state,
+            message_text=message_text,
+            unavailable_inputs=unavailable_input_field(request),
         )
         evaluation_id = str(trace_id) if trace_id else f"no-trace:{uuid.uuid4()}"
         return observe(request, evaluation_id=evaluation_id, sink=sink)
     except Exception:  # noqa: BLE001 — наблюдение не стоит хода
         logger.exception("decision_readiness.shadow.live_turn_failed branch=%s", branch)
+        return None
+
+
+def _open_turn_revision(conversation_id: str) -> Any:
+    """Новая ревизия на входящее сообщение (карта C03, D1-A).
+
+    ``safety.record.record_verdict`` ревизию сам не двигает — по его докстрингу
+    «какая ревизия текущая» решает производитель хода, до safety. Без этого
+    вердикт о новом сообщении получил бы ревизию прошлого — устарелость, которую
+    ловит P3. LIVE-состояние сохраняется со следующим номером (слоты и эпоха —
+    как были), ABSENT/EXPIRED открывает эпоху выше последней выданной ревизии.
+    """
+
+    from apps.orchestrator.decision_readiness import state as state_mod
+
+    found = state_mod.load(conversation_id)
+    if found.state is not None:
+        current = found.state
+        state = state_mod.ConversationState(
+            conversation_id=conversation_id,
+            revision=state_mod.next_revision(conversation_id),
+            slots=dict(current.slots),
+            epoch_started_at_revision=current.epoch_started_at_revision,
+            last_activity_at=current.last_activity_at,
+            safety=current.safety,
+        )
+    else:
+        state = state_mod.open_epoch(conversation_id, after=found)
+    state_mod.save(state)
+    return state
+
+
+def record_turn_safety(conversation: Any, gate_outcome: Any) -> Any:
+    """Открыть ревизию хода и записать в неё вердикт ``pre_check`` (DRF-1885).
+
+    Пишет только при включённом теневом режиме: сегодня это единственный
+    читатель DR-состояния, и запись без читателя — работа на каждом ходу ради
+    ничего. ``record_verdict`` намеренно не глотает сбой записи — перехват здесь,
+    у вызывающего: ход не падает, WARN называет разговор и вердикт.
+    Возвращает ``Recorded`` или None.
+    """
+
+    from apps.orchestrator.decision_readiness.shadow import shadow_flag
+
+    raw = getattr(gate_outcome, "result", None)
+    try:
+        if conversation is None or raw is None or not shadow_flag().value:
+            return None
+        from apps.orchestrator.safety.record import record_verdict
+
+        conversation_id = str(conversation.id)
+        _open_turn_revision(conversation_id)
+        return record_verdict(conversation_id, raw, source="pre_check")
+    except Exception:  # noqa: BLE001 — вердикт в тень не стоит хода
+        logger.warning(
+            "decision_readiness.safety_record_failed conversation=%s verdict=%s",
+            getattr(conversation, "id", None),
+            getattr(gate_outcome, "verdict", None),
+            exc_info=True,
+        )
         return None
 
 
@@ -219,4 +398,5 @@ __all__ = [
     "build_live_input",
     "candidate_signature",
     "observe_live_turn",
+    "record_turn_safety",
 ]

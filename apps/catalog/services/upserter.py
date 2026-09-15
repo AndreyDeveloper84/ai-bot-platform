@@ -169,13 +169,11 @@ def upsert_specialists(tenant: "Tenant", dtos: list["CatalogSpecialistDTO"]) -> 
     (§16 «Source of truth»: никаких параллельных моделей в боте, если
     каталог уже authority).
 
-    Переходное правило до ручки записи в каталог (M21): пока у каталога фото
-    НЕТ (``avatar_url == ""``), платформенное ``photo_url`` не стирается —
-    иначе загруженное через кабинет фото пропадало бы при каждой
-    синхронизации, а положить его в каталог пока некуда. Как только у
-    каталога фото есть — оно и есть фото; ключа в ответе нет (старая Ayla)
-    — поле не трогается. С M21 ветка «нет в каталоге → оставить» снимается,
-    и ``photo_url`` становится зеркалом без оговорок.
+    С M21 (DRF-1813) фото пишется в каталог (кабинет — прокси в
+    ``…/media/avatar/``), и переходное правило «у каталога фото нет →
+    оставить платформенное» снято: ``photo_url`` — зеркало без оговорок,
+    пустое фото каталога стирает платформенное. Ключа ``avatar`` в ответе
+    нет (каталог без поля) — поле не трогается: отсутствие не стирание.
 
     Missing-from-feed rows are kept as-is (same policy as salon-services:
     upsert-only, no proactive deactivation — documented in the S3B PR
@@ -219,6 +217,9 @@ def upsert_specialists(tenant: "Tenant", dtos: list["CatalogSpecialistDTO"]) -> 
                 "review_count": dto.review_count,
                 "is_active": dto.is_active,
                 "ayla_user_id": dto.user_id,
+                # DRF-1933: id каталога — и на новой строке (== pk), и на
+                # склеенной строке приглашения (pk остаётся uuid4).
+                "catalog_specialist_id": dto.ayla_master_id,
                 # DRF-1588 — гео едет в колонки. Раньше оно доезжало только
                 # внутрь ``raw`` (ниже), то есть было, но было недоступно:
                 # по JSON-ключу нельзя ни искать, ни фильтровать, ни
@@ -231,10 +232,10 @@ def upsert_specialists(tenant: "Tenant", dtos: list["CatalogSpecialistDTO"]) -> 
                 "external_updated_at": dto.external_updated_at,
                 "raw": dto.raw,
             }
-            if dto.avatar_url:
-                # DRF-1812 — фото каталога переписывает платформенное; пустое
-                # и отсутствующее поле оставляют ``photo_url`` как есть (см.
-                # докстринг: переходное правило до M21).
+            if dto.avatar_url is not None:
+                # DRF-1812 → DRF-1813 (M21): фото пишется в каталог, зеркало без
+                # оговорок — пустое фото каталога стирает платформенное. Ключа
+                # ``avatar`` нет (``None``, каталог без поля) — поле не трогается.
                 mirror["photo_url"] = dto.avatar_url
             try:
                 with transaction.atomic():
@@ -557,7 +558,9 @@ def _upsert_one_master_service(
     # first place. Guard #1 stays regardless — the edge asserting its own
     # tenant is the check that does not depend on any other mirror having been
     # correct first.
-    master = master_model.objects.filter(id=dto.specialist).first()
+    # DRF-1933: ``dto.specialist`` — id каталога; строка зеркала находится по
+    # колонке (у склеенного приглашения и соло первичный ключ — uuid4).
+    master = master_model.objects.filter(catalog_specialist_id=dto.specialist).first()
     if master is None and dto.user_id:
         # DRF-1507 — тот же ключ склейки, что и в ``upsert_specialists``.
         #

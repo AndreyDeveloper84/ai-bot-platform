@@ -400,6 +400,16 @@ class AylaRepeatIntent:
     raw: dict[str, Any] = field(default_factory=dict)
 
 
+@dataclass(frozen=True)
+class AylaReview:
+    """A review Ayla stored for a client's own completed visit (DRF-1855)."""
+
+    id: str
+    appointment_id: str
+    rating: int
+    raw: dict[str, Any] = field(default_factory=dict)
+
+
 # ─── protocol ────────────────────────────────────────────────────────────────
 
 
@@ -751,6 +761,7 @@ class AylaBookingHTTPClient:
         params: dict[str, Any] | None = None,
         json_body: dict[str, Any] | None = None,
         idempotency_key: str | None = None,
+        files: dict[str, Any] | None = None,
     ) -> httpx.Response:
         """Issue one request through the breaker. Maps network/timeout to
         :class:`BookingUnavailableError`; 429 is retried with backoff.
@@ -775,6 +786,10 @@ class AylaBookingHTTPClient:
 
         url = self._urls.build(f"internal/{endpoint.lstrip('/')}")
         headers = self._headers(external_user_id=external_user_id)
+        if files is not None:
+            # DRF-1813: multipart — границу ставит httpx; навязанный JSON-тип
+            # сделал бы тело неразборчивым для каталога.
+            headers.pop("Content-Type", None)
         if idempotency_key:
             headers["X-Idempotency-Key"] = idempotency_key
 
@@ -788,7 +803,9 @@ class AylaBookingHTTPClient:
 
         for attempt in range(RATE_LIMIT_MAX_RETRIES + 1):
             try:
-                resp = http.request(method, url, headers=headers, params=params, json=json_body)
+                resp = http.request(
+                    method, url, headers=headers, params=params, json=json_body, files=files
+                )
             except (httpx.TimeoutException, httpx.NetworkError) as exc:
                 self._circuit.record_failure(now=now)
                 logger.warning("booking_client.%s.network err=%s", endpoint, type(exc).__name__)
@@ -1286,6 +1303,153 @@ class AylaBookingHTTPClient:
             raise ScheduleBlockConflictError("has_active_appointments")
         return self._ok(resp, success=(200,))
 
+    # ── DRF-1802 (M10): «своя услуга» мастера = заявка о разрыве канона (M9) ─
+
+    def list_canon_gap_requests(
+        self,
+        *,
+        specialist_id: str,
+        external_user_id: str,
+    ) -> dict[str, Any]:
+        """``GET internal/specialists/{id}/canon-gap-requests/`` — свои заявки.
+
+        Субъект — мастер (как у часов, DRF-1815): профиль в URL обязан быть
+        его собственным, иначе каталог отвечает 403 → :class:`BookingBadRequestError`.
+        """
+        resp = self._request(
+            "GET",
+            f"specialists/{specialist_id}/canon-gap-requests/",
+            external_user_id=external_user_id,
+        )
+        return self._ok(resp, success=(200,))
+
+    def create_canon_gap_request(
+        self,
+        *,
+        specialist_id: str,
+        external_user_id: str,
+        name: str,
+        description: str,
+        duration_minutes: int,
+        price: str,
+    ) -> dict[str, Any]:
+        """``POST internal/specialists/{id}/canon-gap-requests/`` — завести PENDING.
+
+        Каталог ничего не создаёт в каноне и возвращает заявку плюс подсказку
+        «похожая услуга» без связи. Решения из бота нет — только владелец в
+        Django-admin каталога.
+        """
+        resp = self._request(
+            "POST",
+            f"specialists/{specialist_id}/canon-gap-requests/",
+            json_body={
+                "name": name,
+                "description": description,
+                "duration_minutes": duration_minutes,
+                "price": price,
+            },
+            external_user_id=external_user_id,
+        )
+        return self._ok(resp, success=(201,))
+
+    def similar_canon_templates(
+        self,
+        *,
+        specialist_id: str,
+        external_user_id: str,
+        name: str,
+    ) -> dict[str, Any]:
+        """``GET internal/specialists/{id}/canon-gap-requests/similar/?name=`` — только чтение."""
+        resp = self._request(
+            "GET",
+            f"specialists/{specialist_id}/canon-gap-requests/similar/",
+            params={"name": name},
+            external_user_id=external_user_id,
+        )
+        return self._ok(resp, success=(200,))
+
+    def get_canon_gap_request(
+        self,
+        *,
+        specialist_id: str,
+        external_user_id: str,
+        request_id: str,
+    ) -> dict[str, Any]:
+        """``GET internal/specialists/{id}/canon-gap-requests/{request_id}/``.
+
+        Чужая заявка неотличима от несуществующей: 404 приходит как
+        :class:`BookingBadRequestError` со ``status_code=404``.
+        """
+        resp = self._request(
+            "GET",
+            f"specialists/{specialist_id}/canon-gap-requests/{request_id}/",
+            external_user_id=external_user_id,
+        )
+        return self._ok(resp, success=(200,))
+
+    def get_accepting_bookings(
+        self,
+        *,
+        specialist_id: str,
+        external_user_id: str,
+    ) -> dict[str, Any]:
+        """``GET internal/specialists/{id}/availability/`` — «Принимаю записи».
+
+        DRF-1845. ``external_user_id`` names the SUBJECT: the catalog lets a
+        master read only their own profile's flag, as with working hours.
+        """
+        resp = self._request(
+            "GET",
+            f"specialists/{specialist_id}/availability/",
+            external_user_id=external_user_id,
+        )
+        return self._ok(resp, success=(200,))
+
+    def set_accepting_bookings(
+        self,
+        *,
+        specialist_id: str,
+        external_user_id: str,
+        accepting: bool,
+    ) -> dict[str, Any]:
+        """``PATCH internal/specialists/{id}/availability/`` — pause or resume.
+
+        DRF-1845. The catalog writes ``SpecialistProfile.is_booking_enabled``
+        and answers with its readback. A profile that is not published is
+        refused with 409 ``PROFILE_NOT_ACTIVE`` — raised here as
+        :class:`BookingBadRequestError` with that code; 403 = not the subject.
+        """
+        if not isinstance(accepting, bool):
+            raise ValueError(f"accepting must be a bool, got {accepting!r}")
+        resp = self._request(
+            "PATCH",
+            f"specialists/{specialist_id}/availability/",
+            json_body={"accepting_bookings": accepting},
+            external_user_id=external_user_id,
+        )
+        return self._ok(resp, success=(200,))
+
+    def get_specialist_reviews(
+        self,
+        *,
+        specialist_id: str,
+        external_user_id: str,
+    ) -> dict[str, Any]:
+        """``GET internal/specialists/{id}/reviews/`` — «Мои отзывы».
+
+        DRF-1857. ``external_user_id`` names the SUBJECT: the catalog lets a
+        master read only reviews of their own profile (403 otherwise). The
+        answer carries visible reviews only, the client as «Имя Ф.» / «Клиент»
+        / ``null`` for an anonymous review, and a rating only when a review
+        exists; the catalog journals the read.
+        """
+        resp = self._request(
+            "GET",
+            f"specialists/{specialist_id}/reviews/",
+            external_user_id=external_user_id,
+        )
+        return self._ok(resp, success=(200,))
+
     def get_specialist_service_edges(
         self,
         *,
@@ -1315,6 +1479,208 @@ class AylaBookingHTTPClient:
                 "is_active": "true",
             },
         )
+
+    # ── M21 профиль мастера (DRF-1813; каталог #455) ─────────────────────────
+    # Субъект — сам мастер. Лимиты и отказы — у каталога: имя ≥ 2 символов,
+    # «о себе» ≤ 500, аватар JPEG/PNG/WebP ≤ 5 МБ и квадрат ±2 %.
+
+    def patch_specialist_profile(
+        self,
+        *,
+        specialist_id: str,
+        external_user_id: str,
+        display_name: str | None = None,
+        bio: str | None = None,
+    ) -> dict[str, Any]:
+        """``PATCH internal/specialists/{id}/profile/`` — только переданные поля."""
+        body: dict[str, Any] = {}
+        if display_name is not None:
+            body["display_name"] = display_name
+        if bio is not None:
+            body["bio"] = bio
+        resp = self._request(
+            "PATCH",
+            f"specialists/{specialist_id}/profile/",
+            json_body=body,
+            external_user_id=external_user_id,
+        )
+        return self._ok(resp, success=(200,))
+
+    def upload_specialist_avatar(
+        self,
+        *,
+        specialist_id: str,
+        external_user_id: str,
+        filename: str,
+        content: bytes,
+        content_type: str,
+    ) -> dict[str, Any]:
+        """``POST internal/specialists/{id}/media/avatar/`` — multipart ``image``."""
+        resp = self._request(
+            "POST",
+            f"specialists/{specialist_id}/media/avatar/",
+            files={"image": (filename, content, content_type)},
+            external_user_id=external_user_id,
+        )
+        return self._ok(resp, success=(200,))
+
+    # ── M8 выбор услуг мастера и его цена (DRF-1895; каталог #443 / #444) ─────
+    # Субъект — сам мастер: профиль в URL обязан быть его собственным, иначе
+    # каталог отвечает 403 → BookingBadRequestError. Счётчики selected /
+    # configured считает каталог; клиент их не трогает.
+
+    def get_service_selection(
+        self,
+        *,
+        specialist_id: str,
+        external_user_id: str,
+    ) -> dict[str, Any]:
+        """``GET internal/specialists/{id}/services/selection/`` — состояние выбора."""
+        resp = self._request(
+            "GET",
+            f"specialists/{specialist_id}/services/selection/",
+            external_user_id=external_user_id,
+        )
+        return self._ok(resp, success=(200,))
+
+    def select_services(
+        self,
+        *,
+        specialist_id: str,
+        external_user_id: str,
+        template_ids: list[str],
+    ) -> dict[str, Any]:
+        """``POST internal/specialists/{id}/services/selection/`` — выбрать канон.
+
+        Всё или ничего: неизвестный шаблон — 404 с ``template_ids``. 201 —
+        создана хотя бы одна строка, 200 — всё уже было; число — в ``created``.
+        """
+        resp = self._request(
+            "POST",
+            f"specialists/{specialist_id}/services/selection/",
+            json_body={"template_ids": list(template_ids)},
+            external_user_id=external_user_id,
+        )
+        return self._ok(resp, success=(200, 201))
+
+    def put_service_offer(
+        self,
+        *,
+        specialist_id: str,
+        external_user_id: str,
+        salon_service_id: str,
+        price: str,
+        duration_minutes: int,
+    ) -> dict[str, Any]:
+        """``PUT internal/specialists/{id}/services/{salon_service_id}/offer/``.
+
+        Первая цена создаёт предложение мастера (201), повтор обновляет его
+        (200). Этот факт у каталога есть только в статусе ответа, поэтому он
+        возвращается рядом с телом как ``created``.
+        """
+        resp = self._request(
+            "PUT",
+            f"specialists/{specialist_id}/services/{salon_service_id}/offer/",
+            json_body={"price": price, "duration_minutes": duration_minutes},
+            external_user_id=external_user_id,
+        )
+        data = self._ok(resp, success=(200, 201))
+        return {**data, "created": resp.status_code == 201}
+
+    def remove_service(
+        self,
+        *,
+        specialist_id: str,
+        external_user_id: str,
+        salon_service_id: str,
+    ) -> dict[str, Any]:
+        """``DELETE internal/specialists/{id}/services/{salon_service_id}/`` — убрать.
+
+        Будущая запись — 409 ``HAS_APPOINTMENTS`` с ``count``; иначе строка
+        удалена или выключена (``removal``).
+        """
+        resp = self._request(
+            "DELETE",
+            f"specialists/{specialist_id}/services/{salon_service_id}/",
+            external_user_id=external_user_id,
+        )
+        return self._ok(resp, success=(200,))
+
+    # ── M4 публикация соло-мастера (DRF-1797; каталог #453) ──────────────────
+    # Субъект — сам мастер: профиль в URL обязан быть его собственным, иначе
+    # каталог отвечает 403 → BookingBadRequestError. Готовность считает
+    # каталог; клиент её не трогает.
+
+    def get_publication_readiness(
+        self,
+        *,
+        specialist_id: str,
+        external_user_id: str,
+    ) -> dict[str, Any]:
+        """``GET internal/specialists/{id}/publication/readiness/`` — READY / NOT_READY."""
+        resp = self._request(
+            "GET",
+            f"specialists/{specialist_id}/publication/readiness/",
+            external_user_id=external_user_id,
+        )
+        return self._ok(resp, success=(200,))
+
+    def publish(
+        self,
+        *,
+        specialist_id: str,
+        external_user_id: str,
+        command_id: str,
+    ) -> dict[str, Any]:
+        """``POST internal/specialists/{id}/publication/`` ``{command_id}`` — «Опубликовать».
+
+        201 — каталог сделал переход DRAFT → PENDING; 200 — повтор той же
+        команды или «уже на проверке / опубликован». Факт перехода у каталога
+        есть только в статусе ответа, поэтому он возвращается рядом с телом
+        как ``created``.
+        """
+        resp = self._request(
+            "POST",
+            f"specialists/{specialist_id}/publication/",
+            json_body={"command_id": command_id},
+            external_user_id=external_user_id,
+        )
+        data = self._ok(resp, success=(200, 201))
+        return {**data, "created": resp.status_code == 201}
+
+    def get_publication_status(
+        self,
+        *,
+        specialist_id: str,
+        external_user_id: str,
+    ) -> dict[str, Any]:
+        """``GET internal/specialists/{id}/publication/status/`` — статус, готовность, последняя команда."""
+        resp = self._request(
+            "GET",
+            f"specialists/{specialist_id}/publication/status/",
+            external_user_id=external_user_id,
+        )
+        return self._ok(resp, success=(200,))
+
+    def get_service_directions(self) -> Any:
+        """``GET internal/services/directions/`` — направления канона (DRF-1799, M7).
+
+        Корни глобальной таксономии (каталог M6). Общий Bearer, субъекта нет:
+        канон не принадлежит мастеру. Форму ответа проверяет вызывающий —
+        пустой список вместо непрочитанного ответа был бы выдуманной пустотой.
+        """
+        resp = self._request("GET", "services/directions/")
+        return self._ok(resp, success=(200,))
+
+    def get_service_templates(self, *, direction_id: str) -> Any:
+        """``GET internal/services/templates/?direction_id=`` — шаблоны направления (DRF-1799, M7).
+
+        Всё поддерево корня на любой глубине, у каждого шаблона — его
+        подкатегория. Не корень — 400 ``NOT_A_DIRECTION``, неизвестный — 404,
+        оба как :class:`BookingBadRequestError` со своим кодом.
+        """
+        resp = self._request("GET", "services/templates/", params={"direction_id": direction_id})
+        return self._ok(resp, success=(200,))
 
     def get_user_bookings_page(
         self,
@@ -1554,6 +1920,70 @@ class AylaBookingHTTPClient:
             suggested_slots=[s for s in slots if isinstance(s, str)]
             if isinstance(slots, list)
             else [],
+            raw=data,
+        )
+
+    # ── reviews ──────────────────────────────────────────────────────────────
+
+    def create_review(
+        self,
+        *,
+        external_user_id: str,
+        ayla_user_id: str,
+        appointment_id: str,
+        rating: int,
+        text: str = "",
+        is_anonymous: bool = False,
+    ) -> AylaReview:
+        """A client's review of their own visit (``POST users/{id}/reviews/``).
+
+        DRF-1855. Until this route the only door to a review was the client
+        app with the person's own JWT, so an answer given to Ayla in the chat
+        had nowhere to go. Upstream applies the app door's rules through the
+        same service: the visit must be this client's and ``completed``; one
+        review per visit.
+
+        **Subject.** The path names the Ayla user; ``X-External-User-ID``
+        names who is acting; upstream refuses (403) unless they are the same
+        person. The review is written *as* that person, so there is no body
+        field through which a caller could name somebody else.
+
+        **Refusals** surface as :class:`BookingBadRequestError` with the wire
+        code: ``REVIEW_EXISTS`` (409) — already reviewed, which a caller may
+        treat as done; ``APPOINTMENT_NOT_COMPLETED`` (400); ``NOT_FOUND``
+        (404) — not this client's visit, indistinguishable from none.
+
+        **No idempotency key.** The one-review-per-visit rule is the dedup:
+        a repeat after a lost response answers ``REVIEW_EXISTS`` and never
+        creates a second row.
+        """
+        # A caller bug fails before the wire: bool is an int in Python, and
+        # ``True`` would otherwise travel as a one-star review.
+        if isinstance(rating, bool) or not isinstance(rating, int) or not 1 <= rating <= 5:
+            raise ValueError(f"rating must be an int in 1..5, got {rating!r}")
+        resp = self._request(
+            "POST",
+            f"users/{ayla_user_id}/reviews/",
+            external_user_id=external_user_id,
+            json_body={
+                "appointment_id": appointment_id,
+                "rating": rating,
+                "text": text,
+                "is_anonymous": is_anonymous,
+            },
+        )
+        payload = self._ok(resp, success=(201,))
+        data = payload if isinstance(payload, dict) else {}
+        review_id = str(data.get("id") or "")
+        if not review_id:
+            # A 201 we cannot read is not «saved»: the caller would tell the
+            # person their review is in while nobody can point at it.
+            logger.warning("booking_client.review_unexpected_shape type=%s", type(payload).__name__)
+            raise BookingUnavailableError("malformed_response")
+        return AylaReview(
+            id=review_id,
+            appointment_id=appointment_id,
+            rating=rating,
             raw=data,
         )
 

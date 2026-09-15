@@ -35,12 +35,14 @@ token lookup is filtered by tenant explicitly as defence-in-depth.
 from __future__ import annotations
 
 import json
+from decimal import Decimal, InvalidOperation
 import logging
 import re
 import uuid
 from datetime import datetime, timedelta, timezone as dt_timezone
-from pathlib import Path
 from typing import Any
+from collections.abc import Callable
+from functools import wraps
 
 from django.conf import settings
 from django.db import transaction
@@ -51,6 +53,7 @@ from django.views.decorators.http import require_http_methods
 
 from apps.audit.services import write_audit
 from apps.catalog.handles import canonical_handle
+from apps.catalog.specialist_ref import CatalogSpecialistUnresolved, catalog_specialist_id
 from apps.catalog.models import CatalogMaster, CatalogService, MasterService
 from apps.catalog.master_state import sale_block
 from apps.catalog.services.schedule_confirmation import (
@@ -139,7 +142,6 @@ from apps.master_api.auth import (
 logger = logging.getLogger(__name__)
 
 
-MAX_BIO_LENGTH = 280
 """Per master-mobile §M0 Step 3 — twitter-length bio limit."""
 
 
@@ -870,50 +872,79 @@ def onboarding_reject(request: HttpRequest) -> HttpResponse:
 # --- PATCH /onboarding/profile --------------------------------------------
 
 
-def _save_master_photo(master: CatalogMaster, file_obj: Any) -> str:
-    """Save the uploaded photo + return the absolute URL.
-
-    Phase 1 (this PR): raw upload only, no resize pipeline. Lives under
-    ``MEDIA_ROOT/master_photos/<master_id>.<ext>`` and the URL is
-    ``MEDIA_URL + master_photos/<master_id>.<ext>``.
-
-    TODO(master PR 4+): proper resize pipeline (Pillow → 800×800 JPEG
-    + thumbnail). Track via media-pipeline ticket. For now we accept
-    PNG/JPEG/WEBP and trust the extension; content-type sniffing is
-    a follow-up.
-    """
-
-    ext = (Path(file_obj.name).suffix or ".jpg").lower()
-    if ext not in (".jpg", ".jpeg", ".png", ".webp"):
-        ext = ".jpg"
-
-    media_root = Path(getattr(settings, "MEDIA_ROOT", "media"))
-    media_url = getattr(settings, "MEDIA_URL", "/media/")
-    photos_dir = media_root / "master_photos"
-    photos_dir.mkdir(parents=True, exist_ok=True)
-
-    out_path = photos_dir / f"{master.id}{ext}"
-    with open(out_path, "wb") as f:
-        for chunk in file_obj.chunks():
-            f.write(chunk)
-
-    return f"{media_url.rstrip('/')}/master_photos/{master.id}{ext}"
+def _profile_refusal(exc: BookingBadRequestError) -> HttpResponse:
+    """Отказы каталога на запись профиля — по имени, данные под ``details``."""
+    details = exc.details or {}
+    if exc.status_code == 403:
+        return _error("not_linked", "Профиль ещё не связан с каталогом.", 403)
+    if exc.status_code == 404:
+        if exc.code == "SPECIALIST_NOT_FOUND":
+            return _error("specialist_not_found", "Профиль мастера не найден в каталоге.", 404)
+        return _error("not_found", "Не найдено.", 404)
+    if exc.status_code == 400:
+        # Не ``_error_with``: у него третий параметр назван ``status`` — ответ
+        # собран напрямую, чтобы поле каталога с тем же именем не столкнулось.
+        return JsonResponse(
+            {
+                "error": "validation_error",
+                "detail": "Каталог не принял профиль.",
+                "details": dict(details),
+            },
+            status=400,
+        )
+    return _error("catalog_refused", "Каталог отказал.", exc.status_code or 400)
 
 
 @csrf_exempt
+def _catalog_profile_required(
+    view_func: Callable[..., HttpResponse],
+) -> Callable[..., HttpResponse]:
+    """DRF-1933: прокси мастерской зовут каталог по id его профиля.
+
+    Id берёт :func:`apps.catalog.specialist_ref.catalog_specialist_id` прямо
+    в аргументах вызова клиента; пустая колонка поднимает отказ ДО вызова,
+    и здесь он становится ответом по имени. Первичный ключ зеркала в
+    каталог не уходит: у соло-мастера и склеенного приглашения это uuid4.
+    """
+
+    @wraps(view_func)
+    def wrapper(request: HttpRequest, *args: Any, **kwargs: Any) -> HttpResponse:
+        try:
+            return view_func(request, *args, **kwargs)
+        except CatalogSpecialistUnresolved:
+            master = getattr(request, "master", None)
+            logger.warning(
+                "master_api.catalog_profile_unresolved master=%s", getattr(master, "pk", None)
+            )
+            return _error(
+                "catalog_profile_unresolved",
+                "Профиль мастера ещё не заведён в каталоге.",
+                409,
+            )
+
+    return wrapper
+
+
 @require_http_methods(["PATCH"])
 @require_master_init_data
+@_catalog_profile_required
 def onboarding_profile(request: HttpRequest) -> HttpResponse:
-    """M0 Step 3 — populate bio + photo. Idempotent.
+    """«О себе» и фото мастера — прокси в каталог (DRF-1813, M21; каталог #455).
 
-    Accepts multipart (for photo) OR JSON (bio-only). The bio comes from
-    either ``request.POST['bio']`` (multipart) or the JSON body.
+    Принимает multipart (с фото) или JSON (только текст). Владелец полей —
+    каталог: «о себе» уходит в ``PATCH …/profile/``, фото — в
+    ``POST …/media/avatar/``. Лимиты и отказы — его (имя ≥ 2, «о себе» ≤ 500,
+    форматы, квадрат); бот своих не держит и файлов не пишет. Зеркало
+    ``CatalogMaster`` берёт ОТВЕТ каталога сразу — кабинет видит правку, не
+    дожидаясь синхронизации. Аудит ``master.profile_initialized`` — только
+    после успешной записи.
     """
 
     master: CatalogMaster = request.master  # type: ignore[attr-defined]
     bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
 
-    bio: str | None = None
+    bio: Any = None
+    display_name: Any = None
     photo_file = None
 
     content_type = request.headers.get("Content-Type", "")
@@ -931,33 +962,62 @@ def onboarding_profile(request: HttpRequest) -> HttpResponse:
             return _error("bad_request", "malformed multipart body", 400)
         if "bio" in post:
             bio = str(post["bio"])
+        if "display_name" in post:
+            display_name = str(post["display_name"])
         photo_file = files.get("photo")
     else:
         body = _parse_json_body(request)
         if isinstance(body, JsonResponse):
             return body
-        if "bio" in body:
-            bio = body["bio"]
+        bio = body.get("bio")
+        display_name = body.get("display_name")
 
+    if bio is not None and not isinstance(bio, str):
+        return _error("bad_request", "bio must be a string", 400)
+    if display_name is not None and not isinstance(display_name, str):
+        return _error("bad_request", "display_name must be a string", 400)
+
+    client = get_ayla_booking_client()
+    actor = external_user_id_for(bot_user)
     fields_populated: list[str] = []
     update_fields: list[str] = []
-
-    if bio is not None:
-        if len(bio) > MAX_BIO_LENGTH:
-            return _error(
-                "bad_request",
-                f"bio exceeds {MAX_BIO_LENGTH} characters",
-                400,
+    try:
+        if bio is not None or display_name is not None:
+            state = client.patch_specialist_profile(
+                specialist_id=catalog_specialist_id(master),
+                external_user_id=actor,
+                display_name=display_name,
+                bio=bio,
             )
-        master.bio = bio
-        update_fields.append("bio")
-        if bio.strip():
-            fields_populated.append("bio")
-
-    if photo_file is not None:
-        master.photo_url = _save_master_photo(master, photo_file)
-        update_fields.append("photo_url")
-        fields_populated.append("photo")
+            if bio is not None:
+                master.bio = str(state.get("bio") or "")
+                update_fields.append("bio")
+                if master.bio.strip():
+                    fields_populated.append("bio")
+            if display_name is not None:
+                master.name = str(state.get("display_name") or master.name)
+                update_fields.append("name")
+                fields_populated.append("name")
+        if photo_file is not None:
+            state = client.upload_specialist_avatar(
+                specialist_id=catalog_specialist_id(master),
+                external_user_id=actor,
+                filename=photo_file.name or "photo",
+                content=photo_file.read(),
+                content_type=photo_file.content_type or "application/octet-stream",
+            )
+            master.photo_url = str(state.get("avatar_url") or "")
+            update_fields.append("photo_url")
+            fields_populated.append("photo")
+    except BookingBadRequestError as exc:
+        # Что каталог уже принял до отказа — в зеркало; аудита нет.
+        if update_fields:
+            master.save(update_fields=update_fields)
+        return _profile_refusal(exc)
+    except BookingUnavailableError:
+        if update_fields:
+            master.save(update_fields=update_fields)
+        return _error("catalog_unavailable", "Каталог сейчас недоступен — попробуйте позже.", 503)
 
     if update_fields:
         master.save(update_fields=update_fields)
@@ -1036,6 +1096,7 @@ def me(request: HttpRequest) -> HttpResponse:
 @csrf_exempt
 @require_http_methods(["GET", "PUT"])
 @require_master_init_data
+@_catalog_profile_required
 def working_hours(request: HttpRequest) -> HttpResponse:
     """The master's own weekly template — read and written in the catalog.
 
@@ -1064,7 +1125,9 @@ def working_hours(request: HttpRequest) -> HttpResponse:
 
     if request.method == "GET":
         try:
-            data = client.get_working_hours(specialist_id=str(master.id), external_user_id=actor)
+            data = client.get_working_hours(
+                specialist_id=catalog_specialist_id(master), external_user_id=actor
+            )
         except BookingBadRequestError as exc:
             return _working_hours_refusal(exc)
         except BookingUnavailableError:
@@ -1081,7 +1144,7 @@ def working_hours(request: HttpRequest) -> HttpResponse:
 
     try:
         data = client.put_working_hours(
-            specialist_id=str(master.id), external_user_id=actor, schedule=schedule
+            specialist_id=catalog_specialist_id(master), external_user_id=actor, schedule=schedule
         )
     except ScheduleBlockConflictError:
         return _error(
@@ -1147,6 +1210,290 @@ def _working_hours_refusal(exc: BookingBadRequestError) -> HttpResponse:
     return _error("schedule_unavailable", "Расписание сейчас недоступно.", 502)
 
 
+# --- /canon-gap-requests (DRF-1802, M10) ----------------------------------
+
+
+@csrf_exempt
+@require_http_methods(["GET", "POST"])
+@require_master_init_data
+@_catalog_profile_required
+def canon_gap_requests(request: HttpRequest) -> HttpResponse:
+    """«Своя услуга» мастера = заявка о разрыве канона к владельцу (G6 / D6).
+
+    Прокси в ``/internal/specialists/{id}/canon-gap-requests/`` каталога
+    (M9): заявка живёт там и только там, второго хранилища в боте нет;
+    ответ — то, что вернул каталог. Решает заявку только владелец в
+    Django-admin каталога — у этого прокси нет ни PATCH, ни PUT, ни DELETE.
+
+    Субъект — сам мастер (``X-External-User-ID`` его bot-личности), профиль —
+    его ``CatalogMaster.id``; каталог пускает только к своему профилю.
+    """
+    master: CatalogMaster = request.master  # type: ignore[attr-defined]
+    bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
+    actor = external_user_id_for(bot_user)
+    client = get_ayla_booking_client()
+
+    if request.method == "GET":
+        try:
+            data = client.list_canon_gap_requests(
+                specialist_id=catalog_specialist_id(master), external_user_id=actor
+            )
+        except BookingBadRequestError as exc:
+            return _canon_gap_refusal(exc)
+        except BookingUnavailableError:
+            return _error("catalog_unavailable", "Каталог сейчас недоступен.", 503)
+        return JsonResponse({"requests": data.get("requests") or []})
+
+    try:
+        body = json.loads(request.body or b"{}")
+    except ValueError:
+        return _error("invalid_json", "Body must be JSON.", 400)
+    if not isinstance(body, dict):
+        return _error("validation_error", "Body must be an object.", 400)
+    name = str(body.get("name") or "").strip()
+    duration = body.get("duration_minutes")
+    price = body.get("price")
+    if (
+        not name
+        or not isinstance(duration, int)
+        or isinstance(duration, bool)
+        or duration < 1
+        or price in (None, "")
+    ):
+        return _error("validation_error", "Нужны название, длительность в минутах и цена.", 400)
+
+    try:
+        data = client.create_canon_gap_request(
+            specialist_id=catalog_specialist_id(master),
+            external_user_id=actor,
+            name=name,
+            description=str(body.get("description") or ""),
+            duration_minutes=duration,
+            price=str(price),
+        )
+    except BookingBadRequestError as exc:
+        return _canon_gap_refusal(exc)
+    except BookingUnavailableError:
+        return _error("catalog_unavailable", "Каталог сейчас недоступен.", 503)
+    return JsonResponse(
+        {"request": data.get("request"), "similar": data.get("similar") or []}, status=201
+    )
+
+
+@require_http_methods(["GET"])
+@require_master_init_data
+@_catalog_profile_required
+def canon_gap_similar(request: HttpRequest) -> HttpResponse:
+    """Подсказка «похожая услуга» — канон по подтверждённым синонимам и имени.
+
+    Только чтение: выбор «Выбрать эту услугу» / «Добавить мою» делает мастер
+    на экране, связь здесь не создаётся.
+    """
+    name = (request.GET.get("name") or "").strip()
+    if not name:
+        return _error("validation_error", "name is required.", 400)
+    master: CatalogMaster = request.master  # type: ignore[attr-defined]
+    bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
+    try:
+        data = get_ayla_booking_client().similar_canon_templates(
+            specialist_id=catalog_specialist_id(master),
+            external_user_id=external_user_id_for(bot_user),
+            name=name,
+        )
+    except BookingBadRequestError as exc:
+        return _canon_gap_refusal(exc)
+    except BookingUnavailableError:
+        return _error("catalog_unavailable", "Каталог сейчас недоступен.", 503)
+    return JsonResponse({"similar": data.get("similar") or []})
+
+
+@require_http_methods(["GET"])
+@require_master_init_data
+@_catalog_profile_required
+def canon_gap_request_detail(request: HttpRequest, request_id: uuid.UUID) -> HttpResponse:
+    """Одна своя заявка; чужая неотличима от несуществующей (404)."""
+    master: CatalogMaster = request.master  # type: ignore[attr-defined]
+    bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
+    try:
+        data = get_ayla_booking_client().get_canon_gap_request(
+            specialist_id=catalog_specialist_id(master),
+            external_user_id=external_user_id_for(bot_user),
+            request_id=str(request_id),
+        )
+    except BookingBadRequestError as exc:
+        return _canon_gap_refusal(exc)
+    except BookingUnavailableError:
+        return _error("catalog_unavailable", "Каталог сейчас недоступен.", 503)
+    return JsonResponse({"request": data.get("request")})
+
+
+def _canon_gap_refusal(exc: BookingBadRequestError) -> HttpResponse:
+    if exc.status_code == 403:
+        return _error(
+            "not_linked", "Профиль ещё не связан с каталогом — заявку пока некуда отправить.", 403
+        )
+    if exc.status_code == 404:
+        return _error("not_found", "Заявка не найдена.", 404)
+    if exc.status_code == 400:
+        return _error("validation_error", "Проверьте название, длительность и цену.", 400)
+    return _error("catalog_unavailable", "Каталог сейчас недоступен.", 502)
+
+
+# --- GET/PATCH /accepting-bookings (DRF-1845) -------------------------------
+
+_ACCEPTING_UNAVAILABLE = "Настройка приёма записей сейчас недоступна."
+
+
+@csrf_exempt
+@require_http_methods(["GET", "PATCH"])
+@require_master_init_data
+@_catalog_profile_required
+def accepting_bookings(request: HttpRequest) -> HttpResponse:
+    """«Принимаю записи / Не принимаю» — прокси в каталог (DRF-1845).
+
+    Флаг живёт в каталоге (``SpecialistProfile.is_booking_enabled``) и только
+    там — второй копии в боте нет; ответ — то, что каталог прочёл после
+    записи. Субъект — сам мастер, как у часов (``working_hours``).
+
+    Бот узнаёт о паузе на следующем синке каталога (≤15 мин): до этого
+    мастер ещё виден клиентам в боте — экран говорит это словами, а не
+    обещает мгновенного эффекта. Не путать с ``availability`` — там заявка
+    на выходной.
+    """
+
+    master: CatalogMaster = request.master  # type: ignore[attr-defined]
+    bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
+    actor = external_user_id_for(bot_user)
+    client = get_ayla_booking_client()
+
+    if request.method == "GET":
+        try:
+            data = client.get_accepting_bookings(
+                specialist_id=catalog_specialist_id(master), external_user_id=actor
+            )
+        except BookingBadRequestError as exc:
+            return _accepting_bookings_refusal(exc)
+        except BookingUnavailableError:
+            return _error("accepting_bookings_unavailable", _ACCEPTING_UNAVAILABLE, 503)
+        return _accepting_bookings_response(data)
+
+    try:
+        body = json.loads(request.body or b"{}")
+    except ValueError:
+        return _error("invalid_json", "Body must be JSON.", 400)
+    value = body.get("accepting_bookings") if isinstance(body, dict) else None
+    if not isinstance(value, bool):
+        return _error("validation_error", "accepting_bookings must be true or false.", 400)
+
+    try:
+        data = client.set_accepting_bookings(
+            specialist_id=catalog_specialist_id(master), external_user_id=actor, accepting=value
+        )
+    except BookingBadRequestError as exc:
+        return _accepting_bookings_refusal(exc)
+    except BookingUnavailableError:
+        return _error("accepting_bookings_unavailable", _ACCEPTING_UNAVAILABLE, 503)
+    return _accepting_bookings_response(data)
+
+
+def _accepting_bookings_response(data: dict[str, Any]) -> HttpResponse:
+    """Ровно то, что прочёл каталог. Без флага в ответе — не «не принимаю»,
+    а непрочитанный ответ: экран не должен нарисовать паузу, которой нет."""
+    value = data.get("accepting_bookings") if isinstance(data, dict) else None
+    if not isinstance(value, bool):
+        return _error("accepting_bookings_unavailable", _ACCEPTING_UNAVAILABLE, 502)
+    return JsonResponse({"accepting_bookings": value, "status": data.get("status")})
+
+
+def _accepting_bookings_refusal(exc: BookingBadRequestError) -> HttpResponse:
+    if exc.status_code == 403:
+        return _error(
+            "not_linked",
+            "Профиль ещё не связан с каталогом — настроить приём записей пока нельзя.",
+            403,
+        )
+    if exc.status_code == 409:
+        return _error(
+            "profile_not_active",
+            "Профиль ещё не опубликован — принимать записи можно после проверки.",
+            409,
+        )
+    if exc.status_code == 400:
+        return _error("validation_error", "accepting_bookings must be true or false.", 400)
+    return _error("accepting_bookings_unavailable", _ACCEPTING_UNAVAILABLE, 502)
+
+
+# --- GET /reviews (DRF-1857) -----------------------------------------------
+
+_REVIEWS_UNAVAILABLE = "Отзывы сейчас недоступны."
+
+#: What a review row may carry to the screen. Anything else the catalog adds is
+#: dropped here — the bot's own boundary, not a trust in the upstream shape.
+_REVIEW_FIELDS = ("id", "rating", "text", "client_name", "service_name", "created_at")
+
+
+@csrf_exempt
+@require_http_methods(["GET"])
+@require_master_init_data
+@_catalog_profile_required
+def reviews(request: HttpRequest) -> HttpResponse:
+    """«Мои отзывы» — прокси в каталог (DRF-1857, карта кабинета K14).
+
+    Отзывы живут в каталоге и только там — копии в боте нет. Субъект — сам
+    мастер, как у часов и «Принимаю записи»: каталог отдаёт отзывы только
+    своего профиля и журналирует чтение. Клиент в ответе — «Имя Ф.» /
+    «Клиент» / ``null`` для анонимного; поля строки — белым списком
+    :data:`_REVIEW_FIELDS`. Оценки нет, пока нет ни одного отзыва: ноль —
+    это «нет данных», а не 0.0.
+    """
+
+    master: CatalogMaster = request.master  # type: ignore[attr-defined]
+    bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
+    actor = external_user_id_for(bot_user)
+    client = get_ayla_booking_client()
+    try:
+        data = client.get_specialist_reviews(
+            specialist_id=catalog_specialist_id(master), external_user_id=actor
+        )
+    except BookingBadRequestError as exc:
+        return _reviews_refusal(exc)
+    except BookingUnavailableError:
+        return _error("reviews_unavailable", _REVIEWS_UNAVAILABLE, 503)
+    return _reviews_response(data)
+
+
+def _reviews_response(data: dict[str, Any]) -> HttpResponse:
+    """Число, оценка и строки ровно из ответа каталога — или 502, если его не прочесть.
+
+    Без числа или списка это не «отзывов нет», а непрочитанный ответ: экран не
+    должен нарисовать пустоту, которой нет."""
+    count = data.get("review_count") if isinstance(data, dict) else None
+    rows = data.get("reviews") if isinstance(data, dict) else None
+    if not isinstance(count, int) or isinstance(count, bool) or not isinstance(rows, list):
+        return _error("reviews_unavailable", _REVIEWS_UNAVAILABLE, 502)
+    return JsonResponse(
+        {
+            "review_count": count,
+            "rating": data.get("rating") if count > 0 else None,
+            "reviews": [
+                {field: row.get(field) for field in _REVIEW_FIELDS}
+                for row in rows
+                if isinstance(row, dict)
+            ],
+        }
+    )
+
+
+def _reviews_refusal(exc: BookingBadRequestError) -> HttpResponse:
+    if exc.status_code == 403:
+        return _error(
+            "not_linked", "Профиль ещё не связан с каталогом — отзывы пока не прочесть.", 403
+        )
+    if exc.status_code == 404:
+        return _error("not_found", "Профиль мастера не найден в каталоге.", 404)
+    return _error("reviews_unavailable", _REVIEWS_UNAVAILABLE, 502)
+
+
 # --- GET /onboarding/readiness --------------------------------------------
 
 
@@ -1162,6 +1509,395 @@ def onboarding_readiness(request: HttpRequest) -> HttpResponse:
 
     master: CatalogMaster = request.master  # type: ignore[attr-defined]
     return JsonResponse(build_readiness(master).as_dict())
+
+
+# --- /publication/readiness, /publication, /publication/status (DRF-1797, M5) ---
+
+_PUBLICATION_UNAVAILABLE = "Каталог сейчас недоступен — попробуйте позже."
+_PUBLICATION_REFUSED_REASONS = frozenset(
+    {"command_id_reused", "salon_publication_owner_managed", "no_workspace_tenant"}
+)
+
+
+def _publication_refusal(exc: BookingBadRequestError) -> HttpResponse:
+    """Один перевод отказов публикации каталога (M4) на имена экрана — с их данными."""
+    details = exc.details or {}
+    if exc.status_code == 403:
+        return _error("not_linked", "Профиль ещё не связан с каталогом.", 403)
+    if exc.status_code == 404:
+        if exc.code == "SPECIALIST_NOT_FOUND":
+            return _error("specialist_not_found", "Профиль мастера не найден в каталоге.", 404)
+        return _error("not_found", "Не найдено.", 404)
+    if exc.status_code == 409:
+        if exc.code == "PUBLICATION_NOT_READY":
+            # Не ``_error_with``: у него третий параметр называется ``status``,
+            # а готовность каталога несёт своё поле ``status`` (READY /
+            # NOT_READY) — та же форма ответа, собранная без столкновения имён.
+            return JsonResponse(
+                {
+                    "error": "not_ready",
+                    "detail": "Профиль ещё не готов к публикации.",
+                    "details": {
+                        "status": details.get("status"),
+                        "missing": list(details.get("missing") or []),
+                    },
+                },
+                status=409,
+            )
+        if exc.code == "PUBLICATION_REFUSED":
+            reason = details.get("reason")
+            slug = reason if reason in _PUBLICATION_REFUSED_REASONS else "publication_refused"
+            return _error_with(slug, "Публикация сейчас недоступна.", 409, reason=reason)
+    if exc.status_code == 400:
+        return _error("validation_error", "Каталог не принял запрос.", 400)
+    return _error("catalog_refused", "Каталог отказал.", exc.status_code or 400)
+
+
+@require_http_methods(["GET"])
+@require_master_init_data
+@_catalog_profile_required
+def publication_readiness(request: HttpRequest) -> HttpResponse:
+    """«Готов к публикации?» — прокси готовности каталога (M5; каталог M4 #453).
+
+    Ответ — как его прислал каталог: READY / NOT_READY и поимённый ``missing``;
+    бот его не пересчитывает. Субъект — сам мастер, профиль — его
+    ``CatalogMaster.id``.
+    """
+    master: CatalogMaster = request.master  # type: ignore[attr-defined]
+    bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
+    try:
+        data = get_ayla_booking_client().get_publication_readiness(
+            specialist_id=catalog_specialist_id(master),
+            external_user_id=external_user_id_for(bot_user),
+        )
+    except BookingBadRequestError as exc:
+        return _publication_refusal(exc)
+    except BookingUnavailableError:
+        return _error("catalog_unavailable", _PUBLICATION_UNAVAILABLE, 503)
+    return JsonResponse(data)
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+@require_master_init_data
+@_catalog_profile_required
+def publication_publish(request: HttpRequest) -> HttpResponse:
+    """«Опубликовать» — прокси команды каталога (M5; каталог M4 #453).
+
+    ``command_id`` (UUID) присылает экран: повтор с тем же ключом безопасен,
+    каталог вернёт ту же команду. Без ключа — 400 без вызова каталога.
+    201 — только когда каталог сделал переход; повтор и «уже на проверке» — 200.
+    ACTIVE ставит модератор — не эта команда.
+    """
+    master: CatalogMaster = request.master  # type: ignore[attr-defined]
+    bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
+    body = _json_object(request)
+    command_id = body.get("command_id") if body is not None else None
+    if not _is_uuid(command_id):
+        return _error("validation_error", "Нужен command_id (UUID) — ключ повтора команды.", 400)
+    try:
+        data = get_ayla_booking_client().publish(
+            specialist_id=catalog_specialist_id(master),
+            external_user_id=external_user_id_for(bot_user),
+            command_id=str(command_id),
+        )
+    except BookingBadRequestError as exc:
+        return _publication_refusal(exc)
+    except BookingUnavailableError:
+        return _error("catalog_unavailable", _PUBLICATION_UNAVAILABLE, 503)
+    created = bool(data.pop("created", False))
+    return JsonResponse(data, status=201 if created else 200)
+
+
+@require_http_methods(["GET"])
+@require_master_init_data
+@_catalog_profile_required
+def publication_status(request: HttpRequest) -> HttpResponse:
+    """«Проверить статус» — прокси статуса публикации каталога (M5; каталог M4 #453)."""
+    master: CatalogMaster = request.master  # type: ignore[attr-defined]
+    bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
+    try:
+        data = get_ayla_booking_client().get_publication_status(
+            specialist_id=catalog_specialist_id(master),
+            external_user_id=external_user_id_for(bot_user),
+        )
+    except BookingBadRequestError as exc:
+        return _publication_refusal(exc)
+    except BookingUnavailableError:
+        return _error("catalog_unavailable", _PUBLICATION_UNAVAILABLE, 503)
+    return JsonResponse(data)
+
+
+# --- /services/selection, /services/<id>/offer, /services/<id> (DRF-1895, M10b) ---
+
+_SELECTION_UNAVAILABLE = "Каталог сейчас недоступен."
+#: Пределы каталога (#443 / #444) — проверяются здесь, чтобы заведомо
+#: неверное тело не уходило в каталог; решает всё равно каталог.
+_MAX_TEMPLATES_PER_CALL = 200
+_OFFER_MIN_PRICE = Decimal("1")
+_OFFER_DURATION_RANGE = (5, 480)
+_SELECTION_REFUSED_REASONS = frozenset(
+    {"salon_catalog_owner_managed", "no_workspace_tenant", "service_removed"}
+)
+
+
+@csrf_exempt
+@require_http_methods(["GET", "POST"])
+@require_master_init_data
+@_catalog_profile_required
+def service_selection(request: HttpRequest) -> HttpResponse:
+    """«Выберите услуги» мастера-соло — прокси в каталог (M8a).
+
+    Выбор живёт в каталоге и только там; ответ — состояние выбора, как его
+    прислал каталог, со счётчиками ``selected`` / ``configured`` — бот их не
+    пересчитывает. Субъект — сам мастер, профиль — его ``CatalogMaster.id``.
+    """
+    master: CatalogMaster = request.master  # type: ignore[attr-defined]
+    bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
+    actor = external_user_id_for(bot_user)
+    client = get_ayla_booking_client()
+    if request.method == "GET":
+        try:
+            data = client.get_service_selection(
+                specialist_id=catalog_specialist_id(master), external_user_id=actor
+            )
+        except BookingBadRequestError as exc:
+            return _selection_refusal(exc)
+        except BookingUnavailableError:
+            return _error("catalog_unavailable", _SELECTION_UNAVAILABLE, 503)
+        return JsonResponse(data)
+    body = _json_object(request)
+    template_ids = body.get("template_ids") if body is not None else None
+    if (
+        not isinstance(template_ids, list)
+        or not 1 <= len(template_ids) <= _MAX_TEMPLATES_PER_CALL
+        or not all(_is_uuid(value) for value in template_ids)
+    ):
+        return _error("validation_error", "Нужен список template_ids: от 1 до 200 UUID.", 400)
+    try:
+        data = client.select_services(
+            specialist_id=catalog_specialist_id(master),
+            external_user_id=actor,
+            template_ids=[str(value) for value in template_ids],
+        )
+    except BookingBadRequestError as exc:
+        return _selection_refusal(exc)
+    except BookingUnavailableError:
+        return _error("catalog_unavailable", _SELECTION_UNAVAILABLE, 503)
+    return JsonResponse(data, status=201 if data.get("created") else 200)
+
+
+@csrf_exempt
+@require_http_methods(["PUT"])
+@require_master_init_data
+@_catalog_profile_required
+def service_offer(request: HttpRequest, salon_service_id: uuid.UUID) -> HttpResponse:
+    """Цена и длительность выбранной услуги — прокси в каталог (M8b).
+
+    Первая цена создаёт предложение мастера (201), следующие обновляют (200).
+    Цена >= 1 (не больше двух знаков после запятой), длительность 5..480 минут.
+    """
+    master: CatalogMaster = request.master  # type: ignore[attr-defined]
+    bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
+    body = _json_object(request)
+    price = body.get("price") if body is not None else None
+    duration = body.get("duration_minutes") if body is not None else None
+    low, high = _OFFER_DURATION_RANGE
+    if (
+        not _is_offer_price(price)
+        or not isinstance(duration, int)
+        or isinstance(duration, bool)
+        or not low <= duration <= high
+    ):
+        return _error("validation_error", "Нужны цена от 1 и длительность от 5 до 480 минут.", 400)
+    try:
+        data = get_ayla_booking_client().put_service_offer(
+            specialist_id=catalog_specialist_id(master),
+            external_user_id=external_user_id_for(bot_user),
+            salon_service_id=str(salon_service_id),
+            price=str(price),
+            duration_minutes=duration,
+        )
+    except BookingBadRequestError as exc:
+        return _selection_refusal(exc)
+    except BookingUnavailableError:
+        return _error("catalog_unavailable", _SELECTION_UNAVAILABLE, 503)
+    payload = dict(data)
+    created = bool(payload.pop("created", False))
+    return JsonResponse(payload, status=201 if created else 200)
+
+
+@csrf_exempt
+@require_http_methods(["DELETE"])
+@require_master_init_data
+@_catalog_profile_required
+def selected_service(request: HttpRequest, salon_service_id: uuid.UUID) -> HttpResponse:
+    """«Убрать из моих услуг» — прокси в каталог (M8b)."""
+    master: CatalogMaster = request.master  # type: ignore[attr-defined]
+    bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
+    try:
+        data = get_ayla_booking_client().remove_service(
+            specialist_id=catalog_specialist_id(master),
+            external_user_id=external_user_id_for(bot_user),
+            salon_service_id=str(salon_service_id),
+        )
+    except BookingBadRequestError as exc:
+        return _selection_refusal(exc)
+    except BookingUnavailableError:
+        return _error("catalog_unavailable", _SELECTION_UNAVAILABLE, 503)
+    return JsonResponse(data)
+
+
+def _json_object(request: HttpRequest) -> dict | None:
+    try:
+        body = json.loads(request.body or b"{}")
+    except ValueError:
+        return None
+    return body if isinstance(body, dict) else None
+
+
+def _is_uuid(value: object) -> bool:
+    if not isinstance(value, str):
+        return False
+    try:
+        uuid.UUID(value)
+    except ValueError:
+        return False
+    return True
+
+
+def _is_offer_price(value: object) -> bool:
+    if isinstance(value, bool) or not isinstance(value, (str, int)):
+        return False
+    try:
+        amount = Decimal(str(value))
+    except InvalidOperation:
+        return False
+    exponent = amount.as_tuple().exponent
+    return (
+        amount.is_finite()
+        and isinstance(exponent, int)
+        and exponent >= -2
+        and amount >= _OFFER_MIN_PRICE
+    )
+
+
+def _selection_refusal(exc: BookingBadRequestError) -> HttpResponse:
+    """Один перевод отказов каталога M8 на имена экрана — с их данными."""
+    details = exc.details or {}
+    reason = details.get("reason")
+    if exc.status_code == 403:
+        return _error("not_linked", "Профиль ещё не связан с каталогом.", 403)
+    if exc.status_code == 404:
+        if exc.code == "SPECIALIST_NOT_FOUND":
+            return _error("specialist_not_found", "Профиль мастера не найден в каталоге.", 404)
+        if reason == "template_not_found":
+            return _error_with(
+                "template_not_found",
+                "Некоторых услуг нет в каталоге.",
+                404,
+                template_ids=list(details.get("template_ids") or []),
+            )
+        if reason == "service_not_selected":
+            return _error("service_not_selected", "Эта услуга не выбрана.", 404)
+        return _error("not_found", "Не найдено.", 404)
+    if exc.status_code == 409:
+        if exc.code == "HAS_APPOINTMENTS":
+            return _error_with(
+                "has_future_appointments",
+                "У услуги есть будущие записи.",
+                409,
+                count=details.get("count"),
+            )
+        if exc.code == "SERVICE_SELECTION_REFUSED":
+            slug = reason if reason in _SELECTION_REFUSED_REASONS else "selection_refused"
+            return _error_with(slug, "Выбор услуг сейчас недоступен.", 409, reason=reason)
+    if exc.status_code == 400:
+        return _error("validation_error", "Проверьте цену и длительность.", 400)
+    return _error("catalog_unavailable", _SELECTION_UNAVAILABLE, 502)
+
+
+def _error_with(slug: str, detail: str, status: int, **details: object) -> JsonResponse:
+    """Отказ с данными — под ``details``, как их читает ``ApiError`` Mini App (DRF-1708)."""
+    return JsonResponse({"error": slug, "detail": detail, "details": details}, status=status)
+
+
+# --- GET /services/directions, /services/templates (DRF-1799, M7) -----------
+
+_CANON_UNAVAILABLE = "Каталог услуг сейчас недоступен."
+
+#: Строки направления и шаблона — белым списком. Экран 03 выбирает услуги
+#: без цен и минут, поэтому ни цена, ни длительность из каталога до него не
+#: доходят; что бы каталог ни добавил, экран получает только это.
+_DIRECTION_FIELDS = ("id", "name", "slug", "icon", "sort_order")
+_TEMPLATE_FIELDS = ("id", "name", "name_short", "is_popular", "category_id", "category_name")
+
+
+def _pick(row: dict[str, Any], fields: tuple[str, ...]) -> dict[str, Any]:
+    return {field: row.get(field) for field in fields}
+
+
+@csrf_exempt
+@require_http_methods(["GET"])
+@require_master_init_data
+def service_directions(request: HttpRequest) -> HttpResponse:
+    """Направления канона для экрана 03 — прокси в каталог (DRF-1799, M7).
+
+    Список — ровно ответ каталога ``/internal/services/directions/``: ни числа
+    направлений, ни их кодов бот не знает и не держит. Оговорка #454 / G7:
+    сегодня это корни канона, а не шесть направлений экрана 02; ответ G7 меняет
+    данные каталога, а не этот прокси. Не прочитался — 502/503, а не пустой
+    список.
+    """
+    client = get_ayla_booking_client()
+    try:
+        data = client.get_service_directions()
+    except BookingBadRequestError:
+        return _error("catalog_unavailable", _CANON_UNAVAILABLE, 502)
+    except BookingUnavailableError:
+        return _error("catalog_unavailable", _CANON_UNAVAILABLE, 503)
+    if not isinstance(data, list):
+        return _error("catalog_unavailable", _CANON_UNAVAILABLE, 502)
+    return JsonResponse(
+        {"directions": [_pick(row, _DIRECTION_FIELDS) for row in data if isinstance(row, dict)]}
+    )
+
+
+@csrf_exempt
+@require_http_methods(["GET"])
+@require_master_init_data
+def service_templates(request: HttpRequest) -> HttpResponse:
+    """Шаблоны одного направления для экрана 03 — прокси в каталог (DRF-1799, M7).
+
+    Каталог отдаёт всё поддерево направления одним запросом (M7a) — логики
+    дерева в боте нет. Без ``direction_id`` (UUID) — 400 без вызова каталога;
+    не направление — ``not_a_direction``, неизвестное — ``direction_not_found``.
+    """
+    direction_id = request.GET.get("direction_id")
+    if not _is_uuid(direction_id):
+        return _error("validation_error", "Нужен direction_id — UUID направления.", 400)
+    client = get_ayla_booking_client()
+    try:
+        data = client.get_service_templates(direction_id=str(direction_id))
+    except BookingBadRequestError as exc:
+        if exc.status_code == 404:
+            return _error("direction_not_found", "Направление не найдено в каталоге.", 404)
+        if exc.status_code == 400 and exc.code == "NOT_A_DIRECTION":
+            return _error("not_a_direction", "Это не направление каталога.", 400)
+        return _error("catalog_unavailable", _CANON_UNAVAILABLE, 502)
+    except BookingUnavailableError:
+        return _error("catalog_unavailable", _CANON_UNAVAILABLE, 503)
+    templates = data.get("templates") if isinstance(data, dict) else None
+    if not isinstance(templates, list):
+        return _error("catalog_unavailable", _CANON_UNAVAILABLE, 502)
+    return JsonResponse(
+        {
+            "direction_id": str(direction_id),
+            "templates": [
+                _pick(row, _TEMPLATE_FIELDS) for row in templates if isinstance(row, dict)
+            ],
+        }
+    )
 
 
 # --- GET /dashboard --------------------------------------------------------

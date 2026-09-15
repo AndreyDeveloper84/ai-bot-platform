@@ -97,6 +97,7 @@ def get_booking_provider(*, bot_user: Any) -> Any:
             # resolves to (must match server-side or create 403s). Empty when
             # identity could not be resolved → create fails gracefully.
             client_id=str(ayla_user_id or ""),
+            tenant=getattr(bot_user, "tenant", None),
         )
 
     from apps.integrations.yclients import get_yclients_client
@@ -121,10 +122,59 @@ class AylaYClientsAdapter:
         client: AylaBookingClient,
         external_user_id: str,
         client_id: str = "",
+        tenant: Any = None,
     ) -> None:
         self._client = client
+        # DRF-1933: салон, в котором резолвится id мастера для каталога.
+        self._tenant = tenant
         self._external_user_id = external_user_id
         self._client_id = client_id
+
+    # ── id мастера для каталога (DRF-1933) ────────────────────────────────
+
+    def catalog_specialist_id(self, staff_id: int | str) -> str:
+        """Id профиля в каталоге для мастера, которого бот знает по ``staff_id``.
+
+        Внутри бота мастер — первичный ключ зеркала: его кладёт консьерж
+        (``handoff.native_master_id``) и несёт колбэк ``book:pick_master``, по
+        нему ищут рёбра и ворота здоровья. У склеенного приглашения и
+        соло-мастера это ``uuid4``, а не id каталога. Поэтому перевод — здесь,
+        на границе, а не в хендоффе.
+
+        * строка зеркала с этим pk → её ``catalog_specialist_id``; пусто —
+          нейтральный :class:`YClientsSpecialistUnavailableError`, без вызова;
+        * строки нет (или адаптер не привязан к салону) → id пришёл от каталога
+          (``get_staff``) или неизвестен —
+          уходит как есть: бот его не выдумывал.
+        """
+        from apps.catalog.models import CatalogMaster
+        from apps.tenancy.context import tenant_scope
+        from apps.catalog.specialist_ref import (
+            CatalogSpecialistUnresolved,
+            catalog_specialist_id,
+        )
+
+        key = str(staff_id)
+        try:
+            uuid.UUID(key)
+        except ValueError:
+            return key
+        if self._tenant is None:
+            # Без салона строку не найти законно (MKT1: межсалонное чтение
+            # каталога — только marketplace). Фабрика салон привязывает всегда.
+            return key
+        with tenant_scope(self._tenant):
+            row = (
+                CatalogMaster.objects.filter(tenant=self._tenant, pk=key)
+                .only("pk", "catalog_specialist_id")
+                .first()
+            )
+        if row is None:
+            return key
+        try:
+            return catalog_specialist_id(row)
+        except CatalogSpecialistUnresolved as exc:
+            raise YClientsSpecialistUnavailableError(str(exc)) from exc
 
     # ── reads ──────────────────────────────────────────────────────────────
 
@@ -169,7 +219,7 @@ class AylaYClientsAdapter:
             # selected service through ("" when absent → the client raises a
             # clear BookingBadRequestError, not a 14-day 400 cascade).
             return self._client.get_available_dates(
-                specialist_id=str(staff_id),
+                specialist_id=self.catalog_specialist_id(staff_id),
                 service_id=_first_id(service_ids) or "",
             )
 
@@ -182,7 +232,7 @@ class AylaYClientsAdapter:
     ) -> list[AvailableTime]:
         with _translate_errors():
             rows = self._client.get_available_times(
-                specialist_id=str(staff_id),
+                specialist_id=self.catalog_specialist_id(staff_id),
                 date=date,
                 service_id=_first_id(service_ids) or "",  # #1051: mandatory
             )
@@ -232,7 +282,7 @@ class AylaYClientsAdapter:
             record = self._client.create_appointment(
                 external_user_id=self._external_user_id,
                 client_id=self._client_id,
-                specialist_id=str(staff_id),
+                specialist_id=self.catalog_specialist_id(staff_id),
                 service_id=service_id,
                 start_datetime=datetime,
                 idempotency_key=key,
@@ -245,7 +295,7 @@ class AylaYClientsAdapter:
             raw=_mirror_raw(
                 record,
                 requested_service_id=service_id or None,
-                requested_specialist_id=str(staff_id) or None,
+                requested_specialist_id=self.catalog_specialist_id(staff_id) or None,
             ),
         )
 
@@ -340,7 +390,7 @@ class AylaYClientsAdapter:
         """
         with _translate_errors():
             rows = self._client.get_specialist_service_edges(
-                specialist_id=str(staff_id),
+                specialist_id=self.catalog_specialist_id(staff_id),
                 service_id=str(service_id),
             )
         if not rows:
@@ -376,7 +426,7 @@ class AylaYClientsAdapter:
         """
         with _translate_errors():
             rows = self._client.get_specialist_service_edges(
-                specialist_id=str(staff_id),
+                specialist_id=self.catalog_specialist_id(staff_id),
                 service_id=str(service_id),
             )
         if not rows:

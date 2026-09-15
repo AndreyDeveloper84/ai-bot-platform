@@ -117,6 +117,17 @@ from apps.orchestrator.open_question import (
     render_answer_block,
 )
 from apps.orchestrator.safety.outbound import ACTION_PROMISE_STEMS
+from apps.orchestrator.said_memory import (
+    CONFIRM_SAID_FACT_TOOL,
+    CONFIRM_SAID_FACT_TOOL_SPEC,
+    confirm_keyboard,
+    confirm_offer,
+    execution_stage_turn,
+    render_said_block,
+    said_facts,
+    said_question_id,
+)
+from apps.orchestrator.search_recap import render_search_recap
 from apps.orchestrator.refusal_memo import (
     RefusedQuery,
     recall_refusals,
@@ -630,9 +641,22 @@ CONCIERGE_TOOL_SPECS: list[dict[str, Any]] = [
     SHOW_SALONS_TOOL_SPEC,
     SHOW_SERVICES_TOOL_SPEC,
     ASK_CLARIFICATION_TOOL_SPEC,
+    CONFIRM_SAID_FACT_TOOL_SPEC,
     *NUTRITION_TOOL_SPECS,
     SHOW_MY_RECORDS_TOOL_SPEC,
 ]
+
+
+def _has_said_facts(conversation: Any) -> bool:
+    """Есть ли у человека сказанные факты, которые можно подтвердить (DRF-1878)."""
+
+    bot_user = getattr(conversation, "bot_user", None) if conversation is not None else None
+    if bot_user is None:
+        return False
+    try:
+        return bool(said_facts(bot_user))
+    except Exception:  # noqa: BLE001 — без чтения фактов инструмент не предлагается
+        return False
 
 
 def _tools_offered(message_text: str, conversation: Any) -> list[dict[str, Any]]:
@@ -649,6 +673,10 @@ def _tools_offered(message_text: str, conversation: Any) -> list[dict[str, Any]]
     возвращает True до чтения памятки); здесь тот же порядок, тем же
     классификатором. Остальные инструменты не трогаются: их парсеры судят
     грамматику, а не память разговора, и заранее их вердикт не известен.
+
+    DRF-1878 — второй такой инструмент: ``confirm_said_fact`` без сказанных
+    фактов исполнитель отвергнет наверняка (подтверждать нечего), поэтому без
+    них он не предлагается.
     """
 
     from apps.skills.health_screening.classifier import PainSignal, classify
@@ -658,9 +686,16 @@ def _tools_offered(message_text: str, conversation: Any) -> list[dict[str, Any]]
     offer_screening = signal == PainSignal.RED_FLAG or (
         signal != PainSignal.NONE and not screening_asked_recently(conversation)
     )
-    if offer_screening:
+    withheld: set[str] = set()
+    if not offer_screening:
+        withheld.add("health_screening")
+    # DRF-1923, H7-B: подтверждение сказанного города и времени — только в ходе
+    # выбора исполнителя (C05), не в DISCOVERY.
+    if not (_has_said_facts(conversation) and execution_stage_turn(message_text, conversation)):
+        withheld.add(CONFIRM_SAID_FACT_TOOL)
+    if not withheld:
         return list(CONCIERGE_TOOL_SPECS)
-    return [spec for spec in CONCIERGE_TOOL_SPECS if spec["name"] != "health_screening"]
+    return [spec for spec in CONCIERGE_TOOL_SPECS if spec["name"] not in withheld]
 
 
 # Cap on a tool argument written to the turn log. Both values are bounded by
@@ -673,6 +708,7 @@ _KNOWN_TOOLS = frozenset(
         SHOW_MASTERS_TOOL_SPEC["name"],
         START_BOOKING_TOOL_SPEC["name"],
         ASK_CLARIFICATION_TOOL_SPEC["name"],
+        CONFIRM_SAID_FACT_TOOL,
     }
     | NUTRITION_TOOL_ACTIONS
     | CATALOG_TOOL_ACTIONS
@@ -871,6 +907,10 @@ def _dispatch_tool(tool_call: Any, context: Any) -> ToolResult:
         # DRF-1302/1305 — selection only again: the Ayla GETs and the memory
         # read are I/O and belong in the wrapper's sync scope, not in a
         # dispatcher the ai-core contract requires to be side-effect-free.
+        return ToolResult(action_type=name, action_data={"arguments": args})
+    if name == CONFIRM_SAID_FACT_TOOL:
+        # DRF-1878 — selection only: reading the fact and rendering the
+        # question are I/O and run in the wrapper's sync scope.
         return ToolResult(action_type=name, action_data={"arguments": args})
     if name == START_BOOKING_ACTION:
         # DRF-1354 — selection only, like every carve-out above. The name
@@ -1439,7 +1479,10 @@ def _render_zero_result(
 
 
 def _render_pending(
-    cards: list[Any], args: dict[str, Any], more_offset: int | None = None
+    cards: list[Any],
+    args: dict[str, Any],
+    more_offset: int | None = None,
+    recap: str | None = None,
 ) -> DiscoveryReply:
     """Render the last executed ``show_masters`` result deterministically.
 
@@ -1462,6 +1505,7 @@ def _render_pending(
             city=city,
             specialization=specialization,
             more_offset=more_offset,
+            recap=recap,
         )
     return _render_zero_result(city=city, specialization=specialization)
 
@@ -1738,8 +1782,12 @@ def _concierge_turn(
     # anyway; an instruction is read as an instruction.
     refusal_block = render_refusal_block(conversation)
     answer_block = render_answer_block(answered)
+    # Бриф «Мозг» п.4 — что человек уже сказал о себе в прошлых разговорах.
+    said_block = render_said_block(
+        bot_user, offer_confirm=execution_stage_turn(message_text, conversation)
+    )
     turn_extra_system = "\n\n".join(
-        part for part in (extra_system, refusal_block, answer_block) if part
+        part for part in (extra_system, refusal_block, answer_block, said_block) if part
     )
 
     def _renderer(_ctx: Any) -> str:
@@ -1822,7 +1870,17 @@ def _concierge_turn(
                 # An EMPTY `pending_cards` is not «no data», it is a searched
                 # zero, and since DRF-1474 it gets the refusal that names an
                 # alternative rather than the same one with a shorter tail.
-                rendered = _render_pending(pending_cards, pending_args, pending_more_offset)
+                rendered = _render_pending(
+                    pending_cards,
+                    pending_args,
+                    pending_more_offset,
+                    recap=render_search_recap(
+                        message_text,
+                        conversation,
+                        city=(pending_args or {}).get("city"),
+                        specialization=(pending_args or {}).get("specialization"),
+                    ),
+                )
                 return _reply(
                     text=rendered.text,
                     action_data=rendered.action_data,
@@ -2015,6 +2073,9 @@ def _concierge_turn(
                 available_services=available,
                 missing_services=missing,
                 more_offset=more_offset,
+                recap=render_search_recap(
+                    message_text, conversation, city=city, specialization=specialization
+                ),
             )
             return _reply(
                 text=rendered.text,
@@ -2037,6 +2098,9 @@ def _concierge_turn(
                     city=city,
                     specialization=specialization,
                     more_offset=more_offset,
+                    recap=render_search_recap(
+                        message_text, conversation, city=city, specialization=specialization
+                    ),
                 )
                 if cards
                 # DRF-1474 — this is the branch the live refusal came out of
@@ -2126,6 +2190,23 @@ def _concierge_turn(
         # re-sent lands here again. «Повторить» would spend the person's
         # patience on a guaranteed repeat; «отвечу через минуту» would spend
         # it on a wait with no end.
+        text = (dto.content or "").strip()
+        if text:
+            return _reply(text=text[:_MAX_REPLY_CHARS], persisted=True)
+        return _reply(text=get_no_answer("ru"), persisted=True)
+
+    if dto.action_type == CONFIRM_SAID_FACT_TOOL:
+        # DRF-1878 — the model asked to confirm a fact the person said before.
+        # The question and the buttons are the bot's, not the model's, and the
+        # question is opened (DRF-1779) so the tap's label is read as its answer.
+        args = (dto.action_data or {}).get("arguments", {})
+        key = str(args.get("key") or "") if isinstance(args, dict) else ""
+        offer = confirm_offer(bot_user, key)
+        if offer is not None:
+            open_question(conversation, said_question_id(offer.key), asked_text=offer.question)
+            return _reply(text=offer.question, action_data=confirm_keyboard(offer), persisted=True)
+        # Nothing to confirm (erased between the prompt and the call, or a key
+        # the enum does not have): keep what the model said, never an empty turn.
         text = (dto.content or "").strip()
         if text:
             return _reply(text=text[:_MAX_REPLY_CHARS], persisted=True)
@@ -2252,7 +2333,17 @@ def _concierge_turn(
         # over an answer we already have would be the same lie pointing the
         # other way.
         if pending_cards is not None:
-            rendered = _render_pending(pending_cards, pending_args, pending_more_offset)
+            rendered = _render_pending(
+                pending_cards,
+                pending_args,
+                pending_more_offset,
+                recap=render_search_recap(
+                    message_text,
+                    conversation,
+                    city=(pending_args or {}).get("city"),
+                    specialization=(pending_args or {}).get("specialization"),
+                ),
+            )
             return _reply(
                 text=rendered.text,
                 action_data=rendered.action_data,
@@ -2286,6 +2377,7 @@ def _concierge_turn(
     # Same cards, same callbacks, same order — the tap path is identical to
     # the pre-DRF-1266 reply.
     action_data = None
+    reply_text = text[:_MAX_REPLY_CHARS]
     if pending_cards:
         action_data = _render_master_cards(
             pending_cards[:_MAX_MASTER_CARDS],
@@ -2293,7 +2385,17 @@ def _concierge_turn(
             specialization=pending_args.get("specialization"),
             more_offset=pending_more_offset,
         ).action_data
-    return _reply(text=text[:_MAX_REPLY_CHARS], action_data=action_data, persisted=True)
+        # DRF-1908 — the model keeps the words; the «по твоим словам» line is
+        # the last line of text, directly above the cards' keyboard.
+        recap = render_search_recap(
+            message_text,
+            conversation,
+            city=pending_args.get("city"),
+            specialization=pending_args.get("specialization"),
+        )
+        if recap:
+            reply_text = f"{text[: _MAX_REPLY_CHARS - len(recap) - 2].rstrip()}\n\n{recap}"
+    return _reply(text=reply_text, action_data=action_data, persisted=True)
 
 
 def generate_direct_show_masters_reply(
@@ -2458,7 +2560,12 @@ def generate_direct_show_masters_reply(
         started=started,
         outcome=AIRequestMetric.OUTCOME_SUCCESS,
     )
-    return _render_master_cards(cards, specialization=message_text, more_offset=more_offset)
+    return _render_master_cards(
+        cards,
+        specialization=message_text,
+        more_offset=more_offset,
+        recap=render_search_recap(message_text, conversation, specialization=message_text),
+    )
 
 
 def _record_direct_metric(

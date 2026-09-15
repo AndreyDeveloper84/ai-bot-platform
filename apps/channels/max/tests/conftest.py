@@ -49,6 +49,13 @@ def mark_welcomed():
             bu.food_scanner_consent_at = now
             fields.append("food_scanner_consent_at")
         bu.save(update_fields=fields)
+        if food_consent:
+            # DRF-1948: сканер пишет в дневник только при PERSONAL_DATA — согласие
+            # сканера стоит поверх него. Без этой строки фото-тесты проверяли бы
+            # отказ PERSONAL_DATA, а не то, ради чего написаны.
+            from apps.consent.services import record_global_consent
+
+            record_global_consent(bu, source="test:mark_welcomed")
         return bu
 
     return _mark

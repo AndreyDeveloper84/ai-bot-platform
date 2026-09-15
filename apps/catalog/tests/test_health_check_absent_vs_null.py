@@ -22,6 +22,7 @@ from apps.catalog.models import CatalogMaster, CatalogService, MasterService
 from apps.catalog.services.http_client import _parse_specialist_service
 from apps.catalog.services.upserter import upsert_master_services
 from apps.tenancy.models import Tenant
+from tests.support.catalog_mirror import sync_shaped
 
 pytestmark = pytest.mark.django_db
 
@@ -37,11 +38,13 @@ def tenant(db) -> Tenant:
 
 @pytest.fixture
 def master(tenant: Tenant) -> CatalogMaster:
-    return CatalogMaster.all_tenants.create(
-        tenant=tenant,
-        external_id=1,
-        external_updated_at=_ts(),
-        name="Мастер",
+    return sync_shaped(
+        CatalogMaster.all_tenants.create(
+            tenant=tenant,
+            external_id=1,
+            external_updated_at=_ts(),
+            name="Мастер",
+        )
     )
 
 

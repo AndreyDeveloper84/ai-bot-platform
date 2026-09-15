@@ -174,7 +174,8 @@ class TestRosterIsTheRealOne:
     the constant itself but ``_tools_offered(text, conversation)`` — the
     constant MINUS the tools whose executor would deterministically refuse
     the call (today: ``health_screening`` when no symptom is named or the
-    screening questions were already asked). The guard therefore checks two
+    screening questions were already asked; DRF-1878: ``confirm_said_fact``
+    when the person has no said facts to confirm). The guard therefore checks two
     things: the call site hands over ``_tools_offered``, and ``_tools_offered``
     subtracts from THIS constant — the same spec objects, in the same order —
     rather than from a private copy that could drift.
@@ -190,24 +191,29 @@ class TestRosterIsTheRealOne:
             "shape. Do not delete the test (DRF-1328)."
         )
 
-    def test_full_roster_is_the_constant_itself(self) -> None:
-        """A symptom with no prior screening → nothing subtracted: the very
-        same spec objects, in the constant's order."""
+    def test_full_roster_is_the_constant_itself(self, monkeypatch) -> None:
+        """A symptom with no prior screening and a person with said facts →
+        nothing subtracted: the very same spec objects, in the constant's order."""
+        from apps.orchestrator import concierge
         from apps.orchestrator.concierge import _tools_offered
 
+        monkeypatch.setattr(concierge, "_has_said_facts", lambda _conversation: True)
+        # DRF-1923: и ход C05 — иначе confirm_said_fact отнимается по стадии.
+        monkeypatch.setattr(concierge, "execution_stage_turn", lambda _text, _conversation: True)
         offered = _tools_offered("болит спина", conversation=None)
         assert [id(spec) for spec in offered] == [id(spec) for spec in CONCIERGE_TOOL_SPECS]
 
     def test_reduced_roster_is_the_constant_minus_the_refused_tool(self) -> None:
-        """No symptom → ``health_screening`` is the ONLY tool withheld, and
-        every remaining spec IS an element of the constant (not a copy)."""
+        """No symptom and no said facts → ``health_screening`` and
+        ``confirm_said_fact`` are the ONLY tools withheld, and every remaining
+        spec IS an element of the constant (not a copy)."""
         from apps.orchestrator.concierge import _tools_offered
 
         offered = _tools_offered("привет", conversation=None)
         constant_ids = {id(spec): spec for spec in CONCIERGE_TOOL_SPECS}
         assert all(id(spec) in constant_ids for spec in offered)
         withheld = sorted(_roster() - {str(spec["name"]) for spec in offered})
-        assert withheld == ["health_screening"], withheld
+        assert withheld == ["confirm_said_fact", "health_screening"], withheld
 
     def test_subtraction_reads_the_constant_not_a_copy(self) -> None:
         """Source-level: the helper's body names CONCIERGE_TOOL_SPECS and no

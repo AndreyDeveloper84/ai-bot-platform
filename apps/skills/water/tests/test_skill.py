@@ -8,12 +8,29 @@ from __future__ import annotations
 
 from unittest.mock import Mock, patch
 
+import pytest
+
 from apps.integrations.ayla import (
     NutritionUnavailableError,
     WaterEntryResponse,
 )
 from apps.skills.base import SkillContext
+from apps.skills.food_clarify.text_entry import CONSENT_TEXT
+from apps.skills.water import skill as water_skill
 from apps.skills.water.skill import WaterSkill
+
+#: Настоящие ворота — до подмены фикстурой ниже.
+_REAL_CONSENT_OPEN = water_skill._consent_open
+
+
+@pytest.fixture(autouse=True)
+def _consent_open(monkeypatch):
+    """DRF-1926: тесты ниже — про запись с согласием; отказ — в своём классе.
+
+    Без этой подмены ``Mock``-пользователь уходил бы в настоящий предикат, тот
+    отказывал бы (fail-closed), и каждый прежний тест мерил бы отказ.
+    """
+    monkeypatch.setattr(water_skill, "_consent_open", lambda _bot_user: True)
 
 
 def _context(text: str, channel: str = "max", channel_user_id: str = "12345") -> SkillContext:
@@ -180,3 +197,67 @@ class TestRegistration:
         assert names.index("water") < names.index("food_clarify"), (
             f"water must precede food_clarify; got order {names}"
         )
+
+
+# ─── consent gate (DRF-1926) ─────────────────────────────────────────────
+
+
+class TestConsentGate:
+    """Запись воды — по тому же правилу, что запись еды в чате."""
+
+    def _client(self, writes: list[dict]) -> Mock:
+        async def _add_water(**kwargs):
+            writes.append(kwargs)
+            return _ayla_response()
+
+        client = Mock()
+        client.add_water = _add_water
+        return client
+
+    def test_no_consent_no_write_and_the_food_sentence(self, monkeypatch) -> None:
+        monkeypatch.setattr(water_skill, "_consent_open", lambda _bot_user: False)
+        writes: list[dict] = []
+        with patch(
+            "apps.skills.water.skill.get_nutrition_client", return_value=self._client(writes)
+        ):
+            result = WaterSkill().handle(_context("стакан воды"))
+
+        assert writes == []
+        assert result.reply_text == CONSENT_TEXT
+        assert result.meta == {"reply_kind": "water_consent_required"}
+        assert result.action_type == ""
+        assert result.action_data is None
+
+    def test_a_consent_read_that_raises_reads_as_no_consent(self, monkeypatch) -> None:
+        monkeypatch.setattr(water_skill, "_consent_open", _REAL_CONSENT_OPEN)
+
+        def _boom(*_args, **_kwargs):
+            raise RuntimeError("consent store down")
+
+        monkeypatch.setattr("apps.consent.services.has_global_consent", _boom)
+        writes: list[dict] = []
+        with patch(
+            "apps.skills.water.skill.get_nutrition_client", return_value=self._client(writes)
+        ):
+            result = WaterSkill().handle(_context("стакан воды"))
+
+        assert writes == []
+        assert result.reply_text == CONSENT_TEXT
+
+    def test_the_gate_is_the_food_predicate(self, monkeypatch) -> None:
+        """Одно правило на еду и воду: ворота зовут тот же предикат, что еда."""
+        seen: list[object] = []
+
+        def _predicate(bot_user):
+            seen.append(bot_user)
+            return False
+
+        monkeypatch.setattr(water_skill, "_consent_open", _REAL_CONSENT_OPEN)
+        monkeypatch.setattr(
+            "apps.orchestrator.personal_surface.personal_records_consent_open", _predicate
+        )
+        context = _context("стакан воды")
+        with patch("apps.skills.water.skill.get_nutrition_client", return_value=self._client([])):
+            WaterSkill().handle(context)
+
+        assert seen == [context.bot_user]

@@ -51,6 +51,7 @@ from apps.integrations.ayla import (
     get_nutrition_client,
 )
 from apps.skills.base import SkillContext, SkillResult
+from apps.skills.food_clarify.text_entry import CONSENT_TEXT
 from apps.skills.registry import register
 from apps.skills.water.parser import REFUSED, BeverageMatch, parse_beverage
 
@@ -62,6 +63,16 @@ _MAX_LEN = 30
 
 
 _AYLA_DOWN_FALLBACK = "Не получилось записать прямо сейчас — попробуй через минуту."
+
+
+def _consent_open(bot_user) -> bool:
+    """DRF-1926: то же правило, что у записи еды в чате (``text_entry._consent_open``).
+
+    PERSONAL_DATA, fail-closed: сбой чтения согласия — «согласия нет».
+    """
+    from apps.orchestrator.personal_surface import personal_records_consent_open
+
+    return personal_records_consent_open(bot_user)
 
 
 @register
@@ -92,6 +103,16 @@ class WaterSkill:
             )
 
         assert isinstance(parsed, BeverageMatch)
+
+        # DRF-1926: без согласия на обработку личных данных стакан не
+        # записывается — как еда в чате, и тем же текстом. ``matches`` ворота
+        # не видит намеренно: иначе ход ушёл бы в food_clarify и получил
+        # карточку «еда или опечатка» вместо честного отказа.
+        if not _consent_open(context.bot_user):
+            return SkillResult(
+                reply_text=CONSENT_TEXT,
+                meta={"reply_kind": "water_consent_required"},
+            )
 
         external_id = external_user_id_for(context.bot_user)
         try:

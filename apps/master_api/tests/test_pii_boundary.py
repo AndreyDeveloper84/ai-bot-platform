@@ -894,6 +894,41 @@ NOT_SWEPT_ROUTES: dict[str, str] = {
     "billing_card_setup": "proxy to the external billing service",
     "billing_pay_debt": "proxy to the external billing service",
     "payout_preview": "proxy to the external billing service",
+    "service_selection": (
+        "GET/POST proxy to the catalog's service selection (DRF-1895): the master's own "
+        "selected canon services and two server counters, no customer record — shape "
+        "pinned in test_service_selection_1895"
+    ),
+    "service_offer": (
+        "PUT proxy (DRF-1895): the master's own price/duration; response is the "
+        "selection state — pinned in test_service_selection_1895"
+    ),
+    "selected_service": (
+        "DELETE proxy (DRF-1895): removes the master's own selected service; response "
+        "is the selection state — pinned in test_service_selection_1895"
+    ),
+    "publication_readiness": (
+        "GET proxy to the catalog's publication readiness (DRF-1797): the master's own "
+        "checklist codes, no customer record — pinned in test_publication_proxy_1797"
+    ),
+    "publication": (
+        "POST proxy (DRF-1797): the master's own publish command; response is the "
+        "catalog's command record — pinned in test_publication_proxy_1797"
+    ),
+    "publication_status": (
+        "GET proxy (DRF-1797): the master's own profile status and readiness, no "
+        "customer record — pinned in test_publication_proxy_1797"
+    ),
+    "service_directions": (
+        "GET proxy to the catalog's canon directions (DRF-1799): roots of the global "
+        "taxonomy, rows whitelisted to id/name/slug/icon/sort_order, no customer record — "
+        "pinned in test_service_canon_proxy_1799"
+    ),
+    "service_templates": (
+        "GET proxy to the catalog's templates of one direction (DRF-1799): canon service "
+        "names and their category, whitelisted, no prices and no customer record — "
+        "pinned in test_service_canon_proxy_1799"
+    ),
     "assistant_history": (
         "the master's own transcript with Ayla — no customer record is "
         "rendered as fields; swept for forbidden keys and for the "
@@ -907,6 +942,34 @@ NOT_SWEPT_ROUTES: dict[str, str] = {
         "GET/PUT proxy to the catalog's working-hours route (DRF-1816): the "
         "response is the master's own weekly template + timezone, no customer "
         "record — swept with a stubbed client in test_working_hours_1816"
+    ),
+    # DRF-1802 (M10) — «своя услуга» мастера: прокси заявок о разрыве канона
+    # в каталог. Отдают только собственные заявки мастера (название, цена,
+    # длительность, статус) — клиентских данных там нет по построению; ответ
+    # приходит из каталога, поэтому свип живым клиентом не собрать — покрыты
+    # подменённым клиентом в test_canon_gap_requests_1802.
+    "canon_gap_requests": (
+        "proxy of the master's own canon-gap requests to the catalog; no customer "
+        "record — covered with a stubbed client in test_canon_gap_requests_1802"
+    ),
+    "canon_gap_similar": (
+        "canonical-template name hint from the catalog; no customer record — covered "
+        "with a stubbed client in test_canon_gap_requests_1802"
+    ),
+    "canon_gap_request_detail": (
+        "one own canon-gap request from the catalog; no customer record — covered "
+        "with a stubbed client in test_canon_gap_requests_1802"
+    ),
+    "accepting_bookings": (
+        "GET/PATCH proxy to the catalog's availability route (DRF-1845): the "
+        "response is exactly {accepting_bookings: bool, status} of the master's "
+        "own profile, no customer record — shape pinned in test_accepting_bookings_1845"
+    ),
+    "reviews": (
+        "GET proxy to the catalog's own-reviews route (DRF-1857): lives in the "
+        "catalog, so a live sweep cannot build it; the client is «Имя Ф.» / «Клиент» / "
+        "null, rows whitelisted to id/rating/text/client_name/service_name/created_at — "
+        "no phone, surname or username pinned with a stubbed client in test_master_reviews_1857"
     ),
 }
 

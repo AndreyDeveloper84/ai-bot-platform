@@ -31,6 +31,7 @@ from apps.integrations.ayla.booking_client import (
 )
 from apps.scheduling.models import ScheduleChangeRequest, ScheduleException
 from apps.tenancy.models import Tenant
+from tests.support.catalog_mirror import sync_shaped
 
 CLIENT_PATH = "apps.integrations.ayla.booking_client.get_ayla_booking_client"
 START = datetime(2026, 9, 7, 9, 0, tzinfo=timezone.utc)
@@ -53,13 +54,15 @@ def tenant(db) -> Tenant:
 
 @pytest.fixture
 def master(tenant: Tenant) -> CatalogMaster:
-    return CatalogMaster.all_tenants.create(
-        tenant=tenant,
-        external_id=7,
-        external_updated_at=datetime(2026, 8, 1, tzinfo=timezone.utc),
-        name="Ольга",
-        is_active=True,
-        ayla_user_id=uuid.uuid4(),
+    return sync_shaped(
+        CatalogMaster.all_tenants.create(
+            tenant=tenant,
+            external_id=7,
+            external_updated_at=datetime(2026, 8, 1, tzinfo=timezone.utc),
+            name="Ольга",
+            is_active=True,
+            ayla_user_id=uuid.uuid4(),
+        )
     )
 
 

@@ -15,6 +15,7 @@
 import { useCallback } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { hapticSelection } from "../lib/max-sdk";
+import { unreadBadgeText } from "../lib/unread-badge";
 
 interface TabBarProps {
   unreadCount: number;
@@ -54,7 +55,7 @@ function IconCalendar() {
   );
 }
 
-function IconMessage() {
+export function IconMessage() {
   return (
     <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor"
       strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
@@ -153,9 +154,9 @@ export function MasterTabBar({
           >
             <span className="master-tabbar__icon">
               {tab.icon}
-              {tab.badgeCount ? (
+              {tab.badgeCount && unreadBadgeText(tab.badgeCount) ? (
                 <span className="master-tabbar__badge" aria-label={`непрочитанных: ${tab.badgeCount}`}>
-                  {tab.badgeCount > 99 ? "99+" : tab.badgeCount}
+                  {unreadBadgeText(tab.badgeCount)}
                 </span>
               ) : tab.badgeDot ? (
                 <span className="master-tabbar__dot" aria-label="есть изменения" />

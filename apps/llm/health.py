@@ -159,6 +159,15 @@ the recipient list from ``HANDOFF_NOTIFY_MAX_CHAT_IDS`` — the primitive
 DRF-1029 already put in production for escalations. No second transport,
 no second address book.
 
+**DRF-1938 — and the operational channel next to it.** 15.09 the probe
+went DOWN at 07:40 and the message reached the one MAX chat configured —
+where nobody saw it for 45 minutes. So each transition is also handed to
+:func:`apps.observability.alerting.page` (Telegram + Sentry, ``critical``
+down / ``warning`` up), with the cause class in the text (network/proxy,
+provider, or unclassified — never guessed). An unconfigured Telegram does
+not fail silently: ``page`` writes ``observability.alert.paged`` with
+``telegram_sent=false``.
+
 ### Secrets
 
 The proxy credentials live in an environment variable in the clear, and
@@ -203,6 +212,39 @@ CACHE_KEY_DOWN_SINCE = "llm:health:down_since"
 
 AUDIT_HEALTH_DOWN = "llm.health.down"
 AUDIT_HEALTH_RECOVERED = "llm.health.recovered"
+
+# DRF-1938 — класс причины в тексте алерта. Инцидент 15.09: прокси лёг, а
+# алерт называл только класс исключения SDK; «сеть или провайдер» читающий
+# должен был вывести сам. Словари закрытые: неизвестный класс — «причина не
+# классифицирована», а не догадка.
+CAUSE_NETWORK = "network"
+CAUSE_PROVIDER = "provider"
+CAUSE_UNCLASSIFIED = "unclassified"
+#: Сеть или прокси: запрос не дошёл до провайдера или ответ не вернулся.
+NETWORK_ERROR_CLASSES = frozenset({"APIConnectionError", "APITimeoutError", "ConnectError"})
+#: Провайдер ответил ошибкой: HTTP-статусы SDK обоих вендоров и наши квоты.
+PROVIDER_ERROR_CLASSES = frozenset(
+    {
+        "InternalServerError",
+        "RateLimitError",
+        "LLMVendorCreditsExhausted",
+        "LLMQuotaError",
+        "LLMProviderQuotaExceeded",
+        "APIStatusError",
+        "AuthenticationError",
+        "PermissionDeniedError",
+        "NotFoundError",
+        "BadRequestError",
+        "UnprocessableEntityError",
+        "ConflictError",
+        "OverloadedError",
+    }
+)
+CAUSE_TEXT = {
+    CAUSE_NETWORK: "сеть или прокси недоступны",
+    CAUSE_PROVIDER: "провайдер отвечает ошибкой",
+    CAUSE_UNCLASSIFIED: "причина не классифицирована",
+}
 
 #: Skip reasons returned by :func:`check_llm_availability` without probing.
 SKIP_DISABLED = "disabled"
@@ -570,7 +612,11 @@ def evaluate_probe(result: ProbeResult) -> str:
                 "downtime": _format_downtime(down_since),
             },
         )
-        _notify(build_recovered_message(result, down_since=down_since))
+        up_text = build_recovered_message(result, down_since=down_since)
+        _notify(up_text)
+        _page(
+            "warning", "LLM снова доступна", up_text, dedup_key=f"llm.health.recovered:{down_since}"
+        )
         return TRANSITION_UP
 
     failures = int(cache.get(CACHE_KEY_FAILURES) or 0) + 1
@@ -617,7 +663,12 @@ def evaluate_probe(result: ProbeResult) -> str:
             "latency_s": round(result.latency_s, 3),
         },
     )
-    _notify(build_down_message(result, failures=failures))
+    down_text = build_down_message(result, failures=failures)
+    _notify(down_text)
+    # DRF-1938 — рядом с MAX: Telegram + Sentry. 15.09 алерт ушёл в один чат
+    # MAX и остался незамеченным; ненастроенный канал виден в аудите
+    # ``observability.alert.paged`` (telegram_sent=false), а не молчит.
+    _page("critical", "LLM недоступна", down_text, dedup_key=f"llm.health.down:{now_iso}")
     return TRANSITION_DOWN
 
 
@@ -656,6 +707,16 @@ def _format_downtime(down_since: object) -> str:
     return f"{minutes} мин"
 
 
+def classify_cause(error_class: str | None) -> str:
+    """Класс причины по имени исключения (DRF-1938). Незнакомое не угадывается."""
+
+    if error_class in NETWORK_ERROR_CLASSES:
+        return CAUSE_NETWORK
+    if error_class in PROVIDER_ERROR_CLASSES:
+        return CAUSE_PROVIDER
+    return CAUSE_UNCLASSIFIED
+
+
 def build_down_message(result: ProbeResult, *, failures: int) -> str:
     """Operator-facing text for the UP → DOWN transition.
 
@@ -674,6 +735,8 @@ def build_down_message(result: ProbeResult, *, failures: int) -> str:
     # reader see that mismatch.
     if result.provider:
         lines.append(f"Провайдер: {result.provider}")
+    # DRF-1938 — сеть/прокси или провайдер: первым делом, до имени исключения.
+    lines.append(f"Причина: {CAUSE_TEXT[classify_cause(result.error_class)]}")
     lines.append(f"Ошибка: {result.error_class or 'unknown'}")
     if result.error_message:
         lines.append(f"Детали: {result.error_message}")
@@ -731,6 +794,25 @@ def _notify(text: str) -> int:
     except Exception:  # noqa: BLE001 — alerting must never break the probe
         logger.exception("llm.health.notify_unexpected")
         return 0
+
+
+def _page(severity: str, title: str, body: str, *, dedup_key: str) -> bool:
+    """Тот же текст в операционный канал (DRF-1938): Telegram + Sentry. Never raises.
+
+    ``apps.observability.alerting.page`` сам пишет аудит ``observability.alert.paged``
+    с ``telegram_sent`` / ``sentry_sent`` — ненастроенный канал виден там, а не
+    теряется. Текста реплик в ``body`` нет: это сообщение пробы.
+    """
+
+    try:
+        from apps.observability import alerting
+
+        sent = alerting.page(severity, title, body, dedup_key=dedup_key)  # type: ignore[arg-type]
+        logger.info("llm.health.page_sent severity=%s sent=%s", severity, sent)
+        return bool(sent)
+    except Exception:  # noqa: BLE001 — alerting must never break the probe
+        logger.exception("llm.health.page_unexpected")
+        return False
 
 
 def _write_audit(action: str, payload: dict) -> None:

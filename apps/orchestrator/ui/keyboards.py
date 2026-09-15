@@ -38,6 +38,7 @@ a typed handle.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import Any
 
@@ -82,6 +83,50 @@ def food_drink_clarify_keyboard() -> list[dict[str, str]]:
     return _to_keyboard(
         Button(label="📔 В дневник", callback="cb:food:diary"),
         Button(label="❌ Опечатка", callback="cb:food:typo"),
+    )
+
+
+def food_text_estimate_keyboard() -> list[dict[str, str]]:
+    """DRF-1837 — карточка оценки по ТЕКСТУ («Я распознала так», §109).
+
+    Без ``scan_id``: оценка по тексту не создаёт скана, её держит
+    ``Conversation.skill_state`` (:mod:`apps.skills.food_clarify.text_entry`).
+    «✏️ Поправить граммы» — единственная правка на этом шаге: блюдо правится
+    новой фразой («Не то» → написать заново).
+    """
+    return _to_keyboard(
+        Button(label="✅ В дневник", callback="cb:food:text_log"),
+        Button(label="✏️ Поправить граммы", callback="cb:food:text_grams"),
+        Button(label="❌ Не то", callback="cb:food:text_reject"),
+    )
+
+
+#: DRF-1838 — тап под сохранённой записью. Один шаблон на маршрут скилла
+#: (``food_clarify.text_entry``) и на историю (``nutrition_global.resolve_food_tap``):
+#: две копии разошлись бы, и тап лёг бы в историю мимо выбора H2.
+ENTRY_CALLBACK_RE = re.compile(r"^cb:food:entry_(fix|del|undo):([A-Za-z0-9_-]+)$")
+#: ``id`` записи, который помещается в кнопку: самый длинный payload
+#: ``cb:food:entry_undo:`` (19 байт) + 45 = 64 байта — лимит Telegram
+#: (``apps/channels/telegram/keyboards.py``). Длиннее — чипов не будет.
+ENTRY_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,45}$")
+
+
+def food_text_logged_keyboard(log_id: str) -> list[dict[str, str]]:
+    """DRF-1838 — под «Записала в дневник»: §109 шаг 7, запись можно исправить или удалить.
+
+    ``log_id`` в payload, а не в ``skill_state``: запись живёт дольше
+    десятиминутного состояния разговора, и чип под ней обязан работать завтра.
+    """
+    return _to_keyboard(
+        Button(label="✏️ Исправить граммы", callback=f"cb:food:entry_fix:{log_id}"),
+        Button(label="🗑 Удалить запись", callback=f"cb:food:entry_del:{log_id}"),
+    )
+
+
+def food_text_deleted_keyboard(log_id: str) -> list[dict[str, str]]:
+    """DRF-1838 — после удаления: вернуть можно в окне восстановления каталога."""
+    return _to_keyboard(
+        Button(label="↩️ Вернуть", callback=f"cb:food:entry_undo:{log_id}"),
     )
 
 

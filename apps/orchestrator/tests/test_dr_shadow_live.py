@@ -92,8 +92,8 @@ def _model(monkeypatch, *results: CompletionResult) -> None:
 _UID = iter(range(78801, 78999))
 
 
-def _turn(sent, text: str) -> str:
-    user_id = next(_UID)
+def _turn(sent, text: str, *, user_id: int | None = None, mid: str | None = None) -> str:
+    user_id = user_id if user_id is not None else next(_UID)
     from apps.consent.services import record_global_consent
 
     bot_user = resolve_or_create_global_bot_user(
@@ -112,7 +112,7 @@ def _turn(sent, text: str) -> str:
             "message": {
                 "sender": {"user_id": user_id, "name": "Андрей"},
                 "recipient": {"chat_id": 8899, "chat_type": "dialog"},
-                "body": {"mid": f"m{user_id}", "seq": 1, "text": text, "attachments": []},
+                "body": {"mid": mid or f"m{user_id}", "seq": 1, "text": text, "attachments": []},
             },
         }
     )
@@ -163,25 +163,45 @@ class TestFlagOnObservesOnly:
         lines = _shadow_lines(caplog)
         assert len(lines) == 1
         line = lines[0]
-        # Замер 14.09: вердикт безопасности с живого пути не пишется → честный блок.
+        # DRF-1885: вердикт pre_check доезжает, и движок блокирует уже по
+        # следующему пробелу входа — probe/ledger/кандидаты недоступны.
         assert line["readiness_state"] == "blocked"
-        assert "SAFETY_UNKNOWN" in line["reason_codes"]
+        assert "BLOCK_READINESS_INPUT_UNAVAILABLE" in line["reason_codes"]
+        assert "SAFETY_UNKNOWN" not in line["reason_codes"]
         assert line["allow_recommend"] is False
         assert line["candidates"]["digest"] == dr_shadow.NOT_SEARCHED
         assert line["measures"]["separation"] is None
         assert line["current_path"]["cards_shown"] == 0
         assert line["path_recommended_without_readiness"] is False
 
-    def test_shadow_run_does_not_hand_out_a_revision(self, settings, monkeypatch, sent, dr_redis):
+    def test_the_shadow_itself_hands_out_no_revision(self, settings, monkeypatch, dr_redis):
+        """Тень только читает состояние; ревизию выдаёт производитель хода (DRF-1885)."""
+        settings.DRE_SHADOW_ENABLED = True
+        calls: list[str] = []
+        real = state_mod.next_revision
+        monkeypatch.setattr(state_mod, "next_revision", lambda cid: calls.append(cid) or real(cid))
+
+        record = dr_shadow.observe_live_turn(
+            SimpleNamespace(id="conv-shadow-rev"), tool_trace=None, trace_id="t1", branch="x"
+        )
+
+        assert record is not None and record.influenced_the_turn is False
+        # empty-assert-ok: наблюдение не пишет состояние по построению; соседний тест доказывает, что счётчик считает
+        assert calls == []
+
+    def test_the_turn_producer_hands_out_exactly_one_revision_per_message(
+        self, settings, monkeypatch, sent, dr_redis
+    ):
         settings.DRE_SHADOW_ENABLED = True
         _model(monkeypatch, _completion(PROSE))
-        incr = MagicMock(side_effect=AssertionError("тень выдала ревизию"))
-        monkeypatch.setattr(state_mod, "next_revision", incr)
+        calls: list[str] = []
+        real = state_mod.next_revision
+        monkeypatch.setattr(state_mod, "next_revision", lambda cid: calls.append(cid) or real(cid))
 
         screen = _turn(sent, "хочу массаж")
 
         assert screen == PROSE
-        assert incr.call_count == 0
+        assert len(calls) == 1
 
 
 class TestShowMastersTurn:
@@ -248,3 +268,300 @@ class TestCandidateSignature:
         assert signature.ordered_ids == ("x", "y")
         assert signature.separation is None
         assert signature.recommendation_eligible_count is None
+
+
+# --------------------------------------------------------------------------- #
+# DRF-1885 — вердикт pre_check доезжает до тени                                #
+# --------------------------------------------------------------------------- #
+class TestSafetyVerdictReachesTheShadow:
+    def test_ordinary_turn_is_normal_not_unknown(
+        self, settings, monkeypatch, sent, dr_redis, caplog
+    ):
+        settings.DRE_SHADOW_ENABLED = True
+        _model(monkeypatch, _completion(PROSE))
+
+        with caplog.at_level(logging.INFO):
+            screen = _turn(sent, "хочу массаж")
+
+        assert screen == PROSE
+        lines = _shadow_lines(caplog)
+        assert len(lines) == 1
+        line = lines[0]
+        assert line["reason_codes"]
+        assert line["safety_state"] == "normal"
+        assert "SAFETY_UNKNOWN" not in line["reason_codes"]
+
+    def test_each_message_of_one_person_opens_a_new_revision(
+        self, settings, monkeypatch, sent, dr_redis, caplog
+    ):
+        settings.DRE_SHADOW_ENABLED = True
+        _model(monkeypatch, _completion(PROSE))
+        user_id = next(_UID)
+
+        with caplog.at_level(logging.INFO):
+            _turn(sent, "хочу массаж", user_id=user_id, mid="r1")
+            _turn(sent, "в Пензе", user_id=user_id, mid="r2")
+
+        revisions = [line["state_revision"] for line in _shadow_lines(caplog)]
+        assert len(revisions) == 2
+        assert revisions[1] > revisions[0]
+
+    def test_crisis_turn_records_stop_and_the_reply_is_the_same(
+        self, settings, monkeypatch, sent, dr_redis, caplog
+    ):
+        from apps.orchestrator.safety.gate import CRISIS_REPLY_TEXT
+
+        settings.DRE_SHADOW_ENABLED = True
+        _model(monkeypatch, _completion(PROSE))
+
+        with caplog.at_level(logging.INFO):
+            screen = _turn(sent, "не хочу больше жить")
+
+        assert screen == CRISIS_REPLY_TEXT
+        lines = _shadow_lines(caplog)
+        assert len(lines) == 1
+        assert lines[0]["safety_state"] == "stop"
+        assert lines[0]["allow_recommend"] is False
+
+    def test_redis_failure_does_not_cost_the_turn(self, settings, monkeypatch, sent, caplog):
+        settings.DRE_SHADOW_ENABLED = True
+        _model(monkeypatch, _completion(PROSE))
+
+        def _down():
+            raise RuntimeError("redis down")
+
+        monkeypatch.setattr(state_mod, "_redis_client", _down)
+
+        with caplog.at_level(logging.INFO):
+            screen = _turn(sent, "хочу массаж")
+
+        assert screen == PROSE
+        assert any(
+            r.getMessage().startswith("decision_readiness.safety_record_failed")
+            for r in caplog.records
+        )
+
+
+# --------------------------------------------------------------------------- #
+# DRF-1903 — отпечаток снимка контекста в строке тени                          #
+# --------------------------------------------------------------------------- #
+class TestSnapshotFingerprintInTheLine:
+    def test_line_carries_version_and_digest_but_no_content(
+        self, settings, monkeypatch, sent, dr_redis, caplog
+    ):
+        from apps.orchestrator.context_snapshot import SNAPSHOT_VERSION
+
+        settings.DRE_SHADOW_ENABLED = True
+        _model(monkeypatch, _completion(PROSE))
+
+        with caplog.at_level(logging.INFO):
+            screen = _turn(sent, "хочу массаж")
+
+        assert screen == PROSE
+        lines = _shadow_lines(caplog)
+        assert len(lines) == 1
+        snapshot = lines[0]["context_snapshot"]
+        assert snapshot["snapshot_version"] == SNAPSHOT_VERSION
+        assert len(snapshot["content_digest"]) == 64
+        assert set(snapshot) == {"snapshot_version", "content_digest"}
+
+    def test_a_rejected_snapshot_is_a_code_and_the_turn_is_intact(
+        self, settings, monkeypatch, sent, dr_redis, caplog
+    ):
+        from apps.orchestrator import context_snapshot as cs
+
+        def _reject(**_kwargs):
+            raise cs.SnapshotRejected("$.said[0].value")
+
+        settings.DRE_SHADOW_ENABLED = True
+        monkeypatch.setattr(cs, "build_turn_snapshot", _reject)
+        _model(monkeypatch, _completion(PROSE))
+
+        with caplog.at_level(logging.INFO):
+            screen = _turn(sent, "хочу массаж")
+
+        assert screen == PROSE
+        lines = _shadow_lines(caplog)
+        assert len(lines) == 1
+        assert lines[0]["context_snapshot"] == {"rejected": True}
+
+
+# --------------------------------------------------------------------------- #
+# DRF-1904 — исход Decision Policy v0 в строке тени                            #
+# --------------------------------------------------------------------------- #
+class TestDecisionPolicyInTheLine:
+    def test_ordinary_turn_is_input_unavailable_and_not_writable(
+        self, settings, monkeypatch, sent, dr_redis, caplog
+    ):
+        from apps.orchestrator.decision_policy import DECISION_POLICY_VERSION
+
+        settings.DRE_SHADOW_ENABLED = True
+        _model(monkeypatch, _completion(PROSE))
+
+        with caplog.at_level(logging.INFO):
+            screen = _turn(sent, "хочу массаж")
+
+        assert screen == PROSE
+        lines = _shadow_lines(caplog)
+        assert len(lines) == 1
+        assert "BLOCK_READINESS_INPUT_UNAVAILABLE" in lines[0]["reason_codes"]
+        assert lines[0]["decision_policy"] == {
+            "result_status": "POLICY_INPUT_UNAVAILABLE",
+            "reason_codes": ["POLICY_READINESS_INPUT_UNAVAILABLE"],
+            # DRF-1932: реплика прочитана словарями — факт назван.
+            "facts_used": ["safety.state", "engine.reason_codes", "turn.phrase"],
+            "decision_policy_version": DECISION_POLICY_VERSION,
+            "catalog_writable": False,
+            "taxonomy_version": "h5-codes:no-phrase-map",
+            "recognized_targets": [],
+            "primary": None,
+            "alternatives": [],
+            "candidate_nba": None,
+        }
+
+    def test_crisis_turn_is_a_safety_boundary_and_the_reply_is_the_same(
+        self, settings, monkeypatch, sent, dr_redis, caplog
+    ):
+        from apps.orchestrator.safety.gate import CRISIS_REPLY_TEXT
+
+        settings.DRE_SHADOW_ENABLED = True
+        _model(monkeypatch, _completion(PROSE))
+
+        with caplog.at_level(logging.INFO):
+            screen = _turn(sent, "не хочу больше жить")
+
+        assert screen == CRISIS_REPLY_TEXT
+        lines = _shadow_lines(caplog)
+        assert len(lines) == 1
+        policy = lines[0]["decision_policy"]
+        assert policy["result_status"] == "SAFETY_BOUNDARY"
+        assert "POLICY_SAFETY_STOP" in policy["reason_codes"]
+        assert policy["catalog_writable"] is True
+
+    def test_a_failing_policy_is_a_code_and_the_turn_is_intact(
+        self, settings, monkeypatch, sent, dr_redis, caplog
+    ):
+        from apps.orchestrator import decision_policy
+
+        def _boom(*_args, **_kwargs):
+            raise RuntimeError("policy down")
+
+        settings.DRE_SHADOW_ENABLED = True
+        monkeypatch.setattr(decision_policy, "decide", _boom)
+        _model(monkeypatch, _completion(PROSE))
+
+        with caplog.at_level(logging.INFO):
+            screen = _turn(sent, "хочу массаж")
+
+        assert screen == PROSE
+        lines = _shadow_lines(caplog)
+        assert len(lines) == 1
+        assert lines[0]["decision_policy"] == {"error": "RuntimeError"}
+
+
+class TestNbaSelectionInTheLine:
+    """DRF-1932: выбор NBA в строке тени — коды, без слов реплики; ответ тот же.
+
+    Боевые словари пусты; тройку здесь даёт тестовый словарь, подставленный тестом.
+    """
+
+    PHRASES = {"расслабиться вечером": "RELAXATION", "расслабить спину": "BACK_COMFORT"}
+    DEFAULTS = {
+        "RELAXATION": ("SUPPORT", "PROVIDER_SESSION"),
+        "BACK_COMFORT": ("RECOVER", "SELF_CARE"),
+    }
+
+    def _dictionaries(self, monkeypatch):
+        from apps.orchestrator import nba_taxonomy
+
+        monkeypatch.setattr(nba_taxonomy, "TARGET_PHRASES", self.PHRASES)
+        monkeypatch.setattr(nba_taxonomy, "TARGET_DEFAULTS", self.DEFAULTS)
+
+    def _raw_lines(self, caplog) -> list[str]:
+        return [
+            r.getMessage()
+            for r in caplog.records
+            if r.getMessage().startswith(dr_shadow.LIVE_LOG_EVENT + " ")
+        ]
+
+    def test_candidate_is_logged_as_codes_and_no_word_of_the_phrase_reaches_the_line(
+        self, settings, monkeypatch, sent, dr_redis, caplog
+    ):
+        settings.DRE_SHADOW_ENABLED = True
+        self._dictionaries(monkeypatch)
+        _model(monkeypatch, _completion(PROSE))
+
+        with caplog.at_level(logging.INFO):
+            screen = _turn(sent, "Хочу расслабиться вечером, Жужелица 7788")
+
+        assert screen == PROSE
+        raw = self._raw_lines(caplog)
+        assert len(raw) == 1
+        for word in ("хочу", "расслабиться", "вечером", "жужелица", "7788"):
+            assert word not in raw[0].casefold(), f"слово реплики в строке тени: {word}"
+        policy = _shadow_lines(caplog)[0]["decision_policy"]
+        assert policy["result_status"] == "POLICY_INPUT_UNAVAILABLE"
+        assert policy["recognized_targets"] == ["RELAXATION"]
+        assert policy["primary"] is None
+        assert policy["candidate_nba"] == {
+            "role": "primary",
+            "target": "RELAXATION",
+            "family": "SUPPORT",
+            "action_type": "PROVIDER_SESSION",
+            "actionable": False,
+            "not_actionable_reason": "POLICY_READINESS_INPUT_UNAVAILABLE",
+        }
+        assert policy["catalog_writable"] is False
+
+    def test_pain_words_give_no_candidate_and_the_reply_is_the_same(
+        self, settings, monkeypatch, sent, dr_redis, caplog
+    ):
+        settings.DRE_SHADOW_ENABLED = True
+        self._dictionaries(monkeypatch)
+        _model(monkeypatch, _completion(PROSE))
+
+        with caplog.at_level(logging.INFO):
+            _turn(sent, "ноет, хочу расслабить спину")
+
+        lines = _shadow_lines(caplog)
+        assert len(lines) == 1
+        policy = lines[0]["decision_policy"]
+        assert policy["result_status"] == "SAFETY_CLARIFICATION_PENDING"
+        assert policy["candidate_nba"] is None
+        assert policy["primary"] is None
+
+
+class TestUnavailableInputInTheLine:
+    """DRF-1937: строка тени называет, какой вход держит готовность — кодами."""
+
+    def test_ordinary_turn_names_the_ledger_first_and_lists_in_engine_order(
+        self, settings, monkeypatch, sent, dr_redis, caplog
+    ):
+        from apps.orchestrator.decision_readiness import engine as eng
+
+        settings.DRE_SHADOW_ENABLED = True
+        _model(monkeypatch, _completion(PROSE))
+
+        with caplog.at_level(logging.INFO):
+            screen = _turn(sent, "хочу массаж")
+
+        assert screen == PROSE
+        raw = [
+            r.getMessage()
+            for r in caplog.records
+            if r.getMessage().startswith(dr_shadow.LIVE_LOG_EVENT + " ")
+        ]
+        assert len(raw) == 1
+        line = _shadow_lines(caplog)[0]
+        field = line["readiness_input_unavailable"]
+
+        # build_live_input: ledger_readable=False — первым срабатывает журнал вопросов.
+        assert field["first"] == eng.INPUT_LEDGER_UNREADABLE
+        assert eng.INPUT_TAU_UNCALIBRATED in field["all"]
+        assert field["all"] == [c for c in eng.UNAVAILABLE_INPUT_CODES if c in field["all"]]
+        assert "BLOCK_READINESS_INPUT_UNAVAILABLE" in line["reason_codes"]
+        # Текста блокера движка в строке нет.
+        for fragment in ("question ledger", "not readable", "uncalibrated (OD-DR-1"):
+            assert fragment not in raw[0]
+        # Исход политики не меняется.
+        assert line["decision_policy"]["result_status"] == "POLICY_INPUT_UNAVAILABLE"

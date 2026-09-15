@@ -21,12 +21,21 @@ vi.mock("./max-sdk", () => ({
 
 import {
   enqueueWaterLog,
+  enqueueWaterLogEntry,
   flushWaterQueue,
   getRecentActivity,
   getWellnessToday,
+  loadDiaryToday,
   readWaterQueue,
+  onWaterQueueRefused,
+  syncWaterEntry,
   undoWaterLog,
+  waterRefusalText,
+  correctFoodEntryGrams,
+  deleteFoodEntry,
+  restoreFoodEntry,
 } from "./customer-wellness";
+import { ApiError } from "./api";
 
 const fetchMock = vi.fn();
 
@@ -197,6 +206,176 @@ describe("flushWaterQueue — the queue reaches Ayla", () => {
   });
 });
 
+describe("DRF-1919 — очередь воды: чей стакан, что повторять, что сказать", () => {
+  it("401 (истекла сессия) — стакан остаётся в очереди, это не отказ дневника", async () => {
+    enqueueWaterLog(250);
+    fetchMock.mockResolvedValueOnce(jsonResponse({ error: "stale", detail: "expired" }, 401));
+    const refused: string[] = [];
+
+    const synced = await flushWaterQueue(undefined, (err) => refused.push(err.slug));
+
+    expect(readWaterQueue()).toHaveLength(1);
+    expect(synced).toBe(0);
+    expect(refused).toEqual([]);
+  });
+
+  it("404 без slug сервера (прокси, сервер без маршрута) — стакан остаётся в очереди", async () => {
+    enqueueWaterLog(250);
+    fetchMock.mockResolvedValueOnce(new Response("Not Found", { status: 404 }));
+
+    const synced = await flushWaterQueue();
+
+    expect(readWaterQueue()).toHaveLength(1);
+    expect(synced).toBe(0);
+  });
+
+  it("колбэки получают сам стакан — вызывающий узнаёт свой по key", async () => {
+    enqueueWaterLog(250);
+    const own = readWaterQueue()[0];
+    fetchMock.mockImplementation(async () => okEntry("entry-1"));
+    const keys: (string | undefined)[] = [];
+
+    await flushWaterQueue((_r, entry) => keys.push(entry.key));
+
+    expect(own?.key).toBeTruthy();
+    expect(keys).toEqual([own?.key]);
+  });
+
+  it("стакан, добавленный во время идущей синхронизации, получает СВОЙ исход", async () => {
+    enqueueWaterLog(250);
+    let release: () => void = () => {};
+    fetchMock.mockImplementationOnce(
+      () =>
+        new Promise<Response>((resolve) => {
+          release = () => resolve(okEntry("entry-1"));
+        }),
+    );
+    fetchMock.mockImplementation(async () => okEntry("entry-2"));
+
+    const first = flushWaterQueue();
+    const own = enqueueWaterLogEntry(500).entry;
+    // async-обёртка: без функции тест краснеет своим промисом, а не утечкой
+    // незавершённого прохода в следующие тесты файла.
+    const outcome = (async () => syncWaterEntry(own))();
+    release();
+    await first;
+
+    const settled = await outcome;
+    expect(settled.kind).toBe("accepted");
+    expect(settled.kind === "accepted" && settled.result.entry_id).toBe("entry-2");
+    expect(readWaterQueue()).toHaveLength(0);
+  });
+
+  it("три участника: каждый стакан получает свой исход, какой бы проход его ни взял", async () => {
+    enqueueWaterLog(250);
+    let release: () => void = () => {};
+    fetchMock.mockImplementationOnce(
+      () =>
+        new Promise<Response>((resolve) => {
+          release = () => resolve(okEntry("entry-1"));
+        }),
+    );
+    let n = 1;
+    fetchMock.mockImplementation(async () => {
+      n += 1;
+      return okEntry(`entry-${n}`);
+    });
+
+    const first = flushWaterQueue();
+    const a = enqueueWaterLogEntry(500).entry;
+    const b = enqueueWaterLogEntry(750).entry;
+    const outcomes = Promise.all([
+      (async () => syncWaterEntry(a))(),
+      (async () => syncWaterEntry(b))(),
+    ]);
+    release();
+    await first;
+    const [oa, ob] = await outcomes;
+
+    expect(oa.kind).toBe("accepted");
+    expect(ob.kind).toBe("accepted");
+    const ids = [oa, ob].map((o) => (o.kind === "accepted" ? o.result.entry_id : ""));
+    expect(new Set(ids).size).toBe(2);
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+  });
+
+  it("отказ стакана, которого никто не ждёт, получает подписчик — не молча", async () => {
+    enqueueWaterLog(250);
+    const own = enqueueWaterLogEntry(500).entry;
+    fetchMock
+      .mockResolvedValueOnce(jsonResponse({ error: "ayla_bad_request", detail: "rejected" }, 400))
+      .mockResolvedValueOnce(okEntry("entry-own"));
+    const heard: string[][] = [];
+    const unsubscribe = onWaterQueueRefused((errs) => heard.push(errs.map((e) => e.slug)));
+
+    const outcome = await syncWaterEntry(own);
+    unsubscribe();
+
+    expect(outcome.kind).toBe("accepted");
+    expect(heard).toEqual([["ayla_bad_request"]]);
+  });
+
+  it("повторный syncWaterEntry того же стакана — оба ожидающих получают исход", async () => {
+    const own = enqueueWaterLogEntry(250).entry;
+    fetchMock.mockImplementation(async () => okEntry("entry-same"));
+
+    const [a, b] = await Promise.all([
+      (async () => syncWaterEntry(own))(),
+      (async () => syncWaterEntry(own))(),
+    ]);
+
+    expect(a.kind).toBe("accepted");
+    expect(b.kind).toBe("accepted");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  }, 2000);
+
+  it("401 — стакан остаётся в очереди, и исход говорит почему", async () => {
+    const own = enqueueWaterLogEntry(250).entry;
+    fetchMock.mockResolvedValueOnce(jsonResponse({ error: "stale", detail: "expired" }, 401));
+
+    const outcome = await syncWaterEntry(own);
+
+    expect(outcome.kind).toBe("queued");
+    expect(outcome.kind === "queued" && outcome.err instanceof ApiError && outcome.err.status).toBe(401);
+    expect(readWaterQueue()).toHaveLength(1);
+  });
+
+  it("404 со slug сервера (дневник выключен) — стакан выброшен как отказ", async () => {
+    // Положительная пара к «404 без slug остаётся в очереди».
+    enqueueWaterLog(250);
+    fetchMock.mockResolvedValueOnce(jsonResponse({ error: "nutrition_disabled", detail: "off" }, 404));
+    const refused: string[] = [];
+
+    await flushWaterQueue(undefined, (err) => refused.push(err.slug));
+
+    expect(readWaterQueue()).toHaveLength(0);
+    expect(refused).toEqual(["nutrition_disabled"]);
+  });
+
+  it("фраза отказа говорит, сколько стаканов не записано и откуда они", () => {
+    const consent = new ApiError(403, "consent_required", "no consent");
+    const bad = new ApiError(400, "ayla_bad_request", "rejected");
+
+    expect(waterRefusalText([consent])).toBe(
+      "Стакан не записан. Чтобы менять дневник, нужно согласие на обработку личных данных — дай его в чате с Ayla.",
+    );
+    expect(waterRefusalText([bad], { fromQueue: true })).toBe(
+      "Стакан из очереди не записан — дневник его не принял.",
+    );
+    expect(waterRefusalText([bad, bad, bad], { fromQueue: true })).toBe(
+      "3 стакана из очереди не записаны — дневник их не принял.",
+    );
+    expect(waterRefusalText([bad, bad, bad, bad, bad])).toBe(
+      "5 стаканов не записаны — дневник их не принял.",
+    );
+  });
+
+  it("404 без slug у отмены — сбой, а не «окно закрылось»", async () => {
+    fetchMock.mockResolvedValueOnce(new Response("Not Found", { status: 404 }));
+    await expect(undoWaterLog("entry-42")).rejects.toThrow();
+  });
+});
+
 describe("undoWaterLog", () => {
   it("DELETEs the entry and reports success", async () => {
     fetchMock.mockResolvedValue(new Response(null, { status: 204 }));
@@ -214,6 +393,15 @@ describe("undoWaterLog", () => {
     );
 
     await expect(undoWaterLog("entry-42")).resolves.toBe(false);
+  });
+
+  it("DRF-1919: a 404 from the diary switch is NOT «окно закрылось» — it throws", async () => {
+    // POSITIVE twin first: the server's own «not undoable» still reads as false.
+    fetchMock.mockResolvedValueOnce(jsonResponse({ error: "not_undoable" }, 404));
+    await expect(undoWaterLog("entry-42")).resolves.toBe(false);
+
+    fetchMock.mockResolvedValueOnce(jsonResponse({ error: "nutrition_disabled" }, 404));
+    await expect(undoWaterLog("entry-42")).rejects.toThrow();
   });
 
   it("propagates a real outage instead of pretending the glass is gone", async () => {
@@ -272,6 +460,33 @@ describe("the reads reach the backend instead of inventing a day", () => {
     expect(today.calories_eaten).not.toBe(1240);
   });
 
+  it("только дневник ставит признак surface=diary; главная — нет (DRF-1897)", async () => {
+    vi.stubEnv("DEV", false);
+    fetchMock.mockResolvedValue(okJson({ ...LIVE_TODAY, entries: [] }));
+
+    const day = await loadDiaryToday();
+    await getWellnessToday();
+
+    // POSITIVE first: both reads reached the endpoint.
+    expect(day.state).toBe("empty");
+    expect(String(callAt(0)[0])).toContain("/wellness/today?surface=diary");
+    expect(String(callAt(1)[0])).toContain("/wellness/today");
+    expect(String(callAt(1)[0])).not.toContain("surface");
+  });
+
+  it("DRF-1927: нет согласия — дневник в своём состоянии, не «не удалось прочитать»", async () => {
+    vi.stubEnv("DEV", false);
+    // Ключей дневника нет: сервер его не читал, потому что нет согласия.
+    fetchMock.mockResolvedValue(
+      okJson({ consent_required: true, active_goals: [], display_name: "Анна" }),
+    );
+
+    const day = await loadDiaryToday();
+
+    expect(day.state).toBe("consent_required");
+    expect(day.state).not.toBe("unreadable");
+  });
+
   it("getRecentActivity asks the endpoint and returns what it answered", async () => {
     vi.stubEnv("DEV", false);
     fetchMock.mockResolvedValue(okJson(LIVE_ACTIVITY));
@@ -320,6 +535,21 @@ describe("flushWaterQueue — onAccepted hands the entry id to the caller (DRF-1
     expect(seen).toEqual([]);
   });
 
+  it("DRF-1919: a permanent refusal is handed to the caller, not dropped silently", async () => {
+    enqueueWaterLog(250);
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse({ error: "consent_required", detail: "no consent" }, 403),
+    );
+    const refused: string[] = [];
+
+    const synced = await flushWaterQueue(undefined, (err) => refused.push(err.slug ?? ""));
+
+    expect(refused).toEqual(["consent_required"]);
+    expect(synced).toBe(0);
+    // The queue must not be poisoned by it either.
+    expect(readWaterQueue()).toHaveLength(0);
+  });
+
   it("a throwing callback does not turn an accepted glass into a retry", async () => {
     enqueueWaterLog(250);
     fetchMock.mockImplementation(async () => okEntry("entry-8"));
@@ -331,4 +561,70 @@ describe("flushWaterQueue — onAccepted hands the entry id to the caller (DRF-1
     expect(synced).toBe(1);
     expect(readWaterQueue()).toHaveLength(0);
   });
+});
+
+
+describe("правка и удаление записи еды (DRF-1838)", () => {
+  it("deleteFoodEntry — DELETE /wellness/food/<id> и окно восстановления", async () => {
+    fetchMock.mockResolvedValue(
+      jsonResponse({ entry_id: "a/b c", restore_window_expires_at: "2026-09-15T12:15:00+00:00" }),
+    );
+
+    const out = await deleteFoodEntry("a/b c");
+
+    const [url, init] = callAt(0);
+    expect(url).toBe("/api/v1/customer/wellness/food/a%2Fb%20c");
+    expect(init.method).toBe("DELETE");
+    expect(out.restore_window_expires_at).toBe("2026-09-15T12:15:00+00:00");
+  });
+
+  it.each([
+    [200, "restored"],
+    [410, "expired"],
+    [404, "gone"],
+  ] as const)("restoreFoodEntry: %s → %s", async (status, outcome) => {
+    fetchMock.mockResolvedValue(
+      jsonResponse(
+        status === 200
+          ? { id: "fl-1" }
+          : { error: status === 404 ? "not_found" : "restore_expired", detail: "x" },
+        status,
+      ),
+    );
+
+    await expect(restoreFoodEntry("fl-1")).resolves.toBe(outcome);
+
+    const [url, init] = callAt(0);
+    expect(url).toBe("/api/v1/customer/wellness/food/fl-1/restore");
+    expect(init.method).toBe("POST");
+  });
+
+  it("restoreFoodEntry — сбой не выдаётся ни за «вернула», ни за «окно закрыто»", async () => {
+    fetchMock.mockResolvedValue(jsonResponse({ error: "ayla_unavailable", detail: "x" }, 502));
+
+    await expect(restoreFoodEntry("fl-1")).rejects.toThrow();
+  });
+
+  it("correctFoodEntryGrams — PATCH с граммами", async () => {
+    fetchMock.mockResolvedValue(jsonResponse({ id: "fl-1", calories: 125 }));
+
+    await correctFoodEntryGrams("fl-1", 250);
+
+    const [url, init] = callAt(0);
+    expect(url).toBe("/api/v1/customer/wellness/food/fl-1");
+    expect(init.method).toBe("PATCH");
+    expect(bodyOf(0)).toEqual({ grams: 250 });
+  });
+});
+
+
+describe("restoreFoodEntry — «записи нет» только по not_found (ревью DRF-1838)", () => {
+  it.each([["nutrition_disabled"], ["http_error"]])(
+    "404 %s — не «записи нет», а ошибка",
+    async (slug) => {
+      fetchMock.mockResolvedValue(jsonResponse({ error: slug, detail: "x" }, 404));
+
+      await expect(restoreFoodEntry("fl-1")).rejects.toThrow();
+    },
+  );
 });

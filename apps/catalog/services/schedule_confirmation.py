@@ -92,6 +92,8 @@
 
 from __future__ import annotations
 
+from apps.catalog.specialist_ref import CatalogSpecialistUnresolved, catalog_specialist_id
+
 import hashlib
 import json
 import logging
@@ -295,10 +297,16 @@ def _read_ayla(master: Any) -> list[dict[str, Any]]:
             f"no active owner/admin staff to read the weekly template for {tenant.slug}"
         )
 
+    # DRF-1933: у строки зеркала нет id профиля в каталоге — звать каталог
+    # не с чем; первичный ключ зеркала туда не уходит.
+    try:
+        catalog_specialist_id(master)
+    except CatalogSpecialistUnresolved:
+        raise SalonNotConfigured("catalog_specialist_unresolved: " + str(master.pk)) from None
     return get_salon_client().get_master_schedule(
         actor_external_id=external_user_id_for(actor_user),
         tenant_slug=tenant.slug,
-        specialist_id=str(master.id),
+        specialist_id=catalog_specialist_id(master),
     )
 
 

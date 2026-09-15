@@ -17,6 +17,10 @@ urlpatterns = [
     path("onboarding/reject", views.onboarding_reject, name="onboarding_reject"),
     path("onboarding/profile", views.onboarding_profile, name="onboarding_profile"),
     path("onboarding/readiness", views.onboarding_readiness, name="onboarding_readiness"),
+    # DRF-1797 (M5) — готовность, «Опубликовать» и статус — прокси в каталог M4.
+    path("publication/readiness", views.publication_readiness, name="publication_readiness"),
+    path("publication/status", views.publication_status, name="publication_status"),
+    path("publication", views.publication_publish, name="publication"),
     # M4 alias — same view, post-onboarding edit URL. Idempotent +
     # last-write-wins; audit event slug still reads MASTER_PROFILE_INITIALIZED
     # until the dedicated MASTER_PROFILE_UPDATED slug ships in a follow-up
@@ -24,10 +28,40 @@ urlpatterns = [
     path("profile", views.onboarding_profile, name="profile"),
     path("me", views.me, name="me"),
     path("dashboard", views.dashboard, name="dashboard"),
+    # DRF-1895 (M10b) — выбор канонических услуг и цена мастера: прокси в
+    # каталог (M8a / M8b). `selection` раньше `<uuid:salon_service_id>`.
+    path("services/selection", views.service_selection, name="service_selection"),
+    # DRF-1799 (M7) — канон для экрана 03: направления и шаблоны направления.
+    path("services/directions", views.service_directions, name="service_directions"),
+    path("services/templates", views.service_templates, name="service_templates"),
+    path(
+        "services/<uuid:salon_service_id>/offer",
+        views.service_offer,
+        name="service_offer",
+    ),
+    path(
+        "services/<uuid:salon_service_id>",
+        views.selected_service,
+        name="selected_service",
+    ),
     # M3 schedule self-service (master-mobile §M3, PR Tier1.2)
     path("schedule", views.schedule, name="schedule"),
     # DRF-1816 (M24) — недельный шаблон часов мастера: прокси в каталог.
     path("working-hours", views.working_hours, name="working_hours"),
+    # DRF-1802 (M10) — «своя услуга» = заявка о разрыве канона: прокси в
+    # каталог (M9). Решает только владелец в admin каталога — мутаций статуса
+    # здесь нет. `similar` раньше `<uuid:request_id>`.
+    path("canon-gap-requests", views.canon_gap_requests, name="canon_gap_requests"),
+    path("canon-gap-requests/similar", views.canon_gap_similar, name="canon_gap_similar"),
+    path(
+        "canon-gap-requests/<uuid:request_id>",
+        views.canon_gap_request_detail,
+        name="canon_gap_request_detail",
+    ),
+    # DRF-1845 — «Принимаю записи»; не путать с «availability» (заявка на выходной).
+    path("accepting-bookings", views.accepting_bookings, name="accepting_bookings"),
+    # DRF-1857 (K14) — «Мои отзывы»: прокси в каталог под субъектом мастера.
+    path("reviews", views.reviews, name="reviews"),
     path("availability", views.availability_request, name="availability_request"),
     path(
         "availability/pending",

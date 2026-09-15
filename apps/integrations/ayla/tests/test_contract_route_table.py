@@ -109,6 +109,11 @@ ROUTE_TABLE: tuple[Route, ...] = (
     Route("GET", "/api/v1/internal/specialists/", Auth.BEARER),
     Route("GET", "/api/v1/internal/specialists/{id}/", Auth.BEARER),
     Route("GET", "/api/v1/internal/specialists/{id}/slots/", Auth.BEARER),
+    # DRF-1802 (M10) — заявки мастера о разрыве канона, под субъектом (M9).
+    Route("GET", "/api/v1/internal/specialists/{id}/canon-gap-requests/", Auth.BEARER_EXT),
+    Route("POST", "/api/v1/internal/specialists/{id}/canon-gap-requests/", Auth.BEARER_EXT),
+    Route("GET", "/api/v1/internal/specialists/{id}/canon-gap-requests/similar/", Auth.BEARER_EXT),
+    Route("GET", "/api/v1/internal/specialists/{id}/canon-gap-requests/{id}/", Auth.BEARER_EXT),
     # Writes pin X-Idempotency-Key — the double-booking dedup guarantee
     # (В2.4), same rationale as payments' Idempotence-Key row below.
     Route(
@@ -132,6 +137,11 @@ ROUTE_TABLE: tuple[Route, ...] = (
     # DRF-1233 — the canonical version, without which the salon console
     # cannot offer a reschedule or a closure at all.
     Route("GET", "/api/v1/internal/appointments/{id}/", Auth.BEARER_EXT),
+    # DRF-1845 — «Принимаю записи» мастера под его субъектом.
+    Route("GET", "/api/v1/internal/specialists/{id}/availability/", Auth.BEARER_EXT),
+    Route("PATCH", "/api/v1/internal/specialists/{id}/availability/", Auth.BEARER_EXT),
+    # DRF-1857 — «Мои отзывы» мастера под его субъектом.
+    Route("GET", "/api/v1/internal/specialists/{id}/reviews/", Auth.BEARER_EXT),
     Route("GET", "/api/v1/internal/me/bookings/", Auth.BEARER_EXT),
     # DRF-1032 customer records: visit card + «Записаться ещё» prefill.
     Route("GET", "/api/v1/internal/me/bookings/{id}/", Auth.BEARER_EXT),
@@ -173,11 +183,28 @@ ROUTE_TABLE: tuple[Route, ...] = (
     # (идемпотентно), GET без номера — текущая для профиля.
     Route("POST", "/api/v1/internal/users/{id}/deletion-requests/", Auth.BEARER_EXT),
     Route("GET", "/api/v1/internal/users/{id}/deletion-requests/", Auth.BEARER_EXT),
+    # DRF-1855 — a client's review of their own visit, written as that person.
+    Route("POST", "/api/v1/internal/users/{id}/reviews/", Auth.BEARER_EXT),
     # billing_client — C2 billing status + C3 payout preview (pilot 2026-08-15).
     Route("GET", "/api/v1/internal/billing/specialists/{id}/status/", Auth.BEARER),
     Route("POST", "/api/v1/internal/billing/specialists/{id}/card-setup/", Auth.BEARER),
     Route("POST", "/api/v1/internal/billing/specialists/{id}/pay-debt/", Auth.BEARER),
     Route("GET", "/api/v1/internal/specialists/{id}/payout-preview/", Auth.BEARER),
+    # DRF-1813 (M21) — профиль и аватар мастера под субъектом (каталог #455).
+    Route("PATCH", "/api/v1/internal/specialists/{id}/profile/", Auth.BEARER_EXT),
+    Route("POST", "/api/v1/internal/specialists/{id}/media/avatar/", Auth.BEARER_EXT),
+    # DRF-1895 (M10b) — выбор услуг мастера и его цена под субъектом (каталог #443/#444).
+    Route("GET", "/api/v1/internal/specialists/{id}/services/selection/", Auth.BEARER_EXT),
+    Route("POST", "/api/v1/internal/specialists/{id}/services/selection/", Auth.BEARER_EXT),
+    Route("PUT", "/api/v1/internal/specialists/{id}/services/{id}/offer/", Auth.BEARER_EXT),
+    Route("DELETE", "/api/v1/internal/specialists/{id}/services/{id}/", Auth.BEARER_EXT),
+    # DRF-1797 (M5) — готовность, публикация и статус соло-мастера под субъектом (каталог #453).
+    Route("GET", "/api/v1/internal/specialists/{id}/publication/readiness/", Auth.BEARER_EXT),
+    Route("POST", "/api/v1/internal/specialists/{id}/publication/", Auth.BEARER_EXT),
+    Route("GET", "/api/v1/internal/specialists/{id}/publication/status/", Auth.BEARER_EXT),
+    # DRF-1799 (M7) — канон для экрана 03: направления и шаблоны направления (каталог M6 + M7a).
+    Route("GET", "/api/v1/internal/services/directions/", Auth.BEARER),
+    Route("GET", "/api/v1/internal/services/templates/", Auth.BEARER),
     # payments_client — C7 client payments (§7.5, REVIEW; upstream W1 pending).
     # IsBotServiceWithVerifiedClient: Bearer + X-External-User-ID on every leg.
     Route("POST", "/api/v1/internal/appointments/{id}/payment/", Auth.BEARER_EXT),
@@ -189,6 +216,10 @@ ROUTE_TABLE: tuple[Route, ...] = (
     # nutrition_client (#1050) — X-Service-Token + X-External-User-ID.
     Route("POST", "/api/v1/nutrition/internal/scan/", Auth.SERVICE_EXT),
     Route("POST", "/api/v1/nutrition/internal/food-log/", Auth.SERVICE_EXT),
+    # DRF-1838 — правка / удаление записи и возврат в окне (§109 шаг 7).
+    Route("PATCH", "/api/v1/nutrition/internal/food-log/{id}/", Auth.SERVICE_EXT),
+    Route("DELETE", "/api/v1/nutrition/internal/food-log/{id}/", Auth.SERVICE_EXT),
+    Route("POST", "/api/v1/nutrition/internal/food-log/{id}/restore/", Auth.SERVICE_EXT),
     Route("GET", "/api/v1/nutrition/internal/summary/", Auth.SERVICE_EXT),
     Route("GET", "/api/v1/nutrition/internal/deficits/", Auth.SERVICE_EXT),
     Route("GET", "/api/v1/nutrition/internal/profile/", Auth.SERVICE_EXT),
@@ -371,6 +402,55 @@ def _exercise_booking() -> None:
     # route was not covered at all. ``get_specialist_service_edges`` is that
     # live reader (quote/repeat, DRF-1067). It takes no tenant scope by design.
     _swallow(lambda: c.get_specialist_service_edges(specialist_id="SPECID", service_id="SVCID"))
+    # DRF-1813 (M21) — профиль и аватар мастера.
+    _swallow(
+        lambda: c.patch_specialist_profile(
+            specialist_id="SPECID", external_user_id=_EXT_USER, bio="о себе"
+        )
+    )
+    _swallow(
+        lambda: c.upload_specialist_avatar(
+            specialist_id="SPECID",
+            external_user_id=_EXT_USER,
+            filename="a.jpg",
+            content=b"\xff\xd8",
+            content_type="image/jpeg",
+        )
+    )
+    # DRF-1895 (M10b) — выбор услуг и цена мастера.
+    _swallow(lambda: c.get_service_selection(specialist_id="SPECID", external_user_id=_EXT_USER))
+    _swallow(
+        lambda: c.select_services(
+            specialist_id="SPECID", external_user_id=_EXT_USER, template_ids=[str(_PROFILE_UUID)]
+        )
+    )
+    _swallow(
+        lambda: c.put_service_offer(
+            specialist_id="SPECID",
+            external_user_id=_EXT_USER,
+            salon_service_id=str(_PROFILE_UUID),
+            price="1500",
+            duration_minutes=45,
+        )
+    )
+    _swallow(
+        lambda: c.remove_service(
+            specialist_id="SPECID", external_user_id=_EXT_USER, salon_service_id=str(_PROFILE_UUID)
+        )
+    )
+    # DRF-1797 (M5) — публикация соло-мастера.
+    _swallow(
+        lambda: c.get_publication_readiness(specialist_id="SPECID", external_user_id=_EXT_USER)
+    )
+    _swallow(
+        lambda: c.publish(
+            specialist_id="SPECID", external_user_id=_EXT_USER, command_id=str(_PROFILE_UUID)
+        )
+    )
+    _swallow(lambda: c.get_publication_status(specialist_id="SPECID", external_user_id=_EXT_USER))
+    # DRF-1799 (M7) — канон для экрана 03.
+    _swallow(lambda: c.get_service_directions())
+    _swallow(lambda: c.get_service_templates(direction_id=str(_PROFILE_UUID)))
     _swallow(lambda: c.get_masters(specialist_id="SPECID"))
     _swallow(
         lambda: c.get_available_times(specialist_id="SPECID", date="2026-07-03", service_id="SVCID")
@@ -407,6 +487,54 @@ def _exercise_booking() -> None:
     _swallow(lambda: c.get_repeat_intent(external_user_id=_EXT_USER, booking_id="APPTID"))
     # DRF-1233 canonical version read.
     _swallow(lambda: c.get_appointment_version(external_user_id=_EXT_USER, booking_id="APPTID"))
+    # DRF-1802 (M10) — canon gap requests under the subject.
+    _swallow(lambda: c.list_canon_gap_requests(specialist_id="SPECID", external_user_id=_EXT_USER))
+    _swallow(
+        lambda: c.create_canon_gap_request(
+            specialist_id="SPECID",
+            external_user_id=_EXT_USER,
+            name="Татуаж",
+            description="",
+            duration_minutes=60,
+            price="1000",
+        )
+    )
+    _swallow(
+        lambda: c.similar_canon_templates(
+            specialist_id="SPECID", external_user_id=_EXT_USER, name="Татуаж"
+        )
+    )
+    _swallow(
+        lambda: c.get_canon_gap_request(
+            specialist_id="SPECID", external_user_id=_EXT_USER, request_id=str(_PROFILE_UUID)
+        )
+    )
+    # DRF-1855 review under the client's subject.
+    _swallow(
+        lambda: c.create_review(
+            external_user_id=_EXT_USER,
+            ayla_user_id=str(_PROFILE_UUID),
+            appointment_id="APPTID",
+            rating=5,
+        )
+    )
+    # DRF-1845 «Принимаю записи».
+    _swallow(
+        lambda: c.get_accepting_bookings(
+            specialist_id=str(_PROFILE_UUID), external_user_id=_EXT_USER
+        )
+    )
+    _swallow(
+        lambda: c.set_accepting_bookings(
+            specialist_id=str(_PROFILE_UUID), external_user_id=_EXT_USER, accepting=False
+        )
+    )
+    # DRF-1857 «Мои отзывы».
+    _swallow(
+        lambda: c.get_specialist_reviews(
+            specialist_id=str(_PROFILE_UUID), external_user_id=_EXT_USER
+        )
+    )
 
 
 def _exercise_profile() -> None:
@@ -545,6 +673,9 @@ async def _exercise_nutrition() -> None:
     await guard(c.purge_body_parameters(external_user_id=_EXT_USER))
     await guard(c.add_water(external_user_id=_EXT_USER, ml=250))
     await guard(c.undo_water(external_user_id=_EXT_USER, entry_id="ENTRYID"))
+    await guard(c.update_meal(external_user_id=_EXT_USER, log_id="ENTRYID", portion_multiplier=2.0))
+    await guard(c.delete_meal(external_user_id=_EXT_USER, log_id="ENTRYID"))
+    await guard(c.restore_meal(external_user_id=_EXT_USER, log_id="ENTRYID"))
     await guard(c.get_water_today(external_user_id=_EXT_USER))
     await guard(c.get_cross_domain_insights(external_user_id=_EXT_USER))
     await guard(c.post_cross_domain_seen(external_user_id=_EXT_USER, shown_id="SHOWNID"))
