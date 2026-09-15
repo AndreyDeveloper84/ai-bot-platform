@@ -176,7 +176,10 @@ def _clean_id(value: object) -> str:
 def resolve_master(*, tenant: Tenant, specialist_id: UUID | None) -> CatalogMaster | None:
     """Catalog-mirror row for the appointment's specialist, if mirrored.
 
-    Matched on **either** mirror key. The masters mirror is keyed on the
+    Matched on **either** mirror key. DRF-1933: the catalog id lives in
+    ``CatalogMaster.catalog_specialist_id`` — the primary key equals it only
+    for rows sync created (a glued invite or a solo master keeps its uuid4).
+    The masters mirror is keyed on the
     Ayla ``SpecialistProfile.id`` (``CatalogMaster.id`` — see
     ``upsert_specialists``) and separately carries the specialist's Ayla
     ``User.id`` in ``ayla_user_id``. ``booking.created.specialist_id`` is
@@ -201,7 +204,7 @@ def resolve_master(*, tenant: Tenant, specialist_id: UUID | None) -> CatalogMast
     with tenant_scope(tenant):
         return (
             CatalogMaster.objects.filter(tenant=tenant)
-            .filter(Q(id=specialist_id) | Q(ayla_user_id=specialist_id))
+            .filter(Q(catalog_specialist_id=specialist_id) | Q(ayla_user_id=specialist_id))
             .select_related("linked_bot_user")
             .first()
         )

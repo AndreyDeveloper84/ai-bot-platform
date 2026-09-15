@@ -28,6 +28,7 @@ from apps.catalog.models import CatalogMaster
 from apps.identity.models import BotUser
 from apps.integrations.ayla.salon_client import SalonUnavailable, SalonValidationError
 from apps.tenancy.models import Tenant
+from tests.support.catalog_mirror import sync_shaped
 
 from .conftest import init_data_header
 
@@ -100,12 +101,14 @@ def ayla(monkeypatch, settings):
 
 @pytest.fixture
 def synced_master(tenant: Tenant) -> CatalogMaster:
-    return CatalogMaster.all_tenants.create(
-        tenant=tenant,
-        external_id=941,
-        external_updated_at=datetime.now(tz=dt_timezone.utc),
-        name="Ольга Синхронная",
-        ayla_user_id=uuid.uuid4(),
+    return sync_shaped(
+        CatalogMaster.all_tenants.create(
+            tenant=tenant,
+            external_id=941,
+            external_updated_at=datetime.now(tz=dt_timezone.utc),
+            name="Ольга Синхронная",
+            ayla_user_id=uuid.uuid4(),
+        )
     )
 
 
@@ -246,12 +249,14 @@ class TestRefusalsAreNamed:
         self, client: Client, owner_bot_user: BotUser, other_tenant: Tenant, ayla
     ) -> None:
         ayla()
-        foreign = CatalogMaster.all_tenants.create(
-            tenant=other_tenant,
-            external_id=942,
-            external_updated_at=datetime.now(tz=dt_timezone.utc),
-            name="Чужая",
-            ayla_user_id=uuid.uuid4(),
+        foreign = sync_shaped(
+            CatalogMaster.all_tenants.create(
+                tenant=other_tenant,
+                external_id=942,
+                external_updated_at=datetime.now(tz=dt_timezone.utc),
+                name="Чужая",
+                ayla_user_id=uuid.uuid4(),
+            )
         )
         assert _get(client, foreign).status_code == 404
 

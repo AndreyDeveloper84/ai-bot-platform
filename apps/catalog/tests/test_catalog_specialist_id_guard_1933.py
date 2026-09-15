@@ -36,27 +36,19 @@ RESOLVER = "catalog_specialist_id"
 CONVERTED = {
     ("apps/master_api/views.py", 18),  # 17 + «Мои отзывы» (#1755)
     ("apps/master_api/services/schedule_frame.py", 3),
+    # 1933b: переведено
+    ("apps/miniapp_api/views.py", 3),
+    ("apps/admin_api/services/availability.py", 1),
+    ("apps/admin_api/views_availability_slots.py", 1),
+    ("apps/admin_api/views_booking_create.py", 1),
+    ("apps/admin_api/views_master_exceptions.py", 2),
+    ("apps/admin_api/views_schedule_impact.py", 1),
+    ("apps/catalog/services/schedule_confirmation.py", 1),
+    # Консьерж: резолв на границе адаптера (handoff держит pk зеркала).
+    ("apps/skills/booking/provider.py", 5),
 }
 
-PENDING_1933B: dict[tuple[str, str], int] = {
-    ("apps/miniapp_api/views.py", "get_available_times"): 1,
-    ("apps/miniapp_api/views.py", "create_appointment"): 1,
-    ("apps/miniapp_api/views.py", "get_specialist_service_edges"): 1,
-    ("apps/admin_api/services/availability.py", "create_specialist_time_off"): 1,
-    ("apps/admin_api/views_availability_slots.py", "get_available_times"): 1,
-    ("apps/admin_api/views_booking_create.py", "create_appointment"): 1,
-    ("apps/admin_api/views_master_exceptions.py", "list_schedule_exceptions"): 1,
-    ("apps/admin_api/views_master_exceptions.py", "list_time_off"): 1,
-    ("apps/admin_api/views_schedule_impact.py", "get_schedule_impact"): 1,
-    ("apps/catalog/services/schedule_confirmation.py", "get_master_schedule"): 1,
-    # Консьерж: ``orchestrator/handoff.py`` кладёт pk карточки в
-    # ``native_master_id``, адаптер шлёт его как ``staff_id``. 1933b чинит
-    # это в одном месте (handoff), и адаптер попадает в NOT_A_MIRROR_ROW.
-    ("apps/skills/booking/provider.py", "get_available_dates"): 1,
-    ("apps/skills/booking/provider.py", "get_available_times"): 1,
-    ("apps/skills/booking/provider.py", "create_appointment"): 1,
-    ("apps/skills/booking/provider.py", "get_specialist_service_edges"): 2,
-}
+PENDING_1933B: dict[tuple[str, str], int] = {}
 
 NOT_A_MIRROR_ROW: dict[tuple[str, str], tuple[int, str]] = {
     ("apps/booking/services/records.py", "get_available_times"): (1, "id из записи каталога"),
@@ -138,7 +130,7 @@ def test_the_scan_sees_the_class():
     sites = _sites()
     assert len(sites) >= 43, len(sites)
     listed = sum(PENDING_1933B.values()) + sum(n for n, _ in NOT_A_MIRROR_ROW.values())
-    assert listed == 23
+    assert listed == 8
 
 
 def test_every_catalog_call_sends_the_catalog_id_or_is_named():
@@ -158,3 +150,50 @@ def test_every_catalog_call_sends_the_catalog_id_or_is_named():
 def test_named_sites_are_real_files():
     for rel, _name in list(PENDING_1933B) + list(NOT_A_MIRROR_ROW):
         assert (ROOT / rel).is_file(), rel
+
+
+# ─── DRF-1933, часть 2 ───────────────────────────────────────────────────────
+
+
+def test_the_second_half_leaves_nothing_pending():
+    """1933b переводит все места ``PENDING_1933B``: список пуст, а
+    ``NOT_A_MIRROR_ROW`` остаётся с причинами."""
+    assert PENDING_1933B == {}
+
+
+def _inbound_lookups_by_primary_key() -> list[str]:
+    """``CatalogMaster ... .filter/get(id=|pk=<…specialist…>)`` вне тестов.
+
+    Id каталога ищет строку зеркала только по колонке
+    ``catalog_specialist_id``: первичный ключ склеенного приглашения и
+    соло-мастера — ``uuid4``.
+    """
+    found: list[str] = []
+    for path in sorted((ROOT / "apps").rglob("*.py")):
+        rel = path.relative_to(ROOT).as_posix()
+        if "/tests/" in rel or "/migrations/" in rel:
+            continue
+        source = path.read_text(encoding="utf-8")
+        if "CatalogMaster" not in source:
+            continue
+        for node in ast.walk(ast.parse(source)):
+            if not isinstance(node, ast.Call):
+                continue
+            # Q(id=…) внутри .filter(...) — тот же поиск другим написанием.
+            is_q = isinstance(node.func, ast.Name) and node.func.id == "Q"
+            if not is_q:
+                if not isinstance(node.func, ast.Attribute):
+                    continue
+                if node.func.attr not in {"filter", "get", "exclude"}:
+                    continue
+                chain = ast.unparse(node.func.value)
+                if "CatalogMaster" not in chain and "master_model" not in chain:
+                    continue
+            for kw in node.keywords:
+                if kw.arg in {"id", "pk"} and "specialist" in ast.unparse(kw.value).lower():
+                    found.append(f"{rel}:{node.lineno}")
+    return found
+
+
+def test_inbound_catalog_ids_do_not_look_up_the_primary_key():
+    assert _inbound_lookups_by_primary_key() == []

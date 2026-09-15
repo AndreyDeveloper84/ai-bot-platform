@@ -26,6 +26,7 @@ from apps.catalog.models import CatalogMaster, CatalogService, MasterService
 from apps.catalog.services.http_client import CatalogSpecialistServiceDTO
 from apps.catalog.services.upserter import UpsertResult, upsert_master_services
 from apps.tenancy.models import Tenant
+from tests.support.catalog_mirror import sync_shaped
 
 _TS = datetime(2026, 7, 9, 18, 31, tzinfo=timezone.utc)
 
@@ -42,12 +43,14 @@ def tenant_b(db) -> Tenant:
 
 def _master(tenant: Tenant, *, name: str = "Мастер", specialization: str = "") -> CatalogMaster:
     """A mirrored master. ``id`` IS Ayla's SpecialistProfile.id by contract."""
-    return CatalogMaster.all_tenants.create(
-        tenant=tenant,
-        id=uuid.uuid4(),
-        name=name,
-        specialization=specialization,
-        external_updated_at=_TS,
+    return sync_shaped(
+        CatalogMaster.all_tenants.create(
+            tenant=tenant,
+            id=uuid.uuid4(),
+            name=name,
+            specialization=specialization,
+            external_updated_at=_TS,
+        )
     )
 
 

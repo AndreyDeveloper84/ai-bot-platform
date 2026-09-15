@@ -39,6 +39,7 @@ from django.http import HttpRequest, HttpResponse, JsonResponse
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_http_methods
 
+from apps.catalog.specialist_ref import CatalogSpecialistUnresolved, catalog_specialist_id
 from apps.admin_api.auth import require_admin_role
 from apps.admin_api.views import _get_master_or_404
 from apps.catalog.models import CatalogService
@@ -156,12 +157,22 @@ def create_booking(request: HttpRequest) -> HttpResponse:
 
     actor = external_user_id_for(bot_user)
 
+    # DRF-1933: у строки зеркала нет id профиля в каталоге — звать каталог
+    # не с чем; первичный ключ зеркала туда не уходит.
+    try:
+        catalog_specialist_id(master)
+    except CatalogSpecialistUnresolved:
+        return _outcome(
+            "blocked",
+            "master is not set up in the catalog yet",
+            409,
+        )
     try:
         created = get_salon_client().create_appointment(
             actor_external_id=actor,
             idempotency_key=idempotency_key,
             tenant_slug=tenant.slug,
-            specialist_id=str(master.id),
+            specialist_id=catalog_specialist_id(master),
             service_id=str(service.ayla_service_id),
             start_datetime=start_at,
             client_id=client_id,
