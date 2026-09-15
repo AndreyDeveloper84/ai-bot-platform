@@ -21,7 +21,7 @@ from apps.tenancy.models import Tenant
 
 pytestmark = pytest.mark.django_db(transaction=True)
 
-DIARY = ConsentRecord.ConsentType.NUTRITION_DIARY.value
+DIARY = ConsentRecord.ConsentType.FOOD_DIARY_PROCESSING.value
 CALC = ConsentRecord.ConsentType.PERSONAL_CALCULATION.value
 
 

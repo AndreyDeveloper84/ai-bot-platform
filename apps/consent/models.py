@@ -66,7 +66,8 @@ class ConsentRecord(models.Model):
         # ``alter_choices`` в духе ADR-0007 — и ТОЛЬКО ею: класть новое
         # согласие мимо этой таблицы значит потерять версию текста, способ
         # получения и отзыв, которых требует §92 п.6. Так уже вышло с
-        # ``BotUser.food_scanner_consent_at`` — см. ``apps/consent/customer.py``.
+        # ``BotUser.food_scanner_consent_at`` — колонка без версии и без отзыва
+        # в журнале; M1 (DRF-1963) перевёл её на ``FOOD_DIARY_PROCESSING`` ниже.
         PERSONAL_DATA = "personal_data", "Personal data (152-ФЗ)"
         MARKETING = "marketing", "Marketing"
         PHOTO_BIOMETRIC = "photo_biometric", "Photo / biometric"
@@ -92,7 +93,16 @@ class ConsentRecord(models.Model):
         #   одного отзывом другого;
         # * ``PHOTO_BIOMETRIC`` — растянуть его на снимок тарелки значило
         #   бы объявить еду биометрией со всеми вытекающими требованиями.
-        NUTRITION_DIARY = "nutrition_diary", "Nutrition diary (food, drinks, photos, voice)"
+        #
+        # M1 (владелец 15.09, `PROMPT_ORCHESTRATOR_AYLA_CONTROLLED_PILOT_NEXT_WAVE.md`
+        # §6): единый реестр вместо колонки сканера, scope ``food_diary_processing``.
+        # Это тот же тип, что §92 завёл как ``nutrition_diary``, — переименован,
+        # а не добавлен рядом: два типа одного согласия отзывались бы порознь
+        # (DRF-1963, решение D1; строк старого значения на пилоте 0).
+        FOOD_DIARY_PROCESSING = (
+            "food_diary_processing",
+            "Food diary processing (food, drinks, photos, voice)",
+        )
         PERSONAL_CALCULATION = (
             "personal_calculation",
             "Personal calculation (weight, height, age, sex, activity, goal)",

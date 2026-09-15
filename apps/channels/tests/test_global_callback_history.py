@@ -739,17 +739,22 @@ class TestFoodGoldenFixturesStillReplay:
     def _consented_user(self, user_id: int):
         """Пользователь, у которого сканер еды уже разрешён.
 
-        ``FoodScannerSkill`` держит собственный 152-ФЗ гейт на поле
-        ``BotUser.food_scanner_consent_at`` и без него отвечает «открой Mini
-        App и подтверди согласие». Фикстуры описывают поведение согласившегося
-        человека, поэтому согласие ставит оснастка — иначе проверялся бы гейт,
-        а не то, что фикстуры описывают.
+        ``FoodScannerSkill`` держит собственный 152-ФЗ гейт на согласии
+        ``food_diary_processing`` (строка реестра, DRF-1963) и без него отвечает
+        «открой Mini App и подтверди согласие». Фикстуры описывают поведение
+        согласившегося человека, поэтому согласие ставит оснастка — иначе
+        проверялся бы гейт, а не то, что фикстуры описывают.
         """
-        from django.utils import timezone
+        from apps.consent.nutrition import DIARY, FOOD_DIARY_CONSENT_DOCUMENT_VERSION
+        from apps.consent.services import record_global_consent
 
         bot_user, conversation = _welcomed_user(user_id)
-        bot_user.food_scanner_consent_at = timezone.now()
-        bot_user.save(update_fields=["food_scanner_consent_at"])
+        record_global_consent(
+            bot_user,
+            consent_type=DIARY,
+            source="test:consented_user",
+            document_version=FOOD_DIARY_CONSENT_DOCUMENT_VERSION,
+        )
         return bot_user, conversation
 
     def test_the_fixture_sets_are_the_real_ones(self):

@@ -33,7 +33,6 @@ from typing import Any
 from unittest.mock import Mock
 
 import pytest
-from django.utils import timezone
 
 from apps.consent.models import ConsentRecord
 from apps.consent.services import record_global_consent
@@ -99,9 +98,16 @@ def person(ayla):
     bot_user = resolve_or_create_global_bot_user(
         channel="max", channel_user_id="drf1454-flow", chat_id="drf1454-flow-chat"
     )
-    # Веха 1 feature consent (152-ФЗ acknowledgement for the scanner surface).
-    bot_user.food_scanner_consent_at = timezone.now()
-    bot_user.save(update_fields=["food_scanner_consent_at"])
+    # Веха 1 feature consent for the scanner surface — a registry row
+    # ``food_diary_processing`` since DRF-1963 (M1).
+    from apps.consent.nutrition import DIARY, FOOD_DIARY_CONSENT_DOCUMENT_VERSION
+
+    record_global_consent(
+        bot_user,
+        consent_type=DIARY,
+        source="welcome",
+        document_version=FOOD_DIARY_CONSENT_DOCUMENT_VERSION,
+    )
     # Memory's own two bases, exactly as the pilot onboarding grants them.
     for consent_type in (
         ConsentRecord.ConsentType.PERSONAL_DATA.value,

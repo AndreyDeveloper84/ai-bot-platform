@@ -32,17 +32,17 @@ Then two conditions only this surface has:
   in :func:`base_queryset`, so in production this per-row check is
   belt-and-braces; it exists for callers that hand :func:`check_common` a
   row they built themselves.
-* ``food_scanner_consent_at`` -- the feature-specific 152-FZ consent for the
-  nutrition diary surface. Reading someone's food diary back to them,
-  unprompted, is processing that data; the same consent that gates writing
-  it gates volunteering it.
+* ``food_diary_processing`` -- the diary/scanner consent (DRF-1963, M1).
+  Reading someone's food diary back to them, unprompted, is processing that
+  data; the same consent that gates writing it gates volunteering it.
 
-  Unlike ``consent_at``, this column has **no** ``ConsentRecord`` behind it:
-  ``ConsentRecord.ConsentType`` has no food-scanner member, so there is no
-  second source to reconcile it against and no withdrawal that could leave
-  it stale. The column *is* the record. That is precisely why reading it
-  directly is correct and why reading ``consent_at`` directly was not --
-  the two look alike and are not alike.
+  It lives in the consent registry and is asked through
+  :func:`apps.consent.nutrition.diary_is_granted` -- the predicate the scanner
+  gate and the Mini App screen use. Until M1 this line read
+  ``BotUser.food_scanner_consent_at`` directly, on the argument that the
+  column *was* the record. It was not a record: no document version, no
+  source, and a withdrawal wiped the grant instead of stamping it. The owner
+  ruled (15.09, §6 M1) that it goes into the registry like every other consent.
 
 The per-feature opt-in (``daily_report_time`` / ``water_reminders``), which
 is OFF for everyone until they ask, is checked in
@@ -168,6 +168,8 @@ def check_common(bot_user: Any) -> str | None:
         return refused.reason
     if not (getattr(bot_user, "channel_user_id", "") or "").strip():
         return "no_chat_id"
-    if getattr(bot_user, "food_scanner_consent_at", None) is None:
+    from apps.consent.nutrition import diary_is_granted
+
+    if not diary_is_granted(bot_user):
         return "no_food_consent"
     return None
