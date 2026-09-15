@@ -219,6 +219,15 @@ describe("экран 01", () => {
     expect(screen.getByTestId("location")).toHaveTextContent(PUBLICATION_ROUTE);
   });
 
+  it("готово, но личность не подтверждена — кнопки отправки нет, строка о личности есть (M26)", async () => {
+    mockedReadiness.mockResolvedValue(
+      readiness([item("services", "done"), item("hours", "done"), item("profile", "done")], "unlinked"),
+    );
+    renderScreen();
+    expect(await screen.findByTestId("setup-identity")).toHaveTextContent("после подтверждения личности");
+    expect(screen.queryByRole("button", { name: PUBLISH_ENTRY_LABEL })).toBeNull();
+  });
+
   it("не готово — кнопки отправки на проверку нет", async () => {
     mockedReadiness.mockResolvedValue(FRESH);
     renderScreen();

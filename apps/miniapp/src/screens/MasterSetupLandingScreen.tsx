@@ -141,6 +141,9 @@ export function MasterSetupLandingScreen() {
   const next = firstOpenItem(readiness.items);
   const note = identityNote(readiness.identity.state);
   const greeting = name ? `${name}, всё готово 👋` : "Всё готово 👋";
+  // Отправить на проверку можно только связанному мастеру (ruling 6): `ready` бота
+  // считает пункты настройки, а личность — отдельной строкой ниже.
+  const canSubmit = readiness.ready && readiness.identity.state === "linked";
 
   return (
     <main className="screen setup-landing" aria-labelledby="setup-landing-title">
@@ -196,7 +199,7 @@ export function MasterSetupLandingScreen() {
             {fill.done > 0 ? CONTINUE_LABEL : START_LABEL}
           </button>
         ) : null}
-        {readiness.ready && (
+        {canSubmit && (
           <button
             type="button"
             className="btn-primary"
@@ -207,7 +210,7 @@ export function MasterSetupLandingScreen() {
         )}
         <button
           type="button"
-          className={next || readiness.ready ? "btn-secondary" : "btn-primary"}
+          className={next || canSubmit ? "btn-secondary" : "btn-primary"}
           onClick={() => navigate(HOME_ROUTE)}
         >
           {next ? LATER_LABEL : "Открыть кабинет"}
