@@ -65,6 +65,9 @@ class FoodClarifySkill:
         # (per the platform's channel-agnostic callback contract).
         if text in ("cb:food:diary", "cb:food:typo") or text in text_entry.TEXT_CALLBACKS:
             return True
+        # DRF-1838 — тап под сохранённой записью (исправить / удалить / вернуть).
+        if text_entry.is_entry_callback(text):
+            return True
         # DRF-1837 — an answer to the question this skill asked (grams, or
         # «что было»). Checked before the hint: «250» is not food-shaped.
         if text_entry.claims_text(context.conversation, text):
@@ -77,6 +80,9 @@ class FoodClarifySkill:
 
         if text in text_entry.TEXT_CALLBACKS:
             return text_entry.on_callback(context, text)
+
+        if text_entry.is_entry_callback(text):
+            return text_entry.on_entry_callback(context, text)
 
         if text == "cb:food:diary":
             return text_entry.on_diary_tap(context)

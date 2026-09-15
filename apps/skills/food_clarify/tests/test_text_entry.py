@@ -32,6 +32,9 @@ class _Catalogue:
     def __init__(self, *, not_found: bool = False) -> None:
         self.estimates: list[dict[str, Any]] = []
         self.logs: list[dict[str, Any]] = []
+        self.updates: list[dict[str, Any]] = []
+        self.deletes: list[dict[str, Any]] = []
+        self.restores: list[dict[str, Any]] = []
         self.not_found = not_found
 
     async def estimate_dish(self, *, external_user_id, dish_name, portion_g=None):
@@ -54,11 +57,45 @@ class _Catalogue:
     async def log_meal(self, **kwargs):
         self.logs.append(kwargs)
         return FoodLogResponse(
-            log_id="log-1",
+            log_id=self.log_id,
             dish_name=kwargs["dish_name"],
             meal_type=kwargs["meal_type"],
             calories=50.0 * kwargs["portion_multiplier"],
             raw={},
+        )
+
+    # DRF-1838 — правка / удаление / возврат сохранённой записи.
+    refuse: Exception | None = None
+    log_id = "log-1"
+
+    async def update_meal(self, **kwargs):
+        self.updates.append(kwargs)
+        if self.refuse is not None:
+            raise self.refuse
+        return FoodLogResponse(
+            log_id=kwargs["log_id"],
+            dish_name="борщ",
+            meal_type="other",
+            calories=50.0 * kwargs["portion_multiplier"],
+            raw={},
+        )
+
+    async def delete_meal(self, **kwargs):
+        from apps.integrations.ayla import MealDeletion
+
+        self.deletes.append(kwargs)
+        if self.refuse is not None:
+            raise self.refuse
+        return MealDeletion(
+            log_id=kwargs["log_id"], restore_window_expires_at="2026-09-15T12:15:00+00:00"
+        )
+
+    async def restore_meal(self, **kwargs):
+        self.restores.append(kwargs)
+        if self.refuse is not None:
+            raise self.refuse
+        return FoodLogResponse(
+            log_id=kwargs["log_id"], dish_name="борщ", meal_type="other", calories=150.0, raw={}
         )
 
 
@@ -288,3 +325,280 @@ class TestRouting:
         from apps.orchestrator.ui.keyboards import food_text_estimate_keyboard
 
         assert {b["callback"] for b in food_text_estimate_keyboard()} == text_entry.TEXT_CALLBACKS
+
+
+LOG_ID = "0b6f3c2e-9d1a-4c55-8e2f-1838aaaa0001"
+
+
+def _ayla_error(name: str, code: str) -> Exception:
+    import apps.integrations.ayla as ayla
+
+    return getattr(ayla, name)(code)
+
+
+class TestSavedEntryChips:
+    """DRF-1838 (F4) — §109 шаг 7: сохранённую запись можно исправить или удалить.
+
+    Каталог (``PATCH/DELETE internal/food-log/<id>/`` и ``…/restore/``)
+    подменён двойником: предмет — что бот показывает под записью, что зовёт по
+    тапу и что говорит на каждый отказ. Правила пересчёта и окна держит
+    каталог (``nutrition/tests/test_internal_food_log_edit.py``).
+    """
+
+    def _logged(self, conversation, catalogue):
+        _turn(conversation, "борщ 300г", catalogue)
+        _turn(conversation, "cb:food:diary", catalogue)
+        return _turn(conversation, "cb:food:text_log", catalogue)
+
+    def test_the_saved_entry_carries_fix_and_delete_chips_with_its_id(
+        self, conversation, consent
+    ) -> None:
+        catalogue = _Catalogue()
+
+        result = self._logged(conversation, catalogue)
+
+        assert result.reply_text == "Записала в дневник: борщ — 150 ккал."
+        assert [b["callback"] for b in result.action_data["buttons"]] == [
+            "cb:food:entry_fix:log-1",
+            "cb:food:entry_del:log-1",
+        ]
+
+    def test_delete_then_restore_within_the_window(self, conversation, consent) -> None:
+        catalogue = _Catalogue()
+
+        deleted = _turn(conversation, f"cb:food:entry_del:{LOG_ID}", catalogue)
+
+        assert catalogue.deletes == [{"external_user_id": "bot:max:1837", "log_id": LOG_ID}]
+        assert deleted.reply_text == (
+            "Убрала запись из дневника. Вернуть можно в течение 15 минут."
+        )
+        assert [b["callback"] for b in deleted.action_data["buttons"]] == [
+            f"cb:food:entry_undo:{LOG_ID}"
+        ]
+
+        restored = _turn(conversation, f"cb:food:entry_undo:{LOG_ID}", catalogue)
+
+        assert catalogue.restores == [{"external_user_id": "bot:max:1837", "log_id": LOG_ID}]
+        assert restored.reply_text == "Вернула в дневник: борщ — 150 ккал."
+        assert [b["callback"] for b in restored.action_data["buttons"]] == [
+            f"cb:food:entry_fix:{LOG_ID}",
+            f"cb:food:entry_del:{LOG_ID}",
+        ]
+
+    def test_restore_after_the_window_says_it_is_final(self, conversation, consent) -> None:
+        catalogue = _Catalogue()
+        catalogue.refuse = _ayla_error("MealRestoreExpiredError", "restore_window_expired")
+
+        result = _turn(conversation, f"cb:food:entry_undo:{LOG_ID}", catalogue)
+
+        # POSITIVE first: the catalogue was asked — the refusal is its answer.
+        assert catalogue.restores == [{"external_user_id": "bot:max:1837", "log_id": LOG_ID}]
+        assert result.reply_text == (
+            "Уже не вернуть: прошло больше 15 минут, запись удалена окончательно."
+        )
+        assert "buttons" not in (result.action_data or {})
+
+    @pytest.mark.parametrize(
+        ("refusal", "text"),
+        [
+            ("MealNotFoundError", "Этой записи уже нет в дневнике."),
+            ("MealEditConflictError", "Эту запись ведёт учёт воды — её убирает отмена стакана."),
+            (
+                "NutritionUnavailableError",
+                "Дневник сейчас не отвечает — ничего не изменила. Попробуй через минуту.",
+            ),
+        ],
+    )
+    def test_each_refusal_of_a_delete_is_named(self, conversation, consent, refusal, text) -> None:
+        catalogue = _Catalogue()
+        catalogue.refuse = _ayla_error(refusal, "refused")
+
+        result = _turn(conversation, f"cb:food:entry_del:{LOG_ID}", catalogue)
+
+        assert len(catalogue.deletes) == 1
+        assert result.reply_text == text
+
+    def test_fix_grams_asks_then_patches_the_portion(self, conversation, consent) -> None:
+        catalogue = _Catalogue()
+
+        prompt = _turn(conversation, f"cb:food:entry_fix:{LOG_ID}", catalogue)
+        assert prompt.reply_text == (
+            "Сколько граммов было на самом деле? Напиши число — пересчитаю запись."
+        )
+        assert catalogue.updates == []
+
+        result = _turn(conversation, "250", catalogue)
+
+        assert catalogue.updates == [
+            {"external_user_id": "bot:max:1837", "log_id": LOG_ID, "portion_multiplier": 2.5}
+        ]
+        assert result.reply_text == "Исправила: борщ — теперь 125 ккал."
+        assert [b["callback"] for b in result.action_data["buttons"]] == [
+            f"cb:food:entry_fix:{LOG_ID}",
+            f"cb:food:entry_del:{LOG_ID}",
+        ]
+        assert "food_text" not in conversation.skill_state
+
+    def test_an_out_of_range_answer_patches_nothing(self, conversation, consent) -> None:
+        catalogue = _Catalogue()
+        _turn(conversation, f"cb:food:entry_fix:{LOG_ID}", catalogue)
+
+        result = _turn(conversation, "5000", catalogue)
+
+        # POSITIVE first: the answer was ours — it got the grams hint, not the concierge.
+        assert result.reply_text == text_entry.GRAMS_UNREADABLE
+        assert catalogue.updates == []
+
+    def test_without_consent_nothing_is_edited_or_restored(self, conversation) -> None:
+        catalogue = _Catalogue()
+        with patch("apps.skills.food_clarify.text_entry._consent_open", return_value=False):
+            fix = _turn(conversation, f"cb:food:entry_fix:{LOG_ID}", catalogue)
+            undo = _turn(conversation, f"cb:food:entry_undo:{LOG_ID}", catalogue)
+
+        assert fix.reply_text == text_entry.CONSENT_TEXT
+        assert undo.reply_text == text_entry.CONSENT_TEXT
+        assert catalogue.updates == []
+        assert catalogue.restores == []
+
+
+class TestEntryTapHistoryH2:
+    """OD-WATER-TAP-HISTORY (H2, владелец не ответил): как тап правки своей записи
+    ложится в историю диалога. Одна точка выбора —
+    ``nutrition_global.EDIT_TAP_HISTORY``: «silence» (вариант б, рекомендован,
+    по умолчанию) или «phrase» (вариант а, подпись кнопки). Сырой payload —
+    никогда: тап обязан быть распознан, иначе обработчик запишет ``cb:…``.
+    """
+
+    ENTRY_PAYLOADS = (
+        f"cb:food:entry_fix:{LOG_ID}",
+        f"cb:food:entry_del:{LOG_ID}",
+        f"cb:food:entry_undo:{LOG_ID}",
+    )
+
+    def test_by_default_the_tap_is_recognised_and_silent(self) -> None:
+        from apps.orchestrator import nutrition_global
+
+        assert nutrition_global.EDIT_TAP_HISTORY == "silence"
+        for payload in self.ENTRY_PAYLOADS:
+            tap = nutrition_global.resolve_food_tap(payload)
+            # POSITIVE first: recognised — it will not fall through to the raw-payload writer.
+            assert tap is not None, payload
+            assert tap.history_text is None, payload
+
+    def test_phrase_mode_writes_the_button_label_never_the_payload(self, monkeypatch) -> None:
+        from apps.orchestrator import nutrition_global
+        from apps.orchestrator.ui.keyboards import (
+            food_text_deleted_keyboard,
+            food_text_logged_keyboard,
+        )
+
+        monkeypatch.setattr(nutrition_global, "EDIT_TAP_HISTORY", "phrase")
+        labels = {
+            b["callback"]: b["label"]
+            for b in (*food_text_logged_keyboard(LOG_ID), *food_text_deleted_keyboard(LOG_ID))
+        }
+        assert set(labels) == set(self.ENTRY_PAYLOADS)
+        for payload, label in labels.items():
+            tap = nutrition_global.resolve_food_tap(payload)
+            assert tap is not None, payload
+            assert tap.history_text == label
+            assert not tap.history_text.startswith("cb:")
+
+    def test_an_unknown_mode_falls_back_to_silence(self, monkeypatch) -> None:
+        from apps.orchestrator import nutrition_global
+
+        monkeypatch.setattr(nutrition_global, "EDIT_TAP_HISTORY", "payload")
+        tap = nutrition_global.resolve_food_tap(self.ENTRY_PAYLOADS[0])
+        assert tap is not None
+        assert tap.history_text is None
+
+
+class TestEntryDecisionsAndEdges:
+    """DRF-1838, ревью: решения, которые код принимает молча, и края.
+
+    Два первых теста сторожат решения, у которых не было ни одного теста:
+    удаление своей записи не требует согласия; выключенный дневник отказывает
+    на все три тапа. Остальные — края, найденные ревью.
+    """
+
+    def test_delete_does_not_need_consent(self, conversation) -> None:
+        catalogue = _Catalogue()
+        with patch("apps.skills.food_clarify.text_entry._consent_open", return_value=False):
+            result = _turn(conversation, f"cb:food:entry_del:{LOG_ID}", catalogue)
+
+        assert len(catalogue.deletes) == 1
+        assert result.reply_text == "Убрала запись из дневника. Вернуть можно в течение 15 минут."
+
+    def test_nutrition_off_refuses_every_entry_tap(self, conversation, consent, settings) -> None:
+        settings.NUTRITION_ENABLED = False
+        catalogue = _Catalogue()
+
+        replies = [
+            _turn(conversation, f"cb:food:{action}:{LOG_ID}", catalogue).reply_text
+            for action in ("entry_fix", "entry_del", "entry_undo")
+        ]
+
+        assert replies == [text_entry.NUTRITION_OFF_TEXT] * 3
+        assert catalogue.updates == []
+        assert catalogue.deletes == []
+        assert catalogue.restores == []
+
+    def test_an_uncertain_outcome_does_not_claim_nothing_changed(
+        self, conversation, consent
+    ) -> None:
+        catalogue = _Catalogue()
+        catalogue.refuse = _ayla_error("NutritionUncertainOutcomeError", "network: ReadTimeout")
+
+        result = _turn(conversation, f"cb:food:entry_del:{LOG_ID}", catalogue)
+
+        assert len(catalogue.deletes) == 1
+        assert result.reply_text == (
+            "Не знаю, дошло ли: дневник не ответил вовремя. "
+            "Загляни в дневник, прежде чем повторять."
+        )
+
+    @pytest.mark.parametrize("pending", ["_food_correction_pending", "_anketa_fsm_active"])
+    def test_fix_is_refused_while_another_question_would_take_the_number(
+        self, conversation, consent, pending
+    ) -> None:
+        catalogue = _Catalogue()
+        with patch(f"apps.orchestrator.nutrition_global.{pending}", return_value=True):
+            result = _turn(conversation, f"cb:food:entry_fix:{LOG_ID}", catalogue)
+
+        assert result.reply_text == (
+            "Сначала закончим вопрос, который уже открыт, — потом исправлю граммы."
+        )
+        assert "food_text" not in conversation.skill_state
+
+    def test_a_consent_refusal_clears_the_pending_fix(self, conversation, consent) -> None:
+        catalogue = _Catalogue()
+        _turn(conversation, f"cb:food:entry_fix:{LOG_ID}", catalogue)
+        assert conversation.skill_state["food_text"]["awaiting_fix_grams"] is True
+
+        with patch("apps.skills.food_clarify.text_entry._consent_open", return_value=False):
+            result = _turn(conversation, "250", catalogue)
+
+        assert result.reply_text == text_entry.CONSENT_TEXT
+        assert "food_text" not in conversation.skill_state
+        assert catalogue.updates == []
+
+    def test_an_id_too_long_for_a_button_gets_no_chips(self, conversation, consent) -> None:
+        catalogue = _Catalogue()
+        catalogue.log_id = "x" * 46  # cb:food:entry_undo: (19) + 46 = 65 байт > 64
+
+        _turn(conversation, "борщ 300г", catalogue)
+        _turn(conversation, "cb:food:diary", catalogue)
+        result = _turn(conversation, "cb:food:text_log", catalogue)
+
+        # POSITIVE first: the entry was written and said so.
+        assert result.reply_text == "Записала в дневник: борщ — 150 ккал."
+        assert result.action_data["log_id"] == "x" * 46
+        assert "buttons" not in result.action_data
+
+    def test_a_long_id_tap_still_obeys_the_history_choice(self) -> None:
+        from apps.orchestrator import nutrition_global
+
+        tap = nutrition_global.resolve_food_tap("cb:food:entry_fix:" + "y" * 60)
+
+        assert tap is not None
+        assert tap.history_text is None
