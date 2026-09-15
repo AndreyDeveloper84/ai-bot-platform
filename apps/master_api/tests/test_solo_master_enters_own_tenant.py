@@ -144,14 +144,15 @@ class TestTheWorkingRowWins:
 
         assert resp.status_code == 200, resp.content
 
-    def test_a_deactivated_staff_row_and_an_archived_card_are_not_working(
+    def test_a_deactivated_staff_row_and_an_archived_card_are_not_working_2026_09_15(
         self, salon_bot, salon, solo
     ):
-        """Отрицательный контроль на само слово «рабочая».
+        """Отрицательный контроль на само слово «рабочая». Эталон ПЕРЕВЁРНУТ 15.09.2026.
 
-        Снятый owner и карточка в архиве — не рабочая строка: человек
-        остаётся тем, кем его видит тенант подписи. Зелёный и до правки
-        (правило совпадает со старым), оставлен как граница нового.
+        Снятый owner и карточка в архиве — не рабочая строка. До 15.09 человек
+        оставался тем, кем его видит тенант подписи (строка салона). DRF-1785
+        (срез 4c; решение владельца R4 а, главное окно Q1): подпись салонного бота
+        без рабочей строки → ``None`` — никакого fallback на тенант подписи.
         """
 
         now = timezone.now()
@@ -163,17 +164,28 @@ class TestTheWorkingRowWins:
         card = _master(solo, b)
         CatalogMaster.all_tenants.filter(pk=card.pk).update(archived_at=now)
 
-        assert _resolve_bot_user(_Verified(CHANNEL_USER_ID, bot_slug="salon")) == a
+        assert a.tenant == salon
+        assert _resolve_bot_user(_Verified(CHANNEL_USER_ID, bot_slug="salon")) is None
 
 
 class TestZeroWorkingRowsKeepsTodaysRule:
-    def test_a_plain_customer_stays_in_the_signing_bots_tenant(self, salon_bot, salon, solo):
-        """Отрицательный контроль: клиент салона с второй строкой где-то ещё — салон, как сегодня."""
+    def test_a_plain_customer_from_the_salon_bot_resolves_to_nobody_2026_09_15(
+        self, salon_bot, salon, solo
+    ):
+        """Эталон ПЕРЕВЁРНУТ 15.09.2026 (DRF-1785, срез 4c; решение владельца R4 а, главное окно Q1).
+
+        До этого дня: клиент салона со второй строкой где-то ещё и подпись
+        салонного бота → строка тенанта подписи (formula-tela), «как сегодня».
+        Подпись салонного бота без рабочей строки теперь → ``None``: ни тенант
+        бота подписи, ни ``MAX_BOT_TENANT_SLUG``, ни «последняя строка». Клиентский
+        бот — как раньше (``test_me_from_the_client_bot_stays_the_salon_customer``).
+        """
 
         a = BotUser.all_tenants.create(tenant=salon, channel="max", channel_user_id=CHANNEL_USER_ID)
         BotUser.all_tenants.create(tenant=solo, channel="max", channel_user_id=CHANNEL_USER_ID)
 
-        assert _resolve_bot_user(_Verified(CHANNEL_USER_ID, bot_slug="salon")) == a
+        assert a.tenant == salon
+        assert _resolve_bot_user(_Verified(CHANNEL_USER_ID, bot_slug="salon")) is None
 
     def test_unknown_user_is_still_none(self, salon_bot, solo_pair):
         assert resolve_bot_user(_Verified("no-such-person")) is None

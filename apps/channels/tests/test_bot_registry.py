@@ -439,3 +439,16 @@ class TestTheSalonBotDoesNotBelongToASalon:
         env["MAX_BOT_CLIENT2_TENANT_SLUG"] = "other-salon"
 
         assert len(parse_registry(env)) == 3
+
+
+class TestTheSalonBotWithoutTheVariable:
+    def test_a_salon_bot_without_a_tenant_slug_is_valid_and_resolves_its_tenant_later(self):
+        """DRF-1785 (срез 4c): переменная снята — запись салонного бота валидна, тенант позже."""
+        env = {k: v for k, v in TWO_BOTS.items() if k != "MAX_BOT_SALON_TENANT_SLUG"}
+
+        _client, salon = parse_registry(env)
+
+        assert salon.slug == "salon"
+        assert salon.stream == "max_salon"
+        assert salon.tenant_slug == ""
+        assert salon.is_tenant_less is True
