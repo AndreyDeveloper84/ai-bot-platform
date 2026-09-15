@@ -412,7 +412,7 @@ class TestDecisionPolicyInTheLine:
             "facts_used": ["safety.state", "engine.reason_codes", "turn.phrase"],
             "decision_policy_version": DECISION_POLICY_VERSION,
             "catalog_writable": False,
-            "taxonomy_version": "h5-codes:no-phrase-map",
+            "taxonomy_version": "h5-j1j2:owner-2026-09-15",
             "recognized_targets": [],
             "primary": None,
             "alternatives": [],

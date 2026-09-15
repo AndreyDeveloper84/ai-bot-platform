@@ -2,8 +2,8 @@
 
 * коды H5/B9 байт в байт с решением владельца и именами констант каталога —
   ``TestCodesAreTheOwnersBytes``;
-* боевые словари J1/J2 в этом срезе пусты и не могут въехать молча —
-  ``TestProductionDictionariesAreEmpty``;
+* боевые словари J1/J2 — ровно утверждённый список владельца (DRF-1945) —
+  ``TestProductionDictionariesAreTheOwnerList``;
 * неизвестное значение — отказ, не выдумка; сочетания не ограничены (I1 а) —
   ``TestValidation``;
 * признаки боли (I2) и health-контекста (п.6) — ``TestSignals``.
@@ -35,36 +35,46 @@ class TestCodesAreTheOwnersBytes:
         # Recommendation.Role (каталог): primary | alternative
         assert (tx.ROLE_PRIMARY, tx.ROLE_ALTERNATIVE) == ("primary", "alternative")
 
-    def test_version_label_fits_the_catalog_and_does_not_claim_a_phrase_map(self):
-        assert tx.TAXONOMY_VERSION == "h5-codes:no-phrase-map"
+    def test_version_label_fits_the_catalog_and_names_the_owner_ruling(self):
+        assert tx.TAXONOMY_VERSION == "h5-j1j2:owner-2026-09-15"
         assert len(tx.TAXONOMY_VERSION) <= 32
 
 
-class TestProductionDictionariesAreEmpty:
-    """Значения J1/J2 — отдельным коммитом после слова владельца (главное окно 15.09)."""
+#: J2 владельца (§4) — дословно.
+OWNER_J2 = {
+    "FACE_FRESHNESS": ("ADDRESS", "PROVIDER_SESSION"),
+    "PUFFINESS_REDUCTION": ("ADDRESS", "PROVIDER_SESSION"),
+    "RELAXATION": ("SUPPORT", "PROVIDER_SESSION"),
+    "BACK_COMFORT": ("RECOVER", "PROVIDER_SESSION"),
+}
 
-    def test_phrase_map_is_empty_until_the_owner_answers(self):
-        # empty-assert-ok: пустота — предмет теста (J1 ждёт владельца); краснеет на въехавшей фразе — проба P5 в PR DRF-1932
-        assert dict(tx.TARGET_PHRASES) == {}, (
-            "словарь «фраза → target» (J1) не пуст: значения — только по слову владельца "
-            "и вместе со сменой TAXONOMY_VERSION"
-        )
+#: J1 владельца (§3) — дословно, только явный список. «Близкие косметические
+#: формулировки» к FACE_FRESHNESS: пусто, ждёт списка владельца (главное окно 15.09).
+OWNER_J1 = {
+    "хочу выглядеть свежее": "FACE_FRESHNESS",
+    "хочу снять напряжение": "RELAXATION",
+    "хочу расслабить спину": "BACK_COMFORT",
+    "спина напряжена": "BACK_COMFORT",
+    "хочу снять зажимы": "BACK_COMFORT",
+    "устала спина после работы": "BACK_COMFORT",
+}
 
-    def test_defaults_are_empty_until_the_owner_answers(self):
-        # empty-assert-ok: пустота — предмет теста (J2 ждёт владельца), как у J1 выше
-        assert dict(tx.TARGET_DEFAULTS) == {}, (
-            "умолчания «target → family, action_type» (J2) не пусты: значения — только по "
-            "слову владельца и вместе со сменой TAXONOMY_VERSION"
-        )
 
-    def test_with_empty_dictionaries_no_phrase_yields_a_target(self):
-        for text in (
-            "Хочу выглядеть свежее",
-            "Хочу снять напряжение",
-            "хочу расслабиться вечером",
-            "хочу расслабить спину",
-        ):
-            assert tx.read_turn_needs(text).recognized_targets == ()
+class TestProductionDictionariesAreTheOwnerList:
+    """DRF-1945: боевой словарь = утверждённый список, строкой. Любая фраза сверх
+    списка или правка умолчания краснит здесь — вместе со сменой TAXONOMY_VERSION."""
+
+    def test_phrase_map_is_exactly_the_owner_j1(self):
+        assert dict(tx.TARGET_PHRASES) == OWNER_J1
+
+    def test_defaults_are_exactly_the_owner_j2(self):
+        assert dict(tx.TARGET_DEFAULTS) == OWNER_J2
+
+
+class TestOwnerPhrasesJ1:
+    @pytest.mark.parametrize("phrase, target", sorted(OWNER_J1.items()))
+    def test_each_owner_phrase_gives_its_target(self, phrase, target):
+        assert tx.read_turn_needs(phrase.capitalize()).recognized_targets == (target,)
 
 
 class TestValidation:
@@ -154,14 +164,6 @@ class TestSignals:
 # DRF-1945 — боевые словари J1/J2 по решению владельца 15.09                   #
 # (docs/PROMPT_ORCHESTRATOR_AYLA_CONTROLLED_PILOT_NEXT_WAVE.md §3–§4)          #
 # --------------------------------------------------------------------------- #
-
-#: J2 владельца (§4) — дословно.
-OWNER_J2 = {
-    "FACE_FRESHNESS": ("ADDRESS", "PROVIDER_SESSION"),
-    "PUFFINESS_REDUCTION": ("ADDRESS", "PROVIDER_SESSION"),
-    "RELAXATION": ("SUPPORT", "PROVIDER_SESSION"),
-    "BACK_COMFORT": ("RECOVER", "PROVIDER_SESSION"),
-}
 
 #: §3 NO TARGET: тексты кнопок первого хода (``apps/channels/max/quick_actions.py``)
 #: и краткие формы владельца.

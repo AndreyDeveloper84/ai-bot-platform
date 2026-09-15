@@ -158,12 +158,11 @@ class TestCandidateWhenInputUnavailable:
         assert verdict.candidate_nba is None
         assert verdict.recognized_targets == ("RELAXATION",)
 
-    def test_production_dictionaries_give_no_candidate(self):
-        needs = tx.read_turn_needs("хочу расслабиться вечером")
+    def test_production_dictionaries_name_the_owner_version(self):
+        needs = tx.read_turn_needs("Хочу снять напряжение")
         verdict = dp.decide(_evidence("normal", INPUT_UNAVAILABLE), needs=needs)
 
-        assert verdict.candidate_nba is None
-        assert verdict.nba_fields()["taxonomy_version"] == "h5-codes:no-phrase-map"
+        assert verdict.nba_fields()["taxonomy_version"] == "h5-j1j2:owner-2026-09-15"
 
     def test_candidate_status_is_never_catalog_writable(self):
         with pytest.raises(dp.NotCatalogWritable):
@@ -419,3 +418,44 @@ class TestOwnerButtonsWithoutATarget:
         assert verdict.reason_codes == (reason,)
         assert verdict.primary is None
         assert verdict.candidate_nba is None
+
+
+#: J1 + J2 владельца (§3–§4): фраза → ожидаемая тройка.
+OWNER_PHRASE_TRIPLES = [
+    ("Хочу выглядеть свежее", tx.Triple("FACE_FRESHNESS", "ADDRESS", "PROVIDER_SESSION")),
+    ("Хочу снять напряжение", tx.Triple("RELAXATION", "SUPPORT", "PROVIDER_SESSION")),
+    ("Хочу расслабить спину", tx.Triple("BACK_COMFORT", "RECOVER", "PROVIDER_SESSION")),
+    ("Спина напряжена", tx.Triple("BACK_COMFORT", "RECOVER", "PROVIDER_SESSION")),
+    ("Хочу снять зажимы", tx.Triple("BACK_COMFORT", "RECOVER", "PROVIDER_SESSION")),
+    ("Устала спина после работы", tx.Triple("BACK_COMFORT", "RECOVER", "PROVIDER_SESSION")),
+]
+
+
+class TestOwnerPhrasesSelectTheOwnerTriple:
+    @pytest.mark.parametrize("text, triple", OWNER_PHRASE_TRIPLES)
+    def test_ready_input_is_a_clear_primary_with_the_owner_triple(self, text, triple):
+        verdict = _decide_production(text)
+
+        assert verdict.result_status is dp.PolicyStatus.CLEAR_PRIMARY
+        assert verdict.primary == triple
+        assert verdict.alternatives == ()
+
+    @pytest.mark.parametrize("text, triple", OWNER_PHRASE_TRIPLES)
+    def test_on_the_pilot_path_the_owner_triple_is_a_candidate(self, text, triple):
+        """τ не откалиброван → вход готовности недоступен → тройка в ``candidate_nba``."""
+        verdict = _decide_production(text, reason_codes=INPUT_UNAVAILABLE)
+
+        assert verdict.result_status is dp.PolicyStatus.POLICY_INPUT_UNAVAILABLE
+        assert verdict.candidate_nba == triple
+        assert verdict.primary is None
+
+    def test_tension_in_the_back_is_relaxation_until_the_owner_adds_a_phrase(self):
+        """Главное окно 15.09 (Q3): «напряжение в спине» в J1 нет — фраза даёт только
+        «хочу снять напряжение». Если владелец добавит фразу про спину, тест краснеет
+        и возвращает вопрос о правиле перекрытия фраз."""
+        verdict = _decide_production("Хочу снять напряжение в спине")
+
+        assert verdict.result_status is dp.PolicyStatus.CLEAR_PRIMARY
+        assert verdict.recognized_targets == ("RELAXATION",)
+        assert verdict.primary == tx.Triple("RELAXATION", "SUPPORT", "PROVIDER_SESSION")
+        assert verdict.alternatives == ()
