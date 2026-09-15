@@ -14,7 +14,7 @@ Mini App закрывается экраном «Открой Ayla из MAX».
 * наружу — **401 ``no_init_data``**, одинаково на всех поверхностях;
 * внутрь — строка лога ``miniapp.auth.transport_refused surface=… reason=…``,
   где ``reason`` ∈ ``missing | empty | malformed | bad_signature | stale |
-  invalid``. Значение initData и id человека в лог не пишутся.
+  future | invalid``. Значение initData и id человека в лог не пишутся.
 
 ``InitDataNotConfigured`` — не транспорт, а поломка сервера: остаётся 500
 ``server_misconfigured``.
@@ -34,6 +34,7 @@ from apps.miniapp_api.auth import (
     HEADER_PREFIX,
     InitDataBadSignature,
     InitDataError,
+    InitDataFromFuture,
     InitDataMalformed,
     InitDataNotConfigured,
     InitDataStale,
@@ -59,6 +60,8 @@ def _reason(header: str, exc: InitDataError) -> str:
         return "empty"
     if isinstance(exc, InitDataStale):
         return "stale"
+    if isinstance(exc, InitDataFromFuture):
+        return "future"
     if isinstance(exc, InitDataBadSignature):
         return "bad_signature"
     if isinstance(exc, InitDataMalformed):

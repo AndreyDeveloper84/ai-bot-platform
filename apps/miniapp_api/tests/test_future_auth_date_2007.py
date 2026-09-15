@@ -107,7 +107,9 @@ def test_future_refusal_is_logged_with_reason_future(caplog):
     with caplog.at_level(logging.INFO):
         view(RequestFactory().get("/", HTTP_AUTHORIZATION=header))
 
-    refused = [r.getMessage() for r in caplog.records if "miniapp.auth.transport_refused" in r.getMessage()]
+    refused = [
+        r.getMessage() for r in caplog.records if "miniapp.auth.transport_refused" in r.getMessage()
+    ]
     assert refused, "отказ транспорта не записан в лог"
     assert any("reason=future" in m for m in refused), refused
 
