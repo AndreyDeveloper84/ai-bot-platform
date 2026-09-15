@@ -1039,6 +1039,7 @@ class TestSlotPickCallback:
             with tenant_scope(tenant):
                 first = BookingSkill().handle(ctx)
                 second = BookingSkill().handle(ctx)
+        assert first.action_data is not None and second.action_data is not None
         assert (
             first.action_data["pending_action"]["token"]
             == second.action_data["pending_action"]["token"]
