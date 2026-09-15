@@ -79,11 +79,29 @@ class TestNoSignal:
     def test_non_pain_messages(self, text: str) -> None:
         assert classify(text) == PainSignal.NONE
 
-    def test_long_text_does_not_classify(self) -> None:
-        """200-char cap: full-text questions about pain are an LLM job,
-        not the classifier's."""
+
+class TestNoLengthCap:
+    """DRF-1996 (S-1a): the rule changed, the test did not drift.
+
+    The old test here pinned the 200-character cap — «full-text questions
+    about pain are an LLM job» — and asserted ``NONE`` for any long text. The
+    same cap silenced red flags: a person who described an emergency in more
+    words got no red flag at all (CLINICAL-F01). The S1 detector validation
+    report requires «отсутствие length cap / иных silent-miss механизмов»
+    (clinical-review-001 F01 п. 2), so the expectation is reversed on purpose.
+    """
+
+    def test_long_text_with_pain_is_soft(self) -> None:
         long_text = "болит " * 100  # well over 200 chars
-        assert classify(long_text) == PainSignal.NONE
+        assert len(long_text) > 200
+        assert classify(long_text) == PainSignal.SOFT
+
+    def test_a_red_flag_at_the_end_of_a_long_message_is_caught(self) -> None:
+        long_text = (
+            "Хочу записаться на массаж спины в пятницу после работы. " * 5 + "теряю сознание"
+        )
+        assert len(long_text) > 200
+        assert classify(long_text) == PainSignal.RED_FLAG
 
 
 class TestTypeTolerance:
