@@ -154,9 +154,8 @@ def handle_inbound(payload: dict[str, Any], tenant: "Tenant") -> None:
         return
 
     logger.info(
-        "channels.telegram.handler.received tenant=%s channel_user_id=%s text_len=%d attachments=%d is_callback=%s",
+        "channels.telegram.handler.received tenant=%s text_len=%d attachments=%d is_callback=%s",
         tenant.id,
-        event.channel_user_id,
         len(event.text),
         len(event.attachments),
         bool(event.raw.get("callback_query_id")),

@@ -976,9 +976,9 @@ def handle_max_event(payload: dict, trace_id: str | uuid.UUID | None = None) -> 
         )
         return
 
+    # DRF-2009: без id человека в канале — ПДн в логе не пишутся.
     logger.info(
-        "channels.max.handler.received channel_user_id=%s text_len=%d attachments=%d",
-        event.channel_user_id,
+        "channels.max.handler.received text_len=%d attachments=%d",
         len(event.text),
         len(event.attachments),
     )

@@ -644,9 +644,7 @@ def _remember_salon_choice(event: CanonicalEvent, slug: str | None) -> None:
         else:
             cache.delete(_salon_choice_key(event))
     except Exception:  # noqa: BLE001
-        logger.warning(
-            "channels.max.salon.choice_cache_unavailable channel_user_id=%s", event.channel_user_id
-        )
+        logger.warning("channels.max.salon.choice_cache_unavailable")  # DRF-2009: без id
 
 
 def _ask_which_salon(event: CanonicalEvent, tenants) -> None:
@@ -660,10 +658,7 @@ def _ask_which_salon(event: CanonicalEvent, tenants) -> None:
 
     entry = resolve_by_stream(SALON_STREAM, effective_registry())
     if entry is None:
-        logger.error(
-            "channels.max.salon.no_salon_bot channel_user_id=%s — cannot ask which salon",
-            event.channel_user_id,
-        )
+        logger.error("channels.max.salon.no_salon_bot — cannot ask which salon")  # DRF-2009
         return
     buttons = [
         {"label": (t.name or t.slug), "callback": f"{CB_SALON_CHOOSE_PREFIX}{t.slug}"}
@@ -774,9 +769,8 @@ def _serve_stranger(event: CanonicalEvent, trace_id: str | uuid.UUID | None) -> 
     entry = resolve_by_stream(SALON_STREAM, effective_registry())
     if entry is None:
         logger.error(
-            "channels.max.salon.no_salon_bot channel_user_id=%s — refusing to reply; "
+            "channels.max.salon.no_salon_bot — refusing to reply; "
             "declare a bot with MAX_BOT_<SLUG>_STREAM=%s",
-            event.channel_user_id,
             SALON_STREAM,
         )
         return
@@ -1216,10 +1210,7 @@ def _register_solo_provider(
             city=city,
         )
     except SoloOnboardingError:
-        logger.exception(
-            "channels.max.salon.solo_register_failed channel_user_id=%s",
-            identity.channel_user_id,
-        )
+        logger.exception("channels.max.salon.solo_register_failed")  # DRF-2009: без id
         _reply(event, SOLO_FAILED)
         return
 
