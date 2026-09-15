@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import json
+from typing import TYPE_CHECKING
 import uuid
 from unittest.mock import MagicMock
 
@@ -29,6 +30,9 @@ from apps.identity.models import BotUser
 from apps.integrations.ayla.booking_client import BookingBadRequestError, BookingUnavailableError
 from apps.master_api import views
 from apps.master_api.tests.conftest import init_data_header
+
+if TYPE_CHECKING:
+    from django.test.client import _MonkeyPatchedWSGIResponse
 
 pytestmark = pytest.mark.django_db
 
@@ -61,7 +65,7 @@ def _auth() -> dict:
     return {"HTTP_AUTHORIZATION": init_data_header("12345")}
 
 
-def _json(client: Client, method: str, url: str, body) -> object:
+def _json(client: Client, method: str, url: str, body: object) -> "_MonkeyPatchedWSGIResponse":
     return getattr(client, method)(
         url, data=json.dumps(body), content_type="application/json", **_auth()
     )
