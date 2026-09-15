@@ -263,3 +263,39 @@ describe("пустой день не зовёт в неработающий ск
     expect(screen.getByText("Другое")).toBeInTheDocument();
   });
 });
+
+
+describe("строка диетолога (DRF-1897)", () => {
+  const LINE = "Третий вечер ужин после девяти. Если хочешь, подумаем, что можно сдвинуть.";
+
+  it("пришла — стоит под итогами дословно", async () => {
+    mockedLoad.mockResolvedValue({
+      state: "entries",
+      entries: [OATS],
+      hideNumbers: false,
+      today: today({ coach_observation: LINE }),
+    });
+    renderScreen();
+
+    const line = await screen.findByText(LINE);
+    const totals = screen.getByRole("region", { name: "Сегодня" });
+    // Под итогами: итоги в документе раньше строки.
+    expect(
+      totals.compareDocumentPosition(line) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+  });
+
+  it("не пришла — ни абзаца", async () => {
+    mockedLoad.mockResolvedValue({
+      state: "entries",
+      entries: [OATS],
+      hideNumbers: false,
+      today: today(),
+    });
+    const { container } = renderScreen();
+
+    // POSITIVE first: the ready diary did render.
+    expect(await screen.findByText("Овсянка с ягодами")).toBeInTheDocument();
+    expect(container.querySelector(".food-scanner-diary__observation")).toBeNull();
+  });
+});

@@ -256,6 +256,15 @@ function DiaryReady({
         </section>
       )}
 
+      {/* Строка диетолога (DRF-1897) — под итогами, тем же текстом, что в
+          чате. Сервер присылает её только этому экрану и уже записал её
+          в журнал как показанную; нет ключа — нет и абзаца. */}
+      {day.today.coach_observation && (
+        <p className="food-scanner-diary__observation">
+          {day.today.coach_observation}
+        </p>
+      )}
+
       {scanEntryLive && (
         <div className="food-scanner-screen__cta-stack">
           <button
