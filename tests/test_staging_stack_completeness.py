@@ -92,6 +92,16 @@ EXPECTED_STAGING_DJANGO_SERVICES = EXPECTED_BASE_DJANGO_SERVICES | {
 
 STAGING_SETTINGS_MODULE = "config.settings.staging"
 
+#: Stateful infra the staging stack starts from the base file (DRF-1915).
+#: Pinned for the same reason as the Django sets above: a derived set that
+#: silently shrinks makes "every started service restarts" vacuously true.
+EXPECTED_STAGING_INFRA_SERVICES = {"postgres", "redis", "minio"}
+
+#: What a host reboot must not undo. `restart=no` (compose's default) left
+#: postgres/redis/minio down after the 2026-09-15 04:14 UTC reboot while
+#: every app service came back, and the bot answered /readyz/ with 503.
+RESTART_POLICY = "unless-stopped"
+
 
 class _TagTolerantLoader(yaml.SafeLoader):
     """SafeLoader that tolerates compose's `!override` / `!reset` tags.
@@ -367,3 +377,105 @@ def test_the_resolver_guard_fails_when_a_service_loses_its_staging_stanza(tmp_pa
     # whole check fell over.
     for neighbour in sorted(EXPECTED_STAGING_DJANGO_SERVICES - {"shadow-worker"}):
         _assert_service_is_staged(mutated, neighbour)
+
+
+# ---------------------------------------------------------------------------
+# Restart policy (DRF-1915): a reboot must bring the whole stack back.
+#
+# The base file gives postgres/redis/minio no `restart:`, so compose creates
+# them with `restart=no`. After the pilot host was resized and rebooted
+# (2026-09-15 04:14 UTC) every app service came back — they carry
+# `unless-stopped` — and the three stores did not; the bot answered /readyz/
+# with 503 until they were started by hand. `docker update --restart` on the
+# host survives only until the next `up` recreates the containers.
+# ---------------------------------------------------------------------------
+
+
+def _started_staging_services(base: dict, staging: dict) -> dict[str, dict]:
+    """The services a plain `up -d` of the two files starts, merged per key.
+
+    Staging keys win over base keys, as in compose. A service with
+    `profiles:` is left out — `chromadb` is profiled `off` in staging, and a
+    service that never starts has nothing to restart.
+    """
+
+    base_services = base.get("services") or {}
+    staging_services = staging.get("services") or {}
+    started: dict[str, dict] = {}
+    for name in set(base_services) | set(staging_services):
+        service = {**(base_services.get(name) or {}), **(staging_services.get(name) or {})}
+        if service.get("profiles"):
+            continue
+        started[name] = service
+    return started
+
+
+def _services_without_restart_policy(started: dict[str, dict]) -> list[str]:
+    return sorted(
+        name for name, service in started.items() if service.get("restart") != RESTART_POLICY
+    )
+
+
+def test_the_started_staging_set_is_the_one_the_restart_guard_assumes():
+    """Arming check: the per-service restart test below cannot pass on an empty set."""
+
+    started = set(_started_staging_services(_load(BASE_COMPOSE), _load(STAGING_COMPOSE)))
+    expected = EXPECTED_STAGING_DJANGO_SERVICES | EXPECTED_STAGING_INFRA_SERVICES
+
+    assert started == expected, (
+        f"The staging stack now starts {sorted(started)}, not {sorted(expected)}. "
+        "If you added a service, give it `restart: unless-stopped` in "
+        f"{STAGING_COMPOSE.name} and record it here."
+    )
+
+
+@pytest.mark.parametrize(
+    "service_name",
+    sorted(EXPECTED_STAGING_DJANGO_SERVICES | EXPECTED_STAGING_INFRA_SERVICES),
+)
+def test_every_started_staging_service_comes_back_after_a_reboot(service_name: str):
+    started = _started_staging_services(_load(BASE_COMPOSE), _load(STAGING_COMPOSE))
+    policy = started[service_name].get("restart")
+
+    assert policy == RESTART_POLICY, (
+        f"`{service_name}` resolves to restart={policy!r} in the staging stack. "
+        f"Without `restart: {RESTART_POLICY}` a host reboot leaves it down — on "
+        "2026-09-15 postgres/redis/minio stayed down after the 04:14 UTC reboot "
+        "and the bot answered /readyz/ with 503 (DRF-1915). Set it in "
+        f"{STAGING_COMPOSE.name}; `docker update` on the host is undone by the "
+        "next `up`."
+    )
+
+
+def test_the_restart_guard_names_exactly_the_service_that_lost_its_policy():
+    """The mutation: drop the policy from one store, require exactly that name."""
+
+    base = _load(BASE_COMPOSE)
+    staging = _load(STAGING_COMPOSE)
+
+    postgres = (staging.get("services") or {}).get("postgres") or {}
+    removed = postgres.pop("restart", None)
+    assert removed == RESTART_POLICY, (
+        f"{STAGING_COMPOSE.name} gives `postgres` restart={removed!r}, so there is "
+        "no policy to remove — the mutation cannot be applied, and that absence "
+        "is the DRF-1915 state itself."
+    )
+
+    assert _services_without_restart_policy(_started_staging_services(base, staging)) == [
+        "postgres"
+    ]
+
+
+def test_resolved_stack_restarts_every_started_service(resolved_stack: dict):
+    """What `docker compose` will actually create — skips without the docker CLI."""
+
+    services = resolved_stack.get("services") or {}
+    assert EXPECTED_STAGING_INFRA_SERVICES <= set(services), (
+        f"The resolved stack lacks {sorted(EXPECTED_STAGING_INFRA_SERVICES - set(services))}."
+    )
+    policies = {name: service.get("restart") for name, service in services.items()}
+    assert policies, "The resolved stack has no services — this test sees nothing to guard."
+    assert policies == {name: RESTART_POLICY for name in policies}, (
+        f"Every resolved service must carry restart={RESTART_POLICY!r}; resolved policies: "
+        f"{dict(sorted(policies.items()))}"
+    )
