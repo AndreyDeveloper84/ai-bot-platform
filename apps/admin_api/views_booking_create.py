@@ -142,8 +142,10 @@ def create_booking(request: HttpRequest) -> HttpResponse:
         idempotency_key = str(uuid.uuid4())
 
     from apps.integrations.ayla.health_check import text_for
+    from apps.integrations.ayla.offer_refusal import OFFER_NOT_SELLABLE_SLUG, staff_text_for
     from apps.integrations.ayla.salon_client import (
         SalonAPIError,
+        SalonOfferNotSellable,
         SalonForbidden,
         SalonHealthCheckHandoff,
         SalonNotConfigured,
@@ -263,6 +265,24 @@ def create_booking(request: HttpRequest) -> HttpResponse:
             # работа. Слитый здесь код отнял бы у экрана именно то
             # различие, ради которого владелец завёл `reason_code`.
             reason_code=(exc.code or "").lower() or "health_check_unspecified",
+        )
+    except SalonOfferNotSellable as exc:
+        # DRF-1989. Осознанный отказ каталога — не поломка: раньше он уходил в
+        # catch-all ниже и читался администратором как 502 «failed». Наружу —
+        # ``blocked`` (§18: объяснить, не повторять) с причиной и тем, что
+        # исправить.
+        logger.info(
+            "admin_api.create_booking.offer_not_sellable actor=%s tenant=%s reason=%s",
+            actor,
+            tenant.id,
+            exc.reason,
+        )
+        return _outcome(
+            "blocked",
+            staff_text_for(exc.reason),
+            409,
+            reason_code=OFFER_NOT_SELLABLE_SLUG,
+            unsellable_reason=exc.reason,
         )
     except SalonAPIError as exc:
         logger.warning("admin_api.create_booking.error actor=%s err=%s", actor, exc)

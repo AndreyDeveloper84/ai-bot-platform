@@ -154,6 +154,7 @@ from apps.orchestrator.time_preference import (
     part_of_iso_datetime,
     resolve_date,
 )
+from apps.integrations.ayla.offer_refusal import OFFER_NOT_SELLABLE_SLUG, client_text_for
 from apps.skills.booking.provider import YClientsScheduleUnavailableError
 from apps.skills.booking.prompts import BrandVoiceConfig, build_booking_prompt
 from apps.skills.booking.tools import (
@@ -943,7 +944,9 @@ class BookingSkill:
 
         # DRF-997: transient schedule-service outage is surfaced as a
         # deterministic retry message. Do NOT hand off to a manager.
-        if tool_result.error == "schedule_unavailable":
+        # DRF-1989: непродаваемое предложение — тоже детерминированный ответ
+        # своими словами: не передача менеджеру и не перефраз моделью.
+        if tool_result.error in {"schedule_unavailable", OFFER_NOT_SELLABLE_SLUG}:
             return _build_skill_result(
                 text=tool_result.text,
                 tool_calls_made=tool_calls_made,
@@ -1041,6 +1044,20 @@ class BookingSkill:
             # DRF-1353: the resolved verdict is per (master × service), so the
             # master the LLM grounded must travel with the service id.
             gate_master_id = _coerce_id(first_call.arguments.get("master_id"))
+            offer_reason = (
+                _offer_refusal_for_edge(tenant, gate_master_id, service_id)
+                if service_id is not None
+                else None
+            )
+            if offer_reason is not None:
+                # DRF-1989: непродаваемое ребро — отказ с причиной до ворот
+                # здоровья: «консультация» по предложению, которое нельзя
+                # купить, была бы обещанием, которого никто не выполнит.
+                return _build_skill_result(
+                    text=client_text_for(offer_reason),
+                    tool_calls_made=tool_calls_made,
+                    confidence=_CONFIDENCE_OK,
+                )
             if service_id is not None and _service_requires_health_check(
                 tenant, service_id, gate_master_id
             ):
@@ -1238,6 +1255,9 @@ def _dispatch_tool(
         # user as a retry message, not a manager handoff.
         if result.error == "schedule_unavailable":
             return result, ""
+        if result.error == OFFER_NOT_SELLABLE_SLUG:
+            # DRF-1989: именованный отказ со своими словами — не передача.
+            return result, ""
         if result.error in {"yclients_unavailable", "yclients_api_error"}:
             return result, "booking_yclients_failure"
         if result.error:
@@ -1387,6 +1407,34 @@ def _has_contraindication_text(tenant: Any, service_id: int | str) -> bool:
             return False
     text = rows.values_list("contraindications", flat=True).first()
     return bool(text and text.strip())
+
+
+def _offer_refusal_for_edge(
+    tenant: Any,
+    master_id: int | str | None,
+    service_id: int | str,
+) -> str | None:
+    """Почему (мастер × услуга) не продаётся, или ``None`` (DRF-1989).
+
+    То же зеркальное ребро, что у ворот здоровья, но через предикат
+    продаваемости. ``None`` — продаётся, ребра нет или id не читается: тогда
+    решают прежние ворота, как до DRF-1989.
+    """
+    if master_id is None:
+        return None
+    try:
+        master_key = uuid.UUID(str(master_id))
+        service_key = uuid.UUID(str(service_id))
+    except (ValueError, AttributeError, TypeError):
+        return None
+    from apps.catalog.models import MasterService
+
+    edge = MasterService.all_tenants.filter(
+        tenant=tenant, master_id=master_key, service__ayla_service_id=service_key
+    )
+    if edge.sellable().exists() or not edge.exists():
+        return None
+    return edge.values_list("unsellable_reason", flat=True).first() or "unknown"
 
 
 def _resolved_health_check_for_edge(
@@ -1893,6 +1941,13 @@ def _handle_pick_slot_callback(
             reason=REFUSAL_UNKNOWN_MASTER,
             text=_CONTEXT_GONE_TEXT,
             detail=f"master={master_id} roster_size={len(allowed_master_ids)}",
+        )
+
+    # DRF-1989: непродаваемое ребро — отказ с причиной, до ворот здоровья.
+    offer_reason = _offer_refusal_for_edge(tenant, master_id, service_id)
+    if offer_reason is not None:
+        return _build_skill_result(
+            text=client_text_for(offer_reason), tool_calls_made=[], confidence=_CONFIDENCE_OK
         )
 
     # Health-check gate — same rule as the LLM confirm path: gated
