@@ -35,6 +35,7 @@ token lookup is filtered by tenant explicitly as defence-in-depth.
 from __future__ import annotations
 
 import json
+from decimal import Decimal, InvalidOperation
 import logging
 import re
 import uuid
@@ -1288,6 +1289,197 @@ def onboarding_readiness(request: HttpRequest) -> HttpResponse:
 
     master: CatalogMaster = request.master  # type: ignore[attr-defined]
     return JsonResponse(build_readiness(master).as_dict())
+
+
+# --- /services/selection, /services/<id>/offer, /services/<id> (DRF-1895, M10b) ---
+
+_SELECTION_UNAVAILABLE = "Каталог сейчас недоступен."
+#: Пределы каталога (#443 / #444) — проверяются здесь, чтобы заведомо
+#: неверное тело не уходило в каталог; решает всё равно каталог.
+_MAX_TEMPLATES_PER_CALL = 200
+_OFFER_MIN_PRICE = Decimal("1")
+_OFFER_DURATION_RANGE = (5, 480)
+_SELECTION_REFUSED_REASONS = frozenset(
+    {"salon_catalog_owner_managed", "no_workspace_tenant", "service_removed"}
+)
+
+
+@csrf_exempt
+@require_http_methods(["GET", "POST"])
+@require_master_init_data
+def service_selection(request: HttpRequest) -> HttpResponse:
+    """«Выберите услуги» мастера-соло — прокси в каталог (M8a).
+
+    Выбор живёт в каталоге и только там; ответ — состояние выбора, как его
+    прислал каталог, со счётчиками ``selected`` / ``configured`` — бот их не
+    пересчитывает. Субъект — сам мастер, профиль — его ``CatalogMaster.id``.
+    """
+    master: CatalogMaster = request.master  # type: ignore[attr-defined]
+    bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
+    actor = external_user_id_for(bot_user)
+    client = get_ayla_booking_client()
+    if request.method == "GET":
+        try:
+            data = client.get_service_selection(
+                specialist_id=str(master.id), external_user_id=actor
+            )
+        except BookingBadRequestError as exc:
+            return _selection_refusal(exc)
+        except BookingUnavailableError:
+            return _error("catalog_unavailable", _SELECTION_UNAVAILABLE, 503)
+        return JsonResponse(data)
+    body = _json_object(request)
+    template_ids = body.get("template_ids") if body is not None else None
+    if (
+        not isinstance(template_ids, list)
+        or not 1 <= len(template_ids) <= _MAX_TEMPLATES_PER_CALL
+        or not all(_is_uuid(value) for value in template_ids)
+    ):
+        return _error("validation_error", "Нужен список template_ids: от 1 до 200 UUID.", 400)
+    try:
+        data = client.select_services(
+            specialist_id=str(master.id),
+            external_user_id=actor,
+            template_ids=[str(value) for value in template_ids],
+        )
+    except BookingBadRequestError as exc:
+        return _selection_refusal(exc)
+    except BookingUnavailableError:
+        return _error("catalog_unavailable", _SELECTION_UNAVAILABLE, 503)
+    return JsonResponse(data, status=201 if data.get("created") else 200)
+
+
+@csrf_exempt
+@require_http_methods(["PUT"])
+@require_master_init_data
+def service_offer(request: HttpRequest, salon_service_id: uuid.UUID) -> HttpResponse:
+    """Цена и длительность выбранной услуги — прокси в каталог (M8b).
+
+    Первая цена создаёт предложение мастера (201), следующие обновляют (200).
+    Цена >= 1 (не больше двух знаков после запятой), длительность 5..480 минут.
+    """
+    master: CatalogMaster = request.master  # type: ignore[attr-defined]
+    bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
+    body = _json_object(request)
+    price = body.get("price") if body is not None else None
+    duration = body.get("duration_minutes") if body is not None else None
+    low, high = _OFFER_DURATION_RANGE
+    if (
+        not _is_offer_price(price)
+        or not isinstance(duration, int)
+        or isinstance(duration, bool)
+        or not low <= duration <= high
+    ):
+        return _error("validation_error", "Нужны цена от 1 и длительность от 5 до 480 минут.", 400)
+    try:
+        data = get_ayla_booking_client().put_service_offer(
+            specialist_id=str(master.id),
+            external_user_id=external_user_id_for(bot_user),
+            salon_service_id=str(salon_service_id),
+            price=str(price),
+            duration_minutes=duration,
+        )
+    except BookingBadRequestError as exc:
+        return _selection_refusal(exc)
+    except BookingUnavailableError:
+        return _error("catalog_unavailable", _SELECTION_UNAVAILABLE, 503)
+    payload = dict(data)
+    created = bool(payload.pop("created", False))
+    return JsonResponse(payload, status=201 if created else 200)
+
+
+@csrf_exempt
+@require_http_methods(["DELETE"])
+@require_master_init_data
+def selected_service(request: HttpRequest, salon_service_id: uuid.UUID) -> HttpResponse:
+    """«Убрать из моих услуг» — прокси в каталог (M8b)."""
+    master: CatalogMaster = request.master  # type: ignore[attr-defined]
+    bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
+    try:
+        data = get_ayla_booking_client().remove_service(
+            specialist_id=str(master.id),
+            external_user_id=external_user_id_for(bot_user),
+            salon_service_id=str(salon_service_id),
+        )
+    except BookingBadRequestError as exc:
+        return _selection_refusal(exc)
+    except BookingUnavailableError:
+        return _error("catalog_unavailable", _SELECTION_UNAVAILABLE, 503)
+    return JsonResponse(data)
+
+
+def _json_object(request: HttpRequest) -> dict | None:
+    try:
+        body = json.loads(request.body or b"{}")
+    except ValueError:
+        return None
+    return body if isinstance(body, dict) else None
+
+
+def _is_uuid(value: object) -> bool:
+    if not isinstance(value, str):
+        return False
+    try:
+        uuid.UUID(value)
+    except ValueError:
+        return False
+    return True
+
+
+def _is_offer_price(value: object) -> bool:
+    if isinstance(value, bool) or not isinstance(value, (str, int)):
+        return False
+    try:
+        amount = Decimal(str(value))
+    except InvalidOperation:
+        return False
+    exponent = amount.as_tuple().exponent
+    return (
+        amount.is_finite()
+        and isinstance(exponent, int)
+        and exponent >= -2
+        and amount >= _OFFER_MIN_PRICE
+    )
+
+
+def _selection_refusal(exc: BookingBadRequestError) -> HttpResponse:
+    """Один перевод отказов каталога M8 на имена экрана — с их данными."""
+    details = exc.details or {}
+    reason = details.get("reason")
+    if exc.status_code == 403:
+        return _error("not_linked", "Профиль ещё не связан с каталогом.", 403)
+    if exc.status_code == 404:
+        if exc.code == "SPECIALIST_NOT_FOUND":
+            return _error("specialist_not_found", "Профиль мастера не найден в каталоге.", 404)
+        if reason == "template_not_found":
+            return _error_with(
+                "template_not_found",
+                "Некоторых услуг нет в каталоге.",
+                404,
+                template_ids=list(details.get("template_ids") or []),
+            )
+        if reason == "service_not_selected":
+            return _error("service_not_selected", "Эта услуга не выбрана.", 404)
+        return _error("not_found", "Не найдено.", 404)
+    if exc.status_code == 409:
+        if exc.code == "HAS_APPOINTMENTS":
+            return _error_with(
+                "has_future_appointments",
+                "У услуги есть будущие записи.",
+                409,
+                count=details.get("count"),
+            )
+        if exc.code == "SERVICE_SELECTION_REFUSED":
+            slug = reason if reason in _SELECTION_REFUSED_REASONS else "selection_refused"
+            return _error_with(slug, "Выбор услуг сейчас недоступен.", 409, reason=reason)
+    if exc.status_code == 400:
+        return _error("validation_error", "Проверьте цену и длительность.", 400)
+    return _error("catalog_unavailable", _SELECTION_UNAVAILABLE, 502)
+
+
+def _error_with(slug: str, detail: str, status: int, **details: object) -> JsonResponse:
+    """Отказ с данными — под ``details``, как их читает ``ApiError`` Mini App (DRF-1708)."""
+    return JsonResponse({"error": slug, "detail": detail, "details": details}, status=status)
 
 
 # --- GET /dashboard --------------------------------------------------------

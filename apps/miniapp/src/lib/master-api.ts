@@ -387,6 +387,59 @@ export const getSimilarCanonTemplates = (
 ): Promise<{ similar: CanonGapSimilar[] }> =>
   request(`/canon-gap-requests/similar?name=${encodeURIComponent(name)}`, { method: "GET" });
 
+// --- DRF-1895 (M10b) выбор канонических услуг и цена мастера ------------------
+// Mirrors apps/master_api/views.py::service_selection / service_offer /
+// selected_service — a proxy to the catalog (M8a / M8b). The counters
+// `selected` / `configured` are the server's; the screen never computes them.
+
+export interface SelectedServiceOffer {
+  id: string;
+  price: string;
+  duration_minutes: number;
+  is_active: boolean;
+}
+
+export interface SelectedService {
+  salon_service_id: string;
+  template_id: string;
+  name: string;
+  category_id: string | null;
+  is_active: boolean;
+  mapping_status: string;
+  offer: SelectedServiceOffer | null;
+  configured: boolean;
+}
+
+export interface ServiceSelectionState {
+  specialist_id: string;
+  tenant_id: string;
+  selected: number;
+  configured: number;
+  services: SelectedService[];
+}
+
+export const getServiceSelection = (): Promise<ServiceSelectionState> =>
+  request("/services/selection", { method: "GET" });
+
+export const selectServices = (
+  templateIds: string[],
+): Promise<ServiceSelectionState & { created: number }> =>
+  request("/services/selection", {
+    method: "POST",
+    body: JSON.stringify({ template_ids: templateIds }),
+  });
+
+export const putServiceOffer = (
+  salonServiceId: string,
+  body: { price: string; duration_minutes: number },
+): Promise<ServiceSelectionState & { offer_id: string }> =>
+  request(`/services/${salonServiceId}/offer`, { method: "PUT", body: JSON.stringify(body) });
+
+export const removeService = (
+  salonServiceId: string,
+): Promise<ServiceSelectionState & { removal: "deleted" | "deactivated" }> =>
+  request(`/services/${salonServiceId}`, { method: "DELETE" });
+
 /** Пункты, которые экран рисует: всё, кроме `unavailable`. */
 export const drawnReadinessItems = (items: ReadinessItem[]): ReadinessItem[] =>
   items.filter((item) => item.state !== "unavailable");

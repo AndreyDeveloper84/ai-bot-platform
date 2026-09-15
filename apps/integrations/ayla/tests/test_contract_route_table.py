@@ -185,6 +185,11 @@ ROUTE_TABLE: tuple[Route, ...] = (
     Route("POST", "/api/v1/internal/billing/specialists/{id}/card-setup/", Auth.BEARER),
     Route("POST", "/api/v1/internal/billing/specialists/{id}/pay-debt/", Auth.BEARER),
     Route("GET", "/api/v1/internal/specialists/{id}/payout-preview/", Auth.BEARER),
+    # DRF-1895 (M10b) — выбор услуг мастера и его цена под субъектом (каталог #443/#444).
+    Route("GET", "/api/v1/internal/specialists/{id}/services/selection/", Auth.BEARER_EXT),
+    Route("POST", "/api/v1/internal/specialists/{id}/services/selection/", Auth.BEARER_EXT),
+    Route("PUT", "/api/v1/internal/specialists/{id}/services/{id}/offer/", Auth.BEARER_EXT),
+    Route("DELETE", "/api/v1/internal/specialists/{id}/services/{id}/", Auth.BEARER_EXT),
     # payments_client — C7 client payments (§7.5, REVIEW; upstream W1 pending).
     # IsBotServiceWithVerifiedClient: Bearer + X-External-User-ID on every leg.
     Route("POST", "/api/v1/internal/appointments/{id}/payment/", Auth.BEARER_EXT),
@@ -378,6 +383,27 @@ def _exercise_booking() -> None:
     # route was not covered at all. ``get_specialist_service_edges`` is that
     # live reader (quote/repeat, DRF-1067). It takes no tenant scope by design.
     _swallow(lambda: c.get_specialist_service_edges(specialist_id="SPECID", service_id="SVCID"))
+    # DRF-1895 (M10b) — выбор услуг и цена мастера.
+    _swallow(lambda: c.get_service_selection(specialist_id="SPECID", external_user_id=_EXT_USER))
+    _swallow(
+        lambda: c.select_services(
+            specialist_id="SPECID", external_user_id=_EXT_USER, template_ids=[str(_PROFILE_UUID)]
+        )
+    )
+    _swallow(
+        lambda: c.put_service_offer(
+            specialist_id="SPECID",
+            external_user_id=_EXT_USER,
+            salon_service_id=str(_PROFILE_UUID),
+            price="1500",
+            duration_minutes=45,
+        )
+    )
+    _swallow(
+        lambda: c.remove_service(
+            specialist_id="SPECID", external_user_id=_EXT_USER, salon_service_id=str(_PROFILE_UUID)
+        )
+    )
     _swallow(lambda: c.get_masters(specialist_id="SPECID"))
     _swallow(
         lambda: c.get_available_times(specialist_id="SPECID", date="2026-07-03", service_id="SVCID")

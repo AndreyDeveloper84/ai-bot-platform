@@ -24,6 +24,8 @@ vi.mock("../lib/master-api", async (importOriginal) => {
     listCanonGapRequests: vi.fn(),
     createCanonGapRequest: vi.fn(),
     getSimilarCanonTemplates: vi.fn(),
+    getServiceSelection: vi.fn(),
+    selectServices: vi.fn(),
   };
 });
 
@@ -31,8 +33,10 @@ import { ApiError } from "../lib/api";
 import {
   createCanonGapRequest,
   getMasterCatalog,
+  getServiceSelection,
   getSimilarCanonTemplates,
   listCanonGapRequests,
+  selectServices,
   type CanonGapRequest,
   type MasterServiceItem,
 } from "../lib/master-api";
@@ -49,7 +53,10 @@ import {
   NOT_LINKED_MESSAGE,
   OWN_TITLE,
   PICK_CANON_LABEL,
+  PICK_CANON_UNAVAILABLE,
+  SALON_MANAGED_MESSAGE,
   SENT_MESSAGE,
+  pickedMessage,
   validateOwnService,
 } from "./MasterServicesScreen";
 
@@ -57,6 +64,17 @@ const mockedCatalog = vi.mocked(getMasterCatalog);
 const mockedList = vi.mocked(listCanonGapRequests);
 const mockedCreate = vi.mocked(createCanonGapRequest);
 const mockedSimilar = vi.mocked(getSimilarCanonTemplates);
+const mockedSelection = vi.mocked(getServiceSelection);
+const mockedSelect = vi.mocked(selectServices);
+
+const SELECTION = {
+  specialist_id: "m1",
+  tenant_id: "tn1",
+  selected: 0,
+  configured: 0,
+  services: [],
+};
+const SIMILAR = { template_id: "t1", name: "Перманентный макияж бровей", matched_by: "synonym" };
 
 function svc(id: string, name: string, category = "Брови"): MasterServiceItem {
   return {
@@ -101,7 +119,23 @@ beforeEach(() => {
   mockedList.mockResolvedValue({ requests: [req("r1", "Татуаж бровей пудровый")] });
   mockedSimilar.mockResolvedValue({ similar: [] });
   mockedCreate.mockResolvedValue({ request: req("r2", "Ламинирование"), similar: [] });
+  mockedSelection.mockResolvedValue(SELECTION);
+  // Сервер отвечает своим счётчиком — экран показывает его, а не считает сам.
+  mockedSelect.mockResolvedValue({ ...SELECTION, selected: 3, created: 1 });
 });
+
+async function openSimilarHint() {
+  fireEvent.click(
+    await within(await screen.findByRole("region", { name: OWN_TITLE })).findByRole("button", {
+      name: ADD_OWN_LABEL,
+    }),
+  );
+  fill(FIELD_NAME, "Татуаж бровей");
+  fill(FIELD_DURATION, "90");
+  fill(FIELD_PRICE, "3000");
+  fireEvent.click(within(ownSection()).getByRole("button", { name: ADD_OWN_LABEL }));
+  await within(ownSection()).findByText(SIMILAR.name);
+}
 
 describe("MasterServicesScreen — «Свои услуги»", () => {
   it("A+B: counter and status come from the server; requests stay out of the catalog", async () => {
@@ -166,7 +200,10 @@ describe("MasterServicesScreen — «Свои услуги»", () => {
     expect(await within(ownSection()).findByText("Перманентный макияж бровей")).toBeInTheDocument();
     expect(mockedSimilar).toHaveBeenCalledWith("Татуаж бровей");
     expect(mockedCreate).not.toHaveBeenCalled();
-    expect(within(ownSection()).getByRole("button", { name: PICK_CANON_LABEL })).toBeDisabled();
+    // DRF-1895: выбор канона доступен (состояние выбора загрузилось) — кнопка
+    // активна. Было toBeDisabled() до M10b; переворот объявлен в PR.
+    expect(within(ownSection()).getByRole("button", { name: PICK_CANON_LABEL })).toBeEnabled();
+    expect(mockedSelect).not.toHaveBeenCalled();
 
     mockedList.mockResolvedValue({ requests: [req("r1", "Татуаж бровей пудровый"), req("r2", "Татуаж бровей")] });
     fireEvent.click(within(ownSection()).getByRole("button", { name: ADD_ANYWAY_LABEL }));
@@ -204,6 +241,48 @@ describe("MasterServicesScreen — «Свои услуги»", () => {
     expect(within(ownSection()).queryByRole("button", { name: ADD_OWN_LABEL })).not.toBeInTheDocument();
     // Каталог при этом на месте.
     expect(within(catalog()).getByText("Коррекция бровей")).toBeInTheDocument();
+  });
+});
+
+describe("MasterServicesScreen — «Выбрать эту услугу» (DRF-1895)", () => {
+  it("H: salon catalog is owner-managed → the button stays disabled and says why", async () => {
+    mockedSelection.mockRejectedValue(
+      new ApiError(409, "salon_catalog_owner_managed", "…", {
+        reason: "salon_catalog_owner_managed",
+      }),
+    );
+    mockedSimilar.mockResolvedValue({ similar: [SIMILAR] });
+    render(<MasterServicesScreen />);
+    await openSimilarHint();
+
+    expect(within(ownSection()).getByRole("button", { name: PICK_CANON_LABEL })).toBeDisabled();
+    expect(within(ownSection()).getByText(SALON_MANAGED_MESSAGE)).toBeInTheDocument();
+    expect(mockedSelect).not.toHaveBeenCalled();
+  });
+
+  it("I: picking the similar canon service selects it and shows the server's counter", async () => {
+    mockedSimilar.mockResolvedValue({ similar: [SIMILAR] });
+    render(<MasterServicesScreen />);
+    await openSimilarHint();
+
+    fireEvent.click(within(ownSection()).getByRole("button", { name: PICK_CANON_LABEL }));
+
+    await waitFor(() => expect(mockedSelect).toHaveBeenCalledWith(["t1"]));
+    expect(await within(ownSection()).findByText(pickedMessage(3))).toBeInTheDocument();
+    expect(mockedCreate).not.toHaveBeenCalled();
+  });
+
+  it("J: selection state unavailable → the button is not offered (fail-closed)", async () => {
+    mockedSelection.mockRejectedValue(new ApiError(503, "catalog_unavailable", "…"));
+    mockedSimilar.mockResolvedValue({ similar: [SIMILAR] });
+    render(<MasterServicesScreen />);
+    await openSimilarHint();
+
+    const button = within(ownSection()).getByRole("button", { name: PICK_CANON_LABEL });
+    expect(button).toBeDisabled();
+    // Выключенная кнопка объясняет себя, а не молчит.
+    expect(button).toHaveAttribute("title", PICK_CANON_UNAVAILABLE);
+    expect(mockedSelect).not.toHaveBeenCalled();
   });
 });
 

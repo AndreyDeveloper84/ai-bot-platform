@@ -24,6 +24,19 @@ urlpatterns = [
     path("profile", views.onboarding_profile, name="profile"),
     path("me", views.me, name="me"),
     path("dashboard", views.dashboard, name="dashboard"),
+    # DRF-1895 (M10b) — выбор канонических услуг и цена мастера: прокси в
+    # каталог (M8a / M8b). `selection` раньше `<uuid:salon_service_id>`.
+    path("services/selection", views.service_selection, name="service_selection"),
+    path(
+        "services/<uuid:salon_service_id>/offer",
+        views.service_offer,
+        name="service_offer",
+    ),
+    path(
+        "services/<uuid:salon_service_id>",
+        views.selected_service,
+        name="selected_service",
+    ),
     # M3 schedule self-service (master-mobile §M3, PR Tier1.2)
     path("schedule", views.schedule, name="schedule"),
     # DRF-1816 (M24) — недельный шаблон часов мастера: прокси в каталог.

@@ -894,6 +894,19 @@ NOT_SWEPT_ROUTES: dict[str, str] = {
     "billing_card_setup": "proxy to the external billing service",
     "billing_pay_debt": "proxy to the external billing service",
     "payout_preview": "proxy to the external billing service",
+    "service_selection": (
+        "GET/POST proxy to the catalog's service selection (DRF-1895): the master's own "
+        "selected canon services and two server counters, no customer record — shape "
+        "pinned in test_service_selection_1895"
+    ),
+    "service_offer": (
+        "PUT proxy (DRF-1895): the master's own price/duration; response is the "
+        "selection state — pinned in test_service_selection_1895"
+    ),
+    "selected_service": (
+        "DELETE proxy (DRF-1895): removes the master's own selected service; response "
+        "is the selection state — pinned in test_service_selection_1895"
+    ),
     "assistant_history": (
         "the master's own transcript with Ayla — no customer record is "
         "rendered as fields; swept for forbidden keys and for the "
