@@ -114,9 +114,9 @@ DEFERRED_ACK: dict[str, str] = {
 }
 
 # DRF-1579 (F3): вес — данные дневника, и дневник Ayla (ADR-0009), поэтому он
-# не идёт в память. Но ручка правки записи есть (beautygo_backend#450), и вес,
-# названный ДО «В дневник», кладётся в состояние карточки: food_scanner пишет
-# запись уже с ним (множитель от распознанной порции). Три честных исхода:
+# не идёт в память. Вес, названный ДО «В дневник», кладётся в карту поправок
+# ``food_scan_grams`` (её пишет только этот скилл), и food_scanner пишет запись
+# уже с ним (множитель от распознанной порции). Честные исходы:
 GRAMS_CARRIED_ACK = "Поняла: {value} г — запишу в дневник с этим весом."
 # Карточка уже записана: множитель для фото считается от порции скана, и
 # пересчёт сохранённой записи — отдельный лист (DRF-1917). Не «учла».
@@ -127,6 +127,13 @@ GRAMS_NO_PORTION_ACK = (
     "не из чего. Можно записать текстом, например «{dish} {value} г»."
 )
 GRAMS_NOT_CARRIED_ACK = "Не получилось передать вес в запись — напиши его ещё раз."
+# Множитель вне того, что каталог примет в запись: сказать сейчас, а не
+# пообещать «запишу» и отказать на «В дневник». Вопрос остаётся открытым.
+GRAMS_OUT_OF_RANGE_ACK = (
+    "Вес {value} г слишком далёк от распознанной порции ({portion} г) — так пересчитать "
+    "не могу. Напиши вес ещё раз."
+)
+_MAX_CARRIED_CORRECTIONS = 5
 
 # Stored nothing (no consent / no link / write failed). A soft ack, never a
 # promise we did not keep.
@@ -377,40 +384,64 @@ def _write_state(context: SkillContext, value: dict[str, Any] | None) -> None:
         )
 
 
-def _carry_grams_to_card(
+def _carry_grams(
     context: SkillContext, pending: dict[str, Any], grams: Any
-) -> tuple[str, str]:
-    """Положить вес в карточку скана, чтобы «В дневник» записал с ним (DRF-1579).
+) -> tuple[str, str, bool]:
+    """Положить вес в карту поправок, чтобы «В дневник» записал с ним (DRF-1579).
 
-    Возвращает ``(ответ, reply_kind)``. Вес пишется в состояние разговора, не в
-    память: он живёт до записи и уходит в Ayla вместе с ней.
+    Возвращает ``(ответ, reply_kind, оставить_вопрос_открытым)``. Вес пишется в
+    состояние разговора, не в память: он живёт до записи и уходит в Ayla
+    вместе с ней. Карточку фото и отметку «записано» этот скилл не пишет.
     """
-    from apps.skills.food_scanner.skill import LAST_CARD_STATE_KEY
+    from apps.skills.food_scanner.skill import (
+        GRAMS_STATE_KEY,
+        LAST_CARD_STATE_KEY,
+        LOGGED_STATE_KEY,
+        OUT_OF_RANGE,
+        corrected_multiplier,
+    )
 
-    card = _skill_state(context).get(LAST_CARD_STATE_KEY)
+    state = _skill_state(context)
+    card = state.get(LAST_CARD_STATE_KEY)
     scan_id = pending.get("scan_id")
     dish = pending.get("dish") if isinstance(pending.get("dish"), str) else ""
-    if not isinstance(card, dict) or (scan_id and card.get("scan_id") not in (None, "", scan_id)):
-        return STALE_CARD_ACK, "food_correction_stale_card"
-    if card.get("logged"):
-        return GRAMS_AFTER_LOG_ACK, "food_correction_grams_after_log"
+    # Точное совпадение с обеих сторон: поправка без scan_id не применится никогда.
+    if not scan_id or not isinstance(card, dict) or card.get("scan_id") != scan_id:
+        return STALE_CARD_ACK, "food_correction_stale_card", False
+    logged = state.get(LOGGED_STATE_KEY)
+    if isinstance(logged, dict) and scan_id in logged:
+        return GRAMS_AFTER_LOG_ACK, "food_correction_grams_after_log", False
     portion = card.get("portion_g")
-    if isinstance(portion, bool) or not isinstance(portion, (int, float)) or portion <= 0:
+    multiplier = corrected_multiplier(grams, portion)
+    if multiplier is None:
         return (
             GRAMS_NO_PORTION_ACK.format(value=grams, dish=dish),
             "food_correction_grams_no_portion",
+            False,
         )
+    if multiplier is OUT_OF_RANGE:
+        shown = int(portion) if float(portion).is_integer() else portion
+        return (
+            GRAMS_OUT_OF_RANGE_ACK.format(value=grams, portion=shown),
+            "food_correction_grams_out_of_range",
+            True,
+        )
+    current = state.get(GRAMS_STATE_KEY)
+    entries = dict(current) if isinstance(current, dict) else {}
+    entries.pop(scan_id, None)
+    entries[scan_id] = {"grams": grams, "portion_g": portion}
+    entries = dict(list(entries.items())[-_MAX_CARRIED_CORRECTIONS:])
     try:
         from apps.conversations.services import write_skill_state
 
-        write_skill_state(context.conversation, LAST_CARD_STATE_KEY, {**card, "grams": grams})
+        write_skill_state(context.conversation, GRAMS_STATE_KEY, entries)
     except Exception:  # noqa: BLE001 — say it did not land rather than «запишу»
         logger.debug(
             "food_correction.grams_carry_skipped conversation=%s",
             getattr(context.conversation, "id", None),
         )
-        return GRAMS_NOT_CARRIED_ACK, "food_correction_grams_not_carried"
-    return GRAMS_CARRIED_ACK.format(value=grams), "food_correction_grams_carried"
+        return GRAMS_NOT_CARRIED_ACK, "food_correction_grams_not_carried", True
+    return GRAMS_CARRIED_ACK.format(value=grams), "food_correction_grams_carried", False
 
 
 def _dish_for(context: SkillContext, scan_id: str) -> str:
@@ -658,8 +689,13 @@ class FoodCorrectionSkill:
             reply = REMEMBERED_ACK[field].format(dish=dish, value=value)
             reply_kind = f"food_correction_{field}_remembered"
         elif outcome is food_memory.Outcome.NOT_REMEMBERED and field == food_memory.FIELD_GRAMS:
-            # DRF-1579: вес не в память, а в карточку — до записи в дневник.
-            reply, reply_kind = _carry_grams_to_card(context, pending, value)
+            # DRF-1579: вес не в память, а в карту поправок — до записи в дневник.
+            reply, reply_kind, keep_open = _carry_grams(context, pending, value)
+            if keep_open:
+                # «Напиши ещё раз» должно быть правдой: вопрос остаётся открытым,
+                # и следующее число снова наше (как ветка RETRY_ACK выше).
+                _write_state(context, {**pending, "at": datetime.now(timezone.utc).isoformat()})
+                return SkillResult(reply_text=reply, meta={"reply_kind": reply_kind})
         elif outcome is food_memory.Outcome.NOT_REMEMBERED:
             # Macros: understood and repeated back, kept by nobody here —
             # log_meal has no field that could carry them to the entry.

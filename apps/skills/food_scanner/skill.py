@@ -70,6 +70,12 @@ The dish behind a card is stashed in ``Conversation.skill_state`` under
 :data:`LAST_CARD_STATE_KEY` so the correction callback — which carries only a
 ``scan_id`` — can key memory on it.
 
+DRF-1579: a weight named on the card before «✅ В дневник» lives in
+:data:`GRAMS_STATE_KEY` (written only by ``food_correction``), and which scans
+are already logged lives in :data:`LOGGED_STATE_KEY` (written only here). Each
+subkey has one writer, so neither clobbers the other from a stale read, and a
+newer photo replacing the card does not lose a promised weight.
+
 ## Scope cut (vs mysite source)
 
 Skipped for Sprint 9 — folded into P5 or Phase 1:
@@ -298,11 +304,12 @@ class FoodScannerSkill:
 
         # action == "to_diary"
         external_id = external_user_id_for(context.bot_user)
-        card = _card_for(context, scan_id)
-        corrected = _corrected_portion(card)
-        if corrected is _OUT_OF_RANGE:
+        correction = _correction_for(context, scan_id)
+        grams = correction.get("grams") if correction else None
+        corrected = corrected_multiplier(grams, correction.get("portion_g")) if correction else None
+        if corrected is OUT_OF_RANGE:
             return SkillResult(
-                reply_text=GRAMS_OUT_OF_RANGE_TEXT.format(grams=(card or {}).get("grams")),
+                reply_text=GRAMS_OUT_OF_RANGE_TEXT.format(grams=grams),
                 meta={"reply_kind": "food_scanner_log_grams_out_of_range"},
             )
         extra: dict = {}
@@ -338,9 +345,14 @@ class FoodScannerSkill:
                 meta={"reply_kind": "food_scanner_log_error"},
             )
 
-        _mark_card_logged(context, card, log.log_id)
+        _mark_logged(context, scan_id, log.log_id)
+        reply = f"Записала: {log.dish_name} — {int(log.calories)} ккал."
+        if extra and (log.raw or {}).get("entry_origin") != "photo_user_corrected":
+            # Ключ повтора вернул ПРЕЖНЮЮ запись (первый тап дошёл, ответ — нет):
+            # вес в неё не лёг, и сказать «записала» без оговорки было бы ложью.
+            reply = f"{reply} {GRAMS_NOT_APPLIED_TEXT.format(grams=grams)}"
         return SkillResult(
-            reply_text=f"Записала: {log.dish_name} — {int(log.calories)} ккал.",
+            reply_text=reply,
             action_type="food_logged",
             action_data={
                 "log_id": log.log_id,
@@ -491,54 +503,74 @@ def _check_gates(
     return None
 
 
+#: DRF-1579 — поправки веса по ``scan_id``: ``{scan_id: {"grams", "portion_g"}}``.
+#: Пишет ТОЛЬКО ``food_correction``; этот скилл лишь читает. Отдельно от
+#: карточки последнего фото — новое фото не теряет обещанный вес, а два
+#: писателя одного подключа затирали бы друг друга по старому чтению.
+GRAMS_STATE_KEY = "food_scan_grams"
+#: DRF-1579 — какие сканы уже записаны: ``{scan_id: log_id}``. Пишет ТОЛЬКО
+#: этот скилл (после успешного ``log_meal``).
+LOGGED_STATE_KEY = "food_scan_logged"
+_MAX_LOGGED = 10
+
 #: Границы множителя, которые каталог принимает в запись (FoodLogCreateSerializer).
 _MIN_PORTION_MULTIPLIER = 0.1
 _MAX_PORTION_MULTIPLIER = 20.0
-_OUT_OF_RANGE = object()
+OUT_OF_RANGE = object()
 GRAMS_OUT_OF_RANGE_TEXT = (
     "Вес {grams} г слишком далёк от распознанной порции — пересчитать не могу. "
-    "Напиши вес ещё раз или запиши текстом."
+    "Нажми «✏️ Уточнить» → «⚖️ Грамм» и укажи вес ещё раз."
+)
+GRAMS_NOT_APPLIED_TEXT = (
+    "Вес {grams} г не применился: это блюдо уже было в дневнике. "
+    "Чтобы поменять вес, удали запись и запиши заново."
 )
 
 
-def _card_for(context: SkillContext, scan_id: str) -> dict | None:
-    """Карточка ЭТОГО скана из состояния разговора, или ``None``."""
+def _state(context: SkillContext) -> dict:
     raw = getattr(context.conversation, "skill_state", None)
-    card = raw.get(LAST_CARD_STATE_KEY) if isinstance(raw, dict) else None
-    if isinstance(card, dict) and card.get("scan_id") == scan_id:
-        return card
-    return None
+    return raw if isinstance(raw, dict) else {}
 
 
-def _corrected_portion(card: dict | None):
-    """Множитель от поправленного веса (DRF-1579), ``None`` без поправки, или ``_OUT_OF_RANGE``."""
-    if not card:
-        return None
-    grams = card.get("grams")
-    portion = card.get("portion_g")
+def corrected_multiplier(grams, portion):
+    """Множитель от поправленного веса (DRF-1579).
+
+    ``float`` — множитель от распознанной порции; ``None`` — считать не из чего
+    (нет веса или порции); :data:`OUT_OF_RANGE` — каталог такой не примет.
+    Одна функция на ответ про граммы и на «В дневник»: обещание и запись не
+    должны расходиться в том, что считается допустимым.
+    """
     if isinstance(grams, bool) or not isinstance(grams, int):
         return None
     if isinstance(portion, bool) or not isinstance(portion, (int, float)) or portion <= 0:
         return None
     multiplier = round(grams / float(portion), 3)
     if not _MIN_PORTION_MULTIPLIER <= multiplier <= _MAX_PORTION_MULTIPLIER:
-        return _OUT_OF_RANGE
+        return OUT_OF_RANGE
     return multiplier
 
 
-def _mark_card_logged(context: SkillContext, card: dict | None, log_id: str) -> None:
-    """После записи карточка «записана»: поправка веса больше не делает вид, что применится."""
-    if not card:
-        return
-    marked = {key: value for key, value in card.items() if key != "grams"}
-    marked.update({"logged": True, "log_id": log_id})
+def _correction_for(context: SkillContext, scan_id: str) -> dict | None:
+    """Поправка веса ЭТОГО скана из ``food_scan_grams``, или ``None``."""
+    entries = _state(context).get(GRAMS_STATE_KEY)
+    entry = entries.get(scan_id) if isinstance(entries, dict) else None
+    return entry if isinstance(entry, dict) else None
+
+
+def _mark_logged(context: SkillContext, scan_id: str, log_id: str) -> None:
+    """После записи скан «записан»: поправка веса больше не делает вид, что применится."""
+    current = _state(context).get(LOGGED_STATE_KEY)
+    logged = dict(current) if isinstance(current, dict) else {}
+    logged.pop(scan_id, None)
+    logged[scan_id] = log_id
+    logged = dict(list(logged.items())[-_MAX_LOGGED:])
     try:
         from apps.conversations.services import write_skill_state
 
-        write_skill_state(context.conversation, LAST_CARD_STATE_KEY, marked)
+        write_skill_state(context.conversation, LOGGED_STATE_KEY, logged)
     except Exception:  # noqa: BLE001 — the entry is written; a lost mark costs one wrong ack
         logger.debug(
-            "food_scanner.card_mark_skipped conversation=%s",
+            "food_scanner.logged_mark_skipped conversation=%s",
             getattr(context.conversation, "id", None),
         )
 

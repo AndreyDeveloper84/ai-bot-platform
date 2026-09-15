@@ -481,21 +481,39 @@ class TestMemoryOnTheCard:
 class TestCorrectedGramsReachTheLog:
     """DRF-1579 (F3): граммы, названные на карточке, пишутся в дневник.
 
-    Множитель — от порции, которую распознал скан (``portion_g``): запись по
-    скану масштабирует ЕГО итоги, а не 100 г. Происхождение — §136
-    ``photo_user_corrected``. Без правки вызов прежний.
+    Вес берётся из ``food_scan_grams`` по ``scan_id`` — не из карточки
+    последнего фото: новое фото не теряет обещанный вес. Множитель — от порции,
+    которую распознал скан. Происхождение — §136 ``photo_user_corrected``.
+    Отметку «записано» сканер пишет в свой подключ ``food_scan_logged``.
     """
 
-    def _to_diary(self, card: dict):
+    def _to_diary(
+        self,
+        *,
+        card: dict | None = None,
+        grams_map: dict | None = None,
+        echoed_origin: str | None = "photo_user_corrected",
+        raise_exc: Exception | None = None,
+    ):
         ctx = _context("cb:food:to_diary:scan-1")
-        ctx.conversation.skill_state = {"food_scan": card}
+        state: dict = {}
+        if card is not None:
+            state["food_scan"] = card
+        if grams_map is not None:
+            state["food_scan_grams"] = grams_map
+        ctx.conversation.skill_state = state
         client = Mock()
         captured: list[dict] = []
         written: list = []
 
         async def _log(**kwargs):
             captured.append(kwargs)
-            return _log_response()
+            if raise_exc is not None:
+                raise raise_exc
+            raw = {"entry_origin": echoed_origin} if "entry_origin" in kwargs else {}
+            return FoodLogResponse(
+                log_id="log-1", dish_name="Борщ", meal_type="other", calories=250.0, raw=raw
+            )
 
         client.log_meal = _log
         with (
@@ -508,49 +526,67 @@ class TestCorrectedGramsReachTheLog:
             result = FoodScannerSkill().handle(ctx)
         return result, captured, written
 
+    GRAMS = {"scan-1": {"grams": 500, "portion_g": 250}}
+
     def test_corrected_grams_set_the_portion_and_the_origin(self) -> None:
-        card = {"scan_id": "scan-1", "dish": "Борщ", "portion_g": 250, "grams": 500}
+        result, captured, written = self._to_diary(grams_map=self.GRAMS)
 
-        result, captured, written = self._to_diary(card)
-
-        assert result.action_type == "food_logged"
+        assert result.reply_text == "Записала: Борщ — 250 ккал."
         assert captured[0]["scan_id"] == "scan-1"
         assert captured[0]["portion_multiplier"] == 2.0
         assert captured[0]["entry_origin"] == "photo_user_corrected"
-        # The card now says «logged»: a later correction must not pretend to apply.
-        assert written[-1][0] == "food_scan"
-        assert written[-1][1]["logged"] is True
-        assert "grams" not in written[-1][1]
+        assert ("food_scan_logged", {"scan-1": "log-1"}) in written
 
     def test_without_a_correction_the_log_call_is_unchanged(self) -> None:
-        card = {"scan_id": "scan-1", "dish": "Борщ", "portion_g": 250}
-
-        _, captured, written = self._to_diary(card)
+        _, captured, written = self._to_diary(
+            card={"scan_id": "scan-1", "dish": "Борщ", "portion_g": 250}
+        )
 
         assert captured[0]["scan_id"] == "scan-1"
         assert "portion_multiplier" not in captured[0]
         assert "entry_origin" not in captured[0]
-        assert written[-1] == ("food_scan", {**card, "logged": True, "log_id": "log-1"})
+        assert ("food_scan_logged", {"scan-1": "log-1"}) in written
+
+    def test_a_newer_photo_does_not_lose_the_promised_weight(self) -> None:
+        newer = {"scan_id": "scan-2", "dish": "Суп", "portion_g": 300}
+
+        _, captured, _ = self._to_diary(card=newer, grams_map=self.GRAMS)
+
+        assert captured[0]["portion_multiplier"] == 2.0
+
+    def test_a_replayed_key_that_returns_the_old_entry_says_the_weight_did_not_apply(self) -> None:
+        # Первый тап ушёл по таймауту, запись уже была: каталог вернул прежнюю строку.
+        result, captured, _ = self._to_diary(grams_map=self.GRAMS, echoed_origin=None)
+
+        assert captured[0]["portion_multiplier"] == 2.0
+        assert result.reply_text == (
+            "Записала: Борщ — 250 ккал. Вес 500 г не применился: это блюдо уже было в "
+            "дневнике. Чтобы поменять вес, удали запись и запиши заново."
+        )
+
+    def test_a_correction_the_catalogue_cannot_scale_is_not_logged(self) -> None:
+        result, captured, _ = self._to_diary(grams_map={"scan-1": {"grams": 5000, "portion_g": 10}})
+
+        assert result.reply_text == (
+            "Вес 5000 г слишком далёк от распознанной порции — пересчитать не могу. "
+            "Нажми «✏️ Уточнить» → «⚖️ Грамм» и укажи вес ещё раз."
+        )
+        assert captured == []
 
     def test_a_correction_for_another_scan_is_not_applied(self) -> None:
-        card = {"scan_id": "scan-2", "dish": "Суп", "portion_g": 250, "grams": 500}
-
-        _, captured, _ = self._to_diary(card)
+        _, captured, _ = self._to_diary(grams_map={"scan-2": {"grams": 500, "portion_g": 250}})
 
         assert captured[0]["scan_id"] == "scan-1"
         assert "portion_multiplier" not in captured[0]
 
-    def test_a_correction_the_catalogue_cannot_scale_is_not_logged(self) -> None:
-        # 5000 г от распознанных 10 г — множитель 500, каталог принимает 0.1…20.
-        card = {"scan_id": "scan-1", "dish": "Борщ", "portion_g": 10, "grams": 5000}
-
-        result, captured, _ = self._to_diary(card)
-
-        assert result.reply_text == (
-            "Вес 5000 г слишком далёк от распознанной порции — пересчитать не могу. "
-            "Напиши вес ещё раз или запиши текстом."
+    def test_a_failed_log_is_not_marked_logged(self) -> None:
+        result, captured, written = self._to_diary(
+            grams_map=self.GRAMS, raise_exc=NutritionUnavailableError("down")
         )
-        assert captured == []
+
+        assert len(captured) == 1
+        assert result.meta["reply_kind"] == "food_scanner_log_unavailable"
+        assert not any(key == "food_scan_logged" for key, _ in written)
 
     def test_the_card_keeps_the_scan_portion(self) -> None:
         from types import SimpleNamespace
