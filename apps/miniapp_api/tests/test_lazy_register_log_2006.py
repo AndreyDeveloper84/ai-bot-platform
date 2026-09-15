@@ -90,7 +90,11 @@ def test_lazy_register_record_is_written_once_on_creation(tenant, caplog):
 
 
 def test_repeat_contact_writes_no_second_record(tenant, caplog):
-    first = _lazy_register_bot_user(tenant, _verified())
+    with caplog.at_level(logging.INFO):
+        first = _lazy_register_bot_user(tenant, _verified())
+    # Положительная половина на тех же данных: создающий вызов строку пишет —
+    # иначе «повтор не пишет» ниже зеленел бы и на логе, который не пишет никогда.
+    assert len(_lazy_records(caplog)) == 1
     # Обработчик caplog висит на весь тест: строка первого (создающего) вызова
     # уже в caplog.records. Без очистки проверка ниже видела бы её, а не повтор.
     caplog.clear()
