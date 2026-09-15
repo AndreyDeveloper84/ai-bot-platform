@@ -186,6 +186,29 @@ class LivePathSink:
             "content_digest": snapshot.content_digest,
         }
 
+    def _policy_field(self, evidence: Any) -> dict[str, Any]:
+        """Что решила бы Decision Policy v0 (DRF-1904) — коды, на ход не влияет.
+
+        ``catalog_writable`` — пропустила бы граница записи каталога этот
+        статус (до таксономии — только ``SAFETY_BOUNDARY``). Наблюдение не
+        бросает: сбой — имя типа.
+        """
+
+        from apps.orchestrator.decision_policy import decide
+
+        try:
+            safety = getattr(self._dr_state, "safety", None)
+            verdict = decide(evidence, handoff=getattr(safety, "handoff", None))
+        except Exception as exc:  # noqa: BLE001 — наблюдение не стоит хода
+            return {"error": type(exc).__name__}
+        return {
+            "result_status": verdict.result_status.value,
+            "reason_codes": list(verdict.reason_codes),
+            "facts_used": list(verdict.facts_used),
+            "decision_policy_version": verdict.decision_policy_version,
+            "catalog_writable": verdict.catalog_writable,
+        }
+
     def record(self, evidence: Any) -> None:
         question = evidence.question or {}
         logger.info(
@@ -215,6 +238,7 @@ class LivePathSink:
                         self._cards_shown > 0 and not evidence.allow_recommend
                     ),
                     "context_snapshot": self._snapshot_field(evidence.readiness_state),
+                    "decision_policy": self._policy_field(evidence),
                 },
                 ensure_ascii=False,
                 sort_keys=True,
