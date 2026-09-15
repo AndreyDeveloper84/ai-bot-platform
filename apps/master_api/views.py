@@ -1435,6 +1435,7 @@ _REVIEW_FIELDS = ("id", "rating", "text", "client_name", "service_name", "create
 @csrf_exempt
 @require_http_methods(["GET"])
 @require_master_init_data
+@_catalog_profile_required
 def reviews(request: HttpRequest) -> HttpResponse:
     """«Мои отзывы» — прокси в каталог (DRF-1857, карта кабинета K14).
 
@@ -1451,7 +1452,9 @@ def reviews(request: HttpRequest) -> HttpResponse:
     actor = external_user_id_for(bot_user)
     client = get_ayla_booking_client()
     try:
-        data = client.get_specialist_reviews(specialist_id=str(master.id), external_user_id=actor)
+        data = client.get_specialist_reviews(
+            specialist_id=catalog_specialist_id(master), external_user_id=actor
+        )
     except BookingBadRequestError as exc:
         return _reviews_refusal(exc)
     except BookingUnavailableError:

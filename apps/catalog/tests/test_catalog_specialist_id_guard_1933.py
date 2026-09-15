@@ -34,7 +34,7 @@ CLIENT_MODULES = (
 RESOLVER = "catalog_specialist_id"
 
 CONVERTED = {
-    ("apps/master_api/views.py", 17),
+    ("apps/master_api/views.py", 18),  # 17 + «Мои отзывы» (#1755)
     ("apps/master_api/services/schedule_frame.py", 3),
 }
 

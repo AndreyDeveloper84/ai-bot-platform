@@ -109,6 +109,7 @@ SITES: list[tuple[str, str, str, dict[str, str], str | None, Any, str]] = [
     ("readiness", "get", "publication_readiness", {}, None, None, "get_publication_readiness"),
     ("publish", "post", "publication", {}, "json", {"command_id": CMD}, "publish"),
     ("pub_status", "get", "publication_status", {}, None, None, "get_publication_status"),
+    ("reviews", "get", "reviews", {}, None, None, "get_specialist_reviews"),
     ("selection_get", "get", "service_selection", {}, None, None, "get_service_selection"),
     (
         "selection_post",
@@ -143,9 +144,10 @@ SITE_IDS = [s[0] for s in SITES]
 
 def test_the_table_names_every_workshop_call_site():
     """Перепись 15.09 (бот dev f3fa4275): 17 вызовов клиента каталога в
-    ``master_api/views.py``. Таблица выше — ровно они, по одному на метод."""
-    assert len(SITES) == 17
-    assert len({s[6] for s in SITES}) == 17
+    ``master_api/views.py``; после #1755 (K14b, «Мои отзывы») — 18.
+    Таблица выше — ровно они, по одному на метод."""
+    assert len(SITES) == 18
+    assert len({s[6] for s in SITES}) == 18
 
 
 def _set_catalog_id(master: CatalogMaster, *, raw_id: str | None, column: str | None) -> None:
