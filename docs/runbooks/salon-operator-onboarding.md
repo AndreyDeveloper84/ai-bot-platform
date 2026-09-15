@@ -60,8 +60,8 @@
 
 **DaData.** Ключа нет — это не блокер. Место остаётся без координат, расстояние и
 «рядом» для салона не работают и не выдаются как функция (решение владельца,
-раздел Q). `geocode_locations` без ключа завершается кодом 2 и ничего не
-запрашивает (`tenants/management/commands/geocode_locations.py:103-108`).
+раздел Q). `geocode_locations --provider dadata` без ключа завершается кодом 2 и ничего не
+запрашивает (`core/geocoding/providers/dadata.py:94-98` → `tenants/management/commands/geocode_locations.py:103-108`); без `--provider` код 2 по другой причине — флаг обязателен (`:93-97`).
 
 ## Step-by-step procedure
 
@@ -128,7 +128,7 @@ docker exec -i dev-web-1 python manage.py promote_tenant_location --slug <slug> 
 confirmed без кто/когда/основание (`tenants/service_location.py:204-225`). В базе —
 `servicelocation_confirmed_requires_provenance` (`:142-152`).
 
-**Не делать.** Не ставить `status=confirmed` из инлайна «Места» на форме тенанта —
+**Не делать.** Не ставить `status=confirmed` из инлайна «Места оказания услуг» на форме тенанта (`tenants/admin.py:55-62`) —
 500 (см. «Известные 500»).
 
 **Readback.**
@@ -157,7 +157,7 @@ docker exec -i dev-web-1 python manage.py promote_tenant_location --slug <slug> 
 
 **Координаты.** Без DaData место подтверждается без координат: ограничение базы
 требует только кто/когда/основание. Такое место `participates_in_distance=False`
-(`service_location.py:194-202`) — итог готовности будет `READY_WITHOUT_DISTANCE`.
+(`service_location.py:194-202`) — после DRF-1977 итог `tenant_readiness` для такого салона — `READY_WITHOUT_DISTANCE` (на `b9d1906` команды ещё нет, см. шаг 13).
 
 **Readback.**
 ```bash
@@ -175,7 +175,7 @@ docker exec -i dev-web-1 python manage.py shell -c \
 `booking_source`. Инлайн подхватывает профиль, созданный сигналом (`:349-387`).
 
 `status` оставить «Черновик» до конца шага 9; публикация — действием
-«✅ Подтвердить мастеров (→ active)» (`users/admin.py:111`) на шаге 9.
+«✅ Подтвердить мастеров (→ active)» (`users/admin.py:111`) на шаге 9. Действие есть только в списке профилей мастеров (`/admin/users/specialistprofile/`, `users/admin.py:490`), не на форме тенанта.
 
 **Проверка.** Профиль, уже принадлежащий другому салону, — отказ (`:363-372`);
 `works_at` чужого салона — отказ «Это место принадлежит другому салону…»
@@ -244,7 +244,7 @@ docker exec -i dev-web-1 python manage.py shell -c \
 
 **Путь.** Форма услуги салона → инлайн (`services/admin.py:156-166`): `specialist`
 (id профиля мастера **этого** салона), `duration_minutes`, `price`,
-`requires_health_check`, `is_active`.
+`requires_health_check`, `buffer_after_minutes`, `is_active`.
 
 **Проверка.** `price` обязателен, ≥ 1; длительность должна определяться
 («An active bookable service needs a resolvable duration.»,
@@ -291,7 +291,7 @@ docker exec -i dev-web-1 python manage.py shell -c \
 услуги салона закрывает `None` и без шаблона. Ворота читают шаблон и флаги, а не
 `mapping_status`.
 
-Затем — публикация мастеров: действие «✅ Подтвердить мастеров (→ active)».
+Затем — публикация мастеров: список профилей мастеров (`/admin/users/specialistprofile/`) → отметить мастеров салона → действие «✅ Подтвердить мастеров (→ active)» (`users/admin.py:490`).
 
 **Readback.**
 ```bash
@@ -330,7 +330,7 @@ docker exec -i dev-web-1 python manage.py shell -c \
 
 ### Шаг 11. Подключение салона к боту
 
-**Путь.** Админка бота → Tenants → **«Подключить салон»** (`connect/`,
+**Путь.** Админка бота → «Салоны» (`apps/tenancy/models.py:384`) → **«Подключить салон»** (`connect/`,
 `apps/tenancy/admin.py:395-403`): «Slug», «Название салона», «Город» — те же, что
 в шаге 2. Экран находит салон в каталоге по slug, заводит тенант бота с тем же
 UUID, сразу запускает синк и показывает оценку (`apps/tenancy/onboarding.py:464-591`).
@@ -470,3 +470,4 @@ docker exec -i ayla-bot-staging-web-1 python manage.py shell -c \
 ## Changelog
 
 - 2026-09-15 — ayla-96 — первая версия по разделам Q/S, сверено с каталогом `b9d1906` и ботом `8bf99f7c`; блокеры DRF-1987 (шаг 10b) и DRF-1785 (шаг 12).
+- 2026-09-15 — ayla-96 — шесть правок независимой сверки главного окна: раздел «Салоны», итог готовности после DRF-1977, инлайн «Места оказания услуг», `buffer_after_minutes`, где искать «Подтвердить мастеров», флаг `--provider dadata`.
