@@ -130,6 +130,11 @@ from apps.channels.max.photo import (
     extract_first_photo_url,
     safe_hostname,
 )
+from apps.channels.max.voice import (
+    VOICE_ACTION_TYPE,
+    VOICE_NOT_SUPPORTED_TEXT,
+    is_voice_only,
+)
 from apps.conversations.models import Conversation
 from apps.conversations.services import (
     record_global_message,
@@ -1719,6 +1724,21 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
             outcome=AIRequestMetric.OUTCOME_SUCCESS,
             skill_selected="safety_pre_check",
         )
+    elif is_voice_only(event.text, event.attachments):
+        # DRF-1939 — голосовое: честный ответ сразу после safety, до фото-ветки
+        # и консьержа (иначе консьерж получал пустую строку). Без LLM; аудио не
+        # скачивается и не хранится. Временная заглушка до DRF-1942.
+        reply = DiscoveryReply(text=VOICE_NOT_SUPPORTED_TEXT)
+        assistant_action_type = VOICE_ACTION_TYPE
+        _record_live_path_metric(
+            bot_user=bot_user,
+            conversation=conversation,
+            trace_id=trace_id,
+            message_text=event.text,
+            t_start=t_start,
+            outcome=AIRequestMetric.OUTCOME_SUCCESS,
+            skill_selected=VOICE_ACTION_TYPE,
+        )
     elif (_opt_out_reply := try_handle_opt_out(text=event.text, bot_user=bot_user)) is not None:
         # DRF-1285 — «не пиши мне» must work on THIS surface too. The skill
         # registry is dispatched only on the per-tenant path below, and the
@@ -2874,6 +2894,51 @@ def _handle_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.UUID | N
             pre_verdict=safety.verdict,
             post_verdict="",
             reply_text=safety.reply_text,
+        )
+        return
+
+    # DRF-1939 — голосовое сообщение: честный ответ до фото-блока и навыков.
+    # Ход без текста с одними audio-вложениями иначе шёл в food_scanner как
+    # «фото без байтов». Аудио не скачивается и не хранится. Оператор ведёт
+    # диалог (HUMAN_HANDOFF) — бот молчит, как диспетчер ниже.
+    if (
+        is_voice_only(event.text, event.attachments)
+        and conversation.state != Conversation.State.HUMAN_HANDOFF
+    ):
+        voice_text = VOICE_NOT_SUPPORTED_TEXT
+        voice_guard = guard_outbound(
+            voice_text, surface="max", bot_user=bot_user, trace_id=trace_id
+        )
+        if voice_guard.blocked:
+            voice_text = voice_guard.text
+        record_message(
+            conversation,
+            role="assistant",
+            content=voice_text,
+            rendered_text=voice_text,
+            action_type=VOICE_ACTION_TYPE,
+            trace_id=trace_id,
+        )
+        short_term.append(conversation.id, role="assistant", content=voice_text)
+        _record_live_path_metric(
+            bot_user=bot_user,
+            conversation=conversation,
+            trace_id=trace_id,
+            message_text=event.text,
+            t_start=t_start,
+            tenant=conversation.tenant,
+            outcome=AIRequestMetric.OUTCOME_SUCCESS,
+            skill_selected=VOICE_ACTION_TYPE,
+        )
+        send_message(chat_id=event.chat_id, text=voice_text)
+        _capture_live_replay(
+            trace_id=trace_id,
+            event=event,
+            surface="max_per_tenant",
+            branch=VOICE_ACTION_TYPE,
+            pre_verdict=safety.verdict,
+            post_verdict="block" if voice_guard.blocked else "allow",
+            reply_text=voice_text,
         )
         return
 
