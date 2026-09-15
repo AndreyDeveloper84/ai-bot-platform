@@ -118,6 +118,7 @@ import { MasterProfileScreen } from "./screens/MasterProfileScreen";
 import { MasterReviewsScreen } from "./screens/MasterReviewsScreen";
 import { MasterAylaScreen } from "./screens/MasterAylaScreen";
 import { MasterScheduleScreen } from "./screens/MasterScheduleScreen";
+import { MasterPublicationScreen } from "./screens/MasterPublicationScreen";
 import { MasterServiceSelectScreen } from "./screens/MasterServiceSelectScreen";
 import { MasterServicesScreen } from "./screens/MasterServicesScreen";
 import { MasterSettingsScreen } from "./screens/MasterSettingsScreen";
@@ -1253,6 +1254,7 @@ function UnifiedSoloSurface({ me }: { me: MeResponse }) {
          * ведёт на экран 01 «всё готово», иначе — «Мой день». */}
         <Route path="/" element={<SoloSetupGate />} />
         <Route path="/solo/setup" element={<MasterSetupLandingScreen />} />
+        <Route path="/solo/publication" element={<MasterPublicationScreen />} />
         {/* DRF-1817 — экран 06: рабочие часы на общем контракте /working-hours. */}
         <Route path="/solo/working-hours" element={<MasterWorkingHoursScreen />} />
 
