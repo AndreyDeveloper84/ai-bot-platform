@@ -65,12 +65,15 @@ beforeEach(() => {
 });
 
 describe("гейт решается lib/identity, не экраном", () => {
-  it("no_init_data → гейт «Чтобы записаться», запись не создаётся", () => {
+  it("no_init_data → «Открой Ayla из MAX» (DRF-1893, раздел U), запись не создаётся", () => {
+    // 16.09.2026 (DRF-1893): гейт регистрации снят — пустой initData это
+    // отказ транспорта, не аноним; экран — возврат в MAX, без OAuth.
     vi.spyOn(identity, "channelIdentity").mockReturnValue("no_init_data");
 
     renderScreen();
 
-    expect(screen.getByText("Чтобы записаться")).toBeTruthy();
+    expect(screen.getByText("Открой Ayla из MAX")).toBeTruthy();
+    expect(screen.queryByText("Чтобы записаться")).toBeNull();
     expect(mockedCreate).not.toHaveBeenCalled();
   });
 
