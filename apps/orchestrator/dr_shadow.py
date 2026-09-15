@@ -151,6 +151,7 @@ class LivePathSink:
         conversation: Any = None,
         dr_state: Any = None,
         message_text: str | None = None,
+        unavailable_inputs: dict[str, Any] | None = None,
     ) -> None:
         self._branch = branch
         self._tools = tools
@@ -159,6 +160,8 @@ class LivePathSink:
         self._dr_state = dr_state
         #: DRF-1932 — только для словарей выбора NBA; в строку лога не пишется.
         self._message_text = message_text
+        #: DRF-1937 — какой вход держит готовность: коды, без текста блокера.
+        self._unavailable_inputs = unavailable_inputs
 
     def _snapshot_field(self, readiness_state: str | None) -> dict[str, Any] | None:
         """Версия и digest снимка контекста хода (DRF-1903) — без содержимого.
@@ -247,11 +250,48 @@ class LivePathSink:
                     ),
                     "context_snapshot": self._snapshot_field(evidence.readiness_state),
                     "decision_policy": self._policy_field(evidence),
+                    # DRF-1937: первый недоступный вход и все недоступные — кодами.
+                    "readiness_input_unavailable": self._unavailable_inputs,
                 },
                 ensure_ascii=False,
                 sort_keys=True,
             ),
         )
+
+
+#: DRF-1937 — условие недоступности, которого нет в закрытом словаре движка.
+UNAVAILABLE_INPUT_UNCLASSIFIED = "UNCLASSIFIED"
+
+
+def unavailable_input_field(request: Any) -> dict[str, Any]:
+    """Какой вход держит готовность: первый и все недоступные, кодами (DRF-1937).
+
+    Источник — тот же ``engine.unavailable_inputs``, из которого движок берёт
+    свой блокер, поэтому вердикт и список не расходятся. Текст блокера в лог не
+    идёт; код вне ``UNAVAILABLE_INPUT_CODES`` — ``UNCLASSIFIED``. Запись §19
+    (``DecisionEvidence``) не меняется: причина живёт только в строке тени
+    (решение главного окна 15.09). Не бросает: сбой — имя типа.
+    """
+
+    from apps.orchestrator.decision_readiness import engine as eng
+
+    try:
+        found = eng.unavailable_inputs(
+            availability=request.availability,
+            probe_usable=request.probe_usable,
+            safety=request.safety,
+            state_revision=request.state_revision,
+            candidates=request.candidates,
+            measures=request.measures,
+            policy=request.policy,
+        )
+    except Exception as exc:  # noqa: BLE001 — наблюдение не стоит хода
+        return {"error": type(exc).__name__}
+    codes = [
+        code if code in eng.UNAVAILABLE_INPUT_CODES else UNAVAILABLE_INPUT_UNCLASSIFIED
+        for code, _attribution in found
+    ]
+    return {"first": codes[0] if codes else None, "all": codes}
 
 
 def observe_live_turn(
@@ -282,6 +322,7 @@ def observe_live_turn(
             conversation=conversation,
             dr_state=request.state,
             message_text=message_text,
+            unavailable_inputs=unavailable_input_field(request),
         )
         evaluation_id = str(trace_id) if trace_id else f"no-trace:{uuid.uuid4()}"
         return observe(request, evaluation_id=evaluation_id, sink=sink)
