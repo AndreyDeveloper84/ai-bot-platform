@@ -83,6 +83,7 @@ from django.conf import settings
 
 from apps.catalog.services.throttle import ThrottleWaitBudget
 from apps.integrations.ayla.url_builder import AylaUrlBuilder, AylaUrlError
+from apps.integrations.ayla.offer_refusal import KNOWN_REASONS
 from apps.integrations.ayla.request_id import with_request_id
 
 logger = logging.getLogger(__name__)
@@ -243,6 +244,12 @@ class CatalogSpecialistServiceDTO:
     #: вызывающий, собравший DTO руками и про поле не сказавший, получает
     #: прежнее поведение «сохранить, что было».
     health_check_key_present: bool = False
+    #: DRF-1964a — продаётся ли ребро (контракт DRF-1962). Та же развилка, что у
+    #: проверки здоровья: ``sellable_key_present=False`` — ответ о продаже молчит
+    #: (каталог до DRF-1962), и зеркало не меняется.
+    sellable: bool = True
+    unsellable_reason: str | None = None
+    sellable_key_present: bool = False
     raw: dict[str, Any] = field(default_factory=dict)
 
 
@@ -1150,6 +1157,34 @@ def _parse_salon_service(row: dict[str, Any]) -> CatalogSalonServiceDTO:
     )
 
 
+#: Причины, которые каталог называет (``services/offer_sellable.py``, DRF-1962) —
+#: один словарь с чтением ребра и отказа записи (DRF-1989).
+KNOWN_UNSELLABLE_REASONS = KNOWN_REASONS
+
+
+def _parse_sellable(row: dict[str, Any]) -> dict[str, Any]:
+    """``sellable`` / ``unsellable_reason`` ребра (DRF-1964a), fail-closed.
+
+    Ключа нет → ``sellable_key_present=False``: зеркало ничего не пишет. Ключ
+    есть → продаётся только явное ``true``; у непродаваемого ребра причина из
+    закрытого словаря, иначе ``unknown`` (ребро остаётся непродаваемым).
+    """
+    if "sellable" not in row:
+        return {"sellable": True, "unsellable_reason": None, "sellable_key_present": False}
+    if row["sellable"] is True:
+        return {"sellable": True, "unsellable_reason": None, "sellable_key_present": True}
+    reason = row.get("unsellable_reason")
+    if reason not in KNOWN_UNSELLABLE_REASONS:
+        logger.warning(
+            "catalog.parse.unsellable_reason_unknown edge=%s sellable=%r reason=%r",
+            row.get("id"),
+            row["sellable"],
+            reason,
+        )
+        reason = "unknown"
+    return {"sellable": False, "unsellable_reason": reason, "sellable_key_present": True}
+
+
 def _parse_specialist_service(row: dict[str, Any]) -> CatalogSpecialistServiceDTO:
     """Parse one bookable-edge row. Raises ``KeyError`` on a missing join key.
 
@@ -1187,6 +1222,7 @@ def _parse_specialist_service(row: dict[str, Any]) -> CatalogSpecialistServiceDT
         # «не знаю», и он обязан отличаться от «ключа не было». Оба дают
         # питоновский `None`, и до этой строки различить их было нечем.
         health_check_key_present="resolved_requires_health_check" in row,
+        **_parse_sellable(row),
         raw=row,
     )
 

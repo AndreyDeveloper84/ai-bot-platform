@@ -65,6 +65,7 @@ import httpx
 from django.conf import settings
 
 from apps.integrations.ayla.health_check import HEALTH_CHECK_CODES
+from apps.integrations.ayla.offer_refusal import reason_from_refusal
 from apps.integrations.ayla.url_builder import AylaUrlBuilder
 from apps.integrations.ayla.request_id import with_request_id
 
@@ -148,6 +149,19 @@ class SalonNotAllowed(SalonAPIError):
     moved. Not a rights problem (403) and not a race (409): no retry and
     no other actor changes the answer.
     """
+
+
+class SalonOfferNotSellable(SalonNotAllowed):
+    """422 ``SERVICE_NOT_ACTIVE`` с ``details.reason`` — каталог не продаёт предложение.
+
+    DRF-1989. Подкласс :class:`SalonNotAllowed`: смысл тот же — «так нельзя,
+    кто бы ни просил», — но у отказа есть причина, и администратору её
+    говорят. Безымянный ``SERVICE_NOT_ACTIVE`` остаётся ``SalonNotAllowed``.
+    """
+
+    def __init__(self, detail: str = "", *, code: str = "", reason: str) -> None:
+        super().__init__(detail, code=code)
+        self.reason = reason
 
 
 class SalonHealthCheckHandoff(SalonAPIError):
@@ -333,6 +347,9 @@ class AylaSalonClient:
             # a consultation nobody is going to give.
             if code in HEALTH_CHECK_CODES:
                 raise SalonHealthCheckHandoff(detail, code=code, handoff=_error_handoff(resp))
+            offer_reason = reason_from_refusal(code, _error_details(resp))
+            if offer_reason is not None:
+                raise SalonOfferNotSellable(detail, code=code, reason=offer_reason)
             raise SalonNotAllowed(detail, code=code)
         if resp.status_code >= 500:
             raise SalonUnavailable(f"upstream {resp.status_code}: {detail}")
@@ -989,6 +1006,16 @@ def _error_code(resp: httpx.Response) -> str:
         if isinstance(err, dict):
             return str(err.get("code") or "")
     return ""
+
+
+def _error_details(resp: httpx.Response) -> dict[str, Any] | None:
+    """Ayla's ``error.details`` as sent, or None when absent (DRF-1989)."""
+
+    try:
+        details = (resp.json().get("error") or {}).get("details")
+    except (ValueError, AttributeError):
+        return None
+    return details if isinstance(details, dict) else None
 
 
 def _error_handoff(resp: httpx.Response) -> bool | None:

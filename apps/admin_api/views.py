@@ -242,17 +242,27 @@ def _detail_payload(master: CatalogMaster, *, include_audit: bool = False) -> di
 
     # Services list — read MasterService mapping (M2M editing is MM4 / a
     # later PR; we only READ here).
-    service_ids = list(
-        MasterService.all_tenants.filter(tenant=master.tenant_id, master=master).values_list(
-            "service_id", flat=True
-        )
-    )
+    # DRF-1989 — салонная админка показывает непродаваемое с причиной.
+    sale_state = {
+        service_id: (sellable, unsellable_reason or None)
+        for service_id, sellable, unsellable_reason in MasterService.all_tenants.filter(
+            tenant=master.tenant_id, master=master
+        ).values_list("service_id", "sellable", "unsellable_reason")
+    }
     services = list(
         CatalogService.all_tenants.filter(
-            tenant=master.tenant_id, id__in=service_ids, is_active=True
+            tenant=master.tenant_id, id__in=list(sale_state), is_active=True
         ).values("id", "name")
     )
-    services_payload = [{"id": str(s["id"]), "name": s["name"]} for s in services]
+    services_payload = [
+        {
+            "id": str(s["id"]),
+            "name": s["name"],
+            "sellable": sale_state[s["id"]][0],
+            "unsellable_reason": sale_state[s["id"]][1],
+        }
+        for s in services
+    ]
 
     return {
         "id": str(master.id),

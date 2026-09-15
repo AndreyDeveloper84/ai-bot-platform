@@ -64,6 +64,7 @@ from apps.booking.services.attribution import (
 )
 from apps.booking.services.master_gate import master_sale_refusal
 from apps.catalog.models import CatalogMaster, CatalogService, MasterService
+from apps.integrations.ayla.offer_refusal import OFFER_NOT_SELLABLE_SLUG, client_text_for
 from apps.events.services import emit
 from apps.identity.models import BotUser
 from apps.scheduling.services.resolver import (
@@ -264,14 +265,23 @@ def create_customer_booking(
             if refusal is not None:
                 raise BookingCreateError(*refusal)
 
-            if not MasterService.all_tenants.filter(
+            offered = MasterService.all_tenants.filter(
                 tenant_id=inp.tenant.id,
                 master_id=master.id,
                 service_id=service.id,
-            ).exists():
-                raise BookingCreateError(
-                    "service_not_offered", "master does not perform this service"
-                )
+            )
+            # DRF-1989 — новая запись только на продаваемое ребро (один запрос на
+            # обычном пути, как раньше). Перенос через эту функцию не
+            # спрашивает: решение владельца R6 — перенос существующей записи
+            # цену не перепроверяет.
+            if not offered.sellable().exists():
+                if not offered.exists():
+                    raise BookingCreateError(
+                        "service_not_offered", "master does not perform this service"
+                    )
+                if inp.created_by != "execute_reschedule":
+                    reason = offered.values_list("unsellable_reason", flat=True).first()
+                    raise BookingCreateError(OFFER_NOT_SELLABLE_SLUG, client_text_for(reason))
 
             local_visit = inp.visit_at.astimezone(tz)
             blocks = resolve_working_blocks(

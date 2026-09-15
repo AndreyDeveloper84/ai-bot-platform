@@ -55,7 +55,13 @@ from apps.integrations.ayla.user_proxy import external_user_id_for
 from django.conf import settings
 from django.utils.dateparse import parse_datetime
 
-from apps.catalog.models import CatalogMaster, CatalogService, MasterService
+from apps.catalog.models import CatalogMaster, CatalogService, MasterService, sellable_edge_q
+from apps.integrations.ayla.offer_refusal import (
+    OFFER_NOT_SELLABLE_SLUG,
+    client_text_for,
+    reason_from_edge,
+    reason_from_refusal,
+)
 from apps.identity.models import BotUser
 from apps.tenancy.models import Tenant
 from apps.miniapp_api.auth import (
@@ -85,6 +91,18 @@ logger = logging.getLogger(__name__)
 
 def _error(slug: str, detail: str, status: int) -> JsonResponse:
     return JsonResponse({"error": slug, "detail": detail}, status=status)
+
+
+def _offer_not_sellable(reason: str) -> JsonResponse:
+    """DRF-1989: каталог не продаёт предложение — 409 с причиной и словами для человека.
+
+    409, а не 400: запрос верен, продавать нечего. Экран рисует ``detail``
+    дословно — слова живут в одном месте (``offer_refusal``).
+    """
+    return JsonResponse(
+        {"error": OFFER_NOT_SELLABLE_SLUG, "detail": client_text_for(reason), "reason": reason},
+        status=409,
+    )
 
 
 def _lazy_register_bot_user(tenant: Tenant, verified: VerifiedInitData) -> BotUser:
@@ -631,7 +649,11 @@ def slots(request: HttpRequest) -> HttpResponse:
 
     # Per master-management handoff §MM4: customer can book a master
     # for a service only if the (master, service) mapping exists.
-    if not MasterService.objects.filter(master_id=master.id, service_id=service.id).exists():
+    if (
+        not MasterService.objects.filter(master_id=master.id, service_id=service.id)
+        .sellable()
+        .exists()
+    ):
         return _error(
             "not_found",
             "master does not perform this service",
@@ -745,7 +767,11 @@ def _bookable_master_exists() -> Exists:
     code — plus the ``OuterRef`` join onto the already-scoped service row.
     """
 
-    return Exists(CatalogMaster.objects.bookable().filter(services_offered__service=OuterRef("pk")))
+    return Exists(
+        CatalogMaster.objects.bookable().filter(
+            sellable_edge_q("services_offered__"), services_offered__service=OuterRef("pk")
+        )
+    )
 
 
 def _services_with_bookability():
@@ -867,8 +893,10 @@ def masters_list(request: HttpRequest) -> HttpResponse:
         # Existence join via MasterService. Filter via FK lookup so
         # Django coerces the string UUID; raw service_id= would fail
         # mypy strict UUID type check.
-        master_ids = MasterService.objects.filter(service__id=service_id).values_list(
-            "master_id", flat=True
+        master_ids = (
+            MasterService.objects.filter(service__id=service_id)
+            .sellable()
+            .values_list("master_id", flat=True)
         )
         qs = qs.filter(id__in=list(master_ids))
     rows = [_master_to_dict(m) for m in qs]
@@ -952,9 +980,9 @@ def master_detail(request: HttpRequest, master_id: str) -> HttpResponse:
     # disable services the master doesn't offer.
     service_ids = [
         str(sid)
-        for sid in MasterService.objects.filter(master_id=master.id).values_list(
-            "service_id", flat=True
-        )
+        for sid in MasterService.objects.filter(master_id=master.id)
+        .sellable()
+        .values_list("service_id", flat=True)
     ]
     payload = _master_to_dict(master)
     payload["service_ids"] = service_ids
@@ -981,6 +1009,8 @@ def _parse_iso_datetime(s: str | None) -> datetime | None:
 # и, возможно, неверным статусом. Полноту таблицы по слагам гейта продажи
 # держит ``test_every_sale_block_slug_is_mapped_on_create`` (DRF-1548).
 _ERROR_SLUG_TO_STATUS = {
+    # DRF-1989 — запрос верен, продавать нечего; как у ``service_unbookable``.
+    OFFER_NOT_SELLABLE_SLUG: 409,
     "service_not_found": 404,
     "master_not_bookable": 404,
     "service_not_offered": 404,
@@ -1221,6 +1251,19 @@ def _create_booking_via_ayla(
                 text_for(exc.code, handoff=exc.handoff),
                 422,
             )
+        offer_reason = reason_from_refusal(exc.code, exc.details)
+        if offer_reason is not None:
+            # DRF-1989: 422 SERVICE_NOT_ACTIVE с причиной — осознанный отказ
+            # каталога, а не «booking rejected». Лог держит причину.
+            logger.info(
+                "miniapp_api.create_booking.offer_not_sellable "
+                "tenant=%s service=%s master=%s reason=%s",
+                tenant.id,
+                service_id,
+                master_id,
+                offer_reason,
+            )
+            return _offer_not_sellable(offer_reason)
         if (exc.code or "").lower() == "subscription_past_due":
             # C1: neutral surface — no debt semantics to the client
             # (frozen W4 slug).
@@ -1356,6 +1399,11 @@ def booking_quote(request: HttpRequest) -> HttpResponse:
             rows = []
         if rows:
             edge = rows[0]
+            offer_reason = reason_from_edge(edge)
+            if offer_reason is not None:
+                # DRF-1989: цена непродаваемого ребра — не цена; экран
+                # подтверждения рисовал «Цена 0 ₽».
+                return _offer_not_sellable(offer_reason)
             edge_price = edge.get("price")
             edge_duration = edge.get("duration_minutes")
             try:

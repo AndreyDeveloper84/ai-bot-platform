@@ -117,6 +117,8 @@ class TestServicesList:
         out = svc.list_master_services(master=accepted_master)
         assert len(out) == 1
         row = out[0]
+        # DRF-1989 (16.09.2026): кабинет мастера показывает непродаваемое с
+        # причиной — строка несёт ``sellable`` и ``unsellable_reason``.
         assert set(row.keys()) == {
             "service_id",
             "name",
@@ -125,7 +127,10 @@ class TestServicesList:
             "description",
             "category",
             "is_active",
+            "sellable",
+            "unsellable_reason",
         }
+        assert (row["sellable"], row["unsellable_reason"]) == (True, None)
         assert row["name"] == "Маникюр гель-лак"
         assert row["price_rub"] == 2400
         assert row["duration_min"] == 90
