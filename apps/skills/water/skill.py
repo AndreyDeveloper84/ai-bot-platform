@@ -109,8 +109,11 @@ class WaterSkill:
         # не видит намеренно: иначе ход ушёл бы в food_clarify и получил
         # карточку «еда или опечатка» вместо честного отказа.
         if not _consent_open(context.bot_user):
+            from apps.skills.welcome.skill import consent_offer_action_data
+
             return SkillResult(
                 reply_text=CONSENT_TEXT,
+                action_data=consent_offer_action_data("water"),
                 meta={"reply_kind": "water_consent_required"},
             )
 

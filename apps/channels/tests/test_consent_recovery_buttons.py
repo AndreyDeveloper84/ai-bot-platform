@@ -25,7 +25,6 @@ SET:true в web/worker/celery-worker). Флаг выключат — кнопк�
 from __future__ import annotations
 
 from datetime import datetime, timezone as dt_timezone
-from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import pytest
@@ -78,7 +77,7 @@ class TestRefusalCarriesTheButton:
         bot_user = Mock()
         bot_user.food_scanner_consent_at = datetime(2026, 9, 1, tzinfo=dt_timezone.utc)
         ctx = SkillContext(
-            conversation=SimpleNamespace(id=1, skill_state={}),
+            conversation=Mock(id=1, skill_state={}),
             bot_user=bot_user,
             message_text="",
             has_attachments=True,
@@ -98,7 +97,7 @@ class TestRefusalCarriesTheButton:
         from apps.skills.food_clarify import text_entry
 
         ctx = SkillContext(
-            conversation=SimpleNamespace(id=2, skill_state={}),
+            conversation=Mock(id=2, skill_state={}),
             bot_user=Mock(),
             message_text="омлет 150 г",
         )
@@ -117,7 +116,7 @@ class TestRefusalCarriesTheButton:
         bot_user.channel = "max"
         bot_user.channel_user_id = "990001"
         ctx = SkillContext(
-            conversation=SimpleNamespace(id=3, skill_state={}),
+            conversation=Mock(id=3, skill_state={}),
             bot_user=bot_user,
             message_text="стакан воды",
         )
@@ -205,7 +204,7 @@ class TestGuards:
         bot_user.channel = "max"
         bot_user.channel_user_id = "990002"
         ctx = SkillContext(
-            conversation=SimpleNamespace(id=4, skill_state={}),
+            conversation=Mock(id=4, skill_state={}),
             bot_user=bot_user,
             message_text="стакан воды",
         )

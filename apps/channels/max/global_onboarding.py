@@ -418,8 +418,17 @@ def run_onboarding_turn(
 
 
 def _is_consent_grant_turn(result: Any) -> bool:
-    """True when this WelcomeSkill turn is the one that grants consent (S5 render)."""
-    return (getattr(result, "meta", None) or {}).get("reply_kind", "") == _S5_KIND
+    """True when this WelcomeSkill turn is the one that grants consent.
+
+    Два вида: приветственный S5 и возврат в исходный поток после отказа
+    (DRF-1968, ``welcome_consent_recovery_granted``). Оба идут через
+    ``WelcomeSkill``, журнал пишется здесь одним путём — ``record_global_consent``
+    идемпотентен, повторный тап не плодит строк.
+    """
+    from apps.skills.welcome.skill import CONSENT_RECOVERY_GRANT_KIND
+
+    kind = (getattr(result, "meta", None) or {}).get("reply_kind", "")
+    return kind in {_S5_KIND, CONSENT_RECOVERY_GRANT_KIND}
 
 
 def _consent_captured(bot_user: Any) -> bool:

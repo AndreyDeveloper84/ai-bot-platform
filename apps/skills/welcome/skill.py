@@ -475,6 +475,30 @@ class WelcomeSkill:
                 },
                 meta={"reply_kind": "welcome_s2a_details"},
             )
+        for origin in CONSENT_RECOVERY_ORIGINS:
+            # DRF-1968 — вход в согласие из отказа: тот же утверждённый экран
+            # S2, «Да, продолжим» помнит, куда человека вернуть.
+            if text == f"cb:welcome:consent_offer_{origin}":
+                return SkillResult(
+                    reply_text=S2_CONSENT_TEXT,
+                    action_type="welcome_consent_prompt",
+                    action_data={
+                        "buttons": _s2_consent_buttons_for(origin),
+                        "button_columns": 1,
+                    },
+                    meta={"reply_kind": "welcome_s2_consent_prompt", "consent_origin": origin},
+                )
+            if text == f"cb:welcome:consent_yes_{origin}":
+                # Согласие пишет глобальный онбординг по reply_kind (ниже), а
+                # человек слышит возврат в свой поток, а не общий первый экран.
+                return SkillResult(
+                    reply_text=CONSENT_RECOVERY_RETURN_TEXTS[origin],
+                    action_type="welcome_consent_recovery_granted",
+                    meta={
+                        "reply_kind": CONSENT_RECOVERY_GRANT_KIND,
+                        "consent_origin": origin,
+                    },
+                )
         if text == "cb:welcome:consent_yes":
             # Direct S1 → S2 → S3 → S5 path. SHOW S3 positioning.
             return self._render_consent_granted(context, show_s3=True)
@@ -852,6 +876,63 @@ def _start_buttons() -> list[dict[str, str]]:
     return [{"label": "▶️ Начать", "callback": "cb:welcome:start_s2"}]
 
 
+#: DRF-1968 (M2+) — откуда человек пришёл к согласию. Один сегмент payload:
+#: ``cb:welcome:consent_offer_<origin>`` и ``cb:welcome:consent_yes_<origin>``.
+CONSENT_RECOVERY_ORIGINS: tuple[str, ...] = ("photo", "text", "water")
+
+#: Вид ответа «согласие выдано из отказа»: по нему глобальный онбординг пишет
+#: журнал согласий тем же путём, что и приветственный S5.
+CONSENT_RECOVERY_GRANT_KIND = "welcome_consent_recovery_granted"
+
+#: Подпись кнопки в отказе. Рекомендация владельца (OWNER_QUESTIONS, раздел M):
+#: «добавить кнопку „Дать согласие“ в оба отказа».
+CONSENT_OFFER_LABEL = "Дать согласие"
+
+#: Возврат в исходный поток после выдачи согласия (решение владельца M2+:
+#: «После consent возвращать пользователя в исходный flow»). ЧЕРНОВИК: сами
+#: фразы владельцем не утверждены, вынесены вопросом W3 вместе с текстами
+#: «забудь всё»; экран согласия при этом — утверждённый S2_CONSENT_TEXT.
+CONSENT_RECOVERY_RETURN_TEXTS: dict[str, str] = {
+    "photo": "Готово, согласие есть. Пришли фото ещё раз — запишу в дневник.",
+    "text": "Готово, согласие есть. Напиши, что съела, — посчитаю и запишу.",
+    "water": "Готово, согласие есть. Сколько воды записать?",
+}
+
+
+def consent_offer_buttons(origin: str) -> list[dict[str, str]]:
+    """Кнопка «Дать согласие» под отказом; несёт, откуда человек пришёл."""
+    return [
+        {
+            "label": CONSENT_OFFER_LABEL,
+            "callback": f"cb:welcome:consent_offer_{origin}",
+        }
+    ]
+
+
+def consent_offer_action_data(origin: str) -> dict | None:
+    """``action_data`` для отказа — ТОЛЬКО на глобальном пути.
+
+    На салонном пути тап согласия ставит ``consent_at``, но не пишет
+    ConsentRecord (:meth:`WelcomeSkill._render_consent_granted`), а отказы
+    читают журнал — кнопка вернула бы человека к тому же отказу. Салонный путь
+    — отдельный лист (решение главного окна 16.09).
+    """
+    from apps.tenancy.context import current_tenant
+
+    if current_tenant() is not None:
+        return None
+    return {"buttons": consent_offer_buttons(origin), "button_columns": 1}
+
+
+def _s2_consent_buttons_for(origin: str) -> list[dict[str, str]]:
+    """Тот же экран S2, но «Да, продолжим» несёт исходный вход человека."""
+    return [
+        {"label": "Да, продолжим", "callback": f"cb:welcome:consent_yes_{origin}"},
+        {"label": "Узнать что хранится", "callback": "cb:welcome:consent_details"},
+        {"label": "Не сейчас", "callback": "cb:welcome:consent_refuse"},
+    ]
+
+
 def _s2_consent_buttons() -> list[dict[str, str]]:
     """S2 privacy consent keyboard (Tau §5).
 
@@ -908,11 +989,16 @@ def welcome_tap_labels() -> dict[str, str]:
     ``cb:welcome:`` payload, и в чат они ничего не присылают.
     """
     labels: dict[str, str] = {}
+    recovery_buttons: list[dict[str, str]] = []
+    for origin in CONSENT_RECOVERY_ORIGINS:
+        recovery_buttons.extend(consent_offer_buttons(origin))
+        recovery_buttons.extend(_s2_consent_buttons_for(origin))
     for button in (
         *_start_buttons(),
         *_s2_consent_buttons(),
         *_s2a_details_buttons(),
         *_legacy_wellness_buttons(),
+        *recovery_buttons,
     ):
         callback = button.get("callback", "")
         if callback.startswith("cb:welcome:"):
