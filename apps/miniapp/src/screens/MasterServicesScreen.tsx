@@ -38,6 +38,7 @@ import { useNavigate } from "react-router-dom";
 
 import {
   ADD_OWN_LABEL,
+  FIELD_PRICE,
   NOT_LINKED_MESSAGE,
   OWN_EMPTY,
   OWN_NOTE,
