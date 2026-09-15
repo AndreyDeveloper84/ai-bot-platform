@@ -475,6 +475,59 @@ export const getServiceTemplates = (
 ): Promise<{ direction_id: string; templates: ServiceTemplate[] }> =>
   request(`/services/templates?direction_id=${encodeURIComponent(directionId)}`, { method: "GET" });
 
+// --- M5/M26 publication (DRF-1797 / DRF-1818) ------------------------------
+// Mirrors apps/master_api/views.py::publication_status / publication_publish —
+// thin proxies of the catalog M4 routes. The screen reads the catalog's answer
+// and never recomputes readiness on its own.
+
+export type PublicationProfileStatus = "draft" | "pending" | "active";
+
+export interface PublicationMissingItem {
+  code: string;
+  /** Те же ключи, что у пунктов readiness бота, плюс `identity`. */
+  section: string;
+  detail: Record<string, unknown>;
+}
+
+export interface PublicationReadiness {
+  status: "READY" | "NOT_READY" | string;
+  missing: PublicationMissingItem[];
+}
+
+export interface PublicationRequestRecord {
+  id: string;
+  command_id: string;
+  outcome: string;
+  from_status: string;
+  to_status: string;
+  created_at: string;
+}
+
+export interface PublicationStatus {
+  specialist_id: string;
+  profile_status: PublicationProfileStatus | string;
+  readiness: PublicationReadiness;
+  last_request: PublicationRequestRecord | null;
+}
+
+export interface PublishResponse {
+  specialist_id: string;
+  profile_status: PublicationProfileStatus | string;
+  replayed: boolean;
+  request: PublicationRequestRecord;
+}
+
+export const getPublicationStatus = (): Promise<PublicationStatus> =>
+  request("/publication/status", { method: "GET" });
+
+/** `commandId` — ключ одной попытки: повтор с тем же ключом каталог не выполнит второй раз. */
+export const publishProfile = (commandId: string, signal?: AbortSignal): Promise<PublishResponse> =>
+  request("/publication", {
+    method: "POST",
+    body: JSON.stringify({ command_id: commandId }),
+    signal,
+  });
+
 /** Пункты, которые экран рисует: всё, кроме `unavailable`. */
 export const drawnReadinessItems = (items: ReadinessItem[]): ReadinessItem[] =>
   items.filter((item) => item.state !== "unavailable");
