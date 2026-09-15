@@ -412,7 +412,17 @@ def run_onboarding_turn(
     # the ConsentRecord (#1074). Idempotent (get_or_create) — re-tapping «Да» never
     # duplicates and a repeat tap reconciles a consent_at a prior failure dropped.
     if _is_consent_grant_turn(result):
-        _record_consent_journal(bot_user)
+        recorded = _record_consent_journal(bot_user)
+        if not recorded and _is_recovery_grant_turn(result):
+            # Журнал глотает исключения — «не бросило» НЕ значит «записано».
+            # Обещать человеку «готово, согласие есть», когда в журнале
+            # ничего нет, нельзя: это утверждение о 152-ФЗ, и отказы,
+            # читающие журнал, упрут его в тот же отказ следующим ходом.
+            # Приветственный S5 сознательно не трогаем — его поведение при
+            # сбое journal'а прежнее (отдельный предмет).
+            from apps.skills.welcome.skill import CONSENT_RECOVERY_FAILED_TEXT
+
+            return DiscoveryReply(text=CONSENT_RECOVERY_FAILED_TEXT)
 
     return _to_discovery_reply(result, bot_user)
 
@@ -429,6 +439,14 @@ def _is_consent_grant_turn(result: Any) -> bool:
 
     kind = (getattr(result, "meta", None) or {}).get("reply_kind", "")
     return kind in {_S5_KIND, CONSENT_RECOVERY_GRANT_KIND}
+
+
+def _is_recovery_grant_turn(result: Any) -> bool:
+    """True только для возврата из отказа (DRF-1968), не для приветственного S5."""
+    from apps.skills.welcome.skill import CONSENT_RECOVERY_GRANT_KIND
+
+    kind = (getattr(result, "meta", None) or {}).get("reply_kind", "")
+    return kind == CONSENT_RECOVERY_GRANT_KIND
 
 
 def _consent_captured(bot_user: Any) -> bool:
@@ -515,8 +533,13 @@ def _to_discovery_reply(result: Any, bot_user: Any = None) -> DiscoveryReply:
     return DiscoveryReply(text=result.reply_text, action_data=result.action_data)
 
 
-def _record_consent_journal(bot_user: Any) -> None:
+def _record_consent_journal(bot_user: Any) -> bool:
     """Capture consent server-side, ATOMICALLY (best-effort, loud on failure).
+
+    Возвращает, записан ли PERSONAL_DATA этим ходом. Вызывающему этого не
+    вывести из «не бросило»: исключения здесь глотаются намеренно, и молчание
+    одинаково выглядит и при успехе, и при сбое. Утверждать согласие по
+    152-ФЗ можно только по этому значению (DRF-1968).
 
     ``record_global_consent`` writes the proof-of-consent ConsentRecord AND stamps
     ``bot_user.consent_at`` in one transaction (#1074), so on this global path
@@ -553,8 +576,10 @@ def _record_consent_journal(bot_user: Any) -> None:
     from apps.consent.models import ConsentRecord
     from apps.consent.services import record_global_consent
 
+    personal_data_type = ConsentRecord.ConsentType.PERSONAL_DATA.value
+    recorded_personal_data = False
     for consent_type in (
-        ConsentRecord.ConsentType.PERSONAL_DATA.value,
+        personal_data_type,
         ConsentRecord.ConsentType.MEMORY_GREEN.value,
     ):
         try:
@@ -570,3 +595,7 @@ def _record_consent_journal(bot_user: Any) -> None:
                 getattr(bot_user, "id", None),
                 consent_type,
             )
+        else:
+            if consent_type == personal_data_type:
+                recorded_personal_data = True
+    return recorded_personal_data

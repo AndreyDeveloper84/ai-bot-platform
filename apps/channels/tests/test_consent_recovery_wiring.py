@@ -314,9 +314,42 @@ class TestGuards:
         assert result.reply_text == CONSENT_TEXT
         assert result.action_data is None
 
+    def test_at_no_tenant_the_refusal_still_carries_the_button(self) -> None:
+        """Вторая половина двусостоятельного различителя (инвариант #1074).
+
+        Сам ход выдачи согласия идёт при ``tenant=None``: ``run_onboarding_turn``
+        БРОСАЕТ, если в него протёк tenant scope (атомарность consent_at и
+        ConsentRecord). Отказы же исполняются под сентинелом. Значит различитель
+        обязан пропускать ОБА состояния, и почини его только на сентинеле —
+        кнопка снова не появилась бы, уже по второй причине.
+
+        Сторож зелёный и до правки, и после: прежний код при ``tenant=None``
+        кнопку отдавал. Он держит ровно ту половину, которую правка могла
+        потерять молча.
+        """
+        from apps.skills.water import skill as water_skill
+        from apps.tenancy.context import current_tenant
+
+        assert current_tenant() is None, "предмет сторожа подменён: тут должен быть tenant=None"
+        ctx = SkillContext(
+            conversation=Mock(id="conv-none", skill_state={}),
+            bot_user=Mock(channel="max", channel_user_id="71976"),
+            message_text="стакан воды",
+        )
+        with patch.object(water_skill, "_consent_open", return_value=False):
+            result = water_skill.WaterSkill().handle(ctx)
+
+        assert result.reply_text == CONSENT_TEXT
+        assert [b["callback"] for b in (result.action_data or {})["buttons"]] == [
+            "cb:welcome:consent_offer_water"
+        ]
+
     def test_the_three_return_texts_are_different(self) -> None:
         """Возврат — в СВОЙ поток: одинаковые фразы сделали бы origin фикцией."""
-        from apps.skills.welcome.skill import CONSENT_RECOVERY_ORIGINS, CONSENT_RECOVERY_RETURN_TEXTS
+        from apps.skills.welcome.skill import (
+            CONSENT_RECOVERY_ORIGINS,
+            CONSENT_RECOVERY_RETURN_TEXTS,
+        )
 
         texts = [CONSENT_RECOVERY_RETURN_TEXTS[o] for o in CONSENT_RECOVERY_ORIGINS]
         assert len(set(texts)) == len(CONSENT_RECOVERY_ORIGINS)

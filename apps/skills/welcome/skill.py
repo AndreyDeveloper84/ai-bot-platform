@@ -477,7 +477,7 @@ class WelcomeSkill:
             )
         for origin in CONSENT_RECOVERY_ORIGINS:
             # DRF-1968 — вход в согласие из отказа: тот же утверждённый экран
-            # S2, «Да, продолжим» помнит, куда человека вернуть.
+            # S2, но каждая кнопка помнит, куда человека вернуть.
             if text == f"cb:welcome:consent_offer_{origin}":
                 return SkillResult(
                     reply_text=S2_CONSENT_TEXT,
@@ -486,19 +486,31 @@ class WelcomeSkill:
                         "buttons": _s2_consent_buttons_for(origin),
                         "button_columns": 1,
                     },
-                    meta={"reply_kind": "welcome_s2_consent_prompt", "consent_origin": origin},
-                )
-            if text == f"cb:welcome:consent_yes_{origin}":
-                # Согласие пишет глобальный онбординг по reply_kind (ниже), а
-                # человек слышит возврат в свой поток, а не общий первый экран.
-                return SkillResult(
-                    reply_text=CONSENT_RECOVERY_RETURN_TEXTS[origin],
-                    action_type="welcome_consent_recovery_granted",
                     meta={
-                        "reply_kind": CONSENT_RECOVERY_GRANT_KIND,
+                        "reply_kind": CONSENT_RECOVERY_PROMPT_KIND,
                         "consent_origin": origin,
                     },
                 )
+            if text == f"cb:welcome:consent_details_{origin}":
+                # Тот же разворот S2a, что у приветствия; отличается только
+                # тем, что кнопка продолжения не теряет исходный вход.
+                return SkillResult(
+                    reply_text=S2A_DETAILS_TEXT,
+                    action_type="welcome_consent_details",
+                    action_data={
+                        "buttons": _s2a_details_buttons_for(origin),
+                        "button_columns": 1,
+                    },
+                    meta={
+                        "reply_kind": "welcome_s2a_details",
+                        "consent_origin": origin,
+                    },
+                )
+            if text in (
+                f"cb:welcome:consent_yes_{origin}",
+                f"cb:welcome:consent_yes_via_s2a_{origin}",
+            ):
+                return self._render_consent_recovery_granted(context, origin=origin)
         if text == "cb:welcome:consent_yes":
             # Direct S1 → S2 → S3 → S5 path. SHOW S3 positioning.
             return self._render_consent_granted(context, show_s3=True)
@@ -537,20 +549,7 @@ class WelcomeSkill:
         # S1 idempotency: stamp welcomed_at so subsequent inbound
         # messages bypass the auto-trigger branch in matches().
         bot_user = context.bot_user
-        if getattr(bot_user, "welcomed_at", None) is None:
-            try:
-                bot_user.welcomed_at = timezone.now()
-                bot_user.save(update_fields=["welcomed_at"])
-            except Exception as exc:  # noqa: BLE001
-                # Не блокируем welcome delivery если DB write fail —
-                # худший случай: welcome re-fires на следующем msg.
-                # ERROR log: оператор увидит pattern если это
-                # систематически воспроизводится.
-                logger.error(
-                    "welcome.welcomed_at_save_failed bot_user_id=%s err=%s",
-                    getattr(bot_user, "id", None),
-                    exc,
-                )
+        _stamp_welcomed_at(bot_user)
         # DRF-1202 — Returning User (§9) и User with an Active Task (§10).
         # Оба доступны только через явный жест: `/start` или колбэк
         # welcome-клавиатуры. Автотриггер по произвольному тексту
@@ -617,6 +616,40 @@ class WelcomeSkill:
             meta={"reply_kind": "welcome"},
         )
 
+    def _render_consent_recovery_granted(
+        self, context: SkillContext, *, origin: str
+    ) -> SkillResult:
+        """Согласие выдано из отказа — возврат в тот поток, откуда человек пришёл.
+
+        Журнал 152-ФЗ пишет глобальный онбординг по ``reply_kind``, и текст
+        он выбирает ПО ФАКТУ записи, а не по отсутствию исключения
+        (:func:`apps.channels.max.global_onboarding.run_onboarding_turn`).
+        Здесь — только экран.
+
+        **Вне глобального пути этой ветки быть не должно**: кнопку туда не
+        отдаёт :func:`consent_offer_action_data`. Но клавиатура живёт в чате
+        человека и переживает смену пути, так что тап всё-таки может прийти
+        с салонного. Тогда он уходит в канонический салонный путь
+        (:meth:`_render_consent_granted` ставит ``consent_at``) — а НЕ
+        отвечает «готово, согласие есть», потому что на салонном пути
+        ConsentRecord не пишется никем: это было бы ложное утверждение о
+        152-ФЗ, выданное человеку.
+        """
+        if not _is_global_bot_scope(current_tenant()):
+            return self._render_consent_granted(context, show_s3=True)
+        # Человек, впервые заговоривший с ботом через отказ, для приветствия
+        # уже знаком: без отметки S1-автотриггер выстрелил бы следующим ходом
+        # и накрыл бы возврат в поток полным первым приветствием.
+        _stamp_welcomed_at(context.bot_user)
+        return SkillResult(
+            reply_text=CONSENT_RECOVERY_RETURN_TEXTS[origin],
+            action_type="welcome_consent_recovery_granted",
+            meta={
+                "reply_kind": CONSENT_RECOVERY_GRANT_KIND,
+                "consent_origin": origin,
+            },
+        )
+
     def _render_consent_granted(self, context: SkillContext, *, show_s3: bool) -> SkillResult:
         """Stamp consent_at + render S5 first-action grid.
 
@@ -668,6 +701,31 @@ class WelcomeSkill:
                 "reply_kind": "welcome_s5_first_action",
                 "s3_shown": show_s3,
             },
+        )
+
+
+def _stamp_welcomed_at(bot_user) -> None:
+    """S1 idempotency: отметить, что человек уже поздоровался.
+
+    Без отметки автотриггер приветствия выстреливает на следующем же входящем
+    сообщении. Вынесено из :meth:`WelcomeSkill.handle` одним источником, потому
+    что выдача согласия из отказа (DRF-1968) — тоже первый разговор человека с
+    ботом, и копия этой логики разошлась бы с оригиналом.
+
+    Не блокируем доставку, если запись в БД упала — худший случай: приветствие
+    повторится следующим сообщением. ERROR в лог: систематическое повторение
+    оператор увидит.
+    """
+    if getattr(bot_user, "welcomed_at", None) is not None:
+        return
+    try:
+        bot_user.welcomed_at = timezone.now()
+        bot_user.save(update_fields=["welcomed_at"])
+    except Exception as exc:  # noqa: BLE001
+        logger.error(
+            "welcome.welcomed_at_save_failed bot_user_id=%s err=%s",
+            getattr(bot_user, "id", None),
+            exc,
         )
 
 
@@ -884,6 +942,19 @@ CONSENT_RECOVERY_ORIGINS: tuple[str, ...] = ("photo", "text", "water")
 #: журнал согласий тем же путём, что и приветственный S5.
 CONSENT_RECOVERY_GRANT_KIND = "welcome_consent_recovery_granted"
 
+#: Экран согласия, ВЫЗВАННЫЙ ОТКАЗОМ, — отдельное имя, хотя текст тот же S2.
+#: Снаружи это один экран, внутрь — разные события: приветственный S2 живёт в
+#: первом контакте, этот приходит из середины разговора. Общее имя сделало бы
+#: их неразличимыми в истории и в счётчиках.
+CONSENT_RECOVERY_PROMPT_KIND = "welcome_s2_consent_prompt_recovery"
+
+#: Журнал согласия не записался. ЧЕРНОВИК: владельцем не утверждён, идёт к нему
+#: вместе с W1–W3. Утверждать «готово, согласие есть» здесь нельзя — отказы
+#: читают журнал, и человек упёрся бы в тот же отказ следующим же ходом.
+CONSENT_RECOVERY_FAILED_TEXT = (
+    "Не получилось сохранить согласие прямо сейчас. Попробуй, пожалуйста, ещё раз через минуту."
+)
+
 #: Подпись кнопки в отказе. Рекомендация владельца (OWNER_QUESTIONS, раздел M):
 #: «добавить кнопку „Дать согласие“ в оба отказа».
 CONSENT_OFFER_LABEL = "Дать согласие"
@@ -909,6 +980,38 @@ def consent_offer_buttons(origin: str) -> list[dict[str, str]]:
     ]
 
 
+def _is_global_bot_scope(tenant: object | None) -> bool:
+    """True на глобальном пути бота — вне тенанта ИЛИ под сентинелом.
+
+    Признака «тенанта нет» здесь недостаточно, и это не теория: три отказа,
+    под которыми живёт кнопка, исполняются ВНУТРИ
+    ``tenant_scope(get_global_bot_tenant())`` (``orchestrator/nutrition_global.py``
+    ::``_run_skill`` — сентинел нужен там, чтобы принять глобальную
+    Conversation). Сентинел не ``None`` никогда, поэтому проверка
+    ``current_tenant() is None`` отбивала кнопку на ВСЕХ трёх поверхностях —
+    в бою её не было ни разу, а тесты, зовущие навыки мимо scope, этого
+    не видели.
+
+    Сравнение — идентичностью строки, тем же аксессором, каким сентинел
+    получает боевой путь. Ни по slug, ни по своей копии константы: слепок
+    имени пережил бы переименование и соврал бы молча.
+
+    Fail-closed: не удалось получить сентинел — считаем путь не глобальным,
+    то есть возвращаемся к поведению без кнопки.
+    """
+    if tenant is None:
+        return True
+    try:
+        from apps.identity.services.global_tenant import get_global_bot_tenant
+
+        sentinel_pk = getattr(get_global_bot_tenant(), "pk", None)
+    except Exception:  # noqa: BLE001 — читаем сентинел best-effort
+        logger.exception("welcome.global_scope_probe_failed")
+        return False
+    tenant_pk = getattr(tenant, "pk", None)
+    return tenant_pk is not None and tenant_pk == sentinel_pk
+
+
 def consent_offer_action_data(origin: str) -> dict | None:
     """``action_data`` для отказа — ТОЛЬКО на глобальном пути.
 
@@ -919,7 +1022,7 @@ def consent_offer_action_data(origin: str) -> dict | None:
     """
     from apps.tenancy.context import current_tenant
 
-    if current_tenant() is not None:
+    if not _is_global_bot_scope(current_tenant()):
         return None
     return {"buttons": consent_offer_buttons(origin), "button_columns": 1}
 
@@ -928,7 +1031,24 @@ def _s2_consent_buttons_for(origin: str) -> list[dict[str, str]]:
     """Тот же экран S2, но «Да, продолжим» несёт исходный вход человека."""
     return [
         {"label": "Да, продолжим", "callback": f"cb:welcome:consent_yes_{origin}"},
-        {"label": "Узнать что хранится", "callback": "cb:welcome:consent_details"},
+        {"label": "Узнать что хранится", "callback": f"cb:welcome:consent_details_{origin}"},
+        {"label": "Не сейчас", "callback": "cb:welcome:consent_refuse"},
+    ]
+
+
+def _s2a_details_buttons_for(origin: str) -> list[dict[str, str]]:
+    """S2a-разворот, в который пришли из отказа: продолжение помнит вход.
+
+    Без этого человек, решивший сперва прочитать «что хранится», выдавал бы
+    согласие общим ``consent_yes_via_s2a`` и возвращался на приветственный
+    экран вместо своего потока — origin терялся ровно на том шаге, который
+    добросовестный человек и делает.
+    """
+    return [
+        {
+            "label": "Понятно, продолжим",
+            "callback": f"cb:welcome:consent_yes_via_s2a_{origin}",
+        },
         {"label": "Не сейчас", "callback": "cb:welcome:consent_refuse"},
     ]
 
@@ -993,6 +1113,7 @@ def welcome_tap_labels() -> dict[str, str]:
     for origin in CONSENT_RECOVERY_ORIGINS:
         recovery_buttons.extend(consent_offer_buttons(origin))
         recovery_buttons.extend(_s2_consent_buttons_for(origin))
+        recovery_buttons.extend(_s2a_details_buttons_for(origin))
     for button in (
         *_start_buttons(),
         *_s2_consent_buttons(),
