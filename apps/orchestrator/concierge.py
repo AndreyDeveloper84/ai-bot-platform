@@ -117,7 +117,15 @@ from apps.orchestrator.open_question import (
     render_answer_block,
 )
 from apps.orchestrator.safety.outbound import ACTION_PROMISE_STEMS
-from apps.orchestrator.said_memory import render_said_block
+from apps.orchestrator.said_memory import (
+    CONFIRM_SAID_FACT_TOOL,
+    CONFIRM_SAID_FACT_TOOL_SPEC,
+    confirm_keyboard,
+    confirm_offer,
+    render_said_block,
+    said_facts,
+    said_question_id,
+)
 from apps.orchestrator.refusal_memo import (
     RefusedQuery,
     recall_refusals,
@@ -631,9 +639,22 @@ CONCIERGE_TOOL_SPECS: list[dict[str, Any]] = [
     SHOW_SALONS_TOOL_SPEC,
     SHOW_SERVICES_TOOL_SPEC,
     ASK_CLARIFICATION_TOOL_SPEC,
+    CONFIRM_SAID_FACT_TOOL_SPEC,
     *NUTRITION_TOOL_SPECS,
     SHOW_MY_RECORDS_TOOL_SPEC,
 ]
+
+
+def _has_said_facts(conversation: Any) -> bool:
+    """Есть ли у человека сказанные факты, которые можно подтвердить (DRF-1878)."""
+
+    bot_user = getattr(conversation, "bot_user", None) if conversation is not None else None
+    if bot_user is None:
+        return False
+    try:
+        return bool(said_facts(bot_user))
+    except Exception:  # noqa: BLE001 — без чтения фактов инструмент не предлагается
+        return False
 
 
 def _tools_offered(message_text: str, conversation: Any) -> list[dict[str, Any]]:
@@ -650,6 +671,10 @@ def _tools_offered(message_text: str, conversation: Any) -> list[dict[str, Any]]
     возвращает True до чтения памятки); здесь тот же порядок, тем же
     классификатором. Остальные инструменты не трогаются: их парсеры судят
     грамматику, а не память разговора, и заранее их вердикт не известен.
+
+    DRF-1878 — второй такой инструмент: ``confirm_said_fact`` без сказанных
+    фактов исполнитель отвергнет наверняка (подтверждать нечего), поэтому без
+    них он не предлагается.
     """
 
     from apps.skills.health_screening.classifier import PainSignal, classify
@@ -659,9 +684,14 @@ def _tools_offered(message_text: str, conversation: Any) -> list[dict[str, Any]]
     offer_screening = signal == PainSignal.RED_FLAG or (
         signal != PainSignal.NONE and not screening_asked_recently(conversation)
     )
-    if offer_screening:
+    withheld: set[str] = set()
+    if not offer_screening:
+        withheld.add("health_screening")
+    if not _has_said_facts(conversation):
+        withheld.add(CONFIRM_SAID_FACT_TOOL)
+    if not withheld:
         return list(CONCIERGE_TOOL_SPECS)
-    return [spec for spec in CONCIERGE_TOOL_SPECS if spec["name"] != "health_screening"]
+    return [spec for spec in CONCIERGE_TOOL_SPECS if spec["name"] not in withheld]
 
 
 # Cap on a tool argument written to the turn log. Both values are bounded by
@@ -674,6 +704,7 @@ _KNOWN_TOOLS = frozenset(
         SHOW_MASTERS_TOOL_SPEC["name"],
         START_BOOKING_TOOL_SPEC["name"],
         ASK_CLARIFICATION_TOOL_SPEC["name"],
+        CONFIRM_SAID_FACT_TOOL,
     }
     | NUTRITION_TOOL_ACTIONS
     | CATALOG_TOOL_ACTIONS
@@ -872,6 +903,10 @@ def _dispatch_tool(tool_call: Any, context: Any) -> ToolResult:
         # DRF-1302/1305 — selection only again: the Ayla GETs and the memory
         # read are I/O and belong in the wrapper's sync scope, not in a
         # dispatcher the ai-core contract requires to be side-effect-free.
+        return ToolResult(action_type=name, action_data={"arguments": args})
+    if name == CONFIRM_SAID_FACT_TOOL:
+        # DRF-1878 — selection only: reading the fact and rendering the
+        # question are I/O and run in the wrapper's sync scope.
         return ToolResult(action_type=name, action_data={"arguments": args})
     if name == START_BOOKING_ACTION:
         # DRF-1354 — selection only, like every carve-out above. The name
@@ -2129,6 +2164,23 @@ def _concierge_turn(
         # re-sent lands here again. «Повторить» would spend the person's
         # patience on a guaranteed repeat; «отвечу через минуту» would spend
         # it on a wait with no end.
+        text = (dto.content or "").strip()
+        if text:
+            return _reply(text=text[:_MAX_REPLY_CHARS], persisted=True)
+        return _reply(text=get_no_answer("ru"), persisted=True)
+
+    if dto.action_type == CONFIRM_SAID_FACT_TOOL:
+        # DRF-1878 — the model asked to confirm a fact the person said before.
+        # The question and the buttons are the bot's, not the model's, and the
+        # question is opened (DRF-1779) so the tap's label is read as its answer.
+        args = (dto.action_data or {}).get("arguments", {})
+        key = str(args.get("key") or "") if isinstance(args, dict) else ""
+        offer = confirm_offer(bot_user, key)
+        if offer is not None:
+            open_question(conversation, said_question_id(offer.key), asked_text=offer.question)
+            return _reply(text=offer.question, action_data=confirm_keyboard(offer), persisted=True)
+        # Nothing to confirm (erased between the prompt and the call, or a key
+        # the enum does not have): keep what the model said, never an empty turn.
         text = (dto.content or "").strip()
         if text:
             return _reply(text=text[:_MAX_REPLY_CHARS], persisted=True)

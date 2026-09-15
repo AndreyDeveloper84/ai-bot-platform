@@ -47,9 +47,31 @@ PERSONAL_DATA и канонический ``ayla_user_id``; новых согл�
 ### Как читается
 
 :func:`render_said_block` — абзац system-prompt консьержа: факт с датой и
-правило «не спрашивай заново, предложи подтвердить одним вопросом». В общий
-блок памяти (ai-core) и в ``memory_surface`` эти ключи не идут — у них своя
-инструкция, и «город — Пенза» в двух местах промпта читался бы как два факта.
+правило «не спрашивай заново, предложи подтвердить». В общий блок памяти
+(ai-core) и в ``memory_surface`` эти ключи не идут — у них своя инструкция, и
+«город — Пенза» в двух местах промпта читался бы как два факта.
+
+### Подтверждение одним тапом (DRF-1878)
+
+Модель не пишет вопрос-подтверждение словами: она вызывает инструмент
+``confirm_said_fact(key)``, а вопрос и кнопки рисует бот
+(:func:`confirm_offer`, :func:`confirm_keyboard`) — «Ищем в городе Пенза, как
+обычно?» · «Да, Пенза» / «Другой город», callback ``cb:said:<key>:yes|other``.
+Кнопки и метки для истории строит один и тот же строитель, так что
+переименованная кнопка уходит в историю уже новым именем.
+
+* **«Да»** — факт переписывается свежей строкой (новый ``said_at``, прежняя
+  строка — superseded) и ход идёт дальше текстом метки: консьерж закрывает
+  открытый вопрос ``said.<key>`` этой репликой, как любой другой ответ.
+* **«Другое»** — бот спрашивает сам («В каком городе ищем?»), без модели, и
+  открывает вопрос ``said.<key>``; новый сказанный город вытесняет прежний
+  существующим писателем.
+
+В истории тап — **фраза**, а не молчание: «Да, Пенза» — высказывание человека
+о себе, по образцу тапов еды (``nutrition_global.resolve_food_tap``: «✅ В
+дневник» ложится меткой). Сырой payload в историю не попадает никогда (класс
+DRF-990); кнопка, за которой факта уже нет (стёрт), — устаревшая: в историю
+не идёт ничего.
 """
 
 from __future__ import annotations
@@ -238,11 +260,17 @@ def _answered_screening_this_turn(conversation: Any, message_text: str) -> bool:
 # --------------------------------------------------------------------------- #
 # Запись                                                                      #
 # --------------------------------------------------------------------------- #
-def _write_said_fact(bot_user: Any, *, kind: str, content: dict[str, str]) -> bool:
+def _write_said_fact(
+    bot_user: Any, *, kind: str, content: dict[str, str], refresh: bool = False
+) -> bool:
     """Одна зелёная строка «сказано в разговоре». Гейты — как у M-B2.
 
     ``content`` приходит литералом ``{"key": …}`` от вызывающего — так ключ
     видит ``tools/lint/personal_field_guard.py`` (регистр полей и кардинальностей).
+
+    ``refresh=True`` (DRF-1878, человек подтвердил) — то же значение пишется
+    свежей строкой, а прежняя строка с этим ключом уходит в superseded: у
+    факта новый ``said_at``, а живая строка по ключу по-прежнему одна.
     """
 
     from django.utils import timezone
@@ -265,7 +293,7 @@ def _write_said_fact(bot_user: Any, *, kind: str, content: dict[str, str]) -> bo
         return False
     for fact in read_current_view(user_id).green_facts:
         existing = fact.content if isinstance(fact.content, dict) else {}
-        if existing.get("key") == key and existing.get("value") == value:
+        if not refresh and existing.get("key") == key and existing.get("value") == value:
             return False
     upc = get_or_create_personal_context(user_id)
     if upc.soft_deleted_at is not None or upc.forget_all_requested_at is not None:
@@ -295,7 +323,7 @@ def _write_said_fact(bot_user: Any, *, kind: str, content: dict[str, str]) -> bo
         if row.id != entry.id
         and isinstance(row.content, dict)
         and row.content.get("key") == key
-        and row.content.get("value") != value
+        and (refresh or row.content.get("value") != value)
     ]
     if displaced:
         supersede_entries(replaced_by=entry, entries=displaced)
@@ -396,25 +424,185 @@ def render_said_block(bot_user: Any) -> str:
     if not facts:
         return ""
     lines = ["Человек сам говорил в прошлых разговорах (это его слова, не догадки):"]
-    city = None
     for fact in sorted(facts, key=lambda f: f.key):
         when = f" ({fact.said_at:%d.%m})" if fact.said_at else ""
         if fact.key == KEY_CITY:
-            city = fact.value
-            lines.append(f"- город — {fact.value}{when}")
+            lines.append(f"- город — {fact.value}{when} [key={KEY_CITY}]")
         else:
             label = VISIT_CONTEXT_LABELS.get(fact.value, fact.value)
-            lines.append(f"- когда удобно приходить — {label}{when}")
-    example = f"«Ищем в городе {city}, как обычно?»" if city else "«Как обычно — …?»"
+            lines.append(f"- когда удобно приходить — {label}{when} [key={KEY_VISIT_CONTEXT}]")
     lines.append(
-        "Не спрашивай это заново. Если относится к запросу — предложи подтвердить "
-        f"одним коротким вопросом ({example}); назовёт другое — иди за новым и не "
-        "спорь. Не выдавай это за сегодняшний факт."
+        "Не спрашивай это заново. Если относится к запросу — не спрашивай текстом, "
+        f"вызови {CONFIRM_SAID_FACT_TOOL} с этим key: вопрос и кнопки нарисует бот. "
+        "Назовёт другое — иди за новым и не спорь. Не выдавай это за сегодняшний факт."
     )
     return "\n".join(lines)
 
 
+# --------------------------------------------------------------------------- #
+# Подтверждение одним тапом (DRF-1878)                                        #
+# --------------------------------------------------------------------------- #
+CONFIRM_SAID_FACT_TOOL = "confirm_said_fact"
+
+#: Плоская спецификация — как у ``ASK_CLARIFICATION_TOOL_SPEC``: провайдер сам
+#: заворачивает её в ``{"type": "function", ...}``.
+CONFIRM_SAID_FACT_TOOL_SPEC: dict[str, Any] = {
+    "name": CONFIRM_SAID_FACT_TOOL,
+    "description": (
+        "Offer the person to confirm with one tap something THEY said in an "
+        "earlier conversation (the city to search in, or when they like to come). "
+        "The bot renders the question and the buttons itself — call this instead "
+        "of asking about the known fact in plain text."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {"key": {"type": "string", "enum": [KEY_CITY, KEY_VISIT_CONTEXT]}},
+        "required": ["key"],
+    },
+}
+
+SAID_CALLBACK_PREFIX = "cb:said:"
+#: Строгая форма: «cb:said: Пенза», набранное руками, тапом не является.
+_SAID_CALLBACK_RE = re.compile(r"^cb:said:(city|visit_context):(yes|other)$")
+
+VERDICT_YES = "yes"
+VERDICT_OTHER = "other"
+
+OTHER_LABELS = {KEY_CITY: "Другой город", KEY_VISIT_CONTEXT: "Другое время"}
+#: Вопрос после «Другое» — задаёт бот, не модель.
+OTHER_QUESTIONS = {
+    KEY_CITY: "В каком городе ищем?",
+    KEY_VISIT_CONTEXT: "Когда тебе удобно приходить?",
+}
+STALE_TEXT = "Эта кнопка уже неактуальна. Напиши, что ищем, — продолжу."
+
+
+def said_question_id(key: str) -> str:
+    """Id открытого вопроса (DRF-1779) — код, без смысла здоровья."""
+
+    return f"said.{key}"
+
+
+@dataclass(frozen=True)
+class ConfirmOffer:
+    key: str
+    question: str
+    #: ``(label, callback)`` — порядок кнопок на экране.
+    buttons: tuple[tuple[str, str], ...]
+
+
+def _offer(fact: SaidFact) -> ConfirmOffer:
+    if fact.key == KEY_CITY:
+        question = f"Ищем в городе {fact.value}, как обычно?"
+        yes_label = f"Да, {fact.value}"
+    else:
+        label = VISIT_CONTEXT_LABELS.get(fact.value, fact.value)
+        question = f"Как обычно — {label}?"
+        yes_label = f"Да, {label}"
+    return ConfirmOffer(
+        key=fact.key,
+        question=question,
+        buttons=(
+            (yes_label, f"{SAID_CALLBACK_PREFIX}{fact.key}:{VERDICT_YES}"),
+            (OTHER_LABELS[fact.key], f"{SAID_CALLBACK_PREFIX}{fact.key}:{VERDICT_OTHER}"),
+        ),
+    )
+
+
+def confirm_offer(bot_user: Any, key: str) -> ConfirmOffer | None:
+    """Вопрос и кнопки для сказанного факта — или None, если факта нет."""
+
+    fact = next((f for f in said_facts(bot_user) if f.key == key), None)
+    return _offer(fact) if fact is not None else None
+
+
+def confirm_keyboard(offer: ConfirmOffer) -> dict[str, Any]:
+    """``action_data`` ответа: одна строка кнопок, как у ``_render_ask_clarification``."""
+
+    return {
+        "attachments": [
+            {
+                "type": "inline_keyboard",
+                "payload": {
+                    "buttons": [
+                        {"label": label, "callback": callback} for label, callback in offer.buttons
+                    ]
+                },
+            }
+        ]
+    }
+
+
+def said_tap_labels(bot_user: Any) -> dict[str, str]:
+    """``{callback: метка}`` по текущим фактам — тем же строителем, что кнопки."""
+
+    return {
+        callback: label for fact in said_facts(bot_user) for label, callback in _offer(fact).buttons
+    }
+
+
+@dataclass(frozen=True)
+class SaidTap:
+    key: str
+    verdict: str
+    #: Метка кнопки — чем тап был как реплика; None — кнопка устарела (факта нет).
+    history_text: str | None
+
+
+def resolve_said_tap(text: str, bot_user: Any) -> SaidTap | None:
+    """Разобрать тап подтверждения; ``None`` — «это не тап ``cb:said:``»."""
+
+    stripped = (text or "").strip()
+    match = _SAID_CALLBACK_RE.match(stripped)
+    if match is None:
+        return None
+    return SaidTap(
+        key=match.group(1),
+        verdict=match.group(2),
+        history_text=said_tap_labels(bot_user).get(stripped),
+    )
+
+
+def confirm_said_fact(bot_user: Any, key: str) -> bool:
+    """Человек подтвердил сказанный факт: переписать его свежей строкой. Не бросает."""
+
+    try:
+        fact = next((f for f in said_facts(bot_user) if f.key == key), None)
+        if fact is None:
+            return False
+        if key == KEY_CITY:
+            return _write_said_fact(
+                bot_user,
+                kind="preference",
+                content={"key": "city", "value": fact.value},
+                refresh=True,
+            )
+        return _write_said_fact(
+            bot_user,
+            kind="lifestyle",
+            content={"key": "visit_context", "value": fact.value},
+            refresh=True,
+        )
+    except Exception:  # noqa: BLE001 — память не стоит хода
+        logger.exception("orchestrator.said_memory.confirm_failed key=%s", key)
+        return False
+
+
 __all__ = [
+    "CONFIRM_SAID_FACT_TOOL",
+    "CONFIRM_SAID_FACT_TOOL_SPEC",
+    "OTHER_LABELS",
+    "OTHER_QUESTIONS",
+    "SAID_CALLBACK_PREFIX",
+    "STALE_TEXT",
+    "ConfirmOffer",
+    "SaidTap",
+    "confirm_keyboard",
+    "confirm_offer",
+    "confirm_said_fact",
+    "resolve_said_tap",
+    "said_question_id",
+    "said_tap_labels",
     "KEY_CITY",
     "KEY_VISIT_CONTEXT",
     "ORIGIN_CONVERSATION",
