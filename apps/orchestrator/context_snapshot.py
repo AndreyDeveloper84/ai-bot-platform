@@ -32,6 +32,12 @@
 ``safety_evaluation_ref`` (слово главного окна 15.09); дублировать её в снимке
 значило бы хранить её дважды.
 
+**Сказанное сверяется по ключу** (DRF-1911): «похоже на код» — не сторож смысла,
+латинское ``pregnant`` форму кода проходит. Поэтому :func:`assert_said_in_vocabulary`
+проверяет ``said[]`` по словарю ключа — тому же, из которого пишет память
+сказанного: город — живой набор городов с мастерами, «когда удобно» — коды
+``said_memory``; неизвестный ключ или значение вне словаря — отказ.
+
 Это не соглашение, а проверка: :func:`assert_codes_only` отвергает любой лист,
 который не код / число / дата / значение закрытого словаря, и сборщик вызывает
 её перед тем, как считать digest. Текст, попавший в снимок, не посчитается и не
@@ -88,6 +94,24 @@ def _closed_values() -> frozenset[str]:
     except Exception:  # noqa: BLE001 — без набора городов город в снимок не пойдёт
         cities = frozenset()
     return cities
+
+
+def assert_said_in_vocabulary(said: Any, *, cities: frozenset[str]) -> None:
+    """``said[]`` по ключу против закрытого словаря того, кто его пишет (DRF-1911)."""
+
+    from apps.orchestrator.said_memory import KEY_CITY, KEY_VISIT_CONTEXT, VISIT_CONTEXT_LABELS
+
+    vocabulary: dict[str, frozenset[str]] = {
+        KEY_CITY: cities,
+        KEY_VISIT_CONTEXT: frozenset(VISIT_CONTEXT_LABELS),
+    }
+    for index, row in enumerate(said or ()):
+        key = row.get("key") if isinstance(row, dict) else None
+        allowed = vocabulary.get(key) if isinstance(key, str) else None
+        if allowed is None:
+            raise SnapshotRejected(f"$.said[{index}].key: ключ вне словаря сказанного")
+        if row.get("value") not in allowed:
+            raise SnapshotRejected(f"$.said[{index}].value: значение вне словаря ключа {key}")
 
 
 def assert_codes_only(value: Any, *, closed: frozenset[str], path: str = "$") -> None:
@@ -165,7 +189,9 @@ def build_turn_snapshot(
         "said": _said_section(bot_user) if bot_user is not None else [],
         "answered_question": _answered_section(conversation),
     }
-    assert_codes_only(content, closed=_closed_values())
+    closed = _closed_values()
+    assert_said_in_vocabulary(content["said"], cities=closed)
+    assert_codes_only(content, closed=closed)
     return TurnSnapshot(content=content, content_digest=content_digest(content))
 
 
@@ -175,6 +201,7 @@ __all__ = [
     "SnapshotRejected",
     "TurnSnapshot",
     "assert_codes_only",
+    "assert_said_in_vocabulary",
     "build_turn_snapshot",
     "content_digest",
 ]
