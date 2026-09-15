@@ -10,7 +10,9 @@
 
 * ``SELLABLE`` — путь продажи; файл обязан звать предикат
   (``.sellable()`` или ``sellable_edge_q(...)``);
-* ``PENDING_1989`` — путь продажи второй половины (DRF-1989); причина рядом;
+* ``SHOWS_REASON`` — служебный экран (кабинет мастера, салонная админка):
+  непродаваемое там не скрывается, а показывается с причиной; файл обязан
+  упоминать ``unsellable_reason`` (DRF-1989);
 * ``NOT_SALE_PATH`` — писатели, провенанс, операторские экраны, служебное.
 
 Новый файл-читатель или изменившееся число — красный тест: место надо
@@ -43,10 +45,13 @@ PREDICATE_NAMES = {"sellable", "sellable_edge_q"}
 PREDICATE_HOME = "apps/catalog/models.py"
 
 SELLABLE = "SELLABLE"
-PENDING_1989 = "PENDING_1989"
+SHOWS_REASON = "SHOWS_REASON"
 NOT_SALE_PATH = "NOT_SALE_PATH"
+REASON_FIELD = "unsellable_reason"
 
 #: Перепись бот ``dev`` ``8bf99f7c`` (15.09.2026): 14 файлов, 41 упоминание.
+#: DRF-1989 (16.09.2026): вторая половина разобрана, ``PENDING_1989`` — 0;
+#: навык записи +1 (отказ с причиной до ворот здоровья) — 42 упоминания.
 EXPECTED: dict[str, tuple[int, str, str]] = {
     # ── путь продажи, DRF-1964a ──
     "apps/marketplace/discovery.py": (
@@ -66,24 +71,36 @@ EXPECTED: dict[str, tuple[int, str, str]] = {
     ),
     # ── путь продажи, вторая половина DRF-1989 ──
     "apps/skills/booking/skill.py": (
-        1,
-        PENDING_1989,
-        "ворота здоровья навыка записи — причина вместо «консультации»",
+        2,
+        SELLABLE,
+        "навык записи: непродаваемое ребро — отказ с причиной до ворот здоровья, "
+        "не «консультация»; вердикт здоровья читается как раньше",
     ),
-    "apps/booking/services/create.py": (1, PENDING_1989, "локальная запись — маппинг отказа"),
-    "apps/booking/services/transitions.py": (1, PENDING_1989, "локальный перенос — маппинг отказа"),
+    "apps/booking/services/create.py": (
+        1,
+        SELLABLE,
+        "локальная запись: непродаваемое ребро — offer_not_sellable; "
+        "продолжение переноса не спрашивает (R6)",
+    ),
+    # ── служебные экраны: причина показывается, не скрывается (DRF-1989) ──
     "apps/master_api/services/catalog.py": (
         1,
-        PENDING_1989,
-        "кабинет мастера — показ причины, не скрытие",
+        SHOWS_REASON,
+        "кабинет мастера, список услуг — sellable и причина",
     ),
-    "apps/master_api/views.py": (1, PENDING_1989, "кабинет мастера — показ причины, не скрытие"),
+    "apps/master_api/views.py": (1, SHOWS_REASON, "кабинет мастера, профиль — sellable и причина"),
     "apps/admin_api/views.py": (
         1,
-        PENDING_1989,
-        "салонная админка, услуги мастера — показ причины",
+        SHOWS_REASON,
+        "салонная админка, услуги мастера — sellable и причина",
     ),
     # ── не путь продажи ──
+    "apps/booking/services/transitions.py": (
+        1,
+        NOT_SALE_PATH,
+        "перенос существующей записи — не продажа: решение владельца R6 "
+        "(OWNER_QUESTIONS.md), цена не перепроверяется; закреплено тестом DRF-1989",
+    ),
     "apps/admin_api/views_services_mapping.py": (
         6,
         NOT_SALE_PATH,
@@ -112,13 +129,24 @@ def _call_name(node: ast.Call) -> str | None:
     return None
 
 
-def scan(source: str) -> tuple[int, bool, int]:
-    """(упоминаний зеркала, зовёт ли предикат, сырых ``sellable=`` в фильтрах)."""
+def _names_the_reason(node: ast.AST) -> bool:
+    return (
+        (isinstance(node, ast.Constant) and node.value == REASON_FIELD)
+        or (isinstance(node, ast.Attribute) and node.attr == REASON_FIELD)
+        or (isinstance(node, ast.keyword) and node.arg == REASON_FIELD)
+    )
+
+
+def scan(source: str) -> tuple[int, bool, int, bool]:
+    """(упоминаний зеркала, зовёт ли предикат, сырых ``sellable=`` в фильтрах,
+    называет ли файл причину ``unsellable_reason``)."""
     tree = ast.parse(source)
     predicate_args: set[int] = set()
     uses_predicate = False
     raw_sellable = 0
+    names_reason = False
     for node in ast.walk(tree):
+        names_reason = names_reason or _names_the_reason(node)
         if isinstance(node, ast.Call):
             name = _call_name(node)
             if name in PREDICATE_NAMES:
@@ -144,14 +172,14 @@ def scan(source: str) -> tuple[int, bool, int]:
             and id(node) not in predicate_args
         ):
             refs += 1
-    return refs, uses_predicate, raw_sellable
+    return refs, uses_predicate, raw_sellable, names_reason
 
 
 def violations(sources: dict[str, str], expected: dict[str, tuple[int, str, str]]) -> list[str]:
     out: list[str] = []
     seen: set[str] = set()
     for rel, source in sorted(sources.items()):
-        refs, uses_predicate, raw_sellable = scan(source)
+        refs, uses_predicate, raw_sellable, names_reason = scan(source)
         if raw_sellable and rel != PREDICATE_HOME:
             out.append(f"{rel}: сырое sellable= в фильтре ({raw_sellable}) — только через предикат")
         if not refs:
@@ -165,6 +193,8 @@ def violations(sources: dict[str, str], expected: dict[str, tuple[int, str, str]
             out.append(f"{rel}: упоминаний {refs}, в переписи {count}")
         if kind == SELLABLE and not uses_predicate:
             out.append(f"{rel}: путь продажи без предиката sellable")
+        if kind == SHOWS_REASON and not names_reason:
+            out.append(f"{rel}: служебный экран без причины {REASON_FIELD}")
     for rel in sorted(set(expected) - seen):
         out.append(f"{rel}: в переписи, но упоминаний нет — убрать запись")
     return out
@@ -202,3 +232,21 @@ def test_guard_catches_a_sale_path_reader_without_the_predicate():
     assert violations({"apps/x/views.py": fixed}, {}) == [
         "apps/x/views.py: 1 упоминаний зеркала рёбер, файл не классифицирован"
     ]
+
+
+def test_guard_catches_a_staff_screen_that_hides_the_reason():
+    """Положительная стража класса SHOWS_REASON (DRF-1989): экран без причины — пойман."""
+    head = "from apps.catalog.models import MasterService\n"
+    hidden = (
+        head + "MasterService.objects.filter(master_id=1).values_list('service_id', flat=True)\n"
+    )
+    shown = head + (
+        "MasterService.objects.filter(master_id=1)"
+        ".values_list('service_id', 'sellable', 'unsellable_reason')\n"
+    )
+    expected = {"apps/x/views.py": (1, SHOWS_REASON, "синтетика")}
+
+    assert violations({"apps/x/views.py": hidden}, expected) == [
+        "apps/x/views.py: служебный экран без причины unsellable_reason"
+    ]
+    assert violations({"apps/x/views.py": shown}, expected) == []
