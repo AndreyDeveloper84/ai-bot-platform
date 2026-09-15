@@ -262,9 +262,10 @@ class TestSaidBlock:
         block = said_memory.render_said_block(bot_user)
 
         today = timezone.now().strftime("%d.%m")
-        assert f"- город — Пенза ({today})" in block
-        assert f"- когда удобно приходить — после работы ({today})" in block
-        assert "«Ищем в городе Пенза, как обычно?»" in block
+        assert f"- город — Пенза ({today}) [key=city]" in block
+        assert f"- когда удобно приходить — после работы ({today}) [key=visit_context]" in block
+        # DRF-1878: подтверждение — инструментом, вопрос рисует бот, не модель.
+        assert "confirm_said_fact" in block
         assert "Не спрашивай это заново" in block
 
     def test_block_is_empty_without_facts(self, settings):

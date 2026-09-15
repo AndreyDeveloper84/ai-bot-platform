@@ -312,8 +312,11 @@ class TestAQuestionNeverCostsTheAnswer:
         reply = generate_direct_show_masters_reply("хочу массаж", trace_id="t-soft")
 
         assert reply is not None
-        # The list, not the question, and not an exception.
-        assert reply.text.startswith("Вот мастера")
+        # The list, not the question, and not an exception. DRF-1908: the
+        # «по твоим словам» line stands directly above the list.
+        lines = reply.text.split("\n")
+        assert lines[0] == "Искала по твоим словам: массаж"
+        assert lines[1].startswith("Вот мастера")
 
 
 class TestTheConciergeFastPathAsksToo:
@@ -330,5 +333,9 @@ class TestTheConciergeFastPathAsksToo:
         reply = generate_direct_show_masters_reply("хочу классический массаж", trace_id="t-2")
 
         assert reply is not None
-        assert reply.text.startswith("Вот мастера")
+        # DRF-1908: the «по твоим словам» line stands directly above the list;
+        # «классический» is not a service word, so the fragment is «массаж».
+        lines = reply.text.split("\n")
+        assert lines[0] == "Искала по твоим словам: массаж"
+        assert lines[1].startswith("Вот мастера")
         assert "Мастер 02" in reply.text
