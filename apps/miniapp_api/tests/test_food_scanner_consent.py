@@ -93,10 +93,10 @@ class TestFoodScannerConsentEndpoint:
     ):
         """Половина, ради которой ручка написана: петля разомкнулась.
 
-        Гейт спрашивает три вещи по порядку: рубильник питания, гейт
-        фото и согласие. Первые два здесь подняты намеренно — иначе
-        тест зеленел бы на отказе «питание выключено» и ничего не
-        говорил бы про согласие.
+        Гейт спрашивает по порядку: рубильник питания, гейт фото,
+        PERSONAL_DATA (DRF-1948) и согласие сканера. Первые три здесь
+        подняты намеренно — иначе тест зеленел бы на чужом отказе и ничего
+        не говорил бы про согласие сканера.
         """
         settings.NUTRITION_ENABLED = True
 
@@ -121,6 +121,11 @@ class TestFoodScannerConsentEndpoint:
                 message_text="",
             )
 
+        from apps.consent.services import record_global_consent
+
+        # DRF-1948: запись дневника требует PERSONAL_DATA — выдано, чтобы
+        # отказ «ДО» был отказом именно колонки сканера.
+        record_global_consent(bot_user, source="test:scanner-gate")
         bot_user.refresh_from_db()
         # ДО: гейт отказывает и просит открыть мини-приложение.
         before = _check_gates(_ctx(bot_user), require_photo_scan=False, kind="callback")

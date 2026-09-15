@@ -535,7 +535,14 @@ def revoke_data_storage(bot_user: "BotUser") -> "DeleteCascadeResult":
         # — одним ``update`` по всем оболочкам человека, здесь по более
         # широкому множеству полного резолва личности. Идемпотентно:
         # повторный отзыв присваивает то же ``True``.
-        BotUserModel.all_tenants.filter(id__in=shell_ids).update(proactive_messages_opt_out=True)
+        # DRF-1948 — согласие сканера фото стоит поверх PERSONAL_DATA и
+        # отзывается вместе с ним: иначе после отзыва колонка оставалась, и
+        # «В дневник» продолжал писать в дневник. Тем же ``update`` по всем
+        # оболочкам человека. Повторная выдача PERSONAL_DATA колонку не
+        # возвращает — согласие на фото даётся заново на своём экране.
+        BotUserModel.all_tenants.filter(id__in=shell_ids).update(
+            proactive_messages_opt_out=True, food_scanner_consent_at=None
+        )
     # Экземпляр вызывающего должен совпасть со строкой — ответ ручки
     # собирается из него же и не имеет права показать значение, которого
     # в базе уже нет. Присваивание стоит ЗА блоком: исключение внутри
@@ -544,6 +551,7 @@ def revoke_data_storage(bot_user: "BotUser") -> "DeleteCascadeResult":
     # сегодня ``revoke_data_storage`` в такую не заворачивают, а
     # ``ATOMIC_REQUESTS`` платформа держит выключенным осознанно.)
     bot_user.proactive_messages_opt_out = True
+    bot_user.food_scanner_consent_at = None
 
     write_audit(
         "consent.data_storage_revoked",
@@ -560,6 +568,7 @@ def revoke_data_storage(bot_user: "BotUser") -> "DeleteCascadeResult":
             # не быть» это поле не даёт: ``write_audit`` стоит вне
             # транзакции шага 1, и его отказ оставит колонку записанной.
             "proactive_hints_disabled": True,
+            "food_scanner_consent_cleared": True,
         },
     )
 
