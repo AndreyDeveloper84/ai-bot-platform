@@ -69,8 +69,12 @@ class TestProxy:
         assert resp.json() == {"review_count": 1, "rating": 5.0, "reviews": [ROW]}
 
     def test_rows_are_whitelisted(self, client: Client, ayla):
-        leaky = dict(ROW, phone="+79997775544", client_username="user_79997775544",
-                     client_last_name="Леонова")
+        leaky = dict(
+            ROW,
+            phone="+79997775544",
+            client_username="user_79997775544",
+            client_last_name="Леонова",
+        )
         ayla.get_specialist_reviews.return_value["reviews"] = [leaky]
         resp = _get(client)
         body = resp.content.decode("utf-8")
@@ -82,7 +86,9 @@ class TestProxy:
         assert _get(client).json() == {"review_count": 0, "rating": None, "reviews": []}
 
     def test_only_get(self, client: Client, ayla):
-        resp = client.post(reverse("master_api:reviews"), HTTP_AUTHORIZATION=init_data_header("12345"))
+        resp = client.post(
+            reverse("master_api:reviews"), HTTP_AUTHORIZATION=init_data_header("12345")
+        )
         assert resp.status_code == 405
         ayla.get_specialist_reviews.assert_not_called()
 
