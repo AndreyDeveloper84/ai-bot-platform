@@ -42,12 +42,14 @@ class TestProductionDictionariesAreEmpty:
     """Значения J1/J2 — отдельным коммитом после слова владельца (главное окно 15.09)."""
 
     def test_phrase_map_is_empty_until_the_owner_answers(self):
+        # empty-assert-ok: пустота — предмет теста (J1 ждёт владельца); краснеет на въехавшей фразе — проба P5 в PR DRF-1932
         assert dict(tx.TARGET_PHRASES) == {}, (
             "словарь «фраза → target» (J1) не пуст: значения — только по слову владельца "
             "и вместе со сменой TAXONOMY_VERSION"
         )
 
     def test_defaults_are_empty_until_the_owner_answers(self):
+        # empty-assert-ok: пустота — предмет теста (J2 ждёт владельца), как у J1 выше
         assert dict(tx.TARGET_DEFAULTS) == {}, (
             "умолчания «target → family, action_type» (J2) не пусты: значения — только по "
             "слову владельца и вместе со сменой TAXONOMY_VERSION"
