@@ -82,3 +82,24 @@ describe("CustomerBookingSuccessScreen — «Открыть запись» desti
     expect(screen.queryByText("LEGACY-b-1")).not.toBeInTheDocument();
   });
 });
+
+describe("CustomerBookingSuccessScreen — адрес салона (DRF-1952)", () => {
+  it("называет адрес салона из ответа создания записи", () => {
+    renderWithState({
+      service_name: "Маникюр",
+      master_name: "Анна",
+      visit_at: "2026-08-01T16:00:00+03:00",
+      address: "ул. Карпинского, 33А",
+    });
+    expect(screen.getByText(/Карпинского, 33А/)).toBeInTheDocument();
+  });
+
+  it("без адреса — «Уточните адрес в салоне», а не пустота и не «—»", () => {
+    renderWithState({
+      service_name: "Маникюр",
+      master_name: "Анна",
+      visit_at: "2026-08-01T16:00:00+03:00",
+    });
+    expect(screen.getByText(/Уточните адрес в салоне/)).toBeInTheDocument();
+  });
+});

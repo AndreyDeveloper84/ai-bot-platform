@@ -172,6 +172,7 @@ from apps.skills.booking.tools import (
     _booking_via_ayla,
     _coerce_id,
     _format_confirm_preview,
+    _salon_address_text,
     _id_key,
     _to_slot_candidate,
     build_master_lookup,
@@ -2130,6 +2131,8 @@ def _skill_result_for_existing_pending(
     """
     payload = row.payload or {}
     preview_text = _format_confirm_preview(
+        # DRF-1952 — адрес тенанта ЭТОЙ pending-записи, не контекста разговора.
+        address_text=_salon_address_text(row.tenant),
         master_name=str(payload.get("master_name") or ""),
         service_name=str(payload.get("service_name") or ""),
         slot_datetime=str(payload.get("slot_datetime") or ""),

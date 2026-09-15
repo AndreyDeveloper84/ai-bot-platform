@@ -600,3 +600,15 @@ class TestHealthCheckHandoff:
         assert not any(HEALTH_CHECK_UNKNOWN in m for m in required), (
             "REQUIRED пишется как UNKNOWN — счётчик разметки будет завышен"
         )
+
+
+class TestSalonAddressInResponse:
+    """DRF-1952: ответ создания записи несёт адрес салона — экран успеха его показывает."""
+
+    def test_the_created_booking_carries_the_salon_address(
+        self, client, tenant, bot_user, service, master, stub_client
+    ) -> None:
+        Tenant.objects.filter(pk=tenant.pk).update(address="ул. Карпинского, 33А")
+        resp = _post(client, service, master)
+        assert resp.status_code == 201
+        assert resp.json()["booking"]["address"] == "ул. Карпинского, 33А"

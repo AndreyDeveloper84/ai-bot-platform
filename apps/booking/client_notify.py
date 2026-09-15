@@ -253,6 +253,11 @@ def build_booking_confirmation(
     salon = (getattr(tenant, "name", "") or "").strip()
     if salon:
         lines.append(f"Салон: {salon}")
+    # DRF-1952 — куда идти: адрес салона записи (зеркало ``Tenant.address``);
+    # пустой — фраза ``visit-address.ts``, не выдуманный адрес и не «—».
+    from apps.tenancy.visit_address import tenant_address_text
+
+    lines.append(f"Адрес: {tenant_address_text(tenant)}")
     return "\n".join(lines)
 
 

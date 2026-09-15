@@ -431,6 +431,17 @@ describe("error matrix + idempotency (Wave 0 booking GO)", () => {
   });
 });
 
+describe("DRF-1952 — адрес салона доезжает до экрана успеха", () => {
+  it("передаёт адрес из ответа создания записи на экран успеха", async () => {
+    mockedCreate.mockResolvedValue({ booking: { ...CREATED.booking, address: "ул. Карпинского, 33А" } });
+    const user = userEvent.setup();
+    renderScreen();
+    await user.click(screen.getByRole("button", { name: "Записаться" }));
+    expect(await screen.findByText(/Записала тебя/)).toBeInTheDocument();
+    expect(screen.getByText(/Карпинского, 33А/)).toBeInTheDocument();
+  });
+});
+
 describe("DRF-1066 — the success screen must actually appear", () => {
   it("lands on the success screen after a successful create", async () => {
     const user = userEvent.setup();

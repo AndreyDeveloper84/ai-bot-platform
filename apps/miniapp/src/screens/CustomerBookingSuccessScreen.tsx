@@ -36,6 +36,7 @@ import { PaymentStatusBadge } from "../components/PaymentStatusBadge";
 import { ScreenLayout } from "../components/ScreenLayout";
 import { StickyBar, StickyCtaButton } from "../components/StickyCta";
 import { formatVisitFull } from "../lib/format";
+import { visitAddressText } from "../lib/visit-address";
 import { closeApp, hapticNotify, maxBridge } from "../lib/max-sdk";
 import { backTo } from "../lib/screen-back";
 
@@ -50,6 +51,8 @@ interface SuccessState {
   service_name?: string;
   master_name?: string;
   visit_at?: string;
+  /** DRF-1952 — адрес салона записи; `null`/нет ключа → «Уточните адрес в салоне». */
+  address?: string | null;
   /** C7.4 — booking created but the payment create failed right after. */
   payment_start_failed?: boolean;
   /** C7.3 — capture_state right after payment create (online path). */
@@ -132,6 +135,14 @@ export function CustomerBookingSuccessScreen() {
             <>
               <dt>Услуга</dt>
               <dd>{s.service_name}</dd>
+            </>
+          )}
+          {/* DRF-1952 — куда идти. Только когда запись известна (есть state):
+              при переходе по ссылке без state адреса мы не знаем. */}
+          {(s.service_name || s.visit_at) && (
+            <>
+              <dt>Адрес</dt>
+              <dd>{visitAddressText(s.address)}</dd>
             </>
           )}
           {bookingId && (

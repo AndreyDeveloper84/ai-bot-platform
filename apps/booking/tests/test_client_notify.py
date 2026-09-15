@@ -772,3 +772,25 @@ class TestRollback:
         assert not RemoteBookingProxy.all_tenants.filter(
             appointment_id=uuid.UUID(APPOINTMENT_ID)
         ).exists()
+
+
+# ─── DRF-1952: адрес салона ────────────────────────────────────────────────
+
+
+class TestSalonAddress:
+    def test_confirmation_names_the_salon_address(
+        self, tenant: Tenant, client_bot_user: BotUser, send: SendRecorder
+    ) -> None:
+        Tenant.objects.filter(pk=tenant.pk).update(address="ул. Карпинского, 33А")
+        tenant.refresh_from_db()
+        _notify(tenant, client_bot_user)
+        text = send.calls[0]["text"]
+        assert "Вы записаны" in text
+        assert "Адрес: ул. Карпинского, 33А" in text
+
+    def test_confirmation_without_an_address_says_to_ask_the_salon(
+        self, tenant: Tenant, client_bot_user: BotUser, send: SendRecorder
+    ) -> None:
+        assert tenant.address is None  # зеркало молчит — как у пилотного салона
+        _notify(tenant, client_bot_user)
+        assert "Адрес: Уточните адрес в салоне" in send.calls[0]["text"]

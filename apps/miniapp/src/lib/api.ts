@@ -717,6 +717,12 @@ export interface CreatedBooking {
   visit_at: string;
   duration_min: number;
   status: string;
+  /**
+   * DRF-1952 — адрес салона записи (зеркало `Tenant.address`). `null` —
+   * источник промолчал; ключа нет (сервер старше DRF-1952) — `undefined`.
+   * Показывать только через `visitAddressText`.
+   */
+  address?: string | null;
 }
 export const createBooking = (body: {
   service_id: string;
