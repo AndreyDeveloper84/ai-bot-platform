@@ -919,6 +919,16 @@ NOT_SWEPT_ROUTES: dict[str, str] = {
         "GET proxy (DRF-1797): the master's own profile status and readiness, no "
         "customer record — pinned in test_publication_proxy_1797"
     ),
+    "service_directions": (
+        "GET proxy to the catalog's canon directions (DRF-1799): roots of the global "
+        "taxonomy, rows whitelisted to id/name/slug/icon/sort_order, no customer record — "
+        "pinned in test_service_canon_proxy_1799"
+    ),
+    "service_templates": (
+        "GET proxy to the catalog's templates of one direction (DRF-1799): canon service "
+        "names and their category, whitelisted, no prices and no customer record — "
+        "pinned in test_service_canon_proxy_1799"
+    ),
     "assistant_history": (
         "the master's own transcript with Ayla — no customer record is "
         "rendered as fields; swept for forbidden keys and for the "

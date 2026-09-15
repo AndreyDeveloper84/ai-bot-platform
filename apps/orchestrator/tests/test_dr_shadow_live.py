@@ -408,9 +408,15 @@ class TestDecisionPolicyInTheLine:
         assert lines[0]["decision_policy"] == {
             "result_status": "POLICY_INPUT_UNAVAILABLE",
             "reason_codes": ["POLICY_READINESS_INPUT_UNAVAILABLE"],
-            "facts_used": ["safety.state", "engine.reason_codes"],
+            # DRF-1932: реплика прочитана словарями — факт назван.
+            "facts_used": ["safety.state", "engine.reason_codes", "turn.phrase"],
             "decision_policy_version": DECISION_POLICY_VERSION,
             "catalog_writable": False,
+            "taxonomy_version": "h5-codes:no-phrase-map",
+            "recognized_targets": [],
+            "primary": None,
+            "alternatives": [],
+            "candidate_nba": None,
         }
 
     def test_crisis_turn_is_a_safety_boundary_and_the_reply_is_the_same(
@@ -451,3 +457,75 @@ class TestDecisionPolicyInTheLine:
         lines = _shadow_lines(caplog)
         assert len(lines) == 1
         assert lines[0]["decision_policy"] == {"error": "RuntimeError"}
+
+
+class TestNbaSelectionInTheLine:
+    """DRF-1932: выбор NBA в строке тени — коды, без слов реплики; ответ тот же.
+
+    Боевые словари пусты; тройку здесь даёт тестовый словарь, подставленный тестом.
+    """
+
+    PHRASES = {"расслабиться вечером": "RELAXATION", "расслабить спину": "BACK_COMFORT"}
+    DEFAULTS = {
+        "RELAXATION": ("SUPPORT", "PROVIDER_SESSION"),
+        "BACK_COMFORT": ("RECOVER", "SELF_CARE"),
+    }
+
+    def _dictionaries(self, monkeypatch):
+        from apps.orchestrator import nba_taxonomy
+
+        monkeypatch.setattr(nba_taxonomy, "TARGET_PHRASES", self.PHRASES)
+        monkeypatch.setattr(nba_taxonomy, "TARGET_DEFAULTS", self.DEFAULTS)
+
+    def _raw_lines(self, caplog) -> list[str]:
+        return [
+            r.getMessage()
+            for r in caplog.records
+            if r.getMessage().startswith(dr_shadow.LIVE_LOG_EVENT + " ")
+        ]
+
+    def test_candidate_is_logged_as_codes_and_no_word_of_the_phrase_reaches_the_line(
+        self, settings, monkeypatch, sent, dr_redis, caplog
+    ):
+        settings.DRE_SHADOW_ENABLED = True
+        self._dictionaries(monkeypatch)
+        _model(monkeypatch, _completion(PROSE))
+
+        with caplog.at_level(logging.INFO):
+            screen = _turn(sent, "Хочу расслабиться вечером, Жужелица 7788")
+
+        assert screen == PROSE
+        raw = self._raw_lines(caplog)
+        assert len(raw) == 1
+        for word in ("хочу", "расслабиться", "вечером", "жужелица", "7788"):
+            assert word not in raw[0].casefold(), f"слово реплики в строке тени: {word}"
+        policy = _shadow_lines(caplog)[0]["decision_policy"]
+        assert policy["result_status"] == "POLICY_INPUT_UNAVAILABLE"
+        assert policy["recognized_targets"] == ["RELAXATION"]
+        assert policy["primary"] is None
+        assert policy["candidate_nba"] == {
+            "role": "primary",
+            "target": "RELAXATION",
+            "family": "SUPPORT",
+            "action_type": "PROVIDER_SESSION",
+            "actionable": False,
+            "not_actionable_reason": "POLICY_READINESS_INPUT_UNAVAILABLE",
+        }
+        assert policy["catalog_writable"] is False
+
+    def test_pain_words_give_no_candidate_and_the_reply_is_the_same(
+        self, settings, monkeypatch, sent, dr_redis, caplog
+    ):
+        settings.DRE_SHADOW_ENABLED = True
+        self._dictionaries(monkeypatch)
+        _model(monkeypatch, _completion(PROSE))
+
+        with caplog.at_level(logging.INFO):
+            _turn(sent, "ноет, хочу расслабить спину")
+
+        lines = _shadow_lines(caplog)
+        assert len(lines) == 1
+        policy = lines[0]["decision_policy"]
+        assert policy["result_status"] == "SAFETY_CLARIFICATION_PENDING"
+        assert policy["candidate_nba"] is None
+        assert policy["primary"] is None

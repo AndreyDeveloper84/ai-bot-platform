@@ -86,8 +86,9 @@ class TestInputUnavailableIsNotInsufficientContext:
     def test_answered_safety_and_available_input_is_a_named_gap(self, state):
         verdict = dp.decide(_evidence(state, reason_codes=("STATE_READY",)))
 
-        assert verdict.result_status is dp.PolicyStatus.NBA_SELECTION_PENDING_TAXONOMY
-        assert verdict.reason_codes == (dp.POLICY_TAXONOMY_NOT_APPROVED,)
+        # DRF-1932: без реплики словарь ничего не распознаёт — пропуск назван.
+        assert verdict.result_status is dp.PolicyStatus.NBA_TARGET_NOT_RECOGNIZED
+        assert verdict.reason_codes == (dp.POLICY_TARGET_NOT_RECOGNIZED,)
         assert verdict.decision_policy_version == dp.DECISION_POLICY_VERSION
 
 
@@ -118,7 +119,10 @@ class TestCatalogWall:
         [
             dp.PolicyStatus.POLICY_INPUT_UNAVAILABLE,
             dp.PolicyStatus.SAFETY_CLARIFICATION_PENDING,
-            dp.PolicyStatus.NBA_SELECTION_PENDING_TAXONOMY,
+            dp.PolicyStatus.NBA_TARGET_NOT_RECOGNIZED,
+            dp.PolicyStatus.NBA_TRIPLE_NOT_DEFINED,
+            dp.PolicyStatus.CLEAR_PRIMARY,
+            dp.PolicyStatus.MULTIPLE_SUITABLE,
             "POLICY_INPUT_UNAVAILABLE",
             "INSUFFICIENT_CONTEXT",
             "CLEAR_PRIMARY",
@@ -130,12 +134,15 @@ class TestCatalogWall:
             dp.assert_catalog_writable(status)
 
     def test_shadow_statuses_cannot_be_mistaken_for_contract_ones(self):
-        shadow_only = {s.value for s in dp.PolicyStatus} - {"SAFETY_BOUNDARY"}
+        contract = {"SAFETY_BOUNDARY", "CLEAR_PRIMARY", "MULTIPLE_SUITABLE"}
+        shadow_only = {s.value for s in dp.PolicyStatus} - contract
 
+        assert contract <= dp.CONTRACT_RESULT_STATUSES
         assert shadow_only == {
             "POLICY_INPUT_UNAVAILABLE",
             "SAFETY_CLARIFICATION_PENDING",
-            "NBA_SELECTION_PENDING_TAXONOMY",
+            "NBA_TARGET_NOT_RECOGNIZED",
+            "NBA_TRIPLE_NOT_DEFINED",
         }
         assert not shadow_only & dp.CONTRACT_RESULT_STATUSES
         assert dp.CATALOG_WRITABLE_BEFORE_TAXONOMY <= dp.CONTRACT_RESULT_STATUSES
