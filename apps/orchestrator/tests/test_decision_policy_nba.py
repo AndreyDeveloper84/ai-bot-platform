@@ -158,12 +158,11 @@ class TestCandidateWhenInputUnavailable:
         assert verdict.candidate_nba is None
         assert verdict.recognized_targets == ("RELAXATION",)
 
-    def test_production_dictionaries_give_no_candidate(self):
-        needs = tx.read_turn_needs("хочу расслабиться вечером")
+    def test_production_dictionaries_name_the_owner_version(self):
+        needs = tx.read_turn_needs("Хочу снять напряжение")
         verdict = dp.decide(_evidence("normal", INPUT_UNAVAILABLE), needs=needs)
 
-        assert verdict.candidate_nba is None
-        assert verdict.nba_fields()["taxonomy_version"] == "h5-codes:no-phrase-map"
+        assert verdict.nba_fields()["taxonomy_version"] == "h5-j1j2:owner-2026-09-15:r2"
 
     def test_candidate_status_is_never_catalog_writable(self):
         with pytest.raises(dp.NotCatalogWritable):
@@ -305,3 +304,171 @@ class TestCandidateStaysInTheShadow:
 
         assert len(scanned) >= 500, f"скан пуст или не тот корень: {apps_root}"
         assert naming == ["apps/orchestrator/decision_policy.py"]
+
+
+# --------------------------------------------------------------------------- #
+# DRF-1945 — боевые словари: safety первой, NBA = NONE без fallback (§3, §5)   #
+# --------------------------------------------------------------------------- #
+#: Фраза владельца из J1 (§3 BACK_COMFORT).
+OWNER_BACK_PHRASE = "Хочу расслабить спину"
+#: §3: стоп-фразы I2 — дословно.
+OWNER_STOP_PHRASES = ("ноет спина", "болит спина", "простреливает", "онемение", "отдаёт")
+
+
+def _decide_production(text, *, safety_state="normal", reason_codes=READY, handoff=None):
+    """Боевые словари J1/J2 — без подстановки."""
+    return dp.decide(
+        _evidence(safety_state, reason_codes), handoff=handoff, needs=tx.read_turn_needs(text)
+    )
+
+
+class TestSafetyBlocksTheProductionChoice:
+    """§3/§5: цель может быть распознана, выбор NBA — нет. Вход готовности
+    недоступен, как на пилоте (τ не откалиброван), — ``candidate_nba`` тоже нет."""
+
+    @pytest.mark.parametrize(
+        "safety_state, handoff, status, reason",
+        [
+            ("stop", None, dp.PolicyStatus.SAFETY_BOUNDARY, dp.POLICY_SAFETY_STOP),
+            ("normal", "required", dp.PolicyStatus.SAFETY_BOUNDARY, dp.POLICY_HANDOFF_REQUIRED),
+            (
+                "unknown",
+                None,
+                dp.PolicyStatus.POLICY_INPUT_UNAVAILABLE,
+                dp.POLICY_SAFETY_VERDICT_UNAVAILABLE,
+            ),
+        ],
+    )
+    def test_boundary_or_unknown_safety_gives_no_nba(self, safety_state, handoff, status, reason):
+        verdict = _decide_production(
+            OWNER_BACK_PHRASE,
+            safety_state=safety_state,
+            handoff=handoff,
+            reason_codes=INPUT_UNAVAILABLE,
+        )
+
+        assert verdict.result_status is status
+        assert verdict.reason_codes == (reason,)
+        assert verdict.primary is None and verdict.alternatives == ()
+        assert verdict.candidate_nba is None
+
+    def test_clarify_recognizes_the_target_and_selects_nothing(self):
+        verdict = _decide_production(
+            OWNER_BACK_PHRASE, safety_state="clarify", reason_codes=INPUT_UNAVAILABLE
+        )
+
+        assert verdict.result_status is dp.PolicyStatus.SAFETY_CLARIFICATION_PENDING
+        assert verdict.recognized_targets == ("BACK_COMFORT",)
+        assert verdict.primary is None
+        assert verdict.candidate_nba is None
+
+    def test_pain_with_an_owner_phrase_recognizes_the_target_and_selects_nothing(self):
+        verdict = _decide_production(
+            "Хочу расслабить спину, но простреливает", reason_codes=INPUT_UNAVAILABLE
+        )
+
+        assert verdict.result_status is dp.PolicyStatus.SAFETY_CLARIFICATION_PENDING
+        assert verdict.reason_codes == (dp.POLICY_PAIN_SIGNAL,)
+        assert verdict.recognized_targets == ("BACK_COMFORT",)
+        assert verdict.primary is None
+        assert verdict.candidate_nba is None
+
+
+class TestOwnerStopPhrases:
+    @pytest.mark.parametrize("text", OWNER_STOP_PHRASES)
+    def test_stop_phrase_is_pending_without_nba(self, text):
+        verdict = _decide_production(text, reason_codes=INPUT_UNAVAILABLE)
+
+        assert verdict.result_status is dp.PolicyStatus.SAFETY_CLARIFICATION_PENDING
+        assert verdict.reason_codes == (dp.POLICY_PAIN_SIGNAL,)
+        assert verdict.primary is None
+        assert verdict.candidate_nba is None
+
+
+class TestOwnerButtonsWithoutATarget:
+    @pytest.mark.parametrize(
+        "text, status, reason",
+        [
+            (
+                "Беспокоят отёки",
+                dp.PolicyStatus.SAFETY_CLARIFICATION_PENDING,
+                dp.POLICY_HEALTH_SENSITIVE_CONTEXT,
+            ),
+            (
+                "Последнее время сильно устаю",
+                dp.PolicyStatus.NBA_TARGET_NOT_RECOGNIZED,
+                dp.POLICY_TARGET_NOT_RECOGNIZED,
+            ),
+            (
+                "Хочу больше времени уделять себе",
+                dp.PolicyStatus.NBA_TARGET_NOT_RECOGNIZED,
+                dp.POLICY_TARGET_NOT_RECOGNIZED,
+            ),
+            (
+                "Готовлюсь к важному событию",
+                dp.PolicyStatus.NBA_TARGET_NOT_RECOGNIZED,
+                dp.POLICY_TARGET_NOT_RECOGNIZED,
+            ),
+        ],
+    )
+    def test_button_without_a_target_selects_nothing(self, text, status, reason):
+        verdict = _decide_production(text)
+
+        assert verdict.result_status is status
+        assert verdict.reason_codes == (reason,)
+        assert verdict.primary is None
+        assert verdict.candidate_nba is None
+
+
+#: J1 + J2 владельца (§3–§4): фраза → ожидаемая тройка.
+OWNER_PHRASE_TRIPLES = [
+    ("Хочу выглядеть свежее", tx.Triple("FACE_FRESHNESS", "ADDRESS", "PROVIDER_SESSION")),
+    ("Хочу снять напряжение", tx.Triple("RELAXATION", "SUPPORT", "PROVIDER_SESSION")),
+    ("Хочу расслабить спину", tx.Triple("BACK_COMFORT", "RECOVER", "PROVIDER_SESSION")),
+    ("Спина напряжена", tx.Triple("BACK_COMFORT", "RECOVER", "PROVIDER_SESSION")),
+    ("Хочу снять зажимы", tx.Triple("BACK_COMFORT", "RECOVER", "PROVIDER_SESSION")),
+    ("Устала спина после работы", tx.Triple("BACK_COMFORT", "RECOVER", "PROVIDER_SESSION")),
+    ("Напряжение в спине", tx.Triple("BACK_COMFORT", "RECOVER", "PROVIDER_SESSION")),
+    ("Хочу снять напряжение в спине", tx.Triple("BACK_COMFORT", "RECOVER", "PROVIDER_SESSION")),
+]
+
+
+class TestOwnerPhrasesSelectTheOwnerTriple:
+    @pytest.mark.parametrize("text, triple", OWNER_PHRASE_TRIPLES)
+    def test_ready_input_is_a_clear_primary_with_the_owner_triple(self, text, triple):
+        verdict = _decide_production(text)
+
+        assert verdict.result_status is dp.PolicyStatus.CLEAR_PRIMARY
+        assert verdict.primary == triple
+        assert verdict.alternatives == ()
+
+    @pytest.mark.parametrize("text, triple", OWNER_PHRASE_TRIPLES)
+    def test_on_the_pilot_path_the_owner_triple_is_a_candidate(self, text, triple):
+        """τ не откалиброван → вход готовности недоступен → тройка в ``candidate_nba``."""
+        verdict = _decide_production(text, reason_codes=INPUT_UNAVAILABLE)
+
+        assert verdict.result_status is dp.PolicyStatus.POLICY_INPUT_UNAVAILABLE
+        assert verdict.candidate_nba == triple
+        assert verdict.primary is None
+
+    def test_tension_in_the_back_is_back_comfort_by_the_longer_phrase(self):
+        """R2: «хочу снять напряжение в спине» — BACK_COMFORT; «хочу снять напряжение»
+        лежит внутри неё и не считается — альтернативы RELAXATION нет."""
+        verdict = _decide_production("Хочу снять напряжение в спине")
+
+        assert verdict.result_status is dp.PolicyStatus.CLEAR_PRIMARY
+        assert verdict.recognized_targets == ("BACK_COMFORT",)
+        assert verdict.primary == tx.Triple("BACK_COMFORT", "RECOVER", "PROVIDER_SESSION")
+        assert verdict.alternatives == ()
+
+    def test_safety_stays_on_top_of_the_longer_phrase(self):
+        """R2: safety не отменяется — признак боли при распознанной цели → PENDING, NBA нет."""
+        verdict = _decide_production(
+            "Хочу снять напряжение в спине, но простреливает", reason_codes=INPUT_UNAVAILABLE
+        )
+
+        assert verdict.result_status is dp.PolicyStatus.SAFETY_CLARIFICATION_PENDING
+        assert verdict.reason_codes == (dp.POLICY_PAIN_SIGNAL,)
+        assert verdict.recognized_targets == ("BACK_COMFORT",)
+        assert verdict.primary is None
+        assert verdict.candidate_nba is None

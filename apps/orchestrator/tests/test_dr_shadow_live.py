@@ -412,11 +412,18 @@ class TestDecisionPolicyInTheLine:
             "facts_used": ["safety.state", "engine.reason_codes", "turn.phrase"],
             "decision_policy_version": DECISION_POLICY_VERSION,
             "catalog_writable": False,
-            "taxonomy_version": "h5-codes:no-phrase-map",
+            "taxonomy_version": "h5-j1j2:owner-2026-09-15:r2",
             "recognized_targets": [],
             "primary": None,
             "alternatives": [],
             "candidate_nba": None,
+            # DRF-1945: минимум строки тени владельца (§4) — плоско.
+            "target": None,
+            "family": None,
+            "action_type": None,
+            "decision_status": "POLICY_INPUT_UNAVAILABLE",
+            "safety_state": "normal",
+            "reason_code": "POLICY_READINESS_INPUT_UNAVAILABLE",
         }
 
     def test_crisis_turn_is_a_safety_boundary_and_the_reply_is_the_same(
@@ -565,3 +572,86 @@ class TestUnavailableInputInTheLine:
             assert fragment not in raw[0]
         # Исход политики не меняется.
         assert line["decision_policy"]["result_status"] == "POLICY_INPUT_UNAVAILABLE"
+
+
+# --------------------------------------------------------------------------- #
+# DRF-1945 — боевые словари J1/J2: минимум строки тени и тот же ответ          #
+# --------------------------------------------------------------------------- #
+class TestOwnerMinimumInTheLine:
+    """§4: target, family, action_type, decision_status, safety_state, reason_code."""
+
+    MINIMUM = ("target", "family", "action_type", "decision_status", "safety_state", "reason_code")
+
+    def test_button_turn_names_the_candidate_triple_status_safety_and_reason(
+        self, settings, monkeypatch, sent, dr_redis, caplog
+    ):
+        settings.DRE_SHADOW_ENABLED = True
+        _model(monkeypatch, _completion(PROSE))
+
+        with caplog.at_level(logging.INFO):
+            _turn(sent, "Хочу снять напряжение")
+
+        raw = [
+            r.getMessage()
+            for r in caplog.records
+            if r.getMessage().startswith(dr_shadow.LIVE_LOG_EVENT + " ")
+        ]
+        assert len(raw) == 1
+        for word in ("хочу", "снять", "напряжение"):
+            assert word not in raw[0].casefold(), f"слово реплики в строке тени: {word}"
+        policy = _shadow_lines(caplog)[0]["decision_policy"]
+        assert set(self.MINIMUM) <= set(policy)
+        assert {k: policy[k] for k in self.MINIMUM} == {
+            "target": "RELAXATION",
+            "family": "SUPPORT",
+            "action_type": "PROVIDER_SESSION",
+            "decision_status": "POLICY_INPUT_UNAVAILABLE",
+            "safety_state": "normal",
+            "reason_code": "POLICY_READINESS_INPUT_UNAVAILABLE",
+        }
+
+    def test_crisis_turn_names_the_boundary_and_no_triple(
+        self, settings, monkeypatch, sent, dr_redis, caplog
+    ):
+        settings.DRE_SHADOW_ENABLED = True
+        _model(monkeypatch, _completion(PROSE))
+
+        with caplog.at_level(logging.INFO):
+            _turn(sent, "не хочу больше жить")
+
+        lines = _shadow_lines(caplog)
+        assert len(lines) == 1
+        policy = lines[0]["decision_policy"]
+        assert set(self.MINIMUM) <= set(policy)
+        assert {k: policy[k] for k in self.MINIMUM} == {
+            "target": None,
+            "family": None,
+            "action_type": None,
+            "decision_status": "SAFETY_BOUNDARY",
+            "safety_state": "stop",
+            "reason_code": "POLICY_SAFETY_STOP",
+        }
+
+
+class TestOwnerDictionariesDoNotChangeTheReply:
+    def test_the_reply_is_byte_for_byte_the_same_with_the_shadow_off_and_on(
+        self, settings, monkeypatch, sent, dr_redis, caplog
+    ):
+        _model(monkeypatch, _completion(PROSE))
+
+        with caplog.at_level(logging.INFO):
+            settings.DRE_SHADOW_ENABLED = False
+            off = _turn(sent, "Хочу снять напряжение")
+            sent_off = [c["text"] for c in sent]
+            settings.DRE_SHADOW_ENABLED = True
+            on = _turn(sent, "Хочу снять напряжение")
+            sent_on = [c["text"] for c in sent[len(sent_off) :]]
+
+        assert off == PROSE
+        assert on.encode("utf-8") == off.encode("utf-8")
+        assert sent_on == sent_off
+        lines = _shadow_lines(caplog)
+        assert len(lines) == 1
+        candidate = lines[0]["decision_policy"]["candidate_nba"]
+        assert candidate is not None, "боевой словарь не дал кандидата на кнопке владельца"
+        assert candidate["target"] == "RELAXATION"
