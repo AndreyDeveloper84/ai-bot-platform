@@ -210,6 +210,20 @@ def _patch_yclients(client: FakeYClients):
     return patch("apps.integrations.yclients.get_yclients_client", return_value=client)
 
 
+def _patch_booking_provider(client: FakeYClients):
+    """The OTHER half of the gate's client path (DRF-2012).
+
+    ``_patch_yclients`` covers the YClients factory. The gate itself selects a
+    provider (``apps.bookings.callbacks`` → ``get_booking_provider``), and with
+    ``BOOKING_VIA_AYLA_REST`` on that is the Ayla adapter, which needs a base
+    URL no test environment sets — the tap then answers «Сейчас не могу
+    записать…» before ``_dispatch_confirm`` ever sees a result. Any test that
+    taps under the live flag needs this one too.
+    """
+
+    return patch("apps.skills.booking.provider.get_booking_provider", return_value=client)
+
+
 # ---------------------------------------------------------------------------
 # matches()
 # ---------------------------------------------------------------------------
@@ -918,12 +932,18 @@ class TestConfirmTapNamedOutcomes:
         from apps.skills.booking.tests.test_health_check_handoff import _confirm
 
         settings.BOOKING_VIA_AYLA_REST = True
-        for code in (HEALTH_CHECK_REQUIRED, HEALTH_CHECK_UNKNOWN, HEALTH_CHECK_NOT_APPLICABLE):
-            from_message_path = _confirm(tenant, bot_user, code)
-            expected = text_for(code)
-            assert from_message_path.text == expected, code
-            tap = self._tap(tenant, bot_user, conversation, from_message_path)
-            assert tap.reply_text == expected, code
+        codes = (HEALTH_CHECK_REQUIRED, HEALTH_CHECK_UNKNOWN, HEALTH_CHECK_NOT_APPLICABLE)
+        # The flag stays on for BOTH halves — the defect is one state producing
+        # two sentences. Under it the gate builds the Ayla provider, which needs
+        # a base URL this environment has not got; the provider object itself is
+        # never used here, since ``execute_confirm`` is patched inside ``_tap``.
+        with _patch_booking_provider(FakeYClients()):
+            for code in codes:
+                from_message_path = _confirm(tenant, bot_user, code)
+                expected = text_for(code)
+                assert from_message_path.text == expected, code
+                tap = self._tap(tenant, bot_user, conversation, from_message_path)
+                assert tap.reply_text == expected, code
 
     # Guards — these three keep today's copy and today's reason.
 
