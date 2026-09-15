@@ -101,8 +101,10 @@ _PAIN_STEMS: frozenset[str] = frozenset(
         "пульсир",
         "защемил",
         "защемля",
-        "зажим",  # зажимает / зажим в шее
-        "напряж",  # напряжение в спине
+        # «зажим» и «напряж» здесь больше не стоят (DRF-2001, S-3c): пакет 3
+        # владельца п. 6b — «хочу снять напряжение / зажимы» без боли, онемения,
+        # слабости, травмы — обычная потребность, не S2. С болью реплика даёт
+        # SOFT по стему «бол», с онемением — RED_FLAG.
         "спазм",
         "судорог",
         # Body part / state combos that mean pain without «бол»
@@ -145,12 +147,14 @@ _NOT_PAIN: tuple[re.Pattern[str], ...] = (
     re.compile(r"стрелк\w*", re.IGNORECASE),
     # «хрустальный» — a nail-design finish, not «хруст в шее».
     re.compile(r"хрустал\w*", re.IGNORECASE),
-    # «зажим для волос» — a hair clip, not «зажим в шее». Only the
-    # purchase phrasing is masked: bare «зажим» stays a complaint.
+    # «зажим для волос» — a hair clip. Since DRF-2001 «зажим» is not a pain
+    # stem at all (п. 6b), so this mask is belt and braces for the purchase
+    # phrasing; kept so a future stem cannot revive the false friend.
     re.compile(r"зажим\w*\s+для\b", re.IGNORECASE),
     # «напряжённая неделя / график / работа» — the reason a person books
-    # a relaxing massage, not a symptom. «напряжение в спине» is
-    # untouched: only these complements are masked.
+    # a relaxing massage, not a symptom. Since DRF-2001 «напряж» is not a
+    # pain stem either (п. 6b: «напряжение в спине» without pain is a need),
+    # so this mask is belt and braces, kept for the same reason as above.
     re.compile(
         r"напряж[её]нн\w*\s+(?:график\w*|недел\w*|день|дня|дн[ий]\w*"
         r"|месяц\w*|период\w*|работ\w*|разговор\w*)",
