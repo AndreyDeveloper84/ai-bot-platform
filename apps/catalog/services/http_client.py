@@ -170,9 +170,12 @@ class CatalogSpecialistDTO:
     location_lng: Decimal | None = None
     # DRF-1588 — адрес САЛОНА, отдельным ключом ``tenant_address``, а не тем
     # же ``address``, что у мастера: в одной строке приезжают оба. Складывать
-    # их здесь нечем и незачем — правило старшинства это DRF-1589. Ключа
-    # сегодня ещё нет (его заводит DRF-1587), поэтому ``None`` — штатное
-    # состояние, а не дефект.
+    # их здесь нечем и незачем — правило старшинства это DRF-1589. Каталог
+    # отдаёт ключ с DRF-1587 (каталог dbf14409: ``users/internal_catalog_api.py``
+    # ``get_tenant_address`` → ``_blank_to_none`` — пустой адрес уходит как
+    # ``null``, не пустой строкой). ``None`` здесь — у салона адрес не заполнен
+    # или ключа нет в строке. Upserter пишет значение в ``Tenant.address``,
+    # только когда все строки салона согласны (DRF-1954).
     tenant_address: str | None = None
     avatar_url: str | None = None
     raw: dict[str, Any] = field(default_factory=dict)

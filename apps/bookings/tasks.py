@@ -88,6 +88,13 @@ logger = logging.getLogger(__name__)
 BATCH_LIMIT = 200
 
 
+def _salon_address_line(reminder: BookingReminder) -> str:
+    """DRF-1952 — адрес салона записи (FK ``reminder.tenant``, он в ``select_related``)."""
+    from apps.tenancy.visit_address import tenant_address_line
+
+    return tenant_address_line(reminder.tenant)
+
+
 def _format_day_before_text(reminder: BookingReminder) -> str:
     """Render the T-24h reminder body.
 
@@ -102,7 +109,8 @@ def _format_day_before_text(reminder: BookingReminder) -> str:
         "Здравствуйте! Напоминаю о записи завтра:\n"
         f"{reminder.service_name or '—'} к мастеру "
         f"{reminder.master_name or '—'}\n"
-        f"{visit_local.strftime('%d.%m в %H:%M')}\n\n"
+        f"{visit_local.strftime('%d.%m в %H:%M')}\n"
+        f"{_salon_address_line(reminder)}\n\n"
         "Подтвердите, пожалуйста:"
     )
 
@@ -118,7 +126,8 @@ def _format_two_hours_text(reminder: BookingReminder) -> str:
         "Через 2 часа жду вас на приём:\n"
         f"{reminder.service_name or '—'} к мастеру "
         f"{reminder.master_name or '—'}\n"
-        f"в {visit_local.strftime('%H:%M')}\n\n"
+        f"в {visit_local.strftime('%H:%M')}\n"
+        f"{_salon_address_line(reminder)}\n\n"
         "Если планы изменились — напишите, постараемся помочь."
     )
 
