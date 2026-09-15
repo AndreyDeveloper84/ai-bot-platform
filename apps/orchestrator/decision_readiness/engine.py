@@ -385,6 +385,81 @@ def f(
     return ReadinessState.READY, (), verdicts, codes
 
 
+#: DRF-1937 — §15.2's availability rows as codes, in the engine's order. The
+#: shadow line names which input actually holds readiness back; the outward
+#: reason code stays the single ``BLOCK_READINESS_INPUT_UNAVAILABLE`` and the
+#: §19 record is untouched (the codes live in the shadow sink only).
+INPUT_LEDGER_UNREADABLE = "LEDGER_UNREADABLE"
+INPUT_PROBE_UNAVAILABLE = "PROBE_UNAVAILABLE"
+INPUT_CANDIDATES_STALE = "CANDIDATES_STALE"
+INPUT_SAFETY_REVISION_BEHIND = "SAFETY_REVISION_BEHIND"
+INPUT_ELIGIBILITY_UNKNOWN = "ELIGIBILITY_UNKNOWN"
+INPUT_CONFLICTS_NOT_COMPUTED = "CONFLICTS_NOT_COMPUTED"
+INPUT_TAU_UNCALIBRATED = "TAU_UNCALIBRATED"
+UNAVAILABLE_INPUT_CODES: tuple[str, ...] = (
+    INPUT_LEDGER_UNREADABLE,
+    INPUT_PROBE_UNAVAILABLE,
+    INPUT_CANDIDATES_STALE,
+    INPUT_SAFETY_REVISION_BEHIND,
+    INPUT_ELIGIBILITY_UNKNOWN,
+    INPUT_CONFLICTS_NOT_COMPUTED,
+    INPUT_TAU_UNCALIBRATED,
+)
+
+
+def unavailable_inputs(
+    *,
+    availability: InputAvailability,
+    probe_usable: bool,
+    safety: SafetyResult,
+    state_revision: int,
+    candidates: CandidateSetSignature,
+    measures: Measures,
+    policy: ControlledPolicy,
+) -> tuple[tuple[str, str], ...]:
+    """Every unavailable input, in the engine's order: ``(code, attribution)``.
+
+    The single source of §15.2's rows. :func:`_unavailable_reason` takes the
+    first of them, so the engine's verdict and the shadow's list cannot drift.
+    """
+
+    found: list[tuple[str, str]] = []
+    if not availability.ledger_readable:
+        found.append((INPUT_LEDGER_UNREADABLE, "question ledger is not readable"))
+    if not probe_usable:
+        found.append((INPUT_PROBE_UNAVAILABLE, "candidate probe is unavailable"))
+    if not availability.candidates_fresh:
+        found.append((INPUT_CANDIDATES_STALE, "candidate set is stale"))
+    if safety.evaluated_at_revision is None or safety.evaluated_at_revision < state_revision:
+        found.append(
+            (
+                INPUT_SAFETY_REVISION_BEHIND,
+                f"safety evaluated at revision {safety.evaluated_at_revision} "
+                f"but state is at {state_revision}",
+            )
+        )
+    if candidates.recommendation_eligible_count is None:
+        # §12.3: absence of the flag is UNKNOWN, not true.
+        found.append(
+            (
+                INPUT_ELIGIBILITY_UNKNOWN,
+                "recommendation_eligible is absent, which is unknown rather than yes",
+            )
+        )
+    if measures.conflicts is None:
+        found.append(
+            (
+                INPUT_CONFLICTS_NOT_COMPUTED,
+                "conflicts was not computed, and an uncomputed conflict count is not zero",
+            )
+        )
+    if isinstance(policy.tau_separation, Uncalibrated):
+        # OD-DR-1: calibrate in shadow first. Until then the engine cannot tell
+        # READY from NEEDS_DISCRIMINATION, and saying either would be a guess.
+        found.append((INPUT_TAU_UNCALIBRATED, "tau_separation is uncalibrated (OD-DR-1, DRF-1519)"))
+    return tuple(found)
+
+
 def _unavailable_reason(
     *,
     availability: InputAvailability,
@@ -399,30 +474,21 @@ def _unavailable_reason(
 
     One outward state, separate reasons inward: a caller that only sees
     "unavailable" cannot tell a broken register from an uncalibrated threshold,
-    and the two need different people to fix them.
+    and the two need different people to fix them. The first unavailable input
+    of :func:`unavailable_inputs` (DRF-1937: one source for the verdict and the
+    shadow's list).
     """
 
-    if not availability.ledger_readable:
-        return "question ledger is not readable"
-    if not probe_usable:
-        return "candidate probe is unavailable"
-    if not availability.candidates_fresh:
-        return "candidate set is stale"
-    if safety.evaluated_at_revision is None or safety.evaluated_at_revision < state_revision:
-        return (
-            f"safety evaluated at revision {safety.evaluated_at_revision} "
-            f"but state is at {state_revision}"
-        )
-    if candidates.recommendation_eligible_count is None:
-        # §12.3: absence of the flag is UNKNOWN, not true.
-        return "recommendation_eligible is absent, which is unknown rather than yes"
-    if measures.conflicts is None:
-        return "conflicts was not computed, and an uncomputed conflict count is not zero"
-    if isinstance(policy.tau_separation, Uncalibrated):
-        # OD-DR-1: calibrate in shadow first. Until then the engine cannot tell
-        # READY from NEEDS_DISCRIMINATION, and saying either would be a guess.
-        return "tau_separation is uncalibrated (OD-DR-1, DRF-1519)"
-    return None
+    found = unavailable_inputs(
+        availability=availability,
+        probe_usable=probe_usable,
+        safety=safety,
+        state_revision=state_revision,
+        candidates=candidates,
+        measures=measures,
+        policy=policy,
+    )
+    return found[0][1] if found else None
 
 
 def _required_context_codes(verdicts: dict[str, SlotVerdict]) -> list[str]:

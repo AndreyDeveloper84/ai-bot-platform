@@ -529,3 +529,39 @@ class TestNbaSelectionInTheLine:
         assert policy["result_status"] == "SAFETY_CLARIFICATION_PENDING"
         assert policy["candidate_nba"] is None
         assert policy["primary"] is None
+
+
+class TestUnavailableInputInTheLine:
+    """DRF-1937: строка тени называет, какой вход держит готовность — кодами."""
+
+    def test_ordinary_turn_names_the_ledger_first_and_lists_in_engine_order(
+        self, settings, monkeypatch, sent, dr_redis, caplog
+    ):
+        from apps.orchestrator.decision_readiness import engine as eng
+
+        settings.DRE_SHADOW_ENABLED = True
+        _model(monkeypatch, _completion(PROSE))
+
+        with caplog.at_level(logging.INFO):
+            screen = _turn(sent, "хочу массаж")
+
+        assert screen == PROSE
+        raw = [
+            r.getMessage()
+            for r in caplog.records
+            if r.getMessage().startswith(dr_shadow.LIVE_LOG_EVENT + " ")
+        ]
+        assert len(raw) == 1
+        line = _shadow_lines(caplog)[0]
+        field = line["readiness_input_unavailable"]
+
+        # build_live_input: ledger_readable=False — первым срабатывает журнал вопросов.
+        assert field["first"] == eng.INPUT_LEDGER_UNREADABLE
+        assert eng.INPUT_TAU_UNCALIBRATED in field["all"]
+        assert field["all"] == [c for c in eng.UNAVAILABLE_INPUT_CODES if c in field["all"]]
+        assert "BLOCK_READINESS_INPUT_UNAVAILABLE" in line["reason_codes"]
+        # Текста блокера движка в строке нет.
+        for fragment in ("question ledger", "not readable", "uncalibrated (OD-DR-1"):
+            assert fragment not in raw[0]
+        # Исход политики не меняется.
+        assert line["decision_policy"]["result_status"] == "POLICY_INPUT_UNAVAILABLE"
