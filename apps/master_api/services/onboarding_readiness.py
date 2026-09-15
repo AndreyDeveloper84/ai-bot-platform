@@ -70,6 +70,11 @@ DEEP_LINKS: dict[str, str] = {
     "profile": "/solo/profile",
 }
 
+#: DRF-1809 (M17): пока не выбрано ни одной услуги, пункт «services» ведёт на
+#: экран 03 — выбор из каталога, а не на экран цен, где новичку нечего
+#: настроить. Считается по тому же ``detail.selected``, что отдаёт пункт.
+SERVICES_SELECT_LINK = "/solo/services/select"
+
 
 @dataclass(frozen=True)
 class ReadinessItem:
@@ -78,13 +83,19 @@ class ReadinessItem:
     detail: dict[str, Any] = field(default_factory=dict)
     reason: str | None = None
 
+    @property
+    def deep_link(self) -> str:
+        if self.key == "services" and not self.detail.get("selected"):
+            return SERVICES_SELECT_LINK
+        return DEEP_LINKS[self.key]
+
     def as_dict(self) -> dict[str, Any]:
         return {
             "key": self.key,
             "state": self.state,
             "detail": dict(self.detail),
             "reason": self.reason,
-            "deep_link": DEEP_LINKS[self.key],
+            "deep_link": self.deep_link,
         }
 
 

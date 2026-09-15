@@ -118,6 +118,7 @@ import { MasterProfileScreen } from "./screens/MasterProfileScreen";
 import { MasterReviewsScreen } from "./screens/MasterReviewsScreen";
 import { MasterAylaScreen } from "./screens/MasterAylaScreen";
 import { MasterScheduleScreen } from "./screens/MasterScheduleScreen";
+import { MasterServiceSelectScreen } from "./screens/MasterServiceSelectScreen";
 import { MasterServicesScreen } from "./screens/MasterServicesScreen";
 import { MasterSettingsScreen } from "./screens/MasterSettingsScreen";
 import { MasterSetupLandingScreen } from "./screens/MasterSetupLandingScreen";
@@ -1260,6 +1261,8 @@ function UnifiedSoloSurface({ me }: { me: MeResponse }) {
         <Route path="/solo/bookings" element={<MasterScheduleScreen />} />
         <Route path="/solo/customers" element={<MasterCustomersScreen />} />
         <Route path="/solo/services" element={<MasterServicesScreen />} />
+        {/* DRF-1809 (M17) — экран 03: выбор услуг из каталога по направлению. */}
+        <Route path="/solo/services/select" element={<MasterServiceSelectScreen />} />
         {/* /solo/more — deep-link only; redirects synchronously to
          * /solo/my-day. The parent (`UnifiedSoloSurface`) reads the URL
          * on mount and initialises `moreOpen=true` for this path, so

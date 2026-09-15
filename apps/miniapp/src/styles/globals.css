@@ -7897,3 +7897,58 @@ a {
   color: var(--c-text-primary);
   white-space: pre-line;
 }
+
+/* DRF-1809 (M17) — экран 03: выбор услуг из каталога по направлению. */
+.service-select__counter {
+  margin: 0;
+  font-size: var(--font-size-200);
+  font-weight: 600;
+  color: var(--c-text-primary);
+}
+
+.service-select__directions,
+.service-select__direction,
+.service-select__done {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+}
+
+.service-select__direction-row {
+  flex-direction: row;
+  align-items: center;
+  justify-content: space-between;
+  text-align: left;
+  cursor: pointer;
+}
+
+.service-select__search {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-1);
+  font-size: var(--font-size-100);
+  color: var(--c-text-secondary);
+}
+
+.service-select__group {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.service-select__group-title {
+  padding: 0;
+  font-size: var(--font-size-100);
+  font-weight: 600;
+  color: var(--c-text-secondary);
+}
+
+.service-select__item {
+  flex-direction: row;
+  align-items: center;
+  gap: var(--s-2);
+  cursor: pointer;
+}
