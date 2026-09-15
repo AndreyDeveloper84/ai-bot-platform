@@ -203,12 +203,14 @@ def verify_init_data(
         Reject if ``now - auth_date > max_age_seconds``. Default 60 min.
     """
 
+    # DRF-1893 — пустое значение проверяется ДО токена: это отказ транспорта
+    # при любой конфигурации сервера, а не 500 из-за ненастроенного токена.
+    if not raw:
+        raise InitDataMalformed("empty initData")
+
     candidates = _candidate_tokens(bot_token)
     if not candidates:
         raise InitDataNotConfigured("no MAX bot token is configured")
-
-    if not raw:
-        raise InitDataMalformed("empty initData")
 
     # parse_qsl preserves duplicates as list-of-tuples; the MAX spec
     # has no duplicate keys, so a dict is fine. keep_blank_values keeps

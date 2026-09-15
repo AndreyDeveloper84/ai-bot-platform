@@ -54,8 +54,11 @@ export function maxBridge(): MaxWebAppGlobal | null {
 export function getInitData(): string {
   const fromBridge = maxBridge()?.initData ?? "";
   if (fromBridge) return fromBridge;
-  const fromEnv = (import.meta.env.VITE_DEV_INIT_DATA as string | undefined) ?? "";
-  return fromEnv;
+  // DRF-1893 — подписанный dev-initData только в режиме разработки: без этой
+  // проверки прод-бандл, собранный с VITE_DEV_INIT_DATA, вёз заранее
+  // подписанный вход мимо MAX.
+  if (!import.meta.env.DEV) return "";
+  return (import.meta.env.VITE_DEV_INIT_DATA as string | undefined) ?? "";
 }
 
 /**

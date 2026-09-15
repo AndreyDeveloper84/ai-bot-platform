@@ -37,17 +37,23 @@ describe("прод-сборка", () => {
     "не содержит VITE_DEV_INIT_DATA",
     async () => {
       const previous = process.env.VITE_DEV_INIT_DATA;
+      // vitest выставляет NODE_ENV=test, и Vite собрал бы бандл с
+      // import.meta.env.DEV=true — это не прод. CI зовёт `npx vite build`
+      // без NODE_ENV, то есть production; повторяем именно его.
+      const previousNodeEnv = process.env.NODE_ENV;
+      process.env.NODE_ENV = "production";
       process.env.VITE_DEV_INIT_DATA = `user=%7B%7D&${MARKER}`;
       try {
         await build({
           root: ROOT,
           mode: "production",
           logLevel: "silent",
-          build: { outDir: OUT, emptyOutDir: true, minify: false, sourcemap: false },
+          build: { outDir: OUT, emptyOutDir: true, sourcemap: false },
         });
       } finally {
         if (previous === undefined) delete process.env.VITE_DEV_INIT_DATA;
         else process.env.VITE_DEV_INIT_DATA = previous;
+        process.env.NODE_ENV = previousNodeEnv;
       }
       const bundle = files(OUT)
         .filter((f) => f.endsWith(".js"))
