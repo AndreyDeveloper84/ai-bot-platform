@@ -375,9 +375,19 @@ class TestOnboardingRouteIsReachableBeforeTheMasterRole:
         Pinned by location, not by mere presence: ``App`` is the one
         component that renders on every surface.
         """
+        # 15.09.2026 UTC (DRF-1893): App() is now only the initData pre-check —
+        # without valid initData it renders «Открой Ayla из MAX» and nothing
+        # else (owner ruling U). With it, App() renders AppShell, which holds
+        # the boot and the role cascade, so the launch payload is read there:
+        # still once, still above every surface's route tree.
         app_body = _fn_body("App")
-        assert "useStartParamRedirect(" in app_body, (
-            "the launch payload is not read in App(). Wherever it is read "
+        assert "<AppShell" in app_body, (
+            "App() no longer renders AppShell — the pre-check and the shell "
+            "have drifted apart, and the reader below may not run at all."
+        )
+        shell_body = _fn_body("AppShell")
+        assert "useStartParamRedirect(" in shell_body, (
+            "the launch payload is not read in AppShell(). Wherever it is read "
             "instead, it runs under one surface's route tree — and the "
             "surfaces an invited master can boot into are not the same one."
         )

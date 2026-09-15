@@ -66,7 +66,7 @@ beforeEach(() => {
 
 describe("гейт решается lib/identity, не экраном", () => {
   it("no_init_data → «Открой Ayla из MAX» (DRF-1893, раздел U), запись не создаётся", () => {
-    // 16.09.2026 (DRF-1893): гейт регистрации снят — пустой initData это
+    // 15.09.2026 UTC (DRF-1893): гейт регистрации снят — пустой initData это
     // отказ транспорта, не аноним; экран — возврат в MAX, без OAuth.
     vi.spyOn(identity, "channelIdentity").mockReturnValue("no_init_data");
 

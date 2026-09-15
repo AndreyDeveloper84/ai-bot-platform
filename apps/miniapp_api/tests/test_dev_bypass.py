@@ -112,6 +112,7 @@ class TestProdModeIgnoresBypass:
     def test_all_bypass_headers_present_still_enforces_hmac(
         self, tenant: Tenant, bot_user: BotUser, caplog: pytest.LogCaptureFixture
     ) -> None:
+        # 15.09.2026 UTC (DRF-1893): отказ транспорта — один код 401 no_init_data (было 400 malformed / 401 bad_signature).
         client = Client()
         caplog.set_level(logging.WARNING, logger="apps.miniapp_api.dev_bypass")
 
@@ -123,7 +124,7 @@ class TestProdModeIgnoresBypass:
         )
 
         # No Authorization header at all → 400 malformed (HMAC path runs).
-        assert resp.status_code == 400
+        assert resp.status_code == 401
         # CRITICAL: no log line leaked. In prod the helper exits BEFORE
         # reading headers, so even probes don't generate signal.
         assert not any("DEV-BYPASS" in rec.getMessage() for rec in caplog.records)
@@ -212,6 +213,7 @@ class TestDevModeRejections:
     def test_missing_user_id_header(
         self, tenant: Tenant, bot_user: BotUser, caplog: pytest.LogCaptureFixture
     ) -> None:
+        # 15.09.2026 UTC (DRF-1893): отказ транспорта — один код 401 no_init_data (было 400 malformed / 401 bad_signature).
         client = Client()
         caplog.set_level(logging.WARNING, logger="apps.miniapp_api.dev_bypass")
 
@@ -221,7 +223,7 @@ class TestDevModeRejections:
             HTTP_X_DEV_TENANT_SLUG=tenant.slug,
         )
         # No bypass → HMAC path runs → 400 malformed (no Auth header).
-        assert resp.status_code == 400
+        assert resp.status_code == 401
         # Rejection logged.
         assert any(
             "DEV-BYPASS" in rec.getMessage() and "rejected" in rec.getMessage()
@@ -232,6 +234,7 @@ class TestDevModeRejections:
     def test_missing_tenant_slug_header(
         self, tenant: Tenant, bot_user: BotUser, caplog: pytest.LogCaptureFixture
     ) -> None:
+        # 15.09.2026 UTC (DRF-1893): отказ транспорта — один код 401 no_init_data (было 400 malformed / 401 bad_signature).
         client = Client()
         caplog.set_level(logging.WARNING, logger="apps.miniapp_api.dev_bypass")
 
@@ -240,7 +243,7 @@ class TestDevModeRejections:
             HTTP_X_DEV_BYPASS="1",
             HTTP_X_DEV_USER_ID=str(bot_user.id),
         )
-        assert resp.status_code == 400
+        assert resp.status_code == 401
         assert any(
             "DEV-BYPASS" in rec.getMessage() and "rejected" in rec.getMessage()
             for rec in caplog.records
@@ -248,6 +251,7 @@ class TestDevModeRejections:
 
     @override_settings(DEBUG=True)
     def test_invalid_uuid_user_id(self, tenant: Tenant, caplog: pytest.LogCaptureFixture) -> None:
+        # 15.09.2026 UTC (DRF-1893): отказ транспорта — один код 401 no_init_data (было 400 malformed / 401 bad_signature).
         client = Client()
         caplog.set_level(logging.WARNING, logger="apps.miniapp_api.dev_bypass")
 
@@ -257,7 +261,7 @@ class TestDevModeRejections:
             HTTP_X_DEV_USER_ID="not-a-uuid",
             HTTP_X_DEV_TENANT_SLUG=tenant.slug,
         )
-        assert resp.status_code == 400
+        assert resp.status_code == 401
         assert any(
             "DEV-BYPASS" in rec.getMessage() and "rejected" in rec.getMessage()
             for rec in caplog.records
@@ -265,6 +269,7 @@ class TestDevModeRejections:
 
     @override_settings(DEBUG=True)
     def test_nonexistent_user_id(self, tenant: Tenant, caplog: pytest.LogCaptureFixture) -> None:
+        # 15.09.2026 UTC (DRF-1893): отказ транспорта — один код 401 no_init_data (было 400 malformed / 401 bad_signature).
         client = Client()
         caplog.set_level(logging.WARNING, logger="apps.miniapp_api.dev_bypass")
 
@@ -275,7 +280,7 @@ class TestDevModeRejections:
             HTTP_X_DEV_USER_ID=str(ghost),
             HTTP_X_DEV_TENANT_SLUG=tenant.slug,
         )
-        assert resp.status_code == 400  # HMAC path runs, no Auth header
+        assert resp.status_code == 401  # HMAC path runs, no Auth header
         assert any(
             "DEV-BYPASS" in rec.getMessage() and "rejected" in rec.getMessage()
             for rec in caplog.records
@@ -294,6 +299,7 @@ class TestDevModeRejections:
         (id, tenant=Tenant.objects.get(slug=...)), so a UUID that exists
         only in tenant-B is invisible from tenant-A's headers.
         """
+        # 15.09.2026 UTC (DRF-1893): отказ транспорта — один код 401 no_init_data (было 400 malformed / 401 bad_signature).
         client = Client()
         caplog.set_level(logging.WARNING, logger="apps.miniapp_api.dev_bypass")
 
@@ -304,7 +310,7 @@ class TestDevModeRejections:
             HTTP_X_DEV_USER_ID=str(cross_tenant_bot_user.id),
             HTTP_X_DEV_TENANT_SLUG=tenant.slug,
         )
-        assert resp.status_code == 400  # falls through to HMAC, malformed
+        assert resp.status_code == 401  # falls through to HMAC, malformed
         assert any(
             "DEV-BYPASS" in rec.getMessage() and "rejected" in rec.getMessage()
             for rec in caplog.records
@@ -314,6 +320,7 @@ class TestDevModeRejections:
     def test_nonexistent_tenant_slug(
         self, bot_user: BotUser, caplog: pytest.LogCaptureFixture
     ) -> None:
+        # 15.09.2026 UTC (DRF-1893): отказ транспорта — один код 401 no_init_data (было 400 malformed / 401 bad_signature).
         client = Client()
         caplog.set_level(logging.WARNING, logger="apps.miniapp_api.dev_bypass")
 
@@ -323,7 +330,7 @@ class TestDevModeRejections:
             HTTP_X_DEV_USER_ID=str(bot_user.id),
             HTTP_X_DEV_TENANT_SLUG="ghost-tenant",
         )
-        assert resp.status_code == 400
+        assert resp.status_code == 401
         assert any(
             "DEV-BYPASS" in rec.getMessage()
             and "rejected" in rec.getMessage()
@@ -336,6 +343,7 @@ class TestDevModeRejections:
         self, tenant: Tenant, bot_user: BotUser, caplog: pytest.LogCaptureFixture
     ) -> None:
         """Only ``X-Dev-Bypass: 1`` activates the bypass — ``true`` / ``yes`` don't."""
+        # 15.09.2026 UTC (DRF-1893): отказ транспорта — один код 401 no_init_data (было 400 malformed / 401 bad_signature).
         client = Client()
         caplog.set_level(logging.WARNING, logger="apps.miniapp_api.dev_bypass")
 
@@ -345,7 +353,7 @@ class TestDevModeRejections:
             HTTP_X_DEV_USER_ID=str(bot_user.id),
             HTTP_X_DEV_TENANT_SLUG=tenant.slug,
         )
-        assert resp.status_code == 400
+        assert resp.status_code == 401
         # Header value didn't match — no log (silent fall-through).
         assert not any("DEV-BYPASS" in rec.getMessage() for rec in caplog.records)
 

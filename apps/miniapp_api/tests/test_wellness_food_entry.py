@@ -206,11 +206,12 @@ class TestDelete:
         fake.delete_meal.assert_not_awaited()
 
     def test_unauthenticated_delete_is_refused(self, client: Client, db):
+        # 15.09.2026 UTC (DRF-1893): отказ транспорта — один код 401 no_init_data (было 400 malformed / 401 bad_signature).
         patcher, fake = _patch_client(delete=DELETION)
         with patcher:
             resp = client.delete(_entry_url())
 
-        assert resp.status_code == 400
+        assert resp.status_code == 401
         fake.delete_meal.assert_not_awaited()
 
 

@@ -90,6 +90,22 @@ describe("без initData — экран «Открой Ayla из MAX» на к�
 
     expect(close).toHaveBeenCalledTimes(1);
   });
+
+  it("по умолчанию, без мока: реальный channelIdentity, моста MAX нет → тот же экран", () => {
+    // Без этой проверки явный мок `identified` в App.*-тестах мог бы спрятать
+    // поведение по умолчанию. Здесь ничего не подменено: моста `window.WebApp`
+    // нет, dev-initData пуст — и App сам приходит к экрану отказа.
+    delete (window as unknown as { WebApp?: unknown }).WebApp;
+    vi.stubEnv("VITE_DEV_INIT_DATA", "");
+
+    renderAt("/");
+
+    expect(identity.channelIdentity()).toBe("no_init_data");
+    expect(screen.getByText(TITLE)).toBeInTheDocument();
+    expect(mockedGetMe).not.toHaveBeenCalled();
+    expect(fetchMock).not.toHaveBeenCalled();
+    vi.unstubAllEnvs();
+  });
 });
 
 describe("с initData — обычный путь (положительная стража)", () => {
