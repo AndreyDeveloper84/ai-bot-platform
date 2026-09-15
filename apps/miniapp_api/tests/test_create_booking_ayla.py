@@ -42,6 +42,7 @@ from apps.integrations.ayla.health_check import (
 )
 from apps.integrations.ayla.identity_client import IdentityResolveError, ResolvedIdentity
 from apps.tenancy.models import Tenant
+from tests.support.catalog_mirror import sync_shaped
 
 #: Три кода отказа гейта здоровья и два имени, под которыми они выходят
 #: наружу (§98: REQUIRED и UNKNOWN — одно имя для человека).
@@ -126,14 +127,16 @@ def bot_user(tenant) -> BotUser:
 def master(tenant) -> CatalogMaster:
     from django.utils import timezone as tz
 
-    return CatalogMaster.all_tenants.create(
-        tenant=tenant,
-        external_updated_at=tz.now(),
-        name="Ольга",
-        specialization="Маникюр",
-        is_active=True,
-        invite_status=CatalogMaster.InviteStatus.ACCEPTED,
-        ayla_user_id=MASTER_AYLA_ID,
+    return sync_shaped(
+        CatalogMaster.all_tenants.create(
+            tenant=tenant,
+            external_updated_at=tz.now(),
+            name="Ольга",
+            specialization="Маникюр",
+            is_active=True,
+            invite_status=CatalogMaster.InviteStatus.ACCEPTED,
+            ayla_user_id=MASTER_AYLA_ID,
+        )
     )
 
 

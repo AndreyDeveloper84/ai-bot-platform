@@ -31,6 +31,7 @@ from apps.catalog.models import CatalogMaster, CatalogService, MasterService
 from apps.identity.models import BotUser
 from apps.scheduling.models import Weekday, WorkingHours
 from apps.tenancy.models import Tenant
+from tests.support.catalog_mirror import sync_shaped
 
 BOT_TOKEN = "test-bot-token-xyz"
 CLIENT_PATH = "apps.integrations.ayla.booking_client.get_ayla_booking_client"
@@ -85,19 +86,21 @@ def bot_user(tenant: Tenant) -> BotUser:
 
 @pytest.fixture
 def master(tenant: Tenant) -> CatalogMaster:
-    return CatalogMaster.all_tenants.create(
-        tenant=tenant,
-        external_id=1,
-        external_updated_at=datetime(2026, 8, 1, tzinfo=timezone.utc),
-        name="Ольга",
-        is_active=True,
-        # DRF-1496: умолчание invite_status теперь PENDING — бронируемость
-        # декларируем явно, а не побочным эффектом умолчания.
-        invite_status=CatalogMaster.InviteStatus.ACCEPTED,
-        # The Ayla User id — deliberately different from the row id, which
-        # is what the slots endpoint actually takes. Mixing these up gives
-        # a silently empty picker.
-        ayla_user_id=uuid.uuid4(),
+    return sync_shaped(
+        CatalogMaster.all_tenants.create(
+            tenant=tenant,
+            external_id=1,
+            external_updated_at=datetime(2026, 8, 1, tzinfo=timezone.utc),
+            name="Ольга",
+            is_active=True,
+            # DRF-1496: умолчание invite_status теперь PENDING — бронируемость
+            # декларируем явно, а не побочным эффектом умолчания.
+            invite_status=CatalogMaster.InviteStatus.ACCEPTED,
+            # The Ayla User id — deliberately different from the row id, which
+            # is what the slots endpoint actually takes. Mixing these up gives
+            # a silently empty picker.
+            ayla_user_id=uuid.uuid4(),
+        )
     )
 
 

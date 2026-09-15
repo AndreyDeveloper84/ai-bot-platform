@@ -43,6 +43,7 @@ from django.utils import timezone
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_http_methods
 
+from apps.catalog.specialist_ref import CatalogSpecialistUnresolved, catalog_specialist_id
 from apps.integrations.ayla.payments_client import (
     AylaClientPaymentsClient,
     ClientPaymentsConflictError,
@@ -509,13 +510,23 @@ def _slots_from_ayla(
             409,
         )
 
+    # DRF-1933: у строки зеркала нет id профиля в каталоге — звать каталог
+    # не с чем; первичный ключ зеркала туда не уходит.
+    try:
+        catalog_specialist_id(master)
+    except CatalogSpecialistUnresolved:
+        return None, _error(
+            "master_unbookable",
+            "master is not set up in the booking system yet",
+            409,
+        )
     client = get_ayla_booking_client()
     out: list[dict[str, str]] = []
     current = date_from
     while current <= date_to:
         try:
             rows = client.get_available_times(
-                specialist_id=str(master.id),
+                specialist_id=catalog_specialist_id(master),
                 date=current.isoformat(),
                 service_id=str(service.ayla_service_id),
             )
@@ -1119,6 +1130,16 @@ def _create_booking_via_ayla(
     )
     idempotency_key = hashlib.sha256(seed.encode("utf-8")).hexdigest()[:32]
 
+    # DRF-1933: у строки зеркала нет id профиля в каталоге — звать каталог
+    # не с чем; первичный ключ зеркала туда не уходит.
+    try:
+        catalog_specialist_id(master)
+    except CatalogSpecialistUnresolved:
+        return _error(
+            "master_unbookable",
+            "master is not set up in the booking system yet",
+            409,
+        )
     try:
         record = get_ayla_booking_client().create_appointment(
             external_user_id=external_user_id_for(bot_user),
@@ -1127,7 +1148,7 @@ def _create_booking_via_ayla(
             # SpecialistProfile UUID (= CatalogMaster.id per the masters
             # mirror mapping), NOT master.ayla_user_id (the Ayla User
             # UUID — that one is the AMD-005 BILLING key only).
-            specialist_id=str(master.id),
+            specialist_id=catalog_specialist_id(master),
             service_id=str(service.ayla_service_id),
             start_datetime=visit_at.isoformat(),
             idempotency_key=idempotency_key,
@@ -1320,9 +1341,12 @@ def booking_quote(request: HttpRequest) -> HttpResponse:
 
         try:
             rows = get_ayla_booking_client().get_specialist_service_edges(
-                specialist_id=str(master.id),
+                specialist_id=catalog_specialist_id(master),
                 service_id=str(service.ayla_service_id),
             )
+        except CatalogSpecialistUnresolved:
+            # DRF-1933: ребро спрашивать не по чему — котировка из зеркала.
+            rows = []
         except BookingAPIError:
             logger.warning(
                 "miniapp_api.booking_quote.edge_unavailable master=%s service=%s",
@@ -1768,7 +1792,7 @@ def _proxy_catalog_refs(proxy) -> tuple[Any, Any]:
         service = CatalogService.objects.filter(ayla_service_id=proxy.service_id).first()
     master = None
     if proxy.specialist_id:
-        master = CatalogMaster.objects.filter(id=proxy.specialist_id).first()
+        master = CatalogMaster.objects.filter(catalog_specialist_id=proxy.specialist_id).first()
     return service, master
 
 

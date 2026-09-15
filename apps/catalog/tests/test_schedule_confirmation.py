@@ -29,6 +29,7 @@ from apps.catalog.services import schedule_confirmation as sc
 from apps.identity.models import BotUser
 from apps.integrations.ayla.salon_client import SalonNotConfigured, SalonUnavailable
 from apps.tenancy.models import Tenant, TenantStaff
+from tests.support.catalog_mirror import sync_shaped
 
 pytestmark = pytest.mark.django_db
 
@@ -45,12 +46,14 @@ def tenant() -> Tenant:
 
 @pytest.fixture
 def master(tenant: Tenant) -> CatalogMaster:
-    return CatalogMaster.all_tenants.create(
-        tenant=tenant,
-        external_id=11,
-        external_updated_at=dt.datetime.now(tz=dt.timezone.utc),
-        name="Тихонова Ольга",
-        ayla_user_id=uuid.uuid4(),
+    return sync_shaped(
+        CatalogMaster.all_tenants.create(
+            tenant=tenant,
+            external_id=11,
+            external_updated_at=dt.datetime.now(tz=dt.timezone.utc),
+            name="Тихонова Ольга",
+            ayla_user_id=uuid.uuid4(),
+        )
     )
 
 
@@ -361,12 +364,14 @@ class TestRule6NobodyIsConfirmedWholesale:
         """
 
         masters = [
-            CatalogMaster.all_tenants.create(
-                tenant=tenant,
-                external_id=100 + i,
-                external_updated_at=dt.datetime.now(tz=dt.timezone.utc),
-                name=f"Мастер {i}",
-                ayla_user_id=uuid.uuid4(),
+            sync_shaped(
+                CatalogMaster.all_tenants.create(
+                    tenant=tenant,
+                    external_id=100 + i,
+                    external_updated_at=dt.datetime.now(tz=dt.timezone.utc),
+                    name=f"Мастер {i}",
+                    ayla_user_id=uuid.uuid4(),
+                )
             )
             for i in range(5)
         ]
@@ -767,12 +772,14 @@ class TestTheSweepIsTheOnlyResetThatActuallyRuns:
         from apps.catalog.tasks import sweep_schedule_confirmations
 
         for i in range(4):
-            CatalogMaster.all_tenants.create(
-                tenant=tenant,
-                external_id=300 + i,
-                external_updated_at=dt.datetime.now(tz=dt.timezone.utc),
-                name=f"Неподтверждённая {i}",
-                ayla_user_id=uuid.uuid4(),
+            sync_shaped(
+                CatalogMaster.all_tenants.create(
+                    tenant=tenant,
+                    external_id=300 + i,
+                    external_updated_at=dt.datetime.now(tz=dt.timezone.utc),
+                    name=f"Неподтверждённая {i}",
+                    ayla_user_id=uuid.uuid4(),
+                )
             )
         client = ayla(wire_week())
 

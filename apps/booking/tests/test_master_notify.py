@@ -55,6 +55,7 @@ from apps.eventbus.consumers.booking import handle_booking_created
 from apps.eventbus.ingest_envelope import IngestEnvelope
 from apps.identity.models import BotUser
 from apps.tenancy.models import Tenant
+from tests.support.catalog_mirror import sync_shaped
 
 pytestmark = pytest.mark.django_db
 
@@ -173,13 +174,15 @@ def _make_master(
             channel_user_id=linked_user_id,
             chat_id=f"dialog-of-{linked_user_id.strip() or 'blank'}",
         )
-    return CatalogMaster.all_tenants.create(
-        tenant=tenant,
-        external_id=external_id,
-        external_updated_at=timezone.now(),
-        name=name,
-        ayla_user_id=ayla_user_id,
-        linked_bot_user=linked,
+    return sync_shaped(
+        CatalogMaster.all_tenants.create(
+            tenant=tenant,
+            external_id=external_id,
+            external_updated_at=timezone.now(),
+            name=name,
+            ayla_user_id=ayla_user_id,
+            linked_bot_user=linked,
+        )
     )
 
 
@@ -310,14 +313,16 @@ class TestAddressingCascade:
             channel_user_id="master-chat-2",
             chat_id="dialog-of-master-chat-2",
         )
-        CatalogMaster.all_tenants.create(
-            id=uuid.UUID(SPECIALIST_ID),
-            tenant=tenant,
-            external_id=2,
-            external_updated_at=timezone.now(),
-            name="Сазонова Инна",
-            ayla_user_id=None,
-            linked_bot_user=linked,
+        sync_shaped(
+            CatalogMaster.all_tenants.create(
+                id=uuid.UUID(SPECIALIST_ID),
+                tenant=tenant,
+                external_id=2,
+                external_updated_at=timezone.now(),
+                name="Сазонова Инна",
+                ayla_user_id=None,
+                linked_bot_user=linked,
+            )
         )
         _notify(tenant)
         # The resolved master gets his personal copy (addressed to him,

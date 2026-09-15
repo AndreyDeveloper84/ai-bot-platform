@@ -558,7 +558,9 @@ def _upsert_one_master_service(
     # first place. Guard #1 stays regardless — the edge asserting its own
     # tenant is the check that does not depend on any other mirror having been
     # correct first.
-    master = master_model.objects.filter(id=dto.specialist).first()
+    # DRF-1933: ``dto.specialist`` — id каталога; строка зеркала находится по
+    # колонке (у склеенного приглашения и соло первичный ключ — uuid4).
+    master = master_model.objects.filter(catalog_specialist_id=dto.specialist).first()
     if master is None and dto.user_id:
         # DRF-1507 — тот же ключ склейки, что и в ``upsert_specialists``.
         #

@@ -66,6 +66,7 @@ from django.conf import settings
 from django.http import HttpRequest, HttpResponse, JsonResponse
 from django.views.decorators.http import require_http_methods
 
+from apps.catalog.specialist_ref import CatalogSpecialistUnresolved, catalog_specialist_id
 from apps.admin_api.auth import require_admin_or_reception_read
 from apps.admin_api.services.salon_day import tenant_tz
 from apps.admin_api.services.wire_lists import UNREADABLE, read_rows
@@ -200,11 +201,21 @@ def master_schedule_impact(request: HttpRequest, master_id: str) -> HttpResponse
         actor_user.pk,
     )
 
+    # DRF-1933: у строки зеркала нет id профиля в каталоге — звать каталог
+    # не с чем; первичный ключ зеркала туда не уходит.
+    try:
+        catalog_specialist_id(master)
+    except CatalogSpecialistUnresolved:
+        return _error(
+            "catalog_profile_unresolved",
+            "master is not set up in the catalog yet",
+            409,
+        )
     try:
         impact = get_salon_client().get_schedule_impact(
             actor_external_id=external_user_id_for(actor_user),
             tenant_slug=tenant.slug,
-            specialist_id=str(master.id),
+            specialist_id=catalog_specialist_id(master),
             start_at=start_at,
             end_at=end_at,
         )
