@@ -264,3 +264,68 @@ class TestSaidVocabularyByKey:
         )
         with pytest.raises(cs.SnapshotRejected):
             _build(bot_user, conversation)
+
+
+class TestHealthClassMirrorsCatalog:
+    """DRF-1913: класс здоровья по правилу каталога DRF-1906 — любой сегмент, без регистра."""
+
+    @pytest.mark.parametrize(
+        "code",
+        [
+            "said.health_note",
+            "Health_Status",
+            "open:screening-2",
+            "screenings_v2",
+            "screening",
+            "safety_check",
+            "said.health_x",
+            "a/wellness_sleep",
+        ],
+    )
+    def test_segment_prefix_is_a_health_class(self, code):
+        assert cs.health_prefix(code) is not None
+
+    @pytest.mark.parametrize(
+        "code", ["xhealth_y", "said.xhealth_y", "safetynet", "ask_clarification", "said.city"]
+    )
+    def test_substring_or_ordinary_code_is_not(self, code):
+        # empty-assert-ok: не класс здоровья по построению; соседний параметризованный тест доказывает, что класс распознаётся
+        assert cs.health_prefix(code) is None
+
+    def test_the_rule_mirrors_the_catalog_by_name(self):
+        """Зеркало recommendation/snapshots.py DRF-1906: HEALTH_PREFIXES, _SEGMENT_RE, _QUESTION_ID_RE."""
+        assert cs.HEALTH_QUESTION_PREFIXES == ("health_", "screening", "safety_", "wellness_")
+        assert cs._SEGMENT_RE.pattern == r"[.:/\-]"
+        assert cs._QUESTION_ID_RE.pattern == r"^[A-Za-z0-9_.:/\-]{1,64}$"
+
+    @pytest.mark.parametrize(
+        "question_id", ["said.health_x", "Health_x", "a/wellness_sleep", "x-Screening.v2"]
+    )
+    def test_builder_drops_a_health_class_question(self, settings, question_id):
+        bot_user, conversation = _person(settings)
+        open_question(conversation, question_id, asked_text="?")
+        close_question(conversation, "ответ")
+        conversation.refresh_from_db()
+
+        # empty-assert-ok: вопрос класса здоровья не берётся по построению; test_ordinary_question_id_is_kept_without_its_text доказывает, что обычный берётся
+        assert _build(bot_user, conversation).content["answered_question"] is None
+
+    def test_guard_rejects_health_class_long_id_and_extra_keys(self):
+        cs.assert_answered_question(None)
+        cs.assert_answered_question({"question_id": "said.city"})
+        for bad in (
+            {"question_id": "said.health_x"},
+            {"question_id": "q" * 65},
+            {"question_id": "ask_clarification", "asked_text": "?"},
+        ):
+            with pytest.raises(cs.SnapshotRejected):
+                cs.assert_answered_question(bad)
+
+    def test_builder_refuses_a_question_id_longer_than_the_catalog_allows(self, settings):
+        bot_user, conversation = _person(settings)
+        open_question(conversation, "q" * 65, asked_text="?")
+        close_question(conversation, "ответ")
+        conversation.refresh_from_db()
+
+        with pytest.raises(cs.SnapshotRejected):
+            _build(bot_user, conversation)
