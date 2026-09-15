@@ -3398,6 +3398,30 @@ def _diary_coach_observation(bot_user: BotUser, profile_res: Any) -> str | None:
     return observation.text
 
 
+def _wellness_active_goals(external_id: str) -> list[dict[str, Any]] | None:
+    """Цель для «Сегодня»: список, ``[]`` — цели нет, ``None`` — спросить не удалось.
+
+    Одно чтение на оба пути ответа — с согласием на дневник и без него
+    (DRF-1927): цель к дневнику не относится и показывается как раньше.
+    """
+
+    from apps.integrations.ayla.goals_client import (
+        GoalsConfigError,
+        GoalsUnavailable,
+        fetch_decision_context,
+    )
+
+    try:
+        goals_doc = fetch_decision_context(external_user_id=external_id)
+    except (GoalsConfigError, GoalsUnavailable) as exc:
+        logger.warning("wellness_today.goals_unavailable ext=%s err=%s", external_id, exc)
+        return None
+    except Exception:  # noqa: BLE001 — a goal read must never 500 the dashboard
+        logger.warning("wellness_today.goals_unexpected ext=%s", external_id, exc_info=True)
+        return None
+    return _active_goals_from_context(goals_doc, now=timezone.now())
+
+
 @require_http_methods(["GET"])
 @require_init_data
 def customer_wellness_today(request: HttpRequest) -> HttpResponse:
@@ -3486,6 +3510,24 @@ def customer_wellness_today(request: HttpRequest) -> HttpResponse:
 
     bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
     external_id = external_user_id_for(bot_user)
+
+    # DRF-1927 — дневник читается по тому же правилу, что в чате и при
+    # записи: без согласия на обработку личных данных (``PERSONAL_DATA``,
+    # fail-closed) чтений дневника в Ayla нет вовсе, ключей дневника в
+    # ответе нет, а ``consent_required`` говорит экрану почему. Цель к
+    # дневнику не относится и читается как раньше. Решение главного окна
+    # 15.09 — выравнивание с чатом (``personal_surface.render_diary``).
+    from apps.orchestrator.personal_surface import personal_records_consent_open
+
+    if not personal_records_consent_open(bot_user):
+        closed: dict[str, Any] = {
+            "display_name": bot_user.client_name or bot_user.display_name or "",
+            "consent_required": True,
+        }
+        closed_goals = _wellness_active_goals(external_id)
+        if closed_goals is not None:
+            closed["active_goals"] = closed_goals
+        return JsonResponse(closed)
 
     async def _fetch() -> tuple[Any, Any, Any]:
         client = get_nutrition_client()
@@ -3667,24 +3709,8 @@ def customer_wellness_today(request: HttpRequest) -> HttpResponse:
     # a process-wide connection pool (DRF-1435), so on a warm worker this
     # is ~0.09 s, and the goal screen the person just came from has
     # already opened that connection.
-    from apps.integrations.ayla.goals_client import (
-        GoalsConfigError,
-        GoalsUnavailable,
-        fetch_decision_context,
-    )
-
-    goals_known = True
-    active_goals: list[dict[str, Any]] = []
-    try:
-        goals_doc = fetch_decision_context(external_user_id=external_id)
-    except (GoalsConfigError, GoalsUnavailable) as exc:
-        logger.warning("wellness_today.goals_unavailable ext=%s err=%s", external_id, exc)
-        goals_known = False
-    except Exception:  # noqa: BLE001 — a goal read must never 500 the dashboard
-        logger.warning("wellness_today.goals_unexpected ext=%s", external_id, exc_info=True)
-        goals_known = False
-    else:
-        active_goals = _active_goals_from_context(goals_doc, now=timezone.now())
+    active_goals = _wellness_active_goals(external_id)
+    goals_known = active_goals is not None
 
     payload: dict[str, Any] = {
         "display_name": bot_user.client_name or bot_user.display_name or "",

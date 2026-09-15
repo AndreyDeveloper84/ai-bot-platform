@@ -118,6 +118,19 @@ def goals_stub():
         yield m
 
 
+@pytest.fixture(autouse=True)
+def _diary_consent_open():
+    """DRF-1927: тесты этого файла — про дневник при согласии.
+
+    Без подмены каждый тест мерил бы отказ по согласию; сами ворота —
+    в ``test_wellness_today_consent_1927.py``.
+    """
+    with patch(
+        "apps.orchestrator.personal_surface.personal_records_consent_open", return_value=True
+    ):
+        yield
+
+
 # Minimal stand-ins for the dataclass responses the NutritionClient returns.
 @dataclass
 class _FakeSummary:

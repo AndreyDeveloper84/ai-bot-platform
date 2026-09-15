@@ -55,6 +55,8 @@ type Status =
   | { kind: "loading" }
   | { kind: "error"; err: unknown }
   | { kind: "unreadable" }
+  // DRF-1927 — нет согласия: дневник не читался, повтор ничего не даст.
+  | { kind: "consent_required" }
   | {
       kind: "ready";
       day: Extract<DiaryToday, { state: "empty" | "entries" }>;
@@ -91,7 +93,11 @@ export function FoodScannerDiaryScreen() {
       // «Ответ пришёл, записей в нём нет» — своё состояние, не ошибка
       // и не пустой день.
       setStatus(
-        day.state === "unreadable" ? { kind: "unreadable" } : { kind: "ready", day },
+        day.state === "unreadable"
+          ? { kind: "unreadable" }
+          : day.state === "consent_required"
+            ? { kind: "consent_required" }
+            : { kind: "ready", day },
       );
     } catch (err) {
       setStatus({ kind: "error", err });
@@ -244,6 +250,14 @@ export function FoodScannerDiaryScreen() {
             <button type="button" className="btn-secondary" onClick={load}>
               Попробовать снова
             </button>
+          </div>
+        )}
+
+        {/* DRF-1927 — без согласия дневник не читался: не сбой и не пустой
+            день, повтор ничего не даст, поэтому и кнопки повтора нет. */}
+        {status.kind === "consent_required" && (
+          <div className="food-scanner-diary__unreadable" role="status">
+            <p>{DIARY_CONSENT_REQUIRED_TEXT}</p>
           </div>
         )}
 

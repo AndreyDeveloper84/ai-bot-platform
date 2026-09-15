@@ -586,6 +586,28 @@ describe("CustomerWellnessDashboardScreen — degraded reads (DRF-1546)", () => 
     window.history.replaceState({}, "", "/customer/main");
   });
 
+  it("DRF-1927: no personal-data consent — the diary rows say why, not «Не удалось загрузить»", async () => {
+    serve(
+      {
+        // Ключей дневника нет: сервер его не читал — нет согласия.
+        consent_required: true,
+        active_goals: [],
+        display_name: "Анна",
+      },
+      { this_week_booking_count: 0 },
+    );
+    await renderScreen(false);
+
+    // POSITIVE: обе строки дневника говорят про согласие.
+    expect(
+      await screen.findAllByText(/нужно согласие на обработку личных данных/),
+    ).toHaveLength(2);
+    // NEGATIVE (парная): это не сбой и не пустой день.
+    expect(screen.queryByText("Не удалось загрузить")).not.toBeInTheDocument();
+    expect(screen.queryByText(/ккал/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/стаканов/)).not.toBeInTheDocument();
+  });
+
   it("nutrition read failed: says so, invents no «0 / 0 ккал»", async () => {
     serve(
       {

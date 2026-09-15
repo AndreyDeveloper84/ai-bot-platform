@@ -103,6 +103,7 @@ import {
   waterRefusalText,
   type RecentActivity,
   type WellnessToday,
+  DIARY_CONSENT_REQUIRED_TEXT,
 } from "../lib/customer-wellness";
 import {
   getCatalogBrowse,
@@ -945,6 +946,9 @@ function PulseStrip({ data }: { data: WellnessToday }) {
   const goalsKnown = data.active_goals !== undefined;
   // Одна цель, не несколько (решение владельца №13, 06.09).
   const goal = data.active_goals?.[0];
+  // DRF-1927 — ключей дневника нет, потому что нет согласия, а не потому,
+  // что чтение упало: говорим, что нужно, а не «Не удалось загрузить».
+  const sliceClosedCopy = data.consent_required ? DIARY_CONSENT_REQUIRED_TEXT : UNAVAILABLE;
 
   return (
     <div className="wellness-dash__pulse-card">
@@ -953,7 +957,7 @@ function PulseStrip({ data }: { data: WellnessToday }) {
         className="wellness-dash__pulse-row"
         aria-label={
           !caloriesKnown
-            ? `Питание: ${UNAVAILABLE}`
+            ? `Питание: ${sliceClosedCopy}`
             : caloriesTargetKnown
               ? `Питание: ${caloriesEaten} из ${caloriesTarget} килокалорий, ${caloriesPct} процентов${
                   data.pfc
@@ -1013,7 +1017,7 @@ function PulseStrip({ data }: { data: WellnessToday }) {
         ) : (
           /* Read failed - no numbers, no bar. «0 / 0 ккал · 0 %» would
              read as a logged-nothing day, which is a different fact. */
-          <div className="wellness-dash__pulse-numbers">{UNAVAILABLE}</div>
+          <div className="wellness-dash__pulse-numbers">{sliceClosedCopy}</div>
         )}
       </div>
 
@@ -1024,7 +1028,7 @@ function PulseStrip({ data }: { data: WellnessToday }) {
         className="wellness-dash__pulse-row"
         aria-label={
           !waterKnown
-            ? `Вода: ${UNAVAILABLE}`
+            ? `Вода: ${sliceClosedCopy}`
             : waterTargetKnown
               ? `Вода: ${waterEaten} из ${waterTarget} стаканов`
               : `Вода: ${waterEaten} ${ruPluralWater(waterEaten)} сегодня`
@@ -1064,7 +1068,7 @@ function PulseStrip({ data }: { data: WellnessToday }) {
         ) : (
           /* Read failed. The «+ стакан» quick action stays live - it is
              a separate handle (POST /wellness/water) and still works. */
-          <div className="wellness-dash__pulse-numbers">{UNAVAILABLE}</div>
+          <div className="wellness-dash__pulse-numbers">{sliceClosedCopy}</div>
         )}
       </div>
 
