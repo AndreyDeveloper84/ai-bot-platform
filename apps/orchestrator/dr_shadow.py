@@ -150,12 +150,15 @@ class LivePathSink:
         cards_shown: int,
         conversation: Any = None,
         dr_state: Any = None,
+        message_text: str | None = None,
     ) -> None:
         self._branch = branch
         self._tools = tools
         self._cards_shown = cards_shown
         self._conversation = conversation
         self._dr_state = dr_state
+        #: DRF-1932 — только для словарей выбора NBA; в строку лога не пишется.
+        self._message_text = message_text
 
     def _snapshot_field(self, readiness_state: str | None) -> dict[str, Any] | None:
         """Версия и digest снимка контекста хода (DRF-1903) — без содержимого.
@@ -195,10 +198,14 @@ class LivePathSink:
         """
 
         from apps.orchestrator.decision_policy import decide
+        from apps.orchestrator.nba_taxonomy import read_turn_needs
 
         try:
             safety = getattr(self._dr_state, "safety", None)
-            verdict = decide(evidence, handoff=getattr(safety, "handoff", None))
+            # DRF-1932: реплика читается словарями и дальше этой строки не идёт —
+            # в лог уходят только коды.
+            needs = read_turn_needs(self._message_text) if self._message_text is not None else None
+            verdict = decide(evidence, handoff=getattr(safety, "handoff", None), needs=needs)
         except Exception as exc:  # noqa: BLE001 — наблюдение не стоит хода
             return {"error": type(exc).__name__}
         return {
@@ -207,6 +214,7 @@ class LivePathSink:
             "facts_used": list(verdict.facts_used),
             "decision_policy_version": verdict.decision_policy_version,
             "catalog_writable": verdict.catalog_writable,
+            **verdict.nba_fields(),
         }
 
     def record(self, evidence: Any) -> None:
@@ -252,10 +260,12 @@ def observe_live_turn(
     tool_trace: Any,
     trace_id: Any,
     branch: str,
+    message_text: str | None = None,
 ) -> Any:
     """Прогнать движок в тени для этого хода. Возвращает ``ShadowRecord`` или None.
 
-    При выключенном флаге — None и ноль работы. Не бросает.
+    При выключенном флаге — None и ноль работы. Не бросает. ``message_text`` —
+    реплика человека, только для словарей выбора NBA (DRF-1932); в лог не пишется.
     """
 
     from apps.orchestrator.decision_readiness.shadow import observe, shadow_flag
@@ -271,6 +281,7 @@ def observe_live_turn(
             cards_shown=request.candidates.visible_count,
             conversation=conversation,
             dr_state=request.state,
+            message_text=message_text,
         )
         evaluation_id = str(trace_id) if trace_id else f"no-trace:{uuid.uuid4()}"
         return observe(request, evaluation_id=evaluation_id, sink=sink)
