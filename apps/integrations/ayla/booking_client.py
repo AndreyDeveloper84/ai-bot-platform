@@ -1452,6 +1452,88 @@ class AylaBookingHTTPClient:
             },
         )
 
+    # ── M8 выбор услуг мастера и его цена (DRF-1895; каталог #443 / #444) ─────
+    # Субъект — сам мастер: профиль в URL обязан быть его собственным, иначе
+    # каталог отвечает 403 → BookingBadRequestError. Счётчики selected /
+    # configured считает каталог; клиент их не трогает.
+
+    def get_service_selection(
+        self,
+        *,
+        specialist_id: str,
+        external_user_id: str,
+    ) -> dict[str, Any]:
+        """``GET internal/specialists/{id}/services/selection/`` — состояние выбора."""
+        resp = self._request(
+            "GET",
+            f"specialists/{specialist_id}/services/selection/",
+            external_user_id=external_user_id,
+        )
+        return self._ok(resp, success=(200,))
+
+    def select_services(
+        self,
+        *,
+        specialist_id: str,
+        external_user_id: str,
+        template_ids: list[str],
+    ) -> dict[str, Any]:
+        """``POST internal/specialists/{id}/services/selection/`` — выбрать канон.
+
+        Всё или ничего: неизвестный шаблон — 404 с ``template_ids``. 201 —
+        создана хотя бы одна строка, 200 — всё уже было; число — в ``created``.
+        """
+        resp = self._request(
+            "POST",
+            f"specialists/{specialist_id}/services/selection/",
+            json_body={"template_ids": list(template_ids)},
+            external_user_id=external_user_id,
+        )
+        return self._ok(resp, success=(200, 201))
+
+    def put_service_offer(
+        self,
+        *,
+        specialist_id: str,
+        external_user_id: str,
+        salon_service_id: str,
+        price: str,
+        duration_minutes: int,
+    ) -> dict[str, Any]:
+        """``PUT internal/specialists/{id}/services/{salon_service_id}/offer/``.
+
+        Первая цена создаёт предложение мастера (201), повтор обновляет его
+        (200). Этот факт у каталога есть только в статусе ответа, поэтому он
+        возвращается рядом с телом как ``created``.
+        """
+        resp = self._request(
+            "PUT",
+            f"specialists/{specialist_id}/services/{salon_service_id}/offer/",
+            json_body={"price": price, "duration_minutes": duration_minutes},
+            external_user_id=external_user_id,
+        )
+        data = self._ok(resp, success=(200, 201))
+        return {**data, "created": resp.status_code == 201}
+
+    def remove_service(
+        self,
+        *,
+        specialist_id: str,
+        external_user_id: str,
+        salon_service_id: str,
+    ) -> dict[str, Any]:
+        """``DELETE internal/specialists/{id}/services/{salon_service_id}/`` — убрать.
+
+        Будущая запись — 409 ``HAS_APPOINTMENTS`` с ``count``; иначе строка
+        удалена или выключена (``removal``).
+        """
+        resp = self._request(
+            "DELETE",
+            f"specialists/{specialist_id}/services/{salon_service_id}/",
+            external_user_id=external_user_id,
+        )
+        return self._ok(resp, success=(200,))
+
     def get_user_bookings_page(
         self,
         *,

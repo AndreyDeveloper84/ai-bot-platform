@@ -38,8 +38,10 @@ import { ApiError } from "../lib/api";
 import {
   createCanonGapRequest,
   getMasterCatalog,
+  getServiceSelection,
   getSimilarCanonTemplates,
   listCanonGapRequests,
+  selectServices,
   type CanonGapRequest,
   type CanonGapSimilar,
   type MasterServiceItem,
@@ -78,8 +80,15 @@ export const OWN_EMPTY = "Своих услуг пока нет.";
 export const ADD_OWN_LABEL = "Добавить мою";
 export const ADD_ANYWAY_LABEL = "Всё равно добавить мою";
 export const PICK_CANON_LABEL = "Выбрать эту услугу";
-export const PICK_CANON_LATER =
-  "Выбор услуги из каталога появится в следующем обновлении.";
+// DRF-1895: кнопка активна ⇔ выбор канона доступен этому мастеру (состояние
+// выбора загрузилось с сервера). Салон, чей каталог ведёт владелец, выбрать не
+// может — экран говорит это словами; любой другой отказ — кнопка выключена.
+export const PICK_CANON_UNAVAILABLE = "Выбор услуги из каталога сейчас недоступен.";
+export const SALON_MANAGED_MESSAGE =
+  "Каталог салона ведёт владелец — выбрать услугу из каталога здесь нельзя.";
+/** Счётчик — из ответа сервера, экран его не считает. */
+export const pickedMessage = (selected: number) =>
+  `Добавили в ваши услуги. Выбрано услуг: ${selected}.`;
 export const SIMILAR_TITLE = "В каталоге есть похожая услуга:";
 export const SENT_MESSAGE = "Отправили на проверку.";
 export const NOT_LINKED_MESSAGE =
@@ -213,6 +222,9 @@ function OwnServicesSection() {
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const [submitError, setSubmitError] = useState<string | null>(null);
+  const [selection, setSelection] = useState<
+    "loading" | "available" | "salon_managed" | "unavailable"
+  >("loading");
 
   const load = useCallback(() => {
     setLoadError(null);
@@ -234,6 +246,25 @@ function OwnServicesSection() {
   useEffect(() => {
     void load();
   }, [load]);
+
+  useEffect(() => {
+    let alive = true;
+    getServiceSelection()
+      .then(() => {
+        if (alive) setSelection("available");
+      })
+      .catch((e: unknown) => {
+        if (!alive) return;
+        setSelection(
+          e instanceof ApiError && e.slug === "salon_catalog_owner_managed"
+            ? "salon_managed"
+            : "unavailable",
+        );
+      });
+    return () => {
+      alive = false;
+    };
+  }, []);
 
   const refusal = (e: unknown) => {
     if (e instanceof ApiError && e.slug === "not_linked") {
@@ -260,6 +291,26 @@ function OwnServicesSection() {
       // Список и счётчик — заново с сервера, а не дописанной локально строкой.
       await load();
     } catch (e: unknown) {
+      refusal(e);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const pick = async (templateId: string) => {
+    setBusy(true);
+    setSubmitError(null);
+    try {
+      const res = await selectServices([templateId]);
+      setFormOpen(false);
+      setDraft(EMPTY_DRAFT);
+      setSimilar(null);
+      setMessage(pickedMessage(res.selected));
+    } catch (e: unknown) {
+      if (e instanceof ApiError && e.slug === "salon_catalog_owner_managed") {
+        setSelection("salon_managed");
+        return;
+      }
       refusal(e);
     } finally {
       setBusy(false);
@@ -368,12 +419,22 @@ function OwnServicesSection() {
               {similar.map((s) => (
                 <div key={s.template_id} className="master-services__similar-item">
                   <span>{s.name}</span>
-                  <button type="button" className="btn-secondary" disabled title={PICK_CANON_LATER}>
+                  <button
+                    type="button"
+                    className="btn-secondary"
+                    disabled={busy || selection !== "available"}
+                    title={selection === "available" ? undefined : PICK_CANON_UNAVAILABLE}
+                    onClick={() => void pick(s.template_id)}
+                  >
                     {PICK_CANON_LABEL}
                   </button>
                 </div>
               ))}
-              <p className="master-services__similar-later">{PICK_CANON_LATER}</p>
+              {selection === "salon_managed" ? (
+                <p className="master-services__similar-later">{SALON_MANAGED_MESSAGE}</p>
+              ) : selection === "unavailable" ? (
+                <p className="master-services__similar-later">{PICK_CANON_UNAVAILABLE}</p>
+              ) : null}
               <button type="button" className="btn-primary" disabled={busy} onClick={() => void create()}>
                 {ADD_ANYWAY_LABEL}
               </button>
