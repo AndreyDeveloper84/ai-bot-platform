@@ -97,7 +97,9 @@ def test_a_closed_job_is_never_requeued(job, closed) -> None:
     from apps.identity.models import AylaErasureJob
 
     AylaErasureJob.objects.filter(pk=job.pk).update(status=closed)
-    with pytest.raises(CommandError):
+    # Отказ самой команды, а не «Unknown command»: без match тест был зелёным
+    # и при отсутствии команды (вхолостую, пойман на красном до правки).
+    with pytest.raises(CommandError, match="закрыто"):
         call_command("ayla_erasure_requeue", str(job.pk), "--apply", stdout=StringIO())
     job.refresh_from_db()
     assert job.status == closed
