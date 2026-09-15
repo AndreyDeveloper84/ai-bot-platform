@@ -340,3 +340,47 @@ class TestSafetyVerdictReachesTheShadow:
             r.getMessage().startswith("decision_readiness.safety_record_failed")
             for r in caplog.records
         )
+
+
+# --------------------------------------------------------------------------- #
+# DRF-1903 — отпечаток снимка контекста в строке тени                          #
+# --------------------------------------------------------------------------- #
+class TestSnapshotFingerprintInTheLine:
+    def test_line_carries_version_and_digest_but_no_content(
+        self, settings, monkeypatch, sent, dr_redis, caplog
+    ):
+        from apps.orchestrator.context_snapshot import SNAPSHOT_VERSION
+
+        settings.DRE_SHADOW_ENABLED = True
+        _model(monkeypatch, _completion(PROSE))
+
+        with caplog.at_level(logging.INFO):
+            screen = _turn(sent, "хочу массаж")
+
+        assert screen == PROSE
+        lines = _shadow_lines(caplog)
+        assert len(lines) == 1
+        snapshot = lines[0]["context_snapshot"]
+        assert snapshot["snapshot_version"] == SNAPSHOT_VERSION
+        assert len(snapshot["content_digest"]) == 64
+        assert set(snapshot) == {"snapshot_version", "content_digest"}
+
+    def test_a_rejected_snapshot_is_a_code_and_the_turn_is_intact(
+        self, settings, monkeypatch, sent, dr_redis, caplog
+    ):
+        from apps.orchestrator import context_snapshot as cs
+
+        def _reject(**_kwargs):
+            raise cs.SnapshotRejected("$.said[0].value")
+
+        settings.DRE_SHADOW_ENABLED = True
+        monkeypatch.setattr(cs, "build_turn_snapshot", _reject)
+        _model(monkeypatch, _completion(PROSE))
+
+        with caplog.at_level(logging.INFO):
+            screen = _turn(sent, "хочу массаж")
+
+        assert screen == PROSE
+        lines = _shadow_lines(caplog)
+        assert len(lines) == 1
+        assert lines[0]["context_snapshot"] == {"rejected": True}
