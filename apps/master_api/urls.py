@@ -28,6 +28,16 @@ urlpatterns = [
     path("schedule", views.schedule, name="schedule"),
     # DRF-1816 (M24) — недельный шаблон часов мастера: прокси в каталог.
     path("working-hours", views.working_hours, name="working_hours"),
+    # DRF-1802 (M10) — «своя услуга» = заявка о разрыве канона: прокси в
+    # каталог (M9). Решает только владелец в admin каталога — мутаций статуса
+    # здесь нет. `similar` раньше `<uuid:request_id>`.
+    path("canon-gap-requests", views.canon_gap_requests, name="canon_gap_requests"),
+    path("canon-gap-requests/similar", views.canon_gap_similar, name="canon_gap_similar"),
+    path(
+        "canon-gap-requests/<uuid:request_id>",
+        views.canon_gap_request_detail,
+        name="canon_gap_request_detail",
+    ),
     path("availability", views.availability_request, name="availability_request"),
     path(
         "availability/pending",

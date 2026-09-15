@@ -1147,6 +1147,132 @@ def _working_hours_refusal(exc: BookingBadRequestError) -> HttpResponse:
     return _error("schedule_unavailable", "Расписание сейчас недоступно.", 502)
 
 
+# --- /canon-gap-requests (DRF-1802, M10) ----------------------------------
+
+
+@csrf_exempt
+@require_http_methods(["GET", "POST"])
+@require_master_init_data
+def canon_gap_requests(request: HttpRequest) -> HttpResponse:
+    """«Своя услуга» мастера = заявка о разрыве канона к владельцу (G6 / D6).
+
+    Прокси в ``/internal/specialists/{id}/canon-gap-requests/`` каталога
+    (M9): заявка живёт там и только там, второго хранилища в боте нет;
+    ответ — то, что вернул каталог. Решает заявку только владелец в
+    Django-admin каталога — у этого прокси нет ни PATCH, ни PUT, ни DELETE.
+
+    Субъект — сам мастер (``X-External-User-ID`` его bot-личности), профиль —
+    его ``CatalogMaster.id``; каталог пускает только к своему профилю.
+    """
+    master: CatalogMaster = request.master  # type: ignore[attr-defined]
+    bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
+    actor = external_user_id_for(bot_user)
+    client = get_ayla_booking_client()
+
+    if request.method == "GET":
+        try:
+            data = client.list_canon_gap_requests(
+                specialist_id=str(master.id), external_user_id=actor
+            )
+        except BookingBadRequestError as exc:
+            return _canon_gap_refusal(exc)
+        except BookingUnavailableError:
+            return _error("catalog_unavailable", "Каталог сейчас недоступен.", 503)
+        return JsonResponse({"requests": data.get("requests") or []})
+
+    try:
+        body = json.loads(request.body or b"{}")
+    except ValueError:
+        return _error("invalid_json", "Body must be JSON.", 400)
+    if not isinstance(body, dict):
+        return _error("validation_error", "Body must be an object.", 400)
+    name = str(body.get("name") or "").strip()
+    duration = body.get("duration_minutes")
+    price = body.get("price")
+    if (
+        not name
+        or not isinstance(duration, int)
+        or isinstance(duration, bool)
+        or duration < 1
+        or price in (None, "")
+    ):
+        return _error("validation_error", "Нужны название, длительность в минутах и цена.", 400)
+
+    try:
+        data = client.create_canon_gap_request(
+            specialist_id=str(master.id),
+            external_user_id=actor,
+            name=name,
+            description=str(body.get("description") or ""),
+            duration_minutes=duration,
+            price=str(price),
+        )
+    except BookingBadRequestError as exc:
+        return _canon_gap_refusal(exc)
+    except BookingUnavailableError:
+        return _error("catalog_unavailable", "Каталог сейчас недоступен.", 503)
+    return JsonResponse(
+        {"request": data.get("request"), "similar": data.get("similar") or []}, status=201
+    )
+
+
+@require_http_methods(["GET"])
+@require_master_init_data
+def canon_gap_similar(request: HttpRequest) -> HttpResponse:
+    """Подсказка «похожая услуга» — канон по подтверждённым синонимам и имени.
+
+    Только чтение: выбор «Выбрать эту услугу» / «Добавить мою» делает мастер
+    на экране, связь здесь не создаётся.
+    """
+    name = (request.GET.get("name") or "").strip()
+    if not name:
+        return _error("validation_error", "name is required.", 400)
+    master: CatalogMaster = request.master  # type: ignore[attr-defined]
+    bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
+    try:
+        data = get_ayla_booking_client().similar_canon_templates(
+            specialist_id=str(master.id),
+            external_user_id=external_user_id_for(bot_user),
+            name=name,
+        )
+    except BookingBadRequestError as exc:
+        return _canon_gap_refusal(exc)
+    except BookingUnavailableError:
+        return _error("catalog_unavailable", "Каталог сейчас недоступен.", 503)
+    return JsonResponse({"similar": data.get("similar") or []})
+
+
+@require_http_methods(["GET"])
+@require_master_init_data
+def canon_gap_request_detail(request: HttpRequest, request_id: uuid.UUID) -> HttpResponse:
+    """Одна своя заявка; чужая неотличима от несуществующей (404)."""
+    master: CatalogMaster = request.master  # type: ignore[attr-defined]
+    bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
+    try:
+        data = get_ayla_booking_client().get_canon_gap_request(
+            specialist_id=str(master.id),
+            external_user_id=external_user_id_for(bot_user),
+            request_id=str(request_id),
+        )
+    except BookingBadRequestError as exc:
+        return _canon_gap_refusal(exc)
+    except BookingUnavailableError:
+        return _error("catalog_unavailable", "Каталог сейчас недоступен.", 503)
+    return JsonResponse({"request": data.get("request")})
+
+
+def _canon_gap_refusal(exc: BookingBadRequestError) -> HttpResponse:
+    if exc.status_code == 403:
+        return _error(
+            "not_linked", "Профиль ещё не связан с каталогом — заявку пока некуда отправить.", 403
+        )
+    if exc.status_code == 404:
+        return _error("not_found", "Заявка не найдена.", 404)
+    if exc.status_code == 400:
+        return _error("validation_error", "Проверьте название, длительность и цену.", 400)
+    return _error("catalog_unavailable", "Каталог сейчас недоступен.", 502)
+
+
 # --- GET /onboarding/readiness --------------------------------------------
 
 
