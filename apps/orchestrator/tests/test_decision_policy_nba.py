@@ -162,7 +162,7 @@ class TestCandidateWhenInputUnavailable:
         needs = tx.read_turn_needs("Хочу снять напряжение")
         verdict = dp.decide(_evidence("normal", INPUT_UNAVAILABLE), needs=needs)
 
-        assert verdict.nba_fields()["taxonomy_version"] == "h5-j1j2:owner-2026-09-15"
+        assert verdict.nba_fields()["taxonomy_version"] == "h5-j1j2:owner-2026-09-15:r2"
 
     def test_candidate_status_is_never_catalog_writable(self):
         with pytest.raises(dp.NotCatalogWritable):
@@ -428,6 +428,8 @@ OWNER_PHRASE_TRIPLES = [
     ("Спина напряжена", tx.Triple("BACK_COMFORT", "RECOVER", "PROVIDER_SESSION")),
     ("Хочу снять зажимы", tx.Triple("BACK_COMFORT", "RECOVER", "PROVIDER_SESSION")),
     ("Устала спина после работы", tx.Triple("BACK_COMFORT", "RECOVER", "PROVIDER_SESSION")),
+    ("Напряжение в спине", tx.Triple("BACK_COMFORT", "RECOVER", "PROVIDER_SESSION")),
+    ("Хочу снять напряжение в спине", tx.Triple("BACK_COMFORT", "RECOVER", "PROVIDER_SESSION")),
 ]
 
 
@@ -449,13 +451,24 @@ class TestOwnerPhrasesSelectTheOwnerTriple:
         assert verdict.candidate_nba == triple
         assert verdict.primary is None
 
-    def test_tension_in_the_back_is_relaxation_until_the_owner_adds_a_phrase(self):
-        """Главное окно 15.09 (Q3): «напряжение в спине» в J1 нет — фраза даёт только
-        «хочу снять напряжение». Если владелец добавит фразу про спину, тест краснеет
-        и возвращает вопрос о правиле перекрытия фраз."""
+    def test_tension_in_the_back_is_back_comfort_by_the_longer_phrase(self):
+        """R2: «хочу снять напряжение в спине» — BACK_COMFORT; «хочу снять напряжение»
+        лежит внутри неё и не считается — альтернативы RELAXATION нет."""
         verdict = _decide_production("Хочу снять напряжение в спине")
 
         assert verdict.result_status is dp.PolicyStatus.CLEAR_PRIMARY
-        assert verdict.recognized_targets == ("RELAXATION",)
-        assert verdict.primary == tx.Triple("RELAXATION", "SUPPORT", "PROVIDER_SESSION")
+        assert verdict.recognized_targets == ("BACK_COMFORT",)
+        assert verdict.primary == tx.Triple("BACK_COMFORT", "RECOVER", "PROVIDER_SESSION")
         assert verdict.alternatives == ()
+
+    def test_safety_stays_on_top_of_the_longer_phrase(self):
+        """R2: safety не отменяется — признак боли при распознанной цели → PENDING, NBA нет."""
+        verdict = _decide_production(
+            "Хочу снять напряжение в спине, но простреливает", reason_codes=INPUT_UNAVAILABLE
+        )
+
+        assert verdict.result_status is dp.PolicyStatus.SAFETY_CLARIFICATION_PENDING
+        assert verdict.reason_codes == (dp.POLICY_PAIN_SIGNAL,)
+        assert verdict.recognized_targets == ("BACK_COMFORT",)
+        assert verdict.primary is None
+        assert verdict.candidate_nba is None

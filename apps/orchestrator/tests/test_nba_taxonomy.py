@@ -36,7 +36,7 @@ class TestCodesAreTheOwnersBytes:
         assert (tx.ROLE_PRIMARY, tx.ROLE_ALTERNATIVE) == ("primary", "alternative")
 
     def test_version_label_fits_the_catalog_and_names_the_owner_ruling(self):
-        assert tx.TAXONOMY_VERSION == "h5-j1j2:owner-2026-09-15"
+        assert tx.TAXONOMY_VERSION == "h5-j1j2:owner-2026-09-15:r2"
         assert len(tx.TAXONOMY_VERSION) <= 32
 
 
@@ -48,8 +48,9 @@ OWNER_J2 = {
     "BACK_COMFORT": ("RECOVER", "PROVIDER_SESSION"),
 }
 
-#: J1 владельца (§3) — дословно, только явный список. «Близкие косметические
-#: формулировки» к FACE_FRESHNESS: пусто, ждёт списка владельца (главное окно 15.09).
+#: J1 владельца (§3 + R2, OWNER_QUESTIONS раздел S) — дословно, только явный список.
+#: R1: близкие формулировки к FACE_FRESHNESS не вводятся, новые фразы — явно по
+#: shadow evidence.
 OWNER_J1 = {
     "хочу выглядеть свежее": "FACE_FRESHNESS",
     "хочу снять напряжение": "RELAXATION",
@@ -57,6 +58,8 @@ OWNER_J1 = {
     "спина напряжена": "BACK_COMFORT",
     "хочу снять зажимы": "BACK_COMFORT",
     "устала спина после работы": "BACK_COMFORT",
+    "напряжение в спине": "BACK_COMFORT",
+    "хочу снять напряжение в спине": "BACK_COMFORT",
 }
 
 
@@ -196,3 +199,24 @@ class TestOwnerNoTargetPhrases:
         """J: PUFFINESS_REDUCTION на пилоте из утверждённых фраз недостижима — это честно."""
         assert tx.TARGET_PHRASES, "словарь J1 пуст"
         assert "PUFFINESS_REDUCTION" not in set(tx.TARGET_PHRASES.values())
+
+
+class TestLongestMatchWins:
+    """R2 (владелец 15.09): при подстроках побеждает более специфичная формулировка —
+    совпавшая фраза, лежащая в реплике внутри другой совпавшей, не считается. Считается
+    по словам реплики, а не по вложенности ключей словаря."""
+
+    PHRASES = {
+        "снять напряжение": "RELAXATION",
+        "снять напряжение в спине": "BACK_COMFORT",
+    }
+
+    def test_a_phrase_inside_a_longer_matched_phrase_does_not_count(self):
+        needs = tx.read_turn_needs("Хочу снять напряжение в спине", phrases=self.PHRASES)
+        assert needs.recognized_targets == ("BACK_COMFORT",)
+
+    def test_separate_occurrences_both_count(self):
+        needs = tx.read_turn_needs(
+            "Хочу снять напряжение, а ещё снять напряжение в спине", phrases=self.PHRASES
+        )
+        assert needs.recognized_targets == ("RELAXATION", "BACK_COMFORT")
