@@ -24,7 +24,11 @@
   пути) признаёт услугой; клауза со смыслом здоровья отбрасывается целиком
   («ноет спина» не попадает, как в памяти сказанного); цифры не проходят по
   построению — телефон в строку не попадает; длина ≤ 40 знаков, обрезка по
-  слову. Если модель искала другое, чем назвал человек, услуги в строке нет;
+  слову. Если модель искала другое, чем назвал человек, услуги в строке нет.
+  **Название специалиста — не услуга** (ayla-4c, 15.09): «массажистов»,
+  «косметолога», «маникюрщицу» ловятся стемом услуги, но называют человека, и
+  фрагмента не дают; перефразировать в «массаж» нельзя — строка обещает «по
+  твоим словам»;
 * **город** — только названный человеком словами в этом пути: на быстром пути —
   в самой реплике (по ней и искали), на пути модели — в репликах человека за
   два часа (срок контекста разговора, B13). Город из сохранённой памяти или
@@ -60,6 +64,11 @@ _WORD_SPAN_RE = re.compile(r"[А-Яа-яЁёA-Za-z]+(?:-[А-Яа-яЁёA-Za-z]+)
 #: Общая часть основы, по которой услуга человека совпадает с поиском модели.
 _STEM_CHARS = 5
 
+#: Хвост ПОСЛЕ стема услуги, превращающий слово в название специалиста:
+#: массаж|ист, массаж|истка, маникюр|щица, космето|лог, маникюр|ша. Считается от
+#: стема, а не с конца слова: «чистк|а» — услуга, хотя в слове есть «ист».
+_SPECIALIST_TAIL_RE = re.compile(r"^(?:ист|щик|щиц|о?лог|ш[аиуеой])")
+
 
 def _clip_by_word(text: str, limit: int) -> str:
     if len(text) <= limit:
@@ -73,11 +82,23 @@ def _clip_by_word(text: str, limit: int) -> str:
     return out.rstrip(",")
 
 
+def _names_a_service(word: str) -> bool:
+    """Слово — форма названия услуги, а не специалиста (ayla-4c, 15.09)."""
+
+    from apps.skills.menu.matching import _SERVICE_STEMS, mentions_service
+
+    if not mentions_service(word):
+        return False
+    low = word.casefold().replace("ё", "е")
+    tails = [low[len(stem) :] for stem in _SERVICE_STEMS if low.startswith(stem)]
+    # Совпало не стемом (целым словом или стемом тенанта) — хвоста нет, это услуга.
+    return not tails or any(not _SPECIALIST_TAIL_RE.match(tail) for tail in tails)
+
+
 def service_fragment(message_text: str) -> str | None:
     """Дословные слова услуги из реплики — или None. Без смысла здоровья, без цифр."""
 
     from apps.orchestrator.said_memory import _CLAUSE_SPLIT_RE, _has_health_meaning
-    from apps.skills.menu.matching import mentions_service
 
     runs: list[str] = []
     for raw_clause in _CLAUSE_SPLIT_RE.split(message_text or ""):
@@ -87,7 +108,7 @@ def service_fragment(message_text: str) -> str | None:
         start: int | None = None
         end = 0
         for match in _WORD_SPAN_RE.finditer(clause):
-            if mentions_service(match.group(0)):
+            if _names_a_service(match.group(0)):
                 if start is None:
                     start = match.start()
                 end = match.end()
