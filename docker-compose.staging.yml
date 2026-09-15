@@ -202,17 +202,29 @@ services:
 
   # ------------------------------------------------------------------
   # Infra — internal only (this host's 5432/6379 belong to Ayla).
+  #
+  # `restart: unless-stopped` here is not optional (DRF-1915). The base
+  # file gives these three no restart policy, so compose creates them with
+  # `restart=no`. On 2026-09-15 the pilot host was resized and rebooted at
+  # 04:14 UTC: every app service came back (they carry `unless-stopped`),
+  # postgres/redis/minio did not — and the bot answered /readyz/ with 503
+  # until they were started by hand. A `docker update --restart` on the
+  # host fixes the running containers only; the next `up` that recreates
+  # them brings `restart=no` back. The policy belongs in this file.
   # ------------------------------------------------------------------
   postgres:
     ports: !override []
+    restart: unless-stopped
 
   redis:
     ports: !override []
+    restart: unless-stopped
 
   minio:
     ports: !override
       - "127.0.0.1:9002:9000"
       - "127.0.0.1:9003:9001"
+    restart: unless-stopped
 
   # chromadb is OUT of the sprint's critical path — kept behind an
   # inert profile so a plain `up -d` never starts it. If a code path
