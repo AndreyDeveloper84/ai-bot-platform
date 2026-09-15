@@ -231,9 +231,24 @@ export const DATA_STORAGE_REVOCATION_DISCLOSURE_TEXT =
  */
 export const DATA_STORAGE_PARTIAL_PROCESSING_NOTE: string | null = null;
 
-/** Исход отзыва — ровно два значения, которые отдаёт сервер на 200. */
+/**
+ * DRF-1950 (решение владельца M3, дословно): удаление в Ayla поставлено в
+ * задание, и каталог ещё не подтвердил стирание чтением. До readback —
+ * никакого «удалено». Показывается ТОЛЬКО при `revoked_deletion_started`:
+ * у несвязанного с Ayla (`revoked_partial_processing`) удаления там не было
+ * и не будет — «запущено» было бы ложью.
+ */
+export const DATA_STORAGE_DELETION_STARTED_NOTE =
+  "Удаление запущено. Оно завершится в установленный срок.";
+
+/**
+ * Исход отзыва — три значения, которые отдаёт сервер на 200 (DRF-1950).
+ * Незнакомое значение (сервер новее экрана) читается как частичный исход:
+ * безопасный текст «Согласие отозвано.», без утверждений о полноте.
+ */
 export type DataStorageRevocationStatus =
   | "revoked"
+  | "revoked_deletion_started"
   | "revoked_partial_processing";
 
 export interface DataStorageRevocationResult {
@@ -559,8 +574,11 @@ export async function revokeDataStorage(
     });
     // Сервер называет исход сам. Выводить его из `failed_steps` значило
     // бы решать за сервер, что считать полным успехом.
+    const raw = doc.revocation?.status;
     const status: DataStorageRevocationStatus =
-      doc.revocation?.status === "revoked" ? "revoked" : "revoked_partial_processing";
+      raw === "revoked" || raw === "revoked_deletion_started"
+        ? raw
+        : "revoked_partial_processing";
     return { status, consents: toConsents(doc) };
   } catch (err) {
     if (err instanceof ApiError) {
