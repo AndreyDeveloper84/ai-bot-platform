@@ -1228,7 +1228,8 @@ describe("CustomerWellnessDashboardScreen — отмена стакана (DRF-1
     releaseFirst();
 
     await vi.waitFor(() => expect(posts()).toBe(2));
-    expect(await screen.findByText("+1 стакан зачтён")).toBeInTheDocument();
+    // Оба стакана ушли: в очереди ничего не ждёт (а «зачтён» уже показал первый тап).
+    await vi.waitFor(() => expect(screen.queryByText(/ждёт синхронизации|ждут синхронизации/)).toBeNull());
   });
 
   it("DRF-1919: после возврата сети отказанные стаканы из очереди названы числом", async () => {
@@ -1247,6 +1248,98 @@ describe("CustomerWellnessDashboardScreen — отмена стакана (DRF-1
         "2 стакана из очереди не записаны. Чтобы менять дневник, нужно согласие на обработку личных данных — дай его в чате с Ayla.",
       ),
     ).toBeInTheDocument();
+  });
+
+  it("DRF-1919: три тапа — отказ третьего назван как его, а не «из очереди»", async () => {
+    let releaseFirst: () => void = () => {};
+    let n = 0;
+    const calls = serveWater(
+      () => new Response(null, { status: 204 }),
+      () => {
+        n += 1;
+        if (n === 1) {
+          return new Promise<Response>((resolve) => {
+            releaseFirst = () => resolve(json({ entry_id: "entry-1", ml: 250, water_ml: 250, today_total_ml: 250, today_norm_ml: 0, water_glasses_eaten: 1 }));
+          });
+        }
+        if (n === 3) return json({ error: "ayla_bad_request", detail: "rejected" }, 400);
+        return json({ entry_id: `entry-${n}`, ml: 250, water_ml: 250, today_total_ml: 250, today_norm_ml: 0, water_glasses_eaten: 1 });
+      },
+    );
+    await tapWater();
+    const posts = () => calls.filter((c) => c.startsWith("POST")).length;
+    await vi.waitFor(() => expect(posts()).toBe(1));
+    const qa = within(screen.getByRole("region", { name: "Что сделаем сейчас" }));
+    fireEvent.click(qa.getByRole("button", { name: "Добавить стакан воды 250 мл" }));
+    fireEvent.click(qa.getByRole("button", { name: "Добавить стакан воды 250 мл" }));
+    releaseFirst();
+
+    await vi.waitFor(() => expect(posts()).toBe(3));
+    expect(
+      await screen.findByText("Стакан не записан — дневник его не принял."),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/из очереди/)).not.toBeInTheDocument();
+  });
+
+  it("DRF-1919: «Отменить» не остаётся от чужого стакана рядом с «ждёт синхронизации»", async () => {
+    let releaseFirst: () => void = () => {};
+    let n = 0;
+    const calls = serveWater(
+      () => new Response(null, { status: 204 }),
+      () => {
+        n += 1;
+        if (n === 1) {
+          return new Promise<Response>((resolve) => {
+            releaseFirst = () => resolve(json({ entry_id: "entry-1", ml: 250, water_ml: 250, today_total_ml: 250, today_norm_ml: 0, water_glasses_eaten: 1 }));
+          });
+        }
+        throw new TypeError("Failed to fetch");
+      },
+    );
+    await tapWater();
+    const posts = () => calls.filter((c) => c.startsWith("POST")).length;
+    await vi.waitFor(() => expect(posts()).toBe(1));
+    const qa = within(screen.getByRole("region", { name: "Что сделаем сейчас" }));
+    fireEvent.click(qa.getByRole("button", { name: "Добавить стакан воды 250 мл" }));
+    releaseFirst();
+
+    expect(await screen.findByText("+1 стакан · 1 стакан ждёт синхронизации")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Отменить стакан" })).not.toBeInTheDocument();
+  });
+
+  it("DRF-1919: отказ своего и стакана из очереди — названы раздельно, каждый со своей причиной", async () => {
+    window.localStorage.setItem("max:wellness_water_offline_queue", JSON.stringify([{ ts: Date.now() - 60_000, volume_ml: 250, key: "water-old" }]));
+    let n = 0;
+    serveWater(
+      () => new Response(null, { status: 204 }),
+      () => {
+        n += 1;
+        if (n === 1) return json({ error: "ayla_bad_request", detail: "rejected" }, 400);
+        return json({ error: "consent_required", detail: "no consent" }, 403);
+      },
+    );
+    await tapWater();
+
+    expect(
+      await screen.findByText(
+        "Стакан не записан. Чтобы менять дневник, нужно согласие на обработку личных данных — дай его в чате с Ayla. Стакан из очереди не записан — дневник его не принял.",
+      ),
+    ).toBeInTheDocument();
+  });
+
+  it("DRF-1919: 401 — сказано, что сессия истекла, а не «ждёт синхронизации»", async () => {
+    serveWater(
+      () => new Response(null, { status: 204 }),
+      () => json({ error: "stale", detail: "init data expired" }, 401),
+    );
+    await tapWater();
+
+    expect(
+      await screen.findByText(
+        "Стакан сохранён, но не отправлен: сессия истекла — открой приложение заново.",
+      ),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/зачтён/)).not.toBeInTheDocument();
   });
 
   it("сбой при отмене — ничего не убрано, кнопка возвращается", async () => {

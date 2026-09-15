@@ -21,11 +21,14 @@ vi.mock("./max-sdk", () => ({
 
 import {
   enqueueWaterLog,
+  enqueueWaterLogEntry,
   flushWaterQueue,
   getRecentActivity,
   getWellnessToday,
   loadDiaryToday,
   readWaterQueue,
+  onWaterQueueRefused,
+  syncWaterEntry,
   undoWaterLog,
   waterRefusalText,
   correctFoodEntryGrams,
@@ -238,7 +241,7 @@ describe("DRF-1919 — очередь воды: чей стакан, что по
     expect(keys).toEqual([own?.key]);
   });
 
-  it("присоединившийся к идущей синхронизации досылает свой стакан со своими колбэками", async () => {
+  it("стакан, добавленный во время идущей синхронизации, получает СВОЙ исход", async () => {
     enqueueWaterLog(250);
     let release: () => void = () => {};
     fetchMock.mockImplementationOnce(
@@ -250,15 +253,89 @@ describe("DRF-1919 — очередь воды: чей стакан, что по
     fetchMock.mockImplementation(async () => okEntry("entry-2"));
 
     const first = flushWaterQueue();
-    enqueueWaterLog(500);
-    const seen: string[] = [];
-    const second = flushWaterQueue((r) => seen.push(r.entry_id));
+    const own = enqueueWaterLogEntry(500).entry;
+    // async-обёртка: без функции тест краснеет своим промисом, а не утечкой
+    // незавершённого прохода в следующие тесты файла.
+    const outcome = (async () => syncWaterEntry(own))();
     release();
-    await Promise.all([first, second]);
+    await first;
 
-    expect(fetchMock).toHaveBeenCalledTimes(2);
-    expect(seen).toEqual(["entry-2"]);
+    const settled = await outcome;
+    expect(settled.kind).toBe("accepted");
+    expect(settled.kind === "accepted" && settled.result.entry_id).toBe("entry-2");
     expect(readWaterQueue()).toHaveLength(0);
+  });
+
+  it("три участника: каждый стакан получает свой исход, какой бы проход его ни взял", async () => {
+    enqueueWaterLog(250);
+    let release: () => void = () => {};
+    fetchMock.mockImplementationOnce(
+      () =>
+        new Promise<Response>((resolve) => {
+          release = () => resolve(okEntry("entry-1"));
+        }),
+    );
+    let n = 1;
+    fetchMock.mockImplementation(async () => {
+      n += 1;
+      return okEntry(`entry-${n}`);
+    });
+
+    const first = flushWaterQueue();
+    const a = enqueueWaterLogEntry(500).entry;
+    const b = enqueueWaterLogEntry(750).entry;
+    const outcomes = Promise.all([
+      (async () => syncWaterEntry(a))(),
+      (async () => syncWaterEntry(b))(),
+    ]);
+    release();
+    await first;
+    const [oa, ob] = await outcomes;
+
+    expect(oa.kind).toBe("accepted");
+    expect(ob.kind).toBe("accepted");
+    const ids = [oa, ob].map((o) => (o.kind === "accepted" ? o.result.entry_id : ""));
+    expect(new Set(ids).size).toBe(2);
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+  });
+
+  it("отказ стакана, которого никто не ждёт, получает подписчик — не молча", async () => {
+    enqueueWaterLog(250);
+    const own = enqueueWaterLogEntry(500).entry;
+    fetchMock
+      .mockResolvedValueOnce(jsonResponse({ error: "ayla_bad_request", detail: "rejected" }, 400))
+      .mockResolvedValueOnce(okEntry("entry-own"));
+    const heard: string[][] = [];
+    const unsubscribe = onWaterQueueRefused((errs) => heard.push(errs.map((e) => e.slug)));
+
+    const outcome = await syncWaterEntry(own);
+    unsubscribe();
+
+    expect(outcome.kind).toBe("accepted");
+    expect(heard).toEqual([["ayla_bad_request"]]);
+  });
+
+  it("401 — стакан остаётся в очереди, и исход говорит почему", async () => {
+    const own = enqueueWaterLogEntry(250).entry;
+    fetchMock.mockResolvedValueOnce(jsonResponse({ error: "stale", detail: "expired" }, 401));
+
+    const outcome = await syncWaterEntry(own);
+
+    expect(outcome.kind).toBe("queued");
+    expect(outcome.kind === "queued" && outcome.err instanceof ApiError && outcome.err.status).toBe(401);
+    expect(readWaterQueue()).toHaveLength(1);
+  });
+
+  it("404 со slug сервера (дневник выключен) — стакан выброшен как отказ", async () => {
+    // Положительная пара к «404 без slug остаётся в очереди».
+    enqueueWaterLog(250);
+    fetchMock.mockResolvedValueOnce(jsonResponse({ error: "nutrition_disabled", detail: "off" }, 404));
+    const refused: string[] = [];
+
+    await flushWaterQueue(undefined, (err) => refused.push(err.slug));
+
+    expect(readWaterQueue()).toHaveLength(0);
+    expect(refused).toEqual(["nutrition_disabled"]);
   });
 
   it("фраза отказа говорит, сколько стаканов не записано и откуда они", () => {

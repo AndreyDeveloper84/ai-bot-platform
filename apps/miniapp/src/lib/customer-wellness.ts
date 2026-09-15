@@ -781,6 +781,45 @@ function isPermanentRejection(err: unknown): boolean {
   return err.status >= 400 && err.status < 500;
 }
 
+/**
+ * DRF-1919 — исход ОДНОГО стакана: принят, отказан навсегда или остался в
+ * очереди (с причиной — сеть, 5xx, истёкшая сессия).
+ */
+export type WaterEntryOutcome =
+  | { kind: "accepted"; result: WaterLogResult }
+  | { kind: "rejected"; err: ApiError }
+  | { kind: "queued"; err: unknown };
+
+/** Кто ждёт исхода какого стакана — по ключу стакана, а не по проходу. */
+const entryWatchers = new Map<string, (outcome: WaterEntryOutcome) => void>();
+/** Кому сказать об отказе стаканов, исхода которых никто не ждёт. */
+const queueRefusalListeners = new Set<(refused: ApiError[]) => void>();
+
+function notifyEntry(entry: QueuedWaterLog, outcome: WaterEntryOutcome): boolean {
+  const key = idempotencyKeyFor(entry);
+  const watcher = entryWatchers.get(key);
+  if (!watcher) return false;
+  entryWatchers.delete(key);
+  try {
+    watcher(outcome);
+  } catch {
+    /* исход для экрана — не часть синхронизации */
+  }
+  return true;
+}
+
+/**
+ * DRF-1919 — подписка на отказы стаканов из очереди, которых никто не ждёт
+ * (офлайн-стаканы, ушедшие при возврате сети или вместе с новым тапом): отказ
+ * не должен пропадать молча. Возвращает отписку.
+ */
+export function onWaterQueueRefused(listener: (refused: ApiError[]) => void): () => void {
+  queueRefusalListeners.add(listener);
+  return () => {
+    queueRefusalListeners.delete(listener);
+  };
+}
+
 /** Guards against two overlapping flushes double-posting the same entry. */
 let flushInFlight: Promise<number> | null = null;
 
@@ -812,21 +851,15 @@ export async function flushWaterQueue(
   /** DRF-1919: постоянный отказ — стакан выброшен из очереди, экран обязан это сказать. */
   onRejected?: (err: ApiError, entry: QueuedWaterLog) => void,
 ): Promise<number> {
-  if (flushInFlight) {
-    // DRF-1919: присоединившийся ждёт идущую синхронизацию. Остались стаканы
-    // (например, его собственный, добавленный во время неё) — он досылает их
-    // со СВОИМИ колбэками: иначе его стакан висел бы до следующего тапа, а
-    // отказ в нём никто бы не сказал.
-    const joined = await flushInFlight;
-    if (!onAccepted && !onRejected) return joined;
-    if (readWaterQueue().length === 0) return joined;
-    return flushWaterQueue(onAccepted, onRejected);
-  }
+  // Исход СВОЕГО стакана вызывающий узнаёт через `syncWaterEntry`, а не через
+  // колбэки прохода: присоединившийся к идущему проходу своих колбэков не имеет.
+  if (flushInFlight) return flushInFlight;
   flushInFlight = (async () => {
     const queue = readWaterQueue();
     if (queue.length === 0) return 0;
 
     const remaining: QueuedWaterLog[] = [];
+    const unwatchedRefusals: ApiError[] = [];
     let synced = 0;
 
     for (const [i, entry] of queue.entries()) {
@@ -838,21 +871,26 @@ export async function flushWaterQueue(
         if (isPermanentRejection(err)) {
           // eslint-disable-next-line no-console
           console.warn("[customer-wellness] water entry refused, dropping", err);
-          if (onRejected && err instanceof ApiError) {
-            try {
-              onRejected(err, entry);
-            } catch {
-              /* фраза об отказе — не часть синхронизации */
+          if (err instanceof ApiError) {
+            if (onRejected) {
+              try {
+                onRejected(err, entry);
+              } catch {
+                /* фраза об отказе — не часть синхронизации */
+              }
             }
+            if (!notifyEntry(entry, { kind: "rejected", err })) unwatchedRefusals.push(err);
           }
           continue;
         }
         // Retryable — this entry and every later one stay queued.
+        for (const left of queue.slice(i)) notifyEntry(left, { kind: "queued", err });
         remaining.push(...queue.slice(i));
         break;
       }
       // Вне try: сбой подсказки в интерфейсе не должен превращать уже
       // принятый стакан в «повторить отправку» — это был бы дубль.
+      if (accepted) notifyEntry(entry, { kind: "accepted", result: accepted });
       if (accepted && onAccepted) {
         try {
           onAccepted(accepted, entry);
@@ -869,6 +907,15 @@ export async function flushWaterQueue(
       (e) => !queue.some((sent) => sent.ts === e.ts && sent.key === e.key),
     );
     writeWaterQueue([...remaining, ...appended]);
+    if (unwatchedRefusals.length > 0) {
+      for (const listener of queueRefusalListeners) {
+        try {
+          listener(unwatchedRefusals);
+        } catch {
+          /* фраза об отказе — не часть синхронизации */
+        }
+      }
+    }
     return synced;
   })();
   try {
@@ -877,6 +924,35 @@ export async function flushWaterQueue(
     flushInFlight = null;
   }
 }
+
+/**
+ * DRF-1919 — отправить стакан и узнать ЕГО исход, какой бы проход его ни взял.
+ *
+ * Идущий проход снял снимок очереди до этого стакана — дождаться его и
+ * запустить проход, в котором стакан есть. Любой проход, взявший стакан,
+ * называет его исход (принят / отказан / остался в очереди с причиной).
+ */
+export async function syncWaterEntry(entry: QueuedWaterLog): Promise<WaterEntryOutcome> {
+  const key = idempotencyKeyFor(entry);
+  let resolveOutcome: (outcome: WaterEntryOutcome) => void = () => {};
+  const outcome = new Promise<WaterEntryOutcome>((resolve) => {
+    resolveOutcome = resolve;
+  });
+  entryWatchers.set(key, resolveOutcome);
+  for (let attempt = 0; attempt < 3 && entryWatchers.get(key) === resolveOutcome; attempt += 1) {
+    await flushWaterQueue();
+  }
+  if (entryWatchers.get(key) === resolveOutcome) {
+    // Стакан не попал ни в один проход (очередь очищена / TTL) — исход не известен.
+    entryWatchers.delete(key);
+    return { kind: "queued", err: null };
+  }
+  return outcome;
+}
+
+/** DRF-1919 — 401: стакан сохранён, но сам не уйдёт, пока приложение не открыть заново. */
+export const WATER_SESSION_EXPIRED_TEXT =
+  "Стакан сохранён, но не отправлен: сессия истекла — открой приложение заново.";
 
 // ---------------------------------------------------------------------------
 // Onboarding card dismiss state (localStorage flag) — §11.6.

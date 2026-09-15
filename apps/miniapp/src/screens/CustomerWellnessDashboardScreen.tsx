@@ -79,7 +79,7 @@
  *      explicit verified tokens (handled in globals.css).
  */
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { ApiError, type Service } from "../lib/api";
 import { authErrorCopy, loadErrorReason, type LoadErrorReason } from "../lib/auth-error-copy";
@@ -89,6 +89,9 @@ import {
   enqueueWaterLog,
   enqueueWaterLogEntry,
   flushWaterQueue,
+  onWaterQueueRefused,
+  syncWaterEntry,
+  WATER_SESSION_EXPIRED_TEXT,
   getRecentActivity,
   getWellnessToday,
   isOnboardingDismissed,
@@ -211,11 +214,9 @@ export function CustomerWellnessDashboardScreen() {
     const onOnline = () => {
       setOnline(true);
       // Auto-flush water queue on reconnect (Tau §11.8).
-      // DRF-1919: отказанные стаканы из очереди называются числом, а не молча.
-      const refused: ApiError[] = [];
-      void flushWaterQueue(undefined, (err) => refused.push(err)).then(() => {
+      // Отказы стаканов из очереди скажет подписка `onWaterQueueRefused` (DRF-1919).
+      void flushWaterQueue().then(() => {
         setWaterQueueLen(readWaterQueue().length);
-        if (refused.length > 0) setWaterToast(waterRefusalText(refused, { fromQueue: true }));
       });
     };
     const onOffline = () => setOnline(false);
@@ -235,6 +236,7 @@ export function CustomerWellnessDashboardScreen() {
       () => {
         setWaterToast(null);
         setUndoEntryId(null);
+        queueRefusalNote.current = null;
       },
       undoEntryId ? 8000 : 3000,
     );
@@ -271,36 +273,43 @@ export function CustomerWellnessDashboardScreen() {
     // очереди. Отказ в них не затирается принятием нового; свой стакан, не
     // дошедший по сети, — «ждёт синхронизации».
     const { entry: own } = enqueueWaterLogEntry(250);
-    const refusedOwn: ApiError[] = [];
-    const refusedQueued: ApiError[] = [];
-    let ownAccepted = false;
-    void flushWaterQueue(
-      (accepted, entry) => {
-        if (entry.key !== own.key) return;
-        ownAccepted = true;
-        setUndoEntryId(accepted.entry_id);
-      },
-      (err, entry) => {
-        (entry.key === own.key ? refusedOwn : refusedQueued).push(err);
-      },
-    ).then(() => {
-      const queue = readWaterQueue();
-      setWaterQueueLen(queue.length);
-      const parts: string[] = [];
-      if (ownAccepted) {
-        parts.push("+1 стакан зачтён");
-      } else if (queue.some((e) => e.key === own.key)) {
-        const len = queue.length;
-        parts.push(`+1 стакан · ${len} ${ruPluralWater(len)} ${ruPluralWaterWaits(len)} синхронизации`);
+    void syncWaterEntry(own).then((outcome) => {
+      const len = readWaterQueue().length;
+      setWaterQueueLen(len);
+      let ownText: string;
+      if (outcome.kind === "accepted") {
+        setUndoEntryId(outcome.result.entry_id);
+        ownText = "+1 стакан зачтён";
+      } else {
+        // «Отменить» могла остаться от стакана другого тапа — рядом с этим
+        // тостом она была бы про чужой стакан.
+        setUndoEntryId(null);
+        if (outcome.kind === "rejected") {
+          ownText = waterRefusalText([outcome.err]);
+        } else if (outcome.err instanceof ApiError && outcome.err.status === 401) {
+          ownText = WATER_SESSION_EXPIRED_TEXT;
+        } else {
+          ownText = `+1 стакан · ${len} ${ruPluralWater(len)} ${ruPluralWaterWaits(len)} синхронизации`;
+        }
       }
-      if (refusedOwn.length > 0) {
-        parts.push(waterRefusalText([...refusedOwn, ...refusedQueued]));
-      } else if (refusedQueued.length > 0) {
-        parts.push(waterRefusalText(refusedQueued, { fromQueue: true }));
-      }
-      if (parts.length > 0) setWaterToast(parts.join(". "));
+      const note = queueRefusalNote.current;
+      queueRefusalNote.current = null;
+      setWaterToast(joinSentences(note ? [ownText, note] : [ownText]));
     });
   }, [online]);
+
+  // DRF-1919: отказ стаканов из очереди, которых этот экран не ждал, — не молча.
+  // Тап, пришедший следом, допишет эту фразу к своей, а не затрёт её.
+  const queueRefusalNote = useRef<string | null>(null);
+  useEffect(
+    () =>
+      onWaterQueueRefused((refused) => {
+        const note = waterRefusalText(refused, { fromQueue: true });
+        queueRefusalNote.current = note;
+        setWaterToast(note);
+      }),
+    [],
+  );
 
   const onUndoWater = useCallback(() => {
     const id = undoEntryId;
@@ -1311,6 +1320,11 @@ function ruPluralWater(n: number): string {
 // Verb agreement for "стакан(а/ов) ждёт/ждут синхронизации".
 // Singular forms (1, 21, 31, ...) take "ждёт"; rest take "ждут".
 // Excludes the 11-14 teen-irregular range.
+/** Предложения тоста через пробел; точка ставится там, где её нет. */
+function joinSentences(parts: string[]): string {
+  return parts.map((p, i) => (i < parts.length - 1 && !/[.!?]$/.test(p) ? `${p}.` : p)).join(" ");
+}
+
 function ruPluralWaterWaits(n: number): string {
   const mod10 = n % 10;
   const mod100 = n % 100;
