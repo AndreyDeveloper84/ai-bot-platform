@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import uuid
+from collections import Counter
+
 import pytest
+from django.utils import timezone
 
 from apps.events.models import Event
 from apps.identity.models import BotUser
@@ -11,6 +15,16 @@ from apps.tenancy.context import tenant_scope
 from apps.tenancy.models import Tenant
 
 pytestmark = pytest.mark.django_db
+
+#: DRF-1949 — что резолвер обещает про события: первый вызов создаёт, второй
+#: находит. Это счёт, а не порядок: у ``Event`` нет монотонного поля
+#: (``id`` — случайный UUID, ``created_at`` — ``auto_now_add``), и два события
+#: в одном тике часов не имеют порядка, который можно прочитать из базы.
+EXPECTED_EVENTS = Counter({"identity.bot_user.created": 1, "identity.bot_user.resolved": 1})
+
+
+def _event_types(tenant: Tenant) -> Counter[str]:
+    return Counter(Event.objects.filter(tenant=tenant).values_list("event_type", flat=True))
 
 
 @pytest.fixture
@@ -41,13 +55,37 @@ class TestResolverHappyPath:
             first = resolve_or_create_bot_user(channel="max", channel_user_id="200")
             second = resolve_or_create_bot_user(channel="max", channel_user_id="200")
         assert first.id == second.id
-        # Two events: one .created, one .resolved.
-        types = list(
-            Event.objects.filter(tenant=tenant_a)
-            .order_by("created_at")
-            .values_list("event_type", flat=True)
+        # Two events: one .created, one .resolved (DRF-1949: counted, not ordered).
+        assert _event_types(tenant_a) == EXPECTED_EVENTS
+
+    def test_the_event_assertion_survives_a_created_at_tie(self, tenant_a, settings):
+        """DRF-1949: ничья ``created_at`` и UUID не в порядке записи — утверждение то же.
+
+        Флаки под нагрузкой был ровно этим: два события в одном тике часов, и база
+        отдавала их в произвольном порядке. Здесь ничья ставится явно, а UUID —
+        так, что у ``resolved`` он МЕНЬШЕ: сортировка «по времени, потом по id»
+        дала бы порядок, обратный записи. Утверждение по счёту это не задевает.
+        """
+        settings.STRICT_TENANT_SCOPE = "strict"
+        with tenant_scope(tenant_a):
+            resolve_or_create_bot_user(channel="max", channel_user_id="201")
+            resolve_or_create_bot_user(channel="max", channel_user_id="201")
+        events = Event.objects.filter(tenant=tenant_a)
+        tie = timezone.now()
+        events.update(created_at=tie)
+        events.filter(event_type="identity.bot_user.created").update(
+            id=uuid.UUID("ffffffff-ffff-ffff-ffff-ffffffffffff")
         )
-        assert types == ["identity.bot_user.created", "identity.bot_user.resolved"]
+        events.filter(event_type="identity.bot_user.resolved").update(
+            id=uuid.UUID("00000000-0000-0000-0000-000000000001")
+        )
+        # Сначала — что ничья и обратный порядок id действительно поставлены.
+        assert set(events.values_list("created_at", flat=True)) == {tie}
+        assert list(events.order_by("id").values_list("event_type", flat=True)) == [
+            "identity.bot_user.resolved",
+            "identity.bot_user.created",
+        ]
+        assert _event_types(tenant_a) == EXPECTED_EVENTS
 
 
 class TestResolverOpportunisticEnrichment:
