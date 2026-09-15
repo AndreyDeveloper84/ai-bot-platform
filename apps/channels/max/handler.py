@@ -2556,6 +2556,8 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
         tool_trace=getattr(turn_reply, "tool_trace", None) if concierge_turn_ran else None,
         trace_id=trace_id,
         branch=assistant_action_type or ("concierge" if concierge_turn_ran else ""),
+        # DRF-1932 — реплика только для словарей выбора NBA; в строку лога не идёт.
+        message_text=event.text,
     )
 
     # DRF-1273 — canonical intent resolution (Output Contract 0.5) for
