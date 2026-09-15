@@ -1662,6 +1662,26 @@ class AylaBookingHTTPClient:
         )
         return self._ok(resp, success=(200,))
 
+    def get_service_directions(self) -> Any:
+        """``GET internal/services/directions/`` — направления канона (DRF-1799, M7).
+
+        Корни глобальной таксономии (каталог M6). Общий Bearer, субъекта нет:
+        канон не принадлежит мастеру. Форму ответа проверяет вызывающий —
+        пустой список вместо непрочитанного ответа был бы выдуманной пустотой.
+        """
+        resp = self._request("GET", "services/directions/")
+        return self._ok(resp, success=(200,))
+
+    def get_service_templates(self, *, direction_id: str) -> Any:
+        """``GET internal/services/templates/?direction_id=`` — шаблоны направления (DRF-1799, M7).
+
+        Всё поддерево корня на любой глубине, у каждого шаблона — его
+        подкатегория. Не корень — 400 ``NOT_A_DIRECTION``, неизвестный — 404,
+        оба как :class:`BookingBadRequestError` со своим кодом.
+        """
+        resp = self._request("GET", "services/templates/", params={"direction_id": direction_id})
+        return self._ok(resp, success=(200,))
+
     def get_user_bookings_page(
         self,
         *,

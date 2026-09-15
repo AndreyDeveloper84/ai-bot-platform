@@ -202,6 +202,9 @@ ROUTE_TABLE: tuple[Route, ...] = (
     Route("GET", "/api/v1/internal/specialists/{id}/publication/readiness/", Auth.BEARER_EXT),
     Route("POST", "/api/v1/internal/specialists/{id}/publication/", Auth.BEARER_EXT),
     Route("GET", "/api/v1/internal/specialists/{id}/publication/status/", Auth.BEARER_EXT),
+    # DRF-1799 (M7) — канон для экрана 03: направления и шаблоны направления (каталог M6 + M7a).
+    Route("GET", "/api/v1/internal/services/directions/", Auth.BEARER),
+    Route("GET", "/api/v1/internal/services/templates/", Auth.BEARER),
     # payments_client — C7 client payments (§7.5, REVIEW; upstream W1 pending).
     # IsBotServiceWithVerifiedClient: Bearer + X-External-User-ID on every leg.
     Route("POST", "/api/v1/internal/appointments/{id}/payment/", Auth.BEARER_EXT),
@@ -445,6 +448,9 @@ def _exercise_booking() -> None:
         )
     )
     _swallow(lambda: c.get_publication_status(specialist_id="SPECID", external_user_id=_EXT_USER))
+    # DRF-1799 (M7) — канон для экрана 03.
+    _swallow(lambda: c.get_service_directions())
+    _swallow(lambda: c.get_service_templates(direction_id=str(_PROFILE_UUID)))
     _swallow(lambda: c.get_masters(specialist_id="SPECID"))
     _swallow(
         lambda: c.get_available_times(specialist_id="SPECID", date="2026-07-03", service_id="SVCID")
