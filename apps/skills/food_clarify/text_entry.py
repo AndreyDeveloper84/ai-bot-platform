@@ -63,12 +63,22 @@ from typing import Any
 
 from apps.integrations.ayla import (
     FoodNotRecognizedError,
+    MealEditConflictError,
+    MealNotFoundError,
+    MealRestoreExpiredError,
     NutritionAPIError,
+    NutritionUncertainOutcomeError,
     NutritionUnavailableError,
     external_user_id_for,
     get_nutrition_client,
 )
-from apps.orchestrator.ui.keyboards import food_text_estimate_keyboard
+from apps.orchestrator.ui.keyboards import (
+    ENTRY_CALLBACK_RE,
+    ENTRY_ID_RE,
+    food_text_deleted_keyboard,
+    food_text_estimate_keyboard,
+    food_text_logged_keyboard,
+)
 from apps.skills.base import SkillContext, SkillResult
 
 logger = logging.getLogger(__name__)
@@ -91,6 +101,12 @@ CB_GRAMS = "cb:food:text_grams"
 CB_REJECT = "cb:food:text_reject"
 TEXT_CALLBACKS = frozenset({CB_LOG, CB_GRAMS, CB_REJECT})
 
+#: DRF-1838 — тапы под СОХРАНЁННОЙ записью. ``id`` записи в payload:
+#: запись переживает десятиминутное состояние разговора.
+_ENTRY_CALLBACK = ENTRY_CALLBACK_RE
+#: Окно восстановления каталога (``food_log_edit_service.RESTORE_WINDOW_MINUTES``).
+RESTORE_WINDOW_MINUTES = 15
+
 # ─── тексты ───────────────────────────────────────────────────────────────
 
 ASK_WHAT_TEXT = (
@@ -111,6 +127,20 @@ CONSENT_TEXT = (
     "без него я ничего не записываю."
 )
 NUTRITION_OFF_TEXT = "Дневник еды пока недоступен — функция готовится."
+FIX_GRAMS_PROMPT = "Сколько граммов было на самом деле? Напиши число — пересчитаю запись."
+FIXED_TEXT = "Исправила: {dish} — теперь {kcal} ккал."
+DELETED_TEXT = f"Убрала запись из дневника. Вернуть можно в течение {RESTORE_WINDOW_MINUTES} минут."
+RESTORED_TEXT = "Вернула в дневник: {dish} — {kcal} ккал."
+RESTORE_EXPIRED_TEXT = (
+    f"Уже не вернуть: прошло больше {RESTORE_WINDOW_MINUTES} минут, запись удалена окончательно."
+)
+ENTRY_GONE_TEXT = "Этой записи уже нет в дневнике."
+ENTRY_WATER_TEXT = "Эту запись ведёт учёт воды — её убирает отмена стакана."
+EDIT_UNAVAILABLE_TEXT = "Дневник сейчас не отвечает — ничего не изменила. Попробуй через минуту."
+UNCERTAIN_TEXT = (
+    "Не знаю, дошло ли: дневник не ответил вовремя. Загляни в дневник, прежде чем повторять."
+)
+OTHER_QUESTION_TEXT = "Сначала закончим вопрос, который уже открыт, — потом исправлю граммы."
 
 # ─── разбор фразы ─────────────────────────────────────────────────────────
 
@@ -216,7 +246,14 @@ def has_pending_text_entry(conversation: Any) -> bool:
     про открытую анкету и незакрытую поправку скана.
     """
     bucket = _bucket(conversation)
-    return bool(bucket and (bucket.get("awaiting_grams") or bucket.get("expect_food")))
+    return bool(
+        bucket
+        and (
+            bucket.get("awaiting_grams")
+            or bucket.get("expect_food")
+            or bucket.get("awaiting_fix_grams")
+        )
+    )
 
 
 def claims_text(conversation: Any, text: str) -> bool:
@@ -224,7 +261,7 @@ def claims_text(conversation: Any, text: str) -> bool:
     bucket = _bucket(conversation)
     if not bucket:
         return False
-    if bucket.get("awaiting_grams"):
+    if bucket.get("awaiting_grams") or bucket.get("awaiting_fix_grams"):
         return bool(_GRAMS_ANSWER.match(text or ""))
     if bucket.get("expect_food"):
         return parse_food_text(text) is not None
@@ -280,6 +317,8 @@ def on_diary_tap(context: SkillContext) -> SkillResult:
 def on_text(context: SkillContext, text: str) -> SkillResult:
     """Реплика, которую :func:`claims_text` признал ответом."""
     bucket = _bucket(context.conversation) or {}
+    if bucket.get("awaiting_fix_grams"):
+        return _on_fix_grams_answer(context, bucket, text)
     if bucket.get("awaiting_grams"):
         return _on_grams_answer(context, bucket, text)
     parsed = parse_food_text(text)
@@ -420,14 +459,166 @@ def _log(context: SkillContext, bucket: dict[str, Any]) -> SkillResult:
         )
 
     forget(context)
+    action_data: dict[str, Any] = {
+        "log_id": log.log_id,
+        "dish_name": log.dish_name,
+        "calories": log.calories,
+        "entry_origin": origin,
+    }
+    if log.log_id and ENTRY_ID_RE.match(log.log_id):
+        # DRF-1838 — §109 шаг 7: сохранённую запись можно исправить или удалить.
+        action_data["buttons"] = food_text_logged_keyboard(log.log_id)
     return SkillResult(
         reply_text=f"Записала в дневник: {log.dish_name} — {int(round(log.calories))} ккал.",
         action_type="food_logged",
-        action_data={
-            "log_id": log.log_id,
-            "dish_name": log.dish_name,
-            "calories": log.calories,
-            "entry_origin": origin,
-        },
+        action_data=action_data,
         meta={"reply_kind": "food_text_logged"},
+    )
+
+
+# ─── сохранённая запись: исправить / удалить / вернуть (DRF-1838) ─────────
+
+
+def is_entry_callback(text: str) -> bool:
+    """Тап под сохранённой записью (``cb:food:entry_{fix,del,undo}:<id>``)?"""
+    return bool(_ENTRY_CALLBACK.match((text or "").strip()))
+
+
+def _nutrition_on() -> bool:
+    from django.conf import settings
+
+    return bool(getattr(settings, "NUTRITION_ENABLED", False))
+
+
+def _other_question_open(conversation: Any) -> bool:
+    """Открыт ли вопрос, который заберёт число раньше этого скилла?
+
+    Диспетчер питания пробует скиллы по порядку: поправка скана и анкета
+    стоят раньше ``food_clarify``. Ответ «250» ушёл бы им, а запись дневника
+    осталась бы прежней — поэтому «Исправить граммы» ждёт, пока они закроются.
+    """
+    from apps.orchestrator import nutrition_global
+
+    return bool(
+        nutrition_global._food_correction_pending(conversation)  # noqa: SLF001 — одна правда на весь диспетчер
+        or nutrition_global._anketa_fsm_active(conversation)  # noqa: SLF001
+    )
+
+
+def on_entry_callback(context: SkillContext, text: str) -> SkillResult:
+    """§109 шаг 7 — правка, удаление и возврат записи по тапу под ней.
+
+    Удаление не требует открытого согласия: убрать свою запись человек
+    вправе всегда, это не новая обработка. Правка и возврат пишут в дневник —
+    те же ворота, что у записи (:func:`_gate`).
+    """
+    match = _ENTRY_CALLBACK.match((text or "").strip())
+    assert match is not None  # routed only after is_entry_callback
+    action, log_id = match.group(1), match.group(2)
+    if action == "del":
+        if not _nutrition_on():
+            return SkillResult(
+                reply_text=NUTRITION_OFF_TEXT, meta={"reply_kind": "food_text_nutrition_off"}
+            )
+        return _delete_entry(context, log_id)
+    refused = _gate(context)
+    if refused is not None:
+        return refused
+    if action == "fix":
+        if _other_question_open(context.conversation):
+            return SkillResult(
+                reply_text=OTHER_QUESTION_TEXT, meta={"reply_kind": "food_entry_fix_blocked"}
+            )
+        _write(
+            context.conversation,
+            {"awaiting_fix_grams": True, "log_id": log_id, "at": _now_iso()},
+        )
+        return SkillResult(
+            reply_text=FIX_GRAMS_PROMPT, meta={"reply_kind": "food_entry_fix_prompt"}
+        )
+    return _restore_entry(context, log_id)
+
+
+def _entry_refusal(exc: Exception, *, external_id: str, step: str) -> SkillResult:
+    if isinstance(exc, MealRestoreExpiredError):
+        return SkillResult(
+            reply_text=RESTORE_EXPIRED_TEXT, meta={"reply_kind": "food_entry_restore_expired"}
+        )
+    if isinstance(exc, MealNotFoundError):
+        return SkillResult(reply_text=ENTRY_GONE_TEXT, meta={"reply_kind": "food_entry_gone"})
+    if isinstance(exc, MealEditConflictError):
+        return SkillResult(reply_text=ENTRY_WATER_TEXT, meta={"reply_kind": "food_entry_water"})
+    if isinstance(exc, NutritionUncertainOutcomeError):
+        logger.warning("food_entry.%s.uncertain user=%s", step, external_id)
+        return SkillResult(reply_text=UNCERTAIN_TEXT, meta={"reply_kind": "food_entry_uncertain"})
+    if isinstance(exc, NutritionUnavailableError):
+        logger.warning("food_entry.%s.unavailable user=%s", step, external_id)
+    else:
+        logger.exception("food_entry.%s.error user=%s", step, external_id)
+    return SkillResult(
+        reply_text=EDIT_UNAVAILABLE_TEXT, meta={"reply_kind": "food_entry_unavailable"}
+    )
+
+
+def _delete_entry(context: SkillContext, log_id: str) -> SkillResult:
+    external_id = external_user_id_for(context.bot_user)
+    try:
+        asyncio.run(get_nutrition_client().delete_meal(external_user_id=external_id, log_id=log_id))
+    except NutritionAPIError as exc:
+        return _entry_refusal(exc, external_id=external_id, step="delete")
+    return SkillResult(
+        reply_text=DELETED_TEXT,
+        action_type="food_entry_deleted",
+        action_data={"log_id": log_id, "buttons": food_text_deleted_keyboard(log_id)},
+        meta={"reply_kind": "food_entry_deleted"},
+    )
+
+
+def _restore_entry(context: SkillContext, log_id: str) -> SkillResult:
+    external_id = external_user_id_for(context.bot_user)
+    try:
+        log = asyncio.run(
+            get_nutrition_client().restore_meal(external_user_id=external_id, log_id=log_id)
+        )
+    except NutritionAPIError as exc:
+        return _entry_refusal(exc, external_id=external_id, step="restore")
+    return SkillResult(
+        reply_text=RESTORED_TEXT.format(dish=log.dish_name, kcal=int(round(log.calories))),
+        action_type="food_entry_restored",
+        action_data={"log_id": log_id, "buttons": food_text_logged_keyboard(log_id)},
+        meta={"reply_kind": "food_entry_restored"},
+    )
+
+
+def _on_fix_grams_answer(context: SkillContext, bucket: dict[str, Any], text: str) -> SkillResult:
+    match = _GRAMS_ANSWER.match(text or "")
+    grams = int(match.group(1)) if match else 0
+    if not MIN_GRAMS <= grams <= MAX_GRAMS:
+        return SkillResult(
+            reply_text=GRAMS_UNREADABLE, meta={"reply_kind": "food_text_grams_unreadable"}
+        )
+    refused = _gate(context)
+    if refused is not None:
+        # Отказ снимает ожидание: иначе каждое число десять минут получало бы отказ.
+        forget(context)
+        return refused
+    log_id = str(bucket.get("log_id") or "")
+    external_id = external_user_id_for(context.bot_user)
+    try:
+        log = asyncio.run(
+            get_nutrition_client().update_meal(
+                external_user_id=external_id,
+                log_id=log_id,
+                portion_multiplier=round(grams / BASELINE_G, 3),
+            )
+        )
+    except NutritionAPIError as exc:
+        forget(context)
+        return _entry_refusal(exc, external_id=external_id, step="update")
+    forget(context)
+    return SkillResult(
+        reply_text=FIXED_TEXT.format(dish=log.dish_name, kcal=int(round(log.calories))),
+        action_type="food_entry_updated",
+        action_data={"log_id": log_id, "buttons": food_text_logged_keyboard(log_id)},
+        meta={"reply_kind": "food_entry_updated"},
     )

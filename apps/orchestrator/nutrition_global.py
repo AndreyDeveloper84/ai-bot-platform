@@ -512,7 +512,9 @@ def food_tap_labels(scan_id: str) -> dict[str, str]:
         correction_choice_keyboard,
         food_drink_clarify_keyboard,
         food_recognition_keyboard,
+        food_text_deleted_keyboard,
         food_text_estimate_keyboard,
+        food_text_logged_keyboard,
     )
 
     return {
@@ -522,8 +524,38 @@ def food_tap_labels(scan_id: str) -> dict[str, str]:
             *food_recognition_keyboard(scan_id),
             *correction_choice_keyboard(scan_id),
             *food_text_estimate_keyboard(),
+            *food_text_logged_keyboard(scan_id),
+            *food_text_deleted_keyboard(scan_id),
         )
     }
+
+
+#: OD-WATER-TAP-HISTORY (H2, ``docs/OWNER_QUESTIONS_2026-09-12.md``) — как тап
+#: правки/отмены СВОЕГО действия ложится в историю диалога. Владелец не ответил;
+#: решение 15.09 распространено и на чипы записи дневника (DRF-1838). ЕДИНСТВЕННАЯ
+#: точка выбора:
+#:
+#: * ``"silence"`` — вариант (б), рекомендован окном питания и главным окном:
+#:   в историю ничего, ход виден по ответу бота (как «Не присылать», DRF-1468);
+#: * ``"phrase"``  — вариант (а): подпись кнопки ложится репликой человека.
+#:
+#: Любое другое значение читается как молчание. Сырой payload — никогда: тап
+#: распознаётся всегда, иначе обработчик канала записал бы ``cb:…`` (DRF-988).
+EDIT_TAP_HISTORY = "silence"
+
+
+def _food_entry_tap(text: str) -> bool:
+    """Тап под сохранённой записью — по тому же шаблону, что маршрут скилла."""
+    from apps.orchestrator.ui.keyboards import ENTRY_CALLBACK_RE
+
+    return bool(ENTRY_CALLBACK_RE.match(text))
+
+
+def edit_tap_history_text(label: str | None) -> str | None:
+    """Текст истории для тапа правки своей записи — по :data:`EDIT_TAP_HISTORY`."""
+    if EDIT_TAP_HISTORY == "phrase" and label:
+        return label
+    return None
 
 
 def resolve_food_tap(text: str) -> AnketaTap | None:
@@ -540,6 +572,9 @@ def resolve_food_tap(text: str) -> AnketaTap | None:
     # имени действия у тех, что нет (``cb:food:diary``). Оба случая
     # разрешаются одинаково: строим таблицу с ним и ищем ТОЧНОЕ совпадение.
     scan_id = stripped.rsplit(":", 1)[-1]
+    if _food_entry_tap(stripped):
+        # DRF-1838 / H2 — правка своей записи: фраза или молчание, одной точкой.
+        return AnketaTap(history_text=edit_tap_history_text(food_tap_labels(scan_id).get(stripped)))
     return AnketaTap(history_text=food_tap_labels(scan_id).get(stripped))
 
 

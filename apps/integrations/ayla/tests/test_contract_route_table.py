@@ -196,6 +196,10 @@ ROUTE_TABLE: tuple[Route, ...] = (
     # nutrition_client (#1050) — X-Service-Token + X-External-User-ID.
     Route("POST", "/api/v1/nutrition/internal/scan/", Auth.SERVICE_EXT),
     Route("POST", "/api/v1/nutrition/internal/food-log/", Auth.SERVICE_EXT),
+    # DRF-1838 — правка / удаление записи и возврат в окне (§109 шаг 7).
+    Route("PATCH", "/api/v1/nutrition/internal/food-log/{id}/", Auth.SERVICE_EXT),
+    Route("DELETE", "/api/v1/nutrition/internal/food-log/{id}/", Auth.SERVICE_EXT),
+    Route("POST", "/api/v1/nutrition/internal/food-log/{id}/restore/", Auth.SERVICE_EXT),
     Route("GET", "/api/v1/nutrition/internal/summary/", Auth.SERVICE_EXT),
     Route("GET", "/api/v1/nutrition/internal/deficits/", Auth.SERVICE_EXT),
     Route("GET", "/api/v1/nutrition/internal/profile/", Auth.SERVICE_EXT),
@@ -583,6 +587,9 @@ async def _exercise_nutrition() -> None:
     await guard(c.purge_body_parameters(external_user_id=_EXT_USER))
     await guard(c.add_water(external_user_id=_EXT_USER, ml=250))
     await guard(c.undo_water(external_user_id=_EXT_USER, entry_id="ENTRYID"))
+    await guard(c.update_meal(external_user_id=_EXT_USER, log_id="ENTRYID", portion_multiplier=2.0))
+    await guard(c.delete_meal(external_user_id=_EXT_USER, log_id="ENTRYID"))
+    await guard(c.restore_meal(external_user_id=_EXT_USER, log_id="ENTRYID"))
     await guard(c.get_water_today(external_user_id=_EXT_USER))
     await guard(c.get_cross_domain_insights(external_user_id=_EXT_USER))
     await guard(c.post_cross_domain_seen(external_user_id=_EXT_USER, shown_id="SHOWNID"))

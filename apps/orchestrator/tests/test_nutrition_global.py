@@ -506,12 +506,20 @@ class TestFoodTapAsAHistoryTurn:
         Кнопка, добавленная через месяц без метки, падает здесь, а не в
         истории у человека в чате.
         """
+        from apps.orchestrator.nutrition_global import edit_tap_history_text
+
         labels = food_tap_labels(self.SCAN)
         assert labels, "клавиатуры еды пусты — проверка ниже ни о чём"
         for payload, label in labels.items():
             tap = resolve_food_tap(payload)
             assert tap is not None, payload
-            assert tap.history_text == label, payload
+            # DRF-1838 — чипы правки своей записи идут через точку выбора H2
+            # (OD-WATER-TAP-HISTORY): метка есть всегда, а в историю она
+            # попадает или нет по решению владельца. Остальные — меткой.
+            if payload.startswith("cb:food:entry_"):
+                assert tap.history_text == edit_tap_history_text(label), payload
+            else:
+                assert tap.history_text == label, payload
 
     def test_the_confirmation_and_the_rejection_are_both_kept(self):
         """«✅ В дневник» и «❌ Не то» — подтверждение и поправка о себе."""
