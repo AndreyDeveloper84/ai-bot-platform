@@ -131,7 +131,9 @@ class CatalogSpecialistDTO:
     ``CatalogMaster.ayla_user_id`` (event/booking bridge, AMD-005).
     ``is_active`` mirrors status==active AND is_available upstream; the
     feed's queryset already filters to those, but the mapping stays
-    explicit for forward-compat. Platform-owned fields (invite_status,
+    explicit for forward-compat. DRF-1845: AND is_booking_enabled — the
+    catalog keeps a master whose bookings are paused IN the feed (this sync
+    never deactivates rows that stop arriving), so the pause is read here. Platform-owned fields (invite_status,
     archived_at…) never ride here — sync must not touch them.
 
     ``avatar_url`` (DRF-1812, M20) — фото мастера, владелец которого каталог
@@ -1204,7 +1206,11 @@ def _parse_specialist(row: dict[str, Any]) -> CatalogSpecialistDTO:
         rating=_parse_decimal(row.get("rating")),
         review_count=int(row.get("reviews_count") or 0),
         is_active=bool(
-            str(row.get("status", "")).lower() == "active" and row.get("is_available", True)
+            str(row.get("status", "")).lower() == "active"
+            and row.get("is_available", True)
+            # DRF-1845 — «не принимаю записи». Absent key = an older catalog
+            # that never sent it = today's behaviour, not a pause.
+            and row.get("is_booking_enabled", True)
         ),
         # DRF-1588 — ``_optional_str``/``_parse_decimal``, а не ``or ""`` /
         # ``or 0``: последние стирают ровно ту разницу, ради которой поле

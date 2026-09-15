@@ -156,6 +156,26 @@ class FoodNotRecognizedError(NutritionAPIError):
     """Ayla returned 400 FOOD_NOT_RECOGNIZED — not food / unreadable photo."""
 
 
+class MealNotFoundError(NutritionAPIError):
+    """DRF-1838: 404 — no such entry (or deletion) for THIS person."""
+
+
+class MealRestoreExpiredError(NutritionAPIError):
+    """DRF-1838: 410 RESTORE_WINDOW_EXPIRED — the deletion is final."""
+
+
+class MealEditConflictError(NutritionAPIError):
+    """DRF-1838: 409 — the entry mirrors a water entry (the water undo owns it)."""
+
+
+class NutritionUncertainOutcomeError(NutritionUnavailableError):
+    """DRF-1838: the request left, the answer never came back (timeout / network).
+
+    Unlike a 5xx or an open circuit, the write MAY have been applied on Ayla's
+    side — the chat must not tell the person «ничего не изменила».
+    """
+
+
 @dataclass(frozen=True)
 class ScanResponse:
     """Subset of ``FoodScanResponseSerializer`` data we care about."""
@@ -178,6 +198,14 @@ class FoodLogResponse:
     meal_type: str
     calories: float
     raw: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class MealDeletion:
+    """DRF-1838 — ``DELETE internal/food-log/<id>/``: запись убрана, окно открыто."""
+
+    log_id: str
+    restore_window_expires_at: str | None
 
 
 @dataclass(frozen=True)
@@ -816,6 +844,124 @@ class NutritionClient:
         if err_code == "FOOD_NOT_RECOGNIZED":
             raise FoodNotRecognizedError("nutrition_missing")
         raise NutritionAPIError(f"http_{resp.status_code}_{err_code or 'unknown'}")
+
+    # ─── правка / удаление записи (DRF-1838, §109 шаг 7) ─────────────────
+
+    def _meal_edit_refusal(self, resp: httpx.Response, *, now: float) -> NutritionAPIError:
+        """Map a non-success answer of the entry-edit routes to a named error."""
+        if resp.status_code >= 500:
+            self._circuit.record_failure(now=now)
+            return NutritionUnavailableError(f"http_{resp.status_code}")
+        self._circuit.record_success()
+        try:
+            err_code = (resp.json().get("error") or {}).get("code", "")
+        except ValueError:
+            err_code = ""
+        if resp.status_code == 404:
+            return MealNotFoundError(err_code or "not_found")
+        if resp.status_code == 410:
+            return MealRestoreExpiredError(err_code or "restore_window_expired")
+        if resp.status_code == 409:
+            return MealEditConflictError(err_code or "conflict")
+        return NutritionAPIError(f"http_{resp.status_code}_{err_code or 'unknown'}")
+
+    async def _meal_edit_call(
+        self,
+        method: str,
+        path: str,
+        *,
+        external_user_id: str,
+        body: dict[str, Any] | None = None,
+    ) -> tuple[httpx.Response, float]:
+        now = time.monotonic()
+        if self._circuit.is_open(now=now):
+            raise NutritionUnavailableError("circuit_open")
+        url = self._urls.build(path)
+        headers = with_request_id(
+            {
+                "X-Service-Token": self._token,
+                "X-External-User-ID": external_user_id,
+            }
+        )
+        try:
+            async with httpx.AsyncClient(timeout=self._timeout_s) as http:
+                resp = await http.request(method, url, headers=headers, json=body)
+        except (httpx.TimeoutException, httpx.NetworkError) as exc:
+            self._circuit.record_failure(now=now)
+            logger.warning(
+                "nutrition_client.meal_edit.network method=%s ext=%s err=%s",
+                method,
+                external_user_id,
+                type(exc).__name__,
+            )
+            raise NutritionUncertainOutcomeError(f"network: {type(exc).__name__}") from exc
+        return resp, now
+
+    async def update_meal(
+        self,
+        *,
+        external_user_id: str,
+        log_id: str,
+        portion_multiplier: float | None = None,
+        meal_type: str | None = None,
+    ) -> FoodLogResponse:
+        """PATCH ``/api/v1/nutrition/internal/food-log/{log_id}/``.
+
+        Каталог пересчитывает снимок записи и называет число исправленным
+        клиентом (§136). Raises :class:`MealNotFoundError` (404),
+        :class:`MealEditConflictError` (409), :class:`NutritionUnavailableError`.
+        """
+        body: dict[str, Any] = {}
+        if portion_multiplier is not None:
+            body["portion_multiplier"] = portion_multiplier
+        if meal_type is not None:
+            body["meal_type"] = meal_type
+        resp, now = await self._meal_edit_call(
+            "PATCH",
+            f"nutrition/internal/food-log/{log_id}/",
+            external_user_id=external_user_id,
+            body=body,
+        )
+        if resp.status_code == 200:
+            return self._parse_log_response(resp, external_user_id=external_user_id)
+        raise self._meal_edit_refusal(resp, now=now)
+
+    async def delete_meal(self, *, external_user_id: str, log_id: str) -> MealDeletion:
+        """DELETE ``/api/v1/nutrition/internal/food-log/{log_id}/`` — обратимо в окне."""
+        resp, now = await self._meal_edit_call(
+            "DELETE",
+            f"nutrition/internal/food-log/{log_id}/",
+            external_user_id=external_user_id,
+        )
+        if resp.status_code == 200:
+            self._circuit.record_success()
+            try:
+                body = resp.json().get("data")
+            except ValueError:
+                body = None
+            if not isinstance(body, dict):
+                # Удаление могло пройти, но ответ не читается — назвать, а не упасть мимо скилла.
+                raise NutritionAPIError("http_200_malformed_body")
+            return MealDeletion(
+                log_id=str(body.get("entry_id") or log_id),
+                restore_window_expires_at=body.get("restore_window_expires_at"),
+            )
+        raise self._meal_edit_refusal(resp, now=now)
+
+    async def restore_meal(self, *, external_user_id: str, log_id: str) -> FoodLogResponse:
+        """POST ``/api/v1/nutrition/internal/food-log/{log_id}/restore/``.
+
+        Raises :class:`MealRestoreExpiredError` (410) — окно закрыто, удаление
+        окончательно; :class:`MealNotFoundError` (404).
+        """
+        resp, now = await self._meal_edit_call(
+            "POST",
+            f"nutrition/internal/food-log/{log_id}/restore/",
+            external_user_id=external_user_id,
+        )
+        if resp.status_code == 200:
+            return self._parse_log_response(resp, external_user_id=external_user_id)
+        raise self._meal_edit_refusal(resp, now=now)
 
     # ─── summary ──────────────────────────────────────────────────────────
 

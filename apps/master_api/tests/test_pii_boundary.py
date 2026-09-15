@@ -925,6 +925,11 @@ NOT_SWEPT_ROUTES: dict[str, str] = {
         "one own canon-gap request from the catalog; no customer record — covered "
         "with a stubbed client in test_canon_gap_requests_1802"
     ),
+    "accepting_bookings": (
+        "GET/PATCH proxy to the catalog's availability route (DRF-1845): the "
+        "response is exactly {accepting_bookings: bool, status} of the master's "
+        "own profile, no customer record — shape pinned in test_accepting_bookings_1845"
+    ),
 }
 
 

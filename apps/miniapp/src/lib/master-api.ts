@@ -1241,3 +1241,24 @@ export const confirmAylaAction = (token: string): Promise<AylaConfirmResponse> =
     method: "POST",
     body: JSON.stringify({ token }),
   });
+
+// --- DRF-1845 «Принимаю записи» ---------------------------------------------
+// Mirrors apps/master_api/views.py::accepting_bookings — a proxy to the
+// catalog's availability route. The flag lives in the catalog only; the answer
+// is its readback. The bot sees a pause on its next catalog sync (≤15 min).
+
+export interface AcceptingBookingsResponse {
+  accepting_bookings: boolean;
+  status: string | null;
+}
+
+export const getAcceptingBookings = (): Promise<AcceptingBookingsResponse> =>
+  request("/accepting-bookings", { method: "GET" });
+
+export const setAcceptingBookings = (
+  accepting: boolean,
+): Promise<AcceptingBookingsResponse> =>
+  request("/accepting-bookings", {
+    method: "PATCH",
+    body: JSON.stringify({ accepting_bookings: accepting }),
+  });

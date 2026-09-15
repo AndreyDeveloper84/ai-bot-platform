@@ -1380,6 +1380,48 @@ class AylaBookingHTTPClient:
         )
         return self._ok(resp, success=(200,))
 
+    def get_accepting_bookings(
+        self,
+        *,
+        specialist_id: str,
+        external_user_id: str,
+    ) -> dict[str, Any]:
+        """``GET internal/specialists/{id}/availability/`` — «Принимаю записи».
+
+        DRF-1845. ``external_user_id`` names the SUBJECT: the catalog lets a
+        master read only their own profile's flag, as with working hours.
+        """
+        resp = self._request(
+            "GET",
+            f"specialists/{specialist_id}/availability/",
+            external_user_id=external_user_id,
+        )
+        return self._ok(resp, success=(200,))
+
+    def set_accepting_bookings(
+        self,
+        *,
+        specialist_id: str,
+        external_user_id: str,
+        accepting: bool,
+    ) -> dict[str, Any]:
+        """``PATCH internal/specialists/{id}/availability/`` — pause or resume.
+
+        DRF-1845. The catalog writes ``SpecialistProfile.is_booking_enabled``
+        and answers with its readback. A profile that is not published is
+        refused with 409 ``PROFILE_NOT_ACTIVE`` — raised here as
+        :class:`BookingBadRequestError` with that code; 403 = not the subject.
+        """
+        if not isinstance(accepting, bool):
+            raise ValueError(f"accepting must be a bool, got {accepting!r}")
+        resp = self._request(
+            "PATCH",
+            f"specialists/{specialist_id}/availability/",
+            json_body={"accepting_bookings": accepting},
+            external_user_id=external_user_id,
+        )
+        return self._ok(resp, success=(200,))
+
     def get_specialist_service_edges(
         self,
         *,
