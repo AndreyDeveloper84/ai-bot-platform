@@ -9014,7 +9014,7 @@ batch / backfill / cron / mass processing
 
 ### HISTORICAL PROVENANCE — старый Yandex contract · SUPERSEDED / DO NOT IMPLEMENT (что из него осталось в силе — в конце раздела)
 
-> **STATUS: `SUPERSEDED_BY_DADATA_AMENDMENT`** — решение ниже сохранено как provenance и не удалено. Действующий провайдер пилота — в AMENDMENT 2026-09-16 в конце §139 (owner ruling 2026-09-16).
+> **STATUS: `SUPERSEDED_BY_DADATA_AMENDMENT`** — решение ниже сохранено как provenance и не удалено. Действующий провайдер пилота — в AMENDMENT 2026-09-16 в начале §139 (owner ruling 2026-09-16).
 
 **Для пилота — API Яндекс Геокодера, подключённый через внутренний адаптер**, чтобы позднее заменить провайдера без изменения бизнес-логики.
 
