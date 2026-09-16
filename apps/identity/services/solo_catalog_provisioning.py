@@ -32,6 +32,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from django.db import transaction
 from django.utils import timezone
 
 from apps.catalog.services.http_client import (
@@ -61,6 +62,27 @@ def provision_catalog_workspace(
     """
 
     if link.catalog_provisioned_at is not None:
+        # DRF-N. Ранний возврат отвечал на вопрос «провижининг ВЫПОЛНЯЛСЯ?»,
+        # а нужен ответ на «факт СОГЛАСОВАН?». Разница появляется ровно
+        # после обрыва между двумя записями ниже: ``catalog_provisioned_at``
+        # уже проставлен, а зеркало ещё пусто — и повтор уходил отсюда с
+        # «сделано», не тронув зеркала. То есть дефект запирал себе путь к
+        # починке: чем чаще повторяли, тем увереннее система отвечала, что
+        # чинить нечего.
+        #
+        # Каталог при этом звать НЕЛЬЗЯ: id уже выдан, и второй вызов завёл
+        # бы второй workspace под тот же ``external_user_id``. Поэтому здесь
+        # — досыл факта, а не повторный провижининг.
+        stored = link.catalog_specialist_id
+        if stored and not link.master.catalog_specialist_id:
+            link.master.catalog_specialist_id = stored
+            link.master.save(update_fields=["catalog_specialist_id"])
+            logger.info(
+                "identity.solo_catalog.mirror_backfilled master=%s specialist=%s — "
+                "the link kept a fact the mirror had lost",
+                link.master_id,
+                stored,
+            )
         return None
 
     refusal: str | None
@@ -85,21 +107,32 @@ def provision_catalog_workspace(
     except CatalogTransportError:
         refusal = "transport_error"
     else:
-        link.catalog_specialist_id = dto.specialist_id
-        link.catalog_provisioned_at = timezone.now()
-        link.catalog_provisioning_refusal = ""
-        link.save(
-            update_fields=[
-                "catalog_specialist_id",
-                "catalog_provisioned_at",
-                "catalog_provisioning_refusal",
-            ]
-        )
-        # DRF-1933: тот же readback — на строку зеркала, которую читают
-        # прокси кабинета (apps/catalog/specialist_ref.py). У соло-мастера
-        # первичный ключ строки — uuid4, а не id профиля каталога.
-        link.master.catalog_specialist_id = dto.specialist_id
-        link.master.save(update_fields=["catalog_specialist_id"])
+        # DRF-N: обе записи — В ОДНОЙ транзакции. Один и тот же факт живёт в
+        # двух местах (связь и строка зеркала), и до этой правки они писались
+        # двумя ``save()`` подряд: падение между ними оставляло связь со
+        # значением, а зеркало пустым. Читатели зовут каталог через зеркало
+        # (``apps/catalog/specialist_ref.py``), поэтому такая строка молча
+        # выглядела бы как «у мастера нет профиля в каталоге» при живом
+        # профиле — запрещённый частичный успех.
+        #
+        # Запись ПРИЧИНЫ ОТКАЗА ниже намеренно осталась снаружи: откат стёр
+        # бы ровно то объяснение, ради которого оператор туда смотрит.
+        with transaction.atomic():
+            link.catalog_specialist_id = dto.specialist_id
+            link.catalog_provisioned_at = timezone.now()
+            link.catalog_provisioning_refusal = ""
+            link.save(
+                update_fields=[
+                    "catalog_specialist_id",
+                    "catalog_provisioned_at",
+                    "catalog_provisioning_refusal",
+                ]
+            )
+            # DRF-1933: тот же readback — на строку зеркала, которую читают
+            # прокси кабинета (apps/catalog/specialist_ref.py). У соло-мастера
+            # первичный ключ строки — uuid4, а не id профиля каталога.
+            link.master.catalog_specialist_id = dto.specialist_id
+            link.master.save(update_fields=["catalog_specialist_id"])
         logger.info(
             "identity.solo_catalog.provisioned master=%s tenant=%s specialist=%s created=%s",
             link.master_id,
