@@ -227,6 +227,21 @@ def test_every_local_schedule_reader_is_classified():
     assert NAMED_LIMITS and all(NAMED_LIMITS)
 
 
+def test_availability_path_is_no_longer_classified_as_debt():
+    """Переход записи переписи — такое же утверждение о коде, как любое другое (DRF-2019).
+
+    После правки `request_availability_change` сверяет пересечение по живой
+    рамке, и запись про долг становится ложной. Узел стоит отдельно от порядка
+    слияния: если PR соберут в другом порядке или один отменят, он скажет об
+    этом вслух, а не промолчит, потому что «в линии коммитов так вышло».
+    """
+    rel = "apps/master_api/services/schedule.py"
+    kind, reason = EXPECTED[rel]
+
+    assert kind != DEBT, reason
+    assert "DRF-2019" not in reason, reason
+
+
 def test_guard_catches_a_new_flag_blind_reader():
     """Положительная стража сторожа — на своих входах, не на боевой переписи.
 
