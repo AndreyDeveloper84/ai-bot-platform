@@ -127,6 +127,14 @@ docker exec -i dev-web-1 python manage.py promote_tenant_location --slug <slug> 
 docker exec -i dev-web-1 python manage.py promote_tenant_location --slug <slug> --apply   # место review_required
 ```
 
+**Ловушка.** `promote_tenant_location` по слугу `ayla-marketplace` **не запускать**:
+это служебный тенант маркетплейса, не салон. Адрес у него непустой, поэтому
+единственная защита команды пройдена, и `--apply` создаст ему место молча.
+Отличить служебный тенант от салона команда не может **по устройству**:
+`Tenant.Kind` знает только `SALON` и `SOLO`, умолчание — `SALON`, служебного
+значения в схеме нет. До появления сторожа в самой команде салон от служебного
+тенанта отличает только человек — то есть эта строка.
+
 **Путь (форма).** «Места оказания услуг» → Add (`tenants/admin.py:68-115`):
 `tenant`, `label`, `address`, `city`; `status` оставить `review_required`.
 
