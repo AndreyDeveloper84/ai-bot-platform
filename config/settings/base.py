@@ -456,6 +456,16 @@ REPLAY_LIVE_CAPTURE_ENABLED = os.environ.get("REPLAY_LIVE_CAPTURE_ENABLED", "fal
 if "DRE_SHADOW_ENABLED" in os.environ:
     DRE_SHADOW_ENABLED = os.environ["DRE_SHADOW_ENABLED"]
 
+# Снятие барьера RECOMMEND наружу пакета DecisionReadiness. Форма та же и по той
+# же причине: ключ существует ТОЛЬКО если переменная задана, значение идёт СЫРОЙ
+# строкой, а три «выкл» различает `release_flag()`
+# (`apps/orchestrator/decision_readiness/release.py`). Разница с теневым флагом —
+# в цене ошибки: нечитаемое значение ТАМ не включит тень, а ЗДЕСЬ не СНИМЕТ
+# запрет. Умолчание кода — барьер стоит; снимает его acceptance-прогон S1/F0,
+# а не отдельное решение.
+if "DRE_RECOMMEND_RELEASE_ENABLED" in os.environ:
+    DRE_RECOMMEND_RELEASE_ENABLED = os.environ["DRE_RECOMMEND_RELEASE_ENABLED"]
+
 # #433 umbrella — HANDLER_EXCEPTION → DLQ threshold. A handler that
 # raises gets retried by Ayla per §6.3; after this many failed
 # attempts (counted per event_id + handler), bot-platform upserts a

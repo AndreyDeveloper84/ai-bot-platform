@@ -110,18 +110,23 @@ _TRUE_WORDS = frozenset({"true", "1", "yes", "on"})
 _FALSE_WORDS = frozenset({"false", "0", "no", "off", ""})
 
 
-def shadow_flag() -> FlagReading:
-    """Read the shadow flag, and say where the answer came from.
+def read_flag(setting_name: str) -> FlagReading:
+    """Read one boolean setting, and say where the answer came from.
 
     Never raises: a broken flag must not break a turn. It resolves to `False`
     with the source named, so the audit can tell "off", "unset" and "unreadable"
     apart — and only the first of the three is somebody's decision.
+
+    Shared rather than copied. A second flag carrying its own copy of the word
+    tables below would answer "what does this string mean" twice, and the two
+    answers would drift without anything failing — a copy has no refusal. The
+    caller passes a setting name; what the words mean stays in one place.
     """
 
-    if not hasattr(settings, SHADOW_SETTING):
+    if not hasattr(settings, setting_name):
         return FlagReading(value=False, source=FlagSource.READ_DEFAULT)
 
-    raw = getattr(settings, SHADOW_SETTING)
+    raw = getattr(settings, setting_name)
 
     if isinstance(raw, bool):
         return FlagReading(value=raw, source=FlagSource.SETTINGS)
@@ -134,11 +139,17 @@ def shadow_flag() -> FlagReading:
             return FlagReading(value=False, source=FlagSource.SETTINGS)
 
     logger.warning(
-        "decision_readiness.shadow.flag_unreadable setting=%s type=%s — resolved to off",
-        SHADOW_SETTING,
+        "decision_readiness.flag_unreadable setting=%s type=%s — resolved to off",
+        setting_name,
         type(raw).__name__,
     )
     return FlagReading(value=False, source=FlagSource.MALFORMED)
+
+
+def shadow_flag() -> FlagReading:
+    """Read the shadow flag, and say where the answer came from."""
+
+    return read_flag(SHADOW_SETTING)
 
 
 @runtime_checkable

@@ -131,6 +131,12 @@ from apps.orchestrator.decision_readiness.shadow import (
     observe,
     shadow_flag,
 )
+from apps.orchestrator.decision_readiness.release import (
+    RELEASE_SETTING,
+    RecommendWithheld,
+    permit_outbound,
+    release_flag,
+)
 from apps.orchestrator.decision_readiness.state import (
     ConversationState,
     LoadResult,
@@ -146,6 +152,7 @@ __all__ = [
     "EMPTY_SPEC",
     "RESUME_TTL_SECONDS",
     "KNOWN_SAFETY_STATES",
+    "RELEASE_SETTING",
     "SHADOW_SETTING",
     "SPEC_VERSION",
     "UNCALIBRATED",
@@ -189,6 +196,7 @@ __all__ = [
     "ReadinessOutput",
     "ReadinessState",
     "ReaskConditions",
+    "RecommendWithheld",
     "ResumeSummary",
     "RequiredContextSpec",
     "RequiredSlot",
@@ -217,9 +225,11 @@ __all__ = [
     "from_promoted_memory",
     "from_user_action",
     "from_user_text",
+    "permit_outbound",
     "project",
     "question_id",
     "readiness_key",
+    "release_flag",
     "shadow_flag",
     "resume_conditions",
     "summarise",

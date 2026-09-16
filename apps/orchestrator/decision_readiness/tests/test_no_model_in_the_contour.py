@@ -60,6 +60,7 @@ DECISION_MODULES = (
     "declared_states.py",
     "shadow.py",
     "resume.py",
+    "release.py",
 )
 
 ADAPTERS_OUTSIDE_THE_CONTOUR = frozenset(
