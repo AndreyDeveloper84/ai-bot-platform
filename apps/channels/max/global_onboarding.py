@@ -403,10 +403,11 @@ def run_onboarding_turn(
     )
     result = WelcomeSkill().handle(ctx)
 
-    # Capture consent on the grant turn. WelcomeSkill renders the S5 first-action
-    # surface only on the consent-grant callbacks (both consent_yes and
-    # consent_yes_via_s2a funnel through ``_render_consent_granted``), so the S5
-    # reply_kind is the reliable «consent granted this turn» signal. On this global
+    # Capture consent on the grant turn. Грант-видов ДВА (DRF-1968): приветственный
+    # S5 (оба callback'а funnel через ``_render_consent_granted``) и возврат из
+    # отказа, который через ``_render_consent_granted`` НЕ идёт — у него свой
+    # ``_render_consent_recovery_granted``. Признак гранта — набор reply_kind в
+    # :func:`_is_consent_grant_turn`, а не один S5. На this global
     # path WelcomeSkill does NOT stamp consent_at itself (current_tenant() is None
     # → its guard skips); record_global_consent stamps consent_at ATOMICALLY with
     # the ConsentRecord (#1074). Idempotent (get_or_create) — re-tapping «Да» never
@@ -536,10 +537,15 @@ def _to_discovery_reply(result: Any, bot_user: Any = None) -> DiscoveryReply:
 def _record_consent_journal(bot_user: Any) -> bool:
     """Capture consent server-side, ATOMICALLY (best-effort, loud on failure).
 
-    Возвращает, записан ли PERSONAL_DATA этим ходом. Вызывающему этого не
-    вывести из «не бросило»: исключения здесь глотаются намеренно, и молчание
-    одинаково выглядит и при успехе, и при сбое. Утверждать согласие по
-    152-ФЗ можно только по этому значению (DRF-1968).
+    Возвращает, ЕСТЬ ЛИ активный грант PERSONAL_DATA после вызова — создан им
+    или уже существовал (``record_global_consent`` идемпотентен). Именно это, а
+    не «создан этим ходом», и нужно для утверждения по 152-ФЗ: человеку обещают
+    наличие согласия, а не факт его создания. НЕ сужать до флага ``created`` из
+    ``get_or_create`` — тогда повторный тап человека, у которого согласие уже
+    есть, начнёт получать текст неудачи.
+
+    Вызывающему этого не вывести из «не бросило»: исключения здесь глотаются
+    намеренно, и молчание одинаково выглядит и при успехе, и при сбое (DRF-1968).
 
     ``record_global_consent`` writes the proof-of-consent ConsentRecord AND stamps
     ``bot_user.consent_at`` in one transaction (#1074), so on this global path

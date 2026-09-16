@@ -186,6 +186,9 @@ class TestGrantWritesTheJournalAndReturns:
         bot_user, conversation = _global_user_and_conv()
         reply = run_onboarding_turn(conversation, bot_user, f"cb:welcome:consent_yes_{origin}")
 
+        # Сверка константы с самой собой: доказывает ПРОВОДКУ origin → текст, и
+        # это и есть предмет узла. Про сам текст он не говорит ничего — тексты
+        # черновики W3; читать его как покрытие содержания нельзя.
         assert reply.text == CONSENT_RECOVERY_RETURN_TEXTS[origin]
 
     def test_every_new_tap_has_a_history_label(self) -> None:

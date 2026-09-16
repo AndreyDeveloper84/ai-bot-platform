@@ -140,6 +140,33 @@ def _water_turn(user_id: int) -> None:
     )
 
 
+def _tap_turn(user_id: int, payload: str) -> None:
+    """Тап по кнопке — событием MAX, ровно в той форме, в какой шлёт платформа."""
+    from django.utils import timezone
+
+    bot_user = resolve_or_create_global_bot_user(
+        channel="max", channel_user_id=str(user_id), chat_id=str(user_id)
+    )
+    bot_user.welcomed_at = timezone.now()
+    bot_user.save(update_fields=["welcomed_at"])
+    max_handler.handle_global_max_event(
+        {
+            "update_type": "message_callback",
+            "timestamp": 1731320000000,
+            "callback": {
+                "timestamp": 1731320000500,
+                "callback_id": f"cb-{user_id}",
+                "payload": payload,
+                "user": {"user_id": user_id, "name": "Ирина", "lang": "ru"},
+            },
+            "message": {
+                "recipient": {"chat_id": user_id, "chat_type": "dialog"},
+                "body": {"mid": f"m{user_id}", "seq": 1, "text": "", "attachments": []},
+            },
+        }
+    )
+
+
 def _callbacks_of(attachments) -> list[str]:
     out: list[str] = []
     for att in attachments or []:
@@ -158,7 +185,14 @@ class TestTheButtonReachesTheChannel:
     def test_the_water_refusal_reaches_max_with_the_consent_button(
         self, monkeypatch, sent, water_writes
     ) -> None:
-        """Ход идёт под сентинельным тенантом — кнопка обязана дожить до канала."""
+        """Ход идёт под сентинельным тенантом — кнопка обязана дожить до канала.
+
+        НАЗВАННЫЙ ПРЕДЕЛ: через канал целиком проходит только отказ ВОДЫ. Фото и
+        еда текстом покрыты прямыми вызовами при ``tenant=None`` — то есть в той
+        самой слепой зоне, где жил B1. Риск низкий (все три зовут один
+        ``consent_offer_action_data``), но сторож этого не заявляет, и утверждать
+        за него «все три поверхности проверены в бою» нельзя.
+        """
         _model_calls_log_water(monkeypatch)
 
         _water_turn(71968)
@@ -168,6 +202,26 @@ class TestTheButtonReachesTheChannel:
         last = sent[-1]
         assert last["text"] == CONSENT_TEXT
         assert "cb:welcome:consent_offer_water" in _callbacks_of(last["attachments"])
+
+    def test_the_offer_tap_reaches_the_consent_screen_through_the_channel(
+        self, monkeypatch, sent
+    ) -> None:
+        """Вторая половина маршрута: тап доезжает до экрана согласия.
+
+        Все прочие узлы зовут ``run_onboarding_turn`` или ``WelcomeSkill`` напрямую
+        и потому не видят лестницу канала: ``is_stale_tap`` и ``resolve_tap_text``
+        стоят ВЫШЕ приветствия и разбирают свои семейства payload, дальше
+        ``needs_onboarding``. Ровно такая необойдённая половина маршрута и
+        породила B1 — там кнопку гасят молча, а прямой вызов остаётся зелёным.
+        """
+        from apps.skills.welcome.skill import S2_CONSENT_TEXT
+
+        _tap_turn(71977, "cb:welcome:consent_offer_water")
+
+        assert sent, "тап не дошёл до ответа"
+        last = sent[-1]
+        assert last["text"] == S2_CONSENT_TEXT
+        assert "cb:welcome:consent_yes_water" in _callbacks_of(last["attachments"])
 
 
 # ── 2. Обещание согласия — только там, где оно записано ──────────────────────
@@ -192,6 +246,11 @@ class TestThePromiseMatchesTheJournal:
         with tenant_scope(tenant):
             result = WelcomeSkill().handle(ctx)
 
+        # Положительное утверждение обязательно: `not ...exists()` покраснеть НЕ
+        # может — ConsentRecord на салонном пути не пишет никто, ни при верной
+        # реализации, ни при сломанной. Без строки ниже сторож держался бы на
+        # одном «!=», которое зелено и на пустом тексте, и на трассе.
+        assert result.meta["reply_kind"] == "welcome_s5_first_action"
         assert result.reply_text != CONSENT_RECOVERY_RETURN_TEXTS["photo"]
         assert not ConsentRecord.all_tenants.filter(bot_user=bot_user, granted=True).exists()
 
@@ -199,7 +258,7 @@ class TestThePromiseMatchesTheJournal:
         """Запись не удалась — человеку не говорится, что согласие есть."""
         from apps.channels.max.global_onboarding import run_onboarding_turn
         from apps.conversations.services import resolve_active_global_conversation
-        from apps.skills.welcome.skill import CONSENT_RECOVERY_RETURN_TEXTS
+        from apps.skills.welcome.skill import CONSENT_RECOVERY_FAILED_TEXT
 
         bot_user = resolve_or_create_global_bot_user(
             channel="max", channel_user_id="71970", chat_id="71970"
@@ -211,7 +270,10 @@ class TestThePromiseMatchesTheJournal:
         ):
             reply = run_onboarding_turn(conversation, bot_user, "cb:welcome:consent_yes_photo")
 
-        assert reply.text != CONSENT_RECOVERY_RETURN_TEXTS["photo"]
+        # Точное равенство, а не «!=»: неравенство осталось бы зелёным и на
+        # пустой строке, и на экране S5, и на тексте трассы — то есть не
+        # отличало бы честный отказ от любой поломки.
+        assert reply.text == CONSENT_RECOVERY_FAILED_TEXT
         assert not ConsentRecord.all_tenants.filter(bot_user=bot_user, granted=True).exists()
 
 
@@ -345,7 +407,11 @@ class TestGuards:
         ]
 
     def test_the_three_return_texts_are_different(self) -> None:
-        """Возврат — в СВОЙ поток: одинаковые фразы сделали бы origin фикцией."""
+        """Возврат — в СВОЙ поток: одинаковые фразы сделали бы origin фикцией.
+
+        Предел: проверяется РАЗЛИЧИЕ, а не содержание. Узел зелен для любых трёх
+        непохожих черновиков — содержание текстов ждёт слова владельца (W3).
+        """
         from apps.skills.welcome.skill import (
             CONSENT_RECOVERY_ORIGINS,
             CONSENT_RECOVERY_RETURN_TEXTS,
