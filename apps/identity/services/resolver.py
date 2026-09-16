@@ -56,6 +56,7 @@ def resolve_or_create_bot_user(
     display_name: str = "",
     phone: str = "",
     chat_id: str = "",
+    timezone: str = "",
 ) -> BotUser:
     """Return the BotUser for ``(current_tenant, channel, channel_user_id)``.
 
@@ -66,6 +67,23 @@ def resolve_or_create_bot_user(
                     rows ONLY when the row's `display_name` is blank.
       phone: E.164 phone. Same opportunistic-enrichment rule.
       chat_id: Channel-side chat identifier for outbound. Same rule.
+      timezone: IANA zone to stamp **on creation only**, and only when the
+                caller has one. NOT part of the opportunistic enrichment
+                below, and that is deliberate on two counts.
+
+                First, blank is a declared state, not a gap: the column's
+                own help_text says «Пусто означает „не задано“», and every
+                reader spells it `bot_user.timezone or "Europe/Moscow"`.
+                Filling it later would move a person's day without anyone
+                asking them.
+
+                Second, the default is `""` so the seven callers that do not
+                pass it keep the behaviour they have today. The one caller
+                that does — the Mini App's lazy registration — used to run
+                its own `get_or_create` with `defaults={... "timezone":
+                tenant.timezone}`, which is what made this one operation two
+                paths with different rules. The parameter exists to collapse
+                those two into this one without changing what either did.
 
     Returns:
       A `BotUser` instance, either just-created or pre-existing.
@@ -90,6 +108,12 @@ def resolve_or_create_bot_user(
         "phone": phone,
         "chat_id": chat_id,
     }
+    if timezone:
+        # Creation only — see the `timezone` arg. Absent from the enrichment
+        # loop below by design, and absent from the event payload too: the
+        # event carries `phone_present` rather than values, and a zone is
+        # neither a presence flag nor something a consumer reads from there.
+        defaults["timezone"] = timezone
     # Use ``all_tenants`` for the lookup because the default
     # ``TenantScopedManager.get_queryset`` already filters by tenant —
     # passing ``tenant=tenant`` to ``get_or_create`` via the default

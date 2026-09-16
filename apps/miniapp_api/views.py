@@ -68,6 +68,7 @@ from apps.miniapp_api.auth import (
     extract_init_data,
     verify_init_data,
 )
+from apps.identity.services import resolve_or_create_bot_user
 from apps.miniapp_api.dev_bypass import try_dev_bypass
 from apps.scheduling.services.resolver import (
     collect_time_block_intervals,
@@ -105,17 +106,35 @@ def _lazy_register_bot_user(tenant: Tenant, verified: VerifiedInitData) -> BotUs
     if verified.chat and "id" in verified.chat:
         chat_id = str(verified.chat.get("id", ""))[:128]
 
-    bot_user, created = BotUser.all_tenants.get_or_create(
-        tenant=tenant,
-        channel="max",
-        channel_user_id=verified.user_id,
-        defaults={
-            "display_name": display,
-            "chat_id": chat_id,
-            "timezone": tenant.timezone,
-        },
-    )
-    if created:
+    existed = BotUser.all_tenants.filter(
+        tenant=tenant, channel="max", channel_user_id=verified.user_id
+    ).exists()
+
+    # ONE path to a person. This used to be a local ``get_or_create`` with its
+    # own ``defaults``, which made «найти-или-создать человека» two operations
+    # with different rules: the resolver fills a blank field on an existing row
+    # and never overwrites, this one filled nothing at all. Same operation, two
+    # answers — the thing the owner forbade.
+    #
+    # The scope is entered HERE, around this one call, and closes before the
+    # decorator returns. ``require_init_data`` deliberately does NOT enter a
+    # tenant scope (#1019 / EPIC #1014 — the nationwide bot serves discovery
+    # tenant-less, so per-request scope is no longer a blanket decorator
+    # concern), and that decision stands: views still stack
+    # ``with_request_tenant`` for their body, and ``current_tenant()`` is None
+    # again by the time the view runs. The resolver, for its part, fails loudly
+    # without a scope on purpose — so a caller that knows its tenant must say
+    # so. Same shape as ``apps/orchestrator/handoff.py``'s handoff-to-booking.
+    with tenant_scope(tenant):
+        bot_user = resolve_or_create_bot_user(
+            channel="max",
+            channel_user_id=verified.user_id,
+            display_name=display,
+            chat_id=chat_id,
+            timezone=tenant.timezone,
+        )
+
+    if not existed:
         logger.info(
             "miniapp_api.auth.lazy_register tenant=%s channel_user_id=%s display=%r",
             tenant.slug,
