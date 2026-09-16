@@ -1318,6 +1318,94 @@ class TestTheScheduleGateIsOffUntilTheOwnerTurnsItOn:
         assert _gate_roster(tenant, master) == "active"
 
 
+class TestTheCatalogIdentityGateIsOffUntilSomebodyCanFillTheColumn:
+    """Личность в каталоге: условие есть, но никого не снимает.
+
+    Порядок тот же, что у §83, и по той же причине: сперва способ
+    заполнить ``catalog_specialist_id``, потом кампания по уже
+    подключённым, и только потом гейт. Путь приглашения этот столбец не
+    пишет ВОВСЕ — его заполняет синхронизация, — поэтому включённый
+    сегодня гейт снял бы с витрины каждую строку, заведённую
+    приглашением.
+
+    Насколько «каждую» — видно прямо в этом файле: ``_make_master`` не
+    ставит ``catalog_specialist_id`` ни разу, то есть все мастера всех
+    тестов здесь каталогу неизвестны и при выключенном флаге продаются.
+    Это не оговорка фикстуры, а замер: столько строк уедет с витрины в
+    день включения.
+    """
+
+    def test_a_master_unknown_to_the_catalog_still_sells_while_the_flag_is_off(
+        self, tenant: Tenant
+    ) -> None:
+        master = _make_master(tenant)
+
+        assert master.catalog_specialist_id is None
+        assert sale_block(master) is None
+        assert is_available(master) is True
+        assert CatalogMaster.all_tenants.filter(available_q()).filter(pk=master.pk).exists()
+
+    @override_settings(MASTER_CATALOG_IDENTITY_REQUIRED=True)
+    def test_with_the_flag_on_the_same_master_stops_selling_and_says_why(
+        self, tenant: Tenant
+    ) -> None:
+        master = _make_master(tenant)
+
+        assert sale_block(master) == "catalog_unlinked"
+        assert is_available(master) is False
+        assert not CatalogMaster.all_tenants.filter(available_q()).filter(pk=master.pk).exists()
+
+    @override_settings(MASTER_CATALOG_IDENTITY_REQUIRED=True)
+    def test_a_master_the_catalog_knows_passes_the_gate(self, tenant: Tenant) -> None:
+        """Положительная стража: гейт снимает неизвестных, а не всех.
+
+        Без этой половины предыдущий тест зеленел бы и на предикате,
+        который не пускает никого.
+        """
+
+        master = _make_master(tenant, catalog_specialist_id=uuid4())
+
+        assert sale_block(master) is None
+        assert is_available(master) is True
+        assert CatalogMaster.all_tenants.filter(available_q()).filter(pk=master.pk).exists()
+
+    @override_settings(MASTER_CATALOG_IDENTITY_REQUIRED=True)
+    def test_the_upstream_reason_wins_over_its_own_consequence(self, tenant: Tenant) -> None:
+        """Сперва причина выше по течению, потом следствие.
+
+        У строки без ``ayla_user_id`` связи нет вовсе, и пустая личность
+        в каталоге — её следствие, а не отдельная беда. Сказать «нет
+        профиля в каталоге» тому, кто ещё не связан, значит назвать
+        второй шаг вместо первого.
+        """
+
+        unlinked = _make_master(tenant, ayla_user_id=None)
+
+        assert unlinked.catalog_specialist_id is None
+        assert sale_block(unlinked) == "ayla_unlinked"
+
+    @override_settings(
+        MASTER_CATALOG_IDENTITY_REQUIRED=True,
+        MASTER_SCHEDULE_CONFIRMATION_REQUIRED=True,
+    )
+    def test_the_schedule_reason_never_outranks_the_one_she_cannot_fix_by_pressing(
+        self, tenant: Tenant
+    ) -> None:
+        """Тот же довод, которым §83 поставил себя последним.
+
+        Мастеру, которой каталог не знает, подтверждение расписания
+        продажи не вернёт: владелица нажала бы «Расписание верно», и не
+        изменилось бы ничего. Оба флага включены намеренно — ответ
+        обязан назвать то, что чинится, а не то, что нажимается.
+        """
+
+        master = _make_master(tenant)
+
+        assert master.schedule_confirmed_at is None
+        assert master.catalog_specialist_id is None
+        assert sale_block(master) == "catalog_unlinked"
+
+
 class TestTheTwoTwinsOfTheSalePredicateCannotDrift:
     """``AVAILABLE`` (SQL) и :func:`sale_block` (построчно) — один вопрос.
 
