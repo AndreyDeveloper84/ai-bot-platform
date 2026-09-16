@@ -730,6 +730,89 @@ CATALOG_CROSS_TENANT_BASELINE: frozenset[BaselineKey] = frozenset(
 )
 
 
+# ── Cross-tenant scheduling-access rule (SCH1, DRF-2022) ─────────────
+#
+# Same posture as MKT1 above, different tables — and the gap it closes was
+# WRITTEN DOWN before it was held: CATALOG_CROSS_TENANT_BASELINE lists
+# apps/master_api/services/schedule.py as an accepted cross-tenant site,
+# but CATALOG_CROSS_TENANT_MODELS never contained a scheduling model. So
+# `ScheduleException.all_tenants` in that very file passed in silence. The
+# stance was recorded; the guard did not hold it.
+#
+# The message says ACCESS, not "read", deliberately: `all_tenants` bypasses
+# the tenant-scoped manager in BOTH directions, and one accepted site below
+# is a write (`ScheduleChangeRequest.all_tenants.create`). A contract whose
+# text needs a caveat to cover its own scope gets read without the caveat
+# the first time somebody copies it.
+#
+# No apps/marketplace/ carve-out: cross-tenant DISCOVERY is marketplace's
+# sanctioned job and a schedule is not discovery. Pinned by a test, not by
+# this comment — a comment is not a guard.
+#
+# Detection shares MKT1's visitor and therefore MKT1's honest limit: the
+# model reference must be a literal bare Name. `apps/scheduling/admin.py`
+# holds 5 `self.model.all_tenants` accesses whose model name is COMPUTED;
+# they are invisible to this rule and always will be. They are excluded
+# from the floor below rather than silently counted as covered.
+SCHEDULING_CROSS_TENANT_CONTRACT_ID = "SCH1-scheduling-cross-tenant-access"
+SCHEDULING_CROSS_TENANT_ISSUE = "DRF-2022"
+SCHEDULING_CROSS_TENANT_MODELS = frozenset(
+    {"WorkingHours", "ScheduleException", "TimeBlock", "ScheduleChangeRequest", "SlotConfig"}
+)
+# Same manager as MKT1 — the carve-out is the manager, not the app.
+SCHEDULING_CROSS_TENANT_MANAGER = CATALOG_CROSS_TENANT_MANAGER
+_SCHEDULING_ROOT = "<scheduling.all_tenants>"
+
+# Floor for "an empty scan must not read as a clean scan". Measured before
+# the rule existed: 19 sites in 7 files on dev 8bf99f7c, 16 sites in the
+# same 7 files once #1791 and #1794 land (both already proven green). The
+# floor is the MINIMUM across those states — a floor of 19 would turn red
+# the day #1794 merges, with nothing broken.
+#
+# MAINTENANCE: when a site is legitimately removed, lower this number IN
+# THE SAME CHANGE, on purpose. Never edit the floor after seeing red to get
+# back to green — a floor fitted to the result is not a guard any more.
+MIN_SCHEDULING_SITES = 16
+MIN_SCHEDULING_BASELINE_FILES = 7
+
+# Accepted pre-existing sites. Every entry is a VERDICT, and each one below
+# was reached by reading the query, not by trusting the file's neighbours:
+# all 19 accesses pin the tenant explicitly in the query itself. Had one of
+# them not been scoped, it would have gone to a separate ticket — putting an
+# unscoped access in here would legitimise a live cross-tenant hole and set
+# this guard to defend it.
+SCHEDULING_CROSS_TENANT_BASELINE: frozenset[BaselineKey] = frozenset(
+    (SCHEDULING_CROSS_TENANT_CONTRACT_ID, _f, FILE_QUALNAME, _SCHEDULING_ROOT)
+    for _f in (
+        # 5 sites. Every query pins `tenant_id=tenant_id` from the admin
+        # request, including both `select_for_update().get(id=…, tenant_id=…)`.
+        # Admin authority over ONE named tenant; no discovery.
+        "apps/admin_api/services/availability.py",
+        # 1 site. `update_or_create(tenant=tenant, master=mst, …)` in a dev
+        # bootstrap command, run at a terminal where no tenant ContextVar exists.
+        "apps/catalog/management/commands/seed_dev_formula_tela.py",
+        # 1 site. `filter(tenant_id=master.tenant_id, master_id=master.id)` —
+        # scoped to the master being confirmed; runs from the consumer.
+        "apps/catalog/services/schedule_confirmation.py",
+        # 3 sites on dev, 1 after #1791. The master's own cabinet: every query
+        # pins tenant_id AND master_id taken from the master being viewed.
+        "apps/master_api/services/dashboard.py",
+        # 3 sites on dev, 2 after #1794 — and one of them is a WRITE:
+        # `ScheduleChangeRequest.all_tenants.create(tenant=master.tenant, …)`.
+        # Listed under the same verdict because this contract covers access in
+        # both directions, so the write needs no exception clause.
+        "apps/master_api/services/schedule.py",
+        # 2 sites. The one flag-aware frame loader; both queries pin tenant_id
+        # and master_id.
+        "apps/master_api/services/schedule_frame.py",
+        # 4 sites. The resolver receives the tenant as an argument and pins it
+        # on every query (`tenant=tenant, master=master`); it runs outside a
+        # request, where `.objects` would have no ContextVar to read.
+        "apps/scheduling/services/resolver.py",
+    )
+)
+
+
 # -- Shape rules: banned CODE SHAPES, not import edges -----------------
 #
 # The G-series contracts above ban an *edge* - a fact fully visible in
@@ -1283,7 +1366,11 @@ BASELINE_NOTES: dict[BaselineKey, BaselineNote] = {
 
 # Every accepted entry this module ships, for the report + the tests.
 ALL_BASELINES: frozenset[BaselineKey] = frozenset(
-    BASELINE | CATALOG_CROSS_TENANT_BASELINE | ROW_LOCK_JOIN_BASELINE | HASH_SINK_BASELINE
+    BASELINE
+    | CATALOG_CROSS_TENANT_BASELINE
+    | SCHEDULING_CROSS_TENANT_BASELINE
+    | ROW_LOCK_JOIN_BASELINE
+    | HASH_SINK_BASELINE
 )
 
 
@@ -1687,6 +1774,8 @@ def evaluate_file(
     catalog_baseline: frozenset[BaselineKey] = CATALOG_CROSS_TENANT_BASELINE,
     catalog_models: frozenset[str] = CATALOG_CROSS_TENANT_MODELS,
     marketplace_prefix: str = MARKETPLACE_PREFIX,
+    scheduling_baseline: frozenset[BaselineKey] = SCHEDULING_CROSS_TENANT_BASELINE,
+    scheduling_models: frozenset[str] = SCHEDULING_CROSS_TENANT_MODELS,
     row_lock_baseline: frozenset[BaselineKey] = ROW_LOCK_JOIN_BASELINE,
     hash_baseline: frozenset[BaselineKey] = HASH_SINK_BASELINE,
 ) -> tuple[list[Violation], set[BaselineKey]]:
@@ -1809,6 +1898,41 @@ def evaluate_file(
                     )
                 )
 
+    # ── Cross-tenant scheduling-access rule (SCH1) ────────────────────
+    # No marketplace exemption: unlike MKT1 this rule applies everywhere in
+    # production scope, because a schedule is never discovery.
+    if production_scope:
+        sch_visitor = _CatalogAllTenantsVisitor(scheduling_models, SCHEDULING_CROSS_TENANT_MANAGER)
+        sch_visitor.visit(tree)
+        # File-granular for the same reason as MKT1: the verdict is about
+        # the file's posture, not about one line.
+        sch_key: BaselineKey = (
+            SCHEDULING_CROSS_TENANT_CONTRACT_ID,
+            rel_posix,
+            FILE_QUALNAME,
+            _SCHEDULING_ROOT,
+        )
+        if sch_visitor.hits and sch_key in scheduling_baseline:
+            satisfied.add(sch_key)
+        else:
+            for hit in sch_visitor.hits[:1]:
+                violations.append(
+                    Violation(
+                        file=file_path,
+                        lineno=hit.lineno,
+                        col_offset=hit.col_offset,
+                        message=(
+                            f"[{SCHEDULING_CROSS_TENANT_CONTRACT_ID}] {hit.module} — "
+                            "cross-tenant scheduling access (read OR write): the "
+                            "all_tenants manager bypasses tenant scoping in both "
+                            "directions. Use .objects, or pin an explicit tenant_id and "
+                            "add this file to SCHEDULING_CROSS_TENANT_BASELINE with a "
+                            f"verdict saying why (tracked {SCHEDULING_CROSS_TENANT_ISSUE})."
+                        ),
+                        key=sch_key,
+                    )
+                )
+
     # ── Shape rules (DRF-1130 row-lock join, DRF-1158 hash sink) ──────
     def _run_shape_rule(
         rule: ShapeRule,
@@ -1849,6 +1973,8 @@ def scan_paths(
     contracts: tuple[Contract, ...] = CONTRACTS,
     baseline: frozenset[BaselineKey] = BASELINE,
     catalog_baseline: frozenset[BaselineKey] = CATALOG_CROSS_TENANT_BASELINE,
+    scheduling_baseline: frozenset[BaselineKey] = SCHEDULING_CROSS_TENANT_BASELINE,
+    scheduling_models: frozenset[str] = SCHEDULING_CROSS_TENANT_MODELS,
     row_lock_baseline: frozenset[BaselineKey] = ROW_LOCK_JOIN_BASELINE,
     hash_baseline: frozenset[BaselineKey] = HASH_SINK_BASELINE,
 ) -> list[Violation]:
@@ -1880,13 +2006,17 @@ def scan_paths(
                 contracts=contracts,
                 baseline=baseline,
                 catalog_baseline=catalog_baseline,
+                scheduling_baseline=scheduling_baseline,
+                scheduling_models=scheduling_models,
                 row_lock_baseline=row_lock_baseline,
                 hash_baseline=hash_baseline,
             )
             violations.extend(v)
             satisfied |= s
 
-    all_baselines = baseline | catalog_baseline | row_lock_baseline | hash_baseline
+    all_baselines = (
+        baseline | catalog_baseline | scheduling_baseline | row_lock_baseline | hash_baseline
+    )
     for key in sorted(all_baselines - satisfied):
         contract_id, rel_posix, qualname, root = key
         if rel_posix not in scanned_rel:
@@ -1912,6 +2042,39 @@ def scan_paths(
             )
         )
     return violations
+
+
+def count_scheduling_all_tenants_sites(
+    paths: list[Path],
+    repo_root: Path,
+    *,
+    scheduling_models: frozenset[str] = SCHEDULING_CROSS_TENANT_MODELS,
+) -> int:
+    """Count INDIVIDUAL `<SchedulingModel>.all_tenants` accesses.
+
+    ``scan_paths`` reports one violation per FILE, so it cannot answer "how
+    many places are there" — and the floor needs exactly that: the 7 files
+    could each stay while the accesses inside them collapsed to one, and a
+    file-only floor would call that clean.
+    """
+    total = 0
+    for path in paths:
+        files = [path] if path.is_file() else sorted(path.rglob("*.py"))
+        for py_file in files:
+            try:
+                rel_posix = py_file.resolve().relative_to(repo_root.resolve()).as_posix()
+            except ValueError:
+                continue
+            if _is_skipped(rel_posix):
+                continue
+            try:
+                tree = ast.parse(py_file.read_text(encoding="utf-8"), filename=str(py_file))
+            except (OSError, SyntaxError):
+                continue
+            visitor = _CatalogAllTenantsVisitor(scheduling_models, SCHEDULING_CROSS_TENANT_MANAGER)
+            visitor.visit(tree)
+            total += len(visitor.hits)
+    return total
 
 
 def _detect_repo_root(start: Path) -> Path:

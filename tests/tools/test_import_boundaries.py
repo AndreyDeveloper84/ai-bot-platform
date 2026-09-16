@@ -291,7 +291,15 @@ class TestRealReposClean:
         observed = {
             v.key
             for v in found
-            if v.key is not None and v.key[0] != ib.CATALOG_CROSS_TENANT_CONTRACT_ID
+            if v.key is not None
+            and v.key[0]
+            not in (
+                ib.CATALOG_CROSS_TENANT_CONTRACT_ID,
+                # Declared before the code was written: this node guards the
+                # IMPORT-EDGE baseline, and SCH1 is the second ORM-shape rule,
+                # excluded here for the same reason MKT1 already is.
+                ib.SCHEDULING_CROSS_TENANT_CONTRACT_ID,
+            )
         }
         assert observed == set(ib.BASELINE)
 
@@ -547,6 +555,12 @@ def _scan_row_lock(root: Path, baseline: frozenset = _EMPTY) -> list[ib.Violatio
         root,
         contracts=(),
         catalog_baseline=_EMPTY,
+        # The DRF-1130 fixtures are written with ScheduleChangeRequest
+        # .all_tenants..., which SCH1 flags — correctly. Emptying its baseline
+        # would not help (an unbaselined access is exactly what it reports), so
+        # the rule is switched off for this helper instead.
+        scheduling_baseline=_EMPTY,
+        scheduling_models=frozenset(),
         row_lock_baseline=baseline,
         hash_baseline=_EMPTY,
     )
@@ -1088,6 +1102,11 @@ class TestSalonSurfacesNoPersonalContext:
             contracts=(self._S26,),
             baseline=frozenset(),
             catalog_baseline=frozenset(),
+            # Same reason as the catalog baseline above, one rule later: this
+            # tmp tree writes apps/master_api/services/dashboard.py, which SCH1
+            # pins. Without this the pin reports stale — SCH1's business, not
+            # S2.6's.
+            scheduling_baseline=frozenset(),
         )
 
     @pytest.mark.parametrize(
