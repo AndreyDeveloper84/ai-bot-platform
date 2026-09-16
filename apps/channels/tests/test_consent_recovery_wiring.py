@@ -358,6 +358,37 @@ class TestTheRecoveryTurnIsAFullWelcomeTurn:
 # ── Сторожа: зелёные и до правки, и после ────────────────────────────────────
 
 
+class TestTheDiscriminatorDoesNotWrite:
+    def test_the_scope_probe_never_creates_the_sentinel(self) -> None:
+        """Read-only вопрос «это сентинел?» не должен уметь заводить строку.
+
+        ``get_global_bot_tenant()`` — resolve-or-create, и для БОЕВОГО пути это
+        верно: там сентинел обязан существовать, а ленивое создание спасает
+        свежую среду от осиротевших глобальных пользователей. Но различитель
+        зовётся на КАЖДОМ отказе, и вопрос у него чисто читающий. Чтение,
+        умеющее писать, хуже всего проявится там, где сентинела ещё нет:
+        в тестах и в редких путях.
+
+        Сторож смотрит на строку, а не на ответ: ответ ``None`` тут одинаков и
+        при пишущем аксессоре, и при читающем — различает только то, появился
+        ли тенант.
+        """
+        from apps.identity.constants import GLOBAL_BOT_TENANT_SLUG
+        from apps.skills.welcome.skill import consent_offer_action_data
+        from apps.tenancy.context import tenant_scope
+        from apps.tenancy.models import Tenant
+
+        Tenant.all_objects.filter(slug=GLOBAL_BOT_TENANT_SLUG).delete()
+        salon = Tenant.objects.create(slug="salon-no-write", name="Salon No Write")
+
+        with tenant_scope(salon):
+            assert consent_offer_action_data("water") is None
+
+        assert not Tenant.all_objects.filter(slug=GLOBAL_BOT_TENANT_SLUG).exists(), (
+            "различитель завёл сентинела в ответ на читающий вопрос"
+        )
+
+
 class TestGuards:
     def test_on_a_salon_tenant_the_refusal_has_no_button(self) -> None:
         from apps.skills.water import skill as water_skill
