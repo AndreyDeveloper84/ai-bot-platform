@@ -405,6 +405,66 @@ class TestProfileTargetsSource:
         profile = await self._fetch(_profile_body(targets_provenance={"method_versions": {}}))
         assert profile.targets_source == ""
 
+    @pytest.mark.asyncio
+    async def test_by_kind_arrives_per_kind(self) -> None:
+        """DRF-1929 (F1(б)): каталог подписывает виды порознь — бот их различает."""
+        body = _profile_body(
+            norms={"daily_kcal": 1900, "daily_protein_g": 95, "daily_water_ml": 2200},
+            targets_provenance={
+                "source": "user_entered",
+                "by_kind": {
+                    "calories": {"source": "user_entered"},
+                    "fluids": {"source": "ayla_proposed"},
+                },
+            },
+        )
+        profile = await self._fetch(body)
+
+        assert profile.calories_source == "user_entered"
+        assert profile.fluids_source == "ayla_proposed"
+        # Калории человек назвал — едут; вода только предложена — не едет.
+        assert profile.daily_kcal == 1900
+        assert profile.water_ml is None
+
+    @pytest.mark.asyncio
+    async def test_without_by_kind_both_kinds_take_the_whole_set_source(self) -> None:
+        """Мост на время, пока каталог не выложен, — и он обязателен.
+
+        Этот PR может слиться раньше каталожного (#498) и точно раньше
+        выкладки. Пока ``by_kind`` не приходит, единственная правда о видах
+        — общая подпись; прочти бот пустоту как «не настроено», он снял бы
+        ориентиры у КАЖДОГО живого клиента.
+        """
+        body = _profile_body(
+            norms={"daily_kcal": 1900, "daily_water_ml": 2200},
+            targets_provenance={"source": "ayla_calculated"},
+        )
+        profile = await self._fetch(body)
+
+        assert profile.calories_source == "ayla_calculated"
+        assert profile.fluids_source == "ayla_calculated"
+        assert (profile.daily_kcal, profile.water_ml) == (1900, 2200)
+
+    @pytest.mark.asyncio
+    async def test_null_inside_by_kind_falls_back_too(self) -> None:
+        """Строка каталога до миграции данных: ключ есть, значение ``None``.
+
+        Это «по видам не устанавливалось», а не «ориентира нет», и
+        подставлять ``none`` здесь нельзя — иначе бот изготовил бы
+        состояние, которого каталог не присылал.
+        """
+        body = _profile_body(
+            norms={"daily_kcal": 1900},
+            targets_provenance={
+                "source": "ayla_calculated",
+                "by_kind": {"calories": {"source": None}, "fluids": {"source": None}},
+            },
+        )
+        profile = await self._fetch(body)
+
+        assert profile.calories_source == "ayla_calculated"
+        assert profile.daily_kcal == 1900
+
 
 class TestProfileMethodAndInputsArrive:
     """Методика и снимок входов доезжают до ``ProfileResponse`` (§5.1 11.09.2026).

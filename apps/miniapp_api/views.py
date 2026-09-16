@@ -3697,10 +3697,17 @@ def customer_wellness_today(request: HttpRequest) -> HttpResponse:
     # ``getattr(..., False)``, а не прямое обращение: чужой объект без
     # этого признака — не настроен. Ошибка типа здесь превратилась бы в
     # 500 дашборда, а fail-closed — в отсутствие ключа, что и требуется.
-    targets_configured = (
-        profile_res is not None
-        and not isinstance(profile_res, Exception)
-        and bool(getattr(profile_res, "targets_are_configured", False))
+    #
+    # DRF-1929 (F1(б)): вопросов два, по видам. Один общий флаг снимал бы
+    # норму воды из-за неподтверждённых калорий и наоборот — ровно та
+    # потеря числа, которую каталог убрал у себя. ``getattr`` сохранён у
+    # обоих: fail-closed важнее, чем раньше, потому что признака теперь два.
+    _profile_readable = profile_res is not None and not isinstance(profile_res, Exception)
+    calories_configured = _profile_readable and bool(
+        getattr(profile_res, "calories_are_configured", False)
+    )
+    water_configured = _profile_readable and bool(
+        getattr(profile_res, "fluids_are_configured", False)
     )
 
     # ── hydration (from get_water_today) ────────────────────────────────
@@ -3746,7 +3753,7 @@ def customer_wellness_today(request: HttpRequest) -> HttpResponse:
         payload["calories_eaten"] = calories_eaten
         # Цель уходит, только когда она есть И настроена. Ключа нет = цели
         # нет; ``NOT_CONFIGURED`` §6 на этой границе — отсутствие ключа.
-        if calories_target is not None and targets_configured:
+        if calories_target is not None and calories_configured:
             payload["calories_target"] = calories_target
         if pfc is not None:
             payload["pfc"] = pfc
@@ -3762,7 +3769,7 @@ def customer_wellness_today(request: HttpRequest) -> HttpResponse:
         payload["water_glasses_eaten"] = water_glasses_eaten
         # Цель уходит, только когда она есть И настроена — то же правило,
         # что у калорий: норма без происхождения не показывается.
-        if water_glasses_target is not None and targets_configured:
+        if water_glasses_target is not None and water_configured:
             payload["water_glasses_target"] = water_glasses_target
     # Omitted — not `[]` — when the goal layer could not be reached: an
     # empty list means «no goal chosen», and saying that on an outage is

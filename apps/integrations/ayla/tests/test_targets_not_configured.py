@@ -156,3 +156,69 @@ class TestNoSurfacePrintsAnUnexplainedNumber:
 
         assert remark, "при настроенных ориентирах оценка обязана появиться"
         assert "нормы" in remark
+
+
+def _by_kind(*, calories: str, fluids: str) -> ProfileResponse:
+    """Профиль с РАЗДЕЛЬНЫМИ подписями видов (DRF-1929, F1(б))."""
+    return ProfileResponse(
+        gender="female",
+        age=31,
+        height_cm=168,
+        weight_kg=62,
+        goal="lose",
+        daily_kcal=KCAL,
+        protein_g=PROTEIN,
+        fat_g=60,
+        carbs_g=210,
+        water_ml=WATER,
+        bmr=1400,
+        health_flags={},
+        disclaimer_acked=None,
+        targets_source=calories,
+        calories_source=calories,
+        fluids_source=fluids,
+    )
+
+
+class TestEachKindAnswersForItself:
+    """DRF-1929 (F1(б)): вид гасится своей подписью, а не подписью набора.
+
+    До разделения один вердикт снимал воду вместе с калориями — бот
+    воспроизводил на своей границе ту самую потерю числа, которую каталог
+    убрал у себя (#498). Пара асимметричных случаев ниже — единственное,
+    что отличает «разделили» от «переименовали»: при общем предикате оба
+    были бы красными, а при отсутствии разделения — оба зелёными по
+    неверной причине.
+    """
+
+    def test_water_survives_unconfirmed_calories(self) -> None:
+        p = _by_kind(calories="ayla_proposed", fluids="user_entered")
+
+        assert p.water_ml == WATER, "вода снята из-за чужого вида"
+        assert p.daily_kcal is None and p.protein_g is None and p.bmr is None
+        assert p.fluids_are_configured and not p.calories_are_configured
+        assert p.targets_are_configured, "«хоть один вид» обязан остаться истиной"
+
+    def test_calories_survive_unconfirmed_water(self) -> None:
+        p = _by_kind(calories="user_entered", fluids="ayla_proposed")
+
+        assert (p.daily_kcal, p.protein_g) == (KCAL, PROTEIN)
+        assert p.water_ml is None, "вода без подтверждения дошла до потребителя"
+        assert p.calories_are_configured and not p.fluids_are_configured
+
+    def test_both_unconfirmed_is_the_old_behaviour(self) -> None:
+        """Стража к обоим: разделение не ослабило запрет, когда нет ни одного."""
+        p = _by_kind(calories="unknown_legacy", fluids="unknown_legacy")
+
+        assert (p.daily_kcal, p.protein_g, p.water_ml, p.bmr) == (None,) * 4
+        assert not p.targets_are_configured
+
+    def test_a_profile_without_by_kind_keeps_the_whole_set_answer(self) -> None:
+        """Мост: DTO, собранный мимо клиента, судится по общей подписи.
+
+        Так строят профиль фикстуры, ``nutrition_coach_dryrun`` и весь
+        существующий набор проверок выше. Без моста они начали бы читать
+        пустую по-видовую подпись как «не настроено».
+        """
+        assert _profile("ayla_calculated").water_ml == WATER
+        assert _profile("unknown_legacy").water_ml is None
