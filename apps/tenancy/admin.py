@@ -760,11 +760,31 @@ class TenantAdmin(AylaAdminMedia, admin.ModelAdmin):
 
 
 class _ReadOnlyStaffAdmin(AylaAdminMedia, admin.ModelAdmin):
-    """Общая часть обеих карточек: показывать, но не трогать."""
+    """Общая часть обеих карточек: показывать, но не трогать.
+
+    Видимость закрыта отдельным правом, и это решение владельца:
+    ``is_staff`` означает ровно «может войти в Django Admin» и бизнес-правом
+    не является. Здесь показ идёт ПОПЕРЁК САЛОНОВ (``get_queryset`` берёт
+    ``all_tenants``), то есть это ровно тот cross-tenant доступ, ради
+    которого право и заведено. Без этой проверки разделение существовало бы
+    на словах: любой, кто попал в админку, видел бы доступы всех салонов.
+    """
+
+    #: Право оператора платформы. Строкой, а не импортом: Django сверяет
+    #: право по имени, и имя обязано совпадать с ``Meta.permissions``.
+    PLATFORM_OPERATIONS_PERM = "tenancy.platform_operations"
 
     #: Как выглядит отсутствие значения. Не прочерк и не ноль: прочерк в
     #: колонке читается как ноль, а ноль — как измеренное значение.
     empty_value_display = "нет данных"
+
+    def has_view_permission(self, request: HttpRequest, obj=None) -> bool:
+        return request.user.has_perm(self.PLATFORM_OPERATIONS_PERM)
+
+    def has_module_permission(self, request: HttpRequest) -> bool:
+        # Иначе карточка светится в индексе приложения тому, кто открыть
+        # её всё равно не сможет: список имён — тоже сведения.
+        return request.user.has_perm(self.PLATFORM_OPERATIONS_PERM)
 
     def get_queryset(self, request: HttpRequest):
         # ``all_tenants`` — как у зеркала: админка показывает все салоны,
@@ -820,6 +840,19 @@ class TenantStaffAdmin(_ReadOnlyStaffAdmin):
 @admin.register(StaffInvite)
 class StaffInviteAdmin(_ReadOnlyStaffAdmin):
     """Приглашения сотрудников: кого позвали, кем и чем это кончилось.
+
+    ВНИМАНИЕ: в боте слово «приглашение» означает ДВА разных предмета, и
+    путать их дорого.
+
+    * **Здесь** — ``StaffInvite`` (DRF-1061): приглашение КОДОМ, у него
+      ``code_hash`` и срок. Им зовут человека стать сотрудником салона.
+    * **В карточке мастера** (``apps/catalog/admin.py``) — совсем другое:
+      ``CatalogMaster.invite_status`` / ``invite_token``, приглашение
+      МАСТЕРА, приезжающее синхронизацией и отзываемое действием
+      ``revoke_invite_masters``.
+
+    У обеих карточек колонка называется «состояние приглашения», и это
+    единственное, что у них общего. Отзыв одного не отзывает другое.
 
     ``code_hash`` не показывается НИГДЕ — ни в списке, ни в карточке.
     Это дайджест кода приглашения, то есть учётные данные; в админке им
