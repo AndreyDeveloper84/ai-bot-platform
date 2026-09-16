@@ -59,10 +59,10 @@ EXPECTED: dict[str, tuple[str, str]] = {
         "сам переключатель: флаг OFF — локальные таблицы, ON — каталог",
     ),
     "apps/master_api/services/schedule.py": (
-        DEBT,
-        "DRF-2019: request_availability_change сверяет пересечение по локальному "
-        "ScheduleException мимо флага; сегодня молчит только потому, что таблица "
-        "пуста (замер главного окна 15.09.2026 ~23:20 UTC)",
+        FRAME,
+        "экран расписания и заявка на отсутствие читают рамку через load_day_frame "
+        "(DRF-2019); ScheduleException здесь — словарь видов (Type, FULL_DAY_TYPES), "
+        "а не чтение копии",
     ),
     "apps/scheduling/admin.py": (WRITER_OR_OPERATOR, "операторский CRUD копии; вопрос X5"),
     "apps/scheduling/services/resolver.py": (
