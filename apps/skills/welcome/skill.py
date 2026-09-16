@@ -996,15 +996,20 @@ def _is_global_bot_scope(tenant: object | None) -> bool:
     тем же аксессором, каким его получает боевой путь. Ни по slug, ни по своей
     копии константы: слепок имени пережил бы переименование и соврал бы молча.
 
-    Fail-closed: не удалось получить сентинел — считаем путь не глобальным,
-    то есть возвращаемся к поведению без кнопки.
+    Аксессор — ЧИТАЮЩИЙ (``find_global_bot_tenant``), не resolve-or-create:
+    вопрос «это сентинел?» не должен уметь заводить системного тенанта. Этот
+    различитель зовётся на каждом отказе, и побочная запись проявилась бы
+    ровно там, где строки ещё нет.
+
+    Fail-closed: сентинела нет или прочитать не удалось — путь считается не
+    глобальным, то есть возвращаемся к поведению без кнопки.
     """
     if tenant is None:
         return True
     try:
-        from apps.identity.services.global_tenant import get_global_bot_tenant
+        from apps.identity.services.global_tenant import find_global_bot_tenant
 
-        sentinel_pk = getattr(get_global_bot_tenant(), "pk", None)
+        sentinel_pk = getattr(find_global_bot_tenant(), "pk", None)
     except Exception:  # noqa: BLE001 — читаем сентинел best-effort
         logger.exception("welcome.global_scope_probe_failed")
         return False
