@@ -1941,17 +1941,36 @@ export type RoleSource = "access_code" | "master_invite" | "direct";
  * `MASTER_SCHEDULE_CONFIRMATION_REQUIRED` is on; the word exists first so
  * the screen is not the last place to learn about it.
  *
+ * `catalog_unlinked` is ours in the same way `ayla_unlinked` is, and for
+ * a different missing thing: the row carries no `catalog_specialist_id`,
+ * so the catalog does not know her at all. She would be sold and then
+ * every booking path would raise on the first read of her identity. The
+ * owner cannot fix it and neither can the master — only provisioning /
+ * sync writes that column, and the invite path never does. Distinct copy
+ * from `ayla_unlinked` on purpose: the next move is the same (come to
+ * us), but support has to know WHICH identity is missing.
+ *
  * The backend grows this union in `apps/catalog/master_state.py`
- * (`SaleBlock`). A new member must be added to `STATE_SUFFIX` and
- * `STATE_CHIP_CLASS` in `AdminPeopleScreen.tsx` — both are exhaustive
- * `Record<RoleState, …>`, so the type checker refuses a half-done
- * addition rather than rendering an empty chip.
+ * (`SaleBlock`). A new member must be added to `STATE_SUFFIX`,
+ * `STATE_CHIP_CLASS` and `STATE_REVOCABLE` in `AdminPeopleScreen.tsx` —
+ * all three are exhaustive `Record<RoleState, …>`, so the type checker
+ * refuses a half-done addition rather than rendering an empty chip. (The
+ * previous wording named only the first two; the third is the one that
+ * decides whether a button appears, which is the worst one to forget.)
+ *
+ * WARNING — this union is a HAND-MAINTAINED MIRROR of the Python
+ * `Literal`, and nothing checks the two against each other. The records
+ * below are exhaustive against THIS union, not against the backend: add
+ * a member there and omit it here and `tsc` stays green while the screen
+ * receives a state it has no word for. That they have matched so far is
+ * a habit, not a guarantee.
  */
 export type RoleState =
   | "active"
   | "pending"
   | "revoked"
   | "ayla_unlinked"
+  | "catalog_unlinked"
   | "profile_incomplete"
   | "schedule_unconfirmed";
 
