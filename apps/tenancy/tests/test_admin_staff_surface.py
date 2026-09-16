@@ -136,6 +136,39 @@ class TestTheInviteDigestNeverReachesTheHtml:
         assert CODE_HASH not in body
 
 
+class TestTheOperatorIsToldWhyThereIsNoRevoke:
+    """Отсутствие действия объяснено НА ЭКРАНЕ, а не только в исходнике.
+
+    Замер ayla-5f: отозвать выписанный код нечем — функций ``revoke`` /
+    ``cancel`` в ``apps/identity/services/staff_invites.py`` ноль из
+    пятнадцати при положительном контроле 1 из 1 по ``staff_revoke.py``.
+    Гашение только пассивное: срок и погашение.
+
+    Без объяснения на карточке отсутствие кнопки читается как недоделка
+    экрана, и оператор идёт искать её в другом месте. С объяснением оно
+    читается как состояние системы, каковым и является.
+
+    Узел проверяет ОТРИСОВКУ. ``manage check`` резолвит имена полей и
+    ничего не говорит про то, дошло ли описание до страницы: между
+    «поле объявлено» и «текст виден» стоит ровно тот зазор, на котором я
+    сегодня уже споткнулся с неимпортированным ``format_html``.
+    """
+
+    def test_the_change_form_says_the_code_cannot_be_revoked(
+        self, superuser_client: Client, invite_row: StaffInvite
+    ) -> None:
+        url = reverse("admin:tenancy_staffinvite_change", args=[invite_row.pk])
+        body = superuser_client.get(url).content.decode("utf-8")
+
+        # ПРИСУТСТВИЕ: форма отрисована и это форма нужного приглашения.
+        assert "Салон операций" in body
+        # Само объяснение — то, ради чего описание и заведено.
+        assert "Отозвать выписанный код" in body
+        # И названы оба пассивных способа гашения, а не один.
+        assert "Действует до" in body
+        assert "Использовано" in body
+
+
 class TestStateIsNamedNotGuessed:
     """C. Три состояния приглашения и два состояния доступа — словами."""
 
