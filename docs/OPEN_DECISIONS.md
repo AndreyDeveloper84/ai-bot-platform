@@ -9030,6 +9030,24 @@ BATCH_CEILING = 50   НЕ является разрешением на batch
 
 Третий пункт списка «Когда вызывается» выше (разовое заполнение координат уже существующих адресов) — это и есть apply-batch; по решению 16.09 он `disabled` до Legal ruling. Остальные два пункта — сохранение или изменение адреса человеком — попадают в допустимый flow.
 
+### Уточнение 2026-09-16 — trigger policy для DaData
+
+Для DaData меняется не только provider,
+но временно уточняется trigger policy.
+
+```
+Разрешено:
+user enters/changes address
+→ explicit "Проверить / Использовать адрес"
+→ one DaData request
+
+Не разрешено до Legal ruling:
+save-hook → automatic geocoding
+
+Не разрешено:
+batch / backfill / cron / mass processing
+```
+
 ---
 
 ## §140. ОТВЕЧЕН: координаты клиента — два режима, геолокация из Mini App
