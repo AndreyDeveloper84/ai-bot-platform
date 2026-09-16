@@ -238,8 +238,11 @@ def test_availability_path_is_no_longer_classified_as_debt():
     rel = "apps/master_api/services/schedule.py"
     kind, reason = EXPECTED[rel]
 
-    assert kind != DEBT, reason
-    assert "DRF-2019" not in reason, reason
+    # Роль, а не написание: ключ DRF-2019 в причине законен — он называет лист,
+    # которым файл стал читателем рамки. Запрещать подстроку значило бы стеречь
+    # орфографию; стережём класс записи и то, чем он обоснован.
+    assert kind == FRAME, (kind, reason)
+    assert FRAME_LOADER in reason, reason
 
 
 def test_guard_catches_a_new_flag_blind_reader():
