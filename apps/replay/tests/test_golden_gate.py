@@ -130,8 +130,9 @@ GRANTED_PRECONDITIONS = (
     "BotUser.welcomed_at is set (WelcomeSkill intercepts the first message "
     "from an ungreeted user and would answer every fixture with the "
     "welcome copy)",
-    "BotUser.food_scanner_consent_at is set (152-ФЗ gate; without it every "
-    "food_scanner fixture gets the «открой Mini App» refusal)",
+    "ConsentRecord FOOD_DIARY_PROCESSING is granted with its document version "
+    "(152-ФЗ gate, DRF-1963; without it every food_scanner fixture gets the "
+    "«открой Mini App» refusal)",
     "NUTRITION_ENABLED / FOOD_PHOTO_SCAN_ENABLED are on (their default is "
     "off, and off means the «функция готовится» placeholder)",
     "ConsentRecord PERSONAL_CALCULATION is granted with its document version "
@@ -237,11 +238,19 @@ def golden_run(monkeypatch, fake_redis, golden_tenant, settings):
                 # nobody has to read this file to learn what the gate handed
                 # the system for free.
                 bot_user.welcomed_at = timezone.now()
-                bot_user.food_scanner_consent_at = timezone.now()
-                bot_user.save(update_fields=["welcomed_at", "food_scanner_consent_at"])
+                bot_user.save(update_fields=["welcomed_at"])
                 # DRF-1926 — согласие на обработку личных данных тем же
                 # писателем, что экран приветствия, не подменой предиката.
+                from apps.consent.nutrition import DIARY, FOOD_DIARY_CONSENT_DOCUMENT_VERSION
                 from apps.consent.services import record_global_consent
+
+                # DRF-1963 (M1) — согласие дневника/сканера, строка реестра.
+                record_global_consent(
+                    bot_user,
+                    consent_type=DIARY,
+                    source="replay:golden-gate",
+                    document_version=FOOD_DIARY_CONSENT_DOCUMENT_VERSION,
+                )
 
                 record_global_consent(
                     bot_user,

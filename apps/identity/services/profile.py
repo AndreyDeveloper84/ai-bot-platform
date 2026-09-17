@@ -46,6 +46,14 @@ from django.utils import timezone
 
 from apps.identity.models import BotUser, UserPreferences
 
+#: Имя ключа ``/me`` с датой согласия на дневник/сканер. Совпадает с именем
+#: снятой с учёта колонки ``BotUser`` — это ключ ответа, а не колонка: значение
+#: берётся из реестра (DRF-1963, D5), и ключ живёт ради закешированного бандла
+#: мини-приложения до второй половины листа. Пишется ровно здесь — единственный
+#: модуль, которому сторож ``tools/lint/food_scanner_column_guard.py`` это
+#: разрешает.
+LEGACY_ME_CONSENT_KEY = "food_scanner_consent_at"
+
 
 @dataclass(frozen=True)
 class ProfileSnapshot:
@@ -62,11 +70,12 @@ class ProfileSnapshot:
     # Favourites — top-N derived; computed elsewhere, populated here for F4
     favorite_master_name: str | None
     favorite_service_name: str | None
-    # DRF-1564 — момент согласия на сканирование еды, ISO 8601 либо None.
-    # Отдаётся моментом, а не булевым: ту же колонку читает гейт навыка
-    # (`apps/skills/food_scanner/skill.py:463`), и два производных от
-    # одного значения разошлись бы рано или поздно.
-    food_scanner_consent_at: str | None
+    # DRF-1564 — момент согласия на дневник/сканер, ISO 8601 либо None.
+    # DRF-1963 (M1, D5): имя ключа прежнее ради закешированного бандла
+    # мини-приложения, но значение — дата действующей строки реестра
+    # ``food_diary_processing``, той же, которую видит гейт навыка. Ключ
+    # удаляется второй половиной листа вместе с колонкой.
+    food_diary_consent_at: str | None
 
 
 def _mask_phone(phone: str) -> str:
@@ -90,10 +99,13 @@ def get_profile(bot_user: BotUser) -> ProfileSnapshot:
     Favourites are stubbed to ``None`` for now; v1.1 will compute from
     booking history.
     """
+    from apps.consent.nutrition import diary_current_record
+
     prefs, _ = UserPreferences.all_tenants.get_or_create(
         bot_user=bot_user,
         defaults={"tenant": bot_user.tenant},
     )
+    diary_consent = diary_current_record(bot_user)
     return ProfileSnapshot(
         bot_user_id=str(bot_user.id),
         display_name=bot_user.display_name,
@@ -110,10 +122,8 @@ def get_profile(bot_user: BotUser) -> ProfileSnapshot:
         },
         favorite_master_name=None,
         favorite_service_name=None,
-        food_scanner_consent_at=(
-            bot_user.food_scanner_consent_at.isoformat()
-            if bot_user.food_scanner_consent_at
-            else None
+        food_diary_consent_at=(
+            diary_consent.captured_at.isoformat() if diary_consent is not None else None
         ),
     )
 

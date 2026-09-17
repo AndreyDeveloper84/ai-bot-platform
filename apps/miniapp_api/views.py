@@ -2516,17 +2516,26 @@ def deletion_request(request: HttpRequest) -> HttpResponse:
 
 
 def _food_scanner_consent_payload(bot_user: BotUser) -> dict:
-    """Состояние согласия на сканирование еды для экрана.
+    """Состояние согласия на дневник/сканер для экрана — из реестра (DRF-1963).
 
-    Отдаётся МОМЕНТ выдачи, а не булев: гейт навыка
-    (``apps/skills/food_scanner/skill.py:463``) читает ту же колонку и
-    требует настоящий ``datetime``, поэтому экран и гейт смотрят на одно
-    и то же значение, а не на два производных от него.
+    Та же строка ``food_diary_processing``, которую читает гейт навыка:
+    экран не может показать «разрешено», пока гейт отказывает. Дата — из
+    действующей строки, не из часов.
     """
-    consent_at = bot_user.food_scanner_consent_at
+    from apps.consent.nutrition import (
+        FOOD_DIARY_CONSENT_DOCUMENT_VERSION,
+        diary_current_record,
+        diary_is_granted,
+    )
+
+    granted = diary_is_granted(bot_user)
+    record = diary_current_record(bot_user) if granted else None
     return {
-        "granted": consent_at is not None,
-        "granted_at": consent_at.isoformat() if consent_at else None,
+        "granted": granted,
+        "granted_at": record.captured_at.isoformat() if record else None,
+        # Версия, под которой согласие СТОИТ; текущая — рядом (M2 поднимет её).
+        "document_version": record.document_version if record else "",
+        "current_document_version": FOOD_DIARY_CONSENT_DOCUMENT_VERSION,
     }
 
 
@@ -2535,50 +2544,72 @@ def _food_scanner_consent_payload(bot_user: BotUser) -> dict:
 @require_init_data
 @with_request_tenant
 def food_scanner_consent(request: HttpRequest) -> HttpResponse:
-    """Согласие на сканирование еды — чтение, выдача, отзыв (DRF-1564).
+    """Согласие на дневник/сканер — чтение, выдача, отзыв (DRF-1564, DRF-1963).
 
     ``GET``    → состояние (см. :func:`_food_scanner_consent_payload`).
-    ``POST``   → выдать. Тело не требуется. Идемпотентно.
-    ``DELETE`` → отозвать: колонка становится ``NULL``, и гейт навыка
-                 читает это как «согласия нет». Идемпотентно.
+    ``POST``   → выдать. Тело: ``{"document_version": "<версия текста>"}``;
+                 версия обязательна и сверяется с серверной — согласие
+                 записывается на текст, который человеку показали. Идемпотентно.
+    ``DELETE`` → отозвать. Идемпотентно; строка реестра не удаляется,
+                 проставляется ``withdrawn_at``.
 
-    ### Почему ручка появилась только сейчас
+    ### Реестр, а не колонка (M1, владелец 15.09)
 
-    Колонка ``BotUser.food_scanner_consent_at`` живёт с миграции
-    ``0013``; гейт навыка её читает. **Писателей у неё не было.**
-    Согласие человека оседало в ``localStorage`` мини-приложения —
-    то есть экран его принимал и пропускал дальше, а бот на то же самое
-    согласие отвечал «открой Mini App и дай согласие». Петля, из которой
-    человек не выходит своими силами, и на новом устройстве всё
-    начиналось заново.
+    До DRF-1963 ручка писала ``BotUser.food_scanner_consent_at``: без версии
+    текста, без источника, с audit-строкой мимо ``ConsentRecord``, и отзыв
+    стирал сам факт выдачи. Теперь это строка ``food_diary_processing`` —
+    тот же реестр и тот же писатель по всем оболочкам человека, что у
+    остальных согласий (:mod:`apps.consent.nutrition`). Путь ручки прежний:
+    мини-приложение уже ходит сюда.
 
     ### Почему DELETE здесь, а не «потом»
 
     Согласие — юридический факт, и отозвать его человек должен уметь тем
-    же способом, каким давал. Ручка выдачи без ручки отзыва завела бы
-    ровно ту строку, которую закрывала DRF-1520 («право на отзыв
-    недостижимо из приложения»), и завела бы её в тот же день.
-
-    Тела у ``POST`` нет намеренно: в отличие от health-consent, у
-    сканера нет версионированного текста раскрытия, который сверяется с
-    серверным. Появится — появится и ``document_version``; выдумывать
-    версию, которой нет, чтобы «было как у соседа», значит поставить
-    согласие на несуществующий документ.
+    же способом, каким давал (DRF-1520).
     """
-    from apps.consent.customer import set_food_scanner_consent
+    import json
+
+    from apps.consent.nutrition import (
+        UnknownDisclosureVersionError,
+        grant_diary,
+        withdraw_diary,
+    )
 
     bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
 
     if request.method == "GET":
         return JsonResponse(_food_scanner_consent_payload(bot_user))
 
-    granted = request.method == "POST"
-    set_food_scanner_consent(bot_user, granted=granted)
-    logger.info(
-        "miniapp_api.food_scanner_consent.%s bot_user=%s",
-        "granted" if granted else "withdrawn",
-        bot_user.id,
-    )
+    if request.method == "DELETE":
+        withdrawn = withdraw_diary(bot_user)
+        logger.info(
+            "miniapp_api.food_scanner_consent.withdrawn bot_user=%s rows=%d",
+            bot_user.id,
+            withdrawn,
+        )
+        return JsonResponse(_food_scanner_consent_payload(bot_user))
+
+    try:
+        body = json.loads(request.body or b"{}")
+    except ValueError:
+        return _error("malformed", "body is not valid JSON", 400)
+    if not isinstance(body, dict):
+        return _error("malformed", "body must be a JSON object", 400)
+    document_version = str(body.get("document_version") or "").strip()
+    if not document_version:
+        return _error("bad_request", "document_version is required", 400)
+
+    try:
+        grant_diary(bot_user, document_version=document_version)
+    except UnknownDisclosureVersionError:
+        # 409, не 400: форма запроса верна — разошлись версии текста, и
+        # клиенту нужно показать актуальный, а не чинить тело.
+        return _error(
+            "stale_disclosure",
+            "document_version does not match the current food diary consent text",
+            409,
+        )
+    logger.info("miniapp_api.food_scanner_consent.granted bot_user=%s", bot_user.id)
     return JsonResponse(_food_scanner_consent_payload(bot_user))
 
 
@@ -2883,6 +2914,8 @@ def customer_data_storage_consent(request: HttpRequest) -> HttpResponse:
 
 def _profile_to_dict(snap) -> dict:
     """Serialise a :class:`ProfileSnapshot` for the JSON response."""
+    from apps.identity.services.profile import LEGACY_ME_CONSENT_KEY
+
     return {
         "bot_user_id": snap.bot_user_id,
         "display_name": snap.display_name,
@@ -2891,17 +2924,16 @@ def _profile_to_dict(snap) -> dict:
         "timezone": snap.timezone,
         "joined_at": snap.joined_at,
         "preferences": snap.preferences,
-        # DRF-1564 — согласие на сканирование еды приезжает вместе с
-        # профилем, а не отдельным вызовом ради одного значения. Это
-        # ЕДИНСТВЕННЫЙ источник правды для экранов сканера: `localStorage`
-        # авторитетом быть перестал — браузер на новом устройстве сказал
-        # бы «согласия нет» там, где база говорит «есть», и разошлись бы
-        # они молча.
+        # DRF-1564 — дата согласия на дневник/сканер рядом с профилем.
+        # DRF-1963 (M1, D5): значение — из реестра (строка
+        # ``food_diary_processing``), имя ключа прежнее ради закешированного
+        # бандла. Новый бандл читает ``me/food-scanner-consent/``; ключ
+        # удаляется второй половиной листа.
         #
         # `null` означает «согласия нет» и читается экраном как отказ
         # (fail-closed): отсутствие доезжает отсутствием, а не
         # подставленным значением.
-        "food_scanner_consent_at": snap.food_scanner_consent_at,
+        LEGACY_ME_CONSENT_KEY: snap.food_diary_consent_at,
         "favorites": {
             "master_name": snap.favorite_master_name,
             "service_name": snap.favorite_service_name,

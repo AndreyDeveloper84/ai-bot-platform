@@ -11,12 +11,12 @@ Covers:
 * Registration order vs food_clarify (P1 owned callbacks must be
   distinguishable; sentinel test asserts both skills are present).
 * Веха 1 gates: NUTRITION_ENABLED / FOOD_PHOTO_SCAN_ENABLED master
-  switches + per-user ``food_scanner_consent_at`` consent gate.
+  switches + the per-person ``food_diary_processing`` consent from the
+  registry (DRF-1963, M1).
 """
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
 from unittest.mock import Mock, patch
 
 import pytest
@@ -75,12 +75,31 @@ def no_personal_data():
         yield missing
 
 
+@pytest.fixture(autouse=True)
+def _diary_consent_granted():
+    """DRF-1963 (M1): согласие дневника/сканера — строка реестра, спрашивается предикатом.
+
+    Поведенческие тесты идут с выданным согласием; отказ пришпилен в
+    ``TestGates`` фикстурой ``no_diary_consent``. Пользователь здесь — Mock,
+    строк реестра у него нет, поэтому предикат подменяется, как PERSONAL_DATA
+    выше. Настоящий предикат на настоящей строке гоняют
+    ``apps/miniapp_api/tests/test_food_scanner_consent.py``.
+    """
+    with patch("apps.consent.nutrition.diary_is_granted", return_value=True) as granted:
+        yield granted
+
+
+@pytest.fixture
+def no_diary_consent():
+    with patch("apps.consent.nutrition.diary_is_granted", return_value=False) as missing:
+        yield missing
+
+
 def _context(
     text: str = "",
     *,
     has_attachments: bool = False,
     photo_bytes: bytes | None = None,
-    consent_at: datetime | None = None,
 ) -> SkillContext:
     conversation = Mock(id="conv-1")
     if photo_bytes is not None:
@@ -91,12 +110,6 @@ def _context(
     bot_user = Mock()
     bot_user.channel = "max"
     bot_user.channel_user_id = "12345"
-    # Веха 1: default to a granted consent so the broad test suite
-    # exercises the post-gate code paths. The consent-missing case is
-    # asserted explicitly in TestGates.
-    bot_user.food_scanner_consent_at = (
-        consent_at if consent_at is not None else datetime.now(timezone.utc)
-    )
     return SkillContext(
         conversation=conversation,
         bot_user=bot_user,
@@ -383,15 +396,8 @@ class TestGates:
             cb_result = FoodScannerSkill().handle(ctx_cb)
         assert cb_result.action_type == "food_logged"
 
-    def test_consent_missing_short_circuits_photo(self, settings) -> None:
-        ctx = _context(
-            has_attachments=True,
-            photo_bytes=b"jpeg",
-            consent_at=None,
-        )
-        # Mock returns a Mock for any unset attr; explicitly set to None
-        # since _context default is now() — override here.
-        ctx.bot_user.food_scanner_consent_at = None
+    def test_consent_missing_short_circuits_photo(self, settings, no_diary_consent) -> None:
+        ctx = _context(has_attachments=True, photo_bytes=b"jpeg")
 
         with patch(
             "apps.skills.food_scanner.skill.get_nutrition_client",
@@ -401,9 +407,8 @@ class TestGates:
         assert result.reply_text == CONSENT_REQUIRED_FALLBACK
         assert result.meta.get("reply_kind") == "food_scanner_consent_required"
 
-    def test_consent_missing_short_circuits_to_diary(self, settings) -> None:
+    def test_consent_missing_short_circuits_to_diary(self, settings, no_diary_consent) -> None:
         ctx = _context("cb:food:to_diary:scan-1")
-        ctx.bot_user.food_scanner_consent_at = None
         with patch(
             "apps.skills.food_scanner.skill.get_nutrition_client",
             side_effect=AssertionError("log_meal MUST NOT run without consent"),
@@ -411,19 +416,17 @@ class TestGates:
             result = FoodScannerSkill().handle(ctx)
         assert result.reply_text == CONSENT_REQUIRED_FALLBACK
 
-    def test_reject_callback_works_even_without_consent(self, settings) -> None:
+    def test_reject_callback_works_even_without_consent(self, settings, no_diary_consent) -> None:
         # ``reject`` is a no-op ack that never touches Ayla or any
         # user data. Gating it just confuses the user.
         ctx = _context("cb:food:reject:scan-1")
-        ctx.bot_user.food_scanner_consent_at = None
         result = FoodScannerSkill().handle(ctx)
         assert result.reply_text == REJECTED_ACK
 
-    def test_gate_order_nutrition_beats_consent(self, settings) -> None:
+    def test_gate_order_nutrition_beats_consent(self, settings, no_diary_consent) -> None:
         # Both off — the more informative «feature off» message wins.
         settings.NUTRITION_ENABLED = False
         ctx = _context(has_attachments=True, photo_bytes=b"jpeg")
-        ctx.bot_user.food_scanner_consent_at = None
         result = FoodScannerSkill().handle(ctx)
         assert result.reply_text == NUTRITION_OFF_FALLBACK
 
@@ -434,8 +437,9 @@ class TestGates:
     ) -> None:
         from apps.skills.food_clarify.text_entry import CONSENT_TEXT
 
-        ctx = _context(has_attachments=True, photo_bytes=b"jpeg")
-        assert isinstance(ctx.bot_user.food_scanner_consent_at, datetime)  # согласие сканера есть
+        ctx = _context(
+            has_attachments=True, photo_bytes=b"jpeg"
+        )  # согласие дневника выдано (autouse)
         with patch(
             "apps.skills.food_scanner.skill.get_nutrition_client",
             side_effect=AssertionError("Ayla MUST NOT be called without PERSONAL_DATA"),
@@ -449,8 +453,7 @@ class TestGates:
     ) -> None:
         from apps.skills.food_clarify.text_entry import CONSENT_TEXT
 
-        ctx = _context("cb:food:to_diary:scan-1")
-        assert isinstance(ctx.bot_user.food_scanner_consent_at, datetime)
+        ctx = _context("cb:food:to_diary:scan-1")  # согласие дневника выдано (autouse)
         with patch(
             "apps.skills.food_scanner.skill.get_nutrition_client",
             side_effect=AssertionError("log_meal MUST NOT run without PERSONAL_DATA"),
@@ -460,12 +463,11 @@ class TestGates:
         assert result.meta.get("reply_kind") == "food_scanner_personal_data_required"
 
     def test_personal_data_is_checked_before_the_scanner_consent(
-        self, settings, no_personal_data
+        self, settings, no_personal_data, no_diary_consent
     ) -> None:
         from apps.skills.food_clarify.text_entry import CONSENT_TEXT
 
         ctx = _context(has_attachments=True, photo_bytes=b"jpeg")
-        ctx.bot_user.food_scanner_consent_at = None
         result = FoodScannerSkill().handle(ctx)
         assert result.reply_text == CONSENT_TEXT
 
@@ -486,23 +488,22 @@ class TestGates:
         result = FoodScannerSkill().handle(ctx)
         assert result.reply_text == REJECTED_ACK
 
-    def test_mock_shaped_consent_does_not_silently_pass(self, settings) -> None:
-        # Адверсариальный обзор PRE_PILOT #2 — bare Mock() auto-generates
-        # a truthy Mock object on every attr access. Without the
-        # isinstance(datetime) guard the gate would silently pass and
-        # the skill would call Ayla using a Mock identity. Pin the
-        # guard so the refusal path fires whenever the attribute is
-        # something other than a real datetime.
+    def test_a_failing_consent_check_refuses_instead_of_crashing(self, settings) -> None:
+        # Адверсариальный обзор PRE_PILOT #2 держал «Mock-объект вместо
+        # согласия не проходит гейт». С DRF-1963 гейт спрашивает реестр, и
+        # тот же класс ошибки — ответ, которому нельзя верить. Сбой проверки
+        # согласия обязан закончиться отказом, а не записью и не падением хода.
         ctx = _context(has_attachments=True, photo_bytes=b"jpeg")
-        # Default _context() sets a datetime — drop it back to a bare
-        # Mock-shaped attr to simulate a forgotten test fixture.
-        ctx.bot_user.food_scanner_consent_at = Mock()
-        with patch(
-            "apps.skills.food_scanner.skill.get_nutrition_client",
-            side_effect=AssertionError("Ayla MUST NOT be called for Mock-shaped consent"),
+        with (
+            patch("apps.consent.nutrition.diary_is_granted", side_effect=RuntimeError("db down")),
+            patch(
+                "apps.skills.food_scanner.skill.get_nutrition_client",
+                side_effect=AssertionError("Ayla MUST NOT be called when consent is unproven"),
+            ),
         ):
             result = FoodScannerSkill().handle(ctx)
         assert result.reply_text == CONSENT_REQUIRED_FALLBACK
+        assert result.meta.get("reply_kind") == "food_scanner_consent_required"
 
 
 # ─── registration ────────────────────────────────────────────────────────

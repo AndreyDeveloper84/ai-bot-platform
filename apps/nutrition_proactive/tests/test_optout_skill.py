@@ -34,17 +34,28 @@ def tenant(db) -> Tenant:
 
 @pytest.fixture
 def bot_user(tenant: Tenant) -> BotUser:
+    from apps.consent.models import ConsentRecord
+
     now = datetime(2026, 5, 1, tzinfo=dt_timezone.utc)
-    return BotUser.all_tenants.create(
+    user = BotUser.all_tenants.create(
         tenant=tenant,
         channel="max",
         customer_status=BotUser.CustomerStatus.LINKED,  # S2-2: the client contour knows this person
         channel_user_id="np-oo-1",
         chat_id="chat-oo-1",
         consent_at=now,
-        food_scanner_consent_at=now,
         context={prefs.CONTEXT_KEY: {"water_reminders": True, "daily_report_time": "21:00"}},
     )
+    # DRF-1963 (M1): the diary/scanner consent is a registry row, not a column.
+    ConsentRecord.all_tenants.create(
+        tenant=tenant,
+        bot_user=user,
+        consent_type=ConsentRecord.ConsentType.FOOD_DIARY_PROCESSING.value,
+        granted=True,
+        source="test:fixture",
+        document_version="food-diary-v0",
+    )
+    return user
 
 
 def ctx(bot_user: BotUser, text: str) -> SkillContext:

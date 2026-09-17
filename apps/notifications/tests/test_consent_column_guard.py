@@ -153,13 +153,12 @@ class TestAllowsWrites:
 
 class TestAllowsNeighbouringFields:
     def test_food_scanner_consent_at_attribute(self, tmp_path) -> None:
-        """A different column, with no ConsentRecord behind it.
+        """A different column — and not this guard's business.
 
-        ``ConsentRecord.ConsentType`` has no food-scanner member, so
-        there is no second source to reconcile the column against and no
-        withdrawal that could leave it stale. Reading it directly is
-        correct, which is exactly what makes the two look alike and be
-        different.
+        ``food_scanner_consent_at`` is kept dead by its own guard
+        (``tools/lint/food_scanner_column_guard.py``, DRF-1963): no reads
+        and no writes at all. This one stays about ``consent_at`` and must
+        not match the neighbour by substring, which is what is pinned here.
         """
         assert _scan(tmp_path, "x = bot_user.food_scanner_consent_at\n") == []
 
