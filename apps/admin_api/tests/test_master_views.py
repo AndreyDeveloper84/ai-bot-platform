@@ -68,8 +68,9 @@ class TestAdminAuth:
     for defence-in-depth on the destructive paths."""
 
     def test_missing_header_400(self, client: Client, tenant: Tenant) -> None:
+        # 15.09.2026 UTC (DRF-1893): отказ транспорта — один код 401 no_init_data (было 400 malformed / 401 bad_signature).
         resp = client.get(_list_url())
-        assert resp.status_code == 400
+        assert resp.status_code == 401
 
     def test_bad_signature_401(self, client: Client, tenant: Tenant) -> None:
         resp = client.get(_list_url(), HTTP_AUTHORIZATION="MaxInitData user=foo&hash=deadbeef")

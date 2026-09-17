@@ -81,8 +81,9 @@ def _valid_body(
 
 class TestAuth:
     def test_missing_auth_header_400(self, client: Client, tenant: Tenant) -> None:
+        # 15.09.2026 UTC (DRF-1893): отказ транспорта — один код 401 no_init_data (было 400 malformed / 401 bad_signature).
         resp = client.post(_invite_url(), data=_valid_body(), content_type="application/json")
-        assert resp.status_code == 400
+        assert resp.status_code == 401
 
     def test_customer_403(
         self,

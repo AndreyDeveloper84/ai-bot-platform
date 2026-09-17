@@ -17,8 +17,8 @@
  *     визита.» была константой без ручки.
  *   - Notes label: «+ Добавить заметку мастеру» — collapsed by
  *     default per founder cut #3.
- *   - Primary CTA: «Записаться» (registered) / «Зарегистрироваться»
- *     (anonymous gate). NEVER «Подтвердить» / «Окей» / «Готово».
+ *   - Primary CTA: «Записаться» (no initData → «Открой Ayla из MAX», DRF-1893)
+ *     NEVER «Подтвердить» / «Окей» / «Готово».
  *
  * Founder priority order (§6.1, locked):
  *   1. Что / где / когда / цена  (the visit summary)
@@ -36,16 +36,12 @@
  *   is plumbed by backend; absent → fall back to the generic
  *   «Выбрать другое время» CTA returning to F3.
  *
- * Anonymous gate:
- *   Detection: `channelIdentity() === "no_init_data"` (DRF-1319, one
- *   definition in `lib/identity.ts`; not «anonymous» — the channel did
- *   not deliver initData). When so AND a slot has been picked, the screen renders the
- *   `<AnonymousGateOverlay>` panel instead of the registered card.
- *   The overlay's «Зарегистрироваться» button:
- *     1. Calls `savePendingIntent({...})` (sessionStorage).
- *     2. Triggers MAX OAuth via `maxBridge().openLink(...)`. The
- *        OAuth callback returns to `/customer/booking/confirm`,
- *        where `restorePendingIntent()` rehydrates the draft.
+ * No initData (DRF-1893, owner ruling U):
+ *   Detection: `channelIdentity() === "no_init_data"` (one definition in
+ *   `lib/identity.ts`). The screen renders «Открой Ayla из MAX» with a
+ *   return to MAX — no registration, no OAuth, no booking call. In practice
+ *   App's pre-check stops this state before any route; the branch here is
+ *   the screen's own fail-closed floor.
  *
  *   W4 backend round-trip (TL Q4 — defence in depth): the `/auth/verify`
  *   response MAY include a server-side `pending_booking_intent` field.
@@ -58,6 +54,7 @@ import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { ApiError, authVerify, isHealthCheckSlug } from "../lib/api";
 import { channelIdentity } from "../lib/identity";
+import { OpenFromMaxScreen } from "../components/OpenFromMaxScreen";
 import { OfflineBanner } from "../components/OfflineBanner";
 import { ScreenLayout } from "../components/ScreenLayout";
 import { StickyCta } from "../components/StickyCta";
@@ -72,17 +69,9 @@ import {
   type QuoteChange,
 } from "../lib/customer-booking";
 import { formatDuration, formatMoney, formatVisitFull } from "../lib/format";
-import {
-  getStartPayload,
-  openExternalLink,
-  openPaymentConfirmation,
-} from "../lib/max-sdk";
+import { openPaymentConfirmation } from "../lib/max-sdk";
 import { createPayment } from "../lib/payments";
-import {
-  resolveEntryPoint,
-  restorePendingIntent,
-  savePendingIntent,
-} from "../lib/pending-booking-intent";
+import { restorePendingIntent } from "../lib/pending-booking-intent";
 import {
   resetBooking,
   setMaster,
@@ -403,127 +392,9 @@ export function CustomerBookingConfirmScreen() {
     }
   }
 
-  // MAX OAuth (W4) на момент DRF-1319 не выкачен, поэтому переменная
-  // пуста во всех окружениях и человек видит объяснение, а не тупик.
-  const oauthUrl = (import.meta.env.VITE_MAX_OAUTH_URL ?? "").trim();
-
-  function onStartRegistration() {
-    // Spec §6.2 — P0 context preservation. Save BEFORE redirect to
-    // OAuth; the callback restores from sessionStorage on mount.
-    if (!draft.serviceId || !draft.masterId || !draft.visitAt) return;
-    // DRF-1484 / §24.5 — provenance rides the snapshot; tenant_id
-    // deliberately does NOT (tenant is execution-context, server-side).
-    const entryPoint = resolveEntryPoint(draft.entryPoint, getStartPayload());
-    savePendingIntent({
-      master_id: draft.masterId,
-      service_id: draft.serviceId,
-      slot_iso: draft.visitAt,
-      // price_rub is optional now (post-round-1) — real price will
-      // arrive via service detail once F1 surfaces a price field per
-      // Alpha endpoint. We omit it rather than ship a 0 sentinel,
-      // which violated the P0 contract («price preserved as known»).
-      note: note || undefined,
-      service_name: draft.serviceName ?? undefined,
-      master_name: draft.masterName ?? undefined,
-      entry_point: entryPoint,
-    });
-    // W4 #844 defence-in-depth — also push the intent to the server
-    // cache. Survives sessionStorage eviction + multi-device flows.
-    // Best-effort: failure is non-fatal (sessionStorage stays primary).
-    //
-    // Field-name conversion: backend uses `price_quoted` (not
-    // `price_rub`) and does NOT accept the display-only `service_name`
-    // / `master_name` strings — `_ALLOWED_FIELDS` whitelist drops them
-    // silently. We only send the identifying triplet + optional note.
-    //
-    // Anonymous users have no BotUser.id yet (the cache key) — the
-    // backend handles this by treating the request as «no body»; the
-    // call is safe to issue regardless of auth state.
-    void authVerify({
-      intent: {
-        master_id: draft.masterId,
-        service_id: draft.serviceId,
-        slot_iso: draft.visitAt,
-        ...(note ? { note } : {}),
-        entry_point: entryPoint,
-      },
-    }).catch(() => {
-      // Swallow — server-side caching is supplementary. sessionStorage
-      // already has the draft.
-    });
-    // OAuth deep-link — bot DM redirect. Real MAX OAuth URL TBD by
-    // backend; until then we open the bot DM (matches existing
-    // «Доступ не настроен» screen). Gate the console.info behind
-    // import.meta.env.DEV to avoid leaking flow telemetry in prod.
-    if (import.meta.env.DEV) {
-      // eslint-disable-next-line no-console
-      console.info(
-        "[customer-booking-confirm] saved intent + entering OAuth flow",
-      );
-    }
-    // DRF-1319. Здесь стоял `navigate("/")` — кнопка «Зарегистрироваться»
-    // возвращала человека на главный экран. Теперь она ведёт туда, куда
-    // обещает, и существует ровно тогда, когда этому адресу есть куда
-    // вести: см. `oauthUrl` ниже.
-    openExternalLink(oauthUrl);
-  }
-
-  // ── Gate branch (§6.2): канал не передал initData ─────────────────────
-  if (noInitData) {
-    // Пока адреса MAX OAuth нет, кнопка «Зарегистрироваться» уводила бы
-    // в никуда: сохранённое намерение и `navigate("/")` — тупик
-    // (round-1 PRE_MERGE blocker #1). Допустимая деградация: показать
-    // that lets the user keep exploring the catalog. Flip the env
-    // flag when W4 lands.
-    // DRF-1319. Выключателем служит САМ АДРЕС, а не булев флаг.
-    //
-    // Раньше здесь стоял `VITE_MAX_OAUTH_ENABLED`, упомянутый в одном
-    // месте и не заданный НИГДЕ, включая `.env.local.example`. Флаг без
-    // установщика всегда ложь — ветка не исполнялась ни в одном
-    // окружении и при этом читалась как существующая. А включи его
-    // кто-нибудь, он получил бы кнопку «Зарегистрироваться», которая
-    // возвращает на главный экран: хуже заглушки.
-    //
-    // Условие на непустой адрес снимает обе беды разом. Включить
-    // регистрацию нельзя, не дав ей куда вести, и не бывает состояния
-    // «включено, но некуда».
-    if (!oauthUrl) {
-      return (
-        <ScreenLayout back={back} title="Чтобы записаться">
-          <section className="customer-confirm__oauth-pending">
-            <p className="customer-confirm__oauth-soon">
-              Регистрация через MAX скоро будет доступна. Сейчас можно
-              посмотреть мастеров и услуги.
-            </p>
-            <button
-              type="button"
-              className="btn-secondary"
-              onClick={() => navigate("/customer/catalog")}
-            >
-              Посмотреть мастеров
-            </button>
-          </section>
-        </ScreenLayout>
-      );
-    }
-    return (
-      <ScreenLayout
-        back={back}
-        title="Чтобы записаться"
-        cta={
-          <StickyCta onClick={onStartRegistration}>
-            Зарегистрироваться
-          </StickyCta>
-        }
-      >
-        <AnonymousGateBody
-          serviceName={draft.serviceName}
-          masterName={draft.masterName}
-          visitAt={draft.visitAt}
-        />
-      </ScreenLayout>
-    );
-  }
+  // ── Канал не передал initData (DRF-1893, раздел U) ────────────────────
+  // Регистрации и OAuth в пилоте нет: пустой initData — отказ транспорта.
+  if (noInitData) return <OpenFromMaxScreen />;
 
   // DRF-1776 — «подтверждение устарело»: выбранное время уже прошло
   // (долгий возврат из OAuth, восстановленное намерение, сон телефона).
@@ -888,46 +759,6 @@ export function CustomerBookingConfirmScreen() {
         </div>
       )}
     </ScreenLayout>
-  );
-}
-
-/**
- * Anonymous gate body — §6.2 verbatim founder copy.
- *
- * The OAuth round-trip is initiated by the StickyCta button in the
- * parent. This component shows WHAT the user is about to lock in
- * (so they understand why they're registering), followed by the
- * trust block (compact: «Только МАХ авторизация, без e-mail»).
- */
-function AnonymousGateBody({
-  serviceName,
-  masterName,
-  visitAt,
-}: {
-  serviceName: string | null;
-  masterName: string | null;
-  visitAt: string | null;
-}) {
-  return (
-    <>
-      <p className="customer-confirm__gate-lead">
-        Сохраню запись после регистрации — всё, что ты выбрала,
-        останется на месте.
-      </p>
-      <div className="confirm-card">
-        <dl>
-          <dt>Услуга</dt>
-          <dd>{serviceName || "—"}</dd>
-          <dt>Мастер</dt>
-          <dd>{masterName || "—"}</dd>
-          <dt>Время</dt>
-          <dd>{visitAt ? formatVisitFull(visitAt) : "—"}</dd>
-        </dl>
-      </div>
-      <p className="customer-confirm__gate-trust">
-        Только авторизация через MAX. Email не нужен.
-      </p>
-    </>
   );
 }
 

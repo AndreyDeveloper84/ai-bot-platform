@@ -106,11 +106,13 @@ def _url() -> str:
 
 class TestMeAuth:
     def test_missing_header_returns_400(self, client: Client, tenant: Tenant) -> None:
+        # 15.09.2026 UTC (DRF-1893): отказ транспорта — один код 401 no_init_data (было 400 malformed / 401 bad_signature).
         resp = client.get(_url())
-        assert resp.status_code == 400
-        assert resp.json()["error"] == "malformed"
+        assert resp.status_code == 401
+        assert resp.json()["error"] == "no_init_data"
 
     def test_bad_signature_returns_401(self, client: Client, tenant: Tenant) -> None:
+        # 15.09.2026 UTC (DRF-1893): отказ транспорта — один код 401 no_init_data (было 400 malformed / 401 bad_signature).
         params = {
             "user": json.dumps({"id": 12345, "first_name": "Анна"}),
             "auth_date": str(int(time_module.time())),
@@ -118,7 +120,7 @@ class TestMeAuth:
         raw = _sign(params, token="wrong-token")
         resp = client.get(_url(), HTTP_AUTHORIZATION=f"MaxInitData {raw}")
         assert resp.status_code == 401
-        assert resp.json()["error"] == "bad_signature"
+        assert resp.json()["error"] == "no_init_data"
 
 
 # --- response shape ------------------------------------------------------

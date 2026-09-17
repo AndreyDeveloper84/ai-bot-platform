@@ -52,15 +52,7 @@ from apps.identity.services.bot_user_resolver import (
     resolve_bot_user,
     salon_choice_from,
 )
-from apps.miniapp_api.auth import (
-    InitDataBadSignature,
-    InitDataError,
-    InitDataMalformed,
-    InitDataNotConfigured,
-    InitDataStale,
-    extract_init_data,
-    verify_init_data,
-)
+from apps.miniapp_api.transport_refusal import GUARD_ATTR, verify_request_init_data
 from apps.miniapp_api.dev_bypass import try_dev_bypass
 from apps.tenancy.context import tenant_scope
 
@@ -353,21 +345,10 @@ def require_master_init_data(
         if bypass is not None:
             bot_user, _bypass_tenant = bypass
         else:
-            header = request.headers.get("Authorization", "")
-            try:
-                raw = extract_init_data(header)
-                verified = verify_init_data(raw)
-            except InitDataNotConfigured:
-                logger.error("master_api.auth.not_configured")
-                return _error("server_misconfigured", "MAX bot token not configured", 500)
-            except InitDataBadSignature:
-                return _error("bad_signature", "initData signature mismatch", 401)
-            except InitDataStale:
-                return _error("stale", "initData expired — reopen the Mini App", 401)
-            except InitDataMalformed as exc:
-                return _error("malformed", str(exc), 400)
-            except InitDataError as exc:
-                return _error("unauthorized", str(exc), 401)
+            # DRF-1893 — один отказ транспорта: 401 no_init_data, причина в логе.
+            verified, refusal = verify_request_init_data(request, surface="master_api")
+            if refusal is not None:
+                return refusal
 
             try:
                 bot_user = _resolve_bot_user(verified, chosen_slug=salon_choice_from(request))
@@ -433,6 +414,7 @@ def require_master_init_data(
         with tenant_scope(bot_user.tenant):
             return view_func(request, *args, **kwargs)
 
+    setattr(wrapper, GUARD_ATTR, "master")
     return wrapper
 
 
@@ -460,21 +442,10 @@ def require_init_data_only(
         if bypass is not None:
             bot_user, _bypass_tenant = bypass
         else:
-            header = request.headers.get("Authorization", "")
-            try:
-                raw = extract_init_data(header)
-                verified = verify_init_data(raw)
-            except InitDataNotConfigured:
-                logger.error("master_api.auth.not_configured")
-                return _error("server_misconfigured", "MAX bot token not configured", 500)
-            except InitDataBadSignature:
-                return _error("bad_signature", "initData signature mismatch", 401)
-            except InitDataStale:
-                return _error("stale", "initData expired — reopen the Mini App", 401)
-            except InitDataMalformed as exc:
-                return _error("malformed", str(exc), 400)
-            except InitDataError as exc:
-                return _error("unauthorized", str(exc), 401)
+            # DRF-1893 — один отказ транспорта: 401 no_init_data, причина в логе.
+            verified, refusal = verify_request_init_data(request, surface="master_api")
+            if refusal is not None:
+                return refusal
 
             try:
                 bot_user = _resolve_bot_user(verified, chosen_slug=salon_choice_from(request))
@@ -495,6 +466,7 @@ def require_init_data_only(
         with tenant_scope(bot_user.tenant):
             return view_func(request, *args, **kwargs)
 
+    setattr(wrapper, GUARD_ATTR, "master_onboarding")
     return wrapper
 
 

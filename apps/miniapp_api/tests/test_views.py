@@ -135,11 +135,13 @@ class TestAuthVerify:
         assert data["tenant"]["slug"] == "mn-test"
 
     def test_missing_header(self, client: Client) -> None:
+        # 15.09.2026 UTC (DRF-1893): отказ транспорта — один код 401 no_init_data (было 400 malformed / 401 bad_signature).
         resp = client.post(reverse("miniapp_api:auth_verify"))
-        assert resp.status_code == 400
-        assert resp.json()["error"] == "malformed"
+        assert resp.status_code == 401
+        assert resp.json()["error"] == "no_init_data"
 
     def test_bad_signature(self, client: Client, bot_user: BotUser, settings) -> None:
+        # 15.09.2026 UTC (DRF-1893): отказ транспорта — один код 401 no_init_data (было 400 malformed / 401 bad_signature).
         settings.MAX_BOT_TOKEN = BOT_TOKEN
         # Sign with wrong token.
         params = {
@@ -152,7 +154,7 @@ class TestAuthVerify:
             HTTP_AUTHORIZATION=f"MaxInitData {raw}",
         )
         assert resp.status_code == 401
-        assert resp.json()["error"] == "bad_signature"
+        assert resp.json()["error"] == "no_init_data"
 
     @pytest.mark.django_db
     def test_user_not_registered(self, client: Client, tenant: Tenant) -> None:

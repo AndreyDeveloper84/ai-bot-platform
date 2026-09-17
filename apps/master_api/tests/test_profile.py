@@ -31,12 +31,13 @@ class TestOnboardingProfile:
     # DRF-1813 (M21): запись «о себе» и фото ушла в каталог — сохранение,
     # лимит, аудит и загрузка фото теперь в test_profile_proxy_1813.py.
     def test_unauthenticated_rejected(self, client: Client, db) -> None:
+        # 15.09.2026 UTC (DRF-1893): отказ транспорта — один код 401 no_init_data (было 400 malformed / 401 bad_signature).
         resp = client.patch(
             reverse("master_api:onboarding_profile"),
             data=json.dumps({"bio": "hi"}),
             content_type="application/json",
         )
-        assert resp.status_code == 400  # missing init-data
+        assert resp.status_code == 401  # missing init-data
 
     def test_non_master_rejected(
         self,
@@ -74,5 +75,6 @@ class TestMe:
         assert len(data["master"]["services"]) >= 1
 
     def test_unauthenticated(self, client: Client, db) -> None:
+        # 15.09.2026 UTC (DRF-1893): отказ транспорта — один код 401 no_init_data (было 400 malformed / 401 bad_signature).
         resp = client.get(reverse("master_api:me"))
-        assert resp.status_code == 400  # malformed init-data
+        assert resp.status_code == 401  # malformed init-data
