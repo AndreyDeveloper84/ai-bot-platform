@@ -28,8 +28,8 @@
 ### Чего политика не делает — и почему не притворяется
 
 * **Не выдумывает словари.** «Фраза → target» (J1) и «target → family,
-  action_type» (J2) — политика владельца; до его слова они пусты, и выбор честно
-  кончается на ``NBA_TARGET_NOT_RECOGNIZED``.
+  action_type» (J2) — политика владельца (решение 15.09, DRF-1945): только
+  явный список; фраза вне его — ``NBA_TARGET_NOT_RECOGNIZED``.
 * **Не производит ``INSUFFICIENT_CONTEXT``.** §30: недостаточность — недостающий
   факт, который политика объявила обязательным для NBA. Required facts пока не
   объявлены; блок движка ``BLOCK_READINESS_INPUT_UNAVAILABLE`` — «вход
@@ -48,7 +48,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum
 from typing import Any
 
@@ -151,6 +151,9 @@ class PolicyVerdict:
     candidate_nba: Triple | None = None
     candidate_not_actionable_reason: str | None = None
     taxonomy_version: str = TAXONOMY_VERSION
+    #: DRF-1945: вердикт безопасности, который политика прочитала (минимум строки
+    #: тени владельца, §4). Проставляет :func:`decide`.
+    safety_state: str | None = None
 
     @property
     def catalog_writable(self) -> bool:
@@ -159,6 +162,7 @@ class PolicyVerdict:
     def nba_fields(self) -> dict[str, Any]:
         """Поля выбора NBA для строки тени — в написании записи каталога."""
 
+        chosen = self.primary or self.candidate_nba
         candidate: dict[str, Any] | None = None
         if self.candidate_nba is not None:
             candidate = {
@@ -172,6 +176,14 @@ class PolicyVerdict:
             "primary": self.primary.as_record(ROLE_PRIMARY) if self.primary else None,
             "alternatives": [a.as_record(ROLE_ALTERNATIVE) for a in self.alternatives],
             "candidate_nba": candidate,
+            # DRF-1945 — минимум строки тени владельца (§4), плоско. Тройка — основной
+            # рекомендации, а без неё — кандидата; у исхода без обеих — пусто.
+            "target": chosen.target if chosen else None,
+            "family": chosen.family if chosen else None,
+            "action_type": chosen.action_type if chosen else None,
+            "decision_status": self.result_status.value,
+            "safety_state": self.safety_state,
+            "reason_code": self.reason_codes[0] if self.reason_codes else None,
         }
 
 
@@ -181,7 +193,7 @@ def _value(item: Any) -> str | None:
     return str(getattr(item, "value", item))
 
 
-def decide(
+def _decide(
     evidence: Any,
     *,
     handoff: Any = None,
@@ -285,6 +297,24 @@ def decide(
         primary=triples[0],
         alternatives=triples[1 : 1 + MAX_ALTERNATIVES],
     )
+
+
+def decide(
+    evidence: Any,
+    *,
+    handoff: Any = None,
+    needs: TurnNeeds | None = None,
+    defaults: Any = None,
+) -> PolicyVerdict:
+    """Исход прохода (:func:`_decide`) с прочитанным вердиктом безопасности.
+
+    DRF-1945: ``safety_state`` — в минимуме строки тени владельца; политика
+    называет то, что прочитала сама, а не то, что лежит рядом в записи движка.
+    """
+
+    verdict = _decide(evidence, handoff=handoff, needs=needs, defaults=defaults)
+    read = _value((getattr(evidence, "safety", None) or {}).get("state"))
+    return replace(verdict, safety_state=read)
 
 
 def assert_catalog_writable(status: Any) -> str:

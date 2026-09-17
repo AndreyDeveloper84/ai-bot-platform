@@ -2,8 +2,8 @@
 
 * коды H5/B9 байт в байт с решением владельца и именами констант каталога —
   ``TestCodesAreTheOwnersBytes``;
-* боевые словари J1/J2 в этом срезе пусты и не могут въехать молча —
-  ``TestProductionDictionariesAreEmpty``;
+* боевые словари J1/J2 — ровно утверждённый список владельца (DRF-1945) —
+  ``TestProductionDictionariesAreTheOwnerList``;
 * неизвестное значение — отказ, не выдумка; сочетания не ограничены (I1 а) —
   ``TestValidation``;
 * признаки боли (I2) и health-контекста (п.6) — ``TestSignals``.
@@ -35,36 +35,49 @@ class TestCodesAreTheOwnersBytes:
         # Recommendation.Role (каталог): primary | alternative
         assert (tx.ROLE_PRIMARY, tx.ROLE_ALTERNATIVE) == ("primary", "alternative")
 
-    def test_version_label_fits_the_catalog_and_does_not_claim_a_phrase_map(self):
-        assert tx.TAXONOMY_VERSION == "h5-codes:no-phrase-map"
+    def test_version_label_fits_the_catalog_and_names_the_owner_ruling(self):
+        assert tx.TAXONOMY_VERSION == "h5-j1j2:owner-2026-09-15:r2"
         assert len(tx.TAXONOMY_VERSION) <= 32
 
 
-class TestProductionDictionariesAreEmpty:
-    """Значения J1/J2 — отдельным коммитом после слова владельца (главное окно 15.09)."""
+#: J2 владельца (§4) — дословно.
+OWNER_J2 = {
+    "FACE_FRESHNESS": ("ADDRESS", "PROVIDER_SESSION"),
+    "PUFFINESS_REDUCTION": ("ADDRESS", "PROVIDER_SESSION"),
+    "RELAXATION": ("SUPPORT", "PROVIDER_SESSION"),
+    "BACK_COMFORT": ("RECOVER", "PROVIDER_SESSION"),
+}
 
-    def test_phrase_map_is_empty_until_the_owner_answers(self):
-        # empty-assert-ok: пустота — предмет теста (J1 ждёт владельца); краснеет на въехавшей фразе — проба P5 в PR DRF-1932
-        assert dict(tx.TARGET_PHRASES) == {}, (
-            "словарь «фраза → target» (J1) не пуст: значения — только по слову владельца "
-            "и вместе со сменой TAXONOMY_VERSION"
-        )
+#: J1 владельца (§3 + R2, OWNER_QUESTIONS раздел S) — дословно, только явный список.
+#: R1: близкие формулировки к FACE_FRESHNESS не вводятся, новые фразы — явно по
+#: shadow evidence.
+OWNER_J1 = {
+    "хочу выглядеть свежее": "FACE_FRESHNESS",
+    "хочу снять напряжение": "RELAXATION",
+    "хочу расслабить спину": "BACK_COMFORT",
+    "спина напряжена": "BACK_COMFORT",
+    "хочу снять зажимы": "BACK_COMFORT",
+    "устала спина после работы": "BACK_COMFORT",
+    "напряжение в спине": "BACK_COMFORT",
+    "хочу снять напряжение в спине": "BACK_COMFORT",
+}
 
-    def test_defaults_are_empty_until_the_owner_answers(self):
-        # empty-assert-ok: пустота — предмет теста (J2 ждёт владельца), как у J1 выше
-        assert dict(tx.TARGET_DEFAULTS) == {}, (
-            "умолчания «target → family, action_type» (J2) не пусты: значения — только по "
-            "слову владельца и вместе со сменой TAXONOMY_VERSION"
-        )
 
-    def test_with_empty_dictionaries_no_phrase_yields_a_target(self):
-        for text in (
-            "Хочу выглядеть свежее",
-            "Хочу снять напряжение",
-            "хочу расслабиться вечером",
-            "хочу расслабить спину",
-        ):
-            assert tx.read_turn_needs(text).recognized_targets == ()
+class TestProductionDictionariesAreTheOwnerList:
+    """DRF-1945: боевой словарь = утверждённый список, строкой. Любая фраза сверх
+    списка или правка умолчания краснит здесь — вместе со сменой TAXONOMY_VERSION."""
+
+    def test_phrase_map_is_exactly_the_owner_j1(self):
+        assert dict(tx.TARGET_PHRASES) == OWNER_J1
+
+    def test_defaults_are_exactly_the_owner_j2(self):
+        assert dict(tx.TARGET_DEFAULTS) == OWNER_J2
+
+
+class TestOwnerPhrasesJ1:
+    @pytest.mark.parametrize("phrase, target", sorted(OWNER_J1.items()))
+    def test_each_owner_phrase_gives_its_target(self, phrase, target):
+        assert tx.read_turn_needs(phrase.capitalize()).recognized_targets == (target,)
 
 
 class TestValidation:
@@ -148,3 +161,62 @@ class TestSignals:
         phrases = {"спину": "BACK_COMFORT", "свежее": "FACE_FRESHNESS"}
         needs = tx.read_turn_needs("хочу расслабить спину и выглядеть свежее", phrases=phrases)
         assert needs.recognized_targets == ("FACE_FRESHNESS", "BACK_COMFORT")
+
+
+# --------------------------------------------------------------------------- #
+# DRF-1945 — боевые словари J1/J2 по решению владельца 15.09                   #
+# (docs/PROMPT_ORCHESTRATOR_AYLA_CONTROLLED_PILOT_NEXT_WAVE.md §3–§4)          #
+# --------------------------------------------------------------------------- #
+
+#: §3 NO TARGET: тексты кнопок первого хода (``apps/channels/max/quick_actions.py``)
+#: и краткие формы владельца.
+NO_TARGET_PHRASES = (
+    "Беспокоят отёки",
+    "Последнее время сильно устаю",
+    "Хочу больше времени уделять себе",
+    "Готовлюсь к важному событию",
+    "Сильно устаю",
+    "Время себе",
+    "Важное событие",
+)
+
+
+class TestOwnerDefaultsJ2:
+    @pytest.mark.parametrize("target", tx.TARGETS)
+    def test_each_target_gets_the_owner_triple(self, target):
+        (triple,) = tx.triples_for((target,))
+        assert triple == tx.Triple(target, *OWNER_J2[target])
+
+
+class TestOwnerNoTargetPhrases:
+    @pytest.mark.parametrize("text", NO_TARGET_PHRASES)
+    def test_no_target_is_assigned(self, text):
+        assert tx.words(text), text
+        # empty-assert-ok: отсутствие цели — предмет теста (§3 NO TARGET)
+        assert tx.read_turn_needs(text).recognized_targets == ()
+
+    def test_no_owner_phrase_reaches_puffiness(self):
+        """J: PUFFINESS_REDUCTION на пилоте из утверждённых фраз недостижима — это честно."""
+        assert tx.TARGET_PHRASES, "словарь J1 пуст"
+        assert "PUFFINESS_REDUCTION" not in set(tx.TARGET_PHRASES.values())
+
+
+class TestLongestMatchWins:
+    """R2 (владелец 15.09): при подстроках побеждает более специфичная формулировка —
+    совпавшая фраза, лежащая в реплике внутри другой совпавшей, не считается. Считается
+    по словам реплики, а не по вложенности ключей словаря."""
+
+    PHRASES = {
+        "снять напряжение": "RELAXATION",
+        "снять напряжение в спине": "BACK_COMFORT",
+    }
+
+    def test_a_phrase_inside_a_longer_matched_phrase_does_not_count(self):
+        needs = tx.read_turn_needs("Хочу снять напряжение в спине", phrases=self.PHRASES)
+        assert needs.recognized_targets == ("BACK_COMFORT",)
+
+    def test_separate_occurrences_both_count(self):
+        needs = tx.read_turn_needs(
+            "Хочу снять напряжение, а ещё снять напряжение в спине", phrases=self.PHRASES
+        )
+        assert needs.recognized_targets == ("RELAXATION", "BACK_COMFORT")
