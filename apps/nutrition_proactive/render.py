@@ -198,7 +198,12 @@ def goal_remark(
     # все они сравнивают с нормой. Нормы не настроены — реплики нет,
     # какое бы число ни лежало в сводке или в ответе по воде: у них нет
     # происхождения, у профиля есть.
-    if not profile.targets_are_configured:
+    #
+    # DRF-1929 (F1(б)): вид — КАЛОРИИ. Все четыре реплики ниже сравнивают с
+    # нормой калорий или выведенных из неё макросов; происхождение воды к
+    # ним отношения не имеет. Водную реплику отдельно охраняет
+    # ``_water_norm`` — по своей подписи.
+    if not profile.calories_are_configured:
         return ""
 
     goal_label = GOAL_LABELS.get(profile.goal, "")
@@ -309,8 +314,12 @@ def _water_norm(water: WaterTodayResponse, profile: ProfileResponse | None) -> f
 
     Тот же довод, что у :func:`_summary_goal`: число едет отдельным ответом
     и своего происхождения не имеет; профиль знает, можно ли его показывать.
+
+    DRF-1929 (F1(б)): спрашивается подпись ЖИДКОСТИ. До разделения норму
+    воды снимали неподтверждённые калории — спрашивали набор, а показывали
+    воду.
     """
-    if profile is None or not profile.targets_are_configured:
+    if profile is None or not profile.fluids_are_configured:
         return None
     norm = water.norm_ml
     return None if not norm else float(norm)
@@ -323,8 +332,10 @@ def _summary_goal(summary: SummaryResponse, profile: ProfileResponse | None) -> 
     ``unknown_legacy`` каталог до команды очистки (#332) присылает в ней
     число. Профиль своё происхождение знает, и он же решает, можно ли
     показывать число из соседнего ответа. Без профиля — нельзя: §103.
+
+    DRF-1929 (F1(б)): вид — КАЛОРИИ.
     """
-    if profile is None or not profile.targets_are_configured:
+    if profile is None or not profile.calories_are_configured:
         return None
     goal = summary.calories_goal
     return None if goal is None else float(goal)

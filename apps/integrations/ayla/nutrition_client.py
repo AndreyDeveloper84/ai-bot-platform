@@ -288,6 +288,45 @@ def _targets_source(body: dict[str, Any]) -> str:
     return str(provenance.get("source") or "")
 
 
+#: Виды ориентира. Имена — те же, что у каталога в ``targets_provenance.by_kind``
+#: и в ``targets_method_versions``: грань по видам проведена там раньше и по
+#: той же причине — у калорий и жидкости методики разные (§85).
+KIND_CALORIES = "calories"
+KIND_FLUIDS = "fluids"
+
+
+def _kind_source(body: dict[str, Any], kind: str) -> str:
+    """``targets_provenance.by_kind.<вид>.source`` — с НАЗВАННЫМ мостом.
+
+    DRF-1929 (F1(б)): каталог начал подписывать калории и жидкость порознь,
+    чтобы ручная правка одного вида не переписывала происхождение другого.
+
+    **Мост, и почему он обязателен.** Этот PR может слиться раньше, чем
+    каталожный, и уж точно раньше, чем каталог выложат. Пока ``by_kind`` не
+    приходит, единственная правда о видах — общая подпись, и читать её
+    здесь не «на всякий случай», а единственно верно: иначе бот, поехав
+    впереди каталога, счёл бы КАЖДЫЙ профиль ненастроенным и снял бы
+    ориентиры у всех живых клиентов.
+
+    Мост исчезает сам, когда каталог начнёт слать ``by_kind``: тогда ветка
+    просто перестаёт выбираться. Отдельного снятия он не требует.
+    """
+    provenance = body.get("targets_provenance")
+    if not isinstance(provenance, dict):
+        return ""
+    by_kind = provenance.get("by_kind")
+    if isinstance(by_kind, dict):
+        entry = by_kind.get(kind)
+        if isinstance(entry, dict):
+            value = entry.get("source")
+            # ``None`` внутри ``by_kind`` — «по видам не устанавливалось»
+            # (строка каталога до миграции данных): это не «нет ориентира»,
+            # и подставлять "none" нельзя — падаем на общую подпись.
+            if value:
+                return str(value)
+    return str(provenance.get("source") or "")
+
+
 def _provenance_dict(body: dict[str, Any], key: str) -> dict[str, Any]:
     """``targets_provenance.<key>`` как словарь — или ``{}``.
 
@@ -330,7 +369,12 @@ TARGETS_NOT_CONFIGURED = "not_configured"
 
 
 def targets_configured(source: str | None) -> bool:
-    """Есть ли у ориентира названное происхождение (§6, §103)."""
+    """Есть ли у ориентира названное происхождение (§6, §103).
+
+    Множество источников общее для всех видов: меняется не то, ЧТО значит
+    «настроено», а то, У КОГО спрашивают. Поэтому предикат один, а
+    вопросов к нему теперь два — по калориям и по жидкости.
+    """
     return (source or "") in TARGETS_CONFIGURED_SOURCES
 
 
@@ -447,6 +491,13 @@ class ProfileResponse:
     #: сторона по ``"none"`` объясняет человеку, почему ориентиров нет, а
     #: по ``""`` молчит и пишет warning: нарушен контракт, а не расчёт.
     targets_source: str = ""
+    #: Происхождение ПО ВИДАМ (DRF-1929, F1(б)): каталог подписывает калории
+    #: и жидкость порознь, чтобы ручная правка одного вида не переписывала
+    #: другой. Пустая строка — ``by_kind`` не пришёл; разбор в этом случае
+    #: кладёт сюда общую подпись (мост в :func:`_kind_source`), поэтому
+    #: пустыми они остаются только у DTO, собранного руками мимо клиента.
+    calories_source: str = ""
+    fluids_source: str = ""
     #: Методика (``{"calories": "mifflin_st_jeor_v1"}``) и входы расчёта
     #: (``SNAPSHOT_INPUTS`` каталога: пол, возраст, рост, вес, активность,
     #: цель, темп) — §5.1 11.09.2026: показываются человеку. Это данные
@@ -456,8 +507,13 @@ class ProfileResponse:
     targets_input_snapshot: dict[str, Any] = field(default_factory=dict)
     raw: dict[str, Any] = field(default_factory=dict)
 
-    #: Поля, которые обязаны быть ``None`` у не настроенного профиля.
-    _TARGET_FIELDS = ("daily_kcal", "protein_g", "fat_g", "carbs_g", "water_ml", "bmr")
+    #: Поля, которые обязаны быть ``None`` у не настроенного профиля —
+    #: РАЗДЕЛЬНО по видам (DRF-1929). Макросы и ``bmr`` выведены из расчёта
+    #: калорий и делят их родословную; вода — своя.
+    _CALORIE_FIELDS = ("daily_kcal", "protein_g", "fat_g", "carbs_g", "bmr")
+    _FLUID_FIELDS = ("water_ml",)
+    #: Прежнее общее имя — для читателей, которым нужен весь набор.
+    _TARGET_FIELDS = _CALORIE_FIELDS + _FLUID_FIELDS
 
     def __post_init__(self) -> None:
         """Инвариант DTO: не настроено ⇒ ориентиров нет — при ЛЮБОМ способе сборки.
@@ -468,12 +524,33 @@ class ProfileResponse:
         получив профиль с ``unknown_legacy`` И числами — состояние, которого
         по §103 не бывает. Инвариант на типе обойти нельзя. Числа при этом
         не теряются: они в ``raw``, для диагностики.
+
+        DRF-1929 (F1(б)): гасится КАЖДЫЙ вид по своему происхождению. До
+        разделения один общий вердикт снимал воду вместе с калориями — то
+        есть бот воспроизводил на своей границе ровно ту потерю числа,
+        которую каталог только что убрал у себя. Теперь калории, макросы и
+        ``bmr`` уходят по подписи калорий, а вода — по своей.
         """
-        if targets_configured(self.targets_source):
-            return
-        for name in self._TARGET_FIELDS:
-            if getattr(self, name) is not None:
-                object.__setattr__(self, name, None)
+        for source, names in (
+            (self._kind_source_value(KIND_CALORIES), self._CALORIE_FIELDS),
+            (self._kind_source_value(KIND_FLUIDS), self._FLUID_FIELDS),
+        ):
+            if targets_configured(source):
+                continue
+            for name in names:
+                if getattr(self, name) is not None:
+                    object.__setattr__(self, name, None)
+
+    def _kind_source_value(self, kind: str) -> str:
+        """Подпись вида — своя, либо общая, если по видам ничего не пришло.
+
+        Тот же мост, что в :func:`_kind_source`, но для DTO, собранного
+        МИМО клиента (тесты, фикстуры, ``nutrition_coach_dryrun``): такие
+        объекты несут только ``targets_source``, и без моста инвариант
+        погасил бы у них всё.
+        """
+        own = self.calories_source if kind == KIND_CALORIES else self.fluids_source
+        return own or self.targets_source
 
     @property
     def targets_state(self) -> str:
@@ -495,8 +572,22 @@ class ProfileResponse:
         Единственный вопрос, который поверхность вправе задать: «можно ли
         показывать ориентир». Ответ производится здесь, а не собирается на
         каждом экране заново из ``targets_source``.
+
+        DRF-1929: «настроен хоть один вид». Ослабить прежнее поведение это
+        не может — у профиля без разделения оба вида читают одну подпись, —
+        а поверхность, знающая свой вид, обязана спрашивать его напрямую.
         """
-        return targets_configured(self.targets_source)
+        return self.calories_are_configured or self.fluids_are_configured
+
+    @property
+    def calories_are_configured(self) -> bool:
+        """Можно ли показывать калории и выведенное из них (макросы, bmr, RDA)."""
+        return targets_configured(self._kind_source_value(KIND_CALORIES))
+
+    @property
+    def fluids_are_configured(self) -> bool:
+        """Можно ли показывать норму жидкости."""
+        return targets_configured(self._kind_source_value(KIND_FLUIDS))
 
 
 @dataclass(frozen=True)
@@ -1298,6 +1389,8 @@ class NutritionClient:
                 disclaimer_acked=body.get("disclaimer_acked"),
                 goal_overridden_by=body.get("goal_overridden_by"),
                 targets_source=_targets_source(body),
+                calories_source=_kind_source(body, KIND_CALORIES),
+                fluids_source=_kind_source(body, KIND_FLUIDS),
                 targets_method_versions=_provenance_dict(body, "method_versions"),
                 targets_input_snapshot=_provenance_dict(body, "input_snapshot"),
                 raw=body,

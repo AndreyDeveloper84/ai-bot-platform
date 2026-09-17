@@ -174,6 +174,29 @@ class _FakeProfile:
     health_flags: dict = None  # type: ignore[assignment]
     targets_are_configured: bool = True
     targets_source: str = "ayla_calculated"
+    #: DRF-1929 (F1(б)): ручка спрашивает происхождение ПО ВИДАМ. Здесь это
+    #: НЕ отдельные поля, а производные: тесты выражают «не настроено»
+    #: присваиванием одного ``targets_are_configured``, и простые поля с
+    #: умолчанием ``True`` этот приём молча обошли бы — ручка получила бы
+    #: «калории настроены» у профиля, объявленного ненастроенным, и выдала
+    #: бы ``calories_target``, который §103 запрещает.
+    #:
+    #: ``None`` — «как у набора» (тот же мост, что в клиенте); явный ``bool``
+    #: — по-видовая подпись для проверок самого разделения.
+    calories_override: bool | None = None
+    fluids_override: bool | None = None
+
+    @property
+    def calories_are_configured(self) -> bool:
+        if self.calories_override is None:
+            return self.targets_are_configured
+        return self.calories_override
+
+    @property
+    def fluids_are_configured(self) -> bool:
+        if self.fluids_override is None:
+            return self.targets_are_configured
+        return self.fluids_override
 
 
 _NO_PROFILE = object()
@@ -246,6 +269,33 @@ class TestTargetsRequireProvenance:
             data = self._get(client, bot_user)
         assert data["calories_eaten"] == 1240
         assert "calories_target" not in data
+        assert "water_glasses_target" not in data
+
+    def test_water_target_survives_unconfirmed_calories(self, client: Client, bot_user: BotUser):
+        """DRF-1929 (F1(б)): ключи цели уходят ПО ВИДАМ, порознь.
+
+        Ради этого разделения всё и делалось: до него один вердикт снимал
+        норму воды из-за неподтверждённых калорий. Узел асимметричный
+        намеренно — при общем флаге он был бы красным, а при «разделили
+        только на словах» зелёным по неверной причине, потому что оба
+        ключа ушли бы вместе.
+        """
+        split = _FakeProfile(calories_override=False, fluids_override=True)
+        with _patch_nutrition(summary=_FakeSummary(), water=_FakeWater(), profile=split):
+            data = self._get(client, bot_user)
+
+        # Факты остаются — снимается только ориентир по калориям.
+        assert data["calories_eaten"] == 1240
+        assert "calories_target" not in data
+        assert data["water_glasses_target"] is not None
+
+    def test_calories_target_survives_unconfirmed_water(self, client: Client, bot_user: BotUser):
+        """Зеркало предыдущего: вид гасит себя, а не соседа."""
+        split = _FakeProfile(calories_override=True, fluids_override=False)
+        with _patch_nutrition(summary=_FakeSummary(), water=_FakeWater(), profile=split):
+            data = self._get(client, bot_user)
+
+        assert data["calories_target"] is not None
         assert "water_glasses_target" not in data
 
     def test_an_unreadable_profile_hides_targets_fail_closed(
