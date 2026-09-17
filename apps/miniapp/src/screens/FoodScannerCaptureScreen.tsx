@@ -31,11 +31,18 @@ import {
   MEAL_TYPE_ICON,
   MEAL_TYPE_LABEL,
   defaultMealTypeForHour,
-  fetchConsentAt,
+  fetchDiaryConsentGate,
   grantConsent,
   stripImageMetadata,
   type MealType,
 } from "../lib/food-scanner";
+import {
+  BUTTON_DECLINE,
+  BUTTON_GRANT,
+  DISCLOSURE_BODY,
+  DISCLOSURE_HEADLINE,
+  FOOD_DIARY_DISCLOSURE_VERSION,
+} from "../lib/food-diary-disclosure";
 import { Skeleton } from "../components/Skeleton";
 import { StateError } from "../components/StateError";
 import { useScreenBack } from "../hooks/useScreenBack";
@@ -73,11 +80,21 @@ export function FoodScannerCaptureScreen() {
     undefined,
   );
   const [consentErr, setConsentErr] = useState<unknown>(null);
+  // КАКОЙ путь согласия живой — со слов сервера. Не «разрешено ли»:
+  // право устанавливает предикат на сервере, экран его только показывает.
+  // По умолчанию `false` — то есть старый путь: не узнав ничего, экран
+  // обязан вести себя как сегодня, а не как завтра.
+  const [canonical, setCanonical] = useState<boolean>(false);
 
   const loadConsent = useCallback(async () => {
     setConsentErr(null);
     try {
-      setConsentAt(await fetchConsentAt());
+      // Каким путём спрашивать, решает СЕРВЕР, а не сборка: правило
+      // «поля нет — путь старый» живёт в одном месте, внутри
+      // `fetchDiaryConsentGate`, и здесь не повторяется.
+      const gate = await fetchDiaryConsentGate();
+      setCanonical(gate.canonical);
+      setConsentAt(gate.grantedAt);
     } catch (e) {
       // Не подставляем `null`: «не смогли спросить» — не «согласия
       // нет». Первое лечится повтором, второе — гейтом, и путать их
@@ -121,6 +138,11 @@ export function FoodScannerCaptureScreen() {
     // согласия — это два разных согласия.
     let now: string | null;
     try {
+      // Ручка одна и версия одна для обоих текстов (DRF-2038 поверх
+      // половины 1 DRF-1963): выдача идёт через `grantConsent` в любом
+      // случае. Какой текст человек читал, решает `canonical` ниже, а
+      // версия, под которой согласие ложится в реестр, — константа
+      // половины 1; развилка v0/v1 у владельца.
       now = await grantConsent();
     } catch (e) {
       setConsentErr(e);
@@ -213,6 +235,7 @@ export function FoodScannerCaptureScreen() {
   if (consentAt === null) {
     return (
       <ConsentGate
+        canonical={canonical}
         onBack={onBack}
         onAccept={handleAcceptConsent}
         onDecline={handleDeclineConsent}
@@ -364,10 +387,18 @@ export function FoodScannerCaptureScreen() {
 // ---------------------------------------------------------------------------
 
 function ConsentGate({
+  canonical,
   onBack,
   onAccept,
   onDecline,
 }: {
+  /**
+   * Какой текст показывать. `false` — нынешний короткий текст, слово в
+   * слово как до DRF-2038; `true` — каноническое раскрытие Z9. Пока
+   * раскрытие имеет статус WORKING PRODUCT COPY, сервер объявляет канон
+   * только под флагом, и по умолчанию экран обязан показывать старое.
+   */
+  canonical: boolean;
   /**
    * Возврат приходит готовым от экрана (DRF-1493).
    *
@@ -407,14 +438,38 @@ function ConsentGate({
           className="food-scanner-consent"
           aria-labelledby="food-consent-h2"
         >
-          <h2 id="food-consent-h2" className="food-scanner-consent__headline">
-            Можно показать тебе фото-скан?
-          </h2>
-          <p className="food-scanner-consent__body">
-            Я возьму фото только чтобы узнать блюдо — посчитаю примерные
-            калории и БЖУ. Удаляю фото сразу после распознавания,
-            мастер и салон его не видят.
-          </p>
+          {canonical ? (
+            <>
+              <h2 id="food-consent-h2" className="food-scanner-consent__headline">
+                {DISCLOSURE_HEADLINE}
+              </h2>
+              {/* Текст берётся из единственного источника, а не пишется здесь:
+                  Gate A требует совпадения на всех поверхностях, а скопированный
+                  абзац расходится с оригиналом молча. */}
+              {DISCLOSURE_BODY.map((paragraph) => (
+                <p className="food-scanner-consent__body" key={paragraph}>
+                  {paragraph}
+                </p>
+              ))}
+              <p
+                className="food-scanner-consent__version"
+                data-testid="food-diary-disclosure-version"
+              >
+                {FOOD_DIARY_DISCLOSURE_VERSION}
+              </p>
+            </>
+          ) : (
+            <>
+              <h2 id="food-consent-h2" className="food-scanner-consent__headline">
+                Можно показать тебе фото-скан?
+              </h2>
+              <p className="food-scanner-consent__body">
+                Я возьму фото только чтобы узнать блюдо — посчитаю примерные
+                калории и БЖУ. Удаляю фото сразу после распознавания,
+                мастер и салон его не видят.
+              </p>
+            </>
+          )}
           <p className="food-scanner-consent__body">
             Если ты не хочешь — это нормально. Можно вернуться на главную
             и продолжать без сканера.
@@ -425,14 +480,14 @@ function ConsentGate({
               className="btn-primary food-scanner-consent__accept"
               onClick={onAccept}
             >
-              Хорошо, разрешаю
+              {canonical ? BUTTON_GRANT : "Хорошо, разрешаю"}
             </button>
             <button
               type="button"
               className="btn-secondary"
               onClick={onDecline}
             >
-              Не сейчас
+              {canonical ? BUTTON_DECLINE : "Не сейчас"}
             </button>
           </div>
         </section>

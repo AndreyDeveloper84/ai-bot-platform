@@ -944,6 +944,24 @@ except _IngestAllowlistConfigurationError as exc:
 # values via env vars — the import-time read here is the boot-time
 # snapshot used by the skill + endpoints.
 NUTRITION_ENABLED = os.environ.get("NUTRITION_ENABLED", "false").lower() in ("true", "1")
+# 3. ``FOOD_DIARY_CANONICAL_CONSENT`` — каноническое согласие на дневник
+#    питания (F10/Z9, решение владельца). Пока ВЫКЛЮЧЕН: текст раскрытия
+#    имеет статус WORKING PRODUCT COPY до Privacy/Legal review, и
+#    обязательное согласие живым людям на нём не включается. Снятие
+#    ограничения — решение владельца, не исполнителя.
+#
+#    Флаг решает только, КАКОЙ ТЕКСТ показывает экран согласия. Основание
+#    права одно в любом положении — строка реестра ``food_diary_processing``
+#    (половина 1 DRF-1963) через ручку ``me/food-scanner-consent/``, и
+#    версия одна — ``FOOD_DIARY_CONSENT_DOCUMENT_VERSION``.
+#    False → ``/me`` не несёт ``food_diary_consent_canonical``, экран
+#    показывает нынешний короткий текст. True → ``/me`` объявляет канон,
+#    экран показывает раскрытие Z9 (``apps/consent/food_diary_disclosure.py``).
+FOOD_DIARY_CANONICAL_CONSENT = os.environ.get("FOOD_DIARY_CANONICAL_CONSENT", "false").lower() in (
+    "true",
+    "1",
+)
+
 FOOD_PHOTO_SCAN_ENABLED = os.environ.get("FOOD_PHOTO_SCAN_ENABLED", "false").lower() in (
     "true",
     "1",

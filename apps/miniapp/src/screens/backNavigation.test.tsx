@@ -58,7 +58,9 @@ vi.mock("../lib/food-scanner", async (importOriginal) => {
     fetchHealthFlags: vi.fn(),
     logMeal: vi.fn(),
     // DRF-1564 — согласие спрашивается у сервера, а не у браузера.
-    fetchConsentAt: vi.fn(),
+    // F10 — и спрашивается ОДНИМ вызовом, который сам решает, какой путь
+    // живой. `fetchConsentAt` экран больше не зовёт.
+    fetchDiaryConsentGate: vi.fn(),
     grantConsent: vi.fn(),
   };
 });
@@ -80,7 +82,7 @@ vi.mock("../lib/customer-goals", async (importOriginal) => {
 import { fetchMyBookings, fetchServices } from "../lib/api";
 import { getCatalogBrowse, getCustomerSlots } from "../lib/customer-booking";
 import {
-  fetchConsentAt,
+  fetchDiaryConsentGate,
   fetchHealthFlags,
   grantConsent,
   type ScanResponse,
@@ -98,7 +100,7 @@ import { FoodScannerResultScreen } from "./FoodScannerResultScreen";
 const mockedBrowse = vi.mocked(getCatalogBrowse);
 const mockedSlots = vi.mocked(getCustomerSlots);
 const mockedFlags = vi.mocked(fetchHealthFlags);
-const mockedConsent = vi.mocked(fetchConsentAt);
+const mockedConsent = vi.mocked(fetchDiaryConsentGate);
 const mockedGrant = vi.mocked(grantConsent);
 const mockedServices = vi.mocked(fetchServices);
 const mockedBookings = vi.mocked(fetchMyBookings);
@@ -282,7 +284,13 @@ describe("DRF-1493 · внутренняя часть экрана не объя
     const user = userEvent.setup();
     // Согласия нет — и это ОТВЕТ сервера, а не пустой localStorage:
     // источником правды с DRF-1564 является колонка, а не браузер.
-    mockedConsent.mockResolvedValue(null);
+    // Старый путь (`canonical: false`) — при выключенном флаге экран ведёт
+    // себя в точности как прежде, и этот узел сторожит именно его.
+    mockedConsent.mockResolvedValue({
+      canonical: false,
+      grantedAt: null,
+      currentDocumentVersion: "",
+    });
     mockedGrant.mockResolvedValue("2026-09-08T12:00:00+00:00");
     renderDeepLink(
       "/customer/food-scanner/capture",
