@@ -37,6 +37,7 @@ from django.urls import reverse
 from django.utils import timezone
 
 from apps.identity.models import BotUser
+from apps.tenancy.admin import StaffInviteAdmin, TenantStaffAdmin
 from apps.tenancy.models import StaffInvite, Tenant, TenantStaff
 
 pytestmark = pytest.mark.django_db
@@ -169,25 +170,36 @@ class TestTheOperatorIsToldWhyThereIsNoRevoke:
         assert "Использовано" in body
 
 
+def _staff_admin() -> TenantStaffAdmin:
+    """Карточка из живого реестра, а не свежий экземпляр: проверяем ту, что зарегистрирована."""
+    model_admin = site._registry[TenantStaff]
+    assert isinstance(model_admin, TenantStaffAdmin)
+    return model_admin
+
+
+def _invite_admin() -> StaffInviteAdmin:
+    model_admin = site._registry[StaffInvite]
+    assert isinstance(model_admin, StaffInviteAdmin)
+    return model_admin
+
+
 class TestStateIsNamedNotGuessed:
     """C. Три состояния приглашения и два состояния доступа — словами."""
 
     def test_access_state_says_active_when_not_revoked(self, staff_row: TenantStaff) -> None:
-        model_admin = site._registry[TenantStaff]
-        assert model_admin.access_state(staff_row) == "Действует"
+        assert _staff_admin().access_state(staff_row) == "Действует"
 
     def test_access_state_says_revoked_with_the_date(self, staff_row: TenantStaff) -> None:
         staff_row.deactivated_at = timezone.now()
-        assert "Отозван" in site._registry[TenantStaff].access_state(staff_row)
+        assert "Отозван" in _staff_admin().access_state(staff_row)
 
     def test_invite_waiting_is_not_confused_with_expired(self, invite_row: StaffInvite) -> None:
-        model_admin = site._registry[StaffInvite]
-        assert model_admin.invite_state(invite_row) == "Ждёт принятия"
+        assert _invite_admin().invite_state(invite_row) == "Ждёт принятия"
 
     def test_expired_invite_is_named_expired_not_waiting(self, invite_row: StaffInvite) -> None:
         """Тот самый случай, ради которого колонка заведена."""
         invite_row.expires_at = timezone.now() - timedelta(days=1)
-        state = site._registry[StaffInvite].invite_state(invite_row)
+        state = _invite_admin().invite_state(invite_row)
         assert "Срок истёк" in state
         assert state != "Ждёт принятия"
 
@@ -200,4 +212,4 @@ class TestStateIsNamedNotGuessed:
         """
         invite_row.used_at = timezone.now() - timedelta(days=2)
         invite_row.expires_at = timezone.now() - timedelta(days=1)
-        assert "Использовано" in site._registry[StaffInvite].invite_state(invite_row)
+        assert "Использовано" in _invite_admin().invite_state(invite_row)

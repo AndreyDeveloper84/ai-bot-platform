@@ -26,6 +26,7 @@ import re
 import secrets
 
 import pytest
+from django.contrib.admin.sites import site
 from django.contrib.auth import get_user_model
 from django.test import Client
 from django.urls import reverse
@@ -126,5 +127,5 @@ class TestConsequencesAreNamed:
         активен, ограничений нет» значило бы утверждать измеренное там,
         где ничего не измеряли.
         """
-        rendered = TenantAdmin.inactive_consequences(TenantAdmin, Tenant())
+        rendered = TenantAdmin(Tenant, site).inactive_consequences(Tenant())
         assert rendered == "нет данных"

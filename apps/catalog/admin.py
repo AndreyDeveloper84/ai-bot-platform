@@ -439,7 +439,7 @@ class CatalogMasterAdmin(_MirrorAdminBase):
     #: то, что не чинится.
     _READINESS_BADGES: ClassVar[BadgeMap] = {
         "done": ("ok", "готово"),
-        "missing": ("warn", "не настроено"),
+        "missing": ("stop", "не настроено"),
         "unknown": ("off", "не удалось спросить"),
         "unavailable": ("off", "возможности ещё нет"),
     }
@@ -502,9 +502,9 @@ class CatalogMasterAdmin(_MirrorAdminBase):
     #: Состояния связи — из ``identity_facts``.
     _IDENTITY_BADGES: ClassVar[BadgeMap] = {
         "linked": ("ok", "связан"),
-        "unlinked": ("warn", "не связан"),
+        "unlinked": ("stop", "не связан"),
         "pending": ("off", "ждёт подтверждения"),
-        "rejected": ("warn", "отклонена"),
+        "rejected": ("stop", "отклонена"),
     }
 
     def get_queryset(self, request):  # type: ignore[no-untyped-def]
