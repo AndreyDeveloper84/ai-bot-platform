@@ -15,6 +15,7 @@ dupe. DRF-1581 is the number that actually shipped it.)
 
 from __future__ import annotations
 
+import uuid
 from typing import ClassVar
 
 from django.contrib import admin, messages
@@ -261,6 +262,15 @@ _PLATFORM_FIELDS = (
 )
 
 
+def _looks_like_uuid(value: str) -> bool:
+    """Отсев до запроса: кривой id — «не найден», а не 500 из ``UUIDField``."""
+    try:
+        uuid.UUID(value)
+    except (ValueError, AttributeError, TypeError):
+        return False
+    return True
+
+
 @admin.register(CatalogMaster)
 class CatalogMasterAdmin(_MirrorAdminBase):
     """Мастера: карточка, верификация приглашения, архив (DRF-1496).
@@ -320,6 +330,7 @@ class CatalogMasterAdmin(_MirrorAdminBase):
         "unarchive_masters",
         "confirm_solo_identity_link",
         "reject_solo_identity_link",
+        "onboard_person",
     )
     fieldsets = (
         (
@@ -802,6 +813,171 @@ class CatalogMasterAdmin(_MirrorAdminBase):
             request,
             f"Извлечено из архива: {restored}. Не были в архиве: {len(queryset) - restored}.",
             level=messages.SUCCESS,
+        )
+
+    # --- «Подключить человека» — один путь, тем же правом, что карточки -------
+
+    #: Право оператора платформы — то же, которым #1802 закрыл карточки
+    #: доступов (``apps/tenancy/admin.py::_ReadOnlyStaffAdmin``). Строкой,
+    #: как там: Django сверяет право по имени. Подключение человека к
+    #: мастеру — cross-tenant операция (оператор выбирает любой салон), а
+    #: ``catalog.change_catalogmaster`` есть и у «правящего» — этого мало.
+    PLATFORM_OPERATIONS_PERM: ClassVar[str] = "tenancy.platform_operations"
+
+    #: Сколько людей показывать на промежуточной странице. Кандидаты — строки
+    #: ``BotUser`` салона мастера; у живого салона их сотни (клиенты), а
+    #: нужен один. Сначала — недавно активные; для остальных есть поле с id.
+    ONBOARD_CANDIDATE_LIMIT: ClassVar[int] = 200
+
+    #: Слово оператору на каждый слуг отказа — фасада и ядра связи. Ключи —
+    #: ``.slug`` классов исключений, полноту держит тест
+    #: ``test_every_refusal_slug_has_a_word_for_the_operator``: новый отказ
+    #: без слова напечатал бы код, а экран читает человек.
+    ONBOARD_REFUSAL_WORDS: ClassVar[dict[str, str]] = {
+        "foreign_tenant": "Оператор не может действовать в этом салоне.",
+        "tenant_inactive": (
+            "Салон выключен — подключать мастеров нельзя. Сначала явно "
+            "включите салон, потом повторите."
+        ),
+        "person_in_other_tenant": "Этот человек принадлежит другому салону.",
+        "master_in_other_tenant": "Карточка мастера принадлежит другому салону.",
+        "invite_master_missing": "Карточка мастера удалена или в архиве.",
+        "wrong_recipient": (
+            "Карточка уже принадлежит другому человеку. Связь не переписана: "
+            "сначала отзовите прежнюю."
+        ),
+        "person_already_master": (
+            "Этот человек уже связан с другой карточкой мастера. Сначала снимите прежнюю связь."
+        ),
+    }
+
+    def has_onboard_permission(self, request: HttpRequest) -> bool:
+        """Django зовёт это для ``permissions=["onboard"]`` — действие не
+        появится в списке без права, а не только откажет при нажатии."""
+        return request.user.has_perm(self.PLATFORM_OPERATIONS_PERM) and self.has_change_permission(
+            request
+        )
+
+    @admin.action(
+        permissions=["onboard"],
+        description="Подключить человека к мастеру (один путь: связь → identity)",
+    )
+    def onboard_person(self, request, queryset):  # type: ignore[no-untyped-def]
+        """Тонкая обёртка над фасадом ``onboard_specialist_to_tenant``.
+
+        Здесь только то, что принадлежит админке: одна выбранная строка,
+        выбор человека из салона мастера, слова оператору и ``LogEntry`` с
+        автором. Всё остальное — контекст актора, отказы по имени, связь,
+        identity, гейт продажи, строка аудита — делает фасад, и повторять
+        его логику здесь значило бы завести вторую реализацию той самой
+        операции, ради единственности которой он написан.
+
+        Исход фасада — двумя половинами: связь есть/была, identity есть/нет
+        и почему. ``identity_unavailable`` — предупреждение, не ошибка:
+        человек подключён, а текст восстановления говорит «заводится
+        оператором в админке каталога», а не «никогда».
+        """
+        from apps.identity.models import BotUser
+        from apps.identity.services import specialist_onboarding as facade
+        from apps.identity.services.staff_invites import InviteError
+
+        if queryset.count() != 1:
+            self.message_user(
+                request,
+                "Подключить человека можно к одному мастеру за раз — выберите ровно одну строку.",
+                level=messages.ERROR,
+            )
+            return None
+        master = queryset.select_related("tenant").first()
+
+        if request.POST.get("apply"):
+            # Выбор из списка или id руками — вписанный id важнее: он
+            # означает, что нужного человека в списке не было.
+            raw_id = (
+                request.POST.get("bot_user_id_manual") or request.POST.get("bot_user_id") or ""
+            ).strip()
+            person = (
+                BotUser.all_tenants.filter(
+                    pk=raw_id, tenant_id=master.tenant_id, deleted_at__isnull=True
+                ).first()
+                if _looks_like_uuid(raw_id)
+                else None
+            )
+            if person is None:
+                # Чужой салон, удалённая строка и пустое поле — один ответ:
+                # человека, которого можно подключить, здесь нет.
+                self.message_user(
+                    request,
+                    "Человек не найден в салоне этого мастера — выберите из списка "
+                    "или укажите id строки BotUser этого салона.",
+                    level=messages.ERROR,
+                )
+                return None
+
+            actor = facade.OnboardingActor(
+                surface="django_admin",
+                audit_label=f"django_admin:user={request.user.pk}",
+                cross_tenant=True,
+                capability="platform_operations",
+            )
+            try:
+                result = facade.onboard_specialist_to_tenant(
+                    tenant=master.tenant, master=master, bot_user=person, actor=actor
+                )
+            except (facade.OnboardingRefused, InviteError) as exc:
+                word = self.ONBOARD_REFUSAL_WORDS.get(exc.slug, f"Отказ: {exc.slug}.")
+                self.message_user(request, word, level=messages.ERROR)
+                return None
+
+            self.log_change(
+                request,
+                master,
+                f"Подключение человека {person.pk}: membership={result.membership}, "
+                f"status={result.status}, identity_reason={result.identity_reason or '-'}, "
+                f"sale_block={result.sale_block or '-'}.",
+            )
+            membership_word = (
+                "уже была связана"
+                if result.membership == facade.MEMBERSHIP_ALREADY_LINKED
+                else "связана"
+            )
+            if result.success:
+                self.message_user(
+                    request,
+                    f"Карточка {membership_word} с человеком, identity подтверждена "
+                    f"(specialist_id {result.specialist_id}). "
+                    f"Продажа: {result.sale_block or 'открыта'}.",
+                    level=messages.SUCCESS,
+                )
+            else:
+                self.message_user(
+                    request,
+                    f"Карточка {membership_word} с человеком, но identity в каталоге "
+                    f"НЕ подтверждена: {result.identity_reason}. Мастер не продаётся, "
+                    "пока ключа нет. Не этим путём: профиль специалиста заводится "
+                    "оператором в админке каталога, ключ приезжает синком — затем "
+                    "повторите действие. "
+                    f"Продажа: {result.sale_block or '-'}.",
+                    level=messages.WARNING,
+                )
+            return None
+
+        candidates = (
+            BotUser.all_tenants.filter(tenant_id=master.tenant_id, deleted_at__isnull=True)
+            .only("id", "display_name", "channel", "last_seen")
+            .order_by("-last_seen")[: self.ONBOARD_CANDIDATE_LIMIT]
+        )
+        return render(
+            request,
+            "admin/catalog/master_onboard.html",
+            context={
+                "title": "Подключить человека к мастеру",
+                "master": master,
+                "candidates": candidates,
+                "candidate_limit": self.ONBOARD_CANDIDATE_LIMIT,
+                "action_checkbox_name": ACTION_CHECKBOX_NAME,
+                "opts": self.model._meta,  # noqa: SLF001
+            },
         )
 
 

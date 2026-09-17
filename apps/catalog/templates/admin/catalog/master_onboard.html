@@ -1,0 +1,59 @@
+{% extends "admin/base_site.html" %}
+{# Промежуточная страница «Подключить человека к мастеру».
+
+   Один мастер, один человек из его салона. Кнопка зовёт фасад
+   onboard_specialist_to_tenant (apps/identity/services/specialist_onboarding.py):
+   связь → catalog identity → гейт продажи, отказы по имени. Страница ничего
+   не решает сама — она только выбирает, кого. #}
+
+{% block breadcrumbs %}
+  <div class="breadcrumbs">
+    <a href="{% url 'admin:index' %}">Админка</a>
+    &rsaquo; <a href="{% url 'admin:catalog_catalogmaster_changelist' %}">Мастера</a>
+    &rsaquo; Подключить человека
+  </div>
+{% endblock %}
+
+{% block content %}
+  <div id="content-main">
+    <h1>{{ title }}</h1>
+    <p style="max-width: 46em;">
+      Мастер: <strong>{{ master }}</strong> — {{ master.tenant }}.
+      Действие связывает карточку с человеком (<code>linked_bot_user</code>,
+      приглашение принято, карточка активна) и затем подтверждает
+      identity в каталоге. Если identity подтвердить нельзя — связь
+      останется, а причина будет названа: мастер не продаётся, пока ключ
+      не приедет из каталога.
+    </p>
+
+    <form method="post">
+      {% csrf_token %}
+      <fieldset class="module aligned">
+        <div class="form-row">
+          <label for="id_bot_user_id"><strong>Человек из салона мастера</strong></label>
+          <select id="id_bot_user_id" name="bot_user_id" style="display: block; margin-top: .5em;">
+            <option value="">— выберите —</option>
+            {% for person in candidates %}
+              <option value="{{ person.pk }}">{{ person.display_name|default:"(без имени)" }} · {{ person.channel }} · {{ person.pk|stringformat:"s"|slice:":8" }} · был {{ person.last_seen|date:"d.m H:i" }}</option>
+            {% endfor %}
+          </select>
+          <p class="help">
+            Показаны до {{ candidate_limit }} недавно активных строк этого салона.
+            Нужного нет — впишите id строки <code>BotUser</code> вручную вместо выбора:
+          </p>
+          <input type="text" name="bot_user_id_manual" placeholder="uuid строки BotUser (необязательно)"
+                 style="display: block; width: 24em;">
+        </div>
+      </fieldset>
+
+      <input type="hidden" name="{{ action_checkbox_name }}" value="{{ master.pk }}">
+      <input type="hidden" name="action" value="onboard_person">
+      <div class="submit-row">
+        <input type="submit" name="apply" value="Подключить" class="default">
+        <a href="{% url 'admin:catalog_catalogmaster_changelist' %}" class="button cancel-link">
+          Отмена
+        </a>
+      </div>
+    </form>
+  </div>
+{% endblock %}
