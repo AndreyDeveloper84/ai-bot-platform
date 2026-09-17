@@ -35,6 +35,7 @@ def tenant(db) -> Tenant:
 @pytest.fixture
 def bot_user(tenant: Tenant) -> BotUser:
     from apps.consent.models import ConsentRecord
+    from apps.consent.nutrition import FOOD_DIARY_CONSENT_DOCUMENT_VERSION
 
     now = datetime(2026, 5, 1, tzinfo=dt_timezone.utc)
     user = BotUser.all_tenants.create(
@@ -53,7 +54,9 @@ def bot_user(tenant: Tenant) -> BotUser:
         consent_type=ConsentRecord.ConsentType.FOOD_DIARY_PROCESSING.value,
         granted=True,
         source="test:fixture",
-        document_version="food-diary-v0",
+        # Текущая версия, не литерал: фикстура «согласие есть» обязана
+        # стоять под тем текстом, который признаёт предикат (D3).
+        document_version=FOOD_DIARY_CONSENT_DOCUMENT_VERSION,
     )
     return user
 

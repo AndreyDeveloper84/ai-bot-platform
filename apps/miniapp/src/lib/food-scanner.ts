@@ -463,11 +463,17 @@ export async function fetchHealthFlags(): Promise<MeHealthFlagsResponse> {
 // бота читают одну и ту же строку через `me/food-scanner-consent/`.
 
 /**
- * Версия текста согласия, который показывает экран. Меняется ВМЕСТЕ с текстом
- * и с `FOOD_DIARY_CONSENT_DOCUMENT_VERSION` в `apps/consent/nutrition.py`:
- * сервер отвергает выдачу под версией, которой не знает (409).
+ * Версия текста согласия, который показывает экран. КОПИЯ константы
+ * `FOOD_DIARY_CONSENT_DOCUMENT_VERSION` из `apps/consent/nutrition.py` —
+ * источник там, паритет держит тест `test_food_diary_disclosure.py`.
+ * Сервер отвергает выдачу под версией, которой не знает (409).
+ *
+ * `food-diary-v1` — решение владельца 17.09: текст v1 = раскрытие Z9
+ * (`food-diary-disclosure.ts`), с этого момента неизменяем; содержательное
+ * изменение текста = `food-diary-v2` новой константой, без перезаписи v1.
+ * `food-diary-v0` — черновой контракт, не используется.
  */
-export const FOOD_DIARY_CONSENT_DOCUMENT_VERSION = "food-diary-v0";
+export const FOOD_DIARY_CONSENT_DOCUMENT_VERSION = "food-diary-v1";
 
 /**
  * Прочитать согласие у СЕРВЕРА.
