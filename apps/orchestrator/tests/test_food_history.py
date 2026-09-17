@@ -71,6 +71,7 @@ def _nutrition_contour_on(settings):
     """
     settings.NUTRITION_ENABLED = True
 
+
 CHANNEL_USER_ID = "1467001"
 
 

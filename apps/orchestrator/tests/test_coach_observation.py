@@ -68,6 +68,7 @@ def _nutrition_contour_on(settings):
     """
     settings.NUTRITION_ENABLED = True
 
+
 #: 12:00 в Москве — «сегодня» для предела «раз в сутки»: 2026-08-23.
 NOON = datetime(2026, 8, 23, 9, 0, tzinfo=dt_timezone.utc)
 NEXT_DAY = NOON + timedelta(days=1)

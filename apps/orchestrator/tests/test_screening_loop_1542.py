@@ -67,6 +67,7 @@ def _nutrition_contour_on(settings):
     """
     settings.NUTRITION_ENABLED = True
 
+
 # Пять реплик человека из боевого диалога 06.09, в том же порядке.
 LIVE_TURNS = (
     "Что-то тянет поясницу",
