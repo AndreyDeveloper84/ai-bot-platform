@@ -294,8 +294,12 @@ def _gate(context: SkillContext) -> SkillResult | None:
             reply_text=NUTRITION_OFF_TEXT, meta={"reply_kind": "food_text_nutrition_off"}
         )
     if not _consent_open(context.bot_user):
+        from apps.skills.welcome.skill import consent_offer_action_data
+
         return SkillResult(
-            reply_text=CONSENT_TEXT, meta={"reply_kind": "food_text_consent_required"}
+            reply_text=CONSENT_TEXT,
+            action_data=consent_offer_action_data("text"),
+            meta={"reply_kind": "food_text_consent_required"},
         )
     return None
 

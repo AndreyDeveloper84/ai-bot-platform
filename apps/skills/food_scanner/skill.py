@@ -516,8 +516,11 @@ def _check_gates(
             kind,
             getattr(context.conversation, "id", None),
         )
+        from apps.skills.welcome.skill import consent_offer_action_data
+
         return SkillResult(
             reply_text=CONSENT_TEXT,
+            action_data=consent_offer_action_data("photo"),
             meta={"reply_kind": "food_scanner_personal_data_required"},
         )
 

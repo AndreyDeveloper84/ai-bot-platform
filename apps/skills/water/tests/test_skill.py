@@ -226,7 +226,13 @@ class TestConsentGate:
         assert result.reply_text == CONSENT_TEXT
         assert result.meta == {"reply_kind": "water_consent_required"}
         assert result.action_type == ""
-        assert result.action_data is None
+        # DRF-1968 (M2+): у отказа есть вход в согласие — кнопка «Дать согласие»
+        # с исходным входом. Решение владельца: отказ → объяснение → «Дать
+        # согласие» → канонический поток → возврат в свой поток.
+        assert result.action_data == {
+            "buttons": [{"label": "Дать согласие", "callback": "cb:welcome:consent_offer_water"}],
+            "button_columns": 1,
+        }
 
     def test_a_consent_read_that_raises_reads_as_no_consent(self, monkeypatch) -> None:
         monkeypatch.setattr(water_skill, "_consent_open", _REAL_CONSENT_OPEN)
