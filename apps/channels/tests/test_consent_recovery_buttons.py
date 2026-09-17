@@ -32,7 +32,6 @@ SET:true в web/worker/celery-worker). Флаг выключат — кнопк�
 
 from __future__ import annotations
 
-from datetime import datetime, timezone as dt_timezone
 from unittest.mock import Mock, patch
 
 import pytest
@@ -83,16 +82,20 @@ class TestRefusalCarriesTheButton:
         from apps.skills.food_scanner.skill import FoodScannerSkill
 
         bot_user = Mock()
-        bot_user.food_scanner_consent_at = datetime(2026, 9, 1, tzinfo=dt_timezone.utc)
         ctx = SkillContext(
             conversation=Mock(id=1, skill_state={}),
             bot_user=bot_user,
             message_text="",
             has_attachments=True,
         )
-        with patch(
-            "apps.orchestrator.personal_surface.personal_records_consent_open",
-            return_value=False,
+        # Согласие дневника ЕСТЬ (предикатом реестра, не колонкой — DRF-1963),
+        # а PERSONAL_DATA — нет: отказ обязан быть именно про личные данные.
+        with (
+            patch("apps.consent.nutrition.diary_is_granted", return_value=True),
+            patch(
+                "apps.orchestrator.personal_surface.personal_records_consent_open",
+                return_value=False,
+            ),
         ):
             result = FoodScannerSkill().handle(ctx)
 

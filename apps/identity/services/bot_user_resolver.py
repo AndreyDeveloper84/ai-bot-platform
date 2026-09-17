@@ -233,11 +233,8 @@ def resolve_bot_user(
         # DRF-1785 (R4 а, главное окно Q1 15.09): подпись салонного бота без рабочей
         # строки — никто. Ни тенант подписи / MAX_BOT_TENANT_SLUG, ни «последняя строка
         # любого тенанта»: оба шага подставили бы строку, где у человека нет роли.
-        logger.info(
-            "%s.auth.salon_signature_without_working_row channel_user_id=%s",
-            surface,
-            verified.user_id,
-        )
+        # DRF-2009: идентификатор канала в лог не пишется — только поверхность.
+        logger.info("%s.auth.salon_signature_without_working_row", surface)
         return None
 
     tenant_slug = resolve_tenant_slug_for_init_data(verified)

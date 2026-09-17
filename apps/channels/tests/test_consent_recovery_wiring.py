@@ -471,20 +471,25 @@ class TestGuards:
         """НАЗВАННЫЙ ДОЛГ, а не починка: у сканера своя вторая колонка.
 
         Текст возврата обещает «пришли фото ещё раз — запишу в дневник», но
-        после PERSONAL_DATA сканер держит ещё один гейт — ``food_scanner_consent_at``
-        (``food_scanner/skill.py::_check_gates``, ветка ниже). Человек с фото
-        упрётся в него и услышит второй отказ. Здесь предел обещания
-        пришпилен, чтобы он не растворился молча; починка — согласие дневника
-        в чате, PR-2 этого листа (стекуется на #1776). Сторож зелёный и до
-        правки, и после: он про чужое поведение, которое я не меняю.
+        после PERSONAL_DATA сканер держит ещё один гейт — согласие дневника
+        ``food_diary_processing`` из реестра (``food_scanner/skill.py::_check_gates``,
+        читается через ``apps.consent.nutrition.diary_is_granted``; с DRF-1963
+        колонка ``BotUser`` основанием не является). Человек с фото упрётся
+        в него и услышит второй отказ. Здесь предел обещания пришпилен, чтобы
+        он не растворился молча; починка — согласие дневника в чате, PR-2
+        этого листа (стекуется на #1776). Сторож зелёный и до правки, и
+        после: он про чужое поведение, которое я не меняю.
         """
+        from apps.consent import nutrition
         from apps.orchestrator import personal_surface
         from apps.skills.food_scanner.skill import _check_gates
 
         monkeypatch.setattr(personal_surface, "personal_records_consent_open", lambda _u: True)
+        # Согласия дневника НЕТ — предикатом реестра, а не колонкой.
+        monkeypatch.setattr(nutrition, "diary_is_granted", lambda _u: False)
         ctx = SkillContext(
             conversation=Mock(id="conv-debt", skill_state={}),
-            bot_user=Mock(food_scanner_consent_at=None),
+            bot_user=Mock(),
             message_text="",
         )
 
