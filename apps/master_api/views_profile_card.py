@@ -96,15 +96,22 @@ def _tenant_tz(master: CatalogMaster) -> ZoneInfo:
 
 
 def _bridged_service_id(master: CatalogMaster) -> str | None:
-    """Ayla-id первой активной услуги мастера с мостом в каталог — для запроса слотов."""
+    """Ayla-id первой ПРОДАВАЕМОЙ услуги мастера с мостом в каталог — для слотов.
+
+    Путь продажи: бейдж «Принимает сегодня» — обещание клиенту, и слот по
+    непродаваемому ребру его не подтверждает. Поэтому ребро берётся через
+    предикат ``sellable()`` (DRF-1964a, один на все читатели), а не по
+    ``is_active`` услуги — сторож ``test_master_service_sellable_census``
+    держит это пофайлово.
+    """
 
     edge = (
         MasterService.all_tenants.filter(
             tenant_id=master.tenant_id,
             master=master,
-            service__is_active=True,
             service__ayla_service_id__isnull=False,
         )
+        .sellable()
         .select_related("service")
         .order_by("service__name")
         .first()
@@ -231,20 +238,22 @@ def profile_portfolio(request: HttpRequest) -> HttpResponse:
     bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
     actor = external_user_id_for(bot_user)
     client = get_ayla_booking_client()
-    specialist_id = catalog_specialist_id(master)
 
+    # ``catalog_specialist_id(master)`` — в аргументах КАЖДОГО вызова, не в
+    # переменной: сторож DRF-1933 (``test_catalog_specialist_id_guard_1933``)
+    # смотрит на вызываемое, и переменная для него — «не через резолвер».
     try:
         if request.method == "GET":
             return JsonResponse(
                 client.list_specialist_portfolio(
-                    specialist_id=specialist_id, external_user_id=actor
+                    specialist_id=catalog_specialist_id(master), external_user_id=actor
                 )
             )
         image = request.FILES.get("image")
         if image is None:
             return _error("bad_request", "multipart field 'image' is required", 400)
         item = client.upload_specialist_portfolio_item(
-            specialist_id=specialist_id,
+            specialist_id=catalog_specialist_id(master),
             external_user_id=actor,
             filename=image.name or "photo",
             content=image.read(),

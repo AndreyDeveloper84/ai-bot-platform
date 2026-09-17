@@ -220,6 +220,23 @@ class TestAcceptsTodayComesFromARealSlot:
         assert body["accepts_today_reason"] == card.ACCEPTS_TODAY_NO_SERVICE
         assert ayla.get_available_times.call_count == 0
 
+    def test_an_unsellable_edge_does_not_earn_the_badge(
+        self, client: Client, accepted_master, ayla, bridged_service
+    ):
+        """Бейдж — обещание клиенту: слот по непродаваемому ребру его не даёт
+        (предикат ``sellable()``, DRF-1964a); при единственном таком ребре —
+        ``no_service`` и ни одного запроса слотов."""
+
+        MasterService.all_tenants.filter(master=accepted_master).update(
+            sellable=False, unsellable_reason="price_missing"
+        )
+
+        body = _get_card(client).json()
+
+        assert body["accepts_today"] is False
+        assert body["accepts_today_reason"] == card.ACCEPTS_TODAY_NO_SERVICE
+        assert ayla.get_available_times.call_count == 0
+
     def test_slots_outage_is_false_with_the_reason_and_the_card_still_renders(
         self, client: Client, accepted_master, ayla, bridged_service
     ):
