@@ -333,6 +333,8 @@ export function CustomerBookingConfirmScreen() {
           service_name: booking.service_name,
           master_name: booking.master_name,
           visit_at: booking.visit_at,
+          // DRF-1952 — адрес салона на экран успеха.
+          address: booking.address,
           payment_start_failed: paymentStartFailed,
           payment_capture_state: paymentCaptureState,
         },

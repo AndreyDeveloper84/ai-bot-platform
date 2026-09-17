@@ -1257,6 +1257,10 @@ def _create_booking_via_ayla(
                 "master_name": master.name,
                 "visit_at": visit_at.isoformat(),
                 "duration_min": service.duration_min,
+                # DRF-1952 — адрес салона записи, тот же источник, что у карточки
+                # записи (зеркало ``Tenant.address``); ``None`` — зеркало молчит,
+                # экран успеха скажет «Уточните адрес в салоне».
+                "address": tenant.address,
                 # Ayla verbatim: confirmed (payment_required=false) or
                 # awaiting_payment (true, pending Payment created).
                 "status": status,
@@ -1509,6 +1513,8 @@ def create_booking(request: HttpRequest) -> HttpResponse:
                 "visit_at": booking.visit_at.isoformat() if booking.visit_at else "",
                 "duration_min": booking.duration_min,
                 "status": booking.status,
+                # DRF-1952 — см. ветку Ayla выше.
+                "address": tenant.address,
             }
         },
         status=201,

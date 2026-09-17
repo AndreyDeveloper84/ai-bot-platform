@@ -1363,10 +1363,10 @@ def _render_salon_cards(
     """Render salons: name — city, address + a short «что там делают» sample,
     plus one chip per salon whose tap opens that salon's services.
 
-    ``address`` may legitimately be absent — ``None`` today for every salon
-    (``Tenant.address`` is fed by the specialists feed's ``tenant_address``
-    key, which DRF-1587 is still landing), "" when the source says there is no
-    address. The line simply goes without it, and never prints «None»
+    ``address`` may legitimately be absent — ``None`` when the salon has no
+    address in the catalog (``Tenant.address`` is fed by the specialists feed's
+    ``tenant_address`` key, sent since DRF-1587 with an empty address as
+    ``null``), "" when it was set so by hand (DRF-1954). The line simply goes without it, and never prints «None»
     (``test_catalog_surface`` guards both empties). A salon whose mirror holds no active
     services says «Услуги пока не загружены» instead of inventing a list —
     and gets no chip either: its tap would open an empty list.

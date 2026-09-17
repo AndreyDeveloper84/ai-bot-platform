@@ -1017,6 +1017,35 @@ class TestSlotPickCallback:
         # must not hit the provider again.
         assert len(client.times_calls) == 1
 
+    def test_duplicate_tap_preview_names_the_salon_address(
+        self, context: SkillContext, tenant: Tenant
+    ) -> None:
+        """DRF-1952: превью, собранное заново из уже активной pending-строки,
+        тоже называет адрес салона (тенант записи)."""
+        tenant.address = "ул. Карпинского, 33А"
+        tenant.save(update_fields=["address"])
+        client = FakeYClients()
+        client.services_rows = [_service(22)]
+        client.staff_rows = [_staff(11)]
+        client.times = [
+            AvailableTime(time="14:00", datetime=f"{BOOKING_DATE}T14:00:00", seance_length_s=3600)
+        ]
+        ctx = SkillContext(
+            conversation=context.conversation,
+            bot_user=context.bot_user,
+            message_text=f"cb:book:pick_slot:11:22:{BOOKING_DATE}T14:00:00",
+        )
+        with _patch_yclients(client), _patch_provider_complete([]):
+            with tenant_scope(tenant):
+                first = BookingSkill().handle(ctx)
+                second = BookingSkill().handle(ctx)
+        assert first.action_data is not None and second.action_data is not None
+        assert (
+            first.action_data["pending_action"]["token"]
+            == second.action_data["pending_action"]["token"]
+        )
+        assert "• Адрес: ул. Карпинского, 33А" in second.reply_text
+
     def test_slot_recheck_provider_failure_handoffs(
         self, context: SkillContext, tenant: Tenant
     ) -> None:
