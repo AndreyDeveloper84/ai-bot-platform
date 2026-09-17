@@ -1,88 +1,53 @@
 /**
- * Master M4 profile editor — full screen.
+ * Экран 07 «Профиль мастера» — макет 6 (DRF-1814, часть B из трёх).
+ * Route: /master/profile и /solo/profile.
  *
- * Route: /master/profile (replaces MasterProfilePlaceholderScreen).
+ * Карта разрывов: `Ayla/docs/GAP_MAP_MASTER_ONBOARDING_2026-09-12.md` §2.5 (P57–P67), §3.
+ * Контракт: `GET /master/profile/card` (часть A, `apps/master_api/views_profile_card.py`).
  *
- * Spec: docs/design/handoffs/2026-05-18-master-mobile-handoff.md §M4
- * (lines 480-553). Verbatim Russian copy throughout.
+ * Блоки макета 6 и что здесь заперто:
+ *   6.1 фото (необязательно сейчас, обязательно при публикации — решает readiness,
+ *       не этот экран) + подсказки; имя с «Изменить»; «О себе» ≤ `limits.bio`;
+ *   6.2 кроп 1:1 — `PhotoCropSheet` (камера/галерея, зум, поворот, заменить);
+ *   6.3 работы ≤ `limits.portfolio_count`, удаление, «Пропустить пока»;
+ *   6.4 предпросмотр — ТОТ ЖЕ `MasterCard`, что видит клиент. Бейдж «Принимает
+ *       сегодня» рисуется только при `accepts_today === true` с сервера (реальный
+ *       слот на сегодня); чипы — `categories` (категории выбранных шаблонов);
+ *       одной подписи-специализации нет; рейтинг — только настоящий (`MasterCard`).
  *
- * Spec quote (§M4 lines 487-523, layout block):
+ * Лимиты — данные контракта (`limits`), не литералы экрана (§3 карты): 280 из
+ * §M4 снят вместе с `MASTER_PROFILE_BIO_MAX`. Счётчик работ — из ответа сервера.
  *
- *     «← Профиль … Как видят клиенты … [АП] Анна Петрова / Мастер по
- *     ногтям / «5 лет опыта, люблю когда красиво» … [Изменить фото] /
- *     [Изменить «О себе»] … ━━ УСЛУГИ ━━ … Хотите добавить или убрать?
- *     [Написать Карине ›] … ━━ РАБОЧЕЕ ВРЕМЯ ━━ … Пн—Сб: 10:00–19:00 …
- *     [Запросить изменение ›] … ━━ ОТЗЫВЫ КЛИЕНТОВ ━━ … За последние
- *     30 дней: …»
- *
- * Spec quote (§M4 lines 549-552, Bridge API):
- *
- *     «WebApp.SecureStorage … WebApp.enableClosingConfirmation() when
- *     bio/photo dirty … HapticFeedback.notificationOccurred('success')
- *     on save»
- *
- * IN scope (this screen):
- *   - Section 1: profile (avatar, name read-only, specialization read-only,
- *     bio inline-edit, photo upload)
- *   - Section 2: services (read-only list + «Написать Карине ›» CTA —
- *     deferred to disabled-tooltip since master-side internal-chat UI
- *     isn't wired yet; backend exists in apps/internal_chat/)
- *   - Section 3: working hours (read-only summary if available + «Запросить
- *     изменение ›» → /master/schedule, which exposes the existing M3
- *     availability-request flow)
- *   - Section 4: reviews stub (disabled — reviews backend not built)
- *   - State matrix: loading skeleton, save spinner, save error, photo
- *     errors (size / MIME / network), pending owner-approval chip
- *     pattern (wired for display-name field even though the field is
- *     disabled this PR — reuse pattern for future fields), offline
- *     banner.
- *
- * OUT of scope (deferred, documented in PR body):
- *   - Display-name change (needs owner-approval flow; pattern shows
- *     disabled tooltip)
- *   - Reviews backend
- *   - Services add/remove (master proposes → owner approves) — pointer
- *     stays at «Написать Карине» CTA
- *   - Quiet hours / theme / push notification settings → M7
- *
- * Backend reuse decision: Option B (URL alias). The PATCH endpoint is
- * the existing apps/master_api/views.py::onboarding_profile wired via
- * a new ``path("profile", ...)`` alias in apps/master_api/urls.py. Same
- * view function — idempotent + last-write-wins per the view docstring.
- * Audit event slug still reads ``MASTER_PROFILE_INITIALIZED``; a
- * follow-up backend cleanup ticket can add ``MASTER_PROFILE_UPDATED``.
- *
- * Photo upload bypass note: ``uploadMasterProfilePhoto`` skips the
- * shared ``request()`` helper and calls ``fetch`` directly with
- * ``applyDevBypassHeaders``. The reason is the MM3/MM4 lesson:
- * ``request()`` auto-sets ``Content-Type: application/json`` whenever a
- * body is present, which clobbers the browser's multipart boundary
- * string and the backend MultiPartParser then rejects with 400.
+ * Ниже 6.x остаются разделы §M4, которых макет 6 не касается: услуги
+ * (реальные offers из `/me`), рабочее время, отзывы, настройки.
  *
  * Bridge API:
  *   - BackButton.show() → /master/dashboard
- *   - enableClosingConfirmation() while any inline editor is dirty OR
- *     while a photo upload is in flight
- *   - hapticSelection() on edit-open
- *   - hapticNotify('success') / hapticNotify('error') on save outcomes
- *   - Plain ``<input type=file>`` for photo upload (§M4 line 550)
+ *   - enableClosingConfirmation() пока открыт редактор или идёт загрузка
+ *   - hapticSelection() на открытие, hapticNotify на исход
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 
+import { MasterCard } from "../components/MasterCard";
 import { MasterTabBar } from "../components/MasterTabBar";
+import { CROP_COPY, PhotoCropSheet } from "../components/PhotoCropSheet";
 import { Snackbar } from "../components/Snackbar";
-import { ApiError } from "../lib/api";
+import { ApiError, type Master } from "../lib/api";
 import {
-  MASTER_PROFILE_BIO_MAX,
-  MASTER_PROFILE_PHOTO_MAX_BYTES,
   MASTER_PROFILE_PHOTO_MIME_ALLOWLIST,
+  deletePortfolioItem,
   getMasterMe,
+  getMasterProfileCard,
+  getPortfolio,
   patchMasterProfile,
   uploadMasterProfilePhoto,
+  uploadPortfolioPhoto,
   type MasterMeMaster,
   type MasterMeResponse,
+  type MasterProfileCard,
+  type PortfolioList,
 } from "../lib/master-api";
 import {
   hapticNotify,
@@ -92,20 +57,31 @@ import {
   setClosingConfirmation,
 } from "../lib/max-sdk";
 
-// --- Russian copy (VERBATIM from §M4) -----------------------------------
+// --- Копия -----------------------------------------------------------------
 
-const COPY = {
+export const PROFILE_COPY = {
   header: "Профиль",
   sections: {
-    asClientsSeeYou: "Как видят клиенты",
+    photoAndName: "Фото и имя",
+    portfolio: "Работы",
+    preview: "Как видят клиенты",
     services: "━━ УСЛУГИ ━━━━━━━━━━━━━━━━━━",
     workHours: "━━ РАБОЧЕЕ ВРЕМЯ ━━━━━━━━━━━━",
     reviews: "━━ ОТЗЫВЫ КЛИЕНТОВ ━━━━━━━━━━━",
     settings: "━━ НАСТРОЙКИ ━━━━━━━━━━━━━━━",
   },
+  photoHints: [
+    "Настоящее фото — вас должны узнать в салоне.",
+    "Без фильтров и логотипов, лицо хорошо видно.",
+  ],
+  photoOptional: "Фото можно добавить позже — но без него профиль не опубликуется.",
   buttons: {
-    editPhoto: "Изменить фото",
+    takePhoto: "Сделать фото",
+    pickPhoto: "Выбрать из галереи",
+    editName: "Изменить",
     editBio: "Изменить «О себе»",
+    addWork: "Добавить фото работы",
+    skipPortfolio: "Пропустить пока",
     writeToOwner: "Написать Карине ›",
     requestScheduleChange: "Запросить изменение ›",
     notificationSettings: "Настройки уведомлений ›",
@@ -115,47 +91,60 @@ const COPY = {
     cancel: "Отмена",
     retry: "Попробовать снова",
   },
+  nameEdit: {
+    title: "Имя",
+    placeholder: "Как вас называть клиентам",
+    tooShort: (min: number) => `Имя короче ${min} символов нельзя.`,
+  },
+  bioEdit: {
+    title: "О себе",
+    placeholder: "Например: 7 лет в маникюре, люблю аккуратную классику…",
+    empty: "«О себе» пока не заполнено.",
+  },
+  portfolio: {
+    counter: (count: number, limit: number) => `${count} из ${limit}`,
+    hint: "До десяти фото работ. Клиенты смотрят их до записи.",
+    skipped: "Работы можно добавить позже — из профиля.",
+    removeAria: "Удалить фото работы",
+    empty: "Пока ни одной работы.",
+  },
+  preview: {
+    acceptsToday: "Принимает сегодня",
+    hint: "Так вашу карточку видят клиенты. Рейтинг появится после первых отзывов.",
+  },
+  crop: CROP_COPY,
   services: {
     helper: "Хотите добавить или убрать?",
     empty: "Услуги ещё не назначены.",
   },
   workHours: {
-    fallback:
-      "Информацию о рабочем времени уточните у администратора.",
+    fallback: "Информацию о рабочем времени уточните у администратора.",
   },
   reviews: {
-    placeholder: "За последние 30 дней: — отзывов. Скоро.",
+    placeholder: "Отзывы появятся после первых визитов.",
   },
-  bioEdit: {
-    title: "О себе",
-    placeholder: "Расскажите о себе в нескольких словах…",
-  },
-  pendingApproval: "На рассмотрении у Карины",
-  displayNameTooltip:
-    "Изменение имени требует подтверждения от Карины — скоро.",
-  reviewsTooltip:
-    "Отзывы появятся позже — мы готовим этот раздел.",
+  reviewsTooltip: "Отзывы появятся позже — мы готовим этот раздел.",
   internalChatHint: "Личный канал общения с админами студии.",
   toasts: {
     saved: "✓ Сохранено",
     photoSaved: "✓ Фото обновлено",
+    workAdded: "✓ Работа добавлена",
+    workRemoved: "✓ Фото удалено",
   },
   states: {
     loading: "Загружаем профиль…",
     errorTitle: "Не получилось загрузить",
-    errorBody:
-      "Не получилось загрузить ваш профиль. Проверьте интернет и попробуйте снова.",
+    errorBody: "Не получилось загрузить ваш профиль. Проверьте интернет и попробуйте снова.",
     saveError: "Не удалось сохранить. Попробуйте ещё раз.",
-    photoTooLarge: "Фото больше 10 МБ. Уменьшите размер.",
+    photoTooLarge: (mb: number) => `Фото больше ${mb} МБ. Уменьшите размер.`,
     photoBadMime: "Поддерживаются JPG / PNG / WebP",
-    photoNetwork:
-      "Не получилось загрузить фото. Проверьте интернет и попробуйте снова.",
-    bioTooLong: `Длиннее ${MASTER_PROFILE_BIO_MAX} символов нельзя.`,
+    photoNetwork: "Не получилось загрузить фото. Проверьте интернет и попробуйте снова.",
+    bioTooLong: (max: number) => `Длиннее ${max} символов нельзя.`,
     offlineBanner: "Нет связи. Сохраним, как только сеть появится.",
   },
 };
 
-// --- Helpers ------------------------------------------------------------
+// --- Helpers --------------------------------------------------------------
 
 function initials(name: string): string {
   const trimmed = (name || "").trim();
@@ -164,47 +153,56 @@ function initials(name: string): string {
   return parts.map((p) => p.charAt(0).toUpperCase()).join("");
 }
 
-/**
- * Format service duration as «N мин». Returns empty string when the
- * backend omits it (Phase 0 catalog mirror occasionally lacks the
- * field for newly imported services).
- */
 function formatDuration(min: number | null): string {
   if (typeof min !== "number" || !Number.isFinite(min) || min <= 0) return "";
   return `${Math.round(min)} мин`;
 }
 
-// --- State model --------------------------------------------------------
+const megabytes = (bytes: number): number => Math.max(1, Math.round(bytes / (1024 * 1024)));
 
-interface BioEditorState {
+// --- Модель состояния ------------------------------------------------------
+
+interface TextEditorState {
   value: string;
   saving: boolean;
   err: string;
 }
 
-type Phase =
-  | { kind: "loading" }
-  | { kind: "ready"; data: MasterMeResponse }
-  | { kind: "error"; err: unknown };
+interface ReadyData {
+  me: MasterMeResponse;
+  card: MasterProfileCard;
+  portfolio: PortfolioList;
+}
 
-// --- Component ----------------------------------------------------------
+type Phase = { kind: "loading" } | { kind: "ready"; data: ReadyData } | { kind: "error"; err: unknown };
+
+// --- Компонент -------------------------------------------------------------
 
 export function MasterProfileScreen() {
   const navigate = useNavigate();
 
   const [phase, setPhase] = useState<Phase>({ kind: "loading" });
-  const [editor, setEditor] = useState<BioEditorState | null>(null);
+  const [bioEditor, setBioEditor] = useState<TextEditorState | null>(null);
+  const [nameEditor, setNameEditor] = useState<TextEditorState | null>(null);
+  const [cropFile, setCropFile] = useState<File | null>(null);
   const [photoUploading, setPhotoUploading] = useState(false);
   const [photoErr, setPhotoErr] = useState("");
+  const [workBusy, setWorkBusy] = useState(false);
+  const [workErr, setWorkErr] = useState("");
+  const [portfolioSkipped, setPortfolioSkipped] = useState(false);
   const [offlineBanner, setOfflineBanner] = useState(false);
   const [toast, setToast] = useState("");
-  const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const galleryInputRef = useRef<HTMLInputElement | null>(null);
+  const cameraInputRef = useRef<HTMLInputElement | null>(null);
+  const workInputRef = useRef<HTMLInputElement | null>(null);
 
-  // --- Bridge: BackButton + closing-confirmation ---
-  const originalBio =
-    phase.kind === "ready" ? phase.data.master.bio : "";
-  const isBioDirty =
-    editor !== null && (editor.value ?? "") !== (originalBio ?? "");
+  const card = phase.kind === "ready" ? phase.data.card : null;
+  const limits = card?.limits ?? null;
+
+  const isDirty =
+    (bioEditor !== null && bioEditor.value !== (card?.master.bio ?? "")) ||
+    (nameEditor !== null && nameEditor.value !== (card?.master.name ?? "")) ||
+    cropFile !== null;
 
   useEffect(() => {
     setBackButton(true);
@@ -221,180 +219,239 @@ export function MasterProfileScreen() {
   }, []);
 
   useEffect(() => {
-    setClosingConfirmation(isBioDirty || photoUploading);
-  }, [isBioDirty, photoUploading]);
+    setClosingConfirmation(isDirty || photoUploading || workBusy);
+  }, [isDirty, photoUploading, workBusy]);
 
-  // --- Initial load ---
-  const fetchMe = useCallback(async () => {
+  // --- Загрузка: /me (услуги, права) + карточка (владелец полей) + работы ---
+  const fetchAll = useCallback(async () => {
     setPhase({ kind: "loading" });
     try {
-      const data = await getMasterMe();
-      setPhase({ kind: "ready", data });
+      const [me, cardData, portfolio] = await Promise.all([
+        getMasterMe(),
+        getMasterProfileCard(),
+        getPortfolio(),
+      ]);
+      setPhase({ kind: "ready", data: { me, card: cardData, portfolio } });
     } catch (err) {
       setPhase({ kind: "error", err });
     }
   }, []);
 
   useEffect(() => {
-    void fetchMe();
-  }, [fetchMe]);
+    void fetchAll();
+  }, [fetchAll]);
 
-  // --- Bio editor lifecycle ---
-  const openBioEditor = useCallback(() => {
-    if (phase.kind !== "ready") return;
-    hapticSelection();
-    setEditor({
-      value: phase.data.master.bio ?? "",
-      saving: false,
-      err: "",
-    });
-  }, [phase]);
-
-  const cancelBioEditor = useCallback(() => {
-    setEditor(null);
-  }, []);
-
-  const updateBio = useCallback((value: string) => {
-    setEditor((curr) =>
-      curr ? { ...curr, value, err: "" } : curr,
+  const patchCard = useCallback((patch: Partial<MasterProfileCard["master"]>) => {
+    setPhase((curr) =>
+      curr.kind === "ready"
+        ? {
+            kind: "ready",
+            data: { ...curr.data, card: { ...curr.data.card, master: { ...curr.data.card.master, ...patch } } },
+          }
+        : curr,
     );
   }, []);
 
+  const refreshPortfolio = useCallback(async () => {
+    const portfolio = await getPortfolio();
+    setPhase((curr) => (curr.kind === "ready" ? { kind: "ready", data: { ...curr.data, portfolio } } : curr));
+  }, []);
+
+  // --- «О себе» ---
+  const openBioEditor = useCallback(() => {
+    if (!card) return;
+    hapticSelection();
+    setBioEditor({ value: card.master.bio ?? "", saving: false, err: "" });
+  }, [card]);
+
   const saveBio = useCallback(async () => {
-    if (!editor || phase.kind !== "ready") return;
-    const trimmed = editor.value;
-    if (trimmed.length > MASTER_PROFILE_BIO_MAX) {
-      setEditor({ ...editor, err: COPY.states.bioTooLong });
+    if (!bioEditor || !limits) return;
+    const value = bioEditor.value;
+    if (value.length > limits.bio) {
+      setBioEditor({ ...bioEditor, err: PROFILE_COPY.states.bioTooLong(limits.bio) });
       hapticNotify("error");
       return;
     }
-    setEditor({ ...editor, saving: true, err: "" });
+    setBioEditor({ ...bioEditor, saving: true, err: "" });
     setOfflineBanner(false);
     try {
-      const res = await patchMasterProfile({ bio: trimmed });
+      const res = await patchMasterProfile({ bio: value });
       hapticNotify("success");
-      // Merge the patched fields back into the cached me payload — the
-      // PATCH response only carries {id, name, bio, photo_url}.
-      setPhase({
-        kind: "ready",
-        data: {
-          ...phase.data,
-          master: {
-            ...phase.data.master,
-            bio: res.master.bio,
-            photo_url: res.master.photo_url,
-          },
-        },
-      });
-      setEditor(null);
-      setToast(COPY.toasts.saved);
+      patchCard({ bio: res.master.bio, photo_url: res.master.photo_url });
+      setBioEditor(null);
+      setToast(PROFILE_COPY.toasts.saved);
     } catch (e) {
       if (e instanceof ApiError) {
-        setEditor({
-          ...editor,
-          saving: false,
-          err: e.detail || COPY.states.saveError,
-        });
+        setBioEditor({ ...bioEditor, saving: false, err: e.detail || PROFILE_COPY.states.saveError });
       } else {
         setOfflineBanner(true);
-        setEditor({ ...editor, saving: false, err: "" });
+        setBioEditor({ ...bioEditor, saving: false, err: "" });
       }
       hapticNotify("error");
     }
-  }, [editor, phase]);
+  }, [bioEditor, limits, patchCard]);
 
-  // --- Photo upload ---
-  const handlePhotoSelect = useCallback(
-    async (file: File) => {
-      if (phase.kind !== "ready") return;
+  // --- Имя ---
+  const openNameEditor = useCallback(() => {
+    if (!card) return;
+    hapticSelection();
+    setNameEditor({ value: card.master.name ?? "", saving: false, err: "" });
+  }, [card]);
+
+  const saveName = useCallback(async () => {
+    if (!nameEditor || !limits) return;
+    const value = nameEditor.value.trim();
+    if (value.length < limits.display_name_min) {
+      setNameEditor({ ...nameEditor, err: PROFILE_COPY.nameEdit.tooShort(limits.display_name_min) });
+      hapticNotify("error");
+      return;
+    }
+    setNameEditor({ ...nameEditor, saving: true, err: "" });
+    setOfflineBanner(false);
+    try {
+      const res = await patchMasterProfile({ display_name: value });
+      hapticNotify("success");
+      patchCard({ name: res.master.name });
+      setNameEditor(null);
+      setToast(PROFILE_COPY.toasts.saved);
+    } catch (e) {
+      if (e instanceof ApiError) {
+        setNameEditor({ ...nameEditor, saving: false, err: e.detail || PROFILE_COPY.states.saveError });
+      } else {
+        setOfflineBanner(true);
+        setNameEditor({ ...nameEditor, saving: false, err: "" });
+      }
+      hapticNotify("error");
+    }
+  }, [nameEditor, limits, patchCard]);
+
+  // --- Фото: выбор → кроп → загрузка ---
+  const acceptPhotoFile = useCallback(
+    (file: File, maxBytes: number): boolean => {
+      if (file.size > maxBytes) {
+        setPhotoErr(PROFILE_COPY.states.photoTooLarge(megabytes(maxBytes)));
+        hapticNotify("error");
+        return false;
+      }
+      if (!MASTER_PROFILE_PHOTO_MIME_ALLOWLIST.has((file.type || "").toLowerCase())) {
+        setPhotoErr(PROFILE_COPY.states.photoBadMime);
+        hapticNotify("error");
+        return false;
+      }
+      return true;
+    },
+    [],
+  );
+
+  const handleAvatarSelect = useCallback(
+    (file: File) => {
+      if (!limits) return;
       setPhotoErr("");
-      if (file.size > MASTER_PROFILE_PHOTO_MAX_BYTES) {
-        setPhotoErr(COPY.states.photoTooLarge);
-        hapticNotify("error");
-        return;
-      }
-      const mime = (file.type || "").toLowerCase();
-      if (!MASTER_PROFILE_PHOTO_MIME_ALLOWLIST.has(mime)) {
-        setPhotoErr(COPY.states.photoBadMime);
-        hapticNotify("error");
-        return;
-      }
+      if (!acceptPhotoFile(file, limits.avatar_bytes)) return;
+      hapticSelection();
+      setCropFile(file);
+    },
+    [limits, acceptPhotoFile],
+  );
+
+  const applyCrop = useCallback(
+    async (square: Blob) => {
       setPhotoUploading(true);
+      setPhotoErr("");
       try {
+        const file = new File([square], "avatar.jpg", { type: square.type || "image/jpeg" });
         const res = await uploadMasterProfilePhoto(file);
         hapticNotify("success");
-        setPhase({
-          kind: "ready",
-          data: {
-            ...phase.data,
-            master: {
-              ...phase.data.master,
-              photo_url: res.master.photo_url,
-              bio: res.master.bio,
-            },
-          },
-        });
-        setToast(COPY.toasts.photoSaved);
+        patchCard({ photo_url: res.master.photo_url, bio: res.master.bio });
+        setCropFile(null);
+        setToast(PROFILE_COPY.toasts.photoSaved);
       } catch (e) {
-        if (e instanceof ApiError) {
-          setPhotoErr(e.detail || COPY.states.photoNetwork);
-        } else {
-          setPhotoErr(COPY.states.photoNetwork);
-        }
+        setPhotoErr(e instanceof ApiError ? e.detail || PROFILE_COPY.states.photoNetwork : PROFILE_COPY.states.photoNetwork);
         hapticNotify("error");
       } finally {
         setPhotoUploading(false);
-        // Allow re-selecting the same file (browsers de-dupe by name).
-        if (fileInputRef.current) fileInputRef.current.value = "";
+        if (galleryInputRef.current) galleryInputRef.current.value = "";
+        if (cameraInputRef.current) cameraInputRef.current.value = "";
       }
     },
-    [phase],
+    [patchCard],
   );
 
-  const openFilePicker = useCallback(() => {
-    if (photoUploading) return;
-    hapticSelection();
-    fileInputRef.current?.click();
-  }, [photoUploading]);
+  // --- Работы ---
+  const handleWorkSelect = useCallback(
+    async (file: File) => {
+      if (!limits) return;
+      setWorkErr("");
+      const okSize = file.size <= limits.portfolio_bytes;
+      if (!okSize) {
+        setWorkErr(PROFILE_COPY.states.photoTooLarge(megabytes(limits.portfolio_bytes)));
+        hapticNotify("error");
+        return;
+      }
+      if (!MASTER_PROFILE_PHOTO_MIME_ALLOWLIST.has((file.type || "").toLowerCase())) {
+        setWorkErr(PROFILE_COPY.states.photoBadMime);
+        hapticNotify("error");
+        return;
+      }
+      setWorkBusy(true);
+      try {
+        await uploadPortfolioPhoto(file);
+        await refreshPortfolio();
+        hapticNotify("success");
+        setToast(PROFILE_COPY.toasts.workAdded);
+      } catch (e) {
+        setWorkErr(e instanceof ApiError ? e.detail || PROFILE_COPY.states.photoNetwork : PROFILE_COPY.states.photoNetwork);
+        hapticNotify("error");
+      } finally {
+        setWorkBusy(false);
+        if (workInputRef.current) workInputRef.current.value = "";
+      }
+    },
+    [limits, refreshPortfolio],
+  );
 
-  // --- Navigation handlers ---
+  const removeWork = useCallback(
+    async (itemId: string) => {
+      setWorkErr("");
+      setWorkBusy(true);
+      try {
+        await deletePortfolioItem(itemId);
+        await refreshPortfolio();
+        hapticNotify("success");
+        setToast(PROFILE_COPY.toasts.workRemoved);
+      } catch (e) {
+        setWorkErr(e instanceof ApiError ? e.detail || PROFILE_COPY.states.saveError : PROFILE_COPY.states.saveError);
+        hapticNotify("error");
+      } finally {
+        setWorkBusy(false);
+      }
+    },
+    [refreshPortfolio],
+  );
+
+  // --- Навигация ---
   const goToScheduleRequest = useCallback(() => {
     hapticSelection();
-    // The existing M3 schedule screen exposes the «Запросить выходной» /
-    // «Запросить изменение» flow via the per-day CTA. Sending the master
-    // there is the documented bridge to availability requests.
     navigate("/master/schedule");
   }, [navigate]);
-
-  // M7 entry point — spec §M7 line 780 «Profile → «Уведомления»».
   const goToNotificationSettings = useCallback(() => {
     hapticSelection();
     navigate("/master/settings/notifications");
   }, [navigate]);
-
-  // M8 minimal entry point — logout-only app settings screen.
-  // Full M8 (theme/font/help/about/version) deferred post-pilot.
   const goToAppSettings = useCallback(() => {
     hapticSelection();
     navigate("/master/settings");
   }, [navigate]);
-
-  // Internal-chat entry — opens new thread tagged ``general`` so the
-  // M4 «Написать Карине ›» CTA lands directly on the compose flow
-  // (handoff §3.3 + §5.3 — generic CTA defaults to `general` topic).
   const goToWriteOwner = useCallback(() => {
     hapticSelection();
     navigate("/master/internal-chat?new=1&topic=general");
   }, [navigate]);
-
-  // «Со студией ›» — opens the list view (master's archive of threads
-  // with the admin team).
   const goToInternalChatList = useCallback(() => {
     hapticSelection();
     navigate("/master/internal-chat");
   }, [navigate]);
 
-  // --- Render branches ---
+  // --- Ветки рендера ---
   if (phase.kind === "loading") {
     return (
       <ProfileFrame>
@@ -405,46 +462,83 @@ export function MasterProfileScreen() {
   if (phase.kind === "error") {
     return (
       <ProfileFrame>
-        <ErrorBanner err={phase.err} onRetry={() => void fetchMe()} />
+        <ErrorBanner onRetry={() => void fetchAll()} />
       </ProfileFrame>
     );
   }
 
-  const { master } = phase.data;
+  const { me, card: cardData, portfolio } = phase.data;
+  const master = cardData.master;
+  const previewMaster: Master = {
+    id: master.id,
+    name: master.name,
+    specialization: "",
+    bio: master.bio,
+    experience: "",
+    rating: null,
+    photo_url: master.photo_url,
+  };
+  const portfolioFull = portfolio.count >= portfolio.limit;
 
   return (
     <ProfileFrame>
       {offlineBanner ? <OfflineBanner /> : null}
 
-      <ProfileSection title={COPY.sections.asClientsSeeYou}>
-        <ProfileHeaderRow master={master} />
+      {/* 6.1 — фото и имя */}
+      <ProfileSection title={PROFILE_COPY.sections.photoAndName}>
+        <div className="master-profile__header-row">
+          <div className="master-profile__avatar" aria-hidden="true">
+            {master.photo_url ? <img src={master.photo_url} alt="" /> : <span>{initials(master.name)}</span>}
+          </div>
+          <div className="master-profile__identity">
+            <div className="master-profile__name-row">
+              <div className="master-profile__name">{master.name || "—"}</div>
+              <button type="button" className="master-profile__link-btn" onClick={openNameEditor}>
+                {PROFILE_COPY.buttons.editName}
+              </button>
+            </div>
+            {master.bio ? (
+              <blockquote className="master-profile__bio-quote">«{master.bio}»</blockquote>
+            ) : (
+              <p className="master-profile__bio-empty">{PROFILE_COPY.bioEdit.empty}</p>
+            )}
+          </div>
+        </div>
+
+        <ul className="master-profile__hints">
+          {PROFILE_COPY.photoHints.map((hint) => (
+            <li key={hint}>{hint}</li>
+          ))}
+        </ul>
+        <p className="master-profile__hint">{PROFILE_COPY.photoOptional}</p>
 
         <div className="master-profile__actions">
           <button
             type="button"
             className="btn-secondary master-profile__action-btn"
-            onClick={openFilePicker}
+            onClick={() => {
+              hapticSelection();
+              cameraInputRef.current?.click();
+            }}
             disabled={photoUploading}
           >
-            {photoUploading ? "Загружаем…" : COPY.buttons.editPhoto}
+            {PROFILE_COPY.buttons.takePhoto}
           </button>
           <button
             type="button"
             className="btn-secondary master-profile__action-btn"
-            onClick={openBioEditor}
+            onClick={() => {
+              hapticSelection();
+              galleryInputRef.current?.click();
+            }}
+            disabled={photoUploading}
           >
-            {COPY.buttons.editBio}
+            {photoUploading ? "Загружаем…" : PROFILE_COPY.buttons.pickPhoto}
+          </button>
+          <button type="button" className="btn-secondary master-profile__action-btn" onClick={openBioEditor}>
+            {PROFILE_COPY.buttons.editBio}
           </button>
         </div>
-
-        {/* Display-name change is owner-approved — disabled for now. */}
-        <p
-          className="master-profile__hint"
-          title={COPY.displayNameTooltip}
-          aria-label={COPY.displayNameTooltip}
-        >
-          {COPY.displayNameTooltip}
-        </p>
 
         {photoErr ? (
           <p className="master-profile__error" role="alert">
@@ -453,103 +547,193 @@ export function MasterProfileScreen() {
         ) : null}
 
         <input
-          ref={fileInputRef}
+          ref={galleryInputRef}
+          data-role="avatar"
           type="file"
           accept="image/jpeg,image/png,image/webp"
           style={{ display: "none" }}
           onChange={(e) => {
             const file = e.target.files?.[0];
-            if (file) void handlePhotoSelect(file);
+            if (file) handleAvatarSelect(file);
+          }}
+        />
+        <input
+          ref={cameraInputRef}
+          data-role="avatar-camera"
+          type="file"
+          accept="image/*"
+          capture="user"
+          style={{ display: "none" }}
+          onChange={(e) => {
+            const file = e.target.files?.[0];
+            if (file) handleAvatarSelect(file);
           }}
         />
       </ProfileSection>
 
-      <ProfileSection title={COPY.sections.services}>
-        <ServicesList master={master} />
-        <p className="master-profile__hint">{COPY.services.helper}</p>
-        <button
-          type="button"
-          className="btn-secondary master-profile__action-btn"
-          onClick={goToWriteOwner}
-        >
-          {COPY.buttons.writeToOwner}
+      {/* 6.3 — работы */}
+      <ProfileSection title={PROFILE_COPY.sections.portfolio}>
+        {portfolioSkipped && portfolio.count === 0 ? (
+          <p className="master-profile__hint">{PROFILE_COPY.portfolio.skipped}</p>
+        ) : (
+          <>
+            <div className="master-profile__portfolio-head">
+              <span className="master-profile__counter" aria-live="polite">
+                {PROFILE_COPY.portfolio.counter(portfolio.count, portfolio.limit)}
+              </span>
+              <span className="master-profile__hint">{PROFILE_COPY.portfolio.hint}</span>
+            </div>
+            {portfolio.items.length === 0 ? (
+              <p className="master-profile__hint">{PROFILE_COPY.portfolio.empty}</p>
+            ) : (
+              <ul className="master-profile__portfolio">
+                {portfolio.items.map((item) => (
+                  <li key={item.id} className="master-profile__work">
+                    <img src={item.image_url} alt="" />
+                    <button
+                      type="button"
+                      className="master-profile__work-remove"
+                      aria-label={PROFILE_COPY.portfolio.removeAria}
+                      onClick={() => void removeWork(item.id)}
+                      disabled={workBusy}
+                    >
+                      ×
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )}
+            {workErr ? (
+              <p className="master-profile__error" role="alert">
+                {workErr}
+              </p>
+            ) : null}
+            <div className="master-profile__actions">
+              {!portfolioFull ? (
+                <button
+                  type="button"
+                  className="btn-secondary master-profile__action-btn"
+                  onClick={() => {
+                    hapticSelection();
+                    workInputRef.current?.click();
+                  }}
+                  disabled={workBusy}
+                >
+                  {workBusy ? "Загружаем…" : PROFILE_COPY.buttons.addWork}
+                </button>
+              ) : null}
+              {portfolio.count === 0 ? (
+                <button
+                  type="button"
+                  className="master-profile__link-btn"
+                  onClick={() => {
+                    hapticSelection();
+                    setPortfolioSkipped(true);
+                  }}
+                >
+                  {PROFILE_COPY.buttons.skipPortfolio}
+                </button>
+              ) : null}
+            </div>
+            <input
+              ref={workInputRef}
+              data-role="work"
+              type="file"
+              accept="image/jpeg,image/png,image/webp"
+              style={{ display: "none" }}
+              onChange={(e) => {
+                const file = e.target.files?.[0];
+                if (file) void handleWorkSelect(file);
+              }}
+            />
+          </>
+        )}
+      </ProfileSection>
+
+      {/* 6.4 — предпросмотр тем же MasterCard */}
+      <ProfileSection title={PROFILE_COPY.sections.preview}>
+        <div className="master-profile__preview">
+          <MasterCard
+            master={previewMaster}
+            acceptsToday={cardData.accepts_today}
+            categories={cardData.categories}
+            onSelect={() => {}}
+          />
+        </div>
+        <p className="master-profile__hint">{PROFILE_COPY.preview.hint}</p>
+      </ProfileSection>
+
+      <ProfileSection title={PROFILE_COPY.sections.services}>
+        <ServicesList master={me.master} />
+        <p className="master-profile__hint">{PROFILE_COPY.services.helper}</p>
+        <button type="button" className="btn-secondary master-profile__action-btn" onClick={goToWriteOwner}>
+          {PROFILE_COPY.buttons.writeToOwner}
         </button>
       </ProfileSection>
 
-      <ProfileSection title={COPY.sections.workHours}>
-        <p className="master-profile__hint">
-          {COPY.workHours.fallback}
-        </p>
-        <button
-          type="button"
-          className="btn-secondary master-profile__action-btn"
-          onClick={goToScheduleRequest}
-        >
-          {COPY.buttons.requestScheduleChange}
+      <ProfileSection title={PROFILE_COPY.sections.workHours}>
+        <p className="master-profile__hint">{PROFILE_COPY.workHours.fallback}</p>
+        <button type="button" className="btn-secondary master-profile__action-btn" onClick={goToScheduleRequest}>
+          {PROFILE_COPY.buttons.requestScheduleChange}
         </button>
       </ProfileSection>
 
-      <ProfileSection title={COPY.sections.reviews}>
-        <div
-          className="callout"
-          role="status"
-          title={COPY.reviewsTooltip}
-        >
-          <p style={{ margin: 0 }}>{COPY.reviews.placeholder}</p>
+      <ProfileSection title={PROFILE_COPY.sections.reviews}>
+        <div className="callout" role="status" title={PROFILE_COPY.reviewsTooltip}>
+          <p style={{ margin: 0 }}>{PROFILE_COPY.reviews.placeholder}</p>
         </div>
       </ProfileSection>
 
-      {/*
-       * M7 entry-point per spec §M7 line 780. Placed in a dedicated
-       * «НАСТРОЙКИ» section at the bottom of the profile — the spec
-       * locates the link generically as «Profile → «Уведомления»» but
-       * doesn't pin a slot inside the M4 layout. Bottom of profile +
-       * its own section header gives it visibility without crowding
-       * the read-mostly «УСЛУГИ» / «ОТЗЫВЫ» blocks. M8 (App settings)
-       * isn't built yet — when it ships, it will deep-link here.
-       */}
-      <ProfileSection title={COPY.sections.settings}>
-        <button
-          type="button"
-          className="btn-secondary master-profile__action-btn"
-          onClick={goToInternalChatList}
-        >
-          {COPY.buttons.internalChat}
+      <ProfileSection title={PROFILE_COPY.sections.settings}>
+        <button type="button" className="btn-secondary master-profile__action-btn" onClick={goToInternalChatList}>
+          {PROFILE_COPY.buttons.internalChat}
         </button>
-        <p className="master-profile__hint">{COPY.internalChatHint}</p>
-        <button
-          type="button"
-          className="btn-secondary master-profile__action-btn"
-          onClick={goToNotificationSettings}
-        >
-          {COPY.buttons.notificationSettings}
+        <p className="master-profile__hint">{PROFILE_COPY.internalChatHint}</p>
+        <button type="button" className="btn-secondary master-profile__action-btn" onClick={goToNotificationSettings}>
+          {PROFILE_COPY.buttons.notificationSettings}
         </button>
-        {/*
-         * M8 minimal — logout-only app settings. Full M8 layout
-         * (theme/font/help/about/version) deferred to a post-pilot
-         * FOLLOW_UP issue per TL plan Step 2.
-         */}
-        <button
-          type="button"
-          className="btn-secondary master-profile__action-btn"
-          onClick={goToAppSettings}
-        >
-          {COPY.buttons.appSettings}
+        <button type="button" className="btn-secondary master-profile__action-btn" onClick={goToAppSettings}>
+          {PROFILE_COPY.buttons.appSettings}
         </button>
       </ProfileSection>
 
-      <MasterTabBar
-        unreadCount={0}
-        scheduleHasPendingChange={false}
-        profileHasOwnerPendingChange={false}
-      />
+      <MasterTabBar unreadCount={0} scheduleHasPendingChange={false} profileHasOwnerPendingChange={false} />
 
-      {editor !== null ? (
-        <BioEditorSheet
-          state={editor}
-          onChange={updateBio}
-          onCancel={cancelBioEditor}
+      {bioEditor !== null && limits ? (
+        <TextEditorSheet
+          title={PROFILE_COPY.bioEdit.title}
+          placeholder={PROFILE_COPY.bioEdit.placeholder}
+          multiline
+          max={limits.bio}
+          state={bioEditor}
+          onChange={(value) => setBioEditor((c) => (c ? { ...c, value, err: "" } : c))}
+          onCancel={() => setBioEditor(null)}
           onSave={() => void saveBio()}
+        />
+      ) : null}
+
+      {nameEditor !== null && limits ? (
+        <TextEditorSheet
+          title={PROFILE_COPY.nameEdit.title}
+          placeholder={PROFILE_COPY.nameEdit.placeholder}
+          multiline={false}
+          state={nameEditor}
+          onChange={(value) => setNameEditor((c) => (c ? { ...c, value, err: "" } : c))}
+          onCancel={() => setNameEditor(null)}
+          onSave={() => void saveName()}
+        />
+      ) : null}
+
+      {cropFile !== null ? (
+        <PhotoCropSheet
+          file={cropFile}
+          busy={photoUploading}
+          onApply={(square) => void applyCrop(square)}
+          onReplace={() => {
+            setCropFile(null);
+            galleryInputRef.current?.click();
+          }}
+          onCancel={() => setCropFile(null)}
         />
       ) : null}
 
@@ -564,19 +748,13 @@ export function MasterProfileScreen() {
   );
 }
 
-// --- Sub-components -----------------------------------------------------
+// --- Подкомпоненты ---------------------------------------------------------
 
 function ProfileFrame({ children }: { children: React.ReactNode }) {
   return <div className="master-profile">{children}</div>;
 }
 
-function ProfileSection({
-  title,
-  children,
-}: {
-  title: string;
-  children: React.ReactNode;
-}) {
+function ProfileSection({ title, children }: { title: string; children: React.ReactNode }) {
   return (
     <section className="master-profile__section">
       <h2 className="master-profile__section-title">{title}</h2>
@@ -585,43 +763,9 @@ function ProfileSection({
   );
 }
 
-function ProfileHeaderRow({ master }: { master: MasterMeMaster }) {
-  const init = useMemo(() => initials(master.name), [master.name]);
-  return (
-    <div className="master-profile__header-row">
-      <div className="master-profile__avatar" aria-hidden="true">
-        {master.photo_url ? (
-          <img src={master.photo_url} alt="" />
-        ) : (
-          <span>{init}</span>
-        )}
-      </div>
-      <div className="master-profile__identity">
-        <div className="master-profile__name">{master.name || "—"}</div>
-        {master.specialization ? (
-          <div className="master-profile__specialization">
-            {master.specialization}
-          </div>
-        ) : null}
-        {master.bio ? (
-          <blockquote className="master-profile__bio-quote">
-            «{master.bio}»
-          </blockquote>
-        ) : (
-          <p className="master-profile__bio-empty">
-            «О себе» пока не заполнено.
-          </p>
-        )}
-      </div>
-    </div>
-  );
-}
-
 function ServicesList({ master }: { master: MasterMeMaster }) {
   if (!master.services || master.services.length === 0) {
-    return (
-      <p className="master-profile__hint">{COPY.services.empty}</p>
-    );
+    return <p className="master-profile__hint">{PROFILE_COPY.services.empty}</p>;
   }
   return (
     <ul className="master-profile__services">
@@ -630,12 +774,7 @@ function ServicesList({ master }: { master: MasterMeMaster }) {
         return (
           <li key={s.id} className="master-profile__service-item">
             <span>{s.name}</span>
-            {duration ? (
-              <span className="master-profile__service-meta">
-                {" "}
-                · {duration}
-              </span>
-            ) : null}
+            {duration ? <span className="master-profile__service-meta"> · {duration}</span> : null}
           </li>
         );
       })}
@@ -643,64 +782,73 @@ function ServicesList({ master }: { master: MasterMeMaster }) {
   );
 }
 
-function BioEditorSheet({
+function TextEditorSheet({
+  title,
+  placeholder,
+  multiline,
+  max,
   state,
   onChange,
   onCancel,
   onSave,
 }: {
-  state: BioEditorState;
+  title: string;
+  placeholder: string;
+  multiline: boolean;
+  /** Лимит из контракта; счётчик и блокировка «Сохранить» — от него. */
+  max?: number;
+  state: TextEditorState;
   onChange: (v: string) => void;
   onCancel: () => void;
   onSave: () => void;
 }) {
-  const remaining = MASTER_PROFILE_BIO_MAX - state.value.length;
-  const overLimit = remaining < 0;
+  const overLimit = typeof max === "number" && state.value.length > max;
+  const counterClass = useMemo(
+    () => (overLimit ? "master-profile__counter master-profile__counter--bad" : "master-profile__counter"),
+    [overLimit],
+  );
   return (
-    <div className="master-profile__sheet" role="dialog" aria-modal="true">
+    <div className="master-profile__sheet" role="dialog" aria-modal="true" aria-label={title}>
       <div className="master-profile__sheet-card">
-        <h3 className="master-profile__sheet-title">{COPY.bioEdit.title}</h3>
-        <textarea
-          className="master-profile__textarea"
-          value={state.value}
-          onChange={(e) => onChange(e.target.value)}
-          rows={5}
-          maxLength={MASTER_PROFILE_BIO_MAX + 50}
-          placeholder={COPY.bioEdit.placeholder}
-          disabled={state.saving}
-          aria-label={COPY.bioEdit.title}
-        />
-        <div
-          className={
-            overLimit
-              ? "master-profile__counter master-profile__counter--bad"
-              : "master-profile__counter"
-          }
-          aria-live="polite"
-        >
-          {state.value.length} / {MASTER_PROFILE_BIO_MAX}
-        </div>
+        <h3 className="master-profile__sheet-title">{title}</h3>
+        {multiline ? (
+          <textarea
+            className="master-profile__textarea"
+            value={state.value}
+            onChange={(e) => onChange(e.target.value)}
+            rows={5}
+            maxLength={typeof max === "number" ? max + 50 : undefined}
+            placeholder={placeholder}
+            disabled={state.saving}
+            aria-label={title}
+          />
+        ) : (
+          <input
+            className="master-profile__input"
+            type="text"
+            value={state.value}
+            onChange={(e) => onChange(e.target.value)}
+            placeholder={placeholder}
+            disabled={state.saving}
+            aria-label={title}
+          />
+        )}
+        {typeof max === "number" ? (
+          <div className={counterClass} aria-live="polite">
+            {state.value.length} / {max}
+          </div>
+        ) : null}
         {state.err ? (
           <p className="master-profile__error" role="alert">
             {state.err}
           </p>
         ) : null}
         <div className="master-profile__sheet-actions">
-          <button
-            type="button"
-            className="btn-secondary"
-            onClick={onCancel}
-            disabled={state.saving}
-          >
-            {COPY.buttons.cancel}
+          <button type="button" className="btn-secondary" onClick={onCancel} disabled={state.saving}>
+            {PROFILE_COPY.buttons.cancel}
           </button>
-          <button
-            type="button"
-            className="btn-primary"
-            onClick={onSave}
-            disabled={state.saving || overLimit}
-          >
-            {state.saving ? "Сохраняем…" : COPY.buttons.save}
+          <button type="button" className="btn-primary" onClick={onSave} disabled={state.saving || overLimit}>
+            {state.saving ? "Сохраняем…" : PROFILE_COPY.buttons.save}
           </button>
         </div>
       </div>
@@ -711,41 +859,27 @@ function BioEditorSheet({
 function LoadingSkeleton() {
   return (
     <div className="master-profile__skeleton-wrap" aria-busy="true">
-      <p className="master-profile__loading-label">{COPY.states.loading}</p>
+      <p className="master-profile__loading-label">{PROFILE_COPY.states.loading}</p>
       <div className="m-card m-card--skel">
         <div className="skeleton" style={{ width: "60%", height: "1.2em" }} />
-        <div
-          className="skeleton"
-          style={{ width: "40%", height: "1em", marginTop: 8 }}
-        />
+        <div className="skeleton" style={{ width: "40%", height: "1em", marginTop: 8 }} />
       </div>
       <div className="m-card m-card--skel">
         <div className="skeleton" style={{ width: "70%", height: "1em" }} />
-      </div>
-      <div className="m-card m-card--skel">
-        <div className="skeleton" style={{ width: "50%", height: "1em" }} />
       </div>
     </div>
   );
 }
 
-function ErrorBanner({
-  err: _err,
-  onRetry,
-}: {
-  err: unknown;
-  onRetry: () => void;
-}) {
+function ErrorBanner({ onRetry }: { onRetry: () => void }) {
   return (
     <section className="master-profile__section">
-      <h2 className="master-profile__section-title">
-        {COPY.states.errorTitle}
-      </h2>
+      <h2 className="master-profile__section-title">{PROFILE_COPY.states.errorTitle}</h2>
       <div className="callout callout--danger" role="alert">
-        <p style={{ margin: 0 }}>{COPY.states.errorBody}</p>
+        <p style={{ margin: 0 }}>{PROFILE_COPY.states.errorBody}</p>
         <div style={{ marginTop: "var(--s-3)" }}>
           <button type="button" className="btn-secondary" onClick={onRetry}>
-            {COPY.buttons.retry}
+            {PROFILE_COPY.buttons.retry}
           </button>
         </div>
       </div>
@@ -755,12 +889,8 @@ function ErrorBanner({
 
 function OfflineBanner() {
   return (
-    <div
-      className="callout callout--danger"
-      role="alert"
-      style={{ margin: "var(--s-2) var(--s-3)" }}
-    >
-      <p style={{ margin: 0 }}>{COPY.states.offlineBanner}</p>
+    <div className="callout callout--danger" role="alert" style={{ margin: "var(--s-2) var(--s-3)" }}>
+      <p style={{ margin: 0 }}>{PROFILE_COPY.states.offlineBanner}</p>
     </div>
   );
 }
