@@ -2,9 +2,16 @@
 
 **Date:** 2026-05-19 r1
 **Status:** STRATEGIC FOUNDATION — Doc #5 of 5 in Ayla-first foundation set. Defines when customer must register vs can browse anonymously.
+**Amended:** 2026-09-15 (DRF-1894) — **в канале MAX не применяется**, см. блок ниже. Поправки ожидают подтверждения владельцем.
 **Reads:** [`ayla-identity-and-brand.md`](./ayla-identity-and-brand.md), [`ayla-memory-and-personalization.md`](./ayla-memory-and-personalization.md), [`ayla-emergency-fallback-policy.md`](./ayla-emergency-fallback-policy.md), [`tenant-as-provider-model.md`](./tenant-as-provider-model.md), [`customer-first-touch-and-mini-app-states.md`](./customer-first-touch-and-mini-app-states.md), memory `project_ayla_first_strategic_pivot`, Notion: AI-01 (`338b0dab-2955-8105-b117-c5db1a17633e`) — «Анонимный пользователь может задать запрос и увидеть подборку; Gate срабатывает только при нажатии «Записаться»»
 
 > Customer can browse Ayla, ask questions, see master cards, get recommendations — all without registering. Registration triggers only when customer commits action requiring identity (booking) or wants persistent personalized experience (saved history, memory across sessions). Locks acquisition funnel to «try before commit» pattern.
+
+> **Amendment 2026-09-15 (A-1) — применимость.** Документ действует для реально неидентифицированной поверхности (открытый web/RN). **В канале MAX не применяется**: `initData` называет человека всегда. `docs/OPEN_DECISIONS.md` §124 («отдельной сущности „аноним“ внутри MAX не заводим»): «Anonymous-состояние нужно только для реально неидентифицированной поверхности, а не для имитации старой политики из открытого RN/web-входа.».
+>
+> Документ не удаляется — он остаётся спецификацией на случай открытого входа, которого в пилоте нет. Пустой `initData` внутри MAX — **отказ транспорта** (`no_init_data`), не аноним и не гость (A-4).
+>
+> Поправки A-2…A-5 вписаны у своих разделов блоками «Amendment 2026-09-15»; прежний текст сохранён. Вердикт по каждому из 18 нормативных разделов — `Ayla/docs/RECONCILIATION_DRF1319_A_GATE_POLICY_2026-09-11.md` §1.
 
 ---
 
@@ -119,6 +126,8 @@ Per Doc #4 §2.1: salon is provider. Anonymous customer is still customer-of-Ayl
 - ✅ Registration moment is when `BotUser` is created from MAX OAuth
 - ✅ `AnonymousSession` may link to `BotUser` if customer registers within session
 
+> **Amendment 2026-09-15 (A-2, §124).** В канале MAX пункт перевёрнут: ленивое создание `BotUser` при первом верифицированном контакте — **норма**, а не «ghost account» (`apps/miniapp_api/views.py::_lazy_register_bot_user`, вызывается из `require_init_data`). Человека без channel identity в канале нет, `AnonymousSession` не заводится.
+
 ### 2.5 Anonymous data is anonymous
 Per Doc #2 §1.3: Ayla memory belongs to user. Anonymous = no user yet → no memory accumulation. Per-session ephemeral context only.
 
@@ -178,6 +187,8 @@ Per Notion AI-01 AC: customer taps «Записаться» button on master car
 - Salon needs identity for service delivery (legal, safety, customer recognition)
 - Customer's first booking commits identity reasonably
 
+> **Amendment 2026-09-15 (A-4).** В канале MAX единственный вход в этот раздел — пустой `initData` в момент записи. Это не «гейт анонима», а **отказ транспорта**: состояние называется `no_init_data` (`apps/miniapp/src/lib/identity.ts::channelIdentity`). Что показывать человеку в нём — DRF-1319 D-2 (заперт решением о MAX OAuth).
+
 ### 3.2 Secondary gate triggers (customer-initiated)
 
 | Trigger | Customer asks via | Reason |
@@ -225,6 +236,8 @@ Per Doc #4 §2.6: tenant cannot customize Ayla. Tenant cannot add «Зареги
 ## 4. The gate UX moment
 
 ### 4.1 Anonymous customer taps «Записаться»
+
+> **Amendment 2026-09-15 (A-4).** В канале MAX макет ниже не действует — см. поправку к §3.1: пустой `initData` — отказ транспорта `no_init_data`, экран — DRF-1319 D-2.
 
 Ayla intercepts, shows registration prompt:
 
@@ -329,6 +342,8 @@ NO repeated prompts. Customer's pace.
 ## 5. Identity model — anonymous → registered
 
 ### 5.1 Two-table model
+
+> **Amendment 2026-09-15 (A-3, §124).** Двухтабличная модель ниже в канале MAX не применяется. Вместо неё — два понятия §124: `identified channel user` (MAX `initData` достоверно назвал человека) и `registered Ayla subject` (доменный субъект, к которому канал привязан). «Регистрация» — не экран и не OAuth, а привязка при входе: `ensure_ayla_link(bot_user, trigger="miniapp_auth_verify")` (`apps/identity/services/ayla_link.py`), fail-soft — при недоступной Ayla человек остаётся `unlinked`, вход не падает.
 
 Anonymous and registered are **separate identities** in the database. Linking happens at registration moment.
 
@@ -884,6 +899,8 @@ If tenant SUSPENDED → not surfaced in anonymous search results. Per Doc #4 §1
 | Soft prompts every reply | §4.7 + §7.5 max 1 per session | One organic mention max |
 | «Limited browsing — register for full Ayla» | Anti-pattern (functional regression) | Anonymous Ayla = full Ayla quality |
 
+> **Amendment 2026-09-15 (A-2).** Строка «Backend creates ghost account» в канале MAX не действует: ленивый `BotUser` при первом верифицированном контакте — норма по §124 (см. поправку к §2.4).
+
 ### 12.2 Data privacy
 
 | Anti-pattern | Why bad | Correct |
@@ -933,9 +950,15 @@ See §5.1 `AnonymousSession`, §6.5 `AnonymousMemoryDraft`, §6.7 `GateTransitio
 
 Total: 3 NEW models.
 
+> **Amendment 2026-09-15 (A-5, §124).** В канале MAX три модели не заводятся (`AnonymousSession`, `AnonymousMemoryDraft`, `GateTransitionEvent` — 0 вхождений в коде) и сняты из acceptance criteria §16.
+
 ---
 
 ## 14. API contracts
+
+> **Amendment 2026-09-15 (A-5, §124).** В канале MAX 12 endpoints не заводятся. Контракт идентичности — один: блок `identity` в ответе `/auth/verify` (DRF-1319 B+E):
+> `{"channel": "identified" | "dev_bypass", "subject": "linked" | "unlinked", "ayla_user_id": <uuid> | null}`.
+> Субъект решает только сервер; клиент читает (`lib/identity.ts::subjectIdentity`) и отсутствие блока считает «неизвестно», а не «не привязан».
 
 ### 14.1 Anonymous endpoints
 
@@ -974,6 +997,8 @@ Total: 3 NEW models.
 
 ## 15. Events emitted
 
+> **Amendment 2026-09-15 (A-5, §124).** В канале MAX события `anonymous.*` не заводятся. События идентичности — `identity.ayla_link.*` (`requested`, `resolved`, `persisted`, `cache_hit`, `conflict`, `failed`, `persist_failed`, `unexpected`; `apps/identity/services/ayla_link.py`) — про привязку субъекта, не про анонима.
+
 Add to [`event-taxonomy.md`](./event-taxonomy.md) `3.21 anonymous flow domain` (NEW section):
 
 | Trigger | Event | Notes |
@@ -992,6 +1017,8 @@ Add to [`event-taxonomy.md`](./event-taxonomy.md) `3.21 anonymous flow domain` (
 ---
 
 ## 16. Acceptance criteria
+
+> **Amendment 2026-09-15 (A-5, §124).** В канале MAX сняты пункты про 3 модели, 12 endpoints, 8 событий, конверсию, перенос данных, 24 ч и cron (вердикт ОТМЕНЕНО §124). Действуют: «Mini App открывается без экрана регистрации» (§2.1), «контекст записи сохраняется» (§6.2), «одна MAX-идентичность = один `BotUser`» (§9.4). Гейт и MAX OAuth — DRF-1319 D-2.
 
 - [ ] 3 models §5/§6/§7 (AnonymousSession, AnonymousMemoryDraft, GateTransitionEvent)
 - [ ] 12 endpoints §14 (8 anonymous + 1 customer + 2 founder + 2 internal)
@@ -1124,3 +1151,4 @@ Add to [`event-taxonomy.md`](./event-taxonomy.md) `3.21 anonymous flow domain` (
 
 ## Last verified
 2026-05-19 (initial draft, anonymous browsing supported + single primary gate trigger «Записаться» + secondary opt-in triggers + AnonymousSession 24h + MAX OAuth conversion + data carry-forward opt-in + tenant invisibility + 3 models, 12 endpoints, 8 events — locked. Foundation Doc #5 of 5 for Ayla-first pivot. COMPLETES foundation set.)
+2026-09-15 — amendments A-1…A-6 по сверке DRF-1319-A (`docs/OPEN_DECISIONS.md` §124 («отдельной сущности „аноним“ внутри MAX не заводим»)): применимость к каналу MAX, ленивый `BotUser` как норма, два понятия идентичности вместо двух таблиц, отказ транспорта вместо гейта анонима, снятие моделей / endpoints / событий из критериев. Прежний текст сохранён. **Ожидает подтверждения владельцем** (DRF-1894).
