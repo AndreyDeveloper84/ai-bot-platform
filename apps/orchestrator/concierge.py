@@ -101,6 +101,7 @@ from apps.orchestrator.llm.templates import (
     get_not_parsed,
 )
 from apps.orchestrator.nutrition_global import (
+    NUTRITION_ONLY_TOOL_NAMES,
     NUTRITION_TOOL_ACTIONS,
     NUTRITION_TOOL_SPECS,
     execute_nutrition_tool,
@@ -689,6 +690,13 @@ def _tools_offered(message_text: str, conversation: Any) -> list[dict[str, Any]]
     withheld: set[str] = set()
     if not offer_screening:
         withheld.add("health_screening")
+    # DRF-1994 (решение U) / DRF-1295 — при выключенном контуре питания
+    # модели не предлагаются ТРИ инструмента еды/воды/анкеты. Не четыре:
+    # ``health_screening`` остаётся по решению владельца о coarse guard —
+    # см. ``NUTRITION_ONLY_TOOL_NAMES``. Это второй слой поверх ворот в
+    # ``execute_nutrition_tool``: не предложить дешевле, чем отказать.
+    if not _nutrition_enabled():
+        withheld.update(NUTRITION_ONLY_TOOL_NAMES)
     # DRF-1923, H7-B: подтверждение сказанного города и времени — только в ходе
     # выбора исполнителя (C05), не в DISCOVERY.
     if not (_has_said_facts(conversation) and execution_stage_turn(message_text, conversation)):
@@ -1130,6 +1138,67 @@ def _execute_start_booking(
     return DiscoveryReply(text=reply.text, action_data=reply.action_data, persisted=True)
 
 
+def _nutrition_enabled() -> bool:
+    """DRF-1994 — тот же читатель флага, что у меню, анкеты, воды и инструментов."""
+    from apps.skills.menu.marketplace import nutrition_enabled
+
+    return nutrition_enabled()
+
+
+#: Строка скрининга — БЕЗУСЛОВНАЯ часть блока питания в промпте (DRF-358 T04,
+#: coarse guard по решению владельца). Вынесена в константу, чтобы тест мог
+#: утверждать её присутствие при выключенном контуре буквально, а не по слову.
+_SCREENING_PROMPT_LINE = (
+    "- Жалоба на боль или симптомы («болит спина», «онемела рука») — "
+    "вызывай health_screening ПЕРВЫМ, раньше любых других инструментов "
+    "и раньше show_masters.\n"
+)
+
+#: Три строки, которые уходят из промпта вместе с тремя инструментами
+#: (``NUTRITION_ONLY_TOOL_NAMES``), когда контур питания выключен.
+_NUTRITION_TOOLS_PROMPT_LINES = (
+    "- Напиток («стакан воды», «кофе 200 мл») — только log_water, "
+    "никогда не clarify_food_entry.\n"
+    "- Короткий текст про еду («борщ 300г») — clarify_food_entry.\n"
+    "- Просьба заполнить или продолжить анкету питания — "
+    "start_nutrition_anketa.\n"
+)
+
+
+def _nutrition_tools_prompt_block() -> str:
+    """Блок «Инструменты питания» промпта — с учётом единого выключателя.
+
+    DRF-1994 (решение U) / DRF-1295. Инструменты, которых модели не дают
+    (``_tools_offered``), нельзя при этом рекламировать в промпте — это
+    «выключено наполовину»: модель ищет инструмент, которого нет, и
+    отвечает прозой о еде. Строка скрининга остаётся всегда: скрининг —
+    coarse guard, не контур питания.
+
+    Строка про ``show_my_records`` остаётся тоже: инструмент читает и
+    память, и дневник; дневник при выключенном контуре ответит заглушкой
+    из ``render_diary``, а память — как прежде.
+
+    Чего этот блок НЕ делает: не велит модели молчать о питании в свободном
+    тексте. Это отдельная инструкция промпта, и она — решение владельца
+    (DRF-1295), а не побочный эффект выключателя.
+    """
+    tool_lines = _NUTRITION_TOOLS_PROMPT_LINES if _nutrition_enabled() else ""
+    return (
+        "Инструменты питания (приоритет обязателен):\n"
+        + _SCREENING_PROMPT_LINE
+        + tool_lines
+        # DRF-1302/1305 — the READ tool. Named apart from the writing tools
+        # above because the failure it prevents is the model ANSWERING
+        # «что я ел сегодня» from its own head: without a tool call there is
+        # no data, and a warm invented answer about the person's food is the
+        # exact thing the boundary below forbids.
+        + "- Вопрос про СВОИ записи или про то, что ты о нём помнишь («что я "
+        "ел сегодня», «мой дневник», «что ты про меня помнишь») — "
+        "show_my_records. Никогда не отвечай на такой вопрос по памяти "
+        "разговора: числа и факты берутся только из ответа инструмента."
+    )
+
+
 def build_concierge_system_prompt(
     *,
     memory_block: str = "",
@@ -1255,24 +1324,10 @@ def build_concierge_system_prompt(
         # load-bearing registry order of apps/skills/apps.py is restated
         # here as model-facing priority: the reasons for that order do not
         # disappear with the transfer, they become prompt requirements.
-        "Инструменты питания (приоритет обязателен):\n"
-        "- Жалоба на боль или симптомы («болит спина», «онемела рука») — "
-        "вызывай health_screening ПЕРВЫМ, раньше любых других инструментов "
-        "и раньше show_masters.\n"
-        "- Напиток («стакан воды», «кофе 200 мл») — только log_water, "
-        "никогда не clarify_food_entry.\n"
-        "- Короткий текст про еду («борщ 300г») — clarify_food_entry.\n"
-        "- Просьба заполнить или продолжить анкету питания — "
-        "start_nutrition_anketa.\n"
-        # DRF-1302/1305 — the READ tool. Named apart from the four writing
-        # tools above because the failure it prevents is the model ANSWERING
-        # «что я ел сегодня» from its own head: without a tool call there is
-        # no data, and a warm invented answer about the person's food is the
-        # exact thing the boundary below forbids.
-        "- Вопрос про СВОИ записи или про то, что ты о нём помнишь («что я "
-        "ел сегодня», «мой дневник», «что ты про меня помнишь») — "
-        "show_my_records. Никогда не отвечай на такой вопрос по памяти "
-        "разговора: числа и факты берутся только из ответа инструмента.",
+        # DRF-1994 — the block is assembled by a function: the three
+        # food/water/anketa lines leave the prompt together with the tools
+        # when the nutrition contour is off, the screening line never does.
+        _nutrition_tools_prompt_block(),
         f"Если вопрос не про запись к мастеру — мягко верни в тему: "
         f"«{voice['off_topic_redirect']}»",
         # Boundaries (W5 task 4) — Constitution Art. X (helpful restraint),

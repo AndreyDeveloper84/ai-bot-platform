@@ -362,6 +362,19 @@ def diary_is_reachable() -> bool:
 # ---------------------------------------------------------------------------
 
 
+def _nutrition_enabled() -> bool:
+    """DRF-1994 — тот же читатель флага, что у меню, анкеты, воды и инструментов."""
+    from apps.skills.menu.marketplace import nutrition_enabled
+
+    return nutrition_enabled()
+
+
+def _nutrition_unavailable_text() -> str:
+    from apps.skills.menu.marketplace import NUTRITION_UNAVAILABLE_TEXT
+
+    return NUTRITION_UNAVAILABLE_TEXT
+
+
 def personal_records_consent_open(bot_user: Any) -> bool:
     """PERSONAL_DATA granted? Fail-closed on any error.
 
@@ -408,6 +421,14 @@ def render_diary(
     (:func:`apps.orchestrator.health_return.resume_after_health_consent`):
     приветственное слово показывается, но суточный слот не тратит.
     """
+    # DRF-1994 (решение U) / DRF-1295 — талия ЧТЕНИЯ дневника: сюда сходятся
+    # «что я ел сегодня» (``_try_handle_diary_request``), инструмент
+    # ``show_my_records`` (``execute_personal_tool``) и возврат после
+    # согласия (``health_return``). Флаг раньше согласия — «функция
+    # выключена» важнее «согласия нет», как у сканера.
+    if not _nutrition_enabled():
+        return _reply(_nutrition_unavailable_text(), [])
+
     if not personal_records_consent_open(bot_user):
         return _reply(CONSENT_CLOSED_TEXT, [])
 
