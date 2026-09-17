@@ -19,7 +19,6 @@ class TestSoftPain:
             "плечи тянет",
             "пульсирует в висках",
             "защемило в шее",
-            "напряжение в спине",
             "Поясница ломит к вечеру",
             "стреляет в ягодицу",
             "Не могу повернуть шею",
@@ -104,6 +103,38 @@ class TestNoLengthCap:
         assert classify(long_text) == PainSignal.RED_FLAG
 
 
+class TestTensionIsANeedNotPain:
+    """DRF-2001 (S-3c, F08): пакет 3 п. 6b — напряжение и зажимы без боли — потребность.
+
+    «Хочу снять напряжение» — кнопка первого контакта (``apps/channels/max/quick_actions.py``);
+    раньше на неё приходил вопрос «где именно болит». Те же фразы в теневой
+    таксономии NBA — цели RELAXATION / BACK_COMFORT (#1774, DRF-1945): это потребность.
+
+    Снятие стемов «напряж» и «зажим» не должно ослабить путь боли и неврологии —
+    для этого положительная стража ниже.
+    """
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "хочу снять напряжение",
+            "хочу снять зажимы",
+            "спина напряжена",
+            "напряжение в спине",
+            "хочу снять напряжение в спине",
+            "спина напряжена после работы",
+        ],
+    )
+    def test_tension_without_pain_is_not_a_pain_signal(self, text: str) -> None:
+        assert classify(text) == PainSignal.NONE
+
+    def test_tension_with_pain_still_asks(self) -> None:
+        assert classify("зажимы в шее, болит") == PainSignal.SOFT
+
+    def test_tension_with_numbness_is_still_a_red_flag(self) -> None:
+        assert classify("напряжение в шее и немеет рука") == PainSignal.RED_FLAG
+
+
 class TestTypeTolerance:
     @pytest.mark.parametrize("bad", [None, 123, b"bolit", ["bolit"]])
     def test_non_str_returns_none(self, bad: object) -> None:
@@ -155,6 +186,16 @@ NOT_PAIN_PHRASES: tuple[str, ...] = (
     "у меня напряжённая неделя",  # «напряж»
     "хочу напряжённый график",
     "у меня была напряжённая неделя, хочу расслабляющий массаж",
+    # ── DRF-2001 (S-3c): СМЕНА ПРАВИЛА решением владельца, не подгонка. Пакет 3
+    #    п. 6b (docs/OWNER_DECISIONS_2026-09-15_PACKAGE3.md:15): «Хочу снять
+    #    напряжение / зажимы» без боли, онемения, слабости, травмы = обычная
+    #    потребность, не S2. Эти две фразы раньше стояли в PAIN_PHRASES (и
+    #    «напряжение в спине» — ещё и в TestSoftPain); пометка «never trim» выше
+    #    защищает от потери настоящей жалобы, а здесь жалобы нет: «зажим в шее»
+    #    без слова боли по п. 6b — тоже потребность. С болью или неврологией —
+    #    по-прежнему сигнал: см. TestTensionIsANeedNotPain. ──
+    "зажим в шее",
+    "напряжение в спине",
     # ── the question about a procedure that has not happened yet ──
     "а это больно?",
     "больно ли делать татуаж?",
@@ -212,8 +253,6 @@ PAIN_PHRASES: tuple[str, ...] = (
     "дёргает зуб",
     "пульсирует висок",
     "защемило нерв",
-    "зажим в шее",
-    "напряжение в спине",
     "спазм мышц",
     "судорога в ноге",
     "тяжесть в ногах",
