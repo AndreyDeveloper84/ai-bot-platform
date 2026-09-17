@@ -301,7 +301,7 @@ def handoff_to_booking(
     """
     # Local imports keep app-load order clean + the tenant-scoped models out of
     # module import time.
-    from apps.catalog.models import CatalogMaster, CatalogService, MasterService
+    from apps.catalog.models import CatalogMaster, CatalogService, MasterService, sellable_edge_q
     from apps.conversations.services import resolve_active_conversation
     from apps.identity.services import resolve_or_create_bot_user
     from apps.skills.base import SkillContext
@@ -377,7 +377,9 @@ def handoff_to_booking(
             edge_exists = service is not None and (
                 MasterService.all_tenants.filter(
                     tenant=tenant, master_id=master.id, service_id=service.id
-                ).exists()
+                )
+                .sellable()
+                .exists()
             )
             if service is not None and edge_exists and service.ayla_service_id is not None:
                 native_service_id = str(service.ayla_service_id)
@@ -406,7 +408,9 @@ def handoff_to_booking(
                     tapped is not None
                     and not MasterService.all_tenants.filter(
                         tenant=tenant, master_id=master.id, service_id=service_id
-                    ).exists()
+                    )
+                    .sellable()
+                    .exists()
                 ):
                     not_offered_name = tapped
             # Funnel visibility (review): without an event, a cohort whose
@@ -449,6 +453,7 @@ def handoff_to_booking(
             filtered = False
             if flag_on:
                 menu_qs = CatalogService.objects.filter(
+                    sellable_edge_q("masters_offering__"),
                     masters_offering__master=master,
                     is_active=True,
                     ayla_service_id__isnull=False,
@@ -832,12 +837,13 @@ def _groundable_service_rows(master, parsed) -> list[tuple[uuid.UUID, str, int]]
 
     Caller must already be inside ``tenant_scope(tenant)``.
     """
-    from apps.catalog.models import CatalogService
+    from apps.catalog.models import CatalogService, sellable_edge_q
 
     if parsed.is_empty:
         return []
     rows = (
         CatalogService.objects.filter(
+            sellable_edge_q("masters_offering__"),
             masters_offering__master=master,
             is_active=True,
             ayla_service_id__isnull=False,
