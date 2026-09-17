@@ -41,8 +41,11 @@ env-backed source for a DB-backed one later changes only :func:`load`.
   ``X-Max-Bot-Api-Secret`` header. Doubles as the registry's primary key.
 * ``API_TOKEN`` — required. The outbound ``Authorization`` credential, and
   the initData HMAC key.
-* ``TENANT_SLUG`` — optional. Empty means tenant-less (the nationwide
-  discovery bot, which selects a tenant only at booking time).
+* ``TENANT_SLUG`` — optional. Empty means the tenant is decided later
+  (DRF-1785, 15.09.2026): the nationwide discovery bot selects it at
+  booking time; the salon bot takes it from the person (working row,
+  invite code, «Я работаю сам») and never from this entry — owner
+  12.09.2026: the salon bot does not belong to a salon (DRF-1705).
 * ``STREAM`` — optional, defaults to ``max``. The ingress stream suffix;
   must match a handler registered via ``apps.workers.registry``.
 * ``MINIAPP_URL`` / ``WEB_APP`` — optional. Per-bot Mini App address, so a
@@ -137,7 +140,13 @@ class BotEntry:
 
     @property
     def is_tenant_less(self) -> bool:
-        """True for the nationwide bot, which resolves a tenant only later."""
+        """True when the entry names no tenant: the tenant is decided later.
+
+        Since DRF-1785 (15.09.2026) that covers two streams — the nationwide
+        bot (a tenant at booking) and the salon bot (a tenant from the
+        person). Until that day the docstring read «True for the nationwide
+        bot», which the salon bot's pilot entry contradicted.
+        """
         return not self.tenant_slug
 
     def __repr__(self) -> str:  # pragma: no cover - trivial, but security-relevant

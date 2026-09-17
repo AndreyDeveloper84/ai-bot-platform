@@ -115,14 +115,22 @@ class TestGate:
 
 @pytest.mark.django_db
 class TestRouting:
-    def test_salon_update_goes_to_its_own_stream_with_its_tenant(self, _enqueue):
-        tenant = Tenant.objects.create(slug="formula-tela", name="Формула тела")
+    def test_salon_update_goes_to_its_own_stream_without_a_tenant_2026_09_15(self, _enqueue):
+        """Эталон ПЕРЕВЁРНУТ 15.09.2026 (DRF-1785, срез 4c DRF-1705; решение владельца R4 а).
+
+        До этого дня тест назывался «…with_its_tenant» и ждал на стриме тенант
+        записи бота. Салонный бот не принадлежит салону: тенант решает человек
+        (``salon_handler`` — рабочая строка, код, «Я работаю сам»). Поэтому стрим
+        ``max_salon`` не несёт тенант даже там, где запись его ещё называет — пока
+        ``MAX_BOT_SALON_TENANT_SLUG`` стоит на пилоте.
+        """
+        Tenant.objects.create(slug="formula-tela", name="Формула тела")
 
         _post(SALON_SECRET, _payload())
 
         kwargs = _enqueue.call_args.kwargs
         assert kwargs["channel"] == "max_salon"
-        assert kwargs["tenant_id"] == str(tenant.id)
+        assert kwargs["tenant_id"] is None
 
     def test_client_update_goes_to_the_tenant_less_global_stream(self, _enqueue):
         _post(CLIENT_SECRET, _payload())
@@ -139,6 +147,45 @@ class TestRouting:
         assert response.status_code == 200
         assert _enqueue.call_args.kwargs["channel"] == "max_salon"
         assert _enqueue.call_args.kwargs["tenant_id"] is None
+
+    def test_the_token_map_does_not_give_the_salon_bot_a_tenant(self, settings, _enqueue):
+        """DRF-1785: запись без тенанта не проваливается в карту токенов — никакого fallback (R4 а)."""
+        Tenant.objects.create(slug="formula-tela", name="Формула тела")
+        settings.MAX_BOT_REGISTRY = (
+            REGISTRY[0],
+            BotEntry(
+                slug="salon",
+                webhook_secret=SALON_SECRET,
+                api_token="tok-salon",  # pragma: allowlist secret
+                stream="max_salon",
+            ),
+        )
+        settings.CHANNEL_TOKEN_TO_TENANT_SLUG = f"{SALON_SECRET}=formula-tela"
+
+        _post(SALON_SECRET, _payload())
+
+        kwargs = _enqueue.call_args.kwargs
+        assert kwargs["channel"] == "max_salon"
+        assert kwargs["tenant_id"] is None
+
+    def test_the_token_map_still_resolves_a_per_tenant_bot(self, settings, _enqueue):
+        """Положительная пара: обычный бот салона (stream ``max``) берёт тенант из карты, как раньше."""
+        tenant = Tenant.objects.create(slug="per-tenant-salon", name="Салон")
+        settings.MAX_BOT_REGISTRY = (
+            BotEntry(
+                slug="legacy",
+                webhook_secret=STRANGER_SECRET,
+                api_token="tok-legacy",  # pragma: allowlist secret
+                stream="max",
+            ),
+        )
+        settings.CHANNEL_TOKEN_TO_TENANT_SLUG = f"{STRANGER_SECRET}=per-tenant-salon"
+
+        _post(STRANGER_SECRET, _payload())
+
+        kwargs = _enqueue.call_args.kwargs
+        assert kwargs["channel"] == "max"
+        assert kwargs["tenant_id"] == str(tenant.id)
 
 
 @pytest.mark.django_db

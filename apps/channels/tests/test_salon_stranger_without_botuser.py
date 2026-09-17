@@ -221,7 +221,7 @@ class TestTheCodeDecidesTheTenant:
         assert "код приглашения" not in _text(sent)
 
 
-def _register_solo_through_the_dialog(salon: Tenant, *, first_update_id: int = 1) -> int:
+def _register_solo_through_the_dialog(salon: Tenant | None, *, first_update_id: int = 1) -> int:
     """DRF-1793 (M1): «Я работаю сам» → имя (prefill из MAX) → город → «Создать мой профиль».
 
     Возвращает следующий свободный ``update_id``. Кабинет появляется только
@@ -302,3 +302,39 @@ class TestStaffAreUnchanged:
 
         assert len(_rows()) == 1
         assert "Формула тела" in _text(sent)
+
+
+class TestTheSoloPathWithoutTheVariable:
+    def test_from_hello_to_the_cabinet_without_the_entry_tenant(self, salon, sent, settings):
+        """DRF-1785 (срез 4c): полный соло-путь без ``MAX_BOT_SALON_TENANT_SLUG``. Зелёный до и после.
+
+        Сообщение → «Я работаю сам» → имя → город → «Создать мой профиль» → поверхность
+        мастеров (подпись салонного бота) находит соло-строку. Ни одной строки в салоне.
+        """
+        from types import SimpleNamespace
+
+        from apps.identity.services.bot_user_resolver import resolve_bot_user
+
+        settings.MAX_BOT_REGISTRY = (
+            BotEntry(
+                slug="salon",
+                webhook_secret="wh-salon",  # pragma: allowlist secret
+                api_token="token-salon",  # pragma: allowlist secret
+                tenant_slug="",
+                stream="max_salon",
+                miniapp_url="https://app.example/staff",
+            ),
+        )
+        settings.MAX_BOT_TENANT_SLUG = ""
+
+        _handle("привет", None, update_id=1)
+        assert salon_handler.SOLO_OFFER.strip() in _text(sent)
+
+        _register_solo_through_the_dialog(None, first_update_id=2)
+
+        rows = _rows()
+        assert len(rows) == 1, [r.tenant.slug for r in rows]
+        assert rows[0].tenant.slug.startswith("solo-")
+        assert rows[0].tenant != salon
+        verified = SimpleNamespace(user_id=CHANNEL_USER_ID, bot_slug="salon")
+        assert resolve_bot_user(verified) == rows[0]
