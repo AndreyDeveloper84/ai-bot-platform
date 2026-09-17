@@ -3684,6 +3684,21 @@ def customer_wellness_today(request: HttpRequest) -> HttpResponse:
     )
 
     bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
+
+    # DRF-2071 — чтение дневника за теми же воротами, что его запись
+    # (``_diary_entry_gate``): ``NUTRITION_ENABLED=false`` закрывал запись
+    # (404 ``nutrition_disabled``), а этот экран продолжал читать дневник и
+    # воду из Ayla как при включённом контуре. Решение владельца 17.09:
+    # при OFF закрыты UI, команда, callback, deep link и API — чтение тоже
+    # API. Согласие проверяется отдельно ниже (``needs_consent=False``
+    # здесь): без согласия ответ остаётся 200 с ``consent_required`` — это
+    # не отказ контура, а объяснение экрану, что нужно. Флаг раньше
+    # согласия — «выключено» важнее «согласия нет», как у сканера и в чате
+    # (``personal_surface.render_diary``).
+    refused = _diary_entry_gate(bot_user, needs_consent=False)
+    if refused is not None:
+        return refused
+
     external_id = external_user_id_for(bot_user)
 
     # DRF-1927 — дневник читается по тому же правилу, что в чате и при

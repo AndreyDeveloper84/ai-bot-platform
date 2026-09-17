@@ -46,6 +46,10 @@ DIARY_PROMPT = text_entry.ASK_WHAT_TEXT
 
 TYPO_ACK = "Поняла 🙂"
 
+#: DRF-2071 — ходы, которые при выключенном контуре остаются ack'ами: они
+#: только стирают открытый вопрос и ничего не пишут и не спрашивают.
+_ACK_WHEN_OFF = frozenset({"cb:food:typo", text_entry.CB_REJECT})
+
 
 @register
 class FoodClarifySkill:
@@ -77,6 +81,24 @@ class FoodClarifySkill:
 
     def handle(self, context: SkillContext) -> SkillResult:
         text = context.message_text.strip()
+
+        # DRF-2071 — единый выключатель контура питания (DRF-1994) в талии
+        # навыка, не по веткам. Ворота ``text_entry._gate`` стояли только на
+        # оценке и записи; перепись по классу (``test_nutrition_switch_census_2071``)
+        # нашла ветки, которые при OFF продолжали разговор о еде: карточка
+        # «Это про еду?» на свободный текст, «📔 В дневник» без исходной
+        # фразы («напиши, что было»), «записать»/«граммы» без оценки («эта
+        # оценка уже не действует — напиши ещё раз»). Два хода остаются
+        # без ворот намеренно: «Опечатка» и «не записываю» — молчаливый
+        # ack, который стирает состояние и ничего не спрашивает. Литерал —
+        # свой (``NUTRITION_OFF_TEXT``), как у остальных ворот этого пакета
+        # (PR #1800, «Пределы» п.3: сведение литералов — решение владельца).
+        if text not in _ACK_WHEN_OFF and not text_entry._nutrition_on():
+            text_entry.forget(context)
+            return SkillResult(
+                reply_text=text_entry.NUTRITION_OFF_TEXT,
+                meta={"reply_kind": "food_text_nutrition_off"},
+            )
 
         if text in text_entry.TEXT_CALLBACKS:
             return text_entry.on_callback(context, text)

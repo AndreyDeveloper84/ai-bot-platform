@@ -51,6 +51,19 @@ def _bot_token(settings):
     settings.MAX_BOT_TOKEN = BOT_TOKEN
 
 
+@pytest.fixture(autouse=True)
+def _nutrition_contour_on(settings):
+    """DRF-2071 — этот модуль проверяет контур питания ВКЛЮЧЁННЫМ.
+
+    До DRF-2071 ``wellness/today`` флаг ``NUTRITION_ENABLED`` не читал, и
+    модуль работал при любом его значении. Теперь умолчание ``False``
+    (fail-closed) даёт 404 ``nutrition_disabled`` — и то, что модуль всегда
+    предполагал, названо явно. Выключенное поведение живёт в
+    ``test_wellness_today_nutrition_off_2071``.
+    """
+    settings.NUTRITION_ENABLED = True
+
+
 @pytest.fixture
 def tenant(db, settings) -> Tenant:
     t = Tenant.objects.create(slug="wellness-test", name="Wellness Test", timezone="Europe/Moscow")
