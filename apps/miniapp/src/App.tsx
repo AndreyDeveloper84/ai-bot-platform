@@ -121,6 +121,7 @@ import { MasterReviewsScreen } from "./screens/MasterReviewsScreen";
 import { MasterAylaScreen } from "./screens/MasterAylaScreen";
 import { MasterScheduleScreen } from "./screens/MasterScheduleScreen";
 import { MasterPublicationScreen } from "./screens/MasterPublicationScreen";
+import { MasterDirectionsScreen } from "./screens/MasterDirectionsScreen";
 import { MasterServiceSelectScreen } from "./screens/MasterServiceSelectScreen";
 import { MasterServicesScreen } from "./screens/MasterServicesScreen";
 import { MasterSettingsScreen } from "./screens/MasterSettingsScreen";
@@ -1265,6 +1266,8 @@ function UnifiedSoloSurface({ me }: { me: MeResponse }) {
         <Route path="/solo/bookings" element={<MasterScheduleScreen />} />
         <Route path="/solo/customers" element={<MasterCustomersScreen />} />
         <Route path="/solo/services" element={<MasterServicesScreen />} />
+        {/* DRF-1808 (M16) — экран 02: направления; выбор уходит на экран 03 навигацией, не хранится. */}
+        <Route path="/solo/directions" element={<MasterDirectionsScreen />} />
         {/* DRF-1809 (M17) — экран 03: выбор услуг из каталога по направлению. */}
         <Route path="/solo/services/select" element={<MasterServiceSelectScreen />} />
         {/* /solo/more — deep-link only; redirects synchronously to

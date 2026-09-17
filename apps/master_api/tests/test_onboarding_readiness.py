@@ -100,13 +100,19 @@ class TestItemsAreComputedFromRows:
         # Ни процентов, ни «N из M» — числа только из строк.
         assert "percent" not in body and "step" not in body
 
-    def test_services_links_to_selection_until_something_is_selected(
+    def test_services_links_to_directions_until_something_is_selected(
         self, client: Client, tenant: Tenant, accepted_master: CatalogMaster
     ) -> None:
-        """DRF-1809: 0 выбранных → экран 03 (выбор), ≥1 → экран 04 (цены)."""
+        """DRF-1808: 0 выбранных → экран 02 (направления), ≥1 → экран 04 (цены).
+
+        Экран 01 ведёт по этому ``deep_link`` и своей константы не держит:
+        одна константа — один узел. Литералом, не константой модуля — сверка
+        с константой сторожила бы модуль сам с собой.
+        """
         fresh = _items(_get(client).json())["services"]
         assert fresh["detail"]["selected"] == 0
-        assert fresh["deep_link"] == "/solo/services/select"
+        assert fresh["deep_link"] == "/solo/directions"
+        assert fresh["deep_link"] != "/solo/services/select"  # экран 03 — уже не первый шаг
 
         _priced_service(tenant, accepted_master, price=None, duration=60)
         picked = _items(_get(client).json())["services"]

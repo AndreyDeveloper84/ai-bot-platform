@@ -18,10 +18,16 @@
  * Цен и длительности на этом шаге нет (они на экране 04); фото у шаблонов
  * канона нет — не рисуется. Уже выбранную услугу здесь не снимают: «Убрать»
  * на экране 04, где видны будущие записи.
+ *
+ * DRF-1808 (экран 02): если пришли с `/solo/directions`, в `location.state`
+ * лежат выбранные направления — список и порядок «Следующее направление»
+ * сужаются до них. Без state (вход с экрана 04 или из готовности) — все
+ * корни, как раньше. Направления нигде не хранятся: state живёт до ухода с
+ * экрана.
  */
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { useLocation, useNavigate } from "react-router-dom";
 
 import {
   NOT_LINKED_MESSAGE,
@@ -235,8 +241,18 @@ function DirectionPicker({
   );
 }
 
+/** Выбранные на экране 02 направления из state навигации — либо `null`. */
+export function directionIdsFromState(state: unknown): string[] | null {
+  if (!state || typeof state !== "object") return null;
+  const ids = (state as { directionIds?: unknown }).directionIds;
+  if (!Array.isArray(ids) || ids.length === 0) return null;
+  return ids.filter((x): x is string => typeof x === "string");
+}
+
 export function MasterServiceSelectScreen() {
   const navigate = useNavigate();
+  const location = useLocation();
+  const chosenIds = useMemo(() => directionIdsFromState(location.state), [location.state]);
   const [load, setLoad] = useState<Load>({ kind: "loading" });
   const [reloadKey, setReloadKey] = useState(0);
   const [activeId, setActiveId] = useState<string | null>(null);
@@ -311,7 +327,13 @@ export function MasterServiceSelectScreen() {
     );
   }
 
-  const { directions, selection } = load;
+  const { directions: allDirections, selection } = load;
+  // Сужение по экрану 02 — только если КАЖДЫЙ переданный id есть в ответе;
+  // иначе state устарел (каталог изменился) и показываются все корни.
+  const directions =
+    chosenIds && chosenIds.every((id) => allDirections.some((d) => d.id === id))
+      ? allDirections.filter((d) => chosenIds.includes(d.id))
+      : allDirections;
   const active = directions.find((d) => d.id === activeId) ?? null;
   const done = directions.find((d) => d.id === doneId) ?? null;
   const doneIndex = done ? directions.indexOf(done) : -1;
