@@ -54,6 +54,7 @@ import logging
 import secrets
 from dataclasses import dataclass
 from datetime import timedelta
+from typing import Any
 
 from django.db import IntegrityError, transaction
 from django.utils import timezone
@@ -597,34 +598,71 @@ def _grant_staff_role(invite: StaffInvite, bot_user: BotUser) -> RedeemResult:
 
 
 def _link_master(invite: StaffInvite, bot_user: BotUser) -> RedeemResult:
+    """Attach a person to the master row an invite code points at.
+
+    The code-specific half is only *which* row: a CHECK constraint
+    guarantees master invites carry a catalog row, but the column is
+    nullable for the other roles, so it is narrowed explicitly rather than
+    asserted away. Everything else — the lock, the two refusals, the
+    activation — is :func:`link_master_to_person`, shared with the
+    onboarding facade so the two doors into one card cannot drift.
+    """
+
+    return link_master_to_person(
+        master_id=invite.catalog_master_id,
+        tenant_id=invite.tenant_id,
+        bot_user=bot_user,
+        invite_id=invite.id,
+    )
+
+
+def link_master_to_person(
+    *,
+    master_id: Any,
+    tenant_id: Any,
+    bot_user: BotUser,
+    invite_id: Any = None,
+) -> RedeemResult:
     """Attach a person to the master row that already exists.
+
+    The one authority for «this person is this master» (ADR-0008 decision
+    2: the master role lives on ``CatalogMaster.linked_bot_user``). Two
+    callers: :func:`_link_master` for a redeemed code, and
+    :func:`apps.identity.services.specialist_onboarding.onboard_specialist_to_tenant`
+    for an operator or a salon admin acting without a code. ``invite_id`` is
+    only for the log lines — ``None`` means «no code was involved».
+
+    **Must run inside ``transaction.atomic``**: the row is taken under
+    ``select_for_update`` and the savepoint below needs an enclosing
+    transaction to roll back into.
 
     Sets ``is_active=True`` alongside the link on purpose. The pre-existing
     admin invite path leaves invited masters at ``is_active=False`` and
     nothing ever flips it, so ``resolve_role`` reports them as masters while
     every master endpoint answers 403 ``master_inactive`` (DRF-1080). A
-    person who just proved they hold a valid code is active by definition.
+    person who just proved they hold a valid code — or whom an operator
+    linked by hand — is active by definition.
+
+    Raises:
+      InviteMasterMissing, MasterAlreadyLinked, PersonAlreadyMaster — same
+      slugs whichever door the caller came through.
     """
 
-    # A CHECK constraint guarantees master invites carry a catalog row, but
-    # the column is nullable for the other roles — narrow it explicitly
-    # rather than asserting it away.
-    master_id = invite.catalog_master_id
     master = (
         CatalogMaster.all_tenants.select_for_update()
-        .filter(pk=master_id, tenant_id=invite.tenant_id)
+        .filter(pk=master_id, tenant_id=tenant_id)
         .first()
         if master_id is not None
         else None
     )
     if master is None or master.archived_at is not None:
-        logger.warning("identity.staff_invite.master_missing invite=%s", invite.id)
+        logger.warning("identity.staff_invite.master_missing invite=%s", invite_id)
         raise InviteMasterMissing("catalog master is gone or archived")
 
     if master.linked_bot_user_id == bot_user.id:
         return RedeemResult(
             role=StaffInvite.Role.MASTER,
-            tenant_id=str(invite.tenant_id),
+            tenant_id=str(tenant_id),
             already_had_role=True,
             catalog_master_id=str(master.id),
         )
@@ -650,7 +688,7 @@ def _link_master(invite: StaffInvite, bot_user: BotUser) -> RedeemResult:
         logger.warning(
             "identity.staff_invite.wrong_recipient invite=%s master=%s "
             "linked_to=%s presented_by=%s",
-            invite.id,
+            invite_id,
             master.id,
             master.linked_bot_user_id,
             bot_user.id,
@@ -703,7 +741,7 @@ def _link_master(invite: StaffInvite, bot_user: BotUser) -> RedeemResult:
         logger.warning(
             "identity.staff_invite.person_already_master invite=%s master=%s "
             "already_holds=%s bot_user=%s",
-            invite.id,
+            invite_id,
             master.id,
             held.id,
             bot_user.id,
@@ -712,7 +750,7 @@ def _link_master(invite: StaffInvite, bot_user: BotUser) -> RedeemResult:
 
     return RedeemResult(
         role=StaffInvite.Role.MASTER,
-        tenant_id=str(invite.tenant_id),
+        tenant_id=str(tenant_id),
         already_had_role=False,
         catalog_master_id=str(master.id),
     )
