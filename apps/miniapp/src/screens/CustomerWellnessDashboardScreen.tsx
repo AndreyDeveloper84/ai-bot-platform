@@ -83,7 +83,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { ApiError, type Service } from "../lib/api";
 import { authErrorCopy, loadErrorReason, type LoadErrorReason } from "../lib/auth-error-copy";
-import { formatDuration, formatMoney } from "../lib/format";
+import { formatDuration, priceFromLabel } from "../lib/format";
 import { visitAddressText } from "../lib/visit-address";
 import {
   enqueueWaterLog,
@@ -1267,8 +1267,13 @@ function RecoCard({
         <div id={metaId} className="wellness-dash__reco-meta">
           {/* Factual mirror fields only — never a synthesised WHY. */}
           {formatDuration(service.duration_min)}
-          {service.duration_min && service.price_from ? " · " : ""}
-          {service.price_from ? `от ${formatMoney(service.price_from)}` : ""}
+          {/* DRF-1989 — цена ниже 1 ₽ не рисуется: «от 0 ₽» читалось как «бесплатно». */}
+          {service.duration_min && service.price_from && priceFromLabel(service.price_from)
+            ? " · "
+            : ""}
+          {service.price_from && priceFromLabel(service.price_from)
+            ? `от ${priceFromLabel(service.price_from)}`
+            : ""}
         </div>
       </button>
       {/* WHY — verbatim from the source. Kept OUTSIDE the button (a

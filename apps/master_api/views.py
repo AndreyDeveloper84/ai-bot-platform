@@ -220,11 +220,15 @@ def _services_for_master(master: CatalogMaster) -> list[dict[str, Any]]:
     shouldn't show services they can't be booked for.
     """
 
-    service_ids = MasterService.all_tenants.filter(
-        master_id=master.id, tenant=master.tenant
-    ).values_list("service_id", flat=True)
+    # DRF-1989 — кабинет мастера показывает непродаваемое с причиной.
+    sale_state = {
+        service_id: (sellable, unsellable_reason or None)
+        for service_id, sellable, unsellable_reason in MasterService.all_tenants.filter(
+            master_id=master.id, tenant=master.tenant
+        ).values_list("service_id", "sellable", "unsellable_reason")
+    }
     services = CatalogService.all_tenants.filter(
-        id__in=list(service_ids),
+        id__in=list(sale_state),
         tenant=master.tenant,
         is_active=True,
     ).order_by("name")
@@ -233,6 +237,8 @@ def _services_for_master(master: CatalogMaster) -> list[dict[str, Any]]:
             "id": str(s.id),
             "name": s.name,
             "duration_min": s.duration_min,
+            "sellable": sale_state[s.id][0],
+            "unsellable_reason": sale_state[s.id][1],
         }
         for s in services
     ]

@@ -56,6 +56,12 @@ from django.conf import settings
 from django.utils.dateparse import parse_datetime
 
 from apps.catalog.models import CatalogMaster, CatalogService, MasterService, sellable_edge_q
+from apps.integrations.ayla.offer_refusal import (
+    OFFER_NOT_SELLABLE_SLUG,
+    client_text_for,
+    reason_from_edge,
+    reason_from_refusal,
+)
 from apps.identity.models import BotUser
 from apps.tenancy.models import Tenant
 from apps.miniapp_api.auth import VerifiedInitData
@@ -77,6 +83,18 @@ logger = logging.getLogger(__name__)
 
 def _error(slug: str, detail: str, status: int) -> JsonResponse:
     return JsonResponse({"error": slug, "detail": detail}, status=status)
+
+
+def _offer_not_sellable(reason: str) -> JsonResponse:
+    """DRF-1989: каталог не продаёт предложение — 409 с причиной и словами для человека.
+
+    409, а не 400: запрос верен, продавать нечего. Экран рисует ``detail``
+    дословно — слова живут в одном месте (``offer_refusal``).
+    """
+    return JsonResponse(
+        {"error": OFFER_NOT_SELLABLE_SLUG, "detail": client_text_for(reason), "reason": reason},
+        status=409,
+    )
 
 
 def _lazy_register_bot_user(tenant: Tenant, verified: VerifiedInitData) -> BotUser:
@@ -977,6 +995,8 @@ def _parse_iso_datetime(s: str | None) -> datetime | None:
 # и, возможно, неверным статусом. Полноту таблицы по слагам гейта продажи
 # держит ``test_every_sale_block_slug_is_mapped_on_create`` (DRF-1548).
 _ERROR_SLUG_TO_STATUS = {
+    # DRF-1989 — запрос верен, продавать нечего; как у ``service_unbookable``.
+    OFFER_NOT_SELLABLE_SLUG: 409,
     "service_not_found": 404,
     "master_not_bookable": 404,
     "service_not_offered": 404,
@@ -1225,6 +1245,19 @@ def _create_booking_via_ayla(
                 text_for(exc.code, handoff=exc.handoff),
                 422,
             )
+        offer_reason = reason_from_refusal(exc.code, exc.details)
+        if offer_reason is not None:
+            # DRF-1989: 422 SERVICE_NOT_ACTIVE с причиной — осознанный отказ
+            # каталога, а не «booking rejected». Лог держит причину.
+            logger.info(
+                "miniapp_api.create_booking.offer_not_sellable "
+                "tenant=%s service=%s master=%s reason=%s",
+                tenant.id,
+                service_id,
+                master_id,
+                offer_reason,
+            )
+            return _offer_not_sellable(offer_reason)
         if (exc.code or "").lower() == "subscription_past_due":
             # C1: neutral surface — no debt semantics to the client
             # (frozen W4 slug).
@@ -1364,6 +1397,11 @@ def booking_quote(request: HttpRequest) -> HttpResponse:
             rows = []
         if rows:
             edge = rows[0]
+            offer_reason = reason_from_edge(edge)
+            if offer_reason is not None:
+                # DRF-1989: цена непродаваемого ребра — не цена; экран
+                # подтверждения рисовал «Цена 0 ₽».
+                return _offer_not_sellable(offer_reason)
             edge_price = edge.get("price")
             edge_duration = edge.get("duration_minutes")
             try:

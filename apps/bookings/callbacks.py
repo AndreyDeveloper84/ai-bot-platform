@@ -68,6 +68,7 @@ from apps.bookings.pending_actions import (
     latest_relevant_pending,
 )
 from apps.events.services import emit
+from apps.integrations.ayla.offer_refusal import OFFER_NOT_SELLABLE_SLUG
 from apps.skills.base import SkillContext, SkillResult
 from apps.skills.booking.tools import (
     execute_cancel,
@@ -807,6 +808,11 @@ class BookingGateCallbackSkill:
             tenant=row.tenant,
             bot_user=row.bot_user,
         )
+        if result.error == OFFER_NOT_SELLABLE_SLUG:
+            # DRF-1989: каталог не продаёт предложение и назвал причину — у
+            # отказа свои слова, передавать менеджеру нечего. Остальные ошибки
+            # (в том числе health_check_handoff) — как были, см. DRF-2012.
+            return SkillResult(reply_text=result.text)
         if result.error in {"yclients_unavailable", "yclients_api_error"}:
             return SkillResult(
                 reply_text="Не удалось создать запись — переключаю на менеджера.",

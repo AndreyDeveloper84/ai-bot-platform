@@ -63,12 +63,13 @@ import { useHaptics } from "../hooks/useHaptics";
 import { useOnline } from "../hooks/useOnline";
 import {
   createCustomerBooking,
+  OFFER_NOT_SELLABLE_SLUG,
   getBookingQuote,
   quoteChangeOf,
   type BookingQuote,
   type QuoteChange,
 } from "../lib/customer-booking";
-import { formatDuration, formatMoney, formatVisitFull } from "../lib/format";
+import { formatDuration, formatMoney, formatVisitFull, priceFromLabel } from "../lib/format";
 import { openPaymentConfirmation } from "../lib/max-sdk";
 import { createPayment } from "../lib/payments";
 import { restorePendingIntent } from "../lib/pending-booking-intent";
@@ -274,13 +275,24 @@ export function CustomerBookingConfirmScreen() {
       .then((q) => {
         if (!cancelled) setQuote(q);
       })
-      .catch(() => {
-        if (!cancelled) setQuote(null);
+      .catch((e: unknown) => {
+        if (cancelled) return;
+        setQuote(null);
+        // DRF-1989 — не сбой котировки, а ответ: предложение не продаётся.
+        // Та же спокойная плашка, что у отказа создания, — до нажатия.
+        if (e instanceof ApiError && e.slug === OFFER_NOT_SELLABLE_SLUG) {
+          setHandoff({ text: e.detail });
+        }
       });
     return () => {
       cancelled = true;
     };
   }, [quoteMasterId, quoteServiceId]);
+
+  // DRF-1708 + DRF-1989 — показанная цена и есть отправленная; цена ниже
+  // 1 ₽ не цена (каталог такое не продаёт): не рисуется и не уезжает.
+  const shownPrice =
+    quote?.price != null && priceFromLabel(quote.price) !== "" ? quote.price : null;
 
   // Missing prerequisites — bounce back to catalog (founder cut #1
   // graceful degradation).
@@ -303,7 +315,7 @@ export function CustomerBookingConfirmScreen() {
         payment_required: paymentChoice === "online",
         // DRF-1708 / D4 — ровно то, что показано в карточке выше; сервер
         // сверит с применяемым внутри транзакции создания.
-        ...(quote?.price != null ? { quoted_price: quote.price } : {}),
+        ...(shownPrice != null ? { quoted_price: shownPrice } : {}),
         ...(quote?.duration_minutes != null
           ? { quoted_duration_minutes: quote.duration_minutes }
           : {}),
@@ -341,7 +353,12 @@ export function CustomerBookingConfirmScreen() {
         replace: true,
       });
     } catch (e: unknown) {
-      if (e instanceof ApiError && isHealthCheckSlug(e.slug)) {
+      // DRF-1989 — «не продаётся» — такой же исход, не ошибка: слова
+      // сервера спокойной плашкой, без error-хаптики и без повтора.
+      if (
+        e instanceof ApiError &&
+        (isHealthCheckSlug(e.slug) || e.slug === OFFER_NOT_SELLABLE_SLUG)
+      ) {
         // DRF-1614 — NOT an error state, and deliberately not `setErr`.
         // Ayla refused the booking because the service needs a screening
         // question first; that is a decision somebody took about this
@@ -452,10 +469,10 @@ export function CustomerBookingConfirmScreen() {
               <dd data-testid="confirm-duration">{formatDuration(quote.duration_minutes)}</dd>
             </>
           )}
-          {quote?.price != null && (
+          {shownPrice != null && (
             <>
               <dt>Цена</dt>
-              <dd data-testid="confirm-price">{formatMoney(quote.price)}</dd>
+              <dd data-testid="confirm-price">{formatMoney(shownPrice)}</dd>
             </>
           )}
         </dl>

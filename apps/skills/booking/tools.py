@@ -99,6 +99,7 @@ from apps.booking.services.attribution import (
 )
 from apps.eventbus import services as eventbus_services
 from apps.integrations.ayla.health_check import text_for as health_check_text_for
+from apps.integrations.ayla.offer_refusal import OFFER_NOT_SELLABLE_SLUG, client_text_for
 from apps.bookings.keyboards import confirm_2_button
 from apps.bookings.pending_actions import create_pending
 from apps.bookings.reminders_factory import create_reminders_for_booking
@@ -112,6 +113,7 @@ from apps.integrations.yclients import (
 )
 from apps.skills.booking.provider import (
     YClientsHealthCheckHandoffError,
+    YClientsOfferNotSellableError,
     YClientsQuoteChangedError,
     YClientsScheduleUnavailableError,
     YClientsSpecialistUnavailableError,
@@ -958,9 +960,16 @@ def confirm_booking(
     }
     # DRF-1708 / D4: то, что превью ПОКАЖЕТ, ложится в снимок pending и
     # уедет в создание как quoted_*; неизвестное — не кладётся.
-    quoted_price, quoted_duration = _quote_for_preview(
-        client, master_id=master_id, service_id=service_id
-    )
+    try:
+        quoted_price, quoted_duration = _quote_for_preview(
+            client, master_id=master_id, service_id=service_id
+        )
+    except YClientsOfferNotSellableError as exc:
+        # DRF-1989: каталог не продаёт это предложение. Ни превью с «Цена: 0 ₽»,
+        # ни pending на запись, которую каталог откажет.
+        return _offer_not_sellable_result(
+            tenant_id=tenant_id, tool="confirm_booking", reason=exc.reason
+        )
     if quoted_price is not None:
         payload["quoted_price"] = str(quoted_price)
     if quoted_duration is not None:
@@ -1105,6 +1114,9 @@ def _quote_for_preview(
         return None, None
     try:
         return client.get_specialist_service_quote(staff_id=master_id, service_id=service_id)
+    except YClientsOfferNotSellableError:
+        # DRF-1989: не сбой котировки, а ответ — его разбирает вызывающий.
+        raise
     except (YClientsUnavailableError, YClientsAPIError) as exc:
         logger.warning(
             "booking.confirm.quote_failed master_id=%s service_id=%s err=%s",
@@ -1113,6 +1125,22 @@ def _quote_for_preview(
             exc,
         )
         return None, None
+
+
+def _offer_not_sellable_result(
+    *, tenant_id: str, tool: str, reason: str, confirm: bool = True
+) -> BookingToolResult:
+    """DRF-1989: именованный отказ непродаваемого предложения — слова причины, без передачи."""
+    _audit_tool(
+        tenant_id=tenant_id, tool=tool, outcome=OFFER_NOT_SELLABLE_SLUG, extra={"reason": reason}
+    )
+    return BookingToolResult(
+        text=client_text_for(reason),
+        error=OFFER_NOT_SELLABLE_SLUG,
+        confirmation=(
+            ConfirmationResult(ok=False, error=OFFER_NOT_SELLABLE_SLUG) if confirm else None
+        ),
+    )
 
 
 def _resolve_payment_required(tenant: Any, payload: dict[str, Any]) -> bool:
@@ -1327,6 +1355,13 @@ def execute_confirm(
         return BookingToolResult(
             confirmation=ConfirmationResult(ok=False, error="yclients_unavailable"),
             error="yclients_unavailable",
+        )
+    except YClientsOfferNotSellableError as exc:
+        # DRF-1989: 422 SERVICE_NOT_ACTIVE с причиной — каталог не продаёт
+        # предложение. Не поломка и не передача менеджеру: у отказа свои слова.
+        logger.info("booking.confirm.exec.offer_not_sellable reason=%s", exc.reason)
+        return _offer_not_sellable_result(
+            tenant_id=tenant_id, tool="execute_confirm", reason=exc.reason
         )
     except YClientsSpecialistUnavailableError as exc:
         # C1 (PILOT_CONTRACTS §2): Ayla rejected the NEW booking with 409
@@ -3155,9 +3190,20 @@ def calc_price(
     # at. ``service_id`` is the Ayla UUID here (``_coerce_id`` under
     # flag ON), the same key the edge lookup is scoped by.
     if master_id is not None and client is not None and _booking_via_ayla():
-        edge_price = _edge_price_for_quote(client, master_id=master_id, service_id=service_id)
+        try:
+            edge_price = _edge_price_for_quote(client, master_id=master_id, service_id=service_id)
+        except YClientsOfferNotSellableError as exc:
+            # DRF-1989: у этого мастера предложение не продаётся — цены нет.
+            return _offer_not_sellable_result(
+                tenant_id=tenant_id, tool="calc_price", reason=exc.reason, confirm=False
+            )
         if edge_price is not None:
             base_price = edge_price
+
+    # DRF-1989: цена ниже 1 ₽ — не цена, а незаполненное поле (каталог такое не
+    # продаёт): ответ «цену озвучит администратор», а не «0 ₽».
+    if base_price is not None and base_price < 1:
+        base_price = None
 
     # ── No promo case ──────────────────────────────────────────────
     if not promo_code:
@@ -3256,6 +3302,9 @@ def _edge_price_for_quote(
     """
     try:
         return client.get_specialist_service_price(staff_id=master_id, service_id=service_id)
+    except YClientsOfferNotSellableError:
+        # DRF-1989: не сбой чтения цены, а ответ — его разбирает вызывающий.
+        raise
     except (YClientsUnavailableError, YClientsAPIError) as exc:
         logger.warning(
             "booking.calc_price.edge_price_failed master_id=%s service_id=%s err=%s",

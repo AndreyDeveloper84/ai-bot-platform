@@ -525,6 +525,12 @@ export const getBookingQuote = async (
   return res.quote;
 };
 
+/**
+ * Наружное имя отказа «каталог не продаёт это предложение» (DRF-1989).
+ * Приходит и на котировку, и на создание записи; `detail` — слова для человека.
+ */
+export const OFFER_NOT_SELLABLE_SLUG = "offer_not_sellable";
+
 /** Наружное имя отказа «то, что ты видел, уже не действует» (DRF-1708). */
 export const QUOTE_CHANGED_SLUG = "quote_changed";
 
