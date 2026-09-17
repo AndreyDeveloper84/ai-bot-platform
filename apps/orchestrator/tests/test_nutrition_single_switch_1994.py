@@ -38,6 +38,7 @@ from apps.orchestrator import nutrition_global, personal_surface
 from apps.orchestrator.concierge import (
     _NUTRITION_TOOLS_PROMPT_LINES,
     _SCREENING_PROMPT_LINE,
+    _nutrition_off_prompt_line,
     _nutrition_tools_prompt_block,
     _tools_offered,
     build_concierge_system_prompt,
@@ -322,6 +323,52 @@ class TestPromptDoesNotAdvertiseWithheldTools:
         prompt = build_concierge_system_prompt(today=date(2026, 9, 17))
         assert "health_screening ПЕРВЫМ" in prompt
         assert "start_nutrition_anketa" not in prompt
+
+
+class TestPromptTellsTheModelToAnswerWithTheStubWhenOff:
+    """DRF-1295 — «содержательно о питании не говорит» для СВОБОДНОГО текста.
+
+    Предел, названный, а не спрятанный: здесь доказывается, что инструкция
+    В ПРОМПТЕ (при выключенном — есть, при включённом — нет), и что заглушка
+    в ней — та же константа. Что модель ей ПОДЧИНИЛАСЬ — не доказывается:
+    это её поведение, не наше, и мок-модель тут ничего не докажет.
+    """
+
+    def test_off_the_block_carries_the_instruction_with_the_literal_stub(self, nutrition_off):
+        line = _nutrition_off_prompt_line()
+        block = _nutrition_tools_prompt_block()
+
+        assert STUB in line
+        assert line in block
+        assert _NUTRITION_TOOLS_PROMPT_LINES not in block
+
+    def test_off_the_whole_system_prompt_carries_it(self, nutrition_off):
+        prompt = build_concierge_system_prompt(today=date(2026, 9, 17))
+        assert _nutrition_off_prompt_line() in prompt
+        assert STUB in prompt
+
+    def test_positive_control_on_the_instruction_is_absent_and_tools_are_advertised(
+        self, nutrition_on
+    ):
+        block = _nutrition_tools_prompt_block()
+        prompt = build_concierge_system_prompt(today=date(2026, 9, 17))
+
+        # Присутствие — впереди отсутствия, и на ТЕХ ЖЕ данных: сторож
+        # negative_assert_guard иначе прав, что «нет в prompt» зеленело бы и
+        # на пустом промпте.
+        assert _NUTRITION_TOOLS_PROMPT_LINES in block
+        assert _nutrition_off_prompt_line() not in block
+        assert _NUTRITION_TOOLS_PROMPT_LINES in prompt
+        assert _nutrition_off_prompt_line() not in prompt
+
+    def test_the_instruction_avoids_the_outbound_medical_patterns(self):
+        """Строка живёт в промпте, а бюджетный сторож читает и его
+        (``concierge.py``, комментарий у ``_NUTRITION_WELLNESS_INTERPRETATION``)."""
+        from apps.orchestrator.safety.outbound import evaluate_outbound
+
+        verdict = evaluate_outbound(_nutrition_off_prompt_line())
+        assert verdict.allowed is True
+        assert "medical" not in verdict.categories
 
 
 # ---------------------------------------------------------------------------
