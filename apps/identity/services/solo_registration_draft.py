@@ -131,8 +131,8 @@ def get_draft(*, channel: str, channel_user_id: str) -> SoloRegistrationDraft | 
         return None
     if draft.expires_at <= timezone.now():
         logger.info(
-            "identity.solo_draft.expired channel_user_id=%s step=%s", channel_user_id, draft.step
-        )
+            "identity.solo_draft.expired draft=%s step=%s", draft.pk, draft.step
+        )  # DRF-2009
         draft.delete()
         return None
     return draft

@@ -361,7 +361,7 @@ def create_solo_provider(
         raise ValueError(
             "create_solo_provider requires non-empty channel and "
             f"channel_user_id; got channel={channel!r}, "
-            f"channel_user_id={channel_user_id!r}. Empty inputs would "
+            "channel_user_id empty. Empty inputs would "
             "produce a deterministic slug shared across callers — "
             "identity-hijack risk via idempotency path."
         )
@@ -414,7 +414,7 @@ def create_solo_provider(
         if existing_bot_user is None:
             raise SoloOnboardingPartialStateError(
                 f"Solo tenant {target_slug!r} exists but no BotUser found "
-                f"for (channel={channel!r}, channel_user_id={channel_user_id!r})."
+                f"for channel={channel!r}."  # DRF-2009: без id человека в канале
             )
 
         existing_owner = TenantStaff.all_tenants.filter(

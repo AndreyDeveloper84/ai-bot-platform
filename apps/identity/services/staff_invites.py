@@ -326,9 +326,10 @@ def _check_rate_limit_for(channel: str, channel_user_id: str) -> None:
         return
 
     if attempts > MAX_ATTEMPTS:
+        # DRF-2009: тормоз по личности, строки нет — id человека в лог не пишется.
         logger.warning(
-            "identity.staff_invite.rate_limited channel_user_id=%s attempts=%s",
-            channel_user_id,
+            "identity.staff_invite.rate_limited channel=%s attempts=%s",
+            channel,
             attempts,
         )
         raise InviteRateLimited("too many attempts")
@@ -387,7 +388,7 @@ def redeem_staff_invite_by_identity(
         # FOR UPDATE.
         invite = StaffInvite.all_tenants.select_for_update().filter(code_hash=code_hash).first()
         if invite is None:
-            logger.info("identity.staff_invite.miss channel_user_id=%s", channel_user_id)
+            logger.info("identity.staff_invite.miss channel=%s", channel)  # DRF-2009: без id
             raise InviteNotFound("no such invite")
         if invite.used_at is not None:
             logger.info("identity.staff_invite.already_used invite=%s", invite.id)
@@ -507,7 +508,7 @@ def redeem_staff_invite(*, code: str, bot_user: BotUser, tenant) -> RedeemResult
         # person cannot distinguish them and neither should a guesser; the
         # log keeps the truth.
         if invite is None:
-            logger.info("identity.staff_invite.miss channel_user_id=%s", bot_user.channel_user_id)
+            logger.info("identity.staff_invite.miss bot_user=%s", bot_user.pk)  # DRF-2009
             raise InviteNotFound("no such invite")
         if invite.used_at is not None:
             logger.info("identity.staff_invite.already_used invite=%s", invite.id)

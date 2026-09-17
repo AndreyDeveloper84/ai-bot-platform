@@ -166,18 +166,19 @@ def resolve_working_bot_user(
         for row in working:
             if row.tenant.slug == chosen_slug:
                 return row
+        # DRF-2009: внутренние ключи вместо MAX id и slug'ов (slug соло-кабинета выведен
+        # из личности человека).
         logger.info(
-            "%s.auth.salon_choice_not_working channel_user_id=%s chosen=%s tenants=%s",
+            "%s.auth.salon_choice_not_working bot_users=%s tenants=%s",
             surface,
-            channel_user_id,
-            chosen_slug,
-            [row.tenant.slug for row in working],
+            [str(row.pk) for row in working],
+            [str(row.tenant_id) for row in working],
         )
     logger.info(
-        "%s.auth.salon_choice_required channel_user_id=%s tenants=%s",
+        "%s.auth.salon_choice_required bot_users=%s tenants=%s",
         surface,
-        channel_user_id,
-        [row.tenant.slug for row in working],
+        [str(row.pk) for row in working],
+        [str(row.tenant_id) for row in working],
     )
     raise SalonChoiceRequired([row.tenant for row in working])
 
@@ -232,10 +233,9 @@ def resolve_bot_user(
         # under a different tenant and linked there. Better to answer with
         # the row we can find than to deny someone who is genuinely staff.
         logger.info(
-            "%s.auth.no_bot_user_in_bot_tenant tenant=%s channel_user_id=%s",
+            "%s.auth.no_bot_user_in_bot_tenant tenant=%s",  # DRF-2009: без MAX id
             surface,
             tenant_slug,
-            verified.user_id,
         )
 
     # DRF-1653 — `-last_seen` alone is not a total order, and the third step
