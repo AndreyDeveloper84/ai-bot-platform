@@ -2974,6 +2974,8 @@ def customer_data_storage_consent(request: HttpRequest) -> HttpResponse:
 
 def _profile_to_dict(snap) -> dict:
     """Serialise a :class:`ProfileSnapshot` for the JSON response."""
+    from django.conf import settings as _dj_settings
+
     from apps.identity.services.profile import LEGACY_ME_CONSENT_KEY
 
     return {
@@ -2994,6 +2996,20 @@ def _profile_to_dict(snap) -> dict:
         # (fail-closed): отсутствие доезжает отсутствием, а не
         # подставленным значением.
         LEGACY_ME_CONSENT_KEY: snap.food_diary_consent_at,
+        # F10 — КАКОЙ путь согласия сейчас живой. Ровно одно поле, и его
+        # ОТСУТСТВИЕ означает старый путь: сборка, не знающая про канон, и
+        # ответ без поля обязаны вести себя одинаково, иначе выключенный
+        # флаг перестал бы быть выключенным.
+        #
+        # Поле НЕ говорит, дано ли согласие, и никогда не должно: право
+        # устанавливает предикат на сервере. Экран, выводящий «разрешено»
+        # отсюда, был бы вторым источником права — у этого свой узел
+        # (`test_me_announces_the_canonical_path_while_consent_is_absent`).
+        **(
+            {"food_diary_consent_canonical": True}
+            if getattr(_dj_settings, "FOOD_DIARY_CANONICAL_CONSENT", False)
+            else {}
+        ),
         "favorites": {
             "master_name": snap.favorite_master_name,
             "service_name": snap.favorite_service_name,

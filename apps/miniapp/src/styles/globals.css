@@ -6457,6 +6457,15 @@ a {
   color: var(--c-text-secondary);
   line-height: var(--leading-normal);
 }
+/* Версия раскрытия под текстом согласия — Z9. Строка служебная: человек
+   читает её, только если ищет, ПОЭТОМУ она приглушена и мельче тела. Но
+   она обязана быть видимой и контрастной — это единственное место, где
+   видно, на какой именно текст человек согласился. */
+.food-scanner-consent__version {
+  margin: 0;
+  font-size: var(--font-size-100);
+  color: var(--c-text-secondary);
+}
 .food-scanner-consent__actions {
   display: flex;
   flex-direction: column;

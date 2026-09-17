@@ -26,16 +26,33 @@ vi.mock("../lib/food-scanner", async (importOriginal) => {
   const original = await importOriginal<typeof import("../lib/food-scanner")>();
   return {
     ...original,
-    fetchConsentAt: vi.fn(),
+    // Шов переехал (F10): экран спрашивает согласие ОДНИМ вызовом, который
+    // сам решает, какой путь живой. `fetchConsentAt` экран больше не зовёт,
+    // и мок на него означал бы тихий уход теста в настоящую сеть.
+    fetchDiaryConsentGate: vi.fn(),
     grantConsent: vi.fn(),
   };
 });
 
-import { fetchConsentAt, grantConsent } from "../lib/food-scanner";
+import { fetchDiaryConsentGate, grantConsent } from "../lib/food-scanner";
 import { FoodScannerCaptureScreen } from "./FoodScannerCaptureScreen";
 
-const mockedFetch = vi.mocked(fetchConsentAt);
+const mockedFetch = vi.mocked(fetchDiaryConsentGate);
 const mockedGrant = vi.mocked(grantConsent);
+
+/**
+ * Старый путь — ровно то, что этот файл сторожит (DRF-1564).
+ *
+ * `canonical: false` здесь не деталь мока, а предмет: при выключенном
+ * флаге экран обязан вести себя в точности как прежде — спрашивать тем же
+ * способом и выдавать через `grantConsent`. Поэтому все узлы ниже остались
+ * дословно теми же, поменялась только форма ответа сервера.
+ */
+const legacy = (grantedAt: string | null) => ({
+  canonical: false,
+  grantedAt,
+  currentDocumentVersion: "",
+});
 
 function renderScreen() {
   return render(
@@ -58,7 +75,7 @@ beforeEach(() => {
 
 describe("источник правды — сервер, а не браузер", () => {
   it("согласие есть на сервере — гейт не показывается", async () => {
-    mockedFetch.mockResolvedValue("2026-09-08T10:00:00+00:00");
+    mockedFetch.mockResolvedValue(legacy("2026-09-08T10:00:00+00:00"));
     renderScreen();
 
     // Присутствие: экран съёмки открылся…
@@ -72,7 +89,7 @@ describe("источник правды — сервер, а не браузер
     // согласие с другого устройства. Браузер о нём не знает — и это
     // больше не имеет значения.
     window.localStorage.clear();
-    mockedFetch.mockResolvedValue("2026-09-08T10:00:00+00:00");
+    mockedFetch.mockResolvedValue(legacy("2026-09-08T10:00:00+00:00"));
     renderScreen();
 
     expect(await screen.findByRole("heading", { name: "Что ешь сейчас?" })).toBeInTheDocument();
@@ -81,7 +98,7 @@ describe("источник правды — сервер, а не браузер
 
   it("согласия нет — гейт показывается, и согласие уходит НА СЕРВЕР", async () => {
     const user = userEvent.setup();
-    mockedFetch.mockResolvedValue(null);
+    mockedFetch.mockResolvedValue(legacy(null));
     mockedGrant.mockResolvedValue("2026-09-08T12:00:00+00:00");
     renderScreen();
 
@@ -113,9 +130,9 @@ describe("«не смогли спросить» ≠ «согласия нет»
   });
 
   it("пока ответ не пришёл — ни гейта, ни камеры", async () => {
-    let release: (v: string | null) => void = () => {};
+    let release: (v: ReturnType<typeof legacy>) => void = () => {};
     mockedFetch.mockReturnValue(
-      new Promise<string | null>((resolve) => {
+      new Promise<ReturnType<typeof legacy>>((resolve) => {
         release = resolve;
       }),
     );
@@ -126,13 +143,13 @@ describe("«не смогли спросить» ≠ «согласия нет»
     expect(screen.queryByRole("button", { name: /разреш/i })).not.toBeInTheDocument();
     expect(screen.queryByRole("heading", { name: "Что ешь сейчас?" })).not.toBeInTheDocument();
 
-    release("2026-09-08T10:00:00+00:00");
+    release(legacy("2026-09-08T10:00:00+00:00"));
     expect(await screen.findByRole("heading", { name: "Что ешь сейчас?" })).toBeInTheDocument();
   });
 
   it("сбой ЗАПИСИ не выдаёт согласие за данное", async () => {
     const user = userEvent.setup();
-    mockedFetch.mockResolvedValue(null);
+    mockedFetch.mockResolvedValue(legacy(null));
     mockedGrant.mockRejectedValue(new Error("[500] boom"));
     renderScreen();
 
