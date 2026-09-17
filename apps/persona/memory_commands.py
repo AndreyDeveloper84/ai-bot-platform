@@ -88,6 +88,15 @@ _FORGET_ALL_PARTIAL = (
     "и я доведу до конца."
 )
 
+# DRF-1950 (M3): удаление в Ayla поставлено в задание, readback каталога ещё
+# не подтвердил. Первая фраза — правда: память бота и переписка уже обработаны
+# выше; «забыла всё, что о тебе помнила» и «напиши ещё раз» здесь неправда —
+# анкета в Ayla ещё не подтверждена, повтор делает задание, а не человек.
+# Вторая половина — решение владельца дословно; склейка — черновик на утверждение.
+_FORGET_ALL_STARTED = (
+    "Я забыла всё, что помнила сама. Удаление запущено. Оно завершится в установленный срок."
+)
+
 _CONFIRM_WORD = "удалить"
 
 # SHOW triggers (substring match on normalised text). Kept explicit for
@@ -404,7 +413,7 @@ def _bridge_clear(bot_user, memory_keys: list[str]) -> None:
         logger.exception("persona.memory_commands.bridge_clear_failed")
 
 
-def _bridge_erase(bot_user) -> bool:
+def _bridge_erase(bot_user) -> str:
     """«Забудь всё» → ask Ayla to erase the profile it owns. Erased?
 
     DRF-1367: the previous implementation walked ``_KEY_KEYWORDS`` and asked
@@ -420,14 +429,20 @@ def _bridge_erase(bot_user) -> bool:
     if bot_user is None:
         # Bot-local command (no channel user passed): there is no Ayla side to
         # erase and nothing upstream was ever written under this call path.
-        return True
+        return "erased"
     try:
-        from apps.orchestrator.memory.ayla_bridge import erase_declared_profile
+        from apps.identity.services.personal_context import GateStatus
+        from apps.orchestrator.memory.ayla_bridge import erase_declared_profile_status
 
-        return erase_declared_profile(bot_user)
+        status = erase_declared_profile_status(bot_user)
     except Exception:  # noqa: BLE001 — forget must never break the turn
         logger.exception("persona.memory_commands.bridge_erase_failed")
-        return False
+        return "failed"
+    if status is GateStatus.OK:
+        return "erased"
+    if status is GateStatus.STARTED:
+        return "started"
+    return "failed"
 
 
 def _anonymize_dialogue(bot_user) -> None:
@@ -502,7 +517,9 @@ def handle_memory_command(
             # fields is the DRF-1367 defect: it emptied three of twelve and
             # could not clear the price at all.
             erased = _bridge_erase(bot_user)
-            if not erased:
+            if erased == "started":
+                return MemoryCommandResult(text=_FORGET_ALL_STARTED)
+            if erased != "erased":
                 # The upstream profile survived. Saying «я забыла всё» here
                 # would be a false statement about a 152-ФЗ erasure — and the
                 # person would catch us out on the next turn, when the prompt

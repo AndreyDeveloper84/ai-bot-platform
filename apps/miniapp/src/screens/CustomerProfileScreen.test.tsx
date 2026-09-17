@@ -386,6 +386,54 @@ describe("CustomerProfileScreen (настоящие ручки согласий)
     expect(within(dialog).queryByText(/ayla_delete/)).toBeNull();
   }, 15000);
 
+  it("revoked_deletion_started (DRF-1950): «Удаление запущено…», и ни слова «удалены»", async () => {
+    const user = userEvent.setup();
+    routeRequests({
+      [DATA_STORAGE]: () =>
+        consentsDoc({
+          storageGranted: false,
+          revocation: {
+            status: "revoked_deletion_started",
+            failed_steps: ["ayla_delete"],
+          },
+        }),
+    });
+    await renderFresh();
+    await user.click(await screen.findByRole("button", { name: REVOKE_ROW_BTN }));
+    await user.click(
+      await screen.findByRole("button", { name: "Отозвать согласие" }),
+    );
+    const dialog = await screen.findByRole("dialog");
+    expect(within(dialog).getByText("Согласие отозвано.")).toBeInTheDocument();
+    expect(
+      within(dialog).getByText("Удаление запущено. Оно завершится в установленный срок."),
+    ).toBeInTheDocument();
+    // Решение владельца M3: до readback — никакого «удалены».
+    expect(within(dialog).queryByText(/удалены/)).toBeNull();
+    expect(within(dialog).queryByText(/deletion_started/)).toBeNull();
+  }, 15000);
+
+  it("неизвестный статус отзыва (новый сервер, старый экран): безопасный текст, не «удалены»", async () => {
+    const user = userEvent.setup();
+    routeRequests({
+      [DATA_STORAGE]: () =>
+        consentsDoc({
+          storageGranted: false,
+          revocation: { status: "revoked_something_new", failed_steps: [] },
+        }),
+    });
+    await renderFresh();
+    await user.click(await screen.findByRole("button", { name: REVOKE_ROW_BTN }));
+    await user.click(
+      await screen.findByRole("button", { name: "Отозвать согласие" }),
+    );
+    const dialog = await screen.findByRole("dialog");
+    // Положительная стража: одно проверенное утверждение сказано.
+    expect(within(dialog).getByText("Согласие отозвано.")).toBeInTheDocument();
+    expect(within(dialog).queryByText(/удалены/)).toBeNull();
+    expect(within(dialog).queryByText(/revoked_something_new/)).toBeNull();
+  }, 15000);
+
   it("§35 п.9: подсказки после отзыва — то, что сказал сервер", async () => {
     // Решение владельца требует, чтобы подсказки погасли, и теперь их
     // гасит сервер: `revoke_data_storage` ставит

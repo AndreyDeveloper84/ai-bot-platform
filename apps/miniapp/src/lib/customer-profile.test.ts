@@ -324,6 +324,22 @@ describe("revokeDataStorage (DELETE me/consents/data-storage/)", () => {
     expect(result.consents.data_storage_granted).toBe(false);
   });
 
+  it("удаление в Ayla запущено (DRF-1950) — свой исход, не частичный и не успех", async () => {
+    requestMock.mockResolvedValue(
+      consentsDoc({
+        storageGranted: false,
+        revocation: {
+          status: "revoked_deletion_started",
+          failed_steps: ["ayla_delete"],
+          failed_details: { ayla_delete: "deletion_started" },
+        },
+      }),
+    );
+    const result = await revokeDataStorage("УДАЛИТЬ", "data-storage-revocation-v1");
+    expect(result.status).toBe("revoked_deletion_started");
+    expect(result.consents.data_storage_granted).toBe(false);
+  });
+
   it("409 stale_disclosure — отдельный тип, а не общий сбой", async () => {
     requestMock.mockRejectedValue(
       new ApiError(409, "stale_disclosure", "disclosure changed"),

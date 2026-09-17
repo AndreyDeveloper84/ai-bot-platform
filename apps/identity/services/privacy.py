@@ -82,6 +82,7 @@ from apps.consent.customer import _mirror_notify_promo
 from apps.consent.services import withdraw_personal_data_for_bot_users
 from apps.identity.export_coverage import build_coverage_section
 from apps.identity.models import BotUser, UserPreferences
+from apps.identity.services import ayla_erasure
 from apps.identity.services.memory_deleter import (
     request_forget_all,
     soft_delete_green_entries,
@@ -130,6 +131,19 @@ class DeleteCascadeResult:
     @property
     def failed_steps(self) -> list[str]:
         return [s.step for s in self.steps if not s.ok]
+
+    @property
+    def deletion_started(self) -> bool:
+        """DRF-1950: единственный незавершённый шаг — удаление в Ayla, поставленное в задание.
+
+        Не «частично»: удаление идёт и завершится повтором; readback ещё не подтвердил.
+        """
+        failed = [s for s in self.steps if not s.ok]
+        return (
+            len(failed) == 1
+            and failed[0].step == "ayla_delete"
+            and failed[0].detail == "deletion_started"
+        )
 
 
 def _resolve_ayla_user_id(bot_user: BotUser) -> uuid.UUID | None:
@@ -590,9 +604,18 @@ def delete_personal_data(
     bot_user: BotUser,
     *,
     client: PersonalContextHttpClient | None = None,
+    retry_source: str | None = None,
 ) -> DeleteCascadeResult:
     """Run the C5 delete cascade for the person. Every step is
-    idempotent; per-step outcomes are reported, never hidden."""
+    idempotent; per-step outcomes are reported, never hidden.
+
+    ``retry_source`` (DRF-1950) — вход, который ставит удаление в Ayla в
+    durable-задание с readback (``AylaErasureJob.Source``). При открытом
+    ``AYLA_ERASURE_RETRY_ENABLED`` шаг ``ayla_delete`` ok только после
+    подтверждения каталогом; иначе ``deletion_started`` (или
+    ``superseded_by_account_deletion``). Без источника — прежний путь: так
+    зовёт бот-половина D3, у которой повтор и перечитывание остатка — на
+    стороне каталога (решение главного окна В2)."""
     # Person-level, not row-level — see _resolve_person_link. A row-level
     # read makes a linked person look unlinked from the Mini App shell,
     # which would report their live memory as "no state".
@@ -618,7 +641,43 @@ def delete_personal_data(
             bot_user.id,
         )
         steps.append(DeleteStep("ayla_delete", False, "not_linked"))
+    elif retry_source is not None and ayla_erasure.retry_enabled():
+        # DRF-1950 (M3): «удалено» — только после readback каталога. Снимок
+        # внешнего id берётся здесь, до локальных шагов, которые стирают
+        # идентификаторы оболочек.
+        owns = client is None
+        client = client or PersonalContextHttpClient(
+            retries=ayla_erasure.SYNC_RETRIES, timeout=ayla_erasure.SYNC_TIMEOUT_SECONDS
+        )
+        outcome: ayla_erasure.ErasureOutcome | None
+        try:
+            outcome = ayla_erasure.erase_with_readback(
+                bot_user=bot_user,
+                ayla_user_id=ayla_user_id,
+                external_user_id=external_user_id_for(bot_user),
+                source=retry_source,
+                client=client,
+            )
+        except Exception:  # noqa: BLE001 — сбой механики задания не отменяет локальные шаги (ревью B1)
+            logger.exception("identity.privacy.ayla_erasure_job_failed")
+            outcome = None
+        finally:
+            if owns:
+                client.close()
+        if outcome is None or outcome.state == ayla_erasure.FAILED:
+            # Задание могло не сохраниться или его повторы исчерпаны — «запущено»
+            # здесь было бы ложью: честный частичный исход.
+            steps.append(DeleteStep("ayla_delete", False))
+        elif outcome.state == ayla_erasure.CONFIRMED:
+            steps.append(DeleteStep("ayla_delete", True, "confirmed"))
+        elif outcome.state == ayla_erasure.SUPERSEDED:
+            steps.append(DeleteStep("ayla_delete", False, "superseded_by_account_deletion"))
+        else:
+            steps.append(DeleteStep("ayla_delete", False, "deletion_started"))
     else:
+        # Флаг закрыт или вход без источника (D3): прежний путь без readback.
+        # При закрытом флаге «удалено» здесь не подтверждено чтением каталога —
+        # названный долг против правила владельца M3 (DRF-1950), гасится флагом.
         owns = client is None
         client = client or PersonalContextHttpClient()
         try:

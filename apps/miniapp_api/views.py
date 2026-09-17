@@ -2425,9 +2425,13 @@ def personal_data_delete(request: HttpRequest) -> HttpResponse:
             400,
         )
 
-    result = delete_personal_data(bot_user)
+    result = delete_personal_data(bot_user, retry_source="personal_data_delete")
     if result.all_ok:
         return JsonResponse({"status": "deleted"}, status=200)
+    if result.deletion_started:
+        # DRF-1950 — удаление в Ayla в задании; readback каталога ещё не
+        # подтвердил. Не «частично»: повтор делает задание, не человек.
+        return JsonResponse({"status": "deletion_started"}, status=200)
     # ``failed_details`` distinguishes a transient failure (retry helps) from
     # a structural one like ``not_linked`` (retry can never help). Without it
     # the sheet invites an infinite "попробуй ещё раз" loop. Slugs only —
@@ -2914,7 +2918,16 @@ def customer_data_storage_consent(request: HttpRequest) -> HttpResponse:
         )
 
     document["revocation"] = {
-        "status": "revoked" if result.all_ok else "revoked_partial_processing",
+        # DRF-1950: три исхода. «revoked» — всё подтверждено, включая readback
+        # каталога; «revoked_deletion_started» — удаление в Ayla в задании;
+        # «revoked_partial_processing» — not_linked / конфликт / локальный шаг.
+        "status": (
+            "revoked"
+            if result.all_ok
+            else "revoked_deletion_started"
+            if result.deletion_started
+            else "revoked_partial_processing"
+        ),
         "failed_steps": result.failed_steps,
         "failed_details": {s.step: s.detail for s in result.steps if not s.ok and s.detail},
     }

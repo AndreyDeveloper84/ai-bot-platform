@@ -300,18 +300,35 @@ class PersonalContextHttpClient:
         ``data_sources[*] = "erased"``, deriving the field list from the
         model rather than from a caller's enumeration.
 
-        404 (``PersonalContextNotFoundError``) means the subject is not
-        addressable — either unknown or already soft-deleted upstream, which
-        the C5.2 view collapses into one status. Callers treat it as an
-        idempotent success; note that «already soft-deleted» leaves the
-        context row in place upstream (backend matrix cell
-        ``test_...delete_after_account_delete``), a gap owned by the backend.
+        Upstream answers 200 on every success, repeats included; ``deleted: []``
+        does not tell «already erased» from «nothing was there» (catalog AMD-020,
+        DRF-1984). A soft-deleted account is erased too (DRF-1368). 404 is kept
+        as an idempotent success for older upstreams. After account deletion
+        (D3) the subject header no longer resolves and upstream answers 403
+        (``PersonalContextAuthError``) — even before the catalog marks the
+        request COMPLETED. Whether the erasure happened is answered by
+        :meth:`get_erasure_status`, never by this call's status.
         """
         self._send_with_retry(
             "DELETE",
             f"internal/users/{ayla_user_id}/personal-data/",
             external_user_id=external_user_id,
         )
+
+    def get_erasure_status(self, *, ayla_user_id: str, external_user_id: str) -> dict[str, Any]:
+        """C5.3 / AMD-020: ``GET /internal/users/{id}/personal-data/erasure-status/``.
+
+        Authoritative readback of the C5.2 erasure (DRF-1950, catalog DRF-1984):
+        ``{"user_id", "erased": bool, "identities": [{"kind", "context_row",
+        "erased"}]}`` — no personal values, no external ids; creates nothing
+        upstream. Read-only, retried.
+        """
+        payload = self._send_with_retry(
+            "GET",
+            f"internal/users/{ayla_user_id}/personal-data/erasure-status/",
+            external_user_id=external_user_id,
+        )
+        return _unwrap_data(payload)
 
     # ------------------------------------------------------------------
     # DRF-1699 — заявка на удаление аккаунта (§7 свода владельца)

@@ -496,7 +496,7 @@ def revoke_data_storage(bot_user: "BotUser") -> "DeleteCascadeResult":
 
     # 2 — предусмотренная процедура по уже накопленному. Пишет собственную
     # audit-строку ``privacy.personal_data_deleted`` со списком шагов.
-    result = delete_personal_data(bot_user)
+    result = delete_personal_data(bot_user, retry_source="revoke_data_storage")
     logger.info(
         "consent.customer.data_storage_revoked bot_user=%s all_ok=%s failed=%s",
         bot_user.id,

@@ -221,6 +221,29 @@ def clear_declared_fields(
     return len(updates)
 
 
+def erase_declared_profile_status(bot_user: Any, *, client: Any = None) -> GateStatus:
+    """«Забудь всё» с durable-удалением (DRF-1950): исход ``OK`` | ``STARTED`` | отказ.
+
+    ``OK`` — каталог подтвердил стирание чтением; ``STARTED`` — удаление в
+    задании, readback ещё не подтвердил (человеку — «удаление запущено»);
+    остальное — стирание не состоялось и не поставлено (например, не связан).
+    """
+    result = erase_declared_prefs(bot_user, client=client, retry_source="chat_forget")
+    if result.status is GateStatus.OK:
+        logger.info("orchestrator.memory_bridge.erased bot_user=%s", getattr(bot_user, "id", "?"))
+    elif result.status is GateStatus.STARTED:
+        logger.info(
+            "orchestrator.memory_bridge.erase_started bot_user=%s", getattr(bot_user, "id", "?")
+        )
+    else:
+        logger.warning(
+            "orchestrator.memory_bridge.erase_failed reason=%s bot_user=%s",
+            result.status.value,
+            getattr(bot_user, "id", "?"),
+        )
+    return result.status
+
+
 def erase_declared_profile(bot_user: Any, *, client: Any = None) -> bool:
     """«Забудь всё» → ask Ayla to erase the profile it owns. Erased?
 

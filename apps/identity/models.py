@@ -1458,3 +1458,71 @@ class SoloRegistrationDraft(models.Model):
 
     def __str__(self) -> str:
         return f"SoloRegistrationDraft[{self.channel}:{self.channel_user_id} {self.step}]"
+
+
+class AylaErasureJob(models.Model):
+    """Durable-удаление персональных данных в Ayla (DRF-1950, решение владельца M3).
+
+    Запрос → задание → идемпотентность → повтор с backoff → authoritative
+    readback (каталог C5.3 ``…/personal-data/erasure-status/``) → completed.
+    До readback человеку «удалено» не говорится.
+
+    Одно открытое задание на ``ayla_user_id`` (частичный уникальный индекс) —
+    повторный запрос того же человека переиспользует его. Внешний идентификатор
+    нужен заголовку ``X-External-User-ID`` на повторах: снимок берётся ДО
+    локальных шагов каскада (они стирают идентификаторы оболочек) и очищается,
+    как только задание закрыто.
+    """
+
+    class Source(models.TextChoices):
+        REVOKE_DATA_STORAGE = "revoke_data_storage", "Отзыв согласия на хранение данных"
+        PERSONAL_DATA_DELETE = "personal_data_delete", "Удаление персональных данных"
+        CHAT_FORGET = "chat_forget", "«Забудь всё» в чате"
+
+    class Status(models.TextChoices):
+        PENDING = "pending", "Ожидает подтверждения"
+        COMPLETED = "completed", "Стирание подтверждено"
+        FAILED = "failed", "Повторы исчерпаны"
+        SUPERSEDED = "superseded_by_account_deletion", "Закрыто удалением аккаунта"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    bot_user = models.ForeignKey(
+        "identity.BotUser",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="+",
+        verbose_name="Пользователь бота",
+    )
+    ayla_user_id = models.UUIDField("Субъект в Ayla")
+    external_user_id = models.CharField(
+        "Внешний идентификатор для повтора", max_length=128, blank=True, default=""
+    )
+    source = models.CharField("Откуда запрос", max_length=32, choices=Source.choices)
+    status = models.CharField(
+        "Состояние", max_length=40, choices=Status.choices, default=Status.PENDING
+    )
+    attempts = models.PositiveSmallIntegerField("Попыток", default=0)
+    next_attempt_at = models.DateTimeField("Следующая попытка", null=True, blank=True)
+    last_error_kind = models.CharField("Последняя причина", max_length=32, blank=True, default="")
+    created_at = models.DateTimeField("Создано", auto_now_add=True)
+    updated_at = models.DateTimeField("Обновлено", auto_now=True)
+    completed_at = models.DateTimeField("Закрыто", null=True, blank=True)
+    alerted_at = models.DateTimeField("Алерт отправлен", null=True, blank=True)
+
+    class Meta:
+        verbose_name = "Задание удаления в Ayla"
+        verbose_name_plural = "Задания удаления в Ayla"
+        constraints = [
+            models.UniqueConstraint(
+                fields=["ayla_user_id"],
+                condition=models.Q(status="pending"),
+                name="ayla_erasure_job_one_pending_per_subject",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["status", "next_attempt_at"], name="ayla_erasure_job_due"),
+        ]
+
+    def __str__(self) -> str:
+        return f"AylaErasureJob[{self.pk} {self.status} attempts={self.attempts}]"

@@ -45,6 +45,8 @@ class GateStatus(str, Enum):
     OK = "ok"
     BLOCKED_CONSENT = "blocked_consent"  # gate closed or no ayla_user_id
     ERROR = "error"  # upstream/transport failure (logged)
+    # DRF-1950: удаление в Ayla поставлено в задание; readback ещё не подтвердил.
+    STARTED = "started"
 
 
 @dataclass(frozen=True)
@@ -232,6 +234,7 @@ def erase_declared_prefs(
     bot_user,
     *,
     client: PersonalContextHttpClient | None = None,
+    retry_source: str | None = None,
 ) -> GatedResult:
     """The ONE erase verb: ``DELETE /internal/users/{id}/personal-data/``.
 
@@ -270,6 +273,36 @@ def erase_declared_prefs(
         return GatedResult(status=GateStatus.BLOCKED_CONSENT)
     owns = client is None
     client = client or PersonalContextHttpClient()
+    if retry_source is not None:
+        from apps.identity.services import ayla_erasure
+
+        if ayla_erasure.retry_enabled():
+            # DRF-1950 (M3): OK — только после readback каталога. Синхронная
+            # попытка — короткий клиент: остальное повторит задание.
+            if owns:
+                client.close()
+                client = PersonalContextHttpClient(
+                    retries=ayla_erasure.SYNC_RETRIES, timeout=ayla_erasure.SYNC_TIMEOUT_SECONDS
+                )
+            try:
+                outcome = ayla_erasure.erase_with_readback(
+                    bot_user=bot_user,
+                    ayla_user_id=ayla_user_id,
+                    external_user_id=external_user_id_for(bot_user),
+                    source=retry_source,
+                    client=client,
+                )
+            except Exception:  # noqa: BLE001 — сбой механики задания: честный отказ, не «запущено»
+                logger.exception("identity.personal_context.erase_job_failed")
+                return GatedResult(status=GateStatus.ERROR)
+            finally:
+                if owns:
+                    client.close()
+            if outcome.state == ayla_erasure.CONFIRMED:
+                return GatedResult(status=GateStatus.OK)
+            if outcome.state == ayla_erasure.FAILED:
+                return GatedResult(status=GateStatus.ERROR)
+            return GatedResult(status=GateStatus.STARTED)
     try:
         client.delete_personal_data(
             ayla_user_id=str(ayla_user_id),

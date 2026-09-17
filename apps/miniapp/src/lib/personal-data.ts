@@ -137,7 +137,7 @@ export const DELETE_CONFIRMATION_TOKEN = "УДАЛИТЬ";
  */
 export async function deletePersonalData(
   confirmation: string,
-): Promise<{ status: "deleted" }> {
+): Promise<{ status: "deleted" | "deletion_started" }> {
   const headers = buildAuthHeaders();
   headers.set("Content-Type", "application/json");
   const res = await fetch(`${API_BASE}${DELETE_PATH}`, {
@@ -146,7 +146,8 @@ export async function deletePersonalData(
     body: JSON.stringify({ confirmation }),
   });
   if (res.ok) {
-    return (await res.json()) as { status: "deleted" };
+    // DRF-1950: `deletion_started` — удаление в Ayla в задании, не «удалено».
+    return (await res.json()) as { status: "deleted" | "deletion_started" };
   }
   if (res.status === 502) {
     try {

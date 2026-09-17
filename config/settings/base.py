@@ -1367,6 +1367,13 @@ CELERY_BEAT_SCHEDULE = {
     # scans one row per user who ever asked to be forgotten, so hourly is
     # cheap; :50 keeps it clear of the :15 idempotency cleanup and the :00 /
     # :30 booking sweeps.
+    # DRF-1950 — повтор удаления в Ayla по расписанию заданий (1м…24ч, 10 попыток).
+    # Каждые 5 минут: ближайшая пауза — минута, подметальщик берёт просроченные.
+    # Задача инертна, пока AYLA_ERASURE_RETRY_ENABLED не открыт.
+    "identity_ayla_erasure_sweep": {
+        "task": "apps.identity.tasks.ayla_erasure_sweep",
+        "schedule": crontab(minute="*/5"),
+    },
     "identity_forget_all_sweep": {
         "task": "apps.identity.tasks.forget_all_sweep",
         "schedule": crontab(minute="50"),
@@ -1615,6 +1622,15 @@ EVENTBUS_DISPATCH_BEAT_ENABLED = (
 )
 EVENTBUS_DISPATCH_BEAT_DRY_RUN = (
     os.environ.get("EVENTBUS_DISPATCH_BEAT_DRY_RUN", "true").lower() not in _FALSY
+)
+
+# DRF-1950 (M3) — durable-удаление в Ayla: задание, повтор, readback каталога
+# (C5.3 / AMD-020, DRF-1984). Открывается только явным «да» и ТОЛЬКО после
+# выкладки каталожной ручки erasure-status: без неё каждое задание исчерпало бы
+# повторы и подняло алерт. Выключено — сегодняшнее поведение: «…удалены.» без
+# readback — названный долг против правила владельца, гасится этим флагом.
+AYLA_ERASURE_RETRY_ENABLED = (
+    os.environ.get("AYLA_ERASURE_RETRY_ENABLED", "false").lower() in _TRUTHY
 )
 
 # DRF-1285 - the two switches in front of every bot-initiated nutrition
