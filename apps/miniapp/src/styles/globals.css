@@ -8118,3 +8118,165 @@ a {
   gap: var(--s-2);
   margin-top: var(--s-4);
 }
+
+/* --- DRF-1814 (экран 07): бейдж и чипы карточки мастера --------------------
+   Бейдж рисуется только при accepts_today === true с сервера (реальный слот);
+   чипы — категории выбранных шаблонов. Цвета — токены, свои значения не
+   вводятся. */
+.master-card__badge {
+  display: inline-block;
+  margin-top: var(--s-1);
+  padding: 2px var(--s-2);
+  border-radius: 999px;
+  background: var(--c-accent-subtle);
+  color: var(--c-accent);
+  font-size: var(--font-size-200);
+}
+
+.master-card__chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s-1);
+  margin: var(--s-1) 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.master-card__chip {
+  max-width: 100%;
+  padding: 2px var(--s-2);
+  border: 1px solid var(--c-divider);
+  border-radius: 999px;
+  background: var(--c-surface-2);
+  color: var(--c-text-primary);
+  font-size: var(--font-size-200);
+}
+
+/* --- DRF-1814 (экран 07): профиль — имя с «Изменить», подсказки, работы,
+   предпросмотр, кроп ------------------------------------------------------ */
+.master-profile__name-row {
+  display: flex;
+  align-items: baseline;
+  gap: var(--s-2);
+  flex-wrap: wrap;
+}
+
+.master-profile__link-btn {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--c-accent);
+  font: inherit;
+  font-size: var(--font-size-200);
+  cursor: pointer;
+}
+
+.master-profile__hints {
+  margin: var(--s-2) 0 0;
+  padding-left: var(--s-4);
+  color: var(--c-text-secondary);
+  font-size: var(--font-size-200);
+}
+
+.master-profile__input {
+  width: 100%;
+  padding: var(--s-2) var(--s-3);
+  border: 1px solid var(--c-divider);
+  border-radius: var(--r-md);
+  background: var(--c-surface-1);
+  color: var(--c-text-primary);
+  font: inherit;
+}
+
+.master-profile__input:focus {
+  outline: 2px solid var(--c-accent);
+  outline-offset: -1px;
+}
+
+.master-profile__portfolio-head {
+  display: flex;
+  align-items: baseline;
+  gap: var(--s-2);
+  flex-wrap: wrap;
+}
+
+.master-profile__portfolio {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--s-2);
+  margin: var(--s-2) 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.master-profile__work {
+  position: relative;
+  aspect-ratio: 1 / 1;
+  overflow: hidden;
+  border-radius: var(--r-md);
+  background: var(--c-surface-2);
+}
+
+.master-profile__work img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.master-profile__work-remove {
+  position: absolute;
+  top: var(--s-1);
+  right: var(--s-1);
+  width: 28px;
+  height: 28px;
+  border: 0;
+  border-radius: 50%;
+  background: var(--c-surface-1);
+  color: var(--c-text-primary);
+  font: inherit;
+  line-height: 28px;
+  text-align: center;
+  cursor: pointer;
+}
+
+.master-profile__preview {
+  margin-top: var(--s-2);
+}
+
+.master-profile__preview .master-card {
+  pointer-events: none;
+}
+
+.photo-crop__frame {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 1 / 1;
+  overflow: hidden;
+  margin-top: var(--s-2);
+  border-radius: var(--r-md);
+  background: var(--c-surface-2);
+}
+
+.photo-crop__image {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  transform-origin: center;
+  transition: transform 120ms ease-out;
+}
+
+.photo-crop__zoom {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+  margin-top: var(--s-2);
+  color: var(--c-text-secondary);
+  font-size: var(--font-size-200);
+}
+
+.photo-crop__zoom input[type="range"] {
+  flex: 1;
+}

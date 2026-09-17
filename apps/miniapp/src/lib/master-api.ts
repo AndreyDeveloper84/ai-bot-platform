@@ -553,11 +553,15 @@ export const readinessFill = (items: ReadinessItem[]): { done: number; total: nu
  */
 export const patchMasterProfile = (patch: {
   bio?: string;
-}): Promise<ProfilePatchResponse> =>
-  request("/profile", {
-    method: "PATCH",
-    body: JSON.stringify({ bio: patch.bio ?? "" }),
-  });
+  display_name?: string;
+}): Promise<ProfilePatchResponse> => {
+  // DRF-1814: только переданные поля — имя без «о себе» не затирает «о себе»
+  // пустой строкой (владелец полей — каталог, он пишет ровно то, что пришло).
+  const body: Record<string, string> = {};
+  if (patch.bio !== undefined) body.bio = patch.bio;
+  if (patch.display_name !== undefined) body.display_name = patch.display_name;
+  return request("/profile", { method: "PATCH", body: JSON.stringify(body) });
+};
 
 /**
  * Upload a new profile photo (multipart). Bypasses the shared
@@ -594,16 +598,87 @@ export const uploadMasterProfilePhoto = async (
   return (await res.json()) as ProfilePatchResponse;
 };
 
-/** §M4 line 527 — bio UI cap (server-side MAX_BIO_LENGTH = 280). */
-export const MASTER_PROFILE_BIO_MAX = 280;
-/** §M4 line 550 — photo upload cap. Mirrors backend PHOTO_MAX_BYTES. */
-export const MASTER_PROFILE_PHOTO_MAX_BYTES = 10 * 1024 * 1024;
-/** §M4 line 550 — accepted MIME types. */
+// DRF-1814: лимитов «о себе» и байтов фото здесь больше НЕТ. Они приходят в
+// `MasterProfileCard.limits` из каталога (DRF-1960) — те же числа, которыми
+// каталог проверяет запись. Литерал 280 при лимите каталога 500 был двумя
+// числами на один предмет (GAP_MAP §3 «лимиты — данные контракта»).
+/** Форматы фото — как у каталога (`ALLOWED_FORMATS`); предпроверка до сети. */
 export const MASTER_PROFILE_PHOTO_MIME_ALLOWLIST = new Set<string>([
   "image/jpeg",
   "image/png",
   "image/webp",
 ]);
+
+// --- Экран 07 «Профиль мастера» (DRF-1814, часть B) ------------------------
+// Зеркало apps/master_api/views_profile_card.py (часть A): карточка с
+// лимитами каталога, бейджем из реального слота и чипами из выбранных
+// шаблонов; портфолио — прокси в каталог, субъект — мастер из initData.
+
+export interface ProfileLimits {
+  bio: number;
+  display_name_min: number;
+  avatar_bytes: number;
+  portfolio_bytes: number;
+  portfolio_count: number;
+}
+
+export interface MasterProfileCard {
+  master: { id: string; name: string; bio: string; photo_url: string };
+  limits: ProfileLimits;
+  portfolio: { count: number; limit: number };
+  accepts_today: boolean;
+  accepts_today_reason: string | null;
+  categories: string[];
+  categories_reason: string | null;
+}
+
+export interface PortfolioItem {
+  id: string;
+  image_url: string;
+  sort_order: number;
+  created_at: string;
+}
+
+export interface PortfolioList {
+  items: PortfolioItem[];
+  count: number;
+  limit: number;
+}
+
+export const getMasterProfileCard = (): Promise<MasterProfileCard> =>
+  request("/profile/card", { method: "GET" });
+
+export const getPortfolio = (): Promise<PortfolioList> =>
+  request("/profile/portfolio", { method: "GET" });
+
+export const deletePortfolioItem = (itemId: string): Promise<{ count: number; limit: number }> =>
+  request(`/profile/portfolio/${encodeURIComponent(itemId)}`, { method: "DELETE" });
+
+/** Загрузка работы — multipart `image`; тот же обход `request()`, что у фото профиля. */
+export const uploadPortfolioPhoto = async (file: File): Promise<PortfolioItem> => {
+  const fd = new FormData();
+  fd.set("image", file);
+  const initData = getInitData();
+  const headers = new Headers();
+  if (initData) headers.set("Authorization", `MaxInitData ${initData}`);
+  applyDevBypassHeaders(headers);
+  applySalonChoiceHeader(headers);
+  const res = await fetch(`${MASTER_API_BASE}/profile/portfolio`, {
+    method: "POST",
+    headers,
+    body: fd,
+  });
+  if (!res.ok) {
+    let parsed: ErrorBody = { error: "http_error", detail: res.statusText };
+    try {
+      parsed = (await res.json()) as ErrorBody;
+    } catch {
+      /* non-JSON 5xx */
+    }
+    throw new ApiError(res.status, parsed.error, parsed.detail);
+  }
+  return (await res.json()) as PortfolioItem;
+};
 
 export const MASTER_SESSION_STORAGE_KEY = "master_token";
 
