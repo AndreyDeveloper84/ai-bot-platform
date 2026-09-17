@@ -53,12 +53,19 @@ if TYPE_CHECKING:
 #: Дневник: еда, напитки, фотографии, голосовые — scope M1.
 DIARY = ConsentRecord.ConsentType.FOOD_DIARY_PROCESSING.value
 
-#: Версия текста согласия, который показывает экран сканера. ``v0`` — текст,
-#: действующий сейчас; новый текст M2 поднимает версию, и
-#: :func:`diary_is_granted` с ``document_version`` вернёт ``False`` тем, кто
-#: соглашался на старый (D3). Меняется ВМЕСТЕ с
-#: ``FOOD_DIARY_CONSENT_DOCUMENT_VERSION`` в ``apps/miniapp/src/lib/food-scanner.ts``.
-FOOD_DIARY_CONSENT_DOCUMENT_VERSION = "food-diary-v0"
+#: Версия текста согласия на дневник питания. ЕДИНСТВЕННОЕ определение:
+#: ``apps/consent/food_diary_disclosure.py`` берёт её отсюда псевдонимом, а
+#: ``apps/miniapp/src/lib/food-scanner.ts`` несёт копию, сверяемую тестом
+#: паритета (``test_food_diary_disclosure.py::test_the_version_matches_on_both_surfaces``).
+#:
+#: ``food-diary-v1`` — решение владельца 17.09: текст v1 = каноническое
+#: раскрытие Z9 из #1812 (``food_diary_disclosure.DISCLOSURE_BODY``), с этого
+#: момента НЕИЗМЕНЯЕМ. Любое содержательное изменение текста = ``food-diary-v2``
+#: с новой константой, без перезаписи v1: человек согласился на текст, который
+#: ему показали, и запись согласия обязана указывать ровно на него.
+#: ``food-diary-v0`` — черновой контракт, не используется: строки под ним
+#: :func:`diary_is_granted` не признаёт (D3, механизм включён 17.09).
+FOOD_DIARY_CONSENT_DOCUMENT_VERSION = "food-diary-v1"
 
 #: Откуда пришла выдача / отзыв. Свободная форма по контракту модели.
 GRANT_SOURCE = "miniapp:food_scanner_consent"
@@ -118,8 +125,15 @@ def withdraw_diary(bot_user: "BotUser", *, source: str = WITHDRAW_SOURCE) -> int
 
 
 def diary_is_granted(bot_user: "BotUser") -> bool:
-    """Действует ли согласие на дневник питания СЕЙЧАС."""
-    return has_global_consent(bot_user, DIARY)
+    """Действует ли согласие на дневник питания СЕЙЧАС — на ТЕКУЩИЙ текст.
+
+    Версия передаётся (D3, включено 17.09 вместе с ``food-diary-v1``): строка,
+    выданная под прежним текстом, предикат не признаёт — человека спросят
+    заново на новом тексте. Без этого поднятие версии было бы обещанием без
+    механизма: строка v0 продолжала бы открывать дневник, а 409 на выдаче
+    никогда бы не случился, потому что экран согласия не показали бы.
+    """
+    return has_global_consent(bot_user, DIARY, document_version=FOOD_DIARY_CONSENT_DOCUMENT_VERSION)
 
 
 def diary_current_record(bot_user: "BotUser") -> ConsentRecord | None:

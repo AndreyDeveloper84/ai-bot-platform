@@ -48,10 +48,45 @@ class TestGrant:
 
         assert record is not None
         assert record.consent_type == "food_diary_processing"
-        assert record.document_version == "food-diary-v0"
+        # Литералом, не константой: сверка с константой сторожила бы модуль
+        # сам с собой. Решение владельца 17.09 — v1; v0 — черновой контракт.
+        assert record.document_version == "food-diary-v1"
+        assert record.document_version != "food-diary-v0"
         assert record.source == nutrition.GRANT_SOURCE
         assert nutrition.diary_is_granted(person) is True
         assert nutrition.diary_current_record(person) == record
+
+    def test_a_v0_row_does_not_open_the_diary_under_v1(self, person) -> None:
+        """D3: строка под черновой версией предикат не открывает.
+
+        Строка ЕСТЬ, granted и не отозвана — то есть по всем признакам, кроме
+        версии, это действующее согласие. Именно поэтому узел нужен: без
+        сверки версии он зеленел бы, и человек с черновым согласием получил
+        бы дневник, не увидев текста v1. Положительная пара — узел ниже.
+        """
+        record_global_consent(
+            person,
+            consent_type=nutrition.DIARY,
+            source="test:v0",
+            document_version="food-diary-v0",
+        )
+        # ПРИСУТСТВИЕ: строка действительно лежит и по всем признакам жива.
+        live = _rows(person).filter(granted=True, withdrawn_at__isnull=True)
+        assert live.count() == 1
+        assert live.get().document_version == "food-diary-v0"
+
+        # ОТСУТСТВИЕ права на тех же данных: версия не та.
+        assert nutrition.diary_is_granted(person) is False
+
+    def test_a_v1_row_opens_the_diary(self, person) -> None:
+        """Положительная пара к узлу выше: та же строка, но под текущей версией."""
+        record_global_consent(
+            person,
+            consent_type=nutrition.DIARY,
+            source="test:v1",
+            document_version="food-diary-v1",
+        )
+        assert nutrition.diary_is_granted(person) is True
 
     def test_an_unknown_version_is_refused_and_writes_nothing(self, person) -> None:
         with pytest.raises(nutrition.UnknownDisclosureVersionError):

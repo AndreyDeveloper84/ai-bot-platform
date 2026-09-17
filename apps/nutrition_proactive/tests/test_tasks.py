@@ -21,6 +21,7 @@ import pytest
 from django.core.management import call_command
 
 from apps.consent.models import ConsentRecord
+from apps.consent.nutrition import FOOD_DIARY_CONSENT_DOCUMENT_VERSION
 from apps.identity.models import BotUser
 from apps.integrations.ayla import ProfileResponse, SummaryResponse, WaterTodayResponse
 from apps.nutrition_proactive import prefs, selection, tasks
@@ -63,7 +64,9 @@ def grant_food_diary(bot_user: BotUser) -> ConsentRecord:
         consent_type=ConsentRecord.ConsentType.FOOD_DIARY_PROCESSING.value,
         granted=True,
         source="test:fixture",
-        document_version="food-diary-v0",
+        # Текущая версия, не литерал: фикстура «согласие есть» обязана
+        # стоять под тем текстом, который признаёт предикат (D3).
+        document_version=FOOD_DIARY_CONSENT_DOCUMENT_VERSION,
     )
 
 
