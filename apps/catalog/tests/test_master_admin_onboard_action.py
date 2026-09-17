@@ -239,6 +239,25 @@ def test_person_of_another_salon_is_refused_and_nothing_is_written(
     assert _audit_rows(master) == []
 
 
+def test_manual_id_of_another_salon_s_person_is_refused_like_the_list(
+    salon: Tenant, other_salon: Tenant
+) -> None:
+    """Поле руками — не обход фильтра: тот же серверный отбор по салону мастера."""
+    client, _ = _client("ops-manual-foreign", ops=True)
+    master = _master(salon, "Мастер A", catalog_specialist_id=uuid.uuid4())
+    own = _person(salon, "Своя")
+    foreign = _person(other_salon, "Чужая")
+
+    refused = _post(client, [master], apply="1", bot_user_id_manual=str(foreign.pk))
+    assert [level for level, _ in _messages(refused)] == [40]
+    assert CatalogMaster.all_tenants.get(pk=master.pk).linked_bot_user_id is None
+
+    # Положительная стража на том же поле: свой pk руками — проходит.
+    accepted = _post(client, [master], apply="1", bot_user_id_manual=str(own.pk))
+    assert 40 not in [level for level, _ in _messages(accepted)]
+    assert CatalogMaster.all_tenants.get(pk=master.pk).linked_bot_user_id == own.pk
+
+
 def test_manual_id_that_is_not_a_uuid_is_refused_not_500(salon: Tenant) -> None:
     """Поле руками принимает что угодно; кривой id — отказ словами, не 500."""
     client, _ = _client("ops-badid", ops=True)
