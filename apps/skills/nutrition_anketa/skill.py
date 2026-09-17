@@ -129,7 +129,26 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+
 # Key inside Conversation.skill_state.
+def _nutrition_enabled() -> bool:
+    """Тот же читатель, что у меню и у хендлера (``marketplace.nutrition_enabled``).
+
+    Один флаг, один способ чтения — ``getattr`` с ``False`` по умолчанию.
+    Импорт ленивый: меню тянет клавиатуры и каталог, навыку это не нужно
+    на этапе импорта.
+    """
+    from apps.skills.menu.marketplace import nutrition_enabled
+
+    return nutrition_enabled()
+
+
+def _nutrition_unavailable_text() -> str:
+    from apps.skills.menu.marketplace import NUTRITION_UNAVAILABLE_TEXT
+
+    return NUTRITION_UNAVAILABLE_TEXT
+
+
 _STATE_KEY = "nutrition_anketa"
 
 _AYLA_DOWN_FALLBACK = (
@@ -324,6 +343,23 @@ class NutritionAnketaSkill:
     # ─── handle ──────────────────────────────────────────────────────────
 
     def handle(self, context: SkillContext) -> SkillResult:
+        # DRF-1994 (решение U) / DRF-1295 — единый выключатель контура
+        # питания, и стоит он В НАВЫКЕ, а не по хендлерам. Сюда сходятся
+        # ВСЕ входы анкеты: ``/anketa``, ``cb:anketa:*``, входная фраза,
+        # продолжение FSM, согласие/отзыв, инструмент консьержа через
+        # ``nutrition_global._run_skill``. Новый вход, доехавший до навыка,
+        # упрётся в ворота, не зная о них.
+        #
+        # ``matches`` флаг НЕ читает намеренно. Верни он False, «/anketa»
+        # уехал бы модели, и модель заговорила бы о питании сама — ровно
+        # то, что DRF-1295 запрещает. Навык забирает ход и отвечает
+        # заглушкой; стерегут это ``test_nutrition_single_switch_1994``.
+        if not _nutrition_enabled():
+            return SkillResult(
+                reply_text=_nutrition_unavailable_text(),
+                meta={"reply_kind": "nutrition_anketa_nutrition_off"},
+            )
+
         text = context.message_text.strip()
 
         # Ответ на экран согласия — до всего остального.

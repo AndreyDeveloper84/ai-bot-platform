@@ -169,6 +169,31 @@ NUTRITION_TOOL_SPECS: list[dict[str, Any]] = [
 #: action_type values the concierge wrapper must execute after the LLM pass.
 NUTRITION_TOOL_ACTIONS = frozenset(spec["name"] for spec in NUTRITION_TOOL_SPECS)
 
+#: DRF-1994 (решение U) / DRF-1295 — инструменты, которые гасит единый
+#: выключатель ``NUTRITION_ENABLED``. Это ТРИ из четырёх. ``health_screening``
+#: сюда не входит намеренно и не по забывчивости: на ``RED_FLAG`` он отвечает
+#: «сначала к врачу» до чтения памятки (§35 п.5 владельца) — это грубая
+#: защита второго слоя, а владелец постановил, что «safety coarse guard
+#: remains mandatory even in Core Pilot». Гасить её флагом ПИТАНИЯ значило бы
+#: снять защитную реплику ради выключения еды. Положительный контроль —
+#: ``test_nutrition_single_switch_1994``: скрининг жив при выключенном флаге.
+NUTRITION_ONLY_TOOL_NAMES: frozenset[str] = frozenset(
+    {"log_water", "clarify_food_entry", "start_nutrition_anketa"}
+)
+
+
+def _nutrition_enabled() -> bool:
+    """Тот же читатель, что у меню, анкеты и воды — один флаг, одно место."""
+    from apps.skills.menu.marketplace import nutrition_enabled
+
+    return nutrition_enabled()
+
+
+def _nutrition_unavailable_text() -> str:
+    from apps.skills.menu.marketplace import NUTRITION_UNAVAILABLE_TEXT
+
+    return NUTRITION_UNAVAILABLE_TEXT
+
 
 # ---------------------------------------------------------------------------
 # Skill execution (shared by both layers).
@@ -265,6 +290,23 @@ def execute_nutrition_tool(
     skill_name = skill_name_by_tool.get(name)
     if skill_name is None:
         return None
+
+    # DRF-1994 — ворота на уровне инструмента, ДО навыка, и не ``None``.
+    # Навыки анкеты/воды/еды гасят себя сами в ``handle``, но между
+    # инструментом и ``handle`` стоит ``skill.matches`` с правом вето, а
+    # вето здесь возвращает ``None`` — и ``None`` отдаёт ход МОДЕЛИ, которая
+    # может заговорить о питании сама (DRF-1295). Заглушка отсюда закрывает
+    # и этот путь. ``health_screening`` не в ``NUTRITION_ONLY_TOOL_NAMES`` —
+    # см. комментарий у константы.
+    if name in NUTRITION_ONLY_TOOL_NAMES and not _nutrition_enabled():
+        logger.info(
+            "orchestrator.nutrition_global.tool_nutrition_off tool=%s trace=%s", name, trace_id
+        )
+        return SkillResult(
+            reply_text=_nutrition_unavailable_text(),
+            meta={"reply_kind": f"{skill_name}_nutrition_off"},
+        )
+
     skill = _skill_by_name(skill_name)
     if skill is None:
         logger.warning(

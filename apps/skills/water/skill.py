@@ -65,6 +65,19 @@ _MAX_LEN = 30
 _AYLA_DOWN_FALLBACK = "Не получилось записать прямо сейчас — попробуй через минуту."
 
 
+def _nutrition_enabled() -> bool:
+    """DRF-1994 — тот же читатель флага, что у меню, анкеты и хендлера."""
+    from apps.skills.menu.marketplace import nutrition_enabled
+
+    return nutrition_enabled()
+
+
+def _nutrition_unavailable_text() -> str:
+    from apps.skills.menu.marketplace import NUTRITION_UNAVAILABLE_TEXT
+
+    return NUTRITION_UNAVAILABLE_TEXT
+
+
 def _consent_open(bot_user) -> bool:
     """DRF-1926: то же правило, что у записи еды в чате (``text_entry._consent_open``).
 
@@ -89,6 +102,18 @@ class WaterSkill:
         return isinstance(result, BeverageMatch)
 
     def handle(self, context: SkillContext) -> SkillResult:
+        # DRF-1994 (решение U) / DRF-1295 — вода ПИШЕТ в дневник, значит
+        # это вход в дневник, и он под тем же единым выключателем. Ворота
+        # в ``handle``, не в ``matches``: иначе «стакан воды» ушёл бы
+        # дальше по лестнице (food_clarify → модель) вместо честной
+        # заглушки. Сюда же приходит инструмент ``log_water`` через
+        # ``nutrition_global._run_skill``.
+        if not _nutrition_enabled():
+            return SkillResult(
+                reply_text=_nutrition_unavailable_text(),
+                meta={"reply_kind": "water_nutrition_off"},
+            )
+
         text = context.message_text.strip()
         parsed = parse_beverage(text)
 

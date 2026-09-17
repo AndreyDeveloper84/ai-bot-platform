@@ -32,6 +32,19 @@ from apps.orchestrator.memory import short_term
 pytestmark = pytest.mark.django_db
 
 
+@pytest.fixture(autouse=True)
+def _nutrition_contour_on(settings):
+    """DRF-1994 — этот модуль проверяет контур питания ВКЛЮЧЁННЫМ.
+
+    До единого выключателя пути анкеты/дневника/воды флаг не читали, и
+    модуль работал при любом его значении. Теперь умолчание ``False``
+    (fail-closed по решению владельца) даёт заглушку — и то, что модуль
+    всегда предполагал, названо явно. Выключенное поведение живёт в
+    ``test_nutrition_single_switch_1994``.
+    """
+    settings.NUTRITION_ENABLED = True
+
+
 # --------------------------------------------------------------------------- #
 # Оснастка — та же, что у C01 (apps/channels/tests/test_first_contact_c01.py)   #
 # --------------------------------------------------------------------------- #

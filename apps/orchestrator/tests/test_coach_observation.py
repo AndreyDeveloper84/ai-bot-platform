@@ -55,6 +55,20 @@ from apps.orchestrator.food_history import Meal, Status, TodayDiary
 
 pytestmark = pytest.mark.django_db(transaction=True)
 
+
+@pytest.fixture(autouse=True)
+def _nutrition_contour_on(settings):
+    """DRF-1994 — этот модуль проверяет контур питания ВКЛЮЧЁННЫМ.
+
+    До единого выключателя пути анкеты/дневника/воды флаг не читали, и
+    модуль работал при любом его значении. Теперь умолчание ``False``
+    (fail-closed по решению владельца) даёт заглушку — и то, что модуль
+    всегда предполагал, названо явно. Выключенное поведение живёт в
+    ``test_nutrition_single_switch_1994``.
+    """
+    settings.NUTRITION_ENABLED = True
+
+
 #: 12:00 в Москве — «сегодня» для предела «раз в сутки»: 2026-08-23.
 NOON = datetime(2026, 8, 23, 9, 0, tzinfo=dt_timezone.utc)
 NEXT_DAY = NOON + timedelta(days=1)
