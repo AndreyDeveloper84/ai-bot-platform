@@ -89,6 +89,13 @@ EXPECTED: dict[str, tuple[int, str, str]] = {
         "кабинет мастера, список услуг — sellable и причина",
     ),
     "apps/master_api/views.py": (1, SHOWS_REASON, "кабинет мастера, профиль — sellable и причина"),
+    # DRF-1814 (часть A): бейдж «Принимает сегодня» — обещание клиенту; слот
+    # спрашивается по первому ПРОДАВАЕМОМУ ребру с мостом — через предикат.
+    "apps/master_api/views_profile_card.py": (
+        1,
+        SELLABLE,
+        "карточка профиля, услуга для слотов на сегодня — только продаваемое ребро",
+    ),
     "apps/admin_api/views.py": (
         1,
         SHOWS_REASON,

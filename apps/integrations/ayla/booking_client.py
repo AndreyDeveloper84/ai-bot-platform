@@ -1524,6 +1524,73 @@ class AylaBookingHTTPClient:
         )
         return self._ok(resp, success=(200,))
 
+    # ── M22 карточка профиля и портфолио (DRF-1814; каталог #471, #455) ────────
+    # Тот же субъект и тот же bearer, что у PATCH выше. Лимиты (``limits``)
+    # приходят из каталога и нигде здесь не повторяются: один источник для
+    # экрана профиля (DRF-1960). Портфолио: до ``limit`` фото — число тоже
+    # каталога; 11-е он отклоняет 400 ``portfolio_limit_exceeded``.
+
+    def get_specialist_profile(
+        self,
+        *,
+        specialist_id: str,
+        external_user_id: str,
+    ) -> dict[str, Any]:
+        """``GET internal/specialists/{id}/profile/`` — состояние + ``limits``."""
+        resp = self._request(
+            "GET",
+            f"specialists/{specialist_id}/profile/",
+            external_user_id=external_user_id,
+        )
+        return self._ok(resp, success=(200,))
+
+    def list_specialist_portfolio(
+        self,
+        *,
+        specialist_id: str,
+        external_user_id: str,
+    ) -> dict[str, Any]:
+        """``GET internal/specialists/{id}/portfolio/`` — ``{items, count, limit}``."""
+        resp = self._request(
+            "GET",
+            f"specialists/{specialist_id}/portfolio/",
+            external_user_id=external_user_id,
+        )
+        return self._ok(resp, success=(200,))
+
+    def upload_specialist_portfolio_item(
+        self,
+        *,
+        specialist_id: str,
+        external_user_id: str,
+        filename: str,
+        content: bytes,
+        content_type: str,
+    ) -> dict[str, Any]:
+        """``POST internal/specialists/{id}/portfolio/`` — multipart ``image``, 201."""
+        resp = self._request(
+            "POST",
+            f"specialists/{specialist_id}/portfolio/",
+            files={"image": (filename, content, content_type)},
+            external_user_id=external_user_id,
+        )
+        return self._ok(resp, success=(201,))
+
+    def delete_specialist_portfolio_item(
+        self,
+        *,
+        specialist_id: str,
+        external_user_id: str,
+        item_id: str,
+    ) -> dict[str, Any]:
+        """``DELETE internal/specialists/{id}/portfolio/{item}/`` — ``{count, limit}``."""
+        resp = self._request(
+            "DELETE",
+            f"specialists/{specialist_id}/portfolio/{item_id}/",
+            external_user_id=external_user_id,
+        )
+        return self._ok(resp, success=(200,))
+
     # ── M8 выбор услуг мастера и его цена (DRF-1895; каталог #443 / #444) ─────
     # Субъект — сам мастер: профиль в URL обязан быть его собственным, иначе
     # каталог отвечает 403 → BookingBadRequestError. Счётчики selected /
