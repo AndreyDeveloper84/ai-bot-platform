@@ -28,9 +28,12 @@ human-readable ``detail``. View layer maps ``slug`` to HTTP status:
 * ``visit_in_past`` → 400
 * ``slot_unavailable`` → 409
 * ``master_archived`` → 409 (race: deactivated after we resolved id)
+* ``master_catalog_unlinked`` → 404 (the catalog does not know this row —
+  ``catalog_specialist_id`` is empty, so every booking path would raise
+  instead of booking)
 * ``tenant_mismatch`` → 403
 
-The three master refusals come from one place —
+Every master refusal comes from one place —
 ``apps.booking.services.master_gate.master_sale_refusal`` — which asks
 the product-wide sale gate (``apps.catalog.master_state.sale_block``)
 instead of re-assembling its columns here. ``transitions.commit_reschedule``

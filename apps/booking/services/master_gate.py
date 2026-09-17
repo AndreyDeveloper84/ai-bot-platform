@@ -56,9 +56,12 @@ from apps.catalog.master_state import SaleBlock, sale_block
 #: Причина «не продаётся» → стабильный слаг отказа брони.
 #:
 #: ``revoked`` и ``pending`` названы теми же слагами, которыми обе точки
-#: отвечали до DRF-1548, — контракт наружу не менялся. Новых здесь два:
-#: ``master_ayla_unlinked`` (DRF-1548) и ``master_profile_incomplete``
-#: (DRF-1521). Четыре причины — четыре слага, ни одного общего.
+#: отвечали до DRF-1548, — контракт наружу не менялся.
+#:
+#: **Сколько причин, столько и слагов, ни одного общего.** Числом это
+#: правило не записано намеренно: прежняя редакция говорила «четыре
+#: причины — четыре слага» и была неверна уже при пяти. Полноту держит
+#: тест, а не счёт в комментарии.
 #:
 #: ``master_profile_incomplete`` обязан отличаться от
 #: ``master_ayla_unlinked``, хотя клиенту оба означают «к этому мастеру
@@ -70,6 +73,7 @@ SALE_BLOCK_SLUG: Final[Mapping[SaleBlock, str]] = MappingProxyType(
         "revoked": "master_archived",
         "pending": "master_not_bookable",
         "ayla_unlinked": "master_ayla_unlinked",
+        "catalog_unlinked": "master_catalog_unlinked",
         "profile_incomplete": "master_profile_incomplete",
         "schedule_unconfirmed": "master_schedule_unconfirmed",
     }
@@ -99,6 +103,8 @@ def master_sale_refusal(master: Any) -> tuple[str, str] | None:
         return slug, f"master invite_status={master.invite_status}"
     if block == "ayla_unlinked":
         return slug, "master has no canonical ayla_user_id; booking notification would not arrive"
+    if block == "catalog_unlinked":
+        return slug, "master has no catalog_specialist_id; the booking path would raise"
     if block == "profile_incomplete":
         return slug, "master accepted the invite but her profile is not ready for sale"
     if block == "schedule_unconfirmed":
