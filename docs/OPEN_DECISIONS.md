@@ -9654,3 +9654,92 @@ authority, evidence и `unknown_behavior`»; §5.3: «если система н
 | 7 | ayla-90 write window | временный выход из auto-mode для pre-reviewed idempotent package; отчёт APPLIED/UNCHANGED/FAILED + AUTO MODE RESTORED | решение 8 DRF-1349 | окно Linear |
 | 8 | DRF 3.18 в каталоге | HOLD до compatibility migration: golden contract PATCH personal-context, exact delta BEFORE/AFTER, consumer census, error normalizer → стабильный canonical envelope | #284, Dependabot-триаж | окно оценки |
 | 9 | Ruff 0.16 | tool upgrade GO (#1632 — как 0.15, 0 семантических изменений); 413 правил — HOLD до census (SAFE/REVIEW/SEMANTIC_RISK/NOT_APPLICABLE/POST_PILOT); repository-wide .md formatting — HOLD; версия пиннится одинаково в local/CI/pre-commit | #1632 | окно оценки |
+
+---
+
+## §154. ОТВЕЧЕН W1-06: психологический кризис — отдельная Crisis Safety Policy, не восьмая группа S1 (17.09.2026)
+
+**Решение владельца, 17.09.2026: `W1-06 = C`.** Контекст — F0 / C3 Safety Matrix, Wave 1 owner decision pack (`Ayla/docs/safety/reviews/WAVE1_OWNER_DECISIONS_F0-C3.md`, W1-06; consolidated finding CF-07 / LEGAL-F01 reconciliation report 12.09).
+
+Смысл (без переформулировки семантики S1–S10):
+
+- психологический кризис (suicide / self-harm / acute abuse) — **отдельная Crisis Safety Policy**;
+- **не** восьмая группа S1: S1 остаётся семью medical emergency groups OD-SAF-11 п. 8;
+- **тот же** Safety Engine и тот же authoritative artifact (`ayla-knowledge`, V8) — не второй safety authority;
+- **отдельный** escalation channel (кризисная линия) — medical S1 (103 / 112, пакет 3 п. 8) и crisis escalation **не смешиваются**;
+- существующий founder-approved `CRISIS_REPLY_TEXT` (PR #1084) — сохраняется как текст Crisis policy; в S1 не переносится.
+
+Остаётся открытым (не решено этим §): текст и Legal review Crisis Safety Policy; precedence при одновременном S1 + crisis; параллельная эскалация к оператору (OD-F0C3-10).
+
+Провенанс: решение принято в рабочем контексте оркестратора safety 17.09.2026, до этой записи существовало только в документах (`F0-C3-safety-matrix.md` §14.4, Wave 1 pack) с пометкой `REGISTRY WRITE PENDING`.
+
+---
+
+## §155. ОТВЕЧЕН W1-07: до согласия HEALTH — только S1 protective detection, transient, без clarification и durable evidence (Controlled Pilot, 17.09.2026)
+
+**Решение владельца, 17.09.2026: `W1-07 = A for Controlled Pilot`.** Контекст — Wave 1 pack W1-07 (CF-08 / LEGAL-F02).
+
+До согласия на обработку данных о здоровье (HEALTH consent):
+
+- S1 protective detection **разрешён** — transient / in-turn;
+- **без** health clarification (вопросы не задаются);
+- **без** durable health evidence value (значение не сохраняется);
+- S2–S9 **не выполняются** как полноценная health evaluation;
+- semantic safety-sensitive recommendation **закрыта consumer consent gate** (reason `CONSENT_REQUIRED` на уровне consumer / DecisionReadiness); каталог и direct booking — по [§72] / C2;
+- `consent gate != SafetyState`: отсутствие согласия — не S10-ветка, не `UNKNOWN`, не `ERROR`, не `CLARIFY`, не рендерится как «опасно».
+
+Область: Controlled Pilot. Переход к варианту B (transient детекция всех классов без хранения) — только после подтверждения Legal и зелёных privacy guard tests (матрица §13.1). Retention / persistence safety evidence — W1-08, открыт.
+
+Провенанс: как §154 — рабочий контекст 17.09.2026, `REGISTRY WRITE PENDING` до этой записи.
+
+---
+
+## §156. ОТВЕЧЕН: выход из safety-state — `S1_STOP` снимается только явным `safety_recheck` → `CLEARED_BY_RECHECK` (16.09.2026)
+
+**Источник — слово владельца напрямую:** `Ayla/docs/Q1.md` (файл 16.09.2026 11:26), строка 16. Дословно:
+
+> Выход из safety-state тоже фиксирую. Обычная следующая реплика, новый intent и TTL не снимают STOP. S1_STOP снимается только отдельным явным safety_recheck: пользователь сам запускает повторную проверку текущего состояния; все обязательные S1-вопросы получают отрицательные/безопасные ответы; detector снова проходит; результат записывается как CLEARED_BY_RECHECK с provenance. Если остаётся UNKNOWN, неоднозначность или новый сигнал — STOP остаётся. Это не «медицинское разрешение», а снятие продуктового safety-блокиратора по новой явной самооценке пользователя. Для CLARIFY более низкого уровня состояние может сниматься ответом на конкретный safety-вопрос.
+
+Cross-reference: `Ayla/docs/CURRENT_DECISIONS_2026-09-16.md` (строка «Выход из safety-state», RESOLVED → «Записан в DRF-2040»); DRF-2040 (описание — этот же текст дословно; открытые вопросы 1–3: точка входа, носитель provenance `CLEARED_BY_RECHECK`, граница с `CLARIFY` более низкого уровня — Owner / Safety).
+
+Смысл (product mechanics; новой wording не вводится):
+
+- `S1_STOP` **не снимается** обычным следующим ходом, новым intent, TTL, новой сессией (V4 FINAL FREEZE 09.09);
+- снятие — **только** отдельным явным `safety_recheck`, который запускает пользователь;
+- успешный product result = `CLEARED_BY_RECHECK` с provenance; условия — все обязательные S1-вопросы получают отрицательные / безопасные ответы **и** detector снова проходит;
+- `UNKNOWN` / неоднозначность / новый S1 → STOP persists;
+- это снятие **продуктового** safety-блокиратора по новой явной самооценке пользователя, **не** medical clearance;
+- `CLARIFY` более низкого уровня может сниматься ответом на конкретный safety-вопрос.
+
+Clinical sufficiency recheck (для каких групп допустим, минимальные вопросы, достаточность ответов) — предмет physician review (Clinical Review Pack §11, CQ-CTX-01…03), не этого §.
+
+---
+
+## §157. ОТВЕЧЕН VQ3: текст медицинской эскалации S1 — 103 / 112, отдельно от psych-crisis (16.09.2026)
+
+**Источник — слово владельца напрямую:** `Ayla/docs/Q1.md` (16.09.2026 11:26), строки 10–14. Дословно:
+
+> VQ3 — текст 103/112 утверждаю сейчас. Для явного S1 medical red flag отдельный от psych-crisis ответ:
+>
+> «По описанию это может требовать срочной медицинской помощи. Я не буду сейчас подбирать процедуру или оформлять запись. Если это происходит сейчас, симптомы усиливаются или тебе резко плохо — позвони 103 или 112. Если можешь, попроси человека рядом помочь тебе.»
+>
+> Никаких диагнозов, никаких «скорее всего». Этот текст относится именно к медицинской S1-эскалации.
+
+Cross-reference: DRF-2000 (comment 16.09 08:31 UTC — перенесено дословно, «править нельзя ни слова»); `Ayla/docs/CURRENT_DECISIONS_2026-09-16.md` (VQ3, RESOLVED); пакет 3 п. 8 (15.09: 103 / 112, не психологическая линия, не администратор как medical authority).
+
+Смысл:
+
+- это утверждённый владельцем текст **именно медицинской S1-эскалации** — не psychological crisis channel (`CRISIS_REPLY_TEXT`, PR #1084, остаётся для Crisis policy, §154);
+- physician review (VQ1, лицензированный врач) проверяет **медицинскую корректность** текста, не утверждает и не переписывает его;
+- production controlled-template gate (OD-F0C3-08 / V5 — templates всех состояний, Legal review) **остаётся OPEN** — этот § закрывает текст S1, не gate;
+- runtime сегодня текст не несёт (кардиальные фразы → `CRISIS_REPLY_TEXT`; red flag → `RED_FLAG_REPLY` без номера) — исполнение DRF-2000.
+
+---
+
+## §158. ЗАРЕГИСТРИРОВАН: immutable owner record OD-SAF-11…22 (тексты owner rulings S1–S10 от 12.09.2026)
+
+**Запись:** `Ayla/docs/safety/reviews/OWNER_RULINGS_OD-SAF-11-22_IMMUTABLE_RECORD.md`, record v1.0 от 17.09.2026, sha256 `bf5589a0fbfc528a8aff91b8b796b3cc8d6355e3b39d68fbfd461ef77ec83177`.
+
+Содержание: тексты owner rulings **OD-SAF-11…OD-SAF-22** (слово владельца 12.09.2026; S1–S10 owner-level semantics, `NORMAL` как имя состояния, `missing user fact != missing policy`) — строки §5.1 baseline `docs/safety/F0-C3-safety-matrix.md` v0.12 дословно + owner-блоки §6.1–6.10 v0.12 дословно с sha256 каждого блока (baseline v0.12 sha256 `12451baf4931e3e72c8dff1dd567b2433c4cfb85323cbcb7a7b29a1678516e49`). Статус — `IMMUTABLE RECORD`: правки в файл не вносятся, новое слово владельца = новая запись; fidelity рабочей копии (§5.1 / §6 матрицы) проверяется по хешам (CF-28 reconciliation report 12.09).
+
+Что этот § **не** делает: не утверждает матрицу (остаётся `WORKING DRAFT`), не подтверждает fidelity записи слову владельца — это подтверждает владелец; Clinical fidelity до подтверждения = «внутренне согласовано с record».
