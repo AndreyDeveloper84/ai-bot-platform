@@ -22,6 +22,7 @@ from django.contrib.admin.helpers import ACTION_CHECKBOX_NAME
 from django.http import HttpRequest
 from django.shortcuts import render
 from django.utils import timezone
+from django.utils.html import format_html, format_html_join
 
 from apps.adminconsole.theme import AylaAdminMedia, BadgeMap, absent, badge
 from apps.catalog.master_state import is_available, sale_block
@@ -410,8 +411,101 @@ class CatalogMasterAdmin(_MirrorAdminBase):
                 ),
             },
         ),
+        (
+            "Готовность к работе",
+            {
+                "description": (
+                    "Проекция по живым фактам, ничего не хранится. Показана "
+                    "ПОПУНКТНО и намеренно без общего слова «готов»: пункт "
+                    "«места работы» отвечает «возможности ещё нет», и "
+                    "совокупное «готов» было бы истинным ИЗ-ЗА отсутствующей "
+                    "возможности — то есть врало бы устойчиво, а не изредка."
+                ),
+                "fields": ("setup_readiness",),
+            },
+        ),
     )
-    readonly_fields = _SYNC_MANAGED_FIELDS + _PLATFORM_FIELDS
+    # Вычисляемое поле дописано ЗДЕСЬ, а не внутрь кортежей: обе части
+    # перечисляют поля модели, а это отображение.
+    readonly_fields = _SYNC_MANAGED_FIELDS + _PLATFORM_FIELDS + ("setup_readiness",)
+
+    #: Состояния пункта готовности словами оператора. Ключи ровно из
+    #: ``ItemState`` (``apps.master_api.services.onboarding_readiness``), и
+    #: полнота держится тестом: забытый ключ печатал бы машинное имя.
+    #:
+    #: ``unavailable`` — то, ради чего попунктный показ и заведён. Это НЕ
+    #: «не настроено»: мастер ничего не мог сделать, возможности нет в
+    #: продукте. Слить его с ``missing`` значит отправить оператора чинить
+    #: то, что не чинится.
+    _READINESS_BADGES: ClassVar[BadgeMap] = {
+        "done": ("ok", "готово"),
+        "missing": ("stop", "не настроено"),
+        "unknown": ("off", "не удалось спросить"),
+        "unavailable": ("off", "возможности ещё нет"),
+    }
+
+    #: Подписи пунктов. Ключи — ``ReadinessItem.key``.
+    _READINESS_ITEM_LABELS: ClassVar[dict[str, str]] = {
+        "services": "Услуги",
+        "location": "Места работы",
+        "hours": "Расписание",
+        "profile": "Профиль",
+    }
+
+    @admin.display(description="Готовность по пунктам")
+    def setup_readiness(self, obj: CatalogMaster):  # type: ignore[no-untyped-def]
+        """Попунктная готовность мастера — без совокупного «готов».
+
+        Спрашивает ``build_readiness``, а не пересобирает пункты заново:
+        своя копия стала бы четвёртым словарём готовности (уже есть
+        проекция онбординга, ``READY``/``NOT_READY`` у каталога и гейт
+        продажи) и разошлась бы с ними при первой же правке.
+
+        ``ready`` намеренно НЕ показывается. Он истинен при отсутствующей
+        возможности ``location``, и одно слово на экране оператора значило
+        бы «всё в порядке» там, где пункт просто не построен.
+
+        ``sale_block`` тоже не показывается: его уже печатает соседняя
+        колонка «Почему не бронируется», и второе изображение одного факта
+        разошлось бы с первым.
+
+        Сетевой вызов здесь есть (пункт «расписание» спрашивает канон), и
+        поэтому поле живёт на КАРТОЧКЕ, а не в списке: один запрос на
+        строку превратил бы список в минуту ожидания.
+        """
+        from apps.master_api.services.onboarding_readiness import build_readiness
+
+        readiness = build_readiness(obj)
+
+        rows = []
+        for item in readiness.items:
+            tone, label = self._READINESS_BADGES.get(item.state, ("off", item.state))
+            name = self._READINESS_ITEM_LABELS.get(item.key, item.key)
+            # Причина показывается рядом с состоянием, когда она есть:
+            # «не удалось спросить» без причины оператору не помогает.
+            suffix = f" ({item.reason})" if item.reason else ""
+            rows.append((name, badge(tone, label + suffix, item.state)))
+
+        identity_state = readiness.identity.get("state") or "unknown"
+        # Распаковка пары через ``*`` работала бы ровно до первой карты с
+        # тремя элементами и сломалась бы молча. Пишем как у соседей.
+        identity_tone, identity_label = self._IDENTITY_BADGES.get(
+            identity_state, ("off", identity_state)
+        )
+        rows.append(("Связь с Ayla", badge(identity_tone, identity_label, identity_state)))
+
+        return format_html(
+            "<ul class='ayla-readiness'>{}</ul>",
+            format_html_join("", "<li>{}: {}</li>", rows),
+        )
+
+    #: Состояния связи — из ``identity_facts``.
+    _IDENTITY_BADGES: ClassVar[BadgeMap] = {
+        "linked": ("ok", "связан"),
+        "unlinked": ("stop", "не связан"),
+        "pending": ("off", "ждёт подтверждения"),
+        "rejected": ("stop", "отклонена"),
+    }
 
     def get_queryset(self, request):  # type: ignore[no-untyped-def]
         return self.model.all_tenants.select_related("tenant", "identity_link")

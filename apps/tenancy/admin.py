@@ -34,10 +34,11 @@ from django.core.exceptions import PermissionDenied, ValidationError
 from django.http import Http404, HttpRequest, HttpResponse, HttpResponseRedirect
 from django.template.response import TemplateResponse
 from django.urls import path
+from django.utils import timezone
 from django.utils.html import format_html, format_html_join
 
 from apps.adminconsole.theme import AylaAdminMedia
-from apps.tenancy.models import Tenant
+from apps.tenancy.models import StaffInvite, Tenant, TenantStaff
 from apps.tenancy.onboarding import (
     REASON_LABELS,
     ConnectError,
@@ -169,12 +170,23 @@ class TenantAdmin(AylaAdminMedia, admin.ModelAdmin):
     empty_value_display = "нет данных"
     readonly_fields = (
         "id",
+        # Решение владельца, дословно: «нельзя случайно активировать
+        # operator-действием». До этой строки галочка «активен» правилась
+        # прямо из карточки — то есть салон включался мимо всяких
+        # проверок, одним движением и без следа о том, кто это сделал.
+        #
+        # Возможность не отнимается насовсем: явная реактивация уезжает в
+        # доменную операцию, где у неё будут проверки и авторство.
+        # Командный путь остаётся и сейчас. Здесь закрывается СЛУЧАЙНОЕ
+        # действие, а не намеренное.
+        "is_active",
         "is_system",
         "created_at",
         "updated_at",
         "telegram_bot_token_state",
         "telegram_webhook_secret_state",
         "salon_visibility_state",
+        "inactive_consequences",
         "last_catalog_sync_at",
         "last_catalog_sync_ok_at",
     )
@@ -182,7 +194,16 @@ class TenantAdmin(AylaAdminMedia, admin.ModelAdmin):
         (
             "Салон",
             {
-                "fields": ("id", "slug", "name", "city", "address", "is_active", "is_system"),
+                "fields": (
+                    "id",
+                    "slug",
+                    "name",
+                    "city",
+                    "address",
+                    "is_active",
+                    "inactive_consequences",
+                    "is_system",
+                ),
                 "description": (
                     "Город участвует в городском поиске: без него салон "
                     "отсутствует во всех городских ответах (DRF-1510). "
@@ -654,6 +675,49 @@ class TenantAdmin(AylaAdminMedia, admin.ModelAdmin):
             return False
         return super().has_delete_permission(request, obj)
 
+    @admin.display(description="Что запрещает неактивность")
+    def inactive_consequences(self, obj: Tenant) -> str:
+        """Последствия неактивности — словами, а не галочкой.
+
+        Галочка ``is_active`` уже стояла в карточке, и оператору она не
+        говорила ни одного из четырёх последствий. «Флаг показан» и
+        «человек знает, что произойдёт» — разные вещи, и дорогая здесь
+        вторая: по ней решают, чинить салон или заводить заново.
+
+        Три ответа, а не два, по образцу соседних колонок этой же
+        карточки: у новой строки (салон ещё не сохранён) ответа нет
+        вовсе, и подставлять ей «всё разрешено» значило бы утверждать
+        измеренное там, где ничего не измеряли.
+
+        «Не сохранена» определяется по ``_state.adding``, а НЕ по
+        ``pk is None``: ``Tenant.id`` объявлен с ``default=uuid.uuid4``,
+        поэтому ключ есть у строки уже в момент создания объекта в
+        памяти. Проверка по ``pk`` здесь никогда не сработала бы — и
+        выглядела бы при этом совершенно рабочей.
+        """
+        if obj._state.adding:
+            return "нет данных"
+        if obj.is_active:
+            return "Салон активен — ограничений по этой причине нет."
+        return format_html(
+            "<b>Салон неактивен.</b> Пока это так:<ul>{}</ul>"
+            "<i>Снять неактивность галочкой нельзя — это отдельная "
+            "операция с проверками.</i>",
+            format_html_join(
+                "",
+                "<li>{}</li>",
+                (
+                    (item,)
+                    for item in (
+                        "мастера нельзя сделать публичным;",
+                        "новую запись начать нельзя;",
+                        "привязка локации или услуги не снимает запрет на публикацию;",
+                        "случайно активировать салон действием оператора нельзя.",
+                    )
+                ),
+            ),
+        )
+
     def delete_model(self, request, obj):
         if getattr(obj, "is_system", False):
             raise PermissionDenied(
@@ -672,3 +736,203 @@ class TenantAdmin(AylaAdminMedia, admin.ModelAdmin):
                 "selection or clear `is_system` first."
             )
         super().delete_queryset(request, queryset)
+
+
+# ---------------------------------------------------------------------------
+# Platform Operations — доступы сотрудников и приглашения, ТОЛЬКО ЧТЕНИЕ.
+#
+# До этих карточек оператор не видел в админке ни одного ответа на вопрос
+# «кто в этом салоне админ» — модели есть с ADR-0008, карточек нет ни у
+# одной. Смотреть приходилось в базу.
+#
+# Почему только чтение, и почему это не временная мера. Выдача и отзыв
+# доступа — операции доменного слоя: у них свои проверки, свой аудит и
+# своё «кем выдан». Admin-форма, которая пишет в эти таблицы напрямую,
+# воспроизвела бы бизнес-логику мимо них — именно то, что запрещено
+# первым пунктом задачи. Поэтому здесь показ, а мутации придут ручкой
+# домена, когда её контракт будет объявлен.
+#
+# Идиома запрета взята дословно у зеркала каталога
+# (``apps/catalog/admin.py``::``_MirrorAdminBase``): три ``has_*_permission``
+# возвращают ``False`` безусловно, а не «False, если не суперпользователь» —
+# иначе запрет держался бы на роли читателя, а не на природе таблицы.
+# ---------------------------------------------------------------------------
+
+
+class _ReadOnlyStaffAdmin(AylaAdminMedia, admin.ModelAdmin):
+    """Общая часть обеих карточек: показывать, но не трогать.
+
+    Видимость закрыта отдельным правом, и это решение владельца:
+    ``is_staff`` означает ровно «может войти в Django Admin» и бизнес-правом
+    не является. Здесь показ идёт ПОПЕРЁК САЛОНОВ (``get_queryset`` берёт
+    ``all_tenants``), то есть это ровно тот cross-tenant доступ, ради
+    которого право и заведено. Без этой проверки разделение существовало бы
+    на словах: любой, кто попал в админку, видел бы доступы всех салонов.
+    """
+
+    #: Право оператора платформы. Строкой, а не импортом: Django сверяет
+    #: право по имени, и имя обязано совпадать с ``Meta.permissions``.
+    PLATFORM_OPERATIONS_PERM = "tenancy.platform_operations"
+
+    #: Как выглядит отсутствие значения. Не прочерк и не ноль: прочерк в
+    #: колонке читается как ноль, а ноль — как измеренное значение.
+    empty_value_display = "нет данных"
+
+    def has_view_permission(self, request: HttpRequest, obj=None) -> bool:
+        return request.user.has_perm(self.PLATFORM_OPERATIONS_PERM)
+
+    def has_module_permission(self, request: HttpRequest) -> bool:
+        # Иначе карточка светится в индексе приложения тому, кто открыть
+        # её всё равно не сможет: список имён — тоже сведения.
+        return request.user.has_perm(self.PLATFORM_OPERATIONS_PERM)
+
+    def get_queryset(self, request: HttpRequest):
+        # ``all_tenants`` — как у зеркала: админка показывает все салоны,
+        # а не только тот, в контексте которого пришёл запрос.
+        return self.model.all_tenants.all()
+
+    def has_add_permission(self, request: HttpRequest) -> bool:
+        return False
+
+    def has_change_permission(self, request: HttpRequest, obj=None) -> bool:
+        return False
+
+    def has_delete_permission(self, request: HttpRequest, obj=None) -> bool:
+        return False
+
+
+@admin.register(TenantStaff)
+class TenantStaffAdmin(_ReadOnlyStaffAdmin):
+    """Кто и с какой ролью имеет доступ к салону (ADR-0008).
+
+    Роли здесь ровно три — ``receptionist``, ``admin``, ``owner``. Мастера
+    в этой таблице НЕ живут: мастер — это связь
+    ``CatalogMaster.linked_bot_user``, а не строка доступа. Колонка
+    «Мастер» отсутствует намеренно, чтобы карточка не утверждала
+    членства, которого в модели нет.
+    """
+
+    list_display = ("tenant", "bot_user", "role", "access_state", "created_at", "created_by")
+    list_filter = ("role", "tenant")
+    search_fields = ("tenant__name", "tenant__slug")
+    search_help_text = "Ищет по названию салона и его коду."
+    ordering = ("-created_at",)
+    date_hierarchy = "created_at"
+    # Поля перечислены поимённо, а не оставлены на усмотрение Django:
+    # список по умолчанию берёт все редактируемые поля, и новое поле
+    # модели появилось бы на экране само, никем не решённое.
+    fields = ("tenant", "bot_user", "role", "created_at", "created_by", "deactivated_at")
+    readonly_fields = fields
+
+    @admin.display(description="Состояние доступа")
+    def access_state(self, obj: TenantStaff) -> str:
+        """Действует доступ или отозван — словами, а не датой.
+
+        ``deactivated_at`` пустой читается оператором как «поле не
+        заполнили», а не как «доступ действует». Разница дорогая: по ней
+        решают, есть ли у человека права прямо сейчас.
+        """
+        if obj.deactivated_at is None:
+            return "Действует"
+        return f"Отозван {obj.deactivated_at:%d.%m.%Y}"
+
+
+@admin.register(StaffInvite)
+class StaffInviteAdmin(_ReadOnlyStaffAdmin):
+    """Приглашения сотрудников: кого позвали, кем и чем это кончилось.
+
+    ВНИМАНИЕ: в боте слово «приглашение» означает ДВА разных предмета, и
+    путать их дорого.
+
+    * **Здесь** — ``StaffInvite`` (DRF-1061): приглашение КОДОМ, у него
+      ``code_hash`` и срок. Им зовут человека стать сотрудником салона.
+    * **В карточке мастера** (``apps/catalog/admin.py``) — совсем другое:
+      ``CatalogMaster.invite_status`` / ``invite_token``, приглашение
+      МАСТЕРА, приезжающее синхронизацией и отзываемое действием
+      ``revoke_invite_masters``.
+
+    У обеих карточек колонка называется «состояние приглашения», и это
+    единственное, что у них общего. Отзыв одного не отзывает другое.
+
+    **Отозвать выписанный код нечем — и это состояние системы, а не
+    ограничение этой карточки.** Замер ayla-5f: функций ``revoke``/
+    ``cancel`` в ``apps/identity/services/staff_invites.py`` — ноль из
+    пятнадцати, при положительном контроле той же командой по
+    ``staff_revoke.py`` (1 из 1). По всему дереву ``StaffInvite`` не
+    гасит никто: ни админка, ни API, ни сервисный слой. Гашение только
+    пассивное — срок (``expires_at``) и однократность (``used_at``).
+    Поэтому здесь нет действия отзыва: звать нечего, а кнопка,
+    показывающая несуществующую возможность, хуже её отсутствия.
+
+    **А отмена МАСТЕРСКОГО приглашения бывает трёх происхождений**, и
+    соседняя колонка их не различает: действие оператора в каталоге
+    (``catalog/admin.py``), отказ самого мастера
+    (``master_api/views.py``) и склейка DRF-1507, где строка замещается
+    другой — единственный случай, когда гасится и токен. На экране все
+    три выглядят одинаково «отменено».
+
+    ``code_hash`` не показывается НИГДЕ — ни в списке, ни в карточке.
+    Это дайджест кода приглашения, то есть учётные данные; в админке им
+    не место даже на чтение. Поля перечислены поимённо именно поэтому:
+    умолчание Django показало бы всё редактируемое, включая его.
+
+    Роли здесь ЧЕТЫРЕ, в отличие от таблицы доступов: добавлен
+    ``master``. Приглашение мастера — законный случай, а строки доступа
+    у мастера не возникает: принятое приглашение связывает
+    ``CatalogMaster``, а не заводит ``TenantStaff``.
+    """
+
+    list_display = ("tenant", "role", "catalog_master", "invite_state", "expires_at", "created_by")
+    list_filter = ("role", "tenant")
+    search_fields = ("tenant__name", "tenant__slug", "note")
+    search_help_text = "Ищет по названию салона, его коду и заметке."
+    ordering = ("-created_at",)
+    date_hierarchy = "created_at"
+    #: Поля карточки одним кортежем: на него ссылаются и ``fieldsets``, и
+    #: ``readonly_fields``. Django не разрешает объявить ``fields`` и
+    #: ``fieldsets`` разом, а два перечня разошлись бы молча.
+    _INVITE_FIELDS = (
+        "tenant",
+        "role",
+        "catalog_master",
+        "expires_at",
+        "used_at",
+        "used_by",
+        "created_at",
+        "created_by",
+        "note",
+    )
+    fieldsets = (
+        (
+            "Приглашение",
+            {
+                "fields": _INVITE_FIELDS,
+                "description": (
+                    "Отозвать выписанный код <b>нечем</b>: механизма отзыва "
+                    "нет ни в админке, ни в API, ни в сервисном слое. "
+                    "Приглашение гасится только сроком (<i>Действует до</i>) "
+                    "или погашением (<i>Использовано</i>). Это состояние "
+                    "системы, а не ограничение экрана — поэтому здесь нет "
+                    "кнопки отзыва: кнопка, показывающая несуществующую "
+                    "возможность, хуже её отсутствия."
+                ),
+            },
+        ),
+    )
+    readonly_fields = _INVITE_FIELDS
+
+    @admin.display(description="Состояние приглашения")
+    def invite_state(self, obj: StaffInvite) -> str:
+        """Три ответа, а не два.
+
+        «Не использовано» и «срок истёк» — разные состояния, и слить их
+        значило бы спрятать ровно тот случай, ради которого оператор сюда
+        пришёл: приглашение, которое человек уже не сможет принять.
+        Порядок проверок тоже не косметика — использованное приглашение
+        остаётся использованным после истечения срока.
+        """
+        if obj.used_at is not None:
+            return f"Использовано {obj.used_at:%d.%m.%Y}"
+        if obj.expires_at is not None and obj.expires_at <= timezone.now():
+            return f"Срок истёк {obj.expires_at:%d.%m.%Y}"
+        return "Ждёт принятия"
