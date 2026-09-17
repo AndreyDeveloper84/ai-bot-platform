@@ -48,7 +48,8 @@ SKIP_PARTS: frozenset[str] = frozenset({"tests", "migrations"})
 #: Строки, которые чинит #1783 (DRF-2006): файл → точное число нарушений в нём сегодня.
 #: Кто сливается ВТОРЫМ (этот PR или #1783), тот снимает запись: после слияния обоих
 #: нарушений в файле 0, и ``test_the_lines_fixed_in_1783_are_still_counted`` краснеет.
-FIXED_IN_1783: dict[str, int] = {"apps/miniapp_api/views.py": 1}
+#: 17.09: #1783 слит вторым (eeb3e5f2) — запись снята, в файле 0 нарушений.
+FIXED_IN_1783: dict[str, int] = {}
 
 
 def _is_logger_call(node: ast.AST) -> bool:
