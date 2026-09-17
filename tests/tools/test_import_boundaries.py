@@ -291,7 +291,15 @@ class TestRealReposClean:
         observed = {
             v.key
             for v in found
-            if v.key is not None and v.key[0] != ib.CATALOG_CROSS_TENANT_CONTRACT_ID
+            if v.key is not None
+            and v.key[0]
+            not in (
+                ib.CATALOG_CROSS_TENANT_CONTRACT_ID,
+                # Declared before the code was written: this node guards the
+                # IMPORT-EDGE baseline, and SCH1 is the second ORM-shape rule,
+                # excluded here for the same reason MKT1 already is.
+                ib.SCHEDULING_CROSS_TENANT_CONTRACT_ID,
+            )
         }
         assert observed == set(ib.BASELINE)
 
@@ -380,6 +388,151 @@ class TestCatalogCrossTenantRule:
         assert "STALE BASELINE" in v[0].message
 
 
+# ── SCH1: cross-tenant scheduling-read rule (DRF-2022) ────────────────
+#
+# MKT1 above polices the catalog mirrors (CatalogMaster/CatalogService).
+# The scheduling tables carry the SAME tenant posture and were never
+# policed: CATALOG_CROSS_TENANT_BASELINE records
+# `apps/master_api/services/schedule.py` as an accepted site, but the
+# detector's model set never contained a scheduling model, so
+# `ScheduleException.all_tenants` passed in silence. The posture was
+# written down; the guard did not hold it.
+#
+# Measured on dev 8bf99f7c before writing any of this: 19 sites in 7
+# files (16 in the same 7 after #1791+#1794). A two-sided probe with the
+# SHIPPED guard flagged the catalog control and none of the five
+# scheduling models — that, not the reds below, is the proof of blindness.
+
+
+class TestSchedulingCrossTenantRule:
+    def _scan_sch(self, root, baseline=_EMPTY):
+        # Only the scheduling rule matters here: no import contracts, and
+        # an empty catalog baseline so a shared statement cannot be
+        # silently attributed to the older rule.
+        return ib.scan_paths(
+            [root / "apps"],
+            root,
+            contracts=(),
+            catalog_baseline=_EMPTY,
+            scheduling_baseline=baseline,
+        )
+
+    def _key(self, rel: str):
+        return (
+            ib.SCHEDULING_CROSS_TENANT_CONTRACT_ID,
+            rel,
+            ib.FILE_QUALNAME,
+            ib._SCHEDULING_ROOT,
+        )
+
+    @pytest.mark.parametrize(
+        "stmt",
+        [
+            "ScheduleException.all_tenants.filter(x=1)",
+            "WorkingHours.all_tenants.all()",
+            "qs = TimeBlock.all_tenants.select_for_update().get(pk=1)",
+        ],
+    )
+    def test_scheduling_all_tenants_flagged_outside_marketplace(self, tmp_path, stmt) -> None:
+        _write(tmp_path, "apps/foo/views.py", stmt + "\n")
+        v = self._scan_sch(tmp_path)
+        assert len(v) == 1
+        assert ib.SCHEDULING_CROSS_TENANT_CONTRACT_ID in v[0].message
+
+    def test_scheduling_baselined_file_passes(self, tmp_path) -> None:
+        _write(tmp_path, "apps/foo/views.py", "ScheduleException.all_tenants.all()\n")
+        # Presence on the same tree FIRST: the rule really does fire here.
+        # Without it, the silence below would also appear if the scan had
+        # looked at nothing at all.
+        assert len(self._scan_sch(tmp_path)) == 1
+        assert self._scan_sch(tmp_path, frozenset({self._key("apps/foo/views.py")})) == []
+
+    def test_stale_scheduling_baseline_reported(self, tmp_path) -> None:
+        # The ratchet: the accepted site is gone, so the line must go too.
+        _write(tmp_path, "apps/foo/views.py", "ScheduleException.objects.all()\n")
+        v = self._scan_sch(tmp_path, frozenset({self._key("apps/foo/views.py")}))
+        assert len(v) == 1
+        assert "STALE BASELINE" in v[0].message
+
+    def test_scheduling_objects_manager_not_flagged(self, tmp_path) -> None:
+        # Positive twin: the rule bans the cross-tenant MANAGER, not the model.
+        # Same file, same scan, one token apart — so the silence is about
+        # `.objects` and not about a scan that saw nothing.
+        _write(tmp_path, "apps/foo/views.py", "ScheduleException.all_tenants.all()\n")
+        assert len(self._scan_sch(tmp_path)) == 1
+        _write(tmp_path, "apps/foo/views.py", "ScheduleException.objects.all()\n")
+        assert self._scan_sch(tmp_path) == []
+
+    def test_non_scheduling_all_tenants_ignored_by_the_new_rule(self, tmp_path) -> None:
+        # Positive twin: widening the rule must not make it police everything.
+        # The model name is the ONLY difference between the two scans below.
+        _write(tmp_path, "apps/foo/views.py", "ScheduleException.all_tenants.filter(x=1)\n")
+        assert len(self._scan_sch(tmp_path)) == 1
+        _write(tmp_path, "apps/foo/views.py", "BotUser.all_tenants.filter(x=1)\n")
+        assert self._scan_sch(tmp_path) == []
+
+    def test_scheduling_rule_has_no_marketplace_carve_out(self, tmp_path) -> None:
+        # MKT1 exempts apps/marketplace/ because cross-tenant DISCOVERY is
+        # its sanctioned home. A schedule is not discovery, so the same
+        # statement there stays a violation. Asserted, never a comment.
+        _write(tmp_path, "apps/marketplace/discovery.py", "ScheduleException.all_tenants.all()\n")
+        v = self._scan_sch(tmp_path)
+        assert len(v) == 1
+        assert ib.SCHEDULING_CROSS_TENANT_CONTRACT_ID in v[0].message
+
+    def test_one_site_yields_one_violation_not_two(self, tmp_path) -> None:
+        # Two ORM rules now read the same attribute shape. One site must
+        # not be counted by both, or every number downstream doubles.
+        _write(tmp_path, "apps/foo/views.py", "ScheduleException.all_tenants.all()\n")
+        v = ib.scan_paths(
+            [tmp_path / "apps"],
+            tmp_path,
+            contracts=(),
+            catalog_baseline=_EMPTY,
+            scheduling_baseline=_EMPTY,
+        )
+        assert [x.key[0] for x in v if x.key] == [ib.SCHEDULING_CROSS_TENANT_CONTRACT_ID]
+
+
+class TestSchedulingRuleAgainstRealRepo:
+    def test_scheduling_baseline_matches_reality(self) -> None:
+        found = ib.scan_paths(
+            [_PROJECT_ROOT / "apps"], _PROJECT_ROOT, scheduling_baseline=frozenset()
+        )
+        observed = {
+            v.key
+            for v in found
+            if v.key is not None and v.key[0] == ib.SCHEDULING_CROSS_TENANT_CONTRACT_ID
+        }
+        assert observed == set(ib.SCHEDULING_CROSS_TENANT_BASELINE)
+
+    def test_scheduling_rule_stays_file_granular_and_is_not_empty(self) -> None:
+        # `all(...)` over an empty set is vacuously true, so the lower
+        # bound belongs INSIDE this node, not in a separate courtesy test.
+        assert len(ib.SCHEDULING_CROSS_TENANT_BASELINE) >= ib.MIN_SCHEDULING_BASELINE_FILES
+        assert all(k[2] == ib.FILE_QUALNAME for k in ib.SCHEDULING_CROSS_TENANT_BASELINE)
+
+    def test_scheduling_baseline_meets_the_measured_floor(self) -> None:
+        """An empty scan must not read as a clean one.
+
+        The floor is the MINIMUM across the two measured states: 19 sites
+        on dev, 16 after #1791+#1794 land. A floor of 19 would turn red
+        the day #1794 merges — the guard has to survive what is already
+        proven, so 16 is the honest number.
+        """
+        sites = ib.count_scheduling_all_tenants_sites([_PROJECT_ROOT / "apps"], _PROJECT_ROOT)
+        assert sites >= ib.MIN_SCHEDULING_SITES, sites
+        found = ib.scan_paths(
+            [_PROJECT_ROOT / "apps"], _PROJECT_ROOT, scheduling_baseline=frozenset()
+        )
+        files = {
+            v.key[1]
+            for v in found
+            if v.key is not None and v.key[0] == ib.SCHEDULING_CROSS_TENANT_CONTRACT_ID
+        }
+        assert len(files) >= ib.MIN_SCHEDULING_BASELINE_FILES, sorted(files)
+
+
 # (`_parse_contract_and_root` used to reconstruct the baseline key by
 # scraping the violation message. DRF-1157 put the key on `Violation.key`
 # instead — the message is prose for humans, the key is data for tests.)
@@ -402,6 +555,12 @@ def _scan_row_lock(root: Path, baseline: frozenset = _EMPTY) -> list[ib.Violatio
         root,
         contracts=(),
         catalog_baseline=_EMPTY,
+        # The DRF-1130 fixtures are written with ScheduleChangeRequest
+        # .all_tenants..., which SCH1 flags — correctly. Emptying its baseline
+        # would not help (an unbaselined access is exactly what it reports), so
+        # the rule is switched off for this helper instead.
+        scheduling_baseline=_EMPTY,
+        scheduling_models=frozenset(),
         row_lock_baseline=baseline,
         hash_baseline=_EMPTY,
     )
@@ -943,6 +1102,11 @@ class TestSalonSurfacesNoPersonalContext:
             contracts=(self._S26,),
             baseline=frozenset(),
             catalog_baseline=frozenset(),
+            # Same reason as the catalog baseline above, one rule later: this
+            # tmp tree writes apps/master_api/services/dashboard.py, which SCH1
+            # pins. Without this the pin reports stale — SCH1's business, not
+            # S2.6's.
+            scheduling_baseline=frozenset(),
         )
 
     @pytest.mark.parametrize(
