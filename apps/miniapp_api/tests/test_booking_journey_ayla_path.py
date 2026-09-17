@@ -50,6 +50,7 @@ import json
 import time as time_module
 import uuid
 from datetime import datetime, timedelta
+from collections.abc import Iterator
 from typing import Any
 from urllib.parse import urlencode
 from zoneinfo import ZoneInfo
@@ -175,7 +176,7 @@ class _JourneyAylaClient:
 
 
 @pytest.fixture(autouse=True)
-def _wired(settings, monkeypatch) -> None:
+def _wired(settings, monkeypatch) -> Iterator[None]:
     """Мини-апп на пути Ayla + настоящий ingest с настоящими обработчиками.
 
     Проводка ingest взята у ``test_e2e_ingest_smoke.py`` дословно: тот же
