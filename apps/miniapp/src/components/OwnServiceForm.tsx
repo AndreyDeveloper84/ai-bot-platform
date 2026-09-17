@@ -81,6 +81,7 @@ export function OwnServiceForm({
   onSelected,
   onNotLinked,
   onSubmitStart,
+  initialDraft,
 }: {
   availability: PickAvailability;
   /** Заявка принята сервером — экран перечитывает список и показывает сообщение. */
@@ -91,8 +92,14 @@ export function OwnServiceForm({
   onNotLinked: () => void;
   /** Новая отправка началась — экран снимает прежнее сообщение (как до выноса формы). */
   onSubmitStart?: () => void;
+  /**
+   * Предзаполнение (DRF-1808, экран 02): «Другое направление» приходит сюда с
+   * названным направлением в описании. Поля остаются редактируемыми — это
+   * подсказка мастеру и владельцу, а не скрытое поле заявки.
+   */
+  initialDraft?: Partial<OwnServiceDraft>;
 }) {
-  const [draft, setDraft] = useState<OwnServiceDraft>(EMPTY_DRAFT);
+  const [draft, setDraft] = useState<OwnServiceDraft>({ ...EMPTY_DRAFT, ...initialDraft });
   const [errors, setErrors] = useState<OwnServiceErrors>({});
   const [similar, setSimilar] = useState<CanonGapSimilar[] | null>(null);
   const [busy, setBusy] = useState(false);

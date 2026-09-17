@@ -74,6 +74,8 @@ const COPY = {
   later: "Сохранить и продолжить позже",
   // DRF-1809 (M17): единственный выход из нулевого выбора — экран 03.
   chooseFromCatalog: "Выбрать из каталога",
+  // DRF-1808 (M16): направления можно изменить в любое время (P13) — экран 02.
+  directions: "Направления",
   loadError: "Не удалось загрузить услуги.",
   retryLoad: "Повторить",
   salonManaged: "Услуги салона ведёт владелец салона.",
@@ -115,6 +117,8 @@ const SETUP_PATH = "/solo/setup";
 const SELF_READINESS_KEY = "services";
 /** Экран 03 — выбор услуг из каталога (DRF-1809, M17). */
 export const SELECT_PATH = "/solo/services/select";
+/** Экран 02 — направления (DRF-1808, M16): «изменить в любое время». */
+export const DIRECTIONS_PATH = "/solo/directions";
 
 // --- «Свои услуги» copy (DRF-1896) ----------------------------------------
 // Форма «Добавить мою» и её слова живут в components/OwnServiceForm (DRF-1809:
@@ -649,6 +653,15 @@ export function MasterServicesScreen() {
         </div>
       )}
 
+      {state && (
+        <p className="master-services__directions-entry">
+          {/* DRF-1808 (P13): вход на экран 02 из настроек услуг — направления
+              не хранятся, экран 02 выведет их из выбранных услуг. */}
+          <button type="button" className="btn-secondary" onClick={() => navigate(DIRECTIONS_PATH)}>
+            {COPY.directions}
+          </button>
+        </p>
+      )}
       {state && (
         <section className="master-services__section" aria-label={COPY.pricesTitle}>
           <h2 className="master-services__section-title">{COPY.pricesTitle}</h2>

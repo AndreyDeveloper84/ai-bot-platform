@@ -279,6 +279,15 @@ describe("MasterServicesScreen — экран 04 «Цены и длительн�
     expect(screen.getByRole("button", { name: "Сохранить и продолжить позже" })).toBeEnabled();
   });
 
+  it("S5 (DRF-1808): «Направления» ведёт на экран 02 — изменить в любое время", async () => {
+    mockedSelection.mockResolvedValue(state([row("a", "Коррекция бровей")], 1, 0));
+    await renderScreen();
+
+    fireEvent.click(screen.getByRole("button", { name: "Направления" }));
+    await settle();
+    expect(screen.getByTestId("location")).toHaveTextContent("/solo/directions");
+  });
+
   it("S4: one selected and not configured → «Продолжить» is off, no hint", async () => {
     mockedSelection.mockResolvedValue(state([row("a", "Коррекция бровей")], 1, 0));
     await renderScreen();

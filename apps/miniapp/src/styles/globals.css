@@ -7962,6 +7962,30 @@ a {
   cursor: pointer;
 }
 
+/* DRF-1808 (M16) — экран 02: направления как карточки-чекбоксы, «Другое
+   направление» как уточнение перед формой своей услуги; вход с экрана 04. */
+.master-services__note {
+  margin: 0;
+  font-size: var(--font-size-100);
+  color: var(--c-text-secondary);
+}
+
+.service-card__icon {
+  font-size: var(--font-size-300);
+  line-height: 1;
+}
+
+.service-select__other {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+}
+
+.master-services__directions-entry {
+  margin: 0;
+  display: flex;
+}
+
 /* DRF-1818 — экран 08 «отправка профиля на проверку»: чек-лист по кодам
    каталога, услуги на проверке, текстовая сводка вместо карточки до M22. */
 .publication {

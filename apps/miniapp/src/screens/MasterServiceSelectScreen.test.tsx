@@ -248,6 +248,46 @@ describe("MasterServiceSelectScreen — шаблоны направления", 
   });
 });
 
+describe("MasterServiceSelectScreen — вход с экрана 02 (DRF-1808)", () => {
+  it("D1: state.directionIds сужает список и порядок «Следующее направление»; без state — все корни", async () => {
+    mockedDirections.mockResolvedValue({ directions: directions(4) });
+    // Со state: выбраны 3-е и 1-е (порядок state не важен — идёт порядок каталога).
+    render(
+      <MemoryRouter initialEntries={[{ pathname: "/solo/services/select", state: { directionIds: ["dir-3", "dir-1"] } }]}>
+        <Routes>
+          <Route path="/solo/services/select" element={<MasterServiceSelectScreen />} />
+          <Route path="*" element={<LocationProbe />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+    await settle();
+
+    // ПРИСУТСТВИЕ: ровно два выбранных направления.
+    const rows = within(directionsRegion()).getAllByRole("button", { name: /Направление \d/ });
+    expect(rows.map((b) => b.textContent)).toEqual([
+      expect.stringContaining("Направление 1"),
+      expect.stringContaining("Направление 3"),
+    ]);
+    // ОТСУТСТВИЕ: невыбранные корни не показываются.
+    expect(within(directionsRegion()).queryByText("Направление 0")).toBeNull();
+    expect(within(directionsRegion()).queryByText("Направление 2")).toBeNull();
+
+    // «Следующее направление» после 1-го ведёт на 3-е, минуя 2-е.
+    await openDirection("Направление 1");
+    fireEvent.click(screen.getByRole("button", { name: SELECT_COPY.save }));
+    await settle();
+    fireEvent.click(screen.getByRole("button", { name: SELECT_COPY.nextDirection }));
+    await settle();
+    expect(mockedTemplates).toHaveBeenLastCalledWith("dir-3");
+  });
+
+  it("D2: без state — все корни, как до экрана 02", async () => {
+    mockedDirections.mockResolvedValue({ directions: directions(4) });
+    await renderScreen();
+    expect(within(directionsRegion()).getAllByRole("button", { name: /Направление \d/ })).toHaveLength(4);
+  });
+});
+
 describe("MasterServiceSelectScreen — отказы", () => {
   it.each([
     [new ApiError(409, "salon_catalog_owner_managed", "…", { reason: "salon_catalog_owner_managed" }), SELECT_COPY.salonManaged],

@@ -70,10 +70,12 @@ DEEP_LINKS: dict[str, str] = {
     "profile": "/solo/profile",
 }
 
-#: DRF-1809 (M17): пока не выбрано ни одной услуги, пункт «services» ведёт на
-#: экран 03 — выбор из каталога, а не на экран цен, где новичку нечего
-#: настроить. Считается по тому же ``detail.selected``, что отдаёт пункт.
-SERVICES_SELECT_LINK = "/solo/services/select"
+#: DRF-1809 (M17) → DRF-1808 (M16): пока не выбрано ни одной услуги, пункт
+#: «services» ведёт на экран 02 — направления (макет: 01 → 02 → 03), а не на
+#: экран цен, где новичку нечего настроить. Экран 03 остаётся достижим с
+#: экрана 02 и с экрана 04. Считается по тому же ``detail.selected``, что
+#: отдаёт пункт. Экран 01 своей константы не держит — ведёт по ``deep_link``.
+SERVICES_DIRECTIONS_LINK = "/solo/directions"
 
 
 @dataclass(frozen=True)
@@ -86,7 +88,7 @@ class ReadinessItem:
     @property
     def deep_link(self) -> str:
         if self.key == "services" and not self.detail.get("selected"):
-            return SERVICES_SELECT_LINK
+            return SERVICES_DIRECTIONS_LINK
         return DEEP_LINKS[self.key]
 
     def as_dict(self) -> dict[str, Any]:
