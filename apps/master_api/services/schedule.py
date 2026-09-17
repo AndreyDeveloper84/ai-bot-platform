@@ -74,6 +74,11 @@ from apps.master_api.services.visit_source import (
     VisitRow,
     master_visits,
 )
+from apps.integrations.ayla.salon_client import (
+    SalonAPIError,
+    SalonNotConfigured,
+    SalonUnavailable,
+)
 from apps.master_api.services.schedule_frame import (
     ExceptionLike,
     FrameBlock,
@@ -907,35 +912,59 @@ def request_availability_change(
     start_local_date = start.astimezone(tz).date()
     end_local_date = end.astimezone(tz).date()
 
-    # Overlap check against approved ScheduleException rows.
-    # CUSTOM_HOURS is a partial-day exception so we project to UTC
-    # window precisely; full-day types cover [00:00, 23:59:59] local.
-    exceptions = list(
-        ScheduleException.all_tenants.filter(
-            tenant_id=master.tenant_id,
-            master_id=master.id,
-            date__gte=start_local_date,
-            date__lte=end_local_date,
+    # Overlap check against approved exceptions — из ЖИВОГО источника (DRF-2019).
+    #
+    # Здесь стоял прямой запрос к локальной ``ScheduleException`` мимо
+    # ``BOOKING_VIA_AYLA_REST``, тогда как экран расписания, готовность мастера и
+    # дашборд (DRF-2014) уже читают рамку через ``load_day_frame``. Кабинет
+    # решал по копии, которую при включённом флаге никто не обновляет: замер
+    # главного окна на пилоте 15.09.2026 ~23:20 UTC — в копии 28 строк недельных
+    # часов у 4 мастеров от 22.07 против 63 строк у 9 мастеров в каталоге, а
+    # ``scheduling_scheduleexception`` пуст. Путь молчал по ДАННЫМ, а не по
+    # устройству: первая же строка в копии — и заявка отклонялась по ней.
+    #
+    # Форма источника другая, и это не переименование: рамка отдаёт
+    # ``dict[date, ExceptionLike]``, у каталожного ``FrameException`` поля
+    # ``date`` нет — день приходит ключом. Граница частичного исключения
+    # считается по этому ключу.
+    #
+    # Рамку не прочитали — отказ, а не создание заявки против расписания,
+    # которого мы не видели: выдать разрешение по незнанию хуже, чем отказать.
+    # Наружу одно имя (``schedule_unavailable``), внутрь — названная причина;
+    # третьего состояния в контракте здесь не заводим (вопрос владельца X7).
+    try:
+        _wh_by_weekday, exceptions_by_date, _blocks = load_day_frame(
+            master,
+            from_date=start_local_date,
+            to_date=end_local_date,
+            tz=tz,
         )
-    )
-    for exc in exceptions:
-        if exc.type == ScheduleException.Type.CUSTOM_HOURS:
-            if not exc.start_time or not exc.end_time:
+    except (SalonNotConfigured, SalonUnavailable, SalonAPIError) as exc:
+        logger.info(
+            "master.availability.frame_unreadable master=%s reason=%s",
+            master.id,
+            type(exc).__name__,
+        )
+        raise AvailabilityRequestError(
+            "schedule_unavailable",
+            "schedule cannot be read right now — try again later",
+        ) from exc
+
+    for day, exc_row in sorted(exceptions_by_date.items()):
+        if exc_row.type == ScheduleException.Type.CUSTOM_HOURS:
+            if not exc_row.start_time or not exc_row.end_time:
                 continue  # malformed row; skip rather than crash
-            exc_start = datetime.combine(exc.date, exc.start_time, tzinfo=tz).astimezone(
+            exc_start = datetime.combine(day, exc_row.start_time, tzinfo=tz).astimezone(
                 dt_timezone.utc
             )
-            exc_end = datetime.combine(exc.date, exc.end_time, tzinfo=tz).astimezone(
-                dt_timezone.utc
-            )
+            exc_end = datetime.combine(day, exc_row.end_time, tzinfo=tz).astimezone(dt_timezone.utc)
         else:
             # Full-day off types — block the whole local date.
-            day_start, day_end = _day_bounds_utc(exc.date, tz)
-            exc_start, exc_end = day_start, day_end
+            exc_start, exc_end = _day_bounds_utc(day, tz)
         if start < exc_end and exc_start < end:
             raise AvailabilityRequestError(
                 "overlap",
-                f"window overlaps an existing approved exception on {exc.date.isoformat()}",
+                f"window overlaps an existing approved exception on {day.isoformat()}",
             )
 
     req = ScheduleChangeRequest.all_tenants.create(

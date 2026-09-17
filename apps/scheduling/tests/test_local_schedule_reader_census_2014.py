@@ -59,10 +59,10 @@ EXPECTED: dict[str, tuple[str, str]] = {
         "сам переключатель: флаг OFF — локальные таблицы, ON — каталог",
     ),
     "apps/master_api/services/schedule.py": (
-        DEBT,
-        "DRF-2019: request_availability_change сверяет пересечение по локальному "
-        "ScheduleException мимо флага; сегодня молчит только потому, что таблица "
-        "пуста (замер главного окна 15.09.2026 ~23:20 UTC)",
+        FRAME,
+        "экран расписания и заявка на отсутствие читают рамку через load_day_frame "
+        "(DRF-2019); ScheduleException здесь — словарь видов (Type, FULL_DAY_TYPES), "
+        "а не чтение копии",
     ),
     "apps/scheduling/admin.py": (WRITER_OR_OPERATOR, "операторский CRUD копии; вопрос X5"),
     "apps/scheduling/services/resolver.py": (
@@ -225,6 +225,24 @@ def test_every_local_schedule_reader_is_classified():
     assert len(set(reasons)) == len(reasons)
     # Пределы названы в самом стороже, а не только в теле PR.
     assert NAMED_LIMITS and all(NAMED_LIMITS)
+
+
+def test_availability_path_is_no_longer_classified_as_debt():
+    """Переход записи переписи — такое же утверждение о коде, как любое другое (DRF-2019).
+
+    После правки `request_availability_change` сверяет пересечение по живой
+    рамке, и запись про долг становится ложной. Узел стоит отдельно от порядка
+    слияния: если PR соберут в другом порядке или один отменят, он скажет об
+    этом вслух, а не промолчит, потому что «в линии коммитов так вышло».
+    """
+    rel = "apps/master_api/services/schedule.py"
+    kind, reason = EXPECTED[rel]
+
+    # Роль, а не написание: ключ DRF-2019 в причине законен — он называет лист,
+    # которым файл стал читателем рамки. Запрещать подстроку значило бы стеречь
+    # орфографию; стережём класс записи и то, чем он обоснован.
+    assert kind == FRAME, (kind, reason)
+    assert FRAME_LOADER in reason, reason
 
 
 def test_guard_catches_a_new_flag_blind_reader():
