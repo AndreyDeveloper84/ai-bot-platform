@@ -327,20 +327,23 @@ _RED_FLAG_PATTERNS: tuple[re.Pattern[str], ...] = (
 )
 
 
-# Cap message length — long free-text is a question, not a pain report.
-_MAX_LEN = 200
-
-
 def classify(text: str) -> PainSignal:
     """Return the strongest pain signal in ``text``.
 
     Type-tolerant: non-``str`` returns :data:`PainSignal.NONE`. We never
     raise — bad upstream data is a router bug, not a classifier bug.
+
+    No length cap (DRF-1996, S-1a). A 200-character cap used to return
+    ``NONE`` before the red-flag scan, so a person who described an
+    emergency in more words got no red flag at all (CLINICAL-F01). The S1
+    detector validation report requires «отсутствие length cap / иных
+    silent-miss механизмов» (clinical-review-001 F01 п. 2). The patterns are
+    plain linear scans; message size is bounded by the channel.
     """
     if not isinstance(text, str):
         return PainSignal.NONE
     stripped = text.strip()
-    if not stripped or len(stripped) > _MAX_LEN:
+    if not stripped:
         return PainSignal.NONE
 
     # DRF-973 — the false-friend phrases are blanked ONCE and both tiers
