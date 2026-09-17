@@ -168,6 +168,58 @@ class TestAuthVerify:
             tenant=tenant, channel="max", channel_user_id="99999"
         ).exists()
 
+    # Таблица отображения исключений в ``require_init_data`` — пять ветвей,
+    # у каждой свой статус И свой ``error``. На уровне модуля типы исключений
+    # закреплены прочно (``test_auth.py``), но это проверяет ВЕРИФИКАТОР.
+    # Что увидит Mini App — свойство декоратора, и до этих двух узлов оно
+    # было закреплено только у ``bad_signature`` и ``malformed``.
+    #
+    # Утверждаются статус и код ПО ОТДЕЛЬНОСТИ, а не «не 200»: узел, который
+    # проверяет только статус, зелен и когда ``stale`` отвечает 401 с кодом
+    # ``bad_signature`` — то есть ровно при той путанице, ради которой
+    # различимые коды и заведены.
+    #
+    # Третьего узла на ``malformed`` здесь намеренно нет. Его входы
+    # (отсутствующий заголовок, дубль ключа, битый JSON) различаются только
+    # в ``detail`` — 'missing Authorization header' против "duplicate key
+    # 'hash'" — а статус и код у всех одинаковы: 400 / ``malformed``.
+    # На оси, которую стерегут эти узлы, входы неразличимы; на оси, где они
+    # различаются, значение — свободная проза, ломающаяся от правки текста.
+
+    def test_stale_init_data_is_401_with_its_own_code(self, client: Client) -> None:
+        """Просрочка отличима от неверной подписи: тот же 401, но другой код."""
+
+        params = {
+            "user": json.dumps({"id": 12345}),
+            "auth_date": str(int(time_module.time()) - 3601),  # > 60 мин
+        }
+        raw = _sign(params)
+        resp = client.post(
+            reverse("miniapp_api:auth_verify"),
+            HTTP_AUTHORIZATION=f"MaxInitData {raw}",
+        )
+        assert resp.status_code == 401
+        assert resp.json()["error"] == "stale"
+
+    def test_no_configured_bot_token_is_500_not_401(self, client: Client, settings) -> None:
+        """Ненастроенный сервер — вина сервера, а не клиента: 500, не 401.
+
+        Гасятся оба источника токенов: ``MAX_BOT_TOKEN`` и реестр. Реестр
+        строится один раз на импорте настроек из ``os.environ``
+        (``config/settings/base.py:1964``), поэтому снятие одного только
+        токена его НЕ опустошает, и без второй строки узел свалился бы в
+        ``bad_signature`` — то есть прошёл бы по неверной причине.
+        """
+
+        settings.MAX_BOT_TOKEN = ""
+        settings.MAX_BOT_REGISTRY = ()
+        resp = client.post(
+            reverse("miniapp_api:auth_verify"),
+            HTTP_AUTHORIZATION=_init_data_header("12345"),
+        )
+        assert resp.status_code == 500
+        assert resp.json()["error"] == "server_misconfigured"
+
 
 class TestSlots:
     def _url(self, **params) -> str:
