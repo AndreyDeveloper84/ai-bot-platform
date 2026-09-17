@@ -883,6 +883,18 @@ NOT_SWEPT_ROUTES: dict[str, str] = {
     "onboarding_reject": "POST mutation; response carries no customer data",
     "onboarding_profile": "PATCH mutation; response is the master's own profile card",
     "profile": "alias of onboarding_profile — same view function",
+    "profile_card": (
+        "GET proxy to the catalog's specialist profile (DRF-1814, part A): the master's "
+        "own name/bio/photo, the catalog's limits, the badge flag and category chips — "
+        "no customer record; shape pinned in test_profile_card_portfolio_1814"
+    ),
+    "profile_portfolio": (
+        "GET/POST proxy to the catalog's portfolio of the signed master (DRF-1814): "
+        "the master's own photos, no customer record — test_profile_card_portfolio_1814"
+    ),
+    "profile_portfolio_item": (
+        "DELETE proxy to the catalog's portfolio item (DRF-1814); response is {count, limit}"
+    ),
     "availability_request": "POST mutation; response is the master's own request id/status",
     "conversation_send_message": "POST mutation; body is the master's own outbound message",
     "conversation_mark_read": "POST mutation; response is an ack",

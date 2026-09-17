@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from django.urls import path
 
-from apps.master_api import views, views_assistant
+from apps.master_api import views, views_assistant, views_profile_card
 
 app_name = "master_api"
 
@@ -26,6 +26,17 @@ urlpatterns = [
     # until the dedicated MASTER_PROFILE_UPDATED slug ships in a follow-up
     # backend cleanup ticket (Option B per the M4 frontend PR body).
     path("profile", views.onboarding_profile, name="profile"),
+    # DRF-1814 (часть A) — экран 07: карточка (владелец полей — каталог,
+    # limits оттуда же), бейдж «Принимает сегодня» из реального слота, чипы
+    # из выбранных шаблонов; портфолио — прокси. Субъект — мастер из
+    # initData: параметра specialist_id в путях НЕТ по построению.
+    path("profile/card", views_profile_card.profile_card, name="profile_card"),
+    path("profile/portfolio", views_profile_card.profile_portfolio, name="profile_portfolio"),
+    path(
+        "profile/portfolio/<uuid:item_id>",
+        views_profile_card.profile_portfolio_item,
+        name="profile_portfolio_item",
+    ),
     path("me", views.me, name="me"),
     path("dashboard", views.dashboard, name="dashboard"),
     # DRF-1895 (M10b) — выбор канонических услуг и цена мастера: прокси в
