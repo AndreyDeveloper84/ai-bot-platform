@@ -772,6 +772,9 @@ jobs:
         run: |
           DEPLOYED="$(ssh -i ~/.ssh/dev_deploy "${DEV_USER}@${DEV_HOST}" bash -lc "
             set -euo pipefail
+            # Актор — в лог (DRF-1646); в stderr, потому что stdout этого
+            # блока разбирается построчно ниже.
+            echo \"::notice::шаг идёт от uid \$(id -u), gid \$(id -g)\" >&2
             cd '${DEV_DEPLOY_PATH}'
             OWNER=\$(stat -c %U '${DEV_DEPLOY_PATH}')
             sudo -u \"\$OWNER\" -H git fetch -q origin
