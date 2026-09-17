@@ -123,7 +123,7 @@ const COPY = {
     // sentence works for any tenant string.
     noServices: (ownerHint: string) =>
       `Вам ещё не назначили услуги. Их настраивает ${ownerHint} — напишите в MAX, если думаете, что это ошибка.`,
-    noServicesCta: "Написать Карине",
+    noServicesCta: "Написать администратору салона",
   },
   dayDone: {
     body: (n: number, time: string | null, firstName: string | null) =>
@@ -139,7 +139,7 @@ const COPY = {
   },
   permissionDenied: {
     title: "Этот диалог не для вас",
-    body: "Если думаете, что должны видеть — напишите Карине.",
+    body: "Если думаете, что должны видеть — напишите администратору салона.",
   },
   loading: "Загружаем рабочий стол…",
   errorTitle: "Не получилось загрузить",

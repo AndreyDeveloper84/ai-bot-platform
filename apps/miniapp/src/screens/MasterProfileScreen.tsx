@@ -82,7 +82,7 @@ export const PROFILE_COPY = {
     editBio: "Изменить «О себе»",
     addWork: "Добавить фото работы",
     skipPortfolio: "Пропустить пока",
-    writeToOwner: "Написать Карине ›",
+    writeToOwner: "Написать администратору салона ›",
     requestScheduleChange: "Запросить изменение ›",
     notificationSettings: "Настройки уведомлений ›",
     internalChat: "Со студией ›",
