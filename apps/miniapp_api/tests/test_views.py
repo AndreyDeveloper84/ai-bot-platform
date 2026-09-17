@@ -188,8 +188,13 @@ class TestAuthVerify:
     # На оси, которую стерегут эти узлы, входы неразличимы; на оси, где они
     # различаются, значение — свободная проза, ломающаяся от правки текста.
 
-    def test_stale_init_data_is_401_with_its_own_code(self, client: Client) -> None:
-        """Просрочка отличима от неверной подписи: тот же 401, но другой код."""
+    def test_stale_init_data_is_the_same_transport_refusal(self, client: Client) -> None:
+        """Просрочка наружу неотличима от неверной подписи: 401 ``no_init_data``.
+
+        Контракт DRF-1893 (#1781): один отказ транспорта для любой причины,
+        причина уходит только в лог. Различать ``stale`` на HTTP-уровне
+        клиенту незачем — экран один: «Открой Ayla из MAX».
+        """
 
         params = {
             "user": json.dumps({"id": 12345}),
@@ -201,7 +206,7 @@ class TestAuthVerify:
             HTTP_AUTHORIZATION=f"MaxInitData {raw}",
         )
         assert resp.status_code == 401
-        assert resp.json()["error"] == "stale"
+        assert resp.json()["error"] == "no_init_data"
 
     def test_no_configured_bot_token_is_500_not_401(self, client: Client, settings) -> None:
         """Ненастроенный сервер — вина сервера, а не клиента: 500, не 401.
