@@ -98,6 +98,9 @@ from apps.booking.services.attribution import (
     get_reschedulable_statuses,
 )
 from apps.eventbus import services as eventbus_services
+from apps.integrations.ayla.health_check import (
+    promises_a_specialist as health_check_promises_a_specialist,
+)
 from apps.integrations.ayla.health_check import text_for as health_check_text_for
 from apps.integrations.ayla.offer_refusal import OFFER_NOT_SELLABLE_SLUG, client_text_for
 from apps.bookings.keyboards import confirm_2_button
@@ -628,6 +631,11 @@ class BookingToolResult:
     certificate: BuyCertificateResult | None = None
     keyboard: list[dict[str, str]] = field(default_factory=list)
     error: str = ""
+    #: DRF-2012 — whether this refusal promised the person a specialist.
+    #: The callback path reads the RESULT, not the exception, and cannot
+    #: decide this from the text: the two refusals differ by wording, not
+    #: by a sign. False unless a branch says otherwise.
+    handoff: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -1417,6 +1425,7 @@ def execute_confirm(
         return BookingToolResult(
             text=health_check_text_for(exc.code, handoff=exc.handoff),
             error="health_check_handoff",
+            handoff=health_check_promises_a_specialist(exc.code, handoff=exc.handoff),
         )
     except YClientsAPIError as exc:
         logger.info("booking.confirm.exec.api_error err=%s", exc)

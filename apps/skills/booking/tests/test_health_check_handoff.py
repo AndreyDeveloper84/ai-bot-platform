@@ -30,6 +30,7 @@ from apps.integrations.ayla.health_check import (
     HEALTH_CHECK_REQUIRED,
     HEALTH_CHECK_UNKNOWN,
     NOT_APPLICABLE_TEXT,
+    promises_a_specialist,
 )
 from apps.skills.booking.tests.test_ayla_write_lifecycle import FakeAyla, _adapter
 from apps.skills.booking.tools import execute_confirm
@@ -232,3 +233,25 @@ def test_unknown_is_countable_apart_from_required(tenant: Tenant, bot_user: BotU
         "UNKNOWN неотличим — очередь разметки без критерия"
     )
     assert any(o.endswith("required") for o in outcomes)
+
+
+@pytest.mark.parametrize("code", ALL_THREE)
+def test_the_result_says_whether_a_specialist_was_promised(
+    tenant: Tenant, bot_user: BotUser, code: str
+) -> None:
+    """DRF-2012 — решение о специалисте едет полем, а не прозой.
+
+    Путь ✅ (`apps/bookings/callbacks.py`) читает результат, а не исключение,
+    и решать по тексту он не может: две строки отличаются словами, а не
+    признаком. Поле несёт ровно то, что решил `promises_a_specialist` —
+    флаг Ayla, когда он есть, иначе набор кодов.
+
+    Положительная стража впереди: на том же результате проверяется текст,
+    иначе «поле совпало» было бы верно и для результата, который человеку
+    ничего не сказал.
+    """
+    result = _confirm(tenant, bot_user, code)
+
+    expected = promises_a_specialist(code)
+    assert result.text == (HANDOFF_TEXT if expected else NOT_APPLICABLE_TEXT)
+    assert result.handoff is expected

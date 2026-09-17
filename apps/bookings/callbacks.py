@@ -171,6 +171,15 @@ LABEL_ANOTHER_TIME = "🔄 Выбрать другое время"
 _MAX_CALLBACK_BYTES = 64
 
 
+#: DRF-2012 — confirm outcomes that keep today's sentence but stop being
+#: filed as a provider outage. Both reasons are NEW; the shape follows the
+#: existing ``booking_reschedule_partial_failure`` in :meth:`_dispatch_reschedule`.
+_CONFIRM_FAILURE_REASONS = {
+    "invalid_payload": "booking_invalid_payload",
+    "booking_confirm_partial_failure": "booking_confirm_partial_failure",
+}
+
+
 def _keyboard(buttons: list[dict[str, str]]) -> dict | None:
     """The platform-canonical keyboard envelope, or ``None`` for no buttons.
 
@@ -813,6 +822,39 @@ class BookingGateCallbackSkill:
             # отказа свои слова, передавать менеджеру нечего. Остальные ошибки
             # (в том числе health_check_handoff) — как были, см. DRF-2012.
             return SkillResult(reply_text=result.text)
+        if result.error == "health_check_handoff":
+            # DRF-2012: the refusal already carries the owner's sentence
+            # (§98) and Ayla's own decision about a specialist. Sending the
+            # breakdown copy replaced the words; naming it
+            # ``booking_yclients_failure`` filed a medical decision as a bus
+            # failure, which later lies to whoever counts why people reach an
+            # operator. ``handoff`` is the decision, not the prose — see
+            # ``promises_a_specialist``: a refusal that promises nobody must
+            # not open a handoff, or it becomes a promise nobody keeps.
+            return SkillResult(
+                reply_text=result.text,
+                should_handoff=result.handoff,
+                handoff_reason="booking_health_check_required" if result.handoff else "",
+            )
+        if result.error == "quote_changed":
+            # The quote moved while the person was choosing. The result
+            # carries a fresh preview AND the buttons of the new pending row;
+            # the breakdown copy dropped the one next step that existed.
+            return SkillResult(
+                reply_text=result.text,
+                action_data=_keyboard(result.pending.keyboard) if result.pending else None,
+            )
+        if result.error == "schedule_unavailable":
+            # The schedule is down, not the booking: its own sentence says so,
+            # and there is nothing for an operator to do about it.
+            return SkillResult(reply_text=result.text)
+        named_reason = _CONFIRM_FAILURE_REASONS.get(result.error)
+        if named_reason:
+            return SkillResult(
+                reply_text="Не удалось создать запись — переключаю на менеджера.",
+                should_handoff=True,
+                handoff_reason=named_reason,
+            )
         if result.error in {"yclients_unavailable", "yclients_api_error"}:
             return SkillResult(
                 reply_text="Не удалось создать запись — переключаю на менеджера.",

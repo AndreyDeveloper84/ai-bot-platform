@@ -323,16 +323,18 @@ def test_confirm_tap_reply_is_the_refusal_not_the_manager_handoff(
     assert (result.should_handoff, result.reply_text) == (False, CLIENT_PRICE)
 
 
-def test_confirm_tap_on_a_health_check_handoff_keeps_todays_reply(
+def test_confirm_tap_on_a_health_check_handoff_keeps_the_medical_words(
     tenant: Tenant, bot_user: BotUser, conversation: Conversation
 ) -> None:
-    """Закрепление СЕГОДНЯШНЕГО поведения, не желаемого — исправляется в DRF-2012.
+    """DRF-2012 — медицинский отказ на ✅ говорит своими словами.
 
-    На ✅ ``_dispatch_confirm`` превращает любой ``result.error`` в «Не удалось
-    создать запись — переключаю на менеджера», и именованный медицинский отказ
-    (DRF-1614) теряет свой текст. DRF-1989 чинит на этом пути только
-    ``offer_not_sellable`` и не трогает health-исход — этот тест следит, чтобы
-    правка его и не ухудшила. Лист P1 сделает тест красным и снимет пометку.
+    До этой правки ``_dispatch_confirm`` превращал любой ``result.error`` в
+    «Не удалось создать запись — переключаю на менеджера» с причиной
+    ``booking_yclients_failure``: именованный отказ (DRF-1614) терял и слова,
+    и имя, а очередь операторов считала медицинское решение сбоем шины.
+    DRF-1989 починил здесь только ``offer_not_sellable``; health-исход
+    чинится этой правкой, и тест DRF-1989, закреплявший старое поведение,
+    переписан вместе с ней.
     """
     future_iso = (dj_timezone.now() + timedelta(days=2)).replace(microsecond=0).isoformat()
     token = create_pending(
@@ -348,7 +350,9 @@ def test_confirm_tap_on_a_health_check_handoff_keeps_todays_reply(
         patch(
             "apps.bookings.callbacks.execute_confirm",
             return_value=BookingToolResult(
-                error="health_check_handoff", text="Текст медицинского отказа"
+                error="health_check_handoff",
+                text="Текст медицинского отказа",
+                handoff=True,
             ),
         ),
     ):
@@ -356,8 +360,8 @@ def test_confirm_tap_on_a_health_check_handoff_keeps_todays_reply(
 
     assert (result.should_handoff, result.handoff_reason, result.reply_text) == (
         True,
-        "booking_yclients_failure",
-        "Не удалось создать запись — переключаю на менеджера.",
+        "booking_health_check_required",
+        "Текст медицинского отказа",
     )
 
 

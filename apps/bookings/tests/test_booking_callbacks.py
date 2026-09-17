@@ -20,6 +20,7 @@ Aspect coverage:
 
 from __future__ import annotations
 
+import uuid
 from datetime import timedelta
 from typing import Any
 from unittest.mock import patch
@@ -42,6 +43,19 @@ from apps.bookings.callbacks import (
 from apps.bookings.pending_actions import create_pending
 from apps.conversations.models import Conversation
 from apps.identity.models import BotUser
+from apps.integrations.ayla.health_check import (
+    HANDOFF_TEXT,
+    HEALTH_CHECK_NOT_APPLICABLE,
+    HEALTH_CHECK_REQUIRED,
+    HEALTH_CHECK_UNKNOWN,
+    NOT_APPLICABLE_TEXT,
+    text_for,
+)
+from apps.skills.booking.tools import (
+    SCHEDULE_UNAVAILABLE_TEXT,
+    BookingToolResult,
+    PendingPreview,
+)
 from apps.integrations.yclients import AvailableTime, BookingRecord, YClientsAPIError
 from apps.skills.base import SkillContext
 from apps.tenancy.context import tenant_scope
@@ -194,6 +208,29 @@ class FakeYClients:
 
 def _patch_yclients(client: FakeYClients):
     return patch("apps.integrations.yclients.get_yclients_client", return_value=client)
+
+
+def _patch_booking_provider(client: FakeYClients):
+    """The OTHER half of the gate's client path (DRF-2012).
+
+    The path has two halves, and a test needs BOTH of them:
+
+    * ``_patch_yclients`` — the YClients factory
+      (``apps.integrations.yclients.get_yclients_client``);
+    * this one — the gate's provider fork at ``apps/bookings/callbacks.py``
+      lines 789-791, where ``get_booking_provider`` is called. With
+      ``BOOKING_VIA_AYLA_REST`` ON that returns the Ayla adapter, which needs
+      a base URL no test environment sets.
+
+    One without the other does not leave a gap you can see: the tap answers
+    «Сейчас не могу записать, попробуйте чуть позже» from the
+    ``bookings.gate.yclients_init_failed`` branch and never reaches
+    ``_dispatch_confirm`` — the assertion then measures the early refusal
+    instead of the path under test. Any test that taps under the live flag
+    needs both.
+    """
+
+    return patch("apps.skills.booking.provider.get_booking_provider", return_value=client)
 
 
 # ---------------------------------------------------------------------------
@@ -762,3 +799,172 @@ class TestCallbacksRetroHotfix:
             ok = _try_yclients_cancel("12345")
         assert ok is True
         assert client.cancel_calls == [12345]
+
+
+# ---------------------------------------------------------------------------
+# Confirm-tap: every named outcome keeps its own words (DRF-2012)
+# ---------------------------------------------------------------------------
+
+
+class TestConfirmTapNamedOutcomes:
+    """``_dispatch_confirm`` turned every ``result.error`` into one breakdown
+    sentence and one reason. The medical refusal (DRF-1614) already carries
+    the owner's wording and its own decision about a specialist; the quote
+    change carries a fresh preview and its buttons. Both were being replaced
+    by «Не удалось создать запись — переключаю на менеджера» and filed under
+    ``booking_yclients_failure``, which also mislabels why people reach an
+    operator.
+    """
+
+    def _tap(
+        self,
+        tenant: Tenant,
+        bot_user: BotUser,
+        conversation: Conversation,
+        result: BookingToolResult,
+    ):
+        future_iso = (timezone.now() + timedelta(days=2)).replace(microsecond=0).isoformat()
+        token = create_pending(
+            tenant=tenant,
+            bot_user=bot_user,
+            kind=PendingBookingAction.Kind.CONFIRM,
+            payload=_confirm_payload(future_iso),
+        )
+        ctx = _ctx(f"cb:book:confirm:{token}", bot_user=bot_user, conversation=conversation)
+        with (
+            _patch_yclients(FakeYClients()),
+            patch("apps.bookings.callbacks.execute_confirm", return_value=result),
+        ):
+            return BookingGateCallbackSkill().handle(ctx)
+
+    def test_health_refusal_that_promises_a_specialist_hands_off_by_its_own_name(
+        self, tenant: Tenant, bot_user: BotUser, conversation: Conversation
+    ) -> None:
+        result = self._tap(
+            tenant,
+            bot_user,
+            conversation,
+            BookingToolResult(error="health_check_handoff", text=HANDOFF_TEXT, handoff=True),
+        )
+        assert (result.reply_text, result.should_handoff, result.handoff_reason) == (
+            HANDOFF_TEXT,
+            True,
+            "booking_health_check_required",
+        )
+
+    def test_health_refusal_that_promises_nobody_does_not_hand_off(
+        self, tenant: Tenant, bot_user: BotUser, conversation: Conversation
+    ) -> None:
+        """NOT_APPLICABLE promises no specialist — a handoff here would be a
+        promise nobody keeps (health_check.py §100.A)."""
+        result = self._tap(
+            tenant,
+            bot_user,
+            conversation,
+            BookingToolResult(
+                error="health_check_handoff", text=NOT_APPLICABLE_TEXT, handoff=False
+            ),
+        )
+        assert (result.reply_text, result.should_handoff) == (NOT_APPLICABLE_TEXT, False)
+
+    def test_quote_change_keeps_its_preview_and_its_buttons(
+        self, tenant: Tenant, bot_user: BotUser, conversation: Conversation
+    ) -> None:
+        buttons = [{"label": "✅ Подтвердить", "callback": "cb:book:confirm:new-token"}]
+        text = "Пока вы выбирали, цена изменилась: было 1 000 ₽, стало 1 200 ₽. Запись не создана."
+        result = self._tap(
+            tenant,
+            bot_user,
+            conversation,
+            BookingToolResult(
+                error="quote_changed",
+                text=text,
+                pending=PendingPreview(
+                    kind=PendingBookingAction.Kind.CONFIRM,
+                    token=uuid.uuid4(),
+                    preview_text=text,
+                    keyboard=buttons,
+                ),
+            ),
+        )
+        assert (result.reply_text, result.should_handoff) == (text, False)
+        assert result.action_data == {
+            "attachments": [{"type": "inline_keyboard", "payload": {"buttons": buttons}}]
+        }
+
+    def test_schedule_outage_says_so_without_an_operator(
+        self, tenant: Tenant, bot_user: BotUser, conversation: Conversation
+    ) -> None:
+        result = self._tap(
+            tenant,
+            bot_user,
+            conversation,
+            BookingToolResult(error="schedule_unavailable", text=SCHEDULE_UNAVAILABLE_TEXT),
+        )
+        assert (result.reply_text, result.should_handoff) == (SCHEDULE_UNAVAILABLE_TEXT, False)
+
+    def test_invalid_payload_hands_off_under_its_own_reason(
+        self, tenant: Tenant, bot_user: BotUser, conversation: Conversation
+    ) -> None:
+        result = self._tap(
+            tenant, bot_user, conversation, BookingToolResult(error="invalid_payload")
+        )
+        assert (result.should_handoff, result.handoff_reason) == (True, "booking_invalid_payload")
+
+    def test_partial_failure_hands_off_under_its_own_reason(
+        self, tenant: Tenant, bot_user: BotUser, conversation: Conversation
+    ) -> None:
+        result = self._tap(
+            tenant,
+            bot_user,
+            conversation,
+            BookingToolResult(error="booking_confirm_partial_failure"),
+        )
+        assert (result.should_handoff, result.handoff_reason) == (
+            True,
+            "booking_confirm_partial_failure",
+        )
+
+    def test_the_tap_shows_the_same_sentence_as_the_message_path(
+        self, tenant: Tenant, bot_user: BotUser, conversation: Conversation, settings
+    ) -> None:
+        """The defect DRF-2012 is filed for: same refusal, two different
+        sentences depending on how the person got here.
+
+        The message path renders ``text_for(code, handoff=…)``; the tap
+        rendered the breakdown copy. Here the REAL ``execute_confirm`` result
+        (the message path's own output, via the health-refusal fake) is fed to
+        the tap, and both are compared to ``text_for`` rather than to a literal
+        — a literal would go green again the day the owner's wording changes
+        on one path only.
+        """
+        from apps.skills.booking.tests.test_health_check_handoff import _confirm
+
+        settings.BOOKING_VIA_AYLA_REST = True
+        codes = (HEALTH_CHECK_REQUIRED, HEALTH_CHECK_UNKNOWN, HEALTH_CHECK_NOT_APPLICABLE)
+        # The flag stays on for BOTH halves — the defect is one state producing
+        # two sentences. Under it the gate builds the Ayla provider, which needs
+        # a base URL this environment has not got; the provider object itself is
+        # never used here, since ``execute_confirm`` is patched inside ``_tap``.
+        with _patch_booking_provider(FakeYClients()):
+            for code in codes:
+                from_message_path = _confirm(tenant, bot_user, code)
+                expected = text_for(code)
+                assert from_message_path.text == expected, code
+                tap = self._tap(tenant, bot_user, conversation, from_message_path)
+                assert tap.reply_text == expected, code
+
+    # Guards — these three keep today's copy and today's reason.
+
+    @pytest.mark.parametrize(
+        "code", ["yclients_unavailable", "yclients_api_error", "some_code_nobody_named_yet"]
+    )
+    def test_provider_failures_and_unknown_codes_are_unchanged(
+        self, tenant: Tenant, bot_user: BotUser, conversation: Conversation, code: str
+    ) -> None:
+        result = self._tap(tenant, bot_user, conversation, BookingToolResult(error=code))
+        assert (result.reply_text, result.should_handoff, result.handoff_reason) == (
+            "Не удалось создать запись — переключаю на менеджера.",
+            True,
+            "booking_yclients_failure",
+        )
