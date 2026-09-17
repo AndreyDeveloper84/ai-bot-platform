@@ -101,6 +101,12 @@ jobs:
     timeout-minutes: 15
     needs: preflight
     if: needs.preflight.outputs.ready == 'true'
+    # actions: write — ради ОДНОГО вызова: страж поздней выкладки (DRF-2073)
+    # отменяет собственный прогон, чтобы он читался `cancelled` своим знаком,
+    # а не `success` («выложили») и не `failure` («сломалось»).
+    permissions:
+      contents: read
+      actions: write
 
     steps:
       # B-5 (5.2): выкладывается ПРОВЕРЕННЫЙ коммит, а не голова dev.
@@ -130,6 +136,67 @@ jobs:
           fi
           echo "sha=${SHA}" >> "$GITHUB_OUTPUT"
           echo "::notice::выкладывается проверенный ${SHA} (event=${{ github.event_name }})"
+
+      # DRF-2073: страж поздней выкладки — ДО любой записи на хост.
+      #
+      # 17.09.2026 перезапущенный старый ci-прогон (41bc4514) завершился позже
+      # выкладки 7e80fa98; его workflow_run запустил этот job, и стенд
+      # откатился на коммит назад. Прежний `::warning::голова dev ушла
+      # вперёд…` стоял ПОСЛЕ бэкапа и ПОСЛЕ `git checkout` — превратить его в
+      # отказ на месте значило бы отказывать с уже откаченным деревом.
+      #
+      # Правило владельца: workflow_run с проверенным SHA, который уже не
+      # голова dev, ПРЕКРАЩАЕТСЯ — `cancelled` своим знаком. Голову выложит её
+      # собственный зелёный прогон. workflow_dispatch берёт голову и не
+      # затрагивается. Логика — в скрипте, чтобы её сторожил unit-тест
+      # (tests/tools/test_deploy_sha_is_dev_head.py): живой workflow_run
+      # срабатывает только с dev, и гонку иначе не воспроизвести до слияния.
+      #
+      # Скрипт берётся из ПРОВЕРЕННОГО дерева (sparse, только tools/ci): SHA
+      # старше этого стража по построению не голова dev, и отсутствие скрипта
+      # читается как superseded, а не как поломка.
+      - name: Checkout tools/ci of the verified SHA (для стража)
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ steps.verified.outputs.sha }}
+          sparse-checkout: tools/ci
+          sparse-checkout-cone-mode: true
+          fetch-depth: 1
+          path: guard
+
+      - name: Guard — verified SHA is still the head of dev (DRF-2073)
+        id: head_guard
+        env:
+          SHA: ${{ steps.verified.outputs.sha }}
+          EVENT_NAME: ${{ github.event_name }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          DEV_HEAD="$(git ls-remote "https://github.com/${GITHUB_REPOSITORY}.git" refs/heads/dev | cut -f1)"
+          echo "::notice::голова dev по ls-remote: ${DEV_HEAD}; проверенный ${SHA}; event=${EVENT_NAME}"
+          echo "dev_head=${DEV_HEAD}" >> "$GITHUB_OUTPUT"
+          GUARD=guard/tools/ci/deploy_sha_is_dev_head.sh
+          set +e
+          if [ -f "$GUARD" ]; then
+            bash "$GUARD" "${EVENT_NAME}" "${SHA}" "${DEV_HEAD}"; RC=$?
+          elif [ "${EVENT_NAME}" = "workflow_run" ]; then
+            echo "::notice::superseded: в проверенном ${SHA} ещё нет стража DRF-2073 — он старше стража и уже не голова dev (${DEV_HEAD}); стенд не тронут"
+            RC=3
+          else
+            RC=0
+          fi
+          set -e
+          case "$RC" in
+            0) exit 0 ;;
+            3)
+              # Отмена СВОЕГО прогона: знак `cancelled`. Если отмена не
+              # дошла — красный, не выкладка (fail-closed).
+              gh run cancel "${GITHUB_RUN_ID}" --repo "${GITHUB_REPOSITORY}"
+              sleep 120
+              echo "::error::прогон должен был быть отменён как superseded, но всё ещё выполняется — выкладка запрещена"
+              exit 1
+              ;;
+            *) exit 1 ;;
+          esac
 
       - name: Configure SSH
         env:
@@ -293,9 +360,41 @@ jobs:
             echo \"::notice::снимков в \$BACKUP_DIR: \$KEPT (глубина \$KEEP), занято \$TOTAL\"
           "
 
+      # Второй раз — после бэкапа: между первым стражем и первой записью в
+      # дерево проходят минуты, и слияние в dev за это время делает этот
+      # прогон таким же поздним, как перезапущенный старый.
+      - name: Guard again — head of dev unchanged since backup (DRF-2073)
+        env:
+          SHA: ${{ steps.verified.outputs.sha }}
+          EVENT_NAME: ${{ github.event_name }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          DEV_HEAD="$(git ls-remote "https://github.com/${GITHUB_REPOSITORY}.git" refs/heads/dev | cut -f1)"
+          GUARD=guard/tools/ci/deploy_sha_is_dev_head.sh
+          set +e
+          if [ -f "$GUARD" ]; then
+            bash "$GUARD" "${EVENT_NAME}" "${SHA}" "${DEV_HEAD}"; RC=$?
+          elif [ "${EVENT_NAME}" = "workflow_run" ]; then
+            RC=3
+          else
+            RC=0
+          fi
+          set -e
+          case "$RC" in
+            0) exit 0 ;;
+            3)
+              gh run cancel "${GITHUB_RUN_ID}" --repo "${GITHUB_REPOSITORY}"
+              sleep 120
+              echo "::error::прогон должен был быть отменён как superseded, но всё ещё выполняется — выкладка запрещена"
+              exit 1
+              ;;
+            *) exit 1 ;;
+          esac
+
       - name: Pull + rebuild + restart dev services
         env:
           DEPLOY_SHA: ${{ steps.verified.outputs.sha }}
+          EVENT_NAME: ${{ github.event_name }}
           DEV_HOST: ${{ secrets.DEV_HOST }}
           DEV_USER: ${{ secrets.DEV_USER }}
           DEV_DEPLOY_PATH: ${{ secrets.DEV_DEPLOY_PATH }}
@@ -351,22 +450,30 @@ jobs:
               echo \"::error::проверенный ${DEPLOY_SHA} не лежит на origin/dev — dev переписан или прогон был не по dev; выкладка отказана\"
               exit 1
             fi
+            # DRF-2073: сверка с головой — ДО checkout, а не после. Раньше
+            # здесь стоял ::warning:: «голова ушла вперёд — выкладывается
+            # проверенный», и он выкладывал: поздний старый прогон откатывал
+            # стенд. Для workflow_run это теперь отказ (стражи на раннере
+            # уже отменили бы прогон; сюда доходит только сдвиг dev в секунды
+            # между ls-remote там и fetch здесь). workflow_dispatch берёт
+            # голову своей ветки — для него сдвиг остаётся предупреждением.
+            DEV_HEAD=\$(sudo -u \"\$OWNER\" -H git rev-parse origin/dev)
+            if [ \"\$DEV_HEAD\" != \"${DEPLOY_SHA}\" ]; then
+              BEHIND=\$(sudo -u \"\$OWNER\" -H git rev-list --count '${DEPLOY_SHA}'..origin/dev)
+              if [ \"${EVENT_NAME}\" = \"workflow_run\" ]; then
+                echo \"::error::голова dev \$DEV_HEAD ушла на \$BEHIND коммит(ов) вперёд от проверенного ${DEPLOY_SHA} между стражем на раннере и fetch на хосте — дерево не тронуто, выкладка отказана; голову выложит её собственный зелёный прогон (DRF-2073)\"
+                exit 1
+              fi
+              echo \"::warning::workflow_dispatch: голова dev \$DEV_HEAD на \$BEHIND коммит(ов) впереди проверенного ${DEPLOY_SHA} — выкладывается проверенный, не голова\"
+            fi
             # Дерево на ПРОВЕРЕННОМ коммите, отсоединённое: «git checkout dev»
             # ставило бы голову dev, а она могла уйти вперёд без зелени.
             sudo -u \"\$OWNER\" -H git checkout --detach '${DEPLOY_SHA}'
-            DEV_HEAD=\$(sudo -u \"\$OWNER\" -H git rev-parse origin/dev)
             TREE_HEAD=\$(sudo -u \"\$OWNER\" -H git rev-parse HEAD)
             # SHA дерева печатается РЯДОМ с проверенным — совпадение видно
             # глазом в логе, а не выводится из того, что шаг не упал.
             echo \"::notice::в дереве \$TREE_HEAD, проверенный ${DEPLOY_SHA}, голова dev \$DEV_HEAD\"
             [ \"\$TREE_HEAD\" = \"${DEPLOY_SHA}\" ] || { echo \"::error::дерево не на проверенном коммите\"; exit 1; }
-            if [ \"\$DEV_HEAD\" != \"${DEPLOY_SHA}\" ]; then
-              # Не отказ: голова dev ушла вперёд, но ЭТОТ коммит проверен, и
-              # следующий придёт своей выкладкой, когда пройдёт свой ci.
-              # Отказывать здесь значило бы держать пилот на старом коде
-              # ровно в те часы, когда dev двигается быстрее ci.
-              echo \"::warning::голова dev ушла на \$(sudo -u \"\$OWNER\" -H git rev-list --count '${DEPLOY_SHA}'..origin/dev) коммит(ов) вперёд без своей зелени — выкладывается проверенный ${DEPLOY_SHA}, не голова\"
-            fi
             # Кому принадлежат файлы, которые напишет контейнер.
             #
             # Первая редакция брала \`id -u\` — ЗОВУЩЕГО. Это был прокси для
@@ -642,6 +749,59 @@ jobs:
             done
             echo '::error::readyz red after 5 attempts — investigate dev deploy'; exit 1
           "
+
+      # DRF-2073 (2): readback после выкладки — что лежит в дереве хоста
+      # против того, что этот прогон проверил и застал головой dev.
+      #
+      # Красный — ТОЛЬКО на откат: дерево не на проверенном SHA, либо дерево
+      # не лежит на текущем dev (dev переписан). «dev ушёл вперёд за время
+      # выкладки» — notice, не error: это не откат, а обычный ход поезда,
+      # следующий зелёный прогон выложит голову сам (толкование главного
+      # окна 17.09, §45; владелец может перерешить).
+      #
+      # Все три SHA печатаются РЯДОМ: совпадение видно глазом в логе, а не
+      # выводится из того, что шаг не упал.
+      - name: Readback — deployed tree is the verified SHA, not a rollback (DRF-2073)
+        env:
+          DEV_HOST: ${{ secrets.DEV_HOST }}
+          DEV_USER: ${{ secrets.DEV_USER }}
+          DEV_DEPLOY_PATH: ${{ secrets.DEV_DEPLOY_PATH }}
+          DEPLOY_SHA: ${{ steps.verified.outputs.sha }}
+          HEAD_AT_GUARD: ${{ steps.head_guard.outputs.dev_head }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          DEPLOYED="$(ssh -i ~/.ssh/dev_deploy "${DEV_USER}@${DEV_HOST}" bash -lc "
+            set -euo pipefail
+            cd '${DEV_DEPLOY_PATH}'
+            OWNER=\$(stat -c %U '${DEV_DEPLOY_PATH}')
+            sudo -u \"\$OWNER\" -H git fetch -q origin
+            sudo -u \"\$OWNER\" -H git rev-parse HEAD
+            sudo -u \"\$OWNER\" -H git rev-parse origin/dev
+            sudo -u \"\$OWNER\" -H git merge-base --is-ancestor HEAD origin/dev && echo ancestor || echo NOT-ancestor
+          ")"
+          TREE="$(printf '%s\n' "$DEPLOYED" | sed -n 1p)"
+          DEV_NOW="$(printf '%s\n' "$DEPLOYED" | sed -n 2p)"
+          ANCESTRY="$(printf '%s\n' "$DEPLOYED" | sed -n 3p)"
+          echo "::notice::readback: в дереве ${TREE}; проверенный ${DEPLOY_SHA}; голова dev при страже ${HEAD_AT_GUARD}; голова dev сейчас ${DEV_NOW}; дерево на dev: ${ANCESTRY}"
+          if [ "${TREE}" != "${DEPLOY_SHA}" ]; then
+            echo "::error::ОТКАТ ИЛИ ЧУЖАЯ ЗАПИСЬ: дерево хоста ${TREE} ≠ проверенного ${DEPLOY_SHA}, который этот прогон выкладывал"
+            exit 1
+          fi
+          if [ "${ANCESTRY}" != "ancestor" ]; then
+            echo "::error::дерево хоста ${TREE} не лежит на текущем dev ${DEV_NOW} — dev переписан после выкладки"
+            exit 1
+          fi
+          if [ "${EVENT_NAME}" = "workflow_run" ] && [ "${TREE}" != "${HEAD_AT_GUARD}" ]; then
+            # Недостижимо, пока страж стоит: workflow_run с SHA ≠ голове был бы
+            # отменён. Если всё же случилось — это дыра в страже, не в поезде.
+            echo "::error::выложен ${TREE}, а головой dev при страже был ${HEAD_AT_GUARD} — страж поздней выкладки пропустил прогон"
+            exit 1
+          fi
+          if [ "${DEV_NOW}" != "${TREE}" ]; then
+            echo "::notice::dev ушёл вперёд за время выкладки: сейчас ${DEV_NOW}, выложен ${TREE} — не откат; голову выложит её собственный зелёный прогон"
+          else
+            echo "::notice::стенд на голове dev: ${TREE}"
+          fi
 
       # DRF-1661. Состояние поверхности снимается КОМАНДОЙ после каждой
       # выкладки и кладётся в дерево — не в репозиторий: файл есть вывод, а
