@@ -145,6 +145,16 @@ STAFF_INVITE_ISSUED = "staff.invite_issued"
 # describing a rollback would be a lie.
 STAFF_ACCESS_REVOKED = "staff.access_revoked"
 
+# --- Specialist onboarded into a salon (поток A, п. 3) --------------------
+# Emitted from apps.identity.services.specialist_onboarding when an operator
+# (Django Admin / operations tool) or a salon admin (Mini App «Команда»)
+# runs the one onboarding path for a master. One row PER CALL, written
+# after the result is known — it records the outcome, not the attempt.
+# Payload: {surface, actor_label, capability, cross_tenant, person_id,
+# membership_before, membership_after, identity_status, identity_reason?,
+# specialist_id?, sale_block?}. Names only — never a phone or a MAX id.
+STAFF_SPECIALIST_ONBOARDED = "staff.specialist_onboarded"
+
 # --- Admin services ↔ masters mapping (master-management MM4 / PR 4) -----
 # Emitted from apps.admin_api when an owner/admin toggles the M2M between
 # CatalogMaster and CatalogService. One event PER affected master with a
@@ -392,6 +402,7 @@ CANONICAL_EVENTS: frozenset[str] = frozenset(
         MASTER_INVITE_DISPATCHED,
         STAFF_INVITE_ISSUED,
         STAFF_ACCESS_REVOKED,
+        STAFF_SPECIALIST_ONBOARDED,
         MASTER_SERVICES_CHANGED,
         MASTER_SERVICE_EDGE_CREATED,
         MASTER_SERVICE_EDGE_DELETED,
