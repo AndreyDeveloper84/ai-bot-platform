@@ -588,9 +588,18 @@ export function CustomerWellnessDashboardScreen() {
           >
             <div className="wellness-dash__onboarding-body">
               <p className="wellness-dash__onboarding-title">Начнём с малого?</p>
+              {/* DRF-2091: копия честная — путь текстом есть, фото (D26) —
+                  ещё нет; обещать «сфотографируй» без ручки нельзя. */}
               <p className="wellness-dash__onboarding-text">
-                Сфотографируй первый приём, добавь воду или выбери цель.
+                Запиши первый приём текстом, добавь воду или выбери цель.
               </p>
+              <button
+                type="button"
+                className="btn-secondary wellness-dash__onboarding-cta"
+                onClick={() => navigate("/customer/food-scanner/manual")}
+              >
+                Записать текстом
+              </button>
               <button
                 type="button"
                 className="wellness-dash__onboarding-dismiss"

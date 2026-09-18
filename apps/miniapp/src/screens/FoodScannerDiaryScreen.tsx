@@ -264,7 +264,9 @@ export function FoodScannerDiaryScreen() {
         {status.kind === "ready" && (
           <DiaryReady
             day={status.day}
-            onAddTap={() => navigate("/customer/food-scanner/capture")}
+            // DRF-2091: «Добавить приём» ведёт на запись текстом — фото-половина
+            // ждёт решение владельца (D26), обещать её кнопкой нельзя.
+            onAddTap={() => navigate("/customer/food-scanner/manual")}
             onDelete={onDelete}
             onCorrect={onCorrect}
             pending={pending}

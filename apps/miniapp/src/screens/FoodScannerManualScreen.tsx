@@ -1,85 +1,142 @@
 /**
- * Manual entry fallback — Customer Food Scanner.
+ * Запись еды текстом — Customer Food Diary, F8 (текстовая половина, DRF-2091).
  *
- * Route: `/customer/food-scanner/manual`
+ * Route: `/customer/food-scanner/manual`. Вход — «Добавить приём» из
+ * дневника (F5) и «Записать текстом» с дашборда. Фото — не здесь (D26 у
+ * владельца): маршруты сканера остаются, но с этого экрана на них не ведёт.
  *
- * Spec: `docs/screens/customer-food-scanner-flow.md` §8.
+ * Та же тропа, что у текста в чате (F2 #1729 + #1823), теми же словами:
+ *   1. поле «Что съела?» — «борщ 250»: граммы в конце фразы — порция по
+ *      словам человека; без граммов — порция оценивается;
+ *   2. `POST /food/estimate` — оценка БЕЗ записи;
+ *   3. карточка «Я распознала так: …» — каждое предположение названо
+ *      предположением: слова «примерно» и «оценка» на карточке обязательны
+ *      (сторож в тесте, как у чата);
+ *   4. «В дневник» — запись как показано (`corrected=false` →
+ *      `text_estimated_confirmed`); «Поправить граммы» — новая оценка с
+ *      названными граммами и запись с `corrected=true` (`text_user_corrected`);
+ *   5. возврат в дневник: запись в списке — и есть подтверждение.
  *
- * Activated from F2 error states «Не разобралась» / «Сервис
- * недоступен» → `Написать вручную`. Customer types dish name +
- * optional portion + meal-type. log_meal() called with `scan_id=None`.
+ * Согласие дневника — из реестра (DRF-1963): без него сервер отвечает 403
+ * `food_diary_consent_required`, и экран ведёт на гейт согласия (он живёт в
+ * экране съёмки) с возвратом сюда. «Не смогли спросить» ≠ «согласия нет»:
+ * сетевой сбой чтения на гейт не ведёт.
  */
-
-import { useCallback, useEffect, useState } from "react";
-import { useLocation, useNavigate } from "react-router-dom";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { useNavigate } from "react-router-dom";
 
 import { Snackbar } from "../components/Snackbar";
-import {
-  MEAL_TYPE_ICON,
-  MEAL_TYPE_LABEL,
-  defaultMealTypeForHour,
-  logMeal,
-  fetchConsentAt,
-  type MealType,
-} from "../lib/food-scanner";
 import { useScreenBack } from "../hooks/useScreenBack";
+import { ApiError } from "../lib/api";
+import {
+  estimateFoodText,
+  fetchConsentAt,
+  logFoodText,
+  type FoodTextEstimate,
+} from "../lib/food-scanner";
 import { backTo } from "../lib/screen-back";
 
-interface RouterState {
-  mealType?: MealType;
+export const DIARY_ROUTE = "/customer/food-scanner/diary";
+export const MANUAL_ROUTE = "/customer/food-scanner/manual";
+const CONSENT_GATE_ROUTE = "/customer/food-scanner/capture";
+
+export const MANUAL_COPY = {
+  title: "Записать текстом",
+  whatField: "Что съела?",
+  whatInputLabel: "Еда текстом",
+  whatPlaceholder: "например, борщ 250",
+  whatHint: "Можно с граммами в конце — «гречка с курицей 200». Без граммов порцию оценю.",
+  estimate: "Оценить",
+  estimating: "Считаю…",
+  cardTitle: (dish: string) => `Я распознала так: ${dish}.`,
+  portionEstimated: (g: number) => `Порция — примерно ${g} г, это оценка: граммов в сообщении не было.`,
+  portionNamed: (g: number) => `Порция — ${g} г, по твоим словам.`,
+  macros: (kcal: number, rest: string) => `Примерно ${kcal} ккал${rest} — оценка по справочнику блюд.`,
+  confirmQuestion: "Записать в дневник?",
+  toDiary: "В дневник",
+  fixGrams: "Поправить граммы",
+  gramsField: "Сколько граммов?",
+  recalc: "Пересчитать",
+  cancelGrams: "Отмена",
+  saving: "Записываю…",
+  emptyText: "Подскажи, что съела — пара слов.",
+  badGrams: "Граммы — целое число от 1 до 5000.",
+  notRecognized: "Не нашла такое блюдо в справочнике. Попробуй назвать иначе.",
+  unavailable: "Сервис питания сейчас недоступен. Попробуй чуть позже.",
+  saveFailed: "Не получилось записать. Попробуй ещё раз.",
+  diaryOff: "Дневник питания пока недоступен.",
+} as const;
+
+type Card = {
+  estimate: FoodTextEstimate;
+  /** Граммы поправлены человеком на карточке — код происхождения меняется. */
+  corrected: boolean;
+  /** Один ключ на карточку: повтор запроса после потери ответа не пишет вторую запись. */
+  idempotencyKey: string;
+};
+
+function mintKey(): string {
+  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+    return crypto.randomUUID();
+  }
+  return `k-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
 }
 
-const MEAL_TYPES: ReadonlyArray<MealType> = [
-  "breakfast",
-  "lunch",
-  "dinner",
-  "snack",
-];
+/** Текст карточки — предположения названы предположениями (как в чате, §109 шаг 4). */
+export function renderEstimateLines(estimate: FoodTextEstimate): string[] {
+  const grams = Math.round(estimate.portion_g);
+  const macros: string[] = [];
+  for (const [label, value] of [
+    ["Б", estimate.protein_g],
+    ["Ж", estimate.fat_g],
+    ["У", estimate.carbs_g],
+  ] as Array<[string, number | null]>) {
+    if (value !== null && value !== undefined) macros.push(`${label} ${Math.round(value)}`);
+  }
+  const rest = macros.length ? ` · ${macros.join(" · ")}` : "";
+  return [
+    MANUAL_COPY.cardTitle(estimate.matched_dish),
+    estimate.portion_estimated ? MANUAL_COPY.portionEstimated(grams) : MANUAL_COPY.portionNamed(grams),
+    MANUAL_COPY.macros(Math.round(estimate.kcal), rest),
+  ];
+}
+
+function refusal(e: unknown): { slug: string; status: number } | null {
+  if (!(e instanceof ApiError)) return null;
+  return { slug: e.slug, status: e.status };
+}
 
 export function FoodScannerManualScreen() {
   const navigate = useNavigate();
+  // Возврат — в дневник: сюда приходят из него и с дашборда, не из съёмки.
+  const onBack = useScreenBack(backTo(DIARY_ROUTE));
 
-  // Возврат (DRF-1493) — к съёмке: ручной ввод открывают из неё.
-  // Был `-1`, то есть ничего при входе по ссылке.
-  const onBack = useScreenBack(backTo("/customer/food-scanner/capture"));
-  const location = useLocation();
-  const state = (location.state ?? {}) as RouterState;
-  const [dishName, setDishName] = useState("");
-  const [mealType, setMealType] = useState<MealType>(
-    state.mealType ?? defaultMealTypeForHour(new Date().getHours()),
-  );
-  const [portion, setPortion] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [snack, setSnack] = useState<{ visible: boolean; message: string }>({
-    visible: false,
-    message: "",
-  });
+  const [text, setText] = useState("");
+  const [card, setCard] = useState<Card | null>(null);
+  const [gramsOpen, setGramsOpen] = useState(false);
+  const [grams, setGrams] = useState("");
+  const [busy, setBusy] = useState<"idle" | "estimating" | "saving">("idle");
+  const [snack, setSnack] = useState<{ visible: boolean; message: string }>({ visible: false, message: "" });
+  const alive = useRef(true);
 
-  // Consent gate for manual entry path (follow-up #961). 152-FZ
-  // consent covers the food-scanner feature as a whole — dish-name PII
-  // text logged via manual entry hits the same nutrition pipeline as
-  // photo scans. If the customer never accepted the gate (deep-link
-  // bypass; legitimate path through error screens already came from
-  // /capture so they saw the gate), redirect to /capture where the
-  // gate is presented.
-  //
-  // Preserve `returnTo` so the consent-accept handler can bounce the
-  // customer back to /manual (adversarial CR F1 — without this, deep-
-  // linked /manual user lands at /capture after accept and loses the
-  // path they intended).
+  useEffect(() => {
+    alive.current = true;
+    return () => {
+      alive.current = false;
+    };
+  }, []);
+
+  const toConsentGate = useCallback(() => {
+    navigate(CONSENT_GATE_ROUTE, { replace: true, state: { returnTo: MANUAL_ROUTE } });
+  }, [navigate]);
+
+  // Согласие спрашивается у сервера; отказ ЧТЕНИЯ на гейт не ведёт.
   useEffect(() => {
     let cancelled = false;
-    // Согласие спрашивается у сервера. Отказ ЧТЕНИЯ сюда не приводит:
-    // отправить человека на гейт из-за сетевого сбоя значило бы
-    // переспросить согласие у того, кто его дал, — а «не смогли
-    // спросить» и «согласия нет» это разные вещи.
     fetchConsentAt()
       .then((at) => {
         if (cancelled || at !== null) return;
-        navigate("/customer/food-scanner/capture", {
-          replace: true,
-          state: { returnTo: "/customer/food-scanner/manual", mealType },
-        });
+        toConsentGate();
       })
       .catch(() => {
         /* читать не удалось — экран остаётся на месте, гейт не зовём */
@@ -87,145 +144,157 @@ export function FoodScannerManualScreen() {
     return () => {
       cancelled = true;
     };
-  }, [navigate, mealType]);
+  }, [toConsentGate]);
 
-  const onSave = useCallback(async () => {
-    const trimmed = dishName.trim();
-    if (!trimmed) {
-      setSnack({
-        visible: true,
-        message: "Подскажи, что съела — пара слов.",
-      });
+  const say = (message: string) => setSnack({ visible: true, message });
+
+  const handleRefusal = (e: unknown, fallback: string): void => {
+    const r = refusal(e);
+    if (r?.slug === "food_diary_consent_required" || r?.slug === "consent_required") {
+      toConsentGate();
       return;
     }
-    setBusy(true);
+    if (r?.slug === "food_not_recognized") return say(MANUAL_COPY.notRecognized);
+    if (r?.slug === "nutrition_disabled") return say(MANUAL_COPY.diaryOff);
+    if (r?.slug === "nutrition_unavailable" || (r && r.status >= 500)) return say(MANUAL_COPY.unavailable);
+    say(fallback);
+  };
+
+  const estimate = useCallback(
+    async (portionG?: number) => {
+      const trimmed = text.trim();
+      if (!trimmed) return say(MANUAL_COPY.emptyText);
+      setBusy("estimating");
+      try {
+        const est = await estimateFoodText(trimmed, portionG);
+        if (!alive.current) return;
+        setCard({
+          estimate: est,
+          corrected: portionG !== undefined,
+          idempotencyKey: mintKey(),
+        });
+        setGramsOpen(false);
+        setGrams("");
+      } catch (e) {
+        if (alive.current) handleRefusal(e, MANUAL_COPY.unavailable);
+      } finally {
+        if (alive.current) setBusy("idle");
+      }
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [text],
+  );
+
+  const recalc = () => {
+    const n = Number(grams.trim());
+    if (!/^\d{1,4}$/.test(grams.trim()) || n < 1 || n > 5000) return say(MANUAL_COPY.badGrams);
+    void estimate(n);
+  };
+
+  const save = async () => {
+    if (!card) return;
+    setBusy("saving");
     try {
-      await logMeal({
-        dish_name: trimmed,
-        meal_type: mealType,
-        portion_multiplier: 1.0,
+      await logFoodText({
+        dish_name: card.estimate.matched_dish,
+        portion_g: card.estimate.portion_g,
+        corrected: card.corrected,
+        idempotency_key: card.idempotencyKey,
       });
-      navigate("/customer/food-scanner/saved", {
-        replace: true,
-        state: { dishName: trimmed, calories: null, edMode: false },
-      });
-    } catch {
-      setSnack({
-        visible: true,
-        message: "Не получилось сохранить. Попробуй ещё раз.",
-      });
+      if (!alive.current) return;
+      // Возврат в дневник: запись в списке — и есть подтверждение.
+      navigate(DIARY_ROUTE, { replace: true });
+    } catch (e) {
+      if (alive.current) handleRefusal(e, MANUAL_COPY.saveFailed);
     } finally {
-      setBusy(false);
+      if (alive.current) setBusy("idle");
     }
-  }, [dishName, mealType, navigate]);
+  };
 
   return (
     <div className="food-scanner-screen">
       <header className="records-screen__header">
-        <button
-          type="button"
-          className="records-screen__back"
-          aria-label="Назад"
-          onClick={onBack}
-        >
+        <button type="button" className="records-screen__back" aria-label="Назад" onClick={onBack}>
           <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
-            <path
-              d="M12 4l-6 6 6 6"
-              stroke="currentColor"
-              strokeWidth="2"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-            />
+            <path d="M12 4l-6 6 6 6" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
           </svg>
         </button>
-        <h1 className="records-screen__title">Запись вручную</h1>
+        <h1 className="records-screen__title">{MANUAL_COPY.title}</h1>
       </header>
 
       <main className="food-scanner-screen__main">
-        <section
-          className="food-scanner-screen__section"
-          aria-labelledby="food-manual-name-h3"
-        >
-          <h3
-            id="food-manual-name-h3"
-            className="food-scanner-screen__section-heading"
-          >
-            Что съела?
+        <section className="food-scanner-screen__section" aria-labelledby="food-manual-name-h3">
+          <h3 id="food-manual-name-h3" className="food-scanner-screen__section-heading">
+            {MANUAL_COPY.whatField}
           </h3>
           <input
             type="text"
             className="food-scanner-result__name-input"
-            value={dishName}
-            onChange={(e) => setDishName(e.target.value)}
-            placeholder="например, гречка с курицей"
-            aria-label="Название блюда"
+            value={text}
+            onChange={(e) => {
+              setText(e.target.value);
+              setCard(null);
+            }}
+            placeholder={MANUAL_COPY.whatPlaceholder}
+            aria-label={MANUAL_COPY.whatInputLabel}
+            disabled={busy !== "idle"}
           />
-        </section>
-
-        <section
-          className="food-scanner-screen__section"
-          aria-labelledby="food-manual-meal-h3"
-        >
-          <h3
-            id="food-manual-meal-h3"
-            className="food-scanner-screen__section-heading"
-          >
-            Когда
-          </h3>
-          <div
-            className="food-scanner-screen__meal-chips"
-            role="radiogroup"
-            aria-labelledby="food-manual-meal-h3"
-          >
-            {MEAL_TYPES.map((mt) => (
-              <button
-                key={mt}
-                type="button"
-                role="radio"
-                aria-checked={mealType === mt}
-                className={`food-scanner-screen__chip${
-                  mealType === mt ? " food-scanner-screen__chip--active" : ""
-                }`}
-                onClick={() => setMealType(mt)}
-              >
-                <span aria-hidden="true">{MEAL_TYPE_ICON[mt]}</span>
-                <span>{MEAL_TYPE_LABEL[mt]}</span>
+          <p className="food-scanner-screen__hint">{MANUAL_COPY.whatHint}</p>
+          {!card && (
+            <div className="food-scanner-screen__cta-stack">
+              <button type="button" className="btn-primary" disabled={busy !== "idle"} onClick={() => void estimate()}>
+                {busy === "estimating" ? MANUAL_COPY.estimating : MANUAL_COPY.estimate}
               </button>
+            </div>
+          )}
+        </section>
+
+        {card && (
+          <section className="food-scanner-screen__section food-text-card" aria-label="Я распознала так" data-testid="estimate-card">
+            {renderEstimateLines(card.estimate).map((line) => (
+              <p key={line} className="food-text-card__line">
+                {line}
+              </p>
             ))}
-          </div>
-        </section>
-
-        <section
-          className="food-scanner-screen__section"
-          aria-labelledby="food-manual-portion-h3"
-        >
-          <h3
-            id="food-manual-portion-h3"
-            className="food-scanner-screen__section-heading"
-          >
-            Порция (необязательно)
-          </h3>
-          <input
-            type="text"
-            inputMode="numeric"
-            className="food-scanner-result__name-input"
-            value={portion}
-            onChange={(e) => setPortion(e.target.value)}
-            placeholder="например, 150"
-            aria-label="Порция в граммах"
-          />
-        </section>
-
-        <div className="food-scanner-screen__cta-stack">
-          <button
-            type="button"
-            className="btn-primary"
-            disabled={busy}
-            onClick={onSave}
-          >
-            Записать
-          </button>
-        </div>
+            {gramsOpen ? (
+              <div className="food-text-card__grams">
+                <label className="food-scanner-screen__section-heading" htmlFor="food-manual-grams">
+                  {MANUAL_COPY.gramsField}
+                </label>
+                <input
+                  id="food-manual-grams"
+                  type="text"
+                  inputMode="numeric"
+                  className="food-scanner-result__name-input"
+                  value={grams}
+                  onChange={(e) => setGrams(e.target.value)}
+                  placeholder="например, 300"
+                  disabled={busy !== "idle"}
+                />
+                <div className="food-scanner-screen__cta-stack">
+                  <button type="button" className="btn-primary" disabled={busy !== "idle"} onClick={recalc}>
+                    {busy === "estimating" ? MANUAL_COPY.estimating : MANUAL_COPY.recalc}
+                  </button>
+                  <button type="button" className="btn-secondary" disabled={busy !== "idle"} onClick={() => setGramsOpen(false)}>
+                    {MANUAL_COPY.cancelGrams}
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <>
+                <p className="food-text-card__line">{MANUAL_COPY.confirmQuestion}</p>
+                <div className="food-scanner-screen__cta-stack">
+                  <button type="button" className="btn-primary" disabled={busy !== "idle"} onClick={() => void save()}>
+                    {busy === "saving" ? MANUAL_COPY.saving : MANUAL_COPY.toDiary}
+                  </button>
+                  <button type="button" className="btn-secondary" disabled={busy !== "idle"} onClick={() => setGramsOpen(true)}>
+                    {MANUAL_COPY.fixGrams}
+                  </button>
+                </div>
+              </>
+            )}
+          </section>
+        )}
       </main>
 
       <Snackbar

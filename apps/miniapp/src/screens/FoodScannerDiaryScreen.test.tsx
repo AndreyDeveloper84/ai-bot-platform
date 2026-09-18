@@ -274,6 +274,29 @@ describe("пустой день не зовёт в неработающий ск
     ).toBeInTheDocument();
   });
 
+  it("DRF-2091: «Добавить приём» ведёт на запись текстом, не в съёмку (фото — D26)", async () => {
+    mockedLoad.mockResolvedValue({
+      state: "empty",
+      hideNumbers: false,
+      today: today({ calories_eaten: 0 }),
+    });
+    const { useLocation } = await import("react-router-dom");
+    function Probe() {
+      const location = useLocation();
+      return <div data-testid="location">{location.pathname}</div>;
+    }
+    render(
+      <MemoryRouter initialEntries={["/customer/food-scanner/diary"]}>
+        <Routes>
+          <Route path="/customer/food-scanner/diary" element={<FoodScannerDiaryScreen />} />
+          <Route path="*" element={<Probe />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+    fireEvent.click(await screen.findByRole("button", { name: "Добавить приём" }));
+    expect(await screen.findByTestId("location")).toHaveTextContent("/customer/food-scanner/manual");
+  });
+
   it("запись из чата (meal_type other) видна в «Другое»", async () => {
     // Текстовый ввод DRF-1837 пишет тип приёма «не указан» — он обязан
     // остаться на экране, а не пропасть из списка.
