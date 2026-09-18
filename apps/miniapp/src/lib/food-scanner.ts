@@ -481,6 +481,65 @@ export const FOOD_DIARY_CONSENT_DOCUMENT_VERSION = "food-diary-v1";
  * `null` — согласия нет, и экран обязан спросить. Отсутствие ключа
  * читается так же: fail-closed, отсутствие доезжает отсутствием.
  */
+// ---------------------------------------------------------------------------
+// Запись еды ТЕКСТОМ — F8, текстовая половина (DRF-2091).
+//
+// Настоящий провод, не stub: `POST /food/estimate` (оценка без записи) и
+// `POST /food/log` (запись по подтверждению) — те же ручки бота, что ведут
+// в ту же тропу каталога, что и текст в чате (F2). `guardProd` здесь не
+// стоит: это боевые ручки. Фото-половина (`scanPhoto`/`logMeal` выше) —
+// по-прежнему stub за `guardProd`, до решения владельца D26.
+// ---------------------------------------------------------------------------
+
+export interface FoodTextEstimate {
+  matched_dish: string;
+  portion_g: number;
+  /** true — граммов в тексте не было, порция — оценка; экран обязан сказать это словами. */
+  portion_estimated: boolean;
+  kcal: number;
+  protein_g: number | null;
+  fat_g: number | null;
+  carbs_g: number | null;
+}
+
+export interface FoodTextLogResult {
+  log_id: string;
+  dish_name: string;
+  calories: number;
+  entry_origin: "text_estimated_confirmed" | "text_user_corrected" | string;
+}
+
+/** Оценка без записи. `portionG` — поправка граммов с карточки, сильнее числа в тексте. */
+export async function estimateFoodText(
+  text: string,
+  portionG?: number,
+): Promise<FoodTextEstimate> {
+  const body: { text: string; portion_g?: number } = { text };
+  if (portionG !== undefined) body.portion_g = portionG;
+  return request<FoodTextEstimate>("/food/estimate", {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+}
+
+/**
+ * Запись — только по подтверждению показанной оценки. `corrected` решается
+ * на карточке («Поправить граммы» → true), не задним числом: от него
+ * зависит код происхождения записи (§136). Ключ идемпотентности минтится
+ * экраном один раз на карточку и переживает повтор запроса.
+ */
+export async function logFoodText(req: {
+  dish_name: string;
+  portion_g: number;
+  corrected: boolean;
+  idempotency_key: string;
+}): Promise<FoodTextLogResult> {
+  return request<FoodTextLogResult>("/food/log", {
+    method: "POST",
+    body: JSON.stringify(req),
+  });
+}
+
 export async function fetchConsentAt(): Promise<string | null> {
   const res = await request<{ granted?: boolean; granted_at?: string | null }>(
     "/me/food-scanner-consent/",

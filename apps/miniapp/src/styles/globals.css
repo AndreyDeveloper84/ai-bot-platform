@@ -4724,6 +4724,11 @@ a {
   color: var(--c-text-secondary);
   padding-right: 44px;
 }
+/* DRF-2091 — вход в запись текстом с карточки-подсказки. */
+.wellness-dash__onboarding-cta {
+  margin-top: var(--s-2);
+}
+
 .wellness-dash__onboarding-dismiss {
   position: absolute;
   top: var(--s-1);
@@ -6352,6 +6357,31 @@ a {
   flex-direction: column;
   gap: var(--s-2);
 }
+/* DRF-2091 — запись еды текстом: карточка «Я распознала так». */
+.food-text-card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-1);
+}
+
+.food-text-card__line {
+  margin: 0;
+  font-size: var(--font-size-200);
+  color: var(--c-text-primary);
+}
+
+.food-text-card__grams {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+}
+
+.food-scanner-screen__hint {
+  margin: var(--s-1) 0 0;
+  font-size: var(--font-size-100);
+  color: var(--c-text-secondary);
+}
+
 .food-scanner-screen__section-heading {
   margin: 0;
   font-size: var(--font-size-200);
