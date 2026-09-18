@@ -1748,6 +1748,12 @@ WELLNESS_PROACTIVE_ENABLED = os.environ.get("WELLNESS_PROACTIVE_ENABLED", "false
     "1",
 )
 
+# DRF-2101 — Plan Lite (§49): тот же ключ, что в каталоге. Default CLOSED:
+# включает главное окно на стенде после проверки владельцем. Выключен →
+# прокси customer/plan-lite отвечает 404 plan_lite_disabled ДО вызова
+# каталога, «мой план» в чате — не наш текст (уходит модели, как раньше).
+PLAN_LITE_ENABLED = os.environ.get("PLAN_LITE_ENABLED", "false").lower() in ("true", "1")
+
 # DRF-1301 — the same two switches in front of the post-visit follow-up
 # («как прошёл вчерашний визит?»), for the same reason and in the same
 # order. See apps/bookings/followups.py for the consent gate they guard.

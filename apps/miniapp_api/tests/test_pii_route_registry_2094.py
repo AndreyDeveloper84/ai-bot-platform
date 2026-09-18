@@ -509,6 +509,21 @@ CUSTOMER_ROUTES: dict[str, Entry] = {
             "flag; no dish fields come back on delete"
         ),
     ),
+    # --- Plan Lite (DRF-2101, own) --------------------------------------
+    "customer_plan_lite": own(
+        "plan_lite.plan_id",
+        "plan_lite.goal_key",
+        "plan_lite.actions[].action_type / cadence / target_count / done_count / bucket.start / bucket.end",
+        "closed",
+        via="apps.miniapp_api.views_plan_lite:plan_lite_payload",
+        note=(
+            "the caller's own Plan Lite passed through from the catalog wellness-context "
+            "under their external_user_id: the goal KEY (curated slug, never the goal text) "
+            "and the commitments with their done_count — action facts only (В-5), no "
+            "observation values, no phone or name; GET reads it, POST echoes the plan just "
+            "created, DELETE answers with the closed flag only"
+        ),
+    ),
 }
 
 

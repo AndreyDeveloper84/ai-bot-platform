@@ -54,6 +54,11 @@ from apps.integrations.ayla.nutrition_client import (
 )
 from apps.integrations.ayla.wellness_context_client import (
     OutcomeState,
+    PlanLite,
+    PlanLiteAction,
+    PlanLiteAlreadyActiveError,
+    PlanLiteDisabledError,
+    PlanLiteGoalNotFoundError,
     WellnessContext,
     WellnessContextAuthError,
     WellnessContextClientError,
@@ -99,6 +104,11 @@ __all__ = [
     "SummaryResponse",
     "WaterEntryResponse",
     "WaterTodayResponse",
+    "PlanLite",
+    "PlanLiteAction",
+    "PlanLiteAlreadyActiveError",
+    "PlanLiteDisabledError",
+    "PlanLiteGoalNotFoundError",
     "WellnessContext",
     "WellnessContextAuthError",
     "WellnessContextClientError",
