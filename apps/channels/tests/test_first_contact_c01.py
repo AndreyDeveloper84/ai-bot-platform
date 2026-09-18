@@ -676,7 +676,9 @@ class TestDiaryOnFirstContact:
         """
 
         def _set(granted: bool) -> None:
-            monkeypatch.setattr("apps.consent.nutrition.diary_or_health_granted", lambda _u: granted)
+            monkeypatch.setattr(
+                "apps.consent.nutrition.diary_or_health_granted", lambda _u: granted
+            )
 
         _set(False)
         return _set

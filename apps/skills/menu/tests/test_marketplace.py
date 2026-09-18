@@ -93,7 +93,9 @@ def consent(monkeypatch):
     """
 
     def _set(granted: bool) -> None:
-        monkeypatch.setattr("apps.consent.nutrition.diary_or_health_granted", lambda _bot_user: granted)
+        monkeypatch.setattr(
+            "apps.consent.nutrition.diary_or_health_granted", lambda _bot_user: granted
+        )
 
     _set(False)
     return _set
