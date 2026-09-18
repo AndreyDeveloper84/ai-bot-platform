@@ -85,8 +85,16 @@ def ayla(monkeypatch: pytest.MonkeyPatch, settings):
             raw={},
         )
 
+    async def _no_diary_today(**_kwargs: Any) -> Any:
+        # DRF-2100: the diary consent v1 the fixture below seeds IS the
+        # nutrition basis, so the scanner now reads today's diary next to the
+        # scan. An unreachable diary costs one line and nothing else (see
+        # ``_scan_and_read_diary``) — this flow is about memory, not the diary.
+        raise RuntimeError("no diary in this flow")
+
     client = Mock()
     client.scan_photo = _scan
+    client.daily_summary = _no_diary_today
     monkeypatch.setattr(
         "apps.skills.food_scanner.skill.get_nutrition_client", lambda: client, raising=True
     )

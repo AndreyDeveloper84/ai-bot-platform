@@ -85,14 +85,15 @@ def bot_user() -> _StubUser:
 def consent(monkeypatch):
     """Переключатель согласия ``HEALTH`` без похода в базу.
 
-    Подменяется ``apps.consent.health.is_granted`` — ровно тот предикат,
-    который зовёт ``marketplace.health_granted`` ленивым импортом, — а не
+    Подменяется ``apps.consent.nutrition.diary_or_health_granted`` (DRF-2100:
+    дневник v1 ИЛИ старый HEALTH) — ровно тот предикат, который зовёт
+    ``marketplace.health_granted`` ленивым импортом, — а не
     сама ``health_granted``: иначе тест проверял бы собственную заглушку
     вместо связи меню со сторожем согласия.
     """
 
     def _set(granted: bool) -> None:
-        monkeypatch.setattr("apps.consent.health.is_granted", lambda _bot_user: granted)
+        monkeypatch.setattr("apps.consent.nutrition.diary_or_health_granted", lambda _bot_user: granted)
 
     _set(False)
     return _set
@@ -679,7 +680,7 @@ class TestNutritionGates:
         def _boom(_bot_user):
             raise RuntimeError("db is down")
 
-        monkeypatch.setattr("apps.consent.health.is_granted", _boom)
+        monkeypatch.setattr("apps.consent.nutrition.diary_or_health_granted", _boom)
         payloads = _payloads(marketplace_menu_reply(bot_user=bot_user)[1]["buttons"])
         assert f"{CALLBACK_HEALTH_NEED_PREFIX}food_diary" in payloads
 
