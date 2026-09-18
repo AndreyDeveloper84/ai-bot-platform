@@ -1,0 +1,30 @@
+{% extends "admin/base_site.html" %}
+{# Страница результата выдачи (DRF-2082). Единственное место, где код виден:
+   ответ на POST, в базе только хеш, GET адреса выдачи кода не несёт. #}
+
+{% block breadcrumbs %}
+  <div class="breadcrumbs">
+    <a href="{% url 'admin:index' %}">Админка</a>
+    &rsaquo; <a href="{% url 'admin:tenancy_staffinvite_changelist' %}">Приглашения</a>
+    &rsaquo; Код выписан
+  </div>
+{% endblock %}
+
+{% block content %}
+  <div id="content-main">
+    <h1>{{ title }}</h1>
+    <div class="callout" role="status">
+      <p style="margin: 0 0 .5em;">Код для роли <strong>{{ invite.role }}</strong> в салоне <strong>{{ invite.tenant }}</strong>{% if master %} (мастер: {{ master.name }}){% endif %}:</p>
+      <p style="font-size: 1.6em; letter-spacing: .1em; margin: 0;"><code data-role="invite-code">{{ code }}</code></p>
+      <p style="margin: .5em 0 0;">Действует до {{ invite.expires_at|date:"d.m.Y H:i" }}. Человек вводит код в салонном боте.</p>
+    </div>
+    <p style="max-width: 46em;">
+      <strong>Скопируйте код сейчас.</strong> Повторно он не показывается — в базе
+      хранится только хеш. Если код потерян — отзовите его и выпишите новый.
+    </p>
+    <div class="submit-row">
+      <a href="{% url 'admin:tenancy_staffinvite_changelist' %}" class="button">К списку приглашений</a>
+      <a href="{% url 'admin:tenancy_staffinvite_issue' %}?tenant={{ invite.tenant_id }}" class="button">Выписать ещё</a>
+    </div>
+  </div>
+{% endblock %}

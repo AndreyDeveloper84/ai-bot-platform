@@ -107,6 +107,18 @@ class InviteMasterMissing(InviteError):
     slug = "invite_master_missing"
 
 
+class InviteAlreadyUsed(InviteError):
+    """Revoking a code that was already redeemed (DRF-2082).
+
+    Nothing to revoke: the access it granted lives in ``TenantStaff`` / the
+    master link now and is taken away by ``revoke_staff_access``, not by
+    touching the spent code. Named so the operator is sent to the right
+    action instead of seeing a silent no-op.
+    """
+
+    slug = "invite_already_used"
+
+
 class MasterAlreadyLinked(InviteError):
     """The catalog row this code points at already belongs to someone else.
 
@@ -394,6 +406,12 @@ def redeem_staff_invite_by_identity(
         if invite.used_at is not None:
             logger.info("identity.staff_invite.already_used invite=%s", invite.id)
             raise InviteNotFound("already used")
+        if invite.revoked_at is not None:
+            # DRF-2082 — revoked by an operator. Same answer as used/expired
+            # for the person typing (DRF-1061: a guesser learns nothing);
+            # the log keeps the real reason.
+            logger.info("identity.staff_invite.revoked invite=%s", invite.id)
+            raise InviteNotFound("revoked")
         if invite.expires_at <= now:
             logger.info("identity.staff_invite.expired invite=%s", invite.id)
             raise InviteNotFound("expired")
@@ -514,6 +532,9 @@ def redeem_staff_invite(*, code: str, bot_user: BotUser, tenant) -> RedeemResult
         if invite.used_at is not None:
             logger.info("identity.staff_invite.already_used invite=%s", invite.id)
             raise InviteNotFound("already used")
+        if invite.revoked_at is not None:
+            logger.info("identity.staff_invite.revoked invite=%s", invite.id)
+            raise InviteNotFound("revoked")
         if invite.expires_at <= now:
             logger.info("identity.staff_invite.expired invite=%s", invite.id)
             raise InviteNotFound("expired")
@@ -535,6 +556,74 @@ def redeem_staff_invite(*, code: str, bot_user: BotUser, tenant) -> RedeemResult
         invite.tenant.slug,
     )
     return result
+
+
+@dataclass(frozen=True)
+class RevokeInviteResult:
+    """``changed=False`` — код уже был отозван; повтор не ошибка."""
+
+    invite_id: Any
+    changed: bool
+
+
+def revoke_staff_invite(
+    invite: StaffInvite,
+    *,
+    surface: str,
+    actor_label: str,
+    actor_id: Any = None,
+    reason: str = "",
+) -> RevokeInviteResult:
+    """Отозвать код приглашения до срока (DRF-2082) — то, чего не было.
+
+    До этого листа приглашение гасилось только пассивно: сроком
+    (``expires_at``) и однократностью (``used_at``); «отозвано оператором» и
+    «истекло» были неразличимы, а отозвать до срока было нечем (замер ayla-5f,
+    #1802). Здесь — ``revoked_at``, и оба пути погашения отвечают на такой код
+    ``InviteNotFound`` — тем же словом, что на использованный и истёкший:
+    набирающий чужой код не должен узнать, ЧТО с ним не так (DRF-1061), а
+    оператор видит правду в карточке и в аудите.
+
+    Использованный код не отзывается — ``InviteAlreadyUsed``: выданный им
+    доступ живёт уже в ``TenantStaff``/связи мастера и снимается
+    ``revoke_staff_access``. Повторный отзыв — ``changed=False``, не ошибка.
+
+    Кто отозвал — в аудите (``surface``/``actor_label``): оператор платформы
+    ``BotUser`` не имеет, поэтому колонки «кем» на модели нет намеренно.
+    """
+    from apps.audit.services import write_audit
+    from apps.events.vocabulary import STAFF_INVITE_REVOKED
+    from apps.tenancy.context import tenant_scope
+
+    with transaction.atomic():
+        row = StaffInvite.all_tenants.select_for_update().get(pk=invite.pk)
+        if row.used_at is not None:
+            raise InviteAlreadyUsed("the code was already redeemed — revoke the access instead")
+        if row.revoked_at is not None:
+            return RevokeInviteResult(invite_id=row.pk, changed=False)
+        row.revoked_at = timezone.now()
+        row.save(update_fields=["revoked_at"])
+        with tenant_scope(row.tenant):
+            write_audit(
+                STAFF_INVITE_REVOKED,
+                target="tenancy.StaffInvite",
+                target_id=row.pk,
+                payload={
+                    "surface": surface,
+                    "actor_label": actor_label,
+                    "role": row.role,
+                    "reason": (reason or "").strip()[:200],
+                },
+                actor_id=actor_id,
+            )
+
+    logger.info(
+        "identity.staff_invite.revoked_by_operator invite=%s tenant=%s surface=%s",
+        row.pk,
+        row.tenant_id,
+        surface,
+    )
+    return RevokeInviteResult(invite_id=row.pk, changed=True)
 
 
 def _grant_staff_role(invite: StaffInvite, bot_user: BotUser) -> RedeemResult:

@@ -155,9 +155,12 @@ class TestTheOperatorIsToldWhyThereIsNoRevoke:
     сегодня уже споткнулся с неимпортированным ``format_html``.
     """
 
-    def test_the_change_form_says_the_code_cannot_be_revoked(
+    def test_the_change_form_says_how_the_code_is_revoked(
         self, superuser_client: Client, invite_row: StaffInvite
     ) -> None:
+        """До DRF-2082 узел утверждал «отозвать нечем» — с отзывом кода это
+        стало бы докстрингом, пережившим дефект. Теперь описание называет
+        действие «Отозвать код» и оба пассивных способа гашения."""
         url = reverse("admin:tenancy_staffinvite_change", args=[invite_row.pk])
         body = superuser_client.get(url).content.decode("utf-8")
 
@@ -165,6 +168,7 @@ class TestTheOperatorIsToldWhyThereIsNoRevoke:
         assert "Салон операций" in body
         # Само объяснение — то, ради чего описание и заведено.
         assert "Отозвать выписанный код" in body
+        assert "Отозвать код" in body
         # И названы оба пассивных способа гашения, а не один.
         assert "Действует до" in body
         assert "Использовано" in body

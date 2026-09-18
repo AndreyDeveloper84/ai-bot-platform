@@ -1154,23 +1154,40 @@ class StaffInviteAdmin(_ReadOnlyStaffAdmin):
         "expires_at",
         "used_at",
         "used_by",
+        "revoked_at",
         "created_at",
         "created_by",
         "note",
     )
+    change_list_template = "admin/tenancy/staffinvite/change_list.html"
+    actions = ("revoke_staff_invite",)
+
+    #: Слово оператору на каждый именованный исход.
+    CODE_WORDS: dict[str, str] = {
+        "invite_already_used": (
+            "Код уже использован — отзывать нечего. Выданный им доступ снимается "
+            "действием «Отозвать доступ» на карточке доступов."
+        ),
+        "master_required": "Для роли «master» нужно выбрать мастера этого салона.",
+        "master_not_in_tenant": "Этот мастер принадлежит другому салону.",
+        "master_only_for_master_role": "Мастер указывается только для роли «master».",
+        "tenant_required": "Выберите салон.",
+        "unknown_role": "Такой роли в словаре нет.",
+    }
     fieldsets = (
         (
             "Приглашение",
             {
                 "fields": _INVITE_FIELDS,
                 "description": (
-                    "Отозвать выписанный код <b>нечем</b>: механизма отзыва "
-                    "нет ни в админке, ни в API, ни в сервисном слое. "
-                    "Приглашение гасится только сроком (<i>Действует до</i>) "
-                    "или погашением (<i>Использовано</i>). Это состояние "
-                    "системы, а не ограничение экрана — поэтому здесь нет "
-                    "кнопки отзыва: кнопка, показывающая несуществующую "
-                    "возможность, хуже её отсутствия."
+                    "Отозвать выписанный код — действие «Отозвать код» в списке "
+                    "приглашений (DRF-2082): ставит <i>Отозвано</i>, и ввод кода "
+                    "после этого отклоняется. Использованный код не отзывается — "
+                    "выданный им доступ снимается действием «Отозвать доступ» на "
+                    "карточке доступов. Пассивное гашение остаётся: срок "
+                    "(<i>Действует до</i>) и однократность (<i>Использовано</i>). "
+                    "Сам код здесь не показывается никогда: он был показан один раз "
+                    "при выдаче, в базе только хеш."
                 ),
             },
         ),
@@ -1189,6 +1206,186 @@ class StaffInviteAdmin(_ReadOnlyStaffAdmin):
         """
         if obj.used_at is not None:
             return f"Использовано {obj.used_at:%d.%m.%Y}"
+        if obj.revoked_at is not None:
+            # DRF-2082: четвёртое состояние — активный отзыв оператором. Стоит
+            # ПОСЛЕ «использовано» (использованный не отзывается) и ДО «истёк»
+            # (отозванный истекать уже нечему).
+            return f"Отозвано {obj.revoked_at:%d.%m.%Y}"
         if obj.expires_at is not None and obj.expires_at <= timezone.now():
             return f"Срок истёк {obj.expires_at:%d.%m.%Y}"
         return "Ждёт принятия"
+
+    # --- DRF-2082 (PR-2): выдать / отозвать код — через сервисы, не мимо ------
+
+    def _actor(self, request: HttpRequest):  # noqa: ANN202
+        from apps.identity.services.specialist_onboarding import OnboardingActor
+
+        return OnboardingActor(
+            surface="django_admin",
+            audit_label=f"django_admin:user={request.user.pk}",
+            cross_tenant=True,
+            capability="platform_operations",
+        )
+
+    def get_urls(self):  # type: ignore[no-untyped-def]
+        return [
+            path(
+                "issue/",
+                self.admin_site.admin_view(self.issue_view),
+                name="tenancy_staffinvite_issue",
+            ),
+            *super().get_urls(),
+        ]
+
+    def issue_view(self, request: HttpRequest) -> HttpResponse:
+        """«Выдать код»: тот же путь, что `issue_staff_invite` с хоста.
+
+        Код показывается оператору ОДИН РАЗ — на странице результата, которая
+        является ответом на POST; в базе только хеш, GET этого адреса кода не
+        несёт по построению. В `LogEntry` и аудит — id приглашения, роль,
+        срок; ни код, ни хеш.
+        """
+        from apps.audit.services import write_audit
+        from apps.catalog.models import CatalogMaster
+        from apps.events.vocabulary import STAFF_INVITE_ISSUED
+        from apps.identity.services.staff_invites import INVITE_TTL_DAYS, issue_staff_invite
+        from apps.tenancy.context import tenant_scope
+
+        if not self.has_manage_permission(request):
+            raise PermissionDenied
+        tenants = list(Tenant.all_objects.order_by("name"))
+        raw_tenant = (request.POST.get("tenant") or request.GET.get("tenant") or "").strip()
+        tenant = (
+            Tenant.all_objects.filter(pk=raw_tenant).first()
+            if _looks_like_uuid(raw_tenant)
+            else None
+        )
+        # Чтение мастеров — под скоупом выбранного салона (менеджер по умолчанию
+        # фильтрует по tenant), а не через all_tenants: cross-tenant чтение
+        # каталога вне apps/marketplace запрещено сторожем MKT1.
+        masters: list[CatalogMaster] = []
+        if tenant is not None:
+            with tenant_scope(tenant):
+                masters = list(
+                    CatalogMaster.objects.filter(archived_at__isnull=True)
+                    .only("id", "name", "linked_bot_user")
+                    .order_by("name")
+                )
+        context = {
+            **self.admin_site.each_context(request),
+            "title": "Выдать код приглашения",
+            "opts": self.model._meta,  # noqa: SLF001
+            "tenants": tenants,
+            "tenant": tenant,
+            "masters": masters,
+            "roles": StaffInvite.Role.choices,
+            "ttl_days": INVITE_TTL_DAYS,
+        }
+
+        if request.method == "POST" and request.POST.get("apply"):
+            role = (request.POST.get("role") or "").strip()
+            note = (request.POST.get("note") or "").strip()[:200]
+            raw_master = (request.POST.get("catalog_master") or "").strip()
+            slug = None
+            master = None
+            if tenant is None:
+                slug = "tenant_required"
+            elif role not in StaffInvite.Role.values:
+                slug = "unknown_role"
+            elif role == StaffInvite.Role.MASTER:
+                master = None
+                if _looks_like_uuid(raw_master):
+                    with tenant_scope(tenant):
+                        master = CatalogMaster.objects.filter(pk=raw_master).first()
+                if not raw_master:
+                    slug = "master_required"
+                elif master is None:
+                    slug = "master_not_in_tenant"
+            elif raw_master:
+                slug = "master_only_for_master_role"
+            if slug is not None:
+                self.message_user(request, self.CODE_WORDS[slug], messages.ERROR)
+                return HttpResponseRedirect(
+                    f"{request.path}?tenant={tenant.pk}" if tenant is not None else request.path
+                )
+
+            invite, code = issue_staff_invite(
+                tenant=tenant, role=role, catalog_master=master, created_by=None, note=note
+            )
+            actor = self._actor(request)
+            with tenant_scope(tenant):
+                write_audit(
+                    STAFF_INVITE_ISSUED,
+                    target="tenancy.StaffInvite",
+                    target_id=invite.pk,
+                    payload={
+                        "surface": actor.surface,
+                        "actor_label": actor.audit_label,
+                        "role": invite.role,
+                        "master_id": str(master.pk) if master is not None else None,
+                        "expires_at": invite.expires_at.isoformat(),
+                    },
+                )
+            # Ни кода, ни хеша: журнал — место, куда смотрят.
+            self.log_addition(
+                request, invite, f"Выписан код приглашения (роль {invite.role}, DRF-2082)."
+            )
+            return TemplateResponse(
+                request,
+                "admin/tenancy/staffinvite/issued.html",
+                {
+                    **context,
+                    "title": "Код приглашения выписан",
+                    "invite": invite,
+                    "code": code,
+                    "master": master,
+                },
+            )
+
+        return TemplateResponse(request, "admin/tenancy/staffinvite/issue.html", context)
+
+    @admin.action(permissions=["manage"], description="Отозвать код (с причиной)")
+    def revoke_staff_invite(self, request: HttpRequest, queryset):  # type: ignore[no-untyped-def]
+        """Сервис `revoke_staff_invite` на каждую выбранную строку; исходы — по имени."""
+        from apps.identity.services.staff_invites import InviteAlreadyUsed, revoke_staff_invite
+
+        if not request.POST.get("apply"):
+            return TemplateResponse(
+                request,
+                "admin/tenancy/staffinvite/revoke.html",
+                {
+                    **self.admin_site.each_context(request),
+                    "title": "Отозвать код приглашения",
+                    "opts": self.model._meta,  # noqa: SLF001
+                    "rows": list(queryset.select_related("tenant")),
+                    "action_checkbox_name": ACTION_CHECKBOX_NAME,
+                },
+            )
+        reason = (request.POST.get("reason") or "").strip()
+        if not reason:
+            self.message_user(
+                request, "Отзыв без причины не допускается — укажите причину.", messages.ERROR
+            )
+            return None
+        actor = self._actor(request)
+        revoked = already = 0
+        for invite in queryset:
+            try:
+                result = revoke_staff_invite(
+                    invite, surface=actor.surface, actor_label=actor.audit_label, reason=reason
+                )
+            except InviteAlreadyUsed as exc:
+                self.message_user(request, self.CODE_WORDS[exc.slug], messages.ERROR)
+                continue
+            if result.changed:
+                revoked += 1
+                self.log_change(request, invite, f"Код отозван. Причина: {reason} (DRF-2082).")
+            else:
+                already += 1
+        if revoked or already:
+            self.message_user(
+                request,
+                f"Отозвано: {revoked}. Уже были отозваны: {already}. Ввод этих кодов отклоняется.",
+                messages.SUCCESS if revoked else messages.WARNING,
+            )
+        return None
