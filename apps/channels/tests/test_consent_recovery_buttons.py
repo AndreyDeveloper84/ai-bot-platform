@@ -112,7 +112,9 @@ class TestRefusalCarriesTheButton:
             bot_user=Mock(),
             message_text="омлет 150 г",
         )
-        with patch.object(text_entry, "_consent_open", return_value=False):
+        with patch(
+            "apps.orchestrator.personal_surface.personal_records_consent_open", return_value=False
+        ):
             result = text_entry._gate(ctx)
 
         assert result is not None
@@ -131,7 +133,9 @@ class TestRefusalCarriesTheButton:
             bot_user=bot_user,
             message_text="стакан воды",
         )
-        with patch.object(water_skill, "_consent_open", return_value=False):
+        with patch(
+            "apps.orchestrator.personal_surface.personal_records_consent_open", return_value=False
+        ):
             result = water_skill.WaterSkill().handle(ctx)
 
         assert result.reply_text == CONSENT_TEXT
@@ -222,7 +226,13 @@ class TestGuards:
             bot_user=bot_user,
             message_text="стакан воды",
         )
-        with patch.object(water_skill, "_consent_open", return_value=False), tenant_scope(tenant):
+        with (
+            patch(
+                "apps.orchestrator.personal_surface.personal_records_consent_open",
+                return_value=False,
+            ),
+            tenant_scope(tenant),
+        ):
             result = water_skill.WaterSkill().handle(ctx)
 
         assert result.reply_text == CONSENT_TEXT

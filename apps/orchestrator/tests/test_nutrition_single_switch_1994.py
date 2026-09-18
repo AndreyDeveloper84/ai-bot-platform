@@ -222,9 +222,10 @@ class TestWaterIsADiaryEntryAndAnswersTheStub:
     def test_positive_control_water_reaches_its_consent_gate_when_on(
         self, nutrition_on, monkeypatch
     ):
-        from apps.skills.water import skill as water_module
 
-        monkeypatch.setattr(water_module, "_consent_open", lambda _u: False)
+        monkeypatch.setattr(
+            "apps.orchestrator.personal_surface.personal_records_consent_open", lambda _u: False
+        )
         result = WaterSkill().handle(_ctx("стакан воды"))
         assert result.reply_text  # что-то сказано
         assert result.reply_text != STUB
