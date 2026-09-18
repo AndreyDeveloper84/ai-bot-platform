@@ -263,6 +263,9 @@ class TestEveryReaderCatchesTheWholeSalonFamily:
         assert module.__file__ is not None
         tree = ast.parse(Path(module.__file__).read_text(encoding="utf-8"))
         family = _salon_error_classes()
+        # Присутствие раньше отсутствия (negative_assert_guard): «ничего не
+        # пропущено» на пустой иерархии было бы пустой правдой.
+        assert len(family) >= 5, "иерархия Salon* пуста — сканер слеп"
         blocks = _catalog_try_blocks(tree)
         assert blocks, f"{reader}: ни одного try вокруг вызова каталога — сканер слеп"
 
@@ -277,6 +280,7 @@ class TestEveryReaderCatchesTheWholeSalonFamily:
                     if caught is None:
                         continue
                     covered |= {n for n, cls in family.items() if issubclass(cls, caught)}
+            assert covered, f"{reader}:{block.lineno}: ни одного Salon* в except — не тот try"
             missing = sorted(set(family) - covered)
             assert not missing, (
                 f"{reader}:{block.lineno} не ловит {missing} — на стенде это 500 без имени"
