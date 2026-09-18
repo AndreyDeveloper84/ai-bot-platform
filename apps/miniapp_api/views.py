@@ -3965,8 +3965,9 @@ def customer_wellness_water(request: HttpRequest) -> HttpResponse:
 
     bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
     # DRF-1919: новый стакан — запись в дневник, за теми же воротами, что
-    # запись и правка еды: без согласия на персональные данные — 403.
-    refusal = _diary_entry_gate(bot_user, needs_consent=True)
+    # запись и правка еды; DRF-2093 — и за реестром согласия дневника: без
+    # действующего ``food_diary_processing`` — 403 своим слагом.
+    refusal = _diary_write_gate(bot_user)
     if refusal is not None:
         return refusal
 
@@ -4189,17 +4190,37 @@ def _food_entry_refusal(exc: Exception, *, external_id: str, step: str) -> JsonR
 # ведёт человека на экран согласия, а не на общий «нет согласия».
 
 
-def _food_text_gate(bot_user: BotUser) -> JsonResponse | None:
-    refused = _diary_entry_gate(bot_user, needs_consent=True)
-    if refused is not None:
-        return refused
-    from apps.consent.nutrition import diary_is_granted
+def _diary_write_gate(bot_user: BotUser) -> JsonResponse | None:
+    """Ворота ЗАПИСИ в дневник — вода, еда текстом, правка и возврат (DRF-2093).
 
-    if not diary_is_granted(bot_user):
+    Один предикат на всех писателей (``apps.consent.diary_gate``): флаг →
+    PERSONAL_DATA → реестр ``food_diary_processing``. До этого листа вода и
+    правка спрашивали только первые два, и отозванное в Mini App согласие
+    дневника не мешало тому же Mini App записать стакан. Слаги — те же, что у
+    F8: ``nutrition_disabled`` 404, ``consent_required`` 403,
+    ``food_diary_consent_required`` 403 (экран ведёт на согласие).
+    """
+    from apps.consent.diary_gate import (
+        CONSENT_REQUIRED,
+        FOOD_DIARY_CONSENT_REQUIRED,
+        NUTRITION_DISABLED,
+        diary_write_refusal,
+    )
+
+    reason = diary_write_refusal(bot_user)
+    if reason == NUTRITION_DISABLED:
+        return _error("nutrition_disabled", "food diary is not enabled", 404)
+    if reason == CONSENT_REQUIRED:
+        return _error("consent_required", "personal data consent is required", 403)
+    if reason == FOOD_DIARY_CONSENT_REQUIRED:
         return _error(
             "food_diary_consent_required", "food diary consent (registry) is required", 403
         )
     return None
+
+
+def _food_text_gate(bot_user: BotUser) -> JsonResponse | None:
+    return _diary_write_gate(bot_user)
 
 
 def _food_text_json(request: HttpRequest) -> dict[str, Any] | JsonResponse:
@@ -4423,7 +4444,8 @@ def customer_wellness_food_entry(request: HttpRequest, entry_id: str) -> HttpRes
             }
         )
 
-    refused = _diary_entry_gate(bot_user, needs_consent=True)
+    # DRF-2093: правка — запись в дневник; те же три ворот, что у воды и F8.
+    refused = _diary_write_gate(bot_user)
     if refused is not None:
         return refused
     try:
@@ -4465,7 +4487,8 @@ def customer_wellness_food_entry_restore(request: HttpRequest, entry_id: str) ->
     if not entry_id:
         return _error("malformed", "entry_id is required", 400)
     bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
-    refused = _diary_entry_gate(bot_user, needs_consent=True)
+    # DRF-2093: возврат — запись в дневник; те же три ворот, что у воды и F8.
+    refused = _diary_write_gate(bot_user)
     if refused is not None:
         return refused
     external_id = external_user_id_for(bot_user)

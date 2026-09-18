@@ -143,6 +143,11 @@ def _turn(user_id: int, *, consent: bool) -> None:
             source="test:drf1926",
             document_version="welcome-s2-v1",
         )
+        # DRF-2093: вода — запись в дневник, и с этого листа «с согласием» значит
+        # оба согласия: PERSONAL_DATA и дневник из реестра (food-diary-v1).
+        from apps.consent.nutrition import FOOD_DIARY_CONSENT_DOCUMENT_VERSION, grant_diary
+
+        grant_diary(bot_user, document_version=FOOD_DIARY_CONSENT_DOCUMENT_VERSION)
     max_handler.handle_global_max_event(
         {
             "update_type": "message_created",

@@ -72,6 +72,14 @@ def consent():
         yield m
 
 
+@pytest.fixture(autouse=True)
+def diary_consent():
+    """DRF-2093: третьи ворота записи — согласие дневника из реестра (DRF-1963).
+    Отозванное согласие — в apps/consent/tests/test_diary_write_gate_2093.py."""
+    with patch("apps.consent.nutrition.diary_is_granted", return_value=True) as m:
+        yield m
+
+
 @pytest.fixture
 def no_consent():
     with patch(

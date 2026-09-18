@@ -114,6 +114,7 @@ from apps.orchestrator.ui.keyboards import (
     parse_callback,
 )
 from apps.skills.base import SkillContext, SkillResult
+from apps.skills.food_clarify.text_entry import DIARY_CONSENT_REQUIRED_TEXT
 from apps.skills.registry import register
 
 logger = logging.getLogger(__name__)
@@ -156,10 +157,9 @@ PHOTO_SCAN_OFF_FALLBACK = (
     "— например «гречка 200 г»: посчитаю и покажу, прежде чем записать."
 )
 
-CONSENT_REQUIRED_FALLBACK = (
-    "Чтобы записать еду, нужно открыть Mini App и подтвердить согласие "
-    "на обработку данных (152-ФЗ). После этого вернись — и пришли фото."
-)
+#: DRF-2093 — один текст отказа реестра на воду, текст и фото; живёт в
+#: ``text_entry`` рядом с CONSENT_TEXT, здесь — прежнее имя для читателей.
+CONSENT_REQUIRED_FALLBACK = DIARY_CONSENT_REQUIRED_TEXT
 
 
 # ─── skill ────────────────────────────────────────────────────────────────
@@ -500,15 +500,18 @@ def _check_gates(
             meta={"reply_kind": "food_scanner_photo_scan_off"},
         )
 
-    # DRF-1948 — запись в дневник требует PERSONAL_DATA, как у записи еды
-    # текстом и правки в Mini App. Раньше сканер смотрел только на свою
-    # колонку, и дневник писался без согласия на обработку личных данных.
-    # Импорт ленивый, как у соседних гейтов: предикат и текст отказа нужны
-    # только здесь (``text_entry`` навыков не регистрирует — это модуль
-    # помощников записи еды текстом).
-    from apps.orchestrator.personal_surface import personal_records_consent_open
+    # DRF-1948 / DRF-1963 / DRF-2093 — PERSONAL_DATA и согласие дневника из
+    # реестра спрашиваются ОДНИМ предикатом на всех писателей
+    # (``apps.consent.diary_gate.diary_write_refusal``, fail-closed на сбое
+    # реестра). Тексты и ``reply_kind`` — прежние: M2+ recovery ключуется на них.
+    from apps.consent.diary_gate import (
+        CONSENT_REQUIRED,
+        FOOD_DIARY_CONSENT_REQUIRED,
+        diary_write_refusal,
+    )
 
-    if not personal_records_consent_open(context.bot_user):
+    reason = diary_write_refusal(context.bot_user)
+    if reason == CONSENT_REQUIRED:
         from apps.skills.food_clarify.text_entry import CONSENT_TEXT
 
         logger.info(
@@ -523,19 +526,7 @@ def _check_gates(
             action_data=consent_offer_action_data("photo"),
             meta={"reply_kind": "food_scanner_personal_data_required"},
         )
-
-    # DRF-1963 (M1) — согласие дневника и сканера живёт в реестре. Раньше
-    # здесь читалась колонка ``BotUser.food_scanner_consent_at``: без версии
-    # текста, без источника, и её отзыв стирал сам факт выдачи. Сбой проверки
-    # — отказ, как у PERSONAL_DATA выше: не доказано согласие — нет записи.
-    from apps.consent.nutrition import diary_is_granted
-
-    try:
-        diary_open = diary_is_granted(context.bot_user)
-    except Exception:  # noqa: BLE001 — fail-closed: no consent proven, no diary write
-        logger.exception("food_scanner.gate.consent_check_failed kind=%s", kind)
-        diary_open = False
-    if not diary_open:
+    if reason == FOOD_DIARY_CONSENT_REQUIRED:
         logger.info(
             "food_scanner.gate.consent_missing kind=%s conv=%s",
             kind,

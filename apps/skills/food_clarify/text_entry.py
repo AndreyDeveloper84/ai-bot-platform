@@ -126,6 +126,14 @@ CONSENT_TEXT = (
     "Чтобы вести дневник, мне нужно согласие на обработку личных данных — "
     "без него я ничего не записываю."
 )
+#: DRF-2093 — согласие ДНЕВНИКА (реестр ``food_diary_processing``) отозвано или
+#: не выдано. Один текст на воду, текст и фото в чате; без кнопки «Дать
+#: согласие» (DRF-1968): та выдаёт PERSONAL_DATA, а согласие дневника из чата
+#: выдать нечем — только экран Mini App. Тот же текст, что у сканера (F11).
+DIARY_CONSENT_REQUIRED_TEXT = (
+    "Чтобы записать еду, нужно открыть Mini App и подтвердить согласие "
+    "на обработку данных (152-ФЗ). После этого вернись — и пришли фото."
+)
 NUTRITION_OFF_TEXT = "Дневник еды пока недоступен — функция готовится."
 FIX_GRAMS_PROMPT = "Сколько граммов было на самом деле? Напиши число — пересчитаю запись."
 FIXED_TEXT = "Исправила: {dish} — теперь {kcal} ккал."
@@ -290,26 +298,37 @@ def forget(context: SkillContext) -> None:
 # ─── гейты ────────────────────────────────────────────────────────────────
 
 
-def _consent_open(bot_user: Any) -> bool:
-    from apps.orchestrator.personal_surface import personal_records_consent_open
-
-    return personal_records_consent_open(bot_user)
-
-
 def _gate(context: SkillContext) -> SkillResult | None:
-    from django.conf import settings
+    """Ворота записи текстом — тот же предикат, что у всех писателей (DRF-2093).
 
-    if not getattr(settings, "NUTRITION_ENABLED", False):
+    ``apps.consent.diary_gate.diary_write_refusal``: флаг → PERSONAL_DATA →
+    реестр согласия дневника. Правка и возврат записи идут через эти же
+    ворота (они пишут в дневник); удаление — нет.
+    """
+    from apps.consent.diary_gate import (
+        CONSENT_REQUIRED,
+        FOOD_DIARY_CONSENT_REQUIRED,
+        NUTRITION_DISABLED,
+        diary_write_refusal,
+    )
+
+    reason = diary_write_refusal(context.bot_user)
+    if reason == NUTRITION_DISABLED:
         return SkillResult(
             reply_text=NUTRITION_OFF_TEXT, meta={"reply_kind": "food_text_nutrition_off"}
         )
-    if not _consent_open(context.bot_user):
+    if reason == CONSENT_REQUIRED:
         from apps.skills.welcome.skill import consent_offer_action_data
 
         return SkillResult(
             reply_text=CONSENT_TEXT,
             action_data=consent_offer_action_data("text"),
             meta={"reply_kind": "food_text_consent_required"},
+        )
+    if reason == FOOD_DIARY_CONSENT_REQUIRED:
+        return SkillResult(
+            reply_text=DIARY_CONSENT_REQUIRED_TEXT,
+            meta={"reply_kind": "food_text_diary_consent_required"},
         )
     return None
 
