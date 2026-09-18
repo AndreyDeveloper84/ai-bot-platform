@@ -237,7 +237,7 @@ CONSENT_CLOSED_TEXT = (
 
 #: No anketa yet. The diary has nothing to be measured against, so the anketa
 #: is not a suggestion here — it is the missing half of the answer.
-NO_PROFILE_TEXT = "Норм пока нет — я ещё не считала их для тебя."
+NO_PROFILE_TEXT = "Ориентиров пока нет — я ещё не считала их для тебя."
 
 #: Анкета есть, ориентиров нет — каталог их снял (``targets_provenance.source
 #: == "none"``, DRF-1623 N-b). Человек, который вчера видел «из 95 г»,
@@ -571,10 +571,10 @@ def _render_week(bot_user: Any, profile: Any) -> DiscoveryReply:
     if pct is not None:
         # % of the goal in the person's OWN profile — Ayla's arithmetic over
         # what they logged against what they chose. Not a claim about them.
-        lines.append(f"Белок: в среднем {round(pct)}% от твоей нормы.")
+        lines.append(f"Белок: в среднем {round(pct)}% от твоего ориентира.")
     streak = _clamp_int(getattr(deficits, "protein_low_streak_days", 0))
     if streak:
-        lines.append(f"Дней подряд ниже нормы белка: {streak}.")
+        lines.append(f"Дней подряд ниже ориентира по белку: {streak}.")
     # Ayla's free-form ``hint`` is NOT appended — see the module docstring.
     return _reply("\n".join(lines), _diary_chips(profile))
 

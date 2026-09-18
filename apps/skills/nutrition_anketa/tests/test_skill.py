@@ -689,7 +689,7 @@ class TestSummaryCardShowsOnlyRealTargets:
     выдавала «💧 Вода: 0 мл», а человеку без веса — ещё и «🔥 Калории:
     0 ккал/день». Ни одна из пяти величин не бывает нулём у живого
     человека, поэтому такая карточка не пустая, а лживая — и лжёт сразу
-    после слов «Готово, рассчитала твои нормы».
+    после слов «Готово, посчитала твои ориентиры».
     """
 
     def test_a_full_calculation_still_shows_every_row(self) -> None:
@@ -697,7 +697,7 @@ class TestSummaryCardShowsOnlyRealTargets:
         from apps.skills.nutrition_anketa.skill import _format_summary
 
         text = _format_summary(_profile())
-        assert "Готово, рассчитала твои нормы:" in text
+        assert "Готово, посчитала твои ориентиры:" in text
         assert "🔥 Калории: 1900 ккал/день" in text
         assert "💧 Вода: 2100 мл" in text
 
@@ -734,7 +734,7 @@ class TestSummaryCardShowsOnlyRealTargets:
         # пустой строке.
         assert "Дневник готов" in text
         # ABSENCE: расчётом карточка не притворяется и нолей не печатает.
-        assert "рассчитала твои нормы" not in text
+        assert "посчитала твои ориентиры" not in text
         assert "0" not in text
 
 
@@ -903,7 +903,7 @@ class TestProposalCard:
         assert "🍗 Белок: 100 г" in text
         assert "Считала по методике Миффлин — Сан Жеор, версия 1 от твоих данных:" in text
         assert "пока ты его не подтвердишь, в дневнике оно не действует" in text
-        assert "Готово, рассчитала твои нормы" not in text
+        assert "Готово, посчитала твои ориентиры" not in text
         assert "Дневных ориентиров пока не считаю" not in text
 
     def test_fluids_reference_caption_is_printed_only_when_the_catalogue_names_it(self) -> None:
@@ -993,7 +993,7 @@ class TestProposalCard:
             },
         )
         text = _format_summary(profile)
-        assert text.startswith("Норму не считаю: при беременности, возрасте до 18 лет")
+        assert text.startswith("Ориентиры не считаю: при беременности, возрасте до 18 лет")
         assert "Дневник и вода работают как раньше" in text
         assert "ккал" not in text  # ни одного числа
         assert "Дневных ориентиров пока не считаю" not in text  # не безымянный отказ
