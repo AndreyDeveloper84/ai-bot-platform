@@ -122,6 +122,7 @@ import { MasterAylaScreen } from "./screens/MasterAylaScreen";
 import { MasterScheduleScreen } from "./screens/MasterScheduleScreen";
 import { MasterPublicationScreen } from "./screens/MasterPublicationScreen";
 import { MasterDirectionsScreen } from "./screens/MasterDirectionsScreen";
+import { MasterPlaceScreen } from "./screens/MasterPlaceScreen";
 import { MasterServiceSelectScreen } from "./screens/MasterServiceSelectScreen";
 import { MasterServicesScreen } from "./screens/MasterServicesScreen";
 import { MasterSettingsScreen } from "./screens/MasterSettingsScreen";
@@ -1260,6 +1261,8 @@ function UnifiedSoloSurface({ me }: { me: MeResponse }) {
         <Route path="/solo/publication" element={<MasterPublicationScreen />} />
         {/* DRF-1817 — экран 06: рабочие часы на общем контракте /working-hours. */}
         <Route path="/solo/working-hours" element={<MasterWorkingHoursScreen />} />
+        {/* DRF-1811 (M19) — экран 05: место работы; всё в каталоге через /service-locations. */}
+        <Route path="/solo/place" element={<MasterPlaceScreen />} />
 
         {/* Bottom-bar destinations. */}
         <Route path="/solo/my-day" element={<MasterDashboardScreen />} />

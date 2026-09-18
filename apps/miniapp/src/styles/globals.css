@@ -7986,6 +7986,41 @@ a {
   display: flex;
 }
 
+/* DRF-1811 (M19) — экран 05: место работы. Карта — ссылка по координатам,
+   без встраивания и без фото фасада. */
+.place__suggestions {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-1);
+}
+
+.place__suggestion {
+  width: 100%;
+  justify-content: flex-start;
+  text-align: left;
+}
+
+.place__card {
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--s-1);
+}
+
+.place__badge {
+  font-size: var(--font-size-100);
+  font-weight: 600;
+  color: var(--c-text-primary);
+}
+
+.place__map-link {
+  font-size: var(--font-size-100);
+  color: var(--c-accent);
+  text-decoration: underline;
+}
+
 /* DRF-1818 — экран 08 «отправка профиля на проверку»: чек-лист по кодам
    каталога, услуги на проверке, текстовая сводка вместо карточки до M22. */
 .publication {
