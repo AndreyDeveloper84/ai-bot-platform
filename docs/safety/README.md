@@ -1,0 +1,17 @@
+# Ayla S1 clinical safety review package — индекс
+
+Документальная публикация пакета для независимой pre-validation медицинской safety-модели Ayla S1. Источник — рабочее пространство `Ayla/docs` (локальный git, ветка `safety/physician-review-package-2026-09-17`, commit `8432550`); файлы перенесены **байт в байт**, SHA-256 — в описании PR. Смысл, owner rulings и clinical status не менялись.
+
+| Файл здесь | Что это | В `Ayla/docs` лежал как |
+|---|---|---|
+| `docs/safety/F0-C3-safety-matrix.md` | Safety Matrix v0.12-reviewfix1 — `WORKING DRAFT` | `docs/safety/F0-C3-safety-matrix.md` |
+| `docs/safety/reviews/AYLA_CLINICAL_SAFETY_REVIEW_PACK_v0.1_2026-09-16.md` | Clinical Review Pack v0.1-reviewfix1 — интерфейс врача | `docs/AYLA_CLINICAL_SAFETY_REVIEW_PACK_v0.1_2026-09-16.md` (корень) |
+| `docs/safety/reviews/S1_CLINICAL_DETECTOR_FIXTURES_v0.1.md` | 35 базовых fixtures (contract layer над `apps/skills/health_screening/tests/s1_fixtures.py`) | тот же путь |
+| `docs/safety/reviews/S1_CONTEXT_RECHECK_ADVERSARIAL_FIXTURES_v0.2.md` | 69 контекстных / многоходовых fixtures (v0.2-reviewfix1) | тот же путь |
+| `docs/safety/reviews/OWNER_RULINGS_OD-SAF-11-22_IMMUTABLE_RECORD.md` | immutable owner record OD-SAF-11…22 — не редактируется ([OD-BOT §158]) | тот же путь |
+| `docs/safety/reviews/WAVE1_OWNER_DECISIONS_F0-C3.md` | Wave 1 owner decision pack — PARTIALLY RESOLVED | тот же путь |
+| `docs/Q1.md` | слово владельца 16.09.2026 — источник [OD-BOT §156] (стр. 16) и [OD-BOT §157] (стр. 10–14) | `docs/Q1.md` |
+
+Реестр решений владельца — `docs/OPEN_DECISIONS.md` (ключ `[OD-BOT §N]` в документах; §154–§158 — safety). Ссылки внутри пакета на `Ayla/docs/OPEN_DECISIONS.md` описывают устаревшую копию реестра в другом рабочем пространстве и намеренно не переписаны. `docs/CURRENT_DECISIONS_2026-09-16.md` в пакет не включён (операционный документ с инфраструктурными деталями); его safety-строки дословно воспроизведены в §156 / §157.
+
+**Статус.** Physician sign-off отсутствует: clinical status всех 104 fixtures — `PENDING_CLINICAL_EXPERT`. Публикация пакета **не означает** `CLINICAL APPROVED`, `PHYSICIAN PASS` или `SAFE FOR PILOT`; Safety Matrix остаётся `WORKING DRAFT`; end-to-end S1 runtime — NOT PASS; Controlled Pilot S1 gate — NOT READY.
