@@ -527,15 +527,15 @@ def _check_gates(
             meta={"reply_kind": "food_scanner_personal_data_required"},
         )
     if reason == FOOD_DIARY_CONSENT_REQUIRED:
+        from apps.skills.food_clarify.text_entry import diary_consent_required_result
+
         logger.info(
             "food_scanner.gate.consent_missing kind=%s conv=%s",
             kind,
             getattr(context.conversation, "id", None),
         )
-        return SkillResult(
-            reply_text=CONSENT_REQUIRED_FALLBACK,
-            meta={"reply_kind": "food_scanner_consent_required"},
-        )
+        # DRF-2096 — тот же отказ и та же кнопка, что у воды и текста.
+        return diary_consent_required_result("food_scanner_consent_required")
 
     return None
 
