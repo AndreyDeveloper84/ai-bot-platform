@@ -80,7 +80,14 @@ def _nutrition_on(settings):
 
 @pytest.fixture(autouse=True)
 def _consent():
-    with patch("apps.skills.food_clarify.text_entry._consent_open", return_value=True):
+    """PERSONAL_DATA и согласие дневника — по каноническим адресам предикатов
+    (DRF-2093: ворота текста зовут единый ``diary_write_refusal``)."""
+    with (
+        patch(
+            "apps.orchestrator.personal_surface.personal_records_consent_open", return_value=True
+        ),
+        patch("apps.consent.nutrition.diary_is_granted", return_value=True),
+    ):
         yield
 
 
