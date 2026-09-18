@@ -1,7 +1,7 @@
 """Plan Lite — прокси Mini App к каталогу под субъектом (DRF-2101, §49).
 
     GET    /customer/plan-lite  → wellness-context.plan_lite
-    POST   /customer/plan-lite  → создать план {goal_id, actions[1..3]}
+    POST   /customer/plan-lite  → создать план {goal_id?, actions[1..3]}
     DELETE /customer/plan-lite  → закрыть план (append-only)
 
 Первый живой вызывающий ``wellness_context_client`` (до этого — только
@@ -134,15 +134,17 @@ def customer_plan_lite(request: HttpRequest) -> HttpResponse:
         return _error("malformed", "body must be a JSON object", 400)
     goal_id = body.get("goal_id")
     actions = body.get("actions")
-    if not isinstance(goal_id, str) or not goal_id.strip():
-        return _error("malformed", "goal_id is required", 400)
+    # goal_id необязателен (PR-2b): экран его не знает — активную цель берёт
+    # каталог; передан — прокидывается как есть, форму проверяет каталог.
+    if goal_id is not None and (not isinstance(goal_id, str) or not goal_id.strip()):
+        return _error("malformed", "goal_id must be a non-empty string when given", 400)
     if not isinstance(actions, list):
         return _error("malformed", "actions must be a list", 400)
     try:
         plan = client.create_plan_lite(
             external_user_id=external_id,
-            goal_id=goal_id.strip(),
             actions=actions,
+            goal_id=goal_id.strip() if isinstance(goal_id, str) else None,
         )
     except Exception as exc:  # noqa: BLE001
         return _refusal(exc, step="create")
