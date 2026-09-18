@@ -96,6 +96,7 @@ import { CustomerRecordsScreen } from "./screens/CustomerRecordsScreen";
 import { CustomerSlotsScreen } from "./screens/CustomerSlotsScreen";
 import { CustomerWellnessDashboardScreen } from "./screens/CustomerWellnessDashboardScreen";
 import { GoalSelectScreen } from "./screens/GoalSelectScreen";
+import { PlanLiteScreen } from "./screens/PlanLiteScreen";
 import { FeedbackScreen } from "./screens/FeedbackScreen";
 import { FoodScannerCaptureScreen } from "./screens/FoodScannerCaptureScreen";
 import { FoodScannerDiaryScreen } from "./screens/FoodScannerDiaryScreen";
@@ -1437,6 +1438,7 @@ export function CustomerRoutes() {
         the bot, not just an internal link.
       */}
       <Route path="/customer/goal-select" element={<GoalSelectScreen />} />
+      <Route path="/customer/plan" element={<PlanLiteScreen />} />
       {/*
         Совместимый псевдоним того же экрана. Слаги бота
         `open_wellness` и `open_water_add_250` резолвятся сюда

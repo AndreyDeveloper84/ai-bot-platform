@@ -137,6 +137,7 @@ const EXPECTED_SCREENS = [
   "GoalSelectScreen",
   "HelloScreen",
   "MasterPickerScreen",
+  "PlanLiteScreen",
   "RescheduleScreen",
   "RoleNotReadyScreen",
   "ServiceDetailScreen",
