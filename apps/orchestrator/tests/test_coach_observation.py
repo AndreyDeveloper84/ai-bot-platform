@@ -34,7 +34,7 @@ from typing import Any
 
 import pytest
 
-from apps.consent import health as health_consent
+from apps.consent.tests.legacy_health import seed_legacy_health
 from apps.consent.services import record_global_consent
 from apps.identity.models import BotUser
 from apps.integrations.ayla import ProfileResponse, SummaryResponse, WaterTodayResponse
@@ -95,9 +95,7 @@ def _person(uid: str, *, health: bool = True) -> BotUser:
     )
     record_global_consent(bot_user, source="test:welcome")
     if health:
-        health_consent.grant(
-            bot_user, document_version=health_consent.HEALTH_CONSENT_DOCUMENT_VERSION
-        )
+        seed_legacy_health(bot_user)
     bot_user.ayla_user_id = uuid.uuid4()
     bot_user.save(update_fields=["ayla_user_id"])
     return bot_user

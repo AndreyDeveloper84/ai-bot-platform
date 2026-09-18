@@ -71,11 +71,14 @@ import {
 } from "../lib/personal-data";
 import {
   grantHealthConsent,
-  HEALTH_CONSENT_DOCUMENT_VERSION,
   StaleDisclosureError,
   withdrawHealthConsent,
   type HealthConsentState,
 } from "../lib/health-consent";
+import {
+  DISCLOSURE_BODY as FOOD_DIARY_DISCLOSURE_BODY,
+  FOOD_DIARY_DISCLOSURE_VERSION,
+} from "../lib/food-diary-disclosure";
 import { useSheetKeyNav } from "../hooks/useSheetKeyNav";
 
 // ---------------------------------------------------------------------------
@@ -583,8 +586,11 @@ export function PersonalDataDeleteSheet({ open, triggerRef, onClose }: SheetProp
 //
 // * раскрытие перед подтверждением — CTA лежит ПОД перечнем, а не над ним,
 //   и перечень не сворачивается: согласие подписывают после текста;
-// * версия — выдача уходит с HEALTH_CONSENT_DOCUMENT_VERSION, то есть в
-//   журнал попадает то, что человеку показали. Если сервер тем временем
+// * версия — выдача уходит с FOOD_DIARY_DISCLOSURE_VERSION, то есть в
+//   журнал попадает то, что человеку показали (DRF-2100: показывается
+//   раскрытие дневника Z9 — согласие на данные о питании одно, и это оно;
+//   свой текст «Что передаётся/Зачем» лист больше не несёт, иначе в журнал
+//   попадала бы версия одного текста под показом другого). Если сервер тем временем
 //   обновил раскрытие (409 stale_disclosure), лист НЕ дожимает выдачу, а
 //   честно говорит, что текст изменился и его надо перечитать;
 // * симметрия — отзыв живёт в том же листе и тем же весом: разрешение,
@@ -602,17 +608,6 @@ interface HealthConsentSheetProps extends SheetProps {
   /** Успешная запись: экран обновляет строку согласия и показывает снекбар. */
   onSettled: (next: HealthConsentState) => void;
 }
-
-/** Что именно уходит в обработку. Формулировки — по факту, без обещаний. */
-const HEALTH_DATA_SCOPE: readonly string[] = [
-  "Что ты записываешь в дневник питания: блюда, порции, время",
-  "Недельная картина по белку, воде и целям — в сводном виде",
-];
-
-const HEALTH_DATA_PURPOSE: readonly string[] = [
-  "Ayla учитывает питание в разговоре и в подсказках",
-  "Без этого разрешения дневник остаётся у тебя, а в разговоре не участвует",
-];
 
 export function HealthConsentSheet({
   open,
@@ -632,7 +627,7 @@ export function HealthConsentSheet({
     try {
       const next = granted
         ? await withdrawHealthConsent()
-        : await grantHealthConsent(HEALTH_CONSENT_DOCUMENT_VERSION);
+        : await grantHealthConsent(FOOD_DIARY_DISCLOSURE_VERSION);
       onSettled(next);
       onClose();
     } catch (err) {
@@ -673,20 +668,13 @@ export function HealthConsentSheet({
                 разрешение на них отдельное — и его не бывает «заодно» с
                 остальными.
               </p>
-              <p className="profile-support-sheet__sub-heading">
-                Что передаётся:
-              </p>
-              <ul className="profile-support-sheet__list">
-                {HEALTH_DATA_SCOPE.map((item) => (
-                  <li key={item}>{item}</li>
-                ))}
-              </ul>
-              <p className="profile-support-sheet__sub-heading">Зачем:</p>
-              <ul className="profile-support-sheet__list">
-                {HEALTH_DATA_PURPOSE.map((item) => (
-                  <li key={item}>{item}</li>
-                ))}
-              </ul>
+              {/* DRF-2100 — то же раскрытие дневника (Z9), что и на экране
+                  сканера: согласие одно, текст один, версия одна. */}
+              {FOOD_DIARY_DISCLOSURE_BODY.map((paragraph) => (
+                <p key={paragraph} className="profile-support-sheet__body">
+                  {paragraph}
+                </p>
+              ))}
               <p className="profile-support-sheet__body">
                 Отозвать можно в любой момент — здесь же, одним действием.
               </p>

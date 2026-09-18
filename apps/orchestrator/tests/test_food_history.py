@@ -43,6 +43,7 @@ from typing import Any
 import pytest
 
 from apps.consent import health as health_consent
+from apps.consent.tests.legacy_health import seed_legacy_health
 from apps.consent.services import record_global_consent
 from apps.identity.models import BotUser, MemoryEntry
 from apps.integrations.ayla import (
@@ -198,7 +199,7 @@ def person(db) -> BotUser:
         channel="max", channel_user_id=CHANNEL_USER_ID, chat_id="chat-1467"
     )
     record_global_consent(bot_user, source="test:welcome")
-    health_consent.grant(bot_user, document_version=health_consent.HEALTH_CONSENT_DOCUMENT_VERSION)
+    seed_legacy_health(bot_user)
     # Связка с Ayla обязательна, а не декоративна: ``memory.food`` пишет
     # ``MemoryEntry`` по ``ayla_user_id``, и на несвязанной строке он вообще
     # ничего не пишет. Счётчик на такой строке всегда показывал бы ноль и
@@ -523,22 +524,26 @@ class TestTheScannerWiringNotJustTheFormatter:
         # Оба запроса ушли — и оба в одном ходе, а не один за другим.
         assert sorted(fake.calls) == ["daily_summary", "scan_photo"]
 
-    def test_without_health_consent_ayla_is_asked_only_to_recognise(
+    def test_the_diary_consent_alone_reads_the_diary_next_to_the_scan(
         self, no_health, monkeypatch
     ) -> None:
-        """Закрытые ворота не стоят ни одного лишнего запроса."""
+        """DRF-2100 — ``no_health`` holds PERSONAL_DATA and the diary consent v1
+        (``_context`` seeds it for the scan) and NO legacy HEALTH row. Until
+        this ticket that was «scan, but do not read the diary»; now v1 IS the
+        nutrition basis, so the diary is read next to the scan and the card
+        knows the dish is already logged. The closed-gate case (no v1 at
+        all) costs no request at all — ``test_no_health_consent_no_call``."""
         from apps.skills.food_scanner.skill import ALREADY_LOGGED_LINE
 
         fake = _FakeAyla(summary=_summary())
 
         result = self._handle(monkeypatch, fake, no_health)
 
-        # Карточка отрисовалась и она про то самое блюдо.
         assert "Борщ" in result.reply_text
         assert result.action_data is not None
-        assert result.action_data["already_logged_today"] is False
-        assert ALREADY_LOGGED_LINE not in result.reply_text
-        assert fake.calls == ["scan_photo"]
+        assert result.action_data["already_logged_today"] is True
+        assert ALREADY_LOGGED_LINE in result.reply_text
+        assert fake.calls == ["scan_photo", "daily_summary"]
 
 
 # ─── 3. согласие HEALTH — ворота ───────────────────────────────────────────

@@ -912,20 +912,22 @@ NUTRITION_UNAVAILABLE_TEXT = "Функция пока недоступна."
 
 
 def health_granted(bot_user: Any) -> bool:
-    """Вторые ворота: действующее согласие ``HEALTH`` у ЭТОГО человека.
+    """Вторые ворота: действующее основание на данные о питании у ЭТОГО человека.
 
     Тот же предикат, которым ходит сторож нутриционной поверхности
-    (:func:`apps.consent.health.is_granted`), — чтобы меню не могло
-    показать вход туда, куда поверхность откажет.
+    (:func:`apps.consent.nutrition.diary_or_health_granted` — дневник v1
+    или старый ``HEALTH``, DRF-2100), — чтобы меню не могло показать вход
+    туда, куда поверхность откажет.
 
     Fail-closed: любая ошибка чтения — это «согласия нет», то есть тап
     приведёт на запрос согласия. Ошибиться в другую сторону значило бы
     открыть медданные по сбою БД.
     """
-    from apps.consent.health import is_granted
+    from apps.consent.nutrition import diary_or_health_granted
 
+    # DRF-2100 — one consent (diary v1); a legacy HEALTH row still opens the entry.
     try:
-        return bool(is_granted(bot_user))
+        return bool(diary_or_health_granted(bot_user))
     except Exception:  # noqa: BLE001 — сторож согласия обязан быть fail-closed
         return False
 

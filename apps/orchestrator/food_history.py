@@ -218,7 +218,11 @@ UNKNOWN = TodayDiary(Status.UNAVAILABLE)
 
 
 def read_consent_open(bot_user: Any) -> bool:
-    """PERSONAL_DATA **and** HEALTH granted? Fail-closed on any error.
+    """PERSONAL_DATA **and** a nutrition basis granted? Fail-closed on any error.
+
+    The basis is the diary consent ``food-diary-v1`` OR a legacy ``HEALTH``
+    row (DRF-2100, owner ruling 18.09 §48 п.8б — one consent, old rows
+    stay valid): :func:`apps.consent.nutrition.diary_or_health_granted`.
 
     ``has_global_consent`` rather than the tenant-scoped ``has_consent``:
     the concierge and the global skill path run with
@@ -226,11 +230,12 @@ def read_consent_open(bot_user: Any) -> bool:
     """
     try:
         from apps.consent.models import ConsentRecord
+        from apps.consent.nutrition import diary_or_health_granted
         from apps.consent.services import has_global_consent
 
         return has_global_consent(
             bot_user, ConsentRecord.ConsentType.PERSONAL_DATA.value
-        ) and has_global_consent(bot_user, ConsentRecord.ConsentType.HEALTH.value)
+        ) and diary_or_health_granted(bot_user)
     except Exception:  # noqa: BLE001 — fail-closed: no consent proven, no read
         logger.exception("orchestrator.food_history.consent_check_failed")
         return False

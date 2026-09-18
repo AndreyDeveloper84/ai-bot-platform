@@ -2676,22 +2676,29 @@ def food_scanner_consent(request: HttpRequest) -> HttpResponse:
 
 
 def _health_consent_payload(bot_user: BotUser) -> dict:
-    """Состояние согласия для экрана. Дата — из действующей строки, не из часов."""
-    from apps.consent.health import (
-        HEALTH_CONSENT_DOCUMENT_VERSION,
-        current_record,
-        is_granted,
+    """Состояние согласия для экрана. Дата — из действующей строки, не из часов.
+
+    DRF-2100: согласие на данные о питании одно — дневник ``food-diary-v1``;
+    старая строка HEALTH признаётся как действующая (совместимость), и тогда
+    ``document_version`` показывает ЕЁ версию, а ``current_document_version``
+    — текст дневника: экран видит, что стоит старое, и может предложить
+    перечитать, но человек ничего не теряет.
+    """
+    from apps.consent.nutrition import (
+        FOOD_DIARY_CONSENT_DOCUMENT_VERSION,
+        diary_or_health_current_record,
+        diary_or_health_granted,
     )
 
-    granted = is_granted(bot_user)
-    record = current_record(bot_user) if granted else None
+    granted = diary_or_health_granted(bot_user)
+    record = diary_or_health_current_record(bot_user) if granted else None
     return {
         "granted": granted,
         "granted_at": record.captured_at.isoformat() if record else None,
         # Версия, под которой согласие СТОИТ (может отставать от текущей —
         # тогда экран показывает актуальную и предлагает перечитать).
         "document_version": record.document_version if record else "",
-        "current_document_version": HEALTH_CONSENT_DOCUMENT_VERSION,
+        "current_document_version": FOOD_DIARY_CONSENT_DOCUMENT_VERSION,
     }
 
 
@@ -2700,11 +2707,15 @@ def _health_consent_payload(bot_user: BotUser) -> dict:
 @require_init_data
 @with_request_tenant
 def health_consent(request: HttpRequest) -> HttpResponse:
-    """Согласие на обработку медданных: прочитать / выдать / отозвать.
+    """Согласие на данные о питании из профиля: прочитать / выдать / отозвать.
+
+    DRF-2100: выдаётся согласие дневника ``food-diary-v1`` (одно на все
+    поверхности), а не отдельный HEALTH; старые строки HEALTH читаются и
+    отзываются здесь же (совместимость — решение владельца 18.09, §48 п.8б).
 
     ``GET``    → состояние (см. :func:`_health_consent_payload`).
     ``POST``   → выдать. Тело: ``{"document_version": "<версия раскрытия>"}``;
-                 версия обязательна и сверяется с серверной — согласие
+                 версия обязательна и сверяется с текстом дневника — согласие
                  записывается на текст, который человеку показали, а не на
                  абстрактное «да». Идемпотентно.
     ``DELETE`` → отозвать. Идемпотентно; строки согласий не удаляются,
@@ -2715,10 +2726,12 @@ def health_consent(request: HttpRequest) -> HttpResponse:
     """
     import json
 
-    from apps.consent.health import (
+    from apps.consent.health import GRANT_SOURCE as PROFILE_GRANT_SOURCE
+    from apps.consent.health import withdraw as withdraw_legacy_health
+    from apps.consent.nutrition import (
         UnknownDisclosureVersionError,
-        grant as grant_health,
-        withdraw as withdraw_health,
+        grant_diary,
+        withdraw_diary,
     )
 
     bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
@@ -2727,7 +2740,11 @@ def health_consent(request: HttpRequest) -> HttpResponse:
         return JsonResponse(_health_consent_payload(bot_user))
 
     if request.method == "DELETE":
-        withdrawn = withdraw_health(bot_user)
+        # DRF-2100 — отзыв гасит ОБЕ строки: дневник v1 и старую HEALTH.
+        # Человек со старым согласием нажимает «Отозвать» и обязан увидеть
+        # «нет»; оставить HEALTH стоять значило бы отозвать на экране и не
+        # отозвать в реестре.
+        withdrawn = withdraw_diary(bot_user) + withdraw_legacy_health(bot_user)
         logger.info(
             "miniapp_api.health_consent.withdrawn bot_user=%s rows=%d",
             bot_user.id,
@@ -2745,8 +2762,14 @@ def health_consent(request: HttpRequest) -> HttpResponse:
     if not document_version:
         return _error("bad_request", "document_version is required", 400)
 
+    # DRF-2100 — второй путь выдачи ОДНОГО согласия дневника v1 (первый —
+    # ``food_scanner_consent``): та же ``grant_diary``, тот же тип и та же
+    # версия, различается только ``source``. Строка HEALTH здесь не
+    # создаётся ни при каком клиенте: старый бандл, приславший
+    # ``health-data-v1``, получает 409 — прежний контракт «текст изменился,
+    # перечитай» — а не новое согласие особой категории под чужим текстом.
     try:
-        grant_health(bot_user, document_version=document_version)
+        grant_diary(bot_user, document_version=document_version, source=PROFILE_GRANT_SOURCE)
     except UnknownDisclosureVersionError:
         # 409, не 400: запрос корректен по форме — расходятся версии
         # раскрытия, и клиенту нужно перечитать актуальную, а не чинить тело.

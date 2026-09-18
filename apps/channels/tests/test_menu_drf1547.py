@@ -142,7 +142,10 @@ def concierge(monkeypatch):
 @pytest.fixture
 def health_consent(monkeypatch):
     def _set(granted: bool) -> None:
-        monkeypatch.setattr("apps.consent.health.is_granted", lambda _bot_user: granted)
+        # DRF-2100 — the menu asks the one nutrition basis (diary v1 OR legacy HEALTH).
+        monkeypatch.setattr(
+            "apps.consent.nutrition.diary_or_health_granted", lambda _bot_user: granted
+        )
 
     _set(False)
     return _set

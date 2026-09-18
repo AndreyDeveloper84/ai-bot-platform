@@ -99,7 +99,15 @@ class TestConsentGate:
         _, asked = self._wire(monkeypatch, {"personal_data", "health"})
         assert build_nutrition_context_block(object()) != ""
         # Both bases were actually consulted — not one standing in for two.
-        assert set(asked) == {"personal_data", "health"}
+        # DRF-2100: the nutrition basis is «diary v1 OR legacy HEALTH», so a
+        # person with only the old row is asked for the diary first, then HEALTH.
+        assert set(asked) == {"personal_data", "food_diary_processing", "health"}
+
+    def test_the_diary_consent_alone_is_the_new_basis(self, monkeypatch, ayla) -> None:
+        """DRF-2100 — a new person has food-diary-v1 and no HEALTH row at all."""
+        _, asked = self._wire(monkeypatch, {"personal_data", "food_diary_processing"})
+        assert build_nutrition_context_block(object()) != ""
+        assert "health" not in asked  # the OR short-circuits: v1 was enough
 
     def test_personal_data_only_is_blocked(self, monkeypatch, ayla) -> None:
         self._wire(monkeypatch, {"personal_data"})

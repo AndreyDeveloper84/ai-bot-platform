@@ -226,7 +226,10 @@ class TestRecipientGateTrace:
             )
         assert only(decisions, user).reason == "opt_out"
         gate.assert_called_once()
-        assert gate.call_args.kwargs["required_consents"] == (PERSONAL_DATA, HEALTH)
+        # DRF-2100: the blocker checks the baseline; the nutrition basis
+        # (diary v1 OR legacy HEALTH) is an «or» the blocker cannot express
+        # and is asked separately, under the same slug.
+        assert gate.call_args.kwargs["required_consents"] == (PERSONAL_DATA,)
 
     def test_blocked_recipient_leaves_an_audit_trail(self, tenant: Tenant) -> None:
         """След, по которому оператор видит, КАКОЙ гейт сработал."""
@@ -237,6 +240,28 @@ class TestRecipientGateTrace:
         assert row.payload["reason"] == "no_health_consent"
         assert row.payload["gate"] == "recipient"
         assert row.payload["occasion"] is False
+
+    def test_diary_v1_without_legacy_health_passes_the_gate(self, tenant: Tenant) -> None:
+        """DRF-2100 — a new person gives only food-diary-v1; the tick must not demand HEALTH."""
+        from apps.consent import nutrition
+
+        user = make_user(tenant, consents=(PERSONAL_DATA,))
+        nutrition.grant_diary(user, document_version=nutrition.FOOD_DIARY_CONSENT_DOCUMENT_VERSION)
+        decisions = tasks.plan_observe_occasions(
+            fetch=context_reader(WellnessContext(has_plan=True, outcomes=(outcome(),)))
+        )
+        assert only(decisions, user).reason == "observe_due"
+
+    def test_legacy_health_without_v1_still_passes_the_gate(self, tenant: Tenant) -> None:
+        """DRF-2100 — compatibility: the old row keeps its holder in."""
+        user = make_user(tenant)  # PERSONAL_DATA + legacy HEALTH, no diary row
+        assert not ConsentRecord.all_tenants.filter(
+            bot_user=user, consent_type="food_diary_processing"
+        ).exists()
+        decisions = tasks.plan_observe_occasions(
+            fetch=context_reader(WellnessContext(has_plan=True, outcomes=(outcome(),)))
+        )
+        assert only(decisions, user).reason == "observe_due"
 
     def test_fully_consenting_recipient_passes_the_gate(self, tenant: Tenant) -> None:
         """Положительная стража на тех же данных: гейт — не стена."""

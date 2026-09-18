@@ -126,6 +126,8 @@ BLOCK_REASONS = (
     # DRF-1338: missing HEALTH when a caller requires it. Distinct from
     # "no_consent" so a dry run tells "no 152-ФЗ baseline" apart from
     # "no health consent".
+    # DRF-2100: означает «ни дневник v1, ни старый HEALTH» — второе
+    # основание проверяет вызывающий (wellness_proactive), тем же слагом.
     "no_health_consent",
     # DRF-1731: missing MARKETING for a PROMO-class sender (38-ФЗ ст. 18,
     # §35 п.17 — an unproven marketing consent is an absent one).

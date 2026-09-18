@@ -40,8 +40,11 @@ must be open before a single byte leaves Ayla:
 
 1. ``PERSONAL_DATA`` — the 152-ФЗ baseline (ADR-0011 §11). Without it
    nothing about this person may be processed at all.
-2. ``HEALTH`` — the special-category basis
-   (:class:`apps.consent.models.ConsentRecord.ConsentType.HEALTH`).
+2. the nutrition basis — the diary consent ``food-diary-v1``
+   (:func:`apps.consent.nutrition.diary_is_granted`) OR a legacy ``HEALTH``
+   row (DRF-2100, owner ruling 18.09 §48 п.8б: HEALTH is no longer issued,
+   old rows stay valid). One predicate:
+   :func:`apps.consent.nutrition.diary_or_health_granted`.
 
 Both are read through :func:`apps.consent.services.has_global_consent`
 — the concierge runs tenant-less (``current_tenant() is None``), where

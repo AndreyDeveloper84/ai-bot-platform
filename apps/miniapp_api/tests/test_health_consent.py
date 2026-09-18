@@ -7,6 +7,12 @@
 * выдать можно только под ту версию раскрытия, которую человеку показали;
 * отзыв возвращает состояние обратно и идемпотентен;
 * оба перехода видны читающему предикату, которым ходит сторож питания.
+
+DRF-2100: the handle keeps its path and shape but WRITES the diary consent
+``food_diary_processing`` under ``food-diary-v1`` — one consent for the
+nutrition surfaces; HEALTH is no longer issued (owner ruling 18.09 §48 п.8б).
+The nodes below were written for HEALTH and now pin the same contract on the
+diary row; the DRF-2100-specific nodes live in ``test_health_consent_2100.py``.
 """
 
 from __future__ import annotations
@@ -21,7 +27,8 @@ import pytest
 from django.test import Client
 from django.urls import reverse
 
-from apps.consent import health as health_consent
+
+from apps.consent import nutrition
 from apps.consent.models import ConsentRecord
 from apps.consent.services import record_global_consent
 from apps.identity.models import BotUser
@@ -97,39 +104,39 @@ def test_default_state_is_not_granted(client: Client, bot_user, url, auth) -> No
     assert body["granted"] is False
     assert body["granted_at"] is None
     # Экран должен знать, какую версию раскрытия показывать.
-    assert body["current_document_version"] == health_consent.HEALTH_CONSENT_DOCUMENT_VERSION
+    assert body["current_document_version"] == nutrition.FOOD_DIARY_CONSENT_DOCUMENT_VERSION
 
 
 def test_grant_then_read_back(client: Client, bot_user, url, auth) -> None:
-    res = _post(client, url, auth, health_consent.HEALTH_CONSENT_DOCUMENT_VERSION)
+    res = _post(client, url, auth, nutrition.FOOD_DIARY_CONSENT_DOCUMENT_VERSION)
 
     assert res.status_code == 200
     assert res.json()["granted"] is True
     assert res.json()["granted_at"] is not None
     assert client.get(url, **auth).json()["granted"] is True
     # Тот же предикат, которым ходит сторож нутриционной поверхности.
-    assert health_consent.is_granted(bot_user) is True
+    assert nutrition.diary_is_granted(bot_user) is True
 
 
 def test_grant_records_the_version_the_person_was_shown(
     client: Client, bot_user, url, auth
 ) -> None:
-    _post(client, url, auth, health_consent.HEALTH_CONSENT_DOCUMENT_VERSION)
+    _post(client, url, auth, nutrition.FOOD_DIARY_CONSENT_DOCUMENT_VERSION)
 
     row = ConsentRecord.all_tenants.get(
-        bot_user=bot_user, consent_type=ConsentRecord.ConsentType.HEALTH
+        bot_user=bot_user, consent_type=ConsentRecord.ConsentType.FOOD_DIARY_PROCESSING
     )
-    assert row.document_version == health_consent.HEALTH_CONSENT_DOCUMENT_VERSION
+    assert row.document_version == nutrition.FOOD_DIARY_CONSENT_DOCUMENT_VERSION
     assert row.granted is True
 
 
 def test_stale_disclosure_version_is_refused(client: Client, bot_user, url, auth) -> None:
     """Согласие на текст, которого сервер не знает, не записывается."""
-    res = _post(client, url, auth, "health-data-v0")
+    res = _post(client, url, auth, "food-diary-v0")
 
     assert res.status_code == 409
     assert res.json()["error"] == "stale_disclosure"
-    assert health_consent.is_granted(bot_user) is False
+    assert nutrition.diary_is_granted(bot_user) is False
 
 
 def test_version_is_required(client: Client, bot_user, url, auth) -> None:
@@ -137,21 +144,21 @@ def test_version_is_required(client: Client, bot_user, url, auth) -> None:
 
     assert res.status_code == 400
     assert res.json()["error"] == "bad_request"
-    assert health_consent.is_granted(bot_user) is False
+    assert nutrition.diary_is_granted(bot_user) is False
 
 
 def test_withdraw_returns_to_not_granted(client: Client, bot_user, url, auth) -> None:
-    _post(client, url, auth, health_consent.HEALTH_CONSENT_DOCUMENT_VERSION)
+    _post(client, url, auth, nutrition.FOOD_DIARY_CONSENT_DOCUMENT_VERSION)
 
     res = client.delete(url, **auth)
 
     assert res.status_code == 200
     assert res.json()["granted"] is False
-    assert health_consent.is_granted(bot_user) is False
+    assert nutrition.diary_is_granted(bot_user) is False
 
 
 def test_withdraw_is_idempotent_and_keeps_the_trail(client: Client, bot_user, url, auth) -> None:
-    _post(client, url, auth, health_consent.HEALTH_CONSENT_DOCUMENT_VERSION)
+    _post(client, url, auth, nutrition.FOOD_DIARY_CONSENT_DOCUMENT_VERSION)
     client.delete(url, **auth)
 
     res = client.delete(url, **auth)
@@ -160,13 +167,13 @@ def test_withdraw_is_idempotent_and_keeps_the_trail(client: Client, bot_user, ur
     assert res.json()["granted"] is False
     # Строка не удалена — она датирована (append-only контракт ConsentRecord).
     row = ConsentRecord.all_tenants.get(
-        bot_user=bot_user, consent_type=ConsentRecord.ConsentType.HEALTH
+        bot_user=bot_user, consent_type=ConsentRecord.ConsentType.FOOD_DIARY_PROCESSING
     )
     assert row.withdrawn_at is not None
 
 
 def test_grant_after_withdraw_appends_a_fresh_row(client: Client, bot_user, url, auth) -> None:
-    version = health_consent.HEALTH_CONSENT_DOCUMENT_VERSION
+    version = nutrition.FOOD_DIARY_CONSENT_DOCUMENT_VERSION
     _post(client, url, auth, version)
     client.delete(url, **auth)
 
@@ -174,7 +181,7 @@ def test_grant_after_withdraw_appends_a_fresh_row(client: Client, bot_user, url,
 
     assert res.json()["granted"] is True
     rows = ConsentRecord.all_tenants.filter(
-        bot_user=bot_user, consent_type=ConsentRecord.ConsentType.HEALTH
+        bot_user=bot_user, consent_type=ConsentRecord.ConsentType.FOOD_DIARY_PROCESSING
     )
     assert rows.count() == 2  # отозванная + новая
     assert rows.filter(withdrawn_at__isnull=True).count() == 1
@@ -217,7 +224,7 @@ def test_granting_resumes_the_surface_the_person_came_from(
 
     monkeypatch.setattr("apps.orchestrator.health_return.resume_after_health_consent", _resume)
 
-    res = _post(client, url, auth, health_consent.HEALTH_CONSENT_DOCUMENT_VERSION)
+    res = _post(client, url, auth, nutrition.FOOD_DIARY_CONSENT_DOCUMENT_VERSION)
 
     # Стража: согласие действительно выдано — есть чему вызывать возврат.
     assert res.status_code == 200
@@ -241,16 +248,16 @@ def test_a_failing_resume_never_turns_a_granted_consent_into_a_500(
 
     monkeypatch.setattr("apps.orchestrator.health_return.resume_after_health_consent", _boom)
 
-    res = _post(client, url, auth, health_consent.HEALTH_CONSENT_DOCUMENT_VERSION)
+    res = _post(client, url, auth, nutrition.FOOD_DIARY_CONSENT_DOCUMENT_VERSION)
 
     assert res.status_code == 200
     assert res.json()["granted"] is True
-    assert health_consent.is_granted(bot_user) is True
+    assert nutrition.diary_is_granted(bot_user) is True
 
 
 def test_withdrawal_resumes_nothing(client: Client, bot_user, url, auth, monkeypatch) -> None:
     """Возврат — следствие согласия, а не любого хода по ручке."""
-    _post(client, url, auth, health_consent.HEALTH_CONSENT_DOCUMENT_VERSION)
+    _post(client, url, auth, nutrition.FOOD_DIARY_CONSENT_DOCUMENT_VERSION)
     called: list[str] = []
 
     def _resume(user) -> bool:
