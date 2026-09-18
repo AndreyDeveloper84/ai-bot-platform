@@ -4371,6 +4371,9 @@ def customer_food_log(request: HttpRequest) -> HttpResponse:
     body = _food_text_json(request)
     if isinstance(body, JsonResponse):
         return body
+    if body.get("scan_id") is not None:
+        # DRF-2098 — фото-половина F8: запись по скану, той же тропой, что чат.
+        return _customer_food_log_scan(bot_user, body)
     dish = body.get("dish_name")
     portion = body.get("portion_g")
     corrected = body.get("corrected", False)
@@ -4410,6 +4413,179 @@ def customer_food_log(request: HttpRequest) -> HttpResponse:
             "dish_name": log.dish_name,
             "calories": log.calories,
             "entry_origin": origin,
+        },
+        status=201,
+    )
+
+
+# --- DRF-2098 — F8, фото-половина: скан из Mini App ---------------------------
+#
+# Решение владельца 18.09 (§48 п.4), дословно: «food-diary-v1 покрывает фото
+# из Mini App» — отдельного согласия на фото нет, ворота те же, что у текста
+# (:func:`_food_text_gate` → ``apps.consent.diary_gate``).
+#
+# Бот здесь — только пересылка. Байты фото не пишутся ни в БД, ни в кэш, ни
+# на диск и не попадают в лог: ``request.FILES`` читается в память один раз
+# и уходит в ``scan_photo`` каталога, где у снимка свой срок (DRF-1843, 30
+# суток). В строках лога — только размер и MIME.
+
+#: Что распознаватель каталога принимает (``nutrition/internal/scan/`` шлёт
+#: ``image/jpeg`` по умолчанию; png/webp каталог тоже читает).
+FOOD_SCAN_ALLOWED_MIME: frozenset[str] = frozenset({"image/jpeg", "image/png", "image/webp"})
+
+#: Типы приёма пищи, которые Mini App может назвать (карточка F3); всё
+#: остальное — ``MEAL_TYPE_UNNAMED`` текстовой половины.
+FOOD_SCAN_MEAL_TYPES: frozenset[str] = frozenset({"breakfast", "lunch", "dinner", "snack"})
+
+#: Границы множителя порции карточки F3 (``PORTION_STEPS`` в
+#: ``food-scanner.ts``: 0.5 … 2.0; запас — на будущие шаги, не на опечатку).
+FOOD_SCAN_MULTIPLIER_MIN = 0.25
+FOOD_SCAN_MULTIPLIER_MAX = 4.0
+
+#: Происхождение записи по фото с поправкой человека — как в чате
+#: (``skills/food_scanner/skill.py``: ``photo_user_corrected``). Без поправки
+#: origin не передаётся: умолчание каталога для скана — то же, что у чата.
+FOOD_SCAN_ORIGIN_USER_CORRECTED = "photo_user_corrected"
+
+
+def _food_scan_max_bytes() -> int:
+    """Лимит размера — ОДИН на бота: тот же, что у фото из чата (импорт, не копия)."""
+    from apps.channels.max.photo import MAX_PHOTO_BYTES
+
+    return MAX_PHOTO_BYTES
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+@require_init_data
+def customer_food_scan(request: HttpRequest) -> HttpResponse:
+    """Распознать фото еды: multipart ``image`` → ``{scan_id, dish_name, …}``.
+
+    Ворота — те же три, что у текста (DRF-2093). Затем: файл обязателен;
+    MIME из :data:`FOOD_SCAN_ALLOWED_MIME`; размер ≤ лимита чата
+    (413 ``photo_too_large``). Байты уходят в каталог как есть и нигде в
+    боте не задерживаются. Отказы каталога — как у текста
+    (``food_not_recognized`` 400, ``nutrition_unavailable`` 503).
+    """
+    import asyncio
+
+    from apps.integrations.ayla import external_user_id_for, get_nutrition_client
+    from apps.integrations.ayla.nutrition_client import NutritionAPIError
+
+    bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
+    refused = _food_text_gate(bot_user)
+    if refused is not None:
+        return refused
+
+    upload = request.FILES.get("image")
+    if upload is None:
+        return _error("malformed", "multipart field 'image' is required", 400)
+    mime = (getattr(upload, "content_type", "") or "").split(";")[0].strip().lower()
+    if mime not in FOOD_SCAN_ALLOWED_MIME:
+        return _error("unsupported_media_type", "image must be jpeg, png or webp", 400)
+    limit = _food_scan_max_bytes()
+    size = int(getattr(upload, "size", 0) or 0)
+    if size > limit:
+        logger.info("food_scan_ma.too_large bot_user=%s size=%d limit=%d", bot_user.id, size, limit)
+        return _error("photo_too_large", f"photo exceeds {limit} bytes", 413)
+    image_bytes = upload.read()
+    if not image_bytes:
+        return _error("malformed", "image is empty", 400)
+    if len(image_bytes) > limit:
+        # ``size`` — заявленное клиентом; прочитанное — факт.
+        return _error("photo_too_large", f"photo exceeds {limit} bytes", 413)
+
+    external_id = external_user_id_for(bot_user)
+    filename = {"image/png": "meal.png", "image/webp": "meal.webp"}.get(mime, "meal.jpg")
+    try:
+        scan = asyncio.run(
+            get_nutrition_client().scan_photo(
+                external_user_id=external_id,
+                image_bytes=image_bytes,
+                filename=filename,
+            )
+        )
+    except NutritionAPIError as exc:
+        return _food_text_catalog_refusal(exc, external_id=external_id, step="scan")
+    logger.info(
+        "food_scan_ma.scanned bot_user=%s mime=%s size=%d", bot_user.id, mime, len(image_bytes)
+    )
+    return JsonResponse(
+        {
+            "scan_id": scan.scan_id,
+            "dish_name": scan.dish_name,
+            "confidence": scan.confidence,
+            "portion_g": scan.portion_g,
+            "nutrition": scan.nutrition,
+        }
+    )
+
+
+def _customer_food_log_scan(bot_user: BotUser, body: dict[str, Any]) -> HttpResponse:
+    """Запись по скану (DRF-2098): ``{scan_id, portion_multiplier, meal_type?, dish_name?, idempotency_key}``.
+
+    ``dish_name`` — только когда человек переименовал блюдо на карточке; при
+    этом ``scan_id`` остаётся рядом (провенанс фото, §136 ``photo_*``), каталог
+    принимает оба. Поправка (множитель ≠ 1 или переименование) —
+    ``photo_user_corrected``, как в чате; без поправки origin не шлётся.
+    ``note`` карточки не пересылается — у ``log_meal`` нет такого поля
+    (предел, как и в чате).
+    """
+    import asyncio
+
+    from apps.integrations.ayla import external_user_id_for, get_nutrition_client
+    from apps.integrations.ayla.nutrition_client import NutritionAPIError
+    from apps.skills.food_clarify.text_entry import MEAL_TYPE_UNNAMED
+
+    scan_id = body.get("scan_id")
+    multiplier = body.get("portion_multiplier", 1.0)
+    meal_type = body.get("meal_type")
+    dish = body.get("dish_name")
+    key = body.get("idempotency_key")
+    if not isinstance(scan_id, str) or not scan_id.strip() or len(scan_id) > 80:
+        return _error("malformed", "scan_id must be a non-empty string", 400)
+    if (
+        isinstance(multiplier, bool)
+        or not isinstance(multiplier, (int, float))
+        or not (FOOD_SCAN_MULTIPLIER_MIN <= multiplier <= FOOD_SCAN_MULTIPLIER_MAX)
+    ):
+        return _error(
+            "malformed",
+            f"portion_multiplier must be between {FOOD_SCAN_MULTIPLIER_MIN} and {FOOD_SCAN_MULTIPLIER_MAX}",
+            400,
+        )
+    if meal_type is not None and meal_type not in FOOD_SCAN_MEAL_TYPES:
+        return _error("malformed", "meal_type must be breakfast, lunch, dinner or snack", 400)
+    if dish is not None and (not isinstance(dish, str) or not dish.strip()):
+        return _error("malformed", "dish_name must be a non-empty string when present", 400)
+    if not isinstance(key, str) or not key.strip() or len(key) > 80:
+        return _error("malformed", "idempotency_key is required", 400)
+
+    external_id = external_user_id_for(bot_user)
+    corrected = dish is not None or float(multiplier) != 1.0
+    kwargs: dict[str, Any] = {
+        "external_user_id": external_id,
+        "scan_id": scan_id.strip(),
+        "meal_type": meal_type or MEAL_TYPE_UNNAMED,
+        "portion_multiplier": round(float(multiplier), 3),
+        "idempotency_key": f"food-photo-ma:{external_id}:{key.strip()}",
+    }
+    if dish is not None:
+        kwargs["dish_name"] = dish.strip()
+    if corrected:
+        kwargs["entry_origin"] = FOOD_SCAN_ORIGIN_USER_CORRECTED
+    try:
+        log = asyncio.run(get_nutrition_client().log_meal(**kwargs))
+    except NutritionAPIError as exc:
+        return _food_text_catalog_refusal(exc, external_id=external_id, step="log")
+
+    return JsonResponse(
+        {
+            "log_id": log.log_id,
+            "dish_name": log.dish_name,
+            "meal_type": log.meal_type,
+            "calories": log.calories,
+            "entry_origin": FOOD_SCAN_ORIGIN_USER_CORRECTED if corrected else None,
         },
         status=201,
     )

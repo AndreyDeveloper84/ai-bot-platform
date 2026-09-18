@@ -149,6 +149,9 @@ urlpatterns = [
     # оценка без записи и подтверждение — той же тропой, что текст в чате.
     path("food/estimate", views.customer_food_estimate, name="customer_food_estimate"),
     path("food/log", views.customer_food_log, name="customer_food_log"),
+    # DRF-2098 (F8, фото-половина) — скан фото из Mini App под тем же гейтом
+    # дневника v1; запись — через food/log по scan_id.
+    path("food/scan", views.customer_food_scan, name="customer_food_scan"),
     # Wellness write path (DRF-1402) — log / undo a water entry on Ayla.
     path(
         "wellness/water",
