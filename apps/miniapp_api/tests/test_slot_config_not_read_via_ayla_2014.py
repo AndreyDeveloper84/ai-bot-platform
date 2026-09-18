@@ -29,10 +29,13 @@ from __future__ import annotations
 from datetime import date, timedelta
 from unittest.mock import patch
 from urllib.parse import urlencode
+from zoneinfo import ZoneInfo
 
 import pytest
 from django.test import Client
 from django.urls import reverse
+from django.utils import timezone
+from freezegun import freeze_time
 
 from apps.miniapp_api import views as miniapp_views
 from apps.miniapp_api.tests.test_slots_ayla_source_1062 import (  # noqa: F401 — фикстуры
@@ -60,6 +63,17 @@ WINDOW_DAYS = MAX_SLOT_DATE_RANGE_DAYS  # 14 — граница запроса, 
 def one_day_horizon(tenant: Tenant) -> SlotConfig:
     """Локальная копия говорит «не дальше завтра» — на пути Ayla ей слова нет."""
     return SlotConfig.all_tenants.create(tenant=tenant, max_advance_days=1)
+
+
+def _today_local(tenant: Tenant) -> date:
+    """«Сегодня» в поясе тенанта — тем же выражением, что у OFF-пути ручки.
+
+    DRF-2103: ``date.today()`` на UTC-раннере и ``today_local`` тенанта
+    (Europe/Moscow, UTC+3) расходятся на сутки между 21:00 и 24:00 UTC, и
+    узел n3, сравнивающий окно с «сегодня», краснел ровно в эти три часа —
+    на трёх PR разом. Часы — молчаливый параметр; здесь он назван.
+    """
+    return timezone.now().astimezone(ZoneInfo(tenant.timezone)).date()
 
 
 def _window(client: Client, master, service, *, start: date, days: int):
@@ -116,6 +130,7 @@ class TestAylaPathDoesNotReadTheLocalSlotConfig:
         self,
         settings,
         client,
+        tenant,
         bot_user,
         master,
         service,
@@ -125,7 +140,7 @@ class TestAylaPathDoesNotReadTheLocalSlotConfig:
     ):
         """Положительная стража: OFF-путь читает копию и клампит — не тронут (X5)."""
         settings.BOOKING_VIA_AYLA_REST = False
-        start = date.today()
+        start = _today_local(tenant)
         fake, calls = _fake_client({})
 
         with (
@@ -139,6 +154,42 @@ class TestAylaPathDoesNotReadTheLocalSlotConfig:
         assert resp.status_code == 200, resp.content
         assert spy.call_count == 1
         assert calls == []  # Ayla на OFF-пути не зовётся
+        dates = {s["date"] for s in resp.json()["slots"]}
+        assert dates, "локальные часы открыты каждый день — слоты должны быть"
+        assert dates <= {start.isoformat(), (start + timedelta(days=1)).isoformat()}
+
+    @freeze_time("2026-09-18 23:30:00", tz_offset=0)
+    def test_n3b_the_clamp_holds_at_the_utc_day_boundary(
+        self,
+        settings,
+        client,
+        tenant,
+        bot_user,
+        master,
+        service,
+        master_service,
+        open_every_day,
+        one_day_horizon,
+    ):
+        """DRF-2103 — ложный вход: 23:30 UTC = 02:30 следующего дня в Москве.
+
+        До правки узел брал ``date.today()`` (UTC: 18.09) и ждал окно
+        {18.09, 19.09}, а ручка клампила по «сегодня» тенанта (19.09) и
+        отдавала {19.09, 20.09}. Часы заморожены на границе: если «сегодня»
+        снова возьмут с раннера, узел покраснеет здесь, а не раз в сутки на
+        чужих PR.
+        """
+        settings.BOOKING_VIA_AYLA_REST = False
+        assert date.today() == date(2026, 9, 18)  # UTC-раннер
+        start = _today_local(tenant)
+        assert start == date(2026, 9, 19)  # тенант уже в завтра
+        fake, calls = _fake_client({})
+
+        with patch(CLIENT_PATH, return_value=fake):
+            resp = _window(client, master, service, start=start, days=WINDOW_DAYS)
+
+        assert resp.status_code == 200, resp.content
+        assert calls == []
         dates = {s["date"] for s in resp.json()["slots"]}
         assert dates, "локальные часы открыты каждый день — слоты должны быть"
         assert dates <= {start.isoformat(), (start + timedelta(days=1)).isoformat()}
