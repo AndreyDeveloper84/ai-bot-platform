@@ -28,6 +28,18 @@ interface ErrorBody {
 }
 
 export async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
+  return (await requestWithStatus<T>(path, init)).data;
+}
+
+/**
+ * То же, что `request`, но со статусом успешного ответа. Нужен там, где
+ * сервер различает исходы статусом при одинаковом теле — избранное
+ * (DRF-2092): 201 «сохранила» / 200 «уже в избранном».
+ */
+export async function requestWithStatus<T>(
+  path: string,
+  init: RequestInit = {},
+): Promise<{ status: number; data: T }> {
   const initData = getInitData();
   const headers = new Headers(init.headers);
   if (initData) headers.set("Authorization", `MaxInitData ${initData}`);
@@ -45,8 +57,8 @@ export async function request<T>(path: string, init: RequestInit = {}): Promise<
     }
     throw new ApiError(res.status, body.error, body.detail, body.details);
   }
-  if (res.status === 204) return undefined as T;
-  return (await res.json()) as T;
+  if (res.status === 204) return { status: res.status, data: undefined as T };
+  return { status: res.status, data: (await res.json()) as T };
 }
 
 // --- auth ---

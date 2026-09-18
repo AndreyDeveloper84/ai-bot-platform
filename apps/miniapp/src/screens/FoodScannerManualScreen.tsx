@@ -23,7 +23,7 @@
  * сетевой сбой чтения на гейт не ведёт.
  */
 import { useCallback, useEffect, useRef, useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { useLocation, useNavigate } from "react-router-dom";
 
 import { Snackbar } from "../components/Snackbar";
 import { useScreenBack } from "../hooks/useScreenBack";
@@ -111,7 +111,19 @@ export function FoodScannerManualScreen() {
   // Возврат — в дневник: сюда приходят из него и с дашборда, не из съёмки.
   const onBack = useScreenBack(backTo(DIARY_ROUTE));
 
-  const [text, setText] = useState("");
+  // DRF-2092 (F12) — «Записать из избранного»: экран избранного передаёт
+  // блюдо и сохранённую порцию, и оценка зовётся сразу, без набора текста.
+  // Тропа дальше та же: карточка → «В дневник» / «Поправить граммы».
+  const location = useLocation();
+  const fromSaved = (location.state as { fromSaved?: { dish_name?: unknown; portion_g?: unknown } } | null)
+    ?.fromSaved;
+  const savedDish = typeof fromSaved?.dish_name === "string" ? fromSaved.dish_name.trim() : "";
+  const savedPortion =
+    typeof fromSaved?.portion_g === "number" && Number.isFinite(fromSaved.portion_g)
+      ? fromSaved.portion_g
+      : undefined;
+
+  const [text, setText] = useState(savedDish);
   const [card, setCard] = useState<Card | null>(null);
   const [gramsOpen, setGramsOpen] = useState(false);
   const [grams, setGrams] = useState("");
@@ -129,6 +141,32 @@ export function FoodScannerManualScreen() {
   const toConsentGate = useCallback(() => {
     navigate(CONSENT_GATE_ROUTE, { replace: true, state: { returnTo: MANUAL_ROUTE } });
   }, [navigate]);
+
+  // Из избранного: оценка с сохранённой порцией — один раз, на входе.
+  // `corrected=false`: порцию человек назвал, когда сохранял блюдо; это не
+  // поправка на карточке (§136 решается на карточке, не задним числом).
+  const savedOnce = useRef(false);
+  useEffect(() => {
+    if (!savedDish || savedPortion === undefined || savedOnce.current) return;
+    savedOnce.current = true;
+    let cancelled = false;
+    setBusy("estimating");
+    estimateFoodText(savedDish, savedPortion)
+      .then((est) => {
+        if (cancelled || !alive.current) return;
+        setCard({ estimate: est, corrected: false, idempotencyKey: mintKey() });
+      })
+      .catch((e) => {
+        if (!cancelled && alive.current) handleRefusal(e, MANUAL_COPY.unavailable);
+      })
+      .finally(() => {
+        if (!cancelled && alive.current) setBusy("idle");
+      });
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [savedDish, savedPortion]);
 
   // Согласие спрашивается у сервера; отказ ЧТЕНИЯ на гейт не ведёт.
   useEffect(() => {

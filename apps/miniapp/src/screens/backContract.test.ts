@@ -129,6 +129,7 @@ const EXPECTED_SCREENS = [
   "FeedbackScreen",
   "FoodScannerCaptureScreen",
   "FoodScannerDiaryScreen",
+  "FoodScannerFavoritesScreen",
   "FoodScannerManualScreen",
   "FoodScannerProcessingScreen",
   "FoodScannerResultScreen",
