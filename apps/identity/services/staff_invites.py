@@ -538,64 +538,98 @@ def redeem_staff_invite(*, code: str, bot_user: BotUser, tenant) -> RedeemResult
 
 
 def _grant_staff_role(invite: StaffInvite, bot_user: BotUser) -> RedeemResult:
-    """Create (or find) the TenantStaff row this invite grants."""
+    """Create (or find) the TenantStaff row this invite grants.
 
-    existing = TenantStaff.all_tenants.filter(
+    The invite-specific half is only *what* to grant and *who* issued it;
+    the row, the two partial-unique refusals and the race answer are
+    :func:`grant_staff_role`, shared with the operator's «выдать роль» in
+    Django Admin (DRF-2082) so a role granted by code and a role granted by
+    hand cannot drift apart.
+    """
+
+    return grant_staff_role(
         tenant_id=invite.tenant_id,
         bot_user=bot_user,
         role=invite.role,
+        created_by=invite.created_by,
+        invite_id=invite.id,
+    )
+
+
+def grant_staff_role(
+    *,
+    tenant_id: Any,
+    bot_user: BotUser,
+    role: str,
+    created_by: BotUser | None = None,
+    invite_id: Any = None,
+) -> RedeemResult:
+    """Grant ``role`` to ``bot_user`` in ``tenant_id`` — the one authority.
+
+    Idempotent in the way that matters to a human: a person who already
+    holds the role gets ``already_had_role=True``, never a duplicate row —
+    and that answer is what the operator's «повтор выдачи» reads as
+    «уже есть». The database holds the line under a race (two operators,
+    or an operator and a code, at once): the partial unique index
+    ``unique_active_staff_role`` fires, and the loser gets the same
+    ``already_had_role`` answer instead of a 500.
+
+    ``created_by`` is the ``BotUser`` who issued the grant when there is one
+    (a code's issuer); a platform operator has no ``BotUser`` and passes
+    ``None`` — authorship then lives in the audit row's ``actor_label``,
+    not here. ``invite_id`` — log lines only.
+
+    Must run inside ``transaction.atomic`` (the savepoint below needs an
+    enclosing transaction to roll back into).
+
+    Raises:
+      OwnerAlreadyExists — the tenant already has an active owner.
+    """
+
+    existing = TenantStaff.all_tenants.filter(
+        tenant_id=tenant_id,
+        bot_user=bot_user,
+        role=role,
         deactivated_at__isnull=True,
     ).first()
     if existing is not None:
-        return RedeemResult(
-            role=invite.role,
-            tenant_id=str(invite.tenant_id),
-            already_had_role=True,
-        )
+        return RedeemResult(role=role, tenant_id=str(tenant_id), already_had_role=True)
 
     try:
         # Savepoint: an IntegrityError poisons the enclosing transaction,
         # and the non-owner branch below wants to carry on afterwards.
         with transaction.atomic():
             TenantStaff.all_tenants.create(
-                tenant_id=invite.tenant_id,
+                tenant_id=tenant_id,
                 bot_user=bot_user,
-                role=invite.role,
-                created_by=invite.created_by,
+                role=role,
+                created_by=created_by,
             )
     except IntegrityError as exc:
         # Two partial unique indexes can fire here (DRF-1227 added the
         # second): one active owner per tenant, and one active row per
         # (tenant, person, role).
-        if invite.role == StaffInvite.Role.OWNER:
+        if role == StaffInvite.Role.OWNER:
             # Surfacing this as a 500 would be wrong: the operator issued a
             # second owner code, and that is an answerable situation.
             logger.warning(
                 "identity.staff_invite.owner_conflict tenant=%s invite=%s",
-                invite.tenant_id,
-                invite.id,
+                tenant_id,
+                invite_id,
             )
             raise OwnerAlreadyExists("tenant already has an active owner") from exc
-        # Otherwise we lost a race with a concurrent redemption granting the
-        # same role to the same person. The grant the caller wanted now
-        # exists, so this is the "already had it" answer, not a failure.
+        # Otherwise we lost a race with a concurrent grant of the same role
+        # to the same person. The grant the caller wanted now exists, so
+        # this is the "already had it" answer, not a failure.
         logger.info(
             "identity.staff_invite.grant_race tenant=%s invite=%s role=%s",
-            invite.tenant_id,
-            invite.id,
-            invite.role,
+            tenant_id,
+            invite_id,
+            role,
         )
-        return RedeemResult(
-            role=invite.role,
-            tenant_id=str(invite.tenant_id),
-            already_had_role=True,
-        )
+        return RedeemResult(role=role, tenant_id=str(tenant_id), already_had_role=True)
 
-    return RedeemResult(
-        role=invite.role,
-        tenant_id=str(invite.tenant_id),
-        already_had_role=False,
-    )
+    return RedeemResult(role=role, tenant_id=str(tenant_id), already_had_role=False)
 
 
 def _link_master(invite: StaffInvite, bot_user: BotUser) -> RedeemResult:
