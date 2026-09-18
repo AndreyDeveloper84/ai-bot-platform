@@ -814,6 +814,20 @@ def try_handle_structured_nutrition_turn(
         )
         if diary is not None:
             return diary
+        # DRF-2101 — «мой план»: карточка Plan Lite из wellness-context, тем же
+        # приёмом, что чтение дневника; под флагом, иначе текст — модели.
+        if not has_attachments:
+            from apps.orchestrator.plan_lite_card import try_handle_my_plan
+
+            try:
+                plan = try_handle_my_plan(text=text, bot_user=bot_user, trace_id=trace_id)
+            except Exception:  # noqa: BLE001 — план не должен ломать глобальный ход
+                logger.exception(
+                    "orchestrator.nutrition_global.plan_lite_failed trace=%s", trace_id
+                )
+                plan = None
+            if plan is not None:
+                return plan
         # DRF-2078 — «борщ 250»: блюдо с порцией не нуждается в модели.
         return _try_handle_food_with_grams(
             text=text,

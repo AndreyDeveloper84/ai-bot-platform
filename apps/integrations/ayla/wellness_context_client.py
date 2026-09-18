@@ -63,6 +63,8 @@ logger = logging.getLogger(__name__)
 DEFAULT_TIMEOUT_S: Final[float] = 10.0
 
 _PATH: Final[str] = "internal/me/wellness-context/"
+#: DRF-2101 — писатель Plan Lite (тот же auth, что у чтения).
+_PLAN_LITE_PATH: Final[str] = "internal/me/plan-lite/"
 
 
 # ---------------------------------------------------------------------------
@@ -87,6 +89,31 @@ class OutcomeState:
 
 
 @dataclass(frozen=True)
+class PlanLiteAction:
+    """Одно обязательство Plan Lite (DRF-2101) — форма и факт, ничего о результате.
+
+    ``done_count`` ≤ ``target_count`` за текущее ведро ``[bucket_start,
+    bucket_end)``; процентов и «достигнуто» у DTO нет полей — В-5.
+    """
+
+    action_type: str
+    cadence: str
+    target_count: int
+    done_count: int
+    bucket_start: str
+    bucket_end: str
+
+
+@dataclass(frozen=True)
+class PlanLite:
+    """Активный Plan Lite человека — ключ цели и обязательства с фактами."""
+
+    plan_id: str
+    goal_key: str
+    actions: tuple[PlanLiteAction, ...] = ()
+
+
+@dataclass(frozen=True)
 class WellnessContext:
     """Документ ``wellness-context`` одного получателя.
 
@@ -100,6 +127,9 @@ class WellnessContext:
     has_plan: bool
     outcomes: tuple[OutcomeState, ...] = ()
     gated: bool = False
+    #: DRF-2101 — Plan Lite стоит рядом с гейтами, не за ними: факты
+    #: действий за текущее ведро. ``None`` — плана нет или флаг выключен.
+    plan_lite: PlanLite | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -125,6 +155,19 @@ class WellnessContextClientError(WellnessContextError):
 
 class WellnessContextUnavailableError(WellnessContextError):
     """Network / timeout / 5xx / malformed JSON — skip this tick."""
+
+
+class PlanLiteDisabledError(WellnessContextClientError):
+    """404 ``PLAN_LITE_DISABLED`` — каталог держит Plan Lite выключенным (DRF-2101)."""
+
+
+class PlanLiteAlreadyActiveError(WellnessContextClientError):
+    """409 ``PLAN_LITE_ALREADY_ACTIVE`` — активный план уже есть; сперва закрыть."""
+
+
+class PlanLiteGoalNotFoundError(WellnessContextClientError):
+    """404 ``NOT_FOUND`` — цель не у этого человека / не активна, или нет
+    активного плана при закрытии."""
 
 
 # ---------------------------------------------------------------------------
@@ -220,6 +263,94 @@ class WellnessContextHttpClient:
             self._http = httpx.Client(timeout=self._timeout)
         return self._http
 
+    # ─── Plan Lite — DRF-2101 ─────────────────────────────────────────────
+
+    def _plan_lite_request(
+        self,
+        method: str,
+        *,
+        external_user_id: str,
+        body: dict[str, Any] | None = None,
+    ) -> httpx.Response:
+        try:
+            url = AylaUrlBuilder(self._base_url).build(_PLAN_LITE_PATH)
+        except AylaUrlError as exc:
+            raise WellnessContextConfigError(f"invalid AYLA_BASE_URL: {exc}") from exc
+        if not self._token:
+            raise WellnessContextConfigError("AYLA_INTERNAL_API_TOKEN not configured")
+        try:
+            response = self._client().request(
+                method,
+                url,
+                headers=with_request_id(
+                    {
+                        "Authorization": f"Bearer {self._token}",
+                        "X-External-User-ID": external_user_id,
+                        "Accept": "application/json",
+                    }
+                ),
+                json=body,
+                timeout=self._timeout,
+            )
+        except httpx.HTTPError as exc:
+            # Тела и id не логируются: статус и класс — всё, что нужно (DRF-2009).
+            logger.warning(
+                "wellness_context.plan_lite.network_failure method=%s exc=%s",
+                method,
+                type(exc).__name__,
+            )
+            raise WellnessContextUnavailableError(f"network: {type(exc).__name__}") from exc
+        if response.status_code in (401, 403):
+            raise WellnessContextAuthError(
+                f"Ayla plan-lite auth failed: HTTP {response.status_code}"
+            )
+        if response.status_code >= 500:
+            logger.warning(
+                "wellness_context.plan_lite.server_error method=%s status=%d",
+                method,
+                response.status_code,
+            )
+            raise WellnessContextUnavailableError(f"server: HTTP {response.status_code}")
+        if 400 <= response.status_code < 500:
+            raise _plan_lite_refusal(response)
+        return response
+
+    def create_plan_lite(
+        self,
+        *,
+        external_user_id: str,
+        goal_id: str,
+        actions: list[dict[str, Any]],
+    ) -> PlanLite:
+        """``POST /internal/me/plan-lite/`` — составить план; 201 → документ.
+
+        Raises :class:`PlanLiteDisabledError`, :class:`PlanLiteAlreadyActiveError`,
+        :class:`PlanLiteGoalNotFoundError`, :class:`WellnessContextClientError` (400).
+        """
+        response = self._plan_lite_request(
+            "POST",
+            external_user_id=external_user_id,
+            body={"goal_id": goal_id, "actions": actions},
+        )
+        try:
+            payload = response.json()
+        except ValueError as exc:
+            raise WellnessContextUnavailableError("malformed_json") from exc
+        data = payload.get("data") if isinstance(payload, dict) else None
+        plan = _plan_lite_from_wire(data)
+        if plan is None:
+            raise WellnessContextUnavailableError("plan_lite_malformed_body")
+        return plan
+
+    def close_plan_lite(self, *, external_user_id: str) -> bool:
+        """``DELETE /internal/me/plan-lite/`` — закрыть активный план (append-only).
+
+        Raises :class:`PlanLiteDisabledError`, :class:`PlanLiteGoalNotFoundError`
+        (активного плана нет).
+        """
+        self._plan_lite_request("DELETE", external_user_id=external_user_id)
+        return True
+
     def close(self) -> None:
         if self._http is not None:
             self._http.close()
@@ -266,7 +397,55 @@ def _context_from_wire(payload: Any) -> WellnessContext:
         has_plan=isinstance(data.get("plan"), dict),
         outcomes=tuple(outcomes),
         gated=isinstance(data.get("gated"), dict),
+        plan_lite=_plan_lite_from_wire(data.get("plan_lite")),
     )
+
+
+def _plan_lite_from_wire(raw: Any) -> PlanLite | None:
+    """``plan_lite`` документа → DTO фактов; всё, чего в DTO нет полей
+    (проценты, тексты), умирает здесь. Битая форма — ``None``."""
+    if not isinstance(raw, dict):
+        return None
+    actions: list[PlanLiteAction] = []
+    for item in raw.get("actions") or []:
+        if not isinstance(item, dict):
+            continue
+        raw_bucket = item.get("bucket")
+        bucket: dict[str, Any] = raw_bucket if isinstance(raw_bucket, dict) else {}
+        actions.append(
+            PlanLiteAction(
+                action_type=_code(item.get("action_type")),
+                cadence=_code(item.get("cadence")),
+                target_count=_count(item.get("target_count")),
+                done_count=_count(item.get("done_count")),
+                bucket_start=_code(bucket.get("start")),
+                bucket_end=_code(bucket.get("end")),
+            )
+        )
+    return PlanLite(
+        plan_id=_code(raw.get("plan_id")),
+        goal_key=_code(raw.get("goal_key")),
+        actions=tuple(actions),
+    )
+
+
+def _count(value: Any) -> int:
+    return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else 0
+
+
+def _plan_lite_refusal(response: httpx.Response) -> WellnessContextClientError:
+    """4xx писателя → исключение по коду каталога; тело в лог не идёт."""
+    try:
+        code = ((response.json() or {}).get("error") or {}).get("code", "")
+    except ValueError:
+        code = ""
+    if response.status_code == 404 and code == "PLAN_LITE_DISABLED":
+        return PlanLiteDisabledError("plan_lite_disabled")
+    if response.status_code == 409 and code == "PLAN_LITE_ALREADY_ACTIVE":
+        return PlanLiteAlreadyActiveError("already_active")
+    if response.status_code == 404:
+        return PlanLiteGoalNotFoundError(code or "not_found")
+    return WellnessContextClientError(f"Ayla plan-lite 4xx: HTTP {response.status_code} {code}")
 
 
 def _code(value: Any) -> str:

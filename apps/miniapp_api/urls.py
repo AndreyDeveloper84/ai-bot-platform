@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from django.urls import path
 
-from apps.miniapp_api import views, views_saved_meals
+from apps.miniapp_api import views, views_plan_lite, views_saved_meals
 
 app_name = "miniapp_api"
 
@@ -181,6 +181,13 @@ urlpatterns = [
         "saved-meals/<str:meal_id>",
         views_saved_meals.customer_saved_meal,
         name="customer_saved_meal",
+    ),
+    # DRF-2101 (§49) — Plan Lite: план из 1–3 действий из цели, adherence
+    # «N из M»; серверный источник — каталог, под флагом PLAN_LITE_ENABLED.
+    path(
+        "plan-lite",
+        views_plan_lite.customer_plan_lite,
+        name="customer_plan_lite",
     ),
     # Dashboard rollup — next booking + this-week count (bookings-only).
     path(
