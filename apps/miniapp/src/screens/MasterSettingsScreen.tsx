@@ -146,6 +146,16 @@ export function MasterSettingsScreen() {
         Рабочие часы
       </button>
 
+      {/* DRF-1811 (M19) — экран 05: место работы (изменить формат/адрес в любое время, P45/P50). */}
+      <button
+        type="button"
+        className="btn-secondary"
+        style={{ width: "100%", justifyContent: "center", marginBottom: "var(--s-3)" }}
+        onClick={() => navigate("/solo/place")}
+      >
+        Место работы
+      </button>
+
       {/* Phase 2b — billing / payout surface (C2/C3, real proxies). */}
       <button
         type="button"

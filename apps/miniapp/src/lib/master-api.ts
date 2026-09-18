@@ -337,6 +337,86 @@ export const putWorkingHours = (
 ): Promise<WorkingHoursResponse> =>
   request("/working-hours", { method: "PUT", body: JSON.stringify({ schedule }) });
 
+// --- M19 место работы (DRF-1811) -----------------------------------------------
+// Mirrors apps/master_api/views.py::service_locations / service_location_detail /
+// address_suggest — proxies to the catalog (M11 #502, M12 #476). The answer is
+// the catalog's readback: `shown_to_clients_after_publication` is the catalog's
+// word (CONFIRMED only), coordinates are null until geocoded.
+
+export type PlaceKind = "private_studio" | "salon_or_studio";
+export type PlaceStatus = "confirmed" | "review_required" | "inactive" | string;
+export type AreaCoverage = "whole_city" | "later";
+
+export interface ServicePlace {
+  id: string;
+  kind: PlaceKind | "";
+  label: string;
+  address: string;
+  city: string;
+  note_for_client: string;
+  status: PlaceStatus;
+  geocode_status: string;
+  latitude: string | null;
+  longitude: string | null;
+  shown_to_clients_after_publication: boolean;
+}
+
+export interface ServiceArea {
+  id: string;
+  kind: "mobile";
+  city: string;
+  coverage: AreaCoverage;
+  configured: boolean;
+}
+
+export interface ServiceLocationsState {
+  specialist_id: string | null;
+  city: string;
+  places: ServicePlace[];
+  areas: ServiceArea[];
+}
+
+export type ServiceLocationCreate =
+  | { kind: PlaceKind; address: string; label?: string; note_for_client?: string }
+  | { kind: "mobile"; coverage: AreaCoverage };
+
+export const getServiceLocations = (): Promise<ServiceLocationsState> =>
+  request("/service-locations", { method: "GET" });
+
+export const createServiceLocation = (
+  body: ServiceLocationCreate,
+): Promise<ServiceLocationsState> =>
+  request("/service-locations", { method: "POST", body: JSON.stringify(body) });
+
+export const patchServiceLocation = (
+  itemId: string,
+  body: Partial<{ kind: PlaceKind; address: string; label: string; note_for_client: string; coverage: AreaCoverage }>,
+): Promise<ServiceLocationsState> =>
+  request(`/service-locations/${encodeURIComponent(itemId)}`, {
+    method: "PATCH",
+    body: JSON.stringify(body),
+  });
+
+export interface AddressSuggestion {
+  value: string;
+  unrestricted_value: string;
+}
+
+export interface AddressSuggestResponse {
+  available: boolean;
+  reason?: string | null;
+  city?: string | null;
+  suggestions: AddressSuggestion[];
+}
+
+/**
+ * Подсказки адреса — POST с телом: адрес мастера не должен оседать в URL.
+ * 503 (геокодер не настроен — стенд пилота) и 409 (нет города) приходят с
+ * `available: false`; экран читает их как «подсказок нет», не как ошибку.
+ */
+export const suggestAddress = (q: string): Promise<AddressSuggestResponse> =>
+  request("/geocoding/suggest", { method: "POST", body: JSON.stringify({ q }) });
+
 // --- M18a «Свои услуги» — заявки о разрыве канона (DRF-1896 / DRF-1802) ---------
 // Mirrors apps/master_api/views.py::canon_gap_requests / canon_gap_similar /
 // canon_gap_request_detail — a proxy to the catalog (DRF-1801). The answer is
