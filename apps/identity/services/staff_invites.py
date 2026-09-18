@@ -642,6 +642,12 @@ def _grant_staff_role(invite: StaffInvite, bot_user: BotUser) -> RedeemResult:
         role=invite.role,
         created_by=invite.created_by,
         invite_id=invite.id,
+        # DRF-2085, ruling п.1 читается строго (главное окно 18.09): ввод
+        # кода — действие приглашённого, и артефакт оператора его полномочие
+        # не переносит. Каталожную половину admin делает только оператор —
+        # «Выдать роль» в Django Admin, повторно после кода (тот же ключ
+        # идемпотентности дозаводит её без дублей).
+        link_catalog=False,
     )
 
 
@@ -652,6 +658,8 @@ def grant_staff_role(
     role: str,
     created_by: BotUser | None = None,
     invite_id: Any = None,
+    actor_label: str = "",
+    link_catalog: bool = True,
 ) -> RedeemResult:
     """Grant ``role`` to ``bot_user`` in ``tenant_id`` — the one authority.
 
@@ -671,9 +679,37 @@ def grant_staff_role(
     Must run inside ``transaction.atomic`` (the savepoint below needs an
     enclosing transaction to roll back into).
 
+    **DRF-2085 — the catalog half of ``admin``.** For ``role=admin`` the
+    catalog is asked FIRST (``salon_admin_link.ensure_catalog_salon_admin``:
+    fresh salon-administrator account + TUR + MAX link, idempotent per
+    (tenant, person)) and only then is ``TenantStaff`` written. A refusal
+    raises :class:`salon_admin_link.CatalogAdminLinkRefused` out of the
+    enclosing transaction — no row, named reason, «что сделать» in the
+    text. The call happens even when the row already exists: administrators
+    granted before this rule have no catalog half, and a repeat grant is the
+    operator's way to add it. ``actor_label`` names the operator in both
+    audits. ``link_catalog=False`` is the invite-code door
+    (:func:`_grant_staff_role`): the ruling's capability is operator-only,
+    so a redeemed admin code grants the bot role and leaves the catalog
+    half to the operator's «Выдать роль».
+
     Raises:
       OwnerAlreadyExists — the tenant already has an active owner.
+      CatalogAdminLinkRefused — role=admin, the catalog half was refused.
     """
+
+    link_outcome = None
+    if role == StaffInvite.Role.ADMIN and link_catalog:
+        from apps.identity.services import salon_admin_link
+
+        tenant = Tenant.all_objects.get(pk=tenant_id)
+        link_outcome = salon_admin_link.ensure_catalog_salon_admin(
+            tenant=tenant, bot_user=bot_user, actor_label=actor_label
+        )
+        if link_outcome.created:
+            salon_admin_link.audit_linked(
+                link_outcome, tenant=tenant, bot_user=bot_user, actor_label=actor_label
+            )
 
     existing = TenantStaff.all_tenants.filter(
         tenant_id=tenant_id,

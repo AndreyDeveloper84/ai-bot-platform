@@ -87,6 +87,8 @@ from django.views.decorators.http import require_http_methods
 from apps.admin_api.auth import require_admin_or_reception_read
 from apps.admin_api.services.wire_lists import UNREADABLE, read_list
 from apps.integrations.ayla.salon_client import (
+    SalonAPIError,
+    SalonForbidden,
     SalonNotConfigured,
     SalonUnavailable,
     get_salon_client,
@@ -207,6 +209,43 @@ def salon_day_frame(request: HttpRequest) -> HttpResponse:
         return _error("schedule_source_not_configured", str(exc), 503)
     except SalonUnavailable as exc:
         return _error("schedule_unavailable", str(exc), 503)
+    except SalonForbidden as exc:
+        # DRF-2087 — 403 каталога по имени, как у действий (отмена, поиск
+        # клиентов). Это не сбой, а факт настройки: человек, от чьего имени
+        # салон читает (владелец/админ, ``_ayla_read_actor``), в каталоге не
+        # администратор этого салона. 500 говорило «сломалось» и звало
+        # чинить не то; у 403 есть ход оператора, и он назван.
+        logger.warning(
+            "admin_api.salon_day_frame.forbidden actor=%s tenant=%s err=%s",
+            actor_user.pk,
+            tenant.slug,
+            exc,
+        )
+        return _error(
+            "salon_forbidden",
+            f"catalog refused the salon actor for {tenant.slug}: the owner/admin "
+            "this read is named to is not an administrator of this salon in the "
+            "catalog — relink them there (provision_salon_admin) and retry; "
+            "nothing was read",
+            403,
+        )
+    except SalonAPIError as exc:
+        # DRF-2087 — страховочная сеть. Узкие ловцы выше — про то, что
+        # известно сегодня; этот — про следующий подкласс, которого сегодня
+        # нет, и про 401/404, которых здесь не ждали: без сети каждый из них
+        # — 500 без имени. Класс отказа уходит в лог, экрану — та же
+        # названная причина «источник не ответил».
+        logger.warning(
+            "admin_api.salon_day_frame.salon_error class=%s tenant=%s err=%s",
+            type(exc).__name__,
+            tenant.slug,
+            exc,
+        )
+        return _error(
+            "schedule_unavailable",
+            f"catalog refused to read the salon day ({type(exc).__name__}); nothing was read",
+            503,
+        )
 
     masters = payload.get("masters")
     if not isinstance(masters, list):

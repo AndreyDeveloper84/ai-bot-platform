@@ -73,6 +73,8 @@ from apps.admin_api.auth import require_admin_or_reception_read
 from apps.admin_api.services.wire_lists import UNREADABLE, read_rows
 from apps.catalog.models import CatalogMaster
 from apps.integrations.ayla.salon_client import (
+    SalonAPIError,
+    SalonForbidden,
     SalonNotConfigured,
     SalonUnavailable,
     get_salon_client,
@@ -268,6 +270,43 @@ def master_exceptions(request: HttpRequest, master_id: str) -> HttpResponse:
         # Названная причина, а не пустые списки: пустота читается как «ничего
         # не назначено», и салон спланировал бы день поверх отгула.
         return _error("schedule_unavailable", str(exc), 503)
+    except SalonForbidden as exc:
+        # DRF-2087 — 403 каталога по имени, как у действий (отмена, поиск
+        # клиентов). Это не сбой, а факт настройки: человек, от чьего имени
+        # салон читает (владелец/админ, ``_ayla_read_actor``), в каталоге не
+        # администратор этого салона. 500 говорило «сломалось» и звало
+        # чинить не то; у 403 есть ход оператора, и он назван.
+        logger.warning(
+            "admin_api.master_exceptions.forbidden actor=%s tenant=%s err=%s",
+            actor_user.pk,
+            tenant.slug,
+            exc,
+        )
+        return _error(
+            "salon_forbidden",
+            f"catalog refused the salon actor for {tenant.slug}: the owner/admin "
+            "this read is named to is not an administrator of this salon in the "
+            "catalog — relink them there (provision_salon_admin) and retry; "
+            "nothing was read",
+            403,
+        )
+    except SalonAPIError as exc:
+        # DRF-2087 — страховочная сеть. Узкие ловцы выше — про то, что
+        # известно сегодня; этот — про следующий подкласс, которого сегодня
+        # нет, и про 401/404, которых здесь не ждали: без сети каждый из них
+        # — 500 без имени. Класс отказа уходит в лог, экрану — та же
+        # названная причина «источник не ответил».
+        logger.warning(
+            "admin_api.master_exceptions.salon_error class=%s tenant=%s err=%s",
+            type(exc).__name__,
+            tenant.slug,
+            exc,
+        )
+        return _error(
+            "schedule_unavailable",
+            f"catalog refused to read the master exceptions ({type(exc).__name__}); nothing was read",
+            503,
+        )
 
     payload: dict[str, Any] = {
         "from": from_date.isoformat(),

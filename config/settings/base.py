@@ -781,6 +781,19 @@ AYLA_INTERNAL_API_TOKEN = os.environ.get("AYLA_INTERNAL_API_TOKEN", "")
 # отвечает ``SETUP_PENDING`` с именем причины, а не ложным успехом.
 AYLA_TENANT_PROVISIONING_TOKEN = os.environ.get("AYLA_TENANT_PROVISIONING_TOKEN", "")
 
+# DRF-2085 (OWNER RULING 18.09, вариант А) — четвёртый секрет, одна ручка.
+# ``POST /api/v1/internal/tenants/<slug>/salon-admins/`` в каталоге заводит
+# СВЕЖУЮ учётку администратора салона, TUR admin и связывает с ней
+# MAX-личность. Запускает её только операторское действие
+# ``platform_operations`` в Django Admin бота (ядро ``grant_staff_role``
+# при role=admin, до записи TenantStaff). Не общий Bearer, не
+# provisioning-токен, не identity-токен (§151/§153 п.6 в силе): каталог
+# требует, чтобы все четыре различались (users.E004 при его старте).
+# Пусто = выдача роли admin отказывает ПО ИМЕНИ (``token_missing``) и
+# строки не пишет — ложного «доступ выдан» без каталожной половины нет.
+# В логи и в клиентский код значение не попадает (узел в тестах).
+AYLA_SALON_ADMIN_LINK_TOKEN = os.environ.get("AYLA_SALON_ADMIN_LINK_TOKEN", "")
+
 # C7 client-payments: fallback ``return_url`` for the YooKassa confirmation
 # flows (payment create / card setup) when the miniapp request doesn't carry
 # one. W4's master-side flows send return_url explicitly (precedent); the

@@ -42,7 +42,10 @@ from apps.identity.services.role_resolver import resolve_role
 from apps.tenancy.admin import TenantStaffAdmin
 from apps.tenancy.models import Tenant, TenantStaff
 
-pytestmark = pytest.mark.django_db
+# DRF-2085: роль admin, выданная ОПЕРАТОРОМ, спрашивает каталог (свежая учётка +
+# TUR + связь) до записи TenantStaff; здесь каталог — заглушка, его половина
+# доказывается в apps/identity/tests/test_salon_admin_link_2085.py.
+pytestmark = [pytest.mark.django_db, pytest.mark.usefixtures("catalog_admin_link_stub")]
 
 CHANGELIST = "admin:tenancy_tenantstaff_changelist"
 GRANT_URL = "admin:tenancy_tenantstaff_grant"
@@ -183,6 +186,39 @@ def test_g2_apply_grants_through_the_service_and_journals(salon: Tenant) -> None
     assert entry is not None
     assert "admin" in entry.get_change_message()
     assert 25 in {level for level, _ in _messages(response)}  # SUCCESS
+
+
+def test_g2b_catalog_refusal_is_told_to_the_operator_and_no_row_is_written(
+    salon: Tenant, catalog_admin_link_stub
+) -> None:
+    """DRF-2085: на отказ каталога — слово оператору с причиной и «что сделать», TenantStaff нет."""
+    client, _ = _client("ops-g2b", ops=True)
+    person = _person(salon)
+    catalog_admin_link_stub.refuse_with = "credential_refused"
+
+    response = client.post(
+        reverse(GRANT_URL),
+        {"tenant": str(salon.pk), "bot_user_id": str(person.pk), "role": "admin", "apply": "1"},
+        follow=True,
+    )
+
+    # empty-assert-ok: слово оператору с причиной — присутствие ниже
+    assert _active_roles(salon, person) == []
+    errors = [text for level, text in _messages(response) if level == 40]
+    assert len(errors) == 1
+    assert "credential_refused" in errors[0] and "Роль в боте не выдана" in errors[0]
+    assert "AYLA_SALON_ADMIN_LINK_TOKEN" in errors[0]  # «что сделать» — по имени переменной
+    assert catalog_admin_link_stub.calls == [
+        (salon.slug, str(person.pk), f"django_admin:user={_user_pk('ops-g2b')}")
+    ]
+    # empty-assert-ok: вызов каталога зафиксирован строкой выше, ошибка оператору — выше
+    assert _audit(STAFF_ROLE_GRANTED, person) == []
+
+
+def _user_pk(username: str):  # noqa: ANN202
+    from django.contrib.auth import get_user_model
+
+    return get_user_model().objects.get(username=username).pk
 
 
 def test_g3_repeat_is_a_named_refusal_not_a_second_row(salon: Tenant) -> None:

@@ -920,6 +920,7 @@ class TenantStaffAdmin(_ReadOnlyStaffAdmin):
         """
         from apps.identity.models import BotUser
         from apps.identity.services import staff_roles
+        from apps.identity.services.salon_admin_link import CatalogAdminLinkRefused
         from apps.identity.services.staff_invites import OwnerAlreadyExists
 
         if not self.has_manage_permission(request):
@@ -956,6 +957,10 @@ class TenantStaffAdmin(_ReadOnlyStaffAdmin):
                     self._refusal(request, exc.slug)
                 except OwnerAlreadyExists:
                     self._refusal(request, "owner_already_exists")
+                except CatalogAdminLinkRefused as exc:
+                    # DRF-2085: каталожная половина admin отказала — роль не
+                    # выдана; оператору причина и «что сделать».
+                    self.message_user(request, exc.operator_text(), messages.ERROR)
                 else:
                     if result.already_had_role:
                         self.message_user(
@@ -999,6 +1004,7 @@ class TenantStaffAdmin(_ReadOnlyStaffAdmin):
     def change_staff_role(self, request: HttpRequest, queryset):  # type: ignore[no-untyped-def]
         """Сервис ``change_staff_role``: старая строка закрывается, новая выдаётся."""
         from apps.identity.services import staff_roles
+        from apps.identity.services.salon_admin_link import CatalogAdminLinkRefused
         from apps.identity.services.staff_invites import OwnerAlreadyExists
 
         if queryset.count() != 1:
@@ -1015,6 +1021,8 @@ class TenantStaffAdmin(_ReadOnlyStaffAdmin):
                 self._refusal(request, exc.slug)
             except OwnerAlreadyExists:
                 self._refusal(request, "owner_already_exists")
+            except CatalogAdminLinkRefused as exc:
+                self.message_user(request, exc.operator_text(), messages.ERROR)
             else:
                 self.log_change(
                     request,
