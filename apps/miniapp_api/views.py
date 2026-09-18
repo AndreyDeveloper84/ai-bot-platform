@@ -4172,6 +4172,205 @@ def _food_entry_refusal(exc: Exception, *, external_id: str, step: str) -> JsonR
     return _error("ayla_bad_request", "ayla rejected the change", 400)
 
 
+# --- customer/food/estimate, customer/food/log — текстовая запись еды (DRF-2091, F8) ---
+#
+# Та же тропа, что у текста в чате (``apps.skills.food_clarify.text_entry``,
+# F2 #1729 + #1823): фраза → ``parse_food_text`` → оценка каталогом
+# (``internal/food-estimate/``, ничего не пишет) → карточка «Я распознала
+# так» → подтверждение → ``log_meal`` с кодом происхождения §136
+# (``text_estimated_confirmed`` / ``text_user_corrected``). Второй тропы для
+# Mini App не заводится: тот же клиент, те же аргументы, тот же справочник.
+#
+# Ворота — три, и все до разбора тела: initData (декоратор), NUTRITION_ENABLED
+# + PERSONAL_DATA (``_diary_entry_gate``, как у воды) и согласие дневника из
+# реестра (``diary_is_granted``, DRF-1963): по F11 строка
+# ``food_diary_processing`` покрывает дневник и текстом, и фотографией.
+# Отказ реестра — своим слагом ``food_diary_consent_required`` (403): экран
+# ведёт человека на экран согласия, а не на общий «нет согласия».
+
+
+def _food_text_gate(bot_user: BotUser) -> JsonResponse | None:
+    refused = _diary_entry_gate(bot_user, needs_consent=True)
+    if refused is not None:
+        return refused
+    from apps.consent.nutrition import diary_is_granted
+
+    if not diary_is_granted(bot_user):
+        return _error(
+            "food_diary_consent_required", "food diary consent (registry) is required", 403
+        )
+    return None
+
+
+def _food_text_json(request: HttpRequest) -> dict[str, Any] | JsonResponse:
+    import json
+
+    content_type = (request.content_type or "").split(";")[0].strip().lower()
+    if content_type != "application/json" or not request.body:
+        return _error("malformed", "expected a JSON body", 400)
+    try:
+        body = json.loads(request.body)
+    except ValueError:
+        return _error("malformed", "body is not valid JSON", 400)
+    if not isinstance(body, dict):
+        return _error("malformed", "body must be a JSON object", 400)
+    return body
+
+
+def _food_text_catalog_refusal(exc: Exception, *, external_id: str, step: str) -> JsonResponse:
+    from apps.integrations.ayla.nutrition_client import (
+        FoodNotRecognizedError,
+        NutritionUnavailableError,
+    )
+
+    if isinstance(exc, FoodNotRecognizedError):
+        return _error("food_not_recognized", "dish not found in the reference", 400)
+    if isinstance(exc, NutritionUnavailableError):
+        logger.warning("food_text_ma.%s.unavailable ext=%s err=%s", step, external_id, exc)
+        return _error("nutrition_unavailable", "ayla nutrition unavailable", 503)
+    logger.warning("food_text_ma.%s.rejected ext=%s err=%s", step, external_id, exc)
+    return _error("ayla_bad_request", "ayla rejected the request", 400)
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+@require_init_data
+def customer_food_estimate(request: HttpRequest) -> HttpResponse:
+    """Оценка без записи: ``{"text": "борщ 250"}`` → «Я распознала так».
+
+    Текст разбирается тем же ``parse_food_text``, что и в чате (граммы в
+    конце фразы — DRF-2078); ``portion_g`` в теле — явная поправка граммов с
+    карточки («Поправить граммы»), она сильнее числа в тексте. Ответ несёт
+    ``portion_estimated``: экран обязан называть оценку оценкой.
+    """
+    import asyncio
+
+    from apps.integrations.ayla import external_user_id_for, get_nutrition_client
+    from apps.integrations.ayla.nutrition_client import NutritionAPIError
+    from apps.skills.food_clarify.text_entry import parse_food_text
+
+    bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
+    refused = _food_text_gate(bot_user)
+    if refused is not None:
+        return refused
+
+    body = _food_text_json(request)
+    if isinstance(body, JsonResponse):
+        return body
+    text = body.get("text")
+    if not isinstance(text, str) or not text.strip():
+        return _error("malformed", "text is required", 400)
+    parsed = parse_food_text(text)
+    if parsed is None:
+        return _error("food_not_recognized", "could not read a dish from the text", 400)
+    grams: float | None = parsed.grams
+    if "portion_g" in body and body["portion_g"] is not None:
+        raw = body["portion_g"]
+        if isinstance(raw, bool) or not isinstance(raw, (int, float)) or not (1 <= raw <= 5000):
+            return _error("malformed", "portion_g must be a number between 1 and 5000", 400)
+        grams = float(raw)
+
+    external_id = external_user_id_for(bot_user)
+    try:
+        estimate = asyncio.run(
+            get_nutrition_client().estimate_dish(
+                external_user_id=external_id, dish_name=parsed.dish, portion_g=grams
+            )
+        )
+    except NutritionAPIError as exc:
+        return _food_text_catalog_refusal(exc, external_id=external_id, step="estimate")
+
+    return JsonResponse(
+        {
+            "matched_dish": estimate.matched_dish,
+            "portion_g": estimate.portion_g,
+            "portion_estimated": estimate.portion_estimated,
+            "kcal": estimate.kcal,
+            "protein_g": estimate.protein_g,
+            "fat_g": estimate.fat_g,
+            "carbs_g": estimate.carbs_g,
+        }
+    )
+
+
+#: Порция каталога считается от 100 г — та же база, что у текста в чате.
+_FOOD_TEXT_BASELINE_G = 100.0
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+@require_init_data
+def customer_food_log(request: HttpRequest) -> HttpResponse:
+    """Запись — только по подтверждению показанной оценки (§109 шаг 6).
+
+    Тело: ``{"dish_name", "portion_g", "corrected": bool, "idempotency_key"}``.
+    ``corrected`` решается на карточке, не задним числом: ``true`` — человек
+    поправил граммы (``text_user_corrected``), ``false`` — подтвердил оценку
+    как есть (``text_estimated_confirmed``). Ключ идемпотентности — от экрана:
+    повтор после потерянного ответа не пишет вторую запись.
+    """
+    import asyncio
+
+    from apps.integrations.ayla import external_user_id_for, get_nutrition_client
+    from apps.integrations.ayla.nutrition_client import NutritionAPIError
+    from apps.skills.food_clarify.text_entry import (
+        MEAL_TYPE_UNNAMED,
+        ORIGIN_ESTIMATED_CONFIRMED,
+        ORIGIN_USER_CORRECTED,
+    )
+
+    bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
+    refused = _food_text_gate(bot_user)
+    if refused is not None:
+        return refused
+
+    body = _food_text_json(request)
+    if isinstance(body, JsonResponse):
+        return body
+    dish = body.get("dish_name")
+    portion = body.get("portion_g")
+    corrected = body.get("corrected", False)
+    key = body.get("idempotency_key")
+    if not isinstance(dish, str) or not dish.strip():
+        return _error("malformed", "dish_name is required", 400)
+    if (
+        isinstance(portion, bool)
+        or not isinstance(portion, (int, float))
+        or not (1 <= portion <= 5000)
+    ):
+        return _error("malformed", "portion_g must be a number between 1 and 5000", 400)
+    if not isinstance(corrected, bool):
+        return _error("malformed", "corrected must be a boolean", 400)
+    if not isinstance(key, str) or not key.strip() or len(key) > 80:
+        return _error("malformed", "idempotency_key is required", 400)
+
+    external_id = external_user_id_for(bot_user)
+    origin = ORIGIN_USER_CORRECTED if corrected else ORIGIN_ESTIMATED_CONFIRMED
+    try:
+        log = asyncio.run(
+            get_nutrition_client().log_meal(
+                external_user_id=external_id,
+                dish_name=dish.strip(),
+                meal_type=MEAL_TYPE_UNNAMED,
+                portion_multiplier=round(float(portion) / _FOOD_TEXT_BASELINE_G, 3),
+                idempotency_key=f"food-text-ma:{external_id}:{key.strip()}",
+                entry_origin=origin,
+            )
+        )
+    except NutritionAPIError as exc:
+        return _food_text_catalog_refusal(exc, external_id=external_id, step="log")
+
+    return JsonResponse(
+        {
+            "log_id": log.log_id,
+            "dish_name": log.dish_name,
+            "calories": log.calories,
+            "entry_origin": origin,
+        },
+        status=201,
+    )
+
+
 def _food_log_payload(log: Any) -> dict[str, Any]:
     return {
         "id": log.log_id,
