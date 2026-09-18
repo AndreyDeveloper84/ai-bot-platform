@@ -33,8 +33,10 @@ import {
   DIARY_CONSENT_REQUIRED_TEXT,
 } from "../lib/customer-wellness";
 import { ApiError } from "../lib/api";
+import { saveMealFromEntry } from "../lib/saved-meals";
 import { useScreenBack } from "../hooks/useScreenBack";
 import { backTo } from "../lib/screen-back";
+import { FAVORITES_COPY, FAVORITES_ROUTE, favoritesRefusalText } from "./FoodScannerFavoritesScreen";
 
 /**
  * ЧЕТЫРЕ состояния, и свести любые два нельзя — у каждого своя правда
@@ -180,6 +182,45 @@ export function FoodScannerDiaryScreen() {
     [load, runEntryAction],
   );
 
+  // DRF-2092 (F12) — «В избранное»: шлётся id записи, снимок делает каталог
+  // из своей записи. 201 и 200 сервера — разные фразы: «сохранила» и «уже в
+  // избранном» для человека не одно и то же. День не перечитывается —
+  // запись дневника не менялась.
+  const onFavorite = useCallback(
+    (entry: FoodDiaryEntry) => {
+      if (busy.current) return;
+      busy.current = true;
+      setPending(true);
+      void (async () => {
+        try {
+          const outcome = await saveMealFromEntry(entry.id);
+          setNotice({
+            text: outcome.created
+              ? FAVORITES_COPY.savedNotice(entry.dish_name)
+              : FAVORITES_COPY.alreadyNotice(entry.dish_name),
+          });
+        } catch (err) {
+          if (err instanceof ApiError && err.slug === "food_diary_consent_required") {
+            navigate("/customer/food-scanner/capture", {
+              state: { returnTo: "/customer/food-scanner/diary" },
+            });
+            return;
+          }
+          setNotice({
+            text:
+              err instanceof ApiError && err.slug === "consent_required"
+                ? DIARY_CONSENT_REQUIRED_TEXT
+                : favoritesRefusalText(err),
+          });
+        } finally {
+          busy.current = false;
+          setPending(false);
+        }
+      })();
+    },
+    [navigate],
+  );
+
   return (
     <div className="food-scanner-screen">
       <header className="records-screen__header">
@@ -267,8 +308,10 @@ export function FoodScannerDiaryScreen() {
             // DRF-2091: «Добавить приём» ведёт на запись текстом — фото-половина
             // ждёт решение владельца (D26), обещать её кнопкой нельзя.
             onAddTap={() => navigate("/customer/food-scanner/manual")}
+            onFavoritesTap={() => navigate(FAVORITES_ROUTE)}
             onDelete={onDelete}
             onCorrect={onCorrect}
+            onFavorite={onFavorite}
             pending={pending}
           />
         )}
@@ -280,14 +323,18 @@ export function FoodScannerDiaryScreen() {
 function DiaryReady({
   day,
   onAddTap,
+  onFavoritesTap,
   onDelete,
   onCorrect,
+  onFavorite,
   pending,
 }: {
   day: Extract<DiaryToday, { state: "empty" | "entries" }>;
   onAddTap: () => void;
+  onFavoritesTap: () => void;
   onDelete: (entry: FoodDiaryEntry) => Promise<void>;
   onCorrect: (entry: FoodDiaryEntry, grams: number) => Promise<void>;
+  onFavorite: (entry: FoodDiaryEntry) => void;
   pending: boolean;
 }) {
   const [editing, setEditing] = useState<string | null>(null);
@@ -356,6 +403,15 @@ function DiaryReady({
                         Граммы
                       </button>
                     )}
+                    <button
+                      type="button"
+                      className="food-scanner-diary__entry-action"
+                      aria-label={`В избранное: ${entry.dish_name}`}
+                      disabled={pending}
+                      onClick={() => onFavorite(entry)}
+                    >
+                      В избранное
+                    </button>
                     <button
                       type="button"
                       className="food-scanner-diary__entry-action"
@@ -435,6 +491,14 @@ function DiaryReady({
           </button>
         </div>
       )}
+
+      {/* DRF-2092 (F12) — избранное живёт на сервере; вход отсюда, не с
+          дашборда: избранное растёт из записей дневника. */}
+      <div className="food-scanner-screen__cta-stack">
+        <button type="button" className="btn-secondary" onClick={onFavoritesTap}>
+          {FAVORITES_COPY.openFromDiary}
+        </button>
+      </div>
     </>
   );
 }

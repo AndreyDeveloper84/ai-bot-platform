@@ -103,6 +103,7 @@ import { FoodScannerManualScreen } from "./screens/FoodScannerManualScreen";
 import { FoodScannerProcessingScreen } from "./screens/FoodScannerProcessingScreen";
 import { FoodScannerResultScreen } from "./screens/FoodScannerResultScreen";
 import { FoodScannerSavedScreen } from "./screens/FoodScannerSavedScreen";
+import { FoodScannerFavoritesScreen } from "./screens/FoodScannerFavoritesScreen";
 import { HelloScreen } from "./screens/HelloScreen";
 import { CustomerEntryScreen } from "./screens/CustomerEntryScreen";
 import { RoleNotReadyScreen } from "./screens/RoleNotReadyScreen";
@@ -1556,6 +1557,10 @@ export function CustomerRoutes() {
       <Route
         path="/customer/food-scanner/diary"
         element={<FoodScannerDiaryScreen />}
+      />
+      <Route
+        path="/customer/food-scanner/favorites"
+        element={<FoodScannerFavoritesScreen />}
       />
       <Route
         path="/customer/food-scanner/manual"
