@@ -2440,7 +2440,7 @@ turns:
     code_ref: NOT_IN_CODE_CORPUS
     expected: {recheck: {initiated_by: USER, all_required_S1_questions: NEGATIVE_OR_SAFE, detector_pass: REQUIRED, result: S1_NOT_CURRENT_MEDICAL_FOLLOWUP_REQUIRED  # [OD-BOT §162] условие 8: достоверный эпизод выраженного нарушения дыхания — universal clearance запрещён, provenance: REQUIRED}, state_after: NOT_NORMAL  # не медицинское разрешение; health-sensitive recommendation / booking не разблокируются автоматически; user-facing — следующий шаг к медицинской помощи (wording OPEN), if_any_UNKNOWN_or_new_signal: STOP_PERSISTS, entry_point: OPEN (DRF-2040 q1)}
     observed_detectors: {pre_check: ALLOW, classify: NONE, s1_detected: false, channel_today: "none"}
-note: "OWNER RULING docs/Q1.md стр. 16 / DRF-2040 (product mechanics): пользователь сам запускает recheck; все обязательные S1-вопросы — отрицательные / безопасные ответы; detector снова проходит; результат CLEARED_BY_RECHECK с provenance; точка входа / поля — OPEN (DRF-2040 вопросы 1–2); это не «медицинское разрешение»"
+note: "OWNER RULING docs/Q1.md стр. 16 / DRF-2040 (product mechanics, [OD-BOT §156]): пользователь сам запускает recheck; все обязательные S1-вопросы — отрицательные / безопасные ответы; detector снова проходит. Для ЭТОГО сценария результат — НЕ CLEARED_BY_RECHECK: после достоверного эпизода выраженного нарушения дыхания условие 8 [OD-BOT §162] не выполнено → S1_NOT_CURRENT_MEDICAL_FOLLOWUP_REQUIRED с provenance; не NORMAL; не медицинское разрешение; запись / health-sensitive recommendation не разблокируются автоматически. Точка входа / поля provenance — OPEN (DRF-2040 q1–q2). Owner-approved conservative policy — PENDING PHYSICIAN CONFIRMATION."
 technical_validation:
   status: FAIL
   levels: {DETECTION: PASS, ROUTING: PASS, STATE: NOT_IMPLEMENTED, CAPABILITY: NOT_IMPLEMENTED, ESCALATION: FAIL, PERSISTENCE: NOT_IMPLEMENTED}
@@ -2535,7 +2535,7 @@ turns:
     code_ref: NOT_IN_CODE_CORPUS
     expected: {answer_class: NEGATIVE_SPECIFIC  # «полностью прошло после лестницы, тяжёлых признаков не было», outcome: S1_NOT_CONFIRMED  # условие 5 [OD-BOT §162]: ambiguous после одного конкретного вопроса однозначно вне S1 → CLEARED_BY_RECHECK допустим с provenance (нет UNKNOWN, нет нового S1, нет условия 8), lower_level_CLARIFY: CLEARED_BY_ANSWER  # DRF-2040 (владелец), automatic_NORMAL: false  # capabilities — по own evaluation / W1-01}
     observed_detectors: {pre_check: ALLOW, classify: NONE, s1_detected: false, channel_today: "none"}
-note: "владелец разрешил снимать CLARIFY более низкого уровня ответом на конкретный safety-вопрос (DRF-2040), но исход после отрицательного ответа на S1-уточнение — O-11 q3 (открыт); routing первого хода — OD-F0C3-05"
+note: "владелец разрешил снимать CLARIFY более низкого уровня ответом на конкретный safety-вопрос (DRF-2040, [OD-BOT §156]). Routing первого хода (один вопрос G1) и отрицательный исход (полностью прошло после нагрузки, тяжёлых признаков не было → S1 не подтверждён → clearance по условию 5) теперь owner-approved — [OD-BOT §164] / [OD-BOT §162]; прежние пометки O-11 q3 (открыт) и OD-F0C3-05 в этой части закрыты; ожидает physician confirmation (Review Pack G1-BOUNDARY-01, RECHECK-01)."
 technical_validation:
   status: NOT_IMPLEMENTED
   levels: {DETECTION: N/A (expected OPEN), ROUTING: N/A (expected OPEN), STATE: N/A (expected OPEN), CAPABILITY: N/A (expected OPEN), ESCALATION: N/A (expected OPEN), PERSISTENCE: NOT_IMPLEMENTED}

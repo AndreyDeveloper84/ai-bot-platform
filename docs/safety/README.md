@@ -4,7 +4,7 @@
 
 | Файл здесь | Что это | В `Ayla/docs` лежал как |
 |---|---|---|
-| `docs/safety/F0-C3-safety-matrix.md` | Safety Matrix v0.12-reviewfix1 — `WORKING DRAFT` | `docs/safety/F0-C3-safety-matrix.md` |
+| `docs/safety/F0-C3-safety-matrix.md` | Safety Matrix v0.12-reviewfix2 — `WORKING DRAFT` | `docs/safety/F0-C3-safety-matrix.md` |
 | `docs/safety/reviews/AYLA_CLINICAL_SAFETY_REVIEW_PACK_v0.1_2026-09-16.md` | Clinical Review Pack v0.1-reviewfix1 — интерфейс врача | `docs/AYLA_CLINICAL_SAFETY_REVIEW_PACK_v0.1_2026-09-16.md` (корень) |
 | `docs/safety/reviews/S1_CLINICAL_DETECTOR_FIXTURES_v0.1.md` | 35 базовых fixtures (contract layer над `apps/skills/health_screening/tests/s1_fixtures.py`) | тот же путь |
 | `docs/safety/reviews/S1_CONTEXT_RECHECK_ADVERSARIAL_FIXTURES_v0.2.md` | 69 контекстных / многоходовых fixtures (v0.2-reviewfix1) | тот же путь |
