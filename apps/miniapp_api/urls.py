@@ -145,6 +145,10 @@ urlpatterns = [
         views.customer_wellness_today,
         name="customer_wellness_today",
     ),
+    # DRF-2091 (F8, текстовая половина) — запись еды текстом из Mini App:
+    # оценка без записи и подтверждение — той же тропой, что текст в чате.
+    path("food/estimate", views.customer_food_estimate, name="customer_food_estimate"),
+    path("food/log", views.customer_food_log, name="customer_food_log"),
     # Wellness write path (DRF-1402) — log / undo a water entry on Ayla.
     path(
         "wellness/water",
