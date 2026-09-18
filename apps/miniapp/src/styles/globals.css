@@ -913,6 +913,17 @@ a {
   color: var(--c-text-secondary);
 }
 
+/* DRF-1763 — вопросы safety-стопа: список под признанием, тем же тихим
+   фоном, что и «Текущая цель»; поле ответа — тот же textarea ниже. */
+.goal-select__safety-questions {
+  margin: var(--s-2) 0 var(--s-3);
+  padding: var(--s-3) var(--s-3) var(--s-3) var(--s-5);
+  background: var(--c-surface-2);
+  border-radius: var(--r-md);
+  color: var(--c-text-primary);
+  line-height: 1.5;
+}
+
 .goal-select__actions {
   margin-top: var(--s-2);
 }

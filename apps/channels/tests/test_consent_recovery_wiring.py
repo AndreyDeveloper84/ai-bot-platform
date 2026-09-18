@@ -401,7 +401,13 @@ class TestGuards:
             bot_user=Mock(channel="max", channel_user_id="71974"),
             message_text="стакан воды",
         )
-        with patch.object(water_skill, "_consent_open", return_value=False), tenant_scope(tenant):
+        with (
+            patch(
+                "apps.orchestrator.personal_surface.personal_records_consent_open",
+                return_value=False,
+            ),
+            tenant_scope(tenant),
+        ):
             result = water_skill.WaterSkill().handle(ctx)
 
         assert result.reply_text == CONSENT_TEXT
@@ -429,7 +435,9 @@ class TestGuards:
             bot_user=Mock(channel="max", channel_user_id="71976"),
             message_text="стакан воды",
         )
-        with patch.object(water_skill, "_consent_open", return_value=False):
+        with patch(
+            "apps.orchestrator.personal_surface.personal_records_consent_open", return_value=False
+        ):
             result = water_skill.WaterSkill().handle(ctx)
 
         assert result.reply_text == CONSENT_TEXT

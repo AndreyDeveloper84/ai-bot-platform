@@ -402,10 +402,13 @@ CUSTOMER_ROUTES: dict[str, Entry] = {
     ),
     "customer_goal_select": own(
         "data (the caller's goal document as Ayla returns it after the select)",
+        "safety.kind / text / acknowledgement / questions (DRF-1763 — canned copy only; "
+        "neither goal_text nor safety_answer is echoed)",
         via=V + "customer_goal_select",
         note=(
             "the goal the caller just chose, in the same {data} envelope as the read; a 400 "
-            "echoes Ayla's error body, which is about the request, not the person"
+            "echoes Ayla's error body, which is about the request, not the person; a health "
+            "signal answers with the {safety} envelope instead (health_gate.screen_goal_body)"
         ),
     ),
     # --- wellness (own) ---------------------------------------------------

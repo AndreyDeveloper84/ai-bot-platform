@@ -16,21 +16,27 @@ from apps.integrations.ayla import (
 )
 from apps.skills.base import SkillContext
 from apps.skills.food_clarify.text_entry import CONSENT_TEXT
-from apps.skills.water import skill as water_skill
 from apps.skills.water.skill import WaterSkill
 
-#: Настоящие ворота — до подмены фикстурой ниже.
-_REAL_CONSENT_OPEN = water_skill._consent_open
+#: Настоящий предикат PERSONAL_DATA — до подмены фикстурой ниже.
+from apps.orchestrator.personal_surface import (  # noqa: E402
+    personal_records_consent_open as _REAL_PERSONAL_DATA_PREDICATE,
+)
 
 
 @pytest.fixture(autouse=True)
 def _consent_open(monkeypatch):
-    """DRF-1926: тесты ниже — про запись с согласием; отказ — в своём классе.
+    """DRF-1926 / DRF-2093: тесты ниже — про запись с согласием; отказ — в своём классе.
 
-    Без этой подмены ``Mock``-пользователь уходил бы в настоящий предикат, тот
-    отказывал бы (fail-closed), и каждый прежний тест мерил бы отказ.
+    Подмена — по каноническим адресам предикатов (PERSONAL_DATA и реестр
+    дневника): ворота воды зовут единый ``diary_write_refusal``, а тот читает
+    оба через модули. Без подмены ``Mock``-пользователь уходил бы в настоящие
+    предикаты, те отказывали бы (fail-closed), и каждый прежний тест мерил бы отказ.
     """
-    monkeypatch.setattr(water_skill, "_consent_open", lambda _bot_user: True)
+    monkeypatch.setattr(
+        "apps.orchestrator.personal_surface.personal_records_consent_open", lambda _u: True
+    )
+    monkeypatch.setattr("apps.consent.nutrition.diary_is_granted", lambda _u: True)
 
 
 def _context(text: str, channel: str = "max", channel_user_id: str = "12345") -> SkillContext:
@@ -215,7 +221,9 @@ class TestConsentGate:
         return client
 
     def test_no_consent_no_write_and_the_food_sentence(self, monkeypatch) -> None:
-        monkeypatch.setattr(water_skill, "_consent_open", lambda _bot_user: False)
+        monkeypatch.setattr(
+            "apps.orchestrator.personal_surface.personal_records_consent_open", lambda _u: False
+        )
         writes: list[dict] = []
         with patch(
             "apps.skills.water.skill.get_nutrition_client", return_value=self._client(writes)
@@ -235,7 +243,10 @@ class TestConsentGate:
         }
 
     def test_a_consent_read_that_raises_reads_as_no_consent(self, monkeypatch) -> None:
-        monkeypatch.setattr(water_skill, "_consent_open", _REAL_CONSENT_OPEN)
+        monkeypatch.setattr(
+            "apps.orchestrator.personal_surface.personal_records_consent_open",
+            _REAL_PERSONAL_DATA_PREDICATE,
+        )
 
         def _boom(*_args, **_kwargs):
             raise RuntimeError("consent store down")
@@ -258,7 +269,6 @@ class TestConsentGate:
             seen.append(bot_user)
             return False
 
-        monkeypatch.setattr(water_skill, "_consent_open", _REAL_CONSENT_OPEN)
         monkeypatch.setattr(
             "apps.orchestrator.personal_surface.personal_records_consent_open", _predicate
         )

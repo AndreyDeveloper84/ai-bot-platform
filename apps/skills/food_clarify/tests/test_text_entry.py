@@ -106,7 +106,14 @@ def _nutrition_on(settings):
 
 @pytest.fixture
 def consent():
-    with patch("apps.skills.food_clarify.text_entry._consent_open", return_value=True) as p:
+    """PERSONAL_DATA и согласие дневника из реестра — по каноническим адресам
+    предикатов (DRF-2093: ворота текста зовут единый ``diary_write_refusal``)."""
+    with (
+        patch(
+            "apps.orchestrator.personal_surface.personal_records_consent_open", return_value=True
+        ) as p,
+        patch("apps.consent.nutrition.diary_is_granted", return_value=True),
+    ):
         yield p
 
 
@@ -264,7 +271,9 @@ class TestRefusals:
 
     def test_no_personal_data_consent_no_estimate_no_log(self, conversation) -> None:
         catalogue = _Catalogue()
-        with patch("apps.skills.food_clarify.text_entry._consent_open", return_value=False):
+        with patch(
+            "apps.orchestrator.personal_surface.personal_records_consent_open", return_value=False
+        ):
             _turn(conversation, "борщ 300г", catalogue)
             result = _turn(conversation, "cb:food:diary", catalogue)
         assert result.reply_text == text_entry.CONSENT_TEXT
@@ -451,7 +460,9 @@ class TestSavedEntryChips:
 
     def test_without_consent_nothing_is_edited_or_restored(self, conversation) -> None:
         catalogue = _Catalogue()
-        with patch("apps.skills.food_clarify.text_entry._consent_open", return_value=False):
+        with patch(
+            "apps.orchestrator.personal_surface.personal_records_consent_open", return_value=False
+        ):
             fix = _turn(conversation, f"cb:food:entry_fix:{LOG_ID}", catalogue)
             undo = _turn(conversation, f"cb:food:entry_undo:{LOG_ID}", catalogue)
 
@@ -523,7 +534,9 @@ class TestEntryDecisionsAndEdges:
 
     def test_delete_does_not_need_consent(self, conversation) -> None:
         catalogue = _Catalogue()
-        with patch("apps.skills.food_clarify.text_entry._consent_open", return_value=False):
+        with patch(
+            "apps.orchestrator.personal_surface.personal_records_consent_open", return_value=False
+        ):
             result = _turn(conversation, f"cb:food:entry_del:{LOG_ID}", catalogue)
 
         assert len(catalogue.deletes) == 1
@@ -575,7 +588,9 @@ class TestEntryDecisionsAndEdges:
         _turn(conversation, f"cb:food:entry_fix:{LOG_ID}", catalogue)
         assert conversation.skill_state["food_text"]["awaiting_fix_grams"] is True
 
-        with patch("apps.skills.food_clarify.text_entry._consent_open", return_value=False):
+        with patch(
+            "apps.orchestrator.personal_surface.personal_records_consent_open", return_value=False
+        ):
             result = _turn(conversation, "250", catalogue)
 
         assert result.reply_text == text_entry.CONSENT_TEXT

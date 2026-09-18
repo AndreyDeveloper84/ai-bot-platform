@@ -51,7 +51,7 @@ from apps.integrations.ayla import (
     get_nutrition_client,
 )
 from apps.skills.base import SkillContext, SkillResult
-from apps.skills.food_clarify.text_entry import CONSENT_TEXT
+from apps.skills.food_clarify.text_entry import CONSENT_TEXT, DIARY_CONSENT_REQUIRED_TEXT
 from apps.skills.registry import register
 from apps.skills.water.parser import REFUSED, BeverageMatch, parse_beverage
 
@@ -76,16 +76,6 @@ def _nutrition_unavailable_text() -> str:
     from apps.skills.menu.marketplace import NUTRITION_UNAVAILABLE_TEXT
 
     return NUTRITION_UNAVAILABLE_TEXT
-
-
-def _consent_open(bot_user) -> bool:
-    """DRF-1926: то же правило, что у записи еды в чате (``text_entry._consent_open``).
-
-    PERSONAL_DATA, fail-closed: сбой чтения согласия — «согласия нет».
-    """
-    from apps.orchestrator.personal_surface import personal_records_consent_open
-
-    return personal_records_consent_open(bot_user)
 
 
 @register
@@ -129,17 +119,30 @@ class WaterSkill:
 
         assert isinstance(parsed, BeverageMatch)
 
-        # DRF-1926: без согласия на обработку личных данных стакан не
-        # записывается — как еда в чате, и тем же текстом. ``matches`` ворота
-        # не видит намеренно: иначе ход ушёл бы в food_clarify и получил
-        # карточку «еда или опечатка» вместо честного отказа.
-        if not _consent_open(context.bot_user):
+        # DRF-1926 / DRF-2093: без согласия на обработку личных данных И без
+        # действующего согласия дневника (реестр) стакан не записывается — тем
+        # же предикатом, что еда текстом и фото. ``matches`` ворота не видит
+        # намеренно: иначе ход ушёл бы в food_clarify и получил карточку «еда
+        # или опечатка» вместо честного отказа.
+        from apps.consent.diary_gate import (
+            CONSENT_REQUIRED,
+            FOOD_DIARY_CONSENT_REQUIRED,
+            diary_write_refusal,
+        )
+
+        reason = diary_write_refusal(context.bot_user)
+        if reason == CONSENT_REQUIRED:
             from apps.skills.welcome.skill import consent_offer_action_data
 
             return SkillResult(
                 reply_text=CONSENT_TEXT,
                 action_data=consent_offer_action_data("water"),
                 meta={"reply_kind": "water_consent_required"},
+            )
+        if reason == FOOD_DIARY_CONSENT_REQUIRED:
+            return SkillResult(
+                reply_text=DIARY_CONSENT_REQUIRED_TEXT,
+                meta={"reply_kind": "water_diary_consent_required"},
             )
 
         external_id = external_user_id_for(context.bot_user)
