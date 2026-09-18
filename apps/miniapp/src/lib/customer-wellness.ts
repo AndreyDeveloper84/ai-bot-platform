@@ -290,7 +290,7 @@ export interface RecentActivity {
 
 // ---------------------------------------------------------------------------
 // Production honesty rule (`lib/feature-flags.ts`): NOTHING fake in
-// prod. A stub that shipped to a real customer would show them «Анна»,
+// prod. A stub that shipped to a real customer would show them «Клиент»,
 // 1240 kcal they never ate and a massage they never booked — so the
 // stub blobs below are reachable ONLY from a dev build, and only when
 // `?stub=` names a variant. The screen-level gate that used to hide
@@ -348,7 +348,7 @@ const DEFAULT_TODAY: WellnessToday = {
   water_glasses_eaten: 4,
   water_glasses_target: 8,
   active_goals: [{ title: "Меньше стресса", week_num: 3 }],
-  display_name: "Анна",
+  display_name: "Клиент",
   day_pattern_hint: "morning_good_progress",
 };
 
@@ -357,7 +357,7 @@ const DEFAULT_ACTIVITY: RecentActivity = {
     date_human: "Завтра · пт · 16:00",
     service_name: "Массаж лимфодренаж",
     duration_min: 60,
-    master_name: "Ирина",
+    master_name: "Мастер",
     salon_name: "Формула тела",
     address: "ул. Тверская 12",
     booking_id: "booking-stub-001",
@@ -387,7 +387,7 @@ const EMPTY_TODAY: WellnessToday = {
   // та же выдуманная восьмёрка, что и на бэкенде, и стаб «подтверждал»
   // константу вместо того, чтобы её ловить.
   active_goals: [],
-  display_name: "Анна",
+  display_name: "Клиент",
   day_pattern_hint: "morning_no_logs",
 };
 
@@ -406,7 +406,7 @@ const PARTIAL_TODAY: WellnessToday = {
   // water_glasses_target omitted — тот же холодный старт.
   // active_goals omitted — the goal layer was unreachable. Exercises
   // the third state: neutral label, never «Выбери цель» (DRF-1476).
-  display_name: "Анна",
+  display_name: "Клиент",
   // No day_pattern_hint → falls back to «fallback» template
 };
 

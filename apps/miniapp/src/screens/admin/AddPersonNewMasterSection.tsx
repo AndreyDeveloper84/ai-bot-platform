@@ -501,7 +501,7 @@ export function AddPersonNewMasterSection({ me, switcher }: Props) {
               setFieldErrors((prev) => ({ ...prev, name: undefined }));
             }
           }}
-          placeholder="Анна Петрова"
+          placeholder="Имя и фамилия мастера"
           maxLength={80}
           className="admin-search-input"
           aria-invalid={Boolean(fieldErrors.name)}
