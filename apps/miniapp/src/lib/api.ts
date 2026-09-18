@@ -45,7 +45,12 @@ export async function requestWithStatus<T>(
   if (initData) headers.set("Authorization", `MaxInitData ${initData}`);
   applyDevBypassHeaders(headers);
   applySalonChoiceHeader(headers);
-  if (init.body && !headers.has("Content-Type")) headers.set("Content-Type", "application/json");
+  // Multipart (DRF-2098 — фото еды) идёт `FormData`: заголовок пишет
+  // браузер вместе с boundary, и выставленный вручную `application/json`
+  // сломал бы разбор на сервере. То же правило — в `master-api.ts`.
+  if (init.body && !(init.body instanceof FormData) && !headers.has("Content-Type")) {
+    headers.set("Content-Type", "application/json");
+  }
 
   const res = await fetch(`${API_BASE}${path}`, { ...init, headers });
   if (!res.ok) {
