@@ -65,7 +65,7 @@ REQUIRED_ITEMS: tuple[str, ...] = ("services", "location", "hours", "profile")
 #: Куда ведёт каждый пункт — маршруты соло-поверхности (``App.tsx`` /solo/*).
 DEEP_LINKS: dict[str, str] = {
     "services": "/solo/services",
-    "location": "/solo/settings",
+    "location": "/solo/place",  # DRF-1811 (M19): экран 05 «Место работы»
     "hours": "/solo/working-hours",  # M25 (#1711): редактор часов, не журнал записей
     "profile": "/solo/profile",
 }

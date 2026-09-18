@@ -1216,6 +1216,193 @@ def _working_hours_refusal(exc: BookingBadRequestError) -> HttpResponse:
     return _error("schedule_unavailable", "Расписание сейчас недоступно.", 502)
 
 
+# --- /service-locations, /geocoding/suggest (DRF-1811, M19) -----------------
+#
+# Место работы соло-мастера (макет 5). Всё живёт в каталоге (M11, #502) — бот
+# не хранит ни места, ни зоны выезда; ответ каждой ручки — readback каталога
+# ПОСЛЕ записи, не эхо запроса. Проверяет ввод каталог: лишнее поле,
+# ``tenant_id`` или ``status`` он отвергает 400 по имени, второе место —
+# 409 ``place_already_set``; здесь коды каталога отдаются экрану как есть,
+# чтобы отказ читался по имени, а не «что-то не так».
+
+#: Отказы каталога, которые экран показывает по имени (M11, tenants/master_places.py).
+_LOCATION_REFUSALS: dict[str, str] = {
+    "salon_place_owner_managed": "Место работы мастера салона ведёт владелец салона.",
+    "no_workspace_tenant": "У профиля ещё нет рабочего пространства — привязку выполнит оператор.",
+    "place_already_set": "Место уже указано — измените его, а не добавляйте второе.",
+    "place_outside_workspace": "Это место не из вашего рабочего пространства.",
+    "area_already_set": "Зона выезда уже указана — измените её.",
+}
+
+
+def _location_refusal(exc: BookingBadRequestError) -> HttpResponse:
+    """Отказ каталога → ответ экрану тем же именем; 5xx сюда не приходит."""
+    if exc.status_code == 403:
+        return _error(
+            "not_linked",
+            "Профиль ещё не связан с каталогом — сохранить место пока некуда.",
+            403,
+        )
+    if exc.status_code == 404:
+        return _error("not_found", "Такого места или зоны у вас нет.", 404)
+    code = (exc.code or "").lower()
+    if exc.status_code == 409 and code in _LOCATION_REFUSALS:
+        return _error(code, _LOCATION_REFUSALS[code], 409)
+    if exc.status_code == 400:
+        # Текст каталога — про поле по имени (``details``); экрану — как есть.
+        detail = ""
+        if isinstance(exc.details, dict):
+            detail = str(exc.details.get("detail") or exc.details.get("field") or "")
+        return _error("validation_error", detail or "Проверьте введённое.", 400)
+    return _error("locations_unavailable", "Место работы сейчас недоступно.", 502)
+
+
+def _read_json_object(request: HttpRequest) -> dict[str, Any] | HttpResponse:
+    try:
+        body = json.loads(request.body or b"{}")
+    except ValueError:
+        return _error("invalid_json", "Body must be JSON.", 400)
+    if not isinstance(body, dict):
+        return _error("validation_error", "Body must be a JSON object.", 400)
+    return body
+
+
+@csrf_exempt
+@require_http_methods(["GET", "POST"])
+@require_master_init_data
+@_catalog_profile_required
+def service_locations(request: HttpRequest) -> HttpResponse:
+    """Своё место и зоны выезда — чтение и создание (макет 5, кадры 5.1–5.4).
+
+    ``GET`` → ``{specialist_id, city, places[], areas[]}`` каталога как есть:
+    у места — ``status`` (CONFIRMED / REVIEW_REQUIRED / INACTIVE), координаты
+    либо ``null``, ``shown_to_clients_after_publication`` — только при
+    CONFIRMED; у зоны — ``coverage`` (whole_city / later) и ``configured``.
+    ``POST`` → место (``kind`` + ``address``, ``label``, ``note_for_client``)
+    или зона (``kind=mobile`` + ``coverage``); ответ — readback.
+    """
+    master: CatalogMaster = request.master  # type: ignore[attr-defined]
+    bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
+    actor = external_user_id_for(bot_user)
+    client = get_ayla_booking_client()
+
+    if request.method == "GET":
+        try:
+            data = client.get_service_locations(
+                specialist_id=catalog_specialist_id(master), external_user_id=actor
+            )
+        except BookingBadRequestError as exc:
+            return _location_refusal(exc)
+        except BookingUnavailableError:
+            return _error("locations_unavailable", "Место работы сейчас недоступно.", 503)
+        return JsonResponse(_locations_payload(data))
+
+    body = _read_json_object(request)
+    if isinstance(body, HttpResponse):
+        return body
+    try:
+        data = client.create_service_location(
+            specialist_id=catalog_specialist_id(master), external_user_id=actor, fields=body
+        )
+    except BookingBadRequestError as exc:
+        return _location_refusal(exc)
+    except BookingUnavailableError:
+        return _error("locations_unavailable", "Место работы сейчас недоступно.", 503)
+    return JsonResponse(_locations_payload(data), status=201)
+
+
+@csrf_exempt
+@require_http_methods(["PATCH"])
+@require_master_init_data
+@_catalog_profile_required
+def service_location_detail(request: HttpRequest, item_id: str) -> HttpResponse:
+    """Изменить поля своего места или охват своей зоны — ``PATCH``; ответ — readback."""
+    master: CatalogMaster = request.master  # type: ignore[attr-defined]
+    bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
+    actor = external_user_id_for(bot_user)
+    client = get_ayla_booking_client()
+
+    body = _read_json_object(request)
+    if isinstance(body, HttpResponse):
+        return body
+    try:
+        data = client.patch_service_location(
+            specialist_id=catalog_specialist_id(master),
+            external_user_id=actor,
+            item_id=str(item_id),
+            fields=body,
+        )
+    except BookingBadRequestError as exc:
+        return _location_refusal(exc)
+    except BookingUnavailableError:
+        return _error("locations_unavailable", "Место работы сейчас недоступно.", 503)
+    return JsonResponse(_locations_payload(data))
+
+
+def _locations_payload(data: Any) -> dict[str, Any]:
+    """Форма для экрана — ровно то, что прислал каталог, без дорисовки."""
+    if not isinstance(data, dict):
+        return {"specialist_id": None, "city": "", "places": [], "areas": []}
+    return {
+        "specialist_id": data.get("specialist_id"),
+        "city": data.get("city") or "",
+        "places": [p for p in (data.get("places") or []) if isinstance(p, dict)],
+        "areas": [a for a in (data.get("areas") or []) if isinstance(a, dict)],
+    }
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+@require_master_init_data
+@_catalog_profile_required
+def address_suggest(request: HttpRequest) -> HttpResponse:
+    """Подсказки адреса (M12a, #476) — ``POST`` с телом ``{"q": "..."}``.
+
+    Строка адреса — в теле, не в URL, и не в логе: это адрес мастера, часто
+    домашний. Когда геокодер не настроен (стенд пилота: ключ пуст) или лёг,
+    каталог отвечает 503 — здесь это ``{"available": false, "reason": …,
+    "suggestions": []}`` с тем же 503, и экран падает в ручной ввод. Не 500
+    и не выключатель клиента бронирования (см. ``suggest_address`` клиента).
+    """
+    master: CatalogMaster = request.master  # type: ignore[attr-defined]
+    bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
+    actor = external_user_id_for(bot_user)
+    client = get_ayla_booking_client()
+
+    body = _read_json_object(request)
+    if isinstance(body, HttpResponse):
+        return body
+    q = body.get("q")
+    if not isinstance(q, str) or not q.strip():
+        return _error("validation_error", "q is required.", 400)
+    try:
+        data = client.suggest_address(
+            specialist_id=catalog_specialist_id(master), external_user_id=actor, q=q.strip()
+        )
+    except BookingBadRequestError as exc:
+        return _location_refusal(exc)
+    except BookingUnavailableError:
+        return JsonResponse(
+            {"available": False, "reason": "unavailable", "suggestions": []}, status=503
+        )
+    if not data.get("available"):
+        return JsonResponse(
+            {"available": False, "reason": data.get("reason"), "suggestions": []},
+            status=503 if data.get("reason") != "no_city" else 409,
+        )
+    return JsonResponse(
+        {
+            "available": True,
+            "city": data.get("city"),
+            "suggestions": [
+                {"value": s.get("value"), "unrestricted_value": s.get("unrestricted_value")}
+                for s in data.get("suggestions", [])
+                if isinstance(s, dict)
+            ],
+        }
+    )
+
+
 # --- /canon-gap-requests (DRF-1802, M10) ----------------------------------
 
 
