@@ -56,13 +56,24 @@ Execution details:
   wrapper's sync scope after ``asyncio.run`` returns — the same shape
   as ``show_masters`` (ai-core dispatchers stay I/O-free).
 - Free-text tools run the skills' own parsers rather than teaching the
-  model the beverage/food grammars. ``log_water`` and
-  ``clarify_food_entry`` are executed on the phrase the MODEL passed —
-  its normalisation («и водички дёрнул стакан» → «стакан воды») is what
-  those grammars can read. ``health_screening`` is executed on the
-  phrase the PERSON typed (DRF-1542): it has no grammar to normalise,
-  only a symptom classifier, and a paraphrased red flag would decay to
-  soft pain. See :func:`execute_nutrition_tool`.
+  model the beverage/food grammars. ``log_water`` is executed on the
+  phrase the MODEL passed — its normalisation («и водички дёрнул
+  стакан» → «стакан воды») is what the beverage grammar can read.
+  ``health_screening`` is executed on the phrase the PERSON typed
+  (DRF-1542): it has no grammar to normalise, only a symptom
+  classifier, and a paraphrased red flag would decay to soft pain.
+  ``clarify_food_entry`` is executed on the PERSON's phrase too
+  (DRF-2078): the phrase it remembers is what «📔 В дневник» later
+  estimates, and the model's paraphrase drops the one thing the food
+  grammar cannot recover — the portion («борщ 250» → «борщ» → 100 g).
+  See :func:`execute_nutrition_tool`.
+
+- **A dish with a portion skips the model altogether (DRF-2078)** —
+  :func:`_try_handle_food_with_grams` claims «борщ 250» / «гречка
+  200 г» deterministically and shows the estimate card straight away:
+  one confirmation instead of «это про еду?» → tap → card → confirm.
+  Drinks are never claimed there (DRF-819: «кофе 200 мл» stays with
+  the model and ``log_water``).
 """
 
 from __future__ import annotations
@@ -331,20 +342,53 @@ def execute_nutrition_tool(
     if not text:
         return None
 
+    if name == "clarify_food_entry":
+        # DRF-2078 — фраза еды тоже берётся у ЧЕЛОВЕКА, и вот почему это
+        # не то же, что у `log_water`. Навык еды на этом ходу ничего не
+        # разбирает: он ЗАПОМИНАЕТ фразу (`text_entry.remember_source`) и
+        # рисует карточку «Это про еду?», а разбирать её будет тап
+        # «📔 В дневник» на следующем ходу. Пересказ модели («борщ 250» →
+        # «борщ») грамматике не помогает — наполнители парсер снимает
+        # сам, — а порцию теряет, и потерянное не восстановить: тап несёт
+        # только payload. Диалог владельца: «борщ 250» → «В дневник» →
+        # запись на 100 г. До этого тикета докстринг модуля защищал
+        # пересказ как «нормализацию, которую грамматика может прочесть»;
+        # для еды это было верно про грамматику и ложно про число.
+        #
+        # Пересказ модели остаётся ТОЛЬКО запасным входом — ход без текста
+        # (одно фото с подписью в аргументе инструмента): там фразы
+        # человека нет, и терять нечего.
+        human_text = str(message_text or "").strip()
+        if human_text:
+            # Без вето `skill.matches`: его детектор (`looks_like_food_drink`,
+            # ≤30 символов) — дешёвая ДО-модельная эвристика «похоже на еду».
+            # Здесь модель уже решила, что это еда, и вето сказало бы «нет»
+            # ровно длинным фразам («на обед съела борщ 250 и котлету») —
+            # тем, где пересказ терял бы больше всего. Что из фразы
+            # читается, решит тап: `parse_food_text` не разберёт — спросит
+            # «что было» словами, а не подставит 100 г.
+            context = _build_context(
+                message_text=human_text,
+                bot_user=bot_user,
+                conversation=conversation,
+                trace_id=trace_id,
+            )
+            return _run_skill(skill, context)
+
     if name == "health_screening":
         # DRF-1542 — половина Б. Скрининг судится по словам ЧЕЛОВЕКА, а
         # не по пересказу модели, и по ним же исполняется.
         #
-        # Сужено ровно до этого инструмента, намеренно. `log_water` и
-        # `clarify_food_entry` разбирают ГРАММАТИКУ («стакан воды»,
-        # «борщ 300г»), и там пересказ модели — нормализация, которая
-        # парсеру помогает: человек говорит «и водички дёрнул стакан»,
-        # модель отдаёт «стакан воды», парсер матчит второе и не матчит
-        # первое. Подставить им реплику человека значило бы сузить их
-        # там, где они работают. У скрининга грамматики нет — есть
-        # классификатор симптомов, и он обязан читать симптом из уст
-        # человека: перефразированный моделью красный флаг («онемела
-        # рука» → «болит рука») деградировал бы до SOFT.
+        # `log_water` остаётся на пересказе модели, намеренно: он
+        # разбирает ГРАММАТИКУ напитка («стакан воды»), и там пересказ —
+        # нормализация, которая парсеру помогает: человек говорит «и
+        # водички дёрнул стакан», модель отдаёт «стакан воды», парсер
+        # матчит второе и не матчит первое. Подставить ему реплику
+        # человека значило бы сузить его там, где он работает. У
+        # скрининга грамматики нет — есть классификатор симптомов, и он
+        # обязан читать симптом из уст человека: перефразированный
+        # моделью красный флаг («онемела рука» → «болит рука»)
+        # деградировал бы до SOFT.
         human_text = str(message_text or "").strip()
         if not human_text:
             logger.info(
@@ -765,8 +809,18 @@ def try_handle_structured_nutrition_turn(
         # Placed AFTER the structured check so an active anketa FSM keeps
         # first claim on the turn: mid-anketa, «что я ел» is an answer to the
         # question on screen before it is a request for the diary.
-        return _try_handle_diary_request(
+        diary = _try_handle_diary_request(
             text=text, has_attachments=has_attachments, bot_user=bot_user, trace_id=trace_id
+        )
+        if diary is not None:
+            return diary
+        # DRF-2078 — «борщ 250»: блюдо с порцией не нуждается в модели.
+        return _try_handle_food_with_grams(
+            text=text,
+            has_attachments=has_attachments,
+            bot_user=bot_user,
+            conversation=conversation,
+            trace_id=trace_id,
         )
 
     context = _build_context(
@@ -857,3 +911,83 @@ def _try_handle_diary_request(
         action_data=reply.action_data,
         meta={"reply_kind": "nutrition_diary"},
     )
+
+
+#: DRF-2078 — верхняя граница фразы для ярлыка «блюдо + порция». Длиннее —
+#: это рассказ, а не запись, и он идёт модели, как и раньше. Та же
+#: величина, что у детектора ``looks_like_food_drink`` (``hints._MAX_LEN``),
+#: не импорт: два детектора с одним числом — совпадение, а не связь.
+_FOOD_WITH_GRAMS_MAX_LEN = 30
+
+
+def _try_handle_food_with_grams(
+    *,
+    text: str,
+    has_attachments: bool,
+    bot_user: Any,
+    conversation: Any,
+    trace_id: str,
+) -> SkillResult | None:
+    """«борщ 250» → карточка оценки сразу, детерминированно. ``None`` — не наше.
+
+    Диалог владельца (DRF-2078): «борщ 250» → модель → «Это про еду?» → «В
+    дневник» → оценка → подтверждение. Два подтверждения, и на первом же
+    шаге пересказ модели терял порцию. Блюдо с НАЗВАННОЙ порцией не
+    нуждается ни в вопросе «это еда?», ни в модели: человек уже сказал и
+    что, и сколько. Ярлык ведёт прямо к шагу 3 §109 — «Я распознала так» с
+    одним подтверждением (``cb:food:text_log``), запись только после него.
+
+    Границы, каждая — намеренно:
+
+    * только с порцией: «борщ» без числа идёт модели и получает карточку
+      «Это про еду?» как раньше — ярлык не отменяет защиту от опечаток
+      (DRF-358), он обходит её там, где число делает опечатку невероятной;
+    * напитки не берутся: «кофе 200 мл» — ``log_water`` через модель
+      (DRF-819), и грамматика напитков (``parse_beverage``) решает это ДО
+      нас; иначе ярлык завёл бы кофе в дневник еды;
+    * не в :func:`is_structured_nutrition_turn`: свободный текст остаётся
+      неструктурным для внешнего предиката (сторож «free text never
+      claimed»), ярлык живёт рядом с чтением дневника (DRF-1302) — тот же
+      двухслойный приём;
+    * контур питания выключен — ``None``: ход уходит модели, где заглушку
+      даёт ``execute_nutrition_tool``; ярлык при выключенном флаге не
+      меняет ни строки поведения;
+    * с фото — не наше: подпись к фото читает сканер.
+
+    Никогда не бросает: отказ дневника не должен ломать глобальный ход —
+    как у чтения дневника, ход продолжается к модели.
+    """
+
+    if has_attachments:
+        return None
+    stripped = text.strip()
+    if not stripped or len(stripped) > _FOOD_WITH_GRAMS_MAX_LEN:
+        return None
+    if not _nutrition_enabled():
+        return None
+    try:
+        from apps.skills.food_clarify import text_entry
+        from apps.skills.water.parser import BeverageMatch, parse_beverage
+
+        parsed = text_entry.parse_food_text(stripped)
+        if parsed is None or parsed.grams is None:
+            return None
+        if isinstance(parse_beverage(stripped), BeverageMatch):
+            return None
+        context = _build_context(
+            message_text=stripped,
+            bot_user=bot_user,
+            conversation=conversation,
+            trace_id=trace_id,
+        )
+        with tenant_scope(get_global_bot_tenant()):
+            result = text_entry.show_estimate(context, parsed.dish, parsed.grams, corrected=False)
+    except Exception:  # noqa: BLE001 — nutrition must never break the global turn
+        logger.exception("orchestrator.nutrition_global.food_with_grams_failed trace=%s", trace_id)
+        return None
+    logger.info(
+        "orchestrator.nutrition_global.food_with_grams_shortcut kind=%s trace=%s",
+        (result.meta or {}).get("reply_kind"),
+        trace_id,
+    )
+    return result
