@@ -209,6 +209,25 @@ class MealDeletion:
 
 
 @dataclass(frozen=True)
+class SavedMealRow:
+    """DRF-2092 (F12) — строка избранного, как её отдаёт ``internal/saved-meals/``.
+
+    Снимок на момент сохранения: порция в граммах и калории/БЖУ; ссылки на
+    справочник нет — «то, что я сохранил» не меняется вместе с ним.
+    """
+
+    meal_id: str
+    dish_name: str
+    portion_g: float
+    calories: float
+    protein_g: float | None
+    fat_g: float | None
+    carbs_g: float | None
+    source_food_log_id: str | None
+    created_at: str | None
+
+
+@dataclass(frozen=True)
 class DishEstimate:
     """Оценка блюда БЕЗ записи — ``internal/food-estimate/`` (DRF-1837, §109).
 
@@ -1057,6 +1076,118 @@ class NutritionClient:
         raise self._meal_edit_refusal(resp, now=now)
 
     # ─── summary ──────────────────────────────────────────────────────────
+
+    # ─── избранные блюда — DRF-2092 (F12) ────────────────────────────────
+
+    _SAVED_MEALS_PATH = "nutrition/internal/saved-meals/"
+
+    @staticmethod
+    def _saved_meal_row(body: Any) -> SavedMealRow:
+        if not isinstance(body, dict):
+            raise NutritionUnavailableError("saved_meal_malformed_body")
+
+        def _num(key: str) -> float | None:
+            value = body.get(key)
+            return (
+                float(value)
+                if isinstance(value, (int, float)) and not isinstance(value, bool)
+                else None
+            )
+
+        return SavedMealRow(
+            meal_id=str(body.get("id") or ""),
+            dish_name=str(body.get("dish_name") or ""),
+            portion_g=_num("portion_g") or 0.0,
+            calories=_num("calories") or 0.0,
+            protein_g=_num("protein_g"),
+            fat_g=_num("fat_g"),
+            carbs_g=_num("carbs_g"),
+            source_food_log_id=(
+                str(body["source_food_log_id"]) if body.get("source_food_log_id") else None
+            ),
+            created_at=str(body["created_at"]) if body.get("created_at") else None,
+        )
+
+    async def list_saved_meals(self, *, external_user_id: str) -> list[SavedMealRow]:
+        """GET ``internal/saved-meals/`` — живые строки субъекта, новые сверху.
+
+        Пустой список — «избранного нет»; тело не разобрать — «каталог не
+        ответил» (:class:`NutritionUnavailableError`): спутать их значит
+        показать пустой экран вместо ошибки.
+        """
+        resp, now = await self._meal_edit_call(
+            "GET", self._SAVED_MEALS_PATH, external_user_id=external_user_id
+        )
+        if resp.status_code != 200:
+            raise self._meal_edit_refusal(resp, now=now)
+        self._circuit.record_success()
+        try:
+            data = resp.json().get("data")
+        except ValueError:
+            data = None
+        items = data.get("items") if isinstance(data, dict) else None
+        if not isinstance(items, list):
+            raise NutritionUnavailableError("saved_meals_malformed_body")
+        return [self._saved_meal_row(item) for item in items]
+
+    async def save_meal(
+        self,
+        *,
+        external_user_id: str,
+        food_log_id: str | None = None,
+        dish_name: str | None = None,
+        portion_g: float | None = None,
+        calories: float | None = None,
+        protein_g: float | None = None,
+        fat_g: float | None = None,
+        carbs_g: float | None = None,
+    ) -> tuple[SavedMealRow, bool]:
+        """POST ``internal/saved-meals/`` — из записи (``food_log_id``) или снимком.
+
+        Возвращает ``(строка, создана)``: каталог отвечает 201 на новую и 200
+        на уже сохранённую (то же блюдо с той же порцией — не дубль).
+        Raises :class:`MealNotFoundError` — ``food_log_id`` не у этого субъекта.
+        """
+        body: dict[str, Any]
+        if food_log_id is not None:
+            body = {"food_log_id": food_log_id}
+        else:
+            body = {"dish_name": dish_name, "portion_g": portion_g}
+            for key, value in (
+                ("calories", calories),
+                ("protein_g", protein_g),
+                ("fat_g", fat_g),
+                ("carbs_g", carbs_g),
+            ):
+                if value is not None:
+                    body[key] = value
+        resp, now = await self._meal_edit_call(
+            "POST", self._SAVED_MEALS_PATH, external_user_id=external_user_id, body=body
+        )
+        if resp.status_code not in (200, 201):
+            raise self._meal_edit_refusal(resp, now=now)
+        self._circuit.record_success()
+        try:
+            data = resp.json().get("data")
+        except ValueError:
+            data = None
+        return self._saved_meal_row(data), resp.status_code == 201
+
+    async def delete_saved_meal(self, *, external_user_id: str, meal_id: str) -> str:
+        """DELETE ``internal/saved-meals/{id}/`` — скрыть; чужая/скрытая — 404."""
+        resp, now = await self._meal_edit_call(
+            "DELETE", f"{self._SAVED_MEALS_PATH}{meal_id}/", external_user_id=external_user_id
+        )
+        if resp.status_code != 200:
+            raise self._meal_edit_refusal(resp, now=now)
+        self._circuit.record_success()
+        try:
+            data = resp.json().get("data")
+        except ValueError:
+            data = None
+        if not isinstance(data, dict):
+            raise NutritionUncertainOutcomeError("http_200_malformed_body")
+        return str(data.get("id") or meal_id)
 
     async def daily_summary(
         self,
