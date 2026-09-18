@@ -1,8 +1,8 @@
-"""Nutrition anketa FSM — 6 steps, screening before anthropometry.
+"""Nutrition anketa FSM — 7 steps, screening before anthropometry.
 
 Walks the user through
-``gender → age → screening → height → weight → goal``, then signals
-COMPLETE. The skill (``skill.py``) takes the completed answers, POSTs to
+``gender → age → screening → height → weight → activity → goal``, then
+signals COMPLETE. The skill (``skill.py``) takes the completed answers, POSTs to
 Ayla ``upsert_profile``, and renders the targets card.
 
 ## Why screening sits third, before height and weight
@@ -30,6 +30,19 @@ into three yes/no turns would read as an interrogation and buy nothing:
 a person with two of them still lands in the same branch. One
 single-select question, with an explicit "none of these" option, is the
 same decision with a third of the intrusion.
+
+## Activity sits after weight, before goal (DRF-2102)
+
+The four coefficients are the owner's table (decision of 2026-09-09,
+«Коэффициенты активности»: 1.2 / 1.375 / 1.55 / 1.725) — an input of
+the calculation, a multiplier on REE, so it is asked with the other
+inputs and before the goal, which stays last and closes the flow. Until
+this step the skill sent ``1.4`` to everyone — a number outside the
+approved set, which the catalogue then rounded to the nearest one. A
+fifth answer, «Не знаю», is a skip: the skill sends 1.375 and marks
+``activity`` in ``_skipped_fields`` so the catalogue keeps
+``health_flags.activity_skipped`` — the number is a default, and it says
+so. See :data:`ACTIVITY_SKIP`.
 
 ## What is deliberately NOT here yet
 
@@ -82,13 +95,42 @@ _SCREENING_CHOICES = {
 #: The one screening answer that lets the calculation proceed.
 SCREENING_CLEAR = "none"
 
+#: Activity answers — the labels are the owner's table verbatim and in its
+#: order (``docs/decisions/AYLA_NUTRITION_TARGETS_ARCHITECTURE_DECISION.md``,
+#: «Коэффициенты активности»); «Не знаю» is the skip and comes last.
+_ACTIVITY_CHOICES = {
+    "sedentary": "Почти нет активности",
+    "light": "Лёгкая активность",
+    "moderate": "Средняя активность",
+    "high": "Высокая активность",
+    "unknown": "Не знаю",
+}
+
+#: slug → coefficient, the four values of §85. The catalogue keeps the same
+#: set as ``ACTIVITY_COEFFICIENTS`` in ``nutrition_profile_service``; it is
+#: not importable from here, so the mirror is held by the owner decision
+#: and guarded in ``tests/test_activity_step_2102.py``.
+ACTIVITY_COEFFICIENTS: dict[str, float] = {
+    "sedentary": 1.2,
+    "light": 1.375,
+    "moderate": 1.55,
+    "high": 1.725,
+}
+
+#: The skip answer. Not a coefficient: the skill substitutes
+#: :data:`ACTIVITY_DEFAULT_ON_SKIP` and names the skip in ``_skipped_fields``.
+ACTIVITY_SKIP = "unknown"
+
+#: What a skipped activity is sent as (DRF-2102, the ticket's default).
+ACTIVITY_DEFAULT_ON_SKIP = 1.375
+
 #: Below this the calculation is not offered (§7.1). The diary stays.
 ADULT_AGE = 18
 
 
 @dataclass
 class AnketaFSM(SkillFSM):
-    """6-step nutrition profile FSM. Screening precedes anthropometry."""
+    """7-step nutrition profile FSM. Screening precedes anthropometry."""
 
     STEPS: ClassVar[dict[str, _Step]] = {
         "gender": _Step(
@@ -111,7 +153,7 @@ class AnketaFSM(SkillFSM):
             next="screening",
         ),
         "screening": _Step(
-            # Third of six, and the prompt says so. It used to open with
+            # Third of seven, and the prompt says so. It used to open with
             # «И последнее перед расчётом» — the owner walked the live
             # path 12.09 01:33 and got height, weight and goal AFTER «the
             # last question». A prompt that names its place wrongly is
@@ -135,6 +177,14 @@ class AnketaFSM(SkillFSM):
         "weight": _Step(
             prompt="Какой текущий вес в килограммах?",
             validator=validate_int_range(30, 200, name="вес"),
+            next="activity",
+        ),
+        "activity": _Step(
+            prompt=(
+                "Сколько движения в твоём обычном дне? От этого зависит "
+                "множитель к обмену веществ — а с ним и ориентир."
+            ),
+            validator=validate_choice(_ACTIVITY_CHOICES),
             next="goal",
         ),
         "goal": _Step(
@@ -157,6 +207,7 @@ class AnketaFSM(SkillFSM):
 GENDER_CHOICES = _GENDER_CHOICES
 GOAL_CHOICES = _GOAL_CHOICES
 SCREENING_CHOICES = _SCREENING_CHOICES
+ACTIVITY_CHOICES = _ACTIVITY_CHOICES
 
 
 def choice_keyboard_options(step: str) -> list[tuple[str, str]]:
@@ -177,8 +228,12 @@ def choice_keyboard_options(step: str) -> list[tuple[str, str]]:
         # the conditions above it would make the neutral path the one you
         # scroll past.
         return [(label, slug) for slug, label in _SCREENING_CHOICES.items()]
+    if step == "activity":
+        # The owner's order, «Не знаю» last: the skip is an escape, not a
+        # level, and it must not read as the fifth rung of the ladder.
+        return [(label, slug) for slug, label in _ACTIVITY_CHOICES.items()]
     raise KeyError(f"step {step!r} has no choice keyboard (text-input step)")
 
 
-CHOICE_STEPS = frozenset({"gender", "goal", "screening"})
+CHOICE_STEPS = frozenset({"gender", "goal", "screening", "activity"})
 """Steps that present a choice keyboard. Text-input steps are the complement."""

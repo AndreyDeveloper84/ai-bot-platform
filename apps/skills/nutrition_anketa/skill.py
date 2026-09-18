@@ -1,7 +1,8 @@
-"""Nutrition anketa skill — 5-step nutrition profile FSM.
+"""Nutrition anketa skill — 7-step nutrition profile FSM.
 
 Sprint 9 / P3 (DRF-820). Largest port in Sprint 9: walks the user
-through gender → age → height → weight → goal, persists state in
+through gender → age → screening → height → weight → activity → goal
+(see ``fsm.py`` for why in that order), persists state in
 ``Conversation.skill_state['nutrition_anketa']`` (via D3), POSTs the
 result to Ayla ``upsert_profile``, and renders the computed norms.
 
@@ -34,8 +35,9 @@ pipeline does NOT auto-persist (per D3 design — explicit writers).
 
 On COMPLETE, the skill:
 
-1. Calls Ayla ``upsert_profile`` with the answers + ``activity_coefficient=1.4``
-   (sedentary default; Phase 1 will collect activity as a separate step).
+1. Calls Ayla ``upsert_profile`` with the answers; ``activity_coefficient``
+   is the person's own answer (DRF-2102, the four values of §85), or
+   1.375 named as a skip in ``_skipped_fields`` when they chose «Не знаю».
 2. Reads the response's ``norms`` envelope (kcal / protein / fat /
    carbs / water_ml).
 3. Renders a "норму посчитала" summary.
@@ -83,10 +85,11 @@ Deferred to Phase 1 / a follow-up Sprint 9 ticket:
 * BMI-ladder override response handling ("Учла важное" override card).
 * Allergies / meds (these belong with the Tier-B health screening
   port — see DRF-824 scope note).
-* Activity step — defaulted to ``1.4`` (sedentary). Phase 1 makes it a
-  step with 5 levels. Note ``1.4`` is not one of the four coefficients
-  the owner approved (1.2 / 1.375 / 1.55 / 1.725); the calculation
-  service change carries that.
+* ~~Activity step~~ — landed with DRF-2102 (four levels + «Не знаю»).
+  Until then every profile carried ``1.4``, a value outside the approved
+  set; the catalogue still normalises such legacy values (#508) and its
+  schema default is still 1.4 — removing that default is a separate
+  ticket with a migration.
 * Consent screen before the weight question. The owner requires a
   separate consent for weight; whether the same consent covers the
   screening answers is open (question 1 in
@@ -116,6 +119,10 @@ from apps.orchestrator.ui.keyboards import anketa_choice_keyboard, parse_callbac
 from apps.skills.base import SkillContext, SkillResult
 from apps.skills.fsm import Completed, NextStep
 from apps.skills.nutrition_anketa.fsm import (
+    ACTIVITY_CHOICES,
+    ACTIVITY_COEFFICIENTS,
+    ACTIVITY_DEFAULT_ON_SKIP,
+    ACTIVITY_SKIP,
     ADULT_AGE,
     CHOICE_STEPS,
     SCREENING_CLEAR,
@@ -474,6 +481,16 @@ class NutritionAnketaSkill:
 
         # Completed → POST to Ayla.
         assert isinstance(result, Completed)
+        if "activity" not in result.answers:
+            # DRF-2102: a state serialised before the activity step existed
+            # (it stood on «goal» with no activity answer). The number is
+            # asked, not assumed — no default is written for a person who
+            # was never asked; the goal is asked again after it, that is
+            # the whole cost. Guards the mechanism; whether such states
+            # exist on the pilot is not claimed here.
+            step_result = fsm.goto("activity")
+            self._save_state(context, fsm)
+            return self._render_step(fsm.current_step, step_result.prompt)
         return self._on_complete(context, result.answers)
 
     # ─── stop scenarios (§7.1) ───────────────────────────────────────────
@@ -903,8 +920,13 @@ class NutritionAnketaSkill:
     def _build_ayla_payload(self, answers: dict, attestation: "ConsentAttestation") -> dict:
         """Map FSM answers to the Ayla profile schema.
 
-        Activity is hardcoded to ``1.4`` (sedentary) for Sprint 9.
-        Phase 1 collects activity as a step.
+        Активность — ответ человека (DRF-2102): один из четырёх
+        коэффициентов §85 по slug. «Не знаю» — пропуск: уходит
+        ``ACTIVITY_DEFAULT_ON_SKIP`` и ``_skipped_fields: ["activity"]``,
+        из которого каталог делает ``health_flags.activity_skipped`` —
+        число-умолчание помечено как умолчание, а не выдано за ответ.
+        Отсутствие ответа — ``KeyError``, как у остальных полей: тихого
+        умолчания за человека здесь нет (см. ``_on_transition``).
 
         Утверждение о согласии — обязательный аргумент, не флаг и не
         ``None`` по умолчанию: все шесть полей ниже закрыты границей
@@ -913,14 +935,21 @@ class NutritionAnketaSkill:
         """
         from apps.consent.personal_calculation import attach as attach_consent
 
+        activity = answers["activity"]
         body = {
             "gender": answers["gender"],
             "age": int(answers["age"]),
             "height_cm": int(answers["height"]),
             "weight_kg": int(answers["weight"]),
             "goal": answers["goal"],
-            "activity_coefficient": 1.4,
+            "activity_coefficient": (
+                ACTIVITY_DEFAULT_ON_SKIP
+                if activity == ACTIVITY_SKIP
+                else ACTIVITY_COEFFICIENTS[activity]
+            ),
         }
+        if activity == ACTIVITY_SKIP:
+            body["_skipped_fields"] = ["activity"]
         return attach_consent(body, attestation)
 
 
@@ -1048,6 +1077,12 @@ _GOAL_LABELS: dict[str, str] = {
     "tone": "подтянуть",
 }
 _PACE_LABELS: dict[str, str] = {"gentle": "мягкий", "moderate": "средний"}
+#: Число из снимка → слово, которое человек выбирал (DRF-2102). Значение
+#: вне таблицы (1.4 у профилей, посчитанных до шага) печатается числом.
+_ACTIVITY_LABELS: dict[float, str] = {
+    coefficient: ACTIVITY_CHOICES[slug].lower()
+    for slug, coefficient in ACTIVITY_COEFFICIENTS.items()
+}
 
 
 def _method_and_inputs_line(profile) -> str:
@@ -1084,7 +1119,9 @@ def _method_and_inputs_line(profile) -> str:
         weight_text = f"{weight:g}" if isinstance(weight, (int, float)) else str(weight)
         facts.append(f"вес — {weight_text} кг")
     if snapshot.get("activity_coefficient") is not None:
-        facts.append(f"активность — {snapshot['activity_coefficient']}")
+        activity = snapshot["activity_coefficient"]
+        label = _ACTIVITY_LABELS.get(activity) if isinstance(activity, (int, float)) else None
+        facts.append(f"активность — {label} ({activity})" if label else f"активность — {activity}")
     goal = snapshot.get("goal")
     if goal:
         facts.append(f"цель — {_GOAL_LABELS.get(str(goal), str(goal))}")

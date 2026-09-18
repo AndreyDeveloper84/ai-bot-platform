@@ -1,6 +1,6 @@
 """NutritionAnketaSkill end-to-end tests (DRF-820 / Sprint 9 / P3).
 
-Covers the full 5-step walk plus resume, edit, choice-callback decoding,
+Covers the full 7-step walk plus resume, edit, choice-callback decoding,
 validation re-asks, and Ayla error paths. The FSM helper has its own
 unit tests; this file targets the skill-level integration.
 """
@@ -152,7 +152,7 @@ class TestMatches:
 
 
 class TestFullWalk:
-    def test_full_5_step_completion_posts_to_ayla(self) -> None:
+    def test_full_7_step_completion_posts_to_ayla(self) -> None:
         """Simulate the entire flow turn-by-turn. Same conversation
         object is mutated across turns; that's how the platform
         pipeline runs in practice (one conversation per chain)."""
@@ -206,11 +206,15 @@ class TestFullWalk:
             r5 = skill.handle(_ctx("168"))
             assert r5.action_type == "anketa_step_weight"
 
-            # Turn 6: weight.
+            # Turn 6: weight → activity (DRF-2102), not goal.
             r6w = skill.handle(_ctx("62"))
-            assert r6w.action_type == "anketa_step_goal"
+            assert r6w.action_type == "anketa_step_activity"
 
-            # Turn 7: goal → complete.
+            # Turn 7: activity via callback.
+            r7 = skill.handle(_ctx("cb:anketa:choice:activity:light"))
+            assert r7.action_type == "anketa_step_goal"
+
+            # Turn 8: goal → complete.
             r6 = skill.handle(_ctx("cb:anketa:choice:goal:maintain"))
             assert r6.action_type == "anketa_complete"
 
@@ -223,7 +227,7 @@ class TestFullWalk:
             "height_cm": 168,
             "weight_kg": 62,
             "goal": "maintain",
-            "activity_coefficient": 1.4,
+            "activity_coefficient": 1.375,
             # DRF-1658: утверждение о согласии в форме границы #324.
             "consent": {
                 "type": "personal_calculation",
@@ -300,6 +304,7 @@ class TestEdit:
                         "age": 28,
                         "height": 168,
                         "weight": 62,
+                        "activity": "light",
                     },
                     "is_complete": False,
                 }
@@ -329,6 +334,7 @@ class TestErrorPaths:
                         "age": 28,
                         "height": 168,
                         "weight": 62,
+                        "activity": "light",
                     },
                     "is_complete": False,
                 }
@@ -408,7 +414,15 @@ class TestScreeningQuestionSitsWhereItSays:
         ]
         assert liars == [], f"шаг назвал себя последним, но за ним есть шаг: {liars}"
         # POSITIVE: сторож смотрит на непустой набор шагов с известным порядком.
-        assert list(AnketaFSM.STEPS) == ["gender", "age", "screening", "height", "weight", "goal"]
+        assert list(AnketaFSM.STEPS) == [
+            "gender",
+            "age",
+            "screening",
+            "height",
+            "weight",
+            "activity",
+            "goal",
+        ]
 
     def test_screening_prompt_names_what_follows(self) -> None:
         from apps.skills.nutrition_anketa.fsm import AnketaFSM
@@ -767,7 +781,7 @@ class TestSummaryCardShowsMethodAndInputs:
             "возраст — 30",
             "рост — 168 см",
             "вес — 62 кг",
-            "активность — 1.375",
+            "активность — лёгкая активность (1.375)",
             "цель — поддерживать",
             "темп — средний",
         ):
