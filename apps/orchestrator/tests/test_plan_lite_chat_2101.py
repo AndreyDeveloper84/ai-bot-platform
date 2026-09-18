@@ -104,6 +104,8 @@ class TestMyPlanInChat:
         """В-5: только «N из M» — ни процента, ни «достигнута», ни «пропустил»."""
         result, _ = _turn("мой план", WellnessContext(has_plan=False, gated=True, plan_lite=PLAN))
         low = result.reply_text.lower()
+        # Присутствие раньше отсутствия: карточка с фактами «N из M» на месте.
+        assert "3 из 5" in low and "4 из 7" in low
         assert "%" not in low
         assert "достиг" not in low and "пропуст" not in low and "прогресс" not in low
 
@@ -144,5 +146,7 @@ class TestMenuIsUntouched:
         settings.PLAN_LITE_ENABLED = flag
         settings.MAX_BOT_WEB_APP = "aylabot"
         labels = [item.label for item in main_items(bot_user=_bot_user())]
+        # Присутствие раньше отсутствия: меню собрано, «Помощь» замыкает его.
+        assert "Помощь" in labels, labels
         assert "Мой план" not in labels, labels
         assert labels == [item.label for item in main_items(bot_user=_bot_user())]
