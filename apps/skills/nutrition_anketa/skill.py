@@ -1167,7 +1167,7 @@ _HEALTH_FACTOR_LABELS: dict[str, str] = {
 
 
 def _format_health_factor_refusal(names: list[str]) -> str:
-    """«Норму не считаю: при … Ayla индивидуальные ориентиры не рассчитывает».
+    """«Ориентиры не считаю: при … Ayla их не рассчитывает».
 
     Решение владельца 11.09.2026 §5.1: «При health-факторах Ayla не
     рассчитывает индивидуальную норму». Отказ назван по факту, без
@@ -1177,7 +1177,7 @@ def _format_health_factor_refusal(names: list[str]) -> str:
     labels = [_HEALTH_FACTOR_LABELS.get(n, n) for n in names]
     joined = ", ".join(labels)
     return (
-        f"Норму не считаю: при {joined} Ayla индивидуальные ориентиры не рассчитывает.\n"
+        f"Ориентиры не считаю: при {joined} Ayla их не рассчитывает.\n"
         "Дневник и вода работают как раньше — записывай, я всё сохраню."
     )
 
@@ -1189,8 +1189,8 @@ def _format_summary(profile) -> str:
     `{profile.<поле>}`, и ноль печатался как значение: «💧 Вода: 0 мл»,
     а у человека, не назвавшего вес, — ещё и «🔥 Калории: 0 ккал/день».
     Ноль ккал в сутки не бывает; такая карточка не «пустая», она ЛЖЁТ, и
-    лжёт в самом громком месте — сразу после «Готово, рассчитала твои
-    нормы».
+    лжёт в самом громком месте — сразу после «Готово, посчитала твои
+    ориентиры».
 
     С 09.09.2026 нолей в этих полях штатно много: владелец снял формулу
     воды `30 мл × вес` (§82) и подстановку медианы за пропущенные
@@ -1245,7 +1245,7 @@ def _format_summary(profile) -> str:
             "Дневных ориентиров пока не считаю."
         )
 
-    parts: list[str] = ["Готово, рассчитала твои нормы:"]
+    parts: list[str] = ["Готово, посчитала твои ориентиры:"]
     parts.append("\n".join(rows))
     method_line = _method_and_inputs_line(profile)
     if method_line:
@@ -1257,6 +1257,6 @@ def _format_summary(profile) -> str:
         # Ayla applied a safety override (pregnancy / eating-disorder /
         # BMI floor). Mention it gently — the override is the right call,
         # not a downgrade.
-        parts.append("Учла важное в анамнезе — нормы подобрала с поправкой на это.")
+        parts.append("Учла важное в анамнезе — ориентиры подобрала с поправкой на это.")
     parts.append("Теперь могу считать калории и БЖУ из фото блюд.")
     return "\n\n".join(parts)

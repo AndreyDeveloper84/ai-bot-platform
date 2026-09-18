@@ -249,7 +249,7 @@ def _render_goal_lines(goal: Any) -> list[str]:
     """Цель человека → строка промпта. ``[]``, когда цели нет.
 
     Цель стоит ПЕРВОЙ в блоке: она рамка, в которой читается всё
-    остальное. «Белок 62% от нормы» без цели — число ни о чём; с целью
+    остальное. «Белок 62% от ориентира» без цели — число ни о чём; с целью
     «больше энергии днём» — то, с чем модели разрешено связать вопрос.
 
     Формулировка берётся у человека дословно (``text``), а при её
@@ -314,7 +314,7 @@ def _render_lines(deficits: Any) -> list[str]:
 
     pct = _as_float(getattr(deficits, "protein_avg_pct_goal", None))
     if pct is not None:
-        lines.append(f"Белок: в среднем {pct:.0f}% от нормы.")
+        lines.append(f"Белок: в среднем {pct:.0f}% от ориентира.")
 
     streak = _clamp_days(getattr(deficits, "protein_low_streak_days", 0))
     if streak:

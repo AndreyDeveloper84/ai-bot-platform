@@ -300,7 +300,7 @@ class TestEveryNumberTraces:
         reply = render_diary(_bot_user("trace-4"))
 
         assert " из 128 " not in reply.text
-        assert "Норм пока нет" in reply.text
+        assert "Ориентиров пока нет" in reply.text
 
 
 # ─── the cleared profile says why (DRF-1623 N-b) ──────────────────────────
