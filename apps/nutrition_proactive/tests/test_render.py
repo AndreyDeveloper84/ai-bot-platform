@@ -85,7 +85,7 @@ class TestReportIsSubstantive:
 
     def test_a_clear_protein_shortfall_earns_a_remark(self) -> None:
         text = render.render_daily_report(summary(protein_g=40.0), water(), profile())
-        assert "Белка сегодня меньше нормы из профиля на 55 г" in text
+        assert "Белка сегодня меньше ориентира из профиля на 55 г" in text
         assert "снизить вес" in text
 
     def test_the_remark_quotes_the_goal_the_person_chose(self) -> None:
@@ -96,12 +96,12 @@ class TestReportIsSubstantive:
     def test_an_overshoot_is_stated_as_arithmetic(self) -> None:
         remark = render.goal_remark(summary(calories_total=2300.0), water(), profile(goal="lose"))
         assert remark == (
-            "Калорий вышло на 400 ккал больше нормы из профиля — цель в профиле «снизить вес»."
+            "Калорий вышло на 400 ккал больше ориентира из профиля — цель в профиле «снизить вес»."
         )
 
     def test_a_day_within_the_bands_is_acknowledged(self) -> None:
         remark = render.goal_remark(summary(), water(), profile())
-        assert remark == "День уложился в нормы из твоего профиля."
+        assert remark == "День уложился в ориентир из твоего профиля."
 
     def test_at_most_one_remark_ever(self) -> None:
         """Protein short AND water short AND over calories — still one line."""
@@ -354,7 +354,7 @@ class TestNoTargetNoJudgement:
             water(),
             profile(goal="lose", protein_g=0),
         )
-        assert "больше нормы" in with_target
+        assert "больше ориентира" in with_target
 
         # ABSENCE: без ориентира ответа нет вовсе — это сильнее трёх
         # «not in», потому что закрывает и формулировки, которых мы не

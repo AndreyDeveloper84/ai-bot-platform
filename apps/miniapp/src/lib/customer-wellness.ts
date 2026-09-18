@@ -115,10 +115,12 @@ export interface WellnessToday {
    * has not completed the nutrition anketa (Tau §11.1). In that case
    * the БЖУ row is hidden entirely — NEVER rendered as «Б — · Ж — · У —».
    *
-   * `protein_target_g` has no Ayla source and the backend never sends
-   * it; the «Добрать белок» line that depended on it was removed
-   * (DRF-1546). The field stays on the type as the marker for the day
-   * a source appears.
+   * `protein_target_g` — DRF-1844 (F1): the profile's protein target,
+   * derived from the §85 calories target; the backend sends it ONLY
+   * under the same provenance flag as `calories_target` (confirmed
+   * `ayla_calculated` / `user_entered`). Absent = no target — the БЖУ row
+   * then shows the fact alone («Б 65 г»), never «Б 65 / 0 г». The
+   * «Добрать белок» line removed in DRF-1546 is NOT brought back here.
    */
   pfc?: {
     protein_g: number;
