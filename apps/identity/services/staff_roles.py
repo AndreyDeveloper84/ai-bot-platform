@@ -149,11 +149,19 @@ def grant_role_by_operator(
     """
     from apps.events.vocabulary import STAFF_ROLE_GRANTED
 
+    from apps.identity.services.salon_admin_link import recording_refusals
+
     _check(tenant, bot_user, role, actor)
 
-    with transaction.atomic():
+    # DRF-2085: для admin ядро сперва спрашивает каталог; отказ — по имени,
+    # строки нет, аудит отказа — после отката.
+    with recording_refusals(), transaction.atomic():
         result = grant_staff_role(
-            tenant_id=tenant.id, bot_user=bot_user, role=role, created_by=None
+            tenant_id=tenant.id,
+            bot_user=bot_user,
+            role=role,
+            created_by=None,
+            actor_label=actor.audit_label,
         )
 
     _audit(
@@ -190,9 +198,11 @@ def change_staff_role(
     """
     from apps.events.vocabulary import STAFF_ROLE_CHANGED
 
+    from apps.identity.services.salon_admin_link import recording_refusals
+
     _check(tenant, bot_user, role, actor)
 
-    with transaction.atomic():
+    with recording_refusals(), transaction.atomic():
         rows = list(
             TenantStaff.all_tenants.select_for_update().filter(
                 tenant_id=tenant.id, bot_user=bot_user, deactivated_at__isnull=True
@@ -207,7 +217,13 @@ def change_staff_role(
         to_close = [row.pk for row in rows if row.role != role]
         if to_close:
             TenantStaff.all_tenants.filter(pk__in=to_close).update(deactivated_at=timezone.now())
-        grant_staff_role(tenant_id=tenant.id, bot_user=bot_user, role=role, created_by=None)
+        grant_staff_role(
+            tenant_id=tenant.id,
+            bot_user=bot_user,
+            role=role,
+            created_by=None,
+            actor_label=actor.audit_label,
+        )
 
     change = RoleChange(
         tenant_id=tenant.id, bot_user_id=bot_user.pk, previous_roles=previous, role=role
