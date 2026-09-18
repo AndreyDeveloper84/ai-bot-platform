@@ -319,10 +319,13 @@ class WellnessContextHttpClient:
         self,
         *,
         external_user_id: str,
-        goal_id: str,
         actions: list[dict[str, Any]],
+        goal_id: str | None = None,
     ) -> PlanLite:
         """``POST /internal/me/plan-lite/`` — составить план; 201 → документ.
+
+        ``goal_id`` необязателен: без него каталог строит план от активной
+        цели вызывающего (нет активной → :class:`PlanLiteGoalNotFoundError`).
 
         Raises :class:`PlanLiteDisabledError`, :class:`PlanLiteAlreadyActiveError`,
         :class:`PlanLiteGoalNotFoundError`, :class:`WellnessContextClientError` (400).
@@ -330,7 +333,13 @@ class WellnessContextHttpClient:
         response = self._plan_lite_request(
             "POST",
             external_user_id=external_user_id,
-            body={"goal_id": goal_id, "actions": actions},
+            # goal_id необязателен (PR-1b/2b): без него каталог берёт активную
+            # цель вызывающего; ключ в тело не кладётся, чтобы не слать null.
+            body=(
+                {"goal_id": goal_id, "actions": actions}
+                if goal_id is not None
+                else {"actions": actions}
+            ),
         )
         try:
             payload = response.json()

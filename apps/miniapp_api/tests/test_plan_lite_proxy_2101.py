@@ -228,3 +228,39 @@ class TestFlag:
         assert resp.status_code == 404, resp.content
         assert resp.json()["error"] == "plan_lite_disabled"
         assert fake.calls == []
+
+
+class TestGoalIdOptional:
+    """PR-2b: goal_id в теле необязателен — активную цель знает каталог (PR-1b);
+    экран шлёт только actions, прокси прокидывает тело как есть."""
+
+    def test_post_without_goal_id_proxies_actions_only(
+        self, client: Client, bot_user: BotUser
+    ) -> None:
+        fake = _FakeClient(create=PLAN)
+        actions = [{"action_type": "log_food", "cadence": "per_week", "target_count": 3}]
+        with _patch(fake):
+            resp = client.post(
+                _url(),
+                data=json.dumps({"actions": actions}),
+                content_type="application/json",
+                HTTP_AUTHORIZATION=_auth(bot_user.channel_user_id),
+            )
+        assert resp.status_code == 201, resp.content
+        assert fake.calls == [("create", EXT, None, actions)]
+
+    def test_no_active_goal_upstream_is_404_not_found(
+        self, client: Client, bot_user: BotUser
+    ) -> None:
+        from apps.integrations.ayla.wellness_context_client import PlanLiteGoalNotFoundError
+
+        fake = _FakeClient(create=PlanLiteGoalNotFoundError("no_active_goal"))
+        with _patch(fake):
+            resp = client.post(
+                _url(),
+                data=json.dumps({"actions": []}),
+                content_type="application/json",
+                HTTP_AUTHORIZATION=_auth(bot_user.channel_user_id),
+            )
+        assert resp.status_code == 404
+        assert resp.json()["error"] == "not_found"

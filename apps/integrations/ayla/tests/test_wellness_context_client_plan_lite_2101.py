@@ -179,3 +179,21 @@ class TestWriters:
         )
         with pytest.raises(PlanLiteGoalNotFoundError):
             _client(handler).close_plan_lite(external_user_id=_EXT)
+
+
+class TestGoalIdOptional:
+    def test_create_without_goal_id_posts_actions_only(self) -> None:
+        seen = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen["body"] = json.loads(request.content)
+            return httpx.Response(201, json={"data": PLAN_LITE_WIRE})
+
+        _client(handler).create_plan_lite(
+            external_user_id=_EXT,
+            actions=[{"action_type": "log_food", "cadence": "per_week", "target_count": 3}],
+        )
+
+        assert seen["body"] == {
+            "actions": [{"action_type": "log_food", "cadence": "per_week", "target_count": 3}]
+        }
