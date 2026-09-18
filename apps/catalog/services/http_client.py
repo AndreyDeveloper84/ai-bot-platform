@@ -364,6 +364,44 @@ class CatalogSoloProvisioningRefused(CatalogError):
         self.reason = reason
 
 
+class CatalogAdminLinkTokenMissing(CatalogError):
+    """``AYLA_SALON_ADMIN_LINK_TOKEN`` пуст НА НАШЕЙ стороне (DRF-2085).
+
+    Тот же раздел, что у :class:`CatalogProvisioningTokenMissing`: чинится в
+    контейнере бота, а не каталога, и потому названо отдельно.
+    """
+
+
+class CatalogAdminLinkRefused(CatalogError):
+    """Каталог не связал администратора салона (DRF-2085).
+
+    ``reason`` — машинное имя: ``credential_refused`` (401/403 — у каталога
+    секрет пуст или не наш), ``rate_limited`` (429), либо ``details.reason``
+    каталога (``tenant_not_found`` / ``tenant_inactive`` /
+    ``identity_already_bound`` / ``identity_not_proxy`` /
+    ``idempotency_key_reused`` / ``bind_refused`` / ``readback_failed``).
+    Ничего не создано ни там, ни здесь.
+    """
+
+    def __init__(self, message: str, *, reason: str, status_code: int) -> None:
+        super().__init__(message)
+        self.reason = reason
+        self.status_code = status_code
+
+
+@dataclass(frozen=True)
+class LinkedSalonAdminDTO:
+    """Ответ ``POST /api/v1/internal/tenants/<slug>/salon-admins/`` (DRF-2085).
+
+    ``created`` — 201 против 200 (повтор с тем же ключом идемпотентности).
+    """
+
+    tenant_id: uuid.UUID
+    ayla_user_id: uuid.UUID
+    relationship_id: uuid.UUID
+    created: bool
+
+
 @dataclass(frozen=True)
 class ProvisionedSoloWorkspaceDTO:
     """Ответ ``POST /api/v1/internal/tenants/solo-workspaces/`` (DRF-1828/1830).
@@ -438,6 +476,7 @@ class CatalogHttpClient:
         http_client: httpx.Client | None = None,
         wait_budget: ThrottleWaitBudget | None = None,
         provisioning_token: str | None = None,
+        salon_admin_link_token: str | None = None,
     ) -> None:
         self._base_url = (
             base_url if base_url is not None else getattr(settings, "AYLA_BASE_URL", "")
@@ -450,6 +489,9 @@ class CatalogHttpClient:
         # лениво в :meth:`ensure_tenant`, а не здесь: клиент синхронизации
         # не должен падать оттого, что токен для другой операции не задан.
         self._provisioning_token = provisioning_token
+        # Четвёртый секрет (DRF-2085): только ручка «администратор салона».
+        # Тоже лениво — см. :meth:`link_salon_admin`.
+        self._salon_admin_link_token = salon_admin_link_token
         self._timeout = (
             timeout if timeout is not None else getattr(settings, "CATALOG_SYNC_HTTP_TIMEOUT", 30)
         )
@@ -813,6 +855,115 @@ class CatalogHttpClient:
         if self._http is None:
             self._http = httpx.Client(timeout=self._timeout)
         return self._http
+
+    def link_salon_admin(
+        self,
+        *,
+        tenant_slug: str,
+        external_user_id: str,
+        actor: str,
+        correlation_id: str,
+        idempotency_key: str,
+    ) -> LinkedSalonAdminDTO:
+        """Свежий администратор салона в каталоге + связь с MAX-личностью (DRF-2085).
+
+        ``POST /api/v1/internal/tenants/<slug>/salon-admins/`` под
+        ``AYLA_SALON_ADMIN_LINK_TOKEN`` — не под общим Bearer и не под
+        provisioning-токеном: у каталога это ручка ОДНОЙ силы со своим
+        сторожем (``IsSalonAdminLinkBearer``).
+
+        Без ретраев: это действие, и повтор вслепую после таймаута значил
+        бы не знать, случилось ли оно. Каталог идемпотентен по
+        ``idempotency_key`` — вызывающий повторяет с тем же ключом.
+
+        Исходы по имени: :class:`CatalogAdminLinkTokenMissing` (у нас пусто),
+        :class:`CatalogAdminLinkRefused` (401/403/404/409/429/500 с
+        причиной), :class:`CatalogClientError` (прочие 4xx),
+        :class:`CatalogTransportError` (сеть / 5xx без причины / кривой
+        ответ). Секрет в сообщения исключений и в лог не попадает.
+        """
+        token = (
+            self._salon_admin_link_token
+            if self._salon_admin_link_token is not None
+            else getattr(settings, "AYLA_SALON_ADMIN_LINK_TOKEN", "")
+        )
+        if not token:
+            raise CatalogAdminLinkTokenMissing(
+                "AYLA_SALON_ADMIN_LINK_TOKEN not configured on the bot side"
+            )
+        try:
+            url = AylaUrlBuilder(self._base_url).build(
+                f"/internal/tenants/{tenant_slug}/salon-admins/"
+            )
+        except AylaUrlError as exc:
+            raise CatalogTransportError(f"invalid AYLA_BASE_URL: {exc}") from exc
+
+        try:
+            response = self._client().post(
+                url,
+                json={
+                    "external_user_id": external_user_id,
+                    "actor": actor,
+                    "correlation_id": correlation_id,
+                    "idempotency_key": idempotency_key,
+                },
+                headers=with_request_id(
+                    {
+                        "Authorization": f"Bearer {token}",
+                        "Accept": "application/json",
+                    }
+                ),
+                # Короче общего таймаута синхронизации: вызывающий держит
+                # строку приглашения под блокировкой, пока ждёт ответа.
+                timeout=min(float(self._timeout), 10.0),
+            )
+        except httpx.HTTPError as exc:
+            raise CatalogTransportError(
+                f"Ayla salon-admins: transport failure on {url}: {exc.__class__.__name__}"
+            ) from exc
+
+        if response.status_code in (401, 403):
+            raise CatalogAdminLinkRefused(
+                f"Ayla salon-admins: credential refused with HTTP {response.status_code}",
+                reason="credential_refused",
+                status_code=response.status_code,
+            )
+        if response.status_code == 429:
+            raise CatalogAdminLinkRefused(
+                "Ayla salon-admins: rate limited",
+                reason="rate_limited",
+                status_code=429,
+            )
+        if response.status_code in (404, 409, 500):
+            details = _json_or_empty(response).get("error", {}).get("details", {}) or {}
+            reason = str(details.get("reason") or "")
+            if reason:
+                raise CatalogAdminLinkRefused(
+                    f"Ayla salon-admins: refused with HTTP {response.status_code} reason={reason}",
+                    reason=reason,
+                    status_code=response.status_code,
+                )
+        if 400 <= response.status_code < 500:
+            raise CatalogClientError(
+                f"Ayla salon-admins 4xx: HTTP {response.status_code} body={response.text[:200]!r}"
+            )
+        if response.status_code >= 500:
+            raise CatalogTransportError(f"Ayla salon-admins: HTTP {response.status_code}")
+
+        data = _json_or_empty(response).get("data")
+        if not isinstance(data, dict):
+            raise CatalogTransportError("Ayla salon-admins: response without data")
+        try:
+            return LinkedSalonAdminDTO(
+                tenant_id=uuid.UUID(str(data["tenant_id"])),
+                ayla_user_id=uuid.UUID(str(data["ayla_user_id"])),
+                relationship_id=uuid.UUID(str(data["relationship_id"])),
+                created=response.status_code == 201,
+            )
+        except (KeyError, ValueError) as exc:
+            raise CatalogTransportError(
+                "Ayla salon-admins: response without the three ids"
+            ) from exc
 
     def provision_solo_workspace(
         self,

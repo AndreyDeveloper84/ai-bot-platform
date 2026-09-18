@@ -38,7 +38,10 @@ from apps.identity.services.staff_invites import issue_staff_invite
 from apps.tenancy.context import tenant_scope
 from apps.tenancy.models import StaffInvite, Tenant, TenantStaff
 
-pytestmark = pytest.mark.django_db
+# DRF-2085: роль admin спрашивает каталог (свежая учётка + TUR + связь) ДО
+# записи TenantStaff; здесь каталог — заглушка, его половина доказывается в
+# apps/identity/tests/test_salon_admin_link_2085.py.
+pytestmark = [pytest.mark.django_db, pytest.mark.usefixtures("catalog_admin_link_stub")]
 
 CHANNEL_USER_ID = "4004114"
 CHAT_ID = "557"
