@@ -27,10 +27,12 @@ import {
   FoodNotRecognizedError,
   NutritionUnavailableError,
   PhotoBytesMissingError,
+  PhotoTooLargeError,
   StubNotWiredError,
   scanPhoto,
   type MealType,
 } from "../lib/food-scanner";
+import { ApiError } from "../lib/api";
 import { useScreenBack } from "../hooks/useScreenBack";
 import { backTo } from "../lib/screen-back";
 
@@ -235,20 +237,35 @@ function ScanErrorScreen({
   // «сервис временно недоступен, попробуй через минуту» врал о природе
   // отказа и звал человека возвращаться.
   const isNotWired = err instanceof StubNotWiredError;
+  // DRF-2098 — два отказа самого прокси: 413 (лимит один на бота, тот же,
+  // что у фото в чате) и отказ ворот дневника в полёте (согласие отозвано
+  // между экраном и снимком) — тот же экран согласия, что до снимка.
+  const isTooLarge = err instanceof PhotoTooLargeError;
+  const isConsentGate =
+    err instanceof ApiError &&
+    (err.slug === "food_diary_consent_required" || err.slug === "consent_required");
   const headline = isNotRecognized
     ? "Не разобралась"
     : isPhotoFailed
       ? "Не получилось загрузить"
-      : isNotWired
-        ? "Пока не подключено"
-        : "Сервис недоступен";
+      : isTooLarge
+        ? "Фото слишком большое"
+        : isConsentGate
+          ? "Нужно разрешение"
+          : isNotWired
+            ? "Пока не подключено"
+            : "Сервис недоступен";
   const body = isNotRecognized
     ? "Фото немного сложное — не разобралась. Можно переснять поближе или просто написать, что было."
     : isPhotoFailed
       ? "Фото пришло, но скачать не получилось — пришли ещё раз, пожалуйста."
-      : isNotWired
-        ? "Распознавание еды по фото в приложении ещё не работает. Дневник питания сейчас ведёт Ayla в чате."
-        : "Сервис распознавания временно недоступен. Попробуй через минуту.";
+      : isTooLarge
+        ? "Такое фото не пройдёт — попробуй снять ещё раз или выбрать снимок поменьше."
+        : isConsentGate
+          ? "Чтобы распознавать еду по фото, нужно разрешение на дневник питания — вернись к сканеру и дай его."
+          : isNotWired
+            ? "Распознавание еды по фото в приложении ещё не работает. Дневник питания сейчас ведёт Ayla в чате."
+            : "Сервис распознавания временно недоступен. Попробуй через минуту.";
   return (
     <div className="food-scanner-screen">
       <header className="records-screen__header">
@@ -301,7 +318,7 @@ function ScanErrorScreen({
               Переснять
             </button>
           )}
-          {isPhotoFailed && (
+          {(isPhotoFailed || isTooLarge || isConsentGate) && (
             <button
               type="button"
               className="btn-primary"
@@ -309,10 +326,10 @@ function ScanErrorScreen({
                 navigate("/customer/food-scanner/capture", { replace: true })
               }
             >
-              Сделать заново
+              {isConsentGate ? "К сканеру" : "Сделать заново"}
             </button>
           )}
-          {!isPhotoFailed && !isNotWired && (
+          {!isPhotoFailed && !isNotWired && !isTooLarge && !isConsentGate && (
             <button
               type="button"
               className="btn-secondary"

@@ -21,7 +21,7 @@
  * deficits / beauty_impact / recommendation) below the primary CTAs.
  */
 
-import { useCallback, useEffect, useId, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 
 import { useScreenBack } from "../hooks/useScreenBack";
@@ -155,24 +155,32 @@ export function FoodScannerResultScreen() {
     : null;
   const isLowConf = result.confidence < 0.6;
   const leadVerb = isLowConf ? "Похоже на" : "Узнала";
+  // DRF-2098 — ключ идемпотентности живёт столько, сколько карточка: повтор
+  // «Записать» после потерянного ответа не пишет вторую запись, а новая
+  // карточка (новый скан) получает новый ключ.
+  const idempotencyKey = useMemo(
+    () => `${result.scan_id}:${Date.now().toString(36)}`,
+    [result.scan_id],
+  );
 
   const onSave = useCallback(async () => {
     // Decide name override by comparing current input vs original
     // result — NOT by the `editingName` sticky flag (adversarial CR P2).
-    // Previously: opening F3-Clarify > Rename and tapping save without
-    // actually editing dropped scan_id permanently, losing the
-    // recognition link in analytics. Compare strings → only drop
-    // scan_id when the customer really renamed the dish.
+    // Compare strings → send `dish_name` only when the customer really
+    // renamed the dish. DRF-2098: `scan_id` STAYS next to the new name —
+    // it is the photo's provenance (§136 `photo_*`); the catalog accepts
+    // both. Dropping it on rename (as before) lost the recognition link.
     const trimmed = dishName.trim();
     const renamed =
       trimmed.length > 0 && trimmed !== result.dish_name;
     setBusy(true);
     try {
       await logMeal({
-        scan_id: renamed ? undefined : result.scan_id,
+        scan_id: result.scan_id,
         dish_name: renamed ? trimmed : undefined,
         meal_type: mealType,
         portion_multiplier: portionMultiplier,
+        idempotency_key: idempotencyKey,
         note: note.trim() || undefined,
       });
       navigate("/customer/food-scanner/saved", {
@@ -199,6 +207,7 @@ export function FoodScannerResultScreen() {
     dishName,
     calories,
     hideNumbers,
+    idempotencyKey,
     navigate,
   ]);
 
@@ -269,7 +278,7 @@ export function FoodScannerResultScreen() {
             />
           </svg>
         </button>
-        <h1 className="records-screen__title">Распознанное</h1>
+        <h1 className="records-screen__title">Я распознала так</h1>
       </header>
 
       <main className="food-scanner-screen__main">

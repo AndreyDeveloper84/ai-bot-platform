@@ -1,5 +1,5 @@
 /**
- * Customer food scanner stub lib — Tier 1 Priority 7 Phase B.
+ * Customer food scanner lib — Tier 1 Priority 7 Phase B; scan/log — боевые с DRF-2098.
  *
  * Spec: `docs/screens/customer-food-scanner-flow.md` (Variant A — Wizard,
  * 4 screens with MAX BackButton navigation) + memory
@@ -55,7 +55,7 @@
 // — frontend must null-safe; UI never crashes.
 // ---------------------------------------------------------------------------
 
-import { request } from "./api";
+import { ApiError, request } from "./api";
 
 export interface NutritionFacts {
   calories: number;
@@ -82,16 +82,6 @@ export interface ScanResponse {
 }
 
 export type MealType = "breakfast" | "lunch" | "dinner" | "snack";
-
-export interface LogMealRequest {
-  scan_id?: string;
-  dish_name?: string;
-  meal_type: MealType;
-  /** 1.0 default; portion ± buttons multiply this. */
-  portion_multiplier: number;
-  /** Optional free-text customer note. */
-  note?: string;
-}
 
 export interface LogMealResponse {
   log_id: string;
@@ -174,6 +164,14 @@ export class PhotoBytesMissingError extends Error {
   }
 }
 
+/** 413 `photo_too_large` — лимит один на бота (тот же, что у фото из чата). */
+export class PhotoTooLargeError extends Error {
+  constructor() {
+    super("Фото слишком большое — попробуй сжать или снять ещё раз.");
+    this.name = "PhotoTooLargeError";
+  }
+}
+
 /**
  * Production guard — Profile PR #954 M1 precedent. If real W4 endpoint
  * is not wired, prod-mode calls throw → `StateError` renders. NEVER
@@ -230,102 +228,6 @@ function pickStubVariant(): StubVariant {
   return "default";
 }
 
-// ---------------------------------------------------------------------------
-// In-memory dev state (mirrors Profile pattern). Diary entries accumulate
-// across `log_meal` calls in dev so QA can see them in the diary screen.
-// ---------------------------------------------------------------------------
-
-const SCAN_STUB: Record<StubVariant, ScanResponse> = {
-  default: {
-    scan_id: "scan-stub-001",
-    dish_name: "Гречка с курицей",
-    confidence: 0.85,
-    portion_g: 150,
-    nutrition: {
-      calories: 480,
-      protein_g: 35,
-      fat_g: 8,
-      carbs_g: 50,
-      vitamins: { B6: 0.4, Fe: 3.2 },
-    },
-    beauty_insights: null,
-  },
-  low_confidence: {
-    scan_id: "scan-stub-002",
-    dish_name: "Гречка с курицей",
-    confidence: 0.42,
-    portion_g: 150,
-    nutrition: {
-      calories: 480,
-      protein_g: 35,
-      fat_g: 8,
-      carbs_g: 50,
-    },
-    beauty_insights: null,
-  },
-  not_recognized: {
-    scan_id: "",
-    dish_name: "",
-    confidence: 0,
-    portion_g: null,
-    nutrition: null,
-    beauty_insights: null,
-  },
-  api_down: {
-    scan_id: "",
-    dish_name: "",
-    confidence: 0,
-    portion_g: null,
-    nutrition: null,
-    beauty_insights: null,
-  },
-  photo_failed: {
-    scan_id: "",
-    dish_name: "",
-    confidence: 0,
-    portion_g: null,
-    nutrition: null,
-    beauty_insights: null,
-  },
-  ed_mode: {
-    scan_id: "scan-stub-ed",
-    dish_name: "Гречка с курицей",
-    confidence: 0.85,
-    portion_g: 150,
-    nutrition: null, // ED mode: Ayla returns no numbers
-    beauty_insights: null,
-  },
-};
-
-interface DiaryState {
-  entries: DailySummaryEntry[];
-}
-
-const DIARY_STATE: { byDate: Map<string, DiaryState> } = {
-  byDate: new Map(),
-};
-
-function todayKey(): string {
-  const now = new Date();
-  const y = now.getFullYear();
-  const m = String(now.getMonth() + 1).padStart(2, "0");
-  const d = String(now.getDate()).padStart(2, "0");
-  return `${y}-${m}-${d}`;
-}
-
-function ensureDiaryDay(date: string): DiaryState {
-  let state = DIARY_STATE.byDate.get(date);
-  if (!state) {
-    // Ориентира у стаба нет — ровно как у источника. Стояло
-    // `calories_goal: 2100`: выдуманное число, «подтверждавшее»
-    // константу вместо того, чтобы её ловить. Ровно так же здесь уже
-    // стояла выдуманная восьмёрка стаканов.
-    state = { entries: [] };
-    DIARY_STATE.byDate.set(date, state);
-  }
-  return state;
-}
-
 function devWarn(msg: string): void {
   if (import.meta.env.DEV && typeof console !== "undefined") {
     // eslint-disable-next-line no-console
@@ -334,77 +236,120 @@ function devWarn(msg: string): void {
 }
 
 // ---------------------------------------------------------------------------
-// Fetch wrappers — stubs in DEV; throw in prod until W4 wires.
+// Фото-половина F8 (DRF-2098) — настоящий провод. Решение владельца 18.09
+// (§48 п.4): «food-diary-v1 покрывает фото из Mini App» — отдельного
+// согласия на фото нет, ворота у `POST /food/scan` те же, что у текста
+// (`fetchDiaryConsentGate` спрашивают до снимка; 403 в полёте — тот же
+// экран согласия). `guardProd` с этих двух ручек снят: они боевые.
 // ---------------------------------------------------------------------------
 
 export interface ScanPhotoOptions {
   caption?: string;
   /**
-   * AbortSignal plumbed from `AbortController` on F2 — friendly CR
-   * follow-up. On stub this controls only the simulated-latency
-   * setTimeout so QA can verify cancel UX; on swap-day W4 must wire
-   * the signal into the real `fetch`/`httpx` request so an inflight
-   * upload is cancelled when the customer taps «Отменить» or
-   * navigates away.
+   * AbortSignal from F2's `AbortController` — passed straight into
+   * `fetch`, so «Отменить» aborts the upload in flight, not a timer.
    */
   signal?: AbortSignal;
 }
 
-export async function scanPhoto(
-  _photo: File,
-  opts?: ScanPhotoOptions,
-): Promise<ScanResponse> {
-  guardProd("POST /api/v1/customer/food/scan");
-  devWarn("scanPhoto served from stub — W4 follow-up");
-  const v = pickStubVariant();
-  // Simulate network latency so the F2 loading card actually shows.
-  // The signal aborts the wait early to mirror prod cancel behaviour.
-  await new Promise<void>((resolve, reject) => {
-    const timer = window.setTimeout(resolve, 1200);
-    if (opts?.signal) {
-      const onAbort = () => {
-        window.clearTimeout(timer);
-        reject(new DOMException("Aborted", "AbortError"));
-      };
-      if (opts.signal.aborted) {
-        onAbort();
-      } else {
-        opts.signal.addEventListener("abort", onAbort, { once: true });
-      }
-    }
-  });
-  if (v === "not_recognized") throw new FoodNotRecognizedError();
-  if (v === "api_down") throw new NutritionUnavailableError();
-  if (v === "photo_failed") throw new PhotoBytesMissingError();
-  return SCAN_STUB[v];
+/** Ответ прокси `POST /food/scan` (бот отдаёт подмножество каталога). */
+interface ScanWire {
+  scan_id: string;
+  dish_name: string;
+  confidence: number;
+  portion_g: number | null;
+  nutrition: NutritionFacts | null;
 }
 
-export async function logMeal(
-  req: LogMealRequest,
-): Promise<LogMealResponse> {
-  guardProd("POST /api/v1/customer/food/log");
-  devWarn("logMeal served from stub — W4 follow-up");
-  const dishName = req.dish_name ?? "Запись";
-  // Resolve calories from the most recent scan stub of the active
-  // variant (so the diary reflects what the user just saw on F3).
-  const v = pickStubVariant();
-  const baseCalories =
-    SCAN_STUB[v].nutrition?.calories ?? 0;
-  const calories = Math.round(baseCalories * (req.portion_multiplier ?? 1));
-  const logId = `log-${Date.now()}`;
-  const day = ensureDiaryDay(todayKey());
-  day.entries.push({
-    log_id: logId,
+/**
+ * Multipart `POST /food/scan`: поле `image` — сам файл. Ошибки бота
+ * приводятся к таксономии §7: `food_not_recognized` → FoodNotRecognizedError,
+ * `nutrition_unavailable` (503) → NutritionUnavailableError, `photo_too_large`
+ * (413) → PhotoTooLargeError. Отказы гейта (403/404) пробрасываются как
+ * `ApiError` — Capture-экран ведёт на согласие по слагу.
+ */
+export async function scanPhoto(
+  photo: File,
+  opts?: ScanPhotoOptions,
+): Promise<ScanResponse> {
+  const form = new FormData();
+  form.append("image", photo, photo.name || "meal.jpg");
+  let wire: ScanWire;
+  try {
+    wire = await request<ScanWire>("/food/scan", {
+      method: "POST",
+      body: form,
+      signal: opts?.signal,
+    });
+  } catch (err) {
+    if (err instanceof ApiError) {
+      if (err.slug === "food_not_recognized") throw new FoodNotRecognizedError();
+      if (err.slug === "nutrition_unavailable") throw new NutritionUnavailableError();
+      if (err.slug === "photo_too_large") throw new PhotoTooLargeError();
+    }
+    throw err;
+  }
+  return {
+    scan_id: wire.scan_id,
+    dish_name: wire.dish_name,
+    confidence: wire.confidence,
+    portion_g: wire.portion_g,
+    nutrition: wire.nutrition,
+    // Каталог не отдаёт beauty-инсайты на этой ручке; экран рисует
+    // блок только когда он есть.
+    beauty_insights: null,
+  };
+}
+
+/** Тело записи по скану — ветка `scan_id` в `POST /food/log` (DRF-2098). */
+export interface LogMealRequest {
+  /** Провенанс фото (§136 `photo_*`) — остаётся и при переименовании. */
+  scan_id: string;
+  /** Только когда человек переименовал блюдо на карточке. */
+  dish_name?: string;
+  meal_type: MealType;
+  /** 1.0 default; portion ± buttons multiply this. */
+  portion_multiplier: number;
+  /** Ключ идемпотентности — от экрана; повтор после потерянного ответа не пишет вторую запись. */
+  idempotency_key: string;
+  /**
+   * Заметка карточки. НЕ пересылается: у `log_meal` каталога нет такого
+   * поля, чат её тоже не шлёт (предел, назван в DRF-2098).
+   */
+  note?: string;
+}
+
+interface LogMealWire {
+  log_id: string;
+  dish_name: string;
+  meal_type: string;
+  calories: number;
+  entry_origin: string | null;
+}
+
+/**
+ * `POST /food/log` с `scan_id`. Возвращает запись, как её записал каталог;
+ * `meal_type` в ответе — как каталог её назвал (unnamed, если экран не
+ * назвал приём).
+ */
+export async function logMeal(req: LogMealRequest): Promise<LogMealResponse> {
+  const body: Record<string, unknown> = {
+    scan_id: req.scan_id,
     meal_type: req.meal_type,
-    dish_name: dishName,
-    calories,
-    portion_g:
-      SCAN_STUB[v].portion_g != null
-        ? Math.round((SCAN_STUB[v].portion_g as number) * (req.portion_multiplier ?? 1))
-        : undefined,
-    logged_at_iso: new Date().toISOString(),
+    portion_multiplier: req.portion_multiplier,
+    idempotency_key: req.idempotency_key,
+  };
+  if (req.dish_name !== undefined) body.dish_name = req.dish_name;
+  const wire = await request<LogMealWire>("/food/log", {
+    method: "POST",
+    body: JSON.stringify(body),
   });
-  return { log_id: logId, dish_name: dishName, meal_type: req.meal_type, calories };
+  return {
+    log_id: wire.log_id,
+    dish_name: wire.dish_name,
+    meal_type: (wire.meal_type as MealType) ?? req.meal_type,
+    calories: wire.calories,
+  };
 }
 
 /*
@@ -487,8 +432,9 @@ export const FOOD_DIARY_CONSENT_DOCUMENT_VERSION = "food-diary-v1";
 // Настоящий провод, не stub: `POST /food/estimate` (оценка без записи) и
 // `POST /food/log` (запись по подтверждению) — те же ручки бота, что ведут
 // в ту же тропу каталога, что и текст в чате (F2). `guardProd` здесь не
-// стоит: это боевые ручки. Фото-половина (`scanPhoto`/`logMeal` выше) —
-// по-прежнему stub за `guardProd`, до решения владельца D26.
+// стоит: это боевые ручки. Фото-половина (`scanPhoto`/`logMeal` выше) — с
+// DRF-2098 тоже боевая: решение владельца D26 = «food-diary-v1 покрывает
+// фото из Mini App».
 // ---------------------------------------------------------------------------
 
 export interface FoodTextEstimate {
