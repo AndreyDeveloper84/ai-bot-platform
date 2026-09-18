@@ -9743,3 +9743,109 @@ Cross-reference: DRF-2000 (comment 16.09 08:31 UTC — перенесено до
 Содержание: тексты owner rulings **OD-SAF-11…OD-SAF-22** (слово владельца 12.09.2026; S1–S10 owner-level semantics, `NORMAL` как имя состояния, `missing user fact != missing policy`) — строки §5.1 baseline `docs/safety/F0-C3-safety-matrix.md` v0.12 дословно + owner-блоки §6.1–6.10 v0.12 дословно с sha256 каждого блока (baseline v0.12 sha256 `12451baf4931e3e72c8dff1dd567b2433c4cfb85323cbcb7a7b29a1678516e49`). Статус — `IMMUTABLE RECORD`: правки в файл не вносятся, новое слово владельца = новая запись; fidelity рабочей копии (§5.1 / §6 матрицы) проверяется по хешам (CF-28 reconciliation report 12.09).
 
 Что этот § **не** делает: не утверждает матрицу (остаётся `WORKING DRAFT`), не подтверждает fidelity записи слову владельца — это подтверждает владелец; Clinical fidelity до подтверждения = «внутренне согласовано с record».
+
+---
+
+## §159. ОТВЕЧЕН (18.09.2026): G6 — внезапный отёк губ / рта / языка / горла → S1 STOP без ожидания дыхательных симптомов; локальная сыпь / зуд — не автоматический S1
+
+**Источник:** решение владельца (Андрей Тихонов) 18.09.2026 — консервативная product safety policy для подготовки Controlled Pilot по итогам AI clinical pre-review; статус `OWNER APPROVED — PENDING PHYSICIAN CONFIRMATION`. Дословный текст — immutable record `docs/safety/reviews/OWNER_RULINGS_S1_AI_CLINICAL_PRE_REVIEW_2026-09-18.md` (RECORD SHA-256 `230236a92b8c4e2e562874409e73b0e5e13a318e469d6b13a57da9d7ea34b8b4`); сопоставление с границами и fixtures — `docs/safety/reviews/AYLA_S1_AI_CLINICAL_PRE_REVIEW_DELTA_v0.1_2026-09-18.md`. Не physician sign-off, не `CLINICAL APPROVED`, не `SAFE FOR PILOT`.
+
+Смысл: внезапный отёк губ, рта, языка или горла после возможного контакта с аллергеном → `S1 / G6 → STOP`; также STOP — затруднение дыхания / глотания, сдавление горла, внезапная осиплость, выраженное головокружение, спутанность, обморок. «После крема сыпь и губы опухают» — expected `explicit_positive → STOP` (было ambiguous). Изолированная локальная сыпь / зуд без указанных признаков — не S1: `CLARIFY` / `CAUTION` по отдельной policy (G6 question contract — §164). Семь групп S1 не расширяются.
+
+**Затронутый код:**
+- `apps/skills/health_screening/classifier.py`
+- `apps/skills/health_screening/tests/s1_fixtures.py`
+- `docs/safety/reviews/S1_CLINICAL_DETECTOR_FIXTURES_v0.1.md`
+
+
+---
+
+## §160. ОТВЕЧЕН (18.09.2026): G7 — «резко стало очень плохо» без конкретного тяжёлого признака → CLARIFY + один вопрос; положительный ответ → STOP; фигуральное — не S1
+
+**Источник:** решение владельца (Андрей Тихонов) 18.09.2026 — консервативная product safety policy для подготовки Controlled Pilot по итогам AI clinical pre-review; статус `OWNER APPROVED — PENDING PHYSICIAN CONFIRMATION`. Дословный текст — immutable record `docs/safety/reviews/OWNER_RULINGS_S1_AI_CLINICAL_PRE_REVIEW_2026-09-18.md` (RECORD SHA-256 `230236a92b8c4e2e562874409e73b0e5e13a318e469d6b13a57da9d7ea34b8b4`); сопоставление с границами и fixtures — `docs/safety/reviews/AYLA_S1_AI_CLINICAL_PRE_REVIEW_DELTA_v0.1_2026-09-18.md`. Не physician sign-off, не `CLINICAL APPROVED`, не `SAFE FOR PILOT`.
+
+Смысл: фраза без конкретного тяжёлого функционального / системного признака — не основание для автоматического STOP; маршрут `CLARIFY` с вопросом «Прямо сейчас тебе трудно дышать, стоять, говорить, ты теряешь сознание или состояние быстро ухудшается?»; любой положительный ответ → STOP; `UNKNOWN` / уклонение / неоднозначность → ограничение сохраняется. «Мне очень плохо, сейчас упаду», внезапная спутанность, невозможность стоять / нормально говорить, выраженное нарушение дыхания, быстрое текущее ухудшение — остаются STOP. «Мне плохо от цены», «умру от цены» — не personal medical S1 без иных доказательств.
+
+**Затронутый код:**
+- `apps/skills/health_screening/classifier.py`
+- `apps/orchestrator/safety/pre_check.py`
+- `apps/skills/health_screening/tests/s1_fixtures.py`
+- `docs/safety/reviews/S1_CLINICAL_DETECTOR_FIXTURES_v0.1.md`
+- `docs/safety/reviews/S1_CONTEXT_RECHECK_ADVERSARIAL_FIXTURES_v0.2.md`
+
+
+---
+
+## §161. ОТВЕЧЕН (18.09.2026): recent-resolved — G3 / G4 / G6 → STOP; G1 / G2 / G5 / G7 — не автоматический NORMAL
+
+**Источник:** решение владельца (Андрей Тихонов) 18.09.2026 — консервативная product safety policy для подготовки Controlled Pilot по итогам AI clinical pre-review; статус `OWNER APPROVED — PENDING PHYSICIAN CONFIRMATION`. Дословный текст — immutable record `docs/safety/reviews/OWNER_RULINGS_S1_AI_CLINICAL_PRE_REVIEW_2026-09-18.md` (RECORD SHA-256 `230236a92b8c4e2e562874409e73b0e5e13a318e469d6b13a57da9d7ea34b8b4`); сопоставление с границами и fixtures — `docs/safety/reviews/AYLA_S1_AI_CLINICAL_PRE_REVIEW_DELTA_v0.1_2026-09-18.md`. Не physician sign-off, не `CLINICAL APPROVED`, не `SAFE FOR PILOT`.
+
+Смысл: недавний достоверный S1 для G3 (новая боль / давление / выраженный дискомфорт в груди), G4 (признаки инсульта / TIA), G6 (возможная тяжёлая аллергическая реакция) не снимается фразами «прошло», «стало лучше», «сейчас нормально»: `RES-G3 / RES-G4 / RES-G6 → STOP`; для G4 исчезновение признаков не снимает срочность; для G6 уменьшение отёка — не clearance. G1 → минимум `CLARIFY`, после достоверного выраженного нарушения дыхания — STOP; G2 → `CLARIFY / MEDICAL_REVIEW_REQUIRED`, STOP при неполном восстановлении / боли в груди / нарушении речи-движения / судорогах / травме / обмороке при нагрузке; G5 → `CLARIFY / CAUTION` при полной остановке, неостанавливающееся / значительное → STOP; G7 → `CLARIFY` до подтверждения конкретного тяжёлого признака.
+
+**Затронутый код:**
+- `docs/safety/reviews/S1_CONTEXT_RECHECK_ADVERSARIAL_FIXTURES_v0.2.md`
+
+
+---
+
+## §162. ОТВЕЧЕН (18.09.2026): граница CLEARED_BY_RECHECK — восемь условий; «мне лучше / всё прошло / новая сессия / TTL / новый intent / detector молчит» — не clearance; outcome S1_NOT_CURRENT_MEDICAL_FOLLOWUP_REQUIRED
+
+**Источник:** решение владельца (Андрей Тихонов) 18.09.2026 — консервативная product safety policy для подготовки Controlled Pilot по итогам AI clinical pre-review; статус `OWNER APPROVED — PENDING PHYSICIAN CONFIRMATION`. Дословный текст — immutable record `docs/safety/reviews/OWNER_RULINGS_S1_AI_CLINICAL_PRE_REVIEW_2026-09-18.md` (RECORD SHA-256 `230236a92b8c4e2e562874409e73b0e5e13a318e469d6b13a57da9d7ea34b8b4`); сопоставление с границами и fixtures — `docs/safety/reviews/AYLA_S1_AI_CLINICAL_PRE_REVIEW_DELTA_v0.1_2026-09-18.md`. Не physician sign-off, не `CLINICAL APPROVED`, не `SAFE FOR PILOT`.
+
+Смысл: `CLEARED_BY_RECHECK` допустим только если (1) исходный personal S1 — ложное срабатывание; (2) сообщение было цитатой / гипотезой / переносным выражением; (3) относилось к другому человеку; (4) исправлена доказуемая опечатка / полярность; (5) ambiguous-сигнал после одного конкретного вопроса однозначно вне S1; (6) нет `UNKNOWN`; (7) нет нового S1; (8) не было подтверждённого recent-resolved события, для которого исчезновение симптома не снимает срочность. Context / evidence corrections (attribution, quotation, typo / polarity, supersession) отличаются от выздоровления. `T-S1-CTX-R09` («Не могу вдохнуть» → recheck → «сейчас дышу свободно») — не universal clearance: после достоверного эпизода выраженного нарушения дыхания automatic beauty-flow unlock запрещён → resolution-level outcome `S1_NOT_CURRENT_MEDICAL_FOLLOWUP_REQUIRED` (симптом сейчас не подтверждается; не NORMAL; не медицинское разрешение; health-sensitive recommendation / booking не разблокируются автоматически; provenance обязателен). Новый `SafetyState` не вводится; механика [§156] не отменяется — сужаются условия clearance.
+
+**Затронутый код:**
+- `docs/safety/reviews/S1_CONTEXT_RECHECK_ADVERSARIAL_FIXTURES_v0.2.md`
+
+
+---
+
+## §163. ОТВЕЧЕН (18.09.2026): текст медицинской S1-эскалации v2 (RU Controlled Pilot) — SUPERSEDES текст [§157]; owner approval ≠ physician approval
+
+**Источник:** решение владельца (Андрей Тихонов) 18.09.2026 — консервативная product safety policy для подготовки Controlled Pilot по итогам AI clinical pre-review; статус `OWNER APPROVED — PENDING PHYSICIAN CONFIRMATION`. Дословный текст — immutable record `docs/safety/reviews/OWNER_RULINGS_S1_AI_CLINICAL_PRE_REVIEW_2026-09-18.md` (RECORD SHA-256 `230236a92b8c4e2e562874409e73b0e5e13a318e469d6b13a57da9d7ea34b8b4`); сопоставление с границами и fixtures — `docs/safety/reviews/AYLA_S1_AI_CLINICAL_PRE_REVIEW_DELTA_v0.1_2026-09-18.md`. Не physician sign-off, не `CLINICAL APPROVED`, не `SAFE FOR PILOT`.
+
+Утверждён новый owner-approved candidate text (дословно):
+
+> «По описанию это может требовать срочной медицинской помощи. Я не буду сейчас подбирать процедуру или оформлять запись. Если это происходит сейчас, произошло только что, повторяется, усиливается или тебе резко плохо — позвони 103 или 112. Не добирайся за рулём самостоятельно. Если можешь, попроси человека рядом помочь тебе вызвать помощь и остаться с тобой.»
+
+Зафиксировано: текст — для российского Controlled Pilot; medical S1 response остаётся отдельным от Psychological Crisis Policy (`CRISIS_REPLY_TEXT` не тронут, W1-06 = C); owner approval не означает physician approval; текст требует licensed physician confirmation и Legal / localization review; G7 получает этот текст только после подтверждения конкретного тяжёлого признака; runtime пока не менять.
+
+### Что это отменяет
+
+Текст v1 из [§157] (16.09, `docs/Q1.md` стр. 10–14) как candidate для runtime — заменён v2; §157 остаётся историей и не переписывается. В runtime ни v1, ни v2 не реализованы (DRF-2000 Backlog) — отмена не касается уже слитого кода.
+
+**Затронутый код:**
+- `apps/skills/health_screening/skill.py`
+- `apps/orchestrator/safety/gate.py`
+
+
+---
+
+## §164. ОТВЕЧЕН (18.09.2026): question contracts G1–G6 — один routing-вопрос на ambiguous; YES → STOP; UNKNOWN → ограничение сохраняется; G4 boundary + зрение / равновесие
+
+**Источник:** решение владельца (Андрей Тихонов) 18.09.2026 — консервативная product safety policy для подготовки Controlled Pilot по итогам AI clinical pre-review; статус `OWNER APPROVED — PENDING PHYSICIAN CONFIRMATION`. Дословный текст — immutable record `docs/safety/reviews/OWNER_RULINGS_S1_AI_CLINICAL_PRE_REVIEW_2026-09-18.md` (RECORD SHA-256 `230236a92b8c4e2e562874409e73b0e5e13a318e469d6b13a57da9d7ea34b8b4`); сопоставление с границами и fixtures — `docs/safety/reviews/AYLA_S1_AI_CLINICAL_PRE_REVIEW_DELTA_v0.1_2026-09-18.md`. Не physician sign-off, не `CLINICAL APPROVED`, не `SAFE FOR PILOT`.
+
+G1: «Сейчас, когда ты находишься в покое, всё ещё трудно дышать, не хватает воздуха или трудно говорить полными фразами?» — YES → STOP; полностью прошло после нагрузки без тяжёлых признаков → S1 не подтверждён; UNKNOWN → ограничение.
+G2: «Это происходит сейчас, ты теряла сознание или ещё не полностью пришла в себя?» — текущий симптом / обморок с неполным восстановлением / опасные признаки → STOP; обморок без emergency-признаков → `MEDICAL_REVIEW_REQUIRED`, не NORMAL.
+G3 («что-то колет в груди»): только контекстный вопрос «Это ощущение в груди происходит у тебя сейчас?» — текущий новый личный симптом → STOP; диагностическая анкета не создаётся.
+G4 boundary: внезапная односторонняя слабость / онемение, перекос лица, нарушение речи, внезапное нарушение зрения, внезапное нарушение равновесия / координации; вопрос «Это началось внезапно, и есть ли сейчас слабость или онемение с одной стороны, перекос лица, нарушение речи, зрения или равновесия?» — любой положительный признак или recent-resolved эквивалент → STOP.
+G5: «Кровотечение сейчас продолжается, усиливается или его не удаётся остановить прижатием чистой салфеткой?» — продолжается / усиливается / не останавливается → STOP; небольшое поверхностное остановилось → вне S1; UNKNOWN → ограничение. Прижатие — только routing boundary, не инструкция по лечению.
+G6 (локальная сыпь «сыпь и зуд после крема»): «Есть ли сейчас внезапный отёк губ, рта, языка или горла, затруднение дыхания или глотания, сильное головокружение либо обморок?» — любой положительный признак → STOP; только локальная сыпь / зуд → не S1 (`CAUTION` / отдельная health-sensitive policy); UNKNOWN → ограничение.
+
+Закрывает часть OD-F0C3-05 (routing question) как owner-approved candidate; production wording вопросов — pending physician + Legal.
+
+**Затронутый код:**
+- `apps/skills/health_screening/tests/s1_fixtures.py`
+- `docs/safety/reviews/S1_CLINICAL_DETECTOR_FIXTURES_v0.1.md`
+
+
+---
+
+## §165. ЗАРЕГИСТРИРОВАН (18.09.2026): immutable owner record S1 AI clinical pre-review + AI pre-review delta v0.1
+
+**Record:** `docs/safety/reviews/OWNER_RULINGS_S1_AI_CLINICAL_PRE_REVIEW_2026-09-18.md` — `DO NOT EDIT — SUPERSEDE WITH A NEW RECORD`; RECORD SHA-256 (содержимое выше строки `---- RECORD HASH BOUNDARY ----`) `230236a92b8c4e2e562874409e73b0e5e13a318e469d6b13a57da9d7ea34b8b4`; sha256 полного файла `d749928668aed2d04d25dd0c68feb6702b79fcd501ec33d4ccc0ad4017504745`. Содержит дословно решения 1–5 (§159–§163) и question contracts (§164), статус `OWNER APPROVED — PENDING PHYSICIAN CONFIRMATION`, scope, supersedes / changes, что не меняется.
+**Delta:** `docs/safety/reviews/AYLA_S1_AI_CLINICAL_PRE_REVIEW_DELTA_v0.1_2026-09-18.md` — рабочий документ: сопоставление решений с границами S1, fixture delta (v0.1 → v0.1.1, v0.2 → v0.2.1), supporting evidence (NHS / AHA / ASA — не physician sign-off), engineering follow-ups.
+**Что не менялось:** `OWNER_RULINGS_OD-SAF-11-22_IMMUTABLE_RECORD.md` (байт в байт), [§154–§158], W1-06 = C, W1-07 = A, четыре SafetyState, семь групп S1, runtime и code fixtures. Physician sign-off отсутствует; `CONTROLLED PILOT S1 GATE — NOT READY`.
+
+**Затронутый код:**
+НЕ ПРИМЕНИМО — документальное решение; runtime, тесты и code fixtures в этом § не меняются.
