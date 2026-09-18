@@ -5146,6 +5146,14 @@ def customer_goal_select(request: HttpRequest) -> HttpResponse:
             return _error("malformed", "body must be a JSON object", 400)
         body = parsed
 
+    # DRF-1763 — safety entry on goal_text / answer.text (see health_gate.py):
+    # a health signal stops the write and shows the person the questions.
+    from apps.miniapp_api.health_gate import screen_goal_body
+
+    stop, body = screen_goal_body(request.bot_user, body)  # type: ignore[attr-defined]
+    if stop is not None:
+        return JsonResponse({"safety": stop.as_payload()})
+
     try:
         ayla_body = post_goal_select(
             external_user_id=external_user_id_for(request.bot_user),  # type: ignore[attr-defined]
