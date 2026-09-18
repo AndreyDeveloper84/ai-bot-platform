@@ -29,7 +29,7 @@ from apps.audit.models import AuditLog
 from apps.booking.models import BookingReminder
 from apps.bookings import followups as followups_mod
 from apps.bookings.followups import send_post_visit_followups
-from apps.consent import customer as customer_consents, health as health_consent
+from apps.consent import customer as customer_consents, nutrition
 from apps.consent.models import ConsentRecord
 from apps.consent.services import has_global_consent, record_global_consent
 from apps.identity.models import BotUser, UserPreferences
@@ -277,21 +277,32 @@ def test_read_is_read_only(client: Client, bot_user, url, auth) -> None:
 
 
 def test_health_consent_shows_up_in_the_same_document(client: Client, bot_user, url, auth) -> None:
-    """Одно состояние на платформу, а не отдельная правда у каждой ручки."""
-    assert client.get(url, **auth).json()["consents"]["health"]["granted"] is False
+    """Одно состояние на платформу, а не отдельная правда у каждой ручки.
+
+    DRF-2100: ручка профиля выдаёт согласие ДНЕВНИКА v1, а не HEALTH —
+    документ показывает строку ``food_diary_processing``, а ``health``
+    остаётся «нет»: новая строка особой категории не создаётся.
+    """
+    before = client.get(url, **auth).json()["consents"]
+    assert before["health"]["granted"] is False
+    assert before["food_diary_processing"]["granted"] is False
 
     client.post(
         reverse("miniapp_api:health_consent"),
-        data=json.dumps({"document_version": health_consent.HEALTH_CONSENT_DOCUMENT_VERSION}),
+        data=json.dumps({"document_version": nutrition.FOOD_DIARY_CONSENT_DOCUMENT_VERSION}),
         content_type="application/json",
         **auth,
     )
 
-    health = client.get(url, **auth).json()["consents"]["health"]
-    assert health["granted"] is True
+    after = client.get(url, **auth).json()["consents"]
+    assert after["food_diary_processing"]["granted"] is True
     # Версия раскрытия, под которой согласие стоит, — та же, что записала
-    # ручка медданных. Содержимое медданных при этом не отдаётся.
-    assert health["document_version"] == health_consent.HEALTH_CONSENT_DOCUMENT_VERSION
+    # ручка. Содержимое медданных при этом не отдаётся.
+    assert (
+        after["food_diary_processing"]["document_version"]
+        == nutrition.FOOD_DIARY_CONSENT_DOCUMENT_VERSION
+    )
+    assert after["health"]["granted"] is False
 
 
 def test_malformed_body_is_refused_without_touching_state(
@@ -814,7 +825,7 @@ def test_no_phone_and_no_health_content_leaves_the_endpoint(
     BotUser.all_tenants.filter(pk=bot_user.pk).update(phone="79991234567")
     client.post(
         reverse("miniapp_api:health_consent"),
-        data=json.dumps({"document_version": health_consent.HEALTH_CONSENT_DOCUMENT_VERSION}),
+        data=json.dumps({"document_version": nutrition.FOOD_DIARY_CONSENT_DOCUMENT_VERSION}),
         content_type="application/json",
         **auth,
     )
@@ -823,7 +834,7 @@ def test_no_phone_and_no_health_content_leaves_the_endpoint(
 
     # Тело не пустое и действительно про согласия — есть чему не утечь рядом.
     assert "health" in raw
-    assert json.loads(raw)["consents"]["health"]["granted"] is True
+    assert json.loads(raw)["consents"]["food_diary_processing"]["granted"] is True
     assert "79991234567" not in raw
     assert "phone" not in raw
 

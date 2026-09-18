@@ -32,7 +32,13 @@ import { ApiError, request } from "./api";
  * Поднятие версии = согласия, выданные под старый текст, перестают проходить
  * version-строгую проверку, то есть человека спрашивают заново.
  */
-export const HEALTH_CONSENT_DOCUMENT_VERSION = "health-data-v1";
+// DRF-2100 — the profile row issues the ONE nutrition consent, the diary
+// disclosure `food-diary-v1` (owner ruling 18.09 §48 п.8б: HEALTH is no
+// longer issued; old rows stay valid and are read/withdrawn through this
+// same endpoint). The version sent must be the text shown, and the text
+// shown is now the Z9 disclosure (`food-diary-disclosure.ts`).
+export { FOOD_DIARY_DISCLOSURE_VERSION as HEALTH_CONSENT_DOCUMENT_VERSION } from "./food-diary-disclosure";
+import { FOOD_DIARY_DISCLOSURE_VERSION } from "./food-diary-disclosure";
 
 export interface HealthConsentState {
   granted: boolean;
@@ -70,7 +76,7 @@ export function fetchHealthConsent(): Promise<HealthConsentState> {
  * обязан перечитать состояние и показать новый текст, а не «дожать» выдачу.
  */
 export async function grantHealthConsent(
-  documentVersion: string = HEALTH_CONSENT_DOCUMENT_VERSION,
+  documentVersion: string = FOOD_DIARY_DISCLOSURE_VERSION,
 ): Promise<HealthConsentState> {
   try {
     return await request<HealthConsentState>(PATH, {

@@ -21,6 +21,7 @@ from zoneinfo import ZoneInfo
 import pytest
 from django.utils import timezone as dj_timezone
 
+from apps.consent import nutrition
 from apps.consent.models import ConsentRecord
 from apps.identity.models import BotUser
 from apps.integrations.ayla import ProfileResponse
@@ -185,26 +186,41 @@ class TestCommonGatePassesThrough:
 
 
 class TestHealthBasis:
-    def test_no_health_consent_blocks_a_fully_common_consenting_person(
+    def test_no_nutrition_basis_blocks_a_fully_common_consenting_person(
         self, tenant: Tenant
     ) -> None:
-        """PERSONAL_DATA + the shared gate pass; HEALTH is the basis the
-        diary is read on, and without it the surface is silent."""
-        user = make_user(tenant)  # personal-data record only, no health
+        """PERSONAL_DATA + the shared gate pass; the nutrition basis (diary v1
+        OR legacy HEALTH, DRF-2100) is what the diary is read on, and without
+        it the surface is silent."""
+        from apps.consent import nutrition
+
+        user = make_user(tenant)  # personal-data + diary v1 (make_user seeds both)
+        nutrition.withdraw_diary(user)  # → no basis at all
         decisions = plan(user)
-        assert only(decisions, user).reason == "no_health_consent"
+        # The shared gate (``selection.check_common``) reads the diary consent
+        # first and names it; the basis behind it is closed for the same
+        # reason. Either way: no hint for a person with no nutrition basis.
+        assert only(decisions, user).reason in ("no_food_consent", "no_health_consent")
+        assert only(decisions, user).send is False
+
+    def test_the_diary_consent_alone_is_a_basis(self, tenant: Tenant) -> None:
+        """DRF-2100 — a new person gives only food-diary-v1 and never HEALTH."""
+        user = make_user(tenant)
+        grant_marketing(user)
+        assert not ConsentRecord.all_tenants.filter(
+            bot_user=user, consent_type=ConsentRecord.ConsentType.HEALTH.value
+        ).exists()
+        assert only(plan(user), user).reason != "no_health_consent"
 
     def test_a_throwing_consent_read_fails_closed(self, tenant: Tenant, monkeypatch) -> None:
         user = coach_user(tenant)
 
-        from apps.consent.services import has_global_consent as real
+        def boom(bot_user):
+            raise RuntimeError("db down")
 
-        def boom(bot_user, consent_type, **kwargs):
-            if consent_type == ConsentRecord.ConsentType.HEALTH.value:
-                raise RuntimeError("db down")
-            return real(bot_user, consent_type, **kwargs)
-
-        monkeypatch.setattr("apps.consent.services.has_global_consent", boom)
+        # The basis predicate itself blows up (DRF-2100: it is the one the
+        # coach asks); the coach must read that as «no basis», not as «fine».
+        monkeypatch.setattr("apps.consent.nutrition.diary_or_health_granted", boom)
         decisions = plan(user)
         assert only(decisions, user).reason == "no_health_consent"
 
@@ -739,14 +755,16 @@ class TestDryRunCommand:
     def test_the_recipient_and_the_blocked_shapes(self, tenant: Tenant) -> None:
         recipient = coach_user(tenant, suffix="ok")
 
-        no_health = make_user(tenant, suffix="nohealth")  # personal-data only
+        no_health = make_user(tenant, suffix="nohealth")
+        nutrition.withdraw_diary(no_health)  # personal-data only: no diary v1, no legacy HEALTH
 
         opted_out_pref = coach_user(tenant, suffix="pref", extra_prefs={"coach_hints": False})
 
         rows = self._rows(self._run())
         assert rows[str(recipient.pk)]["send"] is True
         assert rows[str(recipient.pk)]["reason"] == "due"
-        assert rows[str(no_health.pk)]["reason"] == "no_health_consent"
+        assert rows[str(no_health.pk)]["reason"] in ("no_food_consent", "no_health_consent")
+        assert rows[str(no_health.pk)]["send"] is False
         assert rows[str(opted_out_pref.pk)]["reason"] == "hints_off"
 
     def test_no_message_text_reaches_the_report(self, tenant: Tenant) -> None:

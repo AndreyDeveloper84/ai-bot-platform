@@ -38,17 +38,20 @@
 
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING
 
+from apps.consent import services
 from apps.consent.models import ConsentRecord
 from apps.consent.services import (
-    has_global_consent,
     record_person_consent,
     withdraw_person_consent,
 )
 
 if TYPE_CHECKING:
     from apps.identity.models import BotUser
+
+logger = logging.getLogger(__name__)
 
 #: Дневник: еда, напитки, фотографии, голосовые — scope M1.
 DIARY = ConsentRecord.ConsentType.FOOD_DIARY_PROCESSING.value
@@ -133,7 +136,9 @@ def diary_is_granted(bot_user: "BotUser") -> bool:
     механизма: строка v0 продолжала бы открывать дневник, а 409 на выдаче
     никогда бы не случился, потому что экран согласия не показали бы.
     """
-    return has_global_consent(bot_user, DIARY, document_version=FOOD_DIARY_CONSENT_DOCUMENT_VERSION)
+    return services.has_global_consent(
+        bot_user, DIARY, document_version=FOOD_DIARY_CONSENT_DOCUMENT_VERSION
+    )
 
 
 def diary_current_record(bot_user: "BotUser") -> ConsentRecord | None:
@@ -154,10 +159,72 @@ def diary_current_record(bot_user: "BotUser") -> ConsentRecord | None:
     )
 
 
+# --- DRF-2100 — одно согласие дневника; старый HEALTH — совместимость -----
+#
+# Решение владельца 18.09 (§48 п.8б), дословно: «HEALTH пока не удалять из
+# данных и схемы: перестать создавать новые отдельные согласия, сохранить
+# совместимость со старыми. Удаление типа — отдельная миграция после пилота».
+#
+# Совместимость — про ЧТЕНИЕ и показ: блок питания в консьерже, подсказки,
+# строка диетолога, wellness-проактив и пункт меню открываются человеку,
+# который дал старый HEALTH и не давал v1. Запись в дневник — ворота
+# :mod:`apps.consent.diary_gate` (DRF-2093) — остаётся v1-only: она и до
+# этого листа требовала реестр дневника (решение главного окна 18.09, по
+# слову владельца: «сохранить совместимость», не «расширить»).
+#
+# Старая строка HEALTH признаётся под ЛЮБОЙ версией: её текст больше не
+# показывается и не поднимается, сверять его не с чем. Строка дневника —
+# только на текущий текст (:func:`diary_is_granted`), как и была.
+
+_LEGACY_HEALTH = ConsentRecord.ConsentType.HEALTH.value
+
+
+def diary_or_health_granted(bot_user: "BotUser") -> bool:
+    """Есть ли у человека основание на данные о питании: дневник v1 ИЛИ старый HEALTH.
+
+    Fail-closed: любая ошибка чтения — «основания нет». Ошибиться в другую
+    сторону значило бы открыть особую категорию по сбою БД.
+
+    Чтение реестра — через ``services.has_global_consent`` по модулю, а не по
+    имени, импортированному сюда: читатели и до этого листа подменяли
+    реестр в тестах по адресу ``apps.consent.services.has_global_consent``,
+    и подмена обязана доставать все шесть разом — иначе один из них тест
+    проверял бы мимо.
+    """
+    try:
+        if diary_is_granted(bot_user):
+            return True
+        return services.has_global_consent(bot_user, _LEGACY_HEALTH)
+    except Exception:  # noqa: BLE001 — fail-closed: основание не доказано
+        logger.exception("consent.nutrition.diary_or_health_check_failed")
+        return False
+
+
+def diary_or_health_current_record(bot_user: "BotUser") -> ConsentRecord | None:
+    """Действующая строка, которую признаёт :func:`diary_or_health_granted`.
+
+    Дневник v1 — первым: у человека с обеими строками экран показывает дату
+    того согласия, которое сегодня выдаётся; старый HEALTH — когда v1 нет.
+    """
+    diary = diary_current_record(bot_user)
+    if diary is not None:
+        return diary
+    return (
+        ConsentRecord.all_tenants.filter(
+            bot_user=bot_user,
+            consent_type=_LEGACY_HEALTH,
+            granted=True,
+            withdrawn_at__isnull=True,
+        )
+        .order_by("-captured_at")
+        .first()
+    )
+
+
 def calculation_is_granted(bot_user: "BotUser") -> bool:
     """Действует ли согласие на персональный расчёт СЕЙЧАС.
 
     «Сейчас», а не «когда-нибудь»: отозванное согласие обязано закрывать
     поверхность в тот же миг, иначе предикат повторяет дефект колонки.
     """
-    return has_global_consent(bot_user, CALCULATION)
+    return services.has_global_consent(bot_user, CALCULATION)

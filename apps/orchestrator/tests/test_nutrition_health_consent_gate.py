@@ -11,9 +11,14 @@
 согласия (мокается только сеть до Ayla):
 
 1. без ``HEALTH`` — отказ, до Ayla дело не доходит;
-2. после :func:`apps.consent.health.grant` — тот же вызов, те же данные,
-   ответ по существу;
+2. со строкой ``HEALTH`` — тот же вызов, те же данные, ответ по существу;
 3. после :func:`apps.consent.health.withdraw` — снова отказ.
+
+DRF-2100: выдачи HEALTH больше нет — ручка профиля выдаёт согласие
+дневника ``food-diary-v1``, а старые строки HEALTH остаются действующими
+(решение владельца 18.09, §48 п.8б). Узлы ниже сеют СТАРУЮ строку тестовым
+помощником ``seed_legacy_health`` и держат совместимость; новый путь — узел
+``test_the_diary_consent_v1_opens_the_surface_without_any_health_row``.
 
 Плюс то, ради чего выдача сделана person-level: человек соглашается в
 мини-приложении, а читает согласие консьерж — это РАЗНЫЕ ``BotUser``
@@ -30,6 +35,7 @@ from unittest.mock import Mock
 import pytest
 
 from apps.consent import health as health_consent
+from apps.consent.tests.legacy_health import seed_legacy_health
 from apps.consent.models import ConsentRecord
 from apps.consent.services import record_global_consent, withdraw_personal_data_for_bot_users
 from apps.identity.models import BotUser
@@ -106,10 +112,6 @@ def concierge_user(miniapp_user: BotUser) -> BotUser:
     return user
 
 
-def _grant_version() -> str:
-    return health_consent.HEALTH_CONSENT_DOCUMENT_VERSION
-
-
 class TestGrantOpensTheSurface:
     """Отказ, выдача, ответ по существу, отзыв, снова отказ."""
 
@@ -120,7 +122,7 @@ class TestGrantOpensTheSurface:
     def test_after_grant_the_same_call_answers(self, miniapp_user, ayla) -> None:
         assert build_nutrition_context_block(miniapp_user) == ""
 
-        health_consent.grant(miniapp_user, document_version=_grant_version())
+        seed_legacy_health(miniapp_user)
 
         block = build_nutrition_context_block(miniapp_user)
         assert block != ""
@@ -129,7 +131,7 @@ class TestGrantOpensTheSurface:
         ayla.assert_called()
 
     def test_withdraw_puts_it_back_to_sleep(self, miniapp_user, ayla) -> None:
-        health_consent.grant(miniapp_user, document_version=_grant_version())
+        seed_legacy_health(miniapp_user)
         assert build_nutrition_context_block(miniapp_user) != ""
 
         withdrawn = health_consent.withdraw(miniapp_user)
@@ -139,7 +141,7 @@ class TestGrantOpensTheSurface:
 
     def test_withdraw_keeps_the_audit_row(self, miniapp_user) -> None:
         """Отзыв не удаляет доказательство — он его датирует (append-only)."""
-        health_consent.grant(miniapp_user, document_version=_grant_version())
+        seed_legacy_health(miniapp_user)
         health_consent.withdraw(miniapp_user)
 
         rows = ConsentRecord.all_tenants.filter(
@@ -150,7 +152,7 @@ class TestGrantOpensTheSurface:
 
     def test_grant_is_idempotent(self, miniapp_user) -> None:
         for _ in range(3):
-            health_consent.grant(miniapp_user, document_version=_grant_version())
+            seed_legacy_health(miniapp_user)
         assert (
             ConsentRecord.all_tenants.filter(
                 bot_user=miniapp_user,
@@ -186,21 +188,30 @@ class TestSeparateFromPersonalData:
         )
         assert no_base.consent_at is None
 
-        health_consent.grant(no_base, document_version=_grant_version())
+        seed_legacy_health(no_base)
 
         no_base.refresh_from_db()
         assert health_consent.is_granted(no_base) is True  # согласие записано
         assert no_base.consent_at is None  # а база — нет
 
-    def test_unknown_disclosure_version_is_refused(self, miniapp_user) -> None:
-        """Согласие записывается на показанный текст, а не на абстрактное «да»."""
-        with pytest.raises(health_consent.UnknownDisclosureVersionError):
-            health_consent.grant(miniapp_user, document_version="health-data-v0")
-        assert health_consent.is_granted(miniapp_user) is False
+    def test_the_diary_consent_v1_opens_the_surface_without_any_health_row(
+        self, miniapp_user, ayla
+    ) -> None:
+        """DRF-2100 — the path a NEW person takes: one diary consent, no HEALTH."""
+        from apps.consent import nutrition
+
+        nutrition.grant_diary(
+            miniapp_user, document_version=nutrition.FOOD_DIARY_CONSENT_DOCUMENT_VERSION
+        )
+
+        assert not ConsentRecord.all_tenants.filter(
+            bot_user=miniapp_user, consent_type=ConsentRecord.ConsentType.HEALTH
+        ).exists()
+        assert build_nutrition_context_block(miniapp_user) != ""
 
     def test_personal_data_withdrawal_cascades_to_health(self, miniapp_user) -> None:
         """Вышел из персонализированного сервиса — особая категория закрылась."""
-        health_consent.grant(miniapp_user, document_version=_grant_version())
+        seed_legacy_health(miniapp_user)
 
         withdraw_personal_data_for_bot_users(
             BotUser.all_tenants.filter(id=miniapp_user.id), source="test:erase"
@@ -218,7 +229,7 @@ class TestGrantReachesTheReadingSurface:
         assert build_nutrition_context_block(concierge_user) == ""
 
         # Тап в мини-приложении — по своей строке.
-        health_consent.grant(miniapp_user, document_version=_grant_version())
+        seed_legacy_health(miniapp_user)
 
         # Консьерж читает СВОЮ строку и должен увидеть согласие.
         assert build_nutrition_context_block(concierge_user) != ""
@@ -226,7 +237,7 @@ class TestGrantReachesTheReadingSurface:
     def test_withdraw_from_miniapp_closes_the_concierge_shell(
         self, miniapp_user, concierge_user, ayla
     ) -> None:
-        health_consent.grant(miniapp_user, document_version=_grant_version())
+        seed_legacy_health(miniapp_user)
         assert build_nutrition_context_block(concierge_user) != ""
 
         health_consent.withdraw(miniapp_user)
@@ -245,7 +256,7 @@ class TestGrantReachesTheReadingSurface:
         )
         record_global_consent(stranger, source="test:welcome")
 
-        health_consent.grant(miniapp_user, document_version=_grant_version())
+        seed_legacy_health(miniapp_user)
 
         assert health_consent.is_granted(stranger) is False
         assert build_nutrition_context_block(stranger) == ""

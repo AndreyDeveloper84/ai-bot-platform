@@ -270,7 +270,7 @@ def persist_observation(
 
 
 def _health_open(bot_user: Any) -> bool:
-    """HEALTH granted, proven by a record — fail-closed on any error.
+    """Nutrition basis (diary v1 or legacy HEALTH) proven by a record — fail-closed.
 
     ``has_global_consent`` because the personal surface runs tenant-less.
     PERSONAL_DATA is not re-checked here: the diary render above this call
@@ -278,10 +278,10 @@ def _health_open(bot_user: Any) -> bool:
     message it rides on.
     """
     try:
-        from apps.consent.models import ConsentRecord
-        from apps.consent.services import has_global_consent
+        from apps.consent.nutrition import diary_or_health_granted
 
-        return has_global_consent(bot_user, ConsentRecord.ConsentType.HEALTH.value)
+        # DRF-2100 — the basis is the diary consent v1 OR a legacy HEALTH row.
+        return diary_or_health_granted(bot_user)
     except Exception:  # noqa: BLE001 — fail-closed: no proven basis, no line
         logger.exception("orchestrator.coach_observation.consent_check_failed")
         return False

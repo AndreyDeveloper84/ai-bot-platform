@@ -227,7 +227,7 @@ def plan_coach_hints(
 
 
 def _health_basis(bot_user: Any) -> bool:
-    """PERSONAL_DATA **and** HEALTH, proven by records — fail-closed.
+    """PERSONAL_DATA **and** the nutrition basis (diary v1 or legacy HEALTH) — fail-closed.
 
     Same two-key standard :func:`apps.orchestrator.food_history.
     read_consent_open` applies to READING the diary: a hint that reasons
@@ -236,11 +236,13 @@ def _health_basis(bot_user: Any) -> bool:
     """
     try:
         from apps.consent.models import ConsentRecord
+        from apps.consent.nutrition import diary_or_health_granted
         from apps.consent.services import has_global_consent
 
+        # DRF-2100 — the basis is the diary consent v1 OR a legacy HEALTH row.
         return has_global_consent(
             bot_user, ConsentRecord.ConsentType.PERSONAL_DATA.value
-        ) and has_global_consent(bot_user, ConsentRecord.ConsentType.HEALTH.value)
+        ) and diary_or_health_granted(bot_user)
     except Exception:  # noqa: BLE001 — fail-closed: no proven basis, no hint
         logger.exception("nutrition_proactive.coach.consent_check_failed")
         return False

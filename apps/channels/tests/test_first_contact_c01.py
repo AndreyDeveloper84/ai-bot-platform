@@ -668,14 +668,17 @@ class TestDiaryOnFirstContact:
     def consent(self, monkeypatch):
         """Согласие ``HEALTH`` без похода в базу.
 
-        Подменяется ``apps.consent.health.is_granted`` — тот самый
-        предикат, которым ходит ``marketplace.health_granted``, — а не
+        Подменяется ``apps.consent.nutrition.diary_or_health_granted``
+        (DRF-2100) — тот самый предикат, которым ходит
+        ``marketplace.health_granted``, — а не
         сам ``health_granted``: иначе экран проверялся бы против
         собственной заглушки, а не против сторожа согласия.
         """
 
         def _set(granted: bool) -> None:
-            monkeypatch.setattr("apps.consent.health.is_granted", lambda _u: granted)
+            monkeypatch.setattr(
+                "apps.consent.nutrition.diary_or_health_granted", lambda _u: granted
+            )
 
         _set(False)
         return _set
