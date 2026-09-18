@@ -62,6 +62,15 @@ urlpatterns = [
     # DRF-1802 (M10) — «своя услуга» = заявка о разрыве канона: прокси в
     # каталог (M9). Решает только владелец в admin каталога — мутаций статуса
     # здесь нет. `similar` раньше `<uuid:request_id>`.
+    # DRF-1811 (M19) — место работы соло-мастера: прокси в каталог (M11 #502,
+    # M12 #476). Подсказки адреса — POST: адрес не должен оседать в URL.
+    path("service-locations", views.service_locations, name="service_locations"),
+    path(
+        "service-locations/<uuid:item_id>",
+        views.service_location_detail,
+        name="service_location_detail",
+    ),
+    path("geocoding/suggest", views.address_suggest, name="address_suggest"),
     path("canon-gap-requests", views.canon_gap_requests, name="canon_gap_requests"),
     path("canon-gap-requests/similar", views.canon_gap_similar, name="canon_gap_similar"),
     path(

@@ -977,6 +977,25 @@ NOT_SWEPT_ROUTES: dict[str, str] = {
         "response is exactly {accepting_bookings: bool, status} of the master's "
         "own profile, no customer record — shape pinned in test_accepting_bookings_1845"
     ),
+    # DRF-1811 (M19) — место работы соло-мастера: прокси в каталог. Ответ —
+    # своё место (адрес мастера, подпись клиенту, статус, координаты) и зоны
+    # выезда; клиентских данных нет по построению; ответ приходит из каталога,
+    # поэтому свип живым клиентом не собрать — покрыты подменённым клиентом
+    # в test_service_locations_1811 (shown_to_clients — слово каталога).
+    "service_locations": (
+        "GET/POST proxy to the catalog's service-locations route (DRF-1811): the "
+        "master's own place and travel areas, no customer record — covered with a "
+        "stubbed client in test_service_locations_1811"
+    ),
+    "service_location_detail": (
+        "PATCH proxy to one own place/area in the catalog (DRF-1811); no customer "
+        "record — covered with a stubbed client in test_service_locations_1811"
+    ),
+    "address_suggest": (
+        "POST; address suggestions from the catalog's geocoder for the master's OWN "
+        "address (q in the body, never logged); no customer record — covered with a "
+        "stubbed client in test_service_locations_1811"
+    ),
     "reviews": (
         "GET proxy to the catalog's own-reviews route (DRF-1857): lives in the "
         "catalog, so a live sweep cannot build it; the client is «Имя Ф.» / «Клиент» / "

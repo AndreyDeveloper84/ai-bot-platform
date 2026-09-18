@@ -1303,6 +1303,108 @@ class AylaBookingHTTPClient:
             raise ScheduleBlockConflictError("has_active_appointments")
         return self._ok(resp, success=(200,))
 
+    # ── DRF-1811 (M19): место работы соло-мастера — прокси к M11 (#502) и M12 (#476)
+
+    def get_service_locations(
+        self,
+        *,
+        specialist_id: str,
+        external_user_id: str,
+    ) -> dict[str, Any]:
+        """``GET internal/specialists/{id}/service-locations/`` — своё место и зоны.
+
+        Субъект — мастер (как у часов): профиль в URL обязан быть его
+        собственным, иначе каталог отвечает 403 → :class:`BookingBadRequestError`.
+        Ответ — ``{specialist_id, city, places[], areas[]}`` каталога как есть.
+        """
+        resp = self._request(
+            "GET",
+            f"specialists/{specialist_id}/service-locations/",
+            external_user_id=external_user_id,
+        )
+        return self._ok(resp, success=(200,))
+
+    def create_service_location(
+        self,
+        *,
+        specialist_id: str,
+        external_user_id: str,
+        fields: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``POST internal/specialists/{id}/service-locations/`` — место или зона.
+
+        Тело — как ввёл мастер (``kind`` + ``address``/``label``/``note_for_client``
+        для места, ``kind=mobile`` + ``coverage`` для зоны); проверяет каталог,
+        а не бот — лишнее поле, ``tenant_id`` или ``status`` он отвергает 400 по
+        имени. 409 (второе место, чужой workspace, мастер салона) — по коду
+        каталога в ``BookingBadRequestError.code``.
+        """
+        resp = self._request(
+            "POST",
+            f"specialists/{specialist_id}/service-locations/",
+            json_body=fields,
+            external_user_id=external_user_id,
+        )
+        return self._ok(resp, success=(200, 201))
+
+    def patch_service_location(
+        self,
+        *,
+        specialist_id: str,
+        external_user_id: str,
+        item_id: str,
+        fields: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``PATCH internal/specialists/{id}/service-locations/{item_id}/``."""
+        resp = self._request(
+            "PATCH",
+            f"specialists/{specialist_id}/service-locations/{item_id}/",
+            json_body=fields,
+            external_user_id=external_user_id,
+        )
+        return self._ok(resp, success=(200,))
+
+    def suggest_address(
+        self,
+        *,
+        specialist_id: str,
+        external_user_id: str,
+        q: str,
+    ) -> dict[str, Any]:
+        """``POST internal/specialists/{id}/geocoding/suggest/`` — подсказки адреса.
+
+        Строка — в теле, не в URL (M12a, #476): адрес мастера не должен оседать
+        в журналах доступа. Здесь она тоже не логируется.
+
+        Каталог отвечает 503 (``misconfigured`` / ``suggest_not_supported`` /
+        ``unavailable``), когда геокодер не настроен или лёг — на стенде
+        пилота это ПОСТОЯННОЕ состояние (ключ пуст). Такой 503 — не падение
+        каталога, и выключатель :class:`BookingUnavailableError` он не
+        дёргает: иначе один ввод адреса гасил бы весь клиент бронирования.
+        Возвращается ``{"available": False, "reason": <код>, "suggestions": []}``;
+        экран падает в ручной ввод. 409 ``no_city`` — тем же способом.
+        """
+        resp = self._request(
+            "POST",
+            f"specialists/{specialist_id}/geocoding/suggest/",
+            json_body={"q": q},
+            external_user_id=external_user_id,
+        )
+        if resp.status_code in (503, 409):
+            # Причина — в ``error.details.reason`` (misconfigured / no_city / …),
+            # ``error.code`` там общий (SERVICE_UNAVAILABLE / CONFLICT).
+            details = _err_details(resp) or {}
+            reason = str(details.get("reason") or "") or _err_code(resp).lower()
+            logger.info("booking_client.suggest_address.unavailable reason=%s", reason)
+            return {"available": False, "reason": reason, "suggestions": []}
+        data = self._ok(resp, success=(200,))
+        return {
+            "available": True,
+            "reason": None,
+            "city": data.get("city") if isinstance(data, dict) else None,
+            "suggestions": data.get("suggestions", []) if isinstance(data, dict) else [],
+        }
+
     # ── DRF-1802 (M10): «своя услуга» мастера = заявка о разрыве канона (M9) ─
 
     def list_canon_gap_requests(

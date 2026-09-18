@@ -34,7 +34,9 @@ CLIENT_MODULES = (
 RESOLVER = "catalog_specialist_id"
 
 CONVERTED = {
-    ("apps/master_api/views.py", 18),  # 17 + «Мои отзывы» (#1755)
+    # 17 + «Мои отзывы» (#1755) + место работы: GET/POST/PATCH service-locations
+    # и подсказки адреса (DRF-1811, M19) — четыре вызова через колонку.
+    ("apps/master_api/views.py", 22),
     ("apps/master_api/services/schedule_frame.py", 3),
     # 1933b: переведено
     ("apps/miniapp_api/views.py", 3),
