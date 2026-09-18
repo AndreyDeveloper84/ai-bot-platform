@@ -13,7 +13,11 @@ OWNER RULING 18.09 (вариант А). Сеть — ``pytest-httpx``: здес�
   читают его ровно два файла (перепись по AST);
 * **на 403 каталога — отказ по имени, TenantStaff нет** — ``test_r1_…``:
   credential_refused → ``CatalogAdminLinkRefused`` с причиной, строки нет,
-  код приглашения не погашен, аудит отказа записан после отката.
+  аудит отказа записан после отката;
+* **ввод admin-кода не ходит в каталог, роль в боте выдаётся** —
+  ``test_g2_…`` (положительная пара к r1): ruling п.1 читается строго —
+  operator-only capability; каталожную половину дозаводит оператор
+  повторной «Выдать роль» (тот же ключ идемпотентности).
 """
 
 from __future__ import annotations
@@ -155,19 +159,40 @@ class TestTheCatalogIsAskedFirst:
         assert "2085001" not in json.dumps(linked.payload)  # MAX id не в аудите
         assert len(_audit(STAFF_ROLE_GRANTED, person)) == 1
 
-    def test_g2_the_operator_issued_code_links_on_redemption_with_the_invite_as_actor(
+    @pytest.mark.httpx_mock(assert_all_responses_were_requested=False)
+    def test_g2_an_admin_code_grants_the_bot_role_and_never_calls_the_catalog(
         self, httpx_mock: HTTPXMock, tenant, person
     ):
-        httpx_mock.add_response(method="POST", url=_url(tenant), json=_ok(tenant), status_code=201)
+        """Узел из тела PR (положительная пара к r1): дверь кода каталог не зовёт —
+        даже когда каталог ответил бы 403, роль в боте выдана и код погашен."""
+        httpx_mock.add_response(method="POST", url=_url(tenant), status_code=403, json={})
         invite, code = issue_staff_invite(tenant=tenant, role=StaffInvite.Role.ADMIN)
 
         result = redeem_staff_invite(code=code, bot_user=person, tenant=tenant)
 
         assert result.role == "admin" and _rows(tenant, person) == ["admin"]
-        (req,) = httpx_mock.get_requests()
-        assert json.loads(req.content)["actor"] == f"staff_invite:{invite.id}"
+        assert httpx_mock.get_requests() == []  # в сеть ничего — ответ 403 так и не спрошен
         invite.refresh_from_db()
         assert invite.used_at is not None
+        # empty-assert-ok: роль выдана (строка выше), каталожной половины нет по построению
+        assert _audit(STAFF_SALON_ADMIN_LINKED, person) == []
+
+    def test_g2b_after_the_code_the_operator_adds_the_catalog_half_with_one_click(
+        self, httpx_mock: HTTPXMock, tenant, person
+    ):
+        """HOWTO шаг 9: после кода администратора оператор жмёт «Выдать роль» — один клик."""
+        httpx_mock.add_response(method="POST", url=_url(tenant), json=_ok(tenant), status_code=201)
+        _, code = issue_staff_invite(tenant=tenant, role=StaffInvite.Role.ADMIN)
+        redeem_staff_invite(code=code, bot_user=person, tenant=tenant)
+
+        result = grant_role_by_operator(
+            tenant=tenant, bot_user=person, role="admin", actor=_actor()
+        )
+
+        assert result.already_had_role is True  # строка уже была — от кода
+        assert len(httpx_mock.get_requests()) == 1 and _rows(tenant, person) == ["admin"]
+        (linked,) = _audit(STAFF_SALON_ADMIN_LINKED, person)
+        assert linked.payload["actor_label"] == "django_admin:user=7"
 
     def test_g3_a_repeat_grant_asks_again_with_the_same_key_and_is_replayed(
         self, httpx_mock: HTTPXMock, tenant, person
@@ -210,17 +235,16 @@ class TestTheCatalogIsAskedFirst:
 
 
 class TestRefusalByName:
-    def test_r1_catalog_403_is_a_named_refusal_no_row_and_the_code_survives(
+    def test_r1_catalog_403_is_a_named_refusal_and_no_row_is_written(
         self, httpx_mock: HTTPXMock, tenant, person
     ):
         """Узел из тела PR: на 403 каталога — отказ по имени, TenantStaff нет."""
         httpx_mock.add_response(
             method="POST", url=_url(tenant), status_code=403, json={"detail": "no"}
         )
-        invite, code = issue_staff_invite(tenant=tenant, role=StaffInvite.Role.ADMIN)
 
         with pytest.raises(CatalogAdminLinkRefused) as exc:
-            redeem_staff_invite(code=code, bot_user=person, tenant=tenant)
+            grant_role_by_operator(tenant=tenant, bot_user=person, role="admin", actor=_actor())
 
         assert (
             exc.value.reason == "credential_refused"
@@ -232,12 +256,12 @@ class TestRefusalByName:
         )
         # empty-assert-ok: отказ пойман выше (pytest.raises), аудит отказа — присутствие ниже
         assert _rows(tenant, person) == []
-        invite.refresh_from_db()
-        assert invite.used_at is None  # код не погашен — человек повторит после починки
         (refused,) = _audit(STAFF_SALON_ADMIN_LINK_REFUSED, person)  # аудит отказа пережил откат
         assert refused.payload["reason"] == "credential_refused"
         assert refused.payload["correlation_id"] == exc.value.correlation_id
-        assert refused.payload["actor_label"] == f"staff_invite:{invite.id}"
+        assert refused.payload["actor_label"] == "django_admin:user=7"
+        # empty-assert-ok: пара — аудит отказа найден выше; аудит выдачи пишется после ядра и не наступил
+        assert _audit(STAFF_ROLE_GRANTED, person) == []
         # empty-assert-ok: пара — строка аудита отказа найдена выше
         assert _audit(STAFF_SALON_ADMIN_LINKED, person) == []
 
@@ -368,8 +392,10 @@ class TestTheSecretStaysOut:
 
 
 class TestTheGuards:
-    def test_c1_every_caller_of_the_core_names_its_actor(self):
-        """Все вызовы grant_staff_role передают actor_label — иначе каталожная половина безымянна."""
+    def test_c1_every_caller_of_the_core_names_its_actor_or_closes_the_door(self):
+        """Все вызовы grant_staff_role передают actor_label — иначе каталожная половина
+        безымянна; единственный вызов без него — дверь кода, и она закрыта явно
+        (``link_catalog=False``): пропущенный аргумент не может стать «безымянной» связью."""
         root = Path(__file__).resolve().parents[3]
         calls: list[str] = []
         for path in (root / "apps").rglob("*.py"):
@@ -384,14 +410,16 @@ class TestTheGuards:
                 name = fn.id if isinstance(fn, ast.Name) else getattr(fn, "attr", "")
                 if name != "grant_staff_role":
                     continue
-                keywords = {kw.arg for kw in node.keywords}
-                assert "actor_label" in keywords, (
-                    f"{rel}:{node.lineno} вызывает ядро без actor_label"
+                keywords = {kw.arg: kw.value for kw in node.keywords}
+                door_closed = (
+                    isinstance(keywords.get("link_catalog"), ast.Constant)
+                    and keywords["link_catalog"].value is False
                 )
-                calls.append(f"{rel}:{node.lineno}")
-        assert len(calls) == 3, (
-            calls
-        )  # _grant_staff_role, grant_role_by_operator, change_staff_role
+                assert "actor_label" in keywords or door_closed, (
+                    f"{rel}:{node.lineno} вызывает ядро без actor_label и без link_catalog=False"
+                )
+                calls.append(f"{rel}:{node.lineno}:{'closed' if door_closed else 'named'}")
+        assert sorted(c.rsplit(":", 1)[1] for c in calls) == ["closed", "named", "named"], calls
 
     def test_c2_the_link_is_asked_before_the_row_is_written(self):
         """Порядок в ядре — по AST: вызов ensure_catalog_salon_admin стоит выше TenantStaff.create."""

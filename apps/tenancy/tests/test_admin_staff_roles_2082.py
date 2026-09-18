@@ -42,9 +42,9 @@ from apps.identity.services.role_resolver import resolve_role
 from apps.tenancy.admin import TenantStaffAdmin
 from apps.tenancy.models import Tenant, TenantStaff
 
-# DRF-2085: роль admin спрашивает каталог (свежая учётка + TUR + связь) ДО
-# записи TenantStaff; здесь каталог — заглушка, его половина доказывается в
-# apps/identity/tests/test_salon_admin_link_2085.py.
+# DRF-2085: роль admin, выданная ОПЕРАТОРОМ, спрашивает каталог (свежая учётка +
+# TUR + связь) до записи TenantStaff; здесь каталог — заглушка, его половина
+# доказывается в apps/identity/tests/test_salon_admin_link_2085.py.
 pytestmark = [pytest.mark.django_db, pytest.mark.usefixtures("catalog_admin_link_stub")]
 
 CHANGELIST = "admin:tenancy_tenantstaff_changelist"

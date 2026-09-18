@@ -74,7 +74,6 @@ from apps.channels.max.staff_menu import (
 from apps.events.services import emit
 from apps.identity.services.identity_card import WHOAMI_COMMAND, build_card, render_for_person
 from apps.identity.services.role_resolver import resolve_role
-from apps.identity.services.salon_admin_link import CatalogAdminLinkRefused
 from apps.identity.services.staff_invites import (
     InviteError,
     MasterAlreadyLinked,
@@ -264,17 +263,6 @@ PERSON_ALREADY_MASTER = (
 OWNER_TAKEN = (
     "У салона уже есть владелец. Если владельца нужно сменить — "
     "это делается через поддержку, а не новым кодом."
-)
-
-# DRF-2085. Код администратора верен, но каталог не подтвердил учётную
-# запись администратора салона (или у бота не задан секрет этой ручки):
-# роль НЕ выдана, код НЕ погашен — человек повторит после починки. Причина
-# — оператору в аудит и лог, не сюда: человеку нужно знать одно — код ещё
-# действует, и чинит не он.
-CATALOG_ADMIN_NOT_LINKED = (
-    "Код верный, но каталог пока не подтвердил вашу учётную запись "
-    "администратора — доступ не выдан. Код продолжает действовать: "
-    "напишите в техподдержку салона, после исправления введите его ещё раз."
 )
 
 # --- master invitation, opened by a start link (DRF-1424) -----------------
@@ -1616,16 +1604,6 @@ def _redeem_and_greet(event: CanonicalEvent, code: str, entry) -> None:
         return
     except PersonAlreadyMaster:
         _reply(event, PERSON_ALREADY_MASTER)
-        return
-    except CatalogAdminLinkRefused as exc:
-        # DRF-2085: тоже подкласс InviteError — стоит выше общей ветки по
-        # той же причине, что две предыдущие.
-        logger.warning(
-            "channels.max.salon.admin_link_refused reason=%s correlation_id=%s",
-            exc.reason,
-            exc.correlation_id,
-        )
-        _reply(event, CATALOG_ADMIN_NOT_LINKED)
         return
     except InviteError as exc:  # future slugs — never leak an exception text
         logger.warning("channels.max.salon.redeem_failed slug=%s", getattr(exc, "slug", "?"))

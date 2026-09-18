@@ -92,28 +92,6 @@ class TestEachRefusalGetsItsOwnWords:
 
 
 class TestTheGeneralBranchStillCatchesTheRest:
-    def test_the_catalog_refusal_says_the_code_still_works(self, monkeypatch, said):
-        """DRF-2085: каталог не подтвердил администратора — свои слова: роль не
-        выдана, код действует, чинит техподдержка; не «код не подошёл»."""
-        from types import SimpleNamespace
-
-        from apps.identity.services.salon_admin_link import CatalogAdminLinkRefused
-
-        exc = CatalogAdminLinkRefused(
-            "credential_refused",
-            correlation_id="c-2085",
-            tenant=SimpleNamespace(id="t", slug="s-2085"),
-            bot_user=SimpleNamespace(pk="p"),
-            actor_label="staff_invite:i",
-        )
-        monkeypatch.setattr(salon_handler, "redeem_staff_invite_by_identity", _redeem_raising(exc))
-
-        salon_handler._redeem_and_greet(_Event(), "AYLA-7K3M", object())
-
-        assert said == [salon_handler.CATALOG_ADMIN_NOT_LINKED]
-        assert said[0] != salon_handler.CODE_NOT_ACCEPTED
-        assert "продолжает действовать" in said[0] and "credential_refused" not in said[0]
-
     def test_an_unknown_invite_error_still_gets_the_hedge(self, monkeypatch, said):
         """Положительная стража: общая ветка не сломана.
 

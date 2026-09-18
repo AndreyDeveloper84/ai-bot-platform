@@ -390,16 +390,12 @@ def redeem_staff_invite_by_identity(
     from apps.identity.services.resolver import resolve_or_create_bot_user
     from apps.tenancy.context import tenant_scope
 
-    from apps.identity.services.salon_admin_link import recording_refusals
-
     _check_rate_limit_for(channel, channel_user_id)
     normalized = normalize_code(code)
     code_hash = _hash_code(normalized)
     now = timezone.now()
 
-    # DRF-2085: отказ каталога на роли admin откатывает всё (код остаётся
-    # действующим) и пишется в аудит уже после отката.
-    with recording_refusals(), transaction.atomic():
+    with transaction.atomic():
         # No select_related under the row lock (DRF-1130 guard): the tenant
         # is read lazily below, one extra query, no LEFT OUTER JOIN under
         # FOR UPDATE.
@@ -502,14 +498,11 @@ def redeem_staff_invite(*, code: str, bot_user: BotUser, tenant) -> RedeemResult
 
     _check_rate_limit(bot_user)
 
-    from apps.identity.services.salon_admin_link import recording_refusals
-
     normalized = normalize_code(code)
     code_hash = _hash_code(normalized)
     now = timezone.now()
 
-    # DRF-2085: см. redeem_staff_invite_by_identity — тот же контур отказа.
-    with recording_refusals(), transaction.atomic():
+    with transaction.atomic():
         # `select_related` must NOT include `catalog_master` here.
         #
         # It is a nullable FK, so Django renders it as a LEFT OUTER JOIN,
@@ -649,9 +642,12 @@ def _grant_staff_role(invite: StaffInvite, bot_user: BotUser) -> RedeemResult:
         role=invite.role,
         created_by=invite.created_by,
         invite_id=invite.id,
-        # Автор каталожной половины — код, выданный оператором
-        # platform_operations (его actor_label — в аудите выдачи кода).
-        actor_label=f"staff_invite:{invite.id}",
+        # DRF-2085, ruling п.1 читается строго (главное окно 18.09): ввод
+        # кода — действие приглашённого, и артефакт оператора его полномочие
+        # не переносит. Каталожную половину admin делает только оператор —
+        # «Выдать роль» в Django Admin, повторно после кода (тот же ключ
+        # идемпотентности дозаводит её без дублей).
+        link_catalog=False,
     )
 
 
@@ -663,6 +659,7 @@ def grant_staff_role(
     created_by: BotUser | None = None,
     invite_id: Any = None,
     actor_label: str = "",
+    link_catalog: bool = True,
 ) -> RedeemResult:
     """Grant ``role`` to ``bot_user`` in ``tenant_id`` — the one authority.
 
@@ -690,8 +687,11 @@ def grant_staff_role(
     enclosing transaction — no row, named reason, «что сделать» in the
     text. The call happens even when the row already exists: administrators
     granted before this rule have no catalog half, and a repeat grant is the
-    operator's way to add it. ``actor_label`` names the operator (or the
-    operator-issued code) in both audits.
+    operator's way to add it. ``actor_label`` names the operator in both
+    audits. ``link_catalog=False`` is the invite-code door
+    (:func:`_grant_staff_role`): the ruling's capability is operator-only,
+    so a redeemed admin code grants the bot role and leaves the catalog
+    half to the operator's «Выдать роль».
 
     Raises:
       OwnerAlreadyExists — the tenant already has an active owner.
@@ -699,7 +699,7 @@ def grant_staff_role(
     """
 
     link_outcome = None
-    if role == StaffInvite.Role.ADMIN:
+    if role == StaffInvite.Role.ADMIN and link_catalog:
         from apps.identity.services import salon_admin_link
 
         tenant = Tenant.all_objects.get(pk=tenant_id)
