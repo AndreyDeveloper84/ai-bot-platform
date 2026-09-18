@@ -145,6 +145,14 @@ STAFF_INVITE_ISSUED = "staff.invite_issued"
 # describing a rollback would be a lie.
 STAFF_ACCESS_REVOKED = "staff.access_revoked"
 
+# --- Staff role management from Django Admin (DRF-2082) -------------------
+# Emitted from apps.identity.services.staff_roles when a platform operator
+# grants or changes a salon role by hand (no invite code). One row per
+# call, after the result. Payload: {surface, actor_label, person_id, role,
+# previous_roles?, already_had_role?}. Names only — never a phone or a MAX id.
+STAFF_ROLE_GRANTED = "staff.role_granted"
+STAFF_ROLE_CHANGED = "staff.role_changed"
+
 # --- Specialist onboarded into a salon (поток A, п. 3) --------------------
 # Emitted from apps.identity.services.specialist_onboarding when an operator
 # (Django Admin / operations tool) or a salon admin (Mini App «Команда»)
@@ -403,6 +411,8 @@ CANONICAL_EVENTS: frozenset[str] = frozenset(
         STAFF_INVITE_ISSUED,
         STAFF_ACCESS_REVOKED,
         STAFF_SPECIALIST_ONBOARDED,
+        STAFF_ROLE_GRANTED,
+        STAFF_ROLE_CHANGED,
         MASTER_SERVICES_CHANGED,
         MASTER_SERVICE_EDGE_CREATED,
         MASTER_SERVICE_EDGE_DELETED,

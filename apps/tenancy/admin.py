@@ -29,11 +29,12 @@ Key behaviour:
 from __future__ import annotations
 
 from django import forms
-from django.contrib import admin
+from django.contrib import admin, messages
+from django.contrib.admin.helpers import ACTION_CHECKBOX_NAME
 from django.core.exceptions import PermissionDenied, ValidationError
 from django.http import Http404, HttpRequest, HttpResponse, HttpResponseRedirect
 from django.template.response import TemplateResponse
-from django.urls import path
+from django.urls import path, reverse
 from django.utils import timezone
 from django.utils.html import format_html, format_html_join
 
@@ -759,6 +760,17 @@ class TenantAdmin(AylaAdminMedia, admin.ModelAdmin):
 # ---------------------------------------------------------------------------
 
 
+def _looks_like_uuid(value: str) -> bool:
+    """Отсев до запроса: кривой id — «не найден», а не 500 из ``UUIDField``."""
+    import uuid
+
+    try:
+        uuid.UUID(value)
+    except (ValueError, AttributeError, TypeError):
+        return False
+    return True
+
+
 class _ReadOnlyStaffAdmin(AylaAdminMedia, admin.ModelAdmin):
     """Общая часть обеих карточек: показывать, но не трогать.
 
@@ -779,6 +791,16 @@ class _ReadOnlyStaffAdmin(AylaAdminMedia, admin.ModelAdmin):
     empty_value_display = "нет данных"
 
     def has_view_permission(self, request: HttpRequest, obj=None) -> bool:
+        return request.user.has_perm(self.PLATFORM_OPERATIONS_PERM)
+
+    def has_manage_permission(self, request: HttpRequest) -> bool:
+        """DRF-2082: действия над доступами — тем же правом, что и просмотр.
+
+        ``has_change_permission`` здесь безусловно ``False`` (форма не
+        пишет), поэтому у действий свой предикат ``permissions=["manage"]``,
+        как у ``has_onboard_permission`` в карточке мастера (#1811). Без
+        права действий нет в списке — не только отказ при нажатии.
+        """
         return request.user.has_perm(self.PLATFORM_OPERATIONS_PERM)
 
     def has_module_permission(self, request: HttpRequest) -> bool:
@@ -823,6 +845,34 @@ class TenantStaffAdmin(_ReadOnlyStaffAdmin):
     # модели появилось бы на экране само, никем не решённое.
     fields = ("tenant", "bot_user", "role", "created_at", "created_by", "deactivated_at")
     readonly_fields = fields
+    change_list_template = "admin/tenancy/tenantstaff/change_list.html"
+    actions = ("change_staff_role", "revoke_staff_access")
+
+    #: Сколько людей показывать на странице «выдать роль» — недавно активные
+    #: строки салона; для остальных есть поле с id (как у карточки мастера).
+    GRANT_CANDIDATE_LIMIT = 200
+
+    #: Слово оператору на каждый именованный исход сервисов. Ключи — слуги
+    #: исключений и ответов ядра; полноту держит тест.
+    ROLE_WORDS: dict[str, str] = {
+        "already_had_role": "У этого человека уже есть такая роль в салоне — второй строки нет.",
+        "owner_already_exists": (
+            "В салоне уже есть действующий владелец. Передача владения — "
+            "сначала отозвать прежнего, потом выдать роль."
+        ),
+        "owner_role_locked": (
+            "Роль действующего владельца этим действием не меняется. Передача "
+            "владения — отозвать доступ, потом выдать роль новому."
+        ),
+        "owner_revoke_refused": (
+            "Доступ действующего владельца здесь не отзывается — это отдельное "
+            "решение, не операторское действие."
+        ),
+        "no_active_role": "У этого человека нет действующей роли в салоне — менять нечего.",
+        "unknown_role": "Такой роли в словаре нет.",
+        "person_in_other_tenant": "Этот человек принадлежит другому салону.",
+        "foreign_tenant": "Оператор не может действовать в этом салоне.",
+    }
 
     @admin.display(description="Состояние доступа")
     def access_state(self, obj: TenantStaff) -> str:
@@ -835,6 +885,212 @@ class TenantStaffAdmin(_ReadOnlyStaffAdmin):
         if obj.deactivated_at is None:
             return "Действует"
         return f"Отозван {obj.deactivated_at:%d.%m.%Y}"
+
+    # --- DRF-2082: управление доступами — через сервисы, не мимо ------------
+
+    def _actor(self, request: HttpRequest):  # noqa: ANN202
+        from apps.identity.services.specialist_onboarding import OnboardingActor
+
+        return OnboardingActor(
+            surface="django_admin",
+            audit_label=f"django_admin:user={request.user.pk}",
+            cross_tenant=True,
+            capability="platform_operations",
+        )
+
+    def _refusal(self, request: HttpRequest, slug: str) -> None:
+        self.message_user(request, self.ROLE_WORDS.get(slug, f"Отказ: {slug}."), messages.ERROR)
+
+    def get_urls(self):  # type: ignore[no-untyped-def]
+        return [
+            path(
+                "grant/",
+                self.admin_site.admin_view(self.grant_view),
+                name="tenancy_tenantstaff_grant",
+            ),
+            *super().get_urls(),
+        ]
+
+    def grant_view(self, request: HttpRequest) -> HttpResponse:
+        """«Выдать роль»: салон → человек из этого салона → роль → сервис.
+
+        Пишет ``grant_role_by_operator`` (то же ядро, что у кода приглашения);
+        страница только выбирает. Повтор — «уже есть» (предупреждение, не
+        ошибка и не вторая строка); чужой салон в id — отказ по имени.
+        """
+        from apps.identity.models import BotUser
+        from apps.identity.services import staff_roles
+        from apps.identity.services.staff_invites import OwnerAlreadyExists
+
+        if not self.has_manage_permission(request):
+            raise PermissionDenied
+        opts = self.model._meta  # noqa: SLF001
+        tenants = list(Tenant.all_objects.order_by("name"))
+        raw_tenant = (request.POST.get("tenant") or request.GET.get("tenant") or "").strip()
+        tenant = (
+            Tenant.all_objects.filter(pk=raw_tenant).first()
+            if _looks_like_uuid(raw_tenant)
+            else None
+        )
+
+        if request.method == "POST" and request.POST.get("apply") and tenant is not None:
+            raw_id = (
+                request.POST.get("bot_user_id_manual") or request.POST.get("bot_user_id") or ""
+            ).strip()
+            person = (
+                BotUser.all_tenants.filter(
+                    pk=raw_id, tenant_id=tenant.id, deleted_at__isnull=True
+                ).first()
+                if _looks_like_uuid(raw_id)
+                else None
+            )
+            role = (request.POST.get("role") or "").strip()
+            if person is None:
+                self._refusal(request, "person_in_other_tenant")
+            else:
+                try:
+                    result = staff_roles.grant_role_by_operator(
+                        tenant=tenant, bot_user=person, role=role, actor=self._actor(request)
+                    )
+                except staff_roles.StaffRoleError as exc:
+                    self._refusal(request, exc.slug)
+                except OwnerAlreadyExists:
+                    self._refusal(request, "owner_already_exists")
+                else:
+                    if result.already_had_role:
+                        self.message_user(
+                            request, self.ROLE_WORDS["already_had_role"], messages.WARNING
+                        )
+                    else:
+                        self.log_change(
+                            request, tenant, f"Выдана роль {role} человеку {person.pk} (DRF-2082)."
+                        )
+                        self.message_user(
+                            request,
+                            f"Роль {role} выдана. Доступ действует сразу.",
+                            messages.SUCCESS,
+                        )
+                    return HttpResponseRedirect(reverse("admin:tenancy_tenantstaff_changelist"))
+            return HttpResponseRedirect(f"{request.path}?tenant={tenant.pk}")
+
+        candidates = (
+            BotUser.all_tenants.filter(tenant_id=tenant.id, deleted_at__isnull=True)
+            .only("id", "display_name", "channel", "last_seen")
+            .order_by("-last_seen")[: self.GRANT_CANDIDATE_LIMIT]
+            if tenant is not None
+            else []
+        )
+        return TemplateResponse(
+            request,
+            "admin/tenancy/tenantstaff/grant.html",
+            {
+                **self.admin_site.each_context(request),
+                "title": "Выдать роль в салоне",
+                "opts": opts,
+                "tenants": tenants,
+                "tenant": tenant,
+                "candidates": candidates,
+                "candidate_limit": self.GRANT_CANDIDATE_LIMIT,
+                "roles": TenantStaff.Role.choices,
+            },
+        )
+
+    @admin.action(permissions=["manage"], description="Сменить роль (одна строка)")
+    def change_staff_role(self, request: HttpRequest, queryset):  # type: ignore[no-untyped-def]
+        """Сервис ``change_staff_role``: старая строка закрывается, новая выдаётся."""
+        from apps.identity.services import staff_roles
+        from apps.identity.services.staff_invites import OwnerAlreadyExists
+
+        if queryset.count() != 1:
+            self.message_user(request, "Сменить роль можно одной строке за раз.", messages.ERROR)
+            return None
+        row = queryset.select_related("tenant", "bot_user").first()
+        if request.POST.get("apply"):
+            role = (request.POST.get("role") or "").strip()
+            try:
+                change = staff_roles.change_staff_role(
+                    tenant=row.tenant, bot_user=row.bot_user, role=role, actor=self._actor(request)
+                )
+            except staff_roles.StaffRoleError as exc:
+                self._refusal(request, exc.slug)
+            except OwnerAlreadyExists:
+                self._refusal(request, "owner_already_exists")
+            else:
+                self.log_change(
+                    request,
+                    row,
+                    f"Роль изменена: {', '.join(change.previous_roles)} → {change.role} (DRF-2082).",
+                )
+                self.message_user(
+                    request,
+                    f"Роль изменена: {', '.join(change.previous_roles)} → {change.role}.",
+                    messages.SUCCESS,
+                )
+            return None
+        return TemplateResponse(
+            request,
+            "admin/tenancy/tenantstaff/change_role.html",
+            {
+                **self.admin_site.each_context(request),
+                "title": "Сменить роль",
+                "opts": self.model._meta,  # noqa: SLF001
+                "row": row,
+                "roles": TenantStaff.Role.choices,
+                "action_checkbox_name": ACTION_CHECKBOX_NAME,
+            },
+        )
+
+    @admin.action(permissions=["manage"], description="Отозвать доступ (с причиной)")
+    def revoke_staff_access(self, request: HttpRequest, queryset):  # type: ignore[no-untyped-def]
+        """Сервис ``revoke_staff_access``: fail-closed, ``deactivated_at``, владелец — отказ."""
+        from apps.identity.services.staff_revoke import OwnerRevokeRefused, revoke_staff_access
+
+        if queryset.count() != 1:
+            self.message_user(request, "Отозвать доступ можно одной строке за раз.", messages.ERROR)
+            return None
+        row = queryset.select_related("tenant", "bot_user").first()
+        if request.POST.get("apply"):
+            reason = (request.POST.get("reason") or "").strip()
+            if not reason:
+                self.message_user(
+                    request, "Отзыв без причины не допускается — укажите причину.", messages.ERROR
+                )
+                return None
+            actor = self._actor(request)
+            try:
+                result = revoke_staff_access(
+                    tenant=row.tenant,
+                    bot_user=row.bot_user,
+                    reason=reason,
+                    surface=actor.surface,
+                    actor_label=actor.audit_label,
+                )
+            except OwnerRevokeRefused:
+                self._refusal(request, "owner_revoke_refused")
+                return None
+            self.log_change(request, row, f"Доступ отозван. Причина: {reason} (DRF-2082).")
+            if result.changed:
+                text = f"Доступ отозван: {', '.join(result.roles_revoked) or '—'}"
+                if result.master_unlinked:
+                    text += ", связь мастера снята"
+                text += ". Mini App салона закрыт сразу."
+                self.message_user(request, text, messages.SUCCESS)
+            else:
+                self.message_user(
+                    request, "Доступа уже не было — ничего не изменилось.", messages.WARNING
+                )
+            return None
+        return TemplateResponse(
+            request,
+            "admin/tenancy/tenantstaff/revoke.html",
+            {
+                **self.admin_site.each_context(request),
+                "title": "Отозвать доступ",
+                "opts": self.model._meta,  # noqa: SLF001
+                "row": row,
+                "action_checkbox_name": ACTION_CHECKBOX_NAME,
+            },
+        )
 
 
 @admin.register(StaffInvite)
