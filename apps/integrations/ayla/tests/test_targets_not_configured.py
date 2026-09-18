@@ -155,7 +155,7 @@ class TestNoSurfacePrintsAnUnexplainedNumber:
         remark = goal_remark(_summary(), _water(), _profile("ayla_calculated"))
 
         assert remark, "при настроенных ориентирах оценка обязана появиться"
-        assert "нормы" in remark
+        assert "ориентира" in remark  # DRF-1844 / §82: «ориентир», не «норма»
 
 
 def _by_kind(*, calories: str, fluids: str) -> ProfileResponse:
