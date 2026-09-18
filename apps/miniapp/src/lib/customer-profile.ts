@@ -50,7 +50,7 @@
  *
  * # Stub variants for dev QA (Records / Wellness pattern reuse)
  *
- *   ?stub=default — multi-tenant happy path (Анна Петрова, 3 салона)
+ *   ?stub=default — multi-tenant happy path (клиент с 3 салонами)
  *   ?stub=new_user — first-time, single tenant, all consents at default
  *   ?stub=multi   — same as default (alias kept for explicit naming)
  *
@@ -363,21 +363,22 @@ function toProactivePrefs(doc: ConsentsDocument): ProactivePrefsResponse {
 }
 
 // ---------------------------------------------------------------------------
-// Stub data — voice-audited per spec §10. Anna Petrova default mirrors
-// the spec §3 illustration verbatim.
+// Stub data — voice-audited per spec §10. The default mirrors the spec §3
+// illustration; the person is named by ROLE, not by a name (DRF-1961): a
+// stub name is still a person's name in a string literal of the UI code.
 // ---------------------------------------------------------------------------
 
 const DEFAULT_ME: MeProfileResponse = {
-  display_name: "Анна Петрова",
-  max_handle: "@anna_petrova",
+  display_name: "Клиент",
+  max_handle: "@client_stub",
   // Пояс задан — заглушка «человек уже ответил».
   timezone: "Europe/Moscow",
   tenant_names: ["Beauty Place", "Casa Bella", "Студия Натали"],
 };
 
 const NEW_USER_ME: MeProfileResponse = {
-  display_name: "Мария",
-  max_handle: "@maria_k",
+  display_name: "Новый клиент",
+  max_handle: "@new_client_stub",
   // Новый человек: пояс НЕ задан. Пусто, а не «Europe/Moscow» —
   // заглушка обязана уметь показывать то состояние, ради которого
   // DRF-1606 и делался.
