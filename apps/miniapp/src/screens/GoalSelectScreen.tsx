@@ -94,7 +94,10 @@ import {
   type GoalSelectBody,
   withinC03Boundary,
   type MissingItem,
+  isSafetyStop,
+  type SafetyStop,
 } from "../lib/customer-goals";
+import { SAFETY_KIND_CLARIFY } from "../lib/health-gate-copy";
 import { backTo, screenRoot, type BackIntent } from "../lib/screen-back";
 
 type State =
@@ -194,6 +197,16 @@ export function GoalSelectScreen({ initialDoc }: Props = {}) {
   // он открыт, текущий вопрос уступает ему место: один экран — одна
   // задача (макет C03). Сбрасывается любым ответом сервера.
   const [revisingStep, setRevisingStep] = useState<string | null>(null);
+  // DRF-1763 — safety-стоп сервера на тексте цели/ответа. Пока он открыт,
+  // экран показывает признание и вопросы (или отказ) ВМЕСТО документа:
+  // цель не создана, документ не двигался, и рисовать его как ни в чём не
+  // бывало значило бы соврать. `pendingBody` — то самое тело, за которое
+  // спрошено; ответ человека уходит рядом с ним, а не вместо него.
+  const [safetyStop, setSafetyStop] = useState<{
+    stop: SafetyStop;
+    pendingBody: GoalSelectBody;
+  } | null>(null);
+  const [safetyAnswer, setSafetyAnswer] = useState("");
 
   const load = useCallback(() => {
     setState({ kind: "loading" });
@@ -246,8 +259,16 @@ export function GoalSelectScreen({ initialDoc }: Props = {}) {
     setSubmitError(null);
     setSavedNotice(null);
     postGoalSelect(body)
-      .then((doc) => {
-        setState({ kind: "ok", doc: withinC03Boundary(doc) });
+      .then((result) => {
+        if (isSafetyStop(result)) {
+          // Документ не пришёл — значит, не менялся. Ничего не сохранено,
+          // и «Цель сохранена» здесь было бы неправдой.
+          setSafetyStop({ stop: result.safety, pendingBody: body });
+          setSafetyAnswer("");
+          return;
+        }
+        setSafetyStop(null);
+        setState({ kind: "ok", doc: withinC03Boundary(result) });
         setGoalText("");
         setRevisingStep(null);
         setSavedNotice(noticeFor(body));
@@ -282,6 +303,85 @@ export function GoalSelectScreen({ initialDoc }: Props = {}) {
     return (
       <ScreenLayout back={back} title="Какая у тебя цель?">
         <StateError err={state.err} onRetry={load} screenId="goal-select" />
+      </ScreenLayout>
+    );
+  }
+
+  // DRF-1763 — safety-стоп вместо документа. Решение владельца 18.09
+  // (§48 п.6): «CLARIFY означает реальный вопрос пользователю, а не
+  // разрешение продолжить» — поэтому здесь нет кнопки «всё равно
+  // сохранить»: единственный выход из признания — ответ, из отказа —
+  // «Понятно», и ни тот ни другой цель не создаёт.
+  if (safetyStop) {
+    const { stop, pendingBody } = safetyStop;
+    const clarify = stop.kind === SAFETY_KIND_CLARIFY;
+    const answerPending = clarify && safetyAnswer.trim().length > 0;
+    const cta = clarify ? (
+      answerPending ? (
+        <StickyBar>
+          <StickyCtaButton
+            disabled={submitting}
+            onClick={() =>
+              submit({ ...pendingBody, safety_answer: safetyAnswer.trim() } as GoalSelectBody)
+            }
+          >
+            Отправить ответ
+          </StickyCtaButton>
+        </StickyBar>
+      ) : undefined
+    ) : (
+      <StickyBar>
+        <StickyCtaButton disabled={submitting} onClick={() => setSafetyStop(null)}>
+          Понятно
+        </StickyCtaButton>
+      </StickyBar>
+    );
+    return (
+      <ScreenLayout back={back} title="Какая у тебя цель?" cta={cta}>
+        {submitError && (
+          <div className="callout callout--danger" role="alert">
+            <p style={{ margin: 0 }}>{submitError}</p>
+          </div>
+        )}
+        <section
+          aria-labelledby="goal-select-safety"
+          data-testid="goal-safety-frame"
+          data-safety-kind={stop.kind}
+        >
+          <h2 id="goal-select-safety" className="goal-select__section-title">
+            {clarify ? "Сначала уточню" : "Здесь я не подскажу"}
+          </h2>
+          {/* Сервер прислал — экран показал. Ни одной своей строки о
+              самочувствии здесь нет: копия признания и вопросы приходят по
+              проводу (`health-gate-copy.ts` — только для паритета). */}
+          {stop.acknowledgement && (
+            <p className="goal-select__current">{stop.acknowledgement}</p>
+          )}
+          {stop.text && (
+            <p className="goal-select__current" style={{ whiteSpace: "pre-line" }}>
+              {stop.text}
+            </p>
+          )}
+          {clarify && (stop.questions?.length ?? 0) > 0 && (
+            <ol className="goal-select__safety-questions">
+              {stop.questions?.map((q) => (
+                <li key={q}>{q}</li>
+              ))}
+            </ol>
+          )}
+          {clarify && (
+            <textarea
+              className="goal-select__textarea"
+              value={safetyAnswer}
+              onChange={(e) => setSafetyAnswer(e.target.value)}
+              maxLength={GOAL_TEXT_MAX}
+              rows={3}
+              placeholder="Ответь своими словами"
+              aria-label="Твой ответ"
+              disabled={submitting}
+            />
+          )}
+        </section>
       </ScreenLayout>
     );
   }

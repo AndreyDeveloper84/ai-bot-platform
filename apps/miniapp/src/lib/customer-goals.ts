@@ -191,6 +191,33 @@ interface DecisionContextEnvelope {
 }
 
 /**
+ * DRF-1763 — the safety half of `POST /goals/select`. When the free text
+ * carries a health signal the server does NOT write the goal and answers
+ * with this envelope instead of `{data}`: the document is unchanged, the
+ * screen shows what is here and waits for the person. `text` is the whole
+ * reply for the three hard stops (`crisis` / `block` / `health_red_flag`);
+ * `acknowledgement` + `questions` are the clarify frame (`health_clarify`).
+ * The screen renders what it receives and invents nothing.
+ */
+export interface SafetyStop {
+  kind: string;
+  text?: string;
+  acknowledgement?: string;
+  questions?: string[];
+}
+
+export interface SafetyEnvelope {
+  safety: SafetyStop;
+}
+
+/** What `postGoalSelect` resolves to: the updated document, or a safety stop. */
+export type GoalSelectResult = DecisionContext | SafetyEnvelope;
+
+export function isSafetyStop(result: GoalSelectResult): result is SafetyEnvelope {
+  return "safety" in result && typeof (result as SafetyEnvelope).safety === "object";
+}
+
+/**
  * POST /goals/select body — exactly one of the variants.
  *
  * DRF-1451 added `answer` (one anketa step) and `intent: "start_anketa"`.
@@ -201,6 +228,11 @@ interface DecisionContextEnvelope {
 export type GoalSelectBody =
   | { goal_key: string; source_channel: "miniapp" }
   | { goal_text: string; source_channel: "miniapp" }
+  /** DRF-1763 — the person's answer to the clarifying questions, carried
+      next to the ORIGINAL body it answers for. The server classifies it
+      and drops it; it is never stored. */
+  | { goal_text: string; safety_answer: string; source_channel: "miniapp" }
+  | { answer: { step: string; text: string }; safety_answer: string; source_channel: "miniapp" }
   | { intent: "need_guidance"; source_channel: "miniapp" }
   | { intent: "start_anketa"; source_channel: "miniapp" }
   | {
@@ -278,10 +310,13 @@ export const fetchDecisionContext = async (): Promise<DecisionContext> => {
  */
 export const postGoalSelect = async (
   body: GoalSelectBody,
-): Promise<DecisionContext> => {
-  const env = await request<DecisionContextEnvelope>("/goals/select", {
+): Promise<GoalSelectResult> => {
+  const env = await request<DecisionContextEnvelope | SafetyEnvelope>("/goals/select", {
     method: "POST",
     body: JSON.stringify(body),
   });
+  // DRF-1763 — a safety stop comes WITHOUT `data`: the document did not
+  // move, and handing the caller a stale one would say it did.
+  if ("safety" in env) return env;
   return env.data;
 };
