@@ -646,22 +646,23 @@ def slots(request: HttpRequest) -> HttpResponse:
             404,
         )
 
-    config = get_slot_config(tenant)
-
-    # Clamp date_to to tenant's max_advance_days policy.
-    today_local = timezone.now().astimezone(tz).date()
-    advance_cap = today_local + timedelta(days=config.max_advance_days)
-    if date_to > advance_cap:
-        date_to = advance_cap
-        if date_to < date_from:
-            return JsonResponse({"slots": []})
-
     # DRF-1062 — one source of truth per deployment. On the Ayla path the
     # booking is written to Ayla, so the slots offered must come from Ayla
     # too; showing times computed from the bot's own schedule while writing
     # elsewhere is how the pilot ended up selling Sundays. Flag OFF keeps
     # the local computation, which is correct there: that deployment also
     # writes bookings locally.
+    #
+    # DRF-2014 — the local slot POLICY is part of that same copy. Until this
+    # ticket ``get_slot_config`` was read ABOVE this branch, and its
+    # ``max_advance_days`` (no ``SlotConfig`` row on the pilot → default 60)
+    # clamped ``date_to`` before Ayla was even asked. It held by coincidence:
+    # the local default happened to equal the catalog's
+    # ``BOOKING_MAX_AHEAD_DAYS`` (60), and either side could change alone.
+    # On the Ayla path the horizon belongs to the catalog; the only bound
+    # the bot keeps is the per-request window (``MAX_SLOT_DATE_RANGE_DAYS``)
+    # checked above. The census guard
+    # (``test_local_schedule_reader_census_2014``) now counts this reader.
     if getattr(settings, "BOOKING_VIA_AYLA_REST", False):
         ayla_slots, error = _slots_from_ayla(
             master=master,
@@ -673,6 +674,16 @@ def slots(request: HttpRequest) -> HttpResponse:
         if error is not None:
             return error
         return JsonResponse({"slots": ayla_slots})
+
+    # Flag OFF — this deployment writes bookings locally, so the local
+    # policy is the right one: clamp date_to to max_advance_days.
+    config = get_slot_config(tenant)
+    today_local = timezone.now().astimezone(tz).date()
+    advance_cap = today_local + timedelta(days=config.max_advance_days)
+    if date_to > advance_cap:
+        date_to = advance_cap
+        if date_to < date_from:
+            return JsonResponse({"slots": []})
 
     booking_occupied = _collect_occupied(
         tenant_id=tenant.id,
