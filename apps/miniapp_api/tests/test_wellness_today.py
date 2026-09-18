@@ -727,6 +727,52 @@ class TestWellnessTodayInventedCalorieGoal:
         assert "calories_target" not in data
         assert "pfc" not in data
 
+    def test_drf1844_protein_target_rides_with_the_calories_provenance(
+        self, client: Client, bot_user: BotUser
+    ):
+        """DRF-1844: ``pfc.protein_target_g`` из профиля — только под признаком калорий."""
+
+        @dataclass
+        class _ProfileWithProtein(_FakeProfile):
+            protein_g: float | None = 130.4
+
+        def _get() -> dict:
+            resp = client.get(
+                _url(), HTTP_AUTHORIZATION=_init_data_header(bot_user.channel_user_id)
+            )
+            assert resp.status_code == 200
+            return resp.json()
+
+        with _patch_nutrition(
+            summary=_FakeSummary(calories_goal=2000),
+            water=_FakeWater(),
+            profile=_ProfileWithProtein(),
+        ):
+            data = _get()
+        assert data["calories_target"] == 2000
+        assert data["pfc"]["protein_target_g"] == 130
+
+        # Отрицание с положительной парой выше: калории не настроены → ни цели,
+        # ни ориентира по белку — хотя профиль число знает (строка БЖУ как факт
+        # при цели из сводки остаётся: это прежнее поведение, не предмет листа).
+        with _patch_nutrition(
+            summary=_FakeSummary(calories_goal=2000),
+            water=_FakeWater(),
+            profile=_ProfileWithProtein(calories_override=False),
+        ):
+            data = _get()
+        assert "calories_target" not in data
+        assert "protein_target_g" not in data.get("pfc", {})
+
+        # Профиль настроен, но ориентира по белку у него нет — строка БЖУ без ключа.
+        with _patch_nutrition(
+            summary=_FakeSummary(calories_goal=2000),
+            water=_FakeWater(),
+            profile=_ProfileWithProtein(protein_g=None),
+        ):
+            data = _get()
+        assert data["pfc"] == {"protein_g": 65, "fat_g": 40, "carbs_g": 121}
+
     def test_a_real_goal_keeps_the_target_and_the_pfc_row(self, client: Client, bot_user: BotUser):
         """Вторая половина пары: с настоящей целью оба ключа на месте.
 

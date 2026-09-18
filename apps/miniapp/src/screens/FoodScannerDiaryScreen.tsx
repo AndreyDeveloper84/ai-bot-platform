@@ -465,7 +465,11 @@ function DiaryReady({
               настоящее приходит с каждой записью. */}
           {pfc && (
             <p className="food-scanner-saved__macros">
-              Б {pfc.protein_g} · Ж {pfc.fat_g} · У {pfc.carbs_g} г
+              Б {pfc.protein_g}
+              {pfc.protein_target_g !== undefined
+                ? ` / ${pfc.protein_target_g}`
+                : ""}{" "}
+              · Ж {pfc.fat_g} · У {pfc.carbs_g} г
             </p>
           )}
         </section>

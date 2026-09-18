@@ -209,10 +209,13 @@ def goal_remark(
     goal_label = GOAL_LABELS.get(profile.goal, "")
     calories_goal = _summary_goal(summary, profile)
 
+    # DRF-1844 / §82: про калории и белок — «ориентир», не «норма». Вода
+    # остаётся «нормой» намеренно — решение владельца 11.09.2026 §5.2:
+    # норма воды — мера шага («до нормы», не «до цели»), это другой предмет.
     if profile.protein_g and summary.protein_g < profile.protein_g * SHORTFALL_RATIO:
         short = round(profile.protein_g - summary.protein_g)
         tail = f" — при цели «{goal_label}» его обычно добирают первым" if goal_label else ""
-        return f"Белка сегодня меньше нормы из профиля на {short} г{tail}."
+        return f"Белка сегодня меньше ориентира из профиля на {short} г{tail}."
 
     water_norm = _water_norm(water, profile) if water is not None else None
     if water is not None and water_norm and water.total_ml < water_norm * SHORTFALL_RATIO:
@@ -225,10 +228,16 @@ def goal_remark(
     ):
         over = round(summary.calories_total - calories_goal)
         tail = f" — цель в профиле «{goal_label}»" if goal_label else ""
-        return f"Калорий вышло на {over} ккал больше нормы из профиля{tail}."
+        return f"Калорий вышло на {over} ккал больше ориентира из профиля{tail}."
 
     if calories_goal and summary.calories_total >= calories_goal * SHORTFALL_RATIO:
-        return "День уложился в нормы из твоего профиля."
+        return "День уложился в ориентир из твоего профиля."
+
+    # DRF-1844 (F1, D15): «осталось N ккал» — только при действующем
+    # ориентире и когда до него ещё далеко. Арифметика, не оценка: §85 §8
+    # запрещает осуждающие формулировки, а «осталось» — просто разность.
+    if calories_goal and summary.calories_total < calories_goal:
+        return f"До ориентира по калориям осталось {round(calories_goal - summary.calories_total)} ккал."
 
     return ""
 

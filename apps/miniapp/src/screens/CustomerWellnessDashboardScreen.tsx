@@ -473,10 +473,10 @@ export function CustomerWellnessDashboardScreen() {
   // Block 4 actionable targets visibility.
   //
   // Строка «🍽 Добрать белок · ещё N г» СНЯТА (DRF-1546): она висела на
-  // `pfc.protein_target_g`, а бэкенд этот ключ не шлёт и источника под
-  // него не имеет (см. docstring `customer_wellness_today`). То есть в
-  // бою она не рендерилась никогда. Вернуть — когда появится цель по
-  // белку; поле оставлено в типе как метка.
+  // `pfc.protein_target_g`, которого тогда бэкенд не слал. С DRF-1844 ключ
+  // приходит (под признаком происхождения), но строка НЕ возвращается:
+  // «добрать» — оценка, §85 §8 разрешает при ориентире шкалу и процент, а
+  // не призыв; ориентир по белку виден в самой строке БЖУ («Б 108 / 130 г»).
   // «Ещё N стаканов до нормы» бывает только когда норма есть.
   //
   // «До нормы», не «до цели»: решение владельца 11.09.2026 §5.2 — Goal это
@@ -986,11 +986,17 @@ function PulseStrip({ data }: { data: WellnessToday }) {
                 ? "Ещё ничего не залогировано"
                 : `${caloriesEaten} / ${caloriesTarget} ккал · ${caloriesPct} %`}
             </div>
-            {/* §11.1 — БЖУ row hidden when pfc absent. */}
+            {/* §11.1 — БЖУ row hidden when pfc absent. DRF-1844: белок
+                «108 / 130 г», когда ориентир по белку приехал; без него —
+                факт без второго числа (§85 §8: процент и «из» только при
+                ориентире). */}
             {data.pfc && (
               <div className="wellness-dash__pulse-pfc" aria-hidden="true">
-                Б {data.pfc.protein_g} · Ж {data.pfc.fat_g} · У{" "}
-                {data.pfc.carbs_g} г
+                Б {data.pfc.protein_g}
+                {data.pfc.protein_target_g !== undefined
+                  ? ` / ${data.pfc.protein_target_g}`
+                  : ""}{" "}
+                · Ж {data.pfc.fat_g} · У {data.pfc.carbs_g} г
               </div>
             )}
             {/* Пустой день — без шкалы. Полоса при нуле не видна глазом,

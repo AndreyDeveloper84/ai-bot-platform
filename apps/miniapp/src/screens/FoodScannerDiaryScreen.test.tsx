@@ -99,6 +99,19 @@ beforeEach(() => {
 });
 
 describe("дневник рисует НАСТОЯЩИЕ числа источника", () => {
+  it("DRF-1844: ориентир по белку рисуется вторым числом, когда он приехал", async () => {
+    mockedLoad.mockResolvedValue({
+      state: "entries",
+      entries: [OATS, SOUP],
+      hideNumbers: false,
+      today: today({ pfc: { protein_g: 108, fat_g: 13, carbs_g: 66, protein_target_g: 130 } }),
+    });
+    renderScreen();
+
+    expect(await screen.findByText("530 / 2100 ккал")).toBeInTheDocument();
+    expect(screen.getByText(/Б 108 \/ 130 · Ж 13 · У 66/)).toBeInTheDocument();
+  });
+
   it("БЖУ приходит от источника, а не вычисляется из калорий", async () => {
     mockedLoad.mockResolvedValue({
       state: "entries",
@@ -115,7 +128,7 @@ describe("дневник рисует НАСТОЯЩИЕ числа источн
 
     // Итог — ровно то, что прислал источник.
     expect(screen.getByText("530 / 2100 ккал")).toBeInTheDocument();
-    expect(screen.getByText(/Б 29 · Ж 13 · У 66/)).toBeInTheDocument();
+    expect(screen.getByText(/Б 29 · Ж 13 · У 66/)).toBeInTheDocument();  // без ориентира по белку — факт без «/»
 
     // Отсутствие — та самая формула. 530 × 0.075 = 40, × 0.018 = 10,
     // × 0.105 = 56. Ни одно из этих чисел на экране появиться не может.

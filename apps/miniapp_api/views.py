@@ -3661,8 +3661,11 @@ def customer_wellness_today(request: HttpRequest) -> HttpResponse:
       выполнения. The key is not sent, the frontend no longer has a
       field to render it from, and adding a source later is a product
       decision, not a wiring one.
-    * ``pfc.protein_target_g`` + ``day_pattern_hint`` — omitted (no
-      clean source). Frontend treats both as optional.
+    * ``pfc.protein_target_g`` — DRF-1844: from the profile's
+      ``daily_protein_g`` (derived from the §85 calories target), sent only
+      under the same provenance flag as ``calories_target``; absent otherwise.
+      ``day_pattern_hint`` — omitted (no clean source). Frontend treats both
+      as optional.
 
     ## coach_observation — только с ``?surface=diary`` (DRF-1897)
 
@@ -3857,6 +3860,17 @@ def customer_wellness_today(request: HttpRequest) -> HttpResponse:
     water_configured = _profile_readable and bool(
         getattr(profile_res, "fluids_are_configured", False)
     )
+
+    # DRF-1844 (F1): ориентир по белку — из профиля (``daily_protein_g``,
+    # выведен из ориентира калорий по §85), и только под тем же признаком
+    # происхождения, что ``calories_target``: без подтверждённого ориентира
+    # ключа нет, строка БЖУ остаётся фактом. Читается ``getattr`` с ``None``,
+    # как соседние признаки: чужой объект без поля — «ориентира нет», не 500.
+    if pfc is not None and calories_configured:
+        protein_target = getattr(profile_res, "protein_g", None)
+        if isinstance(protein_target, (int, float)) and not isinstance(protein_target, bool):
+            if protein_target > 0:
+                pfc["protein_target_g"] = round(protein_target)
 
     # ── hydration (from get_water_today) ────────────────────────────────
     water_known = True

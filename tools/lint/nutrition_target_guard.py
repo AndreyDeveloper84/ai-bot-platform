@@ -107,6 +107,9 @@ TARGET_NAMES = frozenset(
 ALLOWED = frozenset(
     {
         "apps/nutrition_proactive/tests/test_render.py",
+        # DRF-1844 (F1): узлы состояния «ориентир ЕСТЬ и подтверждён» — «из»,
+        # «осталось», слово «ориентир»; те же фикстуры, что у test_render.py.
+        "apps/nutrition_proactive/tests/test_render_calories_target_1844.py",
         "apps/nutrition_proactive/tests/test_tasks.py",
         "apps/orchestrator/tests/test_coach_observation.py",
         "apps/orchestrator/tests/test_food_history.py",

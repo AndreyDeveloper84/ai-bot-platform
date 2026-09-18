@@ -724,6 +724,36 @@ describe("CustomerWellnessDashboardScreen — degraded reads (DRF-1546)", () => 
 
     expect(await screen.findByText(/Ещё 4 стакана до нормы/)).toBeInTheDocument();
     expect(screen.queryByText(/Добрать белок/)).not.toBeInTheDocument();
+    // DRF-1844: ориентир по белку виден в самой строке БЖУ, а не призывом.
+    expect(screen.getByText(/Б 65 \/ 100 · Ж 40 · У 120 г/)).toBeInTheDocument();
+  });
+
+  it("DRF-1844 / §85 §8: после 100 % — число и процент без осуждения, шкала не переполняется", async () => {
+    // Пример владельца: «2150 из 2000 ккал · 108 %».
+    serve(
+      {
+        calories_eaten: 2150,
+        calories_target: 2000,
+        pfc: { protein_g: 108, fat_g: 70, carbs_g: 250, protein_target_g: 130 },
+        water_glasses_eaten: 4,
+        water_glasses_target: 8,
+        active_goals: [],
+        display_name: "Анна",
+      },
+      { this_week_booking_count: 0 },
+    );
+    await renderScreen(false);
+
+    expect(await screen.findByText(/2150 \/ 2000 ккал · 108 %/)).toBeInTheDocument();
+    expect(screen.getByLabelText("Калории: 2150 из 2000")).toBeInTheDocument();
+    expect(screen.getByText(/Б 108 \/ 130 · Ж 70 · У 250 г/)).toBeInTheDocument();
+    const bar = screen.getByRole("progressbar", { name: "Калории: 2150 из 2000" });
+    const fill = bar.querySelector(".wellness-dash__progress-fill") as HTMLElement;
+    expect(fill.style.width).toBe("100%"); // зажато, не 108 %
+    expect(fill.className).toBe("wellness-dash__progress-fill"); // без модификатора «перебор»
+    // Ни одного осуждающего слова в блоке питания (§85 §8).
+    const row = screen.getByLabelText(/^Питание:/);
+    expect(row.textContent).not.toMatch(/перебор|превыш|слишком|много/i);
   });
 });
 
