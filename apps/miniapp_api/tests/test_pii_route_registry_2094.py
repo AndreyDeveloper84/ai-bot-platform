@@ -38,7 +38,7 @@ V = "apps.miniapp_api.views:"
 
 #: Named routes in ``apps/miniapp_api/urls.py`` on dev 94125e1f (18.09.2026).
 #: Lower the floor deliberately when a route is removed.
-ROUTE_FLOOR = 44
+ROUTE_FLOOR = 45
 
 _BOOKING_FIELDS = (
     "id",
@@ -457,10 +457,25 @@ CUSTOMER_ROUTES: dict[str, Entry] = {
         "dish_name",
         "calories",
         "entry_origin",
+        "meal_type (scan branch, DRF-2098)",
         via=V + "customer_food_log",
         note=(
-            "the diary entry the caller just wrote from text, behind _food_text_gate (diary "
-            "consent required); the origin says whether the estimate was confirmed or corrected"
+            "the diary entry the caller just wrote from text — or by scan_id (DRF-2098, "
+            "_customer_food_log_scan) — behind _food_text_gate (diary consent required); the "
+            "origin says whether the estimate was confirmed or corrected"
+        ),
+    ),
+    "customer_food_scan": own(
+        "scan_id",
+        "dish_name",
+        "confidence",
+        "portion_g",
+        "nutrition",
+        via=V + "customer_food_scan",
+        note=(
+            "what the catalog recognised on the photo the caller just sent, behind the same "
+            "diary gate (D26: food-diary-v1 covers photos); the photo itself is forwarded and "
+            "never kept, and the body carries no field of the person"
         ),
     ),
     "customer_wellness_food_entry": own(
