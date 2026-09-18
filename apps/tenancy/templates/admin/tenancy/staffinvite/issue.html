@@ -1,0 +1,73 @@
+{% extends "admin/base_site.html" %}
+{# «Выдать код приглашения» (DRF-2082): тот же путь, что issue_staff_invite с
+   хоста. Код будет показан ОДИН раз на следующей странице; в базе только хеш. #}
+
+{% block breadcrumbs %}
+  <div class="breadcrumbs">
+    <a href="{% url 'admin:index' %}">Админка</a>
+    &rsaquo; <a href="{% url 'admin:tenancy_staffinvite_changelist' %}">Приглашения</a>
+    &rsaquo; Выдать код
+  </div>
+{% endblock %}
+
+{% block content %}
+  <div id="content-main">
+    <h1>{{ title }}</h1>
+    <p style="max-width: 46em;">
+      Код действует {{ ttl_days }} дней, одноразовый, 5 попыток в час у вводящего.
+      Он будет показан <strong>один раз</strong> на следующей странице — сохраните его
+      сразу; повторно посмотреть нельзя, в базе хранится только хеш.
+    </p>
+
+    <form method="get">
+      <fieldset class="module aligned">
+        <div class="form-row">
+          <label for="id_tenant"><strong>Салон</strong></label>
+          <select id="id_tenant" name="tenant" onchange="this.form.submit()" style="display: block; margin-top: .5em;">
+            <option value="">— выберите —</option>
+            {% for t in tenants %}
+              <option value="{{ t.pk }}" {% if tenant and t.pk == tenant.pk %}selected{% endif %}>{{ t.name }} ({{ t.slug }})</option>
+            {% endfor %}
+          </select>
+        </div>
+      </fieldset>
+      <noscript><input type="submit" value="Выбрать салон"></noscript>
+    </form>
+
+    {% if tenant %}
+    <form method="post">
+      {% csrf_token %}
+      <input type="hidden" name="tenant" value="{{ tenant.pk }}">
+      <fieldset class="module aligned">
+        <div class="form-row">
+          <label for="id_role"><strong>Роль</strong></label>
+          <select id="id_role" name="role" style="display: block; margin-top: .5em;">
+            {% for value, label in roles %}
+              <option value="{{ value }}">{{ label }} ({{ value }})</option>
+            {% endfor %}
+          </select>
+          <p class="help">Код владельца — только владельцу; в салоне он один.</p>
+        </div>
+        <div class="form-row">
+          <label for="id_catalog_master"><strong>Мастер (только для роли «master»)</strong></label>
+          <select id="id_catalog_master" name="catalog_master" style="display: block; margin-top: .5em;">
+            <option value="">— не нужен —</option>
+            {% for m in masters %}
+              <option value="{{ m.pk }}">{{ m.name }}{% if m.linked_bot_user_id %} · уже связан{% endif %}</option>
+            {% endfor %}
+          </select>
+          <p class="help">Код мастера связывает СУЩЕСТВУЮЩУЮ карточку каталога; новую карточку код не заводит.</p>
+        </div>
+        <div class="form-row">
+          <label for="id_note"><strong>Заметка (для кого)</strong></label>
+          <input id="id_note" type="text" name="note" maxlength="200" style="display: block; width: 24em;">
+        </div>
+      </fieldset>
+      <div class="submit-row">
+        <input type="submit" name="apply" value="Выписать код" class="default">
+        <a href="{% url 'admin:tenancy_staffinvite_changelist' %}" class="button cancel-link">Отмена</a>
+      </div>
+    </form>
+    {% endif %}
+  </div>
+{% endblock %}

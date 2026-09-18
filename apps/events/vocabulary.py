@@ -152,6 +152,10 @@ STAFF_ACCESS_REVOKED = "staff.access_revoked"
 # previous_roles?, already_had_role?}. Names only — never a phone or a MAX id.
 STAFF_ROLE_GRANTED = "staff.role_granted"
 STAFF_ROLE_CHANGED = "staff.role_changed"
+# Invite code revoked by an operator before its expiry (DRF-2082, PR-2).
+# Payload: {surface, actor_label, role, reason}. Neither the code nor its
+# hash — same rule as STAFF_INVITE_ISSUED.
+STAFF_INVITE_REVOKED = "staff.invite_revoked"
 
 # --- Specialist onboarded into a salon (поток A, п. 3) --------------------
 # Emitted from apps.identity.services.specialist_onboarding when an operator
@@ -413,6 +417,7 @@ CANONICAL_EVENTS: frozenset[str] = frozenset(
         STAFF_SPECIALIST_ONBOARDED,
         STAFF_ROLE_GRANTED,
         STAFF_ROLE_CHANGED,
+        STAFF_INVITE_REVOKED,
         MASTER_SERVICES_CHANGED,
         MASTER_SERVICE_EDGE_CREATED,
         MASTER_SERVICE_EDGE_DELETED,

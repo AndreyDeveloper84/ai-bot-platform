@@ -710,6 +710,11 @@ class StaffInvite(models.Model):
     )
     expires_at = models.DateTimeField(db_index=True, verbose_name="Действует до")
     used_at = models.DateTimeField(null=True, blank=True, verbose_name="Использовано")
+    # DRF-2082: активный отзыв кода оператором. До этого поля приглашение
+    # гасилось только пассивно — сроком и однократностью; «отозван» и
+    # «истёк» были неразличимы, а отозвать до срока было нечем. Кто отозвал —
+    # в аудите (оператор платформы не имеет BotUser), здесь только когда.
+    revoked_at = models.DateTimeField(null=True, blank=True, verbose_name="Отозвано")
     used_by = models.ForeignKey(
         "identity.BotUser",
         on_delete=models.SET_NULL,
