@@ -99,6 +99,8 @@ import {
 } from "../lib/customer-goals";
 import { SAFETY_KIND_CLARIFY } from "../lib/health-gate-copy";
 import { backTo, screenRoot, type BackIntent } from "../lib/screen-back";
+import { planLiteEnabled } from "../lib/feature-flags";
+import { PLAN_LITE_COPY, PLAN_LITE_ROUTE } from "./PlanLiteScreen";
 
 type State =
   | { kind: "loading" }
@@ -585,6 +587,19 @@ export function GoalSelectScreen({ initialDoc }: Props = {}) {
                 </>
               )}
             </p>
+            {/* DRF-2101 — Plan Lite: «Мой план» под флагом сборки; без флага
+                состав экрана прежний. План строится от этой цели. */}
+            {planLiteEnabled() && (
+              <div className="food-scanner-screen__cta-stack">
+                <button
+                  type="button"
+                  className="btn-secondary"
+                  onClick={() => navigate(PLAN_LITE_ROUTE)}
+                >
+                  {PLAN_LITE_COPY.entryFromGoal}
+                </button>
+              </div>
+            )}
           </section>
         )
       )}

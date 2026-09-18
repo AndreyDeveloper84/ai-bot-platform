@@ -111,6 +111,8 @@ import {
 } from "../lib/customer-booking";
 import { UnbookableBadge } from "../components/UnbookableNote";
 import { useScreenBack } from "../hooks/useScreenBack";
+import { planLiteEnabled } from "../lib/feature-flags";
+import { PLAN_LITE_COPY, PLAN_LITE_ROUTE } from "./PlanLiteScreen";
 import { screenRoot } from "../lib/screen-back";
 
 // ---------------------------------------------------------------------------
@@ -358,6 +360,13 @@ export function CustomerWellnessDashboardScreen() {
 
   const onCatalogTap = useCallback(() => {
     navigate("/customer/catalog");
+  }, [navigate]);
+
+  // DRF-2101 — Plan Lite: вход «Мой план» под флагом сборки и только когда
+  // цель есть — без цели плана не бывает, и кнопка не обещает того, чего
+  // сервер не даст.
+  const onPlanTap = useCallback(() => {
+    navigate(PLAN_LITE_ROUTE);
   }, [navigate]);
 
   // DRF-1839 — вход в дневник. Экран `/customer/food-scanner/diary`
@@ -662,6 +671,19 @@ export function CustomerWellnessDashboardScreen() {
                 {goalCtaLabel}
               </span>
             </button>
+            {planLiteEnabled() && hasGoal && (
+              <button
+                type="button"
+                className="wellness-dash__qa-btn"
+                aria-label={PLAN_LITE_COPY.entryFromDashboard}
+                onClick={onPlanTap}
+              >
+                <span className="wellness-dash__qa-icon" aria-hidden="true">
+                  📋
+                </span>
+                <span className="wellness-dash__qa-label">{PLAN_LITE_COPY.entryFromDashboard}</span>
+              </button>
+            )}
             <button
               type="button"
               className="wellness-dash__qa-btn"

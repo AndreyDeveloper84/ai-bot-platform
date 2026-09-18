@@ -59,3 +59,17 @@ export const STUB_SURFACES_ENABLED = import.meta.env.DEV;
 export function recommendationShelfEnabled(): boolean {
   return (import.meta.env.VITE_RECOMMENDATION_SHELF as string | undefined) === "1";
 }
+
+/**
+ * DRF-2101 — Plan Lite без веса (§49). Флаг ВРЕМЕНИ СБОРКИ:
+ * `VITE_PLAN_LITE=1` — включение на стенде = env + пересборка Mini App при
+ * выкладке, не переменная бота. Тот же ключ стоит в каталоге и в боте
+ * (`PLAN_LITE_ENABLED`); включаются три места разом
+ * (`docs/STAGING_EFFECTIVE_CONFIG`). Функция, а не константа — как
+ * `recommendationShelfEnabled`: читается при рендере, тест включает на
+ * один случай без перезагрузки модуля. Выключен → маршрут и входы
+ * отсутствуют, а экран по прямой ссылке говорит «недоступно» без сети.
+ */
+export function planLiteEnabled(): boolean {
+  return (import.meta.env.VITE_PLAN_LITE as string | undefined) === "1";
+}
