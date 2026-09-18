@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from django.urls import path
 
-from apps.miniapp_api import views
+from apps.miniapp_api import views, views_saved_meals
 
 app_name = "miniapp_api"
 
@@ -170,6 +170,17 @@ urlpatterns = [
         "wellness/food/<str:entry_id>",
         views.customer_wellness_food_entry,
         name="customer_wellness_food_entry",
+    ),
+    # DRF-2092 (F12) — избранные блюда: серверный источник в каталоге.
+    path(
+        "saved-meals",
+        views_saved_meals.customer_saved_meals,
+        name="customer_saved_meals",
+    ),
+    path(
+        "saved-meals/<str:meal_id>",
+        views_saved_meals.customer_saved_meal,
+        name="customer_saved_meal",
     ),
     # Dashboard rollup — next booking + this-week count (bookings-only).
     path(
