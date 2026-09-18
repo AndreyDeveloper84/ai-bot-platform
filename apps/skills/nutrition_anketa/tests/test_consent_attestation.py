@@ -47,7 +47,13 @@ VERSION = "personal-calculation-v1"
 _READY_FOR_GOAL = {
     "nutrition_anketa": {
         "current_step": "goal",
-        "answers": {"gender": "female", "age": 28, "height": 168, "weight": 62},
+        "answers": {
+            "gender": "female",
+            "age": 28,
+            "height": 168,
+            "weight": 62,
+            "activity": "light",
+        },
         "is_complete": False,
     }
 }
@@ -147,7 +153,7 @@ class TestWithAttestationTheBodyCarriesIt:
             "height_cm": 168,
             "weight_kg": 62,
             "goal": "maintain",
-            "activity_coefficient": 1.4,
+            "activity_coefficient": 1.375,
             "consent": {"type": "personal_calculation", "document_version": VERSION},
         }
         assert "nutrition_anketa" not in conversation.skill_state
