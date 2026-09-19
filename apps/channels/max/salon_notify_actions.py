@@ -133,6 +133,9 @@ def _schedule_details(ref: str, tenant: Any) -> str:
         parsed = UUID(str(ref))
     except (ValueError, AttributeError):
         return "Заявка не найдена."
+    # ``all_tenants`` с явным ``tenant=tenant`` салона, чью кнопку нажали:
+    # тап приходит из обработчика салонного бота, но проверяется и вне
+    # контекста (тесты, ручной вызов); реестр SCHEDULING_CROSS_TENANT_BASELINE.
     request = (
         ScheduleChangeRequest.all_tenants.filter(id=parsed, tenant=tenant)
         .select_related("master", "tenant")

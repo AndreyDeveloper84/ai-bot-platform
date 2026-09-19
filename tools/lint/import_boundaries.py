@@ -772,8 +772,8 @@ _SCHEDULING_ROOT = "<scheduling.all_tenants>"
 # MAINTENANCE: when a site is legitimately removed, lower this number IN
 # THE SAME CHANGE, on purpose. Never edit the floor after seeing red to get
 # back to green — a floor fitted to the result is not a guard any more.
-MIN_SCHEDULING_SITES = 16
-MIN_SCHEDULING_BASELINE_FILES = 7
+MIN_SCHEDULING_SITES = 18
+MIN_SCHEDULING_BASELINE_FILES = 9
 
 # Accepted pre-existing sites. Every entry is a VERDICT, and each one below
 # was reached by reading the query, not by trusting the file's neighbours:
@@ -798,6 +798,15 @@ SCHEDULING_CROSS_TENANT_BASELINE: frozenset[BaselineKey] = frozenset(
         # 1 site. `filter(tenant_id=master.tenant_id, master_id=master.id)` —
         # scoped to the master being confirmed; runs from the consumer.
         "apps/catalog/services/schedule_confirmation.py",
+        # 1 site (DRF-2118). `WorkingHours.all_tenants.filter(tenant_id=
+        # master.tenant_id, master=master, …)` — рабочие часы мастера для
+        # «Было/Станет» в уведомлении; зовётся из on_commit-хуков и beat
+        # без тенантного контекста, строка закреплена мастером и его салоном.
+        "apps/channels/max/salon_notify.py",
+        # 1 site (DRF-2118). `ScheduleChangeRequest.all_tenants.filter(id=…,
+        # tenant=tenant)` — «Подробнее» по кнопке уведомления: тенант — тот,
+        # чью кнопку нажали, закреплён в запросе.
+        "apps/channels/max/salon_notify_actions.py",
         # 3 sites on dev, 1 after #1791. The master's own cabinet: every query
         # pins tenant_id AND master_id taken from the master being viewed.
         "apps/master_api/services/dashboard.py",

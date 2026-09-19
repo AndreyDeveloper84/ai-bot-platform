@@ -310,8 +310,13 @@ def _door(label: str, path: str) -> tuple[Button, ...]:
 def _working_window(master: Any, day: date) -> tuple[time, time] | None:
     from apps.scheduling.models import WorkingHours
 
+    # ``all_tenants`` с явным ``tenant_id=master.tenant_id``: сюда заходят
+    # ``on_commit``-хуки и beat без тенантного контекста; строка закреплена
+    # мастером и его же салоном (реестр SCHEDULING_CROSS_TENANT_BASELINE).
     row = (
-        WorkingHours.all_tenants.filter(master=master, day_of_week=day.weekday())
+        WorkingHours.all_tenants.filter(
+            tenant_id=master.tenant_id, master=master, day_of_week=day.weekday()
+        )
         .values("is_working", "start_time", "end_time")
         .first()
     )
@@ -504,8 +509,9 @@ def master_unavailable_notice(master: Any, *, block: str) -> SalonNotice:
     # personal_message — про клиентов, urgent принудительно включён (§805).
     # Читать чужой переключатель значило бы выдать его за свой; отдельный
     # переключатель «обо мне» — отдельный лист.
-    if person is not None and getattr(person, "channel_user_id", ""):
-        extra = (MaxAddress(user_id=person.channel_user_id),)
+    person_id = getattr(person, "channel_user_id", "") if person is not None else ""
+    if person_id:
+        extra = (MaxAddress(user_id=str(person_id)),)
     return SalonNotice(
         kind="master_off",
         tenant=master.tenant,

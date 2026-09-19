@@ -45,6 +45,7 @@ import uuid
 from datetime import datetime, timedelta, timezone as dt_timezone
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import patch
 
 import pytest
@@ -301,7 +302,9 @@ class TestP2OneMessagePerEvent:
         assert capture[0]["token"] == SALON_TOKEN
         assert capture[0]["user_id"] == "owner-2118"
         payloads = [
-            b.get("payload") for b in _buttons_of(capture[0]) if b.get("type") == "callback"
+            str(b.get("payload") or "")
+            for b in _buttons_of(capture[0])
+            if b.get("type") == "callback"
         ]
         assert payloads and all(p.startswith("cb:salon:n:sync:") for p in payloads), payloads
 
@@ -559,7 +562,7 @@ class TestP6SourcesAreWired:
     def test_handoff_creation_notifies_the_salon(self, salon, two_bots, capture) -> None:
         from apps.handoff.notify import notify_admin_task_created
 
-        task = SimpleNamespace(
+        task: Any = SimpleNamespace(
             id=uuid.uuid4(),
             tenant=salon.tenant,
             reason=f"клиент {PHONE} просит человека",
