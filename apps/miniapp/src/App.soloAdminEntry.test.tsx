@@ -11,7 +11,8 @@
  * The sheet is opened by deep-linking to `/solo/more`, which
  * `UnifiedSoloSurface` reads on mount.
  */
-import { render, screen } from "@testing-library/react";
+import { render, screen, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -87,33 +88,58 @@ beforeEach(() => {
   // The dashboard behind the sheet is irrelevant here — reject so the
   // screen settles into its error state instead of hanging on a pending
   // promise. The sheet renders regardless.
-  mockedDashboard.mockRejectedValue(new Error("not under test"));
+  // DRF-2127: аватар живёт в шапке дашборда — ему нужны данные мастера.
+  mockedDashboard.mockResolvedValue({
+    master: { id: "m-1", name: "Ольга", specialization: "", photo_url: "" },
+    salon: { id: "t-1", name: "Demo" },
+    now_iso: "2026-09-19T09:00:00+03:00",
+    active_visit: null,
+    next_visit: null,
+    inbox_preview: [],
+    today_summary: { total_clients_today: 0, completed_count: 0, next_free_window: null },
+    tab_badges: {
+      conversations_unread: 0,
+      schedule_has_pending_change: false,
+      profile_has_owner_pending_change: false,
+    },
+    states: { is_day_done: false, is_offline_safe_response: false },
+    week_summary: { week_start: "2026-09-14", week_end: "2026-09-20", bookings: 0, completed: 0, rating: null },
+  });
   mockedPayout.mockRejectedValue(new Error("not under test"));
 });
 
-describe("solo surface — admin escape hatch (DRF-1149)", () => {
-  it("shows «Салон» in the «Ещё» sheet for an owner", async () => {
-    renderAppAt("/solo/more");
+describe("solo surface — admin escape hatch (DRF-1149 → лист аватара, DRF-2127)", () => {
+  // Лист «Ещё» снят вместе с пятивкладочной панелью (§28/§50); правило
+  // DRF-1149 живёт в листе аватара: «Управление салоном» — при владельческой
+  // роли поверх соло-профиля.
+  async function openAvatarSheet() {
+    await userEvent.click(await screen.findByRole("button", { name: "Меню профиля" }));
+    return screen.findByRole("dialog", { name: "Меню" });
+  }
+
+  it("shows «Управление салоном» in the avatar sheet for an owner", async () => {
+    renderAppAt("/solo/my-day");
+    const sheet = await openAvatarSheet();
     expect(
-      await screen.findByRole("button", { name: "Управление салоном" }),
+      within(sheet).getByRole("button", { name: "Управление салоном" }),
     ).toBeInTheDocument();
   });
 
-  it("keeps the Tau §3 base items alongside it", async () => {
-    renderAppAt("/solo/more");
-    await screen.findByRole("button", { name: "Управление салоном" });
-    for (const label of ["Расписание", "Доходы", "Отзывы", "AI-помощник", "Профиль", "Настройки"]) {
-      expect(screen.getByRole("button", { name: label })).toBeInTheDocument();
+  it("keeps the solo base items alongside it", async () => {
+    renderAppAt("/solo/my-day");
+    const sheet = await openAvatarSheet();
+    for (const label of ["Профиль", "Клиенты", "Услуги", "Отзывы", "Настройки"]) {
+      expect(within(sheet).getByRole("button", { name: label })).toBeInTheDocument();
     }
   });
 
-  it("hides «Салон» from a master-only caller", async () => {
+  it("hides «Управление салоном» from a master-only caller", async () => {
     mockedGetMe.mockResolvedValue(SOLO_MASTER_ONLY_ME);
-    renderAppAt("/solo/more");
-    // Wait for the sheet to exist via a base item, then assert absence.
-    await screen.findByRole("button", { name: "Расписание" });
+    renderAppAt("/solo/my-day");
+    const sheet = await openAvatarSheet();
+    expect(within(sheet).getByRole("button", { name: "Профиль" })).toBeInTheDocument();
     expect(
-      screen.queryByRole("button", { name: "Управление салоном" }),
+      within(sheet).queryByRole("button", { name: "Управление салоном" }),
     ).not.toBeInTheDocument();
   });
 });
