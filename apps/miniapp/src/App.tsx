@@ -101,9 +101,11 @@ import { FeedbackScreen } from "./screens/FeedbackScreen";
 import { FoodScannerCaptureScreen } from "./screens/FoodScannerCaptureScreen";
 import { FoodScannerDiaryScreen } from "./screens/FoodScannerDiaryScreen";
 import { FoodScannerManualScreen } from "./screens/FoodScannerManualScreen";
+import { FoodScannerWeekScreen } from "./screens/FoodScannerWeekScreen";
 import { FoodScannerProcessingScreen } from "./screens/FoodScannerProcessingScreen";
 import { FoodScannerResultScreen } from "./screens/FoodScannerResultScreen";
 import { FoodScannerSavedScreen } from "./screens/FoodScannerSavedScreen";
+import { FoodScannerDayScreen } from "./screens/FoodScannerDayScreen";
 import { FoodScannerFavoritesScreen } from "./screens/FoodScannerFavoritesScreen";
 import { HelloScreen } from "./screens/HelloScreen";
 import { CustomerEntryScreen } from "./screens/CustomerEntryScreen";
@@ -1567,6 +1569,15 @@ export function CustomerRoutes() {
       <Route
         path="/customer/food-scanner/manual"
         element={<FoodScannerManualScreen />}
+      />
+      {/* DRF-2099 — дневник за неделю и записи одного дня (только чтение). */}
+      <Route
+        path="/customer/food-scanner/week"
+        element={<FoodScannerWeekScreen />}
+      />
+      <Route
+        path="/customer/food-scanner/day/:date"
+        element={<FoodScannerDayScreen />}
       />
       <Route path="/feedback/:bookingId" element={<FeedbackScreen />} />
       {/* DRF-1349 — the surface an invited master actually boots into.

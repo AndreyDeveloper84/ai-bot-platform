@@ -228,6 +228,30 @@ class SavedMealRow:
 
 
 @dataclass(frozen=True)
+class DiaryDayRow:
+    """DRF-2099 — один день дневника, как его считает ``internal/diary/days/``.
+
+    Границы суток — по поясу человека в каталоге; здесь дата — строка
+    ``YYYY-MM-DD`` в том поясе, а не UTC. ``kcal`` — ``None`` без записей.
+    """
+
+    date: str
+    meals_count: int
+    kcal: float | None
+    has_entries: bool
+
+
+@dataclass(frozen=True)
+class DiaryDaysResponse:
+    """DRF-2099 — период дневника: строка на КАЖДЫЙ день, пустые тоже."""
+
+    timezone: str
+    date_from: str
+    date_to: str
+    days: tuple[DiaryDayRow, ...]
+
+
+@dataclass(frozen=True)
 class DishEstimate:
     """Оценка блюда БЕЗ записи — ``internal/food-estimate/`` (DRF-1837, §109).
 
@@ -1300,6 +1324,85 @@ class NutritionClient:
             self._circuit.record_failure(now=now)
             raise NutritionUnavailableError(f"http_{resp.status_code}")
         raise NutritionAPIError(f"http_{resp.status_code}")
+
+    # ─── diary days (DRF-2099) ────────────────────────────────────────────
+
+    async def diary_days(
+        self,
+        *,
+        external_user_id: str,
+        date_from: str | None = None,
+        date_to: str | None = None,
+    ) -> DiaryDaysResponse:
+        """GET ``/api/v1/nutrition/internal/diary/days/?from=&to=``.
+
+        Без периода каталог отдаёт свою неделю (7 дней до сегодня по поясу
+        человека). Слишком длинный или перевёрнутый период — 400 у каталога,
+        здесь ``NutritionAPIError``: отказ по имени, а не пустая неделя.
+        Тело ответа в лог не пишется.
+        """
+        now = time.monotonic()
+        if self._circuit.is_open(now=now):
+            raise NutritionUnavailableError("circuit_open")
+
+        url = self._urls.build("nutrition/internal/diary/days/")
+        headers = with_request_id(
+            {
+                "X-Service-Token": self._token,
+                "X-External-User-ID": external_user_id,
+            }
+        )
+        params: dict[str, str] = {}
+        if date_from:
+            params["from"] = date_from
+        if date_to:
+            params["to"] = date_to
+        try:
+            async with httpx.AsyncClient(timeout=self._timeout_s) as http:
+                resp = await http.get(url, headers=headers, params=params)
+        except (httpx.TimeoutException, httpx.NetworkError) as exc:
+            self._circuit.record_failure(now=now)
+            logger.warning(
+                "nutrition_client.diary_days.network ext=%s err=%s",
+                external_user_id,
+                type(exc).__name__,
+            )
+            raise NutritionUnavailableError(f"network: {type(exc).__name__}") from exc
+
+        if resp.status_code >= 500:
+            self._circuit.record_failure(now=now)
+            raise NutritionUnavailableError(f"http_{resp.status_code}")
+        if resp.status_code != 200:
+            raise NutritionAPIError(f"http_{resp.status_code}")
+        self._circuit.record_success()
+        try:
+            body = resp.json().get("data") or {}
+            rows = body["days"]
+            if not isinstance(rows, list):
+                raise TypeError("days")
+            days = tuple(
+                DiaryDayRow(
+                    date=str(row["date"]),
+                    meals_count=int(row.get("meals_count") or 0),
+                    kcal=_float_or_none(row.get("kcal")),
+                    has_entries=bool(row.get("has_entries")),
+                )
+                for row in rows
+            )
+        except (KeyError, TypeError, ValueError, AttributeError) as exc:
+            # Ответ 200 не той формы — не «пустая неделя»: экран покажет отказ.
+            logger.warning(
+                "nutrition_client.diary_days.malformed ext=%s err=%s",
+                external_user_id,
+                type(exc).__name__,
+            )
+            raise NutritionUnavailableError("malformed_body") from exc
+        return DiaryDaysResponse(
+            timezone=str(body.get("timezone") or "UTC"),
+            date_from=str(body.get("from") or ""),
+            date_to=str(body.get("to") or ""),
+            days=days,
+        )
 
     # ─── profile ──────────────────────────────────────────────────────────
 

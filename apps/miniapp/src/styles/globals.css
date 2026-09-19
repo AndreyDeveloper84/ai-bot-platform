@@ -6928,6 +6928,33 @@ a {
   gap: var(--s-1);
   flex: 0 0 auto;
 }
+/* DRF-2099 — неделя дневника: стрелки и строка дня как кнопка. */
+.food-scanner-week__nav {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s-2);
+}
+.food-scanner-week__period {
+  font-size: var(--font-size-200);
+  color: var(--c-text-secondary);
+}
+.food-scanner-week__day {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s-2);
+  padding: var(--s-2) 0;
+  background: none;
+  border: 0;
+  font: inherit;
+  color: inherit;
+  text-align: left;
+}
+.food-scanner-diary__entry-action:disabled {
+  opacity: 0.4;
+}
 .food-scanner-diary__entry-action {
   padding: 0 var(--s-2);
   background: none;

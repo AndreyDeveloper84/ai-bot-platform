@@ -524,6 +524,32 @@ CUSTOMER_ROUTES: dict[str, Entry] = {
             "flag; no dish fields come back on delete"
         ),
     ),
+    # --- diary week (DRF-2099, own) --------------------------------------
+    "customer_diary_days": own(
+        "timezone",
+        "from",
+        "to",
+        "days[].date / meals_count / kcal / has_entries",
+        "nutrition_numbers_hidden",
+        via="apps.miniapp_api.views_diary_days:customer_diary_days",
+        note=(
+            "the caller's own diary days passed through from the catalog under their "
+            "external_user_id: per-day counts and kcal only, no dish names; the day "
+            "boundary is the catalog's (person timezone); nutrition_numbers_hidden is the "
+            "same single derived boolean as wellness/today, never the health flag itself"
+        ),
+    ),
+    "customer_diary_day": own(
+        "date",
+        "calories_total",
+        "entries",
+        "nutrition_numbers_hidden",
+        via="apps.miniapp_api.views_diary_days:customer_diary_day",
+        note=(
+            "the caller's own diary entries for one date — the catalog daily summary for "
+            "that date in the wellness/today entry shape; read-only, no edit of past days here"
+        ),
+    ),
     # --- Plan Lite (DRF-2101, own) --------------------------------------
     "customer_plan_lite": own(
         "plan_lite.plan_id",
