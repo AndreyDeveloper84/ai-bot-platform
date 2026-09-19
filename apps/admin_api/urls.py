@@ -20,6 +20,7 @@ from apps.admin_api import (
     views_booking_create,
     views_customers,
     views_day,
+    views_handoff_queue,
     views_invite,
     views_master_exceptions,
     views_schedule_impact,
@@ -238,5 +239,12 @@ urlpatterns = [
         "availability-requests/",
         views_availability.availability_requests_list,
         name="availability_requests_list",
+    ),
+    # DRF-2115 — карточка «Диалоги — N ждут ответа» на «Сегодня»: очередь
+    # handoff этого салона, только чтение (взять/закрыть — в Django-админке).
+    path(
+        "handoff-queue/",
+        views_handoff_queue.handoff_queue,
+        name="handoff_queue",
     ),
 ]

@@ -2067,3 +2067,33 @@ export const revokeStaffAccess = (
     method: "POST",
     body: JSON.stringify(payload),
   });
+
+// ---------------------------------------------------------------------------
+// DRF-2115 — очередь handoff для «Сегодня»: сколько ждут человека и как давно.
+// Только чтение; «взять»/«закрыть» — в Django-админке (DRF-1488).
+// В ответе нет ни клиента, ни текста: задача, статус, возраст, кто взял.
+// ---------------------------------------------------------------------------
+
+export interface HandoffQueueRow {
+  task_id: string;
+  status: "open" | "in_progress" | string;
+  age_minutes: number;
+  created_at: string;
+  claimed: boolean;
+  /** Оператор или очередь, взявшие задачу; пусто — никто. */
+  addressee: string;
+  escalated: boolean;
+}
+
+export interface HandoffQueueResponse {
+  waiting: number;
+  rows: HandoffQueueRow[];
+}
+
+export const getHandoffQueue = (
+  init: { signal?: AbortSignal } = {},
+): Promise<HandoffQueueResponse> =>
+  request<HandoffQueueResponse>("/api/v1/admin/handoff-queue/", {
+    method: "GET",
+    signal: init.signal,
+  });

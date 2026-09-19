@@ -35,7 +35,8 @@ import {
   listAdminThreads,
   threadNeedsAdminResponse,
 } from "../../lib/internal-chat-api";
-import { hapticImpact, hapticSelection, setBackButton } from "../../lib/max-sdk";
+import { useSalonSectionBack } from "../../hooks/useSalonSectionBack";
+import { hapticImpact, hapticSelection } from "../../lib/max-sdk";
 
 interface Props {
   me: MeResponse;
@@ -105,10 +106,9 @@ export function AdminTeamScreen({ me }: Props) {
   const [awaitingErr, setAwaitingErr] = useState<boolean>(false);
   const [verifying, setVerifying] = useState<boolean>(false);
 
-  useEffect(() => {
-    // Tab bar is at the root — hide MAX BackButton on the team screen.
-    setBackButton(false);
-  }, []);
+  // DRF-2115: у владельца/администратора «Команда» открывается из аватара —
+  // системная «назад» ведёт в «Сегодня»; у ресепшн это корень моста.
+  useSalonSectionBack(me);
 
   useEffect(() => {
     if (!(me.is_owner || me.is_admin)) return;

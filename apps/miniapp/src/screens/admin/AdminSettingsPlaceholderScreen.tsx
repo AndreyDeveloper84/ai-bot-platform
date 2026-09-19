@@ -35,16 +35,16 @@
  * экран отказа.
  */
 
-import { useNavigate } from "react-router-dom";
 
 import { AdminTabBar } from "../../components/AdminTabBar";
 import type { MeResponse } from "../../lib/admin-api";
 import { SurfaceSwitchButton } from "../../components/SurfaceSwitch";
-import { hapticSelection } from "../../lib/max-sdk";
-import { SALON_PILOT_LANDING, canOpenSalonPilot } from "../../lib/salon-pilot";
+import { useSalonSectionBack } from "../../hooks/useSalonSectionBack";
 
 export function AdminSettingsPlaceholderScreen({ me }: { me: MeResponse }) {
-  const navigate = useNavigate();
+  // DRF-2115: «Настройки» открываются из аватара — системная «назад»
+  // ведёт в «Сегодня». Вход в пилот отсюда снят: пилот и есть посадка.
+  useSalonSectionBack(me);
   return (
     <div className="screen">
       <header className="screen__header">
@@ -53,32 +53,6 @@ export function AdminSettingsPlaceholderScreen({ me }: { me: MeResponse }) {
       <div className="callout" role="status">
         <p style={{ margin: 0 }}>Скоро здесь будут настройки салона.</p>
       </div>
-      {canOpenSalonPilot(me) ? (
-        <div className="callout" role="group" aria-label="Пилотная админка">
-          {/*
-            Формулировка нарочно не обещает содержимого. «Расписание» и
-            «Ayla» сегодня пусты, и надпись говорит это прямо: человек,
-            нажавший кнопку, должен знать, что он там увидит, ДО нажатия,
-            а не после.
-          */}
-          <p style={{ margin: 0 }}>
-            Пилотная админка салона: «Сегодня», «Расписание», «Ayla». Готов
-            раздел «Сегодня» — «Расписание» и «Ayla» пока пустые.
-          </p>
-          <div style={{ marginTop: "var(--s-3)" }}>
-            <button
-              type="button"
-              className="btn-secondary"
-              onClick={() => {
-                hapticSelection();
-                navigate(SALON_PILOT_LANDING);
-              }}
-            >
-              Открыть пилотную админку
-            </button>
-          </div>
-        </div>
-      ) : null}
       {/*
         The way back out of a surface. Renders itself away for anyone
         holding a single role, so the ordinary receptionist never sees a

@@ -103,8 +103,8 @@ describe("adminLandingPath", () => {
     expect(adminLandingPath(RECEPTION)).toBe("/admin/day");
   });
 
-  it("владелец и администратор — на «Команду», как и было", () => {
-    expect(adminLandingPath(OWNER)).toBe("/admin/team");
-    expect(adminLandingPath(ADMIN)).toBe("/admin/team");
+  it("владелец и администратор — в «Сегодня» пилота (DRF-2115, §50 п.5; §47.1 снят 19.09)", () => {
+    expect(adminLandingPath(OWNER)).toBe("/admin/today");
+    expect(adminLandingPath(ADMIN)).toBe("/admin/today");
   });
 });

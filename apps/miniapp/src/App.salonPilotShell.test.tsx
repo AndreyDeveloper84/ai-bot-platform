@@ -32,7 +32,6 @@
  * `setBackButton`/`onBackButton` с `SalonPilotFrame` — покраснеет выход.
  */
 import { render, screen, waitFor } from "@testing-library/react";
-import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -377,39 +376,29 @@ describe("«Расписание» и «Ayla» не обещают несуще�
   });
 });
 
-describe("мост из пяти вкладок не сдвинулся (DRF-1235)", () => {
-  it("владелец на «Дне» видит прежние пять вкладок", async () => {
+describe("мост снят с панели владельца и администратора (DRF-2115, §50 п.5)", () => {
+  // Прежние узлы пришпиливали §47.1 «посадку не переключать» — снято
+  // решением владельца 19.09.2026: тройка пилота стала посадкой, разделы
+  // моста живут по прямым адресам и открываются из аватара.
+  it("владелец на «Дне» видит тройку пилота", async () => {
     mockedGetMe.mockResolvedValue(OWNER_ME);
     renderAppAt("/admin/day");
     await waitFor(() => expect(mockedDay).toHaveBeenCalled());
-    expect(tabLabels()).toEqual([
-      "День",
-      "Команда",
-      "Услуги",
-      "Чаты",
-      "Настройки",
-    ]);
+    expect(tabLabels()).toEqual(["Сегодня", "Расписание", "Ayla"]);
   });
 
   it("у ресепшн на мосту прежние две вкладки: «День» и «Команда»", async () => {
-    // Пин по именам, а не по числу. DRF-1552 убрал у ресепшн «Услуги»,
-    // и счётчик «три» здесь уже однажды устарел за сутки; список имён
-    // покраснеет и на возврате «Услуг», и на подмешивании пилота.
     mockedGetMe.mockResolvedValue(RECEPTION_ME);
     renderAppAt("/admin/day");
     await waitFor(() => expect(mockedDay).toHaveBeenCalled());
     expect(tabLabels()).toEqual(["День", "Команда"]);
   });
 
-  it("вход без адреса по-прежнему ведёт владельца на «Команду»", async () => {
+  it("вход без адреса ведёт владельца в «Сегодня»", async () => {
     mockedGetMe.mockResolvedValue(OWNER_ME);
     renderAppAt("/");
-    // Присутствие: посадка сработала и сходила за ростером.
-    await waitFor(() => expect(mockedMasters).toHaveBeenCalled());
-    // Отсутствие: значит, на пилот его не унесло.
-    expect(
-      screen.queryByRole("button", { name: "Расписание" }),
-    ).not.toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "Сегодня" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Расписание" })).toBeInTheDocument();
   });
 });
 
@@ -441,147 +430,69 @@ function stubMaxBackButton() {
   };
 }
 
-describe("вход в пилот с моста (решение владельца 07.09.2026)", () => {
-  it("владелец видит вход на «Настройках» и попадает по нему в «Сегодня»", async () => {
+describe("входа в пилот с «Настроек» больше нет (DRF-2115)", () => {
+  // Решение 07.09 «мост остаётся посадкой, вход в пилот с Настроек» отменено
+  // 19.09 (§50 п.5): пилот и есть посадка, кнопка стала бы петлёй.
+  it("владелец на «Настройках» кнопки не видит, панель — тройка пилота", async () => {
     mockedGetMe.mockResolvedValue(OWNER_ME);
     renderAppAt("/admin/settings");
-    const enter = await screen.findByRole("button", {
-      name: "Открыть пилотную админку",
-    });
-    await userEvent.click(enter);
+    expect(await screen.findByText(/Скоро здесь будут настройки/)).toBeInTheDocument();
     expect(
-      await screen.findByRole("heading", { name: "Сегодня" }),
-    ).toBeInTheDocument();
-    // И это именно пилот, а не «День» моста.
+      screen.queryByRole("button", { name: "Открыть пилотную админку" }),
+    ).not.toBeInTheDocument();
     expect(tabLabels()).toEqual(["Сегодня", "Расписание", "Ayla"]);
-  });
-
-  it("администратор видит тот же вход", async () => {
-    mockedGetMe.mockResolvedValue(ADMIN_ME);
-    renderAppAt("/admin/settings");
-    expect(
-      await screen.findByRole("button", { name: "Открыть пилотную админку" }),
-    ).toBeInTheDocument();
-  });
-
-  it("надпись не обещает содержимого пустых разделов", async () => {
-    mockedGetMe.mockResolvedValue(OWNER_ME);
-    renderAppAt("/admin/settings");
-    // Присутствие: вход на месте и назвал оба пустых раздела пустыми.
-    expect(
-      await screen.findByText(
-        /«Расписание» и «Ayla» пока пустые/,
-      ),
-    ).toBeInTheDocument();
   });
 
   it("ресепшн до «Настроек» не доходит — на адресе стоит отказ", async () => {
     mockedGetMe.mockResolvedValue(RECEPTION_ME);
     renderAppAt("/admin/settings");
-    // Присутствие: отказ отрисован, экран не пустой.
     expect(await screen.findByRole("alert")).toHaveTextContent(
       /Раздел «Настройки» открыт владельцу и администратору/,
     );
-    // И только теперь отрицание: входа в пилот на нём нет.
-    expect(
-      screen.queryByRole("button", { name: "Открыть пилотную админку" }),
-    ).not.toBeInTheDocument();
   });
 
-  /**
-   * Проверка выше пинует СТРАЖ МАРШРУТА, а не проверку роли на экране:
-   * ресепшн до placeholder-а не доходит вовсе, поэтому убери
-   * `canOpenSalonPilot` из экрана — и она осталась бы зелёной. Проверено
-   * саботажем: заменил условие на `true`, все 29 остались зелёными.
-   *
-   * Поэтому экран рендерится напрямую, в обход маршрута. Правила
-   * независимы: сюда пускает `isAdminTabAllowed(me, "settings")`, в пилот
-   * — `canOpenSalonPilot`. Сегодня оба закрыты для ресепшн; если
-   * «Настройки» ей когда-нибудь откроют, вход в пилот уехать следом не
-   * должен — он привёл бы её на экран отказа.
-   */
-  it("на самом экране вход скрыт от ресепшн, а не только на маршруте", () => {
-    render(
-      <MemoryRouter>
-        <AdminSettingsPlaceholderScreen me={RECEPTION_ME} />
-      </MemoryRouter>,
-    );
-    // Присутствие: экран отрисовался целиком, а не упал в пустоту.
-    expect(screen.getByText(/Скоро здесь будут настройки/)).toBeInTheDocument();
-    // Отсутствие: и входа в пилот на нём нет.
-    expect(
-      screen.queryByRole("button", { name: "Открыть пилотную админку" }),
-    ).not.toBeInTheDocument();
-  });
-
-  it("тому же экрану с владельцем вход показывается", () => {
+  it("экран настроек рендерится напрямую и без кнопки", () => {
     render(
       <MemoryRouter>
         <AdminSettingsPlaceholderScreen me={OWNER_ME} />
       </MemoryRouter>,
     );
+    expect(screen.getByText(/Скоро здесь будут настройки/)).toBeInTheDocument();
     expect(
-      screen.getByRole("button", { name: "Открыть пилотную админку" }),
-    ).toBeInTheDocument();
-  });
-
-  it("«Настройки» не потеряли своего прежнего содержимого", async () => {
-    mockedGetMe.mockResolvedValue(OWNER_ME);
-    renderAppAt("/admin/settings");
-    expect(
-      await screen.findByText(/Скоро здесь будут настройки/),
-    ).toBeInTheDocument();
-    // Панель моста под ними прежняя — вход в пилот её не тронул.
-    expect(tabLabels()).toEqual([
-      "День",
-      "Команда",
-      "Услуги",
-      "Чаты",
-      "Настройки",
-    ]);
+      screen.queryByRole("button", { name: "Открыть пилотную админку" }),
+    ).not.toBeInTheDocument();
   });
 });
 
-describe("выход с пилота обратно на мост (не ловушка)", () => {
+describe("возврат: корни пилота без системной «назад», разделы ведут в «Сегодня» (DRF-2115)", () => {
   afterEach(() => {
     delete (window as unknown as { WebApp?: unknown }).WebApp;
   });
 
-  it("на пилоте показана системная «назад», и она возвращает в «Настройки»", async () => {
+  it("на «Сегодня» системная «назад» спрятана — это корень поверхности", async () => {
     const max = stubMaxBackButton();
     mockedGetMe.mockResolvedValue(OWNER_ME);
     renderAppAt("/admin/today");
     await screen.findByRole("heading", { name: "Сегодня" });
-    // Присутствие: кнопка показана и экран на неё подписался.
-    expect(max.backButton.show).toHaveBeenCalled();
-    expect(max.backButton.onClick).toHaveBeenCalled();
-
-    max.press();
-
-    expect(
-      await screen.findByText(/Скоро здесь будут настройки/),
-    ).toBeInTheDocument();
-    // Ушли именно на мост: под «Настройками» его пятивкладочная панель.
-    expect(tabLabels()).toEqual([
-      "День",
-      "Команда",
-      "Услуги",
-      "Чаты",
-      "Настройки",
-    ]);
+    expect(max.backButton.hide).toHaveBeenCalled();
+    expect(max.backButton.onClick).not.toHaveBeenCalled();
   });
 
-  it("выход есть на каждом из трёх разделов, а не только на «Сегодня»", async () => {
+  it("на «Настройках», открытых из аватара, системная «назад» ведёт в «Сегодня»", async () => {
     const max = stubMaxBackButton();
     mockedGetMe.mockResolvedValue(OWNER_ME);
-    renderAppAt("/admin/ayla");
-    await screen.findByRole("heading", { name: "Ayla" });
+    renderAppAt("/admin/settings");
+    await screen.findByText(/Скоро здесь будут настройки/);
     expect(max.backButton.show).toHaveBeenCalled();
-
     max.press();
+    expect(await screen.findByRole("heading", { name: "Сегодня" })).toBeInTheDocument();
+  });
 
-    expect(
-      await screen.findByText(/Скоро здесь будут настройки/),
-    ).toBeInTheDocument();
+  it("у ресепшн «День» остаётся корнем: кнопки нет", async () => {
+    const max = stubMaxBackButton();
+    mockedGetMe.mockResolvedValue(RECEPTION_ME);
+    renderAppAt("/admin/day");
+    await waitFor(() => expect(mockedDay).toHaveBeenCalled());
+    expect(max.backButton.show).not.toHaveBeenCalled();
   });
 });
