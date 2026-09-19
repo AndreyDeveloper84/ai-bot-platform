@@ -22,7 +22,9 @@ import pytest
 from apps.channels.max import handler as max_handler
 from apps.channels.max.global_onboarding import (
     GLOBAL_S5_TEXT,
+    GLOBAL_WELCOME_TAP_LABELS,
     GLOBAL_WELCOME_TEXT,
+    START_BUTTON_LABEL,
     needs_onboarding,
     resolve_welcome_tap,
     run_onboarding_turn,
@@ -281,7 +283,7 @@ class TestRunOnboardingTurn:
         assert reply.text == GLOBAL_WELCOME_TEXT
         # Only the «Начать» button — no salon/wellness buttons leak through.
         assert reply.action_data == {
-            "buttons": [{"label": "▶️ Начать", "callback": "cb:welcome:start_s2"}],
+            "buttons": [{"label": START_BUTTON_LABEL, "callback": "cb:welcome:start_s2"}],
             "button_columns": 1,
         }
         bot_user.refresh_from_db()
@@ -294,7 +296,8 @@ class TestRunOnboardingTurn:
 
         reply = run_onboarding_turn(conv, bot_user, "cb:welcome:consent_yes")
 
-        assert reply.text.startswith(GLOBAL_S5_TEXT)  # DRF-1348: + подсказка и чипы
+        # DRF-2120: S3 доходит и стоит ПЕРЕД первым экраном (раньше терялся).
+        assert reply.text.endswith(GLOBAL_S5_TEXT) and reply.text != GLOBAL_S5_TEXT
         # Wellness-грид по-прежнему сброшен — но экран больше не пустой:
         # DRF-1348 поставил на его место Quick Actions макета C01. Проверка
         # изменилась с «кнопок нет вовсе» на «нет ИМЕННО wellness-кнопок»,
@@ -397,7 +400,8 @@ class TestRunOnboardingTurn:
 
         reply = run_onboarding_turn(conv, bot_user, "cb:welcome:consent_yes_via_s2a")
 
-        assert reply.text.startswith(GLOBAL_S5_TEXT)  # DRF-1348: + подсказка и чипы
+        # Через S2a S3 не показывается (правило WelcomeSkill) — экран один.
+        assert reply.text == GLOBAL_S5_TEXT
         assert _granted_types(bot_user) == {
             ConsentRecord.ConsentType.PERSONAL_DATA.value,
             ConsentRecord.ConsentType.MEMORY_GREEN.value,
@@ -488,7 +492,7 @@ class TestHandlerIntegration:
             _callback_payload(payload="cb:welcome:consent_yes", user_id=uid, callback_id="c2"),
             trace_id=str(uuid.uuid4()),
         )
-        assert mock_send[-1]["text"].startswith(GLOBAL_S5_TEXT)  # DRF-1348
+        assert mock_send[-1]["text"].endswith(GLOBAL_S5_TEXT)  # DRF-2120: S3 + экран
         spy_discovery.assert_not_called()
         spy_direct_show_masters.assert_not_called()
 
@@ -641,10 +645,13 @@ class TestWelcomeTapAsAHistoryTurn:
 
         labels = welcome_tap_labels()
         assert labels, "клавиатура приветствия пуста — проверка ниже ни о чём"
+        # DRF-2120: кнопки самого глобального пути подписаны текстом
+        # владельца («Начать», «Записать еду») — их таблица побеждает.
+        assert GLOBAL_WELCOME_TAP_LABELS, "таблица подписей глобального пути пуста"
         for payload, label in labels.items():
             tap = resolve_welcome_tap(payload)
             assert tap is not None, payload
-            assert tap.history_text == label, payload
+            assert tap.history_text == GLOBAL_WELCOME_TAP_LABELS.get(payload, label), payload
 
     def test_the_consent_decisions_are_the_ones_that_matter(self):
         """Оба решения — согласие и отказ — остаются в истории фразой."""
