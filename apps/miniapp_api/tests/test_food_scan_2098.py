@@ -342,15 +342,15 @@ class TestLogByScan:
             == f"food-photo-ma:bot:max:{bot_user.channel_user_id}:k-photo-1"
         )
         assert "dish_name" not in kwargs
-        assert "entry_origin" not in kwargs, (
-            "an unchanged card is the catalog's default origin, as in the chat"
-        )
+        # DRF-2110 — §136: подтверждённая как есть фото-запись названа своим
+        # кодом, а не NULL («до §136»).
+        assert kwargs["entry_origin"] == "photo_estimated_confirmed"
         assert resp.json() == {
             "log_id": "01J9FOODPHOTO0000000000AA",
             "dish_name": "борщ",
             "meal_type": "lunch",
             "calories": 250.0,
-            "entry_origin": None,
+            "entry_origin": "photo_estimated_confirmed",
         }
 
     def test_a_corrected_portion_is_photo_user_corrected(self, client, bot_user) -> None:
