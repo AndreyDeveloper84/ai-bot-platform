@@ -39,6 +39,7 @@ import {
   correctFoodEntryGrams,
   deleteFoodEntry,
   DIARY_CONSENT_REQUIRED_TEXT,
+  DIARY_OFF_TEXT,
   loadDiaryToday,
   restoreFoodEntry,
   type WellnessToday,
@@ -227,6 +228,27 @@ describe("четыре состояния различимы попарно", ()
 
     expect(await screen.findByRole("button", { name: /Повторить|снова/i })).toBeInTheDocument();
     expect(screen.queryByText(/Пока ничего не записано/)).not.toBeInTheDocument();
+  });
+
+  it("DRF-2071: контур выключен (404 nutrition_disabled) — «недоступен», без повтора и без «Добавить приём»", async () => {
+    mockedLoad.mockRejectedValue(new ApiError(404, "nutrition_disabled", "food diary is not enabled"));
+    renderScreen();
+
+    expect(await screen.findByText(DIARY_OFF_TEXT)).toBeInTheDocument();
+    // Не сбой: ни «через минуту», ни кнопки повтора.
+    expect(screen.queryByText(/Не удалось загрузить дневник/)).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Повторить|снова/i })).not.toBeInTheDocument();
+    // Не пустой день и не вход в запись: «Добавить приём» не рисуется.
+    expect(screen.queryByText(/Пока ничего не записано/)).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Добавить приём/ })).not.toBeInTheDocument();
+  });
+
+  it("DRF-2071: положительная стража — прочий 404 остаётся сбоем с повтором", async () => {
+    mockedLoad.mockRejectedValue(new ApiError(404, "not_found", "no such day"));
+    renderScreen();
+
+    expect(await screen.findByRole("button", { name: /Повторить|снова/i })).toBeInTheDocument();
+    expect(screen.queryByText(DIARY_OFF_TEXT)).not.toBeInTheDocument();
   });
 });
 

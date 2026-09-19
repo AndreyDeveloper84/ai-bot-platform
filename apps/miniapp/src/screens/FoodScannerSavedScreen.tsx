@@ -25,7 +25,12 @@ import { useLocation, useNavigate } from "react-router-dom";
 import { StateError } from "../components/StateError";
 import {
 } from "../lib/food-scanner";
-import { getWellnessToday, type WellnessToday } from "../lib/customer-wellness";
+import {
+  DIARY_OFF_TEXT,
+  getWellnessToday,
+  isDiaryOff,
+  type WellnessToday,
+} from "../lib/customer-wellness";
 import { useScreenBack } from "../hooks/useScreenBack";
 import { backTo } from "../lib/screen-back";
 
@@ -147,7 +152,12 @@ export function FoodScannerSavedScreen() {
             >
               Сегодня
             </h2>
-            {err !== null && <StateError err={err} onRetry={load} />}
+            {/* DRF-2071 — контур выключили между записью и сводкой: не сбой,
+                повтор ничего не даст. */}
+            {err !== null && isDiaryOff(err) && (
+              <p className="food-scanner-saved__total" role="status">{DIARY_OFF_TEXT}</p>
+            )}
+            {err !== null && !isDiaryOff(err) && <StateError err={err} onRetry={load} />}
             {err === null && summary && (
               <>
                 {eaten !== undefined && (
@@ -185,13 +195,17 @@ export function FoodScannerSavedScreen() {
         )}
 
         <div className="food-scanner-screen__cta-stack">
-          <button
-            type="button"
-            className="btn-primary"
-            onClick={() => navigate("/customer/food-scanner/diary")}
-          >
-            Открыть дневник
-          </button>
+          {/* DRF-2071 — при выключенном контуре дневник не открывается:
+              кнопка вела бы на экран с той же фразой «недоступен». */}
+          {!isDiaryOff(err) && (
+            <button
+              type="button"
+              className="btn-primary"
+              onClick={() => navigate("/customer/food-scanner/diary")}
+            >
+              Открыть дневник
+            </button>
+          )}
           <button
             type="button"
             className="btn-secondary"
