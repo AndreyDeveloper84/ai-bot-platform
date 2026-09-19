@@ -36,9 +36,10 @@ from tests.support.pii_route_registry import (
 
 V = "apps.miniapp_api.views:"
 
-#: Named routes in ``apps/miniapp_api/urls.py`` on dev 94125e1f (18.09.2026).
+#: Named routes in ``apps/miniapp_api/urls.py`` on dev f2268007 (19.09.2026) + the
+#: DRF-2123 proposal route.
 #: Lower the floor deliberately when a route is removed.
-ROUTE_FLOOR = 45
+ROUTE_FLOOR = 49
 
 _BOOKING_FIELDS = (
     "id",
@@ -563,6 +564,25 @@ CUSTOMER_ROUTES: dict[str, Entry] = {
             "and the commitments with their done_count — action facts only (В-5), no "
             "observation values, no phone or name; GET reads it, POST echoes the plan just "
             "created, DELETE answers with the closed flag only"
+        ),
+    ),
+    # --- Plan Lite proposal (DRF-2123, План-A, own) ---------------------
+    "customer_plan_lite_proposal": own(
+        "proposal.goal_key",
+        "proposal.why",
+        "proposal.template_version",
+        "proposal.actions[].action_type / cadence / target_count",
+        via="apps.miniapp_api.views_plan_lite:plan_lite_proposal_payload",
+        note=(
+            "the plan the catalog proposes for the caller's own active goal, read under "
+            "their external_user_id and never stored here: goal_key is the curated slug of "
+            "that goal (never the goal text the person typed), why is the owner-curated "
+            "template text for that goal (the same sentence for everyone with the goal, "
+            "nothing about the person), template_version is a provenance integer, and the "
+            "actions are the template's shape only — type, cadence, target — with no "
+            "done_count, no observation values, no phone or name; the response is "
+            "classified own because which template comes back reveals which goal the "
+            "caller has chosen"
         ),
     ),
 }

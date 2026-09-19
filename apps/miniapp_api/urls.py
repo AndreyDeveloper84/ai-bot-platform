@@ -192,6 +192,13 @@ urlpatterns = [
         views_plan_lite.customer_plan_lite,
         name="customer_plan_lite",
     ),
+    # DRF-2123 (План-A) — предложение из шаблона активной цели; ничего не
+    # создаёт, подтверждается POST plan-lite с template_version.
+    path(
+        "plan-lite/proposal",
+        views_plan_lite.customer_plan_lite_proposal,
+        name="customer_plan_lite_proposal",
+    ),
     # DRF-2099 — дневник за неделю: строка на день и записи одного дня;
     # границы суток считает каталог по поясу человека.
     path(

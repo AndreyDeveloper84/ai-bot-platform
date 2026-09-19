@@ -9,7 +9,15 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("./max-sdk", () => ({ getInitData: () => "init-data-2101" }));
 
-import { closePlanLite, createPlanLite, getPlanLite, type PlanLite, type PlanLiteActionSpec } from "./plan-lite";
+import {
+  closePlanLite,
+  createPlanLite,
+  getPlanLite,
+  getPlanLiteProposal,
+  type PlanLite,
+  type PlanLiteActionSpec,
+  type PlanLiteProposal,
+} from "./plan-lite";
 
 const fetchMock = vi.fn();
 
@@ -72,5 +80,53 @@ describe("plan-lite: провод к customer/plan-lite", () => {
     const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
     expect(url).toMatch(/\/api\/v1\/customer\/plan-lite$/);
     expect(init.method).toBe("DELETE");
+  });
+});
+
+describe("plan-lite: предложение из шаблона (DRF-2123, План-A)", () => {
+  const PROPOSAL: PlanLiteProposal = {
+    goal_key: "self_care",
+    why: "Забота о себе — это регулярность, а не подвиг.",
+    template_version: 2,
+    actions: [
+      { action_type: "book_service", cadence: "per_2_weeks", target_count: 1 },
+      { action_type: "log_water", cadence: "per_day", target_count: 6 },
+    ],
+  };
+
+  it("proposal — GET /plan-lite/proposal, документ как отдал сервер", async () => {
+    fetchMock.mockResolvedValueOnce(respond(200, { proposal: PROPOSAL }));
+    expect(await getPlanLiteProposal()).toEqual(PROPOSAL);
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toMatch(/\/api\/v1\/customer\/plan-lite\/proposal$/);
+    expect(init.method ?? "GET").toBe("GET");
+  });
+
+  it("proposal — 404 no_template / no_active_goal доезжают слагами", async () => {
+    fetchMock.mockResolvedValueOnce(respond(404, { error: "no_template", detail: "none" }));
+    await expect(getPlanLiteProposal()).rejects.toMatchObject({ status: 404, slug: "no_template" });
+    fetchMock.mockResolvedValueOnce(respond(404, { error: "no_active_goal", detail: "none" }));
+    await expect(getPlanLiteProposal()).rejects.toMatchObject({ status: 404, slug: "no_active_goal" });
+  });
+
+  it("create с template_version — ключ в теле рядом с actions", async () => {
+    fetchMock.mockResolvedValueOnce(respond(201, { plan_lite: PLAN }));
+
+    await createPlanLite(PROPOSAL.actions, 2);
+
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    const body = JSON.parse(String(init.body));
+    expect(body).toEqual({ actions: PROPOSAL.actions, template_version: 2 });
+  });
+
+  it("create без template_version — ключа в теле нет (не null)", async () => {
+    fetchMock.mockResolvedValueOnce(respond(201, { plan_lite: PLAN }));
+
+    await createPlanLite(PROPOSAL.actions);
+
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    const body = JSON.parse(String(init.body));
+    expect(body.actions).toEqual(PROPOSAL.actions);
+    expect(Object.keys(body)).toEqual(["actions"]);
   });
 });

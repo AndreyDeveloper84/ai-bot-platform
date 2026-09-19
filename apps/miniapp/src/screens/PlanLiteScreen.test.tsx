@@ -18,7 +18,13 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vites
 
 vi.mock("../lib/plan-lite", async (importOriginal) => {
   const original = await importOriginal<typeof import("../lib/plan-lite")>();
-  return { ...original, getPlanLite: vi.fn(), createPlanLite: vi.fn(), closePlanLite: vi.fn() };
+  return {
+    ...original,
+    getPlanLite: vi.fn(),
+    getPlanLiteProposal: vi.fn(),
+    createPlanLite: vi.fn(),
+    closePlanLite: vi.fn(),
+  };
 });
 vi.mock("../lib/customer-goals", async (importOriginal) => {
   const original = await importOriginal<typeof import("../lib/customer-goals")>();
@@ -31,7 +37,7 @@ vi.mock("../lib/max-sdk", async (importOriginal) => {
 
 import { ApiError } from "../lib/api";
 import { fetchDecisionContext, type DecisionContext } from "../lib/customer-goals";
-import { closePlanLite, createPlanLite, getPlanLite, type PlanLite } from "../lib/plan-lite";
+import { closePlanLite, createPlanLite, getPlanLite, getPlanLiteProposal, type PlanLite } from "../lib/plan-lite";
 import { PLAN_LITE_COPY, PLAN_LITE_ROUTE, PlanLiteScreen } from "./PlanLiteScreen";
 
 const GUARD_ASYNC_TIMEOUT_MS = 20;
@@ -51,6 +57,7 @@ const settle = async (rounds = 4) => {
 };
 
 const mockedGet = vi.mocked(getPlanLite);
+const mockedProposal = vi.mocked(getPlanLiteProposal);
 const mockedCreate = vi.mocked(createPlanLite);
 const mockedClose = vi.mocked(closePlanLite);
 const mockedDoc = vi.mocked(fetchDecisionContext);
@@ -94,6 +101,9 @@ beforeEach(() => {
   vi.stubEnv("VITE_PLAN_LITE", "1");
   mockedDoc.mockResolvedValue(DOC);
   mockedGet.mockResolvedValue(null);
+  // Здесь — прежний путь без шаблона (DRF-2123: no_template → конструктор);
+  // предложение из шаблона сторожит PlanLiteScreen.proposal.test.tsx.
+  mockedProposal.mockRejectedValue(new ApiError(404, "no_template", "none"));
   mockedCreate.mockResolvedValue(PLAN);
   mockedClose.mockResolvedValue(undefined);
 });
