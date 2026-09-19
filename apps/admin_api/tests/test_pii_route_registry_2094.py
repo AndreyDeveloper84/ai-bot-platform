@@ -295,6 +295,19 @@ ADMIN_ROUTES: dict[str, Entry] = {
     "availability_requests_list": _AVAILABILITY_REQUEST,
     "availability_request_approve": _AVAILABILITY_REQUEST,
     "availability_request_reject": _AVAILABILITY_REQUEST,
+    # --- DRF-2117 — готовность салона поимённо ----------------------------
+    "salon_readiness": third_party(
+        "problems[].master.name",
+        "problems[].text",
+        via=A + "services.salon_readiness:Problem.as_dict",
+        whose="the salon's masters (first name from the catalog / mirror row)",
+        why=(
+            "the owner or administrator reads which master blocks bookings and why "
+            "(no schedule, no services, no catalog link, no free slots); the text names "
+            "the master by first name so the sheet is actionable — no phone, no customer, "
+            "no message text leaves this route"
+        ),
+    ),
     # --- DRF-2115 — очередь handoff для «Сегодня» --------------------------
     "handoff_queue": third_party(
         "addressee",

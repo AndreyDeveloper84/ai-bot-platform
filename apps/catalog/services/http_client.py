@@ -436,6 +436,60 @@ class EnsuredTenantDTO:
     created: bool
 
 
+class CatalogNotConfigured(CatalogTransportError):
+    """Наша сторона не настроена: пустой ``AYLA_INTERNAL_API_TOKEN`` или кривой
+    ``AYLA_BASE_URL`` (DRF-2117). Подкласс transport-ошибки, чтобы старые
+    ловцы не разъехались, но с собственным именем: «попробуйте ещё раз» здесь
+    не поможет — чинится в контейнере бота."""
+
+
+class CatalogReadinessRefused(CatalogError):
+    """Каталог не отдал готовность салона: 401/403/404 (DRF-2117).
+
+    ``reason`` — ``credential_refused`` (401/403: общий Bearer не подошёл,
+    заголовок актора отвергнут или актор неизвестен/неактивен) или
+    ``salon_not_confirmed`` (404: слаг чужой, салон выключен или актор не
+    администратор этого салона в каталоге — связь администратора DRF-2085).
+    Оба — не сбой сети: повтор не поможет, нужен оператор.
+    """
+
+    def __init__(self, message: str, *, reason: str, status_code: int) -> None:
+        super().__init__(message)
+        self.reason = reason
+        self.status_code = status_code
+
+
+@dataclass(frozen=True)
+class SalonReadinessMasterDTO:
+    """Один мастер из ответа readiness: id каталога (= ``catalog_specialist_id``
+    зеркала), ``user_id`` (= ``ayla_user_id``), имя, проверки и проблемы."""
+
+    id: str
+    user_id: str | None
+    name: str
+    checks: dict[str, str]
+    problems: tuple[dict[str, str], ...]
+
+
+@dataclass(frozen=True)
+class SalonReadinessDTO:
+    """Ответ ``GET /api/v1/internal/salons/<slug>/readiness/`` (DRF-2117).
+
+    Половина ответа, которую знает каталог; §83 / ``catalog_specialist_id`` /
+    ``sellable`` зеркала накладывает :mod:`apps.admin_api.services.salon_readiness`.
+    ``ready`` каталога — «каталог не видит препятствий», не вердикт.
+    """
+
+    ready: bool
+    checked_at: str
+    horizon_days: int
+    masters: tuple[SalonReadinessMasterDTO, ...]
+    #: Проблемы уровня салона (``problems[].master == null`` в контракте §2b —
+    #: сегодня одна, ``no_masters``); в ``masters[]`` их нет по построению.
+    salon_problems: tuple[dict[str, str], ...]
+    limits: tuple[str, ...]
+
+
 # ---------------------------------------------------------------------------
 # Client
 # ---------------------------------------------------------------------------
@@ -963,6 +1017,103 @@ class CatalogHttpClient:
         except (KeyError, ValueError) as exc:
             raise CatalogTransportError(
                 "Ayla salon-admins: response without the three ids"
+            ) from exc
+
+    def fetch_salon_readiness(
+        self,
+        *,
+        tenant_slug: str,
+        actor_external_id: str,
+    ) -> SalonReadinessDTO:
+        """Салонная готовность поимённо, как её видит каталог (DRF-2117).
+
+        ``GET /api/v1/internal/salons/<slug>/readiness/`` под общим Bearer
+        + ``X-External-User-ID`` владельца / администратора, от чьего имени
+        салон читает (та же пара, что на ``/tenants/me/…``, OD-B5-1):
+        каталог подтверждает slug по TUR ``admin`` актора, чужой салон —
+        404 без подтверждения существования.
+
+        Чтение без ретраев по 4xx и с одной попыткой по сети: ответ идёт
+        человеку на кнопку, и ждать три бэкоффа он не будет; отказ сети —
+        :class:`CatalogTransportError`, и вызывающий говорит «не удалось
+        проверить», а не «готов».
+        """
+        if not self._token:
+            raise CatalogNotConfigured("AYLA_INTERNAL_API_TOKEN not configured on the bot side")
+        try:
+            url = AylaUrlBuilder(self._base_url).build(f"/internal/salons/{tenant_slug}/readiness/")
+        except AylaUrlError as exc:
+            raise CatalogNotConfigured(f"invalid AYLA_BASE_URL: {exc}") from exc
+
+        try:
+            response = self._client().get(
+                url,
+                headers=with_request_id(
+                    {
+                        "Authorization": f"Bearer {self._token}",
+                        "X-External-User-ID": actor_external_id,
+                        "Accept": "application/json",
+                    }
+                ),
+                timeout=min(float(self._timeout), 15.0),
+            )
+        except httpx.HTTPError as exc:
+            raise CatalogTransportError(
+                f"Ayla salon readiness: transport failure on {url}: {exc.__class__.__name__}"
+            ) from exc
+
+        if response.status_code in (401, 403):
+            raise CatalogReadinessRefused(
+                f"Ayla salon readiness: credential refused with HTTP {response.status_code}",
+                reason="credential_refused",
+                status_code=response.status_code,
+            )
+        if response.status_code == 404:
+            raise CatalogReadinessRefused(
+                "Ayla salon readiness: salon not confirmed for this actor (HTTP 404)",
+                reason="salon_not_confirmed",
+                status_code=404,
+            )
+        if 400 <= response.status_code < 500:
+            raise CatalogClientError(
+                f"Ayla salon readiness 4xx: HTTP {response.status_code} body={response.text[:200]!r}"
+            )
+        if response.status_code >= 500:
+            raise CatalogTransportError(f"Ayla salon readiness: HTTP {response.status_code}")
+
+        data = _json_or_empty(response).get("data")
+        if not isinstance(data, dict):
+            raise CatalogTransportError("Ayla salon readiness: response without data")
+        try:
+            masters = tuple(
+                SalonReadinessMasterDTO(
+                    id=str(row["id"]),
+                    user_id=(str(row["user_id"]) if row.get("user_id") else None),
+                    name=str(row.get("name") or ""),
+                    checks={str(k): str(v) for k, v in dict(row.get("checks") or {}).items()},
+                    problems=tuple(
+                        {"code": str(p.get("code") or ""), "text": str(p.get("text") or "")}
+                        for p in list(row.get("problems") or [])
+                    ),
+                )
+                for row in list(data.get("masters") or [])
+            )
+            salon_problems = tuple(
+                {"code": str(p.get("code") or ""), "text": str(p.get("text") or "")}
+                for p in list(data.get("problems") or [])
+                if p.get("master") is None
+            )
+            return SalonReadinessDTO(
+                ready=bool(data["ready"]),
+                checked_at=str(data.get("checked_at") or ""),
+                horizon_days=int(data.get("horizon_days") or 0),
+                masters=masters,
+                salon_problems=salon_problems,
+                limits=tuple(str(x) for x in list(data.get("limits") or [])),
+            )
+        except (KeyError, TypeError, ValueError, AttributeError) as exc:
+            raise CatalogTransportError(
+                "Ayla salon readiness: response shape not understood"
             ) from exc
 
     def provision_solo_workspace(
