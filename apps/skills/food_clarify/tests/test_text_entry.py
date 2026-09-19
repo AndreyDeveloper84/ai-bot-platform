@@ -77,7 +77,7 @@ class _Catalogue:
             dish_name="борщ",
             meal_type="other",
             calories=50.0 * kwargs["portion_multiplier"],
-            raw={},
+            raw={"entry_origin": "text_user_corrected"},
         )
 
     async def delete_meal(self, **kwargs):
@@ -86,16 +86,22 @@ class _Catalogue:
         self.deletes.append(kwargs)
         if self.refuse is not None:
             raise self.refuse
-        return MealDeletion(
-            log_id=kwargs["log_id"], restore_window_expires_at="2026-09-15T12:15:00+00:00"
-        )
+        # DRF-2108 — окно с провода: 15 минут от «сейчас», как у каталога.
+        from datetime import datetime, timedelta, timezone
+
+        expires = datetime.now(timezone.utc) + timedelta(minutes=15)
+        return MealDeletion(log_id=kwargs["log_id"], restore_window_expires_at=expires.isoformat())
 
     async def restore_meal(self, **kwargs):
         self.restores.append(kwargs)
         if self.refuse is not None:
             raise self.refuse
         return FoodLogResponse(
-            log_id=kwargs["log_id"], dish_name="борщ", meal_type="other", calories=150.0, raw={}
+            log_id=kwargs["log_id"],
+            dish_name="борщ",
+            meal_type="other",
+            calories=150.0,
+            raw={"entry_origin": "text_estimated_confirmed"},
         )
 
 
@@ -378,9 +384,7 @@ class TestSavedEntryChips:
         deleted = _turn(conversation, f"cb:food:entry_del:{LOG_ID}", catalogue)
 
         assert catalogue.deletes == [{"external_user_id": "bot:max:1837", "log_id": LOG_ID}]
-        assert deleted.reply_text == (
-            "Убрала запись из дневника. Вернуть можно в течение 15 минут."
-        )
+        assert deleted.reply_text == "Убрала запись из дневника. Вернуть можно ещё 15 минут."
         assert [b["callback"] for b in deleted.action_data["buttons"]] == [
             f"cb:food:entry_undo:{LOG_ID}"
         ]
@@ -403,7 +407,7 @@ class TestSavedEntryChips:
         # POSITIVE first: the catalogue was asked — the refusal is its answer.
         assert catalogue.restores == [{"external_user_id": "bot:max:1837", "log_id": LOG_ID}]
         assert result.reply_text == (
-            "Уже не вернуть: прошло больше 15 минут, запись удалена окончательно."
+            "Уже не вернуть: окно возврата закрылось, запись удалена окончательно."
         )
         assert "buttons" not in (result.action_data or {})
 
@@ -540,7 +544,7 @@ class TestEntryDecisionsAndEdges:
             result = _turn(conversation, f"cb:food:entry_del:{LOG_ID}", catalogue)
 
         assert len(catalogue.deletes) == 1
-        assert result.reply_text == "Убрала запись из дневника. Вернуть можно в течение 15 минут."
+        assert result.reply_text == "Убрала запись из дневника. Вернуть можно ещё 15 минут."
 
     def test_nutrition_off_refuses_every_entry_tap(self, conversation, consent, settings) -> None:
         settings.NUTRITION_ENABLED = False

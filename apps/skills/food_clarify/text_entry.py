@@ -62,6 +62,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from apps.integrations.ayla import (
+    FoodLogResponse,
     FoodNotRecognizedError,
     MealEditConflictError,
     MealNotFoundError,
@@ -75,6 +76,7 @@ from apps.integrations.ayla import (
 from apps.orchestrator.ui.keyboards import (
     ENTRY_CALLBACK_RE,
     ENTRY_ID_RE,
+    food_entry_keyboard,
     food_text_deleted_keyboard,
     food_text_estimate_keyboard,
     food_text_logged_keyboard,
@@ -104,8 +106,9 @@ TEXT_CALLBACKS = frozenset({CB_LOG, CB_GRAMS, CB_REJECT})
 #: DRF-1838 — тапы под СОХРАНЁННОЙ записью. ``id`` записи в payload:
 #: запись переживает десятиминутное состояние разговора.
 _ENTRY_CALLBACK = ENTRY_CALLBACK_RE
-#: Окно восстановления каталога (``food_log_edit_service.RESTORE_WINDOW_MINUTES``).
-RESTORE_WINDOW_MINUTES = 15
+#: DRF-2108 — окно возврата НЕ константа бота: каталог отдаёт
+#: ``restore_window_expires_at`` в ответе на удаление, минуты считаются от
+#: него; без поля обещания нет — ни фразы, ни чипа «Вернуть».
 
 # ─── тексты ───────────────────────────────────────────────────────────────
 
@@ -164,11 +167,10 @@ def diary_consent_required_result(reply_kind: str) -> SkillResult:
 NUTRITION_OFF_TEXT = "Дневник еды пока недоступен — функция готовится."
 FIX_GRAMS_PROMPT = "Сколько граммов было на самом деле? Напиши число — пересчитаю запись."
 FIXED_TEXT = "Исправила: {dish} — теперь {kcal} ккал."
-DELETED_TEXT = f"Убрала запись из дневника. Вернуть можно в течение {RESTORE_WINDOW_MINUTES} минут."
+DELETED_TEXT = "Убрала запись из дневника."
+DELETED_WITH_WINDOW_TEXT = "Убрала запись из дневника. Вернуть можно ещё {minutes}."
 RESTORED_TEXT = "Вернула в дневник: {dish} — {kcal} ккал."
-RESTORE_EXPIRED_TEXT = (
-    f"Уже не вернуть: прошло больше {RESTORE_WINDOW_MINUTES} минут, запись удалена окончательно."
-)
+RESTORE_EXPIRED_TEXT = "Уже не вернуть: окно возврата закрылось, запись удалена окончательно."
 ENTRY_GONE_TEXT = "Этой записи уже нет в дневнике."
 ENTRY_WATER_TEXT = "Эту запись ведёт учёт воды — её убирает отмена стакана."
 EDIT_UNAVAILABLE_TEXT = "Дневник сейчас не отвечает — ничего не изменила. Попробуй через минуту."
@@ -236,8 +238,49 @@ def parse_food_text(text: str) -> ParsedFood | None:
 # ─── состояние ────────────────────────────────────────────────────────────
 
 
+def _now_utc() -> datetime:
+    return datetime.now(timezone.utc)
+
+
 def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return _now_utc().isoformat()
+
+
+def restore_minutes_left(expires_at: str | None, *, now: datetime) -> int | None:
+    """Сколько минут ещё можно вернуть запись — по ``restore_window_expires_at``.
+
+    ``None`` — поля нет, дата не читается или окно уже закрылось: обещать
+    нечего. Минуты — вверх: «ещё 15 минут» при 14:30 честнее, чем «14».
+    """
+    if not expires_at:
+        return None
+    try:
+        expires = datetime.fromisoformat(expires_at.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if expires.tzinfo is None:
+        expires = expires.replace(tzinfo=timezone.utc)
+    seconds = (expires - now).total_seconds()
+    if seconds <= 0:
+        return None
+    return max(1, int(-(-seconds // 60)))
+
+
+def _minutes_ru(n: int) -> str:
+    mod10, mod100 = n % 10, n % 100
+    if mod10 == 1 and mod100 != 11:
+        word = "минуту"
+    elif 2 <= mod10 <= 4 and not 12 <= mod100 <= 14:
+        word = "минуты"
+    else:
+        word = "минут"
+    return f"{n} {word}"
+
+
+def _entry_fixable(log: FoodLogResponse) -> bool:
+    """«Исправить граммы» — только у записи текстом (тот же предикат, что isTextEntry)."""
+    origin = (log.raw or {}).get("entry_origin")
+    return isinstance(origin, str) and origin.startswith("text_")
 
 
 def _bucket(conversation: Any) -> dict[str, Any] | None:
@@ -620,11 +663,22 @@ def _entry_refusal(exc: Exception, *, external_id: str, step: str) -> SkillResul
 def _delete_entry(context: SkillContext, log_id: str) -> SkillResult:
     external_id = external_user_id_for(context.bot_user)
     try:
-        asyncio.run(get_nutrition_client().delete_meal(external_user_id=external_id, log_id=log_id))
+        deletion = asyncio.run(
+            get_nutrition_client().delete_meal(external_user_id=external_id, log_id=log_id)
+        )
     except NutritionAPIError as exc:
         return _entry_refusal(exc, external_id=external_id, step="delete")
+    minutes = restore_minutes_left(deletion.restore_window_expires_at, now=_now_utc())
+    if minutes is None:
+        # Окна с провода нет — не обещаем ни фразой, ни чипом (fail-closed).
+        return SkillResult(
+            reply_text=DELETED_TEXT,
+            action_type="food_entry_deleted",
+            action_data={"log_id": log_id},
+            meta={"reply_kind": "food_entry_deleted"},
+        )
     return SkillResult(
-        reply_text=DELETED_TEXT,
+        reply_text=DELETED_WITH_WINDOW_TEXT.format(minutes=_minutes_ru(minutes)),
         action_type="food_entry_deleted",
         action_data={"log_id": log_id, "buttons": food_text_deleted_keyboard(log_id)},
         meta={"reply_kind": "food_entry_deleted"},
@@ -642,7 +696,10 @@ def _restore_entry(context: SkillContext, log_id: str) -> SkillResult:
     return SkillResult(
         reply_text=RESTORED_TEXT.format(dish=log.dish_name, kcal=int(round(log.calories))),
         action_type="food_entry_restored",
-        action_data={"log_id": log_id, "buttons": food_text_logged_keyboard(log_id)},
+        action_data={
+            "log_id": log_id,
+            "buttons": food_entry_keyboard(log_id, fixable=_entry_fixable(log)),
+        },
         meta={"reply_kind": "food_entry_restored"},
     )
 
@@ -676,6 +733,9 @@ def _on_fix_grams_answer(context: SkillContext, bucket: dict[str, Any], text: st
     return SkillResult(
         reply_text=FIXED_TEXT.format(dish=log.dish_name, kcal=int(round(log.calories))),
         action_type="food_entry_updated",
-        action_data={"log_id": log_id, "buttons": food_text_logged_keyboard(log_id)},
+        action_data={
+            "log_id": log_id,
+            "buttons": food_entry_keyboard(log_id, fixable=_entry_fixable(log)),
+        },
         meta={"reply_kind": "food_entry_updated"},
     )

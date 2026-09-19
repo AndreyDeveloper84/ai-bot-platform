@@ -33,6 +33,7 @@ import {
   DIARY_CONSENT_REQUIRED_TEXT,
 } from "../lib/customer-wellness";
 import { ApiError } from "../lib/api";
+import { minutesRu, restoreWindowMinutesLeft } from "../lib/restore-window";
 import { saveMealFromEntry } from "../lib/saved-meals";
 import { useScreenBack } from "../hooks/useScreenBack";
 import { backTo } from "../lib/screen-back";
@@ -143,11 +144,17 @@ export function FoodScannerDiaryScreen() {
   const onDelete = useCallback(
     (entry: FoodDiaryEntry) =>
       runEntryAction(async () => {
-        await deleteFoodEntry(entry.id);
-        setNotice({
-          text: `Убрано: ${entry.dish_name}. Вернуть можно ${RESTORE_WINDOW_MINUTES} минут.`,
-          undo: entry,
-        });
+        const deletion = await deleteFoodEntry(entry.id);
+        // DRF-2108 — окно с провода; без него не обещаем ни фразой, ни кнопкой.
+        const minutes = restoreWindowMinutesLeft(deletion.restore_window_expires_at);
+        setNotice(
+          minutes === null
+            ? { text: `Убрано: ${entry.dish_name}.` }
+            : {
+                text: `Убрано: ${entry.dish_name}. Вернуть можно ещё ${minutesRu(minutes)}.`,
+                undo: entry,
+              },
+        );
         await load();
       }),
     [load, runEntryAction],
@@ -164,7 +171,7 @@ export function FoodScannerDiaryScreen() {
           await load();
         } else if (outcome === "expired") {
           setNotice({
-            text: `Уже не вернуть: прошло больше ${RESTORE_WINDOW_MINUTES} минут, запись удалена окончательно.`,
+            text: "Уже не вернуть: окно возврата закрылось, запись удалена окончательно.",
           });
         } else {
           setNotice({ text: ENTRY_GONE_TEXT });
@@ -534,8 +541,6 @@ function groupByMeal(
 
 // ─── DRF-1838: правка и удаление записи ─────────────────────────────────
 
-/** Окно восстановления каталога (`food_log_edit_service.RESTORE_WINDOW_MINUTES`). */
-const RESTORE_WINDOW_MINUTES = 15;
 const GRAMS_MIN = 10;
 const GRAMS_MAX = 2000;
 const ENTRY_GONE_TEXT = "Этой записи уже нет в дневнике.";
