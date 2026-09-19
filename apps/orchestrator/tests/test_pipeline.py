@@ -677,13 +677,13 @@ class TestRetryExhaustedFallback:
         assert payload["last_error_class"] == "InternalServerError"
         assert payload["tenant_id"] == str(tenant.id)
 
-    async def test_retry_exhausted_sends_manager_alert(self, tenant):
-        """When manager_chat_id is set, the orchestrator sends one
-        Telegram alert to the manager so they can check the vendor's
-        status page."""
+    async def test_retry_exhausted_pages_operators_manager_zero(self, tenant):
+        """DRF-2130: retry exhausted — инженерный алерт. Уходит в
+        ``observability.alerting.page`` (Telegram + Sentry), менеджеру салона
+        в MAX — 0 сообщений, даже когда его адрес заполнен."""
         from apps.llm.retry import RetriableLLMError
 
-        # Set manager chat id so the alert is dispatched.
+        # Manager address set on purpose: the guard catches the personal send.
         tenant.manager_chat_id = "100200300"
         await sync_to_async(tenant.save)()
 
@@ -698,27 +698,27 @@ class TestRetryExhaustedFallback:
         with (
             patch("apps.orchestrator.pipeline.classify", side_effect=_raise),
             patch("apps.channels.max.outbound.send_message") as mock_send,
+            patch("apps.observability.alerting.page", return_value=True) as mock_page,
         ):
             await turn(_message(text="hi"))
 
-        # The manager alert is one specific send_message call;
-        # the outbound to the user (the static fallback) is another.
-        # We look for the alert text marker "LLM провайдер недоступен".
-        alert_calls = [
-            c
-            for c in mock_send.call_args_list
-            if c.kwargs.get("chat_id") == "100200300"
-            and "LLM провайдер недоступен" in (c.kwargs.get("text") or "")
+        manager_calls = [
+            c for c in mock_send.call_args_list if c.kwargs.get("chat_id") == "100200300"
         ]
-        assert len(alert_calls) == 1
+        assert manager_calls == []
+        assert mock_page.call_count == 1
+        severity, title, body = mock_page.call_args.args
+        assert severity == "error"
+        assert "LLM" in title
+        assert tenant.slug in body
+        assert "RateLimitError" in body
+        assert "attempts=3" in body or "3 попыток" in body
+        assert mock_page.call_args.kwargs["dedup_key"]
 
     async def test_retry_exhausted_alert_deduped_within_hour(self, tenant):
-        """Two retry-exhausted turns within the dedup window send
-        exactly ONE manager alert."""
+        """Two retry-exhausted turns within the dedup window page
+        exactly ONCE."""
         from apps.llm.retry import RetriableLLMError
-
-        tenant.manager_chat_id = "200300400"
-        await sync_to_async(tenant.save)()
 
         class _FakeUpstream(Exception):
             pass
@@ -730,24 +730,18 @@ class TestRetryExhaustedFallback:
 
         with (
             patch("apps.orchestrator.pipeline.classify", side_effect=_raise),
-            patch("apps.channels.max.outbound.send_message") as mock_send,
+            patch("apps.observability.alerting.page", return_value=True) as mock_page,
         ):
             await turn(_message(text="hi"))
             await turn(_message(text="hi again"))
 
-        alert_calls = [
-            c
-            for c in mock_send.call_args_list
-            if c.kwargs.get("chat_id") == "200300400"
-            and "LLM провайдер недоступен" in (c.kwargs.get("text") or "")
-        ]
-        # Dedup: exactly one alert despite two exhausted turns.
-        assert len(alert_calls) == 1
+        # Dedup: exactly one page despite two exhausted turns.
+        assert mock_page.call_count == 1
 
-    async def test_retry_exhausted_no_manager_chat_id_skips_alert(self, tenant):
-        """Empty manager_chat_id → no alert sent (log + skip), but
-        the user-facing fallback still happens and the audit row
-        still gets written."""
+    async def test_retry_exhausted_no_manager_address_still_pages(self, tenant):
+        """The operators' channel does not depend on the salon manager's
+        address: no manager → page still fires, the user-facing fallback
+        still happens and the audit row still gets written."""
         from apps.llm.retry import AUDIT_RETRY_EXHAUSTED, RetriableLLMError
 
         # tenant fixture creates a Tenant without manager_chat_id.
@@ -764,19 +758,17 @@ class TestRetryExhaustedFallback:
         with (
             patch("apps.orchestrator.pipeline.classify", side_effect=_raise),
             patch("apps.channels.max.outbound.send_message") as mock_send,
+            patch("apps.observability.alerting.page", return_value=True) as mock_page,
         ):
             result = await turn(_message(text="hi"))
 
         # User-facing fallback served as normal.
         assert result.ok is True
         assert result.error == "llm_retry_exhausted"
-        # No alert calls (only the user-facing outbound from step 19).
-        alert_calls = [
-            c
-            for c in mock_send.call_args_list
-            if "LLM провайдер недоступен" in (c.kwargs.get("text") or "")
-        ]
-        assert len(alert_calls) == 0
+        assert mock_page.call_count == 1
+        # No alert text in the personal channel (only the user-facing outbound).
+        alert_calls = [c for c in mock_send.call_args_list if "LLM" in (c.kwargs.get("text") or "")]
+        assert alert_calls == []
         # Audit row written regardless.
         from apps.audit.models import AuditLog
 
@@ -785,6 +777,21 @@ class TestRetryExhaustedFallback:
         )()
         assert len(rows) >= 1
         assert rows[0].payload["trace_id"] == result.trace_id
+
+    async def test_retry_exhausted_page_failure_never_breaks_turn(self, tenant):
+        from apps.llm.retry import RetriableLLMError
+
+        def _raise(*args, **kwargs):
+            raise RetriableLLMError(attempts=3, last_error=RuntimeError("boom"))
+
+        with (
+            patch("apps.orchestrator.pipeline.classify", side_effect=_raise),
+            patch("apps.observability.alerting.page", side_effect=RuntimeError("sink down")),
+        ):
+            result = await turn(_message(text="hi"))
+
+        assert result.ok is True
+        assert result.error == "llm_retry_exhausted"
 
     async def test_retry_exhausted_does_not_create_handoff_admin_task(self, tenant):
         """DRF-989: timeout/retry exhaustion must serve a fallback reply

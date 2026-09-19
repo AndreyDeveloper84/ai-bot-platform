@@ -4,10 +4,12 @@ Covers:
   * record_usage / get_current_usage round-trip.
   * Cap enforcement (token + cost, independent).
   * Pre-emptive projected_tokens guard.
-  * Cross-80% and cross-100% threshold alerts with dedup.
+  * Cross-80% and cross-100% threshold alerts with dedup — into the
+    operators' channel (``observability.alerting.page``), never to the
+    salon manager's MAX (DRF-2130).
   * UTC midnight rollover via freezegun.
   * Multi-tenant isolation.
-  * Empty manager_chat_id → log + skip, cap still enforced.
+  * Tenant without a manager address → page still fires, cap enforced.
 """
 
 from __future__ import annotations
@@ -159,60 +161,108 @@ class TestEnforceCostCap:
 
 @pytest.fixture
 def _patched_send_message():
+    """Персональный канал MAX — сторож «менеджеру 0» (DRF-2130)."""
     with patch("apps.channels.max.outbound.send_message") as mock:
         mock.return_value = {"ok": True}
         yield mock
 
 
+@pytest.fixture
+def _patched_page():
+    """Операторский канал (Telegram + Sentry) — сюда уходят инженерные алерты."""
+    with patch("apps.observability.alerting.page", return_value=True) as mock:
+        yield mock
+
+
 class TestThresholdAlerts:
-    async def test_cross_80_fires_one_alert(
+    """DRF-2130: бюджет токенов — инженерный алерт, не решение менеджера (§50 п.8).
+
+    Владелец салона не должен получать ни 80 %, ни 100 % — оба уходят в
+    ``alerting.page``. ``manager_chat_id`` у ``tenant_with_manager`` заполнен
+    нарочно: сторож ловит именно отправку человеку.
+    """
+
+    async def test_cross_80_pages_warning_once(
         self,
         tenant_with_manager: Tenant,
         _patched_send_message,
+        _patched_page,
     ) -> None:
         # From 79% (7900) to 81% (8100) — single boundary cross.
         await record_usage(str(tenant_with_manager.id), tokens=7_900, cost_usd=Decimal("0"))
-        _patched_send_message.assert_not_called()
+        _patched_page.assert_not_called()
         await record_usage(str(tenant_with_manager.id), tokens=200, cost_usd=Decimal("0"))
-        assert _patched_send_message.call_count == 1
-        kwargs = _patched_send_message.call_args.kwargs
-        assert kwargs["chat_id"] == "manager-chat-42"
-        assert "80%" in kwargs["text"]
+        assert _patched_page.call_count == 1
+        severity, title, body = _patched_page.call_args.args
+        assert severity == "warning"
+        assert "80" in title
+        assert tenant_with_manager.slug in body
+        assert _patched_page.call_args.kwargs["dedup_key"]
+        _patched_send_message.assert_not_called()
 
     async def test_subsequent_calls_do_not_re_alert_80(
         self,
         tenant_with_manager: Tenant,
         _patched_send_message,
+        _patched_page,
     ) -> None:
         await record_usage(str(tenant_with_manager.id), tokens=8_100, cost_usd=Decimal("0"))
-        assert _patched_send_message.call_count == 1
+        assert _patched_page.call_count == 1
         # Stay between 80% and 100% — more calls must NOT re-alert.
         await record_usage(str(tenant_with_manager.id), tokens=500, cost_usd=Decimal("0"))
         await record_usage(str(tenant_with_manager.id), tokens=500, cost_usd=Decimal("0"))
-        assert _patched_send_message.call_count == 1
+        assert _patched_page.call_count == 1
+        _patched_send_message.assert_not_called()
 
-    async def test_cross_100_fires_one_alert(
+    async def test_cross_100_manager_zero_page_one(
         self,
         tenant_with_manager: Tenant,
         _patched_send_message,
+        _patched_page,
     ) -> None:
-        # Jump straight from 0 → over cap (single record_usage). Both 80%
-        # and 100% boundaries cross in one call → both alerts fire.
-        await record_usage(str(tenant_with_manager.id), tokens=11_000, cost_usd=Decimal("0"))
-        assert _patched_send_message.call_count == 2
+        """Узел DRF-2130: при 100 % бюджета менеджеру сообщений 0, в page — 1."""
+        # From 81% straight over the cap: only the 100% boundary crosses.
+        await record_usage(str(tenant_with_manager.id), tokens=8_100, cost_usd=Decimal("0"))
+        _patched_page.reset_mock()
+
+        await record_usage(str(tenant_with_manager.id), tokens=2_000, cost_usd=Decimal("0"))
+
+        _patched_send_message.assert_not_called()
+        assert _patched_page.call_count == 1
+        severity, title, _body = _patched_page.call_args.args
+        assert severity == "error"
+        assert "100" in title
 
         # A subsequent call must NOT re-alert either.
         await record_usage(str(tenant_with_manager.id), tokens=100, cost_usd=Decimal("0"))
-        assert _patched_send_message.call_count == 2
+        assert _patched_page.call_count == 1
+        _patched_send_message.assert_not_called()
 
-    async def test_empty_manager_chat_id_logs_and_skips(
+    async def test_single_jump_over_cap_pages_both_levels(
+        self,
+        tenant_with_manager: Tenant,
+        _patched_send_message,
+        _patched_page,
+    ) -> None:
+        # Jump straight from 0 → over cap (single record_usage). Both 80%
+        # and 100% boundaries cross in one call → both pages fire, with
+        # distinct dedup keys so the second is not swallowed by the first.
+        await record_usage(str(tenant_with_manager.id), tokens=11_000, cost_usd=Decimal("0"))
+        assert _patched_page.call_count == 2
+        keys = {c.kwargs["dedup_key"] for c in _patched_page.call_args_list}
+        assert len(keys) == 2
+        _patched_send_message.assert_not_called()
+
+    async def test_no_manager_address_still_pages_and_enforces(
         self,
         tenant: Tenant,
         _patched_send_message,
+        _patched_page,
     ) -> None:
-        # `tenant` fixture has no manager_chat_id. Cap is still
-        # enforced; the manager just doesn't get pinged.
+        # `tenant` fixture has no manager address. The operators' channel
+        # does not depend on it — the page fires, the cap is enforced.
         await record_usage(str(tenant.id), tokens=11_000, cost_usd=Decimal("0"))
+        assert _patched_page.call_count == 2
         _patched_send_message.assert_not_called()
         with pytest.raises(TenantQuotaExceeded):
             await enforce_caps(str(tenant.id))
@@ -221,10 +271,23 @@ class TestThresholdAlerts:
         self,
         tenant_with_manager: Tenant,
         _patched_send_message,
+        _patched_page,
     ) -> None:
         # Low token usage but cost > 80% of $5 cap.
         await record_usage(str(tenant_with_manager.id), tokens=10, cost_usd=Decimal("4.50"))
-        assert _patched_send_message.call_count == 1
+        assert _patched_page.call_count == 1
+        _patched_send_message.assert_not_called()
+
+    async def test_page_failure_never_breaks_accounting(
+        self,
+        tenant_with_manager: Tenant,
+        _patched_send_message,
+    ) -> None:
+        with patch("apps.observability.alerting.page", side_effect=RuntimeError("sink down")):
+            await record_usage(str(tenant_with_manager.id), tokens=11_000, cost_usd=Decimal("0"))
+        usage = await get_current_usage(str(tenant_with_manager.id))
+        assert usage.tokens_used == 11_000
+        _patched_send_message.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
