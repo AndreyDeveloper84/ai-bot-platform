@@ -1,8 +1,15 @@
 """Plan Lite — прокси Mini App к каталогу под субъектом (DRF-2101, §49).
 
-    GET    /customer/plan-lite  → wellness-context.plan_lite
-    POST   /customer/plan-lite  → создать план {goal_id?, actions[1..3]}
-    DELETE /customer/plan-lite  → закрыть план (append-only)
+    GET    /customer/plan-lite           → wellness-context.plan_lite
+    POST   /customer/plan-lite           → создать план {goal_id?, actions[1..3], template_version?}
+    DELETE /customer/plan-lite           → закрыть план (append-only)
+    GET    /customer/plan-lite/proposal  → предложение из шаблона цели (DRF-2123, План-A)
+
+План-A (DRF-2123): предложение — ``{goal_key, why, template_version, actions}``
+из шаблона активной цели, ничего не создаёт; экран подтверждает его тем же
+POST с ``template_version`` (провенанс плана в каталоге). Отказы предложения —
+своими слагами: 404 ``no_active_goal`` / ``no_template`` (второй — не ошибка
+для экрана: конструктор без блока).
 
 Первый живой вызывающий ``wellness_context_client`` (до этого — только
 запертая проактивность). Форму тела проверяет каталог (400 → ``ayla_bad_request``);
@@ -40,6 +47,8 @@ from apps.integrations.ayla.wellness_context_client import (
     PlanLiteAlreadyActiveError,
     PlanLiteDisabledError,
     PlanLiteGoalNotFoundError,
+    PlanLiteNoTemplateError,
+    PlanLiteProposal,
     WellnessContextAuthError,
     WellnessContextClientError,
     WellnessContextConfigError,
@@ -75,13 +84,37 @@ def plan_lite_payload(plan: PlanLite | None) -> dict[str, Any] | None:
     }
 
 
+def plan_lite_proposal_payload(proposal: PlanLiteProposal) -> dict[str, Any]:
+    """DTO предложения → JSON экрана: ключ цели, «почему», версия шаблона и
+    форма действий. Фактов и результата у предложения нет по построению."""
+    return {
+        "goal_key": proposal.goal_key,
+        "why": proposal.why,
+        "template_version": proposal.template_version,
+        "actions": [
+            {
+                "action_type": a.action_type,
+                "cadence": a.cadence,
+                "target_count": a.target_count,
+            }
+            for a in proposal.actions
+        ],
+    }
+
+
 def _refusal(exc: Exception, *, step: str) -> JsonResponse:
     if isinstance(exc, PlanLiteDisabledError):
         return _error("plan_lite_disabled", "plan lite is not enabled", 404)
     if isinstance(exc, PlanLiteAlreadyActiveError):
         return _error("already_active", "an active plan already exists; close it first", 409)
     if isinstance(exc, PlanLiteGoalNotFoundError):
+        # У предложения нет активной цели — своим слагом (DRF-2123); у
+        # писателей — прежний not_found (цель не у человека / нет плана).
+        if step == "proposal":
+            return _error("no_active_goal", "no active goal to propose a plan for", 404)
         return _error("not_found", "goal or active plan not found", 404)
+    if isinstance(exc, PlanLiteNoTemplateError):
+        return _error("no_template", "no plan template for the active goal", 404)
     if isinstance(exc, WellnessContextConfigError):
         logger.error("customer_plan_lite.%s.config_error class=%s", step, type(exc).__name__)
         return _error("not_configured", "ayla wellness not configured", 503)
@@ -140,16 +173,62 @@ def customer_plan_lite(request: HttpRequest) -> HttpResponse:
         return _error("malformed", "goal_id must be a non-empty string when given", 400)
     if not isinstance(actions, list):
         return _error("malformed", "actions must be a list", 400)
+    # template_version необязателен (DRF-2123): дан — целое ≥ 1 (bool — не
+    # целое), прокидывается как есть; существование версии проверяет каталог.
+    template_version = body.get("template_version")
+    if template_version is not None and (
+        not isinstance(template_version, int)
+        or isinstance(template_version, bool)
+        or template_version < 1
+    ):
+        return _error("malformed", "template_version must be an integer >= 1 when given", 400)
     try:
         plan = client.create_plan_lite(
             external_user_id=external_id,
             actions=actions,
             goal_id=goal_id.strip() if isinstance(goal_id, str) else None,
+            template_version=template_version,
         )
     except Exception as exc:  # noqa: BLE001
         return _refusal(exc, step="create")
-    logger.info("customer_plan_lite.created bot_user=%s actions=%d", bot_user.pk, len(plan.actions))
+    logger.info(
+        "customer_plan_lite.created bot_user=%s actions=%d template_version=%s",
+        bot_user.pk,
+        len(plan.actions),
+        template_version,
+    )
     return JsonResponse({"plan_lite": plan_lite_payload(plan)}, status=201)
 
 
-__all__ = ["customer_plan_lite", "plan_lite_enabled", "plan_lite_payload"]
+@csrf_exempt
+@require_http_methods(["GET"])
+@require_init_data
+def customer_plan_lite_proposal(request: HttpRequest) -> HttpResponse:
+    """GET — предложение Plan Lite из шаблона активной цели (DRF-2123, План-A).
+
+    Ничего не создаёт: экран показывает его и подтверждает POST'ом с
+    ``template_version``. Флаг выключен → 404 ``plan_lite_disabled`` ДО
+    каталога; 404 ``no_active_goal`` / ``no_template`` — по имени.
+    """
+    from apps.integrations.ayla import external_user_id_for
+
+    if not plan_lite_enabled():
+        return _error("plan_lite_disabled", "plan lite is not enabled", 404)
+
+    bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
+    external_id = external_user_id_for(bot_user)
+    client = WellnessContextHttpClient()
+    try:
+        proposal = client.get_plan_lite_proposal(external_user_id=external_id)
+    except Exception as exc:  # noqa: BLE001 — каждый класс назван в _refusal
+        return _refusal(exc, step="proposal")
+    return JsonResponse({"proposal": plan_lite_proposal_payload(proposal)})
+
+
+__all__ = [
+    "customer_plan_lite",
+    "customer_plan_lite_proposal",
+    "plan_lite_enabled",
+    "plan_lite_payload",
+    "plan_lite_proposal_payload",
+]
