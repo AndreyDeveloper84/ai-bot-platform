@@ -395,7 +395,9 @@ describe("правка и удаление записи (DRF-1838)", () => {
     });
   }
 
-  const DELETION = { entry_id: "fl-text", restore_window_expires_at: "2026-09-15T12:15:00+00:00" };
+  // DRF-2108 — окно с провода: 15 минут от «сейчас», как отдаёт каталог.
+  const inMinutes = (m: number) => new Date(Date.now() + m * 60_000).toISOString();
+  const DELETION = { entry_id: "fl-text", restore_window_expires_at: inMinutes(15) };
 
   it("у каждой записи «Удалить», «Исправить граммы» — только у записи текстом", async () => {
     serveDay([TEXT_ENTRY, PHOTO_ENTRY]);
@@ -417,7 +419,9 @@ describe("правка и удаление записи (DRF-1838)", () => {
 
     fireEvent.click(await screen.findByRole("button", { name: "Удалить: Гречка" }));
 
-    expect(await screen.findByText("Убрано: Гречка. Вернуть можно 15 минут.")).toBeInTheDocument();
+    expect(
+      await screen.findByText("Убрано: Гречка. Вернуть можно ещё 15 минут."),
+    ).toBeInTheDocument();
     expect(mockedDelete).toHaveBeenCalledWith("fl-text");
     expect(mockedLoad).toHaveBeenCalledTimes(2);
     expect(screen.getByRole("button", { name: "Вернуть" })).toBeInTheDocument();
@@ -447,8 +451,34 @@ describe("правка и удаление записи (DRF-1838)", () => {
     fireEvent.click(await screen.findByRole("button", { name: "Вернуть" }));
 
     expect(
-      await screen.findByText("Уже не вернуть: прошло больше 15 минут, запись удалена окончательно."),
+      await screen.findByText("Уже не вернуть: окно возврата закрылось, запись удалена окончательно."),
     ).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Вернуть" })).not.toBeInTheDocument();
+  });
+
+  it("DRF-2108: минуты окна — с провода, не константа", async () => {
+    serveDay([TEXT_ENTRY]);
+    mockedDelete.mockResolvedValue({ ...DELETION, restore_window_expires_at: inMinutes(3.5) });
+    renderScreen();
+
+    fireEvent.click(await screen.findByRole("button", { name: "Удалить: Гречка" }));
+
+    expect(
+      await screen.findByText("Убрано: Гречка. Вернуть можно ещё 4 минуты."),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Вернуть" })).toBeInTheDocument();
+  });
+
+  it("DRF-2108: без окна с провода — убрано без обещания и без «Вернуть» (fail-closed)", async () => {
+    serveDay([TEXT_ENTRY]);
+    mockedDelete.mockResolvedValue({ entry_id: "fl-text", restore_window_expires_at: null });
+    renderScreen();
+
+    fireEvent.click(await screen.findByRole("button", { name: "Удалить: Гречка" }));
+
+    expect(await screen.findByText("Убрано: Гречка.")).toBeInTheDocument();
+    expect(mockedDelete).toHaveBeenCalledWith("fl-text");
+    expect(screen.queryByText(/Вернуть можно/)).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Вернуть" })).not.toBeInTheDocument();
   });
 
@@ -520,7 +550,10 @@ describe("правка и удаление записи — края из рев
   const mockedDelete = vi.mocked(deleteFoodEntry);
   const mockedRestore = vi.mocked(restoreFoodEntry);
   const mockedCorrect = vi.mocked(correctFoodEntryGrams);
-  const DELETION = { entry_id: "fl-edge", restore_window_expires_at: "2026-09-15T12:15:00+00:00" };
+  const DELETION = {
+    entry_id: "fl-edge",
+    restore_window_expires_at: new Date(Date.now() + 15 * 60_000).toISOString(),
+  };
 
   function serve() {
     mockedLoad.mockResolvedValue({

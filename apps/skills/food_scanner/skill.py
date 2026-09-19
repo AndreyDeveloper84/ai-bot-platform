@@ -98,7 +98,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import ClassVar
+from typing import Any, ClassVar
 
 from apps.integrations.ayla import (
     FoodNotRecognizedError,
@@ -363,14 +363,22 @@ class FoodScannerSkill:
             # Ключ повтора вернул ПРЕЖНЮЮ запись (первый тап дошёл, ответ — нет):
             # вес в неё не лёг, и сказать «записала» без оговорки было бы ложью.
             reply = f"{reply} {GRAMS_NOT_APPLIED_TEXT.format(grams=grams)}"
+        # DRF-2108 — §109 шаг 7 и под фото-записью: только «Удалить».
+        # «Исправить граммы» (÷100) верно лишь для записи текстом; обработчик
+        # чипов общий (``food_clarify.text_entry.on_entry_callback``).
+        from apps.orchestrator.ui.keyboards import ENTRY_ID_RE, food_entry_keyboard
+
+        action_data: dict[str, Any] = {
+            "log_id": log.log_id,
+            "dish_name": log.dish_name,
+            "calories": log.calories,
+        }
+        if log.log_id and ENTRY_ID_RE.match(log.log_id):
+            action_data["buttons"] = food_entry_keyboard(log.log_id, fixable=False)
         return SkillResult(
             reply_text=reply,
             action_type="food_logged",
-            action_data={
-                "log_id": log.log_id,
-                "dish_name": log.dish_name,
-                "calories": log.calories,
-            },
+            action_data=action_data,
             meta={"reply_kind": "food_scanner_logged"},
         )
 
