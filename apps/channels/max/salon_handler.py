@@ -1585,7 +1585,7 @@ def _is_button_tap(text: str) -> bool:
 def _handle_button(event: CanonicalEvent, role_ctx, bot_user, tenant, entry) -> None:
     """Run the tapped action, then re-show the menu so the panel persists."""
 
-    from apps.channels.max import staff_actions
+    from apps.channels.max import salon_notify, staff_actions
 
     action = event.text
     is_admin_side = role_ctx.is_owner or role_ctx.is_admin or role_ctx.is_receptionist
@@ -1633,6 +1633,14 @@ def _handle_button(event: CanonicalEvent, role_ctx, bot_user, tenant, entry) -> 
             attachments=_requests_attachments(tenant, role_ctx, entry),
         )
         return
+    elif action.startswith(salon_notify.CB_PREFIX):
+        # DRF-2118 — кнопка уведомления-решения (Одобрить / Отклонить /
+        # Подробнее / Вернуть Ayla / Повторить). Роль проверяет сам
+        # обработчик: мастер получает объяснение, а не отказ, и ничего
+        # не меняется. Меню после — как у любого действия.
+        from apps.channels.max.salon_notify_actions import handle_action
+
+        body = handle_action(payload=action, tenant=tenant, bot_user=bot_user, role_ctx=role_ctx)
     elif action == OPEN_APP_PAYLOAD:
         # The Mini App opens client-side; nothing to do server-side. This
         # branch is defensive: whether MAX echoes an `open_app` payload

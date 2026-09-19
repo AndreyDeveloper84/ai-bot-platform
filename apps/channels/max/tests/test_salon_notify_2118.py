@@ -248,7 +248,7 @@ class TestP1EveryKindRendersWithButtons:
 
         assert set(sn.KINDS) == {"handoff", "schedule", "sync", "master_off", "booking"}
 
-    def test_each_kind_renders_title_facts_and_parseable_buttons(self, salon) -> None:
+    def test_each_kind_renders_title_facts_and_parseable_buttons(self, salon, two_bots) -> None:
         from apps.channels.max import salon_notify as sn
 
         notices = self._all(salon)
@@ -265,7 +265,7 @@ class TestP1EveryKindRendersWithButtons:
                 assert parsed == (kind, notice.ref, b.action), (kind, b)
             assert not violates_phone_rule(text), (kind, text)
 
-    def test_the_decision_kinds_offer_a_decision_and_the_rest_a_door(self, salon) -> None:
+    def test_the_decision_kinds_offer_a_decision_and_the_rest_a_door(self, salon, two_bots) -> None:
         notices = self._all(salon)
         actions = {k: {b.action for b in n.buttons if not b.url} for k, n in notices.items()}
         urls = {k: [b for b in n.buttons if b.url] for k, n in notices.items()}
@@ -316,6 +316,17 @@ class TestP2OneMessagePerEvent:
         b = sn.schedule_request_notice(_friday_request(master), impact=sn.Impact("ok", 0))
         assert sn.notify(a) is not None and sn.notify(b) is not None
         assert len(capture) == 2
+
+    def test_two_concurrent_claims_yield_one_send(self) -> None:
+        """Узел: событие один раз при двух конкурентных вызовах — ``cache.add`` атомарен."""
+        from concurrent.futures import ThreadPoolExecutor
+
+        from apps.channels.max import salon_notify as sn
+
+        key = f"salon_notify:test:{uuid.uuid4()}"
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            outcomes = list(pool.map(lambda _: sn._claim(key), range(2)))
+        assert sorted(outcomes) == [False, True]
 
 
 # ── p3 — чужой салон не получает ─────────────────────────────────────
@@ -526,6 +537,24 @@ class TestP6SourcesAreWired:
         # Повторный синк с тем же состоянием — не второе сообщение.
         upsert_specialists(salon.tenant, [dto])
         assert len(capture) == 1
+
+    def test_master_off_reaches_the_master_too(self, salon, two_bots, capture) -> None:
+        """Тип 4 — мастеру о себе: копия человеку, привязанному к строке.
+
+        Переключателя для этого события в ``MasterNotificationPrefs`` нет
+        (new_booking / booking_change / personal_message — про клиентов,
+        urgent принудительно включён) — поэтому без чтения чужого."""
+        from apps.channels.max import salon_notify as sn
+        from apps.identity.models import BotUser
+
+        master = _master(salon.tenant, name="Лера")
+        person = BotUser.all_tenants.create(
+            tenant=salon.tenant, channel="max", channel_user_id="m-off", chat_id="c-m-off"
+        )
+        master.linked_bot_user = person
+        master.save(update_fields=["linked_bot_user"])
+        sn.notify(sn.master_unavailable_notice(master, block="revoked"))
+        assert sorted(c["user_id"] for c in capture) == ["m-off", "owner-2118"]
 
     def test_handoff_creation_notifies_the_salon(self, salon, two_bots, capture) -> None:
         from apps.handoff.notify import notify_admin_task_created

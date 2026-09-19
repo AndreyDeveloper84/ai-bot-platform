@@ -1049,40 +1049,43 @@ def list_pending_requests(
 
 
 def notify_manager_of_availability_request(*, tenant, master, request_id) -> None:
-    """DM «Анна просит выходной» управляющим салона — от салонного бота.
+    """Уведомление-решение «мастер просит изменить график» управляющим салона.
 
     Спека master-mobile §M3 строка 458: «server marks slot blocked →
-    owner notified (audit + bot DM)». Адресаты и отправитель решаются в
-    :func:`~apps.channels.max.staff_outbound.send_to_staff` (DRF-2128):
-    активные владелец/админ салона плюс адрес менеджера, от бота потока
-    ``max_salon``. Никого не нашлось — деградация с именем
-    (``no_recipients`` в логе отправителя), тот же режим, что у
-    эскалации напоминаний; slug ``no_manager_chat_id`` ниже сохранён —
-    это эмитируемый ключ.
+    owner notified (audit + bot DM)». С DRF-2118 — единый формат
+    :mod:`apps.channels.max.salon_notify`: «Было / Станет / затронуто N»
+    (impact §142 тем же чтением, что у Admin Mini App) и кнопки
+    Одобрить / Отклонить / Подробнее. Отправитель и адресаты —
+    ``send_to_staff`` (DRF-2128); повтор по той же заявке — не дубль.
+    Никого не нашлось — деградация с именем; slug ``no_manager_chat_id``
+    ниже сохранён — это эмитируемый ключ.
 
     Живёт здесь, потому что заявку подают два места: кнопка «Помечу как
     недоступно» в расписании и подтверждённое предложение Ayla
     (:mod:`apps.master_api.services.assistant_actions`); вьюха
     ``master_api.views._maybe_send_manager_dm`` — тонкая обёртка над этой
-    функцией (копия схлопнута в DRF-2128). Импорты локальные:
-    ``apps.channels`` не нужен эндпоинтам master_api, которые сюда не
-    заходят.
+    функцией. Импорты локальные: ``apps.channels`` не нужен эндпоинтам
+    master_api, которые сюда не заходят.
     """
 
-    from django.conf import settings
+    from apps.channels.max import salon_notify
 
-    from apps.channels.max.staff_outbound import MANAGER, send_to_staff
-
-    admin_url = getattr(
-        settings,
-        "ADMIN_MINI_APP_URL",
-        "https://admin.formulatela.ru/availability",
+    request = (
+        ScheduleChangeRequest.all_tenants.filter(id=request_id, tenant=tenant)
+        .select_related("master", "tenant")
+        .first()
     )
-    text = (
-        f"{master.name} просит изменить расписание. "
-        f"[Открыть запрос]({admin_url}?request_id={request_id})"
-    )
-    result = send_to_staff(tenant, MANAGER, text)
+    if request is None:
+        logger.warning(
+            "master_api.availability.notify_request_missing tenant=%s request=%s",
+            tenant.id,
+            request_id,
+        )
+        return
+    impact = salon_notify.schedule_request_impact(request)
+    result = salon_notify.notify(salon_notify.schedule_request_notice(request, impact=impact))
+    if result is None:
+        return  # дубль — уже уведомляли по этой заявке
     if result.recipients == 0:
         logger.info(
             "master_api.availability.no_manager_chat_id tenant=%s master=%s",

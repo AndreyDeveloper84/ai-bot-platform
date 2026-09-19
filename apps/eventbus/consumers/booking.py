@@ -68,6 +68,7 @@ from apps.booking.client_notify import (
 from apps.booking.completion import actor_from_event
 from apps.booking.master_notify import (
     CHAT_ORIGIN_SOURCE,
+    schedule_booking_attention_notification,
     schedule_booking_created_notification,
 )
 from apps.booking.models import BookingReminder, RemoteBookingProxy
@@ -1099,6 +1100,16 @@ def handle_booking_cancelled(envelope: IngestEnvelope) -> None:
 
     _cancel_reminders(appointment_id=appointment_id)
 
+    # DRF-2118 тип 5 — салон узнаёт об отмене не своей рукой: «запись
+    # требует вмешательства». Отмена самим салоном — его же решение,
+    # уведомлять не о чем.
+    cancelled_by = str(data.get("cancelled_by", "") or "").lower()
+    if cancelled_by not in ("salon", "admin", "staff"):
+        schedule_booking_attention_notification(
+            proxy_pk=proxy.pk,
+            reason="cancelled_by_client" if cancelled_by in ("client", "customer") else "cancelled",
+        )
+
     emit_internal_event(
         "booking_cancelled",
         properties={
@@ -1851,6 +1862,9 @@ def handle_booking_no_show(envelope: IngestEnvelope) -> None:
         last_synced_event_id=envelope.event_id,
     )
     _cancel_reminders(appointment_id=appointment_id)
+    # DRF-2118 тип 5 — неявка: салону решать, что с записью и клиентом.
+    if proxy is not None:
+        schedule_booking_attention_notification(proxy_pk=proxy.pk, reason="no_show")
 
 
 # ─── registration ──────────────────────────────────────────────────────────

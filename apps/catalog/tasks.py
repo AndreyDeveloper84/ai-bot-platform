@@ -292,6 +292,7 @@ def alert_stale_catalog_sync() -> dict[str, int]:
     paged = 0
 
     for age in stale:
+        _notify_salon_staff(age)
         sent = page(
             "error",
             f"Каталог салона {age.slug} не синхронизировался {age.age_human}",
@@ -322,6 +323,25 @@ def alert_stale_catalog_sync() -> dict[str, int]:
         paged,
     )
     return {"checked": len(ages), "stale": len(stale), "paged": paged}
+
+
+def _notify_salon_staff(age: Any) -> None:
+    """Тип 3 DRF-2118 — владельцу/админу салона: «Повторить» / «Подробнее».
+
+    Дедуп — по часу последнего успеха: пока каталог не ожил, почасовая
+    проверка — тот же случай, не новое событие. Операторский ``page`` рядом
+    остаётся: оператор чинит, владелец — знает и может повторить.
+    """
+
+    try:
+        from apps.channels.max import salon_notify
+
+        tenant = Tenant.all_objects.filter(id=age.tenant_id).first()
+        if tenant is None:
+            return
+        salon_notify.notify(salon_notify.sync_failed_notice(tenant, age))
+    except Exception:  # noqa: BLE001 — страница операторам важнее сбоя здесь
+        logger.exception("catalog.alert_stale.salon_staff_failed tenant=%s", age.slug)
 
 
 @shared_task(
