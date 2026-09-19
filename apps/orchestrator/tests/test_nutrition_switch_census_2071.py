@@ -7,9 +7,13 @@
 вход, который не читает ничего, — тем более. Здесь перепись идёт по классу
 входа, и флаг в ней не упоминается вовсе:
 
-* **ручки Mini App** — каждый маршрут ``miniapp_api`` с префиксом ``wellness/``
-  (список берётся из ``urlpatterns``, не из головы), каждым методом, который
-  маршрут принимает: при OFF — 404 ``nutrition_disabled``;
+* **ручки Mini App** — каждый маршрут ``miniapp_api`` из четырёх семейств
+  контура питания: ``wellness/`` (сводка, вода, запись еды), ``food/``
+  (оценка, запись текстом, скан), ``saved-meals`` (избранное), ``diary/``
+  (дни). Список берётся из ``urlpatterns`` по префиксу, не из головы; каждый
+  маршрут — каждым методом, который он принимает: при OFF — 404
+  ``nutrition_disabled`` до разбора тела, и ни одного вызова каталога.
+  ``plan-lite`` — не питание (свой флаг), в класс не входит;
 * **кнопки и текст в чате** — каждый payload семейств ``cb:food:*`` и
   ``cb:anketa:*`` (формы из ``parse_callback``/регулярок навыков) плюс два
   текстовых входа дневника: каждый навык РЕЕСТРА, который такой ход забирает,
@@ -66,24 +70,33 @@ def nutrition_off(settings):
 
 METHODS = ("get", "post", "put", "patch", "delete")
 
+#: Семейства маршрутов контура питания в ``miniapp_api``. Новый маршрут с
+#: одним из этих префиксов попадает в перепись сам; новое семейство — руками
+#: сюда (и ``test_the_census_is_not_empty`` ниже держит нижнюю границу).
+NUTRITION_ROUTE_PREFIXES = ("wellness/", "food/", "saved-meals", "diary/")
 
-def _wellness_routes() -> list[tuple[str, str]]:
-    """``(name, route)`` для каждого маршрута ``wellness/…`` из ``urlpatterns``."""
+#: Подстановки для параметров пути — любой непустой id: ворота стоят до
+#: обращения к каталогу, так что существование записи не проверяется.
+_PATH_ARGS = {"entry_id": "e1", "meal_id": "m1"}
+
+
+def _nutrition_routes() -> list[tuple[str, str]]:
+    """``(name, route)`` для каждого маршрута контура питания из ``urlpatterns``."""
     found = []
     for pattern in miniapp_urls.urlpatterns:
         route = str(getattr(pattern.pattern, "_route", ""))
-        if route.startswith("wellness/"):
+        if route.startswith(NUTRITION_ROUTE_PREFIXES):
             found.append((pattern.name, route))
     return found
 
 
 def _url(name: str, route: str) -> str:
-    kwargs = {"entry_id": "e1"} if "<str:entry_id>" in route else {}
+    kwargs = {k: v for k, v in _PATH_ARGS.items() if f"<str:{k}>" in route}
     return reverse(f"miniapp_api:{name}", kwargs=kwargs)
 
 
 @pytest.mark.django_db
-class TestEveryWellnessRouteRefusesWhenOff:
+class TestEveryNutritionRouteRefusesWhenOff:
     @pytest.fixture
     def bot_user(self, settings) -> BotUser:
         tenant = Tenant.objects.create(slug="census-2071", name="Census", timezone="Europe/Moscow")
@@ -94,8 +107,12 @@ class TestEveryWellnessRouteRefusesWhenOff:
         )
 
     def test_the_census_is_not_empty(self):
-        routes = _wellness_routes()
-        assert len(routes) >= 5, routes
+        routes = _nutrition_routes()
+        # 5 wellness/ + 3 food/ + 2 saved-meals + 2 diary/ на dev 1365892f;
+        # меньше — семейство выпало из ``urlpatterns`` или сменило префикс.
+        assert len(routes) >= 12, routes
+        for prefix in NUTRITION_ROUTE_PREFIXES:
+            assert any(route.startswith(prefix) for _, route in routes), prefix
 
     def test_each_route_each_accepted_method_is_404_nutrition_disabled(
         self, client: Client, bot_user: BotUser, nutrition_off
@@ -109,7 +126,7 @@ class TestEveryWellnessRouteRefusesWhenOff:
                 return_value=True,
             ),
         ):
-            for name, route in _wellness_routes():
+            for name, route in _nutrition_routes():
                 for method in METHODS:
                     kwargs = {} if method == "get" else {"data": "{}", "content_type": "application/json"}
                     response = getattr(client, method)(
@@ -123,7 +140,7 @@ class TestEveryWellnessRouteRefusesWhenOff:
                     assert response.status_code == 404, (route, method, response.status_code)
                     assert response.json()["error"] == "nutrition_disabled", (route, method)
         # Каждый маршрут принял хотя бы один метод — иначе он выпал из переписи.
-        assert set(seen) == {route for _, route in _wellness_routes()}, seen
+        assert set(seen) == {route for _, route in _nutrition_routes()}, seen
         assert not ayla.method_calls, ayla.method_calls
 
 
