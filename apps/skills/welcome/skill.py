@@ -87,8 +87,11 @@ dispatcher flow.
 privacy consent prompt (Tau's customer-onboarding-flow.md §5):
 
 * ``cb:welcome:consent_yes`` — DIRECT path («Да, продолжим» из S2).
-  Funnels к ``_render_consent_granted(show_s3=True)`` — stamps
-  consent_at idempotently + renders S3 + S5 combined bubble.
+  Funnels к ``_render_consent_granted(show_s3=True)`` — on the per-tenant
+  path writes the ``personal_data`` ConsentRecord for every shell of the
+  person (DRF-2016; ``consent_at`` is stamped atomically with the row) +
+  renders S3 + S5 combined bubble. On the global path the journal is
+  written by ``global_onboarding`` after the render.
 * ``cb:welcome:consent_yes_via_s2a`` — S2a path («Понятно, продолжим»
   из S2a fold). Same handler but ``show_s3=False`` per Tau §6
   conditional rule (user already saw scope disclosure → S3
@@ -125,6 +128,8 @@ from typing import ClassVar
 from django.conf import settings
 from django.utils import timezone
 
+from apps.consent.models import ConsentRecord
+from apps.consent.services import record_person_consent
 from apps.skills.base import SkillContext, SkillResult
 from apps.skills.menu.matching import (
     CALLBACK_MENU_BOOK,
@@ -630,9 +635,9 @@ class WelcomeSkill:
         отдаёт :func:`consent_offer_action_data`. Но клавиатура живёт в чате
         человека и переживает смену пути, так что тап всё-таки может прийти
         с салонного. Тогда он уходит в канонический салонный путь
-        (:meth:`_render_consent_granted` ставит ``consent_at``) — а НЕ
+        (:meth:`_render_consent_granted` пишет строку реестра и ``consent_at``) — а НЕ
         отвечает «готово, согласие есть», потому что на салонном пути
-        ConsentRecord не пишется никем: это было бы ложное утверждение о
+        ConsentRecord писал бы только он (DRF-2016): иначе это было бы ложное утверждение о
         152-ФЗ, выданное человеку.
         """
         if not _is_global_bot_scope(current_tenant()):
@@ -651,7 +656,7 @@ class WelcomeSkill:
         )
 
     def _render_consent_granted(self, context: SkillContext, *, show_s3: bool) -> SkillResult:
-        """Stamp consent_at + render S5 first-action grid.
+        """Write the consent row (per-tenant path) + render S5 first-action grid.
 
         Both consent_yes callbacks (direct + via_s2a) funnel here for
         single-source idempotent consent stamping. ``show_s3`` toggles
@@ -665,22 +670,38 @@ class WelcomeSkill:
         infrastructure. Strict two-bubble может revisit post-pilot.
         """
         bot_user = context.bot_user
-        # #1074 — on the GLOBAL (tenant-less) path we do NOT stamp consent_at here.
+        # #1074 — on the GLOBAL (tenant-less) path nothing is written here:
         # global_onboarding calls ``consent.services.record_global_consent`` right
         # after this render, and that stamps consent_at ATOMICALLY with the
-        # ConsentRecord (proof-of-consent) — so on the global path consent_at can
-        # never be set without the record. On the per-tenant path
-        # (``current_tenant()`` set) we stamp as before.
-        if current_tenant() is not None and getattr(bot_user, "consent_at", None) is None:
+        # ConsentRecord (proof-of-consent).
+        #
+        # DRF-2016 — on the per-tenant path this used to stamp ``consent_at``
+        # and stop. Every reader (``diary_write_refusal`` →
+        # ``personal_records_consent_open`` → ``has_global_consent``) asks the
+        # REGISTRY ROW of the BotUser, never the column — so a person who came
+        # through a salon bot kept getting ``consent_required`` after «Дать
+        # согласие». Now the salon path writes the same row through the same
+        # person-level primitive the nutrition consents use: one row per shell
+        # of the person, ``consent_at`` stamped inside the same transaction as
+        # the row, idempotent on a repeat tap. Only ``personal_data``:
+        # ``memory_green`` «одним тапом» was the owner's decision for the GLOBAL
+        # onboarding and is not extended to the salon path without his word.
+        if current_tenant() is not None:
             try:
-                bot_user.consent_at = timezone.now()
-                bot_user.save(update_fields=["consent_at"])
+                record_person_consent(
+                    bot_user,
+                    consent_type=ConsentRecord.ConsentType.PERSONAL_DATA.value,
+                    source=S2_CONSENT_SOURCE_TENANT,
+                    document_version=S2_CONSENT_DOCUMENT_VERSION,
+                )
             except Exception as exc:  # noqa: BLE001
-                # Mirror welcomed_at pattern: log + continue. Worst case
-                # — consent re-asked on next entry to S2; not data-loss
-                # since user IS giving consent right now.
+                # Mirror welcomed_at pattern: log + continue. Worst case —
+                # consent re-asked on next entry to S2; not data-loss since
+                # the person IS giving consent right now. Nothing half-done:
+                # the stamp lives inside the row's transaction, so a failure
+                # leaves neither.
                 logger.error(
-                    "welcome.consent_at_save_failed bot_user_id=%s err=%s",
+                    "welcome.consent_record_failed bot_user_id=%s err=%s",
                     getattr(bot_user, "id", None),
                     exc,
                 )
@@ -702,6 +723,18 @@ class WelcomeSkill:
                 "s3_shown": show_s3,
             },
         )
+
+
+#: Где выдано согласие салонного S2 (форма ``<путь>:<экран>``, как у
+#: ``global_onboarding:welcome_s2``).
+S2_CONSENT_SOURCE_TENANT = "welcome:s2_tenant"
+
+#: Версия текста S2. Один текст (Tau §5) на оба пути — глобальный онбординг
+#: переиспользует WelcomeSkill напрямую и пишет ту же версию
+#: (``global_onboarding.CONSENT_DOCUMENT_VERSION``); равенство держит узел
+#: ``tests/test_consent_registry_2016.py::TestC7``. Импортировать оттуда
+#: нельзя: skills не зависят от channels.
+S2_CONSENT_DOCUMENT_VERSION = "welcome-s2-v1"
 
 
 def _stamp_welcomed_at(bot_user) -> None:
