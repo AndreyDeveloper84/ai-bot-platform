@@ -74,14 +74,19 @@ class TestTheVerdictMatchesTheShippedDecision:
         assert classify(content).action == "delete", content
 
     def test_a_welcome_tap_is_rewritten_to_its_label(self):
+        """Подпись — та, что человек видел на глобальном пути (DRF-2120 v2:
+        «Начать» без стрелки — решение владельца); для кнопок без своей
+        подписи там — подпись строителя WelcomeSkill."""
+        from apps.channels.max.global_onboarding import GLOBAL_WELCOME_TAP_LABELS
         from apps.skills.welcome.skill import welcome_tap_labels
 
         labels = welcome_tap_labels()
         assert labels, "клавиатура приветствия пуста — проверка ниже ни о чём"
-        payload, label = next(iter(labels.items()))
-        verdict = classify(payload)
-        assert verdict.action == "rewrite", payload
-        assert verdict.new_content == label
+        assert GLOBAL_WELCOME_TAP_LABELS, "таблица подписей глобального пути пуста"
+        for payload, label in labels.items():
+            verdict = classify(payload)
+            assert verdict.action == "rewrite", payload
+            assert verdict.new_content == GLOBAL_WELCOME_TAP_LABELS.get(payload, label), payload
 
     @pytest.mark.parametrize(
         "content",
