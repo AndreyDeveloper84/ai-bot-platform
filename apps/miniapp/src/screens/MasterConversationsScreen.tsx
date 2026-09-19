@@ -302,15 +302,7 @@ export function MasterConversationsScreen() {
         durationMs={3500}
         onTimeout={() => setToast({ visible: false, message: "" })}
       />
-      <MasterTabBar
-        unreadCount={
-          phase.kind === "ready"
-            ? phase.data.section_counts.awaiting_master
-            : 0
-        }
-        scheduleHasPendingChange={false}
-        profileHasOwnerPendingChange={false}
-      />
+      <MasterTabBar scheduleHasPendingChange={false} />
     </>
   );
 }

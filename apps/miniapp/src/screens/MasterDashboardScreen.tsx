@@ -39,7 +39,7 @@
  *   - No enableClosingConfirmation (no dirty state)
  */
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { ApiError } from "../lib/api";
 import { salonOwnerHint } from "../lib/salonOwnerHint";
@@ -59,7 +59,9 @@ import {
   setBackButton,
   signalReady,
 } from "../lib/max-sdk";
+import { AvatarSheet } from "../components/AvatarSheet";
 import { IconMessage, MasterTabBar } from "../components/MasterTabBar";
+import { masterAvatarSheetItems } from "../lib/avatar-sheet";
 import { unreadBadgeText } from "../lib/unread-badge";
 import { AcceptingBookingsToggle } from "../components/AcceptingBookingsToggle";
 import { PayoutPreviewCard } from "../components/PayoutPreviewCard";
@@ -353,6 +355,7 @@ export function MasterDashboardScreen() {
         nowIso={data.now_iso}
         unreadCount={tab_badges.conversations_unread}
         onInbox={onInboxCardTap}
+        profileHasOwnerPendingChange={tab_badges.profile_has_owner_pending_change}
       />
 
       {isStale ? (
@@ -401,11 +404,7 @@ export function MasterDashboardScreen() {
 
       <PayoutPreviewCard />
 
-      <MasterTabBar
-        unreadCount={tab_badges.conversations_unread}
-        scheduleHasPendingChange={tab_badges.schedule_has_pending_change}
-        profileHasOwnerPendingChange={tab_badges.profile_has_owner_pending_change}
-      />
+      <MasterTabBar scheduleHasPendingChange={tab_badges.schedule_has_pending_change} />
     </DashboardFrame>
   );
 }
@@ -475,6 +474,7 @@ export function DashboardHeader({
   nowIso,
   unreadCount,
   onInbox,
+  profileHasOwnerPendingChange = false,
 }: {
   salonName: string;
   masterName: string;
@@ -482,16 +482,15 @@ export function DashboardHeader({
   nowIso: string;
   unreadCount: number;
   onInbox: () => void;
+  /** Точка на аватаре: владелец ждёт правок профиля (DRF-2121 — переехала с панели). */
+  profileHasOwnerPendingChange?: boolean;
 }) {
-  // We render the master's first name + initial-circle when the photo is
-  // missing. Spec §M1 lines 289-291: «Студия Карина [Анна ●] / Среда, 21
-  // мая 14:42».
+  // Spec §M1 lines 289-291: «Студия Карина [Анна ●] / Среда, 21 мая 14:42».
+  // DRF-2121 (§28 п.3): аватар — кнопка, открывающая лист «Профиль · Со
+  // студией · Настройки»; «Профиль» из нижней панели снят. Кнопка «Диалоги»
+  // с бейджем рядом — вход в переписку мастер↔клиент, подлежащую снятию
+  // (DRF-1039/1255); здесь не трогается.
   const firstName = (masterName || "").split(/\s+/)[0] ?? "";
-  const initials = useMemo(() => {
-    const parts = (masterName || "").trim().split(/\s+/).filter(Boolean);
-    if (!parts.length) return "—";
-    return parts.slice(0, 2).map((p) => p[0]?.toUpperCase() ?? "").join("");
-  }, [masterName]);
   const badge = unreadBadgeText(unreadCount);
   return (
     <header className="master-dashboard__header">
@@ -515,13 +514,12 @@ export function DashboardHeader({
               </span>
             ) : null}
           </button>
-          <div className="master-dashboard__avatar" aria-label={firstName}>
-            {photoUrl ? (
-              <img src={photoUrl} alt="" />
-            ) : (
-              <span>{initials}</span>
-            )}
-          </div>
+          <AvatarSheet
+            name={masterName}
+            photoUrl={photoUrl}
+            dot={profileHasOwnerPendingChange}
+            items={masterAvatarSheetItems()}
+          />
         </div>
         <div className="master-dashboard__time">{formatTimeHM(nowIso)}</div>
       </div>
@@ -926,10 +924,6 @@ function PermissionDeniedScreen({ onRetry: _onRetry }: { onRetry: () => void }) 
 /** Empty tab bar shown while data loads — keeps layout stable. */
 function TabBarBlank() {
   return (
-    <MasterTabBar
-      unreadCount={0}
-      scheduleHasPendingChange={false}
-      profileHasOwnerPendingChange={false}
-    />
+    <MasterTabBar scheduleHasPendingChange={false} />
   );
 }

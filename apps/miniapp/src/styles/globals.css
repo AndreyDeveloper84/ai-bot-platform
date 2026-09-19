@@ -1320,7 +1320,8 @@ a {
   inset-inline: 0;
   bottom: 0;
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
+  /* DRF-2121: ровно три вкладки (§28 п.2) — колонок столько же. */
+  grid-template-columns: repeat(3, 1fr);
   background: var(--c-surface-1);
   border-top: 1px solid var(--c-divider);
   padding: var(--s-2) 0 calc(var(--s-2) + var(--safe-bottom));
@@ -1454,6 +1455,26 @@ a {
   align-items: center;
   justify-content: center;
 }
+.avatar-sheet__trigger {
+  position: relative;
+  overflow: hidden;
+}
+.avatar-sheet__photo {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  border-radius: 50%;
+}
+.avatar-sheet__dot {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--c-accent);
+  border: 2px solid var(--c-surface-1);
+}
 .avatar-sheet {
   position: fixed;
   inset: 0;
@@ -1516,6 +1537,14 @@ a {
 .avatar-sheet__item:focus-visible {
   outline: 2px solid var(--c-accent);
   outline-offset: 2px;
+}
+
+/* DRF-2121 — шапка «Ayla» мастера: заголовок слева, аватар справа. */
+.ayla-header__top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s-3);
 }
 
 /* Карточки на «Сегодня» (DRF-2115): Диалоги / График. */

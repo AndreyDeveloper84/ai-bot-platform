@@ -697,7 +697,7 @@ export function MasterProfileScreen() {
         </button>
       </ProfileSection>
 
-      <MasterTabBar unreadCount={0} scheduleHasPendingChange={false} profileHasOwnerPendingChange={false} />
+      <MasterTabBar scheduleHasPendingChange={false} />
 
       {bioEditor !== null && limits ? (
         <TextEditorSheet

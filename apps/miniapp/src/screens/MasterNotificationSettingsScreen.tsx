@@ -476,11 +476,7 @@ export function MasterNotificationSettingsScreen() {
         />
       </NotifSection>
 
-      <MasterTabBar
-        unreadCount={0}
-        scheduleHasPendingChange={false}
-        profileHasOwnerPendingChange={false}
-      />
+      <MasterTabBar scheduleHasPendingChange={false} />
 
       {editor !== null ? (
         <QuietHoursEditor

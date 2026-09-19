@@ -1,36 +1,39 @@
 /**
- * Master bottom tab bar (master-mobile §M1).
+ * Master bottom tab bar — ровно три (DRF-2121; §28 п.2, §50).
  *
- * Sticky bottom row of 4 tabs with badge support. Icons are hand-rolled
- * SVG ~matching the Lucide outline set referenced by the spec, kept
- * inline to avoid a runtime icon dep (skill ref: «Don't add CSS-in-JS
- * frameworks» and analogous bundle discipline).
+ * «Сегодня | Расписание | Ayla». Решение владельца 05.09 (§28): «Профиль»
+ * и «Ещё» в панель не добавляются, вход в Профиль — аватар справа вверху
+ * на всех трёх разделах (`AvatarSheet`, DRF-2115). «Диалоги» (переписка
+ * мастер↔клиент, DRF-1039) из панели сняты — маршрут живёт по прямой
+ * ссылке до DRF-1255; счётчик непрочитанных — на кнопке в шапке «Сегодня».
+ *
+ * Icons are hand-rolled SVG ~matching the Lucide outline set, kept inline
+ * to avoid a runtime icon dep.
  *
  * Layout:
  *   ┌──────────────────────────────────────┐
- *   │  [🏠]    [📅]    [💬 2]    [👤●]    │
+ *   │   [📅 Сегодня]  [📅● Расписание]  [✦ Ayla]   │
  *   └──────────────────────────────────────┘
  */
 
 import { useCallback } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { hapticSelection } from "../lib/max-sdk";
-import { unreadBadgeText } from "../lib/unread-badge";
 
 interface TabBarProps {
-  unreadCount: number;
   scheduleHasPendingChange: boolean;
-  profileHasOwnerPendingChange: boolean;
 }
 
-type TabKey = "home" | "schedule" | "conversations" | "profile";
+type TabKey = "today" | "schedule" | "ayla";
+
+/** Подписи в порядке панели — сторож «ровно три» сверяет с ними. */
+export const MASTER_TAB_LABELS = ["Сегодня", "Расписание", "Ayla"] as const;
 
 interface TabSpec {
   key: TabKey;
   label: string;
   to: string;
   icon: JSX.Element;
-  badgeCount?: number;
   badgeDot?: boolean;
 }
 
@@ -64,23 +67,28 @@ export function IconMessage() {
   );
 }
 
-function IconUser() {
+function IconAyla() {
   return (
-    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-      strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-      <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2" />
-      <circle cx="12" cy="7" r="4" />
+    <svg
+      width="24"
+      height="24"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <path d="M12 3.5 13.3 8l4.5 1.3-4.5 1.3L12 15l-1.3-4.4L6.2 9.3 10.7 8 12 3.5Z" />
+      <path d="M18.5 15.5l.6 2 2 .6-2 .6-.6 2-.6-2-2-.6 2-.6.6-2Z" />
     </svg>
   );
 }
 
 // --- Component ------------------------------------------------------------
 
-export function MasterTabBar({
-  unreadCount,
-  scheduleHasPendingChange,
-  profileHasOwnerPendingChange,
-}: TabBarProps) {
+export function MasterTabBar({ scheduleHasPendingChange }: TabBarProps) {
   const navigate = useNavigate();
   const location = useLocation();
 
@@ -103,31 +111,23 @@ export function MasterTabBar({
 
   const tabs: TabSpec[] = [
     {
-      key: "home",
-      label: "Дом",
+      key: "today",
+      label: MASTER_TAB_LABELS[0],
       to: "/master/dashboard",
       icon: <IconHome />,
     },
     {
       key: "schedule",
-      label: "Расписание",
+      label: MASTER_TAB_LABELS[1],
       to: "/master/schedule",
       icon: <IconCalendar />,
       badgeDot: scheduleHasPendingChange,
     },
     {
-      key: "conversations",
-      label: "Диалоги",
-      to: "/master/conversations",
-      icon: <IconMessage />,
-      badgeCount: unreadCount > 0 ? unreadCount : undefined,
-    },
-    {
-      key: "profile",
-      label: "Профиль",
-      to: "/master/profile",
-      icon: <IconUser />,
-      badgeDot: profileHasOwnerPendingChange,
+      key: "ayla",
+      label: MASTER_TAB_LABELS[2],
+      to: "/master/ayla",
+      icon: <IconAyla />,
     },
   ];
 
@@ -154,11 +154,7 @@ export function MasterTabBar({
           >
             <span className="master-tabbar__icon">
               {tab.icon}
-              {tab.badgeCount && unreadBadgeText(tab.badgeCount) ? (
-                <span className="master-tabbar__badge" aria-label={`непрочитанных: ${tab.badgeCount}`}>
-                  {unreadBadgeText(tab.badgeCount)}
-                </span>
-              ) : tab.badgeDot ? (
+              {tab.badgeDot ? (
                 <span className="master-tabbar__dot" aria-label="есть изменения" />
               ) : null}
             </span>

@@ -63,6 +63,7 @@ import {
   setBackButton,
   signalReady,
 } from "../lib/max-sdk";
+import { MasterAvatar } from "../components/MasterAvatar";
 import { MasterTabBar } from "../components/MasterTabBar";
 import { Snackbar } from "../components/Snackbar";
 import {
@@ -420,11 +421,9 @@ export function MasterScheduleScreen() {
         onTimeout={() => setSnackbar({ visible: false, message: "" })}
       />
       <MasterTabBar
-        unreadCount={0}
         scheduleHasPendingChange={
           phase.kind === "ready" && phase.pending.length > 0
         }
-        profileHasOwnerPendingChange={false}
       />
     </>
   );
@@ -490,6 +489,8 @@ function ScheduleHeader({
         >
           {COPY.today}
         </button>
+        {/* DRF-2121 (§28 п.3): вход в профиль — аватар на каждом из трёх разделов. */}
+        <MasterAvatar />
       </div>
       <div
         className="schedule-segments"
