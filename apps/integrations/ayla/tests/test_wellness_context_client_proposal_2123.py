@@ -153,13 +153,13 @@ class TestProposalRead:
         assert not isinstance(info.value, PlanLiteGoalNotFoundError)
 
     def test_5xx_is_unavailable_and_the_body_is_not_logged(self, caplog) -> None:
-        secret = "SECRET-BODY-2123"
+        body_marker = "BODY-MARKER-2123"
         with caplog.at_level(
             logging.WARNING, logger="apps.integrations.ayla.wellness_context_client"
         ):
             with pytest.raises(WellnessContextUnavailableError):
                 _client(
-                    lambda _r: httpx.Response(503, json={"error": {"code": "X", "message": secret}})
+                    lambda _r: httpx.Response(503, json={"error": {"code": "X", "message": body_marker}})
                 ).get_plan_lite_proposal(external_user_id=_EXT)
         # Всё, что попало в лог: сообщение и сырые аргументы (DRF-2009 —
         # сторож на аргументах, а не только на отрендеренной строке).
@@ -169,7 +169,7 @@ class TestProposalRead:
         )
         assert "wellness_context.plan_lite.server_error" in logged  # предупреждение есть
         assert "status=503" in logged
-        assert secret not in logged
+        assert body_marker not in logged
 
 
 class TestCreateWithTemplateVersion:
