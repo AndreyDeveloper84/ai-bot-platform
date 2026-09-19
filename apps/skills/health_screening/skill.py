@@ -45,7 +45,7 @@ from typing import ClassVar
 
 from apps.skills.base import SkillContext, SkillResult
 from apps.orchestrator.safety.medical_emergency import MEDICAL_EMERGENCY_TEXT_V2
-from apps.skills.health_screening.classifier import PainSignal, classify, detect_g6
+from apps.skills.health_screening.classifier import PainSignal, classify, detect_g4, detect_g6
 from apps.orchestrator.open_question import open_question
 from apps.skills.health_screening.memo import (
     remember_screening_asked,
@@ -110,7 +110,12 @@ class HealthScreeningSkill:
         signal = classify(context.message_text)
 
         if signal == PainSignal.RED_FLAG:
-            group = "G6" if detect_g6(context.message_text) else None
+            # Attribution only — the reply is the same canonical text for every
+            # medical S1 group. G6 ([OD-BOT §159]) and G4 ([OD-BOT §164]) are the
+            # two groups with an explicit detector; the older flat rules carry no
+            # group. One label per turn: a message with both signs is logged as G6.
+            text = context.message_text
+            group = "G6" if detect_g6(text) else "G4" if detect_g4(text) else None
             logger.info(
                 "health_screening.red_flag conversation=%s group=%s",
                 context.conversation.id if context.conversation else None,
