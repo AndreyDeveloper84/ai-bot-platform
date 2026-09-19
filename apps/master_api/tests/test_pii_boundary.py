@@ -175,9 +175,33 @@ _UUID_RE = re.compile(
 #: what happened on PR #1289, a branch that touches no master surface.
 #:
 #: What this hides, stated plainly: sub-second clock noise, nothing
-#: else. The date, the time down to the second, and every other digit in
-#: the body remain under the assertion, in both passes.
+#: else. In the RAW pass the date, the time down to the second, and every
+#: other digit in the body remain under the assertion.
 _SUBSECOND_RE = re.compile(r"(?<=\d\d:\d\d:\d\d)\.\d{1,9}")
+
+#: DRF-2095 — the collapsed (per-value) pass strips separators, and an ISO
+#: timestamp collapses into a digit run that can contain a phone window:
+#: ``2026-09-18T17:55:49+00:00`` → ``…17554900…`` → ``7554``. That is what
+#: happened on PR #1835 shard 5 at 17:55:49 UTC. Measured: with the date
+#: 2026-09-18, 64 clock seconds per day collide (every ``HH:55:44`` gives
+#: ``5544``; ``05:54:40``, ``17:55:49`` …); other dates add their own. The
+#: clock was a silent parameter of this test.
+#:
+#: So the collapsed pass masks whole timestamp-shaped tokens BY FORM —
+#: ``YYYY-MM-DD``, optionally ``THH:MM[:SS[.ffffff]]`` and ``Z``/``±HH:MM``,
+#: and a bare ``HH:MM:SS`` — before collapsing, the way it already masks
+#: UUIDs. The form is strict (two-digit month/day/hour…): a phone dressed
+#: as ``2026-99-97T77:55:44`` does not parse as a date and stays under the
+#: assertion. What this hides, stated plainly: digits of the customer's
+#: number that happen to be written INSIDE a well-formed timestamp — a
+#: field a server renders from a datetime, not from a phone. The raw pass
+#: still sees every timestamp digit, colons and all.
+_ISO_DATETIME_RE = re.compile(
+    r"(?<!\d)\d{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\d|3[01])"
+    r"(?:[T ](?:[01]\d|2[0-3]):[0-5]\d(?::[0-5]\d(?:\.\d{1,9})?)?"
+    r"(?:Z|[+-](?:[01]\d|2[0-3]):[0-5]\d)?)?(?!\d)"
+    r"|(?<!\d)(?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d(?!\d)"
+)
 
 
 def _utc(dt_local: datetime) -> datetime:
@@ -283,7 +307,7 @@ def _assert_no_customer_phone(raw: str, *, where: str, body: object = None) -> N
     if body is None:
         body = json.loads(raw)
     for value in _iter_string_values(body):
-        digits = re.sub(r"\D", "", _SUBSECOND_RE.sub("", _UUID_RE.sub("", value)))
+        digits = re.sub(r"\D", "", _ISO_DATETIME_RE.sub("", _UUID_RE.sub("", value)))
         if not digits:
             continue
         for window in windows:
@@ -771,6 +795,85 @@ class TestCustomerTypedContactsAreRedacted:
         _assert_no_customer_phone(
             resp.content.decode("utf-8"), where="conversation_detail", body=resp.json()
         )
+
+    # --- DRF-2095: the clock is not a parameter of this test any more ------
+
+    #: Clock times whose HH:MM:SS collapse into a window of CUSTOMER_DIGITS —
+    #: independent of the date (the window sits inside the six time digits).
+    #: Measured by brute force over a day: 64 such seconds. 17:55:49 is the
+    #: one that went red on PR #1835 shard 5.
+    COLLIDING_TIMES = (
+        time(17, 55, 49, 890712),  # ‥17554900‥ → 7554
+        time(10, 55, 44, 123456),  # ‥10554400‥ → 5544
+        time(5, 54, 40, 0),  # ‥0554400‥ → 5544
+    )
+
+    @staticmethod
+    def _colliding_instant(clock: time) -> datetime:
+        """Tomorrow at ``clock`` (UTC) — newest message on the thread, whatever today is."""
+
+        tomorrow = (dj_timezone.now() + timedelta(days=1)).date()
+        return datetime.combine(tomorrow, clock, tzinfo=timezone.utc)
+
+    @pytest.mark.parametrize("clock", COLLIDING_TIMES, ids=lambda t: t.strftime("%H:%M:%S"))
+    def test_a_timestamp_that_collapses_into_a_phone_window_is_not_a_leak(
+        self,
+        client: Client,
+        tenant: Tenant,
+        seeded_surface: Conversation,
+        clock: time,
+    ) -> None:
+        """False input: the message is stamped at a colliding second (by ``update()``,
+        not by freezing the clock) and the excerpt carries no number at all."""
+
+        instant = self._colliding_instant(clock)
+        message = Message.all_tenants.create(
+            tenant=tenant,
+            conversation=seeded_surface,
+            role=Message.Role.USER,
+            content="Перезвоните пожалуйста, когда сможете",
+        )
+        Message.all_tenants.filter(pk=message.pk).update(created_at=instant)
+        resp = client.get(
+            reverse("master_api:conversations_list"),
+            HTTP_AUTHORIZATION=init_data_header("12345"),
+        )
+        assert resp.status_code == 200, resp.content[:400]
+        body = resp.json()
+        # Positive guard: the colliding timestamp really is in the response.
+        assert any(instant.isoformat() in v for v in _iter_string_values(body)), body
+        _assert_excerpt_survived(body, where="conversations_list", witness="Перезвоните")
+        _assert_no_customer_phone(
+            resp.content.decode("utf-8"), where="conversations_list", body=body
+        )
+
+    def test_a_real_leak_next_to_a_colliding_timestamp_is_still_caught(self) -> None:
+        """The mask hides the timestamp, not the number beside it."""
+
+        stamp = self._colliding_instant(self.COLLIDING_TIMES[0]).isoformat()
+        clean = {"items": [{"last_message_at": stamp, "last_message_excerpt": "перезвоните"}]}
+        _assert_no_customer_phone(
+            json.dumps(clean), where="probe", body=clean
+        )  # timestamp alone passes
+        leaking = {
+            "items": [
+                {"last_message_at": stamp, "last_message_excerpt": "мой номер +7 (999) 777-55-44"}
+            ]
+        }
+        with pytest.raises(AssertionError, match="4 digits of the customer's phone"):
+            _assert_no_customer_phone(json.dumps(leaking), where="probe", body=leaking)
+
+    def test_the_mask_is_by_form_not_by_punctuation(self) -> None:
+        """A phone dressed as a timestamp does not parse as a date and stays under the assertion."""
+
+        assert _ISO_DATETIME_RE.sub("", "2026-09-18T17:55:49.890712+00:00") == ""
+        assert _ISO_DATETIME_RE.sub("", "17:55:49") == ""
+        # Invalid month/day/hour: not a timestamp, not masked.
+        dressed = "2026-99-97T77:55:44"
+        assert _ISO_DATETIME_RE.sub("", dressed) == dressed
+        body = {"note": dressed}
+        with pytest.raises(AssertionError, match="4 digits of the customer's phone"):
+            _assert_no_customer_phone(json.dumps(body), where="probe", body=body)
 
     def test_truncation_cannot_leave_a_four_digit_tail(
         self,
