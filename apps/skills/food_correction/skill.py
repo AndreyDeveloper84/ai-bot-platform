@@ -554,6 +554,10 @@ class FoodCorrectionSkill:
         # прошлого сообщения. ``matches`` флаг не читает намеренно (как у
         # анкеты): верни он ``False`` — ход уехал бы модели.
         if not _nutrition_enabled():
+            # Открытый вопрос стирается (как ``text_entry.forget`` у соседа):
+            # иначе до конца ``_PENDING_TTL_SECONDS`` каждое число или название
+            # блюда забирал бы этот навык и отвечал той же заглушкой.
+            _write_state(context, None)
             return SkillResult(
                 reply_text=_nutrition_unavailable_text(),
                 meta={"reply_kind": "food_correction_nutrition_off"},

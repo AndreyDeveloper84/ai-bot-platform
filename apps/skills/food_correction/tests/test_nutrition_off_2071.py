@@ -23,6 +23,7 @@ from apps.skills.food_correction.tests.test_skill import _context, _pending_cont
 from apps.skills.menu.marketplace import NUTRITION_UNAVAILABLE_TEXT
 
 REMEMBER = "apps.orchestrator.memory.food.remember_correction"
+WRITE_STATE = "apps.conversations.services.write_skill_state"
 
 
 @pytest.fixture
@@ -61,11 +62,13 @@ class TestAnswerToAnEarlierQuestionIsNotRememberedWhenOff:
         skill = FoodCorrectionSkill()
         assert skill.matches(ctx)
 
-        with patch(REMEMBER) as remember:
+        with patch(REMEMBER) as remember, patch(WRITE_STATE) as write_state:
             result = skill.handle(ctx)
 
         assert result.reply_text == NUTRITION_UNAVAILABLE_TEXT
         remember.assert_not_called()
+        # Открытый вопрос стёрт — следующее «250» уже не этого навыка.
+        write_state.assert_called_once_with(ctx.conversation, "food_correction", None)
 
     def test_positive_control_the_answer_is_remembered_when_on(self):
         from apps.orchestrator.memory import food as food_memory
