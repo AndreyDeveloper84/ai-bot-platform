@@ -81,6 +81,31 @@ from apps.tenancy.models import Tenant, TenantStaff
 
 pytestmark = pytest.mark.django_db
 
+
+@pytest.fixture(autouse=True)
+def _fresh_stranger_counter():
+    """DRF-2113: после трёх ответов незнакомцу бот молчит (счётчик в cache по
+    личности). Тесты этого файла говорят от одной личности много раз — счётчик
+    между тестами обнуляется, иначе четвёртый тест слышал бы молчание."""
+    from django.core.cache import cache
+
+    cache.clear()
+    yield
+    cache.clear()
+
+
+@pytest.fixture(autouse=True)
+def _staff_are_linked(monkeypatch):
+    """DRF-2113: связь с каталогом — не предмет этого файла.
+
+    Пре-чек входа (``salon_entry``) показывает меню только связанным с
+    каталогом; строки здесь строятся без ключа личности, и без этой
+    оговорки каждый персонал получал бы «Доступ ещё не подключён».
+    Связь стережётся в ``test_salon_entry_2113``.
+    """
+    monkeypatch.setattr("apps.channels.max.salon_entry.unlinked_reason", lambda *a, **kw: "")
+
+
 CHANNEL_USER_ID = "83146139"
 CHAT_ID = "315714313"
 
@@ -309,7 +334,7 @@ class TestPlainStartIsUntouched:
     def test_no_payload_still_asks_for_a_code(self, tenant, sent):
         _open(tenant, None)
 
-        assert "код приглашения" in _text(sent)
+        assert "код сотрудника" in _text(sent)  # DRF-2113: STRANGER-текст
         # Positive guard on the same data: the branch under test is
         # reachable and does send a button when a token IS present.
         # Without this line the assertion above passes on a handler that
@@ -335,7 +360,7 @@ class TestPlainStartIsUntouched:
 
         _open(tenant, "ref_user_42")
 
-        assert "код приглашения" in _text(sent)
+        assert "код сотрудника" in _text(sent)  # DRF-2113: STRANGER-текст
         assert _invite_buttons(sent) == []
 
 
@@ -527,7 +552,7 @@ class TestTheInviteIsReadAboveTheRoleCascade:
         # reply, ahead of both claims about what it must NOT contain.
         assert tenant.name in _text(sent)
         assert not _invite_buttons(sent)
-        assert "код приглашения" not in _text(sent)
+        assert "код сотрудника" not in _text(sent) and "код приглашения" not in _text(sent)
 
 
 class TestThePayloadIsAcceptableToMAX:

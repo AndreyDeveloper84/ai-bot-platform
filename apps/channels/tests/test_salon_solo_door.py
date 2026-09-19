@@ -33,6 +33,18 @@ from apps.tenancy.models import Tenant
 pytestmark = pytest.mark.django_db
 
 
+@pytest.fixture(autouse=True)
+def _fresh_stranger_counter():
+    """DRF-2113: после трёх ответов незнакомцу бот молчит (счётчик в cache по
+    личности). Тесты этого файла говорят от одной личности много раз — счётчик
+    между тестами обнуляется, иначе четвёртый тест слышал бы молчание."""
+    from django.core.cache import cache
+
+    cache.clear()
+    yield
+    cache.clear()
+
+
 class _Event:
     """Минимальное событие: ровно те поля, которые дверь читает.
 
@@ -85,7 +97,8 @@ class TestTheOfferAppearsForSomeoneWithNoTrace:
         salon_handler._ask_for_code_with_solo_offer(_Event("здравствуйте"), entry=None)
 
         assert len(said) == 1
-        assert salon_handler.ASK_FOR_CODE in said[0]["text"]
+        # DRF-2113: незнакомцу — STRANGER-текст (без имени: записи бота нет), не «пришлите код».
+        assert said[0]["text"].startswith(salon_handler.STRANGER_TEXT)
         assert salon_handler.SOLO_OFFER.strip() in said[0]["text"]
 
     def test_the_offer_carries_a_button_not_a_guessable_word(self, bot_user, said):
@@ -130,7 +143,7 @@ class TestSomeoneWithATraceIsNotOffered:
         with tenant_scope(salon):
             salon_handler._ask_for_code_with_solo_offer(_Event("привет"), entry=None)
 
-        assert said[0]["text"] == salon_handler.ASK_FOR_CODE
+        assert said[0]["text"] == salon_handler.STRANGER_TEXT  # DRF-2113
         assert salon_handler.SOLO_OFFER.strip() not in said[0]["text"]
         assert not said[0]["attachments"]
 

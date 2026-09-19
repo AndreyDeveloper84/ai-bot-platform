@@ -188,6 +188,49 @@ CB_SALON_CHOOSE_PREFIX = "cb:salon:choose:"
 SALON_CHOICE_PROMPT = "У вас есть роль в нескольких салонах. В каком вы сейчас?"
 SALON_CHOICE_TTL_SECONDS = 12 * 3600
 
+# ─── DRF-2113 (§50 п.1–3): пре-чек входа — три исхода, тексты листа дословно ───
+
+#: «Повторить проверку» — тот же пре-чек заново; «Обратиться в поддержку» —
+#: реплика с контактом (``AYLA_SUPPORT_CONTACT``), без AdminTask: примитива
+#: живого handoff для персонала на салонном стриме нет — это предел.
+CB_SALON_RECHECK = "cb:salon:recheck"
+CB_SALON_SUPPORT = "cb:salon:support"
+RECHECK_BUTTON = "Повторить проверку"
+SUPPORT_BUTTON = "Обратиться в поддержку"
+
+NOT_LINKED_TEXT = (
+    "Доступ к салону ещё не подключён. "
+    "Ваша учётная запись найдена, но связь с каталогом не завершена."
+)
+
+#: Текст главного окна, не владельца (у листа три исхода; неактивный салон
+#: получает такое же честное состояние с именем). Владелец поправит при проверке.
+SALON_INACTIVE_TEXT = (
+    "Салон «{name}» сейчас отключён в Ayla. Если это ошибка — обратитесь в поддержку."
+)
+
+#: Незнакомцу — кто здесь и куда ему: имя салона берётся из
+#: ``MAX_BOT_<SALON>_TENANT_SLUG`` записи реестра, если задан (на стенде задан);
+#: салонный бот салону не принадлежит (DRF-1783), так что без слага — без имени.
+STRANGER_TEXT_NAMED = (
+    "Здравствуйте! Это рабочий бот салона «{name}» — для мастеров и администраторов. "
+    "Если у вас есть код сотрудника или ссылка-приглашение — отправьте их сюда. "
+    "Если вы хотите записаться или вести дневник — вам к Ayla для клиентов:"
+)
+STRANGER_TEXT = (
+    "Здравствуйте! Это рабочий бот салона — для мастеров и администраторов. "
+    "Если у вас есть код сотрудника или ссылка-приглашение — отправьте их сюда. "
+    "Если вы хотите записаться или вести дневник — вам к Ayla для клиентов:"
+)
+CLIENT_BOT_BUTTON = "Ayla для клиентов"
+
+SUPPORT_FALLBACK_TEXT = "Напишите в поддержку Ayla."
+
+#: После стольких ответов незнакомцу без кода бот замолкает: это не диалог.
+#: Код, приглашение, ``/whoami`` и кнопки по-прежнему отвечаются.
+STRANGER_REPLY_LIMIT = 3
+STRANGER_REPLY_TTL_SECONDS = 3600
+
 #: §122: регистрация НЕ завершается как «готово». Текст говорит ровно то,
 #: что произошло, и ровно то, чего ждать, — потому что произошло не всё.
 #:
@@ -584,10 +627,7 @@ def _handle_salon_event_inner(event: CanonicalEvent, trace_id: str | uuid.UUID |
        The tenant of the registry entry is not read on this path at all.
     """
 
-    from apps.identity.services.bot_user_resolver import (
-        SalonChoiceRequired,
-        resolve_working_bot_user,
-    )
+    from apps.identity.services.bot_user_resolver import SalonChoiceRequired
     from apps.tenancy.context import tenant_scope
 
     # DRF-1766: a tap on «which salon» is the answer to the question below —
@@ -599,16 +639,34 @@ def _handle_salon_event_inner(event: CanonicalEvent, trace_id: str | uuid.UUID |
         chosen = event.text[len(CB_SALON_CHOOSE_PREFIX) :].strip() or None
         _remember_salon_choice(event, chosen)
 
+    # DRF-2113 (§50 п.2): пре-чек ×5 до любого меню — личность → салон и
+    # роль → связь с каталогом → активность. Три исхода для человека:
+    # STAFF / NOT_LINKED / STRANGER; SALON_INACTIVE и NO_IDENTITY — те же
+    # честные состояния под своим кодом.
+    from apps.channels.max import salon_entry
+
     try:
-        working = resolve_working_bot_user(
-            event.channel_user_id, surface="salon_bot", chosen_slug=chosen
-        )
+        verdict = salon_entry.precheck(event, chosen_slug=chosen)
     except SalonChoiceRequired as exc:
         _ask_which_salon(event, exc.tenants)
         return
-    if working is not None:
-        with tenant_scope(working.tenant):
-            _serve(event, trace_id, tenant=working.tenant, bot_user=working)
+
+    if verdict.is_staff:
+        with tenant_scope(verdict.tenant):
+            if event.text.strip() == CB_SALON_RECHECK:
+                # «Повторить проверку» прошла — сразу рабочее меню, а не
+                # разбор тапа, для которого у меню нет строки.
+                _open_menu_after_recheck(event, verdict)
+                return
+            _serve(event, trace_id, tenant=verdict.tenant, bot_user=verdict.bot_user)
+        return
+
+    if verdict.code in (salon_entry.NOT_LINKED, salon_entry.SALON_INACTIVE):
+        _serve_unlinked(event, verdict)
+        return
+
+    if verdict.code == salon_entry.NO_IDENTITY:
+        logger.warning("channels.max.salon.entry.no_identity")  # DRF-2009: без id
         return
 
     # No working row → the stranger path, WITHOUT a row (DRF-1784, D2 → б).
@@ -617,6 +675,137 @@ def _handle_salon_event_inner(event: CanonicalEvent, trace_id: str | uuid.UUID |
     # here: a stranger's tenant is decided by the code they type, or by
     # «Я работаю сам» — never by the salon the entry happens to name.
     _serve_stranger(event, trace_id)
+
+
+def _open_menu_after_recheck(event: CanonicalEvent, verdict) -> None:
+    """«Повторить проверку» прошла: рабочее меню по роли, как салонному боту."""
+
+    from apps.channels.bot_registry import effective_registry, resolve_by_slug
+
+    entry = resolve_by_slug(_bot_slug_for(verdict.tenant), effective_registry())
+    if entry is None:
+        logger.error("channels.max.salon.no_registry_entry tenant=%s", verdict.tenant.slug)
+        return
+    with bot_scope(entry):
+        _send_menu(event, verdict.role_ctx, verdict.tenant, entry)
+
+
+def _serve_unlinked(event: CanonicalEvent, verdict) -> None:
+    """NOT_LINKED / SALON_INACTIVE: честное состояние, две кнопки, без админки.
+
+    Ни ``open_app``, ни меню: админка ответила бы 403/500 (§50 п.2). Тап
+    «Обратиться в поддержку» — реплика с контактом; «Повторить проверку» —
+    следующее сообщение проходит пре-чек заново (он и есть проверка).
+    """
+
+    from apps.channels.bot_registry import effective_registry, resolve_by_stream
+    from apps.channels.max import salon_entry
+
+    entry = resolve_by_stream(SALON_STREAM, effective_registry())
+    if entry is None:
+        logger.error("channels.max.salon.no_salon_bot — cannot answer NOT_LINKED")
+        return
+    with bot_scope(entry):
+        # Приглашение и /whoami отвечаются и здесь: владелец, открывший
+        # приглашение мастера, и человек, спросивший «кто я», не должны
+        # упираться в состояние подключения (§12.3; см. ``_serve``).
+        invite_token = _extract_invite_token(event.text)
+        if invite_token is not None:
+            _handle_master_invite(event, invite_token, entry)
+            return
+        if event.text.strip() == WHOAMI_COMMAND:
+            bot_user = verdict.bot_user
+            _reply(
+                event,
+                render_for_person(
+                    build_card(bot_user.channel, bot_user.channel_user_id),
+                    tenant_slug=verdict.tenant.slug,
+                ),
+            )
+            return
+        if event.text.strip() == CB_SALON_SUPPORT:
+            _reply(event, _support_text())
+            return
+        if verdict.code == salon_entry.SALON_INACTIVE:
+            name = getattr(verdict.tenant, "name", "") or getattr(verdict.tenant, "slug", "")
+            buttons = [{"label": SUPPORT_BUTTON, "callback": CB_SALON_SUPPORT}]
+            _reply(
+                event,
+                SALON_INACTIVE_TEXT.format(name=name),
+                attachments=[outbound.make_inline_keyboard_attachment(buttons, columns=1)],
+            )
+            return
+        buttons = [
+            {"label": RECHECK_BUTTON, "callback": CB_SALON_RECHECK},
+            {"label": SUPPORT_BUTTON, "callback": CB_SALON_SUPPORT},
+        ]
+        _reply(
+            event,
+            NOT_LINKED_TEXT,
+            attachments=[outbound.make_inline_keyboard_attachment(buttons, columns=1)],
+        )
+
+
+def _support_text() -> str:
+    from django.conf import settings
+
+    contact = str(getattr(settings, "AYLA_SUPPORT_CONTACT", "") or "").strip()
+    return f"Поддержка Ayla: {contact}" if contact else SUPPORT_FALLBACK_TEXT
+
+
+def _stranger_reply_key(event: CanonicalEvent) -> str:
+    return f"salon_stranger_replies:{event.channel}:{event.channel_user_id}"
+
+
+def _stranger_may_be_answered(event: CanonicalEvent) -> bool:
+    """Третий ответ незнакомцу — последний; дальше молчание (§50 п.1: не диалог)."""
+
+    from django.core.cache import cache
+
+    key = _stranger_reply_key(event)
+    try:
+        count = int(cache.get(key) or 0)
+        if count >= STRANGER_REPLY_LIMIT:
+            logger.info("channels.max.salon.stranger_silenced")  # DRF-2009: без id
+            return False
+        cache.set(key, count + 1, timeout=STRANGER_REPLY_TTL_SECONDS)
+    except Exception:  # noqa: BLE001 — кэш недоступен → отвечаем, как раньше
+        return True
+    return True
+
+
+def _forget_stranger_replies(event: CanonicalEvent) -> None:
+    from django.core.cache import cache
+
+    try:
+        cache.delete(_stranger_reply_key(event))
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _client_bot_link_button() -> dict[str, str] | None:
+    """Кнопка-ссылка на клиентского бота из реестра (``MAX_BOT_<S>_LINK`` у ``max_global``)."""
+
+    from apps.channels.bot_registry import effective_registry, resolve_by_stream
+
+    client = resolve_by_stream("max_global", effective_registry())
+    link = (getattr(client, "link", "") or "").strip() if client is not None else ""
+    if not link:
+        return None
+    return {"label": CLIENT_BOT_BUTTON, "url": link}
+
+
+def _stranger_text(entry) -> str:
+    """Имя салона — из слага записи салонного бота, если он задан."""
+
+    slug = (getattr(entry, "tenant_slug", "") or "").strip()
+    if slug:
+        from apps.tenancy.models import Tenant
+
+        name = Tenant.all_objects.filter(slug=slug).values_list("name", flat=True).first()
+        if name:
+            return STRANGER_TEXT_NAMED.format(name=name)
+    return STRANGER_TEXT
 
 
 def _salon_choice_key(event: CanonicalEvent) -> str:
@@ -795,6 +984,10 @@ def _serve_stranger(event: CanonicalEvent, trace_id: str | uuid.UUID | None) -> 
         # A stray button tap from someone who lost their access must not be
         # read as an invite code — it would burn a rate-limit attempt for a
         # message they did not type.
+        if event.text.strip() == CB_SALON_SUPPORT:
+            _reply(event, _support_text())
+            return
+
         if _is_button_tap(event.text):
             if _solo_registration_step(event, entry=entry):
                 return
@@ -808,9 +1001,10 @@ def _serve_stranger(event: CanonicalEvent, trace_id: str | uuid.UUID | None) -> 
             # прислал AYLA-XXXX посреди регистрации, хотел войти по коду.
             if _solo_registration_takes_name(event):
                 return
-            _ask_for_code_with_solo_offer(event, entry=entry)
+            _greet_stranger(event, entry=entry)
             return
 
+        _forget_stranger_replies(event)
         _redeem_and_greet(event, code, entry)
 
 
@@ -940,17 +1134,29 @@ def _open_cabinet_attachments(entry) -> list[dict] | None:
     return [make_inline_keyboard_attachment([button], columns=1)]
 
 
-def _ask_for_code_with_solo_offer(event: CanonicalEvent, *, entry=None) -> None:
-    """Попросить код — и, если уместно, предложить кабинет соло-мастера.
+def _greet_stranger(event: CanonicalEvent, *, entry=None) -> None:
+    """STRANGER (DRF-2113): кто здесь, куда клиенту — и, если уместно, дверь соло.
 
-    По личности события, без строки (DRF-1784). ``entry`` — запись салонного
-    бота; нужна только вернувшемуся владельцу кабинета, чтобы вместе с
-    ответом получить дверь в него.
+    По личности события, без строки (DRF-1784). Текст — листа дословно;
+    кнопка ``link`` на клиентского бота — из реестра (без записи — без
+    кнопки, текст тот же); «Я работаю сам» остаётся (владелец D2 12.09 —
+    соло-мастер тоже персонал). После :data:`STRANGER_REPLY_LIMIT` ответов
+    без кода — молчание. ``entry`` — запись салонного бота: имя салона и
+    дверь в кабинет вернувшемуся владельцу.
     """
 
     identity = _Identity.of(event)
     if _has_a_master_card_anywhere(identity):
-        _reply(event, ASK_FOR_CODE)
+        if not _stranger_may_be_answered(event):
+            return
+        button = _client_bot_link_button()
+        _reply(
+            event,
+            _stranger_text(entry),
+            attachments=[outbound.make_inline_keyboard_attachment([button], columns=1)]
+            if button
+            else None,
+        )
         return
 
     if _already_has_a_solo_workspace(identity):
@@ -970,12 +1176,22 @@ def _ask_for_code_with_solo_offer(event: CanonicalEvent, *, entry=None) -> None:
         _reply(event, SOLO_ALREADY_REGISTERED, attachments=_open_cabinet_attachments(entry))
         return
 
-    from apps.channels.max import outbound
-
-    attachment = outbound.make_inline_keyboard_attachment(
-        [{"label": SOLO_OFFER_BUTTON, "callback": SOLO_REGISTER_CALLBACK}]
+    if not _stranger_may_be_answered(event):
+        return
+    buttons: list[dict[str, str]] = []
+    link_button = _client_bot_link_button()
+    if link_button:
+        buttons.append(link_button)
+    buttons.append({"label": SOLO_OFFER_BUTTON, "callback": SOLO_REGISTER_CALLBACK})
+    _reply(
+        event,
+        _stranger_text(entry) + SOLO_OFFER,
+        attachments=[outbound.make_inline_keyboard_attachment(buttons, columns=1)],
     )
-    _reply(event, ASK_FOR_CODE + SOLO_OFFER, attachments=[attachment])
+
+
+#: Прежнее имя двери (DRF-1784): та же функция — ответ незнакомцу теперь STRANGER.
+_ask_for_code_with_solo_offer = _greet_stranger
 
 
 # ─── DRF-1793 (M1): диалог регистрации соло — имя → город → сводка → подтверждение ───
@@ -1634,6 +1850,24 @@ def _redeem_and_greet(event: CanonicalEvent, code: str, entry) -> None:
 
     with tenant_scope(tenant):
         role_ctx = resolve_role(bot_user)
+        # DRF-2113 (§50 п.2): роль выдана, но каталожной половины нет
+        # (админский код — дверь без каталога, её даёт оператор «Выдать
+        # роль») → честное состояние вместо меню, которое ответит 403.
+        from apps.channels.max import salon_entry
+
+        reason = salon_entry.unlinked_reason(bot_user, role_ctx, tenant=tenant)
+        if reason:
+            logger.info("channels.max.salon.entry.not_linked_after_code reason=%s", reason)
+            buttons = [
+                {"label": RECHECK_BUTTON, "callback": CB_SALON_RECHECK},
+                {"label": SUPPORT_BUTTON, "callback": CB_SALON_SUPPORT},
+            ]
+            _reply(
+                event,
+                f"{greeting}\n\n{NOT_LINKED_TEXT}",
+                attachments=[outbound.make_inline_keyboard_attachment(buttons, columns=1)],
+            )
+            return
         _reply(
             event,
             f"{greeting}\n\n{menu_header(role_ctx, tenant)}",

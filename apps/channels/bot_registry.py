@@ -137,6 +137,9 @@ class BotEntry:
     stream: str = _DEFAULT_STREAM
     miniapp_url: str = ""
     web_app: str = ""
+    #: Публичная ссылка на бота (``MAX_BOT_<S>_LINK``) — чтобы другой бот мог
+    #: отправить человека сюда кнопкой (DRF-2113: салонный → клиентский).
+    link: str = ""
 
     @property
     def is_tenant_less(self) -> bool:
@@ -155,7 +158,7 @@ class BotEntry:
         return (
             f"BotEntry(slug={self.slug!r}, webhook_secret='<redacted>', "
             f"api_token='<redacted>', tenant_slug={self.tenant_slug!r}, "
-            f"stream={self.stream!r}, miniapp_url={self.miniapp_url!r})"
+            f"stream={self.stream!r}, miniapp_url={self.miniapp_url!r}, link={self.link!r})"
         )
 
 
@@ -271,6 +274,7 @@ def parse_registry(env: Mapping[str, Any]) -> tuple[BotEntry, ...]:
                 stream=stream,
                 miniapp_url=_clean(env.get(f"{prefix}MINIAPP_URL")),
                 web_app=_clean(env.get(f"{prefix}WEB_APP")),
+                link=_clean(env.get(f"{prefix}LINK")),
             )
         )
 
