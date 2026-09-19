@@ -27,6 +27,7 @@ constitute CLINICAL APPROVED, PHYSICIAN PASS, or SAFE FOR PILOT.
 from __future__ import annotations
 
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import Mock
 
 import pytest
@@ -121,7 +122,7 @@ def _conversation() -> SimpleNamespace:
     return SimpleNamespace(id="conv-g4", skill_state={})
 
 
-def _context(text: str, conversation: object | None = None) -> SkillContext:
+def _context(text: str, conversation: Any = None) -> SkillContext:
     return SkillContext(
         conversation=conversation if conversation is not None else Mock(id="conv-g4"),
         bot_user=Mock(),
