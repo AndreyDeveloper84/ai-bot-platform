@@ -315,11 +315,21 @@ class FoodScannerSkill:
                 reply_text=GRAMS_OUT_OF_RANGE_TEXT.format(grams=grams),
                 meta={"reply_kind": "food_scanner_log_grams_out_of_range"},
             )
+        from apps.skills.food_clarify.text_entry import (
+            PHOTO_ORIGIN_ESTIMATED_CONFIRMED,
+            PHOTO_ORIGIN_USER_CORRECTED,
+        )
+
         extra: dict = {}
+        # §136 / DRF-2110: происхождение решается на карточке и едет ВСЕГДА —
+        # подтверждённая как есть фото-запись тоже названа своим кодом, а не
+        # NULL, который читается как «до §136».
+        entry_origin = PHOTO_ORIGIN_ESTIMATED_CONFIRMED
         if isinstance(corrected, float):
             # DRF-1579: вес, названный на карточке, — множитель от распознанной
             # порции; число исправлено человеком (§136).
-            extra = {"portion_multiplier": corrected, "entry_origin": "photo_user_corrected"}
+            extra = {"portion_multiplier": corrected}
+            entry_origin = PHOTO_ORIGIN_USER_CORRECTED
         # «В полёте» ДО сетевого вызова: ответ про граммы, пришедший, пока запись
         # летит, не пообещает вес, который в неё уже не попадёт.
         # Уже записанный скан не понижается: повтор ключа вернёт ту же запись.
@@ -332,6 +342,7 @@ class FoodScannerSkill:
                     scan_id=scan_id,
                     meal_type="other",  # P1 doesn't show meal-type buttons
                     idempotency_key=f"diary:{external_id}:{scan_id}",
+                    entry_origin=entry_origin,
                     **extra,
                 )
             )
@@ -359,7 +370,7 @@ class FoodScannerSkill:
 
         _mark_logged(context, scan_id, log.log_id)
         reply = f"Записала: {log.dish_name} — {int(log.calories)} ккал."
-        if extra and (log.raw or {}).get("entry_origin") != "photo_user_corrected":
+        if extra and (log.raw or {}).get("entry_origin") != PHOTO_ORIGIN_USER_CORRECTED:
             # Ключ повтора вернул ПРЕЖНЮЮ запись (первый тап дошёл, ответ — нет):
             # вес в неё не лёг, и сказать «записала» без оговорки было бы ложью.
             reply = f"{reply} {GRAMS_NOT_APPLIED_TEXT.format(grams=grams)}"

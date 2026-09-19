@@ -637,7 +637,9 @@ class TestCorrectedGramsReachTheLog:
 
         assert captured[0]["scan_id"] == "scan-1"
         assert "portion_multiplier" not in captured[0]
-        assert "entry_origin" not in captured[0]
+        # DRF-2110 — без поправки запись всё равно названа: §136 требует
+        # четыре значения, NULL читался как «до §136».
+        assert captured[0]["entry_origin"] == "photo_estimated_confirmed"
         assert ("food_scan_logged", {"scan-1": "log-1"}) in written
 
     def test_a_newer_photo_does_not_lose_the_promised_weight(self) -> None:

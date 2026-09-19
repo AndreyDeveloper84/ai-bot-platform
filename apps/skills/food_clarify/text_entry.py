@@ -96,6 +96,12 @@ BASELINE_G = 100.0
 
 ORIGIN_ESTIMATED_CONFIRMED = "text_estimated_confirmed"
 ORIGIN_USER_CORRECTED = "text_user_corrected"
+#: DRF-2110 — две фото-половины §136 рядом с текстовыми: четыре значения в
+#: одном месте. Пишутся ВСЕГДА (чат и прокси Mini App): до этого листа
+#: фото-запись без поправки уходила без origin и хранилась как NULL —
+#: «до §136 или не передано» — и была неотличима от старых строк.
+PHOTO_ORIGIN_ESTIMATED_CONFIRMED = "photo_estimated_confirmed"
+PHOTO_ORIGIN_USER_CORRECTED = "photo_user_corrected"
 MEAL_TYPE_UNNAMED = "other"
 
 CB_LOG = "cb:food:text_log"
