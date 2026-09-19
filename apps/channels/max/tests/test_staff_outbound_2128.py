@@ -47,7 +47,7 @@ import uuid
 from datetime import timedelta
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Callable
+from typing import Any, Callable
 
 import pytest
 from django.utils import timezone
@@ -130,11 +130,13 @@ def _tenant_double(**over) -> SimpleNamespace:
     return SimpleNamespace(**base)
 
 
-def _master_double() -> SimpleNamespace:
+def _master_double() -> Any:
+    """Лёгкий двойник мастера: строителям текста нужны только ``id`` и ``name``."""
     return SimpleNamespace(id=uuid.uuid4(), name="Лера")
 
 
-def _pending_row(tenant) -> SimpleNamespace:
+def _pending_row(tenant) -> Any:
+    """Лёгкий двойник ``PendingBookingAction``: ``pk``, ``tenant``, ``payload``."""
     return SimpleNamespace(
         pk=uuid.uuid4(),
         tenant=tenant,
