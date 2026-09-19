@@ -282,6 +282,12 @@ WITHDRAW_DONE = (
     "показываются. Дневник продолжает работать как обычно.\n\n"
     "Если захотите вернуть расчёт, напишите: «Рассчитать мои нормы»."
 )
+#: DRF-2135 — те же предложения при выключенном контуре, минус два, которые
+#: при OFF ложны: дневник не работает, а «Рассчитать мои нормы» получит
+#: заглушку. Ничего нового не обещается — только убрана неправда.
+WITHDRAW_DONE_CONTOUR_OFF = (
+    "Персональный расчёт отключён. Параметры удалены, нормы больше не показываются."
+)
 #: Согласие снято, но каталог не подтвердил удаление: правда важнее
 #: гладкости — параметры уже НЕ используются, а «удалены» сказать нельзя.
 WITHDRAW_DELETE_UNCONFIRMED = (
@@ -290,8 +296,12 @@ WITHDRAW_DELETE_UNCONFIRMED = (
     "«Отключить персональный расчёт» через пару минут, я доведу его до конца."
 )
 WITHDRAW_KEPT = "Оставляю как есть: персональный расчёт работает."
+WITHDRAW_KEPT_CONTOUR_OFF = "Оставляю как есть: согласие остаётся."
 WITHDRAW_NOTHING_TO_WITHDRAW = (
     "Персональный расчёт и так не включён — отключать нечего. Дневник работает как обычно."
+)
+WITHDRAW_NOTHING_TO_WITHDRAW_CONTOUR_OFF = (
+    "Персональный расчёт и так не включён — отключать нечего."
 )
 
 
@@ -827,7 +837,9 @@ class NutritionAnketaSkill:
 
         if not is_granted(context.bot_user):
             return SkillResult(
-                reply_text=WITHDRAW_NOTHING_TO_WITHDRAW,
+                reply_text=self._contour_copy(
+                    WITHDRAW_NOTHING_TO_WITHDRAW, WITHDRAW_NOTHING_TO_WITHDRAW_CONTOUR_OFF
+                ),
                 meta={"reply_kind": "anketa_withdraw_nothing"},
             )
         return SkillResult(
@@ -880,15 +892,23 @@ class NutritionAnketaSkill:
                 meta={"reply_kind": "anketa_withdraw_unconfirmed"},
             )
         return SkillResult(
-            reply_text=WITHDRAW_DONE,
+            reply_text=self._contour_copy(WITHDRAW_DONE, WITHDRAW_DONE_CONTOUR_OFF),
             meta={"reply_kind": "anketa_withdraw_done"},
         )
 
     def _on_withdraw_keep(self, context: SkillContext) -> SkillResult:
         return SkillResult(
-            reply_text=WITHDRAW_KEPT,
+            reply_text=self._contour_copy(WITHDRAW_KEPT, WITHDRAW_KEPT_CONTOUR_OFF),
             meta={"reply_kind": "anketa_withdraw_kept"},
         )
+
+    @staticmethod
+    def _contour_copy(when_on: str, when_off: str) -> str:
+        """Копия отзыва по состоянию контура. Флаг здесь ВЫБИРАЕТ ФРАЗУ, не
+        решает исход: отзыв уже произошёл (или не понадобился) до этой строки.
+        При OFF убраны предложения, которые при OFF ложны («дневник работает»,
+        «напишите „Рассчитать мои нормы“»); новых обещаний нет."""
+        return when_on if _nutrition_enabled() else when_off
 
     def _render_step(self, step: str, prompt: str) -> SkillResult:
         action_data: dict = {"step": step}

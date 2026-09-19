@@ -9,8 +9,11 @@
 (положительный страж в переписи DRF-2071).
 
 Здесь: при OFF три шага отзыва (спросить → подтвердить / оставить) и текстовая
-форма отвечают тем же, что при ON, ``withdraw`` пишется, параметры в каталоге
+форма делают то же, что при ON: ``withdraw`` пишется, параметры в каталоге
 удаляются (``purge_body_parameters`` — часть отзыва, не функция питания).
+Копия при OFF — те же утверждённые предложения минус те, что при OFF ложны
+(«дневник работает как обычно», «напишите „Рассчитать мои нормы“» — второе
+при OFF получило бы заглушку); флаг ВЫБИРАЕТ фразу, но не решает исход.
 Остальные входы анкеты при OFF — заглушка, как и были (стража: ворота
 сдвигаются, не исчезают). Положительная пара при ON на тех же входах.
 
@@ -42,10 +45,6 @@ from apps.skills.nutrition_anketa.tests.test_consent_gate_at_entry import (
 
 STUB = anketa._nutrition_unavailable_text()
 _FLAG = "apps.skills.nutrition_anketa.skill._nutrition_enabled"
-
-
-def _flag_must_not_be_read(*_a, **_k):
-    raise AssertionError("на пути отзыва читатель флага NUTRITION_ENABLED вызван")
 
 
 @pytest.fixture
@@ -90,7 +89,9 @@ class TestWithdrawalWorksWhenTheContourIsOff:
         with patch(_IS_GRANTED, return_value=False):
             result = NutritionAnketaSkill().handle(ctx)
 
-        assert result.reply_text == anketa.WITHDRAW_NOTHING_TO_WITHDRAW
+        assert result.reply_text == anketa.WITHDRAW_NOTHING_TO_WITHDRAW_CONTOUR_OFF
+        # Про дневник при OFF — ни слова: он выключен.
+        assert "Дневник" not in result.reply_text
 
     def test_confirming_withdraws_and_purges_and_says_done(self, nutrition_off):
         ctx = _ctx(anketa.WITHDRAW_CONFIRM_CALLBACK)
@@ -103,8 +104,12 @@ class TestWithdrawalWorksWhenTheContourIsOff:
 
         withdraw.assert_called_once_with(ctx.bot_user)
         assert client.calls == 1  # удаление параметров — часть отзыва, не функция питания
-        assert result.reply_text == anketa.WITHDRAW_DONE
+        assert result.reply_text == anketa.WITHDRAW_DONE_CONTOUR_OFF
         assert result.meta["reply_kind"] == "anketa_withdraw_done"
+        # Наличие раньше отсутствия: суть отзыва сказана, ложных при OFF обещаний нет.
+        assert "Параметры удалены" in result.reply_text
+        assert "Дневник" not in result.reply_text
+        assert anketa.ENTRY_PHRASE.capitalize() not in result.reply_text
 
     def test_confirming_when_the_catalog_is_down_still_withdraws(self, nutrition_off):
         from apps.integrations.ayla.nutrition_client import NutritionUnavailableError
@@ -122,7 +127,8 @@ class TestWithdrawalWorksWhenTheContourIsOff:
 
     def test_keeping_is_acknowledged(self, nutrition_off):
         result = NutritionAnketaSkill().handle(_ctx(anketa.WITHDRAW_KEEP_CALLBACK))
-        assert result.reply_text == anketa.WITHDRAW_KEPT
+        # «Персональный расчёт работает» при OFF — неправда; остаётся согласие.
+        assert result.reply_text == anketa.WITHDRAW_KEPT_CONTOUR_OFF
 
 
 class TestTheGateMovedButDidNotVanish:
@@ -160,7 +166,16 @@ class TestPositiveControlWhenOn:
         ctx = _ctx(anketa.WITHDRAW_CONFIRM_CALLBACK)
         with patch(_WITHDRAW, return_value=1), patch(_CLIENT, return_value=_FakeClient()):
             result = NutritionAnketaSkill().handle(ctx)
-        assert result.reply_text == anketa.WITHDRAW_DONE
+        assert result.reply_text == anketa.WITHDRAW_DONE  # прежний текст, с «Рассчитать мои нормы»
+
+    def test_keeping_and_nothing_are_the_same_when_on(self):
+        assert (
+            NutritionAnketaSkill().handle(_ctx(anketa.WITHDRAW_KEEP_CALLBACK)).reply_text
+            == anketa.WITHDRAW_KEPT
+        )
+        with patch(_IS_GRANTED, return_value=False):
+            result = NutritionAnketaSkill().handle(_ctx(anketa.WITHDRAW_CALLBACK))
+        assert result.reply_text == anketa.WITHDRAW_NOTHING_TO_WITHDRAW
 
 
 class TestTheGuardAgainstAQuietRegression:
@@ -177,19 +192,25 @@ class TestTheGuardAgainstAQuietRegression:
             anketa.WITHDRAW_KEEP_CALLBACK,
         ],
     )
-    def test_the_flag_reader_is_never_called_on_the_withdrawal_path(self, text):
-        """Не «флаг False, а отзыв работает», а сильнее: флаг на этом пути не
-        читается вовсе — читатель подменён на взрыв. Ветка отзыва ниже ворот
-        или ``_nutrition_enabled()`` внутри ``_on_withdraw_*`` → красный."""
-        ctx = _ctx(text)
-        with (
-            patch(_FLAG, side_effect=_flag_must_not_be_read),
-            patch(_IS_GRANTED, return_value=True),
-            patch(_WITHDRAW, return_value=1),
-            patch(_CLIENT, return_value=_FakeClient()),
-        ):
-            result = NutritionAnketaSkill().handle(ctx)
-        assert result.reply_text != STUB
+    def test_the_flag_does_not_decide_the_outcome_on_the_withdrawal_path(self, text):
+        """Флаг на пути отзыва может выбрать фразу, но не исход: при обоих
+        значениях читателя ``reply_kind`` один и тот же ``anketa_withdraw_*``,
+        и это не заглушка. Ветка отзыва ниже ворот или «if not
+        _nutrition_enabled(): return stub» внутри ``_on_withdraw_*`` → красный."""
+        kinds: set[str] = set()
+        for flag in (True, False):
+            ctx = _ctx(text)
+            with (
+                patch(_FLAG, return_value=flag),
+                patch(_IS_GRANTED, return_value=True),
+                patch(_WITHDRAW, return_value=1),
+                patch(_CLIENT, return_value=_FakeClient()),
+            ):
+                result = NutritionAnketaSkill().handle(ctx)
+            assert result.reply_text != STUB, (text, flag)
+            kinds.add(result.meta["reply_kind"])
+        assert len(kinds) == 1, kinds
+        assert kinds.pop().startswith("anketa_withdraw_")
 
     def test_the_flag_reader_is_still_called_for_everything_else(self):
         """Положительная стража сторожа выше: на не-отзыве читатель зовётся —

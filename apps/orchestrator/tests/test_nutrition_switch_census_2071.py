@@ -83,9 +83,9 @@ from apps.skills.nutrition_anketa.skill import (
     WITHDRAW_CALLBACK,
     WITHDRAW_CONFIRM_ASK,
     WITHDRAW_CONFIRM_CALLBACK,
-    WITHDRAW_DONE,
+    WITHDRAW_DONE_CONTOUR_OFF,
     WITHDRAW_KEEP_CALLBACK,
-    WITHDRAW_KEPT,
+    WITHDRAW_KEPT_CONTOUR_OFF,
 )
 from apps.skills.registry import registered
 from apps.tenancy.models import Tenant
@@ -304,8 +304,8 @@ ACK_BY_DESIGN: dict[str, str] = {
 OPEN_BY_DESIGN: dict[str, tuple[str, bool]] = {
     WITHDRAW_CALLBACK: (WITHDRAW_CONFIRM_ASK, False),
     WITHDRAW_ACTION_TEXT: (WITHDRAW_CONFIRM_ASK, False),
-    WITHDRAW_CONFIRM_CALLBACK: (WITHDRAW_DONE, True),
-    WITHDRAW_KEEP_CALLBACK: (WITHDRAW_KEPT, False),
+    WITHDRAW_CONFIRM_CALLBACK: (WITHDRAW_DONE_CONTOUR_OFF, True),
+    WITHDRAW_KEEP_CALLBACK: (WITHDRAW_KEPT_CONTOUR_OFF, False),
 }
 
 
