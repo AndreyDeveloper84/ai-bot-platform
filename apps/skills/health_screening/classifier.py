@@ -403,19 +403,154 @@ _S1_G5_PATTERNS: tuple[re.Pattern[str], ...] = (
 )
 
 #: G6 — «признаки тяжёлой аллергической реакции с дыхательными / системными проявлениями»
-#: (:202); «после укола отекло горло, тяжело дышать» (:205); T-S1-11 (:286). A local rash
-#: is not G6, so «сыпь» needs a swelling or breathing sign next to it.
-_S1_SYSTEMIC = (
-    r"(?:от[её]к\w*|отекл\w*|опух\w*|трудно\s+дышать|тяжело\s+дышать|задыха\w*|удушь\w*|горл\w*)"
+#: (:202); «после укола отекло горло, тяжело дышать» (:205); T-S1-11 (:286).
+#:
+#: Owner ruling 18.09 — [OD-BOT §159] (``docs/OPEN_DECISIONS.md``; immutable record
+#: ``docs/safety/reviews/OWNER_RULINGS_S1_AI_CLINICAL_PRE_REVIEW_2026-09-18.md``):
+#: внезапный отёк губ / рта / языка / горла после возможного контакта с аллергеном —
+#: явный G6 → STOP, дыхательных симптомов ждать не нужно; также затруднение дыхания /
+#: глотания, сдавление горла, внезапная осиплость, выраженное головокружение,
+#: спутанность, обморок — в контексте возможной острой аллергической реакции.
+#: Изолированная локальная сыпь / зуд без этих признаков — НЕ автоматический S1.
+#:
+#: The detector is negation-aware (the §159 boundary): «губы не опухли», «нет отёка
+#: языка», «горло не отекает», «отёка нет» must not fire on the keywords alone.
+#: Negation is read only in a closed set of shapes attached to the swelling word —
+#: never anywhere in the sentence, so «…губы опухают, не знаю, что делать» keeps its
+#: red flag. A future-tense swelling verb next to a hypothetical marker («что делать,
+#: если когда-нибудь опухнут губы?») is not a current sign.
+#:
+#: Named limits, NOT compensated by a wider regex: third-party («у мамы опухли губы»),
+#: a quoted phrase and a hypothetical in the present tense are still caught — the
+#: fail-closed direction, documented as strict xfail in ``tests/test_g6_detector.py``
+#: (attribution / quotation context is a runtime gap of the whole S1 tract, not of
+#: G6). The local-rash question contract ([OD-BOT §164]) is not implemented here:
+#: «сыпь и зуд после крема» is not G6 and gets no question on this path. The
+#: fidelity of every pattern awaits the licensed physician (VQ1).
+
+#: Sites named by the ruling — lips, mouth, tongue, throat (+ larynx). Word forms are
+#: enumerated, not ``\w*``: «губка» (a sponge) and «языковой» must not qualify.
+_G6_SITE = (
+    r"(?:губ(?:а|ы|у|е|ой|ами|ах)?|рот|рта|рту|ртом|во\s+рту"
+    r"|язык(?:а|у|ом|е)?|горл(?:о|а|у|е|ом)|гортан(?:ь|и|ью))"
 )
+#: Swelling — noun and verb forms. «опухол…» (a tumour) is excluded: it is not an acute
+#: sign. «отеч…» is limited to conjugations of «отечь» so «отечественный крем» is not a
+#: swelling.
+_G6_SWELL = (
+    r"(?:от[её]к\w*|отеч(?:ь|[её]т|ешь|[её]м|[её]те|ут)\b|опух(?!ол)\w*|распух\w*"
+    r"|припух\w*|раздул\w*|вздул\w*)"
+)
+#: Same sentence, either order, within a short window. Commas are allowed inside the
+#: window («губы, язык и горло не отекали») — the negation guard reads the verb.
+_G6_SWELLING_SITE = re.compile(
+    _G6_SWELL + r"[^.!?;]{0,30}?\b" + _G6_SITE + r"\b"
+    r"|\b" + _G6_SITE + r"\b[^.!?;]{0,30}?" + _G6_SWELL,
+    re.IGNORECASE,
+)
+_G6_SWELL_TOKEN = re.compile(_G6_SWELL, re.IGNORECASE)
+#: Negation attached to the swelling word: up to two words may stand between the
+#: particle and the word («не сильно опухли»), nothing more.
+_G6_NEG_BEFORE = re.compile(
+    r"(?:\bне|\bни|\bнет|\bнету|\bбез|\bне\s+было|\bне\s+бывает)\s+(?:[\w-]+\s+){0,2}$",
+    re.IGNORECASE,
+)
+#: «отёка нет», «отёка не было», «отёк отсутствует» — negation after the word.
+_G6_NEG_AFTER = re.compile(r"^\s*(?:нет\b|нету\b|не\s+было\b|отсутству\w*)", re.IGNORECASE)
+#: Hypothetical: a future / infinitive swelling verb next to an «if / ever» marker.
+_G6_FUTURE = re.compile(
+    r"\b(?:опухн\w*|распухн\w*|отекут|отеч[её]т|отекать|опухать|распухать)\b", re.IGNORECASE
+)
+_G6_HYPOTHETICAL = re.compile(
+    r"(?:что\s+делать,?\s+если|а\s+если|если\s+вдруг|если\s+когда-нибудь|когда-нибудь"
+    r"|бывает\s+ли|может\s+ли|а\s+вдруг)",
+    re.IGNORECASE,
+)
+#: Possible contact with an allergen / trigger — the context the ruling names for the
+#: secondary signs (the swelling itself needs no context).
+_G6_EXPOSURE = (
+    r"(?:после\s+(?:крем\w*|маз\w*|маск\w*|косметик\w*|лекарств\w*|таблет\w*|антибиотик\w*"
+    r"|препарат\w*|укол\w*|инъекци\w*|прививк\w*|еды|пищи|орех\w*|морепродукт\w*|укус\w*"
+    r"|пчел\w*|ос[ыа]\b|пилинг\w*|процедур\w*|сеанс\w*|нанес\w*)"
+    r"|аллерг\w*|анафилакт\w*|укусил\w*|ужалил\w*)"
+)
+#: Secondary G6 signs (the ruling's list). Breathing is already G1; «трудно глотать»,
+#: throat tightness, sudden hoarseness, marked dizziness, confusion, fainting count as
+#: G6 only next to a possible exposure. «больно глотать» alone is a sore throat, not
+#: listed, and is left out.
+_G6_SIGN = (
+    r"(?:(?:трудно|тяжело|не\s+могу|не\s+получается)\s+глотать|глотать\s+(?:трудно|тяжело)"
+    r"|(?:сдавливает|сдавило|сжимает|сжало|перехватило|стеснени\w*|сдавлен\w*)\s+(?:в\s+)?горл\w*"
+    r"|горло\s+(?:сдавливает|сдавило|сжимает|сжало|перехватило)"
+    r"|внезапн\w+\s+осипл\w*|(?:резко|внезапно)\s+осип\w*|голос\s+(?:резко\s+|внезапно\s+)?(?:осип|сел|пропал)"
+    r"|сильно\s+кружится\s+голова|выраженн\w+\s+головокружени\w*|спутанн\w*|обморок\w*"
+    r"|(?:трудно|тяжело)\s+дышать|не\s+могу\s+(?:дышать|вдохнуть)|задыха\w*|удушь\w*)"
+)
+_G6_EXPOSURE_SIGN = re.compile(
+    _G6_EXPOSURE
+    + r"[^.!?;]{0,60}?"
+    + _G6_SIGN
+    + r"|"
+    + _G6_SIGN
+    + r"[^.!?;]{0,60}?"
+    + _G6_EXPOSURE,
+    re.IGNORECASE,
+)
+_G6_SIGN_TOKEN = re.compile(_G6_SIGN, re.IGNORECASE)
+#: Unconditional: the reaction is named.
 _S1_G6_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"\bанафилакт\w*", re.IGNORECASE),
-    re.compile(
-        r"\b(?:отекл[оа]|отекает|опухл[оа]|опухает)\s+(?:горло|гортань|язык|губы)", re.IGNORECASE
-    ),
-    re.compile(r"\b(?:от[её]к|отек)\w*\s+(?:горла|гортани|языка|квинке)", re.IGNORECASE),
-    re.compile(r"\bсыпь[^.!?]{0,40}" + _S1_SYSTEMIC, re.IGNORECASE),
+    re.compile(r"\bот[её]к\w*\s+квинке", re.IGNORECASE),
 )
+
+
+def _g6_negated(lower: str, token_start: int, token_end: int) -> bool:
+    """True when the swelling / sign word at ``lower[token_start:token_end]`` is negated.
+
+    Only the closed shapes above count; a «не» three words away is not a negation of
+    this word.
+    """
+    before = lower[max(0, token_start - 40) : token_start]
+    if _G6_NEG_BEFORE.search(before):
+        return True
+    after = lower[token_end : token_end + 20]
+    return bool(_G6_NEG_AFTER.search(after))
+
+
+def _g6_hypothetical(lower: str, match: re.Match[str]) -> bool:
+    sentence_start = max(lower.rfind(ch, 0, match.start()) for ch in ".!?") + 1
+    sentence = lower[sentence_start : match.end() + 1]
+    return bool(_G6_HYPOTHETICAL.search(sentence)) and bool(_G6_FUTURE.search(match.group(0)))
+
+
+def _g6_live_match(lower: str, matches: list[re.Match[str]], token: re.Pattern[str]) -> bool:
+    for match in matches:
+        if _g6_hypothetical(lower, match):
+            continue
+        tok = token.search(lower, match.start(), match.end())
+        if tok is None:
+            continue
+        if not _g6_negated(lower, tok.start(), tok.end()):
+            return True
+    return False
+
+
+def detect_g6(text: str) -> bool:
+    """S1 group G6 — explicit, current, non-negated swelling of lips / mouth / tongue /
+    throat, or a named reaction, or a secondary sign next to a possible exposure.
+
+    Pure regex, no LLM. Reads the same masked lower-cased text as :func:`classify`.
+    """
+    if not isinstance(text, str) or not text.strip():
+        return False
+    lower = _mask_not_pain(text.strip().lower())
+    for pattern in _S1_G6_PATTERNS:
+        if pattern.search(lower):
+            return True
+    if _g6_live_match(lower, list(_G6_SWELLING_SITE.finditer(lower)), _G6_SWELL_TOKEN):
+        return True
+    return _g6_live_match(lower, list(_G6_EXPOSURE_SIGN.finditer(lower)), _G6_SIGN_TOKEN)
+
 
 #: G7 — «иное внезапное тяжёлое системное ухудшение» (:203). The weakest source: the
 #: matrix gives no illustrative phrase for G7, and «плохо» is ambiguous in Russian. Rules
@@ -464,13 +599,13 @@ _S1_G7_PATTERNS: tuple[re.Pattern[str], ...] = (
 )
 
 # One group per line, so a probe can take a whole group out with a one-line edit.
+# G6 is not in this tuple: it is negation-aware and lives in :func:`detect_g6`.
 _RED_FLAG_PATTERNS = (
     _RED_FLAG_PATTERNS
     + _S1_G2_PATTERNS
     + _S1_G3_PATTERNS
     + _S1_G4_PATTERNS
     + _S1_G5_PATTERNS
-    + _S1_G6_PATTERNS
     + _S1_G7_PATTERNS
 )
 
@@ -505,6 +640,9 @@ def classify(text: str) -> PainSignal:
     for pattern in _RED_FLAG_PATTERNS:
         if pattern.search(lower):
             return PainSignal.RED_FLAG
+    # G6 ([OD-BOT §159]) — negation-aware, so it is a function, not a pattern.
+    if detect_g6(stripped):
+        return PainSignal.RED_FLAG
 
     for pattern in _PAIN_STEM_PATTERNS:
         if pattern.search(lower):

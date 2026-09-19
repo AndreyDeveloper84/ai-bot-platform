@@ -36,6 +36,15 @@ import {
 } from "../lib/health-gate-copy";
 import { GoalSelectScreen } from "./GoalSelectScreen";
 
+/** [OD-BOT §163] — the server's medical S1 text (`apps/orchestrator/safety/medical_emergency.py`), verbatim. */
+const MEDICAL_EMERGENCY_TEXT_V2 =
+  "По описанию это может требовать срочной медицинской помощи. " +
+  "Я не буду сейчас подбирать процедуру или оформлять запись. " +
+  "Если это происходит сейчас, произошло только что, повторяется, усиливается " +
+  "или тебе резко плохо — позвони 103 или 112. " +
+  "Не добирайся за рулём самостоятельно. " +
+  "Если можешь, попроси человека рядом помочь тебе вызвать помощь и остаться с тобой.";
+
 const mockedFetch = vi.mocked(fetchDecisionContext);
 const mockedPost = vi.mocked(postGoalSelect);
 
@@ -134,7 +143,7 @@ describe("GoalSelectScreen — safety-стоп на тексте цели (DRF-1
   });
 
   it.each([
-    [SAFETY_KIND_RED_FLAG, "Звучит серьёзно — лучше сначала к врачу."],
+    [SAFETY_KIND_RED_FLAG, MEDICAL_EMERGENCY_TEXT_V2],
     [SAFETY_KIND_CRISIS, "Спасибо, что написал(а) мне это.\n\nРядом есть те, кто может поддержать."],
     [SAFETY_KIND_BLOCK, "Здесь я не помощник — это вопрос к специалисту."],
   ])("на %s показывает текст сервера, без поля ответа и без «продолжить»", async (kind, text) => {

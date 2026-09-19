@@ -27,7 +27,8 @@ It CALLS the safety producers and consumes their verdicts unchanged:
   the founder-approved crisis reply, ``BLOCK`` → the block reply. Same
   text as the chat, same source constant.
 * :func:`apps.skills.health_screening.classifier.classify` — ``RED_FLAG``
-  → the chat's «сначала к врачу» reply; ``SOFT`` → the acknowledgement +
+  → the chat's medical emergency text v2 ([OD-BOT §163], one canonical
+  constant); ``SOFT`` → the acknowledgement +
   the chat's two diagnostic-first questions.
 * ``pre_check`` ``CLARIFY`` (the vague-medical bucket the inbound gate
   deliberately lets through in chat) → the same acknowledgement + questions.

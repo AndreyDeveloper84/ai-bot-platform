@@ -52,12 +52,13 @@ class TestHandle:
     def test_red_flag_redirects_to_doctor(self) -> None:
         result = HealthScreeningSkill().handle(_context("Онемение в ноге"))
         assert result.reply_text == RED_FLAG_REPLY
-        assert "врач" in result.reply_text.lower()
+        # [OD-BOT §163]: the reply points to emergency help, not «к врачу».
+        assert "103" in result.reply_text and "112" in result.reply_text
 
     def test_radiation_pattern_redirects(self) -> None:
         """DRF-358 voice-example case: «отдаёт в руку» → к неврологу."""
         result = HealthScreeningSkill().handle(_context("Болит шея, отдаёт в руку"))
-        assert "врач" in result.reply_text.lower()
+        assert result.reply_text == RED_FLAG_REPLY
 
 
 class TestRegistration:
