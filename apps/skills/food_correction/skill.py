@@ -86,6 +86,7 @@ def _nutrition_unavailable_text() -> str:
 
     return NUTRITION_UNAVAILABLE_TEXT
 
+
 logger = logging.getLogger(__name__)
 
 

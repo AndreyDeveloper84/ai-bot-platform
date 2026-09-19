@@ -56,7 +56,9 @@ from apps.skills.nutrition_anketa.skill import (
 from apps.skills.registry import registered
 from apps.tenancy.models import Tenant
 
-STUBS = frozenset({NUTRITION_UNAVAILABLE_TEXT, NUTRITION_OFF_FALLBACK, text_entry.NUTRITION_OFF_TEXT})
+STUBS = frozenset(
+    {NUTRITION_UNAVAILABLE_TEXT, NUTRITION_OFF_FALLBACK, text_entry.NUTRITION_OFF_TEXT}
+)
 
 
 @pytest.fixture
@@ -82,10 +84,11 @@ _PATH_ARGS = {"entry_id": "e1", "meal_id": "m1"}
 
 def _nutrition_routes() -> list[tuple[str, str]]:
     """``(name, route)`` для каждого маршрута контура питания из ``urlpatterns``."""
-    found = []
+    found: list[tuple[str, str]] = []
     for pattern in miniapp_urls.urlpatterns:
         route = str(getattr(pattern.pattern, "_route", ""))
         if route.startswith(NUTRITION_ROUTE_PREFIXES):
+            assert pattern.name, route  # безымянный маршрут не reverse'ится — в перепись не войдёт
             found.append((pattern.name, route))
     return found
 
@@ -128,7 +131,11 @@ class TestEveryNutritionRouteRefusesWhenOff:
         ):
             for name, route in _nutrition_routes():
                 for method in METHODS:
-                    kwargs = {} if method == "get" else {"data": "{}", "content_type": "application/json"}
+                    kwargs = (
+                        {}
+                        if method == "get"
+                        else {"data": "{}", "content_type": "application/json"}
+                    )
                     response = getattr(client, method)(
                         _url(name, route),
                         HTTP_AUTHORIZATION=_init_data_header(bot_user.channel_user_id),
