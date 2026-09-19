@@ -100,6 +100,19 @@ class TestOffTheDiaryIsNeitherReadNorSent:
         assert body["display_name"] == "Анна К."
         assert "active_goals" not in body
 
+    def test_the_default_is_off(
+        self, client: Client, bot_user: BotUser, nutrition, goals, settings
+    ):
+        """Флага нет в настройках вовсе — контур закрыт (fail-closed, как у ворот записи)."""
+        del settings.NUTRITION_ENABLED
+        with patch(CONSENT, return_value=True):
+            body = _get(client, bot_user).json()
+
+        assert body["nutrition_disabled"] is True
+        assert body["display_name"] == "Анна К."
+        assert not (DIARY_KEYS & set(body)), sorted(DIARY_KEYS & set(body))
+        nutrition.daily_summary.assert_not_called()
+
     def test_the_flag_comes_before_consent(
         self, client: Client, bot_user: BotUser, nutrition, goals, nutrition_off
     ):

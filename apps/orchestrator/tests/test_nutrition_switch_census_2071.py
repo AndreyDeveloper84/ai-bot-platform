@@ -20,10 +20,23 @@
   так же, как у остальных. ``plan-lite`` — не питание (свой флаг), в класс
   не входит;
 * **кнопки и текст в чате** — каждый payload семейств ``cb:food:*`` и
-  ``cb:anketa:*`` (формы из ``parse_callback``/регулярок навыков) плюс два
-  текстовых входа дневника: каждый навык РЕЕСТРА, который такой ход забирает,
-  при OFF отвечает заглушкой или молчит; забирает его хотя бы один навык —
-  иначе перепись пуста и зелена ни о чём.
+  ``cb:anketa:*`` (формы из ``parse_callback``/регулярок навыков), текстовые
+  входы анкеты и дневника, свободный текст о еде и ответ на открытый вопрос
+  текстового ввода: каждый навык РЕЕСТРА, который такой ход забирает, при OFF
+  отвечает заглушкой или молчит, и каталог питания при этом не вызывается;
+  забирает его хотя бы один навык — иначе перепись пуста и зелена ни о чём.
+
+Вне переписи по замыслу, поимённо (не «забыли», а «не контур»):
+
+* ``me/food-scanner-consent/`` и ``me/health-consent/`` — выдача и ОТЗЫВ
+  согласий; отзыв обязан работать при любом флаге, поэтому маршруты флаг не
+  читают, и ``test_consent_routes_stay_open_when_off`` держит это как
+  положительный страж;
+* ``cb:nutri:stop:{surface}`` — «Не присылать» (DRF-1468): отписка стоит в
+  ``handler.py`` выше всех ворот — «просьба не писать важнее всего»;
+* фото-вложение (главный вход сканера) и путь инструментов
+  ``execute_nutrition_tool`` — не текстовые payload'ы; их ворота при OFF
+  доказывают ``food_scanner/tests/test_skill.py`` и тесты ``nutrition_global``.
 
 Три литерала заглушки — намеренно три (PR #1800, «Пределы» п.3): сведение —
 решение владельца, не побочный эффект выключателя. Три хода по замыслу без
@@ -34,6 +47,8 @@
 
 from __future__ import annotations
 
+from contextlib import ExitStack
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
@@ -58,6 +73,8 @@ from apps.skills.nutrition_anketa.skill import (
     CB_CONFIRM_TARGETS,
     CONSENT_DECLINE_CALLBACK,
     CONSENT_GRANT_CALLBACK,
+    ENTRY_PHRASE,
+    WITHDRAW_ACTION_TEXT,
     WITHDRAW_CALLBACK,
     WITHDRAW_CONFIRM_CALLBACK,
     WITHDRAW_KEEP_CALLBACK,
@@ -93,6 +110,10 @@ _PATH_ARGS = {"entry_id": "e1", "meal_id": "m1"}
 #: ``(route, method)`` — единственный вход, который при OFF отвечает не 404,
 #: а 200 с маркером: чтение сводки несёт дашборду имя и цель.
 MARKER_NOT_404 = frozenset({("wellness/today", "get")})
+
+#: Маршруты согласий — вне класса по замыслу: отзыв согласия обязан работать
+#: при любом флаге. Перепись держит это положительным стражем, а не молчанием.
+CONSENT_ROUTES_OPEN_BY_DESIGN = ("food_scanner_consent", "health_consent")
 
 
 def _nutrition_routes() -> list[tuple[str, str]]:
@@ -173,6 +194,24 @@ class TestEveryNutritionRouteRefusesWhenOff:
         assert all(m in seen[r] for r, m in MARKER_NOT_404), seen
         assert not ayla.method_calls, ayla.method_calls
 
+    def test_consent_routes_stay_open_when_off(
+        self, client: Client, bot_user: BotUser, nutrition_off
+    ):
+        """Отзыв согласия при OFF не получает ``nutrition_disabled`` — иначе выключенный
+        контур запирал бы человека в согласии, которое он хочет отозвать."""
+        for name in CONSENT_ROUTES_OPEN_BY_DESIGN:
+            response = client.get(
+                reverse(f"miniapp_api:{name}"),
+                HTTP_AUTHORIZATION=_init_data_header(bot_user.channel_user_id),
+            )
+            assert response.status_code != 404, (name, response.status_code)
+            body = (
+                response.json()
+                if response.get("Content-Type", "").startswith("application/json")
+                else {}
+            )
+            assert body.get("error") != "nutrition_disabled", name
+
 
 # ---------------------------------------------------------------------------
 # 2. Кнопки и текст в чате — по семействам payload'ов
@@ -181,8 +220,10 @@ class TestEveryNutritionRouteRefusesWhenOff:
 #: Все формы ``cb:food:*`` и ``cb:anketa:*``, которые разбирают навыки
 #: (``parse_callback`` + регулярки), и два текстовых входа дневника.
 CHAT_ENTRIES: tuple[str, ...] = (
-    # анкета — все формы из ``NutritionAnketaSkill.matches``
+    # анкета — все формы из ``NutritionAnketaSkill.matches``, включая текстовые
     "/anketa",
+    ENTRY_PHRASE,
+    WITHDRAW_ACTION_TEXT,
     "cb:anketa:start",
     "cb:anketa:edit:weight",
     "cb:anketa:choice:gender:female",
@@ -213,6 +254,10 @@ CHAT_ENTRIES: tuple[str, ...] = (
     # вода и дневник текстом (чипы шлют ровно эти строки)
     "стакан воды",
     "что я ел сегодня",
+    # свободный текст о еде — карточка «Это про еду?» (``looks_like_food_drink``)
+    "борщ 300г",
+    # ответ на открытый вопрос текстового ввода («сколько граммов?» задан при ON)
+    "250",
 )
 
 #: Навыки контура питания — те, к которым ``nutrition_global`` ведёт
@@ -225,6 +270,15 @@ NUTRITION_SKILLS = frozenset(
     {"food_scanner", "food_correction", "nutrition_anketa", "food_clarify", "water"}
 )
 
+#: Где навык семейства берёт клиента каталога (импорт по имени при загрузке
+#: модуля). ``food_correction`` каталог не зовёт вовсе — пишет только память.
+CATALOG_MODULES: dict[str, str] = {
+    "food_scanner": "apps.skills.food_scanner.skill",
+    "nutrition_anketa": "apps.skills.nutrition_anketa.skill",
+    "food_clarify": "apps.skills.food_clarify.text_entry",
+    "water": "apps.skills.water.skill",
+}
+
 #: По замыслу без ворот: молчаливый ack, ничего не пишет и не спрашивает.
 ACK_BY_DESIGN: dict[str, str] = {
     "cb:food:reject:scan-1": REJECTED_ACK,
@@ -234,13 +288,19 @@ ACK_BY_DESIGN: dict[str, str] = {
 
 
 def _ctx(text: str) -> SkillContext:
-    # Разговор с карточкой сканера и активной анкетой, чтобы ход забирали
-    # и «кнопочные», и «продолжающие» ветки ``matches``.
+    # Разговор с карточкой сканера, активной анкетой и открытым вопросом
+    # текстового ввода, чтобы ход забирали и «кнопочные», и «продолжающие»
+    # ветки ``matches``.
     conversation = SimpleNamespace(
         id=1,
         skill_state={
             "food_scan": {"scan_id": "scan-1", "dish": "борщ"},
             "nutrition_anketa": {"current_step": "gender"},
+            text_entry.STATE_KEY: {
+                "awaiting_grams": True,
+                "dish": "борщ",
+                "at": datetime.now(UTC).isoformat(),
+            },
         },
     )
     return SkillContext(conversation=conversation, bot_user=Mock(), message_text=text)  # type: ignore[arg-type]
@@ -269,13 +329,20 @@ class TestEveryChatEntryIsClaimedAndAnswersTheStubWhenOff:
         claimed = [s for s in family.values() if s.matches(_ctx(text))]
         assert claimed, f"{text!r} не забирает ни один навык контура — вход выпал из переписи"
 
+        # Каталог питания при OFF не вызывается ни одним навыком семейства —
+        # как и маршрутами Mini App выше. Навыки берут клиента по имени при
+        # импорте, поэтому двойник ставится в каждый модуль, а не в источник.
+        catalog = Mock(name="catalog-must-not-be-called")
         for skill in claimed:
-            result = skill.handle(_ctx(text))
+            targets = ["apps.integrations.ayla.get_nutrition_client"]
+            if skill.name in CATALOG_MODULES:
+                targets.append(f"{CATALOG_MODULES[skill.name]}.get_nutrition_client")
+            with ExitStack() as stack:
+                for target in targets:
+                    stack.enter_context(patch(target, return_value=catalog))
+                result = skill.handle(_ctx(text))
             if text in ACK_BY_DESIGN:
                 assert result.reply_text == ACK_BY_DESIGN[text], (skill.name, result.reply_text)
                 continue
-            assert result.reply_text in STUBS or result.should_send is False, (
-                skill.name,
-                text,
-                result.reply_text,
-            )
+            assert result.reply_text in STUBS, (skill.name, text, result.reply_text)
+        assert not catalog.method_calls, (text, catalog.method_calls)

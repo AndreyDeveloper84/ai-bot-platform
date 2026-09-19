@@ -28,7 +28,7 @@ import { useScreenBack } from "../hooks/useScreenBack";
 import { backByAction } from "../lib/screen-back";
 
 import { Snackbar } from "../components/Snackbar";
-import { getWellnessToday } from "../lib/customer-wellness";
+import { DIARY_OFF_TEXT, diaryIsOff, getWellnessToday } from "../lib/customer-wellness";
 import {
   MEAL_TYPE_ICON,
   MEAL_TYPE_LABEL,
@@ -98,6 +98,11 @@ export function FoodScannerResultScreen() {
   // «Примерно — записала.» instead of numbers, plus a console.error.
   const [edMode, setEdMode] = useState<boolean>(true);
   const [flagsResolved, setFlagsResolved] = useState<boolean>(false);
+  // DRF-2071 — контур выключили между сканом и записью: сводка пришла с
+  // маркером. «Записать» и «Уточнить» не рисуются — запись всё равно
+  // получит отказ, а «попробуй ещё раз» было бы ложью. «Не то» остаётся:
+  // это ack, ничего не пишет.
+  const [diaryOff, setDiaryOff] = useState<boolean>(false);
   const [clarifyOpen, setClarifyOpen] = useState(false);
   const [snack, setSnack] = useState<{ visible: boolean; message: string }>({
     visible: false,
@@ -117,6 +122,7 @@ export function FoodScannerResultScreen() {
       .then((today) => {
         if (cancelled) return;
         setEdMode(today.nutrition_numbers_hidden !== false);
+        setDiaryOff(diaryIsOff(today));
         setFlagsResolved(true);
       })
       .catch(() => {
@@ -471,24 +477,31 @@ export function FoodScannerResultScreen() {
          */}
 
         <div className="food-scanner-screen__cta-stack">
-          <button
-            type="button"
-            className="btn-primary"
-            disabled={busy}
-            onClick={onSave}
-          >
-            Записать в дневник
-          </button>
-          <button
-            ref={clarifyTriggerRef}
-            type="button"
-            className={`btn-secondary${
-              isLowConf ? " food-scanner-result__cta--hint" : ""
-            }`}
-            onClick={openClarify}
-          >
-            Уточнить
-          </button>
+          {diaryOff && (
+            <p className="food-scanner-diary__caption" role="status">{DIARY_OFF_TEXT}</p>
+          )}
+          {!diaryOff && (
+            <button
+              type="button"
+              className="btn-primary"
+              disabled={busy}
+              onClick={onSave}
+            >
+              Записать в дневник
+            </button>
+          )}
+          {!diaryOff && (
+            <button
+              ref={clarifyTriggerRef}
+              type="button"
+              className={`btn-secondary${
+                isLowConf ? " food-scanner-result__cta--hint" : ""
+              }`}
+              onClick={openClarify}
+            >
+              Уточнить
+            </button>
+          )}
           <button
             type="button"
             className="btn-secondary"

@@ -109,6 +109,8 @@ describe("CustomerWellnessDashboardScreen — контур питания вык
     await renderScreen();
 
     expect(await screen.findByText(DIARY_OFF_TEXT)).toBeInTheDocument();
+    // Живая область: экранный диктор услышит фразу, а не пустоту на месте чисел.
+    expect(screen.getByRole("status", { name: "" }).textContent).toContain(DIARY_OFF_TEXT);
     expect(screen.queryByText(/через минуту/)).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Обновить" })).not.toBeInTheDocument();
     // Не пустой день: карточка первого шага требует ЗНАНИЯ о пустом дне.
