@@ -12,7 +12,7 @@
  *     → на гейт согласия с возвратом сюда; `nutrition_unavailable` → фраза;
  *   - `guardProd` на этой тропе НЕ стоит: `estimateFoodText`/`logFoodText` —
  *     настоящие request (с DRF-2098 и `scanPhoto`/`logMeal` тоже — D26 = v1
- *     покрывает фото; контроль сторожа — `fetchHealthFlags`, всё ещё stub);
+ *     покрывает фото; DRF-2106 снял последний stub `fetchHealthFlags`);
  *   - «Добавить приём» в дневнике и кнопка дашборда ведут сюда, а не в съёмку.
  */
 import { act, configure, fireEvent, getConfig, render, screen } from "@testing-library/react";
@@ -245,10 +245,9 @@ describe("тропа настоящая, не stub", () => {
     expect(source).not.toContain("guardprod");
     expect(source).toContain("/food/estimate");
     expect(source).toContain("/food/log");
-    // Контроль, что сторож отличает тропы, а не просто не видит слова:
-    // `fetchHealthFlags` — по-прежнему stub за guardProd (не предмет F8).
-    // Фото-половина с DRF-2098 боевая (D26 = «food-diary-v1 покрывает фото»).
-    expect(original.fetchHealthFlags.toString().toLowerCase()).toContain("guardprod");
+    // Фото-половина с DRF-2098 боевая (D26 = «food-diary-v1 покрывает фото»),
+    // последний stub (`fetchHealthFlags`) снят DRF-2106 — в модуле `guardProd`
+    // больше нет вовсе; контроль на слово живёт в `food-scanner.scan.test.ts`.
     expect(original.scanPhoto.toString().toLowerCase()).not.toContain("guardprod");
     expect(typeof foodScanner.estimateFoodText).toBe("function");
   });

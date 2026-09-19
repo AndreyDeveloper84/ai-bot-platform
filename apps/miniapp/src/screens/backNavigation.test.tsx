@@ -55,7 +55,6 @@ vi.mock("../lib/food-scanner", async (importOriginal) => {
   const original = await importOriginal<typeof import("../lib/food-scanner")>();
   return {
     ...original,
-    fetchHealthFlags: vi.fn(),
     logMeal: vi.fn(),
     // DRF-1564 — согласие спрашивается у сервера, а не у браузера.
     // F10 — и спрашивается ОДНИМ вызовом, который сам решает, какой путь
@@ -83,7 +82,6 @@ import { fetchMyBookings, fetchServices } from "../lib/api";
 import { getCatalogBrowse, getCustomerSlots } from "../lib/customer-booking";
 import {
   fetchDiaryConsentGate,
-  fetchHealthFlags,
   grantConsent,
   type ScanResponse,
 } from "../lib/food-scanner";
@@ -99,7 +97,6 @@ import { FoodScannerResultScreen } from "./FoodScannerResultScreen";
 
 const mockedBrowse = vi.mocked(getCatalogBrowse);
 const mockedSlots = vi.mocked(getCustomerSlots);
-const mockedFlags = vi.mocked(fetchHealthFlags);
 const mockedConsent = vi.mocked(fetchDiaryConsentGate);
 const mockedGrant = vi.mocked(grantConsent);
 const mockedServices = vi.mocked(fetchServices);
@@ -216,7 +213,6 @@ describe("DRF-1493 · вложенный экран: возврат есть и 
    */
   it("FoodScannerResultScreen → съёмка (возврат заданным действием)", async () => {
     const user = userEvent.setup();
-    mockedFlags.mockResolvedValue({ health_flags: { eating_disorder: false } });
     const result: ScanResponse = {
       scan_id: "scan-1",
       dish_name: "Овсянка",
