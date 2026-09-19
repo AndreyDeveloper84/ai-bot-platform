@@ -426,7 +426,10 @@ CUSTOMER_ROUTES: dict[str, Entry] = {
         via=V + "customer_wellness_today",
         note=(
             "the caller's own diary day; without PERSONAL_DATA consent the body shrinks to "
-            "display_name + consent_required (+ goals) and no diary key is present at all"
+            "display_name + consent_required (+ goals) and no diary key is present at all; "
+            "with NUTRITION_ENABLED=false (DRF-2071) the body is display_name + "
+            "nutrition_disabled (+ goals) in the same shape, checked before consent, and no "
+            "diary or water key is read or sent"
         ),
     ),
     "customer_wellness_water": own(

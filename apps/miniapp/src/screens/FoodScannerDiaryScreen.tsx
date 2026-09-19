@@ -31,6 +31,7 @@ import {
   type DiaryToday,
   type FoodDiaryEntry,
   DIARY_CONSENT_REQUIRED_TEXT,
+  DIARY_OFF_TEXT,
 } from "../lib/customer-wellness";
 import { ApiError } from "../lib/api";
 import { minutesRu, restoreWindowMinutesLeft } from "../lib/restore-window";
@@ -61,6 +62,9 @@ type Status =
   | { kind: "unreadable" }
   // DRF-1927 — нет согласия: дневник не читался, повтор ничего не даст.
   | { kind: "consent_required" }
+  // DRF-2071 — контур питания выключен (сводка с `nutrition_disabled: true`):
+  // не сбой и не пустой день; ни повтора, ни «Добавить приём».
+  | { kind: "diary_off" }
   | {
       kind: "ready";
       day: Extract<DiaryToday, { state: "empty" | "entries" }>;
@@ -101,7 +105,9 @@ export function FoodScannerDiaryScreen() {
           ? { kind: "unreadable" }
           : day.state === "consent_required"
             ? { kind: "consent_required" }
-            : { kind: "ready", day },
+            : day.state === "diary_off"
+              ? { kind: "diary_off" }
+              : { kind: "ready", day },
       );
     } catch (err) {
       setStatus({ kind: "error", err });
@@ -307,6 +313,14 @@ export function FoodScannerDiaryScreen() {
         {status.kind === "consent_required" && (
           <div className="food-scanner-diary__unreadable" role="status">
             <p>{DIARY_CONSENT_REQUIRED_TEXT}</p>
+          </div>
+        )}
+
+        {/* DRF-2071 — контур выключен: та же фраза, что у дня/недели/избранного,
+            без повтора и без входов в запись. */}
+        {status.kind === "diary_off" && (
+          <div className="food-scanner-diary__unreadable" role="status">
+            <p>{DIARY_OFF_TEXT}</p>
           </div>
         )}
 

@@ -104,6 +104,8 @@ import {
   type RecentActivity,
   type WellnessToday,
   DIARY_CONSENT_REQUIRED_TEXT,
+  DIARY_OFF_TEXT,
+  diaryIsOff,
 } from "../lib/customer-wellness";
 import {
   getCatalogBrowse,
@@ -385,6 +387,12 @@ export function CustomerWellnessDashboardScreen() {
 
   // ── derived state ────────────────────────────────────────────────────
   const todayData = today.kind === "ok" ? today.data : null;
+  // DRF-2071 — контур питания выключен: сводка пришла с маркером и без
+  // ключей дневника (как `consent_required`), имя и цель — на месте. Не
+  // сбой (повтор ничего не даст) и не пустой день; входы в дневник (стакан,
+  // «Дневник питания») не рисуются — иначе рядом с «недоступен» стояло бы
+  // «Добавить».
+  const diaryOff = diaryIsOff(todayData);
   const activityData = activity.kind === "ok" ? activity.data : null;
   const recsData = recs.kind === "ok" ? recs.data : null;
   // Block 7 picks — top-3 services by Ayla scorer rank, joined onto the
@@ -630,7 +638,12 @@ export function CustomerWellnessDashboardScreen() {
               onRetry={() => void fetchAll()}
             />
           )}
-          {today.kind === "ok" && (
+          {today.kind === "ok" && diaryOff && (
+            <div className="wellness-dash__block-error" role="status" aria-live="polite">
+              <p>{DIARY_OFF_TEXT}</p>
+            </div>
+          )}
+          {today.kind === "ok" && !diaryOff && (
             <PulseStrip data={today.data} />
           )}
         </section>
@@ -644,19 +657,21 @@ export function CustomerWellnessDashboardScreen() {
             Что сделаем сейчас
           </h2>
           <div className="wellness-dash__qa-grid">
-            <button
-              type="button"
-              className="wellness-dash__qa-btn"
-              aria-label="Добавить стакан воды 250 мл"
-              onClick={onWaterTap}
-            >
-              <span className="wellness-dash__qa-icon" aria-hidden="true">
-                💧
-              </span>
-              <span className="wellness-dash__qa-label">
-                + стакан 250 мл
-              </span>
-            </button>
+            {!diaryOff && (
+              <button
+                type="button"
+                className="wellness-dash__qa-btn"
+                aria-label="Добавить стакан воды 250 мл"
+                onClick={onWaterTap}
+              >
+                <span className="wellness-dash__qa-icon" aria-hidden="true">
+                  💧
+                </span>
+                <span className="wellness-dash__qa-label">
+                  + стакан 250 мл
+                </span>
+              </button>
+            )}
             <button
               type="button"
               className="wellness-dash__qa-btn"
@@ -695,17 +710,19 @@ export function CustomerWellnessDashboardScreen() {
               </span>
               <span className="wellness-dash__qa-label">Найди услугу</span>
             </button>
-            <button
-              type="button"
-              className="wellness-dash__qa-btn"
-              aria-label="Дневник питания"
-              onClick={onDiaryTap}
-            >
-              <span className="wellness-dash__qa-icon" aria-hidden="true">
-                📔
-              </span>
-              <span className="wellness-dash__qa-label">Дневник питания</span>
-            </button>
+            {!diaryOff && (
+              <button
+                type="button"
+                className="wellness-dash__qa-btn"
+                aria-label="Дневник питания"
+                onClick={onDiaryTap}
+              >
+                <span className="wellness-dash__qa-icon" aria-hidden="true">
+                  📔
+                </span>
+                <span className="wellness-dash__qa-label">Дневник питания</span>
+              </button>
+            )}
           </div>
 
           {/* Sync indicator for offline water queue (§11.8). */}

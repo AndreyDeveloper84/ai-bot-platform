@@ -3686,6 +3686,28 @@ def customer_wellness_today(request: HttpRequest) -> HttpResponse:
     bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
     external_id = external_user_id_for(bot_user)
 
+    # DRF-2071 — ``NUTRITION_ENABLED=false`` закрывал ЗАПИСЬ дневника и воды
+    # (``_diary_entry_gate`` → 404 ``nutrition_disabled``), а этот экран
+    # продолжал ЧИТАТЬ их из Ayla как при включённом контуре. Решение
+    # владельца 17.09: при OFF закрыты UI, команда, callback, deep link и
+    # API — чтение тоже API. Форма ответа — как у ветки «нет согласия» ниже
+    # (DRF-1927), а не 404: имя и цель к дневнику не относятся
+    # (``base.py`` ограничивает флаг дневником/водой/сводкой), и дашборд
+    # рисует по ним приветствие и тройку кнопки цели (DRF-1476) — 404 унёс
+    # бы их вместе с дневником. Питательной половины в ответе нет ни
+    # ключом, ни чтением: nutrition-клиент Ayla не вызывается. Флаг раньше
+    # согласия — «выключено» важнее «согласия нет», как у сканера и в чате
+    # (``personal_surface.render_diary``).
+    if not getattr(settings, "NUTRITION_ENABLED", False):
+        off: dict[str, Any] = {
+            "display_name": bot_user.client_name or bot_user.display_name or "",
+            "nutrition_disabled": True,
+        }
+        off_goals = _wellness_active_goals(external_id)
+        if off_goals is not None:
+            off["active_goals"] = off_goals
+        return JsonResponse(off)
+
     # DRF-1927 — дневник читается по тому же правилу, что в чате и при
     # записи: без согласия на обработку личных данных (``PERSONAL_DATA``,
     # fail-closed) чтений дневника в Ayla нет вовсе, ключей дневника в

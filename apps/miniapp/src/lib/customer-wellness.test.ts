@@ -20,6 +20,7 @@ vi.mock("./max-sdk", () => ({
 }));
 
 import {
+  diaryIsOff,
   enqueueWaterLog,
   enqueueWaterLogEntry,
   flushWaterQueue,
@@ -485,6 +486,30 @@ describe("the reads reach the backend instead of inventing a day", () => {
 
     expect(day.state).toBe("consent_required");
     expect(day.state).not.toBe("unreadable");
+  });
+
+  it("DRF-2071: контур выключен — дневник в своём состоянии, раньше согласия и «не удалось прочитать»", async () => {
+    vi.stubEnv("DEV", false);
+    // Ключей дневника нет: сервер его не читал, потому что контур выключен.
+    // Маркер стоит рядом с consent_required — выключено важнее.
+    fetchMock.mockResolvedValue(
+      okJson({ nutrition_disabled: true, consent_required: true, active_goals: [], display_name: "Анна" }),
+    );
+
+    const day = await loadDiaryToday();
+
+    expect(day.state).toBe("diary_off");
+  });
+
+  it.each([
+    [{ nutrition_disabled: true }, true],
+    [{ nutrition_disabled: false, entries: [] }, false],
+    [{ entries: [] }, false],
+    [{ consent_required: true }, false],
+    [null, false],
+    [undefined, false],
+  ])("DRF-2071: diaryIsOff(%j) → %s — только по маркеру, не по отсутствию ключей", (today, expected) => {
+    expect(diaryIsOff(today as never)).toBe(expected);
   });
 
   it("getRecentActivity asks the endpoint and returns what it answered", async () => {

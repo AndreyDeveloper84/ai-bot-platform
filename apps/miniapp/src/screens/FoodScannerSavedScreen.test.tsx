@@ -37,9 +37,11 @@ vi.mock("../lib/customer-wellness", async (importOriginal) => {
 });
 
 import {
+  DIARY_OFF_TEXT,
   getWellnessToday,
   type WellnessToday,
 } from "../lib/customer-wellness";
+import { ApiError } from "../lib/api";
 import { FoodScannerSavedScreen } from "./FoodScannerSavedScreen";
 
 const mockedToday = vi.mocked(getWellnessToday);
@@ -154,5 +156,32 @@ describe("ориентир есть — §85 вернул шкалу и проц
     expect(await screen.findByText("1080 / 2000 ккал")).toBeInTheDocument();
     expect(screen.getByRole("progressbar")).toBeInTheDocument();
     expect(screen.getByText("54 %")).toBeInTheDocument();
+  });
+});
+
+describe("DRF-2071 — контур выключили между записью и сводкой", () => {
+  it("сводка с nutrition_disabled — «недоступен», без повтора и без «Открыть дневник»", async () => {
+    // Как отвечает сервер при OFF: маркер, имя, ни одного ключа дневника.
+    mockedToday.mockResolvedValue({ display_name: "Анна", nutrition_disabled: true } as WellnessToday);
+    renderScreen();
+
+    expect(await screen.findByText(DIARY_OFF_TEXT)).toBeInTheDocument();
+    // Запись уже сделана — «записала» остаётся правдой.
+    expect(screen.getByText(/Овсянка с ягодами/)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Попробовать снова/ })).not.toBeInTheDocument();
+    // Чисел нет и не будет — ни шкалы, ни «/ ккал».
+    expect(screen.queryByRole("progressbar")).not.toBeInTheDocument();
+    // Кнопка вела бы на экран с той же фразой.
+    expect(screen.queryByRole("button", { name: "Открыть дневник" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Готово" })).toBeInTheDocument();
+  });
+
+  it("положительная стража: прочий сбой — повтор и «Открыть дневник» на месте", async () => {
+    mockedToday.mockRejectedValue(new ApiError(502, "ayla_unavailable", "upstream"));
+    renderScreen();
+
+    expect(await screen.findByRole("button", { name: /Попробовать снова/ })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Открыть дневник" })).toBeInTheDocument();
+    expect(screen.queryByText(DIARY_OFF_TEXT)).not.toBeInTheDocument();
   });
 });
