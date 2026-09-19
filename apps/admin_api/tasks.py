@@ -231,10 +231,11 @@ def dispatch_master_decision_dm(
         (no rendered text in retry/error logging).
     """
 
-    # Local import — channels' ``send_message`` only needed in the
+    # Local import — channels' ``send_to_staff`` only needed in the
     # worker path. ``MaxAPIError`` is imported at module level for
     # ``autoretry_for`` binding (see decorator above).
-    from apps.channels.max.outbound import send_message
+    from apps.channels.max.addressing import MaxAddress
+    from apps.channels.max.staff_outbound import send_to_staff
     from django.core.cache import cache
 
     master_mini_app_url = getattr(
@@ -292,7 +293,11 @@ def dispatch_master_decision_dm(
         return {"sent": False, "reason": "already_sent"}
 
     try:
-        send_message(user_id=user_id_norm, text=text)
+        # DRF-2128 — от салонного бота; ``propagate`` — чтобы
+        # ``MaxAPIError`` дошёл до ``autoretry_for`` как есть. Тенанта в
+        # kwargs нет (строка заявки закреплена ``master_id``), адрес уже
+        # известен — человек, не диалог.
+        send_to_staff(None, MaxAddress(user_id=user_id_norm), text, propagate=True)
     except MaxAPIError:
         # Surface #3: structured-only log — no rendered text, no
         # rejection_reason. ``exc_info=True`` retains the traceback

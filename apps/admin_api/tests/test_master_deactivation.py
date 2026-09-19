@@ -1132,8 +1132,9 @@ class TestReactivate:
             linked_bot_user=master_bu,
         )
 
+        # DRF-2128 — DM мастеру идёт через send_to_staff; подменяется провод.
         with patch(
-            "apps.admin_api.services.master_deactivation.send_message",
+            "apps.channels.max.outbound.send_message",
             return_value={"ok": True},
         ) as send_mock:
             resp = client.post(
@@ -1162,7 +1163,7 @@ class TestReactivate:
             is_active=False,
             archived_at=datetime.now(tz=timezone.utc),
         )
-        with patch("apps.admin_api.services.master_deactivation.send_message") as send_mock:
+        with patch("apps.channels.max.outbound.send_message") as send_mock:
             resp = client.post(
                 _reactivate_url(m.id),
                 data=json.dumps({"notify_master": True}),

@@ -51,7 +51,7 @@ from django.utils import timezone
 
 from apps.audit.services import write_audit
 from apps.booking.models import BookingReminder, PendingBookingAction
-from apps.channels.max.addressing import manager_address
+from apps.channels.max.staff_outbound import MANAGER, send_to_staff
 from apps.bookings.keyboards import (
     CALLBACK_BOOK_CANCEL_PREFIX,
     CALLBACK_BOOK_CONFIRM_PREFIX,
@@ -1099,27 +1099,21 @@ def _notify_manager_partial_reschedule(row: PendingBookingAction) -> None:
     raise from the callback path (the destructive operation already
     happened, the user's reply is already on the line).
 
-    Адрес и ключ выбирает :func:`~apps.channels.max.addressing.manager_address`
-    (DRF-1559): человек, если у салона заполнен ``manager_user_id``, иначе
-    диалог — и тогда с прежним ограничением, что он верен только для того
-    бота, из чьей переписки его скопировали.
+    Адресаты и отправитель — :func:`~apps.channels.max.staff_outbound.send_to_staff`
+    (DRF-2128): активные владелец/админ салона плюс адрес менеджера, от
+    салонного бота. Никого — пропуск с именем (``no_manager_chat``).
     """
     tenant = row.tenant
-    address = manager_address(tenant)
-    if not address:
+    text = _render_partial_failure_text(row)
+    result = send_to_staff(tenant, MANAGER, text)
+    if result.recipients == 0:
         logger.warning(
             "bookings.gate.partial.no_manager_chat tenant=%s pk=%s",
             tenant.slug,
             row.pk,
         )
-        return
-    text = _render_partial_failure_text(row)
-    try:
-        from apps.channels.max.outbound import send_message
-
-        send_message(**address.send_kwargs(), text=text, attachments=None)
-    except Exception:  # noqa: BLE001 — manager-notification is best-effort
-        logger.exception("bookings.gate.partial.notify_failed pk=%s", row.pk)
+    elif not result.delivered:  # manager-notification is best-effort
+        logger.error("bookings.gate.partial.notify_failed pk=%s", row.pk)
 
 
 def _notify_manager_reschedule_success(
@@ -1132,16 +1126,10 @@ def _notify_manager_reschedule_success(
     notification.
     """
     tenant = row.tenant
-    address = manager_address(tenant)  # DRF-1559 — человек, иначе диалог
-    if not address:
-        return
     text = _render_reschedule_success_text(row, result)
-    try:
-        from apps.channels.max.outbound import send_message
-
-        send_message(**address.send_kwargs(), text=text, attachments=None)
-    except Exception:  # noqa: BLE001 — best-effort
-        logger.exception("bookings.gate.reschedule.notify_failed pk=%s", row.pk)
+    sent = send_to_staff(tenant, MANAGER, text)  # DRF-2128 — от салонного бота
+    if sent.recipients and not sent.delivered:  # best-effort
+        logger.error("bookings.gate.reschedule.notify_failed pk=%s", row.pk)
 
 
 def _render_partial_failure_text(row: PendingBookingAction) -> str:
