@@ -37,9 +37,9 @@ from tests.support.pii_route_registry import (
 V = "apps.miniapp_api.views:"
 
 #: Named routes in ``apps/miniapp_api/urls.py`` on dev f2268007 (19.09.2026) + the
-#: DRF-2123 proposal route.
+#: DRF-2123 proposal route (49) + the three DRF-2133 memory routes (52).
 #: Lower the floor deliberately when a route is removed.
-ROUTE_FLOOR = 49
+ROUTE_FLOOR = 52
 
 _BOOKING_FIELDS = (
     "id",
@@ -586,6 +586,53 @@ CUSTOMER_ROUTES: dict[str, Entry] = {
             "done_count, no observation values, no phone or name; the response is "
             "classified own because which template comes back reveals which goal the "
             "caller has chosen"
+        ),
+    ),
+    # --- «Что Ayla помнит» (DRF-2133, Память-2, own) --------------------
+    "customer_memory": own(
+        "green[].id",
+        "green[].key",
+        "green[].label",
+        "green[].value",
+        "green[].said_at",
+        "green[].provenance",
+        "health[].id",
+        "health[].kind",
+        "health[].value",
+        "health[].said_at",
+        "status",
+        via="apps.miniapp_api.views_memory:customer_memory",
+        note=(
+            "what the bot remembers about the caller, keyed on their own ayla_user_id "
+            "(never BotUser.id) behind the same read gate the chat uses: green facts are "
+            "the current value per key (superseded history stays hidden) with the chat's "
+            "own phrasing as label and a said/inferred provenance mark; health rows are "
+            "red-zone entries and come only through RedZoneReader, which writes a "
+            "RedZoneAccessLog row per entry under the data_subject role — this is 152-ФЗ "
+            "special-category data shown to its subject and to no one else; status says "
+            "deletion_pending once forget-all or account deletion was requested, in which "
+            "case both lists are empty by the gate, not by filtering here"
+        ),
+    ),
+    "customer_memory_entry": own(
+        "id",
+        "deleted",
+        via="apps.miniapp_api.views_memory:customer_memory_entry",
+        note=(
+            "the id of the caller's own memory entry just tombstoned with reason "
+            "user_request_miniapp, and the deleted flag; a foreign, unknown or already "
+            "forgotten id is 404 with no record, and a red entry goes through "
+            "RedZoneReader.soft_delete_for_subject with a delete-type access log"
+        ),
+    ),
+    "customer_memory_forget_all": own(
+        "status",
+        via="apps.miniapp_api.views_memory:customer_memory_forget_all",
+        note=(
+            "the deletion_pending status after the caller asked to forget everything; the "
+            "body carries no fact — the request is recorded on the caller's own "
+            "UserPersonalContext and the same three chat steps run (forget-all intent, "
+            "dialogue anonymisation, Ayla profile erasure)"
         ),
     ),
 }

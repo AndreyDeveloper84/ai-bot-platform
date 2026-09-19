@@ -180,8 +180,13 @@ class TestGet:
 
     def test_current_view_not_history(self, client, bot_user, upc):
         """Ключ diet — single: показывается победитель, не оба значения (DRF-1262)."""
-        _green(upc, content={"key": "diet", "value": "vegan"})
+        old = _green(upc, content={"key": "diet", "value": "vegan"})
         _green(upc, content={"key": "diet", "value": "keto"})
+        # auto_now_add gives both rows the same instant on a fast machine;
+        # the policy's tie-break is then the id, not the age. Make the age real.
+        MemoryEntry.objects.filter(id=old.id).update(
+            created_at=old.created_at - timezone.timedelta(days=1)
+        )
 
         body = _get(client, bot_user).json()
 
