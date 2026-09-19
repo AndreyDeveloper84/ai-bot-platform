@@ -4475,7 +4475,9 @@ def _food_scan_max_bytes() -> int:
 def customer_food_scan(request: HttpRequest) -> HttpResponse:
     """Распознать фото еды: multipart ``image`` → ``{scan_id, dish_name, …}``.
 
-    Ворота — те же три, что у текста (DRF-2093). Затем: файл обязателен;
+    Ворота — те же три, что у текста (DRF-2093), затем флаг фото
+    ``FOOD_PHOTO_SCAN_ENABLED`` тем же предикатом, что у чата (DRF-2109,
+    404 ``photo_scan_disabled``). Затем: файл обязателен;
     MIME из :data:`FOOD_SCAN_ALLOWED_MIME`; размер ≤ лимита чата
     (413 ``photo_too_large``). Байты уходят в каталог как есть и нигде в
     боте не задерживаются. Отказы каталога — как у текста
@@ -4490,6 +4492,12 @@ def customer_food_scan(request: HttpRequest) -> HttpResponse:
     refused = _food_text_gate(bot_user)
     if refused is not None:
         return refused
+    # DRF-2109 — cross-border флаг фото: тот же предикат, что у чата
+    # (``apps.consent.photo_gate``); до этого листа прокси его не спрашивал.
+    from apps.consent.photo_gate import photo_scan_refusal
+
+    if photo_scan_refusal() is not None:
+        return _error("photo_scan_disabled", "photo recognition is not enabled", 404)
 
     upload = request.FILES.get("image")
     if upload is None:

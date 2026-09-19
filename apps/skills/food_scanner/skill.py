@@ -463,8 +463,10 @@ def _check_gates(
 
     1. ``settings.NUTRITION_ENABLED`` — master switch. False → «feature
        off» reply. Covers the whole RU-side nutrition surface.
-    2. ``settings.FOOD_PHOTO_SCAN_ENABLED`` — cross-border gate.
-       Only consulted when ``require_photo_scan=True`` (new scans).
+    2. ``FOOD_PHOTO_SCAN_ENABLED`` — cross-border gate, asked through
+       :func:`apps.consent.photo_gate.photo_scan_refusal` (DRF-2109: the same
+       predicate the Mini App proxy asks). Only consulted when
+       ``require_photo_scan=True`` (new scans).
        False → manual-entry hint.
     3. PERSONAL_DATA (DRF-1948) — ``personal_records_consent_open``, the same
        rule every other diary write already follows (text entry, Mini App
@@ -497,7 +499,11 @@ def _check_gates(
             meta={"reply_kind": "food_scanner_nutrition_off"},
         )
 
-    if require_photo_scan and not getattr(settings, "FOOD_PHOTO_SCAN_ENABLED", False):
+    # DRF-2109 — cross-border флаг фото через один предикат на чат и прокси
+    # Mini App (``apps.consent.photo_gate``); текст и reply_kind прежние.
+    from apps.consent.photo_gate import photo_scan_refusal
+
+    if require_photo_scan and photo_scan_refusal() is not None:
         logger.info(
             "food_scanner.gate.photo_scan_off kind=%s conv=%s",
             kind,

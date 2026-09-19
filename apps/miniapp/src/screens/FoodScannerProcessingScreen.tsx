@@ -244,6 +244,9 @@ function ScanErrorScreen({
   const isConsentGate =
     err instanceof ApiError &&
     (err.slug === "food_diary_consent_required" || err.slug === "consent_required");
+  // DRF-2109 — фото выключено флагом (тот же предикат, что у чата): это не
+  // сбой и не «через минуту» — писать текстом работает, туда и ведём.
+  const isPhotoOff = err instanceof ApiError && err.slug === "photo_scan_disabled";
   const headline = isNotRecognized
     ? "Не разобралась"
     : isPhotoFailed
@@ -252,9 +255,11 @@ function ScanErrorScreen({
         ? "Фото слишком большое"
         : isConsentGate
           ? "Нужно разрешение"
-          : isNotWired
-            ? "Пока не подключено"
-            : "Сервис недоступен";
+          : isPhotoOff
+            ? "Фото пока не принимаю"
+            : isNotWired
+              ? "Пока не подключено"
+              : "Сервис недоступен";
   const body = isNotRecognized
     ? "Фото немного сложное — не разобралась. Можно переснять поближе или просто написать, что было."
     : isPhotoFailed
@@ -263,7 +268,9 @@ function ScanErrorScreen({
         ? "Такое фото не пройдёт — попробуй снять ещё раз или выбрать снимок поменьше."
         : isConsentGate
           ? "Чтобы распознавать еду по фото, нужно разрешение на дневник питания — вернись к сканеру и дай его."
-          : isNotWired
+          : isPhotoOff
+            ? "Распознавание по фото сейчас выключено. Напиши, что было и сколько граммов, — посчитаю и покажу, прежде чем записать."
+            : isNotWired
             ? "Распознавание еды по фото в приложении ещё не работает. Дневник питания сейчас ведёт Ayla в чате."
             : "Сервис распознавания временно недоступен. Попробуй через минуту.";
   return (
@@ -304,7 +311,7 @@ function ScanErrorScreen({
           {/* Когда ручек нет, «Переснять» и «Написать вручную» ведут в ту
               же стену: `logMeal` закрыт тем же `guardProd`. Предлагать их
               значило бы врать второй раз, уже действием. */}
-          {!isPhotoFailed && !isNotWired && (
+          {!isPhotoFailed && !isNotWired && !isPhotoOff && (
             <button
               type="button"
               className="btn-primary"
@@ -332,7 +339,7 @@ function ScanErrorScreen({
           {!isPhotoFailed && !isNotWired && !isTooLarge && !isConsentGate && (
             <button
               type="button"
-              className="btn-secondary"
+              className={isPhotoOff ? "btn-primary" : "btn-secondary"}
               onClick={() =>
                 navigate("/customer/food-scanner/manual", {
                   state: { mealType },
