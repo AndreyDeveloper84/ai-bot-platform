@@ -291,15 +291,21 @@ class TestWelcomeTapsAreThePhraseTheButtonCarried:
         Кнопка, добавленная через месяц, падает здесь, а не в истории у
         человека в чате.
         """
-        from apps.channels.max.global_onboarding import resolve_welcome_tap
+        from apps.channels.max.global_onboarding import (
+            GLOBAL_WELCOME_TAP_LABELS,
+            resolve_welcome_tap,
+        )
         from apps.skills.welcome.skill import welcome_tap_labels
 
         labels = welcome_tap_labels()
         assert labels, "клавиатура приветствия пуста — проверка ниже ни о чём"
+        # DRF-2120: кнопки самого глобального пути подписаны текстом
+        # владельца («Начать», «Записать еду») — их таблица побеждает.
+        assert GLOBAL_WELCOME_TAP_LABELS, "таблица подписей глобального пути пуста"
         for payload, label in labels.items():
             tap = resolve_welcome_tap(payload)
             assert tap is not None, payload
-            assert tap.history_text == label, payload
+            assert tap.history_text == GLOBAL_WELCOME_TAP_LABELS.get(payload, label), payload
 
     def test_a_retired_welcome_button_leaves_no_user_turn(self, sent, fake_redis, concierge):
         """Снятая кнопка: форма правильная, метки нет — выдумать фразу нечем.

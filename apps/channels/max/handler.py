@@ -101,6 +101,7 @@ from typing import Any
 from django.conf import settings
 
 from apps.channels.max.global_onboarding import (
+    first_contact_action_data,
     needs_onboarding,
     resolve_welcome_tap,
     run_onboarding_turn,
@@ -115,7 +116,6 @@ from apps.channels.max.quick_actions import (
     AI_UNAVAILABLE_TEXT,
     STALE_TAP_TEXT,
     ai_unavailable_action_data,
-    first_contact_action_data,
     is_retry_callback,
     is_stale_tap,
     looks_like_callback_payload,
@@ -1775,6 +1775,7 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
         # прочих колбэковых веток, по правилу ``_PASSTHROUGH_CALLBACK_PREFIXES``:
         # тап по кнопке, которую бот сам нарисовал, обязан дойти до ответа, а
         # не быть проглоченным приветствием или отданным модели сырым.
+        # Клавиатура — та же, что на первом экране (DRF-2120: четыре кнопки).
         reply = DiscoveryReply(
             text=STALE_TAP_TEXT, action_data=first_contact_action_data(bot_user=bot_user)
         )

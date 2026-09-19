@@ -374,12 +374,14 @@ def forget(context: SkillContext) -> None:
 # ─── гейты ────────────────────────────────────────────────────────────────
 
 
-def _gate(context: SkillContext) -> SkillResult | None:
-    """Ворота записи текстом — тот же предикат, что у всех писателей (DRF-2093).
+def diary_entry_refusal(bot_user: Any) -> SkillResult | None:
+    """Отказ записи в дневник ЭТОМУ человеку — экраном, или ``None``.
 
-    ``apps.consent.diary_gate.diary_write_refusal``: флаг → PERSONAL_DATA →
-    реестр согласия дневника. Правка и возврат записи идут через эти же
-    ворота (они пишут в дневник); удаление — нет.
+    Тот же предикат, что у всех писателей (``diary_write_refusal``,
+    DRF-2093): флаг → PERSONAL_DATA → реестр согласия дневника; и те же
+    три экрана отказа. Публичен ради кнопки «Записать еду» на возврате
+    глобального бота (DRF-2120): ворота читаются ДО приглашения прислать
+    еду, а не после него.
     """
     from apps.consent.diary_gate import (
         CONSENT_REQUIRED,
@@ -388,7 +390,7 @@ def _gate(context: SkillContext) -> SkillResult | None:
         diary_write_refusal,
     )
 
-    reason = diary_write_refusal(context.bot_user)
+    reason = diary_write_refusal(bot_user)
     if reason == NUTRITION_DISABLED:
         return SkillResult(
             reply_text=NUTRITION_OFF_TEXT, meta={"reply_kind": "food_text_nutrition_off"}
@@ -404,6 +406,12 @@ def _gate(context: SkillContext) -> SkillResult | None:
     if reason == FOOD_DIARY_CONSENT_REQUIRED:
         return diary_consent_required_result("food_text_diary_consent_required")
     return None
+
+
+def _gate(context: SkillContext) -> SkillResult | None:
+    """Ворота записи текстом. Правка и возврат записи идут через них же
+    (они пишут в дневник); удаление — нет."""
+    return diary_entry_refusal(context.bot_user)
 
 
 # ─── шаги ─────────────────────────────────────────────────────────────────
