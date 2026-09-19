@@ -879,12 +879,15 @@ def _miniapp_button(item: MenuItem, *, web_app: str, miniapp_url: str) -> dict[s
 
 
 def _config() -> tuple[str, str]:
-    from django.conf import settings
+    """(web_app, miniapp_url) of the bot in this conversation — DRF-1361.
 
-    return (
-        getattr(settings, "MAX_BOT_WEB_APP", "") or "",
-        getattr(settings, "MAX_MINIAPP_URL", "") or "",
-    )
+    Registry entry first (the bot in scope, else the ``max_global`` entry),
+    global settings as the single-bot fallback: ``apps.channels.miniapp_config``.
+    """
+    from apps.channels.miniapp_config import miniapp_target
+
+    target = miniapp_target()
+    return target.web_app, target.miniapp_url
 
 
 def miniapp_configured() -> bool:

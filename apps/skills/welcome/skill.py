@@ -47,10 +47,12 @@ entry price.
 
 Only «👤 Профиль» needs a Mini App route. Behaviour follows config:
 
-* ``settings.MAX_BOT_WEB_APP`` set → ``open_app`` (Mini App opens INSIDE
+* ``web_app`` of the bot in scope (DRF-1361: registry entry, else the
+  ``max_global`` entry, else ``settings.MAX_BOT_WEB_APP``) set →
+  ``open_app`` (Mini App opens INSIDE
   the MAX client; the route comes from the ``callback`` field which MAX
   forwards into the Mini App's ``initData``).
-* ``settings.MAX_BOT_WEB_APP`` empty + ``settings.MAX_MINIAPP_URL`` set
+* ``web_app`` empty + ``miniapp_url`` (same ladder) set
   → ``link`` button (opens in the external browser). The path comes from
   :data:`MINIAPP_ROUTES`, joined onto the bare domain.
 * Both empty → «👤 Профиль» is **dropped entirely** — not downgraded to a
@@ -125,7 +127,7 @@ from __future__ import annotations
 import logging
 from typing import ClassVar
 
-from django.conf import settings
+from apps.channels.miniapp_config import miniapp_target
 from django.utils import timezone
 
 from apps.consent.models import ConsentRecord
@@ -863,8 +865,10 @@ def _welcome_buttons() -> list[dict[str, str]]:
     and the S5 first-action grid still opens the catalog directly
     (``open_catalog`` in :func:`_s5_first_action_buttons`).
     """
-    web_app = getattr(settings, "MAX_BOT_WEB_APP", "")
-    miniapp_url = getattr(settings, "MAX_MINIAPP_URL", "")
+    # DRF-1361 — the Mini App of the bot in THIS conversation (registry
+    # entry first, global settings as the single-bot fallback), one source
+    # for every button builder: apps.channels.miniapp_config.
+    web_app, miniapp_url, _ = miniapp_target()
 
     if not pilot_ux_enabled():
         # DRF-963 rolled back without a deploy — restore the pre-change
@@ -1229,8 +1233,7 @@ def _s5_first_action_buttons() -> list[dict[str, str]]:
     ``tests/test_miniapp_routes.py``, so a button added here without its
     route fails a test instead of shipping a dead deeplink.
     """
-    web_app = getattr(settings, "MAX_BOT_WEB_APP", "")
-    miniapp_url = getattr(settings, "MAX_MINIAPP_URL", "")
+    web_app, miniapp_url, _ = miniapp_target()  # DRF-1361 — see _welcome_buttons
 
     primary_actions: list[dict[str, str]] = []
     just_browse: list[dict[str, str]] = []
