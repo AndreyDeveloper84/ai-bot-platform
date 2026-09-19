@@ -159,7 +159,9 @@ class TestProposalRead:
         ):
             with pytest.raises(WellnessContextUnavailableError):
                 _client(
-                    lambda _r: httpx.Response(503, json={"error": {"code": "X", "message": body_marker}})
+                    lambda _r: httpx.Response(
+                        503, json={"error": {"code": "X", "message": body_marker}}
+                    )
                 ).get_plan_lite_proposal(external_user_id=_EXT)
         # Всё, что попало в лог: сообщение и сырые аргументы (DRF-2009 —
         # сторож на аргументах, а не только на отрендеренной строке).
