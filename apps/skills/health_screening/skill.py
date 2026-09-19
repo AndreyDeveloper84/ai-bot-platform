@@ -44,7 +44,7 @@ import logging
 from typing import ClassVar
 
 from apps.skills.base import SkillContext, SkillResult
-from apps.skills.health_screening.classifier import PainSignal, classify
+from apps.skills.health_screening.classifier import PainSignal, classify, detect_g6
 from apps.orchestrator.open_question import open_question
 from apps.skills.health_screening.memo import (
     remember_screening_asked,
@@ -109,14 +109,16 @@ class HealthScreeningSkill:
         signal = classify(context.message_text)
 
         if signal == PainSignal.RED_FLAG:
+            group = "G6" if detect_g6(context.message_text) else None
             logger.info(
-                "health_screening.red_flag conversation=%s",
+                "health_screening.red_flag conversation=%s group=%s",
                 context.conversation.id if context.conversation else None,
+                group,
             )
-            return SkillResult(
-                reply_text=RED_FLAG_REPLY,
-                meta={"reply_kind": "health_red_flag"},
-            )
+            meta: dict[str, object] = {"reply_kind": "health_red_flag"}
+            if group is not None:
+                meta["s1_group"] = group
+            return SkillResult(reply_text=RED_FLAG_REPLY, meta=meta)
 
         if signal == PainSignal.SOFT:
             # Записывается ровно то, что было сказано: вопросы заданы.
