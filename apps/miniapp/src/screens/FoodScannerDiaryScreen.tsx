@@ -37,6 +37,7 @@ import { saveMealFromEntry } from "../lib/saved-meals";
 import { useScreenBack } from "../hooks/useScreenBack";
 import { backTo } from "../lib/screen-back";
 import { FAVORITES_COPY, FAVORITES_ROUTE, favoritesRefusalText } from "./FoodScannerFavoritesScreen";
+import { WEEK_COPY, WEEK_ROUTE } from "./FoodScannerWeekScreen";
 
 /**
  * ЧЕТЫРЕ состояния, и свести любые два нельзя — у каждого своя правда
@@ -309,6 +310,7 @@ export function FoodScannerDiaryScreen() {
             // ждёт решение владельца (D26), обещать её кнопкой нельзя.
             onAddTap={() => navigate("/customer/food-scanner/manual")}
             onFavoritesTap={() => navigate(FAVORITES_ROUTE)}
+            onWeekTap={() => navigate(WEEK_ROUTE)}
             onDelete={onDelete}
             onCorrect={onCorrect}
             onFavorite={onFavorite}
@@ -324,6 +326,7 @@ function DiaryReady({
   day,
   onAddTap,
   onFavoritesTap,
+  onWeekTap,
   onDelete,
   onCorrect,
   onFavorite,
@@ -332,6 +335,7 @@ function DiaryReady({
   day: Extract<DiaryToday, { state: "empty" | "entries" }>;
   onAddTap: () => void;
   onFavoritesTap: () => void;
+  onWeekTap: () => void;
   onDelete: (entry: FoodDiaryEntry) => Promise<void>;
   onCorrect: (entry: FoodDiaryEntry, grams: number) => Promise<void>;
   onFavorite: (entry: FoodDiaryEntry) => void;
@@ -501,6 +505,10 @@ function DiaryReady({
       <div className="food-scanner-screen__cta-stack">
         <button type="button" className="btn-secondary" onClick={onFavoritesTap}>
           {FAVORITES_COPY.openFromDiary}
+        </button>
+        {/* DRF-2099 — неделя: факт «N из 7 дней с записями», без напоминаний. */}
+        <button type="button" className="btn-secondary" onClick={onWeekTap}>
+          {WEEK_COPY.openFromDiary}
         </button>
       </div>
     </>

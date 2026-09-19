@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from django.urls import path
 
-from apps.miniapp_api import views, views_plan_lite, views_saved_meals
+from apps.miniapp_api import views, views_diary_days, views_plan_lite, views_saved_meals
 
 app_name = "miniapp_api"
 
@@ -191,6 +191,18 @@ urlpatterns = [
         "plan-lite",
         views_plan_lite.customer_plan_lite,
         name="customer_plan_lite",
+    ),
+    # DRF-2099 — дневник за неделю: строка на день и записи одного дня;
+    # границы суток считает каталог по поясу человека.
+    path(
+        "diary/days",
+        views_diary_days.customer_diary_days,
+        name="customer_diary_days",
+    ),
+    path(
+        "diary/day",
+        views_diary_days.customer_diary_day,
+        name="customer_diary_day",
     ),
     # Dashboard rollup — next booking + this-week count (bookings-only).
     path(
