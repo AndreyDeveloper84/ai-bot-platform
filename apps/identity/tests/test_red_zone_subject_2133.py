@@ -123,8 +123,13 @@ class TestListLiveForSubject:
         assert log.purpose == "miniapp_memory_screen"
 
     def test_empty_result_writes_no_log(self, upc):
-        assert _list(upc.user_id) == []
-        assert RedZoneAccessLog.objects.count() == 0
+        # Presence first: the same call returns the row once one exists.
+        entry = _red(upc)
+        assert [r.id for r in _list(upc.user_id)] == [entry.id]
+        fresh = UserPersonalContext.objects.create(user_id=uuid.uuid4())
+        logs_before = RedZoneAccessLog.objects.count()
+        assert _list(fresh.user_id) == []  # empty-assert-ok: a subject with no red rows
+        assert RedZoneAccessLog.objects.count() == logs_before
 
     def test_ops_admin_without_principal_is_refused(self, upc):
         with pytest.raises(ValueError):
@@ -188,7 +193,7 @@ class TestSoftDeleteForSubject:
         assert log.access_type == RedZoneAccessLog.ACCESS_DELETE
         assert log.accessor_role == RedZoneAccessLog.ACCESSOR_DATA_SUBJECT
         assert log.request_id == rid
-        assert _list(upc.user_id) == []
+        assert _list(upc.user_id) == []  # empty-assert-ok: the only row was just tombstoned above
 
     def test_foreign_row_is_untouched_and_unlogged(self, upc):
         other = UserPersonalContext.objects.create(user_id=uuid.uuid4())
