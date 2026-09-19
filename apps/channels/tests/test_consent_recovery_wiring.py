@@ -229,7 +229,13 @@ class TestTheButtonReachesTheChannel:
 
 class TestThePromiseMatchesTheJournal:
     def test_a_salon_tap_does_not_claim_the_consent(self) -> None:
-        """На салонном пути журнал не пишется — «Готово, согласие есть» там ложь."""
+        """Салонный тап уходит в салонный путь: экран S5, не «Готово, согласие есть».
+
+        До DRF-2016 на салонном пути журнал не писал никто, и текст возврата
+        был бы ложью. Теперь салонный путь пишет строку ``personal_data`` сам
+        (``record_person_consent``) — но реплика возврата по-прежнему
+        глобальная: салонный тап получает канонический экран S5.
+        """
         from apps.skills.welcome.skill import CONSENT_RECOVERY_RETURN_TEXTS, WelcomeSkill
         from apps.tenancy.context import tenant_scope
         from apps.tenancy.models import Tenant
@@ -246,13 +252,14 @@ class TestThePromiseMatchesTheJournal:
         with tenant_scope(tenant):
             result = WelcomeSkill().handle(ctx)
 
-        # Положительное утверждение обязательно: `not ...exists()` покраснеть НЕ
-        # может — ConsentRecord на салонном пути не пишет никто, ни при верной
-        # реализации, ни при сломанной. Без строки ниже сторож держался бы на
-        # одном «!=», которое зелено и на пустом тексте, и на трассе.
+        # Положительные утверждения: S5 отрисован и строка реестра есть
+        # (DRF-2016: салонный путь пишет ``personal_data`` сам). Без них
+        # сторож держался бы на одном «!=», которое зелено и на пустом тексте.
         assert result.meta["reply_kind"] == "welcome_s5_first_action"
         assert result.reply_text != CONSENT_RECOVERY_RETURN_TEXTS["photo"]
-        assert not ConsentRecord.all_tenants.filter(bot_user=bot_user, granted=True).exists()
+        assert ConsentRecord.all_tenants.filter(
+            bot_user=bot_user, consent_type="personal_data", granted=True
+        ).exists()
 
     def test_a_failed_journal_does_not_claim_the_consent(self) -> None:
         """Запись не удалась — человеку не говорится, что согласие есть."""

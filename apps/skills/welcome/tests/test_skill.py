@@ -515,15 +515,19 @@ class TestS2ConsentFlow:
     def test_consent_yes_save_failure_does_not_block_response(
         self, unwelcomed_bot_user, monkeypatch, caplog
     ):
-        """Mirror welcomed_at pattern: DB write fail → log ERROR +
+        """Mirror welcomed_at pattern: registry write fail → log ERROR +
         deliver placeholder. Худший случай: consent re-asked на следующем
-        entry в S2; not data-loss since user IS giving consent right now."""
+        entry в S2; not data-loss since user IS giving consent right now.
+
+        DRF-2016: на салонном пути пишется строка реестра (``consent_at`` —
+        внутри той же транзакции), так что «сбой записи» — сбой
+        ``record_person_consent``, а не ``bot_user.save``."""
         import logging as _logging
 
         def _explode(*args, **kwargs):
             raise RuntimeError("DB write fail")
 
-        monkeypatch.setattr(unwelcomed_bot_user, "save", _explode)
+        monkeypatch.setattr("apps.skills.welcome.skill.record_person_consent", _explode)
         skill = WelcomeSkill()
         with (
             tenant_scope(unwelcomed_bot_user.tenant),
@@ -534,7 +538,7 @@ class TestS2ConsentFlow:
             )
         # S5 grid still rendered — flow continues despite DB write fail.
         assert S5_PROMPT_TEXT in result.reply_text
-        assert any("consent_at_save_failed" in r.message for r in caplog.records)
+        assert any("consent_record_failed" in r.message for r in caplog.records)
 
 
 # ───────────────────────────────────────────────────────────────────────
