@@ -22,9 +22,13 @@
 2. **Через ``handler`` в golden-стиле** — тот же путь, что прошёл владелец:
    welcomed-пользователь, ``/anketa``, тап ``cb:pc_consent:grant``. Красное до
    правки: ответ начинается с ``FALLBACK_INTRO`` («Я пока не поняла»).
-3. **Выключатель**: при ``NUTRITION_ENABLED=false`` эти тапы отвечают
-   буквальной заглушкой ``NUTRITION_UNAVAILABLE_TEXT`` — через диспетчер,
-   не напрямую навыком (1994 уже доказал навык; здесь предмет — маршрут).
+3. **Выключатель**: при ``NUTRITION_ENABLED=false`` тапы согласия
+   (``grant``/``decline``) отвечают буквальной заглушкой
+   ``NUTRITION_UNAVAILABLE_TEXT`` — через диспетчер, не напрямую навыком (1994
+   уже доказал навык; здесь предмет — маршрут). Тапы ОТЗЫВА (``withdraw*``)
+   с DRF-2135 стоят выше ворот и при OFF доезжают до навыка тем же маршрутом
+   и отвечают как при ON (§92: отзыв согласия работает при любом флаге);
+   что именно они отвечают — ``test_withdraw_outside_switch_2135``.
 
 Каждое отрицание стоит рядом с положительной стражей на тех же данных:
 перепись непуста и содержит семейство согласия; при включённом флаге тот же
@@ -67,13 +71,20 @@ from apps.skills.water import skill as water_skill
 
 STUB = NUTRITION_UNAVAILABLE_TEXT
 
-CONSENT_FAMILY: tuple[str, ...] = (
+#: Под воротами выключателя: дать согласие в выключенный контур нельзя.
+CONSENT_GATED: tuple[str, ...] = (
     CONSENT_GRANT_CALLBACK,
     CONSENT_DECLINE_CALLBACK,
+)
+
+#: Выше ворот (DRF-2135): отзыв согласия ПДн работает при любом флаге.
+CONSENT_OPEN: tuple[str, ...] = (
     WITHDRAW_CALLBACK,
     WITHDRAW_CONFIRM_CALLBACK,
     WITHDRAW_KEEP_CALLBACK,
 )
+
+CONSENT_FAMILY: tuple[str, ...] = CONSENT_GATED + CONSENT_OPEN
 
 
 # ---------------------------------------------------------------------------
@@ -217,7 +228,7 @@ class TestDispatcherHandsConsentTapsToTheAnketaSkill:
         assert result.reply_text == "навык ответил"
         assert seen == [callback]  # payload дошёл нетронутым
 
-    @pytest.mark.parametrize("callback", CONSENT_FAMILY)
+    @pytest.mark.parametrize("callback", CONSENT_GATED)
     def test_off_the_tap_answers_the_literal_stub_through_the_dispatcher(
         self, nutrition_off, callback: str
     ) -> None:
@@ -232,6 +243,37 @@ class TestDispatcherHandsConsentTapsToTheAnketaSkill:
         assert result is not None, f"{callback}: при выключенном флаге ход ушёл мимо навыка"
         assert result.reply_text == STUB
         assert result.meta["reply_kind"] == "nutrition_anketa_nutrition_off"
+
+    @pytest.mark.parametrize("callback", CONSENT_OPEN)
+    def test_off_the_withdrawal_tap_still_reaches_the_skill_and_is_not_the_stub(
+        self, nutrition_off, monkeypatch, callback: str
+    ) -> None:
+        """DRF-2135 — маршрут при OFF тот же, что при ON: диспетчер отдаёт ход
+        навыку, навык отвечает НЕ заглушкой. Само поведение отзыва (согласие
+        снято, параметры удалены) — предмет ``test_withdraw_outside_switch_2135``;
+        здесь предмет — маршрут, поэтому запись согласия и каталог подменены."""
+        monkeypatch.setattr("apps.consent.personal_calculation.is_granted", lambda bot_user: True)
+        monkeypatch.setattr("apps.consent.personal_calculation.withdraw", lambda bot_user: 1)
+
+        class _Catalog:
+            async def purge_body_parameters(self, *, external_user_id):  # noqa: ANN001, ANN202
+                return True
+
+        monkeypatch.setattr(
+            "apps.skills.nutrition_anketa.skill.get_nutrition_client", lambda: _Catalog()
+        )
+
+        result = try_handle_structured_nutrition_turn(
+            text=callback,
+            attachments=None,
+            bot_user=Mock(),
+            conversation=_bare_conversation(),
+            trace_id="t-2074",
+        )
+
+        assert result is not None, f"{callback}: при выключенном флаге ход ушёл мимо навыка"
+        assert result.reply_text != STUB
+        assert result.meta["reply_kind"].startswith("anketa_withdraw_")
 
 
 # ---------------------------------------------------------------------------
