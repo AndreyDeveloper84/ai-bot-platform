@@ -4456,10 +4456,13 @@ FOOD_SCAN_MEAL_TYPES: frozenset[str] = frozenset({"breakfast", "lunch", "dinner"
 FOOD_SCAN_MULTIPLIER_MIN = 0.25
 FOOD_SCAN_MULTIPLIER_MAX = 4.0
 
-#: Происхождение записи по фото с поправкой человека — как в чате
-#: (``skills/food_scanner/skill.py``: ``photo_user_corrected``). Без поправки
-#: origin не передаётся: умолчание каталога для скана — то же, что у чата.
-FOOD_SCAN_ORIGIN_USER_CORRECTED = "photo_user_corrected"
+#: Происхождение записи по фото — §136, обе половины, всегда (DRF-2110): с
+#: поправкой человека ``photo_user_corrected``, подтверждённая как есть —
+#: ``photo_estimated_confirmed``. Константы — одно место с текстовыми.
+from apps.skills.food_clarify.text_entry import (  # noqa: E402
+    PHOTO_ORIGIN_ESTIMATED_CONFIRMED as FOOD_SCAN_ORIGIN_ESTIMATED_CONFIRMED,
+    PHOTO_ORIGIN_USER_CORRECTED as FOOD_SCAN_ORIGIN_USER_CORRECTED,
+)
 
 
 def _food_scan_max_bytes() -> int:
@@ -4549,7 +4552,8 @@ def _customer_food_log_scan(bot_user: BotUser, body: dict[str, Any]) -> HttpResp
     ``dish_name`` — только когда человек переименовал блюдо на карточке; при
     этом ``scan_id`` остаётся рядом (провенанс фото, §136 ``photo_*``), каталог
     принимает оба. Поправка (множитель ≠ 1 или переименование) —
-    ``photo_user_corrected``, как в чате; без поправки origin не шлётся.
+    ``photo_user_corrected``, подтверждение как есть — ``photo_estimated_confirmed``
+    (DRF-2110: origin едет всегда, как в чате).
     ``note`` карточки не пересылается — у ``log_meal`` нет такого поля
     (предел, как и в чате).
     """
@@ -4594,10 +4598,15 @@ def _customer_food_log_scan(bot_user: BotUser, body: dict[str, Any]) -> HttpResp
     }
     if dish is not None:
         kwargs["dish_name"] = dish.strip()
-    if corrected:
-        kwargs["entry_origin"] = FOOD_SCAN_ORIGIN_USER_CORRECTED
+    entry_origin = (
+        FOOD_SCAN_ORIGIN_USER_CORRECTED if corrected else FOOD_SCAN_ORIGIN_ESTIMATED_CONFIRMED
+    )
     try:
-        log = asyncio.run(get_nutrition_client().log_meal(**kwargs))
+        log = asyncio.run(
+            get_nutrition_client().log_meal(
+                scan_id=kwargs.pop("scan_id"), entry_origin=entry_origin, **kwargs
+            )
+        )
     except NutritionAPIError as exc:
         return _food_text_catalog_refusal(exc, external_id=external_id, step="log")
 
@@ -4607,7 +4616,7 @@ def _customer_food_log_scan(bot_user: BotUser, body: dict[str, Any]) -> HttpResp
             "dish_name": log.dish_name,
             "meal_type": log.meal_type,
             "calories": log.calories,
-            "entry_origin": FOOD_SCAN_ORIGIN_USER_CORRECTED if corrected else None,
+            "entry_origin": entry_origin,
         },
         status=201,
     )
