@@ -349,17 +349,14 @@ function DiaryReady({
   // «прятать» на уровне чтения (fail-closed, §10 Appendix ED Mode).
   const showNumbers = !day.hideNumbers;
   const { calories_eaten: eaten, calories_target: target, pfc } = day.today;
-  // DRF-1839. Добавление через скан — экран под `guardProd`, в прод-сборке
-  // он падает в момент использования (§33, DRF-1546 сняли его с главной по
-  // той же причине). Работающий вход записи — чат: текстовый ввод DRF-1837
-  // («гречка 200 г» → оценка → подтверждение). Кнопка скана остаётся только
-  // в DEV, где заглушки живы.
-  const scanEntryLive = import.meta.env.DEV;
+  // DRF-2107. «Добавить приём» ведёт на запись текстом (DRF-2091) — живой
+  // прокси, не заглушка; гейт `import.meta.env.DEV` времён DRF-1839 прятал
+  // в проде работающий вход и снят.
   return (
     <>
       <p className="food-scanner-diary__caption">
         {totalCount === 0
-          ? "Пока ничего не записано. Напиши Ayla в чате, что было, — например «гречка 200 г»: она посчитает и покажет, прежде чем записать."
+          ? "Пока ничего не записано. Добавь приём текстом здесь или напиши Ayla в чате — например «гречка 200 г»: она посчитает и покажет, прежде чем записать."
           : `Сегодня — ${entriesLabel(totalCount)}.`}
       </p>
 
@@ -488,17 +485,11 @@ function DiaryReady({
         </p>
       )}
 
-      {scanEntryLive && (
-        <div className="food-scanner-screen__cta-stack">
-          <button
-            type="button"
-            className="btn-primary"
-            onClick={onAddTap}
-          >
-            Добавить приём
-          </button>
-        </div>
-      )}
+      <div className="food-scanner-screen__cta-stack">
+        <button type="button" className="btn-primary" onClick={onAddTap}>
+          Добавить приём
+        </button>
+      </div>
 
       {/* DRF-2092 (F12) — избранное живёт на сервере; вход отсюда, не с
           дашборда: избранное растёт из записей дневника. */}

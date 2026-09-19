@@ -251,10 +251,11 @@ describe("ни одна съеденная тарелка не исчезает"
 });
 
 
-describe("пустой день не зовёт в неработающий скан (DRF-1839)", () => {
-  it("прод: подпись зовёт в чат, кнопки скана нет", async () => {
-    // Экран скана под `guardProd` падает в прод-сборке; работающий вход
-    // записи — текстовый ввод в чате (DRF-1837).
+describe("«Добавить приём» живёт и в прод-сборке (DRF-2107)", () => {
+  it("прод (DEV=false): кнопка есть и ведёт на запись текстом; подпись зовёт записать здесь", async () => {
+    // Гейт `import.meta.env.DEV` закрывал кнопку, пока скан был заглушкой
+    // (DRF-1839). После DRF-2091 кнопка ведёт на живой текстовый ввод —
+    // прятать её в проде значило прятать работающий вход.
     vi.stubEnv("DEV", false);
     try {
       mockedLoad.mockResolvedValue({
@@ -262,29 +263,40 @@ describe("пустой день не зовёт в неработающий ск
         hideNumbers: false,
         today: today({ calories_eaten: 0 }),
       });
-      renderScreen();
-      expect(
-        await screen.findByText(/Напиши Ayla в чате, что было/),
-      ).toBeInTheDocument();
-      expect(
-        screen.queryByRole("button", { name: "Добавить приём" }),
-      ).not.toBeInTheDocument();
+      const { useLocation } = await import("react-router-dom");
+      function Probe() {
+        const location = useLocation();
+        return <div data-testid="location">{location.pathname}</div>;
+      }
+      render(
+        <MemoryRouter initialEntries={["/customer/food-scanner/diary"]}>
+          <Routes>
+            <Route path="/customer/food-scanner/diary" element={<FoodScannerDiaryScreen />} />
+            <Route path="*" element={<Probe />} />
+          </Routes>
+        </MemoryRouter>,
+      );
+      expect(await screen.findByText(/Добавь приём текстом здесь/)).toBeInTheDocument();
       expect(screen.queryByText(/через скан/)).not.toBeInTheDocument();
+      fireEvent.click(screen.getByRole("button", { name: "Добавить приём" }));
+      expect(await screen.findByTestId("location")).toHaveTextContent(
+        "/customer/food-scanner/manual",
+      );
     } finally {
       vi.unstubAllEnvs();
     }
   });
 
-  it("DEV: кнопка скана остаётся — заглушки там живы", async () => {
+  it("непустой день — кнопка тоже есть", async () => {
     mockedLoad.mockResolvedValue({
-      state: "empty",
+      state: "entries",
+      entries: [SOUP],
       hideNumbers: false,
-      today: today({ calories_eaten: 0 }),
+      today: today(),
     });
     renderScreen();
-    expect(
-      await screen.findByRole("button", { name: "Добавить приём" }),
-    ).toBeInTheDocument();
+    await screen.findByText(SOUP.dish_name);
+    expect(screen.getByRole("button", { name: "Добавить приём" })).toBeInTheDocument();
   });
 
   it("DRF-2091: «Добавить приём» ведёт на запись текстом, не в съёмку (фото — D26)", async () => {
