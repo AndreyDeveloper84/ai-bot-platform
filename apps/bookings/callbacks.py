@@ -1145,17 +1145,32 @@ def _notify_manager_reschedule_success(
 
 
 def _render_partial_failure_text(row: PendingBookingAction) -> str:
+    """Менеджеру: перенос не завершён. Без телефона клиента (DRF-2129, DRF-1039)."""
     payload = row.payload or {}
+    link = _salon_day_link_for(payload.get("new_datetime"))
     return (
         "⚠️ Перенос записи не завершён.\n"
         f"Старая запись (record_id={payload.get('record_id', '—')}) отменена, "
         f"новая на {payload.get('new_datetime', '—')} НЕ создана.\n"
         f"Услуга: {payload.get('service_name', '—')}\n"
         f"Мастер: {payload.get('master_name', '—')}\n"
-        f"Клиент: {payload.get('client_name', '—')} "
-        f"({payload.get('client_phone', '—')})\n"
-        "Пожалуйста, перезапишите клиента вручную."
+        f"Клиент: {payload.get('client_name', '—')}\n"
+        "Пожалуйста, перезапишите клиента вручную." + (f" День салона: {link}" if link else "")
     )
+
+
+def _salon_day_link_for(iso_datetime: object) -> str:
+    """Ссылка на день салона по ISO-дате из payload; нет даты / Mini App — пусто."""
+    from datetime import date
+
+    from apps.channels.max.salon_links import salon_day_link
+
+    raw = str(iso_datetime or "")[:10]
+    try:
+        day = date.fromisoformat(raw)
+    except ValueError:
+        return ""
+    return salon_day_link(day)
 
 
 def _render_reschedule_success_text(
@@ -1165,6 +1180,8 @@ def _render_reschedule_success_text(
     payload = row.payload or {}
     confirmation = getattr(result, "confirmation", None)
     new_record_id = getattr(confirmation, "record_id", "") if confirmation else ""
+    # DRF-2129 — пара «переноса не завершён», тот же класс: телефона клиента нет.
+    link = _salon_day_link_for(payload.get("new_datetime"))
     return (
         "🔄 Клиент перенёс запись.\n"
         f"Старый record_id: {payload.get('record_id', '—')}\n"
@@ -1172,8 +1189,7 @@ def _render_reschedule_success_text(
         f"Услуга: {payload.get('service_name', '—')}\n"
         f"Мастер: {payload.get('master_name', '—')}\n"
         f"Новое время: {payload.get('new_datetime', '—')}\n"
-        f"Клиент: {payload.get('client_name', '—')} "
-        f"({payload.get('client_phone', '—')})"
+        f"Клиент: {payload.get('client_name', '—')}" + (f"\nДень салона: {link}" if link else "")
     )
 
 
