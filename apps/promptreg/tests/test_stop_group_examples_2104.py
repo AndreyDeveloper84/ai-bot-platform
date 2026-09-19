@@ -25,7 +25,12 @@ G1–G7 — острые неотложные состояния): там РПП
   человека, ответ передаёт менеджеру подбор ПРОЦЕДУРЫ (S5, не расчёт):
   не нарушение — для пулов записи страж требует только отсутствия
   обещания расчёта, маркеры «специалист» / «дневник» — про питание;
-* s5 — пул анкеты не менялся в составе: три примера, РПП-пример на месте.
+* s5 — пул анкеты не менялся в составе: три примера, РПП-пример на месте;
+* s6 (DRF-2105) — второе правило, по ОТВЕТУ и по всем пулам, от реплики не
+  зависит: в ответе примера нет числа-нормы темпа («2–3 кг/месяц», «кг в
+  неделю», «N кг за месяц») и нет обещания «темпа» — такой нормы владелец
+  не утверждал (§85 — только поправка ≤ 10 % к поддержанию), а ``pace`` в
+  анкете не шаг. Ложный вход — старый текст примера :206 → нарушение.
 """
 
 from __future__ import annotations
@@ -59,6 +64,18 @@ _CALCULATION_PROMISE = re.compile(r"поддержан|анкет|програм
 #: Что обязан сказать стоп о питании: кто называет числа и что дневник остаётся.
 _STOP_MARKERS = ("специалист", "дневник")
 
+#: DRF-2105 — число-норма темпа или обещание темпа в ОТВЕТЕ, по всем пулам и
+#: независимо от реплики: «2–3 кг/месяц», «кг в неделю», «5 кг за месяц»,
+#: «в спокойном темпе». Слово «темп» ловится целиком (темп/темпе/темпом):
+#: в примерах голоса ему места нет — «темп» в анкете не шаг (``fsm.py``).
+_PACE_NORM = re.compile(
+    r"\d[\d,.\-–]*\s*кг\s*(?:/|в\s+|за\s+)\s*(?:мес|недел)"
+    r"|кг\s*/\s*(?:мес|недел)"
+    r"|кг\s+в\s+(?:месяц|неделю)"
+    r"|\bтемп",
+    re.I,
+)
+
 #: Пулы, где стоп — про расчёт питания (маркеры обязательны). Остальные пулы
 #: (запись, боль) — только без обещания расчёта.
 _NUTRITION_INTENTS = frozenset(
@@ -91,6 +108,16 @@ def stop_group_violations(examples: list[Example], *, nutrition: bool = True) ->
     return violations
 
 
+def pace_norm_violations(examples: list[Example]) -> list[str]:
+    """DRF-2105: ответ примера называет норму темпа или обещает «темп» — по любой реплике."""
+    violations: list[str] = []
+    for example in examples:
+        hit = _PACE_NORM.search(example.assistant)
+        if hit:
+            violations.append(f"{example.user!r}: темп={hit.group(0)!r}")
+    return violations
+
+
 def _all_violations() -> tuple[int, list[str]]:
     """(сколько примеров прочитано, нарушения) по всем пулам роутера."""
     seen = 0
@@ -101,6 +128,7 @@ def _all_violations() -> tuple[int, list[str]]:
             f"{intent}: {v}"
             for v in stop_group_violations(pool, nutrition=intent in _NUTRITION_INTENTS)
         ]
+        violations += [f"{intent}: {v}" for v in pace_norm_violations(pool)]
     return seen, violations
 
 
@@ -173,6 +201,61 @@ class TestS4AStopWordWithoutAPromiseIsNotAViolation:
         assert stop_group_violations([example], nutrition=False) == []
         # Тот же ответ в пуле питания был бы нарушением: без «специалист» и «дневник».
         assert stop_group_violations([example], nutrition=True)
+
+
+_OLD_PACE_TEXT = (
+    "Понимаю желание, но за месяц 10 кг — слишком резко: уйдёт "
+    "мышечная масса, потом отскок. Реалистично 2-3 кг/месяц. "
+    "Поставлю цель «снижение» в спокойном темпе — ок?"
+)
+#: Две формулировки замены (обе без нормы темпа и без «темпа»); в пуле —
+#: та, что выбрал владелец. Вторая держится здесь, чтобы страж был проверен
+#: на обеих, а не только на выбранной.
+_PACE_TEXT_A = (
+    "Понимаю желание. Резких целей я не ставлю: в пилоте поправка к ориентиру — "
+    "не больше 10 % от поддержания. Посчитаю твой ориентир, а скорость снижения "
+    "лучше обсудить со специалистом — ок?"
+)
+_PACE_TEXT_B = (
+    "Понимаю. Цифру на месяц не назову — это к специалисту. "
+    "Здесь поставлю цель «снижение» с мягкой поправкой к ориентиру "
+    "(в пилоте — не больше 10 %) и посчитаю, от чего отталкиваться — ок?"
+)
+_PACE_USER = "хочу похудеть на 10 кг за месяц"
+
+
+class TestS6NoPaceNormInAnyReply:
+    def test_no_pool_reply_names_a_pace_norm_or_promises_a_pace(self) -> None:
+        seen, violations = _all_violations()
+        assert seen >= 21  # положительно: пулы прочитаны
+        # Квантор непустой: реплика про «кг за месяц» в пуле анкеты живая.
+        assert any(e.user == _PACE_USER for e in voice_examples.ANKETA_EMPATHY_EXAMPLES)
+        assert violations == []
+
+    def test_the_old_text_is_a_violation_by_the_number_and_by_the_word(self) -> None:
+        old = pace_norm_violations([Example(user=_PACE_USER, assistant=_OLD_PACE_TEXT)])
+        assert len(old) == 1 and "кг/мес" in old[0]
+        # Каждая половина порознь: число без слова и слово без числа.
+        assert pace_norm_violations([Example(user="x", assistant="Реалистично 2-3 кг/месяц.")])
+        assert pace_norm_violations(
+            [Example(user="x", assistant="Поставлю цель в спокойном темпе.")]
+        )
+        assert pace_norm_violations([Example(user="x", assistant="Не больше 0,5 кг в неделю.")])
+        assert pace_norm_violations([Example(user="x", assistant="Реально 4 кг за месяц.")])
+
+    def test_both_replacement_wordings_pass_and_the_pool_holds_one_of_them(self) -> None:
+        # Положительно — обе формулировки без нормы темпа и без «темпа»;
+        # старый текст на той же реплике даёт нарушение узлом выше.
+        for text in (_PACE_TEXT_A, _PACE_TEXT_B):
+            clean = pace_norm_violations([Example(user=_PACE_USER, assistant=text)])
+            assert not clean  # empty-assert-ok: the old text on the same user is a violation above
+            assert "10 %" in text and "кг" not in text.lower()
+        example = next(e for e in voice_examples.ANKETA_EMPATHY_EXAMPLES if e.user == _PACE_USER)
+        assert example.assistant in (_PACE_TEXT_A, _PACE_TEXT_B)
+        # Единственное число в ответе — предел §85 (10 %); литерал, у бота
+        # константы §85 нет (``GOAL_FACTOR_LIMIT`` живёт в каталоге).
+        assert re.findall(r"\d+(?:[.,]\d+)?", example.assistant) == ["10"]
+        assert "снижение" in example.assistant  # goal_key существует; «темп» — нет
 
 
 class TestS5ThePoolKeepsItsShape:
