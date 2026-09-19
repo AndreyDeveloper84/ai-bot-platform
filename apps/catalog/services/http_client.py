@@ -436,6 +436,13 @@ class EnsuredTenantDTO:
     created: bool
 
 
+class CatalogNotConfigured(CatalogTransportError):
+    """Наша сторона не настроена: пустой ``AYLA_INTERNAL_API_TOKEN`` или кривой
+    ``AYLA_BASE_URL`` (DRF-2117). Подкласс transport-ошибки, чтобы старые
+    ловцы не разъехались, но с собственным именем: «попробуйте ещё раз» здесь
+    не поможет — чинится в контейнере бота."""
+
+
 class CatalogReadinessRefused(CatalogError):
     """Каталог не отдал готовность салона: 401/403/404 (DRF-2117).
 
@@ -477,6 +484,9 @@ class SalonReadinessDTO:
     checked_at: str
     horizon_days: int
     masters: tuple[SalonReadinessMasterDTO, ...]
+    #: Проблемы уровня салона (``problems[].master == null`` в контракте §2b —
+    #: сегодня одна, ``no_masters``); в ``masters[]`` их нет по построению.
+    salon_problems: tuple[dict[str, str], ...]
     limits: tuple[str, ...]
 
 
@@ -1029,11 +1039,11 @@ class CatalogHttpClient:
         проверить», а не «готов».
         """
         if not self._token:
-            raise CatalogTransportError("AYLA_INTERNAL_API_TOKEN not configured on the bot side")
+            raise CatalogNotConfigured("AYLA_INTERNAL_API_TOKEN not configured on the bot side")
         try:
             url = AylaUrlBuilder(self._base_url).build(f"/internal/salons/{tenant_slug}/readiness/")
         except AylaUrlError as exc:
-            raise CatalogTransportError(f"invalid AYLA_BASE_URL: {exc}") from exc
+            raise CatalogNotConfigured(f"invalid AYLA_BASE_URL: {exc}") from exc
 
         try:
             response = self._client().get(
@@ -1088,11 +1098,17 @@ class CatalogHttpClient:
                 )
                 for row in list(data.get("masters") or [])
             )
+            salon_problems = tuple(
+                {"code": str(p.get("code") or ""), "text": str(p.get("text") or "")}
+                for p in list(data.get("problems") or [])
+                if p.get("master") is None
+            )
             return SalonReadinessDTO(
                 ready=bool(data["ready"]),
                 checked_at=str(data.get("checked_at") or ""),
                 horizon_days=int(data.get("horizon_days") or 0),
                 masters=masters,
+                salon_problems=salon_problems,
                 limits=tuple(str(x) for x in list(data.get("limits") or [])),
             )
         except (KeyError, TypeError, ValueError, AttributeError) as exc:

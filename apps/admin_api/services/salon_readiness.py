@@ -30,13 +30,26 @@
   при неизвестном состоянии не печатается никогда;
 * каждая проблема каталога — по коду; тексты — константы :data:`TEXTS` по
   тем же кодам, незнакомый код — текст каталога;
-* поверх — зеркало: строки тенанта не в архиве и с принятым приглашением
-  (``pending`` и ``revoked`` — решения владельца, не препятствия готовности);
-  ``profile_incomplete`` / ``ayla_unlinked`` / ``catalog_unlinked`` /
-  ``schedule_unconfirmed`` — по коду ``sale_block``; строка с
-  ``catalog_specialist_id``, которого нет в ответе каталога, —
-  ``catalog_missing``;
+* проблемы уровня салона (``no_masters``, ``master: null`` в контракте) —
+  строкой без имени; каталог сказал ``ready=false`` без единой строки —
+  ``unknown`` (форма, которую он не производит, но «готов» из неё не выводится);
+* поверх — зеркало: строки тенанта не в архиве, с принятым приглашением и
+  не снятые владельцем (``pending`` / ``revoked`` по ``sale_block`` — решения
+  владельца о составе, не препятствия; ``is_active=False`` — тот же фильтр,
+  что у дня салона ``staff_actions.salon_day``); ``profile_incomplete`` /
+  ``ayla_unlinked`` / ``catalog_unlinked`` / ``schedule_unconfirmed`` — по
+  коду ``sale_block``; строка с ``catalog_specialist_id``, которого нет в
+  ответе каталога, — ``catalog_missing``;
+* отказ зеркала или поиска актора (БД) — тот же UNKNOWN, что и отказ
+  каталога: кнопка и прокси не падают, а говорят «не удалось проверить»;
 * «готов» — только при пустом списке и без ``unknown`` ни у каталога, ни у нас.
+
+**Названный предел (DRF-1540/1541):** мастер из приглашения и та же мастер
+из синхронизации живут двумя строками зеркала; путь приглашения
+``catalog_specialist_id`` не пишет. Пока это так, инвайт-строка без ключа даёт
+«не связана с каталогом» даже для человека, которого каталог знает по
+синхронизированной строке, и считается отдельно в ``masters_total``.
+Склейка — контракт DRF-1541, не этот модуль.
 
 Актор чтения — владелец, иначе администратор (``_ayla_read_actor``, то же
 правило, что у кадра дня DRF-1237): каталог подтверждает slug по его TUR.
@@ -71,6 +84,8 @@ AYLA_UNLINKED = "ayla_unlinked"
 SCHEDULE_UNCONFIRMED = "schedule_unconfirmed"
 PROFILE_INCOMPLETE = "profile_incomplete"
 CATALOG_MISSING = "catalog_missing"
+#: Уровень салона (каталог, ``master: null``).
+NO_MASTERS = "no_masters"
 
 #: Отказы источника целиком — одна строка о салоне.
 SOURCE_UNAVAILABLE = "source_unavailable"
@@ -92,6 +107,11 @@ TEXTS: dict[str, str] = {
     SCHEDULE_UNCONFIRMED: "{name} — график не подтверждён",
     PROFILE_INCOMPLETE: "{name} — профиль не заполнен",
     CATALOG_MISSING: "{name} — не найдена в каталоге",
+}
+
+#: Тексты проблем уровня салона — без имени.
+SALON_TEXTS: dict[str, str] = {
+    NO_MASTERS: "В салоне нет ни одного мастера",
 }
 
 SOURCE_TEXTS: dict[str, str] = {
@@ -202,14 +222,17 @@ def _catalog_readiness(tenant: Any, actor_external_id: str):
 
 
 def _mirror_rows(tenant: Any) -> list[Any]:
-    """Строки зеркала, о которых есть смысл спрашивать: не в архиве, приглашение принято."""
+    """Строки зеркала, о которых есть смысл спрашивать: не в архиве, приглашение
+    принято, не сняты владельцем (``is_active`` — как у дня салона)."""
     from apps.catalog.master_state import ACCEPTED
     from apps.catalog.models import CatalogMaster
     from apps.tenancy.context import tenant_scope
 
     with tenant_scope(tenant):
         return list(
-            CatalogMaster.objects.filter(archived_at__isnull=True, invite_status=ACCEPTED)
+            CatalogMaster.objects.filter(
+                archived_at__isnull=True, invite_status=ACCEPTED, is_active=True
+            )
             .select_related("identity_link")
             .order_by("name", "id")
         )
@@ -224,7 +247,12 @@ def _mirror_problems(rows: list[Any], catalog_ids: set[str], *, days: int) -> li
         catalog_id = getattr(row, "catalog_specialist_id", None)
         codes: list[str] = []
         block = sale_block(row)
-        if block in _MIRROR_BLOCKS:
+        if block is not None and block not in _MIRROR_BLOCKS:
+            # ``pending`` / ``revoked`` — решение владельца о составе; строку
+            # не спрашиваем ни о связи, ни о каталоге (фильтр выше держит
+            # это же, здесь — на случай гонки со сменой статуса).
+            continue
+        if block is not None:
             codes.append(block)
         if catalog_id is None:
             # Без гейта ``sale_block`` молчит, а запись к такой строке из
@@ -247,9 +275,27 @@ def _mirror_problems(rows: list[Any], catalog_ids: set[str], *, days: int) -> li
 
 
 def check_salon_readiness(tenant: Any) -> Readiness:
-    """Каталог + зеркало; любой отказ источника — UNKNOWN = проблема."""
+    """Каталог + зеркало; любой отказ источника — UNKNOWN = проблема.
+
+    Наружу не бросает: и кнопка в чате, и прокsi admin Mini App отвечают
+    «не удалось проверить», а не 500 / проглоченный тап (ключ идемпотентности
+    консьюмера на исключении не освобождается).
+    """
+    try:
+        return _check_salon_readiness(tenant)
+    except Exception:  # noqa: BLE001 — UNKNOWN = проблема; класс и трасса — в лог
+        logger.warning(
+            "admin_api.salon_readiness.failed tenant=%s",
+            getattr(tenant, "slug", "?"),
+            exc_info=True,
+        )
+        return _source_failure(SOURCE_UNAVAILABLE)
+
+
+def _check_salon_readiness(tenant: Any) -> Readiness:
     from apps.catalog.services.http_client import (
         CatalogError,
+        CatalogNotConfigured,
         CatalogReadinessRefused,
         CatalogTransportError,
     )
@@ -271,18 +317,14 @@ def check_salon_readiness(tenant: Any) -> Readiness:
             exc.status_code,
         )
         return _source_failure(SOURCE_REFUSED)
-    except CatalogTransportError as exc:
+    except CatalogNotConfigured as exc:
+        logger.warning(
+            "admin_api.salon_readiness.not_configured tenant=%s err=%s", tenant.slug, exc
+        )
+        return _source_failure(SOURCE_NOT_CONFIGURED)
+    except (CatalogTransportError, CatalogError) as exc:
         logger.warning(
             "admin_api.salon_readiness.unavailable tenant=%s class=%s err=%s",
-            tenant.slug,
-            type(exc).__name__,
-            exc,
-        )
-        code = SOURCE_NOT_CONFIGURED if "not configured" in str(exc) else SOURCE_UNAVAILABLE
-        return _source_failure(code)
-    except CatalogError as exc:
-        logger.warning(
-            "admin_api.salon_readiness.error tenant=%s class=%s err=%s",
             tenant.slug,
             type(exc).__name__,
             exc,
@@ -292,6 +334,12 @@ def check_salon_readiness(tenant: Any) -> Readiness:
     days = catalog.horizon_days or 7
     problems: list[Problem] = []
     unknown = False
+    for p in catalog.salon_problems:
+        # Уровень салона (``no_masters``): строка без имени, каталожный текст
+        # — только для незнакомого кода.
+        problems.append(
+            Problem(None, "", p["code"], SALON_TEXTS.get(p["code"], p["text"]), "catalog")
+        )
     for master in catalog.masters:
         name = _first_name(master.name)
         if "unknown" in master.checks.values():
@@ -307,18 +355,27 @@ def check_salon_readiness(tenant: Any) -> Readiness:
                 )
             )
 
+    if not catalog.ready and not problems:
+        # Каталог отказал в «готов», не назвав причины, — форма, которой контракт
+        # не производит; читать её как «готов» нельзя.
+        unknown = True
+
     rows = _mirror_rows(tenant)
     catalog_ids = {m.id for m in catalog.masters}
     problems.extend(_mirror_problems(rows, catalog_ids, days=days))
 
-    # Состав — объединение двух списков: мастера каталога плюс строки
-    # зеркала, которых каталог не знает (без ``catalog_specialist_id``).
+    # Состав — объединение двух списков: мастера каталога ∪ строки зеркала с
+    # ключом каталога (в том числе те, кого каталог не вернул — они названы
+    # ``catalog_missing``) + строки без ключа (``catalog_unlinked``).
+    linked_ids = {
+        str(r.catalog_specialist_id) for r in rows if getattr(r, "catalog_specialist_id", None)
+    }
     unlinked_rows = sum(1 for r in rows if getattr(r, "catalog_specialist_id", None) is None)
     return Readiness(
         problems=tuple(problems),
         unknown=unknown,
         checked_at=catalog.checked_at or timezone.now().isoformat(),
-        masters_total=len(catalog_ids) + unlinked_rows,
+        masters_total=len(catalog_ids | linked_ids) + unlinked_rows,
         limits=catalog.limits,
     )
 
@@ -346,8 +403,10 @@ __all__ = [
     "CATALOG_MISSING",
     "CATALOG_UNLINKED",
     "NOT_READY_HEAD",
+    "NO_MASTERS",
     "PROFILE_INCOMPLETE",
     "READY_TEXT",
+    "SALON_TEXTS",
     "SCHEDULE_UNCONFIRMED",
     "SOURCE_NOT_CONFIGURED",
     "SOURCE_REFUSED",

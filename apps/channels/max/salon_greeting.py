@@ -170,14 +170,35 @@ def _masters_available() -> int:
     return CatalogMaster.objects.filter(AVAILABLE).count()
 
 
+#: Сколько держится счётчик готовности для приветствия. Приветствие звучит и
+#: на свободный текст владельца — REST-чтение каталога (до 7 вычислений окон
+#: на мастера) на каждое сообщение было бы циклом, а контракт §2b говорит
+#: «кнопка, не цикл». Кнопка «Проверить готовность» кэш не читает.
+READINESS_CACHE_SECONDS = 120
+
+
 def _readiness_problems(tenant: Any) -> int | None:
-    """Сколько проблем готовности; ``None`` — источник недоступен (строка без утверждения)."""
+    """Сколько проблем готовности; ``None`` — источник недоступен (строка без утверждения).
+
+    Кэш на :data:`READINESS_CACHE_SECONDS` по тенанту; отказ источника не
+    кэшируется — следующий вход спросит снова.
+    """
+    from django.core.cache import cache
+
     from apps.admin_api.services.salon_readiness import check_salon_readiness
 
+    key = f"salon_greeting:readiness:{getattr(tenant, 'pk', tenant)}"
+    cached = cache.get(key)
+    if cached is not None:
+        return int(cached)
     readiness = check_salon_readiness(tenant)
     if readiness.source_problem is not None:
         return None
-    return len(readiness.problems)
+    if readiness.unknown and not readiness.problems:
+        return None
+    count = len(readiness.problems)
+    cache.set(key, count, READINESS_CACHE_SECONDS)
+    return count
 
 
 def _attention() -> int:
@@ -228,9 +249,10 @@ def gather(tenant: Any, role_ctx: Any, *, now: datetime | None = None) -> Greeti
             logger.warning("channels.max.salon.greeting.attention_unavailable", exc_info=True)
             missing.append("attention")
 
-        if not getattr(role_ctx, "is_master", False):
-            # Готовность — только владельцу / администратору: мастеру список
-            # чужих проблем не адресован, а вызов стоит REST-чтения каталога.
+        if getattr(role_ctx, "is_owner", False) or getattr(role_ctx, "is_admin", False):
+            # Готовность — только владельцу / администратору (и владельцу,
+            # который сам мастер): мастеру список чужих проблем не адресован,
+            # а вызов стоит REST-чтения каталога.
             try:
                 readiness_problems = _readiness_problems(tenant)
             except Exception:  # noqa: BLE001
@@ -316,9 +338,16 @@ def render_master(name: str, salon: str, data: GreetingData) -> str:
 
 
 def _attention_total(data: GreetingData) -> int | None:
-    """Заявки + handoff + проблемы готовности; ``None``, когда нет ни одного источника."""
-    parts = [n for n in (data.attention, data.readiness_problems) if n is not None]
-    return sum(parts) if parts else None
+    """Заявки + handoff + проблемы готовности.
+
+    ``None``, когда недоступен источник заявок/handoff: строка о «ситуациях»
+    опускается целиком (§103) — «ожидающих ответа нет» при упавшем источнике
+    было бы утверждением без основания, сколько бы проблем ни нашла готовность.
+    Недоступная готовность (``None``) счётчик не ломает — просто не входит.
+    """
+    if data.attention is None:
+        return None
+    return data.attention + (data.readiness_problems or 0)
 
 
 def render_admin(name: str, salon: str, role_word: str, data: GreetingData) -> str:

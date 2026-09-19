@@ -20,6 +20,7 @@
 
 from __future__ import annotations
 
+import itertools
 import uuid
 from unittest.mock import patch
 
@@ -91,10 +92,13 @@ def _catalog_body(masters: list[dict], *, ready: bool | None = None) -> dict:
     }
 
 
+_external_ids = itertools.count(-2117001, -1)
+
+
 def _mirror_row(tenant: Tenant, name: str, **over) -> CatalogMaster:
     fields = dict(
         tenant=tenant,
-        external_id=-abs(hash(name)) % 100000,
+        external_id=next(_external_ids),
         external_updated_at=timezone.now(),
         name=name,
         invite_status=CatalogMaster.InviteStatus.ACCEPTED,
@@ -253,8 +257,55 @@ class TestService:
             "Ольга — не найдена в каталоге",
         ]
         assert (
-            r.masters_total == 2
-        )  # Анна из каталога + Мария без связи; Ольга — в списке каталога нет
+            r.masters_total == 3
+        )  # Анна (каталог) + Мария (без ключа) + Ольга (ключ, каталог не вернул)
+
+    def test_owner_deactivated_row_is_not_a_problem(
+        self, httpx_mock: HTTPXMock, tenant: Tenant, owner_bot_user: BotUser
+    ) -> None:
+        """Снятая владельцем строка (``is_active=False``) — решение, не препятствие."""
+        anna = _catalog_master("Анна")
+        httpx_mock.add_response(method="GET", url=_url(tenant), json=_catalog_body([anna]))
+        _mirror_row(tenant, "Анна", catalog_specialist_id=uuid.UUID(anna["id"]))
+        _mirror_row(tenant, "Снятая", catalog_specialist_id=None, is_active=False)
+        r = svc.check_salon_readiness(tenant)
+        assert r.ready is True and r.masters_total == 1
+
+    def test_empty_salon_from_the_contract_is_not_ready(
+        self, httpx_mock: HTTPXMock, tenant: Tenant, owner_bot_user: BotUser
+    ) -> None:
+        """Контракт §2b: ``masters: []``, ``ready: false``, одна проблема с ``master: null``."""
+        body = _catalog_body([], ready=False)
+        body["data"]["problems"] = [
+            {"master": None, "code": "no_masters", "text": "В салоне нет ни одного мастера"}
+        ]
+        httpx_mock.add_response(method="GET", url=_url(tenant), json=body)
+        r = svc.check_salon_readiness(tenant)
+        assert r.ready is False and r.unknown is False
+        assert [(p.master_id, p.code, p.origin) for p in r.problems] == [
+            (None, "no_masters", "catalog")
+        ]
+        assert svc.render(r) == "Салон пока не готов:\nВ салоне нет ни одного мастера."
+        assert r.masters_total == 0
+
+    def test_catalog_not_ready_without_a_reason_is_unknown(
+        self, httpx_mock: HTTPXMock, tenant: Tenant, owner_bot_user: BotUser
+    ) -> None:
+        httpx_mock.add_response(method="GET", url=_url(tenant), json=_catalog_body([], ready=False))
+        r = svc.check_salon_readiness(tenant)
+        assert r.ready is False and r.unknown is True
+
+    def test_mirror_failure_is_unknown_not_a_crash(
+        self, httpx_mock: HTTPXMock, tenant: Tenant, owner_bot_user: BotUser, monkeypatch
+    ) -> None:
+        httpx_mock.add_response(method="GET", url=_url(tenant), json=_catalog_body([]))
+
+        def boom(tenant):
+            raise RuntimeError("db down")
+
+        monkeypatch.setattr(svc, "_mirror_rows", boom)
+        r = svc.check_salon_readiness(tenant)
+        assert r.ready is False and r.source_problem == svc.SOURCE_UNAVAILABLE
 
     def test_schedule_unconfirmed_only_behind_the_gate(
         self, httpx_mock: HTTPXMock, tenant: Tenant, owner_bot_user: BotUser, settings
@@ -318,6 +369,15 @@ class TestService:
     ) -> None:
         r = svc.check_salon_readiness(tenant)
         assert r.source_problem == svc.SOURCE_NOT_CONFIGURED and r.ready is False
+        assert httpx_mock.get_requests() == []
+
+    @pytest.mark.httpx_mock(assert_all_responses_were_requested=False)
+    def test_empty_token_is_not_configured_not_retry(
+        self, httpx_mock: HTTPXMock, tenant: Tenant, owner_bot_user: BotUser, settings
+    ) -> None:
+        settings.AYLA_INTERNAL_API_TOKEN = ""
+        r = svc.check_salon_readiness(tenant)
+        assert r.source_problem == svc.SOURCE_NOT_CONFIGURED
         assert httpx_mock.get_requests() == []
 
     def test_admin_is_the_actor_when_there_is_no_owner(

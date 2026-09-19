@@ -405,6 +405,23 @@ class TestG5TheNumbersAreLive:
         )
         assert "графики и услуги настроены" not in text
 
+    def test_attention_source_down_drops_the_line_even_with_readiness(
+        self, tenant, sources, sent, monkeypatch
+    ) -> None:
+        """§103: заявки/handoff недоступны — «ожидающих ответа нет» не печатается."""
+        _owner(tenant, greeted=True)
+
+        def _boom():
+            raise RuntimeError("tasks down")
+
+        monkeypatch.setattr(salon_greeting, "_attention", _boom)
+        sources["readiness"] = 0
+        _handle("/start")
+        text = sent.call_args.kwargs["text"]
+        assert "ожидающих ответа нет" not in text and "ситуац" not in text
+        assert "всё в порядке" not in text
+        assert "7 записей;" in text and "работают 3 мастера." in text
+
     def test_readiness_problems_count_as_situations(self, tenant, sources, sent) -> None:
         """DRF-2117: «одна ситуация требует внимания» — и проблема готовности тоже."""
         _owner(tenant, greeted=True)
