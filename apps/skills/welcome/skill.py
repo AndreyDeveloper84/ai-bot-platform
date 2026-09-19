@@ -192,6 +192,17 @@ MINIAPP_ROUTES: dict[str, str] = {
     # DRF-1491 — главное меню витрины (``apps.skills.menu.marketplace``).
     # Два экрана, у которых слага до сих пор не было.
     "open_food_diary": "customer/food-scanner/diary",
+    # DRF-2114 — тройка «Сегодня | Расписание | Ayla» персоналу (§50 п.5):
+    # салон (owner|admin — за ``canOpenSalonPilot``, DRF-2115) и мастер.
+    # Имена согласованы с ayla-85 (#1867 пути не менял). Слага под
+    # ``/admin/handoff`` нет намеренно: вход — только с карточки «Сегодня».
+    "open_admin_today": "admin/today",
+    "open_admin_schedule": "admin/schedule",
+    "open_admin_ayla": "admin/ayla",
+    "open_admin_booking_new": "admin/booking/new",
+    "open_master_today": "master/dashboard",
+    "open_master_schedule": "master/schedule",
+    "open_master_ayla": "master/ayla",
     # На ``open_wellness`` кнопки сегодня НЕТ — по той же причине и с той
     # же судьбой, что у ``open_food_scan`` абзацем выше: экран в прод-
     # сборке отдаёт ``PilotComingSoonScreen`` (сторож
