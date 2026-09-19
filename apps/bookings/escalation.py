@@ -123,15 +123,10 @@ ESCALATION_WINDOW = timedelta(hours=12)
 def _format_escalation_text(reminder: BookingReminder) -> str:
     """Render the manager-facing escalation body.
 
-    Plain text — no buttons, no callbacks. The manager calls the client
-    by phone, so the message must surface the phone number prominently
-    and include enough context that the manager can identify the
-    booking without opening YClients.
+    Plain text — no buttons, no callbacks. Enough context to identify the
+    booking without opening YClients:
 
-    Fields included (per DRF-845 spec):
-
-    * client phone — primary actionable datum
-    * client name — for warm intro on the call
+    * client name — who the booking is for
     * service name — to set context ("about your massage tomorrow")
     * visit time — to confirm the slot is still wanted
     * master name — to confirm the right provider
@@ -140,28 +135,39 @@ def _format_escalation_text(reminder: BookingReminder) -> str:
       has no ``booking_request`` link (webhook-created without a
       pre-existing booking row), we surface the reminder's own UUID
       instead so the row is still locatable.
+    * a link to the salon's day in the admin Mini App, when the salon bot
+      has one (DRF-2129) — the manager reaches the booking there.
 
-    Phone / name are pulled from the linked ``bot_user`` (snapshot of
-    client identity at booking time, stable across BotUser edits — same
+    **No client phone** (DRF-1039 / OD-W2-2, applied in DRF-2129): the
+    number is not passed to staff in texts; the guard is
+    ``bookings/tests/test_staff_texts_no_phone_2129.py``.
+
+    Name is pulled from the linked ``bot_user`` (snapshot of client
+    identity at booking time, stable across BotUser edits — same
     rationale as ``chat_id`` snapshotting on the reminder itself).
     """
+    from apps.channels.max.salon_links import salon_day_link
+
     visit_local = timezone.localtime(reminder.visit_at)
     bu = reminder.bot_user
-    phone = (bu.phone if bu else "") or "—"
     client_name = (bu.client_name if bu else "") or "—"
     if reminder.booking_request_id is not None:
         traceable_id = reminder.booking_request_id
     else:
         traceable_id = reminder.id
+    link = salon_day_link(visit_local.date())
+    tail = (
+        f"Пожалуйста, свяжитесь с клиентом и уточните. День салона: {link}"
+        if link
+        else "Пожалуйста, свяжитесь с клиентом и уточните — запись в дне салона в приложении."
+    )
     return (
         "⚠️ Клиент не подтвердил запись.\n"
         f"Имя: {client_name}\n"
-        f"Телефон: {phone}\n"
         f"Услуга: {reminder.service_name or '—'}\n"
         f"Мастер: {reminder.master_name or '—'}\n"
         f"Визит: {visit_local.strftime('%d.%m в %H:%M')}\n"
-        f"ID записи: {traceable_id}\n\n"
-        "Пожалуйста, позвоните клиенту и уточните."
+        f"ID записи: {traceable_id}\n\n" + tail
     )
 
 

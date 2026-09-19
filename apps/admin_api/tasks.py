@@ -91,6 +91,72 @@ def _idempotency_lock_key(*, request_id: str, decision: str) -> str:
     return f"master_dm_sent:{request_id}:{decision}"
 
 
+def render_master_decision_text(
+    *,
+    decision: str,
+    date_range_human: str,
+    rejection_reason: str,
+    decided_by: str | None,
+    master_mini_app_url: str,
+) -> str:
+    """Текст DM мастеру о решении по заявке — чистая функция (DRF-2129).
+
+    Отклонение зовёт не имя администратора, зашитое в код, а того, кто решил
+    (``decided_by`` — первое слово ``display_name`` решившего, без фамилии
+    и телефона); решивший не найден — «у администратора салона», без
+    подстановки владельца по умолчанию.
+    """
+
+    if decision == "approved":
+        return (
+            f"Ваш запрос на смену расписания на {date_range_human} одобрен. Готово. "
+            f"[Открыть расписание]({master_mini_app_url})"
+        )
+    who = f"у администратора салона — {decided_by}" if decided_by else "у администратора салона"
+    return (
+        f"Запрос на смену расписания на {date_range_human} отклонён. "
+        f"Причина: {rejection_reason}. Уточнить можно {who}."
+    )
+
+
+def _decider_first_name(request_id: str, master_id: str) -> str | None:
+    """Первое слово имени решившего по ``ScheduleChangeRequest.resolved_by_bot_user_id``.
+
+    Задача без тенанта в kwargs: заявка читается по ``master_id`` (тот же
+    мастер, которому уходит DM), решивший — по ``tenant_id`` заявки.
+    """
+
+    try:
+        from apps.identity.models import BotUser
+        from apps.scheduling.models import ScheduleChangeRequest
+
+        row = (
+            ScheduleChangeRequest.all_tenants.filter(pk=request_id, master_id=UUID(master_id))
+            .values_list("resolved_by_bot_user_id", "tenant_id")
+            .first()
+        )
+        if not row or not row[0]:
+            return None
+        resolver_id: UUID = row[0]
+        tenant_id = row[1]
+        name = (
+            BotUser.all_tenants.filter(pk=resolver_id, tenant_id=tenant_id)
+            .values_list("display_name", flat=True)
+            .first()
+        )
+    except Exception:  # noqa: BLE001 — имя решившего не должно ронять DM
+        # INFO, не WARNING: best-effort; WARNING этого модуля — только с
+        # полным набором полей (test_tasks_amendments, Surface #3).
+        logger.info(
+            "admin_api.tasks.decider_lookup_failed request_id=%s master_id=%s",
+            request_id,
+            master_id,
+        )
+        return None
+    first = str(name or "").strip().split(" ", 1)[0]
+    return first or None
+
+
 @shared_task(
     name="admin_api.dispatch_master_decision_dm",
     bind=True,
@@ -177,15 +243,13 @@ def dispatch_master_decision_dm(
         "https://master.formulatela.ru/schedule",
     )
 
-    if decision == "approved":
-        text = (
-            f"Ваш запрос на смену расписания на {date_range_human} одобрен. Готово. "
-            f"[Открыть расписание]({master_mini_app_url})"
-        )
-    elif decision == "rejected":
-        text = (
-            f"Запрос на смену расписания на {date_range_human} отклонён. "
-            f"Причина: {rejection_reason}. Спросите у Карины уточнить."
+    if decision in ("approved", "rejected"):
+        text = render_master_decision_text(
+            decision=decision,
+            date_range_human=date_range_human,
+            rejection_reason=rejection_reason,
+            decided_by=_decider_first_name(request_id, master_id),
+            master_mini_app_url=master_mini_app_url,
         )
     else:
         # Structured-only log: no rendered text, no rejection_reason.

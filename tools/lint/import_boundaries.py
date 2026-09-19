@@ -788,6 +788,10 @@ SCHEDULING_CROSS_TENANT_BASELINE: frozenset[BaselineKey] = frozenset(
         # request, including both `select_for_update().get(id=…, tenant_id=…)`.
         # Admin authority over ONE named tenant; no discovery.
         "apps/admin_api/services/availability.py",
+        # 1 site (DRF-2129). Worker task without a tenant in kwargs: the
+        # request row is pinned by `master_id` (the master the DM goes to);
+        # the decider is then read by that row's `tenant_id`.
+        "apps/admin_api/tasks.py",
         # 1 site. `update_or_create(tenant=tenant, master=mst, …)` in a dev
         # bootstrap command, run at a terminal where no tenant ContextVar exists.
         "apps/catalog/management/commands/seed_dev_formula_tela.py",

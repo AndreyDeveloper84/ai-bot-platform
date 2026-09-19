@@ -132,8 +132,8 @@ class TestHappyPath:
         assert kwargs["chat_id"] == "mgr-chat-1"
         assert kwargs["attachments"] is None
         text = kwargs["text"]
-        # Spec: message contains phone, name, service, visit time, master.
-        assert "79991234567" in text
+        # DRF-2129 (DRF-1039): name, service, visit time, master — no client phone.
+        assert "79991234567" not in text
         assert "Anna" in text
         assert "Массаж" in text
         assert "Lera" in text
@@ -314,15 +314,16 @@ class TestMultiTenant:
         assert result["escalated"] == 2
         assert mock_send.call_count == 2
         # Each call carried the correct per-tenant manager chat_id and
-        # the correct per-tenant client phone number — no cross-leak.
+        # the correct per-tenant client name — no cross-leak; phones are
+        # not in staff texts at all (DRF-2129, DRF-1039).
         calls_by_chat = {
             call.kwargs["chat_id"]: call.kwargs["text"] for call in mock_send.call_args_list
         }
         assert set(calls_by_chat.keys()) == {"mgr-A", "mgr-B"}
-        assert "79990000001" in calls_by_chat["mgr-A"]
         assert "Alice" in calls_by_chat["mgr-A"]
-        assert "79990000002" in calls_by_chat["mgr-B"]
         assert "Bob" in calls_by_chat["mgr-B"]
+        assert "79990000001" not in calls_by_chat["mgr-A"]
+        assert "79990000002" not in calls_by_chat["mgr-B"]
         # Negative cross-checks — Alice's phone must NOT appear in
         # Salon B's manager message.
         assert "79990000001" not in calls_by_chat["mgr-B"]
