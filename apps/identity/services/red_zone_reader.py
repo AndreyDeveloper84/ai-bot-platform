@@ -46,6 +46,7 @@ import uuid
 from typing import Optional
 
 from django.db import connection, transaction
+from django.utils import timezone
 
 from apps.identity.models import MemoryEntry, RedZoneAccessLog
 from apps.identity.services.exceptions import TenantScopeViolation
@@ -208,3 +209,145 @@ class RedZoneReader:
                     logger.exception(
                         "RESET of red_zone_access_context failed — connection likely unusable"
                     )
+
+    # ------------------------------------------------------------------
+    # DRF-2133 — субъект данных: экран «Что Ayla помнит»
+    # ------------------------------------------------------------------
+
+    @classmethod
+    def list_live_for_subject(
+        cls,
+        *,
+        user_id: uuid.UUID,
+        accessor_role: str,
+        request_id: uuid.UUID,
+        purpose: str,
+        accessor_principal: Optional[str] = None,
+    ) -> list[MemoryEntry]:
+        """Live red-zone entries of ONE subject, audited row by row.
+
+        The screen «Что Ayla помнит» needs the list, and :meth:`read` takes
+        one id: an id list gathered outside this module would see zero rows
+        on Postgres (RLS hides red without the GUC) and would be a second
+        red read path besides. Same three layers as :meth:`read`: GUC set
+        inside one ``atomic()``, ownership by construction (the filter IS
+        ``user_id``), one ``RedZoneAccessLog`` row per returned entry in
+        the same transaction — an empty result writes no log (no orphan
+        log, round-2 AS1). ``RESET`` in ``finally`` (round-5 F1).
+
+        Live = not tombstoned and no pending delete request, the same gate
+        ``memory_reader`` applies to green. No cross-tenant carve-out here:
+        the subject sees their own memory whatever tenant wrote it.
+        """
+        if accessor_principal is None:
+            accessor_principal = _default_principal_for_role(accessor_role)
+        if accessor_role == RedZoneAccessLog.ACCESSOR_OPS_ADMIN and accessor_principal == "unknown":
+            raise ValueError(
+                "ops_admin role requires explicit accessor_principal (staff User UUID)"
+            )
+
+        try:
+            with transaction.atomic():
+                cls._set_guc(request_id)
+                entries = list(
+                    MemoryEntry.objects.filter(
+                        user_id=user_id,
+                        sensitivity_zone=MemoryEntry.SENSITIVITY_RED,
+                        soft_deleted_at__isnull=True,
+                        delete_requested_at__isnull=True,
+                    ).order_by("created_at")
+                )
+                RedZoneAccessLog.objects.bulk_create(
+                    [
+                        RedZoneAccessLog(
+                            memory_entry_id=entry.id,
+                            user_id=user_id,
+                            accessor_role=accessor_role,
+                            accessor_principal=accessor_principal,
+                            access_type=RedZoneAccessLog.ACCESS_READ,
+                            request_id=request_id,
+                            purpose=purpose,
+                        )
+                        for entry in entries
+                    ]
+                )
+                return entries
+        finally:
+            cls._reset_guc()
+
+    @classmethod
+    def soft_delete_for_subject(
+        cls,
+        *,
+        entry_id: uuid.UUID,
+        user_id: uuid.UUID,
+        accessor_role: str,
+        request_id: uuid.UUID,
+        purpose: str,
+        reason: str,
+        accessor_principal: Optional[str] = None,
+    ) -> bool:
+        """Tombstone ONE live red entry of the subject; ``True`` if a row moved.
+
+        The green deleter (``memory_deleter.soft_delete_green_entries``) is
+        green-only on purpose; a red tombstone needs the GUC (the UPDATE's
+        WHERE is subject to the SELECT policy) and an access log of type
+        ``delete``. Same UPDATE shape as the green path: tombstone +
+        ``status='deleted'`` + ``updated_at`` in one statement (CHECK 4).
+        Not the subject's, not red, or already gone → ``False``, no log.
+        """
+        if accessor_principal is None:
+            accessor_principal = _default_principal_for_role(accessor_role)
+
+        try:
+            with transaction.atomic():
+                cls._set_guc(request_id)
+                now = timezone.now()
+                moved = MemoryEntry.objects.filter(
+                    id=entry_id,
+                    user_id=user_id,
+                    sensitivity_zone=MemoryEntry.SENSITIVITY_RED,
+                    soft_deleted_at__isnull=True,
+                    delete_requested_at__isnull=True,
+                ).update(
+                    delete_requested_at=now,
+                    soft_deleted_at=now,
+                    deletion_reason=reason,
+                    status=MemoryEntry.STATUS_DELETED,
+                    updated_at=now,
+                )
+                if moved:
+                    RedZoneAccessLog.objects.create(
+                        memory_entry_id=entry_id,
+                        user_id=user_id,
+                        accessor_role=accessor_role,
+                        accessor_principal=accessor_principal,
+                        access_type=RedZoneAccessLog.ACCESS_DELETE,
+                        request_id=request_id,
+                        purpose=purpose,
+                    )
+                return bool(moved)
+        finally:
+            cls._reset_guc()
+
+    @staticmethod
+    def _set_guc(request_id: uuid.UUID) -> None:
+        """Step 1 of every red access: let RLS see red rows for this txn (Postgres only)."""
+        if connection.vendor == "postgresql":
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    "SELECT set_config('ayla.red_zone_access_context', %s, true)",
+                    [str(request_id)],
+                )
+
+    @staticmethod
+    def _reset_guc() -> None:
+        """Round-5 F1: clear the GUC on every exit path; a failed RESET is logged, not raised."""
+        if connection.vendor == "postgresql":
+            try:
+                with connection.cursor() as cursor:
+                    cursor.execute("RESET ayla.red_zone_access_context")
+            except Exception:
+                logger.exception(
+                    "RESET of red_zone_access_context failed — connection likely unusable"
+                )

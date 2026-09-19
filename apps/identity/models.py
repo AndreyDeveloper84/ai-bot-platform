@@ -864,8 +864,14 @@ class MemoryEntry(models.Model):
     DELETION_REASON_TTL_PURGE = "ttl_purge"
     DELETION_REASON_MINOR_PROTECTION = "minor_protection"
     DELETION_REASON_UNKNOWN_LEGACY = "unknown_legacy"
+    # DRF-2133 — «Забыть» с экрана «Что Ayla помнит». Отдельно от
+    # ``user_delete`` (команда в чате): два запроса с разной доказательной
+    # базой, и tombstone, который их не различает, не ответит аудиту
+    # «откуда пришло удаление». Ровно 20 символов — предел поля.
+    DELETION_REASON_USER_REQUEST_MINIAPP = "user_request_miniapp"
     DELETION_REASON_CHOICES = [
         (DELETION_REASON_USER_DELETE, "User-initiated per-entry delete"),
+        (DELETION_REASON_USER_REQUEST_MINIAPP, "User-initiated per-entry delete from Mini App"),
         (DELETION_REASON_WITHDRAWAL, "Consent withdrawn for yellow/red entry"),
         (DELETION_REASON_FORGET_ALL, "User invoked forget-all"),
         (DELETION_REASON_TTL_PURGE, "Auto-purged by TTL sweep"),
@@ -1195,10 +1201,15 @@ class RedZoneAccessLog(models.Model):
     ACCESSOR_AYLA_LLM = "ayla_llm"
     ACCESSOR_SYSTEM_JOB = "system_job"
     ACCESSOR_OPS_ADMIN = "ops_admin"
+    # DRF-2133 — субъект данных читает / забывает свои red-строки с экрана
+    # «Что Ayla помнит». Не ops_admin с principal=user_id: аудит субъекта
+    # под чужой ролью недопустим (152-ФЗ гл. 3 «кто обращался»).
+    ACCESSOR_DATA_SUBJECT = "data_subject"
     ACCESSOR_ROLE_CHOICES = [
         (ACCESSOR_AYLA_LLM, "Ayla LLM prompt construction"),
         (ACCESSOR_SYSTEM_JOB, "System job (TTL sweep, forget-all)"),
         (ACCESSOR_OPS_ADMIN, "Ops admin (break-glass)"),
+        (ACCESSOR_DATA_SUBJECT, "Data subject (own memory, Mini App)"),
     ]
 
     ACCESS_READ = "read"
@@ -1206,10 +1217,13 @@ class RedZoneAccessLog(models.Model):
     ACCESS_PURGE = "purge"
     ACCESS_WITHDRAWAL = "withdrawal"
     ACCESS_WRITE_REJECTED_DOB = "write_rejected_dob_lookup"
+    # DRF-2133 — soft-delete по просьбе субъекта (tombstone, не purge).
+    ACCESS_DELETE = "delete"
     ACCESS_TYPE_CHOICES = [
         (ACCESS_READ, "Read"),
         (ACCESS_WRITE, "Write"),
         (ACCESS_PURGE, "Purge"),
+        (ACCESS_DELETE, "Delete — subject-requested soft-delete (tombstone)"),
         (ACCESS_WITHDRAWAL, "Withdrawal — explicit consent revocation"),
         (
             ACCESS_WRITE_REJECTED_DOB,
