@@ -79,6 +79,7 @@ import {
   setBackButton,
   setClosingConfirmation,
 } from "../../lib/max-sdk";
+import { SALON_PILOT_LANDING } from "../../lib/salon-pilot";
 
 interface Props {
   me: MeResponse;
@@ -229,7 +230,8 @@ export function AdminServicesMatrixScreen({ me }: Props) {
       if (dirtyCount > 0) {
         setConfirmLeave(true);
       } else {
-        navigate("/admin/team");
+        // DRF-2115: «Услуги» открываются из аватара — назад в «Сегодня».
+        navigate(SALON_PILOT_LANDING);
       }
     });
     return () => {

@@ -116,6 +116,7 @@ import {
   type DayRow,
 } from "../../lib/salon-today";
 import { SalonPilotFrame } from "./SalonPilotFrame";
+import { SalonTodayCards } from "./SalonTodayCards";
 
 /** `2026-09-07` → `Понедельник, 7 сентября` — как в шапке макета. */
 function formatDayLine(iso: string): string {
@@ -304,6 +305,10 @@ export function SalonPilotTodayScreen({ me }: { me: MeResponse }) {
           + Новая запись
         </button>
       ) : null}
+
+      {/* DRF-2115 — «Диалоги — N ждут ответа» и «График — N заявок»;
+          «Готовность» не рисуется до ручки (§33, DRF-2116/2117). */}
+      <SalonTodayCards />
 
       <p className="salon-pilot__note" role="status">
         {statusLine}

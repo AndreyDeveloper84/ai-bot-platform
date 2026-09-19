@@ -46,6 +46,8 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 
+import { useSalonSectionBack } from "../../hooks/useSalonSectionBack";
+
 import { AdminTabBar } from "../../components/AdminTabBar";
 import { Snackbar } from "../../components/Snackbar";
 import { ApiError } from "../../lib/api";
@@ -62,11 +64,7 @@ import {
   isResolvedStatus,
   listAdminThreads,
 } from "../../lib/internal-chat-api";
-import {
-  hapticImpact,
-  hapticSelection,
-  setBackButton,
-} from "../../lib/max-sdk";
+import { hapticImpact, hapticSelection } from "../../lib/max-sdk";
 
 // --- Russian copy (verbatim from §4.1) -----------------------------------
 
@@ -155,10 +153,9 @@ export function AdminInternalChatListScreen({ me }: Props) {
   const [filter, setFilter] = useState<StatusFilter>("active");
   const [toast, setToast] = useState("");
 
-  useEffect(() => {
-    // Root tab — AdminTabBar handles navigation, MAX BackButton hidden.
-    setBackButton(false);
-  }, []);
+  // DRF-2115: «Чаты с мастерами» открываются из аватара — системная
+  // «назад» ведёт в «Сегодня».
+  useSalonSectionBack(me);
 
   const reload = useCallback(async () => {
     if (!isAdmin) {

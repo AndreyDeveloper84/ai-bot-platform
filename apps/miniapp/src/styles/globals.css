@@ -1431,6 +1431,140 @@ a {
   color: var(--c-text-primary);
 }
 
+/* DRF-2115 — шапка рамки: имя салона слева, аватар справа. */
+.salon-pilot__topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s-3);
+  margin-bottom: var(--s-2);
+}
+
+/* Аватар-кнопка → лист разделов (DRF-2115). ≥44dp по 2.5.8. */
+.avatar-sheet__trigger {
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  border: 1px solid var(--c-divider);
+  background: var(--c-surface-1);
+  color: var(--c-text-primary);
+  font: inherit;
+  font-weight: 600;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.avatar-sheet {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+}
+.avatar-sheet__backdrop {
+  position: absolute;
+  inset: 0;
+  border: 0;
+  padding: 0;
+  background: rgba(0, 0, 0, 0.4);
+}
+.avatar-sheet__panel {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: var(--c-surface-1);
+  border-radius: var(--r-md) var(--r-md) 0 0;
+  padding: var(--s-2) var(--s-4) var(--s-5);
+}
+.avatar-sheet__grip {
+  width: 36px;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--c-divider);
+  margin: 0 auto var(--s-3);
+}
+.avatar-sheet__list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-1);
+}
+.avatar-sheet__list--nested {
+  padding-left: var(--s-3);
+}
+.avatar-sheet__group {
+  padding: var(--s-1) 0;
+}
+.avatar-sheet__group-title {
+  margin: 0 0 var(--s-1);
+  font-size: var(--font-size-100);
+  color: var(--c-text-secondary);
+  text-transform: none;
+}
+.avatar-sheet__item {
+  width: 100%;
+  min-height: 44px;
+  text-align: left;
+  background: none;
+  border: 0;
+  padding: var(--s-2) 0;
+  font: inherit;
+  font-size: var(--font-size-300);
+  color: var(--c-text-primary);
+}
+.avatar-sheet__item:focus-visible {
+  outline: 2px solid var(--c-accent);
+  outline-offset: 2px;
+}
+
+/* Карточки на «Сегодня» (DRF-2115): Диалоги / График. */
+.salon-today__cards {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--s-2);
+  margin: var(--s-3) 0;
+}
+.salon-today__card {
+  display: block;
+  min-height: 44px;
+  padding: var(--s-3);
+  border: 1px solid var(--c-divider);
+  border-radius: var(--r-md);
+  background: var(--c-surface-1);
+  color: var(--c-text-primary);
+  text-decoration: none;
+  font-size: var(--font-size-200);
+}
+
+/* Очередь диалогов (DRF-2115). */
+.handoff-queue__list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+}
+.handoff-queue__row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s-2);
+  align-items: baseline;
+  padding: var(--s-2) 0;
+  border-bottom: 1px solid var(--c-divider);
+}
+.handoff-queue__age {
+  font-weight: 600;
+}
+.handoff-queue__who {
+  color: var(--c-text-secondary);
+}
+.handoff-queue__flag {
+  color: var(--c-danger);
+  font-size: var(--font-size-100);
+}
+
 /* Дата под заголовком «Сегодня» — приходит с сервера, в поясе салона. */
 .salon-pilot__subtitle {
   margin: calc(var(--s-3) * -1) 0 var(--s-3);

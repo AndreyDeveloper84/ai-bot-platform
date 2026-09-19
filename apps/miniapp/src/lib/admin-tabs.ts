@@ -97,5 +97,8 @@ export function isAdminTabAllowed(me: AdminRoleFlags, tab: AdminTabKey): boolean
  * противоречила.
  */
 export function adminLandingPath(me: AdminRoleFlags): string {
-  return isReceptionOnly(me) ? "/admin/day" : "/admin/team";
+  // DRF-2115 (§50 п.5, отменяет §47.1 «посадку не переключать»):
+  // владелец и администратор входят в «Сегодня» пилота; ресепшн — на
+  // «День» моста, как раньше (§35 — в пилот ей нельзя).
+  return isReceptionOnly(me) ? "/admin/day" : "/admin/today";
 }

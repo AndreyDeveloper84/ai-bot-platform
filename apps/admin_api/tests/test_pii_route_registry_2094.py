@@ -295,6 +295,18 @@ ADMIN_ROUTES: dict[str, Entry] = {
     "availability_requests_list": _AVAILABILITY_REQUEST,
     "availability_request_approve": _AVAILABILITY_REQUEST,
     "availability_request_reject": _AVAILABILITY_REQUEST,
+    # --- DRF-2115 — очередь handoff для «Сегодня» --------------------------
+    "handoff_queue": third_party(
+        "addressee",
+        via=A + "views_handoff_queue:_row",
+        whose="the operator (or queue name) who claimed the handoff task",
+        why=(
+            "the salon operator sees how many customers wait for a human and for how long "
+            "(task id, status, age, escalation flag) and which colleague has already taken "
+            "the task; no customer name, channel id, reason or message text leaves this route "
+            "— the transcript stays in the Django admin queue (DRF-1499)"
+        ),
+    ),
 }
 
 

@@ -140,18 +140,21 @@ describe("ресепшн садится на «День» (DRF-1522)", () => {
     expect(mockedMasters).not.toHaveBeenCalled();
   });
 
-  it("владелец по-прежнему садится на «Команду»", async () => {
+  // DRF-2115 (§50 п.5): владелец и администратор садятся в «Сегодня»
+  // пилота; прежние узлы пришпиливали §47.1 «посадку не переключать» —
+  // снято решением владельца 19.09.2026. Ресепшн — как была (§35).
+  it("владелец садится в «Сегодня» пилота", async () => {
     mockedGetMe.mockResolvedValue(OWNER_ME);
     renderAppAt("/");
-    await waitFor(() => expect(mockedMasters).toHaveBeenCalled());
-    expect(mockedDay).not.toHaveBeenCalled();
+    expect(await screen.findByRole("heading", { name: "Сегодня" })).toBeInTheDocument();
+    expect(mockedMasters).not.toHaveBeenCalled();
   });
 
-  it("администратор по-прежнему садится на «Команду»", async () => {
+  it("администратор садится в «Сегодня» пилота", async () => {
     mockedGetMe.mockResolvedValue(ADMIN_ME);
     renderAppAt("/");
-    await waitFor(() => expect(mockedMasters).toHaveBeenCalled());
-    expect(mockedDay).not.toHaveBeenCalled();
+    expect(await screen.findByRole("heading", { name: "Сегодня" })).toBeInTheDocument();
+    expect(mockedMasters).not.toHaveBeenCalled();
   });
 });
 
@@ -172,30 +175,21 @@ describe("состав нижней панели (DRF-1522, DRF-1552)", () => {
     ).not.toBeInTheDocument();
   });
 
-  it("у владельца пять вкладок — состав не изменился", async () => {
+  // DRF-2115: у владельца и администратора нижняя панель — ровно три
+  // вкладки пилота на любом адресе админки, «День» в том числе (адрес
+  // остаётся по прямой ссылке). Прежние «пять» пришпиливали §47.1.
+  it("у владельца на «Дне» — тройка пилота, не пять вкладок моста", async () => {
     mockedGetMe.mockResolvedValue(OWNER_ME);
     renderAppAt("/admin/day");
     await waitFor(() => expect(mockedDay).toHaveBeenCalled());
-    expect(tabLabels()).toEqual([
-      "День",
-      "Команда",
-      "Услуги",
-      "Чаты",
-      "Настройки",
-    ]);
+    expect(tabLabels()).toEqual(["Сегодня", "Расписание", "Ayla"]);
   });
 
-  it("у администратора пять вкладок — состав не изменился", async () => {
+  it("у администратора на «Дне» — тройка пилота", async () => {
     mockedGetMe.mockResolvedValue(ADMIN_ME);
     renderAppAt("/admin/day");
     await waitFor(() => expect(mockedDay).toHaveBeenCalled());
-    expect(tabLabels()).toEqual([
-      "День",
-      "Команда",
-      "Услуги",
-      "Чаты",
-      "Настройки",
-    ]);
+    expect(tabLabels()).toEqual(["Сегодня", "Расписание", "Ayla"]);
   });
 
   it("панель ресепшн растянута на свои две колонки, а не сжата в пять", async () => {

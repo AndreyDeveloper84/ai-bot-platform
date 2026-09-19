@@ -75,6 +75,7 @@ import { AdminInternalChatThreadScreen } from "./screens/admin/AdminInternalChat
 import { AdminMasterDetailScreen } from "./screens/admin/AdminMasterDetailScreen";
 import { AdminNewBookingScreen } from "./screens/admin/AdminNewBookingScreen";
 import { AdminPeopleScreen } from "./screens/admin/AdminPeopleScreen";
+import { AdminHandoffQueueScreen } from "./screens/admin/AdminHandoffQueueScreen";
 import { AdminSalonDayScreen } from "./screens/admin/AdminSalonDayScreen";
 import { AdminSectionDeniedScreen } from "./screens/admin/AdminSectionDeniedScreen";
 import { AdminServicesMatrixScreen } from "./screens/admin/AdminServicesMatrixScreen";
@@ -315,7 +316,19 @@ function adminRouteElements(me: MeResponse): React.ReactNode {
           )
         }
       />
-      {/* Phase 2 — the salon's day. First tab in AdminTabBar. */}
+      {/* DRF-2115 — очередь диалогов, ждущих человека: с карточки «Сегодня». */}
+      <Route
+        path="/admin/handoff"
+        element={
+          canOpenSalonPilot(me) ? (
+            <AdminHandoffQueueScreen />
+          ) : (
+            <AdminSectionDeniedScreen me={me} section="Диалоги" />
+          )
+        }
+      />
+      {/* Phase 2 — the salon's day. Был первой вкладкой моста; у владельца и
+          администратора мост снят (DRF-2115), адрес живёт по прямой ссылке. */}
       <Route path="/admin/day" element={<AdminSalonDayScreen me={me} />} />
       <Route path="/admin/booking/new" element={<AdminNewBookingScreen />} />
       <Route path="/admin/team" element={<AdminTeamScreen me={me} />} />

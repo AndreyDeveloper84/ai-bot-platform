@@ -25,6 +25,8 @@ import { useLocation, useNavigate } from "react-router-dom";
 import { hapticSelection } from "../lib/max-sdk";
 import type { MeResponse } from "../lib/admin-api";
 import { adminTabsFor, type AdminTabKey } from "../lib/admin-tabs";
+import { canOpenSalonPilot } from "../lib/salon-pilot";
+import { SalonPilotTabBar } from "./SalonPilotTabBar";
 
 interface TabSpec {
   key: AdminTabKey;
@@ -159,6 +161,17 @@ const ALL_TABS: readonly TabSpec[] = [
   ];
 
 export function AdminTabBar({ me }: { me: MeResponse }) {
+  // DRF-2115 (§50 п.5, отменяет §47.1): у владельца и администратора
+  // нижняя панель — ровно три вкладки пилота, на КАЖДОМ экране админки.
+  // Разделы моста открываются из аватара (`AvatarSheet`), не отсюда.
+  // Ресепшн — как была: «День» + «Команда» (§35), в пилот ей нельзя.
+  if (canOpenSalonPilot(me)) {
+    return <SalonPilotTabBar />;
+  }
+  return <BridgeTabBar me={me} />;
+}
+
+function BridgeTabBar({ me }: { me: MeResponse }) {
   const navigate = useNavigate();
   const location = useLocation();
 
