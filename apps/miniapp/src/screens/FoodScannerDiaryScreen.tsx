@@ -32,7 +32,6 @@ import {
   type FoodDiaryEntry,
   DIARY_CONSENT_REQUIRED_TEXT,
   DIARY_OFF_TEXT,
-  isDiaryOff,
 } from "../lib/customer-wellness";
 import { ApiError } from "../lib/api";
 import { minutesRu, restoreWindowMinutesLeft } from "../lib/restore-window";
@@ -63,7 +62,7 @@ type Status =
   | { kind: "unreadable" }
   // DRF-1927 — нет согласия: дневник не читался, повтор ничего не даст.
   | { kind: "consent_required" }
-  // DRF-2071 — контур питания выключен (404 `nutrition_disabled` на чтение):
+  // DRF-2071 — контур питания выключен (сводка с `nutrition_disabled: true`):
   // не сбой и не пустой день; ни повтора, ни «Добавить приём».
   | { kind: "diary_off" }
   | {
@@ -106,10 +105,12 @@ export function FoodScannerDiaryScreen() {
           ? { kind: "unreadable" }
           : day.state === "consent_required"
             ? { kind: "consent_required" }
-            : { kind: "ready", day },
+            : day.state === "diary_off"
+              ? { kind: "diary_off" }
+              : { kind: "ready", day },
       );
     } catch (err) {
-      setStatus(isDiaryOff(err) ? { kind: "diary_off" } : { kind: "error", err });
+      setStatus({ kind: "error", err });
     }
   }, []);
 

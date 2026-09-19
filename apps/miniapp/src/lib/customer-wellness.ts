@@ -100,6 +100,12 @@ export interface WellnessToday {
    */
   consent_required?: boolean;
   /**
+   * DRF-2071 — `true`, когда контур питания выключен (`NUTRITION_ENABLED=false`):
+   * сервер дневник и воду НЕ читал, ключей дневника нет; имя и цель — есть,
+   * они к дневнику не относятся. Та же форма, что у `consent_required`.
+   */
+  nutrition_disabled?: boolean;
+  /**
    * Eaten today (kcal), and the target. `0` is a real value — «nothing
    * logged yet». **Both keys are ABSENT when the nutrition read failed**
    * (DRF-1546), which is a different thing entirely: the screen must
@@ -484,6 +490,9 @@ export type DiaryToday =
   // DRF-1927 — нет согласия на обработку личных данных: сервер дневник не
   // читал. Не сбой (повтор ничего не даст) и не пустой день.
   | { state: "consent_required" }
+  // DRF-2071 — контур питания выключен: сервер дневник не читал. Тоже не
+  // сбой и не пустой день; входов в запись при этом не рисуется.
+  | { state: "diary_off" }
   | { state: "empty"; hideNumbers: boolean; today: WellnessToday }
   | {
       state: "entries";
@@ -496,6 +505,8 @@ export async function loadDiaryToday(): Promise<DiaryToday> {
   // Явный признак «открыт именно дневник» (DRF-1897): по нему и только по
   // нему сервер решает строку диетолога и пишет журнал.
   const today = await getWellnessToday({ surface: "diary" });
+  // Выключено важнее «согласия нет» — так отвечает и сервер.
+  if (diaryIsOff(today)) return { state: "diary_off" };
   if (today.consent_required === true) return { state: "consent_required" };
   if (!Array.isArray(today.entries)) return { state: "unreadable" };
   const hideNumbers = today.nutrition_numbers_hidden !== false;
@@ -680,17 +691,18 @@ export const DIARY_CONSENT_REQUIRED_TEXT =
   "Чтобы менять дневник, нужно согласие на обработку личных данных — дай его в чате с Ayla.";
 
 /**
- * DRF-2071 — контур питания выключен (`NUTRITION_ENABLED=false`): сервер
- * отвечает 404 `nutrition_disabled` на ЧТЕНИЕ `wellness/today` так же, как на
- * запись. Это не сбой (повтор ничего не даст) и не пустой день — экраны,
- * читающие сводку, показывают эту фразу и не рисуют кнопок записи.
- * Литерал тот же, что у экранов дня/недели/избранного (`*_COPY.diaryOff`).
+ * DRF-2071 — контур питания выключен (`NUTRITION_ENABLED=false`): на ЧТЕНИЕ
+ * `wellness/today` сервер отвечает 200 с `nutrition_disabled: true` и без
+ * ключей дневника/воды (запись — 404 с тем же слагом). Это не сбой (повтор
+ * ничего не даст) и не пустой день — экраны, читающие сводку, показывают эту
+ * фразу и не рисуют кнопок записи. Литерал тот же, что у экранов
+ * дня/недели/избранного (`*_COPY.diaryOff`).
  */
 export const DIARY_OFF_TEXT = "Дневник питания пока недоступен.";
 
-/** DRF-2071 — отказ «контур выключен» узнаётся по слагу, не по статусу. */
-export function isDiaryOff(err: unknown): boolean {
-  return err instanceof ApiError && err.slug === "nutrition_disabled";
+/** DRF-2071 — «контур выключен» узнаётся по маркеру сводки, не по статусу. */
+export function diaryIsOff(today: WellnessToday | null | undefined): boolean {
+  return today?.nutrition_disabled === true;
 }
 
 /**

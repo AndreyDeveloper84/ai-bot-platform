@@ -1,9 +1,12 @@
 /**
- * DRF-2071 — контур питания выключен (`NUTRITION_ENABLED=false`): сервер
- * отвечает 404 `nutrition_disabled` на ЧТЕНИЕ `wellness/today`, как и на
- * запись. До этого листа дашборд получал 200 с дневником при выключенном
- * контуре; после — 404, и экран обязан сказать «недоступен», а не
- * «попробуй через минуту» (повтор ничего не даст) и не пустой день.
+ * DRF-2071 — контур питания выключен (`NUTRITION_ENABLED=false`): на ЧТЕНИЕ
+ * `wellness/today` сервер отвечает 200 с `nutrition_disabled: true`, именем и
+ * целью — и без единого ключа дневника/воды (та же форма, что у
+ * `consent_required`, DRF-1927). До этого листа дашборд получал дневник при
+ * выключенном контуре; теперь экран обязан сказать «недоступен», а не
+ * «попробуй через минуту» (повтор ничего не даст) и не пустой день — и при
+ * этом НЕ потерять имя в приветствии и тройку кнопки цели (DRF-1476): они к
+ * дневнику не относятся.
  *
  * Второй узел — входы в запись не рисуются: рядом с «недоступен» не должно
  * стоять «+ стакан» и «Дневник питания». Остальные быстрые действия (цель,
@@ -71,6 +74,13 @@ function live(): Response {
   } as unknown as Response;
 }
 
+/** Ответ сервера при OFF: маркер, имя, цель — и ни одного ключа дневника. */
+function off(goals: unknown[] | undefined = [{ title: "Высыпаться", week_num: 1 }]): Response {
+  const body: Record<string, unknown> = { nutrition_disabled: true, display_name: "Анна" };
+  if (goals !== undefined) body.active_goals = goals;
+  return { ok: true, status: 200, json: async () => body } as unknown as Response;
+}
+
 async function renderScreen() {
   vi.resetModules();
   vi.stubEnv("DEV", false);
@@ -94,8 +104,8 @@ afterEach(() => {
 });
 
 describe("CustomerWellnessDashboardScreen — контур питания выключен (DRF-2071)", () => {
-  it("404 nutrition_disabled → «недоступен» без повтора, не «через минуту»", async () => {
-    serveToday(() => refused(404, "nutrition_disabled"));
+  it("сводка с nutrition_disabled → «недоступен» без повтора, не «через минуту» и не пустой день", async () => {
+    serveToday(() => off());
     await renderScreen();
 
     expect(await screen.findByText(DIARY_OFF_TEXT)).toBeInTheDocument();
@@ -103,10 +113,29 @@ describe("CustomerWellnessDashboardScreen — контур питания вык
     expect(screen.queryByRole("button", { name: "Обновить" })).not.toBeInTheDocument();
     // Не пустой день: карточка первого шага требует ЗНАНИЯ о пустом дне.
     expect(screen.queryByText("Начнём с малого?")).not.toBeInTheDocument();
+    // И не дневник: ни калорий, ни стаканов на экране.
+    expect(screen.queryByText(/ккал/)).not.toBeInTheDocument();
   });
 
-  it("входы в запись не рисуются: ни «+ стакан», ни «Дневник питания»; цель и каталог — на месте", async () => {
-    serveToday(() => refused(404, "nutrition_disabled"));
+  it("имя и цель не теряются: приветствие с именем, кнопка цели — «Моя цель», не нейтральная «Цель»", async () => {
+    serveToday(() => off());
+    await renderScreen();
+
+    await screen.findByText(DIARY_OFF_TEXT);
+    expect(screen.getByRole("heading", { level: 1 }).textContent).toContain("Анна");
+    expect(screen.getByRole("button", { name: "Моя цель" })).toBeInTheDocument();
+  });
+
+  it("цели нет — «Выбери цель», как при включённом контуре", async () => {
+    serveToday(() => off([]));
+    await renderScreen();
+
+    await screen.findByText(DIARY_OFF_TEXT);
+    expect(screen.getByRole("button", { name: "Выбери цель" })).toBeInTheDocument();
+  });
+
+  it("входы в запись не рисуются: ни «+ стакан», ни «Дневник питания»; каталог — на месте", async () => {
+    serveToday(() => off());
     await renderScreen();
 
     await screen.findByText(DIARY_OFF_TEXT);
@@ -116,10 +145,9 @@ describe("CustomerWellnessDashboardScreen — контур питания вык
     expect(screen.queryByRole("button", { name: "Дневник питания" })).not.toBeInTheDocument();
     // «Найди услугу» есть и в быстрых действиях, и под пустой записью.
     expect(screen.getAllByRole("button", { name: "Найди услугу" }).length).toBeGreaterThan(0);
-    expect(screen.getByRole("button", { name: /Цель|Выбери цель|Моя цель/ })).toBeInTheDocument();
   });
 
-  it("положительная стража: прочий 4xx — по-прежнему «через минуту» с повтором и кнопками записи", async () => {
+  it("положительная стража: отказ ручки — по-прежнему «через минуту» с повтором и кнопками записи", async () => {
     serveToday(() => refused(422, "validation_error"));
     await renderScreen();
 

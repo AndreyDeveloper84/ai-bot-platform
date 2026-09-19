@@ -160,16 +160,17 @@ describe("ориентир есть — §85 вернул шкалу и проц
 });
 
 describe("DRF-2071 — контур выключили между записью и сводкой", () => {
-  it("404 nutrition_disabled — «недоступен», без повтора и без «Открыть дневник»", async () => {
-    mockedToday.mockRejectedValue(
-      new ApiError(404, "nutrition_disabled", "food diary is not enabled"),
-    );
+  it("сводка с nutrition_disabled — «недоступен», без повтора и без «Открыть дневник»", async () => {
+    // Как отвечает сервер при OFF: маркер, имя, ни одного ключа дневника.
+    mockedToday.mockResolvedValue({ display_name: "Анна", nutrition_disabled: true } as WellnessToday);
     renderScreen();
 
     expect(await screen.findByText(DIARY_OFF_TEXT)).toBeInTheDocument();
     // Запись уже сделана — «записала» остаётся правдой.
     expect(screen.getByText(/Овсянка с ягодами/)).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /Попробовать снова/ })).not.toBeInTheDocument();
+    // Чисел нет и не будет — ни шкалы, ни «/ ккал».
+    expect(screen.queryByRole("progressbar")).not.toBeInTheDocument();
     // Кнопка вела бы на экран с той же фразой.
     expect(screen.queryByRole("button", { name: "Открыть дневник" })).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Готово" })).toBeInTheDocument();

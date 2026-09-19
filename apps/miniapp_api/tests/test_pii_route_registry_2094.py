@@ -427,8 +427,9 @@ CUSTOMER_ROUTES: dict[str, Entry] = {
         note=(
             "the caller's own diary day; without PERSONAL_DATA consent the body shrinks to "
             "display_name + consent_required (+ goals) and no diary key is present at all; "
-            "with NUTRITION_ENABLED=false (DRF-2071) the answer is the 404 nutrition_disabled "
-            "envelope, checked before consent, and no field of the person is read or sent"
+            "with NUTRITION_ENABLED=false (DRF-2071) the body is display_name + "
+            "nutrition_disabled (+ goals) in the same shape, checked before consent, and no "
+            "diary or water key is read or sent"
         ),
     ),
     "customer_wellness_water": own(

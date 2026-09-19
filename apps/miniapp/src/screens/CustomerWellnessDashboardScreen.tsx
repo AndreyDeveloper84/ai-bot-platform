@@ -105,7 +105,7 @@ import {
   type WellnessToday,
   DIARY_CONSENT_REQUIRED_TEXT,
   DIARY_OFF_TEXT,
-  isDiaryOff,
+  diaryIsOff,
 } from "../lib/customer-wellness";
 import {
   getCatalogBrowse,
@@ -126,11 +126,7 @@ import { screenRoot } from "../lib/screen-back";
 type Slice<T> =
   | { kind: "loading" }
   | { kind: "ok"; data: T }
-  | { kind: "error"; reason: LoadErrorReason }
-  // DRF-2071 — контур питания выключен: сервер отказал в чтении сводки
-  // (404 `nutrition_disabled`). Не сбой — повтор ничего не даст — и не
-  // пустой день; кнопок записи в дневник при этом экран не рисует.
-  | { kind: "diary_off" };
+  | { kind: "error"; reason: LoadErrorReason };
 
 function isOnline(): boolean {
   if (typeof navigator === "undefined") return true;
@@ -207,8 +203,6 @@ export function CustomerWellnessDashboardScreen() {
 
     if (todayRes.status === "fulfilled") {
       setToday({ kind: "ok", data: todayRes.value });
-    } else if (isDiaryOff(todayRes.reason)) {
-      setToday({ kind: "diary_off" });
     } else {
       setToday({ kind: "error", reason: loadErrorReason(todayRes.reason) });
     }
@@ -393,9 +387,12 @@ export function CustomerWellnessDashboardScreen() {
 
   // ── derived state ────────────────────────────────────────────────────
   const todayData = today.kind === "ok" ? today.data : null;
-  // DRF-2071 — при выключенном контуре входы в дневник (стакан, «Дневник
-  // питания») не рисуются: иначе рядом с «недоступен» стояло бы «Добавить».
-  const diaryOff = today.kind === "diary_off";
+  // DRF-2071 — контур питания выключен: сводка пришла с маркером и без
+  // ключей дневника (как `consent_required`), имя и цель — на месте. Не
+  // сбой (повтор ничего не даст) и не пустой день; входы в дневник (стакан,
+  // «Дневник питания») не рисуются — иначе рядом с «недоступен» стояло бы
+  // «Добавить».
+  const diaryOff = diaryIsOff(todayData);
   const activityData = activity.kind === "ok" ? activity.data : null;
   const recsData = recs.kind === "ok" ? recs.data : null;
   // Block 7 picks — top-3 services by Ayla scorer rank, joined onto the
@@ -641,12 +638,12 @@ export function CustomerWellnessDashboardScreen() {
               onRetry={() => void fetchAll()}
             />
           )}
-          {today.kind === "diary_off" && (
+          {today.kind === "ok" && diaryOff && (
             <div className="wellness-dash__block-error" role="status" aria-live="polite">
               <p>{DIARY_OFF_TEXT}</p>
             </div>
           )}
-          {today.kind === "ok" && (
+          {today.kind === "ok" && !diaryOff && (
             <PulseStrip data={today.data} />
           )}
         </section>

@@ -27,8 +27,8 @@ import {
 } from "../lib/food-scanner";
 import {
   DIARY_OFF_TEXT,
+  diaryIsOff,
   getWellnessToday,
-  isDiaryOff,
   type WellnessToday,
 } from "../lib/customer-wellness";
 import { useScreenBack } from "../hooks/useScreenBack";
@@ -59,6 +59,8 @@ export function FoodScannerSavedScreen() {
 
   const [summary, setSummary] = useState<WellnessToday | null>(null);
   const [err, setErr] = useState<unknown>(null);
+  // DRF-2071 — сводка с маркером «контур выключен»: чисел нет и не будет.
+  const diaryOff = diaryIsOff(summary);
 
   const load = useCallback(async () => {
     setErr(null);
@@ -141,6 +143,13 @@ export function FoodScannerSavedScreen() {
           </p>
         )}
 
+        {/* DRF-2071 — контур выключили между записью и сводкой: сводка пришла
+            с маркером и без чисел (edMode остаётся true — ключа нет). Не сбой,
+            повтор ничего не даст; «записала» выше остаётся правдой. */}
+        {diaryOff && (
+          <p className="food-scanner-saved__recap" role="status">{DIARY_OFF_TEXT}</p>
+        )}
+
         {!edMode && (
           <section
             className="food-scanner-saved__daily"
@@ -152,12 +161,7 @@ export function FoodScannerSavedScreen() {
             >
               Сегодня
             </h2>
-            {/* DRF-2071 — контур выключили между записью и сводкой: не сбой,
-                повтор ничего не даст. */}
-            {err !== null && isDiaryOff(err) && (
-              <p className="food-scanner-saved__total" role="status">{DIARY_OFF_TEXT}</p>
-            )}
-            {err !== null && !isDiaryOff(err) && <StateError err={err} onRetry={load} />}
+            {err !== null && <StateError err={err} onRetry={load} />}
             {err === null && summary && (
               <>
                 {eaten !== undefined && (
@@ -197,7 +201,7 @@ export function FoodScannerSavedScreen() {
         <div className="food-scanner-screen__cta-stack">
           {/* DRF-2071 — при выключенном контуре дневник не открывается:
               кнопка вела бы на экран с той же фразой «недоступен». */}
-          {!isDiaryOff(err) && (
+          {!diaryOff && (
             <button
               type="button"
               className="btn-primary"

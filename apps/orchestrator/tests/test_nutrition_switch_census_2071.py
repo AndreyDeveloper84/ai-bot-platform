@@ -13,7 +13,12 @@
   (дни). Список берётся из ``urlpatterns`` по префиксу, не из головы; каждый
   маршрут — каждым методом, который он принимает: при OFF — 404
   ``nutrition_disabled`` до разбора тела, и ни одного вызова каталога.
-  ``plan-lite`` — не питание (свой флаг), в класс не входит;
+  Одно исключение по форме, не по сути: ``GET wellness/today`` отдаёт
+  дашборду ещё имя и цель, которые к дневнику не относятся (DRF-1927,
+  решение главного окна 19.09), — при OFF это 200 с ``nutrition_disabled:
+  true`` и без единого ключа дневника/воды; каталог питания не вызывается
+  так же, как у остальных. ``plan-lite`` — не питание (свой флаг), в класс
+  не входит;
 * **кнопки и текст в чате** — каждый payload семейств ``cb:food:*`` и
   ``cb:anketa:*`` (формы из ``parse_callback``/регулярок навыков) плюс два
   текстовых входа дневника: каждый навык РЕЕСТРА, который такой ход забирает,
@@ -39,6 +44,10 @@ from django.urls import reverse
 from apps.identity.models import BotUser
 from apps.miniapp_api import urls as miniapp_urls
 from apps.miniapp_api.tests.test_wellness_today import BOT_TOKEN, _init_data_header
+
+# Ключи питательной половины ``wellness/today``: при OFF ни одного из них в
+# ответе нет. Один список с тестом согласия (DRF-1927), не второй.
+from apps.miniapp_api.tests.test_wellness_today_consent_1927 import DIARY_KEYS
 from apps.orchestrator.nutrition_global import try_handle_structured_nutrition_turn
 from apps.skills.base import SkillContext
 from apps.skills.food_clarify import text_entry
@@ -80,6 +89,10 @@ NUTRITION_ROUTE_PREFIXES = ("wellness/", "food/", "saved-meals", "diary/")
 #: Подстановки для параметров пути — любой непустой id: ворота стоят до
 #: обращения к каталогу, так что существование записи не проверяется.
 _PATH_ARGS = {"entry_id": "e1", "meal_id": "m1"}
+
+#: ``(route, method)`` — единственный вход, который при OFF отвечает не 404,
+#: а 200 с маркером: чтение сводки несёт дашборду имя и цель.
+MARKER_NOT_404 = frozenset({("wellness/today", "get")})
 
 
 def _nutrition_routes() -> list[tuple[str, str]]:
@@ -144,10 +157,20 @@ class TestEveryNutritionRouteRefusesWhenOff:
                     if response.status_code == 405:
                         continue  # маршрут этот метод не принимает — не вход
                     seen.setdefault(route, []).append(method)
+                    if (route, method) in MARKER_NOT_404:
+                        body = response.json()
+                        assert response.status_code == 200, (route, method, response.status_code)
+                        assert body["nutrition_disabled"] is True, (route, method)
+                        assert body["display_name"] == "Перепись", (route, method)
+                        leaked = DIARY_KEYS & set(body)
+                        assert not leaked, (route, method, sorted(leaked))
+                        continue
                     assert response.status_code == 404, (route, method, response.status_code)
                     assert response.json()["error"] == "nutrition_disabled", (route, method)
         # Каждый маршрут принял хотя бы один метод — иначе он выпал из переписи.
         assert set(seen) == {route for _, route in _nutrition_routes()}, seen
+        # Исключение по форме действительно встретилось — иначе оно мёртвое.
+        assert all(m in seen[r] for r, m in MARKER_NOT_404), seen
         assert not ayla.method_calls, ayla.method_calls
 
 

@@ -230,8 +230,8 @@ describe("четыре состояния различимы попарно", ()
     expect(screen.queryByText(/Пока ничего не записано/)).not.toBeInTheDocument();
   });
 
-  it("DRF-2071: контур выключен (404 nutrition_disabled) — «недоступен», без повтора и без «Добавить приём»", async () => {
-    mockedLoad.mockRejectedValue(new ApiError(404, "nutrition_disabled", "food diary is not enabled"));
+  it("DRF-2071: контур выключен (сводка с nutrition_disabled) — «недоступен», без повтора и без «Добавить приём»", async () => {
+    mockedLoad.mockResolvedValue({ state: "diary_off" });
     renderScreen();
 
     expect(await screen.findByText(DIARY_OFF_TEXT)).toBeInTheDocument();
@@ -243,7 +243,7 @@ describe("четыре состояния различимы попарно", ()
     expect(screen.queryByRole("button", { name: /Добавить приём/ })).not.toBeInTheDocument();
   });
 
-  it("DRF-2071: положительная стража — прочий 404 остаётся сбоем с повтором", async () => {
+  it("DRF-2071: положительная стража — отказ ручки остаётся сбоем с повтором", async () => {
     mockedLoad.mockRejectedValue(new ApiError(404, "not_found", "no such day"));
     renderScreen();
 
