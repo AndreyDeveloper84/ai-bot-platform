@@ -704,18 +704,39 @@ class TestRetryExhaustedFallback:
         ):
             await turn(_message(text="hi"))
 
-        manager_calls = [
-            c for c in mock_send.call_args_list if c.kwargs.get("chat_id") == "100200300"
+        # Any personal send of the alert — by chat_id OR user_id (DRF-1559
+        # prefers manager_user_id) — is a leak. The only send_message the
+        # turn itself makes is the user-facing fallback, which never
+        # mentions the provider.
+        leaked = [
+            c
+            for c in mock_send.call_args_list
+            if c.kwargs.get("chat_id") == "100200300" or "LLM" in (c.kwargs.get("text") or "")
         ]
-        assert manager_calls == []
+        assert leaked == []
         assert mock_page.call_count == 1
         severity, title, body = mock_page.call_args.args
         assert severity == "error"
         assert "LLM" in title
         assert tenant.slug in body
         assert "RateLimitError" in body
-        assert "attempts=3" in body or "3 попыток" in body
+        assert "attempts=3" in body
         assert mock_page.call_args.kwargs["dedup_key"]
+
+    def test_pipeline_alert_path_has_no_max_outbound_binding(self):
+        """Structural half of the «менеджеру 0» guard (DRF-2130): the
+        run-time mocks above intercept a call-time import of
+        ``apps.channels.max.outbound.send_message``; a module-level
+        import would bind the real function and slip past them. Fail
+        here if the alert helper ever names the personal channel again."""
+        import inspect
+
+        from apps.orchestrator import pipeline
+
+        src = inspect.getsource(pipeline._send_retry_exhausted_alert)
+        assert "apps.channels.max" not in src
+        assert "send_message" not in src
+        assert "manager_address" not in src
 
     async def test_retry_exhausted_alert_deduped_within_hour(self, tenant):
         """Two retry-exhausted turns within the dedup window page

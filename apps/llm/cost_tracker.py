@@ -841,6 +841,7 @@ def _send_threshold_alert(
         "cost_used": cost_used_str,
         "cost_cap": cost_cap_str,
     }
+    severity: Literal["warning", "error"]
     if level == 80:
         severity = "warning"
         title = _PAGE_80_TITLE.format(**fields)
@@ -854,7 +855,7 @@ def _send_threshold_alert(
         from apps.observability import alerting
 
         sent = alerting.page(
-            severity,  # type: ignore[arg-type]
+            severity,
             title,
             body,
             dedup_key=f"llm_cost_cap:{tenant_id}:{_today_utc()}:{level}",

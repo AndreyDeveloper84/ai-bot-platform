@@ -293,6 +293,21 @@ class TestThresholdAlerts:
         assert _patched_page.call_count == 1
         _patched_send_message.assert_not_called()
 
+    def test_module_has_no_max_outbound_binding(self) -> None:
+        """Structural half of the «менеджеру 0» guard (DRF-2130): the
+        ``send_message`` mock above intercepts a call-time import; a
+        module-level ``from apps.channels.max... import`` would bind the
+        real function and slip past it. Fail here if cost_tracker names
+        the personal channel again."""
+        import inspect
+
+        from apps.llm import cost_tracker
+
+        src = inspect.getsource(cost_tracker)
+        assert "apps.channels.max" not in src
+        assert "MaxAddress" not in src
+        assert not hasattr(cost_tracker, "send_message")
+
     async def test_page_failure_never_breaks_accounting(
         self,
         tenant_with_manager: Tenant,
