@@ -23,6 +23,9 @@ export type AvatarSheetItemKey =
   | "services"
   | "staffChats"
   | "studio"
+  | "customers"
+  | "reviews"
+  | "salon"
   | "settings";
 
 export interface AvatarSheetItem {
@@ -43,6 +46,11 @@ export const AVATAR_SHEET_COPY = {
   staffChats: "Чаты с мастерами",
   /** Мастер: внутренний чат со студией (DRF-2121). */
   studio: "Со студией",
+  /** Соло (DRF-2127): разделы, снятые с пятивкладочной панели. */
+  customers: "Клиенты",
+  reviews: "Отзывы",
+  /** Соло с владельческой ролью — вход в салонную админку (DRF-1149). */
+  salon: "Управление салоном",
   settings: "Настройки",
   close: "Закрыть",
 } as const;
@@ -67,12 +75,38 @@ export function avatarSheetItemsFor(me: AvatarSheetRoleFlags): AvatarSheetItem[]
   return items;
 }
 
+export type MasterSurface = "master" | "solo";
+
 /**
- * Пункты листа для МАСТЕРА (DRF-2121; §28 п.3): Профиль · Со студией ·
- * Настройки. Набор закрыт сторожем; «Диалоги» (переписка мастер↔клиент,
- * DRF-1039/1255) сюда не входят намеренно.
+ * Пункты листа для МАСТЕРА по поверхности.
+ *
+ * `master` (DRF-2121; §28 п.3): Профиль · Со студией · Настройки.
+ * «Диалоги» (переписка мастер↔клиент, DRF-1039/1255) сюда не входят.
+ *
+ * `solo` (DRF-2127): то, что ушло с пятивкладочной панели и листа «Ещё»
+ * и имеет живой экран — Профиль · Клиенты · Услуги · Отзывы · Настройки;
+ * при владельческой роли — «Управление салоном» → `/admin/team`
+ * (DRF-1149). НЕ рисуются: «Доходы» (экран-заглушка, §33) и
+ * «AI-помощник» (на деле — переписка с клиентами, DRF-1039); их адреса
+ * остаются по прямым ссылкам. «Со студией» соло не применимо.
+ * Набор закрыт сторожем.
  */
-export function masterAvatarSheetItems(): AvatarSheetItem[] {
+export function masterAvatarSheetItems(
+  opts: { surface?: MasterSurface; salonAdmin?: boolean } = {},
+): AvatarSheetItem[] {
+  if (opts.surface === "solo") {
+    const items: AvatarSheetItem[] = [
+      { key: "profile", label: AVATAR_SHEET_COPY.profile, to: "/solo/profile" },
+      { key: "customers", label: AVATAR_SHEET_COPY.customers, to: "/solo/customers" },
+      { key: "services", label: AVATAR_SHEET_COPY.services, to: "/solo/services" },
+      { key: "reviews", label: AVATAR_SHEET_COPY.reviews, to: "/solo/reviews" },
+    ];
+    if (opts.salonAdmin) {
+      items.push({ key: "salon", label: AVATAR_SHEET_COPY.salon, to: "/admin/team" });
+    }
+    items.push({ key: "settings", label: AVATAR_SHEET_COPY.settings, to: "/solo/settings" });
+    return items;
+  }
   return [
     { key: "profile", label: AVATAR_SHEET_COPY.profile, to: MASTER_PROFILE_PATH },
     { key: "studio", label: AVATAR_SHEET_COPY.studio, to: "/master/internal-chat" },
