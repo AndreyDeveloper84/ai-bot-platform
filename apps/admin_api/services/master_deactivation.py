@@ -71,7 +71,9 @@ from apps.booking.services.transitions import (
 )
 from apps.catalog.master_state import is_available
 from apps.catalog.models import CatalogMaster, MasterService
+from apps.channels.max.addressing import MaxAddress
 from apps.channels.max.outbound import MaxAPIError, send_message
+from apps.channels.max.staff_outbound import send_to_staff
 from apps.events.services import emit
 from apps.events.vocabulary import (
     MASTER_BOOKINGS_CANCELLED,
@@ -1173,14 +1175,16 @@ def execute_deactivation(
                     pn.blocked_reason,
                 )
                 continue
-            try:
-                send_message(user_id=pn.user_id, text=pn.text)
+            # DRF-2128 — мастеру от салонного бота; сбой провода
+            # именован в логе отправителя, здесь — счётчик и slug как был.
+            outcome = send_to_staff(master.tenant, MaxAddress(user_id=pn.user_id), pn.text)
+            if outcome.delivered:
                 master_dispatched += 1
-            except MaxAPIError as exc:
+            else:
                 logger.warning(
-                    "mm5.notify.master_failed master=%s status=%s",
+                    "mm5.notify.master_failed master=%s failed=%s",
                     pn.master_id,
-                    exc.status_code,
+                    outcome.failed,
                 )
 
     # Hook AFTER the transaction is committed. For tests not in a
@@ -1279,14 +1283,17 @@ def reactivate_master(
                 pending_master_dm.blocked_reason,
             )
             return
-        try:
-            send_message(user_id=pending_master_dm.user_id, text=pending_master_dm.text)
+        # DRF-2128 — мастеру от салонного бота.
+        outcome = send_to_staff(
+            master.tenant, MaxAddress(user_id=pending_master_dm.user_id), pending_master_dm.text
+        )
+        if outcome.delivered:
             notified = True
-        except MaxAPIError as exc:
+        else:
             logger.warning(
-                "mm5.reactivate.notify_failed master=%s status=%s",
+                "mm5.reactivate.notify_failed master=%s failed=%s",
                 pending_master_dm.master_id,
-                exc.status_code,
+                outcome.failed,
             )
 
     transaction.on_commit(_dispatch)

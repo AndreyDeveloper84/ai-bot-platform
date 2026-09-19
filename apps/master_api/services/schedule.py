@@ -1049,43 +1049,29 @@ def list_pending_requests(
 
 
 def notify_manager_of_availability_request(*, tenant, master, request_id) -> None:
-    """DM «Анна просит выходной» администратору салона.
+    """DM «Анна просит выходной» управляющим салона — от салонного бота.
 
     Спека master-mobile §M3 строка 458: «server marks slot blocked →
-    owner notified (audit + bot DM)». Ненастроенный адрес менеджера — не
-    ошибка, а деградация: тот же режим, что у эскалации напоминаний.
+    owner notified (audit + bot DM)». Адресаты и отправитель решаются в
+    :func:`~apps.channels.max.staff_outbound.send_to_staff` (DRF-2128):
+    активные владелец/админ салона плюс адрес менеджера, от бота потока
+    ``max_salon``. Никого не нашлось — деградация с именем
+    (``no_recipients`` в логе отправителя), тот же режим, что у
+    эскалации напоминаний; slug ``no_manager_chat_id`` ниже сохранён —
+    это эмитируемый ключ.
 
-    Живёт здесь, а не в вызывающем модуле, потому что заявку теперь
-    подают два места: кнопка «Помечу как недоступно» в расписании и
-    подтверждённое предложение Ayla
-    (:mod:`apps.master_api.services.assistant_actions`). Один и тот же
-    администратор должен узнавать об обеих одинаково.
-
-    У `master_api.views._maybe_send_manager_dm` пока живёт свой
-    экземпляр той же логики — вьюхи заняты соседней задачей (DRF-1507),
-    и сводить копии в одну, пока файл правит кто-то другой, значит
-    гарантировать конфликт. Схлопнуть, как только он освободится.
+    Живёт здесь, потому что заявку подают два места: кнопка «Помечу как
+    недоступно» в расписании и подтверждённое предложение Ayla
+    (:mod:`apps.master_api.services.assistant_actions`); вьюха
+    ``master_api.views._maybe_send_manager_dm`` — тонкая обёртка над этой
+    функцией (копия схлопнута в DRF-2128). Импорты локальные:
+    ``apps.channels`` не нужен эндпоинтам master_api, которые сюда не
+    заходят.
     """
 
     from django.conf import settings
 
-    # DRF-1559 — адрес менеджера: человек, если у салона заполнен
-    # ``manager_user_id``, иначе прежний диалоговый идентификатор. Slug
-    # ``no_manager_chat_id`` сохранён — это эмитируемый ключ. Импорт
-    # локальный, как и у ``send_message`` ниже: apps.channels не нужен
-    # тем эндпоинтам master_api, которые сюда не заходят.
-    from apps.channels.max.addressing import manager_address
-
-    manager = manager_address(tenant)
-    if not manager:
-        logger.info(
-            "master_api.availability.no_manager_chat_id tenant=%s master=%s",
-            tenant.id,
-            master.id,
-        )
-        return
-
-    from apps.channels.max.outbound import MaxAPIError, send_message
+    from apps.channels.max.staff_outbound import MANAGER, send_to_staff
 
     admin_url = getattr(
         settings,
@@ -1096,15 +1082,19 @@ def notify_manager_of_availability_request(*, tenant, master, request_id) -> Non
         f"{master.name} просит изменить расписание. "
         f"[Открыть запрос]({admin_url}?request_id={request_id})"
     )
-    try:
-        send_message(**manager.send_kwargs(), text=text)
-    except MaxAPIError:
+    result = send_to_staff(tenant, MANAGER, text)
+    if result.recipients == 0:
+        logger.info(
+            "master_api.availability.no_manager_chat_id tenant=%s master=%s",
+            tenant.id,
+            master.id,
+        )
+    elif not result.delivered:
         # Best-effort: источник правды — строка в базе и аудит.
         logger.warning(
             "master_api.availability.manager_dm_failed tenant=%s request=%s",
             tenant.id,
             request_id,
-            exc_info=True,
         )
 
 

@@ -72,7 +72,7 @@ The retry behaves correctly because:
 
 1. Status starts as ``SENT_NO_REPLY``.
 2. CAS flips to ``ESCALATED``.
-3. ``send_message`` raises.
+3. ``send_to_staff`` доставил никому (``delivered`` ложно).
 4. We revert: another CAS ``ESCALATED → SENT_NO_REPLY``.
 5. Next hourly beat tick re-picks the row.
 
@@ -92,8 +92,7 @@ from datetime import timedelta
 
 from apps.audit.services import write_audit
 from apps.booking.models import BookingReminder
-from apps.channels.max.addressing import manager_address
-from apps.channels.max.outbound import MaxAPIError, send_message
+from apps.channels.max.staff_outbound import MANAGER, send_to_staff
 
 # E0 #6 — send-time booking-state recheck. The same helper governs
 # the T-24h / T-2h dispatch loop in `tasks.py`; reusing it here keeps
@@ -200,13 +199,14 @@ def escalate_stale_reminders() -> dict[str, int]:
 
     1. CAS ``SENT_NO_REPLY → ESCALATED``. ``rowcount == 0`` → race
        lost (another worker already escalated); skip.
-    2. If tenant ``manager_chat_id`` is empty → log WARN, audit, count
-       as "escalated" (row is now terminal), continue. **Do not** send
-       anything; the operator will discover the empty chat_id via the
-       audit row.
-    3. Compose plain-text escalation body.
-    4. Call :func:`apps.channels.max.outbound.send_message` (no
-       attachments — the manager isn't tapping anything).
+    2. Compose plain-text escalation body.
+    3. :func:`apps.channels.max.staff_outbound.send_to_staff` to the
+       salon's managers (DRF-2128 — active owner/admin staff plus the
+       manager address, sent as the SALON bot; no attachments — the
+       manager isn't tapping anything). Nobody to send to → log WARN,
+       audit ``no_manager_chat_id``, count as "escalated" (row is now
+       terminal), continue; the operator will discover the empty
+       address via the audit row.
     5. On send failure: revert status to ``SENT_NO_REPLY`` via a
        guarded CAS (``ESCALATED → SENT_NO_REPLY`` only). The next
        hourly tick retries. Log + audit so operators can see the
@@ -288,12 +288,34 @@ def escalate_stale_reminders() -> dict[str, int]:
 
         # We own the row.
         tenant = row.tenant
-        # DRF-1559 — человек, если у салона заполнен ``manager_user_id``,
-        # иначе прежний диалоговый идентификатор. Slug причины и ключ
-        # аудита (``no_manager_chat_id``) сохранены: это эмитируемые ключи,
-        # по ним считают пропущенные эскалации.
-        manager = manager_address(tenant)
-        if not manager:
+        text = _format_escalation_text(row)
+        # DRF-2128 — адресаты и отправитель решаются в send_to_staff:
+        # активные владелец/админ салона плюс адрес менеджера, от
+        # салонного бота. Slug причины и ключ аудита
+        # (``no_manager_chat_id``) сохранены: это эмитируемые ключи, по
+        # ним считают пропущенные эскалации.
+        try:
+            outcome = send_to_staff(tenant, MANAGER, text)
+        except Exception as exc:  # noqa: BLE001 — defensive, see R1 tasks.py
+            logger.exception("bookings.escalate.send_unexpected pk=%s", row.pk)
+            BookingReminder.all_tenants.filter(
+                pk=row.pk,
+                status=BookingReminder.Status.ESCALATED,
+            ).update(status=BookingReminder.Status.SENT_NO_REPLY)
+            write_audit(
+                action="bookings.reminder.escalation_failed",
+                target="BookingReminder",
+                target_id=row.pk,
+                payload={
+                    "kind": row.kind,
+                    "yclients_record_id": row.yclients_record_id,
+                    "exception_type": type(exc).__name__,
+                },
+            )
+            send_failed += 1
+            continue
+
+        if outcome.recipients == 0:
             logger.warning(
                 "bookings.escalate.no_manager_chat tenant=%s pk=%s",
                 tenant.slug,
@@ -313,19 +335,12 @@ def escalate_stale_reminders() -> dict[str, int]:
             no_manager += 1
             continue
 
-        text = _format_escalation_text(row)
-        try:
-            send_message(
-                **manager.send_kwargs(),
-                text=text,
-                attachments=None,
-            )
-        except MaxAPIError as exc:
+        if not outcome.delivered:
             logger.warning(
-                "bookings.escalate.send_failed pk=%s status=%s err=%s",
+                "bookings.escalate.send_failed pk=%s recipients=%d failed=%d",
                 row.pk,
-                exc.status_code,
-                exc.body[:200] if exc.body else "",
+                outcome.recipients,
+                outcome.failed,
             )
             # Revert so the next hourly tick retries. Guarded CAS
             # (ESCALATED → SENT_NO_REPLY) prevents clobbering a row a
@@ -341,25 +356,8 @@ def escalate_stale_reminders() -> dict[str, int]:
                 payload={
                     "kind": row.kind,
                     "yclients_record_id": row.yclients_record_id,
-                    "status_code": exc.status_code,
-                },
-            )
-            send_failed += 1
-            continue
-        except Exception as exc:  # noqa: BLE001 — defensive, see R1 tasks.py
-            logger.exception("bookings.escalate.send_unexpected pk=%s", row.pk)
-            BookingReminder.all_tenants.filter(
-                pk=row.pk,
-                status=BookingReminder.Status.ESCALATED,
-            ).update(status=BookingReminder.Status.SENT_NO_REPLY)
-            write_audit(
-                action="bookings.reminder.escalation_failed",
-                target="BookingReminder",
-                target_id=row.pk,
-                payload={
-                    "kind": row.kind,
-                    "yclients_record_id": row.yclients_record_id,
-                    "exception_type": type(exc).__name__,
+                    "recipients": outcome.recipients,
+                    "failed": outcome.failed,
                 },
             )
             send_failed += 1
