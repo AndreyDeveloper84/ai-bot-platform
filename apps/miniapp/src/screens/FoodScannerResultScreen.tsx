@@ -28,11 +28,11 @@ import { useScreenBack } from "../hooks/useScreenBack";
 import { backByAction } from "../lib/screen-back";
 
 import { Snackbar } from "../components/Snackbar";
+import { getWellnessToday } from "../lib/customer-wellness";
 import {
   MEAL_TYPE_ICON,
   MEAL_TYPE_LABEL,
   PORTION_STEPS,
-  fetchHealthFlags,
   logMeal,
   nextPortion,
   type MealType,
@@ -85,11 +85,17 @@ export function FoodScannerResultScreen() {
   const [busy, setBusy] = useState(false);
   // ED-mode initial = true (fail-safe per adversarial CR P1).
   // Spec §10 Appendix mandates UI MUST hide numeric nutrition for
-  // customers with eating_disorder flag. Initializing to `false` and
-  // letting `fetchHealthFlags()` resolve asynchronously creates a race
-  // window where ED-customer sees calorie numbers before the flag
-  // arrives. We default to «hide», then `flagsResolved=true` flips ON
-  // ONLY if the customer is explicitly NOT in ED mode.
+  // customers with the eating-disorder flag. Initializing to `false` and
+  // letting the flag resolve asynchronously creates a race window where
+  // an ED-customer sees calorie numbers before the flag arrives. We
+  // default to «hide», then `flagsResolved=true` flips ON ONLY if the
+  // source says explicitly `nutrition_numbers_hidden: false`.
+  //
+  // DRF-2106 — the flag is the diary's own `nutrition_numbers_hidden`
+  // from `wellness/today`, the same key Saved / Favorites / Week read.
+  // Until this ticket the card asked `fetchHealthFlags()`, a stub behind
+  // `guardProd` that THREW in the production build: every customer saw
+  // «Примерно — записала.» instead of numbers, plus a console.error.
   const [edMode, setEdMode] = useState<boolean>(true);
   const [flagsResolved, setFlagsResolved] = useState<boolean>(false);
   const [clarifyOpen, setClarifyOpen] = useState(false);
@@ -100,17 +106,17 @@ export function FoodScannerResultScreen() {
   const clarifyTriggerRef = useRef<HTMLButtonElement | null>(null);
   const portionRowRef = useRef<HTMLDivElement | null>(null);
 
-  // Read health_flags once — ED mode also implied by null nutrition.
-  // Default is `edMode=true` (fail-safe); flip OFF only after the
-  // fetch confirms the customer is NOT in ED mode. If the fetch fails
-  // we stay in safe mode + keep numbers hidden — the cost is one
-  // user-visible «Примерно — записала.» instead of calories.
+  // Read the diary's ED flag once — ED mode also implied by null nutrition.
+  // Default is `edMode=true` (fail-safe); flip OFF only after the source
+  // says `nutrition_numbers_hidden === false`. An absent key or a failed
+  // read keeps numbers hidden — «не смогли спросить» is not permission to
+  // show them; the cost is one user-visible «Примерно — записала.».
   useEffect(() => {
     let cancelled = false;
-    fetchHealthFlags()
-      .then((flags) => {
+    getWellnessToday()
+      .then((today) => {
         if (cancelled) return;
-        setEdMode(Boolean(flags.health_flags.eating_disorder));
+        setEdMode(today.nutrition_numbers_hidden !== false);
         setFlagsResolved(true);
       })
       .catch(() => {

@@ -13,19 +13,20 @@
  *   POST /api/v1/customer/food/log       → LogMealResponse
  *   GET  /api/v1/customer/food/daily     → DailySummaryResponse
  *
- * Mini App calls bot-platform `miniapp_api` proxy (W4 ownership);
- * proxy talks to Ayla `nutrition_client.{scan_photo,log_meal,
- * daily_summary}`. Exact paths TBD by W4. Until W4 ships, frontend
- * stubs serve dev — production calls throw `StubNotWiredError`
- * (Profile precedent PR #954 M1 inline fix).
+ * Mini App calls bot-platform `miniapp_api` proxy; the proxy talks to
+ * Ayla `nutrition_client.{scan_photo,log_meal}`. Everything here is a
+ * real request since DRF-2098 / DRF-2106 — the last stub
+ * (`fetchHealthFlags`, behind `guardProd`) threw in the production
+ * build and hid the numbers on the result card for everyone.
  *
  * # ED-mode rendering — critical voice rule
  *
- * If `MeResponse.health_flags.eating_disorder === true`, Ayla does
- * NOT return calorie numbers (spec §10 Appendix ED Mode). UI MUST
- * hide all numeric nutrition values (calories, macros). Render text
- * only: «Примерно · 150 г · записала». Portion ± buttons still
- * function locally but display no updated numbers.
+ * The ED flag is the same `nutrition_numbers_hidden` the diary reads
+ * (`wellness/today`, `customer-wellness.ts::getWellnessToday`),
+ * fail-closed: an absent key HIDES the numbers (spec §10 Appendix ED
+ * Mode). UI MUST hide all numeric nutrition values (calories, macros)
+ * while it is not explicitly `false`. Render text only: «Примерно ·
+ * 150 г · записала».
  *
  * # 152-ФЗ consent gate
  *
@@ -33,21 +34,6 @@
  * sheet). Stored server-side in the consent registry as
  * `food_diary_processing` (DRF-1963) via `me/food-scanner-consent/`.
  *
- * # Stub variants for dev QA
- *
- *   ?stub=default        — happy path (гречка с курицей, conf 0.85)
- *   ?stub=low_confidence — F3 low-conf branch (conf 0.42 → «Похоже на»)
- *   ?stub=not_recognized — FoodNotRecognizedError
- *   ?stub=api_down       — NutritionUnavailableError
- *   ?stub=photo_failed   — PhotoBytesMissingError
- *   ?stub=ed_mode        — eating_disorder=true (hides numbers)
- *
- * # Voice + factual-only rule (per spec §10)
- *
- *   - «примерно» / «похоже на» / «можно уточнить» / «записала» — OK
- *   - «вредно» / «много» / «слишком» — FORBIDDEN (medical/judgmental)
- *   - «~» literal as visual approximate signal
- *   - No gamification / streaks / badges (founder anti-pattern)
  */
 
 // ---------------------------------------------------------------------------
@@ -120,24 +106,6 @@ export interface DailySummaryResponse {
   ai_comment?: string;
 }
 
-/**
- * Stub MeResponse extension — health_flags exposure (Q2 blocker per
- * Phase A recon). Real shape lives in `apps/miniapp/src/lib/admin-api.ts
- * ::MeResponse`; this typed subset is what food scanner consumes.
- * Until W4 wires `health_flags` into the canonical /me payload, the
- * stub here drives the ED-mode toggle.
- */
-export interface FoodHealthFlags {
-  eating_disorder?: boolean;
-  pregnancy?: boolean;
-  breastfeeding?: boolean;
-  diabetes?: boolean;
-  hypertension?: boolean;
-}
-
-export interface MeHealthFlagsResponse {
-  health_flags: FoodHealthFlags;
-}
 
 // ---------------------------------------------------------------------------
 // Error taxonomy — UI maps each to one of the §7 state screens.
@@ -173,9 +141,10 @@ export class PhotoTooLargeError extends Error {
 }
 
 /**
- * Production guard — Profile PR #954 M1 precedent. If real W4 endpoint
- * is not wired, prod-mode calls throw → `StateError` renders. NEVER
- * ship fake recognition results / fake daily totals to a real customer.
+ * Legacy (DRF-2106): nothing in this module throws it any more — the last
+ * stub is gone. The class stays exported because the Processing screen
+ * still maps it to its «пока не подключено» state; that branch is dead
+ * and can go with the screen's next edit.
  */
 export class StubNotWiredError extends Error {
   constructor() {
@@ -184,63 +153,12 @@ export class StubNotWiredError extends Error {
   }
 }
 
-function guardProd(endpoint: string): void {
-  if (!import.meta.env.DEV) {
-    // eslint-disable-next-line no-console
-    console.error(
-      `[food-scanner] ${endpoint} called in production with no W4 wire-up. ` +
-        "See docs/screens/customer-food-scanner-flow.md §13 + W4 follow-up issue.",
-    );
-    throw new StubNotWiredError();
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Stub variant picker.
-// ---------------------------------------------------------------------------
-
-type StubVariant =
-  | "default"
-  | "low_confidence"
-  | "not_recognized"
-  | "api_down"
-  | "photo_failed"
-  | "ed_mode";
-
-function pickStubVariant(): StubVariant {
-  if (!import.meta.env.DEV) return "default";
-  if (typeof window === "undefined") return "default";
-  try {
-    const sp = new URLSearchParams(window.location.search);
-    const v = sp.get("stub");
-    if (
-      v === "low_confidence" ||
-      v === "not_recognized" ||
-      v === "api_down" ||
-      v === "photo_failed" ||
-      v === "ed_mode"
-    ) {
-      return v;
-    }
-  } catch {
-    /* SSR / parse failure */
-  }
-  return "default";
-}
-
-function devWarn(msg: string): void {
-  if (import.meta.env.DEV && typeof console !== "undefined") {
-    // eslint-disable-next-line no-console
-    console.warn(`[food-scanner stub] ${msg}`);
-  }
-}
-
 // ---------------------------------------------------------------------------
 // Фото-половина F8 (DRF-2098) — настоящий провод. Решение владельца 18.09
 // (§48 п.4): «food-diary-v1 покрывает фото из Mini App» — отдельного
 // согласия на фото нет, ворота у `POST /food/scan` те же, что у текста
 // (`fetchDiaryConsentGate` спрашивают до снимка; 403 в полёте — тот же
-// экран согласия). `guardProd` с этих двух ручек снят: они боевые.
+// экран согласия). Stub-сторожа `guardProd` в модуле больше нет (DRF-2098/2106).
 // ---------------------------------------------------------------------------
 
 export interface ScanPhotoOptions {
@@ -381,20 +299,6 @@ export async function logMeal(req: LogMealRequest): Promise<LogMealResponse> {
  * Настоящее чтение — `customer-wellness.ts::loadDiaryToday`.
  */
 
-/**
- * Read the customer's health_flags. Production swap: read from
- * canonical `/api/v1/me` response once W4 adds the `health_flags`
- * field (P2 follow-up).
- */
-export async function fetchHealthFlags(): Promise<MeHealthFlagsResponse> {
-  guardProd("GET /api/v1/me (health_flags)");
-  devWarn("health_flags served from stub — W4 follow-up");
-  const v = pickStubVariant();
-  return {
-    health_flags: { eating_disorder: v === "ed_mode" },
-  };
-}
-
 // ---------------------------------------------------------------------------
 // Согласие на сканирование еды (152-ФЗ) — источник правды СЕРВЕР.
 // ---------------------------------------------------------------------------
@@ -431,10 +335,9 @@ export const FOOD_DIARY_CONSENT_DOCUMENT_VERSION = "food-diary-v1";
 //
 // Настоящий провод, не stub: `POST /food/estimate` (оценка без записи) и
 // `POST /food/log` (запись по подтверждению) — те же ручки бота, что ведут
-// в ту же тропу каталога, что и текст в чате (F2). `guardProd` здесь не
-// стоит: это боевые ручки. Фото-половина (`scanPhoto`/`logMeal` выше) — с
-// DRF-2098 тоже боевая: решение владельца D26 = «food-diary-v1 покрывает
-// фото из Mini App».
+// в ту же тропу каталога, что и текст в чате (F2). Это боевые ручки, как и
+// фото-половина (`scanPhoto`/`logMeal` выше) с DRF-2098: решение владельца
+// D26 = «food-diary-v1 покрывает фото из Mini App».
 // ---------------------------------------------------------------------------
 
 export interface FoodTextEstimate {

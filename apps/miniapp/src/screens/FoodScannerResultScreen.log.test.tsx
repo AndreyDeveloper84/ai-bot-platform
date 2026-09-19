@@ -14,16 +14,20 @@ vi.mock("../lib/food-scanner", async (importOriginal) => {
   return {
     ...original,
     logMeal: vi.fn(),
-    fetchHealthFlags: vi.fn(),
   };
+});
+vi.mock("../lib/customer-wellness", async (importOriginal) => {
+  const original = await importOriginal<typeof import("../lib/customer-wellness")>();
+  return { ...original, getWellnessToday: vi.fn() };
 });
 vi.mock("../hooks/useScreenBack", () => ({ useScreenBack: () => vi.fn() }));
 
-import { fetchHealthFlags, logMeal, type ScanResponse } from "../lib/food-scanner";
+import { getWellnessToday } from "../lib/customer-wellness";
+import { logMeal, type ScanResponse } from "../lib/food-scanner";
 import { FoodScannerResultScreen } from "./FoodScannerResultScreen";
 
 const mockedLog = vi.mocked(logMeal);
-const mockedFlags = vi.mocked(fetchHealthFlags);
+const mockedToday = vi.mocked(getWellnessToday);
 
 const RESULT: ScanResponse = {
   scan_id: "scan-2098-1",
@@ -52,7 +56,7 @@ function renderResult() {
 
 beforeEach(() => {
   vi.clearAllMocks();
-  mockedFlags.mockResolvedValue({ health_flags: { eating_disorder: false } });
+  mockedToday.mockResolvedValue({ display_name: "", nutrition_numbers_hidden: false } as never);
   mockedLog.mockResolvedValue({ log_id: "log-1", dish_name: "Борщ", meal_type: "lunch", calories: 250 });
 });
 

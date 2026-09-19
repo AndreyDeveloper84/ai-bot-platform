@@ -166,13 +166,13 @@ describe("logMeal — запись по scan_id через POST /food/log", () =
 });
 
 describe("stub-ветка мертва", () => {
-  it("guardProd не стоит на scanPhoto/logMeal — и стоит на fetchHealthFlags (контроль)", async () => {
-    const original = await vi.importActual<typeof import("./food-scanner")>("./food-scanner");
-    expect(original.scanPhoto.toString().toLowerCase()).not.toContain("guardprod");
-    expect(original.logMeal.toString().toLowerCase()).not.toContain("guardprod");
-    expect(original.scanPhoto.toString()).toContain("/food/scan");
-    expect(original.logMeal.toString()).toContain("/food/log");
-    // Положительная стража на тот же признак: сторож видит слово там, где оно есть.
-    expect(original.fetchHealthFlags.toString().toLowerCase()).toContain("guardprod");
+  it("в модуле нет ни guardProd, ни fetchHealthFlags — только настоящие запросы (DRF-2106)", async () => {
+    const source = (await import("./food-scanner.ts?raw")).default as string;
+    // Положительно: это тот самый модуль — обе боевые ручки в нём названы.
+    expect(source).toContain("/food/scan");
+    expect(source).toContain("/food/log");
+    expect(source).not.toContain("guardProd(");
+    expect(source).not.toContain("function fetchHealthFlags");
+    expect(source).not.toContain("function pickStubVariant");
   });
 });
