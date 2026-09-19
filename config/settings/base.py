@@ -637,6 +637,11 @@ MAX_BOT_TENANT_SLUG = os.environ.get("MAX_BOT_TENANT_SLUG", "")
 MAX_BOT_WEB_APP = os.environ.get("MAX_BOT_WEB_APP", "")
 MAX_MINIAPP_URL = os.environ.get("MAX_MINIAPP_URL", "")
 
+# DRF-2113 — контакт поддержки, который салонный бот называет по кнопке
+# «Обратиться в поддержку» (NOT_LINKED / неактивный салон / незнакомец).
+# Пусто → «Напишите в поддержку Ayla.» без контакта. Не секрет; в лог не пишется.
+AYLA_SUPPORT_CONTACT = os.environ.get("AYLA_SUPPORT_CONTACT", "")
+
 # Master Mini App session token (PR 1 / M0 onboarding).
 #
 # Issued by POST /api/v1/master/onboarding/accept. The Mini App stores it

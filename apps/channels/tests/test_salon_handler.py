@@ -31,6 +31,31 @@ from apps.tenancy.models import StaffInvite, Tenant, TenantStaff
 
 pytestmark = pytest.mark.django_db
 
+
+@pytest.fixture(autouse=True)
+def _fresh_stranger_counter():
+    """DRF-2113: после трёх ответов незнакомцу бот молчит (счётчик в cache по
+    личности). Тесты этого файла говорят от одной личности много раз — счётчик
+    между тестами обнуляется, иначе четвёртый тест слышал бы молчание."""
+    from django.core.cache import cache
+
+    cache.clear()
+    yield
+    cache.clear()
+
+
+@pytest.fixture(autouse=True)
+def _staff_are_linked(monkeypatch):
+    """DRF-2113: связь с каталогом — не предмет этого файла.
+
+    Пре-чек входа (``salon_entry``) показывает меню только связанным с
+    каталогом; строки здесь строятся без ключа личности, и без этой
+    оговорки каждый персонал получал бы «Доступ ещё не подключён».
+    Связь стережётся в ``test_salon_entry_2113``.
+    """
+    monkeypatch.setattr("apps.channels.max.salon_entry.unlinked_reason", lambda *a, **kw: "")
+
+
 CHANNEL_USER_ID = "700700"
 CHAT_ID = "555"
 
@@ -129,7 +154,8 @@ class TestOnboarding:
     def test_a_stranger_is_asked_for_a_code(self, tenant, sent):
         _handle("привет", tenant)
 
-        assert "код приглашения" in sent.call_args.kwargs["text"]
+        # DRF-2113: незнакомцу — «рабочий бот салона … код сотрудника или ссылка-приглашение».
+        assert "код сотрудника" in sent.call_args.kwargs["text"]
         assert not TenantStaff.all_tenants.exists()
 
     def test_a_bad_code_is_refused_without_detail(self, tenant, sent):
@@ -155,7 +181,7 @@ class TestOnboarding:
         _handle("привет", tenant, update_id=2)
 
         text = sent.call_args.kwargs["text"]
-        assert "код приглашения" not in text
+        assert "код сотрудника" not in text and "код приглашения" not in text
         assert "Формула тела" in text
 
 

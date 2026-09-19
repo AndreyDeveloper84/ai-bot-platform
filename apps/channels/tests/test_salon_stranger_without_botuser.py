@@ -40,6 +40,31 @@ from apps.tenancy.models import StaffInvite, Tenant, TenantStaff
 
 pytestmark = pytest.mark.django_db
 
+
+@pytest.fixture(autouse=True)
+def _fresh_stranger_counter():
+    """DRF-2113: после трёх ответов незнакомцу бот молчит (счётчик в cache по
+    личности). Тесты этого файла говорят от одной личности много раз — счётчик
+    между тестами обнуляется, иначе четвёртый тест слышал бы молчание."""
+    from django.core.cache import cache
+
+    cache.clear()
+    yield
+    cache.clear()
+
+
+@pytest.fixture(autouse=True)
+def _staff_are_linked(monkeypatch):
+    """DRF-2113: связь с каталогом — не предмет этого файла.
+
+    Пре-чек входа (``salon_entry``) показывает меню только связанным с
+    каталогом; строки здесь строятся без ключа личности, и без этой
+    оговорки каждый персонал получал бы «Доступ ещё не подключён».
+    Связь стережётся в ``test_salon_entry_2113``.
+    """
+    monkeypatch.setattr("apps.channels.max.salon_entry.unlinked_reason", lambda *a, **kw: "")
+
+
 CHANNEL_USER_ID = "4004114"
 CHAT_ID = "557"
 
@@ -218,7 +243,7 @@ class TestTheCodeDecidesTheTenant:
 
         assert len(_rows()) == 1
         assert "Салон Игрек" in _text(sent)
-        assert "код приглашения" not in _text(sent)
+        assert "код сотрудника" not in _text(sent) and "код приглашения" not in _text(sent)
 
 
 def _register_solo_through_the_dialog(salon: Tenant | None, *, first_update_id: int = 1) -> int:
@@ -284,7 +309,7 @@ class TestSoloRegistrationFromTheEventAlone:
         assert (_rows()[0].tenant.name or _rows()[0].tenant.slug) in _text(
             sent
         )  # меню называет кабинет
-        assert "код приглашения" not in _text(sent)
+        assert "код сотрудника" not in _text(sent) and "код приглашения" not in _text(sent)
 
 
 class TestStaffAreUnchanged:

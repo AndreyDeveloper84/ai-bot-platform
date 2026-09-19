@@ -36,6 +36,18 @@ from apps.tenancy.models import Tenant
 pytestmark = pytest.mark.django_db
 
 
+@pytest.fixture(autouse=True)
+def _fresh_stranger_counter():
+    """DRF-2113: после трёх ответов незнакомцу бот молчит (счётчик в cache по
+    личности). Тесты этого файла говорят от одной личности много раз — счётчик
+    между тестами обнуляется, иначе четвёртый тест слышал бы молчание."""
+    from django.core.cache import cache
+
+    cache.clear()
+    yield
+    cache.clear()
+
+
 class _Event:
     def __init__(self, text: str) -> None:
         self.text = text

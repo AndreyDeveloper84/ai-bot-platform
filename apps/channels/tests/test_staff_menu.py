@@ -40,6 +40,19 @@ from apps.tenancy.models import StaffInvite, Tenant
 
 pytestmark = pytest.mark.django_db
 
+
+@pytest.fixture(autouse=True)
+def _staff_are_linked(monkeypatch):
+    """DRF-2113: связь с каталогом — не предмет этого файла.
+
+    Пре-чек входа (``salon_entry``) показывает меню только связанным с
+    каталогом; строки здесь строятся без ключа личности, и без этой
+    оговорки каждый персонал получал бы «Доступ ещё не подключён».
+    Связь стережётся в ``test_salon_entry_2113``.
+    """
+    monkeypatch.setattr("apps.channels.max.salon_entry.unlinked_reason", lambda *a, **kw: "")
+
+
 MSK = ZoneInfo("Europe/Moscow")
 CHANNEL_USER_ID = "700700"
 
