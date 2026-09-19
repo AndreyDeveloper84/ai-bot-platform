@@ -51,7 +51,7 @@ from apps.integrations.ayla import (
     get_nutrition_client,
 )
 from apps.skills.base import SkillContext, SkillResult
-from apps.skills.food_clarify.text_entry import CONSENT_TEXT, DIARY_CONSENT_REQUIRED_TEXT
+from apps.skills.food_clarify.text_entry import CONSENT_TEXT, diary_consent_required_result
 from apps.skills.registry import register
 from apps.skills.water.parser import REFUSED, BeverageMatch, parse_beverage
 
@@ -140,10 +140,8 @@ class WaterSkill:
                 meta={"reply_kind": "water_consent_required"},
             )
         if reason == FOOD_DIARY_CONSENT_REQUIRED:
-            return SkillResult(
-                reply_text=DIARY_CONSENT_REQUIRED_TEXT,
-                meta={"reply_kind": "water_diary_consent_required"},
-            )
+            # DRF-2096 — тот же отказ и та же кнопка, что у текста и фото.
+            return diary_consent_required_result("water_diary_consent_required")
 
         external_id = external_user_id_for(context.bot_user)
         try:

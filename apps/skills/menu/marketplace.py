@@ -1155,6 +1155,46 @@ def open_warning_reply(slug: str) -> tuple[str, dict[str, Any]] | None:
     }
 
 
+#: Слаг экрана согласия дневника v1: первый кадр сканера без согласия — и
+#: есть экран согласия (``FoodScannerCaptureScreen`` → ``ConsentGate``, Z9);
+#: после «Разрешаю» человек остаётся у сканера (DRF-1968). Слаг стоит в
+#: обоих реестрах (``welcome.skill.MINIAPP_ROUTES`` / ``max-sdk.ts``).
+DIARY_CONSENT_OPEN_SLUG = "open_food_scan"
+DIARY_CONSENT_OPEN_LABEL = "Открыть и разрешить"
+DIARY_CONSENT_REQUEST_KIND = "diary_consent_request"
+
+
+def diary_consent_request_action_data() -> dict[str, Any] | None:
+    """Кнопка «открыть экран согласия дневника» — ОДНА на все три пути чата (DRF-2096).
+
+    Вода, еда текстом и фото отказывают одним предикатом
+    (``apps.consent.diary_gate``) и одним текстом; до этого листа текст
+    говорил «открой Mini App и подтверди», а открыть было нечем. Кнопка —
+    ``open_app`` на :data:`DIARY_CONSENT_OPEN_SLUG` тем же строителем, что
+    у меню (:func:`_miniapp_button`), и с той же лестницей вырождения:
+    приложение не настроено → ``None`` — текст без мёртвой кнопки
+    (§25 п.6). Кнопки «Дать согласие» (DRF-1968) здесь нет: она выдаёт
+    PERSONAL_DATA и вернула бы человека к тому же отказу.
+
+    Возврат в чат после «Разрешаю» — ручной: человек закрывает приложение
+    и повторяет фразу; запись тогда проходит (#1839).
+    """
+    web_app, miniapp_url = _config()
+    button = _miniapp_button(
+        MenuItem(
+            label=DIARY_CONSENT_OPEN_LABEL,
+            callback=DIARY_CONSENT_OPEN_SLUG,
+            line="",
+            where="miniapp",
+        ),
+        web_app=web_app,
+        miniapp_url=miniapp_url,
+    )
+    if button is None:
+        return None
+    return {"buttons": [button], "button_columns": 1, "kind": DIARY_CONSENT_REQUEST_KIND}
+
+
 def health_request_action_data() -> dict[str, Any]:
     """Клавиатура экрана запроса согласия.
 

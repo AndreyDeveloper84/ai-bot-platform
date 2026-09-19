@@ -130,10 +130,37 @@ CONSENT_TEXT = (
 #: не выдано. Один текст на воду, текст и фото в чате; без кнопки «Дать
 #: согласие» (DRF-1968): та выдаёт PERSONAL_DATA, а согласие дневника из чата
 #: выдать нечем — только экран Mini App. Тот же текст, что у сканера (F11).
+#: DRF-2096 — под текстом кнопка ``open_app`` на экран согласия
+#: (:func:`apps.skills.menu.marketplace.diary_consent_request_action_data`);
+#: когда приложение не настроено — прежний текст без кнопки.
 DIARY_CONSENT_REQUIRED_TEXT = (
     "Чтобы записать еду, нужно открыть Mini App и подтвердить согласие "
     "на обработку данных (152-ФЗ). После этого вернись — и пришли фото."
 )
+DIARY_CONSENT_REQUIRED_WITH_BUTTON_TEXT = (
+    "Чтобы записать еду, нужно разрешить дневник питания в Mini App. "
+    "Нажми кнопку ниже, подтверди — и вернись сюда: повтори, что было."
+)
+
+
+def diary_consent_required_result(reply_kind: str) -> SkillResult:
+    """Отказ «нет согласия дневника» — один на воду, текст и фото (DRF-2096).
+
+    Текст с приглашением — только когда есть кнопка; без приложения —
+    прежний текст без обещания кнопки, которой нет.
+    """
+    from apps.skills.menu.marketplace import diary_consent_request_action_data
+
+    action_data = diary_consent_request_action_data()
+    return SkillResult(
+        reply_text=DIARY_CONSENT_REQUIRED_WITH_BUTTON_TEXT
+        if action_data
+        else DIARY_CONSENT_REQUIRED_TEXT,
+        action_data=action_data,
+        meta={"reply_kind": reply_kind},
+    )
+
+
 NUTRITION_OFF_TEXT = "Дневник еды пока недоступен — функция готовится."
 FIX_GRAMS_PROMPT = "Сколько граммов было на самом деле? Напиши число — пересчитаю запись."
 FIXED_TEXT = "Исправила: {dish} — теперь {kcal} ккал."
@@ -326,10 +353,7 @@ def _gate(context: SkillContext) -> SkillResult | None:
             meta={"reply_kind": "food_text_consent_required"},
         )
     if reason == FOOD_DIARY_CONSENT_REQUIRED:
-        return SkillResult(
-            reply_text=DIARY_CONSENT_REQUIRED_TEXT,
-            meta={"reply_kind": "food_text_diary_consent_required"},
-        )
+        return diary_consent_required_result("food_text_diary_consent_required")
     return None
 
 
