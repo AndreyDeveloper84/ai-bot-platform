@@ -921,8 +921,12 @@ class TestExecute:
             sent_chats.append(user_id)
             return {"ok": True}
 
-        with patch(
-            "apps.admin_api.services.master_deactivation.send_message", side_effect=_capture
+        # Клиентам — прямой провод модуля; мастеру — через send_to_staff
+        # (DRF-2128), то есть через ``outbound.send_message``. Два патча,
+        # один сборщик.
+        with (
+            patch("apps.admin_api.services.master_deactivation.send_message", side_effect=_capture),
+            patch("apps.channels.max.outbound.send_message", side_effect=_capture),
         ):
             resp = client.post(
                 _deactivate_url(master.id),
