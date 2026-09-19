@@ -33,10 +33,9 @@
   ресепшн и дубль по значению — не адресаты.
 
 Два места того же класса — ``llm/cost_tracker.py`` (бюджет токенов) и
-``orchestrator/pipeline.py`` (retry exhausted) — забирает DRF-2130 в
-операторский канал (``alerting.page``), а не в персонал; они названы в
-``HANDED_TO_DRF_2130`` и не переводятся здесь. Когда DRF-2130 снимет
-отправку менеджеру, запись станет устаревшей и p2 попросит её удалить.
+``orchestrator/pipeline.py`` (retry exhausted) — ушли в операторский канал
+(``alerting.page``) по DRF-2130 (#1877); пока это не случилось, они стояли
+в ``HANDED_TO_DRF_2130``, и p2 попросил снять запись, когда отправки не стало.
 """
 
 from __future__ import annotations
@@ -337,14 +336,9 @@ DIRECT_SEND_SITES: dict[str, str] = {
     "apps/channels/max/salon_handler.py": "in_scope",
 }
 
-#: Инженерные алерты менеджеру — уходят в операторский канал по DRF-2130,
-#: не в персонал. Устаревшая запись (отправки больше нет) → красный: снять.
-HANDED_TO_DRF_2130: frozenset[str] = frozenset(
-    {
-        "apps/llm/cost_tracker.py",
-        "apps/orchestrator/pipeline.py",
-    }
-)
+#: Инженерные алерты менеджеру ушли в операторский канал (DRF-2130, #1877) —
+#: персоналу их больше нет. Пусто намеренно: устаревшая запись → красный.
+HANDED_TO_DRF_2130: frozenset[str] = frozenset()
 
 #: Модули, чьи отправки — персоналу по определению модуля.
 STAFF_MODULES: tuple[str, ...] = (
