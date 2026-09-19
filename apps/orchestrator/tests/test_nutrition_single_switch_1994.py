@@ -62,9 +62,6 @@ from apps.skills.nutrition_anketa.skill import (
     CONSENT_DECLINE_CALLBACK,
     CONSENT_GRANT_CALLBACK,
     ENTRY_PHRASE,
-    WITHDRAW_CALLBACK,
-    WITHDRAW_CONFIRM_CALLBACK,
-    WITHDRAW_KEEP_CALLBACK,
     NutritionAnketaSkill,
 )
 from apps.skills.water.skill import WaterSkill
@@ -103,8 +100,12 @@ def nutrition_on(settings):
 # 1. Анкета — каждый вход, одна талия
 # ---------------------------------------------------------------------------
 
-#: Девять форм, которые принимает ``NutritionAnketaSkill.matches`` (перепись в
-#: теле PR). ``DRF-1994`` называл первые три.
+#: Формы, которые принимает ``NutritionAnketaSkill.matches`` (перепись в теле
+#: PR) и которые при OFF отвечают заглушкой. ``DRF-1994`` называл первые три.
+#: Отзыв согласия (``cb:pc_consent:withdraw*``, «Отключить персональный
+#: расчёт») здесь НЕ перечислен намеренно — с DRF-2135 он стоит выше ворот и
+#: работает при любом флаге (§92); доказывается в
+#: ``nutrition_anketa/tests/test_withdraw_outside_switch_2135.py``.
 ANKETA_ENTRIES: tuple[tuple[str, str, dict | None], ...] = (
     ("typed_command", "/anketa", None),
     ("start_callback", "cb:anketa:start", None),
@@ -112,9 +113,6 @@ ANKETA_ENTRIES: tuple[tuple[str, str, dict | None], ...] = (
     ("edit_callback", "cb:anketa:edit:weight", None),
     ("consent_grant", CONSENT_GRANT_CALLBACK, None),
     ("consent_decline", CONSENT_DECLINE_CALLBACK, None),
-    ("withdraw", WITHDRAW_CALLBACK, None),
-    ("withdraw_confirm", WITHDRAW_CONFIRM_CALLBACK, None),
-    ("withdraw_keep", WITHDRAW_KEEP_CALLBACK, None),
     ("confirm_targets", CB_CONFIRM_TARGETS, None),
     # Продолжение FSM: любой не-``cb:`` текст, пока анкета в полёте.
     ("fsm_resume_plain_text", "30", {"nutrition_anketa": {"current_step": "age"}}),

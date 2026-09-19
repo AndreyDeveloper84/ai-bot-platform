@@ -34,6 +34,11 @@
   положительный страж;
 * ``cb:nutri:stop:{surface}`` — «Не присылать» (DRF-1468): отписка стоит в
   ``handler.py`` выше всех ворот — «просьба не писать важнее всего»;
+* ``cb:pc_consent:withdraw*`` и «Отключить персональный расчёт» — ОТЗЫВ
+  согласия ПДн (DRF-2135, §92): стоит в ``NutritionAnketaSkill.handle`` выше
+  ворот и отвечает при OFF тем же, что при ON; удаление параметров тела в
+  каталоге — часть отзыва, поэтому вызов каталога на ``withdraw_confirm``
+  разрешён (``OPEN_BY_DESIGN``); ``grant``/``decline`` — под воротами;
 * фото-вложение (главный вход сканера) и путь инструментов
   ``execute_nutrition_tool`` — не текстовые payload'ы; их ворота при OFF
   доказывают ``food_scanner/tests/test_skill.py`` и тесты ``nutrition_global``.
@@ -50,7 +55,7 @@ from __future__ import annotations
 from contextlib import ExitStack
 from datetime import UTC, datetime
 from types import SimpleNamespace
-from unittest.mock import Mock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 from django.test import Client
@@ -76,8 +81,11 @@ from apps.skills.nutrition_anketa.skill import (
     ENTRY_PHRASE,
     WITHDRAW_ACTION_TEXT,
     WITHDRAW_CALLBACK,
+    WITHDRAW_CONFIRM_ASK,
     WITHDRAW_CONFIRM_CALLBACK,
+    WITHDRAW_DONE,
     WITHDRAW_KEEP_CALLBACK,
+    WITHDRAW_KEPT,
 )
 from apps.skills.registry import registered
 from apps.tenancy.models import Tenant
@@ -286,6 +294,16 @@ ACK_BY_DESIGN: dict[str, str] = {
     text_entry.CB_REJECT: text_entry.REJECTED_TEXT,
 }
 
+#: По замыслу ВЫШЕ ворот (DRF-2135): отзыв согласия ПДн работает при любом
+#: флаге. ``(ожидаемый ответ, каталог может быть вызван)`` — каталог зовётся
+#: только на подтверждении (удаление параметров тела — часть отзыва).
+OPEN_BY_DESIGN: dict[str, tuple[str, bool]] = {
+    WITHDRAW_CALLBACK: (WITHDRAW_CONFIRM_ASK, False),
+    WITHDRAW_ACTION_TEXT: (WITHDRAW_CONFIRM_ASK, False),
+    WITHDRAW_CONFIRM_CALLBACK: (WITHDRAW_DONE, True),
+    WITHDRAW_KEEP_CALLBACK: (WITHDRAW_KEPT, False),
+}
+
 
 def _ctx(text: str) -> SkillContext:
     # Разговор с карточкой сканера, активной анкетой и открытым вопросом
@@ -333,6 +351,8 @@ class TestEveryChatEntryIsClaimedAndAnswersTheStubWhenOff:
         # как и маршрутами Mini App выше. Навыки берут клиента по имени при
         # импорте, поэтому двойник ставится в каждый модуль, а не в источник.
         catalog = Mock(name="catalog-must-not-be-called")
+        catalog.purge_body_parameters = AsyncMock(return_value=True)
+        open_by_design = OPEN_BY_DESIGN.get(text)
         for skill in claimed:
             targets = ["apps.integrations.ayla.get_nutrition_client"]
             if skill.name in CATALOG_MODULES:
@@ -340,9 +360,28 @@ class TestEveryChatEntryIsClaimedAndAnswersTheStubWhenOff:
             with ExitStack() as stack:
                 for target in targets:
                     stack.enter_context(patch(target, return_value=catalog))
+                if open_by_design is not None:
+                    # Отзыв: согласие есть, снимается — иначе ответ был бы
+                    # «нечего отключать», и перепись проверяла бы не то.
+                    stack.enter_context(
+                        patch("apps.consent.personal_calculation.is_granted", return_value=True)
+                    )
+                    stack.enter_context(
+                        patch("apps.consent.personal_calculation.withdraw", return_value=1)
+                    )
                 result = skill.handle(_ctx(text))
             if text in ACK_BY_DESIGN:
                 assert result.reply_text == ACK_BY_DESIGN[text], (skill.name, result.reply_text)
                 continue
+            if open_by_design is not None:
+                assert result.reply_text == open_by_design[0], (skill.name, result.reply_text)
+                continue
             assert result.reply_text in STUBS, (skill.name, text, result.reply_text)
-        assert not catalog.method_calls, (text, catalog.method_calls)
+        if open_by_design is not None and open_by_design[1]:
+            # Каталог позван ровно ради удаления параметров — и ни для чего иного.
+            assert [c[0] for c in catalog.method_calls] == ["purge_body_parameters"], (
+                text,
+                catalog.method_calls,
+            )
+        else:
+            assert not catalog.method_calls, (text, catalog.method_calls)
