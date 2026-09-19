@@ -647,9 +647,11 @@ class TestRetryExhaustedFallback:
 
         assert result.ok is True
         assert result.reply is not None
-        # Static Russian fallback line — the manager has been alerted.
+        # Static Russian fallback line. DRF-2130: the manager is NOT told
+        # anything, so the line must not claim it — that would be a lie
+        # to the client.
         assert "сейчас не могу ответить" in result.reply.text.lower()
-        assert "менедж" in result.reply.text.lower()
+        assert "менедж" not in result.reply.text.lower()
         assert result.error == "llm_retry_exhausted"
 
     async def test_retry_exhausted_writes_audit_row(self, tenant):

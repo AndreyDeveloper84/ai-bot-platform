@@ -345,27 +345,30 @@ _FALLBACK_QUOTA_EXHAUSTED = (
 # budget is gone; THIS one fires when the upstream provider (OpenAI /
 # Anthropic) is repeatedly returning 429 / 5xx so the call has been
 # retried up to ``LLM_RETRY_MAX_ATTEMPTS`` times and STILL failed.
-# User-facing line is intentionally generic; the manager Telegram alert
-# carries the operational detail (provider, model, attempts, last
-# error class).
-_FALLBACK_RETRY_EXHAUSTED = "Извините, сейчас не могу ответить. Я уже сообщил менеджеру."
+# User-facing line is intentionally generic; the operators' page carries
+# the operational detail (provider, attempts, last error class). DRF-2130:
+# the line no longer claims «я уже сообщил менеджеру» — the manager is
+# not told anything, so the sentence would be a lie to the client.
+_FALLBACK_RETRY_EXHAUSTED = "Извините, сейчас не могу ответить. Попробуйте написать чуть позже."
 
-# Manager alert template. Sent to the salon manager's MAX address (when set)
-# whenever the retry layer exhausts for that tenant. Dedup window =
-# one alert per tenant per hour to avoid spamming the manager during
-# an OpenAI / Anthropic outage that affects every turn.
-_ALERT_RETRY_EXHAUSTED_TEMPLATE = (
-    "⚠️ LLM провайдер недоступен после {attempts} попыток "
-    "(provider={provider}, error={error_class}). "
-    "Бот переключился на fallback. Возможно, OpenAI / Anthropic outage — "
+# Operators' page (DRF-2130): Telegram + Sentry via
+# ``apps.observability.alerting.page`` whenever the retry layer exhausts
+# for a tenant. Not sent to the salon manager — a provider outage is an
+# engineering fact, not a decision the salon takes (§50 п.8). Dedup
+# window = one page per tenant per hour so a sustained outage that
+# touches every turn does not flood the channel.
+_PAGE_RETRY_EXHAUSTED_TITLE = "LLM провайдер недоступен после {attempts} попыток (салон {slug})"
+_PAGE_RETRY_EXHAUSTED_BODY = (
+    "tenant={slug} (id={tenant_id})\n"
+    "provider={provider}, error={error_class}, attempts={attempts}\n"
+    "Бот отвечает fallback. Возможно, OpenAI / Anthropic outage — "
     "проверьте статус-страницу."
 )
 
-# Redis key + TTL for the per-tenant retry-exhausted alert dedup flag.
-# 3600s (1 hour) is the same dedup window we use for the PI9
-# cost-cap warning escalation. Long enough to avoid manager-side spam
-# during a sustained vendor outage; short enough that a new event the
-# next hour does get surfaced.
+# Redis key + TTL for the per-tenant retry-exhausted page dedup flag.
+# 3600s (1 hour): long enough to avoid channel spam during a sustained
+# vendor outage; short enough that a new event the next hour does get
+# surfaced. Kept in front of ``page()``'s own 5-minute content dedup.
 _RETRY_ALERT_DEDUP_PREFIX = "llm_retry_alert:"
 _RETRY_ALERT_DEDUP_TTL_S = 3600
 
@@ -519,9 +522,9 @@ async def turn(message: ChannelMessage) -> TurnResult:
                 # Phase 1 / PI7 (DRF-858) — LLM provider returned
                 # transient errors (429 / 5xx / timeout) for every
                 # retry attempt. The user sees a static Russian
-                # fallback; the salon manager gets a Telegram alert
-                # (deduped per tenant per hour) so they can check
-                # the vendor's status page.
+                # fallback; the operators' channel gets a page
+                # (deduped per tenant per hour, DRF-2130) so they can
+                # check the vendor's status page.
                 logger.warning(
                     "pipeline.retry_exhausted trace_id=%s tenant=%s attempts=%d last_error=%s",
                     trace_id,
@@ -1244,40 +1247,29 @@ def _write_retry_exhausted_telemetry(*, trace_id: str, tenant: Any, retry_exc: A
 
 
 def _send_retry_exhausted_alert(*, tenant: Any, retry_exc: Any) -> None:
-    """Send the salon-manager Telegram alert when LLM retries exhaust.
+    """Page the operators' channel when LLM retries exhaust (DRF-2130).
 
-    Phase 1 / PI7 (DRF-858). Deduplicated via a per-tenant Redis flag
-    with a 1-hour TTL so a sustained vendor outage that touches every
-    turn doesn't spam the manager. No configured address → log +
-    skip (matches the cost-tracker alert path).
+    Phase 1 / PI7 (DRF-858) sent this to the salon manager's MAX; since
+    DRF-2130 it goes to ``apps.observability.alerting.page`` (Telegram +
+    Sentry) and the manager gets nothing. The page does not depend on
+    the tenant having a manager address — before, salons without one
+    lost the signal entirely.
 
-    The dedup flag is checked AND set via ``cache.add`` so the
-    check-then-set is atomic (cache.add returns False when key
-    already exists), avoiding a race where two concurrent turns
-    both think they're the first to alert.
+    Deduplicated via a per-tenant Redis flag with a 1-hour TTL so a
+    sustained vendor outage that touches every turn doesn't flood the
+    channel. The flag is checked AND set via ``cache.add`` so the
+    check-then-set is atomic (cache.add returns False when key already
+    exists), avoiding a race where two concurrent turns both think
+    they're the first to page.
     """
     from django.core.cache import cache
 
-    from apps.channels.max.addressing import manager_address
-
-    # DRF-1559 — человек, если у салона заполнен ``manager_user_id``, иначе
-    # прежний диалоговый идентификатор. Локальный импорт, как и у
-    # ``send_message`` ниже: оркестратор не тянет apps.channels на уровне
-    # модуля (цикл feature↔feature, Sprint 8 review P1-cycle2).
-    # Slug ``...no_manager_chat_id`` сохранён — эмитируемый ключ.
-    manager = manager_address(tenant)
     tenant_id = str(getattr(tenant, "id", ""))
-
-    if not manager:
-        logger.warning(
-            "pipeline.retry_alert_skipped_no_manager_chat_id tenant=%s",
-            tenant_id,
-        )
-        return
+    slug = str(getattr(tenant, "slug", "") or "")
 
     # Dedup: cache.add returns False when the key already exists.
     # Setting + checking atomically prevents two concurrent retry-
-    # exhausted turns from both sending the alert.
+    # exhausted turns from both paging.
     dedup_key = f"{_RETRY_ALERT_DEDUP_PREFIX}{tenant_id}"
     if not cache.add(dedup_key, 1, timeout=_RETRY_ALERT_DEDUP_TTL_S):
         logger.info(
@@ -1299,19 +1291,29 @@ def _send_retry_exhausted_alert(*, tenant: Any, retry_exc: Any) -> None:
         elif "anthropic" in module:
             provider = "anthropic"
 
-    text = _ALERT_RETRY_EXHAUSTED_TEMPLATE.format(
-        attempts=getattr(retry_exc, "attempts", 0),
-        provider=provider,
-        error_class=type(last_error).__name__ if last_error else "Unknown",
-    )
+    fields = {
+        "slug": slug,
+        "tenant_id": tenant_id,
+        "attempts": getattr(retry_exc, "attempts", 0),
+        "provider": provider,
+        "error_class": type(last_error).__name__ if last_error else "Unknown",
+    }
 
     try:
-        from apps.channels.max.outbound import send_message
+        # Local import, like ``write_audit`` above: the orchestrator does
+        # not pull sibling apps at module level (feature↔feature cycle).
+        from apps.observability import alerting
 
-        send_message(**manager.send_kwargs(), text=text)
+        sent = alerting.page(
+            "error",
+            _PAGE_RETRY_EXHAUSTED_TITLE.format(**fields),
+            _PAGE_RETRY_EXHAUSTED_BODY.format(**fields),
+            dedup_key=dedup_key,
+        )
+        logger.info("pipeline.retry_alert_paged tenant=%s sent=%s", tenant_id, sent)
     except Exception:  # noqa: BLE001 — alerting must never break the request
         logger.warning(
-            "pipeline.retry_alert_send_failed tenant=%s",
+            "pipeline.retry_alert_page_failed tenant=%s",
             tenant_id,
             exc_info=True,
         )

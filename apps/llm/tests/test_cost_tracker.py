@@ -267,6 +267,21 @@ class TestThresholdAlerts:
         with pytest.raises(TenantQuotaExceeded):
             await enforce_caps(str(tenant.id))
 
+    async def test_no_manager_address_cross_100_pages_once(
+        self,
+        tenant: Tenant,
+        _patched_send_message,
+        _patched_page,
+    ) -> None:
+        """Узел: тенант без менеджера, 100 % → page 1 (раньше сигнал терялся
+        с ``alert_skipped_no_manager_chat_id``)."""
+        await record_usage(str(tenant.id), tokens=8_100, cost_usd=Decimal("0"))
+        _patched_page.reset_mock()
+        await record_usage(str(tenant.id), tokens=2_000, cost_usd=Decimal("0"))
+        assert _patched_page.call_count == 1
+        assert _patched_page.call_args.args[0] == "error"
+        _patched_send_message.assert_not_called()
+
     async def test_cost_threshold_crosses_independent_of_tokens(
         self,
         tenant_with_manager: Tenant,
