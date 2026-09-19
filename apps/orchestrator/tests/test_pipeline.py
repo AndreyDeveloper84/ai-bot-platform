@@ -734,6 +734,8 @@ class TestRetryExhaustedFallback:
         from apps.orchestrator import pipeline
 
         src = inspect.getsource(pipeline._send_retry_exhausted_alert)
+        # Presence first: the operators' channel is what the helper binds.
+        assert "alerting.page(" in src
         assert "apps.channels.max" not in src
         assert "send_message" not in src
         assert "manager_address" not in src

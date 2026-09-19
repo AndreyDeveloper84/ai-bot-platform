@@ -304,6 +304,9 @@ class TestThresholdAlerts:
         from apps.llm import cost_tracker
 
         src = inspect.getsource(cost_tracker)
+        # Presence first: the operators' channel is what the module binds.
+        assert "alerting.page(" in src
+        assert hasattr(cost_tracker, "_send_threshold_alert")
         assert "apps.channels.max" not in src
         assert "MaxAddress" not in src
         assert not hasattr(cost_tracker, "send_message")
