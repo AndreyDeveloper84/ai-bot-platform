@@ -47,8 +47,17 @@ _REGISTRY = _PROJECT_ROOT / "docs" / "OPEN_DECISIONS.md"
 
 # Measured on dev@d5e3c75e (11.09.2026) by running the guard with an
 # empty amnesty: 204 sections, 16 of them cancelling, 16 of those with
-# no path block. The registry only grows, so this is a floor.
+# no path block. The registry only grows, so this is a floor — and the
+# exact size of the shipped amnesty, which can only shrink.
 _MEASURED_CANCELLING = 16
+
+# Cancelling sections the guard finds in the live registry today: the 16
+# amnestied ones plus every later section that carries its own path block.
+# Re-measured on dev@be14178e (19.09.2026): §163 «Что это отменяет»
+# (owner delta 18.09, #1841, docs-only run — the count test did not run
+# there) is the 17th, `[checked]`, not amnestied. Bump it when the registry
+# gains a cancelling section; the amnesty size above does not move.
+_LIVE_CANCELLING = 17
 
 
 def _scan(text: str, baseline: set[str] | None = None):
@@ -217,7 +226,7 @@ def test_the_count_is_printed_on_a_green_run(capsys) -> None:
     rc = guard.main(["decision_reversal_guard.py", str(_REGISTRY)])
     out = capsys.readouterr()
     assert rc == 0, out.err
-    assert f"секций с отменой найдено: {_MEASURED_CANCELLING}" in out.out
+    assert f"секций с отменой найдено: {_LIVE_CANCELLING}" in out.out
 
 
 # ---------------------------------------------------------------------------
