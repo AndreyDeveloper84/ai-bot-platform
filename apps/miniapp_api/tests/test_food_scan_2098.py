@@ -67,6 +67,9 @@ def _auth(user_id: str) -> str:
 def _settings(settings):
     settings.MAX_BOT_TOKEN = BOT_TOKEN
     settings.NUTRITION_ENABLED = True
+    # DRF-2109 — прокси стоит и за cross-border флагом фото (тем же
+    # предикатом, что чат); этот файл — про прокси при ОТКРЫТЫХ воротах.
+    settings.FOOD_PHOTO_SCAN_ENABLED = True
     cache.clear()
     yield
     cache.clear()

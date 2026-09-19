@@ -33,6 +33,7 @@ import {
   StubNotWiredError,
   scanPhoto,
 } from "../lib/food-scanner";
+import { ApiError } from "../lib/api";
 import { FoodScannerProcessingScreen } from "./FoodScannerProcessingScreen";
 
 const mockedScan = vi.mocked(scanPhoto);
@@ -129,5 +130,20 @@ describe("положительная стража: настоящие сбои �
     expect(
       screen.getByRole("button", { name: "Сделать заново" }),
     ).toBeInTheDocument();
+  });
+});
+
+describe("фото выключено флагом — DRF-2109", () => {
+  it("photo_scan_disabled называет выключенное фото, не «через минуту», и ведёт писать текстом", async () => {
+    mockedScan.mockRejectedValue(
+      new ApiError(404, "photo_scan_disabled", "photo recognition is not enabled"),
+    );
+    renderScreen();
+
+    expect(await screen.findByText("Фото пока не принимаю")).toBeInTheDocument();
+    expect(screen.getByText(/Напиши, что было/)).toBeInTheDocument();
+    expect(screen.queryByText(/через минуту/)).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Переснять" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Написать вручную" })).toBeInTheDocument();
   });
 });
