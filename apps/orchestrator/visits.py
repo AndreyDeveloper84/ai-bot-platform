@@ -505,15 +505,13 @@ def reschedule_button(appointment_id: str, *, label: str) -> dict[str, str] | No
     префикса» было бы дырой, а не сокращением: хвост попадает в адрес
     самого приложения.
     """
-    from django.conf import settings
-
+    from apps.channels.miniapp_config import miniapp_target
     from apps.skills.welcome.skill import reschedule_route
 
     booking_id = (appointment_id or "").strip()
     if not _UUID_RE.match(booking_id):
         return None
-    web_app = getattr(settings, "MAX_BOT_WEB_APP", "") or ""
-    miniapp_url = getattr(settings, "MAX_MINIAPP_URL", "") or ""
+    web_app, miniapp_url, _ = miniapp_target()  # DRF-1361 — one source for the ladder
     if web_app:
         return {
             "label": label,
@@ -544,13 +542,11 @@ def history_app_button() -> dict[str, str] | None:
     на один и тот же экран не могут разъехаться, потому что обе берут
     путь оттуда.
     """
-    from django.conf import settings
-
+    from apps.channels.miniapp_config import miniapp_target
     from apps.skills.menu.marketplace import OPEN_BUTTON_LABEL
     from apps.skills.welcome.skill import _miniapp_url
 
-    web_app = getattr(settings, "MAX_BOT_WEB_APP", "") or ""
-    miniapp_url = getattr(settings, "MAX_MINIAPP_URL", "") or ""
+    web_app, miniapp_url, _ = miniapp_target()  # DRF-1361 — one source for the ladder
     if web_app:
         return {"label": OPEN_BUTTON_LABEL, "callback": _HISTORY_SLUG, "web_app": web_app}
     if miniapp_url:
