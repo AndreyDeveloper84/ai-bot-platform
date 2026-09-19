@@ -92,13 +92,14 @@ class TestPositiveControlOnTheReadIsWhatItWas:
 
         assert response.status_code == 200
         body = response.json()
-        assert "consent_required" not in body
-        # Ключи, которые при удачном чтении есть всегда (цели/БЖУ — по
-        # наличию; ``coach_observation`` — только с ``surface=diary``).
+        # Наличие раньше отсутствия: ключи, которые при удачном чтении есть
+        # всегда (цели/БЖУ — по наличию; ``coach_observation`` — только с
+        # ``surface=diary``), и только потом — что согласие не спрашивалось.
         expected = {"calories_eaten", "entries", "water_glasses_eaten"}
         assert expected <= DIARY_KEYS
-        missing = expected - set(body)
-        assert not missing, f"ключей дневника нет при включённом контуре: {missing}"
+        for key in sorted(expected):
+            assert key in body, f"ключа дневника {key!r} нет при включённом контуре: {sorted(body)}"
+        assert "consent_required" not in body
         nutrition.daily_summary.assert_called_once()
         nutrition.get_water_today.assert_called_once()
 
