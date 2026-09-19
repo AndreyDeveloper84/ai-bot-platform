@@ -41,6 +41,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 
+import { MasterAvatar } from "../components/MasterAvatar";
 import { MasterTabBar } from "../components/MasterTabBar";
 import { useScreenBack } from "../hooks/useScreenBack";
 import { ApiError } from "../lib/api";
@@ -188,7 +189,11 @@ export function MasterAylaScreen() {
   return (
     <main className="screen ayla-screen">
       <header className="ayla-header">
-        <h1 className="ayla-header__title">Ayla</h1>
+        <div className="ayla-header__top">
+          <h1 className="ayla-header__title">Ayla</h1>
+          {/* DRF-2121 (§28 п.3): вход в профиль — аватар на каждом из трёх разделов. */}
+          <MasterAvatar />
+        </div>
         <p className="ayla-header__sub">Помощник по вашему расписанию</p>
       </header>
 
@@ -295,11 +300,7 @@ export function MasterAylaScreen() {
           дашборда (`tab_badges`), и запрашивать дашборд ради трёх
           чисел на экране диалога — лишний круг к серверу на каждом
           открытии. Панель здесь нужна как навигация, не как сводка. */}
-      <MasterTabBar
-        unreadCount={0}
-        scheduleHasPendingChange={false}
-        profileHasOwnerPendingChange={false}
-      />
+      <MasterTabBar scheduleHasPendingChange={false} />
     </main>
   );
 }

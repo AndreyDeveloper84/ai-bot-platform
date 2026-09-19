@@ -12,7 +12,7 @@ import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
 import { describe, expect, it, vi } from "vitest";
 
-import { MasterTabBar } from "../components/MasterTabBar";
+import { unreadBadgeText } from "../lib/unread-badge";
 import { DashboardHeader } from "./MasterDashboardScreen";
 
 type Props = Parameters<typeof DashboardHeader>[0];
@@ -27,7 +27,11 @@ const BASE: Props = {
 };
 
 function renderHeader(overrides: Partial<Props> = {}) {
-  return render(<DashboardHeader {...BASE} {...overrides} />);
+  return render(
+    <MemoryRouter initialEntries={["/master/dashboard"]}>
+      <DashboardHeader {...BASE} {...overrides} />
+    </MemoryRouter>,
+  );
 }
 
 describe("DashboardHeader", () => {
@@ -56,18 +60,18 @@ describe("DashboardHeader", () => {
     expect(onInbox).toHaveBeenCalledTimes(1);
   });
 
-  it.each([1, 7, 99, 100, 120])("число в шапке = число на вкладке: %i", (count) => {
+  // DRF-2121: вкладки «Диалоги» в панели больше нет — число живёт только в
+  // шапке и пишется тем же правилом `unreadBadgeText`, что и раньше.
+  it.each([1, 7, 99, 100, 120])("число в шапке — по правилу unreadBadgeText: %i", (count) => {
     const { container } = renderHeader({ unreadCount: count });
     const headerText = within(container).getByRole("button", { name: /^Диалоги/ }).textContent;
-    render(
-      <MemoryRouter initialEntries={["/master/dashboard"]}>
-        <MasterTabBar
-          unreadCount={count}
-          scheduleHasPendingChange={false}
-          profileHasOwnerPendingChange={false}
-        />
-      </MemoryRouter>,
-    );
-    expect(screen.getByLabelText(`непрочитанных: ${count}`).textContent).toBe(headerText);
+    expect(headerText).toBe(unreadBadgeText(count));
+  });
+
+  it("аватар — кнопка листа профиля, с точкой, когда владелец ждёт правок (DRF-2121)", () => {
+    renderHeader({ profileHasOwnerPendingChange: true });
+    const trigger = screen.getByRole("button", { name: "Меню профиля" });
+    expect(trigger).toHaveTextContent("АП");
+    expect(within(trigger).getByLabelText("есть изменения")).toBeInTheDocument();
   });
 });

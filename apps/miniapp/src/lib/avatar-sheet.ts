@@ -17,7 +17,13 @@
  */
 import type { AdminRoleFlags } from "./admin-tabs";
 
-export type AvatarSheetItemKey = "profile" | "team" | "services" | "staffChats" | "settings";
+export type AvatarSheetItemKey =
+  | "profile"
+  | "team"
+  | "services"
+  | "staffChats"
+  | "studio"
+  | "settings";
 
 export interface AvatarSheetItem {
   key: AvatarSheetItemKey;
@@ -35,6 +41,8 @@ export const AVATAR_SHEET_COPY = {
   team: "Команда",
   services: "Услуги",
   staffChats: "Чаты с мастерами",
+  /** Мастер: внутренний чат со студией (DRF-2121). */
+  studio: "Со студией",
   settings: "Настройки",
   close: "Закрыть",
 } as const;
@@ -57,6 +65,19 @@ export function avatarSheetItemsFor(me: AvatarSheetRoleFlags): AvatarSheetItem[]
     { key: "settings", label: AVATAR_SHEET_COPY.settings, to: "/admin/settings" },
   );
   return items;
+}
+
+/**
+ * Пункты листа для МАСТЕРА (DRF-2121; §28 п.3): Профиль · Со студией ·
+ * Настройки. Набор закрыт сторожем; «Диалоги» (переписка мастер↔клиент,
+ * DRF-1039/1255) сюда не входят намеренно.
+ */
+export function masterAvatarSheetItems(): AvatarSheetItem[] {
+  return [
+    { key: "profile", label: AVATAR_SHEET_COPY.profile, to: MASTER_PROFILE_PATH },
+    { key: "studio", label: AVATAR_SHEET_COPY.studio, to: "/master/internal-chat" },
+    { key: "settings", label: AVATAR_SHEET_COPY.settings, to: "/master/settings" },
+  ];
 }
 
 /** «Ирина Петрова» → «ИП»; пустое имя → «•». */

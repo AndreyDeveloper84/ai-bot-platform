@@ -17,10 +17,16 @@ import { AVATAR_SHEET_COPY, initialsOf, type AvatarSheetItem } from "../lib/avat
 
 export function AvatarSheet({
   name,
+  photoUrl,
+  dot = false,
   items,
 }: {
   /** Имя человека — для инициалов на кнопке. */
   name: string;
+  /** Фото, если есть, — вместо инициалов (мастер, DRF-2121). */
+  photoUrl?: string | null;
+  /** Точка «есть изменения» на аватаре (например, владелец ждёт правок профиля). */
+  dot?: boolean;
   items: ReadonlyArray<AvatarSheetItem>;
 }) {
   const navigate = useNavigate();
@@ -96,7 +102,12 @@ export function AvatarSheet({
         aria-expanded={open}
         onClick={() => setOpen(true)}
       >
-        {initialsOf(name)}
+        {photoUrl ? (
+          <img className="avatar-sheet__photo" src={photoUrl} alt="" />
+        ) : (
+          initialsOf(name)
+        )}
+        {dot ? <span className="avatar-sheet__dot" aria-label="есть изменения" /> : null}
       </button>
       {open ? (
         <div className="avatar-sheet" role="presentation">
