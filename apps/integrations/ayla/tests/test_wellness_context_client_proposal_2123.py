@@ -68,7 +68,7 @@ def _refusal(status: int, code: str, reason: str | None = None) -> httpx.Respons
 
 class TestProposalRead:
     def test_get_is_a_get_on_the_proposal_path_under_the_subject(self) -> None:
-        seen = {}
+        seen: dict[str, object] = {}
 
         def handler(request: httpx.Request) -> httpx.Response:
             seen["method"] = request.method
