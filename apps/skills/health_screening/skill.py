@@ -44,6 +44,7 @@ import logging
 from typing import ClassVar
 
 from apps.skills.base import SkillContext, SkillResult
+from apps.orchestrator.safety.medical_emergency import MEDICAL_EMERGENCY_TEXT_V2
 from apps.skills.health_screening.classifier import PainSignal, classify, detect_g6
 from apps.orchestrator.open_question import open_question
 from apps.skills.health_screening.memo import (
@@ -65,13 +66,13 @@ SOFT_PAIN_REPLY = (
     "2. Это после нагрузки / сидячей работы или с утра после сна?"
 )
 
-# Red-flag wording mirrors the source: warm but firm. The user should
-# leave thinking "врач, не массаж" without feeling brushed off.
-RED_FLAG_REPLY = (
-    "Звучит серьёзно — лучше сначала к врачу, "
-    "массаж в острой фазе может ухудшить. "
-    "Когда специалист даст добро — приходи, разомнём аккуратно."
-)
+# Medical S1 reply — the owner-approved emergency text v2 ([OD-BOT §163]), read
+# from the single canonical module. The former «сначала к врачу … когда
+# специалист даст добро» wording is gone from every live medical-S1 path:
+# it read as a clearance gate and carried causality («массаж в острой фазе
+# может ухудшить»). The name ``RED_FLAG_REPLY`` is kept for the importers
+# (Mini App gate, tests); its value is the canonical text.
+RED_FLAG_REPLY = MEDICAL_EMERGENCY_TEXT_V2
 
 
 @register

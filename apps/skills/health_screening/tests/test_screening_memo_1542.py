@@ -101,7 +101,7 @@ class TestRedFlagIsNeverSilenced:
         assert skill.matches(_context(RED_FLAG_COMPLAINT, conversation)) is True
         result = skill.handle(_context(RED_FLAG_COMPLAINT, conversation))
         assert result.reply_text == RED_FLAG_REPLY
-        assert "врач" in result.reply_text.lower()
+        assert "103" in result.reply_text and "112" in result.reply_text
 
     def test_soft_repeat_is_silenced_on_the_very_same_conversation(self) -> None:
         """Парная отрицательная половина того же факта (DRF-1411).
