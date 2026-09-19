@@ -1,17 +1,18 @@
 """Приветствия персонала по роли с живой сводкой (DRF-2114, §50 п.4).
 
 * g1 — тексты владельца — константы, сверяются дословно (мастер, владелец /
-  администратор, первое, спокойное — без «графики и услуги настроены» до
-  DRF-2117);
+  администратор, первое, спокойное; хвост «графики и услуги настроены» —
+  только при проверенной готовности, DRF-2117);
 * g2 — мастер: имя с карточки, салон, «Сегодня у вас N записей», «Ближайшая —
   клиент, услуга N минут, в HH:MM» из подменённого дня; четыре кнопки;
 * g3 — владелец / администратор: три строки сводки из подменённых
   источников, пять кнопок (§50 п.6: Команда/Услуги/Чаты/Настройки — нет);
 * g4 — первое приветствие по ``welcomed_at`` рабочей строки, «Проверить
-  готовность» → «Сегодня» с честной строкой, штамп после; второй вход —
+  готовность» — callback в чат (DRF-2117), штамп после; второй вход —
   обычное;
 * g5 — числа живые: подмена источника меняет число; отказ источника —
-  строка опущена, не «0»; ноль внимания — спокойная форма;
+  строка опущена, не «0»; ноль внимания — спокойная форма; проблемы
+  готовности входят в «ситуации», недоступная готовность — без хвоста;
 * g6 — когда звучит: «/start», тап «какой салон?», «Повторить проверку»,
   свободный текст владельца (без ассистента); мастеру на текст —
   ассистент (как раньше);
@@ -214,10 +215,11 @@ def _fake_day(master_id: str, n_confirmed: int, *, released: int = 0) -> SalonDa
 @pytest.fixture
 def sources(monkeypatch):
     """Три источника сводки — подменяемые; по умолчанию: 7 записей, 3 мастера, 1 ситуация."""
-    state = {"day": _fake_day("m-1", 7), "masters": 3, "attention": 1}
+    state = {"day": _fake_day("m-1", 7), "masters": 3, "attention": 1, "readiness": 0}
     monkeypatch.setattr(salon_greeting, "_salon_day", lambda tenant, now: state["day"])
     monkeypatch.setattr(salon_greeting, "_masters_available", lambda: state["masters"])
     monkeypatch.setattr(salon_greeting, "_attention", lambda: state["attention"])
+    monkeypatch.setattr(salon_greeting, "_readiness_problems", lambda tenant: state["readiness"])
     monkeypatch.setattr(salon_greeting, "_tenant_now", lambda tenant: NOW)
     return state
 
@@ -235,7 +237,8 @@ class TestG1TheOwnersTextsAreConstants:
         assert salon_greeting.ADMIN_CALM_LINE == (
             "В салоне «{salon}» всё в порядке: сегодня {records}; ожидающих ответа нет."
         )
-        assert "графики и услуги настроены" not in salon_greeting.ADMIN_CALM_LINE  # до DRF-2117
+        assert "графики и услуги настроены" not in salon_greeting.ADMIN_CALM_LINE
+        assert salon_greeting.ADMIN_CALM_READY_TAIL == "; графики и услуги настроены."
         assert salon_greeting.FIRST_GREETING.endswith(
             "Сначала проверим, готов ли салон принимать записи."
         )
@@ -243,9 +246,7 @@ class TestG1TheOwnersTextsAreConstants:
             "Здесь можно управлять записями, диалогами с клиентами, расписанием, услугами и командой."
             in (salon_greeting.FIRST_GREETING)
         )
-        assert salon_greeting.FIRST_GREETING_READINESS_PENDING == (
-            "Проверка готовности появится здесь позже — пока откроется «Сегодня»."
-        )
+        assert not hasattr(salon_greeting, "FIRST_GREETING_READINESS_PENDING")  # DRF-2117
 
 
 class TestG2TheMasterGreeting:
@@ -336,12 +337,12 @@ class TestG4FirstThenRegular:
             "Ваша роль — владелец.\n\n"
             "Здесь можно управлять записями, диалогами с клиентами, расписанием, услугами "
             "и командой. Ayla будет писать сюда, когда потребуется ваше решение.\n\n"
-            "Сначала проверим, готов ли салон принимать записи.\n"
-            "Проверка готовности появится здесь позже — пока откроется «Сегодня»."
+            "Сначала проверим, готов ли салон принимать записи."
         )
         assert _labels(sent.call_args) == ["Проверить готовность", "Открыть салон"]
         readiness = _buttons(sent.call_args)[0]
-        assert readiness["payload"] == "open_admin_today"  # до DRF-2117 — на «Сегодня»
+        assert readiness["type"] == "callback"
+        assert readiness["payload"] == "cb:staff:readiness"  # DRF-2117 — живой ответ в чат
         user.refresh_from_db()
         assert user.welcomed_at is not None
 
@@ -386,9 +387,37 @@ class TestG5TheNumbersAreLive:
         _handle("/start")
         text = sent.call_args.kwargs["text"]
         assert text.endswith(
+            "В салоне «Формула тела» всё в порядке: сегодня 7 записей; ожидающих ответа нет; "
+            "графики и услуги настроены."
+        )
+
+    def test_unknown_readiness_keeps_the_calm_form_without_the_claim(
+        self, tenant, sources, sent
+    ) -> None:
+        """Каталог не ответил — «графики и услуги настроены» не печатается (§103)."""
+        _owner(tenant, greeted=True)
+        sources["attention"] = 0
+        sources["readiness"] = None
+        _handle("/start")
+        text = sent.call_args.kwargs["text"]
+        assert text.endswith(
             "В салоне «Формула тела» всё в порядке: сегодня 7 записей; ожидающих ответа нет."
         )
         assert "графики и услуги настроены" not in text
+
+    def test_readiness_problems_count_as_situations(self, tenant, sources, sent) -> None:
+        """DRF-2117: «одна ситуация требует внимания» — и проблема готовности тоже."""
+        _owner(tenant, greeted=True)
+        sources["attention"] = 0
+        sources["readiness"] = 1
+        _handle("/start")
+        text = sent.call_args.kwargs["text"]
+        assert "одна ситуация требует внимания." in text
+        assert "всё в порядке" not in text
+        sources["attention"] = 2
+        sources["readiness"] = 1
+        _handle("/start", update_id=2)
+        assert "3 ситуации требуют внимания." in sent.call_args.kwargs["text"]
 
     def test_gather_reads_the_real_available_predicate(self, tenant) -> None:
         """Положительная стража источнику: реальная карточка — реальное число."""

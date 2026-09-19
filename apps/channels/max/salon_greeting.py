@@ -19,11 +19,13 @@
 
 Первое приветствие (после первого успешного подключения) — по
 ``BotUser.welcomed_at`` рабочей строки (на салонном стриме поле пусто:
-клиентский S1 здесь не идёт); штампуется после первого приветствия. До
-DRF-2117 «Проверить готовность» ведёт на «Сегодня», и текст говорит это
-прямо; спокойная сводка печатается без «графики и услуги настроены» —
-утверждения, у которого до DRF-2117 нет источника (решение главного окна:
-§103 важнее дословности).
+клиентский S1 здесь не идёт); штампуется после первого приветствия.
+«Проверить готовность» (DRF-2117) — callback ``CB_READINESS``: поимённый
+список из :mod:`apps.admin_api.services.salon_readiness` (каталог +
+зеркало). В сводке проблемы готовности входят в «N ситуаций требуют
+внимания»; спокойная строка получает «; графики и услуги настроены» только
+когда готовность проверена и чиста — источник недоступен → строка без
+этого утверждения (§103).
 
 Склонение имени салона («в «Формулу тела»», «В «Формуле тела»») из
 ``Tenant.name`` не выводится — печатается форма «для салона «{имя}»» /
@@ -57,7 +59,8 @@ ADMIN_TODAY_HEAD = "Сегодня:"
 #: внимания.» — каждая со своим знаком: «;» между, «.» у последней.
 ADMIN_NO_WAITING = "ожидающих ответа нет"
 ADMIN_CALM_LINE = "В салоне «{salon}» всё в порядке: сегодня {records}; ожидающих ответа нет."
-#: После DRF-2117 к спокойной строке возвращается «; графики и услуги настроены.»
+#: Хвост спокойной строки — только при проверенной и чистой готовности (DRF-2117).
+ADMIN_CALM_READY_TAIL = "; графики и услуги настроены."
 
 FIRST_GREETING = (
     "Здравствуйте, {name}!\n\n"
@@ -66,10 +69,6 @@ FIRST_GREETING = (
     "Здесь можно управлять записями, диалогами с клиентами, расписанием, услугами "
     "и командой. Ayla будет писать сюда, когда потребуется ваше решение.\n\n"
     "Сначала проверим, готов ли салон принимать записи."
-)
-#: До DRF-2117 (салонная готовность) — честная строка о том, куда ведёт кнопка.
-FIRST_GREETING_READINESS_PENDING = (
-    "Проверка готовности появится здесь позже — пока откроется «Сегодня»."
 )
 
 ROLE_WORDS = {"owner": "владелец", "admin": "администратор"}
@@ -140,6 +139,8 @@ class GreetingData:
     records: int | None = None
     masters_available: int | None = None
     attention: int | None = None
+    #: Проблемы готовности (DRF-2117); ``None`` — каталог не ответил / не настроен.
+    readiness_problems: int | None = None
     my_records: int | None = None
     next_visit: NextVisit | None = None
     missing: tuple[str, ...] = field(default_factory=tuple)
@@ -169,6 +170,16 @@ def _masters_available() -> int:
     return CatalogMaster.objects.filter(AVAILABLE).count()
 
 
+def _readiness_problems(tenant: Any) -> int | None:
+    """Сколько проблем готовности; ``None`` — источник недоступен (строка без утверждения)."""
+    from apps.admin_api.services.salon_readiness import check_salon_readiness
+
+    readiness = check_salon_readiness(tenant)
+    if readiness.source_problem is not None:
+        return None
+    return len(readiness.problems)
+
+
 def _attention() -> int:
     from apps.handoff.models import AdminTask
     from apps.scheduling.models import ScheduleChangeRequest
@@ -190,6 +201,7 @@ def gather(tenant: Any, role_ctx: Any, *, now: datetime | None = None) -> Greeti
     now = now or _tenant_now(tenant)
     missing: list[str] = []
     records = masters_available = attention = my_records = None
+    readiness_problems = None
     next_visit = None
 
     with tenant_scope(tenant):
@@ -216,10 +228,21 @@ def gather(tenant: Any, role_ctx: Any, *, now: datetime | None = None) -> Greeti
             logger.warning("channels.max.salon.greeting.attention_unavailable", exc_info=True)
             missing.append("attention")
 
+        if not getattr(role_ctx, "is_master", False):
+            # Готовность — только владельцу / администратору: мастеру список
+            # чужих проблем не адресован, а вызов стоит REST-чтения каталога.
+            try:
+                readiness_problems = _readiness_problems(tenant)
+            except Exception:  # noqa: BLE001
+                logger.warning("channels.max.salon.greeting.readiness_unavailable", exc_info=True)
+            if readiness_problems is None:
+                missing.append("readiness")
+
     return GreetingData(
         records=records,
         masters_available=masters_available,
         attention=attention,
+        readiness_problems=readiness_problems,
         my_records=my_records,
         next_visit=next_visit,
         missing=tuple(missing),
@@ -292,18 +315,27 @@ def render_master(name: str, salon: str, data: GreetingData) -> str:
     return NL.join(lines)
 
 
+def _attention_total(data: GreetingData) -> int | None:
+    """Заявки + handoff + проблемы готовности; ``None``, когда нет ни одного источника."""
+    parts = [n for n in (data.attention, data.readiness_problems) if n is not None]
+    return sum(parts) if parts else None
+
+
 def render_admin(name: str, salon: str, role_word: str, data: GreetingData) -> str:
     head = [ADMIN_HELLO.format(name=name), ADMIN_ROLE_LINE.format(salon=salon, role=role_word)]
-    if data.attention == 0 and data.records is not None:
+    attention = _attention_total(data)
+    if data.attention == 0 and attention == 0 and data.records is not None:
         calm = ADMIN_CALM_LINE.format(salon=salon, records=records_phrase(data.records))
+        if data.readiness_problems == 0:
+            calm = calm.rstrip(".") + ADMIN_CALM_READY_TAIL
         return NL.join(head + [calm])
     items: list[str] = []
     if data.records is not None:
         items.append(records_phrase(data.records))
     if data.masters_available is not None:
         items.append(masters_phrase(data.masters_available))
-    if data.attention is not None:
-        items.append(attention_phrase(data.attention) if data.attention else ADMIN_NO_WAITING)
+    if attention is not None:
+        items.append(attention_phrase(attention) if attention else ADMIN_NO_WAITING)
     if not items:
         return NL.join(head)
     body = [f"{item};" for item in items[:-1]] + [f"{items[-1]}."]
@@ -311,11 +343,7 @@ def render_admin(name: str, salon: str, role_word: str, data: GreetingData) -> s
 
 
 def render_first(name: str, salon: str, role_word: str) -> str:
-    return (
-        FIRST_GREETING.format(name=name, salon=salon, role=role_word)
-        + NL
-        + FIRST_GREETING_READINESS_PENDING
-    )
+    return FIRST_GREETING.format(name=name, salon=salon, role=role_word)
 
 
 # ─── кнопки ───────────────────────────────────────────────────────────────
@@ -363,10 +391,11 @@ def admin_buttons(entry: Any) -> list[dict[str, str]]:
 
 
 def first_buttons(entry: Any) -> list[dict[str, str]]:
-    from apps.channels.max.staff_menu import _miniapp_button
+    """«Проверить готовность» — callback в чат (DRF-2117), «Открыть салон» — Mini App."""
+    from apps.channels.max.staff_menu import CB_READINESS, _miniapp_button
 
     buttons = [
-        _app_button(entry, BUTTON_CHECK_READINESS, ADMIN_SLUGS["today"]),
+        {"label": BUTTON_CHECK_READINESS, "callback": CB_READINESS},
         _miniapp_button(entry, BUTTON_OPEN_SALON),
     ]
     return [b for b in buttons if b]

@@ -66,6 +66,7 @@ from apps.channels.max.parser import CanonicalEvent, ParseError, parse_max_webho
 from apps.channels.max.staff_menu import (
     CB_APPROVE_PREFIX,
     CB_DAY,
+    CB_READINESS,
     CB_REQUESTS,
     OPEN_APP_PAYLOAD,
     menu_attachments,
@@ -1604,6 +1605,18 @@ def _handle_button(event: CanonicalEvent, role_ctx, bot_user, tenant, entry) -> 
             event,
             staff_actions.pending_requests(tenant),
             attachments=_requests_attachments(tenant, role_ctx, entry),
+        )
+        return
+    elif action == CB_READINESS and (role_ctx.is_owner or role_ctx.is_admin):
+        from apps.channels.max import salon_greeting
+
+        # DRF-2117 — только владелец / администратор: ресепшну тройка и
+        # готовность закрыты (DRF-2115). Ответ — поимённый список; после
+        # него — кнопки обычного приветствия, чтобы «Открыть салон» был рядом.
+        _reply(
+            event,
+            staff_actions.salon_readiness(tenant),
+            attachments=_greeting_attachments(salon_greeting.admin_buttons(entry), role_ctx, entry),
         )
         return
     elif action.startswith(CB_APPROVE_PREFIX) and is_admin_side:
