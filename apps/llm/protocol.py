@@ -276,7 +276,7 @@ class LLMProvider(Protocol):
     #: DRF-1443 added it for the same reason DRF-1437 added its sibling
     #: above, and with the same lesson attached: the fix is only real if
     #: a wrapper that forgets to forward it FAILS rather than reading as
-    #: ``""``. ``PIITokenizingProvider`` and ``QuotaFallbackProvider``
+    #: ``""``. ``PIITokenizingProvider`` and ``FallbackProvider``
     #: both sit between the router and the concrete provider; declaring
     #: the attribute here makes an omission a type error instead of a
     #: silent downgrade to the reply tier.
