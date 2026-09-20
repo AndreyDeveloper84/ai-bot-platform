@@ -135,6 +135,8 @@ LOCAL_APPS = [
     "apps.voice",
     "apps.catalog",
     "apps.marketplace",
+    # К-3 (DRF-1772): запись Recommendation и карточка C04 в DM.
+    "apps.recommendation",
     "apps.replay",
     "apps.promptreg",
     "apps.adminconsole",

@@ -1477,6 +1477,14 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
     # `startswith` в резолвер по форме; довод там же.
     is_visit_callback = event.text.startswith(VISIT_CALLBACK_PREFIXES)
 
+    # DRF-1772 (К-3) — `cb:reco:*`: тап по карточке C04 («Почему» / «Другой
+    # вариант» / «Не сейчас»). МОЛЧАНИЕ по тому же правилу, что у
+    # `cb:visit:*`: текст несёт id карточки, которую бот сам нарисовал, а
+    # не слова человека. Ход виден по ответу бота и по реакции в записи.
+    from apps.recommendation.taps import is_recommendation_callback
+
+    is_reco_callback = is_recommendation_callback(event.text)
+
     # DRF-1547 — МОЛЧАНИЕ, и по тому же правилу, что у соседей выше.
     #
     #   `cb:extra:*` — «Ещё», «Помощь», «Назад». Навигация по меню, как
@@ -1567,6 +1575,7 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
         or is_catalog_callback
         or is_clarify_redraw_tap
         or is_visit_callback
+        or is_reco_callback
         or is_menu_nav_callback
         or stale_tap
         or inbound_history_text is None
@@ -1850,6 +1859,25 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
             t_start=t_start,
             outcome=AIRequestMetric.OUTCOME_ESCALATED,
             skill_selected="human_handoff",
+        )
+    elif is_reco_callback:
+        # DRF-1772 (К-3) — тап по карточке C04 в DM. Как и визиты ниже: id
+        # нарисовал бот, модели тут делать нечего; реакция пишется в запись.
+        from apps.recommendation.taps import route_recommendation_callback
+
+        reply = route_recommendation_callback(
+            global_bot_user=bot_user,
+            callback_text=event.text,
+        )
+        assistant_action_type = "recommendation_reaction"
+        _record_live_path_metric(
+            bot_user=bot_user,
+            conversation=conversation,
+            trace_id=trace_id,
+            message_text=event.text,
+            t_start=t_start,
+            outcome=AIRequestMetric.OUTCOME_SUCCESS,
+            skill_selected="recommendation_card",
         )
     elif event.text.startswith(VISIT_CALLBACK_PREFIXES):
         # Cards and repeat taps carry an appointment id the bot itself
