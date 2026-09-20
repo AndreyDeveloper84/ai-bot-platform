@@ -70,10 +70,14 @@ safety-контура этого мало: ответ на него маршру
 * не замещается обычным :func:`open_question` (B6 «последний важнее»
   здесь не действует: ограничение переживает любую другую реплику);
 * повторное открытие с тем же ``question_id`` — идемпотентно: один слот,
-  обновляется только отметка времени;
-* живёт те же два часа (B13): протухший — «не спрашивал», и ограничение
-  снимается вместе с ним. Другого срока в зарегистрированных решениях нет —
-  срок ограничения = срок контекста разговора.
+  обновляется только отметка времени; повторный вызов с ``binding=False``
+  НЕ понижает связывающий вопрос — снять его может только
+  :func:`resolve_question`;
+* живёт те же два часа (B13): протухший — «не спрашивал». Это срок
+  РАЗГОВОРНОГО состояния («бот помнит, что спросил»), не срок safety-
+  ограничения: ограничение живёт отдельно и без срока
+  (:mod:`apps.orchestrator.safety.s1_restriction`, [OD-BOT §162] — TTL не
+  clearance).
 
 Носитель тот же — ``Conversation.skill_state`` — поэтому состояние читают все
 поверхности, у которых есть разговор: MAX / Telegram per-tenant, глобальный
@@ -130,6 +134,16 @@ class AnsweredQuestion:
 def _state(conversation: Any) -> dict[str, Any]:
     raw = getattr(conversation, "skill_state", None)
     return raw if isinstance(raw, dict) else {}
+
+
+def write_conversation_state(conversation: Any, subkey: str, value: Any | None) -> None:
+    """Публичный писатель ``skill_state`` для соседних состояний разговора.
+
+    Тот же путь, что у открытого вопроса: область тенанта берётся у самого
+    разговора. Используется :mod:`apps.orchestrator.safety.s1_restriction`.
+    """
+
+    _write(conversation, subkey, value)
 
 
 def _write(conversation: Any, subkey: str, value: Any | None) -> None:
@@ -190,14 +204,17 @@ def open_question(
         from django.utils import timezone as dj_timezone
 
         current = pending_question(conversation)
-        if current is not None and current.binding and current.question_id != str(question_id):
-            logger.info(
-                "orchestrator.open_question.kept_binding question=%s attempted=%s conversation=%s",
-                current.question_id,
-                question_id,
-                getattr(conversation, "id", None),
-            )
-            return
+        if current is not None and current.binding:
+            if current.question_id != str(question_id):
+                logger.info(
+                    "orchestrator.open_question.kept_binding question=%s attempted=%s conversation=%s",
+                    current.question_id,
+                    question_id,
+                    getattr(conversation, "id", None),
+                )
+                return
+            # Same binding question again: a re-stamp, never a downgrade.
+            binding = True
         row: dict[str, Any] = {
             "question_id": str(question_id),
             "asked_text": str(asked_text or "")[:_MAX_TEXT_CHARS],
@@ -346,4 +363,5 @@ __all__ = [
     "pending_question",
     "render_answer_block",
     "resolve_question",
+    "write_conversation_state",
 ]

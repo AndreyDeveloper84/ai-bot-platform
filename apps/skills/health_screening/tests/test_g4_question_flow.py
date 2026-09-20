@@ -13,8 +13,12 @@ from the database between steps, never carried in memory):
   → STOP G6; the crisis gate runs before any of it;
 * global concierge path: the same outcomes, decided BEFORE the model — the
   provider is never called on those turns;
-* the B13 two-hour TTL: an expired question reads as «not asked», the
-  restriction lapses with it (named, not hidden);
+* the B13 two-hour TTL ends only the CONVERSATIONAL question: the durable
+  restriction ([§162]: TTL is never clearance) stays, the question is put
+  again, booking is not reached;
+* the STOP resolution is durable ([§156]): later turns get the STOP reply;
+* nothing but ``clear_restriction`` with provenance removes the restriction —
+  and nothing on a live path calls it (owner blocker, named);
 * the G1–G3 / G5–G7 and G6 slices are unchanged.
 
 Technical checks only. Implementation of registered owner policy does not
@@ -46,6 +50,11 @@ from apps.orchestrator.open_question import (
 )
 from apps.orchestrator.safety.gate import CRISIS_REPLY_TEXT, evaluate_inbound
 from apps.orchestrator.safety.medical_emergency import MEDICAL_EMERGENCY_TEXT_V2
+from apps.orchestrator.safety.s1_restriction import (
+    RESTRICTION_KEY,
+    clear_restriction,
+    restriction,
+)
 from apps.skills.base import SkillContext
 from apps.skills.health_screening.classifier import PainSignal, classify, detect_g6
 from apps.skills.health_screening.g4_question import (
@@ -162,7 +171,10 @@ class TestPersistedState:
         assert resolved is not None and resolved.pk == conversation.pk
         assert g4_pending(resolved) is True
 
-    def test_the_b13_ttl_ends_the_restriction_named_not_hidden(self) -> None:
+    def test_the_b13_ttl_does_not_lift_the_restriction(self) -> None:
+        """[OD-BOT §162]: TTL is never clearance. The conversational question may
+        expire; the durable restriction stays and the question is put again."""
+
         bot_user, conversation = _bot_user_and_conversation("ttl")
         HealthScreeningSkill().handle(_ctx(AMBIGUOUS, conversation))
         row = dict(_fresh(conversation).skill_state[STATE_KEY])
@@ -170,10 +182,99 @@ class TestPersistedState:
         with tenant_scope(conversation.tenant):
             write_skill_state(_fresh(conversation), STATE_KEY, row)
 
-        assert g4_pending(_fresh(conversation)) is False
-        # The next ambiguous message asks again — the flow restarts, nothing leaks.
-        result = HealthScreeningSkill().handle(_ctx(AMBIGUOUS, _fresh(conversation)))
-        assert result.meta["reply_kind"] == "health_clarify_g4"
+        assert g4_pending(_fresh(conversation)) is False  # the question expired …
+        rec = restriction(_fresh(conversation))
+        assert rec is not None and rec.status == "open"  # … the restriction did not
+        # A booking intent after the TTL: still bound, still the question, no booking.
+        result = _dispatch(BOOKING_INTENT, _fresh(conversation), bot_user)
+        assert result is not None
+        assert result.meta["reply_kind"] == "health_restriction_persists"
+        assert result.reply_text == G4_ROUTING_QUESTION
+        assert g4_pending(_fresh(conversation)) is True  # re-asked, same slot
+
+    def test_the_restriction_has_no_expiry_of_its_own(self) -> None:
+        bot_user, conversation = _bot_user_and_conversation("no-expiry")
+        HealthScreeningSkill().handle(_ctx(AMBIGUOUS, conversation))
+        row = dict(_fresh(conversation).skill_state[RESTRICTION_KEY])
+        row["opened_at"] = (timezone.now() - timedelta(days=30)).isoformat()
+        row["updated_at"] = row["opened_at"]
+        with tenant_scope(conversation.tenant):
+            write_skill_state(_fresh(conversation), RESTRICTION_KEY, row)
+
+        rec = restriction(_fresh(conversation))
+        assert rec is not None and rec.status == "open"
+        result = _dispatch("хочу записаться на массаж", _fresh(conversation), bot_user)
+        assert result is not None
+        assert result.meta["reply_kind"] == "health_restriction_persists"
+
+    def test_a_new_session_or_intent_does_not_lift_the_restriction(self) -> None:
+        """A fresh row read in a new request with an unrelated intent is still bound."""
+
+        bot_user, conversation = _bot_user_and_conversation("new-session")
+        HealthScreeningSkill().handle(_ctx(AMBIGUOUS, conversation))
+        for text in ("привет!", "а какие у вас есть услуги?", "хочу маникюр в субботу"):
+            result = _dispatch(text, _fresh(conversation), bot_user)
+            assert result is not None
+            assert result.meta["reply_kind"] == "health_restriction_persists"
+            assert result.reply_text == G4_ROUTING_QUESTION
+        rec = restriction(_fresh(conversation))
+        assert rec is not None and rec.status == "open"
+
+    def test_plain_no_is_not_clearance_on_the_persisted_state(self) -> None:
+        bot_user, conversation = _bot_user_and_conversation("plain-no")
+        HealthScreeningSkill().handle(_ctx(AMBIGUOUS, conversation))
+        for _ in range(3):
+            result = _dispatch(PLAIN_NO, _fresh(conversation), bot_user)
+            assert result is not None
+            assert result.meta["reply_kind"] == "health_restriction_persists"
+        rec = restriction(_fresh(conversation))
+        assert rec is not None and rec.status == "open"
+
+    def test_stop_after_a_positive_answer_is_durable(self) -> None:
+        """[OD-BOT §156]: S1 STOP is not lifted by the next turn, a new intent or
+        «мне лучше» — every later turn gets the STOP reply, nothing is clearance."""
+
+        bot_user, conversation = _bot_user_and_conversation("durable-stop")
+        HealthScreeningSkill().handle(_ctx(AMBIGUOUS, conversation))
+        first = _dispatch(POSITIVE, _fresh(conversation), bot_user)
+        assert first is not None and first.reply_text == MEDICAL_EMERGENCY_TEXT_V2
+        rec = restriction(_fresh(conversation))
+        assert rec is not None and rec.status == "stop"
+        assert rec.provenance == {
+            "source": "health_screening.g4",
+            "outcome": "stop",
+            "reason": "positive_sign",
+        }
+        for text in ("мне уже лучше", "всё прошло", BOOKING_INTENT, PLAIN_NO):
+            result = _dispatch(text, _fresh(conversation), bot_user)
+            assert result is not None
+            assert result.reply_text == MEDICAL_EMERGENCY_TEXT_V2
+            assert result.meta["reply_kind"] == "health_red_flag"
+            assert result.meta["s1_restriction"] == "stop"
+            assert result.meta["s1_group"] == "G4"
+
+    def test_only_cleared_by_recheck_with_provenance_removes_the_restriction(self) -> None:
+        """The registered way out ([§162]) — exists, requires provenance, and is
+        called by nothing on a live path (owner blocker)."""
+
+        bot_user, conversation = _bot_user_and_conversation("recheck")
+        HealthScreeningSkill().handle(_ctx(AMBIGUOUS, conversation))
+        with pytest.raises(ValueError):
+            clear_restriction(_fresh(conversation), provenance={})
+        assert restriction(_fresh(conversation)) is not None
+        clear_restriction(
+            _fresh(conversation),
+            provenance={"mechanic": "safety_recheck", "conditions": "1-8", "by": "test"},
+        )
+        assert restriction(_fresh(conversation)) is None
+
+    def test_an_ordinary_open_question_with_the_same_id_cannot_downgrade_binding(self) -> None:
+        bot_user, conversation = _bot_user_and_conversation("no-downgrade")
+        HealthScreeningSkill().handle(_ctx(AMBIGUOUS, conversation))
+        open_question(_fresh(conversation), G4_QUESTION_ID, asked_text="x", binding=False)
+        pending = pending_question(_fresh(conversation))
+        assert pending is not None and pending.binding is True
+        assert close_question(_fresh(conversation), "нет") is None
 
 
 # --------------------------------------------------------------------------- #
@@ -187,8 +288,14 @@ class TestPerTenantRegistry:
         result = _dispatch(AMBIGUOUS, conversation, bot_user)
         assert result is not None
         assert result.reply_text == G4_ROUTING_QUESTION
-        assert result.meta == {"reply_kind": "health_clarify_g4", "s1_group": "G4"}
+        assert result.meta == {
+            "reply_kind": "health_clarify_g4",
+            "s1_group": "G4",
+            "s1_restriction": "open",
+        }
         assert g4_pending(_fresh(conversation)) is True
+        rec = restriction(_fresh(conversation))
+        assert rec is not None and rec.status == "open"
 
     @pytest.mark.parametrize("reply", (UNKNOWN, PLAIN_NO, BOOKING_INTENT, "хочу маникюр"))
     def test_unknown_no_or_new_intent_never_reaches_booking(self, reply: str) -> None:
@@ -212,8 +319,14 @@ class TestPerTenantRegistry:
         result = _dispatch(reply, _fresh(conversation), bot_user)
         assert result is not None
         assert result.reply_text == MEDICAL_EMERGENCY_TEXT_V2
-        assert result.meta == {"reply_kind": "health_red_flag", "s1_group": "G4"}
+        assert result.meta == {
+            "reply_kind": "health_red_flag",
+            "s1_group": "G4",
+            "s1_restriction": "stop",
+        }
         assert g4_pending(_fresh(conversation)) is False
+        rec = restriction(_fresh(conversation))
+        assert rec is not None and rec.status == "stop"
 
     def test_g6_answer_is_stop_g6_precedence_kept(self) -> None:
         bot_user, conversation = _bot_user_and_conversation("pt-g6")
@@ -223,7 +336,11 @@ class TestPerTenantRegistry:
         result = _dispatch(G6_ANSWER, _fresh(conversation), bot_user)
         assert result is not None
         assert result.reply_text == MEDICAL_EMERGENCY_TEXT_V2
-        assert result.meta == {"reply_kind": "health_red_flag", "s1_group": "G6"}
+        assert result.meta == {
+            "reply_kind": "health_red_flag",
+            "s1_group": "G6",
+            "s1_restriction": "stop",
+        }
         assert g4_pending(_fresh(conversation)) is False
 
     def test_crisis_is_decided_by_the_gate_before_any_skill(self) -> None:

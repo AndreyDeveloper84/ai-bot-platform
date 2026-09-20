@@ -1769,10 +1769,10 @@ def _g4_question_turn(
 
     from apps.skills.base import SkillContext
     from apps.skills.health_screening.classifier import PainSignal, classify
-    from apps.skills.health_screening.g4_question import g4_pending
+    from apps.skills.health_screening.g4_question import g4_state
     from apps.skills.health_screening.skill import HealthScreeningSkill
 
-    if not (g4_pending(conversation) or classify(message_text) is PainSignal.CLARIFY):
+    if not (g4_state(conversation).active or classify(message_text) is PainSignal.CLARIFY):
         return None
     started = time.monotonic()
     result = HealthScreeningSkill().handle(

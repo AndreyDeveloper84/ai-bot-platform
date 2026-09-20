@@ -50,7 +50,7 @@ from apps.orchestrator.open_question import open_question
 from apps.skills.health_screening.g4_question import (
     G4_ROUTING_QUESTION,
     ask_g4,
-    g4_pending,
+    g4_state,
     route_g4_reply,
 )
 from apps.skills.health_screening.memo import (
@@ -109,7 +109,7 @@ class HealthScreeningSkill:
         # skill BEFORE any intent / booking / recommendation skill (registry
         # order: health_screening precedes booking). Read first: the reply may
         # be «нет» or «запишите меня» — no signal of its own.
-        if g4_pending(context.conversation):
+        if g4_state(context.conversation).active:
             return True
         signal = classify(context.message_text)
         if signal == PainSignal.NONE:
@@ -123,31 +123,60 @@ class HealthScreeningSkill:
         # deterministically by :func:`route_g4_reply`; the same function every
         # surface calls, so MAX / Telegram / the global concierge / the Mini
         # App cannot disagree about what a reply means.
-        if g4_pending(context.conversation):
+        state = g4_state(context.conversation)
+        if state.stopped:
+            # [OD-BOT §156]: S1 STOP is durable — a later turn (a booking intent,
+            # «мне лучше», a new session) gets the STOP reply again; nothing is
+            # clearance here.
+            assert state.restriction is not None
+            return SkillResult(
+                reply_text=RED_FLAG_REPLY,
+                meta={
+                    "reply_kind": "health_red_flag",
+                    "s1_group": state.restriction.group,
+                    "s1_restriction": "stop",
+                },
+            )
+        if state.active:
             outcome = route_g4_reply(context.conversation, context.message_text)
             if outcome.stop:
-                meta_stop: dict[str, object] = {"reply_kind": "health_red_flag"}
+                meta_stop: dict[str, object] = {
+                    "reply_kind": "health_red_flag",
+                    "s1_restriction": "stop",
+                }
                 if outcome.group is not None:
                     meta_stop["s1_group"] = outcome.group
                 return SkillResult(reply_text=RED_FLAG_REPLY, meta=meta_stop)
             return SkillResult(
                 reply_text=G4_ROUTING_QUESTION,
-                meta={"reply_kind": "health_restriction_persists", "s1_group": "G4"},
+                meta={
+                    "reply_kind": "health_restriction_persists",
+                    "s1_group": "G4",
+                    "s1_restriction": "open",
+                },
             )
 
         signal = classify(context.message_text)
 
         if signal == PainSignal.CLARIFY:
-            # Ambiguous G4 — exactly one registered question, persisted as a
-            # binding open question; the restriction is that open question.
-            ask_g4(context.conversation)
+            # Ambiguous G4 — exactly one registered question. The durable
+            # restriction and the binding question are written together; if
+            # they could not be persisted the question is still put (the reply
+            # is the same) and the failure is logged — the chat turn ends here
+            # either way, nothing downstream runs.
+            persisted = ask_g4(context.conversation)
             logger.info(
-                "health_screening.g4.asked conversation=%s",
+                "health_screening.g4.asked conversation=%s persisted=%s",
                 context.conversation.id if context.conversation else None,
+                persisted,
             )
             return SkillResult(
                 reply_text=G4_ROUTING_QUESTION,
-                meta={"reply_kind": "health_clarify_g4", "s1_group": "G4"},
+                meta={
+                    "reply_kind": "health_clarify_g4",
+                    "s1_group": "G4",
+                    "s1_restriction": "open" if persisted else "not_persisted",
+                },
             )
 
         if signal == PainSignal.RED_FLAG:

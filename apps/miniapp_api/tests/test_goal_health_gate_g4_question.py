@@ -32,7 +32,9 @@ from apps.miniapp_api.health_gate import (
     KIND_CLARIFY,
     KIND_CRISIS,
     KIND_RED_FLAG,
+    KIND_STATE_UNAVAILABLE,
     SAFETY_ANSWER_FIELD,
+    STATE_UNAVAILABLE_TEXT,
 )
 from apps.orchestrator.safety.gate import CRISIS_REPLY_TEXT
 from apps.orchestrator.safety.medical_emergency import MEDICAL_EMERGENCY_TEXT_V2
@@ -241,3 +243,116 @@ class TestOneStateAcrossSurfaces:
         stop, forward = screen_goal_body(Mock(pk=1, tenant=None), {"goal_text": "болит спина"})
         assert stop is not None and stop.kind == KIND_CLARIFY
         assert SAFETY_ANSWER_FIELD not in forward
+
+
+class TestFailClosedOnStateFailure:
+    """The safety state cannot be read, created or written → the request is
+    blocked with the `safety_state_unavailable` frame; nothing is forwarded;
+    the next request after the failure is screened again from scratch."""
+
+    def test_lookup_failure_blocks_and_forwards_nothing(
+        self, client: Client, bot_user: BotUser
+    ) -> None:
+        with patch(
+            "apps.conversations.services.resolve_conversation_for_bot_user",
+            side_effect=RuntimeError("db down"),
+        ):
+            status, out, forwarded = _post(client, bot_user, _goal("хочу массаж спины"))
+        assert status == 200
+        assert out["safety"] == {"kind": KIND_STATE_UNAVAILABLE, "text": STATE_UNAVAILABLE_TEXT}
+        assert forwarded == []
+
+    def test_lookup_failure_never_weakens_an_explicit_stop(
+        self, client: Client, bot_user: BotUser
+    ) -> None:
+        with patch(
+            "apps.conversations.services.resolve_conversation_for_bot_user",
+            side_effect=RuntimeError("db down"),
+        ):
+            status, out, forwarded = _post(client, bot_user, _goal("Внезапно перекосило лицо"))
+        assert out["safety"] == {"kind": KIND_RED_FLAG, "text": MEDICAL_EMERGENCY_TEXT_V2}
+        assert forwarded == []
+
+    def test_lookup_failure_never_weakens_the_crisis_route(
+        self, client: Client, bot_user: BotUser
+    ) -> None:
+        with patch(
+            "apps.conversations.services.resolve_conversation_for_bot_user",
+            side_effect=RuntimeError("db down"),
+        ):
+            status, out, forwarded = _post(client, bot_user, _goal("я думаю о суициде"))
+        assert out["safety"] == {"kind": KIND_CRISIS, "text": CRISIS_REPLY_TEXT}
+        assert forwarded == []
+
+    def test_creation_failure_on_an_ambiguous_goal_blocks(
+        self, client: Client, bot_user: BotUser
+    ) -> None:
+        with patch(
+            "apps.conversations.services.resolve_active_conversation",
+            side_effect=RuntimeError("cannot create"),
+        ):
+            status, out, forwarded = _post(client, bot_user, _goal(AMBIGUOUS))
+        assert out["safety"] == {"kind": KIND_STATE_UNAVAILABLE, "text": STATE_UNAVAILABLE_TEXT}
+        assert forwarded == []
+        assert _pending(bot_user) is False
+
+    def test_write_failure_on_an_ambiguous_goal_blocks(
+        self, client: Client, bot_user: BotUser
+    ) -> None:
+        with patch(
+            "apps.conversations.services.write_skill_state",
+            side_effect=RuntimeError("write failed"),
+        ):
+            status, out, forwarded = _post(client, bot_user, _goal(AMBIGUOUS))
+        assert out["safety"] == {"kind": KIND_STATE_UNAVAILABLE, "text": STATE_UNAVAILABLE_TEXT}
+        assert forwarded == []
+        assert _pending(bot_user) is False
+
+    def test_the_request_after_a_failure_is_screened_again(
+        self, client: Client, bot_user: BotUser
+    ) -> None:
+        with patch(
+            "apps.conversations.services.write_skill_state",
+            side_effect=RuntimeError("write failed"),
+        ):
+            _post(client, bot_user, _goal(AMBIGUOUS))
+        # Storage is back: the same ambiguous goal asks and persists; a benign
+        # goal after that is still bound to the question.
+        status, out, forwarded = _post(client, bot_user, _goal(AMBIGUOUS))
+        assert out["safety"] == G4_FRAME
+        assert forwarded == []
+        assert _pending(bot_user) is True
+        status, out, forwarded = _post(client, bot_user, _goal("хочу массаж спины"))
+        assert out["safety"] == G4_FRAME
+        assert forwarded == []
+
+    def test_a_benign_goal_after_a_lookup_failure_without_any_state_forwards(
+        self, client: Client, bot_user: BotUser
+    ) -> None:
+        """Fail-closed is for the failing request; once the carrier answers
+        «no state», an unrestricted goal proceeds as before."""
+
+        with patch(
+            "apps.conversations.services.resolve_conversation_for_bot_user",
+            side_effect=RuntimeError("db down"),
+        ):
+            _, out, forwarded = _post(client, bot_user, _goal("хочу массаж спины"))
+        assert out["safety"]["kind"] == KIND_STATE_UNAVAILABLE and forwarded == []
+        _, out, forwarded = _post(client, bot_user, _goal("хочу массаж спины"))
+        assert "safety" not in out or out.get("safety") is None
+        assert len(forwarded) == 1
+
+
+class TestDurableStopOnTheMiniApp:
+    def test_a_positive_answer_stops_and_every_later_request_is_stopped(
+        self, client: Client, bot_user: BotUser
+    ) -> None:
+        _post(client, bot_user, _goal(AMBIGUOUS))
+        _, out, _ = _post(
+            client, bot_user, _goal(AMBIGUOUS, **{SAFETY_ANSWER_FIELD: "да, перекосило лицо"})
+        )
+        assert out["safety"] == {"kind": KIND_RED_FLAG, "text": MEDICAL_EMERGENCY_TEXT_V2}
+        for text in ("хочу массаж спины", "мне уже лучше", "всё прошло"):
+            _, out, forwarded = _post(client, bot_user, _goal(text))
+            assert out["safety"] == {"kind": KIND_RED_FLAG, "text": MEDICAL_EMERGENCY_TEXT_V2}
+            assert forwarded == []

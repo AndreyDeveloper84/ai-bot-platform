@@ -823,10 +823,27 @@ _RED_FLAG_PATTERNS = (
 #: [OD-BOT §164] ambiguous G4 — the DRF-973 numbness forms, verbatim, moved out of
 #: the flat red-flag tuple. Negation is NOT modelled here (a named gap, strict
 #: xfail in ``tests/test_g4_detector.py``): «онемения нет» asks the question too.
+#: Limb context for ambiguous WEAKNESS — [OD-BOT §164] names «слабость … с одной
+#: стороны» as the sign; without the sudden marker it is the question. Weakness
+#: is read only next to a limb (never bare «слабость» / «устала»: general fatigue
+#: after a workout or an illness is not the contract).
+_G4_LIMB = r"(?:рук(?:а|и|е|у|ой|ах)|ног(?:а|и|е|у|ой|ах)|конечност\w*)"
 _G4_AMBIGUOUS_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"\bонемен", re.IGNORECASE),
     re.compile(r"\b(?:о)?неме(?:ет|ют|л|ла|ло|ли|ть|вш\w*)\b", re.IGNORECASE),
     re.compile(r"потерял[аио]? чувствит", re.IGNORECASE),
+    # weakness of a limb («слабость в правой руке иногда», «иногда слабеет левая
+    # рука», «рука ослабла») — with or without a side, never sudden (that is explicit)
+    re.compile(
+        r"\bслабост\w*\s+(?:в\s+)?(?:[\w-]+\s+){0,2}"
+        + _G4_LIMB
+        + r"|\b"
+        + _G4_LIMB
+        + r"\s+(?:[\w-]+\s+){0,2}(?:слабост\w*|слабе\w*|ослаб\w*)"
+        + r"|\b(?:слабе(?:ет|ют)|ослаб\w*)\s+(?:[\w-]+\s+){0,2}"
+        + _G4_LIMB,
+        re.IGNORECASE,
+    ),
 )
 
 

@@ -94,7 +94,6 @@ G4_RECENT_RESOLVED = (
 #: «не вижу» count only with the eye / vision named. None of these is G4, none is
 #: any red flag, none gets the emergency text.
 G4_FALSE_POSITIVE_REGRESSION = (
-    "Слабость в правой руке после тренировки",
     "Правая рука устала после работы",
     "Хочу исправить асимметрию лица",
     "Асимметрия лица с детства",
@@ -127,14 +126,29 @@ G4_NEGATIVE = (
 )
 
 #: Not explicit G4 by the detector — the AMBIGUOUS G4 of [OD-BOT §164]: the
-#: DRF-973 numbness forms without a sudden marker, routed to the one question
-#: (``CLARIFY``), never STOP and never NONE.
+#: DRF-973 numbness forms and limb WEAKNESS without a sudden marker, routed to
+#: the one question (``CLARIFY``), never STOP and never NONE.
 G4_AMBIGUOUS = (
     "Онемения и слабости нет",  # negation gap: asks instead of nothing (TestKnownGaps)
     "Иногда немеет рука",
     "немеет рука иногда",
     "Немеет левая рука по утрам",
     "Онемела правая нога после долгого сидения",
+    # limb weakness — the §164 sign without the sudden marker (review 20.09)
+    "слабость в правой руке иногда",
+    "иногда слабеет левая рука",
+    "Слабость в правой руке после тренировки",  # a workout is context, not clearance: ask
+    "рука ослабла к вечеру",
+)
+
+#: General fatigue / weakness with NO limb named — not the contract, never a
+#: question, never a stop (review 20.09: «не расширяй правило до любой общей
+#: усталости / слабости»).
+GENERAL_FATIGUE_NOT_G4 = (
+    "общая слабость после тренировки",
+    "слабость после болезни, хочу расслабляющий массаж",
+    "устала, слабость во всём теле",
+    "Правая рука устала после работы",
 )
 
 #: [OD-BOT §164] — the one routing question, verbatim. Contract only: not asked
@@ -190,6 +204,19 @@ class TestDetectG4:
         """Not explicit G4, not a red flag, not silence — the one routing question."""
         assert detect_g4(text) is False
         assert classify(text) is PainSignal.CLARIFY
+
+    @pytest.mark.parametrize("text", GENERAL_FATIGUE_NOT_G4)
+    def test_general_fatigue_is_neither_question_nor_stop(self, text: str) -> None:
+        assert detect_g4(text) is False
+        assert classify(text) is not PainSignal.CLARIFY
+        assert classify(text) is not PainSignal.RED_FLAG
+
+    @pytest.mark.parametrize(
+        "text", ("Резко ослабла левая рука", "Внезапно онемела правая сторона тела")
+    )
+    def test_explicit_sudden_unilateral_weakness_stays_stop(self, text: str) -> None:
+        assert detect_g4(text) is True
+        assert classify(text) is PainSignal.RED_FLAG
 
 
 class TestFalsePositiveRegression:
@@ -293,10 +320,22 @@ class TestSkillRouting:
         if skill.matches(context):
             assert skill.handle(context).reply_text != MEDICAL_EMERGENCY_TEXT_V2
 
+    @pytest.mark.usefixtures("memory_carrier")
     def test_ambiguous_phrase_gets_the_question_not_the_emergency_text(self) -> None:
         result = HealthScreeningSkill().handle(_context("немеет рука иногда", _conversation()))
         assert result.reply_text == G4_ROUTING_QUESTION
-        assert result.meta == {"reply_kind": "health_clarify_g4", "s1_group": "G4"}
+        assert result.meta == {
+            "reply_kind": "health_clarify_g4",
+            "s1_group": "G4",
+            "s1_restriction": "open",
+        }
+
+    def test_ambiguous_phrase_without_a_carrier_still_asks_and_says_so(self) -> None:
+        """No carrier (unit Mock): the question is still the reply — the turn ends
+        here — and the meta names that the state did not persist."""
+        result = HealthScreeningSkill().handle(_context("немеет рука иногда", _conversation()))
+        assert result.reply_text == G4_ROUTING_QUESTION
+        assert result.meta["s1_restriction"] == "not_persisted"
 
 
 @pytest.fixture
