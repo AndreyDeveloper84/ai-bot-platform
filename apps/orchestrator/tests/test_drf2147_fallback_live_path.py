@@ -157,3 +157,24 @@ class TestFallbackOnTheLivePath:
         rows = _metrics()
         assert len(rows) == 1
         assert rows[0].outcome == "error"
+
+
+def test_transcript_line_names_the_hop() -> None:
+    """``dialog_transcript`` is the operator's after-the-fact view of a
+    turn; a hop must be readable there without opening the audit log."""
+    from types import SimpleNamespace
+
+    from apps.conversations.management.commands.dialog_transcript import format_metric
+
+    row = SimpleNamespace(
+        llm_pass_index=1,
+        skill_selected="concierge",
+        llm_model="gpt-4o-mini",
+        outcome="success",
+        fallback_triggered=False,
+        latency_total_ms=1200,
+        llm_provider="openai",
+        llm_fallback_from="anthropic",
+    )
+
+    assert "anthropic→openai" in format_metric(row)  # type: ignore[arg-type]
