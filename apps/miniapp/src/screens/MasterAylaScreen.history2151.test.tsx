@@ -79,6 +79,9 @@ describe("visibleMessages / isHiddenTurn", () => {
     expect(isHiddenTurn("/start")).toBe(true);
     expect(isHiddenTurn("/start inv_AYLAUUA6")).toBe(true);
     expect(isHiddenTurn("код AYLA-7K3M")).toBe(true);
+    expect(isHiddenTurn("ayla-7k3m")).toBe(true);
+    expect(isHiddenTurn("AYLA Beauty открыт?")).toBe(false);
+    expect(isHiddenTurn("Ayla, что у меня завтра?")).toBe(false);
     expect(isHiddenTurn("master_invite_2d8bbc4f-1111-4222-8333-444444444444")).toBe(true);
     expect(isHiddenTurn("что у меня завтра")).toBe(false);
     expect(isHiddenTurn("клиент написал: инвойс готов")).toBe(false);

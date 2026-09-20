@@ -130,12 +130,11 @@ def assistant_ask(request: HttpRequest) -> HttpResponse:
         return _error("bad_request", f"text must be ≤ {MAX_QUESTION_CHARS} chars", 400)
 
     thread = _thread(bot_user)
-    from apps.conversations.staff_assistant import is_hidden_staff_turn
+    from apps.conversations.staff_assistant import is_entry_reply, is_hidden_staff_turn
 
     # DRF-2151: команда / токен приглашения в нить не пишется.
-    inbound = (
-        None if is_hidden_staff_turn("user", text) else _remember(thread, role="user", content=text)
-    )
+    hidden = is_hidden_staff_turn("user", text)
+    inbound = None if hidden else _remember(thread, role="user", content=text)
     history = (
         recent_staff_history(thread, exclude_id=getattr(inbound, "id", None))
         if thread is not None
@@ -145,16 +144,21 @@ def assistant_ask(request: HttpRequest) -> HttpResponse:
     reply = answer_admin_question(
         tenant=tenant, bot_user=bot_user, role_ctx=role_ctx, text=text, history=history
     )
-    outbound = _remember(
-        thread,
-        role="assistant",
-        content=reply.text,
-        tool_name=reply.tool_name,
-        tokens_in=reply.tokens_in,
-        tokens_out=reply.tokens_out,
-        llm_provider=reply.llm_provider,
-        llm_model=reply.llm_model,
-        llm_cost_usd=reply.llm_cost_usd,
+    # DRF-2151: ответ входа на скрытую команду — не сирота на экране.
+    outbound = (
+        None
+        if hidden and is_entry_reply(reply.text)
+        else _remember(
+            thread,
+            role="assistant",
+            content=reply.text,
+            tool_name=reply.tool_name,
+            tokens_in=reply.tokens_in,
+            tokens_out=reply.tokens_out,
+            llm_provider=reply.llm_provider,
+            llm_model=reply.llm_model,
+            llm_cost_usd=reply.llm_cost_usd,
+        )
     )
     return JsonResponse(
         {

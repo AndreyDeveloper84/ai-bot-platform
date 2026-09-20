@@ -147,6 +147,20 @@ class TestThePairRule:
             ("assistant", "Завтра у вас три записи, первая в 10:00."),
         ]
 
+    def test_hidden_row_between_command_and_entry_reply_does_not_save_it(
+        self, client, bot_user, accepted_master
+    ):
+        """«С последнего видимого хода была команда» — tool-строка её не забывает."""
+        _seed(
+            bot_user,
+            [
+                ("user", "/start inv_ABCD"),
+                ("tool", '{"code": "AYLA-7K3M"}'),
+                ("assistant", "Салон «Формула тела»."),
+            ],
+        )
+        assert _history(client) == []
+
     def test_entry_reply_not_after_a_command_stays(self, client, bot_user, accepted_master):
         """Форма входа режется только парой: сама по себе «Слушаю…» на вопрос — ответ."""
         _seed(bot_user, [("user", "ты тут?"), ("assistant", "Слушаю, Анна. Что нужно?")])
@@ -199,6 +213,24 @@ class TestCommandsAreNotWrittenAsTurns:
             ]
         assert all(role != "user" for role, _ in rows), rows
         assert not any(text in content for _, content in rows)
+
+    def test_entry_reply_to_a_pasted_command_is_not_recorded_as_an_orphan(
+        self, client, bot_user, accepted_master, llm
+    ):
+        """Вопроса в нити нет — ответ входа без него стал бы сиротой на экране."""
+        llm["script"].append(FakeResult(text="Слушаю, Анна. Что нужно?"))
+        assert _ask(client, "/start inv_AYLAUUA6").status_code == 200
+        assert _history(client) == []
+        with tenant_scope(bot_user.tenant):
+            thread = StaffAssistantThread.objects.get(bot_user=bot_user)
+            assert StaffAssistantMessage.objects.filter(thread=thread).count() == 0
+
+    def test_substantive_reply_to_a_pasted_command_is_recorded(
+        self, client, bot_user, accepted_master, llm
+    ):
+        llm["script"].append(FakeResult(text="Завтра три записи, первая в 10:00."))
+        assert _ask(client, "/start inv_AYLAUUA6 что завтра").status_code == 200
+        assert [m["content"] for m in _history(client)] == ["Завтра три записи, первая в 10:00."]
 
     def test_an_ordinary_question_is_still_recorded(self, client, bot_user, accepted_master, llm):
         """Положительная стража: write-side не запер дверь для вопросов."""
@@ -253,6 +285,9 @@ class TestPredicates:
             "инвайт inv_AYLA7K3M",
             "код AYLA-7K3M",
             "AYLA 7K3M",
+            "ayla-7k3m",
+            "Ayla_7K3M",
+            "7K3M",
             "",
             "   ",
         ],
@@ -262,7 +297,16 @@ class TestPredicates:
 
     @pytest.mark.parametrize(
         "content",
-        ["что в четверг", "запиши отгул 12/10", "клиент написал: инвойс готов", "1/2 дня"],
+        [
+            "что в четверг",
+            "запиши отгул 12/10",
+            "клиент написал: инвойс готов",
+            "1/2 дня",
+            "AYLA Beauty открыт?",
+            "AYLA 2026",
+            "Ayla, что у меня завтра?",
+            "Салон «AYLA Studio». Ваш день и кабинет мастера.",
+        ],
     )
     def test_ordinary_turns_are_visible(self, content):
         assert is_hidden_staff_turn("user", content) is False

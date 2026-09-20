@@ -176,14 +176,17 @@ def assistant_ask(request: HttpRequest) -> HttpResponse:
     if len(text) > MAX_QUESTION_CHARS:
         return _error("bad_request", f"text must be ≤ {MAX_QUESTION_CHARS} chars", 400)
 
-    from apps.conversations.staff_assistant import is_hidden_staff_turn, recent_staff_history
+    from apps.conversations.staff_assistant import (
+        is_entry_reply,
+        is_hidden_staff_turn,
+        recent_staff_history,
+    )
 
     thread = _thread(bot_user)
     # DRF-2151: вставленная команда / токен приглашения отвечается, но в
     # нить как реплика не ложится — ей нечего делать на экране и в памяти.
-    inbound = (
-        None if is_hidden_staff_turn("user", text) else _remember(thread, role="user", content=text)
-    )
+    hidden = is_hidden_staff_turn("user", text)
+    inbound = None if hidden else _remember(thread, role="user", content=text)
     history = (
         recent_staff_history(thread, exclude_id=getattr(inbound, "id", None))
         if thread is not None
@@ -197,16 +200,23 @@ def assistant_ask(request: HttpRequest) -> HttpResponse:
         allow_actions=True,
     )
 
-    outbound = _remember(
-        thread,
-        role="assistant",
-        content=reply.text,
-        tool_name=reply.tool_name,
-        tokens_in=reply.tokens_in,
-        tokens_out=reply.tokens_out,
-        llm_provider=reply.llm_provider,
-        llm_model=reply.llm_model,
-        llm_cost_usd=reply.llm_cost_usd,
+    # Ответ входа на скрытую команду без вопроса стал бы сиротой на экране
+    # (парное правило читателя опирается на вопрос, которого теперь нет);
+    # содержательный ответ пишется.
+    outbound = (
+        None
+        if hidden and is_entry_reply(reply.text)
+        else _remember(
+            thread,
+            role="assistant",
+            content=reply.text,
+            tool_name=reply.tool_name,
+            tokens_in=reply.tokens_in,
+            tokens_out=reply.tokens_out,
+            llm_provider=reply.llm_provider,
+            llm_model=reply.llm_model,
+            llm_cost_usd=reply.llm_cost_usd,
+        )
     )
 
     return JsonResponse(

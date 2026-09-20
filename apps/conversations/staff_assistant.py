@@ -60,9 +60,14 @@ DEFAULT_HISTORY_LIMIT = 10
 _HIDDEN_USER_TURN = re.compile(
     r"^/"
     r"|master_invite_[0-9a-fA-F-]{8,}"
-    r"|\binv_[A-Za-z0-9]{4,}\b"
-    r"|\bAYLA[- ]?[A-Za-z0-9]{4,}\b",
+    r"|\binv_[A-Za-z0-9]{4,}\b",
 )
+
+#: The typed staff code, in the shapes the bot redeems (``staff_invites``:
+#: ``ayla-7k3m`` / ``AYLA 7K3M`` / ``AYLA_7K3M``) — prefix in any case, the
+#: four-character body from ``CODE_ALPHABET`` exactly. «AYLA Beauty», «AYLA
+#: 2026», «Ayla, что завтра?» are not codes and stay visible.
+_TYPED_CODE = re.compile(r"\bAYLA[-_ ]?[23456789ABCDEFGHJKMNPQRSTUVWXYZ]{4}\b", re.IGNORECASE)
 
 #: Entry replies the bot sends to a command — the assistant said nothing,
 #: the door did. Cut only when the reply follows a hidden command AND has
@@ -91,7 +96,13 @@ def is_hidden_staff_turn(role: str, content: str) -> bool:
     text = (content or "").strip()
     if not text:
         return True
-    return bool(_HIDDEN_USER_TURN.search(text))
+    if _HIDDEN_USER_TURN.search(text) or _TYPED_CODE.search(text):
+        return True
+    # A bare code («7K3M») — the bot's own shape test, lazily imported: this
+    # module sits below the identity services in the import graph.
+    from apps.identity.services.staff_invites import looks_like_code
+
+    return looks_like_code(text)
 
 
 def is_entry_reply(content: str) -> bool:
@@ -116,25 +127,31 @@ def visible_staff_history(
     The model's own window (:func:`recent_staff_history`) is untouched:
     this is about what a person sees, not what the assistant remembers.
     """
-    # Four times the screen's quota, capped: the pilot's worst thread had
-    # a handful of commands, not hundreds; a thread that is all commands
-    # simply renders empty, which is the honest picture.
+    # Four times the screen's quota (40…200 for the views' limits 1…50):
+    # the pilot's worst thread had a handful of commands, not hundreds. A
+    # thread whose last 200 rows are all hidden renders empty even if real
+    # turns exist earlier — acceptable, since commands are no longer
+    # written and only legacy rows can pile up like that.
     scan = min(max(limit * 4, 40), 400)
     rows = recent_staff_history(thread, limit=scan)
     kept: list[StaffAssistantMessage] = []
-    previous_hidden_command = False
+    # «Since the last visible turn, was there a hidden command?» — hidden
+    # non-user rows (a tool row, a reply that itself carries a token) do
+    # not reset it, so the entry reply after them is still cut.
+    after_hidden_command = False
     for row in rows:
         if is_hidden_staff_turn(row.role, row.content):
-            previous_hidden_command = row.role == StaffAssistantMessage.Role.USER
+            if row.role == StaffAssistantMessage.Role.USER:
+                after_hidden_command = True
             continue
         if (
-            previous_hidden_command
+            after_hidden_command
             and row.role == StaffAssistantMessage.Role.ASSISTANT
             and is_entry_reply(row.content)
         ):
-            previous_hidden_command = False
+            after_hidden_command = False
             continue
-        previous_hidden_command = False
+        after_hidden_command = False
         kept.append(row)
     return kept[-limit:] if limit > 0 else []
 

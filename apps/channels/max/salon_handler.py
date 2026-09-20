@@ -1712,16 +1712,14 @@ def _handle_talk(event: CanonicalEvent, role_ctx, bot_user, tenant, entry) -> No
     history provoked hallucinated refusals).
     """
 
-    from apps.conversations.staff_assistant import is_hidden_staff_turn
+    from apps.conversations.staff_assistant import is_entry_reply, is_hidden_staff_turn
 
     thread = _open_thread(bot_user, role_ctx)
     # DRF-2151: команда или токен приглашения, дошедшие сюда (форма, которую
-    # входные ветки выше не признали), — не реплика: отвечаем, не записываем.
-    inbound = (
-        None
-        if is_hidden_staff_turn("user", event.text)
-        else _remember(thread, role="user", content=event.text)
-    )
+    # входные ветки выше не признали), — не реплика: отвечаем, не записываем;
+    # ответ входа (меню / приветствие) на неё — тоже, иначе сирота на экране.
+    hidden = is_hidden_staff_turn("user", event.text)
+    inbound = None if hidden else _remember(thread, role="user", content=event.text)
 
     answer = _ask_assistant(bot_user, thread, event.text, exclude_id=inbound)
     if answer is None:
@@ -1743,14 +1741,18 @@ def _handle_talk(event: CanonicalEvent, role_ctx, bot_user, tenant, entry) -> No
             _reply(event, body, attachments=_greeting_attachments(buttons, role_ctx, entry))
             if first:
                 salon_greeting.mark_greeted(bot_user)
-            _remember(thread, role="assistant", content=body)
+            if not hidden:
+                _remember(thread, role="assistant", content=body)
             return
         body = menu_header(role_ctx, tenant)
         _reply(event, body, attachments=menu_attachments(role_ctx, entry))
-        _remember(thread, role="assistant", content=body)
+        if not hidden:
+            _remember(thread, role="assistant", content=body)
         return
 
     _reply(event, answer.text, attachments=menu_attachments(role_ctx, entry))
+    if hidden and is_entry_reply(answer.text):
+        return
     _remember(
         thread,
         role="assistant",
