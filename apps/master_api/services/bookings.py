@@ -244,8 +244,9 @@ def booking_detail(
     service_id: str | None = None
     service_name = ""
     if proxy.service_id is not None:
+        # Под tenant_scope вьюхи; tenant_id — второй замок, как в visit_source.
         svc = (
-            CatalogService.all_tenants.filter(
+            CatalogService.objects.filter(
                 tenant_id=master.tenant_id, ayla_service_id=proxy.service_id
             )
             .values("id", "name")
