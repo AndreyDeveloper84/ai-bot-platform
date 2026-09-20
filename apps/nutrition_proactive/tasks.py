@@ -55,12 +55,27 @@ in a real person's messenger.
 Send-state is written only after the outbound call returns. A send that
 raises leaves the counters untouched, so the next tick retries -- bounded by
 the daily quota for water, and by the one-hour match window for the report.
+
+### The summary says WHY (DRF-2140)
+
+On the stand, 20.09: ``report.summary planned=16 sent=0 skipped=16`` every
+hour for a day -- and nothing in the line said which gate ate the sixteen.
+``skipped_by_reason=`` now carries the count per :class:`Decision` reason
+(``opt_out:3,no_food_consent:5,report_off:6,…``), keys from
+:data:`KNOWN_SKIP_REASONS` only; a slug the vocabulary does not name is
+folded into ``other`` in the summary and printed once more, by slug, on a
+``skipped_other=`` line -- so a new reason is visible, not silently «other».
+No person identifiers on either line. A recipient whose ``channel_user_id``
+vanished between planning and delivery is a **skip** named ``no_channel``,
+not a ``failed`` with a traceback: there is nothing to retry and nothing
+broke.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
+from collections import Counter
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Callable
@@ -133,6 +148,63 @@ def vet_outbound(text: str) -> tuple[str, str | None]:
 #: still renders (calories against the summary's own goal, macros without
 #: targets) and simply makes no remark.
 DailyPayload = tuple[SummaryResponse, WaterTodayResponse | None, ProfileResponse | None]
+
+
+#: Every ``Decision.reason`` the three planners can emit (DRF-2140) -- the
+#: keys ``skipped_by_reason=`` may use. Built from the vocabularies the
+#: modules already declare (``selection.BLOCK_REASONS``,
+#: ``coach.BLOCK_REASONS``) plus the report / water ladders here, so the
+#: summary and the code cannot drift: ``test_skip_reason_vocabulary_census``
+#: greps every reason literal in the package against this tuple. A slug
+#: missing here reaches the summary as ``other`` -- loudly, on a second
+#: line (:func:`_summarise_skips`), never silently.
+KNOWN_SKIP_REASONS: tuple[str, ...] = (
+    # shared gate (selection.check_common → notifications.proactive)
+    *selection.BLOCK_REASONS,
+    # person-context gate (owner §2.4 S2-2): salon shells
+    "shadow",
+    "unresolved",
+    # report ladder
+    "report_off",
+    "quiet_hours",
+    "not_report_hour",
+    "already_sent_today",
+    "surface_auto_paused",
+    "weekly_cap_surface",
+    "weekly_cap_total",
+    "ayla_unavailable",
+    "outbound_safety_hit",
+    # water ladder
+    "water_off",
+    "auto_disabled",
+    "daily_quota",
+    "no_norm",
+    "on_track",
+    # coach ladder (apps/nutrition_proactive/coach.py)
+    "no_health_consent",
+    "no_marketing_consent",
+    "hints_off",
+    "sensitive_perimeter",
+    "no_goal",
+    "no_trigger",
+    # delivery-time skip (see NoChannelError)
+    "no_channel",
+)
+
+#: ``outbound_safety_<categories>`` — the vet's reason carries the hit
+#: categories; the summary folds every such slug into ``outbound_safety_hit``.
+_OUTBOUND_SAFETY_PREFIX = "outbound_safety_"
+OTHER_REASON = "other"
+
+
+class NoChannelError(MaxAPIError):
+    """``channel_user_id`` vanished between planning and delivery (DRF-2140).
+
+    Nothing to retry and nothing broke: the planner refuses such a row up
+    front (``no_chat_id``), so this is the one race -- erasure or a channel
+    unlink -- that lands after selection. Counted as a skip named
+    ``no_channel``, not as ``failed`` with a traceback.
+    """
 
 
 @dataclass
@@ -304,7 +376,7 @@ def _fetch_daily(ext: str) -> DailyPayload:
 
 
 @shared_task(name="nutrition_proactive.send_daily_reports")
-def send_daily_reports() -> dict[str, int]:
+def send_daily_reports() -> dict[str, Any]:
     """Hourly beat. No-op unless ``NUTRITION_PROACTIVE_ENABLED``."""
     return _run_task("report", plan_daily_reports)
 
@@ -443,7 +515,7 @@ def _fetch_water(ext: str) -> WaterTodayResponse:
 
 
 @shared_task(name="nutrition_proactive.send_water_reminders")
-def send_water_reminders() -> dict[str, int]:
+def send_water_reminders() -> dict[str, Any]:
     """Every four hours. No-op unless ``NUTRITION_PROACTIVE_ENABLED``."""
     return _run_task("water", plan_water_reminders)
 
@@ -452,7 +524,7 @@ def send_water_reminders() -> dict[str, int]:
 
 
 @shared_task(name="nutrition_proactive.send_coach_hints")
-def send_coach_hints() -> dict[str, int]:
+def send_coach_hints() -> dict[str, Any]:
     """Daily beat. No-op unless ``NUTRITION_COACH_ENABLED``.
 
     The coach surface has its own switch pair (``apps/nutrition_coach/
@@ -482,7 +554,7 @@ def _run_task(
     *,
     is_enabled: Callable[[], bool] | None = None,
     is_dry_run: Callable[[], bool] | None = None,
-) -> dict[str, int]:
+) -> dict[str, Any]:
     enabled_fn = enabled if is_enabled is None else is_enabled
     dry_run_fn = dry_run if is_dry_run is None else is_dry_run
     if not enabled_fn():
@@ -493,7 +565,7 @@ def _run_task(
     is_dry = dry_run_fn()
     sent = failed = 0
     to_send = [d for d in decisions if d.send]
-    skipped = len(decisions) - len(to_send)
+    skip_reasons: Counter[str] = Counter(d.reason for d in decisions if not d.send)
 
     for decision in decisions:
         if not decision.send and decision.pref_updates:
@@ -506,6 +578,14 @@ def _run_task(
             continue
         try:
             _deliver(decision, surface=kind)
+        except NoChannelError:
+            # A skip with a name, not a failure: the row cannot be written
+            # to and nothing is broken on our side (DRF-2140).
+            logger.warning(
+                "nutrition_proactive.%s.no_channel bot_user=%s", kind, decision.bot_user_id
+            )
+            skip_reasons["no_channel"] += 1
+            continue
         except Exception as exc:  # noqa: BLE001 -- one bad row must not stop the batch
             logger.exception(
                 "nutrition_proactive.%s.send_failed bot_user=%s err=%s",
@@ -519,9 +599,11 @@ def _run_task(
         _audit(kind, decision)
         sent += 1
 
+    skipped = sum(skip_reasons.values())
+    by_reason, other = _summarise_skips(skip_reasons)
     logger.info(
         "nutrition_proactive.%s.summary planned=%d would_send=%d sent=%d "
-        "skipped=%d failed=%d dry_run=%s",
+        "skipped=%d failed=%d dry_run=%s skipped_by_reason=%s",
         kind,
         len(decisions),
         len(to_send),
@@ -529,7 +611,12 @@ def _run_task(
         skipped,
         failed,
         is_dry,
+        _format_counts(by_reason),
     )
+    if other:
+        # A slug KNOWN_SKIP_REASONS does not name: visible by slug, once,
+        # without identifiers -- the census test is the place to add it.
+        logger.warning("nutrition_proactive.%s.skipped_other=%s", kind, _format_counts(other))
     return {
         "planned": len(decisions),
         "would_send": len(to_send),
@@ -537,7 +624,38 @@ def _run_task(
         "skipped": skipped,
         "failed": failed,
         "dry_run": int(is_dry),
+        "skipped_by_reason": by_reason,
     }
+
+
+def _summarise_skips(reasons: Counter[str]) -> tuple[dict[str, int], dict[str, int]]:
+    """Fold raw ``Decision.reason`` counts into the declared vocabulary.
+
+    Returns ``(by_reason, other)``: the first keyed by
+    :data:`KNOWN_SKIP_REASONS` (unknown slugs summed under ``other``), the
+    second the unknown slugs themselves so the summary can name them.
+    ``outbound_safety_<categories>`` folds into ``outbound_safety_hit``.
+    """
+    by_reason: Counter[str] = Counter()
+    other: Counter[str] = Counter()
+    for raw, count in reasons.items():
+        reason = raw or OTHER_REASON
+        if reason.startswith(_OUTBOUND_SAFETY_PREFIX):
+            reason = "outbound_safety_hit"
+        if reason in KNOWN_SKIP_REASONS:
+            by_reason[reason] += count
+        else:
+            by_reason[OTHER_REASON] += count
+            other[reason] += count
+    return dict(by_reason), dict(other)
+
+
+def _format_counts(counts: dict[str, int]) -> str:
+    """``opt_out:3,report_off:6`` -- largest first, then by name; ``-`` when empty."""
+    if not counts:
+        return "-"
+    ordered = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
+    return ",".join(f"{key}:{n}" for key, n in ordered)
 
 
 def _deliver(decision: Decision, *, surface: str) -> None:
@@ -553,7 +671,7 @@ def _deliver(decision: Decision, *, surface: str) -> None:
         or ""
     ).strip()
     if not user_id:
-        raise MaxAPIError(0, "channel_user_id vanished between planning and delivery")
+        raise NoChannelError(0, "channel_user_id vanished between planning and delivery")
     send_message(user_id=user_id, text=decision.text, attachments=_stop_keyboard(surface))
 
 
