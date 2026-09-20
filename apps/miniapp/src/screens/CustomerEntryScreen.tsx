@@ -75,7 +75,11 @@ export function CustomerEntryScreen() {
     fetchDecisionContext()
       .then((doc) => {
         if (cancelled) return;
-        setState(doc.missing.length > 0 ? { kind: "ask", doc } : { kind: "home" });
+        // DRF-2177: документ с целью теперь несёт и её сужающие вопросы
+        // (C03), но первый экран — анкета только для того, у кого цели
+        // НЕТ (DRF-1451). С целью — главный; к вопросам ведёт карточка цели.
+        const newcomer = doc.known.goal === null && doc.missing.length > 0;
+        setState(newcomer ? { kind: "ask", doc } : { kind: "home" });
       })
       .catch(() => {
         if (!cancelled) setState({ kind: "fallback" });
