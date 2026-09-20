@@ -237,7 +237,14 @@ def _crisis_or_block(text: str) -> SafetyStop | None:
 
     inbound = evaluate_inbound(text)
     if not inbound.allowed:
-        kind = KIND_CRISIS if inbound.verdict == SafetyVerdict.HANDOFF.value else KIND_BLOCK
+        if inbound.verdict == SafetyVerdict.HANDOFF.value:
+            kind = KIND_CRISIS
+        elif inbound.verdict == SafetyVerdict.MEDICAL.value:
+            # DRF-2000: the gate's medical verdict is the same medical S1
+            # stop the classifier produces below — one kind, one text.
+            kind = KIND_RED_FLAG
+        else:
+            kind = KIND_BLOCK
         return SafetyStop(kind=kind, text=inbound.reply_text)
     return None
 

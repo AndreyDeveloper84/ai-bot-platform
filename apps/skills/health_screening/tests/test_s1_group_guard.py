@@ -34,9 +34,15 @@ from apps.skills.health_screening.tests.s1_fixtures import (
 
 
 def s1_detected(text: str) -> bool:
-    """Как на живых путях MAX: сначала гейт (HANDOFF), затем классификатор (RED_FLAG)."""
+    """Как на живых путях MAX: сначала гейт (HANDOFF или MEDICAL — DRF-2000),
+    затем классификатор (RED_FLAG)."""
 
-    return pre_check(text).verdict is SafetyVerdict.HANDOFF or classify(text) is PainSignal.RED_FLAG
+    verdict = pre_check(text).verdict
+    return (
+        verdict is SafetyVerdict.HANDOFF
+        or verdict is SafetyVerdict.MEDICAL
+        or classify(text) is PainSignal.RED_FLAG
+    )
 
 
 def _fixture_id(fixture: S1Fixture) -> str:
