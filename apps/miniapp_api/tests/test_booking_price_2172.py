@@ -134,7 +134,7 @@ class TestConsumerStoresTheSnapshot:
         proxy = RemoteBookingProxy.all_tenants.get(appointment_id=appt)
         assert proxy.price_amount == Decimal("3200.00")
 
-    @pytest.mark.parametrize("bad", [None, "", "free", "NaN"])
+    @pytest.mark.parametrize("bad", [None, "", "free", "NaN", "Infinity", "-5", "100000000.00"])
     def test_missing_or_unreadable_price_is_null_not_a_crash(self, tenant, bot_user, bad):
         appt = str(uuid.uuid4())
         data = _created(appt)
@@ -169,6 +169,66 @@ class TestConsumerStoresTheSnapshot:
 
         proxy = RemoteBookingProxy.all_tenants.get(appointment_id=appt)
         assert proxy.price_amount == Decimal("3200.00")
+
+
+class TestDialogPathAndRedelivery:
+    """Запись из диалога бота: зеркало пишется ДО события, уже CONFIRMED, без цены."""
+
+    def _pre_existing_confirmed(self, tenant, bot_user, appt: str, **extra):
+        start = timezone.now() + dt.timedelta(days=2)
+        return RemoteBookingProxy.all_tenants.create(
+            appointment_id=appt,
+            tenant=tenant,
+            bot_user=bot_user,
+            start_at=start,
+            end_at=start + dt.timedelta(hours=1),
+            status=RemoteBookingProxy.Status.CONFIRMED,
+            source=RemoteBookingProxy.Source.MOBILE_APP,
+            last_synced_event_id="dialog-write",
+            **extra,
+        )
+
+    def test_dialog_booking_gets_its_price_from_the_late_created_event(self, tenant, bot_user):
+        """Блокер ревью: мажоритарный путь — строка уже CONFIRMED, событие приходит позже."""
+        appt = str(uuid.uuid4())
+        self._pre_existing_confirmed(tenant, bot_user, appt)
+
+        handle_booking_created(_envelope("booking.created", _created(appt)))
+
+        proxy = RemoteBookingProxy.all_tenants.get(appointment_id=appt)
+        assert proxy.status == "confirmed"  # состояние не откачено
+        assert proxy.price_amount == Decimal("3200.00")
+
+    def test_stored_price_is_never_overwritten_by_a_later_created(self, tenant, bot_user):
+        """Снимок: строка уже с ценой, событие с другой — остаётся первая."""
+        appt = str(uuid.uuid4())
+        self._pre_existing_confirmed(tenant, bot_user, appt, price_amount=Decimal("1500.00"))
+
+        handle_booking_created(_envelope("booking.created", _created(appt, price_total="3200.00")))
+
+        assert RemoteBookingProxy.all_tenants.get(appointment_id=appt).price_amount == Decimal(
+            "1500.00"
+        )
+
+    def test_redelivery_without_price_does_not_erase_the_snapshot(self, tenant, bot_user):
+        """Не-advanced строка (pending_payment): повтор события без price_total — цена на месте."""
+        appt = str(uuid.uuid4())
+        handle_booking_created(
+            _envelope(
+                "booking.created", _created(appt, status="pending_payment"), event_id="01EVT-A"
+            )
+        )
+        assert RemoteBookingProxy.all_tenants.get(appointment_id=appt).price_amount == Decimal(
+            "3200.00"
+        )
+
+        data = _created(appt, status="pending_payment")
+        data.pop("price_total")
+        handle_booking_created(_envelope("booking.created", data, event_id="01EVT-B"))
+
+        assert RemoteBookingProxy.all_tenants.get(appointment_id=appt).price_amount == Decimal(
+            "3200.00"
+        )
 
 
 class TestSurfacesCarryThePrice:

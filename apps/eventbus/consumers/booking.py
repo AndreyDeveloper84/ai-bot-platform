@@ -147,7 +147,13 @@ _CREATED_ADVANCED_STATUSES: Final[frozenset[str]] = frozenset(
 # holds a value is left exactly as it is, including when it disagrees with
 # the event. Deciding WHICH value wins would be a reconciliation policy, and
 # this is not the place to invent one (the sweep DRF-1111 is).
-_CREATED_REFERENCE_FIELDS: Final[tuple[str, ...]] = ("service_id", "specialist_id")
+#
+# DRF-2172: ``price_amount`` is the third member of this family. It is the
+# booking-time snapshot (``price_total``), carried by ``booking.created`` and
+# by nothing after it, and the dialog path writes its mirror row without a
+# price — so for the majority of real bookings this backfill is the ONLY
+# way the price ever lands. Same rule: fill NULL, never overwrite.
+_CREATED_REFERENCE_FIELDS: Final[tuple[str, ...]] = ("service_id", "specialist_id", "price_amount")
 
 
 def _backfill_created_references(
@@ -157,6 +163,7 @@ def _backfill_created_references(
     service_uuid: UUID | None,
     specialist_uuid: UUID | None,
     envelope: Any,
+    price_amount: Decimal | None = None,
 ) -> list[str]:
     """Fill NULL reference columns from a ``booking.created`` payload.
 
@@ -171,7 +178,11 @@ def _backfill_created_references(
     else just filled cannot block the other one.
     """
     filled: list[str] = []
-    for field, value in (("service_id", service_uuid), ("specialist_id", specialist_uuid)):
+    for field, value in (
+        ("service_id", service_uuid),
+        ("specialist_id", specialist_uuid),
+        ("price_amount", price_amount),
+    ):
         if value is None or getattr(proxy, field) is not None:
             continue
         updated = RemoteBookingProxy.all_tenants.filter(
@@ -277,13 +288,17 @@ def _parse_price_total(data: dict[str, Any], *, appointment_id: Any) -> Decimal 
             appointment_id,
         )
         return None
-    if not value.is_finite() or value < 0:
+    # Bounds: the column is numeric(10,2). Postgres raises DataError on
+    # overflow inside get_or_create — that would fail the whole event, which
+    # this parser exists to prevent (sqlite in tests would not notice).
+    if not value.is_finite() or value < 0 or value >= Decimal("1e8"):
         logger.warning(
             "eventbus.consumer.booking.created.price_unreadable appointment_id=%s",
             appointment_id,
         )
         return None
-    return value.quantize(Decimal("0.01"))
+    value = value.quantize(Decimal("0.01"))
+    return value.copy_abs() if value.is_zero() else value  # «-0.00» → «0.00»
 
 
 def _resolve_bot_user(*, user_id: UUID, tenant: Tenant) -> BotUser | None:
@@ -904,8 +919,10 @@ def handle_booking_created(envelope: IngestEnvelope) -> None:
     specialist_uuid = UUID(data["specialist_id"]) if data.get("specialist_id") else None
     raw_source = data.get("source", "")
 
-    # DRF-2172 — the booking-time price snapshot; later events never carry
-    # or touch it, so a salon price change cannot rewrite what was agreed.
+    # DRF-2172 — the booking-time price snapshot. Later events never carry it;
+    # a later booking.created may only FILL a NULL, never overwrite (see
+    # _backfill_created_references) — a salon price change cannot rewrite
+    # what was agreed.
     price_amount = _parse_price_total(data, appointment_id=appointment_id)
 
     create_defaults = {
@@ -968,6 +985,7 @@ def handle_booking_created(envelope: IngestEnvelope) -> None:
                 service_uuid=service_uuid,
                 specialist_uuid=specialist_uuid,
                 envelope=envelope,
+                price_amount=price_amount,
             )
             # DRF-1140: the advanced-state no-op is where a DIALOG booking
             # lands — the internal-bus pair must fire here too, or bot
@@ -1003,6 +1021,11 @@ def handle_booking_created(envelope: IngestEnvelope) -> None:
             )
             return
         update_fields = {k: v for k, v in create_defaults.items() if k != "tenant"}
+        if price_amount is None:
+            # DRF-2172: «absent means no news, never “it is gone”» — a redelivered
+            # booking.created without price_total must not erase the snapshot
+            # an earlier one stored (same rule as service_id in tools.py).
+            update_fields.pop("price_amount", None)
         RemoteBookingProxy.all_tenants.filter(appointment_id=appointment_id).update(**update_fields)
 
     # DRF-1140: the appointment is now known locally — announce it to the

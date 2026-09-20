@@ -211,6 +211,8 @@ export function CustomerBookingDetailScreen() {
 
   const b = state.booking;
   const { rendering } = renderStatus(displayStatusFor(b));
+  // DRF-2172 — цена записи (снимок); ниже 1 ₽ / null → строки нет.
+  const priceLabel = b.price ? priceFromLabel(b.price) : "";
   const isHistoryRow =
     rendering.label !== "Подтверждена" || new Date(b.visit_at).getTime() < Date.now();
 
@@ -263,10 +265,10 @@ export function CustomerBookingDetailScreen() {
             <dd>{visitAddressText(b.address)}</dd>
             {/* DRF-2172 — цена записи (снимок на момент записи); без цены
                 строки нет, «Сумма» ниже — это платёж, другой факт. */}
-            {b.price && priceFromLabel(b.price) && (
+            {priceLabel && (
               <>
                 <dt>Цена</dt>
-                <dd>{priceFromLabel(b.price)}</dd>
+                <dd>{priceLabel}</dd>
               </>
             )}
             {b.payment?.amount && (
