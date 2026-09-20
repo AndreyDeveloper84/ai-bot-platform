@@ -32,11 +32,11 @@ def _plan(*actions: PlanLiteAction) -> PlanLite:
     return PlanLite(plan_id="p-2124", goal_key="tone_up", actions=actions)
 
 
-def _food(target: int, done: int, within: int | None, *, cadence: str = "per_week") -> PlanLiteAction:
+def _food(
+    target: int, done: int, within: int | None, *, cadence: str = "per_week"
+) -> PlanLiteAction:
     bucket = _DAY if cadence == "per_day" else _BUCKET
-    return PlanLiteAction(
-        "log_food", cadence, target, done, *bucket, within_target_count=within
-    )
+    return PlanLiteAction("log_food", cadence, target, done, *bucket, within_target_count=within)
 
 
 _NO_ACHIEVEMENT = ("%", "достиг", "отлично", "молодец", "прогресс", "пропуст")
@@ -55,9 +55,7 @@ class TestC2NoneIsTheOldLine:
         assert "ориентир" not in text.lower()
 
     def test_the_line_is_byte_identical_to_the_default_dto(self) -> None:
-        old = render_plan_lite_card(
-            _plan(PlanLiteAction("log_food", "per_week", 5, 4, *_BUCKET))
-        )
+        old = render_plan_lite_card(_plan(PlanLiteAction("log_food", "per_week", 5, 4, *_BUCKET)))
         assert old == render_plan_lite_card(_plan(_food(5, 4, None)))
 
 

@@ -201,7 +201,9 @@ class TestH3TheHintDoesNotAnswerForThePerson:
         run = _Run(_state("activity", _BODY), doc=_doc(["lose"]))
         result = _ask_goal(run)
         buttons = result.action_data["buttons"]
-        assert [b["label"] for b in buttons] == [label for label, _ in choice_keyboard_options("goal")]
+        assert [b["label"] for b in buttons] == [
+            label for label, _ in choice_keyboard_options("goal")
+        ]
         assert [b["callback"] for b in buttons] == [
             f"cb:anketa:choice:goal:{slug}" for slug in GOAL_CHOICES
         ]
@@ -228,7 +230,11 @@ class TestH5AylaFailuresLeaveThePlainStep:
             Mock(side_effect=GoalsUnavailable("timeout")),
             Mock(side_effect=GoalsConfigError("not configured")),
             Mock(return_value="not a document"),
-            Mock(return_value={"known": {"goal": {"goal_key": "body_shape", "nutrition_goal_hint": "lose"}}}),
+            Mock(
+                return_value={
+                    "known": {"goal": {"goal_key": "body_shape", "nutrition_goal_hint": "lose"}}
+                }
+            ),
         ],
         ids=["unavailable", "not-configured", "not-a-dict", "hint-not-a-list"],
     )

@@ -24,7 +24,9 @@ POST с ``template_version`` (провенанс плана в каталоге)
 только статус и класс (DRF-2009).
 
 В-5: экран получает ровно то, что несёт DTO — форму обязательства и факт
-``done_count``; процентов и «достигнуто» у DTO нет полей.
+``done_count``; процентов и «достигнуто» у DTO нет полей. DRF-2124: у
+``log_food`` — ещё факт ``within_target_count`` (целое или ``null`` —
+«ориентира нет», не 0, §103); у воды и брони ключа нет, как в каталоге.
 
 Отдельный модуль, а не :mod:`apps.miniapp_api.views`: тот сегодня в работе
 у соседей; ворота и отказ импортированы оттуда.
@@ -44,6 +46,7 @@ from django.views.decorators.http import require_http_methods
 from apps.identity.models import BotUser
 from apps.integrations.ayla.wellness_context_client import (
     PlanLite,
+    PlanLiteAction,
     PlanLiteAlreadyActiveError,
     PlanLiteDisabledError,
     PlanLiteGoalNotFoundError,
@@ -71,17 +74,22 @@ def plan_lite_payload(plan: PlanLite | None) -> dict[str, Any] | None:
     return {
         "plan_id": plan.plan_id,
         "goal_key": plan.goal_key,
-        "actions": [
-            {
-                "action_type": a.action_type,
-                "cadence": a.cadence,
-                "target_count": a.target_count,
-                "done_count": a.done_count,
-                "bucket": {"start": a.bucket_start, "end": a.bucket_end},
-            }
-            for a in plan.actions
-        ],
+        "actions": [_action_payload(a) for a in plan.actions],
     }
+
+
+def _action_payload(a: PlanLiteAction) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "action_type": a.action_type,
+        "cadence": a.cadence,
+        "target_count": a.target_count,
+        "done_count": a.done_count,
+        "bucket": {"start": a.bucket_start, "end": a.bucket_end},
+    }
+    if a.action_type == "log_food":
+        # DRF-2124: ключ есть всегда — ``null`` и «0 дней в ориентире» разные факты.
+        payload["within_target_count"] = a.within_target_count
+    return payload
 
 
 def plan_lite_proposal_payload(proposal: PlanLiteProposal) -> dict[str, Any]:

@@ -102,6 +102,12 @@ class PlanLiteAction:
 
     ``done_count`` ≤ ``target_count`` за текущее ведро ``[bucket_start,
     bucket_end)``; процентов и «достигнуто» у DTO нет полей — В-5.
+
+    ``within_target_count`` (DRF-2124) — второй факт, только у ``log_food``:
+    дни ведра, когда сумма калорий ≤ подтверждённому ориентиру; ``None`` —
+    ориентира нет (§103: не 0) или каталог ключа не прислал (вода, бронь,
+    старый каталог). Тоже факт, не оценка: карточка печатает его рядом с
+    «N из M» и ничего из него не выводит.
     """
 
     action_type: str
@@ -110,6 +116,7 @@ class PlanLiteAction:
     done_count: int
     bucket_start: str
     bucket_end: str
+    within_target_count: int | None = None
 
 
 @dataclass(frozen=True)
@@ -496,6 +503,7 @@ def _plan_lite_from_wire(raw: Any) -> PlanLite | None:
                 done_count=_count(item.get("done_count")),
                 bucket_start=_code(bucket.get("start")),
                 bucket_end=_code(bucket.get("end")),
+                within_target_count=_count_or_none(item.get("within_target_count")),
             )
         )
     return PlanLite(
@@ -534,6 +542,13 @@ def _proposal_from_wire(raw: Any) -> PlanLiteProposal | None:
 
 def _count(value: Any) -> int:
     return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else 0
+
+
+def _count_or_none(value: Any) -> int | None:
+    """Факт, которого может не быть: целое ≥ 0 — оно, всё остальное (``null``,
+    ключа нет, мусор) — ``None``. Отличие от :func:`_count` — «нет» здесь не
+    равно нулю (§103, DRF-2124)."""
+    return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else None
 
 
 def _plan_lite_refusal(response: httpx.Response) -> WellnessContextClientError:

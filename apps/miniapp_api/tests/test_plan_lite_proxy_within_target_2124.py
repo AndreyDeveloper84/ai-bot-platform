@@ -13,6 +13,7 @@
 
 from __future__ import annotations
 
+import pytest
 from django.test import Client
 
 from apps.identity.models import BotUser
@@ -21,18 +22,36 @@ from apps.integrations.ayla.wellness_context_client import (
     PlanLiteAction,
     WellnessContext,
 )
-from apps.miniapp_api.tests.test_plan_lite_proxy_2101 import (  # noqa: F401 — фикстуры
+from apps.miniapp_api.tests.test_plan_lite_proxy_2101 import (
+    BOT_TOKEN,
     EXT,
     _auth,
     _FakeClient,
     _patch,
-    _settings,
     _url,
-    bot_user,
-    tenant,
 )
+from apps.tenancy.models import Tenant
 
 _BUCKET = ("2026-09-14", "2026-09-21")
+
+
+@pytest.fixture(autouse=True)
+def _settings(settings):
+    settings.MAX_BOT_TOKEN = BOT_TOKEN
+    settings.AYLA_BASE_URL = "https://ayla.test"
+    settings.AYLA_INTERNAL_API_TOKEN = "test-service-token"  # noqa: S105  # pragma: allowlist secret
+    settings.PLAN_LITE_ENABLED = True
+
+
+@pytest.fixture
+def bot_user(db, settings) -> BotUser:
+    tenant = Tenant.objects.create(
+        slug="plan-lite-2124", name="Plan Lite", timezone="Europe/Moscow"
+    )
+    settings.MAX_BOT_TENANT_SLUG = tenant.slug
+    return BotUser.all_tenants.create(
+        tenant=tenant, channel="max", channel_user_id="21010", display_name="Анна"
+    )
 
 
 def _get(client: Client, bot_user: BotUser, plan: PlanLite) -> list[dict]:

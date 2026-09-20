@@ -69,7 +69,9 @@ class TestW1TheFactTravels:
 
 
 class TestW2GarbageIsNone:
-    @pytest.mark.parametrize("value", ["3", True, -1, 2.5, {"n": 3}], ids=["str", "bool", "neg", "float", "obj"])
+    @pytest.mark.parametrize(
+        "value", ["3", True, -1, 2.5, {"n": 3}], ids=["str", "bool", "neg", "float", "obj"]
+    )
     def test_non_count_values_are_none(self, value: Any) -> None:
         assert _food(_wire(within_target_count=value)).within_target_count is None
 

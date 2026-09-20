@@ -75,6 +75,23 @@ learn elsewhere in this codebase:
 3. **The log records the bucket, not the condition.** ``stop=screening``
    and never *which* — a log line is storage too.
 
+## Goal hint on the last step (DRF-2124, План-B, В-4)
+
+The person's ``ClientGoal.goal_key`` («подтянуть фигуру») and the anketa's
+``goal`` (lose / maintain / gain — a parameter of the calculation) stay two
+different notions. What links them is a curated table on the catalogue side
+(``PlanTemplate.nutrition_goal_hint``, #515) that decision-context serves
+as ``known.goal.nutrition_goal_hint``. This skill is its reader: when the
+goal step is rendered and the person has an active goal with a hint, the
+prompt gets a second line — «Под цель «Подтянуть фигуру» обычно выбирают
+«Похудеть» или «Поддержать» — но выбирай сама» — and ``action_data``
+carries the hint as data. Nothing else changes: the keyboard is the whole
+table in its order, the step is not skipped, nothing is pre-selected, and
+``answers["goal"]`` is written only by the person's tap (§7.1 / §5.1 —
+the person's input). Any refusal of the goals read — not configured,
+unavailable, malformed — renders the plain step; the hint is a courtesy,
+not a dependency. The read happens only when the goal step is rendered.
+
 ## Scope cuts vs mysite
 
 Deferred to Phase 1 / a follow-up Sprint 9 ticket:
@@ -109,12 +126,14 @@ from apps.integrations.ayla import (
     external_user_id_for,
     get_nutrition_client,
 )
+from apps.integrations.ayla.goals_client import fetch_decision_context
 from apps.integrations.ayla.nutrition_client import (
     TARGETS_PROPOSED,
     NothingToConfirmError,
     health_factor_refusals,
     proposed_norms,
 )
+from apps.orchestrator.plan_lite_card import goal_label
 from apps.orchestrator.ui.keyboards import anketa_choice_keyboard, parse_callback
 from apps.skills.base import SkillContext, SkillResult
 from apps.skills.fsm import Completed, NextStep
@@ -125,6 +144,7 @@ from apps.skills.nutrition_anketa.fsm import (
     ACTIVITY_SKIP,
     ADULT_AGE,
     CHOICE_STEPS,
+    GOAL_CHOICES,
     SCREENING_CLEAR,
     AnketaFSM,
     choice_keyboard_options,
@@ -305,6 +325,14 @@ WITHDRAW_NOTHING_TO_WITHDRAW_CONTOUR_OFF = (
 )
 
 
+#: DRF-2124 — подсказка на шаге цели. «обычно выбирают» — про людей с такой
+#: целью, не про этого человека; хвост склоняется по полу с первого шага
+#: (поправка главного окна 20.09: «сама/сам» с косой чертой не звучит).
+#: Без «рекомендую» и без предвыбора: выбор — вход человека (§7.1/§5.1).
+_GOAL_HINT_LINE = "Под цель «{goal}» обычно выбирают {options} — но выбирай {you}."
+_GOAL_HINT_YOU = {"female": "сама", "male": "сам"}
+_GOAL_HINT_YOU_DEFAULT = "сама"
+
 _CONSENT_ATTESTATION_MISSING = (
     "Персональный расчёт пока не запускаю: на обработку веса, роста, возраста "
     "и остального нужно отдельное согласие с версией текста, а у меня его нет — "
@@ -443,7 +471,7 @@ class NutritionAnketaSkill:
         fsm = AnketaFSM()
         step_result = fsm.enter()
         self._save_state(context, fsm)
-        return self._render_step(fsm.current_step, step_result.prompt)
+        return self._render_step(fsm.current_step, step_result.prompt, context=context, fsm=fsm)
 
     # ─── edit (cb:anketa:edit:{step}) ────────────────────────────────────
 
@@ -461,7 +489,7 @@ class NutritionAnketaSkill:
             # Unknown step — defensive.
             return SkillResult(reply_text="", should_send=False)
         self._save_state(context, fsm)
-        return self._render_step(fsm.current_step, step_result.prompt)
+        return self._render_step(fsm.current_step, step_result.prompt, context=context, fsm=fsm)
 
     # ─── transition ──────────────────────────────────────────────────────
 
@@ -496,7 +524,7 @@ class NutritionAnketaSkill:
 
         if isinstance(result, NextStep):
             self._save_state(context, fsm)
-            return self._render_step(fsm.current_step, result.prompt)
+            return self._render_step(fsm.current_step, result.prompt, context=context, fsm=fsm)
 
         # Completed → POST to Ayla.
         assert isinstance(result, Completed)
@@ -509,7 +537,7 @@ class NutritionAnketaSkill:
             # exist on the pilot is not claimed here.
             step_result = fsm.goto("activity")
             self._save_state(context, fsm)
-            return self._render_step(fsm.current_step, step_result.prompt)
+            return self._render_step(fsm.current_step, step_result.prompt, context=context, fsm=fsm)
         return self._on_complete(context, result.answers)
 
     # ─── stop scenarios (§7.1) ───────────────────────────────────────────
@@ -910,10 +938,28 @@ class NutritionAnketaSkill:
         «напишите „Рассчитать мои нормы“»); новых обещаний нет."""
         return when_on if _nutrition_enabled() else when_off
 
-    def _render_step(self, step: str, prompt: str) -> SkillResult:
+    def _render_step(
+        self,
+        step: str,
+        prompt: str,
+        *,
+        context: SkillContext,
+        fsm: AnketaFSM,
+    ) -> SkillResult:
         action_data: dict = {"step": step}
         if step in CHOICE_STEPS:
+            # Клавиатура — вся таблица в её порядке, метки как в таблице
+            # (история хода читает их той же таблицей — стража a5
+            # DRF-2102). Подсказка цели (ниже) кнопок не касается.
             action_data["buttons"] = anketa_choice_keyboard(step, choice_keyboard_options(step))
+        if step == "goal":
+            # DRF-2124: подсказка — строкой под вопросом и данными в
+            # action_data; в answers она не пишет ничего.
+            hint = _goal_hint(context)
+            if hint is not None:
+                goal_key, options = hint
+                prompt = f"{prompt}\n\n" + _goal_hint_line(goal_key, options, fsm.answers)
+                action_data["goal_hint"] = {"goal_key": goal_key, "options": options}
         return SkillResult(
             reply_text=prompt,
             action_type=f"anketa_step_{step}",
@@ -983,6 +1029,44 @@ class NutritionAnketaSkill:
 
 
 # ─── helpers ──────────────────────────────────────────────────────────────
+
+
+def _goal_hint(context: SkillContext) -> tuple[str, list[str]] | None:
+    """DRF-2124: ``(goal_key, [slug, …])`` подсказки из decision-context или ``None``.
+
+    Читает ``known.goal.nutrition_goal_hint`` активной цели; оставляет только
+    значения из таблицы анкеты (:data:`GOAL_CHOICES`) в её порядке — чужое
+    (``slim``) не печатается. ``None`` — цели нет, подсказки нет (``null``,
+    §103), список без известных значений, документ не той формы или Ayla
+    не ответила: подсказка — вежливость, шаг без неё полноценен. В лог —
+    класс отказа, без идентификатора канала (DRF-2009).
+    """
+    try:
+        document = fetch_decision_context(external_user_id=external_user_id_for(context.bot_user))
+    except Exception as exc:  # noqa: BLE001 — любой отказ чтения = «подсказки нет»
+        logger.info("anketa.goal_hint_unavailable class=%s", type(exc).__name__)
+        return None
+    known = document.get("known") if isinstance(document, dict) else None
+    goal = known.get("goal") if isinstance(known, dict) else None
+    if not isinstance(goal, dict):
+        return None
+    goal_key = goal.get("goal_key")
+    raw = goal.get("nutrition_goal_hint")
+    if not isinstance(goal_key, str) or not goal_key or not isinstance(raw, list):
+        return None
+    options = [slug for slug in GOAL_CHOICES if slug in raw]
+    if not options:
+        return None
+    return goal_key, options
+
+
+def _goal_hint_line(goal_key: str, options: list[str], answers: dict) -> str:
+    """Строка подсказки: метка цели из зеркала (не свободный текст человека),
+    метки вариантов — из таблицы анкеты, хвост — по полу с первого шага."""
+    labels = [f"«{GOAL_CHOICES[slug]}»" for slug in options]
+    joined = labels[0] if len(labels) == 1 else ", ".join(labels[:-1]) + " или " + labels[-1]
+    you = _GOAL_HINT_YOU.get(str(answers.get("gender")), _GOAL_HINT_YOU_DEFAULT)
+    return _GOAL_HINT_LINE.format(goal=goal_label(goal_key), options=joined, you=you)
 
 
 def _is_real_orm_conversation(conversation: object) -> bool:
