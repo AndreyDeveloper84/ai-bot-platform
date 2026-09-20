@@ -631,6 +631,8 @@ class TestWellnessTodayActiveGoals:
                 _url(), HTTP_AUTHORIZATION=_init_data_header(bot_user.channel_user_id)
             )
         goal = resp.json()["active_goals"][0]
+        # POSITIVE: цель на месте — снят только срок, не сама цель.
+        assert goal["title"] == "Похудеть к отпуску"
         assert "target_date" not in goal
         assert "target_date_passed" not in goal
 
@@ -661,7 +663,10 @@ class TestWellnessTodayActiveGoals:
                 _url(), HTTP_AUTHORIZATION=_init_data_header(bot_user.channel_user_id)
             )
         assert resp.status_code == 200
-        assert "target_date" not in resp.json()["active_goals"][0]
+        goal = resp.json()["active_goals"][0]
+        # POSITIVE: цель доехала — отброшена только нечитаемая дата.
+        assert goal["title"] == "Похудеть к отпуску"
+        assert "target_date" not in goal
 
     def test_label_from_the_document_wins_over_suggestions(
         self, client: Client, bot_user: BotUser, goals_stub
