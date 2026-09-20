@@ -4,7 +4,10 @@
 сказанное человеком в этом пути (D6: ПДн). По D7 транзакционная часть —
 что показано, когда, какая реакция — остаётся tombstone-строкой для
 attribution/audit (B13), а слова уходят: ``what``/``subline``/``why``/
-``facts`` обнуляются. Идемпотентно: повторный вызов ничего не находит.
+``facts``/``alternatives`` обнуляются. Другие подходы — формулировки
+каталога, не ПДн, но они часть показанного кадра и уходят вместе с ним:
+оставить их значило бы хранить половину карточки без человека, которому
+её показали. Идемпотентно: повторный вызов ничего не находит.
 """
 
 from __future__ import annotations
@@ -17,7 +20,7 @@ from apps.recommendation.models import Recommendation
 def anonymize_recommendations(bot_user_ids: Iterable[object]) -> int:
     """Обнулить слова во всех записях оболочек ``bot_user_ids``; вернуть число строк."""
     return Recommendation.objects.filter(bot_user_id__in=list(bot_user_ids)).update(
-        what="", subline="", why=[], facts={}
+        what="", subline="", why=[], facts={}, alternatives=[]
     )
 
 

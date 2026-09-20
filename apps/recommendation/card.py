@@ -26,9 +26,18 @@ Recommendation = WHAT, услуга/мастер/цена/слот — толь�
   Исходная формулировка листа (рендер `evidence_refs` решения) остаётся
   заблокированной D11: такой связи как данных нет ни в решении резолвера,
   ни в документе целей. Здесь построена та часть, для которой данные есть.
-* **Сторож R11**: в WHAT/подстроке/причинах нет услуги, мастера, салона,
-  цены — той же проверкой, что стережёт опции C02 (`clarify_guard`); и нет
-  слов «рекомендую/рекомендует» (§60). Нарушение → карточки нет → C04.4.
+* **Другие подходы** (C04.3, DRF-1770, К-3 N4) — `known.goal.directions`:
+  та же курируемая таблица, основной первым, других ≤2 (R05). Строк нет
+  или она одна — кадра выбора нет, и кнопка «Показать больше подходов» не
+  рисуется: больше двух не бывает по построению.
+* **Сторож — по предмету, а не по слову** (:func:`boundary_violation`): в
+  WHAT/подстроке/причинах нет услуги, мастера, салона, цены — той же
+  проверкой, что стережёт опции C02 (`clarify_guard`); нет утверждения о
+  приоритете (24.08 §1); нет словаря отладки — кодов, баллов,
+  «уверенности» (R06); и нет «рекоменду… <услуга/мастер/цена>» (§60).
+  Само слово не запрещено: заголовок макета C04.3 «Основной вариант
+  (рекомендую):» — про НАПРАВЛЕНИЕ, и он в явном allow-list одной
+  константой. Нарушение → карточки нет → C04.4.
 
 Триггер — не здесь: `dispatch.maybe_send_card` зовёт `build_card` только на
 серверном факте «контекст собран» (`next.id == return_to_chat`).
@@ -57,6 +66,21 @@ BUTTON_PICK = "Подобрать вариант"
 BUTTON_WHY = "Почему"
 BUTTON_ALT = "Другой вариант"
 BUTTON_SKIP = "Не сейчас"
+
+# ─── тексты макета C04.3 «другие подходы» (DRF-1270) дословно ────────────
+
+ALT_HEAD = "Есть несколько подходящих направлений. Что для тебя важнее?"
+#: «рекомендую» здесь — про НАПРАВЛЕНИЕ, и по §60 это законно: запрещено
+#: «Ayla рекомендует услугу X». Строка стоит в allow-list сторожа явно —
+#: иначе пришлось бы либо ослабить правило, либо переписать макет.
+ALT_PRIMARY_HEAD = "Основной вариант (рекомендую):"
+ALT_OTHERS_HEAD = "Другие подходы (тоже подойдут):"
+#: Сколько ДРУГИХ подходов показываем (R05 — «не больше трёх всего»).
+#: Поэтому кнопки «Показать больше подходов» на кадре нет: она обещала бы
+#: продолжение, которого не бывает по построению.
+MAX_ALTERNATIVES = 2
+#: Длина подписи кнопки — как у соседних клавиатур (`discovery.py`).
+MAX_BUTTON_LABEL_CHARS = 40
 
 # ─── C04.4 — нет рекомендации: текст владельца 12.09 (общий словарь с
 #     `apps/miniapp/src/lib/recommendation-absence.ts`, паритет — тест) ──
@@ -108,8 +132,36 @@ PRIORITY_CLAIM_RE = re.compile(
 _WHITESPACE_RE = re.compile(r"\s+")
 
 #: §60: карточка — направление, а не «Ayla рекомендует услугу X».
-#: Слова рекомендации в тексте карточки — нарушение по построению.
-RECOMMENDS_RE = re.compile(r"рекоменду", re.IGNORECASE)
+#: Ловится не слово, а ПРЕДМЕТ: см. :func:`boundary_violation`.
+RECOMMENDS_RE = re.compile(r"рекоменду\w*", re.IGNORECASE)
+
+#: Строки, где «рекоменду…» законно, — по одной константе и с причиной.
+#: Список явный и короткий: сторож §60 растворился бы от шаблона.
+_RECOMMENDS_ALLOWED = frozenset({ALT_PRIMARY_HEAD})
+
+#: Родовые имена бронируемого — то, о чём §60 говорит прямо: «Ayla
+#: рекомендует УСЛУГУ X». Каталог знает конкретные имена («Массаж»), этот
+#: список — само слово «услуга»; вместе они ловят обе формы фразы, и ни
+#: одна не зависит от того, доступна ли база.
+_BOOKABLE_NOUN_RE = re.compile(
+    r"(услуг)|(мастер)|(специалист)|(салон)",
+    re.IGNORECASE,
+)
+_BOOKABLE_NOUN_REASON = {"услуг": "service", "мастер": "master", "специалист": "master"}
+
+#: Хвост после «рекоменду…»: что именно рекомендуют. Отрезаем пунктуацию —
+#: «рекомендую: массаж» и «рекомендую массаж» — одно и то же.
+_RECOMMENDS_TAIL_STRIP = " \t:,.;!?—-«»\"'"
+
+#: Словарь отладки (R06 — «без reason codes / confidence / debug»): коды
+#: пригодности и совпадения, баллы, «уверенность». Новая стража: до этого
+#: среза правило держалось договорённостью — grep по репозиторию давал
+#: ноль проверок, и первая же строка вида `ELIG_EXCLUDED_SAFETY` доехала
+#: бы до человека.
+DEBUG_VOCABULARY_RE = re.compile(
+    r"(\bELIG_)|(\bMATCH_)|(\bEXEC_)|(\bCONTEXT_)|(\bscore\b)|(увереннос)|(\bбалл)",
+    re.IGNORECASE,
+)
 
 # ─── callback-грамматика тапов ──────────────────────────────────────────
 
@@ -117,6 +169,8 @@ RECO_CALLBACK_PREFIX = "cb:reco:"
 RECO_WHY_PREFIX = "cb:reco:why:"
 RECO_ALT_PREFIX = "cb:reco:alt:"
 RECO_SKIP_PREFIX = "cb:reco:skip:"
+#: Выбор другого подхода на кадре C04.3: ``cb:reco:pick:<id>:<индекс>``.
+RECO_PICK_PREFIX = "cb:reco:pick:"
 
 
 @dataclass(frozen=True)
@@ -128,6 +182,9 @@ class CardDraft:
     subline: str
     why: tuple[str, ...]
     facts: dict[str, Any] = field(default_factory=dict)
+    #: Другие подходы (C04.3, DRF-1770): ≤2 строк той же формы, что и
+    #: основной. Пусто — направление одно, и кадра выбора нет.
+    alternatives: list[dict[str, Any]] = field(default_factory=list)
 
     @property
     def fingerprint(self) -> str:
@@ -225,19 +282,64 @@ def grounded_reasons(goal: dict[str, Any]) -> tuple[tuple[str, ...], dict[str, A
     return tuple(reasons[:MAX_REASONS]), facts
 
 
+def _recommends_a_bookable(text: str) -> str | None:
+    """«рекоменду… X», где X — услуга, мастер, салон или цена каталога.
+
+    §60 запрещает не слово, а ПРЕДМЕТ: «Ayla рекомендует услугу X».
+    Поэтому проверяется ровно хвост — то, ЧТО рекомендуют. Две проверки, и
+    обе нужны: родовое имя («услугу», «мастера») ловится словарём и не
+    зависит от базы; конкретное имя («массаж») знает только каталог — тем
+    же сторожем, что стережёт опции C02.
+
+    Названный предел: имя услуги каталог узнаёт равенством множеств
+    стемов, а мастера и салон — дословно. Значит «рекомендую расслабляющий
+    массаж спины» пройдёт, если такой строки в каталоге нет, и «рекомендую
+    массаж» пройдёт там, где каталог недоступен. Это тот же предел, что
+    назван в `clarify_guard`, а не новая дыра: ловить написание вместо
+    предмета мы там отказались сознательно.
+    """
+    match = RECOMMENDS_RE.search(text)
+    if match is None:
+        return None
+    tail = text[match.end() :].strip(_RECOMMENDS_TAIL_STRIP)
+    if not tail:
+        return None
+    noun = _BOOKABLE_NOUN_RE.search(tail)
+    if noun is not None:
+        stem = noun.group(0).lower()
+        return f"recommends_{_BOOKABLE_NOUN_REASON.get(stem, 'salon')}"
+    reason = clarification_option_violation(tail)
+    return f"recommends_{reason}" if reason is not None else None
+
+
 def boundary_violation(*texts: str) -> str | None:
-    """R11 + §60 + 24.08 §1: услуга/мастер/салон/цена, «рекоменду…» или
-    утверждение о приоритете («это сейчас для тебя самое важное»)."""
+    """Чего в карточке быть не может — ``None``, если всё чисто.
+
+    * ``priority_claim`` — «это сейчас для тебя самое важное» (24.08 §1):
+      утверждение о приоритете, которого человек не подтверждал;
+    * ``debug_vocabulary`` — коды причин, баллы, «уверенность» (R06);
+    * ``price`` / ``service`` / ``master`` / ``salon`` — R11, той же
+      проверкой, что стережёт опции C02;
+    * ``recommends_*`` — «рекомендую» рядом с услугой/мастером/ценой (§60).
+
+    Слово «рекомендую» само по себе не нарушение: заголовок кадра C04.3
+    про НАПРАВЛЕНИЕ законен и стоит в allow-list одной константой. Сторож
+    не ослаблен, а сужен по предмету — подсадь в ту же строку услугу, и
+    она снова красная.
+    """
     for text in texts:
-        if not text:
+        if not text or text in _RECOMMENDS_ALLOWED:
             continue
         if PRIORITY_CLAIM_RE.search(text):
             return "priority_claim"
-        if RECOMMENDS_RE.search(text):
-            return "recommends"
+        if DEBUG_VOCABULARY_RE.search(text):
+            return "debug_vocabulary"
         reason = clarification_option_violation(text)
         if reason is not None:
-            return reason
+            return f"recommends_{reason}" if RECOMMENDS_RE.search(text) else reason
+        recommends = _recommends_a_bookable(text)
+        if recommends is not None:
+            return recommends
     return None
 
 
@@ -270,8 +372,45 @@ def build_card(doc: dict[str, Any]) -> CardDraft | None:
         )
         return None
     return CardDraft(
-        goal_id=str(goal.get("id") or ""), what=what, subline=subline, why=why, facts=facts
+        goal_id=str(goal.get("id") or ""),
+        what=what,
+        subline=subline,
+        why=why,
+        facts=facts,
+        alternatives=_alternatives(goal, primary=what),
     )
+
+
+def _alternatives(goal: dict[str, Any], *, primary: str) -> list[dict[str, Any]]:
+    """Другие подходы из документа: ≤2, без основного, через тот же сторож.
+
+    Документ каталога до выкладки N4 поля `directions` не несёт — тогда
+    других подходов нет, и кадр выбора не рисуется. Это не деградация:
+    ровно так карточка и выглядела до этого среза.
+    """
+    out: list[dict[str, Any]] = []
+    for row in goal.get("directions") or []:
+        if not isinstance(row, dict):
+            continue
+        what = str(row.get("what") or "").strip()
+        subline = str(row.get("subline") or "").strip()
+        if not what or what == primary:
+            continue
+        if boundary_violation(what, subline) is not None:
+            # Строка владельца, нарушившая границу, не показывается — ровно
+            # как основное направление в том же случае.
+            logger.warning(
+                "recommendation.alternative.dropped goal=%s reason=boundary", goal.get("id")
+            )
+            continue
+        # `area_key` сюда не едет: бот его не читает, а хранить поле,
+        # которое некому прочесть, — значит однажды не суметь его
+        # восстановить при выборе другого подхода. Область нужна экрану
+        # (N3), и она остаётся в документе каталога.
+        out.append({"what": what, "subline": subline})
+        if len(out) == MAX_ALTERNATIVES:
+            break
+    return out
 
 
 # ─── рендер ─────────────────────────────────────────────────────────────
@@ -293,6 +432,38 @@ def render_why_more_text(draft: CardDraft) -> str:
     lines = [WHY_MORE_HEAD]
     lines.extend(f"✓ {reason}" for reason in draft.why)
     return "\n".join(lines)
+
+
+def render_alternatives_text(draft: CardDraft) -> str:
+    """Кадр C04.3 — заголовки макета дословно, направления как в таблице."""
+    lines = [ALT_HEAD, "", ALT_PRIMARY_HEAD, draft.what]
+    if draft.subline:
+        lines.append(draft.subline)
+    lines.extend(["", ALT_OTHERS_HEAD])
+    for alt in draft.alternatives:
+        lines.append(f"• {alt['what']}")
+        if alt.get("subline"):
+            lines.append(f"  {alt['subline']}")
+    return "\n".join(lines)
+
+
+def alternatives_keyboard(recommendation_id: str, draft: CardDraft) -> dict[str, Any] | None:
+    """По кнопке на каждый другой подход — и ни одной сверх того.
+
+    «Показать больше подходов» здесь нет: больше двух не бывает (R05), и
+    кнопка обещала бы продолжение, которого не существует.
+    """
+    from apps.orchestrator.discovery import keyboard_envelope
+
+    return keyboard_envelope(
+        [
+            {
+                "label": alt["what"][:MAX_BUTTON_LABEL_CHARS],
+                "callback": f"{RECO_PICK_PREFIX}{recommendation_id}:{index}",
+            }
+            for index, alt in enumerate(draft.alternatives)
+        ]
+    )
 
 
 def _app_button(label: str, slug: str, *, payload: str | None = None) -> dict[str, str] | None:
@@ -349,6 +520,15 @@ def absence_keyboard() -> dict[str, Any] | None:
 
 __all__ = [
     "ACTION_CLARIFY_REQUEST",
+    "ALT_HEAD",
+    "ALT_OTHERS_HEAD",
+    "ALT_PRIMARY_HEAD",
+    "DEBUG_VOCABULARY_RE",
+    "MAX_ALTERNATIVES",
+    "MAX_BUTTON_LABEL_CHARS",
+    "RECO_PICK_PREFIX",
+    "alternatives_keyboard",
+    "render_alternatives_text",
     "ORIGIN_CHOICE",
     "ORIGIN_TEXT",
     "PRIORITY_CLAIM_RE",
