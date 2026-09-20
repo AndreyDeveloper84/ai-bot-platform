@@ -49,14 +49,10 @@
  *   - WebSocket / SSE live updates (poll-on-mount + after-send refresh)
  */
 
-import {
-  useCallback,
-  useEffect,
-  useMemo,
-  useRef,
-  useState,
-} from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
+import { useScreenBack } from "../hooks/useScreenBack";
+import { backTo } from "../lib/screen-back";
 import { ApiError } from "../lib/api";
 import {
   MASTER_COMPOSE_COUNTER_THRESHOLD,
@@ -77,7 +73,6 @@ import {
   hapticImpact,
   hapticNotify,
   hapticSelection,
-  setBackButton,
   setClosingConfirmation,
   signalReady,
 } from "../lib/max-sdk";
@@ -104,8 +99,7 @@ const COPY = {
   composePlaceholder: "Напишите ответ...",
   sendAria: "Отправить",
   sendingHint: "отправляется…",
-  sendFailedInline:
-    "Не отправилось. Попробовать ещё раз?",
+  sendFailedInline: "Не отправилось. Попробовать ещё раз?",
   sendRetry: "Попробовать ещё раз",
   promoteButton: "⚠ Передать админу",
   // Promote sheet — verbatim from §M6 lines 750-762
@@ -146,8 +140,7 @@ const COPY = {
   toastNotForYou: "Этот диалог не для вас",
   toastSessionExpired: "Войдите как мастер заново",
   toastComingSoon: "Скоро будет",
-  toastTierLocked:
-    "Диалог уже передан админу — отправка недоступна",
+  toastTierLocked: "Диалог уже передан админу — отправка недоступна",
   toastPromoted: "Передано админу",
   toastDraftSent: "Отправлено",
   toastDraftReleased: "Ответ отправлен помощником",
@@ -194,9 +187,7 @@ type LoadedPhase = {
 };
 
 type Phase =
-  | { kind: "loading" }
-  | LoadedPhase
-  | { kind: "error_initial"; err: unknown };
+  { kind: "loading" } | LoadedPhase | { kind: "error_initial"; err: unknown };
 
 /**
  * A message that's been optimistically added to the UI but not yet
@@ -246,20 +237,21 @@ export function MasterConversationDetailScreen() {
   /** Confirm sheet for «Пусть помощник ответит». */
   const [releaseConfirmOpen, setReleaseConfirmOpen] = useState(false);
   const [releaseSubmitting, setReleaseSubmitting] = useState(false);
-  const [toast, setToast] = useState<{ visible: boolean; message: string }>(
-    { visible: false, message: "" },
-  );
+  const [toast, setToast] = useState<{ visible: boolean; message: string }>({
+    visible: false,
+    message: "",
+  });
   const markReadFiredRef = useRef(false);
   const messageListEndRef = useRef<HTMLDivElement | null>(null);
   const composeRef = useRef<HTMLTextAreaElement | null>(null);
 
   // --- Bridge: BackButton + ready -------------------------------------
 
+  // Возврат — список переписок (DRF-2150: стрелка без обработчика).
+  useScreenBack(backTo("/master/conversations"));
   useEffect(() => {
-    setBackButton(true);
     signalReady();
     return () => {
-      setBackButton(false);
       // Always release closing confirmation on unmount — leaving it on
       // would block other screens from closing the mini app cleanly.
       setClosingConfirmation(false);
@@ -512,8 +504,7 @@ export function MasterConversationDetailScreen() {
           return;
         }
         // Generic — keep sheet open, surface a toast.
-        const detail =
-          err instanceof ApiError ? err.detail : "Не получилось";
+        const detail = err instanceof ApiError ? err.detail : "Не получилось";
         setToast({ visible: true, message: detail });
       } finally {
         setPromoteSubmitting(false);
@@ -623,35 +614,32 @@ export function MasterConversationDetailScreen() {
    * `override_content`. Reuses the existing compose box (per spec —
    * simpler UX than a separate editor).
    */
-  const onEditDraft = useCallback(
-    (draftId: string, content: string): void => {
-      hapticSelection();
-      setActiveDraftId(draftId);
-      setComposeValue(content);
-      // Hide the draft card so the master sees the compose box as the
-      // single point of interaction. The card returns naturally if they
-      // back out without sending — `activeDraftId` keeps the draft id
-      // pinned until either send completes OR the screen unmounts.
-      setPhase((prev) => {
-        if (prev.kind !== "ready") return prev;
-        return {
-          kind: "ready",
-          data: {
-            ...prev.data,
-            ai_draft: { draft_id: null, content: null, created_at: null },
-          },
-        };
-      });
-      // Defer focus to the next tick — React needs to flush the value
-      // before the textarea is ready to take selection.
-      window.setTimeout(() => {
-        composeRef.current?.focus();
-        composeRef.current?.setSelectionRange(content.length, content.length);
-        composeRef.current?.scrollIntoView({ block: "center" });
-      }, 0);
-    },
-    [],
-  );
+  const onEditDraft = useCallback((draftId: string, content: string): void => {
+    hapticSelection();
+    setActiveDraftId(draftId);
+    setComposeValue(content);
+    // Hide the draft card so the master sees the compose box as the
+    // single point of interaction. The card returns naturally if they
+    // back out without sending — `activeDraftId` keeps the draft id
+    // pinned until either send completes OR the screen unmounts.
+    setPhase((prev) => {
+      if (prev.kind !== "ready") return prev;
+      return {
+        kind: "ready",
+        data: {
+          ...prev.data,
+          ai_draft: { draft_id: null, content: null, created_at: null },
+        },
+      };
+    });
+    // Defer focus to the next tick — React needs to flush the value
+    // before the textarea is ready to take selection.
+    window.setTimeout(() => {
+      composeRef.current?.focus();
+      composeRef.current?.setSelectionRange(content.length, content.length);
+      composeRef.current?.scrollIntoView({ block: "center" });
+    }, 0);
+  }, []);
 
   /**
    * «Пусть помощник ответит» — open the confirm sheet. Actual release
@@ -718,8 +706,7 @@ export function MasterConversationDetailScreen() {
           return;
         }
         // Generic — keep sheet open so the master can retry.
-        const detail =
-          err instanceof ApiError ? err.detail : "Не получилось";
+        const detail = err instanceof ApiError ? err.detail : "Не получилось";
         setToast({ visible: true, message: detail });
       } finally {
         setReleaseSubmitting(false);
@@ -837,9 +824,7 @@ export function MasterConversationDetailScreen() {
   // doesn't auto-trigger per Bundle B scope — this is the master's
   // explicit «draft me a reply» entry point.
   const lastMessage =
-    data.messages.length > 0
-      ? data.messages[data.messages.length - 1]
-      : null;
+    data.messages.length > 0 ? data.messages[data.messages.length - 1] : null;
   const lastIsCustomer = lastMessage?.role === "user";
   const showDraftTrigger =
     !isLocked &&
@@ -874,9 +859,7 @@ export function MasterConversationDetailScreen() {
       {hasActiveDraft ? (
         <AiDraftCard
           content={draftContent!}
-          onAccept={() =>
-            void onSendDraftAsMe(draftId!, draftContent!)
-          }
+          onAccept={() => void onSendDraftAsMe(draftId!, draftContent!)}
           onEdit={() => onEditDraft(draftId!, draftContent!)}
           onRelease={onAskReleaseDraftToAi}
         />
@@ -969,10 +952,7 @@ function LockedBanner(props: {
   const sinceHm = props.since ? formatTimeHM(props.since) : "";
   const adminLabel = (props.adminName ?? "").trim();
   return (
-    <div
-      className="callout callout--danger m6-locked-banner"
-      role="alert"
-    >
+    <div className="callout callout--danger m6-locked-banner" role="alert">
       <p style={{ margin: 0, fontWeight: 600 }}>{COPY.lockedTitle}</p>
       {sinceHm ? (
         <p style={{ margin: "var(--s-1) 0 0" }}>
@@ -1032,8 +1012,7 @@ function Bubble({
   pendingStatus,
   onRetry,
 }: BubbleProps) {
-  const sideClass =
-    side === "right" ? "m6-bubble--right" : "m6-bubble--left";
+  const sideClass = side === "right" ? "m6-bubble--right" : "m6-bubble--left";
   const stateClass =
     pendingStatus === "sending"
       ? " m6-bubble--sending"
@@ -1052,18 +1031,12 @@ function Bubble({
       ) : null}
       <p className="m6-bubble__content">{content}</p>
       <div className="m6-bubble__footer">
-        {timeHm ? (
-          <span className="m6-bubble__time">{timeHm}</span>
-        ) : null}
+        {timeHm ? <span className="m6-bubble__time">{timeHm}</span> : null}
         {pendingStatus === "sending" ? (
           <span className="m6-bubble__status">{COPY.sendingHint}</span>
         ) : null}
         {pendingStatus === "failed" ? (
-          <button
-            type="button"
-            className="m6-bubble__retry"
-            onClick={onRetry}
-          >
+          <button type="button" className="m6-bubble__retry" onClick={onRetry}>
             {COPY.sendFailedInline}
           </button>
         ) : null}
@@ -1352,8 +1325,7 @@ function ComposeBar(props: {
   const overLimit = props.value.length > MASTER_COMPOSE_MAX_LENGTH;
   const sendDisabled = !props.canCompose || trimmed.length === 0 || overLimit;
   const remaining = MASTER_COMPOSE_MAX_LENGTH - props.value.length;
-  const showCounter =
-    props.value.length >= MASTER_COMPOSE_COUNTER_THRESHOLD;
+  const showCounter = props.value.length >= MASTER_COMPOSE_COUNTER_THRESHOLD;
 
   return (
     <div className="m6-compose">
@@ -1506,10 +1478,7 @@ function LoadingSkeleton() {
               i % 2 === 0 ? "left" : "right"
             }`}
           >
-            <div
-              className="skeleton"
-              style={{ width: "70%", height: "1em" }}
-            />
+            <div className="skeleton" style={{ width: "70%", height: "1em" }} />
             <div
               className="skeleton"
               style={{ width: "40%", height: "1em", marginTop: 6 }}

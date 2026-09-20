@@ -46,8 +46,7 @@ a {
    ref Part 6 Pattern 1). */
 .screen {
   min-height: 100dvh;
-  padding: var(--s-4) var(--s-4)
-    calc(var(--cta-clearance) + var(--safe-bottom));
+  padding: var(--s-4) var(--s-4) calc(var(--cta-clearance) + var(--safe-bottom));
 }
 
 /* Панель в два ряда — под ней надо освободить на ряд больше
@@ -107,8 +106,7 @@ a {
   position: fixed;
   inset-inline: 0;
   bottom: 0;
-  padding: var(--s-3) var(--s-4)
-    calc(var(--s-3) + var(--safe-bottom));
+  padding: var(--s-3) var(--s-4) calc(var(--s-3) + var(--safe-bottom));
   background: var(--c-surface-1);
   border-top: 1px solid var(--c-divider);
   z-index: 10;
@@ -199,9 +197,15 @@ a {
 
 /* Skeleton placeholders — spec §7.1 + §9. */
 @keyframes skeleton-shimmer {
-  0% { opacity: 0.6; }
-  50% { opacity: 1; }
-  100% { opacity: 0.6; }
+  0% {
+    opacity: 0.6;
+  }
+  50% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0.6;
+  }
 }
 
 .skeleton {
@@ -222,7 +226,8 @@ a {
   padding: var(--s-3) var(--s-4);
   margin-bottom: var(--s-2);
   min-height: 48px;
-  transition: border-color var(--dur-fast) var(--ease-out),
+  transition:
+    border-color var(--dur-fast) var(--ease-out),
     background-color var(--dur-fast) var(--ease-out);
 }
 
@@ -717,7 +722,9 @@ a {
   padding: var(--s-1);
   min-width: 56px;
   min-height: 56px;
-  transition: transform 0.12s ease, color 0.12s ease;
+  transition:
+    transform 0.12s ease,
+    color 0.12s ease;
 }
 
 .star-picker__star:active {
@@ -766,7 +773,6 @@ a {
   color: var(--c-text-primary);
   line-height: 1.5;
 }
-
 
 /* Filter chips (My visits §3.4).
 
@@ -1226,7 +1232,8 @@ a {
   font: inherit;
   /* Карточка бывает и <a> (DRF-2156: запись → детали) — без подчёркивания. */
   text-decoration: none;
-  transition: border-color var(--dur-fast) var(--ease-out),
+  transition:
+    border-color var(--dur-fast) var(--ease-out),
     background-color var(--dur-fast) var(--ease-out);
 }
 
@@ -1335,7 +1342,11 @@ a {
   color: var(--c-text-primary);
 }
 .booking-detail__state--accent {
-  background: color-mix(in srgb, var(--c-accent-subtle) 60%, var(--c-surface-1));
+  background: color-mix(
+    in srgb,
+    var(--c-accent-subtle) 60%,
+    var(--c-surface-1)
+  );
 }
 .booking-detail__state--success {
   background: color-mix(in srgb, var(--c-success) 10%, var(--c-surface-2));
@@ -1391,7 +1402,11 @@ a {
 
 .m-card--active {
   border-color: var(--c-accent-subtle);
-  background: color-mix(in srgb, var(--c-accent-subtle) 50%, var(--c-surface-1));
+  background: color-mix(
+    in srgb,
+    var(--c-accent-subtle) 50%,
+    var(--c-surface-1)
+  );
 }
 
 .m-card--skel {
@@ -1652,7 +1667,9 @@ a {
 .avatar-sheet {
   position: fixed;
   inset: 0;
-  z-index: 40;
+  /* DRF-2150 (инцидент 20.09): лист лежал под .master-tabbar (z-index 100) —
+     на iPhone видна была одна строка из трёх. Лист — поверх панели. */
+  z-index: 200;
 }
 .avatar-sheet__backdrop {
   position: absolute;
@@ -1668,7 +1685,8 @@ a {
   bottom: 0;
   background: var(--c-surface-1);
   border-radius: var(--r-md) var(--r-md) 0 0;
-  padding: var(--s-2) var(--s-4) var(--s-5);
+  /* Нижний отступ учитывает home-индикатор iPhone (safe-area). */
+  padding: var(--s-2) var(--s-4) calc(var(--s-5) + var(--safe-bottom));
 }
 .avatar-sheet__grip {
   width: 36px;
@@ -2083,7 +2101,6 @@ a {
 }
 
 /* ---- «Ещё» bottom sheet (Tau §3) ------------------------------------ */
-
 
 /* ---- Tier 2 Клиенты / Услуги read-only cards (Tau §4.3 / §4.4) ------- */
 
@@ -2508,7 +2525,11 @@ a {
 
 .schedule-week-cell--today {
   border-color: var(--c-accent);
-  background: color-mix(in srgb, var(--c-accent-subtle) 40%, var(--c-surface-1));
+  background: color-mix(
+    in srgb,
+    var(--c-accent-subtle) 40%,
+    var(--c-surface-1)
+  );
 }
 
 .schedule-week-cell--off {
@@ -2609,7 +2630,11 @@ a {
 
 .schedule-month-cell--today {
   border-color: var(--c-accent);
-  background: color-mix(in srgb, var(--c-accent-subtle) 40%, var(--c-surface-1));
+  background: color-mix(
+    in srgb,
+    var(--c-accent-subtle) 40%,
+    var(--c-surface-1)
+  );
 }
 
 .schedule-month-cell__date {
@@ -2663,8 +2688,7 @@ a {
   background: var(--c-surface-1);
   border-top-left-radius: var(--r-lg);
   border-top-right-radius: var(--r-lg);
-  padding: var(--s-4) var(--s-4)
-    calc(var(--s-4) + var(--safe-bottom, 0px));
+  padding: var(--s-4) var(--s-4) calc(var(--s-4) + var(--safe-bottom, 0px));
   display: flex;
   flex-direction: column;
   gap: var(--s-3);
@@ -2944,7 +2968,11 @@ a {
 .m6-draft-card {
   margin: var(--s-3) 0;
   padding: var(--s-3);
-  background: color-mix(in srgb, var(--c-accent-subtle) 50%, var(--c-surface-1));
+  background: color-mix(
+    in srgb,
+    var(--c-accent-subtle) 50%,
+    var(--c-surface-1)
+  );
   border: 1px solid var(--c-accent-subtle);
   border-radius: var(--r-md);
 }
@@ -3005,8 +3033,13 @@ a {
 }
 
 @keyframes m6-draft-pulse {
-  0%, 100% { opacity: 0.55; }
-  50% { opacity: 1; }
+  0%,
+  100% {
+    opacity: 0.55;
+  }
+  50% {
+    opacity: 1;
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -9062,7 +9095,11 @@ a {
   margin: var(--s-3) 0;
 }
 .system-state--accent {
-  background: color-mix(in srgb, var(--c-accent-subtle) 60%, var(--c-surface-1));
+  background: color-mix(
+    in srgb,
+    var(--c-accent-subtle) 60%,
+    var(--c-surface-1)
+  );
 }
 .system-state--danger {
   background: color-mix(in srgb, var(--c-danger) 8%, var(--c-surface-1));

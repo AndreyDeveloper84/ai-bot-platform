@@ -45,6 +45,8 @@ import {
   type ReactNode,
 } from "react";
 import { Link, useLocation, useNavigate } from "react-router-dom";
+import { useScreenBack } from "../hooks/useScreenBack";
+import { backTo } from "../lib/screen-back";
 import { DEFAULT_SALON_OWNER_HINT } from "../lib/salonOwnerHint";
 import {
   getMasterSchedule,
@@ -57,12 +59,7 @@ import {
   type ScheduleDay,
   type ScheduleFreeWindow,
 } from "../lib/master-api";
-import {
-  hapticImpact,
-  hapticSelection,
-  setBackButton,
-  signalReady,
-} from "../lib/max-sdk";
+import { hapticImpact, hapticSelection, signalReady } from "../lib/max-sdk";
 import { MasterAvatar } from "../components/MasterAvatar";
 import { MasterBookingCard } from "../components/master/MasterBookingCard";
 import { SystemState } from "../components/master/SystemState";
@@ -208,11 +205,18 @@ export function MasterScheduleScreen() {
     isError?: boolean;
   }>({ visible: false, message: "" });
 
-  // BackButton: NOT root, so show.
+  // Возврат — «Сегодня» своей поверхности (DRF-2150, инцидент 20.09: стрелка
+  // MAX показывалась без обработчика — тап в пустоту). Объявление одно на
+  // экран (DRF-1493), готовность — отдельно.
+  useScreenBack(
+    backTo(
+      location.pathname.startsWith("/solo/")
+        ? "/solo/my-day"
+        : "/master/dashboard",
+    ),
+  );
   useEffect(() => {
-    setBackButton(true);
     signalReady();
-    return () => setBackButton(false);
   }, []);
 
   // Compute the requested range based on the current view.
@@ -805,10 +809,15 @@ type DayItem = DayItemBooking | DayItemFree | DayItemBlock | DayItemNow;
  * (отступление (т), у владельца). Линия — про часы, не про состояние записи.
  */
 function nowMarkerFor(day: ScheduleDay, now: Date = new Date()): string | null {
-  return day.date === formatYmdLocal(now) ? formatTimeHM(now.toISOString()) : null;
+  return day.date === formatYmdLocal(now)
+    ? formatTimeHM(now.toISOString())
+    : null;
 }
 
-function buildDayItems(day: ScheduleDay, nowHm: string | null = null): DayItem[] {
+function buildDayItems(
+  day: ScheduleDay,
+  nowHm: string | null = null,
+): DayItem[] {
   const items: DayItem[] = [];
   if (nowHm !== null) items.push({ kind: "now", startHm: nowHm });
   for (const b of day.bookings) {
@@ -827,7 +836,9 @@ function buildDayItems(day: ScheduleDay, nowHm: string | null = null): DayItem[]
   // Стабильная сортировка: при равном времени линия «сейчас» стоит перед
   // карточкой, начинающейся в эту минуту.
   items.sort(
-    (a, b) => a.startHm.localeCompare(b.startHm) || Number(b.kind === "now") - Number(a.kind === "now"),
+    (a, b) =>
+      a.startHm.localeCompare(b.startHm) ||
+      Number(b.kind === "now") - Number(a.kind === "now"),
   );
   return items;
 }
@@ -835,7 +846,11 @@ function buildDayItems(day: ScheduleDay, nowHm: string | null = null): DayItem[]
 /** Тонкая красная линия с подписью времени — DRF-1183 «Текущее время». */
 function NowLine({ hm }: { hm: string }) {
   return (
-    <div className="schedule-now" role="separator" aria-label={COPY.nowLabel(hm)}>
+    <div
+      className="schedule-now"
+      role="separator"
+      aria-label={COPY.nowLabel(hm)}
+    >
       <span className="schedule-now__time">{hm}</span>
       <span className="schedule-now__dot" aria-hidden="true" />
       <span className="schedule-now__line" aria-hidden="true" />
