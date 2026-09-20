@@ -90,6 +90,7 @@ from apps.orchestrator.memory.coordinator import MemorySnapshot, load_snapshot
 from apps.orchestrator.safety.post_check import (
     post_check,
 )
+from apps.orchestrator.safety.medical_emergency import MEDICAL_EMERGENCY_TEXT_V2
 from apps.orchestrator.safety.pre_check import SafetyVerdict, pre_check
 from apps.tenancy.context import tenant_scope
 from apps.tenancy.models import Tenant
@@ -731,6 +732,31 @@ async def _run_under_tenant(
                 )
 
             # --- Step 9: handoff ---
+            if pre_result.verdict == SafetyVerdict.MEDICAL:
+                # DRF-2000 (S-2): the medical emergency text, deterministic,
+                # before any skill or model. No AdminTask: the next step is
+                # 103 / 112, not an operator.
+                reply = await sync_to_async(_canned_reply)(MEDICAL_EMERGENCY_TEXT_V2)
+                await sync_to_async(_save_assistant)(conversation, reply.text, "medical", trace_id)
+                await sync_to_async(_safe_emit_ai_request_metric, thread_sensitive=False)(
+                    tenant=tenant,
+                    bot_user=bot_user,
+                    conversation=conversation,
+                    trace_id=trace_id,
+                    t_start=t_start,
+                    message_text_length=message_text_length,
+                    intent_decision=intent_decision,
+                    outcome=AIRequestMetric.OUTCOME_ESCALATED,
+                )
+                return TurnResult(
+                    ok=True,
+                    trace_id=trace_id,
+                    reply=reply,
+                    intent=intent_decision,
+                    pre_check_verdict=pre_result.verdict.value,
+                    short_circuited_at_step=8,
+                )
+
             if pre_result.verdict == SafetyVerdict.HANDOFF:
                 await sync_to_async(_create_handoff)(
                     conversation, reason=pre_result.reason or "pre_check_handoff"
