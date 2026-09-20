@@ -988,7 +988,9 @@ def _start_buttons() -> list[dict[str, str]]:
 
 #: DRF-1968 (M2+) — откуда человек пришёл к согласию. Один сегмент payload:
 #: ``cb:welcome:consent_offer_<origin>`` и ``cb:welcome:consent_yes_<origin>``.
-CONSENT_RECOVERY_ORIGINS: tuple[str, ...] = ("photo", "text", "water")
+#: ``target`` — ориентир от специалиста (DRF-2138): отказ без PERSONAL_DATA на
+#: входе ручного ориентира ведёт сюда же.
+CONSENT_RECOVERY_ORIGINS: tuple[str, ...] = ("photo", "text", "water", "target")
 
 #: Вид ответа «согласие выдано из отказа»: по нему глобальный онбординг пишет
 #: журнал согласий тем же путём, что и приветственный S5.
@@ -1019,6 +1021,7 @@ CONSENT_RECOVERY_RETURN_TEXTS: dict[str, str] = {
     "photo": "Готово, согласие есть. Пришли фото ещё раз — запишу в дневник.",
     "text": "Готово, согласие есть. Напиши, что съела, — посчитаю и запишу.",
     "water": "Готово, согласие есть. Сколько воды записать?",
+    "target": "Готово, согласие есть. Напиши «ориентир от специалиста» и число ккал — запишу.",
 }
 
 

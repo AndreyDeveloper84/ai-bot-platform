@@ -152,6 +152,31 @@ class NothingToConfirmError(NutritionAPIError):
         super().__init__(f"nothing_to_confirm:{source or 'unknown'}")
 
 
+class ManualTargetsRefusedError(NutritionAPIError):
+    """Каталог отказал в ручном ориентире ``422`` (DRF-2138, режим 3 §82):
+    ``CALORIES_BELOW_FLOOR`` — значение не сохранено. ``details`` — ответ
+    каталога как есть (``floor_kcal`` и т.п.): порог называет каталог, бот
+    его не дублирует.
+    """
+
+    def __init__(self, code: str, details: dict[str, Any]) -> None:
+        self.code = code
+        self.details = dict(details)
+        super().__init__(f"manual_targets_refused:{code}")
+
+
+class ManualTargetsConfirmationRequiredError(NutritionAPIError):
+    """``409 CONFIRMATION_REQUIRED``: каталог запишет только после повторного
+    подтверждения (``kind`` — ``calories_deviation`` / ``water_out_of_range``).
+    ``details`` — ответ каталога (``maintenance_kcal``, ``deviation_ratio``…).
+    """
+
+    def __init__(self, kind: str, details: dict[str, Any]) -> None:
+        self.kind = kind
+        self.details = dict(details)
+        super().__init__(f"manual_targets_confirmation_required:{kind}")
+
+
 class FoodNotRecognizedError(NutritionAPIError):
     """Ayla returned 400 FOOD_NOT_RECOGNIZED — not food / unreadable photo."""
 
@@ -1521,6 +1546,73 @@ class NutritionClient:
         assert result is not None
         outcome = str((result.raw.get("confirmation") or {}).get("outcome") or "")
         return result, outcome
+
+    async def set_manual_targets(
+        self,
+        *,
+        external_user_id: str,
+        calories_kcal: int,
+        confirm_deviation: bool = False,
+    ) -> tuple[ProfileResponse, dict[str, Any]]:
+        """POST ``/api/v1/nutrition/internal/profile/targets/manual/`` (DRF-2138).
+
+        Режим 3 §82 — ориентир, названный человеком (от специалиста);
+        единственный писатель источника ``user_entered``. Шлётся ТОЛЬКО
+        ``calories_kcal`` и, когда человек подтвердил отклонение от
+        расчётного поддержания, ``confirm_deviation: true`` (без
+        подтверждения ключа нет — не ``false``). Воду и белок этот метод не
+        шлёт: белка в контракте каталога нет (DRF-2186), вода — не этот
+        лист. Пороги (<1000 отказ, 1000–1199 ``calories_low``, >30 % от
+        поддержания) — у каталога; отказы приходят по имени:
+
+        Raises:
+            ManualTargetsRefusedError: 422 — не сохранено (``CALORIES_BELOW_FLOOR``).
+            ManualTargetsConfirmationRequiredError: 409 — нужно подтверждение.
+            NutritionUnavailableError: circuit / 5xx / network.
+            NutritionAPIError: прочие 4xx.
+
+        Returns:
+            Профиль (``user_entered``) и отчёт ``manual_targets``
+            (``{"set": [...], "warnings": [...], "deviation": {...}}``).
+        """
+        now = time.monotonic()
+        if self._circuit.is_open(now=now):
+            raise NutritionUnavailableError("circuit_open")
+
+        url = self._urls.build("nutrition/internal/profile/targets/manual/")
+        headers = with_request_id(
+            {
+                "X-Service-Token": self._token,
+                "X-External-User-ID": external_user_id,
+            }
+        )
+        body: dict[str, Any] = {"calories_kcal": int(calories_kcal)}
+        if confirm_deviation:
+            body["confirm_deviation"] = True
+        try:
+            async with httpx.AsyncClient(timeout=self._timeout_s) as http:
+                resp = await http.post(url, headers=headers, json=body)
+        except (httpx.TimeoutException, httpx.NetworkError) as exc:
+            self._circuit.record_failure(now=now)
+            raise NutritionUnavailableError(f"network: {type(exc).__name__}") from exc
+
+        if resp.status_code in (409, 422):
+            self._circuit.record_success()
+            try:
+                err = resp.json().get("error") or {}
+            except ValueError:
+                err = {}
+            code = str(err.get("code") or "")
+            raw_details = err.get("details")
+            details: dict[str, Any] = dict(raw_details) if isinstance(raw_details, dict) else {}
+            if resp.status_code == 422:
+                raise ManualTargetsRefusedError(code or "CALORIES_BELOW_FLOOR", details)
+            raise ManualTargetsConfirmationRequiredError(str(details.get("kind") or code), details)
+
+        result = self._parse_profile_response(resp, allow_404=False)
+        assert result is not None
+        report = result.raw.get("manual_targets")
+        return result, dict(report) if isinstance(report, dict) else {}
 
     async def purge_body_parameters(self, *, external_user_id: str) -> bool:
         """``DELETE /api/v1/nutrition/internal/profile/body-parameters/`` (DRF-1698).

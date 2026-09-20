@@ -29,8 +29,9 @@
 * m9 — до подтверждения POST нет; «Не сейчас» → состояние снято, POST нет;
 * m10 — отзыв: ``user_entered`` без согласия M → предлагается «Отключить и
   удалить» (а не «нечего отключать»); без ручного и без M — как было;
-* m11 — не число / вне разумного («abc», «20») → переспрос, POST нет;
-  пороги каталога в боте не дублируются: 5000 уходит в каталог как есть;
+* m11 — не число («abc», «0», слова, минус, два числа) → переспрос, POST
+  нет; пороги каталога в боте не дублируются: и 20, и 5000 уходят в каталог
+  как есть — отказ ниже порога говорит каталог (m4);
 * m12 — стоп-текст больше не говорит «ручки нет», под ним кнопка первой;
 * m13 — сводка ``user_entered``: заголовок «Ориентир от специалиста», строки
   методики нет, вода справочная остаётся, «Считала» нет.
@@ -230,10 +231,14 @@ class TestM3FalseEntries:
             "диетолог назначил 100 г белка",
             "врач назначил",
             "у меня 1800 калорий вышло за день",
+            "назначил встречу на 1500",
+            "врач назначил 1800 и 2000 через неделю",
         ],
     )
     def test_not_ours(self, text: str) -> None:
         run = _Run()
+        # Присутствие раньше отсутствия: матчер живой — фраза с числом наша.
+        assert run.matches("мне врач назначил 1800 ккал")
         assert not run.matches(text)
 
     def test_phrase_without_a_number_asks(self) -> None:
@@ -375,7 +380,7 @@ class TestM10WithdrawTouchesTheManualTarget:
 
 
 class TestM11NotANumber:
-    @pytest.mark.parametrize("text", ["abc", "20", "тысяча восемьсот", "-1800"])
+    @pytest.mark.parametrize("text", ["abc", "0", "тысяча восемьсот", "-1800", "1800 и 2000"])
     def test_reasks_and_posts_nothing(self, text: str) -> None:
         run = _Run()
         run.turn(MANUAL_TARGET_CALLBACK)
@@ -384,12 +389,13 @@ class TestM11NotANumber:
         assert run.manual_state == {"step": "kcal"}
         assert run.posted == []
 
-    def test_no_bot_side_threshold(self) -> None:
-        """Пороги — у каталога; 5000 уходит как есть."""
+    @pytest.mark.parametrize("value", ["20", "5000"])
+    def test_no_bot_side_threshold(self, value: str) -> None:
+        """Пороги — у каталога; число уходит как есть, отказ скажет каталог."""
         run = _Run()
         run.turn(MANUAL_TARGET_CALLBACK)
-        card = run.turn("5000")
-        assert card.reply_text.startswith("Ориентир от специалиста: 5000 ккал.")
+        card = run.turn(value)
+        assert card.reply_text.startswith(f"Ориентир от специалиста: {value} ккал.")
 
 
 class TestM12StopTextIsHonestAgain:
