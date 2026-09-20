@@ -246,7 +246,7 @@ class TestMultiselectRender:
         mask = apply_clarify_toggle(third.mask, third.index)
 
         screen = render_multiselect_clarification("Что нужно?", options, mask=mask)
-        submit = parse_clarify_callback(screen.action_data["button_rows"][-2][0]["callback"])
+        submit = parse_clarify_callback(screen.action_data["button_rows"][-1][0]["callback"])
         assert submit is not None and submit.kind == "submit"
         assert selected_clarification_options(options, submit.mask) == ["Маникюр", "Стрижка"]
 
@@ -263,11 +263,23 @@ class TestMultiselectRender:
         assert label.startswith(discovery.CLARIFY_MARK_ON)
         assert len(label) == 40
 
-    def test_last_two_rows_are_continue_and_none(self):
-        reply = render_multiselect_clarification("Что?", ["A", "B"], mask=0)
+    def test_rows_follow_the_mock_options_other_continue(self):
+        """Макет C02.2 (DRF-1176): опции → «Другое (расскажу сама)» →
+        «Продолжить». «Продолжить» есть только при выборе ≥1 (DRF-2176)."""
+        reply = render_multiselect_clarification("Что?", ["A", "B"], mask=0b01)
         rows = reply.action_data["button_rows"]
-        assert rows[-2][0]["label"] == discovery.CLARIFY_SUBMIT_LABEL
-        assert rows[-1][0]["callback"] == CLARIFY_NONE_CALLBACK
+        assert rows[-2][0]["callback"] == CLARIFY_NONE_CALLBACK
+        assert rows[-2][0]["label"] == discovery.CLARIFY_NONE_LABEL == "Другое (расскажу сама)"
+        assert rows[-1][0]["label"] == discovery.CLARIFY_SUBMIT_LABEL
+
+    def test_continue_is_absent_until_something_is_ticked(self):
+        """Макет: «Продолжить» активна только после выбора хотя бы одного
+        варианта. У MAX нет disabled — кнопки нет, пока нечего продолжать."""
+        blank = render_multiselect_clarification("Что?", ["A", "B"], mask=0)
+        labels = [row[0]["label"] for row in blank.action_data["button_rows"]]
+        assert labels[-1] == discovery.CLARIFY_NONE_LABEL
+        assert discovery.CLARIFY_SUBMIT_LABEL not in labels
+        assert len(labels) == 3  # A, B, Другое
 
     def test_mode_reads_back_as_choose_many(self):
         reply = render_multiselect_clarification("Что?", ["A"], mask=0)
@@ -280,7 +292,7 @@ class TestMultiselectRender:
         attachments = _build_attachments(reply.action_data)
         assert attachments is not None
         buttons = attachments[0]["payload"]["buttons"]
-        # 2 options + Продолжить + Ни один вариант, one per row.
+        # 2 options + Другое (расскажу сама) + Продолжить, one per row.
         assert len(buttons) == 4
         assert all(len(row) == 1 for row in buttons)
         assert buttons[1][0]["text"].startswith(discovery.CLARIFY_MARK_ON)
@@ -291,8 +303,59 @@ class TestMultiselectRender:
         assert reply.text == "Что нужно?"
 
     def test_a_sixth_option_never_reaches_the_keyboard(self):
-        reply = render_multiselect_clarification("Что?", [f"o{i}" for i in range(9)], mask=0)
-        assert len(reply.action_data["button_rows"]) == 5 + 2
+        reply = render_multiselect_clarification("Что?", [f"o{i}" for i in range(9)], mask=1)
+        assert len(reply.action_data["button_rows"]) == 5 + 2  # + Другое + Продолжить
+
+
+class TestChooseManyIsLiveOnTheModelPath:
+    """DRF-2176 (К-1, C02.2) — единственный разрыв замера 20.09.
+
+    Мультивыбор был построен целиком (DRF-1362/1760), но живой путь модели
+    `_render_ask_clarification(mode="choose_many")` рисовал одиночные кнопки
+    «тап = ответ», а режим был только метаданными. Первый экран ☑/☐ в проде
+    никто не строил — тесты сеяли его спаем. Теперь `choose_many` от модели
+    и есть тот экран.
+    """
+
+    def test_choose_many_from_the_model_renders_the_multiselect_screen(self):
+        reply = discovery._render_ask_clarification(
+            "Что из этого про тебя?", ["Меньше отёчности", "Свежий вид"], "choose_many"
+        )
+        assert reply.action_data is not None
+        rows = reply.action_data["button_rows"]
+        assert rows[0][0]["label"] == f"{discovery.CLARIFY_MARK_OFF}Меньше отёчности"
+        assert rows[1][0]["label"] == f"{discovery.CLARIFY_MARK_OFF}Свежий вид"
+        assert rows[0][0]["callback"] == "cb:clarify:tg:0:0"
+        assert clarification_mode_of(reply.action_data) == CLARIFICATION_MODE_CHOOSE_MANY
+        assert reply.action_data["clarification"]["question"] == "Что из этого про тебя?"
+        assert reply.action_data["clarification"]["mask"] == 0
+        assert "attachments" not in reply.action_data
+
+    def test_it_is_byte_identical_to_the_screen_the_tap_path_redraws(self):
+        """Один экран, два входа: первый показ и перерисовка после тапа —
+        одна функция, иначе они разошлись бы на первой же правке."""
+        live = discovery._render_ask_clarification("Что?", ["A", "B"], "choose_many")
+        redraw = render_multiselect_clarification("Что?", ["A", "B"], mask=0)
+        assert live.text == redraw.text
+        assert live.action_data == redraw.action_data
+
+    def test_confirm_one_beside_it_is_still_one_tap_one_answer(self):
+        """Отрицательная пара: не-мультивыбор рисуется как прежде, байт в байт."""
+        reply = discovery._render_ask_clarification("Что?", ["A", "B"], "confirm_one")
+        buttons = reply.action_data["attachments"][0]["payload"]["buttons"]
+        assert [b["callback"] for b in buttons] == ["A", "B"]
+        assert "button_rows" not in reply.action_data
+
+    def test_option_filter_still_precedes_the_screen(self):
+        """DRF-1765 держится на опциях ДО рендера — режим этого не меняет:
+        `_render_ask_clarification` получает уже отфильтрованный список."""
+        reply = discovery._render_ask_clarification("Что?", ["A", "  ", "B"], "choose_many")
+        assert reply.action_data["clarification"]["options"] == ["A", "B"]
+
+    def test_selected_count_names_the_total(self):
+        """Макет: «Выбрано: 2 из 3»."""
+        reply = render_multiselect_clarification("Что?", ["A", "B", "C"], mask=0b101)
+        assert reply.text.endswith("Выбрано: 2 из 3")
 
 
 class TestModeSurvivesTheConciergeDispatch:

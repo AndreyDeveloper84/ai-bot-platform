@@ -86,7 +86,7 @@ class TestSelectedCount:
     def test_two_ticked_reads_selected_two(self):
         reply = discovery.render_multiselect_clarification(_QUESTION, _OPTIONS, mask=0b101)
         assert reply.text.startswith(_QUESTION)
-        assert reply.text.endswith("Выбрано: 2")
+        assert reply.text.endswith(f"Выбрано: 2 из {len(_OPTIONS)}")
 
     def test_question_is_kept_apart_from_the_count(self):
         """Перерисовка читает вопрос из блока — счётчик на счётчик не ложится."""
