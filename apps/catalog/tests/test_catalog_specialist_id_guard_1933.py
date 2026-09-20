@@ -41,8 +41,9 @@ CONVERTED = {
     # 1933b: переведено
     ("apps/miniapp_api/views.py", 3),
     ("apps/admin_api/services/availability.py", 1),
-    ("apps/admin_api/views_availability_slots.py", 1),
-    ("apps/admin_api/views_booking_create.py", 1),
+    # DRF-2154: создание записи и слоты переехали из вьюх в общий сервис
+    # (create_appointment + get_available_times — два вызова через колонку).
+    ("apps/admin_api/services/booking.py", 2),
     ("apps/admin_api/views_master_exceptions.py", 2),
     # DRF-2118: чтение impact переехало из вьюхи в сервис (одно на вьюху и уведомление).
     ("apps/admin_api/services/schedule_impact.py", 1),
