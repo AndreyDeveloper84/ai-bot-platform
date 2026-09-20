@@ -5,9 +5,13 @@
  *
  * Здесь — узлы на каждый мастерский экран, у которого панель есть в рабочем
  * состоянии, плюс ErrorBoundary приложения: исключение в рендере даёт
- * состояние с повтором, а не белый экран. Положительная пара клиентской
- * поверхности («Сменить режим» / своя панель вне веток) — вопрос владельцу,
- * узел добавится после ответа.
+ * состояние с повтором, а не белый экран.
+ *
+ * Положительная пара клиентской поверхности (H01: панель пяти вкладок и
+ * «Сменить режим» вне веток) здесь НЕ проверяется: для неё нужен свой
+ * загрузочный стенд клиента, а сам экран сейчас переписывает DRF-2191
+ * (вынос панели в общий компонент). Узел ставится там — предел назван в
+ * теле PR.
  */
 import { render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
@@ -118,8 +122,11 @@ describe("ошибка загрузки не убирает панель (DRF-21
   it("«Сегодня» при 403: панель на месте, «Недостаточно прав» — в теле", async () => {
     vi.mocked(getDashboard).mockRejectedValue(FORBIDDEN);
     renderAt("/master/dashboard");
-    await waitFor(() => expect(nav()).toBeInTheDocument(), { timeout: 4000 });
-    expect(screen.getByRole("alert")).toHaveTextContent("Недостаточно прав");
+    // Сначала дожидаемся самого состояния: панель видна и на загрузке.
+    expect(await screen.findByRole("alert", {}, { timeout: 4000 })).toHaveTextContent(
+      "Недостаточно прав",
+    );
+    expect(nav()).toBeInTheDocument();
   });
 });
 
@@ -153,11 +160,17 @@ describe("ErrorBoundary приложения: исключение рендер�
       week_summary: null,
     } as never);
     renderAt("/master/dashboard");
-    // Что бы ни случилось внутри — человек видит текст и кнопку, а не пустоту.
+    // Что бы ни случилось внутри — человек видит состояние с повтором, а не
+    // пустой экран: либо экран отрисовался, либо его перехватила граница.
     await waitFor(
-      () => expect(document.body.textContent?.trim().length ?? 0).toBeGreaterThan(0),
+      () => {
+        const alive =
+          screen.queryByRole("region", { name: /сегодня/i }) !== null ||
+          screen.queryByRole("alert") !== null;
+        expect(alive).toBe(true);
+      },
       { timeout: 4000 },
     );
-    expect(screen.queryByText(/^$/)).toBeNull();
+    expect(document.body.textContent?.trim().length ?? 0).toBeGreaterThan(0);
   });
 });

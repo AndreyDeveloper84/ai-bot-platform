@@ -59,6 +59,7 @@ import { adminLandingPath, isAdminTabAllowed } from "./lib/admin-tabs";
 import { canOpenSalonPilot } from "./lib/salon-pilot";
 import { getStartPayload, parseStartRoute } from "./lib/max-sdk";
 import { channelIdentity } from "./lib/identity";
+import { ErrorBoundary } from "./components/ErrorBoundary";
 import { OpenFromMaxScreen } from "./components/OpenFromMaxScreen";
 import {
   SurfaceModeContext,
@@ -1459,7 +1460,22 @@ export function App() {
   return <AppShell />;
 }
 
+/**
+ * DRF-2198: одна граница ошибок на приложение — диспетчер ниже отдаёт ровно
+ * одно дерево маршрутов (мастер / соло / админ / клиент), и четыре
+ * одинаковые обёртки были бы четырьмя местами, где можно забыть. Любое
+ * исключение рендера даёт состояние с повтором, а не белый экран
+ * (инцидент 20.09, #1918).
+ */
 function AppShell() {
+  return (
+    <ErrorBoundary>
+      <AppSurface />
+    </ErrorBoundary>
+  );
+}
+
+function AppSurface() {
   const [boot, setBoot] = useState<BootState>(INITIAL);
   // Surface choice drives the cascade below, so it has to be reactive —
   // a bare localStorage read wouldn't re-render when the user picks

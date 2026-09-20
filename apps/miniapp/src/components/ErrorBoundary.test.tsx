@@ -50,18 +50,20 @@ describe("ErrorBoundary", () => {
   });
 
   it("«Попробовать снова» перемонтирует детей — после починки экран живой", async () => {
+    // Флаг, а не счётчик: React при исключении повторяет рендер сам, и
+    // «сломанный один раз» компонент починился бы без участия границы.
+    let broken = true;
     function Flaky() {
-      const [n] = [calls++];
-      if (n === 0) throw new RangeError("Invalid time value");
+      if (broken) throw new RangeError("Invalid time value");
       return <p>живой экран</p>;
     }
-    let calls = 0;
     render(
       <ErrorBoundary>
         <Flaky />
       </ErrorBoundary>,
     );
     expect(screen.getByRole("alert")).toBeInTheDocument();
+    broken = false;
     await userEvent.click(screen.getByRole("button", { name: "Попробовать снова" }));
     expect(await screen.findByText("живой экран")).toBeInTheDocument();
   });

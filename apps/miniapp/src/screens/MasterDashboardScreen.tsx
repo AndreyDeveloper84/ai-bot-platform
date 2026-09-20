@@ -281,10 +281,13 @@ export function MasterDashboardScreen() {
   // --- Branch rendering --------------------------------------------------
 
   // Системные состояния — один компонент на все мастерские экраны (DRF-2157).
+  // DRF-2198: состояние ошибки не убирает навигацию — панель и аватар-лист
+  // (выход с поверхности) остаются во всех ветках.
   if (phase.kind === "error_permission") {
     return (
       <div className="master-dashboard">
         <SystemState kind="forbidden" />
+        <TabBarBlank />
       </div>
     );
   }
