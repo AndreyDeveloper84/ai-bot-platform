@@ -7,18 +7,15 @@ sudden vision loss, sudden loss of balance / coordination. Resolution wording
 («прошло», «стало лучше», «сейчас нормально», «отпустило», «восстановилось») does
 NOT clear the flag ([§161]: для G4 исчезновение признаков не снимает срочность).
 
-NOT implemented (architectural blocker, pinned as ``strict`` xfail so a change is
-visible): the §164 routing question for the ambiguous case («немеет рука иногда»).
-The runtime cannot today bind a reply to that specific question deterministically
-(``open_question`` is closed by ANY next message and adjudicated by the model), has
-no restriction state that survives a turn (DRF-2040), and on the Mini App path an
-answer without a hard stop proceeds — so a «нет» would unlock. A keyword «да / нет»
-flow would be a pseudo-implementation; none is added. The ambiguous phrase stays
-fail-closed STOP by the older numbness rule (DRF-973), NOT attributed to G4.
+The §164 routing question for the ambiguous case («немеет рука иногда») is
+implemented (``g4_question.py``, binding open question ``health_screening.g4``):
+``TestQuestionContract`` runs it through the skill on an in-memory carrier; the
+persisted / cross-surface half lives in ``test_g4_question_flow.py``.
 
-Also pinned as gaps: the DRF-973 rule fires on «онемения и слабости нет» (negation
-not modelled there); third-party, quoted and distant-history phrases are caught
-(fail-closed) — attribution / history context is a gap of the whole S1 tract.
+Still pinned as gaps (strict xfail): negation is not modelled in the ambiguity
+patterns («онемения и слабости нет» asks the question instead of nothing);
+third-party, quoted and distant-history phrases are caught (fail-closed) —
+attribution / history context is a gap of the whole S1 tract.
 
 Technical checks only. Implementation of registered owner policy does not
 constitute CLINICAL APPROVED, PHYSICIAN PASS, or SAFE FOR PILOT.
@@ -32,9 +29,12 @@ from unittest.mock import Mock
 
 import pytest
 
+from apps.orchestrator import open_question as open_question_module
 from apps.orchestrator.open_question import pending_question
 from apps.orchestrator.safety.gate import CRISIS_REPLY_TEXT, evaluate_inbound
+from apps.orchestrator.safety import s1_restriction as s1_restriction_module
 from apps.orchestrator.safety.medical_emergency import MEDICAL_EMERGENCY_TEXT_V2
+from apps.orchestrator.safety.s1_restriction import restriction
 from apps.skills.base import SkillContext
 from apps.skills.health_screening.classifier import (
     PainSignal,
@@ -96,7 +96,7 @@ G4_RECENT_RESOLVED = (
 #: «не вижу» count only with the eye / vision named. None of these is G4, none is
 #: any red flag, none gets the emergency text.
 G4_FALSE_POSITIVE_REGRESSION = (
-    "Слабость в правой руке после тренировки",
+    "Слабость в правой руке после тренировки",  # review #1875: NONE — kept (round 2)
     "Правая рука устала после работы",
     "Хочу исправить асимметрию лица",
     "Асимметрия лица с детства",
@@ -128,16 +128,40 @@ G4_NEGATIVE = (
     "правая рука устала после работы",
 )
 
-#: Not G4 by the detector, but still a red flag by the older numbness rule
-#: (DRF-973) that runs before it — fail-closed, named.
-G4_LEGACY_PREEMPTED = (
-    "Онемения и слабости нет",
+#: Not explicit G4 by the detector — the AMBIGUOUS G4 of [OD-BOT §164]: the
+#: DRF-973 numbness forms and limb WEAKNESS without a sudden marker, routed to
+#: the one question (``CLARIFY``), never STOP and never NONE.
+G4_AMBIGUOUS = (
+    "Онемения и слабости нет",  # negation gap: asks instead of nothing (TestKnownGaps)
     "Иногда немеет рука",
     "немеет рука иногда",
-    # non-sudden one-sided numbness: not G4 by §164 (no sudden marker), still a red
-    # flag by the DRF-973 «онемел… / немеет» rule — proven, not hidden.
     "Немеет левая рука по утрам",
     "Онемела правая нога после долгого сидения",
+    # UNEXPLAINED limb weakness — the §164 sign without the sudden marker
+    "слабость в правой руке иногда",
+    "иногда слабеет левая рука",
+    "рука ослабла к вечеру",
+    "слабость в левой ноге",
+)
+
+#: Limb weakness explained by a NAMED physical exertion in the same sentence —
+#: the review-#1875 boundary (NONE): not the question, not a stop, no
+#: restriction. Whether exertion should still ask is an owner question.
+EXERTION_WEAKNESS_NOT_G4 = (
+    "Слабость в правой руке после тренировки",
+    "после зала слабость в руках",
+    "ноги слабые после пробежки",
+    "рука ослабла после тяжёлой сумки",
+)
+
+#: General fatigue / weakness with NO limb named — not the contract, never a
+#: question, never a stop (review 20.09: «не расширяй правило до любой общей
+#: усталости / слабости»).
+GENERAL_FATIGUE_NOT_G4 = (
+    "общая слабость после тренировки",
+    "слабость после болезни, хочу расслабляющий массаж",
+    "устала, слабость во всём теле",
+    "Правая рука устала после работы",
 )
 
 #: [OD-BOT §164] — the one routing question, verbatim. Contract only: not asked
@@ -153,10 +177,16 @@ def _conversation() -> SimpleNamespace:
     return SimpleNamespace(id="conv-g4", skill_state={})
 
 
-def _context(text: str, conversation: Any = None) -> SkillContext:
+def _bot_user() -> SimpleNamespace:
+    """An identity with a ``context`` dict — the durable restriction's carrier."""
+
+    return SimpleNamespace(pk=1, context={})
+
+
+def _context(text: str, conversation: Any = None, bot_user: Any = None) -> SkillContext:
     return SkillContext(
         conversation=conversation if conversation is not None else Mock(id="conv-g4"),
-        bot_user=Mock(),
+        bot_user=bot_user if bot_user is not None else Mock(),
         message_text=text,
     )
 
@@ -188,11 +218,32 @@ class TestDetectG4:
     def test_negative_stays_negative_in_a_long_message(self, text: str) -> None:
         assert detect_g4(LONG_PREFIX + text) is False
 
-    @pytest.mark.parametrize("text", G4_LEGACY_PREEMPTED)
-    def test_legacy_preempted_phrases_are_not_attributed_to_g4(self, text: str) -> None:
-        """The detector itself is right about these; the older rule is what fires."""
+    @pytest.mark.parametrize("text", G4_AMBIGUOUS)
+    def test_ambiguous_is_the_question_not_a_stop(self, text: str) -> None:
+        """Not explicit G4, not a red flag, not silence — the one routing question."""
         assert detect_g4(text) is False
-        assert classify(text) is PainSignal.RED_FLAG  # by DRF-973, proven here
+        assert classify(text) is PainSignal.CLARIFY
+
+    @pytest.mark.parametrize("text", GENERAL_FATIGUE_NOT_G4 + EXERTION_WEAKNESS_NOT_G4)
+    def test_general_fatigue_or_exertion_is_neither_question_nor_stop(self, text: str) -> None:
+        assert detect_g4(text) is False
+        assert classify(text) is not PainSignal.CLARIFY
+        assert classify(text) is not PainSignal.RED_FLAG
+
+    @pytest.mark.parametrize("text", EXERTION_WEAKNESS_NOT_G4)
+    def test_exertion_weakness_is_none_and_opens_no_restriction(self, text: str) -> None:
+        assert classify(text) is PainSignal.NONE
+        bot_user = _bot_user()
+        skill = HealthScreeningSkill()
+        assert skill.matches(_context(text, _conversation(), bot_user)) is False
+        assert restriction(bot_user) is None
+
+    @pytest.mark.parametrize(
+        "text", ("Резко ослабла левая рука", "Внезапно онемела правая сторона тела")
+    )
+    def test_explicit_sudden_unilateral_weakness_stays_stop(self, text: str) -> None:
+        assert detect_g4(text) is True
+        assert classify(text) is PainSignal.RED_FLAG
 
 
 class TestFalsePositiveRegression:
@@ -296,63 +347,100 @@ class TestSkillRouting:
         if skill.matches(context):
             assert skill.handle(context).reply_text != MEDICAL_EMERGENCY_TEXT_V2
 
-    def test_legacy_preempted_phrase_is_a_red_flag_without_a_group(self) -> None:
-        """Fail-closed today: STOP text, but honestly NOT labelled G4."""
-        result = HealthScreeningSkill().handle(_context("немеет рука иногда"))
-        assert result.reply_text == MEDICAL_EMERGENCY_TEXT_V2
-        assert "s1_group" not in result.meta
+    @pytest.mark.usefixtures("memory_carrier")
+    def test_ambiguous_phrase_gets_the_question_not_the_emergency_text(self) -> None:
+        result = HealthScreeningSkill().handle(
+            _context("немеет рука иногда", _conversation(), _bot_user())
+        )
+        assert result.reply_text == G4_ROUTING_QUESTION
+        assert result.meta == {
+            "reply_kind": "health_clarify_g4",
+            "s1_group": "G4",
+            "s1_restriction": "open",
+        }
+
+    def test_ambiguous_phrase_without_a_carrier_still_asks_and_says_so(self) -> None:
+        """No carrier (unit Mock): the question is still the reply — the turn ends
+        here — and the meta names that the state did not persist."""
+        result = HealthScreeningSkill().handle(_context("немеет рука иногда", _conversation()))
+        assert result.reply_text == G4_ROUTING_QUESTION
+        assert result.meta["s1_restriction"] == "not_persisted"
 
 
+@pytest.fixture
+def memory_carrier(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``open_question`` on a plain ``skill_state`` dict — the contract without a DB.
+
+    The persisted half (a real Conversation row, re-read from the database)
+    is proven in ``test_g4_question_flow.py``."""
+
+    def _write(conversation: Any, subkey: str, value: Any | None) -> None:
+        if value is None:
+            conversation.skill_state.pop(subkey, None)
+        else:
+            conversation.skill_state[subkey] = value
+
+    def _write_row(bot_user: Any, row: Any) -> None:
+        if row is None:
+            bot_user.context.pop(s1_restriction_module.RESTRICTION_KEY, None)
+        else:
+            bot_user.context[s1_restriction_module.RESTRICTION_KEY] = row
+
+    monkeypatch.setattr(open_question_module, "_write", _write)
+    monkeypatch.setattr(s1_restriction_module, "_write_row", _write_row)
+
+
+@pytest.mark.usefixtures("memory_carrier")
 class TestQuestionContract:
-    """[OD-BOT §164] G4 question contract — pinned, not implemented.
+    """[OD-BOT §164] G4 question contract — implemented (``g4_question.py``).
 
-    Every test here is ``strict`` xfail: the day the flow lands, the reviewer sees
-    the boundary move. The reasons name the blocker, not a TODO."""
+    These five were strict xfail while the flow was an architectural blocker;
+    they are the contract now. Outcomes here are the skill's; the same
+    ``route_g4_reply`` serves every surface (``test_g4_question_flow.py``)."""
 
-    BLOCKER = (
-        "§164 G4 question flow not implemented: no deterministic binding of a reply to "
-        "this question, no restriction state across turns (DRF-2040), Mini App answer "
-        "path would treat «нет» as clearance"
-    )
-
-    @pytest.mark.xfail(strict=True, reason="§164: ambiguous G4 is CLARIFY, not STOP; " + BLOCKER)
     def test_ambiguous_is_clarify_not_stop(self) -> None:
-        assert classify("немеет рука иногда") is not PainSignal.RED_FLAG
+        assert classify("немеет рука иногда") is PainSignal.CLARIFY
 
-    @pytest.mark.xfail(strict=True, reason="§164: the one routing question is asked; " + BLOCKER)
     def test_ambiguous_gets_exactly_the_routing_question(self) -> None:
-        conversation = _conversation()
-        result = HealthScreeningSkill().handle(_context("немеет рука иногда", conversation))
+        conversation, bot_user = _conversation(), _bot_user()
+        result = HealthScreeningSkill().handle(
+            _context("немеет рука иногда", conversation, bot_user)
+        )
+        assert restriction(bot_user) is not None
         assert result.reply_text == G4_ROUTING_QUESTION
         pending = pending_question(conversation)
         assert pending is not None and pending.question_id == G4_QUESTION_ID
 
-    @pytest.mark.xfail(strict=True, reason="§164: UNKNOWN keeps the restriction; " + BLOCKER)
     def test_unknown_answer_keeps_the_restriction(self) -> None:
-        conversation = _conversation()
+        conversation, bot_user = _conversation(), _bot_user()
         skill = HealthScreeningSkill()
-        skill.handle(_context("немеет рука иногда", conversation))
-        follow_up = _context("не знаю", conversation)
+        skill.handle(_context("немеет рука иногда", conversation, bot_user))
+        follow_up = _context("не знаю", conversation, bot_user)
         assert skill.matches(follow_up) is True
         assert skill.handle(follow_up).meta.get("reply_kind") == "health_restriction_persists"
+        assert pending_question(conversation) is not None  # still open, still binding
 
-    @pytest.mark.xfail(strict=True, reason="§164: a new intent keeps the restriction; " + BLOCKER)
     def test_new_booking_intent_keeps_the_restriction(self) -> None:
-        conversation = _conversation()
+        conversation, bot_user = _conversation(), _bot_user()
         skill = HealthScreeningSkill()
-        skill.handle(_context("немеет рука иногда", conversation))
-        follow_up = _context("запишите меня на массаж в пятницу", conversation)
+        skill.handle(_context("немеет рука иногда", conversation, bot_user))
+        follow_up = _context("запишите меня на массаж в пятницу", conversation, bot_user)
         assert skill.matches(follow_up) is True
         assert skill.handle(follow_up).meta.get("reply_kind") == "health_restriction_persists"
+        pending = pending_question(conversation)
+        assert pending is not None and pending.binding
 
-    @pytest.mark.xfail(strict=True, reason="§164: «нет» is not medical clearance; " + BLOCKER)
     def test_plain_no_is_not_clearance(self) -> None:
-        conversation = _conversation()
+        conversation, bot_user = _conversation(), _bot_user()
         skill = HealthScreeningSkill()
-        skill.handle(_context("немеет рука иногда", conversation))
-        follow_up = _context("нет", conversation)
+        skill.handle(_context("немеет рука иногда", conversation, bot_user))
+        follow_up = _context("нет", conversation, bot_user)
         assert skill.matches(follow_up) is True
-        assert skill.handle(follow_up).meta.get("reply_kind") != "health_no_signal"
+        result = skill.handle(follow_up)
+        assert result.meta.get("reply_kind") != "health_no_signal"
+        assert result.meta.get("reply_kind") == "health_restriction_persists"
+        assert result.reply_text == G4_ROUTING_QUESTION
+        assert pending_question(conversation) is not None
 
     # The positive branch of the contract is already covered by the detector: an
     # answer that names the sign is an explicit / recent-resolved G4 on its own.
@@ -376,18 +464,15 @@ class TestKnownGaps:
 
     @pytest.mark.xfail(
         strict=True,
-        reason="DRF-973 numbness rule fires before detect_g4; negation not modelled there (gap)",
+        reason="negation is not modelled in the ambiguity patterns (DRF-973 forms): «онемения "
+        "нет» asks the routing question instead of nothing (gap)",
     )
-    def test_negated_numbness_is_not_a_red_flag(self) -> None:
-        assert classify("Онемения и слабости нет") is not PainSignal.RED_FLAG
+    def test_negated_numbness_is_no_signal_at_all(self) -> None:
+        assert classify("Онемения и слабости нет") is PainSignal.NONE
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason="DRF-973 numbness rule fires on non-sudden one-sided numbness; §164 would "
-        "route it to the question, not STOP (gap)",
-    )
-    def test_non_sudden_side_numbness_is_not_a_red_flag(self) -> None:
-        assert classify("Немеет левая рука по утрам") is not PainSignal.RED_FLAG
+    def test_non_sudden_side_numbness_is_the_question_not_a_stop(self) -> None:
+        """Was a strict xfail while the flow was a blocker; §164 routes it now."""
+        assert classify("Немеет левая рука по утрам") is PainSignal.CLARIFY
 
     @pytest.mark.xfail(
         strict=True,

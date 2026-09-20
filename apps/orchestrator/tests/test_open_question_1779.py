@@ -248,7 +248,9 @@ class TestRedFlagStillReachesScreening:
     def test_red_flag_in_the_answer_offers_the_tool(self, sent, model):
         """§35 п.5: тревожный признак включает безопасную ветку всегда —
         и на ходу ответа тоже. Памятка гасит только повтор SOFT."""
-        answer = "спина, и ещё немеет рука и нога"
+        # explicit G4 ([OD-BOT §164]) — bare «немеет рука» is the routing question
+        # now and is answered before the model (see test_g4_question_flow.py).
+        answer = "спина, и ещё внезапно онемела правая рука"
         _run_turns(sent, OWNER_TURNS[0], answer)
         assert "health_screening" in _calls_for(model, answer)[0]["tools"]
 

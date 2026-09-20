@@ -434,6 +434,41 @@ def write_skill_state(
         conversation.skill_state = new_state
 
 
+def resolve_conversation_for_bot_user(
+    bot_user,
+    *,
+    create_if_missing: bool = False,
+) -> Conversation | None:
+    """The one active Conversation a ``bot_user`` owns — from any surface.
+
+    [OD-BOT §164] — the Mini App has no conversation in hand, yet it must read
+    and write the SAME persisted question / restriction state the chat
+    surfaces use (``Conversation.skill_state``). A BotUser is tenant-bound, so
+    the tenant is taken from it, never from the caller: the global sentinel's
+    users go through :func:`resolve_active_global_conversation`, every other
+    through :func:`resolve_active_conversation` inside that tenant's scope.
+
+    Returns None when nothing exists and ``create_if_missing`` is False, and
+    on any failure to resolve the global sentinel — a missing carrier must
+    read as «no state», never raise into a request.
+    """
+
+    from apps.identity.services.global_tenant import get_global_bot_tenant
+    from apps.tenancy.context import tenant_scope
+
+    tenant = getattr(bot_user, "tenant", None)
+    if tenant is None:
+        return None
+    try:
+        sentinel = get_global_bot_tenant()
+    except Exception:  # noqa: BLE001 — no sentinel → treat as a per-tenant user
+        sentinel = None
+    if sentinel is not None and getattr(bot_user, "tenant_id", None) == sentinel.id:
+        return resolve_active_global_conversation(bot_user, create_if_missing=create_if_missing)
+    with tenant_scope(tenant):
+        return resolve_active_conversation(bot_user, create_if_missing=create_if_missing)
+
+
 # ─── Global (tenant-less) discovery persistence (#1026 / EPIC #1014) ──────
 #
 # Siblings of resolve_active_conversation / record_message for the nationwide

@@ -54,6 +54,36 @@ TTL два часа — решение владельца B13 (12.09, пакет
 читается как «не спрашивал»: человек, вернувшийся через три часа с «спина»,
 получит вопросы снова, а не будет прочитан как отвечающий на забытое.
 
+### Связывающий вопрос (binding) — расширение контракта, [OD-BOT §164]
+
+Обычный открытый вопрос — контекст для модели: следующая реплика его СНИМАЕТ
+(:func:`close_question`), а решает, ответ ли это, модель. Для routing-вопроса
+safety-контура этого мало: ответ на него маршрутизирует детерминированно
+(YES → STOP, UNKNOWN → ограничение сохраняется), и реплика «а сколько стоит
+маникюр?» не должна снимать вопрос вместе с ограничением.
+
+Поэтому у вопроса есть флаг ``binding``. Связывающий вопрос:
+
+* не снимается :func:`close_question` — она возвращает ``None`` и оставляет
+  его открытым; снимает только владелец через :func:`resolve_question`
+  с тем же ``question_id``;
+* не замещается обычным :func:`open_question` (B6 «последний важнее»
+  здесь не действует: ограничение переживает любую другую реплику);
+* повторное открытие с тем же ``question_id`` — идемпотентно: один слот,
+  обновляется только отметка времени; повторный вызов с ``binding=False``
+  НЕ понижает связывающий вопрос — снять его может только
+  :func:`resolve_question`;
+* живёт те же два часа (B13): протухший — «не спрашивал». Это срок
+  РАЗГОВОРНОГО состояния («бот помнит, что спросил»), не срок safety-
+  ограничения: ограничение живёт отдельно и без срока
+  (:mod:`apps.orchestrator.safety.s1_restriction`, [OD-BOT §162] — TTL не
+  clearance).
+
+Носитель тот же — ``Conversation.skill_state`` — поэтому состояние читают все
+поверхности, у которых есть разговор: MAX / Telegram per-tenant, глобальный
+консьерж и Mini App (через
+:func:`apps.conversations.services.resolve_conversation_for_bot_user`).
+
 ### Чего это НЕ делает
 
 Не решает за модель, что реплика — ответ. Человек мог сменить тему («а
@@ -91,6 +121,8 @@ class OpenQuestion:
     question_id: str
     asked_text: str
     asked_at: datetime
+    #: Связывающий вопрос — см. раздел «Связывающий вопрос» в docstring модуля.
+    binding: bool = False
 
 
 @dataclass(frozen=True)
@@ -102,6 +134,16 @@ class AnsweredQuestion:
 def _state(conversation: Any) -> dict[str, Any]:
     raw = getattr(conversation, "skill_state", None)
     return raw if isinstance(raw, dict) else {}
+
+
+def write_conversation_state(conversation: Any, subkey: str, value: Any | None) -> None:
+    """Публичный писатель ``skill_state`` для соседних состояний разговора.
+
+    Тот же путь, что у открытого вопроса: область тенанта берётся у самого
+    разговора. Используется :mod:`apps.orchestrator.safety.s1_restriction`.
+    """
+
+    _write(conversation, subkey, value)
 
 
 def _write(conversation: Any, subkey: str, value: Any | None) -> None:
@@ -141,12 +183,19 @@ def _fresh(stamped: Any) -> datetime | None:
     return at
 
 
-def open_question(conversation: Any, question_id: str, *, asked_text: str = "") -> None:
+def open_question(
+    conversation: Any, question_id: str, *, asked_text: str = "", binding: bool = False
+) -> None:
     """Записать «бот спросил ``question_id`` и ждёт ответа». Никогда не бросает.
 
     Второй открытый вопрос подряд ЗАМЕЩАЕТ первый: у разговора один открытый
     вопрос — решение B6 (один decision-changing вопрос), и последнее
     сказанное ботом важнее прежнего.
+
+    Исключение — открытый СВЯЗЫВАЮЩИЙ вопрос (``binding``): его обычный вопрос
+    не замещает (запись остаётся, попытка логируется), а повторное открытие
+    того же связывающего вопроса лишь обновляет отметку времени — один слот,
+    двух pending-вопросов не бывает.
     """
 
     if conversation is None or not question_id:
@@ -154,18 +203,30 @@ def open_question(conversation: Any, question_id: str, *, asked_text: str = "") 
     try:
         from django.utils import timezone as dj_timezone
 
-        _write(
-            conversation,
-            STATE_KEY,
-            {
-                "question_id": str(question_id),
-                "asked_text": str(asked_text or "")[:_MAX_TEXT_CHARS],
-                "at": dj_timezone.now().isoformat(),
-            },
-        )
+        current = pending_question(conversation)
+        if current is not None and current.binding:
+            if current.question_id != str(question_id):
+                logger.info(
+                    "orchestrator.open_question.kept_binding question=%s attempted=%s conversation=%s",
+                    current.question_id,
+                    question_id,
+                    getattr(conversation, "id", None),
+                )
+                return
+            # Same binding question again: a re-stamp, never a downgrade.
+            binding = True
+        row: dict[str, Any] = {
+            "question_id": str(question_id),
+            "asked_text": str(asked_text or "")[:_MAX_TEXT_CHARS],
+            "at": dj_timezone.now().isoformat(),
+        }
+        if binding:
+            row["binding"] = True
+        _write(conversation, STATE_KEY, row)
         logger.info(
-            "orchestrator.open_question.opened question=%s conversation=%s",
+            "orchestrator.open_question.opened question=%s binding=%s conversation=%s",
             question_id,
+            binding,
             getattr(conversation, "id", None),
         )
     except Exception:  # noqa: BLE001 — состояние не стоит хода
@@ -194,6 +255,7 @@ def pending_question(conversation: Any) -> OpenQuestion | None:
             question_id=question_id,
             asked_text=str(row.get("asked_text") or ""),
             asked_at=at,
+            binding=bool(row.get("binding")),
         )
     except Exception:  # noqa: BLE001
         logger.exception("orchestrator.open_question.read_failed")
@@ -212,6 +274,34 @@ def close_question(conversation: Any, answer_text: str) -> AnsweredQuestion | No
     question = pending_question(conversation)
     if question is None:
         return None
+    if question.binding:
+        # Связывающий вопрос реплика не снимает — его снимает владелец через
+        # :func:`resolve_question`. Ограничение переживает эту реплику.
+        logger.info(
+            "orchestrator.open_question.binding_kept question=%s conversation=%s",
+            question.question_id,
+            getattr(conversation, "id", None),
+        )
+        return None
+    return _close(conversation, question, answer_text)
+
+
+def resolve_question(
+    conversation: Any, question_id: str, answer_text: str
+) -> AnsweredQuestion | None:
+    """Снять вопрос ``question_id`` — связывающий или обычный — его владельцем.
+
+    Единственный способ закрыть связывающий вопрос. Возвращает None, если
+    открыт другой вопрос или никакого: чужой вопрос владелец не трогает.
+    """
+
+    question = pending_question(conversation)
+    if question is None or question.question_id != str(question_id):
+        return None
+    return _close(conversation, question, answer_text)
+
+
+def _close(conversation: Any, question: OpenQuestion, answer_text: str) -> AnsweredQuestion:
     try:
         from django.utils import timezone as dj_timezone
 
@@ -272,4 +362,6 @@ __all__ = [
     "open_question",
     "pending_question",
     "render_answer_block",
+    "resolve_question",
+    "write_conversation_state",
 ]

@@ -168,7 +168,10 @@ class TestTheVetoIsNoLongerTautological:
         диагностические вопросы вместо «сначала к врачу».
         """
 
-        result = self._run(message_text="Болит спина и онемела рука", symptom="болит рука")
+        # explicit G4 ([OD-BOT §164]); bare «онемела рука» is the routing question now.
+        result = self._run(
+            message_text="Болит спина и внезапно онемела правая рука", symptom="болит рука"
+        )
 
         assert result is not None
         assert result.reply_text == RED_FLAG_REPLY
@@ -347,7 +350,9 @@ class TestTheLiveDialogueDoesNotRepeatItself:
             LIVE_TURNS[0], bot_user=bot_user, conversation=conversation
         )
         second = generate_concierge_reply(
-            "Спина болит и рука онемела", bot_user=bot_user, conversation=conversation
+            "Спина болит и внезапно онемела правая рука",
+            bot_user=bot_user,
+            conversation=conversation,
         )
 
         assert first.text == SOFT_PAIN_REPLY

@@ -693,7 +693,7 @@ def _tools_offered(message_text: str, conversation: Any) -> list[dict[str, Any]]
     from apps.skills.health_screening.memo import screening_asked_recently
 
     signal = classify(message_text)
-    offer_screening = signal == PainSignal.RED_FLAG or (
+    offer_screening = signal in (PainSignal.RED_FLAG, PainSignal.CLARIFY) or (
         signal != PainSignal.NONE and not screening_asked_recently(conversation)
     )
     withheld: set[str] = set()
@@ -1768,6 +1768,48 @@ def generate_concierge_reply(
     return reply
 
 
+def _g4_question_turn(
+    message_text: str, *, conversation: Any, bot_user: Any, trace_id: str | None
+) -> DiscoveryReply | None:
+    """The deterministic G4 turn on the global path, or None when it is not one.
+
+    Runs the very same skill the per-tenant registry runs, with the same
+    conversation state, so the reply and the persisted question are identical
+    on every surface. Persisted here (``persisted=True``) — the transcript must
+    say what the bot said, exactly as the other model-less branches do.
+    """
+
+    from apps.skills.base import SkillContext
+    from apps.skills.health_screening.classifier import PainSignal, classify
+    from apps.skills.health_screening.g4_question import g4_state
+    from apps.skills.health_screening.skill import HealthScreeningSkill
+
+    if not (
+        g4_state(conversation, bot_user).active or classify(message_text) is PainSignal.CLARIFY
+    ):
+        return None
+    started = time.monotonic()
+    result = HealthScreeningSkill().handle(
+        SkillContext(conversation=conversation, bot_user=bot_user, message_text=message_text)
+    )
+    logger.info(
+        "orchestrator.concierge.g4_question kind=%s trace=%s",
+        (result.meta or {}).get("reply_kind"),
+        trace_id,
+    )
+    _record_concierge_metric(
+        bot_user=bot_user,
+        conversation=conversation,
+        trace_id=trace_id,
+        message_text=message_text,
+        pass_index=None,
+        outcome=AIRequestMetric.OUTCOME_SUCCESS,
+        latency_total_ms=int((time.monotonic() - started) * 1000),
+        skill_selected="health_screening",
+    )
+    return DiscoveryReply(text=result.reply_text, action_data=None, persisted=True)
+
+
 def _concierge_turn(
     message_text: str,
     *,
@@ -1845,6 +1887,17 @@ def _concierge_turn(
             action_data=rendered.action_data,
             persisted=True,
         )
+
+    # [OD-BOT §164] — the G4 routing question is not the model's to interpret:
+    # an open one binds THIS reply to the screening skill, and an ambiguous G4
+    # message asks it. Both are decided here, before the model, so the global
+    # path behaves like the per-tenant registry (where the skill precedes
+    # booking). The gate already ran upstream — a crisis phrase never gets here.
+    g4_reply = _g4_question_turn(
+        message_text, conversation=conversation, bot_user=bot_user, trace_id=trace_id
+    )
+    if g4_reply is not None:
+        return g4_reply
 
     # DRF-1779 — если бот на прошлом ходу задал вопрос, эта реплика — ответ на
     # него. Вопрос снимается ДО вызова модели (второй раз его не задать), ответ

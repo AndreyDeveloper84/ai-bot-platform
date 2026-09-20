@@ -82,6 +82,12 @@ from django.core.cache import cache
 from apps.orchestrator.safety.gate import evaluate_inbound
 from apps.orchestrator.safety.pre_check import SafetyVerdict
 from apps.skills.health_screening.classifier import PainSignal, classify
+from apps.skills.health_screening.g4_question import (
+    G4_ROUTING_QUESTION,
+    ask_g4,
+    g4_state,
+    route_g4_reply,
+)
 from apps.skills.health_screening.memo import STATE_TTL_SECONDS
 from apps.skills.health_screening.skill import RED_FLAG_REPLY
 
@@ -116,6 +122,13 @@ KIND_CRISIS = "crisis"
 KIND_BLOCK = "block"
 KIND_RED_FLAG = "health_red_flag"
 KIND_CLARIFY = "health_clarify"
+#: The safety state could not be read or written (carrier lookup / creation /
+#: persistence failure). Fail-closed: the request is blocked with this frame and
+#: nothing is forwarded. Infrastructure copy, not clinical wording.
+KIND_STATE_UNAVAILABLE = "safety_state_unavailable"
+STATE_UNAVAILABLE_TEXT = (
+    "Сейчас не получается проверить безопасность запроса. Попробуй ещё раз чуть позже."
+)
 
 _MEMO_ASKED = "asked"
 _MEMO_ANSWERED = "answered"
@@ -140,6 +153,9 @@ class SafetyStop:
             payload["text"] = self.text
         if self.acknowledgement:
             payload["acknowledgement"] = self.acknowledgement
+        if self.acknowledgement or self.questions:
+            # The G4 frame ([OD-BOT §164]) is one question with no
+            # acknowledgement line; the screen lists ``questions`` on its own.
             payload["questions"] = list(self.questions)
         return payload
 
@@ -149,6 +165,40 @@ _CLARIFY_STOP = SafetyStop(
     acknowledgement=HEALTH_ACKNOWLEDGEMENT_COPY,
     questions=HEALTH_CLARIFY_QUESTIONS,
 )
+
+#: [OD-BOT §164] — the one G4 routing question, same kind as the pain clarify
+#: (the screen shows the list and the answer box for ``health_clarify``), but
+#: NO acknowledgement line and NO second question. The answer never forwards
+#: the body while the question is open.
+_G4_QUESTION_STOP = SafetyStop(kind=KIND_CLARIFY, questions=(G4_ROUTING_QUESTION,))
+_STATE_UNAVAILABLE_STOP = SafetyStop(kind=KIND_STATE_UNAVAILABLE, text=STATE_UNAVAILABLE_TEXT)
+_S1_STOP = SafetyStop(kind=KIND_RED_FLAG, text=RED_FLAG_REPLY)
+
+
+class _CarrierUnavailable(Exception):
+    """The conversation could not be resolved / created — fail closed."""
+
+
+def _conversation_for(bot_user: Any, *, create: bool):
+    """The bot_user's conversation — the carrier of the persisted G4 state.
+
+    Shared with every chat surface. ``None`` only when nothing exists yet and
+    ``create`` is False (a legitimate «no state»). A lookup or creation
+    FAILURE raises :class:`_CarrierUnavailable`: the caller blocks the
+    request — an unreadable safety state must never read as «unrestricted».
+    """
+
+    from apps.conversations.services import resolve_conversation_for_bot_user
+
+    try:
+        return resolve_conversation_for_bot_user(bot_user, create_if_missing=create)
+    except Exception as exc:  # noqa: BLE001 — logged, then fail-closed upstream
+        logger.exception("miniapp_api.health_gate.conversation_lookup_failed")
+        raise _CarrierUnavailable from exc
+
+
+def _g4_stop_from(outcome: Any) -> SafetyStop:
+    return _S1_STOP if outcome.stop else _G4_QUESTION_STOP
 
 
 def free_text_of(body: dict[str, Any]) -> str | None:
@@ -182,15 +232,13 @@ def _remember(bot_user: Any, state: str) -> None:
     cache.set(_memo_key(bot_user), state, timeout=ASKED_TTL_SECONDS)
 
 
-def _hard_stop(text: str) -> SafetyStop | None:
-    """Crisis / block / red flag — the three verdicts that end the flow."""
+def _crisis_or_block(text: str) -> SafetyStop | None:
+    """The inbound gate's two verdicts that end the flow, on their own route."""
 
     inbound = evaluate_inbound(text)
     if not inbound.allowed:
         kind = KIND_CRISIS if inbound.verdict == SafetyVerdict.HANDOFF.value else KIND_BLOCK
         return SafetyStop(kind=kind, text=inbound.reply_text)
-    if classify(text) == PainSignal.RED_FLAG:
-        return SafetyStop(kind=KIND_RED_FLAG, text=RED_FLAG_REPLY)
     return None
 
 
@@ -208,32 +256,132 @@ def screen_goal_body(
     Returns ``(stop, forward)``: ``stop`` is None when the write may
     proceed with ``forward`` (the body minus ``safety_answer``); otherwise
     ``stop`` is what the person is shown instead and nothing is forwarded.
+
+    Fail-closed: when the persisted safety state cannot be read, created or
+    written, the answer is :data:`_STATE_UNAVAILABLE_STOP` — never a forward.
     """
 
     forward = {k: v for k, v in body.items() if k != SAFETY_ANSWER_FIELD}
+    try:
+        return _screen(bot_user, body, forward)
+    except _CarrierUnavailable:
+        logger.error(
+            "miniapp_api.health_gate.fail_closed bot_user=%s", getattr(bot_user, "pk", None)
+        )
+        return _STATE_UNAVAILABLE_STOP, forward
+
+
+def _screen(
+    bot_user: Any, body: dict[str, Any], forward: dict[str, Any]
+) -> tuple[SafetyStop | None, dict[str, Any]]:
     text = free_text_of(body)
+    raw_answer = body.get(SAFETY_ANSWER_FIELD)
+    answer: str = raw_answer.strip() if isinstance(raw_answer, str) else ""
+    has_answer = bool(answer)
+    # What the person sent this time: the answer field when there is one,
+    # otherwise the free text. Everything below reads this first.
+    reply_text = answer if has_answer else (text or "")
+
+    # 1. The strongest outcomes need no state: crisis / block, then an explicit
+    #    S1 red flag in the reply or the text. They come BEFORE the carrier so
+    #    an unreadable state can never weaken them.
+    if reply_text:
+        inbound_stop = _crisis_or_block(reply_text)
+        if inbound_stop is not None:
+            logger.info(
+                "miniapp_api.health_gate.stop kind=%s on=reply bot_user=%s",
+                inbound_stop.kind,
+                bot_user.pk,
+            )
+            return inbound_stop, forward
+    if text is not None and has_answer:
+        inbound_stop = _crisis_or_block(text)
+        if inbound_stop is not None:
+            return inbound_stop, forward
+
+    # 2. The persisted state: the durable restriction on the identity
+    #    (``BotUser.context``, survives a new conversation) and the
+    #    conversational question on the conversation. A lookup FAILURE is not
+    #    «no state»: it is recorded and the request is blocked (fail-closed)
+    #    — unless the text itself is an explicit red flag, which is the
+    #    stronger outcome and needs no state.
+    carrier_failed = False
+    conversation = None
+    try:
+        conversation = _conversation_for(bot_user, create=False)
+    except _CarrierUnavailable:
+        carrier_failed = True
+    try:
+        state: Any = g4_state(conversation, bot_user)
+    except Exception:  # noqa: BLE001 — an unreadable identity row is a failure, not «no state»
+        logger.exception("miniapp_api.health_gate.state_read_failed bot_user=%s", bot_user.pk)
+        state = None
+        carrier_failed = True
+
+    if state is not None and state.stopped:
+        # [OD-BOT §156]: a durable S1 STOP — every later request gets the STOP
+        # frame, nothing is forwarded, nothing here is clearance.
+        return _S1_STOP, forward
+
+    if state is not None and state.active:
+        # [OD-BOT §164] — the open restriction binds whatever the person sends
+        # next: the answer field, or the free text itself. The body is never
+        # forwarded while it is open — a «нет» is not clearance. A restriction
+        # without a conversation (new session, or the row could not be read)
+        # is still a restriction: the question is put again on a carrier
+        # created on demand; if none can be had, the request is blocked.
+        if not reply_text:
+            return _G4_QUESTION_STOP, forward
+        if conversation is None:
+            conversation = _conversation_for(bot_user, create=True)
+            if conversation is None:
+                raise _CarrierUnavailable
+        outcome = route_g4_reply(conversation, bot_user, reply_text)
+        logger.info(
+            "miniapp_api.health_gate.g4 outcome=%s group=%s bot_user=%s",
+            outcome.kind,
+            outcome.group,
+            bot_user.pk,
+        )
+        if outcome.stop and not g4_state(conversation, bot_user).stopped:
+            # The STOP reply is still the STOP reply; the durable record did not
+            # land — logged, and the request stays blocked either way.
+            logger.error("miniapp_api.health_gate.stop_not_persisted bot_user=%s", bot_user.pk)
+        return _g4_stop_from(outcome), forward
+
+    explicit = _explicit_s1_stop(reply_text) or (_explicit_s1_stop(text) if text else None)
+    if explicit is not None:
+        logger.info(
+            "miniapp_api.health_gate.stop kind=%s on=text bot_user=%s", explicit.kind, bot_user.pk
+        )
+        return explicit, forward
+
+    if carrier_failed:
+        # Nothing explicit in the text, and we could not learn whether a
+        # restriction is on record: block, never forward.
+        raise _CarrierUnavailable
+
     if text is None:
         return None, forward
 
-    answer = body.get(SAFETY_ANSWER_FIELD)
-    if isinstance(answer, str) and answer.strip():
-        stop = _hard_stop(answer)
-        if stop is not None:
-            logger.info(
-                "miniapp_api.health_gate.stop kind=%s on=answer bot_user=%s", stop.kind, bot_user.pk
-            )
-            return stop, forward
+    if has_answer:
+        # No G4 question on record: the pain-clarify answer path (DRF-1763).
+        # The answer was already screened for crisis / block / red flag above.
         if _memo(bot_user) == _MEMO_ASKED:
             _remember(bot_user, _MEMO_ANSWERED)
         # No question on record → the flag is not clearance; fall through
         # and screen the text itself.
 
-    stop = _hard_stop(text)
-    if stop is not None:
-        logger.info(
-            "miniapp_api.health_gate.stop kind=%s on=text bot_user=%s", stop.kind, bot_user.pk
-        )
-        return stop, forward
+    if classify(text) == PainSignal.CLARIFY:
+        # Ambiguous G4 — the one registered question, persisted on the same
+        # conversation the chat surfaces read. The carrier is created on
+        # demand; if it cannot be created or the state cannot be written, the
+        # request is blocked (fail-closed) instead of asked-and-forgotten.
+        conversation = _conversation_for(bot_user, create=True)
+        if conversation is None or not ask_g4(conversation, bot_user):
+            raise _CarrierUnavailable
+        logger.info("miniapp_api.health_gate.g4_asked bot_user=%s", bot_user.pk)
+        return _G4_QUESTION_STOP, forward
 
     if _needs_clarification(text) and _memo(bot_user) != _MEMO_ANSWERED:
         _remember(bot_user, _MEMO_ASKED)
@@ -245,6 +393,14 @@ def screen_goal_body(
     return None, forward
 
 
+def _explicit_s1_stop(text: str | None) -> SafetyStop | None:
+    """An explicit S1 red flag in ``text`` — the S1 STOP frame, no state needed."""
+
+    if text and classify(text) == PainSignal.RED_FLAG:
+        return _S1_STOP
+    return None
+
+
 __all__ = [
     "ASKED_TTL_SECONDS",
     "HEALTH_ACKNOWLEDGEMENT_COPY",
@@ -253,7 +409,9 @@ __all__ = [
     "KIND_CLARIFY",
     "KIND_CRISIS",
     "KIND_RED_FLAG",
+    "KIND_STATE_UNAVAILABLE",
     "SAFETY_ANSWER_FIELD",
+    "STATE_UNAVAILABLE_TEXT",
     "SafetyStop",
     "free_text_of",
     "screen_goal_body",

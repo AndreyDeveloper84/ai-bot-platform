@@ -57,7 +57,9 @@ from apps.skills.health_screening.skill import (
 FIRST_COMPLAINT = "Что-то тянет поясницу"
 SECOND_COMPLAINT = "Ну и как тебе донести, что болит спина?"
 NOT_A_COMPLAINT = "Что ты понимаешь?"
-RED_FLAG_COMPLAINT = "Болит спина и онемела рука"
+# explicit G4 ([OD-BOT §164]); bare «онемела рука» is the routing question since the
+# question flow, and this file is about the memo never silencing a RED_FLAG.
+RED_FLAG_COMPLAINT = "Болит спина и внезапно онемела правая рука"
 
 
 def _conversation(*, asked_ago_seconds: int | None = None) -> SimpleNamespace:

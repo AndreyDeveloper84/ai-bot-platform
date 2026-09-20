@@ -106,10 +106,10 @@ _AMBIGUOUS: dict[str, tuple[str, ...]] = {
     "G1": ("как-то тяжело дышать последние дни", "в зале душно, не хватает воздуха, откройте окно"),
     "G2": ("в глазах темнеет, чуть не упала",),
     "G3": ("что-то колет в груди",),
-    # G4 ambiguous — [OD-BOT §164]: ОДИН routing-вопрос, не автоматический STOP. Вопрос
-    # в runtime не задаётся (архитектурный blocker — см. test_g4_detector.py, strict
-    # xfail); сегодня фраза остаётся fail-closed STOP по старому правилу онемения
-    # (DRF-973), поэтому ожидание здесь — вариант (а), «поймана», НЕ как G4.
+    # G4 ambiguous — [OD-BOT §164]: ОДИН routing-вопрос (``health_screening.g4``),
+    # не STOP. Реализован: classify → CLARIFY, ожидание «не поймана» через
+    # :data:`_DETECTION_OVERRIDES`; сам вопрос и исходы — test_g4_detector.py /
+    # test_g4_question_flow.py.
     "G4": ("немеет рука иногда",),
     "G5": ("немного кровит после эпиляции",),
     # G6 ambiguous — [OD-BOT §159]: изолированная локальная сыпь / зуд без отёка и
@@ -214,6 +214,9 @@ _POST_PROCEDURE: dict[str, tuple[str, ...]] = {
 _DETECTION_OVERRIDES: dict[tuple[str, str, str], bool] = {
     # [OD-BOT §159]: локальная сыпь / зуд — не S1; [OD-BOT §164]: один вопрос (не реализован).
     ("G6", "ambiguous", "сыпь и зуд после крема"): False,
+    # [OD-BOT §164]: неоднозначный G4 — ОДИН routing-вопрос (CLARIFY), не STOP; реализован
+    # (``health_screening.g4``). Здесь «пойман» = HANDOFF / RED_FLAG, вопрос — нет.
+    ("G4", "ambiguous", "немеет рука иногда"): False,
 }
 
 
