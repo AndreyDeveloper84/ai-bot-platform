@@ -12,6 +12,10 @@
   - чужой разговор не читается (subject — request.bot_user);
   - обезличенный ход (после «забудь всё» тело пустое) темой не становится;
   - канонный ответ safety-предпроверки темой не становится;
+  - замена §128 (``safety_outbound`` и тот же текст без маркера) — тоже;
+  - служебные строки памяти DRF-1292 («Запомнила: …», вопрос памяти) — отдельный
+    абзац под ответом — в тему не попадают, а ход из одной такой строки
+    пропускается;
   - салонная/мастерская/админская поверхности маршрут не видят
     (тот же сторож, что у памяти 2133);
   - реестр 2094 — запись `own` (см. test_pii_route_registry_2094).
@@ -33,6 +37,9 @@ from django.utils import timezone
 
 from apps.conversations.models import Conversation, Message
 from apps.identity.models import BotUser
+from apps.orchestrator.memory_announce import ANNOUNCE_HEAD
+from apps.orchestrator.safety.gate import OUTBOUND_ACTION_TYPE
+from apps.orchestrator.safety.outbound import REPLACEMENT_TEXT
 from apps.tenancy.models import Tenant
 
 BOT_TOKEN = "test-bot-token-last-topic-2144"  # noqa: S105 — test fixture  # pragma: allowlist secret
@@ -62,7 +69,9 @@ def _bot_token(settings):
 
 @pytest.fixture
 def tenant(db, settings) -> Tenant:
-    t = Tenant.objects.create(slug="last-topic-2144", name="Last Topic 2144", timezone="Europe/Moscow")
+    t = Tenant.objects.create(
+        slug="last-topic-2144", name="Last Topic 2144", timezone="Europe/Moscow"
+    )
     settings.MAX_BOT_TENANT_SLUG = "last-topic-2144"
     return t
 
@@ -104,7 +113,9 @@ def _turn(
         rendered_text=text if rendered is None else rendered,
         action_type=action_type,
     )
-    Message.all_tenants.filter(pk=msg.pk).update(created_at=timezone.now() - timedelta(minutes=minutes_ago))
+    Message.all_tenants.filter(pk=msg.pk).update(
+        created_at=timezone.now() - timedelta(minutes=minutes_ago)
+    )
     msg.refresh_from_db()
     return msg
 
@@ -120,7 +131,12 @@ class TestLastTopic:
     def test_last_assistant_turn_is_the_topic_verbatim(self, client, tenant, bot_user):
         conv = _conversation(tenant, bot_user)
         _turn(conv, Message.Role.USER, "хочу массаж", minutes_ago=30)
-        _turn(conv, Message.Role.ASSISTANT, "Подобрала лимфодренаж у Екатерины на завтра.", minutes_ago=29)
+        _turn(
+            conv,
+            Message.Role.ASSISTANT,
+            "Подобрала лимфодренаж у Екатерины на завтра.",
+            minutes_ago=29,
+        )
         _turn(conv, Message.Role.USER, "спасибо", minutes_ago=28)
 
         res = _get(client, bot_user)
@@ -166,7 +182,9 @@ class TestLastTopic:
 
         assert _get(client, bot_user).json() == {"last_topic": None}
 
-    def test_safety_canned_reply_is_skipped_for_the_previous_real_turn(self, client, tenant, bot_user):
+    def test_safety_canned_reply_is_skipped_for_the_previous_real_turn(
+        self, client, tenant, bot_user
+    ):
         conv = _conversation(tenant, bot_user)
         _turn(conv, Message.Role.ASSISTANT, "Записала завтрак: овсянка.", minutes_ago=5)
         _turn(
@@ -178,6 +196,67 @@ class TestLastTopic:
         )
 
         assert _get(client, bot_user).json()["last_topic"]["text"] == "Записала завтрак: овсянка."
+
+    def test_outbound_replacement_is_skipped_by_marker(self, client, tenant, bot_user):
+        """§128: замена ответа помечена ``safety_outbound`` — берётся ход до неё."""
+        conv = _conversation(tenant, bot_user)
+        _turn(conv, Message.Role.ASSISTANT, "Подобрала массаж у Екатерины.", minutes_ago=5)
+        _turn(
+            conv,
+            Message.Role.ASSISTANT,
+            REPLACEMENT_TEXT,
+            minutes_ago=1,
+            action_type=OUTBOUND_ACTION_TYPE,
+        )
+
+        assert (
+            _get(client, bot_user).json()["last_topic"]["text"] == "Подобрала массаж у Екатерины."
+        )
+
+    def test_outbound_replacement_text_without_marker_is_skipped_too(
+        self, client, tenant, bot_user
+    ):
+        """Подсадка: та же строка §128 без маркера (второй путь передачи) — не тема."""
+        conv = _conversation(tenant, bot_user)
+        _turn(conv, Message.Role.ASSISTANT, REPLACEMENT_TEXT, minutes_ago=1)
+
+        assert _get(client, bot_user).json() == {"last_topic": None}
+
+    def test_memory_announce_paragraph_is_not_part_of_the_topic(self, client, tenant, bot_user):
+        """DRF-1292: «Запомнила: …» дописана абзацем под ответом — тема только ответ."""
+        conv = _conversation(tenant, bot_user)
+        text = (
+            "Ок, без молочного.\n\n"
+            f"{ANNOUNCE_HEAD}не ешь молочное. Скажи «забудь про питание», если не надо."
+        )
+        _turn(conv, Message.Role.ASSISTANT, text, minutes_ago=1)
+
+        topic = _get(client, bot_user).json()["last_topic"]["text"]
+
+        assert topic == "Ок, без молочного."
+        assert "Запомнила" not in topic
+
+    def test_memory_question_paragraph_is_not_part_of_the_topic(self, client, tenant, bot_user):
+        conv = _conversation(tenant, bot_user)
+        text = (
+            "Есть окно в 14:00.\n\nКстати, чтобы подбирать точнее — какие у тебя любимые мастера?"
+        )
+        _turn(conv, Message.Role.ASSISTANT, text, minutes_ago=1)
+
+        assert _get(client, bot_user).json()["last_topic"]["text"] == "Есть окно в 14:00."
+
+    def test_turn_made_only_of_a_service_line_is_skipped(self, client, tenant, bot_user):
+        """Подсадка: ход из одной служебной строки — не тема; берётся ход до него."""
+        conv = _conversation(tenant, bot_user)
+        _turn(conv, Message.Role.ASSISTANT, "Записала обед: суп.", minutes_ago=5)
+        _turn(
+            conv,
+            Message.Role.ASSISTANT,
+            f"{ANNOUNCE_HEAD}не ешь рыбу. Скажи «забудь», если не надо.",
+            minutes_ago=1,
+        )
+
+        assert _get(client, bot_user).json()["last_topic"]["text"] == "Записала обед: суп."
 
     def test_strangers_conversation_is_never_read(self, client, tenant, bot_user, stranger):
         theirs = _conversation(tenant, stranger)

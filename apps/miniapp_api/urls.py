@@ -10,6 +10,7 @@ from django.urls import path
 from apps.miniapp_api import (
     views,
     views_diary_days,
+    views_last_topic,
     views_memory,
     views_plan_lite,
     views_saved_meals,
@@ -236,4 +237,8 @@ urlpatterns = [
         views_memory.customer_memory_entry,
         name="customer_memory_entry",
     ),
+    # DRF-2144 (H01) — «Продолжить разговор с Ayla»: последняя тема — первые
+    # 80 знаков последнего хода ассистента, без safety-строк и служебных
+    # строк памяти; нет темы — null, экран говорит нейтрально.
+    path("last-topic/", views_last_topic.customer_last_topic, name="customer_last_topic"),
 ]

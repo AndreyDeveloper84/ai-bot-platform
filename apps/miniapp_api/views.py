@@ -4810,6 +4810,8 @@ class _ActivityRow(NamedTuple):
     master_name: str
     duration_min: int
     booking_id: str
+    #: Wire status of the row (DRF-2144) — the home card's badge.
+    status: str
 
 
 def _recent_activity_from_mirror(
@@ -4846,6 +4848,7 @@ def _recent_activity_from_mirror(
             master_name=master.name if master else "",
             duration_min=_proxy_duration_min(proxy),
             booking_id=str(proxy.appointment_id),
+            status=str(proxy.status),
         )
 
     this_week_count = owned.filter(
@@ -4885,6 +4888,7 @@ def _recent_activity_from_local(
             master_name=booking.master_name,
             duration_min=booking.duration_min or 0,
             booking_id=str(booking.id),
+            status=str(booking.status),
         )
 
     this_week_count = owned.filter(
@@ -5040,6 +5044,12 @@ def customer_recent_activity(request: HttpRequest) -> HttpResponse:
             # выдали бы наш пробел за ответ салона.
             "address": tenant.address,
             "booking_id": next_row.booking_id,
+            # DRF-2144 — статус для бейджа карточки на Главной: wire-значение
+            # той же строки (mirror: confirmed / awaiting_payment /
+            # pending_payment — то, что этот путь и так отбирает; local:
+            # CONFIRMED). Экран переводит его через `mapBookingStatus`, как
+            # список записей, — второго словаря статусов не заводится.
+            "status": next_row.status,
         }
         if tenant.address is None:
             # Счётчик НАШЕГО пробела. Без него нечем сказать, растёт он
