@@ -84,6 +84,14 @@ CONSENT_OPEN: tuple[str, ...] = (
     WITHDRAW_KEEP_CALLBACK,
 )
 
+#: Что именно навык делает по каждому тапу отзыва — «дошёл» и «сделал что
+#: просили» различимы.
+WITHDRAW_REPLY_KIND: dict[str, str] = {
+    WITHDRAW_CALLBACK: "anketa_withdraw_ask",
+    WITHDRAW_CONFIRM_CALLBACK: "anketa_withdraw_done",
+    WITHDRAW_KEEP_CALLBACK: "anketa_withdraw_kept",
+}
+
 CONSENT_FAMILY: tuple[str, ...] = CONSENT_GATED + CONSENT_OPEN
 
 
@@ -273,7 +281,41 @@ class TestDispatcherHandsConsentTapsToTheAnketaSkill:
 
         assert result is not None, f"{callback}: при выключенном флаге ход ушёл мимо навыка"
         assert result.reply_text != STUB
-        assert result.meta["reply_kind"].startswith("anketa_withdraw_")
+        assert result.meta["reply_kind"] == WITHDRAW_REPLY_KIND[callback]
+
+    def test_off_the_withdrawal_phrase_reaches_the_skill_only_with_an_anketa_in_flight(
+        self, nutrition_off, monkeypatch
+    ) -> None:
+        """Предел DRF-2135, закреплённый с обеих сторон: текстовая форма отзыва —
+        не структурный payload. При активной анкете ход структурный и доезжает
+        до навыка (``anketa_withdraw_ask``); без анкеты в полёте диспетчер его
+        не забирает (``None`` — ход уходит консьержу). Изменится любая сторона
+        — красный здесь, а не тихая перемена маршрута."""
+        from apps.skills.nutrition_anketa.skill import WITHDRAW_ACTION_TEXT
+
+        monkeypatch.setattr("apps.consent.personal_calculation.is_granted", lambda bot_user: True)
+
+        in_flight = SimpleNamespace(
+            id=1, skill_state={"nutrition_anketa": {"current_step": "weight"}}
+        )
+        result = try_handle_structured_nutrition_turn(
+            text=WITHDRAW_ACTION_TEXT,
+            attachments=None,
+            bot_user=Mock(),
+            conversation=in_flight,
+            trace_id="t-2135",
+        )
+        assert result is not None
+        assert result.meta["reply_kind"] == "anketa_withdraw_ask"
+
+        bare = try_handle_structured_nutrition_turn(
+            text=WITHDRAW_ACTION_TEXT,
+            attachments=None,
+            bot_user=Mock(),
+            conversation=_bare_conversation(),
+            trace_id="t-2135",
+        )
+        assert bare is None
 
 
 # ---------------------------------------------------------------------------

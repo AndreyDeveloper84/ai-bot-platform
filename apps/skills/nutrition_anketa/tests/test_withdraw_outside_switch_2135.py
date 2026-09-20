@@ -28,7 +28,6 @@ is_structured_nutrition_turn``), а не ворот, и оно было таки
 
 from __future__ import annotations
 
-import inspect
 from unittest.mock import Mock, patch
 
 import pytest
@@ -125,6 +124,25 @@ class TestWithdrawalWorksWhenTheContourIsOff:
         withdraw.assert_called_once()
         assert result.reply_text == anketa.WITHDRAW_DELETE_UNCONFIRMED
 
+    @pytest.mark.parametrize("flag", [False, True], ids=["OFF", "ON"])
+    def test_confirming_clears_the_anketa_in_flight(self, settings, flag):
+        """§92 — параметры не хранятся после исчезновения основания: собранные
+        ответы анкеты (пол/возраст/…) уходят из ``skill_state`` вместе с
+        согласием. Без этого при OFF каждое следующее сообщение забирала бы
+        анкета в полёте и отвечала заглушкой до протухания состояния."""
+        settings.NUTRITION_ENABLED = flag
+        ctx = _ctx(anketa.WITHDRAW_CONFIRM_CALLBACK)
+        ctx.conversation.skill_state = {
+            "nutrition_anketa": {"current_step": "weight", "answers": {"gender": "female"}},
+            "food_scan": {"scan_id": "scan-1"},
+        }
+        with patch(_WITHDRAW, return_value=1), patch(_CLIENT, return_value=_FakeClient()):
+            NutritionAnketaSkill().handle(ctx)
+
+        # Чужое состояние на месте — стёрта только анкета.
+        assert ctx.conversation.skill_state == {"food_scan": {"scan_id": "scan-1"}}
+        ctx.conversation.save.assert_called_once_with(update_fields=["skill_state"])
+
     def test_keeping_is_acknowledged(self, nutrition_off):
         result = NutritionAnketaSkill().handle(_ctx(anketa.WITHDRAW_KEEP_CALLBACK))
         # «Персональный расчёт работает» при OFF — неправда; остаётся согласие.
@@ -180,8 +198,12 @@ class TestPositiveControlWhenOn:
 
 class TestTheGuardAgainstAQuietRegression:
     """Ложный вход: рефактор, который вернёт отзыв ПОД ворота (или добавит
-    чтение флага внутри самого отзыва), обязан дать красный, а не тихую
-    заглушку. Два независимых сторожа: поведение и порядок веток."""
+    «return stub» по флагу внутри самого отзыва), обязан дать красный, а не
+    тихую заглушку. Сторож поведенческий: мутации «ветка под ворота» (все /
+    только confirm / только фраза) и «stub внутри _on_withdraw_*» — все
+    красные здесь (замер оси tests, ревью #1880); проверка порядка строк
+    исходника снята — она ловила не больше и краснела на легитимных
+    рефакторах."""
 
     @pytest.mark.parametrize(
         "text",
@@ -219,14 +241,3 @@ class TestTheGuardAgainstAQuietRegression:
             result = NutritionAnketaSkill().handle(_ctx("/anketa"))
         flag.assert_called_once()
         assert result.reply_text == STUB
-
-    def test_in_the_source_the_withdrawal_branches_precede_the_gate(self):
-        """Порядок веток в ``handle`` — сначала отзыв, потом ворота. Поменяй
-        местами — красный здесь, ещё до поведения."""
-        src = inspect.getsource(NutritionAnketaSkill.handle)
-        gate = src.index("if not _nutrition_enabled():")
-        for name in ("WITHDRAW_CALLBACK", "WITHDRAW_CONFIRM_CALLBACK", "WITHDRAW_KEEP_CALLBACK"):
-            branch = src.index(f"text == {name}")
-            assert branch < gate, f"{name}: ветка отзыва стоит ниже ворот выключателя"
-        # А согласие — ниже ворот, по замыслу: дать согласие в выключенный контур нельзя.
-        assert src.index("text == CONSENT_GRANT_CALLBACK") > gate
