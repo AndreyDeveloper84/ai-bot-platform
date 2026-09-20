@@ -46,7 +46,7 @@ import logging
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from decimal import Decimal
-from typing import Any
+from typing import Any, Protocol
 
 from django.utils import timezone
 
@@ -171,6 +171,109 @@ def _cost(result) -> Decimal:
         return Decimal(0)
 
 
+class AssistantSubject(Protocol):
+    """Кто спрашивает и что ему можно (DRF-2119 — один цикл на мастера и на админа).
+
+    Цикл ниже знает только это: чей тенант, чем ограничивать (``limit_key``),
+    какой системный промпт, какие инструменты (читают) и действия
+    (предлагают), как их выполнить. Мастер и администратор — два субъекта
+    одного цикла, не два цикла.
+    """
+
+    @property
+    def tenant(self) -> Any: ...
+
+    @property
+    def limit_key(self) -> Any: ...
+
+    @property
+    def log_label(self) -> str: ...
+
+    @property
+    def addressee(self) -> str:
+        """Кому отвечать по данным инструмента — «мастеру» / «администратору»."""
+        ...
+
+    @property
+    def tool_specs(self) -> list[dict[str, Any]]: ...
+
+    @property
+    def action_specs(self) -> list[dict[str, Any]]: ...
+
+    def system_prompt(self, *, today: date, tz_label: str) -> str: ...
+
+    def run_tool(self, name: str, arguments: dict[str, Any]) -> Any:
+        """→ объект с ``name`` и ``data``; ``ToolError`` — названный отказ."""
+        ...
+
+    def propose(self, name: str, arguments: dict[str, Any]) -> Any:
+        """→ объект с ``name``, ``summary``, ``as_dict()``; ``ActionError`` — отказ."""
+        ...
+
+    def is_action(self, name: str) -> bool: ...
+
+    def postprocess(self, text: str) -> str:
+        """Последний рубеж перед человеком (например, маскировка телефона)."""
+        ...
+
+
+@dataclass
+class MasterSubject:
+    """Мастер: видит свой день, предлагает block_time — как до DRF-2119."""
+
+    master: Any
+    allow_actions: bool = False
+
+    @property
+    def tenant(self) -> Any:
+        return self.master.tenant
+
+    @property
+    def limit_key(self) -> Any:
+        return self.master.id
+
+    @property
+    def log_label(self) -> str:
+        return f"master={self.master.id}"
+
+    @property
+    def addressee(self) -> str:
+        return "мастеру"
+
+    @property
+    def tool_specs(self) -> list[dict[str, Any]]:
+        from apps.master_api.services.assistant_tools import TOOL_SPECS
+
+        return list(TOOL_SPECS)
+
+    @property
+    def action_specs(self) -> list[dict[str, Any]]:
+        from apps.master_api.services.assistant_actions import ACTION_SPECS
+
+        return list(ACTION_SPECS) if self.allow_actions else []
+
+    def system_prompt(self, *, today: date, tz_label: str) -> str:
+        return _system_prompt(self.master, today=today, tz_label=tz_label)
+
+    def run_tool(self, name: str, arguments: dict[str, Any]) -> Any:
+        from apps.master_api.services.assistant_tools import run_tool
+
+        return run_tool(name, arguments, master=self.master)
+
+    def propose(self, name: str, arguments: dict[str, Any]) -> Any:
+        from apps.master_api.services.assistant_actions import propose
+
+        return propose(name, arguments, master=self.master)
+
+    def is_action(self, name: str) -> bool:
+        from apps.master_api.services.assistant_actions import is_action
+
+        return is_action(name)
+
+    def postprocess(self, text: str) -> str:
+        return text
+
+
 def answer_master_question(
     *,
     master,
@@ -189,40 +292,57 @@ def answer_master_question(
     пишущее действие возвращается ПРЕДЛОЖЕНИЕМ, а не выполняется.
     """
 
+    if master is None:
+        return AssistantReply(text=NO_MASTER_TEXT)
+    return run_assistant(
+        MasterSubject(master=master, allow_actions=allow_actions),
+        text=text,
+        history=history,
+        now=now,
+    )
+
+
+def run_assistant(
+    subject: AssistantSubject,
+    *,
+    text: str,
+    history=None,
+    now: datetime | None = None,
+) -> AssistantReply:
+    """Один вопрос — один ответ для любого субъекта. Никогда не бросает.
+
+    Порядок тот же, что был у мастера: safety на входе → лимит частоты →
+    лимит стоимости → первый вызов с инструментами → одно действие
+    (предложение) или один инструмент (данные → второй вызов) → safety на
+    выходе → ``postprocess`` субъекта.
+    """
+
     from apps.master_api.services.ai_draft_limits import (
         check_and_consume_rate_limit,
         check_cost_cap,
     )
-    from apps.master_api.services.assistant_actions import (
-        ACTION_SPECS,
-        ActionError,
-        is_action,
-        propose,
-    )
-    from apps.master_api.services.assistant_tools import TOOL_SPECS, ToolError, run_tool
+    from apps.master_api.services.assistant_actions import ActionError
+    from apps.master_api.services.assistant_tools import ToolError
     from apps.orchestrator.safety.gate import evaluate_inbound
     from apps.orchestrator.safety.outbound import evaluate_outbound
 
-    if master is None:
-        return AssistantReply(text=NO_MASTER_TEXT)
+    def _done(reply: AssistantReply, body: str) -> AssistantReply:
+        return _finish(reply, body, evaluate_outbound, subject.postprocess)
 
-    # Safety first, before the limiter: a person in crisis must not be told
-    # to come back in a minute.
     inbound = evaluate_inbound(text)
     if not inbound.allowed:
-        logger.info("master_assistant.safety_short_circuit master=%s", master.id)
+        logger.info("master_assistant.safety_short_circuit %s", subject.log_label)
         return AssistantReply(text=inbound.reply_text)
 
-    limit = check_and_consume_rate_limit(master.id)
+    limit = check_and_consume_rate_limit(subject.limit_key)
     if not limit.allowed:
         return AssistantReply(text=BUSY_TEXT)
-
-    cost_guard = check_cost_cap(master.id, master.tenant_id)
+    cost_guard = check_cost_cap(subject.limit_key, subject.tenant.id)
     if not cost_guard.allowed:
         return AssistantReply(text=COST_TEXT)
 
     now = now or timezone.now()
-    tz_label = getattr(getattr(master, "tenant", None), "timezone", "") or "Europe/Moscow"
+    tz_label = getattr(subject.tenant, "timezone", "") or "Europe/Moscow"
     try:
         from zoneinfo import ZoneInfo
 
@@ -231,18 +351,17 @@ def answer_master_question(
         today = now.date()
 
     messages: list[dict[str, Any]] = [
-        {"role": "system", "content": _system_prompt(master, today=today, tz_label=tz_label)},
+        {"role": "system", "content": subject.system_prompt(today=today, tz_label=tz_label)},
         *_history_messages(history or []),
         {"role": "user", "content": text},
     ]
-
-    offered = [*TOOL_SPECS, *ACTION_SPECS] if allow_actions else list(TOOL_SPECS)
+    offered = [*subject.tool_specs, *subject.action_specs]
 
     reply = AssistantReply(text="")
     try:
-        first = _complete(messages, tenant=master.tenant, tools=offered)
+        first = _complete(messages, tenant=subject.tenant, tools=offered)
     except Exception:  # noqa: BLE001 — provider outage is not a crash
-        logger.exception("master_assistant.first_call_failed master=%s", master.id)
+        logger.exception("master_assistant.first_call_failed %s", subject.log_label)
         return AssistantReply(text=FAILED_TEXT)
 
     reply.llm_called = True
@@ -254,68 +373,54 @@ def answer_master_question(
 
     calls = list(getattr(first, "tool_calls", None) or [])[:MAX_TOOL_CALLS]
     if not calls:
-        return _finish(reply, getattr(first, "text", "") or "", evaluate_outbound)
+        return _done(reply, getattr(first, "text", "") or "")
 
     call = calls[0]
-
-    # Пишущее действие НЕ исполняется здесь — ни при каких аргументах.
-    # Оно возвращается предложением: сводка, которую человек читает, и
-    # талон, которым он подтверждает. Исполнение — отдельный запрос
-    # (`apps.master_api.services.assistant_actions.execute`).
-    if is_action(call.name):
+    if subject.is_action(call.name):
+        # DRF-1180 — пишущее действие не выполняется: собеседнику отдаётся
+        # сводка с талоном, а само действие ждёт отдельного подтверждения.
         try:
-            proposal = propose(call.name, call.arguments or {}, master=master)
+            proposal = subject.propose(call.name, call.arguments or {})
         except ActionError as exc:
-            return _finish(reply, f"Не смог подготовить действие: {exc.detail}", evaluate_outbound)
+            return _done(reply, f"Не смог подготовить действие: {exc.detail}")
         reply.tool_name = proposal.name
         reply.pending_action = proposal.as_dict()
-        # Сводку не пропускаем через модель и не переписываем: человек
-        # подтверждает ровно тот текст, который собран из аргументов,
-        # уехавших в талон. Пересказ подтверждать нечестно.
-        reply.text = proposal.summary
+        reply.text = subject.postprocess(proposal.summary)
         return reply
 
     try:
-        outcome = run_tool(call.name, call.arguments or {}, master=master)
+        outcome = subject.run_tool(call.name, call.arguments or {})
     except ToolError as exc:
-        # The model asked for something it cannot have. Say so plainly —
-        # inventing an answer here is how a master ends up trusting a
-        # number nobody computed.
-        return _finish(reply, f"Не смог посмотреть: {exc}", evaluate_outbound)
+        return _done(reply, f"Не смог посмотреть: {exc}")
     except Exception:  # noqa: BLE001
-        logger.exception("master_assistant.tool_failed tool=%s master=%s", call.name, master.id)
-        return _finish(reply, FAILED_TEXT, evaluate_outbound)
+        logger.exception("master_assistant.tool_failed tool=%s %s", call.name, subject.log_label)
+        return _done(reply, FAILED_TEXT)
 
     reply.tool_name = outcome.name
-
-    # Second pass — data as an ordinary message, NOT a tool message. See the
-    # module docstring: the Anthropic adapter cannot express `role="tool"`,
-    # and a loop that only works on one vendor breaks silently on the other.
     messages.append(
         {
             "role": "user",
             "content": (
                 f"Данные инструмента {outcome.name}:\n"
                 f"{json.dumps(outcome.data, ensure_ascii=False)}\n\n"
-                "Ответь мастеру по этим данным. Ничего не добавляй от себя."
+                f"Ответь {subject.addressee} по этим данным. Ничего не добавляй от себя."
             ),
         }
     )
     try:
-        second = _complete(messages, tenant=master.tenant)
+        second = _complete(messages, tenant=subject.tenant)
     except Exception:  # noqa: BLE001
-        logger.exception("master_assistant.second_call_failed master=%s", master.id)
-        return _finish(reply, FAILED_TEXT, evaluate_outbound)
+        logger.exception("master_assistant.second_call_failed %s", subject.log_label)
+        return _done(reply, FAILED_TEXT)
 
     reply.tokens_in += getattr(second, "prompt_tokens", 0) or 0
     reply.tokens_out += getattr(second, "completion_tokens", 0) or 0
     reply.llm_cost_usd += _cost(second)
     reply.llm_model = getattr(second, "model", "") or reply.llm_model
+    return _done(reply, getattr(second, "text", "") or "")
 
-    return _finish(reply, getattr(second, "text", "") or "", evaluate_outbound)
 
-
-def _finish(reply: AssistantReply, text: str, checker) -> AssistantReply:
+def _finish(reply: AssistantReply, text: str, checker, postprocess=None) -> AssistantReply:
     """Trim, run the outbound check, and hand back what to send."""
 
     body = (text or "").strip()
@@ -324,7 +429,7 @@ def _finish(reply: AssistantReply, text: str, checker) -> AssistantReply:
         return reply
 
     verdict = checker(body[:MAX_REPLY_CHARS])
-    reply.text = verdict.text
+    reply.text = postprocess(verdict.text) if postprocess is not None else verdict.text
     reply.blocked_categories = verdict.categories
     return reply
 
@@ -337,5 +442,8 @@ __all__ = [
     "MAX_REPLY_CHARS",
     "NO_MASTER_TEXT",
     "AssistantReply",
+    "AssistantSubject",
+    "MasterSubject",
     "answer_master_question",
+    "run_assistant",
 ]
