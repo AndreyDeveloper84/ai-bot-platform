@@ -521,6 +521,9 @@ class TestDelete:
             # DRF-1369 — the customer's own dialogue. Step 5 covered the
             # employee surface; this is the one the cascade had no step for.
             "dialogue_anonymize",
+            # DRF-1772 (К-3) — слова человека в карточке C04: причины и факты,
+            # из которых они собраны. Строка остаётся tombstone (B13/D7).
+            "recommendation_erase",
         }
 
 

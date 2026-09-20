@@ -359,6 +359,9 @@ DIRECT_SEND_SITES: dict[str, str] = {
     "apps/skills/payment_failed/skill.py": "client",
     "apps/handoff/silence.py": "client",
     "apps/admin_api/services/master_deactivation.py:_dispatch_customer_notifications": "client",
+    # DRF-1772 (К-3) — карточка C04 в DM после анкеты: клиенту, от глобального
+    # бота (диспетчер сам отказывает пользователям салонных ботов).
+    "apps/recommendation/dispatch.py": "client",
     # транспорт — фан-аут, отправитель задаётся вызывающим (bot_scope)
     "apps/handoff/notify.py": "transport",
     "apps/channels/apps.py": "transport",
