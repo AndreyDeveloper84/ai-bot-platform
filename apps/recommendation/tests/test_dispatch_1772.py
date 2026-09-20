@@ -121,7 +121,10 @@ class TestCard:
             "Ты сказала, что хочешь привести себя в порядок",
             "Ты выбрала: лицо и кожа",
         ]
-        assert record.facts == {"goal": "Привести себя в порядок", "area": "Лицо и кожа"}
+        assert record.facts == {
+            "goal": {"value": "Привести себя в порядок", "origin": c.ORIGIN_CHOICE},
+            "area": {"value": "Лицо и кожа", "origin": c.ORIGIN_CHOICE},
+        }
 
         assert len(sent) == 1
         assert sent[0]["user_id"] == "777001" and sent[0]["chat_id"] is None  # DRF-1558
