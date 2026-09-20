@@ -97,7 +97,7 @@ def _envelope(
         tenant_id=TENANT_ID,
         user_id=AYLA_USER_ID,
         actor="user",
-        correlation_id=None,
+        correlation_id=str(uuid.uuid4()),
         causation_id=None,
         data=data,
     )
