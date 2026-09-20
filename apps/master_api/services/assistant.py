@@ -136,11 +136,22 @@ def _system_prompt(master, *, today: date, tz_label: str) -> str:
     )
 
 
+#: Скрытая строка нити с выбором из карточки (DRF-2153).
+SELECT_HINT_PREFIX = "Уточнение мастера:"
+
+
 def _history_messages(history) -> list[dict[str, str]]:
     out: list[dict[str, str]] = []
     for row in history:
         body = (row.content or "").strip()
-        if not body or row.role not in ("user", "assistant"):
+        if not body:
+            continue
+        if row.role == "tool" and body.startswith(SELECT_HINT_PREFIX):
+            # DRF-2153: выбор из карточки (клиент, время) записан скрытой
+            # tool-строкой — экран её не рисует, модель помнит на следующем ходе.
+            out.append({"role": "user", "content": body})
+            continue
+        if row.role not in ("user", "assistant"):
             continue
         out.append({"role": row.role, "content": body})
     return out
@@ -416,7 +427,9 @@ def run_assistant(
             "content": (
                 f"Данные инструмента {outcome.name}:\n"
                 f"{json.dumps(outcome.data, ensure_ascii=False)}\n\n"
-                f"Ответь {subject.addressee} по этим данным. Ничего не добавляй от себя."
+                f"Ответь {subject.addressee} по этим данным. Ничего не добавляй от себя. "
+                "Если в данных stale=true — скажи, что расписание не удалось проверить и "
+                "это последние известные данные; day_off=true — в этот день выходной."
             ),
         }
     )
@@ -454,6 +467,7 @@ __all__ = [
     "FAILED_TEXT",
     "MAX_REPLY_CHARS",
     "NO_MASTER_TEXT",
+    "SELECT_HINT_PREFIX",
     "AssistantReply",
     "AssistantSubject",
     "MasterSubject",

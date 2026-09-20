@@ -161,7 +161,7 @@ def assistant_history(request: HttpRequest) -> HttpResponse:
 def assistant_ask(request: HttpRequest) -> HttpResponse:
     """Один вопрос — один ответ. Пишущее действие только предлагается."""
 
-    from apps.master_api.services.assistant import answer_master_question
+    from apps.master_api.services.assistant import SELECT_HINT_PREFIX, answer_master_question
 
     master = request.master  # type: ignore[attr-defined]
     bot_user = request.bot_user  # type: ignore[attr-defined]
@@ -182,6 +182,25 @@ def assistant_ask(request: HttpRequest) -> HttpResponse:
         recent_staff_history,
     )
 
+    # DRF-2153: выбор из карточки (клиент из «Кого вы имеете в виду?», время
+    # из «Свободно рядом») уходит модели уточнением — в нить пишется только
+    # то, что мастер видел на кнопке.
+    raw_select = body.get("select")
+    select: dict[str, Any] = raw_select if isinstance(raw_select, dict) else {}
+    hints: list[str] = []
+    # Значения из карточки — короткие id/метки; предел, чтобы тело не
+    # раздувало запрос к модели мимо лимита на text.
+    client_id = str(select.get("client_id") or "").strip()[:64]
+    start_at = str(select.get("start_at") or "").strip()[:64]
+    if client_id:
+        hints.append(f"клиент выбран — client_id={client_id}")
+    if start_at:
+        hints.append(f"время выбрано — start_at={start_at}")
+    model_text = text
+    if hints:
+        joined = "; ".join(hints)
+        model_text = f"{text}\n({SELECT_HINT_PREFIX} {joined})"
+
     thread = _thread(bot_user)
     # DRF-2151: вставленная команда / токен приглашения отвечается, но в
     # нить как реплика не ложится — ей нечего делать на экране и в памяти.
@@ -192,23 +211,12 @@ def assistant_ask(request: HttpRequest) -> HttpResponse:
         if thread is not None
         else []
     )
-
-    # DRF-2153: выбор из карточки (клиент из «Кого вы имеете в виду?», время
-    # из «Свободно рядом») уходит модели уточнением — в нить пишется только
-    # то, что мастер видел на кнопке.
-    raw_select = body.get("select")
-    select: dict[str, Any] = raw_select if isinstance(raw_select, dict) else {}
-    hints: list[str] = []
-    client_id = str(select.get("client_id") or "").strip()
-    start_at = str(select.get("start_at") or "").strip()
-    if client_id:
-        hints.append(f"клиент выбран — client_id={client_id}")
-    if start_at:
-        hints.append(f"время выбрано — start_at={start_at}")
-    model_text = text
-    if hints:
-        joined = "; ".join(hints)
-        model_text = f"{text}\n(Уточнение мастера: {joined})"
+    if hints and inbound is not None:
+        # Выбор из карточки живёт в нити скрытой tool-строкой: экран её не
+        # рисует, а модель помнит клиента на следующем ходе («Запиши на 14:30»
+        # после «Кого вы имеете в виду?» не спрашивает заново). Пишется после
+        # чтения истории — в этом ходе уточнение уже приклеено к вопросу.
+        _remember(thread, role="tool", content=f"{SELECT_HINT_PREFIX} {'; '.join(hints)}")
 
     reply = answer_master_question(
         master=master,

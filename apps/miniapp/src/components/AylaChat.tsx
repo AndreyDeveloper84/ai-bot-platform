@@ -332,16 +332,17 @@ export function AylaChat({
   return (
     <>
       <div className="ayla-list" role="log" aria-label={logLabel}>
+        {/* Стартовый экран — всегда сверху: история общая с ботом, и мастер,
+            который уже говорил с Ayla, иначе не увидел бы контекст и чипы. */}
+        {startScreen && !loadingHistory
+          ? startScreen((text) => void send(text))
+          : null}
         {loadingHistory ? (
           <p className="ayla-empty" aria-live="polite">
             Загружаю диалог…
           </p>
-        ) : messages.length === 0 ? (
-          startScreen ? (
-            startScreen((text) => void send(text))
-          ) : (
-            <p className="ayla-empty">{greeting}</p>
-          )
+        ) : messages.length === 0 && !startScreen ? (
+          <p className="ayla-empty">{greeting}</p>
         ) : (
           messages.map((m) =>
             m.created ? (

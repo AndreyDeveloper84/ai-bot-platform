@@ -129,6 +129,35 @@ describe("1 · стартовый экран", () => {
     expect(screen.queryByText(/Спросите про день, загрузку/)).toBeNull();
   });
 
+  it("вернувшийся мастер (история не пуста) тоже видит контекст и чипы", async () => {
+    mockedHistory.mockResolvedValue({
+      messages: [
+        {
+          id: "1",
+          role: "user",
+          content: "что у меня в четверг",
+          tool: "",
+          created_at: "",
+        },
+        {
+          id: "2",
+          role: "assistant",
+          content: "В четверг две записи.",
+          tool: "",
+          created_at: "",
+        },
+      ],
+    });
+    renderAt();
+    expect(
+      await screen.findByText("В четверг две записи."),
+    ).toBeInTheDocument();
+    expect(screen.getByText("Сегодня 2 записи")).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /^Добавить запись/ }),
+    ).toBeInTheDocument();
+  });
+
   it("без записей — «Сегодня записей нет»", async () => {
     mockedContext.mockResolvedValue({
       today: { date: "2026-09-20", count: 0, next: null },

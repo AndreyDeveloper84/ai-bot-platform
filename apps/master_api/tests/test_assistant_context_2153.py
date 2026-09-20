@@ -237,9 +237,16 @@ class TestContext:
     def test_today_with_visits_names_the_next_one(
         self, client, tenant, bot_user, accepted_master, anna, bridged_service
     ):
-        soon = dj_timezone.now() + timedelta(minutes=45)
+        now = dj_timezone.now()
+        soon = now + timedelta(minutes=45)
         _visit(accepted_master, start=soon, bot_user=anna, service=bridged_service)
-        _visit(accepted_master, start=soon + timedelta(hours=3))
+        # Вторая запись — раньше сегодня (не «+3 ч», чтобы поздним вечером
+        # не перевалить за полночь салона).
+        local = now.astimezone(_tz(tenant))
+        earlier = max(
+            local.replace(hour=0, minute=30, second=0, microsecond=0), local - timedelta(hours=6)
+        )
+        _visit(accepted_master, start=earlier)
         resp = _context(client)
         assert resp.status_code == 200, resp.content
         body = resp.json()
@@ -270,9 +277,14 @@ class TestCards:
 
         tomorrow = (dj_timezone.now().astimezone(_tz(tenant)) + timedelta(days=1)).date()
         # Живая рамка: 10:00–18:00; занято 12:00–15:00 → окна 10:00–12:00 и 15:00–18:00.
+        # Рамка 10–18 с перерывом 13–14 (перерыв — занятость, DRF-1638).
         monkeypatch.setattr(
             "apps.master_api.services.assistant_tools._working_block",
-            lambda master, day: (time_cls(10, 0), time_cls(18, 0), True),
+            lambda master, day: (
+                time_cls(10, 0),
+                time_cls(18, 0),
+                [(time_cls(13, 0), time_cls(14, 0))],
+            ),
         )
         _visit(
             accepted_master,
@@ -295,6 +307,7 @@ class TestCards:
         card = cards[0]
         assert card["date"] == tomorrow.isoformat()
         assert card["stale"] is False
+        # Занято 12–15 визитом и 13–14 перерывом (внутри) → окна 10–12 и 15–18.
         assert [(w["start"], w["end"]) for w in card["windows"]] == [
             ("10:00", "12:00"),
             ("15:00", "18:00"),
@@ -440,6 +453,66 @@ class TestPrepareBooking:
         assert card["label"] == "Добавить запись"
 
 
+class TestReviewGuards:
+    """Находки ревью #1915: телефон как имя, выбор не из результатов, 404 ≠ занято."""
+
+    def test_phone_shaped_client_name_is_refused_before_ayla(
+        self, client, tenant, bot_user, accepted_master, bridged_service, llm, stub_salon
+    ):
+        """DRF-1039: «запиши +7999…» — не обратный поиск «чей это номер»."""
+
+        stub = stub_salon(_StubSalon(rows=[{"id": str(ANNA_P_AYLA_ID), "name": "Анна Петрова"}]))
+        llm["script"].append(FakeResult(tool_calls=[_prepare_call(client_name="+79997775544")]))
+        body = _ask_with(client, "Запиши +79997775544 на массаж завтра в 12:30").json()
+        assert body["pending_action"] is None
+        assert body["answer"] == "Ищу по имени, не по номеру."
+        assert stub.calls == []  # empty-assert-ok: ответ выше доказан — до Ayla не дошло
+
+    def test_selected_client_id_not_in_results_is_asked_again_not_substituted(
+        self, client, tenant, bot_user, accepted_master, bridged_service, llm, stub_salon
+    ):
+        stub_salon(_StubSalon(rows=[{"id": str(ANNA_P_AYLA_ID), "name": "Анна Петрова"}]))
+        llm["script"].append(
+            FakeResult(
+                tool_calls=[_prepare_call(client_name="Анна", client_id=str(ANNA_S_AYLA_ID))]
+            )
+        )
+        body = _ask_with(client, "Запиши Анну на массаж завтра в 12:30").json()
+        assert body["pending_action"] is None
+        assert body["answer"] == "Кого вы имеете в виду?"
+        card = next(c for c in body["cards"] if c["kind"] == "clarify_client")
+        assert [o["client_id"] for o in card["options"]] == [str(ANNA_P_AYLA_ID)]
+
+    def test_selection_is_remembered_on_the_next_turn(
+        self, client, tenant, bot_user, accepted_master, bridged_service, llm
+    ):
+        """Скрытая tool-строка с выбором — модель видит client_id и на следующем ходе."""
+
+        llm["script"].append(FakeResult(text="Уточнил."))
+        _ask_with(client, "Анна П. · была 12.05", select={"client_id": str(ANNA_P_AYLA_ID)})
+        llm["script"].append(FakeResult(text="Хорошо."))
+        _ask_with(client, "Запиши на 14:30")
+        history_users = [m["content"] for m in llm["calls"][1]["messages"] if m["role"] == "user"]
+        assert any(f"client_id={ANNA_P_AYLA_ID}" in h for h in history_users[:-1])
+        # А на экране этой строки нет.
+        resp = client.get(
+            reverse("master_api:assistant_history"), HTTP_AUTHORIZATION=init_data_header("12345")
+        )
+        assert [m["content"] for m in resp.json()["messages"]] == [
+            "Анна П. · была 12.05",
+            "Уточнил.",
+            "Запиши на 14:30",
+            "Хорошо.",
+        ]
+
+    def test_select_values_are_capped(self, client, tenant, bot_user, accepted_master, llm):
+        llm["script"].append(FakeResult(text="ок"))
+        _ask_with(client, "x", select={"client_id": "a" * 500})
+        last_user = [m for m in llm["calls"][0]["messages"] if m["role"] == "user"][-1]["content"]
+        assert "a" * 64 in last_user
+        assert "a" * 65 not in last_user
+
+
 # ─── h4: подтверждение — тот же сервис, что М-2 ─────────────────────────────
 
 
@@ -504,6 +577,33 @@ class TestConfirmBooking:
         assert 2 <= len(times) <= 4
         assert "12:30" not in times
         assert len(stub.calls) == 2  # search + одна попытка создать — тихого переноса нет
+
+    def test_ayla_not_found_is_not_reported_as_slot_taken(
+        self, client, tenant, bot_user, accepted_master, anna, bridged_service, llm, stub_salon
+    ):
+        from apps.integrations.ayla.salon_client import SalonNotFound
+
+        _stub, token = self._prepared(
+            client, llm, stub_salon, exc=SalonNotFound("client not found")
+        )
+        resp = _confirm(client, token)
+        assert resp.status_code == 400
+        assert resp.json()["error"] == "action_rejected"
+        assert "занято" not in resp.content.decode()
+
+    def test_the_same_token_reuses_the_same_idempotency_key(
+        self, client, tenant, bot_user, accepted_master, anna, bridged_service, llm, stub_salon
+    ):
+        stub, token = self._prepared(client, llm, stub_salon)
+        _confirm(client, token)
+        _confirm(client, token)
+        keys = [
+            c["create_appointment"]["idempotency_key"]
+            for c in stub.calls
+            if "create_appointment" in c
+        ]
+        assert len(keys) == 2
+        assert keys[0] == keys[1]
 
     def test_no_answer_is_pending_not_created(
         self, client, tenant, bot_user, accepted_master, anna, bridged_service, llm, stub_salon

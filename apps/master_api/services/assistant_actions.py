@@ -243,10 +243,16 @@ ACTION_SPECS.append(
         "parameters": {
             "type": "object",
             "properties": {
-                "client_name": {"type": "string", "description": "Имя клиента, как сказал мастер."},
+                "client_name": {
+                    "type": "string",
+                    "description": "Имя клиента, как сказал мастер. Обязательно, и при client_id тоже.",
+                },
                 "client_id": {
                     "type": "string",
-                    "description": "Id клиента из уточнения мастера («client_id=…»), если было.",
+                    "description": (
+                        "Id клиента из уточнения мастера («client_id=…»), если было — "
+                        "вместе с client_name."
+                    ),
                 },
                 "service": {"type": "string", "description": "Название услуги, как сказал мастер."},
                 "start_at": {
@@ -254,7 +260,7 @@ ACTION_SPECS.append(
                     "description": "Начало, ISO 8601: ГГГГ-ММ-ДДTЧЧ:ММ.",
                 },
             },
-            "required": ["start_at"],
+            "required": ["client_name", "start_at"],
         },
     }
 )
@@ -485,27 +491,50 @@ def _resolve_client(master, arguments: dict[str, Any], *, tz) -> dict[str, Any]:
     from apps.integrations.ayla.user_proxy import external_user_id_for
     from apps.master_api.services.bookings import enrich_customer_rows
 
-    client_id = str(arguments.get("client_id") or "").strip()
+    from apps.master_api.services.bookings import looks_like_phone
+
+    client_id = str(arguments.get("client_id") or "").strip()[:64]
     client_name = str(arguments.get("client_name") or "").strip()[:80]
-    if not client_id and not client_name:
+    if not client_name:
         raise ActionError("Кого записать?", verbatim=True)
+    # DRF-1039: поиск по номеру закрыт и здесь — иначе «запиши +7999…» стал бы
+    # обратным поиском «чей это номер» (та же дверь, что М-2 держит на 400).
+    if looks_like_phone(client_name):
+        raise ActionError("Ищу по имени, не по номеру.", verbatim=True)
 
     actor_user = getattr(master, "linked_bot_user", None)
     actor = external_user_id_for(actor_user) if actor_user is not None else ""
-    query = client_name or client_id
     rows = search_customers_as(
         actor=actor,
         tenant=master.tenant,
-        query=query,
+        query=client_name,
         log="master_api.assistant.find_client",
     )
     if isinstance(rows, Refusal):
         raise ActionError("Не удалось проверить клиентов. Попробуйте снова.", verbatim=True)
     enriched = enrich_customer_rows(master, rows)
     if client_id:
+        # Выбор из карточки: берётся ровно тот, кого мастер нажал; если его
+        # среди найденных нет — спросить заново, не подставлять первого.
         picked = [r for r in enriched if r["id"] == client_id]
         if picked:
             return picked[0]
+        if enriched:
+            from apps.master_api.services.assistant_cards import client_option_label
+
+            raise ActionError(
+                "Кого вы имеете в виду?",
+                verbatim=True,
+                cards=[
+                    {
+                        "kind": "clarify_client",
+                        "options": [
+                            {"client_id": r["id"], "label": client_option_label(r)}
+                            for r in enriched
+                        ],
+                    }
+                ],
+            )
     if not enriched:
         from apps.master_api.services.assistant_cards import booking_form_url
 
@@ -576,14 +605,14 @@ def _propose_booking(arguments: dict[str, Any], *, master) -> ProposedAction:
     )
 
 
-def _execute_booking(payload: dict[str, Any], *, master, actor) -> ExecutedAction:
+def _execute_booking(payload: dict[str, Any], *, master, actor, token: str = "") -> ExecutedAction:
     """Создать запись тем же сервисом, что стойка и форма мастера (М-2).
 
     Одна попытка. «Занято» → варианты рядом, без тихого переноса; нет
     ответа → «Проверяем результат», а не «создана» (макет DRF-1187).
     """
 
-    import uuid as uuid_mod
+    import hashlib
 
     from apps.admin_api.services.booking import (
         Refusal,
@@ -607,7 +636,9 @@ def _execute_booking(payload: dict[str, Any], *, master, actor) -> ExecutedActio
         master=master,
         service=service,
         start_at=start_at,
-        idempotency_key=str(uuid_mod.uuid4()),
+        # Ключ — от талона: повтор того же подтверждения — та же запись в
+        # Ayla, не вторая (в т.ч. после «Проверяем результат»).
+        idempotency_key=hashlib.sha256(token.encode("utf-8")).hexdigest()[:32],
         client_id=str(args.get("client_id") or "") or None,
         client_name=None,
         client_phone=None,
@@ -621,7 +652,9 @@ def _execute_booking(payload: dict[str, Any], *, master, actor) -> ExecutedActio
             open={"url": booking_detail_url(master, appointment_id), "label": "Открыть запись"},
             details=details,
         )
-    if result.outcome == "conflict":
+    if result.outcome == "conflict" and result.status == 409:
+        # Только «занято» (409). 404 «Ayla не знает клиента» — тоже conflict у
+        # стойки, но предлагать другое время тут бессмысленно.
         tz = _tenant_tz(master)
         try:
             day = datetime.fromisoformat(start_at).astimezone(tz).date()
@@ -706,7 +739,7 @@ def execute(token: str, *, master, actor) -> ExecutedAction:
 
     payload = _decode(token, master=master)
     if payload.get("action") == ACTION_PREPARE_BOOKING:
-        return _execute_booking(payload, master=master, actor=actor)
+        return _execute_booking(payload, master=master, actor=actor, token=token)
     if payload.get("action") != ACTION_BLOCK_TIME:
         raise ActionError(f"неизвестное действие {payload.get('action')!r}")
 
