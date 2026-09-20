@@ -282,7 +282,13 @@ export function parseStartRoute(payload: string): string | null {
   // строгой формой, как соседи ниже: «объявил себя ссылкой и не
   // является» — это не маршрут, а отказ.
   if (payload.startsWith(RECO_PAYLOAD_PREFIX)) {
-    return _RECO_RE.test(payload) ? (_ROUTE_MAP["open_catalog"] ?? null) : null;
+    // DRF-1769 — у карточки появился свой адрес, и ссылка с её именем
+    // ведёт на неё, а не в каталог. До N3 вести было некуда: id ехал
+    // ради провенанса, а показать карточку на экране было нечем.
+    // Провенанс это не трогает — `entry_point` собирается из
+    // start-payload, а не из маршрута.
+    const match = _RECO_RE.exec(payload);
+    return match === null ? null : `/customer/recommendation/${match[1]}`;
   }
   if (payload.startsWith(MASTER_INVITE_PAYLOAD_PREFIX)) {
     const invite = _MASTER_INVITE_RE.exec(payload);

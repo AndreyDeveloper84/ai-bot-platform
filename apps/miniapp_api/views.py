@@ -5425,6 +5425,60 @@ def card_delete(request: HttpRequest, card_id) -> HttpResponse:
     return HttpResponse(status=204)
 
 
+# --- /customer/recommendation/<id> — карточка C04, как её показали (DRF-1769)
+
+
+@require_http_methods(["GET"])
+@require_init_data
+def customer_recommendation(request: HttpRequest, recommendation_id) -> HttpResponse:
+    """Карточка C04 для экрана — **запись**, а не пересчёт (К-3 N3).
+
+    Экран показывает ровно то, что человек увидел в чате: ту же формулу
+    направления, те же причины, те же другие подходы. Пересобирать их на
+    клиенте значило бы завести второй источник истины для фраз владельца
+    — и однажды показать на экране не то, что сказал бот.
+
+    Границы, которые держатся здесь по построению, а не проверкой:
+
+    * **R11** — услуги, мастера, цены и слота в ответе нет, потому что их
+      нет в записи: карточка C04 их не содержит (B2/B3), и брать неоткуда;
+    * **чужая запись** — тот же 404, что и несуществующая. Запись ищется
+      по `bot_user` звонящего, и «не твоя» снаружи неотличима от «нет
+      такой»: иначе id стал бы оракулом «а есть ли у неё карточка».
+      Мини-апп открывают и из салонного бота — там записи нет, и это тот
+      же 404, а не утечка в чужой диалог;
+    * **стёртая запись** — тоже 404. Каскад C5 слова обнуляет, оставляя
+      tombstone для attribution (B13); пустая карточка на экране была бы
+      утверждением «карточка есть», которого больше нет.
+
+    `kind=absence` — не отказ, а состояние: 200 с этим видом, и экран
+    рисует C04.4 тем же текстом владельца, что и DM.
+    """
+    from apps.recommendation.models import Recommendation
+
+    record = Recommendation.objects.filter(
+        id=recommendation_id,
+        bot_user=request.bot_user,  # type: ignore[attr-defined]
+    ).first()
+    if record is None or (
+        record.kind == Recommendation.Kind.DIRECTION and not (record.what or "").strip()
+    ):
+        return _error("not_found", "no such recommendation", 404)
+
+    return JsonResponse(
+        {
+            "data": {
+                "id": str(record.id),
+                "kind": record.kind,
+                "what": record.what,
+                "subline": record.subline,
+                "why": list(record.why or []),
+                "alternatives": list(record.alternatives or []),
+            }
+        }
+    )
+
+
 # --- /customer/decision-context + /customer/goals/select — goal layer proxy (DRF-1190)
 
 
