@@ -15,6 +15,17 @@ Recommendation = WHAT, услуга/мастер/цена/слот — толь�
   подпись цели, ответы шагов анкеты (`known.goal.answers`). «Не знаю» —
   ответ, но не факт; из него причины нет. **Ноль причин → карточки нет**
   (OD_C04 §2 — правило кода, не редактуры) → C04.4.
+* **Сказал словами ≠ выбрал из предложенного** (DRF-1771, К-3 N5).
+  Свободная цель (`goal_text`) и свободный ответ шага (`answer_text`) —
+  слова ЧЕЛОВЕКА, и причина их цитирует; чип — подпись каталога, и причина
+  остаётся пересказом. Происхождение каждой причины (`text` / `choice`)
+  едет в факты записи: связь «причина ↔ факт» становится данными.
+  Цитирование выключается одной константой :data:`QUOTE_THE_PERSON` —
+  вопрос «цитата или всегда пересказ» у владельца открыт.
+
+  Исходная формулировка листа (рендер `evidence_refs` решения) остаётся
+  заблокированной D11: такой связи как данных нет ни в решении резолвера,
+  ни в документе целей. Здесь построена та часть, для которой данные есть.
 * **Сторож R11**: в WHAT/подстроке/причинах нет услуги, мастера, салона,
   цены — той же проверкой, что стережёт опции C02 (`clarify_guard`); и нет
   слов «рекомендую/рекомендует» (§60). Нарушение → карточки нет → C04.4.
@@ -64,7 +75,37 @@ ACTION_CLARIFY_REQUEST = "Уточнить запрос"
 WHY_GOAL = "Ты сказала, что хочешь {goal}"
 WHY_AREA = "Ты выбрала: {area}"
 WHY_FEELING = "Хочешь чувствовать себя: {feeling}"
+#: Слова человека — в кавычках и дословно (DRF-1771). Ни пересказа, ни
+#: модели: это его формулировка, и менять её мы не вправе.
+WHY_GOAL_QUOTED = "Ты написала: «{quote}»"
+WHY_STEP_QUOTED = "Ты написала: «{quote}»"
 MAX_REASONS = 3
+
+#: Цитировать ли человека дословно. Вопрос владельцу открыт («цитата или
+#: всегда пересказ»); `False` возвращает прежний пересказ по подписи —
+#: одна строка, а не правка веток.
+QUOTE_THE_PERSON = True
+
+#: Предел длины цитаты. Обрезка — по границе слова, с многоточием: кнопка
+#: и пузырь MAX конечны, а обрывок посреди слова читается как сбой.
+QUOTE_MAX_CHARS = 120
+
+#: Происхождение факта, из которого собрана причина.
+ORIGIN_TEXT = "text"
+ORIGIN_CHOICE = "choice"
+
+#: Запрещённая форма (OD_C04 §1, дословно): «Это сейчас для тебя самое
+#: важное» — утверждение о приоритете, которого человек не подтверждал.
+#: До этого среза правило держалось договорённостью: grep по репозиторию
+#: давал ноль проверок.
+PRIORITY_CLAIM_RE = re.compile(
+    r"(сам\w*\s+важн)|(важнее\s+всего)|(наиболее\s+важн)|(главное\s+для\s+тебя)",
+    re.IGNORECASE,
+)
+
+#: Управляющие символы и переносы в тексте человека: в одну строку, но не
+#: выбросом — его слова остаются его словами.
+_WHITESPACE_RE = re.compile(r"\s+")
 
 #: §60: карточка — направление, а не «Ayla рекомендует услугу X».
 #: Слова рекомендации в тексте карточки — нарушение по построению.
@@ -102,23 +143,72 @@ def _lower_first(text: str) -> str:
     return text[:1].lower() + text[1:] if text else text
 
 
+def normalize_quote(raw: Any) -> str:
+    """Слова человека в одну строку и в пределах длины; ``""`` — цитировать нечего.
+
+    Переносы и управляющие символы схлопываются в пробел: пузырь MAX —
+    одна реплика, и вставленный перевод строки ломал бы кадр. Обрезка по
+    границе слова с многоточием; текст из одних пробелов даёт пустую
+    строку, а пустая цитата — не причина (её просто нет).
+    """
+    text = _WHITESPACE_RE.sub(" ", str(raw or "")).strip()
+    if len(text) <= QUOTE_MAX_CHARS:
+        return text
+    cut = text[: QUOTE_MAX_CHARS - 1]
+    head, _, _tail = cut.rpartition(" ")
+    return f"{(head or cut).rstrip()}…"
+
+
+def _said_in_own_words(answer: dict[str, Any]) -> str:
+    """Слова человека на шаге — только `answer_text`, и только без выбора.
+
+    Признак «набрал сам» — именно `answer_text`: `label` у шага без
+    `option_key` бывает подписью варианта, и цитировать её значило бы
+    выдать каталожную формулировку за слова человека.
+    """
+    if answer.get("option_key") or answer.get("option_keys"):
+        return ""
+    return normalize_quote(answer.get("answer_text"))
+
+
 def grounded_reasons(goal: dict[str, Any]) -> tuple[tuple[str, ...], dict[str, Any]]:
-    """Причины из фактов документа — и сами факты (provenance).
+    """Причины из фактов документа — и сами факты с происхождением.
 
     Порядок — порядок разговора: цель, затем ответы в порядке шагов.
-    «Не знаю» (`unknown`) пропускается: это ответ, но не факт.
+    «Не знаю» (`unknown`) пропускается: это ответ, но не факт. Человек
+    НАПИСАЛ — цитируем его (DRF-1771); ВЫБРАЛ — пересказываем подпись.
     """
     reasons: list[str] = []
     facts: dict[str, Any] = {}
-    label = str(goal.get("label") or "").strip()
-    if label:
+
+    spoken_goal = normalize_quote(goal.get("goal_text"))
+    label = normalize_quote(goal.get("label"))
+    if spoken_goal:
+        reasons.append(
+            WHY_GOAL_QUOTED.format(quote=spoken_goal)
+            if QUOTE_THE_PERSON
+            else WHY_GOAL.format(goal=_lower_first(spoken_goal))
+        )
+        facts["goal"] = {"value": spoken_goal, "origin": ORIGIN_TEXT}
+    elif label:
         reasons.append(WHY_GOAL.format(goal=_lower_first(label)))
-        facts["goal"] = label
+        facts["goal"] = {"value": label, "origin": ORIGIN_CHOICE}
+
     for answer in goal.get("answers") or []:
         if not isinstance(answer, dict) or answer.get("unknown"):
             continue
         step = str(answer.get("step") or "")
-        text = str(answer.get("label") or "").strip()
+        spoken = _said_in_own_words(answer)
+        if spoken:
+            # Набранный текст — либо цитата, либо ничего: формы пересказа
+            # под произвольные слова у нас нет, а «Ты выбрала: болит спина»
+            # врёт о способе — человек это написал, а не выбрал. Факт при
+            # этом остаётся фактом и едет в запись.
+            if QUOTE_THE_PERSON:
+                reasons.append(WHY_STEP_QUOTED.format(quote=spoken))
+            facts[step] = {"value": spoken, "origin": ORIGIN_TEXT}
+            continue
+        text = normalize_quote(answer.get("label"))
         if not text:
             continue
         if step == "area":
@@ -129,15 +219,20 @@ def grounded_reasons(goal: dict[str, Any]) -> tuple[tuple[str, ...], dict[str, A
             # Шаг, которого шаблон не знает, причиной не становится:
             # сочинять форму под неизвестный факт нельзя.
             continue
-        facts[step] = text
+        # Происхождение — правда о факте, а не о форме фразы: человек мог
+        # набрать текст, а цитирование быть выключено.
+        facts[step] = {"value": text, "origin": ORIGIN_CHOICE}
     return tuple(reasons[:MAX_REASONS]), facts
 
 
 def boundary_violation(*texts: str) -> str | None:
-    """R11 + §60: услуга/мастер/салон/цена или слово «рекоменду…» в тексте."""
+    """R11 + §60 + 24.08 §1: услуга/мастер/салон/цена, «рекоменду…» или
+    утверждение о приоритете («это сейчас для тебя самое важное»)."""
     for text in texts:
         if not text:
             continue
+        if PRIORITY_CLAIM_RE.search(text):
+            return "priority_claim"
         if RECOMMENDS_RE.search(text):
             return "recommends"
         reason = clarification_option_violation(text)
@@ -242,6 +337,14 @@ def absence_keyboard() -> dict[str, Any] | None:
 
 __all__ = [
     "ACTION_CLARIFY_REQUEST",
+    "ORIGIN_CHOICE",
+    "ORIGIN_TEXT",
+    "PRIORITY_CLAIM_RE",
+    "QUOTE_MAX_CHARS",
+    "QUOTE_THE_PERSON",
+    "WHY_GOAL_QUOTED",
+    "WHY_STEP_QUOTED",
+    "normalize_quote",
     "ACTION_SHOW_SERVICES",
     "BUTTON_ALT",
     "BUTTON_PICK",

@@ -77,10 +77,12 @@ class TestBuild:
             "Хочешь чувствовать себя: отдохнувшей, Спокойнее",
         )
         # Provenance: из чего собрано — рядом.
+        # DRF-1771 — у каждого факта своё происхождение: тут всё выбрано
+        # из предложенного, слов человека нет.
         assert draft.facts == {
-            "goal": "Привести себя в порядок",
-            "area": "Лицо и кожа",
-            "feeling": "Отдохнувшей, Спокойнее",
+            "goal": {"value": "Привести себя в порядок", "origin": c.ORIGIN_CHOICE},
+            "area": {"value": "Лицо и кожа", "origin": c.ORIGIN_CHOICE},
+            "feeling": {"value": "Отдохнувшей, Спокойнее", "origin": c.ORIGIN_CHOICE},
         }
         assert draft.goal_id == "goal-1"
 
