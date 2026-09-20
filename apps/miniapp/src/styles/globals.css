@@ -1203,6 +1203,8 @@ a {
   min-height: 56px;
   color: inherit;
   font: inherit;
+  /* Карточка бывает и <a> (DRF-2156: запись → детали) — без подчёркивания. */
+  text-decoration: none;
   transition: border-color var(--dur-fast) var(--ease-out),
     background-color var(--dur-fast) var(--ease-out);
 }

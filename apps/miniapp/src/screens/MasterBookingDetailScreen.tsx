@@ -29,6 +29,11 @@
  *
  * Возврат — заданное место (DRF-1493): откуда пришли (`state.from` с
  * «Сегодня»/«Расписания»), иначе «Расписание» своей поверхности.
+ *
+ * Оговорка про часы: состояние и «Сегодня/Завтра» — по серверу; но дата,
+ * день недели и HH:MM выводятся в часовом поясе УСТРОЙСТВА (как formatTimeHM
+ * на «Сегодня» и в «Расписании»). Мастер с телефоном в другом поясе увидит
+ * сдвиг — общий для всех мастерских экранов, здесь не решается.
  */
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useLocation, useParams } from "react-router-dom";
@@ -57,7 +62,9 @@ const COPY = {
   stateRegion: "Состояние записи",
   upcoming: {
     label: "Следующая запись",
-    until: (min: number) => `До визита ${formatDurationRu(min)}`,
+    // То же правило, что на «Сегодня»: 0 или нет — «Уже сейчас», не «0 мин».
+    until: (min: number | null) =>
+      min !== null && min > 0 ? `До визита ${formatDurationRu(min)}` : "Уже сейчас",
   },
   now: "Сейчас по расписанию",
   after: {
@@ -146,6 +153,11 @@ export function MasterBookingDetailScreen() {
   useEffect(() => {
     alive.current = true;
     signalReady();
+    // Смена :id без размонтирования (назад/вперёд между двумя записями):
+    // чужие данные и остаток троттла новой записи не принадлежат.
+    setPhase({ kind: "loading" });
+    setCooldown(false);
+    setBusy(false);
     void load();
     return () => {
       alive.current = false;
@@ -275,7 +287,7 @@ function StateBlock({
           </p>
           <hr className="booking-detail__state-rule" />
           <p className="booking-detail__state-line">
-            {COPY.upcoming.until(data.minutes_until ?? 0)}
+            {COPY.upcoming.until(data.minutes_until)}
           </p>
         </>
       );
@@ -299,7 +311,21 @@ function StateBlock({
         </p>
       );
       break;
+    case "after":
+      body = (
+        <>
+          <p className="booking-detail__state-title">
+            <IconClock /> {COPY.after.title}
+          </p>
+          <hr className="booking-detail__state-rule" />
+          <p className="booking-detail__state-line">{COPY.after.body}</p>
+        </>
+      );
+      break;
     case "unknown":
+    default:
+      // Незнакомое значение с сервера — «не знаем», а не утверждение о факте:
+      // блок «Проверяем результат» ничего не утверждает и даёт выход.
       tone += " booking-detail__state--accent";
       body = (
         <>
@@ -315,20 +341,6 @@ function StateBlock({
           >
             {COPY.unknown.recheck}
           </button>
-        </>
-      );
-      break;
-    case "after":
-    default:
-      // Неизвестное значение с сервера читаем как «после»: спокойный текст,
-      // никаких действий — это безопаснее любого другого предположения.
-      body = (
-        <>
-          <p className="booking-detail__state-title">
-            <IconClock /> {COPY.after.title}
-          </p>
-          <hr className="booking-detail__state-rule" />
-          <p className="booking-detail__state-line">{COPY.after.body}</p>
         </>
       );
       break;

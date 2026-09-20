@@ -20,7 +20,7 @@
  */
 import { act, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { MemoryRouter, Route, Routes } from "react-router-dom";
+import { MemoryRouter, Route, Routes, useNavigate } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("../lib/master-api", async (importOriginal) => {
@@ -256,7 +256,8 @@ describe("unknown — «Проверяем результат» + «Провер
     expectNothingForbidden();
   });
 
-  it("кнопка заблокирована, пока запрос в полёте; ответ completed заменяет блок", async () => {
+  it("кнопка заблокирована, пока запрос в полёте — и после истечения троттла; ответ completed заменяет блок", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
     let resolveSecond: (v: MasterBookingDetail) => void = () => {};
     mocked
       .mockResolvedValueOnce(
@@ -270,9 +271,15 @@ describe("unknown — «Проверяем результат» + «Провер
       );
     renderAt();
     await findScreen();
+    const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
     const btn = within(stateBlock()).getByRole("button", { name: "Проверить снова" });
-    await userEvent.click(btn);
+    await user.click(btn);
     expect(btn).toBeDisabled();
+    // Троттл вышел, запрос всё ещё в полёте — кнопка заблокирована именно из-за него.
+    await act(async () => {
+      vi.advanceTimersByTime(RECHECK_MIN_INTERVAL_MS + 50);
+    });
+    expect(within(stateBlock()).getByRole("button", { name: "Проверить снова" })).toBeDisabled();
     await act(async () => {
       resolveSecond(
         detail({
@@ -285,6 +292,21 @@ describe("unknown — «Проверяем результат» + «Провер
     });
     expect(await within(stateBlock()).findByText("Завершено")).toBeInTheDocument();
     expect(screen.queryByText("Проверяем результат")).toBeNull();
+  });
+
+  it("незнакомое temporal_state с сервера — «Проверяем результат», а не утверждение о факте", async () => {
+    mocked.mockResolvedValue(
+      detail({
+        temporal_state: "rescheduled" as unknown as MasterBookingDetail["temporal_state"],
+        minutes_until: null,
+      }),
+    );
+    renderAt();
+    await findScreen();
+    expect(within(stateBlock()).getByText("Проверяем результат")).toBeInTheDocument();
+    expect(within(stateBlock()).getByRole("button", { name: "Проверить снова" })).toBeInTheDocument();
+    expect(screen.queryByText("Запись закончилась по расписанию")).toBeNull();
+    expect(screen.queryByText("Завершено")).toBeNull();
   });
 });
 
@@ -313,6 +335,74 @@ describe("отменённая запись — status раньше temporal_sta
       expectNothingForbidden();
     },
   );
+});
+
+describe("смена записи без размонтирования", () => {
+  it("переход b-1 → b-2 по тому же маршруту: старые данные и остаток троттла не наследуются", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const unknownB1 = detail({
+      temporal_state: "unknown",
+      minutes_until: null,
+      checked_at: "2026-08-20T20:00:00",
+    });
+    let resolveB2: (v: MasterBookingDetail) => void = () => {};
+    mocked
+      .mockResolvedValueOnce(unknownB1) // b-1, первая загрузка
+      .mockResolvedValueOnce(unknownB1) // b-1, «Проверить снова» — взводит троттл
+      .mockImplementationOnce(
+        () =>
+          new Promise<MasterBookingDetail>((res) => {
+            resolveB2 = res; // b-2 — в полёте
+          }),
+      );
+    // Тот же <Route> для обоих адресов: элемент не размонтируется, меняется :id.
+    function GoB2() {
+      const navigate = useNavigate();
+      return (
+        <button type="button" onClick={() => navigate("/master/bookings/b-2")}>
+          к b-2
+        </button>
+      );
+    }
+    render(
+      <MemoryRouter initialEntries={["/master/bookings/b-1"]}>
+        <Routes>
+          <Route
+            path="/master/bookings/:id"
+            element={
+              <>
+                <GoB2 />
+                <MasterBookingDetailScreen />
+              </>
+            }
+          />
+        </Routes>
+      </MemoryRouter>,
+    );
+    await findScreen();
+    const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+    await user.click(within(stateBlock()).getByRole("button", { name: "Проверить снова" }));
+    expect(within(stateBlock()).getByRole("button", { name: "Проверить снова" })).toBeDisabled();
+
+    await user.click(screen.getByRole("button", { name: "к b-2" }));
+    // Пока b-2 в полёте — загрузка, а не имя и состояние b-1.
+    expect(await screen.findByText("Загружаем запись…")).toBeInTheDocument();
+    expect(screen.queryByText("Анна П.")).toBeNull();
+    expect(mocked).toHaveBeenLastCalledWith("b-2", expect.anything());
+    await act(async () => {
+      resolveB2(
+        detail({
+          id: "b-2",
+          client: { name_initial: "Борис К.", last_visit_date: null },
+          temporal_state: "unknown",
+          minutes_until: null,
+        }),
+      );
+    });
+    await screen.findByRole("main", { name: /Борис К\./ });
+    // Остаток троттла b-1 не унаследован: кнопка доступна сразу.
+    expect(within(stateBlock()).getByRole("button", { name: "Проверить снова" })).toBeEnabled();
+  });
 });
 
 describe("ошибки загрузки", () => {

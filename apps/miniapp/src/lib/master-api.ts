@@ -266,7 +266,7 @@ export type MasterBookingStatus =
   | "completed"
   | "cancelled"
   | "no_show"
-  | string;
+  | (string & {});
 
 export interface MasterBookingDetail {
   /** Ayla appointment_id — тот же uuid, что booking_id в dashboard/schedule. */
