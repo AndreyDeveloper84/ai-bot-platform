@@ -663,9 +663,22 @@ class WelcomeSkill:
         # уже знаком: без отметки S1-автотриггер выстрелил бы следующим ходом
         # и накрыл бы возврат в поток полным первым приветствием.
         _stamp_welcomed_at(context.bot_user)
+        action_data: dict | None = None
+        if origin == "target":
+            # DRF-2138: возврат — кнопкой, не инструкцией «напиши фразу»:
+            # тап структурен на обоих путях, фраза на глобальном — нет.
+            from apps.skills.nutrition_anketa.skill import (
+                MANUAL_TARGET_BUTTON,
+                MANUAL_TARGET_CALLBACK,
+            )
+
+            action_data = {
+                "buttons": [{"label": MANUAL_TARGET_BUTTON, "callback": MANUAL_TARGET_CALLBACK}]
+            }
         return SkillResult(
             reply_text=CONSENT_RECOVERY_RETURN_TEXTS[origin],
             action_type="welcome_consent_recovery_granted",
+            action_data=action_data,
             meta={
                 "reply_kind": CONSENT_RECOVERY_GRANT_KIND,
                 "consent_origin": origin,
@@ -1021,7 +1034,7 @@ CONSENT_RECOVERY_RETURN_TEXTS: dict[str, str] = {
     "photo": "Готово, согласие есть. Пришли фото ещё раз — запишу в дневник.",
     "text": "Готово, согласие есть. Напиши, что съела, — посчитаю и запишу.",
     "water": "Готово, согласие есть. Сколько воды записать?",
-    "target": "Готово, согласие есть. Напиши «ориентир от специалиста» и число ккал — запишу.",
+    "target": "Готово, согласие есть. Впиши ориентир от специалиста — кнопкой ниже.",
 }
 
 

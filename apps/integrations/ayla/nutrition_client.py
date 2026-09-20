@@ -1599,15 +1599,23 @@ class NutritionClient:
         if resp.status_code in (409, 422):
             self._circuit.record_success()
             try:
-                err = resp.json().get("error") or {}
+                payload = resp.json()
             except ValueError:
-                err = {}
+                payload = {}
+            err = payload.get("error") if isinstance(payload, dict) else None
+            err = err if isinstance(err, dict) else {}
             code = str(err.get("code") or "")
             raw_details = err.get("details")
             details: dict[str, Any] = dict(raw_details) if isinstance(raw_details, dict) else {}
             if resp.status_code == 422:
                 raise ManualTargetsRefusedError(code or "CALORIES_BELOW_FLOOR", details)
-            raise ManualTargetsConfirmationRequiredError(str(details.get("kind") or code), details)
+            # 409 — только именованное «нужно подтверждение»; чужой 409 —
+            # обычная ошибка API, иначе «Да» гоняло бы вопрос по кругу.
+            if code == "CONFIRMATION_REQUIRED":
+                raise ManualTargetsConfirmationRequiredError(
+                    str(details.get("kind") or ""), details
+                )
+            raise NutritionAPIError(f"manual_targets_conflict:{code or resp.status_code}")
 
         result = self._parse_profile_response(resp, allow_404=False)
         assert result is not None

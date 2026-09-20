@@ -155,6 +155,27 @@ class TestC4ConfirmationRequired:
         assert ei.value.details["maintenance_kcal"] == 2100
 
 
+class TestC4bForeign409IsNotAQuestion:
+    @pytest.mark.asyncio
+    async def test_other_409_codes_are_api_errors(self) -> None:
+        """Ревью #1907: чужой 409 не должен превращаться в «подтверждаешь?» —
+        «Да» гоняло бы вопрос по кругу."""
+        client, transport = _client_with_handler(
+            lambda _r: _error(409, "SOMETHING_ELSE", {"kind": "calories_deviation"})
+        )
+        _set_transport(transport)
+        with pytest.raises(nc.NutritionAPIError) as ei:
+            await client.set_manual_targets(external_user_id="bot:max:1", calories_kcal=1200)
+        assert not isinstance(ei.value, nc.ManualTargetsConfirmationRequiredError)
+
+    @pytest.mark.asyncio
+    async def test_non_object_json_body_is_handled(self) -> None:
+        client, transport = _client_with_handler(lambda _r: httpx.Response(422, json=["x"]))
+        _set_transport(transport)
+        with pytest.raises(nc.ManualTargetsRefusedError):
+            await client.set_manual_targets(external_user_id="bot:max:1", calories_kcal=900)
+
+
 class TestC5OtherFailures:
     @pytest.mark.asyncio
     async def test_5xx_is_unavailable(self) -> None:

@@ -13,8 +13,10 @@
 * m2 — фраза «мне врач назначил 1800 ккал» → сразу карточка (число из
   фразы), без вопроса;
 * m3 — ложные входы: «1800» / «1800 ккал» (без слова специалиста) /
-  «врач назначил 2000 шагов» (единица не ккал) → ``matches`` False; «ориентир
-  от специалиста» без числа → вопрос числа;
+  «врач сказал 1800» (число без «ккал» — ревью #1907: «у специалиста был в
+  2019», «консультация специалиста 3000 руб») / «врач назначил 2000 шагов»
+  (единица не ккал) / диапазон → ``matches`` False; «ориентир от специалиста»
+  без числа → вопрос числа; «1 800» и «1.800» читаются как 1800;
 * m4 — <1000: каталог 422 → отказ словами с порогом ИЗ ОТВЕТА, состояние
   снято, второй POST не ушёл;
 * m5 — 1000–1199: ``calories_low`` → фраза «Записала; это низкий ориентир —
@@ -154,7 +156,11 @@ class _Run:
 
     @property
     def manual_state(self) -> dict | None:
-        return self.conversation.skill_state.get(MANUAL_STATE_KEY)
+        """Открытый вопрос без штампа времени — тесты сравнивают шаг и число."""
+        bucket = self.conversation.skill_state.get(MANUAL_STATE_KEY)
+        if bucket is None:
+            return None
+        return {k: v for k, v in bucket.items() if k != "asked_at"}
 
 
 def _labels(result) -> list[str]:
@@ -207,8 +213,9 @@ class TestM2PhraseWithNumberGoesStraightToTheCard:
         [
             "мне врач назначил 1800 ккал",
             "Диетолог назначила 1800 калорий в день",
-            "врач сказал 1800",
+            "врач сказал 1 800 ккал",
             "ориентир от специалиста 1800",
+            "ориентир от специалиста: 1.800",
         ],
     )
     def test_card_without_a_question(self, text: str) -> None:
@@ -233,6 +240,11 @@ class TestM3FalseEntries:
             "у меня 1800 калорий вышло за день",
             "назначил встречу на 1500",
             "врач назначил 1800 и 2000 через неделю",
+            "врач сказал 1800",
+            "у специалиста был в 2019",
+            "консультация специалиста 3000 руб",
+            "врач назначил 1500-1800 ккал",
+            "врач назначил от 1500 до 1800 ккал",
         ],
     )
     def test_not_ours(self, text: str) -> None:
@@ -422,3 +434,100 @@ class TestM13SummaryForUserEntered:
         assert "Считала" not in text and "методик" not in text.lower()
         assert "Предлагаю" not in text
         assert _numbers(text) <= {"1800", "2100"}  # введённое и справочная вода из профиля
+
+
+# ─── ревью #1907 ──────────────────────────────────────────────────────────
+
+
+class TestR1ExitsFromTheOpenQuestion:
+    @pytest.mark.parametrize("text", ["/anketa", "cb:anketa:start", "Рассчитать мои нормы"])
+    def test_anketa_entries_drop_the_manual_question_and_start_the_anketa(self, text: str) -> None:
+        run = _Run()
+        run.turn(MANUAL_TARGET_CALLBACK)
+        assert run.manual_state == {"step": "kcal"}
+        result = run.turn(text)
+        assert run.manual_state is None
+        # Анкета началась (согласие M дано в харнесе → первый шаг).
+        assert result.action_type == "anketa_step_gender"
+
+    def test_the_ask_prompt_carries_a_way_out(self) -> None:
+        run = _Run()
+        asked = run.turn(MANUAL_TARGET_CALLBACK)
+        assert _callbacks(asked) == [MANUAL_CANCEL_CALLBACK]
+
+
+class TestR2TextOnTheCard:
+    def test_a_new_number_corrects_the_card(self) -> None:
+        run = _Run()
+        run.turn("мне врач назначил 1800 ккал")
+        assert run.matches("1900")
+        card = run.turn("1900")
+        assert card.reply_text.startswith("Ориентир от специалиста: 1900 ккал.")
+        assert run.manual_state == {"step": "confirm", "kcal": 1900}
+        run.turn(MANUAL_CONFIRM_CALLBACK)
+        assert run.posted[-1]["calories_kcal"] == 1900
+
+    def test_other_text_on_the_card_is_not_ours(self) -> None:
+        """Раньше «привет» на карточке заводил анкету с чужим состоянием."""
+        run = _Run()
+        run.turn("мне врач назначил 1800 ккал")
+        assert run.matches("1900")  # присутствие: число на карточке — наше
+        assert not run.matches("привет, а что с записью?")
+        assert run.manual_state == {"step": "confirm", "kcal": 1800}
+
+
+class TestR3Freshness:
+    def test_a_stale_question_is_not_a_question(self) -> None:
+        from datetime import UTC, datetime, timedelta
+
+        from apps.skills.nutrition_anketa.skill import (
+            MANUAL_PENDING_TTL_SECONDS,
+            manual_target_pending,
+        )
+
+        run = _Run()
+        run.turn(MANUAL_TARGET_CALLBACK)
+        assert manual_target_pending(run.conversation)
+        assert run.matches("1800")
+        stale = datetime.now(UTC) - timedelta(seconds=MANUAL_PENDING_TTL_SECONDS + 1)
+        run.conversation.skill_state[MANUAL_STATE_KEY]["asked_at"] = stale.isoformat()
+        assert not manual_target_pending(run.conversation)
+        assert not run.matches("1800")
+
+
+class TestR4StateWriteIsAtomic:
+    def test_orm_conversation_goes_through_write_skill_state(self) -> None:
+        """Ревью #1907: весь ``skill_state`` целиком не перезаписывается —
+        соседний подключ (сканер, план) переживает наш ход."""
+        from apps.conversations.models import Conversation
+
+        conversation = Mock(spec=Conversation)
+        conversation.id = "conv-orm"
+        conversation.skill_state = {"food_scanner": {"x": 1}}
+        skill = NutritionAnketaSkill()
+        ctx = SkillContext(
+            conversation=conversation,
+            bot_user=Mock(channel="max", channel_user_id="12345"),
+            message_text=MANUAL_TARGET_CALLBACK,
+        )
+        with (
+            patch(_PD_OPEN, return_value=True),
+            patch("apps.conversations.services.write_skill_state") as writer,
+            patch.object(skill, "_clear_state"),
+        ):
+            skill.handle(ctx)
+        assert writer.call_count == 1
+        conv, key, value = writer.call_args.args
+        assert conv is conversation and key == MANUAL_STATE_KEY
+        assert value["step"] == "kcal" and "asked_at" in value
+        conversation.save.assert_not_called()
+
+
+class TestR5NoFloorInTheResponse:
+    def test_refusal_without_a_number_is_a_sentence_without_a_number(self) -> None:
+        run = _Run(manual=ManualTargetsRefusedError("CALORIES_BELOW_FLOOR", {}))
+        run.turn("мне врач назначил 900 ккал")
+        refused = run.turn(MANUAL_CONFIRM_CALLBACK)
+        assert refused.meta["reply_kind"] == "anketa_manual_target_refused"
+        assert "записать не могу" in refused.reply_text
+        assert _numbers(refused.reply_text) == set()

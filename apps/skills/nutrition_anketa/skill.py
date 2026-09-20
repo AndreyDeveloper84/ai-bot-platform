@@ -152,7 +152,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
-from typing import TYPE_CHECKING, ClassVar
+from datetime import UTC, datetime, timedelta
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from apps.integrations.ayla import (
     NutritionAPIError,
@@ -345,6 +346,9 @@ MANUAL_CALLBACKS = frozenset(
 )
 #: Ключ в ``Conversation.skill_state`` — отдельно от FSM анкеты.
 MANUAL_STATE_KEY = "nutrition_manual_target"
+#: Свежесть открытого вопроса (как у ``food_correction``): протухший ответ
+#: не должен вечно держать текст человека вдали от консьержа.
+MANUAL_PENDING_TTL_SECONDS = 600
 
 #: Тексты — из листа DRF-2138 дословно. Число в карточке — ТОЛЬКО введённое;
 #: порог в отказе — из ответа каталога (``floor_kcal``), не константа бота.
@@ -352,6 +356,10 @@ MANUAL_ASK_KCAL = "Сколько ккал в день назначил спец
 MANUAL_CARD = "Ориентир от специалиста: {kcal} ккал. Источник — ты, не расчёт Ayla. Подтвердить?"
 MANUAL_BELOW_FLOOR = (
     "Такой ориентир я записать не могу — ниже {floor} ккал числа должен вести специалист напрямую."
+)
+#: Каталог отказал 422, но порога в ответе нет — предложение без числа.
+MANUAL_BELOW_FLOOR_NO_NUMBER = (
+    "Такой ориентир я записать не могу — такие числа должен вести специалист напрямую."
 )
 MANUAL_LOW = "Записала; это низкий ориентир — держись под наблюдением специалиста."
 MANUAL_DEVIATION_ASK = "Это сильно отличается от расчётного — подтверждаешь?"
@@ -374,22 +382,29 @@ MANUAL_BUTTON_NO = "Нет"
 #: Происхождение согласия для кнопки «Дать согласие» (DRF-1968, welcome).
 MANUAL_CONSENT_ORIGIN = "target"
 
-#: Матчер входа: число рядом со словом специалиста. Единица не-ккал рядом
-#: с числом (шаги, мл, граммы…) — не наше: цифра про что-то другое.
+#: Матчер входа — три условия, без эвристики по смыслу: слово специалиста
+#: + число С ЕДИНИЦЕЙ ккал (или буквальная фраза «ориентир от специалиста»)
+#: + рядом с числом нет единицы не-ккал / рублей / года. «врач сказал 1800»
+#: без «ккал» — не наше (ревью #1907: «у специалиста был в 2019»,
+#: «консультация специалиста 3000 руб» иначе читались бы как ориентир).
 _MANUAL_ENTRY_PHRASE = "ориентир от специалиста"
 _SPECIALIST_WORD_RE = re.compile(
     r"\b(врач|диетолог|нутрициолог|специалист|доктор|эндокринолог|терапевт)\w*",
     re.IGNORECASE,
 )
-_KCAL_NUMBER_RE = re.compile(
-    r"(?<![\d-])(\d{3,5})(?!\d)\s*(ккал|калори\w*|kcal)?",
-    re.IGNORECASE,
-)
+_KCAL_UNIT = r"(ккал|калори\w*|kcal)"
+_KCAL_NUMBER_RE = re.compile(r"(?<![\d-])(\d{3,5})(?!\d)\s*" + _KCAL_UNIT, re.IGNORECASE)
+_ANY_NUMBER_RE = re.compile(r"(?<![\d-])\d{3,5}(?!\d)")
 _NON_KCAL_UNIT_RE = re.compile(
-    r"(?<![\d-])\d{3,5}(?!\d)\s*(шаг\w*|мл|л\b|мг|г\b|грамм\w*|кг|см|мин\w*|м\b)",
+    r"(?<![\d-])\d{3,5}(?!\d)\s*"
+    r"(шаг\w*|мл|л\b|мг|г\b|гр\b|грамм\w*|кг|см|мин\w*|м\b|руб\w*|₽|р\b|год\w*|г\.)",
     re.IGNORECASE,
 )
-_PLAIN_NUMBER_RE = re.compile(r"^\s*(\d{1,6})\s*(ккал|калори\w*|kcal)?\s*$", re.IGNORECASE)
+#: «1 800» / «1.800» — обычное русское написание тысяч; диапазон «1500-1800»
+#: — два числа, не наше (человек не назвал одно).
+_THOUSANDS_RE = re.compile(r"(?<!\d)(\d{1,2})[ .](\d{3})(?!\d)")
+_RANGE_RE = re.compile(r"\d{3,5}\s*[-–—]\s*\d{3,5}|\bот\s+\d{3,5}\s+до\s+\d{3,5}")
+_PLAIN_NUMBER_RE = re.compile(r"^\s*(\d{1,6})\s*" + _KCAL_UNIT + r"?\s*$", re.IGNORECASE)
 WITHDRAW_BUTTON_CONFIRM = "Отключить и удалить"
 WITHDRAW_BUTTON_KEEP = "Оставить как есть"
 
@@ -474,7 +489,7 @@ class NutritionAnketaSkill:
         # DRF-2138: ориентир от специалиста — кнопки, фраза, ход диалога.
         if text in MANUAL_CALLBACKS or _manual_target_entry(text) is not None:
             return True
-        if self._manual_state(context) is not None and not text.startswith("cb:"):
+        if _manual_text_is_an_answer(self._manual_state(context), text):
             return True
 
         # Resume path — claim turns while an FSM is in flight.
@@ -1053,22 +1068,29 @@ class NutritionAnketaSkill:
     # ─── ориентир от специалиста (DRF-2138) ─────────────────────────────
 
     def _manual_state(self, context: SkillContext) -> dict | None:
-        state = getattr(context.conversation, "skill_state", None) or {}
-        bucket = state.get(MANUAL_STATE_KEY)
-        return dict(bucket) if isinstance(bucket, dict) else None
+        return manual_target_state(context.conversation)
 
     def _save_manual_state(self, context: SkillContext, bucket: dict | None) -> None:
+        """Тот же атомарный писатель, что у FSM (retro B1): подключ, не весь
+        ``skill_state`` — соседние навыки пишут свои ключи параллельно."""
         conversation = context.conversation
-        state = dict(getattr(conversation, "skill_state", None) or {})
-        if bucket is None:
-            state.pop(MANUAL_STATE_KEY, None)
-        else:
-            state[MANUAL_STATE_KEY] = dict(bucket)
-        conversation.skill_state = state
+        value = None if bucket is None else {**bucket, "asked_at": _now_iso()}
         if _is_real_orm_conversation(conversation):
-            conversation.save(update_fields=["skill_state"])
-        elif hasattr(conversation, "save"):
-            conversation.save(update_fields=["skill_state"])
+            from apps.conversations.services import write_skill_state
+
+            write_skill_state(conversation, MANUAL_STATE_KEY, value)
+            return
+        raw = getattr(conversation, "skill_state", None) or {}
+        if not isinstance(raw, dict):
+            raw = {}
+        if value is None:
+            raw = {k: v for k, v in raw.items() if k != MANUAL_STATE_KEY}
+        else:
+            raw = {**raw, MANUAL_STATE_KEY: value}
+        conversation.skill_state = raw
+        save = getattr(conversation, "save", None)
+        if callable(save):
+            save(update_fields=["skill_state"])
 
     def _has_manual_target(self, context: SkillContext) -> bool:
         """Стоит ли у человека ``user_entered`` — по профилю каталога; любой
@@ -1104,6 +1126,13 @@ class NutritionAnketaSkill:
         """Вход / ход диалога ручного ориентира — или ``None`` («не наше»)."""
         state = self._manual_state(context)
 
+        # Выходы: «/anketa», кнопка старта и входная фраза анкеты снимают
+        # открытый вопрос и уходят в анкету (ревью #1907: иначе «/anketa» на
+        # шаге числа отвечал бы «Не разобрала число» без конца).
+        if state is not None and (text in ("/anketa", "cb:anketa:start") or _is_entry_phrase(text)):
+            self._save_manual_state(context, None)
+            return None
+
         if text == MANUAL_TARGET_CALLBACK:
             return self._manual_start(context, kcal=None)
         entry = _manual_target_entry(text)
@@ -1126,13 +1155,16 @@ class NutritionAnketaSkill:
                 return self._manual_stale()
             return self._manual_post(context, int(state["kcal"]), confirm_deviation=True)
 
-        if state is not None and state.get("step") == "kcal" and not text.startswith("cb:"):
+        if _manual_text_is_an_answer(state, text):
             kcal = _parse_kcal(text)
             if kcal is None:
+                # Только на шаге числа: на карточке чужой текст не наш.
                 return SkillResult(
                     reply_text=MANUAL_KCAL_INVALID,
+                    action_data={"buttons": _manual_cancel_button()},
                     meta={"reply_kind": "anketa_manual_target_kcal_invalid"},
                 )
+            # На карточке новое число — поправка: карточка перерисовывается.
             return self._manual_card(context, kcal)
         return None
 
@@ -1148,6 +1180,7 @@ class NutritionAnketaSkill:
             return SkillResult(
                 reply_text=MANUAL_ASK_KCAL,
                 action_type="anketa_manual_target_ask",
+                action_data={"buttons": _manual_cancel_button()},
                 meta={"reply_kind": "anketa_manual_target_ask"},
             )
         return self._manual_card(context, kcal)
@@ -1194,8 +1227,10 @@ class NutritionAnketaSkill:
             logger.info("anketa.manual_target_refused code=%s", exc.code)
             floor = exc.details.get("floor_kcal")
             return SkillResult(
-                reply_text=MANUAL_BELOW_FLOOR.format(
-                    floor=floor if floor is not None else "порога"
+                reply_text=(
+                    MANUAL_BELOW_FLOOR.format(floor=floor)
+                    if isinstance(floor, int) and not isinstance(floor, bool)
+                    else MANUAL_BELOW_FLOOR_NO_NUMBER
                 ),
                 action_data={"buttons": _post_anketa_chips()},
                 meta={"reply_kind": "anketa_manual_target_refused"},
@@ -1448,31 +1483,87 @@ def _manual_target_entry(text: str) -> int | None:
     stripped = (text or "").strip()
     if not stripped or stripped.startswith("cb:"):
         return None
-    normalised = _normalise_phrase(stripped)
-    has_specialist = bool(_SPECIALIST_WORD_RE.search(normalised)) or (
-        _MANUAL_ENTRY_PHRASE in normalised
-    )
-    if not has_specialist:
+    normalised = _join_thousands(_normalise_phrase(stripped))
+    literal = _MANUAL_ENTRY_PHRASE in normalised
+    if not literal and not _SPECIALIST_WORD_RE.search(normalised):
         return None
-    if _NON_KCAL_UNIT_RE.search(normalised):
+    if _NON_KCAL_UNIT_RE.search(normalised) or _RANGE_RE.search(normalised):
         return None
-    numbers = _KCAL_NUMBER_RE.findall(normalised)
-    if not numbers:
-        return 0 if _MANUAL_ENTRY_PHRASE in normalised else None
-    if len(numbers) != 1:
+    all_numbers = _ANY_NUMBER_RE.findall(normalised)
+    if not all_numbers:
+        return 0 if literal else None
+    if len(all_numbers) != 1:
         return None
-    return int(numbers[0][0])
+    with_unit = _KCAL_NUMBER_RE.findall(normalised)
+    if with_unit:
+        return int(with_unit[0][0])
+    # Число без «ккал»: только при буквальной фразе — иначе цифра про что угодно.
+    return int(all_numbers[0]) if literal else None
+
+
+def _join_thousands(text: str) -> str:
+    """«1 800» / «1.800» → «1800» — обычное написание тысяч."""
+    return _THOUSANDS_RE.sub(lambda m: m.group(1) + m.group(2), text)
 
 
 def _parse_kcal(text: str) -> int | None:
     """Ответ на «Сколько ккал…»: одно число, необязательно с «ккал».
     Диапазон не проверяется здесь — пороги у каталога (§85); отсекается
     только то, что числом не является, и ноль."""
-    match = _PLAIN_NUMBER_RE.match(text or "")
+    match = _PLAIN_NUMBER_RE.match(_join_thousands(text or ""))
     if match is None:
         return None
     value = int(match.group(1))
     return value if value > 0 else None
+
+
+def _now_iso() -> str:
+    return datetime.now(UTC).isoformat()
+
+
+def manual_target_state(conversation: Any) -> dict | None:
+    """Свежий открытый вопрос ручного ориентира — или ``None``.
+
+    Протухший (старше :data:`MANUAL_PENDING_TTL_SECONDS`) читается как
+    отсутствующий: иначе одно нажатие кнопки навсегда забирало бы у консьержа
+    любой текст человека. Читается и оркестратором (``nutrition_global``) —
+    на глобальном пути свободный текст доходит до навыка только когда бот сам
+    задал вопрос.
+    """
+    state = getattr(conversation, "skill_state", None)
+    bucket = state.get(MANUAL_STATE_KEY) if isinstance(state, dict) else None
+    if not isinstance(bucket, dict) or bucket.get("step") not in ("kcal", "confirm", "deviation"):
+        return None
+    stamped = bucket.get("asked_at")
+    if isinstance(stamped, str):
+        try:
+            at = datetime.fromisoformat(stamped)
+        except ValueError:
+            return None
+        if at.tzinfo is None:
+            at = at.replace(tzinfo=UTC)
+        if datetime.now(UTC) - at > timedelta(seconds=MANUAL_PENDING_TTL_SECONDS):
+            return None
+    return dict(bucket)
+
+
+def manual_target_pending(conversation: Any) -> bool:
+    """Для ``is_structured_nutrition_turn``: бот ждёт число или подтверждение."""
+    return manual_target_state(conversation) is not None
+
+
+def _manual_text_is_an_answer(state: dict | None, text: str) -> bool:
+    """Свободный текст — наш ответ? На шаге числа — любой (переспросим);
+    на карточке — только новое число (поправка), остальное не наше."""
+    if state is None or text.startswith("cb:"):
+        return False
+    if state.get("step") == "kcal":
+        return True
+    return _parse_kcal(text) is not None
+
+
+def _manual_cancel_button() -> list[dict[str, str]]:
+    return [{"label": MANUAL_BUTTON_CANCEL, "callback": MANUAL_CANCEL_CALLBACK}]
 
 
 def _is_withdraw_phrase(text: str) -> bool:
