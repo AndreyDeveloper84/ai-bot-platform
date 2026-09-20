@@ -27,6 +27,12 @@ export interface PlanLiteAction {
   target_count: number;
   /** Факты за текущее ведро, не больше target_count. */
   done_count: number;
+  /**
+   * DRF-2124, только у `log_food`: дни ведра с суммой ≤ подтверждённого
+   * ориентира; `null` — ориентира нет (не 0, §103). Ключа может не быть
+   * (вода, бронь, старый каталог) — экран показывает строку только при числе.
+   */
+  within_target_count?: number | null;
   bucket: { start: string; end: string };
 }
 

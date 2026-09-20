@@ -14,7 +14,9 @@
 * **Цель есть, шаблона нет** — прежний текст «составить можно в приложении»
   + «Изменить» (конструктор).
 * **План есть** — карточка «Твоя цель: … · На этой неделе: …» (только «N из
-  M», В-5: ни процента, ни «достигнута») + кнопки **«Записаться»**
+  M», В-5: ни процента, ни «достигнута»; у дневника при подтверждённом
+  ориентире — ещё «в ориентире N», DRF-2124: второй факт, не оценка) +
+  кнопки **«Записаться»**
   (``cb:plan:book`` → подбор услуг по КУРИРУЕМОМУ КЛЮЧУ цели, не
   рекомендательный движок — модуль 4 отдельно), **«В дневник»**
   (``cb:food:diary`` — структурный ход текста DRF-1837, свой код не нужен),
@@ -114,6 +116,10 @@ class _Copy:
     week: str = "На этой неделе: {items}."
     two_weeks: str = "Эти 2 недели: {items}."
     today_suffix: str = " (сегодня)"
+    #: DRF-2124 — дни ведра с суммой ≤ ориентира; печатается только когда
+    #: ориентир подтверждён (``within_target_count`` не ``None``). Факт
+    #: рядом с фактом: без «отлично», без ✓, без процента (В-5).
+    within_target: str = ", в ориентире {n}"
     no_plan: str = (
         "Плана пока нет. Составить его можно в приложении: выбери 1–3 шага под свою цель — "
         "и я буду показывать, сколько из них сделано."
@@ -225,11 +231,18 @@ def _action_line(action: PlanLiteAction) -> str:
     if action.action_type == "book_service" and action.target_count == 1:
         return f"{label} {'✓' if action.done_count >= 1 else '—'}"
     suffix = PLAN_LITE_COPY.today_suffix if action.cadence == "per_day" else ""
-    return f"{label} {action.done_count} из {action.target_count}{suffix}"
+    line = f"{label} {action.done_count} из {action.target_count}{suffix}"
+    # DRF-2124: только дневник еды и только при подтверждённом ориентире —
+    # ``None`` значит «ориентира нет», и строка остаётся прежней (§103).
+    # Ноль — тоже факт и печатается; per_day даёт 0/1 («сегодня в ориентире»).
+    if action.action_type == "log_food" and action.within_target_count is not None:
+        line += PLAN_LITE_COPY.within_target.format(n=action.within_target_count)
+    return line
 
 
 def render_plan_lite_card(plan: PlanLite) -> str:
-    """Карточка — только форма обязательств и факты «N из M».
+    """Карточка — только форма обязательств и факты «N из M» (и «в ориентире N»
+    у дневника, когда ориентир подтверждён — DRF-2124).
 
     ``per_2_weeks`` — своей строкой «Эти 2 недели: …», остальное — «На этой неделе».
     """

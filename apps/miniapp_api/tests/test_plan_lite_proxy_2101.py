@@ -54,6 +54,8 @@ PLAN_JSON = {
             "target_count": 3,
             "done_count": 1,
             "bucket": {"start": "2026-09-14", "end": "2026-09-21"},
+            # DRF-2124: у log_food ключ есть всегда — null без ориентира, не 0.
+            "within_target_count": None,
         }
     ],
 }

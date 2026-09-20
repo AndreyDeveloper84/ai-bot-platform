@@ -21,7 +21,9 @@
  *   - план есть → карточка: «Твоя цель: {метка}» (метка — из
  *     decision-context, как на экране цели; иначе ключ) и по обязательству
  *     «N из M» за текущее ведро — и ничего о результате: ни процента цели,
- *     ни шкалы, ни «ты пропустил» (В-5, DRF-1332); каждое обязательство
+ *     ни шкалы, ни «ты пропустил» (В-5, DRF-1332); у дневника при
+ *     подтверждённом ориентире — ещё «в ориентире N» (DRF-2124: второй
+ *     факт, не оценка; `null` — строки нет); каждое обязательство
  *     ведёт туда, где оно делается (каталог / дневник / вода);
  *   - «Изменить план» = закрыть (append-only) и составить заново.
  *
@@ -83,6 +85,8 @@ export const PLAN_LITE_COPY = {
   today: "Сегодня",
   twoWeeks: "Эти 2 недели",
   ofTotal: (done: number, target: number) => `${done} из ${target}`,
+  /** DRF-2124 — второй факт дневника при подтверждённом ориентире; не оценка. */
+  withinTarget: (n: number) => `в ориентире ${n}`,
   go: "Перейти",
   change: "Изменить план",
   changing: "Закрываю…",
@@ -547,6 +551,12 @@ export function PlanLiteScreen() {
                   </div>
                   <span className="food-scanner-diary__entry-cal">
                     {PLAN_LITE_COPY.ofTotal(action.done_count, action.target_count)}
+                    {action.action_type === "log_food" && typeof action.within_target_count === "number" && (
+                      <>
+                        {", "}
+                        {PLAN_LITE_COPY.withinTarget(action.within_target_count)}
+                      </>
+                    )}
                   </span>
                   <div className="food-scanner-diary__entry-actions">
                     <button
