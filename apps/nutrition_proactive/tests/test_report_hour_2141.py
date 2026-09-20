@@ -173,11 +173,15 @@ class TestSet:
         """Узел из листа: prefs=21:00 → отчёт планируется в этот час."""
         report_hour.try_handle_report_hour(text="присылай итоги в 21:00", bot_user=bot_user)
 
-        decision = only(tasks.plan_daily_reports(now_utc=at_msk(21), fetch=summary_reader()), bot_user)
+        decision = only(
+            tasks.plan_daily_reports(now_utc=at_msk(21), fetch=summary_reader()), bot_user
+        )
         assert decision.send is True
         assert decision.reason == "due"
         # Positive control for the guard: one hour earlier it is NOT due.
-        earlier = only(tasks.plan_daily_reports(now_utc=at_msk(20), fetch=summary_reader()), bot_user)
+        earlier = only(
+            tasks.plan_daily_reports(now_utc=at_msk(20), fetch=summary_reader()), bot_user
+        )
         assert earlier.send is False
         assert earlier.reason == "not_report_hour"
 
@@ -199,7 +203,9 @@ class TestSet:
         msk = only(tasks.plan_daily_reports(now_utc=at_msk(21), fetch=summary_reader()), user)
         assert msk.send is False
 
-    @pytest.mark.parametrize("text", ["присылай итоги в 3:00", "присылай итоги в 5", "присылай отчёт в 0:30"])
+    @pytest.mark.parametrize(
+        "text", ["присылай итоги в 3:00", "присылай итоги в 5", "присылай отчёт в 0:30"]
+    )
     def test_a_night_hour_is_refused_and_nothing_changes(
         self, bot_user: BotUser, text: str
     ) -> None:
@@ -266,7 +272,9 @@ class TestAsk:
         )
         assert reply == report_hour.ASK_REPLY.format(time="19:00")
         # Reading does not write.
-        assert prefs.get_prefs(BotUser.all_tenants.get(pk=bot_user.pk))["daily_report_time"] == "19:00"
+        assert (
+            prefs.get_prefs(BotUser.all_tenants.get(pk=bot_user.pk))["daily_report_time"] == "19:00"
+        )
 
     def test_reads_back_what_was_just_set(self, bot_user: BotUser) -> None:
         report_hour.try_handle_report_hour(text="присылай итоги в 21:00", bot_user=bot_user)
@@ -289,7 +297,9 @@ class TestGates:
         settings.NUTRITION_ENABLED = False
         settings.NUTRITION_PROACTIVE_ENABLED = True
         user = make_user(tenant, suffix="g1", report="19:00")
-        assert report_hour.try_handle_report_hour(text="присылай итоги в 21:00", bot_user=user) is None
+        assert (
+            report_hour.try_handle_report_hour(text="присылай итоги в 21:00", bot_user=user) is None
+        )
         assert prefs.get_prefs(BotUser.all_tenants.get(pk=user.pk))["daily_report_time"] == "19:00"
 
     def test_falls_through_when_proactive_is_off(self, tenant: Tenant, settings) -> None:
@@ -311,7 +321,10 @@ class TestGates:
             def context(self):
                 raise RuntimeError("boom")
 
-        assert report_hour.try_handle_report_hour(text="присылай итоги в 21:00", bot_user=Exploding()) is None
+        assert (
+            report_hour.try_handle_report_hour(text="присылай итоги в 21:00", bot_user=Exploding())
+            is None
+        )
 
 
 class TestQuietHoursUnchanged:
@@ -327,7 +340,9 @@ class TestQuietHoursUnchanged:
         """Лист принимает 23:00; тихие часы — нет. Планировщик молчит,
         как и до этого листа (``test_report_silent_at_2300_even_when_2300_was_chosen``)."""
         report_hour.try_handle_report_hour(text="присылай итоги в 23:00", bot_user=bot_user)
-        decision = only(tasks.plan_daily_reports(now_utc=at_msk(23), fetch=summary_reader()), bot_user)
+        decision = only(
+            tasks.plan_daily_reports(now_utc=at_msk(23), fetch=summary_reader()), bot_user
+        )
         assert decision.send is False
         assert decision.reason == "quiet_hours"
 
