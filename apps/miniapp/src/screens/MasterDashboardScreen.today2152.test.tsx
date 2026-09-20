@@ -99,6 +99,16 @@ beforeEach(() => {
   mockedDashboard.mockReset();
 });
 
+describe("шапка — дата в стиле деталей записи (DRF-2179, §61 п.6)", () => {
+  it("«20 сентября · воскресенье», а не «Воскресенье, 20 сентября»", async () => {
+    mockedDashboard.mockResolvedValue(doc());
+    renderAt();
+    await screen.findByRole("region", { name: /сегодня/i });
+    expect(screen.getByText("20 сентября · воскресенье")).toBeInTheDocument();
+    expect(screen.queryByText(/Воскресенье, 20 сентября/)).toBeNull();
+  });
+});
+
 describe("порядок: состояние дня — первым", () => {
   it("блок дня стоит выше карточки настройки и «Спросить Ayla»", async () => {
     mockedDashboard.mockResolvedValue(doc({ next_visit: NEXT }));
